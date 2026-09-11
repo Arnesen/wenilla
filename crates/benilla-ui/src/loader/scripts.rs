@@ -17,7 +17,22 @@ impl Loader<'_> {
         dbg: &str,
     ) -> Option<Function> {
         let mut onload = None;
+        // **The chunk name of an XML handler body is `"<GetName()>:<Handler>"`, read off the
+        // WRAPPER — not off the loader's diagnostic string.** `0x7025fd` calls the script object's
+        // `GetName` through its own vtable (`[[esi]+4]`), falls back to `<unnamed>` (`0x84c7f0`)
+        // at `0x702611` when that is NULL, formats `"%s:%s"` (`0x872a28`) at `0x70261b`, and hands
+        // the result to `0x704c70` at `0x70263c` as the chunk name.
+        //
+        // Reading it here rather than plumbing `dbg` down is the fidelity: `dbg` is a *sentence*
+        // on the `CreateFrame` path (`CreateFrame("Button", "Foo", inherits="Bar")`), which made
+        // every template-inherited handler's errors and `debugstack` frames read as one, and an
+        // unnamed element wrote `<Button>` where the image writes `<unnamed>`.
         for scripts in children_named(el, "Scripts") {
+            let owner = wrapper
+                .call_method::<Option<String>>("GetName", ())
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "<unnamed>".to_string());
             for handler in &scripts.children {
                 let name = handler.tag.clone();
                 // **AN EMPTY BODY IS A CLEAR, AND WHITESPACE IS NOT EMPTY** — the two byte
@@ -50,7 +65,7 @@ impl Loader<'_> {
                 let func = if cleared {
                     None
                 } else {
-                    match self.compile_handler(handler, &name, dbg) {
+                    match self.compile_handler(handler, &name, &owner, dbg) {
                         Some(f) => Some(f),
                         None => continue,
                     }
@@ -145,12 +160,24 @@ impl Loader<'_> {
     ///
     /// So the fallback lives **here**, once, rather than as `(self or this)` sprinkled through
     /// ~20 handler bodies: any XML body in any file — ours or an addon's — now works under both
-    /// callers. It is written on line 1 of the wrapper on purpose, so `{body}` still starts at
-    /// line 2 and every traceback line number keeps pointing at the source the author wrote.
+    /// callers.
+    ///
+    /// ## The prologue shares the body's first line, and that is a line-number fix
+    ///
+    /// The reference compiles the handler body **as the chunk**: `0x704c70` takes the raw text and
+    /// `luaL_loadbuffer`s it, so body line *n* is chunk line *n*. Our wrapper used to end with a
+    /// newline, which pushed every body line down by one — a `<OnClick>` whose code sat on the
+    /// element's second line reported `:3:` where the reference reports `:2:`. Keeping the
+    /// prologue on the body's own first line restores the reference's numbering exactly; the
+    /// closing `end` is the only line we add, and it lands *after* the body.
+    ///
+    /// `owner` is the frame's `GetName()` (or `<unnamed>`) — see [`Self::apply_scripts`] for the
+    /// bytes; `dbg` names the load for the report and is deliberately not the same string.
     pub(super) fn compile_handler(
         &mut self,
         handler: &Element,
         name: &str,
+        owner: &str,
         dbg: &str,
     ) -> Option<Function> {
         // **The raw body, NOT a trimmed one** — 1.12 hands `node->text` straight to
@@ -160,12 +187,12 @@ impl Loader<'_> {
         let body = handler.body.as_str();
         if !body.is_empty() {
             let src = format!(
-                "return function(self, ...) if self == nil then self = this end\n{body}\nend"
+                "return function(self, ...) if self == nil then self = this end {body}\nend"
             );
             match self
                 .lua()
                 .load(&src)
-                .set_name(format!("{dbg}:{name}"))
+                .set_name(format!("{owner}:{name}"))
                 .set_mode(mlua::ChunkMode::Text)
                 .eval::<Function>()
             {

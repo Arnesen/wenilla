@@ -173,6 +173,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     install_bit(lua)?;
     install_gc(lua)?;
+    install_assert(lua)?;
 
     Ok(())
 }
@@ -379,6 +380,56 @@ fn install_gc(lua: &Lua) -> mlua::Result<()> {
 }
 
 /// The type name `luaL_typerror` would print — `luaT_typenames 0x811cd0`'s spelling.
+/// **`assert` answers ONE value in 5.0, and all of its arguments in 5.1.**
+///
+/// `luaB_assert 0x7031a0` is five calls: `luaL_checkany 0x6f4bb0` on argument 1,
+/// `lua_toboolean 0x6f3660`, and on the truthy leg `0x7031e5 call 0x6f3080` — `lua_settop(L, 1)`
+/// — then `0x7031ea mov eax,1`. The false leg is
+/// `luaL_optlstring(L, 2, "assertion failed!" /*0x872bdc*/)` into `luaL_error 0x6f4940`, which
+/// longjmps. 5.1 replaced the settop/`mov eax,1` pair with `return lua_gettop(L)`, so
+/// `assert(a, b)` answers two values there and one here.
+///
+/// Found by the shape gate's base-library arm once it grew an argument ladder — the row
+/// (`arity 1 exact`) has been in `reference/1.12-shapes.tsv` since it was vendored, and a
+/// no-argument probe could never reach it because `assert()` raises.
+///
+/// **Reach, measured rather than assumed:** 5 647 `assert(` sites across the 219-addon corpus and
+/// 73 in the shipped FrameXML, and **zero** of them bind more than one name from the result. So
+/// this buys the contract, not a fixed addon — the same footing as `collectgarbage`'s argument
+/// (2136 §3). The next caller to write `local a, b = assert(f())` is the one that finds out.
+fn install_assert(lua: &Lua) -> mlua::Result<()> {
+    let f = lua.create_function(|lua, args: mlua::MultiValue| {
+        let mut it = args.into_iter();
+        // `luaL_checkany 0x6f4bb0` — an ABSENT argument 1 raises; an explicit `nil` does not, it
+        // is the falsy leg below.
+        let Some(v) = it.next() else {
+            return Err(mlua::Error::RuntimeError(
+                "bad argument #1 to `assert' (value expected)".into(),
+            ));
+        };
+        if matches!(v, Value::Nil | Value::Boolean(false)) {
+            // `luaL_optlstring` — a string or a number; anything else is its own bad-argument
+            // raise, in 5.0's own quoting (2122).
+            let msg = match it.next() {
+                None | Some(Value::Nil) => "assertion failed!".to_string(),
+                Some(other) => match lua.coerce_string(other.clone())? {
+                    Some(s) => s.to_string_lossy(),
+                    None => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "bad argument #2 to `assert' (string expected, got {})",
+                            type_name(&other)
+                        )))
+                    }
+                },
+            };
+            return Err(mlua::Error::RuntimeError(msg));
+        }
+        // `lua_settop(L, 1)`: the first argument, alone, whatever else was passed.
+        Ok(v)
+    })?;
+    lua.globals().set("assert", f)
+}
+
 fn type_name(v: &Value) -> &'static str {
     match v {
         Value::Nil => "no value",
@@ -519,6 +570,51 @@ mod tests {
         assert_eq!(
             e, "[string \"return 1+\"]:1: unexpected symbol near `<eof>'",
             "the second return is the message verbatim, with no mlua decoration"
+        );
+    }
+
+    /// **`assert` answers ONE value — 5.0's `lua_settop(L, 1); return 1`, not 5.1's
+    /// `return lua_gettop(L)`** (`luaB_assert 0x7031a0`, settop at `0x7031e5`, `mov eax,1` at
+    /// `0x7031ea`).
+    ///
+    /// Found by the shape gate's base-library arm once it grew an argument ladder; the row has
+    /// said `arity 1 exact` since the table was vendored, and only a call with MORE than one
+    /// argument can tell the two dialects apart.
+    #[test]
+    fn assert_answers_one_value_and_keeps_5_0_s_messages() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(
+            s.eval::<i64>("return select('#', assert(1, 2, 3))")
+                .unwrap(),
+            1,
+            "5.0 truncates to the first argument; 5.1 returns them all"
+        );
+        assert_eq!(s.eval::<i64>("return (assert(7, 'x'))").unwrap(), 7);
+        // A truthy `false`-adjacent value is still truthy: only nil and false take the raise.
+        assert_eq!(s.eval::<i64>("return select('#', assert(0))").unwrap(), 1);
+
+        let raised = |call: &str| -> String {
+            s.eval::<String>(&format!(
+                "local ok, e = pcall(function() {call} end) return tostring(e)"
+            ))
+            .unwrap()
+        };
+        // `luaL_optlstring(L, 2, "assertion failed!" /*0x872bdc*/)`, then `luaL_error`.
+        assert!(raised("assert(false)").contains("assertion failed!"));
+        assert!(raised("assert(nil, 'my message')").contains("my message"));
+        // A number is a string to `luaL_optlstring`; anything else is its own bad-argument raise,
+        // in 5.0's backtick quoting (2122).
+        assert!(raised("assert(false, 42)").contains("42"));
+        assert!(
+            raised("assert(false, {})").contains("bad argument #2 to `assert' (string expected"),
+            "{}",
+            raised("assert(false, {})")
+        );
+        // `luaL_checkany 0x6f4bb0`: an ABSENT argument 1 raises, an explicit nil does not.
+        assert!(
+            raised("assert()").contains("bad argument #1 to `assert' (value expected)"),
+            "{}",
+            raised("assert()")
         );
     }
 

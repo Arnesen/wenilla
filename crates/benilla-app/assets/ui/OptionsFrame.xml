@@ -1069,12 +1069,20 @@
         -- numbering our page does not use, so each row names the child it drives instead.
         --
         -- NOT bound, and named rather than faked: pfUI's module goes on to hook `SetWorldDetail`
-        -- (unbound) and drive `ConsoleExec("frillDensity ...")`, `lodDist`, `nearClip`, `maxLOD`.
-        -- `ConsoleExec` itself IS bound (1948 — it writes a registered CVar or pushes a console
-        -- command the app dispatches), but none of those four CVars is registered, so those
-        -- writes reach nothing. Neither verb is called at load, so the module loads and its
-        -- slider write lands; its EXTENDED arm cannot work here, and registering a CVar nothing
-        -- reads would be exactly the silent pretence 1203 exists to forbid.
+        -- and `GetWorldDetail` (both unbound) and drive `ConsoleExec("frillDensity ...")`,
+        -- `lodDist`, `nearClip`, `maxLOD`. `ConsoleExec` itself IS bound (1948 — it writes a
+        -- registered CVar or pushes a console command the app dispatches), and `frillDensity` is
+        -- now registered over the clutter knob (2151), so THAT write lands; `lodDist`, `nearClip`
+        -- and `maxLOD` have no benilla knob behind them and reach nothing, because registering a
+        -- CVar nothing reads would be exactly the silent pretence 1203 exists to forbid.
+        --
+        -- Neither WorldDetail verb is called at load, so the module loads and its slider write
+        -- lands. Its EXTENDED arm still cannot RUN here — that arm is `SetWorldDetail`, and its
+        -- replacement `GetWorldDetail` calls a nil hook at any stop <= 48. Nothing in benilla
+        -- calls either today (this page drives the CVar directly), which is what keeps that
+        -- unreachable; the migration this file is scaffolding for is what changes it, since the
+        -- stock `OptionsFrame_Load` prefers `getglobal("Get"..func)` over `GetCVar(func)`
+        -- (`OptionsFrame.lua` l.110/135). Binding the pair is named as the next move in 2151.
         OptionsFrameSliders = {
             { text = "UI Scale", func = "uiscale",
               minValue = 0.64, maxValue = 1.0, valueStep = 0.01, benillaRow = "RowUiScale" },

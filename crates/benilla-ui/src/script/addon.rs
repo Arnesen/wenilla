@@ -99,28 +99,101 @@ pub struct AddOnInfo {
     pub chain: bool,
 }
 
-/// Resolve a Lua index-or-name argument to a position in the registry.
+/// The verbs' own `Usage:` literals, read out of `.data` rather than reconstructed — the message
+/// an addon's error handler prints, so the spelling is the contract. `%s`-free: each is a whole
+/// string in the image.
+const USAGE_INFO: &str = "Usage: GetAddOnInfo(index or \"name\")"; // 0x842d68
+const USAGE_METADATA: &str = "Usage: GetAddOnMetadata(index or \"name\", \"variable\")"; // 0x842d90
+const USAGE_DEPENDENCIES: &str = "Usage: GetAddOnDependencies(index or \"name\")"; // 0x842dc8
+const USAGE_ENABLE: &str = "Usage: EnableAddOn(index or \"name\")"; // 0x842df8
+const USAGE_DISABLE: &str = "Usage: DisableAddOn(index or \"name\")"; // 0x842e1c
+const USAGE_LOAD_ON_DEMAND: &str = "Usage: IsAddOnLoadOnDemand(index or \"name\")"; // 0x842e44
+const USAGE_LOADED: &str = "Usage: IsAddOnLoaded(index or \"name\")"; // 0x842e70
+const USAGE_LOAD: &str = "Usage: LoadAddOn(index or \"name\")"; // 0x842e98
+
+/// **The `index or "name"` argument every in-game addon verb opens with — and its two raises.**
 ///
-/// The reference's verbs all take either, and an addon in the wild passes whichever it has —
-/// `IsAddOnLoaded("Bagnon")` from a dependant, `GetAddOnInfo(i)` from a list walker. Names compare
-/// case-insensitively for the same reason dependency lookup does: a `.toc` may spell a name any way.
-fn resolve(model: &Model, key: &Value) -> Option<usize> {
-    let by_index = |n: i64| usize::try_from(n).ok()?.checked_sub(1);
-    match key {
-        // 1-based, like every indexed API in the tree. A Lua number literal arrives as either
-        // Integer or Number depending on how it was written, so both arms are real.
-        Value::Integer(i) => by_index(*i),
-        Value::Number(n) => by_index(*n as i64),
-        Value::String(s) => {
-            let want = s.to_str().ok()?;
-            model
-                .addons
-                .iter()
-                .position(|a| a.name.eq_ignore_ascii_case(&want))
-        }
-        _ => None,
+/// All eight bindings (`GetAddOnInfo 0x48e390`, `GetAddOnMetadata 0x48e530`,
+/// `GetAddOnDependencies 0x48e5e0`, `EnableAddOn 0x48e690`, `DisableAddOn 0x48e760`,
+/// `IsAddOnLoadOnDemand 0x48e840`, `IsAddOnLoaded 0x48e8e0`, `LoadAddOn 0x48e980`) open with the
+/// *same eleven instructions*, and the shape has three arms, not one:
+///
+/// ```text
+/// edx=1; call 0x6f34d0            ; lua_isnumber — tag 3 OR a numeric string
+///   je  <string>
+///   call 0x6f3620 / 0x40a2b0      ; lua_tonumber, then double->int32 TRUNCATING toward zero
+///   dec eax                       ; the index is 1-BASED
+///   call 0x51df00                 ; name-at(index0); NULL is the bounds failure
+///   jne <shared>
+///   call 0x51def0                 ; the addon COUNT
+///   luaL_error("AddOn index must be in the range of 1 to %d" /*0x837d70*/, count)
+/// <string>:
+///   call 0x6f3510                 ; lua_isstring
+///   je  <usage>
+///   call 0x6f3690                 ; lua_tostring — used AS GIVEN, never validated here
+/// <usage>:
+///   luaL_error("Usage: <Verb>(index or \"name\")")
+/// ```
+///
+/// **`luaL_error 0x6f4940` does not return** ([`super::binding_abi`]): it longjmps, so both arms
+/// abandon the caller's statement. We answered a placeholder, a `nil` or a silent no-op for every
+/// one of them — the failure mode that module's header names: *"a client that answers `nil` there
+/// keeps executing a statement the real client never finishes."*
+///
+/// Three consequences that are easy to get wrong and are all byte-read:
+///
+/// - **The bound is UNSIGNED** (`0x51df00 cmp ecx,[0xbe1b90]; jb`), so `f(0)` decrements to
+///   `0xFFFFFFFF` and raises by the same route as `f(count+1)`.
+/// - **A numeric STRING is an INDEX**, because `0x6f34d0` coerces one — `GetAddOnInfo("2")` is the
+///   second addon, not an addon named `2`.
+/// - **A name is never checked against the registry by this prologue.** Each verb's own body
+///   decides what a miss means, and they do not agree: `GetAddOnInfo` echoes the name back with
+///   placeholders, `IsAddOnLoaded` answers nil, `GetAddOnDependencies` answers nothing.
+enum AddonKey {
+    /// A bounds-checked 0-based position in the registry.
+    Index(usize),
+    /// A name exactly as the caller spelled it — unvalidated, per the prologue above.
+    Name(String),
+}
+
+/// The prologue itself. `usage` is the verb's own `.data` literal, verbatim.
+fn addon_key(lua: &Lua, model: &Model, key: &Value, usage: &'static str) -> mlua::Result<AddonKey> {
+    // `lua_isnumber 0x6f34d0` — and `coerce_number` is its exact analogue, numeric strings and all.
+    if let Some(n) = lua.coerce_number(key.clone())? {
+        // `_ftol 0x40a2b0` truncates toward zero (not `floor`), then `dec eax`, then an unsigned
+        // compare — so the whole out-of-range family collapses onto one `u32` bound test.
+        let index0 = (n as i64 as i32).wrapping_sub(1) as u32 as usize;
+        return match index0 < model.addons.len() {
+            true => Ok(AddonKey::Index(index0)),
+            false => Err(mlua::Error::RuntimeError(format!(
+                "AddOn index must be in the range of 1 to {}",
+                model.addons.len()
+            ))),
+        };
     }
-    .filter(|i| *i < model.addons.len())
+    // `lua_isstring 0x6f3510` → `lua_tostring 0x6f3690`. Lossy for the reason 1193/2138 give: a
+    // 5.0 string is bytes, and a stray one costs a glyph, not the call.
+    match key {
+        Value::String(s) => Ok(AddonKey::Name(s.to_string_lossy())),
+        _ => Err(mlua::Error::RuntimeError(usage.into())),
+    }
+}
+
+/// A name → a position, folded. Names compare case-insensitively for the same reason dependency
+/// lookup does: a `.toc` may spell a name any way.
+fn by_name(model: &Model, name: &str) -> Option<usize> {
+    model
+        .addons
+        .iter()
+        .position(|a| a.name.eq_ignore_ascii_case(name))
+}
+
+/// A validated key → a row, for the verbs whose miss answer is "not found" rather than a raise.
+fn row_of(model: &Model, key: &AddonKey) -> Option<usize> {
+    match key {
+        AddonKey::Index(i) => Some(*i),
+        AddonKey::Name(n) => by_name(model, n),
+    }
 }
 
 /// Lower the registry into the gate's rows — ONE adapter, so every verb consults the same law
@@ -213,29 +286,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetAddOnInfo",
         lua.create_function(|lua, key: Value| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            let Some(i) = resolve(&model, &key) else {
-                // **The two argument forms miss differently** (decision 1845), and ours answered
-                // zero values for both.
-                //
-                // A NUMERIC index out of range **raises**, and the bounds check is *unsigned* — so
-                // index `0` raises too, not just a negative or an over-count. That is not an arity
-                // divergence at all, which is why a gate comparing counts alone would have pushed
-                // this toward a placeholder branch that does not exist for numbers.
-                if matches!(key, Value::Integer(_) | Value::Number(_)) {
-                    return Err(mlua::Error::runtime("GetAddOnInfo: index out of range"));
-                }
-                // The STRING form is not existence-checked at all: it answers seven placeholders,
-                // two of which are not nil. Slot 4 is `enabled` in-game (the glue table's fourth is
-                // `url`, and its eighth is an appended `newVersion` — nothing shifts).
-                return Ok(MultiValue::from_vec(vec![
-                    lua_str(lua, "NoSuchAddon")?,
-                    Value::Nil,
-                    Value::Nil,
-                    Value::Nil,
-                    Value::Nil,
-                    lua_str(lua, "MISSING")?,
-                    lua_str(lua, "INSECURE")?,
-                ]));
+            // **The two argument forms miss differently** (decision 1845). The numeric one cannot
+            // reach here at all — [`addon_key`] has already raised the range error for it.
+            let i = match addon_key(lua, &model, &key, USAGE_INFO)? {
+                AddonKey::Index(i) => i,
+                AddonKey::Name(name) => match by_name(&model, &name) {
+                    Some(i) => i,
+                    // The STRING form is not existence-checked: it answers seven placeholders, two
+                    // of which are not nil — and **slot 1 is the caller's own string echoed back**
+                    // (`0x48e401`, non-NULL by `lua_isstring`). We used to answer the literal
+                    // `"NoSuchAddon"`, which is the wow-re note's *example call*, not a constant
+                    // the image contains. Slot 4 is `enabled` in-game (the glue table's fourth is
+                    // `url`, and its eighth is an appended `newVersion` — nothing shifts).
+                    None => {
+                        return Ok(MultiValue::from_vec(vec![
+                            lua_str(lua, &name)?,
+                            Value::Nil,
+                            Value::Nil,
+                            Value::Nil,
+                            Value::Nil,
+                            lua_str(lua, "MISSING")?,
+                            lua_str(lua, "INSECURE")?,
+                        ]))
+                    }
+                },
             };
             // The one arbiter (decision 1292): loaded short-circuit, then `AddOn_CanLoad` in the
             // in-game flavour — so NOT_DEMAND_LOADED and INTERFACE_VERSION are reachable here,
@@ -261,8 +335,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsAddOnLoaded",
         lua.create_function(|lua, key: Value| {
             let model = lua.app_data_ref::<Model>().expect("model");
+            let key = addon_key(lua, &model, &key, USAGE_LOADED)?;
+            // `0x51e6f0` takes the resolved NAME and answers `[rec+0x18]`; a miss pushes nil
+            // (`0x48e95b`), so an unknown name is one value, not a raise.
             Ok(flag(
-                resolve(&model, &key).is_some_and(|i| model.addons[i].loaded),
+                row_of(&model, &key).is_some_and(|i| model.addons[i].loaded),
             ))
         })?,
     )?;
@@ -271,8 +348,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsAddOnLoadOnDemand",
         lua.create_function(|lua, key: Value| {
             let model = lua.app_data_ref::<Model>().expect("model");
+            let key = addon_key(lua, &model, &key, USAGE_LOAD_ON_DEMAND)?;
             Ok(flag(
-                resolve(&model, &key).is_some_and(|i| model.addons[i].load_on_demand),
+                row_of(&model, &key).is_some_and(|i| model.addons[i].load_on_demand),
             ))
         })?,
     )?;
@@ -283,7 +361,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetAddOnDependencies",
         lua.create_function(|lua, key: Value| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            let Some(i) = resolve(&model, &key) else {
+            let key = addon_key(lua, &model, &key, USAGE_DEPENDENCIES)?;
+            // A name the registry does not hold reaches `0x51e350` and comes back NULL, which
+            // takes `0x48e68a` — zero values, no raise.
+            let Some(i) = row_of(&model, &key) else {
                 return Ok(MultiValue::new());
             };
             let mut out = Vec::new();
@@ -297,9 +378,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // The raw `## Key: Value`, by key — how an addon reads its own `## Version`.
     g.set(
         "GetAddOnMetadata",
-        lua.create_function(|lua, (key, field): (Value, String)| {
+        lua.create_function(|lua, (key, field): (Value, Value)| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            let Some(i) = resolve(&model, &key) else {
+            let key = addon_key(lua, &model, &key, USAGE_METADATA)?;
+            // Argument 2 is gated by its own `lua_isstring` (`0x48e59c`, edx=2) onto the SAME
+            // usage raise (`0x48e5cb`) — so `GetAddOnMetadata("Foo")` raises rather than
+            // answering nil.
+            let field = super::binding_abi::string_arg(lua, field, USAGE_METADATA)?;
+            let Some(i) = row_of(&model, &key) else {
                 return Ok(Value::Nil);
             };
             match model.addons[i]
@@ -321,20 +407,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `0x51df00`); an unknown NAME is where we diverge, disclosed: the reference creates a
     // phantom enable-hash entry for the typo, we no-op — the safer direction, and `resolve`'s
     // established semantics (1191).
-    for (name, on) in [("EnableAddOn", true), ("DisableAddOn", false)] {
+    for (name, on, usage) in [
+        ("EnableAddOn", true, USAGE_ENABLE),
+        ("DisableAddOn", false, USAGE_DISABLE),
+    ] {
         g.set(
             name,
             lua.create_function(move |lua, key: Value| {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                if let Value::Integer(_) | Value::Number(_) = key {
-                    if resolve(&model, &key).is_none() {
-                        return Err(mlua::Error::runtime(format!(
-                            "{}: addon index out of range",
-                            if on { "EnableAddOn" } else { "DisableAddOn" }
-                        )));
-                    }
-                }
-                if let Some(i) = resolve(&model, &key) {
+                let key = addon_key(lua, &model, &key, usage)?;
+                if let Some(i) = row_of(&model, &key) {
                     model.addons[i].enabled = on;
                 }
                 Ok(())
@@ -381,7 +463,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, key: Value| {
             let index = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                resolve(&model, &key)
+                let key = addon_key(lua, &model, &key, USAGE_LOAD)?;
+                row_of(&model, &key)
             };
             let Some(i) = index else {
                 return Ok(MultiValue::from_vec(vec![

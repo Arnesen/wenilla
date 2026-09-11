@@ -27,7 +27,7 @@ use mlua::{Lua, Value, Variadic};
 /// The Lua-level message inside an mlua error — mlua decorates its `Display` with a category
 /// word (`syntax error: `, `runtime error: `) that the reference's own `lua_pushstring` leg never
 /// adds. `loadstring`'s second return is that message verbatim, so the decoration is stripped.
-fn lua_message(e: &mlua::Error) -> String {
+pub(super) fn lua_message(e: &mlua::Error) -> String {
     match e {
         mlua::Error::SyntaxError { message, .. } => message.clone(),
         mlua::Error::RuntimeError(m) => m.clone(),

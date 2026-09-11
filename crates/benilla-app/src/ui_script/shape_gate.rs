@@ -123,6 +123,14 @@ fn rows_of_kind(kind: &str) -> Vec<Row> {
             if f.len() < 9 || f[4] != kind || f[8] != "exact" {
                 return None;
             }
+            // **`agree` is necessary and not sufficient, and the second condition is the table's
+            // own too** (2150 + wow-re `scratch/binding-kinds-stack-overwrite.md`). The kinds
+            // come from tracing each binding's `lua_push*` calls; a row whose notes carry
+            // `delegated-push` has a CALLEE that pushes on its own behalf, which the trace sees
+            // one level too high up, so its tuple covers the binding's own ops only. `eax` is
+            // unaffected, so arity stays gated on every row — it is the kinds claim alone that
+            // narrows.
+            let delegated = f.len() > 11 && f[11].contains("delegated-push");
             Some(Row {
                 name: f[0].to_string(),
                 table_va: f[3].to_string(),
@@ -130,7 +138,7 @@ fn rows_of_kind(kind: &str) -> Vec<Row> {
                 // ADVISORY unless `kinds_conf == agree` — the table's own column contract. A row
                 // that did not agree carries no kinds here at all, so nothing downstream can read
                 // one by accident.
-                kinds: if f.len() > 10 && f[10] == "agree" {
+                kinds: if f.len() > 10 && f[10] == "agree" && !delegated {
                     f[9].to_string()
                 } else {
                     String::new()
@@ -277,30 +285,70 @@ fn every_query_binding_answers_the_reference_s_return_arity() {
 /// whole time. `gcinfo … 2 exact (number,number) agree` and `collectgarbage … 0 exact () agree`
 /// were both in this file before anyone answered either one wrong.
 ///
-/// **Only the no-argument-safe names are probed, by an explicit list rather than a prefix rule.**
-/// The global arm can filter to query verbs because `Get*`/`Is*` names them; the base library has
-/// no such convention, and calling it blind means calling `error`, `pcall` and `setfenv` for their
-/// arities. So the list below is what is safe to call with nothing, and everything else is
-/// uncovered — a loss of coverage, never a wrong assertion, exactly as the global arm's own filter
-/// is. `seterrorhandler`/`setfenv`/`setglobal` are excluded for mutating the VM, not for raising.
-const BASELIB_NO_ARG_PROBES: &[&str] = &[
-    "collectgarbage",
-    "date",
+/// **The base library is probed by an explicit ladder — a name and the arguments to call it
+/// with** — rather than a prefix rule. The global arm can filter to query verbs because
+/// `Get*`/`Is*` names them; the base library has no such convention, and calling it blind means
+/// calling `error`, `pcall` and `setfenv` for their arities.
+///
+/// ## Why an argument ladder is safe HERE and was not for the global arm
+///
+/// 2129 §Why left the ladder question open on exactly one hazard: *a wrong-but-plausible argument
+/// can produce a legitimate kind tuple outside the reference's reachable set, which is a false
+/// positive — the most expensive gate failure.* That hazard is real for a game binding, where the
+/// argument's meaning is the unknown (what index does `GetInboxItem` accept, and what does the
+/// mailbox hold when it does?).
+///
+/// It does not transfer to the base library, and the reason is worth stating rather than
+/// assuming: these are stock Lua 5.0 functions whose argument **types** are fixed by the language
+/// and whose bodies were read at the bytes. `type` takes any value, `rawget` a table and a key,
+/// `pairs` a table. There is no state to be in the wrong shape, so the argument below is not a
+/// guess about the reference — it is the only shape the function accepts.
+///
+/// The arguments are chosen to **discriminate**, not merely to avoid a raise: `assert` is called
+/// with TWO arguments precisely because its `arity 1 exact` row is only falsifiable that way — a
+/// one-argument call answers one value in both dialects and proves nothing. (That probe is what
+/// found 5.1's `return lua_gettop(L)` still in place here; see `script::lua50::install_assert`.)
+///
+/// Excluded, and why: `error`/`pcall`/`xpcall` and the rows whose `arity_conf` is not `exact`
+/// (`next`, `unpack`, `ipairs`, `loadstring`) are filtered out upstream anyway; `setfenv` is left
+/// out because it mutates the environment every later probe runs in, which is a different risk
+/// from raising.
+const BASELIB_PROBES: &[(&str, &str)] = &[
+    ("collectgarbage", ""),
+    ("date", ""),
     // The five shipped stubs — `xor eax,eax; ret` in the image (`lua-dialect.md` §3a), so calling
     // one is as safe here as it is there, and their `0 exact ()` rows are still worth holding.
-    "debugbreak",
-    "debugdump",
-    "debuginfo",
-    "debugload",
-    "debugprint",
-    "debugprofilestart",
-    "debugprofilestop",
-    "debugstack",
-    "debugtimestamp",
-    "gcinfo",
-    "geterrorhandler",
-    "getfenv",
-    "time",
+    ("debugbreak", ""),
+    ("debugdump", ""),
+    ("debuginfo", ""),
+    ("debugload", ""),
+    ("debugprint", ""),
+    ("debugprofilestart", ""),
+    ("debugprofilestop", ""),
+    ("debugstack", ""),
+    ("debugtimestamp", ""),
+    ("gcinfo", ""),
+    ("geterrorhandler", ""),
+    ("getfenv", ""),
+    ("time", ""),
+    // ── the ladder (2136's "left open", closed) ──────────────────────────────────────────────
+    // TWO arguments on purpose: the row is `arity 1 exact` and only a multi-argument call can
+    // tell 5.0's `lua_settop(L,1); return 1` from 5.1's `return lua_gettop(L)`.
+    ("assert", "1, 2"),
+    ("getglobal", "\"BenillaShapeGateAbsent\""),
+    ("getmetatable", "{}"),
+    ("pairs", "{}"),
+    ("rawequal", "1, 1"),
+    ("rawget", "{}, 1"),
+    ("rawset", "{}, 1, 1"),
+    // Both write, and both are namespaced or self-restoring so the VM the next probe sees is the
+    // one it would have seen anyway.
+    ("seterrorhandler", "geterrorhandler()"),
+    ("setglobal", "\"BenillaShapeGateProbe\", 1"),
+    ("setmetatable", "{}, nil"),
+    ("tonumber", "\"1\""),
+    ("tostring", "nil"),
+    ("type", "nil"),
 ];
 
 /// The base library's own shrinking list — same rules as [`NOT_YET_ASSERTED`]. **Empty.**
@@ -316,16 +364,17 @@ fn the_base_library_answers_the_reference_s_return_arity_and_kinds() {
     );
     let s = benilla_ui::script::UiScript::new().expect("VM");
     let mut checked = 0usize;
+    let mut kinds_checked = 0usize;
     let mut mismatches: Vec<String> = Vec::new();
 
     for r in &rows {
-        if !BASELIB_NO_ARG_PROBES.contains(&r.name.as_str()) {
+        let Some((_, args)) = BASELIB_PROBES.iter().find(|(n, _)| *n == r.name) else {
             continue;
-        }
+        };
         let name = &r.name;
         let probe = format!(
             "if type({name}) ~= 'function' then return -1 end \
-             local ok, n = pcall(function() return select('#', {name}()) end) \
+             local ok, n = pcall(function() return select('#', {name}({args})) end) \
              if not ok then return -1 end return n"
         );
         let got: i64 = match s.eval(&probe) {
@@ -348,17 +397,19 @@ fn the_base_library_answers_the_reference_s_return_arity_and_kinds() {
             continue;
         }
         // Kinds, wherever the table calls them trustworthy — the same `kinds_conf = agree` rule
-        // the global arm uses, and the column that types `gcinfo` as `(number,number)`.
+        // the global arm uses, and the column that types `gcinfo` as `(number,number)`. The
+        // `delegated-push` narrowing is applied once, in [`rows_of_kind`], for every arm.
         if r.kinds.is_empty() {
             continue;
         }
         let Ok(kinds) = s.eval::<String>(&format!(
-            "local t = {{ {name}() }} local out = '' \
+            "local t = {{ {name}({args}) }} local out = '' \
              for i = 1, {} do out = out .. (i > 1 and ',' or '') .. type(t[i]) end return out",
             r.arity
         )) else {
             continue;
         };
+        kinds_checked += 1;
         let got_tuple = format!("({kinds})");
         let acceptable = r.kinds.split('|').map(str::trim).any(|alt| {
             alt == got_tuple
@@ -386,8 +437,15 @@ fn the_base_library_answers_the_reference_s_return_arity_and_kinds() {
     // A floor, so a change that stops the probe measuring anything fails loudly.
     // A floor, not a target: raise it when coverage rises, never lower it to fit a change.
     assert!(
-        checked >= 15,
+        checked >= 28,
         "the base-library gate measured only {checked} bindings"
+    );
+    // **The kinds half gets its own floor.** Arity coverage says nothing about how many rows the
+    // kinds comparison actually ran on, and the `kinds_conf`/`delegated-push` narrowing is exactly
+    // the kind of change that can quietly take it to zero while the arity floor stays green.
+    assert!(
+        kinds_checked >= 16,
+        "the base-library gate compared kinds on only {kinds_checked} bindings"
     );
     assert!(
         mismatches.is_empty(),

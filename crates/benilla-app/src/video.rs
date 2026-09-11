@@ -67,7 +67,7 @@ use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution};
 
 /// `$WOW_NOVSYNC=1` — the session-only measurement override. It wins over the config for the run
-/// and never reaches `config.toml` (registered in [`crate::cvars`]'s `env_overridden` set), so a
+/// and never reaches `config.toml` (registered in [`crate::cvars`]'s `session_owned` set), so a
 /// headless FPS-journal run can uncap without making the player's setting sticky.
 pub(crate) fn novsync_env() -> bool {
     std::env::var("WOW_NOVSYNC").as_deref() == Ok("1")

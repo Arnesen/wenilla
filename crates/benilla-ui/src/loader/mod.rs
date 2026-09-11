@@ -393,9 +393,18 @@ impl Loader<'_> {
     /// source snippet, and the separator is `\` because that is the shape an addon parsing its own
     /// `debugstack()` matches against (`crate::script::addon_chunk_name`).
     fn run(&self, chunk: &[u8], path: &str) -> mlua::Result<()> {
+        // A FILE chunk is `"@%s"` (`0x8716e0`) over the resolved path — `0x704bc0` builds it that
+        // way for every `.lua` the loader touches, and `luaO_chunkid`'s `@` branch prints it
+        // plainly (wow-re `scratch/include-lua-dispatch.md` §7).
+        self.run_named(chunk, &format!("@{}", path.replace('/', "\\")))
+    }
+
+    /// Run a chunk under a chunk name given **whole** — for the producers whose name is not a
+    /// path. See the inline `<Script>` arm in [`Self::load_doc`].
+    fn run_named(&self, chunk: &[u8], name: &str) -> mlua::Result<()> {
         self.lua
             .load(chunk)
-            .set_name(format!("@{}", path.replace('/', "\\")))
+            .set_name(name)
             .set_mode(mlua::ChunkMode::Text)
             .exec()
     }
@@ -516,8 +525,20 @@ impl Loader<'_> {
                     // this would make every reported line a confident, checkable lie.
                     let mut chunk = "\n".repeat(line.saturating_sub(1) as usize).into_bytes();
                     chunk.extend_from_slice(body.as_bytes());
-                    let path = self.path.clone();
-                    if let Err(e) = self.run(&chunk, &path) {
+                    // **Not a file name.** The reference names an inline `<Script>` body
+                    // `"%s:<Scripts>"` (`0x871074`) over the XML document's own path, with NO `@`
+                    // — `0x6ee0ed push ebx` / `0x6ee0ee push 0x871074` → `0x6ee0ff` sprintf →
+                    // `0x6ee10f call 0x704cd0`. So `luaO_chunkid` takes its third branch and the
+                    // frame reads `[string "Interface\FrameXML\Foo.xml:<Scripts>"]`, not a path.
+                    // Writing `@path` here made an inline block indistinguishable from the `.lua`
+                    // file beside it — including to the addons that split a `debugstack` frame on
+                    // `\AddOns\`.
+                    //
+                    // The padding above stays (1214): the reference's line numbers here are
+                    // body-relative, ours are the XML file's, and the file's are the ones a reader
+                    // can go and check — the name now carries the path that makes them checkable.
+                    let name = format!("{}:<Scripts>", self.path.replace('/', "\\"));
+                    if let Err(e) = self.run_named(&chunk, &name) {
                         self.report.errors.push(format!("inline <Script>: {e}"));
                     }
                 }

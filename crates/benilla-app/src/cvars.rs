@@ -491,8 +491,47 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // default: our stop 1 scatters ×2 (32) where the reference's boot `frillDensity` is 16
     // registered, 24 after `hwDetect` reads `VideoHardware.dbc` (row 170 on any D3D9-class part,
     // 8 on the weakest). 24 is on no stop of ours; 1649 broke that tie toward the denser stop,
-    // because erring sparse is the worse failure for a knob about ground cover.
+    // because erring sparse is the worse failure for a knob about ground cover. **That divergence
+    // is a row of its own now** — 2151 registered the CVar it lives in, immediately below, so it
+    // is on the deviation inventory instead of only in this paragraph.
     same("WorldDetail", "1"),
+    // The SAME knob in the reference's own unit (2151), and the CVar 1.12 actually registers for
+    // it: `0x68862e` passes name `0x8423d8` `"frillDensity"`, default string `0x864644` `"16"`,
+    // help "Terrain frill density", flags `1`, callback `0x688de0`, record `[0xc7f2f4]` (wow-re
+    // `re/cvar/cvar-register-sites.tsv` row 185). The value is **cells visited per chunk**: the
+    // callback clamps `[1, 256]` and hands the number to `0x6725a0` → `[0xc7b494]`, which bounds
+    // the detail-doodad scatter loop at `0x6bfcfb`/`0x6bff1c`. Our scatter is the byte-exact port
+    // of that loop, so `frillDensity` is not a new dial — it is the unit
+    // `benilla_formats::scatter_ground_doodads` has always counted in, and
+    // `ClutterConfig::frill_density` is the conversion.
+    //
+    // **Two names for one knob is the reference's own shape, not ours.** `SetWorldDetail 0x488dd0`
+    // writes this CVar per stop (16/32/48) alongside `SmallCull` — the row above is that stop,
+    // this row is what the stop wrote. Writing either moves the same ground cover here, and each
+    // keeps the clamp its own writer has: the stop's `[0, 2]`, the cells' `[1, 256]`. So a console
+    // `frillDensity 200` is honoured, exactly as it is there, and the panel row then reads
+    // off-grid — which is already this pair's stated posture for an off-grid multiplier.
+    //
+    // **It has a live Lua consumer, which is why it is registered now** (the module doc's rule):
+    // pfUI's `hdgraphic` replaces `GetWorldDetail` with `tonumber(GetCVar("frillDensity")) > 48`,
+    // and unregistered that is `nil > 48` — an error, not a fallback. Its extended arm drives the
+    // knob the other way, `ConsoleExec("frillDensity " .. (arg+1)*16)` up to 256, which is the
+    // whole reason the reference's range is wider than its slider.
+    //
+    // **The deviation is 1649's grass, finally visible as a row.** 1804 recorded it in prose and
+    // could not table it, because the CVar it is a deviation *in* was not registered: our stop 1
+    // scatters 32 where the reference's boot value is 16 registered, and 24 after `hwDetect`
+    // (`0x639a60` CVar::Sets sixteen video CVars from the matched `VideoHardware.dbc` row; field
+    // `+0x18` holds 8/12/16/24 across the table, 24 on the videoID 170 that the reference
+    // install's own `Logs/gx.log` resolves to). 24 is on no stop of ours.
+    deviates(
+        "frillDensity",
+        "32",
+        "16",
+        "1649/1804: the reference's registered 16 is stop 0 and its post-`hwDetect` 24 is on no \
+         stop at all, so every stop diverges; Medium (32) is the nearest one no sparser than a \
+         fresh install, and erring sparse is the worse failure for ground cover",
+    ),
     // ── The combat log's display ranges: the reference's own `0x8629e0` table, in yards ─────────
     //
     // Eight rows, registered by the reference in ONE place — `0x626d00`, a loop over the
@@ -713,6 +752,39 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // skip-default rule). No host knob: its consumers are the load walk (via the persisted value,
     // [`CvarPersist::addon_version_check`]) and the gate's live per-query read in the VM.
     same("checkAddonVersion", "1"),
+    // **Which graphics API this run is actually on** (2151) — 1.12's own `gxApi`, byte-read at
+    // `0x63a833`: name `0x842a64`, default string `0x864f7c` `"direct3d"`, help "graphics api",
+    // flags `3` (registered | latched), callback `0x63b030`, record `[0xc4ea94]`. There it is a
+    // real selector — `0x63a3c4` compares the live value case-insensitively against `"OpenGl"`
+    // (`0x842a5c`) and `GxDevCreate` builds `CGxDeviceD3d` on anything else — but no shipped
+    // `WTF` overrides it, so the stock client is always D3D9 and the whole GL arm is dead code
+    // image-wide (wow-re states this from a dozen nodes; `models/scratch/part-additive-combine.md`
+    // §"the gxApi selector" is the decoded compare).
+    //
+    // **Here it DESCRIBES, it does not steer** — the `gxColorBits`/`gxDepthBits` posture. benilla
+    // renders through wgpu, which has no D3D9 backend to name and no chooser to offer: the backend
+    // is the adapter's, picked before the first frame, and this row is the honest report of it
+    // (`wgpu::Backend::to_str` — `metal`, `vulkan`, `dx12`, `gl`). Answering `"direct3d"` on a Mac
+    // would be a name with no behaviour behind it, which is the one thing 1203 forbids outright.
+    //
+    // **Default EMPTY, and pushed live** — the `realmName` posture (1140), for the same reason:
+    // the value is a fact about the machine, written from `RenderAdapterInfo` the moment the VM's
+    // table is seeded, so the default only ever describes a client with no render adapter (a
+    // headless test). Inventing a backend for that case would be worse than admitting we have
+    // none. And because it is the machine's fact rather than the player's choice, it is
+    // **session-owned**: `SetCVar` consumes it and `config.toml` never carries it, so a GPU swap
+    // or a `WGPU_BACKEND` run cannot leave a stale renderer name pinned in the file.
+    //
+    // Its live Lua consumer is pfUI's system panel — `panel.lua:185` does
+    // `"|cffffffff" .. GetCVar("gxApi")` in a tooltip, which on a nil is a concat error rather
+    // than a blank row.
+    deviates(
+        "gxApi",
+        "",
+        "direct3d",
+        "2151: descriptive, not a selector — benilla renders through wgpu, which has no D3D9 \
+         backend and no chooser; the value is the live adapter's own and is never persisted",
+    ),
     // Vertical Sync — 1.12's own `gxVSync`, the Video Options checkbox at index 5
     // (`OptionsFrame.lua`'s `OptionsFrameCheckButtons["VERTICAL_SYNC"]`, in the install's
     // FrameXML). The knob is [`crate::video::VideoConfig::vsync`], which the window's
@@ -917,10 +989,17 @@ struct LocalConfig {
 #[derive(Resource, Default)]
 pub(crate) struct CvarPersist {
     /// The file's `[cvars]` entries, verbatim spelling — the merge base every save starts from
-    /// (unknown keys ride through untouched, env-overridden keys keep their stored value).
+    /// (unknown keys ride through untouched, session-owned keys keep their stored value).
     file: BTreeMap<String, String>,
-    /// Lowercased names whose value came from an env var this session (never saved).
-    env_overridden: HashSet<String>,
+    /// Lowercased names this SESSION owns rather than the player — never saved, and the file's
+    /// own entry for them is left exactly as it was found.
+    ///
+    /// Almost all of them are env levers (`$WOW_UI_SCALE`, `$WOW_MSAA`, `$WOW_HOST`, …): a value
+    /// that stuck in `config.toml` would make an A/B or an instrument run sticky across
+    /// relaunches. `gxApi` (2151) is the member that is not — it is owned by the session because
+    /// it is a fact about the *machine* (the render adapter's backend), which is nobody's setting
+    /// to persist. The field was `env_overridden` until it gained that one.
+    session_owned: HashSet<String>,
     /// The engine table has been registered + seeded — **once per VM**, not once per process
     /// (decision 1290). A login builds a fresh VM, so the seed has to happen again: an
     /// unregistered table answers every `GetCVar` with nil, and [`save_config`] composes
@@ -932,8 +1011,8 @@ pub(crate) struct CvarPersist {
 }
 
 impl CvarPersist {
-    /// The saved-base pairs a VM's table is seeded from — the file's entries minus the ones an
-    /// env var owns this session, which are never persisted.
+    /// The saved-base pairs a VM's table is seeded from — the file's entries minus the ones the
+    /// session owns ([`CvarPersist::session_owned`]), which are never persisted.
     ///
     /// Extracted so `ui_script::lifecycle`'s world-entry edge can run the same seed before the
     /// interface loads (decision 2115): the reference's own `UIOptionsFrame.xml` reads two CVars
@@ -944,7 +1023,7 @@ impl CvarPersist {
     pub(crate) fn saved_base(&self) -> impl Iterator<Item = (String, String)> + '_ {
         self.file
             .iter()
-            .filter(|(k, _)| !self.env_overridden.contains(&k.to_ascii_lowercase()))
+            .filter(|(k, _)| !self.session_owned.contains(&k.to_ascii_lowercase()))
             .map(|(k, v)| (k.clone(), v.clone()))
     }
 
@@ -1180,6 +1259,13 @@ fn apply_string_valued(key: &str, name: &str, value: &str, knobs: &mut Knobs) ->
         // posture — so the value is CONSUMED rather than falling to a numeric parse that can only
         // reject it, and so a toggle still dirties the config.
         "realmname" => {}
+        // Descriptive, not a knob (2151): the live value is the render adapter's backend, pushed
+        // into the table by [`sync_cvars`]. Claimed for the same reason `realmname` is — so a
+        // write is CONSUMED rather than falling to a numeric parse that can only reject it — and
+        // it goes no further: the reference latches this CVar for the next `GxDevCreate`, and we
+        // have no device to re-create it on. `load_config` marks it session-owned, so the write
+        // also never reaches `config.toml`.
+        "gxapi" => {}
         _ => {}
     }
     true
@@ -1190,7 +1276,7 @@ fn apply_string_valued(key: &str, name: &str, value: &str, knobs: &mut Knobs) ->
 /// registered row whose default does not parse as a number is named here
 /// ([`every_string_valued_row_is_claimed_before_the_numeric_parse`]).
 fn is_string_valued(key: &str) -> bool {
-    matches!(key, "gxresolution" | "realmlist" | "realmname")
+    matches!(key, "gxapi" | "gxresolution" | "realmlist" | "realmname")
 }
 
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
@@ -1302,6 +1388,12 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // The panel's 0/1/2 lands as the density multiplier ×1/×2/×3; the clamp is the 1.12
         // slider's own range (an off-grid hand-edit rides between stops, like every slider).
         "worlddetail" => knobs.clutter.density = v.clamp(0.0, 2.0) + 1.0,
+        // The SAME knob in the reference's own cells-per-chunk (2151), with the reference's own
+        // `[1, 256]` clamp rather than the stop's — `ClutterConfig::set_frill_density` carries
+        // both, and `terrain_stream::rescatter_clutter` re-scatters the loaded tiles off the
+        // resulting density change exactly as it does for the row above (0992's setter law, which
+        // is the callback's own chunk rebuild).
+        "frilldensity" => knobs.clutter.set_frill_density(v),
         // The two zoom indices (1131) clamp exactly like the client's `set_zoom` (`0x6daa10`:
         // clamp at 5) — the widget clamps again on the way in, so a hand-edited level lands
         // in range whichever path it takes.
@@ -1410,61 +1502,80 @@ fn zoom_index(v: f32) -> u8 {
     v.clamp(0.0, f32::from(MINIMAP_ZOOM_LEVELS - 1)) as u8
 }
 
+/// The two registered spellings of `ClutterConfig::density`, lowercased (2151) — `WorldDetail`'s
+/// panel stop and `frillDensity`'s cells-per-chunk.
+///
+/// Named as a **pair**, because that is the thing about them that is easy to get wrong: anything
+/// which takes the knob for the session has to take *both* keys. `$WOW_CLUTTER_DENSITY` marked
+/// only `worlddetail` for exactly as long as it was the only spelling, and the moment the second
+/// row landed that would have let an A/B lever ride into `config.toml` through the other name and
+/// pin itself on every later launch.
+const CLUTTER_DENSITY_CVARS: [&str; 2] = ["worlddetail", "frilldensity"];
+
 /// Startup: read `benilla-config/config.toml` (absent file = all defaults, not an error) and apply it
-/// to the knob resources — except keys the environment overrides this session (their resources
-/// already read the env var in their `Default`s). The VM does not exist yet; [`sync_cvars`]
-/// seeds the table when it does.
+/// to the knob resources — except the keys this session owns rather than the player
+/// ([`CvarPersist::session_owned`]): an env lever's resource has already read the variable in its
+/// `Default`, and `gxApi` is the machine's own. The VM does not exist yet; [`sync_cvars`] seeds
+/// the table when it does.
 fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     let mut knobs = params.knobs();
     if std::env::var_os("WOW_UI_SCALE").is_some() {
-        persist.env_overridden.insert("uiscale".into());
+        persist.session_owned.insert("uiscale".into());
     }
     if std::env::var_os("WOW_FARCLIP").is_some() {
-        persist.env_overridden.insert("farclip".into());
+        persist.session_owned.insert("farclip".into());
     }
-    // The clutter A/B env drives the same knob WorldDetail lands on — same session-only law.
+    // The clutter A/B env drives the same knob WorldDetail lands on — same session-only law, over
+    // BOTH of that knob's spellings ([`CLUTTER_DENSITY_CVARS`]).
     if std::env::var_os("WOW_CLUTTER_DENSITY").is_some() {
-        persist.env_overridden.insert("worlddetail".into());
+        for key in CLUTTER_DENSITY_CVARS {
+            persist.session_owned.insert(key.into());
+        }
     }
     // `$WOW_NOVSYNC=1` is the measurement uncap: session-only, exactly like the taste-iteration
     // overrides above. Pinning it into the config would make an instrument run sticky.
     if crate::video::novsync_env() {
-        persist.env_overridden.insert("gxvsync".into());
+        persist.session_owned.insert("gxvsync".into());
     }
     // The filter policy's A/B levers, under the same law: pricing mode 3 against mode 5 on one
     // machine in one session is exactly what these are for, and a value that stuck in
     // `config.toml` would silently denominate every later reading.
     if std::env::var_os("WOW_TRILINEAR").is_some() {
-        persist.env_overridden.insert("trilinear".into());
+        persist.session_owned.insert("trilinear".into());
     }
     if std::env::var_os("WOW_ANISO").is_some() {
-        persist.env_overridden.insert("anisotropic".into());
+        persist.session_owned.insert("anisotropic".into());
     }
     // `$WOW_WIN`, a capture scenario, or any instrumented run owns the window's geometry for the
     // session (decision 1627), so the two CVars that would otherwise move it mid-run are
     // session-only under exactly the same law as the four above.
     if crate::video::windowed_env() {
-        persist.env_overridden.insert("gxwindow".into());
-        persist.env_overridden.insert("gxresolution".into());
+        persist.session_owned.insert("gxwindow".into());
+        persist.session_owned.insert("gxresolution".into());
     }
     // `$WOW_MSAA` is the multisampling A/B lever (1629), session-only under the same law as every
     // override above: a value pinned into the file would make a measurement sticky across
     // relaunches.
     if std::env::var_os("WOW_MSAA").is_some() {
-        persist.env_overridden.insert("gxmultisample".into());
+        persist.session_owned.insert("gxmultisample".into());
     }
     // `$WOW_RENDER_SCALE` is the render-scale A/B lever (1639), and doubly session-only: it is
     // also the supersampling instrument this machine prices pixels with, and an instrument run
     // that pinned 4× into the file would come back at 4× the next time the client opened.
     if std::env::var_os("WOW_RENDER_SCALE").is_some() {
-        persist.env_overridden.insert("renderscale".into());
+        persist.session_owned.insert("renderscale".into());
     }
     // `$WOW_HOST` is the realmlist for the session (1667) — every probe, smoke run and harness leg
     // sets it, and a value pinned into the file would silently repoint the player's client at
     // whatever a test dialed. `Realmlist::default()` has already taken it; this keeps it off disk.
     if std::env::var_os("WOW_HOST").is_some() {
-        persist.env_overridden.insert("realmlist".into());
+        persist.session_owned.insert("realmlist".into());
     }
+    // The one member with no env var behind it (2151): `gxApi` reports the render adapter's
+    // backend, which is a fact about the machine rather than a setting the player chose. It is
+    // pushed live by `sync_cvars` on every launch, so persisting it could only ever write a name
+    // that the next launch overwrites — or, worse, a stale one that outlives the GPU it described.
+    persist.session_owned.insert("gxapi".into());
     let cvars = match stored_config() {
         StoredConfig::Absent => return, // no file, hermetic capture, or no install
         StoredConfig::Bad(msg) => {
@@ -1485,8 +1596,8 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
             warn!("config: unknown cvar '{name}' — preserved, not applied");
             continue;
         }
-        if persist.env_overridden.contains(&key) {
-            info!("config: {name} overridden by env for this session (file value kept)");
+        if persist.session_owned.contains(&key) {
+            info!("config: {name} is owned by this session, not the file (file value kept)");
             continue;
         }
         apply_to_knobs(name, value, &mut knobs);
@@ -1561,6 +1672,7 @@ fn sync_cvars(
     script: Option<NonSendMut<UiScript>>,
     mut persist: ResMut<CvarPersist>,
     mut params: KnobParams,
+    adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -1625,7 +1737,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 67] = [
+        let session: [(&str, String); 69] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1673,8 +1785,12 @@ fn sync_cvars(
             (crate::vplates::CVAR_FRIENDS, flag(plates.friends)),
             // The session density on the panel scale (×1..×3 → 0..2). An env-driven off-grid
             // multiplier seeds off-grid honestly — the dropdown shows the raw number, checks
-            // nothing (the 0959 out-of-range posture, dropdown-flavored).
+            // nothing (the 0959 out-of-range posture, dropdown-flavored). A console
+            // `frillDensity` past the top stop reads off-grid here for the same reason, which is
+            // the reference's own inconsistency between its two writers (2151).
             ("WorldDetail", (clutter.density - 1.0).to_string()),
+            // …and the same density in the reference's own cells-per-chunk (2151).
+            ("frillDensity", clutter.frill_density().to_string()),
             ("ChatBubbles", flag(bubbles.all)),
             ("ChatBubblesParty", flag(bubbles.party)),
             ("profanityFilter", flag(text_filter.profanity)),
@@ -1683,6 +1799,15 @@ fn sync_cvars(
             ("gameTip", game_tip.next.to_string()),
             ("minimapZoom", minimap.outdoor.to_string()),
             ("minimapInsideZoom", minimap.inside.to_string()),
+            // **The machine's, not the player's** (2151): the live render backend, so `GetCVar`
+            // and pfUI's system tooltip answer what this run is actually on. `None` only in a
+            // headless app with no renderer, where the registered `""` stands and says so.
+            (
+                "gxApi",
+                adapter
+                    .as_ref()
+                    .map_or_else(String::new, |a| a.backend.to_str().to_string()),
+            ),
             ("gxVSync", flag(video.vsync)),
             // The reference's polarity: the CVar is `gxWindow`, so `1` is the WINDOWED state.
             (
@@ -1833,21 +1958,21 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
     if snapshot.is_empty() {
         return; // a VM that never registered (a capture) has nothing to say about the file
     }
-    persist.file = compose_file(&persist.file, &persist.env_overridden, &snapshot);
+    persist.file = compose_file(&persist.file, &persist.session_owned, &snapshot);
 }
 
 /// Compose the file to save: the previous file as the merge base, every registered var that
-/// moved off its default written, every one back at its default removed — env-overridden keys
-/// untouched (the session value is the env's, not the player's).
+/// moved off its default written, every one back at its default removed — session-owned keys
+/// untouched (that value is the env's or the machine's, not the player's).
 fn compose_file(
     previous: &BTreeMap<String, String>,
-    env_overridden: &HashSet<String>,
+    session_owned: &HashSet<String>,
     snapshot: &[(String, String, String)],
 ) -> BTreeMap<String, String> {
     let mut out = previous.clone();
     for (name, value, default) in snapshot {
         let key = name.to_ascii_lowercase();
-        if env_overridden.contains(&key) {
+        if session_owned.contains(&key) {
             continue;
         }
         // Match any existing entry case-insensitively so a hand-edited spelling doesn't fork.
@@ -1901,7 +2026,7 @@ fn save_config(
         persist.dirty = false; // nothing to save, and retrying every frame changes nothing
         return;
     }
-    let cvars = compose_file(&persist.file, &persist.env_overridden, &snapshot);
+    let cvars = compose_file(&persist.file, &persist.session_owned, &snapshot);
     let body = toml::to_string(&LocalConfig {
         cvars: cvars.clone(),
     })
@@ -2017,6 +2142,8 @@ mod tests {
             vec![
                 "SoundReverb",
                 "autoSelfCast",
+                "frillDensity",
+                "gxApi",
                 "gxColorBits",
                 "gxDepthBits",
                 "gxResolution",
@@ -2139,6 +2266,13 @@ mod tests {
         // scale. The weld is the point: the CVar's default and the engine's must be the same
         // ground cover, or a fresh config writes a row the world does not agree with.
         assert_eq!(d["WorldDetail"], 1.0);
+        // …and its twin in the reference's own unit (2151) welds to it, not beside it: the two
+        // rows are one knob read two ways, so a default that disagreed would ship a client whose
+        // panel stop and whose cells-per-chunk describe different ground.
+        assert_eq!(
+            d["frillDensity"],
+            (d["WorldDetail"] + 1.0) * benilla_formats::FRILL_DENSITY as f32
+        );
         // The bubble pair (1139) welds to BubbleConfig's defaults — both the binary's own since
         // 1804 (`ChatBubbles` "1", `ChatBubblesParty` "0"; the party half was 0598's director pin).
         let bubbles = BubbleConfig::default();
@@ -2393,6 +2527,47 @@ mod tests {
         assert_eq!(knobs.clutter.density, 1.0);
         assert!(apply_to_knobs("worlddetail", "7", &mut knobs));
         assert_eq!(knobs.clutter.density, 3.0);
+        // frillDensity: the SAME field in the reference's cells-per-chunk (2151), and the two
+        // arms' clamps are deliberately different — the stop's `[0, 2]` above, the cells'
+        // `[1, 256]` here (callback `0x688de0`). The stops round-trip through both spellings,
+        // which is the property that makes them one knob rather than two that agree by habit.
+        assert!(apply_to_knobs("frillDensity", "48", &mut knobs));
+        assert_eq!(knobs.clutter.density, 3.0);
+        assert!(apply_to_knobs("frilldensity", "16", &mut knobs));
+        assert_eq!(knobs.clutter.density, 1.0);
+        // Past the top stop is HONOURED, not clamped to it — pfUI's `hdgraphic` drives exactly
+        // this, `ConsoleExec("frillDensity " .. (arg+1)*16)` for arg up to 15.
+        assert!(apply_to_knobs("frillDensity", "256", &mut knobs));
+        assert_eq!(knobs.clutter.density, 16.0);
+        // …and the reference's own bounds hold at both ends. `0` is NOT clutter-off: the callback
+        // pins it to 1, and turning grass off stays the `$WOW_CLUTTER_DENSITY` instrument's.
+        assert!(apply_to_knobs("frillDensity", "9000", &mut knobs));
+        assert_eq!(knobs.clutter.density, 16.0);
+        assert!(apply_to_knobs("frillDensity", "0", &mut knobs));
+        assert_eq!(knobs.clutter.density, 1.0 / 16.0);
+        // The row `GetCVar` answers is the same field seen the other way round.
+        assert!(apply_to_knobs("WorldDetail", "1", &mut knobs));
+        assert_eq!(knobs.clutter.density, 2.0);
+        assert_eq!(knobs.clutter.frill_density(), 32.0);
+        // And the pair is NAMED as a pair, in the registered spelling and the lowercased one, so
+        // `$WOW_CLUTTER_DENSITY` cannot take one spelling of this knob for the session and leave
+        // the other free to persist the lever (2151).
+        for key in CLUTTER_DENSITY_CVARS {
+            assert!(
+                REGISTERED.iter().any(|r| r.name.eq_ignore_ascii_case(key)),
+                "{key}: named as a clutter-density spelling but not registered"
+            );
+            assert_eq!(key.to_ascii_lowercase(), key, "the set is lowercased keys");
+        }
+        // Both of them reach the same field, from a state neither of them holds.
+        for key in CLUTTER_DENSITY_CVARS {
+            knobs.clutter.density = 0.5;
+            assert!(apply_to_knobs(key, "48", &mut knobs));
+            assert_ne!(knobs.clutter.density, 0.5, "{key}: reached no knob");
+        }
+        // Back to the shipped stop, so the rows after this one read the default ground cover.
+        assert!(apply_to_knobs("WorldDetail", "1", &mut knobs));
+        assert_eq!(knobs.clutter.density, 2.0);
         // The zoom pair (1131): each index lands on its own field, clamped like `set_zoom`.
         assert!(apply_to_knobs("minimapZoom", "5", &mut knobs));
         assert_eq!(knobs.minimap.outdoor, 5);
@@ -2739,7 +2914,10 @@ mod tests {
             .map(|r| r.name)
             .collect();
         strings.sort_unstable(); // the list is the claim, not where the rows sit in the table
-        assert_eq!(strings, vec!["gxResolution", "realmList", "realmName"]);
+        assert_eq!(
+            strings,
+            vec!["gxApi", "gxResolution", "realmList", "realmName"]
+        );
         let default_of = |name: &str| {
             REGISTERED
                 .iter()
@@ -2748,6 +2926,12 @@ mod tests {
                 .expect("registered")
         };
         assert_eq!(default_of("realmName"), "");
+        // **`gxApi` defaults EMPTY on the same argument** (2151): the value is the render
+        // adapter's backend, written by `sync_cvars` on every launch, so the default only ever
+        // describes a client with no renderer. Naming one — `"direct3d"` least of all, which is
+        // the reference's and is a backend wgpu does not have — would be a claim about a machine
+        // we have not looked at.
+        assert_eq!(default_of("gxApi"), "");
         assert_eq!(
             crate::video::parse_resolution(default_of("gxResolution")),
             Some(crate::video::DEFAULT_WINDOWED)

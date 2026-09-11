@@ -309,12 +309,26 @@ fn fire_probe_key(
     }
 }
 
-/// The PROBE LUA one-shot (`WOW_PROBE_LUA="<chunk>"`, delay via `WOW_PROBE_LUA_AT` seconds,
-/// default 10): run one Lua chunk in the live UI VM once we are in-world — the "press the button
-/// headlessly" instrument. The chunk drives the REAL FrameXML API surface (`CastSpell`,
-/// `UseAction`, `TargetUnit`, …), so whatever it triggers takes the exact app path a click
-/// takes — a headless wire probe can measure the server, but only the live VM exercises the
-/// button feed and the widget clock.
+/// The PROBE LUA driver (`WOW_PROBE_LUA="<chunk>"`, first fire at `WOW_PROBE_LUA_AT` seconds,
+/// default 10; re-armed `WOW_PROBE_LUA_AGAIN` seconds into every LATER world entry, default 4):
+/// run one Lua chunk in the live UI VM — the "press the button headlessly" instrument. The chunk
+/// drives the REAL FrameXML API surface (`CastSpell`, `UseAction`, `TargetUnit`, …), so whatever
+/// it triggers takes the exact app path a click takes — a headless wire probe can measure the
+/// server, but only the live VM exercises the button feed and the widget clock.
+///
+/// **The chunk fires once per WORLD ENTRY, not once per process** (decision 2116's named gap).
+/// The UI VM is destroyed and rebuilt at every logout/login (1290/1291), taking `_G` and the
+/// `ProbeLog` channel below with it — so while this was a process-wide one-shot, a probe could
+/// not read the same value before and after a relog *at all*. 2116 needed exactly that (the
+/// cooldown triple across a `/logout`) and had to fall back to `WOW_PROBE_CHAT` sending
+/// `/script … error("…")` on a schedule and reading the warn line the input drain logs — a trick
+/// standing in for an instrument, and a morning instead of an hour.
+///
+/// **World entry, and deliberately not "VM rebuild"**, which is the wider edge and the wrong one:
+/// `ReloadUI()` rebuilds the VM without leaving the world, and `WOW_PROBE_LUA="ReloadUI()"` is a
+/// probe we actually run (decision 2028). Re-arming on the VM would make that chunk reload the
+/// interface forever. [`ProbeLog`](install_probe_log) *does* follow the VM, because it is a
+/// channel rather than an action.
 pub(crate) struct ProbeLuaPlugin;
 
 impl Plugin for ProbeLuaPlugin {
@@ -324,48 +338,77 @@ impl Plugin for ProbeLuaPlugin {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10.0);
+        let again = std::env::var("WOW_PROBE_LUA_AGAIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4.0);
         app.insert_resource(ProbeLua {
             chunk,
             at,
-            fired: false,
+            again,
+            ..default()
         })
         .add_systems(Update, fire_probe_lua);
     }
 }
 
-/// [`ProbeLuaPlugin`] state: the chunk, the fire time, and the once-latch.
-#[derive(Resource)]
+/// [`ProbeLuaPlugin`] state: the chunk, the two schedules, and the per-entry bookkeeping that
+/// replaced the process-wide once-latch.
+#[derive(Resource, Default)]
 struct ProbeLua {
     chunk: String,
+    /// `WOW_PROBE_LUA_AT` — the FIRST fire, on the run's own [`ProbeClock`].
     at: f32,
-    fired: bool,
+    /// `WOW_PROBE_LUA_AGAIN` — the settle every LATER entry gets, on its own clock.
+    again: f32,
+    /// World entries that have become able to take a chunk — counted on the rising edge.
+    entries: u32,
+    /// Entries already fired into; `fired < entries` is "this entry is still owed its chunk".
+    fired: u32,
+    /// When the current entry became ready — the re-arm's zero.
+    ready_at: f32,
+    /// Last frame's readiness, so the count above is an edge and not a per-frame increment.
+    was_ready: bool,
+    /// The VM session `ProbeLog` was last installed into. `0` is "none" —
+    /// [`benilla_ui::script::UiScript::session`] hands out from 1, so a fresh probe matches no VM
+    /// and the first ready frame installs.
+    logged_vm: u64,
 }
 
-/// Run the probe chunk once the delay has elapsed AND the session is in-world.
-fn fire_probe_lua(
-    mut probe: ResMut<ProbeLua>,
-    time: ProbeClock,
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
-    self_player: Query<(), With<crate::net::SelfPlayer>>,
-) {
-    if probe.fired || probe.chunk.is_empty() || time.elapsed_secs() < probe.at {
-        return;
+/// **Is this entry's chunk due?** — the whole schedule, as one decision a test can hold.
+///
+/// The first fire keeps `WOW_PROBE_LUA_AT`'s run-relative meaning ([`ProbeClock`], whose zero
+/// trails process start by the boot), and that is not inertia: every recorded probe line in
+/// `decisions/` is tuned against it (`WOW_PROBE_LUA_AT=34` in `scripts/summon-live.sh`, and a
+/// dozen records besides), and re-reading it as "34 s after the loading screen" would quietly
+/// stop reproducing all of them. A later entry cannot use that
+/// clock at all — "34 s into the run" is long past by the time a relog lands — so it runs on
+/// its own settle instead, measured from the moment that entry could take a chunk.
+fn probe_lua_due(probe: &ProbeLua, now: f32) -> bool {
+    if probe.fired >= probe.entries {
+        return false; // this entry has had its chunk (or there is no entry yet)
     }
-    if self_player.is_empty() {
-        return; // not in-world yet — keep waiting past the delay
+    if probe.fired == 0 {
+        now >= probe.at
+    } else {
+        now >= probe.ready_at + probe.again
     }
-    let Some(script) = script else {
-        return;
-    };
-    probe.fired = true;
-    // `ProbeLog(text)` — the chunk's data channel OUT of the VM (greppable `probe-log:` lines);
-    // until now a probe could only report through screenshots or by erroring. Installed only
-    // when a probe chunk actually fires — never part of the shipping API surface.
-    let install = script.lua().create_function(|_, text: String| {
+}
+
+/// Install `ProbeLog(text)` — the chunk's data channel OUT of the VM, as greppable `probe-log:`
+/// lines; before it existed a probe could only report through screenshots or by erroring.
+///
+/// **Into whichever VM is live, and re-installed whenever that changes** (decision 2116). A
+/// global installed once is gone at the next logout/login *and* at the next `ReloadUI()`, both of
+/// which build a new Lua state (1290/1291) — so a chunk that logged happily on its first run died
+/// on a nil call afterwards, which is precisely the shape of failure that reads as "the probe did
+/// nothing". Installed only while a probe chunk is configured; never part of the shipping API
+/// surface.
+fn install_probe_log(script: &benilla_ui::script::UiScript) {
+    match script.lua().create_function(|_, text: String| {
         info!("probe-log: {text}");
         Ok(())
-    });
-    match install {
+    }) {
         Ok(f) => {
             if let Err(e) = script.lua().globals().set("ProbeLog", f) {
                 error!("probe-lua: installing ProbeLog: {e}");
@@ -373,7 +416,63 @@ fn fire_probe_lua(
         }
         Err(e) => error!("probe-lua: creating ProbeLog: {e}"),
     }
-    info!("probe-lua: running {:?}", probe.chunk);
+}
+
+/// Run the probe chunk once per world entry, on [`probe_lua_due`]'s schedule.
+fn fire_probe_lua(
+    mut probe: ResMut<ProbeLua>,
+    time: ProbeClock,
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    self_player: Query<(), With<crate::net::SelfPlayer>>,
+    state: Res<State<crate::char_select::ClientState>>,
+    entry_ui_pending: Option<Res<crate::ui_script::PendingEntryUiLoad>>,
+) {
+    if probe.chunk.is_empty() {
+        return;
+    }
+    let Some(script) = script else {
+        // No VM in the world at all — the deferral window between the world-entry edge and the
+        // entry load, where the boot VM is parked out of every feed's reach
+        // (`ui_script::ParkedBootVm`). Not an entry yet.
+        probe.was_ready = false;
+        return;
+    };
+    // **Ready = this entry can take a chunk**, which is three more facts on top of the VM the
+    // block above just took. A chunk driving `CastSpell` against the *boot* VM — strings, emote
+    // tokens and fonts, not one frame — dies on a nil, and "attempt to call a nil value" out of a
+    // probe reads as a benilla bug rather than as a mis-scheduled probe.
+    //
+    // - **`InWorld`** — the entry edge has been taken, which is what ARMS the deferral window
+    //   below. Without it the window has a hole on its leading side: the entered-world message
+    //   and our first object update can arrive in the same drain, a frame ahead of the state
+    //   transition that parks the VM, so a chunk already past `at` would run there.
+    // - **`PendingEntryUiLoad` gone** — the same window named from the other side: the in-game
+    //   UI is built, not merely owed.
+    // - **a self player** — `UnitName("player")` is in half the chunks anyone writes.
+    let in_world = *state.get() == crate::char_select::ClientState::InWorld;
+    let ready = in_world && entry_ui_pending.is_none() && !self_player.is_empty();
+    let now = time.elapsed_secs();
+    if ready && !probe.was_ready {
+        probe.entries += 1;
+        probe.ready_at = now;
+        info!("probe-lua: world entry {} at {now:.1}s", probe.entries);
+    }
+    probe.was_ready = ready;
+    if !ready {
+        return;
+    }
+    if probe.logged_vm != script.session() {
+        install_probe_log(&script);
+        probe.logged_vm = script.session();
+    }
+    if !probe_lua_due(&probe, now) {
+        return;
+    }
+    probe.fired = probe.entries;
+    info!(
+        "probe-lua: entry {} at {now:.1}s — running {:?}",
+        probe.entries, probe.chunk
+    );
     if let Err(e) = script.run(&probe.chunk) {
         error!("probe-lua: {e}");
     }
@@ -748,4 +847,62 @@ fn fire_probe_drag(
         }
     }
     probe.phase += 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{probe_lua_due, ProbeLua};
+
+    /// A probe configured the way `WOW_PROBE_LUA=… WOW_PROBE_LUA_AT=10` configures one, with the
+    /// per-entry bookkeeping set by hand.
+    fn probe(entries: u32, fired: u32, ready_at: f32) -> ProbeLua {
+        ProbeLua {
+            chunk: "ProbeLog('x')".into(),
+            at: 10.0,
+            again: 4.0,
+            entries,
+            fired,
+            ready_at,
+            ..Default::default()
+        }
+    }
+
+    /// The first entry is still `WOW_PROBE_LUA_AT` on the PROCESS clock — the meaning every
+    /// recorded probe line in `decisions/` is tuned against.
+    #[test]
+    fn first_fire_waits_for_the_process_delay() {
+        let p = probe(1, 0, 2.0);
+        assert!(!probe_lua_due(&p, 9.9), "before WOW_PROBE_LUA_AT");
+        assert!(probe_lua_due(&p, 10.0), "at WOW_PROBE_LUA_AT");
+    }
+
+    /// Nothing fires before there is a world entry to fire into — the login and character
+    /// screens sit here however long they take.
+    #[test]
+    fn nothing_fires_before_the_first_entry() {
+        assert!(!probe_lua_due(&probe(0, 0, 0.0), 60.0));
+    }
+
+    /// One chunk per entry, and no more: the frames after a fire are not a second one.
+    #[test]
+    fn an_entry_takes_exactly_one_chunk() {
+        assert!(!probe_lua_due(&probe(1, 1, 2.0), 60.0));
+        assert!(!probe_lua_due(&probe(2, 2, 40.0), 90.0));
+    }
+
+    /// **The gap 2116 hit head-on**: the second entry re-arms, on its OWN clock. The process
+    /// delay is long past by the time a relog lands, so reusing it would fire the chunk into the
+    /// loading screen; the settle is measured from the moment that entry could take a chunk.
+    #[test]
+    fn a_later_entry_re_arms_on_its_own_clock() {
+        let p = probe(2, 1, 40.0);
+        assert!(
+            !probe_lua_due(&p, 41.0),
+            "still settling after the re-entry"
+        );
+        assert!(
+            probe_lua_due(&p, 44.0),
+            "WOW_PROBE_LUA_AGAIN past the re-entry"
+        );
+    }
 }

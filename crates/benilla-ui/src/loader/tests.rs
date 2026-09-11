@@ -846,6 +846,105 @@ mod loader_tests {
         );
     }
 
+    /// **An XML handler body's chunk name is `"<GetName()>:<Handler>"`, and its lines are the
+    /// body's own.** `0x7025fd` calls the script object's `GetName` through its vtable, falls back
+    /// to `<unnamed>` (`0x84c7f0`) at `0x702611`, formats `"%s:%s"` (`0x872a28`) at `0x70261b`,
+    /// and hands that to `0x704c70` at `0x70263c` — which `luaL_loadbuffer`s the raw body, so body
+    /// line *n* is chunk line *n*.
+    ///
+    /// Three producers, because they used to disagree. A named element was already right; an
+    /// unnamed one wrote `<Button>` where the image writes `<unnamed>`; and a `CreateFrame` off a
+    /// template wrote the *whole call* —
+    /// `CreateFrame("Button", "Made", inherits="ProbeTmpl"):OnClick` — into every error message
+    /// and every `debugstack` frame that handler produced.
+    #[test]
+    fn an_xml_handler_chunk_is_named_by_its_frame_and_handler() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            "<Ui>\n\
+             <Button name=\"NamedBtn\">\n\
+             <Scripts>\n\
+             <OnClick>\n\
+             error(\"boom\")\n\
+             </OnClick>\n\
+             </Scripts>\n\
+             </Button>\n\
+             <Button>\n\
+             <Scripts>\
+             <OnLoad>BenillaAnon = this</OnLoad>\
+             <OnClick>error(\"anon\")</OnClick>\
+             </Scripts>\n\
+             </Button>\n\
+             <Button name=\"ProbeTmpl\" virtual=\"true\">\n\
+             <Scripts><OnClick>error(\"tmpl\")</OnClick></Scripts>\n\
+             </Button>\n\
+             </Ui>",
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.run(r#"Made = CreateFrame("Button", "Made", nil, "ProbeTmpl")"#)
+            .unwrap();
+
+        let raised = |lua: &str| -> String {
+            s.eval::<String>(&format!("local ok, e = pcall({lua}) return tostring(e)"))
+                .unwrap()
+        };
+
+        // A named element. The body sits on the element's SECOND line, and the reference numbers a
+        // handler chunk from the body's own first line — so `:2:`, never `:3:`. Our wrapper used
+        // to end with a newline, which pushed every body line down by one.
+        let named = raised(r#"NamedBtn:GetScript("OnClick")"#);
+        assert!(
+            named.starts_with(r#"[string "NamedBtn:OnClick"]:2: boom"#),
+            "{named}"
+        );
+        // A `CreateFrame` instance is named by the INSTANCE — what `GetName()` answers — not by
+        // the call that made it and not by the template it wore.
+        let made = raised(r#"Made:GetScript("OnClick")"#);
+        assert!(
+            made.starts_with(r#"[string "Made:OnClick"]:1: tmpl"#),
+            "{made}"
+        );
+        // The nameless element takes the image's own fallback literal.
+        let anon = raised(r#"BenillaAnon:GetScript("OnClick")"#);
+        assert!(
+            anon.starts_with(r#"[string "<unnamed>:OnClick"]:1: anon"#),
+            "{anon}"
+        );
+    }
+
+    /// **An inline `<Script>` body is `"<xml path>:<Scripts>"`, with no `@`** — `0x6ee0ed push ebx`
+    /// (the document's own path) / `0x6ee0ee push 0x871074` (`"%s:<Scripts>"`) → `0x6ee0ff` sprintf
+    /// → `0x6ee10f call 0x704cd0`. `luaO_chunkid` therefore takes its *third* branch and the frame
+    /// reads `[string "…"]`, not a bare path — which is how a reader (and every addon that splits a
+    /// `debugstack` frame on `\AddOns\`) tells an inline block from the `.lua` file beside it.
+    ///
+    /// `<Script file="…">` keeps the file form, `"@%s"` (`0x8716e0`), and both are asserted here so
+    /// the two arms cannot drift into each other.
+    #[test]
+    fn an_inline_script_chunk_is_named_for_the_document_not_as_a_file() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            "<Ui>\n<Script file=\"Sibling.lua\"/>\n<Script>\nBenillaInline = ({}).missing.deeper\n</Script>\n</Ui>",
+        );
+        let report = load_in(&s, &doc, "Interface/AddOns/Probe/Probe.xml", &|p: &str| {
+            (p == "Interface/AddOns/Probe/Sibling.lua")
+                .then(|| b"BenillaFile = ({}).missing.deeper".to_vec())
+        });
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert!(
+            report.errors[0].contains("Interface\\AddOns\\Probe\\Sibling.lua:1:"),
+            "a <Script file=> chunk is still a plain `@`-path frame: {}",
+            report.errors[0]
+        );
+        assert!(
+            report.errors[1]
+                .contains("[string \"Interface\\AddOns\\Probe\\Probe.xml:<Scripts>\"]:4:"),
+            "an inline body is a `[string \"…\"]` frame naming the document: {}",
+            report.errors[1]
+        );
+    }
+
     #[test]
     fn button_xml_extras_apply() {
         let mut s = UiScript::new().unwrap();
@@ -2213,6 +2312,8 @@ mod chunk_name_tests {
         let report = load_in(&s, &doc, "Bagnon/src/main.xml", &no_files);
         let err = report.errors.join("\n");
         // The file, in the shape an addon's own `debugstack()` matches (backslashes, no `@`).
+        // The `:<Scripts>` suffix and the `[string "…"]` wrapper are the reference's own
+        // (`"%s:<Scripts>"` `0x871074`, `luaO_chunkid`'s third branch), not decoration of ours.
         assert!(
             err.contains("Bagnon\\src\\main.xml:"),
             "the raise must name the document, got: {err}"
@@ -2220,7 +2321,7 @@ mod chunk_name_tests {
         // Line 5 of the literal above is `error("boom")` — the body starts on line 4 and the
         // padding carries it there. Without the pad this reads `:2:`.
         assert!(
-            err.contains("main.xml:5:"),
+            err.contains("main.xml:<Scripts>\"]:5:"),
             "the line must be the FILE's line, not the block's, got: {err}"
         );
     }
@@ -2239,7 +2340,7 @@ mod chunk_name_tests {
         let report = load_in(&s, &doc, "Addon/outer.xml", &files);
         let err = report.errors.join("\n");
         assert!(
-            err.contains("Addon\\sub\\inner.xml:3:"),
+            err.contains("Addon\\sub\\inner.xml:<Scripts>\"]:3:"),
             "the INCLUDED file and its line, not the includer's: {err}"
         );
         assert!(
@@ -2269,7 +2370,7 @@ mod chunk_name_tests {
         let report = load_in(&s, &doc, "Ours/Bag.xml", &no_files);
         let err = report.errors.join("\n");
         assert!(
-            err.contains("Ours\\Bag.xml:6:"),
+            err.contains("Ours\\Bag.xml:<Scripts>\"]:6:"),
             "line 6 is `error(\"cdata boom\")` in the literal above, got: {err}"
         );
     }

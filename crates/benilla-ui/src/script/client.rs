@@ -80,32 +80,65 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // `RunScript(text)` — compile and run a chunk in the shared global state.
     //
-    // The reference's is `RunScript 0x48b980` (pair `0x83e288`, name `0x83ea60`), and it is how a
-    // macro body, a `/script` slash command, and every addon's "evaluate this snippet" helper
-    // reach Lua. It inherits the same sandbox as our chunk loader: there is no `setfenv` here and
-    // none in the reference either — a script runs with full API access.
+    // `RunScript 0x48b980` (pair `0x83e288`, name `0x83ea60`) is how a macro body, a `/script`
+    // slash command and every addon's "evaluate this snippet" helper reach Lua. It inherits the
+    // same sandbox as our chunk loader: there is no `setfenv` here and none in the reference
+    // either — a script runs with full API access.
     //
-    // **The chunk NAME here is ours, not the image's, and that is an open question** (2136's
-    // "left open"). wow-re's chunk-source census (`lowhealth-playerstatus-onupdate-dead.md` §3)
-    // places this binding's feed precisely — `0x48b9cb` into `0x704cd0`, the source-string arm of
-    // `FS_DoBuffer 0x704ae0` — but records the name argument only for its sibling arms: an XML
-    // `<Script>` inline body is `"%s:<Scripts>"` (`0x871074`) and the one C-resident chunk is
-    // `"compat.lua"`. Until `0x704cd0`'s own name is read, `[RunScript]` is a placeholder that
-    // renders plausibly rather than a verified spelling.
+    // Read end to end, its contract is four facts, and three of them were wrong here (2136's
+    // "left open", closed at the bytes):
     //
-    // (The address here read `0x7044c0` until 2136. That is not `RunScript` and it is not
-    // anything: `scripts/addrs.py` finds no wow-re ledger row for it at all.)
+    // **1 · The chunk name is the SOURCE ITSELF, verbatim.** `0x48b9c7 mov edx,eax` and
+    // `0x48b9c9 mov ecx,eax` hand `lua_tostring 0x6f3690`'s one return to
+    // `0x704cd0 FrameScript_Execute(code, chunkname)` as BOTH arguments. `0x704cd0` strlens the
+    // code (`0x704cd7`) and passes the name straight through `FS_DoBuffer 0x704ae0`
+    // (`0x704b06 push ecx`, the fourth argument of `luaL_loadbuffer 0x6f5690` at `0x704b0c`)
+    // untouched. No `=`, no `@` — so `luaO_chunkid 0x6f5c40` renders it by its third rule,
+    // `[string "…"]`, exactly as `loadstring`'s default source-name does (2136 §4). `=[RunScript]`
+    // was a placeholder that rendered plausibly; `=` is chunkid's *print-verbatim* marker and
+    // `[RunScript]` is not a literal the image contains.
     //
-    // A compile or runtime error is **raised**, not swallowed. The reference propagates it to the
-    // caller's error handler, which is what puts a red line in the chat frame; returning nil would
-    // make a broken macro look like a working one that did nothing.
+    // **2 · A bad argument is a SILENT NO-OP, not a raise.** `0x48b988 call 0x6f3510`
+    // (`lua_isstring` — tag-based, so a *number* passes) failing takes `0x48b98f je` straight to
+    // `0x48b9f3 xor eax,eax; ret`. So does a NULL from `lua_tostring` (`0x48b99f`) and an EMPTY
+    // string (`0x48b9a1 cmp byte ptr [eax],0`). There is no `luaL_error 0x6f4940` anywhere in the
+    // function — `RunScript(nil)` does nothing at all.
+    //
+    // **3 · An error does NOT reach the caller.** `0x704ae0` pushes the registered error handler
+    // from the registry first (`0x704afe`, `[0x8722c8]` at `LUA_REGISTRYINDEX 0xffffd8f0`) and
+    // runs the chunk as `lua_pcall(L, 0, 0, -2)` (`0x704b68`); a *compile* failure takes the other
+    // leg and pcalls that same handler with the message (`0x704b42`). Either way the raise is
+    // consumed, the red line is the handler's doing, and the caller's next statement runs. Raising
+    // here made one bad `RunScript` abort whatever ran it — a macro could take FrameXML down with
+    // it.
+    //
+    // **4 · It answers zero values on every path** (`xor eax,eax` at both exits).
     g.set(
         "RunScript",
-        lua.create_function(|lua, text: String| {
-            lua.load(&text)
-                .set_name("=[RunScript]")
+        lua.create_function(|lua, text: Value| {
+            // `lua_isstring` + `lua_tostring`, in one: strings and numbers coerce, everything
+            // else is `None` — and `None` is the silent return, per fact 2.
+            let Some(s) = lua.coerce_string(text)? else {
+                return Ok(());
+            };
+            let raw = s.as_bytes();
+            if raw.is_empty() {
+                return Ok(());
+            }
+            // The name is the source bytes as given. Same rule as `loadstring`'s default
+            // (`stdlib::loadstring`), and for the same reason: the image passes one pointer twice.
+            let name = String::from_utf8_lossy(&raw).into_owned();
+            if let Err(e) = lua
+                .load(&*raw)
+                .set_name(name)
                 .set_mode(mlua::ChunkMode::Text)
                 .exec()
+            {
+                lua.app_data_mut::<crate::script::Model>()
+                    .expect("model")
+                    .record_script_error(super::stdlib::lua_message(&e));
+            }
+            Ok(())
         })?,
     )?;
 
@@ -306,16 +339,28 @@ mod tests {
         );
     }
 
-    /// `RunScript` runs its text in the shared global state, and an error in it is raised.
+    /// `RunScript` runs its text in the shared global state, and a failure is **recorded, not
+    /// raised** — `0x704ae0` runs the chunk under `lua_pcall(L, 0, 0, -2)` with the registry's
+    /// error handler, so the raise never reaches the caller. (The full contract, and the three
+    /// silent legs, are in `script::tests::stdlib`.)
+    ///
+    /// This test used to assert the opposite, on the reasoning that "a silent nil is a broken
+    /// macro that looks fine". The reasoning was sound and the premise was not: the reference is
+    /// not silent, it hands the message to the error handler and keeps going. Failing loudly *at
+    /// the caller* is the part it does not do, and doing it meant one bad macro could abort the
+    /// FrameXML function that ran it.
     #[test]
-    fn run_script_evaluates_in_the_shared_state_and_raises() {
-        let s = UiScript::new().unwrap();
+    fn run_script_evaluates_in_the_shared_state_and_reports_without_raising() {
+        let mut s = UiScript::new().unwrap();
         s.run(r#"RunScript("RunScriptProbe = 41 + 1")"#).unwrap();
         assert_eq!(s.eval::<i64>("return RunScriptProbe").unwrap(), 42);
-        // A script that fails must fail loudly — a silent nil is a broken macro that looks fine.
+        s.run(r#"RunScript("this is not lua")"#)
+            .expect("a malformed script is caught inside RunScript, not raised at its caller");
+        let errs = s.take_errors();
         assert!(
-            s.run(r#"RunScript("this is not lua")"#).is_err(),
-            "a malformed script must raise, not vanish"
+            errs.iter()
+                .any(|e| e.starts_with("[string \"this is not lua\"]:1:")),
+            "it must not vanish either — the handler channel gets it: {errs:?}"
         );
     }
 

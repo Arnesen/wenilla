@@ -132,7 +132,7 @@ pub use item_random_properties::{
 mod ground_effects;
 pub use ground_effects::{
     load_ground_effect_catalog, scatter_ground_doodads, GroundDoodadPlacement, GroundEffect,
-    GroundEffectCatalog,
+    GroundEffectCatalog, FRILL_DENSITY, FRILL_DENSITY_MAX,
 };
 mod light;
 pub use light::{Atmosphere, LightCatalog, Submersion, ZERO_KEY_COLOR, ZERO_KEY_SCALAR};

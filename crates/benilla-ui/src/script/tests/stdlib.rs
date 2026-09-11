@@ -420,3 +420,92 @@ fn time_is_epoch_seconds_and_date_formats_them() {
     let leap: String = s.eval(r#"return date("%Y-%m-%d %A", 951782400)"#).unwrap();
     assert_eq!(leap, "2000-02-29 Tuesday");
 }
+
+// ── RunScript, at the image's own contract (2136's "left open", closed) ──────────────────────────
+
+/// `RunScript`'s chunk name is the SOURCE, not a label of ours.
+///
+/// `0x48b9c7 mov edx,eax` / `0x48b9c9 mov ecx,eax` hand `lua_tostring`'s one return to
+/// `FrameScript_Execute 0x704cd0` as both the code and the name, so the name reaches
+/// `luaL_loadbuffer` unprefixed and `luaO_chunkid 0x6f5c40` wraps it — `[string "…"]`. We used to
+/// write `=[RunScript]`, whose leading `=` is chunkid's *print this verbatim* marker.
+#[test]
+fn a_runscript_chunk_is_named_by_its_own_source() {
+    let mut s = script();
+    // The error is consumed by RunScript (fact 3), so read it off the recorded channel rather
+    // than off a raise.
+    s.run("RunScript(\"error('boom')\")").unwrap();
+    let errs = s.take_errors();
+    assert!(
+        errs.iter()
+            .any(|e| e.starts_with("[string \"error('boom')\"]:1: boom")),
+        "the chunk names itself by its source: {errs:?}"
+    );
+}
+
+/// The three silent legs, and the raise that must NOT happen.
+///
+/// `lua_isstring 0x6f3510` is tag-based, so a number passes and runs as its own text; every other
+/// type takes `0x48b98f je 0x48b9f3` to `xor eax,eax; ret`. An empty string takes the same exit at
+/// `0x48b9a1`. There is no `luaL_error 0x6f4940` in the function at all.
+#[test]
+fn runscript_swallows_a_bad_argument_instead_of_raising() {
+    let mut s = script();
+    // Each of these must return normally AND leave the next statement running.
+    s.run(
+        "BenillaRan = 0
+         RunScript(nil)
+         RunScript({})
+         RunScript(false)
+         RunScript('')
+         BenillaRan = 1",
+    )
+    .expect("a bad RunScript argument is a no-op, not a raise");
+    assert_eq!(s.eval::<i64>("return BenillaRan").unwrap(), 1);
+    assert!(
+        s.take_errors().is_empty(),
+        "a silent no-op records nothing either"
+    );
+    // A number IS a string to `lua_isstring`, so it compiles — and `42` is not a statement.
+    s.run("RunScript(42)").unwrap();
+    assert!(
+        s.take_errors()
+            .iter()
+            .any(|e| e.contains("[string \"42\"]")),
+        "a number coerces and runs as its own text"
+    );
+}
+
+/// A raise inside the snippet does not escape it: `0x704ae0` runs the chunk under
+/// `lua_pcall(L, 0, 0, -2)` (`0x704b68`) with the registry's error handler pushed at `0x704afe`,
+/// and pcalls that same handler for a *compile* failure (`0x704b42`). Both legs return 0 values.
+///
+/// This is the one with teeth: raising here let one bad macro abort whatever ran it.
+#[test]
+fn a_runscript_error_reaches_the_handler_and_not_the_caller() {
+    let mut s = script();
+    s.run(
+        "BenillaAfter = 0
+         RunScript('error(\"inner\")')
+         RunScript('this is not lua')
+         BenillaAfter = 1",
+    )
+    .expect("neither a runtime nor a compile error may propagate to the caller");
+    assert_eq!(
+        s.eval::<i64>("return BenillaAfter").unwrap(),
+        1,
+        "the caller's next statement still runs"
+    );
+    let errs = s.take_errors();
+    assert_eq!(
+        errs.len(),
+        2,
+        "both errors are recorded, not dropped: {errs:?}"
+    );
+    assert!(errs[0].contains("inner"), "{errs:?}");
+    // mlua's `Display` category word ("syntax error: ") is not something the image ever writes.
+    assert!(
+        errs[1].starts_with("[string \"this is not lua\"]:1:"),
+        "a compile failure is reported under the same name, undecorated: {errs:?}"
+    );
+}
