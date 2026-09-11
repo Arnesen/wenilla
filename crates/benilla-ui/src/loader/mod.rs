@@ -38,12 +38,14 @@
 //! ([`join_ref`]) and hands the provider one already-resolved path; the provider decides what that
 //! path is allowed to reach. [`load`] starts at the root, [`load_in`] starts at a named directory.
 //!
-//! A path with **no provider hit is an error**, not a warning: by [`LoadReport`]'s own definition
-//! errors are "things that dropped a frame or a handler", and an unresolved `<Include>` drops a
-//! whole document while an unresolved `<Script file=>` drops every handler in it. It was a warning
-//! until 1186, and the cost was that an addon which resolved *nothing* reported success — Bagnon
-//! missed all eleven of its references and came back with zero errors. The load still continues
-//! (0068: the client logs and carries on); only the reporting changed.
+//! A path with **no provider hit gets its own list**, [`LoadReport::missing_files`] — neither a
+//! warning nor an error (decision 2155). It was a warning until 1186, and the cost was that an
+//! addon which resolved *nothing* reported success — Bagnon missed all eleven of its references
+//! and came back with zero errors. 1186 answered that by calling it an error, which fixed the
+//! visibility and got the *severity* wrong the other way: the reference logs `"Couldn't open %s"`
+//! and carries on, with nothing raised, so an addon shipping an incomplete package was scoring as
+//! a client script error and reaching the player's red error dialog. Both facts are true and they
+//! need two different lists. The load continues either way (0068: the client logs and carries on).
 //!
 //! ## MAXCSTACK discipline (decision 0068, probe A)
 //!
@@ -78,9 +80,36 @@ pub struct LoadReport {
     /// Things that dropped a frame or a handler: an unknown frame type, a handler that failed to
     /// compile, a method call that errored, a malformed included document.
     pub errors: Vec<String>,
+    /// **A named file the provider does not have** — an `<Include file=>` or `<Script file=>` whose
+    /// resolved path hit nothing (decision 2155).
+    ///
+    /// Its own list because it is its own severity, and 1186 put it in the wrong one. The reference
+    /// does not raise here: `0x6edaa0` logs `"Couldn't open %s"` (`0x846ff4`) and returns null, the
+    /// `<Include>` arm never tests the recursion's result (`0x6ee00d` → `0x6ee012`), and the
+    /// `<Script>` leg reports `"Error loading %s"` (`0x872e50`) and returns 0 — every failure leg
+    /// reports through the sink and returns normally, with no throw and no `longjmp`
+    /// (wow-re `ui/scratch/xml-toc-path-resolution.md` §4 and `include-lua-dispatch.md` §7, both
+    /// VERIFIED). This is the same rule 2107 unified for the `.toc` walk and the demand load, at
+    /// the two doors 2107 did not reach.
+    ///
+    /// **1186's finding is preserved and it is why this is not simply folded into
+    /// [`Self::warnings`]:** a document that resolved *nothing* must not report success — Bagnon
+    /// missed all eleven of its references and came back with zero errors. It still reports them,
+    /// under a name that says which kind of failure it is, and the caller decides severity by
+    /// whose manifest lied (`ui_script::addons`: ours is an `error!`, a player's addon a `warn!`,
+    /// both retained where the player can read them and neither raising a script error).
+    pub missing_files: Vec<String>,
     /// How many frame instances were successfully created (`CreateFrame` returned a wrapper) — the
     /// coverage number the real-file smoke test reports.
     pub frames: usize,
+    /// **The loader's trace lines, emitted only while `FrameXML_Debug` is on** (decision 2160).
+    ///
+    /// Empty in every normal load, which is the reference's own default: `[0xceea30]` boots at 0
+    /// and each of the loader's five trace sites is gated `flag > 0` (`0x6ee298 jle`). Its own
+    /// list rather than a `warnings` row because a trace is not a defect — the reference files it
+    /// into the same per-document record at severity **0**, one below the `frameStrata` warning's
+    /// severity 1.
+    pub traces: Vec<String>,
 }
 
 /// Materialize a parsed FrameXML document into live frames in `script`.
@@ -92,7 +121,8 @@ pub struct LoadReport {
 /// instance is expanded ([`crate::framexml::expand`]) and materialized.
 ///
 /// `files` is the engine-free seam (see module docs): it resolves a FrameXML/Lua path to its
-/// **bytes**. Returning `None` yields a warning, not an error.
+/// **bytes**. Returning `None` yields a [`LoadReport::missing_files`] row — reported, but not an
+/// error, because nothing raised (decision 2155).
 pub fn load(
     script: &UiScript,
     doc: &ParsedDocument,
@@ -513,7 +543,7 @@ impl Loader<'_> {
                                     .push(format!("<Script file=\"{path}\">: {e}"));
                             }
                         }
-                        None => self.report.errors.push(format!(
+                        None => self.report.missing_files.push(format!(
                             "<Script file=\"{path}\">: no provider hit for \"{joined}\"; \
                              every handler in it is missing"
                         )),
@@ -565,7 +595,7 @@ impl Loader<'_> {
     pub(super) fn do_include(&mut self, path: &str) {
         let joined = join_ref(self.base(), path);
         let Some(bytes) = (self.files)(&joined) else {
-            self.report.errors.push(format!(
+            self.report.missing_files.push(format!(
                 "<Include file=\"{path}\">: no provider hit for \"{joined}\"; the whole \
                  document it names is missing"
             ));
@@ -812,6 +842,15 @@ impl Loader<'_> {
         let dbg_name = resolved_name
             .clone()
             .unwrap_or_else(|| format!("<{}>", el.tag));
+
+        // The one trace site walked to the bytes — `Instantiate 0x6ee280`'s
+        // `0x871154 "-- Creating %s named %s"`, gated `flag > 0` at `0x6ee298` (decision 2160).
+        // The kind is the element tag, which is what the reference's first `%s` carries.
+        if self.model().framexml_debug.get() > 0 {
+            self.report
+                .traces
+                .push(format!("-- Creating {} named {dbg_name}", el.tag));
+        }
 
         // This frame's own name is what its *contents* (regions, nested frames) substitute `$parent`
         // against (rf27: a region/child's parent is this frame); a nameless frame passes the nearest

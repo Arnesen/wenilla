@@ -134,8 +134,9 @@ pub(super) fn update_hover(
     // The frame's world-occlusion distance: the final pick is discarded iff the world hit is
     // strictly nearer (behind terrain/WMO/doodad geometry — the post-hoc compare below).
     occlusion: Res<PickOcclusion>,
-    // The V-plates' screen rects (last frame's layout — the plate drive runs after this chain).
-    plate_rects: Res<crate::vplates::PlateRects>,
+    // The unit whose plate the pointer is inside (last frame's layout — the plate drive runs
+    // after this chain), published by the plate widgets themselves.
+    plate_hover: Res<crate::vplates::PlateHover>,
     mut hovered: ResMut<Hovered>,
     mesh_assets: Res<Assets<Mesh>>,
     pose: PickPose,
@@ -199,6 +200,23 @@ pub(super) fn update_hover(
     hovered.corpse_guid = None;
     hovered.distance = f32::MAX;
     hovered.refused = false;
+    // **The plate publishes the mouseover, and it does so THROUGH the UI gate below, not around
+    // it.** A plate is mouse-enabled UI (2148): with the pointer inside one, the UI pointer pass
+    // owns the cursor, `PointerOverUi` is true, and the world pick correctly stands down — so this
+    // has to be read before that early return or hovering a plate would clear the mouseover it is
+    // supposed to set. That is the reference's own arrangement: the plate's OnEnter (`0x7cb850`)
+    // publishes `[0xb4e2c8]` directly, with none of the world hover's grading, and the frame walk
+    // stops there — no world pick behind it. Freelook still wins, because there the plates have
+    // handed the mouse back (`0x60f830`).
+    if !rig.is_looking() {
+        if let Some(entity) = plate_hover.0 {
+            hovered.target = Some(entity);
+            hovered.guid = units.get(entity).ok().map(|(g, _)| g.0);
+            hovered.distance = 0.0; // topmost UI — it beats any world GameObject at a tie
+            *last_pick = Some(entity);
+            return;
+        }
+    }
     if rig.is_looking() || pointer_over_ui.0 {
         *last_pick = None;
         return;
@@ -209,18 +227,6 @@ pub(super) fn update_hover(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    // The plate is mouse-enabled UI on the reference: the cursor inside a plate's rect makes
-    // that plate's unit the mouseover (OnEnter `0x7cb850` → `[0xb4e2c8]`) and the frame walk
-    // stops there — no world pick behind it. So plate hover brightens the model, lights the
-    // plate bar, and click-selects, exactly like hovering the body. Reverse order = the later-drawn
-    // (visually topmost) plate wins an overlap.
-    if let Some(&(_, entity)) = plate_rects.0.iter().rev().find(|(r, _)| r.contains(cursor)) {
-        hovered.target = Some(entity);
-        hovered.guid = units.get(entity).ok().map(|(g, _)| g.0);
-        hovered.distance = 0.0; // a plate is topmost UI — it beats any world GameObject at a tie
-        *last_pick = Some(entity);
-        return;
-    }
     let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
         return;
     };

@@ -107,7 +107,7 @@ pub fn probe(root: &Path, name: &str, evals: &[String]) -> Option<ProbeOutcome> 
         &mut dep_order,
     );
 
-    let (load_errors, _absent) = super::load_addon_files(&script, root, name, &toc);
+    let load_errors = super::load_addon_files(&script, root, name, &toc).errors;
     // Same stamp the survey applies, for the same reason: the registry must agree with the VM
     // about what is loaded, or `IsAddOnLoaded` and every dependency verdict answer for a session
     // that does not exist.

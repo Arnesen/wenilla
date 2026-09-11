@@ -262,7 +262,7 @@ fn enum_token(s: &str) -> String {
 /// The reference's strata NAME table (`0x8119f8`) has eight rows, `BACKGROUND`..`TOOLTIP`; stratum
 /// 0 (`WORLD`) has no name and no XML or Lua can put a frame there — the WorldFrame's constructor
 /// is its only writer (decision 1984, wow-re `worldframe-widget.md` §4).
-fn strata_from_str(s: &str) -> Option<Strata> {
+pub(crate) fn strata_from_str(s: &str) -> Option<Strata> {
     Some(match enum_token(s).as_str() {
         "BACKGROUND" => Strata::Background,
         "LOW" => Strata::Low,

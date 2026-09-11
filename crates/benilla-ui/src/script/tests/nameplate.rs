@@ -456,34 +456,97 @@ fn an_addon_frame_under_the_worldframe_is_not_a_plate() {
     );
 }
 
-/// **The plate does NOT claim the UI pointer — not yet, and deliberately.**
-///
-/// The reference's plate is a mouse-enabled `Button`: hovering it publishes the mouseover
-/// (`0x7cb850` OnEnter → `0x492890`) and a click selects the unit through the button's own click
-/// slot. benilla cannot simply set that bit, because on this engine the UI pointer pass owning a
-/// frame is what makes `PointerOverUi` true, and `target::hover::update_hover` returns early on
-/// exactly that — so a mouse-enabled plate with no engine-side seam takes the hover and gives
-/// nothing back: no model brighten, no lit bar, and no selection on click, because the click never
-/// reaches the world path either.
-///
-/// So the bit stays off until the seam exists (2148 §8), and this test is the tripwire: turning it
-/// on without wiring the hover and click through the engine fails here, in the ABI suite, rather
-/// than under the director's cursor.
+/// **The plate takes the mouse, and hands its unit back.** It is a `Button` and born mouse-enabled
+/// (`CSimpleButton`'s ctor writes `[+0xcc] = 0x4`), so hovering it makes it the mouse focus — which
+/// on this engine means the UI pointer pass owns the cursor and the world pick stands down. What
+/// keeps the mouseover alive is the seam: the widget layer answers WHICH unit's plate the pointer
+/// is inside, exactly as the reference's OnEnter (`0x7cb850`) publishes `[0xb4e2c8]`.
 #[test]
-fn a_plate_does_not_yet_claim_the_ui_pointer() {
+fn hovering_a_plate_names_its_unit() {
+    let mut s = vm();
+    let wolf = plate("Wolf", 30.0, 40.0);
+    let key = wolf.key;
+    drive(&mut s, &[wolf]);
+
+    assert_eq!(s.hovered_nameplate(), None, "nothing hovered yet");
+    // The plate's TOP-CENTRE is (500, 400) and it hangs 32 units below, so this is its middle.
+    s.mouse_move(500.0, 384.0);
+    assert_eq!(s.hovered_nameplate(), Some(key));
+    // Off the plate: the WorldFrame takes the focus again, and no plate is named.
+    s.mouse_move(50.0, 50.0);
+    assert_eq!(s.hovered_nameplate(), None);
+}
+
+/// A completed click on a plate reaches the app — the reference's click slot (`0x7cb910`), whose
+/// tail is the same `SetSelection` a click on the body runs.
+///
+/// **Mouse-UP only**: the plate registers `LeftButtonUp | RightButtonUp` (`RegisterForClicks(0x500)`
+/// at `0x7cb637`), so a press alone selects nothing.
+#[test]
+fn a_completed_click_on_a_plate_reaches_the_app() {
+    let mut s = vm();
+    let wolf = plate("Wolf", 30.0, 40.0);
+    let key = wolf.key;
+    drive(&mut s, &[wolf]);
+    s.mouse_move(500.0, 384.0);
+
+    s.mouse_button(500.0, 384.0, "LeftButton", true);
+    assert!(
+        s.take_nameplate_clicks().is_empty(),
+        "a press is not a click: the plate fires on the UP edge only"
+    );
+    s.mouse_button(500.0, 384.0, "LeftButton", false);
+    let clicks = s.take_nameplate_clicks();
+    assert_eq!(clicks.len(), 1);
+    assert_eq!(clicks[0].key, key);
+    assert_eq!(clicks[0].button, "LeftButton");
+    assert!(
+        s.take_nameplate_clicks().is_empty(),
+        "drained, not repeated"
+    );
+}
+
+/// pfUI's click-through calls `plate:Click("LeftButton")` (`nameplates.lua:1274`), and
+/// CustomNameplates and `_Nameplates` do the same. A scripted click has to select the unit like a
+/// physical one — in the reference both go through the button's one click slot, and here they go
+/// through the one funnel that slot's twin lives on.
+#[test]
+fn a_scripted_click_selects_too() {
+    let mut s = vm();
+    let wolf = plate("Wolf", 30.0, 40.0);
+    let key = wolf.key;
+    drive(&mut s, &[wolf]);
+    s.run(r#"WorldFrame:GetChildren():Click("RightButton")"#)
+        .unwrap();
+    let clicks = s.take_nameplate_clicks();
+    assert_eq!(clicks.len(), 1);
+    assert_eq!(clicks[0].key, key);
+    assert_eq!(clicks[0].button, "RightButton");
+}
+
+/// **The mouselook toggle** (`0x60f830`): entering freelook hands the mouse back on every plate,
+/// leaving takes it again — the reference walks its own intrusive plate list doing exactly this,
+/// from `0x483e80` (enter) and `0x483e70` (leave). Without it a right-drag that begins over a plate
+/// would be a plate click instead of a camera turn.
+#[test]
+fn freelook_hands_the_mouse_back() {
     let mut s = vm();
     drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
-    // The plate's TOP-CENTRE is (500, 400) and it hangs 32 units below, so this is its middle.
-    // `mouse_move` speaks the same y-up FrameXML space the anchors do.
-    //
-    // The WorldFrame itself IS a legitimate hit here — it is mouse-enabled by construction, and
-    // the app filters exactly that one id out (`input::feed_ui_input`, decision 1983) so camera
-    // look, world clicks and hover targeting stay live over it. So the assertion mirrors the
-    // app's own filter: whatever the pointer lands on must be the WorldFrame, never a plate.
-    let focus = s.mouse_move(500.0, 384.0);
+    s.mouse_move(500.0, 384.0);
+    assert!(s.hovered_nameplate().is_some());
+
+    s.set_nameplate_mouse(false);
+    s.mouse_move(500.0, 384.1);
+    assert_eq!(
+        s.hovered_nameplate(),
+        None,
+        "a plate must not hold the pointer while the camera does"
+    );
+
+    s.set_nameplate_mouse(true);
+    s.mouse_move(500.0, 384.0);
     assert!(
-        focus.is_none_or(|id| s.is_world_frame(id)),
-        "a plate claimed the UI pointer: the hover and click seams (2148 §8) have to land in the \
-         same change that enables the mouse, or plate hover and click-select both die"
+        s.hovered_nameplate().is_some(),
+        "and it takes it back on leave"
     );
 }

@@ -490,6 +490,18 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
             ));
         }
     }
+    // **`DAMAGE_TEXT_FONT` binds HERE, at the end of the load edge, and once** (decision 2156):
+    // `0x6c8470` runs from `0x401570 + 0x1620`, *after* the UI load `0x401602` — so after
+    // FrameXML's `Fonts.xml` and after every non-LoadOnDemand addon's `ADDON_LOADED`, which is
+    // where MikScrollingBattleText and pfUI assign it. The reference reads the global's value
+    // eagerly, hands it to the font factory, and never looks again: one writer of `[0xce8820]`,
+    // no invalidation, and a `/reloadui` does not re-run it.
+    //
+    // One step later than the reference, deliberately: it reads after `PLAYER_ENTERING_WORLD`
+    // too, which here fires from [`crate::ui_unit`] when the self descriptor lands rather than
+    // inside this call. Nothing in the corpus assigns a font that late, and moving the seat would
+    // mean waiting on the wire for a value the whole load edge has already settled.
+    world.insert_resource(crate::combat_text::read_damage_text_font(&script));
     // The load edge is over: disarm the instruction bound `load_ingame_ui` installed (decision
     // 1306). From here every OnUpdate and event handler runs unhooked — a session must not kill
     // a player's addon for being slow; only a load that never returns is fair game.

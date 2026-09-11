@@ -184,6 +184,13 @@ struct Plate {
     last: Option<PlateState>,
 }
 
+impl Plate {
+    /// The unit this plate is currently bound to, or `None` while it sits in the pool.
+    fn key(&self) -> Option<u64> {
+        self.last.as_ref().map(|s| s.key)
+    }
+}
+
 /// The plate pool — grown on demand, **never shrunk**, in creation order.
 ///
 /// The reference's pool is unbounded and its free list FIFO; what matters to an addon is only that
@@ -198,8 +205,26 @@ pub(crate) struct NamePlates {
     /// `[unit+0xe60]`, from this side. A slot leaves this map only when its unit's plate is
     /// retired, and the slot itself never moves.
     assigned: std::collections::HashMap<u64, usize>,
+    /// The reverse of the arena's own structure: which slot a frame handle is. Filled at
+    /// creation and never removed (plates are never destroyed), so the pointer boundary and the
+    /// click funnel can ask "is this frame a plate, and whose?" in one lookup.
+    by_frame: std::collections::HashMap<FrameHandle, usize>,
+    /// Completed clicks on plates, drained by the app each frame
+    /// ([`UiScript::take_nameplate_clicks`]).
+    clicks: Vec<NamePlateClick>,
     /// The geometry every live plate is currently laid out under.
     geometry: Option<PlateGeometry>,
+}
+
+/// A completed click on a plate — what the reference's own `CGNamePlateFrame` click slot
+/// (`0x7cb910`) turns into a selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamePlateClick {
+    /// The unit whose plate was clicked ([`PlateState::key`]).
+    pub key: u64,
+    /// `"LeftButton"` / `"RightButton"` — the plate registers for both, on mouse-UP only
+    /// (`RegisterForClicks(0x500)` at `0x7cb637`).
+    pub button: String,
 }
 
 /// What a sync produced that has to be fired **outside** the model borrow: the frames whose
@@ -234,12 +259,95 @@ impl UiScript {
         }
     }
 
+    /// **The unit whose plate the pointer is inside**, or `None` — the reference's plate OnEnter
+    /// (`0x7cb850`) publishing the mouseover global `[0xb4e2c8]`, read from the app's side instead
+    /// of pushed.
+    ///
+    /// The app needs this because a plate is real UI here: with the plate mouse-enabled, the UI
+    /// pointer pass owns the cursor over it and `target::hover`'s world pick correctly stands
+    /// down — so the mouseover has to come from the frame that took it. Exactly the hovered frame,
+    /// never an ancestor: an addon frame parented to a plate takes the hover in the reference too,
+    /// and its OnEnter is the one that fires.
+    pub fn hovered_nameplate(&self) -> Option<u64> {
+        let lua = self.lua();
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let frame = model.mouseover?;
+        let slot = *model.nameplates.by_frame.get(&frame)?;
+        model.nameplates.plates.get(slot)?.key()
+    }
+
+    /// Drain the completed plate clicks — the app turns each into a selection, which is what the
+    /// reference's own click slot does. Both a physical click and Lua's `plate:Click("LeftButton")`
+    /// arrive here, because both go through the one click funnel.
+    pub fn take_nameplate_clicks(&mut self) -> Vec<NamePlateClick> {
+        let lua = self.lua();
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        std::mem::take(&mut model.nameplates.clicks)
+    }
+
+    /// **The mouselook toggle** (`0x60f830`): entering camera freelook disables mouse input on
+    /// every plate, leaving re-enables it — the reference walks its own intrusive plate list at
+    /// `ds:0xc4d92c` doing exactly this, called from `0x483e80` (enter) and `0x483e70` (leave).
+    ///
+    /// Without it a right-drag that starts over a plate would be a plate click instead of a camera
+    /// turn, and the plates would keep taking a pointer that is no longer on screen.
+    pub fn set_nameplate_mouse(&mut self, enabled: bool) {
+        let lua = self.lua();
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let frames: Vec<FrameHandle> = model.nameplates.plates.iter().map(|p| p.frame).collect();
+        for frame in frames {
+            model.arena.set_mouse_enabled(frame, enabled);
+        }
+    }
+
+    /// **Retire every live plate** — hide them all and return them to the pool, without touching
+    /// the geometry they are laid out under.
+    ///
+    /// The app's every early return owes this: a painter that stopped drawing left no plates
+    /// behind, but widgets stay until something hides them, so a V press that turns plates off, a
+    /// frame with no camera, or a world exit would otherwise leave the last frame's plates standing
+    /// on screen. It is `0x608a10` applied to the whole active list, which is what the reference
+    /// does when the master toggle clears.
+    pub fn retire_nameplates(&mut self) {
+        let lua = self.lua();
+        let effects = {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut effects = SyncEffects::default();
+            model.nameplates.assigned.clear();
+            for i in 0..model.nameplates.plates.len() {
+                Plate::retire(&mut model, i, &mut effects);
+            }
+            effects
+        };
+        super::event::fire_visibility_changes(lua, effects.visibility);
+    }
+
     /// How many plate widgets the pool holds — the plate driver's census, and the tests'.
     pub fn nameplate_pool_len(&self) -> usize {
         let lua = self.lua();
         let model = lua.app_data_ref::<Model>().expect("model app_data");
         model.nameplates.plates.len()
     }
+}
+
+/// Record a completed click on `id` if that frame is a live plate — [`super::button::click_button`]
+/// calls this for every button click, physical or scripted.
+pub(super) fn note_click(lua: &mlua::Lua, id: u32, button: &str) {
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let Some(frame) = model.id_to_frame.get(&id).copied() else {
+        return;
+    };
+    let Some(&slot) = model.nameplates.by_frame.get(&frame) else {
+        return;
+    };
+    // A pooled (retired) plate has no unit, and clicking one is not possible anyway — it is hidden.
+    let Some(key) = model.nameplates.plates.get(slot).and_then(Plate::key) else {
+        return;
+    };
+    model.nameplates.clicks.push(NamePlateClick {
+        key,
+        button: button.to_string(),
+    });
 }
 
 /// The whole per-frame drive: grow, re-lay-out if the window moved, write what changed, retire the
@@ -321,20 +429,13 @@ impl Plate {
             .unwrap_or_default();
         model.arena.set_frame_strata(frame, strata);
         model.arena.set_frame_level(frame, PLATE_LEVEL, true);
-        // **The mouse bit stays OFF, and that is a deliberate gap, not an omission** (2148 §8).
-        // The reference's plate is mouse-enabled — hovering it publishes the mouseover
-        // (`0x7cb850` → `0x492890`) and a click selects through the button's own click slot. On
-        // this engine, a mouse-enabled frame under the cursor is what makes `PointerOverUi` true,
-        // and `target::hover::update_hover` returns early on exactly that: setting the bit without
-        // an engine-side hover/click seam takes the hover and gives nothing back — no model
-        // brighten, no lit bar, and no selection, because the click stops at the UI too. The seam
-        // comes first; then the bit, in the same change.
-        // `a_plate_does_not_yet_claim_the_ui_pointer` is the tripwire.
-        //
-        // It has to be turned OFF explicitly: a `Button` is born mouse-enabled here, faithfully —
-        // `CSimpleButton`'s ctor writes `[+0xcc] = 0x4` (`0x7786a3`), which is why the plate needs
-        // no `EnableMouse` of its own in the reference.
-        model.arena.set_mouse_enabled(frame, false);
+        // The plate takes the mouse, which it is born with: `CSimpleButton`'s ctor writes
+        // `[+0xcc] = 0x4` (`0x7786a3`), so the reference's plate needs no `EnableMouse` of its own
+        // and neither does ours. Hovering it publishes the mouseover (`0x7cb850` → `0x492890`) and
+        // a completed click selects through the button's click slot (`0x7cb910`); both reach the
+        // app through [`UiScript::hovered_nameplate`] and [`UiScript::take_nameplate_clicks`].
+        // `EnableMouse`/`IsMouseEnabled` are in the corpus's own call set, and pfUI's vanilla
+        // click-through block drives them.
 
         let border = texture(model, frame, DrawLayer::Artwork, BORDER_TEXTURE);
         let glow = texture(model, frame, DrawLayer::Highlight, GLOW_TEXTURE);
@@ -373,6 +474,11 @@ impl Plate {
         effects
             .visibility
             .extend(model.arena.set_shown(frame, false));
+
+        model
+            .nameplates
+            .by_frame
+            .insert(frame, model.nameplates.plates.len());
 
         Plate {
             frame,

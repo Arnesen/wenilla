@@ -1317,6 +1317,15 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
             .errors
             .push(e.to_string());
     }
+    // **A nameplate's click is the engine's too** (decision 2148): the reference's plate overrides
+    // the button click slot (`0x7cb910`) *and* chains the base, so its unit is selected whether the
+    // click came from the pointer or from Lua's own `Click()` — this funnel is both. Recorded after
+    // the handler, like the loot take below and for the same reason: an addon hook that errors
+    // cannot silently eat the selection. A press (`down`) records nothing — the plate registers for
+    // `LeftButtonUp | RightButtonUp` only (`RegisterForClicks(0x500)` at `0x7cb637`).
+    if !down {
+        super::nameplate::note_click(lua, id, button);
+    }
     // …and then the take, unconditionally on the handler's outcome. `0x4c1867` is not guarded by
     // anything the Lua side did: the base call at `0x4c1833` returns void and its result is never
     // tested. A row whose `OnClick` errored still loots, which is the reference's behaviour and

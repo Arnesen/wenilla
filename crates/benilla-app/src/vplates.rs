@@ -33,33 +33,21 @@
 //!   plates diagonal-linear without limit (§9, byte-closed) and the director rejected that
 //!   look; past 1024×768 the plate grows at half the real rate (midway between faithful and
 //!   the native size).
-//! - **Anatomy — the §7 draw list, byte-verified** (frame offsets/sizes in gx screencoord
-//!   units; TEXT heights resolve through the same damped basis, [`text_px`];
-//!   back → front): the `Nameplate-Border` frame filling the 0.1 × 0.025 rect — its 128 × 32 art
-//!   **sharp-resampled** to the plate's exact size ([`border`], 0188) so it reads crisp, not
-//!   bilinear-magnified; the
-//!   `UI-TargetingFrame-BarFill` health bar (0.0804 × 0.007025 at BOTTOMLEFT + (0.0031,
-//!   0.003125)) — fill = HEALTH/MAXHEALTH as a **left-anchored crop** (u1 = fraction), instant,
-//!   REACTION-tinted (hostile red / neutral yellow / friendly green / player pure blue — the
-//!   confirmed dwords), **no backing behind missing health** (the border alone), the BORDER
-//!   drawn over the fill (its rounded bevels cap the fill's ends — the reference look, a
-//!   director-pinned correction to the §7 order); the name (`NAMEPLATE_FONT` = Friz, h 0.01,
-//!   BOTTOM at plate CENTER, black 1 px drop shadow — director-tuned from the recorded ±0.001 gx,
-//!   no truncation) in WHITE; the level (h 0.0086 — director-pinned one em under the byte 0.009;
-//!   CENTER at BOTTOMRIGHT + (−0.0092, +0.0071)) in
-//!   the client's exact con dwords over its own grayband table; the skull
-//!   (`UI-TargetingFrame-Skull`, 0.01², OVERLAY on the level's anchor) replacing the number for
-//!   a world boss (creature rank 3, unconditional) or a hostile ≥ 10 levels up. **No cast bar** exists on 1.12 plates
-//!   (ctor-verified: exactly 7 children — the ctor's `Nameplate-Glow` child renders as the
-//!   bar brighten below, not as a drawn overlay).
+//! - **Anatomy — not here any more.** The plate's six regions, its health-bar child, their
+//!   layers and the anchors between them live with the widgets that carry them
+//!   ([`benilla_ui::script::nameplate`], decision 2148): the plate is a real `Button` under the
+//!   `WorldFrame` and the shared frame→quad path draws it. What stays this file's is everything
+//!   about the WORLD — the gate above, the anchor, the projection, the seat, and the damped
+//!   basis the geometry is computed in ([`plate_basis`], [`gx_px`], [`text_px`]).
 //! - **Highlight = the mouseover unit ∪ the target** (the watcher `0x606f20 → 0x607080` reads
 //!   both globals): the bar's own colour brightens — a uniform [`LIT_BOOST`] lift of the fill
 //!   tint, gradient untouched, nothing else changes (director-pinned form, 0184; the recorded
 //!   ADD `Nameplate-Glow` rim read as hard edge lines on our linear-blending pipeline and is
-//!   not drawn). The plate rect is itself mouse-enabled UI: hovering it makes its unit the
-//!   mouseover (OnEnter `0x7cb850` → `[0xb4e2c8]`; [`PlateRects`] feeds the shared [`Hovered`]
-//!   pick), which also lifts the model emissive and lets clicks select through the plate;
-//!   plate-rect hover additionally turns the name yellow `0xFFFFFF00` (OnEnter, name-only).
+//!   not drawn). The plate is itself mouse-enabled UI: hovering it makes its unit the mouseover
+//!   (OnEnter `0x7cb850` → `[0xb4e2c8]` — [`PlateHover`], read straight off the widget the
+//!   pointer landed on since 2159), which also lifts the model emissive, and a completed click
+//!   selects through the plate ([`PlateClicks`]); the hover additionally turns the name yellow
+//!   `0xFFFFFF00` (OnEnter, name-only).
 //!   All decoupled from the target dim below.
 //! - **Target highlight**: relative alpha — with a target, the target's plate is opaque and
 //!   every other plate drops to `0x7F`; with no target all are opaque.
@@ -134,12 +122,27 @@ pub(crate) const CVAR_FRIENDS: &str = benilla_ui::script::CVAR_NAMEPLATE_FRIENDS
 #[derive(Resource, Default)]
 pub(crate) struct VPlates(pub(crate) EntityHashSet);
 
-/// The plates' screen rects this frame, in push (= draw) order. The plate is mouse-enabled UI on
-/// the reference (`RegisterForClicks` in the ctor; OnEnter `0x7cb850` sets the mouseover-unit
-/// global), so the hover pick (`crate::target::hover`) consults these — last frame's layout, the
-/// reference's own input-vs-layout latency — before ray-testing the world.
+/// **The unit whose plate the pointer is inside** — the plate's own OnEnter publishing the
+/// mouseover, from this side (`0x7cb850` → `[0xb4e2c8]`).
+///
+/// The plate is real mouse-enabled UI now (2148), so the UI pointer pass owns the cursor over it
+/// and `target::hover`'s world pick correctly stands down; this is how the unit still reaches
+/// [`crate::target::Hovered`]. Written by the plate driver from
+/// [`benilla_ui::script::UiScript::hovered_nameplate`] — last frame's layout, which is the
+/// reference's own input-vs-layout latency.
 #[derive(Resource, Default)]
-pub(crate) struct PlateRects(pub(crate) Vec<(Rect, Entity)>);
+pub(crate) struct PlateHover(pub(crate) Option<Entity>);
+
+/// Completed clicks on plates, waiting for the targeting chain — the reference's plate click slot
+/// (`0x7cb910`), which ends in the same `SetSelection` a click on the body does.
+///
+/// Both a physical click and an addon's `plate:Click("LeftButton")` land here: the engine records
+/// them at the one click funnel both go through.
+#[derive(Resource, Default)]
+pub(crate) struct PlateClicks {
+    pub(crate) left: Vec<Entity>,
+    pub(crate) right: Vec<Entity>,
+}
 
 /// The plate frame, gx screen-height units (`[0x87d9cc]`/`[0x87d9d0]`): 0.1 × 0.025. The border
 /// SetAllPoints-fills it; everything else anchors inside it (§7, byte-verified offsets).
@@ -433,15 +436,18 @@ struct PlateWorld<'w, 's> {
 }
 
 /// Gate + draw, every frame: decide which units carry a plate (into [`VPlates`], the
-/// name-exclusivity verdict) and append the §7 draw list — border, left-cropped reaction fill,
-/// shadowed name (yellow under the mouse), con-colored level or the skull — at constant
-/// screen size over the projected anchor + 2/3 yd. Runs in the [`UiQuadAppend`] window (after
+/// name-exclusivity verdict), seat each one, and hand the result to the widget layer as
+/// [`PlateState`] — at constant screen size over the projected anchor + 2/3 yd. Runs after
 /// the script extract), after the targeting chain (it reads the frame's selection verdict).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
 fn drive_vplates(
     mode: Res<VPlateMode>,
     mut plates: ResMut<VPlates>,
-    mut rects: ResMut<PlateRects>,
+    mut plate_hover: ResMut<PlateHover>,
+    mut plate_clicks: ResMut<PlateClicks>,
+    // Camera freelook, for the mouselook toggle `0x60f830`: plates stop taking the mouse while
+    // the pointer is driving the camera.
+    rig: Res<crate::player::CameraControl>,
     world: PlateWorld,
     mut names: ResMut<NameCache>,
     net_commands: Res<NetCommands>,
@@ -463,26 +469,61 @@ fn drive_vplates(
     mut bucket: Local<crate::smart_rect::SmartBucket>,
     // The raid-target board (decision 0434 §6) — the plate's raid-icon child reads it.
     group: Res<crate::ui_party::GroupState>,
+    // Whether this VM's plates have been told about freelook (the `0x60f830` edge).
+    mut mouse_told: Local<crate::ui_script::VmMemo<Option<bool>>>,
 ) {
     plates.0.clear();
-    rects.0.clear();
+    plate_hover.0 = None;
     bucket.clear();
+    // **Every early return has to RETIRE the plates first, and that is new with 2148.** A painter
+    // could stop drawing and the plates were gone with the frame's quads; widgets stay until they
+    // are hidden, so a V press that turns plates off — or a camera-less frame, or a world exit —
+    // would otherwise leave the last frame's plates standing on screen forever. `sync` with no
+    // states is exactly the reference's own answer: `0x608a10` on every live plate, hiding each and
+    // returning it to the pool.
+    let retire_all = |script: Option<NonSendMut<benilla_ui::script::UiScript>>| {
+        if let Some(mut script) = script {
+            script.retire_nameplates();
+        }
+    };
     if !mode.enemies && !mode.friends {
+        retire_all(script);
         return;
     }
-    let (Ok((cam, cam_pose)), Ok((self_tf, self_store)), Some(mut script)) =
-        (world.camera.single(), world.self_q.single(), script)
+    let (Ok((cam, cam_pose)), Ok((self_tf, self_store))) =
+        (world.camera.single(), world.self_q.single())
     else {
+        retire_all(script);
+        return;
+    };
+    let Some(mut script) = script else {
         return;
     };
     let cam_tf = GlobalTransform::from(*cam_pose);
     let Some(viewport) = cam.logical_viewport_size() else {
+        script.retire_nameplates();
         return;
     };
     let basis = plate_basis(viewport);
     let gx = |v: f32| gx_px(v, basis);
     let window = world.window.single().ok();
-    let cursor = window.and_then(|w| w.cursor_position());
+    // **The mouselook toggle** (`0x60f830`, called from `0x483e80`/`0x483e70`): plates stop taking
+    // the mouse while the camera is in freelook, so a right-drag that starts over a plate turns the
+    // camera instead of clicking the plate, and the plates are not holding a pointer that has left
+    // the screen. Written on the EDGE, not per frame — the reference's own is two call sites on the
+    // freelook transitions, and the memo is keyed to the VM because that is what it is memory about
+    // (1290). A fresh VM's plates are born with the bit, so the memo starting empty is right.
+    // Which unit's plate the pointer is inside (last frame's layout), and the completed clicks
+    // waiting on the targeting chain. Both come from the plate widgets themselves, which is the
+    // reference's own arrangement: the plate's OnEnter publishes the mouseover and its click slot
+    // ends in `SetSelection`.
+    let looking = rig.is_looking();
+    if *mouse_told.get(&script) != Some(looking) {
+        *mouse_told.get(&script) = Some(looking);
+        script.set_nameplate_mouse(!looking);
+    }
+    let hovered_key = script.hovered_nameplate();
+    let clicked = script.take_nameplate_clicks();
     let my_level = self_store.and_then(|s| s.0.unit_level()).unwrap_or(1);
     let has_target = world.selection.target.is_some();
 
@@ -640,8 +681,8 @@ fn drive_vplates(
         // plate inside every screen border (`SetPoint(TOP ← root.BOTTOMLEFT, clampedX/Y)`).
         // The highlight is a 2-D hover over THIS rect (the frame's OnEnter — yellow name). `pw`/`ph`
         // (the plate's logical size) are hoisted above the loop — the border resample keys off them.
-        // Geometry trace for the vplates capture (`WOW_VPLATE_TRACE=1`): the exact quad rects
-        // pushed this frame, in logical px — the machine-side check the capture PNG can't give
+        // Geometry trace for the vplates capture (`WOW_VPLATE_TRACE=1`): the exact plate rects
+        // this frame, in logical px — the machine-side check the capture PNG can't give
         // (fill/border/text hues overlap under zoom).
         let trace = std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1");
         // The full seat (`0x509ec0`): the desired rect TOP-anchored on the raw projected point
@@ -699,12 +740,13 @@ fn drive_vplates(
             );
         }
         bucket.claim(plate);
-        rects.0.push((plate, entity));
-        let hover = cursor.is_some_and(|c| plate.contains(c));
+        // The plate's own hover, from last frame's layout: the widget layer answers which unit's
+        // plate the pointer is inside, and the driver resolves it to this frame's entity below.
+        let hover = hovered_key == Some(guid.0);
         // The highlight trigger — the watcher's OR over the two globals: this unit is the
-        // MOUSEOVER (the 3-D body pick, or a plate hover routed through [`PlateRects`] last
-        // frame) or the current TARGET. `hover` (this frame's rect) joins in so the bar
-        // brighten never lags the yellow name.
+        // MOUSEOVER (the 3-D body pick, or the plate's own hover — [`PlateHover`], which the
+        // widget layer answered above) or the current TARGET. `hover` joins in directly so the
+        // bar brighten never lags the yellow name by the frame the mouseover takes to publish.
         let lit =
             hover || world.hovered.target == Some(entity) || world.selection.target == Some(entity);
         if trace {
@@ -732,6 +774,17 @@ fn drive_vplates(
         let mark = group.raid_target_index(guid.0);
         let x_units = (plate.min.x + plate.max.x) * 0.5 / seam;
         let y_units = (viewport.y - plate.min.y) / seam;
+        if hovered_key == Some(guid.0) {
+            plate_hover.0 = Some(entity);
+        }
+        for click in &clicked {
+            if click.key == guid.0 {
+                match click.button.as_str() {
+                    "RightButton" => plate_clicks.right.push(entity),
+                    _ => plate_clicks.left.push(entity),
+                }
+            }
+        }
         states.push(PlateState {
             // The plate's identity is the UNIT's, for the life of the plate — the reference's
             // `[unit+0xe60]` binding, which every addon's per-plate cache rests on.
@@ -812,7 +865,8 @@ impl Plugin for VPlatesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VPlateMode>()
             .init_resource::<VPlates>()
-            .init_resource::<PlateRects>()
+            .init_resource::<PlateHover>()
+            .init_resource::<PlateClicks>()
             .add_systems(
                 Update,
                 (
@@ -836,9 +890,9 @@ impl Plugin for VPlatesPlugin {
                     .in_set(VPlateSet),
             )
             // **Outside [`VPlateSet`] deliberately.** Its only ordering need is to be ahead of the
-            // script tick, and three sets order *after* `VPlateSet` while `drive_vplates` sits in
-            // `UiQuadAppend` — pulling the whole set in front of `UiInput` to carry one system
-            // would rewire all of that. A V press can therefore reach the globals a frame late,
+            // script tick, and three sets order *after* `VPlateSet` while `drive_vplates` runs
+            // after the targeting chain — pulling the whole set in front of `UiInput` to carry one
+            // system would rewire all of that. A V press can therefore reach the globals a frame late,
             // which costs nothing: their only readers are `UpdateNameplates` at the two world-entry
             // events and an addon that calls it, never a per-frame path.
             .add_systems(Update, feed_plate_globals.before(crate::ui_script::UiInput));

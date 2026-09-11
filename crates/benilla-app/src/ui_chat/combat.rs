@@ -1022,18 +1022,43 @@ pub(crate) fn school_word(script: &benilla_ui::script::UiScript, school: u8) -> 
     global_string(script, &format!("SPELL_SCHOOL{school}_CAP"))
 }
 
+/// The GlobalString key `0x6278f0` resolves for a power tag, or `None` where it answers NULL.
+///
+/// The function is five lines and both of them matter: `cmp ecx,5; jae` — **unsigned**, so a tag
+/// of 5 or more (and a negative one, which reads as huge) returns NULL — else
+/// `[4*ecx + 0x85645c]` into `0x703bf0`. The table's five entries are the five `Powers` the wire
+/// carries, **happiness included**: it is `HAPPINESS_POINTS = "Happiness"` (shipped enUS
+/// `GlobalStrings.lua:2117`), not a hole. This file used to stop the table at energy and call
+/// happiness "no GlobalString", which dropped every line the reference words with it — the
+/// generic leech/drain fall-through out of `0x627de0`, and a happiness `POWERGAIN` tick.
+///
+/// What happiness really lacks is a **`COMBAT_TEXT_UPDATE`** tag: `0x627520`/`0x627930`'s four
+/// `0x64a4c0` compares match only the other four nouns, so it produces the chat line and no
+/// floating text (§4.6). That is a different table, further down, after the emit.
+fn power_key(power: u32) -> Option<&'static str> {
+    match power {
+        0 => Some("MANA_POINTS"),
+        1 => Some("RAGE_POINTS"),
+        2 => Some("FOCUS_POINTS"),
+        3 => Some("ENERGY_POINTS"),
+        4 => Some("HAPPINESS_POINTS"),
+        _ => None,
+    }
+}
+
+/// Whether `0x6278f0` answers a noun at all — the `cmp ecx,5; jae` bound, without a VM in hand.
+///
+/// The formatters gate on the returned pointer (`627964 test edi,edi; 627966 je`) long before they
+/// reach a template, so a caller that has no script yet still has to be able to ask.
+pub(crate) fn power_has_word(power: u32) -> bool {
+    power_key(power).is_some()
+}
+
 /// The power word a `POWERGAIN`/`SPELLPOWERLEECH`/`SPELLPOWERDRAIN` template takes, by the vmangos
-/// `Powers` index the wire carries (0 mana · 1 rage · 2 focus · 3 energy). Happiness (4) has no
-/// GlobalString and no combat-log line, so it answers `None` and the line is dropped.
+/// `Powers` index the wire carries — `0x6278f0`'s table, resolved through the same GlobalString
+/// mechanism the reference uses ([`power_key`] carries the law).
 pub(crate) fn power_word(script: &benilla_ui::script::UiScript, power: u32) -> Option<String> {
-    let key = match power {
-        0 => "MANA_POINTS",
-        1 => "RAGE_POINTS",
-        2 => "FOCUS_POINTS",
-        3 => "ENERGY_POINTS",
-        _ => return None,
-    };
-    global_string(script, key)
+    global_string(script, power_key(power)?)
 }
 
 /// Resolve one endpoint's display name — the reference's `GetObjectName` (`0x6264e0`), which is the
@@ -1771,50 +1796,69 @@ pub(crate) fn miss_family(miss_info: u8) -> Family {
 ///   damage == 0 && HitInfo & 0x20  → VSABSORB        (ABSORB)
 ///   damage == 0 && HitInfo & 0x40  → VSRESIST        (RESIST)
 ///   VictimState == 1 && damage > 0 → COMBATHIT[CRIT][SCHOOL]
-///   otherwise                      → the VictimState word
+///   otherwise                      → the VictimState word, or NO LINE
 /// ```
+///
+/// **The last arm can decline.** `0x62a710` is gated twice before it words anything: the 10-entry
+/// flag table `0x8628f8` = `[0,0,1,1,0,1,1,1,1,0]` indexed by VictimState (`0x62a720`), then
+/// `add eax,-2; cmp eax,6; ja` into the jump table `0x62a8ec` — so VictimState **0, 1, 4 and 9
+/// emit no line at all** (§4.1 row 6). This used to answer `MISSED` for them and call that "the
+/// reference's own fall-through", which it is not: the reference stays silent, and a `MISSED`
+/// there is a sentence the real client never prints.
 ///
 /// The bit values are vmangos's `HitInfo` under the `> 1.9.4` conditional that is compile-time true
 /// for 5875 (`Objects/UnitDefines.h:250-268`) and its `VictimState` (`:237-248`) — the same pair
 /// [`crate::sound::combat`] and [`crate::combat_text`] already read, here named once instead of a
 /// fourth set of bare literals.
-pub(crate) fn melee_family(hit_info: u32, victim_state: u32, damage: u32, school: u8) -> Family {
+pub(crate) fn melee_family(
+    hit_info: u32,
+    victim_state: u32,
+    damage: u32,
+    school: u8,
+) -> Option<Family> {
     const MISS: u32 = 0x10;
     const ABSORB: u32 = 0x20;
     const RESIST: u32 = 0x40;
     const CRIT: u32 = 0x80;
     if hit_info & MISS != 0 {
-        return MISSED;
+        return Some(MISSED);
     }
     if victim_state == 5 {
-        return VSBLOCK;
+        return Some(VSBLOCK);
     }
     if damage == 0 {
         if hit_info & ABSORB != 0 {
-            return VSABSORB;
+            return Some(VSABSORB);
         }
         if hit_info & RESIST != 0 {
-            return VSRESIST;
+            return Some(VSRESIST);
         }
     }
     if victim_state == 1 && damage > 0 {
-        return match (hit_info & CRIT != 0, school != 0) {
+        return Some(match (hit_info & CRIT != 0, school != 0) {
             (false, false) => COMBATHIT,
             (true, false) => COMBATHITCRIT,
             (false, true) => COMBATHITSCHOOL,
             (true, true) => COMBATHITCRITSCHOOL,
-        };
+        });
     }
+    // `0x62a710`'s own two gates, and they are the whole arm. The flag table's `1`s are exactly
+    // these five; VictimState 0 (UNAFFECTED), 1 with no damage, 4 (INTERRUPT) and 9 are `0`s and
+    // the formatter returns having emitted nothing.
+    //
+    // The table's index 5 is a `1`, and it is unreachable: a block is taken above, which is why
+    // the two readings have to be kept apart rather than collapsed into one list of five.
+    // A VictimState of 10 or more is not bounds-checked before the table read — the load runs on
+    // a wire `u32` and index 10 lands in the adjacent pointer table `0x862920`, whose entries are
+    // all non-zero, so gate 1 *passes* and the second gate's `cmp eax,6; ja` is what rejects it.
+    // No line, nothing fired — which is the answer `None` already gives.
     match victim_state {
-        2 => VSDODGE,
-        3 => VSPARRY,
-        6 => VSEVADE,
-        7 => VSIMMUNE,
-        8 => VSDEFLECT,
-        // VictimState 0 (UNAFFECTED, "seen in relation with HITINFO_MISS") and 4 (INTERRUPT) reach
-        // here only on a shape vmangos does not send; MISSED is the reference's own fall-through
-        // and is the least wrong thing to say about a swing that did nothing.
-        _ => MISSED,
+        2 => Some(VSDODGE),
+        3 => Some(VSPARRY),
+        6 => Some(VSEVADE),
+        7 => Some(VSIMMUNE),
+        8 => Some(VSDEFLECT),
+        _ => None,
     }
 }
 

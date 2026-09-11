@@ -125,6 +125,17 @@ pub(crate) struct Model {
     /// the same kind of thing — VM-global registries the loader fills.
     pub(crate) framexml_templates:
         std::cell::RefCell<std::collections::HashMap<String, crate::framexml::Element>>,
+    /// **`FrameXML_Debug`'s flag** — the loader's own trace-severity switch (decision 2160).
+    ///
+    /// `0x488440` is a get-or-set over the single global `[0xceea30]`, which boots at 0 and is
+    /// read at six sites image-wide: the binding itself and five inside the XML loader, each
+    /// gating a severity-0 trace line behind `flag > 0` (`0x6ee298 jle` — **greater than**, not
+    /// non-zero, which is why this is signed). The one site walked to the bytes is
+    /// `Instantiate 0x6ee280`, whose gated line is `0x871154 "-- Creating %s named %s"`.
+    ///
+    /// Here rather than on `UiScript` for `framexml_templates`' reason: the loader runs from a
+    /// bare `&Lua`, and so does the binding that writes this.
+    pub(crate) framexml_debug: std::cell::Cell<i32>,
     /// The FrameXML **font-element registry** (a separate namespace — a font inherits a font,
     /// never a frame template), persisted for the same cross-file reason.
     pub(crate) framexml_fonts:
@@ -1810,6 +1821,7 @@ impl Model {
             addons_saved_account: None,
             addons_saved_character: None,
             framexml_templates: Default::default(),
+            framexml_debug: Default::default(),
             framexml_fonts: Default::default(),
             arena: WidgetArena::new(),
             layout_inputs: HashMap::new(),

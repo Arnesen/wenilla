@@ -161,14 +161,18 @@ fn the_school_and_power_words_resolve() {
             "SPELL_SCHOOL{school}_CAP missing"
         );
     }
-    for power in 0..=3u32 {
+    // `0x6278f0`'s table is FIVE entries — `cmp ecx,5; jae` — and happiness is the fifth. This
+    // used to stop at 3 and assert that happiness had no word "deliberately"; the shipped file
+    // says otherwise, and reading it here is what settles it.
+    for power in 0..=4u32 {
         assert!(
             power_word(&script, power).is_some(),
             "power {power} missing"
         );
     }
-    // Happiness has no combat-log word, deliberately.
-    assert!(power_word(&script, 4).is_none());
+    assert_eq!(power_word(&script, 4).as_deref(), Some("Happiness"));
+    // Past the table's five entries the reference returns NULL and the line is dropped.
+    assert!(power_word(&script, 5).is_none());
 }
 
 /// The sentences a player actually reads, end to end, on the real strings — the residue
@@ -275,26 +279,50 @@ fn the_fill_is_vsnprintf_and_refuses_a_mismatch() {
 /// `MISSED` (the MISS bit is not set for an absorb).
 #[test]
 fn the_melee_dispatcher_follows_the_reference_order() {
+    let f = |h, v, d, s| melee_family(h, v, d, s).expect("a family").stem;
     // A plain landed swing, and its crit and school variants.
-    assert_eq!(melee_family(0, 1, 120, 0).stem, "COMBATHIT");
-    assert_eq!(melee_family(0x80, 1, 120, 0).stem, "COMBATHITCRIT");
-    assert_eq!(melee_family(0, 1, 120, 2).stem, "COMBATHITSCHOOL");
-    assert_eq!(melee_family(0x80, 1, 120, 2).stem, "COMBATHITCRITSCHOOL");
+    assert_eq!(f(0, 1, 120, 0), "COMBATHIT");
+    assert_eq!(f(0x80, 1, 120, 0), "COMBATHITCRIT");
+    assert_eq!(f(0, 1, 120, 2), "COMBATHITSCHOOL");
+    assert_eq!(f(0x80, 1, 120, 2), "COMBATHITCRITSCHOOL");
     // MISS wins over everything, including a VictimState that would say otherwise.
-    assert_eq!(melee_family(0x10, 2, 0, 0).stem, "MISSED");
+    assert_eq!(f(0x10, 2, 0, 0), "MISSED");
     // BLOCKS wins over the damage test — a partial block still lands damage.
-    assert_eq!(melee_family(0, 5, 90, 0).stem, "VSBLOCK");
+    assert_eq!(f(0, 5, 90, 0), "VSBLOCK");
     // Zero damage + the absorb/resist bits.
-    assert_eq!(melee_family(0x20, 1, 0, 0).stem, "VSABSORB");
-    assert_eq!(melee_family(0x40, 1, 0, 0).stem, "VSRESIST");
+    assert_eq!(f(0x20, 1, 0, 0), "VSABSORB");
+    assert_eq!(f(0x40, 1, 0, 0), "VSRESIST");
     // ...but the same bits with damage through are a landed hit, not a full absorb.
-    assert_eq!(melee_family(0x20, 1, 90, 0).stem, "COMBATHIT");
+    assert_eq!(f(0x20, 1, 90, 0), "COMBATHIT");
     // The VictimState words.
-    assert_eq!(melee_family(0, 2, 0, 0).stem, "VSDODGE");
-    assert_eq!(melee_family(0, 3, 0, 0).stem, "VSPARRY");
-    assert_eq!(melee_family(0, 6, 0, 0).stem, "VSEVADE");
-    assert_eq!(melee_family(0, 7, 0, 0).stem, "VSIMMUNE");
-    assert_eq!(melee_family(0, 8, 0, 0).stem, "VSDEFLECT");
+    assert_eq!(f(0, 2, 0, 0), "VSDODGE");
+    assert_eq!(f(0, 3, 0, 0), "VSPARRY");
+    assert_eq!(f(0, 6, 0, 0), "VSEVADE");
+    assert_eq!(f(0, 7, 0, 0), "VSIMMUNE");
+    assert_eq!(f(0, 8, 0, 0), "VSDEFLECT");
+}
+
+/// `0x62a710` declines: the VictimStates whose flag-table byte is `0` produce **no line at all**.
+///
+/// The table `0x8628f8` is `[0,0,1,1,0,1,1,1,1,0]`, so 0, 1, 4 and 9 are silent — and 1 is the
+/// interesting one, because a VictimState of 1 with damage through is the commonest line in the
+/// whole log. It is arm 5 that words that, on `damage != 0`; strip the damage and the same state
+/// falls to this arm and says nothing. Answering `MISSED` here (which is what we did) invents a
+/// sentence the reference never prints.
+#[test]
+fn the_silent_victim_states_emit_no_melee_line() {
+    for state in [0, 1, 4, 9] {
+        assert!(
+            melee_family(0, state, 0, 0).is_none(),
+            "VictimState {state} must emit no line"
+        );
+    }
+    // The same states still word normally when an earlier arm claims them: the MISS bit, and
+    // state 1 with damage through.
+    assert!(melee_family(0x10, 0, 0, 0).is_some(), "the MISS bit wins");
+    assert!(melee_family(0, 1, 120, 0).is_some(), "a landed hit wins");
+    // Index 5 of the table is a `1`, and it is unreachable — a block is claimed by arm 2.
+    assert_eq!(melee_family(0, 5, 0, 0).map(|f| f.stem), Some("VSBLOCK"));
 }
 
 /// The melee msgType matrix, against `0x62a0d0`/`0x62a2e0` as decompiled and against wow-re's

@@ -107,7 +107,19 @@ pub struct AddonReport {
     /// `## Interface`, as written. 1.12 is `11200`; the corpus is full of older values, and we
     /// deliberately do not refuse them (decision 1191 §6).
     pub interface: Vec<u32>,
-    /// Did every file in its manifest load without an error?
+    /// **Did anything in its manifest RAISE, fail to parse, or drop a frame?**
+    ///
+    /// Not "did every entry resolve" — that is [`Self::absent_own_files`] and
+    /// [`Self::absent_foreign_files`], and it is a different question because the reference
+    /// answers it differently: a manifest line naming no file is `"Couldn't open %s"` in
+    /// FrameXML.log and the walk carries straight on (wow-re
+    /// `ui/scratch/xml-toc-path-resolution.md` §4, VERIFIED). An addon shipping an incomplete zip
+    /// *works* on a real client, so counting it here made the survey say the opposite of the truth
+    /// about 24 addons — FuBar itself among them, on two locale files it does not ship.
+    ///
+    /// **[`Self::errors`] is unchanged and still carries those rows verbatim** (1213), so every
+    /// number in every past record is still readable off it; what changed, deliberately and with
+    /// decision 2155 behind it, is which of them this flag counts. The report prints both.
     pub loaded: bool,
     /// Load errors, verbatim, tagged by file.
     pub errors: Vec<String>,
@@ -577,7 +589,7 @@ fn survey_one(
     // makes a high-water mark a valid cut of a log that also evicts and dedupes.
     let warn_mark = script.diagnostics().last().map_or(0, |d| d.seq);
 
-    let (errors, absent) = load_addon_files(&script, root, name, &toc);
+    let files = load_addon_files(&script, root, name, &toc);
     // The registry has to agree with the VM about what has loaded: the live walk stamps each
     // addon at `0x51f5ad`'s position (`ui_script::addons`'s `mark_addon_loaded`, just before
     // `ADDON_LOADED`), and without it here `IsAddOnLoaded` answered nil for an addon whose files
@@ -647,10 +659,10 @@ fn survey_one(
     AddonReport {
         name: name.to_string(),
         interface: toc.interface_versions(),
-        loaded: errors.is_empty(),
-        errors,
-        absent_own_files: absent.own,
-        absent_foreign_files: absent.foreign,
+        loaded: !files.raised,
+        errors: files.errors,
+        absent_own_files: files.absent.own,
+        absent_foreign_files: files.absent.foreign,
         missing_globals: wants.missing_globals,
         missing_deps,
         missing_templates,
@@ -1427,10 +1439,11 @@ fn missing_inherits(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> Ve
 /// tree hanging off them. An addon's real Lua often hangs off its XML rather than its `.toc`, the
 /// same trap the 1.12 corpus set in decision 1190.
 fn source_files(root: &Path, name: &str, toc: &Toc) -> Vec<String> {
+    let base = addon_base(name);
     let mut pending: Vec<String> = toc
         .files
         .iter()
-        .map(|f| benilla_ui::loader::join_ref(name, f))
+        .map(|f| benilla_ui::loader::join_ref(&base, f))
         .collect();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut out = Vec::new();
@@ -1864,23 +1877,40 @@ pub struct AbsentFiles {
     pub foreign: Vec<String>,
 }
 
+/// What one addon's manifest did: every load failure verbatim, which of them were files that
+/// simply are not there, and whether anything actually **raised**.
+struct FileLoad {
+    /// Every load failure, in order, unchanged in content and meaning (1213: `errors` is never
+    /// quietly shrunk — every past record's number is still readable off this list).
+    errors: Vec<String>,
+    /// The subset of [`Self::errors`] that is a named file the provider does not have, split by
+    /// whose package is incomplete.
+    absent: AbsentFiles,
+    /// **Did anything raise, fail to parse, or drop a frame** — the question
+    /// [`AddonReport::loaded`] asks (decision 2155).
+    ///
+    /// It is `false` for an addon whose only failures are absent files, because on the reference
+    /// that addon *loads*: `0x6edaa0` logs `"Couldn't open %s"` and returns null, and the walk
+    /// carries on to the next manifest entry with nothing raised (wow-re
+    /// `ui/scratch/xml-toc-path-resolution.md` §4, VERIFIED — the same rule 2107 unified for the
+    /// two loaders that reach it from Lua). Until this existed the survey scored 24 corpus addons
+    /// as not surviving a session start on nothing but a locale file their own zip omits, FuBar
+    /// and 22 of its plugins among them.
+    raised: bool,
+}
+
 /// Run the addon's manifest through the same two arms the real loader uses — `.lua` as a chunk,
-/// anything else as FrameXML — with the AddOns root as the provider's path space (decision 1186).
-///
-/// Returns the errors **and**, beside them, the split of which entries did not resolve. The
-/// absent ones are still in `errors` — 1213's rule, for the fifth time: this asks a new question
-/// and gets a new column, it does not quietly shrink an old one.
-fn load_addon_files(
-    script: &UiScript,
-    root: &Path,
-    name: &str,
-    toc: &Toc,
-) -> (Vec<String>, AbsentFiles) {
+/// anything else as FrameXML — in the client's **install-relative** path space (decision 2155:
+/// `Interface/AddOns/<Folder>`, exactly what `ui_script::addons::Addon::prefix` hands its own
+/// loader, so a chunk name here and a chunk name in a live session are the same string).
+fn load_addon_files(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> FileLoad {
     let provider = |req: &str| -> Option<Vec<u8>> { read_under(root, req) };
+    let base = addon_base(name);
     let mut errors = Vec::new();
     let mut absent = AbsentFiles::default();
+    let mut raised = false;
     for file in &toc.files {
-        let path = benilla_ui::loader::join_ref(name, file);
+        let path = benilla_ui::loader::join_ref(&base, file);
         let Some(bytes) = read_under(root, &path) else {
             errors.push(format!("{file}: not found"));
             // WHOSE package is incomplete. `join_ref` has already collapsed the `..`s the way the
@@ -1889,7 +1919,7 @@ fn load_addon_files(
             // inside the addon's own folder is the addon shipping a manifest it does not satisfy,
             // while one pointing out of it wants a neighbour that is not installed.
             let own = path
-                .strip_prefix(name)
+                .strip_prefix(base.as_str())
                 .is_some_and(|rest| rest.starts_with('/'));
             if own {
                 absent.own.push(file.clone());
@@ -1901,11 +1931,13 @@ fn load_addon_files(
         if is_lua(file) {
             // Named as the client names it, so the survey sees what a player would: an addon
             // that PARSES a traceback for its own folder (the whole FuBar family) needs the real
-            // `Interface\AddOns\<Folder>\<File>` shape, not mlua's Rust-caller default.
-            if let Err(e) =
-                script.run_chunk_named(&bytes, &benilla_ui::script::addon_chunk_name(name, file))
+            // `Interface\AddOns\<Folder>\<File>` shape, not mlua's Rust-caller default. Built
+            // from the RESOLVED path, like the loader's own `<Script file=>` naming — one rule,
+            // so the two doors into a VM cannot disagree about what a file is called (2155).
+            if let Err(e) = script.run_chunk_named(&bytes, &format!("@{}", path.replace('/', "\\")))
             {
                 errors.push(format!("{file}: {e}"));
+                raised = true;
             }
             continue;
         }
@@ -1918,12 +1950,39 @@ fn load_addon_files(
                 for w in report.warnings {
                     script.report_warning(&format!("{file}: {w}"));
                 }
+                // A file the DOCUMENT named and the provider does not have — the `.toc` arm's rule
+                // one level down (decision 2155). Recorded as absent, under the same own/foreign
+                // split, and never as something that raised: the reference logs `Couldn't open %s`
+                // for an `<Include>` and `Error loading %s` for a `<Script file=>`, and carries on.
+                for m in report.missing_files {
+                    let own = m
+                        .split_once("no provider hit for \"")
+                        .and_then(|(_, rest)| rest.split_once('"'))
+                        .is_some_and(|(p, _)| {
+                            p.strip_prefix(base.as_str())
+                                .is_some_and(|r| r.starts_with('/'))
+                        });
+                    errors.push(format!("{file}: {m}"));
+                    if own {
+                        absent.own.push(format!("{file}: {m}"));
+                    } else {
+                        absent.foreign.push(format!("{file}: {m}"));
+                    }
+                }
+                raised |= !report.errors.is_empty();
                 errors.extend(report.errors.into_iter().map(|e| format!("{file}: {e}")));
             }
-            Err(e) => errors.push(format!("{file}: {e}")),
+            Err(e) => {
+                errors.push(format!("{file}: {e}"));
+                raised = true;
+            }
         }
     }
-    (errors, absent)
+    FileLoad {
+        errors,
+        absent,
+        raised,
+    }
 }
 
 fn is_lua(entry: &str) -> bool {
@@ -1935,7 +1994,14 @@ fn is_lua(entry: &str) -> bool {
         .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("lua"))
 }
 
-/// `root/rel`, refusing to escape — the same lexical AddOns-root sandbox the loader applies.
+/// One addon file, read **through the client's own reader** — the loose AddOns tree, then the
+/// player's patch chain ([`crate::ui_script::addons::read_addon_file`], decision 2155).
+///
+/// It delegates rather than re-implementing, and that is the whole point of it still existing as a
+/// name: this was a private copy of the loader's `read_under`, and a copy of a resolution rule is
+/// a copy that drifts. It had already drifted — the client resolves `..\Blizzard_AuctionUI\…`
+/// and `..\..\FrameXML\…` off the chain and this could not, so the survey reported two addon
+/// families as broken packages when the miss was the instrument's.
 ///
 /// **Bytes, like the loader's** (decision 1193). Until then this function carried a private
 /// lossy-UTF-8 + BOM-strip of its own, so the harness could survey files the *client* refused to
@@ -1943,14 +2009,16 @@ fn is_lua(entry: &str) -> bool {
 /// round. The client reads bytes now, so the harness can simply read bytes too, and the one place
 /// that still needs text ([`read_text`]) says so.
 fn read_under(root: &Path, rel: &str) -> Option<Vec<u8>> {
-    let rel = Path::new(rel);
-    if rel
-        .components()
-        .any(|c| !matches!(c, std::path::Component::Normal(_)))
-    {
-        return None;
-    }
-    std::fs::read(root.join(rel)).ok()
+    crate::ui_script::addons::read_addon_file(root, rel)
+}
+
+/// Where one addon's files sit in the install's path space — `Interface/AddOns/<Folder>`.
+///
+/// The survey's copy of [`crate::ui_script::addons::Addon::prefix`], and it must stay its copy:
+/// every path this module builds is handed to the same reader and named by the same rule, so a
+/// divergence here is a survey measuring a client nobody runs.
+fn addon_base(name: &str) -> String {
+    format!("Interface/AddOns/{name}")
 }
 
 /// [`read_under`] for the **source scanner**, which greps text rather than running it.
@@ -3908,9 +3976,11 @@ mod dependency_tests {
         let wants = of("WantsNeighbour");
         assert_eq!(
             wants.absent_foreign_files,
-            vec!["NotInstalled/templates.xml".to_string()],
+            vec!["Interface/AddOns/NotInstalled/templates.xml".to_string()],
             "`..` is collapsed the way the client collapses it, and the RESOLVED path is what is \
-             reported — the collapse is the interesting half"
+             reported — the collapse is the interesting half. The path is INSTALL-relative since \
+             2155, which is the space the reference's file layer is actually handed: this exact \
+             shape is Auctioneer's, and its real neighbour resolves off the chain now."
         );
         assert!(
             wants.absent_own_files.is_empty(),
@@ -3918,13 +3988,21 @@ mod dependency_tests {
             wants.absent_own_files
         );
 
-        // NOTHING is subtracted. Both are still load failures, still in `errors`, still counted
-        // in every headline — the split is a new column beside them, never a quieter old one.
+        // **NOTHING is subtracted from `errors`** (1213) — both rows are still there, verbatim, so
+        // every figure any past record quoted is still readable off this list. What changed in
+        // 2155 is which of them `loaded` counts: on the reference these addons LOAD, because
+        // `0x6edaa0` logs `Couldn't open %s` and the walk carries on with nothing raised
+        // (`ui/scratch/xml-toc-path-resolution.md` §4). Both halves are asserted together,
+        // because either one alone is a rule that has already been got wrong in both directions.
         for r in [short, wants] {
-            assert!(!r.loaded, "{}: still a load failure", r.name);
+            assert!(
+                r.loaded,
+                "{}: a file the package does not contain is not something that RAISED",
+                r.name
+            );
             assert!(
                 r.errors.iter().any(|e| e.contains("not found")),
-                "{}: the error is still there verbatim: {:?}",
+                "{}: …and the row is still there verbatim: {:?}",
                 r.name,
                 r.errors
             );

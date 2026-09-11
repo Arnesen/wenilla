@@ -425,20 +425,129 @@ mod loader_tests {
             .unwrap());
     }
 
-    /// A missing include is an **error**, and the rest of the load still proceeds.
+    /// **An unrecognised `frameStrata=` warns and skips; the frame keeps the stratum it had, and
+    /// the rest of the document loads** (decision 2160).
     ///
-    /// It was a warning until decision 1186. The load-and-continue half is unchanged and faithful
-    /// (0068: the client logs and carries on) — what changed is the *reporting*, because a warning
-    /// is not in the value callers assert on. Bagnon missed all eleven of its references and came
-    /// back with zero errors, which read as a clean load of an addon that had built nothing.
+    /// The two doors differ in the reference and this is the quiet one. `CSimpleFrame::LoadXML
+    /// 0x769820` resolves through `0x6f17d0`, whose miss returns 0 without writing the out-param;
+    /// the miss leg pushes `"Frame %s: Unknown frame strata: %s"` at severity 1 into the document
+    /// sink (`0x7699a4`, a call that returns) and reconverges with the hit path at `0x7699ad`,
+    /// never reaching `SetFrameStrata 0x76a470`. `EQL3`'s `EQL3_Log.xml` carries the literal case:
+    /// `<Frame frameStrata="ARTWORK">`, a draw-LAYER name where a strata belongs.
     #[test]
-    fn missing_include_errors_and_continues() {
+    fn an_unknown_xml_frame_strata_warns_and_leaves_the_stratum_alone() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                 <Frame name="Bad" frameStrata="ARTWORK"/>
+                 <Frame name="After"/>
+               </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(
+            report.errors.is_empty(),
+            "nothing raised on the XML door: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unknown frame strata") && w.contains("ARTWORK")),
+            "…and it is reported: {report:?}"
+        );
+        assert_eq!(
+            s.eval::<String>("return Bad:GetFrameStrata()").unwrap(),
+            "MEDIUM",
+            "the frame keeps what it had — the ctor's MEDIUM ([+0xc0] = 3) in the base case"
+        );
+        assert!(
+            s.eval::<bool>("return After ~= nil").unwrap(),
+            "and the document carries on"
+        );
+    }
+
+    /// **The Lua door is the LOUD one and stays that way.** `SetFrameStrata 0x774360`'s miss
+    /// reaches `0x774456 call 0x6f4940` (`luaL_error`), whose chain `luaG_errormsg 0x6fc780` /
+    /// `luaD_throw 0x6f5d80` contains no `ret` at all — the epilogue after it is dead code. Pinned
+    /// beside its XML twin so the asymmetry is a test rather than a comment.
+    #[test]
+    fn the_lua_setframestrata_still_raises_on_the_same_value() {
+        let s = UiScript::new().unwrap();
+        s.run(r#"f = CreateFrame("Frame", "Loud")"#).unwrap();
+        let err = s
+            .run(r#"f:SetFrameStrata("ARTWORK")"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ARTWORK"), "{err}");
+    }
+
+    /// **`FrameXML_Debug` is a get-or-set whose SET arm turns on the loader's trace lines**
+    /// (decision 2160) — and `0` takes the SET arm, because the number zero is Lua-truthy and only
+    /// `nil`/`false` are not (`0x48845d`, after `lua_toboolean 0x6f34d0`). That is the half a
+    /// re-implementation gets backwards, so it is the half asserted first.
+    #[test]
+    fn framexml_debug_is_a_get_or_set_and_gates_the_loader_traces() {
+        let s = UiScript::new().unwrap();
+        let doc = || parse(r#"<Ui><Frame name="Traced"/></Ui>"#);
+
+        assert_eq!(
+            s.eval::<i32>("return FrameXML_Debug()").unwrap(),
+            0,
+            "boots 0"
+        );
+        assert!(
+            load(&s, &doc(), &no_files).traces.is_empty(),
+            "and off means no trace at all"
+        );
+
+        assert_eq!(s.eval::<i32>("return FrameXML_Debug(1)").unwrap(), 1);
+        let on = load(&s, &doc(), &no_files);
+        assert!(
+            on.traces
+                .iter()
+                .any(|t| t.contains("Creating Frame named Traced")),
+            "{on:?}"
+        );
+
+        // The two arms that are easy to get wrong.
+        assert_eq!(
+            s.eval::<i32>("return FrameXML_Debug(nil)").unwrap(),
+            1,
+            "nil is a pure GET — the flag is untouched"
+        );
+        assert_eq!(
+            s.eval::<i32>("return FrameXML_Debug(0)").unwrap(),
+            0,
+            "…but 0 is TRUTHY in Lua, so it really does disable it"
+        );
+        assert!(load(&s, &doc(), &no_files).traces.is_empty());
+        // …and the stored value is truncated toward zero, `0x40a2b0`'s conversion.
+        assert_eq!(s.eval::<i32>("return FrameXML_Debug(1.9)").unwrap(), 1);
+    }
+
+    /// A missing include is **reported, not raised**, and the rest of the load still proceeds.
+    ///
+    /// It was a warning until 1186 and an error from 1186 to 2155; it is now its own list. Both of
+    /// the findings behind those moves are asserted here, because each undid the other:
+    /// **1186's** — a document that resolved *nothing* must not report success (Bagnon missed all
+    /// eleven of its references and came back with zero errors) — so the row is in the report; and
+    /// **2155's** — the reference logs `Couldn't open %s` and carries on with nothing raised
+    /// (wow-re `ui/scratch/xml-toc-path-resolution.md` §4, VERIFIED) — so the row is *not* in
+    /// `errors`, which is the list whose entries reach the player's red error dialog.
+    #[test]
+    fn missing_include_is_a_missing_file_not_an_error_and_continues() {
         let s = UiScript::new().unwrap();
         let doc = parse(r#"<Ui><Include file="Nope.xml"/><Frame name="Still"/></Ui>"#);
         let report = load(&s, &doc, &no_files);
         assert!(
-            report.errors.iter().any(|e| e.contains("Nope.xml")),
-            "an unresolved include drops a whole document: {:?}",
+            report.missing_files.iter().any(|e| e.contains("Nope.xml")),
+            "an unresolved include drops a whole document and says so: {report:?}"
+        );
+        assert!(
+            report.errors.is_empty(),
+            "…but nothing raised, so it is not a script error: {:?}",
             report.errors
         );
         assert!(
@@ -447,17 +556,38 @@ mod loader_tests {
         );
     }
 
-    /// So is a missing `<Script file=>` — it drops every handler the file would have defined.
+    /// So is a missing `<Script file=>` — it drops every handler the file would have defined, and
+    /// the reference's own leg for it (`"Error loading %s"`, `include-lua-dispatch.md` §7) returns
+    /// normally rather than throwing.
     #[test]
-    fn missing_script_file_errors_and_continues() {
+    fn missing_script_file_is_a_missing_file_not_an_error_and_continues() {
         let s = UiScript::new().unwrap();
         let doc = parse(r#"<Ui><Script file="Nope.lua"/><Frame name="Still"/></Ui>"#);
         let report = load(&s, &doc, &no_files);
         assert!(
-            report.errors.iter().any(|e| e.contains("Nope.lua")),
-            "{:?}",
-            report.errors
+            report.missing_files.iter().any(|e| e.contains("Nope.lua")),
+            "{report:?}"
         );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(s.eval::<bool>("return Still ~= nil").unwrap());
+    }
+
+    /// **A `<Script file=>` whose chunk RAISES is still an error** — the half `missing_files` must
+    /// not swallow. The two arms sit one line apart in `load_in`, and folding a miss into the
+    /// quiet list is only correct because the raise keeps its own.
+    #[test]
+    fn a_script_file_that_raises_is_still_an_error() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(r#"<Ui><Script file="Boom.lua"/><Frame name="Still"/></Ui>"#);
+        let files = |req: &str| -> Option<Vec<u8>> {
+            (req == "Boom.lua").then(|| b"error('boom')".to_vec())
+        };
+        let report = load(&s, &doc, &files);
+        assert!(
+            report.errors.iter().any(|e| e.contains("Boom.lua")),
+            "a chunk that raised is an error, not a missing file: {report:?}"
+        );
+        assert!(report.missing_files.is_empty(), "{report:?}");
         assert!(s.eval::<bool>("return Still ~= nil").unwrap());
     }
 

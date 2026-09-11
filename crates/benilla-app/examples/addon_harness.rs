@@ -383,6 +383,18 @@ fn main() {
         "  loaded without a single load error : {loaded}/{}",
         reports.len()
     );
+    // **The reconciliation line, printed always** (decision 2155). `loaded` counts what RAISED;
+    // a manifest entry naming a file the package does not contain is not that — the reference logs
+    // `Couldn't open %s` and carries on — and it used to be counted here. Every past record's
+    // figure was the stricter one, so the stricter one is printed beside the honest one rather
+    // than left for a reader to reconstruct: two numbers cannot be silently confused, one can.
+    let strict = reports.iter().filter(|r| r.errors.is_empty()).count();
+    println!(
+        "      (…{} of those name a file their own package does not contain, which the reference \
+         logs and carries on from; the pre-2155 column counted those as failures: {strict}/{})",
+        loaded - strict,
+        reports.len()
+    );
     println!(
         "  ...and calling nothing we lack     : {clean}/{}",
         reports.len()

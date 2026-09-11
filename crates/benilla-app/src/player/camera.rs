@@ -928,6 +928,17 @@ impl WorldMouse {
 pub(super) fn latch_world_mouse(
     buttons: Res<ButtonInput<MouseButton>>,
     pointer_over_ui: Res<PointerOverUi>,
+    // **A V-plate is UI the camera looks straight through** (decision 2148). Plates became real
+    // mouse-enabled widgets, so the pointer inside one makes `PointerOverUi` true — which is right
+    // for the world PICK (the plate publishes the mouseover itself, and its click selects) and
+    // wrong for the camera: a drag that begins over a plate has to turn the view, or nameplates
+    // become dead patches you cannot swing the camera from. The reference says the same thing from
+    // the other end — entering freelook DISABLES plate mouse input (`0x60f830`, from `0x483e80`),
+    // a toggle that would have nothing to do if a press on a plate could not reach freelook.
+    //
+    // The click does NOT leak through with it: `PlayerUiClickConsumed` still suppresses the
+    // `WorldClick`/`WorldRightClick` below, so a plate click stays the plate's own.
+    plate_hover: Res<crate::vplates::PlateHover>,
     mut rig: ResMut<CameraControl>,
     cameras: Query<&Camera, With<FlyCam>>,
     window: Single<&Window, With<PrimaryWindow>>,
@@ -935,8 +946,8 @@ pub(super) fn latch_world_mouse(
     let Ok(camera) = cameras.single() else {
         return;
     };
-    let world_press =
-        rig.look.is_some() || (cursor_in_viewport(&window, camera) && !pointer_over_ui.0);
+    let over_ui = pointer_over_ui.0 && plate_hover.0.is_none();
+    let world_press = rig.look.is_some() || (cursor_in_viewport(&window, camera) && !over_ui);
     rig.world_mouse.update(&buttons, world_press);
 }
 

@@ -169,6 +169,7 @@ pub(super) fn attacker_state(
         hit_info: s.hit_info,
         victim_state: s.victim_state,
         damage: s.damage,
+        displayed: s.displayed(),
         seq,
     };
     if let Some(&e) = index.0.get(&s.attacker) {

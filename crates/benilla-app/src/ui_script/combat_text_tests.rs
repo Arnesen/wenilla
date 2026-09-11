@@ -329,3 +329,41 @@ fn combat_text_master_toggle_unregisters() {
     assert!(none, "disabled: nothing paints ({:?})", s.errors());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **`DAMAGE_TEXT_FONT` is a Lua global the engine reads, not a hardcoded face** (decision 2156).
+///
+/// `0x6c847c` is the only instruction in `WoW.exe` that reads it, through `FrameScript_GetText`'s
+/// fast arm into a plain `lua_gettable(LUA_GLOBALSINDEX)` — so whatever is in the global when the
+/// world-entry load edge closes is what the numbers draw in. Stock `Fonts.xml` puts Friz there;
+/// MikScrollingBattleText and pfUI put their own face there at `ADDON_LOADED`, which the reference
+/// reads because `0x6c8470` runs *after* the addon load, not at CRT init as three wow-re notes
+/// had it.
+///
+/// Skips without client data.
+#[test]
+fn the_damage_text_font_is_read_from_the_lua_global() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let _ = data;
+    let s = UiScript::new().unwrap();
+
+    // Before anything assigns it, there is nothing to bind — the reference's `0x704350` failure
+    // block leaves `0x703bf0`'s pre-seeded `""`, and an empty name is what the font factory's own
+    // guard rejects.
+    assert_eq!(crate::combat_text::read_damage_text_font(&s).0, None);
+
+    // Stock FrameXML, off the player's own chain: `Fonts.xml:6`.
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    assert_eq!(
+        crate::combat_text::read_damage_text_font(&s).0.as_deref(),
+        Some("Fonts\\FRIZQT__.TTF"),
+    );
+
+    // An addon assigning it at ADDON_LOADED — MikScrollingBattleText's line 255, in shape.
+    s.run(r#"DAMAGE_TEXT_FONT = "Interface\\AddOns\\MSBT\\Fonts\\Adventure.ttf""#)
+        .expect("the assignment runs");
+    assert_eq!(
+        crate::combat_text::read_damage_text_font(&s).0.as_deref(),
+        Some("Interface\\AddOns\\MSBT\\Fonts\\Adventure.ttf"),
+        "the addon's face, not Friz"
+    );
+}

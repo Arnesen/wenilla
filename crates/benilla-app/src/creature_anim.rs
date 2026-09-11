@@ -645,6 +645,12 @@ pub(crate) struct SwingMessage {
     /// 7 immune · 8 deflects (decision 0279's byte-verified consequence table keys off it).
     pub(crate) victim_state: u32,
     pub(crate) damage: u32,
+    /// `0x625e40`'s verdict, carried from the packet because **the floating number is gated by it
+    /// too** ([`benilla_protocol::messages::AttackerState::displayed`]): `0x62440d` is the first
+    /// thing the worldtext builder `0x6243e0` does. Everything else this message drives — the
+    /// animation, the flinch, the blood, the sounds, the timers — runs regardless, which is why
+    /// the verdict rides along instead of suppressing the message.
+    pub(crate) displayed: bool,
     /// [`PlaySeq`] stamp at emission (the wire drain, in packet order).
     pub(crate) seq: u64,
 }

@@ -61,6 +61,38 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set("IsMacClient", lua.create_function(|_, ()| Ok(Value::Nil))?)?;
 
+    // **`FrameXML_Debug([v])` — the XML loader's own trace switch, get-or-set** (decision 2160,
+    // wow-re `ui/scratch/framexml-debug-trace-flag.md`). `0x488440` reads the global `[0xceea30]`
+    // through `0x6edb40`, and:
+    //
+    // - a **Lua-truthy** argument takes the SET arm (`0x48845d je` after `lua_toboolean 0x6f34d0`)
+    //   — so `FrameXML_Debug(0)` genuinely disables it rather than being a masked no-op, because
+    //   the NUMBER zero is truthy in Lua; only `nil`/`false` are not;
+    // - the stored value is `lua_tonumber` truncated **toward zero** (`0x40a2b0`), so `1.9` is 1
+    //   and a non-numeric string is 0, which is 5.0's `tonumber` coercion;
+    // - an absent, nil or false argument is a pure GET and leaves the flag alone;
+    // - it always returns ONE number — the flag's value *after* the call
+    //   (`re/audit/binding-shapes.tsv`: `argc 1 exact, returns 1, (number), agree`).
+    //
+    // The reference ships a call to it commented out in its own `BasicControls.xml:20`; the
+    // corpus's consumer is `ImprovedErrorFrame`, which drives it off a saved `XMLDebug` CVar at
+    // its OnLoad and died on the missing global. What it gates is
+    // [`crate::loader::LoadReport::traces`].
+    g.set(
+        "FrameXML_Debug",
+        lua.create_function(|lua, v: Value| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let truthy = !matches!(v, Value::Nil | Value::Boolean(false));
+            if truthy {
+                // `lua_tonumber`'s coercion, then truncate toward zero. Anything that will not
+                // coerce is 0 — the same answer `0x6f3620` gives for a non-numeric argument.
+                let n = lua.coerce_number(v)?.unwrap_or(0.0);
+                model.framexml_debug.set(n.trunc() as i32);
+            }
+            Ok(model.framexml_debug.get())
+        })?,
+    )?;
+
     // version, build, date — three, and no fourth (decision 1842)
     g.set(
         "GetBuildInfo",
