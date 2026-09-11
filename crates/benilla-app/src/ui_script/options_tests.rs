@@ -4396,59 +4396,11 @@ const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
          koKR (`0x603374` selects on the locale index), so stock West ships it OFF",
     ),
     (
-        "UnitNamePlayerGuild",
-        "the `\\n<%s>` guild line in the OVERHEAD name stack — slot a5 of `0x608f50`, gated by bit \
-         `0x10` of the render mask `[0xce8720]`, player branch only, text from `0x5e09f0` through \
-         the WGLD guild-identity cache. NOT the V-key nameplate (`ShouldShowName 0x6070a0` \
-         returns 0 whenever a plate frame is live) and NOT the tooltip (FrameXML's own \
-         `GetGuildInfo`). The data resolves here now — `ui_guild::GuildState` serves \
-         `GetGuildInfo` — so what is missing is the third line in `nameplates::drive_nameplates` \
-         plus its `lines_current` comparator arm and that comparator's differential test",
-    ),
-    (
         "UnitNamePlayerPVPTitle",
         "the PvP rank prefix on the overhead name line — slot a4 of `0x608f50`, bit `0x20` of the \
          same mask, resolved by `0x609370` through the `PVP_RANK_%d_%d` GlobalStrings key. Blocked \
          one step further back than its guild twin: the rank byte streams, but the key's second \
          index is a FACTION SIDE that `ui_unit` does not resolve for an arbitrary player yet",
-    ),
-    (
-        "cameraTerrainTilt",
-        "the camera's ground-pitch channel. VERIFIED end to end by the §5 round this work \
-         dispatched (wow-re `ui/scratch/camera-cvar-gates.md`): the CVar gates predicate \
-         `0x5105a0`, whose false leg zeroes `[cam+0xa0]` at `0x50d922` and skips both `0x672170` \
-         terrain raycasts; `0x50d900` forms `slope = (Δz + 5/3)/√(Δx²+Δy²)`, walks the 10-entry \
-         slope→pitch table at `0x808a40`, clamps ±20°, throttled to 100 ms. Registered \"0\", so \
-         building it changes nothing until a player asks",
-    ),
-    (
-        "cameraBobbing",
-        "head bob. VERIFIED by the same §5 round, including the threshold nobody had read: \
-         `[0x8089ac] = 1/6` is a camera DISTANCE and the compare is inclusive, so head bob is \
-         FIRST-PERSON ONLY. `0x511920` computes `ampH/ampV` from the two amplitude CVars × 1/36, \
-         `speed = clamp(moveSpeed/7.2, [0.5,1.5])`, horizontal at `freq` and vertical at `2×freq`, \
-         into the same eye-translation accumulator as the shake; `0x5106f0` is the DECAY \
-         predicate and fades the residual rather than snapping it. Registered \"0\"",
-    ),
-    (
-        "cameraWaterCollision",
-        "two consumers, both VERIFIED by the §5 round. (1) the collision sweep's class mask \
-         becomes `0x1f0171` instead of `0x100171` — the `0xf0000` nibble is the ADT liquid layers \
-         — and `0x511ad0`'s bands re-base the pivot floor/cap. (2) a band CROSSING (not a level \
-         test: `0x50eb14` snapshots the previous frame's bits before `0x511ad0` rewrites them) \
-         arms a 5° pitch through the `+0xf4` channel. Registered \"1\", so this one is ON in the \
-         reference and benilla is the divergence — but the eye/arm verdict of \
-         `camera-arm-liquid-blind.md` still stands: it is the PIVOT that is liquid-aware",
-    ),
-    (
-        "cameraPivot",
-        "smart pivot. VERIFIED by the §5 round, which also corrected the ±89° claim: predicate \
-         `0x510690` is `enabled ∧ TYPEMASK_UNIT ∧ not moving/strafing (`&0xf`, so turning in place \
-         passes) ∧ pitched down ∧ the collision solver's own clip flags `0x30000` nonzero` — i.e. \
-         it only engages in a frame the camera was ACTUALLY clipped. A mostly-vertical drag then \
-         routes into the pitch-BIAS channel `cam+0x104` instead of the pitch integrator, with a \
-         one-sided floor, and `0x5107f0` eases it back at `cameraTargetSmoothSpeed` when the \
-         predicate drops. Registered \"1\"",
     ),
     // **The SLIDERS' half is empty, and that is the point.** 2115 extended this census from
     // `UIOptionsFrameCheckButtons` to `UIOptionsFrameSliders` and it caught exactly one row —

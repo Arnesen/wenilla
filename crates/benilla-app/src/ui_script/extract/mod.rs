@@ -394,6 +394,7 @@ fn verify_splice(
     s: f32,
     w: f32,
     h: f32,
+    dpi: f32,
     assets: &mut Option<ResMut<WorldAssets>>,
     images: &mut Assets<Image>,
     font_atlas: &mut Option<ResMut<UiFontAtlas>>,
@@ -411,6 +412,7 @@ fn verify_splice(
             s,
             w,
             h,
+            dpi,
             assets,
             images,
             font_atlas,
@@ -1001,6 +1003,7 @@ pub(super) fn drive_script(
                 s,
                 w,
                 h,
+                dpi,
                 &mut assets,
                 &mut images,
                 &mut font_atlas,
@@ -1092,6 +1095,7 @@ pub(super) fn drive_script(
                 s,
                 w,
                 h,
+                dpi,
                 &mut assets,
                 &mut images,
                 &mut font_atlas,
@@ -1153,6 +1157,7 @@ pub(super) fn drive_script(
             s,
             w,
             h,
+            dpi,
             &mut assets,
             &mut images,
             &mut font_atlas,
@@ -1281,6 +1286,9 @@ fn convert_entry(
     // particle unit run on the screen diagonal (decision 2013).
     w: f32,
     h: f32,
+    // The window's DEVICE scale, for the one arm that resamples its art to physical pixels: the
+    // nameplate border's 0188 sharpen, which is a no-op at any other size.
+    dpi: f32,
     assets: &mut Option<ResMut<WorldAssets>>,
     images: &mut Assets<Image>,
     font_atlas: &mut Option<ResMut<UiFontAtlas>>,
@@ -1587,7 +1595,22 @@ fn convert_entry(
                     // generated 128×64 / 128×32 image — white RGB carrying the emblem BLP's own
                     // alpha — into the Texture the setter was handed; the region carries that as
                     // a token path and the resolver builds exactly that image.
-                    let resolved = if let Some(blp) = benilla_ui::script::emblem_mask_path(p) {
+                    let resolved = if p == benilla_ui::script::nameplate::BORDER_TEXTURE {
+                        // The V-plate's frame art, resampled to the quad's exact PHYSICAL size
+                        // with the sharp kernel instead of GPU-magnified (0188 — the director's
+                        // "sharpen the same frame", carried across decision 2148's move of the
+                        // plate into the frame system). Keyed by that size, so it re-rasterises on
+                        // a resize and is a cache hit on every frame in between. An addon that
+                        // blanks the border with `SetTexture("")` never reaches here at all: the
+                        // path is gone, and the arm above draws nothing.
+                        let px = |v: f32| (v * dpi).round().max(1.0) as u32;
+                        a.resampled_sprite(
+                            p,
+                            (px(rect.width()), px(rect.height())),
+                            images,
+                            crate::vplates::border::resample_sharp,
+                        )
+                    } else if let Some(blp) = benilla_ui::script::emblem_mask_path(p) {
                         a.emblem_mask_texture(blp, images)
                     } else if circular {
                         a.portrait_texture(p, images)

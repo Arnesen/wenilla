@@ -28,6 +28,7 @@ mod model_clock;
 mod modelframe;
 mod movable;
 mod name_targets;
+mod nameplate;
 mod object_model;
 mod reference_surface;
 mod region_map;

@@ -1619,6 +1619,11 @@ pub(crate) struct Model {
     /// The world-map seam ([`worldmap`](super::worldmap)): the pushed catalog/feed + the
     /// engine-owned selection.
     pub(crate) worldmap: super::worldmap::WorldMapState,
+    /// The V-key nameplate pool — engine-owned `Button` widgets under the `WorldFrame`, grown on
+    /// demand and never shrunk, in creation order (decision 2148). Lives here rather than on
+    /// [`super::UiScript`] because it IS model state: the plates are arena frames, and an addon
+    /// walking `WorldFrame:GetChildren()` reaches them like any other.
+    pub(crate) nameplates: super::nameplate::NamePlates,
     /// The always-up world-state readout's rows ([`worldstate`](super::worldstate)), already
     /// gated and resolved app-side.
     pub(crate) worldstate: super::worldstate::WorldStateUiState,
@@ -2139,6 +2144,7 @@ impl Model {
             quest_log_watched: Vec::new(),
             server_unix_time: None,
             worldmap: super::worldmap::WorldMapState::default(),
+            nameplates: super::nameplate::NamePlates::default(),
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
             cursor_pos: (0.0, 0.0),

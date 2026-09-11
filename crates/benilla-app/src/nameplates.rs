@@ -47,11 +47,26 @@
 //!   byte leg is a flagged pin); players → `UnitNamePlayer` (default ON); NPCs → `UnitNameNPC`
 //!   and own → `UnitNameOwn` (both default OFF, the binary's own — see [`NameConfig`]).
 //! - **Lines** (`0x608f50`): NPC = name + `<Subname>` (an empty wire subname is no line); player =
-//!   [flag prefixes +] name (guild/PVP-title lines wait on data that doesn't stream yet). The
-//!   prefixes are the a1–a3 vtable-slot decorations of the line stack (`+0x7c/+0x80/+0x84`),
-//!   glued straight onto the name by the `%s%s…` assembly — `<AFK>`/`<DND>`/`<GM>` in that slot
-//!   order from `PLAYER_FLAGS` (see [`flag_prefix`]; byte-verified, wow-re Q4a). The trio is
-//!   unique to the overhead name binary-wide (`CHAT_FLAG_GM`'s only xref is the a3 slot).
+//!   [flag prefixes +] name + `<Guild>`. The prefixes are the a1–a3 vtable-slot decorations of the
+//!   line stack (`+0x7c/+0x80/+0x84`), glued straight onto the name by the `%s%s…` assembly —
+//!   `<AFK>`/`<DND>`/`<GM>` in that slot order from `PLAYER_FLAGS` (see [`flag_prefix`];
+//!   byte-verified, wow-re Q4a). The trio is unique to the overhead name binary-wide
+//!   (`CHAT_FLAG_GM`'s only xref is the a3 slot).
+//!
+//!   **The guild line is a5 and the subname line is a6, and the two can never both appear** —
+//!   wow-re Q4's *branch exclusivity*, VERIFIED: the player branch emits a1–3 · a4 · a5 · a8 and
+//!   never reaches a6/a7; the NPC branch emits a1–3 · a4 · a6 · a7 and never reaches a5/a8. Both
+//!   slots share the one format string `"\n<%s>"` (`0x860f9c`), so one `Option<&str>` carries
+//!   whichever the unit's branch supplies ([`lines_current`]'s `bracketed`). a5 alone is
+//!   CVar-gated — mask bit `0x10`, `UnitNamePlayerGuild`, registered `"1"` (`0x609085`); the
+//!   guild NAME comes from the identity cache `GetGuildInfo` reads
+//!   ([`crate::ui_guild::unit_guild_name`]), so an unqueried guild draws no line and the line
+//!   appears when the query answers.
+//!
+//!   **Still absent, and it is a5's twin:** a4's PvP rank/title prefix (`UnitNamePlayerPVPTitle`,
+//!   bit `0x20`) — the rank byte streams, but `PVP_RANK_%d_%d`'s second index is a faction side
+//!   `ui_unit` does not resolve for an arbitrary player yet. a7 (the NPC relationship line) and a8
+//!   (the foreign-server label) have no cross-realm wire here at all.
 
 use std::collections::HashMap;
 
@@ -90,6 +105,10 @@ pub(crate) struct NameConfig {
     pub(crate) player: bool,
     pub(crate) npc: bool,
     pub(crate) own: bool,
+    /// `UnitNamePlayerGuild` — mask bit `0x10`, registered `"1"`. Unlike the trio above this one
+    /// does **not** gate a whole name: it gates one *line* of the player stack (`0x609085`, the a5
+    /// slot), which is why it reads at the line build rather than in the show ladder.
+    pub(crate) player_guild: bool,
 }
 
 impl Default for NameConfig {
@@ -98,6 +117,7 @@ impl Default for NameConfig {
             player: true,
             npc: false,
             own: false,
+            player_guild: true,
         }
     }
 }
@@ -129,8 +149,14 @@ fn flag_prefix(player_flags: u32) -> String {
 /// these inputs — compared in place, because the steady frame must not allocate three strings per
 /// shown unit just to learn nothing changed. Equivalent to string equality against the built stack
 /// (the differential test pins it): line 0 is the set [`FLAG_PREFIXES`] tags in slot order glued
-/// onto the name, line 1 the `<{sub}>` decoration when a subname shows.
-fn lines_current(cached: &[String], player_flags: u32, name: &str, sub: Option<&str>) -> bool {
+/// onto the name, line 1 the `<{bracketed}>` decoration — the a5 guild line for a player, the a6
+/// subname line for an NPC, never both (the module doc's branch exclusivity).
+fn lines_current(
+    cached: &[String],
+    player_flags: u32,
+    name: &str,
+    bracketed: Option<&str>,
+) -> bool {
     let name_line = |line: &str| {
         let mut rest = line;
         for (bit, tag) in FLAG_PREFIXES {
@@ -143,14 +169,14 @@ fn lines_current(cached: &[String], player_flags: u32, name: &str, sub: Option<&
         }
         rest == name
     };
-    match (cached, sub) {
+    match (cached, bracketed) {
         ([l0], None) => name_line(l0),
-        ([l0, l1], Some(sub)) => {
+        ([l0, l1], Some(bracketed)) => {
             name_line(l0)
                 && l1
                     .strip_prefix('<')
                     .and_then(|r| r.strip_suffix('>'))
-                    .is_some_and(|r| r == sub)
+                    .is_some_and(|r| r == bracketed)
         }
         _ => false,
     }
@@ -385,6 +411,9 @@ pub(crate) fn drive_nameplates(
         Res<NameConfig>,
     ),
     mut names: ResMut<NameCache>,
+    // The guild-identity cache (1257) — the a5 line's text, and the lazy `CMSG_GUILD_QUERY` a
+    // miss sends. `ResMut` because the read IS the ask ([`crate::ui_guild::unit_guild_name`]).
+    mut guilds: ResMut<crate::ui_guild::GuildState>,
     net_commands: Res<NetCommands>,
     factions: Option<Res<Factions>>,
     reputations: Res<Reputations>,
@@ -551,14 +580,19 @@ pub(crate) fn drive_nameplates(
         } else {
             flags
         };
-        let sub = if net.kind == EntityKind::Unit {
-            benilla_protocol::guid::entry(guid.0)
+        // The one `"\n<%s>"` slot: a6 (the creature subtitle) on the NPC branch, a5 (the guild)
+        // on the player branch — never both, and never in the other's branch (the module doc's
+        // branch exclusivity, wow-re Q4, VERIFIED). a5 is the only one of the two that a CVar
+        // gates: mask bit `0x10` at `0x609085`.
+        let bracketed = match net.kind {
+            EntityKind::Unit => benilla_protocol::guid::entry(guid.0)
                 .and_then(|e| names.creature_subname(e))
                 // vmangos ships "" (present-but-empty) for most templates — an empty wire
                 // subname is NO subname, never an empty `<>` line.
-                .filter(|s| !s.trim().is_empty())
-        } else {
-            None
+                .filter(|s| !s.trim().is_empty()),
+            EntityKind::Player if name_cfg.player_guild => store
+                .and_then(|s| crate::ui_guild::unit_guild_name(&s.0, &mut guilds, &net_commands)),
+            _ => None,
         };
         // The color: the ring's byte-verified rank + the shared palette selector.
         let rank = ring_reaction(
@@ -592,7 +626,7 @@ pub(crate) fn drive_nameplates(
             // The steady frame — very nearly all of them — compares the cached stack in place
             // ([`lines_current`]): the line stack used to be BUILT here (three allocations per
             // shown unit per frame) only to equality-compare against the cache and be dropped.
-            Some((_, l, c)) if *c == color && lines_current(l, flags, name, sub) => {}
+            Some((_, l, c)) if *c == color && lines_current(l, flags, name, bracketed) => {}
             stale => {
                 if let Some((old, _, _)) = stale {
                     let old = *old;
@@ -608,8 +642,8 @@ pub(crate) fn drive_nameplates(
                 } else {
                     format!("{prefix}{name}")
                 }];
-                if let Some(sub) = sub {
-                    lines.push(format!("<{sub}>"));
+                if let Some(bracketed) = bracketed {
+                    lines.push(format!("<{bracketed}>"));
                 }
                 debug!("nameplates: rebuild {entity} -> {lines:?} ({color:?})");
                 let mesh = plates
@@ -934,10 +968,10 @@ mod tests {
     /// flagged `Bob`, exactly as the built strings do.
     #[test]
     fn lines_current_matches_the_built_stack() {
-        let build = |flags: u32, name: &str, sub: Option<&str>| {
+        let build = |flags: u32, name: &str, bracketed: Option<&str>| {
             let mut lines = vec![format!("{}{name}", flag_prefix(flags))];
-            if let Some(sub) = sub {
-                lines.push(format!("<{sub}>"));
+            if let Some(bracketed) = bracketed {
+                lines.push(format!("<{bracketed}>"));
             }
             lines
         };
@@ -948,14 +982,22 @@ mod tests {
             (0x2, "Bob", None),
             (0x2 | 0x8, "Bob", None),
             (0, "<AFK>Bob", None),
+            // The a5 slot (2149). It shares the a6 shape exactly, which is the point — the two
+            // are one `"\n<%s>"` and the unit's branch picks which fills it. The guild names
+            // below are the awkward ones: a guild the player left (`None` again), one whose own
+            // name carries the brackets, and one that collides with a subname above.
+            (0, "Bob", Some("Legacy")),
+            (0x2, "Bob", Some("Legacy")),
+            (0, "Bob", Some("<Legacy>")),
+            (0, "Young Wolf", Some("Beast Handlers")),
         ];
-        for &(flags, name, sub) in cases {
-            let cached = build(flags, name, sub);
-            for &(f2, n2, s2) in cases {
+        for &(flags, name, bracketed) in cases {
+            let cached = build(flags, name, bracketed);
+            for &(f2, n2, b2) in cases {
                 assert_eq!(
-                    lines_current(&cached, f2, n2, s2),
-                    build(f2, n2, s2) == cached,
-                    "cache of ({flags:#x}, {name:?}, {sub:?}) vs ({f2:#x}, {n2:?}, {s2:?})"
+                    lines_current(&cached, f2, n2, b2),
+                    build(f2, n2, b2) == cached,
+                    "cache of ({flags:#x}, {name:?}, {bracketed:?}) vs ({f2:#x}, {n2:?}, {b2:?})"
                 );
             }
         }

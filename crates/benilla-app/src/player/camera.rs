@@ -12,6 +12,8 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use avian3d::prelude::*;
 
+use super::camera_channel::{Arm, SmoothChannel};
+use super::camera_dynamics::{DynamicsInput, HeadBob, SmartPivot, TerrainTilt, WaterPitch};
 use crate::creature_anim::wrap_pi;
 use crate::net::Embodied;
 use crate::ui_script::PointerOverUi;
@@ -686,15 +688,14 @@ pub(crate) fn head_height(pivot: Option<&CameraPivot>, scale: f32) -> f32 {
 /// cosine profile peaks at `π/2 ×` it in the middle and is zero at both ends. There is no duration
 /// clamp on this channel (unlike the yaw channel's `[0.1 s, 2.0 s]`).
 const CAM_PIVOT_SMOOTH_SPEED: f32 = 1.2;
-/// The pivot setter's "already there / already arming this" epsilon — VERIFIED `0.001` (`[0x801360]`,
-/// `0x5126b0`). It is what makes the per-frame re-arm a no-op in steady state.
-const CAM_PIVOT_EPS: f32 = 0.001;
-
-/// **The camera's pivot-height channel** — the height the framing pivot actually rides, chasing the
-/// model-derived target with a cosine smoothstep instead of taking it raw.
+/// **The camera's pivot-height channel** — the height the framing pivot actually rides, chasing
+/// the model-derived target with a cosine smoothstep instead of taking it raw.
 ///
 /// The reference's live `cam+0xfc` chasing target `cam+0x1c8`: armed by `0x5126b0` → `0x512790`,
-/// stepped by `0x50f160`'s `[0x50f36a, 0x50f417)` block (wow-re `pivot-height-glide.md`, §5 round).
+/// stepped by `0x50f160`'s `[0x50f36a, 0x50f417)` block (wow-re `pivot-height-glide.md`, §5 round)
+/// — the **fourth instantiation** of the channel template [`SmoothChannel`] holds (wow-re
+/// `camera-cvar-gates.md` §8), which is why nothing of the tween lives here any more. What is left
+/// is the two things this instantiation does that its three siblings do not.
 /// **This is why a druid shapeshift does not snap the reference's camera**, and it glides in *both*
 /// directions: the solver's `max(target, live)` (`0x50e5a9`) is only the collision-corridor seed, and
 /// the far chain clamps the result back down to the live value (`0x50e767`), so an unobstructed pivot
@@ -708,30 +709,14 @@ const CAM_PIVOT_EPS: f32 = 0.001;
 ///   skips the whole camera update while the preset is stale, `0x50e907`). Ours is the `None` target:
 ///   during the frames a swapped-in model is loading, the pivot stays where it is and one glide runs
 ///   when the new height lands.
+#[derive(Default)]
 pub(super) struct PivotGlide {
-    /// The live height — what the camera uses (`cam+0xfc`).
-    live: f32,
-    /// Where the move started (`cam+0x1cc`) and where it is going (`cam+0x1c8`).
-    from: f32,
-    to: f32,
-    /// Seconds since arming, and the move's total (`cam+0x1c0`/`+0x1c4`); `None` = nothing in
-    /// flight (the reference's armed bit `[cam+0x90] & 0x20000000`).
-    flight: Option<(f32, f32)>,
+    /// The channel itself — **linear**, not angular: its live value is yards, so the armer's `2π`
+    /// rewrap must not run on it.
+    channel: SmoothChannel,
     /// Has the channel ever been armed? The reference's latch bit `0x80` — false only until the
     /// first model-derived height arrives, which is therefore a snap.
     seeded: bool,
-}
-
-impl Default for PivotGlide {
-    fn default() -> Self {
-        Self {
-            live: CAM_PIVOT_FALLBACK,
-            from: CAM_PIVOT_FALLBACK,
-            to: CAM_PIVOT_FALLBACK,
-            flight: None,
-            seeded: false,
-        }
-    }
 }
 
 impl PivotGlide {
@@ -739,61 +724,27 @@ impl PivotGlide {
     /// model — hold), step whatever is in flight, and return the height to frame at.
     ///
     /// Called every frame, which is the reference's own cadence (`0x50f880` from the driver tail
-    /// `0x50f011`): the epsilon tests below turn a steady target into a no-op, so "arm per frame"
-    /// and "arm on change" are the same thing except at the instant the target actually moves.
+    /// `0x50f011`): the armer's own two epsilon refusals turn a steady target into a no-op, so
+    /// "arm per frame" and "arm on change" are the same thing except at the instant the target
+    /// actually moves.
     pub(super) fn advance(&mut self, target: Option<f32>, dt: f32) -> f32 {
         if let Some(target) = target {
-            self.arm(target);
-        }
-        if let Some((elapsed, dur)) = self.flight.as_mut() {
-            *elapsed += dt;
-            let s = *elapsed / *dur;
-            if s >= 1.0 {
-                self.live = self.to;
-                self.flight = None;
+            if self.seeded {
+                self.channel.arm(&Arm::at(target, CAM_PIVOT_SMOOTH_SPEED));
             } else {
-                // The reference's kernel `0x5b7bb0` — the same cosine smoothstep the yaw channel
-                // and the render-scale ease use: `a + (b − a)·(1 − cos(πs))/2`.
-                let e = (1.0 - (std::f32::consts::PI * s).cos()) * 0.5;
-                self.live = self.from + (self.to - self.from) * e;
+                // The latch: the first height a camera ever sees is established, not travelled to.
+                self.seeded = true;
+                self.channel.snap(target);
             }
         }
-        self.live
-    }
-
-    /// The arming half (`0x5126b0` → `0x512790`), in its own order: the re-arm memo, the
-    /// already-there test, then the duration — and the once-per-camera snap.
-    fn arm(&mut self, target: f32) {
-        if !self.seeded {
-            // The latch: the first height a camera ever sees is established, not travelled to.
-            self.seeded = true;
-            self.live = target;
-            self.to = target;
-            self.from = target;
-            self.flight = None;
-            return;
-        }
-        // Already arming exactly this — a no-op, so a per-frame re-arm cannot restart the move
-        // from its own midpoint (which would stretch it forever, asymptotically never arriving).
-        if self.flight.is_some() && (self.to - target).abs() < CAM_PIVOT_EPS {
-            return;
-        }
-        if (self.live - target).abs() < CAM_PIVOT_EPS {
-            // Already there: park the target and disarm. The steady-state path, every frame.
-            self.to = target;
-            self.flight = None;
-            return;
-        }
-        self.from = self.live;
-        self.to = target;
-        self.flight = Some((0.0, (target - self.live).abs() / CAM_PIVOT_SMOOTH_SPEED));
+        self.channel.advance(dt)
     }
 
     /// What the channel is doing, for `WOW_CAM_DUMP`: `(live, target)`. A pivot question is a
     /// *timing* question — "does it snap?" is answered by these two columns on a trace, never by
     /// watching a capture (method: timing is measured, never eyeballed).
     pub(super) fn probe(&self) -> (f32, f32) {
-        (self.live, self.to)
+        self.channel.probe()
     }
 }
 
@@ -842,6 +793,24 @@ pub(crate) struct CameraControl {
     /// body, which is why it glides *through* a change of subject (a shapeshift, a far-sight
     /// switch) instead of being reset by one.
     pub(super) pivot: PivotGlide,
+    /// `cameraPivot`'s pitch-bias channel ([`SmartPivot`], decision 2149) — pose, like the two
+    /// above it.
+    pub(super) smart_pivot: SmartPivot,
+    /// `cameraWaterCollision`'s band-crossing pitch kick ([`WaterPitch`], decision 2149) — also
+    /// pose: the band it remembers is the *previous frame's*, which is the whole selector.
+    pub(super) water_pitch: WaterPitch,
+    /// `cameraTerrainTilt`'s ground-pitch channel and its 100 ms probe throttle ([`TerrainTilt`],
+    /// decision 2149).
+    pub(super) terrain_tilt: TerrainTilt,
+    /// `cameraBobbing`'s session latch and eye offset ([`HeadBob`], decision 2149).
+    pub(super) head_bob: HeadBob,
+    /// **Did the collision sweep actually clip the camera on the frame just seated?** The
+    /// reference's `[cam+0x90] & 0x30000`, which nothing but the solver `0x50e570` writes and the
+    /// driver ORs in per frame — and which [`SmartPivot`]'s gate reads as its sixth conjunct, so
+    /// that an unobstructed camera never pivots. Written by [`seat_camera`]; read a frame later by
+    /// [`run_look_session`], exactly as the reference's input handler reads the flags the last
+    /// driver pass left (`0x50fee0`'s sole caller `0x514446` precedes the mover lookup).
+    pub(super) clipped: bool,
 }
 
 impl CameraControl {
@@ -1033,6 +1002,10 @@ pub(super) fn run_look_session(
     left_click: &mut Option<PressGesture>,
     right_click: &mut Option<PressGesture>,
     look_cfg: LookConfig,
+    // The camera-option knobs + this frame's gate facts (decision 2149). `cameraPivot`'s routing
+    // lives in the look session because the reference's does: `0x50fee0` IS the mouse-motion
+    // handler, and the whole decision is "does THIS motion event go into the pitch or the bias".
+    dynamics: &DynamicsInput,
     // Seconds on the app clock — the press predicate's two time gates are measured against it.
     now: f32,
 ) {
@@ -1147,14 +1120,36 @@ pub(super) fn run_look_session(
     // turns the character (its facing tracks the camera yaw); left-drag leaves the character facing.
     if let Some(active) = rig.look {
         let delta = mouse_motion.delta;
-        cam.yaw -= delta.x * yaw_rate;
+        let d_yaw = -delta.x * yaw_rate;
+        cam.yaw += d_yaw;
         // `mouseInvertPitch` flips only the pitch axis (the 1.12 checkbox's whole meaning).
         let dy = if look_cfg.invert_pitch {
             -delta.y
         } else {
             delta.y
         };
-        cam.pitch = (cam.pitch - dy * pitch_rate).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
+        // **The pivot's fork** (`0x50fee0`, decision 2149): a pinned camera looking level-or-up,
+        // dragged mostly vertically, spends this delta on the view's pitch BIAS and leaves the
+        // arm alone. `None` is the reference's pure-pivot frame — the integrator does not run.
+        let d_pitch = -dy * pitch_rate;
+        if d_pitch != 0.0 {
+            // **The hand does not cancel the kick — it carries it** (wow-re
+            // `camera-cvar-kernels.md` Q5). `0x510120` writes all three of the pitch channel's
+            // fields by the same delta — live `[cam+0xf4]`, start `[cam+0x1e4]` and target
+            // `[cam+0x1e0]` — so a drag during a `*FinalPitch` ease keeps the ease's *remaining
+            // travel* instead of losing it. Cancelling was the reading before that answer landed.
+            rig.water_pitch.nudge(d_pitch);
+        }
+        if let Some(d_pitch) = rig.smart_pivot.route_pitch(
+            d_pitch,
+            d_yaw,
+            cam.pitch,
+            &dynamics.subject,
+            rig.clipped,
+            &dynamics.options,
+        ) {
+            cam.pitch = (cam.pitch + d_pitch).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
+        }
         if active == LookButton::Right || both_buttons {
             *face_yaw = cam.yaw;
         }
@@ -1210,6 +1205,8 @@ pub(super) fn seat_on_subject(
     collide: &benilla_world::collision::WorldCollision<'_, '_>,
     cam_probe: &Collider,
     follow: &FollowInput,
+    dynamics: &DynamicsInput,
+    world: &benilla_world::world_point::WorldPoint<'_, '_>,
 ) {
     // The sweep origin moves with the subject too; rooting it at our own head would cast the boom
     // across the world and jam it on the first wall in between
@@ -1217,6 +1214,28 @@ pub(super) fn seat_on_subject(
     let (orbit_pos, sweep_from) = match view.remote {
         Some(v) => (v.feet, v.sweep_origin()),
         None => (feet, head),
+    };
+    // The **fourth** substitution, and it belongs here for the same reason the other three do:
+    // `cameraWaterCollision`'s bands are a fact about the FOLLOWED unit's liquid (`0x511ad0` takes
+    // the unit, and the room claim is that unit's), so a far-sight subject in a lake is what
+    // re-bases the pivot, never our own body's puddle. Every liquid, not only water (0634).
+    let feet_wow = benilla_assets::coords::bevy_to_wow(orbit_pos);
+    let who = view
+        .remote
+        .map_or(benilla_world::world_point::Subject::Player, |v| {
+            benilla_world::world_point::Subject::Unit(v.entity)
+        });
+    let dynamics = &super::camera_dynamics::DynamicsInput {
+        liquid: super::camera_dynamics::SubjectLiquid {
+            // Classified **unconditionally**, as the reference does: `0x511ad0` is called at
+            // `0x50eb45` whatever `cameraWaterCollision` says, and the CVar gates only whether the
+            // bands reach the corridor (`0x50e5ec`) and the crossing kick (`0x50ecb9`). The bits
+            // have a third reader that is NOT gated by it — `0x5103e0`'s `cameraDive` pair — so
+            // gating the query here would be a trap for whoever builds that.
+            surface_y: world.liquid_at(who, feet_wow).map(|h| h.surface_z),
+            feet_y: feet_wow[2],
+        },
+        ..*dynamics
     };
     // The framing height is the **channel's**, not this frame's target: it eases there over
     // `|Δh| / 1.2` s with a cosine profile, so a shapeshift, a mount, a growth aura or a far-sight
@@ -1226,6 +1245,74 @@ pub(super) fn seat_on_subject(
     let orbit_pivot = rig
         .pivot
         .advance(view.remote.map(|v| v.pivot_height).or(body_pivot), dt);
+    // **`cameraWaterCollision`'s pivot corridor** (decision 2149; wow-re `pivot-height-glide.md`
+    // §5 + `camera-cvar-gates.md` §4a). The CVar's *first* consumer is `0x50e5ec`, which folds the
+    // ADT liquid nibble into the solver's sweep class word — but the recorded verdict for the arm
+    // is unchanged by that (`camera-arm-liquid-blind.md`: the SWEEP stays liquid-blind), and what
+    // actually moves is the **framing pivot's** floor and cap, re-based by `0x511ad0`'s bands.
+    // With the CVar off, or out of liquid, `clamp(live, 5/6, live)` is the live height itself.
+    let (band, d) = dynamics.liquid.band(rig.pivot.probe().1);
+    let orbit_pivot = if dynamics.options.water_collision {
+        let (floor, cap) = band.pivot_corridor(d, orbit_pivot);
+        orbit_pivot.clamp(floor, cap.max(floor))
+    } else {
+        orbit_pivot
+    };
+    // The CVar's other consumer: a band CROSSING arms an absolute pitch through the kick's own
+    // channel. Run here, before the seat, so the pitch this frame renders at is the eased one —
+    // and unconditionally, because the previous-frame snapshot it keeps is taken at `0x50eb14`,
+    // ahead of the CVar test at `0x50ecb9`.
+    // **`cameraTerrainTilt`'s probe and channel.** The probe looks at the ground AHEAD of the
+    // subject, not under it: a horizontal ray along its facing from `feet + 5/3`, its hit pulled
+    // back `5/18`, then a `64/9` drop — so the slope is the rise of the ground you are walking
+    // ONTO over the run to it. Rooted at the subject, which is what makes far sight tilt to the
+    // totem's hill rather than to ours.
+    let ground_probe = || {
+        let origin = orbit_pos + Vec3::Y * super::camera_dynamics::PROBE_LIFT;
+        let fwd = Quat::from_rotation_y(dynamics.subject.facing) * Vec3::NEG_Z;
+        let reach = Dir3::new(fwd)
+            .ok()
+            .and_then(|d| collide.ray_body(origin, d, super::camera_dynamics::PROBE_REACH))
+            .map_or(super::camera_dynamics::PROBE_REACH, |h| {
+                h.distance - super::camera_dynamics::PROBE_BACKOFF
+            });
+        let ahead = origin + fwd * reach;
+        let ground_y = collide
+            .ray_body(ahead, Dir3::NEG_Y, super::camera_dynamics::PROBE_DROP)
+            .map_or(ahead.y - super::camera_dynamics::PROBE_DROP, |h| {
+                ahead.y - h.distance
+            });
+        // `L = √(Δx² + Δy²)` is a length, so a hit closer than the backoff runs the probe
+        // *behind* the subject and still divides by a positive run — the reference's own
+        // arithmetic, not a guard added here.
+        (ground_y - orbit_pos.y) / reach.abs().max(1.0e-3)
+    };
+    rig.terrain_tilt.advance(
+        ground_probe,
+        dynamics.options.terrain_tilt,
+        &dynamics.subject,
+        dynamics.smooth_style,
+        &dynamics.options,
+        dt,
+    );
+
+    // **`cameraBobbing`'s latch and kernel.** The session is armed off the input-command word, not
+    // off this gate, so it runs whatever the CVar says and only the OUTPUT is gated — which is what
+    // makes turning the CVar on mid-run start the bob at the phase the session has reached.
+    // `rig.distance` and not `collision_distance`: the reference's first conjunct is on the zoom
+    // (`[cam+0xec]`), so a camera squeezed against a wall is not thereby in first person.
+    rig.head_bob
+        .advance(rig.distance, &dynamics.subject, &dynamics.options, dt);
+
+    // `[cam+0x90] & 1` is FREELOOK — the player holding mouse-look — which picks the HARD SNAP
+    // over the ease (`0x50ed0e`; wow-re `camera-cvar-kernels.md` Q3).
+    let freelook = rig.look.is_some();
+    if let Some(pitch) = rig
+        .water_pitch
+        .advance(band, cam.pitch, freelook, &dynamics.options, dt)
+    {
+        cam.pitch = pitch.clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
+    }
     seat_camera(
         dt,
         turn_delta,
@@ -1238,6 +1325,7 @@ pub(super) fn seat_on_subject(
         collide,
         cam_probe,
         follow,
+        dynamics,
     );
 }
 
@@ -1267,6 +1355,7 @@ pub(super) fn seat_camera(
     collide: &benilla_world::collision::WorldCollision<'_, '_>,
     cam_probe: &Collider,
     follow: &FollowInput,
+    dynamics: &DynamicsInput,
 ) {
     // A keyboard turn carries the camera RIGIDLY (char and camera rotate as one — the reference
     // look, director's call closing 0050's open "camera follow on turn"): an eased chase of a
@@ -1301,19 +1390,45 @@ pub(super) fn seat_camera(
     // instead of overshooting (the old min-distance floor used to force the camera *past* a too-close
     // hit — gone; collision wins outright). `cast_move` ignores origin penetration, so a head grazing
     // a surface still casts outward.
-    let rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
+    // **The seat is built from the UNBIASED pitch and the view from the biased one** — the whole
+    // of `cameraPivot` is that ordering (decision 2149). The reference computes the eye at
+    // `0x50edcc → 0x50de00` and stores it, and only *then* rotates the camera basis `[cam+0x14]`
+    // by `[cam+0x104]` at `0x50ee32`; so the arm never swings and the look direction does. The
+    // bias is zero at every default until a pinned camera is dragged, so `arm_rotation` and
+    // `rotation` are the same quaternion on almost every frame.
+    let bias = rig.smart_pivot.bias();
+    // **The ground tilt IS part of the arm's pitch**, unlike the bias: `0x50f710` composes
+    // `[cam+0xf4] + [cam+0x108]` and clamps the SUM to ±89° before the basis is built, and the eye
+    // is then seated from that basis. So a followed terrain moves the camera; a smart pivot does
+    // not (wow-re `camera-cvar-kernels.md` §1).
+    let arm_pitch = (cam.pitch + rig.terrain_tilt.pitch()).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
+    let arm_rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, arm_pitch, 0.0);
+    // **The composite is deliberately NOT re-clamped to ±89°.** The reference's clamp at
+    // `0x50f710` binds `[cam+0xf4] + [cam+0x108]` — the pitch channel plus the ground tilt — and
+    // the bias is composed **after** it, at `0x50ee58`, so the rendered pitch is not bounded by it
+    // (wow-re `camera-cvar-kernels.md` §1). The bound that does apply to the bias is the one-sided
+    // one on its own accumulate ([`SmartPivot::route_pitch`]), and the ±89° on the body hand-off
+    // (`0x5103e0`), which is where `mover_pitch` takes it.
+    let rotation = if bias == 0.0 {
+        arm_rotation
+    } else {
+        Quat::from_euler(EulerRot::YXZ, cam.yaw, arm_pitch + bias, 0.0)
+    };
     // `Transform::forward()` is exactly `rotation * -Z` (no renormalize), computed here from the
     // local so the write below can be gated.
-    let cam_fwd = rotation * Vec3::NEG_Z;
+    let cam_fwd = arm_rotation * Vec3::NEG_Z;
     let pivot = player_pos + Vec3::Y * cam_pivot_height;
     let seat = pivot - cam_fwd * rig.distance;
     let boom = seat - head;
     let boom_len = boom.length().max(1.0e-3);
     // The camera collides with the WMO *camera/LOS* faces (keeps DETAIL overhangs like forge pipes,
     // drops NOCAMCOLLIDE) + terrain/doodads/GameObjects — its own audience, not the walking mesh.
-    let open = collide
-        .cast_camera(cam_probe, head, Quat::IDENTITY, boom, 0.0)
-        .map_or(boom_len, |h| h.distance);
+    let hit = collide.cast_camera(cam_probe, head, Quat::IDENTITY, boom, 0.0);
+    // The solver's own clip verdict (`0x50e570`'s `0x30000` return, OR'd into `[cam+0x90]` by the
+    // driver) — [`SmartPivot`]'s sixth conjunct, and the reason an unobstructed camera never
+    // pivots. Written here because here is the only place that knows.
+    rig.clipped = hit.is_some();
+    let open = hit.map_or(boom_len, |h| h.distance);
     // Snap in instantly when geometry intrudes (a wall must never sit between camera and character);
     // ease back out to the open arm length once it clears — the vanilla snap-close-then-glide-back.
     rig.collision_distance = if open < rig.collision_distance {
@@ -1323,7 +1438,13 @@ pub(super) fn seat_camera(
         rig.collision_distance + (open - rig.collision_distance) * t
     };
     let frac = (rig.collision_distance / boom_len).clamp(0.0, 1.0);
-    let translation = head + boom * frac;
+    let seated = head + boom * frac;
+    // **The head bob is a pure world-space translation of the eye**, added last, into the same
+    // slot [`crate::camera_shake`] writes — which is exactly what the reference does (`0x50eb0f`
+    // folds the bob into the shake's accumulator and `0x50de00` applies the pair once). Zero on
+    // every frame nothing is bobbing, so the no-op write gate below still holds a parked camera
+    // bit-stable.
+    let translation = seated + rig.head_bob.offset();
     // The no-op write gate (decision 1362 — 1355's clamp lesson, at the camera): a parked
     // camera's pose is bit-stable once the collision ease settles, but writing it anyway marked
     // the camera's transform changed every frame — which re-ran its propagation and told every
@@ -1386,11 +1507,24 @@ pub(super) fn seat_camera(
         );
     }
 
+    // The pivot bias's own per-frame half (`0x50ed77` → `0x5107f0`): with the gate no longer true
+    // the bias eases back to zero at `cameraTargetSmoothSpeed`; with it true an ease in flight is
+    // cancelled where it stands. Runs after the sweep, so `rig.clipped` is this frame's.
+    rig.smart_pivot.advance(
+        cam.pitch,
+        &dynamics.subject,
+        rig.clipped,
+        &dynamics.options,
+        dt,
+    );
+
     // Fade the avatar as the camera nears its pivot (zoom-in / a wall pulling the boom in): opaque
     // in third-person, ramping to invisible in first-person. Keyed off the *realized* camera→pivot
     // distance (collision-pulled), so backing into a wall also thins you — the faithful behavior.
+    // Off the SEATED eye, not the bobbed one: the fade is a statement about how far the boom was
+    // pulled in, and a 5 cm wobble is not that.
     rig.self_fade_alpha =
-        self_model_fade_alpha((translation - pivot).length(), CAM_NEAR, SELF_FADE_WINDOW);
+        self_model_fade_alpha((seated - pivot).length(), CAM_NEAR, SELF_FADE_WINDOW);
 }
 
 /// Apply the self-avatar zoom-in fade ([`CameraControl::self_fade_alpha`], computed in [`control`]) to
@@ -1703,6 +1837,7 @@ pub(super) fn fly_free(
 
 #[cfg(test)]
 mod tests {
+    use super::super::camera_channel::CHANNEL_EPS;
     use super::*;
     use benilla_assets::BillboardInfo;
     use benilla_formats::BillboardKind;
@@ -1741,10 +1876,10 @@ mod tests {
             let expected = (to - from).abs() / CAM_PIVOT_SMOOTH_SPEED;
             let frames = glide_run(&mut g, Some(to), expected * 2.0);
             // It arrives, and only at the end.
-            assert!((frames.last().copied().unwrap() - to).abs() < CAM_PIVOT_EPS);
+            assert!((frames.last().copied().unwrap() - to).abs() < CHANNEL_EPS);
             let arrived = frames
                 .iter()
-                .position(|h| (h - to).abs() < CAM_PIVOT_EPS)
+                .position(|h| (h - to).abs() < CHANNEL_EPS)
                 .unwrap();
             let took = arrived as f32 / 60.0;
             assert!(
@@ -1792,7 +1927,7 @@ mod tests {
         g.advance(Some(1.0), 1.0 / 60.0);
         let frames = glide_run(&mut g, Some(2.2), 2.0);
         assert!(
-            (frames.last().copied().unwrap() - 2.2).abs() < CAM_PIVOT_EPS,
+            (frames.last().copied().unwrap() - 2.2).abs() < CHANNEL_EPS,
             "a per-frame re-arm must still arrive"
         );
     }

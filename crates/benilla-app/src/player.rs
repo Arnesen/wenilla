@@ -44,6 +44,11 @@ mod arc;
 // Writing the frame onto the body we drive — pose, MovementState, the counter-twist gap.
 mod body_pose;
 pub(crate) mod camera;
+// The one smoothed-scalar channel the reference instantiates four times (wow-re
+// `camera-cvar-gates.md` §8) — pitch, pitch-bias, ground tilt and the pivot height, one template.
+mod camera_channel;
+// The four 1.12 camera option toggles and the mechanisms behind them (decision 2149).
+pub(crate) mod camera_dynamics;
 // The per-frame controller itself — the one system, split out so the root stays the map.
 mod controller;
 mod world_focus;
@@ -324,6 +329,7 @@ impl Plugin for PlayerPlugin {
         app.init_resource::<camera::LookConfig>();
         app.init_resource::<camera::ZoomLimit>();
         app.init_resource::<camera::FollowConfig>();
+        app.init_resource::<camera_dynamics::CameraOptions>();
         // Far sight: resolve `PLAYER_FARSIGHT` into a pose before `control` reads it to seat the
         // camera. A separate system rather than another query on `control` for a hard reason —
         // `control` already holds the self entity's `Transform` mutably, so it cannot also read an

@@ -64,6 +64,14 @@ pub struct WorldAssets {
     /// each address-mode pair needs its own GPU image (the sampler is baked into the `Image`).
     /// See [`Self::sprite_texture_wrapped`].
     tiled_sprites: HashMap<(String, bool, bool), Option<Handle<Image>>>,
+    /// Sprites RESAMPLED to an exact physical size, by `(path, w, h)` — the nameplate border's
+    /// 0188 sharpen and nothing else so far. Keyed by size because that is the whole point: the
+    /// art is re-rasterised whenever the plate's pixel size moves, and reused on every frame in
+    /// between (a resize is rare; a plate is drawn 60 times a second).
+    resampled_sprites: HashMap<(String, u32, u32), Option<Handle<Image>>>,
+    /// The decoded source pixels behind [`Self::resampled_sprites`], so a resize re-samples
+    /// instead of re-decoding the BLP.
+    resample_sources: HashMap<String, Option<(u32, u32, Vec<u8>)>>,
     /// Decoded **portrait** sprites — [`Self::sprite_texture`]'s clamp/sRGB sprite with a circular
     /// alpha mask baked in ([`portrait_image`]). Its own cache, like `tiled_sprites`: the mask bakes
     /// into the GPU image, so the same BLP wanted as a plain icon and as a portrait needs two images.
@@ -385,6 +393,8 @@ impl WorldAssets {
             chain: Arc::new(Mutex::new(chain)),
             textures: SpatialCache::default(),
             sprites: HashMap::new(),
+            resampled_sprites: HashMap::new(),
+            resample_sources: HashMap::new(),
             tiled_sprites: HashMap::new(),
             portraits: HashMap::new(),
             masks: HashMap::new(),
@@ -464,6 +474,38 @@ impl WorldAssets {
     /// as [`Self::sprite_texture`]; not cached (a one-shot decode at load, not a per-frame ask).
     pub fn decode_rgba(&mut self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
         decode_sprite(&self.chain, self.loose_root.as_deref(), path)
+    }
+
+    /// A UI sprite **resampled to an exact pixel size** by the caller's own kernel, cached by that
+    /// size — the nameplate border (decision 0188).
+    ///
+    /// The plate's frame art is a 128 × 32 BLP drawn at whatever size the plate is, which past the
+    /// 1024×768 knee (and always on a retina framebuffer) is a magnification: the GPU's bilinear
+    /// filter smears the 1 px gold bevel across several soft output pixels, which is the director's
+    /// "blurry border". Resampling the SAME pixels to the target size with a sharp kernel keeps the
+    /// art and loses the smear. This lives here rather than in the plate driver because since
+    /// decision 2148 the plate is a widget like any other and its border is an ordinary texture
+    /// region — the substitution has to happen where a texture path becomes an image.
+    pub fn resampled_sprite(
+        &mut self,
+        path: &str,
+        (w, h): (u32, u32),
+        images: &mut Assets<Image>,
+        resample: impl FnOnce(&[u8], u32, u32, u32, u32) -> Vec<u8>,
+    ) -> Option<Handle<Image>> {
+        let key = (path.to_string(), w, h);
+        if let Some(cached) = self.resampled_sprites.get(&key) {
+            return cached.clone();
+        }
+        if !self.resample_sources.contains_key(path) {
+            let decoded = decode_sprite(&self.chain, self.loose_root.as_deref(), path);
+            self.resample_sources.insert(path.to_string(), decoded);
+        }
+        let made = self.resample_sources[path]
+            .as_ref()
+            .map(|(sw, sh, src)| images.add(sprite_image(w, h, resample(src, *sw, *sh, w, h))));
+        self.resampled_sprites.insert(key, made.clone());
+        made
     }
 
     /// A UI sprite decoded with **repeat** (wrap) addressing on both axes — the frame `Backdrop`

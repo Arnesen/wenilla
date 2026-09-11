@@ -110,6 +110,8 @@ mod measure;
 mod merchant;
 mod messageframe;
 mod minimap;
+pub mod nameplate;
+pub use nameplate::{PlateGeometry, PlateState};
 mod model;
 mod modelframe;
 mod net_stats;

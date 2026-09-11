@@ -1,0 +1,1793 @@
+//! **The 1.12 camera option toggles** — the four `UIOptionsFrame` checkboxes `FOLLOW_TERRAIN` /
+//! `HEAD_BOB` / `SMART_PIVOT` / `WATER_COLLISION` and the mechanisms behind them (decision 2149).
+//!
+//! Each is a CVar the reference registers and this client ticked at nothing: the census in
+//! `ui_script::options_tests` had all four on its unbacked list with a byte-level spec and no
+//! feature. wow-re's `ui/scratch/camera-cvar-gates.md` (the §5 nine-worker round this work
+//! dispatched, 2026-09-09) carries the gates; `camera-smooth-style.md` §9 and `camera-shake-law.md`
+//! carry the kernels they gate.
+//!
+//! **The sign convention is the one thing to keep straight.** The reference's pitch is positive
+//! **downward** (`follow-camera.md` Q3: `row 0 = (cos y·cos p, sin y·cos p, −sin p)`, `eye =
+//! pivot − dist·forward`, so `+89°` is the eye above the target looking down). benilla's
+//! [`super::camera::FlyCam::pitch`] is a Bevy `EulerRot::YXZ` X-rotation with `forward = rot ·
+//! −Z`, so **positive is upward** — the exact negation. Every reference predicate below is
+//! therefore transcribed with its comparison flipped, and the flip is written out at each site
+//! rather than hidden in a conversion, because a silently mirrored inequality is the failure mode
+//! this file exists to avoid.
+
+use bevy::prelude::*;
+
+use super::camera_channel::{Arm, SmoothChannel, CHANNEL_EPS};
+
+/// `cameraPivotDXMax`'s registered default — radians of **yaw** per motion event, above which a
+/// drag is not "mostly vertical" any more (`0.05` ≈ 2.86°, `[0xbe0f30]`).
+pub(crate) const PIVOT_DX_MAX_DEFAULT: f32 = 0.05;
+/// `cameraPivotDYMin`'s registered default — radians of **pitch** below which a drag does not
+/// engage the pivot at all (`0.0`, `[0xbe0cec]`: any vertical motion qualifies).
+pub(crate) const PIVOT_DY_MIN_DEFAULT: f32 = 0.0;
+/// `cameraTargetSmoothSpeed`'s registered default, deg/s — the rate the pitch bias eases back to
+/// zero at once the pivot lets go (`90.0`, `[0xbe0fc8]`).
+pub(crate) const TARGET_SMOOTH_SPEED_DEFAULT: f32 = 90.0;
+
+/// The lower band threshold — `[0x8089d0] = 2/9`. Also the height the framing pivot is floored at
+/// **above the liquid surface** while the surface band holds.
+const BAND_NEAR: f32 = 2.0 / 9.0;
+/// The upper band threshold — `[0x8089d4] = 5/9`. Past it neither band claims the subject.
+const BAND_FAR: f32 = 5.0 / 9.0;
+
+/// `cameraSurfaceFinalPitch`'s registered default, DEGREES in the reference's own sign (positive =
+/// looking down) — `[0xbe0f2c]`, `"5.0"`.
+pub(crate) const SURFACE_FINAL_PITCH_DEFAULT: f32 = 5.0;
+/// `cameraSubmergeFinalPitch`'s registered default, same units — `[0xbe0fdc]`, `"5.0"`.
+pub(crate) const SUBMERGE_FINAL_PITCH_DEFAULT: f32 = 5.0;
+/// `cameraPitchSmoothSpeed`'s registered default, deg/s — `[0xbe0ce4]`, `"45.0"`. The rate the
+/// pitch channel arms at (`0x512830`'s `duration = |Δ| / (rate · π/180)`).
+pub(crate) const PITCH_SMOOTH_SPEED_DEFAULT: f32 = 45.0;
+
+/// `cameraGroundSmoothSpeed`'s registered default, deg/s — `[0xbe0fc0]`, `"7.5"`.
+pub(crate) const GROUND_SMOOTH_SPEED_DEFAULT: f32 = 7.5;
+/// `cameraTerrainTiltTimeMin`'s registered default, seconds — `[0xbe1050]`, `"3.0"`.
+pub(crate) const TILT_TIME_MIN_DEFAULT: f32 = 3.0;
+/// `cameraTerrainTiltTimeMax`'s registered default, seconds — `[0xbe1054]`, `"10.0"`.
+pub(crate) const TILT_TIME_MAX_DEFAULT: f32 = 10.0;
+
+/// `cameraBobbingLRAmplitude` / `cameraBobbingUDAmplitude`'s registered default — `[0xbe1064]` /
+/// `[0xbe10c8]`, both `"2.0"`. Scaled by [`BOB_AMPLITUDE_SCALE`] to yards.
+pub(crate) const BOB_AMPLITUDE_DEFAULT: f32 = 2.0;
+/// `cameraBobbingFrequency`'s registered default, Hz at unit speed factor — `[0xbe0cf8]`, `"0.8"`.
+pub(crate) const BOB_FREQUENCY_DEFAULT: f32 = 0.8;
+/// `cameraBobbingSmoothSpeed`'s registered default — `[0xbe10bc]`, `"0.8"`. **Not a bob rate**: it
+/// is the DECAY rate, and its one image-wide read is in the disarm (`0x51113a`).
+pub(crate) const BOB_SMOOTH_SPEED_DEFAULT: f32 = 0.8;
+/// What the two amplitude CVars are in — `[0x7ff9d0] = 1/36`. The columns are inches; yards out.
+const BOB_AMPLITUDE_SCALE: f32 = 1.0 / 36.0;
+/// The speed the bob's rate factor is measured against — `[0x808a08] = 7.2` yd/s.
+const BOB_SPEED_DIVISOR: f32 = 7.2;
+/// The rate factor's clamp — `[0x8089a0] = 0.5` (LOWER) and `[0x80899c] = 1.5` (upper). **Stored in
+/// the order a reader would not assume**: the lower bound sits at the higher address, and it is the
+/// substituting block at `0x5119be`, not the address order, that says which is which.
+const BOB_SPEED_CLAMP: (f32, f32) = (0.5, 1.5);
+/// Head bob's first conjunct — `[cam+0xec] <= [0x8089ac] = 1/6`, INCLUSIVE. It is a compare on the
+/// ZOOM distance, so "first person" here is the wheel being all the way in, not the renderer's own
+/// first-person switch (`dist − [cam+0x38] <= 1/360`).
+pub(crate) const BOB_FIRST_PERSON_DISTANCE: f32 = 1.0 / 6.0;
+
+/// The camera option knobs — the CVar-backed half of this module (decision 1804: each default is
+/// the reference's registrar value, and [`crate::cvars`] carries the provenance per row).
+#[derive(Resource, Clone, Copy, Debug)]
+pub(crate) struct CameraOptions {
+    /// `cameraPivot` — registered **"1"**, so this is ON out of the box and benilla was the
+    /// divergence until it was built.
+    pub(crate) pivot: bool,
+    /// `cameraPivotDXMax` — see [`PIVOT_DX_MAX_DEFAULT`].
+    pub(crate) pivot_dx_max: f32,
+    /// `cameraPivotDYMin` — see [`PIVOT_DY_MIN_DEFAULT`].
+    pub(crate) pivot_dy_min: f32,
+    /// `cameraTargetSmoothSpeed` — see [`TARGET_SMOOTH_SPEED_DEFAULT`].
+    pub(crate) target_smooth_speed: f32,
+    /// `cameraWaterCollision` — registered **"1"**, the second of the four that ships ON.
+    pub(crate) water_collision: bool,
+    /// `cameraSurfaceFinalPitch` — see [`SURFACE_FINAL_PITCH_DEFAULT`].
+    pub(crate) surface_final_pitch: f32,
+    /// `cameraSubmergeFinalPitch` — see [`SUBMERGE_FINAL_PITCH_DEFAULT`].
+    pub(crate) submerge_final_pitch: f32,
+    /// `cameraPitchSmoothSpeed` — see [`PITCH_SMOOTH_SPEED_DEFAULT`].
+    pub(crate) pitch_smooth_speed: f32,
+    /// `cameraTerrainTilt` — registered **"0"**, so Follow Terrain is OFF out of the box.
+    pub(crate) terrain_tilt: bool,
+    /// `cameraGroundSmoothSpeed`, deg/s — the ground channel's rate (`[0xbe0fc0]`, `"7.5"`).
+    pub(crate) ground_smooth_speed: f32,
+    /// `cameraTerrainTiltTimeMin`/`Max`, seconds — the ground channel's duration bound, each
+    /// scaled by the row's `Factor` (`[0xbe1050]`/`[0xbe1054]`, `"3.0"`/`"10.0"`).
+    pub(crate) tilt_time_min: f32,
+    pub(crate) tilt_time_max: f32,
+    /// `cameraBobbing` — registered **"0"**, so head bob is OFF out of the box.
+    pub(crate) bobbing: bool,
+    /// `cameraBobbingLRAmplitude` / `cameraBobbingUDAmplitude`, in the CVars' own units.
+    pub(crate) bob_lr_amplitude: f32,
+    pub(crate) bob_ud_amplitude: f32,
+    /// `cameraBobbingFrequency`.
+    pub(crate) bob_frequency: f32,
+    /// `cameraBobbingSmoothSpeed` — the DECAY rate, see [`BOB_SMOOTH_SPEED_DEFAULT`].
+    pub(crate) bob_smooth_speed: f32,
+}
+
+impl Default for CameraOptions {
+    fn default() -> Self {
+        Self {
+            pivot: true,
+            pivot_dx_max: PIVOT_DX_MAX_DEFAULT,
+            pivot_dy_min: PIVOT_DY_MIN_DEFAULT,
+            target_smooth_speed: TARGET_SMOOTH_SPEED_DEFAULT,
+            water_collision: true,
+            surface_final_pitch: SURFACE_FINAL_PITCH_DEFAULT,
+            submerge_final_pitch: SUBMERGE_FINAL_PITCH_DEFAULT,
+            pitch_smooth_speed: PITCH_SMOOTH_SPEED_DEFAULT,
+            terrain_tilt: false,
+            ground_smooth_speed: GROUND_SMOOTH_SPEED_DEFAULT,
+            tilt_time_min: TILT_TIME_MIN_DEFAULT,
+            tilt_time_max: TILT_TIME_MAX_DEFAULT,
+            bobbing: false,
+            bob_lr_amplitude: BOB_AMPLITUDE_DEFAULT,
+            bob_ud_amplitude: BOB_AMPLITUDE_DEFAULT,
+            bob_frequency: BOB_FREQUENCY_DEFAULT,
+            bob_smooth_speed: BOB_SMOOTH_SPEED_DEFAULT,
+        }
+    }
+}
+
+/// **Which liquid band the camera's subject is in** — `[cam+0x90]`'s bits `0x100000`/`0x200000`,
+/// whose sole writer image-wide is the classifier `0x511ad0` (wow-re `pivot-height-glide.md` §5,
+/// re-confirmed by `camera-cvar-gates.md` §4b's census).
+///
+/// The classifier is not a depth test on the *eye* or on the *feet*: it compares the liquid
+/// surface against **the framing pivot's target height**, i.e. against roughly where the subject's
+/// head is going to be. That is why the bands read as "the swimmer's head is at the line" and "the
+/// line is over the head" rather than as water depth.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) enum LiquidBand {
+    /// Neither bit: dry, or the surface is far enough over the pivot that nothing claims it.
+    #[default]
+    None,
+    /// `0x100000` — the surface at, below, or barely above the pivot target.
+    Surface,
+    /// `0x200000` — the surface moderately above it.
+    Submerged,
+}
+
+impl LiquidBand {
+    /// `0x511ad0`'s classification, from the liquid surface height at the subject (`None` = dry),
+    /// the subject's feet and the pivot channel's target — all in world Y.
+    ///
+    /// The reference tests `d < [cam+0x1c8]` **or** `d − [cam+0x1c8] < 2/9` for the surface band;
+    /// the first disjunct is subsumed by the second (a pivot target is always positive — it is
+    /// floored at `5/6`), so it is written once here. Everything else is verbatim, including the
+    /// "neither" leg, which is a real state and not a fallthrough: a subject deep enough under the
+    /// surface leaves the pivot corridor alone entirely.
+    pub(super) fn classify(surface_y: Option<f32>, feet_y: f32, pivot_target: f32) -> Self {
+        let Some(surface_y) = surface_y else {
+            return Self::None;
+        };
+        let excess = (surface_y - feet_y) - pivot_target;
+        if excess < BAND_NEAR {
+            Self::Surface
+        } else if excess < BAND_FAR {
+            Self::Submerged
+        } else {
+            Self::None
+        }
+    }
+
+    /// **The pivot corridor** this band imposes (`0x50e570`'s `local_8` floor and `local_c` cap,
+    /// `0x50e756`/`0x50e767`), given the liquid's height above the subject's feet and the pivot
+    /// channel's live value. Unobstructed, the solver's chain reconstructs the live height exactly,
+    /// so the whole of the liquid's effect on the framing pivot is `live.clamp(floor, cap)`.
+    ///
+    /// - **Surface**: floor `2/9 + d`, cap `max(live, floor)` — the pivot is pushed UP to sit a
+    ///   fixed `2/9` yd above the waterline, which is what keeps a swimmer's head framed.
+    /// - **Submerged**: floor the ordinary `5/6`, cap `max(d − 5/6, 5/6)` — the pivot is pulled
+    ///   DOWN, kept below a surface that has gone over the head.
+    /// - **None**: the ordinary corridor, i.e. the live height untouched.
+    ///
+    /// Gated by `cameraWaterCollision` at the call site, not here: `0x50e5ec` reads the CVar once
+    /// and the bands only reach `local_8`/`local_c` through that read.
+    pub(super) fn pivot_corridor(self, d: f32, live: f32) -> (f32, f32) {
+        match self {
+            Self::Surface => {
+                let floor = BAND_NEAR + d;
+                (floor, live.max(floor))
+            }
+            Self::Submerged => (
+                super::camera::CAM_PIVOT_FLOOR,
+                (d - super::camera::CAM_PIVOT_FLOOR).max(super::camera::CAM_PIVOT_FLOOR),
+            ),
+            Self::None => (super::camera::CAM_PIVOT_FLOOR, live),
+        }
+    }
+}
+
+/// The camera-dynamics inputs one frame hands the rig — the knobs, plus the facts about the
+/// *followed unit* that the mechanisms' gates need and the camera does not hold.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DynamicsInput {
+    pub(super) options: CameraOptions,
+    /// `cameraSmoothStyle` **raw** — the terrain-tilt matrix indexes the un-remapped value
+    /// (`camera-smooth-style.md` §2b), so this is the knob and not the auto-follow's own
+    /// far-sight-adjusted copy.
+    pub(super) smooth_style: super::camera::FollowStyle,
+    pub(super) subject: SubjectState,
+    /// Filled in by [`super::camera::seat_on_subject`], which is where the far-sight substitution
+    /// lives — the controller builds this input with the default (dry) and never has to know.
+    pub(super) liquid: SubjectLiquid,
+}
+
+/// The liquid the followed subject is standing in, as the camera needs it: the surface height in
+/// world Y (`None` = dry) and the feet it is measured from. Resolved by the controller, which is
+/// where the world query and the far-sight substitution both live.
+///
+/// **Every liquid, not only water** — the reference's `0x511ad0` queries `0x670630` over the unit's
+/// own liquid handle with no kind filter, and benilla's rule since decision 0634 is the same: you
+/// swim in lava and slime too, so the camera frames you in them the same way.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SubjectLiquid {
+    pub(super) surface_y: Option<f32>,
+    pub(super) feet_y: f32,
+}
+
+impl SubjectLiquid {
+    /// This frame's band and the liquid's height above the feet — `(band, d)`, the pair
+    /// [`LiquidBand::pivot_corridor`] takes.
+    pub(super) fn band(&self, pivot_target: f32) -> (LiquidBand, f32) {
+        (
+            LiquidBand::classify(self.surface_y, self.feet_y, pivot_target),
+            self.surface_y.map_or(0.0, |y| y - self.feet_y),
+        )
+    }
+}
+
+/// What the four mechanisms' gates need to know about the **followed unit** — the conjuncts that
+/// are facts about the body rather than about the camera or a CVar. The movement word is the one
+/// the last update left, which is what the reference's own input handler reads (`0x50fee0`'s sole
+/// caller `0x514446` precedes the mover lookup).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SubjectState {
+    /// This frame's `MOVEMENTFLAGS`, verbatim — the three mechanisms that read it read *different*
+    /// masks of the same word, so it is carried whole rather than pre-reduced to booleans.
+    pub(super) move_flags: u32,
+    /// `UNIT_FIELD_FLAGS & 0x100000`, the taxi-flight bit — the terrain-tilt classifier's
+    /// highest-priority state (and head bob's ninth conjunct, when that lands).
+    pub(super) taxi: bool,
+    /// The camera's `Track` bit (`[cam+0x90] & 0x100`) — externally-driven movement.
+    pub(super) track: bool,
+    /// The camera's `Fear` bit (`[cam+0x90] & 0x1000`) — external control.
+    pub(super) fear: bool,
+    /// The subject's facing, radians in benilla's yaw convention — the direction terrain tilt
+    /// probes along, and the frame head bob's lateral sway is written in (`[obj+0xc98]`).
+    pub(super) facing: f32,
+    /// `UNIT_FIELD_MOUNTDISPLAYID > 0` — head bob's eighth conjunct.
+    pub(super) mounted: bool,
+    /// The mover's current speed in yd/s — `GetCurrentSpeed 0x7c4c90`, which benilla already has
+    /// as [`crate::net::current_speed`]. Head bob's rate factor is `clamp(speed / 7.2, [0.5,1.5])`.
+    pub(super) speed: f32,
+    /// The camera's input-command word ([`super::camera::follow_cmd`]) — head bob's ARM is an edge
+    /// on this and nothing else (`0x511170`'s two callers).
+    pub(super) command: u32,
+    /// Is the spyglass scope up? `[cam+0x90] & 0x8`, the aura-76 (`SPELL_AURA_FAR_SIGHT`) FOV lock
+    /// — head bob's fourth conjunct.
+    pub(super) scoped: bool,
+}
+
+impl SubjectState {
+    /// `MOVEMENTFLAGS & 0xf` — MOVE (`0x1|0x2`) plus STRAFE (`0x4|0x8`). **TURN (`0x10|0x20`) is
+    /// deliberately not in the mask** (`0x5106b7`'s byte-lane `test byte ptr [eax+0x40],0xf`), so
+    /// turning in place still passes `cameraPivot`'s fourth conjunct.
+    pub(super) fn translating(&self) -> bool {
+        self.move_flags & (mf::FORWARD | mf::BACKWARD | mf::STRAFE_LEFT | mf::STRAFE_RIGHT) != 0
+    }
+}
+
+/// The movement-flag bits these gates read, by the names the wire uses
+/// ([`crate::creature_anim::move_flags`] is the one definition; re-exported here so the predicates
+/// below read as the reference's masks do).
+use crate::creature_anim::move_flags as mf;
+
+/// **`cameraWaterCollision`'s second consumer** — the band-CROSSING pitch kick (`0x50ecae` inside
+/// the driver `0x50e8d0`; wow-re `camera-cvar-gates.md` §4b, VERIFIED).
+///
+/// **It is an EDGE detector, and that is the correction the §5 round exists for.** `0x50eb14`
+/// snapshots the *previous* frame's `[cam+0x90]` band bits into two locals **before**
+/// `0x50eb45 call 0x511ad0`, which unconditionally clears both and re-sets at most one; the two
+/// tests at `0x50ecc2`/`0x50ecdf` then reload the field **fresh**. So the pair is crossed:
+///
+/// | leg | condition | CVar |
+/// |---|---|---|
+/// | surface | OLD submerged **and** NEW surface | `cameraSurfaceFinalPitch` `"5.0"` |
+/// | submerge | OLD surface **and** NEW submerged | `cameraSubmergeFinalPitch` `"5.0"` |
+///
+/// A client that fires on the *level* of the current bit re-arms the channel every frame the
+/// camera spends in the band; the reference fires once per crossing. The target is an **absolute**
+/// pitch, not an increment — the name is *Final*Pitch — and a target of exactly `0.0` is refused
+/// outright (`0x50ed0c jnp`), which is reachable only if a player zeroes one of the two CVars.
+///
+/// **`[cam+0x90] & 1` is FREELOOK — the player is holding mouse-look** (`0x50fe41 or eax,1` in
+/// `0x50fe30`, cleared at `0x50fddd`; named at the bytes by the two mode strings `"Camera
+/// FREELOOK"` / `"Camera NORMAL"` handed to `0x44cb20`). `camera-cvar-gates.md` §7 listed bit 0 as
+/// unsettled; the round this work dispatched settled it. So `0x50ed0e test cl,1` reads *"is the
+/// hand on the camera"*, and the crossing **hard-snaps** while it is and eases when it is not —
+/// which is the right way round: a player already turning the camera is not interrupted by a
+/// 45 °/s tween, and one who is not gets the smooth one.
+///
+/// **The pitch axis, and the divergence that turned out not to be one** (wow-re
+/// `camera-cvar-kernels.md` Q5, dispatched by this work). The reference's mouse pitch and yaw are
+/// **immediate**: `0x510120` adds the delta to all three of the channel's fields — live
+/// `[cam+0xf4]`, start `[cam+0x1e4]` and target `[cam+0x1e0]` — and holds **zero** references to
+/// `[cam+0x90]`, so it never arms the tween; `0x50f160`'s ease runs only behind the armed bit
+/// `0x2000000`. So benilla's direct write to `cam.pitch` is what the reference does, and the three
+/// `cameraSmooth*` CVars that looked like they might say otherwise gate a different system
+/// entirely (the auto-return, `0x510760`/`0x510850`).
+///
+/// What that lockstep buys, and what benilla owes it, is [`Self::nudge`]: `+0xf4` is *the* live
+/// pitch with a tween **overlay**, not a channel apart from it, so a drag during a `*FinalPitch`
+/// ease moves both endpoints by the same delta and the ease **keeps its remaining travel**. It is
+/// not cancelled by the player's hand — it is carried by it.
+pub(super) struct WaterPitch {
+    /// The band the **previous** frame classified — the whole selector (`0x50eb14`'s snapshot).
+    /// Updated every frame whatever the CVar says, exactly where the reference snapshots it.
+    previous: LiquidBand,
+    /// The kick in flight, over `cam.pitch`. Angular; `in_flight` is the reference's `0x2000000`.
+    kick: SmoothChannel,
+    /// Is the channel currently authoring the pitch? Distinct from `in_flight` only on the frame
+    /// the tween lands, where the final value still has to be written.
+    driving: bool,
+}
+
+impl Default for WaterPitch {
+    fn default() -> Self {
+        Self {
+            previous: LiquidBand::None,
+            kick: SmoothChannel::angular(),
+            driving: false,
+        }
+    }
+}
+
+impl WaterPitch {
+    /// One frame: take the band this frame classified, fire on a crossing, and return the pitch
+    /// the channel wants — `None` when it is not driving, which is every frame out of the water.
+    ///
+    /// `pitch` is the camera's live pitch in **benilla's sign** (positive = up); the two CVars are
+    /// in the reference's degrees (positive = down), so the target is negated here, once, where it
+    /// can be read next to the reason.
+    pub(super) fn advance(
+        &mut self,
+        band: LiquidBand,
+        pitch: f32,
+        freelook: bool,
+        cfg: &CameraOptions,
+        dt: f32,
+    ) -> Option<f32> {
+        let previous = std::mem::replace(&mut self.previous, band);
+        if cfg.water_collision {
+            let target_deg = match (previous, band) {
+                (LiquidBand::Submerged, LiquidBand::Surface) => Some(cfg.surface_final_pitch),
+                (LiquidBand::Surface, LiquidBand::Submerged) => Some(cfg.submerge_final_pitch),
+                _ => None,
+            };
+            // Exactly zero is refused, not armed at zero — `0x50ed09 test ah,0x44 / jnp`.
+            if let Some(deg) = target_deg.filter(|d| *d != 0.0) {
+                let target = -deg.to_radians();
+                self.kick.snap(pitch);
+                if freelook {
+                    // `0x50ed13`: with the hand on the camera the target is written straight into
+                    // the live pitch AND the channel target — a hard snap, no easing.
+                    self.kick.snap(target);
+                } else {
+                    self.kick
+                        .arm(&Arm::at(target, cfg.pitch_smooth_speed.to_radians()));
+                }
+                self.driving = true;
+            }
+        }
+        if !self.driving {
+            return None;
+        }
+        let live = self.kick.advance(dt);
+        if !self.kick.in_flight() {
+            self.driving = false;
+        }
+        Some(live)
+    }
+
+    /// A mouse pitch delta, carried into the channel — `0x510120`'s lockstep write of all three
+    /// fields. A kick in flight keeps its remaining travel and lands `delta` further along; with
+    /// nothing in flight this is a no-op on a channel nobody is reading.
+    pub(super) fn nudge(&mut self, delta: f32) {
+        if self.driving {
+            self.kick.shift(delta);
+        }
+    }
+}
+
+/// **`cameraPivot` — "smart pivot"**: the camera the collision solver has pinned against geometry
+/// tilts its *view* instead of swinging its *arm*.
+///
+/// The whole feature is one extra pitch channel, `[cam+0x104]`, and where it is applied. wow-re
+/// `camera-cvar-gates.md` §3, VERIFIED:
+///
+/// - **The gate `0x510690`** is `obj != 0 ∧ typemask bit 0x8 ∧ cameraPivot ∧ ¬translating ∧
+///   [cam+0xf4] ≤ 0`, returning the solver's own clip flags `[cam+0x90] & 0x30000` — which nothing
+///   but `0x50e570` writes (it builds them from its two sweep hits and the driver ORs the return
+///   in at `0x50ed6a`). So **the verdict is nonzero only in a frame the camera was actually
+///   clipped**, which is what makes this "smart": an unobstructed camera never pivots.
+///   `[cam+0xf4] ≤ 0` is the eye at or below the target looking level-or-**up** — the direction
+///   word `pivot-height-glide.md` §1 had inverted, corrected by the same round.
+/// - **The routing `0x50fee0`.** A true verdict *plus* a mostly-vertical drag
+///   (`|dPitch| > cameraPivotDYMin ∧ |dYaw| < cameraPivotDXMax`) — or a bias already displaced
+///   past `0.001` with the ease not armed — accumulates the pitch delta into `+0x104` instead of
+///   calling the ordinary pitch integrator `0x510120`. The clamp on that accumulate is a
+///   **one-sided floor** at `−89° − [cam+0xf4]`, applied only while `[cam+0xf4] < 0`; the
+///   symmetric ±89° pair belongs to the integrator, not here.
+/// - **The sink.** The driver computes the eye from the *unbiased* pitch
+///   (`0x50edcc → 0x50de00`, stored to `[cam+0x08..0x10]`) and only **then** rotates the camera
+///   basis at `[cam+0x14]` by the bias (`0x50ee32`–`0x50ee58`, `0x7be730` about `[0xbe0f20]` =
+///   `(0,1,0)`, skipped entirely while `|bias| < 0.001`). That ordering *is* the feature: the seat
+///   does not move and the look direction does. Corroborated by `0x5103e0`, the camera→body
+///   hand-off, which clamps **`[cam+0x104] + [cam+0xf4]`** to ±89° before passing the pitch on —
+///   i.e. the player's aim is the composite.
+/// - **The release `0x5107f0`**, run per frame from the driver at `0x50ed77`:
+///   `|bias| ≥ 0.001 ∧ 0x511010(cam) == 0 ∧ ¬gate` (the last negated) arms `+0x104` back to zero at
+///   `cameraTargetSmoothSpeed`; a false verdict snapshots and disarms instead.
+///
+/// **One conjunct of the release is not reproduced and is named rather than buried:** `0x511010`
+/// is `[cam+0x90] & 0x100` then `cameraSmoothTrackingStyle` then `0x60f8f0`, all negated — the
+/// externally-driven *tracking* transition that benilla's auto-follow ([`super::camera::FollowRig`])
+/// has no state for. Its effect is to hold the bias while a Track/Fear swing is in flight, so
+/// omitting it can only release the bias *earlier*, never later, and never while the gate holds.
+pub(super) struct SmartPivot {
+    /// The pitch-bias channel `+0x104` — angular, so the armer's `2π` rewrap applies. Its armed
+    /// bit is the reference's `[cam+0x90] & 0x8000000`, which is read as a routing conjunct.
+    bias: SmoothChannel,
+}
+
+impl Default for SmartPivot {
+    fn default() -> Self {
+        Self {
+            bias: SmoothChannel::angular(),
+        }
+    }
+}
+
+impl SmartPivot {
+    /// The bias the view is carrying this frame, radians, **benilla's sign** (positive = the view
+    /// tilted further up). Added to the pitch for the camera's *rotation* and for the body pitch
+    /// hand-off — never for the seat.
+    pub(super) fn bias(&self) -> f32 {
+        self.bias.live()
+    }
+
+    /// `0x50fee0`'s pitch routing, for one motion event.
+    ///
+    /// Takes this event's pitch and yaw deltas (radians, benilla sign) and the camera's live pitch,
+    /// and answers **the pitch delta the ordinary integrator should apply** — `None` on the
+    /// reference's *pure-pivot frame*, where neither the ease nor the integrator runs and the drag
+    /// lives entirely in the bias.
+    ///
+    /// The three legs are the reference's, transcribed with every comparison flipped for benilla's
+    /// upward-positive pitch (see the module doc):
+    ///
+    /// | reference | here |
+    /// |---|---|
+    /// | `[cam+0xf4] < 0` (looking up) | `pitch > 0` |
+    /// | floor `bias ≥ −89° − f4` | ceiling `bias ≤ +89° − pitch` |
+    /// | pure pivot: `bias ≤ 0 ∧ f4 < 0` | `bias ≥ 0 ∧ pitch > 0` |
+    pub(super) fn route_pitch(
+        &mut self,
+        d_pitch: f32,
+        d_yaw: f32,
+        pitch: f32,
+        subject: &SubjectState,
+        clipped: bool,
+        cfg: &CameraOptions,
+    ) -> Option<f32> {
+        // `0x510690`, conjuncts 3-6. (1 and 2 — a non-null UNIT-or-PLAYER subject — are structural
+        // here: the rig only ever follows one.)
+        let verdict = cfg.pivot && !subject.translating() && pitch >= 0.0 && clipped;
+        // The selector `ecx`: an already-displaced bias with the ease NOT armed keeps routing, or
+        // a fresh verdict with a mostly-vertical drag starts it.
+        let displaced = !self.bias.in_flight() && self.bias().abs() >= CHANNEL_EPS;
+        let vertical_drag =
+            verdict && d_pitch.abs() > cfg.pivot_dy_min && d_yaw.abs() < cfg.pivot_dx_max;
+        if displaced || vertical_drag {
+            let mut bias = self.bias() + d_pitch;
+            // The one-sided clamp: only while the camera is looking up, and only on the side that
+            // would take the composite past the pitch limit.
+            if pitch > 0.0 {
+                bias = bias.min(super::camera::CAM_PITCH_LIMIT - pitch);
+            }
+            self.bias.snap(bias);
+            if bias >= 0.0 && pitch > 0.0 {
+                // The pure-pivot frame (`0x5100c3`): the bias stands, the ease is disarmed, and
+                // the ordinary pitch integrator does not run at all.
+                return None;
+            }
+        }
+        // The ordinary path (`0x51009a`): start the bias easing back to zero, then integrate the
+        // pitch as usual. Reached with the increment above already standing when the selector
+        // fired — the reference applies the delta to BOTH on this leg, and the ease then walks the
+        // bias off while the pitch keeps it.
+        self.release(cfg);
+        Some(d_pitch)
+    }
+
+    /// The per-frame half (`0x50ed77` → `0x5107f0`): with the gate false and the bias displaced,
+    /// ease it back to zero; otherwise hold it where it is. Then step whatever is in flight.
+    pub(super) fn advance(
+        &mut self,
+        pitch: f32,
+        subject: &SubjectState,
+        clipped: bool,
+        cfg: &CameraOptions,
+        dt: f32,
+    ) {
+        let verdict = cfg.pivot && !subject.translating() && pitch >= 0.0 && clipped;
+        if !verdict && self.bias().abs() >= CHANNEL_EPS {
+            self.release(cfg);
+        } else if verdict {
+            // The FALSE leg of `0x5107f0`'s caller (`0x50ed93`): snapshot and clear the armed bit,
+            // i.e. a re-engaged gate cancels an ease in flight rather than fighting it.
+            let live = self.bias();
+            self.bias.snap(live);
+        }
+        self.bias.advance(dt);
+    }
+
+    /// `0x512a50(cam, target = 0, 0, 1.0f, now)` — arm the bias back to zero at
+    /// `cameraTargetSmoothSpeed`. A no-op when it is already there (the armer's own epsilon).
+    fn release(&mut self, cfg: &CameraOptions) {
+        self.bias
+            .arm(&Arm::at(0.0, cfg.target_smooth_speed.to_radians()));
+    }
+}
+
+/// **`cameraTerrainTilt` — "Follow Terrain"**: the camera pitches with the ground the character is
+/// walking onto, so cresting a hill does not put the view into the dirt.
+///
+/// Registered `"0"`, so this one is OFF out of the box — building it changes nothing until a player
+/// ticks the box, which is exactly why it could sit unbuilt with a full byte-level spec.
+///
+/// Three pieces, all VERIFIED (wow-re `camera-cvar-kernels.md` §2 + `camera-smooth-style.md` §9,
+/// the two rounds this work dispatched and the one that preceded it):
+///
+/// **The probe (`0x50d900`), which does not look under the character at all.** It samples the
+/// ground **ahead**: a horizontal ray `10/3` yd along the unit's facing from `feet + 5/3` up, its
+/// hit pulled back `5/18`; then a `64/9` drop straight down from wherever that landed. The `5/3`
+/// is a probe LIFT, added going in and cancelled coming out, so the whole thing reduces to
+/// `slope = (groundY_ahead − feet.y) / horizontal_run` — rise over run, ahead of you. A missed
+/// horizontal ray means the full reach; a missed drop means `−64/9`, a slope of about `−1.78`,
+/// which the staircase and the clamp turn into the full downward tilt: **walking off a cliff edge
+/// pitches the camera all the way down**, which is the behaviour and not an accident. Throttled to
+/// 100 ms, and on a throttled frame the previous value STANDS (`0x50d956 js` leaves `[cam+0xa0]`
+/// alone) — only a failed gate zeroes it.
+///
+/// **The staircase (`0x808a40`), which is not a curve.** Ten `{key, angle}` records walked
+/// *downward* from index 9, taking the first `|slope| >= key` — a nearest-below step with no
+/// interpolation. The keys are `round(tan(5k°), 2)` and the angles `5k°`; but the ±20° clamp that
+/// follows equals record 4 exactly, and the table has one consumer image-wide, so **records 5–9
+/// are unreachable** and the shipped map is five steps: `0 / 5 / 10 / 15 / 20°` at
+/// `|slope| >= 0 / 0.09 / 0.18 / 0.27 / 0.36`. Uphill is a NEGATIVE angle in the reference, i.e.
+/// the camera looks up — which is `+` here (module doc).
+///
+/// **The arm (`0x50dbc0`)**, which is where `cameraSmoothStyle` gets a second job: a 10-state
+/// movement classifier indexes a `style × state` matrix of `{Absorb, Delay, Factor}`, the probe's
+/// angle is scaled by `Absorb`, and `Factor` decides what happens — negative is an explicit
+/// **disable sentinel** (the channel holds where it is), otherwise the ground channel `+0x108`
+/// arms toward `Absorb × angle`. The duration is clamped to `[3·Factor, 10·Factor]` seconds by
+/// `cameraTerrainTiltTimeMin`/`Max`, and since `20° / 7.5°/s` is only 2.67 s **that floor always
+/// binds**: every tilt takes at least three seconds. It is a lazy, deliberate lean, not a
+/// suspension.
+///
+/// The sink is the third additive pitch: `0x50f810` folds `+0x108` into the view pitch, and unlike
+/// the pivot bias it sits INSIDE the ±89° clamp (`camera-cvar-kernels.md` §1).
+pub(super) struct TerrainTilt {
+    /// The ground channel `+0x108` — angular, rate `cameraGroundSmoothSpeed`.
+    ground: SmoothChannel,
+    /// The probe's own output `[cam+0xa0]`, held between throttle ticks.
+    slope_pitch: f32,
+    /// Seconds since the probe last ran — the 100 ms throttle (`0x50d94f`).
+    since_probe: f32,
+}
+
+impl Default for TerrainTilt {
+    fn default() -> Self {
+        Self {
+            ground: SmoothChannel::angular(),
+            slope_pitch: 0.0,
+            // The probe runs on the very first frame rather than 100 ms into the session.
+            since_probe: PROBE_THROTTLE,
+        }
+    }
+}
+
+/// One row of the `cameraTerrainTilt<Style><State>` matrix — `{Absorb, Delay, Factor}`.
+///
+/// **A code table, not ninety CVar rows**, following exactly what 1502 did for its sibling family
+/// `cameraSmooth<Style><State>{Delay,Factor}` ([`super::camera::FollowStyle::row`]): the reference
+/// registers these through a loop nest that a per-name row here would only obscure, and the matrix
+/// is a *law*, not a setting anybody tunes. The values are the full byte-read dump in wow-re
+/// `camera-smooth-style.md` §3C.
+type TiltRow = (f32, f32, f32);
+
+/// The ten movement states `0x50dbc0` classifies into, in the reference's own index order (the
+/// `0x84f5e8` name table): `Fall, Fear, Idle, Jump, Move, Strafe, Swim, Taxi, Track, Turn`.
+///
+/// **`Jump` (3) is unreachable in the reference** and is unreachable here: `0x50dc28` and
+/// `0x50dc35` test the same bit of the same reloaded dword, so the second `je` is unconditional and
+/// the block that would emit state 3 is dead (bytes verified, `camera-smooth-style.md` §2). Its row
+/// carries the disable sentinel at every style anyway, so nothing observable rides on it — it is
+/// kept in the enum because the *matrix* keeps it, and dropping it would silently re-index the
+/// other nine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum TiltState {
+    Fall,
+    Fear,
+    Idle,
+    Move,
+    Strafe,
+    Swim,
+    Taxi,
+    Track,
+    Turn,
+}
+
+impl TiltState {
+    /// `0x50dbc0`'s classifier, as the priority ladder its branch order makes it.
+    fn of(subject: &SubjectState) -> Self {
+        if subject.taxi {
+            Self::Taxi
+        } else if subject.move_flags & mf::SWIMMING != 0 {
+            Self::Swim
+        } else if subject.move_flags & mf::FALLING != 0 {
+            Self::Fall
+        } else if subject.track {
+            Self::Track
+        } else if subject.fear {
+            Self::Fear
+        } else if subject.move_flags & (mf::FORWARD | mf::BACKWARD) != 0 {
+            Self::Move
+        } else if subject.move_flags & (mf::STRAFE_LEFT | mf::STRAFE_RIGHT) != 0 {
+            Self::Strafe
+        } else if subject.move_flags & (mf::TURN_LEFT | mf::TURN_RIGHT) != 0 {
+            Self::Turn
+        } else {
+            Self::Idle
+        }
+    }
+
+    /// This state's `{Absorb, Delay, Factor}` at `style`.
+    ///
+    /// `Never` is every state disabled. `Always` differs from `Smart` in exactly one row — `Idle`,
+    /// which `Smart` disables (so a standing camera holds its tilt rather than levelling) and
+    /// `Always` drives. `Swim` and `Taxi` absorb **0.0** at both live styles, i.e. they aim the
+    /// channel at LEVEL rather than at the ground.
+    fn row(self, style: super::camera::FollowStyle) -> TiltRow {
+        use super::camera::FollowStyle;
+        if style == FollowStyle::Never {
+            return (0.0, 0.0, -1.0);
+        }
+        let always = style == FollowStyle::Always;
+        match self {
+            Self::Fall => (1.0, 0.0, 0.75),
+            Self::Fear => (1.0, 0.0, 1.0),
+            Self::Idle if always => (1.0, 0.0, 1.0),
+            Self::Idle => (0.0, 0.0, -1.0),
+            Self::Move | Self::Strafe | Self::Track | Self::Turn => (1.0, 0.0, 1.0),
+            Self::Swim | Self::Taxi => (0.0, 0.0, 1.0),
+        }
+    }
+}
+
+impl TerrainTilt {
+    /// The signed pitch the ground is contributing this frame, radians, benilla's sign — added to
+    /// the view pitch inside the ±89° clamp.
+    pub(super) fn pitch(&self) -> f32 {
+        self.ground.live()
+    }
+
+    /// The probe's staircase (`0x50db37`'s downward walk over `0x808a40`, then the ±20° clamp),
+    /// given the ground's rise-over-run ahead of the subject. Uphill (`slope >= 0`) tilts the view
+    /// UP here, which is the reference's negative.
+    pub(super) fn slope_to_pitch(slope: f32) -> f32 {
+        // The five reachable steps, biggest first — the walk takes the first key the slope clears.
+        // The keys are `round(tan(5k°), 2)`, and each of these literals is bit-identical to the
+        // f32 the table holds (`0.36` IS `0.36000001430511475`), so writing them short costs no
+        // fidelity and keeps the derivation legible.
+        const STEPS: [(f32, f32); 5] = [
+            (0.36, 20.0),
+            (0.27, 15.0),
+            (0.18, 10.0),
+            (0.09, 5.0),
+            (0.0, 0.0),
+        ];
+        let magnitude = STEPS
+            .iter()
+            .find(|(key, _)| slope.abs() >= *key)
+            .map_or(0.0, |(_, deg)| *deg)
+            .to_radians();
+        if slope < 0.0 {
+            -magnitude
+        } else {
+            magnitude
+        }
+    }
+
+    /// Run the probe if the throttle allows, then arm and step the ground channel.
+    ///
+    /// `probe` answers the *rise over run* of the ground ahead — `None` when the CVar's gate is
+    /// false, which is the one case that ZEROES the held value (`0x50d922`) rather than holding it.
+    pub(super) fn advance(
+        &mut self,
+        probe: impl FnOnce() -> f32,
+        gate: bool,
+        subject: &SubjectState,
+        style: super::camera::FollowStyle,
+        cfg: &CameraOptions,
+        dt: f32,
+    ) -> f32 {
+        self.since_probe += dt;
+        if !gate {
+            // `0x5105a0` false: the kernel's second early exit writes an integer zero into
+            // `[cam+0xa0]` and returns, so the held value does NOT survive a switched-off CVar.
+            self.slope_pitch = 0.0;
+        } else if self.since_probe >= PROBE_THROTTLE {
+            self.since_probe = 0.0;
+            self.slope_pitch = Self::slope_to_pitch(probe());
+        }
+        let (absorb, delay, factor) = TiltState::of(subject).row(style);
+        if factor < 0.0 {
+            // The disable sentinel (`0x50dcd1`): the target becomes the live value and the channel
+            // disarms — the camera keeps the lean it has. This is all of `Never`, and it is `Smart`
+            // standing still.
+            self.ground.snap(self.ground.live());
+        } else {
+            let rate = cfg.ground_smooth_speed.to_radians();
+            self.ground.arm(&Arm {
+                target: absorb * self.slope_pitch,
+                delay,
+                factor,
+                rate,
+                duration: Some((cfg.tilt_time_min * factor, cfg.tilt_time_max * factor)),
+            });
+        }
+        self.ground.advance(dt)
+    }
+}
+
+/// The probe's re-run interval — `0x50d953 sub ecx,0x64` / `js`, i.e. 100 ms.
+const PROBE_THROTTLE: f32 = 0.1;
+/// The horizontal probe's reach, yd — `[0x808a34] = 10/3`.
+pub(super) const PROBE_REACH: f32 = 10.0 / 3.0;
+/// How far the horizontal hit is pulled back before the drop, yd — `[0x808ab8] = 5/18`.
+pub(super) const PROBE_BACKOFF: f32 = 5.0 / 18.0;
+/// The probe LIFT, yd — `[0x808a38] = 5/3`. Added to the feet going in and cancelled coming out,
+/// so it never reaches the slope; it exists to start the horizontal ray above the ground.
+pub(super) const PROBE_LIFT: f32 = 5.0 / 3.0;
+/// The vertical drop's reach, yd — `[0x808ab4] = 64/9`.
+pub(super) const PROBE_DROP: f32 = 64.0 / 9.0;
+
+/// **`cameraBobbing` — head bob**: the eye's small figure-of-eight while you walk, in first person
+/// only.
+///
+/// Registered `"0"`, so this ships OFF like Follow Terrain. wow-re `camera-cvar-kernels.md` §4 and
+/// `camera-cvar-gates.md` §2 (the two rounds this work dispatched), VERIFIED:
+///
+/// **The gate `0x5105e0` has ten conjuncts, and the first one is the surprise.** `[cam+0xec] <= 1/6`
+/// is a compare on the **zoom distance**, inclusive — so head bob is *first person only*, which
+/// nothing before that round had said. The rest: a non-null UNIT-or-PLAYER subject, not the
+/// aura-76 FOV lock, `cameraBobbing`, not SWIMMING, not FALLING, `MOUNTDISPLAYID <= 0`, not on a
+/// taxi — and, as its tenth, the **return mask itself**: `0x510675 and eax,0x200`, so the whole
+/// predicate is false unless a bobbing *session* is armed. (`0x51063d`–`0x510653` is dead code — a
+/// second `test ch,0x20` on a bit the previous `jne` already proved clear. Not transcribed.)
+///
+/// **What arms a session is the movement-COMMAND word, not the gate.** `0x511170(cam, enable)` is
+/// an edge setter called from the input word's AddFlags/RemoveFlags (`0x5149d5`/`0x514cc1`), which
+/// recompute from the NEW word:
+///
+/// ```text
+/// armed = (f & (Fwd|Back|StrafeL|StrafeR|AutoRun|Track)) != 0
+///      || (RightMouse && (LeftMouse || TurnL|TurnR))
+/// ```
+///
+/// — the very word benilla already builds for the auto-follow ([`super::camera::follow_cmd`]). The
+/// arm stamps the epoch, so **the phase restarts at every session**; a redundant re-arm writes
+/// nothing. And the latch is **not** gated by `cameraBobbing`: a stock client runs it on every
+/// start and stop and renders nothing, which is why turning the CVar on mid-run starts the bob at
+/// the phase the session has already reached rather than from zero.
+///
+/// **The kernel `0x511920`.** `A = cameraBobbingFrequency × clamp(speed / 7.2, [0.5, 1.5])`,
+/// `t` = seconds since the epoch; horizontal `a = ampH · sin(2πAt)` laid along the subject's
+/// **left** axis (`φ + π/2`), vertical `ampV · sin(2π · 2A · t)` straight up — the horizontal
+/// traces a line and the vertical runs at double rate, which is the figure of eight. Both
+/// amplitudes are their CVar × 1/36. The rate factor's floor is `0.5`, so a session armed while
+/// standing still still bobs, at half rate.
+///
+/// **It is a pure TRANSLATION of the eye** and it lands in the same accumulator the camera shake
+/// uses, reaching the world position once; the look-at target is `eye + forward`, so it rides
+/// along and the view never rotates.
+///
+/// **The decay `0x5106f0` → `0x50f160`.** `cameraBobbingSmoothSpeed` is *not* in the kernel at all:
+/// its one image-wide read is in the disarm, where `|largest component| / speed` becomes the ramp
+/// DURATION. A residual offset with the gate false eases to zero over that, cosine, terminating on
+/// an exact zero — about 0.069 s at the shipped defaults.
+///
+/// **The named divergence:** the reference solves the camera collision against the *bobbed* trial
+/// eye (`0x50ed47`), so the camera pushes off geometry it bobs into. benilla adds the offset after
+/// the sweep, which is the same thing [`crate::camera_shake`] already does with the very same
+/// accumulator — one divergence, in one place, rather than a new one here.
+pub(super) struct HeadBob {
+    /// Is a session armed? `[cam+0x90] & 0x200`, latched on the command word's edges.
+    armed: bool,
+    /// The command word the last edge was computed from.
+    last_command: Option<u32>,
+    /// Seconds since the last transition — `[cam+0x238]`, which serves the bob phase while armed
+    /// and the decay's clock while not, the two never overlapping.
+    since_transition: f32,
+    /// The offset this frame, world axes.
+    offset: Vec3,
+    /// The disarm snapshot and the ramp's duration — `[cam+0x240..0x248]` and `[cam+0x23c]`.
+    ramp_from: Vec3,
+    ramp_duration: f32,
+}
+
+impl Default for HeadBob {
+    fn default() -> Self {
+        Self {
+            armed: false,
+            last_command: None,
+            since_transition: 0.0,
+            offset: Vec3::ZERO,
+            ramp_from: Vec3::ZERO,
+            // The ctor's zero: a decay with nothing snapshotted lands on `s >= 1` immediately and
+            // writes the exact zero, which is the reference's behaviour and not a division to
+            // guard against.
+            ramp_duration: 0.0,
+        }
+    }
+}
+
+impl HeadBob {
+    /// The eye offset this frame, world axes — [`Vec3::ZERO`] whenever nothing is bobbing.
+    pub(super) fn offset(&self) -> Vec3 {
+        self.offset
+    }
+
+    /// The arm predicate, on the camera's own input-command word.
+    fn arms(command: u32) -> bool {
+        use super::camera::follow_cmd as c;
+        const TRANSLATING: u32 =
+            c::FORWARD | c::BACKWARD | c::STRAFE_LEFT | c::STRAFE_RIGHT | c::AUTORUN | c::TRACK;
+        command & TRANSLATING != 0
+            || (command & c::RIGHT_MOUSE != 0
+                && command & (c::LEFT_MOUSE | c::TURN_LEFT | c::TURN_RIGHT) != 0)
+    }
+
+    /// One frame: run the latch off the command word, then either the kernel or the decay.
+    ///
+    /// `zoom` is the wheel's distance (`[cam+0xec]`), NOT the collision-pulled arm — a camera
+    /// squeezed against a wall is not in first person.
+    pub(super) fn advance(
+        &mut self,
+        zoom: f32,
+        subject: &SubjectState,
+        cfg: &CameraOptions,
+        dt: f32,
+    ) {
+        self.since_transition += dt;
+        // The latch (`0x511170`), edge-triggered on the command word and NOT on `cameraBobbing`.
+        let want = Self::arms(subject.command);
+        if self.last_command.replace(subject.command) != Some(subject.command) && want != self.armed
+        {
+            if want {
+                self.armed = true;
+            } else {
+                // The disarm (`0x511110`) snapshots the offset and turns its largest component
+                // into the ramp's duration.
+                self.armed = false;
+                self.ramp_from = self.offset;
+                let largest = self
+                    .offset
+                    .to_array()
+                    .into_iter()
+                    .fold(0.0_f32, |m, c| m.max(c.abs()));
+                self.ramp_duration = largest / cfg.bob_smooth_speed.max(f32::EPSILON);
+            }
+            self.since_transition = 0.0;
+        }
+        if self.eligible(zoom, subject, cfg) {
+            self.offset = self.kernel(subject, cfg);
+        } else if (self.offset.x + self.offset.y + self.offset.z).abs() >= CHANNEL_EPS {
+            // `0x5106f0`'s displacement test is on the SIGNED SUM's magnitude, not on the vector's
+            // length — a detail worth keeping, because the two disagree whenever the components
+            // cancel.
+            let s = self.since_transition / self.ramp_duration.max(f32::EPSILON);
+            self.offset = if s >= 1.0 {
+                Vec3::ZERO
+            } else {
+                let e = (1.0 - (std::f32::consts::PI * s).cos()) * 0.5;
+                self.ramp_from * (1.0 - e)
+            };
+        } else {
+            self.offset = Vec3::ZERO;
+        }
+    }
+
+    /// `0x5105e0`'s ten conjuncts, in its own order.
+    fn eligible(&self, zoom: f32, subject: &SubjectState, cfg: &CameraOptions) -> bool {
+        zoom <= BOB_FIRST_PERSON_DISTANCE
+            && !subject.scoped
+            && cfg.bobbing
+            && subject.move_flags & mf::SWIMMING == 0
+            && subject.move_flags & mf::FALLING == 0
+            && !subject.mounted
+            && !subject.taxi
+            && self.armed
+    }
+
+    /// `0x511920`, once the gate has passed.
+    fn kernel(&self, subject: &SubjectState, cfg: &CameraOptions) -> Vec3 {
+        let rate = cfg.bob_frequency
+            * (subject.speed / BOB_SPEED_DIVISOR).clamp(BOB_SPEED_CLAMP.0, BOB_SPEED_CLAMP.1);
+        let phase = std::f32::consts::TAU * rate * self.since_transition;
+        let lateral = cfg.bob_lr_amplitude * BOB_AMPLITUDE_SCALE * phase.sin();
+        // `φ + π/2` in the reference's Z-up frame is the subject's LEFT — here, the same rotation
+        // about Bevy's +Y. The sway is a sine, so left and right differ only by half a period;
+        // the axis is what matters, and it is the body's, written out in world axes.
+        let left = Quat::from_rotation_y(subject.facing) * Vec3::NEG_X;
+        left * lateral
+            + Vec3::Y * (cfg.bob_ud_amplitude * BOB_AMPLITUDE_SCALE * (2.0 * phase).sin())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DT: f32 = 1.0 / 60.0;
+    /// A drag that is unambiguously "mostly vertical": well over `cameraPivotDYMin` on pitch and
+    /// well under `cameraPivotDXMax` on yaw.
+    const UP: f32 = 0.01;
+
+    fn moving(translating: bool) -> SubjectState {
+        SubjectState {
+            move_flags: if translating { mf::FORWARD } else { 0 },
+            ..SubjectState::default()
+        }
+    }
+
+    /// **The gate's whole point** (`0x510690`, conjunct 6): the verdict is the collision solver's
+    /// own clip flags, so a camera with nothing behind it never pivots however you drag it. Every
+    /// other conjunct is checked in the same shape — one at a time, against a case that would
+    /// otherwise pivot.
+    #[test]
+    fn only_a_clipped_camera_looking_level_or_up_and_not_translating_pivots() {
+        let cfg = CameraOptions::default();
+        // The reference case: clipped, pitched up, standing still, CVar on -> the bias takes it.
+        let mut p = SmartPivot::default();
+        assert_eq!(
+            p.route_pitch(UP, 0.0, 0.2, &moving(false), true, &cfg),
+            None
+        );
+        assert!(p.bias() > 0.0, "the drag went into the bias");
+
+        // …and each single conjunct removed hands the delta back to the ordinary integrator.
+        for (name, opts, pitch, subject, clipped) in [
+            ("unclipped", cfg, 0.2, moving(false), false),
+            ("translating", cfg, 0.2, moving(true), true),
+            // Looking DOWN — the reference's `[cam+0xf4] <= 0`, mirrored (module doc).
+            ("pitched down", cfg, -0.2, moving(false), true),
+            (
+                "cvar off",
+                CameraOptions {
+                    pivot: false,
+                    ..cfg
+                },
+                0.2,
+                moving(false),
+                true,
+            ),
+        ] {
+            let mut p = SmartPivot::default();
+            assert_eq!(
+                p.route_pitch(UP, 0.0, pitch, &subject, clipped, &opts),
+                Some(UP),
+                "{name}: the ordinary pitch integrator must take it"
+            );
+            assert_eq!(p.bias(), 0.0, "{name}: and nothing reached the bias");
+        }
+    }
+
+    /// The drag-shape test (`0x50fff5`/`0x510004`): a mostly-HORIZONTAL drag is an ordinary orbit
+    /// even with every gate conjunct true — smart pivot is for looking up, not for turning.
+    #[test]
+    fn a_mostly_horizontal_drag_is_never_a_pivot() {
+        let cfg = CameraOptions::default();
+        let mut p = SmartPivot::default();
+        let d_yaw = cfg.pivot_dx_max + 0.001;
+        assert_eq!(
+            p.route_pitch(UP, d_yaw, 0.2, &moving(false), true, &cfg),
+            Some(UP)
+        );
+        assert_eq!(p.bias(), 0.0);
+        // Exactly at the threshold is still refused — the compare is `|dYaw| < DXMax`.
+        assert_eq!(
+            p.route_pitch(UP, cfg.pivot_dx_max, 0.2, &moving(false), true, &cfg),
+            Some(UP)
+        );
+        assert_eq!(p.bias(), 0.0);
+        // And a hair under it pivots.
+        assert_eq!(
+            p.route_pitch(
+                UP,
+                cfg.pivot_dx_max - 0.001,
+                0.2,
+                &moving(false),
+                true,
+                &cfg
+            ),
+            None
+        );
+        assert!(p.bias() > 0.0);
+    }
+
+    /// The one-sided clamp (`0x510065`–`0x510079`): the pivot may not take the composite aim past
+    /// the ±89° pitch limit, and the bound is on **that sum**, not on the bias alone.
+    #[test]
+    fn the_bias_cannot_take_the_composite_past_the_pitch_limit() {
+        let cfg = CameraOptions::default();
+        let mut p = SmartPivot::default();
+        let pitch = 0.5_f32;
+        for _ in 0..400 {
+            p.route_pitch(UP, 0.0, pitch, &moving(false), true, &cfg);
+        }
+        assert!(
+            (p.bias() - (super::super::camera::CAM_PITCH_LIMIT - pitch)).abs() < 1e-5,
+            "clamped to 89° − pitch, got {}",
+            p.bias()
+        );
+    }
+
+    /// Dragging back DOWN unwinds the bias and, the moment it would carry the view below the
+    /// camera's own pitch, hands the axis back to the ordinary integrator — the reference's
+    /// `bias > 0 || f4 >= 0` fork at `0x510094`/`0x510045`, mirrored.
+    #[test]
+    fn dragging_back_down_returns_the_axis_to_the_ordinary_pitch() {
+        let cfg = CameraOptions::default();
+        let mut p = SmartPivot::default();
+        for _ in 0..5 {
+            assert_eq!(
+                p.route_pitch(UP, 0.0, 0.2, &moving(false), true, &cfg),
+                None
+            );
+        }
+        let peak = p.bias();
+        assert!(peak > 0.0);
+        // Down again, five times: the bias walks back to (about) zero and the axis is handed over.
+        let mut handed_back = 0;
+        for _ in 0..6 {
+            if p.route_pitch(-UP, 0.0, 0.2, &moving(false), true, &cfg)
+                .is_some()
+            {
+                handed_back += 1;
+            }
+        }
+        assert!(handed_back > 0, "the ordinary integrator never got it back");
+        assert!(p.bias() < peak, "and the bias unwound");
+    }
+
+    /// The release (`0x50ed77` → `0x5107f0`): once any gate conjunct drops, the bias eases back to
+    /// zero at `cameraTargetSmoothSpeed` — not instantly, and not never.
+    #[test]
+    fn losing_the_gate_eases_the_bias_home_at_the_target_smooth_speed() {
+        let cfg = CameraOptions::default();
+        let mut p = SmartPivot::default();
+        p.route_pitch(0.3, 0.0, 0.5, &moving(false), true, &cfg);
+        let held = p.bias();
+        assert!(held > 0.0);
+        // The gate still true: the bias sits exactly where it is, indefinitely.
+        for _ in 0..120 {
+            p.advance(0.5, &moving(false), true, &cfg, DT);
+        }
+        assert_eq!(p.bias(), held, "a held gate must not move the bias");
+        // Step out of the wall: it eases home over |bias| / 90°/s.
+        let expected = held / cfg.target_smooth_speed.to_radians();
+        let mut took = None;
+        for frame in 0..600 {
+            p.advance(0.5, &moving(false), false, &cfg, DT);
+            if took.is_none() && p.bias().abs() < CHANNEL_EPS {
+                took = Some(frame as f32 * DT);
+            }
+        }
+        let took = took.expect("the bias comes home");
+        assert!(
+            (took - expected).abs() < 0.05,
+            "|bias| / cameraTargetSmoothSpeed = {expected:.3}s, took {took:.3}s"
+        );
+    }
+
+    /// `0x511ad0`'s three bands, at their two thresholds and either side of each. The classifier
+    /// compares the liquid against the **pivot target**, not against the feet, so the same water
+    /// depth bands differently for a tauren and a gnome — which is the point, and is why a test
+    /// that only varied the water level would pass on a wrong reading.
+    #[test]
+    fn the_liquid_bands_are_the_two_thresholds_around_the_pivot_target() {
+        let pivot = 1.9_f32; // a human's neck height
+        let at = |excess: f32| LiquidBand::classify(Some(10.0 + pivot + excess), 10.0, pivot);
+        assert_eq!(at(-5.0), LiquidBand::Surface, "waist deep");
+        assert_eq!(at(0.0), LiquidBand::Surface, "exactly at the pivot");
+        assert_eq!(at(BAND_NEAR - 0.01), LiquidBand::Surface);
+        assert_eq!(at(BAND_NEAR + 0.01), LiquidBand::Submerged);
+        assert_eq!(at(BAND_FAR - 0.01), LiquidBand::Submerged);
+        assert_eq!(
+            at(BAND_FAR + 0.01),
+            LiquidBand::None,
+            "deep enough for neither"
+        );
+        assert_eq!(at(50.0), LiquidBand::None);
+        assert_eq!(
+            LiquidBand::classify(None, 10.0, pivot),
+            LiquidBand::None,
+            "dry"
+        );
+        // **Exactly at each threshold**, which the case above cannot reach: `pivot + excess` does
+        // not survive an f32 round trip at world magnitudes, so the inclusivity is pinned on a
+        // zeroed pivot where the subtraction is exact. Both compares are `<`, so the threshold
+        // itself belongs to the band ABOVE it.
+        assert_eq!(
+            LiquidBand::classify(Some(BAND_NEAR), 0.0, 0.0),
+            LiquidBand::Submerged
+        );
+        assert_eq!(
+            LiquidBand::classify(Some(BAND_FAR), 0.0, 0.0),
+            LiquidBand::None
+        );
+        // A shorter subject in the same water is a band further along — the pivot target is the
+        // comparand, and this is the case a feet-relative reading gets wrong.
+        assert_eq!(
+            LiquidBand::classify(Some(10.0 + 1.5), 10.0, 0.9),
+            LiquidBand::None
+        );
+        assert_eq!(
+            LiquidBand::classify(Some(10.0 + 1.5), 10.0, pivot),
+            LiquidBand::Surface
+        );
+    }
+
+    /// The corridor the bands impose on the framing pivot: pushed UP to `2/9` above the waterline
+    /// while the surface band holds, pulled DOWN under a surface that has gone over the head, and
+    /// untouched otherwise. Out of liquid the corridor is the identity — the property that makes
+    /// this safe to run on every frame of a dry world.
+    #[test]
+    fn the_pivot_corridor_frames_over_the_waterline_and_is_the_identity_when_dry() {
+        let live = 1.9_f32;
+        let clamp = |band: LiquidBand, d: f32| {
+            let (floor, cap) = band.pivot_corridor(d, live);
+            live.clamp(floor, cap.max(floor))
+        };
+        // Dry: the live height, bit for bit.
+        assert_eq!(clamp(LiquidBand::None, 0.0), live);
+        // Surface, water over the head: the pivot rises to 2/9 above the line, so the framing
+        // stays out of the water instead of following the neck under it.
+        assert_eq!(clamp(LiquidBand::Surface, 2.0), 2.0 + BAND_NEAR);
+        // Surface, but the line is below `live − 2/9`: the floor does not bind and nothing moves.
+        // The corridor only ever RAISES on this band — it never pulls the pivot down to the water.
+        assert_eq!(clamp(LiquidBand::Surface, 1.4), live);
+        assert_eq!(clamp(LiquidBand::Surface, 0.2), live);
+        // Submerged: capped at d − 5/6, i.e. pulled below a surface that is well over the head.
+        assert_eq!(
+            clamp(LiquidBand::Submerged, 2.5),
+            2.5 - super::super::camera::CAM_PIVOT_FLOOR
+        );
+        // …and never below the ordinary pivot floor, however deep.
+        assert_eq!(
+            clamp(LiquidBand::Submerged, 0.1),
+            super::super::camera::CAM_PIVOT_FLOOR
+        );
+    }
+
+    /// **The crossing, not the level** (`camera-cvar-gates.md` §4b's Correction F): the kick fires
+    /// once on a band change and stays silent for every frame spent inside a band, which is the
+    /// difference between one ease and a channel re-armed sixty times a second.
+    #[test]
+    fn only_a_band_crossing_kicks_and_only_the_two_crossed_pairs_do() {
+        let cfg = CameraOptions::default();
+        let mut w = WaterPitch::default();
+        // Sixty frames of surface: the first is a None -> Surface change, which is NOT one of the
+        // two crossed pairs, so nothing fires; nor does any frame after it.
+        for _ in 0..60 {
+            assert_eq!(w.advance(LiquidBand::Surface, 0.0, false, &cfg, DT), None);
+        }
+        // Surface -> Submerged IS one, and it arms.
+        assert!(w
+            .advance(LiquidBand::Submerged, 0.0, false, &cfg, DT)
+            .is_some());
+        // Staying submerged does not re-arm — it only runs the tween already in flight out.
+        let mut ran = 0;
+        for _ in 0..600 {
+            if w.advance(LiquidBand::Submerged, 0.0, false, &cfg, DT)
+                .is_some()
+            {
+                ran += 1;
+            }
+        }
+        assert!(
+            ran > 0 && ran < 600,
+            "the tween ran and then stopped ({ran})"
+        );
+        // And the other crossed pair fires on the way back up.
+        assert!(w
+            .advance(LiquidBand::Surface, 0.0, false, &cfg, DT)
+            .is_some());
+    }
+
+    /// The target is ABSOLUTE — the name is *Final*Pitch — reached over `|Δ| /
+    /// cameraPitchSmoothSpeed`, and it is the reference's degrees NEGATED, because down is
+    /// positive there and up is positive here.
+    #[test]
+    fn the_kick_eases_to_the_final_pitch_in_benillas_own_sign() {
+        let cfg = CameraOptions::default();
+        let mut w = WaterPitch::default();
+        let from = 0.8_f32; // looking well up
+        w.advance(LiquidBand::Surface, from, false, &cfg, DT);
+        assert!(w
+            .advance(LiquidBand::Submerged, from, false, &cfg, DT)
+            .is_some());
+        let target = -cfg.submerge_final_pitch.to_radians();
+        let expected = (target - from).abs() / cfg.pitch_smooth_speed.to_radians();
+        let mut last = from;
+        let mut took = None;
+        for frame in 0..600 {
+            if let Some(p) = w.advance(LiquidBand::Submerged, last, false, &cfg, DT) {
+                last = p;
+                if took.is_none() && (p - target).abs() < CHANNEL_EPS {
+                    took = Some(frame as f32 * DT);
+                }
+            }
+        }
+        assert!(
+            (last - target).abs() < CHANNEL_EPS,
+            "landed at {last}, wanted {target}"
+        );
+        let took = took.expect("arrives");
+        assert!(
+            (took - expected).abs() < 0.05,
+            "|Δ| / cameraPitchSmoothSpeed = {expected:.3}s, took {took:.3}s"
+        );
+        assert!(target < 0.0, "5° DOWN is negative in benilla's sign");
+    }
+
+    /// **FREELOOK hard-snaps** (`0x50ed0e test cl,1`, whose identity the §5 round settled): with
+    /// the hand on the camera the crossing lands the target in one frame instead of easing to it.
+    #[test]
+    fn a_crossing_under_mouse_look_snaps_instead_of_easing() {
+        let cfg = CameraOptions::default();
+        let target = -cfg.submerge_final_pitch.to_radians();
+        let mut held = WaterPitch::default();
+        held.advance(LiquidBand::Surface, 0.8, true, &cfg, DT);
+        assert_eq!(
+            held.advance(LiquidBand::Submerged, 0.8, true, &cfg, DT),
+            Some(target),
+            "freelook: there on the very frame of the crossing"
+        );
+        // The same crossing with the hand off takes several frames to get there.
+        let mut free = WaterPitch::default();
+        free.advance(LiquidBand::Surface, 0.8, false, &cfg, DT);
+        let first = free
+            .advance(LiquidBand::Submerged, 0.8, false, &cfg, DT)
+            .unwrap();
+        assert!(
+            (first - target).abs() > 0.1,
+            "not-freelook: still travelling, at {first}"
+        );
+    }
+
+    /// **A drag CARRIES an ease in flight, it does not cancel it** (`0x510120` moves all three of
+    /// the channel's fields by the same delta — Q5). The remaining travel is preserved: the ease
+    /// lands exactly `delta` past where it would have.
+    #[test]
+    fn a_mouse_pitch_during_the_ease_carries_it_rather_than_cancelling_it() {
+        let cfg = CameraOptions::default();
+        let target = -cfg.submerge_final_pitch.to_radians();
+        let nudge = 0.2_f32;
+        let run = |with_nudge: bool| {
+            let mut w = WaterPitch::default();
+            w.advance(LiquidBand::Surface, 0.8, false, &cfg, DT);
+            let mut last = w
+                .advance(LiquidBand::Submerged, 0.8, false, &cfg, DT)
+                .unwrap();
+            for frame in 0..600 {
+                if with_nudge && frame == 5 {
+                    w.nudge(nudge);
+                }
+                match w.advance(LiquidBand::Submerged, last, false, &cfg, DT) {
+                    Some(p) => last = p,
+                    None => break,
+                }
+            }
+            last
+        };
+        let plain = run(false);
+        assert!((plain - target).abs() < CHANNEL_EPS);
+        assert!(
+            (run(true) - (target + nudge)).abs() < CHANNEL_EPS,
+            "the ease should land the drag's delta past its own target"
+        );
+    }
+
+    /// The two refusals: the CVar off fires nothing, and a target of exactly zero is refused
+    /// outright rather than armed at zero (`0x50ed0c jnp`).
+    #[test]
+    fn the_cvar_and_an_exactly_zero_target_both_refuse_the_kick() {
+        let off = CameraOptions {
+            water_collision: false,
+            ..CameraOptions::default()
+        };
+        let mut w = WaterPitch::default();
+        w.advance(LiquidBand::Surface, 0.0, false, &off, DT);
+        assert_eq!(w.advance(LiquidBand::Submerged, 0.0, false, &off, DT), None);
+        // …and the previous band is still tracked while it is off, so turning it back on mid-swim
+        // does not invent a crossing out of the frame it was toggled.
+        let on = CameraOptions::default();
+        assert_eq!(w.advance(LiquidBand::Submerged, 0.0, false, &on, DT), None);
+
+        let zeroed = CameraOptions {
+            submerge_final_pitch: 0.0,
+            ..CameraOptions::default()
+        };
+        let mut w = WaterPitch::default();
+        w.advance(LiquidBand::Surface, 0.0, false, &zeroed, DT);
+        assert_eq!(
+            w.advance(LiquidBand::Submerged, 0.0, false, &zeroed, DT),
+            None
+        );
+    }
+
+    /// The staircase, not a curve (`0x808a40` walked downward with no interpolation) — and the
+    /// **five** reachable steps, because the ±20° clamp equals record 4 and the table has one
+    /// consumer image-wide, so records 5–9 can never show through.
+    #[test]
+    fn the_terrain_staircase_is_five_signed_steps_and_nothing_between_them() {
+        let deg = |slope: f32| TerrainTilt::slope_to_pitch(slope).to_degrees();
+        for (slope, want) in [
+            (0.0, 0.0),
+            (0.089, 0.0),
+            (0.09, 5.0),
+            (0.17, 5.0),
+            (0.18, 10.0),
+            (0.26, 10.0),
+            (0.27, 15.0),
+            (0.35, 15.0),
+            (0.36, 20.0),
+            (1.0, 20.0),
+            // Records 5-9 would read 25/30/35/40/45° — the clamp makes them all 20°.
+            (0.47, 20.0),
+            (100.0, 20.0),
+        ] {
+            assert!(
+                (deg(slope) - want).abs() < 1e-4,
+                "slope {slope} -> {} °, wanted {want}",
+                deg(slope)
+            );
+            // Symmetric in magnitude, opposite in sign: downhill tilts the view down.
+            assert!(
+                (deg(-slope) + want).abs() < 1e-4,
+                "slope -{slope} -> {} °, wanted -{want}",
+                deg(-slope)
+            );
+        }
+        // The sign convention, stated as an assertion rather than a comment: UPHILL looks UP,
+        // which is positive here and negative in the reference.
+        assert!(TerrainTilt::slope_to_pitch(0.5) > 0.0);
+    }
+
+    /// The `Factor < 0` disable sentinel holds the channel where it is — which at the shipped
+    /// `Smart` style is what a standing camera does, and what all of `Never` does. Every other
+    /// state drives, and `Swim`/`Taxi` drive it to LEVEL rather than to the ground.
+    #[test]
+    fn the_tilt_matrix_disables_smart_idle_and_levels_swim_and_taxi() {
+        use super::super::camera::FollowStyle;
+        let held = |style, state: TiltState| state.row(style).2 < 0.0;
+        for state in [
+            TiltState::Fall,
+            TiltState::Fear,
+            TiltState::Idle,
+            TiltState::Move,
+            TiltState::Strafe,
+            TiltState::Swim,
+            TiltState::Taxi,
+            TiltState::Track,
+            TiltState::Turn,
+        ] {
+            assert!(held(FollowStyle::Never, state), "Never disables {state:?}");
+        }
+        assert!(
+            held(FollowStyle::Smart, TiltState::Idle),
+            "Smart holds Idle"
+        );
+        assert!(
+            !held(FollowStyle::Always, TiltState::Idle),
+            "Always is the one row that differs"
+        );
+        for state in [TiltState::Swim, TiltState::Taxi] {
+            assert_eq!(
+                state.row(FollowStyle::Smart).0,
+                0.0,
+                "{state:?} absorbs nothing — it aims the channel at level"
+            );
+        }
+        assert_eq!(TiltState::Fall.row(FollowStyle::Smart).2, 0.75);
+    }
+
+    /// The classifier is a priority ladder, and the order is the reference's branch order — a taxi
+    /// outranks swimming, swimming outranks falling, and turning in place is its own state rather
+    /// than Idle.
+    #[test]
+    fn the_tilt_state_ladder_takes_the_highest_priority_flag_set() {
+        let with = |f: fn(&mut SubjectState)| {
+            let mut s = SubjectState::default();
+            f(&mut s);
+            TiltState::of(&s)
+        };
+        assert_eq!(with(|_| {}), TiltState::Idle);
+        assert_eq!(with(|s| s.move_flags = mf::FORWARD), TiltState::Move);
+        assert_eq!(with(|s| s.move_flags = mf::STRAFE_LEFT), TiltState::Strafe);
+        assert_eq!(with(|s| s.move_flags = mf::TURN_RIGHT), TiltState::Turn);
+        assert_eq!(with(|s| s.move_flags = mf::FALLING), TiltState::Fall);
+        assert_eq!(with(|s| s.move_flags = mf::SWIMMING), TiltState::Swim);
+        assert_eq!(with(|s| s.track = true), TiltState::Track);
+        assert_eq!(with(|s| s.fear = true), TiltState::Fear);
+        assert_eq!(with(|s| s.taxi = true), TiltState::Taxi);
+        // …and the ladder's order where several are set at once.
+        assert_eq!(
+            with(|s| {
+                s.taxi = true;
+                s.move_flags = mf::SWIMMING | mf::FORWARD;
+                s.track = true;
+            }),
+            TiltState::Taxi
+        );
+        assert_eq!(
+            with(|s| s.move_flags = mf::SWIMMING | mf::FALLING | mf::FORWARD),
+            TiltState::Swim
+        );
+        assert_eq!(
+            with(|s| s.move_flags = mf::FALLING | mf::FORWARD),
+            TiltState::Fall
+        );
+    }
+
+    /// The whole probe→channel round trip: the throttle holds the probe at 100 ms, the gate's
+    /// false leg ZEROES the held value (it does not hold it), and the duration floor binds so that
+    /// even the full 20° takes its three seconds.
+    #[test]
+    fn the_tilt_channel_is_throttled_gated_and_floored_at_three_seconds() {
+        let cfg = CameraOptions {
+            terrain_tilt: true,
+            ..CameraOptions::default()
+        };
+        use super::super::camera::FollowStyle;
+        let moving = SubjectState {
+            move_flags: mf::FORWARD,
+            ..SubjectState::default()
+        };
+        // The probe runs on frame one, then not again for 100 ms.
+        let mut t = TerrainTilt::default();
+        let mut probes = 0;
+        for _ in 0..6 {
+            t.advance(
+                || {
+                    probes += 1;
+                    0.5
+                },
+                true,
+                &moving,
+                FollowStyle::Smart,
+                &cfg,
+                1.0 / 60.0,
+            );
+        }
+        assert_eq!(probes, 1, "100 ms is six frames at 60 Hz, so one probe");
+
+        // The duration floor: 20° at 7.5 °/s is 2.67 s, and `cameraTerrainTiltTimeMin` is 3.
+        let mut t = TerrainTilt::default();
+        let target = TerrainTilt::slope_to_pitch(0.5);
+        let mut took = None;
+        for frame in 0..600 {
+            let p = t.advance(|| 0.5, true, &moving, FollowStyle::Smart, &cfg, 1.0 / 60.0);
+            // Exact equality, not an epsilon: the cosine's tail is flat, so `|p − target| < 0.001`
+            // lands a fifth of a second early and would hide a wrong duration. The step writes the
+            // target bit-exactly on the frame `s >= 1`, and that frame is the measurement.
+            if took.is_none() && p == target {
+                took = Some(frame as f32 / 60.0);
+            }
+        }
+        let took = took.expect("the lean arrives");
+        assert!(
+            (took - cfg.tilt_time_min).abs() < 0.05,
+            "the 3 s floor should bind, took {took:.2}s"
+        );
+        // And the floor is doing the work: |Δ| / rate alone would be 2.67 s.
+        assert!(target.abs() / cfg.ground_smooth_speed.to_radians() < cfg.tilt_time_min);
+
+        // The gate's false leg zeroes the held probe value rather than holding it (`0x50d922`).
+        let mut zeroed = 0.0_f32;
+        for _ in 0..600 {
+            zeroed = t.advance(|| 0.5, false, &moving, FollowStyle::Smart, &cfg, 1.0 / 60.0);
+        }
+        assert!(zeroed.abs() < CHANNEL_EPS, "levels off, at {zeroed}");
+    }
+
+    /// The arm predicate, which is the reference's own word and not a re-derivation of "moving":
+    /// autorun and externally-driven movement arm it with no key held, and right-mouse arms it only
+    /// in a chord.
+    #[test]
+    fn head_bob_arms_on_the_movement_command_word_and_on_the_mouse_chord() {
+        use super::super::camera::follow_cmd as c;
+        for bits in [
+            c::FORWARD,
+            c::BACKWARD,
+            c::STRAFE_LEFT,
+            c::STRAFE_RIGHT,
+            c::AUTORUN,
+            c::TRACK,
+            c::RIGHT_MOUSE | c::LEFT_MOUSE,
+            c::RIGHT_MOUSE | c::TURN_LEFT,
+            c::RIGHT_MOUSE | c::TURN_RIGHT,
+        ] {
+            assert!(HeadBob::arms(bits), "{bits:#x} should arm");
+        }
+        for bits in [
+            0,
+            c::RIGHT_MOUSE,
+            c::LEFT_MOUSE,
+            c::TURN_LEFT,
+            c::TURN_RIGHT,
+            c::LEFT_MOUSE | c::TURN_LEFT,
+            c::FEAR,
+        ] {
+            assert!(!HeadBob::arms(bits), "{bits:#x} should not arm");
+        }
+    }
+
+    /// The ten conjuncts, one removed at a time from a case that otherwise bobs — including the
+    /// first-person one, which is the round's own finding and the easiest to get wrong (it is the
+    /// ZOOM distance, inclusive at 1/6).
+    #[test]
+    fn head_bob_is_first_person_only_and_every_conjunct_can_stop_it() {
+        use super::super::camera::follow_cmd as c;
+        let cfg = CameraOptions {
+            bobbing: true,
+            ..CameraOptions::default()
+        };
+        let running = SubjectState {
+            command: c::FORWARD,
+            move_flags: mf::FORWARD,
+            speed: 7.0,
+            ..SubjectState::default()
+        };
+        let bobs = |zoom: f32, subject: &SubjectState, cfg: &CameraOptions| {
+            let mut b = HeadBob::default();
+            // A first frame to take the arming edge, then a quarter period to leave zero.
+            b.advance(zoom, subject, cfg, 1.0 / 60.0);
+            for _ in 0..30 {
+                b.advance(zoom, subject, cfg, 1.0 / 60.0);
+            }
+            b.offset() != Vec3::ZERO
+        };
+        assert!(bobs(0.0, &running, &cfg), "first person, running");
+        assert!(
+            bobs(BOB_FIRST_PERSON_DISTANCE, &running, &cfg),
+            "the 1/6 compare is INCLUSIVE"
+        );
+        assert!(
+            !bobs(BOB_FIRST_PERSON_DISTANCE + 0.001, &running, &cfg),
+            "a hair zoomed out is not first person"
+        );
+        assert!(!bobs(5.0, &running, &cfg), "third person never bobs");
+        for (name, subject, cfg) in [
+            (
+                "cvar off",
+                running,
+                CameraOptions {
+                    bobbing: false,
+                    ..cfg
+                },
+            ),
+            (
+                "swimming",
+                SubjectState {
+                    move_flags: mf::FORWARD | mf::SWIMMING,
+                    ..running
+                },
+                cfg,
+            ),
+            (
+                "falling",
+                SubjectState {
+                    move_flags: mf::FORWARD | mf::FALLING,
+                    ..running
+                },
+                cfg,
+            ),
+            (
+                "mounted",
+                SubjectState {
+                    mounted: true,
+                    ..running
+                },
+                cfg,
+            ),
+            (
+                "on a taxi",
+                SubjectState {
+                    taxi: true,
+                    ..running
+                },
+                cfg,
+            ),
+            (
+                "scoped",
+                SubjectState {
+                    scoped: true,
+                    ..running
+                },
+                cfg,
+            ),
+            (
+                "no movement command",
+                SubjectState {
+                    command: 0,
+                    ..running
+                },
+                cfg,
+            ),
+        ] {
+            assert!(!bobs(0.0, &subject, &cfg), "{name} must not bob");
+        }
+    }
+
+    /// The kernel's shape: horizontal along the body's own left axis at `A`, vertical at `2A`, both
+    /// amplitudes scaled by 1/36 — and the rate factor's floor, which is why a session armed at a
+    /// standstill still bobs at half rate rather than stopping.
+    #[test]
+    fn the_bob_traces_a_figure_of_eight_at_the_scaled_amplitudes() {
+        use super::super::camera::follow_cmd as c;
+        let cfg = CameraOptions {
+            bobbing: true,
+            ..CameraOptions::default()
+        };
+        let subject = SubjectState {
+            command: c::FORWARD,
+            move_flags: mf::FORWARD,
+            // 7.2 yd/s is exactly the divisor, so the rate factor is 1.0 and A = the frequency.
+            speed: BOB_SPEED_DIVISOR,
+            facing: 0.0,
+            ..SubjectState::default()
+        };
+        let mut b = HeadBob::default();
+        let dt = 1.0 / 600.0;
+        b.advance(0.0, &subject, &cfg, dt);
+        let (mut peak_lat, mut peak_up) = (0.0_f32, 0.0_f32);
+        let (mut lat_crossings, mut up_crossings) = (0_i32, 0_i32);
+        let (mut was, period) = (Vec3::ZERO, 1.0 / cfg.bob_frequency);
+        // Five periods, so the counts are large enough that where the window happens to end
+        // cannot move the ratio the assertion is about.
+        for _ in 0..(5.0 * period / dt) as usize {
+            b.advance(0.0, &subject, &cfg, dt);
+            let o = b.offset();
+            // Facing −Z, so the body's left is world −X and the sway has no Z at all.
+            assert_eq!(o.z, 0.0, "the sway is lateral, never fore/aft");
+            peak_lat = peak_lat.max(o.x.abs());
+            peak_up = peak_up.max(o.y.abs());
+            if (was.x < 0.0) != (o.x < 0.0) {
+                lat_crossings += 1;
+            }
+            if (was.y < 0.0) != (o.y < 0.0) {
+                up_crossings += 1;
+            }
+            was = o;
+        }
+        let amp = BOB_AMPLITUDE_DEFAULT * BOB_AMPLITUDE_SCALE;
+        assert!((peak_lat - amp).abs() < 1e-3, "lateral peak {peak_lat}");
+        assert!((peak_up - amp).abs() < 1e-3, "vertical peak {peak_up}");
+        // **The vertical runs at double the horizontal** — the figure of eight. Counted over five
+        // periods and compared with one crossing of slack, because where the window happens to end
+        // can leave the faster axis one crossing short of the exact 2:1 and that is a property of
+        // the ruler, not of the wave.
+        assert!(
+            (up_crossings - 2 * lat_crossings).abs() <= 1 && lat_crossings >= 9,
+            "vertical {up_crossings} crossings against lateral {lat_crossings}"
+        );
+
+        // The rate floor: standing still (speed 0) still bobs, at half the unit rate.
+        let still = SubjectState {
+            speed: 0.0,
+            ..subject
+        };
+        let mut slow = HeadBob::default();
+        slow.advance(0.0, &still, &cfg, dt);
+        for _ in 0..(period / dt) as usize {
+            slow.advance(0.0, &still, &cfg, dt);
+        }
+        assert!(
+            slow.offset() != Vec3::ZERO,
+            "the 0.5 floor keeps it running"
+        );
+    }
+
+    /// The decay: a session that ends eases the residual to zero over
+    /// `|largest component| / cameraBobbingSmoothSpeed` and terminates on an EXACT zero.
+    #[test]
+    fn releasing_the_key_ramps_the_bob_to_an_exact_zero() {
+        use super::super::camera::follow_cmd as c;
+        let cfg = CameraOptions {
+            bobbing: true,
+            ..CameraOptions::default()
+        };
+        let running = SubjectState {
+            command: c::FORWARD,
+            move_flags: mf::FORWARD,
+            speed: BOB_SPEED_DIVISOR,
+            ..SubjectState::default()
+        };
+        let dt = 1.0 / 600.0;
+        let mut b = HeadBob::default();
+        b.advance(0.0, &running, &cfg, dt);
+        // A quarter period in, so the offset is near its peak when the key comes up.
+        for _ in 0..150 {
+            b.advance(0.0, &running, &cfg, dt);
+        }
+        let held = b.offset();
+        assert!(held != Vec3::ZERO);
+        let largest = held
+            .to_array()
+            .into_iter()
+            .fold(0.0_f32, |m, c| m.max(c.abs()));
+        let expected = largest / cfg.bob_smooth_speed;
+        let idle = SubjectState {
+            command: 0,
+            ..running
+        };
+        let mut took = None;
+        for frame in 0..2000 {
+            b.advance(0.0, &idle, &cfg, dt);
+            if took.is_none() && b.offset() == Vec3::ZERO {
+                took = Some(frame as f32 * dt);
+            }
+        }
+        let took = took.expect("the residual comes home");
+        assert!(
+            (took - expected).abs() < 0.02,
+            "|largest| / cameraBobbingSmoothSpeed = {expected:.3}s, took {took:.3}s"
+        );
+        assert_eq!(b.offset(), Vec3::ZERO, "and terminates on an exact zero");
+    }
+
+    /// A gate that comes back while the ease is in flight **cancels** it where it stands
+    /// (`0x50ed93`) rather than fighting it — so stepping back against the wall mid-return leaves
+    /// the view tilted, it does not snap.
+    #[test]
+    fn re_entering_the_gate_cancels_the_return_where_it_stands() {
+        let cfg = CameraOptions::default();
+        let mut p = SmartPivot::default();
+        p.route_pitch(0.3, 0.0, 0.5, &moving(false), true, &cfg);
+        for _ in 0..6 {
+            p.advance(0.5, &moving(false), false, &cfg, DT);
+        }
+        let mid = p.bias();
+        assert!(mid > CHANNEL_EPS && mid < 0.3, "mid-return, got {mid}");
+        for _ in 0..60 {
+            p.advance(0.5, &moving(false), true, &cfg, DT);
+        }
+        assert_eq!(p.bias(), mid, "the return was cancelled, not completed");
+    }
+}

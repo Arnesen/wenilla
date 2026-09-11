@@ -450,6 +450,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("UnitNamePlayer", "1"),
     same("UnitNameNPC", "0"),
     same("UnitNameOwn", "0"),
+    // The fourth of the same registrar's five (2149): `UnitNamePlayerGuild` `0x86c680` -> `"1"`
+    // `0x82e748`, mask bit `0x10`. It is NOT a show gate like the three above — `ShouldShowName
+    // 0x6070a0` consults only bits `0x1/0x2/0x4` — it gates ONE LINE of the player stack, the a5
+    // `"\n<%s>"` guild decoration at `0x609085` (wow-re `object-layer/scratch/overhead-name.md`
+    // Q4 point 3 + the registrar table). Its fifth sibling `UnitNamePlayerPVPTitle` (bit `0x20`,
+    // also `"1"`) has no row: a4's rank prefix needs a faction side `ui_unit` cannot resolve for
+    // an arbitrary player, so there is no reader and 1134 §4 says no key.
+    same("UnitNamePlayerGuild", "1"),
     // The two V-plate toggles over `VPlateMode` — the engine bitmask `[0xc4da34]`'s bit 0 and
     // bit 3. 1.12 registers NO nameplate CVar (wow-re, VERIFIED — the bitmask is a plain runtime
     // global, persisted FrameXML-side as the `RegisterForSave`'d `NAMEPLATES_ON` /
@@ -665,6 +673,69 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // It sets the transition's DURATION (`|dyaw| / rate * factor`), so it is an average rate, not a
     // slew. No row yet — the slider is a one-line follow-on now that the knob exists.
     same("cameraYawSmoothSpeed", "180"),
+    // **The four 1.12 camera-option toggles** (decision 2149) — the `UIOptionsFrame` checkboxes
+    // FOLLOW_TERRAIN / HEAD_BOB / SMART_PIVOT / WATER_COLLISION, all four of which sat on the
+    // unbacked-CVar census with a byte-level spec and no feature until now. Defaults are the
+    // registrar's own (`re/cvar/cvar-register-sites.tsv`), and two of them are **"1"** — which is
+    // why building them was not cosmetic: benilla was the divergence on those, not the reference.
+    //
+    // `cameraPivot` `[0xbe10a4]` "1" (`0x50bda3`) — smart pivot. Mechanism: wow-re
+    // `ui/scratch/camera-cvar-gates.md` §3 (gate `0x510690`, routing `0x50fee0`, release
+    // `0x5107f0`); ours is `player::camera_dynamics::SmartPivot`.
+    same("cameraPivot", "1"),
+    // Its two drag-shape thresholds, both read by that routing (`0x50fff5`/`0x510004`) and both
+    // in RADIANS of camera rotation — the deltas they are compared against are already scaled by
+    // `camera<Yaw|Pitch>MoveSpeed · π/180`, so unlike the sensitivity itself these two transfer
+    // to benilla's raw-device units exactly (see `camera::LOOK_YAW_PER_SPEED`'s note).
+    same("cameraPivotDXMax", "0.05"),
+    same("cameraPivotDYMin", "0"),
+    // The rate the pitch bias eases back on once the pivot lets go, deg/s (`[0xbe0fc8]`,
+    // `0x512a50`'s `duration = |Δ| / (rate · π/180)`). No panel row here or there — the reader is
+    // the host, exactly like `cameraSmoothTrackingStyle` above it.
+    same("cameraTargetSmoothSpeed", "90"),
+    // `cameraWaterCollision` `[0xbe1088]` "1" (`0x50bd63`) — the other of the two that ships ON.
+    // Two consumers (wow-re `camera-cvar-gates.md` §4): the solver's sweep class word gains the
+    // `0xf0000` ADT-liquid nibble at `0x50e5ec`, and the driver's band-CROSSING pitch kick at
+    // `0x50ecae`. What it actually MOVES is the framing pivot's floor/cap, re-based by `0x511ad0`'s
+    // bands (`pivot-height-glide.md` §5) — the arm itself stays liquid-blind either way, which is
+    // that note's own verdict and is why benilla having no liquid collider costs nothing here.
+    same("cameraWaterCollision", "1"),
+    // Its band-crossing pair, both `"5.0"` (`[0xbe0f2c]`/`[0xbe0fdc]`) — the ABSOLUTE pitch the
+    // camera eases to when the liquid band crosses, in the reference's own degrees (positive =
+    // looking down; `player::camera_dynamics::WaterPitch` negates once, for benilla's sign).
+    same("cameraSurfaceFinalPitch", "5"),
+    same("cameraSubmergeFinalPitch", "5"),
+    // **`cameraPitchSmoothSpeed`** (`[0xbe0ce4]`, "45.0") — 2115 §7's third partner write, and
+    // 2147 §7's "the only one still unbuilt: no reader, so no row". It has one now, but a PARTIAL
+    // one, and the row says so rather than implying the whole channel exists: it is the rate the
+    // water kick's own pitch channel arms at. The reference reads it for the aim pitch as a whole
+    // (`0x510120` arms `[cam+0x1e0]`, `0x50f160` eases `[cam+0xf4]`); benilla's mouse pitch is an
+    // immediate write and stays one — see `WaterPitch`'s divergence note.
+    same("cameraPitchSmoothSpeed", "45"),
+    // `cameraTerrainTilt` `[0xbe0fd4]` **"0"** (`0x50bcfd`) — Follow Terrain, and the one of the
+    // four that ships OFF, so building it changed nothing until a player ticks the box. Mechanism:
+    // wow-re `camera-cvar-kernels.md` §2 (the ahead-probe and the five-step staircase) and
+    // `camera-smooth-style.md` §9 (the arm); ours is `player::camera_dynamics::TerrainTilt`.
+    same("cameraTerrainTilt", "0"),
+    // The ground channel's rate, deg/s (`[0xbe0fc0]`) and the duration bound its `Factor` scales
+    // (`[0xbe1050]`/`[0xbe1054]`, seconds). The floor always binds — `20° / 7.5°/s` is 2.67 s
+    // against a 3 s minimum — which is why a followed terrain leans rather than tracks.
+    same("cameraGroundSmoothSpeed", "7.5"),
+    same("cameraTerrainTiltTimeMin", "3"),
+    same("cameraTerrainTiltTimeMax", "10"),
+    // `cameraBobbing` `[0xbe10c0]` **"0"** (`0x50b76d`) — head bob, the fourth of the four and the
+    // second that ships OFF. Mechanism: wow-re `camera-cvar-kernels.md` §4 and
+    // `camera-cvar-gates.md` §2; ours is `player::camera_dynamics::HeadBob`.
+    same("cameraBobbing", "0"),
+    // Its four numeric siblings. The two amplitudes are in the CVar's own units — the kernel
+    // scales both by 1/36 (`[0x7ff9d0]`) to reach yards. `cameraBobbingSmoothSpeed` is the odd one
+    // and its name is the trap: it is **not** a bob rate, it is the DECAY rate, and its single
+    // image-wide read is in the disarm `0x51113a`, where `|largest component| / speed` becomes the
+    // ramp's duration (~0.069 s at these defaults).
+    same("cameraBobbingLRAmplitude", "2"),
+    same("cameraBobbingUDAmplitude", "2"),
+    same("cameraBobbingFrequency", "0.8"),
+    same("cameraBobbingSmoothSpeed", "0.8"),
     // Status Text (1140): 1.12's `statusBarText`, the "always show value / max on a status bar"
     // switch. **No host knob** — its consumer is Lua (TextStatusBar.xml, decision 1082, which was
     // written waiting for this key and reads it on every repaint). Default "0": the reference's
@@ -1129,6 +1200,7 @@ pub(crate) struct KnobParams<'w> {
     bubbles: ResMut<'w, BubbleConfig>,
     zoom: ResMut<'w, ZoomLimit>,
     follow: ResMut<'w, FollowConfig>,
+    camera_opts: ResMut<'w, crate::player::camera_dynamics::CameraOptions>,
     video: ResMut<'w, VideoConfig>,
     render_scale: ResMut<'w, RenderScale>,
     tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
@@ -1171,6 +1243,7 @@ impl KnobParams<'_> {
             bubbles: &mut self.bubbles,
             zoom: &mut self.zoom,
             follow: &mut self.follow,
+            camera_opts: &mut self.camera_opts,
             video: &mut self.video,
             render_scale: &mut self.render_scale,
             tex_filter: &mut self.tex_filter,
@@ -1209,6 +1282,7 @@ struct Knobs<'a> {
     bubbles: &'a mut BubbleConfig,
     zoom: &'a mut ZoomLimit,
     follow: &'a mut FollowConfig,
+    camera_opts: &'a mut crate::player::camera_dynamics::CameraOptions,
     video: &'a mut VideoConfig,
     render_scale: &'a mut RenderScale,
     tex_filter: &'a mut benilla_assets::TexFilterSetting,
@@ -1364,6 +1438,27 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "unitnameplayer" => knobs.names.player = v != 0.0,
         "unitnamenpc" => knobs.names.npc = v != 0.0,
         "unitnameown" => knobs.names.own = v != 0.0,
+        "unitnameplayerguild" => knobs.names.player_guild = v != 0.0,
+        // The camera options (2149). The three numeric ones take the value straight: the
+        // reference's own validator on them is `0x50b330`'s range REFUSAL, which lives in
+        // `benilla_ui`'s `SetCVar` path, not here.
+        "camerapivot" => knobs.camera_opts.pivot = v != 0.0,
+        "camerapivotdxmax" => knobs.camera_opts.pivot_dx_max = v,
+        "camerapivotdymin" => knobs.camera_opts.pivot_dy_min = v,
+        "cameratargetsmoothspeed" => knobs.camera_opts.target_smooth_speed = v,
+        "camerawatercollision" => knobs.camera_opts.water_collision = v != 0.0,
+        "camerasurfacefinalpitch" => knobs.camera_opts.surface_final_pitch = v,
+        "camerasubmergefinalpitch" => knobs.camera_opts.submerge_final_pitch = v,
+        "camerapitchsmoothspeed" => knobs.camera_opts.pitch_smooth_speed = v,
+        "cameraterraintilt" => knobs.camera_opts.terrain_tilt = v != 0.0,
+        "cameragroundsmoothspeed" => knobs.camera_opts.ground_smooth_speed = v,
+        "cameraterraintilttimemin" => knobs.camera_opts.tilt_time_min = v,
+        "cameraterraintilttimemax" => knobs.camera_opts.tilt_time_max = v,
+        "camerabobbing" => knobs.camera_opts.bobbing = v != 0.0,
+        "camerabobbinglramplitude" => knobs.camera_opts.bob_lr_amplitude = v,
+        "camerabobbingudamplitude" => knobs.camera_opts.bob_ud_amplitude = v,
+        "camerabobbingfrequency" => knobs.camera_opts.bob_frequency = v,
+        "camerabobbingsmoothspeed" => knobs.camera_opts.bob_smooth_speed = v,
         // The two V-plate toggles — the bitmask's two bits, flags like every other checkbox.
         // Lowercased here like every arm; `VPlateMode`'s consts carry the registered spelling.
         "nameplateshowenemies" => knobs.plates.enemies = v != 0.0,
@@ -1681,6 +1776,7 @@ fn sync_cvars(
         // Read-only borrows for the seed: field access through `ResMut`'s `Deref` flags nothing,
         // which is the half of 0992's change-detection trap this system has to keep.
         let KnobParams {
+            camera_opts,
             sound,
             scale,
             view,
@@ -1737,7 +1833,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 69] = [
+        let session: [(&str, String); 87] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1774,6 +1870,56 @@ fn sync_cvars(
                 follow.tracking_style.cvar().to_string(),
             ),
             ("cameraYawSmoothSpeed", follow.yaw_speed.to_string()),
+            ("cameraPivot", flag(camera_opts.pivot)),
+            ("cameraPivotDXMax", camera_opts.pivot_dx_max.to_string()),
+            ("cameraPivotDYMin", camera_opts.pivot_dy_min.to_string()),
+            (
+                "cameraTargetSmoothSpeed",
+                camera_opts.target_smooth_speed.to_string(),
+            ),
+            ("cameraWaterCollision", flag(camera_opts.water_collision)),
+            (
+                "cameraSurfaceFinalPitch",
+                camera_opts.surface_final_pitch.to_string(),
+            ),
+            (
+                "cameraSubmergeFinalPitch",
+                camera_opts.submerge_final_pitch.to_string(),
+            ),
+            (
+                "cameraPitchSmoothSpeed",
+                camera_opts.pitch_smooth_speed.to_string(),
+            ),
+            ("cameraTerrainTilt", flag(camera_opts.terrain_tilt)),
+            (
+                "cameraGroundSmoothSpeed",
+                camera_opts.ground_smooth_speed.to_string(),
+            ),
+            (
+                "cameraTerrainTiltTimeMin",
+                camera_opts.tilt_time_min.to_string(),
+            ),
+            (
+                "cameraTerrainTiltTimeMax",
+                camera_opts.tilt_time_max.to_string(),
+            ),
+            ("cameraBobbing", flag(camera_opts.bobbing)),
+            (
+                "cameraBobbingLRAmplitude",
+                camera_opts.bob_lr_amplitude.to_string(),
+            ),
+            (
+                "cameraBobbingUDAmplitude",
+                camera_opts.bob_ud_amplitude.to_string(),
+            ),
+            (
+                "cameraBobbingFrequency",
+                camera_opts.bob_frequency.to_string(),
+            ),
+            (
+                "cameraBobbingSmoothSpeed",
+                camera_opts.bob_smooth_speed.to_string(),
+            ),
             ("autoLootDefault", flag(loot.auto_loot)),
             ("showLootSpam", flag(loot.show_loot_spam)),
             ("guildMemberNotify", flag(guild_notify.0)),
@@ -1781,6 +1927,7 @@ fn sync_cvars(
             ("UnitNamePlayer", flag(names.player)),
             ("UnitNameNPC", flag(names.npc)),
             ("UnitNameOwn", flag(names.own)),
+            ("UnitNamePlayerGuild", flag(names.player_guild)),
             (crate::vplates::CVAR_ENEMIES, flag(plates.enemies)),
             (crate::vplates::CVAR_FRIENDS, flag(plates.friends)),
             // The session density on the panel scale (×1..×3 → 0..2). An env-driven off-grid
@@ -2247,9 +2394,59 @@ mod tests {
         assert_eq!(d["UnitNamePlayer"] != 0.0, names.player);
         assert_eq!(d["UnitNameNPC"] != 0.0, names.npc);
         assert_eq!(d["UnitNameOwn"] != 0.0, names.own);
+        assert_eq!(d["UnitNamePlayerGuild"] != 0.0, names.player_guild);
         assert!(
-            names.player && !names.npc && !names.own,
-            "the binary registers UnitNamePlayer \"1\", NPC \"0\", Own \"0\""
+            names.player && !names.npc && !names.own && names.player_guild,
+            "the binary registers UnitNamePlayer \"1\", NPC \"0\", Own \"0\", \
+             PlayerGuild \"1\""
+        );
+        // The camera options weld to `CameraOptions::default()` the same way (2149) — and the two
+        // that matter here are the ones registered "1": a `cameraPivot` that shipped OFF would be
+        // benilla diverging from the reference on a feature it now has.
+        let camera_opts = crate::player::camera_dynamics::CameraOptions::default();
+        assert_eq!(d["cameraPivot"] != 0.0, camera_opts.pivot);
+        assert_eq!(
+            d["cameraWaterCollision"] != 0.0,
+            camera_opts.water_collision
+        );
+        assert!(
+            camera_opts.pivot && camera_opts.water_collision,
+            "the binary registers cameraPivot and cameraWaterCollision both \"1\""
+        );
+        assert_eq!(
+            d["cameraSurfaceFinalPitch"],
+            camera_opts.surface_final_pitch
+        );
+        assert_eq!(
+            d["cameraSubmergeFinalPitch"],
+            camera_opts.submerge_final_pitch
+        );
+        assert_eq!(d["cameraPitchSmoothSpeed"], camera_opts.pitch_smooth_speed);
+        assert_eq!(d["cameraTerrainTilt"] != 0.0, camera_opts.terrain_tilt);
+        assert!(
+            !camera_opts.terrain_tilt,
+            "the binary registers cameraTerrainTilt \"0\""
+        );
+        assert_eq!(
+            d["cameraGroundSmoothSpeed"],
+            camera_opts.ground_smooth_speed
+        );
+        assert_eq!(d["cameraTerrainTiltTimeMin"], camera_opts.tilt_time_min);
+        assert_eq!(d["cameraTerrainTiltTimeMax"], camera_opts.tilt_time_max);
+        assert_eq!(d["cameraBobbing"] != 0.0, camera_opts.bobbing);
+        assert!(
+            !camera_opts.bobbing && !camera_opts.terrain_tilt,
+            "the binary registers cameraBobbing and cameraTerrainTilt both \"0\""
+        );
+        assert_eq!(d["cameraBobbingLRAmplitude"], camera_opts.bob_lr_amplitude);
+        assert_eq!(d["cameraBobbingUDAmplitude"], camera_opts.bob_ud_amplitude);
+        assert_eq!(d["cameraBobbingFrequency"], camera_opts.bob_frequency);
+        assert_eq!(d["cameraBobbingSmoothSpeed"], camera_opts.bob_smooth_speed);
+        assert_eq!(d["cameraPivotDXMax"], camera_opts.pivot_dx_max);
+        assert_eq!(d["cameraPivotDYMin"], camera_opts.pivot_dy_min);
+        assert_eq!(
+            d["cameraTargetSmoothSpeed"],
+            camera_opts.target_smooth_speed
         );
         // The V-plate pair welds to VPlateMode's defaults — both OFF, which is the reference's
         // own boot state on both of its halves (the `[0xc4da34]` bitmask and FrameXML's
@@ -2348,7 +2545,9 @@ mod tests {
         let mut fps_journal = crate::perf::FpsJournalSetting::default();
         let mut text_filter = crate::text_filter::TextFilterSwitches::default();
         let mut game_tip = crate::game_tip::GameTipSetting::default();
+        let mut camera_opts = crate::player::camera_dynamics::CameraOptions::default();
         let mut knobs = Knobs {
+            camera_opts: &mut camera_opts,
             sound: &mut sound,
             auto_self_cast: &mut auto_self_cast,
             text_filter: &mut text_filter,
@@ -2684,6 +2883,7 @@ mod tests {
                 formats: vec![(32, 32, 1), (32, 32, 2), (32, 32, 4)],
             })
             .init_resource::<LookConfig>()
+            .init_resource::<crate::player::camera_dynamics::CameraOptions>()
             .init_resource::<crate::ui_chat::combat::CombatLogRanges>()
             .init_resource::<crate::combat_text::DamageTextGates>()
             .init_resource::<crate::ui_chat::combat::LogPeriodicSpells>()

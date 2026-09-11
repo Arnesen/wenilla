@@ -216,6 +216,11 @@ mod tests {
         // re-seats off `!script.has_text_measurer()` — it interrogates the VM instead of a memo,
         // which is the same guarantee arrived at the other way.
         ("ui_script/extract/mod.rs", "last_seam"),
+        // The plate driver's anti-overlap scratch (decision 2148 put the VM in that system's
+        // hands). It is cleared at the top of every run and rebuilt from this frame's plates —
+        // a reused allocation, not memory: nothing in it survives the call it was filled in, so
+        // a new VM has nothing to stale.
+        ("vplates.rs", "bucket"),
         // The window's `scale_factor` beside it (decision 1342) — the other term a measure is
         // only correct under, since a logical height becomes an integer DEVICE-pixel raster size.
         // A fact about the window, not about the VM; it gates the same re-seat `last_seam` does,
