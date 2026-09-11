@@ -675,8 +675,21 @@ fn wheel_scroll_is_silent_but_the_arrows_click() {
         "the wheel scroll is silent"
     );
 
-    // The down arrow (enabled at the top), though — clicking it plays the ref's arrow click.
-    s.run("ClassTrainerListScrollFrameScrollBarScrollDownButton:Click()")
+    // That one notch reached the BOTTOM, and the arrow to click afterwards is therefore the UP
+    // one. `ScrollFrameTemplate_OnMouseWheel` moves half the bar's height — 76px on this window's
+    // 152-tall bar — and `SetValue` snaps that onto the row lattice (step 16), which rounds 76 up
+    // to the range's own 80 (2133). `FauxScrollFrame_Update` then greys the DOWN arrow on its
+    // `GetValue() - scrollFrameHeight == 0` test, so clicking it would be clicking a disabled
+    // button. Pinned rather than worked around: this snap is the reference's.
+    assert_eq!(
+        s.eval::<f64>("return ClassTrainerListScrollFrameScrollBar:GetValue()")
+            .unwrap(),
+        80.0,
+        "one wheel notch = 76px, snapped to the 5-row bottom of an 80px range"
+    );
+
+    // The up arrow, now the enabled one — clicking it plays the ref's arrow click.
+    s.run("ClassTrainerListScrollFrameScrollBarScrollUpButton:Click()")
         .unwrap();
     assert!(
         s.take_sounds().contains(&click),

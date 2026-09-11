@@ -83,7 +83,7 @@ impl super::UiScript {
             }
         }
         if !unwritable.is_empty() {
-            self.model_mut().warnings.push(format!(
+            self.model_mut().record_warning(format!(
                 "saved variables: not serializable, skipped: {}",
                 unwritable.join(", ")
             ));

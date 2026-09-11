@@ -90,7 +90,11 @@ pub(crate) fn coerced_number(lua: &Lua, v: Option<Value>) -> f64 {
 /// finds nothing, and answers `nil`. Everything else (nil, boolean, table, function) raises.
 pub(crate) fn string_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Result<String> {
     match lua.coerce_string(v)? {
-        Some(s) => Ok(s.to_str()?.to_owned()),
+        // Lossy, per decision 1193: a Lua 5.0 string is BYTES and the reference reads it as
+        // bytes, so an argument that is not valid UTF-8 costs a glyph here — it does not cost
+        // the call. `to_str()` used to raise, which turned one stray byte in one cp1252 addon's
+        // literal into a dead handler (2138).
+        Some(s) => Ok(s.to_string_lossy()),
         None => Err(mlua::Error::RuntimeError(usage.into())),
     }
 }
@@ -118,12 +122,40 @@ pub(crate) fn string_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
 /// argument, and only there) test the tag themselves before calling this.
 pub(crate) fn optional_string(lua: &Lua, v: &Value) -> Option<String> {
     match v {
+        // Lossy, per decision 1193 and for the same reason as [`string_arg`] — with a sharper
+        // symptom, because this one's failure was SILENT: `to_str().ok()` folded a string that
+        // was not valid UTF-8 into `None`, which every caller here reads as *the argument was
+        // not there*. `AddMessage` printed nothing, `CreateFrame` produced an unnamed frame, and
+        // nothing anywhere said why (2138).
         Value::String(_) | Value::Number(_) | Value::Integer(_) => lua
             .coerce_string(v.clone())
             .ok()
             .flatten()
-            .and_then(|s| s.to_str().ok().map(|t| t.to_owned())),
+            .map(|s| s.to_string_lossy()),
         _ => None,
+    }
+}
+
+/// **A free-text argument — the player-visible kind — as the reference takes it** (decision 2138).
+///
+/// The text sinks (`FontString`/`Button`/`EditBox`/`SimpleHTML` `SetText`, `SetFormattedText`,
+/// `EditBox:Insert`) took their argument as mlua's `Option<String>`, whose `FromLua` demands valid
+/// UTF-8 and **raises** otherwise. Decision 1193 settled that a UI source file is bytes and that
+/// "the right place to turn bytes into text is the boundary that actually requires text… A stray
+/// byte should cost one glyph, not the file" — and then these boundaries cost the whole call.
+/// `strsub` is byte-indexed (1193 keeps it that way deliberately), so *any* addon slicing
+/// non-ASCII text hands a sink a broken sequence, and a cp1252 literal is a broken sequence to
+/// begin with.
+///
+/// This is `Option<String>`'s conversion with exactly one arm changed: a **string** becomes its
+/// lossy text. Every other type behaves as before — absent and `nil` are `None`, a number
+/// coerces, a table or a function raises mlua's own conversion error — so the raise/absent split
+/// each binding already had (§ [`optional_string`]'s table) is untouched.
+pub(crate) fn text_arg(lua: &Lua, v: Option<Value>) -> mlua::Result<Option<String>> {
+    match v {
+        None | Some(Value::Nil) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.to_string_lossy())),
+        Some(other) => mlua::FromLua::from_lua(other, lua).map(Some),
     }
 }
 

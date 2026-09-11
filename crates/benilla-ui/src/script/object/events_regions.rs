@@ -309,14 +309,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 ///   the mechanism: the kind buckets, the strata 8→0 order, the key-name table, and the
 ///   existence-not-handling consumption gate). They were this list's standing exception; the rule
 ///   above let them in the moment something fired them.
-/// * **`OnCursorChanged`** (4 sites over 3 addons — all of them the Era `ScrollingEdit_OnCursorChanged`
-///   auto-scroll idiom) — **raising**, by this list's own rule: nothing fires it. It is the
-///   EditBox's own slot (RF-28 `+0x428`), fired by the reference's caret flush `0x77da80` with
-///   **four float caret-POSITION args**. The geometry itself is no longer the obstacle — the paint
-///   seam computes `caret_row`/`caret_x` off the host-answered advance table
-///   ([`crate::script::editbox::seam`]) — but that is a per-extract recompute with no event edge,
-///   so there is no counterpart to the flush to fire from. Accepting the name before building one
-///   would mean a scroll box that silently never follows the caret.
+/// * **`OnCursorChanged`** (4 sites over 3 addons, plus two in the SHIPPED FrameXML — all of them
+///   the `ScrollingEdit_OnCursorChanged` auto-scroll idiom) — **accepted since decision 2141**,
+///   which built the edge this entry said was missing. The EditBox's own slot (RF-28 `+0x428`),
+///   fired by the caret flush `0x77da80` with four float caret-position args in UI units;
+///   `editbox::drain_cursor_changed` is our counterpart, on the tick, gated on the caret having
+///   actually moved. The stock `MailFrame.xml` and `HelpFrame.xml` declare it, so until 2141 the
+///   mail body and the GM ticket box did not scroll as you typed past their bottom — a bug nobody
+///   could see, because the load-time refusal only reached a terminal (decision 2135).
 /// * **`OnAttributeChanged`** (1 site, `Roid-Macros`) — **raising, permanently.** It is 2.0's secure
 ///   frame/attribute system; there is no such slot in any 1.12 resolver. That addon is asking for a
 ///   later client and should hear so.
@@ -431,7 +431,7 @@ fn apply_region_inherits(lua: &Lua, wrapper: &Table, from: &str) -> mlua::Result
     };
     if is_template {
         let mut model = lua.app_data_mut::<Model>().expect("model");
-        model.warnings.push(format!(
+        model.record_warning(format!(
             "CreateTexture/CreateFontString: '{from}' is a registered TEMPLATE, not a font object;              the region is created but the template's content is not applied (no corpus caller              does this)"
         ));
         return Ok(());

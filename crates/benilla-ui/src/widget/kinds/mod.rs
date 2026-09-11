@@ -1029,21 +1029,19 @@ pub enum ButtonVisualState {
 /// the pointer at extract time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ButtonState {
-    /// `Enable`/`Disable`. A disabled button shows its DisabledTexture and fires no clicks.
-    pub enabled: bool,
-    /// The scripted PUSHED state — `SetButtonState("PUSHED"/"NORMAL") 0x780270` /
-    /// `GetButtonState 0x780180`, the keybind visual's engine half (ref `ActionButtonDown/Up`,
-    /// `ActionButton.lua:15-28`). ORs with the mouse-derived held+hovered press in
-    /// [`Self::input_state`]; the mouse press itself stays outside the widget (the app's capture),
-    /// which is why the state machine takes it as an argument.
+    /// **`[CSimpleButton+0x32c]` — the LOCK**, written unconditionally by every
+    /// `SetButtonState(state, locked) 0x779790` and read by exactly four guards, all of them the
+    /// engine's own edges. While it is set the button **ignores the mouse press/release
+    /// transitions entirely**; while it is clear, any engine edge that fires re-writes it to
+    /// `false`, because every engine call site passes `locked = 0` (wow-re
+    /// `system/ui/scratch/button-state-edge-set.md`, VERIFIED — including `Enable`/`Disable`,
+    /// which therefore CLEAR a lock a script set).
     ///
-    /// **The reference has one variable where we have two**, and the difference is stated rather
-    /// than implied: `SetButtonState(state, locked)` writes `[+0x328]` *and* the lock at `+0x32c`,
-    /// and an unlocked scripted push is therefore cleared by the next mouse press/release
-    /// (`0x7793c2`'s `SetState(NORMAL)`, gated on `locked == 0`). Ours keeps the flag until Lua
-    /// clears it. No 1.12 caller pushes without meaning it to stick: `ActionButtonDown` pairs
-    /// every push with its own `ActionButtonUp`, and the micro buttons pass `locked = 1`.
-    pub pushed_state: bool,
+    /// `MainMenuBarMicroButtons.lua` is the reference's own customer: `SetButtonState("PUSHED", 1)`
+    /// when a panel opens, `SetButtonState("NORMAL")` — the flag defaulting to 0 — when it closes.
+    /// The ordinary action bars pass no flag at all, and Tablet-2.0 pushes its clicked rows
+    /// unlocked and never un-pushes them, which is the whole reason this field exists (2134).
+    pub locked: bool,
     /// [`FrameKind::LootButton`]'s own field — `CLootButton +0x4dc`, the **0-based** loot slot
     /// this row takes when clicked. `None` until `SetSlot` writes it (the ctor's zero is a slot
     /// id in the reference; ours is `None`, so a row that was never given one takes nothing
@@ -1146,10 +1144,17 @@ pub struct ButtonState {
     /// [`Self::set_state`] and [`Self::set_state_slot`] alone, which is what makes the transition
     /// rule un-bypassable.
     shown: Option<RegionHandle>,
-    /// The state [`Self::shown`] was last resolved for — the client's `[+0x328]`. Latched from the
-    /// three inputs ([`Self::enabled`], [`Self::pushed_state`] and the mouse's held+hovered) by
-    /// [`Self::settle`], so a *transition* can be detected at all; the client keeps the same one
-    /// variable for the same reason.
+    /// **`[CSimpleButton+0x328]` — THE state**, and the client really does have only this one
+    /// variable: `SetButtonState 0x779790` is its only writer past the ctor, and `IsEnabled
+    /// 0x7800b0`, `GetButtonState 0x780180` and every texture decision read it back.
+    ///
+    /// Private, because it is a **latch driven by edges**, not a value derived from inputs. That
+    /// distinction is the whole of decision 2134: benilla used to carry `enabled` and
+    /// `pushed_state` beside it and re-derive `state` from them plus the live mouse
+    /// (`(held && hovered) || pushed_state`), and the reference's press state **has no hover term
+    /// at all** — the enter and leave notifies (`0x779490`/`0x7794e0`) read `[+0x328]` only as a
+    /// DISABLED guard and never write it. A derived model un-presses when the cursor leaves a held
+    /// button and re-presses when it comes back; the reference does neither.
     state: ButtonVisualState,
 }
 
@@ -1157,8 +1162,7 @@ impl Default for ButtonState {
     fn default() -> Self {
         ButtonState {
             loot_slot: None,
-            enabled: true,
-            pushed_state: false,
+            locked: false,
             checked: false,
             normal: None,
             pushed: None,
@@ -1192,18 +1196,6 @@ impl ButtonState {
             ButtonVisualState::Disabled => self.disabled,
             ButtonVisualState::Normal => self.normal,
             ButtonVisualState::Pushed => self.pushed,
-        }
-    }
-
-    /// The state the three inputs put the button in — disabled wins, then the press (the mouse's
-    /// held+hovered, or the scripted [`Self::pushed_state`]), else resting.
-    fn input_state(&self, hovered: bool, held: bool) -> ButtonVisualState {
-        if !self.enabled {
-            ButtonVisualState::Disabled
-        } else if (held && hovered) || self.pushed_state {
-            ButtonVisualState::Pushed
-        } else {
-            ButtonVisualState::Normal
         }
     }
 
@@ -1251,16 +1243,111 @@ impl ButtonState {
         }
     }
 
-    /// Run the state machine over the current inputs — the caller's job at every point one of them
-    /// can have moved (`script::button::settle`, which reads the mouse's two off the model).
+    /// **`CSimpleButton::SetButtonState(state, locked) 0x779790` — the ONE writer**, and the door
+    /// every edge below goes through.
     ///
-    /// The client has no such call because it has no derived inputs: its mouse handlers call
-    /// `SetState` directly (`0x7791ed` enter, `0x7793f0` leave, `0x7792ad` down, `0x7793c2` up,
-    /// each gated on `locked == 0`) and so do `Enable`/`Disable`. Ours keeps the inputs as fields
-    /// and latches [`Self::state`] from them here; the transitions that result are the same ones,
-    /// in the same order.
-    pub fn settle(&mut self, hovered: bool, held: bool) {
-        self.set_state(self.input_state(hovered, held));
+    /// `0x77979d mov [this+0x32c], locked` is **unconditional**, before and independent of the
+    /// state's own equality early-out at `0x7797a3` — so a `SetButtonState("NORMAL", 1)` on a
+    /// button that is already NORMAL still arms the lock, and every engine edge (all of which pass
+    /// `locked = 0`) disarms it even when the state does not move.
+    pub fn set_button_state(&mut self, new: ButtonVisualState, locked: bool) {
+        self.locked = locked;
+        self.set_state(new);
+    }
+
+    /// `IsEnabled 0x7800b0` — which reads `[+0x328]` and nothing else, because there is no
+    /// separate enabled flag in the class.
+    pub fn enabled(&self) -> bool {
+        self.state != ButtonVisualState::Disabled
+    }
+
+    /// `GetButtonState 0x780180` — the same one variable, un-derived. A button held down by the
+    /// mouse answers `"PUSHED"` because the press *wrote* it, not because a getter re-checks the
+    /// cursor (which is what ours used to do, and why it could disagree with the art).
+    pub fn button_state(&self) -> ButtonVisualState {
+        self.state
+    }
+
+    // ── The engine's edges (wow-re `scratch/button-state-edge-set.md`, VERIFIED) ─────────────
+    //
+    // Seven call sites of `0x779790` exist image-wide; six are below and the seventh is the Lua
+    // binding ([`Self::set_button_state`]). Every one of the six passes `locked = 0`. There is
+    // **no enter edge and no leave edge** — `0x779490`/`0x7794e0` re-apply the label style and
+    // never touch `[+0x328]` — which is the correction 2134 is built on.
+
+    /// **`SetEnabled(bool) 0x779160`** (vtable `+0x90`) — `Enable 0x77fef0` / `Disable 0x77ffd0`.
+    ///
+    /// Two asymmetries the byte read settles, both early-outs on the state it already has:
+    /// `Enable()` on a button that is not DISABLED does **nothing at all** (`0x779175`) — so it
+    /// does not un-push a PUSHED button and does not clear a lock; `Disable()` on an
+    /// already-DISABLED one likewise (`0x77919c`). When it does run it passes `locked = 0`
+    /// (`0x779179`/`0x7791c2`), so enabling or disabling a script-locked button **unlocks** it.
+    ///
+    /// Returns whether the transition ran — the caller owes the HIGHLIGHT draw-layer half only
+    /// then (`script::button::set_enabled`).
+    pub fn set_enabled(&mut self, on: bool) -> bool {
+        if on == self.enabled() {
+            return false;
+        }
+        self.set_button_state(
+            if on {
+                ButtonVisualState::Normal
+            } else {
+                ButtonVisualState::Disabled
+            },
+            false,
+        );
+        true
+    }
+
+    /// **The hide edge** — `CSimpleButton`'s `+0x34` override `0x7791e0`, which un-presses and then
+    /// tail-jumps the base notify so the frame's `<OnHide>` still fires. Guard at `0x7791ed`:
+    /// `state != DISABLED && locked == 0`.
+    pub fn on_hide(&mut self) {
+        if self.state != ButtonVisualState::Disabled && !self.locked {
+            self.set_button_state(ButtonVisualState::Normal, false);
+        }
+    }
+
+    /// **The press edge** — the mouse-down dispatcher `0x779210`'s `0x7792b1`
+    /// `SetButtonState(PUSHED, 0)`, guarded at `0x779295` on `locked == 0 && state != DISABLED`.
+    /// Unconditional past the registration and hit gates above it, which is why a right-click on a
+    /// slot that registered `RightButtonUp` lights up even when the click does nothing.
+    pub fn on_mouse_down(&mut self) {
+        if !self.locked && self.state != ButtonVisualState::Disabled {
+            self.set_button_state(ButtonVisualState::Pushed, false);
+        }
+    }
+
+    /// **The release edge** — the mouse-up dispatcher `0x7792d0`'s `0x7793de`
+    /// `SetButtonState(NORMAL, 0)`, guarded at `0x7793c2` on `locked == 0` and at `0x779307` on the
+    /// state actually being PUSHED.
+    ///
+    /// **It does not ask where the cursor is.** A press held over a button and released anywhere
+    /// on screen un-presses it; the release is the edge, the hover is not. (The caller skips this
+    /// when the base finalized a drag — `0x7792df`'s `0x76c040` test — which is our
+    /// `cursor::take_drag(..).started`.)
+    ///
+    /// This is the edge that fixes Tablet-2.0: its rows call `SetButtonState("PUSHED")` with no
+    /// lock argument and never call `SetButtonState("NORMAL")` at all, because in the reference
+    /// this release does it for them.
+    pub fn on_mouse_up(&mut self) {
+        if !self.locked && self.state == ButtonVisualState::Pushed {
+            self.set_button_state(ButtonVisualState::Normal, false);
+        }
+    }
+
+    /// **The drag-start edge** — `+0x74`'s override `0x7793f0`, `0x779410`
+    /// `SetButtonState(NORMAL, 0)` under the same `0x779400` guard, before forwarding to the base
+    /// `0x76c1e0` that fires `<OnDragStart>`.
+    ///
+    /// It fires on the drag THRESHOLD crossing (a link-time `0.01` frame units, `0x81c468`), not on
+    /// the rect edge, and only for a frame that called `RegisterForDrag` — so a button you drag off
+    /// un-presses well before the cursor leaves it, and one you merely slide off does not.
+    pub fn on_drag_start(&mut self) {
+        if !self.locked && self.state != ButtonVisualState::Disabled {
+            self.set_button_state(ButtonVisualState::Normal, false);
+        }
     }
 
     /// **`SetNormalTexture`/`SetPushedTexture`/`SetDisabledTexture 0x778fd0`** — the slot store,
@@ -1308,10 +1395,10 @@ impl ButtonState {
             return hovered || self.locked_highlight;
         }
         if some == self.checked_tex {
-            return self.checked && (self.enabled || self.disabled_checked.is_none());
+            return self.checked && (self.enabled() || self.disabled_checked.is_none());
         }
         if some == self.disabled_checked {
-            return self.checked && !self.enabled;
+            return self.checked && !self.enabled();
         }
         true
     }
@@ -1382,11 +1469,13 @@ pub struct SliderState {
     /// Atlas's option sliders raised `attempt to index global 'AtlasOptions'` from their own
     /// `<OnLoad>`, a handler the reference never runs at that point.
     pub has_value: bool,
-    /// `SetValueStep` (XML `valueStep`) — the step the arrow keys / step buttons move by. Stored and
-    /// returned. **Known divergence:** the client's `SetValue` (`0x789930`) round-half quantises the
-    /// value by this step before the change compare (wow-re `item9-firing34-merge.md`, `ui.md`
-    /// "clamped/step-quantized"); ours stores the raw value. Not yet reconciled — every scrollbar
-    /// rides this path, so it is its own change with its own falsifier.
+    /// `SetValueStep` (XML `valueStep`) — the client's `[+0x324]`, and **the quantiser every
+    /// stored value passes through**, not merely the arrow keys' stride: `SetValue 0x789930`
+    /// rounds the clamped value onto the `min + n·step` lattice before the change compare, so
+    /// `GetValue` on a stepped slider can only ever answer a lattice point ([`slider_set_value`],
+    /// which is the whole kernel transcribed). A `step` of exactly `0.0` — the ctor default, and
+    /// what every scrollbar template leaves it at — skips the quantiser outright, which is the
+    /// gate that keeps `UIPanelScrollBarTemplate` continuous.
     pub step: f32,
     /// `true` = VERTICAL (the ctor default; value maps along the track's height, min at the top),
     /// `false` = HORIZONTAL (`orientation`; shared enum `0x811b00` HORIZONTAL=0/VERTICAL=1).
@@ -1473,6 +1562,80 @@ pub fn slider_fraction(
     (travel > 0.0).then(|| ((cursor - grab) / travel).clamp(0.0, 1.0))
 }
 
+/// **`CSimpleSlider::SetValue`'s arithmetic kernel — `0x789930`, clamp then quantise.**
+///
+/// The value a `SetValue(v)` actually stores, given the widget's range fields as the client holds
+/// them: `min` = `[+0x318]`, `span` = `[+0x31c]` (the client keeps the *span*, not the max — the
+/// range setter `0x7898f0` stores `end − start` and `0x789a60` re-derives `max = span + min`), and
+/// `step` = `[+0x324]`.
+///
+/// Transcribed op-for-op from wow-re's bit-exact primitive `glue_789930_set_value`
+/// (`crates/ui/src/glue_geom_789.rs`, difftest `glue_geom_789.rs::glue_789930_set_value`,
+/// ledger `PRIMITIVE:glue_789930_set_value`, VERIFIED), whose own doc reads the emitted jccs:
+///
+/// 1. **clamp-low** (`0x789947`..`0x78995f`) — `fld min; fcomp v; test ah,0x41; jne`: `max(min, v)`,
+///    with an unordered compare (NaN) taking the `v` arm.
+/// 2. **`bound = span + min`** (`0x789962`/`0x789968`), spilled to the f32 slot `[ebp-4]`.
+/// 3. **clamp-high** (`0x78996e`..`0x78999c`) — `hi = bound` *reloaded as f32* iff `bound < lo`
+///    ordered-strict; otherwise `hi` is the clamp-low again. Net: `clamp(v, min, bound)`, except
+///    that a **degenerate range pins to `bound`, not to `min`** — which is the one place this
+///    replaced an assumption, our old `v.clamp(min, max.max(min))` having pinned the other way.
+/// 4. **quantise** (`0x78999c`..`0x789a06`), skipped entirely when `step == 0.0`:
+///    `diff = hi − min`, `halfstep = step · 0.5`, then **round-half-away-from-zero** —
+///    `(diff + halfstep) / step` when `diff > 0` ordered, `(diff − halfstep) / step` otherwise
+///    (`≤ 0` and NaN both take the round-down arm) — truncated toward zero by `__ftol`, and
+///    `hi = n · step + min`.
+///
+/// Two consequences worth stating because they look like bugs and are not:
+///
+/// * **The quantised value is NOT re-clamped.** With a range that is not a whole number of steps,
+///   the top of the travel rounds *past* `max` by up to half a step. Every stepped slider the
+///   reference ships is an exact multiple (`FauxScrollFrame_Update` builds its range as
+///   `(numItems − numToDisplay) · valueStep`; the option sliders are all 10/20/100 steps), so the
+///   overshoot is unreachable there — but an addon's odd range really does produce it.
+/// * **The lattice is anchored at `min`, not at zero**, so a slider over `[0.25, 1.0]` stepping by
+///   `0.1` settles on `0.25, 0.35, …`, never on `0.3`.
+///
+/// The f64 intermediates are the x87 register stack at PC_53, and the two `as f32` narrowings are
+/// its two `fst`/`fstp` spills — not an approximation of them.
+pub fn slider_set_value(v: f32, min: f32, span: f32, step: f32) -> f32 {
+    let minv = f64::from(min);
+    let vv = f64::from(v);
+
+    // clamp-low: `fcomp(min, v)` falls through to `min` only on `min > v` ordered-strict.
+    let clamp_low = |v: f64| {
+        if matches!(minv.partial_cmp(&v), Some(core::cmp::Ordering::Greater)) {
+            minv
+        } else {
+            v
+        }
+    };
+    let lo = clamp_low(vv);
+
+    // `bound = span + min`, live, and spilled to f32 at `[ebp-4]`.
+    let bound = f64::from(span) + minv;
+    let mut hi = if matches!(bound.partial_cmp(&lo), Some(core::cmp::Ordering::Less)) {
+        f64::from(bound as f32) // `fld [ebp-4]` — the f32 reload, not the live value
+    } else {
+        clamp_low(vv)
+    };
+
+    // The step test is `fcomp(step, 0.0)`: exactly zero (either sign) skips the quantiser.
+    if f64::from(step) != 0.0 {
+        let stepv = f64::from(step);
+        let diff = hi - minv;
+        let halfstep = stepv * 0.5;
+        let scaled = if diff > 0.0 {
+            (halfstep + diff) / stepv
+        } else {
+            (diff - halfstep) / stepv
+        };
+        let n = scaled.trunc() as i32; // `__ftol`, truncate toward zero
+        hi = (f64::from(n) * stepv) + minv;
+    }
+    hi as f32
+}
+
 impl SliderState {
     /// The value fraction `(value − min) / (max − min)`, clamped to `[0, 1]`; a degenerate range
     /// (`max <= min`, an unscrollable slider) is `0.0` — the thumb sits at the track's start.
@@ -1484,24 +1647,69 @@ impl SliderState {
         }
     }
 
-    /// `SetValue` (`0x789930`): clamp `v` into the live range and store it; returns `Some(value)`
-    /// when the caller must fire `OnValueChanged`. The fire law is the client's, emitted-jcc read
-    /// in wow-re `slider-mouse-law.md` §6: **no range yet → a complete no-op**; **first-ever value →
-    /// always store and fire**; after that, **fire iff the clamped value differs** from the stored
-    /// one. The change-gate is load-bearing, not an optimisation: the reference scrollbar wires
-    /// `OnValueChanged → SetVerticalScroll → scrollbar:SetValue` back on itself, and the gate is
-    /// what stops that after one hop. A degenerate range (`max <= min`) pins to `min`.
+    /// `SetValue` (`0x789930`): clamp **and quantise** `v` ([`slider_set_value`]) and store it;
+    /// returns `Some(value)` when the caller must fire `OnValueChanged`. The fire law is the
+    /// client's, emitted-jcc read in wow-re `slider-mouse-law.md` §6: **no range yet → a complete
+    /// no-op**; **first-ever value → always store and fire**; after that, **fire iff the
+    /// clamped/step-quantised value differs** from the stored one. The change-gate is load-bearing,
+    /// not an optimisation: the reference scrollbar wires `OnValueChanged → SetVerticalScroll →
+    /// scrollbar:SetValue` back on itself, and the gate is what stops that after one hop.
+    ///
+    /// **The quantiser is inside the gate, not after it**, and that is what makes a stepped
+    /// slider's drag cheap as well as faithful: a thumb moved a pixel within one step's band
+    /// resolves to the same lattice point and fires nothing at all, exactly as the reference's
+    /// `fcom` against `[+0x320]` decides.
+    ///
+    /// The client holds the range as `min` + `span`; we hold `min` + `max`, so the span is derived
+    /// here the way `0x7898f0` computes it (`end − start`, at f64 and narrowed). That keeps
+    /// `GetMinMaxValues` answering the exact pair that was set — the reference's own `max` is
+    /// re-derived as `span + min` and can differ from it in the last ulp — at the cost of the
+    /// clamp bound being that same re-derivation. A degenerate range (`max < min`) pins to the
+    /// bound, which is the client's arm, not to `min`.
     pub fn store_value(&mut self, v: f32) -> Option<f32> {
         if !self.range_valid {
             return None;
         }
-        let clamped = v.clamp(self.min, self.max.max(self.min));
+        let span = (f64::from(self.max) - f64::from(self.min)) as f32;
+        let settled = slider_set_value(v, self.min, span, self.step);
         let first = !self.has_value;
         self.has_value = true;
-        (first || clamped != self.value).then(|| {
-            self.value = clamped;
-            clamped
+        (first || settled != self.value).then(|| {
+            self.value = settled;
+            settled
         })
+    }
+
+    /// **`SetValueStep` (`0x789a60`) — which is not a field write** (decision 2143).
+    ///
+    /// The byte read, VERIFIED (wow-re `slider-mouse-law.md` §10, a scoped round dispatched from
+    /// this repo, cross-derived twice and pinned by an executed probe on the binary's own bytes):
+    ///
+    /// 1. `0x789a66` stores the step — **unconditional**.
+    /// 2. `0x789a6c test byte [+0x314],2` — **no range yet ⇒ return, and nothing else happens.**
+    /// 3. Otherwise `0x789a91 call 0x7898f0(min, f32(span + min))` — [`Self::set_min_max`] with the
+    ///    max **re-derived**, which re-clamps the held value through `SetValue` when one exists,
+    ///    re-quantising it onto the NEW lattice and firing `OnValueChanged` if it moved.
+    ///
+    /// So a step handed to a slider that already holds a value can move that value and fire — and,
+    /// because `span′ = f32(f32(span + min) − min)` is **not the identity**, it can also change the
+    /// range (`min = 1.0`, `span = 1e-8` collapses it to zero). Ours stored the step and stopped,
+    /// which diverged on all three counts and on the next `GetMinMaxValues` besides.
+    ///
+    /// Inert for every caller the reference ships, and **not for the reason decision 2133 gave**
+    /// (that they set the range and the step before any value exists — true only of each site's
+    /// first run; `FauxScrollFrame_Update` re-runs on a live bar from fourteen update functions and
+    /// never calls `SetValue` at all). It is inert because the only writer of the value is
+    /// `SetValue`, which quantises on the way in, so the value is always already on the lattice
+    /// being re-imposed.
+    pub fn set_value_step(&mut self, step: f32) -> Option<f32> {
+        self.step = step;
+        if !self.range_valid {
+            return None;
+        }
+        let span = (f64::from(self.max) - f64::from(self.min)) as f32;
+        let max = (f64::from(span) + f64::from(self.min)) as f32;
+        self.set_min_max(self.min, max)
     }
 
     /// `SetMinMaxValues` (`0x7898f0`): set the range, mark it valid, and re-clamp the held value

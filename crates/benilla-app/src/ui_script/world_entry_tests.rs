@@ -880,20 +880,27 @@ fn an_addon_that_fails_to_load_without_raising_is_readable_in_the_error_log() {
     script
         .eval::<()>("BenillaScriptLog_Update() return nil")
         .expect("the window repaints over a real log without raising");
-    let row_label: String = script
-        .eval::<Option<String>>("return BenillaScriptLogRow1Label:GetText()")
-        .expect("eval")
-        .unwrap_or_default();
+    // **A ROW shows it — not necessarily row 1.** The log is ordered by first occurrence and it
+    // carries warnings now (2135), which a world entry produces before any addon is reached, so
+    // asserting an index would be asserting how many warnings the stock UI happens to raise.
+    // What this pins is the row TEXT, which is the window's own trim path over a real message.
+    let row_labels: Vec<String> = (1..=13)
+        .filter_map(|i| {
+            script
+                .eval::<Option<String>>(&format!("return BenillaScriptLogRow{i}Label:GetText()"))
+                .expect("eval")
+        })
+        .collect();
     assert!(
-        row_label.contains("AaMissing"),
-        "row 1 shows the failure, trimmed to the row's width: {row_label:?}"
+        row_labels.iter().any(|l| l.contains("AaMissing")),
+        "a row shows the failure, trimmed to the row's width: {row_labels:?}"
     );
     let summary: String = script
         .eval::<Option<String>>("return BenillaScriptLogSummary:GetText()")
         .expect("eval")
         .unwrap_or_default();
     assert!(
-        summary.contains("error"),
+        summary.contains("problem"),
         "the summary line counted them: {summary:?}"
     );
 
@@ -1158,4 +1165,49 @@ fn a_placed_window_comes_back_after_a_reload() {
 
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **A clean world entry raises the KNOWN warnings and no others** — the tripwire that keeps
+/// decision 2135's channel worth having.
+///
+/// The stock FrameXML is loaded here with no addons at all, so every row is a gap of *ours*.
+/// Before 2135 these reached a terminal and nothing else, and four of them had been sitting in
+/// every session for as long as the interface has been stock: two `OnCursorChanged` refusals (the
+/// mail body and the GM ticket box, which therefore did not scroll as you typed — 2141), one
+/// `OnInputLanguageChanged`, and an unregistered `useUiScale` that `ContainerFrame.lua` and
+/// `UIDropDownMenu.lua` both read.
+///
+/// The allowlist is deliberately a **list of names, not a count**: a new silent gap in a stock
+/// file reddens this instead of scrolling past, and closing one means deleting a line here.
+#[test]
+fn a_clean_world_entry_raises_only_the_warnings_we_have_named() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_tmp, _c, _h) = hermetic_probe("clean-entry-warnings");
+    let mut world = booted_world();
+    world.init_resource::<crate::ui_chat::ChatLog>();
+    log_in_as(&mut world, "Onehunter", 1);
+    let script = world
+        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("VM");
+
+    // **`OnInputLanguageChanged` stays out permanently**, and this is where that is said out loud.
+    // It is a real 1.12 slot (`FloatingChatFrame.xml` wires it to the IME language indicator) with
+    // zero corpus call sites, and benilla has no IME — so nothing here could ever fire it, and
+    // `SCRIPT_KINDS`' rule is that a name we cannot fire stays out. The refusal is the honest
+    // answer; the row is the price of saying it out loud.
+    const KNOWN: [&str; 1] = ["OnInputLanguageChanged"];
+
+    let unexpected: Vec<String> = script
+        .diagnostics()
+        .into_iter()
+        .filter(|d| d.kind == benilla_ui::script::diagnostics::DiagnosticKind::Warning)
+        .map(|d| d.message)
+        .filter(|m| !KNOWN.iter().any(|k| m.contains(k)))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "a stock world entry warned about something new — fix it or name it here: {unexpected:#?}"
+    );
 }

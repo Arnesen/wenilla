@@ -245,7 +245,7 @@ impl UiScript {
                         let hovered = owner.is_some() && model.mouseover == owner;
                         // The PRESS is not read here. Which state texture shows is latched on the
                         // transition (`ButtonState::set_state`), so the press reaches the paint
-                        // through `button::settle` at the moment the mouse moves it — not by
+                        // through the press EDGE at the moment the button goes down — not by
                         // being re-derived every frame. `hovered` survives because the Highlight
                         // is not a state texture and carries no latch.
                         if !bs.region_visible(rh, hovered) {
@@ -286,26 +286,27 @@ impl UiScript {
                             // shows its label. Every state-colour caller in our own UI ships the
                             // matching font object, so the two readings agree on all of them.
                             let highlighted = hovered || bs.locked_highlight;
-                            let (name, color, justify) =
-                                if !bs.enabled && bs.disabled_font.is_some() {
-                                    (
-                                        bs.disabled_font.as_ref(),
-                                        bs.disabled_color,
-                                        bs.disabled_justify_h,
-                                    )
-                                } else if bs.enabled && highlighted && bs.highlight_font.is_some() {
-                                    (
-                                        bs.highlight_font.as_ref(),
-                                        bs.highlight_color,
-                                        bs.highlight_justify_h,
-                                    )
-                                } else {
-                                    (
-                                        bs.normal_font.as_ref(),
-                                        bs.normal_color,
-                                        bs.normal_justify_h,
-                                    )
-                                };
+                            let (name, color, justify) = if !bs.enabled()
+                                && bs.disabled_font.is_some()
+                            {
+                                (
+                                    bs.disabled_font.as_ref(),
+                                    bs.disabled_color,
+                                    bs.disabled_justify_h,
+                                )
+                            } else if bs.enabled() && highlighted && bs.highlight_font.is_some() {
+                                (
+                                    bs.highlight_font.as_ref(),
+                                    bs.highlight_color,
+                                    bs.highlight_justify_h,
+                                )
+                            } else {
+                                (
+                                    bs.normal_font.as_ref(),
+                                    bs.normal_color,
+                                    bs.normal_justify_h,
+                                )
+                            };
                             state_font = name.and_then(|n| model.font_object(n));
                             button_font = bs.font.as_ref();
                             state_color = color;

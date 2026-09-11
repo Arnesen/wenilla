@@ -231,11 +231,13 @@ pub(crate) fn set_label_font_justify_h_lua(
 }
 
 /// Run `f` over a frame's Button state under one short write borrow.
-/// Run `f` over a frame's Button state under one short write borrow, then **settle the state
-/// machine** — `f` is every Lua write that can move an input (`Enable`/`Disable`,
-/// `SetButtonState`, `RegisterForClicks`), and the client's own writers call `SetState` on the
-/// spot rather than leaving a paint to notice. Settling a read is a no-op (the transition guard is
-/// `new == state`), so this stays on the one path instead of splitting into read/write halves.
+///
+/// **It no longer settles a state machine afterwards, because there is no longer one to settle**
+/// (decision 2134). The button's state is a latch the engine's own edges write; a Lua write moves
+/// it only when the write IS an edge (`Enable`/`Disable`, `SetButtonState`), and those call the
+/// edge themselves. `RegisterForClicks` and the texture setters no longer disturb the state at
+/// all — which is the reference's behaviour: re-registering a held button's clicks does not
+/// un-press it.
 fn with_button<T>(
     lua: &Lua,
     this: &Table,
@@ -243,25 +245,14 @@ fn with_button<T>(
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let (hovered, held) = press_inputs(&model, h);
     let frame = model
         .arena
         .frame_mut(h)
         .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
     match &mut frame.kind_state {
-        KindState::Button(bs) => {
-            let out = f(bs);
-            bs.settle(hovered, held);
-            Ok(out)
-        }
+        KindState::Button(bs) => Ok(f(bs)),
         _ => Err(mlua::Error::runtime("not a Button")),
     }
-}
-
-/// The two interaction inputs the model owns rather than the button: the cursor is over it, and a
-/// registered press is holding it.
-fn press_inputs(model: &Model, h: FrameHandle) -> (bool, bool) {
-    (model.mouseover == Some(h), press_held(model, h))
 }
 
 /// `Enable()` / `Disable()` — and the second thing they do, which is not the state texture.
@@ -270,7 +261,9 @@ fn press_inputs(model: &Model, h: FrameHandle) -> (bool, bool) {
 /// `0x779160`; the constructor reaches the same helper with `1` (`0x778766`), which is what puts
 /// a fresh button in NORMAL. That helper does **two** things:
 ///
-/// - `[vtbl+0x9c](state)` = `SetState 0x779790` — [`ButtonState::settle`]'s half; and
+/// - `[vtbl+0x9c](state, 0)` = `SetButtonState 0x779790` — [`ButtonState::set_enabled`]'s half,
+///   whose two early-outs (nothing happens if the button is already in the state being asked for)
+///   are the helper's own; and
 /// - `0x7791bb push 4; call 0x76a730` — the per-layer enable for layer **4 = HIGHLIGHT**, written
 ///   into the very `[frame+0x198]` array that `Enable/DisableDrawLayer` writes and that
 ///   `0x76b3a0` reads back at draw time.
@@ -281,23 +274,49 @@ fn press_inputs(model: &Model, h: FrameHandle) -> (bool, bool) {
 /// the client keeps it, instead of a second rule that agreed with it on the common case and
 /// disagreed on `<Layer level="HIGHLIGHT">` art the button did not put there itself.
 ///
-/// The reference has one array and one writer, so an addon's `DisableDrawLayer("HIGHLIGHT")` is
-/// undone by the next `Enable()`, exactly as here.
+/// **The restore is NOT symmetric, and this comment used to claim it was** — *"one array and one
+/// writer, so an addon's `DisableDrawLayer("HIGHLIGHT")` is undone by the next `Enable()`"*. Both
+/// halves are false (wow-re `scratch/button-disabled-state-texture-law.md` §7, sharpened
+/// 2026-09-09 off `0x779160` read contiguously for exactly this question). The indexed form
+/// `[reg + 4*reg + 0x198]` has **three** sites image-wide — `0x76a717` (=1), `0x76a737` (=0) and
+/// `DrawLayer 0x76b3a6`'s read — so there are **two** writers; and the enable arm calls
+/// *neither* helper. It reaches the ON one only one hop away and only when the button is the
+/// frame under the cursor:
+///
+/// ```text
+/// 779183  mov ecx,[esi+0xa0]   ; the CSimpleTop singleton
+/// 779189  cmp esi,[ecx+0x7c]   ; am I the hover target?
+/// 77918c  jne 0x7791ce         ;   no -> return, layer untouched
+/// 779192  call [edx+0x4c]      ; = 0x779490 -> 0x76b6a0 -> 0x76b6c9 push 4; call 0x76a710
+/// ```
+///
+/// — i.e. `Enable()` on a hovered button restores the layer **by re-running the frame's Lua
+/// `<OnEnter>`**, and on a non-hovered one restores nothing (the next hover-enter does it). Both
+/// restore paths are gated on the LockHighlight flag `[frame+0xf8]`, and the disable arm's
+/// `0x7791bb call 0x76a730(4)` is the one site in the image that is *not* — so
+/// `LockHighlight()` → `Disable()` → `Enable()` leaves the layer off in the reference, and only
+/// `UnlockHighlight()`+`LockHighlight()` or an explicit `EnableDrawLayer` brings it back.
+///
+/// **Ours is the symmetric bit-flip**, which draws the same in the ordinary case — a highlight is
+/// only visible while hovered, and every hover-enter sets it — and diverges in two script-visible
+/// ways: we do not fire the `<OnEnter>` the reference synthesises when you `Enable()` a hovered
+/// button, and we restore a locked-then-disabled highlight the reference leaves dark. Named here
+/// rather than fixed, because the faithful shape needs the layer restore moved onto the hover
+/// path where the reference keeps it.
 fn set_enabled(lua: &Lua, this: &Table, on: bool) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let (hovered, held) = press_inputs(&model, h);
     let frame = model
         .arena
         .frame_mut(h)
         .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
+    // The state half is [`ButtonState::set_enabled`], whose two early-outs are the client's:
+    // `Enable()` on a button that is not DISABLED does nothing at all, and neither does
+    // `Disable()` on one that already is.
     match &mut frame.kind_state {
-        KindState::Button(bs) => {
-            bs.enabled = on;
-            bs.settle(hovered, held);
-        }
+        KindState::Button(bs) => bs.set_enabled(on),
         _ => return Err(mlua::Error::runtime("not a Button")),
-    }
+    };
     let bit = 1u8 << DrawLayer::Highlight.index();
     if on {
         frame.disabled_layers &= !bit;
@@ -307,18 +326,19 @@ fn set_enabled(lua: &Lua, this: &Table, on: bool) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Re-latch a button's state texture after something OUTSIDE the widget moved an input — the
-/// mouse crossing its boundary, a press landing or lifting, a capture dropped when the pointer
-/// left the window, or the hover cleared because the frame was hidden under the cursor.
+/// Run one of the engine's own state edges over frame `h`, if it is a live Button.
 ///
-/// These are the client's own `SetState` call sites (`0x7791ed` enter, `0x7793f0` leave,
-/// `0x7792ad` down, `0x7793c2` up); ours reach the same transition through the derived inputs.
+/// The reference's edge set is exactly seven `SetButtonState` call sites and **six of them are
+/// engine-side** (wow-re `scratch/button-state-edge-set.md`, VERIFIED): Enable, Disable, the hide
+/// notify, mouse-down, mouse-up and the drag-threshold crossing. There is **no enter or leave
+/// edge** — which is why the pointer path no longer calls anything here when the cursor crosses a
+/// button's boundary (decision 2134).
+///
 /// Harmless on a non-Button handle, and on a stale one.
-pub(super) fn settle(model: &mut Model, h: FrameHandle) {
-    let (hovered, held) = press_inputs(model, h);
+pub(super) fn edge(model: &mut Model, h: FrameHandle, f: impl FnOnce(&mut ButtonState)) {
     if let Some(frame) = model.arena.frame_mut(h) {
         if let KindState::Button(bs) = &mut frame.kind_state {
-            bs.settle(hovered, held);
+            f(bs);
         }
     }
 }
@@ -558,7 +578,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // SetText/GetText target the ButtonText fontstring (RF-28: the `text` attr routes there).
     m.set(
         "SetText",
-        lua.create_function(|lua, (this, text): (Table, Option<String>)| {
+        lua.create_function(|lua, (this, text): (Table, Option<Value>)| {
+            let text = super::binding_abi::text_arg(lua, text)?;
             // `CSimpleButton::SetText 0x778dc0` opens `if (!text) return;` (`0x778dcc`, wow-re
             // `button-label-build-and-anchor-order.md`) — a nil never reaches the label at all, so
             // it neither clears the text nor lazily creates the FontString. That guard is the
@@ -991,7 +1012,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "IsEnabled",
         lua.create_function(|lua, this: Table| {
-            with_button(lua, &this, |bs| i64::from(bs.enabled))
+            with_button(lua, &this, |bs| i64::from(bs.enabled()))
         })?,
     )?;
 
@@ -1012,49 +1033,53 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetButtonState("PUSHED"/"NORMAL") / GetButtonState — the scripted press state
-    // (`0x780270`/`0x780180`; ref `ActionButtonDown/Up`, ActionButton.lua:15-28: DOWN pushes
-    // only from NORMAL, UP fires only from PUSHED — the state doubles as the keybind debounce).
-    // Case-insensitive like the API's other string enums; an unknown state is a runtime error.
-    // DISABLED is Enable/Disable's to set, not this method's (the 1.12 FrameXML never passes it).
+    // **`SetButtonState(state[, lock]) 0x780270` — TWO arguments**, and the second is not
+    // cosmetic (wow-re `scratch/binding-shape-arity-law.md` §3, VERIFIED). It reads three stack
+    // indices and returns none; the state maps case-insensitively over exactly
+    // `{"DISABLED", "NORMAL", "PUSHED"}` (`0x780390`, `SStrCmpI`) and an unrecognised string
+    // raises `Usage: %s:SetButtonState("state", lock)`; the flag is `GetBoolOrDefault` with
+    // **default 0** (`0x78032c push 0`), whose number arm truncates through `_ftol`, so the
+    // literal `1` that `MainMenuBarMicroButtons.lua` passes arms it.
+    //
+    // **The lock is the whole of decision 2134.** While it is set the button ignores the mouse
+    // press/release transitions; while it is clear, the next release un-pushes a scripted push —
+    // which is what Tablet-2.0's rows depend on, since the library pushes them and never calls
+    // `SetButtonState("NORMAL")` anywhere.
+    //
+    // DISABLED really is accepted here — the mapper takes it — even though the 1.12 FrameXML
+    // never passes it.
     m.set(
         "SetButtonState",
-        lua.create_function(|lua, (this, state): (Table, String)| {
-            let pushed = if state.eq_ignore_ascii_case("PUSHED") {
-                true
+        lua.create_function(|lua, (this, state, lock): (Table, String, MultiValue)| {
+            let new = if state.eq_ignore_ascii_case("PUSHED") {
+                ButtonVisualState::Pushed
             } else if state.eq_ignore_ascii_case("NORMAL") {
-                false
+                ButtonVisualState::Normal
+            } else if state.eq_ignore_ascii_case("DISABLED") {
+                ButtonVisualState::Disabled
             } else {
                 return Err(mlua::Error::runtime(format!(
-                    "SetButtonState: unknown state '{state}'"
+                    "Usage: SetButtonState(\"state\", lock) — unknown state '{state}'"
                 )));
             };
-            with_button(lua, &this, |bs| bs.pushed_state = pushed)
+            let first = lock.into_iter().next();
+            let locked = super::binding_abi::bool_or_default(first.as_ref(), false);
+            with_button(lua, &this, |bs| bs.set_button_state(new, locked))
         })?,
     )?;
     m.set(
         "GetButtonState",
         lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            // The LIVE mouse-held press counts too (hovered + a registered button down on this
-            // frame — the same predicate the extract pass renders the PushedTexture by), closing
-            // the documented INTERIM where a mouse-held button answered "NORMAL": the chat scroll
-            // buttons' hold-repeat (ref MessageFrameScrollButton_OnUpdate) polls exactly this
-            // mid-press (decision 0288 P3). It reads the same in the reference for the same
-            // reason — `0x7792ad` writes ONE state variable and `0x780180` reads it back, so a
-            // right-held button answers "PUSHED" as surely as a left-held one.
-            let held = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.mouseover == Some(h) && press_held(&model, h)
-            };
-            with_button(lua, &this, move |bs| {
-                if !bs.enabled {
-                    "DISABLED"
-                } else if bs.pushed_state || held {
-                    "PUSHED"
-                } else {
-                    "NORMAL"
-                }
+            // ONE variable, read back (`0x780180` reads `[obj+0x328]`). This used to OR in the
+            // live mouse-held press, because the state was derived and the press lived outside
+            // the widget; now the press *wrote* the state at its edge, so a mouse-held button
+            // answers "PUSHED" for the same reason the reference does — and cannot disagree with
+            // the art the way a re-derived answer could (decision 2134). The chat scroll buttons'
+            // hold-repeat (ref `MessageFrameScrollButton_OnUpdate`) still reads what it needs.
+            with_button(lua, &this, |bs| match bs.button_state() {
+                ButtonVisualState::Disabled => "DISABLED",
+                ButtonVisualState::Pushed => "PUSHED",
+                ButtonVisualState::Normal => "NORMAL",
             })
         })?,
     )?;
@@ -1176,18 +1201,6 @@ pub(super) fn wants_press_visual(model: &Model, h: FrameHandle, button: &str) ->
     }
 }
 
-/// Is a press currently holding this button down — the `held` half of the PushedTexture rule.
-///
-/// Any captured mouse button counts, gated by [`wants_press_visual`]. Callers pair it with
-/// `hovered`, which is `0x779256`'s hit test at press time plus `0x7793f0`'s restore-to-NORMAL
-/// when the pointer leaves mid-press.
-pub(super) fn press_held(model: &Model, h: FrameHandle) -> bool {
-    model
-        .mouse_down_on
-        .iter()
-        .any(|(button, &pressed)| pressed == h && wants_press_visual(model, h, button))
-}
-
 /// The click behavior shared by the input path and `Click()`: gated on `enabled`; a CheckButton
 /// **toggles before OnClick fires** (the documented widget contract — a handler reading
 /// `self:GetChecked()` sees the new state); then `OnClick(self, button, down)` — `down` is `true`
@@ -1236,7 +1249,7 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
         match &mut frame.kind_state {
             // A Button/CheckButton click is gated on its enabled flag…
             KindState::Button(bs) => {
-                if bs.enabled {
+                if bs.enabled() {
                     if is_check {
                         bs.checked = !bs.checked;
                     }

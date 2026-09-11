@@ -27,7 +27,10 @@ use super::region_handle_of;
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetText",
-        lua.create_function(|lua, (this, text): (Table, Option<String>)| {
+        lua.create_function(|lua, (this, text): (Table, Option<mlua::Value>)| {
+            // `text_arg`, not `Option<String>`: a Lua string is bytes and a sliced one need not be
+            // valid UTF-8 (decision 2138 — this raise took the whole handler down).
+            let text = crate::script::binding_abi::text_arg(lua, text)?;
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let data = model.region_data.entry(rh).or_default();
@@ -50,7 +53,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 .globals()
                 .get::<Table>("string")?
                 .get::<mlua::Function>("format")?;
-            let text: String = format.call(args)?;
+            // The formatted result is bytes too — `%s` of a sliced string is a sliced string.
+            let text = format.call::<mlua::String>(args)?.to_string_lossy();
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let data = model.region_data.entry(rh).or_default();

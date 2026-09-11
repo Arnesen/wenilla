@@ -565,6 +565,36 @@ fn main() {
         }
     }
 
+    // **What was WARNED about, ranked** — the channel that reached nobody until 2135. It is
+    // printed after the error rankings and before the distribution on purpose: these are not
+    // blockers (nothing raised, the addon is running), so they must not outrank a row somebody is
+    // stuck on — but they are the only column that can see an addon quietly getting the wrong
+    // thing, which is the class `render` was added for and reaches later.
+    //
+    // Ranked by how many ADDONS hit each row, not by total occurrences: a warning one addon fires
+    // in an OnUpdate would otherwise bury one that fifty addons hit once.
+    let mut warned: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in &reports {
+        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        for w in &r.warnings {
+            seen.insert(addon_harness::normalise(w));
+        }
+        for w in seen {
+            *warned.entry(w).or_default() += 1;
+        }
+    }
+    if !warned.is_empty() {
+        let mut rows: Vec<(String, usize)> = warned.into_iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let addons = reports.iter().filter(|r| !r.warnings.is_empty()).count();
+        println!(
+            "\n  what was WARNED about ({addons} addons raised at least one, by addon count):"
+        );
+        for (w, count) in rows.into_iter().take(12) {
+            println!("    {count:>4}  {w}");
+        }
+    }
+
     // The distribution, because a mean would hide the shape.
     let mut buckets = [0usize; 5];
     for r in &reports {

@@ -306,9 +306,23 @@ pub(crate) const REGISTERED: &[Registered] = &[
          (`0x48fce4`), and the OFF leg `0x492f70` computes clamp(768/height, 0.9, 1.0) instead — \
          0.9 at 854 px tall and up, which is every window we ship against. It is 1.0 at 768 and \
          below, where our flat 0.9 does diverge; `ui_script::DEFAULT_UI_SCALE` carries that. \
-         `useUiScale` itself has no row here: nothing reads it, and registering it would only \
-         offer a switch whose ON path we do not implement",
+         See `useUiScale` below, whose row this one used to say did not exist",
     ),
+    // **`useUiScale` (`0x8430c0`, default `"0"`)** — the switch the row above gates on.
+    //
+    // Its absence used to be argued for here as *"nothing reads it, and registering it would only
+    // offer a switch whose ON path we do not implement"*, and the first half of that has been
+    // false since the interface went stock: `ContainerFrame.lua:483` and `UIDropDownMenu.lua:525`
+    // both branch on `GetCVar("useUiScale") == "1"`, and `OptionsFrame.lua:13` gives it a
+    // checkbox. Nobody noticed because the only thing that said so was a host warning with
+    // nowhere to go (decision 2135, which is how this was found).
+    //
+    // Registering it changes no behaviour today — `nil ~= "1"` and `"0" ~= "1"` take the same
+    // branch — and makes the read the reference's read rather than an accident. The ON path
+    // lands where the reference's does, because our `uiScale` default *is* the reference's OFF-leg
+    // result: at `useUiScale = 1` both clients scale the bag frames and the dropdown list by
+    // `GetCVar("uiscale")`, and both read 0.9 there on every window we ship against.
+    same("useUiScale", "0"),
     same("farclip", "350"),
     // The Controls-page trio (0961). `deselectOnClick`/`mouseInvertPitch` are 1.12's own
     // Interface Options CVars (UIOptionsFrame.lua indices 45/1); their defaults are the

@@ -776,7 +776,7 @@ pub(super) fn resolve_target(
                     .and_then(|&h| model.arena.frame(h))
                     .and_then(|f| f.name.clone())
                     .unwrap_or_else(|| "<anonymous>".into());
-                model.warnings.push(format!(
+                model.record_warning(format!(
                     "SetPoint(region of {who}): relativeTo '{}' does not resolve — anchored to the owner",
                     nt.name
                 ));

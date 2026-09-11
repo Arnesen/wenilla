@@ -295,6 +295,28 @@ pub struct AddonReport {
     /// different question, and redefining an existing number would make every past run
     /// incomparable.
     pub probe_errors: Vec<String>,
+    /// **Warnings raised while this addon loaded and ran** — the engine's own non-fatal channel
+    /// (decision 2135), which nothing in this survey could see until it had one.
+    ///
+    /// A warning is the class of failure that *does not announce itself*: an `inherits=` argument
+    /// that was not a template name and got dropped, a `SetPoint` whose `relativeTo` did not
+    /// resolve and silently re-anchored, a `SetCVar` on a name nothing registered, a saved
+    /// variable that would not serialise, a loader note about a template of the wrong kind.
+    /// Nothing raises, so `errors`, `session_errors` and `probe_errors` are all blind to it, and
+    /// the addon scores a clean pass while doing the wrong thing. That is exactly the shape
+    /// `render` was added for — and this reaches the cases `render` cannot, because a warning
+    /// usually fires long before anything would have been drawn.
+    ///
+    /// A NEW column, never folded into another (1213's rule, again).
+    ///
+    /// **Read off the retained diagnostic log by `seq`, not off the per-frame drain**, so it
+    /// carries the host's loader warnings (which are recorded with their `<file>` prefix and never
+    /// touch the drain) as well as the engine's. One consequence of the log's dedupe is worth
+    /// stating: a warning whose exact text the FrameXML underneath already produced collapses onto
+    /// that older row and does not appear here. The corpus's warnings name the addon's own frames
+    /// and files, so this is rare rather than theoretical — but it means the column, like every
+    /// other one here, is a floor.
+    pub warnings: Vec<String>,
     /// **What it actually PUT ON SCREEN** — see [`render`], whose header is the design.
     ///
     /// The column every other one here was blind to. `loaded`, `session_errors` and `probe_errors`
@@ -549,6 +571,11 @@ fn survey_one(
     // Taken here, after the dependency chain, so a library's frames are not charged to its
     // consumer — the same rule `load_dependencies` applies to errors.
     let baseline = RenderBaseline::of(&script);
+    // THE WARNING MARK, taken at the same seam and for the same reason: everything the FrameXML
+    // underneath and this addon's dependency chain warned about is already behind us, so what
+    // follows is this addon's (decision 2135). `seq` is monotonic and never reused, which is what
+    // makes a high-water mark a valid cut of a log that also evicts and dedupes.
+    let warn_mark = script.diagnostics().last().map_or(0, |d| d.seq);
 
     let (errors, absent) = load_addon_files(&script, root, name, &toc);
     // The registry has to agree with the VM about what has loaded: the live walk stamps each
@@ -566,6 +593,22 @@ fn survey_one(
     let missing_inherits = missing_inherits(&script, root, name, &toc);
     let session_errors = drive_session_start(&mut script, name, &dep_order, installed);
     let probe_errors = drive_ui_probe(&mut script);
+    // Everything filed since the mark, warnings only — the errors have their own columns and are
+    // retained under their own kinds.
+    let warnings: Vec<String> = script
+        .diagnostics()
+        .into_iter()
+        .filter(|d| {
+            d.seq > warn_mark && d.kind == benilla_ui::script::diagnostics::DiagnosticKind::Warning
+        })
+        .map(|d| {
+            if d.count > 1 {
+                format!("{} (x{})", d.message, d.count)
+            } else {
+                d.message
+            }
+        })
+        .collect();
     // AFTER the UI probe and BEFORE the method oracle, and both halves of that are load-bearing.
     // After, because the probe leaves the addon fully driven — and this pass re-OPENS what the
     // probe's second toggle closed, which is why it is a separate probe rather than a read at the
@@ -619,6 +662,7 @@ fn survey_one(
         ambiguous_methods,
         session_errors,
         probe_errors,
+        warnings,
         render,
         used,
     }
@@ -1868,6 +1912,12 @@ fn load_addon_files(
         match benilla_ui::framexml::parse(&benilla_ui::source::decode(&bytes)) {
             Ok(doc) => {
                 let report = benilla_ui::loader::load_in(script, &doc, &path, &provider);
+                // Retained with the file prefix so the survey's `warnings` column can see them
+                // (2135); they were dropped with the report before that, which is why an
+                // unresolved `inherits=` scored as a clean load.
+                for w in report.warnings {
+                    script.report_warning(&format!("{file}: {w}"));
+                }
                 errors.extend(report.errors.into_iter().map(|e| format!("{file}: {e}")));
             }
             Err(e) => errors.push(format!("{file}: {e}")),

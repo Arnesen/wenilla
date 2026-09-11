@@ -438,3 +438,214 @@ fn a_thumb_with_no_authored_size_takes_its_arts_texel_span_and_still_drags() {
         "travel is 128−32 = 96, so a 96-unit pull runs the value min→max (got {v})"
     );
 }
+
+#[test]
+fn slider_setvalue_quantises_onto_the_min_anchored_lattice() {
+    // `SetValue 0x789930` rounds the clamped value onto `min + n·step` (round-half-away-from-zero,
+    // truncated by `__ftol`) BEFORE it stores — so `GetValue` on a stepped slider can only ever
+    // answer a lattice point, and the lattice is anchored at `min`, not at zero. Decision 2095
+    // named this divergence and left it; this is it closed.
+    let s = script();
+    s.run(
+        r#"
+        q = CreateFrame("Slider", "SlQuant")
+        q:SetMinMaxValues(0.2, 1.2)
+        q:SetValueStep(0.5)
+    "#,
+    )
+    .unwrap();
+    // The lattice is 0.2 / 0.7 / 1.2 — 0.5 and 1.0 are NOT on it, which is the whole point of
+    // anchoring at `min`.
+    for (set, want) in [
+        (0.6, 0.7),
+        (0.95, 0.7),
+        (0.4, 0.2),
+        (1.2, 1.2),
+        (0.2, 0.2),
+        (0.0, 0.2), // clamped to min first, then quantised
+    ] {
+        s.run(&format!("SlQuant:SetValue({set})")).unwrap();
+        let v: f32 = s.eval("return SlQuant:GetValue()").unwrap();
+        assert!(
+            (v - want).abs() < 1e-5,
+            "SetValue({set}) settles on {want}, got {v}"
+        );
+    }
+}
+
+#[test]
+fn a_zero_step_leaves_the_value_continuous() {
+    // The gate that keeps every scrollbar working: `UIPanelScrollBarTemplate` declares no
+    // `valueStep`, so `[+0x324]` stays at the ctor's 0.0 and `0x78999c`'s `fcomp(step, 0.0)`
+    // skips the quantiser outright. A stepless slider stores exactly what it was handed.
+    let s = script();
+    s.run(
+        r#"
+        c = CreateFrame("Slider", "SlCont")
+        c:SetMinMaxValues(0, 1)
+        c:SetValue(0.375)
+    "#,
+    )
+    .unwrap();
+    let v: f32 = s.eval("return SlCont:GetValue()").unwrap();
+    assert_eq!(v, 0.375, "no step means no lattice");
+    let step: f32 = s.eval("return SlCont:GetValueStep()").unwrap();
+    assert_eq!(step, 0.0, "the ctor's step is 0.0, and nothing set one");
+}
+
+#[test]
+fn the_quantised_value_is_not_re_clamped_and_may_pass_max() {
+    // The clamp runs BEFORE the quantiser and there is no second clamp after it (`0x789a06`
+    // stores whatever `fild n; fmul step; fadd min` produced). So a range that is not a whole
+    // number of steps rounds *past* its own max at the top of the travel. This looks like a bug
+    // and is the client's arithmetic; it is unreachable in the shipped UI because every stepped
+    // slider the reference ships is an exact multiple of its step.
+    let s = script();
+    s.run(
+        r#"
+        o = CreateFrame("Slider", "SlOver")
+        o:SetMinMaxValues(0, 2.5)
+        o:SetValueStep(1)
+        o:SetValue(2.5)
+    "#,
+    )
+    .unwrap();
+    let v: f32 = s.eval("return SlOver:GetValue()").unwrap();
+    assert_eq!(v, 3.0, "2.5 clamps to 2.5, then rounds half-away to 3·step");
+    let (min, max): (f32, f32) = s.eval("return SlOver:GetMinMaxValues()").unwrap();
+    assert_eq!(
+        (min, max),
+        (0.0, 2.5),
+        "and the range itself is untouched — the overshoot is in the value alone"
+    );
+}
+
+#[test]
+fn a_faux_scrollframes_rows_snap_and_its_bottom_is_exact() {
+    // The falsifier decision 2095 named for this change, run on the shape it names.
+    // `FauxScrollFrame_Update` builds its range as `(numItems − numToDisplay) · valueStep`
+    // (`UIPanelTemplates.lua:180`) and then sets that same step, so the range IS a whole number
+    // of steps: every drag lands on a row boundary and the bottom of the travel is exactly max.
+    // 20 items, 10 on screen, 16 units a row ⇒ range 0..160, step 16.
+    let s = script();
+    s.run(
+        r#"
+        f = CreateFrame("Slider", "SlFaux")
+        f:SetMinMaxValues(0, 160)
+        f:SetValueStep(16)
+    "#,
+    )
+    .unwrap();
+    for (set, want) in [
+        (23.9, 16.0), // just under the half-step boundary: the row below
+        (24.1, 32.0), // just over it: the row above
+        (37.0, 32.0),
+        (160.0, 160.0), // the bottom is exact — no overshoot, the range is 10 steps
+        (0.0, 0.0),
+    ] {
+        s.run(&format!("SlFaux:SetValue({set})")).unwrap();
+        let v: f32 = s.eval("return SlFaux:GetValue()").unwrap();
+        assert_eq!(v, want, "SetValue({set}) snaps to the row at {want}");
+        // FauxScrollFrame_GetOffset's own arithmetic, which is what the row list reads.
+        let off: f32 = s.eval("return floor(SlFaux:GetValue() / 16)").unwrap();
+        assert_eq!(off, (want / 16.0).floor(), "and the row offset follows it");
+    }
+}
+
+#[test]
+fn a_move_inside_one_step_fires_nothing() {
+    // The quantiser sits INSIDE the change-gate (`0x789a0b`'s `fcom` is against the stored value,
+    // and what is stored is already quantised), so a drag that stays within one step's band
+    // resolves to the same lattice point and never reaches `OnValueChanged`. Before this, every
+    // pixel of a stepped drag fired.
+    let s = script();
+    s.run(
+        r#"
+        fires = 0
+        g = CreateFrame("Slider", "SlGate")
+        g:SetScript("OnValueChanged", function() fires = fires + 1 end)
+        g:SetMinMaxValues(0, 160)
+        g:SetValueStep(16)
+        g:SetValue(32)      -- first-ever value: always fires
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.eval::<i64>("return fires").unwrap(), 1);
+    for v in [30.0, 34.0, 39.9, 24.1] {
+        s.run(&format!("SlGate:SetValue({v})")).unwrap();
+    }
+    assert_eq!(
+        s.eval::<i64>("return fires").unwrap(),
+        1,
+        "four moves inside the 24..40 band are one lattice point: no further fire"
+    );
+    s.run("SlGate:SetValue(40.1)").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return fires").unwrap(),
+        2,
+        "crossing into the next band fires once"
+    );
+}
+
+#[test]
+fn set_value_step_re_quantises_the_held_value_and_can_fire() {
+    // `SetValueStep 0x789a60` stores the step and then re-pushes the range through
+    // `SetMinMaxValues`, which re-clamps the held value through `SetValue` — onto the NEW lattice
+    // (decision 2143). A step handed to a slider that already holds a value moves it and fires.
+    let s = script();
+    s.run(
+        r#"
+        fires = 0
+        v = CreateFrame("Slider", "SlStep")
+        v:SetScript("OnValueChanged", function() fires = fires + 1 end)
+        v:SetMinMaxValues(0, 100)
+        v:SetValue(37)          -- first-ever value: always fires, no step yet, so raw
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.eval::<f32>("return SlStep:GetValue()").unwrap(), 37.0);
+    assert_eq!(s.eval::<i64>("return fires").unwrap(), 1);
+
+    // A step arriving AFTER the value snaps it: 37 → 40 on a 10-lattice, and the move fires.
+    s.run("SlStep:SetValueStep(10)").unwrap();
+    assert_eq!(
+        s.eval::<f32>("return SlStep:GetValue()").unwrap(),
+        40.0,
+        "the step re-quantised a value that was already stored"
+    );
+    assert_eq!(
+        s.eval::<i64>("return fires").unwrap(),
+        2,
+        "…and the move fired OnValueChanged, exactly as a SetValue would"
+    );
+
+    // A step that moves nothing fires nothing — the same change gate, one level up.
+    s.run("SlStep:SetValueStep(20)").unwrap();
+    assert_eq!(s.eval::<f32>("return SlStep:GetValue()").unwrap(), 40.0);
+    assert_eq!(s.eval::<i64>("return fires").unwrap(), 2);
+}
+
+#[test]
+fn a_step_before_any_range_is_the_whole_call() {
+    // `0x789a6c test byte [+0x314],2` — bit1 clear ⇒ the step is stored and the function returns.
+    // No range is pushed, nothing is clamped, nothing fires. It is what keeps an `<OnLoad>` that
+    // sets a step before a range from running a handler the addon has not armed (2095's subject,
+    // one verb over).
+    let s = script();
+    s.run(
+        r#"
+        fires = 0
+        n = CreateFrame("Slider", "SlNoRange")
+        n:SetScript("OnValueChanged", function() fires = fires + 1 end)
+        n:SetValueStep(0.25)
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<f32>("return SlNoRange:GetValueStep()").unwrap(),
+        0.25
+    );
+    assert_eq!(s.eval::<i64>("return fires").unwrap(), 0);
+    let (min, max): (f32, f32) = s.eval("return SlNoRange:GetMinMaxValues()").unwrap();
+    assert_eq!((min, max), (0.0, 0.0), "no range was pushed");
+}

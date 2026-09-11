@@ -590,15 +590,18 @@ mod loader_tests {
     }
 
     /// Unsupported handler names are warn-once gaps, not hard errors, and don't stop the frame
-    /// from building. The example is `OnCursorChanged` — caret geometry is host-side here, so its
-    /// four float args would all be zero, which is the silent-drop this warn exists to avoid.
-    /// (It used to be `OnKeyDown`: that one is *fired* since decision 1319 and now belongs to
-    /// `script::tests::keyboard`.)
+    /// from building. The example is `OnAttributeChanged` — 2.0's secure-frame system, which no
+    /// 1.12 resolver has a slot for, so it is the one name on that list that is out permanently.
+    ///
+    /// It has been three names now, and each move is the rule working: `OnKeyDown` left when 1319
+    /// built the delivery walk, `OnCursorChanged` when 2141 built the caret flush's fire. A name
+    /// is accepted only once something fires it, so this test's subject is whatever is still
+    /// waiting.
     #[test]
     fn unsupported_script_name_is_a_warning() {
         let s = UiScript::new().unwrap();
         let doc = parse(
-            r#"<Ui><Frame name="Keyed"><Scripts><OnCursorChanged>x = 1</OnCursorChanged></Scripts></Frame></Ui>"#,
+            r#"<Ui><Frame name="Keyed"><Scripts><OnAttributeChanged>x = 1</OnAttributeChanged></Scripts></Frame></Ui>"#,
         );
         let report = load(&s, &doc, &no_files);
         assert_eq!(report.frames, 1);
@@ -606,7 +609,7 @@ mod loader_tests {
         assert!(report
             .warnings
             .iter()
-            .any(|w| w.contains("OnCursorChanged")));
+            .any(|w| w.contains("OnAttributeChanged")));
     }
 
     /// An unknown frame type is an error that drops that subtree but not the rest of the load.

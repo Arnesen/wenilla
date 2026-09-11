@@ -302,7 +302,13 @@ fn cancel_restores_the_previous_colour_through_cancel_func() {
         .eval("local t = applied[table.getn(applied)] return t.r, t.a")
         .unwrap();
     assert_eq!(mid_r, 1.0, "the live preview really did go red");
-    assert!((mid_a - 0.95).abs() < 1e-9);
+    // 1e-6, like the accept test's alpha above and for one more reason on top of the f32 store:
+    // `OpacitySliderFrame` carries `valueStep="0.01"`, so `SetValue` rebuilds the value as
+    // `n·step + min` (2133) and the reconstruction costs a few more ulps than the literal.
+    assert!(
+        (mid_a - 0.95).abs() < 1e-6,
+        "alpha is 1 - the slider's 0.05, got {mid_a}"
+    );
 
     // …then backs out.
     s.run("ColorPickerCancelButton:Click()").unwrap();

@@ -30,7 +30,8 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
 
     m.set(
         "SetText",
-        lua.create_function(|lua, (this, s): (Table, Option<String>)| {
+        lua.create_function(|lua, (this, s): (Table, Option<mlua::Value>)| {
+            let s = crate::script::binding_abi::text_arg(lua, s)?;
             let h = frame_handle_of(lua, &this)?;
             // Programmatic SetText KEEPS a history browse in progress: the chat live parse
             // rewrites the box on every recalled slash line ("/s hi" → Say + "hi"), and ending
@@ -100,7 +101,8 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // `Option<String>` coercion follows it.
     m.set(
         "Insert",
-        lua.create_function(|lua, (this, s): (Table, Option<String>)| {
+        lua.create_function(|lua, (this, s): (Table, Option<mlua::Value>)| {
+            let s = crate::script::binding_abi::text_arg(lua, s)?;
             let h = frame_handle_of(lua, &this)?;
             if let Some(s) = s {
                 insert(lua, h, &s, true);

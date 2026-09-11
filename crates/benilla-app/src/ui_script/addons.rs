@@ -279,6 +279,11 @@ impl Addon {
             let report = benilla_ui::loader::load_in(script, &doc, &path, &provider);
             for w in &report.warnings {
                 warn!("ui_script({}/{file}): {w}", self.name);
+                // …and retained where a player can read it (2135). The `warn!` above is the
+                // terminal's copy and it is gone the moment the line scrolls; this is the one
+                // that survives to `/errors`, and the prefix is why it is recorded here rather
+                // than inside the loader — only this caller knows which file the warning is from.
+                script.report_warning(&format!("{}/{file}: {w}", self.name));
             }
             for e in &report.errors {
                 error!("ui_script({}/{file}): {e}", self.name);

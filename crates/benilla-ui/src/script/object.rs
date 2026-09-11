@@ -652,7 +652,7 @@ pub(super) fn create_frame(
     if template.is_none() {
         if let Some(v) = inherits.as_ref().filter(|v| !v.is_nil()) {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.warnings.push(format!(
+            model.record_warning(format!(
                 "CreateFrame: the 4th argument (inherits) must be a template-name string, got {}; \
                  ignored for '{}'",
                 v.type_name(),
@@ -727,7 +727,9 @@ pub(super) fn create_frame(
         let messages = crate::loader::apply_template(lua, &wrapper, &kind, &template);
         if !messages.is_empty() {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.warnings.extend(messages);
+            for m in messages {
+                model.record_warning(m);
+            }
         }
     }
     Ok(wrapper)

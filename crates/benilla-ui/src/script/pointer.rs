@@ -48,7 +48,7 @@ use mlua::Value;
 
 use crate::layout::Rect;
 use crate::order;
-use crate::widget::FrameHandle;
+use crate::widget::{ButtonState, FrameHandle};
 
 use super::clip::{effective_clip, scroll_clip_sources};
 use super::{button, cursor, editbox, event, Model, UiScript};
@@ -316,14 +316,17 @@ impl UiScript {
                 });
                 let old_handle = model.mouseover;
                 model.mouseover = new_handle;
-                // The client's `0x7793f0` (leave) and `0x7791ed` (enter) both call `SetState`:
-                // a press held over a button and then walked off it drops back to NORMAL, and
-                // walking back on picks PUSHED up again. Ours latches the same transition from
-                // the moved hover — both sides of the boundary, since each one's `hovered`
-                // changed.
-                for h in [old_handle, new_handle].into_iter().flatten() {
-                    button::settle(&mut model, h);
-                }
+                // **Crossing a button's boundary moves NO button state**, and the comment that
+                // used to sit here claimed the opposite off two mis-attributed addresses:
+                // `0x7793f0` is the drag-start override, not a leave, and `0x7791e0` is the hide
+                // override, not an enter. The real enter/leave notifies `0x779490`/`0x7794e0`
+                // read `[+0x328]` only as a DISABLED guard and never write it (wow-re
+                // `scratch/button-state-edge-set.md`, a §5 census of every store to the field).
+                //
+                // So a press held over a button and walked off it stays PUSHED in the reference —
+                // it is the *drag threshold* (below) that un-presses one, and only for a frame
+                // that registered for drag. Decision 2134.
+                let _ = old_handle;
                 (old_id, drag_start, true, slider_change, color_change)
             }
         };
@@ -546,11 +549,25 @@ impl UiScript {
                     Some(h) => model.mouse_down_on.insert(button.to_string(), h),
                     None => model.mouse_down_on.remove(button),
                 };
-                // `0x7792ad`: the press SetState(PUSHED), unconditional past the registration
-                // and hit gates. The displaced entry is settled too — a second press of the same
-                // button elsewhere releases whatever it was holding.
-                for h in [displaced, hit_handle].into_iter().flatten() {
-                    button::settle(&mut model, h);
+                // `0x7792b1`: the press edge, `SetButtonState(PUSHED, 0)`.
+                //
+                // It is unconditional *past* `0x779210`'s own two gates, and the first of them is
+                // the registration mask `[this+0x330]` tested as `m | m << 8` at `0x77924b` —
+                // "registered for this mouse button EITHER WAY, up or down". That is
+                // [`button::wants_press_visual`], and it is why a right-click lights up an action
+                // slot (it registers `RightButtonUp`) and does nothing at all to a plain
+                // `LeftButtonUp` button. Past it the edge is gated only on the button's own
+                // `locked == 0 && state != DISABLED`.
+                if let Some(h) = hit_handle.filter(|&h| button::wants_press_visual(&model, h, button))
+                {
+                    button::edge(&mut model, h, ButtonState::on_mouse_down);
+                }
+                // A press arriving while this same mouse button was already holding another
+                // frame is a release we never got (the OS ate it — a focus loss, a modal). Give
+                // the displaced frame that release rather than leaving it pushed forever; the
+                // reference never reaches this because its capture guarantees the release.
+                if let Some(h) = displaced {
+                    button::edge(&mut model, h, ButtonState::on_mouse_up);
                 }
                 // `0x7663e6` writes the resolved target into `root+0x80` — capture-else-hover, so
                 // this is an `or`, not an assignment: an existing capture is not displaced by a
@@ -588,10 +605,6 @@ impl UiScript {
                 (click, None, false, jump, None, abandoned, color_jump)
             } else {
                 let pressed = model.mouse_down_on.remove(button);
-                // `0x7793c2`: the release SetState(NORMAL) on the frame the press captured.
-                if let Some(h) = pressed {
-                    button::settle(&mut model, h);
-                }
                 // `root+0x80` is cleared at `0x7664bb` **only when the post-event button mask is
                 // zero** — a chorded release keeps the capture for the button still held. With the
                 // per-button map already drained above, "mask is zero" is "the map is empty".
@@ -609,6 +622,16 @@ impl UiScript {
                 );
                 let release = cursor::take_drag(&mut model, button);
                 let started = release.as_ref().is_some_and(|r| r.started);
+                // **The release edge** — `0x7793de`'s `SetButtonState(NORMAL, 0)`, on the frame
+                // the PRESS captured and regardless of where the cursor now is (`0x7792d0` runs
+                // no hit test of its own). It is guarded on the button's own `locked == 0` and on
+                // the state actually being PUSHED, and it is **skipped when the base finalized a
+                // drag** — `0x7792df`'s `0x76c040` test, which is this `started` (the button
+                // already un-pressed at the drag-start edge below, and un-pressing again would
+                // fire nothing but would be a second transition the reference does not make).
+                if let (Some(h), false) = (pressed, started) {
+                    button::edge(&mut model, h, ButtonState::on_mouse_up);
+                }
                 // The world drop: press AND release both over THE WORLD, no drag started —
                 // a completed left click on the game world (never a drag release, which just
                 // keeps carrying; decision 0218's byte-verified trigger). What actually drops

@@ -1244,3 +1244,197 @@ fn a_state_texture_slot_takes_an_object_and_a_nil() {
         "the slot must read empty after nil"
     );
 }
+
+/// **The unlocked scripted push is released by the next mouse release — Tablet-2.0's rows**
+/// (decision 2134).
+///
+/// `SetButtonState(state[, lock])` writes `[+0x32c]` unconditionally, and the mouse-up edge
+/// `0x7793de` un-presses whenever `locked == 0`. Tablet-2.0 (`Tablet-2.0.lua:1645`) pushes a row it
+/// finds `clicked` and calls `SetButtonState("NORMAL")` *nowhere in the library* — it relies on
+/// exactly this. Ours kept a scripted push until Lua cleared it, so a Questie/FuBar/oRA2 row stayed
+/// depressed for the rest of the session.
+#[test]
+fn an_unlocked_scripted_push_is_released_by_the_next_mouse_release() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        row = CreateFrame("Button", "TabletRow")
+        row:SetPoint("BOTTOMLEFT", 0, 0); row:SetSize(100, 100)
+        row:SetNormalTexture("Interface\\RowN.blp")
+        row:SetPushedTexture("Interface\\RowP.blp")
+        row:SetButtonState("PUSHED")            -- Tablet-2.0's call, verbatim: no lock argument
+    "#,
+    )
+    .unwrap();
+    s.resolve(); // a press only reaches a frame with a resolved rect
+    assert_eq!(
+        s.eval::<String>("return TabletRow:GetButtonState()")
+            .unwrap(),
+        "PUSHED"
+    );
+
+    // A press and release over the row: the release edge finds it PUSHED and unlocked.
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert_eq!(
+        s.eval::<String>("return TabletRow:GetButtonState()")
+            .unwrap(),
+        "NORMAL",
+        "the release un-pushes an unlocked scripted push — the row does not stay depressed"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **`lock` pins the state against the mouse — the micro buttons** (`0x780270`'s third index,
+/// `GetBoolOrDefault` with default 0; wow-re `binding-shape-arity-law.md` §3).
+///
+/// `MainMenuBarMicroButtons.lua` calls `SetButtonState("PUSHED", 1)` when its panel opens, and the
+/// button must stay depressed through every press and release until the panel closes. The same
+/// flag pins a NORMAL button *against* being pushed, which is the half a "sticky push" model
+/// cannot express at all.
+#[test]
+fn a_locked_state_ignores_the_mouse_and_enable_disable_clears_the_lock() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        micro = CreateFrame("Button", "MicroButton")
+        micro:SetPoint("BOTTOMLEFT", 0, 0); micro:SetSize(100, 100)
+        micro:SetButtonState("PUSHED", 1)       -- MainMenuBarMicroButtons.lua, verbatim
+        pin = CreateFrame("Button", "PinnedNormal")
+        pin:SetPoint("BOTTOMLEFT", 200, 0); pin:SetSize(100, 100)
+        pin:SetButtonState("NORMAL", 1)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert_eq!(
+        s.eval::<String>("return MicroButton:GetButtonState()")
+            .unwrap(),
+        "PUSHED",
+        "a locked push survives a whole click"
+    );
+
+    s.mouse_move(250.0, 50.0);
+    s.mouse_button(250.0, 50.0, "LeftButton", true);
+    assert_eq!(
+        s.eval::<String>("return PinnedNormal:GetButtonState()")
+            .unwrap(),
+        "NORMAL",
+        "…and a locked NORMAL cannot be pushed by the mouse at all"
+    );
+    s.mouse_button(250.0, 50.0, "LeftButton", false);
+
+    // `0x779160` passes `locked = 0` on both arms, so Enable/Disable UNLOCK. The panel closing
+    // with a plain `SetButtonState("NORMAL")` (flag defaulting to 0) does the same.
+    s.run("MicroButton:Disable() MicroButton:Enable()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return MicroButton:GetButtonState()")
+            .unwrap(),
+        "NORMAL",
+        "Disable() wrote DISABLED, Enable() wrote NORMAL — and both cleared the lock"
+    );
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    assert_eq!(
+        s.eval::<String>("return MicroButton:GetButtonState()")
+            .unwrap(),
+        "PUSHED",
+        "so the mouse reaches it again"
+    );
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **Walking off a held button does NOT un-press it, and walking back on does not re-press it.**
+///
+/// The correction decision 2134 is built on. Our old model derived the press as
+/// `(held && hovered) || pushed_state` and re-evaluated it whenever the hover moved; the
+/// reference's enter and leave notifies (`0x779490`/`0x7794e0`) read `[+0x328]` only as a DISABLED
+/// guard and **never write it** — proved by a §5 census of every store to the field image-wide.
+/// The only thing that un-presses a held button before its release is the drag-threshold crossing,
+/// and only for a frame that registered for drag.
+#[test]
+fn the_hover_is_not_an_input_to_the_press_state() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        b = CreateFrame("Button", "HeldButton")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetNormalTexture("Interface\\HeldN.blp")
+        b:SetPushedTexture("Interface\\HeldP.blp")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let shows = |s: &UiScript, path: &str| {
+        s.extract()
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p == path))
+    };
+
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    assert!(shows(&s, "Interface\\HeldP.blp"), "the press pushed it");
+
+    // Walk the cursor right off it, still holding.
+    s.mouse_move(500.0, 400.0);
+    assert!(
+        shows(&s, "Interface\\HeldP.blp"),
+        "…and it stays pushed off the rect: the leave notify does not write the state"
+    );
+    assert_eq!(
+        s.eval::<String>("return HeldButton:GetButtonState()")
+            .unwrap(),
+        "PUSHED"
+    );
+
+    // The release, off the button, still un-presses it — `0x7792d0` runs no hit test of its own.
+    s.mouse_button(500.0, 400.0, "LeftButton", false);
+    assert!(
+        shows(&s, "Interface\\HeldN.blp"),
+        "the release is the edge, wherever the cursor is"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **A button hidden while held comes back NORMAL** — `CSimpleButton`'s hide override
+/// (`+0x34` = `0x7791e0`), which un-presses and then tail-jumps the base notify so `<OnHide>`
+/// still fires. It hangs off the visibility transition, not off the hover, so it reaches a button
+/// hidden nowhere near the cursor too.
+#[test]
+fn hiding_a_held_button_un_presses_it() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        h = CreateFrame("Button", "HidButton")
+        h:SetPoint("BOTTOMLEFT", 0, 0); h:SetSize(100, 100)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    assert_eq!(
+        s.eval::<String>("return HidButton:GetButtonState()")
+            .unwrap(),
+        "PUSHED"
+    );
+    s.run("HidButton:Hide()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return HidButton:GetButtonState()")
+            .unwrap(),
+        "NORMAL",
+        "the hide edge un-pressed it"
+    );
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

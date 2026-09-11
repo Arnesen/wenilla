@@ -1822,12 +1822,19 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
         2,
         "only the default writes queue — never the dead pending: {changes:?}"
     );
+    // **357, not 350, and that is the reference's ladder rather than a rounding slip.** The row
+    // is the reference's own farclip slider — `minValue = OPTIONS_FARCLIP_MIN (177)`,
+    // `maxValue = OPTIONS_FARCLIP_MAX (777)`, `valueStep = (max − min)/10` — so its ten stops are
+    // 177, 237, 297, **357**, …, 777, and `SetValue` snaps onto them (2133). The registered
+    // default is 350 (1804: the reference's own `CVar::Register` value), which is not a stop, so
+    // seeding the slider from it lands on 357. 1.12 does exactly this and nobody can see it,
+    // because its option sliders print no number; ours prints one, so the ladder shows.
     assert_eq!(
         s.eval::<String>(
             "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
         )
         .unwrap(),
-        "350"
+        "357"
     );
     assert_eq!(
         s.eval::<String>(

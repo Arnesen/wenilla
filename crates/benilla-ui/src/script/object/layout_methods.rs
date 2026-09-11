@@ -439,7 +439,7 @@ fn set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> mlua::Re
                     .frame(h)
                     .and_then(|f| f.name.clone())
                     .unwrap_or_else(|| "<anonymous>".into());
-                model.warnings.push(format!(
+                model.record_warning(format!(
                     "SetPoint({who}): relativeTo '{}' does not resolve — anchored to the parent",
                     nt.name
                 ));

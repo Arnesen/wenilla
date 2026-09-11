@@ -136,8 +136,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     m.set(
         "SetValueStep",
+        // Not a field write (2143): past the step store it re-pushes the range through
+        // `SetMinMaxValues`, which re-clamps and re-quantises the held value onto the new lattice
+        // and fires `OnValueChanged` if it moved — so this binding fires like the other two.
         lua.create_function(|lua, (this, step): (Table, f32)| {
-            with_slider(lua, &this, |s| s.step = step)
+            let changed = with_slider(lua, &this, |s| s.set_value_step(step))?;
+            fire_value_changed(lua, &this, changed)
         })?,
     )?;
     m.set(

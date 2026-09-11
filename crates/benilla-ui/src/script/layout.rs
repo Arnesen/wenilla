@@ -827,6 +827,7 @@ impl UiScript {
             frame_to_id,
             screen,
             warnings,
+            diagnostics,
             solver,
             layout_scope: scope,
             layout_fingerprint,
@@ -1355,10 +1356,17 @@ impl UiScript {
                 return;
             }
             if round + 1 == round_cap {
-                warnings.push(format!(
+                // `Model::record_warning`'s two halves, spelled out because this pass holds the
+                // model destructured and cannot call it: the host drain, and the retained log
+                // (2135). `WOW_LAYOUT_VERIFY`'s falsifier re-run truncates `warnings` and does
+                // NOT roll the log back — the log dedupes, so a verify build reads `×2` on a row
+                // that happened once, and that build is not a production path.
+                let msg = format!(
                     "layout: anchor graph did not converge in {round_cap} rounds — \
                      an anchor cycle? (rects left at their last pass)"
-                ));
+                );
+                diagnostics.record(super::diagnostics::DiagnosticKind::Warning, &msg);
+                warnings.push(msg);
             }
         }
         // The cycle bail (the loop ran out of rounds and warned above): the rects it leaves are

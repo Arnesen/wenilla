@@ -634,6 +634,13 @@ fn run_files(lua: &Lua, name: &str, read: &Reader, files: &[String]) {
             }
         };
         let report = crate::loader::load_into(lua, &doc, &path, &provider);
+        // The warnings were dropped on the floor here until 2135 — an unresolved `inherits=`, a
+        // template of the wrong kind, an attribute nobody reads: the addon loads "clean", paints
+        // nothing, and the one thing that knew why was a `LoadReport` that went out of scope.
+        // They carry the `<Addon>/<file>` prefix because a bare loader warning names no document.
+        for w in report.warnings {
+            crate::script::diagnostics::record_warning(lua, &format!("{name}/{file}: {w}"));
+        }
         for e in report.errors {
             log_error(lua, &format!("{name}/{file}: {e}"));
         }
@@ -659,10 +666,11 @@ fn load_miss(lua: &Lua, name: &str, file: &str) {
 fn load_failure(lua: &Lua, msg: &str) {
     let msg = format!("LoadAddOn: {msg}");
     crate::script::diagnostics::record_load_failure(lua, &msg);
+    // `warn_host_only`, not `record_warning`: `record_load_failure` above has already retained
+    // this exact sentence as a `Load` row, which is the truer kind (the addon is not running).
     lua.app_data_mut::<Model>()
         .expect("model")
-        .warnings
-        .push(msg);
+        .warn_host_only(msg);
 }
 
 /// `root/rel`, refusing to escape `root` — the AddOns-root sandbox (1186), lexical and applied

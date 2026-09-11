@@ -147,6 +147,11 @@ impl super::UiScript {
         // OnUpdate sweep, matching the reference's order: the box's own OnUpdate override drains
         // before the FrameXML handlers that read the box get their turn.
         editbox::drain_text_changed(&self.lua);
+        // …and the caret flush's own fire, the second half of `0x77a790`'s update walk
+        // (`0x77d3e0` → `0x77da80`): `OnCursorChanged` when the caret has moved. It is what
+        // `ScrollingEdit_OnCursorChanged` records and `ScrollingEdit_OnUpdate` then scrolls by,
+        // so this is the mail body and the GM ticket box following the caret as you type.
+        editbox::drain_cursor_changed(&self.lua);
         // Events queued by Lua bindings last tick (`Model::pending_events` — e.g. `SetMapZoom` →
         // `WORLD_MAP_UPDATE`; the cursor arc's `CURSOR_UPDATE`/`ITEM_LOCK_CHANGED`/
         // `DELETE_ITEM_CONFIRM`, decision 0216) fire first, so handlers see them before this

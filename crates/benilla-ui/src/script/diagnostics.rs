@@ -88,6 +88,18 @@ pub enum DiagnosticKind {
     /// dependency that isn't there) land here — from the player's side they are one thing: *the
     /// addon isn't running*.
     Load,
+    /// **The call was accepted and did not do what it said.** Nothing raised and nothing failed to
+    /// load: an `inherits=` argument that was not a template name and got dropped, a `SetPoint`
+    /// whose `relativeTo` did not resolve and re-anchored to the owner, a `SetCVar` on a name
+    /// nothing registered, a saved variable that could not be serialised, a `CreateMacro` that
+    /// was refused. The addon runs on, believing it got what it asked for.
+    ///
+    /// **This kind exists because the channel was a dead end** (decision 2135). These messages had
+    /// one consumer — a `warn!` line in the host's terminal, drained and discarded every frame —
+    /// so they reached neither the player (who cannot read a terminal, which is the whole
+    /// argument of 1495 above) nor the addon survey (whose columns read `errors`). A warning is
+    /// exactly the class an instrument is *for*: it is the failure that does not announce itself.
+    Warning,
 }
 
 impl DiagnosticKind {
@@ -96,6 +108,7 @@ impl DiagnosticKind {
         match self {
             Self::Error => "error",
             Self::Load => "load",
+            Self::Warning => "warn",
         }
     }
 }
@@ -212,6 +225,17 @@ impl super::UiScript {
     pub fn report_load_failure(&self, msg: &str) {
         record_load_failure(&self.lua, msg);
     }
+
+    /// Retain one non-fatal warning the HOST caught and has already logged — a loader warning off
+    /// an addon's XML, carrying the `<Addon>/<file>` prefix only the caller knows (decision 2135).
+    ///
+    /// The retention half alone, exactly like [`Self::report_script_error`]: the caller writes its
+    /// own `warn!` line, and putting the message on [`Model::warnings`] as well would double it at
+    /// the app's next per-frame drain. For a warning the ENGINE raises, the door is
+    /// [`Model::record_warning`], which owns both halves.
+    pub fn report_warning(&self, msg: &str) {
+        record_warning(&self.lua, msg);
+    }
 }
 
 /// **THE rule for "an addon file did not load"** — one implementation, both loaders (decision
@@ -235,6 +259,20 @@ pub(crate) fn record_load_failure(lua: &Lua, msg: &str) {
         .expect("model app_data set")
         .diagnostics
         .record(DiagnosticKind::Load, msg);
+}
+
+/// **THE rule for "something was accepted and did not do what it said"** — the retention half of
+/// the warning channel, for a caller that holds `&Lua` (decision 2135).
+///
+/// Its `&UiScript` face is [`super::UiScript::report_warning`] and its engine-internal sibling is
+/// [`Model::record_warning`]; the difference is only which of the two channels the caller still
+/// owes. A host caller has already written its own log line and wants retention only; an engine
+/// caller wants both.
+pub(crate) fn record_warning(lua: &Lua, msg: &str) {
+    lua.app_data_mut::<Model>()
+        .expect("model app_data set")
+        .diagnostics
+        .record(DiagnosticKind::Warning, msg);
 }
 
 /// Register the error-log reads the `BenillaScriptLogFrame` polls.
@@ -302,6 +340,62 @@ mod tests {
         assert_eq!(row.count, 1113);
         assert_eq!(row.seq, 1);
         assert_eq!(log.total(), 1);
+    }
+
+    #[test]
+    fn a_warning_reaches_the_retained_log_and_the_host_drain() {
+        // 2135's whole subject. Before it, a warning existed for exactly as long as one terminal
+        // line: `take_warnings` drained it and nothing kept a copy, so neither the player's
+        // `/errors` window nor the addon survey could see one.
+        let mut s = crate::script::UiScript::new().expect("vm");
+        s.run(r#"SetCVar("thisCVarDoesNotExist", "1")"#).unwrap();
+
+        let host = s.take_warnings();
+        assert!(
+            host.iter().any(|w| w.contains("thisCVarDoesNotExist")),
+            "the host's per-frame drain still gets it: {host:?}"
+        );
+        let kept = s.diagnostics();
+        let row = kept
+            .iter()
+            .find(|d| d.message.contains("thisCVarDoesNotExist"))
+            .unwrap_or_else(|| panic!("…and it is RETAINED: {kept:#?}"));
+        assert_eq!(row.kind, DiagnosticKind::Warning, "under its own kind");
+
+        // The drain is a drain; the log is a memory. A second frame does not lose the row.
+        assert!(s.take_warnings().is_empty());
+        assert!(s
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("thisCVarDoesNotExist")));
+    }
+
+    #[test]
+    fn a_text_sink_takes_bytes_rather_than_raising_on_them() {
+        // Decision 2138, and 1193's rule finally applied at the boundary 1193 named. `strsub` is
+        // byte-indexed by design, so a slice through a multi-byte character is a string an addon
+        // really does hand to `SetText` — and mlua's `String` conversion raised on it, killing the
+        // handler. A stray byte costs a glyph.
+        let s = crate::script::UiScript::new().expect("vm");
+        s.run(
+            r#"
+            f = CreateFrame("Frame", "BytesFrame")
+            t = f:CreateFontString("BytesText")
+            -- "a—b" is 5 bytes; cutting at 2 leaves the em dash's lead byte alone.
+            local sliced = strsub("a\226\128\148b", 1, 2)
+            t:SetText(sliced)
+            e = CreateFrame("EditBox", "BytesBox")
+            e:SetText(sliced)
+        "#,
+        )
+        .expect("a sliced multi-byte string must not raise");
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        let got: Option<String> = s.eval("return BytesText:GetText()").unwrap();
+        assert_eq!(
+            got.as_deref(),
+            Some("a\u{fffd}"),
+            "the broken byte became one replacement glyph, and the call completed"
+        );
     }
 
     #[test]

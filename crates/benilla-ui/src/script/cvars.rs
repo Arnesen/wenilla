@@ -223,7 +223,7 @@ pub(super) fn write_cvar(
 fn warn_unknown(model: &mut Model, name: &str) {
     let key = name.to_ascii_lowercase();
     if model.cvars_warned.insert(key) {
-        model.warnings.push(format!(
+        model.record_warning(format!(
             "unknown CVar '{name}' (not host-registered) — ignored"
         ));
     }

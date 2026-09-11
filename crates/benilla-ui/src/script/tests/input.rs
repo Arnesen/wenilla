@@ -617,8 +617,10 @@ fn the_unfired_script_kinds_still_raise_rather_than_silently_accepting() {
         // delivery walk, so they are fired and therefore accepted — the rule this test enforces,
         // applied in the other direction. Their law lives in `script::tests::keyboard`.
         //
-        // Caret geometry is host-side; its four float args would all be zero.
-        "OnCursorChanged",
+        // `OnCursorChanged` left this list with decision 2141: the tick's caret flush fires it
+        // (`editbox::drain_cursor_changed`), which is the rule applied in the other direction
+        // again — its law lives in `script::editbox::tests`.
+        //
         // 2.0's secure-frame system — no such slot exists in any 1.12 resolver.
         "OnAttributeChanged",
         // Real 1.12 slots we do not fire, and zero corpus call sites. (`OnUpdateModel` and

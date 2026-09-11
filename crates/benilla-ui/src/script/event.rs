@@ -22,7 +22,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use super::{Model, ScriptValue, REG_SCRIPTS};
 use crate::script::object::frame_wrapper;
-use crate::widget::FrameHandle;
+use crate::widget::{ButtonState, FrameHandle};
 
 /// Fire `event` at every frame registered for it (the engine-internal twin of
 /// `UiScript::fire_event`, for engine code holding only the Lua context — the compare drive's
@@ -169,10 +169,6 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
             .filter(|&m| items.iter().any(|&(h, _, vis)| h == m && !vis));
         if let Some(m) = hidden_hover {
             model.mouseover = None;
-            // The hover the hide just dropped is an input to the button state machine, so the
-            // frame under it re-latches here as it would on a mouse-out (`0x7793f0`) — a button
-            // hidden mid-press must not come back up still wearing its pushed art.
-            super::button::settle(&mut model, m);
             if model.drag.as_ref().is_some_and(|d| d.source == m) {
                 model.drag = None;
             }
@@ -191,6 +187,18 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
         if visible {
             let mut model = lua.app_data_mut::<Model>().expect("model");
             super::object::toplevel::raise_on_show(&mut model, h);
+        } else {
+            // **The button's HIDE edge** — `CSimpleButton` overrides the hide notify (`+0x34`,
+            // `0x7791e0`) to un-press itself before tail-jumping the base, so a button hidden
+            // while held does not come back up wearing its pushed art (wow-re
+            // `scratch/button-state-edge-set.md`; the guard is `state != DISABLED && locked == 0`).
+            //
+            // It hangs off the VISIBILITY transition, not off the hover, which is what it is in
+            // the reference — a button hidden nowhere near the cursor un-presses too, and one
+            // hidden under the cursor no longer needs the hover-drop above to notice
+            // (decision 2134).
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            super::button::edge(&mut model, h, ButtonState::on_hide);
         }
         let name = if visible { "OnShow" } else { "OnHide" };
         if let Err(e) = fire(lua, id, name, None, Vec::new()) {

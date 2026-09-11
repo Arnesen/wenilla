@@ -451,7 +451,7 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// corpus call sites across 91 addons); it removes working behaviour from the 23 sites that remain,
 /// so it is still a change to make deliberately rather than as a side effect of widening this list
 /// — but the FrameXML half of "with FrameXML fixed first" is most of the way there now.
-const SCRIPT_KINDS: [&str; 37] = [
+const SCRIPT_KINDS: [&str; 38] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -475,6 +475,11 @@ const SCRIPT_KINDS: [&str; 37] = [
     "OnTabPressed",
     "OnTextChanged",
     "OnTextSet",
+    // The caret flush's own (`0x77da80`), fired by the tick's `drain_cursor_changed` when the
+    // caret has moved — the edge `ScrollingEdit_OnCursorChanged` + `ScrollingEdit_OnUpdate` scroll
+    // a multiline box by. It earns its row here the way this list's rule requires: together with
+    // the code that fires it (decisions 2135/2141).
+    "OnCursorChanged",
     "OnEditFocusGained",
     "OnEditFocusLost",
     "OnVerticalScroll",
@@ -1255,11 +1260,11 @@ impl UiScript {
         let mut model = self.model_mut();
         let held: Vec<crate::widget::FrameHandle> = model.mouse_down_on.values().copied().collect();
         model.mouse_down_on.clear();
-        // Every button that capture was holding down goes back to NORMAL — the release the OS
-        // never fed us (`0x7793c2`'s transition), without which a button walked off the window
-        // edge mid-press keeps its pushed art for the rest of the session.
+        // Every button that capture was holding down goes back to NORMAL — the release edge the
+        // OS never fed us (`0x7793de`), without which a button walked off the window edge
+        // mid-press keeps its pushed art for the rest of the session.
         for h in held {
-            button::settle(&mut model, h);
+            button::edge(&mut model, h, crate::widget::ButtonState::on_mouse_up);
         }
         // …and its one-slot twin `root+0x80`, which the mouse-down raise reads: a capture left
         // behind would aim the next press's raise at whatever the pointer was last holding.

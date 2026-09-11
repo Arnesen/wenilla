@@ -55,7 +55,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                         "ANCHOR_BOTTOMLEFT" => Some((Point::TopRight, Point::BottomLeft)),
                         "ANCHOR_NONE" | "ANCHOR_PRESERVE" => None,
                         other => {
-                            model.warnings.push(format!(
+                            model.record_warning(format!(
                                 "SetOwner: unknown anchor '{other}' (kept ANCHOR_RIGHT)"
                             ));
                             Some((Point::BottomLeft, Point::TopRight))

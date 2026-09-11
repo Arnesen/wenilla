@@ -1738,6 +1738,35 @@ impl Model {
         self.errors.push(msg);
     }
 
+    /// **Record one non-fatal warning — the channel's one door** (decision 2135). Both halves:
+    /// the host's per-frame `warnings` drain (a `warn!` line in the terminal, for whoever is
+    /// running the client), and the retained diagnostic log, which is the only copy a player or an
+    /// instrument can read after the frame that produced it.
+    ///
+    /// Before this there was only the first half, and it was a dead end: `take_warnings` empties
+    /// every frame, so a warning existed for the length of one terminal line and then nowhere at
+    /// all. The messages it carries are the failures that never announce themselves — a dropped
+    /// `inherits=`, an unresolved anchor, an unregistered CVar — which is precisely the class the
+    /// diagnostic log was built for.
+    ///
+    /// Its sibling is [`Self::warn_host_only`], for the one message already retained under a
+    /// truer kind.
+    pub(crate) fn record_warning(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.diagnostics
+            .record(super::diagnostics::DiagnosticKind::Warning, &msg);
+        self.warnings.push(msg);
+    }
+
+    /// The host channel **alone** — for a message that is already retained under a kind that says
+    /// more than `Warning` does. Exactly one caller: `LoadAddOn`'s failure line, which
+    /// `record_load_failure` has already filed as a [`Load`](super::diagnostics::DiagnosticKind)
+    /// row ("the addon isn't running", which is the fact worth keeping) and which still wants its
+    /// terminal line. Retaining it twice would put the same sentence in the log under two kinds.
+    pub(crate) fn warn_host_only(&mut self, msg: String) {
+        self.warnings.push(msg);
+    }
+
     pub(crate) fn unit(&self, token: &str) -> Option<&UnitState> {
         if token.bytes().any(|b| b.is_ascii_uppercase()) {
             self.units_by_lower.get(&token.to_ascii_lowercase())
