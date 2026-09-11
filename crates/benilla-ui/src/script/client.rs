@@ -80,10 +80,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // `RunScript(text)` — compile and run a chunk in the shared global state.
     //
-    // The reference's is `RunScript 0x7044c0`, and it is how a macro body, a `/script` slash
-    // command, and every addon's "evaluate this snippet" helper reach Lua. It is the same
-    // `loadstring`+call our own chunk loader does, so it inherits the same sandbox: there is no
-    // `setfenv` here and none in the reference either — a script runs with full API access.
+    // The reference's is `RunScript 0x48b980` (pair `0x83e288`, name `0x83ea60`), and it is how a
+    // macro body, a `/script` slash command, and every addon's "evaluate this snippet" helper
+    // reach Lua. It inherits the same sandbox as our chunk loader: there is no `setfenv` here and
+    // none in the reference either — a script runs with full API access.
+    //
+    // **The chunk NAME here is ours, not the image's, and that is an open question** (2136's
+    // "left open"). wow-re's chunk-source census (`lowhealth-playerstatus-onupdate-dead.md` §3)
+    // places this binding's feed precisely — `0x48b9cb` into `0x704cd0`, the source-string arm of
+    // `FS_DoBuffer 0x704ae0` — but records the name argument only for its sibling arms: an XML
+    // `<Script>` inline body is `"%s:<Scripts>"` (`0x871074`) and the one C-resident chunk is
+    // `"compat.lua"`. Until `0x704cd0`'s own name is read, `[RunScript]` is a placeholder that
+    // renders plausibly rather than a verified spelling.
+    //
+    // (The address here read `0x7044c0` until 2136. That is not `RunScript` and it is not
+    // anything: `scripts/addrs.py` finds no wow-re ledger row for it at all.)
     //
     // A compile or runtime error is **raised**, not swallowed. The reference propagates it to the
     // caller's error handler, which is what puts a red line in the chat frame; returning nil would

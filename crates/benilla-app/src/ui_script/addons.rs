@@ -640,11 +640,21 @@ fn disabled_set(identity: Option<&(String, String)>) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// Write a character's enable state from the AddOns screen (decision 1197).
+/// Write a character's enable state — the AddOns screen's write (decision 1197) and, since 2139,
+/// the in-world logout write too.
 ///
-/// **Merges rather than replaces**, for the reason [`parse_enable_state`] documents: a name in the
-/// file that is not installed right now belongs to an addon that will be again, and rewriting the
-/// file from the installed list alone would forget the player's choice on every uninstall.
+/// **Merges rather than replaces, because that is what the reference's writer structurally IS.**
+/// `0x51ef20` walks the in-memory enable **hash** and emits one `"%s: %s\r\n"` line per entry
+/// (`0x853968`), and that hash is built by the reader `0x51ebe0` from `AddOns.txt` itself — which
+/// "creates entries for every line, both states", strdup'ing each name as written. So a row for an
+/// addon that is not installed right now was loaded, is never removed, and is written straight back
+/// out; and the spelling that survives is the FILE's, not any folder's, because the folder list
+/// never enters the hash at all (wow-5875-re `system/ui/scratch/addon-enable-store.md` §5/§6).
+///
+/// Both halves matter and both were divergent on the logout path, which used to rebuild the file
+/// from `addon_enable_states()` — the installed-folder registry. One logout erased
+/// `Uninstalled: disabled` outright and rewrote `myaddon:` as `MyAddon:`. The uninstall case is the
+/// one with teeth: a player who removes a folder for a week loses the choice they made about it.
 pub(crate) fn write_enable_state(identity: Option<&(String, String)>, states: &[(String, bool)]) {
     let Some(path) = enable_state_path(identity) else {
         return; // no character picked, or no state folder — nothing to write to
@@ -668,24 +678,21 @@ pub(crate) fn write_enable_state(identity: Option<&(String, String)>, states: &[
     }
 }
 
-/// Write the enable state back — the reference's own last shutdown step (`0x490bd0`'s tail,
-/// after the saved-variables files), so a `DisableAddOn` from Lua survives the session.
+/// Write the enable state back — the reference's own last shutdown step (`0x490c88`, after the
+/// saved-variables files), so a `DisableAddOn` from Lua survives the session.
+///
+/// **The same writer the AddOns screen uses** (2139). This used to render
+/// `addon_enable_states()` — the installed-folder registry — over the whole file, which is not the
+/// shape of `0x51ef20`: the reference emits the enable *hash*, and that hash is the file's own
+/// contents plus this session's toggles. Two things followed from the difference, both reproduced
+/// before the change: a row for an addon not installed this session was dropped, and every name
+/// was rewritten into its folder's case rather than the spelling the file already had.
 pub(super) fn save_enable_state(script: &UiScript, identity: Option<&(String, String)>) {
     let states = script.addon_enable_states();
     if states.is_empty() {
-        return; // nothing was ever registered — a glue-only run or a capture; an empty write is a wipe
+        return; // nothing was ever registered — a glue-only run or a capture; nothing to merge in
     }
-    let Some(path) = enable_state_path(identity) else {
-        return;
-    };
-    match crate::local_state::write_atomic(&path, &render_enable_state(&states)) {
-        Ok(()) => info!(
-            "ui_script: wrote {} ({} addons)",
-            path.display(),
-            states.len()
-        ),
-        Err(e) => warn!("ui_script: cannot write {}: {e}", path.display()),
-    }
+    write_enable_state(identity, &states);
 }
 
 /// Write every loaded addon's declared saved variables — the reference's own shutdown step
@@ -2436,6 +2443,164 @@ mod tests {
             written.contains("LastDB = \"written at logout\""),
             "the value the PLAYER_LOGOUT handler set must reach the file — if the write ran \
              first this reads 'unset':\n{written}"
+        );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// **The logout write MERGES, and it keeps the file's own spelling** (decision 2139).
+    ///
+    /// The reference's writer `0x51ef20` emits the in-memory enable hash, and the reader
+    /// `0x51ebe0` builds that hash from `AddOns.txt` — an entry per line, both states, each name
+    /// strdup'd as written. The installed-folder list never enters it. So a row survives an
+    /// uninstall, and the spelling that survives is the file's.
+    ///
+    /// Ours rebuilt the file from `addon_enable_states()` instead, and one logout erased
+    /// `Uninstalled: disabled` and rewrote `myaddon:` as `MyAddon:`.
+    #[test]
+    fn the_logout_write_keeps_rows_it_did_not_put_there() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("logout-merge");
+        write_addon(
+            &home,
+            "MyAddon",
+            "## Interface: 11200\nmain.lua\n",
+            &[("main.lua", "MyAddonRan = true")],
+        );
+        let id = ("Realm".to_string(), "Char".to_string());
+        let p = crate::local_state::addons_state_path("Realm", "Char").unwrap();
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "Uninstalled: disabled\nmyaddon: enabled\n").unwrap();
+
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        let _ = load_third_party(&mut script, Some(&id), true);
+        script.eval::<()>("DisableAddOn('MyAddon')").unwrap();
+        save_enable_state(&script, Some(&id));
+
+        let after = std::fs::read_to_string(&p).unwrap();
+        let rows = parse_enable_state(&after);
+        // The uninstalled addon's row is still there, still disabled — the half with teeth.
+        assert_eq!(
+            rows.iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("Uninstalled"))
+                .map(|(_, on)| *on),
+            Some(false),
+            "a row for an addon not installed this session must survive the write: {after}"
+        );
+        // The file's own spelling survives; the folder's case does not overwrite it.
+        assert!(
+            after.contains("myaddon:"),
+            "the file's spelling is what the reference writes back: {after}"
+        );
+        // …and this session's toggle still landed on it.
+        assert_eq!(
+            rows.iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("MyAddon"))
+                .map(|(_, on)| *on),
+            Some(false),
+            "the DisableAddOn must still be persisted: {after}"
+        );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// **A LoadOnDemand dependency cycle LOADS BOTH and answers `(1, nil)`** (decision 2139) —
+    /// and before the fix this call took the whole process down with SIGABRT.
+    ///
+    /// `AddOn_Load 0x51f240` has no re-entrancy guard: every live site of the visiting byte
+    /// `[UIADDON+0x2d]` is inside `AddOn_CanLoad 0x51e780`, none in the loader. What bounds the
+    /// recursion is the *loaded* byte, stamped **before** the dependency loops —
+    /// `0x51f313 mov byte [rec+0x18],1`, a flag-neutral store between `0x51f311 test eax,eax` and
+    /// `0x51f317 jbe`, therefore unconditional — so the re-entered frame takes the already-loaded
+    /// early-out at `0x51f2d6`/`0x51f2db` and returns 1. We stamped it after the recursion, so
+    /// nothing terminated: Rust-level recursion, stack overflow, `signal 6`, uncatchable by
+    /// `pcall`.
+    ///
+    /// The three assertions below are the reference's own observable consequences, and the last
+    /// two are the ones that would betray a guard bolted on somewhere else instead:
+    /// **no reason token** (a cycle produces none — the reference has no such token),
+    /// `ADDON_LOADED` fires **B then A**, and `IsAddOnLoaded('Ping')` answers 1 throughout Pong's
+    /// execution, because Ping is flagged loaded before its own files run.
+    #[test]
+    fn a_load_on_demand_dependency_cycle_loads_both_sides() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("lod-cycle");
+        write_addon(
+            &home,
+            "Ping",
+            "## Interface: 11200\n## LoadOnDemand: 1\n## Dependencies: Pong\nping.lua\n",
+            &[(
+                "ping.lua",
+                "PingRan = true Order = (Order or '') .. 'Ping,'",
+            )],
+        );
+        write_addon(
+            &home,
+            "Pong",
+            "## Interface: 11200\n## LoadOnDemand: 1\n## Dependencies: Ping\npong.lua\n",
+            &[(
+                "pong.lua",
+                "PongRan = true Order = (Order or '') .. 'Pong,' \
+                 PingSeenLoaded = IsAddOnLoaded('Ping')",
+            )],
+        );
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        script
+            .eval::<()>(
+                "AddonOrder = '' \
+             CycleWatch = CreateFrame('Frame') \
+             CycleWatch:RegisterEvent('ADDON_LOADED') \
+             CycleWatch:SetScript('OnEvent', function() \
+                 AddonOrder = AddonOrder .. arg1 .. ',' end)",
+            )
+            .unwrap();
+        let _ = load_third_party(&mut script, None, true);
+
+        // Neither ran at startup — the walk skips LoadOnDemand, which is why a cycle among them
+        // is never observed until something demand-loads one.
+        assert_eq!(
+            script
+                .eval::<bool>("return PingRan == nil and PongRan == nil")
+                .ok(),
+            Some(true)
+        );
+
+        // The call that used to abort the process.
+        assert_eq!(
+            script
+                .eval::<Vec<String>>(
+                    "local loaded, reason = LoadAddOn('Ping') \
+                     return { tostring(loaded), tostring(reason) }"
+                )
+                .ok(),
+            Some(vec!["1".into(), "nil".into()]),
+            "a cycle loads and answers (1, nil) — the reference has no cycle reason token"
+        );
+
+        // Both sides ran, each `.toc` list exactly once.
+        assert_eq!(
+            script.eval::<String>("return Order").ok().as_deref(),
+            Some("Pong,Ping,"),
+            "the dependency's files run first, and neither list runs twice"
+        );
+        // `ADDON_LOADED` fires B then A.
+        assert_eq!(
+            script.eval::<String>("return AddonOrder").ok().as_deref(),
+            Some("Pong,Ping,")
+        );
+        // The stamp is ahead of the files, so the cycle inverts the declared order: Ping reads as
+        // loaded for the whole of Pong's execution. This is the reference's behaviour and it is
+        // the mechanism, not a side effect.
+        assert_eq!(
+            script.eval::<i64>("return PingSeenLoaded").ok(),
+            Some(1),
+            "inside a cycle an addon is flagged loaded before its own files run"
         );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }

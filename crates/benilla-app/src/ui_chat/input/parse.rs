@@ -234,15 +234,46 @@ pub(in crate::ui_chat) fn parse_line(table: &SlashCommands, line: &str) -> Parse
     }
 }
 
-/// `s` as a Lua long-bracket string literal (`[[…]]`), at a bracket level the text cannot close
-/// early — the one quoting that needs no escaping of what a player typed.
-pub(in crate::ui_chat) fn lua_long_string(s: &str) -> String {
-    let mut level = 0;
-    while s.contains(&format!("]{}]", "=".repeat(level))) {
-        level += 1;
+/// `s` as a Lua **short** string literal, escaped — the only quoting 1.12's lexer can read for
+/// arbitrary text (decision 2136).
+///
+/// This used to build a long-bracket literal and step its `=` level past anything the payload
+/// could close early: `[=[a]]b]=]`. That works on a Lua 5.1-family lexer and **is a syntax error
+/// on the 1.12 client**, whose lexer has no long-string levels at all — `read_long_string
+/// 0x700010` routes `=` to its default arm as ordinary content, the `[` arm at `0x6ff771` makes
+/// exactly one comparison (`cmp eax,0x5b`), and a `[=` therefore leaves the lexer holding the
+/// single-character token `[`, which `prefixexp 0x6fde40` refuses with ``unexpected symbol near
+/// `['`` (wow-5875-re `lua-dialect.md` §9.2, verified and executed).
+///
+/// 2101 removed the three 5.1 grammar additions the corpus probes and left the levelled long
+/// bracket standing, on a measurement of **zero occurrences** across FrameXML, GlueXML,
+/// Blizzard's addons, the director's own folder and the 219-addon corpus. That measurement was
+/// right and incomplete in one specific way: it scanned Lua *trees*, and this is Lua *generated
+/// by Rust at runtime*, which no source scan could see and the fork's parser cannot reject at
+/// compile time either. It is the one live producer of a construct the reference cannot parse,
+/// and it fires whenever a `/console` argument contains `]]`.
+///
+/// Escaping is what 5.0 leaves: `\` and `"` are self-escaped, the three whitespace controls take
+/// their named forms, and every other control byte takes a **three-digit** `\ddd` — padded so a
+/// following digit cannot be swallowed into the escape.
+pub(in crate::ui_chat) fn lua_quoted_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\{:03}", c as u32));
+            }
+            c => out.push(c),
+        }
     }
-    let eq = "=".repeat(level);
-    format!("[{eq}[{s}]{eq}]")
+    out.push('"');
+    out
 }
 
 /// The per-command argument grammar. Each arm is the reference handler's own body reduced to what
@@ -436,7 +467,7 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
         // this arm knew `reloadui` and answered everything else "not implemented" — which is
         // what a probe's `/console fpsJournal 1` got, while the same line typed worked.)
         S::Console => ParsedChat::Lua {
-            body: format!("ConsoleExec({})", lua_long_string(args)),
+            body: format!("ConsoleExec({})", lua_quoted_string(args)),
         },
         // `/script` = the ref's `RunScript(msg)`: the typed text IS the chunk, un-escaped.
         S::Script => {

@@ -24,6 +24,17 @@
 
 use mlua::{Lua, Value, Variadic};
 
+/// The Lua-level message inside an mlua error — mlua decorates its `Display` with a category
+/// word (`syntax error: `, `runtime error: `) that the reference's own `lua_pushstring` leg never
+/// adds. `loadstring`'s second return is that message verbatim, so the decoration is stripped.
+fn lua_message(e: &mlua::Error) -> String {
+    match e {
+        mlua::Error::SyntaxError { message, .. } => message.clone(),
+        mlua::Error::RuntimeError(m) => m.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Sandbox the VM: strip filesystem/OS/native reach, keep a `debugstack` stub, and make chunk
 /// loading text-only.
 pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
@@ -101,10 +112,28 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
     // `luaL_loadbuffer`/`luaX_setinput` — the same door `loadstring` goes through (decision 1193).
     let loadstring = lua.create_function(
         |lua, (src, chunkname): (mlua::String, Option<mlua::String>)| {
-            let bytes = crate::source::chunk(&src.as_bytes()).to_vec();
+            let raw = src.as_bytes();
+            let bytes = crate::source::chunk(&raw).to_vec();
+            // **The chunk name is the caller's string VERBATIM, and it defaults to the SOURCE.**
+            // `luaB_loadstring 0x703280` is stock 5.0: `0x70329a` pushes `edi` — the pointer
+            // `luaL_checklstring` just returned — as `luaL_optlstring`'s `def`, so a nameless
+            // chunk is named by its own text and `luaO_chunkid 0x6f5c40` renders it by its third
+            // rule, `[string "…"]`, cut at the first newline and at the budget. There is no
+            // `.rdata` literal on that path at all (wow-5875-re `lua-dialect.md` §11, executed).
+            //
+            // We used to prepend `=`, which is `luaO_chunkid`'s "print this verbatim, undecorated"
+            // marker — so an explicit name lost its `[string "…"]` wrapper and a `@path` name kept
+            // a literal `@`, and a nameless chunk answered to `(loadstring)`, a literal the image
+            // does not contain. Both are player-visible: they are the prefix of every error a
+            // `loadstring` chunk raises.
+            //
+            // The name is taken from the **un-advanced** bytes on purpose: `luaL_loadbuffer
+            // 0x6f5690` strips a UTF-8 BOM from the buffer, but `0x703296` computed the name
+            // before that, so a BOM'd source compiles without its BOM while its chunk name still
+            // begins with one.
             let name = match &chunkname {
-                Some(n) => format!("={}", n.to_str()?),
-                None => "=(loadstring)".to_string(),
+                Some(n) => String::from_utf8_lossy(&n.as_bytes()).into_owned(),
+                None => String::from_utf8_lossy(&raw).into_owned(),
             };
             let chunk = lua
                 .load(bytes)
@@ -112,7 +141,14 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
                 .set_mode(mlua::ChunkMode::Text);
             match chunk.into_function() {
                 Ok(f) => Ok((Value::Function(f), Value::Nil)),
-                Err(e) => Ok((Value::Nil, Value::String(lua.create_string(e.to_string())?))),
+                // `load_aux`'s failure leg pushes Lua's own message unchanged (`0x7032c6` nil,
+                // `0x7032d2` insert, `mov eax,2`). mlua's `Display` prefixes it with
+                // `syntax error: `, which is mlua's word and not the image's — an addon that shows
+                // the second return to a player would show that prefix too.
+                Err(e) => Ok((
+                    Value::Nil,
+                    Value::String(lua.create_string(lua_message(&e))?),
+                )),
             }
         },
     )?;

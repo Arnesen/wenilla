@@ -172,6 +172,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     install_bit(lua)?;
+    install_gc(lua)?;
 
     Ok(())
 }
@@ -245,9 +246,281 @@ fn install_bit(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set("bit", bit)
 }
 
+/// The **garbage-collector pair** — `gcinfo` answers TWO numbers and `collectgarbage` answers
+/// NONE and takes a *number* (decision 2136).
+///
+/// Both are 5.0-shaped, and 5.1 changed both in ways that are observable from Lua. Read off the
+/// image by wow-5875-re (`system/ui/scratch/lua-dialect.md` §12), and already carried in
+/// `reference/1.12-shapes.tsv` as `gcinfo … 2 exact (number,number) agree` and
+/// `collectgarbage … 0 exact () agree` — rows the return-shape gate never checked, because it
+/// filters to `table_kind = global` and these two are `baselib`.
+///
+/// **`gcinfo 0x703200`** — extent `[0x703200, 0x703243)`, reads no argument and cannot raise:
+/// `lua_getgccount 0x6f43f0` then `lua_getgcthreshold 0x6f43e0`, each shifted `>> 10`, then
+/// `mov eax, 2`. So it is `(count_KB, threshold_KB)` — 5.1 kept the name and dropped the second
+/// value, which is what we answered.
+///
+/// **`collectgarbage 0x703250`** — extent `[0x703250, 0x703273)`, `luaL_optnumber(L, 1, 0.0)` →
+/// `_ftol` → `lua_setgcthreshold 0x6f4400` → `xor eax,eax`. Zero values, and a **number** argument:
+/// 5.1's string options (`"count"`, `"collect"`, `"step"`, …) do not exist in the 35 bytes. The
+/// two dialects are therefore *inverted* on argument type — 5.1 rejects the number the reference
+/// requires, and accepts the strings the reference refuses:
+///
+/// | call | the reference | stock 5.1 (what we had) |
+/// |---|---|---|
+/// | `collectgarbage()` | threshold 0 → full collect, 0 values | 1 value |
+/// | `collectgarbage(0)` | the same, explicitly | **raises** ``invalid option `0'`` |
+/// | `collectgarbage("count")` | **raises** `number expected, got string` | returns a number |
+///
+/// **The threshold is modelled, and this is the one place a value is ours rather than the
+/// image's.** 5.1 replaced 5.0's stop-the-world collector with an incremental one and deleted
+/// `GCthreshold` outright, so there is no 5.1 counter to read. What a script *can* observe is the
+/// rule that moves it, and that rule is 5.0's own: `luaC_collectgarbage` ends
+/// `G->GCthreshold = 2*G->nblocks`, and `lua_setgcthreshold` writes `n << 10` then immediately
+/// collects if the live count has already reached it. Both are reproduced below against mlua's
+/// real heap, so `gcinfo()`'s second value tracks the first exactly as 5.0's does. The saturation
+/// is the image's: `0x6f4400` compares **unsigned** against `0x3fffff`, so a negative `n` — or one
+/// past 4194303 — saturates the threshold to `0xffffffff` bytes.
+///
+/// **The reach is measured, not assumed.** `local mem, threshold = gcinfo()` is
+/// `AceAddon-2.0.lua`'s memory report (36 copies in the 219-addon corpus), and the next line is
+/// `string.format("… %.3f MiB …", threshold / 1024)` — arithmetic on a nil, i.e. a raise inside
+/// the report. pfUI's `modules/panel.lua:170` reads the same slot as `gckb` and guards it, so it
+/// silently prints `UNAVAILABLE` where the reference prints the number. `collectgarbage` has 14
+/// corpus call sites and every one of them is a bare `collectgarbage()` whose result is
+/// discarded, so its arity has no reach today — the argument contract is what this fixes.
+fn install_gc(lua: &Lua) -> mlua::Result<()> {
+    /// 5.0's `GCthreshold`, in **bytes** — the registry cell standing in for `[G+0x24]`.
+    const REG_GC_THRESHOLD: &str = "__benilla_gc_threshold";
+    /// `lua_setgcthreshold 0x6f4400`'s unsigned bound, in kilobytes.
+    const MAX_THRESHOLD_KB: i64 = 0x3f_ffff;
+
+    fn live_bytes(lua: &Lua) -> usize {
+        lua.used_memory()
+    }
+    /// 5.0's post-collection rule, `luaC_collectgarbage`: `GCthreshold = 2 * nblocks`.
+    fn settle(lua: &Lua) -> mlua::Result<()> {
+        let t = u64::try_from(live_bytes(lua))
+            .unwrap_or(u64::MAX)
+            .saturating_mul(2);
+        lua.set_named_registry_value(REG_GC_THRESHOLD, t as f64)
+    }
+
+    settle(lua)?;
+
+    // `gcinfo()` — no argument, two numbers, cannot raise.
+    lua.globals().set(
+        "gcinfo",
+        lua.create_function(|lua, ()| {
+            let live = live_bytes(lua);
+            let mut threshold: f64 = lua.named_registry_value(REG_GC_THRESHOLD).unwrap_or(0.0);
+            // **5.0's invariant, not just its arithmetic.** `luaC_checkGC` runs on allocation, so
+            // the instant `nblocks` reaches `GCthreshold` a collection fires and re-settles the
+            // threshold to `2 * nblocks`. A script therefore never observes a threshold at or
+            // below the live count. We have no allocation hook, so the same rule is applied on
+            // read: without it the cell set at construction goes stale as the heap grows and
+            // `gcinfo()` reports a threshold *under* its own count, a state 5.0 cannot hold.
+            if (live as f64) >= threshold {
+                settle(lua)?;
+                threshold = lua.named_registry_value(REG_GC_THRESHOLD).unwrap_or(0.0);
+            }
+            // Both shifts are the image's own `shr eax,0xa`.
+            Ok(((live >> 10) as f64, (threshold as u64 >> 10) as f64))
+        })?,
+    )?;
+
+    // `collectgarbage([n])` — a number, no return values, and a raise on anything that is not one.
+    lua.globals().set(
+        "collectgarbage",
+        lua.create_function(|lua, arg: Value| {
+            // `luaL_optnumber(L, 1, 0.0)`: absent or nil takes the default; a numeric STRING is
+            // coerced (the image's `lua_tonumber` runs `strtod`); anything else is a type error.
+            let n = match &arg {
+                Value::Nil => 0.0,
+                Value::Integer(i) => *i as f64,
+                Value::Number(n) => *n,
+                Value::String(s) => {
+                    match s.to_str().ok().and_then(|t| t.trim().parse::<f64>().ok()) {
+                        Some(v) => v,
+                        None => {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "bad argument #1 to `collectgarbage' (number expected, got {})",
+                                type_name(&arg)
+                            )))
+                        }
+                    }
+                }
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "bad argument #1 to `collectgarbage' (number expected, got {})",
+                        type_name(other)
+                    )))
+                }
+            };
+            // `_ftol` truncates toward zero; `0x6f4400`'s unsigned compare saturates a negative
+            // or oversized count to `0xffffffff` bytes.
+            let kb = n.trunc();
+            let threshold_bytes: f64 = if !(0.0..=MAX_THRESHOLD_KB as f64).contains(&kb) {
+                u32::MAX as f64
+            } else {
+                kb * 1024.0
+            };
+            lua.set_named_registry_value(REG_GC_THRESHOLD, threshold_bytes)?;
+            // `luaC_checkGC`: collect when the live count has reached the threshold, and the
+            // collection then re-settles it to `2 * nblocks`.
+            if (live_bytes(lua) as f64) >= threshold_bytes {
+                lua.gc_collect()?;
+                settle(lua)?;
+            }
+            Ok(())
+        })?,
+    )?;
+    Ok(())
+}
+
+/// The type name `luaL_typerror` would print — `luaT_typenames 0x811cd0`'s spelling.
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Nil => "no value",
+        Value::Boolean(_) => "boolean",
+        Value::Integer(_) | Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Table(_) => "table",
+        Value::Function(_) => "function",
+        Value::Thread(_) => "thread",
+        _ => "userdata",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::script::UiScript;
+
+    /// **`gcinfo()` answers TWO numbers, and the second one is what the corpus reads**
+    /// (decision 2136).
+    ///
+    /// `0x703200` is `lua_getgccount` + `lua_getgcthreshold`, each `>> 10`, then `mov eax, 2`.
+    /// 5.1 kept the name and dropped the second value, so we answered one — and the reach is not
+    /// hypothetical: `AceAddon-2.0.lua`'s memory report is
+    /// `local mem, threshold = gcinfo()` followed by `string.format("… %.3f MiB …",
+    /// threshold / 1024)`, which is arithmetic on a nil, i.e. a raise *inside* the report, in a
+    /// library 36 corpus addons embed. pfUI's `modules/panel.lua:170` reads the same slot as
+    /// `gckb`, guards it, and so prints `UNAVAILABLE` where the reference prints a number.
+    #[test]
+    fn gcinfo_answers_two_numbers_as_1_12_does() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(
+            s.eval::<i64>("return select('#', gcinfo())").unwrap(),
+            2,
+            "`mov eax, 2` at 0x703239 — one value is 5.1's shape, not 1.12's"
+        );
+        assert_eq!(
+            s.eval::<Vec<String>>("local a, b = gcinfo() return { type(a), type(b) }")
+                .unwrap(),
+            vec!["number".to_string(), "number".to_string()],
+            "(number,number) — `1.12-shapes.tsv` types the row `agree`"
+        );
+        // 5.0's collector keeps `GCthreshold` above `nblocks` (`luaC_checkGC` collects the moment
+        // they meet, and the collection re-settles the threshold to `2 * nblocks`), so a script
+        // cannot observe the pair inverted.
+        assert!(
+            s.eval::<bool>("local c, t = gcinfo() return t > c")
+                .unwrap(),
+            "the threshold must sit above the live count, as 5.0's collector guarantees"
+        );
+        // AceAddon-2.0's own line, verbatim in shape — this is the raise the fix removes.
+        assert!(
+            s.eval::<String>(
+                "local mem, threshold = gcinfo() \
+                 return string.format('%.3f', threshold / 1024)"
+            )
+            .is_ok(),
+            "AceAddon-2.0's memory report divides the second slot by 1024"
+        );
+    }
+
+    /// **`collectgarbage` answers NOTHING and takes a NUMBER** (decision 2136) — the two dialects
+    /// are inverted on the argument, so this is not a superset either way.
+    ///
+    /// `0x703250` is 35 bytes: `luaL_optnumber(L, 1, 0.0)` → `_ftol` → `lua_setgcthreshold` →
+    /// `xor eax,eax`. There is no string-option dispatch anywhere in it — that is 5.1's
+    /// `collectgarbage`, and on this client `gcinfo()` is the only way to read the counters.
+    #[test]
+    fn collectgarbage_answers_nothing_and_takes_a_number() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(
+            s.eval::<i64>("return select('#', collectgarbage())")
+                .unwrap(),
+            0,
+            "`xor eax,eax` at 0x70326f — 5.1 returns one value here"
+        );
+        // The reference's ONLY argument form, which stock 5.1 rejects as ``invalid option `0'``.
+        assert_eq!(
+            s.eval::<i64>("return select('#', collectgarbage(0))")
+                .unwrap(),
+            0
+        );
+        assert!(s.eval::<()>("collectgarbage(2048)").is_ok());
+        // `lua_tonumber` coerces a numeric string through `strtod`, so this one is accepted.
+        assert!(s.eval::<()>(r#"collectgarbage("100")"#).is_ok());
+        // …and a non-numeric string is a type error, in 5.0's own words.
+        let e = s
+            .eval::<()>(r#"collectgarbage("count")"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("bad argument #1 to `collectgarbage' (number expected, got string)"),
+            "5.1's string options must not exist here: {e}"
+        );
+        // An explicit threshold above the live count is what `gcinfo` then reports back.
+        assert!(s
+            .eval::<bool>(
+                "local c = gcinfo() collectgarbage(c * 4) local _, t = gcinfo() return t >= c"
+            )
+            .unwrap());
+    }
+
+    /// **A `loadstring` chunk is named by its own SOURCE, and an explicit name is used verbatim**
+    /// (decision 2136).
+    ///
+    /// `luaB_loadstring 0x703280` pushes the string `luaL_checklstring` just returned as
+    /// `luaL_optlstring`'s `def` (`0x70329a`), so the default chunk name is the source text and
+    /// `luaO_chunkid 0x6f5c40` renders it `[string "…"]`. We prepended `=` — chunkid's
+    /// "print verbatim, undecorated" marker — which stripped the wrapper off every explicit name,
+    /// left a literal `@` on a path-shaped one, and named a nameless chunk `(loadstring)`, a
+    /// literal the image does not contain. All four are the prefix of a player-visible error.
+    #[test]
+    fn a_loadstring_chunk_is_named_by_its_own_source() {
+        let s = UiScript::new().unwrap();
+        let raised = |src: &str| -> String {
+            s.eval::<String>(&format!(
+                "local f = loadstring({src}) local ok, e = pcall(f) return tostring(e)"
+            ))
+            .unwrap()
+        };
+        assert!(
+            raised(r#""error('boom')""#).starts_with(r#"[string "error('boom')"]:1: boom"#),
+            "the default name is the source: {}",
+            raised(r#""error('boom')""#)
+        );
+        // `'='` — printed verbatim with the marker removed, exactly once.
+        assert!(raised(r#""error('boom')", "=myname""#).starts_with("myname:1: boom"));
+        // `'@'` — the file branch; the path prints plainly, without the marker.
+        assert!(raised(r#""error('boom')", "@a/b.lua""#).starts_with("a/b.lua:1: boom"));
+        // No marker — the third branch wraps it, which is what an unprefixed name gets. Four
+        // corpus sites pass one (`loadstring(code, "safecall Dispatcher["..n.."]")`).
+        assert!(raised(r#""error('boom')", "plain""#).starts_with(r#"[string "plain"]:1: boom"#));
+
+        // The failure leg returns Lua's message unchanged — `load_aux` pushes nil and the string
+        // and stops. mlua's `Display` prefixes a category word that the image never adds.
+        let e: String = s
+            .eval(r#"local f, e = loadstring("return 1+") return tostring(e)"#)
+            .unwrap();
+        assert_eq!(
+            e, "[string \"return 1+\"]:1: unexpected symbol near `<eof>'",
+            "the second return is the message verbatim, with no mlua decoration"
+        );
+    }
 
     /// **The 61-addon fix, as the addon actually writes it.**
     ///

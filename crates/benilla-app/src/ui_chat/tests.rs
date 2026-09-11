@@ -1652,20 +1652,43 @@ fn real_alias_table_resolves_the_shipped_commands() {
     assert_eq!(
         parse_line("/console fpsJournal 1"),
         ParsedChat::Lua {
-            body: "ConsoleExec([[fpsJournal 1]])".into()
+            body: "ConsoleExec(\"fpsJournal 1\")".into()
         }
     );
     assert_eq!(
         parse_line("/console reloadUI"),
         ParsedChat::Lua {
-            body: "ConsoleExec([[reloadUI]])".into()
+            body: "ConsoleExec(\"reloadUI\")".into()
         }
     );
-    assert_eq!(super::input::lua_long_string("a]]b"), "[=[a]]b]=]");
+    // **The quoting is a SHORT string, because 1.12's lexer has no long-string levels** (2136).
+    // The old long-bracket form stepped its `=` level past whatever the payload could close, which
+    // is a construct the reference cannot compile at all — see `lua_quoted_string`.
+    assert_eq!(super::input::lua_quoted_string("a]]b"), "\"a]]b\"");
+    assert_eq!(super::input::lua_quoted_string("a]]b]=]c"), "\"a]]b]=]c\"");
     assert_eq!(
-        super::input::lua_long_string("a]]b]=]c"),
-        "[==[a]]b]=]c]==]"
+        super::input::lua_quoted_string("say \"hi\"\\n"),
+        "\"say \\\"hi\\\"\\\\n\""
     );
+    // …and the generated literal ROUND-TRIPS through a real VM, which is the assertion that
+    // actually pins the grammar: the old form compiled here and would not have on the reference,
+    // so a string check alone could not have caught it.
+    {
+        let vm = benilla_ui::script::UiScript::new().expect("VM");
+        for payload in [
+            "fpsJournal 1",
+            "a]]b",
+            "a]]b]=]c",
+            "quote \" and backslash \\",
+            "tab\there",
+        ] {
+            let lit = super::input::lua_quoted_string(payload);
+            let got: String = vm
+                .eval(&format!("return {lit}"))
+                .unwrap_or_else(|e| panic!("{lit} must compile on a 1.12-grammar VM: {e}"));
+            assert_eq!(got, payload, "and must carry the text unchanged");
+        }
+    }
     // The whole shipped surface, so a table that half-loaded fails loudly: **225 distinct emote
     // commands** over the 169 `EmotesText` names (the strings repeat — `EMOTE87_CMD1` and `_CMD2`
     // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **68 distinct

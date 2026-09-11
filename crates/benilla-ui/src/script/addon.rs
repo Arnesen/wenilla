@@ -453,6 +453,35 @@ fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
         Box::new(move |req: &str| read_under(&root, req))
     };
 
+    // ── The *loaded* stamp goes HERE, before the dependency walk — and it is the whole reason a
+    // dependency cycle terminates (decision 2139).
+    //
+    // `AddOn_Load 0x51f240` carries **no re-entrancy guard of its own**: an image-wide census of
+    // the visiting byte `[UIADDON+0x2d]` puts every live site inside `AddOn_CanLoad 0x51e780`
+    // (writers `0x5205a8`/`0x51e8ae`/`0x51e8f1`, reader `0x51e812`) and none in the loader. What
+    // bounds the recursion is this byte: `0x51f313 mov byte [rec+0x18],1` sits between
+    // `0x51f311 test eax,eax` and `0x51f317 jbe` — a flag-neutral, therefore **unconditional**
+    // store — in the dependency loop's PREAMBLE, ahead of both the OptionalDeps body
+    // (`0x51f320`) and the required-dep body (`0x51f343`). So a re-entered frame hits the
+    // already-loaded early-out at `0x51f2d6`/`0x51f2db` and returns 1.
+    //
+    // We stamped it *after* the recursion instead, which is why `LoadAddOn` on two mutually
+    // dependent LoadOnDemand addons overflowed the stack and took the process down with SIGABRT —
+    // not a Lua error, so nothing `pcall` or the error handler could reach.
+    //
+    // **The gate strictly dominates this store** (`0x51f2fa`/`0x51f301` precede `0x51f313`), so a
+    // refusal leaves the byte clear and the load stays retryable. That ordering is why the stamp
+    // is here and not at the top of the function.
+    //
+    // **The consequence is real and is the reference's own**: inside a cycle an addon is flagged
+    // loaded before its own files run, so `IsAddOnLoaded("A")` answers 1 for the whole of B's
+    // execution, and `ADDON_LOADED` fires B before A. That is not a wart we are copying blindly —
+    // it is what makes the recursion finite, and wow-re executed it against the real bytes.
+    {
+        let mut model = lua.app_data_mut::<Model>().expect("model");
+        model.addons[i].loaded = true;
+    }
+
     // The gate said yes, so a dependency failing HERE is a load-time failure (its files errored,
     // it was uninstalled mid-session) — still mapped to the DEP_ mirror, applied once.
     for dep in &deps {
@@ -487,11 +516,6 @@ fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
     // `Bindings.xml` (1188 phase 4) attaches here, between the files and the saved variables.
     load_bindings(lua, &name, &read);
     load_saved_variables(lua, i);
-
-    {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
-        model.addons[i].loaded = true;
-    }
     // The verified position: after the files, at the end of this addon's load (`0x51f5ad`).
     super::event::fire_global(lua, "ADDON_LOADED", &[super::ScriptValue::Str(name)]);
     Ok(())

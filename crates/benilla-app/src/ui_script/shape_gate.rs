@@ -104,6 +104,12 @@ struct Row {
 }
 
 fn rows() -> Vec<Row> {
+    rows_of_kind("global")
+}
+
+/// The same read, for one `table_kind` — `global` is the registrar surface, `baselib` the
+/// 36-entry Lua base array looped straight into `_G` at `0x811e28`.
+fn rows_of_kind(kind: &str) -> Vec<Row> {
     let tsv = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../reference/1.12-shapes.tsv"
@@ -114,7 +120,7 @@ fn rows() -> Vec<Row> {
         .filter_map(|l| {
             let f: Vec<&str> = l.split('\t').collect();
             // name fn pair_va table_va table_kind argc argc_conf arity arity_conf kinds …
-            if f.len() < 9 || f[4] != "global" || f[8] != "exact" {
+            if f.len() < 9 || f[4] != kind || f[8] != "exact" {
                 return None;
             }
             Some(Row {
@@ -256,6 +262,136 @@ fn every_query_binding_answers_the_reference_s_return_arity() {
     assert!(
         mismatches.is_empty(),
         "{} of {checked} probed bindings answer the wrong number of values:\n  {}",
+        mismatches.len(),
+        mismatches.join("\n  ")
+    );
+}
+
+/// **The base-library arm of the gate** (decision 2136) — the 36 entries at `0x811e28`, which the
+/// other three arms never looked at.
+///
+/// [`rows`] filters to `table_kind = global`, so every `baselib` row in the vendored table sat
+/// outside all of the arity, kinds and widget halves. That is not a small corner: it is `gcinfo`,
+/// `collectgarbage`, `loadstring`, `pairs`, `type`, `tostring` — the functions every addon calls
+/// most — and it is where two divergences sat with their correct arities recorded beside them the
+/// whole time. `gcinfo … 2 exact (number,number) agree` and `collectgarbage … 0 exact () agree`
+/// were both in this file before anyone answered either one wrong.
+///
+/// **Only the no-argument-safe names are probed, by an explicit list rather than a prefix rule.**
+/// The global arm can filter to query verbs because `Get*`/`Is*` names them; the base library has
+/// no such convention, and calling it blind means calling `error`, `pcall` and `setfenv` for their
+/// arities. So the list below is what is safe to call with nothing, and everything else is
+/// uncovered — a loss of coverage, never a wrong assertion, exactly as the global arm's own filter
+/// is. `seterrorhandler`/`setfenv`/`setglobal` are excluded for mutating the VM, not for raising.
+const BASELIB_NO_ARG_PROBES: &[&str] = &[
+    "collectgarbage",
+    "date",
+    // The five shipped stubs — `xor eax,eax; ret` in the image (`lua-dialect.md` §3a), so calling
+    // one is as safe here as it is there, and their `0 exact ()` rows are still worth holding.
+    "debugbreak",
+    "debugdump",
+    "debuginfo",
+    "debugload",
+    "debugprint",
+    "debugprofilestart",
+    "debugprofilestop",
+    "debugstack",
+    "debugtimestamp",
+    "gcinfo",
+    "geterrorhandler",
+    "getfenv",
+    "time",
+];
+
+/// The base library's own shrinking list — same rules as [`NOT_YET_ASSERTED`]. **Empty.**
+const BASELIB_NOT_YET_ASSERTED: &[(&str, usize, &str)] = &[];
+
+#[test]
+fn the_base_library_answers_the_reference_s_return_arity_and_kinds() {
+    let rows = rows_of_kind("baselib");
+    assert!(
+        rows.len() > 20,
+        "the vendored table's baselib rows look wrong: {}",
+        rows.len()
+    );
+    let s = benilla_ui::script::UiScript::new().expect("VM");
+    let mut checked = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for r in &rows {
+        if !BASELIB_NO_ARG_PROBES.contains(&r.name.as_str()) {
+            continue;
+        }
+        let name = &r.name;
+        let probe = format!(
+            "if type({name}) ~= 'function' then return -1 end \
+             local ok, n = pcall(function() return select('#', {name}()) end) \
+             if not ok then return -1 end return n"
+        );
+        let got: i64 = match s.eval(&probe) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if got < 0 {
+            continue;
+        }
+        checked += 1;
+        if got as usize != r.arity {
+            if let Some((_, known, _)) = BASELIB_NOT_YET_ASSERTED.iter().find(|(n, ..)| n == name) {
+                assert_eq!(*known, r.arity, "{name} is listed at a stale arity");
+                continue;
+            }
+            mismatches.push(format!(
+                "{name}: answers {got}, reference states {}",
+                r.arity
+            ));
+            continue;
+        }
+        // Kinds, wherever the table calls them trustworthy — the same `kinds_conf = agree` rule
+        // the global arm uses, and the column that types `gcinfo` as `(number,number)`.
+        if r.kinds.is_empty() {
+            continue;
+        }
+        let Ok(kinds) = s.eval::<String>(&format!(
+            "local t = {{ {name}() }} local out = '' \
+             for i = 1, {} do out = out .. (i > 1 and ',' or '') .. type(t[i]) end return out",
+            r.arity
+        )) else {
+            continue;
+        };
+        let got_tuple = format!("({kinds})");
+        let acceptable = r.kinds.split('|').map(str::trim).any(|alt| {
+            alt == got_tuple
+                || alt
+                    .trim_matches(|c| c == '(' || c == ')')
+                    .split(',')
+                    .map(str::trim)
+                    .zip(kinds.split(',').map(str::trim))
+                    // `string?` is string-or-nil; `any`/`value` accept anything.
+                    .all(|(want, got)| {
+                        want == got
+                            || (want == "string?" && (got == "string" || got == "nil"))
+                            || want == "any"
+                            || want == "value"
+                    })
+        });
+        if !acceptable {
+            mismatches.push(format!(
+                "{name}: answers kinds {got_tuple}, reference states {}",
+                r.kinds
+            ));
+        }
+    }
+
+    // A floor, so a change that stops the probe measuring anything fails loudly.
+    // A floor, not a target: raise it when coverage rises, never lower it to fit a change.
+    assert!(
+        checked >= 15,
+        "the base-library gate measured only {checked} bindings"
+    );
+    assert!(
+        mismatches.is_empty(),
+        "{} of {checked} probed base-library bindings diverge:\n  {}",
         mismatches.len(),
         mismatches.join("\n  ")
     );
