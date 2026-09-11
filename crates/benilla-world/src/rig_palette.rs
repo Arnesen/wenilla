@@ -88,20 +88,22 @@ pub(crate) fn rig_origin_region_bytes() -> u64 {
 
 /// Byte offset of the palette rows themselves — after the slot table, the per-instance tint table
 /// that shares this slot index ([`crate::instance_tint`], decision 0812), the origin table, and
-/// the mat-anim delta table ([`crate::mat_anim_table`], decision 1381). The rows stay last
-/// because `wow_model.wgsl` declares them as the struct's one runtime-sized array.
+/// the mat-anim delta table ([`crate::mat_anim_table`], decision 1381), and the straddle clip
+/// table ([`crate::straddle`], decision 2188). The rows stay last because `wow_model.wgsl`
+/// declares them as the struct's one runtime-sized array.
 pub(crate) fn palette_region_offset() -> u64 {
-    crate::mat_anim_table::region_offset() + crate::mat_anim_table::region_bytes()
+    crate::straddle::region_offset() + crate::straddle::region_bytes()
 }
 
 /// Total bytes the slot-indexed regions add to every `wow_light`-layout buffer
 /// (`lighting::light_blob_bytes`): the rig slot table, the instance-tint table, the origin table,
-/// the palette rows.
+/// the mat-anim table, the straddle clip table, the palette rows.
 pub(crate) fn palette_regions_bytes() -> u64 {
     (MAX_RIG_SLOTS * 4) as u64
         + crate::instance_tint::region_bytes()
         + rig_origin_region_bytes()
         + crate::mat_anim_table::region_bytes()
+        + crate::straddle::region_bytes()
         + MAX_PALETTE_BONES as u64 * BONE_BYTES
 }
 
@@ -745,6 +747,11 @@ fn free_rig_skin(mut world: DeferredWorld, ctx: HookContext) {
     // that allocates the slot, and no tinted-unit teardown path has to remember to.
     if let Some(mut tints) = world.get_resource_mut::<crate::instance_tint::InstanceTints>() {
         tints.clear(slot);
+    }
+    // …and the straddle split's waterline (decision 2188), on the same index for the same reason:
+    // a recycled slot must not clip the next unit at the last one's water.
+    if let Some(mut clips) = world.get_resource_mut::<crate::straddle::WaterClips>() {
+        clips.clear(slot);
     }
 }
 
@@ -1435,9 +1442,14 @@ mod tests {
             "the mat-anim table follows the origin table (decision 1381)"
         );
         assert_eq!(
-            palette_region_offset() - crate::mat_anim_table::region_offset(),
+            crate::straddle::region_offset() - crate::mat_anim_table::region_offset(),
             crate::mat_anim_table::region_bytes(),
-            "the palette rows follow the mat-anim table"
+            "the straddle clip table follows the mat-anim table (decision 2188)"
+        );
+        assert_eq!(
+            palette_region_offset() - crate::straddle::region_offset(),
+            crate::straddle::region_bytes(),
+            "the palette rows follow the straddle clip table"
         );
         assert_eq!(
             palette_regions_bytes(),
@@ -1445,6 +1457,7 @@ mod tests {
                 + crate::instance_tint::region_bytes()
                 + rig_origin_region_bytes()
                 + crate::mat_anim_table::region_bytes()
+                + crate::straddle::region_bytes()
                 + (MAX_PALETTE_BONES as u64) * BONE_BYTES
         );
         // One `vec4` per addressable slot — the shader declares `array<vec4<f32>, 2048>`.

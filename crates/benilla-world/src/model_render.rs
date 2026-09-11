@@ -5,6 +5,7 @@
 
 use benilla_formats::{ModelBlend, WmoBatchClass};
 use bevy::asset::AssetId;
+use bevy::mesh::MeshTag;
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Buffer, Face};
@@ -786,11 +787,12 @@ pub struct FarSideOfWater;
 /// The grain is the reference's: every batch entity of one model instance carries the instance's
 /// own transform (the mesh offsets live in vertex space), so classifying each at its
 /// `GlobalTransform` IS the per-model split — one liquid hit at the model's placement, all its
-/// batches on one list. Straddlers keep the near-side default per batch (the reference splits
-/// those with hardware clip planes, `M2UseClipPlanes` — a deviation this system inherits from
-/// 0911 and names, not fixes). WMO translucents never classify (the reference's lists are
-/// CM2Scene's; the WMO leg draws its own), and opaque/cutout batches settle by depth like any
-/// world geometry.
+/// batches on one list. A slot-bearing instance inside the reference's `±r` band is a
+/// **straddler** and takes BOTH lists: its batches stay near and gain a far twin, each clipped at
+/// the waterline (the reference's `M2UseClipPlanes`; decision 2188, [`crate::straddle`]).
+/// Slot-0 content keeps the one-list sign test. WMO translucents never classify (the reference's
+/// lists are CM2Scene's; the WMO leg draws its own), and opaque/cutout batches settle by depth
+/// like any world geometry.
 ///
 /// **Two lanes, one classification.** Entities whose handle the Visibility authority owns — the
 /// `DoodadFade` holders `debug_panel::apply_model_visibility` pins to cutout/blend every frame —
@@ -841,14 +843,20 @@ pub(crate) fn classify_water_side(
                 Changed<MeshMaterial3d<WowModelMaterial>>,
             ),
         >,
-        Query<(
-            Entity,
-            &GlobalTransform,
-            Option<&bevy::camera::visibility::RenderLayers>,
-            &mut MeshMaterial3d<WowModelMaterial>,
-            Has<crate::model_fade::DoodadFade>,
-            Has<FarSideOfWater>,
-        )>,
+        Query<
+            (
+                Entity,
+                &GlobalTransform,
+                Option<&bevy::camera::visibility::RenderLayers>,
+                &mut MeshMaterial3d<WowModelMaterial>,
+                Has<crate::model_fade::DoodadFade>,
+                Has<FarSideOfWater>,
+                Option<&MeshTag>,
+                Has<crate::straddle::StraddlesWater>,
+            ),
+            // A straddle twin is the classification's OUTPUT, never its input.
+            Without<crate::straddle::StraddleTwinOf>,
+        >,
     )>,
     moved: Query<
         Entity,
@@ -861,6 +869,10 @@ pub(crate) fn classify_water_side(
         ),
     >,
     reclaimed: Query<Entity, Changed<crate::wmo_portal::UnitWmoRoom>>,
+    // The straddle verdict's edge (decision 2188): an instance entering or leaving its water band
+    // re-classifies its whole subtree — the same fan-down as the room claim.
+    rebanded: Query<Entity, Changed<crate::straddle::ModelWaterBand>>,
+    clips: Res<crate::straddle::WaterClips>,
     children: Query<&Children>,
     mut removed: RemovedComponents<MeshMaterial3d<WowModelMaterial>>,
     time: Res<bevy::time::Time>,
@@ -913,6 +925,7 @@ pub(crate) fn classify_water_side(
         for item in set.p1().iter_mut() {
             classify_part(
                 &interleave,
+                &clips,
                 &mut twins,
                 &mut materials,
                 &mut commands,
@@ -947,6 +960,7 @@ pub(crate) fn classify_water_side(
             if let Ok(item) = parts.get_mut(e) {
                 classify_part(
                     &interleave,
+                    &clips,
                     &mut twins,
                     &mut materials,
                     &mut commands,
@@ -955,10 +969,10 @@ pub(crate) fn classify_water_side(
                 );
             }
         }
-        // A changed claim re-classifies the holder's whole subtree — the claim lives on the unit
-        // root, the batches are its descendants (a nested holder shadows for its own subtree;
-        // re-classifying it from here anyway is idempotent).
-        let mut stack: Vec<Entity> = reclaimed.iter().collect();
+        // A changed claim — or a changed straddle band (2188) — re-classifies the holder's whole
+        // subtree: both live on the unit root, the batches are its descendants (a nested holder
+        // shadows for its own subtree; re-classifying it from here anyway is idempotent).
+        let mut stack: Vec<Entity> = reclaimed.iter().chain(rebanded.iter()).collect();
         while let Some(e) = stack.pop() {
             if let Ok(ch) = children.get(e) {
                 stack.extend(ch.iter());
@@ -966,6 +980,7 @@ pub(crate) fn classify_water_side(
             if let Ok(item) = parts.get_mut(e) {
                 classify_part(
                     &interleave,
+                    &clips,
                     &mut twins,
                     &mut materials,
                     &mut commands,
@@ -977,23 +992,32 @@ pub(crate) fn classify_water_side(
     }
 }
 
+/// One transparent-candidate batch as [`classify_part`] sees it: the entity, its transform, its
+/// layers, its handle (the channel this lane may swap), whether the Visibility authority owns
+/// that handle, whether it is marked far, its tag (the instance slot the straddle verdict is
+/// keyed on), and whether it is marked straddling.
+type PartItem<'a> = (
+    Entity,
+    &'a GlobalTransform,
+    Option<&'a bevy::camera::visibility::RenderLayers>,
+    Mut<'a, MeshMaterial3d<WowModelMaterial>>,
+    bool,
+    bool,
+    Option<&'a MeshTag>,
+    bool,
+);
+
 /// One batch entity's classification — the shared body of [`classify_water_side`]'s full and
 /// reactive paths. `used` collects the near identities live batches carry (the twin GC's mark);
 /// the reactive path passes `None` and leaves the sweep to the next full frame.
 fn classify_part(
     interleave: &crate::particles::WaterInterleave,
+    clips: &crate::straddle::WaterClips,
     twins: &mut FarSideTwins,
     materials: &mut Assets<WowModelMaterial>,
     commands: &mut Commands,
     used: Option<&mut std::collections::HashSet<AssetId<WowModelMaterial>>>,
-    (entity, gt, layers, mut mat, authority_owned, marked): (
-        Entity,
-        &GlobalTransform,
-        Option<&bevy::camera::visibility::RenderLayers>,
-        Mut<MeshMaterial3d<WowModelMaterial>>,
-        bool,
-        bool,
-    ),
+    (entity, gt, layers, mut mat, authority_owned, marked, tag, straddling): PartItem<'_>,
 ) {
     use bevy::camera::visibility::RenderLayers;
     // A booth-layered batch belongs to its own camera and scene — no world water applies
@@ -1023,48 +1047,59 @@ fn classify_part(
     if !qualifies {
         // A marked part that settled back onto its opaque cutout (fade over, aura released)
         // stops being a transparent draw at all — its side is nobody's business until it
-        // feathers again.
+        // feathers again, and a doubled one stops being doubled.
         if marked {
             commands.entity(entity).remove::<FarSideOfWater>();
+        }
+        if straddling {
+            commands
+                .entity(entity)
+                .remove::<crate::straddle::StraddlesWater>();
         }
         return;
     }
     if let Some(used) = used {
         used.insert(near.id());
     }
-    let far = crate::particles::far_side_of_water(interleave, Some(entity), gt.translation());
+    // **The straddle split** (decision 2188, [`crate::straddle`]): an instance inside its water
+    // band draws on BOTH lists. This batch keeps its NEAR identity — the fragment clips it to the
+    // eye's half — and `sync_straddle_twins` hangs its far twin beside it, clipped to the other.
+    // The verdict is the per-slot word the clip itself reads, so a batch is doubled exactly when
+    // its fragments are halved.
+    let straddles = tag.is_some_and(|t| clips.straddles(crate::mesh_tag::rig_of(t.0)));
+    if straddles != straddling {
+        trace_side(
+            if straddles { "straddle" } else { "unstraddle" },
+            entity,
+            gt,
+        );
+        if straddles {
+            commands
+                .entity(entity)
+                .insert(crate::straddle::StraddlesWater);
+        } else {
+            commands
+                .entity(entity)
+                .remove::<crate::straddle::StraddlesWater>();
+        }
+    }
+    if straddles {
+        // Built here, where the store is writable — the twin sync only reads the map.
+        far_twin(twins, materials, &near);
+    }
+    let far = !straddles
+        && crate::particles::far_side_of_water(interleave, Some(entity), gt.translation());
     if far == far_now {
         return;
     }
     // The swap's own trace (`WOW_MOVE_TRACE_TAGS=fx`): which batches crossed the plane this
     // frame and which way — the numeric read for a sort question no pixel can answer, and
     // naturally sparse (transitions only, never per-frame spam).
-    if benilla_assets::trace::enabled() {
-        let p = gt.translation();
-        benilla_assets::trace::line(
-            "fx",
-            &format!(
-                "{} mesh e={entity} at=[{:.1},{:.1},{:.1}]",
-                if far { "far-side" } else { "near-side" },
-                p.x,
-                p.y,
-                p.z
-            ),
-        );
-    }
+    trace_side(if far { "far-side" } else { "near-side" }, entity, gt);
     if far {
         // Build (or fetch) the twin either way — every composing owner needs it live in the
         // map before its own pick can resolve it.
-        let far_h = if let Some(h) = twins.to_far.get(&near.id()) {
-            h.clone()
-        } else {
-            // `qualifies` above already proved the near asset exists.
-            let twin = far_twin_of(materials.get(near.id()).unwrap());
-            let h = materials.add(twin);
-            twins.to_far.insert(near.id(), h.clone());
-            twins.to_near.insert(h.id(), near.clone());
-            h
-        };
+        let far_h = far_twin(twins, materials, &near);
         commands.entity(entity).insert(FarSideOfWater);
         if !authority_owned {
             mat.0 = far_h;
@@ -1075,6 +1110,39 @@ fn classify_part(
             mat.0 = near;
         }
     }
+}
+
+/// The far twin of `near`, built on first ask. `near` must be a live asset — every caller has
+/// just proved it through the classifier's `qualifies`.
+fn far_twin(
+    twins: &mut FarSideTwins,
+    materials: &mut Assets<WowModelMaterial>,
+    near: &Handle<WowModelMaterial>,
+) -> Handle<WowModelMaterial> {
+    if let Some(h) = twins.to_far.get(&near.id()) {
+        return h.clone();
+    }
+    let twin = far_twin_of(materials.get(near.id()).unwrap());
+    let h = materials.add(twin);
+    twins.to_far.insert(near.id(), h.clone());
+    twins.to_near.insert(h.id(), near.clone());
+    h
+}
+
+/// `WOW_MOVE_TRACE_TAGS=fx`: one line per side transition of one batch — `far-side`/`near-side`
+/// for the one-list law, `straddle`/`unstraddle` for the two-list band.
+fn trace_side(what: &str, entity: Entity, gt: &GlobalTransform) {
+    if !benilla_assets::trace::enabled() {
+        return;
+    }
+    let p = gt.translation();
+    benilla_assets::trace::line(
+        "fx",
+        &format!(
+            "{what} mesh e={entity} at=[{:.1},{:.1},{:.1}]",
+            p.x, p.y, p.z
+        ),
+    );
 }
 
 /// Replace the fog-policy bits (4-6) inside a packed `clutter_fade.z` marker word, preserving

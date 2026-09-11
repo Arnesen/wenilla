@@ -41,7 +41,7 @@ use emit::{emit_local, next_u32, rand01, rand_s11};
 use sim::simulate_particles;
 // The water-plane interleave classification — shared with the ribbon sim (a trail is one of the
 // model's emitters and classifies the same way; `sky_order::FAR_SIDE_BIAS`).
-pub(crate) use sim::{far_side_of_water, model_far_side, WaterInterleave};
+pub(crate) use sim::{far_side_of_water, model_far_side, water_height, WaterInterleave};
 
 /// This camera is **rate-throttled**: it renders on some frames and skips others *by our own
 /// pacing*, while the scene behind it keeps running at full rate. A frame it does not draw is a
