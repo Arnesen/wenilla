@@ -191,80 +191,57 @@
     </Font>
 
     <Script><![CDATA[
-        -- ── The reference's own option table, verbatim (stock UIOptionsFrame.lua l.1-84; 1938) ──
-        -- Stock MultiActionBars.lua:10 writes five rows of this table from MultiActionBarFrame_OnLoad
-        -- ("Hack to get around load order dependencies": the reference's toc loads UIOptionsFrame.xml
-        -- at l.21, before MultiActionBars.xml at l.39, so the MultiBar*_IsVisible funcs named at
-        -- l.55-59 are still nil when the table is declared, exactly as they are here). Our rows
-        -- below keep their own store (OptionsRow_Get's three kinds) and do not read this table; it
-        -- is published because the reference's bar file indexes it at LOAD, and this file is the
-        -- options window — the table's home — now seated at the reference's position in the
-        -- manifest. It goes with the window when UIOptionsFrame.xml migrates.
-        -- The two Action Bars uvars the reference's own options window inits in UIOptionsFrame_Init
-        -- (stock UIOptionsFrame.lua l.102-107), at file scope here because the rows below capture the
-        -- value at their OnLoad as the registered default. LOCK_ACTIONBAR is read by stock
-        -- ActionBarFrame.xml's drag guards and PetActionBarFrame.lua:270/278 (ours PetActionBar.xml);
-        -- ALWAYS_SHOW_MULTIBARS by stock MultiActionBar_UpdateGridVisibility. Both lived in the bar
-        -- files until 1938 took those stock.
-        LOCK_ACTIONBAR = "0"
-        RegisterForSave("LOCK_ACTIONBAR")
-        ALWAYS_SHOW_MULTIBARS = "0"
-        RegisterForSave("ALWAYS_SHOW_MULTIBARS")
-        -- The quest pair's two flags, likewise UIOptionsFrame_Init's (stock l.110-111, l.122-123),
-        -- here since the quest windows went stock (1944). QUEST_FADING_DISABLE is the reference's
-        -- "0". AUTO_QUEST_WATCH is the string "1" ON PURPOSE (decision 1136): the reference assigns
-        -- the NUMBER 1 while every consumer — stock QuestLogFrame.lua:64/68 and the checkbox's own
-        -- load — compares against the string, so on a fresh 1.12 install the row paints unchecked
-        -- and the auto-watch is dead until the box is clicked; the string ships the advertised
-        -- default as the real one. A recorded deviation (1804's rule), not a quiet one.
-        -- "Show Detailed Tooltips" — ref UIOptionsFrame.lua l.100-101, inside UIOptionsFrame_Init.
-        -- A FrameXML uvar, not a CVar, and 1.12 ships it ON: the explanatory second line IS the
-        -- default reference tooltip, not an opt-in (0661). It lived in our GameTooltip.xml until
-        -- the tooltip went stock (1968); the reference keeps it here, with the Interface page.
-        SHOW_NEWBIE_TIPS = "1"
-        RegisterForSave("SHOW_NEWBIE_TIPS")
-        -- "Hide World PvP Objectives" — ref UIOptionsFrame.lua's `HIDE_OUTDOOR_WORLD_STATE = "0"`,
-        -- the gate the stock WorldStateAlwaysUpFrame_Update opens the outdoor readout on
-        -- (`== "0" or instanceType == "pvp"`). Here since that frame went stock (1972); a nil
-        -- reads as hidden, which is how the tower counters would vanish outdoors.
-        HIDE_OUTDOOR_WORLD_STATE = "0"
-        RegisterForSave("HIDE_OUTDOOR_WORLD_STATE")
-        QUEST_FADING_DISABLE = "0"
-        RegisterForSave("QUEST_FADING_DISABLE")
+        -- ══ WHAT THIS FILE NO LONGER DECLARES, AND WHERE IT COMES FROM NOW (decision 2115) ══════
+        --
+        -- benilla's options window is THIS file and it is the one the player opens. But the
+        -- reference's own `UIOptionsFrame.xml` is now loaded too — hidden, off the player's chain,
+        -- at the manifest's l.21 seat above this row — so that a third-party addon reaching for
+        -- `UIOptionsFrame`, `UIOptionsFrameCheckButton42` or `UIOptionsFrame_Load()` finds the real
+        -- thing instead of an alias onto us. Three things this file used to carry are the stock
+        -- file's, and are gone from here rather than duplicated:
+        --
+        --   · **The 38 options uvars.** `UIOptionsFrame_Init` (stock UIOptionsFrame.lua l.93-185)
+        --     assigns every one its factory value and `RegisterForSave`s it — SIMPLE_CHAT,
+        --     CHAT_LOCKED, REMOVE_CHAT_DELAY, SHOW_NEWBIE_TIPS, LOCK_ACTIONBAR,
+        --     SHOW_BUFF_DURATIONS, ALWAYS_SHOW_MULTIBARS, SHOW_PARTY_PETS, QUEST_FADING_DISABLE,
+        --     SHOW_PARTY_BACKGROUND, HIDE_PARTY_INTERFACE, SHOW_TARGET_OF_TARGET(+_STATE),
+        --     HIDE_OUTDOOR_WORLD_STATE, AUTO_QUEST_WATCH, the fourteen COMBAT_TEXT_* rows and
+        --     COMBAT_TEXT_FLOAT_MODE, plus NAMEPLATES_ON/FRIENDNAMEPLATES_ON. Every value we used
+        --     to write here was already the reference's (1804 made them so), so this is a pure
+        --     de-duplication and the DEFAULT IS NOW THE REFERENCE'S BY CONSTRUCTION: our rows read
+        --     the global at their OnLoad (`OptionsGlobalRow_OnLoad`'s `udefault`), and the stock
+        --     file has assigned it long before, so Defaults still walks back to the shipped value.
+        --     Five it declares that we never did come free: SIMPLE_CHAT, SHOW_PARTY_PETS,
+        --     SHOW_PARTY_BACKGROUND, HIDE_PARTY_INTERFACE, and the nameplate pair's save rows.
+        --
+        --   · **`UIOptionsFrameCheckButtons`.** The reference's option table, whose home is that
+        --     file. Stock `MultiActionBars.lua:10` writes five rows into it at ITS load ("Hack to
+        --     get around load order dependencies"), which is why the stock window's row must sit
+        --     above MultiActionBars.xml in benilla.toc — it does, at l.21 exactly as the
+        --     reference's toc has it. Our rows never read this table; they keep their own store
+        --     (`OptionsRow_Get`'s three kinds).
+        --
+        --   · **`UpdateNameplates`.** `UIOptionsFrame.lua` l.768-780 — the reference's own home
+        --     for it, and the four verbs it calls (Show/HideNameplates, Show/HideFriendNameplates)
+        --     are ours in `script/cvars.rs`, unchanged.
+        --
+        -- ── THE ONE ASSIGNMENT THAT STAYS, AND WHY IT IS AN OVERRIDE ────────────────────────────
+        -- `AUTO_QUEST_WATCH` is the string `"1"` ON PURPOSE (decision 1136): the reference assigns
+        -- the NUMBER 1 (`UIOptionsFrame.lua` l.122) while every consumer — stock
+        -- `QuestLogFrame.lua:64/68` and the checkbox's own load — compares against the STRING, and
+        -- in Lua 5.0 `1 ~= "1"`. So on a fresh 1.12 install the box paints unchecked and the
+        -- advertised auto-watch is dead until the player clicks it. We ship the string so the
+        -- advertised default is the real one — a recorded deviation under 1804's rule, not a quiet
+        -- one.
+        --
+        -- **This file loads AFTER the stock one** (manifest l.21 vs this window's seat before
+        -- GameMenuFrame), so this line runs after `UIOptionsFrame_Init` and wins. It is a
+        -- re-assignment, not a declaration: the `RegisterForSave` is the stock file's, and a second
+        -- one would be redundant — but it is kept, because `RegisterForSave` is idempotent and a
+        -- reader of this line should not have to know the stock file registered it to know the
+        -- global is persisted.
         AUTO_QUEST_WATCH = "1"
         RegisterForSave("AUTO_QUEST_WATCH")
-        -- Combat text uvars (ref UIOptionsFrame.lua l.135-152, verbatim). They lived in our
-        -- CombatText.xml while that file stood in for the addon; the addon is the reference's
-        -- own `Blizzard_CombatText` off the chain now, LoadOnDemand as the reference ships it,
-        -- so its option family's defaults sit where the reference keeps them (1964).
-        SHOW_COMBAT_TEXT = "0"
-        RegisterForSave("SHOW_COMBAT_TEXT")
-        COMBAT_TEXT_SHOW_LOW_HEALTH_MANA = "1"
-        RegisterForSave("COMBAT_TEXT_SHOW_LOW_HEALTH_MANA")
-        COMBAT_TEXT_SHOW_AURAS = "1"
-        RegisterForSave("COMBAT_TEXT_SHOW_AURAS")
-        COMBAT_TEXT_SHOW_AURA_FADE = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_AURA_FADE")
-        COMBAT_TEXT_SHOW_COMBAT_STATE = "1"
-        RegisterForSave("COMBAT_TEXT_SHOW_COMBAT_STATE")
-        COMBAT_TEXT_SHOW_DODGE_PARRY_MISS = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_DODGE_PARRY_MISS")
-        COMBAT_TEXT_SHOW_RESISTANCES = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_RESISTANCES")
-        COMBAT_TEXT_SHOW_REPUTATION = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_REPUTATION")
-        COMBAT_TEXT_SHOW_REACTIVES = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_REACTIVES")
-        COMBAT_TEXT_SHOW_FRIENDLY_NAMES = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_FRIENDLY_NAMES")
-        COMBAT_TEXT_SHOW_COMBO_POINTS = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_COMBO_POINTS")
-        COMBAT_TEXT_SHOW_MANA = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_MANA")
-        COMBAT_TEXT_FLOAT_MODE = "1"
-        RegisterForSave("COMBAT_TEXT_FLOAT_MODE")
-        COMBAT_TEXT_SHOW_HONOR_GAINED = "1"
-        RegisterForSave("COMBAT_TEXT_SHOW_HONOR_GAINED")
 
         -- The family's apply, ref UIOptionsFrame_Save l.371-376 verbatim: the addon is
         -- LoadOnDemand, so turning the master on loads it, and the update runs only once it is
@@ -277,15 +254,6 @@
                 CombatText_UpdateDisplayedMessages()
             end
         end
-        -- CHAT_LOCKED / REMOVE_CHAT_DELAY — the chat window's two uvars, the reference's own
-        -- UIOptionsFrame.lua l.96-99 defaults ("0" and "0"), read every frame by
-        -- FloatingChatFrame.lua's FCF_Get_ChatLocked and FCF_OnUpdate since the chat window went
-        -- stock (1948). Declared here because this is where the reference declares them.
-        CHAT_LOCKED = "0"
-        RegisterForSave("CHAT_LOCKED")
-        REMOVE_CHAT_DELAY = "0"
-        RegisterForSave("REMOVE_CHAT_DELAY")
-
         -- The Remove Chat Hover Delay row's applyFunc: the reference's own line
         -- (UIOptionsFrame.lua l.216, `SetChatMouseOverDelay(REMOVE_CHAT_DELAY)`) under the name the
         -- row resolves at apply time. `SetChatMouseOverDelay` is FloatingChatFrame.lua's.
@@ -320,123 +288,6 @@
             end
         end
 
-        UIOptionsFrameCheckButtons = { };
-        ------------------- Basic Options -------------------
-        -- Controls
-        UIOptionsFrameCheckButtons["INVERT_MOUSE"] =				{ index = 1, cvar = "mouseInvertPitch" };
-
-        -- General
-        UIOptionsFrameCheckButtons["CLICK_TO_MOVE"] =				{ index = 6,  cvar = "autointeract" };
-        UIOptionsFrameCheckButtons["GAMEFIELD_DESELECT_TEXT"] =			{ index = 45, cvar = "deselectOnClick"};
-        UIOptionsFrameCheckButtons["ASSIST_ATTACK"] =				{ index = 3,  cvar = "assistAttack" };
-        UIOptionsFrameCheckButtons["CLEAR_AFK"] =				{ index = 16, cvar = "autoClearAFK" };
-        UIOptionsFrameCheckButtons["BLOCK_TRADES"] =				{ index = 14, cvar = "BlockTrades" };
-        UIOptionsFrameCheckButtons["AUTO_SELF_CAST_TEXT"] =			{ index = 61, cvar = "autoSelfCast"};
-
-        -- Display
-        UIOptionsFrameCheckButtons["USE_UBERTOOLTIPS"] =			{ index = 12, cvar = "UberTooltips" };
-        UIOptionsFrameCheckButtons["STATUS_BAR_TEXT"] =				{ index = 2,  cvar = "statusBarText" };
-        UIOptionsFrameCheckButtons["PROFANITY_FILTER"] =			{ index = 5,  cvar = "profanityFilter" };
-        UIOptionsFrameCheckButtons["SHOW_CLOAK"] =				{ index = 31, func = ShowingCloak, setFunc = ShowCloak};
-        UIOptionsFrameCheckButtons["SHOW_HELM"] =				{ index = 20, func = ShowingHelm , setFunc = ShowHelm };
-        UIOptionsFrameCheckButtons["SHOW_QUEST_FADING_TEXT"] =			{ index = 42, uvar = "QUEST_FADING_DISABLE", default = "0"};
-        UIOptionsFrameCheckButtons["SHOW_BUFF_DURATION_TEXT"] =			{ index = 39, uvar = "SHOW_BUFF_DURATIONS", default = "0"};
-        UIOptionsFrameCheckButtons["SHOW_PLAYER_NAMES"] =			{ index = 21, cvar = "UnitNamePlayer"};
-        UIOptionsFrameCheckButtons["SHOW_GUILD_NAMES"] =			{ index = 22, cvar = "UnitNamePlayerGuild"};
-        UIOptionsFrameCheckButtons["SHOW_PLAYER_TITLES"] =			{ index = 23, cvar = "UnitNamePlayerPVPTitle"};
-        UIOptionsFrameCheckButtons["SHOW_NPC_NAMES"] =				{ index = 30, cvar = "UnitNameNPC"};
-        UIOptionsFrameCheckButtons["SHOW_OWN_NAME"] =				{ index = 67, cvar = "UnitNameOwn"};
-        UIOptionsFrameCheckButtons["SHOW_PARTY_BACKGROUND_TEXT"] =		{ index = 43, uvar = "SHOW_PARTY_BACKGROUND"};
-        UIOptionsFrameCheckButtons["HIDE_OUTDOOR_WORLD_STATE_TEXT"] =		{ index = 62, uvar = "HIDE_OUTDOOR_WORLD_STATE", default = "0"};
-        UIOptionsFrameCheckButtons["AUTO_QUEST_WATCH_TEXT"] =			{ index = 66, uvar = "AUTO_QUEST_WATCH", default = "1"};
-
-        -- Camera Controls
-        UIOptionsFrameCheckButtons["FOLLOW_TERRAIN"] =				{ index = 24, cvar = "cameraTerrainTilt"};
-        UIOptionsFrameCheckButtons["HEAD_BOB"] =				{ index = 26, cvar = "cameraBobbing"};
-        UIOptionsFrameCheckButtons["WATER_COLLISION"] =				{ index = 27, cvar = "cameraWaterCollision"};
-        UIOptionsFrameCheckButtons["SMART_PIVOT"] =				{ index = 15, cvar = "cameraPivot" };
-        -- Help
-        UIOptionsFrameCheckButtons["SHOW_TUTORIALS"] =				{ index = 28};
-        UIOptionsFrameCheckButtons["SHOW_NEWBIE_TIPS_TEXT"] =			{ index = 29, uvar = "SHOW_NEWBIE_TIPS"};
-        UIOptionsFrameCheckButtons["SHOW_TIPOFTHEDAY_TEXT"] =			{ index = 44, cvar = "showGameTips"};
-
-        ------------------- Advanced Options -------------------
-        -- Chat
-        UIOptionsFrameCheckButtons["SIMPLE_CHAT_TEXT"] =			{ index = 7,  uvar = "SIMPLE_CHAT" , default = "1"};
-        UIOptionsFrameCheckButtons["CHAT_LOCKED_TEXT"] =			{ index = 8,  uvar = "CHAT_LOCKED" , default = "1"};
-        UIOptionsFrameCheckButtons["GUILDMEMBER_ALERT"] =			{ index = 13, cvar = "guildMemberNotify" };
-        UIOptionsFrameCheckButtons["REMOVE_CHAT_DELAY_TEXT"] =			{ index = 18, uvar = "REMOVE_CHAT_DELAY", default = "0"};
-        UIOptionsFrameCheckButtons["CHAT_BUBBLES_TEXT"] =			{ index = 37, cvar = "ChatBubbles"};
-        UIOptionsFrameCheckButtons["PARTY_CHAT_BUBBLES_TEXT"] =			{ index = 38, cvar = "ChatBubblesParty"};
-        UIOptionsFrameCheckButtons["SHOW_LOOT_SPAM"] =				{ index = 46, cvar = "showLootSpam"};
-        UIOptionsFrameCheckButtons["AUTO_JOIN_GUILD_CHANNEL"] =			{ index = 51};
-        UIOptionsFrameCheckButtons["DISABLE_SPAM_FILTER"] =			{ index = 68, cvar = "spamFilter"};
-
-        -- Action Bars
-        UIOptionsFrameCheckButtons["LOCK_ACTIONBAR_TEXT"] =			{ index = 32, uvar = "LOCK_ACTIONBAR", default = "0"};
-        UIOptionsFrameCheckButtons["SHOW_MULTIBAR1_TEXT"] =			{ index = 33, func = MultiBar1_IsVisible, setFunc = Multibar_EmptyFunc};
-        UIOptionsFrameCheckButtons["SHOW_MULTIBAR2_TEXT"] =			{ index = 34, func = MultiBar2_IsVisible, setFunc = Multibar_EmptyFunc};
-        UIOptionsFrameCheckButtons["SHOW_MULTIBAR3_TEXT"] =			{ index = 35, func = MultiBar3_IsVisible, setFunc = Multibar_EmptyFunc};
-        UIOptionsFrameCheckButtons["SHOW_MULTIBAR4_TEXT"] =			{ index = 36, func = MultiBar4_IsVisible, setFunc = Multibar_EmptyFunc};
-        UIOptionsFrameCheckButtons["ALWAYS_SHOW_MULTIBARS_TEXT"] =		{ index = 40, func = MultibarGrid_IsVisible, setFunc = Multibar_EmptyFunc};
-
-        -- Raid & Party Options
-        UIOptionsFrameCheckButtons["HIDE_PARTY_INTERFACE_TEXT"] =		{ index = 47, uvar = "HIDE_PARTY_INTERFACE" , default = "0"};
-        UIOptionsFrameCheckButtons["SHOW_DISPELLABLE_DEBUFFS_TEXT"] =		{ index = 48, uvar = "SHOW_DISPELLABLE_DEBUFFS" , default = "1"};
-        UIOptionsFrameCheckButtons["SHOW_CASTABLE_BUFFS_TEXT"] =		{ index = 49, uvar = "SHOW_CASTABLE_BUFFS" , default = "1"};
-        UIOptionsFrameCheckButtons["SHOW_TARGET_OF_TARGET_TEXT"] =		{ index = 50, uvar = "SHOW_TARGET_OF_TARGET" , default = "0"};
-        UIOptionsFrameCheckButtons["SHOW_PARTY_PETS_TEXT"] =			{ index = 41, uvar = "SHOW_PARTY_PETS", default = "1"};
-
-        -- Combat Text
-        UIOptionsFrameCheckButtons["SHOW_COMBAT_TEXT_TEXT"] =			{ index = 52, uvar = "SHOW_COMBAT_TEXT" , default = "0"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_LOW_HEALTH_MANA_TEXT"] =	{ index = 53, uvar = "COMBAT_TEXT_SHOW_LOW_HEALTH_MANA" , default = "1"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_AURAS_TEXT"] =		{ index = 54, uvar = "COMBAT_TEXT_SHOW_AURAS" , default = "1"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_AURA_FADE_TEXT"] =		{ index = 55, uvar = "COMBAT_TEXT_SHOW_AURA_FADE" , default = "0"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_COMBAT_STATE_TEXT"] =	{ index = 56, uvar = "COMBAT_TEXT_SHOW_COMBAT_STATE" , default = "1"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_DODGE_PARRY_MISS_TEXT"] =	{ index = 57, uvar = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS", default = "0"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_RESISTANCES_TEXT"] =	{ index = 58, uvar = "COMBAT_TEXT_SHOW_RESISTANCES", default = "0"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_REPUTATION_TEXT"] =	{ index = 60, uvar = "COMBAT_TEXT_SHOW_REPUTATION", default = "0"};
-        UIOptionsFrameCheckButtons["SHOW_DAMAGE_TEXT"] =			{ index = 19, cvar = "CombatDamage"};
-        UIOptionsFrameCheckButtons["LOG_PERIODIC_EFFECTS"] =			{ index = 11, cvar = "CombatLogPeriodicSpells" };
-        UIOptionsFrameCheckButtons["SHOW_PET_MELEE_DAMAGE"] =			{ index = 9,  cvar = "PetMeleeDamage" };
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_REACTIVES_TEXT"] =		{ index = 63, uvar = "COMBAT_TEXT_SHOW_REACTIVES", default = "0"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_FRIENDLY_NAMES_TEXT"] =	{ index = 64, uvar = "COMBAT_TEXT_SHOW_FRIENDLY_NAMES", default = "0"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_COMBO_POINTS_TEXT"] =	{ index = 65, uvar = "COMBAT_TEXT_SHOW_COMBO_POINTS", default = "0"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_MANA_TEXT"] =		{ index = 59, uvar = "COMBAT_TEXT_SHOW_MANA", default = "0"};
-        UIOptionsFrameCheckButtons["COMBAT_TEXT_SHOW_HONOR_GAINED_TEXT"] =	{ index = 69, uvar = "COMBAT_TEXT_SHOW_HONOR_GAINED", default = "1"};
-
-        -- ── SHOW_BUFF_DURATIONS: the buff bar's timer switch (decision 1139) ──────────────────
-        --
-        -- The reference declares this in `UIOptionsFrame.lua` (l.21/104), whose `default` is
-        -- `"0"`. We have no counterpart to that file, and the row that drives it is on THIS
-        -- window's Interface page — so this is its home, and 1751's eighteenth window is what
-        -- moved it: it lived in our BuffFrame.xml, and the buff bar is the reference's own file
-        -- now, which reads the global and declares nothing.
-        --
-        -- **`"0"` — the reference's own, since 1804.** It shipped `"1"` from 0255, which put the
-        -- durations-shown geometry in on the director's call, through 1139, which turned it into a
-        -- setting without re-weighing what it ships as. This assignment is the ONLY statement of
-        -- the default: the saved chunk executes over it at load (1128), and the Interface page's
-        -- row captures it as its Defaults value at OnLoad, which runs first — so Defaults now
-        -- walks back to the reference's table because this line IS the reference's table.
-        --
-        -- Read at CALL time by `BuffButton_Update` / `BuffButtons_UpdatePositions` /
-        -- `BuffFrame_UpdateDuration`, so this file sitting far below the bar does not bind.
-        SHOW_BUFF_DURATIONS = "0"
-        RegisterForSave("SHOW_BUFF_DURATIONS")
-
-        -- The target-of-target pair, at the reference's own values and in the reference's own home
-        -- (`UIOptionsFrame.lua` l.116-119, where both sit in the uvar defaults block and both are
-        -- RegisterForSave'd). The switch ships OFF and the state ships "5".
-        --
-        -- These lived in our `UnitFrames.xml` file scope until the unit-frame kit went to the
-        -- chain — a squatter, and its own note said so. The reference declares them beside the
-        -- other party/unit uvars here, and `TargetFrame.lua:504` reads the switch at CALL time
-        -- (`TargetofTarget_Update`), so this file sitting far below the frames does not bind.
-        SHOW_TARGET_OF_TARGET = "0"
-        SHOW_TARGET_OF_TARGET_STATE = "5"
-        RegisterForSave("SHOW_TARGET_OF_TARGET")
-        RegisterForSave("SHOW_TARGET_OF_TARGET_STATE")
 
         -- The static category tree (era Game tab, Classic tocs), in list order. Keys are the row
         -- name suffixes; the visible label doubles as the page title (the era does the same —
@@ -454,39 +305,6 @@
         -- 724-tall window fills ~85% of the screen's height in our 768-virtual space, where the
         -- reference at typical resolutions reads nearer two-thirds.
         ERA_WINDOW_SCALE = 0.78
-
-        -- ── UpdateNameplates (ref UIOptionsFrame.lua l.768-780, verbatim) ────────────────────
-        -- Its reference home is `UIOptionsFrame.lua` and this file is our stand-in for that window
-        -- (0950/0992), so the function belongs here rather than beside its caller.
-        --
-        -- **Decision 1878 recorded this as "a missing ENGINE verb, and 1203 says build it or leave
-        -- it loudly absent", and named it the thing blocking the UIParent keystone. It is neither.**
-        -- It is FrameXML — `UIOptionsFrame.lua:768`, absent from wow-re's binding-shape table — and
-        -- every verb it calls is already ours: `ShowNameplates`/`HideNameplates`/
-        -- `ShowFriendNameplates`/`HideFriendNameplates` are the four CVar-backed bindings in
-        -- `script/cvars.rs`, all argc=0 arity=0, matching the reference's shapes.
-        --
-        -- `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON` are `RegisterForSave` globals the reference drives
-        -- from the keybinding alone (1.12's own options UI has no nameplate row). Nil is a normal
-        -- state for them and the else-branches are the reference's own answer to it, so this needs
-        -- no seeding — which is why the whole thing is twelve lines rather than a build.
-        --
-        -- The reference's odd second arm is kept as it stands: on FRIENDNAMEPLATES_ON it calls
-        -- Show and then Hide, which is a no-op in the real client too. Transcribed, not corrected;
-        -- fixing a reference bug here would be inventing a difference.
-        function UpdateNameplates()
-            if ( NAMEPLATES_ON ) then
-                ShowNameplates()
-            else
-                HideNameplates()
-            end
-            if ( FRIENDNAMEPLATES_ON ) then
-                ShowFriendNameplates()
-                HideFriendNameplates()
-            else
-                HideFriendNameplates()
-            end
-        end
 
         function OptionsFrame_UpdateScale()
             -- The era panel is registered `checkFit = 1`: the panel manager also shrinks it to
@@ -982,9 +800,15 @@
             --        verbs). It is unbuilt because nobody has asked for it, not because it
             --        would be inert — and the per-window lock the tab menu carries is the one
             --        a player actually reaches for. Ships when it is wanted
-            --   · 51 Auto-join Guild Recruitment Channel — carries **no cvar, uvar or func in the
-            --        reference either** (UIOptionsFrame.lua l.51 is a bare `{ index = 51 }`), so
-            --        it is inert there; a working row here would be an invention, not a fix
+            --   · 51 Auto-join Guild Recruitment Channel — **this note used to say the row is
+            --        inert in the reference too, and that was wrong** (corrected by 2115; it is
+            --        exactly the mistake 2077 corrected for SHOW_TUTORIALS). The table entry is a
+            --        bare `{ index = 51 }`, but the store is not in the TABLE — it is in the three
+            --        special-case arms `UIOptionsFrame_Load` (l.243-248, `GetGuildRecruitmentMode`),
+            --        `_Save` (l.326-331, `SetGuildRecruitmentMode`) and `_SetDefaults` (l.649) keep
+            --        for the key. Both verbs are ours now (2115), over the chat cache's
+            --        `OPTION_GUILD_RECRUITMENT_CHANNEL` latch. The row is unshipped here because
+            --        nobody has asked for it, not because it would be inert
             -- Row 68, Disable Spam Filter, **shipped by 2077** — and the note it replaces was
             -- wrong twice over, both corrected at the bytes by wow-re's `text-filter-law.md`.
             -- The filter is not a word list, it is 28 compiled PCRE patterns from
@@ -1142,52 +966,42 @@
             row.fdefault = default
         end
 
-        -- The other end of `applyFunc`, and the reason a saved "off" used to come back on
-        -- (decision 1139). A CVar row needs nothing here — the host reads its own table at boot.
-        -- A GLOBAL row does: the whole UI's XML runs BEFORE the saved chunk executes over it
-        -- (1128's load order), so every file-scope consumer already ran against the SHIPPED
-        -- default — CombatText_OnLoad armed six event registrations from SHOW_COMBAT_TEXT = "1",
-        -- BuffFrame seated its rows from the durations-shown geometry — and the saved value
-        -- landing afterwards changed the variable while leaving the world it configured alone.
+        -- ── THE LOAD-TIME LADDER IS THE REFERENCE'S OWN AGAIN (decision 2115) ──────────────
         --
-        -- 1.12 closes this with a hand-written ladder in UIOptionsFrame's VARIABLES_LOADED arm
-        -- (l.204-220, "Option specific function calls": BuffButtons_UpdatePositions, the
-        -- SIMPLE_CHAT/CHAT_LOCKED arms, MultiActionBar_ShowAllGrids). We already hold each side
-        -- effect on its own row, so the ladder is a walk: run every distinct applyFunc once, in
-        -- no particular order (they are independent by construction — each one re-derives one
-        -- feature's state from one global). A row whose defining file was not loaded has a nil
-        -- applyFunc and is skipped, which is what keeps a partial test harness honest.
-        -- The multibar grid switch's load arm — stock UIOptionsFrame.lua l.218-220 verbatim.
-        function OptionsFrame_MultibarGrid_Load()
-            if ( ALWAYS_SHOW_MULTIBARS == "1" or ALWAYS_SHOW_MULTIBARS == 1 ) then
-                MultiActionBar_ShowAllGrids()
-            end
-        end
-
-        function OptionsFrame_ApplySavedSettings()
-            -- ref UIOptionsFrame_OnEvent's VARIABLES_LOADED arm, l.224-226: the combat text
-            -- addon loads at login when the saved master is on (1964).
-            if ( SHOW_COMBAT_TEXT == "1" ) then
-                UIParentLoadAddOn("Blizzard_CombatText")
-            end
-            local ran = {}
-            for key, rows in pairs(OPTIONS_PAGE_ROWS) do
-                for _, rkey in ipairs(rows) do
-                    local row = getglobal("OptionsFrameContainerBody" .. key .. rkey)
-                    -- `applyFunc` is a NAME (see OptionsPage_Apply): resolved here, when the
-                    -- definer has long since loaded; a name with nothing behind it is skipped. A
-                    -- row whose LOAD-time side effect differs from its click's names it as
-                    -- `loadFunc` (the multibar grid switch, below).
-                    local name = row and (row.loadFunc or row.applyFunc)
-                    local apply = name
-                    if type(name) == "string" then apply = getglobal(name) end
-                    if apply and not ran[name] then
-                        ran[name] = 1
-                        apply()
-                    end
-                end
-            end
-        end
+        -- The problem it solves is real and unchanged (decision 1139): the whole UI's XML runs
+        -- BEFORE the saved chunk executes over it (1128's load order), so every file-scope
+        -- consumer of a `RegisterForSave`'d global already ran against the SHIPPED default, and
+        -- the saved value landing afterwards changes the variable while leaving the world it
+        -- configured alone. A CVar row needs nothing — the host reads its own table at boot.
+        --
+        -- 1.12 closes it with a hand-written ladder in `UIOptionsFrame_OnEvent`'s VARIABLES_LOADED
+        -- arm (UIOptionsFrame.lua l.193-227): `BuffButtons_UpdatePositions`, the SIMPLE_CHAT and
+        -- CHAT_LOCKED arms, `SetChatMouseOverDelay(REMOVE_CHAT_DELAY)`,
+        -- `MultiActionBar_ShowAllGrids`, `RaidOptionsFrame_UpdatePartyFrames`, and
+        -- `UIParentLoadAddOn("Blizzard_CombatText")`. **That arm runs here now**, off the player's
+        -- chain, because the stock file is loaded (hidden) at the manifest's l.21 seat — so this
+        -- window used to re-express a ladder that did not exist and now would be a SECOND copy of
+        -- one that does.
+        --
+        -- So the walk is gone, and with it `OptionsFrame_ApplySavedSettings`, this window's
+        -- VARIABLES_LOADED registration, and the multibar grid row's `loadFunc`. What the walk did
+        -- that the stock arm does not, checked one by one rather than assumed:
+        --
+        --   · `BuffButtons_UpdatePositions`, `SetChatMouseOverDelay`, `MultiActionBar_ShowAllGrids`
+        --     and `UIParentLoadAddOn("Blizzard_CombatText")` — the stock arm does all four, and it
+        --     runs FIRST (its frame registers at the l.21 seat, ours would register 30 rows later).
+        --   · `CombatText_UpdateDisplayedMessages` — the stock arm does not call it, and does not
+        --     need to: `Blizzard_CombatText`'s own `CombatText_OnLoad` calls it as its first act
+        --     (Blizzard_CombatText.lua l.81-84), and the addon loads INSIDE the stock arm, by
+        --     which time the saved uvars are already in place.
+        --   · `TargetofTarget_Update` — the stock arm does not call it either, and at
+        --     VARIABLES_LOADED there is no target, so `TargetFrame.lua:504`'s guard takes the else
+        --     branch and hides a frame that is already hidden. The row keeps it as its `applyFunc`,
+        --     which is the click behaviour and the only thing it was ever needed for.
+        --
+        -- The property the walk carried that still matters is `OptionsRow_Set`'s, and it stays
+        -- there: an `applyFunc` is a NAME, resolved when the row is applied, so a row whose
+        -- defining file a test harness never loaded applies nothing instead of raising.
 
         -- A slider row's own range and readout, when the template's 0..1 / 5% / percent (the
         -- volume shape) isn't it — called after OptionsRow_OnLoad in the row's OnLoad. The
@@ -3215,14 +3029,15 @@
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "ALWAYS_SHOW_MULTIBARS",
                                                     "Always Show ActionBars", "OPTION_TOOLTIP_ALWAYS_SHOW_MULTIBARS")
-                                                -- Two arms, as the reference has them: a CLICK runs
-                                                -- MultiActionBar_UpdateGridVisibility (UIOptionsFrame.xml:683);
-                                                -- the LOAD arm only ever SHOWS (UIOptionsFrame.lua:218-220),
-                                                -- because every hide is a counted decrement on each well
-                                                -- (ActionButton_HideGrid) and a load-time hide against wells
-                                                -- nobody opened would push the count negative.
+                                                -- A CLICK runs MultiActionBar_UpdateGridVisibility, the
+                                                -- reference's own click arm (UIOptionsFrame.xml:683).
+                                                -- The LOAD arm — which only ever SHOWS, because every hide
+                                                -- is a counted decrement on each well (ActionButton_HideGrid)
+                                                -- and a load-time hide against wells nobody opened would push
+                                                -- the count negative — is the stock file's
+                                                -- VARIABLES_LOADED arm now (UIOptionsFrame.lua l.218-220),
+                                                -- which is why this row carries no `loadFunc` (2115).
                                                 self.applyFunc = "MultiActionBar_UpdateGridVisibility"
-                                                self.loadFunc = "OptionsFrame_MultibarGrid_Load"
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowLockActionBar" inherits="OptionsCheckboxRowTemplate">
@@ -4153,17 +3968,6 @@
             </Button>
         </Frames>
         <Scripts>
-            <!-- The window is where the saved globals get applied, not just edited: the chunk
-                 lands after every file-scope consumer has already run (decision 1139). This is
-                 1.12's own seat for it — UIOptionsFrame registers the same event for the same
-                 reason — and the window is hidden at the time, which is the point: the event is
-                 the UI's, not the panel's. -->
-            <OnLoad>this:RegisterEvent("VARIABLES_LOADED")</OnLoad>
-            <OnEvent>
-                if event == "VARIABLES_LOADED" then
-                    OptionsFrame_ApplySavedSettings()
-                end
-            </OnEvent>
             <!-- Controls is the default page; a re-opened window keeps its last selection (the
                  era remembers too — Settings.OpenToCategory's default seat). The scale re-fits
                  on every show — the era panel manager re-runs checkFit the same way. -->
@@ -4184,21 +3988,43 @@
             </OnHide>
         </Scripts>
     </Frame>
-    <!-- The reference has three options windows — OptionsFrame (video), SoundOptionsFrame and
-         UIOptionsFrame (interface) — and ours is the one window for all three (0985), kept ours by
-         the director's call. The stock files address the three by name: FloatingChatFrame.lua reads
-         `UIOptionsFrame:IsShown()` every frame (FCF_OnUpdate's hover gate), and the stock micro
-         row's UpdateMicroButtons reads all three UNGUARDED to decide whether the Main Menu button
-         is down (MainMenuBarMicroButtons.lua l.47-52; decision 1987). These two aliases are the
-         adapter: a stock read of either sibling is answered by this window, which is the honest
-         answer — while ours is up, the reference's question "is an options window open" is yes.
-         The third alias is the ESC ladder's: the stock `ToggleGameMenu` (UIParent.lua l.1465-1497,
-         off the chain since 1988) closes an open options window with `OptionsFrameCancel:Click()`,
-         the reference's Cancel button; ours has a corner X whose click is the same discard-and-hide
-         (`HideUIPanel(OptionsFrame)`, and OnHide discards the pending page), so that button answers
-         to the reference's name. BENILLA_ALLOW_OWN_UI=1 -->
+    <!-- ══ THE TWO SURVIVING ALIASES, AND THE ONE THAT HAD TO GO (decision 2115) ══════════════
+         The reference has THREE options windows — `OptionsFrame` (video), `SoundOptionsFrame` and
+         `UIOptionsFrame` (interface) — and benilla's one window answers to the first name outright,
+         because that is what this frame is called. What happens to the other two is not one
+         question but two:
+
+         **`UIOptionsFrame` is NO LONGER ALIASED, and must never be.** The reference's own
+         `UIOptionsFrame.xml` is loaded, hidden, at the manifest's l.21 seat, so that name is a real
+         frame with real children — which is the whole point of 2115: pfUI's
+         `skins/blizzard/options-interface.lua` does `UIOptionsFrame:SetWidth(1024)` and then walks
+         `UIOptionsFrameCheckButton1..69`. Under the old alias that `SetWidth` landed on THIS window,
+         the one the player opens. Nothing of ours may `Show()` the stock frame either; it is
+         `hidden="true"` in its own file and that is what keeps it off the screen.
+
+         **`SoundOptionsFrame` stays aliased**, because we do not load the reference's
+         `SoundOptionsFrame.xml` at all (2115 says why: nothing in the addon corpus needs it beyond
+         one optional pfUI skin). It answers exactly two stock consumers, both of which read all
+         three window names UNGUARDED and both of which are asking "is an options window open":
+         `MainMenuBarMicroButtons.lua` l.47-52 (`UpdateMicroButtons`, deciding whether the Main Menu
+         micro button is pushed — decision 1987) and `UIParent.lua:996` (`IsOptionFrameOpen`, on the
+         path of every window close). While ours is up the honest answer to both is yes, and the
+         alias is how they get it. `OptionsFrame`, being this frame's own name, answers them too.
+
+         **`OptionsFrameCancel` stays**, and it is the ESC ladder's: the stock `ToggleGameMenu`
+         (UIParent.lua l.1465-1497, off the chain since 1988) closes an open options window with
+         `OptionsFrame:IsVisible()` → `OptionsFrameCancel:Click()`. Ours has a corner X whose click
+         is the same discard-and-hide (`HideUIPanel(OptionsFrame)`, and OnHide discards the pending
+         page), so that button answers to the reference's name.
+
+         **One behaviour changes because the alias went, and it is the right one.**
+         `FloatingChatFrame.lua` l.842/860 gate the chat tab and dock hover on
+         `not UIOptionsFrame:IsShown()`. That now reads the hidden stock frame, so chat-tab hover
+         works while OUR options window is open. The reference's gate exists because ITS interface
+         window is `frameStrata="FULLSCREEN"` with `setAllPoints` and covers the chat; ours is a
+         panel that does not. No adapter is added for it (2115).
+         BENILLA_ALLOW_OWN_UI=1 -->
     <Script><![CDATA[
-        UIOptionsFrame = OptionsFrame
         SoundOptionsFrame = OptionsFrame
         OptionsFrameCancel = OptionsFrameCloseButton
     ]]></Script>

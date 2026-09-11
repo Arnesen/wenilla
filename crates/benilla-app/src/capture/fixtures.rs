@@ -1038,7 +1038,7 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::OptionsAudio => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
             // The Audio page (0957): register the real CVar set first — the hermetic capture has
@@ -1052,7 +1052,7 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::OptionsGraphics => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
             // The Graphics page (0959), same posture as the Audio fixture: real CVar set, live
@@ -1065,7 +1065,7 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::OptionsChat => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
             // The Chat page (1589), the page fixtures' posture: the real CVar set, then the live
@@ -1097,7 +1097,7 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::OptionsDropdownList => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
             // The dropdown list open (0992, re-seated onto Camera Following Style by 1649), same
@@ -1134,7 +1134,7 @@ pub(super) fn seed_ui_fixture(
             }
         }
         UiFixture::OptionsSearch => {
-            let Some(mut script) = script else {
+            let Some(script) = script else {
                 return;
             };
             // Mid-search (0984), same posture as the page fixtures: real CVar set, then the

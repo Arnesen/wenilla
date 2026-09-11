@@ -16,9 +16,10 @@
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{
-    AttackerState, DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog,
-    PartyKillLog, PeriodicAuraLog, PeriodicTick, SpellDamageLog, SpellDispelLog, SpellEnergizeLog,
-    SpellHealLog, SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog,
+    power_display_scale, AttackerState, DamageShield, DispelFailed, EnchantmentLog,
+    EnvironmentalDamageLog, PartyKillLog, PeriodicAuraLog, PeriodicTick, SpellDamageLog,
+    SpellDispelLog, SpellEnergizeLog, SpellHealLog, SpellInstaKillLog, SpellLogExecute,
+    SpellLogMiss, SpellOutcomeLog,
 };
 
 use crate::ui_chat::combat::{self, Family, Fills, UnitClass};
@@ -341,6 +342,11 @@ pub(super) fn spell_heal_log(
 }
 
 /// `SMSG_SPELLENERGIZELOG` → a power-gain line, also a BUFF type.
+///
+/// **The wire amount is RAW and the sentence wants the displayed figure** (decision 2117): the
+/// reference's own handler `0x5e8a90` divides by `0x6e7130(powerType)` at `0x5e8af3` before it
+/// hands the number to anything, so a warrior's one point of Unbridled Wrath rage — 10 on the
+/// wire — words as *"You gain 1 Rage from …"*, not 10.
 pub(super) fn spell_energize_log(
     s: SpellEnergizeLog,
     ctx: &ChatCtx,
@@ -359,7 +365,7 @@ pub(super) fn spell_energize_log(
     let fills = Fills {
         spell,
         power: Some(s.power),
-        amount: i64::from(s.amount),
+        amount: power_gain(s.power, s.amount),
         ..Default::default()
     };
     queue(
@@ -413,35 +419,48 @@ pub(super) fn periodic_aura_log(
                     ..Default::default()
                 },
             ),
+            // The same divide as the direct packet, from the same law and the same table — the
+            // reference's periodic handler `0x626dd0` applies it at `0x627087` before wording.
             PeriodicTick::Energize { power, amount } => (
                 combat::POWERGAIN,
                 true,
                 Fills {
                     spell: spell.clone(),
                     power: Some(power),
-                    amount: i64::from(amount),
+                    amount: power_gain(power, amount),
                     ..Default::default()
                 },
             ),
             // A mana leech is one sentence about two transfers: what the victim lost and what the
             // caster gained. vmangos sends the drained amount and a multiplier, not the gain, so
             // the gained figure is `amount * multiplier` — the same product the server applies.
+            //
+            // **Both figures are wire-raw** and the shared leech/drain formatter `0x627930` states
+            // the arithmetic exactly (decision 2117): `drained = amount / div`, `gained =
+            // trunc(amount·multiplier) / div` — the product truncates first, then divides — and a
+            // `drained` of zero drops the line, which is the reference's own test and the reason
+            // the periodic arm needs it as much as the execute-log one does.
             PeriodicTick::ManaLeech {
                 power,
                 amount,
                 multiplier,
-            } => (
-                combat::SPELLPOWERLEECH,
-                true,
-                Fills {
-                    spell: spell.clone(),
-                    power: Some(power),
-                    amount: i64::from(amount),
-                    amount2: (f64::from(amount) * f64::from(multiplier)) as i64,
-                    power2: Some(power),
-                    ..Default::default()
-                },
-            ),
+            } => {
+                let Some((drained, gained)) = leech_figures(power, amount, multiplier) else {
+                    continue;
+                };
+                (
+                    combat::SPELLPOWERLEECH,
+                    true,
+                    Fills {
+                        spell: spell.clone(),
+                        power: Some(power),
+                        amount: drained,
+                        amount2: gained,
+                        power2: Some(power),
+                        ..Default::default()
+                    },
+                )
+            }
         };
         let Some(kind) = combat::periodic_kind(caster, buff) else {
             continue;
@@ -791,11 +810,9 @@ pub(super) fn spell_log_execute(
                     multiplier,
                 } => {
                     let victim = ctx.classify(target, stores);
-                    let div = power_divisor(power);
-                    let drained = i64::from(amount) / div;
-                    if drained == 0 {
+                    let Some((drained, gained)) = leech_figures(power, amount, multiplier) else {
                         continue;
-                    }
+                    };
                     if power == POWER_HAPPINESS {
                         // `0x627de0`: the subject is the pet's OWNER and the named thing is the
                         // pet, at the literal misc-info type.
@@ -825,7 +842,6 @@ pub(super) fn spell_log_execute(
                     // `|multiplier| >= 2^-22` is the reference's own epsilon (`[0x8029d4]`), not a
                     // round number of ours.
                     let leech = multiplier.abs() >= LEECH_EPSILON;
-                    let gained = ((f64::from(amount) * f64::from(multiplier)) as i64) / div;
                     queue(
                         log,
                         ctx,
@@ -1001,14 +1017,41 @@ const EFFECT_DISMISS_PET: u32 = 102;
 /// `|multiplier| >= 2^-22` — the reference's own leech/drain discriminator (`[0x8029d4]`).
 const LEECH_EPSILON: f32 = 1.0 / 4_194_304.0;
 
-/// `0x6e7130(powerType)` — the divisor a power's log amounts are reported in
-/// (`[powerType*4 + 0x86f978]` = `{1, 10, 1, 1, 1000}`). Rage is stored ×10 and happiness ×1000.
+/// `0x6e7130(powerType)` as the log formatters take it — [`power_display_scale`]'s table, widened
+/// for the `i64` arithmetic every power line does.
+///
+/// It delegates rather than re-tabulating: this file used to carry its own copy of `{1, 10, 1, 1,
+/// 1000}`, and the copy was applied at exactly one of the four sites that need it (decision 2117).
 fn power_divisor(power: u32) -> i64 {
-    match power {
-        1 => 10,
-        POWER_HAPPINESS => 1000,
-        _ => 1,
-    }
+    i64::from(power_display_scale(power))
+}
+
+/// The figure a `POWERGAIN` line words: the wire amount on the display scale.
+///
+/// The reference does this **in the packet handler**, once per packet — `0x5e8af3` for
+/// `SMSG_SPELLENERGIZELOG`, `0x627087` for an energize tick — so the chat line and the
+/// `COMBAT_TEXT_UPDATE` push can never disagree. We have two consumers instead of one call, so the
+/// law is a named function rather than a local (decision 2117).
+fn power_gain(power: u32, amount: u32) -> i64 {
+    i64::from(amount) / power_divisor(power)
+}
+
+/// The `(drained, gained)` pair a leech/drain sentence words, or `None` when the line is dropped.
+///
+/// One function because the reference has one formatter: `0x627930` serves both
+/// `SMSG_SPELLLOGEXECUTE` effect 8 `POWER_DRAIN` and `SMSG_PERIODICAURALOG` aura 64, and the three
+/// rules are its own — `drained = amount / div`, `gained = trunc(amount·multiplier) / div` (the
+/// product truncates *before* the divide, which is why this is arithmetic and not two divides),
+/// and **`drained == 0` drops the line**.
+fn leech_figures(power: u32, amount: u32, multiplier: f32) -> Option<(i64, i64)> {
+    let div = power_divisor(power);
+    let drained = i64::from(amount) / div;
+    (drained != 0).then(|| {
+        (
+            drained,
+            ((f64::from(amount) * f64::from(multiplier)) as i64) / div,
+        )
+    })
 }
 
 /// A unit's owner guid — `CHARMEDBY` first, then `CREATEDBY`, the same pair
@@ -1180,5 +1223,47 @@ fn queue_named(
     }
     if let Some(line) = combat::queue(kind, family, subject, object, fills, named) {
         log.push_combat(line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{leech_figures, power_gain};
+
+    /// The report this arithmetic was written for: MSBT read `+10 Rage` off our combat log where
+    /// the reference reads `+1 Rage`, for the same swing against the same server.
+    ///
+    /// The wire number really is ten. `Unbridled Wrath Effect` (12964) is
+    /// `effect1 = 30 SPELL_EFFECT_ENERGIZE`, `effectMiscValue1 = 1 POWER_RAGE`,
+    /// `effectBasePoints1 = 9` — base points are *n − 1*, so vmangos energizes by **10** and
+    /// `SendEnergizeSpellLog` ships that same 10 (`SpellCaster.cpp:796-813`, it logs exactly what
+    /// it hands `ModifyPower`, and the stored rage field is the ×10 one). Rage is the only power a
+    /// player can gain where raw and displayed differ, which is why it is the one that was seen.
+    #[test]
+    fn a_rage_gain_words_the_displayed_figure_not_the_wire_one() {
+        assert_eq!(power_gain(1, 10), 1, "Unbridled Wrath: one point of rage");
+        assert_eq!(power_gain(1, 100), 10, "Bloodrage: ten");
+        // Every other power a POWERGAIN line can name is one-to-one, so the divide has to be a
+        // table lookup and not an `if rage` — mana, focus and energy must come through untouched.
+        assert_eq!(power_gain(0, 300), 300);
+        assert_eq!(power_gain(2, 20), 20);
+        assert_eq!(power_gain(3, 20), 20);
+    }
+
+    /// `0x627930`'s three rules, one function for both of its packets.
+    #[test]
+    fn a_leech_divides_both_figures_and_drops_a_zero_drained_line() {
+        // Mana leeches one-to-one: 120 drained, half of it gained.
+        assert_eq!(leech_figures(0, 120, 0.5), Some((120, 60)));
+        // The truncation ORDER is observable, and only on a scaled power: the reference truncates
+        // the product and divides after (`trunc(25 · 0.9) = 22`, `22 / 10 = 2`). Dividing first
+        // would give `(25 / 10) · 0.9 = 1`, and nothing downstream would notice the off-by-one.
+        assert_eq!(leech_figures(1, 25, 0.9), Some((2, 2)));
+        // Below one displayed point there is no line at all — the reference's own `drained == 0`
+        // test, which only a scaled power can reach with a nonzero wire amount.
+        assert_eq!(leech_figures(1, 9, 1.0), None);
+        assert_eq!(leech_figures(0, 0, 1.0), None);
+        // Happiness is the ×1000 arm; a pet's 1500 raw is one displayed point.
+        assert_eq!(leech_figures(4, 1500, 0.0), Some((1, 0)));
     }
 }

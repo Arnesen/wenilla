@@ -76,7 +76,13 @@ impl super::UiScript {
     /// a live table refreshes defaults but never clobbers a value someone already set. A fresh
     /// registration starts at the saved-base value when the config file carries one
     /// ([`Self::set_cvar_saved_base`]), else at the default.
-    pub fn register_cvars<'a>(&mut self, vars: impl IntoIterator<Item = (&'a str, &'a str)>) {
+    ///
+    /// Takes `&self` rather than `&mut self` because the table lives behind the VM's app-data
+    /// (interior mutability), and the interface loader has to be able to guarantee it from a
+    /// `&UiScript` — the stock `UIOptionsFrame.xml` reads CVars in its own `OnLoad`, so a VM that
+    /// loads the client's interface without the client's CVar table is not the client
+    /// (decision 2115).
+    pub fn register_cvars<'a>(&self, vars: impl IntoIterator<Item = (&'a str, &'a str)>) {
         let mut model = self.model_mut();
         for (name, default) in vars {
             let key = name.to_ascii_lowercase();
@@ -476,7 +482,7 @@ mod tests {
     use crate::script::UiScript;
 
     fn script_with_volume() -> UiScript {
-        let mut s = UiScript::new().unwrap();
+        let s = UiScript::new().unwrap();
         s.register_cvars([("MusicVolume", "0.4"), ("MasterVolume", "1.0")]);
         s
     }

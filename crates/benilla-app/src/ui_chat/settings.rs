@@ -99,6 +99,7 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{ChatTypeColor, ChatWindowLook, UiScript, MESSAGE_GROUPS};
 
+use super::edit::zone_bit;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_script::VmMemo;
 
@@ -116,6 +117,26 @@ const HEADER: &str = "\
 # shows, its CHANNELS … END list of custom channels, and its zone channels as ZONECHANNELS bits.
 # Written whole; the tab menu, /join and ChangeChatColor are what move it.
 ";
+
+/// **The writer generation, carried in the header comment** (decision 2120) — the one thing in
+/// this file that is ours and not the reference's grammar, and it is a repair marker, not a
+/// format version.
+///
+/// Every file this client wrote before 2120 composed its `ZONECHANNELS` words from the LIVE
+/// channel roster. A save taken while that roster was momentarily empty — the session-end flush
+/// racing `end_session_channels` on the same unordered `OnExit(InWorld)` edge — wrote
+/// `ZONECHANNELS 0` in the header *and*, through `window bits AND header mask`, in every window
+/// block. The next login then rebuilt window 1 with no channels, and the stock
+/// `ChatFrame_OnEvent` silently drops every `CHANNEL*` line a window does not carry — so the
+/// character lost its `Joined Channel:` notices and all General/Trade speech, permanently, because
+/// nothing but the loader's no-file path ever seeds a window's channel list.
+///
+/// A file without this line is one of those. [`restore_chat_looks`] re-seeds window 1 from
+/// `ChatChannels.dbc`'s `INITIAL` rows exactly as the no-file path does, and the next save stamps
+/// the marker, so the repair fires once per character and then never again. Bump it only for
+/// another repair of our own making; it is a comment line, so a reference client reading this file
+/// skips it like the rest of the header.
+const WRITER_GENERATION: &str = "# benilla-writer 2 (decision 2120)";
 
 /// Which character's file we are on, where it lives, and whether it is owed a write.
 #[derive(Resource, Default)]
@@ -136,31 +157,71 @@ pub(super) struct ChatWindowFile {
 
 /// What a file parses to: the windows it names (0-based index, the record), the `COLORS` rows
 /// it carries in file order, and the custom channels its header lists for re-joining.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) struct Parsed {
     pub(super) looks: Vec<(usize, ChatWindowLook)>,
     pub(super) colors: Vec<(String, [u8; 3])>,
     pub(super) joined: Vec<String>,
+    /// The header's `ZONECHANNELS` word — the reference's `ds:0xb6e5e0`, loaded from the file as
+    /// an overwrite (`0x498d83`). `None` when the file carried no such line, which is what makes
+    /// the loader fall back to the DBC seed rather than to a mask of 0 (decision 2120).
+    pub(super) zone_mask: Option<u32>,
+    /// `OPTION_GUILD_RECRUITMENT_CHANNEL` — the auto-join latch `GetGuildRecruitmentMode` returns
+    /// (decision 2115). `STANDARD` is 0 and **anything else, a missing word included, is 1**: that
+    /// is the reference's own reading (wow-re `chat-cache-grammar.md` — `"STANDARD"` takes the
+    /// `0x49ea70(ecx=0)` leg and every other word takes `ecx=1`), and it is why a file with no such
+    /// line at all reads as AUTO here, exactly as it does there.
+    pub(super) guild_recruitment_auto: bool,
 }
 
-/// The bit a zone channel's id occupies in a `ZONECHANNELS` word.
-fn zone_bit(id: u32) -> u32 {
-    if id == 0 || id > 32 {
-        0
-    } else {
-        1 << (id - 1)
+impl Default for Parsed {
+    fn default() -> Self {
+        Self {
+            looks: Vec::new(),
+            colors: Vec::new(),
+            joined: Vec::new(),
+            zone_mask: None,
+            // The boot value, and it is evidence rather than a guess: all 33 `chat-cache.txt`
+            // files the reference client itself wrote in this repo's install say `AUTO`, on
+            // characters that never opened the option.
+            guild_recruitment_auto: true,
+        }
     }
 }
 
-/// Render the file exactly as the writer does (§1), window order. `joined` is the client's
-/// current channel roster — the custom names go to the header's `CHANNELS`, the zone ids to the
-/// two `ZONECHANNELS` words.
-fn render(looks: &[ChatWindowLook], colors: &[ChatTypeColor], joined: &[(String, u32)]) -> String {
-    let zone_mask = joined.iter().fold(0, |m, (_, id)| m | zone_bit(*id));
+/// Render the file exactly as the writer does (§1), window order.
+///
+/// `joined` is the client's current channel roster and supplies the header's `CHANNELS` names —
+/// **the custom ones only** (`id == 0`): a zone channel is never written as a name, it travels as
+/// its bit (wow-re `chat-cache-grammar.md` §1.1, which is why all 34 stock files have an empty
+/// per-window `CHANNELS` block beside a non-zero `ZONECHANNELS`).
+///
+/// `zone_mask` is [`super::edit::ChannelState::zone_mask`], written raw into the header
+/// (`0x499c19`) and ANDed with each window's own bits for its block (`0x49a133`/`0x49a138`). It is
+/// **passed in rather than derived from `joined`** — decision 2120, and the whole bug: derived, it
+/// was 0 on any save taken while the roster was empty, and `window AND 0` erased the window's
+/// channel list for good.
+fn render(
+    looks: &[ChatWindowLook],
+    colors: &[ChatTypeColor],
+    joined: &[(String, u32)],
+    zone_mask: u32,
+    guild_recruitment_auto: bool,
+) -> String {
     let mut out = String::from(HEADER);
-    out.push_str(
-        "\nVERSION 2\n\nADDEDVERSION 2\n\nOPTION_GUILD_RECRUITMENT_CHANNEL AUTO\n\nCHANNELS\n",
-    );
+    // The repair marker (decision 2120) — a comment line, so the reference's own reader skips it.
+    out.push_str(WRITER_GENERATION);
+    out.push('\n');
+    // The latch is the live one now, not a literal (decision 2115): `SetGuildRecruitmentMode`
+    // writes it and this is the one place it persists.
+    let recruitment = if guild_recruitment_auto {
+        "AUTO"
+    } else {
+        "STANDARD"
+    };
+    out.push_str(&format!(
+        "\nVERSION 2\n\nADDEDVERSION 2\n\nOPTION_GUILD_RECRUITMENT_CHANNEL {recruitment}\n\nCHANNELS\n"
+    ));
     for (name, id) in joined {
         if *id == 0 {
             out.push_str(name);
@@ -308,9 +369,19 @@ fn parse(text: &str, rows: &[(u32, String)]) -> Parsed {
                 block = Block::Joined;
             } else if head.eq_ignore_ascii_case("ADDEDVERSION") {
                 added_version = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            } else if head.eq_ignore_ascii_case("ZONECHANNELS") {
+                // The reference's top-level arm is an OVERWRITE of `ds:0xb6e5e0` (`0x498d83`), not
+                // an OR — the file is the whole truth about which zone channels this character
+                // holds (decision 2120).
+                out.zone_mask = it.next().and_then(|v| v.trim().parse::<u32>().ok());
+            } else if head.eq_ignore_ascii_case("OPTION_GUILD_RECRUITMENT_CHANNEL") {
+                // The reference's own test, whole and case-folded: `STANDARD` is the only word
+                // that means 0; every other word — and no word at all — means 1 (decision 2115).
+                out.guild_recruitment_auto = !it
+                    .next()
+                    .is_some_and(|w| w.eq_ignore_ascii_case("STANDARD"));
             }
-            // VERSION, OPTION_*, and the header's ZONECHANNELS (the joined mask — ours is
-            // whatever the zone walk joins) are the reference's and not read here.
+            // VERSION is the reference's and not read here.
             continue;
         };
         if is_end {
@@ -420,23 +491,59 @@ fn roster(channels: &super::edit::ChannelState) -> Vec<(String, u32)> {
 
 /// Restore the file into a fresh VM — once per character per VM — and fire the loader's two
 /// events, file or no file.
-fn load_chat_looks(
-    script: Option<NonSendMut<UiScript>>,
-    roster_res: Res<crate::char_select::Roster>,
-    channels: Res<super::edit::ChannelState>,
-    commands: Res<NetCommands>,
-    mut file: ResMut<ChatWindowFile>,
-) {
-    let Some(mut script) = script else { return };
-    let Some(id) = crate::ui_macro::identity(&roster_res) else {
+///
+/// **This runs INSIDE the world-entry UI load, not from `Update`** (decision 2119), and the two
+/// events are why. It is the only caller of `UPDATE_CHAT_WINDOWS`, and that event is the only
+/// thing that registers a chat frame for any `CHAT_MSG_*` — `ChatFrame_OnEvent`'s arm (ref
+/// `ChatFrame.lua` l.1261-1273) is what calls
+/// `ChatFrame_RegisterForMessages(GetChatWindowMessages(this:GetID()))`. Anything fired before it
+/// reaches no window and is gone with no trace (1784: a rejected `AddMessage` is a silent skip).
+/// As an `Update` system this landed on the same frame the parked VM came back and the whole
+/// queued login burst drained, with no ordering between them — so the server's MOTD, sent as
+/// `CHAT_MSG_SYSTEM` right after `SMSG_LOGIN_VERIFY_WORLD`, was routed at a window registered for
+/// nothing. Measured on a live login: `net: server says — Welcome to World of Warcraft!` at
+/// `…45.155929`, this restore at `…45.157625`.
+///
+/// It is also the only caller of the `UPDATE_CHAT_COLOR` burst, and that one has to precede
+/// `PLAYER_LOGIN`. The burst's `WHISPER` row mirrors itself into `ChatTypeInfo["REPLY"]`
+/// (`ChatFrame.lua` l.1357-1365) — an entry the engine's 94-row registry does not carry, so its
+/// `.id` is **0** (`ui_script::chat_tests` asserts exactly that) — and `UpdateColorByID(0, …)`
+/// repaints every line already in the window whose id is 0, which is every line printed with no
+/// explicit colour. `AceConsole-2.0`'s `Print` is exactly that call
+/// (`AddMessage(text, nil, nil, nil, nil, 5)`), so running the burst after the addons had printed
+/// repainted their login lines whisper-pink: measured `(255,128,255)` on Bartender2's login line
+/// against the reference's `(255,255,255)`, in a run where the same `AddMessage` a second later
+/// came out white.
+pub(crate) fn restore_chat_looks(world: &mut World, script: &mut UiScript) {
+    let Some(id) = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(crate::ui_macro::identity)
+    else {
         return;
     };
-    if file.identity.get(&script).as_ref() == Some(&id) {
+    // The `ChannelState` reads are taken as owned rows up front: the restore needs the DBC
+    // shortcut table and the auto-join rows while it also holds `ChatWindowFile` mutably, and a
+    // `&mut World` hands out one resource borrow at a time.
+    let Some(channels) = world.get_resource::<super::edit::ChannelState>() else {
+        return;
+    };
+    let rows = shortcut_rows(channels);
+    let auto_rows: Vec<(String, u32)> = channels
+        .channels
+        .auto_join_rows()
+        .map(|r| (r.shortcut.clone(), r.id))
+        .collect();
+    let commands = world.get_resource::<NetCommands>().map(|c| c.0.clone());
+    let Some(mut file) = world.get_resource_mut::<ChatWindowFile>() else {
+        return;
+    };
+    if file.identity.get(script).as_ref() == Some(&id) {
         return; // already restored for this character, into the VM that is live now
     }
+    let who = format!("{} on {}", id.1, id.0);
     file.path = crate::local_state::chat_character_path(&id.0, &id.1);
-    *file.identity.get(&script) = Some(id);
-    *file.dirty.get(&script) = false;
+    *file.identity.get(script) = Some(id);
+    *file.dirty.get(script) = false;
     file.last_change = None;
     let text = file
         .path
@@ -450,20 +557,22 @@ fn load_chat_looks(
             }
         });
     let had_file = text.is_some();
-    let mut parsed = text
-        .map(|t| parse(&t, &shortcut_rows(&channels)))
-        .unwrap_or_default();
+    // A file our own pre-2120 writer damaged: no marker, so its `ZONECHANNELS` words may have been
+    // composed from an empty roster and its window channel lists erased with them. Repaired below,
+    // once — the next save stamps the marker.
+    let damaged = text
+        .as_deref()
+        .is_some_and(|t| !t.contains(WRITER_GENERATION));
+    let mut parsed = text.map(|t| parse(&t, &rows)).unwrap_or_default();
+    // The DBC seed — every `ChatChannels.dbc` row the client joins by itself (`flags & 1`).
+    let seed_mask = auto_rows.iter().fold(0, |m, (_, id)| m | zone_bit(*id));
     if !had_file {
-        // The loader's no-file path (§3, `0x4997ad`): window 1's channel slots get every
-        // `ChatChannels.dbc` row the client joins by itself (`flags & 1`) as `(Shortcut, id)` —
-        // the rows `ChatFrame_RegisterForChannels` will match zone speech against by id. The
-        // rest of the record is the boot init the VM already holds.
+        // The loader's no-file path (§3, `0x4997ad`): the mask is seeded from those rows, and
+        // window 1's channel slots get each of them as `(Shortcut, id)` — the rows
+        // `ChatFrame_RegisterForChannels` will match zone speech against by id. The rest of the
+        // record is the boot init the VM already holds.
         let mut general = ChatWindowLook::stock(0);
-        general.channels = channels
-            .channels
-            .auto_join_rows()
-            .map(|r| (r.shortcut.clone(), r.id))
-            .collect();
+        general.channels = auto_rows.clone();
         parsed.looks.push((0, general));
     }
     if !parsed.looks.is_empty() || !parsed.colors.is_empty() {
@@ -474,6 +583,38 @@ fn load_chat_looks(
             parsed.joined.len()
         );
     }
+    if damaged {
+        // **The one-time repair** (decision 2120, [`WRITER_GENERATION`]). Re-seed window 1 the way
+        // the loader's no-file path seeds it, and OR the DBC bits back into the mask. Additive and
+        // deduplicated, exactly like the in-window `ZONECHANNELS` arm (`0x499332`-`0x4994e7`), so a
+        // file that survived intact is left alone and one that was zeroed gets its channels back.
+        if let Some((_, general)) = parsed.looks.iter_mut().find(|(w, _)| *w == 0) {
+            for (shortcut, id) in &auto_rows {
+                if !general
+                    .channels
+                    .iter()
+                    .any(|(c, _)| c.eq_ignore_ascii_case(shortcut))
+                {
+                    general.channels.push((shortcut.clone(), *id));
+                }
+            }
+        }
+        parsed.zone_mask = Some(parsed.zone_mask.unwrap_or(0) | seed_mask);
+        // Owed a write, so the repair is genuinely ONCE: the next save composes the repaired
+        // record and stamps [`WRITER_GENERATION`], and this branch never runs for the character
+        // again. `last_change` is `None` here, so that save is the very next frame's.
+        *file.dirty.get(script) = true;
+        info!("chat cache: repaired a pre-2120 file's zone channels for {who}");
+    }
+    // …and `ChatWindowFile` is finished with, so the mask can go home to `ChannelState`.
+    drop(file);
+    // The mask is durable state from here on (decision 2120): the file's word when it carried one,
+    // the DBC seed when it did not, and from then on the confirmed joins' own OR.
+    let mask = parsed.zone_mask.unwrap_or(seed_mask);
+    if let Some(mut channels) = world.get_resource_mut::<super::edit::ChannelState>() {
+        channels.zone_mask = mask;
+    }
+    script.set_guild_recruitment_mode(u8::from(parsed.guild_recruitment_auto));
     script.set_chat_colors(parsed.colors);
     script.set_chat_window_looks(parsed.looks);
     // §8: UPDATE_CHAT_WINDOWS once, then UPDATE_CHAT_COLOR for every registry entry, on the file
@@ -493,11 +634,13 @@ fn load_chat_looks(
     }
     // The header's CHANNELS: the custom channels the character was in, re-joined the way the
     // reference re-joins them at login (the zone channels are the zone walk's, not the file's).
-    for name in parsed.joined {
-        let _ = commands.0.send(ClientCommand::JoinChannel {
-            name,
-            password: String::new(),
-        });
+    if let Some(commands) = commands {
+        for name in parsed.joined {
+            let _ = commands.send(ClientCommand::JoinChannel {
+                name,
+                password: String::new(),
+            });
+        }
     }
 }
 
@@ -506,7 +649,10 @@ fn watch_chat_looks(script: Option<NonSendMut<UiScript>>, mut file: ResMut<ChatW
     let Some(mut script) = script else { return };
     let moved = !script.take_chat_window_changes().is_empty();
     let coloured = script.take_chat_color_changes();
-    if !(moved || coloured) {
+    // `SetGuildRecruitmentMode` is a Lua write into the same file (decision 2115) — a host seat at
+    // login does not arm this, only a script call does.
+    let recruitment = script.take_guild_recruitment_change();
+    if !(moved || coloured || recruitment) {
         return;
     }
     *file.dirty.get(&script) = true;
@@ -518,6 +664,8 @@ fn write(script: &UiScript, channels: &super::edit::ChannelState, path: &std::pa
         &script.chat_window_looks(),
         &script.chat_colors(),
         &roster(channels),
+        channels.zone_mask,
+        script.guild_recruitment_mode() != 0,
     );
     if let Err(e) = crate::local_state::write_atomic(path, &body) {
         warn!("chat cache: cannot write {}: {e}", path.display());
@@ -565,21 +713,15 @@ fn save_on_session_end(
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<ChatWindowFile>()
+        // **The restore is not here.** `UPDATE_CHAT_WINDOWS`/`UPDATE_CHAT_COLOR` have to precede
+        // the session's first chat line and `PLAYER_LOGIN` respectively, and no `run_if` can buy
+        // that: 1978's `not(ingame_ui_pending)` gate put the restore on exactly the frame the
+        // parked VM comes back and `feed_chat` drains the whole queued login burst, with nothing
+        // ordering the two. It is called from `ui_script::lifecycle`'s world-entry load instead —
+        // [`restore_chat_looks`], decision 2119. Only the watcher belongs in `Update`.
         .add_systems(
             Update,
-            (load_chat_looks, watch_chat_looks)
-                .chain()
-                .run_if(in_state(crate::char_select::ClientState::InWorld))
-                // …and never before the in-game UI exists (1348's law, the unit feed's own
-                // words): the restore fires `UPDATE_CHAT_WINDOWS` once and latches a per-VM
-                // memo, and the VM that is live between the world-entry edge and the deferred
-                // entry load is the SAME object the load then fills — so a restore made in
-                // that window reaches no chat frame and its memo blocks the one that would.
-                // Every plate texture stayed at the XML's white, alpha 1 (director report,
-                // 2026-09-04).
-                .run_if(bevy::ecs::schedule::common_conditions::not(
-                    crate::ui_script::ingame_ui_pending,
-                )),
+            watch_chat_looks.run_if(in_state(crate::char_select::ClientState::InWorld)),
         )
         .add_systems(
             Update,
@@ -662,7 +804,9 @@ mod tests {
             ("Trade - City".to_string(), 2),
             ("MyChan".to_string(), 0),
         ];
-        let text = render(&looks, &colors, &joined);
+        // The mask is the character's durable one now (2120), passed in rather than derived —
+        // here, the two zone channels the roster holds.
+        let text = render(&looks, &colors, &joined, 0b11, true);
         assert!(
             text.contains("\nCHANNELS\nMyChan\nEND\n\nZONECHANNELS 3\n"),
             "{text}"
@@ -696,16 +840,108 @@ mod tests {
     fn a_windows_zone_bits_are_masked_by_the_joined_set() {
         let mut w = look(1, 0, 0, 0, 0, 0);
         w.channels = vec![("General".into(), 1), ("Trade".into(), 2)];
-        let text = render(&[w], &[], &[("General - Elwynn Forest".to_string(), 1)]);
+        // The mask holds General alone — Trade was explicitly left, so the window's own Trade
+        // bit is ANDed away on the way out.
+        let text = render(
+            &[w],
+            &[],
+            &[("General - Elwynn Forest".to_string(), 1)],
+            1,
+            true,
+        );
         let windows: Vec<&str> = text.split("WINDOW 1").collect();
         assert!(windows[1].contains("ZONECHANNELS 1\n"), "{text}");
+    }
+
+    /// **The bug 2120 fixes, in one assertion: an empty roster must not erase a window's
+    /// channels.**
+    ///
+    /// The mask used to be `joined.fold(|m, (_, id)| m | zone_bit(id))`, so a save taken while
+    /// `ChannelState::joined` was momentarily empty — the session-end flush racing
+    /// `end_session_channels` on the same unordered `OnExit(InWorld)` edge — wrote `ZONECHANNELS
+    /// 0` in the header AND, through `window bits AND header mask`, in every window block. Nothing
+    /// but the loader's no-file path ever seeds a window's channel list, so the next login rebuilt
+    /// window 1 with none, and the stock `ChatFrame_OnEvent` silently drops every `CHANNEL*` line
+    /// a window does not carry: no `Joined Channel:` notices and no General/Trade speech, for
+    /// good. Ten of the twenty files in this repo's own config folder had reached that state.
+    #[test]
+    fn an_empty_roster_does_not_erase_a_windows_zone_channels() {
+        let mut w = look(1, 0, 0, 0, 0, 0);
+        w.channels = vec![("General".into(), 1), ("Trade".into(), 2)];
+        // The character IS in both channels — the mask says so — but the live roster is empty,
+        // which is exactly the state a session-end save can be taken in.
+        let text = render(&[w], &[], &[], 0b11, true);
+        assert!(
+            text.contains("\nZONECHANNELS 3\n"),
+            "the header carries the durable mask, not the roster's shadow: {text}"
+        );
+        let parsed = parse(&text, &rows());
+        assert_eq!(parsed.zone_mask, Some(0b11), "the header word round-trips");
+        assert_eq!(
+            parsed.looks[0].1.channels,
+            vec![("General".to_string(), 1), ("Trade".to_string(), 2)],
+            "window 1 keeps both channels — pre-2120 this came back empty and stayed empty"
+        );
+    }
+
+    /// A file our own pre-2120 writer zeroed carries no [`WRITER_GENERATION`] line, and that is
+    /// the whole discriminator: the repair is keyed on the marker, not on guessing whether a
+    /// player meant to leave every zone channel.
+    #[test]
+    fn a_written_file_carries_the_writer_generation_and_a_damaged_one_does_not() {
+        let text = render(&[ChatWindowLook::stock(0)], &[], &[], 0b11, true);
+        assert!(
+            text.contains(WRITER_GENERATION),
+            "every file we write is stamped, so the repair fires once: {text}"
+        );
+        // The shape the damage takes: a header the reference's own reader accepts, with no marker.
+        let damaged = "VERSION 2\n\nCHANNELS\nEND\n\nZONECHANNELS 0\n\n\
+             WINDOW 1\nSIZE 0\nSHOWN 1\n\nMESSAGES\nSYSTEM\nEND\n\n\
+             CHANNELS\nEND\n\nZONECHANNELS 0\n\nEND\n";
+        assert!(!damaged.contains(WRITER_GENERATION));
+        let parsed = parse(damaged, &rows());
+        assert_eq!(parsed.zone_mask, Some(0), "the zeroed header parses as 0");
+        assert!(
+            parsed.looks[0].1.channels.is_empty(),
+            "and window 1 comes back with no channels — the symptom"
+        );
+    }
+
+    /// The mask is durable state: a confirmed join sets a bit, an explicit leave clears one, and
+    /// a custom channel (no DBC id) has no bit at all.
+    #[test]
+    fn the_zone_mask_moves_on_join_and_explicit_leave_only() {
+        let mut state = super::super::edit::ChannelState {
+            channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+                benilla_formats::ChatChannelRow {
+                    id: 1,
+                    flags: 0x11,
+                    pattern: "General - %s".into(),
+                    shortcut: "General".into(),
+                },
+                benilla_formats::ChatChannelRow {
+                    id: 2,
+                    flags: 0x3b,
+                    pattern: "Trade - %s".into(),
+                    shortcut: "Trade".into(),
+                },
+            ]),
+            ..Default::default()
+        };
+        state.note_zone_channel_joined("General - Elwynn Forest");
+        state.note_zone_channel_joined("Trade - City");
+        assert_eq!(state.zone_mask, 0b11);
+        state.note_zone_channel_joined("MyChan");
+        assert_eq!(state.zone_mask, 0b11, "a custom channel has no bit");
+        state.note_zone_channel_left("Trade - City");
+        assert_eq!(state.zone_mask, 0b01, "an explicit leave clears one bit");
     }
 
     /// The header is a comment block and survives the round trip as one — a reader that choked on
     /// its own header would lose the player's settings on the second launch.
     #[test]
     fn the_header_is_skipped_not_parsed() {
-        assert!(render(&[ChatWindowLook::default()], &[], &[]).starts_with('#'));
+        assert!(render(&[ChatWindowLook::default()], &[], &[], 0, true).starts_with('#'));
         assert_eq!(parse(HEADER, &rows()), Parsed::default());
     }
 
@@ -788,7 +1024,7 @@ mod tests {
             locked: false,
             ..look(1, 0, 0, 0, 64, 14)
         };
-        let text = render(std::slice::from_ref(&unlocked), &[], &[]);
+        let text = render(std::slice::from_ref(&unlocked), &[], &[], 0, true);
         assert!(text.contains("LOCKED 0"));
         assert_eq!(parse(&text, &rows()).looks, vec![(0, unlocked.clone())]);
         assert_eq!(
@@ -807,7 +1043,7 @@ mod tests {
             docked: Some(3),
             ..look(1, 0, 0, 0, 0, 0)
         };
-        let text = render(std::slice::from_ref(&moved), &[], &[]);
+        let text = render(std::slice::from_ref(&moved), &[], &[], 0, true);
         assert!(text.contains("DOCKED 3"));
         assert_eq!(parse(&text, &rows()).looks, vec![(0, moved.clone())]);
         // No DOCKED/SHOWN/MESSAGES at all: the boot init stands — window 1 shown and undocked

@@ -444,9 +444,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // **`same`, not `ours`, and that distinction is the point**: the reference has no CVar to
     // match, but it very much has a *setting* to match, and it boots both halves OFF —
     // `UIOptionsFrame_Init` assigns `NAMEPLATES_ON = nil` / `FRIENDNAMEPLATES_ON = nil` and
-    // `OptionsFrame_ApplySavedSettings` only calls `ShowNameplates()` on a truthy SAVED value
-    // (the install's `Interface\FrameXML\UIOptionsFrame.lua` l.180-183 / l.769-775). A fresh
-    // 1.12 client draws no plates until V is pressed. Enemy plates shipped ON here from 0167
+    // `UpdateNameplates` only calls `ShowNameplates()` on a truthy value (the install's
+    // `Interface\FrameXML\UIOptionsFrame.lua` l.180-183 / l.769-775 — both of them the stock
+    // file's own, off the chain since 2115; our copies of each are gone). A fresh 1.12 client
+    // draws no plates until V is pressed. Enemy plates shipped ON here from 0167
     // until 1804 — `VPlateMode::default()` carries that history.
     same(crate::vplates::CVAR_ENEMIES, "0"),
     same(crate::vplates::CVAR_FRIENDS, "0"),
@@ -827,6 +828,22 @@ pub(crate) struct CvarPersist {
 }
 
 impl CvarPersist {
+    /// The saved-base pairs a VM's table is seeded from — the file's entries minus the ones an
+    /// env var owns this session, which are never persisted.
+    ///
+    /// Extracted so `ui_script::lifecycle`'s world-entry edge can run the same seed before the
+    /// interface loads (decision 2115): the reference's own `UIOptionsFrame.xml` reads two CVars
+    /// in its dropdowns' `OnLoad`, and a `/reloadui` builds a fresh VM and loads the whole
+    /// interface before [`sync_cvars`]'s `Update` claim gets a turn. The ORDER at both call sites
+    /// is this first, `register_cvars` second (1291) — reversed, a reload resets every knobless
+    /// CVar to its factory value.
+    pub(crate) fn saved_base(&self) -> impl Iterator<Item = (String, String)> + '_ {
+        self.file
+            .iter()
+            .filter(|(k, _)| !self.env_overridden.contains(&k.to_ascii_lowercase()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+    }
+
     /// One CVar as `config.toml` holds it — matched case-insensitively, so a hand-edited
     /// spelling still answers.
     ///
@@ -1437,13 +1454,7 @@ fn sync_cvars(
         // knobless CVar (`statusBarText`) and an addon-declared one across a VM replacement; the
         // knob-derived session rows below still win for every key a host knob backs, and an
         // env-overridden key keeps its env value the same way (its knob carries it).
-        script.set_cvar_saved_base(
-            persist
-                .file
-                .iter()
-                .filter(|(k, _)| !persist.env_overridden.contains(&k.to_ascii_lowercase()))
-                .map(|(k, v)| (k.clone(), v.clone())),
-        );
+        script.set_cvar_saved_base(persist.saved_base().collect::<Vec<_>>());
         script.register_cvars(registered_pairs());
         // The Video dropdown's menu — what this device actually accepts, enumerated once at
         // `finish()` by `view::MsaaSupportPlugin` (decision 1631) and handed over whole. Pushed

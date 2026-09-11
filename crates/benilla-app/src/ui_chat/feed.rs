@@ -683,6 +683,13 @@ pub(super) fn deliver(
     let notice = event
         .notice_byte()
         .filter(|_| event.kind == Some(ChatEventKind::ChannelNotice));
+    if notice == Some(channel_notice::YOU_JOINED) {
+        // The reference's `0x49bbaf`: the confirmed join is what sets the channel's
+        // `ZONECHANNELS` bit, and it is the ONLY thing that grows that mask at runtime
+        // (decision 2120). Outside the slot claim below because it is not about slots — a
+        // re-confirmation of a channel we already number still owns the bit.
+        channels.note_zone_channel_joined(&event.channel);
+    }
     if notice == Some(channel_notice::YOU_JOINED) && channels.number_of(&event.channel).is_none() {
         match channels.claim_slot(&event.channel) {
             Some(slot) => {

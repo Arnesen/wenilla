@@ -235,14 +235,23 @@ pub(crate) struct UiInput;
 /// shape) re-measures the tick→feed scheduling gap every frame and wobbles the derived start by
 /// that jitter (±12 ms observed live), turning every running cooldown into a per-frame "changed"
 /// triple — the diff churn 0375 existed to kill.
+///
+/// **Both legs run on the PROCESS's clock and neither restarts with the VM** (decision 2116). A
+/// rebuilt VM (any logout/login, any `ReloadUI`) is handed the running clock by
+/// [`lifecycle::seed_vm_clock`], which writes this pair in the same breath — the reference's
+/// `GetTime` is `KERNEL32!GetTickCount`, an OS clock, and stock `Cooldown.lua` gates on
+/// `start > 0`, so a clock that went back to zero at the character screen pushed every already-
+/// running cooldown into the past and hid its sweep.
 #[derive(Resource)]
 pub(crate) struct UiClock {
     /// The `Instant` leg: `Time<Real>::last_update()` at the tick that produced [`Self::ui_now`].
     pub(crate) anchor: std::time::Instant,
-    /// The `GetTime` leg: the VM clock's value after that tick (seconds).
+    /// The `GetTime` leg: the clock's value after that tick (seconds since this process started).
     pub(crate) ui_now: f64,
 }
 
+/// The pre-boot pair, replaced by [`lifecycle::seed_vm_clock`] the moment the first VM exists —
+/// `init_resource` needs it, nothing else should build one.
 impl Default for UiClock {
     fn default() -> Self {
         Self {
@@ -473,7 +482,7 @@ pub(crate) use lifecycle::{
 // Consumed only from other modules' test code (the emote-table checks, the harness's UI-init
 // tail, the quit-once pin) — a plain re-export would warn unused in a non-test build.
 #[cfg(test)]
-use lifecycle::load_ingame_ui_on_world_entry;
+pub(crate) use lifecycle::load_ingame_ui_on_world_entry;
 use lifecycle::shutdown_on_exit;
 #[cfg(test)]
 pub(crate) use lifecycle::{

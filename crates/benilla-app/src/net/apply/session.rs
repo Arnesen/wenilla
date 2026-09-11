@@ -190,6 +190,7 @@ pub(super) fn disconnected(
     social: &mut crate::ui_social::SocialState,
     guild: &mut crate::ui_guild::GuildState,
     gm_ticket: &mut crate::ui_gm_ticket::GmTicketState,
+    cooldowns: &mut crate::cooldowns::Cooldowns,
     pending_transfer: &mut PendingTransfer,
     disconnects: &mut MessageWriter<DisconnectedMessage>,
 ) {
@@ -282,6 +283,13 @@ pub(super) fn disconnected(
     // counters go with it, so the first `SMSG_GMTICKET_GETTICKET` of the new session re-fires
     // `UPDATE_TICKET` rather than being diffed away against the old character's answer count.
     gm_ticket.clear_session();
+    // The cooldown list is session-scoped for the same reason and had been missing from this
+    // sweep since it was built (decision 2116). `SMSG_INITIAL_SPELLS` carries every cooldown
+    // still running at every world entry and `seed_initial` APPENDS, so a list that outlives the
+    // socket answers the old session's records: a second login on the same character reads its
+    // own stale copy over the wire's fresh remainder, and a login on a different character
+    // inherits cooldowns that were never theirs.
+    cooldowns.clear_session();
     // The death stores are session-scoped too: a reclaim expiry, resurrect offer, or corpse
     // marker must not survive the socket (the reconnect re-sends the reclaim delay when dead).
     *death_net = crate::death::DeathNet::default();

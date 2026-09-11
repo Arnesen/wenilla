@@ -27,6 +27,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::flag;
 use super::cursor::{self, CursorPayload};
 use super::Model;
 
@@ -150,15 +151,6 @@ impl super::UiScript {
     /// slot) — the app maps each to `CMSG_CLEAR_TRADE_ITEM` (decision 0592 P2).
     pub fn take_trade_clear_items(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.model_mut().trade_clear_items)
-    }
-}
-
-/// A `1`/`nil` boolean the way the client pushes flags (`pushnumber(1)` / `pushnil`).
-fn flag(b: bool) -> Value {
-    if b {
-        Value::Integer(1)
-    } else {
-        Value::Nil
     }
 }
 

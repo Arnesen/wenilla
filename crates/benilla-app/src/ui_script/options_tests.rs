@@ -61,6 +61,13 @@ fn harness_on(mut s: UiScript) -> UiScript {
         "Interface\\FrameXML\\StaticPopup.xml",
         "Interface\\FrameXML\\GameTooltip.xml",
         "Interface\\FrameXML\\UIDropDownMenu.xml",
+        // The reference's own Interface Options window, hidden — this kit's source of truth for
+        // `UIOptionsFrameCheckButtons`/`UIOptionsFrameSliders`, which our own file used to
+        // transcribe and 2115 deleted. Its widget kit and the video window's shared helpers come
+        // with it, in the manifest's own order.
+        r"Interface\FrameXML\OptionsFrameTemplates.xml",
+        r"Interface\FrameXML\OptionsFrame.lua",
+        r"Interface\FrameXML\UIOptionsFrame.xml",
         "ScrollTemplates.xml", // the Keybindings page's faux-scroll kit
         "KeyBindingsPage.xml", // the Keybindings body's templates + script (1008)
         "OptionsFrame.xml",
@@ -688,7 +695,7 @@ fn a_slider_rows_readout_sits_on_its_labels_line() {
 /// The Audio harness: the real registered CVar set on the table before the XML loads, exactly
 /// the app's boot order (register → seed → load → select).
 fn audio_harness() -> UiScript {
-    let mut s = UiScript::new().unwrap();
+    let s = UiScript::new().unwrap();
     s.register_cvars(crate::cvars::registered_pairs());
     s
 }
@@ -884,6 +891,13 @@ fn actionbars_harness() -> UiScript {
             "Interface\\FrameXML\\LocaleProperties.lua",
             "Interface\\FrameXML\\StaticPopup.xml",
             "KeyBindingsPage.xml",
+            // The reference's own Interface Options window BEFORE ours, as the manifest has it
+            // (2115) — `UIOptionsFrame_Init` is what assigns `LOCK_ACTIONBAR` and
+            // `ALWAYS_SHOW_MULTIBARS`, and this page's rows capture those at their own OnLoad as
+            // the Defaults value. It is also the home of `UIOptionsFrameCheckButtons`, which
+            // `MultiActionBars.xml` below writes into at its load.
+            r"Interface\FrameXML\OptionsFrame.lua",
+            r"Interface\FrameXML\UIOptionsFrame.xml",
             "OptionsFrame.xml",
             "Interface\\FrameXML\\MultiActionBars.xml",
         ],
@@ -3642,7 +3656,7 @@ fn the_chat_page_writes_the_hover_delay_global_and_the_loot_spam_cvar() {
 /// fresh VM has re-run `ChatFrame.xml`'s file-scope `"0"`.
 #[test]
 fn a_saved_hover_delay_is_applied_when_the_variables_land() {
-    let s = chat_harness();
+    let mut s = chat_harness();
     // What the saved-variables chunk does: assign the global, then the window's VARIABLES_LOADED.
     s.run("REMOVE_CHAT_DELAY = \"1\"").unwrap();
     assert_eq!(
@@ -3651,7 +3665,10 @@ fn a_saved_hover_delay_is_applied_when_the_variables_land() {
         (0.2, 0.15),
         "the bare assignment changes nothing on its own — that is why the row has an applyFunc"
     );
-    s.run("OptionsFrame_ApplySavedSettings()").unwrap();
+    // The reference's own VARIABLES_LOADED arm, off the chain since 2115 — this row's apply is
+    // `SetChatMouseOverDelay(REMOVE_CHAT_DELAY)` at `UIOptionsFrame.lua:216`, and the event is
+    // what runs it. (It used to be our own `OptionsFrame_ApplySavedSettings` walk.)
+    s.fire_event("VARIABLES_LOADED", vec![]);
     assert_eq!(
         s.eval::<(f64, f64)>("return CHAT_TAB_SHOW_DELAY, CHAT_FRAME_FADE_TIME")
             .unwrap(),
@@ -4285,6 +4302,18 @@ const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
         "PetMeleeDamage",
         "`combat_text::law::PET_MELEE_DAMAGE`, a const bool — see CombatDamage",
     ),
+    // …and the SLIDERS' half, which this census was blind to until 2115 extended it from
+    // `UIOptionsFrameCheckButtons` to `UIOptionsFrameSliders` as well. One row, and it is not
+    // cosmetic: `UIOptionsFrame_Load` does `slider:SetValue(GetCVar(value.cvar))`, and
+    // `Slider:SetValue` is a shape-A binding (`0x790980`, wow-re `numeric-arg-coercion-law.md`)
+    // that RAISES on a nil in the reference too — so this is what stops the stock window's
+    // `_Load()` running clean, and pfUI's GVAR path with it.
+    (
+        "cameraYawMoveSpeed",
+        "the Mouse Look Speed slider — benilla's mouse-look yaw rate is not a CVar-driven knob \
+         yet; its sibling `cameraYawSmoothSpeed` (auto-follow) is registered and drives \
+         `follow.yaw_speed`, and this one has no counterpart in `player::camera`",
+    ),
 ];
 
 /// **Every CVar the reference's own options table names is registered here, or listed above with
@@ -4298,16 +4327,22 @@ const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
 fn every_cvar_the_reference_table_names_is_registered_or_listed_with_its_blocker() {
     let s = harness();
     // The table as the file declares it: `name` (the display key) -> its `cvar`, if it has one.
+    // **BOTH of the reference's option tables** (2115). The checkbuttons were the whole census
+    // until the stock window went on the manifest and `UIOptionsFrameSliders` turned out to name a
+    // CVar nothing here registers — a row the check could not see because it only read one table.
     let named: Vec<String> = s
         .eval::<Vec<String>>(
             "local out = {} \
              for key, v in pairs(UIOptionsFrameCheckButtons) do \
                  if v.cvar then table.insert(out, v.cvar) end \
              end \
+             for _, v in ipairs(UIOptionsFrameSliders) do \
+                 if v.cvar then table.insert(out, v.cvar) end \
+             end \
              table.sort(out) \
              return out",
         )
-        .expect("read UIOptionsFrameCheckButtons");
+        .expect("read UIOptionsFrameCheckButtons and UIOptionsFrameSliders");
     assert!(
         named.len() >= 28,
         "the transcription lost rows: only {} cvar entries",

@@ -205,14 +205,17 @@ fn load_action_bar(s: &UiScript) {
     super::test_ui::load_ui(s, r"Interface\FrameXML\UIPanelTemplates.xml");
     super::test_ui::load_ui(s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
     super::test_ui::load_ui(s, r"Interface\FrameXML\ReputationFrame.xml");
-    // The options window: `LOCK_ACTIONBAR` and `ALWAYS_SHOW_MULTIBARS` are declared there, as the
-    // reference declares them in UIOptionsFrame_Init (1938) — and the manifest loads it before
-    // the bars.
     // The dialog engine — the keybindings page registers its two confirms into its table (1960).
     super::test_ui::load_ui(s, r"Interface\FrameXML\BasicControls.xml"); // `TEXT`
     super::test_ui::load_ui(s, r"Interface\FrameXML\LocaleProperties.lua"); // `GetText`
     super::test_ui::load_ui(s, r"Interface\FrameXML\StaticPopup.xml");
     super::test_ui::load_ui(s, "Interface\\FrameXML\\UIDropDownMenu.xml");
+    // `LOCK_ACTIONBAR` and `ALWAYS_SHOW_MULTIBARS` are declared by `UIOptionsFrame_Init` — the
+    // reference's own home for them, and off the chain since 2115 (they were our
+    // `OptionsFrame.xml`'s from 1938 until then). The manifest loads this before the bars and
+    // before our window, whose Action Bars rows capture the value as their Defaults; so does this.
+    super::test_ui::load_ui(s, r"Interface\FrameXML\OptionsFrame.lua");
+    super::test_ui::load_ui(s, r"Interface\FrameXML\UIOptionsFrame.xml");
     super::test_ui::load_ui(s, "ScrollTemplates.xml");
     super::test_ui::load_ui(s, "KeyBindingsPage.xml");
     super::test_ui::load_ui(s, "OptionsFrame.xml");
@@ -302,6 +305,79 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
         (c[0], c[1], c[2]),
         (0.5, 0.5, 1.0),
         "the ref's out-of-power blue-grey"
+    );
+
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Why a restarted `GetTime` clock reads on the bar as "no cooldown at all"** (decision 2116),
+/// through the shipped `Cooldown.lua`: `CooldownFrame_SetTimer`'s only gate is
+/// `start > 0 and duration > 0 and enable > 0`, and its `else` branch is `this:Hide()`. So the
+/// SAME running cooldown draws or vanishes purely on which clock its start was converted against.
+///
+/// This is the observable half of the relog bug: the store held the cooldown (the press was still
+/// refused), the feed pushed a triple every frame, and the button showed nothing — because the VM
+/// had been rebuilt and its clock had gone back to zero, putting every already-running cooldown's
+/// start behind the new epoch.
+#[test]
+fn a_start_behind_the_clocks_epoch_hides_the_stock_sweep() {
+    use benilla_ui::script::ActionState;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Spell_Fire_FlameBolt".into()),
+            kind: 0x00,
+            action: 133,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.tick(10.0); // GetTime == 10 — a clock that restarted ten seconds ago
+
+    // A 10-minute cooldown armed 30 s ago, converted against that restarted clock: start = −20 s.
+    s.set_action_state(
+        1,
+        Some(ActionState {
+            usable: true,
+            cooldown: Some((-20_000, 600_000, true)),
+            ..Default::default()
+        }),
+    );
+    s.fire_event("ACTIONBAR_UPDATE_COOLDOWN", vec![]);
+    super::test_ui::cooldown_facts(&mut s);
+    s.tick(0.0);
+    s.resolve();
+    assert_eq!(
+        super::test_ui::cooldown_play(&s, "ActionButton1Cooldown"),
+        None,
+        "the stock `start > 0` guard hides the pane outright — 9.5 minutes still to run and the \
+         button shows nothing"
+    );
+
+    // The same cooldown on a clock that never restarted: GetTime 100, armed at 70. The sweep is
+    // exactly where it belongs.
+    s.tick(90.0);
+    s.set_action_state(
+        1,
+        Some(ActionState {
+            usable: true,
+            cooldown: Some((70_000, 600_000, true)),
+            ..Default::default()
+        }),
+    );
+    s.fire_event("ACTIONBAR_UPDATE_COOLDOWN", vec![]);
+    super::test_ui::cooldown_facts(&mut s);
+    s.tick(0.0);
+    s.resolve();
+    assert_eq!(
+        super::test_ui::cooldown_play(&s, "ActionButton1Cooldown"),
+        Some((0, 50)),
+        "30 s of 600 s elapsed ⇒ sequence 0 scrubbed to 5 %: 50 ms of the 1000 ms sweep"
     );
 
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -1505,6 +1581,11 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         "KeyBindingsPage.xml",
+        // `UIOptionsFrame_Init`'s uvars and `UIOptionsFrameCheckButtons`, which
+        // `MultiActionBars.xml` below writes into at its load — the reference's own l.21 seat,
+        // ahead of our window and ahead of the bars (2115).
+        r"Interface\FrameXML\OptionsFrame.lua",
+        r"Interface\FrameXML\UIOptionsFrame.xml",
         "OptionsFrame.xml",
         "Interface\\FrameXML\\MultiActionBars.xml",
     ] {

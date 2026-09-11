@@ -662,3 +662,78 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod error_quoting_tests {
+    use crate::script::UiScript;
+
+    /// **Every error message quotes a program element the way 5.0 does — `` `x' ``, not `'x'``
+    /// (decision 2122).**
+    ///
+    /// 5.1 introduced `LUA_QL` and made it two apostrophes; the fork's `luaconf.h` puts 5.0's
+    /// backquote back. The five formats it feeds are all readable in `WoW.exe`'s own `.rdata`, and
+    /// the assertions below are those strings:
+    ///
+    /// ```text
+    /// bad argument #%d to `%s' (%s)          lauxlib.c luaL_argerror
+    /// calling `%s' on bad self (%s)          lauxlib.c luaL_argerror's method arm
+    /// attempt to %s %s `%s' (a %s value)     ldebug.c  luaG_typeerror
+    /// %s:%d: %s near `%s'                    llex.c    luaX_lexerror (the client's own 0x87217c)
+    ///  in function `%s'                      ldblib.c  the line debugstack renders
+    /// ```
+    ///
+    /// **The traceback line is the one this does NOT reach**, and it is the one with teeth.
+    /// `debugstack` delegates to mlua's own traceback, which is built in mlua's C shim rather than
+    /// in this fork, so `LUA_QL` does not reach it: it still renders `in function 'X'`. That
+    /// matters because AceLibrary — shipped inside ~80 corpus addons — reads its own caller back
+    /// out of `debugstack()` with `string.find(debugstack(), "`argCheck'.-([`<].-['>])")`, whose
+    /// two patterns both require the backquote; the nil it gets is then handed to a `%s`, so an
+    /// argument-check *diagnostic* raises inside the error path. Closing that means rendering the
+    /// traceback ourselves in the reference's own shape, which is dispatched into wow-re
+    /// (`debugstack 0x703760`) rather than copied from stock 5.0's `ldblib.c`.
+    #[test]
+    fn errors_quote_program_elements_the_way_lua_5_0_does() {
+        let s = UiScript::new().unwrap();
+        let err = |lua: &str| {
+            s.eval::<String>(&format!(
+                "local ok, e = pcall(function() {lua} end) return tostring(e)"
+            ))
+            .unwrap()
+        };
+
+        // luaG_typeerror.
+        let e = err("local t = nil return t.x");
+        assert!(
+            e.contains("attempt to index local `t' (a nil value)"),
+            "typeerror keeps 5.1's quoting: {e}"
+        );
+        // luaL_argerror, through a library function that raises one.
+        let e = err(r#"return string.rep(nil, 2)"#);
+        assert!(
+            e.contains("bad argument #1 to `rep'"),
+            "argerror keeps 5.1's quoting: {e}"
+        );
+        // luaX_lexerror — the client's own `0x87217c` format.
+        let e = s
+            .eval::<String>(r#"local f, e = loadstring("return 1 +") return tostring(e)"#)
+            .unwrap();
+        assert!(
+            e.contains("near `<eof>'"),
+            "the lexer keeps 5.1's quoting: {e}"
+        );
+        // And no message anywhere OPENS a quote with an apostrophe — 5.1's spelling puts one
+        // where 5.0 puts the backquote, so the tell is a `'` right after a space or a paren.
+        // (The closing quote is an apostrophe in both dialects, which is why this looks for the
+        // opening one and not for the character.)
+        for e in [
+            err("local t = nil return t.x"),
+            err("return nosuchfn()"),
+            err("return string.rep(nil, 2)"),
+        ] {
+            assert!(
+                !e.contains(" '") && !e.contains("('"),
+                "a 5.1-quoted element survives in: {e}"
+            );
+        }
+    }
+}

@@ -56,6 +56,7 @@ fn install_boot_vm(world: &mut World) {
             return;
         }
     };
+    seed_vm_clock(world, &mut script);
     install_addon_asset_resolvers(world, &mut script);
     load_global_strings(world, &script);
     load_emote_tokens(world, &script);
@@ -65,6 +66,39 @@ fn install_boot_vm(world: &mut World) {
         let _ = load_font_registry(&script);
     }
     world.insert_non_send_resource(script);
+}
+
+/// **`GetTime()` is the PROCESS's clock, not the VM's** (decision 2116) — so a VM built now starts
+/// it where the process already is, and [`UiClock`] is re-anchored to match in the same breath.
+///
+/// The reference's `GetTime` (`0x515ea0`) reads `KERNEL32!GetTickCount` and scales by 0.001 (the
+/// thunk `0x42c010` → `0x42b790`, wow-re's `core` boundary row): an OS clock, with no relationship
+/// to the Lua VM, that cannot restart. Ours is a Lua global the VM owns, and since 1290/1291 the VM
+/// is destroyed and rebuilt at every logout/login and every `ReloadUI` — so without this seed the
+/// clock went back to zero on each of those, and every host value already converted onto it
+/// (`CooldownInfo::ui_triple` and its kin, the aura feed's `expirationTime`) suddenly sat in the
+/// past. Stock `Cooldown.lua`'s `CooldownFrame_SetTimer` gates on `start > 0` and takes the `else`
+/// branch — `this:Hide()` — for anything else, so after a relog **every cooldown still running
+/// drew nothing** while the store, and therefore the cast validator, still held it: no sweep on the
+/// button and a "Spell is not ready yet" on the press.
+///
+/// `Time<Real>` is the right clock because it is the very one [`UiClock`] already anchors on:
+/// `elapsed` is measured at `last_update()`, which is [`UiClock::anchor`], so the pair written here
+/// is atomic in exactly the sense that resource's doc requires. A world with no `Time<Real>` (a
+/// bare test world) starts at zero, which is what it did before this existed.
+fn seed_vm_clock(world: &mut World, script: &mut UiScript) {
+    let (anchor, elapsed) = world
+        .get_resource::<Time<bevy::time::Real>>()
+        .map_or_else(Default::default, |t| {
+            (t.last_update(), t.elapsed_secs_f64())
+        });
+    script.set_now(elapsed);
+    if let Some(mut clock) = world.get_resource_mut::<UiClock>() {
+        *clock = UiClock {
+            anchor: anchor.unwrap_or_else(std::time::Instant::now),
+            ui_now: elapsed,
+        };
+    }
 }
 
 /// Wire up the halves of `Interface\AddOns\` **art and fonts** (decisions 1322, 2103): the sprite
@@ -329,6 +363,27 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     let identity = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(crate::ui_macro::identity);
+    // **The CVar table goes in BEFORE the UI loads**, for the same reason and with a shipped-file
+    // consumer rather than an addon one (decision 2115): the reference's own `UIOptionsFrame.xml`
+    // — hidden, on the manifest for the addons that name it — reads `cameraSmoothStyle` and
+    // `cameraSmoothTrackingStyle` inside its two camera dropdowns' `OnLoad`, and a nil there is a
+    // concat error, not a default.
+    //
+    // The seed normally belongs to `cvars::sync_cvars`, a per-VM `Update` claim (1291), and on a
+    // FIRST login that has run many frames earlier. **The window is a VM replacement**: a
+    // `/reloadui` builds a fresh VM and loads the whole interface inside one call, before `Update`
+    // gets a turn — so this edge would load a client with no CVar table at all. Nothing had ever
+    // noticed, because until now no interface file read a CVar at load.
+    //
+    // The two lines are `sync_cvars`'s own first two, in its own order, and the order is
+    // load-bearing: the saved config goes in FIRST so registration starts each key at the player's
+    // value rather than the factory one (1291) — reversed, a reload would quietly reset every
+    // knobless CVar to its default. `sync_cvars` still does its full knob-derived pass on the next
+    // `Update`; both calls are idempotent, and a re-register never clobbers a live value.
+    if let Some(persist) = world.get_resource::<crate::cvars::CvarPersist>() {
+        script.set_cvar_saved_base(persist.saved_base());
+    }
+    script.register_cvars(crate::cvars::registered_pairs());
     // The realm name goes in BEFORE the UI loads, because `GetRealmName()` is read at addon file
     // scope — `MyAddonDB[GetRealmName()] = …` is the corpus idiom, and 24 addons stop on it
     // (decision 1195). The roster carries the auth realm-list entry this session connected to.
@@ -377,6 +432,16 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // back. Startup always precedes this state edge (1038), so the knob is already loaded.
     let zoom = world.resource::<crate::minimap::MinimapZoom>();
     script.set_minimap_zoom(zoom.outdoor, zoom.inside);
+    // **The chat cache restores HERE — after every chat frame exists, before anything prints into
+    // one** (decision 2119). It is the sole firer of `UPDATE_CHAT_WINDOWS`, which is the only
+    // thing that registers a chat frame for any `CHAT_MSG_*` (ref `ChatFrame.lua` l.1261-1273),
+    // and of the `UPDATE_CHAT_COLOR` burst, whose `WHISPER`→`REPLY` mirror repaints every line
+    // already in the window that was printed with no explicit colour (`ChatTypeInfo["REPLY"].id`
+    // is 0, and so is such a line's). As an `Update` system both landed too late: the login MOTD
+    // was routed to a window registered for nothing, and every Ace2 addon's `Print` at
+    // `PLAYER_LOGIN` came out whisper-pink. Placed after `load_ingame_ui` so an ADDON's chat frame
+    // is registered too, and before `finish_ui_load` so the burst precedes `PLAYER_LOGIN`.
+    crate::ui_chat::restore_chat_looks(world, &mut script);
     // The saved-variables chunk runs HERE — after the XML assigned its file-scope defaults, before
     // any consumer reads them — then `VARIABLES_LOADED`. That is the reference's own load order
     // (`AddOn_Load 0x51f240` steps 2 → 4 → 6, decision 1128); reversing it means the defaults
@@ -569,8 +634,14 @@ pub(crate) fn end_ui_session(world: &mut World) {
     // handles itself — it is keyed on [`benilla_ui::script::UiScript::session`] ([`VmMemo`]) — but
     // these are plain values other systems read through `Res<…>`, with no VM in hand to key
     // against, so the edge clears them. Each is a fact about a frame tree that is about to stop
-    // existing: a hovered frame id, the minimap's extracted hole, a payload the cursor is carrying,
-    // and the VM-relative clock the cooldown conversions run through.
+    // existing: a hovered frame id, the minimap's extracted hole, and a payload the cursor is
+    // carrying.
+    //
+    // **[`UiClock`] is NOT one of them, and used to be** (decision 2116). It reads like a fact
+    // about the dying VM — it is the `GetTime` leg of the conversion pair — but `GetTime` is the
+    // reference's OS tick count, not a per-VM clock, so zeroing it here restarted every cooldown
+    // and aura conversion at the character screen. [`seed_vm_clock`] writes the pair for the VM
+    // that replaces this one, moments below.
     //
     // The two input latches were cleared by `char_select`'s logout and disconnect handlers, one
     // copy each. They belong here: the reason they need clearing is that `feed_ui_input` stops
@@ -587,9 +658,6 @@ pub(crate) fn end_ui_session(world: &mut World) {
     }
     if let Some(mut minimap) = world.get_resource_mut::<crate::minimap::MinimapWidget>() {
         minimap.0 = None;
-    }
-    if let Some(mut clock) = world.get_resource_mut::<UiClock>() {
-        *clock = UiClock::default();
     }
 
     install_boot_vm(world);
@@ -825,5 +893,73 @@ mod tests {
             .expect("the parked VM is back");
         assert_eq!(vm.session(), session, "the same VM, no session moved");
         assert!(world.get_non_send_resource::<ParkedBootVm>().is_none());
+    }
+
+    /// **A rebuilt VM inherits the running `GetTime()` clock, and so does the conversion pair**
+    /// (decision 2116) — the bug the director reported as *cooldowns are lost on relog*.
+    ///
+    /// The reference's `GetTime` is `KERNEL32!GetTickCount` × 0.001 (`0x515ea0` → `0x42c010` →
+    /// `0x42b790`), an OS clock that cannot restart — which is why stock `Cooldown.lua` can gate
+    /// on `start > 0`. Ours lives in the VM, and since 1290/1291 the VM dies at the character
+    /// screen; before this, `end_ui_session` zeroed [`UiClock`] too, so on the way back in every
+    /// cooldown that was already running converted to a NEGATIVE start,
+    /// `CooldownFrame_SetTimer` took its `else` branch and hid the sweep — while the store, and
+    /// therefore the cast validator, still held the cooldown.
+    ///
+    /// Against the old shape the two assertions read *"the new VM's GetTime clock restarted at 0
+    /// instead of the process's 90 s"* and *"a cooldown armed before the rebuild derived start
+    /// -30000 ms; stock Cooldown.lua hides anything but `start > 0`"*.
+    #[test]
+    fn a_rebuilt_vm_inherits_the_running_gettime_clock() {
+        use std::time::{Duration, Instant};
+
+        let mut world = World::new();
+        world.init_resource::<UiClock>();
+        // The process has been up 90 s — the clock `Time<Real>` keeps and the one the dying VM
+        // is on, which are the same clock.
+        let startup = Instant::now() - Duration::from_secs(90);
+        let mut time = Time::<bevy::time::Real>::new(startup);
+        // `Time<Real>` measures `elapsed` from its FIRST update, not from `startup` — so the app's
+        // own clock is "since frame one", and the test's has to be seeded the same way.
+        time.update_with_instant(startup);
+        time.update_with_instant(startup + Duration::from_secs(90));
+        world.insert_resource(time);
+        let mut dying = UiScript::new().unwrap();
+        dying.set_now(90.0);
+        world.insert_non_send_resource(dying);
+        // The session never loaded an in-game UI, so the shutdown tail (which writes the player's
+        // four files) is skipped: this test is about the VM swap and nothing else.
+        world.init_resource::<PendingEntryUiLoad>();
+
+        end_ui_session(&mut world);
+
+        let vm = world
+            .get_non_send_resource::<UiScript>()
+            .expect("the session end installs a fresh boot VM");
+        assert_eq!(
+            vm.now(),
+            90.0,
+            "the new VM's GetTime clock restarted at {} instead of the process's 90 s",
+            vm.now()
+        );
+        // …and the pair every `Instant`→`GetTime` conversion runs through moved with it: a
+        // 10-minute cooldown armed 30 s before the rebuild still derives its real start.
+        let clock = world.resource::<UiClock>();
+        let armed = crate::cooldowns::CooldownInfo {
+            start: startup + Duration::from_secs(60),
+            remaining_ms: 570_000,
+            duration_ms: 600_000,
+            enabled: true,
+        };
+        let triple = armed
+            .ui_triple(clock.anchor, clock.ui_now)
+            .expect("a running cooldown pushes a triple");
+        assert_eq!(
+            triple,
+            (60_000, 600_000, true),
+            "a cooldown armed before the rebuild derived start {} ms; stock Cooldown.lua hides \
+             anything but `start > 0`",
+            triple.0
+        );
     }
 }

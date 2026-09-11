@@ -207,6 +207,18 @@ end
 /// the addon harness ([`crate::addon_harness`]), which needs our entire interface under each
 /// surveyed addon.
 pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
+    // **The client's CVar table first, because the interface reads CVars AT LOAD** (decision
+    // 2115). The app registers `crate::cvars::REGISTERED` at startup, long before world entry, so
+    // in the running client this call finds every name already there and only refreshes its
+    // default — it never clobbers a live value ([`benilla_ui::script::UiScript::register_cvars`]).
+    // What it buys is that a **probe** VM is the same client: `UiScript::new()` carries only
+    // `benilla-ui`'s own CVars, and the stock `UIOptionsFrame.xml`'s two camera dropdowns read
+    // theirs inside their own `OnLoad`
+    // (`getglobal("OPTION_TOOLTIP_CAMERA"..UIDropDownMenu_GetSelectedID(this))`, which is nil and
+    // then a concat error when `GetCVar("cameraSmoothStyle")` answers nil). Both of those CVars
+    // have been registered here with real consumers since 1493/1502; the probes simply never had
+    // them, and 218 tests found that out the hour this row went on the manifest.
+    script.register_cvars(crate::cvars::registered_pairs());
     // **Silent, the way the client's own load is.** `0x48fbf0` brackets ITSELF in the counted
     // sound-suppression scope — `0x48fbfa call 0x458f50` on entry, `0x49016d call 0x458f60` on
     // exit — across the TOC walk, Bindings.xml and the AddOns, so both of its callers (login

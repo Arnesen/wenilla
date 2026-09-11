@@ -48,6 +48,7 @@
 
 use mlua::{Lua, Value};
 
+use super::binding_abi::flag;
 use super::{binding_abi, Model};
 
 /// The 1.12 weapon-subclass → `SkillLine.dbc` id table, transcribed from vmangos
@@ -952,16 +953,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // HasWandEquipped() → boolean (the ref's ranged block swaps "Shoot" in on it). No unit arg —
+    // HasWandEquipped() → 1/nil (the ref's ranged block swaps "Shoot" in on it). No unit arg —
     // the live global is player-implicit.
     g.set(
         "HasWandEquipped",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model
-                .player_combat_stats
-                .as_ref()
-                .is_some_and(|s| s.has_wand))
+            Ok(flag(
+                model
+                    .player_combat_stats
+                    .as_ref()
+                    .is_some_and(|s| s.has_wand),
+            ))
         })?,
     )?;
 

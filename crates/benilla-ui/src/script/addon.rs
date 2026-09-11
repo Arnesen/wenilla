@@ -41,6 +41,7 @@ use std::path::PathBuf;
 use mlua::{Lua, MultiValue, Value};
 
 use super::addon_gate::{can_load, GateRow, Verdict};
+use super::binding_abi::flag;
 use super::Model;
 
 /// A reader for a chain-sourced addon's files, by chain-internal path — what the host seats
@@ -159,15 +160,6 @@ fn verdict(model: &Model, i: usize) -> Verdict {
         return Verdict::Loadable;
     }
     can_load(&gate_rows(model), i, true, version_check(model))
-}
-
-/// `1`/`nil` — the client's boolean shape, which every addon tests with a bare `if`.
-fn flag(b: bool) -> Value {
-    if b {
-        Value::Integer(1)
-    } else {
-        Value::Nil
-    }
 }
 
 fn lua_str(lua: &Lua, s: &str) -> mlua::Result<Value> {

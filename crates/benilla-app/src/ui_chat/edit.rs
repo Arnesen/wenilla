@@ -136,9 +136,59 @@ pub(crate) struct ChannelState {
     /// needs no extra bookkeeping at join time. Empty without an install, which degrades to
     /// "no zone channels, arg7 always 0" rather than to an error.
     pub channels: benilla_formats::ChatChannelsCatalog,
+    /// **The `ZONECHANNELS` mask** — the reference's `DWORD ds:0xb6e5e0`, bit `1 << (ChannelID-1)`
+    /// (decision 2120; wow-re `system/ui/scratch/zone-chat-channel-autojoin.md` §3 carries the
+    /// complete 8-site census of that global).
+    ///
+    /// **It is durable state, not a view of [`Self::joined`].** The reference seeds it once — from
+    /// the chat cache's header line (`0x498d83`, an overwrite) or, with no usable file, from every
+    /// `ChatChannels.dbc` row carrying `INITIAL` (`0x4997fc`) — then ORs a bit on each
+    /// server-confirmed join (`0x49bbaf`, the `YOU_JOINED` arm) and clears one only on an explicit
+    /// leave-by-name (`0x49f10a`/`0x49f11a` inside `0x49ee70`). The zone walk's own LEAVE, sent
+    /// every time you cross a border or walk out of a capital, does **not** touch it — which is
+    /// why `Trade`'s bit survives a logout in Elwynn Forest.
+    ///
+    /// Deriving it from the live roster at write time instead is what decision 2120 corrects, and
+    /// it was not cosmetic: the per-window line is written as `the window's own bits AND this
+    /// mask`, so one save taken while the roster was momentarily empty — the session-end flush
+    /// racing `end_session_channels` on the same unordered `OnExit(InWorld)` edge — wrote
+    /// `ZONECHANNELS 0` into every block, and the next login rebuilt window 1 with **no channels
+    /// at all**. The stock `ChatFrame_OnEvent` drops every `CHANNEL*` line whose channel the
+    /// window does not carry (ref `ChatFrame.lua` l.1374-1391, `if found == 0 … return`), so that
+    /// character silently lost its `Joined Channel:` notices *and* all General/Trade speech, for
+    /// good. Ten of the twenty files in this repo's own config folder had reached that state,
+    /// including the director's own character.
+    ///
+    /// Not cleared by the session end: it belongs to the character's file, and the login that
+    /// reads that file is what seats it.
+    pub zone_mask: u32,
+}
+
+/// The bit `id` occupies in a `ZONECHANNELS` word — `1 << (ChannelID - 1)`; nothing outside
+/// `1..=32` has one.
+pub(crate) fn zone_bit(id: u32) -> u32 {
+    if id == 0 || id > 32 {
+        0
+    } else {
+        1 << (id - 1)
+    }
 }
 
 impl ChannelState {
+    /// A server-confirmed join sets the channel's `ZONECHANNELS` bit — the reference's `0x49bbaf`,
+    /// which ORs `1 << (slot.ChannelID - 1)` in the `YOU_JOINED` arm. A custom channel has no DBC
+    /// id and so no bit, which is why this is a no-op for one.
+    pub(crate) fn note_zone_channel_joined(&mut self, name: &str) {
+        self.zone_mask |= zone_bit(self.channels.zone_channel_id(name));
+    }
+
+    /// An **explicit** leave clears the bit — `0x49f10a`/`0x49f11a` inside leave-by-name
+    /// `0x49ee70`, and only there. The zone walk's LEAVE goes out on a different path and leaves
+    /// the mask alone: crossing a border is not "I left this channel".
+    pub(crate) fn note_zone_channel_left(&mut self, name: &str) {
+        self.zone_mask &= !zone_bit(self.channels.zone_channel_id(name));
+    }
+
     /// The 1-based number of `name` (case-insensitive), if joined.
     pub(crate) fn number_of(&self, name: &str) -> Option<u32> {
         self.joined

@@ -59,6 +59,10 @@ pub(crate) use edit::ChannelState;
 pub(crate) use event::event_name;
 pub(crate) use event::{default_color, ChatEvent, ChatEventKind};
 pub(crate) use feed::ChatLog;
+/// The per-character chat cache's restore. Called from the world-entry UI load rather than from a
+/// system, because the two events it fires have to precede the session's first chat line and
+/// `PLAYER_LOGIN` — see [`settings::restore_chat_looks`] and decision 2119.
+pub(crate) use settings::restore_chat_looks;
 
 pub(crate) struct UiChatPlugin;
 

@@ -50,6 +50,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::flag;
 use super::cursor::{queue_cursor_update, CursorPayload, CursorSpell};
 use super::Model;
 
@@ -424,15 +425,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set("BOOKTYPE_SPELL", BOOKTYPE_SPELL)?;
     g.set("BOOKTYPE_PET", BOOKTYPE_PET)?;
 
-    /// The 1/nil boolean every Era binding in this file answers with.
-    fn flag(b: bool) -> Value {
-        if b {
-            Value::Integer(1)
-        } else {
-            Value::Nil
-        }
-    }
-
     // `UpdateSpells()` — twelve bytes in the reference (`[0x4b43e0,0x4b43ec)`), and its entire
     // content is a bare `SignalEvent(SPELLS_CHANGED)`: event 260, **no arguments**, and NO state
     // mutation whatsoever. Byte-carved by a wow-re cross-check (decision 1924, their
@@ -650,7 +642,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "IsSpellPassive")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(book_slot(&model, id, &book_type).is_some_and(|s| s.passive))
+            Ok(flag(
+                book_slot(&model, id, &book_type).is_some_and(|s| s.passive),
+            ))
         })?,
     )?;
 

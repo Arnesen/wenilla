@@ -899,8 +899,14 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitSex(unit) → 2 male, 3 female (1 = neuter — no 1.12 unit feed produces it); nil when the
-    // unit is absent or the sex hasn't streamed (`0`), the API's "can't tell".
+    // UnitSex(unit) → 2 male, 3 female (1 = neuter — no 1.12 unit feed produces it).
+    //
+    // **The absent/unstreamed leg is the NUMBER 2, not nil** — `UnitSex 0x517f9f` pushes the
+    // constant double 2.0 (`push 0x40000000; push 0`), which wow-re's
+    // `unit-predicate-return-shape.md` §4 carves as the numeric-getter contrast to the predicate
+    // family's `1.0`/nil: the numeric getters in this same table answer a number on the
+    // unresolved leg, never nil. The shapes table agrees — this row is `(number)`, with no nil
+    // alternative anywhere (decision 2118).
     g.set(
         "UnitSex",
         lua.create_function(|lua, token: Value| {
@@ -910,11 +916,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 r#"Usage: UnitSex("unit")"#,
             )?);
             let sex = with_unit(lua, &token, 0u8, |u| u.sex)?;
-            Ok(if sex == 0 {
-                Value::Nil
-            } else {
-                Value::Integer(i64::from(sex))
-            })
+            Ok(Value::Integer(i64::from(if sex == 0 { 2 } else { sex })))
         })?,
     )?;
 

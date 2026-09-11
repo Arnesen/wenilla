@@ -39,7 +39,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::binding_abi::number_arg;
+use super::binding_abi::{flag, number_arg};
 use super::quest::QuestItemView;
 use super::Model;
 
@@ -537,16 +537,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // IsCurrentQuestFailed() → the selection's slot state is FAIL (ref appends " - (Failed)").
+    // IsCurrentQuestFailed() → 1/nil: the selection's slot state is FAIL (ref appends
+    // " - (Failed)").
     g.set(
         "IsCurrentQuestFailed",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let sel = model.quest_log_selection as usize;
-            Ok(sel
-                .checked_sub(1)
-                .and_then(|n| model.quest_log.entries.get(n))
-                .is_some_and(|e| e.complete < 0))
+            Ok(flag(
+                sel.checked_sub(1)
+                    .and_then(|n| model.quest_log.entries.get(n))
+                    .is_some_and(|e| e.complete < 0),
+            ))
         })?,
     )?;
 
@@ -708,7 +710,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "IsUnitOnQuest",
-        lua.create_function(|_, (_q, _unit): (Value, Value)| Ok(false))?,
+        lua.create_function(|_, (_q, _unit): (Value, Value)| Ok(flag(false)))?,
     )?;
     // ── The quest watch (the on-screen tracker's state — ref QuestLogFrame.lua:469-505 shift-click
     // toggle, :613-663 QuestWatch_Update). The set lives engine-side, keyed by the entries' stable
@@ -782,7 +784,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsQuestWatched",
         lua.create_function(|lua, i: u32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(watch_id_at(&model, i).is_some_and(|id| model.quest_log_watched.contains(&id)))
+            Ok(flag(
+                watch_id_at(&model, i).is_some_and(|id| model.quest_log_watched.contains(&id)),
+            ))
         })?,
     )?;
     g.set(

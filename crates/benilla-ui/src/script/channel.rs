@@ -132,6 +132,26 @@ impl super::UiScript {
     pub fn take_channel_commands(&mut self) -> Vec<ChannelCommand> {
         std::mem::take(&mut self.model_mut().channel_commands)
     }
+
+    /// The guild-recruitment auto-join latch — `0` STANDARD, `1` AUTO (decision 2115).
+    pub fn guild_recruitment_mode(&self) -> u8 {
+        self.model_ref().guild_recruitment_mode
+    }
+
+    /// Seat the latch from the host (the per-character chat cache at login). A host write is not
+    /// a player gesture, so it does **not** arm [`Self::take_guild_recruitment_change`] — the same
+    /// split `set_cvar_from_host` keeps one store over, and what stops a login from composing the
+    /// player's file out of a value the login itself just read.
+    pub fn set_guild_recruitment_mode(&mut self, mode: u8) {
+        let mut model = self.model_mut();
+        model.guild_recruitment_mode = mode;
+        model.guild_recruitment_changed = false;
+    }
+
+    /// Has Lua moved the latch since the last drain? The chat cache's dirty signal.
+    pub fn take_guild_recruitment_change(&mut self) -> bool {
+        std::mem::take(&mut self.model_mut().guild_recruitment_changed)
+    }
 }
 
 fn push(lua: &Lua, cmd: ChannelCommand) {
@@ -164,18 +184,116 @@ fn name_at(model: &Model, n: usize) -> Option<&str> {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // GetChannelName(indexOrName) → slot, name, instanceID.
+    // ── The guild-recruitment auto-join pair (decision 2115) ──────────────────────────────────
     //
-    // THE TRAP, and the whole risk in this verb: the first return is **always a NUMBER, never
-    // nil** — `0` when the channel is not joined. Verified from both sides. The reference's own
-    // callers compare it numerically and would raise on a nil: `ChatFrame.lua:2114`
-    // `if ( channelNum > 0 )` and `l.2232` `if ( channelNum <= 0 ) then return end`; so does the
-    // corpus, at `_LazyPig/LazyPig.lua:1996` `if id > 0 then`. Returning nil here would convert
-    // three working call sites into "attempt to compare nil with number".
+    // `GetGuildRecruitmentMode 0x4a0040` / `SetGuildRecruitmentMode 0x4a0060` — the store behind
+    // the reference's *Auto-join the Guild Recruitment Channel* option
+    // (`UIOptionsFrameCheckButtons["AUTO_JOIN_GUILD_CHANNEL"]`, index 51). The table entry is a
+    // bare `{ index = 51 }` with no cvar and no uvar, which reads as "unbound" and is not: the
+    // store is the three special-case arms `UIOptionsFrame_Load` (l.243-248), `_Save` (l.326-331)
+    // and `_SetDefaults` (l.649) keep for that key. Exactly the `SHOW_TUTORIALS` shape decision
+    // 2077 corrected, and this tree's own `OptionsFrame.xml` carried the wrong reading until 2115.
     //
-    // NOT a shared helper with `JoinChannelByName`, whose first return is a DIFFERENT number — the
-    // `ChatChannels.dbc` ChannelID, not this local slot index. wow-re calls that pair out
-    // explicitly (`zone-chat-channel-autojoin.md` l.379) and it is an easy, silent mistake.
+    // Every byte fact below is wow-re `system/ui/scratch/guild-recruitment-mode.md`, a §5 round
+    // dispatched for this work.
+    //
+    // **The state is one int** — the reference's `[0x843608]`, written only by `0x49ea70`
+    // (`mov ds:0x843608,ecx`; five call sites, no address-takes) and read by the Lua getter and by
+    // the chat-cache writer. Ours is `Model::guild_recruitment_mode`, seated at login and rendered
+    // back out by `ui_chat::settings`; the whole round trip is that file's one
+    // `OPTION_GUILD_RECRUITMENT_CHANNEL STANDARD|AUTO` line, written at teardown (`0x499a80` at
+    // `0x499b0e`: `latch == 1` → `AUTO`, else `STANDARD`), never at set time.
+    //
+    // **It boots at 1 (AUTO)**, and that is a `.data` initialiser rather than a BSS zero — `raw
+    // 0x443608` is `01 00 00 00` — corroborated twice over: `_SetDefaults` calls
+    // `SetGuildRecruitmentMode(1)`, and all 33 `chat-cache.txt` files the reference client itself
+    // wrote in this repo's install say `AUTO`. See `Model::guild_recruitment_mode`.
+    g.set(
+        "GetGuildRecruitmentMode",
+        // `[0x4a0040, 0x4a0057)` is 23 bytes and one path: `fild dword [0x843608]` (signed i32),
+        // `fstp qword [esp]`, `lua_pushnumber`, `mov eax,1`, `ret`. No arguments, no gates — a
+        // NUMBER, always, never nil. `UIOptionsFrame_Load` compares it `== 1`, so a nil here would
+        // read as a silent "not auto".
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(f64::from(model.guild_recruitment_mode))
+        })?,
+    )?;
+    // ── NAMED, NOT BUILT: the `ecx == 1` cascade (decision 2115) ───────────────────────
+    // `0x49ea70` writes the latch and then tail-jumps into `0x49ea90` **only when the new
+    // mode is 1**, and `0x49ea90` is not bookkeeping — it acts, on the wire:
+    //
+    //   * player IS guilded (`PLAYER_GUILDID`, player-block index 3) → `0x49eb17` leaves
+    //     `GuildRecruitment - City`: `CMSG_LEAVE_CHANNEL` (`push 0x98`), the channel
+    //     stripped from all ten chat windows, the ZONECHANNELS bit cleared;
+    //   * player is NOT guilded and IS in a capital (`AreaTable Flags & 0x100`) →
+    //     `0x49eb55` joins `GuildRecruitment`: `CMSG_JOIN_CHANNEL` (`push 0x97`);
+    //   * otherwise — no resolvable zone row, or unguilded outside a capital — it merely
+    //     arms the one-shot flag `[0xb6e5e4]`, which the next autojoin pass consumes.
+    //
+    // Both acting arms fire `UPDATE_CHAT_WINDOWS`, and `0x4a0060` fires it again, so an
+    // acting `Set(1)` fires it twice. `Set(0)` is the latch alone — `0x49ea70`'s `jne`
+    // stops at `0x49ea80`, no packet.
+    //
+    // **benilla does none of that**, and the reason is that it is a FEATURE this client
+    // has never had rather than a line of this verb: the zone-channel walk
+    // (`ui_chat::channels`) deliberately never joins GuildRecruitment (its row carries no
+    // INITIAL bit), so there is no guild-membership-driven join/leave to hang off. Building
+    // it means the guilded/unguilded gate, the capital-city gate and two channel commands,
+    // and it changes what the client puts on the wire when a player joins or leaves a
+    // guild — its own change, with its own record. The latch here is real, persists, and
+    // is what `GetGuildRecruitmentMode` answers; what it does not yet do is act.
+    //
+    // The same note's other half, also not built: `JoinChannelByName("GuildRecruitment")`
+    // (`0x49ed3d`) and `LeaveChannelByName` (`0x49ef8f`) each force the latch back to 0 —
+    // the join's reset is conditional on the caller's `flag` argument, which the Lua
+    // binding passes as 1 and `0x49ea90`'s own internal join passes as 0 (so the cascade
+    // does not undo the mode it is acting on).
+    g.set(
+        "SetGuildRecruitmentMode",
+        // `[0x4a0060, 0x4a00c4)`. One argument at stack index 1, and **two ways to raise** — this
+        // is a shape-A binding (wow-re `numeric-arg-coercion-law.md`), not one of the many that
+        // swallow a nil:
+        //
+        //   * `lua_isnumber 0x6f34d0` — so a NUMERIC STRING passes (`"1"` works) — else
+        //     `luaL_error("Usage: SetGuildRecruitmentMode(mode)")`, which longjmps.
+        //   * then `__ftol 0x40a2b0`, **truncating toward zero**, so `1.7` is silently accepted as
+        //     1 and `-0.5` as 0.
+        //   * then the range gate `0x4a0094 jl` / `0x4a009b jge 2` →
+        //     `luaL_error("SetGuildRecruitmentMode: invalid mode")` for `-1`, `2`, `-1.7`.
+        //
+        // Success returns **0 values** (`xor eax,eax; ret`), not nil. Stock FrameXML can reach
+        // neither raise: `UIOptionsFrame_Save` passes `button:GetChecked()` and coerces its nil to
+        // 0 itself. An ADDON can, and getting the raise right is the difference between an addon
+        // seeing its own bug and seeing ours.
+        lua.create_function(|lua, mode: Option<Value>| {
+            let n = match mode.as_ref() {
+                Some(Value::Integer(i)) => *i as f64,
+                Some(Value::Number(n)) => *n,
+                // `lua_isnumber` is true for a string luaO_str2d fully consumes.
+                Some(Value::String(s)) => s
+                    .to_str()
+                    .ok()
+                    .and_then(|s| s.trim().parse::<f64>().ok())
+                    .ok_or_else(|| mlua::Error::runtime("Usage: SetGuildRecruitmentMode(mode)"))?,
+                _ => return Err(mlua::Error::runtime("Usage: SetGuildRecruitmentMode(mode)")),
+            };
+            let n = n.trunc();
+            if !(0.0..2.0).contains(&n) {
+                return Err(mlua::Error::runtime(
+                    "SetGuildRecruitmentMode: invalid mode",
+                ));
+            }
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mode = n as u8;
+            if model.guild_recruitment_mode != mode {
+                model.guild_recruitment_mode = mode;
+                model.guild_recruitment_changed = true;
+            }
+            Ok(())
+        })?,
+    )?;
+
     g.set(
         "GetChannelName",
         lua.create_function(|lua, key: Value| {

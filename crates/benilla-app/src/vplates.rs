@@ -1135,7 +1135,7 @@ mod tests {
     fn the_v_key_mirrors_into_the_cvar_table() {
         use crate::bindings::{cmd, BindingsState};
         let mut app = App::new();
-        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        let script = benilla_ui::script::UiScript::new().unwrap();
         script.register_cvars([(CVAR_ENEMIES, "0"), (CVAR_FRIENDS, "0")]);
         app.add_systems(Update, toggle_vplates)
             .init_resource::<VPlateMode>()

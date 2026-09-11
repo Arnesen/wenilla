@@ -324,6 +324,31 @@ pub(crate) fn bool_or_default(v: Option<&Value>, default: bool) -> bool {
     }
 }
 
+/// **The 1.12 predicate return** — `1` for true, `nil` for false, and never a Lua boolean.
+///
+/// The reference client has essentially no boolean-returning query. Across the 1503 rows
+/// `reference/1.12-shapes.tsv` marks `kinds_conf = agree`, exactly two slots in the whole binding
+/// surface are `boolean`: `IsPetAttackActive` (which really does call `lua_pushboolean 0x6f39f0`,
+/// noted in [`super::pet`]) and Lua's own `rawequal`. Every other `Is*`, `Can*`, `Has*` and every
+/// predicate slot of a multi-value answer is `(nil) | (number)`.
+///
+/// **The difference is invisible to `if x then` and decisive to everything else** — `x == 1`,
+/// `x == nil`, `tostring(x)`, arithmetic, a table key, a value round-tripped through a saved
+/// variable. That is why it survived so long: the transcribed FrameXML reads every one of these
+/// with a plain `if`, so `true` and `1` were interchangeable for as long as *we* wrote the callers.
+/// Real 1.12 addons are not our callers — `ColorPickerPlus.lua:121` writes
+/// `if IsShiftKeyDown() == 1 then`, and reads a `true` as "not held" (decision 2118).
+///
+/// Enforced, not remembered: `ui_script::shape_gate::no_query_binding_answers_a_lua_boolean`
+/// probes the whole registered query surface and fails on any Lua boolean.
+pub(crate) fn flag(b: bool) -> Value {
+    if b {
+        Value::Integer(1)
+    } else {
+        Value::Nil
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

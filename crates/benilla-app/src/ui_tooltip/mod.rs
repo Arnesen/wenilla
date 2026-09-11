@@ -115,7 +115,9 @@ fn spell_tooltip_view(
         .store
         .map_or(d.mana_cost, |s| crate::ui_action::usable::power_cost(d, s));
     let cost = {
-        let div = if d.power_type == 1 { 10 } else { 1 };
+        // The one `0x6e7130` table, not a local `if power_type == 1` — decision 2117 found three
+        // hand-rolled copies of it and one of them had been applied at a single site out of four.
+        let div = benilla_protocol::messages::power_display_scale(d.power_type);
         let unit = match d.power_type {
             0 => "Mana",
             1 => "Rage",

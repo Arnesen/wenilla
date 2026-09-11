@@ -403,6 +403,23 @@ impl Cooldowns {
         }
     }
 
+    /// **The list belongs to the world session, not to the process** (decision 2116) — the
+    /// session-end clear every other net-backed store already had
+    /// ([`crate::net::apply::session::disconnected`]).
+    ///
+    /// `SMSG_INITIAL_SPELLS` carries the WHOLE set of cooldowns still running, at every world
+    /// entry, and [`Self::seed_initial`] appends (the reference's `AddCooldown 0x6e12c0` never
+    /// matches by id — see [`Self::add`]). So a store that survives the socket answers the *old*
+    /// session's records for the rest of their lives: a second login on the same character reads
+    /// its own stale copy rather than the wire's fresh remainder (measured live — a 600 s record
+    /// re-derived from the first login still winning over the second login's 594 s one), and a
+    /// login on a DIFFERENT character inherits cooldowns that are not theirs, for spells they may
+    /// not know. Nothing is lost by clearing: the next world entry — including 0065's seamless
+    /// reconnect, which is a full re-login — re-seeds from the wire.
+    pub(crate) fn clear_session(&mut self) {
+        self.wipe();
+    }
+
     /// One `SMSG_SPELL_COOLDOWN` pair (`0x6e9460`'s per-entry law): a nonzero wire duration is
     /// the spell recovery verbatim (category untracked); zero means "the spell's own Spell.dbc
     /// recovery + category recovery". `SPELL_ATTR_COOLDOWN_ON_EVENT` parks it and suppresses the
@@ -826,6 +843,45 @@ mod tests {
         cds.apply_wire_cooldown(100, 0, Some(&charge()), t0);
         let ch = cds.info(100, 0, Some(&charge()), t0 + Duration::from_secs(5));
         assert_eq!((ch.remaining_ms, ch.duration_ms), (10_000, 15_000));
+    }
+
+    /// **The session end empties the list, so the next login's wire is the whole truth**
+    /// (decision 2116). `seed_initial` appends by design (the reference's `AddCooldown` never
+    /// matches by id), so without the clear the previous session's record stays and — being
+    /// stamped with the FULL remainder it had at the earlier login — outlives and outbids the
+    /// fresh one. Measured live before the fix: a second world entry read `d=600` where the wire
+    /// had just said 594.
+    #[test]
+    fn a_session_end_empties_the_list_so_the_next_logins_wire_is_the_whole_truth() {
+        use benilla_protocol::messages::SpellCooldown;
+        let wire = |ms| SpellCooldown {
+            spell_id: 12975, // Last Stand — 10 minutes, no category
+            item_id: 0,
+            category: 0,
+            spell_cd_ms: ms,
+            category_cd_ms: 0,
+        };
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+
+        // Login one: 600 s still to run.
+        cds.seed_initial(&wire(600_000), t0);
+        assert_eq!(cds.info(12975, 0, None, t0).duration_ms, 600_000);
+
+        // …the player logs out six seconds later and comes straight back in; the server's list
+        // now says 594 s.
+        let t1 = t0 + Duration::from_secs(6);
+        cds.clear_session();
+        assert!(cds.records.is_empty(), "the list dies with the session");
+        cds.seed_initial(&wire(594_000), t1);
+
+        let read = cds.info(12975, 0, None, t1);
+        assert_eq!(
+            (cds.records.len(), read.duration_ms, read.remaining_ms),
+            (1, 594_000, 594_000),
+            "one record, the second login's — a surviving first-login record would answer 600 s \
+             and go on answering it for the whole cooldown"
+        );
     }
 
     #[test]

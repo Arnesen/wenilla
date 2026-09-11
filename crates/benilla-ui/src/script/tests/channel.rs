@@ -159,3 +159,87 @@ fn get_channel_list_is_a_flat_slot_name_vararg_in_join_order() {
         0
     );
 }
+
+/// **The guild-recruitment latch boots at AUTO and round-trips as a NUMBER** (decision 2115).
+///
+/// `GetGuildRecruitmentMode 0x4a0040` is 23 bytes and one path — `fild` the int global,
+/// `lua_pushnumber`, `mov eax,1`, `ret` — so it has no nil leg at all, and
+/// `UIOptionsFrame_Load`'s `== 1` would read a nil as a silent "not auto". The boot value is 1
+/// from a `.data` initialiser (`raw 0x443608` = `01 00 00 00`), corroborated by
+/// `UIOptionsFrame_SetDefaults`'s `SetGuildRecruitmentMode(1)` and by all 33 `chat-cache.txt`
+/// files the reference client itself wrote in this repo's install.
+#[test]
+fn the_guild_recruitment_mode_boots_auto_and_answers_a_number() {
+    let s = script();
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        1.0,
+        "the reference's own .data initialiser, not a BSS zero"
+    );
+    assert!(s
+        .eval::<bool>("return type(GetGuildRecruitmentMode()) == 'number'")
+        .unwrap());
+    s.run("SetGuildRecruitmentMode(0)").unwrap();
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        0.0
+    );
+}
+
+/// **The setter is shape A — it RAISES rather than swallowing a bad argument** (decision 2115).
+///
+/// `0x4a0060` gates on `lua_isnumber 0x6f34d0` (so a numeric STRING passes) and otherwise
+/// `luaL_error`s `Usage: SetGuildRecruitmentMode(mode)`; it then truncates toward zero through
+/// `__ftol 0x40a2b0` and range-gates `0 <= mode < 2`, raising
+/// `SetGuildRecruitmentMode: invalid mode` outside it. Most 1.12 numeric bindings swallow a nil
+/// as 0.0 — this one does not, and a client that guessed the common shape would turn an addon's
+/// own bug into silence (wow-re `numeric-arg-coercion-law.md`; the per-binding split is the whole
+/// point of that note).
+///
+/// Success pushes **0 values**, not nil.
+#[test]
+fn the_guild_recruitment_setter_gates_its_argument_the_way_the_reference_does() {
+    let s = script();
+
+    // A numeric string is a number to `lua_isnumber`.
+    s.run(r#"SetGuildRecruitmentMode("0")"#).unwrap();
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        0.0
+    );
+
+    // Truncation toward zero, not rounding: 1.7 is a legal 1.
+    s.run("SetGuildRecruitmentMode(1.7)").unwrap();
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        1.0
+    );
+
+    for bad in ["", "nil", r#""AUTO""#, "{}", "true"] {
+        let e = s
+            .run(&format!("SetGuildRecruitmentMode({bad})"))
+            .expect_err(&format!("SetGuildRecruitmentMode({bad}) must raise"));
+        assert!(
+            e.to_string().contains("Usage: SetGuildRecruitmentMode"),
+            "{bad}: {e}"
+        );
+    }
+    for bad in ["-1", "2", "-1.7", "37"] {
+        let e = s
+            .run(&format!("SetGuildRecruitmentMode({bad})"))
+            .expect_err(&format!("SetGuildRecruitmentMode({bad}) must raise"));
+        assert!(e.to_string().contains("invalid mode"), "{bad}: {e}");
+    }
+
+    // …and none of the refused calls moved the latch.
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        1.0
+    );
+    assert_eq!(
+        s.eval::<i64>("return select('#', SetGuildRecruitmentMode(0))")
+            .unwrap(),
+        0,
+        "0x4a0060 returns `xor eax,eax` — zero values, not a nil"
+    );
+}

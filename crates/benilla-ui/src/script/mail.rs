@@ -30,6 +30,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::flag;
 use super::cursor::{self, CursorPayload};
 use super::Model;
 
@@ -281,15 +282,6 @@ impl super::UiScript {
     /// l.278-289 — its `OnEvent` just re-reads `HasNewMail()` and shows/hides).
     pub fn set_has_new_mail(&mut self, has: bool) {
         self.model_mut().has_new_mail = has;
-    }
-}
-
-/// A `1`/`nil` boolean the way the client pushes flags (`pushnumber(1)` / `pushnil`).
-fn flag(b: bool) -> Value {
-    if b {
-        Value::Integer(1)
-    } else {
-        Value::Nil
     }
 }
 

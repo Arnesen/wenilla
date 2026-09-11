@@ -7,6 +7,7 @@
 
 use mlua::Lua;
 
+use crate::script::binding_abi::flag;
 use crate::script::container::ContainerMove;
 use crate::script::Model;
 
@@ -271,7 +272,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsInventoryItemLocked",
         lua.create_function(|lua, id: u32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(is_inventory_item_locked(&model, id))
+            Ok(flag(is_inventory_item_locked(&model, id)))
         })?,
     )?;
 

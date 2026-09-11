@@ -604,6 +604,19 @@ pub(crate) struct Model {
     pub(crate) zone_channel_catalog: Vec<super::channel::ZoneChannelRow>,
     /// Channel verbs since the last [`super::UiScript::take_channel_commands`] drain.
     pub(crate) channel_commands: Vec<super::channel::ChannelCommand>,
+    /// **The guild-recruitment auto-join latch** — the reference's int global `[0x843608]`, which
+    /// `GetGuildRecruitmentMode` returns and `SetGuildRecruitmentMode` writes (decision 2115).
+    ///
+    /// `0` = STANDARD, `1` = AUTO, and those two words are literally what the per-character chat
+    /// cache stores it as (`OPTION_GUILD_RECRUITMENT_CHANNEL STANDARD|AUTO`; wow-re
+    /// `system/ui/scratch/chat-cache-grammar.md` — the reader maps `STANDARD` to 0 and anything
+    /// else, `AUTO` included, to 1). It boots at **1**: every one of the 33 `chat-cache.txt` files
+    /// the reference client itself wrote in this repo's install says `AUTO`, on characters that
+    /// never opened the option.
+    pub(crate) guild_recruitment_mode: u8,
+    /// Whether Lua has moved [`Self::guild_recruitment_mode`] since the last drain — the chat
+    /// cache's dirty signal, the peer of `chat_window_changes`.
+    pub(crate) guild_recruitment_changed: bool,
     /// `DoEmote` calls since the last drain.
     pub(crate) emote_requests: Vec<super::chat_misc::EmoteRequest>,
     /// `RandomRoll` calls since the last drain.
@@ -1838,6 +1851,8 @@ impl Model {
             known_languages: Vec::new(),
             zone_channel_catalog: Vec::new(),
             channel_commands: Vec::new(),
+            guild_recruitment_mode: 1,
+            guild_recruitment_changed: false,
             emote_requests: Vec::new(),
             roll_requests: Vec::new(),
             uninvite_requests: Vec::new(),

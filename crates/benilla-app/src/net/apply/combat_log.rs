@@ -17,8 +17,8 @@
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{
-    DamageShield, ExplorationXp, LevelUpInfo, PeriodicAuraLog, PeriodicTick, SpellDamageLog,
-    SpellEnergizeLog, SpellHealLog, SpellLogMiss, XpGain,
+    power_display_scale, DamageShield, ExplorationXp, LevelUpInfo, PeriodicAuraLog, PeriodicTick,
+    SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss, XpGain,
 };
 
 use crate::combat_text::{damage_color, miss_word, spell_text, CombatTextSpawn, DamageSource};
@@ -301,10 +301,14 @@ pub(super) fn periodic_aura_log(
                     ),
                     extra: Some(amount.to_string()),
                 }),
+                // The displayed figure, not the wire's — `0x626dd0` divides by
+                // `0x6e7130(powerType)` at `0x627087` **before** it pushes the COMBAT_TEXT tag
+                // (`0x494770`) and before it words the chat line, so both consumers see the same
+                // number (decision 2117).
                 PeriodicTick::Energize { power, amount } => {
                     power_message_type(power).map(|message_type| CombatTextEvent {
                         message_type,
-                        data: Some(amount.to_string()),
+                        data: Some((amount / power_display_scale(power)).to_string()),
                         extra: None,
                     })
                 }
@@ -462,6 +466,10 @@ pub(super) fn spell_heal_log(
 /// NO `UNIT_COMBAT` fires here: the 5875 engine has no ENERGIZE emission — the string is absent
 /// from the whole binary (§5-verified, wow-re `unit-combat-event-law.md`; the shipped
 /// CombatFeedback.lua ENERGIZE arm is dead code in 1.12).
+///
+/// The amount is the **displayed** figure: the handler `0x5e8a90` divides by
+/// `0x6e7130(powerType)` at `0x5e8af3` and hands that one number to the COMBAT_TEXT push
+/// (`0x494770`) and to the chat formatter (`0x62ca00`) alike (decision 2117).
 pub(super) fn spell_energize_log(
     s: SpellEnergizeLog,
     self_guid: &SelfGuid,
@@ -471,7 +479,7 @@ pub(super) fn spell_energize_log(
         if let Some(message_type) = power_message_type(s.power) {
             center.write(CombatTextEvent {
                 message_type,
-                data: Some(s.amount.to_string()),
+                data: Some((s.amount / power_display_scale(s.power)).to_string()),
                 extra: None,
             });
         }

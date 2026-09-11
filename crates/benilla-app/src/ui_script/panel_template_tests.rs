@@ -32,10 +32,6 @@ use benilla_ui::script::UiScript;
 
 use super::test_ui::load_ui as load_xml;
 
-fn ui_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui")
-}
-
 /// The manifest prefix these two files sit on: fonts, `UIParent` (the parent every addon passes),
 /// `HideUIPanel` (the close button's OnClick), the tooltip (the options widgets' hover) and the
 /// scroll kit (`ScrollFrame_OnLoad`), then the two files under test in manifest order.
@@ -57,7 +53,13 @@ fn harness() -> UiScript {
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
-        "OptionsFrameTemplates.xml",
+        // `UIOptionsCheckButtonTemplate`'s home. It was ours, in a one-template
+        // `OptionsFrameTemplates.xml`, until 2115 put the reference's own hidden Interface
+        // Options window on the manifest — the template's actual home, and the whole point of
+        // that record: an addon that names it gets the reference's own declaration. The dropdown
+        // kit comes with it because the window has four.
+        r"Interface\FrameXML\UIDropDownMenu.xml",
+        r"Interface\FrameXML\UIOptionsFrame.xml",
     ] {
         load_xml(&s, file);
     }
@@ -434,59 +436,18 @@ fn the_options_check_button_resolves_its_whole_inheritance_chain() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// **No invented names.** Every `virtual="true"` template these two files declare is a name the
-/// real 1.12.1 client has, read from `reference/1.12-globals.tsv`.
-///
-/// Scoped to these two files on purpose: the rest of `assets/ui` is full of deliberately
-/// benilla-shaped template names (`BenillaScrollBarTemplate`, `BenillaScriptLogRowTemplate`,
-/// `OptionsRedButtonTemplate`), and a whole-tree sweep would be asserting something else. These
-/// two files make the opposite claim — *these are the reference's own names, which is why an addon
-/// can find them* — so that claim is the one worth gating. A template renamed to something
-/// plausible-but-absent here is a template no addon will ever name.
-#[test]
-fn every_template_these_files_declare_is_a_real_1_12_name() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    let tsv =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/1.12-globals.tsv");
-    let text = std::fs::read_to_string(&tsv).unwrap_or_else(|e| {
-        panic!(
-            "reading {}: {e} — regenerate with scripts/gen-reference-globals.py",
-            tsv.display()
-        )
-    });
-    let known: std::collections::HashSet<&str> = text
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| l.split('\t').next())
-        .collect();
-
-    let mut checked = 0;
-    // OUR files only. This reads the source tree directly, so it cannot name a chain entry — and
-    // it has no reason to: asserting that the reference's own file declares 1.12 names is
-    // tautological. What it guards is us inventing one (decision 1841).
-    // Our remaining file only. `UIPanelTemplates.xml` was ours until 1846 put the whole kit on the
-    // chain; what is left to guard is the one template we still declare.
-    for file in ["OptionsFrameTemplates.xml"] {
-        let src = std::fs::read_to_string(ui_dir().join(file)).unwrap();
-        let doc = benilla_ui::framexml::parse(&src).unwrap();
-        for item in &doc.items {
-            let benilla_ui::framexml::TopLevel::Template(el) = item else {
-                continue;
-            };
-            let name = el.name().expect("every template here is named");
-            assert!(
-                known.contains(name),
-                "{file} declares '{name}', which is not a 1.12 global — \
-                 a template the reference does not have is one no addon can name"
-            );
-            checked += 1;
-        }
-    }
-    assert!(
-        checked >= 1,
-        "only {checked} templates swept — the sweep, not the files, is what broke"
-    );
-}
+// **RETIRED with its subject (decision 2115).** `every_template_these_files_declare_is_a_real_1_12_name`
+// swept the `virtual="true"` templates of the files we shipped under a reference name and required
+// each to be a real 1.12 global (`reference/1.12-globals.tsv`) — the guard against inventing a
+// plausible-but-absent template name that no addon could ever reach for (decision 1841). 1846 took
+// `UIPanelTemplates.xml` to the chain and left it one subject, `OptionsFrameTemplates.xml`'s single
+// `UIOptionsCheckButtonTemplate`; 2115 took that one too, by loading the reference's own
+// `UIOptionsFrame.xml`. Nothing under `assets/ui` now declares a template under a reference name —
+// what is left there is deliberately benilla-shaped (`BenillaScrollBarTemplate`,
+// `OptionsCheckboxRowTemplate`, `BenillaScriptLogRowTemplate`), which is a different claim and the
+// sweep's own doc said so. This is 1751 §5 working as written: a drift instrument loses its subject
+// as the copies retire. `the_options_check_button_resolves_its_whole_inheritance_chain` above still
+// proves the template resolves — off the chain now.
 
 /// **`PanelTemplates_TabResize`'s `tab` argument is OPTIONAL, and omitting it means `this`.**
 ///

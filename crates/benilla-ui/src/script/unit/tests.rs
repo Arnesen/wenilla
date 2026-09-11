@@ -629,16 +629,18 @@ fn unit_race_class_sex_report_the_snapshot_or_the_absent_shape() {
         ("Warrior".into(), "WARRIOR".into())
     );
     assert_eq!(s.eval::<i64>(r#"return UnitSex("player")"#).unwrap(), 3);
-    // An absent token: nil, nil / nil — the live API's absent-unit shape.
+    // An absent token: the two string pairs go nil, nil — but **`UnitSex` answers the number 2**,
+    // not nil. It is a numeric getter, and `0x517f9f` pushes the constant double 2.0 on the
+    // unresolved leg exactly as `UnitLevel`/`UnitMana`/`GetMoney` push 0.0 on theirs (wow-re
+    // `unit-predicate-return-shape.md` §4; decision 2118). The shapes table has no nil alternative
+    // for this row at all.
     assert!(s
         .eval::<bool>(r#"local a, b = UnitRace("target") return a == nil and b == nil"#)
         .unwrap());
     assert!(s
         .eval::<bool>(r#"local a, b = UnitClass("target") return a == nil and b == nil"#)
         .unwrap());
-    assert!(s
-        .eval::<bool>(r#"return UnitSex("target") == nil"#)
-        .unwrap());
+    assert_eq!(s.eval::<i64>(r#"return UnitSex("target")"#).unwrap(), 2);
     // A snapshot whose race/class haven't resolved yet (feed pending): same nils.
     s.set_unit(
         "target",
@@ -650,9 +652,8 @@ fn unit_race_class_sex_report_the_snapshot_or_the_absent_shape() {
     assert!(s
         .eval::<bool>(r#"local a, b = UnitRace("target") return a == nil and b == nil"#)
         .unwrap());
-    assert!(s
-        .eval::<bool>(r#"return UnitSex("target") == nil"#)
-        .unwrap());
+    // Same for a seated body whose sex byte has not streamed: the number 2, never nil.
+    assert_eq!(s.eval::<i64>(r#"return UnitSex("target")"#).unwrap(), 2);
 }
 
 /// `UnitFactionGroup` returns the (english, localized) pair the PvP-icon law reads, and `nil, nil`

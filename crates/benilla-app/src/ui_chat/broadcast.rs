@@ -339,6 +339,7 @@ mod tests {
         ChannelState {
             joined: joined.iter().map(|n| Some((*n).to_string())).collect(),
             channels: catalog(),
+            ..Default::default()
         }
     }
 

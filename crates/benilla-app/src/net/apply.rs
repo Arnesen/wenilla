@@ -663,6 +663,7 @@ pub(crate) fn apply_net_updates(
                     &mut social,
                     &mut guild,
                     &mut gm_ticket,
+                    &mut ui_actions.9,
                     &mut aura.6,
                     &mut disconnects,
                 );

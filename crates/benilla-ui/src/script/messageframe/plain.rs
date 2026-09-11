@@ -161,9 +161,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             with_mf(lua, &this, |mf| mf.fading_enabled = on)
         })?,
     )?;
+    // 1/nil, the reference's predicate shape — `binding-shapes.tsv` has this row as
+    // `(nil) | (number)`, like every other 1.12 predicate (decision 2118).
     m.set(
         "GetFading",
-        lua.create_function(|lua, this: Table| with_mf(lua, &this, |mf| mf.fading_enabled))?,
+        lua.create_function(|lua, this: Table| {
+            with_mf(lua, &this, |mf| {
+                crate::script::binding_abi::flag(mf.fading_enabled)
+            })
+        })?,
     )?;
     m.set(
         "SetTimeVisible",

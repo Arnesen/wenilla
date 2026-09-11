@@ -1575,6 +1575,46 @@ mod tests {
                 "a registered 1.12 binding whose body is uncarved (wow-re `bindings.md`, structural row only); a \
                  wow-re orchestrator is out on it and it is built when the carve lands (1960). Reached by TRADE_REPLACE_ENCHANT's Accept, an event this engine does not fire yet.",
             ),
+            (
+                "OptionsFrame.lua",
+                "GetCurrentResolution",
+                "one of the VIDEO options window's nine engine verbs, none built and none intended for now (decision 2115). `OptionsFrame.lua` is on the manifest for its last fifty lines — the seven shared `OptionsFrame_Enable/Disable*` helpers plus `PlayClickSound`, which the stock `UIOptionsFrame.lua` calls and nothing else defines. Its own window's XML is deliberately NOT loaded (the resolution dropdown's OnLoad alone needs `GetCurrentResolution` and `GetScreenResolutions`, and eighteen of its checkboxes are 2004 hardware toggles), so every caller of this verb is a function no frame reaches. benilla's own Graphics page is `OptionsFrame.xml`'s. Closed by building the video window, not by a stub (1203).",
+            ),
+            (
+                "OptionsFrame.lua",
+                "GetGamma",
+                "one of the VIDEO options window's nine engine verbs, none built and none intended for now (decision 2115). `OptionsFrame.lua` is on the manifest for its last fifty lines — the seven shared `OptionsFrame_Enable/Disable*` helpers plus `PlayClickSound`, which the stock `UIOptionsFrame.lua` calls and nothing else defines. Its own window's XML is deliberately NOT loaded (the resolution dropdown's OnLoad alone needs `GetCurrentResolution` and `GetScreenResolutions`, and eighteen of its checkboxes are 2004 hardware toggles), so every caller of this verb is a function no frame reaches. benilla's own Graphics page is `OptionsFrame.xml`'s. Closed by building the video window, not by a stub (1203).",
+            ),
+            (
+                "OptionsFrame.lua",
+                "GetRefreshRates",
+                "one of the VIDEO options window's nine engine verbs, none built and none intended for now (decision 2115). `OptionsFrame.lua` is on the manifest for its last fifty lines — the seven shared `OptionsFrame_Enable/Disable*` helpers plus `PlayClickSound`, which the stock `UIOptionsFrame.lua` calls and nothing else defines. Its own window's XML is deliberately NOT loaded (the resolution dropdown's OnLoad alone needs `GetCurrentResolution` and `GetScreenResolutions`, and eighteen of its checkboxes are 2004 hardware toggles), so every caller of this verb is a function no frame reaches. benilla's own Graphics page is `OptionsFrame.xml`'s. Closed by building the video window, not by a stub (1203).",
+            ),
+            (
+                "OptionsFrame.lua",
+                "GetScreenResolutions",
+                "one of the VIDEO options window's nine engine verbs, none built and none intended for now (decision 2115). `OptionsFrame.lua` is on the manifest for its last fifty lines — the seven shared `OptionsFrame_Enable/Disable*` helpers plus `PlayClickSound`, which the stock `UIOptionsFrame.lua` calls and nothing else defines. Its own window's XML is deliberately NOT loaded (the resolution dropdown's OnLoad alone needs `GetCurrentResolution` and `GetScreenResolutions`, and eighteen of its checkboxes are 2004 hardware toggles), so every caller of this verb is a function no frame reaches. benilla's own Graphics page is `OptionsFrame.xml`'s. Closed by building the video window, not by a stub (1203).",
+            ),
+            (
+                "OptionsFrame.lua",
+                "RestartGx",
+                "one of the VIDEO options window's nine engine verbs, none built and none intended for now (decision 2115). `OptionsFrame.lua` is on the manifest for its last fifty lines — the seven shared `OptionsFrame_Enable/Disable*` helpers plus `PlayClickSound`, which the stock `UIOptionsFrame.lua` calls and nothing else defines. Its own window's XML is deliberately NOT loaded (the resolution dropdown's OnLoad alone needs `GetCurrentResolution` and `GetScreenResolutions`, and eighteen of its checkboxes are 2004 hardware toggles), so every caller of this verb is a function no frame reaches. benilla's own Graphics page is `OptionsFrame.xml`'s. Closed by building the video window, not by a stub (1203).",
+            ),
+            (
+                "OptionsFrame.lua",
+                "RestoreVideoDefaults",
+                "one of the VIDEO options window's nine engine verbs, none built and none intended for now (decision 2115). `OptionsFrame.lua` is on the manifest for its last fifty lines — the seven shared `OptionsFrame_Enable/Disable*` helpers plus `PlayClickSound`, which the stock `UIOptionsFrame.lua` calls and nothing else defines. Its own window's XML is deliberately NOT loaded (the resolution dropdown's OnLoad alone needs `GetCurrentResolution` and `GetScreenResolutions`, and eighteen of its checkboxes are 2004 hardware toggles), so every caller of this verb is a function no frame reaches. benilla's own Graphics page is `OptionsFrame.xml`'s. Closed by building the video window, not by a stub (1203).",
+            ),
+            (
+                "OptionsFrame.lua",
+                "SetGamma",
+                "one of the VIDEO options window's nine engine verbs, none built and none intended for now (decision 2115). `OptionsFrame.lua` is on the manifest for its last fifty lines — the seven shared `OptionsFrame_Enable/Disable*` helpers plus `PlayClickSound`, which the stock `UIOptionsFrame.lua` calls and nothing else defines. Its own window's XML is deliberately NOT loaded (the resolution dropdown's OnLoad alone needs `GetCurrentResolution` and `GetScreenResolutions`, and eighteen of its checkboxes are 2004 hardware toggles), so every caller of this verb is a function no frame reaches. benilla's own Graphics page is `OptionsFrame.xml`'s. Closed by building the video window, not by a stub (1203).",
+            ),
+            (
+                "OptionsFrame.lua",
+                "SetScreenResolution",
+                "one of the VIDEO options window's nine engine verbs, none built and none intended for now (decision 2115). `OptionsFrame.lua` is on the manifest for its last fifty lines — the seven shared `OptionsFrame_Enable/Disable*` helpers plus `PlayClickSound`, which the stock `UIOptionsFrame.lua` calls and nothing else defines. Its own window's XML is deliberately NOT loaded (the resolution dropdown's OnLoad alone needs `GetCurrentResolution` and `GetScreenResolutions`, and eighteen of its checkboxes are 2004 hardware toggles), so every caller of this verb is a function no frame reaches. benilla's own Graphics page is `OptionsFrame.xml`'s. Closed by building the video window, not by a stub (1203).",
+            ),
         ];
 
         let mut missing: Vec<(String, String)> = Vec::new();

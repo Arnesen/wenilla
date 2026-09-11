@@ -2406,3 +2406,131 @@ fn the_free_professions_line_is_printed_once() {
         "LEVEL_UP_SKILL_POINTS_P1, plural-picked by GetText on cp2"
     );
 }
+
+// ───────────── The chat cache restores INSIDE the login, not after it (decision 2119) ─────────
+
+/// **The login order, asserted at the two places that broke.**
+///
+/// `UPDATE_CHAT_WINDOWS` is the only thing that registers a chat frame for any `CHAT_MSG_*`
+/// (`ChatFrame_OnEvent`'s arm calls `ChatFrame_RegisterForMessages(GetChatWindowMessages(id))`),
+/// and the `UPDATE_CHAT_COLOR` burst mirrors `WHISPER` into `ChatTypeInfo["REPLY"]`, whose `.id`
+/// is 0 — the same id every `AddMessage` with no explicit colour carries — so the burst repaints
+/// them. Both events come from the chat-cache restore, so the restore has to be finished before
+/// `PLAYER_LOGIN`: before it, an addon's `Print` gets repainted whisper-pink, and any chat routed
+/// in that window lands on a frame registered for nothing and is dropped in silence (1784).
+///
+/// Pre-2119 the restore was an `Update` system and this probe saw `windows = nil`,
+/// `colors = nil`, `registered = ""` at `PLAYER_LOGIN`.
+///
+/// The probe is planted in the boot VM the way `world_entry_tests` plants its addon: the entry
+/// load runs onto the VM that already exists, so a frame created here hears the whole load.
+#[test]
+fn the_chat_cache_restore_is_finished_before_player_login() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = std::env::temp_dir().join(format!("benilla-chat-order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("benilla-config")).expect("hermetic home");
+    let _capture = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+    let _home = crate::local_state::test_env::EnvGuard::set(
+        "BENILLA_HOME",
+        tmp.join("benilla-config")
+            .to_str()
+            .expect("utf-8 temp path"),
+    );
+
+    let mut world = bevy::prelude::World::new();
+    world.init_resource::<crate::ui_script::AddOnIdentity>();
+    world.init_resource::<crate::minimap::MinimapZoom>();
+    world.init_resource::<crate::ui_script::ReloadUiPending>();
+    world.init_resource::<super::edit::ChannelState>();
+    world.init_resource::<super::settings::ChatWindowFile>();
+    crate::ui_script::setup_script(&mut world);
+
+    world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .run(
+            r#"
+            ChatOrderProbe = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UPDATE_CHAT_WINDOWS")
+            f:RegisterEvent("UPDATE_CHAT_COLOR")
+            f:RegisterEvent("PLAYER_LOGIN")
+            f:SetScript("OnEvent", function()
+                if event == "UPDATE_CHAT_WINDOWS" then
+                    ChatOrderProbe.windows = (ChatOrderProbe.windows or 0) + 1
+                elseif event == "UPDATE_CHAT_COLOR" then
+                    ChatOrderProbe.colors = (ChatOrderProbe.colors or 0) + 1
+                else
+                    ChatOrderProbe.loginWindows = ChatOrderProbe.windows or 0
+                    ChatOrderProbe.loginColors = ChatOrderProbe.colors or 0
+                    ChatOrderProbe.loginRegistered =
+                        (ChatFrame1 and ChatFrame1.messageTypeList
+                            and table.concat(ChatFrame1.messageTypeList, ",")) or ""
+                end
+            end)
+            "#,
+        )
+        .expect("order probe");
+
+    world.insert_resource(crate::char_select::Roster::with_pending_pick(
+        vec![benilla_protocol::Character {
+            guid: 1,
+            name: "Probeorder".into(),
+            race: 1,  // Human → Alliance
+            class: 1, // Warrior
+            gender: 0,
+            level: 60,
+            skin: 0,
+            face: 0,
+            hair_style: 0,
+            hair_color: 0,
+            facial_hair: 0,
+            zone: 0,
+            map: 0,
+            position: benilla_protocol::wire::Vector3d {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            flags: 0,
+            equipment: [benilla_protocol::CharEnumItem::default(); 19],
+            pet_display_id: 0,
+            pet_level: 0,
+            pet_family: 0,
+        }],
+        1,
+    ));
+    crate::ui_script::load_ingame_ui_on_world_entry(&mut world);
+
+    let read = |expr: &str| -> String {
+        world
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .eval::<Option<String>>(&format!("return tostring({expr})"))
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        read("ChatOrderProbe.loginWindows"),
+        "1",
+        "UPDATE_CHAT_WINDOWS must have fired before PLAYER_LOGIN — it is the only thing that \
+         registers a chat frame for CHAT_MSG_*, so a line routed before it is dropped in silence"
+    );
+    assert_ne!(
+        read("ChatOrderProbe.loginColors"),
+        "0",
+        "the UPDATE_CHAT_COLOR burst must precede PLAYER_LOGIN — after it, its WHISPER→REPLY \
+         mirror repaints every already-printed AceConsole line whisper-pink"
+    );
+    assert!(
+        read("ChatOrderProbe.loginRegistered").contains("SYSTEM"),
+        "ChatFrame1 must carry the SYSTEM message group at PLAYER_LOGIN, not {:?}",
+        read("ChatOrderProbe.loginRegistered")
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

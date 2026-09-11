@@ -1658,7 +1658,7 @@ fn every_installed_region_method_lands_in_a_leaf() {
 ///   from one nil for a caller that counts.
 #[test]
 fn the_nameplate_verbs_ignore_their_arguments_and_return_nothing() {
-    let mut s = script();
+    let s = script();
     s.register_cvars([
         (crate::script::CVAR_NAMEPLATE_ENEMIES, "1"),
         (crate::script::CVAR_NAMEPLATE_FRIENDS, "0"),

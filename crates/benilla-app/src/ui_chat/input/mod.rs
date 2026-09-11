@@ -187,7 +187,10 @@ fn engine_verbs(
 pub(super) fn drain_chat_input(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut chat_log: ResMut<super::feed::ChatLog>,
-    channels: Res<super::edit::ChannelState>,
+    // Mutable for one reason: an EXPLICIT leave clears the channel's `ZONECHANNELS` bit
+    // (decision 2120, the reference's `0x49f10a` inside leave-by-name `0x49ee70`). The zone
+    // walk's own LEAVE, one module over, deliberately does not.
+    mut channels: ResMut<super::edit::ChannelState>,
     commands: Res<NetCommands>,
     emotes: Option<Res<crate::sound::EmoteSounds>>,
     selection: Res<Selection>,
@@ -264,6 +267,9 @@ pub(super) fn drain_chat_input(
                     .send(ClientCommand::JoinChannel { name, password });
             }
             ParsedChat::Leave { name } => {
+                // `/leave` is leave-by-name: the reference clears the mask bit here and nowhere
+                // else (decision 2120).
+                channels.note_zone_channel_left(&name);
                 let _ = commands.0.send(ClientCommand::LeaveChannel { name });
             }
             ParsedChat::ChatList { name } => {
@@ -970,7 +976,12 @@ pub(super) fn drain_chat_input(
                 use benilla_ui::script::ChannelCommand as C;
                 let cmd = match cmd {
                     C::Join { name, password } => ClientCommand::JoinChannel { name, password },
-                    C::Leave { name } => ClientCommand::LeaveChannel { name },
+                    C::Leave { name } => {
+                        // `LeaveChannelByName` — the same leave-by-name path as `/leave`, so the
+                        // same mask clear (decision 2120).
+                        channels.note_zone_channel_left(&name);
+                        ClientCommand::LeaveChannel { name }
+                    }
                     C::List { name } => ClientCommand::ChannelList { name },
                     // `ListChannels()` — the joined roster, numbered the way `/N` addresses it.
                     C::ListAll => {

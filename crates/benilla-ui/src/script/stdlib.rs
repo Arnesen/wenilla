@@ -290,7 +290,9 @@ function GetZonePVPInfo()
     local t, f = __benilla_pvp_type, __benilla_pvp_faction
     if t == "" then t = nil end
     if f == "" then f = nil end
-    return t, f, __benilla_pvp_arena
+    -- isArena is 1/nil, never a Lua boolean: the reference's third slot is `(nil) | (number)`
+    -- like every other 1.12 predicate (decision 2118).
+    return t, f, __benilla_pvp_arena and 1 or nil
 end
 
 -- ── GetGameTime: the server's in-game clock (hour, minute) — the reference reads the

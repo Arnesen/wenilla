@@ -375,23 +375,92 @@ ScrollTemplates.xml
 Interface\FrameXML\UIPanelTemplates.lua
 
 Interface\FrameXML\UIPanelTemplates.xml
-# ══ THE WINDOW TAB — the reference's own, off the player's chain (1751; decision 1993) ══
-# `CharacterFrameTabButtonTemplate`, the big tab along a panel's bottom edge — the character,
-# vendor and social windows' rows, and nothing else in the client (the small `TabButtonTemplate`
-# is UIPanelTemplates.xml's, above).
+# ══ THE OPTIONS WIDGET KIT — the reference's own, off the player's chain (1751, window 29) ══
+# The four templates addons name for an options panel: `OptionFrameBoxTemplate`,
+# `OptionsButtonTemplate`, `OptionsCheckButtonTemplate`, `OptionsSliderTemplate`. Self-contained —
+# no `.lua`, no `<Include>` — and a descendant of UIPanelTemplates (`OptionsCheckButtonTemplate`
+# inherits `UICheckButtonTemplate`, `OptionsButtonTemplate` inherits `UIPanelButtonTemplate`), so
+# it stays seated after that file, which is the line above.
 #
-# THE REFERENCE NEVER GIVES THIS FILE A TOC LINE. Neither `FrameXML.toc` lists it (base or
-# patch); `UIOptionsFrame.xml` pulls it in with `<Include file="CharacterFrameTemplates.xml"/>`
-# above its own `<Script file=>` — "Need the character tabs here" — and that file is the
-# reference's toc l.21. Our options window is ours, so the row is explicit; l.21 is exactly here,
-# right after the UIPanelTemplates pair (l.16/17) and before StaticPopup (l.23).
+# THE REFERENCE NEVER GIVES THIS FILE A TOC LINE EITHER: its **video** `OptionsFrame.xml` — toc
+# l.19 — pulls it in with `<Include file="OptionsFrameTemplates.xml"/>` at that file's l.4. We do
+# not load the video window (decision 2115 says why: its resolution dropdown's OnLoad calls
+# `GetCurrentResolution`/`GetScreenResolutions`, nine unbuilt verbs), so the row is explicit and
+# it sits in l.19's own seat — which is what puts it here rather than 200 lines below, where it
+# used to sit before 2115.
 #
-# Its `<OnShow>` fits each tab to its text through `PanelTemplates_TabResize(0)` — which needs
-# the line above it and a SYNCHRONOUS `GetStringWidth`, the reason our own transcription carried
-# an OnUpdate settle instead until the engine gained one (1993 retires it, and 1002's clamp with
-# it: a tab's cap is the reference's own number now, so a long label overflows the plate exactly
-# as it does in the real client).
-Interface\FrameXML\CharacterFrameTemplates.xml
+# **THE SEAT IS A REQUIREMENT, not tidiness.** `UIOptionsFrame.xml` below declares
+# `UIOptionsCheckButtonTemplate` as `inherits="OptionsCheckButtonTemplate"`, resolved at LOAD, and
+# that name is this file's. l.19 before l.21 is exactly the reference's own answer to that.
+#
+# `framexml-transcription-diff.py` reports no handler our transcription was missing, and the swap
+# GIVES BACK the reference's own inline hover: ours had factored it into a shared
+# `BenillaOptionsWidget_ShowTooltip`, where the reference open-codes it once per widget.
+Interface\FrameXML\OptionsFrameTemplates.xml
+# ══ THE VIDEO WINDOW'S LUA, WITHOUT ITS WINDOW — the seven helpers (decision 2115) ══════════
+# `Interface\FrameXML\OptionsFrame.lua` is the reference's toc l.19 file's own `<Script>`, and
+# this row is that half of l.19 alone. **We deliberately do not load the video window's XML**
+# (2115): its resolution dropdown's `OnLoad` calls `GetCurrentResolution()`/`GetScreenResolutions()`
+# and nine video verbs are unbuilt, and eighteen of its checkboxes are 2004 hardware toggles.
+#
+# The `.lua` is a different thing: it is pure declarations and function definitions, and its last
+# fifty lines (l.462-515) are SEVEN shared helpers `UIOptionsFrame.lua` calls and nothing else
+# defines — `OptionsFrame_Enable/DisableCheckBox`, `.../Slider`, `.../DropDown` and
+# `PlayClickSound`. `UIOptionsFrame_Load`, `_SetDefaults` and `_UpdateDependencies` call all seven,
+# so the row below would load clean and die on pfUI's first `UIOptionsFrame_Load()` without this.
+#
+# WHAT ELSE IT PUBLISHES, and why each is fine:
+#   * `OptionsFrameCheckButtons` — the VIDEO window's option table (18 rows). A name 1.12 has and
+#     we did not; its `OptionsFrameCheckButtonN` frames do not exist here, exactly as they do not
+#     for any window we have not built.
+#   * `OptionsFrameSliders` — the video slider table, which **our own `OptionsFrame.xml` overwrites
+#     below** with the three rows our Graphics page actually drives (pfUI's `hdgraphic` module
+#     writes `OptionsFrameSliders[3].maxValue`). Order decides collisions and ours is later; that
+#     is the manifest's rule and this is the PaperDollFrame.lua shape (`ui_script::reference_ui`).
+#   * `OPTIONS_FARCLIP_MIN`/`_MAX`, `ANISOTROPIC_VALUES`, `OPTIONS_FRAME_WIDTH` — constants we do
+#     not declare.
+#   * `OptionsFrame_Init/_Load/_Save/_Cancel/_SetDefaults/_UpdateCheckboxes` and the video
+#     dropdowns' handlers — the video window's own, reaching frames that do not exist. Nothing in
+#     this manifest calls them; an addon that does gets a raise where it used to get "call a nil
+#     value", which is not worse and is 1203's "loudly absent" either way.
+Interface\FrameXML\OptionsFrame.lua
+# ══ THE STOCK INTERFACE OPTIONS WINDOW — loaded, and HIDDEN (decision 2115) ══════════════════
+# **This row is not a migration, and it is the one row in this file where that has to be said.**
+# benilla's own options window is `OptionsFrame.xml` below, and it stays the window the player
+# opens — the director's call, twice (0985, and 1987's "we want to fully own that anyway"). This
+# entry loads the reference's `UIOptionsFrame.xml` **alongside** it, and the stock file's own
+# `hidden="true"` on its main frame is what keeps it off the screen. Nothing of ours may ever
+# `Show()` it.
+#
+# WHY LOAD A WINDOW NOBODY OPENS: because third-party addons reach for it BY NAME. pfUI's
+# `skins/blizzard/options-interface.lua` walks `UIOptionsFrame`, `UIOptionsFrameTab1/2`,
+# `UIOptionsFrameCheckButton1..69`, `UIOptionsFrameSlider1..4`, the four dropdowns and the
+# `BasicOptions*`/`AdvancedOptions*` boxes; its `modules/gui.lua` calls `UIOptionsFrame_Load()`
+# and `UIOptionsFrame_Save()` around a GVAR write. Answering those names with an ALIAS onto our
+# own window (which is what we did until 2115) is worse than answering nothing: the skin's
+# `SetWidth(1024)` lands on the window the player actually opens. Real frames, hidden, is the
+# honest answer — and it is free, because the file is the player's own.
+#
+# IT IS ALSO WHERE THE REFERENCE KEEPS ITS OPTIONS STATE, so loading it retires three duplications
+# our own window carried (2115): `UIOptionsFrame_Init` assigns and `RegisterForSave`s all 38
+# options uvars; `UIOptionsFrameCheckButtons` is declared here — the table stock
+# `MultiActionBars.lua:10` writes five rows into at ITS load, which is why this row must stay
+# above that one; and `UpdateNameplates` is this file's function.
+#
+# SEAT: the reference's own toc l.21, which is exactly here — after the UIPanelTemplates pair
+# (l.16/17) and the widget kit (l.19, above), before StaticPopup (l.23). Load-bearing three ways:
+# `UIOptionsCheckButtonTemplate` inherits the line above; three `GameMenuButtonTemplate` buttons
+# and one `UIPanelCloseButton` come from UIPanelTemplates.xml; and `UIOptionsFrameCheckButtons`
+# must exist before MultiActionBars.xml runs.
+#
+# IT BRINGS `CharacterFrameTemplates.xml` WITH IT, which is why that file has no row of its own
+# any more. The reference gives it no toc line either: this file `<Include>`s it at l.4 ("Need
+# the character tabs here") ahead of its own `<Script file=>`, so `CharacterFrameTabButtonTemplate`
+# — the big tab along the character, vendor and social windows' bottom edge — lands at exactly the
+# position our explicit row used to hold. Its `<OnShow>` fits each tab to its text through
+# `PanelTemplates_TabResize(0)`, which needs UIPanelTemplates.lua above and a SYNCHRONOUS
+# `GetStringWidth` (decision 1993 built that and retired our OnUpdate settle).
+Interface\FrameXML\UIOptionsFrame.xml
 # ══ THE DIALOG ENGINE — the reference's own, off the player's chain (1751; decision 1960) ══
 # StaticPopup.xml + StaticPopup.lua: StaticPopupDialogs (all 76 of the reference's entries),
 # StaticPopup_Show/Hide/Visible/Resize/OnUpdate, the four dialog instances, the edit boxes and the
@@ -535,23 +604,6 @@ Interface\FrameXML\FadingFrame.xml
 # strings, which came from ours as `X = X or "…"` fallbacks and now come from the player's own
 # GlobalStrings.lua like every other string in this interface.
 Interface\FrameXML\ZoneText.xml
-# ══ THE OPTIONS WIDGET KIT — the reference's own, off the player's chain (1751, window 29) ══
-# The four templates addons name for an options panel: `OptionFrameBoxTemplate`,
-# `OptionsButtonTemplate`, `OptionsCheckButtonTemplate`, `OptionsSliderTemplate`. Self-contained —
-# no `.lua`, no `<Include>` — and a descendant of UIPanelTemplates (`OptionsCheckButtonTemplate`
-# inherits `UICheckButtonTemplate`, `OptionsButtonTemplate` inherits `UIPanelButtonTemplate`), so
-# it stays seated after that file.
-#
-# `framexml-transcription-diff.py` reports no handler our transcription was missing, and the swap
-# GIVES BACK the reference's own inline hover: ours had factored it into a shared
-# `BenillaOptionsWidget_ShowTooltip`, where the reference open-codes it once per widget.
-Interface\FrameXML\OptionsFrameTemplates.xml
-# …and ours, shrunk to the ONE template the chain's file does not carry:
-# `UIOptionsCheckButtonTemplate`, whose reference home is `UIOptionsFrame.xml` — a file we do not
-# build, because benilla's options window is `OptionsFrame.xml`, a different design. The corpus
-# names it at 8 `CreateFrame` sites, so it cannot simply go. Same basename as the entry above by
-# design: bare = ours, path = the reference's. Retires when UIOptionsFrame.xml migrates.
-OptionsFrameTemplates.xml
 # ══ THE COLOUR DIALOG — the reference's own, off the player's chain (1751, window 11) ══
 # `ColorPickerFrame` (a `<ColorSelect>`), `OpacitySliderFrame`, `ColorPickerOkayButton`,
 # `ColorPickerCancelButton`, and the separate `OpacityFrame` beside them. The file ships no `.lua`

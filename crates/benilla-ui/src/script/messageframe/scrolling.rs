@@ -219,9 +219,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             with_smf(lua, &this, |smf| smf.fading_enabled = on)
         })?,
     )?;
+    // 1/nil, the reference's predicate shape — `binding-shapes.tsv` has this row as
+    // `(nil) | (number)`, like every other 1.12 predicate (decision 2118).
     m.set(
         "GetFading",
-        lua.create_function(|lua, this: Table| with_smf(lua, &this, |smf| smf.fading_enabled))?,
+        lua.create_function(|lua, this: Table| {
+            with_smf(lua, &this, |smf| {
+                crate::script::binding_abi::flag(smf.fading_enabled)
+            })
+        })?,
     )?;
     // The XML attr is `displayDuration`; the Lua accessors call the same field `TimeVisible`
     // (msgframe-runtime.md).

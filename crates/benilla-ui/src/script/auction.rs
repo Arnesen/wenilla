@@ -42,6 +42,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::flag;
 use super::cursor::{self, CursorPayload};
 use super::Model;
 
@@ -297,15 +298,6 @@ impl super::UiScript {
     /// Empty the sell slot — the app calls this once the auction is away, and on session close.
     pub fn clear_auction_sell_item(&mut self) {
         self.model_mut().auction_sell_item = None;
-    }
-}
-
-/// A `1`/`nil` boolean the way the client pushes flags.
-fn flag(b: bool) -> Value {
-    if b {
-        Value::Integer(1)
-    } else {
-        Value::Nil
     }
 }
 
