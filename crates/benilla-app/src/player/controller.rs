@@ -218,6 +218,7 @@ pub(super) fn control(
         options: *pointer.4,
         nearclip: pointer.5.nearclip,
         smooth_style: pointer.3.style,
+        tracking_style: pointer.3.tracking_style,
         subject: camera_dynamics::SubjectState {
             move_flags: player.move_flags,
             // Off the DRIVEN body's descriptor (1277) — a possessed creature's taxi state is what
@@ -525,9 +526,18 @@ pub(super) fn control(
                 0.0,
                 player.pos,
                 head,
-                body.single()
-                    .ok()
-                    .and_then(|(_, _, _, pivot, .., net)| body_pose::pivot_target(pivot, net)),
+                body.single().ok().and_then(|(_, _, _, pivot, .., net)| {
+                    // Even while a spline/taxi/fear owns the body, the pivot preset follows
+                    // that body's own MOVEFLAG_SWIMMING (`0x50f880` reads the camera target's
+                    // CMovement word, not ours). On this path the controller builds no live
+                    // flag word, so the last-streamed one — which `wire_in` merges from the
+                    // server's own poses — is the body's state.
+                    body_pose::pivot_target(
+                        pivot,
+                        net,
+                        player.move_flags() & crate::creature_anim::move_flags::SWIMMING != 0,
+                    )
+                }),
                 view_subject,
                 &mut rig,
                 &mut cam,

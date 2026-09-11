@@ -58,6 +58,35 @@ pub struct M2Bounds {
     ///
     /// Falls back to the header render-box Z extent for a model with no sequences, like the ring.
     pub stand_box_z: f32,
+    /// How far the camera's framing pivot drops when this body **swims** (model-local yards,
+    /// pre-scale): `StandSeq.bounds.max.z − SwimSeq.bounds.max.z`, floored at zero.
+    ///
+    /// The reference keeps **three** framing-pivot presets side by side (`cam+0x11c`/`+0x120`/
+    /// `+0x124`, rebuilt from the model by `0x50ca90`) and picks one per frame at `0x50f880`. All
+    /// three start from the same base — the `attach17.z + 0.0972222 [0x808ab0]` neck height
+    /// [`M2Bounds::pivot_z`] carries — and only the swim one is then pulled down, by exactly this:
+    /// `0x50ccf6 fsubr [esi+0x124]` subtracts `S · (box0.max.z − box42.max.z)`, where the two boxes
+    /// come from `0x711a20(model, 0)` and `0x711a20(model, 0x2a)` — the same `M2Sequence` `CAaBox`
+    /// query [`stand_box`] reads, on animation id **0** (Stand) and id **42** (Swim). Byte-decoded
+    /// and VERIFIED in wow-re `ui/scratch/water-band-discontinuity.md` §7, which measured
+    /// `+0x11c = +0x120 = 1.9002692` and `+0x124 = 1.5120120` off the shipped `HumanMale.m2` at
+    /// scale 1 — a drop of `0.3882572`, the number the fixture test pins.
+    ///
+    /// It is a **delta**, not a height, because that is the shape of the byte: the base is added to
+    /// all three presets at `0x50cc0c`–`0x50cc2e` and only `+0x124` is decremented, so a consumer
+    /// gets the swim preset as `pivot_height − this`, then the shared `[5/6, 15.0]` clamp
+    /// (`0x50ca90`, `0x50d00d`–`0x50d092`).
+    ///
+    /// **`0.0` when the model has no Swim sequence** — which is every non-character model, and the
+    /// reference's own answer too: `0x50cc67`–`0x50cd02` runs only when `0x711960` reports *both*
+    /// id 0 and id 42 present, so a body that cannot swim keeps the standing preset in every state.
+    ///
+    /// **The zoom pair is NOT built.** `0x50f880`'s other leg picks `+0x11c` (zoomed-in) or
+    /// `+0x120` (zoomed-out) on `cam+0x198 < 1.8315` — and on a scale-1 human the reference computes
+    /// those two *equal*, so nothing here yet says what makes them differ. benilla has one standing
+    /// preset and this drop; the threshold and whatever authors the zoomed pair apart are absent,
+    /// not stubbed.
+    pub swim_pivot_drop: f32,
 }
 
 /// Read an M2's authored bounds + the vertex-derived radius (see [`M2Bounds`]). Uses the same path
@@ -84,43 +113,94 @@ pub fn load_m2_bounds(chain: &mut Chain, raw_path: &str) -> Result<M2Bounds> {
 /// same question, and this is the reference's answer to it.
 pub const DEGENERATE_RING_FOOTPRINT: f32 = 1.2;
 
+/// Resolve an animation **id** to its `M2Sequence` record index — the animation-lookup indirection
+/// every sequence-box read below goes through. The lookup array is at MD20 `0x24`(count)/`0x28`
+/// (offset), one `u16` per animation id; the sequence array it indexes is at `0x1c`/`0x20`. An id
+/// is NOT a record number (a chicken's record 0 is a flap, its Stand sits at index 2), and a model
+/// that simply does not author an animation is the common case, not an error: `None` for a missing
+/// lookup, an id past its end, the `0xffff` "absent" sentinel, or an index past the sequence array.
+///
+/// This is the client's own `0x711960(id)` presence test folded into the `0x711a20(id)` box query —
+/// the pair `0x50ca90` calls on ids 0 and 42 before it will build the swim preset at all.
+fn seq_index(bytes: &[u8], anim_id: usize) -> Option<usize> {
+    let anim_count = bytes.u32_at(0x1c)? as usize;
+    let lookup_count = bytes.u32_at(0x24)? as usize;
+    let lookup_ofs = bytes.u32_at(0x28)? as usize;
+    if anim_count == 0 || anim_id >= lookup_count {
+        return None;
+    }
+    match bytes.u16_at(lookup_ofs.checked_add(anim_id * 2)?) {
+        Some(i) if (i as usize) != 0xffff && (i as usize) < anim_count => Some(i as usize),
+        _ => None,
+    }
+}
+
+/// The byte offset of a resolved sequence record — stride `0x44` from the array at MD20 `0x20`,
+/// with the `CAaBox` at record `+0x24` (min `C3Vector` `+0x24`, max `C3Vector` `+0x30`, so `max.z`
+/// is `+0x38`).
+fn seq_record(bytes: &[u8], idx: usize) -> Option<usize> {
+    let anim_ofs = bytes.u32_at(0x20)? as usize;
+    anim_ofs.checked_add(idx * 0x44)
+}
+
+/// The **Stand** sequence's record — animation id 0 through [`seq_index`], falling back to record 0
+/// for a model whose lookup is absent or points nowhere (the pre-existing behaviour the ring and
+/// the chat bubble are pinned to; every model that has sequences at all has *something* to stand on).
+/// `None` only when the model has no sequences.
+fn stand_record(bytes: &[u8]) -> Option<usize> {
+    if bytes.u32_at(0x1c)? as usize == 0 {
+        return None;
+    }
+    seq_record(bytes, seq_index(bytes, 0).unwrap_or(0))
+}
+
+/// One sequence box's `max.z` — `rec+0x38`, the `out+0x20` field `0x711a20` returns (wow-re
+/// `water-band-discontinuity.md` §7). The camera's swim preset is the difference of two of these.
+fn seq_max_z(bytes: &[u8], anim_id: usize) -> Option<f32> {
+    let rec = seq_record(bytes, seq_index(bytes, anim_id)?)?;
+    bytes.f32_at(rec + 0x38)
+}
+
 /// Read the horizontal (X,Y) extents of the **Stand** animation's bounding box from a raw M2 — the input
 /// the real client's living-unit selection ring is sized from (wow-re selection-ring RE, `0x60aee0`).
 /// The animation `M2Sequence` array is at MD20 `0x1c`(count)/`0x20`(offset), stride `0x44`, with the
 /// sequence's `CAaBox` at record `+0x24` (min C3 `+0x24`, max C3 `+0x30`). Stand is animation **id 0**,
 /// whose *sequence index* is `animationLookup[0]` (array at `0x24`/`0x28`, `u16` each) — NOT necessarily
-/// record 0 (a chicken's record 0 is a flap, its Stand sits at index 2). Returns `(dx, dy, dz)`, or
-/// `None` when the model has no sequences / lookup or the indices are out of range (caller falls back
-/// to the header box). VERIFIED: reproduces the reference ring radii to ~1 mm.
+/// record 0 (a chicken's record 0 is a flap, its Stand sits at index 2) — resolved by [`seq_index`].
+/// Returns `(dx, dy, dz)`, or `None` when the model has no sequences (caller falls back to the header
+/// box). VERIFIED: reproduces the reference ring radii to ~1 mm.
 ///
 /// The Z extent joins the pair the ring needs because the chat bubble's anchor is the **same box**
 /// read on the other axis (1406) — one parse, one Stand-sequence resolution, two consumers, so the
 /// ring and the bubble can never drift onto different animations.
 fn stand_box(bytes: &[u8]) -> Option<(f32, f32, f32)> {
-    let anim_count = bytes.u32_at(0x1c)? as usize;
-    let anim_ofs = bytes.u32_at(0x20)? as usize;
-    let lookup_count = bytes.u32_at(0x24)? as usize;
-    let lookup_ofs = bytes.u32_at(0x28)? as usize;
-    if anim_count == 0 {
-        return None;
-    }
-    // Stand (anim id 0) → its sequence index via animationLookup[0]; fall back to record 0 if the lookup
-    // is absent, out of bounds, or points nowhere (0xffff / out of range).
-    let idx = if lookup_count > 0 {
-        match bytes.u16_at(lookup_ofs) {
-            Some(i) if (i as usize) != 0xffff && (i as usize) < anim_count => i as usize,
-            _ => 0,
-        }
-    } else {
-        0
-    };
-    let rec = anim_ofs.checked_add(idx * 0x44)?;
+    let rec = stand_record(bytes)?;
     // CAaBox @ rec+0x24: min C3 (+0x24), max C3 (+0x30). Horizontal (X,Y) extents; squared in the ring
     // formula so an unsorted box is harmless.
     let dx = bytes.f32_at(rec + 0x30)? - bytes.f32_at(rec + 0x24)?;
     let dy = bytes.f32_at(rec + 0x34)? - bytes.f32_at(rec + 0x28)?;
     let dz = bytes.f32_at(rec + 0x38)? - bytes.f32_at(rec + 0x2c)?;
     Some((dx, dy, dz))
+}
+
+/// `AnimationData` id **42** — Swim. The second box `0x50ca90` queries (`0x50ccde call 0x711a20`
+/// with `seq=0x2a`) when it builds the camera's swim framing-pivot preset.
+const SWIM_ANIM_ID: usize = 42;
+
+/// The camera's swim pivot drop (see [`M2Bounds::swim_pivot_drop`]): `StandSeq.bounds.max.z −
+/// SwimSeq.bounds.max.z`, floored at zero, and `0.0` for any model missing either sequence — the
+/// reference's own both-present guard (`0x711960` on ids 0 and `0x2a` at `0x50cc43`/`0x50cc4f`).
+///
+/// Stand resolves through [`stand_record`], not [`seq_index`] alone, so the standing side of the
+/// subtraction is byte-for-byte the box the ring and the chat bubble already read.
+fn swim_pivot_drop(bytes: &[u8]) -> f32 {
+    let Some(stand_z) = stand_record(bytes).and_then(|rec| bytes.f32_at(rec + 0x38)) else {
+        return 0.0;
+    };
+    let Some(swim_z) = seq_max_z(bytes, SWIM_ANIM_ID) else {
+        return 0.0;
+    };
+    (stand_z - swim_z).max(0.0)
 }
 
 /// Read an **in-memory** M2's authored bounds + vertex-derived radius (see [`M2Bounds`]). The bytes-in
@@ -159,5 +239,6 @@ pub fn parse_m2_bounds(bytes: &[u8]) -> Result<M2Bounds> {
         ring_footprint,
         pivot_z: model.pivot_attach_z,
         stand_box_z: rz.max(0.0),
+        swim_pivot_drop: swim_pivot_drop(bytes),
     })
 }

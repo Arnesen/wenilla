@@ -573,6 +573,10 @@ pub(crate) fn unit_combat_stats(store: &ObjectStore) -> UnitCombatStats {
         offhand_weapon_skill: (0, 0),
         ranged_weapon_skill: (0, 0),
         defense_skill: (0, 0),
+        // Player fields — the player's own snapshot fills them (`combat_stats`); a pet has none.
+        dodge_percent: 0.0,
+        parry_percent: 0.0,
+        block_percent: 0.0,
     }
 }
 
@@ -609,6 +613,12 @@ fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) 
         // `PaperDollFrame` registers, l.28, and `watch_skill_ups` already fires), NOT a
         // `UNIT_DEFENSE` — the character sheet never registers one.
         defense_skill: skill_pair(store, SKILL_DEFENSE),
+        // `GetDodgeChance`/`GetParryChance`/`GetBlockChance` — player fields, so they live on the
+        // player's snapshot and not on the shared core a pet also fills. Already a percent on the
+        // wire; an unstreamed field is 0, which is the wire's own default.
+        dodge_percent: store.0.player_dodge_percentage().unwrap_or(0.0),
+        parry_percent: store.0.player_parry_percentage().unwrap_or(0.0),
+        block_percent: store.0.player_block_percentage().unwrap_or(0.0),
         ..unit_combat_stats(store)
     }
 }

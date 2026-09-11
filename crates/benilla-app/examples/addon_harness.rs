@@ -304,6 +304,96 @@ fn main() {
     let _ = DEEP.set(deep);
     let root = std::path::PathBuf::from(root);
 
+    // `--together` — the whole folder in ONE VM, the control for the survey's one-VM-per-addon
+    // bound. Not a column and not a headline (see `addon_harness::together`'s header for what it
+    // cannot answer); `--diff <a survey roster>` names the rows the bound is costing, which is
+    // the question it exists for.
+    if rest.iter().any(|a| a == "--together") {
+        let rows = addon_harness::together::survey_together(&root);
+        if rows.is_empty() {
+            eprintln!(
+                "no addons under {} — is that an AddOns folder?",
+                root.display()
+            );
+            std::process::exit(1);
+        }
+        let raised: Vec<&addon_harness::together::TogetherRow> =
+            rows.iter().filter(|r| r.always_raises()).collect();
+        let wobbly: Vec<&addon_harness::together::TogetherRow> =
+            rows.iter().filter(|r| r.order_sensitive()).collect();
+        println!(
+            "\n{} addon(s) under {}, ALL IN ONE VM — {} runs",
+            rows.len(),
+            root.display(),
+            addon_harness::together::DEFAULT_RUNS
+        );
+        println!(
+            "  raised in EVERY run : {}/{}  (clean in every run: {})",
+            raised.len(),
+            rows.len(),
+            rows.len() - raised.len() - wobbly.len()
+        );
+        // Named, never folded into either count: Lua hashes a table key by its pointer, so a
+        // registry keyed by objects walks in a different order every process (see the module
+        // doc). A row that raises in some runs and not others is that showing through.
+        println!(
+            "  ORDER-SENSITIVE — raised in some runs, not all ({}):",
+            wobbly.len()
+        );
+        for r in &wobbly {
+            println!(
+                "    {:<28} {}/{}  {}",
+                r.name,
+                r.raised_in,
+                r.runs,
+                r.errors[0].lines().next().unwrap_or("")
+            );
+        }
+        if let Some(path) = &diff {
+            // The survey's roster, read back: `ok` there and clean here is agreement; `fail`
+            // there and clean here is the bound, priced.
+            let prior: std::collections::BTreeMap<String, bool> = std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.rsplit_once(' '))
+                .map(|(n, v)| (n.trim().to_string(), v.trim() == "ok"))
+                .collect();
+            let mut freed: Vec<&str> = Vec::new();
+            let mut only_together: Vec<&str> = Vec::new();
+            for r in &rows {
+                // Only the rows that are the same in every run are compared — an order-sensitive
+                // one belongs to neither list, which is the whole point of naming it separately.
+                match (prior.get(&r.name), r.raised_in) {
+                    (Some(false), 0) => freed.push(&r.name),
+                    (Some(true), n) if n == r.runs => only_together.push(&r.name),
+                    _ => {}
+                }
+            }
+            println!(
+                "\n  FAILS ALONE, CLEAN TOGETHER ({}) — the one-VM bound, priced:",
+                freed.len()
+            );
+            for n in &freed {
+                println!("    {n}");
+            }
+            println!(
+                "\n  CLEAN ALONE, RAISES TOGETHER ({}) — a neighbour's global, or an order the\n                 \x20 survey never reaches:",
+                only_together.len()
+            );
+            for n in &only_together {
+                println!("    {n}");
+            }
+        }
+        println!(
+            "\n  STILL RAISING IN EVERY RUN, WITH EVERY NEIGHBOUR PRESENT (first error each):"
+        );
+        for r in &raised {
+            let first = r.errors[0].lines().next().unwrap_or("");
+            println!("    {:<28} {first}", r.name);
+        }
+        return;
+    }
+
     // `--probe <Name> [--eval <lua> ...]` — ONE addon, loaded the way the survey loads it, then
     // asked. Handled before the survey because it is not one: it prints no column and it is not a
     // measurement (an eval can mutate the VM), so mixing the two outputs would invite a probe

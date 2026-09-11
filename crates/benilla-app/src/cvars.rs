@@ -717,6 +717,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `0x512a50`'s `duration = |Δ| / (rate · π/180)`). No panel row here or there — the reader is
     // the host, exactly like `cameraSmoothTrackingStyle` above it.
     same("cameraTargetSmoothSpeed", "90"),
+    // **`cameraWaterCollision`** `[0xbe1088]` "1" (`0x50bd63`) — one of the two that ship ON, and
+    // this row is its SECOND life. 2149 registered it against a pivot corridor built on
+    // `camera-arm-liquid-blind.md`'s "the arm never touches liquid"; 2165 took that back out after
+    // the corridor moved the framing pivot 19/18 yd in one frame, and wow-re's
+    // `water-band-discontinuity.md` then refuted the verdict itself: `0x50e5ec` ORs the `0xf0000`
+    // ADT-liquid nibble into the trace mask ALL THREE of `0x50e570`'s queries carry — the arm sweep
+    // included — where `0x69cc13` gates a per-layer intersection over the chunk's four MCLQ slots.
+    // A capability requested through an argument flag is invisible to a census of call sites, which
+    // is how a correct, controlled census published the wrong negative. The reader is the camera
+    // boom's collision filter; the corridor is the reference's second consumer and is not rebuilt.
+    same("cameraWaterCollision", "1"),
     // `cameraTerrainTilt` `[0xbe0fd4]` **"0"** (`0x50bcfd`) — Follow Terrain, and the one of the
     // four that ships OFF, so building it changed nothing until a player ticks the box. Mechanism:
     // wow-re `camera-cvar-kernels.md` §2 (the ahead-probe and the five-step staircase) and
@@ -1452,6 +1463,7 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // reference's own validator on them is `0x50b330`'s range REFUSAL, which lives in
         // `benilla_ui`'s `SetCVar` path, not here.
         "camerapivot" => knobs.camera_opts.pivot = v != 0.0,
+        "camerawatercollision" => knobs.camera_opts.water_collision = v != 0.0,
         "camerapivotdxmax" => knobs.camera_opts.pivot_dx_max = v,
         "camerapivotdymin" => knobs.camera_opts.pivot_dy_min = v,
         "cameratargetsmoothspeed" => knobs.camera_opts.target_smooth_speed = v,
@@ -1838,7 +1850,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 84] = [
+        let session: [(&str, String); 85] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1883,6 +1895,7 @@ fn sync_cvars(
                 "cameraTargetSmoothSpeed",
                 camera_opts.target_smooth_speed.to_string(),
             ),
+            ("cameraWaterCollision", flag(camera_opts.water_collision)),
             ("cameraTerrainTilt", flag(camera_opts.terrain_tilt)),
             (
                 "cameraGroundSmoothSpeed",
@@ -2407,6 +2420,14 @@ mod tests {
         let camera_opts = crate::player::camera_dynamics::CameraOptions::default();
         assert_eq!(d["cameraPivot"] != 0.0, camera_opts.pivot);
         assert!(camera_opts.pivot, "the binary registers cameraPivot \"1\"");
+        assert_eq!(
+            d["cameraWaterCollision"] != 0.0,
+            camera_opts.water_collision
+        );
+        assert!(
+            camera_opts.pivot && camera_opts.water_collision,
+            "the binary registers cameraPivot and cameraWaterCollision both \"1\""
+        );
         assert_eq!(d["cameraTerrainTilt"] != 0.0, camera_opts.terrain_tilt);
         assert!(
             !camera_opts.terrain_tilt,

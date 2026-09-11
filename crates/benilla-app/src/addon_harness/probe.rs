@@ -97,9 +97,9 @@ pub fn probe(root: &Path, name: &str, evals: &[String]) -> Option<ProbeOutcome> 
     super::seat_a_session(&mut script);
     let _ = crate::ui_script::load_default_ui(&script);
 
-    let mut dep_order: Vec<String> = Vec::new();
+    let mut dep_order: Vec<super::LoadedDep> = Vec::new();
     super::load_dependencies(
-        &script,
+        &mut script,
         root,
         &toc,
         &installed,
@@ -110,11 +110,9 @@ pub fn probe(root: &Path, name: &str, evals: &[String]) -> Option<ProbeOutcome> 
     let load_errors = super::load_addon_files(&script, root, name, &toc).errors;
     // Same stamp the survey applies, for the same reason: the registry must agree with the VM
     // about what is loaded, or `IsAddOnLoaded` and every dependency verdict answer for a session
-    // that does not exist.
-    for loaded in dep_order.iter().chain(std::iter::once(&name.to_string())) {
-        script.mark_addon_loaded(loaded);
-    }
-    let session_errors = super::drive_session_start(&mut script, name, &dep_order, &installed);
+    // that does not exist. The chain stamped itself as it loaded (2166); this is the surveyed one.
+    script.mark_addon_loaded(name);
+    let session_errors = super::drive_session_start(&mut script, name, &installed);
 
     let answers = evals
         .iter()

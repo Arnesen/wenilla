@@ -646,6 +646,13 @@ const CAM_RETURN_RATE: f32 = 6.0;
 /// floors. The collision sweep still starts from the *head* (not the pivot), so a jump in a low room
 /// stops the camera under the ceiling — see `control`.
 ///
+/// That height is one of the reference's **three** presets, rebuilt together by `0x50ca90` and
+/// chosen between per frame by `0x50f880`. benilla builds two of the three: the standing height
+/// above, and the **swim** preset `cam+0x124` — the same height less the model's
+/// [`CameraPivot::swim_drop_local`] — selected on MOVEFLAG_SWIMMING. The zoomed-in/zoomed-out pair
+/// (`cam+0x11c`/`cam+0x120`, split on `cam+0x198 < 1.8315`) is **not built**; see
+/// [`model_pivot_height`].
+///
 /// Floor (yd) on the world pivot height — VERIFIED `5/6` (`0x50ca90`'s per-preset clamp, and
 /// `0x50e570`'s corridor lower bound).
 pub(super) const CAM_PIVOT_FLOOR: f32 = 5.0 / 6.0;
@@ -657,10 +664,29 @@ pub(super) const CAM_PIVOT_CEIL: f32 = 15.0;
 /// model-derived value the moment the body attaches — as a **snap**, not a glide ([`PivotGlide`]).
 pub(super) const CAM_PIVOT_FALLBACK: f32 = 1.8;
 
-/// One modeled unit's world head height: its model-local [`CameraPivot`] × the given scale, clamped
-/// to `[CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL]` — the reference's per-preset clamp in `0x50ca90`.
-pub(super) fn model_pivot_height(pivot: &CameraPivot, scale: f32) -> f32 {
-    (pivot.height_local * scale).clamp(CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL)
+/// One modeled unit's world framing-pivot height: its model-local [`CameraPivot`] × the given scale,
+/// clamped to `[CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL]` — the reference's per-preset clamp in `0x50ca90`.
+///
+/// **`swimming` selects the preset, per frame, the way `0x50f880` does**
+/// (`0x50f89e test [[unit+0x118]+0x40],0x200000` — MOVEFLAG_SWIMMING on the *camera target's*
+/// CMovement word): set, and the pivot drops by the model's own
+/// [`benilla_formats::M2Bounds::swim_pivot_drop`] before the clamp, which is the reference's
+/// `cam+0x124` preset. Clear, and it stays the standing height. The drop is a *model* constant
+/// (`StandSeq.max.z − SwimSeq.max.z`, `0x50ccf6`), so a body that authors no Swim sequence carries
+/// `0.0` and the two presets are the same number — correct for anything that cannot swim.
+///
+/// **What is deliberately not here:** the reference keeps a *third* preset. `0x50f880`'s non-swim
+/// leg picks `cam+0x11c` (zoomed-in) or `cam+0x120` (zoomed-out) on `cam+0x198 < 1.8315`
+/// (`[0x8089b0]`), and benilla builds neither — one standing height serves both zoom regimes. On a
+/// scale-1 human the reference computes those two presets *equal* (both 1.9002692), so nothing yet
+/// says what authors them apart; naming it beats stubbing a threshold we cannot justify (1203).
+pub(super) fn model_pivot_height(pivot: &CameraPivot, scale: f32, swimming: bool) -> f32 {
+    let local = if swimming {
+        pivot.height_local - pivot.swim_drop_local
+    } else {
+        pivot.height_local
+    };
+    (local * scale).clamp(CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL)
 }
 
 /// World head height above a modeled unit's feet — [`model_pivot_height`], or the neck-height
@@ -677,8 +703,14 @@ pub(super) fn model_pivot_height(pivot: &CameraPivot, scale: f32) -> f32 {
 /// [`PivotGlide`] then walks; multiplying by the eased scale instead would stack a second, slower
 /// ease on top of the first and is what made a shapeshift snap *and* drift. The audio listener still
 /// passes the rendered scale — it tracks the drawn body, and nothing verified says otherwise.
+///
+/// **Always the standing preset.** Its two consumers are a *head*, not the camera's framing pivot:
+/// the 3D-audio listener sits at our own head, and the far-sight subject is a unit whose movement
+/// flags we do not carry. The swim preset is the framing pivot's alone — [`model_pivot_height`]
+/// with `swimming` — and the driven body's own target goes through
+/// [`super::body_pose::pivot_target`], not here.
 pub(crate) fn head_height(pivot: Option<&CameraPivot>, scale: f32) -> f32 {
-    pivot.map_or(CAM_PIVOT_FALLBACK, |p| model_pivot_height(p, scale))
+    pivot.map_or(CAM_PIVOT_FALLBACK, |p| model_pivot_height(p, scale, false))
 }
 
 /// `cameraHeightSmoothSpeed` (yd/s) — the pivot channel's rate, VERIFIED registrar default `"1.2"`.
@@ -770,6 +802,11 @@ pub(crate) struct CameraControl {
     pub(super) collision_distance: f32,
     /// The button currently held for look, or `None`.
     pub(super) look: Option<LookButton>,
+    /// **Is the player in mouse-look right now?** — the reference's `[cam+0x90] & 1`, set at
+    /// `0x50fe41` and cleared at `0x50fddd`, identified at the bytes by the two mode strings
+    /// `"Camera FREELOOK"` / `"Camera NORMAL"`. Written by [`run_look_session`] and read the same
+    /// frame by [`seat_on_subject`], which is `cameraTerrainTilt`'s hand-off edge.
+    pub(super) freelook: bool,
     /// **Which mouse buttons the world owns** this frame ([`WorldMouse`]) — the player side's one
     /// answer to "did the UI eat that press?", written by [`latch_world_mouse`] before anything
     /// reads a button. The look session, the camera's input command word and the both-button run
@@ -974,6 +1011,13 @@ impl FlyCam {
 #[derive(Component, Clone, Copy)]
 pub(crate) struct CameraPivot {
     pub height_local: f32,
+    /// How far that height drops while this body **swims**, model-local and pre-scale
+    /// ([`benilla_formats::M2Bounds::swim_pivot_drop`] — `StandSeq.max.z − SwimSeq.max.z`,
+    /// `0x50ccf6`). The reference builds the swim framing-pivot preset `cam+0x124` by subtracting
+    /// exactly this from the standing one before the shared clamp, and `0x50f880` picks it whenever
+    /// the camera target carries MOVEFLAG_SWIMMING. `0.0` for a model with no Swim sequence (every
+    /// non-character model) and for a bounds-less display — the two presets then coincide.
+    pub swim_drop_local: f32,
 }
 
 /// Mouse-look session state machine — start/stop/hand-off between the two look buttons, cursor
@@ -1152,6 +1196,11 @@ pub(super) fn run_look_session(
             *face_yaw = cam.yaw;
         }
     }
+    // **The freelook latch.** Right-held is the reference's mouse-look; a left-drag is an orbit and
+    // is not freelook. A both-button run steers exactly as a right-drag does, which is the same
+    // "the world holds the right button" the `face_yaw` sync above tests — so it counts, and the
+    // two tests stay written the same way on purpose.
+    rig.freelook = rig.look == Some(LookButton::Right) || (rig.look.is_some() && both_buttons);
 }
 
 /// Wheel-zoom: the CAMERAZOOMIN/OUT bindings set a new target orbit distance, and the actual
@@ -1253,6 +1302,14 @@ pub(super) fn seat_on_subject(
         &dynamics.options,
         dt,
     );
+    // **The mouse-look hand-off** (`0x50d500` push / `0x50d520` pop; wow-re's §5 re-audit, Q-C).
+    // Run after the channel has stepped, so an edge hands off the value this frame is about to
+    // compose. The reference fires it from the input handler instead; the two differ by at most one
+    // frame of channel motion, which at `cameraGroundSmoothSpeed` is a fortieth of a degree.
+    let handed = rig.terrain_tilt.hand_off(rig.freelook);
+    if handed != 0.0 {
+        cam.pitch = (cam.pitch + handed).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
+    }
 
     // **`cameraBobbing`'s latch and kernel.** The session is armed off the input-command word, not
     // off this gate, so it runs whatever the CVar says and only the OUTPUT is gated — which is what
@@ -1372,7 +1429,22 @@ pub(super) fn seat_camera(
     let boom_len = boom.length().max(1.0e-3);
     // The camera collides with the WMO *camera/LOS* faces (keeps DETAIL overhangs like forge pipes,
     // drops NOCAMCOLLIDE) + terrain/doodads/GameObjects — its own audience, not the walking mesh.
-    let hit = collide.cast_camera(cam_probe, head, Quat::IDENTITY, boom, 0.0);
+    //
+    // **And the waterline, under `cameraWaterCollision`** — registered `"1"`, so this is on out of
+    // the box. It is a change to the trace's MASK and nothing else, which is the shape the
+    // reference gives it (`0x50e5ec` ORs the `0xf0000` ADT-liquid nibble into the word all three of
+    // `0x50e570`'s queries carry). Decision 2149 read the arm as liquid-blind and built a pivot
+    // corridor in its place; wow-re's `water-band-discontinuity.md` refuted that — the nibble
+    // reaches `0x69cc13` through four direct calls and gates a per-layer intersection over the
+    // chunk's four MCLQ slots, so the sweep hits bare water and cannot tell it from ground.
+    let hit = collide.cast_camera(
+        cam_probe,
+        head,
+        Quat::IDENTITY,
+        boom,
+        0.0,
+        dynamics.options.water_collision,
+    );
     // The solver's own clip verdict (`0x50e570`'s `0x30000` return, OR'd into `[cam+0x90]` by the
     // driver) — [`SmartPivot`]'s sixth conjunct, and the reason an unobstructed camera never
     // pivots. Written here because here is the only place that knows.
@@ -1464,6 +1536,7 @@ pub(super) fn seat_camera(
         cam.pitch,
         &dynamics.subject,
         rig.clipped,
+        dynamics.tracking_style,
         &dynamics.options,
         dt,
     );
@@ -1893,10 +1966,52 @@ mod tests {
     /// and a shrink cannot bury it in the floor.
     #[test]
     fn the_pivot_target_is_clamped_to_the_references_band() {
-        let p = CameraPivot { height_local: 2.0 };
-        assert_eq!(model_pivot_height(&p, 1.0), 2.0);
-        assert_eq!(model_pivot_height(&p, 0.01), CAM_PIVOT_FLOOR);
-        assert_eq!(model_pivot_height(&p, 100.0), CAM_PIVOT_CEIL);
+        let p = CameraPivot {
+            height_local: 2.0,
+            swim_drop_local: 0.0,
+        };
+        assert_eq!(model_pivot_height(&p, 1.0, false), 2.0);
+        assert_eq!(model_pivot_height(&p, 0.01, false), CAM_PIVOT_FLOOR);
+        assert_eq!(model_pivot_height(&p, 100.0, false), CAM_PIVOT_CEIL);
+    }
+
+    /// **The swim preset** — the reference's `cam+0x124`, selected by `0x50f880` on
+    /// MOVEFLAG_SWIMMING and built at `0x50ccf6` as the standing height less
+    /// `StandSeq.max.z − SwimSeq.max.z`. The numbers are the shipped Human Male's, as wow-re
+    /// measured them off the binary (`water-band-discontinuity.md` §7): standing 1.9002692,
+    /// swimming 1.5120120.
+    #[test]
+    fn swimming_takes_the_lower_pivot_preset() {
+        let human = CameraPivot {
+            height_local: 1.9002692,
+            swim_drop_local: 0.3882572,
+        };
+        assert!((model_pivot_height(&human, 1.0, false) - 1.9002692).abs() < 1e-5);
+        assert!((model_pivot_height(&human, 1.0, true) - 1.512_012).abs() < 1e-5);
+        // The preset multiplies the scale, then clamps — the swim leg shares the band with the
+        // standing one (`0x50ca90` clamps all three presets together).
+        assert!(
+            (model_pivot_height(&human, 2.0, true) - 2.0 * 1.512_012).abs() < 1e-5,
+            "the swim preset scales like its sibling"
+        );
+        assert_eq!(model_pivot_height(&human, 0.01, true), CAM_PIVOT_FLOOR);
+        assert_eq!(model_pivot_height(&human, 100.0, true), CAM_PIVOT_CEIL);
+    }
+
+    /// A model with **no Swim sequence** — every non-character model, and the reference's own
+    /// both-sequences-present guard (`0x711960` on ids 0 and 0x2a). Its drop is `0.0`, so the swim
+    /// preset degenerates to the standing one and a body that cannot swim never dips.
+    #[test]
+    fn a_model_that_cannot_swim_keeps_the_standing_preset() {
+        let chicken = CameraPivot {
+            height_local: 1.2,
+            swim_drop_local: 0.0,
+        };
+        assert_eq!(
+            model_pivot_height(&chicken, 1.0, true),
+            model_pivot_height(&chicken, 1.0, false),
+        );
+        assert_eq!(model_pivot_height(&chicken, 1.0, true), 1.2);
     }
 
     /// A press that has travelled `yaw`/`pitch` **degrees** of camera rotation.

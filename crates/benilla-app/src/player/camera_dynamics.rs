@@ -71,6 +71,19 @@ pub(crate) struct CameraOptions {
     pub(crate) pivot_dy_min: f32,
     /// `cameraTargetSmoothSpeed` — see [`TARGET_SMOOTH_SPEED_DEFAULT`].
     pub(crate) target_smooth_speed: f32,
+    /// **`cameraWaterCollision`** — registered **"1"**, so this is ON out of the box.
+    ///
+    /// One consumer, and it is a **trace mask**: it adds the liquid layer to the camera boom's
+    /// collision filter, so the arm stops at a waterline. Decision 2149 built a pivot corridor
+    /// instead, on `camera-arm-liquid-blind.md`'s verdict that the arm never touches liquid; that
+    /// verdict is **refuted** by wow-re's `water-band-discontinuity.md` (the capability is
+    /// requested through an argument flag, which no census of call sites could see), and the
+    /// corridor it built had a 19/18 yd discontinuity that 2165 took back out.
+    ///
+    /// The corridor is the CVar's *second* consumer in the reference and is **not** rebuilt here
+    /// yet: it is only safe once the framing pivot's depth is pinned the way the reference pins it,
+    /// and that is a separate piece of work with its own continuity sweep to earn.
+    pub(crate) water_collision: bool,
     /// `cameraTerrainTilt` — registered **"0"**, so Follow Terrain is OFF out of the box.
     pub(crate) terrain_tilt: bool,
     /// `cameraGroundSmoothSpeed`, deg/s — the ground channel's rate (`[0xbe0fc0]`, `"7.5"`).
@@ -97,6 +110,7 @@ impl Default for CameraOptions {
             pivot_dx_max: PIVOT_DX_MAX_DEFAULT,
             pivot_dy_min: PIVOT_DY_MIN_DEFAULT,
             target_smooth_speed: TARGET_SMOOTH_SPEED_DEFAULT,
+            water_collision: true,
             terrain_tilt: false,
             ground_smooth_speed: GROUND_SMOOTH_SPEED_DEFAULT,
             tilt_time_min: TILT_TIME_MIN_DEFAULT,
@@ -119,6 +133,10 @@ pub(super) struct DynamicsInput {
     /// (`camera-smooth-style.md` §2b), so this is the knob and not the auto-follow's own
     /// far-sight-adjusted copy.
     pub(super) smooth_style: super::camera::FollowStyle,
+    /// `cameraSmoothTrackingStyle` — read by exactly one thing here, [`SmartPivot::advance`]'s
+    /// third release conjunct (`0x511010`). Separate from `smooth_style` because the reference
+    /// keeps two registrations (`[0xbe10c4]` vs `[0xbe1098]`) off the same default pointer.
+    pub(super) tracking_style: super::camera::FollowStyle,
     pub(super) subject: SubjectState,
     /// The live `nearclip` ([`benilla_world::view::ViewDistance::nearclip`]) — the self-avatar
     /// fade's reference plane, carried on this bundle rather than as a fourteenth `seat_camera`
@@ -203,11 +221,16 @@ use crate::creature_anim::move_flags as mf;
 ///   `|bias| ≥ 0.001 ∧ 0x511010(cam) == 0 ∧ ¬gate` (the last negated) arms `+0x104` back to zero at
 ///   `cameraTargetSmoothSpeed`; a false verdict snapshots and disarms instead.
 ///
-/// **One conjunct of the release is not reproduced and is named rather than buried:** `0x511010`
-/// is `[cam+0x90] & 0x100` then `cameraSmoothTrackingStyle` then `0x60f8f0`, all negated — the
-/// externally-driven *tracking* transition that benilla's auto-follow ([`super::camera::FollowRig`])
-/// has no state for. Its effect is to hold the bias while a Track/Fear swing is in flight, so
-/// omitting it can only release the bias *earlier*, never later, and never while the gate holds.
+/// **The third release conjunct, `0x511010`**, decoded: `[cam+0x90] & 0x100` — the camera's TRACK
+/// latch, the same bit that picks the tilt matrix's `Track` row, fed from `[inputState+4] &
+/// 0xf00000` (externally-driven movement, which is benilla's `server_riding`) — and then, only if
+/// that is set, `cameraSmoothTrackingStyle == Never` OR a move-type-**0** order in flight. A true
+/// answer BLOCKS the ease home, holding the bias while a tracking swing runs.
+///
+/// benilla builds the first disjunct and cannot build the second: `[0xc4d888]` is the
+/// click-to-move / auto-action move-type global, and this client has no click-to-move to put an
+/// order in flight. That half is inert at every state benilla can reach, so it is named here
+/// rather than stubbed — the day click-to-move exists, this is the line that needs the arm.
 pub(super) struct SmartPivot {
     /// The pitch-bias channel `+0x104` — angular, so the armer's `2π` rewrap applies. Its armed
     /// bit is the reference's `[cam+0x90] & 0x8000000`, which is read as a routing conjunct.
@@ -291,13 +314,19 @@ impl SmartPivot {
         pitch: f32,
         subject: &SubjectState,
         clipped: bool,
+        tracking_style: super::camera::FollowStyle,
         cfg: &CameraOptions,
         dt: f32,
     ) {
         let verdict = cfg.pivot && !subject.translating() && pitch >= 0.0 && clipped;
-        if !verdict && self.bias().abs() >= CHANNEL_EPS {
+        // `0x511010`'s first disjunct — the TRACK latch up with tracking set to `Never`. A true
+        // answer blocks the ease home, so it joins the gate on the holding side rather than
+        // forming a third arm.
+        let tracking_hold = subject.track && tracking_style == super::camera::FollowStyle::Never;
+        let holding = verdict || tracking_hold;
+        if !holding && self.bias().abs() >= CHANNEL_EPS {
             self.release(cfg);
-        } else if verdict {
+        } else if holding {
             // The FALSE leg of `0x5107f0`'s caller (`0x50ed93`): snapshot and clear the armed bit,
             // i.e. a re-engaged gate cancels an ease in flight rather than fighting it.
             let live = self.bias();
@@ -360,6 +389,11 @@ pub(super) struct TerrainTilt {
     slope_pitch: f32,
     /// Seconds since the probe last ran — the 100 ms throttle (`0x50d94f`).
     since_probe: f32,
+    /// **The mouse-look hand-off, `[cam+0xa8]`** — is the lean currently living inside the pitch
+    /// rather than being composed onto it? The reference keeps a signed REFCOUNT here and gates
+    /// the compose on `> 0` (`0x50f809 jg`); benilla has exactly one look session, so the count
+    /// can only ever be 0 or 1 and a bool carries it without pretending otherwise.
+    handed_off: bool,
 }
 
 impl Default for TerrainTilt {
@@ -369,6 +403,7 @@ impl Default for TerrainTilt {
             slope_pitch: 0.0,
             // The probe runs on the very first frame rather than 100 ms into the session.
             since_probe: PROBE_THROTTLE,
+            handed_off: false,
         }
     }
 }
@@ -455,7 +490,42 @@ impl TerrainTilt {
     /// The signed pitch the ground is contributing this frame, radians, benilla's sign — added to
     /// the view pitch inside the ±89° clamp.
     pub(super) fn pitch(&self) -> f32 {
-        self.ground.live()
+        // `0x50f809 test eax,eax / jg` — with the hand-off refcount up, the compose is SKIPPED,
+        // because the lean is already inside the pitch that `0x50d500` pushed it into.
+        if self.handed_off {
+            0.0
+        } else {
+            self.ground.live()
+        }
+    }
+
+    /// **The mouse-look hand-off** (`0x50d500` push / `0x50d520` pop) — returns the delta the
+    /// pitch owes, which is `0x510120`'s argument and nothing else.
+    ///
+    /// It is a hand-off, not a suppression. On the freelook 0→1 edge the lean's *current* value is
+    /// added to the pitch and the compose stops, so the view does not move: the lean simply becomes
+    /// part of the angle the player is now dragging. The channel keeps tracking the terrain
+    /// underneath throughout — `0x50d900`/`0x50dbc0` are not gated by `+0xa8` — and on the →0 edge
+    /// the *then-current* value is subtracted back out and the compose resumes.
+    ///
+    /// So crossing a slope change mid-drag leaves a step of exactly the difference between the
+    /// lean at press and at release. That is the reference's behaviour, not a defect of this
+    /// transcription: the reference eases that step through the pitch channel at
+    /// `cameraPitchSmoothSpeed`, and benilla's pitch is an immediate write (the §5 verdict on
+    /// `0x510120`), so here it lands in one frame. Named, not smoothed over.
+    pub(super) fn hand_off(&mut self, freelook: bool) -> f32 {
+        if freelook == self.handed_off {
+            return 0.0;
+        }
+        self.handed_off = freelook;
+        // Always the RAW channel value: `pitch()` answers zero once the flag is up, and the pop
+        // has to give back what the push took plus whatever the terrain moved in between.
+        let live = self.ground.live();
+        if freelook {
+            live
+        } else {
+            -live
+        }
     }
 
     /// The probe's staircase (`0x50db37`'s downward walk over `0x808a40`, then the ±20° clamp),
@@ -859,14 +929,28 @@ mod tests {
         assert!(held > 0.0);
         // The gate still true: the bias sits exactly where it is, indefinitely.
         for _ in 0..120 {
-            p.advance(0.5, &moving(false), true, &cfg, DT);
+            p.advance(
+                0.5,
+                &moving(false),
+                true,
+                super::super::camera::FollowStyle::Smart,
+                &cfg,
+                DT,
+            );
         }
         assert_eq!(p.bias(), held, "a held gate must not move the bias");
         // Step out of the wall: it eases home over |bias| / 90°/s.
         let expected = held / cfg.target_smooth_speed.to_radians();
         let mut took = None;
         for frame in 0..600 {
-            p.advance(0.5, &moving(false), false, &cfg, DT);
+            p.advance(
+                0.5,
+                &moving(false),
+                false,
+                super::super::camera::FollowStyle::Smart,
+                &cfg,
+                DT,
+            );
             if took.is_none() && p.bias().abs() < CHANNEL_EPS {
                 took = Some(frame as f32 * DT);
             }
@@ -1308,12 +1392,26 @@ mod tests {
         let mut p = SmartPivot::default();
         p.route_pitch(0.3, 0.0, 0.5, &moving(false), true, &cfg);
         for _ in 0..6 {
-            p.advance(0.5, &moving(false), false, &cfg, DT);
+            p.advance(
+                0.5,
+                &moving(false),
+                false,
+                super::super::camera::FollowStyle::Smart,
+                &cfg,
+                DT,
+            );
         }
         let mid = p.bias();
         assert!(mid > CHANNEL_EPS && mid < 0.3, "mid-return, got {mid}");
         for _ in 0..60 {
-            p.advance(0.5, &moving(false), true, &cfg, DT);
+            p.advance(
+                0.5,
+                &moving(false),
+                true,
+                super::super::camera::FollowStyle::Smart,
+                &cfg,
+                DT,
+            );
         }
         assert_eq!(p.bias(), mid, "the return was cancelled, not completed");
     }
@@ -1395,5 +1493,108 @@ mod tests {
         assert_bounded_step((0.0, 3.9), DT, amplitude * 0.25, &mut step);
         // The disarm's own ramp, bounded at what `cameraBobbingSmoothSpeed` actually buys.
         assert_bounded_step((3.9, 6.0), DT, amplitude * 0.5, &mut step);
+    }
+
+    /// **The mouse-look hand-off** (`0x50d500` push / `0x50d520` pop; wow-re's §5 re-audit Q-C).
+    ///
+    /// The lean moves *into* the pitch for the duration of a drag and comes back out on release,
+    /// so the view does not move at either edge — and a slope change crossed mid-drag leaves
+    /// behind exactly the difference between the lean at press and the lean at release, which is
+    /// the reference's behaviour and the reason this is a hand-off rather than a suppression.
+    #[test]
+    fn mouse_look_hands_the_lean_into_the_pitch_and_takes_it_back() {
+        use super::super::camera::FollowStyle;
+        let cfg = CameraOptions {
+            terrain_tilt: true,
+            ..CameraOptions::default()
+        };
+        let moving = SubjectState {
+            move_flags: mf::FORWARD,
+            ..SubjectState::default()
+        };
+        let mut tilt = TerrainTilt::default();
+        for _ in 0..900 {
+            tilt.advance(|| 0.5, true, &moving, FollowStyle::Smart, &cfg, DT);
+        }
+        let lean = tilt.pitch();
+        assert!(lean > 0.0, "uphill leans the view UP in benilla's sign");
+
+        // What the camera composes, across the press.
+        let mut pitch = 0.2_f32;
+        let composite = pitch + tilt.pitch();
+        pitch += tilt.hand_off(true);
+        assert_eq!(
+            tilt.pitch(),
+            0.0,
+            "the compose stops while the hand-off holds"
+        );
+        assert!(
+            (pitch + tilt.pitch() - composite).abs() < 1.0e-6,
+            "the press must not move the view"
+        );
+        // Idempotent while held — the reference's refcount does not double-push.
+        assert_eq!(tilt.hand_off(true), 0.0);
+
+        // Released over the same terrain: the pitch gives back exactly what it took.
+        pitch += tilt.hand_off(false);
+        assert!((pitch - 0.2).abs() < 1.0e-6, "the pop returns the push");
+        assert!(
+            (pitch + tilt.pitch() - composite).abs() < 1.0e-6,
+            "and the release must not move the view either"
+        );
+
+        // Now cross a slope change mid-drag: press on the hill, flatten, release.
+        pitch += tilt.hand_off(true);
+        for _ in 0..900 {
+            tilt.advance(|| 0.0, true, &moving, FollowStyle::Smart, &cfg, DT);
+        }
+        assert_eq!(
+            tilt.ground.live(),
+            0.0,
+            "the channel keeps tracking under the hand-off"
+        );
+        pitch += tilt.hand_off(false);
+        assert!(
+            (pitch - (0.2 + lean)).abs() < 1.0e-6,
+            "the step left behind is the lean at press minus the lean at release"
+        );
+    }
+
+    /// **`0x511010`'s first disjunct**: with the TRACK latch up and `cameraSmoothTrackingStyle` at
+    /// `Never`, the bias is HELD where it stands instead of easing home — the reference's way of
+    /// not fighting a tracking swing in flight. Both of the other two legs release as before.
+    #[test]
+    fn a_never_tracking_swing_holds_the_bias_the_gate_would_have_released() {
+        use super::super::camera::FollowStyle;
+        let cfg = CameraOptions::default();
+        // Arm a bias through the pure-pivot leg, then drop the gate and run half a second.
+        let run = |subject: &SubjectState, tracking: FollowStyle| {
+            let mut p = SmartPivot::default();
+            assert_eq!(p.route_pitch(UP, 0.0, 0.1, subject, true, &cfg), None);
+            let armed = p.bias();
+            for _ in 0..30 {
+                p.advance(0.1, subject, false, tracking, &cfg, DT);
+            }
+            (armed, p.bias())
+        };
+        let tracked = SubjectState {
+            track: true,
+            ..SubjectState::default()
+        };
+
+        let (armed, after) = run(&tracked, FollowStyle::Never);
+        assert_eq!(after, armed, "tracking + Never blocks the ease home");
+
+        let (armed, after) = run(&tracked, FollowStyle::Smart);
+        assert!(
+            after.abs() < armed.abs(),
+            "the block is the tracking STYLE's, not the latch's alone"
+        );
+
+        let (armed, after) = run(&SubjectState::default(), FollowStyle::Never);
+        assert!(
+            after.abs() < armed.abs(),
+            "and not the style's alone either — the latch has to be up"
+        );
     }
 }
