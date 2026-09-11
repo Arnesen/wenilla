@@ -107,8 +107,9 @@ fn setpoint_relative_to_resolves_a_region_alias_global() {
     assert_eq!(bottom, 20.0);
 }
 
-/// A global that is not a widget resolves to nothing — the reference's type-5 + tag check. The
-/// binding then takes its usual unresolved-target path (parent + a warning), never the value.
+/// A global that is not a widget resolves to nothing — the reference's type-5 + tag check — and
+/// the binding then takes its unresolved-name leg, which **raises** (`0x87ccd4`; decision 2176).
+/// The value is never used, and no anchor is left behind.
 #[test]
 fn setpoint_relative_to_ignores_a_non_widget_global() {
     let mut s = script();
@@ -121,20 +122,19 @@ fn setpoint_relative_to_ignores_a_non_widget_global() {
         NotAWidget = 5
         Child = CreateFrame("Frame", "Child", Host)
         Child:SetWidth(20); Child:SetHeight(20)
-        Child:SetPoint("BOTTOMLEFT", "NotAWidget", "BOTTOMRIGHT", 0, 0)
     "#,
     )
     .unwrap();
-    s.resolve();
-
-    // Fell back to the parent Host, whose BOTTOMRIGHT is (110, 10).
-    let left: f32 = s.eval("return Child:GetLeft()").unwrap();
-    assert_eq!(left, 110.0);
-    let warnings = s.take_warnings();
+    let e = s
+        .run(r#"Child:SetPoint("BOTTOMLEFT", "NotAWidget", "BOTTOMRIGHT", 0, 0)"#)
+        .unwrap_err()
+        .to_string();
     assert!(
-        warnings.iter().any(|w| w.contains("NotAWidget")),
-        "an unresolved named target is reported, not silently redirected: {warnings:?}"
+        e.contains("Child:SetPoint(): Couldn't find region named 'NotAWidget'"),
+        "a global holding a non-widget names nothing: {e}"
     );
+    let n: i64 = s.eval("return Child:GetNumPoints()").unwrap();
+    assert_eq!(n, 0, "the raise leaves no anchor behind");
 }
 
 /// **`$parent` is expanded at RUNTIME, on the anchor path only.** `0x76c5b0` has exactly two call
@@ -241,4 +241,50 @@ fn setallpoints_resolves_an_alias_global() {
         )
         .unwrap();
     assert_eq!((l, b, w, h), (30.0, 40.0, 120.0, 60.0));
+}
+
+/// **A leading `$parent` in a Lua constructor's NAME argument is expanded**, exactly as in XML —
+/// `CreateFrame 0x7060b0`, `CreateTexture 0x773a20` and `CreateFontString 0x773c30` all build a
+/// synthetic node carrying `name=` and read it back through `CScriptRegion::SetName 0x76c650`,
+/// which is one of the expander `0x76c5b0`'s two call sites.
+///
+/// Found by decision 2176's raise, which is the point of a raise: the unexpanded name had been
+/// there all along, degrading quietly into a parent-anchored fallback. `FonzAppraiser` names
+/// roughly thirty widgets this way and `pfQuest/browser.lua:723` builds its search icon as
+/// `input:CreateTexture("$parentSearchIcon", "OVERLAY")`.
+#[test]
+fn a_constructor_name_expands_parent() {
+    let s = script();
+    s.run(
+        r#"
+        Root = CreateFrame("Frame", "Root")
+        Mid = CreateFrame("Frame", nil, Root)          -- anonymous: the walk skips it
+        Kid = CreateFrame("Frame", "$parentKid", Mid)
+        Icon = Kid:CreateTexture("$parentIcon", "OVERLAY")
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return Kid:GetName()").unwrap(),
+        "RootKid",
+        "the base is the first NAMED ancestor of the frame's parent, not the parent itself"
+    );
+    // …and the expanded name is what reached `_G`, which is the only widget namespace (2105).
+    assert_eq!(
+        s.eval::<String>("return RootKid:GetName()").unwrap(),
+        "RootKid"
+    );
+    assert!(
+        s.eval::<bool>(r#"return getglobal("$parentKid") == nil"#)
+            .unwrap(),
+        "the raw token names nothing"
+    );
+    // A region's `$parent` is its OWNER frame, so the walk starts one link lower.
+    assert_eq!(
+        s.eval::<String>("return RootKidIcon:GetName()").unwrap(),
+        "RootKidIcon"
+    );
+    // The payoff: an anchor by the built name resolves instead of raising.
+    s.run(r#"Icon:SetPoint("TOPLEFT", "RootKid", "TOPLEFT", 0, 0)"#)
+        .unwrap();
 }

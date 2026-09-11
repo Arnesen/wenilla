@@ -244,8 +244,9 @@ mod tests {
             std::fs::write(dir.join(format!("{name}.toc")), toc).unwrap();
             std::fs::write(dir.join(file), body).unwrap();
         };
-        // Loads FIRST (the walk is alphabetical) and puts the library in the one global state,
-        // exactly as any of the seventy corpus packages that ship a copy of `Tablet-2.0` does.
+        // Loads FIRST (`A` before `Z` under the walk's NTFS collation) and puts the library in
+        // the one global state, exactly as any of the seventy corpus packages that ship a copy of
+        // `Tablet-2.0` does.
         write(
             "AlphaShipsIt",
             "## Interface: 11200\nlib.lua\n",

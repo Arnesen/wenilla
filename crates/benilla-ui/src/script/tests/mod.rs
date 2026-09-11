@@ -5,6 +5,7 @@
 //! Split by subject; the shared `script()` fixture lives in [`common`].
 
 mod addon_argument_abi;
+mod addon_index_space;
 mod anchors;
 mod backdrop;
 mod button;

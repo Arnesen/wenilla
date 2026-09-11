@@ -363,6 +363,20 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     let identity = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(crate::ui_macro::identity);
+    // **The Lua index space, before a single addon file runs** (decision 2175). The reference has
+    // the array in hand well before `UI_Init 0x48fbf0` reaches the addon walk — `SMSG_ADDON_INFO`
+    // lands during the handshake — so an addon reading `GetNumAddOns()` at file scope sees a
+    // populated one. Seated here rather than off a message for exactly that reason: a feed running
+    // a frame later would seat it after every addon had already asked.
+    //
+    // A server that never answered leaves this `None`, and the array then stays empty for the
+    // session — which is the reference's behaviour too, not a fallback we chose.
+    if let Some(reply) = world
+        .get_resource::<crate::net::AddonInfoReply>()
+        .and_then(|r| r.0.clone())
+    {
+        script.note_addon_info_reply(&reply);
+    }
     // **The CVar table goes in BEFORE the UI loads**, for the same reason and with a shipped-file
     // consumer rather than an addon one (decision 2115): the reference's own `UIOptionsFrame.xml`
     // — hidden, on the manifest for the addons that name it — reads `cameraSmoothStyle` and

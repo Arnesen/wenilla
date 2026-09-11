@@ -692,9 +692,11 @@ fn main() {
         println!(
             "\n  what was WARNED about ({addons} addons raised at least one, by addon count):"
         );
-        for (w, count) in rows.into_iter().take(12) {
-            println!("    {count:>4}  {w}");
-        }
+        // Through `ranked`, not a bare `take(12)`: this list is a queue like every other one here,
+        // and a silent cut reads as "that is the whole list" (1242's rule, which this block was
+        // written outside of). It cost a measurement — asking the corpus how many `SetPoint`
+        // targets fail to resolve, the answer sat below the cut and the column read zero.
+        ranked(rows, 12);
     }
 
     // The distribution, because a mean would hide the shape.

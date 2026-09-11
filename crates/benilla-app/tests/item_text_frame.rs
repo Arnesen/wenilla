@@ -150,8 +150,14 @@ fn a_letter_reads_with_the_creator_tail() {
 /// The scrollbar track (the ref's black `$parentMiddle` strip) belongs in the scrollbar column,
 /// right of the page — regression for the black bar over the parchment: the ref declares the
 /// ARTWORK layer before BACKGROUND because `Middle` anchors to `Top` by name and anchors resolve
-/// at SetPoint time; a reordered transcription silently fell back to the parent. The warning
-/// check pins the tripwire that now catches any such unresolved named anchor at load.
+/// at SetPoint time; a reordered transcription silently fell back to the parent.
+///
+/// **The tripwire beside it is the whole stock chain's, and it moved with decision 2176.** An
+/// unresolvable `relativeTo` used to anchor to the parent and warn; a *Lua* one now raises
+/// (`0x87ccd4`) and an *XML* one is reported and skipped the way `0x767800` reports and skips it
+/// (`"Couldn't find relative frame: %s"`, `0x878440`). So the assertion is on the new spelling —
+/// zero of those over every file the player's own chain loads — and the raise's own tripwire is
+/// `take_errors()` at the end, which a raise inside any `OnLoad` would land in.
 #[test]
 fn the_scrollbar_track_sits_right_of_the_page() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -160,7 +166,7 @@ fn the_scrollbar_track_sits_right_of_the_page() {
     let unresolved: Vec<String> = s
         .warnings()
         .into_iter()
-        .filter(|w| w.contains("does not resolve"))
+        .filter(|w| w.contains("Couldn't find relative frame"))
         .collect();
     assert!(unresolved.is_empty(), "unresolved anchors: {unresolved:#?}");
 

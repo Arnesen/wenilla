@@ -118,6 +118,8 @@ pub(super) fn connected(
     name: String,
     billing_time_rested: u32,
     tutorial_flags: Option<Vec<u8>>,
+    addon_info: Option<Vec<String>>,
+    addon_reply: &mut crate::net::AddonInfoReply,
     self_guid: &mut SelfGuid,
     status: &mut NetStatus,
     names: &mut NameCache,
@@ -129,6 +131,9 @@ pub(super) fn connected(
     info!("net: in world as {name} (guid {guid})");
     // Our own name came with the login — seed the cache so "player" never queries.
     names.insert_player(guid, name, None);
+    // Seated before the world-entry UI load reads it (2175), and overwritten every login so a
+    // server that answers nothing cannot inherit the previous one's verdict.
+    addon_reply.0 = addon_info;
     entered_world.write(EnteredWorldMessage {
         billing_time_rested,
         tutorial_flags,

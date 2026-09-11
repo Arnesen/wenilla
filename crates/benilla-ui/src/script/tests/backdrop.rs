@@ -132,7 +132,7 @@ fn get_backdrop_round_trips_through_set_backdrop() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "BC2Plate")
-        f:SetPoint("CENTER")
+        f:SetPoint("CENTER", 0, 0)
         f:SetWidth(54); f:SetHeight(54)
         f:SetBackdrop({ bgFile = "bg", edgeFile = "edge", tile = true,
                         tileSize = 32, edgeSize = 32,
@@ -169,7 +169,7 @@ fn set_backdrop_nil_tears_down() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Plate2")
-        f:SetPoint("CENTER")
+        f:SetPoint("CENTER", 0, 0)
         f:SetWidth(100); f:SetHeight(100)
         f:SetBackdrop({ bgFile = "bg", edgeFile = "edge" })
         f:SetBackdrop(nil)

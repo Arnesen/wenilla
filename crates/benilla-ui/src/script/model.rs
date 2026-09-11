@@ -64,6 +64,17 @@ pub(crate) struct Model {
     /// Every discovered addon, in load order — the AddOn API's registry, filled by the host at
     /// world entry ([`super::UiScript::register_addons`]). See [`super::addon`].
     pub(crate) addons: Vec<super::addon::AddOnInfo>,
+    /// **The Lua index space** — positions into [`Self::addons`], `## Title`-sorted and
+    /// hidden-filtered (decision 2175). NOT the registry: the reference keeps two structures and
+    /// they are different permutations of different sets (wow-re
+    /// `system/ui/scratch/addon-registry-scan-and-order.md` §7).
+    pub(crate) addon_index: Vec<usize>,
+    /// The lowercased names `SMSG_ADDON_INFO` marked `status = 2`, or **`None` when no reply has
+    /// arrived this session** — and `None` is why [`Self::addon_index`] can be legitimately empty
+    /// (decision 2175). `[0xbe1b90]` is zeroed by the registry reset `0x51fad1` and written
+    /// nowhere but the reply's own rebuild, so `GetNumAddOns()` really is 0 until the server
+    /// answers.
+    pub(crate) addon_info_hidden: Option<Vec<String>>,
     /// The AddOns folder, so `LoadAddOn` can read an addon's files from inside a Lua binding.
     pub(crate) addons_root: Option<std::path::PathBuf>,
     /// The host's reader for a chain-sourced addon's files (`AddOnInfo::chain`), by
@@ -1812,6 +1823,8 @@ impl Model {
     pub(crate) fn new() -> Model {
         Model {
             addons: Vec::new(),
+            addon_index: Vec::new(),
+            addon_info_hidden: None,
             addons_root: None,
             addons_chain_reader: None,
             measurer: None,

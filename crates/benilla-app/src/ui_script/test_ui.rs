@@ -272,6 +272,13 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
         local named = {}
         for name, row in pairs(UIPARENT_MANAGED_FRAME_POSITIONS) do
             if not row.isVar then table.insert(named, name) end
+            -- …and every row's ANCHOR TARGET (`anchorTo`, l.1668), which is a different set: the
+            -- keys are the frames being MOVED, the targets are what they move relative to, and
+            -- several targets (`ActionButton1`, `MainMenuBarArtFrame`) are declared in files a
+            -- one-window kit never loads. An unresolvable name is a RAISE now (decision 2176), so
+            -- a target the kit is missing aborts `UIParent_ManageFramePositions` mid-pass where it
+            -- used to anchor to the parent and carry on.
+            if row.anchorTo then table.insert(named, row.anchorTo) end
         end
         benilla_seat(named)
         for _, name in ipairs({ "SlidingActionBarTexture0", "SlidingActionBarTexture1" }) do

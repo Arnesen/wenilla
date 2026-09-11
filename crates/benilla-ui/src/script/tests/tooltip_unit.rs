@@ -512,7 +512,7 @@ fn minimap_blip_tooltip_shows_and_fades() {
     s.run(
         r#"
         local up = CreateFrame("Frame", "UIParent")
-        up:SetPoint("BOTTOMLEFT"); up:SetWidth(800); up:SetHeight(600)
+        up:SetPoint("BOTTOMLEFT", 0, 0); up:SetWidth(800); up:SetHeight(600)
     "#,
     )
     .unwrap();

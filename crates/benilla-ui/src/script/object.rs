@@ -26,6 +26,7 @@ use crate::widget::{FrameHandle, FrameKind};
 
 // The frame method-table clusters — split out purely for size (each module's own doc says what
 // lives there); this file keeps the shared id/handle plumbing, `install`, and `CreateFrame`.
+pub(crate) mod anchor_args;
 mod events_regions;
 mod frame_state;
 mod layout_methods;
@@ -693,6 +694,25 @@ pub(super) fn create_frame(
             )));
         }
     }
+
+    // **A leading `$parent` in the NAME is expanded, here as in XML.** `CreateFrame 0x7060b0`
+    // does not store the name itself: it builds a synthetic node, sets `name=` on it
+    // (`0x706225 push 0x838090 "name"` → `0x70622d` SetAttribute) alongside `parent=` and
+    // `inherits=`, and hands it to the XML frame builder `0x6ee280` with the parent object in
+    // `edx` — so the name reaches `CScriptRegion::SetName 0x76c650` by exactly the route an XML
+    // `name=` does, and `0x76c691` is one of the expander's two call sites (wow-re
+    // `name-string-widget-resolution.md` §5/§6).
+    //
+    // The base is the frame's **parent's** first named ancestor — the same walk `$parent` in a
+    // `relativeTo` takes, one link higher than the anchoring frame's own.
+    //
+    // Not academic: `FonzAppraiser` names every widget it builds this way (`"$parentDropdown"..n`,
+    // `"$parentCloseButton"`, ~30 sites), and until decision 2176 made an unresolvable anchor
+    // raise, the unexpanded name only showed up as a warning nobody read.
+    let name = name.map(|n| {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        crate::framexml::resolve_name(&n, &parent_token_base(&model, parent_handle))
+    });
 
     // Create in the arena, mint the id, seed a default layout input. All under one write borrow.
     let id = {

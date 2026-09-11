@@ -975,10 +975,52 @@ impl Loader<'_> {
     /// Returns the frame's own name (`None` if it is anonymous) and the name of its nearest
     /// **named** ancestor — rf27 rule 3's walk, with [`framexml::DEFAULT_PARENT_NAME`] when there
     /// is none.
-    /// Can a `relativeTo` name resolve right now — a frame in the arena or a named region?
-    pub(super) fn anchor_target_exists(&self, name: &str) -> bool {
-        let model = self.model();
-        model.arena.lookup(name).is_some() || model.region_names.contains_key(name)
+    pub(super) fn apply_anchor(&mut self, d: DeferredAnchor, may_defer: bool) {
+        let rel: Value = match d.args.1.as_deref() {
+            Some(name) => {
+                match crate::script::object::anchor_args::resolve_xml_relative_to(self.lua(), name)
+                {
+                    Some(t) => Value::Table(t),
+                    // Nothing by that name YET — a target declared later in the enclosing frame's
+                    // subtree. Hold it until the subtree is complete (`deferred_anchors`) and try
+                    // once more; a miss THEN is a real miss and takes the reference's leg.
+                    None if may_defer => {
+                        self.deferred_anchors.push(d);
+                        return;
+                    }
+                    None => {
+                        self.report
+                            .warnings
+                            .push(format!("{}: Couldn't find relative frame: {name}", d.dbg));
+                        return;
+                    }
+                }
+            }
+            // No `relativeTo=`: `ebx` still holds `[ebp-0x14]`, the layout parent default that
+            // `0x76785b call [edx+0xc]` (= `0x76c6e0`) seeded before the `<Anchor>` loop. A frame
+            // with no parent gets the screen root there, which is what a Lua `nil` means here.
+            None => match d
+                .wrapper
+                .call_method::<Option<Table>>("GetParent", ())
+                .ok()
+                .flatten()
+            {
+                Some(t) => Value::Table(t),
+                None => Value::Nil,
+            },
+        };
+        let DeferredAnchor {
+            wrapper,
+            region,
+            args: (point, _, rel_point, x, y),
+            dbg,
+        } = d;
+        let args = (point, rel, rel_point, x, y);
+        if region {
+            self.call_region(&wrapper, "SetPoint", args, &dbg);
+        } else {
+            self.call(&wrapper, "SetPoint", args, &dbg);
+        }
     }
 
     /// Apply the anchors deferred since `mark` (the enclosing `decorate`'s entry), in order. A
@@ -986,11 +1028,7 @@ impl Loader<'_> {
     pub(super) fn drain_deferred_anchors(&mut self, mark: usize) {
         let pending: Vec<DeferredAnchor> = self.deferred_anchors.drain(mark..).collect();
         for d in pending {
-            if d.region {
-                self.call_region(&d.wrapper, "SetPoint", d.args, &d.dbg);
-            } else {
-                self.call(&d.wrapper, "SetPoint", d.args, &d.dbg);
-            }
+            self.apply_anchor(d, false);
         }
     }
 

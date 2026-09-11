@@ -218,6 +218,12 @@ pub enum SessionEvent {
         /// The tutorial bank, when `SMSG_TUTORIAL_FLAGS` landed during the login handshake
         /// (decision 1976); `None` when it will arrive in the world stream instead.
         tutorial_flags: Option<Vec<u8>>,
+        /// The addons `SMSG_ADDON_INFO` hid from the Lua index space, or **`None` when the server
+        /// never answered our addon block** (decision 2175) — and the two are different: an empty
+        /// list is a reply that hid nothing, `None` is the state in which the reference's
+        /// `GetNumAddOns()` answers 0. It rides the connect event for the same reason the billing
+        /// minutes do: the reply lands during the handshake and nothing downstream can ask again.
+        addon_info: Option<Vec<String>>,
     },
     /// The server **refused** the character we picked (`SMSG_CHARACTER_LOGIN_FAILED`) — we are not
     /// in the world and never were, whatever [`Self::Connected`] said a moment ago.

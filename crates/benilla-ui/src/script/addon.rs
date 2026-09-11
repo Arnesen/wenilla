@@ -91,6 +91,17 @@ pub struct AddOnInfo {
     /// `## Interface` as the client parses it (`Toc::interface_version` — the leading integer,
     /// `0` when the line is absent). What the version gate compares (decision 1292).
     pub interface: u32,
+    /// **The server excluded this record from the Lua index space** — `[rec+0x29]`, which
+    /// `AddOn_ReadAddonInfoReply 0x51da70` sets to 1 for every `SMSG_ADDON_INFO` record whose
+    /// `status` byte is **2** (`0x51db84`), and which the array rebuild then drops (`0x51dc4f
+    /// mov al,[ebx+0x29]` / `0x51dc54 jne`). It is written nowhere else but the ctor's zero
+    /// (`0x52059f`), so an addon the reply never covers stays visible.
+    ///
+    /// The reply covers exactly the `## Secure:` addons, in the order the client sent them, and
+    /// the 2006 retail capture answers `status = 2` for all twelve — which is why the stock
+    /// AddOns list shows the player's addons and none of Blizzard's (wow-re
+    /// `system/net/scratch/cmsg-auth-session-addon-block.md` §6).
+    pub hidden: bool,
     /// The addon's files sit in the player's patch chain, not the AddOns folder — Blizzard's own
     /// LoadOnDemand addons (`Blizzard_TrainerUI` and its eleven siblings), which the reference
     /// loads through the same `LoadAddOn` path as a player's (1957). Read through the host's
@@ -163,11 +174,15 @@ fn addon_key(lua: &Lua, model: &Model, key: &Value, usage: &'static str) -> mlua
         // `_ftol 0x40a2b0` truncates toward zero (not `floor`), then `dec eax`, then an unsigned
         // compare — so the whole out-of-range family collapses onto one `u32` bound test.
         let index0 = (n as i64 as i32).wrapping_sub(1) as u32 as usize;
-        return match index0 < model.addons.len() {
-            true => Ok(AddonKey::Index(index0)),
-            false => Err(mlua::Error::RuntimeError(format!(
+        // **The index space is NOT the registry** (decision 2175). `0x51df00` reads
+        // `[[0xbe1b94] + 4*idx]` — the flat, Title-sorted, hidden-filtered name array — and its
+        // bound is that array's own count `[0xbe1b90]`, which `GetNumAddOns 0x51def0` returns.
+        // The registry list is a different order over a different set.
+        return match model.addon_index.get(index0) {
+            Some(&row) => Ok(AddonKey::Index(row)),
+            None => Err(mlua::Error::RuntimeError(format!(
                 "AddOn index must be in the range of 1 to {}",
-                model.addons.len()
+                model.addon_index.len()
             ))),
         };
     }
@@ -177,6 +192,44 @@ fn addon_key(lua: &Lua, model: &Model, key: &Value, usage: &'static str) -> mlua
         Value::String(s) => Ok(AddonKey::Name(s.to_string_lossy())),
         _ => Err(mlua::Error::RuntimeError(usage.into())),
     }
+}
+
+/// **Rebuild the Lua index space** — the tail block `[0x51dc30, 0x51dcdf)` of
+/// `AddOn_ReadAddonInfoReply 0x51da70`, and the only place that array is ever built
+/// (decision 2175, wow-re `system/ui/scratch/addon-registry-scan-and-order.md` §7).
+///
+/// Three properties, all byte-read, all easy to get wrong:
+///
+/// - **The set is filtered.** `0x51dc4f mov al,[ebx+0x29]` / `0x51dc54 jne` drops every record the
+///   server marked `status = 2`. On a stock install that is all twelve `Blizzard_*` addons, which
+///   is why the AddOns list shows only the player's own.
+/// - **The order is by `## Title:`, not by folder name.** Comparator `0x51deb0` resolves both
+///   sides through `AddOn_GetTitle 0x51df20` and falls back to the folder name only when the
+///   record declares no `Title` (`0x51ded0`/`0x51ded6`), then compares with `SStrCmpI` — case
+///   INSENSITIVE. A materially different permutation from the registry's.
+/// - **No reply, no array.** `[0xbe1b90]` starts at 0 and is written nowhere else, so
+///   `GetNumAddOns()` answers 0 until the server replies.
+///
+/// The reference's `qsort 0x73f727` is **not stable**, so two records with equal keys have no
+/// defined relative order there; ours is stable, which is a strict refinement of "undefined" and
+/// cannot disagree with a defined case.
+fn rebuild_index(model: &mut Model) {
+    let Some(hidden) = model.addon_info_hidden.as_ref() else {
+        model.addon_index = Vec::new(); // no reply yet — the reference's own empty array
+        return;
+    };
+    let hidden: std::collections::HashSet<&str> = hidden.iter().map(String::as_str).collect();
+    for a in &mut model.addons {
+        a.hidden = hidden.contains(a.name.to_ascii_lowercase().as_str());
+    }
+    let mut index: Vec<usize> = (0..model.addons.len())
+        .filter(|&i| !model.addons[i].hidden)
+        .collect();
+    index.sort_by_key(|&i| {
+        let a = &model.addons[i];
+        a.title.as_deref().unwrap_or(&a.name).to_ascii_lowercase()
+    });
+    model.addon_index = index;
 }
 
 /// A name → a position, folded. Names compare case-insensitively for the same reason dependency
@@ -252,7 +305,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumAddOns",
         lua.create_function(|lua, ()| {
-            Ok(lua.app_data_ref::<Model>().expect("model").addons.len())
+            // `0x51def0` is six bytes: `return [0xbe1b90]` — the count of the SORTED array, not the
+            // registry size (decision 2175).
+            Ok(lua
+                .app_data_ref::<Model>()
+                .expect("model")
+                .addon_index
+                .len())
         })?,
     )?;
 
@@ -817,6 +876,26 @@ impl super::UiScript {
         model.addons_root = root;
         model.addons_saved_account = saved_account;
         model.addons_saved_character = saved_character;
+        // The reference builds the registry at glue login and the Lua array only when the server
+        // answers; our registry is built at world entry, by which time the reply has long landed.
+        // So the rebuild runs here, off whatever the reply said — and does nothing at all if no
+        // reply ever came, which is the reference's own pre-reply state.
+        rebuild_index(&mut model);
+    }
+
+    /// **The `SMSG_ADDON_INFO` (`0x2ef`) verdict** — the names the server answered `status = 2`
+    /// for, which the client stores as `[rec+0x29] = 1` and which the Lua index array then drops
+    /// (decision 2175).
+    ///
+    /// The reply carries no count and no names: it is one record per `## Secure:` addon, in the
+    /// order the client itself sent them in `CMSG_AUTH_SESSION`, so the caller does the pairing
+    /// and hands us the names (wow-re `system/net/scratch/cmsg-auth-session-addon-block.md` §6).
+    /// Calling this with an empty slice is meaningful and different from never calling it: it
+    /// records that a reply arrived and hid nothing.
+    pub fn note_addon_info_reply(&mut self, hidden: &[String]) {
+        let mut model = self.model_mut();
+        model.addon_info_hidden = Some(hidden.iter().map(|n| n.to_ascii_lowercase()).collect());
+        rebuild_index(&mut model);
     }
 
     /// Execute one addon's saved-variables files, at the startup walk's verified position — the

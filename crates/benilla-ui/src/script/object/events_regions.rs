@@ -520,6 +520,20 @@ fn create_region(
 
     let wrapper = region_wrapper(lua, id)?;
     if let Some(name) = name {
+        // **A leading `$parent` in the NAME is expanded, here as in XML** — `CreateTexture
+        // 0x773a20` and `CreateFontString 0x773c30` build a synthetic node carrying
+        // `name=<the Lua string>` and read it back through the same `GetAttribute(node, "name")` →
+        // `CScriptRegion::SetName 0x76c650` the XML path uses, and `0x76c691` is one of that
+        // expander's two call sites (wow-re `name-string-widget-resolution.md` §5/§6, whose
+        // `name=` reader census names `0x773ba1` and `0x773dc4` — the addresses *inside* these two
+        // bindings). A region's `$parent` is its OWNER frame, so the walk starts there.
+        //
+        // `pfQuest/browser.lua:723` is `pfBrowser.input:CreateTexture("$parentSearchIcon",
+        // "OVERLAY")`, and every named widget FonzAppraiser builds is this idiom.
+        let name = {
+            let model = lua.app_data_ref::<Model>().expect("model");
+            crate::framexml::resolve_name(&name, &super::parent_token_base(&model, Some(owner)))
+        };
         publish_global(lua, &name, &wrapper)?;
         // Publish into the region-name registry too (first-wins, the frame rule) — this is what
         // lets a sibling region's SetPoint name us as its `relativeTo` (see `resolve_target`).

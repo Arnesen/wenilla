@@ -397,7 +397,11 @@ fn corpus(
         .filter_map(|e| e.file_name().to_str().map(str::to_owned))
         .filter(|n| manifest_path(root, n).is_some())
         .collect();
-    names.sort();
+    // **The live walk's order, not a second opinion.** This used to be a bare `names.sort()`,
+    // a private copy of the ordering `ui_script::addons` decides — so the instrument could
+    // measure a walk the client does not perform. It calls the one definition now, which is what
+    // makes a `--together` row about shared-library provenance mean anything.
+    crate::ui_script::addons::sort_by_directory_order(&mut names);
 
     let installed: BTreeSet<String> = names.iter().map(|n| n.to_ascii_lowercase()).collect();
 
@@ -1867,6 +1871,16 @@ fn seat_a_session(script: &mut UiScript) {
     // — ten subscripts into a list that answered nothing, so `AucCore.lua:106` died on
     // `table index is nil` and took `BeanCounter`, `Informant`, `Enchantrix` and `FonzAppraiser`
     // with it. Five corpus addons read the tree; four of them at file scope.
+    // **The `SMSG_ADDON_INFO` reply, hiding nothing** (2175) — the same class of state correction
+    // as the two catalogues below and the empty spellbook above. The Lua index space
+    // (`GetNumAddOns`, and the index form of every AddOn verb) is built only when the server
+    // answers, and a surveyed VM is an IN-WORLD VM: the reference cannot be in the world without
+    // having had that reply. A survey that left it unanswered would measure a client whose
+    // `GetNumAddOns()` is 0, which is what AceAddon and AceLibrary scan.
+    //
+    // Empty, not the twelve: the corpus registry holds no `## Secure:` addon, so a real server
+    // would have nothing to hide here.
+    script.note_addon_info_reply(&[]);
     script.set_auction_item_classes(auction_item_classes());
 
     // **The talent tree.** `GetTalentInfo(tab, i)` answers off `Talent.dbc` × `TalentTab.dbc`;
@@ -3169,6 +3183,23 @@ pub fn normalise(raw: &str) -> String {
     normalise_error(raw)
 }
 
+/// The byte index of the next `'` that actually OPENS a quote — one with a non-alphanumeric on at
+/// least one side. See [`normalise_error`] step 2.
+fn quote_open(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = s[from..].find('\'') {
+        let i = from + rel;
+        let prev_word = i > 0 && b[i - 1].is_ascii_alphanumeric();
+        let next_word = b.get(i + 1).is_some_and(u8::is_ascii_alphanumeric);
+        if !(prev_word && next_word) {
+            return Some(i);
+        }
+        from = i + 1;
+    }
+    None
+}
+
 /// One load error with everything addon-specific removed, so two addons hitting the same wall
 /// produce the same string. See [`blockers`] for why the crudeness is the point.
 fn normalise_error(raw: &str) -> String {
@@ -3184,10 +3215,16 @@ fn normalise_error(raw: &str) -> String {
     // 2 · Every quoted name becomes `'X'` — the name is what varies between two addons that hit
     //     the same wall, and it is already ranked by `demand`. Both quote kinds, because mlua
     //     writes a chunk name as `[string "MyFrame:OnLoad"]`.
+    //
+    //     **An APOSTROPHE INSIDE A WORD is not a quote.** The reference's own diagnostics are
+    //     written in English — `Couldn't find region named '%s'`, `Couldn't find relative frame:
+    //     %s` — and the `'` in `Couldn't` opened a quote that then swallowed the rest of the line,
+    //     so the row read `Couldn'X'` and named nothing. Letters on both sides is the whole test:
+    //     a real opening quote is preceded by a space, a bracket or the line start.
     let squashed = core.replace('"', "'");
     let mut collapsed = String::with_capacity(squashed.len());
     let mut rest = squashed.as_str();
-    while let Some(open) = rest.find('\'') {
+    while let Some(open) = quote_open(rest) {
         collapsed.push_str(&rest[..open]);
         collapsed.push_str("'X'");
         match rest[open + 1..].find('\'') {

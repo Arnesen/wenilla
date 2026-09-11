@@ -4,11 +4,11 @@
 //! axis — frames grow per-kind method tables ([`super::statusbar`], [`super::button`]), regions
 //! grow paint/coords methods here.
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, MultiValue, Table, Value};
 
+use super::object::anchor_args::{parse_set_point, resolve_rel_target, UNNAMED};
 use super::object::{
-    anchor_bits_eq, anchor_retarget_is_structural, as_f32, decode_id, id_to_lud, point_from_str,
-    NamedTarget,
+    anchor_bits_eq, anchor_retarget_is_structural, decode_id, id_to_lud, NamedTarget,
 };
 use super::{
     Model, REG_FONTSTRING_META, REG_FONTSTRING_METHODS, REG_REGION_META, REG_REGION_METHODS,
@@ -716,77 +716,27 @@ pub(crate) fn implicit_creation_anchor_lua(lua: &Lua, wrapper: &Table) -> mlua::
     Ok(())
 }
 
-/// Phase 1 of a region's `relativeTo`/`SetAllPoints` target — the frame twin is
-/// `object::layout_methods`' `prefetch_relative_to`, and the reason is the same: the reference
-/// reads `_G` with a *gettable*, so the read must happen with **no** `Model` guard alive
-/// ([`super::object::NamedTarget`]).
+/// The two things the shared ladder needs off a **region** receiver, read under one short `Model`
+/// borrow that is dropped before the `_G` read (`super::object::anchor_args`'s contract, and the
+/// frame twin's `frame_ladder_context`): the name the reference puts in its error strings, and the
+/// name a leading `$parent` expands to.
 ///
 /// A region's `$parent` is its **owner** frame (the region's own `+0x9c`), so the walk starts
-/// there rather than one link higher.
-pub(super) fn prefetch_region_target(
-    lua: &Lua,
-    target: &Value,
-    rh: RegionHandle,
-) -> Option<NamedTarget> {
-    let Value::String(s) = target else {
-        return None;
-    };
-    let Ok(raw) = s.to_str() else {
-        return Some(NamedTarget::unreadable());
-    };
-    let base = {
-        let model = lua.app_data_ref::<Model>().expect("model");
-        let owner = model.arena.region(rh).map(|r| r.owner);
-        super::object::parent_token_base(&model, owner)
-    };
-    Some(super::object::prefetch_named_target(
-        lua,
-        raw.as_ref(),
-        Some(&base),
-    ))
-}
-
-/// Resolve a `SetPoint`/`SetAllPoints` `relativeTo` argument (a frame/region wrapper table, a
-/// widget name prefetched by [`prefetch_region_target`], or nil) to a layout id, defaulting to
-/// `owner` when absent/unresolved.
-pub(super) fn resolve_target(
-    model: &mut Model,
-    target: &Value,
-    named: Option<&NamedTarget>,
-    owner: u32,
-) -> u32 {
-    match target {
-        Value::Table(t) => decode_id(t)
-            .ok()
-            .filter(|id| model.id_to_frame.contains_key(id) || model.id_to_region.contains_key(id))
-            .unwrap_or(owner),
-        Value::String(_) => {
-            // The client's global namespace is ONE, so a frame and a region answer the same
-            // lookup — the real XML anchors regions to sibling regions by name too (merchant
-            // label plate → `$parentSlot`, and that `$parent` is expanded on this path).
-            let nt = named.expect("a String argument is prefetched");
-            let hit = super::object::resolve_named_target(model, nt);
-            hit.unwrap_or_else(|| {
-                // The reference RAISES on this leg (`0x87ccd4`); ours warns and falls back to the
-                // owner — the frame twin carries the why, and decision 2105 the deferral. The
-                // warning earns its keep either way: a *named* target that doesn't resolve is
-                // almost always a bug (a typo, or an XML forward reference — ItemTextFrame's
-                // scrollbar track landed on the parchment this way).
-                let who = model
-                    .id_to_frame
-                    .get(&owner)
-                    .and_then(|&h| model.arena.frame(h))
-                    .and_then(|f| f.name.clone())
-                    .unwrap_or_else(|| "<anonymous>".into());
-                model.record_warning(format!(
-                    "SetPoint(region of {who}): relativeTo '{}' does not resolve — anchored to the owner",
-                    nt.name
-                ));
-                owner
-            })
-        }
-        _ => owner,
-    }
+/// there rather than one link higher. Its own name comes back out of `Model::region_names` — the
+/// registry is name→id, and this is the only place that wants the inverse, so it is a scan on the
+/// **error path** rather than a second map kept in step.
+pub(super) fn region_ladder_context(lua: &Lua, rh: RegionHandle) -> (String, String) {
+    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let id = model.region_id(rh);
+    let who = model
+        .region_names
+        .iter()
+        .find(|(_, &v)| v == id)
+        .map(|(n, _)| n.clone())
+        .unwrap_or_else(|| UNNAMED.to_string());
+    let owner = model.arena.region(rh).map(|r| r.owner);
+    let base = super::object::parent_token_base(&model, owner);
+    (who, base)
 }
 
 /// Bit-exact equality for a region's explicit size — the layout gate's own lens
@@ -802,45 +752,22 @@ pub(super) fn size_bits_eq(a: Option<(f32, f32)>, b: Option<(f32, f32)>) -> bool
     }
 }
 
-/// `Region:SetPoint(point [, relativeTo [, relativePoint]] [, x, y])` — the region twin of
-/// [`super::object`]'s frame `SetPoint`, writing [`super::RegionData::anchors`]. The overload is
-/// disambiguated by argument *type* exactly as the frame version.
-pub(super) fn region_set_point(
-    lua: &Lua,
-    this: &Table,
-    point: &str,
-    rest: [Value; 4],
-) -> mlua::Result<()> {
-    let point = point_from_str(point)
-        .ok_or_else(|| mlua::Error::runtime(format!("SetPoint: unknown point '{point}'")))?;
+/// `Region:SetPoint(point [, relativeTo [, relativePoint]] [, x, y])` — the *same* binding as the
+/// frame's (`0x7a2540` is registered once, on `CScriptRegion`), so the argument ladder and every
+/// one of its raises come from [`super::object::anchor_args`]; this side supplies only what the
+/// reference reads off a region — the owner as the layout parent, and
+/// [`super::RegionData::anchors`] as the store.
+pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> mlua::Result<()> {
     let rh = region_handle_of(lua, this)?;
-    // The `_G` read runs before the guard — see `prefetch_region_target`.
-    let named = rest
-        .first()
-        .and_then(|v| prefetch_region_target(lua, v, rh));
+    let (who, base) = region_ladder_context(lua, rh);
+    // The `_G` read inside the ladder runs with no model guard alive — see `region_ladder_context`.
+    let p = parse_set_point(lua, args, &who, &base)?;
+
     let mut model = lua.app_data_mut::<Model>().expect("model");
+    let me = model.region_id(rh);
     let owner = region_owner_id(&mut model, rh);
-
-    let mut cursor = 0usize;
-    let rel_to_id: u32 = match rest.first() {
-        Some(Value::Table(_) | Value::String(_) | Value::Nil) => {
-            cursor = 1;
-            resolve_target(&mut model, &rest[0], named.as_ref(), owner)
-        }
-        // A leading number is the `SetPoint(point, x, y)` overload — cursor stays at 0.
-        _ => owner,
-    };
-
-    let mut rel_point = point;
-    if let Some(Value::String(s)) = rest.get(cursor) {
-        if let Some(p) = s.to_str().ok().and_then(|n| point_from_str(n.as_ref())) {
-            rel_point = p;
-            cursor += 1;
-        }
-    }
-
-    let x = rest.get(cursor).map(as_f32).unwrap_or(0.0);
-    let y = rest.get(cursor + 1).map(as_f32).unwrap_or(0.0);
+    let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, owner)?;
+    let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
 
     let data = model.region_data.entry(rh).or_default();
     let new = Anchor::new(point, rel_to_id, rel_point, x, y);

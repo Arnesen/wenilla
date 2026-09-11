@@ -382,9 +382,9 @@ fn a_width_read_in_the_tick_that_set_the_text_is_not_zero() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Host")
-        f:SetPoint("TOPLEFT"); f:SetWidth(400); f:SetHeight(300)
+        f:SetPoint("TOPLEFT", 0, 0); f:SetWidth(400); f:SetHeight(300)
         local fs = f:CreateFontString("Label", "ARTWORK")
-        fs:SetPoint("TOPLEFT")
+        fs:SetPoint("TOPLEFT", 0, 0)
         -- the corpus idiom: set, then measure, in one statement sequence
         fs:SetText("Onewarrior")
         Answer = fs:GetStringWidth()
@@ -408,9 +408,9 @@ fn with_no_engine_installed_the_round_trip_is_still_the_only_answer() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Host")
-        f:SetPoint("TOPLEFT"); f:SetWidth(400); f:SetHeight(300)
+        f:SetPoint("TOPLEFT", 0, 0); f:SetWidth(400); f:SetHeight(300)
         local fs = f:CreateFontString("Label", "ARTWORK")
-        fs:SetPoint("TOPLEFT")
+        fs:SetPoint("TOPLEFT", 0, 0)
         fs:SetText("Onewarrior")
         Answer = fs:GetStringWidth()
     "#,
@@ -435,9 +435,9 @@ fn resolve_closes_the_round_trip_when_an_engine_is_installed() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Host")
-        f:SetPoint("TOPLEFT"); f:SetWidth(400); f:SetHeight(300)
+        f:SetPoint("TOPLEFT", 0, 0); f:SetWidth(400); f:SetHeight(300)
         local fs = f:CreateFontString("Label", "ARTWORK")
-        fs:SetPoint("TOPLEFT")
+        fs:SetPoint("TOPLEFT", 0, 0)
         fs:SetWidth(35)                 -- a declared width ⇒ the two extents differ
         fs:SetText("Onewarrior")        -- 70 natural, wraps to 2 rows inside 35
     "#,
@@ -469,9 +469,9 @@ fn a_synchronous_measure_satisfies_the_batch_request_too() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Host")
-        f:SetPoint("TOPLEFT"); f:SetWidth(400); f:SetHeight(300)
+        f:SetPoint("TOPLEFT", 0, 0); f:SetWidth(400); f:SetHeight(300)
         local fs = f:CreateFontString("Label", "ARTWORK")
-        fs:SetPoint("TOPLEFT")
+        fs:SetPoint("TOPLEFT", 0, 0)
         fs:SetText("hello")
         Answer = fs:GetStringWidth()
     "#,
@@ -505,9 +505,9 @@ fn a_settled_region_is_refound_after_each_measure_input_write() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Host")
-        f:SetPoint("TOPLEFT"); f:SetWidth(400); f:SetHeight(300)
+        f:SetPoint("TOPLEFT", 0, 0); f:SetWidth(400); f:SetHeight(300)
         local fs = f:CreateFontString("Label", "ARTWORK")
-        fs:SetPoint("TOPLEFT")
+        fs:SetPoint("TOPLEFT", 0, 0)
         fs:SetText("one")
     "#,
     )

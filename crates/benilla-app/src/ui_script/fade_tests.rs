@@ -83,7 +83,7 @@ fn a_flash_alternates_then_stops() {
     // Parked until something asks — the whole point of the driver over UIParent's own OnUpdate.
     s.run(
         r#"Probe = CreateFrame("Frame", "BenillaFlashProbe", UIParent)
-           Probe:SetWidth(10) Probe:SetHeight(10) Probe:SetPoint("TOPLEFT")
+           Probe:SetWidth(10) Probe:SetHeight(10) Probe:SetPoint("TOPLEFT", 0, 0)
            UIFrameFlash(Probe, 0.05, 0.05, 0.3, nil, 0, 0)"#,
     )
     .unwrap();

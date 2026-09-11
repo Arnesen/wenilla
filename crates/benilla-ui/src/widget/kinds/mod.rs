@@ -259,19 +259,27 @@ impl KindState {
     }
 }
 
-/// A tooltip's anchor mode — the reference's `+0x318`, which `SetOwner` writes and
-/// `GetAnchorType 0x5313e0` reads back through the 9-entry `{value, name}` table `0x531530`
-/// (wow-re `bag-portrait-and-appendtext.md` §5; the mode ids in
-/// `hover-hide-and-tooltip-owner-law.md` §4).
+/// A tooltip's anchor mode — the reference's `+0x318`, which `SetOwner 0x5310d0` writes and
+/// `GetAnchorType 0x5313e0` reads back through the 9-entry jump table `.rdata 0x531530`.
 ///
-/// **All nine of the reference's modes are named here even though `SetOwner` cannot reach
-/// [`TooltipAnchor::Cursor`].** The variant is not decoration: mode 6 is the cursor-following
-/// tooltip, driven per frame by the class's own OnUpdate override `0x530b20` (re-anchor to
-/// `[root+0x1118/0x111c]`), and nine corpus files ask for it by name — `pfUI`'s tooltip, xpbar and
-/// chat modules, `pfQuest/browser.lua`, `TipBuddy`. Following the cursor is a mechanism this engine
-/// does not have yet, and 1203 says a verb is not stubbed to make a caller happy, so
-/// `tooltip::verbs`'s `SetOwner` still warns on the string and keeps its previous placement rather
-/// than silently pretending. Naming the variant is what keeps that gap visible instead of implicit.
+/// **The id order below is the jump table's, and it is NOT the setter's compare order** — a
+/// distinction that cost wow-re a contradiction between two of its own notes (`bag-portrait-and-
+/// appendtext.md` §5 had ids 2/3 and 4/5 swapped, because the setter compares `ANCHOR_BOTTOMRIGHT`
+/// third and stores it as id 3 while comparing `ANCHOR_BOTTOMLEFT` fourth and storing it as id 2;
+/// the getter's arm *bodies* sit in `.text` in that same compare order, so it reads as
+/// corroboration). Settled from three independent ends and fixed in place there:
+/// `system/ui/scratch/tooltip-cursor-anchor-law.md` §0/§0.1 (decision 2176).
+///
+/// **All nine modes are reachable.** `SetOwner`'s absent / non-string / unrecognised argument is
+/// mode **0** = [`TooltipAnchor::Left`], silently — the binding zero-initialises its local at
+/// `0x53120d` and neither the `lua_isstring` gate nor the compare chain's fall-through raises.
+///
+/// **What each mode does to the placement** (`0x52fe90`, read contiguously): a NULL owner returns
+/// at once; mode **8** returns at `0x52fead`, *before* the clear; every other mode reaches
+/// `0x52fec2 call 0x767ed0` (ClearAllPoints) — the mode-7 skip beside it is gated on an arg1
+/// `SetOwner`'s core always passes as 1 — and then modes **0..5** take the SetPoint jump table
+/// `0x52ffbc` while **6** and **7** stop there. So: 0..5 clear and point, 6 and 7 clear, 8 does
+/// neither.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TooltipAnchor {
     /// `ANCHOR_LEFT` — the plate's right edge on the owner's left.
@@ -287,18 +295,28 @@ pub enum TooltipAnchor {
     TopLeft,
     /// `ANCHOR_TOPRIGHT`.
     TopRight,
-    /// `ANCHOR_CURSOR` — mode 6, the plate re-anchored to the live cursor every frame. Reachable
-    /// in the reference and NOT constructible here; see the type doc.
+    /// `ANCHOR_CURSOR` — mode 6: the anchors are cleared, and then the plate is re-anchored to the
+    /// live cursor **every frame** by the class's own update override `0x530b20`
+    /// (`script::tooltip::cursor_anchor` carries the law). Nine corpus files ask for it — `pfUI`'s
+    /// tooltip, xpbar and chat modules, `pfQuest/browser.lua`, `TipBuddy`.
     Cursor,
-    /// `ANCHOR_NONE` — mode 7: the owner is recorded and no `SetPoint` is applied, leaving the
+    /// `ANCHOR_NONE` — mode 7: the anchors are cleared and no `SetPoint` follows, leaving the
     /// caller to point the plate (`GameTooltip_SetDefaultAnchor` does exactly that on the next
-    /// line). **The default**, because it is the mode the reference's own `SetOwner` core stores
-    /// when the caller passes no anchor string (`0x530012`), and the only one of the nine that is
-    /// true of a plate nothing has anchored yet.
+    /// line, and that clear is what keeps a stale owner anchor from winning the frame a caller
+    /// forgets to re-point).
+    ///
+    /// **The default here**, which is a benilla choice rather than a read byte: the ctor
+    /// `0x529240` does not write `+0x318` at all, so what a never-owned plate holds depends on the
+    /// allocator, and `GetAnchorType` answers `"ANCHOR_NONE"` for anything out of range
+    /// (`0x53146f ja` shares the id-7 arm). ANCHOR_NONE is therefore the answer that is right
+    /// under the widest reading, and it is the one `pfUI/modules/tooltip.lua:97` compares against.
+    /// It is **not** `SetOwner`'s omitted-argument default, which is mode 0 — see the type doc.
     #[default]
     None,
     /// `ANCHOR_PRESERVE` — mode 8: the owner is recorded and the previous placement is kept
-    /// (`0x52fe90` skips the anchor-apply). Stored like any other mode, so `GetAnchorType` answers
+    /// *including its anchors* — `0x52fe90` returns at `0x52fead`, before the ClearAllPoints that
+    /// every other mode reaches. That clear-vs-keep split is the entire difference between this
+    /// and [`TooltipAnchor::None`]. Stored like any other mode, so `GetAnchorType` answers
     /// `"ANCHOR_PRESERVE"` after one — the reference does not resolve it back to what it preserved.
     Preserve,
 }

@@ -435,9 +435,9 @@ fn a_size_less_pane_takes_its_files_rect_in_layout_units() {
     s.run(
         r#"
         a = CreateFrame("Model", "Sized", UIParent)
-        a:SetPoint("CENTER")
+        a:SetPoint("CENTER", 0, 0)
         b = CreateFrame("Model", "Authored", UIParent)
-        b:SetPoint("CENTER") b:SetWidth(50) b:SetHeight(20)
+        b:SetPoint("CENTER", 0, 0) b:SetWidth(50) b:SetHeight(20)
         a:SetModel("Interface\\Minimap\\MinimapArrow.mdx")
         b:SetModel("Interface\\Minimap\\MinimapArrow.mdx")
     "#,

@@ -137,7 +137,13 @@ pub(crate) fn apply_net_updates(
             MessageWriter<CharActionResultMessage>,
             MessageWriter<super::CharacterLoginFailedMessage>,
         ),
-        MessageWriter<EnteredWorldMessage>,
+        // **The world-entry pair** — the tuple is at Bevy's 16-element ceiling, and these two are
+        // one edge: the entry message, and the `SMSG_ADDON_INFO` verdict that the entry's own UI
+        // load reads before the first addon's file-scope code asks `GetNumAddOns()` (2175).
+        (
+            MessageWriter<EnteredWorldMessage>,
+            ResMut<crate::net::AddonInfoReply>,
+        ),
         MessageWriter<LoggedOutMessage>,
         MessageWriter<super::SpeedChangeMessage>,
         // The two server-authored mover edges the controller both *applies* and *answers*, paired to
@@ -544,7 +550,7 @@ pub(crate) fn apply_net_updates(
         mut worldports,
         (mut char_lists, mut realm_lists),
         (mut char_actions, mut char_login_failures),
-        mut entered_world,
+        (mut entered_world, mut addon_reply),
         mut logged_out,
         mut speed_changes,
         (mut move_modes, mut knockbacks),
@@ -620,11 +626,14 @@ pub(crate) fn apply_net_updates(
                 name,
                 billing_time_rested,
                 tutorial_flags,
+                addon_info,
             } => session::connected(
                 guid,
                 name,
                 billing_time_rested,
                 tutorial_flags,
+                addon_info,
+                &mut addon_reply,
                 &mut self_guid,
                 &mut status,
                 &mut names,

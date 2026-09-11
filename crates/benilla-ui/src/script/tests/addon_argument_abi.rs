@@ -31,6 +31,11 @@ fn seeded() -> UiScript {
         None,
         None,
     );
+    // **The index space exists only once the server has answered** (decision 2175). These tests
+    // are about the prologue's bounds and raises, and a bound of zero would make every one of
+    // them pass vacuously — so the fixture seats the reply an in-world VM has always had, hiding
+    // nothing.
+    s.note_addon_info_reply(&[]);
     s
 }
 

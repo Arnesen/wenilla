@@ -590,6 +590,144 @@ fn an_emptied_pooled_line_drops_its_stale_box_and_the_plate_still_contains_the_c
     assert!(s.take_errors().is_empty());
 }
 
+/// **`SetOwner`'s omitted `anchorType` is mode 0 = ANCHOR_LEFT**, and the clear-vs-keep split runs
+/// between NONE and PRESERVE, not between "points" and "doesn't".
+///
+/// 2142's open thread 1 predicted the opposite on both counts — a mode-7 default, and a NONE arm
+/// that must stop dropping anchors — and the wow-re §5 dispatched for the CURSOR mechanism refuted
+/// both at the bytes (`system/ui/scratch/tooltip-cursor-anchor-law.md` §0.2/§0.3/§2; decision
+/// 2176). What is actually there:
+///
+/// * `0x53120d` zeroes the binding's local mode before any compare, and `0x531214`'s
+///   `lua_isstring` gate jumps the whole `SStrCmpI` chain when arg 3 is absent, nil, a boolean or
+///   a table — so the answer is **0 = ANCHOR_LEFT**, silently, with no `luaL_error` anywhere in
+///   `[0x531221, 0x53133a)`. The core's `mov [+0x318],7` at `0x530012` is an unconditional
+///   pre-store `0x530031` overwrites; it survives only when the owner is NULL.
+/// * `0x52fe90` returns for mode **8** at `0x52fead`, *before* `0x52fec2 call 0x767ed0`, and the
+///   mode-7 skip beside that clear is gated on an arg1 `SetOwner`'s core always passes as 1. So
+///   every mode 0..7 clears, and only PRESERVE keeps the placement.
+#[test]
+fn set_owner_defaults_to_anchor_left_and_only_preserve_keeps_the_placement() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Plate = CreateFrame("GameTooltip", "Plate")
+        Owner = CreateFrame("Frame", "Owner")
+        Owner:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 300, 300)
+        Owner:SetWidth(40) Owner:SetHeight(40)
+        Plate:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)
+        Plate:SetWidth(50) Plate:SetHeight(20)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(s.eval::<f32>("return Plate:GetLeft()").unwrap(), 100.0);
+
+    // ANCHOR_PRESERVE (mode 8) is the ONE mode that leaves the plate alone.
+    s.run(r#"Plate:SetOwner(Owner, "ANCHOR_PRESERVE")"#)
+        .unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f32>("return Plate:GetLeft()").unwrap(),
+        100.0,
+        "mode 8 returns before the ClearAllPoints"
+    );
+    assert_eq!(s.eval::<i64>("return Plate:GetNumPoints()").unwrap(), 1);
+
+    // ANCHOR_NONE (mode 7) clears — which is what makes `GameTooltip_SetDefaultAnchor` safe.
+    s.run(r#"Plate:SetOwner(Owner, "ANCHOR_NONE")"#).unwrap();
+    assert_eq!(
+        s.eval::<i64>("return Plate:GetNumPoints()").unwrap(),
+        0,
+        "mode 7 reaches the clear: arg1 is always 1 from SetOwner's core"
+    );
+
+    // `SetOwner(f)` — no anchor string at all. Mode 0, and mode 0 PLACES: ANCHOR_LEFT pins the
+    // plate's BOTTOMRIGHT to the owner's TOPLEFT, so its right edge sits at the owner's left.
+    s.run(r#"Plate:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)"#)
+        .unwrap();
+    s.run("Plate:SetOwner(Owner)").unwrap();
+    assert_eq!(
+        s.eval::<String>("return Plate:GetAnchorType()").unwrap(),
+        "ANCHOR_LEFT",
+        "the omitted anchorType is the binding's zero-initialised local, mode 0"
+    );
+    s.resolve();
+    assert_eq!(
+        s.eval::<f32>("return Plate:GetLeft()").unwrap(),
+        250.0,
+        "the owner's left edge (300) less the plate's own 50 wide"
+    );
+
+    // An UNRECOGNISED string is the same silent mode 0 — the compare chain falls through with the
+    // local untouched, and raises nothing.
+    s.run(r#"Plate:SetOwner(Owner, "ANCHOR_SIDEWAYS")"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return Plate:GetAnchorType()").unwrap(),
+        "ANCHOR_LEFT"
+    );
+}
+
+/// **`ANCHOR_CURSOR` is a real ninth mode**, not a string to warn about (2142's open thread 2, and
+/// nine corpus files ask for it): mode 6 clears at `SetOwner` time like mode 7, and then the
+/// per-frame update `0x530b20` pins the plate's **BOTTOM** to the screen's **BOTTOMLEFT** at the
+/// cursor's absolute position, divided by the plate's own effective scale. See
+/// `script::tooltip::cursor_anchor`.
+#[test]
+fn anchor_cursor_follows_the_cursor_every_frame() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Tip = CreateFrame("GameTooltip", "Tip")
+        Host = CreateFrame("Frame", "Host")
+        Tip:SetOwner(Host, "ANCHOR_CURSOR")
+        Tip:AddLine("Copper Ore")
+        -- An explicit size, because this VM has no text measurer: the auto-size pre-pass leaves a
+        -- plate with no measured extents at its declared size, and the placement is what is under
+        -- test, not the width.
+        Tip:SetWidth(120) Tip:SetHeight(40)
+        Tip:Show()
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return Tip:GetAnchorType()").unwrap(),
+        "ANCHOR_CURSOR",
+        "the mode round-trips; it is no longer recorded as whatever it was placed by"
+    );
+    assert!(
+        !s.warnings().iter().any(|w| w.contains("ANCHOR_CURSOR")),
+        "a mode we honour is not warned about: {:?}",
+        s.warnings()
+    );
+
+    s.mouse_move(300.0, 200.0);
+    s.resolve();
+    let (left, right, bottom): (f32, f32, f32) = s
+        .eval("return Tip:GetLeft(), Tip:GetRight(), Tip:GetBottom()")
+        .unwrap();
+    assert_eq!(bottom, 200.0, "the plate's BOTTOM sits at the cursor");
+    assert!(
+        ((left + right) / 2.0 - 300.0).abs() < 0.001,
+        "centred horizontally on the cursor: {left}..{right}"
+    );
+
+    // It follows. The whole point of mode 6 is that no second SetOwner is needed.
+    s.mouse_move(120.0, 480.0);
+    s.resolve();
+    let (left, right, bottom): (f32, f32, f32) = s
+        .eval("return Tip:GetLeft(), Tip:GetRight(), Tip:GetBottom()")
+        .unwrap();
+    assert_eq!(bottom, 480.0);
+    assert!(
+        ((left + right) / 2.0 - 120.0).abs() < 0.001,
+        "{left}..{right}"
+    );
+}
+
 /// `GameTooltip:GetAnchorType()` — ONE string, the reference's own spelling, round-tripping
 /// whatever `SetOwner` was given (`0x5313e0`, table `0x854198`, argc 1, arity 1, kinds `(string)`,
 /// reading `[+0x318]` back through the name table `0x531530`).
@@ -625,7 +763,7 @@ fn tooltip_anchor_type_round_trips_every_reachable_mode() {
         "a plate nothing has owned is anchored to nothing"
     );
 
-    // The eight modes SetOwner accepts, each answered back verbatim — ANCHOR_PRESERVE included,
+    // All NINE modes SetOwner accepts, each answered back verbatim — ANCHOR_PRESERVE included,
     // which the reference stores like any other rather than resolving back to what it preserved.
     for mode in [
         "ANCHOR_RIGHT",
@@ -634,6 +772,7 @@ fn tooltip_anchor_type_round_trips_every_reachable_mode() {
         "ANCHOR_TOPLEFT",
         "ANCHOR_BOTTOMRIGHT",
         "ANCHOR_BOTTOMLEFT",
+        "ANCHOR_CURSOR",
         "ANCHOR_NONE",
         "ANCHOR_PRESERVE",
     ] {
@@ -656,20 +795,19 @@ fn tooltip_anchor_type_round_trips_every_reachable_mode() {
         "ANCHOR_LEFT"
     );
 
-    // An anchor SetOwner cannot honour is recorded as the ANCHOR_RIGHT it is actually PLACED by,
-    // never as the string it was handed — the getter reports the plate, not the request.
-    // `ANCHOR_CURSOR` is the live case (nine corpus files ask for it; mode 6 follows the cursor per
-    // frame and this engine has no such driver), and SetOwner warns rather than pretending.
-    s.run(r#"AnchorTip:SetOwner(AnchorOwner, "ANCHOR_CURSOR")"#)
+    // An anchor SetOwner does not recognise is the binding's zero-initialised local, mode 0 —
+    // silently, with no raise (`0x53120d`, and no `luaL_error` in the compare chain). Ours adds a
+    // warning the reference does not have, which is a diagnostic and not API surface.
+    s.run(r#"AnchorTip:SetOwner(AnchorOwner, "ANCHOR_SIDEWAYS")"#)
         .unwrap();
     assert_eq!(
         s.eval::<String>("return AnchorTip:GetAnchorType()")
             .unwrap(),
-        "ANCHOR_RIGHT"
+        "ANCHOR_LEFT"
     );
     assert!(
-        s.warnings().iter().any(|w| w.contains("ANCHOR_CURSOR")),
-        "the unhonoured anchor is warned, not silently taken: {:?}",
+        s.warnings().iter().any(|w| w.contains("ANCHOR_SIDEWAYS")),
+        "the unrecognised anchor is still reported to us: {:?}",
         s.warnings()
     );
 }

@@ -248,10 +248,10 @@ fn the_templated_close_button_hides_the_frame_it_sits_on() {
     s.run(
         r#"MyPanel = CreateFrame("Frame", "MyPanel", UIParent)
            MyPanel:SetWidth(200) MyPanel:SetHeight(100)
-           MyPanel:SetPoint("CENTER")
+           MyPanel:SetPoint("CENTER", 0, 0)
            MyPanel:Show()
            MyClose = CreateFrame("Button", "MyClose", MyPanel, "UIPanelCloseButton")
-           MyClose:SetPoint("TOPRIGHT")"#,
+           MyClose:SetPoint("TOPRIGHT", 0, 0)"#,
     )
     .unwrap();
     assert_eq!(

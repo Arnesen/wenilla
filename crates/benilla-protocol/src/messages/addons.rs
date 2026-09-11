@@ -59,6 +59,26 @@
 /// are byte-identical to the `modulus`/`tdata` array carried in vmangos and cmangos alike.
 pub const STANDARD_MODULUS_CRC: u32 = 0x4C1C_776D;
 
+/// **Which addons `SMSG_ADDON_INFO` hid** — the reply's `status` bytes paired back against the
+/// records we sent (decision 2175).
+///
+/// The reply carries no names: the client re-walks its own `## Secure:` list in the same order it
+/// sent it, so record *i* is `sent[i]`. A `status` of **2** is what makes the reference set
+/// `[rec+0x29] = 1` (`0x51db84`) and drop the addon from the Lua index space — on a stock install
+/// that is all twelve, which is why the AddOns list shows only the player's own addons.
+///
+/// A reply with **more** records than we sent is truncated to what we sent, and one with fewer
+/// simply says nothing about the rest: both are the server disagreeing with us about the block,
+/// and neither is worth failing a login over.
+pub fn hidden_from_reply(statuses: &[u8], sent: &[SecureAddon]) -> Vec<String> {
+    statuses
+        .iter()
+        .zip(sent)
+        .filter(|(status, _)| **status == 2)
+        .map(|(_, addon)| addon.name.to_string())
+        .collect()
+}
+
 /// One record in the addon block — a secure addon as the client describes it to the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SecureAddon<'a> {

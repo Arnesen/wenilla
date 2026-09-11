@@ -90,6 +90,9 @@ pub const SMSG_AUTH_RESPONSE: u16 = 0x01EE;
 /// in the world. benilla does not implement Warden; [`crate::WorldSession::connect`] refuses such
 /// a server at the handshake rather than entering a 30-second kick/reconnect cycle.
 pub const SMSG_WARDEN_DATA: u16 = 0x02E6;
+/// The server's answer to `CMSG_AUTH_SESSION`'s addon block — one record per `## Secure:` addon we
+/// sent, in the order we sent them, with no count and no names (decision 2175).
+pub const SMSG_ADDON_INFO: u16 = 0x02EF;
 pub const SMSG_COMPRESSED_UPDATE_OBJECT: u16 = 0x01F6;
 /// A zlib envelope holding a **batch of whole movement packets** (763, VERIFIED vmangos
 /// `Opcodes_1_12_1.h`). Not an edge case: vmangos moves a session onto this carrier the moment it

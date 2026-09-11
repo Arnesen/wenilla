@@ -462,13 +462,6 @@ fn root_from(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(ADDONS_DIR))
 }
 
-/// Every third-party addon we can see, in load order: alphabetical by folder name.
-///
-/// Alphabetical is **our** choice, not a fidelity claim — the reference enumerates its own record
-/// list and we have not established that order. What matters is that it is deterministic, so two
-/// runs on one machine load the same interface. Real ordering constraints between addons are
-/// expressed by `## Dependencies:` and honoured by [`load_third_party`]'s recursion, which is the
-/// mechanism the reference actually uses.
 /// The reference's own LoadOnDemand addons, as its `Interface\\AddOns\\` folder names them — the
 /// twelve `Blizzard_*` folders on a 1.12 install, each a `.pub` decoy on disk with the real files
 /// inside the archive (the InspectUI header in the manifest). Probed against the chain, so a
@@ -508,13 +501,119 @@ fn chain_addons() -> Vec<Addon> {
         .collect()
 }
 
+/// Every registered addon, in the reference's own **registration order**: the archive pass first,
+/// then the loose folders (decision 2175).
+///
+/// **Two passes, archive before loose, and the first pass wins a duplicate.** Byte-read in wow-re
+/// `system/ui/scratch/addon-registry-scan-and-order.md` §1–§5: `AddOn_ScanAddOnDir 0x51c760` runs
+/// `0x401470` over each mounted archive's `(listfile)` (`0x648fb0`, textual line order) and only
+/// then `0x42ad10`'s `FindFirstFileW` walk of the loose directories; both funnel into
+/// `0x51c9b0`, which probes the name hash and **returns immediately on a hit** (`0x51ca10`), and
+/// links each new record at the TAIL (`0x521ad0` mode 2 — a tail insert with no comparison of any
+/// kind, so registry order *is* registration order). §10 measures the consequence on a stock
+/// install: the twelve `Blizzard_*` `.toc`s are the only ones in any archive, so Blizzard occupies
+/// registry positions 1..12 and third-party always follows.
+///
+/// We had it the other way round — loose first, chain appended — which put our chain rows last and
+/// left a player folder named `Blizzard_TalentUI` registered *twice*, once from each source. The
+/// duplicate is the half with teeth: two records share one name, and every name lookup finds only
+/// the first.
+///
+/// The load walk barely notices (all twelve are `## LoadOnDemand: 1`, so `0x51f600` skips them),
+/// but the registry order is what the Lua index space is built from, and it is what decides which
+/// addon's copy of a shared global wins — the last writer, per §9.
 fn discover() -> Vec<Addon> {
-    let mut found = discover_folder();
-    found.extend(chain_addons());
+    // PASS 1 — the archive. `BLIZZARD_ADDONS` is in ascending name order, which is also the order
+    // the shipped `patch.MPQ` listfile happens to carry those twelve lines in (§10, measured). The
+    // note is explicit that a re-implementation may NOT rely on a listfile being sorted, so this is
+    // our deterministic choice for a set we enumerate ourselves, not a claim about the format.
+    let mut found = chain_addons();
+    // PASS 2 — the loose folders, minus anything the archive already registered.
+    let seen: HashSet<String> = found.iter().map(|a| a.name.to_ascii_lowercase()).collect();
+    found.extend(
+        discover_folder()
+            .into_iter()
+            .filter(|a| !seen.contains(&a.name.to_ascii_lowercase())),
+    );
     found
 }
 
-/// The player's own addons — every folder under the AddOns root with a `<Name>.toc`.
+/// **The reference's directory-listing order, as a sort key** — the one thing 2166 §7 left open.
+///
+/// The reference's loose-folder pass is `0x42ad10`'s kernel32 `FindFirstFileW`/`FindNextFileW`
+/// walk (wow-re `system/ui/scratch/addon-registry-scan-and-order.md`), and that walk **imposes no
+/// ordering of its own**: the client never sorts, so its walk order is whatever the host
+/// filesystem hands back. wow-re states the consequence outright — *"a re-implementation cannot be
+/// order-identical to the reference, because the reference's order is not a property of the
+/// reference."*
+///
+/// So there is no order to copy, and exactly one order worth choosing: **NTFS's**. It is the order
+/// every 1.12 install actually walked in, because that is the filesystem the client shipped on, and
+/// it is therefore the order the whole vanilla addon corpus was written and tested against. A
+/// directory's `$I30` index is a B-tree sorted by collation rule `COLLATION_FILE_NAME`, which
+/// compares UTF-16 code units after mapping each through the volume's `$UpCase` table, and breaks a
+/// case-insensitive tie with a case-sensitive compare of the raw units. Documented in ntfs-3g's
+/// `layout.h`/`unistr.c` (`ntfs_names_full_collate`); Microsoft's `FindNextFileW` remarks say the
+/// order is not *guaranteed* but that NTFS returns names "usually in alphabetical order", and
+/// Raymond Chen's *"Why do NTFS and Explorer disagree on filename sorting?"* names it an ordinal
+/// compare over the format-time case table rather than a locale collation.
+///
+/// **This is the whole difference from the `names.sort()` it replaces, and it is not cosmetic.**
+/// Byte order sorts every uppercase name before every lowercase one and puts `_` between them;
+/// NTFS folds case away and puts `_` after `Z`. On the 219-addon vanilla corpus **153 of the 219
+/// positions move** — `Fubar_*` interleaves with `FuBar_*` instead of following it wholesale,
+/// `oRA2` climbs 31 places, `zBar` overtakes `Zorlen`, and `_LazyPig`/`_Nameplates` fall from the
+/// middle to dead last. Since the client runs every addon in one Lua state and adds no versioning
+/// (wow-re §9: *which provider of a shared library wins is exactly "whichever addon's files run
+/// last"*), that reshuffle decides which copy of `Tablet-2.0` a corpus of seventy providers ends up
+/// with.
+///
+/// The corpus corroborates the mechanism from the other side: the `!`-prefix convention
+/// (`!OmniCC`) only ever bought an addon an early slot because the walk was **name-collated**
+/// rather than creation-ordered — which is what NTFS does and FAT/exFAT do not.
+///
+/// **We sort rather than take `read_dir`'s word even on Windows**, deliberately. Raw host order
+/// would be byte-identical to a reference install on NTFS and arbitrary everywhere else, and it
+/// would cost three things we need: a capture baseline that cannot depend on the host
+/// (`crate::local_state`, 0008), [`installed`]'s contract that back-to-back reads answer the same
+/// rows in the same order, and a corpus harness whose `--diff` means anything (2166 §4 already
+/// fights Lua-side nondeterminism; filesystem-side would end it). One fixed order, and it is the
+/// one the corpus grew up under.
+///
+/// **Where this stops.** `$UpCase` is captured when a volume is formatted, so two Windows volumes
+/// can disagree about non-ASCII names and the reference has no single answer there either. For
+/// ASCII — every folder name in the corpus — `$UpCase` is the identity outside `a`–`z`, which is
+/// exactly what [`upcase_unit`] reproduces.
+pub(crate) fn sort_by_directory_order(names: &mut [String]) {
+    names.sort_by_cached_key(|n| collation_key(n));
+}
+
+/// One name's `COLLATION_FILE_NAME` key: the upcased UTF-16 units, then the raw ones as the
+/// tiebreak the rule specifies for names equal but for case.
+fn collation_key(name: &str) -> (Vec<u16>, Vec<u16>) {
+    let upper: String = name.chars().map(upcase_unit).collect();
+    (
+        upper.encode_utf16().collect(),
+        name.encode_utf16().collect(),
+    )
+}
+
+/// `$UpCase`'s mapping for one character: **1:1 or nothing**.
+///
+/// The table is 65536 UTF-16 entries wide, so it can only express a mapping that keeps a name the
+/// same length. `char::to_uppercase` is Rust's *full* Unicode uppercase and sometimes yields more
+/// than one char (`ß` → `SS`); `$UpCase` cannot, and leaves such a character alone. Taking the
+/// mapping only when it is a single char is that constraint, not an approximation of it.
+fn upcase_unit(c: char) -> char {
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(u), None) => u,
+        _ => c,
+    }
+}
+
+/// The player's own addons — every folder under the AddOns root with a `<Name>.toc`, in
+/// [`sort_by_directory_order`].
 fn discover_folder() -> Vec<Addon> {
     let Some(root) = root() else {
         return Vec::new();
@@ -527,7 +626,7 @@ fn discover_folder() -> Vec<Addon> {
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().to_str().map(str::to_owned))
         .collect();
-    names.sort();
+    sort_by_directory_order(&mut names);
     names
         .into_iter()
         .filter_map(|name| {
@@ -603,6 +702,10 @@ pub(crate) fn info_from_toc(name: &str, toc: &Toc) -> benilla_ui::script::AddOnI
             .into_iter()
             .map(str::to_owned)
             .collect(),
+        // Visible to `GetAddOnInfo(index)` until `SMSG_ADDON_INFO` says otherwise (2175). The
+        // manifest cannot answer this: the exclusion is the SERVER's verdict on a `## Secure:`
+        // record, not a directive.
+        hidden: false,
         enabled: true, // an addon nobody has disabled is enabled; the file below overrides
         saved_enabled: true, // re-stamped from `enabled` at registration — see `register_addons`
         loaded: false,
@@ -694,16 +797,28 @@ impl InstalledAddOn {
     }
 }
 
-/// Every installed addon, in load order, with `character`'s enable state applied.
+/// Every installed addon **in the glue list's own order** — `## Title`-sorted, case-insensitively,
+/// with the folder name as the fallback — and `character`'s enable state applied.
 ///
 /// The AddOns screens' whole data source. `identity` is `(realm, character)`; `None` reads the
 /// folder with nobody's enable file, which is the "no character picked yet" case and shows
 /// everything as enabled.
+///
+/// **The order is the reference's, and it is not the folder's** (decision 2175). The glue's
+/// `AddonList_Update` walks `GetAddOnInfo(i)` for `i = 1..GetNumAddOns()`, and glue `0x46d460`
+/// resolves that index through the same `0x51df00` the in-game binding does — the flat array
+/// `SMSG_ADDON_INFO` builds, sorted by comparator `0x51deb0` on `AddOn_GetTitle 0x51df20` with
+/// `SStrCmpI`. So the rows a player sees are in title order, not folder order, and this screen
+/// showed folder order because it reads the folder.
+///
+/// The array's *membership* needs nothing here: it excludes the addons the server hid, which on a
+/// stock install is Blizzard's twelve, and this walk is the player's own folder only — they were
+/// never in it.
 pub(crate) fn installed(identity: Option<&(String, String)>) -> Vec<InstalledAddOn> {
     let disabled = disabled_set(identity);
     // The player's own folder only: the glue's list is what a player can toggle, and the
     // reference's Blizzard addons are not in it.
-    discover_folder()
+    let mut rows: Vec<InstalledAddOn> = discover_folder()
         .into_iter()
         .map(|addon| InstalledAddOn {
             enabled: !disabled.contains(&addon.name.to_ascii_lowercase()),
@@ -720,7 +835,12 @@ pub(crate) fn installed(identity: Option<&(String, String)>) -> Vec<InstalledAdd
             load_on_demand: addon.toc.load_on_demand(),
             name: addon.name,
         })
-        .collect()
+        .collect();
+    // `SStrCmpI` folds `'A'..'Z'` by `+0x20` on both operands (`0x64a4c0` → `_strnicmp 0x414310`)
+    // — ASCII only, which is what `to_ascii_lowercase` is. Stable, where the reference's `qsort`
+    // is not: equal keys are undefined there, so any order is conformant.
+    rows.sort_by_key(|a| a.display_title().to_ascii_lowercase());
+    rows
 }
 
 /// The lowercased names this character has turned off.
@@ -1084,6 +1204,206 @@ impl Walk {
 
 #[cfg(test)]
 mod tests {
+    /// **The walk order is NTFS's, not byte order** — the fact 2166 §7 left open, pinned here.
+    ///
+    /// The reference's loose pass is `FindFirstFileW` and sorts nothing (wow-re
+    /// `addon-registry-scan-and-order.md`), so its order is the host filesystem's; NTFS's `$I30`
+    /// collation is the one we adopt, because it is the order the entire vanilla corpus was
+    /// written against. Two rules distinguish it from `str`'s own `Ord`, and this asserts both:
+    /// **case folds away** (so a lowercase-initial name sorts among its letter's block rather
+    /// than after every uppercase name) and **`_` sorts after `Z`** (0x5F > 0x5A) rather than
+    /// between the cases.
+    ///
+    /// The names are the corpus's own, and each pair is one that actually moved when this
+    /// replaced `names.sort()`.
+    #[test]
+    fn the_walk_orders_names_the_way_ntfs_lists_a_directory() {
+        let mut names: Vec<String> = [
+            "_LazyPig",
+            "Zorlen",
+            "zBar",
+            "oRA2",
+            "FuBar_TinyTipFu",
+            "Fubar_EmoteFu",
+            "!OmniCC",
+            "Ace2",
+            "AceGUI",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        sort_by_directory_order(&mut names);
+
+        assert_eq!(
+            names,
+            vec![
+                // `!` (0x21) is ahead of everything — which is why the corpus's `!`-prefix
+                // convention ever worked, and evidence the real walk is name-collated.
+                "!OmniCC",
+                // `Ace2` before `AceGUI`: the digit `2` (0x32) beats `G` (0x47), case-blind.
+                "Ace2",
+                "AceGUI",
+                // Case folded: `Fubar_EmoteFu` lands next to its `FuBar_*` siblings instead of
+                // after every one of them. `E` < `T` decides it, not `u` vs `B`.
+                "Fubar_EmoteFu",
+                "FuBar_TinyTipFu",
+                // Lowercase initials sort in their own letter's block, not after `Z`.
+                "oRA2",
+                "zBar",
+                "Zorlen",
+                // `_` (0x5F) sorts AFTER every letter, so this is last rather than mid-list.
+                "_LazyPig",
+            ]
+        );
+
+        // Byte order — what we did before — disagrees on all three rules. Asserted so the test
+        // fails if someone "simplifies" the key back to `str`'s `Ord`.
+        let mut plain = names.clone();
+        plain.sort();
+        assert_ne!(plain, names, "NTFS collation is not byte order");
+    }
+
+    /// The tie `COLLATION_FILE_NAME` specifies: names equal but for case fall back to a
+    /// **case-sensitive** compare of the raw units, so uppercase (`A` 0x41) precedes lowercase
+    /// (`a` 0x61). NTFS itself cannot hold both — it is case-insensitive — but a case-sensitive
+    /// host filesystem can, and without the tiebreak the sort would be stable-on-`read_dir` and
+    /// therefore not deterministic at all, which is the property [`installed`] depends on.
+    #[test]
+    fn names_equal_but_for_case_break_the_tie_uppercase_first() {
+        let mut names: Vec<String> = ["fubar", "FuBar", "FUBAR"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        sort_by_directory_order(&mut names);
+        assert_eq!(names, vec!["FUBAR", "FuBar", "fubar"]);
+    }
+
+    /// `$UpCase` is 65536 UTF-16 entries wide, so it can only express a length-preserving
+    /// mapping: `ß` has no single-unit uppercase and the table leaves it alone, where Rust's full
+    /// `to_uppercase` would expand it to `SS` and sort it under `S`.
+    #[test]
+    fn the_upcase_fold_is_one_to_one_like_the_table_it_models() {
+        assert_eq!(upcase_unit('a'), 'A');
+        assert_eq!(upcase_unit('_'), '_');
+        assert_eq!(upcase_unit('ß'), 'ß');
+        assert_eq!(upcase_unit('é'), 'É');
+    }
+
+    /// **The AddOns screen's rows are in the glue list's order — `## Title`, case-insensitively,
+    /// with the folder name as the fallback** (decision 2175).
+    ///
+    /// The reference's `AddonList_Update` walks `GetAddOnInfo(i)` for `i = 1..GetNumAddOns()`, and
+    /// glue `0x46d460` resolves that index through the same `0x51df00` array the in-game binding
+    /// does — `## Title`-sorted by comparator `0x51deb0`. This screen reads the folder instead
+    /// (1197, so the list works before any VM has addons in it), which is why it showed folder
+    /// order until now.
+    ///
+    /// The three folder names and the three titles are deliberately *different permutations*, and
+    /// `Middle` is the case control: a byte-wise sort would answer `Middle, aardvark, zebra`.
+    #[test]
+    fn the_addons_screen_lists_in_title_order_not_folder_order() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("listorder");
+        write_addon(
+            &home,
+            "Alpha",
+            "## Interface: 11200\n## Title: zebra\n",
+            &[],
+        );
+        write_addon(
+            &home,
+            "Mike",
+            "## Interface: 11200\n## Title: Middle\n",
+            &[],
+        );
+        write_addon(
+            &home,
+            "Zulu",
+            "## Interface: 11200\n## Title: aardvark\n",
+            &[],
+        );
+        // No `## Title` at all — sorts under its folder name, the comparator's own fallback.
+        write_addon(&home, "bravo", "## Interface: 11200\n", &[]);
+
+        let rows = installed(None);
+        assert_eq!(
+            rows.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["Zulu", "bravo", "Mike", "Alpha"],
+            "titles: {:?}",
+            rows.iter()
+                .map(InstalledAddOn::display_title)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **The archive pass registers before the loose one, and wins a duplicate** (decision 2175).
+    ///
+    /// `AddOn_ScanAddOnDir 0x51c760` runs `0x401470` over each mounted archive's `(listfile)` at
+    /// `0x51c777` and only then `0x42ad10`'s `FindFirstFileW` walk at `0x51c78f`; both funnel into
+    /// `0x51c9b0`, whose name-hash probe **returns immediately on a hit** (`0x51ca10`), and the
+    /// list is tail-inserted with no comparison of any kind (`0x521ad0` mode 2). So registry order
+    /// is registration order, and a name in both sources is registered once, by the archive.
+    ///
+    /// We had it the other way round. The duplicate is the half with teeth: before this, a player
+    /// folder named `Blizzard_TalentUI` produced TWO records with one name, and every name lookup
+    /// found only the first.
+    #[test]
+    fn the_archive_pass_registers_first_and_wins_a_duplicate() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("scanorder");
+        let chain = chain_addons();
+        if chain.is_empty() {
+            eprintln!("skipping: the chain carries no Blizzard addon rows");
+            return;
+        }
+        // A loose folder that COLLIDES with an archive name, and one that does not.
+        let collide = chain[0].name.clone();
+        write_addon(
+            &home,
+            &collide,
+            "## Interface: 11200\n## Title: Impostor\n",
+            &[],
+        );
+        write_addon(&home, "Loose", "## Interface: 11200\n", &[]);
+
+        let found = discover();
+        let names: Vec<&str> = found.iter().map(|a| a.name.as_str()).collect();
+
+        // Every archive row precedes every loose one.
+        let first_loose = names.iter().position(|n| *n == "Loose").expect("Loose");
+        assert_eq!(
+            first_loose,
+            chain.len(),
+            "the loose folder follows all {} archive rows: {names:?}",
+            chain.len()
+        );
+
+        // The collision is registered ONCE, and by the archive — the loose `## Title: Impostor`
+        // never reaches the registry.
+        assert_eq!(
+            names.iter().filter(|n| **n == collide).count(),
+            1,
+            "{collide} is registered once: {names:?}"
+        );
+        let row = found.iter().find(|a| a.name == collide).unwrap();
+        assert!(
+            matches!(row.source, Source::Chain),
+            "the archive's copy won"
+        );
+        assert_ne!(
+            row.toc.directive("Title"),
+            Some("Impostor"),
+            "the loose manifest did not overwrite the archive's"
+        );
+    }
+
     /// The chain's Blizzard LoadOnDemand addons are registry rows (1957): every row is
     /// LoadOnDemand and read off the chain, the eight windows the interface opens through them
     /// are among the rows, and the manifest lists no addon at all — the reference's own
@@ -1914,12 +2234,12 @@ mod tests {
         assert!(failures.is_empty(), "load errors: {failures:?}");
 
         // Discovery saw it at all — the `.toc` decoded rather than read as absent.
-        // The one in the folder, plus the chain's Blizzard LoadOnDemand rows on a machine that
-        // has a chain (1957) — the registry is one list, as the reference's is.
-        assert_eq!(
-            script.eval::<i64>("return GetNumAddOns()").ok(),
-            Some(1 + chain_addons().len() as i64)
-        );
+        // **One**, not one-plus-the-chain (decision 2175). The registry holds the chain's twelve
+        // Blizzard rows too, but the Lua index space is a different set: `SMSG_ADDON_INFO` answers
+        // `status = 2` for every secure addon and the array rebuild drops them, which is why the
+        // reference's own AddOns list shows the player's addons and none of Blizzard's.
+        seat_stock_addon_reply(&mut script);
+        assert_eq!(script.eval::<i64>("return GetNumAddOns()").ok(), Some(1));
         assert_eq!(
             script
                 .eval::<String>("return GetAddOnMetadata('Umlaut', 'Title')")
@@ -1977,6 +2297,22 @@ mod tests {
         let _ = home;
     }
 
+    /// What [`crate::ui_script::lifecycle::load_ingame_ui_on_world_entry`] seats before the load
+    /// (decision 2175): the `SMSG_ADDON_INFO` reply, hiding the secure addons the way a real
+    /// server's does.
+    ///
+    /// A test that registers a registry and then asks an *index* question needs this, because the
+    /// Lua index space does not exist until the server answers — the reference's own behaviour,
+    /// not a fixture convenience. The hidden set is the same list production pairs the reply
+    /// against, so a test and a live login agree by construction.
+    fn seat_stock_addon_reply(script: &mut UiScript) {
+        let hidden: Vec<String> = benilla_protocol::messages::STOCK_SECURE_ADDONS
+            .iter()
+            .map(|a| a.name.to_string())
+            .collect();
+        script.note_addon_info_reply(&hidden);
+    }
+
     /// **`GetAddOnInfo` returns the manifest's own `## Title` and `## Notes`** — 1188 phase 2's
     /// first acceptance test, and the reason the registry carries directives rather than a name.
     ///
@@ -2017,12 +2353,12 @@ mod tests {
         let mut script = UiScript::new().unwrap();
         let _ = load_third_party(&mut script, None, true);
 
-        // The one in the folder, plus the chain's Blizzard LoadOnDemand rows on a machine that
-        // has a chain (1957) — the registry is one list, as the reference's is.
-        assert_eq!(
-            script.eval::<i64>("return GetNumAddOns()").ok(),
-            Some(1 + chain_addons().len() as i64)
-        );
+        // **One**, not one-plus-the-chain (decision 2175). The registry holds the chain's twelve
+        // Blizzard rows too, but the Lua index space is a different set: `SMSG_ADDON_INFO` answers
+        // `status = 2` for every secure addon and the array rebuild drops them, which is why the
+        // reference's own AddOns list shows the player's addons and none of Blizzard's.
+        seat_stock_addon_reply(&mut script);
+        assert_eq!(script.eval::<i64>("return GetNumAddOns()").ok(), Some(1));
         assert_eq!(
             script
                 .eval::<Vec<String>>(
@@ -2178,12 +2514,12 @@ mod tests {
         let _ = load_third_party(&mut script, None, true);
 
         // Discovered and described, but NOT run.
-        // The one in the folder, plus the chain's Blizzard LoadOnDemand rows on a machine that
-        // has a chain (1957) — the registry is one list, as the reference's is.
-        assert_eq!(
-            script.eval::<i64>("return GetNumAddOns()").ok(),
-            Some(1 + chain_addons().len() as i64)
-        );
+        // **One**, not one-plus-the-chain (decision 2175). The registry holds the chain's twelve
+        // Blizzard rows too, but the Lua index space is a different set: `SMSG_ADDON_INFO` answers
+        // `status = 2` for every secure addon and the array rebuild drops them, which is why the
+        // reference's own AddOns list shows the player's addons and none of Blizzard's.
+        seat_stock_addon_reply(&mut script);
+        assert_eq!(script.eval::<i64>("return GetNumAddOns()").ok(), Some(1));
         assert_eq!(
             script
                 .eval::<bool>("return IsAddOnLoadOnDemand(1) == 1")
@@ -2433,12 +2769,15 @@ mod tests {
         save_enable_state(&script, Some(&id));
 
         let written = std::fs::read_to_string(home.join("addons/Realm-Char.txt")).unwrap();
-        // The folder's two in registry order, then the chain's Blizzard rows (1957) — every
-        // registry row has a line, the reference's own one-line-per-addon format.
-        let mut expected = String::from("Drop: disabled\nKeep: enabled\n");
+        // **The chain's Blizzard rows first, then the folder's two** — registry order, which since
+        // decision 2175 is the reference's own: the archive pass registers before the loose one
+        // (`0x51c777` then `0x51c78f`), and the list is tail-inserted with no sort. Every registry
+        // row still gets a line; the format is the reference's one-line-per-addon.
+        let mut expected = String::new();
         for a in chain_addons() {
             expected.push_str(&format!("{}: enabled\n", a.name));
         }
+        expected.push_str("Drop: disabled\nKeep: enabled\n");
         assert_eq!(
             written, expected,
             "the reference's own one-line-per-addon format"

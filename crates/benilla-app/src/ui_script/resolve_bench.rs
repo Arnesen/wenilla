@@ -664,7 +664,9 @@ fn a_hover_sweep_across_owners_costs_no_graph_derivation() {
 /// do not use it. With `UberTooltips` at its shipped default of `"1"`, every action button routes
 /// through `GameTooltip_SetDefaultAnchor` (stock `ActionButton_SetTooltip`, and the stance/pet/bonus bars the
 /// same), which is `SetOwner(owner, "ANCHOR_NONE")` followed by an explicit `SetPoint` — a
-/// completely different arm of the same verb, and the one that DROPS the tooltip's anchors.
+/// completely different arm of the same verb, and the one that DROPS the tooltip's anchors
+/// (`0x52fe90`'s mode-7 leg reaches `0x52fec2 call 0x767ed0` like every mode but PRESERVE — 2176
+/// re-confirmed that at the bytes after 2142 predicted the opposite).
 ///
 /// That drop took the conservative touch, so it re-derived the whole graph on every button the
 /// cursor crossed — and on nothing else, which is why it survived two rounds of fixing and a
@@ -721,9 +723,10 @@ fn an_action_bar_hover_sweep_costs_no_graph_derivation() {
     let derives = s.layout_derivations() - derives_before;
     assert_eq!(
         derives, 0,
-        "24 action-bar hovers derived the layout graph {derives} times. `SetOwner`'s ANCHOR_NONE \
-         arm drops the tooltip's anchors, which is a retarget to the EMPTY target set and names \
-         its node like any other (decision 1630, extending 1625)."
+        "24 action-bar hovers derived the layout graph {derives} times. The `ClearAllPoints()` on \
+         `GameTooltip_SetDefaultAnchor`'s next line is a retarget to the EMPTY target set and must \
+         name its node like any other (decision 1630, extending 1625; 2176 moved the emptying \
+         itself off `SetOwner`'s ANCHOR_NONE arm, which the reference leaves alone)."
     );
 }
 
