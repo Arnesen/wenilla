@@ -717,6 +717,19 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `0x512a50`'s `duration = |Δ| / (rate · π/180)`). No panel row here or there — the reader is
     // the host, exactly like `cameraSmoothTrackingStyle` above it.
     same("cameraTargetSmoothSpeed", "90"),
+    // **`cameraWaterCollision`** `[0xbe1088]` "1" (`0x50bd63`, default string `0x82e748`) — one of
+    // the two that ship ON, and this row is its THIRD life. It is **one CVar with two consumers**,
+    // and this tree has now shipped each of them alone and broken the camera both times: 2149 the
+    // pivot corridor without the trace (a 19/18 yd step reached continuously), 2170 the trace
+    // without the corridor (the boom straddling a plane the pivot sits 11 mm under — 2173 §1).
+    // Both halves are here now, and the row exists to say they may never again be separated.
+    //
+    // `0x50e5ec` produces one register. Its `0xf0000` nibble rides the trace mask to all three of
+    // `0x50e570`'s queries, reaching `0x69cc13` through four direct calls; and `0x50e629` tests
+    // the SAME register to admit the floor/cap block that lifts the sweep origin to
+    // `surface + 2/9`. Readers: the camera boom's collision filter
+    // (`benilla_world::collision::camera_filter`) and `player::camera_water`.
+    same("cameraWaterCollision", "1"),
     // `cameraTerrainTilt` `[0xbe0fd4]` **"0"** (`0x50bcfd`) — Follow Terrain, and the one of the
     // four that ships OFF, so building it changed nothing until a player ticks the box. Mechanism:
     // wow-re `camera-cvar-kernels.md` §2 (the ahead-probe and the five-step staircase) and
@@ -1452,6 +1465,7 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // reference's own validator on them is `0x50b330`'s range REFUSAL, which lives in
         // `benilla_ui`'s `SetCVar` path, not here.
         "camerapivot" => knobs.camera_opts.pivot = v != 0.0,
+        "camerawatercollision" => knobs.camera_opts.water_collision = v != 0.0,
         "camerapivotdxmax" => knobs.camera_opts.pivot_dx_max = v,
         "camerapivotdymin" => knobs.camera_opts.pivot_dy_min = v,
         "cameratargetsmoothspeed" => knobs.camera_opts.target_smooth_speed = v,
@@ -1837,8 +1851,39 @@ fn sync_cvars(
                 )
                 .collect(),
         );
+        // **What `GetVideoCaps` answers with** (decision 2177) — the seven values the stock video
+        // window's `OptionsFrame_Load` destructures. Pushed beside the multisample list because it
+        // is the same kind of fact: what this client's device and presentation path really offer,
+        // which the VM has no way to ask.
+        //
+        // Six of the seven are properties of the client rather than of the adapter, and each is
+        // true here by construction:
+        //   * shaders — wgpu has no non-programmable path; there is no fixed-function fallback to
+        //     be missing. The reference asked because 2004 hardware could genuinely lack them.
+        //   * trilinear and anisotropy — `benilla_assets::tex_filter` builds every sampler with
+        //     both available; `ANISO_RANGE`'s top is the ceiling the `anisotropic` CVar clamps to
+        //     and is reported raw, because `OptionsFrame.lua:124` matches it against
+        //     `ANISOTROPIC_VALUES = {"1","2","4","8","16"}` with `tonumber` and ignores a value
+        //     that is not one of them.
+        //   * the hardware cursor — `crate::cursor` composites the reference's own
+        //     `Interface\Cursor\*.blp` into an OS cursor on every target (an `NSCursor` on macOS,
+        //     winit's `CursorIcon::Custom` elsewhere).
+        //   * triple buffering — **false, and it is the one that does visible work**. wgpu's
+        //     surface decides its own buffering and benilla exposes no knob, so the reference's own
+        //     `OptionsFrame_Load` hides check button 13 and re-seats button 6 against button 5
+        //     (`OptionsFrame.lua:168-175`). Answering `true` would light a checkbox writing a CVar
+        //     nothing reads — 2115 §2's wrong answer that succeeds.
+        script.set_video_caps(benilla_ui::script::VideoCaps {
+            anisotropic: true,
+            pixel_shaders: true,
+            vertex_shaders: true,
+            trilinear: true,
+            triple_buffering: false,
+            max_anisotropy: *benilla_assets::ANISO_RANGE.end(),
+            hardware_cursor: true,
+        });
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 84] = [
+        let session: [(&str, String); 85] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1883,6 +1928,7 @@ fn sync_cvars(
                 "cameraTargetSmoothSpeed",
                 camera_opts.target_smooth_speed.to_string(),
             ),
+            ("cameraWaterCollision", flag(camera_opts.water_collision)),
             ("cameraTerrainTilt", flag(camera_opts.terrain_tilt)),
             (
                 "cameraGroundSmoothSpeed",
@@ -2407,6 +2453,14 @@ mod tests {
         let camera_opts = crate::player::camera_dynamics::CameraOptions::default();
         assert_eq!(d["cameraPivot"] != 0.0, camera_opts.pivot);
         assert!(camera_opts.pivot, "the binary registers cameraPivot \"1\"");
+        assert_eq!(
+            d["cameraWaterCollision"] != 0.0,
+            camera_opts.water_collision
+        );
+        assert!(
+            camera_opts.pivot && camera_opts.water_collision,
+            "the binary registers cameraPivot and cameraWaterCollision both \"1\""
+        );
         assert_eq!(d["cameraTerrainTilt"] != 0.0, camera_opts.terrain_tilt);
         assert!(
             !camera_opts.terrain_tilt,
@@ -2774,6 +2828,16 @@ mod tests {
         assert!(REGISTERED
             .iter()
             .any(|r| r.name == benilla_ui::script::CVAR_FRILL_DENSITY));
+        // **`RestoreVideoDefaults`' row list, welded the same way** (2177). It lives in
+        // `benilla-ui` beside the binding that walks it and cannot see this table, so a rename or
+        // a retirement here would turn one of its rows into a silent skip — the verb would restore
+        // eleven settings out of twelve and say nothing. This is the only place that can notice.
+        for key in benilla_ui::script::VIDEO_DEFAULT_CVARS {
+            assert!(
+                REGISTERED.iter().any(|r| r.name.eq_ignore_ascii_case(key)),
+                "{key}: RestoreVideoDefaults would restore it, and nothing registers it"
+            );
+        }
         for (n, frill) in benilla_ui::script::WORLD_DETAIL_STOPS.iter().enumerate() {
             assert_eq!(
                 *frill,

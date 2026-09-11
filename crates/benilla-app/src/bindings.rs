@@ -1176,7 +1176,7 @@ mod tests {
             |n: &str| Cmd(SPECS.iter().position(|s| s.name == n).expect("registered") as u16);
         let mut s = crate::ui_script::keybindings_tests::harness();
         crate::ui_script::keybindings_tests::on_page(&mut s);
-        const ROW: &str = "OptionsFrameContainerBodyKeybindingsRow";
+        const ROW: &str = "BenillaOptionsFrameContainerBodyKeybindingsRow";
         // Expand Movement and arm JUMP's first capsule — JUMP is the classic wheel bind, and one
         // of the 1.12 commands that is NOT `runOnUp`, so the reference accepts the wheel on it.
         s.run(&format!("{ROW}1Header:Click()")).expect("expand");

@@ -55,6 +55,79 @@ pub struct MultisampleFormat {
     pub samples: u32,
 }
 
+/// One screen resolution the Video options dropdown offers, in **physical pixels**.
+///
+/// The reference enumerates the graphics device's own display modes; benilla has no exclusive
+/// mode-set to make (`benilla_app::video`'s module doc: Wayland has no client-side mode-setting,
+/// X11's is XRandR on the *desktop*, macOS has none, and WoW itself deleted exclusive fullscreen in
+/// 8.0.1), so the list is the sizes this client can actually present a window at. Either way it is
+/// a fact about the display that the VM cannot ask for itself, so the host pushes it.
+///
+/// **The `"WxH"` spelling is the contract, not a convenience.** `OptionsFrame.lua:281-284` finds
+/// the `x`, `strsub`s both sides and evaluates `width/height > 4/3` for the WIDESCREEN tag, and
+/// `CT_Viewport.lua:107` re-reads it with `string.find(currRes, "(%d+)x(%d+)")`. Two independent
+/// consumers, both of which fail silently on a space, a suffix, or an `X`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenResolution {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ScreenResolution {
+    /// The reference's ordering key, made total: **pixel area first** (`0x58be40`'s whole body is
+    /// `a.h*a.w - b.h*b.w`), then width, then height. The tie-break is ours — see
+    /// [`super::UiScript::set_screen_resolutions`].
+    pub(crate) fn sort_key(&self) -> (u64, u32, u32) {
+        (
+            u64::from(self.width) * u64::from(self.height),
+            self.width,
+            self.height,
+        )
+    }
+}
+
+impl std::fmt::Display for ScreenResolution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)
+    }
+}
+
+/// What `GetVideoCaps` answers with — the seven values `OptionsFrame_Load` destructures at
+/// `OptionsFrame.lua:59`, in that order.
+///
+/// ```lua
+/// local hasAnisotropic, hasPixelShaders, hasVertexShaders, hasTrilinear,
+///       hasTripleBuffering, maxAnisotropy, hasHardwareCursor = GetVideoCaps();
+/// ```
+///
+/// In the reference these are the D3D/GL device's own answers, cached at start-up. Here they are
+/// what wgpu and this client's own presentation path really do — pushed by the host, which is the
+/// only side that holds a `RenderAdapter`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct VideoCaps {
+    pub anisotropic: bool,
+    pub pixel_shaders: bool,
+    pub vertex_shaders: bool,
+    pub trilinear: bool,
+    /// **A BACKEND constant, not a device capability** — `caps+0x20` is written by the two device
+    /// constructors only (1 under Direct3D, 0 under OpenGL) and read by `GetVideoCaps` alone, so
+    /// `hasTripleBuffering == 1` means "the backend is Direct3D". Its name is the one INFERRED
+    /// label in the seven (wow-re `ui/scratch/video-options-verbs.md` §2.2).
+    ///
+    /// `false` here, and it is pushed as the **number 0**, never nil: benilla is not Direct3D and
+    /// exposes no buffering knob, so check button 13 is hidden and button 6 re-seated
+    /// (`OptionsFrame.lua:168-175`) — while the file's two `not hasTripleBuffering` clauses stay
+    /// dead, which is what the reference does in both backends.
+    pub triple_buffering: bool,
+    /// The raw maximum sample count, matched against `ANISOTROPIC_VALUES = {"1","2","4","8","16"}`
+    /// with `tonumber` (`OptionsFrame.lua:124`) — so it must be one of those numbers to move the
+    /// slider's ceiling, and anything else leaves `value.maxValue` where it was. Pushed raw, or
+    /// **nil iff 0**; the reference is effectively never nil here (its base ctor seeds the field
+    /// to 1), which is why its consumers gate on slot 1 or on `< 2` rather than on nil.
+    pub max_anisotropy: u32,
+    pub hardware_cursor: bool,
+}
+
 impl super::UiScript {
     /// Hand registration the config file's persisted values (decision 1291): name → value, keys
     /// lowercased here. Set **before** any `register_cvars` / addon `RegisterCVar` runs in this
@@ -162,6 +235,54 @@ impl super::UiScript {
     /// which has no render adapter and should not grow one.
     pub fn set_multisample_formats(&mut self, formats: Vec<MultisampleFormat>) {
         self.model_mut().multisample_formats = formats;
+    }
+
+    /// Publish the screen resolutions the Video options dropdown offers, and which one the client
+    /// is currently at.
+    ///
+    /// **`current` is a promise, not a hint.** `CT_Viewport.lua:201` reads its own screen size as
+    /// `arg[GetCurrentResolution()]` over `GetScreenResolutions()`'s varargs and silently falls
+    /// back to 4:3 on a miss, so a current size that is not in the list is a wrong answer that
+    /// succeeds. The host therefore hands the live size here and this pushes it INTO the list if
+    /// the display's own mode table does not carry it — a windowed client at 1600×900 on a 4K
+    /// panel is exactly that case, and it is the common one.
+    ///
+    /// Both halves land together because they are one fact: a list without its index cannot be
+    /// read, and an index into a list that moved is worse than none.
+    ///
+    /// **Ordered by pixel AREA**, which is the reference's own key (`0x58be40`: `a.w*a.h - b.w*b.h`,
+    /// with no tie-break at all). Ours breaks ties on width then height, deliberately: the
+    /// reference's comparator plus its adjacent-only dedupe can leak a duplicate `"WxH"` when two
+    /// distinct modes share an area — 1280×960 and 1600×768 are both 1 228 800 — and reproducing an
+    /// unstable sort is aping a quirk, not implementing the mechanism.
+    pub fn set_screen_resolutions(
+        &mut self,
+        mut offered: Vec<ScreenResolution>,
+        current: Option<ScreenResolution>,
+    ) {
+        offered.sort_by_key(ScreenResolution::sort_key);
+        offered.dedup();
+        let current = current.map(|c| {
+            offered.iter().position(|r| *r == c).unwrap_or_else(|| {
+                let at = offered.partition_point(|r| r.sort_key() < c.sort_key());
+                offered.insert(at, c);
+                at
+            })
+        });
+        let mut model = self.model_mut();
+        model.screen_resolutions = offered;
+        model.current_resolution = current;
+    }
+
+    /// Publish what this run's device and presentation path really offer, behind `GetVideoCaps`.
+    pub fn set_video_caps(&mut self, caps: VideoCaps) {
+        self.model_mut().video_caps = caps;
+    }
+
+    /// Drain the `RestartGx()` calls queued since the last call — each is one "apply the staged
+    /// video settings now", and the host answers by re-asserting them against the window.
+    pub fn take_restart_gx_asks(&mut self) -> u32 {
+        std::mem::take(&mut self.model_mut().restart_gx_asks)
     }
 }
 
@@ -383,6 +504,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    install_video_verbs(lua)?;
+
     lua.globals().set(
         "SetCVar",
         lua.create_function(|lua, args: mlua::MultiValue| {
@@ -416,6 +539,323 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     install_nameplate_verbs(lua)?;
     install_world_detail_verbs(lua)
+}
+
+/// **What `RestoreVideoDefaults` puts back** — the settings this client's video path backs that the
+/// reference's own verb writes, each named by the row it is.
+///
+/// **The reference does NOT restore registered defaults, and this list is not a guess at which it
+/// does** (wow-re `ui/scratch/video-options-verbs.md` §4.3, the round that corrected benilla's
+/// first reading). `0x48dad0` → `0x639a20` maps the already-matched `VideoHardware.dbc` row through
+/// nine lookup tables into a hardware-recommended settings struct, copies the `CGxFormat` **preset**
+/// that row names for this adapter (`[0xc4e6ac]` → `0xc518e0 + 0x38·n`) into the working device
+/// record, writes that record into twelve `gx*` CVars, performs a full synchronous `RestartGx`, and
+/// then writes sixteen further graphics CVars from the recommendations. The registered strings
+/// (`"640x480"`, `"75"`, `"16"`…) are never consulted.
+///
+/// **benilla has no such pass, and that is why its registered defaults ARE its recommended
+/// configuration.** There is no `VideoHardware.dbc` matching here and no preset table: what a fresh
+/// install runs is each `REGISTERED` row's own value, clamped by the device where the device has a
+/// say (`MsaaFormats::clamp`, `tex_filter`'s aniso ceiling). So this restores each row to its
+/// registered default — the same *meaning*, reached the way this client reaches it — and that is a
+/// stated divergence rather than a transcription.
+///
+/// The membership, though, is the reference's: these are the names in its twelve-plus-sixteen that
+/// benilla registers. It does **not** touch `uiScale`, `useUiScale` or `anisotropic` — an earlier
+/// draft of this list did, reasoning from the video window's Lua tables instead of from the verb.
+///
+/// **`WorldDetail` is ours and rides with `frillDensity`**: 2163 welded the panel stop to the
+/// reference's own clutter CVar, so restoring one without the other would leave the pair describing
+/// two different detail levels.
+///
+/// `benilla_app::cvars` holds the matching test that every name here is registered — the weld that
+/// keeps a rename or a retirement from turning a row into a silent no-op.
+pub const VIDEO_DEFAULT_CVARS: &[&str] = &[
+    // of the twelve `gx*` the device record writes (`0x639c40`), the six benilla registers
+    "gxWindow",
+    "gxResolution",
+    "gxVSync",
+    "gxColorBits",
+    "gxDepthBits",
+    "gxMultisample",
+    // of the sixteen further graphics CVars (`0x639a60`), the three benilla registers
+    "farclip",
+    "frillDensity",
+    "trilinear",
+    // ours, welded to `frillDensity` (2163)
+    "WorldDetail",
+];
+
+/// **The Video options window's own engine verbs** — the seven `OptionsFrame.xml` needs that
+/// nothing else in this client provides.
+///
+/// The window is loaded off the player's chain and kept hidden (decision 2177, the shape 2115 and
+/// 2147 set for the Interface and Sound windows): nothing of ours shows it, and it exists so that
+/// an addon reaching for the reference's video-options names finds real frames and real functions
+/// instead of an alias onto a window of ours.
+///
+/// **Three of the seven run at LOAD** — `GetScreenResolutions`, `GetCurrentResolution` and
+/// `GetRefreshRates`, from the resolution and refresh dropdowns' `<OnLoad>`, because
+/// `UIDropDownMenu_Initialize` calls the initializer it is handed *immediately*
+/// (`UIDropDownMenu.lua:48-50`). The file cannot load at all without them, and the window being
+/// `hidden="true"` is precisely what keeps the other four out of that set: they hang off `OnShow`
+/// and the three buttons. The **tenth** name that load reaches, which benilla's own census of this
+/// window missed, is plain `GetCVar` (`OptionsFrame.lua:300`, `GetCVar("gxRefresh")`).
+///
+/// The three multisample verbs the same window needs are above; `GetWorldDetail`/`SetWorldDetail`
+/// are in [`install_world_detail_verbs`]. `GetGamma`/`SetGamma` are deliberately NOT here — see
+/// `ui_script::reference_ui`'s KNOWN table for what they would cost and why they are a feature of
+/// their own rather than a line in this function.
+///
+/// **What must NOT be defined, which is as load-bearing as what is.** `OptionsFrame_Load:110` does
+/// `getglobal("Get"..value.func)` over the nine slider rows and branches on the result; of the
+/// eighteen composed names, six resolve to real bindings in the reference
+/// (`Get/SetWorldDetail`, `Get/SetTerrainMip`, `Get/SetBaseMip`) and **ten must resolve to nil** —
+/// `Getuiscale`, `Getfarclip`, `Getanisotropic`, `GetspellEffectLevel`, `GetweatherDensity` and
+/// their five setters — so those rows fall through to `GetCVar`/`SetCVar`. Defining any of them
+/// changes this window's behaviour without erroring. The trap is `GetFarclip`/`SetFarclip`, which
+/// DO exist at `0x488f00`/`0x488f30` with a capital F while `value.func` is `"farclip"`: the stock
+/// client takes the CVar path only because `getglobal` is case-sensitive. Pinned by
+/// `benilla_app`'s `the_video_windows_ten_composed_names_stay_nil`.
+fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
+    // ── GetScreenResolutions ─────────────────────────────────────────────────────────────────
+    // A vararg of `"WxH"` strings. The format is pinned by two independent consumers, neither of
+    // which raises on a wrong one: `OptionsFrame.lua:281-284` splits on the `x` and evaluates
+    // `width/height > 4/3` to decide the WIDESCREEN tag, and `CT_Viewport.lua:107` re-parses with
+    // `string.find(currRes, "(%d+)x(%d+)")` to size its viewport. A space, an `X`, or a trailing
+    // suffix silently gives one of them the wrong answer.
+    lua.globals().set(
+        "GetScreenResolutions",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let mut out = mlua::MultiValue::new();
+            for r in &model.screen_resolutions {
+                out.push_back(Value::String(lua.create_string(r.to_string())?));
+            }
+            Ok(out)
+        })?,
+    )?;
+    // ── GetCurrentResolution ─────────────────────────────────────────────────────────────────
+    // The **1-based index** into that list — `0x48bfa2 inc eax` over the same array, which is the
+    // only reading `arg[GetCurrentResolution()]` (`CT_Viewport.lua:105`) can have.
+    //
+    // **`1.0` on a miss, never nil and never 0** (`0x48bf88 push 0x3ff00000` — the f64 `1.0`), and
+    // the reference takes that path on every failure: no CVar record, a NULL string, an empty
+    // list, or a value simply not in it. It is the family idiom — `GetCurrentMultisampleFormat`
+    // `0x48c580` answers `1.0` the same way, and `SetMultisampleFormat` above already does. A `1`
+    // is therefore not proof of a match, which is exactly the trap the reference walks into: its
+    // `gxResolution` registers at `"640x480"`, below its own list's 800×600 floor, so a fresh
+    // config reports index 1 while running 640×480.
+    //
+    // **Where ours reads from is a stated divergence.** The reference parses the `gxResolution`
+    // CVar (`0x48bf20`), which on a mode-setting client IS the live mode. benilla ships no
+    // exclusive mode-set: `gxResolution` is the WINDOWED size, and while the client is borderless
+    // fullscreen the two differ. The host therefore pushes the live window size, because "what
+    // resolution am I at" is what every consumer means — `CT_Viewport` scales its viewport by it —
+    // and reporting a windowed size while filling a 4K panel would be a wrong answer that
+    // succeeds. A pick made while fullscreen still lands in `gxResolution` and takes effect on the
+    // way out, which is the honest reading of a windowed-size setting.
+    lua.globals().set(
+        "GetCurrentResolution",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(model.current_resolution.map_or(1.0, |i| (i + 1) as f64))
+        })?,
+    )?;
+    // ── SetScreenResolution ──────────────────────────────────────────────────────────────────
+    // 1-based, from `UIDropDownMenu_GetSelectedID(OptionsFrameResolutionDropDown)`
+    // (`OptionsFrame.lua:239`). Three things about the argument, all carved at `0x48bfd0`:
+    //
+    // * **The TOLERANT family, not the raising one.** `0x48bfe6 xor esi,esi` seats a default index
+    //   of 0 and there is no `0x6f4940` anywhere in the body, so a missing, nil or non-numeric
+    //   argument silently selects **the first entry** rather than erroring. A numeric string is
+    //   accepted (the `0x6f7c20` coercion).
+    // * **Truncated toward zero** — `0x40a2b0 __ftol` with RC=11, so `2.7` is entry 2.
+    // * **Out of range is where we deliberately diverge.** `0x48c008 dec eax` / `0x48c009 cmp` /
+    //   the failure block at `0x48c00d` converge index 0, negatives and anything past the count on
+    //   `list[count]` — one element past the last, read unguarded. It does not fault only because
+    //   the array keeps a spare slot. We clamp to the last entry instead: reproducing an
+    //   out-of-bounds read to apply an uninitialised resolution is not fidelity.
+    //
+    // **The same-value guard is real behaviour and is reproduced** (`0x48c081 je 0x48c0c1`): if the
+    // requested size equals the one `gxResolution` already holds, the reference returns having done
+    // nothing at all — no write, no restart — and so does this. `set_from_engine` would swallow the
+    // write anyway; the restart below is what makes the guard observable.
+    //
+    // **And it issues its own `gxRestart`** (`0x48c0b7 mov ecx,0x842978` → the console executor),
+    // which is why `OptionsFrame_Save` calling `RestartGx()` afterwards restarts a resolution
+    // change twice. Ours does the same, through the same counted request the host drains — benilla
+    // applies the size live, so the restart is a re-assertion rather than a device rebuild, but the
+    // CALL is the reference's and belongs here rather than only at the Okay button.
+    lua.globals().set(
+        "SetScreenResolution",
+        lua.create_function(|lua, id: Option<f64>| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            if model.screen_resolutions.is_empty() {
+                return Ok(());
+            }
+            // nil / non-numeric → 0 → entry 1. Truncate, then clamp both ends.
+            let idx = id.map_or(0.0, f64::trunc);
+            let last = model.screen_resolutions.len() - 1;
+            let r = model.screen_resolutions[if idx < 1.0 {
+                0
+            } else {
+                (idx as usize - 1).min(last)
+            }];
+            let want = r.to_string();
+            if model
+                .cvars
+                .get("gxresolution")
+                .is_some_and(|slot| slot.value.eq_ignore_ascii_case(&want))
+            {
+                return Ok(());
+            }
+            set_from_engine(&mut model, "gxResolution", want);
+            model.restart_gx_asks += 1;
+            Ok(())
+        })?,
+    )?;
+    // ── GetRefreshRates ─────────────────────────────────────────────────────────────────────
+    // **Zero return values, and that IS the reference's "nothing to offer" answer** —
+    // `0x48c136 xor eax,eax; ret`. It was written here as a single `0` first, from
+    // `OptionsFrame_GetRefreshRates`'s `if ( arg.n == 1 and arg[1] == 0 )` opening; the binary
+    // contains **no `push 0` path at all**. That FrameXML branch is reachable only when the OS
+    // reports `dmDisplayFrequency == 0` for every matching mode — Win32's encoding for "the
+    // hardware default" — which the adjacent dedupe collapses to one `0`. It does not special-case
+    // the empty answer: `for i = 1, 0` runs zero times and the dropdown is left **empty but
+    // enabled**, which is what the reference does on a device with nothing to say.
+    //
+    // benilla's answer is always the empty one, because a refresh rate is only selectable through
+    // an exclusive mode-set and this client ships none on any target (`benilla_app::video`'s
+    // module doc walks each). Pushing the monitor's rates would be a dropdown whose every pick did
+    // nothing — 2115 §2's wrong answer that succeeds — and pushing a lone `0` to grey the control
+    // would be inventing a value the binary never produces.
+    //
+    // **The optional index argument is tolerated and ignored**, which is the reference's own shape
+    // (`0x48c0ec xor esi,esi`): with no argument it asks for the rates of the FIRST — smallest —
+    // resolution in the list, never the selected one, and the stock caller passes nothing.
+    lua.globals().set(
+        "GetRefreshRates",
+        lua.create_function(|_, _: mlua::MultiValue| Ok(mlua::MultiValue::new()))?,
+    )?;
+    // ── GetVideoCaps ─────────────────────────────────────────────────────────────────────────
+    // Seven values in `OptionsFrame.lua:59`'s own order, and **THREE push shapes, not two**
+    // (`0x48db40`, each polarity read through to `lua_pushnil 0x6f37f0`):
+    //
+    // * slots 1,2,3,4,7 — **nil, or the number 1**. `caps+0xa8/0x98/0x94/0xa4/0xc4`. Two of them
+    //   test against `-1` rather than 0, because D3D maps ps_1_1 and vs_1_1 to the *value* 0 and a
+    //   `!= 0` test would report "no shaders" on hardware that has them.
+    // * slot 5 `hasTripleBuffering` — **`0x48dbcb fild dword [edi+0x20]`, straight-line, NO
+    //   branch**: always a number, never nil.
+    // * slot 6 `maxAnisotropy` — **nil iff 0**, else the raw value.
+    //
+    // No `lua_pushboolean` anywhere; the `1` is the f64 `1.0`.
+    //
+    // **Slot 5 is a backend constant, and getting its TYPE right is what reproduces a stock
+    // defect.** `caps+0x20` has two writers image-wide (the two device constructors: 1 under
+    // Direct3D, 0 under OpenGL) and one reader, this verb — so `== 1` means "the backend is
+    // Direct3D", independent of GPU, driver and the `gxTripleBuffer` CVar. `OptionsFrame_Load`
+    // tests `not hasTripleBuffering` twice and `hasTripleBuffering == 1` once; `0` is TRUTHY in
+    // Lua and slot 5 is never nil, so **the two `not` tests can never fire in either backend** and
+    // only the `== 1` one works. benilla is not Direct3D and exposes no buffering knob, so it
+    // answers the number **0**: check button 13 is hidden and button 6 re-seated
+    // (`OptionsFrame.lua:168-175`), and the two dead clauses stay dead, which is correct.
+    // Answering nil instead would *revive* them — a branch the reference cannot reach.
+    lua.globals().set(
+        "GetVideoCaps",
+        lua.create_function(|lua, ()| {
+            let caps = lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .video_caps;
+            let flag = |b: bool| if b { Value::Number(1.0) } else { Value::Nil };
+            let mut out = mlua::MultiValue::new();
+            out.push_back(flag(caps.anisotropic));
+            out.push_back(flag(caps.pixel_shaders));
+            out.push_back(flag(caps.vertex_shaders));
+            out.push_back(flag(caps.trilinear));
+            // Slot 5: unconditional number, per the straight-line `fild` above.
+            out.push_back(Value::Number(if caps.triple_buffering { 1.0 } else { 0.0 }));
+            // Slot 6: nil iff 0. The reference is effectively never nil here — its base ctor seeds
+            // `caps+0xac = 1` — so a consumer gates on slot 1 or on `< 2`, never on nil.
+            out.push_back(if caps.max_anisotropy == 0 {
+                Value::Nil
+            } else {
+                Value::Number(caps.max_anisotropy as f64)
+            });
+            out.push_back(flag(caps.hardware_cursor));
+            Ok(out)
+        })?,
+    )?;
+    // ── RestartGx ────────────────────────────────────────────────────────────────────────────
+    // "Apply the staged video settings now." `0x48dab0` is three instructions — it hands the line
+    // `"gxRestart"` to the CONSOLE COMMAND EXECUTOR `0x63ce00`, which looks the action up and calls
+    // its handler `0x639f60` **synchronously**. That handler reads no CVar by name: the staging was
+    // done at `SetCVar` time by each gx CVar's own change callback, which writes the pending device
+    // format record and can veto the write outright; the handler validates that record, applies it
+    // with `DeviceSetFormat`, and then COMMITS the fourteen latched CVars so `GetCVar` catches up.
+    //
+    // **benilla has no such latch and no such device rebuild.** Its video settings apply as they
+    // are written — the departure `benilla_app::video`'s module doc already states for `gxVSync`
+    // ("wgpu reconfigures the surface on the next frame") and for the display mode ("ours takes
+    // effect on the click"). So the verb's postcondition is already true when it is called, which
+    // is not the same as the verb having nothing to do: the caller is asking for the settings to be
+    // in effect *now*, and the honest answer is to make the host re-assert them against the window
+    // rather than wait for its change detection to notice something it may already have seen.
+    //
+    // A counted request the host drains (`take_restart_gx_asks`), the shape `Screenshot()` uses and
+    // for the same reason: no payload, and two calls in a frame are two requests. **It is not a
+    // stub** — a stub would be an empty body pretending the settings had been applied.
+    // `gxMultisample` is the one setting no restart can deliver here, and none can in the reference
+    // either: 1629 latches the sample count at camera spawn, which is what `SetMultisampleFormat`
+    // above already documents as "applies at next launch".
+    lua.globals().set(
+        "RestartGx",
+        lua.create_function(|lua, ()| {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .restart_gx_asks += 1;
+            Ok(())
+        })?,
+    )?;
+    // ── RestoreVideoDefaults ─────────────────────────────────────────────────────────────────
+    // **The Defaults button's whole effect, and the FrameXML proves it.** `OptionsFrame_SetDefaults`
+    // sets every check button and slider from `GetCVarDefault` — and then the button's own
+    // `<OnClick>` calls `HideUIPanel(OptionsFrame)` (`OptionsFrame.xml:688-690`), throwing those
+    // widget values away without ever running `_Save`. So the widgets are cosmetic; this verb is
+    // what actually moves the settings, and it must, or Defaults would do nothing at all.
+    //
+    // What it restores, and why that is not the reference's own values, is
+    // [`VIDEO_DEFAULT_CVARS`]'s doc. Each row rides the ordinary change queue, so the host's knob
+    // sync applies it and the config file is marked dirty — the same route a Lua `SetCVar` takes.
+    // `set_from_engine`, not `write_cvar`, because this is the engine moving a value it owns rather
+    // than a script asking: no `CVAR_UPDATE` token, the minimap-zoom shape.
+    //
+    // **The restart is the reference's own, in the reference's own place** — `0x639a51` calls the
+    // `gxRestart` handler directly and synchronously, between the twelve gx writes and the sixteen
+    // quality ones, and it destroys and recreates the device *and the OS window*. Ours issues the
+    // same counted request; here it is a re-assertion rather than a rebuild, but the call belongs.
+    lua.globals().set(
+        "RestoreVideoDefaults",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            for name in VIDEO_DEFAULT_CVARS {
+                let Some(default) = model
+                    .cvars
+                    .get(&name.to_ascii_lowercase())
+                    .map(|slot| slot.default.clone())
+                else {
+                    // A bare VM with no host behind it registers none of these; there is nothing to
+                    // restore and nothing to warn about, exactly as `set_from_engine` reasons.
+                    continue;
+                };
+                set_from_engine(&mut model, name, default);
+            }
+            model.restart_gx_asks += 1;
+            Ok(())
+        })?,
+    )?;
+    Ok(())
 }
 
 /// The `WorldDetail` slider's **stop**, benilla's spelling — the panel position `0`/`1`/`2`, held as

@@ -222,8 +222,10 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "GameMenuFrame.xml");
 
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    assert!(s.eval::<bool>("return OptionsFrame:IsVisible()").unwrap());
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    assert!(s
+        .eval::<bool>("return BenillaOptionsFrame:IsVisible()")
+        .unwrap());
     assert!(
         !s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap(),
         "the menu is down — the options rung is what must eat this press"
@@ -232,7 +234,8 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     // Press 1: the options rung eats it — the window closes and the menu stays down.
     s.run("ToggleGameMenu()").unwrap();
     assert!(
-        !s.eval::<bool>("return OptionsFrame:IsVisible()").unwrap(),
+        !s.eval::<bool>("return BenillaOptionsFrame:IsVisible()")
+            .unwrap(),
         "ESC closed the options window"
     );
     assert!(

@@ -1033,7 +1033,7 @@ pub(super) fn seed_ui_fixture(
             // capture pins: the era chrome (nine-slice seams, right-edge straddle), the tab
             // plates, the search-box seat, the category list art with Controls selected (the
             // OnShow default), and the window's fit scale.
-            if let Err(e) = script.run("ShowUIPanel(OptionsFrame)") {
+            if let Err(e) = script.run("ShowUIPanel(BenillaOptionsFrame)") {
                 warn!("capture: ui-options seed failed to open the window: {e}");
             }
         }
@@ -1045,9 +1045,9 @@ pub(super) fn seed_ui_fixture(
             // no CvarPlugin file load to race, and the rows must read real values, not the
             // nil-tolerant zeros — then open and select through the live paths.
             script.register_cvars(crate::cvars::registered_pairs());
-            if let Err(e) =
-                script.run("ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowAudio:Click()")
-            {
+            if let Err(e) = script.run(
+                "ShowUIPanel(BenillaOptionsFrame); BenillaOptionsFrameCategoryListRowAudio:Click()",
+            ) {
                 warn!("capture: ui-options-audio seed failed: {e}");
             }
         }
@@ -1059,7 +1059,7 @@ pub(super) fn seed_ui_fixture(
             // open-and-select paths.
             script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) =
-                script.run("ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowGraphics:Click()")
+                script.run("ShowUIPanel(BenillaOptionsFrame); BenillaOptionsFrameCategoryListRowGraphics:Click()")
             {
                 warn!("capture: ui-options-graphics seed failed: {e}");
             }
@@ -1073,9 +1073,9 @@ pub(super) fn seed_ui_fixture(
             // `ChatFrame.xml` declares at file scope, so a hermetic capture sees the shipped "0"
             // and the row paints unchecked — which is the shipped default, not a missing load.
             script.register_cvars(crate::cvars::registered_pairs());
-            if let Err(e) =
-                script.run("ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowChat:Click()")
-            {
+            if let Err(e) = script.run(
+                "ShowUIPanel(BenillaOptionsFrame); BenillaOptionsFrameCategoryListRowChat:Click()",
+            ) {
                 warn!("capture: ui-options-chat seed failed: {e}");
             }
         }
@@ -1108,8 +1108,8 @@ pub(super) fn seed_ui_fixture(
             // the call that asked, so there is no settle to wait out.
             script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) = script.run(
-                "ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowControls:Click(); \
-                 OptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()",
+                "ShowUIPanel(BenillaOptionsFrame); BenillaOptionsFrameCategoryListRowControls:Click(); \
+                 BenillaOptionsFrameContainerBodyControlsRowCameraFollowStyleDropdownButton:Click()",
             ) {
                 warn!("capture: ui-options-dropdown seed failed: {e}");
             }
@@ -1126,8 +1126,8 @@ pub(super) fn seed_ui_fixture(
             script.register_cvars(crate::cvars::registered_pairs());
             script.register_bindings(&crate::bindings::registry_commands());
             if let Err(e) = script.run(
-                "ShowUIPanel(OptionsFrame); \
-                 OptionsFrameCategoryListRowKeybindings:Click(); \
+                "ShowUIPanel(BenillaOptionsFrame); \
+                 BenillaOptionsFrameCategoryListRowKeybindings:Click(); \
                  KeyBindings_ExpandSection(1, true); KeyBindingsPage_Update()",
             ) {
                 warn!("capture: ui-keybindings seed failed: {e}");
@@ -1145,7 +1145,7 @@ pub(super) fn seed_ui_fixture(
             // advance law's visual regression guard.
             script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) = script.run(
-                "ShowUIPanel(OptionsFrame); OptionsFrameSearchBox:SetText(\"volume\"); OptionsFrameSearchBox:SetFocus()",
+                "ShowUIPanel(BenillaOptionsFrame); BenillaOptionsFrameSearchBox:SetText(\"volume\"); BenillaOptionsFrameSearchBox:SetFocus()",
             )
             {
                 warn!("capture: ui-options-search seed failed: {e}");

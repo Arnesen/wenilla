@@ -730,7 +730,7 @@ mod tests {
     /// first of those mints a VM: the world-entry path that fills the banks
     /// ([`Tutorials::world_enter`]) never runs, so a push gated on "the bank moved" never fires
     /// again. `TutorialsEnabled()` then answers nil for the rest of the session, the Show
-    /// Tutorials row loads OFF, and ticking it back on passes `OptionsFrame_SetTutorialsEnabled`'s
+    /// Tutorials row loads OFF, and ticking it back on passes `BenillaOptionsFrame_SetTutorialsEnabled`'s
     /// `~=` guard into `ResetTutorials()` — a `CMSG_TUTORIAL_RESET` that re-arms, account-wide,
     /// every popup the player had already dismissed.
     #[test]

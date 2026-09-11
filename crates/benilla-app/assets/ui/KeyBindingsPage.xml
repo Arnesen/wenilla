@@ -184,7 +184,7 @@
         -- and repainted after a bind lands on one.
         KeyBindingsPage = { sections = {}, items = {} }
 
-        KEYBINDINGS_ROW_BASE = "OptionsFrameContainerBodyKeybindingsRow"
+        KEYBINDINGS_ROW_BASE = "BenillaOptionsFrameContainerBodyKeybindingsRow"
         KEYBINDINGS_DISPLAYED = 19
         KEYBINDINGS_ROW_HEIGHT = 25
         KEYBINDINGS_SEARCH_ROWS = 8
@@ -302,7 +302,7 @@
         -- ── The list repaint (1.12 KeyBindingFrame_Update over the era section list). ──
         function KeyBindingsPage_Update()
             local page = KeyBindingsPage
-            local scroll = getglobal("OptionsFrameContainerBodyKeybindingsScrollFrame")
+            local scroll = getglobal("BenillaOptionsFrameContainerBodyKeybindingsScrollFrame")
             local offset = FauxScrollFrame_GetOffset(scroll)
             for i = 1, KEYBINDINGS_DISPLAYED do
                 local name = KEYBINDINGS_ROW_BASE .. i
@@ -327,23 +327,23 @@
             KeyBindings_UpdateUnbindKey()
         end
 
-        -- The page entry (OptionsFrame_SelectCategory's Keybindings arm): rebuild the tree —
+        -- The page entry (BenillaOptionsFrame_SelectCategory's Keybindings arm): rebuild the tree —
         -- the table may have moved under us (a rebind, a set switch) — sync the checkbox to
         -- the live set, park the scroll at the top, repaint.
         function KeyBindingsPage_Refresh()
             KeyBindings_BuildSections()
-            local box = getglobal("OptionsFrameContainerBodyKeybindingsCharacterRowCheck")
+            local box = getglobal("BenillaOptionsFrameContainerBodyKeybindingsCharacterRowCheck")
             if GetCurrentBindingSet() == 2 then
                 box:SetChecked(1)
             else
                 box:SetChecked(nil)
             end
-            getglobal("OptionsFrameContainerBodyKeybindingsScrollFrameScrollBar"):SetValue(0)
+            getglobal("BenillaOptionsFrameContainerBodyKeybindingsScrollFrameScrollBar"):SetValue(0)
             KeyBindingsPage_Update()
         end
 
         function KeyBindings_Output(text)
-            getglobal("OptionsFrameContainerBodyKeybindingsOutput"):SetText(text)
+            getglobal("BenillaOptionsFrameContainerBodyKeybindingsOutput"):SetText(text)
         end
 
         -- ── Selection + the capture arm ── selecting a capsule arms the HOST's capture seam
@@ -356,7 +356,7 @@
         end
 
         function KeyBindings_UpdateUnbindKey()
-            local unbind = getglobal("OptionsFrameContainerUnbind")
+            local unbind = getglobal("BenillaOptionsFrameContainerUnbind")
             if KeyBindingsPage.selected then
                 unbind:Enable()
             else

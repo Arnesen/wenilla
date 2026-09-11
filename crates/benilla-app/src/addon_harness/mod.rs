@@ -1616,6 +1616,39 @@ fn seat_a_session(script: &mut UiScript) {
     // any, so `GetCVar` answered nil for every name the client actually ships. Same class as the
     // empty addon registry: a state the real client cannot be in.
     script.register_cvars(crate::cvars::registered_pairs());
+    // **A session runs on a DISPLAY, and until 2177 this one ran on none.** The host pushes the
+    // offered resolutions and the live one (`crate::video::publish_display_modes`); a VM with no
+    // window behind it gets an empty list, `GetScreenResolutions()` returns nothing and
+    // `GetCurrentResolution()` answers 0 — a state the real client cannot be in, and exactly the
+    // 1193/1212 fault this whole function exists to close. `CT_Viewport` is what found it: it
+    // reads its own screen size as `arg[GetCurrentResolution()]` at load and then indexes
+    // `CT_Viewport.screenRes` from an event handler, so an empty list turned "the verb is missing"
+    // into a nil-index two lines later — a moved symptom that would have read as a gap of ours.
+    //
+    // One mode, and it is the one this survey already tells the interface it is running at
+    // (`set_screen_size(1024, 768)` above): a display that offers exactly what the client is using.
+    // Anything richer would be numbers invented for an instrument.
+    script.set_screen_resolutions(
+        vec![benilla_ui::script::ScreenResolution {
+            width: 1024,
+            height: 768,
+        }],
+        Some(benilla_ui::script::ScreenResolution {
+            width: 1024,
+            height: 768,
+        }),
+    );
+    // What this run's device offers, as `crate::cvars` pushes it in the app — same values, because
+    // six of the seven are properties of this client rather than of the adapter.
+    script.set_video_caps(benilla_ui::script::VideoCaps {
+        anisotropic: true,
+        pixel_shaders: true,
+        vertex_shaders: true,
+        trilinear: true,
+        triple_buffering: false,
+        max_anisotropy: *benilla_assets::ANISO_RANGE.end(),
+        hardware_cursor: true,
+    });
     script.set_realm_name("Harness");
     // THE BIND POINT. `GetBindLocation()` answered `""` in every VM, and a logged-in character with
     // no hearth location is not a state one is in — the server sends `SMSG_BINDPOINTUPDATE` at

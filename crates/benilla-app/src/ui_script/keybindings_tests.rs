@@ -87,32 +87,32 @@ pub(crate) fn label(s: &UiScript, token: &str, raw: &str) -> String {
 
 /// Open the options window on the Keybindings page.
 pub(crate) fn on_page(s: &mut UiScript) {
-    s.run(r#"ShowUIPanel(OptionsFrame); OptionsFrame_SelectCategory("Keybindings")"#)
+    s.run(r#"ShowUIPanel(BenillaOptionsFrame); BenillaOptionsFrame_SelectCategory("Keybindings")"#)
         .unwrap();
     assert!(s.errors().is_empty(), "on page: {:?}", s.errors());
 }
 
-const ROW: &str = "OptionsFrameContainerBodyKeybindingsRow";
+const ROW: &str = "BenillaOptionsFrameContainerBodyKeybindingsRow";
 
 #[test]
 fn the_page_is_an_options_category_with_the_collapsed_honest_tree() {
     let mut s = harness();
     on_page(&mut s);
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyKeybindings:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyKeybindings:IsVisible()")
         .unwrap());
     assert!(
-        s.eval::<bool>("return OptionsFrameContainerUnbind:IsVisible()")
+        s.eval::<bool>("return BenillaOptionsFrameContainerUnbind:IsVisible()")
             .unwrap(),
         "Unbind Key exists on this page"
     );
     assert!(
-        !s.eval::<bool>("return OptionsFrameContainerUnbind:IsEnabled() ~= 0")
+        !s.eval::<bool>("return BenillaOptionsFrameContainerUnbind:IsEnabled() ~= 0")
             .unwrap(),
         "…disabled until a capsule is selected"
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled() ~= 0")
+        .eval::<bool>("return BenillaOptionsFrameContainerDefaults:IsEnabled() ~= 0")
         .unwrap());
     // The section tree: the registry's category tokens, first-appearance order — exactly
     // 1.12's file order — every section a COLLAPSED header row (the era default).
@@ -178,12 +178,13 @@ fn the_page_is_an_options_category_with_the_collapsed_honest_tree() {
         label(&s, "BINDING_HEADER_CHAT", "BINDING_HEADER_CHAT")
     );
     // Leaving the page hides its body and the Unbind button.
-    s.run(r#"OptionsFrame_SelectCategory("Controls")"#).unwrap();
+    s.run(r#"BenillaOptionsFrame_SelectCategory("Controls")"#)
+        .unwrap();
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyKeybindings:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyKeybindings:IsVisible()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerUnbind:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerUnbind:IsVisible()")
         .unwrap());
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
@@ -202,7 +203,7 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
         "a selected capsule arms the capture"
     );
     assert!(
-        s.eval::<bool>("return OptionsFrameContainerUnbind:IsEnabled() ~= 0")
+        s.eval::<bool>("return BenillaOptionsFrameContainerUnbind:IsEnabled() ~= 0")
             .unwrap(),
         "Unbind arms with the selection"
     );
@@ -227,7 +228,7 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
     );
     assert_eq!(s.take_keybind_requests(), vec![KeybindRequest::Save(1)]);
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyKeybindingsOutput:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameContainerBodyKeybindingsOutput:GetText()")
             .unwrap(),
         "Key Bound Successfully"
     );
@@ -241,7 +242,7 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
     );
     let victim = label(&s, "BINDING_NAME_ATTACKTARGET", "ATTACKTARGET");
     assert!(
-        s.eval::<String>("return OptionsFrameContainerBodyKeybindingsOutput:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameContainerBodyKeybindingsOutput:GetText()")
             .unwrap()
             .contains(&victim),
         "the newly-bare victim is named"
@@ -260,7 +261,7 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
     // so in red, exactly as it would for any other stolen key. That the wheel's own default
     // victim is a real command is half of why the old refusal read as plausible.
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyKeybindingsOutput:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameContainerBodyKeybindingsOutput:GetText()")
             .unwrap(),
         format!(
             "|cffff0000{} Function is Now Unbound!|r",
@@ -278,7 +279,7 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
         "the refused slot restored its key"
     );
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyKeybindingsOutput:GetText()")
+        s.eval::<String>("return BenillaOptionsFrameContainerBodyKeybindingsOutput:GetText()")
             .unwrap(),
         "Can't bind mousewheel to actions with up and down states"
     );
@@ -292,7 +293,7 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
     // otherwise: the armed seam swallows all input with no window on screen).
     s.run(&format!("{ROW}3Key1Button:Click()")).unwrap();
     assert!(s.bind_capture_armed());
-    s.run("HideUIPanel(OptionsFrame)").unwrap();
+    s.run("HideUIPanel(BenillaOptionsFrame)").unwrap();
     assert!(!s.bind_capture_armed(), "OnHide disarms");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
@@ -311,7 +312,7 @@ fn unbind_reset_and_the_live_commit_replace_okay_cancel() {
         label(&s, "BINDING_NAME_JUMP", "JUMP")
     );
     s.run(&format!("{ROW}9Key1Button:Click()")).unwrap();
-    s.run("OptionsFrameContainerUnbind:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerUnbind:Click()").unwrap();
     assert!(s
         .eval::<bool>(
             r#"local k1, k2 = GetBindingKey("JUMP"); return k1 == "NUMPAD0" and k2 == nil"#
@@ -323,7 +324,7 @@ fn unbind_reset_and_the_live_commit_replace_okay_cancel() {
     s.run(&format!("{ROW}9Key1Button:Click()")).unwrap();
     s.run(r#"KeyBindings_OnHostKey("G")"#).unwrap();
     assert_eq!(s.take_keybind_requests(), vec![KeybindRequest::Save(1)]);
-    s.run("OptionsFrameCloseButton:Click()").unwrap();
+    s.run("BenillaOptionsFrameCloseButton:Click()").unwrap();
     assert_eq!(
         s.eval::<String>(r#"return GetBindingAction("G")"#).unwrap(),
         "JUMP",
@@ -332,7 +333,8 @@ fn unbind_reset_and_the_live_commit_replace_okay_cancel() {
     // Reset To Default: the page's Defaults button behind the era confirm — JUMP's real
     // defaults return and the reset itself commits.
     on_page(&mut s);
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    s.run("BenillaOptionsFrameContainerDefaults:Click()")
+        .unwrap();
     assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
     s.run("StaticPopup1Button1:Click()").unwrap();
     assert!(s
@@ -351,20 +353,22 @@ fn the_esc_ladder_closes_the_window_and_the_checkbox_switches_sets() {
     // The ladder (the ESC binding's own body): the options rung hides the window — since 1008
     // that IS the whole gesture for keybinds too (live-commit; nothing to revert).
     s.run("ToggleGameMenu()").unwrap();
-    assert!(!s.eval::<bool>("return OptionsFrame:IsVisible()").unwrap());
+    assert!(!s
+        .eval::<bool>("return BenillaOptionsFrame:IsVisible()")
+        .unwrap());
 
     // The character-specific checkbox (1.12's set model, era confirm-on-uncheck-only law):
     // CHECK switches to the character set and saves it into existence at once.
     on_page(&mut s);
     s.take_keybind_requests();
-    s.run("OptionsFrameContainerBodyKeybindingsCharacterRowCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyKeybindingsCharacterRowCheck:Click()")
         .unwrap();
     assert_eq!(s.current_binding_set(), 2);
     assert!(s.character_bindings_exist());
     assert_eq!(s.take_keybind_requests(), vec![KeybindRequest::Save(2)]);
     // UNCHECK is destructive: the box springs back and the 1.12 confirm decides. Cancel
     // first — still on the character set.
-    s.run("OptionsFrameContainerBodyKeybindingsCharacterRowCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyKeybindingsCharacterRowCheck:Click()")
         .unwrap();
     assert!(
         s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
@@ -372,7 +376,7 @@ fn the_esc_ladder_closes_the_window_and_the_checkbox_switches_sets() {
     );
     assert!(
         s.eval::<bool>(
-            "return OptionsFrameContainerBodyKeybindingsCharacterRowCheck:GetChecked() ~= nil"
+            "return BenillaOptionsFrameContainerBodyKeybindingsCharacterRowCheck:GetChecked() ~= nil"
         )
         .unwrap(),
         "the box springs back until the popup decides"
@@ -382,7 +386,7 @@ fn the_esc_ladder_closes_the_window_and_the_checkbox_switches_sets() {
     assert!(s.character_bindings_exist());
     // Accept: back to the account set, the character set dropped (load-then-save order — the
     // account file must not inherit the character binds).
-    s.run("OptionsFrameContainerBodyKeybindingsCharacterRowCheck:Click()")
+    s.run("BenillaOptionsFrameContainerBodyKeybindingsCharacterRowCheck:Click()")
         .unwrap();
     s.run("StaticPopup1Button1:Click()").unwrap();
     assert_eq!(s.current_binding_set(), 1);
@@ -398,29 +402,32 @@ fn the_esc_ladder_closes_the_window_and_the_checkbox_switches_sets() {
 fn search_surfaces_bindings_as_live_rows_under_the_redirect_head() {
     let mut s = harness();
     s.run(r#"BINDING_NAME_JUMP = "Jump""#).unwrap();
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.take_keybind_requests();
     // A query that matches one binding and no CVar row: the Keybindings group head shows,
     // with the match painted LIVE on the search pool (the era reflows its real rows the
     // same way).
-    s.run(r#"OptionsFrameSearchBox:SetText("jump")"#).unwrap();
+    s.run(r#"BenillaOptionsFrameSearchBox:SetText("jump")"#)
+        .unwrap();
     s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodySearchHeadKeybindings:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodySearchHeadKeybindings:IsVisible()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyKeybindSearch1:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyKeybindSearch1:IsVisible()")
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyKeybindSearch1Description:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyKeybindSearch1Description:GetText()"
+        )
+        .unwrap(),
         "Jump"
     );
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyKeybindSearch2:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyKeybindSearch2:IsVisible()")
         .unwrap());
     // The result row is LIVE: its capsule arms, the bind lands and commits, the row relabels.
-    s.run("OptionsFrameContainerBodyKeybindSearch1Key1Button:Click()")
+    s.run("BenillaOptionsFrameContainerBodyKeybindSearch1Key1Button:Click()")
         .unwrap();
     assert!(s.bind_capture_armed());
     s.run(r#"KeyBindings_OnHostKey("H")"#).unwrap();
@@ -430,24 +437,26 @@ fn search_surfaces_bindings_as_live_rows_under_the_redirect_head() {
     );
     assert_eq!(s.take_keybind_requests(), vec![KeybindRequest::Save(1)]);
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyKeybindSearch1Key1ButtonText:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyKeybindSearch1Key1ButtonText:GetText()"
+        )
+        .unwrap(),
         "H"
     );
     // The head is the era redirect: clicking it ends the search on the Keybindings page.
-    s.run("OptionsFrameContainerBodySearchHeadKeybindings:Click()")
+    s.run("BenillaOptionsFrameContainerBodySearchHeadKeybindings:Click()")
         .unwrap();
     s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert_eq!(
-        s.eval::<String>("return OptionsFrame.selectedCategory")
+        s.eval::<String>("return BenillaOptionsFrame.selectedCategory")
             .unwrap(),
         "Keybindings"
     );
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodyKeybindings:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyKeybindings:IsVisible()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return OptionsFrameContainerBodyKeybindSearch1:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodyKeybindSearch1:IsVisible()")
         .unwrap());
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
@@ -518,7 +527,7 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
            KeyBindingsPage_Update()"#,
     )
     .unwrap();
-    const SF: &str = "OptionsFrameContainerBodyKeybindingsScrollFrame";
+    const SF: &str = "BenillaOptionsFrameContainerBodyKeybindingsScrollFrame";
     assert!(s
         .eval::<bool>(&format!("return {SF}ScrollBar:IsVisible()"))
         .unwrap());
@@ -542,12 +551,12 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
     // What B217 actually cleared — a second bar in the shared gutter — still holds, and that is
     // what is asserted.
     assert!(
-        !s.eval::<bool>("return OptionsFrameContainerScrollBar:IsVisible()")
+        !s.eval::<bool>("return BenillaOptionsFrameContainerScrollBar:IsVisible()")
             .unwrap(),
         "only one bar is on screen: the list's own owns the gutter"
     );
     let body_right = s
-        .eval::<f64>("return OptionsFrameContainerBodyKeybindings:GetRight()")
+        .eval::<f64>("return BenillaOptionsFrameContainerBodyKeybindings:GetRight()")
         .unwrap();
     let rows_right = s.eval::<f64>(&format!("return {ROW}1:GetRight()")).unwrap();
     let bar_left = s
@@ -569,7 +578,7 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
     // overhanging it 21/20 so each arrow drops into the 16-tall socket the art carries (B224; the
     // law and its ref citation are in BenillaScrollTrough_Seat). Asserted off the ARROWS here,
     // which is the half the eye judges: 5 units of cap above the up arrow, 4 below the down arrow.
-    const TROUGH: &str = "OptionsFrameContainerBodyKeybindingsScrollFrameScrollBarTrough";
+    const TROUGH: &str = "BenillaOptionsFrameContainerBodyKeybindingsScrollFrameScrollBarTrough";
     let bar = format!("{SF}ScrollBar");
     let g = |f: &str, m: &str| s.eval::<f64>(&format!("return {f}:{m}()")).unwrap();
     assert!(
@@ -725,21 +734,27 @@ fn the_pet_lane_is_registered_under_the_action_bar_header() {
     // The search tags are the DISPLAY names uppercased (era AddSearchTags), so the query is the
     // label the app's strings give the row, not its token.
     let query = label(&s, "BINDING_NAME_BONUSACTIONBUTTON1", "BONUSACTIONBUTTON1").to_lowercase();
-    s.run(&format!(r#"OptionsFrameSearchBox:SetText("{query}")"#))
-        .unwrap();
+    s.run(&format!(
+        r#"BenillaOptionsFrameSearchBox:SetText("{query}")"#
+    ))
+    .unwrap();
     s.tick(0.0); // the deferred OnTextChanged drains here (decision 1831)
     assert!(s
-        .eval::<bool>("return OptionsFrameContainerBodySearchHeadKeybindings:IsVisible()")
+        .eval::<bool>("return BenillaOptionsFrameContainerBodySearchHeadKeybindings:IsVisible()")
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyKeybindSearch1Description:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyKeybindSearch1Description:GetText()"
+        )
+        .unwrap(),
         label(&s, "BINDING_NAME_BONUSACTIONBUTTON1", "BONUSACTIONBUTTON1"),
         "the row wears the app's own string"
     );
     assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyKeybindSearch1Key1ButtonText:GetText()")
-            .unwrap(),
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyKeybindSearch1Key1ButtonText:GetText()"
+        )
+        .unwrap(),
         "CTRL-1"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

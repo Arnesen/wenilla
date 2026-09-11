@@ -277,7 +277,7 @@
         -- The `~=` guard is the reference's and it matters: `TutorialsEnabled()` returns the NUMBER
         -- 1 or nil, so re-ticking an already-on row does not re-`ResetTutorials()` — which would
         -- re-arm every tutorial the player has already dismissed.
-        function OptionsFrame_SetTutorialsEnabled(value)
+        function BenillaOptionsFrame_SetTutorialsEnabled(value)
             if ( tonumber(value) ~= TutorialsEnabled() ) then
                 if ( value == "1" ) then
                     ResetTutorials()
@@ -343,7 +343,7 @@
         -- reference at typical resolutions reads nearer two-thirds.
         ERA_WINDOW_SCALE = 0.78
 
-        function OptionsFrame_UpdateScale()
+        function BenillaOptionsFrame_UpdateScale()
             -- The era panel is registered `checkFit = 1`: the panel manager also shrinks it to
             -- fit a small screen (UIPanelUpdateScaleForFit: min over width/height ratios
             -- against the panel + 20 units of air each way, capped at 1) — re-expressed here.
@@ -352,7 +352,7 @@
             local hFit = GetScreenHeight() / 744
             if wFit < k then k = wFit end
             if hFit < k then k = hFit end
-            OptionsFrame:SetScale(k)
+            BenillaOptionsFrame:SetScale(k)
         end
 
         -- The era tab width law (MinimalTab.lua l.7): label width + 40, measured ONCE per show —
@@ -361,7 +361,7 @@
         -- OnLoad for a reason that outlives the measure: GetStringWidth answers in the REGION'S
         -- OWN units, so its number depends on the owner's effective scale (glyph advances snap to
         -- whole physical pixels, so the same label is not proportionally the same width at two
-        -- scales) — and this window's scale is set by OptionsFrame_UpdateScale in its own <OnShow>,
+        -- scales) — and this window's scale is set by BenillaOptionsFrame_UpdateScale in its own <OnShow>,
         -- after every OnLoad has already run. Fired from the tabs' <OnShow>, which the engine
         -- runs pre-order behind the window's own, the scale is the drawn one. No poll and no latch:
         -- the engine's font measurer answers inside the Lua call that asked (benilla-ui
@@ -401,20 +401,20 @@
         -- Then the page swap: a category with rows (OPTIONS_PAGE_ROWS) shows its body
         -- refreshed from the CVars and Defaults goes live with it; every other page is still
         -- empty, Defaults disabled.
-        function OptionsFrame_SelectCategory(key)
-            OptionsFrame.selectedCategory = key
-            if OptionsFrameSearchBox:GetText() ~= "" then
-                OptionsFrameSearchBox:SetText("")
+        function BenillaOptionsFrame_SelectCategory(key)
+            BenillaOptionsFrame.selectedCategory = key
+            if BenillaOptionsFrameSearchBox:GetText() ~= "" then
+                BenillaOptionsFrameSearchBox:SetText("")
                 return -- the OnTextChanged restore re-entered with this same key and finished
             end
             for _, k in ipairs(OPTIONS_CATEGORY_KEYS) do
-                local row = getglobal("OptionsFrameCategoryListRow" .. k)
-                local bg = getglobal("OptionsFrameCategoryListRow" .. k .. "Bg")
+                local row = getglobal("BenillaOptionsFrameCategoryListRow" .. k)
+                local bg = getglobal("BenillaOptionsFrameCategoryListRow" .. k .. "Bg")
                 if k == key then
                     bg:SetVertexColor(1, 1, 0)
                     bg:Show()
                     row:SetTextFontObject("GameFontHighlight")
-                    OptionsFrameContainerTitle:SetText(row.pageTitle)
+                    BenillaOptionsFrameContainerTitle:SetText(row.pageTitle)
                 else
                     bg:SetVertexColor(0.196, 0.388, 0.8)
                     bg:Hide()
@@ -422,7 +422,7 @@
                 end
             end
             for k in pairs(OPTIONS_PAGE_ROWS) do
-                local body = getglobal("OptionsFrameContainerBody" .. k)
+                local body = getglobal("BenillaOptionsFrameContainerBody" .. k)
                 if k == key then body:Show() else body:Hide() end
             end
             -- The Keybindings page (KeyBindingsPage.xml, decision 1008) body-swaps like the
@@ -430,22 +430,22 @@
             -- leaving disarms a straggling capture (the host seam must never outlive the page)
             -- and clears its message line. Its Defaults is the confirmed Reset To Default (the
             -- button's OnClick forks), and the Unbind Key button exists only here.
-            local kb = getglobal("OptionsFrameContainerBodyKeybindings")
+            local kb = getglobal("BenillaOptionsFrameContainerBodyKeybindings")
             if key == "Keybindings" then
                 kb:Show()
                 KeyBindingsPage_Refresh()
-                OptionsFrameContainerUnbind:Show()
-                OptionsFrameContainerDefaults:Enable()
+                BenillaOptionsFrameContainerUnbind:Show()
+                BenillaOptionsFrameContainerDefaults:Enable()
             else
                 kb:Hide()
                 KeyBindings_SetSelected(nil)
                 KeyBindings_Output("")
-                OptionsFrameContainerUnbind:Hide()
+                BenillaOptionsFrameContainerUnbind:Hide()
                 if OPTIONS_PAGE_ROWS[key] then
                     OptionsPage_Refresh(key)
-                    OptionsFrameContainerDefaults:Enable()
+                    BenillaOptionsFrameContainerDefaults:Enable()
                 else
-                    OptionsFrameContainerDefaults:Disable()
+                    BenillaOptionsFrameContainerDefaults:Disable()
                 end
             end
         end
@@ -495,7 +495,7 @@
             for _, key in ipairs(OPTIONS_CATEGORY_KEYS) do
                 if OPTIONS_PAGE_ROWS[key] then
                     for _, rkey in ipairs(OPTIONS_PAGE_ROWS[key]) do
-                        local row = getglobal("OptionsFrameContainerBody" .. key .. rkey)
+                        local row = getglobal("BenillaOptionsFrameContainerBody" .. key .. rkey)
                         local s = OptionsSearch_Score(row.searchTag, words)
                         if s then
                             if not buckets[s] then
@@ -557,15 +557,15 @@
             end
             for _, key in ipairs(OPTIONS_CATEGORY_KEYS) do
                 if OPTIONS_PAGE_ROWS[key] then
-                    take("OptionsFrameContainerBodySearchHead" .. key)
+                    take("BenillaOptionsFrameContainerBodySearchHead" .. key)
                     for _, rkey in ipairs(OPTIONS_PAGE_ROWS[key]) do
-                        take("OptionsFrameContainerBody" .. key .. rkey)
+                        take("BenillaOptionsFrameContainerBody" .. key .. rkey)
                     end
                 end
             end
-            take("OptionsFrameContainerBodySearchHeadKeybindings")
+            take("BenillaOptionsFrameContainerBodySearchHeadKeybindings")
             for i = 1, KEYBINDINGS_SEARCH_ROWS do
-                take("OptionsFrameContainerBodyKeybindSearch" .. i)
+                take("BenillaOptionsFrameContainerBodyKeybindSearch" .. i)
             end
             return bottom
         end
@@ -577,8 +577,8 @@
         -- would fight the resolver. UpdateScrollChildRect re-drives the bar through
         -- OnScrollRangeChanged, which is what shows and hides it (and its trough).
         function OptionsScroll_Fit()
-            local sf = OptionsFrameContainerScroll
-            local body = OptionsFrameContainerBody
+            local sf = BenillaOptionsFrameContainerScroll
+            local body = BenillaOptionsFrameContainerBody
             local fw, fh = sf:GetWidth(), sf:GetHeight()
             if not fw or fw <= 0 or not fh or fh <= 0 then return end
             if math.abs(body:GetWidth() - fw) >= 0.5 then body:SetWidth(fw) end
@@ -606,8 +606,8 @@
                 f:SetPoint("TOPLEFT", prev, "BOTTOMLEFT", 0, -9)
                 f:SetPoint("TOPRIGHT", prev, "BOTTOMRIGHT", 0, -9)
             else
-                f:SetPoint("TOPLEFT", "OptionsFrameContainerBody", "TOPLEFT", 10, -12)
-                f:SetPoint("TOPRIGHT", "OptionsFrameContainerBody", "TOPRIGHT", -20, -12)
+                f:SetPoint("TOPLEFT", "BenillaOptionsFrameContainerBody", "TOPLEFT", 10, -12)
+                f:SetPoint("TOPRIGHT", "BenillaOptionsFrameContainerBody", "TOPRIGHT", -20, -12)
             end
         end
 
@@ -616,7 +616,7 @@
         function OptionsPage_Layout(key)
             local prev = nil
             for _, rkey in ipairs(OPTIONS_PAGE_ROWS[key]) do
-                local name = "OptionsFrameContainerBody" .. key .. rkey
+                local name = "BenillaOptionsFrameContainerBody" .. key .. rkey
                 OptionsSearch_Place(name, prev)
                 getglobal(name):Show()
                 prev = name
@@ -632,37 +632,37 @@
         -- (l.680-682).
         function OptionsSearch_Display(text)
             -- A new result set starts at the top (the era's own ScrollBox reset on a search).
-            OptionsFrameContainerScroll:SetVerticalScroll(0)
+            BenillaOptionsFrameContainerScroll:SetVerticalScroll(0)
             for k in pairs(OPTIONS_PAGE_ROWS) do
-                getglobal("OptionsFrameContainerBody" .. k):Show()
+                getglobal("BenillaOptionsFrameContainerBody" .. k):Show()
                 for _, rkey in ipairs(OPTIONS_PAGE_ROWS[k]) do
-                    getglobal("OptionsFrameContainerBody" .. k .. rkey):Hide()
+                    getglobal("BenillaOptionsFrameContainerBody" .. k .. rkey):Hide()
                 end
-                getglobal("OptionsFrameContainerBodySearchHead" .. k):Hide()
+                getglobal("BenillaOptionsFrameContainerBodySearchHead" .. k):Hide()
             end
             -- The Keybindings furniture leaves the stage with the rest: its body hides (the
             -- search paints matched bindings on the shared pool below, not the page list), a
             -- straggling capture disarms, and the pool starts blank.
-            getglobal("OptionsFrameContainerBodyKeybindings"):Hide()
-            getglobal("OptionsFrameContainerBodySearchHeadKeybindings"):Hide()
+            getglobal("BenillaOptionsFrameContainerBodyKeybindings"):Hide()
+            getglobal("BenillaOptionsFrameContainerBodySearchHeadKeybindings"):Hide()
             for i = 1, KEYBINDINGS_SEARCH_ROWS do
-                getglobal("OptionsFrameContainerBodyKeybindSearch" .. i):Hide()
+                getglobal("BenillaOptionsFrameContainerBodyKeybindSearch" .. i):Hide()
             end
             KeyBindingsPage.searchPainted = nil
             KeyBindings_SetSelected(nil)
-            OptionsFrameContainerUnbind:Hide()
-            OptionsFrameContainerTitle:SetText("Search Results")
-            OptionsFrameContainerDefaults:Hide()
+            BenillaOptionsFrameContainerUnbind:Hide()
+            BenillaOptionsFrameContainerTitle:SetText("Search Results")
+            BenillaOptionsFrameContainerDefaults:Hide()
 
             local order, groups = OptionsSearch_FindMatches(text)
             if table.getn(order) == 0 then
-                OptionsFrameContainerBodyNoResults:Show()
+                BenillaOptionsFrameContainerBodyNoResults:Show()
                 return
             end
-            OptionsFrameContainerBodyNoResults:Hide()
+            BenillaOptionsFrameContainerBodyNoResults:Hide()
             local prev = nil
             for _, key in ipairs(order) do
-                local head = "OptionsFrameContainerBodySearchHead" .. key
+                local head = "BenillaOptionsFrameContainerBodySearchHead" .. key
                 OptionsSearch_Place(head, prev)
                 getglobal(head):Show()
                 prev = head
@@ -675,7 +675,7 @@
                     for _, index in ipairs(groups[key]) do
                         if shown < KEYBINDINGS_SEARCH_ROWS then
                             shown = shown + 1
-                            local name = "OptionsFrameContainerBodyKeybindSearch" .. shown
+                            local name = "BenillaOptionsFrameContainerBodyKeybindSearch" .. shown
                             KeyBindings_PaintBindRow(name, index)
                             OptionsSearch_Place(name, prev)
                             getglobal(name):Show()
@@ -686,17 +686,17 @@
                 else
                     local placed = {}
                     for _, rkey in ipairs(groups[key]) do
-                        local row = getglobal("OptionsFrameContainerBody" .. key .. rkey)
+                        local row = getglobal("BenillaOptionsFrameContainerBody" .. key .. rkey)
                         if row.parentRow and not placed[row.parentRow] then
                             placed[row.parentRow] = 1
-                            local pname = "OptionsFrameContainerBody" .. key .. row.parentRow
+                            local pname = "BenillaOptionsFrameContainerBody" .. key .. row.parentRow
                             OptionsSearch_Place(pname, prev)
                             getglobal(pname):Show()
                             prev = pname
                         end
                         if not placed[rkey] then
                             placed[rkey] = 1
-                            local name = "OptionsFrameContainerBody" .. key .. rkey
+                            local name = "BenillaOptionsFrameContainerBody" .. key .. rkey
                             OptionsSearch_Place(name, prev)
                             row:Show()
                             prev = name
@@ -711,28 +711,28 @@
         -- selection re-applied — SelectCategory re-shows the one body, retitles, and brings
         -- Defaults back (the era's no-text arm, l.655-658).
         function OptionsSearch_Restore()
-            OptionsFrameContainerScroll:SetVerticalScroll(0)
+            BenillaOptionsFrameContainerScroll:SetVerticalScroll(0)
             for k in pairs(OPTIONS_PAGE_ROWS) do
                 OptionsPage_Layout(k)
-                getglobal("OptionsFrameContainerBodySearchHead" .. k):Hide()
+                getglobal("BenillaOptionsFrameContainerBodySearchHead" .. k):Hide()
             end
             for i = 1, KEYBINDINGS_SEARCH_ROWS do
-                getglobal("OptionsFrameContainerBodyKeybindSearch" .. i):Hide()
+                getglobal("BenillaOptionsFrameContainerBodyKeybindSearch" .. i):Hide()
             end
-            getglobal("OptionsFrameContainerBodySearchHeadKeybindings"):Hide()
+            getglobal("BenillaOptionsFrameContainerBodySearchHeadKeybindings"):Hide()
             KeyBindingsPage.searchPainted = nil
-            OptionsFrameContainerBodyNoResults:Hide()
-            OptionsFrameContainerDefaults:Show()
-            OptionsFrame_SelectCategory(OptionsFrame.selectedCategory or "Controls")
+            BenillaOptionsFrameContainerBodyNoResults:Hide()
+            BenillaOptionsFrameContainerDefaults:Show()
+            BenillaOptionsFrame_SelectCategory(BenillaOptionsFrame.selectedCategory or "Controls")
         end
 
         -- The text gate (era OnSearchTextChanged l.640-652): a repeat of the same text is a
         -- no-op, and the FIRST change (searchText still nil — load-time initialization)
         -- arms without acting; text clearing restores only if a search was actually live.
         function OptionsSearch_OnTextChanged(text)
-            if text == OptionsFrame.searchText then return end
-            local had = OptionsFrame.searchText and OptionsFrame.searchText ~= ""
-            OptionsFrame.searchText = text
+            if text == BenillaOptionsFrame.searchText then return end
+            local had = BenillaOptionsFrame.searchText and BenillaOptionsFrame.searchText ~= ""
+            BenillaOptionsFrame.searchText = text
             if text == "" then
                 if had then OptionsSearch_Restore() end
             else
@@ -1045,38 +1045,44 @@
         -- refreshing guard: SetMinMaxValues re-clamps the held value and fires OnValueChanged,
         -- and that clamp is wiring, not a player gesture — without the guard every load would
         -- SetCVar the template's 0 clamped into the new range.
-        -- ── OptionsFrameSliders — ref OptionsFrame.lua l.24-34 ──────────────────────────────
-        -- The reference's options-slider table: one row per graphics slider, carrying the bounds
-        -- the slider is built with. It is PUBLISHED, so addons read and write it — pfUI's
-        -- `hdgraphic` module opens with `_G.OptionsFrameSliders[3].maxValue = 15`
-        -- (modules/hdgraphic.lua l.3) and died on the nil, taking the module with it.
+        -- ── OptionsFrameSliders — THE REFERENCE'S TABLE, NOT OURS ANY MORE (2177) ───────────
+        -- `OptionsFrameSliders` is the video options window's own slider table (ref
+        -- `OptionsFrame.lua` l.24-34): one row per graphics slider, carrying the bounds the slider
+        -- is built with, PUBLISHED so addons can read and write it — pfUI's `hdgraphic` opens with
+        -- `_G.OptionsFrameSliders[3].maxValue = 15` (modules/hdgraphic.lua l.3).
         --
-        -- **It is the real thing, not a shape put here to satisfy that write.** The three rows
-        -- below are the source of truth for our own Graphics page: each row's OnLoad reads its
-        -- bounds from here rather than carrying literals, and the page re-applies them on every
-        -- OnShow, which is what makes an addon's write actually move the slider. A table nothing
-        -- read would be a name with no behaviour behind it (1134 §4) — worse than absent, because
-        -- the write would appear to succeed.
+        -- **This file used to declare it, and no longer does.** Until 2177 the video window was not
+        -- loaded, so the name was free and our Graphics page published its own three rows into it
+        -- to keep that addon write landing on something. The stock window is on the manifest now
+        -- and brings the reference's own nine rows — and this file loads AFTER it, so a declaration
+        -- here would not sit beside them, it would REPLACE them, and `OptionsFrame_Load`'s
+        -- `getglobal("OptionsFrameSlider"..index)` walk would silently stop at three of nine.
         --
-        -- **Three rows, not the reference's nine.** Ours are its rows 1-3 in its own order, and the
-        -- `func` strings match our CVars exactly (uiscale/farclip/WorldDetail) — which is why
-        -- pfUI's index 3 lands on Environment Detail here as it does there. The other six
-        -- (TerrainMip, BaseMip, Gamma, anisotropic, spellEffectLevel, weatherDensity) have no
-        -- benilla knob behind them; listing them would publish six rows whose writes do nothing.
-        -- 0959/1649 own which knobs this page ships, and this table follows that, not the reverse.
+        -- **Nothing is lost, because our three rows WERE its rows 1-3.** Same order, same `func`
+        -- strings, same bounds: `uiscale` 0.64-1.0 step 0.01, `farclip` 177-777 step
+        -- (777-177)/10 = 60, `WorldDetail` 0-2 step 1. The Graphics page below still reads
+        -- `OptionsFrameSliders[1..3]` for its bounds — now off the reference's own table rather
+        -- than a transcription of it, which is the whole point of 1751 — and pfUI's index 3 still
+        -- lands on Environment Detail.
         --
-        -- `benillaRow` is ours: the reference addresses its sliders as OptionsFrameSlider1..9, a
-        -- numbering our page does not use, so each row names the child it drives instead.
+        -- What WAS ours in those rows is the `benillaRow` field, and it moves here.
+        -- `BENILLA_GRAPHICS_SLIDER_ROWS` is index → the child of our Graphics page that the
+        -- reference's row drives; the reference addresses its own sliders as
+        -- `OptionsFrameSlider1..9`, a numbering our page does not use. An index with no entry is a
+        -- reference row we ship no knob for (rows 4-9: TerrainMip, BaseMip, Gamma, anisotropic,
+        -- spellEffectLevel, weatherDensity), and the OnShow re-apply loop skips it.
+        BENILLA_GRAPHICS_SLIDER_ROWS = { "RowUiScale", "RowFarclip", "RowWorldDetail" }
         --
-        -- **Both WorldDetail verbs are bound now** (2163), which is what makes pfUI's module RUN
+        -- **Both WorldDetail verbs are bound** (2163), which is what makes pfUI's module RUN
         -- rather than merely load: it hooks `SetWorldDetail`/`GetWorldDetail`, and hooking a nil
         -- took its extended arm down at the first call. `SetWorldDetail` is `0x488dd0`'s carve —
         -- truncate toward zero, `[0, 2]` or raise `"value must be in the range 0, 2"`, write the
         -- `0x804518` stops {16, 32, 48} — and `GetWorldDetail` is `0x488d70` answering the stop.
         -- They live in `benilla_ui::script::cvars`, not here; this page still drives the CVar
-        -- directly, so nothing on it calls either. The stock file WILL, once 1751 migrates this
-        -- window: `OptionsFrame_Save`/`_Load` prefer `getglobal("Set"..func)` / `("Get"..func)`
-        -- over `SetCVar`/`GetCVar` (`OptionsFrame.lua` l.110/135/206-226).
+        -- directly, so nothing on it calls either. The STOCK file does, now that it is loaded:
+        -- `OptionsFrame_Save`/`_Load` prefer `getglobal("Set"..func)` / `("Get"..func)` over
+        -- `SetCVar`/`GetCVar` (`OptionsFrame.lua` l.110/135/206-226) — but nothing of ours calls
+        -- those functions, because nothing of ours shows that window.
         --
         -- **The nine CVars pfUI's `hdgraphic` drives through `ConsoleExec`, each pinned** (2163;
         -- `ConsoleExec` itself is bound since 1948 — it writes a registered CVar or pushes a
@@ -1094,14 +1100,6 @@
         -- `texLodBias` (`0x6885e2`, whose sink `0x672640` is literally `ret 4`). And `maxLOD` is
         -- **not a CVar at all** — zero of the 214 `CVar::Register 0x63db90` sites name it — so
         -- pfUI's `ConsoleExec("maxLOD " .. arg)` reaches nothing in the real client either.
-        OptionsFrameSliders = {
-            { text = "UI Scale", func = "uiscale",
-              minValue = 0.64, maxValue = 1.0, valueStep = 0.01, benillaRow = "RowUiScale" },
-            { text = "Terrain Distance", func = "farclip",
-              minValue = 177, maxValue = 777, valueStep = 60, benillaRow = "RowFarclip" },
-            { text = "Environment Detail", func = "WorldDetail",
-              minValue = 0, maxValue = 2, valueStep = 1, benillaRow = "RowWorldDetail" },
-        }
 
         function OptionsSliderRow_Setup(row, min, max, step, fmt, stops)
             local slider = getglobal(row:GetName() .. "ControlSlider")
@@ -1299,7 +1297,7 @@
             else
                 OptionsRow_Set(row, "0")
             end
-            OptionsPage_UpdateDependencies(OptionsFrame.selectedCategory)
+            OptionsPage_UpdateDependencies(BenillaOptionsFrame.selectedCategory)
         end
 
         function OptionsSlider_OnValueChanged(slider, value)
@@ -1349,7 +1347,7 @@
         end
 
         function OptionsPage_Refresh(key)
-            local base = "OptionsFrameContainerBody" .. key
+            local base = "BenillaOptionsFrameContainerBody" .. key
             for _, rkey in ipairs(OPTIONS_PAGE_ROWS[key]) do
                 local row = getglobal(base .. rkey)
                 local box = getglobal(base .. rkey .. "Check")
@@ -1405,7 +1403,7 @@
                         local live = on
                         if rkey == "RowComboPoints" and not combo then live = nil end
                         OptionsRow_SetEnabled(
-                            getglobal("OptionsFrameContainerBodyCombat" .. rkey), live)
+                            getglobal("BenillaOptionsFrameContainerBodyCombat" .. rkey), live)
                     end
                 end
                 return
@@ -1414,7 +1412,7 @@
                 -- 1.12's own rule for this pair (UIOptionsFrame_UpdateDependencies l.694-700):
                 -- the mode picker is dead while the switch is unticked. It is the only
                 -- cross-row dependency on this page.
-                OptionsRow_SetEnabled(OptionsFrameContainerBodyInterfaceRowTargetOfTargetMode,
+                OptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetMode,
                     SHOW_TARGET_OF_TARGET ~= "0")
                 return
             end
@@ -1424,7 +1422,7 @@
                 -- MultiBarLeft does not appear without MultiBarRight under it (stock
                 -- MultiActionBar_Update's conjunction). It is the only cross-row dependency on this page — the two bottom
                 -- bars, the grid switch and the lock are all independent.
-                OptionsRow_SetEnabled(OptionsFrameContainerBodyActionBarsRowMultiBar4,
+                OptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyActionBarsRowMultiBar4,
                     SHOW_MULTI_ACTIONBAR_3)
                 return
             end
@@ -1435,8 +1433,8 @@
             -- reference's own file has.
             local on = GetCVar("MasterSoundEffects") ~= "0"
             for _, row in {"RowEnableAmbience", "RowEnableErrorSpeech"} do
-                local box = getglobal("OptionsFrameContainerBodyAudio"..row.."Check")
-                local label = getglobal("OptionsFrameContainerBodyAudio"..row.."Label")
+                local box = getglobal("BenillaOptionsFrameContainerBodyAudio"..row.."Check")
+                local label = getglobal("BenillaOptionsFrameContainerBodyAudio"..row.."Label")
                 if on then
                     box:Enable()
                     label:SetFontObject("GameFontNormal")
@@ -1483,7 +1481,7 @@
         -- not modeled — Defaults resets the VISIBLE page). A pending edit dies with it — the
         -- default write supersedes what Apply would have committed.
         function OptionsPage_Defaults(key)
-            local base = "OptionsFrameContainerBody" .. key
+            local base = "BenillaOptionsFrameContainerBody" .. key
             for _, rkey in ipairs(OPTIONS_PAGE_ROWS[key]) do
                 local row = getglobal(base .. rkey)
                 row.pending = nil
@@ -1503,17 +1501,17 @@
         function OptionsApply_Update()
             local pending
             for key, rows in pairs(OPTIONS_PAGE_ROWS) do
-                local base = "OptionsFrameContainerBody" .. key
+                local base = "BenillaOptionsFrameContainerBody" .. key
                 for _, rkey in ipairs(rows) do
                     if getglobal(base .. rkey).pending then pending = 1 end
                 end
             end
             if pending then
-                OptionsFrameApplyButton:Enable()
-                OptionsFrameApplyButton:Show()
+                BenillaOptionsFrameApplyButton:Enable()
+                BenillaOptionsFrameApplyButton:Show()
             else
-                OptionsFrameApplyButton:Disable()
-                OptionsFrameApplyButton:Hide()
+                BenillaOptionsFrameApplyButton:Disable()
+                BenillaOptionsFrameApplyButton:Hide()
             end
         end
 
@@ -1521,7 +1519,7 @@
         -- value everywhere becomes a real SetCVar, and the button goes away.
         function OptionsPage_Apply()
             for key, rows in pairs(OPTIONS_PAGE_ROWS) do
-                local base = "OptionsFrameContainerBody" .. key
+                local base = "BenillaOptionsFrameContainerBody" .. key
                 for _, rkey in ipairs(rows) do
                     local row = getglobal(base .. rkey)
                     if row.pending then
@@ -1537,7 +1535,7 @@
         -- next open re-reads the committed CVars, so the sliders land back on the truth.
         function OptionsPage_DiscardPending()
             for key, rows in pairs(OPTIONS_PAGE_ROWS) do
-                local base = "OptionsFrameContainerBody" .. key
+                local base = "BenillaOptionsFrameContainerBody" .. key
                 for _, rkey in ipairs(rows) do
                     getglobal(base .. rkey).pending = nil
                 end
@@ -1601,16 +1599,16 @@
         <HighlightFont inherits="GameFontHighlight"/>
         <DisabledFont inherits="GameFontDisable"/>
         <Scripts>
-            <OnClick>OptionsFrame_SelectCategory(this.categoryKey)</OnClick>
+            <OnClick>BenillaOptionsFrame_SelectCategory(this.categoryKey)</OnClick>
             <!-- 1.14's highlight shows on hover with the blue tint standing (the selected row
                  holds its locked gold — the guard is UnlockHighlight's job here). -->
             <OnEnter>
-                if OptionsFrame.selectedCategory ~= this.categoryKey then
+                if BenillaOptionsFrame.selectedCategory ~= this.categoryKey then
                     getglobal(this:GetName() .. "Bg"):Show()
                 end
             </OnEnter>
             <OnLeave>
-                if OptionsFrame.selectedCategory ~= this.categoryKey then
+                if BenillaOptionsFrame.selectedCategory ~= this.categoryKey then
                     getglobal(this:GetName() .. "Bg"):Hide()
                 end
             </OnLeave>
@@ -1658,7 +1656,7 @@
             </Layer>
         </Layers>
         <Scripts>
-            <OnClick>OptionsFrame_SelectCategory(this.categoryKey)</OnClick>
+            <OnClick>BenillaOptionsFrame_SelectCategory(this.categoryKey)</OnClick>
             <OnEnter>getglobal(this:GetName() .. "Hover"):Show()</OnEnter>
             <OnLeave>getglobal(this:GetName() .. "Hover"):Hide()</OnLeave>
         </Scripts>
@@ -1886,7 +1884,7 @@
     <!-- `toplevel` restored (ref OptionsFrame.xml l.3) — same class as the B180/Bagnon dialog
          (decision 1318). NOTE our strata is HIGH where the ref is DIALOG; left as-is, flagged in
          the record rather than silently changed. -->
-    <Frame name="OptionsFrame" parent="UIParent" frameStrata="HIGH" toplevel="true" enableMouse="true" hidden="true">
+    <Frame name="BenillaOptionsFrame" parent="UIParent" frameStrata="HIGH" toplevel="true" enableMouse="true" hidden="true">
         <Size><AbsDimension x="920" y="724"/></Size>
         <Anchors><Anchor point="CENTER"/></Anchors>
         <!-- The 1.14 System-window dialog, verbatim (BACKDROP_DIALOG_32_32 — wow-ui-source
@@ -2166,7 +2164,7 @@
                         </Texture>
                     </Layer>
                     <Layer level="OVERLAY">
-                        <!-- The page title — OptionsFrame_SelectCategory writes it. -->
+                        <!-- The page title — BenillaOptionsFrame_SelectCategory writes it. -->
                         <FontString name="$parentTitle" inherits="OptionsFontHighlightHuge">
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-22"/></Offset></Anchor></Anchors>
                         </FontString>
@@ -2175,17 +2173,17 @@
                 <Frames>
                     <!-- Live on any page with rows (OPTIONS_PAGE_ROWS) and on the Keybindings
                          page, where it is 1.12's Reset To Default behind the era confirm
-                         (KeyBindingsPage.xml's popup); OptionsFrame_SelectCategory
+                         (KeyBindingsPage.xml's popup); BenillaOptionsFrame_SelectCategory
                          enables/disables it with the page swap. -->
                     <Button name="$parentDefaults" inherits="OptionsRedButtonTemplate" text="Defaults">
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-36" y="-16"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:Disable()</OnLoad>
                             <OnClick>
-                                if OptionsFrame.selectedCategory == "Keybindings" then
+                                if BenillaOptionsFrame.selectedCategory == "Keybindings" then
                                     StaticPopup_Show("CONFIRM_RESET_KEYBINDINGS")
                                 else
-                                    OptionsPage_Defaults(OptionsFrame.selectedCategory)
+                                    OptionsPage_Defaults(BenillaOptionsFrame.selectedCategory)
                                 end
                             </OnClick>
                         </Scripts>
@@ -2236,7 +2234,7 @@
                         </Anchors>
                         <Scripts>
                             <!-- The loader fires OnLoad bottom-up, so the body already exists. -->
-                            <OnLoad>self:SetScrollChild(OptionsFrameContainerBody)</OnLoad>
+                            <OnLoad>self:SetScrollChild(BenillaOptionsFrameContainerBody)</OnLoad>
                             <OnUpdate>OptionsScroll_Fit()</OnUpdate>
                             <OnMouseWheel>BenillaScroll_OnMouseWheel(this, arg1)</OnMouseWheel>
                             <OnVerticalScroll>BenillaScroll_SyncBar(this)</OnVerticalScroll>
@@ -2254,7 +2252,7 @@
                                  link-stamp as well as by layer. -->
                             <Frame name="$parentBarTrough" inherits="BenillaScrollTroughTemplate"/>
                             <!-- The page body: one child frame per category with rows, shown by
-                                 OptionsFrame_SelectCategory (Audio 0957, Graphics 0959). Named in
+                                 BenillaOptionsFrame_SelectCategory (Audio 0957, Graphics 0959). Named in
                                  full rather than `$parent…`: it keeps the name every page, row and
                                  search seat is derived from, across the scroll frame that now sits
                                  between it and the container. Its SIZE is authored here because a
@@ -2263,7 +2261,7 @@
                                  and height are read; these are the container's own 665 x (613-50),
                                  the seat it held before, and OptionsScroll_Fit keeps them true
                                  against the live rect from there on. -->
-                            <Frame name="OptionsFrameContainerBody">
+                            <Frame name="BenillaOptionsFrameContainerBody">
                                 <Size><AbsDimension x="665" y="563"/></Size>
                             <Layers>
                                 <Layer level="OVERLAY">
@@ -2712,7 +2710,7 @@
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
-                                    <!-- Re-apply the slider bounds from OptionsFrameSliders every time the page is shown.
+                                    <!-- Re-apply the slider bounds from the REFERENCE's OptionsFrameSliders every time the page is shown.
                                          The rows read the table at OnLoad, which is long before any addon runs; an addon that
                                          writes a bound (pfUI's hdgraphic raises Environment Detail's maxValue to 15) would
                                          otherwise never move the slider it just rewrote. The reference does the same loop in
@@ -2724,10 +2722,10 @@
                                          grammar (0992/1649's stop names), set at OnLoad, and no addon addresses them. -->
                                     <Scripts>
                                         <OnShow>
-                                            for i = 1, table.getn(OptionsFrameSliders) do
+                                            for i, name in BENILLA_GRAPHICS_SLIDER_ROWS do
                                                 local info = OptionsFrameSliders[i]
-                                                local row = info.benillaRow and getglobal(this:GetName() .. info.benillaRow)
-                                                if ( row ) then
+                                                local row = getglobal(this:GetName() .. name)
+                                                if ( info and row ) then
                                                     OptionsSliderRow_Setup(row, info.minValue, info.maxValue,
                                                         info.valueStep, row.fmt, row.stops)
                                                 end
@@ -3312,7 +3310,7 @@
                                                  `OptionsFrame_EnableCheckBox(checkButton, 1, 1)`). -->
                                             <Scripts><OnLoad>
                                                 OptionsFuncRow_OnLoad(self, TutorialsEnabled,
-                                                    OptionsFrame_SetTutorialsEnabled, "1",
+                                                    BenillaOptionsFrame_SetTutorialsEnabled, "1",
                                                     "Show Tutorials", "OPTION_TOOLTIP_SHOW_TUTORIALS")
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -3973,8 +3971,8 @@
                         </Layers>
                         <Scripts>
                             <OnClick>
-                                OptionsFrameSearchBox:SetText("")
-                                OptionsFrameSearchBox:ClearFocus()
+                                BenillaOptionsFrameSearchBox:SetText("")
+                                BenillaOptionsFrameSearchBox:ClearFocus()
                             </OnClick>
                             <OnEnter>getglobal(this:GetName() .. "Icon"):SetAlpha(1.0)</OnEnter>
                             <OnLeave>getglobal(this:GetName() .. "Icon"):SetAlpha(0.5)</OnLeave>
@@ -3986,11 +3984,11 @@
                     <!-- Placeholder + clear-button toggle, then the search proper (0984). -->
                     <OnTextChanged>
                         if this:GetText() == "" then
-                            OptionsFrameSearchBoxInstructions:Show()
-                            OptionsFrameSearchBoxClearButton:Hide()
+                            BenillaOptionsFrameSearchBoxInstructions:Show()
+                            BenillaOptionsFrameSearchBoxClearButton:Hide()
                         else
-                            OptionsFrameSearchBoxInstructions:Hide()
-                            OptionsFrameSearchBoxClearButton:Show()
+                            BenillaOptionsFrameSearchBoxInstructions:Hide()
+                            BenillaOptionsFrameSearchBoxClearButton:Show()
                         end
                         OptionsSearch_OnTextChanged(this:GetText())
                     </OnTextChanged>
@@ -4007,7 +4005,7 @@
                 <Scripts>
                     <OnClick>
                         PlaySound("igMainMenuClose")
-                        HideUIPanel(OptionsFrame)
+                        HideUIPanel(BenillaOptionsFrame)
                     </OnClick>
                 </Scripts>
             </Button>
@@ -4028,8 +4026,9 @@
                  era remembers too — Settings.OpenToCategory's default seat). The scale re-fits
                  on every show — the era panel manager re-runs checkFit the same way. -->
             <OnShow>
-                OptionsFrame_UpdateScale()
-                OptionsFrame_SelectCategory(this.selectedCategory or "Controls")
+                BenillaOptionsFrame_UpdateScale()
+                BenillaOptionsFrame_SelectCategory(this.selectedCategory or "Controls")
+                if UpdateMicroButtons then UpdateMicroButtons() end
             </OnShow>
             <!-- Hiding discards pending edits (the era wipes its modified table on hide; its
                  close-time confirm dialog is cut — SCOPE note), ends a live search (the
@@ -4037,58 +4036,78 @@
                  straggling bind capture — the host seam swallowing all input with no window
                  on screen would be a lockout (KeyBindingsPage.xml, decision 1008). -->
             <OnHide>
-                OptionsFrameSearchBox:SetText("")
+                BenillaOptionsFrameSearchBox:SetText("")
                 OptionsPage_DiscardPending()
                 KeyBindings_SetSelected(nil)
                 KeyBindings_Output("")
+                if UpdateMicroButtons then UpdateMicroButtons() end
             </OnHide>
         </Scripts>
     </Frame>
-    <!-- ══ THE ONE SURVIVING ALIAS (decisions 2115, and the Sound window's row) ═══════════════
+    <!-- ══ NO ALIASES LEFT, AND THIS WINDOW IS NO LONGER `OptionsFrame` (2115, 2147, 2177) ══
          The reference has THREE options windows — `OptionsFrame` (video), `SoundOptionsFrame` and
-         `UIOptionsFrame` (interface). benilla's one window answers to the first name outright,
-         because that is what this frame is called; the other two are **the reference's own frames,
-         loaded hidden off the chain**, and neither may ever be aliased onto this one again.
+         `UIOptionsFrame` (interface). **All three are now the reference's own frames, loaded
+         hidden off the player's chain**, and none of them may ever be aliased onto this one.
 
-         **`UIOptionsFrame`** is loaded at the manifest's l.21 seat, so that name is a real frame
-         with real children — the whole point of 2115: pfUI's
-         `skins/blizzard/options-interface.lua` does `UIOptionsFrame:SetWidth(1024)` and then walks
-         `UIOptionsFrameCheckButton1..69`. Under the old alias that `SetWidth` landed on THIS
-         window, the one the player opens.
+         The last of the three to arrive was the VIDEO window, and it is the one that took a name
+         off this file: the frame above was called `OptionsFrame` for its whole life, and
+         `Interface\FrameXML\OptionsFrame.xml` declares that name itself. Two frames cannot hold
+         one global — `CreateFrame` publishes into `_G` and the later one simply wins, silently —
+         and neither ordering is survivable. Ours later CLOBBERS the stock frame, and pfUI's
+         `skins/blizzard/options-video.lua` then runs `CreateBackdrop`, `EnableMovable`,
+         `HookScript(…, "OnShow", …)` and `OptionsFrameHeader:SetTexture("")` against the window the
+         player opens. Ours earlier is no better: the skin's `OptionsFrameSlider1..9` and
+         `OptionsFrameCheckButton1..18` would find the stock frame's children while its
+         `CreateBackdrop(OptionsFrame)` found ours — half a skin, on two different windows. So the
+         reference's name went back to the reference's window and this one became
+         `BenillaOptionsFrame`, the `Benilla…` convention every other frame of our own already
+         wears (`BenillaScriptLogFrame`, `BenillaScrollBarTemplate`).
 
-         **`SoundOptionsFrame` is no longer aliased either**, and the reason it had to go is
-         sharper than the reason it existed. Our file loads AFTER the stock one, so the alias would
-         not have sat harmlessly beside the real frame — it would have **clobbered it**, and pfUI's
-         `skins/blizzard/options-sound.lua` would then `StripTextures`, `CreateBackdrop`,
-         `EnableMovable` and re-anchor THIS window. That is 2115 §2's harm restored, one window
-         over.
+         **What the rename cost, and where each cost is paid.** Three things keyed on the old name
+         had to be restated rather than lost:
+         · the **panel-manager row** — `UIParent.lua:16`'s `UIPanelWindows["OptionsFrame"]`, which
+           gave this window the centre slot and the while-dead permission. Restated below, verbatim.
+         · the **ESC ladder and the micro button** — `ToggleGameMenu`, `IsOptionFrameOpen` and
+           `UpdateMicroButtons` all name the reference's three windows literally, so the whole chain
+           now reads "no" while ours is up. Three wrappers in `GameMenuFrame.xml` add the one term
+           the reference could not know about; that file is the manifest's last row, which is where
+           `UpdateMicroButtons` finally exists to wrap.
+         · the **`OptionsFrameCancel` alias** — RETIRED, and by the sharper of the two arguments.
+           It pointed the reference's name at our Close button so `ToggleGameMenu`'s
+           `OptionsFrameCancel:Click()` would discard-and-hide this window. That button is now a
+           real frame in the stock video window, and this file loads after it, so the alias would
+           not sit beside it — it would **clobber** it, and pfUI's video skin's
+           `SkinButton(OptionsFrameCancel)` would land on ours. The ESC rung it existed for is the
+           `ToggleGameMenu` wrapper's now, calling our own Close button by our own name.
 
-         **Losing it costs nothing.** Its two stock consumers —
-         `MainMenuBarMicroButtons.lua` l.47-52 (`UpdateMicroButtons`) and `UIParent.lua:997`
-         (`IsOptionFrameOpen`) — read all three names UNGUARDED in one `or` chain, and that chain
-         already contains `OptionsFrame:IsVisible()`, which is this frame's own name. The
-         `SoundOptionsFrame` term goes from true-via-alias to false-via-real-hidden-frame, and in
-         both consumers it was redundant with a term that is already true. So while ours is up both
-         still answer yes, and while it is down both still answer no. 2115 §1 read that alias as
-         load-bearing for those two; walking them says it never was.
+         Nothing of ours may `Show()` any of the three stock frames; each is `hidden="true"` in its
+         own file and that is what keeps them off the screen.
 
-         Nothing of ours may `Show()` either stock frame; both are `hidden="true"` in their own
-         files and that is what keeps them off the screen.
-
-         **`OptionsFrameCancel` stays**, and it is the ESC ladder's: the stock `ToggleGameMenu`
-         (UIParent.lua l.1465-1497, off the chain since 1988) closes an open options window with
-         `OptionsFrame:IsVisible()` → `OptionsFrameCancel:Click()`. Ours has a corner X whose click
-         is the same discard-and-hide (`HideUIPanel(OptionsFrame)`, and OnHide discards the pending
-         page), so that button answers to the reference's name.
-
-         **One behaviour changes because the alias went, and it is the right one.**
+         **One behaviour changed when the `UIOptionsFrame` alias went, and it is the right one.**
          `FloatingChatFrame.lua` l.842/860 gate the chat tab and dock hover on
-         `not UIOptionsFrame:IsShown()`. That now reads the hidden stock frame, so chat-tab hover
+         `not UIOptionsFrame:IsShown()`. That reads the hidden stock frame, so chat-tab hover
          works while OUR options window is open. The reference's gate exists because ITS interface
          window is `frameStrata="FULLSCREEN"` with `setAllPoints` and covers the chat; ours is a
          panel that does not. No adapter is added for it (2115).
          BENILLA_ALLOW_OWN_UI=1 -->
     <Script><![CDATA[
-        OptionsFrameCancel = OptionsFrameCloseButton
+        -- ══ THIS WINDOW'S PANEL-MANAGER ROW ══════════════════════════════════════════════════
+        -- `UIPanelWindows` is the table `ShowUIPanel` reads to place a window: `area` picks the
+        -- slot ("center" is the native-centre one, which no side panel may push aside),
+        -- `pushable` its rank within that slot, `whileDead` whether it may open with the player
+        -- dead. A frame with NO row gets none of it — `ShowUIPanel` falls through to a bare
+        -- `Show()`, unplaced, and death closes it.
+        --
+        -- Until now this frame rode the REFERENCE's row. `UIParent.lua:16` keys one on the name
+        -- `OptionsFrame`, and that was this frame's name, so the game menu's Options button got
+        -- the centre slot and the while-dead permission for free. That name is now the stock
+        -- VIDEO options window's, so the row keyed on it is ITS row — and this window needs its
+        -- own. The three values below are the reference's own, copied verbatim from that line:
+        -- the placement our window has always had, now stated under the name it now answers to.
+        --
+        -- SAFE TO RUN HERE: `UIParent.xml` — which carries `UIParent.lua`, where `UIPanelWindows`
+        -- is created — is the manifest's 7th row (`benilla.toc` l.144) and this file is its 38th
+        -- (l.522), so the table is real by the time this executes.
+        UIPanelWindows["BenillaOptionsFrame"] = { area = "center", pushable = 0, whileDead = 1 }
     ]]></Script>
 </Ui>

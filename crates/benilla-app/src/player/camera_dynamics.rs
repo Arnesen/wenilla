@@ -88,12 +88,27 @@ pub(crate) struct CameraOptions {
     pub(crate) bob_frequency: f32,
     /// `cameraBobbingSmoothSpeed` — the DECAY rate, see [`BOB_SMOOTH_SPEED_DEFAULT`].
     pub(crate) bob_smooth_speed: f32,
+    /// **`cameraWaterCollision`** — registered **"1"** (`0x50bd63`, default string `0x82e748`), so
+    /// this is ON out of the box.
+    ///
+    /// **It is one CVar with two consumers, and shipping either alone is a visible defect.** The
+    /// read at `0x50e5ec` produces one register: its `0xf0000` nibble rides the trace mask to all
+    /// three of `0x50e570`'s queries (the boom hits a bare waterline), and `0x50e629` tests the
+    /// *same* register to admit the pivot floor/cap block ([`super::camera_water`]).
+    ///
+    /// This tree has shipped each half on its own and broken the camera both times — 2149 the
+    /// corridor without the trace, 2170 the trace without the corridor (2173 §1: a surface
+    /// swimmer's pivot sits 11 mm under the plane, so the boom straddles it every frame). The two
+    /// are inseparable: the corridor's surface arm is what lifts the sweep origin to
+    /// `surface + 2/9`, clear of the geometry the mask just switched on.
+    pub(crate) water_collision: bool,
 }
 
 impl Default for CameraOptions {
     fn default() -> Self {
         Self {
             pivot: true,
+            water_collision: true,
             pivot_dx_max: PIVOT_DX_MAX_DEFAULT,
             pivot_dy_min: PIVOT_DY_MIN_DEFAULT,
             target_smooth_speed: TARGET_SMOOTH_SPEED_DEFAULT,
@@ -129,6 +144,16 @@ pub(super) struct DynamicsInput {
     /// argument. It rides here because it is a camera CVar reaching a camera kernel, which is what
     /// this struct is for (2163).
     pub(super) nearclip: f32,
+    /// **The liquid surface over the driven body's feet** (Bevy-Y), as the last movement tick
+    /// cached it — [`crate::player::state::Player::liquid_surface`]. Feeds
+    /// [`super::camera_water::classify`], the half of `cameraWaterCollision` that is not the trace
+    /// mask.
+    ///
+    /// Our own body's, so it is `None`-equivalent for a far-sight subject: `0x511ad0` reads the
+    /// camera TARGET's liquid object, and `view_subject` carries no movement state for a watched
+    /// unit — the same gap the swim framing preset has, recorded rather than papered over. A
+    /// totem watched across a lake gets the dry-land corridor.
+    pub(super) surface_y: Option<f32>,
 }
 
 /// What the four mechanisms' gates need to know about the **followed unit** — the conjuncts that

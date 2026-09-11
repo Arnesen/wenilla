@@ -1266,9 +1266,58 @@ pub(super) fn seat_on_subject(
     // switch move the camera smoothly instead of teleporting it ([`PivotGlide`]; wow-re
     // `pivot-height-glide.md`). A far-sight subject supplies the target the same way the body
     // does — one channel, whatever it is looking at.
-    let orbit_pivot = rig
+    let live_pivot = rig
         .pivot
         .advance(view.remote.map(|v| v.pivot_height).or(body_pivot), dt);
+    // **`cameraWaterCollision`'s corridor** — the half 2149 and 2170 each shipped without, and the
+    // reason the option is atomic. [`super::camera_water`] carries the block, the byte sites and
+    // the why; this is only the wiring.
+    //
+    // Classified against the channel's **target** (`[cam+0x1c8]`), never its live value — the
+    // polarity three of wow-re's seven cold workers inverted, arbitrated at the bytes. Banding
+    // against a continuously-eased quantity chatters on its own, independently of the corridor.
+    //
+    // `headroom` is `1.0`: the reference scales the reach by the hit fraction of a vertical
+    // head-room probe at `0x50e6bd` that this client has never had. Absent and named, not stubbed
+    // (1203) — a low ceiling over a swimmer keeps the full reach, which is a pre-existing gap in
+    // the pivot rather than something the corridor introduces.
+    let (_, pivot_target) = rig.pivot.probe();
+    let (band, depth) = super::camera_water::classify(
+        // Our own body's cached surface, and only when the camera is watching our own body:
+        // `0x511ad0` reads the camera TARGET's liquid object and far sight carries none.
+        view.remote
+            .is_none()
+            .then_some(dynamics.surface_y)
+            .flatten(),
+        orbit_pos.y,
+        pivot_target,
+    );
+    let corridor = if dynamics.options.water_collision {
+        super::camera_water::corridor(band, depth, live_pivot)
+    } else {
+        super::camera_water::corridor_off(live_pivot)
+    };
+    let orbit_pivot = super::camera_water::pivot_height(&corridor, pivot_target, live_pivot, 1.0);
+    // **And the corridor's floor lifts the SWEEP ORIGIN, which is the half that actually stops the
+    // pin.** The reference builds the boom's start from the clamped `*heightOut` itself
+    // (`0x50e786`), so in the surface band it sweeps from `surface + 2/9`; this client roots the
+    // boom at the capsule's top hemisphere centre instead, a pre-existing divergence that is
+    // harmless on land and decisive here. A surface-swimming human male's head sits
+    // `surface + 0.171`, and the camera probe has a `0.15` radius — so the probe starts **21 mm**
+    // clear of the water it is now allowed to hit, and a fraction of a degree of downward pitch
+    // collapses the arm from 15 yd to nothing.
+    //
+    // Measured, not reasoned: the end-to-end pitch sweep in `benilla_world::collision`
+    // (`a_surface_swimmers_arm_moves_smoothly_through_the_whole_pitch_range`) put that step at
+    // **6.65 yd** with the corridor applied to the framing pivot alone. Lifting the origin to the
+    // corridor floor takes it to a fraction of a yard. `max`, so this can only ever raise the
+    // origin: dry land and the submerge band are untouched, and nothing here can push the sweep
+    // start down into geometry.
+    let sweep_from = Vec3::new(
+        sweep_from.x,
+        sweep_from.y.max(orbit_pos.y + corridor.floor),
+        sweep_from.z,
+    );
     // **`cameraTerrainTilt`'s probe and channel.** The probe looks at the ground AHEAD of the
     // subject, not under it: a horizontal ray along its facing from `feet + 5/3`, its hit pulled
     // back `5/18`, then a `64/9` drop — so the slope is the rise of the ground you are walking
@@ -1429,7 +1478,22 @@ pub(super) fn seat_camera(
     let boom_len = boom.length().max(1.0e-3);
     // The camera collides with the WMO *camera/LOS* faces (keeps DETAIL overhangs like forge pipes,
     // drops NOCAMCOLLIDE) + terrain/doodads/GameObjects — its own audience, not the walking mesh.
-    let hit = collide.cast_camera(cam_probe, head, Quat::IDENTITY, boom, 0.0);
+    //
+    // **And the waterline, under `cameraWaterCollision`** — registered `"1"`, so this is on out of
+    // the box. `0x50e5ec` ORs the `0xf0000` ADT-liquid nibble into the word all three of
+    // `0x50e570`'s queries carry, and it reaches `0x69cc13` through four direct calls, where it
+    // gates a Möller–Trumbore intersection (`0x7c2c40`, hit distance written at `0x7c2e5f`) over
+    // the chunk's four MCLQ slots. Two-sided, and with no near floor — which is precisely why the
+    // pivot corridor above is not optional: nothing in the trace itself stops a boom that starts
+    // on the water plane, so the *origin* is what has to be lifted clear.
+    let hit = collide.cast_camera(
+        cam_probe,
+        head,
+        Quat::IDENTITY,
+        boom,
+        0.0,
+        dynamics.options.water_collision,
+    );
     // The solver's own clip verdict (`0x50e570`'s `0x30000` return, OR'd into `[cam+0x90]` by the
     // driver) — [`SmartPivot`]'s sixth conjunct, and the reason an unobstructed camera never
     // pivots. Written here because here is the only place that knows.

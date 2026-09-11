@@ -1197,7 +1197,16 @@ fn a_clean_world_entry_raises_only_the_warnings_we_have_named() {
     // zero corpus call sites, and benilla has no IME — so nothing here could ever fire it, and
     // `SCRIPT_KINDS`' rule is that a name we cannot fire stays out. The refusal is the honest
     // answer; the row is the price of saying it out loud.
-    const KNOWN: [&str; 1] = ["OnInputLanguageChanged"];
+    //
+    // **`gxRefresh` stays out permanently too** (decision 2177). The stock VIDEO options window
+    // reads it in `OptionsFrameRefreshDropDown_OnLoad` — one of the two `<OnLoad>` paths that run
+    // on the spot when that file loads — and benilla does not register it, because a refresh rate
+    // is only selectable through an exclusive mode-set and this client ships none on any target
+    // (`crate::video`'s module doc walks each). `GetRefreshRates` therefore returns the
+    // reference's own "no rates available" sentinel, the dropdown greys itself, and nothing ever
+    // reads the variable. Registering it would be a key with no reader — 1134 §4's silent
+    // pretence — so the warn-once is the honest answer and this row is the price of saying so.
+    const KNOWN: [&str; 2] = ["OnInputLanguageChanged", "unknown CVar 'gxRefresh'"];
 
     let unexpected: Vec<String> = script
         .diagnostics()

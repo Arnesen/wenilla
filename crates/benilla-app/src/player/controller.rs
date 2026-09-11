@@ -217,6 +217,8 @@ pub(super) fn control(
     let dynamics = camera_dynamics::DynamicsInput {
         options: *pointer.4,
         nearclip: pointer.5.nearclip,
+        // Last frame's cached surface — the reference's own lag (`Player::liquid_surface`).
+        surface_y: player.liquid_surface,
         smooth_style: pointer.3.style,
         tracking_style: pointer.3.tracking_style,
         subject: camera_dynamics::SubjectState {
@@ -759,6 +761,9 @@ pub(super) fn control(
         // the verified `0x6030c0` boundary — B7 resolved, decision 0226) so wading the line
         // doesn't flicker between the two physics regimes.
         let surface_y = swim::surface_over_feet(world, player.pos);
+        // Cache it for the camera's water corridor, which reads it a frame later exactly as the
+        // reference's `0x670630` accessor does (see `Player::liquid_surface`).
+        player.liquid_surface = surface_y;
         let swimming = swim::update_swimming(&mut player, surface_y, time.elapsed_secs());
         if let Some(surface) = surface_y {
             move_trace::swim(player.pos.y, surface, swimming, player.collision_height.0);

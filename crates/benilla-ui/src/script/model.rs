@@ -804,6 +804,29 @@ pub(crate) struct Model {
     /// formats rather than inventing some.
     pub(crate) multisample_formats: Vec<super::cvars::MultisampleFormat>,
 
+    /// The screen resolutions the Video options window's dropdown offers, ascending — pushed by
+    /// the host ([`super::UiScript::set_screen_resolutions`]) from the display this client is on,
+    /// and read by `GetScreenResolutions` / `GetCurrentResolution` / `SetScreenResolution`.
+    ///
+    /// Empty until the host pushes it. A VM with no window behind it (every extract test) offers
+    /// none rather than inventing a ladder, and the reference's own consumer walks it zero times.
+    pub(crate) screen_resolutions: Vec<super::cvars::ScreenResolution>,
+    /// **Where in that list the client actually is** — the index `GetCurrentResolution` answers,
+    /// 0-based here and reported 1-based, which is the form `CT_Viewport.lua:105` indexes the
+    /// `GetScreenResolutions` varargs with (`arg[GetCurrentResolution()]`).
+    ///
+    /// Held as an index rather than a size so the two can never disagree: the host guarantees the
+    /// live size is IN the list when it pushes, which is what makes that addon's read total.
+    /// `None` while the list is empty.
+    pub(crate) current_resolution: Option<usize>,
+    /// What this run's device and presentation path really offer, behind `GetVideoCaps` — pushed
+    /// by the host, which is the only side holding a `RenderAdapter`.
+    pub(crate) video_caps: super::cvars::VideoCaps,
+    /// `RestartGx()` calls queued since the host last drained them — the video window's
+    /// "apply the staged settings now" button, counted like [`Self::screenshot_asks`] because the
+    /// request carries no payload.
+    pub(crate) restart_gx_asks: u32,
+
     /// The globals `RegisterForSave` declared, in registration order — the saved-variables set the
     /// host writes out at logout/exit and re-executes at load (decision 1128, [`super::saved`]).
     pub(crate) saved_names: Vec<String>,
@@ -1962,6 +1985,10 @@ impl Model {
             cvar_changes: Vec::new(),
             cvars_warned: HashSet::new(),
             multisample_formats: Vec::new(),
+            screen_resolutions: Vec::new(),
+            current_resolution: None,
+            video_caps: super::cvars::VideoCaps::default(),
+            restart_gx_asks: 0,
             saved_names: Vec::new(),
             keybinds: super::keybind::KeybindState::default(),
             actions: HashMap::new(),

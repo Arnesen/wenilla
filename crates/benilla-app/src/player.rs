@@ -55,6 +55,7 @@ mod world_focus;
 // The remembered camera pose (decision 1131) — it lives inside `player/` so it can read the rig's
 // own `pub(super)` fields instead of widening them for a module outside.
 mod camera_saved;
+mod camera_water;
 // The five NAMED camera poses the player can jump between (decision 1745) — `camera_saved`'s
 // complement: that one remembers where you left the camera, this one where you decided it should
 // be able to go. Same reason for living inside `player/`: it writes the rig's `pub(super)` fields.

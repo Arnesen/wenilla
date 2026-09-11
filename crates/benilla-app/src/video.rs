@@ -63,6 +63,7 @@
 //! **`AutoNoVsync`, never `Immediate`.** On macOS/Metal, explicit `Immediate` both rails *and*
 //! takes ~1 s `nextDrawable` stalls — measured, and pinned at [`crate::capture::probe_uncap_mode`].
 
+use benilla_ui::script::ScreenResolution;
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution};
 
@@ -255,9 +256,171 @@ pub(crate) struct VideoPlugin;
 impl Plugin for VideoPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VideoConfig>()
+            .init_resource::<GxRestarts>()
             .add_systems(Startup, (log_display_session, check_window_pinned).chain())
-            .add_systems(Update, (apply_present_mode, apply_window_mode));
+            .add_systems(
+                Update,
+                (
+                    (drain_restart_gx, (apply_present_mode, apply_window_mode)).chain(),
+                    publish_display_modes,
+                ),
+            );
     }
+}
+
+/// How many `RestartGx()` calls the interface has made — the video window's "apply the staged
+/// settings now" (decision 2177).
+///
+/// A generation counter rather than a flag: [`apply_present_mode`] and [`apply_window_mode`] each
+/// keep their own `Local` of the last value they acted on, so one bump forces exactly one
+/// re-assertion in each, whichever order they run in and however many frames apart.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct GxRestarts(u32);
+
+/// Move the interface's `RestartGx()` calls into [`GxRestarts`].
+///
+/// benilla applies its video settings live (this module's doc says so for `gxVSync` and the
+/// display mode), so what a restart means HERE is "re-assert them against the window now" rather
+/// than "tear the device down and rebuild it". The two systems below do the asserting; this one
+/// only carries the request across the VM boundary.
+fn drain_restart_gx(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut restarts: ResMut<GxRestarts>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let asks = script.take_restart_gx_asks();
+    if asks == 0 {
+        // Never touch the resource on a quiet frame: a `ResMut` deref-mut is a change signal, and
+        // both consumers below are gated on the value moving.
+        return;
+    }
+    restarts.0 = restarts.0.wrapping_add(asks);
+    info!("video: RestartGx — re-asserting the display mode and present mode");
+}
+
+/// **The reference's own three filters on the resolution list** (wow-re
+/// `ui/scratch/video-options-verbs.md` §1.1, all VERIFIED at `0x48bcfa`–`0x48bd18`), in its own
+/// order: keep iff `w/h >= 1.248`, `w >= 800`, `h >= 600`.
+///
+/// The aspect constant is `[0x804570]`, the f32 `1.2480000257492065` — chosen just under 5:4 so it
+/// admits 5:4, 4:3, 16:10 and 16:9 and rejects square and portrait modes. It is not a
+/// widescreen-only gate; the `widescreen` CVar is a separate switch [`SCREEN_FALLBACK`] describes.
+fn offerable(r: ScreenResolution) -> bool {
+    r.width >= 800 && r.height >= 600 && f64::from(r.width) / f64::from(r.height) >= 1.248
+}
+
+/// **What the list is when enumeration produces nothing** — the reference's four hardcoded modes,
+/// in its own append order (`0x48bda2`, `0x48bddf`, `0x48be43`, `0x48bea7`).
+///
+/// In the reference this is a "produced nothing" path, not an else: it is taken when the display
+/// enumeration survives no mode, when the `widescreen` CVar's record is missing, or when
+/// `widescreen == 0`. **benilla does not register `widescreen`** (`0x63a747`, registered default
+/// `"1"`), so only the first of the three reaches here — a headless run, or a monitor whose modes
+/// all fail [`offerable`]. Registering it would be a knob whose whole effect is to shrink this
+/// dropdown to these four, which is a setting on its own merits and not this list's business.
+const SCREEN_FALLBACK: [ScreenResolution; 4] = [
+    ScreenResolution {
+        width: 800,
+        height: 600,
+    },
+    ScreenResolution {
+        width: 1024,
+        height: 768,
+    },
+    ScreenResolution {
+        width: 1280,
+        height: 1024,
+    },
+    ScreenResolution {
+        width: 1600,
+        height: 1200,
+    },
+];
+
+/// The pair [`publish_display_modes`] remembers between frames: the list it last pushed and the
+/// index into it. One name because they are one fact — a list without its index cannot be read —
+/// and because a `Local` spelling it inline is what `-D clippy::type-complexity` refuses.
+type PublishedModes = Option<(Vec<ScreenResolution>, Option<ScreenResolution>)>;
+
+/// **What the Video options window's resolution dropdown offers, and where the client is in it** —
+/// the host half of `GetScreenResolutions` / `GetCurrentResolution` / `SetScreenResolution`
+/// (decision 2177).
+///
+/// The reference enumerates the graphics device's display modes, because picking one is a
+/// mode-set. benilla ships no exclusive mode at all (this module's doc walks why, per target), so
+/// what a pick here really changes is the **windowed size** — `gxResolution`, which
+/// `SetScreenResolution` writes and [`apply_window_mode`] applies on the next frame.
+///
+/// **The unit is LOGICAL pixels, not the monitor's physical mode table, and that is deliberate.**
+/// `gxResolution` already means a logical inner size everywhere else in this client
+/// ([`boot_windowed_size`] hands it straight to `WindowResolution`), so offering physical sizes
+/// would make the dropdown's rows and the CVar they write mean two different things on every
+/// HiDPI display — a 1600×900 pick landing a 3200×1800 window. One unit end to end beats matching
+/// the reference's spelling into a variable that means something else here.
+///
+/// The rows are the monitor's own distinct mode sizes plus its full size, in logical units, put
+/// through [`offerable`] — device data and the reference's own filters, not a ladder we invented —
+/// and [`SCREEN_FALLBACK`] when that survives nothing. The live window size is added by
+/// [`UiScript::set_screen_resolutions`] if it is not already among them, which is the common case
+/// (a 1600×900 window on a 4K panel, or anything below the 800×600 floor) and the one
+/// `CT_Viewport.lua:201` depends on: it reads its own screen size as `arg[GetCurrentResolution()]`
+/// and silently falls back to 4:3 on a miss.
+///
+/// **Recomputed on change, where the reference builds it once and never invalidates it** — its own
+/// list survives a `gxRestart`, a `widescreen` toggle and a monitor change (a 25-hit dword census
+/// of the count global says so). That is a cache bug to leave behind, not a mechanism: a client
+/// that can be dragged between monitors has to answer for the one it is on.
+fn publish_display_modes(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    monitors: Query<&bevy::window::Monitor>,
+    mut last: Local<crate::ui_script::VmMemo<PublishedModes>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let res = &window.resolution;
+    let current = Some(ScreenResolution {
+        width: res.width() as u32,
+        height: res.height() as u32,
+    })
+    .filter(|r| r.width > 0 && r.height > 0);
+    let mut offered: Vec<ScreenResolution> = Vec::new();
+    for m in &monitors {
+        // The monitor's own scale — not the window's. A window straddling two displays reports
+        // whichever winit last gave it, and these rows describe the PANEL.
+        let scale = if m.scale_factor > 0.0 {
+            m.scale_factor
+        } else {
+            1.0
+        };
+        let logical = |size: UVec2| ScreenResolution {
+            width: (size.x as f64 / scale).round() as u32,
+            height: (size.y as f64 / scale).round() as u32,
+        };
+        offered.push(logical(m.physical_size()));
+        offered.extend(m.video_modes.iter().map(|v| logical(v.physical_size)));
+    }
+    offered.retain(|r| offerable(*r));
+    if offered.is_empty() {
+        offered.extend(SCREEN_FALLBACK);
+    }
+    offered.sort_by_key(|r| (u64::from(r.width) * u64::from(r.height), r.width, r.height));
+    offered.dedup();
+    // **VM-keyed** (decision 1290): a `ReloadUI` replaces the VM, and the fresh one has been
+    // pushed nothing. A plain `Local` here would remember the OLD VM's list and skip the push
+    // that the new VM needs, leaving `GetScreenResolutions` empty for the rest of the session.
+    let memo = last.get(&script);
+    if memo.as_ref() == Some(&(offered.clone(), current)) {
+        return;
+    }
+    *memo = Some((offered.clone(), current));
+    script.set_screen_resolutions(offered, current);
 }
 
 /// **Did the window actually get the size `$WOW_WIN` asked for?** Refuse the run if not.
@@ -406,10 +569,14 @@ fn display_session() -> String {
 /// reconciles them.
 fn apply_present_mode(
     cfg: Res<VideoConfig>,
+    restarts: Res<GxRestarts>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut last: Local<Option<bool>>,
+    mut last_restart: Local<u32>,
 ) {
-    if last.replace(cfg.vsync) == Some(cfg.vsync) {
+    // A `RestartGx()` re-asserts even when nothing moved — that is what the caller asked for.
+    let forced = std::mem::replace(&mut *last_restart, restarts.0) != restarts.0;
+    if last.replace(cfg.vsync) == Some(cfg.vsync) && !forced {
         return;
     }
     let want = present_mode(cfg.vsync);
@@ -437,10 +604,16 @@ fn apply_present_mode(
 /// frame of every launch. Matching on the variant is the honest question.
 fn apply_window_mode(
     cfg: Res<VideoConfig>,
+    restarts: Res<GxRestarts>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut last: Local<Option<DisplayMode>>,
+    mut last_restart: Local<u32>,
 ) {
-    if last.replace(cfg.display) == Some(cfg.display) {
+    // A `RestartGx()` re-asserts even when nothing moved, and that includes re-applying
+    // `gxResolution` to a window already in windowed mode — the one video setting whose value can
+    // have moved without the MODE moving, and therefore the one this verb is most useful for.
+    let forced = std::mem::replace(&mut *last_restart, restarts.0) != restarts.0;
+    if last.replace(cfg.display) == Some(cfg.display) && !forced {
         return;
     }
     let Ok(mut window) = windows.single_mut() else {
@@ -455,7 +628,7 @@ fn apply_window_mode(
                 WindowMode::BorderlessFullscreen(_)
             )
     );
-    if already {
+    if already && !forced {
         return;
     }
     // Leaving fullscreen has to hand the size back, because entering it **overwrote**
@@ -537,6 +710,9 @@ mod tests {
             display: DisplayMode::Fullscreen,
             windowed: UVec2::new(1024, 768),
         })
+        // The plugin's resource, seated by hand because this test runs the one system rather than
+        // the plugin — `apply_window_mode` reads it to know a `RestartGx()` asked for a re-assert.
+        .init_resource::<GxRestarts>()
         .add_systems(Update, apply_window_mode);
         let win = app
             .world_mut()

@@ -1226,7 +1226,7 @@ fn the_shipped_setter_passes_exactly_four_arguments() {
     // The shipped setter is the Action Bars row's own closure (OptionsFrame.xml), which is
     // stock's three lines — assign the global, MultiActionBar_Update(), SetActionBarToggles(…) —
     // plus the manage pass.
-    s.run("OptionsFrameContainerBodyActionBarsRowMultiBar2Check:Click()")
+    s.run("BenillaOptionsFrameContainerBodyActionBarsRowMultiBar2Check:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<i64>("return BENILLA_TEST_TOGGLE_ARGC").unwrap(),
