@@ -32,6 +32,14 @@ use super::Realms;
 
 /// How long each leg may take before the walk gives up and says which one stalled.
 const LEG_TIMEOUT: f32 = 25.0;
+/// How long the walk waits to REACH character select before it says why it never started.
+///
+/// The whole login is inside this — dial, auth, realm list, roster — which is why it is not
+/// [`LEG_TIMEOUT`], and why it exists at all: leg 0 was the one leg with no predecessor to name
+/// it, so a walk that never reached the roster screen said nothing and ran out the caller's own
+/// timeout instead. `scripts/smoke.sh` then reported "the realm walk did not finish within the
+/// timeout", which is true of every possible failure and a cause for none of them.
+const ENTRY_TIMEOUT: f32 = 60.0;
 /// A beat with the dialog up, so a human watching sees it and a stuck frame has time to show.
 const DWELL: f32 = 1.0;
 
@@ -42,6 +50,8 @@ pub(super) struct Walk {
     /// The roster generation we are waiting to move past — a realm entered is a roster replaced.
     rosters: u32,
     seen: u32,
+    /// The one-shot startup refusal has run.
+    armed: bool,
 }
 
 /// The walk. Every leg names itself on the way in, so a timeout says which boundary stalled
@@ -67,6 +77,42 @@ pub(super) fn debug_realm_smoke(
         error!("realm-smoke: FAILED — {why}");
         exit.write(AppExit::error());
     };
+    // **The walk needs the roster SCREEN, and two envs structurally deny it** — so refuse here,
+    // on the first frame, instead of spending a login and a timeout discovering it. `WOW_CHAR` is
+    // the enter-the-world fast path and `WOW_RIG` seats its own derived body; either one answers
+    // the very roster this walk stands on, and neither can be waited out.
+    //
+    // Inherited rather than typed is the case worth naming. `scripts/smoke.sh` runs this leg out
+    // of the same shell as everything else and now scrubs `WOW_*` before it starts — but this
+    // check is the guard for the leg itself, not for that one caller: an agent reproducing a
+    // realm-list report by hand types `WOW_REALM_SMOKE=1 cargo run` into a shell that has been
+    // exporting probe credentials all session, and gets told why in the first second.
+    if !walk.armed {
+        walk.armed = true;
+        if let Some((key, value)) = ["WOW_CHAR", "WOW_RIG"]
+            .into_iter()
+            .find_map(|k| std::env::var_os(k).map(|v| (k, v)))
+        {
+            fail(&format!(
+                "{key}={} seats a body — this walk drives CHARACTER SELECT and there is no roster \
+                 screen to drive once one is seated. Unset it (`scripts/smoke.sh` does).",
+                value.to_string_lossy(),
+            ));
+            walk.phase = u8::MAX;
+            return;
+        }
+    }
+    if walk.phase == 0 && now - walk.mark > ENTRY_TIMEOUT {
+        fail(&format!(
+            "never reached character select in {ENTRY_TIMEOUT:.0}s (state {:?}, {} characters, \
+             {} realms) — nothing was driven, so the fault is upstream of the walk",
+            state.get(),
+            roster.chars.len(),
+            realms.realms.len(),
+        ));
+        walk.phase = u8::MAX;
+        return;
+    }
     if walk.phase > 0 && now - walk.mark > LEG_TIMEOUT {
         fail(&format!(
             "leg {} stalled for {LEG_TIMEOUT:.0}s (state {:?}, dialog {}, rosters {}/{})",

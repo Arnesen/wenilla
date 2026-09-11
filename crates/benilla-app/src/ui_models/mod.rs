@@ -555,14 +555,91 @@ const GUTTER: u32 = 2;
 const TILE_CAMERA_ORDER: isize = -10;
 
 /// The renderer's per-frame state that is not the bridge.
+///
+/// **Most of this is about a VM, and the VM does not live for the process** (decision 1290): it
+/// is built at world entry and destroyed at the character screen, and `ReloadUI()` is both edges
+/// back to back. [`TileState::session`] is what keeps that honest — see [`TileState::adopt_vm`]
+/// and [`TileState::answer_facts`].
 #[derive(Default)]
 struct TileState {
+    /// The VM these tiles and the bridge's handle-keyed maps belong to
+    /// ([`UiScript::session`]); `0` = none (the "no VM" branch, and a freshly built state).
+    session: u64,
     tiles: HashMap<FrameHandle, Tile>,
     /// Files the engine asked facts for, loading.
     pending_facts: HashMap<String, Handle<M2Model>>,
-    /// Files whose facts were handed over — the handle kept alive for the tiles.
-    loaded: HashMap<String, Handle<M2Model>>,
+    /// Files whose facts have been derived: the asset handle (which keeps the file resident for
+    /// the tiles) beside the facts themselves.
+    ///
+    /// **The facts are cached because they are owed to every VM, not to the process.** This map
+    /// is a HOST fact — "the file is loaded here" — and it stood in for the per-VM fact "this
+    /// VM's engine has been told about the file" until [`TileState::answer_facts`]; the module
+    /// doc of `crate::ui_script::session` names that class and why it has no error path.
+    loaded: HashMap<String, (Handle<M2Model>, ModelFileFacts)>,
     frame: u64,
+}
+
+impl TileState {
+    /// Hand the engine the facts for every file it just asked about, and answer with the keys
+    /// that still need loading (not resident here, and not already in flight).
+    ///
+    /// **Every ask gets an answer, whichever VM is asking.** `model_facts_wanted` DRAINS, and the
+    /// only thing that re-pushes a want is `SetModel` — so a want that is dropped is dropped for
+    /// the life of that VM. Skipping the answer because the file was already loaded *for an
+    /// earlier VM* is therefore permanent: [`UiScript::visible_model_panes`] drops a pane whose
+    /// file the engine knows nothing about, so from the second world entry on, every `<Model>`
+    /// widget in the game — the cooldown pie and the GCD sweep, the autocast shine, the minimap
+    /// and world-map pings, the item-push card, the map arrow — went dark until the process was
+    /// restarted. That is decision 1290's class exactly: a host memory standing in for a per-VM
+    /// one, failing silently, with the window simply empty.
+    fn answer_facts(&mut self, script: &mut UiScript) -> Vec<String> {
+        let mut to_load = Vec::new();
+        for key in script.model_facts_wanted() {
+            if let Some((_, facts)) = self.loaded.get(&key) {
+                if trace_on() {
+                    info!("tile-trace: facts for {key} answered from residency");
+                }
+                script.set_model_facts(&key, facts.clone());
+                continue;
+            }
+            // Already in flight: the landing below answers whichever VM is asking by then.
+            if self.pending_facts.contains_key(&key) {
+                continue;
+            }
+            to_load.push(key);
+        }
+        to_load
+    }
+
+    /// Adopt the VM `script` names — **forgetting every handle-keyed memory when it is a
+    /// different one than these tiles were built against**.
+    ///
+    /// A [`FrameHandle`] is a generational index into ONE VM's widget arena, and the VM is
+    /// rebuilt at every logout, login and `ReloadUI()` (1290/1291). The next VM starts a fresh
+    /// arena and reissues the SAME indices at the same generations, so a tile or a request that
+    /// outlives its VM is not merely stale: it names a different frame. `None` is "no VM" — a
+    /// session in its own right (session `0`), exactly as [`crate::ui_script::VmMemo`] treats the
+    /// character screen.
+    ///
+    /// **When** this runs is load-bearing: [`forget_dead_vm_tiles`], ahead of the extract.
+    fn adopt_vm(
+        &mut self,
+        script: Option<&UiScript>,
+        bridge: &mut UiModelTiles,
+        commands: &mut Commands,
+        table: &mut MatAnimTable,
+    ) {
+        let session = script.map_or(0, UiScript::session);
+        if self.session == session {
+            return;
+        }
+        self.session = session;
+        for (_, tile) in self.tiles.drain() {
+            tile.retire(commands, table);
+        }
+        bridge.requests.clear();
+        bridge.cells.clear();
+    }
 }
 
 pub(crate) struct UiModelsPlugin;
@@ -572,9 +649,20 @@ impl Plugin for UiModelsPlugin {
         app.init_resource::<UiModelTiles>()
             .init_non_send_resource::<TileState>()
             .add_systems(Startup, setup_tiles)
+            // **Before the extract**, which is where a `<Model>` pane's tile request is
+            // published (the UI pass's `paint_script`) — see [`forget_dead_vm_tiles`].
+            .add_systems(
+                Update,
+                forget_dead_vm_tiles.before(crate::ui_script::UiInput),
+            )
             // After the extract published this frame's requests, and before the pose/palette
             // passes read the roots' transforms (they run in PostUpdate).
-            .add_systems(Update, sync_tiles.after(crate::ui_script::UiInput))
+            .add_systems(
+                Update,
+                sync_tiles
+                    .after(crate::ui_script::UiInput)
+                    .after(forget_dead_vm_tiles),
+            )
             // The composite: this frame's cells, appended in the lane the minimap fill uses —
             // after the cells are packed, before the mesh rebuild reads the lane.
             .add_systems(Update, compose_tiles.in_set(UiQuadAppend).after(sync_tiles))
@@ -707,6 +795,26 @@ struct TileRender<'w> {
     anim_mirrors: ResMut<'w, MatAnimMirrors>,
 }
 
+/// **The VM edge** ([`TileState::adopt_vm`]) — its own system, and ordered **ahead of the
+/// extract**, which is the whole reason it is not a first step inside [`sync_tiles`].
+///
+/// A logout, a login and a `ReloadUI()` all replace the VM in `PreUpdate`; the extract
+/// (`ui_script`'s `paint_script`) then publishes the NEW tree's tile requests, and
+/// `sync_tiles` reads them after that. Clearing the bridge from inside `sync_tiles` would
+/// therefore throw away the new VM's very first publish — and the extract's conversion is
+/// memoized on the engine's entry list, so an entry that does not change again is never converted
+/// again and the request never comes back (decision 2023's defect, from the other side). Running
+/// on the frame's way IN puts the clear before the publish instead of after it.
+fn forget_dead_vm_tiles(
+    mut commands: Commands,
+    script: Option<NonSend<UiScript>>,
+    mut state: NonSendMut<TileState>,
+    mut bridge: ResMut<UiModelTiles>,
+    mut table: ResMut<MatAnimTable>,
+) {
+    state.adopt_vm(script.as_deref(), &mut bridge, &mut commands, &mut table);
+}
+
 /// The per-frame pass: feed the engine the facts it asked for, keep one tile per visible pane,
 /// pack the atlas, place every tile at its cell and its play head, and aim the camera.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // a Bevy system's full input set
@@ -762,10 +870,9 @@ fn sync_tiles(
     state.frame += 1;
     let frame = state.frame;
     let Some(mut script) = script else {
-        // No VM: nothing paints. Tear everything down so a dead UI leaves no live camera.
-        for (_, tile) in state.tiles.drain() {
-            tile.retire(&mut commands, &mut render.table);
-        }
+        // No VM: nothing paints. The tiles were retired on the edge
+        // ([`forget_dead_vm_tiles`]); every frame after it must still composite nothing and
+        // leave no live camera.
         bridge.cells.clear();
         set_camera_active(&mut cams, false);
         for (mut cam, _, _, _, _) in &mut pane_cams {
@@ -774,10 +881,11 @@ fn sync_tiles(
         return;
     };
 
-    // ── 1. Facts: what the engine asked for, answered when the file lands ───────────────
-    for key in script.model_facts_wanted() {
-        if state.loaded.contains_key(&key) || state.pending_facts.contains_key(&key) {
-            continue;
+    // ── 1. Facts: what the engine asked for — answered now when the file is already here
+    //         ([`TileState::answer_facts`]), when it lands otherwise ─────────────────────
+    for key in state.answer_facts(&mut script) {
+        if trace_on() {
+            info!("tile-trace: facts for {key} wanted — loading the file");
         }
         let handle = assets.asset_server.load::<M2Model>(m2_url(&key));
         state.pending_facts.insert(key, handle);
@@ -789,11 +897,15 @@ fn sync_tiles(
         .map(|(k, h)| (k.clone(), h.clone()))
         .collect();
     for (key, handle) in landed {
-        if let Some(model) = assets.m2s.get(&handle) {
-            script.set_model_facts(&key, facts_of(model));
-        }
+        let Some(model) = assets.m2s.get(&handle) else {
+            continue; // not readable yet — stay in `pending_facts` rather than fall off the loop
+        };
+        let facts = facts_of(model);
+        script.set_model_facts(&key, facts.clone());
         state.pending_facts.remove(&key);
-        state.loaded.insert(key, handle);
+        // Cached beside the handle so the next VM's want is answered without re-reading the
+        // asset — and so the answer cannot depend on the asset still being resident.
+        state.loaded.insert(key, (handle, facts));
     }
 
     // ── 2. The paint list, and one tile per pane on it ──────────────────────────────────
@@ -877,7 +989,7 @@ fn sync_tiles(
 
     for (i, (handle, req, _)) in live.iter().enumerate() {
         let key = benilla_ui::widget::model_key(&req.path);
-        let Some(m2) = state.loaded.get(&key).cloned() else {
+        let Some(m2) = state.loaded.get(&key).map(|(h, _)| h.clone()) else {
             if trace_on() {
                 info!("tile-trace: {} facts not landed (key {key})", req.path);
             }
@@ -2059,6 +2171,198 @@ mod tests {
         assert_eq!(
             regrown, drawn,
             "a repack changes texel windows, not the drawn set"
+        );
+    }
+
+    /// `UI-Cooldown-Indicator.m2` as `benilla-extract m2seq` reads it: two clamped 1000 ms
+    /// sequences, ids 0 (the sweep) and 1 (the flash).
+    const COOLDOWN_FILE: &str = r"Interface\Cooldown\UI-Cooldown-Indicator.mdx";
+    fn cooldown_facts() -> ModelFileFacts {
+        ModelFileFacts {
+            sequences: vec![
+                SequenceFacts {
+                    anim_id: 0,
+                    duration_ms: 1000,
+                    looping: false,
+                },
+                SequenceFacts {
+                    anim_id: 1,
+                    duration_ms: 1000,
+                    looping: false,
+                },
+            ],
+            bbox: ([0.0; 3], [0.0; 3]),
+            cameras: 0,
+        }
+    }
+
+    /// One freshly built VM with a shown cooldown pane on it — the shape `Cooldown.xml` builds
+    /// per action button, and the shape `!OmniCC` wraps `CooldownFrame_SetTimer` around.
+    fn vm_with_a_cooldown_pane() -> UiScript {
+        let mut s = UiScript::new().expect("VM");
+        s.set_screen_size(1024.0, 768.0);
+        s.run(&format!(
+            r#"cd = CreateFrame("Model", "CD", UIParent) cd:SetWidth(36) cd:SetHeight(36)
+               cd:SetPoint("CENTER", UIParent, "CENTER", 0, 0) cd:SetModel("{}")"#,
+            COOLDOWN_FILE.replace('\\', "\\\\")
+        ))
+        .expect("build the pane");
+        s.resolve();
+        s
+    }
+
+    /// **A rebuilt VM is told about a file the host already loaded** — decision 1290's class,
+    /// found in the tile renderer's facts cache.
+    ///
+    /// `UiScript::model_facts_wanted` DRAINS, and the only thing that re-pushes a want is
+    /// `SetModel`; `visible_model_panes` drops a pane whose file the engine holds no facts for.
+    /// So an answer skipped once is skipped for that VM's whole life. The host used to skip it
+    /// whenever the ASSET was resident — a fact about the process, not about the VM — and the VM
+    /// is rebuilt at every logout, login and `ReloadUI()`. From the second world entry on, every
+    /// `<Model>` widget in the game (the cooldown pie and the GCD sweep, the autocast shine, the
+    /// minimap and world-map pings, the item-push card, the map arrow) drew nothing at all, and
+    /// only restarting the client brought them back.
+    #[test]
+    fn a_rebuilt_vm_is_told_about_a_file_the_host_already_loaded() {
+        let key = benilla_ui::widget::model_key(COOLDOWN_FILE);
+        let mut state = TileState::default();
+
+        // Session 1 — nothing is resident, so the host is asked to load the file.
+        let mut first = vm_with_a_cooldown_pane();
+        assert!(
+            first.visible_model_panes().is_empty(),
+            "no facts yet ⇒ the pane is not on the paint list (the reference's draw gate)"
+        );
+        assert_eq!(state.answer_facts(&mut first), vec![key.clone()]);
+        // …the asset lands: the facts are handed over and cached beside the handle.
+        state
+            .loaded
+            .insert(key.clone(), (Handle::default(), cooldown_facts()));
+        first.set_model_facts(COOLDOWN_FILE, cooldown_facts());
+        assert_eq!(first.visible_model_panes().len(), 1);
+
+        // Session 2 — the logout/login (or `/reload`) rebuild: a fresh VM, the same file.
+        let mut second = vm_with_a_cooldown_pane();
+        assert!(
+            second.visible_model_panes().is_empty(),
+            "a fresh VM starts knowing nothing about any file"
+        );
+        assert!(
+            state.answer_facts(&mut second).is_empty(),
+            "the file is resident here — there is nothing left to load"
+        );
+        assert!(
+            second.has_model_facts(COOLDOWN_FILE),
+            "the want was drained; if it is not answered NOW it is never answered again"
+        );
+        assert_eq!(
+            second.visible_model_panes().len(),
+            1,
+            "the second session's cooldown pane must paint exactly like the first's"
+        );
+    }
+
+    /// **A new VM inherits nothing keyed by a `FrameHandle`** — the same edge, its other half.
+    ///
+    /// A handle is a generational index into ONE arena; the next VM reissues the same indices at
+    /// the same generations, so a surviving tile or request does not go stale, it silently
+    /// re-attaches to a different frame. The tile's tree is despawned and its mat-anim rows go
+    /// back to the table, exactly as a reaped tile's do.
+    #[test]
+    fn a_new_vm_inherits_nothing_keyed_by_a_frame_handle() {
+        let mut world = World::new();
+        let root = world.spawn_empty().id();
+        let mut table = MatAnimTable::default();
+        let mut bridge = UiModelTiles::default();
+        let mut state = TileState::default();
+
+        let mut arena = benilla_ui::widget::WidgetArena::new();
+        let handle = arena.create(benilla_ui::widget::FrameKind::Frame, None, None);
+        let clip_slot = table.alloc().expect("a fresh table has rows");
+        state.tiles.insert(
+            handle,
+            Tile {
+                root,
+                key: benilla_ui::widget::model_key(COOLDOWN_FILE),
+                icon: None,
+                m2: Handle::default(),
+                built: true,
+                light_slot: 0,
+                cam_slot: None,
+                clips: HashMap::new(),
+                armed: None,
+                clip_slot: Some(clip_slot),
+                alpha_parts: Vec::new(),
+                uv_parts: Vec::new(),
+                emitters: Vec::new(),
+                last_seen: 1,
+                parked: false,
+            },
+        );
+        bridge.requests.insert(
+            handle,
+            TileRequest {
+                path: COOLDOWN_FILE.into(),
+                size_px: UVec2::new(36, 36),
+                px_per_unit: 1.0,
+                pos_px_per_unit: 1.0,
+                star_px_per_unit: 1.0,
+                facing: 0.0,
+                position: Vec3::ZERO,
+                root_scale: 1.0,
+                root_pos: Vec3::ZERO,
+                camera: None,
+                light: ModelLight::default(),
+                fog: None,
+                icon: None,
+                rect: Rect::new(0.0, 0.0, 36.0, 36.0),
+                z_key: 1,
+                alpha: 1.0,
+                clip: None,
+            },
+        );
+        bridge.cells.insert(
+            handle,
+            Cell {
+                origin: UVec2::splat(2),
+                size: UVec2::splat(36),
+            },
+        );
+
+        let one = UiScript::new().expect("VM");
+        let two = UiScript::new().expect("VM");
+        assert_ne!(one.session(), two.session(), "each VM has its own identity");
+
+        let mut apply = |state: &mut TileState, bridge: &mut UiModelTiles, s: Option<&UiScript>| {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            {
+                let mut commands = Commands::new(&mut queue, &world);
+                state.adopt_vm(s, bridge, &mut commands, &mut table);
+            }
+            queue.apply(&mut world);
+        };
+
+        // Adopting the VM these tiles belong to changes nothing…
+        state.session = one.session();
+        apply(&mut state, &mut bridge, Some(&one));
+        assert_eq!(state.tiles.len(), 1);
+        assert_eq!(bridge.requests.len(), 1);
+
+        // …and the rebuild drops the lot.
+        apply(&mut state, &mut bridge, Some(&two));
+        assert!(
+            state.tiles.is_empty(),
+            "a dead VM's tiles must not be reused"
+        );
+        assert!(bridge.requests.is_empty() && bridge.cells.is_empty());
+        assert!(
+            world.get_entity(root).is_err(),
+            "the tile's tree goes with it — a live root would keep drawing into the atlas"
+        );
+        assert_eq!(
+            table.alloc(),
+            Some(clip_slot),
+            "the tile's mat-anim rows go back to the table"
         );
     }
 

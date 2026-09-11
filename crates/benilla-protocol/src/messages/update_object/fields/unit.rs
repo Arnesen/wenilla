@@ -26,15 +26,30 @@ const STAND_STATE_DEAD: u8 = 7;
 /// ×1000 (vmangos `GetCreatePowers`: `POWER_RAGE → 1000`, `POWER_HAPPINESS → 1050000`), so the real
 /// client's 100 rage and 1050 happiness are this divide, not a different field.
 ///
-/// Applied by `UnitMana`/`UnitManaMax` only — the raw accessors stay raw, and the pet happiness
-/// bucket thresholds are on the RAW scale, which is why both forms have to exist (decision 1034).
+/// **This is a whole-client law, not one getter's private step** (decision 2117). `0x6e7130` is
+/// called from *every* place a power figure becomes something a player reads, and the wire number
+/// is raw at all of them:
 ///
-/// **Two callers, because the getters have two sources** (decision 1640): the live descriptor
-/// legs below, and the party roster record's ([`crate::messages::PartyMemberStatsInfo::shown_power`])
-/// — `UnitMana 0x517670` divides by this on *both* its object leg (`0x51770f`) and its
-/// record leg (`0x517744`-`0x51775e`), so an out-of-range warrior's rage is not ten times
-/// an in-range one's.
-pub fn power_display_scale(ty: u8) -> u32 {
+/// | caller | what it scales |
+/// |---|---|
+/// | `UnitMana 0x517670` (`0x51770f`), `UnitManaMax 0x5177e0` (`0x517864`) | the live descriptor's power slot |
+/// | the same pair's party-record legs (`0x517748`, `0x5178a8`, `0x5178ee`) | [`crate::messages::PartyMemberStatsInfo::shown_power`] (decision 1640) |
+/// | `SMSG_SPELLENERGIZELOG`'s handler `0x5e8a90` (`0x5e8af3`) | the amount, **once**, before both the chat line (`0x62ca00`) and the `COMBAT_TEXT_UPDATE` push (`0x494770`) |
+/// | `SMSG_PERIODICAURALOG`'s handler `0x626dd0` (`0x627087`) | an energize tick's amount, the same way |
+/// | the power leech/drain formatter `0x627930` | `drained = amount / div` and `gained = trunc(amount·multiplier) / div` |
+/// | the spell tooltip's cost cell `0x52e610` (`0x52e8d2`, `0x52e8e7`) | the flat and per-level costs alike |
+///
+/// (wow-re `system/object-layer/scratch/combat-log-chat-law.md` §4.6 — *"Amounts are divided by
+/// `0x6e7130(powerType)`"* — plus the disassembly at each address above.)
+///
+/// The **raw** accessors stay raw: the pet happiness bucket thresholds are on the raw scale, which
+/// is why both forms have to exist (decision 1034).
+///
+/// The argument is a full 32-bit power tag because the wire's is (`SMSG_SPELLENERGIZELOG` ships a
+/// `u32`) and because the reference's own compare is signed — `POWER_HEALTH (-2)` reaches
+/// `0x6e7130` as a negative and takes the `1`. Arriving here as a large `u32` it takes the same
+/// `1` off the same `_` arm.
+pub fn power_display_scale(ty: u32) -> u32 {
     match ty {
         1 => 10,   // rage
         4 => 1000, // happiness
@@ -228,12 +243,12 @@ impl ObjectFields {
         if self.unit_dynamic_flags() & UNIT_DYNFLAG_DEAD != 0 {
             return (ty < 5).then_some(0);
         }
-        Some(self.unit_power(ty)? / power_display_scale(ty))
+        Some(self.unit_power(ty)? / power_display_scale(u32::from(ty)))
     }
     /// Maximum power **as the UI reads it** — `UnitManaMax 0x5177e0`: the same
     /// [`power_display_scale`] divide (`0x517864`), and deliberately **no** dead gate.
     pub fn unit_shown_max_power(&self, ty: u8) -> Option<u32> {
-        Some(self.unit_max_power(ty)? / power_display_scale(ty))
+        Some(self.unit_max_power(ty)? / power_display_scale(u32::from(ty)))
     }
     /// `UNIT_FIELD_LEVEL` — the unit's level.
     pub fn unit_level(&self) -> Option<u32> {

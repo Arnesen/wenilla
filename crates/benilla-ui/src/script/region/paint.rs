@@ -4,7 +4,7 @@
 use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::script::object::{as_f32, draw_layer_from_str, draw_layer_name};
-use crate::script::{Model, TexCoords};
+use crate::script::{BlendMode, Model, TexCoords};
 
 /// Resolve `self` (a region wrapper) to its live [`RegionHandle`].
 use super::region_handle_of;
@@ -54,10 +54,18 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // known live case is the action bar's grid ring: stock `ActionButton_ShowGrid` passes the
     // fourth argument explicitly (`SetVertexColor(1.0, 1.0, 1.0, 0.5)`), so closing this cannot
     // silently change that file.
+    //
+    // **Shape C on r, g, b** (`Texture:SetVertexColor `0x79abd0``, `2=C 3=C 4=C 5=B`, wow-re
+    // `numeric-arg-coercion-law.md`): a bare `lua_tonumber` with no `lua_isnumber` gate, so a nil,
+    // a table or a string is **0.0** and the call never raises. Taking them as `f32` made mlua's
+    // converter the gate instead — the 2176 class — and the stock
+    // `QuestLogFrame.lua:337` idiom hands three nils (`titleButton.r/g/b` are only assigned in
+    // `QuestLog_Update`) on any path that selects a quest-log entry before the window has painted.
     m.set(
         "SetVertexColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+                let (r, g, b) = (as_f32(&r), as_f32(&g), as_f32(&b));
                 let rh = region_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
@@ -221,16 +229,38 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             data.fill = None;
                             false
                         }
+                        // **Ask the probe BEFORE writing the slot.** The reference's load-FAILURE
+                        // arm (`cmp [ebp-4],2; jl` at `0x770288` → `0x77028e`–`0x7702b2`) releases
+                        // the handle it just built and returns 0 **leaving `+0xcc` and `+0x128` as
+                        // they were** — "the widget keeps whatever texture it already had"
+                        // (wow-re `texture-service-name-resolution.md` §161-169). Storing the path
+                        // first and letting the verdict drive only the *return value* meant a
+                        // mistyped or not-yet-shipped path ERASED the art it failed to replace,
+                        // and did it silently: `GetTexture()` echoed the missing path and the quad
+                        // was dropped, so the region went blank with nothing said (decision 2124).
+                        //
+                        // The store and the return ask deliberately different questions. A VM with
+                        // **no probe installed** has no backend to ask, so it stores — that is
+                        // every engine-less test's world, and the module head already states that
+                        // such a VM's path form "stays nil", which is the return, not the slot.
                         Value::String(s) => {
                             let path = s.to_str()?.to_string();
-                            data.texture = Some(path.clone());
-                            data.fill = None;
                             drop(model);
-                            let model = lua.app_data_ref::<Model>().expect("model");
-                            model
-                                .texture_probe
-                                .as_ref()
-                                .is_some_and(|probe| probe(&path))
+                            let resolvable = {
+                                let model = lua.app_data_ref::<Model>().expect("model");
+                                model
+                                    .texture_probe
+                                    .as_ref()
+                                    .is_none_or(|probe| probe(&path))
+                            };
+                            let mut model = lua.app_data_mut::<Model>().expect("model");
+                            let had_probe = model.texture_probe.is_some();
+                            if resolvable {
+                                let data = model.region_data.entry(rh).or_default();
+                                data.texture = Some(path);
+                                data.fill = None;
+                            }
+                            resolvable && had_probe
                         }
                         // The colour form, and the ONLY branch that looks at the trailing three. A
                         // non-numeric there takes the same default a missing one does, which is what
@@ -389,15 +419,95 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetBlendMode("BLEND"|"ADD"|…) — the shared alphaMode enum (0x811aa8); only ADD changes
-    // draw behavior in v1 (DISABLE/ALPHAKEY/MOD are accepted as straight alpha, a stated gap).
+    // SetBlendMode("DISABLE"|"ALPHAKEY"|"BLEND"|"ADD"|"MOD") — `0x79a950`, the shared alphaMode
+    // enum `0x811aa8`. Only ADD changes draw behavior in v1 (DISABLE/ALPHAKEY/MOD are accepted as
+    // straight alpha, a stated gap — see [`BlendMode`]); an unrecognised name leaves the mode
+    // alone, which is what the enum-table lookup does with a string it cannot match.
+    //
+    // The mode is STORED as the mode. It used to collapse to `additive = (mode == "ADD")` on the
+    // way in, which is everything the renderer needs and strictly less than `GetBlendMode` has to
+    // answer — a texture set to `"MOD"` would have read back as `"BLEND"`.
     m.set(
         "SetBlendMode",
         lua.create_function(|lua, (this, mode): (Table, String)| {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            model.region_data.entry(rh).or_default().additive = mode.eq_ignore_ascii_case("ADD");
+            if let Some(blend) = BlendMode::parse(&mode) {
+                model.region_data.entry(rh).or_default().blend = blend;
+            }
             Ok(())
+        })?,
+    )?;
+    // GetBlendMode() — ONE string, the enum's own spelling (`0x79a890`, table `0x87c128`, argc 1,
+    // arity 1, kinds `(string?)`). A Texture nothing has called the setter on answers `"BLEND"`,
+    // the CSimpleTexture ctor's `[+0xd0] = 2` (`0x76fc64`).
+    //
+    // **This one was answering nil, and nil is not an error here — it is a wrong picture.**
+    // `ShaguTweaks/mods/dark-ui-elements.lua:169` reads
+    // `elseif region.GetBlendMode and region:GetBlendMode() == "ADD" then` while recolouring a
+    // Blizzard frame's children: the `and` guard means a missing method never raised, it just took
+    // the other branch, so every additive texture in the frame got the dark recolour the reference
+    // leaves alone. The kinds column's `string?` is the reference's own nil leg (the name pointer
+    // can be NULL for a mode outside the table); the five modes are all this engine can hold, so
+    // nothing here reaches it.
+    m.set(
+        "GetBlendMode",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(model
+                .region_data
+                .get(&rh)
+                .map_or(BlendMode::default(), |d| d.blend)
+                .name())
+        })?,
+    )?;
+
+    // SetTexCoordModifiesRect(flag) / GetTexCoordModifiesRect() — `0x79c080` / `0x79c120`, table
+    // `0x87c128`. The setter writes the reference's `[texture+0x124]` and is its only writer; the
+    // getter answers `1`/`nil` (kinds `(nil) | (number)`, the predicate law — decision 2118 — not a
+    // Lua boolean).
+    //
+    // **The flag's GEOMETRY effect is not wired, and that is stated rather than implied.** In the
+    // reference the flag gates a rect-recompute leg (`ui.md:4619`, `0x770462`): with it set, a
+    // `SetTexCoord` re-derives the region's own rect from the UV quad instead of leaving the rect
+    // where the anchors put it and resampling inside it. Wiring that means the region resolve in
+    // `region::layout` reading this flag and taking the rect from `RegionData::tex_coords` — a
+    // resolve-order change. Nothing in the stock UI or in either addon corpus calls the SETTER, so
+    // there is no measured case to build it against; what has a caller is the GETTER —
+    // `pfUI/modules/thirdparty-tbc.lua:319` does a bare `if icon:GetTexCoordModifiesRect() then` on
+    // a Texture to choose between two `SetTexCoord` rectangles, and against this VM that raised.
+    // So: the flag is stored, answered truthfully, and read by nothing. See
+    // [`RegionData::tex_coord_modifies_rect`].
+    m.set(
+        "SetTexCoordModifiesRect",
+        lua.create_function(|lua, (this, arg): (Table, Value)| {
+            let rh = region_handle_of(lua, &this)?;
+            // The reference's shared flag-argument truth table (`0x6f1c10(L, 2, default)`), whose
+            // DEFAULT byte for this binding is unread — no corpus site calls the setter at all, so
+            // the no-argument leg is doubly unreachable and `false` is the conservative pick rather
+            // than a claim about `0x79c080`.
+            let on = crate::script::binding_abi::bool_or_default(Some(&arg), false);
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            model
+                .region_data
+                .entry(rh)
+                .or_default()
+                .tex_coord_modifies_rect = on;
+            Ok(())
+        })?,
+    )?;
+    m.set(
+        "GetTexCoordModifiesRect",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(crate::script::binding_abi::flag(
+                model
+                    .region_data
+                    .get(&rh)
+                    .is_some_and(|d| d.tex_coord_modifies_rect),
+            ))
         })?,
     )?;
 
@@ -442,22 +552,23 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetRotation(radians) — spin the texture about its center, counterclockwise-positive (the
-    // later-era Texture API, shipped early: the world-map player arrow's stand-in rotation —
-    // see `QuadContent::Texture::rotation`). No-arg/nil resets to 0.
-    m.set(
-        "SetRotation",
-        lua.create_function(|lua, (this, radians): (Table, Option<f32>)| {
-            let rh = region_handle_of(lua, &this)?;
-            lua.app_data_mut::<Model>()
-                .expect("model")
-                .region_data
-                .entry(rh)
-                .or_default()
-                .rotation = radians.unwrap_or(0.0);
-            Ok(())
-        })?,
-    )?;
+    // `SetRotation` WAS here, on the Texture leaf, and is GONE. 1.12 registers the name once, in
+    // the **PlayerModel** table `0x84f1fc` (`0x505f00`, argc 2 — the paper doll's rotate arrows),
+    // which we already answer through `modelframe`; it is in neither region map, and the carve
+    // above lists it among the five names that are in NEITHER (`texture-fontstring-method-split.md`).
+    // Ours was a later-era Texture verb shipped early for the world-map player arrow's stand-in
+    // rotation — and that arrow has since become a real Model frame driven by `ModelState::facing`
+    // (`script::worldmap_arrow`), so the verb's own reason went with it.
+    //
+    // Removal is safe by census, not by assumption: every `SetRotation` in this repo, in
+    // `assets/ui`, in the stock FrameXML/GlueXML and in both addon corpora has a MODEL receiver —
+    // `pfUI/api/ui-widgets.lua:580`'s `EnableClickRotate` hooks a modelframe's OnUpdate, and
+    // `CustomNameplates/options.lua:308` is `optionsFrame.preview.model:SetRotation(0.61)`. Not one
+    // texture receiver anywhere.
+    //
+    // `RegionData::rotation` and `QuadContent::Texture::rotation` now have no writer left. They are
+    // deliberately NOT pruned in the same change: that plumbing runs into the app's quad emit and
+    // its removal is a wider prune with its own review, not a tail on a method-surface fix.
 
     // SetTexCoord(left, right, top, bottom) — the 4-edge form (XML `<TexCoords>`): a UV sub-rect in
     // 0..1 texture space (top-left origin) the Texture region samples, slicing quadrant/atlas art
@@ -466,7 +577,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // corner in the renderer's screen winding.
     m.set(
         "SetTexCoord",
-        lua.create_function(|lua, (this, rest): (Table, mlua::Variadic<f32>)| {
+        // Every coordinate is **shape C** (`Texture:SetTexCoord 0x79beb0`, all positions C,
+        // wow-re `numeric-arg-coercion-law.md`): bare `lua_tonumber`, nil/table/string → 0.0. Only
+        // the ARITY raises (`0x79bf5d dec eax ; cmp eax,4 ; je ; cmp eax,8 ; je`), which is the
+        // match below. `Variadic<f32>` made mlua the per-coordinate gate; it is not one.
+        lua.create_function(|lua, (this, args): (Table, mlua::Variadic<Value>)| {
+            let rest: Vec<f32> = args.iter().map(as_f32).collect();
             let rh = region_handle_of(lua, &this)?;
             let coords = match rest.len() {
                 4 => Some(TexCoords::Rect([rest[0], rest[1], rest[2], rest[3]])),

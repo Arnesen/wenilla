@@ -1140,8 +1140,11 @@ fn loot_row_awaiting_its_template_opens_clean() {
         .unwrap();
     assert_eq!((item.as_str(), quantity, quality), ("", 1, -1));
     assert!(
-        s.eval::<bool>("return ITEM_QUALITY_COLORS[select(4, GetLootSlotInfo(1))] ~= nil")
-            .unwrap(),
+        s.eval::<bool>(
+            "local _, _, _, quality = GetLootSlotInfo(1) \
+             return ITEM_QUALITY_COLORS[quality] ~= nil"
+        )
+        .unwrap(),
         "the cache-miss quality must be a real row of ITEM_QUALITY_COLORS"
     );
 

@@ -464,7 +464,9 @@ fn resolve_row(
 }
 
 /// Build the Browse tab's category tree from the player's own DBCs (decision 1511 §5).
-fn categories(
+/// `pub(crate)`: the addon-corpus survey seats the same tree off the player's chain (2167), and a
+/// second copy of the class set would be a second thing to keep right.
+pub(crate) fn categories(
     classes: Option<&crate::ui_items::ItemClasses>,
     subclasses: Option<&crate::ui_items::ItemSubClasses>,
 ) -> Vec<AuctionCategory> {

@@ -118,6 +118,98 @@
             button:Disable()
         end
 
+        -- ══ THE THREE STOCK CONSUMERS THAT ASK "IS AN OPTIONS WINDOW OPEN?" (decision 2177) ══
+        -- All three are the reference's own, off the chain, and all three name the reference's
+        -- three windows literally. Two of those names are now REAL hidden stock frames
+        -- (`SoundOptionsFrame` since 2147, `UIOptionsFrame` since 2115) and the third,
+        -- `OptionsFrame`, became one when the stock VIDEO window joined the manifest — so the
+        -- whole chain now reads "no", always, while the window the player actually opens is up.
+        -- Until then `OptionsFrame` WAS our window and every one of them answered by accident.
+        --
+        -- **Wrappers, not replacements.** Each stock function keeps running and keeps deciding;
+        -- ours adds the one term the reference could not know about. A rewrite would be thirty
+        -- lines of the reference's ladder copied into our tree to drift.
+        --
+        -- **HERE, not in `OptionsFrame.xml`, because of load order.** `UpdateMicroButtons` is
+        -- defined by `MainMenuBarMicroButtons.xml`, manifest l.576 — AFTER our options window at
+        -- l.522, where a wrapper would capture a nil. This file is the manifest's LAST row
+        -- (l.1273), so all three exist. It is also the right home on the merits: this is the ESC
+        -- menu, and these three are exactly "the ESC ladder and the micro button know about our
+        -- options window".
+        local Ref_IsOptionFrameOpen = IsOptionFrameOpen
+        local Ref_ToggleGameMenu = ToggleGameMenu
+        local Ref_UpdateMicroButtons = UpdateMicroButtons
+
+        -- The one term all three add. Existence-guarded because these three wrappers stand in a
+        -- file that can be seated without the options window: in the client `BenillaOptionsFrame`
+        -- is manifest row 38 and this file is the last row, so it is always real — but a test kit
+        -- that seats the game menu alone must get "no options window is open", not a raise inside
+        -- the ESC handler.
+        local function BenillaOptions_IsOpen()
+            return BenillaOptionsFrame and BenillaOptionsFrame:IsVisible()
+        end
+
+        -- `UIParent.lua:996`. One caller: `CloseAllWindows_WithExceptions`, which passes
+        -- `ignoreCenter = 1` when an options window is up so the ESC sweep does not close the
+        -- centre panel out from under it. Ours IS the centre panel (`UIPanelWindows` row,
+        -- `area = "center"`), so answering "no" would have ESC close it through the sweep instead
+        -- of through its own rung, discarding pending edits with no Cancel semantics.
+        function IsOptionFrameOpen()
+            if BenillaOptions_IsOpen() then
+                return 1
+            end
+            return Ref_IsOptionFrameOpen()
+        end
+
+        -- `UIParent.lua:1465-1497`. The ESC ladder, and the rung matters as much as the answer:
+        -- the reference tries the static popup FIRST, then an open options window, then the game
+        -- menu. So this runs that first rung itself and returns if it fired — `StaticPopup_Escape        -- Pressed` is a pure scan when nothing is shown (`StaticPopup.lua:1879-1893`), so the
+        -- delegate below re-running it costs nothing and changes nothing — then takes the options
+        -- rung, then hands the rest of the ladder back untouched.
+        --
+        -- The close is our own Close button's click, which is the same discard-and-hide the
+        -- reference reaches through `OptionsFrameCancel:Click()`: our `<OnHide>` drops the pending
+        -- page. (That alias is retired — `OptionsFrameCancel` is the stock video window's own
+        -- button now, and ours loading later would have clobbered it.)
+        function ToggleGameMenu(clicked)
+            if clicked then
+                -- The reference's `clicked` arm closes an open options window and then goes on to
+                -- toggle the game menu, rather than returning. Same here.
+                if BenillaOptions_IsOpen() then
+                    BenillaOptionsFrameCloseButton:Click()
+                end
+                return Ref_ToggleGameMenu(clicked)
+            end
+            if StaticPopup_EscapePressed() then
+                return
+            end
+            if BenillaOptions_IsOpen() then
+                BenillaOptionsFrameCloseButton:Click()
+                return
+            end
+            return Ref_ToggleGameMenu(clicked)
+        end
+
+        -- `MainMenuBarMicroButtons.lua:47-58`. A POST-hook that can only ever push the button, never
+        -- release it: the reference has already decided from the six frames it knows, and this adds
+        -- the seventh. Written this way round so it cannot fight that decision — a wrapper that also
+        -- set NORMAL would be a second copy of the reference's whole `or` chain.
+        --
+        -- **Existence-guarded, and only here.** The shipped manifest always carries
+        -- `MainMenuBarMicroButtons.xml`, so in the client `Ref_UpdateMicroButtons` and
+        -- `MainMenuMicroButton` are always real. A partial test kit that seats this file and not
+        -- the micro bar is the case the guards are for, and a guard is the honest answer there:
+        -- there is no micro button to push, so there is nothing to do — as against a raise inside
+        -- an unrelated window's OnShow, which is what an unguarded wrapper turns that into.
+        function UpdateMicroButtons()
+            if Ref_UpdateMicroButtons then
+                Ref_UpdateMicroButtons()
+            end
+            if MainMenuMicroButton and BenillaOptions_IsOpen() then
+                MainMenuMicroButton:SetButtonState("PUSHED", 1)
+            end
+        end
+
         -- The CAMP/QUIT dialogs and the three-event driver MOVED OUT, to our UIParent.lua counterpart (the stock UIParent.lua since 1988) — the
         -- reference's own homes for both (StaticPopup.lua l.564/586; UIParent.lua l.304-315).
         -- They were here only because this is where they were first needed, and 1751 moving them
@@ -179,7 +271,7 @@
                  something exists behind them. -->
 
             <!-- Options — live: the era GameMenuFrame.lua l.88 entry (ShowUIPanel(SettingsPanel)
-                 there, OptionsFrame here) plus an explicit HideUIPanel first. The ref leans on
+                 there, BenillaOptionsFrame here) plus an explicit HideUIPanel first. The ref leans on
                  the center-replacement rule for the swap (ShowUIPanel l.697-702: native-center
                  frames replace each other); hiding the menu explicitly says the same thing
                  without relying on the eviction path. -->
@@ -191,7 +283,7 @@
                     <OnClick>
                         PlaySound("igMainMenuOption")
                         HideUIPanel(GameMenuFrame)
-                        ShowUIPanel(OptionsFrame)
+                        ShowUIPanel(BenillaOptionsFrame)
                     </OnClick>
                 </Scripts>
             </Button>

@@ -295,12 +295,14 @@ impl PartyMemberStatsInfo {
     /// [`power_display_scale`], exactly as the live-object leg divides. Without it an out-of-range
     /// warrior's rage bar reads ten times an in-range one's. Miss ⇒ `0`, the binding's own.
     pub fn shown_power(&self) -> u32 {
-        u32::from(self.cur_power.unwrap_or(0)) / power_display_scale(self.shown_power_type())
+        u32::from(self.cur_power.unwrap_or(0))
+            / power_display_scale(u32::from(self.shown_power_type()))
     }
 
     /// `UnitManaMax` on the record path (`0x5178af`), the same divide.
     pub fn shown_max_power(&self) -> u32 {
-        u32::from(self.max_power.unwrap_or(0)) / power_display_scale(self.shown_power_type())
+        u32::from(self.max_power.unwrap_or(0))
+            / power_display_scale(u32::from(self.shown_power_type()))
     }
 }
 

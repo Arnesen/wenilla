@@ -122,7 +122,7 @@ fn page(s: &UiScript) {
         f:SetTextColor(0.18, 0.12, 0.06)
         Page = CreateFrame("SimpleHTML", "Page")
         Page:SetPoint("TOPLEFT", 0, 0)
-        Page:SetSize(270, 304)
+        Page:SetWidth(270); Page:SetHeight(304)
         Page:SetFontObject("P", ItemTextFontNormal)
     "#,
     )

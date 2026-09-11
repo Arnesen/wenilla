@@ -90,6 +90,15 @@ impl ChatChannelRow {
         self.flags & flags::CITY_ONLY != 0
     }
 
+    /// Is this the row a **guild** decides about — `GUILD_REQ` (`0x20000`), `GuildRecruitment`
+    /// alone in the 1.12 table? The client keys three things on it: the cascade's composer
+    /// `0x49f140` finds the row by this bit, and a manual `JoinChannelByName`/`LeaveChannelByName`
+    /// on it forces the auto-join option off (`0x49ed3d`/`0x49ef8f`; wow-re
+    /// `guild-recruitment-mode.md` §3/§5).
+    pub fn is_guild_recruitment(&self) -> bool {
+        self.flags & flags::GUILD_REQ != 0
+    }
+
     /// Does this row's `%s` take the shared **city** word instead of the zone's name?
     ///
     /// A different bit from [`Self::is_city_only`] — `CITY_ONLY2` (`0x20`) — and a different test

@@ -50,6 +50,13 @@ struct ViewCtx<'a> {
     home_area: Option<&'a str>,
     form: u8,
     store: Option<&'a ObjectStore>,
+    /// The caster's own `UNIT_FIELD_COMBATREACH`. 1.5 is the descriptor default, not a guess.
+    combat_reach: f32,
+    /// The reach of whoever the caster is currently auto-attacking, when it is auto-attacking —
+    /// the melee range arm's second term. The tooltip passes no target, but `0x6e3480`'s melee
+    /// arm resolves `[caster+0xc48]` itself, so this cell moves with the mob you are swinging at
+    /// and falls back to doubling the caster's own reach when nothing is engaged.
+    attack_target_reach: Option<f32>,
     items: &'a mut Items,
     commands: &'a NetCommands,
     sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
@@ -72,8 +79,8 @@ fn keyed(get: &dyn Fn(&str) -> Option<String>, key: &str, args: &[Arg<'_>]) -> O
 /// every string resolved here where the catalogs live: the cost cell (the RESOLVED
 /// `power_cost` through the power-type key array, health fallback, `_PER_TIME` composite — law
 /// §3.3, 1074; rage prints wire-cost ÷ 10), the range cell ("N yd range", "N-M yd range" when
-/// the row's min is nonzero — the law's `"%d-%d"` fork; "Melee Range" for the melee family —
-/// INTERIM text, the proper source is SpellRange.dbc's own display-name column), the cast cell
+/// the resolved min is nonzero — the law's `"%d-%d"` fork; the melee family resolves through the
+/// same key off the caster's combat reach, and the on-next-swing class shows no cell at all), the cast cell
 /// (the full `52eb45` ladder: sec/min, the negative-base sentinel, "Next melee"/"Attack
 /// speed"/"Channeled", and the mana-keyed Instant fork — law §3.4, 1074; None = the law's
 /// passive gate, which omits the whole line), the cooldown cell
@@ -115,7 +122,9 @@ fn spell_tooltip_view(
         .store
         .map_or(d.mana_cost, |s| crate::ui_action::usable::power_cost(d, s));
     let cost = {
-        let div = if d.power_type == 1 { 10 } else { 1 };
+        // The one `0x6e7130` table, not a local `if power_type == 1` — decision 2117 found three
+        // hand-rolled copies of it and one of them had been applied at a single site out of four.
+        let div = benilla_protocol::messages::power_display_scale(d.power_type);
         let unit = match d.power_type {
             0 => "Mana",
             1 => "Rage",
@@ -136,36 +145,46 @@ fn spell_tooltip_view(
             Some(format!("{} {unit}", resolved_cost / div))
         }
     };
-    let range = spells.ranges.get(d.range_index).and_then(|r| {
-        if r.is_melee() {
-            // **INTERIM, and a known divergence — the reference has no melee wording at all.**
-            //
-            // The guess this line used to carry ("the display-name column of `SpellRange.dbc`")
-            // is REFUTED: a melee spell is simply one whose range row sets flags bit 0 — the one
-            // shipped such row is id 2 "Combat Range", 813 spells — and `0x6e3480` computes
-            // `max = casterReach + reach + 1.3333334` floored at `5.0`, which then renders
-            // through the very same `SPELL_RANGE` + `"%d"` path as every other range. On a player
-            // that is normally **"5 yd range"**, not a word.
-            //
-            // Not converted here because the faithful number needs the caster's own
-            // `UNIT_FIELD_COMBATREACH`, which this builder does not read yet — a data change, not
-            // a string one. Verified in wow-re `system/ui/scratch/tooltip-globalstring-key-resolves.md`
-            // §A3; named in decision 2080 rather than guessed at.
-            Some("Melee Range".to_string())
-        } else if r.max > 0.0 {
+    // The range cell (law §3.3 / wow-re `tooltip-globalstring-key-resolves.md` §A3, VERIFIED):
+    // two attribute gates, then `GetMinMaxRange 0x6e3480` with **`target = NULL`** (`0x52e9c2`),
+    // then a third gate on the resolved `max <= 0`.
+    //
+    // **There is no melee wording anywhere in the client** — `SPELL_RANGE_AREA` is not in
+    // `WoW.exe` at all, and the melee family is not a display name either: a melee spell is one
+    // whose `SpellRange` row sets flags bit 0 (the single shipped such row is id 2 "Combat
+    // Range", 813 spells), and the resolver hands back `max(reach + casterReach + 1.3333334,
+    // 5.0)` — which then prints through the SAME `SPELL_RANGE` + `"%d"` path as every other
+    // range, normally **"5 yd range"** (decision 2080 named this cell; it printed the invented
+    // "Melee Range" until it was converted).
+    //
+    // The tooltip passes no target, but that does NOT make both reaches the caster's: the melee
+    // arm resolves the caster's own `attack_target_guid` and uses that unit's reach, so the cell
+    // reads wider while you are auto-attacking something big.
+    let range = (!d.tooltip_omits_range_line())
+        .then(|| {
+            let (min, max) = benilla_formats::min_max_range(
+                d,
+                spells.ranges.get(d.range_index),
+                vctx.combat_reach,
+                vctx.attack_target_reach,
+            )?;
+            if max <= 0.0 {
+                return None;
+            }
             // `SPELL_RANGE = "%s yd range"` — and its hole is a **string**, which is what makes
             // the law's pair fork (`0x854fb4`'s `"%d-%d"`, Charge: 8-25) expressible at all: the
-            // number cell is composed first and handed over whole.
-            let yards = if r.min > 0.0 {
-                format!("{}-{}", r.min as i32, r.max as i32)
+            // number cell is composed by a nested `SStrPrintf` first and handed over whole. Both
+            // holes are `fistp` conversions — round-to-nearest, never truncation (the melee sum
+            // is the only value that is ever fractional).
+            let yd = |v: f32| f64::from(v).round_ties_even() as i64;
+            let yards = if min > 0.0 {
+                format!("{}-{}", yd(min), yd(max))
             } else {
-                format!("{}", r.max as i32)
+                format!("{}", yd(max))
             };
             keyed(vctx.get, "SPELL_RANGE", &[Arg::S(&yards)])
-        } else {
-            None
-        }
-    });
+        })
+        .flatten();
     // Law §3.4's own gate — wider than the spellbook's `passive`: a TRADE_SKILL or ATTACK
     // Effect[0] omits the line too ([`SpellDisplay::tooltip_omits_cast_line`]). The arm order is
     // the byte ladder `0x52eb45-0x52ec90` (1074): a positive time prints sec/min at the 60 s
@@ -389,6 +408,10 @@ struct SpellFeedMemory {
     /// The player's block/dodge/parry/crit percentages, as raw bit patterns so the diff needs no
     /// float comparison (law line 10's printed value — it moves with gear, buffs and talents).
     avoidance: Option<[u32; 4]>,
+    /// The two reaches the melee range cell reads, as raw bit patterns — the caster's own
+    /// (which moves with scale and shapeshift) and its auto-attack target's (which changes with
+    /// the mob).
+    combat_reach: Option<(Option<u32>, Option<u32>)>,
     /// Per reagent entry currently on show: `(owned count, item name resolved)` — law §3.8's
     /// inline red plus the ask-once template landing.
     reagents: std::collections::BTreeMap<u32, (u32, bool)>,
@@ -409,6 +432,9 @@ fn feed_spell_tooltips(
     selection: Res<crate::target::Selection>,
     stores: Query<&ObjectStore>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    // Who the player is auto-attacking, if anyone — the melee range cell's second reach.
+    engaged_q: Query<&crate::creature_anim::Engaged, With<SelfPlayer>>,
+    guids: Res<crate::net::GuidIndex>,
     home_bind: Option<Res<crate::net::HomeBind>>,
     area_names: Option<Res<crate::ui_quest_log::QuestHeaderNamesRes>>,
     mut items: ResMut<Items>,
@@ -525,6 +551,22 @@ fn feed_spell_tooltips(
         memory.avoidance = avoidance;
         wanted.extend(memory.pushed.drain());
     }
+    // …and so does the range cell's melee arm, whose inputs are the caster's own reach and the
+    // reach of whatever it is auto-attacking (`0x6e3480` resolves the latter itself).
+    let attack_target_reach = engaged_q
+        .single()
+        .ok()
+        .and_then(|e| guids.0.get(&e.0))
+        .and_then(|&e| stores.get(e).ok())
+        .map(|s| s.0.unit_combat_reach());
+    let reaches = (
+        self_store.map(|s| s.0.unit_combat_reach().to_bits()),
+        attack_target_reach.map(f32::to_bits),
+    );
+    if memory.combat_reach != Some(reaches) {
+        memory.combat_reach = Some(reaches);
+        wanted.extend(memory.pushed.drain());
+    }
     let watched: Vec<u32> = memory.reagents.keys().copied().collect();
     let reagent_state: std::collections::BTreeMap<u32, (u32, bool)> = watched
         .into_iter()
@@ -551,6 +593,8 @@ fn feed_spell_tooltips(
             home_area: home_area.as_deref(),
             form,
             store: self_store,
+            combat_reach: self_store.map_or(1.5, |s| s.0.unit_combat_reach()),
+            attack_target_reach,
             items: &mut items,
             commands: &commands,
             sub_classes: sub_classes.as_deref().map(|c| &c.0),

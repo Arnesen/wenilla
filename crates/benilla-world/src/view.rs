@@ -1,7 +1,8 @@
 //! **The view** — who is looking, with what optics, and how far the detailed world is drawn.
 //!
 //! Three things, one owner. [`WorldCamera`] marks *the* camera the scene is rendered through;
-//! [`CAM_NEAR`] and [`CAM_FOVY`] are its optics; [`ViewDistance`] is the faithful `farclip`.
+//! [`CAM_FOVY`] is its fixed optic; [`ViewDistance`] is the faithful `nearclip`/`farclip` **pair**,
+//! which is the shape the reference keeps them in (2163).
 //!
 //! The marker and the optics were in `player::camera` until decision 1160's stage zero, and that
 //! was the single largest edge across the engine/game line: **26 engine files** — terrain
@@ -102,9 +103,29 @@ impl Viewer {
 /// but it is the *maximum*, and it is what every player gets before they touch anything: at 777 the
 /// residency window is 24 chunks per axis against 350's 11 ([`terrain_stream::window::inner_radius`]),
 /// ~4.8x the area streamed, drawn and held resident. The slider still reaches 777.
+///
+/// **`nearclip` is the second half of the same resource, because the reference stamps them
+/// together** (2163). Its per-frame camera outer `0x511bc0` reads both CVar records and writes the
+/// camera in four instructions, unconditionally, before the `[cam+0x48]` branch that picks the
+/// cinematic leg:
+///
+/// ```text
+/// 511bcf  mov  eax,[0xbe1078]        ; the `nearclip` record handle (cached by 0x50b728's Lookup)
+/// 511bd4  fld  dword [eax+0x24]      ; the record's float
+/// 511bdc  fstp dword [esi+0x38]      ; cam near
+/// 511bdf  mov  ecx,[0xbe0cc0]        ; the `farclip` record handle
+/// 511be5  fld  dword [ecx+0x24]
+/// 511be8  fstp dword [esi+0x3c]      ; cam far
+/// ```
+///
+/// So `nearclip` is a **live** setting there, not dead plumbing — see [`NEARCLIP_RANGE`] for the
+/// half-truth this field replaced.
 #[derive(Resource, Clone, Copy)]
 pub struct ViewDistance {
     pub farclip: f32,
+    /// The camera **near-plane** distance in yards — WoW's `nearclip` CVar, re-stamped onto the
+    /// projection every frame by [`stamp_near_clip`] exactly as `0x511bc0` re-stamps `[cam+0x38]`.
+    pub nearclip: f32,
 }
 
 /// The settable range of [`ViewDistance::farclip`] — the vanilla `farclip` CVar clamp `[177, 777]`
@@ -113,6 +134,28 @@ pub struct ViewDistance {
 /// as an A/B lever against the pre-wall "draw everything in the tile window" look; that look is
 /// gone and the window now follows this number, so the headroom went with it (1513).
 pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=777.0;
+
+/// The settable range of [`ViewDistance::nearclip`] — the vanilla `nearclip` CVar clamp, read off
+/// its own change callback `0x688d90` the way [`FARCLIP_RANGE`] is read off `0x688d40`: the two
+/// bounds are the f32s at `[0x8029d0]` = `0.01` and `[0x808300]` = `0.33`, and a value outside them
+/// is **refused** (the callback returns 0 after echoing `0x869abc` `"NearClip must be in range 0.01
+/// - 0.33"`), not clamped. Our apply clamps instead, which is this table's standing posture for
+/// every range (the consumer clamps at its own edge — `script::cvars`' module doc).
+///
+/// **Positive control for that decode:** the same shape at `0x688d40` yields `[0x81021c]` = `177`
+/// and `[0x80fed8]` = `777`, which is [`FARCLIP_RANGE`] as it has stood since 1624.
+///
+/// **This const is the correction of a verified-but-partial finding** (2163). [`NEARCLIP_DEFAULT`]
+/// used to be a hardcoded `1.0 / 9.0` named `CAM_NEAR`, documented as "the reference's own 1/9,
+/// hardcoded in its camera ctor (`0x50a6c0`: `+0x38 = 0x3de38e39`) — the `nearclip` console cvar
+/// stores to a global with zero readers, dead plumbing". Every clause of that is true and the
+/// conclusion is wrong: the *derived global* `[0xc7b480]` is indeed dead (wow-re
+/// `cvar/scratch/graphics-cost-cvar-census.md` §8 lists it), but the camera never reads that global
+/// — it reads the **record**, every frame, at `0x511bd4`. So the ctor's 1/9 is the value the camera
+/// holds for exactly as long as it takes the first frame's outer to overwrite it, and is never
+/// rendered with. `worldview`'s own near plane had already drifted to `0.1` under a doc claiming it
+/// was "kept in step by hand" with the 1/9 — the drift was the tell.
+pub const NEARCLIP_RANGE: std::ops::RangeInclusive<f32> = 0.01..=0.33;
 
 /// The world camera's multisampling level — WoW's **`gxMultisample`** CVar.
 ///
@@ -361,6 +404,20 @@ impl Plugin for MsaaSupportPlugin {
 /// function of anything: the detailed world ends at `farclip` by the wall, never by this plane.
 pub const CAM_FAR: f32 = 3000.0;
 
+impl ViewDistance {
+    /// Set the near plane from a `nearclip` write, under the reference's own bounds.
+    ///
+    /// **A method and not a public [`NEARCLIP_RANGE`] for the CVar host to clamp against**, which
+    /// is how `farclip` does it — because `farclip`'s range has a second consumer (the Terrain
+    /// Distance slider is built with those bounds) and this one does not, and `benilla-app`
+    /// naming one more engine item is what `tests/world_api_wall.rs` exists to make expensive.
+    /// The knob owning its own clamp is also the shape `ClutterConfig::set_frill_density` settled
+    /// on for the same question (2151).
+    pub fn set_nearclip(&mut self, v: f32) {
+        self.nearclip = v.clamp(*NEARCLIP_RANGE.start(), *NEARCLIP_RANGE.end());
+    }
+}
+
 impl Default for ViewDistance {
     /// `$WOW_FARCLIP` (yd, clamped to [`FARCLIP_RANGE`]) overrides the 350 default. The options row is
     /// the live lever, but a headless capture has no hands — and a horizon or fog report almost always
@@ -374,7 +431,10 @@ impl Default for ViewDistance {
             .map_or(350.0, |v| {
                 v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end())
             });
-        Self { farclip }
+        Self {
+            farclip,
+            nearclip: NEARCLIP_DEFAULT,
+        }
     }
 }
 
@@ -414,19 +474,6 @@ pub fn within_farclip(
 #[derive(Component)]
 pub struct WorldCamera;
 
-/// The camera **near-plane** distance (yd) — the reference's own **1/9**, hardcoded in its camera
-/// ctor (`0x50a6c0`: `+0x38 = 0x3de38e39`; the `nearclip` console cvar stores to a global with zero
-/// readers — dead plumbing; wow-re `water-frame-straddle` §4d). Shared by the projection (the camera spawn)
-/// and the self-avatar fade's `nearclip` ([`crate::model_fade::self_model_fade_alpha`]) so the model
-/// finishes fading exactly as the near plane would begin to slice it — the reference couples the
-/// two the same way (`cam+0x38 ≈ 0.1`, set per frame in the driver `0x511bc0`).
-///
-/// It was 1.0 from 0062 to 0905 "for depth precision" — a rationale that predates knowing the
-/// pipeline: the projection is `perspective_infinite_reverse_rh` on a float depth buffer
-/// ([`crate::capture::depth_probe`]'s tests draw with the real one), where `depth = near/z` makes
-/// relative precision — and our ULP-relative bias ladder ([`crate::sky_order`]) — independent of
-/// the near value. The small near is what keeps the whole waterline-crossing band (the corner-min
-/// submersion probe, `liquid::detect_submersion`) inches tall instead of a yard.
 /// The `$WOW_MSAA` startup knob → a sample count, shared by both world-camera spawners
 /// (`benilla_world::worldview` and the app's `player::setup`) so the two can never disagree.
 ///
@@ -456,7 +503,53 @@ pub fn msaa_from_env() -> bevy::render::view::Msaa {
     }
 }
 
-pub const CAM_NEAR: f32 = 1.0 / 9.0;
+/// The **registered default** of the `nearclip` CVar — `"0.1"`, the default string at `0x84fb48`
+/// passed by `CVar::Register 0x63db90` at `0x68867a` (name `0x84ffb0` `"nearclip"`, help
+/// `"Near clip plane distance"`, callback `0x688d90`, record `[0xc7f348]`; wow-re
+/// `re/cvar/cvar-register-sites.tsv` row 187). 1804's law, so this is a `Same` row, not a choice.
+///
+/// The live value is [`ViewDistance::nearclip`]; this is only where it starts and what the
+/// off-world spawners ([`crate::worldview`], the depth probe) use when there is no CVar table.
+///
+/// **Why the number matters even though it is a tenth of a yard.** It was `1.0` from 0062 to 0905
+/// "for depth precision" — a rationale that predates knowing the pipeline: the projection is
+/// `perspective_infinite_reverse_rh` on a float depth buffer (the app's `capture::depth_probe`
+/// tests draw with the real one — it lives a crate up, so this is deliberately not a doc link),
+/// where `depth = near/z` makes relative precision — and our
+/// ULP-relative bias ladder ([`crate::sky_order`]) — independent of the near value. The small near
+/// is what keeps the whole waterline-crossing band (the corner-min submersion probe,
+/// `liquid::detect_submersion`) inches tall instead of a yard. It is also the distance the
+/// self-avatar fade completes over ([`crate::model_fade::self_model_fade_alpha`] takes it as
+/// `nearclip`), so the model finishes fading exactly as the near plane would begin to slice it —
+/// the coupling the reference has for free, both being `[cam+0x38]`.
+pub const NEARCLIP_DEFAULT: f32 = 0.1;
+
+/// **The reference's `0x511bc0`** — re-stamp the world camera's near plane from the live `nearclip`
+/// every frame, so a `SetCVar`/`/console nearclip` write reaches this frame's picture the way it
+/// does there (2163). The far plane is deliberately NOT stamped here: ours is [`CAM_FAR`], the
+/// horizon plane, and `farclip` is the wall — 0684's split, which the reference does not have.
+///
+/// Cheap enough to run unconditionally (one resource read, one component write on one entity), and
+/// unconditional is also what the reference does — it re-stamps on every frame, changed or not.
+pub fn stamp_near_clip(
+    view: Res<ViewDistance>,
+    mut cam: Query<&mut Projection, With<WorldCamera>>,
+) {
+    for mut proj in &mut cam {
+        // Read through `as_ref` first: taking `&mut` on a Bevy component marks it changed whether
+        // or not the write differs, and a projection that reports "changed" every frame is a lie
+        // every downstream `Changed<Projection>` has to pay for.
+        let Projection::Perspective(current) = proj.as_ref() else {
+            continue;
+        };
+        if current.near == view.nearclip {
+            continue;
+        }
+        if let Projection::Perspective(p) = &mut *proj {
+            p.near = view.nearclip;
+        }
+    }
+}
 /// The camera's vertical field of view (radians) — one constant shared by the projection
 /// (the camera spawn) and every consumer that needs the near rectangle's true shape. 45°, the value the
 /// projection has always used (Bevy's `PerspectiveProjection` default, ≈ the reference's 44.1° —
@@ -508,6 +601,16 @@ impl Plugin for ViewPlugin {
 }
 
 pub(crate) fn plugin(app: &mut App) {
+    // The reference's per-frame clip stamp (2163). In `Update` and not `PostUpdate` so a
+    // `SetCVar("nearclip", …)` drained this frame reaches this frame's projection, which is the
+    // ordering `0x511bc0` has for free by running inside the world-frame driver.
+    //
+    // The resource is init'd HERE and not only in `world_plugins`: a system's own plugin owes it
+    // its parameters, and a harness that adds this plugin for the pose set (`view::tests`) got a
+    // "Resource does not exist" panic instead. `init_resource` is idempotent, so the app's own
+    // registration still wins wherever it already ran.
+    app.init_resource::<ViewDistance>()
+        .add_systems(Update, stamp_near_clip);
     app.add_systems(
         Update,
         publish_camera_pose
@@ -523,6 +626,52 @@ pub(crate) fn plugin(app: &mut App) {
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// **`0x511bc0`'s near stamp** — the live `nearclip` reaches the projection, and a projection
+    /// already holding it is not marked changed for the privilege (2163).
+    #[test]
+    fn the_near_plane_follows_the_cvar_and_settles() {
+        let mut app = App::new();
+        app.add_systems(Update, stamp_near_clip);
+        let cam = app
+            .world_mut()
+            .spawn((
+                WorldCamera,
+                Projection::from(PerspectiveProjection {
+                    near: NEARCLIP_DEFAULT,
+                    ..default()
+                }),
+            ))
+            .id();
+        // A player (or an addon's `ConsoleExec("nearClip 0.3")`) moves the knob.
+        app.insert_resource(ViewDistance {
+            farclip: 350.0,
+            nearclip: 0.3,
+        });
+        app.update();
+        let near = |app: &App| match app.world().get::<Projection>(cam).unwrap() {
+            Projection::Perspective(p) => p.near,
+            _ => unreachable!("spawned perspective"),
+        };
+        assert_eq!(near(&app), 0.3, "the stamp is the reference's, every frame");
+
+        // ...and the SECOND frame, with nothing moved, must not report the projection changed:
+        // `&mut` on a Bevy component marks it whether or not the write differs. (Verified by
+        // mutation: dropping the `as_ref` guard in `stamp_near_clip` fails exactly this line.)
+        let tick = app.world().read_change_tick();
+        app.update();
+        assert_eq!(near(&app), 0.3);
+        let now = app.world().read_change_tick();
+        assert!(
+            !app.world()
+                .entity(cam)
+                .get_ref::<Projection>()
+                .unwrap()
+                .last_changed()
+                .is_newer_than(tick, now),
+            "an unchanged near plane must not dirty the projection"
+        );
+    }
 
     /// The contract of [`CameraPoseSet`]: a system ordered after it, in the same `Update`, reads
     /// the pose the controller wrote **this** frame — not the one Bevy will propagate at the end

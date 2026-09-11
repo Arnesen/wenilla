@@ -124,11 +124,27 @@ impl ScrollingMessageState {
     /// `timeVisible`/`fadeDuration` onto the new line, and push it at the ring's newest slot,
     /// dropping the oldest when over `max_lines`. A view scrolled up stays anchored on the same
     /// content (the ring cursor is a slot, not an offset — msgframe-runtime.md).
-    /// `ScrollingMessageFrame:UpdateColorByID(id, r, g, b)` (`0x7932b0`) — every line tagged
-    /// `id` takes the new colour, quantised the way `AddMessage` quantised the old one.
-    /// Returns how many lines moved; a recolour bumps the generation so a settled frame
-    /// redraws.
+    /// `ScrollingMessageFrame:UpdateColorByID(id, r, g, b)` (`0x7932b0` → `0x788250`) — every line
+    /// tagged `id` takes the new colour, quantised the way `AddMessage` quantised the old one.
+    /// Returns how many lines moved; a recolour bumps the generation so a settled frame redraws.
+    ///
+    /// **`id == 0` matches nothing, and that is a guard the reference opens with, not a
+    /// consequence** (decision 2125; wow-re `system/ui/scratch/login-chat-colour-pipeline.md`).
+    /// `0x788250` is `mov edi,[ebp+8]; test edi,edi; je 0x7882a4` → `ret 8`: zero never reaches a
+    /// comparison and the record walk is not entered at all.
+    ///
+    /// Without it this was a live repaint of every line ever printed with no explicit colour,
+    /// because `AddMessage`'s absent-id case stores an explicit literal `0` (`0x7929b7 xor edi,edi`
+    /// → `0x78821d mov [edi+0x14],ecx`) and `ChatTypeInfo["REPLY"].id` is 0 too — FrameXML declares
+    /// REPLY and the engine's 94-row registry does not carry it. So `ChatFrame_OnEvent`'s
+    /// `UPDATE_CHAT_COLOR` arm mirroring WHISPER into REPLY (`ChatFrame.lua` l.1357-1365) called
+    /// `UpdateColorByID(0, 1.0, 0.5, 1.0)` and turned every `AceConsole:Print` in the window
+    /// whisper-pink. Measured `(255,128,255)` on Bartender2's login line where the reference reads
+    /// `(255,255,255)`.
     pub fn update_color_by_id(&mut self, id: u32, r: f32, g: f32, b: f32) -> usize {
+        if id == 0 {
+            return 0;
+        }
         let rgb = [quantize_u8(r), quantize_u8(g), quantize_u8(b)];
         let mut moved = 0;
         for line in self.lines.iter_mut().filter(|l| l.id == id) {

@@ -119,6 +119,13 @@ pub(super) fn load_ui_no_warnings(s: &UiScript, entry: &str) -> usize {
 }
 
 fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bool) -> usize {
+    // **A kit's VM is the client's VM, and that includes the CVar table** (decision 2115). The app
+    // registers `crate::cvars::REGISTERED` at startup, before any interface file loads;
+    // `UiScript::new()` carries only `benilla-ui`'s own. The stock `UIOptionsFrame.xml` reads two
+    // camera CVars inside its dropdowns' `OnLoad` and raises on a nil, so a kit that skips this is
+    // measuring a client that does not exist. Idempotent, and it never clobbers a value a test set
+    // first — `register_cvars` only refreshes an existing slot's default.
+    s.register_cvars(crate::cvars::registered_pairs());
     let path = entry.replace('\\', "/");
     let bytes = read(&path).unwrap_or_else(|| panic!("{entry}: not found"));
     if path.to_ascii_lowercase().ends_with(".lua") {
@@ -129,6 +136,36 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
     let doc = benilla_ui::framexml::parse(&benilla_ui::source::decode(&bytes))
         .unwrap_or_else(|e| panic!("{entry}: {e}"));
     let provider = |req: &str| -> Option<Vec<u8>> { read(req) };
+    // Seated BEFORE the load, not after it like the two below: `MultiActionBarFrame_OnLoad`
+    // indexes `UIOptionsFrameCheckButtons` from inside this very load walk, where the micro row's
+    // and UIParent's callees only run later (decision 2115).
+    if path
+        .rsplit('/')
+        .next()
+        .is_some_and(|l| l.eq_ignore_ascii_case("MultiActionBars.xml"))
+    {
+        s.run(MULTI_ACTION_BAR_STAND_INS)
+            .expect("the multibar stand-ins");
+    }
+    // **Our options window's Graphics rows read the REFERENCE's slider table, at OnLoad**
+    // (decision 2177): `OptionsFrameSliders[1..3]` are the bounds those three rows are built with,
+    // and they come from `Interface\FrameXML\OptionsFrame.lua` — which the shipped manifest loads
+    // as part of the stock VIDEO window, one seat above ours. A kit that seats our file alone has
+    // to bring it too, and brings the reference's own file rather than a transcription of the
+    // three rows: a stand-in here would be a second copy of numbers whose whole point is that
+    // they are no longer ours. Seated BEFORE the load, for the same reason MultiActionBars is:
+    // the rows index it from inside this very load walk.
+    if path
+        .rsplit('/')
+        .next()
+        .is_some_and(|l| l.eq_ignore_ascii_case("OptionsFrame.xml"))
+        && !super::reference_ui::is_chain_entry(&path)
+    {
+        let bytes = read("Interface/FrameXML/OptionsFrame.lua")
+            .expect("the reference's own OptionsFrame.lua");
+        s.run_chunk_named(&bytes, "@Interface\\FrameXML\\OptionsFrame.lua")
+            .expect("the video window's slider table");
+    }
     let report = benilla_ui::loader::load_in(s, &doc, &path, &provider);
     assert!(
         report.errors.is_empty(),
@@ -142,6 +179,10 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
     }
     if leaf.eq_ignore_ascii_case("UIParent.xml") && super::reference_ui::is_chain_entry(&path) {
         s.run(UIPARENT_STAND_INS).expect("the UIParent stand-ins");
+    }
+    if leaf.eq_ignore_ascii_case("UIOptionsFrame.xml") {
+        s.run(UIOPTIONS_STAND_INS)
+            .expect("the stock options window's stand-ins");
     }
     if no_warnings {
         assert!(
@@ -205,8 +246,9 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
     RaidOptionsFrame_UpdatePartyFrames = RaidOptionsFrame_UpdatePartyFrames or function() end
     LocalizeFrames = LocalizeFrames or function() end
     updateContainerFrameAnchors = updateContainerFrameAnchors or function() end
-    -- Ours, not the reference's file: 1.12 keeps UpdateNameplates in UIOptionsFrame.lua and
-    -- benilla's own options window carries it (the options family stays ours).
+    -- 1.12 keeps UpdateNameplates in UIOptionsFrame.lua, which a kit reaches only at manifest
+    -- l.21; our own OptionsFrame.xml re-declares it below that (decision 2132). Both are plain
+    -- `function X()` writes, so a full kit ends on ours and a short one keeps this no-op.
     UpdateNameplates = UpdateNameplates or function() end
     CloseAllBags = CloseAllBags or function() end
     OpenBackpack = OpenBackpack or function() end
@@ -249,6 +291,13 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
         local named = {}
         for name, row in pairs(UIPARENT_MANAGED_FRAME_POSITIONS) do
             if not row.isVar then table.insert(named, name) end
+            -- …and every row's ANCHOR TARGET (`anchorTo`, l.1668), which is a different set: the
+            -- keys are the frames being MOVED, the targets are what they move relative to, and
+            -- several targets (`ActionButton1`, `MainMenuBarArtFrame`) are declared in files a
+            -- one-window kit never loads. An unresolvable name is a RAISE now (decision 2176), so
+            -- a target the kit is missing aborts `UIParent_ManageFramePositions` mid-pass where it
+            -- used to anchor to the parent and carry on.
+            if row.anchorTo then table.insert(named, row.anchorTo) end
         end
         benilla_seat(named)
         for _, name in ipairs({ "SlidingActionBarTexture0", "SlidingActionBarTexture1" }) do
@@ -258,8 +307,13 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
     end
     -- The four options/menu windows `IsOptionFrameOpen` (l.997) and `ToggleGameMenu` (l.1467)
     -- index unguarded. `IsOptionFrameOpen` is on the path of every window close, so a kit that
-    -- loads no options window raised on the first bag click; ours answers all three of the
-    -- reference's options windows (1987) and a kit may load none of them.
+    -- loads no options window raised on the first bag click. In the shipped manifest all four
+    -- names are real, and since 2177 all three options windows are the REFERENCE's own files,
+    -- loaded hidden — including `OptionsFrame`, the video window, which used to be our own
+    -- window's name. Ours is `BenillaOptionsFrame` now and is not in this list: it is not a name
+    -- the reference indexes, and the wrappers in `GameMenuFrame.xml` are what tell these two
+    -- functions about it. A KIT is a prefix of the manifest and may load none of the four, which
+    -- is what these stand-ins are for.
     local function benilla_seat_options()
         benilla_seat({ "GameMenuFrame", "OptionsFrame", "UIOptionsFrame", "SoundOptionsFrame" })
         if not OptionsFrameCancel then
@@ -276,6 +330,60 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
     function ToggleGameMenu(clicked)
         benilla_seat_options()
         return real_toggle_menu(clicked)
+    end
+"#;
+
+/// **What a kit owes the stock `MultiActionBars.xml`.** Its `MultiActionBarFrame_OnLoad`
+/// (`MultiActionBars.lua:10`, under the reference's own comment *"Hack to get around load order
+/// dependencies"*) writes five rows into `UIOptionsFrameCheckButtons` — a table whose home is
+/// `UIOptionsFrame.xml`, which the reference's toc seats at l.21, eighteen rows above this one.
+/// The shipped manifest has that order (decision 2115) and needs nothing here; a KIT is a prefix
+/// of the manifest and dozens of them load the bars without any options window.
+///
+/// `or {}` rather than a fresh table, and seated at load rather than on first use, for the reason
+/// 1988 gives: a table, like a function, is a plain global write, so a real declaration that lands
+/// afterwards simply wins — and in manifest order it never lands afterwards, which is exactly what
+/// the shipped `UIOptionsFrameCheckButtons` order proof asserts. A kit that loads both in manifest
+/// order therefore gets the real table with the bars' five rows in it, which is the client's own
+/// state.
+/// **What a kit owes the stock `UIOptionsFrame.xml`.** Its `UIOptionsFrame_OnEvent`'s
+/// VARIABLES_LOADED arm (`UIOptionsFrame.lua` l.193-227) is the reference's own load-time ladder —
+/// the one decision 2115 retired our re-expression of — and it calls six functions unguarded:
+/// `BuffButtons_UpdatePositions`, `FCF_Set_SimpleChat`, `FCF_Set_ChatLocked`,
+/// `SetChatMouseOverDelay`, `MultiActionBar_ShowAllGrids` and
+/// `RaidOptionsFrame_UpdatePartyFrames`. In the shipped manifest that is fine twice over: the
+/// buff bar loads far above this row, the chat and raid files far below it, and the event does not
+/// fire until every one of them has loaded. A KIT is a prefix of the manifest and fires the event
+/// itself, so it needs the names to exist.
+///
+/// Functions, so load-time seating is safe and the kit's order does not matter: a later chunk's
+/// `function X()` is a plain global write that overwrites the stand-in, unlike a frame's
+/// non-overwriting publish (1988's reasoning, and its precedent).
+pub(super) const UIOPTIONS_STAND_INS: &str = r#"
+    BuffButtons_UpdatePositions = BuffButtons_UpdatePositions or function() end
+    FCF_Set_SimpleChat = FCF_Set_SimpleChat or function() end
+    FCF_Set_NormalChat = FCF_Set_NormalChat or function() end
+    FCF_Set_ChatLocked = FCF_Set_ChatLocked or function() end
+    SetChatMouseOverDelay = SetChatMouseOverDelay or function() end
+    MultiActionBar_ShowAllGrids = MultiActionBar_ShowAllGrids or function() end
+    RaidOptionsFrame_UpdatePartyFrames = RaidOptionsFrame_UpdatePartyFrames or function() end
+    -- …and the one its own CHECK BUTTONS reach: three of them register VARIABLES_LOADED for
+    -- themselves (xml l.373, 925, 993), and CheckButton43's arm calls `PartyFrame.lua`'s
+    -- `UpdatePartyMemberBackground`. The other two call the file's own dropdown loaders.
+    UpdatePartyMemberBackground = UpdatePartyMemberBackground or function() end
+"#;
+
+pub(super) const MULTI_ACTION_BAR_STAND_INS: &str = r#"
+    UIOptionsFrameCheckButtons = UIOptionsFrameCheckButtons or {}
+    -- The five ROWS it writes into, not just the table: the reference's hack assigns
+    -- `UIOptionsFrameCheckButtons["SHOW_MULTIBAR1_TEXT"].setFunc`, which needs the row to exist.
+    -- Empty rows on purpose — the real ones carry `index = 33..36, 40`, and a stand-in that
+    -- restated those numbers would be a transcription of the reference's table in a test helper,
+    -- which is the thing 2115 deleted from `OptionsFrame.xml`. Any kit that reads an index has the
+    -- real window loaded and therefore the real table.
+    for _, key in ipairs({ "SHOW_MULTIBAR1_TEXT", "SHOW_MULTIBAR2_TEXT", "SHOW_MULTIBAR3_TEXT",
+                           "SHOW_MULTIBAR4_TEXT", "ALWAYS_SHOW_MULTIBARS_TEXT" }) do
+        UIOptionsFrameCheckButtons[key] = UIOptionsFrameCheckButtons[key] or {}
     end
 "#;
 
@@ -513,10 +621,10 @@ pub(super) const CHARACTER_UI: &[&str] = &[
     // The reference's own window tab (`CharacterFrameTabButtonTemplate`), whose `<OnShow>`
     // fits each tab to its text — it needs the `UIPanelTemplates` pair above it (1993).
     r"Interface\FrameXML\CharacterFrameTemplates.xml",
-    // The four options templates off the chain, then ours for the one it does not carry
-    // (`UIOptionsCheckButtonTemplate` — decision 1841).
+    // The four options templates off the chain — ReputationFrame's detail check boxes inherit
+    // `OptionsCheckButtonTemplate`. Ours beside it is gone with 2115: its one template,
+    // `UIOptionsCheckButtonTemplate`, comes off the chain out of `UIOptionsFrame.xml` now.
     "Interface\\FrameXML\\OptionsFrameTemplates.xml",
-    "OptionsFrameTemplates.xml", // ReputationFrame's detail check boxes
     "Interface\\FrameXML\\CharacterFrame.xml",
     "Interface\\FrameXML\\PaperDollFrame.xml",
     "Interface\\FrameXML\\PetPaperDollFrame.xml",

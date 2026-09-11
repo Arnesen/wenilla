@@ -57,21 +57,38 @@
 
         -- The first line of a message, trimmed to a row's width. A traceback's later lines are
         -- indented continuations; on one row they read as noise.
+        -- `strsub` is BYTE-indexed (Lua 5.0 strings are byte strings, and benilla keeps them that
+        -- way — decision 1193), so a cut that lands inside a multi-byte character leaves half of
+        -- one. Every message here is UTF-8 and ours are full of em dashes, so this was not
+        -- theoretical: the log window's own repaint raised on the first warning it was ever asked
+        -- to show (2135/2138). Back the cut up over any continuation byte (`10xxxxxx`, i.e.
+        -- 0x80..0xBF) so it lands on a character boundary.
         function BenillaScriptLog_RowText(message)
             local cut = strfind(message, "\n", 1, 1)
             local head = message
             if cut then head = strsub(message, 1, cut - 1) end
             if strlen(head) > BENILLA_SCRIPTLOG_ROW_CHARS then
-                head = strsub(head, 1, BENILLA_SCRIPTLOG_ROW_CHARS - 3) .. "..."
+                local last = BENILLA_SCRIPTLOG_ROW_CHARS - 3
+                while last > 0 do
+                    local b = strbyte(head, last + 1)
+                    if not b or b < 128 or b >= 192 then break end
+                    last = last - 1
+                end
+                head = strsub(head, 1, last) .. "..."
             end
             return head
         end
 
-        -- `load` rows are red and `error` rows amber, and the split is by CONSEQUENCE: a `load` row
-        -- means an addon is not running at all, which is the thing the player can act on. Colours
-        -- come from the shipped tables so this window matches the rest of the UI.
+        -- The three kinds, coloured by CONSEQUENCE — how much of the addon is broken:
+        --   `load`  red    an addon is not running at all (the thing a player can act on)
+        --   `error` amber  code ran and raised; the addon is otherwise up
+        --   `warn`  grey   a call was accepted and quietly did not do what it said (2135)
+        -- Grey rather than a fourth bright colour because a warning is the least urgent of the
+        -- three and there are more of them: colour has to keep ranking the list, not just label
+        -- it. Colours come from the shipped tables so this window matches the rest of the UI.
         function BenillaScriptLog_RowColor(kind)
             if kind == "load" then return 1.0, 0.3, 0.3 end
+            if kind == "warn" then return 0.65, 0.65, 0.65 end
             return 1.0, 0.82, 0.0
         end
 
@@ -81,15 +98,18 @@
             -- The summary line carries the one number a bug report needs and the window cannot
             -- otherwise show: how many were DROPPED. `total` counts distinct failures ever
             -- recorded; `shown` is what survived the cap.
+            -- "problems", not "errors": the log carries three kinds now and two of them are not
+            -- errors (2135). The window is still `/errors` and still opens on the same key —
+            -- what changed is that a count of 7 stopped meaning "7 things raised".
             local summary
             if total == 0 then
-                summary = "No errors this session."
+                summary = "No problems this session."
             elseif total > shown then
-                summary = format("%d errors (%d older not kept)", total, total - shown)
+                summary = format("%d problems (%d older not kept)", total, total - shown)
             elseif total == 1 then
-                summary = "1 error"
+                summary = "1 problem"
             else
-                summary = format("%d errors", total)
+                summary = format("%d problems", total)
             end
             getglobal("BenillaScriptLogSummary"):SetText(summary)
 
@@ -152,7 +172,7 @@
                 end
             end
             if text == "" then
-                text = "Select an error above to read it in full."
+                text = "Select a row above to read it in full."
             end
             getglobal("BenillaScriptLogDetailText"):SetText(text)
         end
@@ -212,7 +232,7 @@
             if getglobal("BenillaScriptLogFrame"):IsVisible() then
                 BenillaScriptLog_Update()
             end
-            DEFAULT_CHAT_FRAME:AddMessage("Script error log cleared.", 1.0, 1.0, 0.0)
+            DEFAULT_CHAT_FRAME:AddMessage("Script log cleared.", 1.0, 1.0, 0.0)
         end
     ]]></Script>
 

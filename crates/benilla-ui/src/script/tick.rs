@@ -149,6 +149,7 @@ pub(crate) fn fire_event_into(lua: &Lua, event: &str, args: Vec<ScriptValue>) {
             at = next;
         }
     }
+    event::fire_all_event_listeners(lua, event, &args);
 }
 
 impl super::UiScript {
@@ -159,11 +160,29 @@ impl super::UiScript {
     /// binding reads it without a host round-trip. Reference FrameXML (CastingBarFrame & co.)
     /// anchors durations on GetTime; the clock advancing in the same call that fires OnUpdate
     /// keeps the two views of time consistent within a frame.
-    /// The current `GetTime()` value (`__benilla_now`, seconds) — the FrameXML session clock. The app
+    /// The current `GetTime()` value (`__benilla_now`, seconds) — the FrameXML clock. The app
     /// reads it to stamp an absolute expiry into the clock a Lua countdown reads (the aura feed's
     /// `expirationTime`, decision 0257); it is the same value `GetTime()` returns inside the VM.
     pub fn now(&self) -> f64 {
         self.lua.globals().get("__benilla_now").unwrap_or(0.0)
+    }
+
+    /// Start this VM's `GetTime()` clock at `secs` rather than at zero — how a host hands a
+    /// **freshly built** VM the clock its process is already on (decision 2116).
+    ///
+    /// The reference's `GetTime` (`0x515ea0`) is `KERNEL32!GetTickCount` scaled by 0.001 (through
+    /// the thunk `0x42c010` → `0x42b790`; wow-re `system/core/ledger.tsv` boundary row and
+    /// `system/ui/ledger.tsv:3265`) — an **OS** clock that knows nothing about the Lua VM and never
+    /// restarts, which is exactly what lets stock `Cooldown.lua` gate on `start > 0`. Ours lives
+    /// inside the VM, so without this a rebuilt VM — every logout/login, every `ReloadUI` — would
+    /// restart it at zero and every host value already converted onto it would land in the past.
+    ///
+    /// Set once, at construction: from then on only [`Self::tick`] moves the clock, so the
+    /// `(Instant, GetTime)` pair a host keeps beside it stays atomic by construction.
+    pub fn set_now(&mut self, secs: f64) {
+        if let Err(e) = self.lua.globals().set("__benilla_now", secs) {
+            self.push_error(e);
+        }
     }
 
     pub fn tick(&mut self, elapsed: f32) {
@@ -182,6 +201,11 @@ impl super::UiScript {
         // OnUpdate sweep, matching the reference's order: the box's own OnUpdate override drains
         // before the FrameXML handlers that read the box get their turn.
         editbox::drain_text_changed(&self.lua);
+        // …and the caret flush's own fire, the second half of `0x77a790`'s update walk
+        // (`0x77d3e0` → `0x77da80`): `OnCursorChanged` when the caret has moved. It is what
+        // `ScrollingEdit_OnCursorChanged` records and `ScrollingEdit_OnUpdate` then scrolls by,
+        // so this is the mail body and the GM ticket box following the caret as you type.
+        editbox::drain_cursor_changed(&self.lua);
         // Events queued by Lua bindings last tick (`Model::pending_events` — e.g. `SetMapZoom` →
         // `WORLD_MAP_UPDATE`; the cursor arc's `CURSOR_UPDATE`/`ITEM_LOCK_CHANGED`/
         // `DELETE_ITEM_CONFIRM`, decision 0216) fire first, so handlers see them before this

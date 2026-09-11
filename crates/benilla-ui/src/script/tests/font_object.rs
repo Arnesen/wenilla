@@ -255,7 +255,7 @@ fn set_font_object_takes_the_object_or_the_name() {
     s.run(
         r#"
         f = CreateFrame("Frame", "TwoWays")
-        f:SetWidth(200); f:SetHeight(40); f:SetPoint("CENTER")
+        f:SetWidth(200); f:SetHeight(40); f:SetPoint("CENTER", 0, 0)
         byObject = f:CreateFontString(nil, "ARTWORK")
         byObject:SetText("obj")
         byObject:SetFontObject(GameFontHighlightSmall)
@@ -320,7 +320,7 @@ fn dewdrop_recolors_a_row_from_its_own_font_object() {
     s.run(
         r#"
         f = CreateFrame("Frame", "DdRow")
-        f:SetWidth(120); f:SetHeight(16); f:SetPoint("CENTER")
+        f:SetWidth(120); f:SetHeight(16); f:SetPoint("CENTER", 0, 0)
         button = { text = f:CreateFontString(nil, "ARTWORK") }
         button.text:SetText("row")
         button.text:SetFontObject(GameFontHighlightSmall)
@@ -362,7 +362,7 @@ fn mutating_a_font_object_repaints_everything_that_inherits_it() {
     s.run(
         r#"
         f = CreateFrame("Frame", "ThemeHost")
-        f:SetWidth(200); f:SetHeight(60); f:SetPoint("CENTER")
+        f:SetWidth(200); f:SetHeight(60); f:SetPoint("CENTER", 0, 0)
         a = f:CreateFontString(nil, "ARTWORK"); a:SetText("inherited")
         a:SetFontObject(ThemeFont)
         b = f:CreateFontString(nil, "ARTWORK"); b:SetText("overridden")
@@ -445,7 +445,7 @@ fn propagation_is_scoped_to_the_object_that_changed() {
     s.run(
         r#"
         f = CreateFrame("Frame", "ScopeHost")
-        f:SetWidth(200); f:SetHeight(60); f:SetPoint("CENTER")
+        f:SetWidth(200); f:SetHeight(60); f:SetPoint("CENTER", 0, 0)
         one = f:CreateFontString(nil, "ARTWORK"); one:SetText("one"); one:SetFontObject(FontOne)
         two = f:CreateFontString(nil, "ARTWORK"); two:SetText("two"); two:SetFontObject(FontTwo)
         FontOne:SetFont("Fonts\\CHANGED.TTF", 30)
@@ -477,7 +477,7 @@ fn create_font_mints_publishes_and_paints() {
         Nameplate.Font:SetTextColor(0, 0.5, 1)
 
         f = CreateFrame("Frame", "PlateHost")
-        f:SetWidth(120); f:SetHeight(20); f:SetPoint("CENTER")
+        f:SetWidth(120); f:SetHeight(20); f:SetPoint("CENTER", 0, 0)
         Name = f:CreateFontString(nil, "ARTWORK")
         Name:SetText("plate")
         Name:SetFontObject(Nameplate.Font)
@@ -626,7 +626,7 @@ fn button_state_fonts_take_the_object_and_follow_its_mutation() {
     s.run(
         r#"
         b = CreateFrame("Button", "StateFontButton")
-        b:SetWidth(80); b:SetHeight(22); b:SetPoint("CENTER")
+        b:SetWidth(80); b:SetHeight(22); b:SetPoint("CENTER", 0, 0)
         b:SetText("go")
         b:SetTextFontObject(GameFontNormal)
     "#,
@@ -671,7 +671,7 @@ fn an_empty_font_object_copies_nothing_onto_a_fontstring() {
     s.run(
         r#"
         f = CreateFrame("Frame", "EmptyFontHost")
-        f:SetWidth(120); f:SetHeight(20); f:SetPoint("CENTER")
+        f:SetWidth(120); f:SetHeight(20); f:SetPoint("CENTER", 0, 0)
         fs = f:CreateFontString(nil, "ARTWORK")
         fs:SetText("keep")
         fs:SetFontObject(DressedFont)
@@ -859,7 +859,7 @@ fn a_cross_axis_token_erases_the_axis_but_still_draws_centred() {
     let mut s = script();
     s.run(
         "f = CreateFrame('Frame', 'ClearAxisFrame')\n\
-         f:SetWidth(200) f:SetHeight(40) f:SetPoint('CENTER')\n\
+         f:SetWidth(200) f:SetHeight(40) f:SetPoint('CENTER', 0, 0)\n\
          fs = f:CreateFontString()\n\
          fs:SetAllPoints(f)\n\
          fs:SetText('erased')",
@@ -924,9 +924,9 @@ fn the_font_block_reaches_both_message_frame_tables() {
         "fo = CreateFont('MsgBlockFont')\n\
          fo:SetFont('Fonts\\\\FRIZQT__.TTF', 14)\n\
          mf = CreateFrame('MessageFrame', 'MsgBlockPlain')\n\
-         mf:SetWidth(300) mf:SetHeight(80) mf:SetPoint('CENTER')\n\
+         mf:SetWidth(300) mf:SetHeight(80) mf:SetPoint('CENTER', 0, 0)\n\
          smf = CreateFrame('ScrollingMessageFrame', 'MsgBlockScroll')\n\
-         smf:SetWidth(300) smf:SetHeight(80) smf:SetPoint('TOPLEFT')",
+         smf:SetWidth(300) smf:SetHeight(80) smf:SetPoint('TOPLEFT', 0, 0)",
     )
     .unwrap();
 
@@ -951,11 +951,7 @@ fn the_font_block_reaches_both_message_frame_tables() {
             .unwrap();
         assert_eq!(height, 16.0, "{obj}:GetFont reads back what SetFont wrote");
         // The four-value getters the carve pins at 4 for every one of the six tables.
-        assert_eq!(
-            s.eval::<i64>(&format!("return select('#', {obj}:GetShadowColor())"))
-                .unwrap(),
-            4
-        );
+        assert_eq!(s.arity(&format!("{obj}:GetShadowColor()")).unwrap(), 4);
     }
 
     // Styling the frame must not move its text: the lines still run flush LEFT.
@@ -1080,4 +1076,97 @@ fn set_font_answers_the_hosts_load_verdict_when_there_is_a_host() {
         "the refused face must not replace the one that loaded"
     );
     assert_eq!(height, 18.0, "…while the height, which never fails, is set");
+}
+
+/// **Mik's Scrolling Battle Text, end to end** — the exact sequence the addon runs per event,
+/// pinned because it is the shape a whole class of "the addon's font did not take" reports wears
+/// (decisions 2103, 2112).
+///
+/// MSBT's twenty scroll-area FontStrings are declared `inherits="MasterFont"` — the reference's
+/// root font object, which carries a `<Shadow>` and **nothing else**: no face, no height, no
+/// outline. Each animation then does, in this order, on the string it recycles:
+/// `ClearAllPoints · SetFont(<its own TTF>, 18, "OUTLINE") · SetTextColor · SetText · SetAlpha ·
+/// SetPoint`. Every one of those five paint axes has to reach the extracted quad *unmodified* by
+/// the object the string inherits — the addon's face over the object's absent one, the addon's
+/// height over the renderer default, the addon's outline over the object's `NONE` (which is
+/// indistinguishable from "unset", see [`Outline`]), its colour over the object's absent one, and
+/// the animation's fade as the quad's own alpha. The `<Shadow>` is the one thing that IS inherited,
+/// and it must still be there.
+#[test]
+fn msbt_paints_its_own_face_size_outline_and_fade_over_the_font_object_it_inherits() {
+    let mut s = script();
+    s.set_screen_size(1600.0, 900.0);
+    load(
+        &s,
+        r#"<Ui>
+             <Font name="MasterFont" virtual="true">
+               <Shadow><Offset><AbsDimension x="1" y="-1"/></Offset><Color r="0" g="0" b="0"/></Shadow>
+             </Font>
+             <Frame name="MSBTFrameIncoming" parent="UIParent">
+               <Size><AbsDimension x="24" y="24"/></Size>
+               <Anchors><Anchor point="BOTTOM" relativePoint="CENTER" relativeTo="UIParent"/></Anchors>
+               <Layers><Layer level="ARTWORK">
+                 <FontString name="$parentText1" inherits="MasterFont">
+                   <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                 </FontString>
+               </Layer></Layers>
+             </Frame>
+           </Ui>"#,
+    );
+    s.run(
+        r#"
+        local fs = getglobal("MSBTFrameIncomingText1")
+        fs:ClearAllPoints()
+        fs:SetFont("Interface\\Addons\\MikScrollingBattleText\\Fonts\\porky.ttf", 18, "OUTLINE")
+        fs:SetTextColor(1, 1, 1)
+        fs:SetText("-64")
+        fs:SetAlpha(0.5)
+        fs:SetPoint("BOTTOMRIGHT", 0, 0)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let q = s
+        .extract()
+        .into_iter()
+        .find(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "-64"))
+        .expect("MSBT's text quad");
+    assert_eq!(
+        q.alpha, 0.5,
+        "the scroll animation's fade is the quad's alpha"
+    );
+    match q.content {
+        QuadContent::Text {
+            ref font,
+            font_height,
+            outline,
+            color,
+            shadow,
+            ..
+        } => {
+            assert_eq!(
+                font.as_deref(),
+                Some("Interface\\Addons\\MikScrollingBattleText\\Fonts\\porky.ttf"),
+                "the addon's own face, not the fallback"
+            );
+            assert_eq!(font_height, Some(18.0), "the profile's master size");
+            assert_eq!(outline, Outline::Normal, "its OUTLINE flag");
+            assert_eq!(color, Some([1.0, 1.0, 1.0, 1.0]));
+            assert!(
+                shadow.is_some(),
+                "MasterFont's <Shadow> is the one axis the string never set, so it inherits"
+            );
+        }
+        ref other => panic!("expected a Text quad, got {other:?}"),
+    }
+    // The Lua-visible echo agrees with the quad — the readback an addon branches on.
+    assert_eq!(
+        s.eval::<(String, f32, String)>("return MSBTFrameIncomingText1:GetFont()")
+            .unwrap(),
+        (
+            "Interface\\Addons\\MikScrollingBattleText\\Fonts\\porky.ttf".to_string(),
+            18.0,
+            "OUTLINE".to_string()
+        )
+    );
 }

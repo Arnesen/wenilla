@@ -361,9 +361,9 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
         s.run(
-            r#"WM = CreateFrame("Frame", "WM") WM:SetSize(1024, 768) WM:SetPoint("CENTER")
+            r#"WM = CreateFrame("Frame", "WM") WM:SetWidth(1024); WM:SetHeight(768) WM:SetPoint("CENTER", 0, 0)
                Detail = CreateFrame("Frame", "WorldMapDetailFrame", WM)
-               Detail:SetSize(1002, 668) Detail:SetPoint("CENTER")"#,
+               Detail:SetWidth(1002); Detail:SetHeight(668) Detail:SetPoint("CENTER", 0, 0)"#,
         )
         .unwrap();
         s
@@ -434,9 +434,9 @@ mod tests {
             (pos.0 - 0.0131).abs() < 1e-5 && (pos.1 - 0.01315).abs() < 1e-5 && pos.2 == 0.0,
             "centred on the box: {pos:?}"
         );
-        assert!(
-            s.eval::<bool>("return select('#', CreateWorldMapArrowFrame(WM)) == 0")
-                .unwrap(),
+        assert_eq!(
+            s.arity("CreateWorldMapArrowFrame(WM)").unwrap(),
+            0,
             "zero values"
         );
     }

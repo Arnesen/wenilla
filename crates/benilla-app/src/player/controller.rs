@@ -36,6 +36,12 @@ pub(super) fn control(
         Res<camera::LookConfig>,
         Res<camera::ZoomLimit>,
         Res<camera::FollowConfig>,
+        // The four 1.12 camera option toggles and their numeric siblings (decision 2149).
+        Res<camera_dynamics::CameraOptions>,
+        // `nearclip`/`farclip` (2163) — the camera's own clip pair. Only the near half is read
+        // here, for the self-avatar fade's reference plane; the far half is the wall's, read by
+        // the world.
+        Res<benilla_world::view::ViewDistance>,
     ),
     // The net bridge, bundled into one param (16-param limit): the outbound command channel + the
     // inbound teleport/worldport messages `apply_net_updates` wrote earlier this frame
@@ -82,7 +88,6 @@ pub(super) fn control(
     speed_capsule: (
         Res<MoveSpeed>,
         Res<PlayerCapsule>,
-        Res<CameraProbe>,
         Res<InspectMode>,
         Res<crate::ui_script::UiKeyboardCapture>,
         Res<crate::ui_script::PlayerUiClickConsumed>,
@@ -149,19 +154,18 @@ pub(super) fn control(
     let mouse_motion = &pointer.0;
     let look_cfg = *pointer.1;
     let zoom_max = pointer.2.max;
-    let (move_speed, capsule, cam_probe, inspect, ui_capture, click_consumed) = (
+    let (move_speed, capsule, inspect, ui_capture, click_consumed) = (
         &speed_capsule.0,
         &speed_capsule.1 .0,
-        &speed_capsule.2 .0,
+        &speed_capsule.2,
         &speed_capsule.3,
         &speed_capsule.4,
-        &speed_capsule.5,
     );
-    let binds = &speed_capsule.6;
-    let view_subject = &speed_capsule.7;
-    let self_guid = speed_capsule.8 .0;
-    let scoped = &speed_capsule.9;
-    let covered = speed_capsule.10.covering();
+    let binds = &speed_capsule.5;
+    let view_subject = &speed_capsule.6;
+    let self_guid = speed_capsule.7 .0;
+    let scoped = &speed_capsule.8;
+    let covered = speed_capsule.9.covering();
     // The auto-follow knobs (decisions 1493/1502), with far sight's one exception folded in here so
     // both camera seats below agree: while the rig orbits somebody ELSE's body (Mind Vision, Sentry
     // Totem), our own facing is not what "behind" means, so the return is forced off rather than
@@ -179,7 +183,6 @@ pub(super) fn control(
         },
         ..*pointer.3
     };
-
     let dt = time.delta_secs();
     // While a focused UI EditBox (the chat input, a mail field) owns the keyboard, keyboard reads see
     // "no keys held" — so the avatar isn't also driven while typing (a `.tele` command). Mouse still
@@ -203,6 +206,49 @@ pub(super) fn control(
         both_buttons,
         follow_command,
     } = input::look_input(binds, &player, &rig);
+
+    // The camera-option inputs (decision 2149). `translating` is **last frame's** wire word, and
+    // deliberately: the reference's `0x50fee0` runs from the input handler `0x514446`, which
+    // precedes the mover lookup, so it reads the movement flags the previous update left. It is
+    // also all this path can read — `flags::this_frame` runs several hundred lines below, after
+    // the mover.
+    let dynamics = camera_dynamics::DynamicsInput {
+        options: *pointer.4,
+        nearclip: pointer.5.nearclip,
+        // Last frame's cached surface — the reference's own lag (`Player::liquid_surface`).
+        surface_y: player.liquid_surface,
+        smooth_style: pointer.3.style,
+        tracking_style: pointer.3.tracking_style,
+        subject: camera_dynamics::SubjectState {
+            move_flags: player.move_flags,
+            // Off the DRIVEN body's descriptor (1277) — a possessed creature's taxi state is what
+            // the camera follows, not ours.
+            taxi: body
+                .single()
+                .ok()
+                .and_then(|(_, _, _, _, _, store, ..)| store)
+                .is_some_and(|s| s.0.unit_flags() & 0x0010_0000 != 0),
+            track: player.server_riding,
+            fear: player.control_lost,
+            facing: player.face_yaw,
+            mounted: body
+                .single()
+                .ok()
+                .and_then(|(_, _, _, _, _, store, ..)| store)
+                .is_some_and(|s| s.0.unit_mount_display_id() > 0),
+            // `GetCurrentSpeed 0x7c4c90` on the mover's own speed set, against LAST frame's flag
+            // word — the same pairing the reference's bob kernel makes, and the only speed either
+            // camera seat below can ask for (the driving path's own is computed hundreds of lines
+            // later, and the stand-down path never computes one at all).
+            speed: body
+                .single()
+                .ok()
+                .and_then(|(_, _, _, _, _, _, _, speeds, ..)| speeds)
+                .map_or(0.0, |s| crate::net::current_speed(&s.0, player.move_flags)),
+            command: follow_command,
+            scoped: scoped.active(),
+        },
+    };
 
     // The look session gets a SHADOW copy of `CursorOptions`, written back only on a real change:
     // handing it the component's `Mut` directly reborrowed mutably every frame, which marks it
@@ -316,6 +362,7 @@ pub(super) fn control(
         left_click,
         right_click,
         look_cfg,
+        &dynamics,
         time.elapsed_secs(),
     );
     // A stun freezes the BODY, not the view. The look session has already moved `cam.yaw` (and, on
@@ -479,20 +526,29 @@ pub(super) fn control(
                 0.0,
                 player.pos,
                 head,
-                body.single()
-                    .ok()
-                    .and_then(|(_, _, _, pivot, .., net)| body_pose::pivot_target(pivot, net)),
+                body.single().ok().and_then(|(_, _, _, pivot, .., net)| {
+                    // Even while a spline/taxi/fear owns the body, the pivot preset follows
+                    // that body's own MOVEFLAG_SWIMMING (`0x50f880` reads the camera target's
+                    // CMovement word, not ours). On this path the controller builds no live
+                    // flag word, so the last-streamed one — which `wire_in` merges from the
+                    // server's own poses — is the body's state.
+                    body_pose::pivot_target(
+                        pivot,
+                        net,
+                        player.move_flags() & crate::creature_anim::move_flags::SWIMMING != 0,
+                    )
+                }),
                 view_subject,
                 &mut rig,
                 &mut cam,
                 &mut cam_t,
                 &collide,
-                cam_probe,
                 &camera::FollowInput {
                     cfg: follow_cfg,
                     face_yaw: player.face_yaw,
                     command: follow_command,
                 },
+                &dynamics,
             );
             // Flush a stale run once, so observers stop extrapolating it — but never under a ride,
             // whose FORWARD report is deliberate and would be cancelled every frame.
@@ -702,6 +758,9 @@ pub(super) fn control(
         // the verified `0x6030c0` boundary — B7 resolved, decision 0226) so wading the line
         // doesn't flicker between the two physics regimes.
         let surface_y = swim::surface_over_feet(world, player.pos);
+        // Cache it for the camera's water corridor, which reads it a frame later exactly as the
+        // reference's `0x670630` accessor does (see `Player::liquid_surface`).
+        player.liquid_surface = surface_y;
         let swimming = swim::update_swimming(&mut player, surface_y, time.elapsed_secs());
         if let Some(surface) = surface_y {
             move_trace::swim(player.pos.y, surface, swimming, player.collision_height.0);
@@ -817,11 +876,16 @@ pub(super) fn control(
         // The push is **per mouse-move, not per frame** ([`Player::aim_pitch_seen`]): the ref's
         // enqueue hangs off the mouse-MOTION event `0x400500cb`, so a still mouse pushes nothing
         // and the other writers of the field — the wobble, StopSwim's levelling — survive.
-        if mouselook && cam.pitch != player.aim_pitch_seen {
-            player.aim_pitch_seen = cam.pitch;
-            player.mover_pitch = cam
-                .pitch
-                .clamp(-MOUSELOOK_PITCH_CLAMP, MOUSELOOK_PITCH_CLAMP);
+        //
+        // **The aim is the COMPOSITE, not the camera's own pitch** (decision 2149): the reference's
+        // camera→body hand-off `0x5103e0` clamps `[cam+0x104] + [cam+0xf4]` to ±89° before passing
+        // the pitch on, so a smart-pivot frame — where the arm's pitch does not move and the view's
+        // does — still aims the body. The bias is zero except on those frames, so this reads as
+        // `cam.pitch` everywhere else.
+        let aim_pitch = cam.pitch + rig.smart_pivot.bias();
+        if mouselook && aim_pitch != player.aim_pitch_seen {
+            player.aim_pitch_seen = aim_pitch;
+            player.mover_pitch = aim_pitch.clamp(-MOUSELOOK_PITCH_CLAMP, MOUSELOOK_PITCH_CLAMP);
         }
         let mut swim_pitch = 0.0_f32;
         // The ground height the mover starts this frame at (pre-step feet Y). For a jump this is the
@@ -1056,8 +1120,8 @@ pub(super) fn control(
             &mut cam,
             &mut cam_t,
             &collide,
-            cam_probe,
             &follow,
+            &dynamics,
         );
 
         // The cast bar's local self-cancel trigger (`ui_cast::local_self_cancel`): a fresh

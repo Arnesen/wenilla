@@ -178,7 +178,11 @@ impl UiScript {
                         owner_frame.map(|f| &f.kind_state)
                     {
                         if sl.thumb == Some(rh) {
-                            let tsize = model.region_data.get(&rh).and_then(|d| d.size);
+                            // The thumb's OWN size getters, not its authored `<Size>` — the same
+                            // `CSimpleTexture::GetWidth`/`GetHeight` fallback the drag law reads
+                            // (`slider::thumb_extent`), so a Lua-built `SetThumbTexture(path)` knob
+                            // draws at its art's texel span instead of smeared over the whole track.
+                            let tsize = super::region::virtual_span(&model, rh);
                             rect = rect
                                 .map(|r| slider::thumb_rect(r, tsize, sl.vertical, sl.fraction()));
                             thumb_fill = true;
@@ -241,7 +245,7 @@ impl UiScript {
                         let hovered = owner.is_some() && model.mouseover == owner;
                         // The PRESS is not read here. Which state texture shows is latched on the
                         // transition (`ButtonState::set_state`), so the press reaches the paint
-                        // through `button::settle` at the moment the mouse moves it — not by
+                        // through the press EDGE at the moment the button goes down — not by
                         // being re-derived every frame. `hovered` survives because the Highlight
                         // is not a state texture and carries no latch.
                         if !bs.region_visible(rh, hovered) {
@@ -282,26 +286,27 @@ impl UiScript {
                             // shows its label. Every state-colour caller in our own UI ships the
                             // matching font object, so the two readings agree on all of them.
                             let highlighted = hovered || bs.locked_highlight;
-                            let (name, color, justify) =
-                                if !bs.enabled && bs.disabled_font.is_some() {
-                                    (
-                                        bs.disabled_font.as_ref(),
-                                        bs.disabled_color,
-                                        bs.disabled_justify_h,
-                                    )
-                                } else if bs.enabled && highlighted && bs.highlight_font.is_some() {
-                                    (
-                                        bs.highlight_font.as_ref(),
-                                        bs.highlight_color,
-                                        bs.highlight_justify_h,
-                                    )
-                                } else {
-                                    (
-                                        bs.normal_font.as_ref(),
-                                        bs.normal_color,
-                                        bs.normal_justify_h,
-                                    )
-                                };
+                            let (name, color, justify) = if !bs.enabled()
+                                && bs.disabled_font.is_some()
+                            {
+                                (
+                                    bs.disabled_font.as_ref(),
+                                    bs.disabled_color,
+                                    bs.disabled_justify_h,
+                                )
+                            } else if bs.enabled() && highlighted && bs.highlight_font.is_some() {
+                                (
+                                    bs.highlight_font.as_ref(),
+                                    bs.highlight_color,
+                                    bs.highlight_justify_h,
+                                )
+                            } else {
+                                (
+                                    bs.normal_font.as_ref(),
+                                    bs.normal_color,
+                                    bs.normal_justify_h,
+                                )
+                            };
                             state_font = name.and_then(|n| model.font_object(n));
                             button_font = bs.font.as_ref();
                             state_color = color;
@@ -326,6 +331,15 @@ impl UiScript {
                     if data_ref.is_some_and(|d| d.hidden) {
                         continue;
                     }
+                    // THE NAMEPLATE GLOW IS SHOWN AND NOT DRAWN — the one region in the engine
+                    // whose paint the director replaced with something else (decision 0184: the
+                    // lit plate brightens its bar instead of wearing the additive rim). It has to
+                    // stay a real, shown, ADD-blended `Nameplate-Glow` region because
+                    // `glow:IsShown()` IS the mouseover signal every 1.12 nameplate addon reads —
+                    // so the deviation lives here, at the paint, and nowhere in the model.
+                    if data_ref.is_some_and(super::nameplate::is_unpainted_glow) {
+                        continue;
+                    }
                     let mut data = data_ref.cloned().unwrap_or_default();
                     // The single-hop draw multiply (`propagation.md`): the region's own alpha times
                     // its immediate owner's — never a product up the tree, because the owner's own
@@ -333,18 +347,34 @@ impl UiScript {
                     let alpha = owner_frame.map(|f| f.effective_alpha).unwrap_or(1.0)
                         * data.alpha.unwrap_or(1.0);
                     if let Some(fo) = state_font {
-                        // The font object's paint wholesale, except a color the Lua explicitly
-                        // SetTextColor'd (the client's explicitly-set mask keeps it — ui ledger
-                        // FONTINSTANCE+0x38, color bit 0x404).
-                        data.font_path = fo.font.clone().or(data.font_path);
-                        data.font_height = fo.height.or(data.font_height);
+                        // The font object's paint, **behind the severance mask on every axis** —
+                        // the same `font_explicit` gate `font::repaint` applies and the
+                        // `button_font` block below names as the law ("it loses to a face the
+                        // label FontString set for *itself*, which severs one level further
+                        // down"). Three of these six axes did not have it: face and height were
+                        // `fo.x.or(data.x)`, which makes the OBJECT outrank an explicit
+                        // `SetFont`, and the outline was written unconditionally — so a label
+                        // that called `SetFont(path, h, "OUTLINE")` for itself had all three put
+                        // back from the object on the very next extract, every frame, forever.
+                        // That is the *shape* of the report this was found under (decision 2112:
+                        // an addon's `SetFont` silently not taking); MSBT's own strings are not
+                        // a button's label and never met it, but any addon that restyles a
+                        // `<ButtonText>` did.
+                        if !data.font_explicit.face {
+                            data.font_path = fo.font.clone().or(data.font_path);
+                        }
+                        if !data.font_explicit.height {
+                            data.font_height = fo.height.or(data.font_height);
+                        }
                         // Same severance as the colour below: a region that called
                         // `SetShadowColor`/`SetShadowOffset` keeps its own, or the font object it
                         // inherits would silently overwrite the value the addon just set.
                         if !data.font_explicit.shadow {
                             data.font_shadow = fo.shadow.or(data.font_shadow);
                         }
-                        data.outline = fo.outline;
+                        if !data.font_explicit.outline {
+                            data.outline = fo.outline;
+                        }
                         // Test the severance MASK, which is what the sentence above claims and what
                         // wow-re pinned, not `vertex_color.is_none()`. The nil-check was an
                         // equivalent proxy for exactly as long as an explicit `SetTextColor` was the
@@ -442,6 +472,11 @@ impl UiScript {
                             shadow: data.font_shadow,
                             outline: data.outline,
                             alpha_gradient: data.alpha_gradient,
+                            // A property of the OWNER, not of the string: the plate's own name
+                            // and level and an addon's replacements for them are all drawn
+                            // inside the same sliding rect.
+                            world_seat: owner
+                                .is_some_and(|o| super::nameplate::is_world_seated(&model, o)),
                         }
                     } else {
                         // The draw gate is the TEXTURE slot, never the colour (`0x7706e0`: `+0xcc`
@@ -466,7 +501,11 @@ impl UiScript {
                             color: has_texture
                                 .then(|| texture_color(fill, data.vertex_color))
                                 .flatten(),
-                            additive: data.additive,
+                            // ADD is the one blend mode the renderer acts on; the other four of
+                            // the client's `alphaMode` enum are carried on `RegionData::blend`
+                            // (and answered by `GetBlendMode`) but drawn as straight alpha — the
+                            // stated v1 gap, see [`crate::script::BlendMode`].
+                            additive: data.blend == crate::script::BlendMode::Add,
                             tex_coords: data.tex_coords,
                             circular: data.circular,
                             portrait_unit: data.portrait_unit,

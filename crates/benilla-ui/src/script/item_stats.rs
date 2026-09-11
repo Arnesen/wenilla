@@ -48,6 +48,16 @@ pub struct ItemTemplateView {
     /// **This is a different spelling from the tooltip's type cell**, which reads `+0x28`
     /// (DisplayName) only — a one-handed sword is "One-Handed Swords" here and "Sword" there.
     pub item_sub_type: Option<String>,
+    /// What `(class, subclass)` is called on the TOOLTIP's own type cell — `ItemSubClass.dbc`'s
+    /// **DisplayName** alone (`row + 4*locale + 0x28`, column 10: the read the builder makes at
+    /// `0x52c0xx` off the `0xc0db90` row cache), which is the SINGULAR spelling: "Sword", not
+    /// [`Self::item_sub_type`]'s "One-Handed Swords". App-resolved, because the engine reads no
+    /// DBCs — and it is the same string the bag line's `CONTAINER_SLOTS` second hole takes.
+    ///
+    /// This used to be a hand-typed `(class, subclass) → &str` table in the renderer, which is
+    /// the shape decision 2080 caught one file over: a stale copy of data the catalog already
+    /// held, missing every container family outright.
+    pub sub_class_display: Option<String>,
     /// The alternate subclass whose proficiency also permits use (ItemSubClass.dbc
     /// prerequisite/postrequisite, app-resolved with the builder's sentinel walk: prerequisite
     /// wins, postrequisite only when prerequisite is −1). A weapon missing its own mask bit but
@@ -833,16 +843,15 @@ mod get_item_info_tests {
     /// `Auctioneer/Database/AucItemDB.lua:288` destructure it.
     ///
     /// **The arity assertion is half the test.** A regression to a later client's shape inserts
-    /// `itemLevel` at position 4 and makes this ten values; `select('#', …)` is the only check
-    /// that notices, because every individual read still "works".
+    /// `itemLevel` at position 4 and makes this ten values; the COUNT is the only check that
+    /// notices, because every individual read still "works".
     #[test]
     fn get_item_info_returns_the_1_12_nine_value_shape() {
         let mut s = UiScript::new().unwrap();
         s.set_item_template(25, worn_shortsword());
 
         assert_eq!(
-            s.eval::<i64>("return select('#', GetItemInfo(25))")
-                .unwrap(),
+            s.arity("GetItemInfo(25)").unwrap(),
             9,
             "1.12 returns nine values (`mov eax,0x9` at 0x48e303) — a tenth means the modern shape"
         );
@@ -898,20 +907,22 @@ mod get_item_info_tests {
             },
         );
         assert_eq!(
-            s.eval::<i64>("return (select(4, GetItemInfo(13262)))")
+            s.eval::<i64>("local _, _, _, minLevel = GetItemInfo(13262) return minLevel")
                 .unwrap(),
             60,
             "position 4 is RequiredLevel ([record+0x3c]); ItemLevel lives at +0x38 and is not pushed"
         );
         assert_eq!(
-            s.eval::<String>("return (select(5, GetItemInfo(13262)))")
+            s.eval::<String>("local _, _, _, _, itemType = GetItemInfo(13262) return itemType")
                 .unwrap(),
             "Weapon",
             "position 5 is itemType — a modern shape would put a NUMBER (itemMinLevel) here"
         );
         assert_eq!(
-            s.eval::<String>("return (select(8, GetItemInfo(13262)))")
-                .unwrap(),
+            s.eval::<String>(
+                "local _, _, _, _, _, _, _, equipLoc = GetItemInfo(13262) return equipLoc"
+            )
+            .unwrap(),
             "INVTYPE_2HWEAPON"
         );
     }
@@ -953,8 +964,7 @@ mod get_item_info_tests {
     fn an_uncached_id_returns_nothing_and_records_the_ask() {
         let mut s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<i64>("return select('#', GetItemInfo(2589))")
-                .unwrap(),
+            s.arity("GetItemInfo(2589)").unwrap(),
             0,
             "an unseen template returns NO values"
         );
@@ -977,15 +987,8 @@ mod get_item_info_tests {
         assert!(s.take_item_stat_asks().is_empty(), "the push cleared it");
 
         // Id 0 and a negative id are not askable — no junk query goes out for them.
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetItemInfo(0))").unwrap(),
-            0
-        );
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetItemInfo(-5))")
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity("GetItemInfo(0)").unwrap(), 0);
+        assert_eq!(s.arity("GetItemInfo(-5)").unwrap(), 0);
         assert!(s.take_item_stat_asks().is_empty());
     }
 
@@ -1019,7 +1022,7 @@ mod get_item_info_tests {
         assert_eq!(link, "item:25:2564:7:0");
         // Case-insensitive prefix, and a truncated string still parses (atoi stops at the NUL).
         assert_eq!(
-            s.eval::<String>("return (select(2, GetItemInfo(\"ITEM:25\")))")
+            s.eval::<String>("local _, link = GetItemInfo(\"ITEM:25\") return link")
                 .unwrap(),
             "item:25:0:0:0"
         );
@@ -1033,8 +1036,7 @@ mod get_item_info_tests {
             "\"\"",
         ] {
             assert_eq!(
-                s.eval::<i64>(&format!("return select('#', GetItemInfo({arg}))"))
-                    .unwrap(),
+                s.arity(&format!("GetItemInfo({arg})")).unwrap(),
                 0,
                 "argument {arg} resolves to item id 0"
             );

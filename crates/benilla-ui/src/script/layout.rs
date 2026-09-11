@@ -827,6 +827,7 @@ impl UiScript {
             frame_to_id,
             screen,
             warnings,
+            diagnostics,
             solver,
             layout_scope: scope,
             layout_fingerprint,
@@ -1355,10 +1356,17 @@ impl UiScript {
                 return;
             }
             if round + 1 == round_cap {
-                warnings.push(format!(
+                // `Model::record_warning`'s two halves, spelled out because this pass holds the
+                // model destructured and cannot call it: the host drain, and the retained log
+                // (2135). `WOW_LAYOUT_VERIFY`'s falsifier re-run truncates `warnings` and does
+                // NOT roll the log back — the log dedupes, so a verify build reads `×2` on a row
+                // that happened once, and that build is not a production path.
+                let msg = format!(
                     "layout: anchor graph did not converge in {round_cap} rounds — \
                      an anchor cycle? (rects left at their last pass)"
-                ));
+                );
+                diagnostics.record(super::diagnostics::DiagnosticKind::Warning, &msg);
+                warnings.push(msg);
             }
         }
         // The cycle bail (the loop ran out of rounds and warned above): the rects it leaves are
@@ -1424,9 +1432,12 @@ impl UiScript {
 
         // The ScrollFrame mechanism (decision 0112): a live ScrollFrame with a live scroll child
         // overrides the child's own anchors for this solve — `SetScrollChild` pins the child TOPLEFT
-        // to the scrollframe's TOPLEFT, offset by the live vertical scroll (`(0, vertical)`; XML
-        // y-positive-up, so a positive offset lifts the child, bringing content below the fold into
-        // view — `frame top 500, vertical 40 ⇒ child top 540`). This is a LOCAL map, consulted only
+        // to the scrollframe's TOPLEFT, offset by the two live scroll offsets
+        // (`(horizontal, vertical)`, both RAW and unnegated, exactly as the reference's re-anchor
+        // `0x787100` hands them to `SetPoint`). XML y-positive-up, so a positive vertical lifts the
+        // child, bringing content below the fold into view — `frame top 500, vertical 40 ⇒ child top
+        // 540`; x grows right, so a positive horizontal pushes the child right and it is a NEGATIVE
+        // horizontal that scrolls right (see `ScrollFrameState::horizontal`). This is a LOCAL map, consulted only
         // while building each round's graph below — the child's authored `LayoutInput.anchors` are
         // never touched, so `SetScrollChild(nil)` needs no restore: the override just stops being
         // computed. The child's own width/height (from its own `LayoutInput`) stay whatever they are;
@@ -1448,7 +1459,13 @@ impl UiScript {
             }
             scroll_child_anchor.insert(
                 child,
-                Anchor::new(Point::TopLeft, id, Point::TopLeft, 0.0, state.vertical),
+                Anchor::new(
+                    Point::TopLeft,
+                    id,
+                    Point::TopLeft,
+                    state.horizontal,
+                    state.vertical,
+                ),
             );
         }
         pre.scroll = pre.lap();

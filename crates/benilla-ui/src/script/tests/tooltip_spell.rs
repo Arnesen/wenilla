@@ -36,7 +36,7 @@ fn spellbook_hover_renders_the_verified_shape() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "SB1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "SB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetSpell(1, "spell")
@@ -102,7 +102,7 @@ fn a_pet_book_hover_reads_the_pets_book_not_the_players() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "SB1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "SB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetSpell(1, "pet")
@@ -152,7 +152,7 @@ fn tracking_hover_renders_gold_name_over_white_description() {
     );
     s.run(
         r#"
-        local f = CreateFrame("Frame", "TRK"); f:SetPoint("CENTER", 0, 0); f:SetSize(10, 10)
+        local f = CreateFrame("Frame", "TRK"); f:SetPoint("CENTER", 0, 0); f:SetWidth(10); f:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(f, "ANCHOR_BOTTOMLEFT")
         tt:SetTrackingSpell()
@@ -206,7 +206,7 @@ fn passive_omits_the_casttime_line() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "SB2"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "SB2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetSpell(1, "spell")
@@ -260,7 +260,7 @@ fn player_buff_hover_is_the_aura_variant() {
         -- the engine reads the string table at all, not what the strings say.
         SPELL_TIME_REMAINING_MIN    = "<%d m>"
         SPELL_TIME_REMAINING_MIN_P1 = "<%d mm>"
-        local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         -- 0, not 1: SetPlayerBuff takes a 1.12 CACHE POSITION (see `script::aura`'s header).
@@ -329,7 +329,7 @@ fn player_buff_hover_names_the_dispel_class_in_gold() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetPlayerBuff(0)
@@ -380,7 +380,7 @@ fn requirement_and_reagent_lines_render_in_law_order() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "SB2"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "SB2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetSpell(1, "spell")
@@ -389,7 +389,7 @@ fn requirement_and_reagent_lines_render_in_law_order() {
         assert(TTTextLeft2:GetText() == "30 yd range", "cost absent: range moves left")
         assert(TTTextLeft3:GetText() == "Instant")
         assert(TTTextLeft4:GetText() == "Requires Wands", "law §3.6 sits above the reagents")
-        assert(TTTextLeft5:GetText():find("Light Feather") ~= nil, "law §3.8")
+        assert(string.find(TTTextLeft5:GetText(), "Light Feather") ~= nil, "law §3.8")
         assert(TTTextLeft6:GetText() == "Attack with an equipped wand.", "description last")
     "#,
     )
@@ -458,7 +458,7 @@ fn unit_buff_and_debuff_hover_render_the_aura_variant_without_remaining() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "TF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "TF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_BOTTOMRIGHT", 15, -25)
         tt:SetUnitDebuff("target", 1)
@@ -535,7 +535,7 @@ fn player_buff_hover_indexes_the_cache_position_not_a_filtered_ordinal() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         local function at(i, extra)
             tt:SetOwner(a, "ANCHOR_RIGHT")
@@ -587,7 +587,7 @@ fn action_hover_delegates_by_kind() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetAction(24)
@@ -638,7 +638,7 @@ fn action_hover_on_a_macro_slot_shows_its_name_in_white() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetAction(24)
@@ -701,6 +701,9 @@ fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
             quality: 1,
             class: 2,
             subclass: 7,
+            // The type cell's word is app-resolved off ItemSubClass.dbc, never composed in the
+            // renderer — a view that carries none prints no type cell.
+            sub_class_display: Some("Sword".into()),
             ..Default::default()
         },
     );
@@ -739,7 +742,7 @@ fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
 
     s.run(
         r#"
-        local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         CreateFrame("GameTooltip", "TT")
 
         -- Row 1 is the "Arms" header: a no-op, not a shifted hit onto a neighbouring service.
@@ -855,7 +858,7 @@ fn set_craft_spell_selects_the_builder_like_the_trainer_hover_does() {
 
     s.run(
         r#"
-        local a = CreateFrame("Button", "AB2"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "AB2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         CreateFrame("GameTooltip", "TT")
         TT:SetOwner(a, "ANCHOR_RIGHT")
         TT:SetCraftSpell(1)
@@ -914,7 +917,7 @@ fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
         SPELL_TIME_REMAINING_SEC    = "<%d s>"
         SPELL_TIME_REMAINING_SEC_P1 = "<%d ss>"
         BENILLA_ANCHOR = CreateFrame("Button", "BF2")
-        BENILLA_ANCHOR:SetPoint("CENTER", 0, 0); BENILLA_ANCHOR:SetSize(10, 10)
+        BENILLA_ANCHOR:SetPoint("CENTER", 0, 0); BENILLA_ANCHOR:SetWidth(10); BENILLA_ANCHOR:SetHeight(10)
         BENILLA_TIP = CreateFrame("GameTooltip", "TT2")
     "#,
     )
@@ -1003,7 +1006,7 @@ fn quest_reward_spell_getters_and_hovers() {
     s.set_spell_tooltip(133, fireball());
     s.run(
         r#"
-        local a = CreateFrame("Button", "Q1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Q1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         "#,
     )
@@ -1011,8 +1014,7 @@ fn quest_reward_spell_getters_and_hovers() {
 
     s.set_quest(Some(QuestState::default()));
     assert_eq!(
-        s.eval::<i64>("return select('#', GetRewardSpell())")
-            .unwrap(),
+        s.arity("GetRewardSpell()").unwrap(),
         3,
         "three values on the empty path"
     );

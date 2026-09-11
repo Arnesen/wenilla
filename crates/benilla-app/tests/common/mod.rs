@@ -84,8 +84,9 @@ const UIPARENT_STAND_INS: &str = r#"
     RaidOptionsFrame_UpdatePartyFrames = RaidOptionsFrame_UpdatePartyFrames or function() end
     LocalizeFrames = LocalizeFrames or function() end
     updateContainerFrameAnchors = updateContainerFrameAnchors or function() end
-    -- Ours, not the reference's file: 1.12 keeps UpdateNameplates in UIOptionsFrame.lua and
-    -- benilla's own options window carries it (the options family stays ours).
+    -- 1.12 keeps UpdateNameplates in UIOptionsFrame.lua, which a kit reaches only at manifest
+    -- l.21; our own OptionsFrame.xml re-declares it below that (decision 2132). Both are plain
+    -- `function X()` writes, so a full kit ends on ours and a short one keeps this no-op.
     UpdateNameplates = UpdateNameplates or function() end
     CloseAllBags = CloseAllBags or function() end
     OpenBackpack = OpenBackpack or function() end
@@ -137,8 +138,13 @@ const UIPARENT_STAND_INS: &str = r#"
     end
     -- The four options/menu windows `IsOptionFrameOpen` (l.997) and `ToggleGameMenu` (l.1467)
     -- index unguarded. `IsOptionFrameOpen` is on the path of every window close, so a kit that
-    -- loads no options window raised on the first bag click; ours answers all three of the
-    -- reference's options windows (1987) and a kit may load none of them.
+    -- loads no options window raised on the first bag click. In the shipped manifest all four
+    -- names are real, and since 2177 all three options windows are the REFERENCE's own files,
+    -- loaded hidden — including `OptionsFrame`, the video window, which used to be our own
+    -- window's name. Ours is `BenillaOptionsFrame` now and is not in this list: it is not a name
+    -- the reference indexes, and the wrappers in `GameMenuFrame.xml` are what tell these two
+    -- functions about it. A KIT is a prefix of the manifest and may load none of the four, which
+    -- is what these stand-ins are for.
     local function benilla_seat_options()
         benilla_seat({ "GameMenuFrame", "OptionsFrame", "UIOptionsFrame", "SoundOptionsFrame" })
         if not OptionsFrameCancel then

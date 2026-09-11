@@ -353,7 +353,7 @@ impl ChatWindowLook {
 /// (see the module docs' divergence note). `NaN` lands on `0` rather than propagating.
 /// `SStrToInt` — the leading decimal integer of a string (an optional sign, then digits), 0 when
 /// there is none.
-fn leading_int(s: &str) -> i64 {
+pub(super) fn leading_int(s: &str) -> i64 {
     let s = s.trim_start();
     let (neg, digits) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -398,7 +398,63 @@ fn window_index(id: i64) -> mlua::Result<usize> {
     Ok(id as usize - 1)
 }
 
+impl super::Model {
+    /// **Register a channel in window `window`'s list** — the shared tail of `JoinChannelByName`
+    /// (`0x49ec24`–`0x49ede7`) and `AddChatWindowChannel` (`0x4a1000`): `(name, id)` appended
+    /// unless an entry of that name is already there (`SStrCmpI`), and the window marked for the
+    /// persist pass. `name` is the DBC's own Shortcut for a matched row, the argument verbatim for
+    /// a custom channel. Answers whether anything was added.
+    pub(super) fn register_window_channel(&mut self, window: usize, name: String, id: u32) -> bool {
+        let Some(look) = self.chat_window_looks.get_mut(window) else {
+            return false;
+        };
+        if look
+            .channels
+            .iter()
+            .any(|(c, _)| c.eq_ignore_ascii_case(&name))
+        {
+            return false;
+        }
+        look.channels.push((name, id));
+        self.chat_window_changes.insert(window);
+        true
+    }
+
+    /// **Strip `key` from every window's list** — leave-by-name `0x49ee70`'s `0x49f001`–`0x49f085`
+    /// (wow-re `leavechannelbyname-contract.md` §6): all ten windows, the first entry whose name
+    /// equals `key` case-insensitively, the cell blanked. `key` is the DBC Shortcut when the
+    /// argument matched a row, else the argument verbatim; the numeric form strips nothing,
+    /// because a slot name never equals a window entry. Answers whether anything was stripped.
+    pub(super) fn strip_window_channel(&mut self, key: &str) -> bool {
+        let mut stripped = false;
+        for (i, look) in self.chat_window_looks.iter_mut().enumerate() {
+            if let Some(at) = look
+                .channels
+                .iter()
+                .position(|(c, _)| c.eq_ignore_ascii_case(key))
+            {
+                look.channels.remove(at);
+                self.chat_window_changes.insert(i);
+                stripped = true;
+            }
+        }
+        stripped
+    }
+}
+
 impl super::UiScript {
+    /// Host-side [`Model::register_window_channel`] — the guild-recruitment cascade's join arm,
+    /// which registers `GuildRecruitment` in window 1 the way `0x49eb70(frameIdx = 0)` does.
+    pub fn register_chat_window_channel(&mut self, window: usize, name: &str, id: u32) -> bool {
+        self.model_mut()
+            .register_window_channel(window, name.to_string(), id)
+    }
+
+    /// Host-side [`Model::strip_window_channel`] — the cascade's leave arm.
+    pub fn strip_chat_window_channel(&mut self, key: &str) -> bool {
+        self.model_mut().strip_window_channel(key)
+    }
+
     /// Seed the per-window looks from the host's persisted store — the load path, so it queues no
     /// change (an echo would re-dirty the file it was just read from; [`Self::set_cvar_host`]'s
     /// reason, one store over).
@@ -892,11 +948,7 @@ mod tests {
     #[test]
     fn get_chat_window_info_answers_the_nine_value_tuple() {
         let s = UiScript::new().unwrap();
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetChatWindowInfo(1))")
-                .unwrap(),
-            9
-        );
+        assert_eq!(s.arity("GetChatWindowInfo(1)").unwrap(), 9);
     }
 
     /// Trap 1: a stock client has never been told a window's name, so the getter answers `""` and
@@ -1208,7 +1260,7 @@ mod record_tests {
             ("Loot".to_string(), Some(1))
         );
         assert!(s
-            .eval::<bool>("return select(7, GetChatWindowInfo(1)) == nil")
+            .eval::<bool>("local _, _, _, _, _, _, sh = GetChatWindowInfo(1) return sh == nil")
             .unwrap());
         assert_eq!(s.take_chat_window_changes(), vec![0, 2]);
         s.run("SetChatWindowName(3, 'Loot')").unwrap();

@@ -249,7 +249,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     m.set(
         "SetColorRGB",
-        lua.create_function(|lua, (this, r, g, b): (Table, f64, f64, f64)| {
+        // Shape C on r, g, b (`ColorSelect:SetColorRGB 0x78eae0`, `2=C 3=C 4=C 5=B`, wow-re
+        // `numeric-arg-coercion-law.md`): bare `lua_tonumber`, nil → 0.0, no raise.
+        lua.create_function(|lua, (this, r, g, b): (Table, Value, Value, Value)| {
+            let (r, g, b) = (
+                crate::script::object::as_f64(&r),
+                crate::script::object::as_f64(&g),
+                crate::script::object::as_f64(&b),
+            );
             // Store through the client's quantize, then fire with what the widget now *holds* —
             // the round-tripped values, identical to the next GetColorRGB, not the raw arguments.
             let (qr, qg, qb) = with_colorselect(lua, &this, |s| {

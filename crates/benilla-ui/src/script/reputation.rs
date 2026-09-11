@@ -746,9 +746,7 @@ mod tests {
         assert!(got.10.is_nil(), "isWatched");
 
         for miss in ["GetFactionInfo(99)", "GetFactionInfo(0)"] {
-            let n = s
-                .eval::<i64>(&format!("return select(\"#\", {miss})"))
-                .unwrap();
+            let n = s.arity(miss).unwrap();
             assert_eq!(n, 11, "{miss} must still be eleven wide");
             let sid = s
                 .eval::<i64>(&format!("local _,_,s = {miss} return s"))

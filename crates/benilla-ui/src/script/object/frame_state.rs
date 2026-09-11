@@ -14,7 +14,10 @@ use super::{decode_id, draw_layer_from_str, frame_handle_of, frame_wrapper, stra
 
 /// Populate `m`'s visibility/hierarchy/strata/backdrop/mouse methods (see the module doc).
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
-    // Show / Hide / visibility
+    // Show / Hide / visibility. **`SetShown` is not here and must not come back**: the branchless
+    // setter belongs to a later expansion — no 1.12 method table registers it, and neither the
+    // stock chain nor either addon corpus calls it (decision 2142's census). A frame is shown or
+    // hidden by the two verbs the era has.
     m.set(
         "Show",
         lua.create_function(|lua, this: Table| set_shown(lua, &this, true))?,
@@ -23,21 +26,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "Hide",
         lua.create_function(|lua, this: Table| set_shown(lua, &this, false))?,
     )?;
-    // SetShown(bool) — the live API's branchless Show/Hide (a consensus call across the 0068
-    // target addons; Lua truthiness, so SetShown(nil) hides).
-    m.set(
-        "SetShown",
-        lua.create_function(|lua, (this, shown): (Table, Value)| {
-            let show = !matches!(shown, Value::Nil | Value::Boolean(false));
-            set_shown(lua, &this, show)
-        })?,
-    )?;
     m.set(
         "IsShown",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model.arena.frame(h).map(|f| f.shown).unwrap_or(false),
             ))
         })?,
@@ -47,7 +41,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model
                     .arena
                     .frame(h)
@@ -517,10 +511,16 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, level): (Table, i64)| {
             let h = frame_handle_of(lua, &this)?;
             let lvl = level.clamp(0, i64::from(u16::MAX)) as u16;
+            // **A script level change carries no children** — the binding `0x774560` calls
+            // `set_frame_level 0x76a4f0` with `propagate=0` (wow-re `ui/ui.md`, default levels).
+            // Only the toplevel raise shifts a subtree. Stock `BonusActionButtonTemplate` is written
+            // for this: it raises the button +2 and then its cooldown +2 by hand, landing the sweep
+            // one level over the button — carrying the children made it three, over the
+            // cooldown-count text an addon hangs at button + 2 (decision 2189).
             lua.app_data_mut::<Model>()
                 .expect("model")
                 .arena
-                .set_frame_level(h, lvl, true);
+                .set_frame_level(h, lvl, false);
             Ok(())
         })?,
     )?;
@@ -620,7 +620,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     //    keep stale values a later `SetBackdropColor` changed.
     // 2. **No backdrop ⇒ ZERO Lua values, not `nil`** — the early bail is `xor eax,eax; ret`, which
     //    for a *return* path really is "no values" (contrast `binding_abi`'s note: the same two
-    //    bytes after a `luaL_error` are unreachable boilerplate). Observable through `select('#')`,
+    //    bytes after a `luaL_error` are unreachable boilerplate). Observable through the count,
     //    and it is the shape our `GetTitleRegion` will *not* have when it lands — that one pushes
     //    nil, i.e. one value. The client cannot distinguish "never set" from `SetBackdrop(nil)`.
     // 3. **A partial `SetBackdrop` omits nothing on the way out.** Every `SetBackdrop` allocates a
@@ -759,7 +759,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model.arena.is_mouse_enabled(h),
             ))
         })?,
@@ -795,7 +795,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model.arena.is_keyboard_enabled(h),
             ))
         })?,
@@ -863,7 +863,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model.arena.is_mouse_wheel_enabled(h),
             ))
         })?,
@@ -889,7 +889,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model.arena.is_clamped_to_screen(h),
             ))
         })?,

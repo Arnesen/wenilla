@@ -44,12 +44,18 @@ mod arc;
 // Writing the frame onto the body we drive — pose, MovementState, the counter-twist gap.
 mod body_pose;
 pub(crate) mod camera;
+// The one smoothed-scalar channel the reference instantiates four times (wow-re
+// `camera-cvar-gates.md` §8) — pitch, pitch-bias, ground tilt and the pivot height, one template.
+mod camera_channel;
+// The four 1.12 camera option toggles and the mechanisms behind them (decision 2149).
+pub(crate) mod camera_dynamics;
 // The per-frame controller itself — the one system, split out so the root stays the map.
 mod controller;
 mod world_focus;
 // The remembered camera pose (decision 1131) — it lives inside `player/` so it can read the rig's
 // own `pub(super)` fields instead of widening them for a module outside.
 mod camera_saved;
+mod camera_water;
 // The five NAMED camera poses the player can jump between (decision 1745) — `camera_saved`'s
 // complement: that one remembers where you left the camera, this one where you decided it should
 // be able to go. Same reason for living inside `player/`: it writes the rig's `pub(super)` fields.
@@ -105,8 +111,7 @@ use controller::control;
 // `/follow` (decision 0890): chat asks with the message, `crate::target` resolves the subject into
 // the state, and this module owns the motion.
 use camera::{
-    apply_zoom_scroll, model_pivot_height, run_look_session, CameraProbe, FlyCam, LookButton,
-    CAM_COLLISION_RADIUS, CAM_DIST_DEFAULT,
+    apply_zoom_scroll, model_pivot_height, run_look_session, FlyCam, LookButton, CAM_DIST_DEFAULT,
 };
 pub(crate) use camera::{head_height, CameraControl, CameraPivot};
 pub(crate) use follow::{FollowRequest, FollowState};
@@ -285,7 +290,7 @@ pub(super) type TransportQuery<'w, 's> = Query<
 /// before the controller reads them orders against this — the two scripted probe drivers do
 /// (`capture::probe_look` / `capture::probe_cam`, decision 1174). A set rather than the `control`
 /// symbol itself: an instrument may name the gameplay system it runs against, but exporting
-/// `control` would drag its private parameter types (`MoveSpeed`, `CameraProbe`, `PressGesture`)
+/// `control` would drag its private parameter types (`MoveSpeed`, `PlayerCapsule`, `PressGesture`)
 /// out with it, which is exactly the internals-publishing 1173 rejected a crate wall to avoid.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PlayerControlSet;
@@ -324,6 +329,7 @@ impl Plugin for PlayerPlugin {
         app.init_resource::<camera::LookConfig>();
         app.init_resource::<camera::ZoomLimit>();
         app.init_resource::<camera::FollowConfig>();
+        app.init_resource::<camera_dynamics::CameraOptions>();
         // Far sight: resolve `PLAYER_FARSIGHT` into a pose before `control` reads it to seat the
         // camera. A separate system rather than another query on `control` for a hard reason —
         // `control` already holds the self entity's `Transform` mutably, so it cannot also read an

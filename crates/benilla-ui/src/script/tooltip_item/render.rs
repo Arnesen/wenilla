@@ -265,17 +265,53 @@ pub(super) fn render_view(
     // proficient, which reds the SLOT cell instead. Independently, an off-hand weapon
     // (InventoryType 22) reds the SLOT cell without Dual Wield (`0x5eab70` = the learned
     // effect-40 spell), even when the type itself is proficient.
-    if v.container_slots > 0 {
-        add((format!("{} Slot Bag", v.container_slots), WHITE))?;
+    // The bag line's gate is `InventoryType == 0x12` **alone** (`0x52b754 sete`, read at
+    // `0x52bffe`) — never the slot count, which the gate does not test at all: a 0-slot bag
+    // prints "0 Slot Bag". Every shipped container carries 18, quivers and ammo pouches
+    // included, which is why `INVTYPE_QUIVER` is a dead slot name in 1.12 (wow-re §D2.4:
+    // InventoryType 27 occurs in none of the 848 records of the reference install's own
+    // `itemcache.wdb`, and `0x809200[27]` maps to no equipment slot at all).
+    if v.inventory_type == 18 {
+        // `%d` is `ContainerSlots`; `%s` is the SAME `ItemSubClass` DisplayName the type cell
+        // reads — so the noun is per-subclass ("24 Slot Soul Bag", "8 Slot Quiver", "6 Slot
+        // Ammo Pouch"), never the constant "Bag" this line used to print for every container.
+        // A container whose row has no display name emits NEITHER this line nor the ordinary
+        // slot|type one (`0x52c006`/`0x52c018`/`0x52c021` all jump past the whole region), and
+        // displayFlags bit 0 is not consulted on this path.
+        if let Some(name) = v.sub_class_display.as_deref() {
+            keyed(
+                "CONTAINER_SLOTS",
+                &[Arg::D(v.container_slots.into()), Arg::S(name)],
+                WHITE,
+                false,
+            )?;
+        }
     } else {
-        // The slot cell is the `0x83ddb0` key table's entry for this InventoryType, resolved here
-        // — so the four types whose keys the string table does not carry (ammo, thrown,
-        // ranged-right, quiver) draw no slot cell, exactly as the reference does.
-        let slot = invtype_key(v.inventory_type).and_then(&get);
+        // The slot cell. For **`ItemClass == 6` the InventoryType key table is not consulted at
+        // all** (`0x52c0bc cmp dword [esi],6`): the reference reads `ItemClass.dbc` row 6's own
+        // localized name — "Projectile" — verbatim out of the store at `[0xc0dc24]`, never
+        // through `FrameScript_GetText`. That is the same `[classRow + 4·locale + 0xc]` column
+        // `GetItemInfo`'s `itemType` answers with, which the view already carries.
+        //
+        // Every other class takes the `0x83ddb0` key table for its InventoryType, so the types
+        // whose keys `GlobalStrings.lua` does not carry (24 ammo, 25 thrown, 26 ranged-right,
+        // 27 quiver) draw no slot cell — but 15 `INVTYPE_RANGED` *does* ship, so a bow reads
+        // "Ranged | Bow" while a gun reads "Gun" alone. Decision 2080 removed three invented
+        // words here and was right about the KEYS; an arrow's cell is nonetheless not empty,
+        // because ammunition never reaches them (wow-re §D2.5j, VERIFIED).
+        let slot = if v.class == 6 {
+            v.item_type.clone()
+        } else {
+            invtype_key(v.inventory_type).and_then(&get)
+        };
+        // The type cell is `ItemSubClass.dbc`'s DisplayName for the pair, app-resolved (the
+        // builder's `0xc0db90` row cache read) — never a table in here: 2080 found the same
+        // shape one file over, where a hand-typed "Lockpicking" shadowed `LockType.dbc`'s own
+        // "Pick Lock".
         let ty = if v.inventory_type == 16 || v.hide_subclass {
             None
         } else {
-            subclass_name(v.class, v.subclass)
+            v.sub_class_display.as_deref()
         };
         let mut left_red = false;
         let mut right_red = false;
@@ -294,63 +330,115 @@ pub(super) fn render_view(
             left_red = true;
         }
         match (slot, ty) {
-            (Some(s), Some(t)) => {
-                add2((s, req_color(!left_red)), (t.into(), req_color(!right_red)))?
-            }
+            (Some(s), Some(t)) => add2(
+                (s, req_color(!left_red)),
+                (t.to_string(), req_color(!right_red)),
+            )?,
             (Some(s), None) => add((s, req_color(!left_red)))?,
             // No slot name: the type stands alone and takes the hard-miss color (the
             // builder's single-cell fallback keeps flag-1).
-            (None, Some(t)) => add((t.into(), req_color(!right_red)))?,
+            (None, Some(t)) => add((t.to_string(), req_color(!right_red)))?,
             _ => {}
         }
     }
-    // Damage | speed (block 1) + extra damage lines + the dps line.
-    if let Some(&(min, max, sch)) = v.damages.first().filter(|d| d.1 > 0.0) {
-        let mut dmg = format!(
-            "{} - {}",
-            (min + 0.5).floor() as i64,
-            (max + 0.5).floor() as i64
-        );
-        if let Some(s) = school_key(sch).and_then(|k| get(&k)) {
-            dmg = format!("{dmg} {s}");
+    // **The damage block** — five slots, a five-arm template matrix and a first/PLUS_ flag
+    // (wow-re `tooltip-damage-matrix-and-container-slots.md` §D1, VERIFIED at
+    // `[0x52c22b, 0x52c5a1)`; §5 trio). Every arm is a key, and every hole's shape is the
+    // binary's own push list — this block composed its English in Rust until it was converted.
+    //
+    // The three predicates and the flag: **hasSchool** is the slot's school field being nonzero
+    // (school 0 takes the no-school subtree — `SPELL_SCHOOL0_CAP` is never looked up);
+    // **isAmmo** is `ItemClass == 6` and *only* that (not InventoryType, not a flag);
+    // **isSingle** is `floor(min) == ceil(max)` on the ROUNDED integers, tested only on the
+    // no-school non-ammo leaf (there is no `SINGLE_…_WITH_SCHOOL`); and **isFirst** is per-ITEM,
+    // cleared on the first EMITTED slot, so a skipped slot does not consume it.
+    let mut first = true;
+    let mut dps_acc = 0.0f32;
+    for &(min, max, school) in v.damages.iter().take(5) {
+        // `floor(min)` / `ceil(max)` — NOT a round-half pair, which is what this block used to
+        // do on both bounds. The reference biases by `0x808120` (0.9999899864196777, neither 0.5
+        // nor 1.0 — the epsilon is what stops an exactly-integral max being bumped) and converts
+        // with `__ftol`'s truncate-toward-zero. Fang of the Mystics' 38.7–85.7 reads "38 - 86";
+        // rounding to nearest would say "39 - 86" (43 shipped items carry fractional damage).
+        let (lo, hi) = (floor_min(min), ceil_max(max));
+        // A slot is emitted iff either rounded bound is nonzero (`0x52c292`).
+        if lo == 0 && hi == 0 {
+            continue;
         }
-        dmg.push_str(" Damage");
-        let speed = f64::from(v.delay_ms) / 1000.0;
-        if speed > 0.0 {
-            add2((dmg, WHITE), (format!("Speed {speed:.2}"), WHITE))?;
+        // The school WORD is the resolved key; the school NUMBER is what picks the arm. A chain
+        // that carries no `SPELL_SCHOOL%d_CAP` still takes the with-school template and fills
+        // the hole with the empty string, exactly as `FrameScript_GetText` does.
+        let school_name = school_key(school).and_then(|k| get(&k)).unwrap_or_default();
+        // `avg` is the two ROUNDED bounds averaged, round-tripped through f32 — and it is NOT
+        // divided by anything: `AMMO_DAMAGE_TEMPLATE`'s shipped "Adds %g damage per second" is
+        // FrameXML's phrasing over a number the binary never makes per-second (Rough Arrow's
+        // 1–2 reads "Adds 1.5 damage per second").
+        let avg = f64::from((lo + hi) as f32 * 0.5);
+        let plus = |k: &str| {
+            if first {
+                k.to_string()
+            } else {
+                format!("PLUS_{k}")
+            }
+        };
+        let (key, args): (String, Vec<Arg<'_>>) = if school != 0 {
+            if v.class == 6 {
+                (
+                    plus("AMMO_SCHOOL_DAMAGE_TEMPLATE"),
+                    vec![Arg::F(avg), Arg::S(&school_name)],
+                )
+            } else {
+                (
+                    plus("DAMAGE_TEMPLATE_WITH_SCHOOL"),
+                    vec![Arg::D(lo.into()), Arg::D(hi.into()), Arg::S(&school_name)],
+                )
+            }
+        } else if v.class == 6 {
+            (plus("AMMO_DAMAGE_TEMPLATE"), vec![Arg::F(avg)])
+        } else if lo == hi {
+            (plus("SINGLE_DAMAGE_TEMPLATE"), vec![Arg::D(lo.into())])
         } else {
-            add((dmg, WHITE))?;
+            (
+                plus("DAMAGE_TEMPLATE"),
+                vec![Arg::D(lo.into()), Arg::D(hi.into())],
+            )
+        };
+        // The RIGHT cell is the FIRST emitted line's alone, and weapons' alone (`0x52c494`/
+        // `0x52c49c` — the only two conjuncts): every later damage line, and every line of a
+        // non-weapon, renders left-text-only. `"%s %.2f"` is an `.rdata` LITERAL, not a key —
+        // only the word "Speed" is looked up — over `Delay × 0.001`.
+        let speed = (first && v.class == 2).then(|| {
+            let word = get("SPEED").unwrap_or_default();
+            let secs = f64::from(v.delay_ms) * f64::from(0.001_f32);
+            format!("{word} {secs:.2}")
+        });
+        // The damage line is white in BOTH cells unconditionally — it never reddens for an item
+        // the player cannot use (`0x52c4fa`–`0x52c516`).
+        if let Some(t) = get(&key) {
+            let line = (fill(&t, &args), WHITE);
+            match speed {
+                Some(s) => add2(line, (s, WHITE))?,
+                None => add(line)?,
+            }
         }
-        for &(emin, emax, esch) in v.damages.iter().skip(1).filter(|d| d.1 > 0.0) {
-            let s = school_key(esch).and_then(|k| get(&k)).unwrap_or_default();
-            let sep = if s.is_empty() { "" } else { " " };
-            add((
-                format!(
-                    "+ {} - {}{sep}{s} Damage",
-                    (emin + 0.5).floor() as i64,
-                    (emax + 0.5).floor() as i64
-                ),
-                WHITE,
-            ))?;
-        }
-        // DPS — weapons only (the byte law gates on class==2), Σ(min+max)·0.5 / speed.
-        if speed > 0.0 && v.class == 2 {
-            let total: f32 = v
-                .damages
-                .iter()
-                .filter(|d| d.1 > 0.0)
-                .map(|&(a, b, _)| (a + b) * 0.5)
-                .sum();
-            // The precision is DPS_TEMPLATE's own `%.1f`, not ours — a locale that respells it
-            // gets its own number of decimals with no code change (law §12: "the print precision
-            // is FRAMEXML-DATA").
-            keyed(
-                "DPS_TEMPLATE",
-                &[Arg::F(f64::from(total) / speed)],
-                WHITE,
-                false,
-            )?;
-        }
+        // The DPS accumulator runs on the emit path, and it uses the RAW floats — so the
+        // printed range and the printed DPS are computed from different numbers by design.
+        dps_acc += (max + min) * 0.5;
+        first = false;
+    }
+    // DPS — two conjuncts: a line was emitted AND `ItemClass == 2`. Ammo can satisfy neither
+    // (its arms require class 6), so an arrow gets no DPS line and no Speed cell.
+    if !first && v.class == 2 {
+        // The precision is DPS_TEMPLATE's own `%.1f`, not ours — a locale that respells it gets
+        // its own number of decimals with no code change (law §12: "the print precision is
+        // FRAMEXML-DATA"). There is no divide-by-zero guard in the reference either.
+        let secs = f64::from(v.delay_ms) * f64::from(0.001_f32);
+        keyed(
+            "DPS_TEMPLATE",
+            &[Arg::F(f64::from(dps_acc) / secs)],
+            WHITE,
+            false,
+        )?;
     }
     if v.armor > 0 {
         keyed("ARMOR_TEMPLATE", &[Arg::D(v.armor.into())], WHITE, false)?;
@@ -397,14 +485,20 @@ pub(super) fn render_view(
             false,
         )?;
     } else {
-        for (i, &r) in v.resistances.iter().enumerate() {
-            if r == 0 || i == 0 {
-                continue; // Holy (i == 0) never prints singly in 1.12
+        // **The singles come out in the BUILDER's order, not the field order.** `0x52c8ad–
+        // 0x52c93e` runs `edi` 1..5 and reads school `esi = (edi == 1) ? 6 : edi`, so the lines
+        // are Arcane, Fire, Nature, Frost, Shadow — and that 1→6 remap is *how* Holy is excluded:
+        // it is displaced by Arcane rather than skipped by a test. Read while converting the
+        // block's keys and named in decision 2080; we emitted plain field order (Fire first,
+        // Arcane last) until it was converted.
+        const RESIST_EMIT_ORDER: [u32; 5] = [6, 2, 3, 4, 5];
+        for school in RESIST_EMIT_ORDER {
+            let r = v.resistances[school as usize - 1];
+            if r == 0 {
+                continue;
             }
             let sign = if r > 0 { "+" } else { "-" };
-            let school = school_key(i as u32 + 1)
-                .and_then(|k| get(&k))
-                .unwrap_or_default();
+            let school = school_key(school).and_then(|k| get(&k)).unwrap_or_default();
             keyed(
                 "ITEM_RESIST_SINGLE",
                 &[Arg::S(sign), Arg::D(r.abs().into()), Arg::S(&school)],
@@ -439,7 +533,7 @@ pub(super) fn render_view(
     // "No id source" is the reference's own three-way fork (§E1): a wrapped gift, or no item
     // object AND no caller-supplied instance block (`+0x440 == 0`). Ours reads the same: a hover
     // that passes NO [`ItemInstance`] is a p6=0 leg — the template sources (merchant, quest,
-    // craft, buyback, send-mail, the compare legs, `SetItemById`) — plus the wrapped-gift bit.
+    // craft, buyback, send-mail, the compare legs, `BenillaSetItemById`) — plus the wrapped-gift bit.
     //
     // **A block-supplying source never prints the placeholder, even carrying no ids at all.** The
     // fork tests the block's presence, not its contents, so `SetLootItem`/`SetHyperlink`/

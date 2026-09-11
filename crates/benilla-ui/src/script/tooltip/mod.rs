@@ -33,8 +33,8 @@ use super::{FontObject, Model, RegionData};
 use crate::layout::{Anchor, Point};
 use crate::order::DrawLayer;
 use crate::widget::{
-    FrameHandle, KindState, RegionKind, TooltipState, TOOLTIP_DOUBLE_GAP, TOOLTIP_FADE_SECS,
-    TOOLTIP_LINE_GAP, TOOLTIP_PAD,
+    FrameHandle, KindState, RegionKind, TooltipAnchor, TooltipState, TOOLTIP_DOUBLE_GAP,
+    TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD,
 };
 
 /// Registry key of the GameTooltip method table (the MAXCSTACK discipline: named registry root).
@@ -375,14 +375,32 @@ pub(super) fn show_or_hide_empty(lua: &Lua, h: FrameHandle) {
     set_shown(lua, h, lines > 0);
 }
 
-/// Cancel a running fade and restore full alpha (any fresh content or an explicit Show does
-/// this — re-hovering during the fade-out resurrects the tooltip at full strength).
+/// Cancel a running fade and restore full alpha (fresh CONTENT does this — re-hovering during
+/// the fade-out resurrects the tooltip at full strength). Conditional on a fade actually running,
+/// because an addon that lowered the plate's alpha itself and then added a line keeps its alpha:
+/// only the three sites in [`full_alpha`] are documented to stamp it back.
 fn cancel_fade(model: &mut Model, h: FrameHandle) {
     if let Ok(t) = tip_mut(model, h) {
         if t.fade_start.take().is_some() {
             model.arena.set_alpha(h, 1.0);
         }
     }
+}
+
+/// `SetAlpha(255)` — **UNCONDITIONAL**, and the FIRST thing the SetOwner core `0x52ffe0` does
+/// (`0x52fff4`), before the five stores; `0x530a80`'s show arm does it too, and its self-hide arm
+/// reaches it through `0x530a60` → `0x52ffe0(0, 0, 0, 0)`. So all three of SetOwner, Show and the
+/// effective-hide leave the plate at full strength whether or not one of OUR fades was running
+/// (wow-re `system/ui/ledger.tsv` rows `0x52ffe0` / `0x530a80`, both verified, and
+/// `scratch/hover-hide-and-tooltip-owner-law.md` §4).
+///
+/// [`cancel_fade`] is not this: it only restores the alpha a fade of ours took away, so a plate
+/// left dim by any other path never recovered where the reference recovers on the next SetOwner.
+fn full_alpha(model: &mut Model, h: FrameHandle) {
+    if let Ok(t) = tip_mut(model, h) {
+        t.fade_start = None;
+    }
+    model.arena.set_alpha(h, 1.0);
 }
 
 /// The engine's `GetTime` clock (the `__benilla_now` global [`super::UiScript::tick`] advances).
@@ -622,7 +640,7 @@ pub(super) use verbs::install;
 pub(super) fn hide_tooltip(lua: &Lua, h: FrameHandle) {
     {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        cancel_fade(&mut model, h);
+        full_alpha(&mut model, h);
         if let Ok(t) = tip_mut(&mut model, h) {
             t.owner = None;
         }
@@ -673,6 +691,67 @@ fn cell(model: &Model, rh: crate::widget::RegionHandle) -> Cell {
 /// (`resolve` solves, fills the pending measures inline, and solves again, so this pre-pass runs
 /// a second time with real extents); without one it is the host's batch round-trip, one frame
 /// later, which is the engine-less path every measurer-free VM still takes.
+/// **ANCHOR_CURSOR — mode 6, re-anchored to the live cursor every frame** (`0x530b20`, the
+/// `CGameTooltip` override of `vtable+0x38` on `0x808f60`; wow-re
+/// `system/ui/scratch/tooltip-cursor-anchor-law.md` §1, three independent derivations agreeing
+/// instruction-for-instruction). Nine corpus files ask for it — `pfUI`'s tooltip, xpbar and chat
+/// modules, `pfQuest/browser.lua`, `TipBuddy` — and until decision 2176 benilla warned and placed
+/// them by some other mode.
+///
+/// The whole of the re-anchor is one `SetPoint`:
+///
+/// ```text
+/// 530b32  cmp [this+0x318],6 ; jne                    -- every other mode skips
+/// 530b3b  eax = [this+0xa0]                           -- the CSimpleTop root == [0xcf0bd8]
+/// 530b4f  ecx = [eax+0x111c] ; edx = [eax+0x1118]     -- the SAVED cursor, normalised [0,1]
+/// 530b63  call 0x41ad80                               -- x *= G44 (screen w), y *= G48 (screen h)
+/// 530b68  fld [this+0x7c] ; fdivr 1.0f                -- 1 / the tooltip's own effective scale
+/// 530b97  call 0x767c70(BOTTOM=7, [0xcf0bd8], BOTTOMLEFT=6, x/scale, y/scale, doResolve=1)
+/// ```
+///
+/// So **the plate's BOTTOM-centre is pinned to the screen's BOTTOMLEFT plus the cursor's absolute
+/// position** — centred horizontally on the cursor and sitting directly above it. Four details are
+/// worth keeping because none is guessable from the name:
+///
+/// * The `relativeTo` is the screen root passed **raw**, not `+0x24` like every other anchor — the
+///   `CSimpleTop`'s `CLayoutFrame` base sits at offset 0. Ours is [`SCREEN`](super::SCREEN), which
+///   is the same object.
+/// * The **divide by the tooltip's own effective scale** is the "cursor box recip": an anchor
+///   offset is stored raw and multiplied by the child's scale at resolve time, so dividing here is
+///   what makes the result land at the cursor's *absolute* position. Ours does the same divide,
+///   against the same scale [`GetWidth`](super::object::eff_scale) reads.
+/// * **The `SetOwner`-time offsets `+0x3c4/+0x3c8` do not participate** — 12 reads of them, every
+///   one on a modes-0..5 arm of `0x52fe90`.
+/// * There is **no `ClearAllPoints` here** (earned zero over the function's complete call set): one
+///   anchor slot is overwritten, and `0x767c70`'s own no-op gate — same target, same
+///   `relativePoint`, both offsets within 2⁻²² — is what keeps a still cursor free.
+///
+/// It runs from the per-frame update pump, which a hidden tooltip is not in (`0x76ad9d`
+/// deregisters on hide), and in the **same frame** as the placement it produces: the layout drain
+/// `0x768ed0` runs at `0x765799`, right after the `+0x38` loop and before the draw. Hence its home
+/// here, at the top of the resolve, beside the auto-size pass.
+fn cursor_anchor(model: &mut Model, h: FrameHandle) {
+    let scale = crate::script::object::eff_scale(model, h);
+    let (cx, cy) = model.cursor_pos;
+    let new = Anchor::new(
+        Point::Bottom,
+        super::SCREEN,
+        Point::BottomLeft,
+        cx / scale,
+        cy / scale,
+    );
+    let input = model.layout_inputs.entry(h).or_default();
+    // `0x767c70`'s change-detect, in our own terms: one slot, replaced only on a real change.
+    let same =
+        input.anchors.len() == 1 && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
+    if same {
+        return;
+    }
+    let old_targets: Vec<u32> = input.anchors.iter().map(|a| a.relative_to).collect();
+    input.anchors = vec![new];
+    model.touch_layout_retarget_frame(h, &old_targets, &[super::SCREEN]);
+}
+
 pub(super) fn layout_tooltips(model: &mut Model) {
     // The arena's tooltip registry, not the resolve's whole frame roster: this pre-pass runs at
     // the top of EVERY resolve, and finding two or three tooltips by scanning ~4000 ids was most
@@ -686,6 +765,16 @@ pub(super) fn layout_tooltips(model: &mut Model) {
         .filter(|h| model.frame_to_id.contains_key(h))
         .collect();
     for h in tips {
+        // Mode 6 first, and **before the line gate below**: the reference's per-frame update is
+        // not gated on content at all, only on the plate being in the pump's list — which is the
+        // shown list. See [`cursor_anchor`].
+        let cursor_mode = match model.arena.frame(h).map(|f| (&f.kind_state, f.shown)) {
+            Some((KindState::Tooltip(t), shown)) => shown && t.anchor == TooltipAnchor::Cursor,
+            _ => false,
+        };
+        if cursor_mode {
+            cursor_anchor(model, h);
+        }
         let (num, lefts, rights, min_w, pad_w) = match model.arena.frame(h).map(|f| &f.kind_state) {
             Some(KindState::Tooltip(t)) => (
                 t.num_lines,

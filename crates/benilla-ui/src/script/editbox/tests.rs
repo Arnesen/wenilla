@@ -32,7 +32,7 @@ fn an_autofocus_box_self_acquires_on_the_first_event() {
         .unwrap();
     // No show transition has run for this box, so nothing owns the keyboard yet.
     assert!(!s.has_keyboard_focus());
-    assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name(), None);
 
     // The first char self-acquires focus AND processes that same event.
     assert!(
@@ -40,7 +40,7 @@ fn an_autofocus_box_self_acquires_on_the_first_event() {
         "an autoFocus box consumes the acquiring event"
     );
     assert!(s.has_keyboard_focus());
-    assert!(s.eval::<bool>("return E:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name().as_deref(), Some("E"));
     assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "a");
 }
 
@@ -62,8 +62,9 @@ fn an_autofocus_box_takes_the_keyboard_when_it_is_shown() {
     assert!(!s.has_keyboard_focus(), "hidden and unfocused to start");
 
     s.run("E:Show()").unwrap();
-    assert!(
-        s.eval::<bool>("return E:HasFocus()").unwrap(),
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("E"),
         "showing an autoFocus box focuses it",
     );
 
@@ -108,18 +109,19 @@ fn the_show_focus_is_refused_without_autofocus_or_with_the_keyboard_taken() {
     )
     .unwrap();
     s.run("LATE:Show()").unwrap();
-    assert!(
-        s.eval::<bool>("return HOLDER:HasFocus()").unwrap(),
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("Holder"),
         "a shown autoFocus box does not steal a focus that is already held",
     );
-    assert!(!s.eval::<bool>("return LATE:HasFocus()").unwrap());
 
     // And hiding a box that does NOT hold the keyboard leaves it where it is — `0x77e410`'s own
     // per-box guard (`cmp ecx,eax; jne ret`), which is what makes the override's unconditional
     // tail-jmp harmless.
     s.run("LATE:Hide()").unwrap();
-    assert!(
-        s.eval::<bool>("return HOLDER:HasFocus()").unwrap(),
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("Holder"),
         "hiding an unfocused box does not clear somebody else's focus",
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
@@ -179,7 +181,7 @@ fn set_focus_on_hidden_box_is_a_noop() {
     "#,
     )
     .unwrap();
-    assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name(), None);
     assert!(!s.has_keyboard_focus());
     assert_eq!(
         s.eval::<i64>("return gained").unwrap(),
@@ -198,7 +200,7 @@ fn click_focuses_regardless_of_autofocus_and_transition_order_is_lost_then_gaine
         local function wire(name, y)
             local f = CreateFrame("EditBox", name)
             f:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 0, y)
-            f:SetSize(100, 20)
+            f:SetWidth(100); f:SetHeight(20)
             f:SetScript("OnEditFocusGained", function() table.insert(log, "gained"..name) end)
             f:SetScript("OnEditFocusLost", function() table.insert(log, "lost"..name) end)
         end
@@ -212,11 +214,11 @@ fn click_focuses_regardless_of_autofocus_and_transition_order_is_lost_then_gaine
     // Neither box has autoFocus, yet a click focuses each.
     s.mouse_button(50.0, 10.0, "LeftButton", true);
     s.mouse_button(50.0, 10.0, "LeftButton", false);
-    assert!(s.eval::<bool>("return A:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name().as_deref(), Some("A"));
 
     s.mouse_button(50.0, 110.0, "LeftButton", true);
     s.mouse_button(50.0, 110.0, "LeftButton", false);
-    assert!(s.eval::<bool>("return B:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name().as_deref(), Some("B"));
 
     let log: Vec<String> = s.eval("return log").unwrap();
     assert_eq!(log, vec!["gainedA", "lostA", "gainedB"]);
@@ -473,8 +475,9 @@ fn enter_escape_tab_space_fire_their_slots() {
     .unwrap();
     assert!(s.key_input("ENTER")); // single-line → OnEnterPressed
     assert!(s.key_input("ESCAPE")); // fires, does NOT release focus
-    assert!(
-        s.eval::<bool>("return E:HasFocus()").unwrap(),
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("E"),
         "ESCAPE keeps focus"
     );
     assert!(s.key_input("TAB"));
@@ -1353,7 +1356,7 @@ fn creating_a_box_does_not_focus_it_the_way_showing_one_does() {
         !s.has_keyboard_focus(),
         "a box born visible has not been SHOWN, so it takes no keyboard",
     );
-    assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name(), None);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -1448,8 +1451,7 @@ fn an_editbox_is_born_with_the_ctors_five_regions_ahead_of_its_authored_ones() {
         "5 ctor regions + 2 authored textures, and the <FontString> adds none"
     );
     assert_eq!(
-        s.eval::<i64>("return select('#', Box:GetRegions())")
-            .unwrap(),
+        s.arity("Box:GetRegions()").unwrap(),
         7,
         "GetNumRegions is exactly the length GetRegions enumerates"
     );
@@ -1584,4 +1586,88 @@ fn set_max_bytes_caps_the_buffer_in_bytes_with_minus_one_unlimited() {
     assert_eq!(max(&s), -1, "nil coerces to 0, which is unlimited");
     assert!(s.run("E:SetMaxBytes()").is_err(), "too few raises");
     assert!(s.run("E:SetMaxBytes(1, 2)").is_err(), "too many raises");
+}
+
+/// **`OnCursorChanged(x, y, w, h)` fires when the caret moves** — the edge the shipped
+/// `MailFrame.xml` and `HelpFrame.xml` wire `ScrollingEdit_OnCursorChanged` to, and the reason a
+/// multiline box follows its caret as you type past the bottom (decision 2141).
+///
+/// The four args are the reference's (wow-re's RF-0085 caret law, VERIFIED): `x` the caret's
+/// advance along its line, `y` **negative-downward** by row (which is what
+/// `ScrollingEdit_OnCursorChanged`'s `cursorOffset = y` then `-this.cursorOffset` reads back as a
+/// positive distance), `w` the constant `4.0`, `h` the line height.
+#[test]
+fn the_caret_flush_fires_on_cursor_changed_with_the_references_four_args() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        fires = {}
+        E = CreateFrame("EditBox", "E")
+        E:SetWidth(200); E:SetHeight(64)
+        E:SetPoint("BOTTOMLEFT", 100, 50)
+        E:SetMultiLine(true)
+        E:SetScript("OnCursorChanged", function()
+            table.insert(fires, { x = arg1, y = arg2, w = arg3, h = arg4 })
+        end)
+        E:SetFocus()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    // Three bytes on row 0, then a wrap onto row 1 — the host answers the rows and the pitch.
+    for ch in "abcdef".chars() {
+        s.char_input(&ch.to_string());
+    }
+    s.resolve();
+    if let Some(req) = s.editbox_advances_request() {
+        // A plain monotonic 7 px/byte table (the rig's own), wrapped into two rows at byte 3 —
+        // `caret_row_x` subtracts the row start's cumulative advance, which is the whole point.
+        let cum: Vec<f32> = (0..=req.text.len()).map(|i| i as f32 * 7.0).collect();
+        s.set_editbox_advances(req.id, req.key, cum, vec![0, 3], 12.0);
+    }
+    s.tick(0.016);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+
+    let n: i64 = s.eval("return table.getn(fires)").unwrap();
+    assert!(n >= 1, "the flush fired at least once");
+    let (x, y, w, h): (f64, f64, f64, f64) = s
+        .eval("local f = fires[table.getn(fires)] return f.x, f.y, f.w, f.h")
+        .unwrap();
+    // The caret sits after 6 bytes: row 1 (rows start at 0 and 3), 3 bytes along it.
+    assert_eq!(
+        x, 21.0,
+        "x is the advance from the ROW's start, not the text's"
+    );
+    assert_eq!(
+        y, -12.0,
+        "y is minus the row index times the pitch — downward is negative"
+    );
+    assert_eq!(w, 4.0, "w is the reference's constant, not a measurement");
+    assert_eq!(h, 12.0, "h is the line height");
+
+    // **The edge is a CHANGE.** A tick that moves nothing fires nothing — which is what makes
+    // `ScrollingEdit_OnUpdate`'s `if (this.cursorOffset)` loop terminate instead of re-scrolling
+    // every frame.
+    let before: i64 = s.eval("return table.getn(fires)").unwrap();
+    s.tick(0.016);
+    s.tick(0.016);
+    assert_eq!(
+        s.eval::<i64>("return table.getn(fires)").unwrap(),
+        before,
+        "two quiet ticks fire nothing"
+    );
+
+    // …and a caret move fires again.
+    s.editbox_action(EditAction::Move {
+        unit: EditUnit::Char,
+        back: true,
+        extend: false,
+    });
+    s.tick(0.016);
+    assert!(
+        s.eval::<i64>("return table.getn(fires)").unwrap() > before,
+        "moving the caret one char fires the flush"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

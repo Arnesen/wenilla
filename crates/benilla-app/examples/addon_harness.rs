@@ -2,7 +2,9 @@
 //!
 //! ```text
 //! cargo run -q -p benilla-app --example addon_harness -- <folder> [--verbose] [--why <substr>] [--deep [n]] [--status <file>] [--diff <file>]
-//!   or: ... -- <folder> --probe <Name> [--eval <lua>]...   (one addon, then ask its VM)
+//!   or: ... -- <folder> --probe <Name> [--eval <lua> | --mouse <x>,<y> | --tick <secs>]...   (one addon, then
+//!       ask its VM — the steps run in the order given, so a read can be taken with the cursor
+//!       parked somewhere the addon cares about)
 //! ```
 //!
 //! The instrument decision 1188 phase 6 asks for: *"which addons work" is a number that can be
@@ -304,6 +306,96 @@ fn main() {
     let _ = DEEP.set(deep);
     let root = std::path::PathBuf::from(root);
 
+    // `--together` — the whole folder in ONE VM, the control for the survey's one-VM-per-addon
+    // bound. Not a column and not a headline (see `addon_harness::together`'s header for what it
+    // cannot answer); `--diff <a survey roster>` names the rows the bound is costing, which is
+    // the question it exists for.
+    if rest.iter().any(|a| a == "--together") {
+        let rows = addon_harness::together::survey_together(&root);
+        if rows.is_empty() {
+            eprintln!(
+                "no addons under {} — is that an AddOns folder?",
+                root.display()
+            );
+            std::process::exit(1);
+        }
+        let raised: Vec<&addon_harness::together::TogetherRow> =
+            rows.iter().filter(|r| r.always_raises()).collect();
+        let wobbly: Vec<&addon_harness::together::TogetherRow> =
+            rows.iter().filter(|r| r.order_sensitive()).collect();
+        println!(
+            "\n{} addon(s) under {}, ALL IN ONE VM — {} runs",
+            rows.len(),
+            root.display(),
+            addon_harness::together::DEFAULT_RUNS
+        );
+        println!(
+            "  raised in EVERY run : {}/{}  (clean in every run: {})",
+            raised.len(),
+            rows.len(),
+            rows.len() - raised.len() - wobbly.len()
+        );
+        // Named, never folded into either count: Lua hashes a table key by its pointer, so a
+        // registry keyed by objects walks in a different order every process (see the module
+        // doc). A row that raises in some runs and not others is that showing through.
+        println!(
+            "  ORDER-SENSITIVE — raised in some runs, not all ({}):",
+            wobbly.len()
+        );
+        for r in &wobbly {
+            println!(
+                "    {:<28} {}/{}  {}",
+                r.name,
+                r.raised_in,
+                r.runs,
+                r.errors[0].lines().next().unwrap_or("")
+            );
+        }
+        if let Some(path) = &diff {
+            // The survey's roster, read back: `ok` there and clean here is agreement; `fail`
+            // there and clean here is the bound, priced.
+            let prior: std::collections::BTreeMap<String, bool> = std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.rsplit_once(' '))
+                .map(|(n, v)| (n.trim().to_string(), v.trim() == "ok"))
+                .collect();
+            let mut freed: Vec<&str> = Vec::new();
+            let mut only_together: Vec<&str> = Vec::new();
+            for r in &rows {
+                // Only the rows that are the same in every run are compared — an order-sensitive
+                // one belongs to neither list, which is the whole point of naming it separately.
+                match (prior.get(&r.name), r.raised_in) {
+                    (Some(false), 0) => freed.push(&r.name),
+                    (Some(true), n) if n == r.runs => only_together.push(&r.name),
+                    _ => {}
+                }
+            }
+            println!(
+                "\n  FAILS ALONE, CLEAN TOGETHER ({}) — the one-VM bound, priced:",
+                freed.len()
+            );
+            for n in &freed {
+                println!("    {n}");
+            }
+            println!(
+                "\n  CLEAN ALONE, RAISES TOGETHER ({}) — a neighbour's global, or an order the\n                 \x20 survey never reaches:",
+                only_together.len()
+            );
+            for n in &only_together {
+                println!("    {n}");
+            }
+        }
+        println!(
+            "\n  STILL RAISING IN EVERY RUN, WITH EVERY NEIGHBOUR PRESENT (first error each):"
+        );
+        for r in &raised {
+            let first = r.errors[0].lines().next().unwrap_or("");
+            println!("    {:<28} {first}", r.name);
+        }
+        return;
+    }
+
     // `--probe <Name> [--eval <lua> ...]` — ONE addon, loaded the way the survey loads it, then
     // asked. Handled before the survey because it is not one: it prints no column and it is not a
     // measurement (an eval can mutate the VM), so mixing the two outputs would invite a probe
@@ -314,13 +406,28 @@ fn main() {
         .position(|a| a == "--probe")
         .and_then(|i| rest.get(i + 1))
     {
-        let evals: Vec<String> = rest
+        // `--eval <lua>` and `--mouse <x>,<y>` are ONE ordered list, not two: a read taken
+        // before the cursor arrived and one taken after answer different questions, and which is
+        // which is the order the caller typed.
+        let steps: Vec<addon_harness::probe::Step> = rest
             .iter()
             .enumerate()
-            .filter(|(_, a)| *a == "--eval")
-            .filter_map(|(i, _)| rest.get(i + 1).cloned())
+            .filter_map(|(i, a)| match a.as_str() {
+                "--eval" => Some(addon_harness::probe::Step::Eval(rest.get(i + 1)?.clone())),
+                "--tick" => Some(addon_harness::probe::Step::Tick(
+                    rest.get(i + 1)?.parse().ok()?,
+                )),
+                "--mouse" => {
+                    let (x, y) = rest.get(i + 1)?.split_once(',')?;
+                    Some(addon_harness::probe::Step::Mouse(
+                        x.trim().parse().ok()?,
+                        y.trim().parse().ok()?,
+                    ))
+                }
+                _ => None,
+            })
             .collect();
-        let Some(out) = addon_harness::probe::probe(&root, name, &evals) else {
+        let Some(out) = addon_harness::probe::probe(&root, name, &steps) else {
             eprintln!(
                 "no manifest under {}/{name} — is that an addon folder?",
                 root.display()
@@ -331,7 +438,7 @@ fn main() {
         report_lines("load errors", &out.load_errors);
         report_lines("session errors", &out.session_errors);
         if out.answers.is_empty() {
-            println!("  (no --eval given — load and session errors only)");
+            println!("  (no --eval/--mouse given — load and session errors only)");
         }
         for (chunk, answer) in &out.answers {
             println!("\n  {chunk}");
@@ -381,6 +488,18 @@ fn main() {
     );
     println!(
         "  loaded without a single load error : {loaded}/{}",
+        reports.len()
+    );
+    // **The reconciliation line, printed always** (decision 2155). `loaded` counts what RAISED;
+    // a manifest entry naming a file the package does not contain is not that — the reference logs
+    // `Couldn't open %s` and carries on — and it used to be counted here. Every past record's
+    // figure was the stricter one, so the stricter one is printed beside the honest one rather
+    // than left for a reader to reconstruct: two numbers cannot be silently confused, one can.
+    let strict = reports.iter().filter(|r| r.errors.is_empty()).count();
+    println!(
+        "      (…{} of those name a file their own package does not contain, which the reference \
+         logs and carries on from; the pre-2155 column counted those as failures: {strict}/{})",
+        loaded - strict,
         reports.len()
     );
     println!(
@@ -563,6 +682,38 @@ fn main() {
         for (err, count) in rows.into_iter().take(12) {
             println!("    {count:>4}  {err}");
         }
+    }
+
+    // **What was WARNED about, ranked** — the channel that reached nobody until 2135. It is
+    // printed after the error rankings and before the distribution on purpose: these are not
+    // blockers (nothing raised, the addon is running), so they must not outrank a row somebody is
+    // stuck on — but they are the only column that can see an addon quietly getting the wrong
+    // thing, which is the class `render` was added for and reaches later.
+    //
+    // Ranked by how many ADDONS hit each row, not by total occurrences: a warning one addon fires
+    // in an OnUpdate would otherwise bury one that fifty addons hit once.
+    let mut warned: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in &reports {
+        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        for w in &r.warnings {
+            seen.insert(addon_harness::normalise(w));
+        }
+        for w in seen {
+            *warned.entry(w).or_default() += 1;
+        }
+    }
+    if !warned.is_empty() {
+        let mut rows: Vec<(String, usize)> = warned.into_iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let addons = reports.iter().filter(|r| !r.warnings.is_empty()).count();
+        println!(
+            "\n  what was WARNED about ({addons} addons raised at least one, by addon count):"
+        );
+        // Through `ranked`, not a bare `take(12)`: this list is a queue like every other one here,
+        // and a silent cut reads as "that is the whole list" (1242's rule, which this block was
+        // written outside of). It cost a measurement — asking the corpus how many `SetPoint`
+        // targets fail to resolve, the answer sat below the cut and the column read zero.
+        ranked(rows, 12);
     }
 
     // The distribution, because a mean would hide the shape.

@@ -19,8 +19,8 @@ use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
 use super::{
-    aura_gone_kind, classify, death_kind, in_range, periodic_kind, Family, Fills, Named,
-    PendingCombat, UnitClass, Variant,
+    aura_gone_kind, classify, death_kind, in_range, periodic_kind, CombatLogRanges, Family, Fills,
+    Named, PendingCombat, UnitClass, Variant,
 };
 use crate::net::{GuidIndex, ObjectStore, Reputations, SelfGuid};
 use crate::target::ring::Factions;
@@ -38,6 +38,8 @@ pub(crate) struct WatchCtx<'w> {
     pub factions: Option<Res<'w, Factions>>,
     pub reputations: Res<'w, Reputations>,
     pub spells: Option<Res<'w, crate::ui_action::Spells>>,
+    /// The live display ranges — the reference's `0x8629e0` table plus `CombatDeathLogRange`.
+    pub ranges: Res<'w, CombatLogRanges>,
 }
 
 impl WatchCtx<'_> {
@@ -69,8 +71,13 @@ impl WatchCtx<'_> {
 
     /// The reference's ONE-SIDED range test — the shape 15 formatters run instead of the two-ended
     /// gate (§5.2), the death and aura lines among them. One participant, one distance.
-    fn in_range(&self, guid: u64, class: UnitClass, poses: &Query<&Transform>) -> bool {
-        in_range(guid, class, &self.self_guid, &self.index, poses)
+    ///
+    /// **`range` is the caller's**, because the death line does not use the class table: its
+    /// formatter `0x62c160` reads `CombatDeathLogRange` first (`0x62c19c`) and only falls back to
+    /// the per-class getter when that *lookup* fails — which never happens in a client that
+    /// registered it at startup. The aura lines have no CVar of their own and stay per-class.
+    fn in_range(&self, guid: u64, range: f32, poses: &Query<&Transform>) -> bool {
+        in_range(guid, range, &self.self_guid, &self.index, poses)
     }
 }
 
@@ -83,10 +90,11 @@ fn queue_one(
     kind: ChatEventKind,
     family: Family,
     subject: (u64, UnitClass),
+    range: f32,
     fills: Fills,
     named: Named,
 ) {
-    if !ctx.in_range(subject.0, subject.1, poses) {
+    if !ctx.in_range(subject.0, range, poses) {
         return;
     }
     log.push_combat(PendingCombat {
@@ -164,6 +172,8 @@ pub(crate) fn death_lines(
             death_kind(class),
             family,
             (guid, class),
+            // The death line's own CVar, not the class table — the one formatter that has one.
+            ctx.ranges.death(),
             Fills::default(),
             Named::Ready,
         );
@@ -255,6 +265,7 @@ pub(crate) fn aura_lines(
                             super::AURAAPPLICATIONADDED_HELPFUL
                         },
                         (guid, class),
+                        ctx.ranges.class(class),
                         fills(i64::from(stacks)),
                         Named::Ready,
                     );
@@ -274,6 +285,7 @@ pub(crate) fn aura_lines(
                             super::AURAADDED_HELPFUL
                         },
                         (guid, class),
+                        ctx.ranges.class(class),
                         fills(0),
                         Named::Ready,
                     );
@@ -295,6 +307,7 @@ pub(crate) fn aura_lines(
                 aura_gone_kind(class),
                 super::AURAREMOVED,
                 (guid, class),
+                ctx.ranges.class(class),
                 Fills {
                     spell,
                     ..Default::default()

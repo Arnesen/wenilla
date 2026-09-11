@@ -36,8 +36,10 @@
 //! ([`highlight`], the byte-verified additive term) and the V-plate's reaction-tinted **glow**
 //! (`crate::vplates`, drawn later off [`Hovered`] + [`Selection`]). The plate rect is itself part
 //! of the pick: hovering a plate makes its unit the mouseover *before* any world ray-test
-//! ([`hover::update_hover`] consults `crate::vplates::PlateRects` first — the reference's
-//! UI-blocks-world frame walk), so plates brighten the model and take clicks like the body does.
+//! ([`hover::update_hover`] reads `crate::vplates::PlateHover` first — the plate is real
+//! mouse-enabled UI since 2148/2159, so it takes the pointer and publishes the unit itself, the
+//! reference's own OnEnter arrangement), so plates brighten the model and take clicks like the
+//! body does ([`click::select_on_plate_click`]).
 //! The real pick's **world-occlusion clamp** is modelled ([`PickOcclusion`]): the reference's scene
 //! trace runs `CWorld::Intersect` first and the object pick only wins nearer than the world hit —
 //! a unit or GameObject behind a wall is not hoverable. Not yet modelled: the header-sphere
@@ -339,6 +341,24 @@ impl Default for ClickConfig {
     }
 }
 
+/// **`assistAttack`** — the second, opt-in leg of `/assist` (1.12's *Assist Attack* checkbox).
+///
+/// `/assist` always does leg 1: read the basis unit's `UNIT_FIELD_TARGET` and select it
+/// (`CMSG_SET_SELECTION`). With this CVar non-zero the reference's shared tail runs a **second**
+/// leg — `0x489c02`/`0x489d02 call 0x5ecb70` `StartAttack(&guid)` — which stands you and sends
+/// `CMSG_ATTACKSWING`. So `/assist` stops meaning "select what my friend is fighting" and starts
+/// meaning "select it and open the swing".
+///
+/// Its record `[0xb4d8f8]` has exactly **three references image-wide**: the registration store and
+/// the two shared assist tails. `CanAssist 0x6066f0` is *not* on this path (verified negative over
+/// all 25 of its call sites).
+///
+/// **Registered default `"0"`, so nothing changes until a player asks for it.** That number cost
+/// wow-re a correction it records against itself: its first pass read `"3"` off the *next*
+/// registration's default (`minimapZoom`), the `mov ds:` adjacency trap.
+#[derive(Resource, Default)]
+pub(crate) struct AssistAttack(pub(crate) bool);
+
 /// Targeting: click-to-select + the ground selection ring.
 pub(crate) struct TargetPlugin;
 
@@ -346,6 +366,7 @@ impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Selection>()
             .init_resource::<ClickConfig>()
+            .init_resource::<AssistAttack>()
             .init_resource::<Hovered>()
             .init_resource::<HoveredObject>()
             .init_resource::<PickOcclusion>()
@@ -394,7 +415,9 @@ impl Plugin for TargetPlugin {
                     // range state — the ref's one CheckGroundPointInRange caller feeds both).
                     reticle::update_reticle,
                     click::world_right_click_payload,
-                    click::select_on_click,
+                    // A plate click replayed as the click it is (2148), then the select that
+                    // reads it. One element, chained: the outer chain is at Bevy's 20-tuple limit.
+                    (click::select_on_plate_click, click::select_on_click).chain(),
                     // AFTER the gated select (which holds while the mode is active): the commit
                     // may clear the mode, and the selection gate must have read it first. The two
                     // world legs are siblings, not a fallback chain — the pending spell's word

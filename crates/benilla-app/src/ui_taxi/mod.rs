@@ -31,7 +31,7 @@
 use benilla_protocol::messages::TaxiMask;
 use bevy::prelude::*;
 
-use benilla_ui::script::{ScriptValue, TaxiUiState, UiScript};
+use benilla_ui::script::{TaxiUiState, UiScript};
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
@@ -238,12 +238,14 @@ fn feed_taxi(
     if fresh != *last || (fresh.is_some() && name_changed) {
         script.set_taxi(fresh.clone());
         match (&*last, &fresh) {
-            (None, Some(_)) | (Some(_), Some(_)) => script.fire_event(
-                "TAXIMAP_OPENED",
-                vec![ScriptValue::Str(
-                    flightmaster_name.clone().unwrap_or_default(),
-                )],
-            ),
+            // **No arguments** — `0x4dba96` is the event's one fire site image-wide and it is a
+            // `FrameScript_SignalEvent 0x703e50`, `__fastcall(ecx = id)` with a plain `ret` and
+            // no vararg push at all. The flight master's name we used to pass was an invention:
+            // `TaxiFrame_OnEvent` reads `UnitName("npc")` for it and never looks at `arg1`
+            // (decision 2140, found by the argument gate).
+            (None, Some(_)) | (Some(_), Some(_)) => {
+                script.fire_event("TAXIMAP_OPENED", Vec::new());
+            }
             (Some(_), None) => script.fire_event("TAXIMAP_CLOSED", vec![]),
             (None, None) => {}
         }

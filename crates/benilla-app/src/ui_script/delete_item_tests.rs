@@ -335,9 +335,9 @@ fn a_rare_payload_raises_the_typed_confirm_with_okay_disabled() {
             .unwrap(),
         "hasEditBox raises the narrow box"
     );
-    assert!(
-        s.eval::<bool>("return StaticPopup1EditBox:HasFocus()")
-            .unwrap(),
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("StaticPopup1EditBox"),
         "the entry's OnShow focuses the box, so the player can type straight away"
     );
     assert_eq!(
@@ -478,18 +478,19 @@ fn no_on_the_typed_confirm_clears_and_leaves_the_box_empty_for_next_time() {
 fn escape_in_the_typed_confirms_box_is_swallowed_as_the_reference_leaves_it() {
     let mut s = setup();
     drop_in_world(&mut s, 871, "Flurry Axe", 4);
-    assert!(s
-        .eval::<bool>("return StaticPopup1EditBox:HasFocus()")
-        .unwrap());
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("StaticPopup1EditBox")
+    );
 
     assert!(s.key_input("ESCAPE"), "the focused box consumes ESCAPE");
     assert!(
         s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
         "the dialog stays: the entry names no escape handler"
     );
-    assert!(
-        s.eval::<bool>("return StaticPopup1EditBox:HasFocus()")
-            .unwrap(),
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("StaticPopup1EditBox"),
         "and the box keeps focus"
     );
     assert!(s.cursor_item().is_some(), "the item is still on the cursor");

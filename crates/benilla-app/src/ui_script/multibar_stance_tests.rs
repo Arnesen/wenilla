@@ -39,10 +39,14 @@ fn load_action_bar(s: &UiScript) {
         r"Interface\FrameXML\UIPanelTemplates.xml",
         r"Interface\FrameXML\OptionsFrameTemplates.xml",
         r"Interface\FrameXML\ReputationFrame.xml",
-        // The stock multibar file's OnLoad writes `UIOptionsFrameCheckButtons`, which our options
-        // window publishes — the reference's own load order (UIOptionsFrame.xml l.21 before
-        // MultiActionBars.xml l.39), and the manifest's since 1938.
+        // The stock multibar file's OnLoad writes `UIOptionsFrameCheckButtons`, whose home is the
+        // reference's own hidden Interface Options window (2115) — the reference's own load order
+        // (UIOptionsFrame.xml l.21 before MultiActionBars.xml l.39), and the manifest's since 1938.
+        // That window is also where `ALWAYS_SHOW_MULTIBARS` is declared and where the load arm this
+        // file exercises lives.
         "Interface\\FrameXML\\UIDropDownMenu.xml",
+        r"Interface\FrameXML\OptionsFrame.lua",
+        r"Interface\FrameXML\UIOptionsFrame.xml",
         "Interface\\FrameXML\\BasicControls.xml",
         "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
@@ -912,14 +916,16 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
     // counts nobody raised below zero. (Ours used to guard the no-op; the guard went with the
     // file, 1938.)
     // The load arm, both ways: off touches no count, on opens the wells.
-    s.run("ALWAYS_SHOW_MULTIBARS = \"0\" OptionsFrame_ApplySavedSettings()")
-        .unwrap();
+    // The LOAD arm is the reference's own VARIABLES_LOADED arm now (`UIOptionsFrame.lua`
+    // l.218-220), off the chain since 2115 — not our retired `OptionsFrame_ApplySavedSettings`.
+    s.run("ALWAYS_SHOW_MULTIBARS = \"0\"").unwrap();
+    s.fire_event("VARIABLES_LOADED", vec![]);
     s.fire_event("ACTIONBAR_SHOWGRID", vec![]);
     assert!(well(&s));
     s.fire_event("ACTIONBAR_HIDEGRID", vec![]);
     assert!(!well(&s), "a load with the option off left the count alone");
-    s.run("ALWAYS_SHOW_MULTIBARS = \"1\" OptionsFrame_ApplySavedSettings()")
-        .unwrap();
+    s.run("ALWAYS_SHOW_MULTIBARS = \"1\"").unwrap();
+    s.fire_event("VARIABLES_LOADED", vec![]);
     assert!(well(&s), "a load with the option on opens the wells");
     s.run("ALWAYS_SHOW_MULTIBARS = \"0\" MultiActionBar_UpdateGridVisibility()")
         .unwrap();
@@ -1220,7 +1226,7 @@ fn the_shipped_setter_passes_exactly_four_arguments() {
     // The shipped setter is the Action Bars row's own closure (OptionsFrame.xml), which is
     // stock's three lines — assign the global, MultiActionBar_Update(), SetActionBarToggles(…) —
     // plus the manage pass.
-    s.run("OptionsFrameContainerBodyActionBarsRowMultiBar2Check:Click()")
+    s.run("BenillaOptionsFrameContainerBodyActionBarsRowMultiBar2Check:Click()")
         .unwrap();
     assert_eq!(
         s.eval::<i64>("return BENILLA_TEST_TOGGLE_ARGC").unwrap(),

@@ -334,8 +334,7 @@ mod tests {
             .unwrap();
         assert_eq!((count, quality), (1, 1), "the miss tail is 1, 1");
         assert_eq!(
-            s.eval::<i64>("return select('#', GetLootRollItemInfo(99))")
-                .unwrap(),
+            s.arity("GetLootRollItemInfo(99)").unwrap(),
             6,
             "five reference returns plus benilla's trailing item id"
         );

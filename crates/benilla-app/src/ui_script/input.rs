@@ -1,5 +1,5 @@
 //! The player-UI input pass: [`feed_ui_input`] hit-tests the cursor and dispatches mouse/keyboard
-//! events into the UI engine (after [`super::extract::drive_script`] has resolved the frame's
+//! events into the UI engine (after [`super::extract::tick_script`] has resolved the frame's
 //! rects), plus the action-bar key map. The OS pasteboard itself lives in [`crate::textinput`].
 //! Split out of [`super`] purely for size — the plugin wiring and the extraction pass live there
 //! and in [`super::extract`] respectively.
@@ -59,7 +59,7 @@ impl PointerFeed<'_> {
 }
 
 /// Feed the window's cursor + buttons + wheel + keyboard into the UI engine (after
-/// [`super::extract::drive_script`] has resolved this frame's rects), firing
+/// [`super::extract::tick_script`] has resolved this frame's rects), firing
 /// OnEnter/OnLeave/OnClick/OnMouseWheel and the EditBox
 /// char/key dispatch, publishing [`PlayerUiHover`] (so the pointer arbiter yields world-pick/camera to
 /// the UI) and [`UiKeyboardCapture`] (so gameplay/dev keyboard readers yield to a focused box).

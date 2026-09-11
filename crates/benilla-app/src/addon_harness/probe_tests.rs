@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::probe::probe;
+use super::probe::{probe, Step};
 
 /// One throwaway AddOns root, cleaned up on drop even if a test panics.
 struct Fixtures(PathBuf);
@@ -71,10 +71,10 @@ fn the_probe_reads_the_vm_after_the_session_start() {
         fx.root(),
         "Talker",
         &[
-            "return TalkerFileScope".to_string(),
-            "return TalkerAtLogin".to_string(),
-            "return nil + 1".to_string(),
-            "return TalkerFileScope".to_string(),
+            Step::Eval("return TalkerFileScope".to_string()),
+            Step::Eval("return TalkerAtLogin".to_string()),
+            Step::Eval("return nil + 1".to_string()),
+            Step::Eval("return TalkerFileScope".to_string()),
         ],
     )
     .expect("the fixture has a manifest");
@@ -115,9 +115,9 @@ fn the_probe_sees_the_whole_folder_installed() {
         fx.root(),
         "Asker",
         &[
-            "return AskerSaw".to_string(),
-            "return GetNumAddOns()".to_string(),
-            "return SiblingRan".to_string(),
+            Step::Eval("return AskerSaw".to_string()),
+            Step::Eval("return GetNumAddOns()".to_string()),
+            Step::Eval("return SiblingRan".to_string()),
         ],
     )
     .expect("the fixture has a manifest");

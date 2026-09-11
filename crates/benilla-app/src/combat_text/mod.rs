@@ -47,8 +47,13 @@
 //! first reading hardcoded its 4:3 value 0.6 — see [`text_px`]), the round being the gx
 //! `ScreenToPixelHeight` law (`0x5c6fa0`, wow-re `crates/font/src/screen_pixel.rs`, bit-exact
 //! difftested). At 1024×768 (diag 1280): normal number 23 px, crit settles 35 px, pop peaks ~70 px.
-//! The font is **DAMAGE_TEXT_FONT** (`0x6c8470` reads the FrameScript global; shipped Fonts.xml:
-//! `Fonts\FRIZQT__.TTF` — our atlas default), created flags 0 (`6c8498 xor edx,edx`): no outline.
+//! The font is **whatever the Lua global `DAMAGE_TEXT_FONT` holds** when `0x6c8470` reads it —
+//! see [`DamageTextFont`] for the binding law (a plain `lua_gettable`, evaluated once, at the tail
+//! of the world-entry UI load, i.e. after every addon's `ADDON_LOADED`). `Fonts\FRIZQT__.TTF` is
+//! only the value the shipped `Fonts.xml` assigns, not a default the engine knows; there is in
+//! fact **no fallback face at all** in the reference — a global that resolves to nothing yields a
+//! NULL handle and the combat text simply does not draw. Created flags 0 (`6c8493 xor edx,edx` —
+//! not `6c8498`, which is `mov ecx,esi`): no outline.
 //!
 //! **The ALPHA + SHADOW law** (`time_alpha_fade 0x6c82e0` — wow-re
 //! `playername/scratch/worldtext-alpha-shadow-law.md`, §5 pair + the emulated bit-exact difftest,
@@ -106,7 +111,7 @@ use law::{
     argb, claimed_box_px, fade_alpha, melee_text, scale_value, shadow_offset_px, text_px,
     CATEGORIES,
 };
-pub(crate) use law::{damage_color, miss_word, spell_text, DamageSource};
+pub(crate) use law::{damage_color, miss_word, spell_text, DamageSource, DamageTextGates};
 
 use bevy::prelude::*;
 
@@ -153,6 +158,42 @@ struct WorldText {
 #[derive(Resource, Default)]
 pub(crate) struct WorldTexts(Vec<WorldText>);
 
+/// **The face the floating numbers draw in — the Lua global `DAMAGE_TEXT_FONT`, resolved once per
+/// world session** (decision 2156).
+///
+/// `0x6c8470` reads the global's *value* eagerly and hands it straight to the font factory:
+/// `6c847c mov ecx,0x86c9ac` ("DAMAGE_TEXT_FONT") → `0x703bf0` `FrameScript_GetText`'s fast arm
+/// (ordinal −1, gender 0) → `0x704350` `GetGlobalString`, which is a plain
+/// `lua_gettable(LUA_GLOBALSINDEX)` — the string is read *now*, not deferred, and the returned
+/// pointer is a borrowed `const char*` into the Lua TString, consumed before the call returns.
+/// `0x6c847c` is the **only** instruction in the image that reads this global.
+///
+/// **When** is the whole finding. `0x6c8470` is not CRT init, as three wow-re notes had it — it
+/// runs from `0x401570 + 0x1620`, *after* the UI load `0x401602`, so after FrameXML has run
+/// `Fonts.xml` and after every non-LoadOnDemand addon's `ADDON_LOADED`. That is exactly where
+/// MikScrollingBattleText (`MikScrollingBattleText.lua:255`) and pfUI (`pfUI.lua:179`) assign it,
+/// and it is why their assignment reaches the real client's damage numbers.
+///
+/// And it is **once**: the handle `[0xce8820]` has exactly one writer image-wide, there is no
+/// invalidation hook and no per-string re-resolution, and `/reloadui` does **not** re-run
+/// `0x6c8470` (it only sets the deferred flag `[0xb4b3f4]`, whose reader rebuilds the UI through
+/// `0x48fbf0` — a different function). So an assignment made after world-enter lands at the next
+/// world-enter and not before. Hence a resource seated on the load edge rather than a global read
+/// per string.
+#[derive(Resource, Default)]
+pub(crate) struct DamageTextFont(pub(crate) Option<String>);
+
+/// Read `DAMAGE_TEXT_FONT` out of the VM — the `0x6c8481` call, at the moment the reference makes
+/// it (the tail of the world-entry UI load; see [`DamageTextFont`]).
+///
+/// `0x704350` accepts a Lua **string or number** (`lua_isstring`) and reports failure by leaving
+/// `0x703bf0`'s pre-seeded `""` in place, so an absent, nil or non-string global reads as empty —
+/// which is the same thing the factory's own name guard rejects. Empty folds to `None` here.
+pub(crate) fn read_damage_text_font(script: &benilla_ui::script::UiScript) -> DamageTextFont {
+    let value: Option<String> = script.lua().globals().get("DAMAGE_TEXT_FONT").ok();
+    DamageTextFont(value.filter(|v| !v.is_empty()))
+}
+
 /// The client's per-unit slot count (`PLAYERNAMEDESC` +0x20..+0x2c): a 5th concurrent text over
 /// one unit is dropped outright.
 const MAX_PER_UNIT: usize = 4;
@@ -196,6 +237,9 @@ pub(crate) fn float_combat_text(
     // The frame's claim bucket 1 (worldtext) — cleared and rebuilt every pass; plates own
     // bucket 0 in `vplates` and the two never interact.
     mut bucket: Local<crate::smart_rect::SmartBucket>,
+    // The face, bound once on the world-entry load edge ([`DamageTextFont`]). Absent in a bare
+    // test world, where the fallback face is what the reference's stock `Fonts.xml` names anyway.
+    font: Option<Res<DamageTextFont>>,
 ) {
     let now = time.elapsed_secs_f64();
     // Headless (captures/tests) the camera is None — spawns/expiry still run, nothing draws.
@@ -314,11 +358,17 @@ pub(crate) fn float_combat_text(
             },
             Z_WORLD_TEXT,
             FontSpec {
-                path: None, // DAMAGE_TEXT_FONT = Friz Quadrata (the default face), no outline
+                // The bound face, and NOT a hardcoded Friz: `Fonts\\FRIZQT__.TTF` is only what
+                // the stock `Fonts.xml` happens to assign, and an addon that assigns something
+                // else before the load edge closes is what the reference draws.
+                path: font.as_ref().and_then(|f| f.0.as_deref()),
                 height: Some(target_px),
                 outline: Outline::None,
                 alpha_gradient: None,
             },
+            // A world overlay riding its own rise/fade seat — the UI grid never applied (the
+            // degenerate rect above already skipped it; this says so out loud).
+            crate::ui_text::TextSeat::Exact,
         );
         drop(e);
         let (alpha_text, alpha_shadow) = fade_alpha(cat, elapsed_ms);
@@ -420,9 +470,17 @@ fn melee_impact_text(
     self_player: Query<(), With<crate::net::SelfPlayer>>,
     self_guid: Res<crate::net::SelfGuid>,
     stores: Query<&crate::net::ObjectStore>,
+    gates: Res<DamageTextGates>,
     mut text: MessageWriter<CombatTextSpawn>,
 ) {
     for crate::creature_anim::SwingImpact { swing: s, .. } in impacts.read() {
+        // `0x62440d` — the FIRST thing `0x6243e0` does, before the self gate and before the
+        // colour law: a swing from a spell that did not land plainly floats nothing. It is the
+        // same `0x625e40` verdict that suppresses the chat line, and it stops here and nowhere
+        // else — the flinch, the blood and the impact sounds all still fire.
+        if !s.displayed {
+            continue;
+        }
         let Some(victim) = s.victim else { continue };
         if self_player.contains(victim) {
             continue; // Gate A: never over your own head
@@ -440,7 +498,7 @@ fn melee_impact_text(
         } else {
             continue; // K = other: never drawn
         };
-        let Some(color) = damage_color(source, true) else {
+        let Some(color) = damage_color(*gates, source, true) else {
             continue; // the CombatDamage / PetMeleeDamage gates
         };
         if let Some((category, body)) = melee_text(s.hit_info, s.victim_state, s.damage) {
@@ -463,6 +521,8 @@ impl Plugin for CombatTextPlugin {
         // The Update append window (see [`UiQuadAppend`]): after the camera controller, and
         // projecting through the camera's FRESH Transform (not the stale propagated global).
         app.init_resource::<WorldTexts>()
+            .init_resource::<DamageTextFont>()
+            .init_resource::<DamageTextGates>()
             .add_message::<CombatTextSpawn>()
             .add_systems(
                 Update,

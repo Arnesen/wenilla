@@ -38,7 +38,8 @@
 //!
 //! 1. **push nil**, one Lua value (`UnitAffectingCombat` on a false/unresolved unit,
 //!    `GetActionText` on a non-macro slot, `UnitInRaid` on a miss).
-//! 2. **zero Lua values** — distinct from `nil` for `select('#', …)` and for a multiple
+//! 2. **zero Lua values** — distinct from `nil` for anything that counts the return list (5.0's
+//!    `arg.n`, or [`crate::script::UiScript::arity`] on the host side) and for a multiple
 //!    assignment, identical to it for a single-value caller (`GetDefaultLanguage`'s failure edges).
 //! 3. **raise** — the statement is abandoned.
 
@@ -90,7 +91,11 @@ pub(crate) fn coerced_number(lua: &Lua, v: Option<Value>) -> f64 {
 /// finds nothing, and answers `nil`. Everything else (nil, boolean, table, function) raises.
 pub(crate) fn string_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Result<String> {
     match lua.coerce_string(v)? {
-        Some(s) => Ok(s.to_str()?.to_owned()),
+        // Lossy, per decision 1193: a Lua 5.0 string is BYTES and the reference reads it as
+        // bytes, so an argument that is not valid UTF-8 costs a glyph here — it does not cost
+        // the call. `to_str()` used to raise, which turned one stray byte in one cp1252 addon's
+        // literal into a dead handler (2138).
+        Some(s) => Ok(s.to_string_lossy()),
         None => Err(mlua::Error::RuntimeError(usage.into())),
     }
 }
@@ -118,12 +123,40 @@ pub(crate) fn string_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
 /// argument, and only there) test the tag themselves before calling this.
 pub(crate) fn optional_string(lua: &Lua, v: &Value) -> Option<String> {
     match v {
+        // Lossy, per decision 1193 and for the same reason as [`string_arg`] — with a sharper
+        // symptom, because this one's failure was SILENT: `to_str().ok()` folded a string that
+        // was not valid UTF-8 into `None`, which every caller here reads as *the argument was
+        // not there*. `AddMessage` printed nothing, `CreateFrame` produced an unnamed frame, and
+        // nothing anywhere said why (2138).
         Value::String(_) | Value::Number(_) | Value::Integer(_) => lua
             .coerce_string(v.clone())
             .ok()
             .flatten()
-            .and_then(|s| s.to_str().ok().map(|t| t.to_owned())),
+            .map(|s| s.to_string_lossy()),
         _ => None,
+    }
+}
+
+/// **A free-text argument — the player-visible kind — as the reference takes it** (decision 2138).
+///
+/// The text sinks (`FontString`/`Button`/`EditBox`/`SimpleHTML` `SetText`, `SetFormattedText`,
+/// `EditBox:Insert`) took their argument as mlua's `Option<String>`, whose `FromLua` demands valid
+/// UTF-8 and **raises** otherwise. Decision 1193 settled that a UI source file is bytes and that
+/// "the right place to turn bytes into text is the boundary that actually requires text… A stray
+/// byte should cost one glyph, not the file" — and then these boundaries cost the whole call.
+/// `strsub` is byte-indexed (1193 keeps it that way deliberately), so *any* addon slicing
+/// non-ASCII text hands a sink a broken sequence, and a cp1252 literal is a broken sequence to
+/// begin with.
+///
+/// This is `Option<String>`'s conversion with exactly one arm changed: a **string** becomes its
+/// lossy text. Every other type behaves as before — absent and `nil` are `None`, a number
+/// coerces, a table or a function raises mlua's own conversion error — so the raise/absent split
+/// each binding already had (§ [`optional_string`]'s table) is untouched.
+pub(crate) fn text_arg(lua: &Lua, v: Option<Value>) -> mlua::Result<Option<String>> {
+    match v {
+        None | Some(Value::Nil) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.to_string_lossy())),
+        Some(other) => mlua::FromLua::from_lua(other, lua).map(Some),
     }
 }
 
@@ -240,7 +273,70 @@ fn trim_g(s: &str) -> &str {
     s.trim_end_matches('0').trim_end_matches('.')
 }
 
-/// A **predicate's return**: the NUMBER `1` for true, `nil` for false — never a Lua boolean.
+pub(crate) fn bool_or_default(v: Option<&Value>, default: bool) -> bool {
+    let Some(v) = v else {
+        return default; // LUA_TNONE
+    };
+    match v {
+        Value::Nil => false,
+        Value::Boolean(b) => *b,
+        Value::LightUserData(_) => default,
+        // `lua_tonumber` then `0x40a2b0`, whose RC = chop makes it a C cast; the caller tests the
+        // low dword only, which is why the double round-trips through `i64 as i32` (see
+        // [`number_arg`]).
+        Value::Integer(i) => (*i as i32) != 0,
+        Value::Number(n) => (*n as i64 as i32) != 0,
+        Value::String(s) => {
+            let bytes = s.as_bytes();
+            match bytes.first() {
+                Some(b'0' | b'F' | b'N' | b'f' | b'n') => false,
+                Some(b'1'..=b'9' | b'T' | b'Y' | b't' | b'y') => true,
+                // The keyword arm — and the fall-through for every byte the remap table cannot
+                // index, which is why an empty string lands here too.
+                _ => {
+                    if bytes.eq_ignore_ascii_case(b"off") || bytes.eq_ignore_ascii_case(b"disabled")
+                    {
+                        false
+                    } else if bytes.eq_ignore_ascii_case(b"on")
+                        || bytes.eq_ignore_ascii_case(b"enabled")
+                    {
+                        true
+                    } else {
+                        default
+                    }
+                }
+            }
+        }
+        _ => default,
+    }
+}
+
+/// **The 1.12 predicate return** — `1` for true, `nil` for false, and never a Lua boolean.
+///
+/// The reference client has essentially no boolean-returning query. Across the 1503 rows
+/// `reference/1.12-shapes.tsv` marks `kinds_conf = agree`, exactly two slots in the whole binding
+/// surface are `boolean`: `IsPetAttackActive` (which really does call `lua_pushboolean 0x6f39f0`,
+/// noted in [`super::pet`]) and Lua's own `rawequal`. Every other `Is*`, `Can*`, `Has*` and every
+/// predicate slot of a multi-value answer is `(nil) | (number)`.
+///
+/// **The difference is invisible to `if x then` and decisive to everything else** — `x == 1`,
+/// `x == nil`, `tostring(x)`, arithmetic, a table key, a value round-tripped through a saved
+/// variable. That is why it survived so long: the transcribed FrameXML reads every one of these
+/// with a plain `if`, so `true` and `1` were interchangeable for as long as *we* wrote the callers.
+/// Real 1.12 addons are not our callers — `ColorPickerPlus.lua:121` writes
+/// `if IsShiftKeyDown() == 1 then`, and reads a `true` as "not held" (decision 2118).
+///
+/// Enforced, not remembered: `ui_script::shape_gate::no_query_binding_answers_a_lua_boolean`
+/// probes the whole registered query surface and fails on any Lua boolean.
+///
+/// ## What `predicate` said, folded in (2142)
+///
+/// This helper had a byte-identical TWIN sixty lines up the same file — `predicate`, 49 call
+/// sites to this one's 77 — carrying its own half of the evidence. 2118 consolidated five *local*
+/// copies into this one and left that one standing, which is the same drift one level up: a house
+/// rule with two homes gets re-derived at each new file, and the file that picks the wrong one is
+/// invisible against the others. The twin is gone; everything it recorded is below.
+///
 ///
 /// The return-side counterpart to [`bool_or_default`], and the same class of fact: 1.12's widget
 /// predicates (1830) and its 29 `Unit*` predicates (2043) do not push booleans. `lua_pushboolean
@@ -278,49 +374,11 @@ fn trim_g(s: &str) -> &str {
 ///
 /// Adopting it is strictly safer than what it replaces: every `if x` and `not x` site reads
 /// identically, and only the direct comparisons change — from wrong to right.
-pub(crate) fn predicate(b: bool) -> Value {
+pub(crate) fn flag(b: bool) -> Value {
     if b {
         Value::Integer(1)
     } else {
         Value::Nil
-    }
-}
-
-pub(crate) fn bool_or_default(v: Option<&Value>, default: bool) -> bool {
-    let Some(v) = v else {
-        return default; // LUA_TNONE
-    };
-    match v {
-        Value::Nil => false,
-        Value::Boolean(b) => *b,
-        Value::LightUserData(_) => default,
-        // `lua_tonumber` then `0x40a2b0`, whose RC = chop makes it a C cast; the caller tests the
-        // low dword only, which is why the double round-trips through `i64 as i32` (see
-        // [`number_arg`]).
-        Value::Integer(i) => (*i as i32) != 0,
-        Value::Number(n) => (*n as i64 as i32) != 0,
-        Value::String(s) => {
-            let bytes = s.as_bytes();
-            match bytes.first() {
-                Some(b'0' | b'F' | b'N' | b'f' | b'n') => false,
-                Some(b'1'..=b'9' | b'T' | b'Y' | b't' | b'y') => true,
-                // The keyword arm — and the fall-through for every byte the remap table cannot
-                // index, which is why an empty string lands here too.
-                _ => {
-                    if bytes.eq_ignore_ascii_case(b"off") || bytes.eq_ignore_ascii_case(b"disabled")
-                    {
-                        false
-                    } else if bytes.eq_ignore_ascii_case(b"on")
-                        || bytes.eq_ignore_ascii_case(b"enabled")
-                    {
-                        true
-                    } else {
-                        default
-                    }
-                }
-            }
-        }
-        _ => default,
     }
 }
 

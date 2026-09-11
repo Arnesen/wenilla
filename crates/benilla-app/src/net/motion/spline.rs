@@ -737,6 +737,22 @@ pub(in crate::net) fn ground_clamp_creatures(
     let t0 = cost.then(bevy::platform::time::Instant::now);
     let (mut visited, mut skipped, mut held, mut cast, mut swept, mut hit_n, mut moved) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    // **The walker arm's two ground numbers** (decision 2174).
+    //
+    // - `noflr` — walker frames whose swept step found no walkable floor at all. Expected nonzero
+    //   while the world streams (our colliders arrive after the units do) and it is *harmless*:
+    //   such a frame holds the server's pose. It is the streaming-race health number.
+    // - `ratchet` — walker frames that found no floor and were nonetheless left BELOW the server's
+    //   seat. **This is a tripwire and it must read 0.** It cannot happen by construction now — the
+    //   miss branch writes `seat_y` verbatim — so any nonzero here means the no-floor drop has
+    //   found its way back into this arm, which is what walked Stormwind's patrolling guards 31 yd
+    //   down through the world (census `worst=+31.45`, one guard's `clmp` at 0.105 yd a frame).
+    //   `deepest` and `worst` name the offender, because a count alone cannot be reconciled against
+    //   `WOW_GROUND_CENSUS`'s per-unit rows.
+    //
+    // (The idle arm's miss is not either event: it has always left the unit at its seat.)
+    let (mut noflr, mut ratchet, mut deepest) = (0u32, 0u32, f32::NEG_INFINITY);
+    let mut worst: Option<(u32, [f32; 2], f32)> = None;
     // What re-armed each cast (1384): the unit's own seat moved, or the world's colliders changed
     // under a unit that didn't. The second must be ~0 in a settled scene — a nonzero steady-state
     // `armed` means the collider set is churning and the gate is holding nothing.
@@ -894,7 +910,26 @@ pub(in crate::net) fn ground_clamp_creatures(
                     steep: false,
                 },
             );
-            let y = g.center.y - half_h.y;
+            // **A walker whose sweep found no floor holds the server's pose** (decision 2174) —
+            // the same law the idle branch below obeys, and the one [`grounded_y`] states in as
+            // many words: a probe miss is either a genuinely airborne pose or ground that has not
+            // streamed in, and an unclamped body belongs exactly where the server said. Taking
+            // `grounded_step`'s no-floor drop instead made this arm a ratchet: it sweeps again next
+            // frame from *this* answer, and once the body is under the surface the down-cast can
+            // never find the terrain above it again (one-sided) and the step-up can never fire
+            // (it needs a blocking horizontal contact, which a flat up-wound face never gives). It
+            // ran Stormwind's patrolling guards 31 yd below their own seat, at 0.1 yd a frame,
+            // until the next `SMSG_MONSTER_MOVE` re-based them.
+            //
+            // 2018's hill is untouched: a chord cutting under a rise meets that rise on the
+            // horizontal leg and the sweep HITS, so it rides as before. This arm is only what
+            // happens when our world cannot answer at all — and then the server is the only
+            // authority there is.
+            let y = if g.unsupported.is_some() {
+                seat_y
+            } else {
+                g.center.y - half_h.y
+            };
             if benilla_assets::trace::enabled_for("clmp")
                 && clamp_trace_display().is_some_and(|d| net.display_id == Some(d))
             {
@@ -911,6 +946,16 @@ pub(in crate::net) fn ground_clamp_creatures(
                         z_of(y),
                     ),
                 );
+            }
+            if g.unsupported.is_some() {
+                noflr += 1;
+                if seat_y - y > 1.0e-4 {
+                    ratchet += 1;
+                    if seat_y - y > deepest {
+                        deepest = seat_y - y;
+                        worst = Some((net.display_id.unwrap_or(0), xz, y));
+                    }
+                }
             }
             (y, g.ground.is_some())
         } else {
@@ -999,7 +1044,12 @@ pub(in crate::net) fn ground_clamp_creatures(
         // Per 0734's law (~10.5 ns per row visit), the walk itself is never the cost here: at ~800
         // units it is ~8 µs. Only `ms` justifies the slice — quote it, not the counts.
         eprintln!(
-            "[clamp-cost] visited={visited} skipped={skipped} held={held} cast={cast} swept={swept} reseat={reseat} armed={armed} hit={hit_n} moved={moved} ms={:.3}",
+            "[clamp-cost] visited={visited} skipped={skipped} held={held} cast={cast} swept={swept} reseat={reseat} armed={armed} hit={hit_n} moved={moved} noflr={noflr} ratchet={ratchet} deepest={} worst={} ms={:.3}",
+            if deepest.is_finite() { format!("{deepest:+.2}") } else { "-".to_string() },
+            worst.map_or_else(
+                || "-".to_string(),
+                |(d, xz, y)| format!("display={d}@({:.0},{:.0}) y={y:.2}", xz[0], xz[1])
+            ),
             t0.elapsed().as_secs_f32() * 1000.0
         );
     }
@@ -1154,10 +1204,10 @@ pub(crate) struct GroundClamped {
     /// The Y standing after that cast (written or left). It differs from [`Self::seat_y`] by
     /// exactly the clamp's own correction, so an *external* write is detectable as "the Y here is
     /// not the one I left", which re-seats.
-    y_written: f32,
+    pub(crate) y_written: f32,
     /// Only a HIT caches: a miss keeps casting, so a tile whose collider streams in late still
     /// catches its standing units.
-    hit: bool,
+    pub(crate) hit: bool,
     /// The collider-set stamp the answer was computed against — a cached answer outlives neither
     /// the unit's own pose nor the world it described.
     epoch: u64,
@@ -1172,6 +1222,16 @@ pub(crate) struct GroundClamped {
     /// packet pos`), so a new spline starts again from the server's own Z, and the late-floor
     /// ratchet 1384 removed cannot outlive a path here either.
     path: Option<(u32, Instant)>,
+}
+
+impl GroundClamped {
+    /// **Which arm produced this answer** — `true` for the walker's swept step (this unit is
+    /// continuing a server path), `false` for the idle settle from the seat. The two obey different
+    /// laws on a probe MISS, so a readout that names [`Self::hit`] without naming the arm is
+    /// ambiguous: an idle miss leaves the unit at its seat, a walker miss descends.
+    pub(crate) fn walking(&self) -> bool {
+        self.path.is_some()
+    }
 }
 
 /// The reference's `0x6030c0` decision for one creature, as a pure function of everything it

@@ -966,6 +966,11 @@ pub(crate) fn snapshot(
         // sets it without being a player.
         player_controlled: store.0.unit_flags() & 0x8 != 0,
         flags: store.0.unit_flags(),
+        // The raw `UNIT_DYNAMIC_FLAGS` dword the event of the same name fires on — the `flags`
+        // arm above, a hundred descriptor fields over. `tapped`/`tapped_by_player` up the struct
+        // are two of its bits; this is the whole word, because the reference's watch is a memcmp
+        // over the dword and not a bit test.
+        dynamic_flags: store.0.unit_dynamic_flags(),
         owner: store
             .0
             .unit_summoned_by()
@@ -1314,6 +1319,25 @@ pub(crate) fn fire_transitions(
     // the gap list said "the AFK/DND badge" for months and sent the first look at the wrong window.
     if prev.is_some() && changed(|u| u64::from(u.player_flags)) {
         script.fire_event("PLAYER_FLAGS_CHANGED", vec![tok()]);
+    }
+    // `UNIT_DYNAMIC_FLAGS` (id 137) — the third arm of the same bridge, and one benilla had
+    // **never fired at all**, which is a different failure from firing it wrong: an addon that
+    // registers it hears nothing, forever, and there is no error anywhere to say so.
+    //
+    // Nothing in 1.12 FrameXML registers it, which is exactly why no gate saw the hole — the
+    // producer gate's oracle is what a stock chain file listens for (`reference_ui::
+    // every_event_a_chain_file_registers_has_a_producer`), and no stock file listens for this one.
+    // The corpus does: `CT_UnitFrames/CT_TargetFrame.xml:200` and `TipBuddy/TipBuddy.lua:17`
+    // register it, and both are repaint wires for the tapped/grey-bar state — the same state
+    // `UnitIsTapped` publishes and that the `UNIT_FACTION` arm below repaints the stock frames on.
+    //
+    // Byte-verified, not inherited (see [`UnitState::dynamic_flags`]): the name-table slot for
+    // 137 resolves to `"UNIT_DYNAMIC_FLAGS"`, and the watch length is one dword, so the trigger
+    // is the RAW word and not the four bits this struct decodes. `prev.is_some()` for the same
+    // reason the two arms above carry it — a unit's first snapshot is its CREATE, and the create
+    // block runs no notify pass.
+    if prev.is_some() && changed(|u| u64::from(u.dynamic_flags)) {
+        script.fire_event("UNIT_DYNAMIC_FLAGS", vec![tok()]);
     }
     // The POWER pair is named per resource in 1.12, not once with the token as arg2: the reference's
     // `UnitFrameManaBar_Initialize` registers `UNIT_MANA`/`UNIT_RAGE`/`UNIT_FOCUS`/`UNIT_ENERGY`/
@@ -2395,6 +2419,60 @@ mod tests {
         );
         // The control that stops all of the above passing by firing always.
         assert!(fired(Some(with(0x1)), with(0x1)).is_empty());
+    }
+
+    /// **`UNIT_DYNAMIC_FLAGS` — an event benilla had never fired at all** (decision 2140).
+    ///
+    /// Same bridge, same shape, the third of the three raw-dword arms: id 137 is the unit-window
+    /// index of descriptor field 143, the name-table slot for 137 has exactly one writer in the
+    /// image and it points at the string `"UNIT_DYNAMIC_FLAGS"`, and the watch length is 4 — one
+    /// dword — so the gate is a `repe cmpsb` over the whole word and **any** bit fires it.
+    ///
+    /// The control below is bit `0x2` (`UNIT_DYNFLAG_TRACK_UNIT`, Hunter's Mark), which no
+    /// `UnitState` field decodes: an arm driven off `tapped`/`tapped_by_player` passes every other
+    /// assertion here and fails that one.
+    #[test]
+    fn unit_dynamic_flags_fires_per_token_on_any_bit_and_never_on_first_sight() {
+        let fired = |prev: Option<UnitState>, cur: UnitState| -> Vec<String> {
+            let mut s = UiScript::new().unwrap();
+            s.run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UNIT_DYNAMIC_FLAGS")
+                f:SetScript("OnEvent", function() table.insert(SEEN, event .. ":" .. arg1) end)
+            "#,
+            )
+            .unwrap();
+            fire_transitions(&mut s, "target", prev.as_ref(), &cur);
+            s.eval::<Vec<String>>("return SEEN").unwrap()
+        };
+        let with = |dyn_flags: u32| UnitState {
+            exists: true,
+            has_object: true,
+            dynamic_flags: dyn_flags,
+            tapped: dyn_flags & 0x4 != 0,
+            tapped_by_player: dyn_flags & 0x8 != 0,
+            ..Default::default()
+        };
+
+        // The bit the corpus registers this event for: `0x4` TAPPED, the grey-bar state
+        // (`CT_UnitFrames/CT_TargetFrame.xml:200`, `TipBuddy/TipBuddy.lua:17`).
+        assert_eq!(
+            fired(Some(with(0)), with(0x4)),
+            vec!["UNIT_DYNAMIC_FLAGS:target".to_string()],
+            "arg1 is the unit token, and there is no arg2"
+        );
+        // The control that proves the trigger is the RAW DWORD: a bit this struct never decodes.
+        assert_eq!(
+            fired(Some(with(0)), with(0x2)),
+            vec!["UNIT_DYNAMIC_FLAGS:target".to_string()],
+            "an undecoded bit still fires it — the watch is a memcmp over the dword"
+        );
+        // The create block runs no notify pass (1098 §4), like both arms beside it.
+        assert!(fired(None, with(0x4)).is_empty());
+        // And the control that stops the rest passing by firing always.
+        assert!(fired(Some(with(0x4)), with(0x4)).is_empty());
     }
 
     /// **The two SELF-ONLY arms of the same handler, each on its own bits** — the half that was

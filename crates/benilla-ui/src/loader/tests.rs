@@ -425,20 +425,129 @@ mod loader_tests {
             .unwrap());
     }
 
-    /// A missing include is an **error**, and the rest of the load still proceeds.
+    /// **An unrecognised `frameStrata=` warns and skips; the frame keeps the stratum it had, and
+    /// the rest of the document loads** (decision 2160).
     ///
-    /// It was a warning until decision 1186. The load-and-continue half is unchanged and faithful
-    /// (0068: the client logs and carries on) — what changed is the *reporting*, because a warning
-    /// is not in the value callers assert on. Bagnon missed all eleven of its references and came
-    /// back with zero errors, which read as a clean load of an addon that had built nothing.
+    /// The two doors differ in the reference and this is the quiet one. `CSimpleFrame::LoadXML
+    /// 0x769820` resolves through `0x6f17d0`, whose miss returns 0 without writing the out-param;
+    /// the miss leg pushes `"Frame %s: Unknown frame strata: %s"` at severity 1 into the document
+    /// sink (`0x7699a4`, a call that returns) and reconverges with the hit path at `0x7699ad`,
+    /// never reaching `SetFrameStrata 0x76a470`. `EQL3`'s `EQL3_Log.xml` carries the literal case:
+    /// `<Frame frameStrata="ARTWORK">`, a draw-LAYER name where a strata belongs.
     #[test]
-    fn missing_include_errors_and_continues() {
+    fn an_unknown_xml_frame_strata_warns_and_leaves_the_stratum_alone() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                 <Frame name="Bad" frameStrata="ARTWORK"/>
+                 <Frame name="After"/>
+               </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(
+            report.errors.is_empty(),
+            "nothing raised on the XML door: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unknown frame strata") && w.contains("ARTWORK")),
+            "…and it is reported: {report:?}"
+        );
+        assert_eq!(
+            s.eval::<String>("return Bad:GetFrameStrata()").unwrap(),
+            "MEDIUM",
+            "the frame keeps what it had — the ctor's MEDIUM ([+0xc0] = 3) in the base case"
+        );
+        assert!(
+            s.eval::<bool>("return After ~= nil").unwrap(),
+            "and the document carries on"
+        );
+    }
+
+    /// **The Lua door is the LOUD one and stays that way.** `SetFrameStrata 0x774360`'s miss
+    /// reaches `0x774456 call 0x6f4940` (`luaL_error`), whose chain `luaG_errormsg 0x6fc780` /
+    /// `luaD_throw 0x6f5d80` contains no `ret` at all — the epilogue after it is dead code. Pinned
+    /// beside its XML twin so the asymmetry is a test rather than a comment.
+    #[test]
+    fn the_lua_setframestrata_still_raises_on_the_same_value() {
+        let s = UiScript::new().unwrap();
+        s.run(r#"f = CreateFrame("Frame", "Loud")"#).unwrap();
+        let err = s
+            .run(r#"f:SetFrameStrata("ARTWORK")"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ARTWORK"), "{err}");
+    }
+
+    /// **`FrameXML_Debug` is a get-or-set whose SET arm turns on the loader's trace lines**
+    /// (decision 2160) — and `0` takes the SET arm, because the number zero is Lua-truthy and only
+    /// `nil`/`false` are not (`0x48845d`, after `lua_toboolean 0x6f34d0`). That is the half a
+    /// re-implementation gets backwards, so it is the half asserted first.
+    #[test]
+    fn framexml_debug_is_a_get_or_set_and_gates_the_loader_traces() {
+        let s = UiScript::new().unwrap();
+        let doc = || parse(r#"<Ui><Frame name="Traced"/></Ui>"#);
+
+        assert_eq!(
+            s.eval::<i32>("return FrameXML_Debug()").unwrap(),
+            0,
+            "boots 0"
+        );
+        assert!(
+            load(&s, &doc(), &no_files).traces.is_empty(),
+            "and off means no trace at all"
+        );
+
+        assert_eq!(s.eval::<i32>("return FrameXML_Debug(1)").unwrap(), 1);
+        let on = load(&s, &doc(), &no_files);
+        assert!(
+            on.traces
+                .iter()
+                .any(|t| t.contains("Creating Frame named Traced")),
+            "{on:?}"
+        );
+
+        // The two arms that are easy to get wrong.
+        assert_eq!(
+            s.eval::<i32>("return FrameXML_Debug(nil)").unwrap(),
+            1,
+            "nil is a pure GET — the flag is untouched"
+        );
+        assert_eq!(
+            s.eval::<i32>("return FrameXML_Debug(0)").unwrap(),
+            0,
+            "…but 0 is TRUTHY in Lua, so it really does disable it"
+        );
+        assert!(load(&s, &doc(), &no_files).traces.is_empty());
+        // …and the stored value is truncated toward zero, `0x40a2b0`'s conversion.
+        assert_eq!(s.eval::<i32>("return FrameXML_Debug(1.9)").unwrap(), 1);
+    }
+
+    /// A missing include is **reported, not raised**, and the rest of the load still proceeds.
+    ///
+    /// It was a warning until 1186 and an error from 1186 to 2155; it is now its own list. Both of
+    /// the findings behind those moves are asserted here, because each undid the other:
+    /// **1186's** — a document that resolved *nothing* must not report success (Bagnon missed all
+    /// eleven of its references and came back with zero errors) — so the row is in the report; and
+    /// **2155's** — the reference logs `Couldn't open %s` and carries on with nothing raised
+    /// (wow-re `ui/scratch/xml-toc-path-resolution.md` §4, VERIFIED) — so the row is *not* in
+    /// `errors`, which is the list whose entries reach the player's red error dialog.
+    #[test]
+    fn missing_include_is_a_missing_file_not_an_error_and_continues() {
         let s = UiScript::new().unwrap();
         let doc = parse(r#"<Ui><Include file="Nope.xml"/><Frame name="Still"/></Ui>"#);
         let report = load(&s, &doc, &no_files);
         assert!(
-            report.errors.iter().any(|e| e.contains("Nope.xml")),
-            "an unresolved include drops a whole document: {:?}",
+            report.missing_files.iter().any(|e| e.contains("Nope.xml")),
+            "an unresolved include drops a whole document and says so: {report:?}"
+        );
+        assert!(
+            report.errors.is_empty(),
+            "…but nothing raised, so it is not a script error: {:?}",
             report.errors
         );
         assert!(
@@ -447,17 +556,38 @@ mod loader_tests {
         );
     }
 
-    /// So is a missing `<Script file=>` — it drops every handler the file would have defined.
+    /// So is a missing `<Script file=>` — it drops every handler the file would have defined, and
+    /// the reference's own leg for it (`"Error loading %s"`, `include-lua-dispatch.md` §7) returns
+    /// normally rather than throwing.
     #[test]
-    fn missing_script_file_errors_and_continues() {
+    fn missing_script_file_is_a_missing_file_not_an_error_and_continues() {
         let s = UiScript::new().unwrap();
         let doc = parse(r#"<Ui><Script file="Nope.lua"/><Frame name="Still"/></Ui>"#);
         let report = load(&s, &doc, &no_files);
         assert!(
-            report.errors.iter().any(|e| e.contains("Nope.lua")),
-            "{:?}",
-            report.errors
+            report.missing_files.iter().any(|e| e.contains("Nope.lua")),
+            "{report:?}"
         );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(s.eval::<bool>("return Still ~= nil").unwrap());
+    }
+
+    /// **A `<Script file=>` whose chunk RAISES is still an error** — the half `missing_files` must
+    /// not swallow. The two arms sit one line apart in `load_in`, and folding a miss into the
+    /// quiet list is only correct because the raise keeps its own.
+    #[test]
+    fn a_script_file_that_raises_is_still_an_error() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(r#"<Ui><Script file="Boom.lua"/><Frame name="Still"/></Ui>"#);
+        let files = |req: &str| -> Option<Vec<u8>> {
+            (req == "Boom.lua").then(|| b"error('boom')".to_vec())
+        };
+        let report = load(&s, &doc, &files);
+        assert!(
+            report.errors.iter().any(|e| e.contains("Boom.lua")),
+            "a chunk that raised is an error, not a missing file: {report:?}"
+        );
+        assert!(report.missing_files.is_empty(), "{report:?}");
         assert!(s.eval::<bool>("return Still ~= nil").unwrap());
     }
 
@@ -590,15 +720,18 @@ mod loader_tests {
     }
 
     /// Unsupported handler names are warn-once gaps, not hard errors, and don't stop the frame
-    /// from building. The example is `OnCursorChanged` — caret geometry is host-side here, so its
-    /// four float args would all be zero, which is the silent-drop this warn exists to avoid.
-    /// (It used to be `OnKeyDown`: that one is *fired* since decision 1319 and now belongs to
-    /// `script::tests::keyboard`.)
+    /// from building. The example is `OnAttributeChanged` — 2.0's secure-frame system, which no
+    /// 1.12 resolver has a slot for, so it is the one name on that list that is out permanently.
+    ///
+    /// It has been three names now, and each move is the rule working: `OnKeyDown` left when 1319
+    /// built the delivery walk, `OnCursorChanged` when 2141 built the caret flush's fire. A name
+    /// is accepted only once something fires it, so this test's subject is whatever is still
+    /// waiting.
     #[test]
     fn unsupported_script_name_is_a_warning() {
         let s = UiScript::new().unwrap();
         let doc = parse(
-            r#"<Ui><Frame name="Keyed"><Scripts><OnCursorChanged>x = 1</OnCursorChanged></Scripts></Frame></Ui>"#,
+            r#"<Ui><Frame name="Keyed"><Scripts><OnAttributeChanged>x = 1</OnAttributeChanged></Scripts></Frame></Ui>"#,
         );
         let report = load(&s, &doc, &no_files);
         assert_eq!(report.frames, 1);
@@ -606,18 +739,96 @@ mod loader_tests {
         assert!(report
             .warnings
             .iter()
-            .any(|w| w.contains("OnCursorChanged")));
+            .any(|w| w.contains("OnAttributeChanged")));
     }
 
-    /// An unknown frame type is an error that drops that subtree but not the rest of the load.
+    /// **An unknown frame type at the XML door is LOGGED, and its node is skipped — nothing
+    /// raises** (decision 2191).
+    ///
+    /// `Instantiate 0x6ee280` prints `"Unknown frame type: %s"` (`0x871124`) at `0x6ee356` and makes
+    /// no object for that node; only the Lua `CreateFrame` binding raises (`0x872fa8` via
+    /// `luaL_error`). The node's own `<Frames>` go with it — there is no object to parent them —
+    /// and the walk carries on to the next sibling.
     #[test]
-    fn unknown_frame_type_errors_but_continues() {
+    fn an_unknown_xml_frame_type_is_logged_and_its_node_skipped() {
         let s = UiScript::new().unwrap();
-        let doc = parse(r#"<Ui><Bogus name="X"/><Frame name="Real"/></Ui>"#);
+        let doc = parse(
+            r#"<Ui>
+                 <Bogus name="X"><Frames><Frame name="Inside"/></Frames></Bogus>
+                 <Frame name="Real"/>
+               </Ui>"#,
+        );
         let report = load(&s, &doc, &no_files);
+        assert!(
+            report.errors.is_empty(),
+            "nothing raised on the XML door: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w == "Unknown frame type: Bogus"),
+            "the reference's own wording, in the log channel: {:?}",
+            report.warnings
+        );
         assert_eq!(report.frames, 1, "only the real frame built");
-        assert!(report.errors.iter().any(|e| e.contains("CreateFrame")));
+        assert!(s.eval::<bool>("return X == nil and Inside == nil").unwrap());
         assert!(s.eval::<bool>("return Real ~= nil").unwrap());
+        // …and the Lua door still raises, on the same lookup.
+        let err = s.run(r#"CreateFrame("Bogus")"#).unwrap_err().to_string();
+        assert!(err.contains("unknown frame type 'Bogus'"), "{err}");
+    }
+
+    /// **A `.toc`-listed `Bindings.xml` loads as XML and costs nothing but log lines** (decision
+    /// 2191) — MonkeyDev's shape, the director's live report. The `.toc` line runner hands every
+    /// non-`.lua` entry to the same file loader (`0x6edd51` → `0x6ede10`), whose walk ignores the
+    /// root's own tag (`<Bindings>`, tolerated) and sees three `<Binding>` elements: three unknown
+    /// frame types, logged. The file's real reading as bindings is `0x51f400`'s, which runs anyway.
+    #[test]
+    fn a_bindings_document_loaded_as_framexml_raises_nothing() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Bindings>
+                 <Binding name="MONKEYDEV_STEPUP" header="MONKEYDEV">MonkeyStep_Inc()</Binding>
+                 <Binding name="MONKEYDEV_STEPDOWN">MonkeyStep_Dec()</Binding>
+               </Bindings>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|w| *w == "Unknown frame type: Binding")
+                .count(),
+            2,
+            "one log line per <Binding>: {:?}",
+            report.warnings
+        );
+        assert!(
+            s.eval::<bool>("return MONKEYDEV_STEPUP == nil").unwrap(),
+            "and no frame published under a binding's name"
+        );
+    }
+
+    /// The WorldFrame's one-shot record, at the XML door: a second `<WorldFrame>` is an unknown
+    /// type, so it logs and builds nothing (decisions 1984, 2191) where `CreateFrame` raises.
+    #[test]
+    fn a_second_xml_world_frame_is_logged_not_raised() {
+        let s = UiScript::new().unwrap();
+        s.run(r#"CreateFrame("WorldFrame", "WorldFrame")"#).unwrap();
+        let report = load(
+            &s,
+            &parse(r#"<Ui><WorldFrame name="Another"/></Ui>"#),
+            &no_files,
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w == "Unknown frame type: WorldFrame"));
+        assert!(s.eval::<bool>("return Another == nil").unwrap());
     }
 
     /// Env-gated smoke test over a real extracted FrameXML file (never committed; extract with
@@ -843,6 +1054,105 @@ mod loader_tests {
         );
     }
 
+    /// **An XML handler body's chunk name is `"<GetName()>:<Handler>"`, and its lines are the
+    /// body's own.** `0x7025fd` calls the script object's `GetName` through its vtable, falls back
+    /// to `<unnamed>` (`0x84c7f0`) at `0x702611`, formats `"%s:%s"` (`0x872a28`) at `0x70261b`,
+    /// and hands that to `0x704c70` at `0x70263c` — which `luaL_loadbuffer`s the raw body, so body
+    /// line *n* is chunk line *n*.
+    ///
+    /// Three producers, because they used to disagree. A named element was already right; an
+    /// unnamed one wrote `<Button>` where the image writes `<unnamed>`; and a `CreateFrame` off a
+    /// template wrote the *whole call* —
+    /// `CreateFrame("Button", "Made", inherits="ProbeTmpl"):OnClick` — into every error message
+    /// and every `debugstack` frame that handler produced.
+    #[test]
+    fn an_xml_handler_chunk_is_named_by_its_frame_and_handler() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            "<Ui>\n\
+             <Button name=\"NamedBtn\">\n\
+             <Scripts>\n\
+             <OnClick>\n\
+             error(\"boom\")\n\
+             </OnClick>\n\
+             </Scripts>\n\
+             </Button>\n\
+             <Button>\n\
+             <Scripts>\
+             <OnLoad>BenillaAnon = this</OnLoad>\
+             <OnClick>error(\"anon\")</OnClick>\
+             </Scripts>\n\
+             </Button>\n\
+             <Button name=\"ProbeTmpl\" virtual=\"true\">\n\
+             <Scripts><OnClick>error(\"tmpl\")</OnClick></Scripts>\n\
+             </Button>\n\
+             </Ui>",
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.run(r#"Made = CreateFrame("Button", "Made", nil, "ProbeTmpl")"#)
+            .unwrap();
+
+        let raised = |lua: &str| -> String {
+            s.eval::<String>(&format!("local ok, e = pcall({lua}) return tostring(e)"))
+                .unwrap()
+        };
+
+        // A named element. The body sits on the element's SECOND line, and the reference numbers a
+        // handler chunk from the body's own first line — so `:2:`, never `:3:`. Our wrapper used
+        // to end with a newline, which pushed every body line down by one.
+        let named = raised(r#"NamedBtn:GetScript("OnClick")"#);
+        assert!(
+            named.starts_with(r#"[string "NamedBtn:OnClick"]:2: boom"#),
+            "{named}"
+        );
+        // A `CreateFrame` instance is named by the INSTANCE — what `GetName()` answers — not by
+        // the call that made it and not by the template it wore.
+        let made = raised(r#"Made:GetScript("OnClick")"#);
+        assert!(
+            made.starts_with(r#"[string "Made:OnClick"]:1: tmpl"#),
+            "{made}"
+        );
+        // The nameless element takes the image's own fallback literal.
+        let anon = raised(r#"BenillaAnon:GetScript("OnClick")"#);
+        assert!(
+            anon.starts_with(r#"[string "<unnamed>:OnClick"]:1: anon"#),
+            "{anon}"
+        );
+    }
+
+    /// **An inline `<Script>` body is `"<xml path>:<Scripts>"`, with no `@`** — `0x6ee0ed push ebx`
+    /// (the document's own path) / `0x6ee0ee push 0x871074` (`"%s:<Scripts>"`) → `0x6ee0ff` sprintf
+    /// → `0x6ee10f call 0x704cd0`. `luaO_chunkid` therefore takes its *third* branch and the frame
+    /// reads `[string "…"]`, not a bare path — which is how a reader (and every addon that splits a
+    /// `debugstack` frame on `\AddOns\`) tells an inline block from the `.lua` file beside it.
+    ///
+    /// `<Script file="…">` keeps the file form, `"@%s"` (`0x8716e0`), and both are asserted here so
+    /// the two arms cannot drift into each other.
+    #[test]
+    fn an_inline_script_chunk_is_named_for_the_document_not_as_a_file() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            "<Ui>\n<Script file=\"Sibling.lua\"/>\n<Script>\nBenillaInline = ({}).missing.deeper\n</Script>\n</Ui>",
+        );
+        let report = load_in(&s, &doc, "Interface/AddOns/Probe/Probe.xml", &|p: &str| {
+            (p == "Interface/AddOns/Probe/Sibling.lua")
+                .then(|| b"BenillaFile = ({}).missing.deeper".to_vec())
+        });
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert!(
+            report.errors[0].contains("Interface\\AddOns\\Probe\\Sibling.lua:1:"),
+            "a <Script file=> chunk is still a plain `@`-path frame: {}",
+            report.errors[0]
+        );
+        assert!(
+            report.errors[1]
+                .contains("[string \"Interface\\AddOns\\Probe\\Probe.xml:<Scripts>\"]:4:"),
+            "an inline body is a `[string \"…\"]` frame naming the document: {}",
+            report.errors[1]
+        );
+    }
+
     #[test]
     fn button_xml_extras_apply() {
         let mut s = UiScript::new().unwrap();
@@ -998,7 +1308,7 @@ mod loader_tests {
         s.resolve();
         s.mouse_button(50.0, 10.0, "LeftButton", true);
         s.mouse_button(50.0, 10.0, "LeftButton", false);
-        assert!(s.eval::<bool>("return XmlEdit:HasFocus()").unwrap());
+        assert_eq!(s.focused_editbox_name().as_deref(), Some("XmlEdit"));
         s.run("typed = false").unwrap();
         assert!(s.char_input("7"));
         s.tick(0.0);
@@ -1036,8 +1346,7 @@ mod loader_tests {
             ))
             .unwrap();
             assert_eq!(
-                s.eval::<bool>(&format!("return {name}:HasFocus()"))
-                    .unwrap(),
+                s.focused_editbox_name().as_deref() == Some(name),
                 want,
                 "{name}: autoFocus should be {want} (absent = the ctor default, ON)",
             );
@@ -2211,6 +2520,8 @@ mod chunk_name_tests {
         let report = load_in(&s, &doc, "Bagnon/src/main.xml", &no_files);
         let err = report.errors.join("\n");
         // The file, in the shape an addon's own `debugstack()` matches (backslashes, no `@`).
+        // The `:<Scripts>` suffix and the `[string "…"]` wrapper are the reference's own
+        // (`"%s:<Scripts>"` `0x871074`, `luaO_chunkid`'s third branch), not decoration of ours.
         assert!(
             err.contains("Bagnon\\src\\main.xml:"),
             "the raise must name the document, got: {err}"
@@ -2218,7 +2529,7 @@ mod chunk_name_tests {
         // Line 5 of the literal above is `error("boom")` — the body starts on line 4 and the
         // padding carries it there. Without the pad this reads `:2:`.
         assert!(
-            err.contains("main.xml:5:"),
+            err.contains("main.xml:<Scripts>\"]:5:"),
             "the line must be the FILE's line, not the block's, got: {err}"
         );
     }
@@ -2237,7 +2548,7 @@ mod chunk_name_tests {
         let report = load_in(&s, &doc, "Addon/outer.xml", &files);
         let err = report.errors.join("\n");
         assert!(
-            err.contains("Addon\\sub\\inner.xml:3:"),
+            err.contains("Addon\\sub\\inner.xml:<Scripts>\"]:3:"),
             "the INCLUDED file and its line, not the includer's: {err}"
         );
         assert!(
@@ -2267,7 +2578,7 @@ mod chunk_name_tests {
         let report = load_in(&s, &doc, "Ours/Bag.xml", &no_files);
         let err = report.errors.join("\n");
         assert!(
-            err.contains("Ours\\Bag.xml:6:"),
+            err.contains("Ours\\Bag.xml:<Scripts>\"]:6:"),
             "line 6 is `error(\"cdata boom\")` in the literal above, got: {err}"
         );
     }

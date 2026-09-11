@@ -323,7 +323,7 @@ fn a_real_hunters_block_lists_exactly_what_the_reference_client_lists() {
     }
     // And the class lines still read as proficiencies despite their 300/300 descriptor.
     assert_eq!(
-        s.eval::<i64>("return (select(7, GetSkillLineInfo(2)))")
+        s.eval::<i64>("local _,_,_,_,_,_,mx = GetSkillLineInfo(2) return mx")
             .unwrap(),
         1,
         "Beast Mastery's skillMaxRank"
@@ -624,8 +624,11 @@ fn the_list_reaches_its_last_row_at_the_bars_end() {
 
     // The knob dragged to the end: bar → SetVerticalScroll → <OnVerticalScroll> →
     // FauxScrollFrame_OnVerticalScroll → SkillFrame_UpdateSkills.
-    s.run("SkillListScrollFrameScrollBar:SetValue(select(2, SkillListScrollFrameScrollBar:GetMinMaxValues()))")
-        .unwrap();
+    s.run(
+        "local _, hi = SkillListScrollFrameScrollBar:GetMinMaxValues() \
+         SkillListScrollFrameScrollBar:SetValue(hi)",
+    )
+    .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
         s.eval::<i64>("return FauxScrollFrame_GetOffset(SkillListScrollFrame)")

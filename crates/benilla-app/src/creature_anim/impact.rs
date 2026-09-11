@@ -286,6 +286,7 @@ mod tests {
             hit_info: 0x2,
             victim_state,
             damage: if victim_state == 1 { 42 } else { 0 },
+            displayed: true,
             seq: 1,
         }
     }

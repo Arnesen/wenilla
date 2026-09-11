@@ -79,8 +79,8 @@ use benilla_assets::materials::WowModelMaterial;
 
 mod framing;
 pub(crate) use framing::{
-    attachment_point, glue_canvas_bars, head_anchor, pane_projection, PortraitAnchors,
-    WowPortraitProjection,
+    attachment_point, glue_box_aspect, glue_canvas_bars, head_anchor, pane_projection,
+    PortraitAnchors, WowPortraitProjection,
 };
 use framing::{body_frame, frame, PORTRAIT_FOV};
 mod booth;
@@ -96,9 +96,8 @@ mod dressup;
 pub(crate) use dressup::{DressUpBake, DressUpLook, DressUpPreview};
 mod glue_booth;
 pub(crate) use glue_booth::{
-    CreateLook, CreateScene, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake,
-    GlueScene, PetLook, PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SelectLook,
-    GLUE_SLOT,
+    CreateLook, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueScene, PetLook,
+    PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
 };
 mod light;
 pub(crate) use light::{material_variant, VariantLane};
@@ -1052,7 +1051,7 @@ pub(crate) struct BoothPanes(pub(crate) HashMap<String, f32>);
 /// Both directions of the booth↔UI bridge in one system param: the bake a bound region **samples**
 /// ([`PortraitImages`]) and the pane geometry the extract **publishes** back ([`BoothPanes`]).
 ///
-/// They travel together because they are the same seam, and because `drive_script` had already
+/// They travel together because they are the same seam, and because the UI pass had already
 /// reached Bevy's 16-parameter ceiling — two more `Res`es there is one too many.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct BoothBridge<'w> {

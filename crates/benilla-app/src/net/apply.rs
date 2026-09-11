@@ -137,7 +137,13 @@ pub(crate) fn apply_net_updates(
             MessageWriter<CharActionResultMessage>,
             MessageWriter<super::CharacterLoginFailedMessage>,
         ),
-        MessageWriter<EnteredWorldMessage>,
+        // **The world-entry pair** — the tuple is at Bevy's 16-element ceiling, and these two are
+        // one edge: the entry message, and the `SMSG_ADDON_INFO` verdict that the entry's own UI
+        // load reads before the first addon's file-scope code asks `GetNumAddOns()` (2175).
+        (
+            MessageWriter<EnteredWorldMessage>,
+            ResMut<crate::net::AddonInfoReply>,
+        ),
         MessageWriter<LoggedOutMessage>,
         MessageWriter<super::SpeedChangeMessage>,
         // The two server-authored mover edges the controller both *applies* and *answers*, paired to
@@ -344,6 +350,12 @@ pub(crate) fn apply_net_updates(
             // Its own queue rather than `UiErrorKeys` because its message needs TWO GlobalStrings
             // lookups, and the inner one is only reachable at the drain (see the resource's doc).
             ResMut<crate::ui_action::PetTameFailures>,
+            // The combat-feedback CVars — the eight display ranges, `CombatLogPeriodicSpells`,
+            // and the three floating-text gates. Rides here for exactly the reason the
+            // FactionTemplate catalog two fields up does: the signature is at the 16-param ceiling
+            // and this is where the room is. One bundle rather than three `Res`, so the use sites
+            // read `cvars.ranges` instead of `ui_actions.1 .7`.
+            crate::ui_chat::combat::CombatFeedbackCvars<'_>,
         ),
         ResMut<crate::ui_items::EquipErrors>,
         ResMut<crate::ui_merchant::MerchantErrors>,
@@ -538,7 +550,7 @@ pub(crate) fn apply_net_updates(
         mut worldports,
         (mut char_lists, mut realm_lists),
         (mut char_actions, mut char_login_failures),
-        mut entered_world,
+        (mut entered_world, mut addon_reply),
         mut logged_out,
         mut speed_changes,
         (mut move_modes, mut knockbacks),
@@ -577,6 +589,8 @@ pub(crate) fn apply_net_updates(
                 factions: ui_actions.1 .2.as_deref(),
                 reputations: &reputations,
                 spells: ui_actions.10.as_deref(),
+                ranges: &ui_actions.1 .5.ranges,
+                periodic: ui_actions.1 .5.periodic.0,
             }
         };
     }
@@ -612,11 +626,14 @@ pub(crate) fn apply_net_updates(
                 name,
                 billing_time_rested,
                 tutorial_flags,
+                addon_info,
             } => session::connected(
                 guid,
                 name,
                 billing_time_rested,
                 tutorial_flags,
+                addon_info,
+                &mut addon_reply,
                 &mut self_guid,
                 &mut status,
                 &mut names,
@@ -663,6 +680,7 @@ pub(crate) fn apply_net_updates(
                     &mut social,
                     &mut guild,
                     &mut gm_ticket,
+                    &mut ui_actions.9,
                     &mut aura.6,
                     &mut disconnects,
                 );
@@ -1558,12 +1576,21 @@ pub(crate) fn apply_net_updates(
                     &self_guid,
                     &stores,
                     ui_actions.10.as_deref(),
+                    *ui_actions.1 .5.damage_text,
                     &mut audio.7,
                     &mut audio.15 .0,
                     &mut audio.15 .1,
                 )
             }
             SessionEvent::PeriodicAuraLog(s) => {
+                // **`CombatLogPeriodicSpells` gates the WHOLE packet body, and this arm is where
+                // that is expressible.** The reference's read site `0x626dee` is the first thing
+                // the handler `0x626dd0` does, and a zero jumps to the bare epilogue `0x6271b4`:
+                // no chat line, no floating tick number, no periodic miss word. Gating inside
+                // either half below would model it as two filters; it is one gate over both.
+                if !ui_actions.1 .5.periodic.0 {
+                    continue;
+                }
                 combat_chat::periodic_aura_log(
                     &s,
                     &chat_ctx!(),
@@ -1577,6 +1604,7 @@ pub(crate) fn apply_net_updates(
                     &self_guid,
                     &stores,
                     ui_actions.10.as_deref(),
+                    *ui_actions.1 .5.damage_text,
                     &mut audio.7,
                     &mut audio.15 .0,
                     &mut audio.15 .1,
@@ -1613,6 +1641,7 @@ pub(crate) fn apply_net_updates(
                     &index,
                     &self_guid,
                     &stores,
+                    *ui_actions.1 .5.damage_text,
                     &mut audio.7,
                     &mut audio.15 .0,
                 )
@@ -1624,6 +1653,8 @@ pub(crate) fn apply_net_updates(
                     &index,
                     &self_guid,
                     &stores,
+                    ui_actions.10.as_deref(),
+                    *ui_actions.1 .5.damage_text,
                     &mut audio.7,
                     &mut audio.15 .0,
                     &mut audio.15 .1,

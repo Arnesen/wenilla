@@ -9,8 +9,8 @@
 //! EditBox's table gets them. The justify law likewise lives once in [`crate::justify`].
 //!
 //! What legitimately stays here is the surface a FontString alone has: the string itself
-//! (`SetText`/`SetFormattedText`/`GetText`), the measured extents, `Set/GetJustifyH`/`V`,
-//! `SetNonSpaceWrap`/`CanNonSpaceWrap`, and `SetTextHeight`.
+//! (`SetText`/`GetText`), the measured extents, `Set/GetJustifyH`/`V`, `SetNonSpaceWrap`/
+//! `CanNonSpaceWrap`, and `SetTextHeight`.
 //!
 //! The per-property override a region has over its inherited font object is unaffected — that is
 //! the severance mask (`FontExplicit`), which the shared block writes the same way this file did.
@@ -27,7 +27,10 @@ use super::region_handle_of;
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetText",
-        lua.create_function(|lua, (this, text): (Table, Option<String>)| {
+        lua.create_function(|lua, (this, text): (Table, Option<mlua::Value>)| {
+            // `text_arg`, not `Option<String>`: a Lua string is bytes and a sliced one need not be
+            // valid UTF-8 (decision 2138 — this raise took the whole handler down).
+            let text = crate::script::binding_abi::text_arg(lua, text)?;
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let data = model.region_data.entry(rh).or_default();
@@ -41,33 +44,53 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetFormattedText(fmt, ...) = SetText(format(fmt, ...)) — routed through the stdlib's
-    // positional-aware `format` so `%N$s` specs behave (a consensus call across the 0068 targets).
-    m.set(
-        "SetFormattedText",
-        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
-            let format: mlua::Function = lua
-                .globals()
-                .get::<Table>("string")?
-                .get::<mlua::Function>("format")?;
-            let text: String = format.call(args)?;
-            let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            let data = model.region_data.entry(rh).or_default();
-            data.text = Some(text);
-            data.alpha_gradient = None;
-            model.touch_measure(rh);
-            Ok(())
-        })?,
-    )?;
+    // **No `SetFormattedText`.** A later-expansion name: absent from the client's 32-entry
+    // FontString map, from the stock 1.12 chain, and from both addon corpora (2142's census). The
+    // era spelling is `SetText(format(fmt, ...))`, and `format` here is already the
+    // positional-aware one ([`crate::strings`]), so `%N$s` behaves at the call site the same way
+    // it behaved inside this shim.
 
+    // GetText — **an EMPTY string comes back as `nil`, and that substitution is the getter's own**
+    // (`FontString:GetText 0x79d690`, wow-re
+    // `system/ui/scratch/fontstring-text-cell-and-gettext-contract.md`, §5 five-worker round):
+    //
+    // ```text
+    // 79d72f  mov  eax,[eax+0xf0]        ; the text cell
+    // 79d735  test eax,eax
+    // 79d739  je   0x79d740              ; NULL      -> substitute
+    // 79d73b  cmp  byte ptr [eax],0x0    ; the FIRST-BYTE test
+    // 79d73e  jne  0x79d742              ; non-empty -> keep
+    // 79d740  xor  eax,eax               ; EMPTY     -> NULL
+    // 79d746  call 0x6f3890              ; pushstring; NULL -> pushnil
+    // ```
+    //
+    // So `FontString:GetText` **cannot return `""`**. Not the setter's doing: `SetText 0x771d80`
+    // never writes NULL to `+0xf0` on any leg — NULL and `""` share one leg that truncates the
+    // buffer in place (`0x771e7e mov byte ptr [eax],0x0`, the pointer surviving) — so the cell
+    // really does hold a non-NULL empty string and this getter is what collapses it.
+    //
+    // The law is **per binding, not per family**, and the two neighbours differ:
+    // `Button:GetText 0x780e10` carries the same substitution (`0x780ec5`, three nil conditions —
+    // see `button.rs`), while `EditBox:GetText 0x7985c0` carries **none** (`0x79867b` reads
+    // `[edit+0x32c]` straight through), which is what stock `MailFrame.lua`'s
+    // `GetText() == ""`/`strlen(GetText())` is written against. Do not hoist this.
+    //
+    // What it costs to get wrong (decision 2110): the stock world map blanks
+    // `WorldMapFrameAreaDescription` with `SetText("")` on every POI hover, and Cartographer 2.02
+    // reads `if WorldMapFrameAreaDescription:GetText() then` as "this POI has a status line" —
+    // answering `""` there put the zone's level range on the description's own line under a
+    // whitened label and left it on screen forever.
     m.set(
         "GetText",
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             let text = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                model.region_data.get(&rh).and_then(|d| d.text.clone())
+                model
+                    .region_data
+                    .get(&rh)
+                    .and_then(|d| d.text.clone())
+                    .filter(|t| !t.is_empty())
             };
             match text {
                 Some(t) => Ok(Value::String(lua.create_string(&t)?)),
@@ -100,7 +123,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // GetStringWidth is the **natural, unwrapped** extent — never the declared box, and never the
     // wrapped one (wow-re `fontstring-overflow.md`, "The measurement echo": the reference's getter
     // re-measures the raw text with NO wrap constraint). Unlike `GetWidth` below it deliberately
-    // does NOT fall back to an explicit `SetSize`: the declared width is the very thing a caller
+    // does NOT fall back to a declared `SetWidth`: that width is the very thing a caller
     // asks this to be independent of. A kit that sizes a box from this number and then sets a width
     // on the string — which is what the reference's own `PanelTemplates_TabResize` does — would
     // otherwise read its own output back as its next input and never settle (decision 0997, the

@@ -1038,7 +1038,7 @@ fn the_duration_line_reads_the_real_global_strings() {
     s.run(
         r#"
         BENILLA_ANCHOR = CreateFrame("Button", "BF9")
-        BENILLA_ANCHOR:SetPoint("CENTER", 0, 0); BENILLA_ANCHOR:SetSize(10, 10)
+        BENILLA_ANCHOR:SetPoint("CENTER", 0, 0); BENILLA_ANCHOR:SetWidth(10); BENILLA_ANCHOR:SetHeight(10)
         BENILLA_TIP = CreateFrame("GameTooltip", "TT9")
     "#,
     )

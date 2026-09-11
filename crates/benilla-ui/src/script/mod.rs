@@ -89,6 +89,11 @@ mod handler_prof;
 mod screenshot;
 mod tabard;
 pub use handler_prof::HandlerRow;
+
+/// The widget-method surface measurement — shared by the `dump_widget_methods` example and the
+/// widget-surface gate (decision 2142).
+mod surface;
+pub use surface::widget_method_census;
 mod inspect;
 mod item_stats;
 mod item_text;
@@ -105,10 +110,12 @@ mod measure;
 mod merchant;
 mod messageframe;
 mod minimap;
+pub mod nameplate;
+pub use nameplate::{PlateGeometry, PlateState};
 mod model;
 mod modelframe;
 mod net_stats;
-mod object;
+pub(crate) mod object;
 pub use object::frame_kind_from_tag;
 mod party;
 mod pet;
@@ -194,7 +201,11 @@ pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorMoney, CursorPayload,
     CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
-pub use cvars::{MultisampleFormat, CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS};
+pub use cvars::{
+    MultisampleFormat, ScreenResolution, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
+    CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS, CVAR_WORLD_DETAIL, VIDEO_DEFAULT_CVARS,
+    WORLD_DETAIL_STOPS,
+};
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;
@@ -263,9 +274,9 @@ pub use trainer::{
     TrainerState, TrainerTooltip, TRAINER_GROUP_KNOWN,
 };
 pub use types::{
-    EditAction, EditBoxTextUi, EditOutcome, EditUnit, ExtractedQuad, FontObject, FontShadow,
-    Gradient, JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline, QuadContent,
-    ScriptValue, TexCoords,
+    BlendMode, EditAction, EditBoxTextUi, EditOutcome, EditUnit, ExtractedQuad, FontObject,
+    FontShadow, Gradient, JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline,
+    QuadContent, ScriptValue, TexCoords,
 };
 pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
 pub use unit::{
@@ -337,11 +348,20 @@ pub(crate) const REGION_LEAF_SHARED: [&str; 9] = [
 /// has `SetGradientAlpha` where FontString has `SetAlphaGradient`: a near-miss pair, and we install
 /// only the FontString one.
 ///
-/// The tail three are OURS, not 1.12's, and are parked here rather than pruned: `SetPortraitToTexture`
-/// and `SetRotation` are texture verbs the carve's 22 does not list, and `SetSize` is an Era
-/// geometry verb absent from the Region map. Removing a superset is a separate question per name —
-/// this landing partitions, it does not prune.
-pub(crate) const TEXTURE_ONLY_METHODS: [&str; 11] = [
+/// **Every name here is the client's own now.** Three of ours were parked in this list pending a
+/// per-name check, and all three are gone: `SetRotation` (1.12 registers it only on PlayerModel,
+/// `0x84f1fc`/`0x505f00`, and the world-map arrow that justified it is a Model frame now — see
+/// `region/paint.rs` at its old site), `SetPortraitToTexture` (1.12 has it as an engine GLOBAL,
+/// never a Texture method — `region.rs` registers it there, and a test pins the absence), and
+/// `SetSize`, the Era geometry verb that was in neither client map and that nothing outside our
+/// own test scaffolding called (decision 2142's census). The 1244/1245 landing partitioned rather
+/// than pruned and said the pruning was a separate question per name; this is the answer to three
+/// of them.
+///
+/// Going the other way: `GetBlendMode`, `SetTexCoordModifiesRect` and `GetTexCoordModifiesRect`
+/// joined the list, all three of them in the client's Texture map `0x87c128` (`0x79a890` /
+/// `0x79c080` / `0x79c120`), and all three of them missing here until then.
+pub(crate) const TEXTURE_ONLY_METHODS: [&str; 12] = [
     "SetGradient",
     "SetGradientAlpha",
     "GetTexture",
@@ -349,22 +369,22 @@ pub(crate) const TEXTURE_ONLY_METHODS: [&str; 11] = [
     "GetTexCoord",
     "SetTexCoord",
     "SetBlendMode",
+    "GetBlendMode",
+    "SetTexCoordModifiesRect",
+    "GetTexCoordModifiesRect",
     "SetDesaturated",
     "GetVertexColor",
-    "SetRotation",
-    "SetSize",
 ];
 
 /// **FontString-only** — the font/text/justify/shadow block plus the string metrics.
 ///
-/// The tail two are OURS: `SetFormattedText` is not in the client's 32, and `SetSize` is the same
-/// Era geometry verb the Texture list carries. Parked, not pruned, pending their own checks.
-///
-/// `GetStringHeight` was here and is GONE (1251's first prune): byte-verified absent from 1.12 in
-/// every encoding, ours was a byte-identical duplicate of `GetHeight`, and every call site — two of
-/// our own XML files, two tests, and `Button:GetTextHeight`'s delegate — now goes through the
-/// Region method the reference itself uses.
-pub(crate) const FONTSTRING_ONLY_METHODS: [&str; 23] = [
+/// **Every name here is the client's own now.** Three of ours were parked in this list:
+/// `GetStringHeight` went first (1251 — byte-verified absent, and ours was a byte-identical
+/// duplicate of `GetHeight`), and `SetFormattedText` (not among the client's 32) and
+/// `SetSize` (the Era geometry verb the Texture list carried too) went with 2142's census, which
+/// found neither in the stock chain nor in either addon corpus. The era spelling of
+/// `SetFormattedText` is `SetText(format(fmt, ...))`; of `SetSize`, `SetWidth` + `SetHeight`.
+pub(crate) const FONTSTRING_ONLY_METHODS: [&str; 21] = [
     "SetFont",
     "GetFont",
     "SetFontObject",
@@ -386,8 +406,6 @@ pub(crate) const FONTSTRING_ONLY_METHODS: [&str; 23] = [
     "SetNonSpaceWrap",
     "CanNonSpaceWrap",
     "SetAlphaGradient",
-    "SetFormattedText",
-    "SetSize",
 ];
 
 pub(crate) const REGION_MAP_METHODS: [&str; 19] = [
@@ -427,7 +445,10 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// each kind dispatching to its own value-changed slot. The eight
 /// `On*Pressed`/text/focus slots are the EditBox's specialized scripts (RF-0082 §2): a focused EditBox
 /// fires ONLY these, never generic `OnKeyDown`/`OnChar` (its C++ override replaces those slots).
-/// `OnVerticalScroll`/`OnScrollRangeChanged` are the ScrollFrame's own slots (decision 0112).
+/// `OnHorizontalScroll`/`OnVerticalScroll`/`OnScrollRangeChanged` are the ScrollFrame's own slots
+/// (decision 0112; the reference's `[+0x32c]`/`[+0x334]`/`[+0x33c]`, script-name map `0x786c40`).
+/// `OnHorizontalScroll` joined the other two with the horizontal offset pair — it is fired by
+/// `SetHorizontalScroll`, which is what earns it the row below.
 /// `OnDragStart`/`OnDragStop`/`OnReceiveDrag` are the drag trio (decision 0216 §3) — driven by
 /// `RegisterForDrag` + the same mouse path as the six mouse handlers above, not a separate one.
 /// `OnColorSelect` is the ColorSelect's own slot (RF-28 `+0x338`), fired by its `SetColorRGB`.
@@ -452,7 +473,7 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// corpus call sites across 91 addons); it removes working behaviour from the 23 sites that remain,
 /// so it is still a change to make deliberately rather than as a side effect of widening this list
 /// — but the FrameXML half of "with FrameXML fixed first" is most of the way there now.
-const SCRIPT_KINDS: [&str; 37] = [
+const SCRIPT_KINDS: [&str; 39] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -476,8 +497,14 @@ const SCRIPT_KINDS: [&str; 37] = [
     "OnTabPressed",
     "OnTextChanged",
     "OnTextSet",
+    // The caret flush's own (`0x77da80`), fired by the tick's `drain_cursor_changed` when the
+    // caret has moved — the edge `ScrollingEdit_OnCursorChanged` + `ScrollingEdit_OnUpdate` scroll
+    // a multiline box by. It earns its row here the way this list's rule requires: together with
+    // the code that fires it (decisions 2135/2141).
+    "OnCursorChanged",
     "OnEditFocusGained",
     "OnEditFocusLost",
+    "OnHorizontalScroll",
     "OnVerticalScroll",
     "OnScrollRangeChanged",
     "OnDragStart",
@@ -974,6 +1001,28 @@ impl UiScript {
         self.lua.load(chunk).set_mode(mlua::ChunkMode::Text).eval()
     }
 
+    /// **How many values does `expr` return?** — the return-shape question, asked at the host
+    /// boundary instead of inside Lua.
+    ///
+    /// This is what `select('#', expr)` used to answer in ~170 of our own tests. `select` is not a
+    /// 1.12 global and is gone (`lua50::install`), and the replacement is not a workaround: a
+    /// binding's arity is a fact about the **binding ABI**, and on this side of it a multiple
+    /// return already *is* a `MultiValue` whose length nothing can round off. It keeps the property
+    /// the arity gates rest on — **zero values and one `nil` are different answers**, `0` and `1`
+    /// (`binding_abi`'s §2), which is exactly what a `Option<T>` return type cannot tell apart.
+    ///
+    /// `expr` is a Lua **expression**, not a chunk: pass `"GetItemInfo(1)"`, not `"return …"`.
+    /// A raise propagates — a call that errors has no arity, and swallowing that into `0` is how a
+    /// broken binding scores as a zero-return verb.
+    ///
+    /// The one place this cannot serve is a probe that has to hold the count *inside* Lua (a
+    /// `pcall` loop over generated calls, as `shape_gate` runs). There the 5.0 spelling is 1.12's
+    /// own and reads the same: `(function(...) return arg.n end)(expr)`.
+    pub fn arity(&self, expr: &str) -> mlua::Result<usize> {
+        let values: mlua::Variadic<mlua::Value> = self.eval(&format!("return {expr}"))?;
+        Ok(values.len())
+    }
+
     /// The owning frame's name for an [`ExtractedQuad`] target — a debugging affordance for
     /// capture/probe tooling, which sees quads but not widgets ("whose quad is this?").
     pub fn quad_owner_name(&self, target: ZTarget) -> Option<String> {
@@ -1256,11 +1305,11 @@ impl UiScript {
         let mut model = self.model_mut();
         let held: Vec<crate::widget::FrameHandle> = model.mouse_down_on.values().copied().collect();
         model.mouse_down_on.clear();
-        // Every button that capture was holding down goes back to NORMAL — the release the OS
-        // never fed us (`0x7793c2`'s transition), without which a button walked off the window
-        // edge mid-press keeps its pushed art for the rest of the session.
+        // Every button that capture was holding down goes back to NORMAL — the release edge the
+        // OS never fed us (`0x7793de`), without which a button walked off the window edge
+        // mid-press keeps its pushed art for the rest of the session.
         for h in held {
-            button::settle(&mut model, h);
+            button::edge(&mut model, h, crate::widget::ButtonState::on_mouse_up);
         }
         // …and its one-slot twin `root+0x80`, which the mouse-down raise reads: a capture left
         // behind would aim the next press's raise at whatever the pointer was last holding.
@@ -1364,6 +1413,21 @@ impl UiScript {
         model
             .focused_editbox
             .is_some_and(|h| model.arena.frame(h).is_some_and(|f| f.effective_visible))
+    }
+
+    /// **Which** EditBox holds the focus, by name — [`Self::has_keyboard_focus`] answers
+    /// *whether*. Unfiltered by visibility, because the focus cell itself is: a box that hides
+    /// while focused keeps the cell until something clears it, and the tests that watch the
+    /// hand-off between two boxes are watching exactly that cell.
+    ///
+    /// This is the host-side read of `Model::focused_editbox`. There is no Lua verb for it and
+    /// there must not be: 1.12's EditBox table has `SetFocus`/`ClearFocus` and no getter, which
+    /// is why `pfQuest/browser.lua:760` ships its own focus flag rather than asking (decision
+    /// 2142).
+    pub fn focused_editbox_name(&self) -> Option<String> {
+        let model = self.model_ref();
+        let h = model.focused_editbox?;
+        model.arena.frame(h)?.name.clone()
     }
 
     /// How many resolves the layout change gate has let through (`Model::layout_solves`) — the

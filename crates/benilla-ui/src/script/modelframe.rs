@@ -148,7 +148,7 @@ impl Model {
         }
     }
 
-    /// A size was AUTHORED on `h` (`SetWidth`/`SetHeight`/`SetSize`, the XML `<Size>` through
+    /// A size was AUTHORED on `h` (`SetWidth`/`SetHeight`, the XML `<Size>` through
     /// them): an implicit rect no longer applies to it, for good — the reference's override
     /// yields to any authored size.
     pub(crate) fn note_authored_size(&mut self, h: FrameHandle) {

@@ -302,7 +302,7 @@ mod tests {
     /// **The sentinel, and the arity that carries it.** `GetPlayerBuff` returns two numbers on every
     /// path — `(-1, 0)` past the end, never nil and never a different count.
     ///
-    /// The `select('#')` assertions are the half that matters, exactly as in
+    /// The arity assertions are the half that matters, exactly as in
     /// [`super::super::item_stats`]'s `get_item_info_tests`: an implementation that returned `nil`
     /// for a miss still "works" for every individual read, and only the arity notices. Here it is
     /// worse than cosmetic — the corpus's termination test is `>= 0` on the *first* value, so nil is
@@ -312,14 +312,13 @@ mod tests {
         let mut s = with_player_cache();
 
         assert_eq!(
-            s.eval::<i64>("return select('#', GetPlayerBuff(0))").unwrap(),
+            s.arity("GetPlayerBuff(0)").unwrap(),
             2,
             "1.12 pushes exactly two values (`mov eax,0x2` at 0x4e471e) — a hit must not be a tuple \
              of aura fields, which is the modern UnitAura shape"
         );
         assert_eq!(
-            s.eval::<i64>("return select('#', GetPlayerBuff(99))")
-                .unwrap(),
+            s.arity("GetPlayerBuff(99)").unwrap(),
             2,
             "and a MISS pushes two as well (0x4e4733), not zero and not nil"
         );
@@ -508,8 +507,7 @@ mod tests {
         ] {
             for arg in ["0", "-1", "99"] {
                 assert_eq!(
-                    s.eval::<i64>(&format!("return select('#', {verb}({arg}))"))
-                        .unwrap(),
+                    s.arity(&format!("{verb}({arg})")).unwrap(),
                     1,
                     "{verb}({arg}) must push one value, not zero and not a tuple"
                 );
@@ -517,11 +515,7 @@ mod tests {
         }
         // CancelPlayerBuff pushes NONE (`xor eax,eax; ret`), on every path.
         for arg in ["0", "-1", "99"] {
-            assert_eq!(
-                s.eval::<i64>(&format!("return select('#', CancelPlayerBuff({arg}))"))
-                    .unwrap(),
-                0
-            );
+            assert_eq!(s.arity(&format!("CancelPlayerBuff({arg})")).unwrap(), 0);
         }
         s.take_cancel_aura_requests();
 

@@ -47,6 +47,37 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // `RegisterAllEvents()` — this frame's `OnEvent` receives EVERY event that is dispatched
+    // (`0x774c20`, table `0x878ec0`, argc 1, arity 0). Cleared by `UnregisterAllEvents` below, and
+    // by nothing else: there is no `UnregisterAllEvents`-less way back out, which is exactly how
+    // the reference's pair reads.
+    //
+    // **Latent, not live, and the widest-carried gap the corpus census found.** Nothing in either
+    // addon corpus calls it *today*, but 63 vanilla addons and 6 of the top 20 ship
+    // **AceEvent-2.0**, whose `AceEvent:RegisterAllEvents(handler)` runs
+    // `AceEvent.frame:RegisterAllEvents()` the first time any addon asks for all events — so the
+    // first one that does raised here. AceEvent is also why the *clearing* half is load-bearing
+    // rather than tidy: while all-events is on it deliberately stops calling
+    // `frame:UnregisterEvent(event)` at all, and `AceEvent:UnregisterAllEvents()` gets back to a
+    // per-event registration by calling `frame:UnregisterAllEvents()` and then re-registering each
+    // event it still wants. A `RegisterAllEvents` that outlived that call would leave every Ace2
+    // addon on the whole event stream forever.
+    //
+    // Registered as a FLAG (the frame joins `Model::all_event_frames`), never as an expansion into
+    // a name list — see that field for why, and `tick::fire_event_into` for the dispatch.
+    m.set(
+        "RegisterAllEvents",
+        lua.create_function(|lua, this: Table| {
+            let h = frame_handle_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            // Registration order, and re-registering keeps the original position — the same law
+            // `RegisterEvent` above holds, for the same reason.
+            if !model.all_event_frames.contains(&h) {
+                model.all_event_frames.push(h);
+            }
+            Ok(())
+        })?,
+    )?;
     // `UnregisterAllEvents()` — drop every registration this frame holds, in one call.
     //
     // 10 corpus addons stop on it (decision 1195), and the idiom is why: an addon's "disable me"
@@ -67,6 +98,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     list.retain(|x| x != &h);
                 }
             }
+            // …and the all-events registration, which is a registration like any other. See
+            // `RegisterAllEvents` above: AceEvent-2.0's own re-registration path depends on this.
+            model.all_event_frames.retain(|x| x != &h);
             Ok(())
         })?,
     )?;
@@ -106,10 +140,15 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // Making it exact means per-type SCRIPT_KINDS, which newly RAISES on 30 sites that work today
     // (9 in our own FrameXML). That is behaviour removal and belongs in its own change, with its
     // own measurement; it is not a tail on this one.
+    //
+    // 1/nil, not a Lua boolean: the reference's row is `(nil) | (number)` like every other
+    // predicate (decision 2118).
     m.set(
         "HasScript",
         lua.create_function(|_, (_this, name): (Table, String)| {
-            Ok(SCRIPT_KINDS.iter().any(|k| k.eq_ignore_ascii_case(&name)))
+            Ok(crate::script::binding_abi::flag(
+                SCRIPT_KINDS.iter().any(|k| k.eq_ignore_ascii_case(&name)),
+            ))
         })?,
     )?;
     // RegisterForDrag(...varargs of button names) — the drag-gesture twin of `RegisterForClicks`
@@ -304,23 +343,26 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 ///   the mechanism: the kind buckets, the strata 8→0 order, the key-name table, and the
 ///   existence-not-handling consumption gate). They were this list's standing exception; the rule
 ///   above let them in the moment something fired them.
-/// * **`OnCursorChanged`** (4 sites over 3 addons — all of them the Era `ScrollingEdit_OnCursorChanged`
-///   auto-scroll idiom) — **raising**, by this list's own rule: nothing fires it. It is the
-///   EditBox's own slot (RF-28 `+0x428`), fired by the reference's caret flush `0x77da80` with
-///   **four float caret-POSITION args**. The geometry itself is no longer the obstacle — the paint
-///   seam computes `caret_row`/`caret_x` off the host-answered advance table
-///   ([`crate::script::editbox::seam`]) — but that is a per-extract recompute with no event edge,
-///   so there is no counterpart to the flush to fire from. Accepting the name before building one
-///   would mean a scroll box that silently never follows the caret.
+/// * **`OnCursorChanged`** (4 sites over 3 addons, plus two in the SHIPPED FrameXML — all of them
+///   the `ScrollingEdit_OnCursorChanged` auto-scroll idiom) — **accepted since decision 2141**,
+///   which built the edge this entry said was missing. The EditBox's own slot (RF-28 `+0x428`),
+///   fired by the caret flush `0x77da80` with four float caret-position args in UI units;
+///   `editbox::drain_cursor_changed` is our counterpart, on the tick, gated on the caret having
+///   actually moved. The stock `MailFrame.xml` and `HelpFrame.xml` declare it, so until 2141 the
+///   mail body and the GM ticket box did not scroll as you typed past their bottom — a bug nobody
+///   could see, because the load-time refusal only reached a terminal (decision 2135).
 /// * **`OnAttributeChanged`** (1 site, `Roid-Macros`) — **raising, permanently.** It is 2.0's secure
 ///   frame/attribute system; there is no such slot in any 1.12 resolver. That addon is asking for a
 ///   later client and should hear so.
-/// * **`OnHorizontalScroll` · `OnHyperlinkEnter` · `OnHyperlinkLeave` · `OnMessageScrollChanged` ·
+/// * **`OnHyperlinkEnter` · `OnHyperlinkLeave` · `OnMessageScrollChanged` ·
 ///   `OnMovieFinished`/`ShowSubtitle`/`HideSubtitle` · `OnInputLanguageChanged`** — **raising.**
 ///   Real 1.12 slots that we do not fire, and measured at **zero** call sites across the
 ///   218-addon corpus, so there is nothing to weigh against the trap: they land when their
-///   mechanism does (horizontal scroll isn't modeled at all — see
-///   [`crate::script::scrollframe`]'s module doc).
+///   mechanism does.
+/// * **`OnHorizontalScroll`** — **accepted, because `SetHorizontalScroll` fires it.** It was on
+///   the line above while "horizontal scroll isn't modeled at all", which stopped being true when
+///   the ScrollFrame's horizontal offset pair landed beside the vertical one
+///   ([`crate::script::scrollframe`]); `aux-addon` reads and writes both axes.
 /// * **`OnUpdateModel` · `OnAnimFinished`** — **accepted since decision 2007**, because the tick
 ///   fires them: the model pane's scene clock runs in this engine now (`tick.rs`), `OnUpdateModel`
 ///   at the top of every paint of a visible pane with a file (`0x76d1a0`) and `OnAnimFinished`
@@ -426,7 +468,7 @@ fn apply_region_inherits(lua: &Lua, wrapper: &Table, from: &str) -> mlua::Result
     };
     if is_template {
         let mut model = lua.app_data_mut::<Model>().expect("model");
-        model.warnings.push(format!(
+        model.record_warning(format!(
             "CreateTexture/CreateFontString: '{from}' is a registered TEMPLATE, not a font object;              the region is created but the template's content is not applied (no corpus caller              does this)"
         ));
         return Ok(());
@@ -478,6 +520,20 @@ fn create_region(
 
     let wrapper = region_wrapper(lua, id)?;
     if let Some(name) = name {
+        // **A leading `$parent` in the NAME is expanded, here as in XML** — `CreateTexture
+        // 0x773a20` and `CreateFontString 0x773c30` build a synthetic node carrying
+        // `name=<the Lua string>` and read it back through the same `GetAttribute(node, "name")` →
+        // `CScriptRegion::SetName 0x76c650` the XML path uses, and `0x76c691` is one of that
+        // expander's two call sites (wow-re `name-string-widget-resolution.md` §5/§6, whose
+        // `name=` reader census names `0x773ba1` and `0x773dc4` — the addresses *inside* these two
+        // bindings). A region's `$parent` is its OWNER frame, so the walk starts there.
+        //
+        // `pfQuest/browser.lua:723` is `pfBrowser.input:CreateTexture("$parentSearchIcon",
+        // "OVERLAY")`, and every named widget FonzAppraiser builds is this idiom.
+        let name = {
+            let model = lua.app_data_ref::<Model>().expect("model");
+            crate::framexml::resolve_name(&name, &super::parent_token_base(&model, Some(owner)))
+        };
         publish_global(lua, &name, &wrapper)?;
         // Publish into the region-name registry too (first-wins, the frame rule) — this is what
         // lets a sibling region's SetPoint name us as its `relativeTo` (see `resolve_target`).

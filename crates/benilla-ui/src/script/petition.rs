@@ -472,13 +472,13 @@ mod tests {
     ///
     /// This file first shipped an empty return, which the reference's own six-way destructure
     /// cannot tell apart (both give six nils… except the fourth, which is `0` here and `nil`
-    /// there). `select("#", …)` is what separates them, and it is the whole point of the test.
+    /// there). The COUNT is what separates them — [`UiScript::arity`] — and it is the whole point
+    /// of the test.
     #[test]
     fn the_no_record_leg_is_six_values_with_a_numeric_zero() {
         let s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<i64>("return select(\"#\", GetPetitionInfo())")
-                .unwrap(),
+            s.arity("GetPetitionInfo()").unwrap(),
             6,
             "six values even with nothing open"
         );
@@ -617,8 +617,7 @@ mod tests {
             "an empty name is refused locally — the server answers it with silence"
         );
         assert_eq!(
-            s.eval::<i64>("return select(\"#\", RenamePetition(\"Legacy\"))")
-                .unwrap(),
+            s.arity("RenamePetition(\"Legacy\")").unwrap(),
             0,
             "rename pushes nothing at all"
         );

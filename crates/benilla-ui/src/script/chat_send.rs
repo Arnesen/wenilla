@@ -130,9 +130,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // and not an id. All **four** failure edges — no player object, a negative id, an id past the
     // language count, a null record — converge on `0x49fd2a xor eax,eax; ret`, i.e. **zero Lua
     // values**. That is shape 2 of the argument ABI ([`super::binding_abi`]) and it is the one
-    // place in this repo where the distinction is observable: `select('#', GetDefaultLanguage())`
-    // is `0` outside the world and `1` inside it, while a single-value caller reads `nil` either
-    // way. Returning `nil` here would be a quiet divergence, so we do not.
+    // place in this repo where the distinction is observable: the call's return-list COUNT is `0`
+    // outside the world and `1` inside it, while a single-value caller reads `nil` either way.
+    // Returning `nil` here would be a quiet divergence, so we do not.
     //
     // **Its sibling is misspelled in the binary, and is deliberately NOT registered here.** The
     // `.data` `{const char* name, void* fn}` record at `0x843628` names `0x49fb30`
@@ -260,23 +260,21 @@ mod tests {
 
     /// **One string, or ZERO values — never `nil`.** The four failure edges reach
     /// `0x49fd2a xor eax,eax; ret` *without* passing through `luaL_error`, which is the only place
-    /// the "returns nothing" shape is real. A single-value caller cannot tell the two apart;
-    /// `select('#', …)` can, and both corpus callers feed the result straight to
+    /// the "returns nothing" shape is real. A single-value caller cannot tell the two apart; the
+    /// return-list count can ([`UiScript::arity`]), and both corpus callers feed the result straight to
     /// `SendChatMessage`, where the difference is an argument that exists versus one that does not.
     #[test]
     fn get_default_language_is_one_string_or_zero_values() {
         let mut s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<i64>("return select('#', GetDefaultLanguage())")
-                .unwrap(),
+            s.arity("GetDefaultLanguage()").unwrap(),
             0,
             "no player object → ZERO values, not nil"
         );
 
         s.set_default_language(Some("Common".into()));
         assert_eq!(
-            s.eval::<i64>("return select('#', GetDefaultLanguage())")
-                .unwrap(),
+            s.arity("GetDefaultLanguage()").unwrap(),
             1,
             "one value — not (name, id)"
         );
@@ -302,8 +300,7 @@ mod language_tests {
         let mut s = UiScript::new().unwrap();
         assert_eq!(s.eval::<i64>("return GetNumLaguages()").unwrap(), 0);
         assert_eq!(
-            s.eval::<i64>("return select('#', GetLanguageByIndex(1))")
-                .unwrap(),
+            s.arity("GetLanguageByIndex(1)").unwrap(),
             0,
             "past the end pushes nothing, not nil"
         );

@@ -39,7 +39,7 @@ fn log_path() -> Option<String> {
     }
 }
 
-/// Is the recorder on? Read once — the phase marks in `drive_script` consult this every frame.
+/// Is the recorder on? Read once — the phase marks in the UI pass (`extract::tick_script`/`paint_script`) consult this every frame.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| log_path().is_some())
@@ -111,7 +111,7 @@ impl Plugin for HoverLogPlugin {
 fn tooltip_context(script: &UiScript) -> Option<(String, i64, String)> {
     let chunk = r#"
         if not GameTooltip or not GameTooltip:IsShown() then return "" end
-        local owner = GameTooltip:GetOwner()
+        local owner = GameTooltip:BenillaGetTooltipOwner()
         local name = "(no owner)"
         if owner and owner.GetName and owner:GetName() then name = owner:GetName() end
         local first = ""

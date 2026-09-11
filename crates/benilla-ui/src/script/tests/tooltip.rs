@@ -31,7 +31,7 @@ fn line_stack_autosize_and_right_flush() {
     s.run(
         r#"
         local owner = CreateFrame("Button", "Slot")
-        owner:SetPoint("TOPLEFT", 100, -100); owner:SetSize(40, 40)
+        owner:SetPoint("TOPLEFT", 100, -100); owner:SetWidth(40); owner:SetHeight(40)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(owner, "ANCHOR_RIGHT")
         tt:AddLine("Tough Jerky", 1, 1, 1)
@@ -101,7 +101,7 @@ fn empty_line_is_a_one_unit_row_and_the_chain_stays_inside_the_plate() {
     s.run(
         r#"
         local owner = CreateFrame("Button", "Slot2")
-        owner:SetPoint("TOPLEFT", 100, -100); owner:SetSize(40, 40)
+        owner:SetPoint("TOPLEFT", 100, -100); owner:SetWidth(40); owner:SetHeight(40)
         local tt = CreateFrame("GameTooltip", "TTE")
         tt:SetOwner(owner, "ANCHOR_RIGHT")
         tt:AddLine("Marshal McBride", 0.25, 0.75, 0.25)
@@ -154,15 +154,15 @@ fn owner_clear_and_hide_lifecycle() {
     s.run(
         r#"
         cleared = 0
-        local a = CreateFrame("Button", "A"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
-        local b = CreateFrame("Button", "B"); b:SetPoint("CENTER", 50, 0); b:SetSize(10, 10)
+        local a = CreateFrame("Button", "A"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local b = CreateFrame("Button", "B"); b:SetPoint("CENTER", 50, 0); b:SetWidth(10); b:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT2")
         tt:SetScript("OnTooltipCleared", function() cleared = cleared + 1 end)
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:AddLine("first hover")
         tt:Show()
         assert(tt:IsOwned(a) and not tt:IsOwned(b), "owned by a")
-        assert(tt:GetOwner() == a, "GetOwner returns the owner wrapper")
+        assert(tt:BenillaGetTooltipOwner() == a, "the owner wrapper reads back")
         tt:SetOwner(b, "ANCHOR_LEFT")
         assert(cleared >= 1, "SetOwner cleared the old content")
         assert(tt:NumLines() == 0, "content cleared on re-own")
@@ -190,7 +190,7 @@ fn settext_shows_and_both_addline_shapes() {
     s.set_screen_size(800.0, 600.0);
     s.run(
         r#"
-        local a = CreateFrame("Button", "A3"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "A3"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT3")
         tt:Hide() -- the XML instance ships hidden="true"; CreateFrame defaults shown
         tt:SetOwner(a, "ANCHOR_RIGHT")
@@ -248,9 +248,9 @@ fn unmeasured_lines_hold_declared_size() {
     s.set_screen_size(800.0, 600.0);
     s.run(
         r#"
-        local a = CreateFrame("Button", "A6"); a:SetPoint("TOPLEFT", 100, -100); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "A6"); a:SetPoint("TOPLEFT", 100, -100); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT6")
-        tt:SetSize(120, 32)
+        tt:SetWidth(120); tt:SetHeight(32)
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:AddLine("Tough Jerky")
         tt:AddDoubleLine("One-Hand", "Sword")
@@ -291,7 +291,7 @@ fn minimum_width_floors_autosize() {
     s.set_screen_size(800.0, 600.0);
     s.run(
         r#"
-        local a = CreateFrame("Button", "A4"); a:SetPoint("TOPLEFT", 100, -100); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "A4"); a:SetPoint("TOPLEFT", 100, -100); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT4")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:AddLine("tiny")
@@ -316,7 +316,7 @@ fn fadeout_ramps_then_hides() {
     s.run(
         r#"
         cleared = 0
-        local a = CreateFrame("Button", "A5"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "A5"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT5")
         tt:SetScript("OnTooltipCleared", function() cleared = cleared + 1 end)
         tt:SetOwner(a, "ANCHOR_RIGHT")
@@ -387,7 +387,7 @@ fn owner_anchored_tooltip_clamps_to_screen() {
     s.run(
         r#"
         local owner = CreateFrame("Button", "ZoneTextBtn")
-        owner:SetPoint("TOPRIGHT", -100, 0); owner:SetSize(90, 14)
+        owner:SetPoint("TOPRIGHT", -100, 0); owner:SetWidth(90); owner:SetHeight(14)
         local tt = CreateFrame("GameTooltip", "TTC")
         assert(tt:IsClampedToScreen(), "a GameTooltip clamps by construction")
         assert(not owner:IsClampedToScreen(), "a plain frame does not")
@@ -539,7 +539,7 @@ fn an_emptied_pooled_line_drops_its_stale_box_and_the_plate_still_contains_the_c
     s.run(
         r#"
         local owner = CreateFrame("Button", "SlotR")
-        owner:SetPoint("TOPLEFT", 100, -100); owner:SetSize(40, 40)
+        owner:SetPoint("TOPLEFT", 100, -100); owner:SetWidth(40); owner:SetHeight(40)
         local tt = CreateFrame("GameTooltip", "TTR")
         tt:SetOwner(owner, "ANCHOR_RIGHT")
         tt:AddLine("Marshal McBride")
@@ -588,4 +588,365 @@ fn an_emptied_pooled_line_drops_its_stale_box_and_the_plate_still_contains_the_c
     )
     .unwrap();
     assert!(s.take_errors().is_empty());
+}
+
+/// **`SetOwner`'s omitted `anchorType` is mode 0 = ANCHOR_LEFT**, and the clear-vs-keep split runs
+/// between NONE and PRESERVE, not between "points" and "doesn't".
+///
+/// 2142's open thread 1 predicted the opposite on both counts — a mode-7 default, and a NONE arm
+/// that must stop dropping anchors — and the wow-re §5 dispatched for the CURSOR mechanism refuted
+/// both at the bytes (`system/ui/scratch/tooltip-cursor-anchor-law.md` §0.2/§0.3/§2; decision
+/// 2176). What is actually there:
+///
+/// * `0x53120d` zeroes the binding's local mode before any compare, and `0x531214`'s
+///   `lua_isstring` gate jumps the whole `SStrCmpI` chain when arg 3 is absent, nil, a boolean or
+///   a table — so the answer is **0 = ANCHOR_LEFT**, silently, with no `luaL_error` anywhere in
+///   `[0x531221, 0x53133a)`. The core's `mov [+0x318],7` at `0x530012` is an unconditional
+///   pre-store `0x530031` overwrites; it survives only when the owner is NULL.
+/// * `0x52fe90` returns for mode **8** at `0x52fead`, *before* `0x52fec2 call 0x767ed0`, and the
+///   mode-7 skip beside that clear is gated on an arg1 `SetOwner`'s core always passes as 1. So
+///   every mode 0..7 clears, and only PRESERVE keeps the placement.
+#[test]
+fn set_owner_defaults_to_anchor_left_and_only_preserve_keeps_the_placement() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Plate = CreateFrame("GameTooltip", "Plate")
+        Owner = CreateFrame("Frame", "Owner")
+        Owner:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 300, 300)
+        Owner:SetWidth(40) Owner:SetHeight(40)
+        Plate:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)
+        Plate:SetWidth(50) Plate:SetHeight(20)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(s.eval::<f32>("return Plate:GetLeft()").unwrap(), 100.0);
+
+    // ANCHOR_PRESERVE (mode 8) is the ONE mode that leaves the plate alone.
+    s.run(r#"Plate:SetOwner(Owner, "ANCHOR_PRESERVE")"#)
+        .unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f32>("return Plate:GetLeft()").unwrap(),
+        100.0,
+        "mode 8 returns before the ClearAllPoints"
+    );
+    assert_eq!(s.eval::<i64>("return Plate:GetNumPoints()").unwrap(), 1);
+
+    // ANCHOR_NONE (mode 7) clears — which is what makes `GameTooltip_SetDefaultAnchor` safe.
+    s.run(r#"Plate:SetOwner(Owner, "ANCHOR_NONE")"#).unwrap();
+    assert_eq!(
+        s.eval::<i64>("return Plate:GetNumPoints()").unwrap(),
+        0,
+        "mode 7 reaches the clear: arg1 is always 1 from SetOwner's core"
+    );
+
+    // `SetOwner(f)` — no anchor string at all. Mode 0, and mode 0 PLACES: ANCHOR_LEFT pins the
+    // plate's BOTTOMRIGHT to the owner's TOPLEFT, so its right edge sits at the owner's left.
+    s.run(r#"Plate:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)"#)
+        .unwrap();
+    s.run("Plate:SetOwner(Owner)").unwrap();
+    assert_eq!(
+        s.eval::<String>("return Plate:GetAnchorType()").unwrap(),
+        "ANCHOR_LEFT",
+        "the omitted anchorType is the binding's zero-initialised local, mode 0"
+    );
+    s.resolve();
+    assert_eq!(
+        s.eval::<f32>("return Plate:GetLeft()").unwrap(),
+        250.0,
+        "the owner's left edge (300) less the plate's own 50 wide"
+    );
+
+    // An UNRECOGNISED string is the same silent mode 0 — the compare chain falls through with the
+    // local untouched, and raises nothing.
+    s.run(r#"Plate:SetOwner(Owner, "ANCHOR_SIDEWAYS")"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return Plate:GetAnchorType()").unwrap(),
+        "ANCHOR_LEFT"
+    );
+}
+
+/// **`SetAlpha(255)` on SetOwner is UNCONDITIONAL** — `0x52fff4`, the first thing the SetOwner
+/// core `0x52ffe0` does, before its five stores (wow-re `system/ui/ledger.tsv` row `0x52ffe0`,
+/// verified). Ours only ever restored the alpha one of OUR OWN fades had taken away, so a plate
+/// left dim by any other path — an addon's `SetAlpha`, an inherited parent alpha — stayed dim
+/// through every subsequent hover, where the reference stamps it back to full on each SetOwner.
+#[test]
+fn set_owner_stamps_full_alpha_even_with_no_fade_running() {
+    let s = script();
+    s.run(
+        r#"
+        Owner = CreateFrame("Frame", "Owner")
+        Tip = CreateFrame("GameTooltip", "Tip")
+        Tip:SetOwner(Owner, "ANCHOR_RIGHT")
+        Tip:AddLine("Tough Jerky", 1, 1, 1)
+        Tip:Show()
+        -- No fade is running: this is an outside party dimming the plate.
+        Tip:SetAlpha(0.3)
+        assert(Tip:GetAlpha() < 0.31, "the dimming took")
+        Tip:SetOwner(Owner, "ANCHOR_RIGHT")
+        assert(Tip:GetAlpha() > 0.99, "the next SetOwner stamps 255 back, fade or no fade")
+        "#,
+    )
+    .unwrap();
+}
+
+/// **`Show` is an EXISTENCE GATE, not a plain show** — `0x530a80`, the CGameTooltip override of
+/// `vtbl+0x88` (the slot a Lua `:Show()` lands in). It shows only when BOTH the owner `+0x314`
+/// and the line count `+0x31c` are non-zero, and otherwise calls its own `vtbl+0x84`
+/// effective-hide `0x530a60` — the SetOwner core with a NULL owner, so the plate is hidden AND
+/// un-owned (wow-re `system/ui/ledger.tsv` row `0x530a80`, verified;
+/// `scratch/hover-hide-and-tooltip-owner-law.md` §4).
+///
+/// The symptom that found it: `Questie`'s tracker draws an EMPTY plate on hover — correctly
+/// sized and bordered, with no text. `QuestieTracker.lua`'s quest-button OnEnter has a dead zone
+/// between its two arms (an in-progress quest that has objectives AND whose objective text is in
+/// the Questie database matches neither), so it adds no line and then calls `Tooltip:Show()`
+/// unconditionally. The reference swallows that; we drew it — and, because `layout_tooltips`
+/// skips a zero-line plate instead of collapsing it, we drew it at the LAST hover's size, which
+/// is why it looked like a real tooltip with the text missing rather than a stub.
+#[test]
+fn show_with_no_lines_self_hides_and_un_owns() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Owner = CreateFrame("Button", "Owner")
+        Owner:SetPoint("TOPLEFT", nil, "TOPLEFT", 100, -100)
+        Owner:SetWidth(40) Owner:SetHeight(40)
+        Tip = CreateFrame("GameTooltip", "Tip")
+        Tip:SetOwner(Owner, "ANCHOR_RIGHT")
+        Tip:AddLine("Tough Jerky", 1, 1, 1)
+        Tip:Show()
+        assert(Tip:IsShown(), "owner + 1 line: both halves of the gate pass")
+        assert(Tip:IsOwned(Owner), "and the owner survives a real show")
+        "#,
+    )
+    .unwrap();
+
+    // Questie's exact shape: the re-hover's SetOwner clears the content, the handler's dead zone
+    // adds nothing, and Show() runs anyway.
+    s.run(
+        r#"
+        Tip:SetOwner(Owner, "ANCHOR_RIGHT")
+        assert(Tip:NumLines() == 0, "SetOwner cleared the last hover's lines")
+        Tip:Show()
+        assert(not Tip:IsShown(), "zero lines takes the self-hide leg of 0x530a80")
+        assert(not Tip:IsOwned(Owner), "and 0x530a60 un-owns: it is the SetOwner core with NULL")
+        "#,
+    )
+    .unwrap();
+
+    // The other half of the gate, on its own: a line but no owner is equally not shown.
+    s.run(
+        r#"
+        Tip:AddLine("Orphan", 1, 1, 1)
+        Tip:Show()
+        assert(not Tip:IsShown(), "lines without an owner is the same self-hide")
+        "#,
+    )
+    .unwrap();
+}
+
+/// **A NON-STRING anchor argument must not raise** — and for a year it did, because the binding
+/// took arg 3 as `Option<String>` and let mlua's converter be the gate.
+///
+/// The reference's gate is `lua_isstring 0x6f3510`, whose entire body is `lua_type` then
+/// `cmp eax,4 / cmp eax,3`: LUA_TSTRING or LUA_TNUMBER pass and are read by coercion, and every
+/// other tag takes `0x53121b je 0x53133a` over the whole compare chain to the join, leaving the
+/// zeroed local — mode 0, `ANCHOR_LEFT`, silently, with no `luaL_error` anywhere in
+/// `[0x531221, 0x53133a)` (wow-re `system/ui/scratch/tooltip-cursor-anchor-law.md` §0.2, the same
+/// section decision 2176 already quotes in this file's doc comments). So a boolean, a table, a
+/// function and absent are *indistinguishable* at this position.
+///
+/// The symptom that found it: `Questie` hovers a world-map note with
+/// `Tooltip:SetOwner(this, this)` (`QuestieNotes.lua` `Questie_Tooltip_OnEnter`) — a frame where
+/// the anchor goes — and got `bad argument #3: error converting Lua table to String` where the
+/// reference draws the tooltip.
+#[test]
+fn a_non_string_anchor_is_silently_mode_zero_and_never_raises() {
+    let s = script();
+    s.run(
+        r#"
+        Plate = CreateFrame("GameTooltip", "Plate")
+        Owner = CreateFrame("Frame", "Owner")
+        "#,
+    )
+    .unwrap();
+
+    // A TABLE — Questie's own call shape, a frame passed where the anchor string goes.
+    s.run("Plate:SetOwner(Owner, Owner)")
+        .expect("a table anchor takes the isstring gate's jump, it does not raise");
+    assert_eq!(
+        s.eval::<String>("return Plate:GetAnchorType()").unwrap(),
+        "ANCHOR_LEFT"
+    );
+
+    // A BOOLEAN and an explicit nil are the same jump.
+    for arg in ["true", "false", "nil"] {
+        s.run(&format!(
+            r#"Plate:SetOwner(Owner, "ANCHOR_RIGHT") Plate:SetOwner(Owner, {arg})"#
+        ))
+        .unwrap_or_else(|e| panic!("SetOwner(Owner, {arg}) raised: {e}"));
+        assert_eq!(
+            s.eval::<String>("return Plate:GetAnchorType()").unwrap(),
+            "ANCHOR_LEFT",
+            "{arg} is indistinguishable from absent at this position"
+        );
+    }
+
+    // A NUMBER is the one non-string tag the gate DOES admit: it is stringified and run through
+    // the chain, which no number can match — the same mode 0, by the other route.
+    s.run(r#"Plate:SetOwner(Owner, "ANCHOR_RIGHT") Plate:SetOwner(Owner, 5)"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return Plate:GetAnchorType()").unwrap(),
+        "ANCHOR_LEFT"
+    );
+}
+
+/// **`ANCHOR_CURSOR` is a real ninth mode**, not a string to warn about (2142's open thread 2, and
+/// nine corpus files ask for it): mode 6 clears at `SetOwner` time like mode 7, and then the
+/// per-frame update `0x530b20` pins the plate's **BOTTOM** to the screen's **BOTTOMLEFT** at the
+/// cursor's absolute position, divided by the plate's own effective scale. See
+/// `script::tooltip::cursor_anchor`.
+#[test]
+fn anchor_cursor_follows_the_cursor_every_frame() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Tip = CreateFrame("GameTooltip", "Tip")
+        Host = CreateFrame("Frame", "Host")
+        Tip:SetOwner(Host, "ANCHOR_CURSOR")
+        Tip:AddLine("Copper Ore")
+        -- An explicit size, because this VM has no text measurer: the auto-size pre-pass leaves a
+        -- plate with no measured extents at its declared size, and the placement is what is under
+        -- test, not the width.
+        Tip:SetWidth(120) Tip:SetHeight(40)
+        Tip:Show()
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return Tip:GetAnchorType()").unwrap(),
+        "ANCHOR_CURSOR",
+        "the mode round-trips; it is no longer recorded as whatever it was placed by"
+    );
+    assert!(
+        !s.warnings().iter().any(|w| w.contains("ANCHOR_CURSOR")),
+        "a mode we honour is not warned about: {:?}",
+        s.warnings()
+    );
+
+    s.mouse_move(300.0, 200.0);
+    s.resolve();
+    let (left, right, bottom): (f32, f32, f32) = s
+        .eval("return Tip:GetLeft(), Tip:GetRight(), Tip:GetBottom()")
+        .unwrap();
+    assert_eq!(bottom, 200.0, "the plate's BOTTOM sits at the cursor");
+    assert!(
+        ((left + right) / 2.0 - 300.0).abs() < 0.001,
+        "centred horizontally on the cursor: {left}..{right}"
+    );
+
+    // It follows. The whole point of mode 6 is that no second SetOwner is needed.
+    s.mouse_move(120.0, 480.0);
+    s.resolve();
+    let (left, right, bottom): (f32, f32, f32) = s
+        .eval("return Tip:GetLeft(), Tip:GetRight(), Tip:GetBottom()")
+        .unwrap();
+    assert_eq!(bottom, 480.0);
+    assert!(
+        ((left + right) / 2.0 - 120.0).abs() < 0.001,
+        "{left}..{right}"
+    );
+}
+
+/// `GameTooltip:GetAnchorType()` — ONE string, the reference's own spelling, round-tripping
+/// whatever `SetOwner` was given (`0x5313e0`, table `0x854198`, argc 1, arity 1, kinds `(string)`,
+/// reading `[+0x318]` back through the name table `0x531530`).
+///
+/// The round trip is the whole point rather than a nicety: `_Nameplates/_Nameplates.lua:479` is
+/// `if GameTooltip:GetAnchorType() ~= Anchor then GameTooltip:SetOwner(Column, Anchor) end`, so an
+/// answer that never equals what the setter was handed would re-own the plate every OnUpdate; and
+/// `pfUI/modules/tooltip.lua:97` compares against the literal `"ANCHOR_NONE"`.
+#[test]
+fn tooltip_anchor_type_round_trips_every_reachable_mode() {
+    let s = script();
+    s.run(
+        r#"
+        AnchorTip = CreateFrame("GameTooltip", "AnchorTip")
+        AnchorOwner = CreateFrame("Frame", "AnchorOwner")
+        "#,
+    )
+    .unwrap();
+
+    // Arity 1, kind string, and NO nil leg — the shapes row is `(string)` with no alternative, so
+    // a plate nobody has owned still answers a string.
+    assert_eq!(s.arity("AnchorTip:GetAnchorType()").unwrap(), 1, "arity 1");
+    assert_eq!(
+        s.eval::<String>("return type(AnchorTip:GetAnchorType())")
+            .unwrap(),
+        "string",
+        "kind string, never nil"
+    );
+    assert_eq!(
+        s.eval::<String>("return AnchorTip:GetAnchorType()")
+            .unwrap(),
+        "ANCHOR_NONE",
+        "a plate nothing has owned is anchored to nothing"
+    );
+
+    // All NINE modes SetOwner accepts, each answered back verbatim — ANCHOR_PRESERVE included,
+    // which the reference stores like any other rather than resolving back to what it preserved.
+    for mode in [
+        "ANCHOR_RIGHT",
+        "ANCHOR_LEFT",
+        "ANCHOR_TOPRIGHT",
+        "ANCHOR_TOPLEFT",
+        "ANCHOR_BOTTOMRIGHT",
+        "ANCHOR_BOTTOMLEFT",
+        "ANCHOR_CURSOR",
+        "ANCHOR_NONE",
+        "ANCHOR_PRESERVE",
+    ] {
+        s.run(&format!(r#"AnchorTip:SetOwner(AnchorOwner, "{mode}")"#))
+            .unwrap();
+        assert_eq!(
+            s.eval::<String>("return AnchorTip:GetAnchorType()")
+                .unwrap(),
+            mode,
+            "round trip through SetOwner"
+        );
+    }
+
+    // Lower case in, the reference's canonical spelling out — SetOwner already folds the token.
+    s.run(r#"AnchorTip:SetOwner(AnchorOwner, "anchor_left")"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return AnchorTip:GetAnchorType()")
+            .unwrap(),
+        "ANCHOR_LEFT"
+    );
+
+    // An anchor SetOwner does not recognise is the binding's zero-initialised local, mode 0 —
+    // silently, with no raise (`0x53120d`, and no `luaL_error` in the compare chain). Ours adds a
+    // warning the reference does not have, which is a diagnostic and not API surface.
+    s.run(r#"AnchorTip:SetOwner(AnchorOwner, "ANCHOR_SIDEWAYS")"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return AnchorTip:GetAnchorType()")
+            .unwrap(),
+        "ANCHOR_LEFT"
+    );
+    assert!(
+        s.warnings().iter().any(|w| w.contains("ANCHOR_SIDEWAYS")),
+        "the unrecognised anchor is still reported to us: {:?}",
+        s.warnings()
+    );
 }

@@ -400,7 +400,19 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// diffuse lobe and the MOLT points are already summed in and cannot be subtracted back out — and
 /// a caller that reached for the *scene* ambient instead, which is what this replaces, tinted
 /// every indoor trail with the sky.
-const CEILING: usize = 179;
+/// And 179 → 180: `weather::WeatherState`, a PUBLISH — the weather driver's own state, reached by
+/// `crate::cvars` because one byte of it (`weather_density`) is a **player setting** and 2181 gave
+/// it its switch. It is the same shape as `clutter::ClutterConfig` two rows of that table up: a
+/// resource the engine owns and the options window writes exactly one field of, welded to its CVar
+/// by `registered_defaults_mirror_the_code_truths`. Published as the state rather than as a
+/// density-only door for the reason the two entries above give in reverse — there is no
+/// reconstruction to get wrong here, the field is a `u8` the engine reads directly, and a
+/// one-field wrapper would be a second name for the same byte that the weld test would then have
+/// to hold in step with both sides. It was already on the far side of the wall as an INSTRUMENT
+/// item (the `#[cfg(feature = "dev")]` weather panel is its only other namer); what changed is
+/// that a game module names it now, which is exactly the crossing this gate exists to make
+/// visible.
+const CEILING: usize = 180;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

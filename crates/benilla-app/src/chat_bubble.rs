@@ -82,7 +82,7 @@ use crate::entities::StandBoxHeight;
 use crate::net::{Embodied, Guid, NetEntity, SelfGuid};
 use crate::ui_chat::{default_color, ChatEventKind};
 use crate::ui_pass::{overlay_z, UiQuad, UiQuadAppend, UiQuads, UvRect};
-use crate::ui_text::{layout_text_quads, measure_text, FontSpec, Justify, UiFontAtlas};
+use crate::ui_text::{layout_text_quads, measure_text, FontSpec, Justify, TextSeat, UiFontAtlas};
 use crate::vplates::{device_snap, gx_px, plate_basis, text_px, VPlateSet, VPlates};
 use benilla_assets::{AssetSet, WorldAssets};
 use benilla_world::view::WorldCamera;
@@ -745,6 +745,13 @@ fn draw_bubble(
         },
         z + Z_TEXT,
         spec,
+        // The bubble frame seats on the DEVICE pixel grid ([`device_snap`], 1398) and slides with
+        // the speaker; its text must be rigid against it. Snapping the block top on the UI's
+        // logical grid instead made the text pop a whole px every second step the frame took —
+        // the V-plate's defect at the sibling site, exactly as 1398 found the snap itself missing
+        // here. Unlike the plate this rect is real (a margin box), so the degenerate-rect
+        // carve-out never covered it.
+        TextSeat::Exact,
     );
     drop(e);
     if trace {

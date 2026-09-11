@@ -660,12 +660,7 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         open(&mut s);
         for call in ["GetStablePetInfo(2)", "GetStablePetInfo(9)"] {
-            assert_eq!(
-                s.eval::<i64>(&format!("return select('#', {call})"))
-                    .unwrap(),
-                5,
-                "{call} arity"
-            );
+            assert_eq!(s.arity(call).unwrap(), 5, "{call} arity");
             // Still falsy on the reference's own `if ( GetStablePetInfo(i) )` test.
             assert!(s.eval::<bool>(&format!("return not {call}")).unwrap());
             assert_eq!(

@@ -1,15 +1,17 @@
 //! Region method-table cluster: **layout** — size, anchors and the resolved-rect readers.
 //! Split out of `region.rs` at the 0716 file-size budget.
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::layout::{Anchor, Point};
+use crate::script::object::anchor_args::{parse_set_all_points, resolve_rel_target};
 use crate::script::object::{anchor_bits_eq, frame_wrapper, point_name};
 use crate::script::{Model, SCREEN};
 
 /// Resolve `self` (a region wrapper) to its live [`RegionHandle`].
 use super::{
-    measured_wh, region_handle_of, region_owner_id, region_set_point, resolve_target, size_bits_eq,
+    measured_wh, region_handle_of, region_ladder_context, region_owner_id, region_set_point,
+    size_bits_eq,
 };
 
 /// Populate `m`'s layout methods (see the module doc).
@@ -56,25 +58,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    m.set(
-        "SetSize",
-        lua.create_function(|lua, (this, w, h): (Table, f32, f32)| {
-            let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            let d = model.region_data.entry(rh).or_default();
-            let new = Some((w, h));
-            let changed = !size_bits_eq(d.size, new);
-            d.size = new;
-            if changed {
-                // A size write moves no edge and no roster membership (decision 1388) — and on
-                // a FontString the width is the WRAP width, a measure-key input, so it names
-                // itself on the measure ledger too.
-                model.touch_layout_region(rh);
-                model.touch_measure(rh);
-            }
-            Ok(())
-        })?,
-    )?;
+    // **No `SetSize`** — the frame twin's note in `object/layout_methods.rs` applies here
+    // unchanged: an Era verb 1.12's Region map does not carry (decision 2142).
 
     m.set(
         "GetWidth",
@@ -123,11 +108,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // XML anchors regions to sibling regions everywhere — merchant label plate → `$parentSlot`).
     m.set(
         "SetPoint",
-        lua.create_function(
-            |lua, (this, p, a2, a3, a4, a5): (Table, String, Value, Value, Value, Value)| {
-                region_set_point(lua, &this, &p, [a2, a3, a4, a5])
-            },
-        )?,
+        lua.create_function(|lua, (this, rest): (Table, MultiValue)| {
+            region_set_point(lua, &this, &rest)
+        })?,
     )?;
 
     m.set(
@@ -136,10 +119,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
-            let changed = !d.anchors.is_empty();
+            // Names its node, the frame twin's rule and for the frame twin's reason (decision
+            // 2114): clearing every anchor is a retarget onto an EMPTY target list, so the cached
+            // graph's edges are unlinked rather than the whole graph re-derived.
+            let old: Option<Vec<u32>> =
+                (!d.anchors.is_empty()).then(|| d.anchors.iter().map(|a| a.relative_to).collect());
             d.anchors.clear();
-            if changed {
-                model.touch_layout();
+            if let Some(old) = old {
+                model.touch_layout_retarget_region(rh, &old, &[]);
             }
             Ok(())
         })?,
@@ -147,13 +134,15 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 
     m.set(
         "SetAllPoints",
-        lua.create_function(|lua, (this, target): (Table, Value)| {
+        lua.create_function(|lua, (this, rest): (Table, MultiValue)| {
             let rh = region_handle_of(lua, &this)?;
-            // The `_G` read runs before the guard — see `region::prefetch_region_target`.
-            let named = super::prefetch_region_target(lua, &target, rh);
+            // `who`/`$parent` first, then the `_G` read, then the guard — `region_ladder_context`.
+            let (who, base) = region_ladder_context(lua, rh);
+            let target = parse_set_all_points(lua, rest.front(), &base);
             let mut model = lua.app_data_mut::<Model>().expect("model");
+            let me = model.region_id(rh);
             let owner = region_owner_id(&mut model, rh);
-            let rel_id = resolve_target(&mut model, &target, named.as_ref(), owner);
+            let rel_id = resolve_rel_target(&model, &target, &who, "SetAllPoints", me, owner)?;
             let pair = [
                 Anchor::new(Point::TopLeft, rel_id, Point::TopLeft, 0.0, 0.0),
                 Anchor::new(Point::BottomRight, rel_id, Point::BottomRight, 0.0, 0.0),

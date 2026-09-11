@@ -1195,8 +1195,15 @@ mod tests {
                 count: None,
             }]
         );
+        // `local _, _, locked` — the 1.12 five-value shape, the same destructuring the positive
+        // assertion above uses. This read `local i = … return i.isLocked` until 2171: a leftover
+        // of the 1.14 `containerInfo` TABLE that 1187 reached for and 1199 corrected in the
+        // binding without correcting it here. It passed anyway, because 5.1's string metatable
+        // made indexing the `texture` string a silent `nil` and `nil` is a passing `!bool`. Taking
+        // the metatable away — 1.12 has none — is what turned a test that asserted nothing into a
+        // test that raises.
         assert!(!s
-            .eval::<bool>("local i = GetContainerItemInfo(0, 1) return i.isLocked")
+            .eval::<bool>("local _, _, locked = GetContainerItemInfo(0, 1) return locked")
             .unwrap());
     }
 
@@ -1252,8 +1259,10 @@ mod tests {
                 count: None,
             }]
         );
+        // The 1.12 five-value shape — see the sibling test above for what this used to read and
+        // why it passed while asserting nothing (2171).
         assert!(!s
-            .eval::<bool>("local i = GetContainerItemInfo(0, 1) return i.isLocked")
+            .eval::<bool>("local _, _, locked = GetContainerItemInfo(0, 1) return locked")
             .unwrap());
     }
 
@@ -1507,8 +1516,7 @@ mod tests {
         );
         assert_eq!(slot("-100"), -81, "negatives run off the line too");
         assert_eq!(
-            s.eval::<i64>("return select(\'#\', ContainerIDToInventoryID(99))")
-                .unwrap(),
+            s.arity("ContainerIDToInventoryID(99)").unwrap(),
             1,
             "one value on every non-raising path"
         );

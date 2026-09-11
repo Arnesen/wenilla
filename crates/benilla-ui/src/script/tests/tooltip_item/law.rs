@@ -23,11 +23,11 @@ fn item_line_law_and_red_requirements() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetItemById(871)
-        assert(tt:IsShown(), "SetItemById shows")
+        tt:BenillaSetItemById(871)
+        assert(tt:IsShown(), "BenillaSetItemById shows")
     "#,
     )
     .unwrap();
@@ -40,8 +40,10 @@ fn item_line_law_and_red_requirements() {
             "[ITEM_BIND_ON_EQUIP]",
             "[INVTYPE_2HWEAPON]",
             // School 0 is physical: the reference names no school word for it either.
-            "68 - 103 Damage",
-            "+ 2 - 4 [SCHOOL5] Damage",
+            // The first emitted slot takes the plain key, a later one the `PLUS_` twin, and a
+            // school'd slot the `_WITH_SCHOOL` arm — the word sits INSIDE the template.
+            "[DMG 68 - 103]",
+            "[+DMGS 2 - 4 [SCHOOL5]]",
             "[DPS 25.3]",
             // Display order, NOT wire order: the fixture feeds (Stamina, Strength) but the
             // 0x808e88 table prints Strength first (STR,AGI,STA,INT,SPI,HP,MANA).
@@ -95,10 +97,10 @@ fn red_lines_track_player_state() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot2"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetItemById(871)
+        tt:BenillaSetItemById(871)
     "#,
     )
     .unwrap();
@@ -122,7 +124,7 @@ fn red_lines_track_player_state() {
 /// The §5-verified families folded back 2026-07-10 (tooltip-content-law.md): SIGNABLE green,
 /// UNIQUE before STARTS_QUEST, LOCKED red, six-equal resistances collapse to the ALL line (and
 /// Holy never prints singly), a known taught spell reds "Already known", the description gold —
-/// and NO openable line: `SetItemById` is a template source, and the whole openable/readable/
+/// and NO openable line: `BenillaSetItemById` is a template source, and the whole openable/readable/
 /// creator tail rides the ref's item-OBJECT gate (`0x52e1c7`/`0x52e2e0` — byte-read 2026-07-20;
 /// the instance-tail law itself is in [`instance_tail_creator_and_readable`]).
 #[test]
@@ -154,10 +156,10 @@ fn verified_families_signable_locked_resists_known() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot5"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot5"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetItemById(5518)
+        tt:BenillaSetItemById(5518)
     "#,
     )
     .unwrap();
@@ -208,11 +210,39 @@ fn verified_families_signable_locked_resists_known() {
     s.run(
         r#"
         TT:SetOwner(Slot5, "ANCHOR_RIGHT")
-        TT:SetItemById(5519)
+        TT:BenillaSetItemById(5519)
         assert(TT:NumLines() == 1, "a lone Holy resist prints no line, got " .. TT:NumLines())
     "#,
     )
     .unwrap();
+    // …and the five that DO print come out in the builder's own order, which is not the field
+    // order: `0x52c8ad` runs `edi` 1..5 reading school `(edi == 1) ? 6 : edi`, so **Arcane leads**
+    // and Holy is displaced rather than skipped (decision 2080 named this; we printed plain field
+    // order, Fire first and Arcane last).
+    s.set_item_template(
+        5520,
+        ItemTemplateView {
+            name: "Prismatic Band".into(),
+            quality: 1,
+            resistances: [9, 1, 2, 3, 4, 5],
+            ..Default::default()
+        },
+    );
+    s.run(r#"TT:SetOwner(Slot5, "ANCHOR_RIGHT"); TT:BenillaSetItemById(5520)"#)
+        .unwrap();
+    let lines = lines_of(&mut s);
+    let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(
+        &texts[1..],
+        [
+            "[RESIST_SINGLE +5 [SCHOOL6]]",
+            "[RESIST_SINGLE +1 [SCHOOL2]]",
+            "[RESIST_SINGLE +2 [SCHOOL3]]",
+            "[RESIST_SINGLE +3 [SCHOOL4]]",
+            "[RESIST_SINGLE +4 [SCHOOL5]]",
+        ],
+        "Arcane, Fire, Nature, Frost, Shadow — and the +9 Holy never prints"
+    );
     assert!(s.take_errors().is_empty());
 }
 
@@ -243,10 +273,10 @@ fn proficiency_and_reputation_reds() {
     s.set_player_req_state(req.clone());
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot9"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot9"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetItemById(871)
+        tt:BenillaSetItemById(871)
     "#,
     )
     .unwrap();
@@ -281,7 +311,7 @@ fn proficiency_and_reputation_reds() {
     req2.proficiency.insert(2, 1 << 0);
     req2.rep_ranks.insert(72, 4);
     s.set_player_req_state(req2.clone());
-    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(871)"#)
+    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(871)"#)
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
@@ -300,7 +330,7 @@ fn proficiency_and_reputation_reds() {
     let mut alt = item;
     alt.proficiency_alt = Some(0);
     s.set_item_template(871, alt);
-    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(871)"#)
+    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(871)"#)
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
@@ -321,6 +351,7 @@ fn proficiency_and_reputation_reds() {
             name: "Left-Hand Blade".into(),
             class: 2,
             subclass: 15,
+            sub_class_display: Some("Dagger".into()),
             inventory_type: 22,
             ..Default::default()
         },
@@ -328,7 +359,7 @@ fn proficiency_and_reputation_reds() {
     let mut req3 = req2.clone();
     req3.proficiency.insert(2, 1 << 15);
     s.set_player_req_state(req3.clone());
-    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(872)"#)
+    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(872)"#)
         .unwrap();
     let lines = lines_of(&mut s);
     // `INVTYPE_WEAPONOFFHAND`, NOT `INVTYPE_SHIELD` — one enUS sentence, two keys, and only the
@@ -345,7 +376,7 @@ fn proficiency_and_reputation_reds() {
     );
     req3.can_dual_wield = true;
     s.set_player_req_state(req3);
-    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(872)"#)
+    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(872)"#)
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
@@ -365,7 +396,7 @@ fn proficiency_and_reputation_reds() {
             ..Default::default()
         },
     );
-    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(118)"#)
+    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(118)"#)
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
@@ -387,7 +418,7 @@ fn proficiency_and_reputation_reds() {
     );
     s.run(
         r#"
-        TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(889)
+        TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(889)
         assert(TTTextLeft2:GetText() == "[INVTYPE_FINGER]")
         assert(TTTextRight2:GetText() == nil or TTTextRight2:GetText() == "",
                "a ring never prints its Miscellaneous type")
@@ -416,13 +447,13 @@ fn required_level_one_is_hidden() {
     }
     s.run(
         r#"
-        local a = CreateFrame("Button", "SlotR"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "SlotR"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
-        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetItemById(11)
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:BenillaSetItemById(11)
         assert(tt:NumLines() == 1, "req 0: name only, got " .. tt:NumLines())
-        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetItemById(12)
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:BenillaSetItemById(12)
         assert(tt:NumLines() == 1, "req 1 hides like req 0, got " .. tt:NumLines())
-        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetItemById(13)
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:BenillaSetItemById(13)
         assert(tt:NumLines() == 2, "req 2 prints, got " .. tt:NumLines())
         assert(TTTextLeft2:GetText() == "[MIN_LEVEL 2]")
     "#,
@@ -515,7 +546,7 @@ fn charter_lines_sit_between_the_name_and_the_signable_line() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "SlotC"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "SlotC"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetBagItem(0, 1)
     "#,
@@ -651,7 +682,7 @@ fn instance_tail_creator_and_readable() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "SlotL"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "SlotL"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetBagItem(0, 1)
     "#,
@@ -770,7 +801,7 @@ fn a_runtime_bound_instance_overrides_the_bind_line_to_soulbound() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(Slot, "ANCHOR_RIGHT")
         tt:SetBagItem(0, 1)
@@ -804,11 +835,202 @@ fn a_runtime_bound_instance_overrides_the_bind_line_to_soulbound() {
     assert_eq!(bind_line(&mut s).0, "[ITEM_BIND_ON_EQUIP]");
 
     // Control 2: a TEMPLATE hover carries no instance at all, so nothing can override.
-    s.run(r#"TT:SetItemById(871)"#).unwrap();
+    s.run(r#"TT:BenillaSetItemById(871)"#).unwrap();
     assert_eq!(bind_line(&mut s).0, "[ITEM_BIND_ON_EQUIP]");
 
     // Control 3: the override's other arm is ITEM_BIND_QUEST — the same text 4|5 already print.
     s.run(r#"TT:SetBagItem(0, 3)"#).unwrap();
     assert_eq!(bind_line(&mut s).0, "[ITEM_BIND_QUEST]");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The damage block's five-arm template matrix** (wow-re
+/// `tooltip-damage-matrix-and-container-slots.md` §D1, VERIFIED; decision 2080 named this cell and
+/// 2158 converted it). Each arm here names the leg it takes: the school predicate is the slot's
+/// school NUMBER, the ammo predicate is `ItemClass == 6` alone, the single predicate compares the
+/// two ROUNDED bounds, and the first/`PLUS_` flag is per-item — a skipped slot does not consume it.
+/// The rounding is `floor(min)` / `ceil(max)`, not a round-half pair.
+#[test]
+fn damage_matrix_arms_and_the_first_flag() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let show = |s: &mut UiScript, id: u32, v: ItemTemplateView| -> Vec<String> {
+        s.set_item_template(id, v);
+        s.run(&format!(
+            r#"local a = CreateFrame("Button", "S{id}"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+               if not TT then CreateFrame("GameTooltip", "TT") end
+               TT:SetOwner(S{id}, "ANCHOR_RIGHT"); TT:BenillaSetItemById({id})"#
+        ))
+        .unwrap();
+        lines_of(s).into_iter().map(|(t, _)| t).collect()
+    };
+    let weapon = |damages: Vec<(f32, f32, u32)>| ItemTemplateView {
+        name: "Probe".into(),
+        class: 2,
+        subclass: 7,
+        sub_class_display: Some("Sword".into()),
+        inventory_type: 13,
+        damages,
+        delay_ms: 2600,
+        ..Default::default()
+    };
+
+    // The plain two-number arm, the SKIP, and the PLUS_ twin — the skipped middle slot does not
+    // consume the first flag, so slot 2 still prints as a later line, and only the FIRST emitted
+    // line carries the Speed cell.
+    let lines = show(
+        &mut s,
+        900,
+        weapon(vec![(5.0, 9.0, 0), (0.0, 0.0, 0), (3.0, 6.0, 0)]),
+    );
+    assert_eq!(
+        &lines[2..5],
+        // (9+5)/2 + (6+3)/2 = 11.5 raw, over 2.6 s.
+        ["[DMG 5 - 9]", "[+DMG 3 - 6]", "[DPS 4.4]"],
+        "plain then PLUS_, the zero slot skipped: {lines:?}"
+    );
+    let speed: String = s
+        .eval("return TTTextRight3:GetText() or ''")
+        .expect("right cell 3");
+    assert_eq!(speed, "Speed 2.60", "the SPEED cell is the first line's");
+    let later: String = s
+        .eval("return TTTextRight4:GetText() or ''")
+        .expect("right cell 4");
+    assert_eq!(later, "", "a later damage line renders left-only");
+
+    // floor(min) / ceil(max) on fractional bounds — Fang of the Mystics' real numbers. A
+    // round-half pair would say "39 - 86"; the biased pair says 38.
+    let lines = show(&mut s, 901, weapon(vec![(38.7, 85.7, 0)]));
+    assert_eq!(lines[2], "[DMG 38 - 86]", "{lines:?}");
+
+    // The SINGLE arm — the two ROUNDED bounds equal. It is a no-school, non-ammo leaf only.
+    let lines = show(&mut s, 902, weapon(vec![(7.0, 7.0, 0)]));
+    assert_eq!(lines[2], "[DMG1 7]", "{lines:?}");
+    // …and a school'd slot with equal bounds still takes the WITH_SCHOOL arm, two identical
+    // numbers and all: there is no SINGLE_…_WITH_SCHOOL template.
+    let lines = show(&mut s, 903, weapon(vec![(7.0, 7.0, 4)]));
+    assert_eq!(lines[2], "[DMGS 7 - 7 [SCHOOL4]]", "{lines:?}");
+
+    // AMMO is `ItemClass == 6` alone. The `%g` value is the two rounded bounds averaged and is
+    // NOT divided by anything — Rough Arrow's 1–2 reads 1.5 — and ammo gets neither a Speed
+    // cell nor a DPS line, because both gate on class 2.
+    let arrow = ItemTemplateView {
+        name: "Rough Arrow".into(),
+        class: 6,
+        subclass: 2,
+        sub_class_display: Some("Arrow".into()),
+        // `ItemClass.dbc` row 6's own name — the LEFT cell for a class-6 item, which never
+        // consults the InventoryType key table.
+        item_type: Some("Projectile".into()),
+        inventory_type: 24,
+        damages: vec![(1.0, 2.0, 0)],
+        delay_ms: 3000,
+        ..Default::default()
+    };
+    let lines = show(&mut s, 904, arrow.clone());
+    // The slot|type line above it reads "Projectile | Arrow": a class-6 item takes
+    // `ItemClass.dbc`'s own row-6 name on the LEFT (`0x52c0bc`, read verbatim — never a
+    // GlobalString), not the empty `INVTYPE_AMMO` key.
+    assert_eq!(lines[1], "Projectile", "{lines:?}");
+    let ty: String = s
+        .eval("return TTTextRight2:GetText() or ''")
+        .expect("type cell");
+    assert_eq!(
+        ty, "Arrow",
+        "the RIGHT cell is unchanged on the class-6 leg"
+    );
+    assert_eq!(lines[2], "[AMMO 1.5]", "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.starts_with("[DPS")),
+        "ammo never reaches the DPS line: {lines:?}"
+    );
+    let right: String = s
+        .eval("return TTTextRight3:GetText() or ''")
+        .expect("right cell");
+    assert_eq!(right, "", "ammo gets no Speed cell either");
+    let lines = show(
+        &mut s,
+        905,
+        ItemTemplateView {
+            damages: vec![(1.0, 2.0, 3), (5.0, 6.0, 3)],
+            ..arrow
+        },
+    );
+    assert_eq!(
+        &lines[2..4],
+        ["[AMMOS 1.5 [SCHOOL3]]", "[+AMMOS 5.5 [SCHOOL3]]"],
+        "{lines:?}"
+    );
+
+    // A non-weapon that carries damage takes the ordinary arms but neither class-2 gate.
+    let lines = show(
+        &mut s,
+        906,
+        ItemTemplateView {
+            name: "Odd Trinket".into(),
+            class: 4,
+            subclass: 0,
+            hide_subclass: true,
+            inventory_type: 12,
+            damages: vec![(4.0, 8.0, 0)],
+            delay_ms: 2000,
+            ..Default::default()
+        },
+    );
+    assert_eq!(lines[2], "[DMG 4 - 8]", "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.starts_with("[DPS")),
+        "DPS is weapons-only: {lines:?}"
+    );
+}
+
+/// **The bag line** (wow-re §D2, VERIFIED): its gate is `InventoryType == 0x12` alone — never the
+/// slot count — and its second hole is the same `ItemSubClass` DisplayName the type cell reads, so
+/// the noun is per-subclass. A container whose row names nothing prints no slot line at all.
+#[test]
+fn container_slots_line_names_its_subclass() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let bag = |sub: u32, name: Option<&str>, slots: u32| ItemTemplateView {
+        name: "Pouch".into(),
+        class: 1,
+        subclass: sub,
+        sub_class_display: name.map(str::to_string),
+        inventory_type: 18,
+        container_slots: slots,
+        ..Default::default()
+    };
+    let show = |s: &mut UiScript, id: u32, v: ItemTemplateView| -> Vec<String> {
+        s.set_item_template(id, v);
+        s.run(&format!(
+            r#"local a = CreateFrame("Button", "B{id}"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+               if not TT then CreateFrame("GameTooltip", "TT") end
+               TT:SetOwner(B{id}, "ANCHOR_RIGHT"); TT:BenillaSetItemById({id})"#
+        ))
+        .unwrap();
+        lines_of(s).into_iter().map(|(t, _)| t).collect()
+    };
+
+    assert_eq!(
+        show(&mut s, 910, bag(0, Some("Bag"), 16))[1],
+        "[SLOTS 16 Bag]"
+    );
+    assert_eq!(
+        show(&mut s, 911, bag(1, Some("Soul Bag"), 24))[1],
+        "[SLOTS 24 Soul Bag]",
+        "the noun is the subclass's, not a constant"
+    );
+    // A quiver is InventoryType 18 like every other container — INVTYPE_QUIVER is a dead slot
+    // name in 1.12 — so it reaches this line and names itself.
+    let mut quiver = bag(2, Some("Quiver"), 8);
+    quiver.class = 11;
+    assert_eq!(show(&mut s, 912, quiver)[1], "[SLOTS 8 Quiver]");
+    // The gate never tests the slot count.
+    assert_eq!(
+        show(&mut s, 913, bag(0, Some("Bag"), 0))[1],
+        "[SLOTS 0 Bag]"
+    );
+    // No row name: NEITHER this line nor the ordinary slot|type one.
+    let lines = show(&mut s, 914, bag(0, None, 16));
+    assert_eq!(lines.len(), 1, "name line only: {lines:?}");
 }

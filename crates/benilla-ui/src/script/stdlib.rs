@@ -7,8 +7,8 @@
 //!   not anti-automation, but running untrusted addon Lua still means no filesystem/OS/native reach.
 //! - **Stdlib** ([`install`]): the nine bare-global aliases probe A found in the real corpus
 //!   (`format`/`strlen`/`gsub`/`strsub`/`strupper`/`tinsert`/`getn`/`tremove`/`strfind`), plus
-//!   `strlower`/`strrep`, `getglobal`/`setglobal`, the `strsplit`/`strjoin`/`strtrim`/`strconcat`
-//!   family, `wipe`, `tostringall`, and — the one non-trivial piece — a `string.format` replacement
+//!   `strlower`/`strrep`, `getglobal`/`setglobal`, and — the one non-trivial piece — a
+//!   `string.format` replacement
 //!   that supports Blizzard's positional `%N$` extension (probe A confirmed stock 5.1 rejects it).
 //!
 //! ## The positional `format` (`%N$`)
@@ -24,6 +24,17 @@
 
 use mlua::{Lua, Value, Variadic};
 
+/// The Lua-level message inside an mlua error — mlua decorates its `Display` with a category
+/// word (`syntax error: `, `runtime error: `) that the reference's own `lua_pushstring` leg never
+/// adds. `loadstring`'s second return is that message verbatim, so the decoration is stripped.
+pub(super) fn lua_message(e: &mlua::Error) -> String {
+    match e {
+        mlua::Error::SyntaxError { message, .. } => message.clone(),
+        mlua::Error::RuntimeError(m) => m.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Sandbox the VM: strip filesystem/OS/native reach, keep a `debugstack` stub, and make chunk
 /// loading text-only.
 pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
@@ -38,39 +49,58 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
         g.set(name, Value::Nil)?;
     }
 
-    // `debugstack([start [, count1 [, count2]]])` — a REAL traceback, not the `""` stub this used
-    // to be.
+    // `debugstack([start [, count1 [, count2]]])` — the client's own traceback, **frames only**.
     //
-    // The stub was justified as "real addons call it in error paths; returning \"\" keeps them
-    // running", and that was true of the addons that only ever DISPLAY it. It is false of the ones
-    // that PARSE it, and the biggest family in the corpus is one of those: `FuBarPlugin-2.0.lua:752`
-    // derives every plugin's own folder with
-    // `string.find(debugstack(6, 1, 0), "\\AddOns\\(.*)\\")`, then formats the capture into an
-    // icon path. Against `""` the find returns nil, `folderName` stays nil, and the plugin dies in
-    // `format` — 20 corpus addons, every one of them a FuBar plugin, and the error surfaced as a
-    // `format` complaint three frames away from the cause.
+    // The stub this replaced returned `""`, which was justified as "real addons only display it".
+    // False: the corpus PARSES it, three different ways, and every one of them reads the string's
+    // shape rather than its contents.
     //
-    // `start` is the stack level to begin at and defaults to 1, matching the client's own callers
-    // (`debugstack(6, 1, 0)` walks past FuBar's own wrapper frames to the plugin file). The two
-    // count arguments bound how many frames are shown at the top and bottom; mlua's traceback does
-    // not take them, so they are accepted and ignored — stated rather than silently dropped, and
-    // harmless because every corpus caller passes a shape whose whole purpose is "give me the
-    // frames", never an exact line count.
+    // **There is no `stack traceback:` header, and line 1 is the caller's frame** (decision 2121).
+    // mlua's `Lua::traceback` is `luaL_traceback`, which emits that header — and the header cost a
+    // whole addon family its saved variables. `AceDB-2.0:RegisterDB` (`AceDB-2.0.lua:742`) does
+    //
+    //     local addonName = string.gsub(debugstack(), ".-\n.-\\AddOns\\(.-)\\.*", "%1")
+    //
+    // — skip exactly ONE line (its own frame), read the folder out of the NEXT one (its caller's).
+    // With a header in front, the "next" line is AceDB's own chunk, so every Ace2 addon resolved to
+    // whichever addon happened to ship the winning copy of the library. `AceDB.addonsLoaded` has
+    // that one flagged already, so `RegisterDB` took its *immediate* branch and bound `db.raw` to a
+    // fresh table at the addon's FILE SCOPE — before the SavedVariables chunk runs. The chunk then
+    // rebound the global and `db.raw` kept pointing at the orphan, so Bartender2 printed
+    // `Creating new DB` at every login and its file was frozen at what a first-run reset writes.
+    // Measured live: `Bartender.db.raw == BarDB` was **false**.
+    //
+    // Two more corpus readers pin the same shape independently, and they are the reason this emits
+    // Lua 5.0's frame wording rather than 5.4's:
+    //   - `AceLibrary.lua:70` takes the FIRST line whole (`string.gsub(stack, "\n.*", "")`) and
+    //     matches it against `".*\\(.*).lua:%d+: .*"` — so line 1 is a frame, `<src>:<line>: …`,
+    //     with no leading newline and no header above it.
+    //   - `AceLibrary.lua:139`'s `argCheck` reads the function name with `"([`<].-['>])"` — a
+    //     BACKTICK or `<` opening it. 5.0 writes ``in function `name'``; 5.4 writes
+    //     `in function 'name'`, which that pattern cannot match at all.
+    //
+    // So the body is `db_errorfb`'s (Lua 5.0 `ldblib.c`) with its header line removed: per frame
+    // `short_src`, then `:line` when there is one, then one of ``  in function `name' ``,
+    // `" in main chunk"`, `" ?"` (a C function) or `" in function <src:linedefined>"`.
+    //
+    // `start` is the level to begin at, default 1 = the caller (level 0 is this binding itself).
+    // `count1`/`count2` are 5.0's `LEVELS1`/`LEVELS2`: show `count1` frames from the top, then
+    // `...`, then the last `count2`. They are honoured rather than ignored because
+    // `FuBarPlugin-2.0.lua:752` passes `debugstack(6, 1, 0)` and reads the capture with a GREEDY
+    // `"\\AddOns\\(.*)\\"` — extra frames would hand it the LAST addon on the stack instead
+    // of its own.
     g.set(
         "debugstack",
         lua.create_function(|lua, args: Variadic<Value>| {
-            let start = match args.first() {
-                Some(Value::Integer(i)) => *i as usize,
-                Some(Value::Number(n)) => *n as usize,
-                _ => 1,
+            let num = |v: Option<&Value>, default: usize| match v {
+                Some(Value::Integer(i)) => usize::try_from(*i).unwrap_or(0),
+                Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
+                _ => default,
             };
-            // A level past the top of the stack is not an error here, it is an empty trace — the
-            // same shape the old stub returned, so a caller that guessed too deep still gets a
-            // string rather than a raise.
-            Ok(lua
-                .traceback(None, start)
-                .and_then(|t| t.to_str().map(|s| s.to_owned()))
-                .unwrap_or_default())
+            let start = num(args.first(), 1);
+            let count1 = num(args.get(1), 12);
+            let count2 = num(args.get(2), 10);
+            Ok(traceback_frames(lua, start, count1, count2))
         })?,
     )?;
 
@@ -82,10 +112,28 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
     // `luaL_loadbuffer`/`luaX_setinput` — the same door `loadstring` goes through (decision 1193).
     let loadstring = lua.create_function(
         |lua, (src, chunkname): (mlua::String, Option<mlua::String>)| {
-            let bytes = crate::source::chunk(&src.as_bytes()).to_vec();
+            let raw = src.as_bytes();
+            let bytes = crate::source::chunk(&raw).to_vec();
+            // **The chunk name is the caller's string VERBATIM, and it defaults to the SOURCE.**
+            // `luaB_loadstring 0x703280` is stock 5.0: `0x70329a` pushes `edi` — the pointer
+            // `luaL_checklstring` just returned — as `luaL_optlstring`'s `def`, so a nameless
+            // chunk is named by its own text and `luaO_chunkid 0x6f5c40` renders it by its third
+            // rule, `[string "…"]`, cut at the first newline and at the budget. There is no
+            // `.rdata` literal on that path at all (wow-5875-re `lua-dialect.md` §11, executed).
+            //
+            // We used to prepend `=`, which is `luaO_chunkid`'s "print this verbatim, undecorated"
+            // marker — so an explicit name lost its `[string "…"]` wrapper and a `@path` name kept
+            // a literal `@`, and a nameless chunk answered to `(loadstring)`, a literal the image
+            // does not contain. Both are player-visible: they are the prefix of every error a
+            // `loadstring` chunk raises.
+            //
+            // The name is taken from the **un-advanced** bytes on purpose: `luaL_loadbuffer
+            // 0x6f5690` strips a UTF-8 BOM from the buffer, but `0x703296` computed the name
+            // before that, so a BOM'd source compiles without its BOM while its chunk name still
+            // begins with one.
             let name = match &chunkname {
-                Some(n) => format!("={}", n.to_str()?),
-                None => "=(loadstring)".to_string(),
+                Some(n) => String::from_utf8_lossy(&n.as_bytes()).into_owned(),
+                None => String::from_utf8_lossy(&raw).into_owned(),
             };
             let chunk = lua
                 .load(bytes)
@@ -93,7 +141,14 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
                 .set_mode(mlua::ChunkMode::Text);
             match chunk.into_function() {
                 Ok(f) => Ok((Value::Function(f), Value::Nil)),
-                Err(e) => Ok((Value::Nil, Value::String(lua.create_string(e.to_string())?))),
+                // `load_aux`'s failure leg pushes Lua's own message unchanged (`0x7032c6` nil,
+                // `0x7032d2` insert, `mov eax,2`). mlua's `Display` prefixes it with
+                // `syntax error: `, which is mlua's word and not the image's — an addon that shows
+                // the second return to a player would show that prefix too.
+                Err(e) => Ok((
+                    Value::Nil,
+                    Value::String(lua.create_string(lua_message(&e))?),
+                )),
             }
         },
     )?;
@@ -102,7 +157,7 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Install the WoW stdlib layer (aliases, `strsplit` family, positional `format`, …).
+/// Install the WoW stdlib layer (the bare-global aliases, positional `format`, …).
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // The default `geterrorhandler()` reports into the same channel a failed handler uses, so an
     // addon's `geterrorhandler()(msg)` surfaces where every other script error does rather than
@@ -138,7 +193,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 }
 
 /// The stdlib layer, in Lua. One place, so each alias is the one-liner the task calls for and the
-/// `format`/`strsplit` logic is readable. Runs once at construction.
+/// `format` logic is readable. Runs once at construction.
 const WOW_STDLIB: &str = r#"
 -- ── the bare string family ─────────────────────────────────────────────────────────────────────
 -- Every name here is present in the REAL 1.12 client's global table — the in-world `_G` captured
@@ -290,7 +345,9 @@ function GetZonePVPInfo()
     local t, f = __benilla_pvp_type, __benilla_pvp_faction
     if t == "" then t = nil end
     if f == "" then f = nil end
-    return t, f, __benilla_pvp_arena
+    -- isArena is 1/nil, never a Lua boolean: the reference's third slot is `(nil) | (number)`
+    -- like every other 1.12 predicate (decision 2118).
+    return t, f, __benilla_pvp_arena and 1 or nil
 end
 
 -- ── GetGameTime: the server's in-game clock (hour, minute) — the reference reads the
@@ -302,65 +359,24 @@ __benilla_game_hour = 0
 __benilla_game_minute = 0
 function GetGameTime() return __benilla_game_hour, __benilla_game_minute end
 
--- ── wipe / tostringall ─────────────────────────────────────────────────────────────────────────
-function wipe(t)
-    for k in pairs(t) do t[k] = nil end
-    return t
-end
-
--- 5.0 spelling throughout this file: a vararg function reads `arg`/`arg.n`, never `...` as a
--- value, because 1.12's Lua has no grammar for that (decision 2101) and neither does ours.
-function tostringall(...)
-    local n = arg.n
-    local t = {}
-    for i = 1, n do t[i] = tostring(arg[i]) end
-    return unpack(t, 1, n)
-end
-
--- ── the strsplit / strjoin / strtrim / strconcat family ────────────────────────────────────────
--- strsplit(delimiters, str [, limit]): each char of `delimiters` is a single-char delimiter;
--- returns the pieces as multiple values (empty fields preserved), matching WoW's behavior.
-function strsplit(delim, str, limit)
-    local set = "[" .. delim:gsub("(.)", "%%%1") .. "]"
-    local result = {}
-    local n = 0
-    local start = 1
-    while true do
-        if limit and n >= limit - 1 then
-            n = n + 1; result[n] = str:sub(start)
-            break
-        end
-        local s, e = str:find(set, start)
-        if not s then
-            n = n + 1; result[n] = str:sub(start)
-            break
-        end
-        n = n + 1; result[n] = str:sub(start, s - 1)
-        start = e + 1
-    end
-    return unpack(result, 1, n)
-end
-
--- strjoin(sep, ...): join the varargs with `sep`.
-function strjoin(sep, ...)
-    return table.concat(arg, sep, 1, arg.n)
-end
-
--- strconcat(...): concatenate all args (WoW's join with no separator).
-function strconcat(...)
-    return table.concat(arg, "", 1, arg.n)
-end
-
--- strtrim(s [, chars]): trim leading/trailing chars (default whitespace).
-function strtrim(s, chars)
-    chars = chars or " \t\r\n"
-    local set = chars:gsub("(.)", "%%%1")
-    return (s:gsub("^[" .. set .. "]*(.-)[" .. set .. "]*$", "%1"))
-end
+-- ── NOT here: wipe / tostringall / strsplit / strjoin / strconcat / strtrim ────────────────────
+-- Six 2.0+ names benilla used to define. 1.12 has none of them (absent from
+-- `reference/1.12-globals.tsv`, from the stock chain, and from every registrar table), and the
+-- reason they were kept — that the vanilla addon ecosystem assumes them — did not survive being
+-- checked: the corpus callers are multi-client addons whose vanilla paths raise on a real 1.12
+-- client too, or that define the name themselves under their own namespace (decision 2146).
+-- An addon reaching for one of these is reaching for a later client's API, and it should find
+-- what it would find there: nothing.
 
 -- ── Blizzard's positional string.format (%N$) ──────────────────────────────────────────────────
 do
-    local _format = string.format
+    -- `_find`/`_sub` are captured for the same reason `_format` is: this wrapper runs on every
+    -- `format` call in the UI and must not follow an addon's later replacement of `string.*`.
+    -- They are CALLS and not method syntax because 1.12 installs no string metatable, so
+    -- `fmt:find(...)` — which this used to be written as — raises there (decision 2101's
+    -- left-open item, closed in `lua50::install`). No chunk of ours may use what the reference's
+    -- VM cannot resolve; the parser enforces that for the grammar, and this is its runtime twin.
+    local _format, _find, _sub, _len = string.format, string.find, string.sub, string.len
     local CONV = "diouxXeEfgGqscp"  -- Lua 5.1 conversion letters
 
     local function reformat(fmt, ...)
@@ -368,7 +384,7 @@ do
             return _format(fmt, unpack(arg, 1, arg.n))
         end
         -- fast path: no "%<digit>" at all ⇒ definitely no positional spec.
-        if not fmt:find("%%%d") then
+        if not _find(fmt, "%%%d") then
             return _format(fmt, unpack(arg, 1, arg.n))
         end
 
@@ -377,33 +393,33 @@ do
         local order = {}       -- for each real conversion: the source arg index, or false=sequential
         local seen_pos, seen_seq = false, false
         local npieces, norder = 0, 0
-        local i, len = 1, string.len(fmt)
+        local i, len = 1, _len(fmt)
 
         while i <= len do
-            local c = fmt:sub(i, i)
+            local c = _sub(fmt, i, i)
             if c ~= "%" then
                 npieces = npieces + 1; pieces[npieces] = c
                 i = i + 1
-            elseif fmt:sub(i + 1, i + 1) == "%" then
+            elseif _sub(fmt, i + 1, i + 1) == "%" then
                 npieces = npieces + 1; pieces[npieces] = "%%"
                 i = i + 2
             else
                 local j = i + 1
-                local ds, de = fmt:find("^%d+%$", j)  -- optional N$
+                local ds, de = _find(fmt, "^%d+%$", j)  -- optional N$
                 if ds then
                     seen_pos = true
-                    norder = norder + 1; order[norder] = tonumber(fmt:sub(ds, de - 1))
+                    norder = norder + 1; order[norder] = tonumber(_sub(fmt, ds, de - 1))
                     j = de + 1
                 else
                     seen_seq = true
                     norder = norder + 1; order[norder] = false
                 end
                 -- copy flags/width/precision + the conversion letter
-                local ce = fmt:find("[" .. CONV .. "]", j)
+                local ce = _find(fmt, "[" .. CONV .. "]", j)
                 if not ce then
                     error("invalid conversion in format string", 2)
                 end
-                npieces = npieces + 1; pieces[npieces] = "%" .. fmt:sub(j, ce)
+                npieces = npieces + 1; pieces[npieces] = "%" .. _sub(fmt, j, ce)
                 i = ce + 1
             end
         end
@@ -591,6 +607,135 @@ fn format_epoch(secs: i64, fmt: &str) -> String {
     }
     out
 }
+/// `luaO_chunkid` (`0x6f5c40`), the reference's own — because `debugstack`'s frames carry
+/// `short_src`, and **it truncates from the FRONT** (decision 2121, wow-re
+/// `system/ui/scratch/debugstack-return-shape.md`).
+///
+/// An `@`-named chunk longer than [`CHUNKID_KEEP`] characters after the `@` becomes `"..."` plus
+/// its LAST [`CHUNKID_KEEP`], so the head of the path is what is lost. That is not a detail: over a
+/// 2189-file vanilla corpus, 60% of addon `.lua` chunk names truncate and **38% lose `\AddOns\`
+/// entirely**, which is exactly the substring three different corpus libraries search for. A client
+/// that keeps the whole name matches at a different frame than the reference for a third of library
+/// frames — silently, and in the addon's favour, which is worse than failing the same way.
+fn chunk_id(source: &str) -> String {
+    if let Some(rest) = source.strip_prefix('=') {
+        // A `=name` chunk is taken verbatim, clipped to the buffer from the front.
+        return rest.chars().take(LUA_IDSIZE - 1).collect();
+    }
+    if let Some(rest) = source.strip_prefix('@') {
+        let n = rest.chars().count();
+        if n <= CHUNKID_KEEP {
+            return rest.to_string();
+        }
+        let tail: String = rest.chars().skip(n - CHUNKID_KEEP).collect();
+        return format!("...{tail}");
+    }
+    // A string chunk: `[string "<first line, clipped>"]`.
+    let first = source.split('\n').next().unwrap_or_default();
+    let budget = LUA_IDSIZE - STRING_CHUNK_OVERHEAD;
+    if first.chars().count() > budget || first.len() < source.len() {
+        let clipped: String = first.chars().take(budget).collect();
+        format!("[string \"{clipped}...\"]")
+    } else {
+        format!("[string \"{first}\"]")
+    }
+}
+
+/// `LUA_IDSIZE` — the `short_src` buffer, 60 bytes including the terminator.
+const LUA_IDSIZE: usize = 60;
+
+/// How many characters of an `@`-named chunk survive truncation, tail-first: the reference keeps
+/// the last 52 behind a `"..."` (wow-re's measurement off `0x6f5c40`).
+const CHUNKID_KEEP: usize = 52;
+
+/// What `[string "…"]` costs the budget in the third `luaO_chunkid` arm.
+const STRING_CHUNK_OVERHEAD: usize = 17;
+
+/// One `debugstack` frame, in the reference's own wording (decision 2121):
+/// `short_src ":" [currentline ":"] DESC`, with the `\n` pushed **after** it by the caller.
+///
+/// `DESC` is the `*namewhat` switch at `0x7038fa`: a `f`/`g`/`l`/`m` name renders
+/// `` in function `%s' `` (`0x872c98`) — Lua **5.0**'s backtick quoting, which is what
+/// `AceLibrary.lua:139`'s `"([`<].-['>])"` needs and what 5.4's `'%s'` cannot satisfy — and
+/// otherwise the `*what` arms decide: `m` → `" in main chunk"` (`0x872c88`), `C` or `t` → `" ?"`
+/// (`0x872c6c`), else `" in function <%s:%d>"` (`0x872c70`).
+fn traceback_frame(d: &mlua::Debug) -> String {
+    let src = d.source();
+    let names = d.names();
+    let short = src
+        .source
+        .as_deref()
+        .map(chunk_id)
+        .or_else(|| src.short_src.as_deref().map(str::to_owned))
+        .unwrap_or_else(|| "?".to_string());
+    let mut line = String::with_capacity(short.len() + 32);
+    line.push_str(&short);
+    line.push(':');
+    if let Some(n) = d.current_line() {
+        line.push_str(&n.to_string());
+        line.push(':');
+    }
+    // A tail call has no calling instruction to name it from. 5.0 gave that frame `what == "tail"`
+    // and the `" ?"` arm; 5.4 hands us a `(tail call)` pseudo-frame instead, which lands in the
+    // same arm by the same rule.
+    let tail_call = src.what == "t" || short == "(tail call)";
+    match names.name.as_deref() {
+        Some(name) if !name.is_empty() && !tail_call => {
+            line.push_str(" in function `");
+            line.push_str(name);
+            line.push('\'');
+        }
+        _ if src.what == "main" => line.push_str(" in main chunk"),
+        _ if src.what == "C" || tail_call => line.push_str(" ?"),
+        _ => {
+            line.push_str(" in function <");
+            line.push_str(&short);
+            line.push(':');
+            line.push_str(&src.line_defined.unwrap_or(0).to_string());
+            line.push('>');
+        }
+    }
+    line
+}
+
+/// `debugstack`'s body — `0x703760`'s walk, which is stock Lua 5.0's `db_errorfb` with its header
+/// and its `"\n\t"` prefix replaced by a `"\n"` pushed **after** each frame (`0x703971`). That one
+/// substitution is the whole difference in shape, and it is why line 1 is a frame and why
+/// `AceDB-2.0`'s skip-one-line lands on its caller (decision 2121).
+///
+/// **`count1` bounds nothing on its own.** The loop formats while the level is `<= start + count1`
+/// (`0x703857` is `jbe`, unsigned ≤), and past that it probes `getstack(level + count2)`: a probe
+/// that FAILS steps back and prints that level as an ordinary frame, so `count1 = 1` returns *two*
+/// frames on a two-deep stack and one frame plus `"...\n"` on a three-deep one. Clamping to
+/// `count1` instead would diverge from the reference at exactly `depth == count1 + 1` — which is
+/// `FuBarPlugin-2.0.lua:752`'s `debugstack(6, 1, 0)`, whose greedy `"\\AddOns\\(.*)\\"` reads the
+/// LAST path in the string. wow-re `debugstack-return-shape.md` maps the whole regime.
+fn traceback_frames(lua: &Lua, start: usize, count1: usize, count2: usize) -> String {
+    let mut out = String::new();
+    let mut level = start;
+    let mut first_part = true;
+    while lua.inspect_stack(level, |_| ()).is_some() {
+        level += 1;
+        if level > start + count1 && first_part {
+            first_part = false;
+            if lua.inspect_stack(level + count2, |_| ()).is_none() {
+                level -= 1; // the probe found nothing to elide — print this level after all
+            } else {
+                out.push_str("...\n");
+                while lua.inspect_stack(level + count2, |_| ()).is_some() {
+                    level += 1;
+                }
+            }
+            continue;
+        }
+        if let Some(f) = lua.inspect_stack(level - 1, traceback_frame) {
+            out.push_str(&f);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod date_table_tests {
     use crate::script::UiScript;

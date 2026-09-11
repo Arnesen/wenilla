@@ -304,20 +304,38 @@ fn dragging_the_bar_steps_the_offset_by_rows_and_repaints() {
         "the drag repainted the owner's list"
     );
 
-    // A sub-row nudge rounds to the NEAREST row (`floor(v/itemHeight + 0.5)`) and lands on the
-    // same one, so the offset does not move.
+    // A sub-row nudge on the BAR reaches nothing at all: `FauxScrollFrame_Update` set the bar's
+    // step to one row, and `SetValue` quantises onto `min + n·step` before its change compare
+    // (2133, `0x789930`), so 51px resolves to the 48 the bar already holds — no
+    // `OnValueChanged`, no `SetVerticalScroll`, no repaint. This is the snap a 1.12 list
+    // scrollbar has and ours did not: the bar cannot come to rest between two rows.
     let settled = s.eval::<i64>("return TestRepaints").unwrap();
     s.run("TestScrollScrollBar:SetValue(51)").unwrap();
+    assert_eq!(
+        s.eval::<f64>("return TestScrollScrollBar:GetValue()")
+            .unwrap(),
+        48.0,
+        "51px is not a lattice point; the bar stays on row 3's"
+    );
+    assert_eq!(
+        s.eval::<i64>("return TestRepaints").unwrap(),
+        settled,
+        "and a value that did not move fires nothing"
+    );
+
+    // The unconditional repaint is still there — it lives one level up, on the path a wheel or a
+    // `SetVerticalScroll` takes. `FauxScrollFrame_OnVerticalScroll` ends in a bare
+    // `updateFunction();` (UIPanelTemplates.lua:228-232) with no compare against the previous
+    // offset, so a sub-row scroll through the FRAME repaints even though the bar does not move.
+    // Our deleted kit repainted only when the row actually changed; the reference does not, and
+    // that difference is the migration's, not a regression to chase (1860).
+    s.run("TestScroll:SetVerticalScroll(51)").unwrap();
     assert_eq!(
         s.eval::<i64>("return FauxScrollFrame_GetOffset(TestScroll)")
             .unwrap(),
         3,
-        "51px is still row 3 once rounded"
+        "51px is still row 3 once rounded (`floor(v/itemHeight + 0.5)`)"
     );
-    // …but it STILL repaints. `FauxScrollFrame_OnVerticalScroll` ends in a bare
-    // `updateFunction();` (UIPanelTemplates.lua:228-233) — unconditional, with no compare against
-    // the previous offset. Our deleted kit repainted only when the row actually changed; the
-    // reference does not, and that difference is the migration's, not a regression to chase (1860).
     assert!(
         s.eval::<i64>("return TestRepaints").unwrap() > settled,
         "the reference repaints on every scroll, changed row or not"

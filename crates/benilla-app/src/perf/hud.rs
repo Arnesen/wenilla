@@ -277,6 +277,8 @@ pub(super) fn pill_quads(
                 outline: Outline::None,
                 alpha_gradient: None,
             },
+            // Our own dev overlay: measured off a degenerate rect, then shifted into the pill.
+            crate::ui_text::TextSeat::Exact,
         );
         drop(e);
         let bounds = glyphs

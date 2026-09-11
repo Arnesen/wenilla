@@ -520,8 +520,7 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_bank_bag_slots(one_bank_bag());
         assert_eq!(
-            s.eval::<i64>("return select('#', PickupBagFromSlot(64))")
-                .unwrap(),
+            s.arity("PickupBagFromSlot(64)").unwrap(),
             0,
             "the delegate's eax is never tested — no return values at all"
         );

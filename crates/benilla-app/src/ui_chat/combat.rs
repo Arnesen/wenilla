@@ -89,24 +89,23 @@ impl Poses for Query<'_, '_, &Transform> {
 /// OUT and a NaN is out. 1571 used `<=`; the boundary is exact in the binary and there is no reason
 /// for us to be looser.
 ///
-/// **The ranges are the compiled-in defaults, not live CVars** — the same standing shape as
-/// [`crate::combat_text`]'s `COMBAT_DAMAGE`/`PET_*` gates, and for the same reason: the values are
-/// byte-read and correct, and the CVars (`CombatLogRangeParty` and its six siblings) can be wired to
-/// the live table without changing anything here. [`UnitClass::default_range`] carries them,
-/// including the two sentinels that make the gate a no-op for you and your pet (`100000.0`) and
-/// unconditional for an unresolvable unit (`0.0`).
+/// **The range is the caller's, read off [`CombatLogRanges`]** — the live table the reference's
+/// `0x626810` walks, not a compiled-in constant. The caller picks which entry: a class range for
+/// the fourteen two-ended and one-ended formatters, and [`CombatLogRanges::death`] for the one
+/// formatter that has a range CVar of its own. The two sentinels ride in the table like any other
+/// entry: `100000.0` makes the gate a no-op for you and your pet, `0.0` refuses an unresolvable
+/// unit outright.
 ///
 /// A pose we do not hold is treated as **in** range: dropping a line because a unit's transform had
 /// not landed yet would silently lose the killing blow on a mob that despawns, which is a worse
 /// failure than logging one fight too far away.
 pub(crate) fn in_range(
     guid: u64,
-    class: UnitClass,
+    range: f32,
     self_guid: &SelfGuid,
     index: &GuidIndex,
     poses: &impl Poses,
 ) -> bool {
-    let range = class.default_range();
     if range >= 100_000.0 {
         return true;
     }
@@ -119,6 +118,135 @@ pub(crate) fn in_range(
     };
     me.distance_squared(them) < range * range
 }
+
+/// **The combat log's display ranges, live** — the reference's `{cvarName, defaultValue}` table at
+/// `0x8629e0` plus the one range CVar that sits outside it, `CombatDeathLogRange`.
+///
+/// The reference registers all eight in one place (`0x626d00`, a loop over `0x8629e0` skipping the
+/// NULL/empty names, then one unrolled call — wow-re `combat-log-chat-law.md` §5.2), stores **no
+/// handle for any of them**, and looks each up by name at every use. We keep the resolved numbers
+/// instead: the lookup-by-name is the reference's way of not caching, not a behaviour, and
+/// `crate::cvars` already owns the string table.
+///
+/// **Yards, and read as the CVar's FLOAT field.** The record carries both `+0x24` float and `+0x28`
+/// int, written from the same string at registration; the range gate reads the float and the
+/// periodic gates read the int (§5.1). `0` is a real value and means *silence this class* —
+/// `dist² < 0` is never true — which is why nothing here clamps to a floor.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct CombatLogRanges {
+    /// By [`UnitClass`] index `0..=9`. Classes 0/1 (you and your pet) have no CVar and sit at the
+    /// reference's `100000.0` sentinel; class 9 (unresolvable) sits at its `0.0`.
+    class: [f32; 10],
+    /// `CombatDeathLogRange` — the death line's own range, and the **only** formatter that has
+    /// one. Not part of the `0x8629e0` table.
+    death: f32,
+}
+
+impl Default for CombatLogRanges {
+    fn default() -> Self {
+        let mut class = [0.0; 10];
+        for (i, slot) in class.iter_mut().enumerate() {
+            *slot = UnitClass::from_index(i).default_range();
+        }
+        Self {
+            class,
+            death: DEATH_LOG_RANGE_DEFAULT,
+        }
+    }
+}
+
+impl CombatLogRanges {
+    /// This class's live display range, in yards.
+    pub(crate) fn class(&self, class: UnitClass) -> f32 {
+        self.class[class as usize]
+    }
+
+    /// The death line's live range — `CombatDeathLogRange`, for every class alike.
+    ///
+    /// **It really is every class.** The death formatter `0x62c160` looks the CVar up first
+    /// (`0x62c19c`) and falls back to the per-class getter only when the *lookup* fails; the CVar
+    /// is registered at startup, so the fallback is unreachable in a running client. So your own
+    /// death passes on distance 0 rather than on class 0's sentinel, and an unresolvable unit's
+    /// death is logged at 60 yd rather than refused by class 9's `0.0`.
+    pub(crate) fn death(&self) -> f32 {
+        self.death
+    }
+
+    /// Apply one `SetCVar` to the table — `true` if the name was one of the eight.
+    ///
+    /// The class names are walked through [`UnitClass::range_cvar`] so this module keeps exactly
+    /// one copy of them.
+    pub(crate) fn set(&mut self, name: &str, value: f32) -> bool {
+        if name.eq_ignore_ascii_case(DEATH_LOG_RANGE_CVAR) {
+            self.death = value;
+            return true;
+        }
+        for i in 0..self.class.len() {
+            let class = UnitClass::from_index(i);
+            if class
+                .range_cvar()
+                .is_some_and(|c| c.eq_ignore_ascii_case(name))
+            {
+                self.class[i] = value;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// **`CombatLogPeriodicSpells`** — "Log Periodic Effects", and its blast radius is wider than the
+/// options row's wording.
+///
+/// Its first read site (`0x626dee`) is at the **top of the `SMSG_PERIODICAURALOG` handler**
+/// `0x626dd0`, and a zero jumps to `0x6271b4`, a bare epilogue — so the whole packet body is
+/// suppressed: every `CHAT_MSG_SPELL_PERIODIC_*` line **and** the floating DoT/HoT tick number
+/// **and** the periodic miss-word. The other two sites are pure chat-line filters that leave the
+/// floats alone: `0x62d9ae` (the `SMSG_SPELLNONMELEEDAMAGELOG` leg whose `periodicLog` byte is
+/// set) and `0x62d25f` (`SMSG_SPELLORDAMAGE_IMMUNE`'s `IMMUNESPELL*` lines, only when the
+/// packet's periodic byte is set).
+///
+/// Read as the CVar record's **int** `+0x28`, unlike [`CombatLogRanges`] which reads the float —
+/// both fields are written from the same string at registration (wow-re
+/// `object-layer/scratch/combat-log-chat-law.md` §5.1/§5.4).
+///
+/// A **missing record counts as OFF** in the reference, because the gate is
+/// `cvar == NULL || cvar->int == 0`. That cannot happen here — the row is registered at startup —
+/// and it is why the reference's own default `"1"` is load-bearing rather than incidental.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct LogPeriodicSpells(pub(crate) bool);
+
+impl Default for LogPeriodicSpells {
+    /// The reference's registered default, `"1"`.
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// `CombatLogPeriodicSpells`' registered name.
+pub(crate) const LOG_PERIODIC_CVAR: &str = "CombatLogPeriodicSpells";
+
+/// **The combat-feedback CVars, as one system parameter** — what a packet handler needs to know
+/// about the player's settings before it emits a line or a floating number.
+///
+/// Bundled for the reason [`crate::cvars::KnobParams`] is: `net::apply::apply_net_updates` lives
+/// against Bevy's 16-parameter ceiling, and three more `Res` would have gone into a nested tuple
+/// as positional fields nobody can read at the use site. They are one concern anyway — the
+/// reference reads all three inside the same combat-log/world-text translation unit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct CombatFeedbackCvars<'w> {
+    /// The eight display ranges.
+    pub ranges: Res<'w, CombatLogRanges>,
+    /// `CombatLogPeriodicSpells`.
+    pub periodic: Res<'w, LogPeriodicSpells>,
+    /// `CombatDamage` + the two `Pet*` sub-gates.
+    pub damage_text: Res<'w, crate::combat_text::DamageTextGates>,
+}
+
+/// `CombatDeathLogRange`'s registered name and default — `0x626d5f`, default string `"60"`
+/// (`0x862e14`).
+pub(crate) const DEATH_LOG_RANGE_CVAR: &str = "CombatDeathLogRange";
+pub(crate) const DEATH_LOG_RANGE_DEFAULT: f32 = 60.0;
 
 /// A unit's standing relative to the active player — the `0..9` index every combat-log selector in
 /// the reference takes, in both parameter positions.
@@ -161,15 +289,29 @@ pub(crate) enum UnitClass {
 }
 
 impl UnitClass {
+    /// The `0..=9` index back to its class — the inverse of the discriminant, for walking the
+    /// reference's own table order.
+    pub(crate) fn from_index(i: usize) -> Self {
+        match i {
+            0 => Self::Me,
+            1 => Self::MyPet,
+            2 => Self::Party,
+            3 => Self::PartyPet,
+            4 => Self::FriendlyPlayer,
+            5 => Self::FriendlyPet,
+            6 => Self::HostilePlayer,
+            7 => Self::HostilePet,
+            8 => Self::Creature,
+            _ => Self::Unknown,
+        }
+    }
+
     /// The CVar naming this class's display range, `None` for the two ungated classes (0/1).
     ///
-    /// **Test-only, deliberately.** The gate itself runs on [`Self::default_range`] — the
-    /// compiled-in values — following the standing shape of [`crate::combat_text`]'s own cvar
-    /// gates. This function is the other half of that table, kept so
-    /// `tests::the_class_range_table_is_the_binarys` can pin what was read out of `WoW.exe`; it
-    /// becomes the production lookup the day the live CVar table is wired in, and until then a
-    /// name that drifted would otherwise have nothing checking it.
-    #[cfg(test)]
+    /// **This is the production lookup** — `CombatLogRanges::set` walks the classes through it to
+    /// find the one a `SetCVar` names, so the table above is the only place these seven names are
+    /// written down. It was `#[cfg(test)]` until the CVars were registered, with a comment saying
+    /// it "becomes the production lookup the day the live CVar table is wired in".
     pub(crate) fn range_cvar(self) -> Option<&'static str> {
         Some(match self {
             Self::Me | Self::MyPet | Self::Unknown => return None,
@@ -183,7 +325,9 @@ impl UnitClass {
         })
     }
 
-    /// The compiled-in default range in yards, before any CVar override.
+    /// The **registered default** range in yards — the `defaultValue` half of the reference's own
+    /// `{cvarName, defaultValue}` pairs at `0x8629e0`, and therefore what [`CombatLogRanges`] seeds
+    /// itself with and what `cvars::REGISTERED` ships. The live value is the CVar's.
     pub(crate) fn default_range(self) -> f32 {
         match self {
             Self::Me | Self::MyPet => 100_000.0,
@@ -385,13 +529,29 @@ pub(crate) fn spell_kind(
 /// `0x627d80` (damage) / `0x6274a0` (buffs) — the periodic family, and it is **a different shape**.
 ///
 /// Ten rows, not sixteen: there is no PET bucket and no `CREATURE_VS_*` split, so a pet folds into
-/// its owner's row and every creature source lands on one `SPELL_PERIODIC_CREATURE_*` row. And the
-/// **victim is not consulted at all** — both selectors take a single argument. A DoT you put on a
-/// hostile player and a DoT that player put on you are told apart by the *source* alone.
-pub(crate) fn periodic_kind(attacker: UnitClass, buff: bool) -> Option<ChatEventKind> {
+/// its owner's row and every creature source lands on one `SPELL_PERIODIC_CREATURE_*` row.
+///
+/// **Both selectors take ONE class, and WHICH one is the caller's to know** (decision 2127). This
+/// doc used to say the endpoint was "the *source* alone", and it is not: `0x626630` fills classA
+/// (the sentence's subject, the caster) and classB (the target), and the four periodic formatters
+/// disagree about which one they hand this selector.
+///
+/// | formatter | msg-id argument | the byte |
+/// |---|---|---|
+/// | `PERIODICAURADAMAGE*` `0x628100` | **classB — the TARGET** | `0x628235 mov ecx,edi` where `edi = [ebp-0x10]` is `outClassB` |
+/// | `PERIODICAURAHEAL*` `0x627240` | **classB — the TARGET** | `0x62732c mov ecx,[ebp-0x4]`, its own `outClassB` |
+/// | `POWERGAIN*` `0x627520` | classA — the caster | `0x6275fb mov ecx,esi`, `esi = [ebp-0x18]` = `outClassA` |
+/// | `SPELLPOWERLEECH*`/`…DRAIN*` `0x627930` | classA — the caster | `0x627a0f`/`0x627a3a mov ecx,esi`, `esi = [ebp-0x10]` = `outClassA` |
+///
+/// Passing the caster for the first two is not a cosmetic slip: a creature's DoT ticking **you**
+/// types as `SPELL_PERIODIC_CREATURE_DAMAGE` instead of `SPELL_PERIODIC_SELF_DAMAGE`, and your own
+/// DoT on a creature types as SELF instead of CREATURE — the two swap. Every addon that parses the
+/// combat log by event name (MikScrollingBattleText matches a *different GlobalString pattern* per
+/// event) then finds no pattern for either line and drops both.
+pub(crate) fn periodic_kind(subject: UnitClass, buff: bool) -> Option<ChatEventKind> {
     use ChatEventKind as K;
     use UnitClass as C;
-    let damage = match attacker {
+    let damage = match subject {
         C::Me | C::MyPet => K::SpellPeriodicSelfDamage,
         C::Party | C::PartyPet => K::SpellPeriodicPartyDamage,
         C::FriendlyPlayer | C::FriendlyPet => K::SpellPeriodicFriendlyPlayerDamage,
@@ -836,25 +996,69 @@ pub(crate) fn global_string(script: &benilla_ui::script::UiScript, key: &str) ->
         .filter(|s| !s.is_empty())
 }
 
-/// The lowercase school word a `…SCHOOL…` template's `%s` takes — `SPELL_SCHOOL<n>_NAME`
-/// ("physical", "holy", "fire", …), resolved through the install's own strings like every other
-/// template slot.
+/// The school word a `…SCHOOL…` template's `%s` takes — **capitalized** (decision 2127).
+///
+/// The reference does not read a GlobalString here at all: `0x6264b0(schoolIndex)` indexes
+/// `Resistances.dbc` (row array `[0xc0d9a4]`, 7 rows of 0x30 bytes, localized name at
+/// `row + 0xc + locale*4`) — wow-re `combat-log-chat-law.md` §4.5 — and those seven rows are
+/// `Physical · Holy · Fire · Nature · Frost · Shadow · Arcane`. `SPELL_SCHOOL<n>_NAME` is a
+/// *different* table in GlobalStrings.lua and holds the same seven words **lowercased**
+/// (`GlobalStrings.lua:4102-4114`), which is what this used to return: "12 nature damage" where
+/// the reference writes "12 Nature damage".
+///
+/// It reads as a nicety and is not one. MikScrollingBattleText classifies a parsed line's damage
+/// school by an exact string compare against `SPELL_SCHOOL<n>_CAP`
+/// (`MikCombatEventHelper.lua:3471-3492`) — an addon written against the live client's own output,
+/// so it is independent evidence for the capital. A lowercase word falls through to
+/// `DAMAGETYPE_UNKNOWN` and every school-coloured number in the addon loses its tint.
+///
+/// **Named residue:** the *source* is still the GlobalString, not the DBC. `SPELL_SCHOOL<n>_CAP`
+/// carries the same seven strings as `Resistances.dbc` in enUS (both read, 2127), and this client
+/// is enUS-only by construction (`combat_text::law::WORDS` and the rest of the string data are
+/// hardcoded enUS). A locale where the two tables disagree would diverge; a `Resistances.dbc`
+/// catalog is what closes it, and it is a data change rather than a string one — `compose_line`
+/// is handed the Lua VM and nothing else.
 pub(crate) fn school_word(script: &benilla_ui::script::UiScript, school: u8) -> Option<String> {
-    global_string(script, &format!("SPELL_SCHOOL{school}_NAME"))
+    global_string(script, &format!("SPELL_SCHOOL{school}_CAP"))
+}
+
+/// The GlobalString key `0x6278f0` resolves for a power tag, or `None` where it answers NULL.
+///
+/// The function is five lines and both of them matter: `cmp ecx,5; jae` — **unsigned**, so a tag
+/// of 5 or more (and a negative one, which reads as huge) returns NULL — else
+/// `[4*ecx + 0x85645c]` into `0x703bf0`. The table's five entries are the five `Powers` the wire
+/// carries, **happiness included**: it is `HAPPINESS_POINTS = "Happiness"` (shipped enUS
+/// `GlobalStrings.lua:2117`), not a hole. This file used to stop the table at energy and call
+/// happiness "no GlobalString", which dropped every line the reference words with it — the
+/// generic leech/drain fall-through out of `0x627de0`, and a happiness `POWERGAIN` tick.
+///
+/// What happiness really lacks is a **`COMBAT_TEXT_UPDATE`** tag: `0x627520`/`0x627930`'s four
+/// `0x64a4c0` compares match only the other four nouns, so it produces the chat line and no
+/// floating text (§4.6). That is a different table, further down, after the emit.
+fn power_key(power: u32) -> Option<&'static str> {
+    match power {
+        0 => Some("MANA_POINTS"),
+        1 => Some("RAGE_POINTS"),
+        2 => Some("FOCUS_POINTS"),
+        3 => Some("ENERGY_POINTS"),
+        4 => Some("HAPPINESS_POINTS"),
+        _ => None,
+    }
+}
+
+/// Whether `0x6278f0` answers a noun at all — the `cmp ecx,5; jae` bound, without a VM in hand.
+///
+/// The formatters gate on the returned pointer (`627964 test edi,edi; 627966 je`) long before they
+/// reach a template, so a caller that has no script yet still has to be able to ask.
+pub(crate) fn power_has_word(power: u32) -> bool {
+    power_key(power).is_some()
 }
 
 /// The power word a `POWERGAIN`/`SPELLPOWERLEECH`/`SPELLPOWERDRAIN` template takes, by the vmangos
-/// `Powers` index the wire carries (0 mana · 1 rage · 2 focus · 3 energy). Happiness (4) has no
-/// GlobalString and no combat-log line, so it answers `None` and the line is dropped.
+/// `Powers` index the wire carries — `0x6278f0`'s table, resolved through the same GlobalString
+/// mechanism the reference uses ([`power_key`] carries the law).
 pub(crate) fn power_word(script: &benilla_ui::script::UiScript, power: u32) -> Option<String> {
-    let key = match power {
-        0 => "MANA_POINTS",
-        1 => "RAGE_POINTS",
-        2 => "FOCUS_POINTS",
-        3 => "ENERGY_POINTS",
-        _ => return None,
-    };
-    global_string(script, key)
+    global_string(script, power_key(power)?)
 }
 
 /// Resolve one endpoint's display name — the reference's `GetObjectName` (`0x6264e0`), which is the
@@ -1592,50 +1796,69 @@ pub(crate) fn miss_family(miss_info: u8) -> Family {
 ///   damage == 0 && HitInfo & 0x20  → VSABSORB        (ABSORB)
 ///   damage == 0 && HitInfo & 0x40  → VSRESIST        (RESIST)
 ///   VictimState == 1 && damage > 0 → COMBATHIT[CRIT][SCHOOL]
-///   otherwise                      → the VictimState word
+///   otherwise                      → the VictimState word, or NO LINE
 /// ```
+///
+/// **The last arm can decline.** `0x62a710` is gated twice before it words anything: the 10-entry
+/// flag table `0x8628f8` = `[0,0,1,1,0,1,1,1,1,0]` indexed by VictimState (`0x62a720`), then
+/// `add eax,-2; cmp eax,6; ja` into the jump table `0x62a8ec` — so VictimState **0, 1, 4 and 9
+/// emit no line at all** (§4.1 row 6). This used to answer `MISSED` for them and call that "the
+/// reference's own fall-through", which it is not: the reference stays silent, and a `MISSED`
+/// there is a sentence the real client never prints.
 ///
 /// The bit values are vmangos's `HitInfo` under the `> 1.9.4` conditional that is compile-time true
 /// for 5875 (`Objects/UnitDefines.h:250-268`) and its `VictimState` (`:237-248`) — the same pair
 /// [`crate::sound::combat`] and [`crate::combat_text`] already read, here named once instead of a
 /// fourth set of bare literals.
-pub(crate) fn melee_family(hit_info: u32, victim_state: u32, damage: u32, school: u8) -> Family {
+pub(crate) fn melee_family(
+    hit_info: u32,
+    victim_state: u32,
+    damage: u32,
+    school: u8,
+) -> Option<Family> {
     const MISS: u32 = 0x10;
     const ABSORB: u32 = 0x20;
     const RESIST: u32 = 0x40;
     const CRIT: u32 = 0x80;
     if hit_info & MISS != 0 {
-        return MISSED;
+        return Some(MISSED);
     }
     if victim_state == 5 {
-        return VSBLOCK;
+        return Some(VSBLOCK);
     }
     if damage == 0 {
         if hit_info & ABSORB != 0 {
-            return VSABSORB;
+            return Some(VSABSORB);
         }
         if hit_info & RESIST != 0 {
-            return VSRESIST;
+            return Some(VSRESIST);
         }
     }
     if victim_state == 1 && damage > 0 {
-        return match (hit_info & CRIT != 0, school != 0) {
+        return Some(match (hit_info & CRIT != 0, school != 0) {
             (false, false) => COMBATHIT,
             (true, false) => COMBATHITCRIT,
             (false, true) => COMBATHITSCHOOL,
             (true, true) => COMBATHITCRITSCHOOL,
-        };
+        });
     }
+    // `0x62a710`'s own two gates, and they are the whole arm. The flag table's `1`s are exactly
+    // these five; VictimState 0 (UNAFFECTED), 1 with no damage, 4 (INTERRUPT) and 9 are `0`s and
+    // the formatter returns having emitted nothing.
+    //
+    // The table's index 5 is a `1`, and it is unreachable: a block is taken above, which is why
+    // the two readings have to be kept apart rather than collapsed into one list of five.
+    // A VictimState of 10 or more is not bounds-checked before the table read — the load runs on
+    // a wire `u32` and index 10 lands in the adjacent pointer table `0x862920`, whose entries are
+    // all non-zero, so gate 1 *passes* and the second gate's `cmp eax,6; ja` is what rejects it.
+    // No line, nothing fired — which is the answer `None` already gives.
     match victim_state {
-        2 => VSDODGE,
-        3 => VSPARRY,
-        6 => VSEVADE,
-        7 => VSIMMUNE,
-        8 => VSDEFLECT,
-        // VictimState 0 (UNAFFECTED, "seen in relation with HITINFO_MISS") and 4 (INTERRUPT) reach
-        // here only on a shape vmangos does not send; MISSED is the reference's own fall-through
-        // and is the least wrong thing to say about a swing that did nothing.
-        _ => MISSED,
+        2 => Some(VSDODGE),
+        3 => Some(VSPARRY),
+        6 => Some(VSEVADE),
+        7 => Some(VSIMMUNE),
+        8 => Some(VSDEFLECT),
+        _ => None,
     }
 }
 

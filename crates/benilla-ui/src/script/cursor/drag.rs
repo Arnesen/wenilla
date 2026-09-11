@@ -72,6 +72,13 @@ pub(crate) fn maybe_start_drag(model: &mut Model, pos: (f32, f32)) -> Option<(u3
         (g.source, g.button.clone())
     };
     model.drag.as_mut().expect("checked Some above").started = true;
+    // **The button's drag-start edge** — `CSimpleButton` overrides `+0x74` with `0x7793f0`, which
+    // un-presses (`0x779410`, guarded on `locked == 0 && state != DISABLED`) and then forwards to
+    // the base notify that fires `<OnDragStart>`. So a button you drag off releases its pushed art
+    // at the THRESHOLD crossing, which is here — not when the cursor leaves its rect, and not for
+    // a frame that never registered for drag (wow-re `scratch/button-state-edge-set.md`;
+    // decision 2134).
+    super::super::button::edge(model, source, crate::widget::ButtonState::on_drag_start);
     let id = model
         .arena
         .frame(source)
@@ -130,13 +137,13 @@ mod tests {
             click_a, click_b = 0, 0
             drag_button = nil
             local a = CreateFrame("Frame", "A")
-            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(400, 600); a:EnableMouse(true)
+            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             a:SetScript("OnDragStart", function(self, button) drag_starts = drag_starts + 1; drag_button = button end)
             a:SetScript("OnDragStop", function(self) drag_stops = drag_stops + 1 end)
             a:SetScript("OnClick", function(self) click_a = click_a + 1 end)
             local b = CreateFrame("Frame", "B")
-            b:SetPoint("BOTTOMLEFT", 400, 0); b:SetSize(400, 600); b:EnableMouse(true)
+            b:SetPoint("BOTTOMLEFT", 400, 0); b:SetWidth(400); b:SetHeight(600); b:EnableMouse(true)
             b:SetScript("OnReceiveDrag", function(self) receives = receives + 1 end)
             b:SetScript("OnClick", function(self) click_b = click_b + 1 end)
             "#,
@@ -194,7 +201,7 @@ mod tests {
             r#"
             clicks = 0
             local a = CreateFrame("Frame", "A")
-            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(400, 600); a:EnableMouse(true)
+            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             a:SetScript("OnClick", function(self) clicks = clicks + 1 end)
             "#,
@@ -216,7 +223,7 @@ mod tests {
             r#"
             clicks = 0
             local a = CreateFrame("Frame", "A")
-            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(400, 600); a:EnableMouse(true)
+            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             a:SetScript("OnClick", function(self) clicks = clicks + 1 end)
             "#,
@@ -245,7 +252,7 @@ mod tests {
             r#"
             heard = 0
             local a = CreateFrame("Frame", "A")
-            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(400, 600); a:EnableMouse(true)
+            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             local f = CreateFrame("Frame", "Listener")
             f:RegisterEvent("DELETE_ITEM_CONFIRM")
@@ -388,7 +395,7 @@ mod tests {
             WorldFrame = CreateFrame("WorldFrame", "WorldFrame") WorldFrame:SetAllPoints()
             heard = 0
             local a = CreateFrame("Frame", "A")
-            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(400, 600); a:EnableMouse(true)
+            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             local f = CreateFrame("Frame", "Listener")
             f:RegisterEvent("DELETE_ITEM_CONFIRM")
             f:SetScript("OnEvent", function() heard = heard + 1 end)
@@ -495,7 +502,7 @@ mod tests {
             r#"
             heard = 0
             local a = CreateFrame("Frame", "A")
-            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(400, 600); a:EnableMouse(true)
+            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             local f = CreateFrame("Frame", "Listener")
             f:RegisterEvent("DELETE_ITEM_CONFIRM")
             f:SetScript("OnEvent", function() heard = heard + 1 end)
@@ -531,7 +538,7 @@ mod tests {
             r#"
             heard = 0
             local a = CreateFrame("Frame", "A")
-            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(400, 600); a:EnableMouse(true)
+            a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
             a:RegisterForDrag("LeftButton")
             local f = CreateFrame("Frame", "Listener")
             f:RegisterEvent("DELETE_ITEM_CONFIRM")
@@ -580,7 +587,7 @@ mod tests {
             r#"
             stops = 0
             local a = CreateFrame("Frame", "A")
-            a:SetPoint("BOTTOMLEFT", 100, 100); a:SetSize(200, 100)
+            a:SetPoint("BOTTOMLEFT", 100, 100); a:SetWidth(200); a:SetHeight(100)
             a:EnableMouse(true); a:SetMovable(true)
             a:RegisterForDrag("LeftButton")
             a:SetScript("OnDragStart", function() this:StartMoving() end)
@@ -630,7 +637,7 @@ mod tests {
             r#"
             stops, starts = 0, 0
             local a = CreateFrame("Frame", "A")
-            a:SetPoint("BOTTOMLEFT", 100, 100); a:SetSize(200, 100)
+            a:SetPoint("BOTTOMLEFT", 100, 100); a:SetWidth(200); a:SetHeight(100)
             a:EnableMouse(true); a:SetMovable(true)
             a:RegisterForDrag("LeftButton")
             a:SetScript("OnDragStart", function() starts = starts + 1; this:StartMoving() end)

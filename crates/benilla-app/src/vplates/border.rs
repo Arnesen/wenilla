@@ -16,7 +16,7 @@
 /// **premultiplied** sRGB so alpha edges don't dark-fringe. On magnification the per-axis boundary
 /// ramp is compressed to ~1 output pixel (crisp); on minification it falls back to plain bilinear
 /// (`sharpen = max(scale, 1)`), so a plate smaller than native still resolves cleanly.
-pub(super) fn resample_sharp(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+pub(crate) fn resample_sharp(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let fetch = |x: i32, y: i32| -> [f32; 4] {
         let x = x.clamp(0, sw as i32 - 1) as u32;
         let y = y.clamp(0, sh as i32 - 1) as u32;

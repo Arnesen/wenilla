@@ -12,7 +12,8 @@
 //!   OnEvent (`(self, elapsed)` for OnUpdate, `(self)` for OnShow/OnHide/OnLoad) — the form Era
 //!   addons are written against.
 //!
-//! So inside one OnEvent handler `this == self` and `arg1 == select(1, ...)`. Handler errors are
+//! So inside one OnEvent handler `this == self` and `arg1` is the first positional argument (5.0's
+//! own `arg[1]`; `...` as a value, and `select` with it, are not in this dialect). Handler errors are
 //! caught (mlua's `Function::call` is a protected call) and returned to the caller, which records
 //! them in [`super::Model::errors`] — never a panic, never a print.
 
@@ -22,7 +23,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use super::{Model, ScriptValue, REG_SCRIPTS};
 use crate::script::object::frame_wrapper;
-use crate::widget::FrameHandle;
+use crate::widget::{ButtonState, FrameHandle};
 
 /// Fire `event` at every frame registered for it (the engine-internal twin of
 /// `UiScript::fire_event`, for engine code holding only the Lua context — the compare drive's
@@ -45,6 +46,46 @@ pub(super) fn fire_global(lua: &Lua, event: &str, args: &[ScriptValue]) {
                 .push(e.to_string());
         }
         i += 1;
+    }
+    fire_all_event_listeners(lua, event, args);
+}
+
+/// The `RegisterAllEvents()` half of one dispatch: every frame that asked for the whole stream,
+/// after the event's own listeners and skipping any frame that was already visited as one of them.
+///
+/// **After, and de-duplicated, because that is where such a frame would sit if the registration
+/// were expanded.** A frame joins the all-events set later than the frames already listening for a
+/// given event, so it takes the tail of that event's list; and a frame holding both an all-events
+/// registration and a `RegisterEvent` for *this* event is one listener, not two — `RegisterEvent`'s
+/// own `if !list.contains(&h)` is the same rule one level down.
+///
+/// Same mid-dispatch discipline as the walk above (`0x703ee8`, decision 1324): the next frame is
+/// re-found by position each step, so a handler that unregisters the walk's successor stops the
+/// dispatch there rather than robbing it.
+pub(super) fn fire_all_event_listeners(lua: &Lua, event: &str, args: &[ScriptValue]) {
+    let model_mut = || lua.app_data_mut::<Model>().expect("model app_data set");
+    let mut at = model_mut().all_event_frames.first().copied();
+    while let Some(h) = at {
+        let mut model = model_mut();
+        let Some(pos) = model.all_event_frames.iter().position(|&x| x == h) else {
+            break;
+        };
+        let next = model.all_event_frames.get(pos + 1).copied();
+        let already = model
+            .event_to_frames
+            .get(event)
+            .is_some_and(|l| l.contains(&h));
+        let id = model.frame_id(h);
+        drop(model);
+        if !already {
+            if let Err(e) = fire_event_handler(lua, id, event, args) {
+                lua.app_data_mut::<Model>()
+                    .expect("model app_data")
+                    .errors
+                    .push(e.to_string());
+            }
+        }
+        at = next;
     }
 }
 
@@ -167,18 +208,22 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
         let hidden_hover = model
             .mouseover
             .filter(|&m| items.iter().any(|&(h, _, vis)| h == m && !vis));
+        // The removal tail is a VIRTUAL dispatch — `0x764cce mov edx,[edi]; push 1;
+        // call [edx+0x50]` — so a Button reaches its own `0x7794e0`, whose DISABLED guard skips
+        // the base leave and with it the `<OnLeave>` script. Hiding a disabled hovered button is
+        // therefore as silent as walking off one ([`super::button::hover_notify_runs`]); the
+        // hover cache and the drag-arm still clear, because those are the *caller's* half.
+        let notified = super::button::hover_notify_runs(&model, hidden_hover);
         if let Some(m) = hidden_hover {
             model.mouseover = None;
-            // The hover the hide just dropped is an input to the button state machine, so the
-            // frame under it re-latches here as it would on a mouse-out (`0x7793f0`) — a button
-            // hidden mid-press must not come back up still wearing its pushed art.
-            super::button::settle(&mut model, m);
             if model.drag.as_ref().is_some_and(|d| d.source == m) {
                 model.drag = None;
             }
         }
         model.hover_repick |= hidden_hover.is_some() || items.iter().any(|&(_, _, vis)| vis);
-        hidden_hover.map(|m| (m, model.frame_id(m)))
+        hidden_hover
+            .filter(|_| notified)
+            .map(|m| (m, model.frame_id(m)))
     };
     if let Some((_, oid)) = left {
         if let Err(e) = fire_widget_handler(lua, oid, "OnLeave", vec![Value::Boolean(true)]) {
@@ -191,6 +236,18 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
         if visible {
             let mut model = lua.app_data_mut::<Model>().expect("model");
             super::object::toplevel::raise_on_show(&mut model, h);
+        } else {
+            // **The button's HIDE edge** — `CSimpleButton` overrides the hide notify (`+0x34`,
+            // `0x7791e0`) to un-press itself before tail-jumping the base, so a button hidden
+            // while held does not come back up wearing its pushed art (wow-re
+            // `scratch/button-state-edge-set.md`; the guard is `state != DISABLED && locked == 0`).
+            //
+            // It hangs off the VISIBILITY transition, not off the hover, which is what it is in
+            // the reference — a button hidden nowhere near the cursor un-presses too, and one
+            // hidden under the cursor no longer needs the hover-drop above to notice
+            // (decision 2134).
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            super::button::edge(&mut model, h, ButtonState::on_hide);
         }
         let name = if visible { "OnShow" } else { "OnHide" };
         if let Err(e) = fire(lua, id, name, None, Vec::new()) {

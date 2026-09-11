@@ -354,40 +354,52 @@ pub(crate) fn far_side_of_water_at(
     point_world: Vec3,
     r: f32,
 ) -> bool {
+    let above = water_height(w, claim_seed, point_world).is_none_or(|d| is_above(d, r));
+    if w.underwater.0.any() {
+        above
+    } else {
+        !above
+    }
+}
+
+/// How high `point_world` sits over its local water plane — `d = point − surface` (WoW Z, yd;
+/// Bevy Y is the same axis) against the nearest **admitted** surface over the point's XY, the
+/// claim taken from the nearest ancestor of `claim_seed` with a room verdict (`Unknown` admits
+/// both sources, still floor-bounded per pool). `None` = no admitted surface — the reference's
+/// `+0x19c == 0`, which every lane reads as the above list.
+///
+/// The one plane query behind both laws: [`far_side_of_water_at`]'s one-list membership, and
+/// the straddle split's two-list band (`crate::straddle`, decision 2188), which also needs the
+/// plane's height itself for the clip.
+pub(crate) fn water_height(
+    w: &WaterInterleave,
+    claim_seed: Option<Entity>,
+    point_world: Vec3,
+) -> Option<f32> {
     let wow = benilla_assets::coords::bevy_to_wow(point_world);
     // The spatial pre-filter first — these lanes ask per DRAW, and the full `surfaces_at` walk
     // at that grain was the 2026-08-03 12-fps regression (`liquid::spatial`). No candidate
     // surface over this XY (the dominant dry-land case) is "no admitted surface" under every
     // claim, so the room walk below is skipped with the scan.
     let candidates = w.index.over(wow[0], wow[1]);
-    let above = if candidates.is_empty() {
-        true
-    } else {
-        let mut seed = claim_seed;
-        let mut room = None;
-        for _ in 0..8 {
-            let Some(e) = seed else { break };
-            if let Ok(rm) = w.rooms.get(e) {
-                room = Some(rm);
-                break;
-            }
-            seed = w.parents.get(e).ok().map(ChildOf::parent);
-        }
-        let claim = crate::liquid::unit_claim(room, &w.placements);
-        let surfaces = candidates.iter().filter_map(|&e| w.water.get(e).ok());
-        match crate::liquid::surfaces_at(surfaces, wow, claim)
-            .map(|z| wow[2] - z)
-            .min_by(|a, b| a.abs().total_cmp(&b.abs()))
-        {
-            Some(d) => is_above(d, r),
-            None => true,
-        }
-    };
-    if w.underwater.0.any() {
-        above
-    } else {
-        !above
+    if candidates.is_empty() {
+        return None;
     }
+    let mut seed = claim_seed;
+    let mut room = None;
+    for _ in 0..8 {
+        let Some(e) = seed else { break };
+        if let Ok(rm) = w.rooms.get(e) {
+            room = Some(rm);
+            break;
+        }
+        seed = w.parents.get(e).ok().map(ChildOf::parent);
+    }
+    let claim = crate::liquid::unit_claim(room, &w.placements);
+    let surfaces = candidates.iter().filter_map(|&e| w.water.get(e).ok());
+    crate::liquid::surfaces_at(surfaces, wow, claim)
+        .map(|z| wow[2] - z)
+        .min_by(|a, b| a.abs().total_cmp(&b.abs()))
 }
 
 /// The mesh lane's wrapper: the sign test at the batch's own transform (r = 0) — the

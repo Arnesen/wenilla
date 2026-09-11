@@ -698,7 +698,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 ),
                 0x80 => {
                     // Route through the shared item renderer (the id-keyed entry).
-                    let f: mlua::Function = this.get("SetItemById")?;
+                    let f: mlua::Function = this.get("BenillaSetItemById")?;
                     f.call::<()>((this.clone(), a.action))
                 }
                 0x40 => {
@@ -750,7 +750,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 // `0x52b650`. No fallback name: an item id of 0 or a template still in flight
                 // renders an EMPTY tooltip, which is the builder's own early-out.
                 TrainerTooltip::Item(item_id) => {
-                    let f: mlua::Function = this.get("SetItemById")?;
+                    let f: mlua::Function = this.get("BenillaSetItemById")?;
                     f.call::<()>((this.clone(), item_id))
                 }
                 TrainerTooltip::Spell {
@@ -796,7 +796,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             match subject {
                 CraftTooltip::Item(item_id) => {
-                    let f: mlua::Function = this.get("SetItemById")?;
+                    let f: mlua::Function = this.get("BenillaSetItemById")?;
                     f.call::<()>((this.clone(), item_id))
                 }
                 CraftTooltip::Spell(spell_id) => {

@@ -42,6 +42,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::flag;
 use super::cursor::{self, CursorPayload};
 use super::Model;
 
@@ -297,15 +298,6 @@ impl super::UiScript {
     /// Empty the sell slot — the app calls this once the auction is away, and on session close.
     pub fn clear_auction_sell_item(&mut self) {
         self.model_mut().auction_sell_item = None;
-    }
-}
-
-/// A `1`/`nil` boolean the way the client pushes flags.
-fn flag(b: bool) -> Value {
-    if b {
-        Value::Integer(1)
-    } else {
-        Value::Nil
     }
 }
 
@@ -1005,9 +997,7 @@ mod tests {
     #[test]
     fn a_missing_row_still_answers_twelve_values() {
         let s = UiScript::new().unwrap();
-        let n: i64 = s
-            .eval(r##"return select("#", GetAuctionItemInfo("list", 99))"##)
-            .unwrap();
+        let n = s.arity(r#"GetAuctionItemInfo("list", 99)"#).unwrap();
         assert_eq!(n, 12, "twelve, even with no session open at all");
         let (count, quality): (i64, i64) = s
             .eval(r#"local _, _, c, q = GetAuctionItemInfo("list", 99) return c, q"#)
@@ -1015,9 +1005,7 @@ mod tests {
         assert_eq!((count, quality), (1, -1));
 
         // The link, by contrast, answers with NO values on a miss — not a nil.
-        let n: i64 = s
-            .eval(r##"return select("#", GetAuctionItemLink("list", 99))"##)
-            .unwrap();
+        let n = s.arity(r#"GetAuctionItemLink("list", 99)"#).unwrap();
         assert_eq!(n, 0, "zero values, not one nil");
     }
 

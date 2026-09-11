@@ -778,6 +778,283 @@ fn a_channel_notice_renders_in_the_channels_color_not_the_notice_row() {
     );
 }
 
+/// **Crossing a zone border must not deregister the channel it renames** (decision 2130).
+///
+/// The walk sends `LEAVE(General - Elwynn Forest)` then `JOIN(General - Westfall)` — one DBC row,
+/// renamed, and the retail sniff in wow-re `zone-chat-channel-autojoin.md` §7 shows exactly that
+/// pair on the wire. The server answers each with a notice, and the stock `ChatFrame_OnEvent`'s
+/// `YOU_LEFT` arm **deletes the window's registration for whatever it matched**
+/// (`ChatFrame.lua` l.1382-1384):
+///
+/// ```lua
+/// this.channelList[index] = nil;
+/// this.zoneChannelList[index] = nil;
+/// ```
+///
+/// Nothing in stock FrameXML ever re-adds one on `YOU_JOINED` — `ChatFrame_AddChannel` is reachable
+/// only from the `/join` popup and the chat-tab dropdown. So if our `YOU_LEFT` still resolves to a
+/// slot, the window loses General for the rest of the session: the replacement join notice is
+/// dropped unprinted, and so is every General line spoken in the new zone. That is the director's
+/// *"sometimes I get no channel stuff"*, and this test is the observable.
+///
+/// The window is registered here the way the chat cache registers it at login — the row's
+/// **Shortcut** against its **ChannelID**, which is the id-match at `ChatFrame.lua:1379` — because
+/// that is the registration the reference's own `chat-cache.txt` produces (`ZONECHANNELS` bits, not
+/// names).
+#[test]
+fn a_zone_change_must_not_deregister_the_channel_it_renames() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    let mut channels = super::edit::ChannelState {
+        channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+            benilla_formats::ChatChannelRow {
+                id: 1,
+                flags: 0x0_0003,
+                pattern: "General - %s".into(),
+                shortcut: "General".into(),
+            },
+        ]),
+        ..Default::default()
+    };
+    channels.claim_slot("General - Elwynn Forest");
+
+    // `ChatFrame_RegisterForChannels(GetChatWindowChannels(1))`, by hand: it does exactly this pair
+    // of writes, and calling it needs the `this` the event dispatch supplies.
+    s.run("ChatFrame1.channelList[1] = 'General' ChatFrame1.zoneChannelList[1] = 1")
+        .unwrap();
+
+    let channel_line = |name: &str| {
+        let mut e = ChatEvent::text_only(K::Channel, "anybody out here".into());
+        e.sender = "Bob".into();
+        e.channel = name.into();
+        e
+    };
+    let notice = |name: &str, byte: &str| {
+        let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
+        e.channel = name.into();
+        e.notice = byte.into();
+        e
+    };
+
+    // The control: registered by id, a General line reaches the window.
+    let before = lines_in_window(&s);
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut channel_line("General - Elwynn Forest"),
+    );
+    assert_eq!(
+        lines_in_window(&s),
+        before + 1,
+        "the control must print — otherwise the assertion below proves nothing"
+    );
+
+    // The border crossing, in the order the walk actually produces it: `CMSG_LEAVE_CHANNEL(old)`
+    // goes out, **the slot is renamed in place before the answer can arrive**
+    // ([`super::edit::ChannelState::rename_slot`], the reference's `0x49bc50` at pass 1 step 6),
+    // `CMSG_JOIN_CHANNEL(new)` goes out, and only then do the two notices land.
+    let renamed = channels.rename_slot("General - Elwynn Forest", "General - Westfall");
+    assert_eq!(
+        renamed,
+        Some(1),
+        "renamed in place — the slot number does not move"
+    );
+
+    let before = lines_in_window(&s);
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut notice("General - Elwynn Forest", "3"), // YOU_LEFT
+    );
+    assert_eq!(
+        lines_in_window(&s),
+        before,
+        "the leave prints NOTHING: no slot carries the old name any more, so arg7/arg8/arg9 come \
+         out defaulted and the stock handler returns at `found == 0` — which is also why it never \
+         reaches the arm that would deregister the channel"
+    );
+
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut notice("General - Westfall", "2"), // YOU_JOINED
+    );
+
+    assert_eq!(
+        s.eval::<Option<i64>>("return ChatFrame1.zoneChannelList[1]")
+            .unwrap(),
+        Some(1),
+        "the window must still be registered for ChannelID 1 after the rename — a nil here is \
+         General going silent for the rest of the session"
+    );
+
+    // …and the observable that actually matters: speech from the NEW zone still lands.
+    let before = lines_in_window(&s);
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut channel_line("General - Westfall"),
+    );
+    assert_eq!(
+        lines_in_window(&s),
+        before + 1,
+        "a General line in the new zone must reach the window"
+    );
+}
+
+/// **Walking out of a capital SUSPENDS Trade — it does not free it** (decision 2130).
+///
+/// The zone walk's other leave: a row that stops applying entirely, which in the 1.12 data means
+/// exactly `Trade` when you step out of a city (wow-re `zone-chat-channel-autojoin.md` §5). The
+/// `CMSG_LEAVE_CHANNEL` still goes out, but the client marks its own slot state 3 (`0x49bcf0`) and
+/// keeps the record — so the notice comes back as the `SUSPENDED` token, the stock handler's
+/// `YOU_LEFT` arm never runs, and the window keeps its registration. Walking back in re-joins
+/// through the state-3 bypass onto the same slot, with the same number.
+///
+/// Freeing it — which is what we did — cost Trade its registration on the way out and left the
+/// re-join notice unprintable on the way back in. Same bug as the border crossing, one row over.
+#[test]
+fn leaving_a_capital_suspends_trade_rather_than_deregistering_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    let mut channels = super::edit::ChannelState {
+        channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+            benilla_formats::ChatChannelRow {
+                id: 2,
+                flags: 0x0_003B,
+                pattern: "Trade - %s".into(),
+                shortcut: "Trade".into(),
+            },
+        ]),
+        ..Default::default()
+    };
+    channels.claim_slot("Trade - City");
+    s.run("ChatFrame1.channelList[1] = 'Trade' ChatFrame1.zoneChannelList[1] = 2")
+        .unwrap();
+
+    let notice = |name: &str, byte: &str| {
+        let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
+        e.channel = name.into();
+        e.notice = byte.into();
+        e
+    };
+
+    // The walk: LEAVE goes out, then the eligibility test suspends the slot.
+    assert_eq!(channels.suspend_slot("Trade - City"), Some(1));
+    let before = lines_in_window(&s);
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut notice("Trade - City", "3"), // YOU_LEFT
+    );
+    s.resolve();
+
+    // The line still PRINTS — `CHAT_SUSPENDED_NOTICE` is "Left Channel: [%s]", the same text as
+    // `CHAT_YOU_LEFT_NOTICE`. Only arg1 differs, and arg1 is what the stock handler branches on.
+    // Asserted because a missing string would make `compose_notice` answer `None` and the line
+    // would vanish silently — the failure this whole area is prone to.
+    assert_eq!(lines_in_window(&s), before + 1);
+    assert!(
+        s.extract().iter().any(|q| matches!(
+            &q.content,
+            benilla_ui::script::QuadContent::Text { text: Some(t), .. }
+                if t == "Left Channel: [1. Trade - City]"
+        )),
+        "the suspended leave renders the same text as an ordinary one"
+    );
+
+    assert_eq!(
+        channels.number_of("Trade - City"),
+        Some(1),
+        "the record and its number survive — `/1` still addresses Trade, and the state-3 bypass \
+         needs the slot to be there to bypass onto"
+    );
+    assert_eq!(
+        s.eval::<Option<i64>>("return ChatFrame1.zoneChannelList[1]")
+            .unwrap(),
+        Some(2),
+        "and the window is still registered for it: the notice carried the SUSPENDED token, so \
+         the stock handler never reached the arm that deletes the registration"
+    );
+
+    // Walking back in: the same slot, the same number, and the notice prints again.
+    let before = lines_in_window(&s);
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut notice("Trade - City", "2"), // YOU_JOINED
+    );
+    assert_eq!(
+        lines_in_window(&s),
+        before + 1,
+        "the re-join prints — it could not have, with the registration gone"
+    );
+    assert_eq!(channels.number_of("Trade - City"), Some(1));
+    assert_eq!(
+        channels.slot_state("Trade - City"),
+        Some(super::edit::SlotState::Joined),
+        "and the slot is back to plain joined"
+    );
+}
+
+/// **A renamed row's confirming notice is `YOU_CHANGED`, and it renders "Changed Channel:"**
+/// (decision 2130).
+///
+/// `CHAT_YOU_CHANGED_NOTICE = "Changed Channel: [%s]"` is a string 1.12 ships and we had never
+/// printed, because we modelled no per-slot state to select it with (`0x02`'s arm splits on
+/// `rec+0x9c == 2`). It is what a zone-border crossing actually looks like in the reference: one
+/// line, not a leave and a join.
+#[test]
+fn a_renamed_zone_channel_confirms_as_changed_not_joined() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    let mut channels = super::edit::ChannelState {
+        channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+            benilla_formats::ChatChannelRow {
+                id: 1,
+                flags: 0x0_0003,
+                pattern: "General - %s".into(),
+                shortcut: "General".into(),
+            },
+        ]),
+        ..Default::default()
+    };
+    channels.claim_slot("General - Elwynn Forest");
+    s.run("ChatFrame1.channelList[1] = 'General' ChatFrame1.zoneChannelList[1] = 1")
+        .unwrap();
+    channels.rename_slot("General - Elwynn Forest", "General - Westfall");
+
+    let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
+    e.channel = "General - Westfall".into();
+    e.notice = "2".into(); // YOU_JOINED
+    super::feed::deliver(&mut s, &mut windows, &mut channels, &mut e);
+    s.resolve();
+
+    let want = "Changed Channel: [1. General - Westfall]";
+    assert!(
+        s.extract().iter().any(|q| matches!(
+            &q.content,
+            benilla_ui::script::QuadContent::Text { text: Some(t), .. } if t == want
+        )),
+        "expected {want:?} in the window"
+    );
+    assert_eq!(
+        channels.slot_state("General - Westfall"),
+        Some(super::edit::SlotState::Joined),
+        "and the confirming notice resolves the state — a second crossing must read as a rename \
+         of its own, not as a leftover"
+    );
+}
+
 /// **The leave line still knows its number, because the record dies after the line** (1275).
 ///
 /// [`super::feed::deliver`] is the ordering under test: we used to drop the channel from the joined
@@ -809,7 +1086,7 @@ fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
         "Left Channel: [2. General - Elwynn Forest]"
     );
     assert_eq!(
-        channels.joined,
+        channels.names(),
         [Some("World".to_string()), None],
         "and only THEN is the record gone — as a HOLE at slot 2, not a shortened list (1286)"
     );
@@ -920,7 +1197,7 @@ fn every_notice_token_resolves_and_the_tokenless_bytes_stay_silent() {
                 s.lua().globals().get::<String>(key).ok()
             })
         });
-        match super::event::notice_token(byte) {
+        match super::event::notice_token(byte, None) {
             Some(token) => assert!(
                 rendered.is_some(),
                 "notice {byte:#04x} has token {token} but CHAT_{token}_NOTICE resolves to nothing"
@@ -1375,20 +1652,43 @@ fn real_alias_table_resolves_the_shipped_commands() {
     assert_eq!(
         parse_line("/console fpsJournal 1"),
         ParsedChat::Lua {
-            body: "ConsoleExec([[fpsJournal 1]])".into()
+            body: "ConsoleExec(\"fpsJournal 1\")".into()
         }
     );
     assert_eq!(
         parse_line("/console reloadUI"),
         ParsedChat::Lua {
-            body: "ConsoleExec([[reloadUI]])".into()
+            body: "ConsoleExec(\"reloadUI\")".into()
         }
     );
-    assert_eq!(super::input::lua_long_string("a]]b"), "[=[a]]b]=]");
+    // **The quoting is a SHORT string, because 1.12's lexer has no long-string levels** (2136).
+    // The old long-bracket form stepped its `=` level past whatever the payload could close, which
+    // is a construct the reference cannot compile at all — see `lua_quoted_string`.
+    assert_eq!(super::input::lua_quoted_string("a]]b"), "\"a]]b\"");
+    assert_eq!(super::input::lua_quoted_string("a]]b]=]c"), "\"a]]b]=]c\"");
     assert_eq!(
-        super::input::lua_long_string("a]]b]=]c"),
-        "[==[a]]b]=]c]==]"
+        super::input::lua_quoted_string("say \"hi\"\\n"),
+        "\"say \\\"hi\\\"\\\\n\""
     );
+    // …and the generated literal ROUND-TRIPS through a real VM, which is the assertion that
+    // actually pins the grammar: the old form compiled here and would not have on the reference,
+    // so a string check alone could not have caught it.
+    {
+        let vm = benilla_ui::script::UiScript::new().expect("VM");
+        for payload in [
+            "fpsJournal 1",
+            "a]]b",
+            "a]]b]=]c",
+            "quote \" and backslash \\",
+            "tab\there",
+        ] {
+            let lit = super::input::lua_quoted_string(payload);
+            let got: String = vm
+                .eval(&format!("return {lit}"))
+                .unwrap_or_else(|e| panic!("{lit} must compile on a 1.12-grammar VM: {e}"));
+            assert_eq!(got, payload, "and must carry the text unchanged");
+        }
+    }
     // The whole shipped surface, so a table that half-loaded fails loudly: **225 distinct emote
     // commands** over the 169 `EmotesText` names (the strings repeat — `EMOTE87_CMD1` and `_CMD2`
     // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **68 distinct
@@ -2432,4 +2732,146 @@ fn the_free_professions_line_is_printed_once() {
         "You now have 2 free professions.",
         "LEVEL_UP_SKILL_POINTS_P1, plural-picked by GetText on cp2"
     );
+}
+
+// ───────────── The chat cache restores INSIDE the login, not after it (decision 2119) ─────────
+
+/// **The login order, asserted at the two places that broke.**
+///
+/// `UPDATE_CHAT_WINDOWS` is the only thing that registers a chat frame for any `CHAT_MSG_*`
+/// (`ChatFrame_OnEvent`'s arm calls `ChatFrame_RegisterForMessages(GetChatWindowMessages(id))`),
+/// and the `UPDATE_CHAT_COLOR` burst mirrors `WHISPER` into `ChatTypeInfo["REPLY"]`, whose `.id`
+/// is 0 — the same id every `AddMessage` with no explicit colour carries — so the burst repaints
+/// them. Both events come from the chat-cache restore, so the restore has to be finished before
+/// `PLAYER_LOGIN`: before it, an addon's `Print` gets repainted whisper-pink, and any chat routed
+/// in that window lands on a frame registered for nothing and is dropped in silence (1784).
+///
+/// Pre-2119 the restore was an `Update` system and this probe saw `windows = nil`,
+/// `colors = nil`, `registered = ""` at `PLAYER_LOGIN`.
+///
+/// The probe is planted in the boot VM the way `world_entry_tests` plants its addon: the entry
+/// load runs onto the VM that already exists, so a frame created here hears the whole load.
+#[test]
+fn the_chat_cache_restore_is_finished_before_player_login() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let _l = crate::local_state::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = std::env::temp_dir().join(format!("benilla-chat-order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("benilla-config")).expect("hermetic home");
+    let _capture = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+    let _home = crate::local_state::test_env::EnvGuard::set(
+        "BENILLA_HOME",
+        tmp.join("benilla-config")
+            .to_str()
+            .expect("utf-8 temp path"),
+    );
+
+    let mut world = bevy::prelude::World::new();
+    world.init_resource::<crate::ui_script::AddOnIdentity>();
+    world.init_resource::<crate::minimap::MinimapZoom>();
+    world.init_resource::<crate::ui_script::ReloadUiPending>();
+    world.init_resource::<super::edit::ChannelState>();
+    world.init_resource::<super::settings::ChatWindowFile>();
+    crate::ui_script::setup_script(&mut world);
+
+    world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .run(
+            r#"
+            ChatOrderProbe = { order = "" }
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("VARIABLES_LOADED")
+            f:RegisterEvent("UPDATE_CHAT_WINDOWS")
+            f:RegisterEvent("UPDATE_CHAT_COLOR")
+            f:RegisterEvent("PLAYER_LOGIN")
+            f:SetScript("OnEvent", function()
+                -- The burst is 100+ events; record it once so the order string stays readable.
+                if not string.find(ChatOrderProbe.order, event, 1, 1) then
+                    ChatOrderProbe.order = ChatOrderProbe.order .. event .. " "
+                end
+                if event == "UPDATE_CHAT_WINDOWS" then
+                    ChatOrderProbe.windows = (ChatOrderProbe.windows or 0) + 1
+                elseif event == "UPDATE_CHAT_COLOR" then
+                    ChatOrderProbe.colors = (ChatOrderProbe.colors or 0) + 1
+                elseif event == "PLAYER_LOGIN" then
+                    ChatOrderProbe.loginWindows = ChatOrderProbe.windows or 0
+                    ChatOrderProbe.loginColors = ChatOrderProbe.colors or 0
+                    ChatOrderProbe.loginRegistered =
+                        (ChatFrame1 and ChatFrame1.messageTypeList
+                            and table.concat(ChatFrame1.messageTypeList, ",")) or ""
+                end
+            end)
+            "#,
+        )
+        .expect("order probe");
+
+    world.insert_resource(crate::char_select::Roster::with_pending_pick(
+        vec![benilla_protocol::Character {
+            guid: 1,
+            name: "Probeorder".into(),
+            race: 1,  // Human → Alliance
+            class: 1, // Warrior
+            gender: 0,
+            level: 60,
+            skin: 0,
+            face: 0,
+            hair_style: 0,
+            hair_color: 0,
+            facial_hair: 0,
+            zone: 0,
+            map: 0,
+            position: benilla_protocol::wire::Vector3d {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            flags: 0,
+            equipment: [benilla_protocol::CharEnumItem::default(); 19],
+            pet_display_id: 0,
+            pet_level: 0,
+            pet_family: 0,
+        }],
+        1,
+    ));
+    crate::ui_script::load_ingame_ui_on_world_entry(&mut world);
+
+    let read = |expr: &str| -> String {
+        world
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .eval::<Option<String>>(&format!("return tostring({expr})"))
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        read("ChatOrderProbe.loginWindows"),
+        "1",
+        "UPDATE_CHAT_WINDOWS must have fired before PLAYER_LOGIN — it is the only thing that \
+         registers a chat frame for CHAT_MSG_*, so a line routed before it is dropped in silence"
+    );
+    assert_ne!(
+        read("ChatOrderProbe.loginColors"),
+        "0",
+        "the UPDATE_CHAT_COLOR burst must precede PLAYER_LOGIN — after it, its WHISPER→REPLY \
+         mirror repaints every already-printed AceConsole line whisper-pink"
+    );
+    assert!(
+        read("ChatOrderProbe.loginRegistered").contains("SYSTEM"),
+        "ChatFrame1 must carry the SYSTEM message group at PLAYER_LOGIN, not {:?}",
+        read("ChatOrderProbe.loginRegistered")
+    );
+    // The reference's own login order, byte-derived (wow-re `login-chat-colour-pipeline.md`;
+    // decision 2125): addons and their `ADDON_LOADED` (`0x4900a3`), then `VARIABLES_LOADED`
+    // (`0x4900b2`), then the chat-cache reader's burst (`0x4900d6`), then `PLAYER_LOGIN`
+    // (`0x490959`). 2119 put the burst ahead of `VARIABLES_LOADED`, one step too early.
+    assert_eq!(
+        read("ChatOrderProbe.order"),
+        "VARIABLES_LOADED UPDATE_CHAT_WINDOWS UPDATE_CHAT_COLOR PLAYER_LOGIN ",
+        "the reference fires the chat-cache burst BETWEEN VARIABLES_LOADED and PLAYER_LOGIN"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
 }

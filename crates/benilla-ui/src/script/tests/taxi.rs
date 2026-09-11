@@ -34,7 +34,7 @@ fn taxi_snapshot_surfaces_and_intents_drain() {
     s.run(
         r#"
         f = CreateFrame("Frame", "TaxiHost")
-        f:SetWidth(316); f:SetHeight(352); f:SetPoint("CENTER")
+        f:SetWidth(316); f:SetHeight(352); f:SetPoint("CENTER", 0, 0)
         map = f:CreateTexture("TaxiMapTex", "OVERLAY")
         SetTaxiMap(map)
 

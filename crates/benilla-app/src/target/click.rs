@@ -46,6 +46,72 @@ pub(super) fn world_right_click_payload(
     script.clear_cursor_payload();
 }
 
+/// **A plate click is a click on its unit** — the plate's own click slot (`0x7cb910`) ends in the
+/// same `SetSelection` a click on the body does (decision 2148).
+///
+/// It **carries its own unit** rather than reading the press pick, and that is the whole design:
+/// pfUI's click-through calls `plate:Click("LeftButton")` with the cursor wherever the player left
+/// it (`nameplates.lua:1274`), so a plate click that depended on the hover would work under the
+/// mouse and silently do nothing for the addon it exists to serve. The first cut of this system
+/// replayed a [`WorldClick`] and was guarded on the press pick naming the same unit; the live probe
+/// caught it — the scripted click selected nothing.
+///
+/// The RIGHT button is the other way round, deliberately. [`act_on_right_click`] acts on the LIVE
+/// hover across many legs (interact, attack, loot, GameObject), so feeding it a unit the pointer is
+/// not on could attack the wrong thing; it is replayed only when the hover already names the
+/// plate's unit — the physical case. A scripted right-click on a plate does nothing yet, which is
+/// a stated gap rather than a guess about which leg it should take.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn select_on_plate_click(
+    mut plate: ResMut<crate::vplates::PlateClicks>,
+    press: Res<PressPick>,
+    hovered: Res<Hovered>,
+    ground: Res<crate::ui_action::SpellTargeting>,
+    mut selection: ResMut<Selection>,
+    mut seam: crate::creature_anim::AttackSeam,
+    self_q: Query<(&Guid, Has<Engaged>), With<SelfPlayer>>,
+    mut greeting: MessageWriter<crate::sound::NpcGreetingRequest>,
+    mut right_clicks: MessageWriter<WorldRightClick>,
+    units: Query<(&Guid, Option<&ObjectStore>)>,
+) {
+    let (left, right) = (
+        std::mem::take(&mut plate.left),
+        std::mem::take(&mut plate.right),
+    );
+    // The ground-targeting cursor owns the click, exactly as it does for a world one (0792).
+    if ground.active() {
+        return;
+    }
+    let (self_guid, engaged) = self_q
+        .single()
+        .map(|(g, e)| (Some(g.0), e))
+        .unwrap_or((None, false));
+    for entity in left {
+        let Ok((guid, store)) = units.get(entity) else {
+            continue; // the unit left between the click and this frame
+        };
+        // The NPC greets us on the SELECT gesture, plate or body — the byte-verified trigger fires
+        // before SetTarget either way (`0x60c270`).
+        greeting.write(crate::sound::NpcGreetingRequest { npc: entity });
+        // The attack classification is the press pick's, and only when the press was actually on
+        // this unit: a scripted click has no cursor behind it, so it is not an attack-cursor click.
+        let attack = press.attack && press.hovered.target == Some(entity);
+        scan::commit(
+            &mut selection,
+            &mut seam,
+            entity,
+            guid.0,
+            store,
+            engaged,
+            self_guid,
+            attack,
+        );
+    }
+    if right.into_iter().any(|e| hovered.target == Some(e)) {
+        right_clicks.write(WorldRightClick);
+    }
+}
+
 /// On a [`WorldClick`], select the unit the **press** was over ([`PressPick`]) and inform the
 /// server; a click on empty ground / a non-unit clears the target — except a click on NOTHING (sky
 /// — no occlusion-ray hit) while a payload is held: the reference's nothing-leg deselect is
@@ -2165,6 +2231,7 @@ mod tests {
         world.init_resource::<crate::ui_party::GroupState>();
         world.init_resource::<crate::net::GuidIndex>();
         world.init_resource::<crate::net::Reputations>();
+        world.init_resource::<super::AssistAttack>();
         world.init_resource::<Selection>();
         world.init_resource::<scan::LastEnemy>();
         world.init_resource::<Messages<super::by_name::AssistRequest>>();

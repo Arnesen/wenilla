@@ -36,6 +36,11 @@ fn scrollframe_methods_exist_only_on_scrollframes() {
         return (type(sf.SetScrollChild) == "function") and (plain.SetScrollChild == nil)
             and (type(sf.SetVerticalScroll) == "function") and (plain.SetVerticalScroll == nil)
             and (type(sf.GetVerticalScrollRange) == "function")
+            -- the horizontal trio lives in the same class table, not on every Frame
+            and (type(sf.SetHorizontalScroll) == "function") and (plain.SetHorizontalScroll == nil)
+            and (type(sf.GetHorizontalScroll) == "function") and (plain.GetHorizontalScroll == nil)
+            and (type(sf.GetHorizontalScrollRange) == "function")
+            and (plain.GetHorizontalScrollRange == nil)
             and (type(sf.Show) == "function") -- base methods still reachable through the fallback
     "#,
         )
@@ -81,13 +86,13 @@ fn scroll_child_top_tracks_vertical_scroll_unclamped_then_restores_on_clear() {
         r#"
         local frame = CreateFrame("ScrollFrame", "SF")
         frame:SetPoint("TOPLEFT", 0, -100)  -- screen top 600 -> frame top 500
-        frame:SetSize(300, 200)             -- frame bottom 300
+        frame:SetWidth(300); frame:SetHeight(200)  -- frame bottom 300
 
         local child = CreateFrame("Frame", "Child")
         -- Authored anchor: relative to the screen (child has no parent) — overridden while scrolled,
         -- and must be exactly what re-applies once the scroll child is cleared.
         child:SetPoint("TOPLEFT", 20, -20)
-        child:SetSize(300, 600)
+        child:SetWidth(300); child:SetHeight(600)
         local marker = child:CreateTexture(nil, "ARTWORK")
         marker:SetTexture("marker:child")
         marker:SetAllPoints()  -- templateless Lua regions carry no implicit anchor (decision 1310)
@@ -170,10 +175,10 @@ fn set_vertical_scroll_fires_on_vertical_scroll_only_on_a_change() {
         Fires = {}
         local frame = CreateFrame("ScrollFrame", "SF")
         frame:SetPoint("TOPLEFT", 0, -100)
-        frame:SetSize(300, 200)
+        frame:SetWidth(300); frame:SetHeight(200)
         frame:SetScript("OnVerticalScroll", function() table.insert(Fires, arg1) end)
         local child = CreateFrame("Frame", "Child")
-        child:SetSize(300, 600)
+        child:SetWidth(300); child:SetHeight(600)
         frame:SetScrollChild(child)
         frame:SetVerticalScroll(0)      -- already 0: nothing
         frame:SetVerticalScroll(40)     -- a change
@@ -199,9 +204,9 @@ fn vertical_scroll_range_is_live_and_zero_when_unresolved_or_childless_or_shorte
         r#"
         local frame = CreateFrame("ScrollFrame", "SF")
         frame:SetPoint("TOPLEFT", 0, -100)
-        frame:SetSize(300, 200)
+        frame:SetWidth(300); frame:SetHeight(200)
         local child = CreateFrame("Frame", "Child")
-        child:SetSize(300, 600)
+        child:SetWidth(300); child:SetHeight(600)
         frame:SetScrollChild(child)
     "#,
     )
@@ -221,7 +226,7 @@ fn vertical_scroll_range_is_live_and_zero_when_unresolved_or_childless_or_shorte
     );
 
     // A child shorter than the frame: 0, not negative.
-    s.run("Child:SetSize(300, 150)").unwrap();
+    s.run("Child:SetWidth(300); Child:SetHeight(150)").unwrap();
     s.resolve();
     assert_eq!(
         s.eval::<f32>("return SF:GetVerticalScrollRange()").unwrap(),
@@ -251,10 +256,10 @@ fn vertical_scroll_range_is_local_units_on_a_scaled_frame() {
         r#"
         local frame = CreateFrame("ScrollFrame", "SF")
         frame:SetPoint("TOPLEFT", 0, -100)
-        frame:SetSize(300, 200)
+        frame:SetWidth(300); frame:SetHeight(200)
         frame:SetScale(0.5)
         local child = CreateFrame("Frame", "Child", frame)
-        child:SetSize(300, 600)
+        child:SetWidth(300); child:SetHeight(600)
         frame:SetScrollChild(child)
     "#,
     )
@@ -299,9 +304,9 @@ fn vertical_scroll_fires_as_given_and_update_rect_fires_range_changed() {
         r#"
         local frame = CreateFrame("ScrollFrame", "SF")
         frame:SetPoint("TOPLEFT", 0, -100)
-        frame:SetSize(300, 200)
+        frame:SetWidth(300); frame:SetHeight(200)
         local child = CreateFrame("Frame", "Child")
-        child:SetSize(300, 600)
+        child:SetWidth(300); child:SetHeight(600)
         frame:SetScrollChild(child)
 
         seen_v = nil
@@ -345,9 +350,9 @@ fn update_scroll_child_rect_sees_a_same_tick_resize_with_no_intervening_resolve(
         r#"
         local frame = CreateFrame("ScrollFrame", "SF")
         frame:SetPoint("TOPLEFT", 0, -100)
-        frame:SetSize(300, 200)
+        frame:SetWidth(300); frame:SetHeight(200)
         local child = CreateFrame("Frame", "Child")
-        child:SetSize(300, 200) -- starts exactly frame-height: range 0
+        child:SetWidth(300); child:SetHeight(200) -- starts exactly frame-height: range 0
         frame:SetScrollChild(child)
     "#,
     )
@@ -358,7 +363,7 @@ fn update_scroll_child_rect_sees_a_same_tick_resize_with_no_intervening_resolve(
         r#"
         seen_hi = nil
         SF:SetScript("OnScrollRangeChanged", function(self, lo, hi) seen_hi = hi end)
-        Child:SetSize(300, 600) -- grows well past the frame — all in this ONE tick
+        Child:SetWidth(300); Child:SetHeight(600) -- grows well past the frame — all in this ONE tick
         SF:UpdateScrollChildRect()
     "#,
     )
@@ -389,10 +394,10 @@ fn extract_clips_the_scroll_childs_whole_subtree_and_leaves_a_sibling_unclipped(
         r#"
         local frame = CreateFrame("ScrollFrame", "SF")
         frame:SetPoint("TOPLEFT", 0, -100)  -- top 500
-        frame:SetSize(300, 200)             -- bottom 300, right 300
+        frame:SetWidth(300); frame:SetHeight(200)  -- bottom 300, right 300
 
         local child = CreateFrame("Frame", "Child")
-        child:SetSize(300, 600)
+        child:SetWidth(300); child:SetHeight(600)
         frame:SetScrollChild(child)
         local cm = child:CreateTexture(nil, "ARTWORK")
         cm:SetTexture("marker:child")
@@ -400,14 +405,14 @@ fn extract_clips_the_scroll_childs_whole_subtree_and_leaves_a_sibling_unclipped(
         -- a grandchild FRAME (a real arena descendant of the scroll child) with its own region
         local grand = CreateFrame("Frame", "Grand", child)
         grand:SetPoint("TOPLEFT", child, "TOPLEFT", 0, 0)
-        grand:SetSize(50, 50)
+        grand:SetWidth(50); grand:SetHeight(50)
         local gm = grand:CreateTexture(nil, "ARTWORK")
         gm:SetTexture("marker:grand")
 
         -- a sibling entirely outside the ScrollFrame
         local sib = CreateFrame("Frame", "Sib")
         sib:SetPoint("TOPLEFT", 0, 0)
-        sib:SetSize(50, 50)
+        sib:SetWidth(50); sib:SetHeight(50)
         local sm = sib:CreateTexture(nil, "ARTWORK")
         sm:SetTexture("marker:sib")
     "#,
@@ -441,11 +446,11 @@ fn nested_scrollframes_intersect_their_clip_rects() {
         r#"
         local outer = CreateFrame("ScrollFrame", "Outer")
         outer:SetPoint("TOPLEFT", 0, -50)   -- top 550
-        outer:SetSize(400, 300)             -- bottom 250, right 400
+        outer:SetWidth(400); outer:SetHeight(300)  -- bottom 250, right 400
         local om = outer:CreateTexture(nil, "ARTWORK"); om:SetTexture("marker:outer")
 
         local c1 = CreateFrame("Frame", "C1")
-        c1:SetSize(400, 1000)
+        c1:SetWidth(400); c1:SetHeight(1000)
         outer:SetScrollChild(c1)
         local c1m = c1:CreateTexture(nil, "ARTWORK"); c1m:SetTexture("marker:c1")
 
@@ -454,11 +459,11 @@ fn nested_scrollframes_intersect_their_clip_rects() {
         -- Outer's right edge — an intersection distinct from either rect alone.
         local inner = CreateFrame("ScrollFrame", "Inner", c1)
         inner:SetPoint("TOPLEFT", "C1", "TOPLEFT", 350, -30)
-        inner:SetSize(200, 150)
+        inner:SetWidth(200); inner:SetHeight(150)
         local im = inner:CreateTexture(nil, "ARTWORK"); im:SetTexture("marker:inner")
 
         local c2 = CreateFrame("Frame", "C2", inner)
-        c2:SetSize(200, 500)
+        c2:SetWidth(200); c2:SetHeight(500)
         inner:SetScrollChild(c2)
         local leaf = c2:CreateTexture(nil, "ARTWORK"); leaf:SetTexture("marker:leaf")
     "#,
@@ -514,16 +519,16 @@ fn hit_test_denies_a_button_clipped_out_and_admits_it_once_scrolled_into_view() 
         r#"
         local frame = CreateFrame("ScrollFrame", "SF")
         frame:SetPoint("TOPLEFT", 0, -100)  -- top 500
-        frame:SetSize(300, 200)             -- bottom 300
+        frame:SetWidth(300); frame:SetHeight(200)  -- bottom 300
         frame:EnableMouse(false)            -- isolate the button's own clip-gated hit (§5's subject)
 
         local child = CreateFrame("Frame", "Child")
-        child:SetSize(300, 600)
+        child:SetWidth(300); child:SetHeight(600)
         frame:SetScrollChild(child)
 
         local btn = CreateFrame("Button", "Btn", child)
         btn:SetPoint("TOPLEFT", "Child", "TOPLEFT", 0, -400)
-        btn:SetSize(50, 20)
+        btn:SetWidth(50); btn:SetHeight(20)
     "#,
     )
     .unwrap();
@@ -568,9 +573,9 @@ fn update_scroll_child_rect_measures_the_childs_text_before_it_reads_the_range()
     s.run(
         r#"
         local sf = CreateFrame("ScrollFrame", "SF", UIParent)
-        sf:SetPoint("TOPLEFT", 0, 0); sf:SetSize(100, 50)
+        sf:SetPoint("TOPLEFT", 0, 0); sf:SetWidth(100); sf:SetHeight(50)
         local child = CreateFrame("Frame", "SFChild", sf)
-        child:SetSize(100, 50); sf:SetScrollChild(child)
+        child:SetWidth(100); child:SetHeight(50); sf:SetScrollChild(child)
         local fs = child:CreateFontString("SFText", "ARTWORK")
         fs:SetPoint("TOPLEFT", 0, 0); fs:SetWidth(70)
         sf:SetScript("OnScrollRangeChanged", function() RANGE = arg2 end)
@@ -585,4 +590,164 @@ fn update_scroll_child_rect_measures_the_childs_text_before_it_reads_the_range()
         6.0,
         "56px of measured text under a 50px frame: the range is known at the call, not a frame later"
     );
+}
+
+/// The horizontal axis is the vertical one's byte-clone (`0x786d30` against `0x786db0`), so this is
+/// the vertical trio's test on the other axis: the offset is stored VERBATIM and re-anchors the
+/// child, `OnHorizontalScroll` fires only on a real change, and the range is
+/// `max(0, subtreeWidth - frameWidth)`.
+///
+/// **The sign is the point.** `0x787100` hands both offsets to `SetPoint(TOPLEFT, self, TOPLEFT,
+/// +hScroll, +vScroll)` unnegated, and x grows right — so a positive horizontal pushes the child
+/// RIGHT where a positive vertical lifts it. `aux-addon/tabs/search/filter.lua:315-322` corroborates
+/// it from the caller's side (it bounds x into `[frameWidth - contentWidth - 10, 0]` and y into
+/// `[0, contentHeight - frameHeight]`), which is why it is asserted here rather than assumed.
+#[test]
+fn scroll_child_left_tracks_horizontal_scroll_unclamped_and_fires_on_change() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+
+    s.run(
+        r#"
+        local frame = CreateFrame("ScrollFrame", "HSF")
+        frame:SetPoint("TOPLEFT", 0, -100)   -- frame left 0, top 500
+        frame:SetWidth(300); frame:SetHeight(200)  -- frame right 300
+
+        local child = CreateFrame("Frame", "HChild")
+        child:SetPoint("TOPLEFT", 20, -20)
+        child:SetWidth(500); child:SetHeight(200)
+        local marker = child:CreateTexture(nil, "ARTWORK")
+        marker:SetTexture("marker:hchild")
+        marker:SetAllPoints()
+
+        frame:SetScrollChild(child)
+        hfired = {}
+        frame:SetScript("OnHorizontalScroll", function() table.insert(hfired, arg1) end)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    assert_eq!(
+        s.eval::<f32>("return HSF:GetHorizontalScroll()").unwrap(),
+        0.0,
+        "a fresh ScrollFrame is at 0 on both axes"
+    );
+    assert_eq!(
+        marker_rect(&s.extract(), "marker:hchild").map(|r| r.left),
+        Some(0.0),
+        "horizontal=0 -> child left = frame left"
+    );
+
+    // Positive pushes the child RIGHT (the reference's unnegated xOff) …
+    s.run("HSF:SetHorizontalScroll(40)").unwrap();
+    s.resolve();
+    assert_eq!(
+        marker_rect(&s.extract(), "marker:hchild").map(|r| r.left),
+        Some(40.0),
+        "a positive horizontal offset moves the child right"
+    );
+    // … and it is the NEGATIVE direction that scrolls right, which is the half aux-addon relies on.
+    s.run("HSF:SetHorizontalScroll(-60)").unwrap();
+    s.resolve();
+    assert_eq!(
+        marker_rect(&s.extract(), "marker:hchild").map(|r| r.left),
+        Some(-60.0),
+        "a negative horizontal offset scrolls right"
+    );
+
+    // No clamp — the range is 500-300 = 200 and 450 is stored and applied whole (decision 2017's
+    // law, which is `0x786d30`'s as much as `0x786db0`'s: neither reads the range).
+    assert_eq!(
+        s.eval::<f32>("return HSF:GetHorizontalScrollRange()")
+            .unwrap(),
+        200.0,
+        "range = subtree width - frame width"
+    );
+    s.run("HSF:SetHorizontalScroll(450)").unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f32>("return HSF:GetHorizontalScroll()").unwrap(),
+        450.0,
+        "stored verbatim, past the range"
+    );
+
+    // Arity/kind, the way the shape gate measures them.
+    assert_eq!(s.arity("HSF:GetHorizontalScroll()").unwrap(), 1);
+    assert_eq!(s.arity("HSF:GetHorizontalScrollRange()").unwrap(), 1);
+    assert_eq!(
+        s.eval::<String>("return type(HSF:GetHorizontalScroll())")
+            .unwrap(),
+        "number"
+    );
+    assert_eq!(
+        s.eval::<String>("return type(HSF:GetHorizontalScrollRange())")
+            .unwrap(),
+        "number"
+    );
+    assert_eq!(
+        s.arity("HSF:SetHorizontalScroll(450)").unwrap(),
+        0,
+        "the setter answers nothing"
+    );
+
+    // The change-gate: four setter calls moved the value (40, -60, 450, and 450 again is not one).
+    let fired: Vec<f32> = (1..=s.eval::<i64>("return table.getn(hfired)").unwrap())
+        .map(|i| s.eval::<f32>(&format!("return hfired[{i}]")).unwrap())
+        .collect();
+    assert_eq!(
+        fired,
+        vec![40.0, -60.0, 450.0],
+        "OnHorizontalScroll fires once per ACTUAL change, with the new offset"
+    );
+
+    // The two axes are independent state, not one offset behind two names.
+    s.run("HSF:SetVerticalScroll(25)").unwrap();
+    assert_eq!(
+        s.eval::<f32>("return HSF:GetHorizontalScroll()").unwrap(),
+        450.0
+    );
+    assert_eq!(
+        s.eval::<f32>("return HSF:GetVerticalScroll()").unwrap(),
+        25.0
+    );
+}
+
+/// `UpdateScrollChildRect` notifies `OnScrollRangeChanged(self, xRange, yRange)` — **horizontal
+/// first**. Byte-derived, not guessed: the vertical result leaves `0x786e30` on top of the x87
+/// stack, is `fstp`'d first and so pushed deepest, landing as `arg2` (wow-re
+/// `scrollframe-offset-and-range-law.md` §3.6 — two of that round's own workers published it the
+/// other way round, which is why it is asserted here). `arg1` was a hardcoded `0.0` for as long as
+/// there was no horizontal range to put in it.
+#[test]
+fn update_scroll_child_rect_reports_both_ranges_horizontal_first() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local frame = CreateFrame("ScrollFrame", "BSF")
+        frame:SetPoint("TOPLEFT", 0, -100)
+        frame:SetWidth(300); frame:SetHeight(200)
+        local child = CreateFrame("Frame", "BChild")
+        child:SetPoint("TOPLEFT", 0, 0)
+        child:SetWidth(500); child:SetHeight(600)
+        frame:SetScrollChild(child)
+        seen = nil
+        frame:SetScript("OnScrollRangeChanged", function() seen = { arg1, arg2 } end)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.run("BSF:UpdateScrollChildRect()").unwrap();
+    assert_eq!(
+        s.eval::<f32>("return seen[1]").unwrap(),
+        200.0,
+        "arg1 is the HORIZONTAL range (500 - 300)"
+    );
+    assert_eq!(
+        s.eval::<f32>("return seen[2]").unwrap(),
+        400.0,
+        "arg2 is the VERTICAL range (600 - 200)"
+    );
+    assert!(s.take_errors().is_empty());
 }

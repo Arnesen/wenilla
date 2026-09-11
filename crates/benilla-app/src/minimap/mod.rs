@@ -1,7 +1,7 @@
 //! The HUD minimap renderer (decision 0203 phase 1) — the app half of the `<Minimap>` widget.
 //!
 //! The engine side (benilla-ui) carries the widget's rect + zoom and emits a
-//! `QuadContent::Minimap` hole at the frame's own draw slot; `ui_script::extract::drive_script` parks that
+//! `QuadContent::Minimap` hole at the frame's own draw slot; `ui_script::extract::paint_script` parks that
 //! in [`MinimapWidget`], and [`emit_minimap`] (in the [`UiQuadAppend`] window) fills it: the
 //! streamed tile window around the player, clipped to the widget rect and masked to the
 //! `MinimapMask.blp` circle at present time, with the player arrow rotating on top. Children of
@@ -210,7 +210,7 @@ fn probe_minimap_widget(mut widget: ResMut<MinimapWidget>, windows: Query<&Windo
     });
 }
 
-/// This frame's extracted `<Minimap>` widget slot, written by `ui_script::extract::drive_script` (the
+/// This frame's extracted `<Minimap>` widget slot, written by `ui_script::extract::paint_script` (the
 /// `QuadContent::Minimap` arm) — `None` when no Minimap widget is visible (cluster hidden, no XML).
 #[derive(Resource, Default)]
 pub(crate) struct MinimapWidget(pub(crate) Option<MinimapSlot>);

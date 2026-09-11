@@ -1016,10 +1016,7 @@ mod tests {
         );
 
         // Exactly one return — the reference assigns it straight into a single local.
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetPetIcon())").unwrap(),
-            1
-        );
+        assert_eq!(s.arity("GetPetIcon()").unwrap(), 1);
     }
 
     fn hunter_stats() -> PetStats {
@@ -1206,16 +1203,11 @@ mod tests {
     fn get_pet_food_types_returns_one_value_per_diet() {
         let mut s = UiScript::new().unwrap();
         // No pet: ZERO returns, which is what makes the ref's `BuildListString` answer nil.
-        assert_eq!(
-            s.eval::<i64>(r##"return select("#", GetPetFoodTypes())"##)
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity("GetPetFoodTypes()").unwrap(), 0);
 
         s.set_pet_stats(true, hunter_stats());
         assert_eq!(
-            s.eval::<i64>(r##"return select("#", GetPetFoodTypes())"##)
-                .unwrap(),
+            s.arity("GetPetFoodTypes()").unwrap(),
             6,
             "a boar's six diets are six returns, not one string"
         );
@@ -1235,11 +1227,7 @@ mod tests {
                 ..hunter_stats()
             },
         );
-        assert_eq!(
-            s.eval::<i64>(r##"return select("#", GetPetFoodTypes())"##)
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity("GetPetFoodTypes()").unwrap(), 0);
     }
 
     /// The family **word** answers regardless of the hunter gate — `UnitCreatureFamily 0x51a310`
@@ -1267,10 +1255,6 @@ mod tests {
         );
         // …while every hunter-gated binding still says nothing.
         assert!(s.eval::<bool>("return GetPetLoyalty() == nil").unwrap());
-        assert_eq!(
-            s.eval::<i64>(r##"return select("#", GetPetFoodTypes())"##)
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity("GetPetFoodTypes()").unwrap(), 0);
     }
 }

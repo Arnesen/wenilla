@@ -141,8 +141,9 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_CHAT").is_ok() {
                 app.add_plugins(crate::capture::ProbeChatPlugin);
             }
-            // The probe-lua one-shot: `WOW_PROBE_LUA="CastSpell(…)"` runs a chunk in the live UI VM once
-            // in-world — the "press the button headlessly" instrument (see `capture::ProbeLuaPlugin`).
+            // The probe-lua driver: `WOW_PROBE_LUA="CastSpell(…)"` runs a chunk in the live UI VM once
+            // per world entry — the "press the button headlessly" instrument, re-armed across a relog
+            // so a probe can read the same value on both sides of one (see `capture::ProbeLuaPlugin`).
             if std::env::var("WOW_PROBE_LUA").is_ok() {
                 app.add_plugins(crate::capture::ProbeLuaPlugin);
             }

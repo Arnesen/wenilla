@@ -25,7 +25,10 @@ pub(super) fn attack_start(attacker: u64, victim: u64, commands: &mut Commands, 
         // Melee-start drops the `0x400` weapon-visual hold unconditionally (the client's
         // `0x60fc50` sibling clear) — a shooter that closes to melee leaves the drawn idle.
         // The LOCAL player's melee paths additionally run the full cancel funnel at send.
-        commands.entity(e).insert(Engaged).remove::<RangedHold>();
+        commands
+            .entity(e)
+            .insert(Engaged(victim))
+            .remove::<RangedHold>();
     }
 }
 
@@ -169,6 +172,7 @@ pub(super) fn attacker_state(
         hit_info: s.hit_info,
         victim_state: s.victim_state,
         damage: s.damage,
+        displayed: s.displayed(),
         seq,
     };
     if let Some(&e) = index.0.get(&s.attacker) {

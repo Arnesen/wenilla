@@ -72,7 +72,7 @@ pub(crate) use measurer::{measure_request, AtlasMeasurer};
 
 pub(crate) use layout::{
     ellipsize_to_fit, layout_text_quads, layout_text_quads_links, line_advances, line_origin,
-    line_rows, measure_text, measure_wrapped_rows, FontSpec, Justify, UI_SEAT_NUDGE,
+    line_rows, measure_text, measure_wrapped_rows, FontSpec, Justify, TextSeat, UI_SEAT_NUDGE,
 };
 
 /// The default body text size (logical px) — WoW's own `GameFontNormal`. A `FontString` with no
@@ -294,7 +294,7 @@ mod ellipsis_memo_tests {
                 r#"
                 local f = CreateFrame("Frame", "MemoHost")
                 f:SetPoint("TOPLEFT", 0, 0)
-                f:SetSize(100, 100)
+                f:SetWidth(100); f:SetHeight(100)
                 for i = 1, 8 do
                     local t = f:CreateTexture(nil, "ARTWORK")
                     t:SetTexture(1, 0, 0)

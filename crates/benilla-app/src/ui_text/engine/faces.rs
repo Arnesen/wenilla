@@ -41,13 +41,30 @@ pub(super) fn hhea_ascent_ratio(bytes: &[u8]) -> Option<f32> {
     (denom > 0.0 && asc > 0.0).then_some(asc / denom)
 }
 
-/// Registers `bytes` (raw TTF) into `font_system`'s `fontdb`, returning `(face_id, family_name)` —
-/// the family name is read back off the just-loaded face so callers build an exact `Attrs::family`
-/// match with no reliance on hardcoding Blizzard's font-name strings.
+/// What a registered face answers to when a caller has to name it to the shaper: its id, the
+/// family string, and the three CSS axes `cosmic-text` matches on.
+///
+/// **The axes are not decoration** (decision 2123). `Attrs::matches` in cosmic-text 0.16 filters
+/// the candidate set on `style` and `stretch`, and `fontdb::Database::query` then does CSS
+/// matching over `weight` as well — so an `Attrs::new().family(…)` built with the *defaults*
+/// asks for a NORMAL-weight, NORMAL-style face and quietly gets somebody else when the face it
+/// named is bold or italic. Reading them back off the face means the attrs describe the face we
+/// actually loaded rather than the one we assumed.
+pub(super) struct Registered {
+    pub(super) id: fontdb::ID,
+    pub(super) family: String,
+    pub(super) weight: fontdb::Weight,
+    pub(super) style: fontdb::Style,
+    pub(super) stretch: fontdb::Stretch,
+}
+
+/// Registers `bytes` (raw TTF) into `font_system`'s `fontdb`, returning the face's id and the
+/// four things a caller needs to name it back to the shaper — all read off the just-loaded face,
+/// with no reliance on hardcoding Blizzard's font-name strings.
 pub(super) fn register_font(
     font_system: &mut FontSystem,
     bytes: Vec<u8>,
-) -> anyhow::Result<(fontdb::ID, String)> {
+) -> anyhow::Result<Registered> {
     let source = fontdb::Source::Binary(
         std::sync::Arc::new(bytes) as std::sync::Arc<dyn AsRef<[u8]> + Sync + Send>
     );
@@ -55,13 +72,20 @@ pub(super) fn register_font(
     let id = *ids
         .first()
         .ok_or_else(|| anyhow::anyhow!("font source produced no faces (not a valid TTF?)"))?;
-    let family = font_system
+    let info = font_system
         .db_mut()
         .face(id)
-        .ok_or_else(|| anyhow::anyhow!("face {id:?} vanished right after loading"))?
+        .ok_or_else(|| anyhow::anyhow!("face {id:?} vanished right after loading"))?;
+    let family = info
         .families
         .first()
         .map(|(name, _)| name.clone())
         .ok_or_else(|| anyhow::anyhow!("face {id:?} carries no family name"))?;
-    Ok((id, family))
+    Ok(Registered {
+        id,
+        family,
+        weight: info.weight,
+        style: info.style,
+        stretch: info.stretch,
+    })
 }

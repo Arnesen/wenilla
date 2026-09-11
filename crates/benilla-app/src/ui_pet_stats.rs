@@ -322,11 +322,22 @@ fn feed_pet_stats(
         // line is `if ( arg1 == this.unit )`, so an argless fire reaches nobody.
         script.fire_event("UNIT_HAPPINESS", vec![ScriptValue::Str("pet".into())]);
     }
+    // Both of these are the SAME bridge as `UNIT_HAPPINESS` above — named unit-descriptor fields
+    // (141/142 `PET_EXPERIENCE`/`PET_NEXT_LEVEL_EXP`, 149 `TRAINING_POINTS`), whose events the
+    // reference dispatches through `0x515e50`'s token fan-out, `SignalEvent2(id, "%s", token)`.
+    // They were argless here for months, two lines under a comment stating the law, and the cost
+    // was not theoretical: `PetPaperDollFrame_OnEvent` gives `UNIT_PET_EXPERIENCE` a named branch
+    // but routes `UNIT_PET_TRAINING_POINTS` to its final `elseif ( arg1 == "pet" )` catch-all
+    // (`PetPaperDollFrame.lua:44`), so an argless fire reached nobody and the pet page's training
+    // points never repainted off the event at all.
     if xp_moved {
-        script.fire_event("UNIT_PET_EXPERIENCE", vec![]);
+        script.fire_event("UNIT_PET_EXPERIENCE", vec![ScriptValue::Str("pet".into())]);
     }
     if training_moved {
-        script.fire_event("UNIT_PET_TRAINING_POINTS", vec![]);
+        script.fire_event(
+            "UNIT_PET_TRAINING_POINTS",
+            vec![ScriptValue::Str("pet".into())],
+        );
     }
 }
 

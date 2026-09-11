@@ -30,6 +30,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::flag;
 use super::cursor::{self, CursorPayload};
 use super::Model;
 
@@ -225,7 +226,7 @@ impl super::UiScript {
 
     /// Drain the `SendMail` intent, if one was queued since the last drain — folds in the last
     /// `SetSendMailMoney`/`SetSendMailCOD` amounts and the attached item's `(bag, slot)`. The
-    /// attachment is left in place (a failed send keeps it; [`Self::clear_send_mail_item`] drops it
+    /// attachment is left in place (a failed send keeps it; [`Self::reset_compose_tab`] drops it
     /// on success).
     pub fn take_mail_send(&mut self) -> Option<MailSendRequest> {
         let mut model = self.model_mut();
@@ -242,13 +243,37 @@ impl super::UiScript {
         })
     }
 
-    /// Drop the send tab's attached item + money/COD amounts — the app calls this on
-    /// `MAIL_SEND_SUCCESS` (the reference `SendMailFrame_Reset`, MailFrame.lua l.49/552).
-    pub fn clear_send_mail_item(&mut self) {
-        let mut model = self.model_mut();
-        model.mail_send_item = None;
-        model.mail_send_money = 0;
-        model.mail_send_cod = 0;
+    /// **`0x4acdc0(1)` — the client's compose-tab reset**, whole. Zeroes the send tab's attachment
+    /// (`0xb6ef90/94`), money (`0xb6efa4`) and COD (`0xb6efa8`) globals and then **tail-fires its
+    /// three events**, in this order: `SEND_MAIL_MONEY_CHANGED`, `SEND_MAIL_COD_CHANGED`,
+    /// `MAIL_SEND_SUCCESS` (`@0x4ace14/1e/28` — wow-re `system/ui/scratch/mail-interaction.md`
+    /// §1/§4).
+    ///
+    /// **The fire belongs to the reset, and that is the whole point of this shape.** Both call
+    /// sites used to fire `MAIL_SEND_SUCCESS` themselves, and the send-result one fired it
+    /// *before* clearing — so the stock `SendMailFrame_Reset` ran while `GetSendMailItem()` still
+    /// answered with the item that had just been sent, and its own `SendMailFrame_Update()` tail
+    /// put the item's name straight back into the subject box and its texture back on
+    /// `SendMailPackageButton`. Nothing re-ran the update after the clear landed, so a sent letter
+    /// left its subject and its icon sitting in the form (director's report, decision 2145).
+    ///
+    /// `MAIL_SEND_SUCCESS` is **overloaded** — it means "the compose form is now clean", not "a
+    /// mail was sent" (the anomaly wow-re verified twice: opening a mailbox fires it too).
+    pub fn reset_compose_tab(&mut self) {
+        {
+            let mut model = self.model_mut();
+            model.mail_send_item = None;
+            model.mail_send_money = 0;
+            model.mail_send_cod = 0;
+        }
+        // Fired here, immediately, rather than queued on `pending_events`: this is a host-side
+        // edge (the mail system driving the VM), not a Lua binding queueing work for the next
+        // tick, and its order against the caller's own `MAIL_SHOW`/`MAIL_FAILED` is the law.
+        // Spelled out one call each — the three are a fixed sequence at three addresses, and the
+        // chain-file event census (`ui_script::reference_ui`) reads producers as literals.
+        self.fire_event("SEND_MAIL_MONEY_CHANGED", Vec::new()); // 0x4ace14
+        self.fire_event("SEND_MAIL_COD_CHANGED", Vec::new()); // 0x4ace1e
+        self.fire_event("MAIL_SEND_SUCCESS", Vec::new()); // 0x4ace28
     }
 
     /// Drop the attachment alone — `SendMail`'s attached-item-gone abort (`ERR_ITEM_NOT_FOUND`, no
@@ -281,15 +306,6 @@ impl super::UiScript {
     /// l.278-289 — its `OnEvent` just re-reads `HasNewMail()` and shows/hides).
     pub fn set_has_new_mail(&mut self, has: bool) {
         self.model_mut().has_new_mail = has;
-    }
-}
-
-/// A `1`/`nil` boolean the way the client pushes flags (`pushnumber(1)` / `pushnil`).
-fn flag(b: bool) -> Value {
-    if b {
-        Value::Integer(1)
-    } else {
-        Value::Nil
     }
 }
 
@@ -461,8 +477,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .is_none_or(|r| super::item_stats::item_usable_by_id(&model, r.item_id));
                 (row, usable)
             };
+            // **Five values on every path**, and the empty leg is `(nil, nil, 0, 0, nil)` —
+            // `GetInboxItem 0x4af5d0`, the sibling of the `GetSendMailItem` block above (wow-re
+            // `mail-interaction.md` §5.1; decision 2129). This answered ONE value, which a caller
+            // destructuring five reads as four nils — and the reference's own row
+            // (`(nil,nil,number,number,nil) | …`) has no one-value alternative at all.
             let Some(r) = row.filter(|r| r.item_id != 0) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Integer(0),
+                    Value::Integer(0),
+                    Value::Nil,
+                ]));
             };
             let name = match &r.item_name {
                 Some(n) => Value::String(lua.create_string(n)?),
@@ -472,10 +499,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(t) => Value::String(lua.create_string(t)?),
                 None => Value::Nil,
             };
-            let quality = match r.item_quality {
-                Some(q) => Value::Integer(i64::from(q)),
-                None => Value::Nil,
-            };
+            // A number on every path, like the send tab's.
+            let quality = Value::Integer(i64::from(r.item_quality.unwrap_or(0)));
             Ok(MultiValue::from_vec(vec![
                 name,
                 texture,
@@ -651,7 +676,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetSendMailItem() → name, texture, stackCount, quality off the attached cursor item
-    // (MailFrame.lua l.511). All-nil/1 when nothing is attached.
+    // (MailFrame.lua l.511).
+    //
+    // **The empty leg is `(nil, nil, 0, 0)`** — four values, and slots 3 and 4 are NUMBERS. Read at
+    // `0x4ae590`: `0x4ae6d3`/`0x4ae6da` push nil, then two `push 0; push 0; lua_pushnumber` pairs
+    // at `0x4ae6df`/`0x4ae6ea`, `eax = 4` (wow-re `mail-interaction.md` §5.1, §5-cross-checked;
+    // decision 2129). All three of the reference's failure guards share that one block, so "nothing
+    // attached" and "the item template has not loaded yet" are indistinguishable to a script.
+    //
+    // The `1` this used to push in slot 3 was borrowed from the wrong binding: it is
+    // `GetAuctionSellItemInfo 0x4ce590`'s empty leg (`1.0`/`-1.0`), not this one's.
+    //
+    // **Still not faithful, and stated rather than implied:** on the LOADED leg the reference reads
+    // quality from `[rec+0x1c]` gated on `[rec+0x2c] != 0` = InventoryType, so a **non-equippable**
+    // item answers quality `-1` (`0x4ae6bf`). We do not carry an inventory type here, so an item
+    // whose quality we have not cached answers 0 rather than -1.
     g.set(
         "GetSendMailItem",
         lua.create_function(|lua, ()| {
@@ -668,8 +707,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
                     Value::Nil,
-                    Value::Integer(1),
-                    Value::Nil,
+                    Value::Integer(0),
+                    Value::Integer(0),
                 ]));
             };
             let name = cursor::item_link_name(it.link.as_deref());
@@ -682,10 +721,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(t) => Value::String(lua.create_string(t)?),
                 None => Value::Nil,
             };
-            let quality = match it.quality {
-                Some(q) => Value::Integer(i64::from(q)),
-                None => Value::Nil,
-            };
+            // A number on every path — the reference's row has no nil alternative in this slot.
+            let quality = Value::Integer(i64::from(it.quality.unwrap_or(0)));
             Ok(MultiValue::from_vec(vec![
                 name,
                 texture,
@@ -912,15 +949,12 @@ mod tests {
         });
         s.set_mail(Some(st));
 
-        assert_eq!(
-            s.eval::<usize>("return select('#', GetInboxInvoiceInfo(1))")
-                .unwrap(),
-            7
-        );
+        assert_eq!(s.arity("GetInboxInvoiceInfo(1)").unwrap(), 7);
         let vals: Vec<String> = (1..=7)
             .map(|i| {
+                let discards = "_, ".repeat(i - 1);
                 s.eval::<String>(&format!(
-                    "return tostring((select({i}, GetInboxInvoiceInfo(1))))"
+                    "local {discards}v = GetInboxInvoiceInfo(1) return tostring(v)"
                 ))
                 .unwrap()
             })
@@ -942,15 +976,15 @@ mod tests {
         // Row 2 carries no invoice — and neither does an index off the end.
         for idx in [2, 99] {
             assert_eq!(
-                s.eval::<usize>(&format!("return select('#', GetInboxInvoiceInfo({idx}))"))
-                    .unwrap(),
+                s.arity(&format!("GetInboxInvoiceInfo({idx})")).unwrap(),
                 7,
                 "the miss is still seven values"
             );
             let tail: Vec<String> = (1..=7)
                 .map(|i| {
+                    let discards = "_, ".repeat(i - 1);
                     s.eval::<String>(&format!(
-                        "return tostring((select({i}, GetInboxInvoiceInfo({idx}))))"
+                        "local {discards}v = GetInboxInvoiceInfo({idx}) return tostring(v)"
                     ))
                     .unwrap()
                 })
@@ -973,8 +1007,7 @@ mod tests {
         s.set_mail(Some(st));
 
         assert_eq!(
-            s.eval::<usize>("return select('#', GetInboxText(1))")
-                .unwrap(),
+            s.arity("GetInboxText(1)").unwrap(),
             4,
             "four values, invoice or not"
         );
@@ -1210,7 +1243,7 @@ mod tests {
         }));
         s.run("ClickSendMailItemButton()").unwrap();
         s.run("SetSendMailMoney(99) SetSendMailCOD(5)").unwrap();
-        s.clear_send_mail_item();
+        s.reset_compose_tab();
         select_default_stationery(&mut s);
         s.run("SendMail('x','y','z')").unwrap();
         let req = s.take_mail_send().unwrap();

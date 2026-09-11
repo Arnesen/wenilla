@@ -28,7 +28,7 @@
 use mlua::{Lua, Value};
 
 use super::{queue_cursor_update, CursorMoney, CursorPayload};
-use crate::script::binding_abi::{number_arg, predicate};
+use crate::script::binding_abi::{flag, number_arg};
 use crate::script::Model;
 
 /// The coin icon for an amount of copper — `GetCoinIcon 0x48d4e0`'s table, SIGNED thresholds
@@ -161,10 +161,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "CursorHasMoney",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(matches!(
-                model.cursor,
-                Some(CursorPayload::Money(_))
-            )))
+            Ok(flag(matches!(model.cursor, Some(CursorPayload::Money(_)))))
         })?,
     )?;
     g.set(

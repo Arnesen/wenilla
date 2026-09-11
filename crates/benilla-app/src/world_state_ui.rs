@@ -81,9 +81,7 @@ fn load_world_state_ui(mut commands: Commands, assets: Option<Res<WorldAssets>>)
 fn defense_channel_joined(channels: &crate::ui_chat::ChannelState) -> bool {
     const REQUIRED: u32 = chan::ZONE_DEP | chan::DEFENSE;
     channels
-        .joined
-        .iter()
-        .flatten()
+        .iter_names()
         .filter_map(|name| channels.channels.row_for_name(name))
         .any(|row| row.flags & REQUIRED == REQUIRED)
 }
