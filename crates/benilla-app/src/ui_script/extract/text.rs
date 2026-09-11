@@ -18,7 +18,7 @@ static TEXT_PROBE: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| std::env::var("WOW_TEXT_PROBE").as_deref() == Ok("1"));
 
 /// The `QuadContent::Text` payload minus the text itself — the region's resolved style, passed
-/// verbatim from the destructure at the [`super::drive_script`] call site.
+/// verbatim from the destructure at the [`super::paint_script`] call site.
 pub(super) struct TextStyle {
     pub color: Option<[f32; 4]>,
     pub justify_h: JustifyH,

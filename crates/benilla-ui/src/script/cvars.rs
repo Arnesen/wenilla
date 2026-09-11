@@ -414,8 +414,151 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    install_nameplate_verbs(lua)
+    install_nameplate_verbs(lua)?;
+    install_world_detail_verbs(lua)
 }
+
+/// The `WorldDetail` slider's **stop**, benilla's spelling — the panel position `0`/`1`/`2`, held as
+/// a CVar because 1.12 has no such CVar and our own Graphics page needs somewhere to keep it (the
+/// `autoLootDefault` posture; the app's table carries the reasoning and the `Same` row).
+///
+/// Defined here, in the crate that publishes the two verbs that read and write it, so the binding
+/// and the name cannot drift apart — as for [`CVAR_NAMEPLATE_ENEMIES`]. The app welds both with its
+/// own test.
+pub const CVAR_WORLD_DETAIL: &str = "WorldDetail";
+
+/// The reference's own Environment Detail CVar — cells visited per chunk by the detail-doodad
+/// scatter. [`WORLD_DETAIL_STOPS`] is what the slider writes into it.
+pub const CVAR_FRILL_DENSITY: &str = "frillDensity";
+
+/// **`SetWorldDetail`'s preset table, verbatim** — the three dwords at `0x804518`, `{0x10, 0x20,
+/// 0x30}`. Read out of `WoW.exe` rather than transcribed from a note.
+pub const WORLD_DETAIL_STOPS: [u32; 3] = [16, 32, 48];
+
+/// **The Environment Detail pair** — `SetWorldDetail 0x488dd0` and `GetWorldDetail 0x488d70`, the
+/// two engine bindings 1.12's own options panel drives that slider through (`OptionsFrame.lua`'s
+/// row 3 is `func = "WorldDetail"`, and `OptionsFrame_Save`/`_Load` prefer `getglobal("Set"..func)`
+/// / `getglobal("Get"..func)` over `SetCVar`/`GetCVar`). Decision 2163.
+///
+/// **The setter, carved end to end** (own decode, agreeing with wow-re
+/// `cvar/scratch/registered-defaults-census.md` §8):
+///
+/// ```text
+/// 488ddf  call 0x6f34d0             ; lua_isnumber(L,1)? else error 0x8423e8
+/// 488e05  call 0x6f3620             ; lua_tonumber(L,1)
+/// 488e0a  call 0x40a2b0             ; -> int, RC forced to CHOP (`or ah,0x0c`): TRUNCATE toward zero
+/// 488e11  test esi,esi; jl  0x488e9b ; n < 0  -> error 0x8423b8
+/// 488e19  cmp  esi,3;   jge 0x488e9b ; n >= 3 -> error 0x8423b8
+/// 488e1e  mov eax,[esi*4 + 0x804518] ; {16,32,48}      -> "%d"  -> CVar::Set "frillDensity"
+/// 488e56  fld dword [esi*4+0x804524] ; {0.07,0.04,0.01} -> "%f" -> CVar::Set "smallCull"
+/// ```
+///
+/// The two error strings are `0x8423e8` `"Usage: SetWorldDetail(value)"` and `0x8423b8` `"value
+/// must be in the range 0, 2"` — both read out of the image, lowercase `v` and all. Every path
+/// returns **zero** Lua values.
+///
+/// Three shapes worth stating because the obvious reading is wrong on each:
+///
+/// - **The truncation is toward zero, not a floor.** `0x40a2b0` saves the FPU control word, ORs
+///   `0x0c` into the high byte (rounding-control = chop) and `fistp`s. So `SetWorldDetail(2.9)`
+///   is stop 2 and `SetWorldDetail(-0.5)` is stop **0** — a negative that truncates to zero is
+///   accepted, and only `<= -1` raises.
+/// - **`lua_isnumber` accepts a numeric string**, so `SetWorldDetail("2")` works there and here.
+/// - **The getter is not the setter's inverse.** `0x488d70` reads only `smallCull`, seeds its
+///   result at **2**, and runs `for i in 0..3 { if v <= tbl[i] { result = i } }` over the
+///   *descending* `{0.07, 0.04, 0.01}` with **no break** — so the last match wins, and any
+///   `smallCull` above `0.07` (legal to 2.0) saturates to 2, i.e. the least detail reads back as
+///   the most. A shipped defect, and one of two: `OptionsFrame_SetDefaults` tests that same
+///   descending table with ascending `elseif`s, so Restore Defaults always parks the slider at 0.
+///
+/// **Where benilla diverges, and why it is not the smallCull ladder.** `SmallCull` is a dead knob
+/// in the reference — `[0x868620]` has one writer and no reader image-wide (wow-re
+/// `cvar/scratch/graphics-cost-cvar-census.md` §8) — so its *only* consumer there is this getter,
+/// which makes it storage for a stop the client keeps nowhere else. benilla keeps the stop:
+/// [`CVAR_WORLD_DETAIL`] is it, and `frillDensity` is the same knob in the reference's unit. So the
+/// getter reads the stop directly and `SmallCull` is not registered, because registering a CVar
+/// whose only purpose is to hold a number we already hold is the silent pretence 1203 forbids.
+///
+/// The observable consequence is **nil at boot and nil for every consumer we know**: a fresh
+/// reference client has `frillDensity 16` with `smallCull 0.04` — stop 0's frill with stop 1's cull
+/// — so its getter answers **1**, and benilla's `WorldDetail` registers at `"1"` for exactly that
+/// reason. The one input that separates them is a bare `frillDensity` write with no stop write,
+/// which there leaves the getter on the stale stop and here moves it; pfUI's `hdgraphic` is the
+/// only known caller and its own replacement short-circuits above 48, so it never reaches the
+/// difference.
+fn install_world_detail_verbs(lua: &Lua) -> mlua::Result<()> {
+    let g = lua.globals();
+    g.set(
+        "SetWorldDetail",
+        lua.create_function(|lua, value: Value| {
+            // `lua_isnumber`: a number, or a string Lua can convert to one. Anything else is the
+            // usage error — NOT a silent no-op.
+            let n = match &value {
+                Value::Integer(i) => *i as f64,
+                Value::Number(n) => *n,
+                Value::String(s) => {
+                    match s.to_str().ok().and_then(|s| s.trim().parse::<f64>().ok()) {
+                        Some(n) => n,
+                        None => return Err(mlua::Error::runtime(USAGE_SET_WORLD_DETAIL)),
+                    }
+                }
+                _ => return Err(mlua::Error::runtime(USAGE_SET_WORLD_DETAIL)),
+            };
+            // Truncate toward zero (`0x40a2b0`'s chop), then the reference's own two bounds. NaN
+            // has no truncation — the reference's `fistp` yields the integer indefinite, which is
+            // negative and raises, so raising here is the same answer by the same door.
+            if n.is_nan() {
+                return Err(mlua::Error::runtime(RANGE_SET_WORLD_DETAIL));
+            }
+            let stop = n.trunc();
+            if !(0.0..3.0).contains(&stop) {
+                return Err(mlua::Error::runtime(RANGE_SET_WORLD_DETAIL));
+            }
+            let stop = stop as usize;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // TWO CVars per stop, as `0x488dd0` writes two: there it is `frillDensity` + the dead
+            // `smallCull`; here it is `frillDensity` + the stop the panel keeps. Both land on one
+            // clutter knob in the host, so applying both is idempotent — and writing only one
+            // would leave the other stale for a `GetWorldDetail` in the same Lua tick, since the
+            // host does not drain the change queue until the end of the frame.
+            write_cvar(
+                &mut model,
+                CVAR_FRILL_DENSITY,
+                WORLD_DETAIL_STOPS[stop].to_string(),
+                None,
+            );
+            write_cvar(&mut model, CVAR_WORLD_DETAIL, stop.to_string(), None);
+            // Zero return values, not nil (`eax = 0` at every `ret`).
+            Ok(mlua::MultiValue::new())
+        })?,
+    )?;
+    g.set(
+        "GetWorldDetail",
+        // `MultiValue` in: the reference reads argument 1 for the SETTER only; the getter never
+        // calls `lua_gettop`, so an argument is accepted and ignored — and pfUI's replacement is
+        // declared `function _G.GetWorldDetail(arg)`, so it is passed one in practice.
+        lua.create_function(|lua, _: mlua::MultiValue| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let stop = model
+                .cvars
+                .get(&CVAR_WORLD_DETAIL.to_ascii_lowercase())
+                .and_then(|slot| slot.value.parse::<f64>().ok())
+                // The reference can only ever answer 0, 1 or 2 (its result is an index into a
+                // three-entry table), so an off-grid stop — which ours can hold, because a console
+                // `frillDensity 200` moves the same knob — reports the nearest one rather than a
+                // number no caller has a branch for.
+                .map_or(0, |v| v.round().clamp(0.0, 2.0) as i64);
+            Ok(stop)
+        })?,
+    )?;
+    Ok(())
+}
+
+/// `0x8423e8`, verbatim.
+const USAGE_SET_WORLD_DETAIL: &str = "Usage: SetWorldDetail(value)";
+
+/// `0x8423b8`, verbatim — lowercase `v`, and the odd comma is the reference's own.
+const RANGE_SET_WORLD_DETAIL: &str = "value must be in the range 0, 2";
 
 /// **The four nameplate verbs** — `ShowNameplates 0x489450`, `HideNameplates 0x489460`,
 /// `ShowFriendNameplates 0x489470`, `HideFriendNameplates 0x489480` (wow-re

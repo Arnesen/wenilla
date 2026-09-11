@@ -1052,7 +1052,7 @@ pub(crate) struct BoothPanes(pub(crate) HashMap<String, f32>);
 /// Both directions of the booth↔UI bridge in one system param: the bake a bound region **samples**
 /// ([`PortraitImages`]) and the pane geometry the extract **publishes** back ([`BoothPanes`]).
 ///
-/// They travel together because they are the same seam, and because `drive_script` had already
+/// They travel together because they are the same seam, and because the UI pass had already
 /// reached Bevy's 16-parameter ceiling — two more `Res`es there is one too many.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct BoothBridge<'w> {

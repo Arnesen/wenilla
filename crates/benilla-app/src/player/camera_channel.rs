@@ -194,20 +194,6 @@ impl SmoothChannel {
         Armed::Started
     }
 
-    /// **Shift the whole channel by `delta`** — live, start and target together, so a tween in
-    /// flight keeps its remaining travel and lands `delta` further along.
-    ///
-    /// This is the reference's `0x510120`, which is not a "set the pitch" at all: it adds the same
-    /// delta to `[cam+0xf4]`, `[cam+0x1e4]` and `[cam+0x1e0]` and clamps each. That is what keeps
-    /// the live angle and the tween's endpoints in lockstep, and it is why a mouse drag during a
-    /// `*FinalPitch` ease carries the ease rather than cancelling it
-    /// (wow-re `camera-cvar-kernels.md` Q5).
-    pub(super) fn shift(&mut self, delta: f32) {
-        self.live += delta;
-        self.from += delta;
-        self.to += delta;
-    }
-
     /// Step whatever is in flight and return the live value — `0x50f160`'s block, shared by all
     /// four channels.
     pub(super) fn advance(&mut self, dt: f32) -> f32 {
@@ -233,6 +219,41 @@ impl SmoothChannel {
     /// question, and these two columns are how a trace answers it (method: timing is measured).
     pub(super) fn probe(&self) -> (f32, f32) {
         (self.live, self.to)
+    }
+}
+
+/// **Sweep a regime switch and bound its step** — the check decision 2165 exists because this tree
+/// did not have one.
+///
+/// A mechanism that switches between *regimes* — liquid bands, a slope staircase, a state ladder,
+/// an eligibility gate — is not verified by point assertions inside each regime. Those are
+/// structurally blind to a cliff *between* them, which is how a pivot corridor that moved the
+/// camera's framing point 1.04 yd in one frame shipped behind five green tests, each correct.
+/// Walk the parameter across every boundary instead and bound the step.
+///
+/// Where a jump is intended, `max_jump` is where its size gets **written down** — which is the
+/// second reason to reach for this rather than eyeball a sweep: the bound is the claim.
+#[cfg(test)]
+pub(super) fn assert_bounded_step(
+    (from, to): (f32, f32),
+    step: f32,
+    max_jump: f32,
+    mut f: impl FnMut(f32) -> f32,
+) {
+    let mut previous: Option<(f32, f32)> = None;
+    let steps = ((to - from) / step).ceil() as i32;
+    for i in 0..=steps {
+        let x = (from + step * i as f32).min(to);
+        let y = f(x);
+        if let Some((px, py)) = previous {
+            assert!(
+                (y - py).abs() <= max_jump,
+                "a step from {px} to {x} moved the output {py} -> {y} \
+                 ({:+}), past the bound {max_jump}",
+                y - py
+            );
+        }
+        previous = Some((x, y));
     }
 }
 

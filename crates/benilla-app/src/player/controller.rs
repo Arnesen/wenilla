@@ -38,6 +38,10 @@ pub(super) fn control(
         Res<camera::FollowConfig>,
         // The four 1.12 camera option toggles and their numeric siblings (decision 2149).
         Res<camera_dynamics::CameraOptions>,
+        // `nearclip`/`farclip` (2163) — the camera's own clip pair. Only the near half is read
+        // here, for the self-avatar fade's reference plane; the far half is the wall's, read by
+        // the world.
+        Res<benilla_world::view::ViewDistance>,
     ),
     // The net bridge, bundled into one param (16-param limit): the outbound command channel + the
     // inbound teleport/worldport messages `apply_net_updates` wrote earlier this frame
@@ -212,6 +216,7 @@ pub(super) fn control(
     // the mover.
     let dynamics = camera_dynamics::DynamicsInput {
         options: *pointer.4,
+        nearclip: pointer.5.nearclip,
         smooth_style: pointer.3.style,
         subject: camera_dynamics::SubjectState {
             move_flags: player.move_flags,
@@ -242,8 +247,6 @@ pub(super) fn control(
             command: follow_command,
             scoped: scoped.active(),
         },
-        // Resolved inside `seat_on_subject`, which owns the far-sight substitution.
-        liquid: camera_dynamics::SubjectLiquid::default(),
     };
 
     // The look session gets a SHADOW copy of `CursorOptions`, written back only on a real change:
@@ -537,7 +540,6 @@ pub(super) fn control(
                     command: follow_command,
                 },
                 &dynamics,
-                world,
             );
             // Flush a stale run once, so observers stop extrapolating it — but never under a ride,
             // whose FORWARD report is deliberate and would be cancelled every frame.
@@ -1109,7 +1111,6 @@ pub(super) fn control(
             cam_probe,
             &follow,
             &dynamics,
-            world,
         );
 
         // The cast bar's local self-cancel trigger (`ui_cast::local_self_cancel`): a fresh

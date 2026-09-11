@@ -39,7 +39,7 @@ fn log_path() -> Option<String> {
     }
 }
 
-/// Is the recorder on? Read once — the phase marks in `drive_script` consult this every frame.
+/// Is the recorder on? Read once — the phase marks in the UI pass (`extract::tick_script`/`paint_script`) consult this every frame.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| log_path().is_some())

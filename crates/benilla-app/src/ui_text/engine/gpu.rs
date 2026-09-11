@@ -186,10 +186,11 @@ fn upload_glyph_cells(
 
 /// `WOW_GLYPH_CACHE=1`: one line a second of what the cache holds.
 ///
-/// It exists because `super::pack::MAX_PAGES` and `super::pack::PAGE_SIZE` are the two numbers
-/// this design can get wrong quietly — too small and a session resets on a loading screen, too
-/// large and we hold VRAM nobody reads. Both are cheap to re-choose *from a measurement* and
-/// expensive to re-choose from an argument, so the measurement ships with them.
+/// It exists because `super::pack::SHEET_SIZE` is the number this design can get wrong quietly —
+/// too small and a session resets on a loading screen, too large and we hold VRAM nobody reads. It
+/// is cheap to re-choose *from a measurement* and expensive to re-choose from an argument, so the
+/// measurement ships with it. (The plural it used to name — `MAX_PAGES`/`PAGE_SIZE` — went with
+/// the multi-page design 1342 replaced with one sheet.)
 fn report_cache(atlas: &UiFontAtlas) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static LAST: AtomicU64 = AtomicU64::new(0);

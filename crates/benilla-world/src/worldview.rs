@@ -71,9 +71,11 @@ fn view_start() -> [f32; 3] {
 /// to clear the valley floor, which is what the viewer has always opened above.
 const VIEW_OPEN_Z: f32 = 100.0;
 
-/// Near plane, in yards — the client's ([`crate::view::CAM_NEAR`]) value, kept in step by hand
-/// until the camera itself moves engine-side (decision 1160, stage zero).
-const NEAR: f32 = 0.1;
+/// Near plane, in yards. The viewer has no CVar table, so it opens at the `nearclip` CVar's
+/// registered default and stays there — **read from the const now, not copied** (2163): "kept in
+/// step by hand" is what this line used to say while holding `0.1` against a `CAM_NEAR` of `1/9`,
+/// and the drift is what showed the 1/9 was wrong in the first place.
+const NEAR: f32 = crate::view::NEARCLIP_DEFAULT;
 
 /// Vertical FOV in radians — vanilla's 90° horizontal at 4:3.
 const FOVY: f32 = 1.221_730_5;

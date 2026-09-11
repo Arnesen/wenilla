@@ -458,7 +458,7 @@ fn the_meeting_stone_icon_follows_the_queue_across_meetingstone_changed() {
 /// the interface moving** (decision 2023): the composite is the renderer's per-frame output in
 /// the overlay lane, never a product of the memoized conversion — which is exactly what the
 /// first shape got wrong, and why this test used to re-ping to "move the pane" before asking
-/// for the quad. Drives the real `drive_script` in the headless harness the clip-plumb tests
+/// for the quad. Drives the real UI pass in the headless harness the clip-plumb tests
 /// use.
 #[test]
 fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
@@ -529,6 +529,8 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     let mut app = App::new();
     app.insert_non_send_resource(s);
     app.init_resource::<UiQuads>();
+    // The pass's own handover (2168) — the tick half writes it, the paint half reads it.
+    app.init_resource::<crate::ui_script::UiPassState>();
     app.init_resource::<Assets<Image>>();
     app.init_resource::<crate::portrait::PortraitImages>();
     app.init_resource::<crate::portrait::BoothPanes>();
@@ -554,7 +556,7 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     app.add_systems(
         Update,
         (
-            super::extract::drive_script,
+            (super::extract::tick_script, super::extract::paint_script).chain(),
             crate::ui_models::compose_tiles,
         )
             .chain(),

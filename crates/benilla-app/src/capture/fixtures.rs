@@ -15,7 +15,7 @@ const WOLF_FACTION: u32 = 32;
 /// The `name-water` fixture's unit: the same wolf, re-seated 25 yd along the water scenario's own
 /// look bearing (`WATER_EYE` → `WATER_LOOK`) at the river surface, so its overhead name projects
 /// onto the water *beyond* it.
-const NAME_WATER_POS: [f32; 3] = [-9512.97, -331.29, 61.4];
+pub(super) const NAME_WATER_POS: [f32; 3] = [-9512.97, -331.29, 61.4];
 
 /// The lighting matrix's chest (decision 0744): `GameObjectDisplayInfo` 259,
 /// `World\SkillActivated\Containers\TreasureChest01.mdx`. GameObject guids carry the `0xF110` high
@@ -1356,6 +1356,15 @@ pub(super) fn seed_ui_fixture(
         }
         UiFixture::NameWater => {
             use benilla_protocol::messages::ObjectFields;
+            // The subject is an NPC's overhead name, and `UnitNameNPC` registers "0" (1804's
+            // byte-read default), so without this the shot contains no name at all — which is
+            // exactly what it had contained since 1804 landed. Set through Lua, the way a player
+            // turns it on, so the sync drains it into `NameConfig` like any other CVar write.
+            if let Some(script) = script.as_deref_mut() {
+                if let Err(e) = script.run("SetCVar(\"UnitNameNPC\", \"1\")") {
+                    warn!("capture: name fixture could not enable UnitNameNPC: {e}");
+                }
+            }
             // The synthetic self player at the eye (the reaction lookup reads its store, and the
             // name colour is that verdict).
             const SELF_GUID: u64 = 0x51;

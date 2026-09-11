@@ -650,7 +650,7 @@ impl Plugin for UiModelsPlugin {
             .init_non_send_resource::<TileState>()
             .add_systems(Startup, setup_tiles)
             // **Before the extract**, which is where a `<Model>` pane's tile request is
-            // published (`UiInput`'s `drive_script`) — see [`forget_dead_vm_tiles`].
+            // published (the UI pass's `paint_script`) — see [`forget_dead_vm_tiles`].
             .add_systems(
                 Update,
                 forget_dead_vm_tiles.before(crate::ui_script::UiInput),
@@ -799,7 +799,7 @@ struct TileRender<'w> {
 /// extract**, which is the whole reason it is not a first step inside [`sync_tiles`].
 ///
 /// A logout, a login and a `ReloadUI()` all replace the VM in `PreUpdate`; the extract
-/// (`ui_script`'s `drive_script`, in `UiInput`) then publishes the NEW tree's tile requests, and
+/// (`ui_script`'s `paint_script`) then publishes the NEW tree's tile requests, and
 /// `sync_tiles` reads them after that. Clearing the bridge from inside `sync_tiles` would
 /// therefore throw away the new VM's very first publish — and the extract's conversion is
 /// memoized on the engine's entry list, so an entry that does not change again is never converted

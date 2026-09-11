@@ -30,21 +30,6 @@ pub(crate) const PIVOT_DY_MIN_DEFAULT: f32 = 0.0;
 /// zero at once the pivot lets go (`90.0`, `[0xbe0fc8]`).
 pub(crate) const TARGET_SMOOTH_SPEED_DEFAULT: f32 = 90.0;
 
-/// The lower band threshold — `[0x8089d0] = 2/9`. Also the height the framing pivot is floored at
-/// **above the liquid surface** while the surface band holds.
-const BAND_NEAR: f32 = 2.0 / 9.0;
-/// The upper band threshold — `[0x8089d4] = 5/9`. Past it neither band claims the subject.
-const BAND_FAR: f32 = 5.0 / 9.0;
-
-/// `cameraSurfaceFinalPitch`'s registered default, DEGREES in the reference's own sign (positive =
-/// looking down) — `[0xbe0f2c]`, `"5.0"`.
-pub(crate) const SURFACE_FINAL_PITCH_DEFAULT: f32 = 5.0;
-/// `cameraSubmergeFinalPitch`'s registered default, same units — `[0xbe0fdc]`, `"5.0"`.
-pub(crate) const SUBMERGE_FINAL_PITCH_DEFAULT: f32 = 5.0;
-/// `cameraPitchSmoothSpeed`'s registered default, deg/s — `[0xbe0ce4]`, `"45.0"`. The rate the
-/// pitch channel arms at (`0x512830`'s `duration = |Δ| / (rate · π/180)`).
-pub(crate) const PITCH_SMOOTH_SPEED_DEFAULT: f32 = 45.0;
-
 /// `cameraGroundSmoothSpeed`'s registered default, deg/s — `[0xbe0fc0]`, `"7.5"`.
 pub(crate) const GROUND_SMOOTH_SPEED_DEFAULT: f32 = 7.5;
 /// `cameraTerrainTiltTimeMin`'s registered default, seconds — `[0xbe1050]`, `"3.0"`.
@@ -86,14 +71,6 @@ pub(crate) struct CameraOptions {
     pub(crate) pivot_dy_min: f32,
     /// `cameraTargetSmoothSpeed` — see [`TARGET_SMOOTH_SPEED_DEFAULT`].
     pub(crate) target_smooth_speed: f32,
-    /// `cameraWaterCollision` — registered **"1"**, the second of the four that ships ON.
-    pub(crate) water_collision: bool,
-    /// `cameraSurfaceFinalPitch` — see [`SURFACE_FINAL_PITCH_DEFAULT`].
-    pub(crate) surface_final_pitch: f32,
-    /// `cameraSubmergeFinalPitch` — see [`SUBMERGE_FINAL_PITCH_DEFAULT`].
-    pub(crate) submerge_final_pitch: f32,
-    /// `cameraPitchSmoothSpeed` — see [`PITCH_SMOOTH_SPEED_DEFAULT`].
-    pub(crate) pitch_smooth_speed: f32,
     /// `cameraTerrainTilt` — registered **"0"**, so Follow Terrain is OFF out of the box.
     pub(crate) terrain_tilt: bool,
     /// `cameraGroundSmoothSpeed`, deg/s — the ground channel's rate (`[0xbe0fc0]`, `"7.5"`).
@@ -120,10 +97,6 @@ impl Default for CameraOptions {
             pivot_dx_max: PIVOT_DX_MAX_DEFAULT,
             pivot_dy_min: PIVOT_DY_MIN_DEFAULT,
             target_smooth_speed: TARGET_SMOOTH_SPEED_DEFAULT,
-            water_collision: true,
-            surface_final_pitch: SURFACE_FINAL_PITCH_DEFAULT,
-            submerge_final_pitch: SUBMERGE_FINAL_PITCH_DEFAULT,
-            pitch_smooth_speed: PITCH_SMOOTH_SPEED_DEFAULT,
             terrain_tilt: false,
             ground_smooth_speed: GROUND_SMOOTH_SPEED_DEFAULT,
             tilt_time_min: TILT_TIME_MIN_DEFAULT,
@@ -133,76 +106,6 @@ impl Default for CameraOptions {
             bob_ud_amplitude: BOB_AMPLITUDE_DEFAULT,
             bob_frequency: BOB_FREQUENCY_DEFAULT,
             bob_smooth_speed: BOB_SMOOTH_SPEED_DEFAULT,
-        }
-    }
-}
-
-/// **Which liquid band the camera's subject is in** — `[cam+0x90]`'s bits `0x100000`/`0x200000`,
-/// whose sole writer image-wide is the classifier `0x511ad0` (wow-re `pivot-height-glide.md` §5,
-/// re-confirmed by `camera-cvar-gates.md` §4b's census).
-///
-/// The classifier is not a depth test on the *eye* or on the *feet*: it compares the liquid
-/// surface against **the framing pivot's target height**, i.e. against roughly where the subject's
-/// head is going to be. That is why the bands read as "the swimmer's head is at the line" and "the
-/// line is over the head" rather than as water depth.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(super) enum LiquidBand {
-    /// Neither bit: dry, or the surface is far enough over the pivot that nothing claims it.
-    #[default]
-    None,
-    /// `0x100000` — the surface at, below, or barely above the pivot target.
-    Surface,
-    /// `0x200000` — the surface moderately above it.
-    Submerged,
-}
-
-impl LiquidBand {
-    /// `0x511ad0`'s classification, from the liquid surface height at the subject (`None` = dry),
-    /// the subject's feet and the pivot channel's target — all in world Y.
-    ///
-    /// The reference tests `d < [cam+0x1c8]` **or** `d − [cam+0x1c8] < 2/9` for the surface band;
-    /// the first disjunct is subsumed by the second (a pivot target is always positive — it is
-    /// floored at `5/6`), so it is written once here. Everything else is verbatim, including the
-    /// "neither" leg, which is a real state and not a fallthrough: a subject deep enough under the
-    /// surface leaves the pivot corridor alone entirely.
-    pub(super) fn classify(surface_y: Option<f32>, feet_y: f32, pivot_target: f32) -> Self {
-        let Some(surface_y) = surface_y else {
-            return Self::None;
-        };
-        let excess = (surface_y - feet_y) - pivot_target;
-        if excess < BAND_NEAR {
-            Self::Surface
-        } else if excess < BAND_FAR {
-            Self::Submerged
-        } else {
-            Self::None
-        }
-    }
-
-    /// **The pivot corridor** this band imposes (`0x50e570`'s `local_8` floor and `local_c` cap,
-    /// `0x50e756`/`0x50e767`), given the liquid's height above the subject's feet and the pivot
-    /// channel's live value. Unobstructed, the solver's chain reconstructs the live height exactly,
-    /// so the whole of the liquid's effect on the framing pivot is `live.clamp(floor, cap)`.
-    ///
-    /// - **Surface**: floor `2/9 + d`, cap `max(live, floor)` — the pivot is pushed UP to sit a
-    ///   fixed `2/9` yd above the waterline, which is what keeps a swimmer's head framed.
-    /// - **Submerged**: floor the ordinary `5/6`, cap `max(d − 5/6, 5/6)` — the pivot is pulled
-    ///   DOWN, kept below a surface that has gone over the head.
-    /// - **None**: the ordinary corridor, i.e. the live height untouched.
-    ///
-    /// Gated by `cameraWaterCollision` at the call site, not here: `0x50e5ec` reads the CVar once
-    /// and the bands only reach `local_8`/`local_c` through that read.
-    pub(super) fn pivot_corridor(self, d: f32, live: f32) -> (f32, f32) {
-        match self {
-            Self::Surface => {
-                let floor = BAND_NEAR + d;
-                (floor, live.max(floor))
-            }
-            Self::Submerged => (
-                super::camera::CAM_PIVOT_FLOOR,
-                (d - super::camera::CAM_PIVOT_FLOOR).max(super::camera::CAM_PIVOT_FLOOR),
-            ),
-            Self::None => (super::camera::CAM_PIVOT_FLOOR, live),
         }
     }
 }
@@ -217,33 +120,11 @@ pub(super) struct DynamicsInput {
     /// far-sight-adjusted copy.
     pub(super) smooth_style: super::camera::FollowStyle,
     pub(super) subject: SubjectState,
-    /// Filled in by [`super::camera::seat_on_subject`], which is where the far-sight substitution
-    /// lives — the controller builds this input with the default (dry) and never has to know.
-    pub(super) liquid: SubjectLiquid,
-}
-
-/// The liquid the followed subject is standing in, as the camera needs it: the surface height in
-/// world Y (`None` = dry) and the feet it is measured from. Resolved by the controller, which is
-/// where the world query and the far-sight substitution both live.
-///
-/// **Every liquid, not only water** — the reference's `0x511ad0` queries `0x670630` over the unit's
-/// own liquid handle with no kind filter, and benilla's rule since decision 0634 is the same: you
-/// swim in lava and slime too, so the camera frames you in them the same way.
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct SubjectLiquid {
-    pub(super) surface_y: Option<f32>,
-    pub(super) feet_y: f32,
-}
-
-impl SubjectLiquid {
-    /// This frame's band and the liquid's height above the feet — `(band, d)`, the pair
-    /// [`LiquidBand::pivot_corridor`] takes.
-    pub(super) fn band(&self, pivot_target: f32) -> (LiquidBand, f32) {
-        (
-            LiquidBand::classify(self.surface_y, self.feet_y, pivot_target),
-            self.surface_y.map_or(0.0, |y| y - self.feet_y),
-        )
-    }
+    /// The live `nearclip` ([`benilla_world::view::ViewDistance::nearclip`]) — the self-avatar
+    /// fade's reference plane, carried on this bundle rather than as a fourteenth `seat_camera`
+    /// argument. It rides here because it is a camera CVar reaching a camera kernel, which is what
+    /// this struct is for (2163).
+    pub(super) nearclip: f32,
 }
 
 /// What the four mechanisms' gates need to know about the **followed unit** — the conjuncts that
@@ -291,123 +172,6 @@ impl SubjectState {
 /// ([`crate::creature_anim::move_flags`] is the one definition; re-exported here so the predicates
 /// below read as the reference's masks do).
 use crate::creature_anim::move_flags as mf;
-
-/// **`cameraWaterCollision`'s second consumer** — the band-CROSSING pitch kick (`0x50ecae` inside
-/// the driver `0x50e8d0`; wow-re `camera-cvar-gates.md` §4b, VERIFIED).
-///
-/// **It is an EDGE detector, and that is the correction the §5 round exists for.** `0x50eb14`
-/// snapshots the *previous* frame's `[cam+0x90]` band bits into two locals **before**
-/// `0x50eb45 call 0x511ad0`, which unconditionally clears both and re-sets at most one; the two
-/// tests at `0x50ecc2`/`0x50ecdf` then reload the field **fresh**. So the pair is crossed:
-///
-/// | leg | condition | CVar |
-/// |---|---|---|
-/// | surface | OLD submerged **and** NEW surface | `cameraSurfaceFinalPitch` `"5.0"` |
-/// | submerge | OLD surface **and** NEW submerged | `cameraSubmergeFinalPitch` `"5.0"` |
-///
-/// A client that fires on the *level* of the current bit re-arms the channel every frame the
-/// camera spends in the band; the reference fires once per crossing. The target is an **absolute**
-/// pitch, not an increment — the name is *Final*Pitch — and a target of exactly `0.0` is refused
-/// outright (`0x50ed0c jnp`), which is reachable only if a player zeroes one of the two CVars.
-///
-/// **`[cam+0x90] & 1` is FREELOOK — the player is holding mouse-look** (`0x50fe41 or eax,1` in
-/// `0x50fe30`, cleared at `0x50fddd`; named at the bytes by the two mode strings `"Camera
-/// FREELOOK"` / `"Camera NORMAL"` handed to `0x44cb20`). `camera-cvar-gates.md` §7 listed bit 0 as
-/// unsettled; the round this work dispatched settled it. So `0x50ed0e test cl,1` reads *"is the
-/// hand on the camera"*, and the crossing **hard-snaps** while it is and eases when it is not —
-/// which is the right way round: a player already turning the camera is not interrupted by a
-/// 45 °/s tween, and one who is not gets the smooth one.
-///
-/// **The pitch axis, and the divergence that turned out not to be one** (wow-re
-/// `camera-cvar-kernels.md` Q5, dispatched by this work). The reference's mouse pitch and yaw are
-/// **immediate**: `0x510120` adds the delta to all three of the channel's fields — live
-/// `[cam+0xf4]`, start `[cam+0x1e4]` and target `[cam+0x1e0]` — and holds **zero** references to
-/// `[cam+0x90]`, so it never arms the tween; `0x50f160`'s ease runs only behind the armed bit
-/// `0x2000000`. So benilla's direct write to `cam.pitch` is what the reference does, and the three
-/// `cameraSmooth*` CVars that looked like they might say otherwise gate a different system
-/// entirely (the auto-return, `0x510760`/`0x510850`).
-///
-/// What that lockstep buys, and what benilla owes it, is [`Self::nudge`]: `+0xf4` is *the* live
-/// pitch with a tween **overlay**, not a channel apart from it, so a drag during a `*FinalPitch`
-/// ease moves both endpoints by the same delta and the ease **keeps its remaining travel**. It is
-/// not cancelled by the player's hand — it is carried by it.
-pub(super) struct WaterPitch {
-    /// The band the **previous** frame classified — the whole selector (`0x50eb14`'s snapshot).
-    /// Updated every frame whatever the CVar says, exactly where the reference snapshots it.
-    previous: LiquidBand,
-    /// The kick in flight, over `cam.pitch`. Angular; `in_flight` is the reference's `0x2000000`.
-    kick: SmoothChannel,
-    /// Is the channel currently authoring the pitch? Distinct from `in_flight` only on the frame
-    /// the tween lands, where the final value still has to be written.
-    driving: bool,
-}
-
-impl Default for WaterPitch {
-    fn default() -> Self {
-        Self {
-            previous: LiquidBand::None,
-            kick: SmoothChannel::angular(),
-            driving: false,
-        }
-    }
-}
-
-impl WaterPitch {
-    /// One frame: take the band this frame classified, fire on a crossing, and return the pitch
-    /// the channel wants — `None` when it is not driving, which is every frame out of the water.
-    ///
-    /// `pitch` is the camera's live pitch in **benilla's sign** (positive = up); the two CVars are
-    /// in the reference's degrees (positive = down), so the target is negated here, once, where it
-    /// can be read next to the reason.
-    pub(super) fn advance(
-        &mut self,
-        band: LiquidBand,
-        pitch: f32,
-        freelook: bool,
-        cfg: &CameraOptions,
-        dt: f32,
-    ) -> Option<f32> {
-        let previous = std::mem::replace(&mut self.previous, band);
-        if cfg.water_collision {
-            let target_deg = match (previous, band) {
-                (LiquidBand::Submerged, LiquidBand::Surface) => Some(cfg.surface_final_pitch),
-                (LiquidBand::Surface, LiquidBand::Submerged) => Some(cfg.submerge_final_pitch),
-                _ => None,
-            };
-            // Exactly zero is refused, not armed at zero — `0x50ed09 test ah,0x44 / jnp`.
-            if let Some(deg) = target_deg.filter(|d| *d != 0.0) {
-                let target = -deg.to_radians();
-                self.kick.snap(pitch);
-                if freelook {
-                    // `0x50ed13`: with the hand on the camera the target is written straight into
-                    // the live pitch AND the channel target — a hard snap, no easing.
-                    self.kick.snap(target);
-                } else {
-                    self.kick
-                        .arm(&Arm::at(target, cfg.pitch_smooth_speed.to_radians()));
-                }
-                self.driving = true;
-            }
-        }
-        if !self.driving {
-            return None;
-        }
-        let live = self.kick.advance(dt);
-        if !self.kick.in_flight() {
-            self.driving = false;
-        }
-        Some(live)
-    }
-
-    /// A mouse pitch delta, carried into the channel — `0x510120`'s lockstep write of all three
-    /// fields. A kick in flight keeps its remaining travel and lands `delta` further along; with
-    /// nothing in flight this is a no-op on a channel nobody is reading.
-    pub(super) fn nudge(&mut self, delta: f32) {
-        if self.driving {
-            self.kick.shift(delta);
-        }
-    }
-}
 
 /// **`cameraPivot` — "smart pivot"**: the camera the collision solver has pinned against geometry
 /// tilts its *view* instead of swinging its *arm*.
@@ -1114,243 +878,6 @@ mod tests {
         );
     }
 
-    /// `0x511ad0`'s three bands, at their two thresholds and either side of each. The classifier
-    /// compares the liquid against the **pivot target**, not against the feet, so the same water
-    /// depth bands differently for a tauren and a gnome — which is the point, and is why a test
-    /// that only varied the water level would pass on a wrong reading.
-    #[test]
-    fn the_liquid_bands_are_the_two_thresholds_around_the_pivot_target() {
-        let pivot = 1.9_f32; // a human's neck height
-        let at = |excess: f32| LiquidBand::classify(Some(10.0 + pivot + excess), 10.0, pivot);
-        assert_eq!(at(-5.0), LiquidBand::Surface, "waist deep");
-        assert_eq!(at(0.0), LiquidBand::Surface, "exactly at the pivot");
-        assert_eq!(at(BAND_NEAR - 0.01), LiquidBand::Surface);
-        assert_eq!(at(BAND_NEAR + 0.01), LiquidBand::Submerged);
-        assert_eq!(at(BAND_FAR - 0.01), LiquidBand::Submerged);
-        assert_eq!(
-            at(BAND_FAR + 0.01),
-            LiquidBand::None,
-            "deep enough for neither"
-        );
-        assert_eq!(at(50.0), LiquidBand::None);
-        assert_eq!(
-            LiquidBand::classify(None, 10.0, pivot),
-            LiquidBand::None,
-            "dry"
-        );
-        // **Exactly at each threshold**, which the case above cannot reach: `pivot + excess` does
-        // not survive an f32 round trip at world magnitudes, so the inclusivity is pinned on a
-        // zeroed pivot where the subtraction is exact. Both compares are `<`, so the threshold
-        // itself belongs to the band ABOVE it.
-        assert_eq!(
-            LiquidBand::classify(Some(BAND_NEAR), 0.0, 0.0),
-            LiquidBand::Submerged
-        );
-        assert_eq!(
-            LiquidBand::classify(Some(BAND_FAR), 0.0, 0.0),
-            LiquidBand::None
-        );
-        // A shorter subject in the same water is a band further along — the pivot target is the
-        // comparand, and this is the case a feet-relative reading gets wrong.
-        assert_eq!(
-            LiquidBand::classify(Some(10.0 + 1.5), 10.0, 0.9),
-            LiquidBand::None
-        );
-        assert_eq!(
-            LiquidBand::classify(Some(10.0 + 1.5), 10.0, pivot),
-            LiquidBand::Surface
-        );
-    }
-
-    /// The corridor the bands impose on the framing pivot: pushed UP to `2/9` above the waterline
-    /// while the surface band holds, pulled DOWN under a surface that has gone over the head, and
-    /// untouched otherwise. Out of liquid the corridor is the identity — the property that makes
-    /// this safe to run on every frame of a dry world.
-    #[test]
-    fn the_pivot_corridor_frames_over_the_waterline_and_is_the_identity_when_dry() {
-        let live = 1.9_f32;
-        let clamp = |band: LiquidBand, d: f32| {
-            let (floor, cap) = band.pivot_corridor(d, live);
-            live.clamp(floor, cap.max(floor))
-        };
-        // Dry: the live height, bit for bit.
-        assert_eq!(clamp(LiquidBand::None, 0.0), live);
-        // Surface, water over the head: the pivot rises to 2/9 above the line, so the framing
-        // stays out of the water instead of following the neck under it.
-        assert_eq!(clamp(LiquidBand::Surface, 2.0), 2.0 + BAND_NEAR);
-        // Surface, but the line is below `live − 2/9`: the floor does not bind and nothing moves.
-        // The corridor only ever RAISES on this band — it never pulls the pivot down to the water.
-        assert_eq!(clamp(LiquidBand::Surface, 1.4), live);
-        assert_eq!(clamp(LiquidBand::Surface, 0.2), live);
-        // Submerged: capped at d − 5/6, i.e. pulled below a surface that is well over the head.
-        assert_eq!(
-            clamp(LiquidBand::Submerged, 2.5),
-            2.5 - super::super::camera::CAM_PIVOT_FLOOR
-        );
-        // …and never below the ordinary pivot floor, however deep.
-        assert_eq!(
-            clamp(LiquidBand::Submerged, 0.1),
-            super::super::camera::CAM_PIVOT_FLOOR
-        );
-    }
-
-    /// **The crossing, not the level** (`camera-cvar-gates.md` §4b's Correction F): the kick fires
-    /// once on a band change and stays silent for every frame spent inside a band, which is the
-    /// difference between one ease and a channel re-armed sixty times a second.
-    #[test]
-    fn only_a_band_crossing_kicks_and_only_the_two_crossed_pairs_do() {
-        let cfg = CameraOptions::default();
-        let mut w = WaterPitch::default();
-        // Sixty frames of surface: the first is a None -> Surface change, which is NOT one of the
-        // two crossed pairs, so nothing fires; nor does any frame after it.
-        for _ in 0..60 {
-            assert_eq!(w.advance(LiquidBand::Surface, 0.0, false, &cfg, DT), None);
-        }
-        // Surface -> Submerged IS one, and it arms.
-        assert!(w
-            .advance(LiquidBand::Submerged, 0.0, false, &cfg, DT)
-            .is_some());
-        // Staying submerged does not re-arm — it only runs the tween already in flight out.
-        let mut ran = 0;
-        for _ in 0..600 {
-            if w.advance(LiquidBand::Submerged, 0.0, false, &cfg, DT)
-                .is_some()
-            {
-                ran += 1;
-            }
-        }
-        assert!(
-            ran > 0 && ran < 600,
-            "the tween ran and then stopped ({ran})"
-        );
-        // And the other crossed pair fires on the way back up.
-        assert!(w
-            .advance(LiquidBand::Surface, 0.0, false, &cfg, DT)
-            .is_some());
-    }
-
-    /// The target is ABSOLUTE — the name is *Final*Pitch — reached over `|Δ| /
-    /// cameraPitchSmoothSpeed`, and it is the reference's degrees NEGATED, because down is
-    /// positive there and up is positive here.
-    #[test]
-    fn the_kick_eases_to_the_final_pitch_in_benillas_own_sign() {
-        let cfg = CameraOptions::default();
-        let mut w = WaterPitch::default();
-        let from = 0.8_f32; // looking well up
-        w.advance(LiquidBand::Surface, from, false, &cfg, DT);
-        assert!(w
-            .advance(LiquidBand::Submerged, from, false, &cfg, DT)
-            .is_some());
-        let target = -cfg.submerge_final_pitch.to_radians();
-        let expected = (target - from).abs() / cfg.pitch_smooth_speed.to_radians();
-        let mut last = from;
-        let mut took = None;
-        for frame in 0..600 {
-            if let Some(p) = w.advance(LiquidBand::Submerged, last, false, &cfg, DT) {
-                last = p;
-                if took.is_none() && (p - target).abs() < CHANNEL_EPS {
-                    took = Some(frame as f32 * DT);
-                }
-            }
-        }
-        assert!(
-            (last - target).abs() < CHANNEL_EPS,
-            "landed at {last}, wanted {target}"
-        );
-        let took = took.expect("arrives");
-        assert!(
-            (took - expected).abs() < 0.05,
-            "|Δ| / cameraPitchSmoothSpeed = {expected:.3}s, took {took:.3}s"
-        );
-        assert!(target < 0.0, "5° DOWN is negative in benilla's sign");
-    }
-
-    /// **FREELOOK hard-snaps** (`0x50ed0e test cl,1`, whose identity the §5 round settled): with
-    /// the hand on the camera the crossing lands the target in one frame instead of easing to it.
-    #[test]
-    fn a_crossing_under_mouse_look_snaps_instead_of_easing() {
-        let cfg = CameraOptions::default();
-        let target = -cfg.submerge_final_pitch.to_radians();
-        let mut held = WaterPitch::default();
-        held.advance(LiquidBand::Surface, 0.8, true, &cfg, DT);
-        assert_eq!(
-            held.advance(LiquidBand::Submerged, 0.8, true, &cfg, DT),
-            Some(target),
-            "freelook: there on the very frame of the crossing"
-        );
-        // The same crossing with the hand off takes several frames to get there.
-        let mut free = WaterPitch::default();
-        free.advance(LiquidBand::Surface, 0.8, false, &cfg, DT);
-        let first = free
-            .advance(LiquidBand::Submerged, 0.8, false, &cfg, DT)
-            .unwrap();
-        assert!(
-            (first - target).abs() > 0.1,
-            "not-freelook: still travelling, at {first}"
-        );
-    }
-
-    /// **A drag CARRIES an ease in flight, it does not cancel it** (`0x510120` moves all three of
-    /// the channel's fields by the same delta — Q5). The remaining travel is preserved: the ease
-    /// lands exactly `delta` past where it would have.
-    #[test]
-    fn a_mouse_pitch_during_the_ease_carries_it_rather_than_cancelling_it() {
-        let cfg = CameraOptions::default();
-        let target = -cfg.submerge_final_pitch.to_radians();
-        let nudge = 0.2_f32;
-        let run = |with_nudge: bool| {
-            let mut w = WaterPitch::default();
-            w.advance(LiquidBand::Surface, 0.8, false, &cfg, DT);
-            let mut last = w
-                .advance(LiquidBand::Submerged, 0.8, false, &cfg, DT)
-                .unwrap();
-            for frame in 0..600 {
-                if with_nudge && frame == 5 {
-                    w.nudge(nudge);
-                }
-                match w.advance(LiquidBand::Submerged, last, false, &cfg, DT) {
-                    Some(p) => last = p,
-                    None => break,
-                }
-            }
-            last
-        };
-        let plain = run(false);
-        assert!((plain - target).abs() < CHANNEL_EPS);
-        assert!(
-            (run(true) - (target + nudge)).abs() < CHANNEL_EPS,
-            "the ease should land the drag's delta past its own target"
-        );
-    }
-
-    /// The two refusals: the CVar off fires nothing, and a target of exactly zero is refused
-    /// outright rather than armed at zero (`0x50ed0c jnp`).
-    #[test]
-    fn the_cvar_and_an_exactly_zero_target_both_refuse_the_kick() {
-        let off = CameraOptions {
-            water_collision: false,
-            ..CameraOptions::default()
-        };
-        let mut w = WaterPitch::default();
-        w.advance(LiquidBand::Surface, 0.0, false, &off, DT);
-        assert_eq!(w.advance(LiquidBand::Submerged, 0.0, false, &off, DT), None);
-        // …and the previous band is still tracked while it is off, so turning it back on mid-swim
-        // does not invent a crossing out of the frame it was toggled.
-        let on = CameraOptions::default();
-        assert_eq!(w.advance(LiquidBand::Submerged, 0.0, false, &on, DT), None);
-
-        let zeroed = CameraOptions {
-            submerge_final_pitch: 0.0,
-            ..CameraOptions::default()
-        };
-        let mut w = WaterPitch::default();
-        w.advance(LiquidBand::Surface, 0.0, false, &zeroed, DT);
-        assert_eq!(
-            w.advance(LiquidBand::Submerged, 0.0, false, &zeroed, DT),
-            None
-        );
-    }
-
     /// The staircase, not a curve (`0x808a40` walked downward with no interpolation) — and the
     /// **five** reachable steps, because the ±20° clamp equals record 4 and the table has one
     /// consumer image-wide, so records 5–9 can never show through.
@@ -1789,5 +1316,84 @@ mod tests {
             p.advance(0.5, &moving(false), true, &cfg, DT);
         }
         assert_eq!(p.bias(), mid, "the return was cancelled, not completed");
+    }
+
+    /// **The sweep decision 2165 says every regime switch owes** — here across the staircase's own
+    /// four keys, in both signs.
+    ///
+    /// Two claims, and the pair is the point. The staircase itself steps by exactly 5° and never
+    /// more: that jump is the mechanism, and this is where its size is written down. What reaches
+    /// the *camera* steps by a fortieth of that, because the staircase arms a channel instead of
+    /// being rendered — which is precisely what the water corridor did not do.
+    #[test]
+    fn the_staircases_five_degree_jumps_reach_the_camera_as_a_smooth_lean() {
+        use super::super::camera::FollowStyle;
+        use super::super::camera_channel::assert_bounded_step;
+
+        // The mechanism's own jump, bounded at itself.
+        assert_bounded_step(
+            (-0.6, 0.6),
+            0.0005,
+            5.0_f32.to_radians() + 1.0e-6,
+            TerrainTilt::slope_to_pitch,
+        );
+
+        // And what a player actually sees, walking terrain that sweeps every key in 20 s.
+        let cfg = CameraOptions {
+            terrain_tilt: true,
+            ..CameraOptions::default()
+        };
+        let moving = SubjectState {
+            move_flags: mf::FORWARD,
+            ..SubjectState::default()
+        };
+        let mut tilt = TerrainTilt::default();
+        assert_bounded_step((0.0, 20.0), DT, 0.25_f32.to_radians(), |now| {
+            let slope = -0.5 + now * 0.05;
+            tilt.advance(|| slope, true, &moving, FollowStyle::Smart, &cfg, DT)
+        });
+    }
+
+    /// The same sweep across head bob's two edges — the arm and the disarm — which are the only
+    /// places its offset can move discontinuously.
+    ///
+    /// The arm is continuous by construction (`since_transition` resets, so the kernel's phase
+    /// starts at zero and both components with it); the disarm is the cosine ramp, whose peak rate
+    /// is what the bound is set from. A regression that armed at an arbitrary phase would put a
+    /// full amplitude into one frame and land here.
+    #[test]
+    fn arming_and_disarming_the_bob_never_steps_the_eye_by_a_visible_amount() {
+        use super::super::camera::follow_cmd as c;
+        use super::super::camera_channel::assert_bounded_step;
+
+        let cfg = CameraOptions {
+            bobbing: true,
+            ..CameraOptions::default()
+        };
+        // A full amplitude in one frame would be this; the two bounds are fractions of it.
+        let amplitude = cfg.bob_ud_amplitude * BOB_AMPLITUDE_SCALE;
+        let mut bob = HeadBob::default();
+        let mut step = |now: f32| {
+            let command = if (1.0..4.0).contains(&now) {
+                c::FORWARD
+            } else {
+                0
+            };
+            bob.advance(
+                0.0,
+                &SubjectState {
+                    command,
+                    speed: 7.0,
+                    ..SubjectState::default()
+                },
+                &cfg,
+                DT,
+            );
+            bob.offset().length()
+        };
+        // Arming, and three seconds of bobbing.
+        assert_bounded_step((0.0, 3.9), DT, amplitude * 0.25, &mut step);
+        // The disarm's own ramp, bounded at what `cameraBobbingSmoothSpeed` actually buys.
+        assert_bounded_step((3.9, 6.0), DT, amplitude * 0.5, &mut step);
     }
 }

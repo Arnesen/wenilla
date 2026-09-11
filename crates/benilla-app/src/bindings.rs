@@ -47,7 +47,7 @@ use benilla_ui::script::keybind::{AddonBindingBody, KeybindCommand, KeybindReque
 use benilla_ui::script::UiScript;
 
 use crate::char_select::ClientState;
-use crate::ui_script::{PlayerUiHover, PointerOverUi, UiKeyboardCapture};
+use crate::ui_script::{PlayerUiHover, PointerOverUiPanel, UiKeyboardCapture};
 
 pub(crate) mod chord;
 pub(crate) mod commands;
@@ -425,7 +425,8 @@ fn latch_and_dispatch(
     scroll: Res<AccumulatedMouseScroll>,
     capture: Res<UiKeyboardCapture>,
     hover: Res<PlayerUiHover>,
-    over_ui: Res<PointerOverUi>,
+    // The CHROME flag — its only reader here is the wheel branch, which says why.
+    over_ui: Res<PointerOverUiPanel>,
     dispatch: Res<BindingDispatch>,
     mut state: ResMut<BindingsState>,
     mut same_vm: Local<crate::ui_script::VmMemo<bool>>,
@@ -638,6 +639,11 @@ fn latch_and_dispatch(
             scroll.delta.y / bevy::input::mouse::MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR
         }
     };
+    // **Over CHROME**, not over any UI at all: the wheel still zooms with the cursor on a
+    // nameplate, which is a mouse-enabled widget and not a panel (`PointerOverUiPanel`). Plates sit
+    // over exactly the things you look at, so the raw flag silently killed scroll-zoom wherever one
+    // happened to be — a regression of the day the plate became a widget (2148), found in the
+    // 2168 audit.
     if wheel != 0.0 && !armed && !sup && !over_ui.0 {
         let (key, amount) = if wheel > 0.0 {
             (BindKey::WheelUp, wheel)
@@ -847,7 +853,7 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::input::InputPlugin))
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiHover>()
-            .init_resource::<PointerOverUi>()
+            .init_resource::<PointerOverUiPanel>()
             .init_resource::<BindingsState>()
             .insert_resource(BindingDispatch::test_defaults())
             .add_systems(Update, latch_and_dispatch);
@@ -902,7 +908,7 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::input::InputPlugin))
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiHover>()
-            .init_resource::<PointerOverUi>()
+            .init_resource::<PointerOverUiPanel>()
             .init_resource::<BindingsState>()
             .init_resource::<BindingDispatch>()
             .add_systems(Update, (sync_dispatch, latch_and_dispatch).chain());
@@ -1521,7 +1527,7 @@ mod tests {
         app.update();
         assert!(state(&app).fired(cmd::CAMERA_ZOOM_IN));
         assert_eq!(state(&app).amount(cmd::CAMERA_ZOOM_IN), 2.0);
-        app.world_mut().resource_mut::<PointerOverUi>().0 = true;
+        app.world_mut().resource_mut::<PointerOverUiPanel>().0 = true;
         app.world_mut().write_message(MouseWheel {
             unit: MouseScrollUnit::Line,
             x: 0.0,

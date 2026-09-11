@@ -38,6 +38,7 @@ fn geometry() -> PlateGeometry {
         raid_size: 25.6,
         name_height: 12.8,
         level_height: 11.0,
+        shadow_offset: 1.0,
     }
 }
 
@@ -52,6 +53,7 @@ fn plate(name: &str, health: f32, max: f32) -> PlateState {
         bar_colour: [1.0, 0.0, 0.0],
         name: name.to_string(),
         level: Some(12),
+        skull: false,
         level_colour: [1.0, 1.0, 0.0],
         raid_icon: None,
         alpha: 1.0,
@@ -381,6 +383,84 @@ fn the_driver_does_not_overwrite_an_addons_takeover() {
         .unwrap());
 }
 
+/// **A hovered plate wears no black box** — the defect the widget port shipped (director report,
+/// 2026-09-10: "they look totally fucked when I hover or click them"), and the two halves that
+/// keep it fixed.
+///
+/// `Nameplate-Glow.blp` is DXT1 with **no alpha channel** and 80.5% pure-black texels. The
+/// reference blends it `ADD` (`push 3` @`0x7cb36a`); blitted with straight `BLEND` it is an opaque
+/// rectangle over the entire plate — which is exactly what the ctor's default mode produced here.
+/// 0184 is the director's call that benilla paints **no rim at all**, so the region has to be ADD
+/// *and* emit nothing, while staying shown and textured for the addons that read it.
+///
+/// The border assert is not decoration: without it the test would pass on an extract that produced
+/// no quads whatsoever.
+#[test]
+fn a_hovered_plate_emits_no_glow_quad() {
+    use crate::script::QuadContent;
+    let mut s = vm();
+    let mut p = plate("Wolf", 30.0, 40.0);
+    p.hovered = true;
+    p.lit = true;
+    drive(&mut s, &[p]);
+
+    // The model tells the truth: shown, textured, and the reference's own blend mode.
+    assert!(s
+        .eval::<bool>(
+            r#"local _, glow = WorldFrame:GetChildren():GetRegions()
+               return glow:IsShown() == 1
+                  and glow:GetTexture() == "Interface\\Tooltips\\Nameplate-Glow"
+                  and glow:GetBlendMode() == "ADD""#
+        )
+        .unwrap());
+
+    let paths: Vec<String> = s
+        .extract()
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Texture { path, .. } => path.clone(),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !paths.iter().any(|p| p.contains("Nameplate-Glow")),
+        "the hovered plate's glow must not be painted (0184); quads were {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p.contains("Nameplate-Border")),
+        "the plate's border must still paint; quads were {paths:?}"
+    );
+}
+
+/// The suppression is **the reference's own glow art on an ADD region**, and nothing wider: an
+/// addon that re-textures the region gets its art painted like any other texture.
+///
+/// pfUI's vanilla branch does exactly this — it blanks the six regions and paints its own — so a
+/// blanket "plate glow regions never draw" would silently eat an addon's work.
+#[test]
+fn an_addon_that_retextures_the_glow_gets_its_art_painted() {
+    use crate::script::QuadContent;
+    let mut s = vm();
+    let mut p = plate("Wolf", 30.0, 40.0);
+    p.hovered = true;
+    drive(&mut s, &[p]);
+    s.run(
+        r#"local _, glow = WorldFrame:GetChildren():GetRegions()
+           glow:SetTexture("Interface\\AddOns\\pfUI\\img\\glow")"#,
+    )
+    .unwrap();
+    s.resolve();
+
+    assert!(s
+        .extract()
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Texture { path, .. } => path.clone(),
+            _ => None,
+        })
+        .any(|p| p.contains("pfUI")));
+}
+
 /// pfUI reads `glow:IsShown()` as the MOUSEOVER signal (`:601`, `:880`). benilla does not paint the
 /// additive rim (0184 — it read as hard edge lines on our pipeline, and the director pinned a bar
 /// brighten instead), but the region is structurally present and really shown, because the
@@ -404,14 +484,14 @@ fn the_glow_region_is_the_mouseover_signal() {
         .unwrap());
 }
 
-/// The level number and the skull share one seat and are mutually exclusive — `level = None` is
-/// how the driver says "world boss, or ten levels up". pfUI gates on `levelicon:IsShown()` and
+/// The level number and the skull share one seat and are mutually exclusive — `skull` is how the
+/// driver says "world boss, or ten levels up". pfUI gates on `levelicon:IsShown()` and
 /// CustomNameplates on `Boss:IsVisible()`, so both flags have to move.
 #[test]
 fn the_skull_replaces_the_level_number() {
     let mut s = vm();
     let mut skulled = plate("Wolf", 30.0, 40.0);
-    skulled.level = None;
+    skulled.skull = true;
     drive(&mut s, &[skulled]);
     assert!(s
         .eval::<bool>(
@@ -420,6 +500,52 @@ fn the_skull_replaces_the_level_number() {
             return level:IsShown() == nil and levelicon:IsShown() == 1
                    and levelicon:IsVisible() == 1
         "#
+        )
+        .unwrap());
+}
+
+/// **A unit whose level has not arrived is not a world boss.** `level: None` with no skull leaves
+/// the seat EMPTY — the old painter's behaviour, which the widget port inverted by making one
+/// `Option` carry both facts (audit, 2026-09-10).
+#[test]
+fn a_unit_with_no_level_yet_wears_no_skull() {
+    let mut s = vm();
+    let mut unknown = plate("Wolf", 30.0, 40.0);
+    unknown.level = None;
+    drive(&mut s, &[unknown]);
+    assert!(s
+        .eval::<bool>(
+            r#"
+            local _, _, _, level, levelicon = WorldFrame:GetChildren():GetRegions()
+            return level:IsShown() == nil and levelicon:IsShown() == nil
+        "#
+        )
+        .unwrap());
+}
+
+/// **A plate the pool grows on any frame but the first is laid out too.** The lay-out used to ride
+/// a per-frame "did the window move?" flag, so a unit that walked into range later got a plate with
+/// no size and no anchors: invisible, permanently, and the number of plates on screen was capped at
+/// however many were up when V was first pressed (audit, 2026-09-10).
+#[test]
+fn a_plate_created_after_the_first_frame_is_laid_out() {
+    let mut s = vm();
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    // A second unit arrives on a LATER frame, with no free slot and no geometry change.
+    drive(
+        &mut s,
+        &[plate("Wolf", 30.0, 40.0), plate("Bear", 10.0, 90.0)],
+    );
+    let (w, h): (f32, f32) = s
+        .eval("local _, b = WorldFrame:GetChildren() return b:GetWidth(), b:GetHeight()")
+        .unwrap();
+    assert_eq!((w, h), (128.0, 32.0), "the second plate has the plate size");
+    // …and its regions are anchored to it, which is what `GetLeft` answering at all proves.
+    assert!(s
+        .eval::<bool>(
+            r#"local _, b = WorldFrame:GetChildren()
+               local border = b:GetRegions()
+               return border:GetLeft() == b:GetLeft() and border:GetRight() == b:GetRight()"#
         )
         .unwrap());
 }

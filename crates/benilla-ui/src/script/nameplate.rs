@@ -76,7 +76,7 @@ use crate::widget::{FrameHandle, FrameKind, KindState, RegionHandle, RegionKind}
 
 use super::model::Model;
 use super::UiScript;
-use super::{FontShadow, JustifyV, TexCoords};
+use super::{BlendMode, FontShadow, JustifyV, RegionData, TexCoords};
 
 /// Region 1's art — and the identification test every corpus addon runs, which is why it is a
 /// constant here rather than a caller's argument.
@@ -123,6 +123,16 @@ pub struct PlateGeometry {
     /// Font heights for the name and the level.
     pub name_height: f32,
     pub level_height: f32,
+    /// The plate text's drop-shadow step, in the same FrameXML units — **the driver divides the
+    /// seam out of it like everything else here**, because the director tuned it as a constant
+    /// ONE LOGICAL PIXEL (2026-07-07) and the shared text arm multiplies whatever it finds by the
+    /// seam on the way out.
+    ///
+    /// Left as a bare `1.0` unit by the widget port, it became `round(windowH/768 × uiScale)`
+    /// drawn px — 2 px from a 1152-tall window up, 3 px at 2160 — which is exactly the "chunky"
+    /// the recorded ±0.001 gx law was tuned away from, and it made the shadow the one part of a
+    /// plate that was not uiScale-blind.
+    pub shadow_offset: f32,
 }
 
 /// One plate's per-frame state, as the app hands it over: everything that can move while a plate is
@@ -152,8 +162,14 @@ pub struct PlateState {
     pub bar_colour: [f32; 3],
     /// The unit's name.
     pub name: String,
-    /// The level text, or `None` to show the skull in the level's seat instead.
+    /// The level number to show, or `None` when the unit has no `UNIT_FIELD_LEVEL` yet.
+    ///
+    /// **`None` is not the skull** — that is [`Self::skull`], and conflating them is what made a
+    /// unit whose level had not arrived wear a world boss's skull. The old painter kept the whole
+    /// level/skull block inside `if let Some(level)`, so no level meant neither.
     pub level: Option<u32>,
+    /// Show the SKULL in the level's seat instead of a number — the boss / far-out-of-range mark.
+    pub skull: bool,
     /// The level text's con colour.
     pub level_colour: [f32; 3],
     /// The raid-target mark, 0-based (`col = idx & 3`, `row = idx >> 2`), or `None`.
@@ -182,6 +198,17 @@ struct Plate {
     fill: RegionHandle,
     /// Last frame's state, so [`Plate::drive`] writes only what moved. `None` = retired.
     last: Option<PlateState>,
+    /// **The geometry this plate's anchors were written under**, or `None` while it has never been
+    /// laid out — the fix for a plate that was born invisible.
+    ///
+    /// [`Plate::lay_out`] used to be driven by one per-frame `relayout` flag ("did the window
+    /// move?"), which is true exactly once per window size. A plate the pool grew on any LATER
+    /// frame — a unit walking into range with no free slot — therefore kept `width: 0`, `height: 0`
+    /// and no region anchors, resolved to nothing, and drew nothing for the rest of the session.
+    /// The number of plates on screen was capped at however many were up on the frame V was first
+    /// pressed. Per-plate state instead of a per-frame flag makes the condition unfalsifiable: a
+    /// plate whose anchors are not the current geometry's gets them, whatever the reason.
+    laid_out: Option<PlateGeometry>,
 }
 
 impl Plate {
@@ -395,7 +422,7 @@ fn sync(
                 i
             }
         };
-        if relayout {
+        if model.nameplates.plates[slot].laid_out != Some(geometry) {
             Plate::lay_out(model, slot, geometry);
         }
         Plate::drive(model, slot, world, state, &mut effects);
@@ -405,7 +432,7 @@ fn sync(
     // can still read them, and they must not come back next frame laid out for the old window.
     if relayout {
         for i in 0..model.nameplates.plates.len() {
-            if model.nameplates.plates[i].last.is_none() {
+            if model.nameplates.plates[i].laid_out != Some(geometry) {
                 Plate::lay_out(model, i, geometry);
             }
         }
@@ -437,12 +464,40 @@ impl Plate {
         // `EnableMouse`/`IsMouseEnabled` are in the corpus's own call set, and pfUI's vanilla
         // click-through block drives them.
 
-        let border = texture(model, frame, DrawLayer::Artwork, BORDER_TEXTURE);
-        let glow = texture(model, frame, DrawLayer::Highlight, GLOW_TEXTURE);
+        // The blend modes are the ctor's own, one `0x7703f0` call per texture (wow-re
+        // `nameplate-vkey.md` §8.1, byte-arbitrated): everything is BLEND(2) except the **glow,
+        // which is ADD(3)** (`push 3` at `0x7cb36a` → `0x7cb374`). Getting that one wrong is not a
+        // subtlety — see [`is_unpainted_glow`].
+        let border = texture(
+            model,
+            frame,
+            DrawLayer::Artwork,
+            BORDER_TEXTURE,
+            BlendMode::Blend,
+        );
+        let glow = texture(
+            model,
+            frame,
+            DrawLayer::Highlight,
+            GLOW_TEXTURE,
+            BlendMode::Add,
+        );
         let name = font_string(model, frame, JustifyV::Bottom);
         let level = font_string(model, frame, JustifyV::Middle);
-        let skull = texture(model, frame, DrawLayer::Overlay, SKULL_TEXTURE);
-        let raid = texture(model, frame, DrawLayer::Artwork, RAID_ICON_TEXTURE);
+        let skull = texture(
+            model,
+            frame,
+            DrawLayer::Overlay,
+            SKULL_TEXTURE,
+            BlendMode::Blend,
+        );
+        let raid = texture(
+            model,
+            frame,
+            DrawLayer::Artwork,
+            RAID_ICON_TEXTURE,
+            BlendMode::Blend,
+        );
         // ↑ THE ORDER. Six regions, and this sequence is the ABI (module doc).
 
         // The one child, below the plate's own level so the border draws over the fill.
@@ -453,7 +508,12 @@ impl Plate {
             .arena
             .create_region(bar, RegionKind::Texture, DrawLayer::Artwork, 0)
             .expect("live bar");
-        model.region_data.entry(fill).or_default().texture = Some(BAR_FILL_TEXTURE.to_string());
+        let fill_data = model.region_data.entry(fill).or_default();
+        fill_data.texture = Some(BAR_FILL_TEXTURE.to_string());
+        // Not overridden by the ctor — the `CSimpleTexture` ctor's own `[+0xd0] = 2` stands
+        // (`0x76fc40`; vkey §8.1). Written explicitly because the default is a FACT here, not an
+        // omission.
+        fill_data.blend = BlendMode::Blend;
         if let Some(KindState::StatusBar(sb)) =
             model.arena.frame_mut(bar).map(|f| &mut f.kind_state)
         {
@@ -491,6 +551,7 @@ impl Plate {
             bar,
             fill,
             last: None,
+            laid_out: None,
         }
     }
 
@@ -540,6 +601,13 @@ impl Plate {
         name_data.font_height = Some(g.name_height);
 
         // The level — ("CENTER", plate, "BOTTOMRIGHT", −x, +y), the other validated pair.
+        for rh in [name, level] {
+            model.region_data.entry(rh).or_default().font_shadow = Some(FontShadow {
+                offset: [g.shadow_offset, -g.shadow_offset],
+                color: [0.0, 0.0, 0.0, 1.0],
+            });
+        }
+
         let level_data = model.region_data.entry(level).or_default();
         level_data.anchors = vec![Anchor::new(
             Point::Center,
@@ -571,6 +639,7 @@ impl Plate {
         // Anchor TARGETS moved (from nothing to the plate) on the first lay-out, so this is the
         // conservative touch — the only one in this module, and it runs once per geometry change.
         model.touch_layout();
+        model.nameplates.plates[i].laid_out = Some(g);
     }
 
     /// The per-frame write: position, health, texts, colours, shown flags, alpha — **and nothing
@@ -670,12 +739,16 @@ impl Plate {
         }
 
         // Level text and skull are mutually exclusive, in one seat.
-        if last
-            .as_ref()
-            .is_none_or(|l| l.level != state.level || l.level_colour != state.level_colour)
-        {
-            match state.level {
-                Some(n) => {
+        if last.as_ref().is_none_or(|l| {
+            l.level != state.level || l.skull != state.skull || l.level_colour != state.level_colour
+        }) {
+            match (state.level, state.skull) {
+                // The skull wins the seat, and it is the SKULL FLAG that puts it there.
+                (_, true) => {
+                    model.region_data.entry(level).or_default().hidden = true;
+                    model.region_data.entry(skull).or_default().hidden = false;
+                }
+                (Some(n), false) => {
                     let c = state.level_colour;
                     let data = model.region_data.entry(level).or_default();
                     data.text = Some(n.to_string());
@@ -685,9 +758,10 @@ impl Plate {
                     model.touch_measure(level);
                     model.touch_layout_region(level);
                 }
-                None => {
+                // No level yet and no skull: the seat stays EMPTY, the old painter's behaviour.
+                (None, false) => {
                     model.region_data.entry(level).or_default().hidden = true;
-                    model.region_data.entry(skull).or_default().hidden = false;
+                    model.region_data.entry(skull).or_default().hidden = true;
                 }
             }
         }
@@ -724,19 +798,33 @@ impl Plate {
     }
 }
 
-/// One of the plate's texture regions, with its path — created in the ABI's order by the caller.
-fn texture(model: &mut Model, frame: FrameHandle, layer: DrawLayer, path: &str) -> RegionHandle {
+/// One of the plate's texture regions, with its path and its blend mode — created in the ABI's
+/// order by the caller. The mode is not decoration: the ctor sets one on every texture it makes
+/// (`0x7703f0`, storing `[texture+0xd0]`), and the glow's is the one that differs — see
+/// [`is_unpainted_glow`].
+fn texture(
+    model: &mut Model,
+    frame: FrameHandle,
+    layer: DrawLayer,
+    path: &str,
+    blend: BlendMode,
+) -> RegionHandle {
     let rh = model
         .arena
         .create_region(frame, RegionKind::Texture, layer, 0)
         .expect("live plate");
-    model.region_data.entry(rh).or_default().texture = Some(path.to_string());
+    let data = model.region_data.entry(rh).or_default();
+    data.texture = Some(path.to_string());
+    data.blend = blend;
     rh
 }
 
 /// One of the plate's two FontStrings. Both are OVERLAY — the ctor re-layers them off ARTWORK
 /// (`0x7cb438`, `0x7cb4ea`) — and both take `NAMEPLATE_FONT` with the plate's black 1 px drop
 /// shadow; the heights arrive with the geometry.
+///
+/// The black drop shadow is written in [`Plate::lay_out`] instead of here: its step is a
+/// WINDOW-derived number ([`PlateGeometry::shadow_offset`]), not a create-time constant.
 ///
 /// `justify_v` is the one benilla-side compensation here, and it is the old painter's, kept: the
 /// plate's name is seated by its **ink**, not by the line box. Our shaper's box is ascent-heavy
@@ -751,14 +839,34 @@ fn font_string(model: &mut Model, frame: FrameHandle, justify_v: JustifyV) -> Re
     let data = model.region_data.entry(rh).or_default();
     data.font_path = Some(PLATE_FONT.to_string());
     data.font_explicit.face = true;
-    // The plate text's shadow (`nameplate-vkey.md` §7: black, ±0.001 gx, director-tuned to a
-    // constant 1 px — the recorded value rounds to 2 px at a large window and reads chunky).
-    data.font_shadow = Some(FontShadow {
-        offset: [1.0, -1.0],
-        color: [0.0, 0.0, 0.0, 1.0],
-    });
     data.justify.set_v(justify_v);
     rh
+}
+
+/// **The plate's glow region paints nothing here** — the region is real, shown, textured and ADD,
+/// and the quad walk skips it ([`super::extract`]). Decision 0184, and it is the director's call
+/// rather than a gap we could close by trying harder.
+///
+/// The reference draws this region `(SRC_ALPHA, ONE)` over the health bar: an additive
+/// reaction-tinted lift of the bar's cavity. 0183 built exactly that and the director rejected it
+/// on sight — *"you should not change the gradient or anything — just make the color of the yellow
+/// bar brighter"* — so 0184 replaced the rim with [`LIT_BOOST`], and the paint has been the bar's
+/// own brighten ever since. That is what this predicate keeps true now that the plate is a widget
+/// and its regions go through the shared frame→quad path instead of a painter that simply never
+/// emitted a glow quad.
+///
+/// **Why the mode matters even though nothing is drawn.** `Nameplate-Glow.blp` is DXT1 with **no
+/// alpha channel** — every one of its 4096 texels is alpha 255 — and 80.5% of it is exactly
+/// `rgb(0,0,0)`, the surround; the signal is a grey rounded bar (rim 140, interior ~46) in rows
+/// 20-26 that only reads as a glow when it is *added*. Blitted with straight `BLEND` it is
+/// `dst·(1−1) + black·1` — **an opaque black rectangle over the whole plate**, which is precisely
+/// what shipped when the widget port left the mode at the ctor default (director report,
+/// 2026-09-10; wow-re `nameplate-vkey.md` §8.1 had already named this exact bug and its cause in
+/// July). So `GetBlendMode()` answers `"ADD"` truthfully, an addon that re-textures the region
+/// gets its own art painted normally, and only the reference's own glow art on an ADD region is
+/// the one thing this engine declines to draw.
+pub(super) fn is_unpainted_glow(data: &RegionData) -> bool {
+    data.blend == BlendMode::Add && data.texture.as_deref() == Some(GLOW_TEXTURE)
 }
 
 /// The LIT (mouseover ∪ target) bar brighten — a uniform multiplicative lift of the fill tint,

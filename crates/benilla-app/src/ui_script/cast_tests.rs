@@ -33,7 +33,7 @@ fn bar_color(s: &UiScript) -> (f64, f64, f64) {
         .unwrap()
 }
 
-/// One tick of the app's real order (`drive_script`): OnUpdate, resolve, then the draw list.
+/// One tick of the app's real order (`tick_script` then `paint_script`): OnUpdate, resolve, then the draw list.
 fn frame(s: &mut UiScript, dt: f32) -> Vec<ExtractedQuad> {
     s.tick(dt);
     s.resolve();

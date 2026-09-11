@@ -4402,6 +4402,20 @@ const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
          one step further back than its guild twin: the rank byte streams, but the key's second \
          index is a FACTION SIDE that `ui_unit` does not resolve for an arbitrary player yet",
     ),
+    (
+        "cameraWaterCollision",
+        "REVERTED 2026-09-10, and the row is back because the feature is not. Two consumers were \
+         transcribed off `pivot-height-glide.md` §5: (1) the collision sweep's class mask \
+         becomes `0x1f0171` instead of `0x100171` — the `0xf0000` nibble is the ADT liquid \
+         layers — and `0x511ad0`'s bands re-base the pivot floor/cap; (2) a band CROSSING \
+         arms a 5° pitch through the `+0xf4` channel. Built as (1)=the pivot corridor alone, \
+         on the reading that the arm stays liquid-blind. **That corridor is discontinuous**: at \
+         `excess = 2/9` the framing pivot drops 1.04 yd in one frame and pops back 0.29 yd at \
+         `5/9`, so entering or leaving water at head depth slams the camera — which is what \
+         the director saw. Whether the discontinuity is the reference's or a mis-transcription is \
+         a live §5 (2165). Registered \"1\", so benilla is the divergence while this row \
+         stands",
+    ),
     // **The SLIDERS' half is empty, and that is the point.** 2115 extended this census from
     // `UIOptionsFrameCheckButtons` to `UIOptionsFrameSliders` and it caught exactly one row —
     // `cameraYawMoveSpeed`, the MOUSE_LOOK_SPEED slider — which was not cosmetic:

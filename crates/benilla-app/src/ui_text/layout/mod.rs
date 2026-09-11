@@ -166,7 +166,7 @@ pub(crate) struct LinkSpan {
 }
 
 /// Lays out `text` within `rect` (screen px, **y-down** — the same space
-/// [`crate::ui_script::extract::drive_script`] already flips frame rects into) and returns one
+/// [`crate::ui_script::extract::paint_script`] already flips frame rects into) and returns one
 /// [`UiQuad`] per non-blank glyph, textured with the page its cell was packed into. `z_key` is
 /// shared by every glyph — the owning `FontString` region's own [`crate::ui_pass`]-order key
 /// (regions already sort after their frame and by draw layer/decl, so reusing it keeps text in the

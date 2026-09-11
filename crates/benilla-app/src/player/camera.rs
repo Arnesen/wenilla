@@ -13,16 +13,14 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use avian3d::prelude::*;
 
 use super::camera_channel::{Arm, SmoothChannel};
-use super::camera_dynamics::{DynamicsInput, HeadBob, SmartPivot, TerrainTilt, WaterPitch};
+use super::camera_dynamics::{DynamicsInput, HeadBob, SmartPivot, TerrainTilt};
 use crate::creature_anim::wrap_pi;
 use crate::net::Embodied;
-use crate::ui_script::PointerOverUi;
 use benilla_assets::materials::WowModelMaterial;
 use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
 use benilla_world::model_fade::{
     self_model_fade_alpha, FadeMaterials, PendingAppearFade, RenderFade, SELF_FADE_WINDOW,
 };
-use benilla_world::view::CAM_NEAR;
 
 /// The reference's up-edge click predicate, in **camera degrees and milliseconds** — the whole
 /// orbit-vs-select law (decision 1122; wow-re `world-click-drag-arbitration.md`, §5 fan-out
@@ -796,9 +794,6 @@ pub(crate) struct CameraControl {
     /// `cameraPivot`'s pitch-bias channel ([`SmartPivot`], decision 2149) — pose, like the two
     /// above it.
     pub(super) smart_pivot: SmartPivot,
-    /// `cameraWaterCollision`'s band-crossing pitch kick ([`WaterPitch`], decision 2149) — also
-    /// pose: the band it remembers is the *previous frame's*, which is the whole selector.
-    pub(super) water_pitch: WaterPitch,
     /// `cameraTerrainTilt`'s ground-pitch channel and its 100 ms probe throttle ([`TerrainTilt`],
     /// decision 2149).
     pub(super) terrain_tilt: TerrainTilt,
@@ -927,9 +922,9 @@ impl WorldMouse {
 /// gesture the world already has.
 pub(super) fn latch_world_mouse(
     buttons: Res<ButtonInput<MouseButton>>,
-    pointer_over_ui: Res<PointerOverUi>,
-    // **A V-plate is UI the camera looks straight through** (decision 2148). Plates became real
-    // mouse-enabled widgets, so the pointer inside one makes `PointerOverUi` true — which is right
+    // **The CHROME flag, not the raw one** — a V-plate is UI the camera looks straight through
+    // (decision 2159, and the concept is named on `PointerOverUiPanel`). Plates became real
+    // mouse-enabled widgets in 2148, so the pointer inside one makes `PointerOverUi` true — right
     // for the world PICK (the plate publishes the mouseover itself, and its click selects) and
     // wrong for the camera: a drag that begins over a plate has to turn the view, or nameplates
     // become dead patches you cannot swing the camera from. The reference says the same thing from
@@ -938,7 +933,7 @@ pub(super) fn latch_world_mouse(
     //
     // The click does NOT leak through with it: `PlayerUiClickConsumed` still suppresses the
     // `WorldClick`/`WorldRightClick` below, so a plate click stays the plate's own.
-    plate_hover: Res<crate::vplates::PlateHover>,
+    pointer_over_ui: Res<crate::ui_script::PointerOverUiPanel>,
     mut rig: ResMut<CameraControl>,
     cameras: Query<&Camera, With<FlyCam>>,
     window: Single<&Window, With<PrimaryWindow>>,
@@ -946,7 +941,7 @@ pub(super) fn latch_world_mouse(
     let Ok(camera) = cameras.single() else {
         return;
     };
-    let over_ui = pointer_over_ui.0 && plate_hover.0.is_none();
+    let over_ui = pointer_over_ui.0;
     let world_press = rig.look.is_some() || (cursor_in_viewport(&window, camera) && !over_ui);
     rig.world_mouse.update(&buttons, world_press);
 }
@@ -1143,14 +1138,6 @@ pub(super) fn run_look_session(
         // dragged mostly vertically, spends this delta on the view's pitch BIAS and leaves the
         // arm alone. `None` is the reference's pure-pivot frame — the integrator does not run.
         let d_pitch = -dy * pitch_rate;
-        if d_pitch != 0.0 {
-            // **The hand does not cancel the kick — it carries it** (wow-re
-            // `camera-cvar-kernels.md` Q5). `0x510120` writes all three of the pitch channel's
-            // fields by the same delta — live `[cam+0xf4]`, start `[cam+0x1e4]` and target
-            // `[cam+0x1e0]` — so a drag during a `*FinalPitch` ease keeps the ease's *remaining
-            // travel* instead of losing it. Cancelling was the reading before that answer landed.
-            rig.water_pitch.nudge(d_pitch);
-        }
         if let Some(d_pitch) = rig.smart_pivot.route_pitch(
             d_pitch,
             d_yaw,
@@ -1217,7 +1204,6 @@ pub(super) fn seat_on_subject(
     cam_probe: &Collider,
     follow: &FollowInput,
     dynamics: &DynamicsInput,
-    world: &benilla_world::world_point::WorldPoint<'_, '_>,
 ) {
     // The sweep origin moves with the subject too; rooting it at our own head would cast the boom
     // across the world and jam it on the first wall in between
@@ -1225,28 +1211,6 @@ pub(super) fn seat_on_subject(
     let (orbit_pos, sweep_from) = match view.remote {
         Some(v) => (v.feet, v.sweep_origin()),
         None => (feet, head),
-    };
-    // The **fourth** substitution, and it belongs here for the same reason the other three do:
-    // `cameraWaterCollision`'s bands are a fact about the FOLLOWED unit's liquid (`0x511ad0` takes
-    // the unit, and the room claim is that unit's), so a far-sight subject in a lake is what
-    // re-bases the pivot, never our own body's puddle. Every liquid, not only water (0634).
-    let feet_wow = benilla_assets::coords::bevy_to_wow(orbit_pos);
-    let who = view
-        .remote
-        .map_or(benilla_world::world_point::Subject::Player, |v| {
-            benilla_world::world_point::Subject::Unit(v.entity)
-        });
-    let dynamics = &super::camera_dynamics::DynamicsInput {
-        liquid: super::camera_dynamics::SubjectLiquid {
-            // Classified **unconditionally**, as the reference does: `0x511ad0` is called at
-            // `0x50eb45` whatever `cameraWaterCollision` says, and the CVar gates only whether the
-            // bands reach the corridor (`0x50e5ec`) and the crossing kick (`0x50ecb9`). The bits
-            // have a third reader that is NOT gated by it — `0x5103e0`'s `cameraDive` pair — so
-            // gating the query here would be a trap for whoever builds that.
-            surface_y: world.liquid_at(who, feet_wow).map(|h| h.surface_z),
-            feet_y: feet_wow[2],
-        },
-        ..*dynamics
     };
     // The framing height is the **channel's**, not this frame's target: it eases there over
     // `|Δh| / 1.2` s with a cosine profile, so a shapeshift, a mount, a growth aura or a far-sight
@@ -1256,23 +1220,6 @@ pub(super) fn seat_on_subject(
     let orbit_pivot = rig
         .pivot
         .advance(view.remote.map(|v| v.pivot_height).or(body_pivot), dt);
-    // **`cameraWaterCollision`'s pivot corridor** (decision 2149; wow-re `pivot-height-glide.md`
-    // §5 + `camera-cvar-gates.md` §4a). The CVar's *first* consumer is `0x50e5ec`, which folds the
-    // ADT liquid nibble into the solver's sweep class word — but the recorded verdict for the arm
-    // is unchanged by that (`camera-arm-liquid-blind.md`: the SWEEP stays liquid-blind), and what
-    // actually moves is the **framing pivot's** floor and cap, re-based by `0x511ad0`'s bands.
-    // With the CVar off, or out of liquid, `clamp(live, 5/6, live)` is the live height itself.
-    let (band, d) = dynamics.liquid.band(rig.pivot.probe().1);
-    let orbit_pivot = if dynamics.options.water_collision {
-        let (floor, cap) = band.pivot_corridor(d, orbit_pivot);
-        orbit_pivot.clamp(floor, cap.max(floor))
-    } else {
-        orbit_pivot
-    };
-    // The CVar's other consumer: a band CROSSING arms an absolute pitch through the kick's own
-    // channel. Run here, before the seat, so the pitch this frame renders at is the eased one —
-    // and unconditionally, because the previous-frame snapshot it keeps is taken at `0x50eb14`,
-    // ahead of the CVar test at `0x50ecb9`.
     // **`cameraTerrainTilt`'s probe and channel.** The probe looks at the ground AHEAD of the
     // subject, not under it: a horizontal ray along its facing from `feet + 5/3`, its hit pulled
     // back `5/18`, then a `64/9` drop — so the slope is the rise of the ground you are walking
@@ -1315,15 +1262,6 @@ pub(super) fn seat_on_subject(
     rig.head_bob
         .advance(rig.distance, &dynamics.subject, &dynamics.options, dt);
 
-    // `[cam+0x90] & 1` is FREELOOK — the player holding mouse-look — which picks the HARD SNAP
-    // over the ease (`0x50ed0e`; wow-re `camera-cvar-kernels.md` Q3).
-    let freelook = rig.look.is_some();
-    if let Some(pitch) = rig
-        .water_pitch
-        .advance(band, cam.pitch, freelook, &dynamics.options, dt)
-    {
-        cam.pitch = pitch.clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
-    }
     seat_camera(
         dt,
         turn_delta,
@@ -1473,10 +1411,11 @@ pub(super) fn seat_camera(
     // (verified negative, wow-re `water-frame-straddle` §4a: zero liquid-height queries in the
     // camera TU); the no-straddle experience is the *submersion probe's* — the frame flips
     // submerged the moment the lowest near-plane corner reaches the surface
-    // (`liquid::detect_submersion`, the corner-min probe), and with [`CAM_NEAR`] at the
-    // reference's 1/9 the whole crossing band is a few inches tall. 0905's eye snap — the local
-    // compensation for the old 1.0-yd near plane — is removed with its cause (its record is
-    // superseded; see the 0905-successor decision).
+    // (`liquid::detect_submersion`, the corner-min probe), and with the near plane at the
+    // `nearclip` CVar's registered 0.1 the whole crossing band is a few inches tall (2163 — it
+    // said "the reference's 1/9" until the per-frame re-stamp at `0x511bd4` was read). 0905's eye
+    // snap — the local compensation for the old 1.0-yd near plane — is removed with its cause
+    // (its record is superseded; see the 0905-successor decision).
     // `WOW_CAM_DUMP=frame`: the REALIZED pose, per frame, bit-exact — not the pose that was asked for.
     //
     // Every scripted probe sets `yaw`/`pitch`/`distance` and we then reason as though the camera is
@@ -1534,8 +1473,14 @@ pub(super) fn seat_camera(
     // distance (collision-pulled), so backing into a wall also thins you — the faithful behavior.
     // Off the SEATED eye, not the bobbed one: the fade is a statement about how far the boom was
     // pulled in, and a 5 cm wobble is not that.
-    rig.self_fade_alpha =
-        self_model_fade_alpha((seated - pivot).length(), CAM_NEAR, SELF_FADE_WINDOW);
+    //
+    // The LIVE `nearclip`, not a constant (2163): the fade is defined as finishing where the near
+    // plane starts cutting, so a player who moves that plane has to move this with it.
+    rig.self_fade_alpha = self_model_fade_alpha(
+        (seated - pivot).length(),
+        dynamics.nearclip,
+        SELF_FADE_WINDOW,
+    );
 }
 
 /// Apply the self-avatar zoom-in fade ([`CameraControl::self_fade_alpha`], computed in [`control`]) to

@@ -326,6 +326,30 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `GetCVar("uiscale")`, and both read 0.9 there on every window we ship against.
     same("useUiScale", "0"),
     same("farclip", "350"),
+    // **`nearclip` — farclip's other half, and a knob we had been holding as a constant** (2163).
+    // `0x68867a` passes name `0x84ffb0` `"nearclip"`, default string `0x84fb48` `"0.1"`, help
+    // "Near clip plane distance", flags `1`, callback `0x688d90`, record `[0xc7f348]` (wow-re
+    // `re/cvar/cvar-register-sites.tsv` row 187).
+    //
+    // **The reader is the camera, and it re-reads every frame.** `0x511bc0` — the per-frame camera
+    // outer, sole caller `0x483094` — stamps `[cam+0x38]` from this record's float before the
+    // `[cam+0x48]` branch and unconditionally: `511bcf mov eax,[0xbe1078]; 511bd4 fld [eax+0x24];
+    // 511bdc fstp [esi+0x38]`, with `[0xbe1078]` the handle `0x50b728` caches from a `"nearclip"`
+    // Lookup. `farclip` is the next four instructions. `benilla_world::view::stamp_near_clip` is
+    // that, and `ViewDistance` is the pair.
+    //
+    // **Why it was not registered for so long, and why that reasoning was wrong.** The near plane
+    // was a `CAM_NEAR = 1.0/9.0` const documented as the reference's own, on the true finding that
+    // the callback's *derived global* `[0xc7b480]` has one writer and no readers (wow-re
+    // `cvar/scratch/graphics-cost-cvar-census.md` §8 lists `nearclip` among the eleven dead knobs
+    // for exactly that). The camera does not read that global; it reads the record. So the ctor's
+    // `0x3de38e39` = 1/9 is overwritten by the first frame's stamp and never reaches a picture —
+    // a verified-but-partial mechanism, which the contract §4 names as the classic trap.
+    //
+    // pfUI's `hdgraphic` writes it (`ConsoleExec("nearClip " .. arg*2/100)`, 0.06..0.30 across its
+    // extended stops) — every value inside the reference's own `[0.01, 0.33]`, which is why that
+    // module could ask for it.
+    same("nearclip", "0.1"),
     // The Controls-page trio (0961). `deselectOnClick`/`mouseInvertPitch` are 1.12's own
     // Interface Options CVars (UIOptionsFrame.lua indices 45/1); their defaults are the
     // reference behaviors benilla already shipped (empty-world click clears the target; no
@@ -693,25 +717,6 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `0x512a50`'s `duration = |Δ| / (rate · π/180)`). No panel row here or there — the reader is
     // the host, exactly like `cameraSmoothTrackingStyle` above it.
     same("cameraTargetSmoothSpeed", "90"),
-    // `cameraWaterCollision` `[0xbe1088]` "1" (`0x50bd63`) — the other of the two that ships ON.
-    // Two consumers (wow-re `camera-cvar-gates.md` §4): the solver's sweep class word gains the
-    // `0xf0000` ADT-liquid nibble at `0x50e5ec`, and the driver's band-CROSSING pitch kick at
-    // `0x50ecae`. What it actually MOVES is the framing pivot's floor/cap, re-based by `0x511ad0`'s
-    // bands (`pivot-height-glide.md` §5) — the arm itself stays liquid-blind either way, which is
-    // that note's own verdict and is why benilla having no liquid collider costs nothing here.
-    same("cameraWaterCollision", "1"),
-    // Its band-crossing pair, both `"5.0"` (`[0xbe0f2c]`/`[0xbe0fdc]`) — the ABSOLUTE pitch the
-    // camera eases to when the liquid band crosses, in the reference's own degrees (positive =
-    // looking down; `player::camera_dynamics::WaterPitch` negates once, for benilla's sign).
-    same("cameraSurfaceFinalPitch", "5"),
-    same("cameraSubmergeFinalPitch", "5"),
-    // **`cameraPitchSmoothSpeed`** (`[0xbe0ce4]`, "45.0") — 2115 §7's third partner write, and
-    // 2147 §7's "the only one still unbuilt: no reader, so no row". It has one now, but a PARTIAL
-    // one, and the row says so rather than implying the whole channel exists: it is the rate the
-    // water kick's own pitch channel arms at. The reference reads it for the aim pitch as a whole
-    // (`0x510120` arms `[cam+0x1e0]`, `0x50f160` eases `[cam+0xf4]`); benilla's mouse pitch is an
-    // immediate write and stays one — see `WaterPitch`'s divergence note.
-    same("cameraPitchSmoothSpeed", "45"),
     // `cameraTerrainTilt` `[0xbe0fd4]` **"0"** (`0x50bcfd`) — Follow Terrain, and the one of the
     // four that ships OFF, so building it changed nothing until a player ticks the box. Mechanism:
     // wow-re `camera-cvar-kernels.md` §2 (the ahead-probe and the five-step staircase) and
@@ -1383,6 +1388,10 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "soundzonemusicnodelay" => knobs.sound.zone_music_no_delay = v != 0.0,
         "uiscale" => knobs.scale.0 = v.clamp(0.5, 1.5),
         "farclip" => knobs.view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
+        // The reference REFUSES an out-of-range write here rather than clamping (`0x688d90` echoes
+        // "NearClip must be in range 0.01 - 0.33" and returns 0). We clamp, which is this table's
+        // standing posture for every range — the consumer clamps at its own edge.
+        "nearclip" => knobs.view.set_nearclip(v),
         "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
         "autoselfcast" => knobs.auto_self_cast.0 = v != 0.0,
         "assistattack" => knobs.assist_attack.0 = v != 0.0,
@@ -1446,10 +1455,6 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "camerapivotdxmax" => knobs.camera_opts.pivot_dx_max = v,
         "camerapivotdymin" => knobs.camera_opts.pivot_dy_min = v,
         "cameratargetsmoothspeed" => knobs.camera_opts.target_smooth_speed = v,
-        "camerawatercollision" => knobs.camera_opts.water_collision = v != 0.0,
-        "camerasurfacefinalpitch" => knobs.camera_opts.surface_final_pitch = v,
-        "camerasubmergefinalpitch" => knobs.camera_opts.submerge_final_pitch = v,
-        "camerapitchsmoothspeed" => knobs.camera_opts.pitch_smooth_speed = v,
         "cameraterraintilt" => knobs.camera_opts.terrain_tilt = v != 0.0,
         "cameragroundsmoothspeed" => knobs.camera_opts.ground_smooth_speed = v,
         "cameraterraintilttimemin" => knobs.camera_opts.tilt_time_min = v,
@@ -1833,7 +1838,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 87] = [
+        let session: [(&str, String); 84] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1856,6 +1861,7 @@ fn sync_cvars(
             ("SoundZoneMusicNoDelay", flag(sound.zone_music_no_delay)),
             ("uiScale", scale.0.to_string()),
             ("farclip", view.farclip.to_string()),
+            ("nearclip", view.nearclip.to_string()),
             ("deselectOnClick", flag(click.deselect_on_click)),
             ("autoSelfCast", flag(auto_self_cast.0)),
             ("assistAttack", flag(assist_attack.0)),
@@ -1876,19 +1882,6 @@ fn sync_cvars(
             (
                 "cameraTargetSmoothSpeed",
                 camera_opts.target_smooth_speed.to_string(),
-            ),
-            ("cameraWaterCollision", flag(camera_opts.water_collision)),
-            (
-                "cameraSurfaceFinalPitch",
-                camera_opts.surface_final_pitch.to_string(),
-            ),
-            (
-                "cameraSubmergeFinalPitch",
-                camera_opts.submerge_final_pitch.to_string(),
-            ),
-            (
-                "cameraPitchSmoothSpeed",
-                camera_opts.pitch_smooth_speed.to_string(),
             ),
             ("cameraTerrainTilt", flag(camera_opts.terrain_tilt)),
             (
@@ -2340,6 +2333,14 @@ mod tests {
         // ViewDistance::default() reads $WOW_FARCLIP; the registered default mirrors the
         // env-less 350 literal (view.rs doc: "Default 350" — the reference's own, 1624).
         assert_eq!(d["farclip"], 350.0);
+        // `nearclip` welds to the const the off-world spawners use, so the viewer, the depth probe
+        // and the player's camera cannot open on three different near planes again (2163).
+        assert_eq!(d["nearclip"], benilla_world::view::NEARCLIP_DEFAULT);
+        assert_eq!(
+            d["nearclip"],
+            ViewDistance::default().nearclip,
+            "the registered default and the resource's own must be one number"
+        );
         // Same shape as farclip: `MsaaSetting::default()` reads $WOW_MSAA, so the registered
         // default mirrors the env-less literal — 1, the reference's own (1629).
         assert_eq!(d["gxMultisample"], 1.0);
@@ -2400,28 +2401,12 @@ mod tests {
             "the binary registers UnitNamePlayer \"1\", NPC \"0\", Own \"0\", \
              PlayerGuild \"1\""
         );
-        // The camera options weld to `CameraOptions::default()` the same way (2149) — and the two
-        // that matter here are the ones registered "1": a `cameraPivot` that shipped OFF would be
+        // The camera options weld to `CameraOptions::default()` the same way (2149) — and the one
+        // that matters here is the one registered "1": a `cameraPivot` that shipped OFF would be
         // benilla diverging from the reference on a feature it now has.
         let camera_opts = crate::player::camera_dynamics::CameraOptions::default();
         assert_eq!(d["cameraPivot"] != 0.0, camera_opts.pivot);
-        assert_eq!(
-            d["cameraWaterCollision"] != 0.0,
-            camera_opts.water_collision
-        );
-        assert!(
-            camera_opts.pivot && camera_opts.water_collision,
-            "the binary registers cameraPivot and cameraWaterCollision both \"1\""
-        );
-        assert_eq!(
-            d["cameraSurfaceFinalPitch"],
-            camera_opts.surface_final_pitch
-        );
-        assert_eq!(
-            d["cameraSubmergeFinalPitch"],
-            camera_opts.submerge_final_pitch
-        );
-        assert_eq!(d["cameraPitchSmoothSpeed"], camera_opts.pitch_smooth_speed);
+        assert!(camera_opts.pivot, "the binary registers cameraPivot \"1\"");
         assert_eq!(d["cameraTerrainTilt"] != 0.0, camera_opts.terrain_tilt);
         assert!(
             !camera_opts.terrain_tilt,
@@ -2497,7 +2482,10 @@ mod tests {
     fn apply_parses_clamps_and_reports_unknowns() {
         let mut sound = SoundConfig::default();
         let mut scale = UiScaleCvar(0.9);
-        let mut view = ViewDistance { farclip: 350.0 };
+        let mut view = ViewDistance {
+            farclip: 350.0,
+            nearclip: benilla_world::view::NEARCLIP_DEFAULT,
+        };
         let mut look = LookConfig::default();
         let mut click = ClickConfig::default();
         let mut loot = LootConfig::default();
@@ -2607,6 +2595,17 @@ mod tests {
         assert_eq!(knobs.sound.master, 1.0);
         assert!(apply_to_knobs("farclip", "50", &mut knobs));
         assert_eq!(knobs.view.farclip, *FARCLIP_RANGE.start());
+        // `nearclip` clamps to the reference's own callback bounds `[0.01, 0.33]` (`0x688d90`),
+        // both ends. pfUI's extended stops write 0.06..0.30, so its whole range passes untouched.
+        assert!(apply_to_knobs("nearclip", "0.001", &mut knobs));
+        assert_eq!(
+            knobs.view.nearclip, 0.01,
+            "[0x8029d0], the callback's low bound"
+        );
+        assert!(apply_to_knobs("nearclip", "9", &mut knobs));
+        assert_eq!(knobs.view.nearclip, 0.33, "[0x808300], its high bound");
+        assert!(apply_to_knobs("nearclip", "0.3", &mut knobs));
+        assert_eq!(knobs.view.nearclip, 0.3);
         // Multisampling clamps to the reference's own [1, 16] and takes an int the way its `atoi`
         // does — the value reaching the camera is a sample COUNT, where 1 is none (1629).
         assert!(apply_to_knobs("gxMultisample", "4", &mut knobs));
@@ -2764,6 +2763,39 @@ mod tests {
             assert!(apply_to_knobs(key, "48", &mut knobs));
             assert_ne!(knobs.clutter.density, 0.5, "{key}: reached no knob");
         }
+        // **The engine verbs' half of the same weld** (2163). `SetWorldDetail`/`GetWorldDetail` live
+        // in `benilla-ui`, which cannot see this table, so the two CVar names and the stop table it
+        // writes are consts there — and if either name stopped being registered, or the reference's
+        // {16, 32, 48} stopped being `frillDensity`'s unit times the stop, the verbs would write
+        // into nothing and only this assertion would say so.
+        assert!(REGISTERED
+            .iter()
+            .any(|r| r.name == benilla_ui::script::CVAR_WORLD_DETAIL));
+        assert!(REGISTERED
+            .iter()
+            .any(|r| r.name == benilla_ui::script::CVAR_FRILL_DENSITY));
+        for (n, frill) in benilla_ui::script::WORLD_DETAIL_STOPS.iter().enumerate() {
+            assert_eq!(
+                *frill,
+                benilla_formats::FRILL_DENSITY * (n as u32 + 1),
+                "stop {n}: the reference's own 0x804518 entry must be this knob's unit times the stop"
+            );
+            // Either spelling of the stop lands on the same ground cover — which is what lets the
+            // setter write `frillDensity` and the getter read `WorldDetail` without disagreeing.
+            assert!(apply_to_knobs("WorldDetail", &n.to_string(), &mut knobs));
+            let by_stop = knobs.clutter.density;
+            knobs.clutter.density = 0.5;
+            assert!(apply_to_knobs(
+                "frillDensity",
+                &frill.to_string(),
+                &mut knobs
+            ));
+            assert_eq!(
+                knobs.clutter.density, by_stop,
+                "stop {n}: the two spellings disagree"
+            );
+            assert_eq!(knobs.clutter.frill_density(), *frill as f32);
+        }
         // Back to the shipped stop, so the rows after this one read the default ground cover.
         assert!(apply_to_knobs("WorldDetail", "1", &mut knobs));
         assert_eq!(knobs.clutter.density, 2.0);
@@ -2869,7 +2901,10 @@ mod tests {
         app.add_plugins(bevy::MinimalPlugins)
             .insert_resource(SoundConfig::default())
             .insert_resource(UiScaleCvar(DEFAULT_UI_SCALE))
-            .insert_resource(ViewDistance { farclip: 350.0 })
+            .insert_resource(ViewDistance {
+                farclip: 350.0,
+                nearclip: benilla_world::view::NEARCLIP_DEFAULT,
+            })
             .insert_resource(MsaaSetting { samples: 1 })
             // Literal for the same reason (1642): TexFilterSetting::default() reads
             // $WOW_TRILINEAR / $WOW_ANISO. These are what ships (1645).

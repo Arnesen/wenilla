@@ -178,7 +178,7 @@ fn hiding_a_frame_does_not_reopen_the_gate() {
 /// re-enter re-measured every line, and the non-empty measure list forced a second full resolve
 /// that the gate could never close over.
 ///
-/// It drives the app's real per-frame order (`ui_script::extract::drive_script`): Lua tick →
+/// It drives the app's real per-frame order (`ui_script::extract::tick_script`): Lua tick →
 /// resolve → measure round-trip → resolve.
 #[test]
 fn the_hover_re_enter_loop_neither_re_measures_nor_re_solves() {
@@ -216,7 +216,7 @@ fn the_hover_re_enter_loop_neither_re_measures_nor_re_solves() {
         ("Restores 243 health over 21 sec.", 118.0, 24.0),
         ("Durability 45 / 45", 96.0, 12.0),
     ];
-    // One frame of `drive_script`: tick (the re-enter) → resolve → measure round-trip → resolve.
+    // One frame of `tick_script`: tick (the re-enter) → resolve → measure round-trip → resolve.
     // Returns how many strings the font engine was asked to shape this frame.
     let frame = |s: &mut UiScript| -> usize {
         s.run("reenter()").expect("re-enter");

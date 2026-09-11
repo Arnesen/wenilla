@@ -73,14 +73,14 @@ fn settled_default_ui() -> UiScript {
     s
 }
 
-/// One frame in the app's own order (`extract::drive_script`): measure FIRST, then resolve.
+/// One frame in the app's own order (`extract::tick_script`): measure FIRST, then resolve.
 fn app_frame(s: &mut UiScript) {
     answer_measures(s);
     s.resolve();
 }
 
 /// A frame that also **ticks the VM**, i.e. runs the shipped UI's own `OnUpdate` handlers, in
-/// `drive_script`'s real order (tick → measure → resolve).
+/// `tick_script`'s real order (tick → measure → resolve).
 ///
 /// [`app_frame`] deliberately models only the measure/resolve half, and the tooltip benches stand
 /// in for the handler by calling it themselves. That is fine when the test IS the driver — but a
@@ -174,7 +174,7 @@ fn a_tooltip_content_change_costs_exactly_one_layout_solve() {
     assert_eq!(
         solves, 10,
         "10 content changes must cost 10 solves — one each. Two per change means the measure \
-         round-trip is running AFTER the resolve again (extract::drive_script's order)."
+         round-trip is running AFTER the resolve again (extract::tick_script's order)."
     );
     // …and none of those ten may DERIVE the graph (decision 1388). This is the second shape of
     // the same law `a_region_moving_every_frame_costs_no_graph_derivation_on_the_shipped_ui`

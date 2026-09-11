@@ -803,19 +803,23 @@ fn drive_vplates(
                 .resolve(guid.0, &net_commands)
                 .map(str::to_owned)
                 .unwrap_or_default(),
-            // `None` = the skull takes the level's seat. Its two legs (`0x7cbb40`, §7-VERIFIED):
-            // a WORLD BOSS — creature-classification rank 3, through the client's own getter
-            // (`gated_rank`, decision 0782, which is why a MIND-CONTROLLED boss shows its number)
-            // — unconditionally; or a hostile ≥ 10 levels up that isn't trivial-grey (`0x5f0700`,
-            // the shared check, vacuous on a ≥ +10 hostile and kept for transcription fidelity).
-            level: store.and_then(|s| s.0.unit_level()).and_then(|level| {
-                let world_boss = crate::names::gated_rank(
+            // The skull's two legs (`0x7cbb40`, §7-VERIFIED): a WORLD BOSS — creature-
+            // classification rank 3, through the client's own getter (`gated_rank`, decision
+            // 0782, which is why a MIND-CONTROLLED boss shows its number) — unconditionally; or a
+            // hostile ≥ 10 levels up that isn't trivial-grey (`0x5f0700`, the shared check,
+            // vacuous on a ≥ +10 hostile and kept for transcription fidelity).
+            //
+            // **A unit with no level yet is not a boss.** The two facts travel separately, because
+            // folding them into one `Option` made a missing `UNIT_FIELD_LEVEL` read as a skull —
+            // the old painter kept the whole block inside `if let Some(level)`, so no level meant
+            // no number AND no skull, and that is the behaviour restored here.
+            level: store.and_then(|s| s.0.unit_level()),
+            skull: store.and_then(|s| s.0.unit_level()).is_some_and(|level| {
+                crate::names::gated_rank(
                     benilla_protocol::guid::entry(guid.0).and_then(|e| names.creature_record(e)),
                     store,
-                ) == 3;
-                let skull = world_boss
-                    || (rank <= 1 && level >= my_level + 10 && !unit_is_grey(my_level, level));
-                (!skull).then_some(level)
+                ) == 3
+                    || (rank <= 1 && level >= my_level + 10 && !unit_is_grey(my_level, level))
             }),
             level_colour: {
                 let c = store
@@ -848,6 +852,10 @@ fn drive_vplates(
             raid_size: gx(RAID_ICON_SIZE) / seam,
             name_height: text_px(NAME_H, basis) / seam,
             level_height: text_px(LEVEL_H, basis) / seam,
+            // A constant ONE LOGICAL PIXEL of drop shadow, in the widget layer's units — the
+            // director's 2026-07-07 tuning, which the shared text arm would otherwise scale by
+            // this same seam and draw 2 px thick from a 1152-tall window up.
+            shadow_offset: 1.0 / seam,
         },
         &states,
     );
@@ -875,15 +883,15 @@ impl Plugin for VPlatesPlugin {
                     // `.after(WorldStage::Input)`, so the camera this projects through is THIS
                     // frame's, the freshest data a plate can be built from.
                     //
-                    // **The paint is therefore one frame behind, and that is a known cost of
-                    // decision 2148.** The UI's tick→resolve→extract (`UiInput`) runs
-                    // `.before(WorldStage::Input)`, so the anchors written here are drawn by the
-                    // NEXT frame's extract. Running earlier does not help — the camera would then
-                    // be last frame's instead, and the lag would be identical with staler
-                    // targeting. Removing it means moving the UI's resolve/extract after the
-                    // camera update, which is a seam change with its own blast radius (the hover
-                    // hit-test reads those rects before `WorldStage::Input`) and is recorded as
-                    // 2148's follow-up rather than smuggled in here.
+                    // **And the paint is this frame's too, since decision 2168.** The UI pass is
+                    // two systems: the tick/resolve half stays ahead of `WorldStage::Input`
+                    // (the hit test feeds `PointerOverUi`, which the camera reads), and the QUAD
+                    // half — `ui_script::extract::paint_script` — runs after this driver. 2148
+                    // shipped with the whole pass ahead of the camera, so the anchors written here
+                    // were drawn by the NEXT frame's extract: the seat reached the paint 16 ms
+                    // late, every frame, which is the director's "way more jittered when the
+                    // creature is moving" (measured both ways on the `vpl` trace, 2026-09-10 —
+                    // median driver→paint gap 16.0 ms before, 0.0 ms after).
                     drive_vplates.after(TargetUpdate),
                 )
                     .chain()

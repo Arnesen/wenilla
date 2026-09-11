@@ -1068,21 +1068,32 @@
         -- `benillaRow` is ours: the reference addresses its sliders as OptionsFrameSlider1..9, a
         -- numbering our page does not use, so each row names the child it drives instead.
         --
-        -- NOT bound, and named rather than faked: pfUI's module goes on to hook `SetWorldDetail`
-        -- and `GetWorldDetail` (both unbound) and drive `ConsoleExec("frillDensity ...")`,
-        -- `lodDist`, `nearClip`, `maxLOD`. `ConsoleExec` itself IS bound (1948 — it writes a
-        -- registered CVar or pushes a console command the app dispatches), and `frillDensity` is
-        -- now registered over the clutter knob (2151), so THAT write lands; `lodDist`, `nearClip`
-        -- and `maxLOD` have no benilla knob behind them and reach nothing, because registering a
-        -- CVar nothing reads would be exactly the silent pretence 1203 exists to forbid.
+        -- **Both WorldDetail verbs are bound now** (2163), which is what makes pfUI's module RUN
+        -- rather than merely load: it hooks `SetWorldDetail`/`GetWorldDetail`, and hooking a nil
+        -- took its extended arm down at the first call. `SetWorldDetail` is `0x488dd0`'s carve —
+        -- truncate toward zero, `[0, 2]` or raise `"value must be in the range 0, 2"`, write the
+        -- `0x804518` stops {16, 32, 48} — and `GetWorldDetail` is `0x488d70` answering the stop.
+        -- They live in `benilla_ui::script::cvars`, not here; this page still drives the CVar
+        -- directly, so nothing on it calls either. The stock file WILL, once 1751 migrates this
+        -- window: `OptionsFrame_Save`/`_Load` prefer `getglobal("Set"..func)` / `("Get"..func)`
+        -- over `SetCVar`/`GetCVar` (`OptionsFrame.lua` l.110/135/206-226).
         --
-        -- Neither WorldDetail verb is called at load, so the module loads and its slider write
-        -- lands. Its EXTENDED arm still cannot RUN here — that arm is `SetWorldDetail`, and its
-        -- replacement `GetWorldDetail` calls a nil hook at any stop <= 48. Nothing in benilla
-        -- calls either today (this page drives the CVar directly), which is what keeps that
-        -- unreachable; the migration this file is scaffolding for is what changes it, since the
-        -- stock `OptionsFrame_Load` prefers `getglobal("Get"..func)` over `GetCVar(func)`
-        -- (`OptionsFrame.lua` l.110/135). Binding the pair is named as the next move in 2151.
+        -- **The nine CVars pfUI's `hdgraphic` drives through `ConsoleExec`, each pinned** (2163;
+        -- `ConsoleExec` itself is bound since 1948 — it writes a registered CVar or pushes a
+        -- console command the app dispatches). Registered here, so the write lands:
+        -- `frillDensity` (2151, the clutter knob) and `nearClip` (2163, the camera near plane —
+        -- `0x511bd4` re-stamps `[cam+0x38]` from its record every frame, so it was never the dead
+        -- knob our own const claimed). Registered in the REFERENCE but with no benilla reader, so
+        -- they reach nothing here and registering them would be 1203's silent pretence:
+        -- `lodDist` (`0x688524`, "100.0" — its `[0x867960]` IS read at `0x6afb1d`, the doodad LOD
+        -- swap we do not have), `footstepBias` (`0x6888b4`, "0.125" — alive at `0x68fcb6`, but a
+        -- derived constant here with nothing to honour a write), `mapObjLightLOD` (`0x6886ec`,
+        -- "0") and `SkyCloudLOD` (`0x6d1d33`, "0"). Registered there and DEAD there — one writer,
+        -- no reader image-wide, so the reference renders identically whatever they say (wow-re
+        -- `cvar/scratch/graphics-cost-cvar-census.md` §8): `DistCull` (`0x688570`) and
+        -- `texLodBias` (`0x6885e2`, whose sink `0x672640` is literally `ret 4`). And `maxLOD` is
+        -- **not a CVar at all** — zero of the 214 `CVar::Register 0x63db90` sites name it — so
+        -- pfUI's `ConsoleExec("maxLOD " .. arg)` reaches nothing in the real client either.
         OptionsFrameSliders = {
             { text = "UI Scale", func = "uiscale",
               minValue = 0.64, maxValue = 1.0, valueStep = 0.01, benillaRow = "RowUiScale" },

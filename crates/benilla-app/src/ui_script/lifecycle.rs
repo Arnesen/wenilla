@@ -418,7 +418,7 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // walk below loads may measure the text it just set — the era's own tab law is
     // `label:GetStringWidth() + 40` at OnLoad, and the addon corpus writes the same pair — and a
     // `GetStringWidth` with no measurer installed answers 0. Seated only from the per-frame pass
-    // (`extract::drive_script`, an `Update` system), a VM that is BORN and LOADED inside one
+    // (`extract::tick_script`, an `Update` system), a VM that is BORN and LOADED inside one
     // exclusive `PreUpdate` slot never sees it: that is exactly `ReloadUI()`, which mints a fresh
     // boot VM in `end_ui_session` and calls straight into here, so every `/reload` measured 0
     // through its whole load edge and only converged a frame later off whatever poll the caller

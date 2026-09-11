@@ -331,6 +331,15 @@ impl UiScript {
                     if data_ref.is_some_and(|d| d.hidden) {
                         continue;
                     }
+                    // THE NAMEPLATE GLOW IS SHOWN AND NOT DRAWN — the one region in the engine
+                    // whose paint the director replaced with something else (decision 0184: the
+                    // lit plate brightens its bar instead of wearing the additive rim). It has to
+                    // stay a real, shown, ADD-blended `Nameplate-Glow` region because
+                    // `glow:IsShown()` IS the mouseover signal every 1.12 nameplate addon reads —
+                    // so the deviation lives here, at the paint, and nowhere in the model.
+                    if data_ref.is_some_and(super::nameplate::is_unpainted_glow) {
+                        continue;
+                    }
                     let mut data = data_ref.cloned().unwrap_or_default();
                     // The single-hop draw multiply (`propagation.md`): the region's own alpha times
                     // its immediate owner's — never a product up the tree, because the owner's own

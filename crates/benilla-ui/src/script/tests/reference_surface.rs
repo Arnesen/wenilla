@@ -1673,6 +1673,153 @@ fn every_installed_region_method_lands_in_a_leaf() {
     );
 }
 
+/// **The Environment Detail pair — `SetWorldDetail 0x488dd0` / `GetWorldDetail 0x488d70`.**
+///
+/// Every assertion below is a byte read out of `WoW.exe`, not a shape chosen here; decision 2163
+/// carries the carve and `script::cvars::install_world_detail_verbs` the reasoning.
+#[test]
+fn set_world_detail_writes_the_stop_table_and_validates_like_the_reference() {
+    let s = script();
+    s.register_cvars([
+        (crate::script::CVAR_WORLD_DETAIL, "1"),
+        (crate::script::CVAR_FRILL_DENSITY, "32"),
+    ]);
+    let frill = |s: &crate::script::UiScript| s.cvar(crate::script::CVAR_FRILL_DENSITY);
+    let stop = |s: &crate::script::UiScript| s.cvar(crate::script::CVAR_WORLD_DETAIL);
+
+    // The preset table at `0x804518`, verbatim: {16, 32, 48}.
+    for (n, want) in [(0, "16"), (1, "32"), (2, "48")] {
+        s.run(&format!("SetWorldDetail({n})")).unwrap();
+        assert_eq!(
+            frill(&s).as_deref(),
+            Some(want),
+            "stop {n} writes frillDensity"
+        );
+        assert_eq!(
+            s.eval::<i64>("return GetWorldDetail()").unwrap(),
+            n,
+            "and the getter reads that stop back in the SAME tick — the host has not drained yet"
+        );
+    }
+    assert_eq!(
+        crate::script::WORLD_DETAIL_STOPS,
+        [16, 32, 48],
+        "the table is the reference's, not a transcription that can drift"
+    );
+
+    // **Truncation is toward zero** (`0x40a2b0` forces RC = chop), so a fractional stop floors
+    // toward 0 from both sides — and -0.5 is therefore stop 0, ACCEPTED.
+    s.run("SetWorldDetail(2.9)").unwrap();
+    assert_eq!(frill(&s).as_deref(), Some("48"));
+    s.run("SetWorldDetail(-0.5)").unwrap();
+    assert_eq!(
+        frill(&s).as_deref(),
+        Some("16"),
+        "-0.5 truncates to 0, which is in range: only <= -1 raises"
+    );
+
+    // **`lua_isnumber` accepts a numeric string.**
+    s.run(r#"SetWorldDetail("2")"#).unwrap();
+    assert_eq!(frill(&s).as_deref(), Some("48"));
+
+    // Both raise paths, with the reference's own strings.
+    for bad in [
+        "SetWorldDetail(3)",
+        "SetWorldDetail(-1)",
+        "SetWorldDetail(99)",
+    ] {
+        let e = s.run(bad).unwrap_err().to_string();
+        assert!(
+            e.contains("value must be in the range 0, 2"),
+            "{bad} must raise 0x8423b8 verbatim, got: {e}"
+        );
+    }
+    for bad in [
+        "SetWorldDetail()",
+        "SetWorldDetail(nil)",
+        r#"SetWorldDetail("x")"#,
+        "SetWorldDetail({})",
+    ] {
+        let e = s.run(bad).unwrap_err().to_string();
+        assert!(
+            e.contains("Usage: SetWorldDetail(value)"),
+            "{bad} must raise 0x8423e8 verbatim, got: {e}"
+        );
+    }
+
+    // Zero return values from the setter; exactly one number from the getter.
+    s.run("SetWorldDetail(1)").unwrap();
+    assert_eq!(
+        s.eval::<usize>("return select('#', SetWorldDetail(1))")
+            .unwrap(),
+        0,
+        "every `ret` in 0x488dd0 leaves eax = 0"
+    );
+    assert_eq!(
+        s.eval::<usize>("return select('#', GetWorldDetail())")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        s.eval::<String>("return type(GetWorldDetail())").unwrap(),
+        "number"
+    );
+    // The getter reads no argument — pfUI declares its replacement `function(arg)` and the stock
+    // one it chains to is called with one.
+    assert_eq!(s.eval::<i64>("return GetWorldDetail(7)").unwrap(), 1);
+    assert_eq!(stop(&s).as_deref(), Some("1"));
+}
+
+/// **pfUI's `hdgraphic` module, run against the real bindings.**
+///
+/// The module hooks both verbs and drives `frillDensity` past the panel's top stop; this is that
+/// arm executed verbatim (`modules/hdgraphic.lua` l.4-39), because "the verbs exist" and "the
+/// module works" are different claims and only the second one is the point.
+#[test]
+fn the_pfui_hdgraphic_extended_arm_runs() {
+    let s = script();
+    s.register_cvars([
+        (crate::script::CVAR_WORLD_DETAIL, "1"),
+        (crate::script::CVAR_FRILL_DENSITY, "32"),
+    ]);
+    s.run(
+        r#"
+        local HookSetWorldDetail = SetWorldDetail
+        function SetWorldDetail(arg)
+          HookSetWorldDetail((arg > 2 and 2 or arg))
+          if arg > 2 then ConsoleExec("frillDensity " .. (arg+1)*16)
+          else ConsoleExec("frillDensity 24") end
+        end
+        local HookGetWorldDetail = GetWorldDetail
+        function GetWorldDetail(arg)
+          local frill = tonumber(GetCVar("frillDensity"))
+          return frill > 48 and frill/16-1 or HookGetWorldDetail()
+        end
+    "#,
+    )
+    .unwrap();
+
+    // The hook's own precondition: `local Hook... = SetWorldDetail` captured a FUNCTION. Before
+    // 2163 both were nil and this line took the module down with it.
+    assert_eq!(
+        s.eval::<i64>("SetWorldDetail(9); return GetWorldDetail()")
+            .unwrap(),
+        9,
+        "the extended stop round-trips through frillDensity, which is the module's whole point"
+    );
+    assert_eq!(
+        s.cvar(crate::script::CVAR_FRILL_DENSITY).as_deref(),
+        Some("160"),
+        "(9+1)*16 — inside the reference's own [1, 256], which is why its range is wider than its slider"
+    );
+    // ...and the low arm falls through to the stock getter, which is where a nil hook used to bite.
+    assert_eq!(
+        s.eval::<i64>("SetWorldDetail(2); return GetWorldDetail()")
+            .unwrap(),
+        2
+    );
+}
+
 /// **The four nameplate verbs take no argument and return nothing.**
 ///
 /// `ShowNameplates 0x489450` / `HideNameplates 0x489460` / `ShowFriendNameplates 0x489470` /

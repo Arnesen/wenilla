@@ -200,7 +200,10 @@ pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorMoney, CursorPayload,
     CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
-pub use cvars::{MultisampleFormat, CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS};
+pub use cvars::{
+    MultisampleFormat, CVAR_FRILL_DENSITY, CVAR_NAMEPLATE_ENEMIES, CVAR_NAMEPLATE_FRIENDS,
+    CVAR_WORLD_DETAIL, WORLD_DETAIL_STOPS,
+};
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;

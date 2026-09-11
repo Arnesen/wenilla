@@ -12,7 +12,7 @@ use benilla_assets::coords::wow_to_bevy;
 
 use benilla_assets::{RenderConfig, WorldAssets};
 use benilla_world::terrain_stream::SPAWN_XY;
-use benilla_world::view::{WorldCamera, CAM_FAR, CAM_FOVY, CAM_NEAR};
+use benilla_world::view::{WorldCamera, CAM_FAR, CAM_FOVY, NEARCLIP_DEFAULT};
 
 use super::{
     CameraControl, CameraProbe, FlyCam, MoveSpeed, Player, PlayerCapsule, CAM_COLLISION_RADIUS,
@@ -104,7 +104,10 @@ pub(super) fn setup_player(
         msaa.level(),
         Projection::from(PerspectiveProjection {
             far: cam_far,
-            near: CAM_NEAR,
+            // The registered default, and only for frame zero: `view::stamp_near_clip` re-stamps
+            // this from the live `nearclip` every frame, exactly as `0x511bc0` overwrites whatever
+            // the reference's camera ctor left in `[cam+0x38]` (2163).
+            near: NEARCLIP_DEFAULT,
             fov: CAM_FOVY,
             ..default()
         }),

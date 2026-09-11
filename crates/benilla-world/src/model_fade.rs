@@ -529,7 +529,9 @@ pub const SELF_FADE_HIDE: f32 = 0.00278;
 /// distance, `α = (1 − cos(π·D/F))/2` over `D = dist − nearclip ∈ (SELF_FADE_HIDE, window]`. Below
 /// [`SELF_FADE_HIDE`] above the near clip the model hard-hides (`0.0`); at/after `window` it's opaque
 /// (`1.0`). `nearclip` is the camera's near-plane distance — the fade completes exactly as the near
-/// plane would begin to slice the model, which is why the two are coupled (see `crate::view::CAM_NEAR`).
+/// plane would begin to slice the model, which is why the two are coupled — the caller passes the
+/// LIVE `nearclip` ([`crate::view::ViewDistance::nearclip`]), not a constant, so a player who moves
+/// the near plane moves the fade with it (2163).
 ///
 /// Unlike [`doodad_fade_alpha`] (horizontal *world* distance, size-bucketed) this is the *camera*
 /// distance to a single tracked object; both feed the same per-instance render-alpha channel.
