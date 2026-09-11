@@ -82,8 +82,10 @@ fn bar_color(s: &UiScript, frame: &str) -> (f64, f64, f64) {
     .unwrap()
 }
 
-fn caption(s: &UiScript, frame: &str) -> String {
-    s.eval::<String>(&format!("return {frame}Text:GetText()"))
+/// `Option`, not `String`: a blank caption reads back **nil**, because `FontString:GetText
+/// 0x79d690` substitutes nil for an empty string (decision 2110).
+fn caption(s: &UiScript, frame: &str) -> Option<String> {
+    s.eval::<Option<String>>(&format!("return {frame}Text:GetText()"))
         .unwrap()
 }
 
@@ -126,7 +128,7 @@ fn breath_takes_the_first_bar_in_the_reference_blue() {
 
     assert!(shown(&s, "MirrorTimer1"));
     assert!(!shown(&s, "MirrorTimer2"), "only one timer is running");
-    assert_eq!(caption(&s, "MirrorTimer1"), "Breath");
+    assert_eq!(caption(&s, "MirrorTimer1").as_deref(), Some("Breath"));
     // Milliseconds on the wire, seconds in the bar — the reference's `/1000` on both.
     assert_eq!(bar_value(&s, "MirrorTimer1"), 45.0);
     assert_eq!(bar_max(&s, "MirrorTimer1"), 60.0);
@@ -147,7 +149,7 @@ fn fatigue_is_the_reference_yellow_under_its_own_caption() {
     start(&mut s, "EXHAUSTION", 60_000, 60_000, -1, "Fatigue");
 
     assert!(shown(&s, "MirrorTimer1"));
-    assert_eq!(caption(&s, "MirrorTimer1"), "Fatigue");
+    assert_eq!(caption(&s, "MirrorTimer1").as_deref(), Some("Fatigue"));
     let (r, g, b) = bar_color(&s, "MirrorTimer1");
     assert!(
         (r - 1.0).abs() < 1e-6 && (g - 0.9).abs() < 1e-6 && (b - 0.0).abs() < 1e-6,
@@ -253,8 +255,8 @@ fn two_timers_stack_and_restate_in_place() {
 
     assert!(shown(&s, "MirrorTimer1") && shown(&s, "MirrorTimer2"));
     assert!(!shown(&s, "MirrorTimer3"));
-    assert_eq!(caption(&s, "MirrorTimer1"), "Fatigue");
-    assert_eq!(caption(&s, "MirrorTimer2"), "Breath");
+    assert_eq!(caption(&s, "MirrorTimer1").as_deref(), Some("Fatigue"));
+    assert_eq!(caption(&s, "MirrorTimer2").as_deref(), Some("Breath"));
 
     // The server re-sends breath on every change; it must reuse frame 2, not take frame 3.
     start(&mut s, "BREATH", 30_000, 60_000, -1, "Breath");
@@ -283,8 +285,8 @@ fn stop_hides_that_timer_and_frees_its_frame() {
     assert!(shown(&s, "MirrorTimer1"));
     assert_eq!(
         caption(&s, "MirrorTimer1"),
-        "",
-        "no FEIGNDEATH_LABEL exists in the 1.12 GlobalStrings"
+        None,
+        "no FEIGNDEATH_LABEL exists in the 1.12 GlobalStrings, and a blank caption reads nil"
     );
 }
 

@@ -2342,7 +2342,10 @@ mod tests {
 
     /// The written bytes are the recorded grammar (decision 1128's, itself byte-verified against
     /// `0x7043f0`/`0x704480`): `NAME = value`, bracketed keys, TAB indent, a trailing comma on
-    /// every entry, and the file split by scope.
+    /// every entry, and the file split by scope. `["t"]`'s `[1] = 1,` is the reference's shape for
+    /// a list too — its writer emits a bracketed key for every table shape and never a bare
+    /// positional entry (wow-re `system/ui/scratch/lua-table-storage-and-next-order.md` §Q5) —
+    /// and it reloads in index order because of what 1.12's *parser* does with it (decision 2111).
     ///
     /// Asserted as bytes rather than by re-reading, because "it round-trips through our own
     /// loader" is exactly the check that passes for a private format. The reference's own client

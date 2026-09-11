@@ -448,11 +448,11 @@ static void recfield (LexState *ls, struct ConsControl *cc) {
   int rkkey;
   if (ls->t.token == TK_NAME) {
     luaY_checklimit(fs, cc->nh, MAX_INT, "items in a constructor");
+    cc->nh++;  /* benilla: 5.0's placement -- `[expr] = v` credits NEITHER size hint */
     checkname(ls, &key);
   }
   else  /* ls->t.token == '[' */
     yindex(ls, &key);
-  cc->nh++;
   checknext(ls, '=');
   rkkey = luaK_exp2RK(fs, &key);
   expr(ls, &val);

@@ -1233,3 +1233,103 @@ fn set_portrait_texture_folds_the_token_to_lowercase() {
     assert_eq!(bound.as_deref(), Some("npc"));
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+/// **`FontString:GetText` substitutes nil for an EMPTY string, and that substitution is the
+/// getter's own** — `0x79d690` reads the cell, and eleven bytes before the pushstring it does a
+/// FIRST-BYTE test and zeroes the pointer on `'\0'`:
+///
+/// ```text
+/// 79d735 test eax,eax / je 0x79d740     ; NULL      -> substitute
+/// 79d73b cmp byte ptr [eax],0x0         ; the first-byte test
+/// 79d73e jne 0x79d742                   ; non-empty -> keep
+/// 79d740 xor eax,eax                    ; EMPTY     -> NULL
+/// 79d746 call 0x6f3890                  ; NULL -> pushnil
+/// ```
+///
+/// So it cannot return `""`, whatever the cell holds — and the cell really does hold non-NULL
+/// empty strings, because `SetText 0x771d80` never writes NULL to `+0xf0` on any leg: NULL and
+/// `""` share one leg that truncates the buffer in place. Per binding, not per family:
+/// `Button:GetText 0x780e10` carries the same substitution (`0x780ec5`), `EditBox:GetText
+/// 0x7985c0` carries none (wow-re `fontstring-text-cell-and-gettext-contract.md`, a §5 round;
+/// decision 2110).
+///
+/// The director's shape (Cartographer 2.02, the world map's hover label): the stock
+/// `WorldMapFrameAreaDescription` is blanked with `SetText("")` by `WorldMapPOI_OnEnter`/`_OnLeave`
+/// on **every** POI hover, and Cartographer's ZoneInfo reads
+/// `if WorldMapFrameAreaDescription:GetText() then` as "this POI has a status line, so put the
+/// zone's level range there instead of on the label". Answering `""` made that true forever after
+/// the first POI touch — the name lost its faction colour, the range moved to the description's own
+/// line beneath it, and nothing ever cleared it again.
+#[test]
+fn an_empty_fontstring_reads_back_nil_and_an_edit_box_does_not() {
+    let s = script();
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "TextCell")
+        fresh = f:CreateFontString(nil, "OVERLAY")
+        held  = f:CreateFontString(nil, "OVERLAY")
+    "#,
+    )
+    .unwrap();
+    let text_of = |s: &UiScript, which: &str| {
+        s.eval::<Option<String>>(&format!("return {which}:GetText()"))
+            .unwrap()
+    };
+
+    // Never written, and every shape of an empty write, all nil.
+    assert_eq!(text_of(&s, "fresh"), None);
+    for write in [
+        r#"fresh:SetText("")"#,
+        r#"fresh:SetText(nil)"#,
+        r#"fresh:SetFormattedText("%s", "")"#,
+    ] {
+        s.run(write).unwrap();
+        assert_eq!(text_of(&s, "fresh"), None, "after `{write}`");
+    }
+
+    // A string that HAS held text still reads nil once blanked — the substitution is the getter's,
+    // so it does not matter that the cell keeps a (truncated) buffer.
+    s.run(r#"held:SetText("In Conflict")"#).unwrap();
+    assert_eq!(text_of(&s, "held").as_deref(), Some("In Conflict"));
+    s.run(r#"held:SetText("")"#).unwrap();
+    assert_eq!(
+        text_of(&s, "held"),
+        None,
+        "a blanked FontString reads back nil, not an empty string"
+    );
+    s.run(r#"held:SetText("back"); held:SetText(nil)"#).unwrap();
+    assert_eq!(text_of(&s, "held"), None);
+
+    // Button:GetText carries the SAME substitution; Button:SetText(nil) is its own no-op guard.
+    s.run(
+        r#"
+        local b = CreateFrame("Button", "TextCellButton")
+        b:SetText("Accept")
+        b:SetText(nil)
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        text_of(&s, "TextCellButton").as_deref(),
+        Some("Accept"),
+        "a nil never reaches the button's label (`0x778dcc`)"
+    );
+    s.run(r#"TextCellButton:SetText("")"#).unwrap();
+    assert_eq!(text_of(&s, "TextCellButton"), None, "an empty label is nil");
+
+    // And the EditBox is the counter-example that keeps this from being hoisted: stock
+    // `MailFrame.lua` compares `GetText() == ""` and calls `strlen(GetText())` on one.
+    s.run(
+        r#"
+        local e = CreateFrame("EditBox", "TextCellEdit")
+        e:SetText("")
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        text_of(&s, "TextCellEdit").as_deref(),
+        Some(""),
+        "EditBox:GetText 0x7985c0 reads [edit+0x32c] straight through — no substitution"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

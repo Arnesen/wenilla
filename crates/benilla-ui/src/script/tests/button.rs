@@ -1073,3 +1073,96 @@ fn a_lazily_made_label_is_anchored_by_the_normal_fonts_justify() {
     s.run("left:SetTextFontObject(ProbeFontRight)").unwrap();
     assert_eq!(point(&s, "left"), ("LEFT".into(), "LEFT".into(), 0.0, 0.0));
 }
+
+/// **A label that set its own face keeps it — the severance mask covers every axis, not three of
+/// six** (decision 2112).
+///
+/// `font_explicit` is the client's explicitly-set mask (`FONTINSTANCE+0x38`): an axis a widget
+/// writes for *itself* severs inheritance from the font instance it reads, and is never restored
+/// (wow-re `font-object-lua-surface.md`; the `button_font` block in `script::extract` cites it by
+/// name). `font::repaint` honours it on all seven axes. The extract's per-state re-point honoured
+/// it on shadow, colour and both justifies — and not on **face, height or outline**: the face and
+/// height read `fo.x.or(data.x)`, which makes the object outrank an explicit `SetFont`, and the
+/// outline was written unconditionally. A `<ButtonText>` that called
+/// `SetFont(path, h, "OUTLINE")` for itself therefore had all three silently put back from the
+/// button's font object on the very next extract — every frame, so no Lua could win the race.
+#[test]
+fn a_button_labels_own_setfont_survives_the_state_font_repoint() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.register_font_object(
+        "TemplateFont",
+        FontObject {
+            font: Some("Fonts\\FRIZQT__.TTF".into()),
+            height: Some(12.0),
+            color: Some([1.0, 0.82, 0.0, 1.0]),
+            outline: Outline::None,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        b = CreateFrame("Button", "SkinnedBtn")
+        b:SetPoint("CENTER", 0, 0); b:SetSize(100, 20)
+        b:SetText("Label")
+        b:SetTextFontObject("TemplateFont")
+        b:GetFontString():SetFont("Interface\\Addons\\Skin\\Fonts\\porky.ttf", 18, "OUTLINE")
+    "#,
+    )
+    .unwrap();
+    let painted = |s: &mut crate::script::UiScript| {
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                QuadContent::Text {
+                    text: Some(t),
+                    ref font,
+                    font_height,
+                    outline,
+                    ..
+                } if t == "Label" => Some((font.clone(), font_height, outline)),
+                _ => None,
+            })
+            .expect("label text quad")
+    };
+    assert_eq!(
+        painted(&mut s),
+        (
+            Some("Interface\\Addons\\Skin\\Fonts\\porky.ttf".to_string()),
+            Some(18.0),
+            Outline::Normal
+        ),
+        "the label's own SetFont severs face, height AND outline from the state font object"
+    );
+    // …and it survives a state change, which is what re-runs the re-point.
+    s.run("b:Disable()").unwrap();
+    assert_eq!(
+        painted(&mut s),
+        (
+            Some("Interface\\Addons\\Skin\\Fonts\\porky.ttf".to_string()),
+            Some(18.0),
+            Outline::Normal
+        ),
+        "…and a disable re-points the instance without restoring what the label severed"
+    );
+    // The axes the label did NOT set still follow the object: the colour is the template's gold.
+    s.resolve();
+    let color = s
+        .extract()
+        .into_iter()
+        .find_map(|q| match q.content {
+            QuadContent::Text {
+                text: Some(t),
+                color,
+                ..
+            } if t == "Label" => Some(color),
+            _ => None,
+        })
+        .expect("label text quad");
+    assert_eq!(
+        color,
+        Some([1.0, 0.82, 0.0, 1.0]),
+        "an axis the label never set still inherits — severance is per-axis"
+    );
+}

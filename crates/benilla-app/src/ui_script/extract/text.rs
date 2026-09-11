@@ -200,13 +200,24 @@ pub(super) fn emit(
             let ink = crate::ui_text::measure_text(&mut atlas.lock(), draw_text, None, spec).0;
             format!(" caret={:.1} ink={ink:.1}", ui.caret_x * host.scale)
         });
+        // **The FACE and the FLAGS are on this line for a reason.** It used to print the
+        // requested height and nothing else about the font, so the one question a "the text
+        // looks wrong" report actually asks — *which face, at what size, with what outline, did
+        // this quad draw* — could not be answered from the probe at all; it took a live
+        // `SetFont` probe, a control plate and a screenshot to establish for MSBT what these
+        // four fields say directly (decisions 2103, 2112). `px` is the DRAWN logical height
+        // (`drawn_px`: the requested one through the cap, the 768 seam and the frame scale),
+        // which is the number that disagrees with `h` whenever a size looks wrong.
         info!(
-            "text probe: [{:.0},{:.0} {:.0}x{:.0}] h={:?}{} {:?}",
+            "text probe: [{:.0},{:.0} {:.0}x{:.0}] h={:?} px={:?} flags={:?} face={:?}{} {:?}",
             draw_rect.min.x,
             draw_rect.min.y,
             host.rect.width(),
             host.rect.height(),
             style.font_height,
+            spec.height,
+            style.outline.as_str(),
+            spec.path.unwrap_or("<none — the fallback face>"),
             ebox_geom.unwrap_or_default(),
             &draw_text[..draw_text.len().min(60)]
         );

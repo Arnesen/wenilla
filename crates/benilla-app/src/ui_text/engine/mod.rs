@@ -1188,6 +1188,66 @@ mod ppem_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **An addon-shipped face wears an OUTLINE like any other** — the two halves of the MSBT
+    /// look, together, which nothing pinned (decision 2112). 2103 pins that the face LOADS;
+    /// [`super::outline`]'s own tests pin the composite recipe on a synthetic bitmap; the cell
+    /// arithmetic was only ever exercised on the fallback face. This runs a face read out of the
+    /// AddOns root through the outline path and asserts the composite cell it produces: the same
+    /// glyph, one cell per radius, each grown by `pad` on every side with its bearings moved out
+    /// to match, and the plain cell untouched.
+    #[test]
+    fn an_addon_shipped_face_rasterizes_an_outlined_cell() {
+        let Some(mut e) = engine_or_skip() else {
+            return;
+        };
+        let bytes = {
+            let source = e.source.as_ref().expect("the test engine carries a chain");
+            let chain = source.chain.lock_recover();
+            chain.read(TEST_FACES[2]).expect("MORPHEUS is in the chain")
+        };
+        let root =
+            std::env::temp_dir().join(format!("benilla-addon-outline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let fonts = root.join("MikScrollingBattleText").join("Fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        std::fs::write(fonts.join("porky.ttf"), &bytes).unwrap();
+        e.source.as_mut().unwrap().loose_root = Some(root.clone());
+
+        let face = e.face_for(Some(
+            "Interface\\Addons\\MikScrollingBattleText\\Fonts\\porky.ttf",
+        ));
+        assert_ne!(face, e.face_for(None), "the addon's own face, not Friz");
+        // MSBT's default master size, and its default flag — `SetFont(porky, 18, "OUTLINE")`
+        // resolves to radius 1 (`super::outline::radius_of`).
+        let ppem = e.ppem(18.0);
+        e.ensure_str(face, ppem, 0, "6");
+        e.ensure_str(face, ppem, 1, "6");
+        let g = e.char_cell(face, ppem, '6').expect("shaped").glyphs[0].glyph_id;
+        let plain = e.cell(face, ppem, 0, g).expect("a plain cell");
+        let ringed = e.cell(face, ppem, 1, g).expect("an outlined cell");
+        // `dpi` is 1 here, so NORMAL is one dilation pass: `pad` = 1 texel every side.
+        assert_eq!(
+            (ringed.px_w, ringed.px_h),
+            (plain.px_w + 2.0, plain.px_h + 2.0),
+            "the ring grows the cell by pad on every side"
+        );
+        assert_eq!(
+            (ringed.bearing_x, ringed.bearing_top),
+            (plain.bearing_x - 1.0, plain.bearing_top + 1.0),
+            "…and the bearings move out with it, so the ink sits where it did"
+        );
+        // THICK is the second pass, and is a THIRD cell — not a re-use of either.
+        e.ensure_str(face, ppem, 2, "6");
+        let thick = e.cell(face, ppem, 2, g).expect("a THICK cell");
+        assert_eq!(
+            (thick.px_w, thick.px_h),
+            (plain.px_w + 4.0, plain.px_h + 4.0)
+        );
+        assert_ne!(thick.uv, ringed.uv, "each radius packs its own cell");
+        assert_ne!(plain.uv, ringed.uv);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A path that resolves nowhere falls back to Friz and is remembered, so the read and the WARN
     /// happen once rather than once per measure.
     #[test]

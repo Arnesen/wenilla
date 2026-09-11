@@ -647,7 +647,12 @@ fn an_auction_invoice_renders_as_a_receipt() {
         "the buy mode rides the item line here, not the purchaser line"
     );
     assert_eq!(text(&s, "OpenMailInvoicePurchaser"), "FROM: Onewarrior");
-    assert_eq!(text(&s, "OpenMailInvoiceBuyMode"), "");
+    assert_eq!(
+        text(&s, "OpenMailInvoiceBuyMode"),
+        "nil",
+        "the buy-mode line is blank on a bid win, and a blank FontString reads back nil — \
+         `FontString:GetText 0x79d690` substitutes (decision 2110); this helper `tostring`s it"
+    );
     assert_eq!(money(&s, "OpenMailTransactionAmountMoneyFrame"), "9000");
     for gone in [
         "OpenMailInvoiceSalePrice",

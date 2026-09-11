@@ -375,3 +375,66 @@ fn slider_onload_range_does_not_run_an_unarmed_onvaluechanged() {
     )
     .unwrap();
 }
+
+#[test]
+fn a_thumb_with_no_authored_size_takes_its_arts_texel_span_and_still_drags() {
+    // Dewdrop-2.0's `OpenSlider` (Cartographer 2.02 → Look 'n' Feel → Overlay transparency), in
+    // its own construction order — the shape that has no `<ThumbTexture><Size>` anywhere:
+    // `SetThumbTexture(path)` from Lua and nothing else. The reference asks the thumb for its own
+    // `GetWidth`/`GetHeight` (`0x789ba0` → `[thumb_vt+0x1c]/[+0x20]` = `CSimpleTexture::0x770720`
+    // /`0x770790`), which falls back to the art's native texel span — 32×32 for
+    // `UI-SliderBar-Button-Vertical` — so the thumb is a 32-unit knob on a 128-unit track with
+    // 96 units of travel. Ours read the *authored* size only and, finding none, sized the thumb to
+    // the whole track: zero travel, a thumb smeared over the bar, and a drag that cannot move.
+    let mut s = script();
+    s.set_screen_size(1024.0, 768.0);
+    s.set_texture_size_probe(Box::new(|p| {
+        p.contains("UI-SliderBar-Button-Vertical")
+            .then_some((32, 32))
+    }));
+    s.run(
+        r#"
+        -- The popout is a parentless FULLSCREEN_DIALOG frame that takes the mouse itself, with
+        -- the slider one frame level above it — so this also pins that the press resolves to the
+        -- Slider and not to the mouse-enabled host sitting under it.
+        host = CreateFrame("Frame", "DdHost", nil)
+        host:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)
+        host:SetSize(80, 170)
+        host:SetFrameStrata("FULLSCREEN_DIALOG")
+        host:EnableMouse(true)
+        bar = CreateFrame("Slider", "DdSlider", host)
+        bar:SetFrameLevel(host:GetFrameLevel() + 1)
+        bar:SetOrientation("VERTICAL")
+        bar:SetMinMaxValues(0, 1)
+        bar:SetValueStep(0.01)
+        bar:SetValue(0.5)
+        bar:SetWidth(16)
+        bar:SetHeight(128)
+        bar:SetPoint("LEFT", host, "LEFT", 15, 0)
+        bar:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Vertical")
+        -- Dewdrop then seats the open value: overlayAlpha is 100 % of a 25 %..100 % range, and
+        -- the popout inverts it (`1 - (value-min)/(max-min)`), so the engine value is 0 = the
+        -- TOP of a vertical track.
+        bar:SetValue(0)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    // host y ∈ [100, 270] ⇒ the bar is centred on y=185, 128 tall ⇒ track y ∈ [121, 249];
+    // x: host left 100 + 15 ⇒ [115, 131], so the thumb centres on x=123.
+    assert_eq!(
+        thumb_rect(&s.extract(), "UI-SliderBar-Button-Vertical"),
+        (107.0, 139.0, 217.0, 249.0),
+        "a sizeless thumb is its art's 32×32, flush at the track top — not the whole 16×128 track"
+    );
+
+    // And it drags: grab the thumb at its centre and pull to the bottom of the track.
+    s.mouse_button(123.0, 233.0, "LeftButton", true);
+    s.mouse_move(123.0, 137.0);
+    let v: f32 = s.eval("return DdSlider:GetValue()").unwrap();
+    assert!(
+        (v - 1.0).abs() < 1e-3,
+        "travel is 128−32 = 96, so a 96-unit pull runs the value min→max (got {v})"
+    );
+}

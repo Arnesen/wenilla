@@ -136,10 +136,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
-            let changed = !d.anchors.is_empty();
+            // Names its node, the frame twin's rule and for the frame twin's reason (decision
+            // 2114): clearing every anchor is a retarget onto an EMPTY target list, so the cached
+            // graph's edges are unlinked rather than the whole graph re-derived.
+            let old: Option<Vec<u32>> =
+                (!d.anchors.is_empty()).then(|| d.anchors.iter().map(|a| a.relative_to).collect());
             d.anchors.clear();
-            if changed {
-                model.touch_layout();
+            if let Some(old) = old {
+                model.touch_layout_retarget_region(rh, &old, &[]);
             }
             Ok(())
         })?,

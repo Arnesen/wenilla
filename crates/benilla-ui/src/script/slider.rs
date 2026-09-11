@@ -282,16 +282,14 @@ fn num_f32(v: &Value) -> f32 {
 /// track and centered on the cross-axis. The thumb stays **inset** within the track (travel =
 /// trackLen − thumbLen), the way WoW scrollbar knobs visibly do. VERTICAL runs y-up-inverted —
 /// `fraction` 0 (value=min) sits the thumb flush at the **top** (a scrollbar at 0 is scrolled to the
-/// top), `fraction` 1 flush at the bottom. A thumb with no explicit size fills the slider (zero
-/// travel). This is the single geometry source shared by `extract` (render) and [`begin_drag`]
-/// (hit-test), so render and input never disagree. Returns a [`Rect`] as `(bottom, left, top, right)`.
-pub(super) fn thumb_rect(
-    r: Rect,
-    thumb_size: Option<(f32, f32)>,
-    vertical: bool,
-    fraction: f32,
-) -> Rect {
-    let (tw, th) = thumb_size.unwrap_or((r.width(), r.height()));
+/// top), `fraction` 1 flush at the bottom. This is the single geometry source shared by `extract`
+/// (render) and [`begin_drag`] (hit-test), so render and input never disagree. Returns a [`Rect`] as
+/// `(bottom, left, top, right)`.
+///
+/// `thumb_size` is [`thumb_extent`]'s — the thumb region's OWN size getters, never its authored
+/// `<Size>` alone.
+pub(super) fn thumb_rect(r: Rect, thumb_size: (f32, f32), vertical: bool, fraction: f32) -> Rect {
+    let (tw, th) = thumb_size;
     if vertical {
         let travel = (r.height() - th).max(0.0);
         let top = r.top - fraction * travel; // f=0 → track top, f=1 → track bottom
@@ -303,6 +301,26 @@ pub(super) fn thumb_rect(
         let cy = (r.bottom + r.top) * 0.5;
         Rect::new(cy - th * 0.5, left, cy + th * 0.5, left + tw)
     }
+}
+
+/// The thumb's extent along both axes — **the thumb region's own `GetWidth`/`GetHeight`**, which
+/// is what the client asks for and is not the same thing as its authored `<Size>`.
+///
+/// `CSimpleSlider`'s pixel→value law reads the thumb through its geometry vtable
+/// (`0x789ba0`: `ff 50 1c call [eax+0x1c]` for the horizontal branch, `+0x20` for the vertical), and
+/// on a `CSimpleTexture` those slots are `0x770720`/`0x770790` — the **native-texel fallback**:
+/// authored span when it is non-zero on that axis, else the art's own texel span through the same
+/// `<AbsDimension>` converter, else `0.0` when there is no art at all (wow-re
+/// `region-size-fallback.md` §2, VERIFIED; ours is [`super::region::virtual_span`], decision 1349).
+///
+/// Reading `RegionData::size` instead is what broke every Lua-built slider: `SetThumbTexture(path)`
+/// authors no size, all four stock `<ThumbTexture>`s declare one, and the old fallback — *the thumb
+/// fills the track* — is not a client behaviour at all. It smeared the knob over the whole bar and
+/// left `trackLen − thumbLen == 0`, i.e. a slider that cannot move (Dewdrop-2.0's popout, B-report).
+/// A thumb with **no region at all** is `None`: `0x789ba0` gates the value math on `+0x328` being
+/// non-null, so a thumbless slider takes the press and the capture but never warps.
+fn thumb_extent(model: &Model, thumb: Option<crate::widget::RegionHandle>) -> Option<(f32, f32)> {
+    Some(super::region::virtual_span(model, thumb?))
 }
 
 /// The in-flight thumb drag (decision 0250 §5): the slider being dragged + the grab offset
@@ -340,22 +358,28 @@ pub(super) fn begin_drag(
     if !enabled {
         return None;
     }
-    let size = thumb
-        .and_then(|rh| model.region_data.get(&rh))
-        .and_then(|d| d.size);
+    // No thumb region → `0x789ba0`'s `+0x328` gate: the press still captures (the dispatcher's
+    // `mov [ebx+0x80],esi` is unconditional), the value never moves.
+    let Some(size) = thumb_extent(model, thumb) else {
+        model.slider_drag = Some(SliderDrag {
+            slider: h,
+            grab_offset: 0.0,
+        });
+        return None;
+    };
     let trect = thumb_rect(r, size, vertical, fraction);
     let on_thumb = point_in_rect(trect, x, y);
     // Everything below is stated as distance from the TRACK'S LEADING EDGE — the end the thumb
     // sits at when the value is `min`. Vertical tracks run downward from `r.top` in this y-up
     // arena, so that distance is `top − y`; horizontal ones run rightward from `r.left`.
-    let (cursor, thumb_lead, thumb_extent) = if vertical {
+    let (cursor, thumb_lead, thumb_len) = if vertical {
         (r.top - y, r.top - trect.top, trect.top - trect.bottom)
     } else {
         (x - r.left, trect.left - r.left, trect.right - trect.left)
     };
     model.slider_drag = Some(SliderDrag {
         slider: h,
-        grab_offset: slider_grab(cursor, thumb_lead, thumb_extent),
+        grab_offset: slider_grab(cursor, thumb_lead, thumb_len),
     });
     if on_thumb {
         return None; // no value change from the grab itself
@@ -378,18 +402,15 @@ pub(super) fn drag_move(model: &mut Model, x: f32, y: f32) -> Option<(u32, f32)>
         Some(KindState::Slider(s)) => (s.min, s.max, s.vertical, s.thumb),
         _ => return None, // slider destroyed mid-drag
     };
-    let (tw, th) = thumb
-        .and_then(|rh| model.region_data.get(&rh))
-        .and_then(|d| d.size)
-        .unwrap_or((r.width(), r.height()));
+    let (tw, th) = thumb_extent(model, thumb)?;
     // The same leading-edge frame [`begin_drag`] stored the grab in.
-    let (cursor, track_extent, thumb_extent) = if vertical {
+    let (cursor, track_extent, thumb_len) = if vertical {
         (r.top - y, r.height(), th)
     } else {
         (x - r.left, r.width(), tw)
     };
     // `None` = nothing to scroll (a thumb as long as its track).
-    let fraction = slider_fraction(cursor, grab_offset, track_extent, thumb_extent)?;
+    let fraction = slider_fraction(cursor, grab_offset, track_extent, thumb_len)?;
     let value = min + fraction * (max - min);
     let changed = match model.arena.frame_mut(slider).map(|f| &mut f.kind_state) {
         Some(KindState::Slider(s)) => s.store_value(value),

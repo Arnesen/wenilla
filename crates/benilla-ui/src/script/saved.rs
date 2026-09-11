@@ -146,9 +146,18 @@ fn quote(s: &str) -> String {
 }
 
 /// A table constructor: `{\n<tabs>[key] = value,\n<tabs-1>}`. Keys are always bracketed (the
-/// reference's shape, and it sidesteps every reserved-word and non-identifier question); entries
-/// are **sorted** — integer keys ascending, then strings alphabetically — so the file is stable
-/// across runs instead of following Lua's hash order.
+/// reference's shape — its writer emits `[key] = value` for **every** table shape and never a bare
+/// positional entry, byte-verified in wow-re `system/ui/scratch/lua-table-storage-and-next-order.md`
+/// §Q5 — and it sidesteps every reserved-word and non-identifier question); entries are **sorted**
+/// — integer keys ascending, then strings alphabetically — so the file is stable across runs
+/// instead of following Lua's hash order.
+///
+/// **A list written this way still reloads as a list**, and that is a property of the *parser*, not
+/// of this emitter: 1.12's `recfield` gives a `[expr] = v` field neither size hint, so the table is
+/// born on the dummy node, the first store rehashes, and the dense integer keys land in an array
+/// part that `next` walks ascending. Our vendored parser was restored to that placement in decision
+/// 2111 — before it, this exact file shape came back keyed 1..n in the *hash* part and Bagnon's
+/// keyring drew first.
 fn table(t: &Table, depth: usize, seen: &mut HashSet<*const c_void>) -> Option<String> {
     if depth > MAX_DEPTH || !seen.insert(t.to_pointer()) {
         return None;
@@ -210,6 +219,50 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::script::UiScript;
+
+    /// **A saved LIST comes back a list** — Bagnon's inventory grid, at 1:1 scale, and the
+    /// round-trip half of decision 2111 (the dialect half is `lua50`'s own tests).
+    ///
+    /// `Bagnon_Core` keeps its frame's bag order in a saved table, sorts it so the keyring
+    /// (`KEYRING_CONTAINER` = -2) lands last, and then lays the grid out by walking it with
+    /// **`pairs`** (`BagnonFrame_Generate`'s `for _, bagID in pairs(BagnonSets[frameName].bags)`).
+    /// Session one has no file: the table is the literal `{-2,0,1,2,3,4}`, an array table, and
+    /// `pairs` walks it 1..6 — keyring last, as the reference shows it. Session two reads the
+    /// serializer's `[k] = v` form back, and before 2111 that came back keyed 1..6 in the **hash**
+    /// part, walked in slot order, with key 6 — the keyring — **first**, ahead of the backpack.
+    /// That is the director's report; the writer is unchanged and the parser is what was wrong.
+    #[test]
+    fn a_saved_list_still_walks_in_index_order_after_a_restart() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            BAGS = { -2, 0, 1, 2, 3, 4 }
+            table.sort(BAGS, function(a, b)
+                if a == -2 then return false
+                elseif b == -2 then return true
+                else return a < b end
+            end)
+            RegisterForSave("BAGS")
+        "#,
+        )
+        .unwrap();
+        let walk = |vm: &UiScript| {
+            vm.eval::<String>(
+                "local out = '' for _, v in pairs(BAGS) do out = out .. v .. ',' end return out",
+            )
+            .unwrap()
+        };
+        assert_eq!(walk(&s), "0,1,2,3,4,-2,", "the live table, before any save");
+
+        let text = s.saved_variables_text();
+        let fresh = UiScript::new().unwrap();
+        fresh.run(&text).unwrap();
+        assert_eq!(
+            walk(&fresh),
+            "0,1,2,3,4,-2,",
+            "the restart must walk the same order the live session did; wrote:\n{text}"
+        );
+    }
 
     /// The round trip that is the whole point: what the writer emits, the loader's own chunk
     /// restores — through a fresh VM, exactly as a restart does.

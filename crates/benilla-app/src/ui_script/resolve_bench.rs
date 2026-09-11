@@ -726,3 +726,84 @@ fn an_action_bar_hover_sweep_costs_no_graph_derivation() {
          its node like any other (decision 1630, extending 1625)."
     );
 }
+
+/// **The bag-addon hover law** (decision 2114, ledger B06's third idiom): a hover that owns the
+/// tooltip WITH an anchor and then re-points it by hand must cost **zero** derivations.
+///
+/// The guard above drives `SetOwner(owner, "ANCHOR_NONE")` + `ClearAllPoints()`, and it has always
+/// passed — because ANCHOR_NONE already dropped the anchors, so the `ClearAllPoints()` after it
+/// finds an empty list and touches nothing at all. It is the third idiom that was never driven:
+///
+/// ```lua
+/// -- Bagnon_Core/core/Item.lua -> Bagnon_Core/core/Utility.lua
+/// ContainerFrameItemButton_OnEnter(item)      -- SetOwner(item, "ANCHOR_RIGHT"): sets an anchor
+/// Bagnon_AnchorTooltip(item)                  -- ClearAllPoints(), then GetLeft(), then SetPoint
+/// ```
+///
+/// `ClearAllPoints()` with anchors present took the conservative touch, and the `GetLeft()` on the
+/// next line settles the layout right there — so the whole graph was re-derived INSIDE the handler,
+/// once per bag slot the cursor crossed. Measured live on `Probetwo` with the director's AddOns
+/// folder, `WOW_UI_HANDLERS=8` over a 60 Hz sweep of twelve `BagnonItem*` buttons: `OnEnter` self
+/// 1.75 ms/frame and `[layout-derive]` naming this site in three of its four samples, against
+/// 0.43 ms/frame of total `tick` for the same sweep over stock `ContainerFrame1Item*` with no
+/// addons. `derives/frame` read 0.88 with Bagnon and 0.00 without.
+#[test]
+fn a_bag_addon_hover_sweep_costs_no_graph_derivation() {
+    let mut s = settled_default_ui();
+    s.run(
+        r#"
+        for i = 1, 12 do
+            local b = CreateFrame("Button", "BagOwner" .. i)
+            b:SetPoint("CENTER", 0, 0); b:SetSize(37, 37)
+        end
+        bag_n = 0
+        function bag_hover()
+            bag_n = bag_n + 1
+            local item = getglobal("BagOwner" .. (math.mod(bag_n, 12) + 1))
+            -- ContainerFrameItemButton_OnEnter's arm: an ANCHORED SetOwner.
+            GameTooltip:SetOwner(item, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("Item " .. bag_n, 1, 1, 1)
+            if math.mod(bag_n, 2) == 0 then
+                GameTooltip:AddLine("Use: restores health over 21 sec.", 0, 1, 0, 1)
+            else
+                GameTooltip:AddLine("Main Hand", 1, 1, 1)
+            end
+            GameTooltip:Show()
+            -- …then Bagnon_AnchorTooltip: drop the anchors it just set, ASK A RESOLVED EDGE
+            -- (which settles the layout on the spot), and re-point by hand.
+            GameTooltip:ClearAllPoints()
+            local left = item:GetLeft() or 0
+            if left < (UIParent:GetRight() / 2) then
+                GameTooltip:SetPoint("TOPLEFT", item, "BOTTOMRIGHT")
+            else
+                GameTooltip:SetPoint("TOPRIGHT", item, "BOTTOMLEFT")
+            end
+        end
+        "#,
+    )
+    .unwrap();
+
+    // Positive control across the births and the line pool's growth — both structural.
+    let born_at = s.layout_derivations();
+    for _ in 0..40 {
+        s.run("bag_hover()").unwrap();
+        app_frame(&mut s);
+    }
+    assert!(
+        s.layout_derivations() > born_at,
+        "creating twelve slots must derive the graph — zero here makes the assertion vacuous."
+    );
+
+    let derives_before = s.layout_derivations();
+    for _ in 0..24 {
+        s.run("bag_hover()").unwrap();
+        app_frame(&mut s);
+    }
+    let derives = s.layout_derivations() - derives_before;
+    assert_eq!(
+        derives, 0,
+        "24 bag-slot hovers derived the layout graph {derives} times — one per slot crossed. \
+         `ClearAllPoints` drops a node's whole anchor-target set, which is a retarget onto the \
+         EMPTY set and names its node like any other (decision 2114, completing 1625/1630)."
+    );
+}

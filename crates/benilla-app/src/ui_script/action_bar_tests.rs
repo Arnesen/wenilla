@@ -367,6 +367,126 @@ fn the_cooldown_sweep_paints_over_the_buttons_icon_and_ring() {
     );
 }
 
+/// **A cooldown-count addon's hook leaves the sweep exactly where it was.**
+///
+/// `!OmniCC` 6.8.30 — the cooldown addon on the director's screen — is a single wrap of the
+/// FrameXML global: it captures `CooldownFrame_SetTimer` in an upvalue, replaces the global with
+/// a function that calls through, and hangs a `Frame` + `FontString` off the button for its own
+/// countdown, keeping the handle on a field of the cooldown widget itself (`cd.textFrame`). The
+/// shape is transcribed here — the widget verbs it uses, not its source — because that shape
+/// touches everything the pie's paint depends on: the global the bar calls, the widget's own
+/// Lua fields (`start`/`duration`/`stopping`, which the stock `Cooldown.lua` writes and its
+/// `OnUpdateModel` reads back), and the button's frame-level stack.
+///
+/// It came in as "with `!OmniCC` installed the pie and the GCD sweep are gone", and this is the
+/// half that answers whether the addon's hook itself is what breaks them. It is not: the engine
+/// reports the same paint list, the same armed sequence and the same scrub with the wrap in
+/// place as without it. (What did break them is the tile renderer's per-VM state — enabling an
+/// addon costs a logout and a login, and the pane's model facts did not survive that; see
+/// `ui_models`' own tests.)
+#[test]
+fn a_cooldown_count_addons_hook_leaves_the_sweep_running() {
+    use benilla_ui::script::ActionState;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    // The addon loads after FrameXML (`!` sorts it first among addons, all of which run after the
+    // interface), so the global it captures is the stock one.
+    s.run(
+        r#"
+        local original = CooldownFrame_SetTimer
+        seen = 0
+        CooldownFrame_SetTimer = function(cd, start, duration, enable)
+            seen = seen + 1
+            original(cd, start, duration, enable)
+            if start > 0 and duration > 3 and enable > 0 then
+                local count = cd.textFrame
+                if not count then
+                    local icon = getglobal(cd:GetParent():GetName() .. "Icon")
+                    if icon then
+                        count = CreateFrame("Frame", nil, cd:GetParent())
+                        count:SetAllPoints(cd:GetParent())
+                        count:SetFrameLevel(count:GetFrameLevel() + 1)
+                        count.text = count:CreateFontString(nil, "OVERLAY")
+                        count.text:SetFontObject(GameFontNormal)
+                        count.text:SetPoint("CENTER", count, "CENTER", 0, 1)
+                        count.icon = icon
+                        count:SetScript("OnUpdate", function() end)
+                        cd.textFrame = count
+                    end
+                end
+                if count then
+                    count.start = start
+                    count.duration = duration
+                    count:Show()
+                end
+            elseif cd.textFrame then
+                cd.textFrame:Hide()
+            end
+        end
+    "#,
+    )
+    .expect("the addon's hook installs");
+
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Spell_Fire_FlameBolt".into()),
+            kind: 0x00,
+            action: 133,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.tick(10.0);
+    s.set_action_state(
+        1,
+        Some(ActionState {
+            usable: true,
+            cooldown: Some((6_000, 10_000, true)),
+            ..Default::default()
+        }),
+    );
+    s.fire_event("ACTIONBAR_UPDATE_COOLDOWN", vec![]);
+    super::test_ui::cooldown_facts(&mut s);
+    s.tick(0.0);
+    s.resolve();
+
+    assert!(
+        s.eval::<i64>("return seen").unwrap() > 0,
+        "the bar must reach the addon's replacement, not a captured original"
+    );
+    assert!(
+        s.eval::<bool>("return ActionButton1Cooldown.textFrame ~= nil")
+            .unwrap(),
+        "the addon hangs its countdown off the cooldown widget — a field the widget must accept"
+    );
+    assert_eq!(
+        super::test_ui::cooldown_play(&s, "ActionButton1Cooldown"),
+        Some((0, 400)),
+        "the wrap calls through, so the pane is on the paint list with sequence 0 at 40 %"
+    );
+    // And it goes cold the reference's way when the cooldown is cleared.
+    s.set_action_state(
+        1,
+        Some(ActionState {
+            usable: true,
+            ..Default::default()
+        }),
+    );
+    s.fire_event("ACTIONBAR_UPDATE_COOLDOWN", vec![]);
+    s.tick(0.0);
+    s.resolve();
+    assert_eq!(
+        super::test_ui::cooldown_play(&s, "ActionButton1Cooldown"),
+        None,
+        "an elapsed cooldown hides the pane through the wrap exactly as it does without it"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// An action button is a TWO-button button (decision 0908; director's report B200: "I can't right
 /// click food on my bar to eat it or right click spells"). The ref's `ActionButton_OnLoad`
 /// registers `("LeftButtonUp", "RightButtonUp")` (ActionButton.lua:109) and its OnClick body reads

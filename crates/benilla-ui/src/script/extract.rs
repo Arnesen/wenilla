@@ -178,7 +178,11 @@ impl UiScript {
                         owner_frame.map(|f| &f.kind_state)
                     {
                         if sl.thumb == Some(rh) {
-                            let tsize = model.region_data.get(&rh).and_then(|d| d.size);
+                            // The thumb's OWN size getters, not its authored `<Size>` — the same
+                            // `CSimpleTexture::GetWidth`/`GetHeight` fallback the drag law reads
+                            // (`slider::thumb_extent`), so a Lua-built `SetThumbTexture(path)` knob
+                            // draws at its art's texel span instead of smeared over the whole track.
+                            let tsize = super::region::virtual_span(&model, rh);
                             rect = rect
                                 .map(|r| slider::thumb_rect(r, tsize, sl.vertical, sl.fraction()));
                             thumb_fill = true;
@@ -333,18 +337,34 @@ impl UiScript {
                     let alpha = owner_frame.map(|f| f.effective_alpha).unwrap_or(1.0)
                         * data.alpha.unwrap_or(1.0);
                     if let Some(fo) = state_font {
-                        // The font object's paint wholesale, except a color the Lua explicitly
-                        // SetTextColor'd (the client's explicitly-set mask keeps it — ui ledger
-                        // FONTINSTANCE+0x38, color bit 0x404).
-                        data.font_path = fo.font.clone().or(data.font_path);
-                        data.font_height = fo.height.or(data.font_height);
+                        // The font object's paint, **behind the severance mask on every axis** —
+                        // the same `font_explicit` gate `font::repaint` applies and the
+                        // `button_font` block below names as the law ("it loses to a face the
+                        // label FontString set for *itself*, which severs one level further
+                        // down"). Three of these six axes did not have it: face and height were
+                        // `fo.x.or(data.x)`, which makes the OBJECT outrank an explicit
+                        // `SetFont`, and the outline was written unconditionally — so a label
+                        // that called `SetFont(path, h, "OUTLINE")` for itself had all three put
+                        // back from the object on the very next extract, every frame, forever.
+                        // That is the *shape* of the report this was found under (decision 2112:
+                        // an addon's `SetFont` silently not taking); MSBT's own strings are not
+                        // a button's label and never met it, but any addon that restyles a
+                        // `<ButtonText>` did.
+                        if !data.font_explicit.face {
+                            data.font_path = fo.font.clone().or(data.font_path);
+                        }
+                        if !data.font_explicit.height {
+                            data.font_height = fo.height.or(data.font_height);
+                        }
                         // Same severance as the colour below: a region that called
                         // `SetShadowColor`/`SetShadowOffset` keeps its own, or the font object it
                         // inherits would silently overwrite the value the addon just set.
                         if !data.font_explicit.shadow {
                             data.font_shadow = fo.shadow.or(data.font_shadow);
                         }
-                        data.outline = fo.outline;
+                        if !data.font_explicit.outline {
+                            data.outline = fo.outline;
+                        }
                         // Test the severance MASK, which is what the sentence above claims and what
                         // wow-re pinned, not `vertex_color.is_none()`. The nil-check was an
                         // equivalent proxy for exactly as long as an explicit `SetTextColor` was the

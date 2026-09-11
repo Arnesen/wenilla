@@ -173,7 +173,8 @@ fn the_poi_pool_grows_and_parks_its_tail() {
 
 /// Hovering a POI names it in the map's area label; the description line beneath carries the
 /// landmark's status only when it has one — the guard's directions never do, a battleground
-/// node's "In Conflict" would — and is blanked otherwise (stock `WorldMapPOI_OnEnter`).
+/// node's "In Conflict" would — and is blanked otherwise (stock `WorldMapPOI_OnEnter`), which
+/// reads back as **nil**, not `""` (decision 2110).
 #[test]
 fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -188,10 +189,12 @@ fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
         "Lion's Pride Inn"
     );
     assert_eq!(
-        s.eval::<String>("return WorldMapFrameAreaDescription:GetText()")
+        s.eval::<Option<String>>("return WorldMapFrameAreaDescription:GetText()")
             .unwrap(),
-        "",
-        "no description → an empty description line"
+        None,
+        "no description → a blank line that reads back NIL: `FontString:GetText 0x79d690` \
+         substitutes nil for an empty string (decision 2110), and Cartographer 2.02's world-map \
+         hover reads exactly this as \"this POI has no status line\""
     );
 
     let mut with_status = landmark("Stables", 6, (0.5, 0.5));

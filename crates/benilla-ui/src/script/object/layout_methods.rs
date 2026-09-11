@@ -60,15 +60,24 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // keeps an idempotent per-frame caller (the classic OnUpdate re-SetPoint idiom) from
             // pinning the gate open — the same absorption the fingerprint gives, paid once at
             // the write instead of per-frame over the whole model.
-            let changed = match model.layout_inputs.get_mut(&h) {
+            //
+            // **And it NAMES its node** (decision 2114, completing 1625's migration). Dropping
+            // every anchor is a retarget whose NEW target list is empty, and both lists are right
+            // here — so the cached graph's edges get unlinked instead of thrown away. Left on the
+            // conservative touch, this was the one recurring `[layout-derive]` site in a live
+            // hover sweep: `Bagnon_AnchorTooltip` opens with `GameTooltip:ClearAllPoints()` and
+            // then asks `frame:GetLeft()`, so the whole graph was re-derived INSIDE the handler,
+            // once per hovered item, and billed to `[ui-handlers]`' `OnEnter`.
+            let old: Option<Vec<u32>> = match model.layout_inputs.get_mut(&h) {
                 Some(input) if !input.anchors.is_empty() => {
+                    let old = input.anchors.iter().map(|a| a.relative_to).collect();
                     input.anchors.clear();
-                    true
+                    Some(old)
                 }
-                _ => false,
+                _ => None,
             };
-            if changed {
-                model.touch_layout();
+            if let Some(old) = old {
+                model.touch_layout_retarget_frame(h, &old, &[]);
             }
             Ok(())
         })?,

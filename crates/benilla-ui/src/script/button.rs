@@ -476,14 +476,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetText",
         lua.create_function(|lua, (this, text): (Table, Option<String>)| {
+            // `CSimpleButton::SetText 0x778dc0` opens `if (!text) return;` (`0x778dcc`, wow-re
+            // `button-label-build-and-anchor-order.md`) — a nil never reaches the label at all, so
+            // it neither clears the text nor lazily creates the FontString. That guard is the
+            // BUTTON's own: a `FontString:SetText(nil)` is not a no-op, it truncates the cell
+            // (`0x771d80`, decision 2110). Below the guard the button is a pass-through to
+            // `[button+0x338]->0x771d80`.
+            let Some(text) = text else { return Ok(()) };
             let id = ensure_slot(lua, &this, Slot::Text)?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let rh = *model.id_to_region.get(&id).expect("text region id");
-            model.region_data.entry(rh).or_default().text = text;
+            model.region_data.entry(rh).or_default().text = Some(text);
             model.touch_measure(rh);
             Ok(())
         })?,
     )?;
+    // GetText — like the FontString's own (`region::text`, decision 2110), an **empty label reads
+    // back nil**: `Button:GetText 0x780e10` carries the same first-byte substitution at `0x780ec5`,
+    // over three nil conditions rather than two (no label region, a NULL cell, an empty cell).
+    // Its EditBox neighbour deliberately does not — the law is per binding.
     m.set(
         "GetText",
         lua.create_function(|lua, this: Table| {
@@ -492,6 +503,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 rh.and_then(|rh| model.region_data.get(&rh))
                     .and_then(|d| d.text.clone())
+                    .filter(|t| !t.is_empty())
             };
             match text {
                 Some(t) => Ok(Value::String(lua.create_string(&t)?)),

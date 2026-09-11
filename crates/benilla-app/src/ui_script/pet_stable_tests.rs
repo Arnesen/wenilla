@@ -90,8 +90,10 @@ fn hunter_pet_stats() -> PetStats {
     }
 }
 
-fn level_text(s: &UiScript) -> String {
-    s.eval::<String>("return PetStableLevelText:GetText()")
+/// `Option`, not `String`: an emptied line reads back **nil**, because `FontString:GetText
+/// 0x79d690` substitutes nil for an empty string (decision 2110).
+fn level_text(s: &UiScript) -> Option<String> {
+    s.eval::<Option<String>>("return PetStableLevelText:GetText()")
         .unwrap()
 }
 
@@ -123,7 +125,7 @@ fn call_pet_repaints_the_closed_stable_with_unknownobject_while_the_name_is_in_f
         !s.eval::<bool>("return PetStableFrame:IsVisible()").unwrap(),
         "UNIT_PET must repaint the window without opening it"
     );
-    assert_eq!(level_text(&s), "Unknown Level 58 Boar");
+    assert_eq!(level_text(&s).as_deref(), Some("Unknown Level 58 Boar"));
     assert_eq!(
         s.eval::<String>("return PetStableCurrentPet.tooltip")
             .unwrap(),
@@ -141,7 +143,7 @@ fn call_pet_repaints_the_closed_stable_with_unknownobject_while_the_name_is_in_f
     s.set_unit("pet", Some(pet(Some("Snarl"))));
     s.fire_event("PET_STABLE_UPDATE", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    assert_eq!(level_text(&s), "Snarl Level 58 Boar");
+    assert_eq!(level_text(&s).as_deref(), Some("Snarl Level 58 Boar"));
     assert_eq!(
         s.eval::<String>("return PetStableCurrentPet.tooltip")
             .unwrap(),
@@ -164,7 +166,7 @@ fn dismissing_the_pet_empties_the_closed_stable_without_raising() {
     s.set_pet_stats(false, PetStats::default());
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    assert_eq!(level_text(&s), "");
+    assert_eq!(level_text(&s), None, "an emptied line reads back nil");
     assert_eq!(
         s.eval::<String>("return PetStableCurrentPet.tooltip")
             .unwrap(),

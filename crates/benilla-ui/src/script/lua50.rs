@@ -597,4 +597,68 @@ mod tests {
             "5.0's insert writes index getn+1, which after setn(t, 0) is index 1"
         );
     }
+
+    /// **`{ [1] = a, [2] = b, … }` is a LIST, and `pairs` walks it 1, 2, 3** — decision 2111, the
+    /// fourth "restore what 5.1 changed" hunk in `third_party/lua-src`.
+    ///
+    /// 1.12's `recfield` keeps `cc->nh++` **inside** its `TK_NAME` arm (`0x6fd5a4`'s
+    /// `cmp [edi+0x10],0x116` / `0x6fd5ad jne 0x6fd5d4` — 5.0's own placement), so a
+    /// `[expr] = value` field credits **neither** `OP_NEWTABLE` size hint. The table is born with
+    /// `B = C = 0`, i.e. on the shared dummy node, so the first store finds no free node, takes
+    /// `luaH_newkey`'s rehash tail, and `rehash` sizes an **array part** for the dense integer
+    /// keys; `luaH_next` walks the array part first, ascending by index, and the node part after.
+    /// Stock 5.1 moved that `cc->nh++` out of the arm, pre-sized a node vector big enough that no
+    /// rehash ever fires, and left all n keys in the hash — where `next` is slot order.
+    ///
+    /// wow-5875-re `system/ui/scratch/lua-table-storage-and-next-order.md` — **executed** on
+    /// `WoW.exe`'s own bytes (`lua_open` → `luaL_loadbuffer` → `lua_pcall` → `lua_next`), not
+    /// derived, including the exact `Bagnon_Core.lua` below; ascending holds for n = 1..24 and
+    /// regardless of the order the fields are written in.
+    ///
+    /// It matters because every saved-variables file we write is that constructor (decision 1128's
+    /// grammar, and the reference's own writer's — it never emits a bare positional entry), so
+    /// before this hunk every list an addon saved came back in hash order. Bagnon 6.10.22 walks
+    /// its saved bag order with `pairs` and drew the keyring first, ahead of the backpack.
+    #[test]
+    fn a_bracketed_key_constructor_is_an_array_and_walks_in_index_order() {
+        let s = UiScript::new().unwrap();
+        // Bagnon's own table, exactly as its saved-variables file spells it.
+        assert_eq!(
+            s.eval::<String>(
+                "local t = { [1] = 0, [2] = 1, [3] = 2, [4] = 3, [5] = 4, [6] = -2 }
+                 local out = '' for _, v in pairs(t) do out = out .. v .. ',' end return out"
+            )
+            .unwrap(),
+            "0,1,2,3,4,-2,",
+            "the keyring (-2) is LAST — this is the director's Bagnon grid"
+        );
+        // …and the order the fields are written in does not change it.
+        assert_eq!(
+            s.eval::<String>(
+                "local t = { [3] = 'c', [1] = 'a', [2] = 'b' }
+                 local out = '' for k in pairs(t) do out = out .. k .. ',' end return out"
+            )
+            .unwrap(),
+            "1,2,3,"
+        );
+        // A key the array part cannot hold comes after the run, in hash order.
+        assert_eq!(
+            s.eval::<String>(
+                "local t = { ['a'] = 1, [1] = 10, [2] = 20, [3] = 30 }
+                 local out = '' for k in pairs(t) do out = out .. tostring(k) .. ',' end return out"
+            )
+            .unwrap(),
+            "1,2,3,a,"
+        );
+        // The positional spelling was always an array and still is — the control that keeps the
+        // first assertion from reading as vacuous.
+        assert_eq!(
+            s.eval::<String>(
+                "local t = { 0, 1, 2, 3, 4, -2 }
+                 local out = '' for _, v in pairs(t) do out = out .. v .. ',' end return out"
+            )
+            .unwrap(),
+            "0,1,2,3,4,-2,"
+        );
+    }
 }
