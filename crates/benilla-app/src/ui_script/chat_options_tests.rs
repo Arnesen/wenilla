@@ -242,8 +242,14 @@ fn the_background_row_opens_the_picker_and_its_opacity_slider_drives_the_window(
     let stored: f64 = s
         .eval("local _,_,_,_,_,a = GetChatWindowInfo(1) return a")
         .unwrap();
+    // 204/255, and the last byte of that is 2133's doing. The slider carries
+    // `valueStep="0.01"`, so `SetValue` snaps `1 - 0.8` onto the lattice and rebuilds it as
+    // `n·step`; the reconstruction lands a hair BELOW the literal, `1 - value` a hair above 0.8,
+    // and the alpha store's floor quantizer then keeps 204 where it used to shed one to 203.
+    // The player asked for 0.8 and the store holds 0.8 — the client's own arithmetic, improved
+    // by accident.
     assert!(
-        (stored - 203.0 / 255.0).abs() < 1e-9,
+        (stored - 204.0 / 255.0).abs() < 1e-9,
         "the drag reached the engine store, quantized to its byte: {stored}"
     );
     s.mouse_move(1500.0, 850.0);

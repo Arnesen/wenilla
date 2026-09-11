@@ -139,8 +139,10 @@ Interface\FrameXML\WorldFrame.xml
 # the reference keeps it.
 # What stayed ours moved out: the placeholder icon (ScrollTemplates.xml; the window tab template
 # and its settle went with it and are the chain's since 1993), 0561's bag verbs (ContainerFrameAdapters.xml), the script log's row
-# (ScriptLogFrame.xml), and three aliases in OptionsFrame.xml that answer the reference's three
-# options windows and its Cancel button.
+# (ScriptLogFrame.xml). The three aliases OptionsFrame.xml used to carry for the reference's three
+# options windows and its Cancel button are all gone: each of those four names is a REAL frame off
+# the chain now (2115, 2147, 2177), and the last of them — the video window's `OptionsFrame` — is
+# why our own window is `BenillaOptionsFrame`.
 Interface\FrameXML\UIParent.xml
 # ══ THE ITEM-SLOT BASE — the reference's own, off the player's chain (1751, window 24) ══
 # `ItemButtonTemplate` and the eight `SetItemButton*` verbs out of `ItemButtonTemplate.lua`. It
@@ -375,23 +377,126 @@ ScrollTemplates.xml
 Interface\FrameXML\UIPanelTemplates.lua
 
 Interface\FrameXML\UIPanelTemplates.xml
-# ══ THE WINDOW TAB — the reference's own, off the player's chain (1751; decision 1993) ══
-# `CharacterFrameTabButtonTemplate`, the big tab along a panel's bottom edge — the character,
-# vendor and social windows' rows, and nothing else in the client (the small `TabButtonTemplate`
-# is UIPanelTemplates.xml's, above).
+# ══ THE STOCK VIDEO OPTIONS WINDOW — loaded, and HIDDEN, in the reference's own l.19 seat ══
+# `FrameXML.toc` l.19, whole: the file, its `<Script file="OptionsFrame.lua"/>` (l.3) and its
+# `<Include file="OptionsFrameTemplates.xml"/>` (l.4), which is why ONE row replaces the three
+# this manifest used to carry. Both of those were explicit rows here while the window itself was
+# not loaded (2115 took the `.lua` for its seven shared helpers and the templates for the kit);
+# the window brings them itself now, in its own order, so a second row for either would re-run a
+# file that has already run.
 #
-# THE REFERENCE NEVER GIVES THIS FILE A TOC LINE. Neither `FrameXML.toc` lists it (base or
-# patch); `UIOptionsFrame.xml` pulls it in with `<Include file="CharacterFrameTemplates.xml"/>`
-# above its own `<Script file=>` — "Need the character tabs here" — and that file is the
-# reference's toc l.21. Our options window is ours, so the row is explicit; l.21 is exactly here,
-# right after the UIPanelTemplates pair (l.16/17) and before StaticPopup (l.23).
+# **Why the window is here at all** (decision 2177). The same argument 2115 made for the Interface
+# window and 2147 for the Sound one, and this is the last of the three: an addon that reaches for
+# the reference's video-options names finds REAL frames and real functions, because the file is the
+# player's own. `hidden="true"` on its own main frame is the whole mechanism — nothing of ours
+# shows it, ever. pfUI's `skins/blizzard/options-video.lua` walks `OptionsFrame`,
+# `OptionsFrameHeader`, `OptionsFrameSlider1..9`, `OptionsFrameCheckButton1..18`, the three
+# dropdowns and `OptionsFrameCancel`/`Okay`/`Defaults`; `CT_Viewport` calls `GetScreenResolutions`
+# and `GetCurrentResolution`.
 #
-# Its `<OnShow>` fits each tab to its text through `PanelTemplates_TabResize(0)` — which needs
-# the line above it and a SYNCHRONOUS `GetStringWidth`, the reason our own transcription carried
-# an OnUpdate settle instead until the engine gained one (1993 retires it, and 1002's clamp with
-# it: a tab's cap is the reference's own number now, so a long label overflows the plate exactly
-# as it does in the real client).
-Interface\FrameXML\CharacterFrameTemplates.xml
+# **IT TOOK A NAME BACK, and that is the load-bearing part.** This file declares `OptionsFrame`,
+# which was OUR options window's name until 2177. Two frames cannot hold one global, and no load
+# order survives the collision: ours later clobbers the stock frame (pfUI's video skin then strips
+# and re-anchors the window the player opens), ours earlier leaves the skin split across two
+# windows. So our window is `BenillaOptionsFrame` now (`OptionsFrame.xml` below carries the whole
+# argument, plus the three things that were keyed on the old name and had to be restated).
+#
+# **The seat is a requirement three times over**, and it is the reference's own answer to all three:
+#   * `OptionsFrameTemplates.xml` (arriving via the `<Include>`) is a descendant of
+#     UIPanelTemplates — `OptionsCheckButtonTemplate` inherits `UICheckButtonTemplate`,
+#     `OptionsButtonTemplate` inherits `UIPanelButtonTemplate` — so it must land after the row
+#     above, and l.19 after l.17 is exactly that.
+#   * `UIOptionsFrame.xml` (l.21, below) declares `UIOptionsCheckButtonTemplate` as
+#     `inherits="OptionsCheckButtonTemplate"`, resolved at LOAD. l.19 before l.21.
+#   * this file's three dropdowns inherit `UIDropDownMenuTemplate` AND their `<OnLoad>` calls
+#     `UIDropDownMenu_Initialize`, which runs the initializer it is handed immediately
+#     (`UIDropDownMenu.lua` l.48-50). The reference seats `UIDropDownMenu.xml` at l.15 for that
+#     reason; ours is manifest row 14 (l.216), far above.
+#
+# WHAT LOADING IT COSTS, measured rather than assumed — the two `<OnLoad>` paths that run engine
+# verbs on the spot, and nothing else: the resolution dropdown's (`GetCurrentResolution`,
+# `GetScreenResolutions`) and the refresh dropdown's (`GetRefreshRates`, plus `GetCVar("gxRefresh")`
+# — unregistered, so a nil and a warn-once, which `UIDropDownMenu_SetSelectedValue` takes). The
+# multisample dropdown's third path was already answered (2163). Everything else in the file —
+# `OptionsFrame_Load`, `_Save`, `_Cancel`, `_SetDefaults` and the eighteen 2004 hardware toggles —
+# hangs off `<OnShow>` and the three buttons, which nothing of ours reaches.
+#
+# WHAT IT PUBLISHES that we do not, and why each is right:
+#   * `OptionsFrameCheckButtons` / `OptionsFrameSliders` — the video window's own two tables, with
+#     the frames behind them for the first time. `OptionsFrame.xml` below **used to overwrite the
+#     slider table** with three rows of its own and no longer does: those three WERE the
+#     reference's rows 1-3, verbatim, and our Graphics page reads them off the reference's table
+#     now (2177).
+#   * the seven shared `OptionsFrame_Enable/DisableCheckBox` / `…Slider` / `…DropDown` helpers and
+#     `PlayClickSound`, which `UIOptionsFrame.lua` calls and nothing else defines — 2115 took this
+#     `.lua` for them alone, and they arrive the same way, one seat earlier in the file.
+#   * `OPTIONS_FARCLIP_MIN`/`_MAX`, `ANISOTROPIC_VALUES`, `OPTIONS_FRAME_WIDTH` — constants we do
+#     not declare.
+Interface\FrameXML\OptionsFrame.xml
+# ══ THE STOCK SOUND OPTIONS WINDOW — loaded, and HIDDEN, by 2115's own argument ══════════════
+# The reference's `FrameXML.toc` seats this file at l.20, exactly between the video window (l.19,
+# whose `.lua` is the row above) and the interface window (l.21, the row below). Ours now does too,
+# and the seat is the reference's rather than convenient: `SoundOptionsFrame.xml` inherits
+# `OptionsCheckButtonTemplate` and `OptionsSliderTemplate` from `OptionsFrameTemplates.xml` and
+# `GameMenuButtonTemplate` from `UIPanelTemplates.xml`, both already above.
+#
+# **It brings nothing else with it.** Unlike `UIOptionsFrame.xml`, which `<Include>`s
+# `CharacterFrameTemplates.xml`, this file's only dependency line is its own
+# `<Script file="SoundOptionsFrame.lua"/>`. And nothing below depends on IT — no file on this
+# manifest indexes `SoundOptionsFrameCheckButtons`, so there is no `MultiActionBars`-shaped
+# load-order edge under it the way 2115 §3 had to argue for the interface window.
+#
+# **Zero unbuilt engine verbs**, which is why this is one row and not a project: the whole surface
+# is `Get`/`SetCVar`/`GetCVarDefault`, `getglobal`, `TEXT`, `PlaySound`, `Show`/`HideUIPanel`,
+# `GetBindingKey`/`RunBinding`, `Disable_BagButtons`, `UpdateMicroButtons`, the seven
+# `OptionsFrame_*` helpers the row above already loads, and its own functions. All present.
+#
+# **All eleven CVars it names are registered**, so its `_Load` runs clean — including
+# `slider:SetValue(value.initialValue)`, the shape-A path that raised on the interface window's
+# `cameraYawMoveSpeed`. The three that were missing — `SoundListenerAtCharacter`, `EmoteSounds`,
+# `SoundZoneMusicNoDelay` — are check buttons (nil-safe either way) and were built rather than
+# listed, so this row costs no census entry at all.
+#
+# Its own `hidden="true"` (xml l.18) is the whole mechanism, exactly as for the interface window.
+# Nothing of ours may ever `Show()` it.
+Interface\FrameXML\SoundOptionsFrame.xml
+# ══ THE STOCK INTERFACE OPTIONS WINDOW — loaded, and HIDDEN (decision 2115) ══════════════════
+# **This row is not a migration, and it is the one row in this file where that has to be said.**
+# benilla's own options window is `OptionsFrame.xml` below, and it stays the window the player
+# opens — the director's call, twice (0985, and 1987's "we want to fully own that anyway"). This
+# entry loads the reference's `UIOptionsFrame.xml` **alongside** it, and the stock file's own
+# `hidden="true"` on its main frame is what keeps it off the screen. Nothing of ours may ever
+# `Show()` it.
+#
+# WHY LOAD A WINDOW NOBODY OPENS: because third-party addons reach for it BY NAME. pfUI's
+# `skins/blizzard/options-interface.lua` walks `UIOptionsFrame`, `UIOptionsFrameTab1/2`,
+# `UIOptionsFrameCheckButton1..69`, `UIOptionsFrameSlider1..4`, the four dropdowns and the
+# `BasicOptions*`/`AdvancedOptions*` boxes; its `modules/gui.lua` calls `UIOptionsFrame_Load()`
+# and `UIOptionsFrame_Save()` around a GVAR write. Answering those names with an ALIAS onto our
+# own window (which is what we did until 2115) is worse than answering nothing: the skin's
+# `SetWidth(1024)` lands on the window the player actually opens. Real frames, hidden, is the
+# honest answer — and it is free, because the file is the player's own.
+#
+# IT IS ALSO WHERE THE REFERENCE KEEPS ITS OPTIONS STATE, so loading it retires three duplications
+# our own window carried (2115): `UIOptionsFrame_Init` assigns and `RegisterForSave`s all 30
+# options uvars; `UIOptionsFrameCheckButtons` is declared here — the table stock
+# `MultiActionBars.lua:10` writes five rows into at ITS load, which is why this row must stay
+# above that one; and `UpdateNameplates` is this file's function.
+#
+# SEAT: the reference's own toc l.21, which is exactly here — after the UIPanelTemplates pair
+# (l.16/17) and the widget kit (l.19, above), before StaticPopup (l.23). Load-bearing three ways:
+# `UIOptionsCheckButtonTemplate` inherits the line above; three `GameMenuButtonTemplate` buttons
+# and one `UIPanelCloseButton` come from UIPanelTemplates.xml; and `UIOptionsFrameCheckButtons`
+# must exist before MultiActionBars.xml runs.
+#
+# IT BRINGS `CharacterFrameTemplates.xml` WITH IT, which is why that file has no row of its own
+# any more. The reference gives it no toc line either: this file `<Include>`s it at l.4 ("Need
+# the character tabs here") ahead of its own `<Script file=>`, so `CharacterFrameTabButtonTemplate`
+# — the big tab along the character, vendor and social windows' bottom edge — lands at exactly the
+# position our explicit row used to hold. Its `<OnShow>` fits each tab to its text through
+# `PanelTemplates_TabResize(0)`, which needs UIPanelTemplates.lua above and a SYNCHRONOUS
+# `GetStringWidth` (decision 1993 built that and retired our OnUpdate settle).
+Interface\FrameXML\UIOptionsFrame.xml
 # ══ THE DIALOG ENGINE — the reference's own, off the player's chain (1751; decision 1960) ══
 # StaticPopup.xml + StaticPopup.lua: StaticPopupDialogs (all 76 of the reference's entries),
 # StaticPopup_Show/Hide/Visible/Resize/OnUpdate, the four dialog instances, the edit boxes and the
@@ -419,7 +524,8 @@ KeyBindingsPage.xml
 # The options window (the 0985 provenance split: 0950's era structure, 0978's
 # 1.12-native art, 0981/0984's 1.14 chrome + working era search, 0989's directed
 # cuts — bare fully-live sliders, no corner X; 0992's dropdown rows + the Nameplates
-# page): the era-shaped OptionsFrame the game menu's Options button opens. Needs
+# page): the era-shaped `BenillaOptionsFrame` the game menu's Options button opens
+# (`OptionsFrame` is the stock VIDEO window's own name again since 2177). Needs
 # Fonts' objects, UiPanels' panel manager, and UIDropDownMenu's capsule template
 # (all far above); sits right before GameMenuFrame so the menu — which reaches it by
 # name at click time — stays the last, outermost layer.
@@ -475,8 +581,10 @@ Interface\FrameXML\PetActionBarFrame.xml
 # UpdateMicroButtons this file defines, and that function reads CharacterFrame, SpellBookFrame,
 # QuestLogFrame, GameMenuFrame, OptionsFrame, SoundOptionsFrame, UIOptionsFrame, FriendsFrame,
 # WorldMapFrame, HelpFrame and KeyRingButton UNGUARDED at call time, so every one of them is up
-# before anything can be shown (SoundOptionsFrame and UIOptionsFrame are OptionsFrame.xml's two
-# aliases — our one options window answers for the reference's three).
+# before anything can be shown. All three options windows are the reference's own frames now,
+# loaded hidden above — `OptionsFrame` (2177), `SoundOptionsFrame` (2147), `UIOptionsFrame` (2115) —
+# so all three answer, and none of them is ever visible. What that chain CANNOT see is our own
+# window: `GameMenuFrame.xml`, the manifest's last row, wraps `UpdateMicroButtons` to add it.
 Interface\FrameXML\MainMenuBarMicroButtons.xml
 # ══ THE BATTLEGROUND LIST + THE MINIMAP CLUSTER — the reference's own, off the player's chain
 # (1751; decision 1974) ══
@@ -535,23 +643,6 @@ Interface\FrameXML\FadingFrame.xml
 # strings, which came from ours as `X = X or "…"` fallbacks and now come from the player's own
 # GlobalStrings.lua like every other string in this interface.
 Interface\FrameXML\ZoneText.xml
-# ══ THE OPTIONS WIDGET KIT — the reference's own, off the player's chain (1751, window 29) ══
-# The four templates addons name for an options panel: `OptionFrameBoxTemplate`,
-# `OptionsButtonTemplate`, `OptionsCheckButtonTemplate`, `OptionsSliderTemplate`. Self-contained —
-# no `.lua`, no `<Include>` — and a descendant of UIPanelTemplates (`OptionsCheckButtonTemplate`
-# inherits `UICheckButtonTemplate`, `OptionsButtonTemplate` inherits `UIPanelButtonTemplate`), so
-# it stays seated after that file.
-#
-# `framexml-transcription-diff.py` reports no handler our transcription was missing, and the swap
-# GIVES BACK the reference's own inline hover: ours had factored it into a shared
-# `BenillaOptionsWidget_ShowTooltip`, where the reference open-codes it once per widget.
-Interface\FrameXML\OptionsFrameTemplates.xml
-# …and ours, shrunk to the ONE template the chain's file does not carry:
-# `UIOptionsCheckButtonTemplate`, whose reference home is `UIOptionsFrame.xml` — a file we do not
-# build, because benilla's options window is `OptionsFrame.xml`, a different design. The corpus
-# names it at 8 `CreateFrame` sites, so it cannot simply go. Same basename as the entry above by
-# design: bare = ours, path = the reference's. Retires when UIOptionsFrame.xml migrates.
-OptionsFrameTemplates.xml
 # ══ THE COLOUR DIALOG — the reference's own, off the player's chain (1751, window 11) ══
 # `ColorPickerFrame` (a `<ColorSelect>`), `OpacitySliderFrame`, `ColorPickerOkayButton`,
 # `ColorPickerCancelButton`, and the separate `OpacityFrame` beside them. The file ships no `.lua`

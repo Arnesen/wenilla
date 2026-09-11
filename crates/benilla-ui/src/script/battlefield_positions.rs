@@ -153,11 +153,7 @@ mod tests {
                 .unwrap(),
             0
         );
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetBattlefieldPosition(1))")
-                .unwrap(),
-            3
-        );
+        assert_eq!(s.arity("GetBattlefieldPosition(1)").unwrap(), 3);
         s.set_battlefield_positions(
             vec![
                 BattlefieldPositionView {

@@ -50,6 +50,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::flag;
 use super::cursor::{queue_cursor_update, CursorPayload, CursorSpell};
 use super::Model;
 
@@ -424,15 +425,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set("BOOKTYPE_SPELL", BOOKTYPE_SPELL)?;
     g.set("BOOKTYPE_PET", BOOKTYPE_PET)?;
 
-    /// The 1/nil boolean every Era binding in this file answers with.
-    fn flag(b: bool) -> Value {
-        if b {
-            Value::Integer(1)
-        } else {
-            Value::Nil
-        }
-    }
-
     // `UpdateSpells()` — twelve bytes in the reference (`[0x4b43e0,0x4b43ec)`), and its entire
     // content is a bare `SignalEvent(SPELLS_CHANGED)`: event 260, **no arguments**, and NO state
     // mutation whatsoever. Byte-carved by a wow-re cross-check (decision 1924, their
@@ -576,7 +568,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(slot) = book_slot(&model, id, &book_type) else {
                 // An unfilled slot inside the range answers **two** nils (`0x4b4086` → `mov eax,0x2`
-                // at `0x4b4095`), not one — which `select('#', …)` and a two-name assignment can
+                // at `0x4b4095`), not one — which a return-list count and a two-name assignment can
                 // both tell apart.
                 return Ok(MultiValue::from_vec(vec![Value::Nil, Value::Nil]));
             };
@@ -650,7 +642,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "IsSpellPassive")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(book_slot(&model, id, &book_type).is_some_and(|s| s.passive))
+            Ok(flag(
+                book_slot(&model, id, &book_type).is_some_and(|s| s.passive),
+            ))
         })?,
     )?;
 
@@ -1521,11 +1515,7 @@ mod tests {
             ],
         });
 
-        assert_eq!(
-            s.eval::<i64>(r#"return select('#', GetSpellName(1, "spell"))"#)
-                .unwrap(),
-            2
-        );
+        assert_eq!(s.arity(r#"GetSpellName(1, "spell")"#).unwrap(), 2);
         let (name, rank) = s
             .eval::<(String, String)>(r#"return GetSpellName(1, "spell")"#)
             .unwrap();
@@ -1547,12 +1537,8 @@ mod tests {
             ("Heroic Strike".to_string(), "Rank 1".to_string())
         );
 
-        // An unfilled slot INSIDE the range is two nils, not one — distinguishable by select('#').
-        assert_eq!(
-            s.eval::<i64>(r#"return select('#', GetSpellName(9, "spell"))"#)
-                .unwrap(),
-            2
-        );
+        // An unfilled slot INSIDE the range is two nils, not one — distinguishable by the count.
+        assert_eq!(s.arity(r#"GetSpellName(9, "spell")"#).unwrap(), 2);
         assert!(s
             .eval::<bool>(r#"local a, b = GetSpellName(9, "spell") return a == nil and b == nil"#)
             .unwrap());
@@ -1567,11 +1553,7 @@ mod tests {
             "got {err}"
         );
         // ...and 1023 is inside it, so it answers rather than raising.
-        assert_eq!(
-            s.eval::<i64>(r#"return select('#', GetSpellName(1023, "spell"))"#)
-                .unwrap(),
-            2
-        );
+        assert_eq!(s.arity(r#"GetSpellName(1023, "spell")"#).unwrap(), 2);
     }
 
     /// **`UpdateSpells()` fires `SPELLS_CHANGED` and does nothing else** — decision 1924, from a
@@ -1602,10 +1584,7 @@ mod tests {
             "UpdateSpells must fire SPELLS_CHANGED synchronously, as SignalEvent does"
         );
         // Zero return values — `arity = 0 (exact)` in `reference/1.12-shapes.tsv`.
-        assert_eq!(
-            s.eval::<i64>("return select('#', UpdateSpells())").unwrap(),
-            0
-        );
+        assert_eq!(s.arity("UpdateSpells()").unwrap(), 0);
         assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
     }
 
@@ -1619,11 +1598,7 @@ mod tests {
         let s = UiScript::new().unwrap();
         assert_eq!(s.eval::<i64>("return GetNumSpellTabs()").unwrap(), 0);
         assert_eq!(s.eval::<i64>("return PlayerHasSpells()").unwrap(), 1);
-        assert_eq!(
-            s.eval::<i64>("return select('#', PlayerHasSpells())")
-                .unwrap(),
-            1
-        );
+        assert_eq!(s.arity("PlayerHasSpells()").unwrap(), 1);
     }
 
     /// **Out of range answers `nil, nil, 0, 0` — four values, the last two NUMBERS** (1931). The
@@ -1636,8 +1611,7 @@ mod tests {
         let s = UiScript::new().unwrap();
         for idx in ["0", "1", "99", "-1", "0.5"] {
             assert_eq!(
-                s.eval::<i64>(&format!("return select('#', GetSpellTabInfo({idx}))"))
-                    .unwrap(),
+                s.arity(&format!("GetSpellTabInfo({idx})")).unwrap(),
                 4,
                 "GetSpellTabInfo({idx}) must answer four values"
             );

@@ -1,4 +1,4 @@
-//! The extraction pass: [`drive_script`] turns [`UiScript::extract`]'s per-frame output into
+//! The extraction pass: [`tick_script`] + [`paint_script`] turn [`UiScript::extract`]'s per-frame output into
 //! [`UiQuads`] for the render pass (screen size → tick → resolve → extract → quads), including the
 //! held-cursor icon overlay ([`cursor_icon_quad`]) — CAPTURE-ONLY since decision 0216 §5, where
 //! the held payload's icon became the hardware cursor ([`crate::cursor`]) in a normal run; the
@@ -394,6 +394,7 @@ fn verify_splice(
     s: f32,
     w: f32,
     h: f32,
+    dpi: f32,
     assets: &mut Option<ResMut<WorldAssets>>,
     images: &mut Assets<Image>,
     font_atlas: &mut Option<ResMut<UiFontAtlas>>,
@@ -411,6 +412,7 @@ fn verify_splice(
             s,
             w,
             h,
+            dpi,
             assets,
             images,
             font_atlas,
@@ -507,10 +509,21 @@ pub(crate) fn seat_text_measurer(script: &mut UiScript, atlas: &UiFontAtlas, sea
     )));
 }
 
-/// Per frame: screen size → `tick` (OnUpdate) → `resolve` → `extract` → [`UiQuads`]. Script errors
-/// drain to the log (throttled by being drained — each fires once).
+/// **The UI pass, first half: the VM's frame** — screen size -> `tick` (OnUpdate) -> the measure
+/// round-trip -> `resolve`. Script errors drain to the log (throttled by being drained, each fires
+/// once). The quads are the second half's ([`paint_script`]).
+///
+/// **The pass is two systems because a widget can be anchored to the world** (decision 2168). The
+/// hit test has to run before `WorldStage::Input` (`PlayerUiHover` feeds `PointerOverUi`, which the
+/// camera reads), so this half stays there. Building the quads there too made every world-anchored
+/// widget a frame stale, and since 2148 the nameplates ARE widgets — real `WorldFrame` children
+/// positioned by `vplates::drive_vplates` from a camera that only exists later in the frame. The
+/// plate was therefore painted at the unit's PREVIOUS frame's screen point: a median 1.9 px and a
+/// p90 of 16 px of lag per frame at 640x360 while a guard walked (the `vpl` trace, 2026-09-10), and
+/// proportionally more at a real window. That is the director's "way more jittered when the
+/// creature is moving".
 #[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
-pub(super) fn drive_script(
+pub(super) fn tick_script(
     script: Option<NonSendMut<UiScript>>,
     window: Query<&Window, With<PrimaryWindow>>,
     // REAL time, deliberately: this drives the VM's `GetTime()` session clock, and the reference
@@ -522,27 +535,11 @@ pub(super) fn drive_script(
     // (verified live: an occluded run's UI clock fell 27 s behind in 43 s of wall time).
     time: Res<Time<Real>>,
     mut ui_clock: ResMut<super::UiClock>,
-    mut quads: ResMut<UiQuads>,
-    world_assets: Option<ResMut<WorldAssets>>,
-    mut images: ResMut<Assets<Image>>,
     mut font_atlas: Option<ResMut<UiFontAtlas>>,
-    // Both directions of the booth seam: the token -> off-screen-baked-face bridge a
-    // `SetPortraitTexture`-bound region samples, and the pane geometry this pass publishes back
-    // for the booths' projection aspect + render gate (decision 1069).
+    // The booth seam's DPI half, and the pane map this half invalidates when the VM or the window
+    // is gone — see the two early returns.
     mut booths: crate::portrait::BoothBridge,
-    // Two facts about the RUN, tupled to stay inside Bevy's 16-element system-param limit (the
-    // same squeeze `player::control` and `GateInputs` above record):
-    // · the held-cursor icon quad (decision 0216 §5) is CAPTURE-ONLY, the same presence check
-    //   every other capture-only system uses (`ui_script::capture_ui_active`'s sibling pattern);
-    // · whether anything wants this pass's phase split at all ([`super::UiCostWanted`]).
-    run: (
-        Option<Res<crate::run_mode::CaptureMode>>,
-        Res<super::UiCostWanted>,
-    ),
-    // The append-lane hole this pass parks for its UiQuadAppend producer: the `<Minimap>` widget
-    // slot (`minimap::emit_minimap` fills it with tile/arrow quads — decision 0203 phase 1). (The
-    // autocast shine's sites used to ride beside it; the shine is a model tile since 2014.)
-    mut parked_minimap: ResMut<crate::minimap::MinimapWidget>,
+    ui_cost_wanted: Res<super::UiCostWanted>,
     // The seam scale the engine's text-metric caches were answered under. When `s` moves (window
     // resize / fullscreen toggle / uiScale change), every cached measure is stale — see the
     // invalidation below.
@@ -557,34 +554,12 @@ pub(super) fn drive_script(
     mut last_dpi: Local<f32>,
     // The uiScale dial folded into the seam scale (decision 0584).
     ui_scale: Res<super::UiScaleCvar>,
-    // ── The extract gate's memory (decision 0740): last frame's conversion inputs ─────────────
-    // The conversion loop below is a pure function of (extracted, text_ui, the RASTER
-    // ENVIRONMENT, the portrait token map, the glyph-sheet generation) — the sprite caches are
-    // monotone path→handle, so equal inputs reproduce the same `UiQuads` the diff would then
-    // discard. Capture mode never skips (the harness wants exact per-frame output, including the
-    // cursor-icon quad's live mouse position).
-    //
-    // The raster environment is window size × seam scale × **`scale_factor`**, and that last term
-    // is decision 1342's correction. A monitor hop at an unchanged window size moves nothing else
-    // in this list, but it changes the integer device-pixel size every glyph rasterizes at
-    // (`TextEngine::ppem`) — so the quads held from last frame are the wrong size and the gate
-    // must miss. (1339 caught the same hole through an atlas-bake counter, which was the right
-    // fix for a design where the atlas re-baked; there is nothing to re-bake now, so the term that
-    // survives is the one that actually moved.)
-    //
-    // The generation term is the glyph sheet RESETTING — the one event that moves a cached cell's
-    // UV, which happens when the sheet fills and is repacked from empty. Held quads carry the old
-    // UVs and would draw letters as fragments of other letters.
-    //
-    // A [`crate::ui_script::VmMemo`] because a skip is not only a quad-conversion skip: it also skips
-    // `set_link_spans` and the minimap-slot / booth-pane refills, which are pushes INTO the VM. The
-    // VM lives for one login (decision 1290), so a fresh VM must never be gated on what the previous
-    // one extracted — its first frame is always a real conversion.
-    mut prev: Local<crate::ui_script::VmMemo<GateInputs>>,
     // This frame's phase split, published for whoever asked (the `[ui-cost]` line, `hover_log`).
     mut ui_cost: ResMut<super::UiFrameCost>,
+    // What the paint half needs from this one — and whether it may run at all.
+    mut pass: ResMut<super::UiPassState>,
 ) {
-    let (capture, ui_cost_wanted) = run;
+    pass.live = false;
     let Some(mut script) = script else {
         // No VM ⇒ no UI is sampling any booth pane. The panes map must not outlive its writer:
         // every OTHER return in this system provably keeps pane presence unchanged (the settled
@@ -594,7 +569,6 @@ pub(super) fn drive_script(
         booths.panes.0.clear();
         return;
     };
-    let prev = prev.get(&script);
     let Ok(window) = window.single() else {
         // Same law as the no-VM arm: no window, no sampling — a pane map with no writer lies.
         booths.panes.0.clear();
@@ -625,7 +599,6 @@ pub(super) fn drive_script(
     let dpi = window.scale_factor();
     // The tile renderer sizes its cells in device pixels off this (decision 2008).
     booths.tiles.dpi = dpi;
-    let generation = font_atlas.as_deref().map(|a| a.generation);
     let seam_moved = *last_seam != s || *last_dpi != dpi;
     if seam_moved {
         if *last_seam != 0.0 {
@@ -786,6 +759,139 @@ pub(super) fn drive_script(
         warn!("ui_script: {w}");
     }
 
+    // ── The handover ────────────────────────────────────────────────────────────────────────
+    // Everything the paint half derives from the window and the meter, published once here so the
+    // two halves cannot disagree about the frame they are in.
+    *pass = super::UiPassState {
+        live: true,
+        seam: s,
+        dpi,
+        us_tick,
+        us_resolve,
+        us_measure,
+        solves_before: solves_before.unwrap_or(0),
+        derives_before: derives_before.unwrap_or(0),
+    };
+}
+
+/// **The UI pass, second half: the quads** — a second (incremental) measure + `resolve`, the tree
+/// walk, and the conversion into [`UiQuads`].
+///
+/// Split out of [`tick_script`] (decision 2168) and scheduled **after the camera and after the
+/// plate driver**, which is the whole point: a widget positioned from this frame's camera has to be
+/// walked after that camera exists. The re-resolve is what makes the plates' fresh anchors real —
+/// it is the layout ledger's incremental pass, so on a frame where nothing but the plates moved it
+/// solves the plates and nothing else.
+#[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
+pub(super) fn paint_script(
+    script: Option<NonSendMut<UiScript>>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    mut quads: ResMut<UiQuads>,
+    world_assets: Option<ResMut<WorldAssets>>,
+    mut images: ResMut<Assets<Image>>,
+    mut font_atlas: Option<ResMut<UiFontAtlas>>,
+    // Both directions of the booth seam: the token -> off-screen-baked-face bridge a
+    // `SetPortraitTexture`-bound region samples, and the pane geometry this pass publishes back
+    // for the booths' projection aspect + render gate (decision 1069).
+    mut booths: crate::portrait::BoothBridge,
+    // Two facts about the RUN, tupled to stay inside Bevy's 16-element system-param limit (the
+    // same squeeze `player::control` and `GateInputs` above record):
+    // · the held-cursor icon quad (decision 0216 §5) is CAPTURE-ONLY, the same presence check
+    //   every other capture-only system uses (`ui_script::capture_ui_active`'s sibling pattern);
+    // · whether anything wants this pass's phase split at all ([`super::UiCostWanted`]).
+    run: (
+        Option<Res<crate::run_mode::CaptureMode>>,
+        Res<super::UiCostWanted>,
+    ),
+    // The append-lane hole this pass parks for its UiQuadAppend producer: the `<Minimap>` widget
+    // slot (`minimap::emit_minimap` fills it with tile/arrow quads — decision 0203 phase 1). (The
+    // autocast shine's sites used to ride beside it; the shine is a model tile since 2014.)
+    mut parked_minimap: ResMut<crate::minimap::MinimapWidget>,
+    // ── The extract gate's memory (decision 0740): last frame's conversion inputs ─────────────
+    // The conversion loop below is a pure function of (extracted, text_ui, the RASTER
+    // ENVIRONMENT, the portrait token map, the glyph-sheet generation) — the sprite caches are
+    // monotone path→handle, so equal inputs reproduce the same `UiQuads` the diff would then
+    // discard. Capture mode never skips (the harness wants exact per-frame output, including the
+    // cursor-icon quad's live mouse position).
+    //
+    // The raster environment is window size × seam scale × **`scale_factor`**, and that last term
+    // is decision 1342's correction. A monitor hop at an unchanged window size moves nothing else
+    // in this list, but it changes the integer device-pixel size every glyph rasterizes at
+    // (`TextEngine::ppem`) — so the quads held from last frame are the wrong size and the gate
+    // must miss. (1339 caught the same hole through an atlas-bake counter, which was the right
+    // fix for a design where the atlas re-baked; there is nothing to re-bake now, so the term that
+    // survives is the one that actually moved.)
+    //
+    // The generation term is the glyph sheet RESETTING — the one event that moves a cached cell's
+    // UV, which happens when the sheet fills and is repacked from empty. Held quads carry the old
+    // UVs and would draw letters as fragments of other letters.
+    //
+    // A [`crate::ui_script::VmMemo`] because a skip is not only a quad-conversion skip: it also skips
+    // `set_link_spans` and the minimap-slot / booth-pane refills, which are pushes INTO the VM. The
+    // VM lives for one login (decision 1290), so a fresh VM must never be gated on what the previous
+    // one extracted — its first frame is always a real conversion.
+    mut prev: Local<crate::ui_script::VmMemo<GateInputs>>,
+    // This frame's phase split, published for whoever asked (the `[ui-cost]` line, `hover_log`).
+    mut ui_cost: ResMut<super::UiFrameCost>,
+    // Whether the tick half ran this frame, and what it derived.
+    pass: Res<super::UiPassState>,
+) {
+    let (capture, ui_cost_wanted) = run;
+    // The paint half stands down whenever the tick half did — no VM, or no window. Both of those
+    // arms already cleared the booth panes, and re-deriving the seam here would be inventing a
+    // frame the VM never had.
+    if !pass.live {
+        return;
+    }
+    let Some(mut script) = script else {
+        return;
+    };
+    let prev = prev.get(&script);
+    let Ok(window) = window.single() else {
+        return;
+    };
+    let (w, h) = (window.width(), window.height());
+    let (s, dpi) = (pass.seam, pass.dpi);
+    let (us_tick, us_resolve) = (pass.us_tick, pass.us_resolve);
+    let (solves_before, derives_before) = (Some(pass.solves_before), Some(pass.derives_before));
+    let printing = ui_cost_enabled();
+    let cost_on = printing || ui_cost_wanted.0;
+    let mut t_mark = cost_on.then(bevy::platform::time::Instant::now);
+    // Marks phase boundaries under the meter: returns μs since the previous mark and re-arms.
+    let mut lap = move || -> u128 {
+        if !cost_on {
+            return 0;
+        }
+        t_mark
+            .replace(bevy::platform::time::Instant::now())
+            .map_or(0, |t| t.elapsed().as_micros())
+    };
+    // ── The SECOND measure + resolve, and the reason this half is its own system ─────────────
+    // Everything written into the VM since the tick half ran becomes real here — the nameplate
+    // anchors above all, which `vplates::drive_vplates` writes from a camera that did not exist
+    // when the tick half ran. Incremental: the ledger solves what is dirty, so a frame in which
+    // nothing moved pays a walk and no solve. A plate whose unit's NAME changed also needs its
+    // measure served here, which is why the round-trip comes along rather than the resolve alone.
+    let mut measured_any = false;
+    if let Some(atlas) = font_atlas.as_deref_mut() {
+        measured_any = measure_fontstrings(&mut script, atlas, s, &mut ui_cost, ui_cost_wanted.0);
+    }
+    {
+        let _span = bevy::log::info_span!("ui_script: resolve").entered();
+        script.resolve();
+    }
+    if measured_any {
+        if let Some(atlas) = font_atlas.as_deref_mut() {
+            if measure_fontstrings(&mut script, atlas, s, &mut ui_cost, ui_cost_wanted.0) {
+                script.resolve();
+            }
+        }
+    }
+    // Folded into the tick half's own measure figure: one frame, one row.
+    let us_measure = pass.us_measure + lap();
+    // The glyph sheet's repack counter — the extract gate's term, read here because the gate is
+    // here (a repack moves every cached cell's UV, so held quads would draw letter fragments).
+    let generation = font_atlas.as_deref().map(|a| a.generation);
     let extract_span = bevy::log::info_span!("ui_script: extract").entered();
     let mut out = Vec::new();
     let mut assets = world_assets;
@@ -1007,6 +1113,7 @@ pub(super) fn drive_script(
                 s,
                 w,
                 h,
+                dpi,
                 &mut assets,
                 &mut images,
                 &mut font_atlas,
@@ -1098,6 +1205,7 @@ pub(super) fn drive_script(
                 s,
                 w,
                 h,
+                dpi,
                 &mut assets,
                 &mut images,
                 &mut font_atlas,
@@ -1159,6 +1267,7 @@ pub(super) fn drive_script(
             s,
             w,
             h,
+            dpi,
             &mut assets,
             &mut images,
             &mut font_atlas,
@@ -1287,6 +1396,9 @@ fn convert_entry(
     // particle unit run on the screen diagonal (decision 2013).
     w: f32,
     h: f32,
+    // The window's DEVICE scale, for the one arm that resamples its art to physical pixels: the
+    // nameplate border's 0188 sharpen, which is a no-op at any other size.
+    dpi: f32,
     assets: &mut Option<ResMut<WorldAssets>>,
     images: &mut Assets<Image>,
     font_atlas: &mut Option<ResMut<UiFontAtlas>>,
@@ -1593,7 +1705,38 @@ fn convert_entry(
                     // generated 128×64 / 128×32 image — white RGB carrying the emblem BLP's own
                     // alpha — into the Texture the setter was handed; the region carries that as
                     // a token path and the resolver builds exactly that image.
-                    let resolved = if let Some(blp) = benilla_ui::script::emblem_mask_path(p) {
+                    let resolved = if p == benilla_ui::script::nameplate::BORDER_TEXTURE {
+                        // **Where the plate actually PAINTED**, on the same `vpl` tag the driver's
+                        // own seat line rides (`vplates`'s jitter decomposition). The driver says
+                        // where it put the plate; this says where the frame system drew it, in the
+                        // same window px — so "is the paint this frame's or last frame's?" is a
+                        // diff of two numbers instead of an argument about the schedule. It is the
+                        // measurement decision 2168 was taken on, and the one that proves it
+                        // stays fixed.
+                        if benilla_assets::trace::enabled_for("vpl") {
+                            benilla_assets::trace::line(
+                                "vpl",
+                                &format!(
+                                    "paint=({:.1},{:.1})..({:.1},{:.1})",
+                                    rect.min.x, rect.min.y, rect.max.x, rect.max.y
+                                ),
+                            );
+                        }
+                        // The V-plate's frame art, resampled to the quad's exact PHYSICAL size
+                        // with the sharp kernel instead of GPU-magnified (0188 — the director's
+                        // "sharpen the same frame", carried across decision 2148's move of the
+                        // plate into the frame system). Keyed by that size, so it re-rasterises on
+                        // a resize and is a cache hit on every frame in between. An addon that
+                        // blanks the border with `SetTexture("")` never reaches here at all: the
+                        // path is gone, and the arm above draws nothing.
+                        let px = |v: f32| (v * dpi).round().max(1.0) as u32;
+                        a.resampled_sprite(
+                            p,
+                            (px(rect.width()), px(rect.height())),
+                            images,
+                            crate::vplates::border::resample_sharp,
+                        )
+                    } else if let Some(blp) = benilla_ui::script::emblem_mask_path(p) {
                         a.emblem_mask_texture(blp, images)
                     } else if circular {
                         a.portrait_texture(p, images)
@@ -1729,6 +1872,7 @@ fn convert_entry(
             shadow,
             outline,
             alpha_gradient,
+            world_seat,
         } => {
             // No atlas (no client data / Friz Quadrata unreadable — see `ui_text`'s startup
             // system) means text simply doesn't render, same graceful-absence posture as a
@@ -1750,6 +1894,7 @@ fn convert_entry(
                     shadow,
                     outline,
                     alpha_gradient,
+                    world_seat,
                 },
                 text::TextHost {
                     z: eq.z,
@@ -1958,8 +2103,8 @@ mod cursor_quad_tests {
 }
 
 /// The app-side half of the ScrollFrame clip plumb (decision 0112): does a [`UiQuad`] built from a
-/// clipped [`QuadContent::Texture`] actually carry `clip` through `drive_script`? Drives the real
-/// system in a minimal headless `App` (no `DefaultPlugins` — just the resources `drive_script`
+/// clipped [`QuadContent::Texture`] actually carry `clip` through the UI pass? Drives the real
+/// systems in a minimal headless `App` (no `DefaultPlugins` — just the resources the pass
 /// reads), rather than re-deriving the y-up→y-down flip by hand: that flip is exactly the seam this
 /// test exists to catch a regression in.
 #[cfg(test)]
@@ -1970,10 +2115,10 @@ mod clip_plumb_tests {
 
     use benilla_ui::script::UiScript;
 
-    use super::{drive_script, UiQuad, UiQuads};
+    use super::{paint_script, tick_script, UiQuad, UiQuads};
     use crate::portrait::PortraitImages;
 
-    /// A headless app with exactly the resources/entities `drive_script` reads: a `NonSend` VM
+    /// A headless app with exactly the resources/entities the UI pass reads: a `NonSend` VM
     /// carrying a ScrollFrame + scrolled-out child + a colored (pathless) Texture region marker, a
     /// 1024×768 primary window (the 768-virtual design height — s = 1, so the WoW-space rects are
     /// known by hand; decision 0582), and every other resource
@@ -1986,9 +2131,9 @@ mod clip_plumb_tests {
                 r#"
             local frame = CreateFrame("ScrollFrame", "SF")
             frame:SetPoint("TOPLEFT", 0, -100)  -- screen top 768 -> frame top 668
-            frame:SetSize(300, 200)             -- frame bottom 300, right 300
+            frame:SetWidth(300); frame:SetHeight(200)  -- frame bottom 300, right 300
             local child = CreateFrame("Frame", "Child")
-            child:SetSize(300, 600)
+            child:SetWidth(300); child:SetHeight(600)
             frame:SetScrollChild(child)
             local marker = child:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(1, 0, 0)          -- pathless colored quad: no BLP asset needed
@@ -2000,6 +2145,8 @@ mod clip_plumb_tests {
         let mut app = App::new();
         app.insert_non_send_resource(script);
         app.init_resource::<UiQuads>();
+        // The pass's own handover (2168) — the tick half writes it, the paint half reads it.
+        app.init_resource::<crate::ui_script::UiPassState>();
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
@@ -2020,7 +2167,9 @@ mod clip_plumb_tests {
             },
             PrimaryWindow,
         ));
-        app.add_systems(Update, drive_script);
+        // The pass is two systems since 2168, and a test that drives it drives BOTH — the quads are
+        // the second half's.
+        app.add_systems(Update, (tick_script, paint_script).chain());
         app
     }
 
@@ -2076,7 +2225,7 @@ mod clip_plumb_tests {
                 r#"
             local plain = CreateFrame("Frame", "Plain")
             plain:SetPoint("TOPLEFT", 0, 0)
-            plain:SetSize(50, 50)
+            plain:SetWidth(50); plain:SetHeight(50)
             local m = plain:CreateTexture(nil, "ARTWORK")
             m:SetTexture(0, 1, 0)
             m:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
@@ -2087,6 +2236,8 @@ mod clip_plumb_tests {
         let mut app = App::new();
         app.insert_non_send_resource(script);
         app.init_resource::<UiQuads>();
+        // The pass's own handover (2168) — the tick half writes it, the paint half reads it.
+        app.init_resource::<crate::ui_script::UiPassState>();
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
@@ -2105,7 +2256,9 @@ mod clip_plumb_tests {
             },
             PrimaryWindow,
         ));
-        app.add_systems(Update, drive_script);
+        // The pass is two systems since 2168, and a test that drives it drives BOTH — the quads are
+        // the second half's.
+        app.add_systems(Update, (tick_script, paint_script).chain());
         app.update();
 
         let quads = &app.world().resource::<UiQuads>().quads;
@@ -2140,7 +2293,7 @@ mod align_tests {
             for i = 1, 2 do
               local f = CreateFrame("Frame", "F" .. i)
               f:SetPoint("TOPLEFT", 0, 0)
-              f:SetSize(50, 50)
+              f:SetWidth(50); f:SetHeight(50)
               for j = 1, 2 do
                 local t = f:CreateTexture(nil, "ARTWORK")
                 t:SetTexture(i / 4, j / 4, 0)
@@ -2269,7 +2422,7 @@ mod extract_gate_tests {
 
     use benilla_ui::script::UiScript;
 
-    use super::{drive_script, UiQuads};
+    use super::{paint_script, tick_script, UiQuads};
     use crate::portrait::PortraitImages;
 
     fn app_with_marker() -> App {
@@ -2277,7 +2430,7 @@ mod extract_gate_tests {
             r#"
             local plain = CreateFrame("Frame", "Plain")
             plain:SetPoint("TOPLEFT", 0, 0)
-            plain:SetSize(50, 50)
+            plain:SetWidth(50); plain:SetHeight(50)
             marker = plain:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(1, 0, 0)
             marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
@@ -2294,6 +2447,8 @@ mod extract_gate_tests {
         let mut app = App::new();
         app.insert_non_send_resource(script);
         app.init_resource::<UiQuads>();
+        // The pass's own handover (2168) — the tick half writes it, the paint half reads it.
+        app.init_resource::<crate::ui_script::UiPassState>();
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
@@ -2312,7 +2467,9 @@ mod extract_gate_tests {
             },
             PrimaryWindow,
         ));
-        app.add_systems(Update, drive_script);
+        // The pass is two systems since 2168, and a test that drives it drives BOTH — the quads are
+        // the second half's.
+        app.add_systems(Update, (tick_script, paint_script).chain());
         app
     }
 
@@ -2385,11 +2542,11 @@ mod extract_gate_tests {
             r#"
             local doll = CreateFrame("PlayerModel", "CharacterModelFrame")
             doll:SetPoint("TOPLEFT", 0, 0)
-            doll:SetSize(233, 224)
+            doll:SetWidth(233); doll:SetHeight(224)
             doll:SetUnit("player")
             local stray = CreateFrame("PlayerModel", "SomeAddonsModelPane")
             stray:SetPoint("TOPLEFT", 300, 0)
-            stray:SetSize(233, 224)
+            stray:SetWidth(233); stray:SetHeight(224)
             stray:SetUnit("player")
         "#,
         );
@@ -2507,7 +2664,7 @@ mod extract_gate_tests {
             r#"
             local plain = CreateFrame("Frame", "Plain")
             plain:SetPoint("TOPLEFT", 0, 0)
-            plain:SetSize(50, 50)
+            plain:SetWidth(50); plain:SetHeight(50)
             marker = plain:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(0, 0, 1)
             marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
@@ -2566,7 +2723,7 @@ mod extract_gate_tests {
             r#"
             local plain = CreateFrame("Frame", "Plain")
             plain:SetPoint("TOPLEFT", 0, 0)
-            plain:SetSize(50, 50)
+            plain:SetWidth(50); plain:SetHeight(50)
             marker = plain:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(0, 1, 0)
             marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
@@ -2593,7 +2750,7 @@ mod extract_gate_tests {
             local function box(name, x, r, g, b)
               local f = CreateFrame("Frame", name)
               f:SetPoint("TOPLEFT", x, 0)
-              f:SetSize(50, 50)
+              f:SetWidth(50); f:SetHeight(50)
               local t = f:CreateTexture(nil, "ARTWORK")
               t:SetTexture(r, g, b)
               t:SetAllPoints()

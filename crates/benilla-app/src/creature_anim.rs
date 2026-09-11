@@ -194,8 +194,15 @@ impl Wielded {
 /// The unit is engaged in melee auto-attack (`SMSG_ATTACKSTART` .. `ATTACKSTOP`, decision 0073):
 /// standing still it plays the weapon-class Ready idle — the client's `0x5fd360` arm gates on the
 /// auto-attack-target GUID being set, i.e. engagement, **not** sheath state.
+///
+/// **It carries that GUID**, because the reference's `[+0xc48]` is the target and not a flag, and
+/// a second reader wants the unit and not just the fact: `0x6e3480`'s melee arm resolves
+/// `[caster+0xc48]` and uses THAT unit's combat reach, which is what the spell tooltip's range
+/// cell prints while you are auto-attacking (wow-re
+/// `tooltip-damage-matrix-and-container-slots.md` §D4.2b). Every animation reader still asks only
+/// `With`/`Has`, which is unchanged by the payload.
 #[derive(Component)]
-pub(crate) struct Engaged;
+pub(crate) struct Engaged(pub(crate) u64);
 
 /// The local player has fired an auto-repeat spell (Auto Shot / wand Shoot) — the client's
 /// `[+0xd58] & 0x200`, whose **only writer binary-wide** is the local cast-send tail (`0x6e593b`,
@@ -645,6 +652,12 @@ pub(crate) struct SwingMessage {
     /// 7 immune · 8 deflects (decision 0279's byte-verified consequence table keys off it).
     pub(crate) victim_state: u32,
     pub(crate) damage: u32,
+    /// `0x625e40`'s verdict, carried from the packet because **the floating number is gated by it
+    /// too** ([`benilla_protocol::messages::AttackerState::displayed`]): `0x62440d` is the first
+    /// thing the worldtext builder `0x6243e0` does. Everything else this message drives — the
+    /// animation, the flinch, the blood, the sounds, the timers — runs regardless, which is why
+    /// the verdict rides along instead of suppressing the message.
+    pub(crate) displayed: bool,
     /// [`PlaySeq`] stamp at emission (the wire drain, in packet order).
     pub(crate) seq: u64,
 }

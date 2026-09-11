@@ -14,7 +14,7 @@ fn end_to_end_two_frame_tree_extracts_in_zkey_order() {
         -- same strata/level) with a texture and a fontstring. ~30 lines of ordinary FrameXML Lua.
         local parent = CreateFrame("Frame", "Root")
         parent:SetPoint("TOPLEFT", 0, 0)          -- anchored to the screen root
-        parent:SetSize(400, 300)
+        parent:SetWidth(400); parent:SetHeight(300)
         -- SetAllPoints on each region: a templateless Lua region gets NO implicit anchor
         -- (decision 1310 — rect-less, never drawn), so real addon code anchors it, and so do we.
         local pbg = parent:CreateTexture(nil, "BACKGROUND")
@@ -23,7 +23,7 @@ fn end_to_end_two_frame_tree_extracts_in_zkey_order() {
 
         local child = CreateFrame("Frame", "Leaf", parent)
         child:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, -10)
-        child:SetSize(100, 50)
+        child:SetWidth(100); child:SetHeight(50)
         local cbg = child:CreateTexture(nil, "ARTWORK")
         cbg:SetTexture("Interface\\Child.blp")
         cbg:SetAllPoints()

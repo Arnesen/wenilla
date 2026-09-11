@@ -560,6 +560,29 @@ pub(crate) fn unit_guild(
     })
 }
 
+/// A unit's guild NAME alone — the **a5 line of the overhead name stack** (`"\n<%s>"`,
+/// `0x860f9c`), which the reference resolves through the very same guild-identity cache this
+/// serves `GetGuildInfo` from: `0x609085` tests the render mask's bit `0x10`
+/// (`UnitNamePlayerGuild`) and then reads `0x5e09f0` off the unit's own `[CGUnit+0xe68]+0x8/0xc`
+/// guild GUID (wow-re `object-layer/scratch/overhead-name.md` Q4 point 3).
+///
+/// [`unit_guild`] without the rank — and, deliberately, **without its two `String` clones**: this
+/// is read once per shown player per frame by [`crate::nameplates::drive_nameplates`], whose whole
+/// steady-frame design is that a name nothing changed allocates nothing.
+///
+/// The `None` legs are [`unit_guild`]'s, unchanged: a guildless player, a creature, and a guild id
+/// whose `CMSG_GUILD_QUERY` has not answered yet — the last of which is also what *sends* it, so
+/// the line appears a round trip later and the rebuild arm picks it up on that frame.
+pub(crate) fn unit_guild_name<'a>(
+    fields: &ObjectFields,
+    guild: &'a mut GuildState,
+    commands: &NetCommands,
+) -> Option<&'a str> {
+    guild
+        .resolve_identity(fields.player_guild_id(), commands)
+        .map(|identity| identity.name.as_str())
+}
+
 /// A unit's guild **tabard**, for the body composite — the emblem five of `SMSG_GUILD_QUERY_RESPONSE`,
 /// joined off the unit's own PUBLIC `PLAYER_GUILDID` and asking for the identity if we do not hold
 /// it, exactly like [`unit_guild`].
@@ -1205,6 +1228,49 @@ mod tests {
                 .rank_name,
             ""
         );
+    }
+
+    /// The overhead a5 line's reader answers exactly what `GetGuildInfo`'s does, on the same
+    /// three legs and with the same lazy ask — the one thing that could silently drift between
+    /// them is which of the two sends the query, and neither may skip it.
+    #[test]
+    fn unit_guild_name_is_unit_guilds_name_on_every_leg() {
+        let (commands, rx) = net_commands();
+        let mut guild = GuildState::default();
+        guild
+            .identities
+            .insert(7, identity("Legacy", &["GM", "Off"]));
+        // The negative cache: a query that came back empty is "no such guild", not a blank name.
+        guild.identities.insert(8, identity("", &[]));
+
+        let guildless = ObjectFields::from_pairs(&[]);
+        assert_eq!(unit_guild_name(&guildless, &mut guild, &commands), None);
+        assert_eq!(rx.try_iter().count(), 0, "guild id 0 asks nothing");
+
+        let unknown = ObjectFields::from_pairs(&[(191, 9)]);
+        assert_eq!(
+            unit_guild_name(&unknown, &mut guild, &commands),
+            None,
+            "a query in flight draws no line"
+        );
+        assert_eq!(rx.try_iter().count(), 1, "and the miss asked for it");
+
+        let blank = ObjectFields::from_pairs(&[(191, 8)]);
+        assert_eq!(unit_guild_name(&blank, &mut guild, &commands), None);
+        assert_eq!(
+            rx.try_iter().count(),
+            0,
+            "the negative cache re-asks nothing"
+        );
+
+        let member = ObjectFields::from_pairs(&[(191, 7), (192, 1)]);
+        assert_eq!(
+            unit_guild_name(&member, &mut guild, &commands),
+            Some("Legacy")
+        );
+        let via_line = unit_guild_name(&member, &mut guild, &commands).map(str::to_owned);
+        let via_api = unit_guild(&member, &mut guild, &commands).map(|g| g.name);
+        assert_eq!(via_line, via_api, "the two readers of one cache disagree");
     }
 
     /// A command channel whose receiver stays alive, so a send neither blocks nor is dropped.

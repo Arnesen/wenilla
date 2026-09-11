@@ -173,7 +173,8 @@ fn the_poi_pool_grows_and_parks_its_tail() {
 
 /// Hovering a POI names it in the map's area label; the description line beneath carries the
 /// landmark's status only when it has one — the guard's directions never do, a battleground
-/// node's "In Conflict" would — and is blanked otherwise (stock `WorldMapPOI_OnEnter`).
+/// node's "In Conflict" would — and is blanked otherwise (stock `WorldMapPOI_OnEnter`), which
+/// reads back as **nil**, not `""` (decision 2110).
 #[test]
 fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -188,10 +189,12 @@ fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
         "Lion's Pride Inn"
     );
     assert_eq!(
-        s.eval::<String>("return WorldMapFrameAreaDescription:GetText()")
+        s.eval::<Option<String>>("return WorldMapFrameAreaDescription:GetText()")
             .unwrap(),
-        "",
-        "no description → an empty description line"
+        None,
+        "no description → a blank line that reads back NIL: `FontString:GetText 0x79d690` \
+         substitutes nil for an empty string (decision 2110), and Cartographer 2.02's world-map \
+         hover reads exactly this as \"this POI has no status line\""
     );
 
     let mut with_status = landmark("Stables", 6, (0.5, 0.5));
@@ -745,5 +748,69 @@ fn a_click_over_a_blip_still_answers_the_maps_uv() {
         s.world_map_uv_at((cx * ceff) as f32, (cy * ceff) as f32)
             .is_none(),
         "the close button is not the map"
+    );
+}
+
+/// **The real-data hover** — the player's own DBCs, through the reference's own OnUpdate, to the
+/// string the label ends up wearing.
+///
+/// Every other world-map test in the tree stands on a hand-written catalog, which can only ever
+/// prove the engine's *arithmetic*. What a player hovers is the catalog
+/// [`crate::ui_world_map::build_catalog`] builds out of `WorldMapArea` × `AreaTable` ×
+/// `WorldMapOverlay`, indexed the way the engine indexes it, addressed by the UV
+/// `WorldMapButton_OnUpdate` computes from the live cursor through a scaled frame. Three joins,
+/// none of them covered, and the director's report ("hovering Dire Maul on the Feralas map names
+/// it in the reference and not in benilla") is exactly a break in one of them.
+///
+/// Feralas, the 5875 numbers: `WorldMapArea` 121, the `DIREMAUL` overlay's hit rect
+/// `(top 235, left 525, bottom 325, right 655)` px of the 1002×668 detail frame, naming
+/// `AreaTable` 2577 "Dire Maul" behind explore bit 953. The cursor goes at the map UV the
+/// director's own screenshot reports (58.8, 42.6), converted to a screen point through the
+/// button's rect — so the test crosses the same scale conversion the live frame does.
+#[test]
+fn the_real_feralas_catalog_names_dire_maul_under_the_cursor() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+
+    let mut chain = benilla_formats::open_chain(&data).expect("chain");
+    let areas = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable");
+    let maps =
+        benilla_assets::MapCatalogRes(benilla_formats::load_map_catalog(&mut chain).expect("Map"));
+    let (views, _) =
+        crate::ui_world_map::build_catalog(&mut chain, &areas, &maps).expect("the real catalog");
+    // Feralas' place in the pushed catalog, found the way Lua would.
+    let (ci, zi) = views
+        .iter()
+        .enumerate()
+        .find_map(|(ci, c)| {
+            c.zones
+                .iter()
+                .position(|z| z.name == "Feralas")
+                .map(|zi| (ci + 1, zi + 1))
+        })
+        .expect("Feralas is in the catalog");
+    s.set_world_map_catalog(views);
+    s.set_world_map_explored(vec![u32::MAX; 64]); // a fully-discovered character
+    s.run(&format!("SetMapZoom({ci}, {zi})")).unwrap();
+    s.run("ToggleWorldMap()").unwrap();
+    s.resolve();
+
+    // (58.8 %, 42.6 %) of the detail frame, in screen units — the same conversion
+    // `WorldMapButton_OnUpdate` inverts.
+    let (l, r, t, b, eff) = s
+        .eval::<(f32, f32, f32, f32, f32)>(
+            "return WorldMapButton:GetLeft(), WorldMapButton:GetRight(), WorldMapButton:GetTop(), \
+             WorldMapButton:GetBottom(), WorldMapButton:GetEffectiveScale()",
+        )
+        .unwrap();
+    let (x, y) = ((l + (r - l) * 0.588) * eff, (t - (t - b) * 0.426) * eff);
+    s.mouse_move(x, y);
+    update(&mut s);
+
+    assert_eq!(
+        s.eval::<String>("return WorldMapFrameAreaLabel:GetText()")
+            .unwrap(),
+        "Dire Maul",
+        "the stock OnUpdate puts the hovered sub-area's name in the label"
     );
 }

@@ -20,8 +20,9 @@
 //! deterministic captures (the tick is skipped ⇒ zero deltas ⇒ bit-identical to the old seed
 //! frames), and slot exhaustion (no slot ⇒ frozen at seed, never garbage).
 //!
-//! Region layout: between the rig-origin table and the palette rows (the palette array is
-//! runtime-sized, so it must stay last) — `wow_model.wgsl`'s struct mirrors this order.
+//! Region layout: between the rig-origin table and the straddle clip table ([`crate::straddle`]);
+//! the palette rows stay last (the palette array is runtime-sized) — `wow_model.wgsl`'s struct
+//! mirrors this order.
 
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 pub(crate) const MAX_MAT_ANIM_SLOTS: usize = 2048;
 
 /// Byte offset of the mat-anim region inside a `wow_light`-layout buffer: after the rig-origin
-/// table, before the palette rows — mirroring `wow_model.wgsl`'s struct order.
+/// table, before the straddle clip table — mirroring `wow_model.wgsl`'s struct order.
 pub(crate) fn region_offset() -> u64 {
     crate::rig_palette::rig_origin_region_offset() + crate::rig_palette::rig_origin_region_bytes()
 }

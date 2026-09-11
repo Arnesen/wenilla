@@ -186,10 +186,23 @@ impl BlizzardRandomizer {
 }
 
 /// The client's `frillDensity` CVar default — the number of (randomly-chosen, with-repeats) cells the
-/// client visits per chunk (RE'd from `WoW.exe`; range 1..256, `SetWorldDetail` sets 16/32/48). It is
-/// **not** all 64 cells — that's what makes the real clutter patchy (some cells hit 2–3×, ~50 left bare)
-/// rather than an even carpet.
-const FRILL_DENSITY: u32 = 16;
+/// client visits per chunk. It is **not** all 64 cells — that's what makes the real clutter patchy
+/// (some cells hit 2–3×, ~50 left bare) rather than an even carpet.
+///
+/// **Byte-read, not chosen**: `CVar::Register 0x63db90` at `0x68862e` passes name `0x8423d8`
+/// `"frillDensity"`, default string `0x864644` `"16"`, help "Terrain frill density", record
+/// `[0xc7f2f4]` (wow-re `re/cvar/cvar-register-sites.tsv` row 185). `SetWorldDetail 0x488dd0`
+/// writes 16/32/48 over it per slider stop, so a stop IS a multiple of this constant — which is
+/// why [`scatter_ground_doodads`] takes a multiplier and the CVar host converts at its edge
+/// ([`crate::ground_effects::FRILL_DENSITY_MAX`] is that conversion's other bound).
+pub const FRILL_DENSITY: u32 = 16;
+
+/// The top of the reference's own `frillDensity` range — its change callback `0x688de0` clamps the
+/// written value to `[1, 256]`, so this is the densest ground cover the real client will scatter
+/// (its renderer saturates first: `0x6b1d4b` computes the detail-doodad instance count as
+/// `frillDensity << 6` capped at `0x2000`, reached at 128). Named here because both the scatter's
+/// own clamp below and the `frillDensity` CVar arm in `benilla-app` have to agree on it.
+pub const FRILL_DENSITY_MAX: u32 = 256;
 
 /// Scatter ground-clutter doodads over one terrain chunk — a **bit-exact port of the client's
 /// `CMapChunk::CreateDetailDoodads`** (RE'd from `WoW.exe` @ `0x6bfc10`). One RNG stream per chunk,
@@ -219,7 +232,8 @@ pub fn scatter_ground_doodads(
     if chunk.positions.len() < 145 || density_scale <= 0.0 {
         return Vec::new();
     }
-    let frill = ((FRILL_DENSITY as f32 * density_scale).round() as i64).clamp(0, 256) as u32;
+    let frill = ((FRILL_DENSITY as f32 * density_scale).round() as i64)
+        .clamp(0, i64::from(FRILL_DENSITY_MAX)) as u32;
     if frill == 0 {
         return Vec::new();
     }

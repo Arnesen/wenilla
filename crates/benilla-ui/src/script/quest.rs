@@ -21,6 +21,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::flag;
 use super::Model;
 
 /// Which of the four questgiver sub-panels a [`QuestState`] is for (the app sets it from the wire
@@ -274,12 +275,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     install_count(lua, "GetRewardMoney", |q| i64::from(q.reward_money))?;
     install_count(lua, "GetQuestMoneyToGet", |q| i64::from(q.required_money))?;
 
-    // IsQuestCompletable() → bool (progress panel gate for the Continue button).
+    // IsQuestCompletable() → 1/nil (progress panel gate for the Continue button).
     g.set(
         "IsQuestCompletable",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.quest.as_ref().is_some_and(|q| q.completable))
+            Ok(flag(model.quest.as_ref().is_some_and(|q| q.completable)))
         })?,
     )?;
 

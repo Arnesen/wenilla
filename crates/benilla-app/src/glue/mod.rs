@@ -251,15 +251,19 @@ pub(crate) fn glue_canvas() -> (GlueCanvas, FocusPolicy, Node) {
 /// only on change keeps it off Bevy's `Changed<Node>` path on the ~every frame nothing moves.
 pub(crate) fn fit_glue_canvas(
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    scene: Option<Res<crate::portrait::CreateScene>>,
     mut canvases: Query<&mut Node, With<GlueCanvas>>,
 ) {
     if canvases.is_empty() {
         return;
     }
+    // Off the **window**, not off `CreateScene` (decision 2187): the frame is one aspect for every
+    // scene now, so the canvas has no reason to wait on the booth — which is what used to move it
+    // when a stage swap cleared the box for a frame, and what made a screen spawned before its
+    // scene lay out against the window once and snap in.
+    let window = window.single().ok();
     let (left, right) = crate::portrait::glue_canvas_bars(
-        window.single().ok(),
-        scene.and_then(|s| s.viewport_aspect()),
+        window,
+        window.and_then(|w| crate::portrait::glue_box_aspect(w.width() / w.height().max(1.0))),
     );
     let (left, right) = (Val::Px(left), Val::Px(right));
     for mut node in &mut canvases {

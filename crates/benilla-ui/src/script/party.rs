@@ -1085,19 +1085,14 @@ mod tests {
 
         for index in ["1", "10", "0", "-1", "41", "9999"] {
             assert_eq!(
-                s.eval::<i64>(&format!("return select('#', GetRaidRosterInfo({index}))"))
-                    .unwrap(),
+                s.arity(&format!("GetRaidRosterInfo({index})")).unwrap(),
                 9,
                 "index {index} must still be a nine-value answer"
             );
         }
         // And with no raid at all — the shape does not depend on being in one.
         let s = UiScript::new().unwrap();
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetRaidRosterInfo(1))")
-                .unwrap(),
-            9
-        );
+        assert_eq!(s.arity("GetRaidRosterInfo(1)").unwrap(), 9);
     }
 
     /// The miss tuple is `(nil, 0, 1, 1, nil, nil, nil, nil, nil)` — **not** nine nils, and not
@@ -1187,19 +1182,13 @@ mod tests {
     #[test]
     fn get_raid_roster_info_raises_only_on_a_non_number() {
         let s = UiScript::new().unwrap();
-        let err = s
-            .eval::<i64>("return select('#', GetRaidRosterInfo({}))")
-            .unwrap_err();
+        let err = s.arity("GetRaidRosterInfo({})").unwrap_err();
         assert!(
             format!("{err}").contains("Usage: GetRaidRosterInfo(index)"),
             "got {err}"
         );
         // A numeric string coerces (Lua 5.1's `lua_isnumber`) and does NOT raise.
-        assert_eq!(
-            s.eval::<i64>(r#"return select('#', GetRaidRosterInfo("3"))"#)
-                .unwrap(),
-            9
-        );
+        assert_eq!(s.arity(r#"GetRaidRosterInfo("3")"#).unwrap(), 9);
     }
 
     /// `UnitInRaid` answers the **constant 1**, not a roster index — the value is the hard-coded

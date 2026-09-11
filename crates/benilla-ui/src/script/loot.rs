@@ -45,6 +45,7 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
+use super::binding_abi::flag;
 use super::Model;
 
 /// `CLootButton`'s own Lua method table (`0x847ce4`) — see [`crate::widget::FrameKind::LootButton`].
@@ -330,14 +331,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // IsFishingLoot() → whether the open loot came from fishing (false when none is open).
+    // IsFishingLoot() → 1/nil, whether the open loot came from fishing (nil when none is open).
     // `LootFrame_OnShow` keys the reel-in sound + the fishing portrait overlay on it
     // (`LootFrame.lua:137-140`; decision 1086).
     g.set(
         "IsFishingLoot",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.loot.as_ref().is_some_and(|l| l.fishing))
+            Ok(flag(model.loot.as_ref().is_some_and(|l| l.fishing)))
         })?,
     )?;
 

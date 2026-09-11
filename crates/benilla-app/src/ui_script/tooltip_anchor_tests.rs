@@ -287,7 +287,7 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
 /// table so the pass means what it says.
 #[test]
 fn action_button_hover_takes_the_default_corner() {
-    let mut s = harness(&[
+    let s = harness(&[
         "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
         "Interface\\FrameXML\\TextStatusBar.lua",

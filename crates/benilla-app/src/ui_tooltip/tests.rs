@@ -55,6 +55,19 @@ impl TestCtx {
         self.ctx_for(form, sub_classes, None)
     }
 
+    /// The same context with an auto-attack target engaged — the melee range arm's second
+    /// reach, which `0x6e3480` resolves out of `[caster+0xc48]` rather than taking as an
+    /// argument.
+    fn ctx_engaged<'a>(
+        &'a mut self,
+        store: Option<&'a ObjectStore>,
+        target_reach: f32,
+    ) -> ViewCtx<'a> {
+        let mut ctx = self.ctx_for(0, None, store);
+        ctx.attack_target_reach = Some(target_reach);
+        ctx
+    }
+
     fn ctx_for<'a>(
         &'a mut self,
         form: u8,
@@ -65,6 +78,10 @@ impl TestCtx {
             home_area: None,
             form,
             store,
+            combat_reach: store.map_or(1.5, |s| s.0.unit_combat_reach()),
+            // The tests drive the melee arm through `combat_reach` alone; the engaged-target
+            // reach has its own case in `range_cell_on_real_data`.
+            attack_target_reach: None,
             items: &mut self.items,
             commands: &self.commands,
             sub_classes,
@@ -255,6 +272,75 @@ fn cost_and_cast_cells_on_real_data() {
         .expect("Mind Flay view");
     assert_eq!(v.cost.as_deref(), Some("45 Mana"));
     assert_eq!(v.cast_time.as_deref(), Some("Channeled"));
+}
+
+/// The RANGE cell's whole law on the REAL 5875 data (wow-re `tooltip-globalstring-key-resolves.md`
+/// §A3): the melee family renders through `SPELL_RANGE` off the caster's own combat reach — the
+/// invented "Melee Range" decision 2080 named is gone — the authored rows print their own numbers
+/// through the same key, and the on-next-swing class and the self-only rows print no cell at all.
+/// Skips without client data.
+#[test]
+fn range_cell_on_real_data() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let spells = Spells {
+        catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),
+        forms: benilla_formats::load_shapeshift_forms(&mut chain).expect("SpellShapeshiftForm.dbc"),
+        ranges: benilla_formats::load_spell_ranges(&mut chain).expect("SpellRange.dbc"),
+        cast_times: benilla_formats::load_spell_cast_times(&mut chain).expect("SpellCastTimes.dbc"),
+        durations: benilla_formats::load_spell_durations(&mut chain).expect("SpellDuration.dbc"),
+        radii: benilla_formats::load_spell_radii(&mut chain).expect("SpellRadius.dbc"),
+    };
+    let mut t = TestCtx::new();
+    // A default-reach player: `UNIT_FIELD_COMBATREACH` (130) unset reads the descriptor's 1.5.
+    let store = empty_player();
+
+    // Sinister Strike (1752) sits on SpellRange row 2 "Combat Range" — the ONE shipped row with
+    // flags bit 0. 1.5 + 1.5 + 1.3333334 = 4.333 does not clear the 5.0 floor, so the cell reads
+    // the floor: the melee family's normal render is a NUMBER, not a word.
+    let d = spells.catalog.get(1752).expect("Sinister Strike 1752");
+    assert_eq!(d.range_index, 2, "the melee row");
+    assert!(spells.ranges.get(2).expect("row 2").is_melee());
+    let v = spell_tooltip_view(1752, &spells, &mut t.ctx_for(0, None, Some(&store)))
+        .expect("Sinister Strike view");
+    assert_eq!(v.range.as_deref(), Some("5 yd range"));
+
+    // …and it MOVES with the caster's reach, which is the whole reason the cell needs a store:
+    // 4.0 + 4.0 + 1.3333334 = 9.333 clears the floor and `fistp` rounds it to 9.
+    let big = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+        130u16,
+        4.0f32.to_bits(),
+    )]));
+    let v = spell_tooltip_view(1752, &spells, &mut t.ctx_for(0, None, Some(&big)))
+        .expect("Sinister Strike view");
+    assert_eq!(v.range.as_deref(), Some("9 yd range"));
+
+    // …and the second reach is the AUTO-ATTACK target's, not the caster's doubled: swinging at
+    // a 4.0-reach mob with a default 1.5 body reads 1.5 + 4.0 + 1.3333334 = 6.833 -> 7.
+    let v = spell_tooltip_view(1752, &spells, &mut t.ctx_engaged(Some(&store), 4.0))
+        .expect("Sinister Strike view");
+    assert_eq!(v.range.as_deref(), Some("7 yd range"));
+
+    // An authored single-number row: Fireball's 0–35.
+    let v = spell_tooltip_view(133, &spells, &mut t.ctx_for(0, None, Some(&store)))
+        .expect("Fireball view");
+    assert_eq!(v.range.as_deref(), Some("35 yd range"));
+
+    // An authored PAIR (the `"%d-%d"` nested fill): Charge's 8–25, unpadded — the tooltip's own
+    // `GetMinMaxRange` call passes `target = NULL`, so the reach never joins these two.
+    let v =
+        spell_tooltip_view(100, &spells, &mut t.ctx_for(0, None, Some(&big))).expect("Charge view");
+    assert_eq!(v.range.as_deref(), Some("8-25 yd range"));
+
+    // The two absences. Heroic Strike (78) carries the on-next-swing pair, which jumps the cell
+    // before the resolver runs — it does NOT read "Melee Range", and it does not read 5 yd
+    // either. Bloodrage (2687) sits on the self row, whose resolved max is 0.
+    let v = spell_tooltip_view(78, &spells, &mut t.ctx_for(0, None, Some(&store)))
+        .expect("Heroic Strike view");
+    assert_eq!(v.range, None, "Attributes & 0x404 → no range cell");
+    let v = spell_tooltip_view(2687, &spells, &mut t.ctx_for(0, None, Some(&store)))
+        .expect("Bloodrage view");
+    assert_eq!(v.range, None, "the self row resolves max 0");
 }
 
 /// The three lines the 2026-07-25 reference captures pinned (decision 0620), each against the

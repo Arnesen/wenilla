@@ -73,14 +73,14 @@ fn settled_default_ui() -> UiScript {
     s
 }
 
-/// One frame in the app's own order (`extract::drive_script`): measure FIRST, then resolve.
+/// One frame in the app's own order (`extract::tick_script`): measure FIRST, then resolve.
 fn app_frame(s: &mut UiScript) {
     answer_measures(s);
     s.resolve();
 }
 
 /// A frame that also **ticks the VM**, i.e. runs the shipped UI's own `OnUpdate` handlers, in
-/// `drive_script`'s real order (tick → measure → resolve).
+/// `tick_script`'s real order (tick → measure → resolve).
 ///
 /// [`app_frame`] deliberately models only the measure/resolve half, and the tooltip benches stand
 /// in for the handler by calling it themselves. That is fine when the test IS the driver — but a
@@ -97,7 +97,7 @@ fn app_frame_ticked(s: &mut UiScript, dt: f32) {
 fn install_changing_tooltip(s: &UiScript, owner: &str, func: &str) {
     s.run(&format!(
         r#"
-        local a = CreateFrame("Button", "{owner}"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "{owner}"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         {func}_n = 0
         function {func}()
             {func}_n = {func}_n + 1
@@ -174,7 +174,7 @@ fn a_tooltip_content_change_costs_exactly_one_layout_solve() {
     assert_eq!(
         solves, 10,
         "10 content changes must cost 10 solves — one each. Two per change means the measure \
-         round-trip is running AFTER the resolve again (extract::drive_script's order)."
+         round-trip is running AFTER the resolve again (extract::tick_script's order)."
     );
     // …and none of those ten may DERIVE the graph (decision 1388). This is the second shape of
     // the same law `a_region_moving_every_frame_costs_no_graph_derivation_on_the_shipped_ui`
@@ -534,7 +534,7 @@ fn a_tooltip_line_flipping_wrapped_to_plain_costs_no_graph_derivation() {
     s.run(
         r#"
         FlipOwner = CreateFrame("Button", "FlipOwner"); FlipOwner:SetPoint("CENTER", 0, 0)
-        FlipOwner:SetSize(10, 10)
+        FlipOwner:SetWidth(10); FlipOwner:SetHeight(10)
         flip_n = 0
         -- The two shapes a hover alternates between. The trailing `1` on the wrap arm is
         -- `AddLine`'s positional wrapText flag (the byte-pinned 0x531630 signature) — it is what
@@ -606,7 +606,7 @@ fn a_hover_sweep_across_owners_costs_no_graph_derivation() {
         r#"
         for i = 1, 12 do
             local b = CreateFrame("Button", "SweepOwner" .. i)
-            b:SetPoint("CENTER", 0, 0); b:SetSize(10, 10)
+            b:SetPoint("CENTER", 0, 0); b:SetWidth(10); b:SetHeight(10)
         end
         sweep_n = 0
         -- A different owner AND a different line shape every step: the two halves of a real sweep
@@ -664,7 +664,9 @@ fn a_hover_sweep_across_owners_costs_no_graph_derivation() {
 /// do not use it. With `UberTooltips` at its shipped default of `"1"`, every action button routes
 /// through `GameTooltip_SetDefaultAnchor` (stock `ActionButton_SetTooltip`, and the stance/pet/bonus bars the
 /// same), which is `SetOwner(owner, "ANCHOR_NONE")` followed by an explicit `SetPoint` — a
-/// completely different arm of the same verb, and the one that DROPS the tooltip's anchors.
+/// completely different arm of the same verb, and the one that DROPS the tooltip's anchors
+/// (`0x52fe90`'s mode-7 leg reaches `0x52fec2 call 0x767ed0` like every mode but PRESERVE — 2176
+/// re-confirmed that at the bytes after 2142 predicted the opposite).
 ///
 /// That drop took the conservative touch, so it re-derived the whole graph on every button the
 /// cursor crossed — and on nothing else, which is why it survived two rounds of fixing and a
@@ -679,7 +681,7 @@ fn an_action_bar_hover_sweep_costs_no_graph_derivation() {
         r#"
         for i = 1, 12 do
             local b = CreateFrame("Button", "BarOwner" .. i)
-            b:SetPoint("CENTER", 0, 0); b:SetSize(36, 36)
+            b:SetPoint("CENTER", 0, 0); b:SetWidth(36); b:SetHeight(36)
         end
         bar_n = 0
         -- `GameTooltip_SetDefaultAnchor`'s body, which is what every action button actually runs:
@@ -721,8 +723,90 @@ fn an_action_bar_hover_sweep_costs_no_graph_derivation() {
     let derives = s.layout_derivations() - derives_before;
     assert_eq!(
         derives, 0,
-        "24 action-bar hovers derived the layout graph {derives} times. `SetOwner`'s ANCHOR_NONE \
-         arm drops the tooltip's anchors, which is a retarget to the EMPTY target set and names \
-         its node like any other (decision 1630, extending 1625)."
+        "24 action-bar hovers derived the layout graph {derives} times. The `ClearAllPoints()` on \
+         `GameTooltip_SetDefaultAnchor`'s next line is a retarget to the EMPTY target set and must \
+         name its node like any other (decision 1630, extending 1625; 2176 moved the emptying \
+         itself off `SetOwner`'s ANCHOR_NONE arm, which the reference leaves alone)."
+    );
+}
+
+/// **The bag-addon hover law** (decision 2114, ledger B06's third idiom): a hover that owns the
+/// tooltip WITH an anchor and then re-points it by hand must cost **zero** derivations.
+///
+/// The guard above drives `SetOwner(owner, "ANCHOR_NONE")` + `ClearAllPoints()`, and it has always
+/// passed — because ANCHOR_NONE already dropped the anchors, so the `ClearAllPoints()` after it
+/// finds an empty list and touches nothing at all. It is the third idiom that was never driven:
+///
+/// ```lua
+/// -- Bagnon_Core/core/Item.lua -> Bagnon_Core/core/Utility.lua
+/// ContainerFrameItemButton_OnEnter(item)      -- SetOwner(item, "ANCHOR_RIGHT"): sets an anchor
+/// Bagnon_AnchorTooltip(item)                  -- ClearAllPoints(), then GetLeft(), then SetPoint
+/// ```
+///
+/// `ClearAllPoints()` with anchors present took the conservative touch, and the `GetLeft()` on the
+/// next line settles the layout right there — so the whole graph was re-derived INSIDE the handler,
+/// once per bag slot the cursor crossed. Measured live on `Probetwo` with the director's AddOns
+/// folder, `WOW_UI_HANDLERS=8` over a 60 Hz sweep of twelve `BagnonItem*` buttons: `OnEnter` self
+/// 1.75 ms/frame and `[layout-derive]` naming this site in three of its four samples, against
+/// 0.43 ms/frame of total `tick` for the same sweep over stock `ContainerFrame1Item*` with no
+/// addons. `derives/frame` read 0.88 with Bagnon and 0.00 without.
+#[test]
+fn a_bag_addon_hover_sweep_costs_no_graph_derivation() {
+    let mut s = settled_default_ui();
+    s.run(
+        r#"
+        for i = 1, 12 do
+            local b = CreateFrame("Button", "BagOwner" .. i)
+            b:SetPoint("CENTER", 0, 0); b:SetWidth(37); b:SetHeight(37)
+        end
+        bag_n = 0
+        function bag_hover()
+            bag_n = bag_n + 1
+            local item = getglobal("BagOwner" .. (math.mod(bag_n, 12) + 1))
+            -- ContainerFrameItemButton_OnEnter's arm: an ANCHORED SetOwner.
+            GameTooltip:SetOwner(item, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("Item " .. bag_n, 1, 1, 1)
+            if math.mod(bag_n, 2) == 0 then
+                GameTooltip:AddLine("Use: restores health over 21 sec.", 0, 1, 0, 1)
+            else
+                GameTooltip:AddLine("Main Hand", 1, 1, 1)
+            end
+            GameTooltip:Show()
+            -- …then Bagnon_AnchorTooltip: drop the anchors it just set, ASK A RESOLVED EDGE
+            -- (which settles the layout on the spot), and re-point by hand.
+            GameTooltip:ClearAllPoints()
+            local left = item:GetLeft() or 0
+            if left < (UIParent:GetRight() / 2) then
+                GameTooltip:SetPoint("TOPLEFT", item, "BOTTOMRIGHT")
+            else
+                GameTooltip:SetPoint("TOPRIGHT", item, "BOTTOMLEFT")
+            end
+        end
+        "#,
+    )
+    .unwrap();
+
+    // Positive control across the births and the line pool's growth — both structural.
+    let born_at = s.layout_derivations();
+    for _ in 0..40 {
+        s.run("bag_hover()").unwrap();
+        app_frame(&mut s);
+    }
+    assert!(
+        s.layout_derivations() > born_at,
+        "creating twelve slots must derive the graph — zero here makes the assertion vacuous."
+    );
+
+    let derives_before = s.layout_derivations();
+    for _ in 0..24 {
+        s.run("bag_hover()").unwrap();
+        app_frame(&mut s);
+    }
+    let derives = s.layout_derivations() - derives_before;
+    assert_eq!(
+        derives, 0,
+        "24 bag-slot hovers derived the layout graph {derives} times — one per slot crossed. \
+         `ClearAllPoints` drops a node's whole anchor-target set, which is a retarget onto the \
+         EMPTY set and names its node like any other (decision 2114, completing 1625/1630)."
     );
 }

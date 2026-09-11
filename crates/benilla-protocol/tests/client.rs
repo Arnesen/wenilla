@@ -723,3 +723,56 @@ fn ping_body_golden_and_pong_roundtrip() {
         other => panic!("expected one Pong event, got {other:?}"),
     }
 }
+
+/// **`SMSG_ADDON_INFO`, against the retail capture's own bytes** (decision 2175).
+///
+/// The reply carries no count and no names: the client re-walks the `## Secure:` list it sent and
+/// reads one record per addon. The 2006 capture is the minimal form — 96 bytes, 12 x
+/// `{status = 2, infoProvided = 1, keyProvided = 0, revision = 0u32, urlProvided = 0}` — and
+/// `status = 2` is what sets `[rec+0x29] = 1` (`0x51db84`) and drops the addon from the Lua index
+/// space (wow-re `system/net/scratch/cmsg-auth-session-addon-block.md` §6).
+#[test]
+fn the_addon_info_reply_pairs_its_statuses_back_against_what_we_sent() {
+    let capture: Vec<u8> = std::iter::repeat_n(hx("0201000000000000"), 12)
+        .flatten()
+        .collect();
+    assert_eq!(capture.len(), 96, "the capture is 12 x 8 bytes");
+    let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &capture).unwrap();
+    let ServerPacket::AddonInfo { statuses } = packet else {
+        panic!("expected AddonInfo");
+    };
+    assert_eq!(statuses, vec![2u8; 12]);
+
+    // Paired back against the block we send, every stock addon is hidden from the index space —
+    // which is why the reference's AddOns list shows the player's addons and none of Blizzard's.
+    let hidden = messages::hidden_from_reply(&statuses, &messages::STOCK_SECURE_ADDONS);
+    assert_eq!(hidden.len(), 12);
+    assert!(
+        hidden.iter().all(|n| n.starts_with("Blizzard_")),
+        "{hidden:?}"
+    );
+
+    // A record that says it carries a key and a url is 8 + 256 + 256 bytes, and `status = 1`
+    // leaves the addon VISIBLE — the exclusion is `2` alone, not "the server said something".
+    let mut fat = vec![1u8, 1, 1];
+    fat.extend(std::iter::repeat_n(0xABu8, 256)); // modulus
+    fat.extend([0u8; 4]); // revision
+    fat.push(1); // urlProvided
+    fat.extend(std::iter::repeat_n(b'x', 256)); // url
+    let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &fat).unwrap();
+    let ServerPacket::AddonInfo { statuses } = packet else {
+        panic!("expected AddonInfo");
+    };
+    assert_eq!(statuses, vec![1u8], "the fat record parsed whole");
+    assert!(messages::hidden_from_reply(&statuses, &messages::STOCK_SECURE_ADDONS).is_empty());
+
+    // A truncated record contributes nothing, and the whole ones before it survive — the pairing
+    // against what we sent cannot slip.
+    let mut short = hx("0201000000000000").to_vec();
+    short.extend([2u8, 1]); // a second record that stops mid-way
+    let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &short).unwrap();
+    let ServerPacket::AddonInfo { statuses } = packet else {
+        panic!("expected AddonInfo");
+    };
+    assert_eq!(statuses, vec![2u8], "only the whole record counted");
+}

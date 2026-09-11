@@ -18,6 +18,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::flag;
 use super::Model;
 
 /// Action-kind bytes — bits 24–31 of the wire's packed slot word (VERIFIED vmangos `Player.h`
@@ -196,11 +197,12 @@ pub(super) fn truthy_nonzero(v: &Value) -> bool {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
+    // HasAction(action) → 1/nil, the reference's predicate shape (`super::binding_abi::flag`).
     g.set(
         "HasAction",
         lua.create_function(|lua, action: u32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.actions.contains_key(&action))
+            Ok(flag(model.actions.contains_key(&action)))
         })?,
     )?;
 
@@ -640,11 +642,7 @@ mod tests {
             );
         }
         // One value on every non-raising path — never zero values.
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetActionText(4))")
-                .unwrap(),
-            1
-        );
+        assert_eq!(s.arity("GetActionText(4)").unwrap(), 1);
     }
 
     /// A missing or non-number slot **raises** (`0x4e70be` → `0x6f4940`, which never returns).

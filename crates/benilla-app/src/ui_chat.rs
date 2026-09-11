@@ -40,9 +40,12 @@ mod input;
 mod language;
 /// `LoggingChat`/`LoggingCombat` — the two log files `/chatlog` and `/combatlog` toggle.
 mod logging;
+/// The `AUTO_JOIN_GUILD_CHANNEL` cascade (decision 2144) — the one place the client joins or
+/// leaves `GuildRecruitment - City` on its own.
+mod recruitment;
 /// The chat windows' saved look (B246, decision 1589) — where the tab menu's tint/alpha/font-size
 /// picks are read from at login and written back at logout.
-mod settings;
+pub(crate) mod settings;
 #[cfg(test)]
 mod tests;
 
@@ -60,6 +63,10 @@ pub(crate) use event::event_name;
 pub(crate) use event::{default_color, ChatEvent, ChatEventKind};
 pub(crate) use feed::ChatLog;
 pub(crate) use frames::ChatWindows;
+/// The per-character chat cache's restore. Called from the world-entry UI load rather than from a
+/// system, because the two events it fires have to precede the session's first chat line and
+/// `PLAYER_LOGIN` — see [`settings::restore_chat_looks`] and decision 2119.
+pub(crate) use settings::restore_chat_looks;
 
 pub(crate) struct UiChatPlugin;
 
@@ -72,7 +79,16 @@ impl Plugin for UiChatPlugin {
             .init_resource::<frames::ChatWindows>()
             .init_resource::<edit::ChannelState>()
             .init_resource::<channels::ZoneChannelWalk>()
+            .init_resource::<recruitment::GuildRecruitmentCascade>()
             .init_resource::<language::ChatLanguages>()
+            .init_resource::<combat::CombatLogRanges>()
+            // `CombatLogPeriodicSpells`' knob, beside its sibling range set — both are
+            // `KnobParams` members, so a missing one is not a dormant default but a
+            // STARTUP PANIC in `cvars::load_config` (which takes them all as `ResMut`).
+            // 947ba585f registered it only in the `cvar_app()` test helper, and the client
+            // stopped booting; the unit suites never noticed because each builds its own
+            // world. `scripts/smoke.sh` is the gate that sees this class.
+            .init_resource::<combat::LogPeriodicSpells>()
             // `ChatChannels.dbc` — six rows, read once; the auto-join walk and every chat event's
             // arg7 both come out of it. **`.after(AssetSet::Open)` is load-bearing**: without it
             // this runs before the patch chain exists, takes its `assets: Option<Res<_>>` `None`
@@ -176,14 +192,27 @@ impl Plugin for UiChatPlugin {
             // drop that stays in-world for the reconnect. The disconnect twin is chained BEFORE the
             // walk so a drop and a walk landing on the same frame cannot re-diff against membership
             // the drop just invalidated.
+            //
+            // **After `AreaAuthoritySet`** (decision 2130), like the zone-text feed and the breath
+            // classifier — the other two systems that act on the leaf area. The walk turns the zone
+            // into packets, so reading last frame's answer is not a cosmetic lag: it joined the
+            // previous character's capital at login and then left it again, and the leave took the
+            // stock `ChatFrame_OnEvent`'s channel registration with it.
+            //
+            // The guild-recruitment cascade (decision 2144) runs **after the walk**, where the
+            // reference runs it — the tail of `ZoneChannelRefresh` — and reads the zone the walk
+            // just published.
             .add_systems(
                 Update,
                 (
                     channels::end_session_channels_on_disconnect,
                     channels::auto_join_zone_channels
                         .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                    recruitment::guild_recruitment_cascade
+                        .run_if(in_state(crate::char_select::ClientState::InWorld)),
                 )
-                    .chain(),
+                    .chain()
+                    .after(benilla_world::terrain_stream::AreaAuthoritySet),
             )
             .add_systems(
                 OnExit(crate::char_select::ClientState::InWorld),

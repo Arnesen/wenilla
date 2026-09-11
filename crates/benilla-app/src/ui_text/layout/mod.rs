@@ -43,6 +43,28 @@ const WRAP_MIN_WIDTH: f32 = 1.0;
 /// line-stack stop ([`overflow::lines_allowed`]) and the ellipsis gate ([`ellipsize_to_fit`]).
 const HEIGHT_LIMIT_MIN: f32 = 1.0;
 
+/// **Which grid a text block's top may land on** — the layout input decision 2172 made explicit.
+///
+/// The client has one vertical anchor snap ([`snap_block_top`]) and applies it to every
+/// `FontString`, because in the reference the interface *is* the framebuffer's pixel grid: the
+/// snap and the rect cannot disagree. benilla has frames that live outside that grid — the
+/// WorldFrame overlays (V-plates, chat bubbles, overhead names) that slide continuously over the
+/// 3-D scene and take their own DEVICE-pixel seat law ([`crate::vplates::device_snap`],
+/// 0188/1398). Snapping their text on the UI's coarser LOGICAL grid puts two quantizers on one
+/// sliding object, and the text beats against the art it is drawn inside.
+///
+/// This used to be inferred from the rect: a degenerate (zero-height) rect skipped the snap, and
+/// the overlay painters all happened to pass one. Decision 2148 gave the V-plate real FontString
+/// regions with real rects, and the inference silently stopped selecting them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TextSeat {
+    /// The client's law: the block top takes [`snap_block_top`]. Every interface `FontString`.
+    UiGrid,
+    /// The block top is exactly where `rect` puts it; only the per-glyph device rounding
+    /// downstream quantizes it, on the same grid the overlay's own art is snapped to.
+    Exact,
+}
+
 /// A `FontString`'s two justification axes (`justifyH`/`justifyV`), bundled — they arrive together
 /// from the region's paint and travel together into [`layout_text_quads`].
 #[derive(Clone, Copy)]
@@ -166,7 +188,7 @@ pub(crate) struct LinkSpan {
 }
 
 /// Lays out `text` within `rect` (screen px, **y-down** — the same space
-/// [`crate::ui_script::extract::drive_script`] already flips frame rects into) and returns one
+/// [`crate::ui_script::extract::paint_script`] already flips frame rects into) and returns one
 /// [`UiQuad`] per non-blank glyph, textured with the page its cell was packed into. `z_key` is
 /// shared by every glyph — the owning `FontString` region's own [`crate::ui_pass`]-order key
 /// (regions already sort after their frame and by draw layer/decl, so reusing it keeps text in the
@@ -179,6 +201,7 @@ pub(crate) struct LinkSpan {
 /// line block vertically (default `Middle`, the client's FontString default; degenerate zero-height
 /// rects keep top). Each line is measured once (a first pass laying glyphs at a zero line-origin),
 /// then shifted by the justification offset.
+#[allow(clippy::too_many_arguments)] // the shared layout context, plus the seat
 pub(crate) fn layout_text_quads(
     e: &mut TextEngine,
     text: &str,
@@ -187,8 +210,9 @@ pub(crate) fn layout_text_quads(
     justify: Justify,
     z_key: u64,
     font: FontSpec,
+    seat: TextSeat,
 ) -> Vec<UiQuad> {
-    layout_text_quads_inner(e, text, rect, base_color, justify, z_key, font, None)
+    layout_text_quads_inner(e, text, rect, base_color, justify, z_key, font, seat, None)
 }
 
 /// [`layout_text_quads`] that also collects the laid-out [`LinkSpan`]s — the message-frame path
@@ -203,6 +227,7 @@ pub(crate) fn layout_text_quads_links(
     justify: Justify,
     z_key: u64,
     font: FontSpec,
+    seat: TextSeat,
     links_out: &mut Vec<LinkSpan>,
 ) -> Vec<UiQuad> {
     layout_text_quads_inner(
@@ -213,6 +238,7 @@ pub(crate) fn layout_text_quads_links(
         justify,
         z_key,
         font,
+        seat,
         Some(links_out),
     )
 }
@@ -226,6 +252,7 @@ fn layout_text_quads_inner(
     justify: Justify,
     z_key: u64,
     font: FontSpec,
+    seat: TextSeat,
     mut links_out: Option<&mut Vec<LinkSpan>>,
 ) -> Vec<UiQuad> {
     let gradient = font.alpha_gradient;
@@ -324,10 +351,10 @@ fn layout_text_quads_inner(
     // which appears nowhere in the placement path; seating with it dropped every line ~3px too low.
     let ascent_ratio = e.ascent_ratio_of(r.face);
     let baseline_in_cell = (f64::from(r.size) * f64::from(ascent_ratio) + 0.5).floor() as f32;
-    // The block top takes the client's ONE vertical snap ([`snap_block_top`]); a degenerate
-    // (single-point / world-text) rect keeps its exact fractional origin — those callers
-    // (nameplates/vplates/combat_text) own their own seating laws and re-seat by ink.
-    let block_top = if rect.height() > f32::EPSILON {
+    // The block top takes the client's ONE vertical snap ([`snap_block_top`]) — unless this block
+    // seats outside the UI's pixel grid ([`TextSeat::Exact`], the WorldFrame overlays), or its rect
+    // is degenerate (a single-point / pre-measure rect has no seat to snap to).
+    let block_top = if seat == TextSeat::UiGrid && rect.height() > f32::EPSILON {
         snap_block_top(rect.min.y + v_offset)
     } else {
         rect.min.y + v_offset
@@ -660,6 +687,69 @@ mod measure_fits_render {
         }
     }
 
+    /// **A world-seated block follows its rect; a UI-seated one snaps to the grid.**
+    ///
+    /// The V-plate slides over the world on the DEVICE pixel grid ([`crate::vplates::device_snap`],
+    /// 0188/1398) — half a logical pixel per step at 2×, which is why the border art glides. Its
+    /// name and level are drawn *inside* it and have to be rigid to it. Under
+    /// [`TextSeat::UiGrid`] the block top takes [`snap_block_top`], a WHOLE-logical-pixel
+    /// quantizer, so the ink holds still for one step of the border and then jumps two: the text
+    /// beats against the art at half the plate's step rate. That is the "level and name text look
+    /// janky af walking up to a mob" the director reported the day after decision 2148 moved the
+    /// plate's strings out of a painter that never snapped them (2172).
+    ///
+    /// The walk is the plate's own: half-pixel steps at dpi 2, the seat the driver actually hands
+    /// the widget layer.
+    #[test]
+    fn a_world_seated_block_tracks_its_rect_and_a_ui_one_snaps() {
+        let Some(mut e) = test_engine(2.0) else {
+            eprintln!("skipping: no install / font chain");
+            return;
+        };
+        let s = spec(13.0);
+        let (mut exact, mut grid) = (Vec::new(), Vec::new());
+        for step in 0..24 {
+            #[allow(clippy::cast_precision_loss)]
+            let top = 100.0 + step as f32 * 0.5;
+            let rect = Rect::new(40.0, top, 140.0, top + 14.0);
+            for (seat, out) in [(TextSeat::Exact, &mut exact), (TextSeat::UiGrid, &mut grid)] {
+                let quads = layout_text_quads(
+                    &mut e,
+                    "Twilight Avenger",
+                    rect,
+                    [1.0; 4],
+                    Justify {
+                        h: JustifyH::Center,
+                        v: JustifyV::Middle,
+                    },
+                    0,
+                    s,
+                    seat,
+                );
+                assert!(!quads.is_empty(), "the name drew");
+                out.push(quads.iter().map(|q| q.rect.min.y).fold(f32::MAX, f32::min));
+            }
+        }
+        // Rigid: every half-pixel step of the rect is a half-pixel step of the ink.
+        for (i, w) in exact.windows(2).enumerate() {
+            assert!(
+                (w[1] - w[0] - 0.5).abs() < 1e-3,
+                "world-seated step {i}: the rect moved 0.5px and the ink moved {}",
+                w[1] - w[0]
+            );
+        }
+        // The defect, stated so it cannot come back quietly: the UI grid quantizes this same walk
+        // to whole pixels — some steps move nothing and others move a full pixel, none move 0.5.
+        assert!(
+            grid.windows(2).any(|w| w[1] - w[0] > 0.9),
+            "the UI grid must actually quantize, else this test proves nothing: {grid:?}"
+        );
+        assert!(
+            grid.windows(2).all(|w| (w[1] - w[0] - 0.5).abs() > 1e-3),
+            "a UI-grid seat never lands between two logical pixels: {grid:?}"
+        );
+    }
+
     /// **One line is ONE baseline — at every DPI, size and seat.**
     ///
     /// The emit pass's whole claim (decision 1342) is that a line is flat *by construction*: one
@@ -703,6 +793,7 @@ mod measure_fits_render {
                         },
                         0,
                         s,
+                        TextSeat::UiGrid,
                     );
                     let lo = quads
                         .iter()
@@ -763,6 +854,7 @@ mod measure_fits_render {
                 },
                 0,
                 s,
+                TextSeat::UiGrid,
             );
             let ink = quads.iter().map(|q| q.rect.max.x).fold(0.0f32, f32::max);
             assert!(
@@ -798,6 +890,7 @@ mod measure_fits_render {
             },
             0,
             s,
+            TextSeat::UiGrid,
         );
         assert!(quads.len() > 8, "the string drew");
         let dpi = 2.0f32;

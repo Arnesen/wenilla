@@ -38,12 +38,14 @@
 //! ([`join_ref`]) and hands the provider one already-resolved path; the provider decides what that
 //! path is allowed to reach. [`load`] starts at the root, [`load_in`] starts at a named directory.
 //!
-//! A path with **no provider hit is an error**, not a warning: by [`LoadReport`]'s own definition
-//! errors are "things that dropped a frame or a handler", and an unresolved `<Include>` drops a
-//! whole document while an unresolved `<Script file=>` drops every handler in it. It was a warning
-//! until 1186, and the cost was that an addon which resolved *nothing* reported success — Bagnon
-//! missed all eleven of its references and came back with zero errors. The load still continues
-//! (0068: the client logs and carries on); only the reporting changed.
+//! A path with **no provider hit gets its own list**, [`LoadReport::missing_files`] — neither a
+//! warning nor an error (decision 2155). It was a warning until 1186, and the cost was that an
+//! addon which resolved *nothing* reported success — Bagnon missed all eleven of its references
+//! and came back with zero errors. 1186 answered that by calling it an error, which fixed the
+//! visibility and got the *severity* wrong the other way: the reference logs `"Couldn't open %s"`
+//! and carries on, with nothing raised, so an addon shipping an incomplete package was scoring as
+//! a client script error and reaching the player's red error dialog. Both facts are true and they
+//! need two different lists. The load continues either way (0068: the client logs and carries on).
 //!
 //! ## MAXCSTACK discipline (decision 0068, probe A)
 //!
@@ -73,14 +75,43 @@ mod widgets;
 pub struct LoadReport {
     /// Tolerable issues: a missing include/script provider, an unsupported-in-v1 attribute or script
     /// handler, an unregistered `inherits=` font object, and the parse/expand warnings folded in from
-    /// the document layer. None of these dropped a frame.
+    /// the document layer. None of these dropped a frame — except one, on purpose: an **unknown
+    /// frame type** drops its own node here rather than in `errors`, because that is the channel
+    /// the reference uses for it at the XML door (`0x6ee356`, logged and non-fatal; decision 2191).
     pub warnings: Vec<String>,
-    /// Things that dropped a frame or a handler: an unknown frame type, a handler that failed to
-    /// compile, a method call that errored, a malformed included document.
+    /// Things that dropped a frame or a handler and that the reference RAISES on: a handler that
+    /// failed to compile, a method call that errored, a malformed included document.
     pub errors: Vec<String>,
+    /// **A named file the provider does not have** — an `<Include file=>` or `<Script file=>` whose
+    /// resolved path hit nothing (decision 2155).
+    ///
+    /// Its own list because it is its own severity, and 1186 put it in the wrong one. The reference
+    /// does not raise here: `0x6edaa0` logs `"Couldn't open %s"` (`0x846ff4`) and returns null, the
+    /// `<Include>` arm never tests the recursion's result (`0x6ee00d` → `0x6ee012`), and the
+    /// `<Script>` leg reports `"Error loading %s"` (`0x872e50`) and returns 0 — every failure leg
+    /// reports through the sink and returns normally, with no throw and no `longjmp`
+    /// (wow-re `ui/scratch/xml-toc-path-resolution.md` §4 and `include-lua-dispatch.md` §7, both
+    /// VERIFIED). This is the same rule 2107 unified for the `.toc` walk and the demand load, at
+    /// the two doors 2107 did not reach.
+    ///
+    /// **1186's finding is preserved and it is why this is not simply folded into
+    /// [`Self::warnings`]:** a document that resolved *nothing* must not report success — Bagnon
+    /// missed all eleven of its references and came back with zero errors. It still reports them,
+    /// under a name that says which kind of failure it is, and the caller decides severity by
+    /// whose manifest lied (`ui_script::addons`: ours is an `error!`, a player's addon a `warn!`,
+    /// both retained where the player can read them and neither raising a script error).
+    pub missing_files: Vec<String>,
     /// How many frame instances were successfully created (`CreateFrame` returned a wrapper) — the
     /// coverage number the real-file smoke test reports.
     pub frames: usize,
+    /// **The loader's trace lines, emitted only while `FrameXML_Debug` is on** (decision 2160).
+    ///
+    /// Empty in every normal load, which is the reference's own default: `[0xceea30]` boots at 0
+    /// and each of the loader's five trace sites is gated `flag > 0` (`0x6ee298 jle`). Its own
+    /// list rather than a `warnings` row because a trace is not a defect — the reference files it
+    /// into the same per-document record at severity **0**, one below the `frameStrata` warning's
+    /// severity 1.
+    pub traces: Vec<String>,
 }
 
 /// Materialize a parsed FrameXML document into live frames in `script`.
@@ -92,7 +123,8 @@ pub struct LoadReport {
 /// instance is expanded ([`crate::framexml::expand`]) and materialized.
 ///
 /// `files` is the engine-free seam (see module docs): it resolves a FrameXML/Lua path to its
-/// **bytes**. Returning `None` yields a warning, not an error.
+/// **bytes**. Returning `None` yields a [`LoadReport::missing_files`] row — reported, but not an
+/// error, because nothing raised (decision 2155).
 pub fn load(
     script: &UiScript,
     doc: &ParsedDocument,
@@ -393,9 +425,18 @@ impl Loader<'_> {
     /// source snippet, and the separator is `\` because that is the shape an addon parsing its own
     /// `debugstack()` matches against (`crate::script::addon_chunk_name`).
     fn run(&self, chunk: &[u8], path: &str) -> mlua::Result<()> {
+        // A FILE chunk is `"@%s"` (`0x8716e0`) over the resolved path — `0x704bc0` builds it that
+        // way for every `.lua` the loader touches, and `luaO_chunkid`'s `@` branch prints it
+        // plainly (wow-re `scratch/include-lua-dispatch.md` §7).
+        self.run_named(chunk, &format!("@{}", path.replace('/', "\\")))
+    }
+
+    /// Run a chunk under a chunk name given **whole** — for the producers whose name is not a
+    /// path. See the inline `<Script>` arm in [`Self::load_doc`].
+    fn run_named(&self, chunk: &[u8], name: &str) -> mlua::Result<()> {
         self.lua
             .load(chunk)
-            .set_name(format!("@{}", path.replace('/', "\\")))
+            .set_name(name)
             .set_mode(mlua::ChunkMode::Text)
             .exec()
     }
@@ -504,7 +545,7 @@ impl Loader<'_> {
                                     .push(format!("<Script file=\"{path}\">: {e}"));
                             }
                         }
-                        None => self.report.errors.push(format!(
+                        None => self.report.missing_files.push(format!(
                             "<Script file=\"{path}\">: no provider hit for \"{joined}\"; \
                              every handler in it is missing"
                         )),
@@ -516,8 +557,20 @@ impl Loader<'_> {
                     // this would make every reported line a confident, checkable lie.
                     let mut chunk = "\n".repeat(line.saturating_sub(1) as usize).into_bytes();
                     chunk.extend_from_slice(body.as_bytes());
-                    let path = self.path.clone();
-                    if let Err(e) = self.run(&chunk, &path) {
+                    // **Not a file name.** The reference names an inline `<Script>` body
+                    // `"%s:<Scripts>"` (`0x871074`) over the XML document's own path, with NO `@`
+                    // — `0x6ee0ed push ebx` / `0x6ee0ee push 0x871074` → `0x6ee0ff` sprintf →
+                    // `0x6ee10f call 0x704cd0`. So `luaO_chunkid` takes its third branch and the
+                    // frame reads `[string "Interface\FrameXML\Foo.xml:<Scripts>"]`, not a path.
+                    // Writing `@path` here made an inline block indistinguishable from the `.lua`
+                    // file beside it — including to the addons that split a `debugstack` frame on
+                    // `\AddOns\`.
+                    //
+                    // The padding above stays (1214): the reference's line numbers here are
+                    // body-relative, ours are the XML file's, and the file's are the ones a reader
+                    // can go and check — the name now carries the path that makes them checkable.
+                    let name = format!("{}:<Scripts>", self.path.replace('/', "\\"));
+                    if let Err(e) = self.run_named(&chunk, &name) {
                         self.report.errors.push(format!("inline <Script>: {e}"));
                     }
                 }
@@ -544,7 +597,7 @@ impl Loader<'_> {
     pub(super) fn do_include(&mut self, path: &str) {
         let joined = join_ref(self.base(), path);
         let Some(bytes) = (self.files)(&joined) else {
-            self.report.errors.push(format!(
+            self.report.missing_files.push(format!(
                 "<Include file=\"{path}\">: no provider hit for \"{joined}\"; the whole \
                  document it names is missing"
             ));
@@ -716,6 +769,27 @@ impl Loader<'_> {
             .name()
             .map(|raw| framexml::resolve_name(raw, parent_name));
 
+        // 0 · **The type lookup, and its XML miss LOGS and skips the node** (decision 2191).
+        //
+        //     `Instantiate 0x6ee280` looks the element's own tag up first (`0x6ee2e5 mov
+        //     edi,[esi+8]`, before `parent=` is read), and on a miss prints `"Unknown frame type:
+        //     %s"` (`0x871124`) at `0x6ee356` into the document's log and makes no object for that
+        //     node — non-fatal, and the walk goes on to the next sibling (wow-re
+        //     `taxiroute-widget-type.md`, `lootbutton-widget-type.md` §1). Only the Lua door
+        //     raises. We used to reach the registry through the Lua `CreateFrame`, so an XML miss
+        //     became a `report.errors` row — a script error the player sees — for a document the
+        //     client shrugs at. The live case: an addon whose `.toc` lists its own `Bindings.xml`
+        //     (MonkeyDev). The toc line runner hands it to the same file loader as any `.xml`, its
+        //     `<Binding>` children are not `Include`/`Script`/`Font`, so each is a frame element
+        //     whose type does not exist — three log lines in the reference, three red dialogs here
+        //     — while the file's real reading as bindings happens at `0x51f400` regardless.
+        if crate::script::object::registered_frame_kind(self.lua(), &el.tag).is_none() {
+            self.report
+                .warnings
+                .push(format!("Unknown frame type: {}", el.tag));
+            return None;
+        }
+
         // 1a · `parent="SomeFrame"` — the OTHER way an element names its parent, and the one the
         //      reference's own FrameXML uses most, because its files are flat: `<Frame name="X"
         //      parent="UIParent">` at top level rather than nested inside `<Frames>`. We only ever
@@ -760,8 +834,9 @@ impl Loader<'_> {
         let parent_name = attr_parent_name.as_deref().unwrap_or(parent_name);
         let parent = attr_parent.as_ref().or(parent);
 
-        // 1 · CreateFrame(kind = element tag, name, parent). An unknown frame type errors here (the
-        //     factory-table miss, rf24 `0x6ee280`) — record it and skip the whole subtree.
+        // 1 · CreateFrame(kind = element tag, name, parent). The type is already known to resolve
+        //     (step 0), so an error here is something else the call raised — record it and skip
+        //     the whole subtree.
         let create: Function = match self.lua().globals().get("CreateFrame") {
             Ok(f) => f,
             Err(e) => {
@@ -791,6 +866,15 @@ impl Loader<'_> {
         let dbg_name = resolved_name
             .clone()
             .unwrap_or_else(|| format!("<{}>", el.tag));
+
+        // The one trace site walked to the bytes — `Instantiate 0x6ee280`'s
+        // `0x871154 "-- Creating %s named %s"`, gated `flag > 0` at `0x6ee298` (decision 2160).
+        // The kind is the element tag, which is what the reference's first `%s` carries.
+        if self.model().framexml_debug.get() > 0 {
+            self.report
+                .traces
+                .push(format!("-- Creating {} named {dbg_name}", el.tag));
+        }
 
         // This frame's own name is what its *contents* (regions, nested frames) substitute `$parent`
         // against (rf27: a region/child's parent is this frame); a nameless frame passes the nearest
@@ -915,10 +999,52 @@ impl Loader<'_> {
     /// Returns the frame's own name (`None` if it is anonymous) and the name of its nearest
     /// **named** ancestor — rf27 rule 3's walk, with [`framexml::DEFAULT_PARENT_NAME`] when there
     /// is none.
-    /// Can a `relativeTo` name resolve right now — a frame in the arena or a named region?
-    pub(super) fn anchor_target_exists(&self, name: &str) -> bool {
-        let model = self.model();
-        model.arena.lookup(name).is_some() || model.region_names.contains_key(name)
+    pub(super) fn apply_anchor(&mut self, d: DeferredAnchor, may_defer: bool) {
+        let rel: Value = match d.args.1.as_deref() {
+            Some(name) => {
+                match crate::script::object::anchor_args::resolve_xml_relative_to(self.lua(), name)
+                {
+                    Some(t) => Value::Table(t),
+                    // Nothing by that name YET — a target declared later in the enclosing frame's
+                    // subtree. Hold it until the subtree is complete (`deferred_anchors`) and try
+                    // once more; a miss THEN is a real miss and takes the reference's leg.
+                    None if may_defer => {
+                        self.deferred_anchors.push(d);
+                        return;
+                    }
+                    None => {
+                        self.report
+                            .warnings
+                            .push(format!("{}: Couldn't find relative frame: {name}", d.dbg));
+                        return;
+                    }
+                }
+            }
+            // No `relativeTo=`: `ebx` still holds `[ebp-0x14]`, the layout parent default that
+            // `0x76785b call [edx+0xc]` (= `0x76c6e0`) seeded before the `<Anchor>` loop. A frame
+            // with no parent gets the screen root there, which is what a Lua `nil` means here.
+            None => match d
+                .wrapper
+                .call_method::<Option<Table>>("GetParent", ())
+                .ok()
+                .flatten()
+            {
+                Some(t) => Value::Table(t),
+                None => Value::Nil,
+            },
+        };
+        let DeferredAnchor {
+            wrapper,
+            region,
+            args: (point, _, rel_point, x, y),
+            dbg,
+        } = d;
+        let args = (point, rel, rel_point, x, y);
+        if region {
+            self.call_region(&wrapper, "SetPoint", args, &dbg);
+        } else {
+            self.call(&wrapper, "SetPoint", args, &dbg);
+        }
     }
 
     /// Apply the anchors deferred since `mark` (the enclosing `decorate`'s entry), in order. A
@@ -926,11 +1052,7 @@ impl Loader<'_> {
     pub(super) fn drain_deferred_anchors(&mut self, mark: usize) {
         let pending: Vec<DeferredAnchor> = self.deferred_anchors.drain(mark..).collect();
         for d in pending {
-            if d.region {
-                self.call_region(&d.wrapper, "SetPoint", d.args, &d.dbg);
-            } else {
-                self.call(&d.wrapper, "SetPoint", d.args, &d.dbg);
-            }
+            self.apply_anchor(d, false);
         }
     }
 

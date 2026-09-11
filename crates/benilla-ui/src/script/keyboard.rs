@@ -60,7 +60,7 @@
 use mlua::Lua;
 
 use super::{event, Model};
-use crate::widget::FrameHandle;
+use crate::widget::{FrameHandle, FrameKind};
 
 /// Which channel a dispatch is on — the two walks the reference registers separately.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -102,6 +102,31 @@ fn has_script(lua: &Lua, id: u32, name: &str) -> bool {
     event::has_widget_handler(lua, id, name)
 }
 
+/// Is `h` a `CSimpleEditBox`?
+///
+/// **A box in the walk is asked about FOCUS, never about a script slot.** Its ctor (`0x779ce8`)
+/// registers it in the kind-0 *and* kind-1 buckets, and its vtable `0x81c910` **replaces** the base
+/// input slots — `+0x5c` → `0x77a900` (char), `+0x60` → `0x77b160` (key-down) — and never chains to
+/// them. wow-re `system/ui/scratch/frame-key-script-delivery.md` §3, at the bytes: *"There is no
+/// `call 0x76b760` anywhere in it, so the generic `OnChar` slot `+0x180` is unreachable on an
+/// editbox."* The override's own tail is the decline this predicate exists to reach:
+/// `0x77a952 cmp esi,eax` — I am the focus owner → insert and consume — else
+/// `0x77a956 xor eax,eax`, **return 0, and the walk continues past me**. `0x77b160` has the same
+/// shape at `0x77b1c7`/`0x77b21e`.
+///
+/// Without this, an unfocused box carrying an XML `<OnChar>` ran the base gate and **ate every
+/// keystroke aimed at its neighbours**: stock `SendMailNameEditBox` has one
+/// (`SendMailFrame_SendeeAutocomplete`) and is the first-registered keyboard frame in the mail
+/// window, so the send tab's subject, body and three money boxes took no input at all — the whole
+/// window typed dead except the one box the handler is on (decision 2145).
+fn is_editbox(lua: &Lua, h: FrameHandle) -> bool {
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    model
+        .arena
+        .frame(h)
+        .is_some_and(|f| f.kind == FrameKind::EditBox)
+}
+
 /// The dispatcher for one channel — [`Channel`]'s walk, gate and fire, in the reference's order.
 ///
 /// Returns whether the event was **consumed**, which is what the caller must use to suppress the
@@ -127,6 +152,13 @@ fn walk(lua: &Lua, channel: Channel, arg: &str) -> bool {
             if consumed {
                 return true;
             }
+            continue;
+        }
+        // Someone else holds the focus (or nothing does and this box is not `autoFocus`): the
+        // override returns 0 and the walk moves on. The base slot is unreachable here — see
+        // [`is_editbox`]. A no-focus self-acquire still happens, at [`super::editbox::route`],
+        // when the whole walk declines.
+        if is_editbox(lua, h) {
             continue;
         }
         let id = {
@@ -213,6 +245,11 @@ pub(super) fn frame_key_input(lua: &Lua, key: &str) -> bool {
             if model.focused_editbox == Some(h) {
                 return false; // the box owns this key; its chord path handles it
             }
+        }
+        // …and an UNfocused box declines instead of gating on `+0x188`/`+0x190` ([`is_editbox`]),
+        // so it can never steal a neighbour's BACKSPACE either.
+        if is_editbox(lua, h) {
+            continue;
         }
         let id = {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");

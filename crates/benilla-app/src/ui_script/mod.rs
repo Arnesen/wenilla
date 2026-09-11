@@ -126,7 +126,7 @@ pub(crate) struct InspectMode {
     pub(crate) enabled: bool,
 }
 
-/// One frame's UI-pass phase split, in μs — written by [`extract::drive_script`] under the same
+/// One frame's UI-pass phase split, in μs — written by [`extract::tick_script`] and [`extract::paint_script`] under the same
 /// marks the `[ui-cost]` line prints. **Owned by the producer** (decision 1174): the split is a
 /// fact this pass publishes about itself, so it must exist whether or not the recorder that reads
 /// it (`hover_log`) is compiled in. Its consumers are instruments; its writer is not.
@@ -218,6 +218,57 @@ pub(crate) struct PlayerUiClickConsumed(pub(crate) bool);
 #[derive(Resource, Default)]
 pub(crate) struct CursorPayloadHeld(pub(crate) bool);
 
+/// What [`extract::tick_script`] hands [`extract::paint_script`] — the UI pass is two systems, and
+/// this is the frame they agree on (decision 2168).
+///
+/// `live` is the load-bearing field: the tick half returns early with no VM or no window, and the
+/// paint half must then do nothing at all rather than re-derive a seam for a frame the VM never
+/// had. Everything else is a value the two halves must not compute twice, because computing it
+/// twice is how they would come to disagree.
+#[derive(Resource, Default)]
+pub(crate) struct UiPassState {
+    /// The tick half ran to completion this frame.
+    pub(crate) live: bool,
+    /// The 768-virtual seam scale (decision 0582/0584) this frame was ticked under.
+    pub(crate) seam: f32,
+    /// The window's device scale factor.
+    pub(crate) dpi: f32,
+    /// The meter's first three phases, so one `[ui-cost]` row still describes one frame.
+    pub(crate) us_tick: u128,
+    pub(crate) us_resolve: u128,
+    pub(crate) us_measure: u128,
+    /// The layout counters as they stood before the tick, so the row's `solves`/`derives` cover
+    /// BOTH halves' resolves.
+    pub(crate) solves_before: u64,
+    pub(crate) derives_before: u64,
+}
+
+/// **The pointer is over UI CHROME** — [`PointerOverUi`] minus the nameplates.
+///
+/// A plate is real mouse-enabled UI (2148/2159): it takes the hover, fires an addon's `OnEnter`,
+/// and a click on it selects. It is not a *panel*, though, and the two consumers that mean "the
+/// player is working in the interface, keep the world's hands off the mouse" have to say so:
+///
+/// - the camera's world-mouse latch — a right-drag that starts on a plate must still turn the view
+///   (decision 2159 §2, which argued it from the reference's own `0x60f830`);
+/// - the WHEEL — scrolling with the cursor on a plate must still zoom.
+///
+/// Both were regressions of the day a plate became a widget, and both are the same mistake, so
+/// they are one named concept rather than two `&& plate_hover.is_none()`s.
+///
+/// **This is a narrowing of a coarse flag, not a fidelity claim.** The reference has no
+/// "pointer over UI" boolean at all: it walks the strata for a frame that handles the message, and
+/// a notch over any frame with no `OnMouseWheel` falls through to `CGWorldFrame` — an action button
+/// included. Ours is one bit for the whole interface, and the plate is where that bit is visibly
+/// wrong. Widening it to the reference's per-frame dispatch is its own arc.
+#[derive(Resource, Default)]
+pub(crate) struct PointerOverUiPanel(pub(crate) bool);
+
+/// The player-UI PAINT pass — the quad walk ([`extract::paint_script`]), ordered after the world's
+/// camera update so that world-anchored widgets are drawn from this frame's camera (decision 2168).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UiPaint;
+
 /// The player-UI input pass — hit-testing + handler firing. Ordered before [`WorldStage::Input`] so
 /// the [`PlayerUiHover`] it produces is folded into `PointerOverUi` before `player::control` reads it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -226,7 +277,7 @@ pub(crate) struct UiInput;
 /// The frame's atomic (`Instant`, `GetTime`) clock pair — the ONE lawful base for mapping a
 /// store-side `Instant` onto the VM's `GetTime` clock (`CooldownInfo::ui_triple` and kin).
 ///
-/// Written at the single `script.tick` site ([`extract::drive_script`]): `ui_now` is the value the
+/// Written at the single `script.tick` site ([`extract::tick_script`]): `ui_now` is the value the
 /// VM clock just advanced to, `anchor` is `Time<Real>`'s own `last_update()` — the exact instant
 /// whose frame-to-frame differences ARE the deltas the VM clock accumulates. Because both legs
 /// advance in lockstep by construction, a conversion `ui_now - (anchor - start)` yields the SAME
@@ -235,19 +286,28 @@ pub(crate) struct UiInput;
 /// shape) re-measures the tick→feed scheduling gap every frame and wobbles the derived start by
 /// that jitter (±12 ms observed live), turning every running cooldown into a per-frame "changed"
 /// triple — the diff churn 0375 existed to kill.
+///
+/// **Both legs run on the PROCESS's clock and neither restarts with the VM** (decision 2116). A
+/// rebuilt VM (any logout/login, any `ReloadUI`) is handed the running clock by
+/// [`lifecycle::seed_vm_clock`], which writes this pair in the same breath — the reference's
+/// `GetTime` is `KERNEL32!GetTickCount`, an OS clock, and stock `Cooldown.lua` gates on
+/// `start > 0`, so a clock that went back to zero at the character screen pushed every already-
+/// running cooldown into the past and hid its sweep.
 #[derive(Resource)]
 pub(crate) struct UiClock {
     /// The `Instant` leg: `Time<Real>::last_update()` at the tick that produced [`Self::ui_now`].
-    /// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: it's what `Time<Real>` itself
+    /// `bevy::platform::time::Instant`, not `std::time::Instant`: it's what `Time<Real>` itself
     /// hands back, and on wasm32 (the default `web` Bevy feature) the two are genuinely different
-    /// types — `web_time::Instant` there, a plain alias for `bevy::platform::time::Instant` everywhere else —
+    /// types — `web_time::Instant` there, a plain alias for `std::time::Instant` everywhere else —
     /// so this is the one spelling that's correct on both. [`crate::cooldowns`] takes the same
     /// type for exactly this reason: every `Instant` this clock's value ever meets must agree.
     pub(crate) anchor: bevy::platform::time::Instant,
-    /// The `GetTime` leg: the VM clock's value after that tick (seconds).
+    /// The `GetTime` leg: the clock's value after that tick (seconds since this process started).
     pub(crate) ui_now: f64,
 }
 
+/// The pre-boot pair, replaced by [`lifecycle::seed_vm_clock`] the moment the first VM exists —
+/// `init_resource` needs it, nothing else should build one.
 impl Default for UiClock {
     fn default() -> Self {
         Self {
@@ -342,7 +402,7 @@ impl Plugin for UiScriptPlugin {
         app.insert_resource(UiScaleCvar(default_ui_scale()))
             // The UI pass publishes its per-frame phase split here every frame the cost meter or
             // the hover recorder is armed; the producer owns the resource so any minimal app that
-            // runs `drive_script` (the extract tests) has it.
+            // runs the UI pass (the extract tests) has it.
             .init_resource::<UiFrameCost>()
             .init_resource::<UiCostWanted>()
             .init_resource::<PointerOverUi>()
@@ -400,15 +460,17 @@ impl Plugin for UiScriptPlugin {
             // `GetFramerate()`'s host half (decision 1195), before the VM ticks so an `OnUpdate`
             // handler reads this frame's number rather than the previous one's.
             .add_systems(Update, feed_framerate.before(UiInput))
-            // `drive_script` resolves layout; `feed_ui_input` hit-tests against those rects, so they
+            // `tick_script` resolves layout; `feed_ui_input` hit-tests against those rects, so they
             // chain (also required because both take the single `NonSend` VM). The pair runs before
             // `WorldStage::Input` so the hover result reaches the pointer arbiter in time. The input
             // pass is in-world only (decision 0193): the character-select glue screen owns the
             // pointer + keyboard there (its exit edge resets the latches this pass normally drives).
+            .init_resource::<UiPassState>()
+            .init_resource::<PointerOverUiPanel>()
             .add_systems(
                 Update,
                 (
-                    extract::drive_script,
+                    extract::tick_script,
                     input::feed_ui_input.run_if(in_state(crate::char_select::ClientState::InWorld)),
                 )
                     .chain()
@@ -418,6 +480,19 @@ impl Plugin for UiScriptPlugin {
                     // consumed this frame never also fires a binding.
                     .before(crate::bindings::BindingSet)
                     .before(WorldStage::Input),
+            )
+            // **The paint half, after the camera** (decision 2168): the quad walk runs once the
+            // world's own update has happened, so a widget anchored to the world — the nameplates,
+            // which since 2148 are real `WorldFrame` children seated by `vplates::drive_vplates`
+            // out of THIS frame's camera — is drawn where it belongs instead of a frame behind.
+            // Bounded on both sides: after the plate driver that writes those anchors, and before
+            // the append lane, whose minimap producer fills the widget slot this pass parks.
+            .add_systems(
+                Update,
+                extract::paint_script
+                    .in_set(UiPaint)
+                    .after(crate::vplates::VPlateSet)
+                    .before(crate::ui_pass::UiQuadAppend),
             )
             // Combine the two pointer contributions (dev overlay + player UI) into the single
             // `PointerOverUi` source of truth, after the hover is known and before gameplay reads it.
@@ -458,7 +533,9 @@ fn capture_ui_active(capture: Option<Res<crate::run_mode::CaptureMode>>) -> bool
 fn arbitrate_pointer_over_ui(
     egui: Option<Res<EguiPointerOver>>,
     hover: Res<PlayerUiHover>,
+    plate_hover: Res<crate::vplates::PlateHover>,
     mut over: ResMut<PointerOverUi>,
+    mut panel: ResMut<PointerOverUiPanel>,
 ) {
     // A cinematic used to need a third term here, and no longer does — the deletion is the point
     // of decision 1734. `CinematicFrame` is `setAllPoints` + `enableMouse="true"`, so while it is
@@ -466,6 +543,10 @@ fn arbitrate_pointer_over_ui(
     // every other frame out of it. The hit test now arrives at that on its own, so
     // [`PlayerUiHover`] carries it and the special case is gone.
     over.0 = egui.is_some_and(|e| e.0) || hover.0.is_some();
+    // A nameplate is mouse-enabled UI and it is not CHROME — see [`PointerOverUiPanel`]. The plate
+    // hover is last frame's (the plate driver runs after the camera), which is the same vintage the
+    // camera's own plate exception has always used.
+    panel.0 = over.0 && plate_hover.0.is_none();
 }
 
 /// The session lifecycle — the VM's birth, identity, death, and the reload. Every edge function
@@ -478,7 +559,7 @@ pub(crate) use lifecycle::{
 // Consumed only from other modules' test code (the emote-table checks, the harness's UI-init
 // tail, the quit-once pin) — a plain re-export would warn unused in a non-test build.
 #[cfg(test)]
-use lifecycle::load_ingame_ui_on_world_entry;
+pub(crate) use lifecycle::load_ingame_ui_on_world_entry;
 use lifecycle::shutdown_on_exit;
 #[cfg(test)]
 pub(crate) use lifecycle::{
@@ -493,7 +574,7 @@ pub(crate) use lifecycle::{
 /// that nobody can take a value off. The pole is a one-second time constant — fast enough that a
 /// real stall is visible within a frame or two, slow enough to read.
 ///
-/// `Time<Real>` deliberately, the same choice `drive_script` documents: this is a *frame rate*, and
+/// `Time<Real>` deliberately, the same choice `tick_script` documents: this is a *frame rate*, and
 /// a virtual clock that clamps its delta would report a rate the machine is not achieving.
 fn feed_framerate(
     script: Option<NonSendMut<UiScript>>,
@@ -916,6 +997,11 @@ mod panel_template_tests;
 #[cfg(test)]
 mod shape_gate;
 
+/// The event ARGUMENT-shape gate (decision 2140) — the same question one API over: the two event
+/// gates in `reference_ui` compare names, and nothing compared what a fire site pushes.
+#[cfg(test)]
+mod event_shape_gate;
+
 /// The reference's BasicControls.xml — TEXT/message/_ERRORMESSAGE and the ScriptErrors dialog,
 /// none of which benilla itself calls: every test enters from Lua the way an addon does.
 #[cfg(test)]
@@ -1161,5 +1247,61 @@ mod seam_scale_tests {
         assert!((seam_scale(1080.0, 768.0 / 1080.0) - 1.0).abs() < 1e-6);
         // A degenerate (pre-winit) window is identity, never a division blow-up.
         assert_eq!(seam_scale(0.0, 0.9), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod pointer_arbiter_tests {
+    use super::*;
+
+    /// A world it can run the arbiter in: the three inputs and the two outputs, nothing else.
+    fn app() -> App {
+        let mut app = App::new();
+        app.init_resource::<PlayerUiHover>()
+            .init_resource::<crate::vplates::PlateHover>()
+            .init_resource::<PointerOverUi>()
+            .init_resource::<PointerOverUiPanel>()
+            .add_systems(Update, arbitrate_pointer_over_ui);
+        app
+    }
+
+    /// **A plate is UI, and it is not chrome.** The camera's world-mouse latch and the wheel's zoom
+    /// binding both read the second bit; both were dead over a plate until they did (2168).
+    #[test]
+    fn a_hovered_plate_is_ui_but_not_chrome() {
+        let mut app = app();
+        let plate = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<PlayerUiHover>().0 = Some(7);
+        app.world_mut()
+            .resource_mut::<crate::vplates::PlateHover>()
+            .0 = Some(plate);
+        app.update();
+        assert!(
+            app.world().resource::<PointerOverUi>().0,
+            "the plate takes the pointer"
+        );
+        assert!(
+            !app.world().resource::<PointerOverUiPanel>().0,
+            "…and the camera and the wheel look straight through it"
+        );
+    }
+
+    /// An ordinary frame is both, which is the whole point of keeping two bits rather than one.
+    #[test]
+    fn a_hovered_panel_is_both() {
+        let mut app = app();
+        app.world_mut().resource_mut::<PlayerUiHover>().0 = Some(7);
+        app.update();
+        assert!(app.world().resource::<PointerOverUi>().0);
+        assert!(app.world().resource::<PointerOverUiPanel>().0);
+    }
+
+    /// And empty world under the pointer is neither.
+    #[test]
+    fn no_hover_is_neither() {
+        let mut app = app();
+        app.update();
+        assert!(!app.world().resource::<PointerOverUi>().0);
+        assert!(!app.world().resource::<PointerOverUiPanel>().0);
     }
 }

@@ -24,6 +24,11 @@
 //! instrument cannot see that, and did not: the arc measured coverage for two sessions with this
 //! gap wide open. `--members` prints `table.setn`-style rows for the stdlib tables, so the dialect
 //! is measurable the same way the API surface is.
+//!
+//! It also prints the **per-type metatables** (decision 2171), which is the same blind spot one
+//! layer further down and stayed open longer because a metatable is not a *name*: 5.1 gives the
+//! string type one and 5.0 cannot have one, so `("x"):upper()` worked here and raised on the
+//! reference for as long as nothing thought to look.
 use benilla_ui::script::UiScript;
 
 /// The tables whose membership an addon can observe and depend on.
@@ -60,6 +65,32 @@ fn main() -> mlua::Result<()> {
             ))?;
             rows.extend(members);
         }
+
+        // **The per-type metatables — the surface `_G` and the member lists both miss** (decision
+        // 2171). `table.setn` taught 1194 that a `_G`-only instrument cannot see a *member*; the
+        // string metatable is the same lesson one layer further down, and it stayed invisible for
+        // longer because it is not a name at all. 1.12 installs none — `lua_setmetatable 0x6f4020`
+        // accepts only LUA_TTABLE and LUA_TUSERDATA and returns 0 for every other tag, so a
+        // primitive type there *cannot* carry one — while stock 5.1 gives `string` a metatable
+        // whose `__index` is the `string` table itself, which is what makes `("x"):upper()` work
+        // on 5.1 and raise on 5.0. Every row here should read `nil`.
+        //
+        // Written as a fixed list rather than a table because a `nil` value has no entry to
+        // iterate — the one type whose metatable slot is easiest to forget is the one a
+        // constructor silently drops.
+        let metatables: Vec<String> = script.eval(
+            "local out = {} \
+             local function probe(name, v) \
+               table.insert(out, '<' .. name .. '>\\tmetatable ' .. type(getmetatable(v))) \
+             end \
+             probe('string', '') \
+             probe('number', 0) \
+             probe('boolean', true) \
+             probe('nil', nil) \
+             probe('function', probe) \
+             return out",
+        )?;
+        rows.extend(metatables);
     }
 
     rows.sort();

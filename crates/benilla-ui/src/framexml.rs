@@ -183,7 +183,39 @@ impl std::error::Error for Error {
 /// error: the RE spec never states the loader checks the root's own tag name, only that it walks
 /// its children (`0x6ede10`).
 pub fn parse(text: &str) -> Result<ParsedDocument, Error> {
-    let doc = roxmltree::Document::parse(text).map_err(Error::Xml)?;
+    // **The reference has no XML Namespaces, and our stand-in parser does** (decision 2155).
+    //
+    // The client's document tree is `XMLTree.cpp`'s, built by embedded **expat 1.95.5** created
+    // through `XML_ParserCreate 0x7e6690` — *not* `XML_ParserCreateNS` — so namespace processing
+    // is off: a prefix is opaque bytes inside the attribute's name, an `xmlns:` declaration is an
+    // ordinary attribute, and an *undeclared* prefix cannot be an error because nothing is
+    // resolving one. The node struct the FrameXML loader walks is that same tree (name `@+0x8`,
+    // the `{char*, char*}` attribute array `@+0x14`, looked up by `GetAttribute 0x6f2cf0`'s linear
+    // case-insensitive scan — `scratch/rf24-framexml-loader.md`'s header and
+    // `scratch/simplehtml-markup-engine.md` §1.2).
+    //
+    // `roxmltree` is namespace-aware and has no switch for it, so it refuses
+    // `<Ui xsi:schemaLocation="…">` with `UnknownNamespace` when the file never declares
+    // `xmlns:xsi` — and takes the **whole document** with it. That is not a rare authoring slip:
+    // Auctioneer writes exactly that line at the top of all five of its UI documents and
+    // BeanCounter includes two of them, so the Auction House replacement lost its entire interface
+    // to a concept the client it targets does not implement.
+    //
+    // So a namespace error is answered by giving the parser the binding it wants and re-reading —
+    // driven by the prefix the error itself names, never by scanning the text for colons (which
+    // would fire inside comments, CDATA and attribute values). The document's own bytes are
+    // otherwise untouched, and [`element_from_node`] drops every prefixed attribute, so nothing
+    // downstream can see the difference between a repaired document and one that never had a
+    // prefix.
+    let repaired;
+    let doc = match roxmltree::Document::parse(text) {
+        Ok(doc) => doc,
+        Err(roxmltree::Error::UnknownNamespace(..)) => {
+            repaired = bind_undeclared_prefixes(text);
+            roxmltree::Document::parse(&repaired).map_err(Error::Xml)?
+        }
+        Err(e) => return Err(Error::Xml(e)),
+    };
     let root = doc.root_element();
 
     let mut warnings = Vec::new();
@@ -238,6 +270,98 @@ pub fn parse(text: &str) -> Result<ParsedDocument, Error> {
     Ok(ParsedDocument { items, warnings })
 }
 
+/// Declare every prefix the document uses but never binds, so a namespace-aware parser stops
+/// having an opinion the reference's parser cannot have (decision 2155; the *why* is in
+/// [`parse`]).
+///
+/// **Driven by the parser's own error, not by a scan.** `roxmltree` names the offending prefix in
+/// `UnknownNamespace`, so each round adds exactly that one binding to the ROOT element's start tag
+/// — where a declaration is in scope for the whole document, including the root's own name — and
+/// re-parses. A text scan for `name:` would fire inside comments, CDATA and attribute values
+/// (`Interface\AddOns\…` and `$Id:` lines are everywhere in this corpus), and would have to
+/// re-implement the tokenizer to avoid it.
+///
+/// Bounded, and honest when it gives up: a document that keeps naming new prefixes stops after
+/// [`MAX_BOUND_PREFIXES`] rounds and the text is returned as it stands, so [`parse`] reports the
+/// parser's real error rather than looping. A document whose error is something else on the retry
+/// (a genuinely malformed file that also has a stray prefix) reports that error, which is the one
+/// worth reading.
+pub(crate) fn bind_undeclared_prefixes(text: &str) -> String {
+    let mut out = text.to_string();
+    for _ in 0..MAX_BOUND_PREFIXES {
+        let Err(roxmltree::Error::UnknownNamespace(prefix, _)) = roxmltree::Document::parse(&out)
+        else {
+            return out;
+        };
+        let Some(at) = root_attr_insertion_point(&out) else {
+            return out;
+        };
+        // The URI is inert and never read: nothing downstream resolves a namespace, and
+        // `element_from_node` drops prefixed attributes outright. It only has to be *a* URI, and
+        // distinct per prefix so two stray prefixes are not silently the same namespace.
+        out.insert_str(
+            at,
+            &format!(" xmlns:{prefix}=\"urn:benilla:undeclared:{prefix}\""),
+        );
+    }
+    out
+}
+
+/// How many distinct undeclared prefixes [`bind_undeclared_prefixes`] will bind before it stops.
+///
+/// Generous against the real cause (one file, one stray `xsi:`) and small enough that a
+/// pathological document cannot turn a failed parse into a long loop.
+const MAX_BOUND_PREFIXES: usize = 8;
+
+/// The byte offset inside the ROOT element's start tag at which a new attribute may be inserted —
+/// just before the `>` or `/>` that closes it.
+///
+/// Walks the prolog by hand rather than parsing, because the document by definition does not parse
+/// at this point: `<?…?>`, `<!--…-->` and `<!…>` are skipped, and the first remaining `<` opens the
+/// root. Inside that tag, `'` and `"` runs are stepped over whole, so a `>` living in an attribute
+/// value (`hyperlinkFormat="|H%s|h[%s]|h"` is the shape that exists in this corpus) cannot be
+/// mistaken for the tag's end.
+fn root_attr_insertion_point(text: &str) -> Option<usize> {
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let rest = &text[i..];
+        if rest.starts_with("<?") {
+            i += rest.find("?>").map(|n| n + 2)?;
+        } else if rest.starts_with("<!--") {
+            i += rest.find("-->").map(|n| n + 3)?;
+        } else if rest.starts_with("<!") {
+            i += rest.find('>').map(|n| n + 1)?;
+        } else {
+            // The root's start tag. Step over quoted runs so a `>` inside a value is not its end.
+            let mut j = i + 1;
+            while j < b.len() {
+                match b[j] {
+                    q @ (b'\'' | b'"') => {
+                        j += 1;
+                        while j < b.len() && b[j] != q {
+                            j += 1;
+                        }
+                    }
+                    b'>' => {
+                        // Insert before a `/>`'s slash, not between the slash and the `>`.
+                        let at = if j > 0 && b[j - 1] == b'/' { j - 1 } else { j };
+                        return Some(at);
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            return None;
+        }
+    }
+    None
+}
+
 fn attr_ci(node: roxmltree::Node, name: &str) -> Option<String> {
     node.attributes()
         .find(|a| a.name().eq_ignore_ascii_case(name))
@@ -274,6 +398,14 @@ fn element_from_node(node: roxmltree::Node) -> Element {
         tag: node.tag_name().name().to_string(),
         attrs: node
             .attributes()
+            // **A prefixed attribute is unreachable in the reference, so it is not an attribute
+            // here** (decision 2155). `GetAttribute 0x6f2cf0` compares a lookup key against the
+            // stored name whole, and no FrameXML attribute name contains a colon — so
+            // `xsi:schemaLocation` can never match any key the loader asks for. Dropping it is
+            // what keeps a *declared* prefix (stock FrameXML's own `<Ui xmlns:xsi=… xsi:schema
+            // Location=…>`) and an *undeclared* one (Auctioneer's) behave identically, and stops
+            // `roxmltree`'s local-name view from making `xsi:name` answer a lookup for `name`.
+            .filter(|a| a.namespace().is_none())
             .map(|a| (a.name().to_string(), a.value().to_string()))
             .collect(),
         children: node
@@ -503,6 +635,88 @@ pub fn resolve_name(raw: &str, parent_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An undeclared namespace prefix is not an error, because the reference has no namespaces**
+    /// (decision 2155). The client's tree is `XMLTree.cpp`'s, built by expat 1.95.5 through
+    /// `XML_ParserCreate 0x7e6690` — never `XML_ParserCreateNS` — so nothing is resolving a prefix
+    /// and nothing can find one unbound.
+    ///
+    /// The literal line is Auctioneer's, at the top of all five of its UI documents (and two of
+    /// them are `<Include>`d by BeanCounter): a `roxmltree` `UnknownNamespace` there cost the
+    /// Auction House replacement its entire interface, an element at a time, to a concept the
+    /// client it targets does not implement.
+    #[test]
+    fn an_undeclared_namespace_prefix_does_not_cost_the_document() {
+        let doc = parse(
+            r#"<Ui xsi:schemaLocation="http://www.blizzard.com/wow/ui/">
+                <Frame name="Survived"/>
+            </Ui>"#,
+        )
+        .expect("the reference parses this, so we must");
+        assert_eq!(doc.items.len(), 1);
+        let TopLevel::Instance(el) = &doc.items[0] else {
+            panic!("{:?}", doc.items[0])
+        };
+        assert_eq!(el.name(), Some("Survived"));
+    }
+
+    /// Two stray prefixes, and one of them on an ELEMENT rather than an attribute — the binding
+    /// goes on the root, where it is in scope for the whole document including the root's own
+    /// name, and the retry loop is driven by the parser naming each prefix in turn.
+    #[test]
+    fn several_undeclared_prefixes_are_all_bound() {
+        let doc = parse(
+            r#"<Ui xsi:schemaLocation="x" foo:bar="y">
+                <Frame name="A"/>
+                <bar:Frame name="B"/>
+            </Ui>"#,
+        )
+        .expect("every stray prefix is bound, not just the first");
+        assert_eq!(doc.items.len(), 2);
+    }
+
+    /// **A prefixed attribute is not an attribute** — `GetAttribute 0x6f2cf0` compares a lookup key
+    /// against the stored name whole, and no FrameXML key contains a colon, so `xsi:name` can never
+    /// answer a lookup for `name`. Asserted on a *declared* prefix as well, because stock FrameXML
+    /// writes one on every `<Ui>` and the two spellings must behave identically.
+    #[test]
+    fn a_prefixed_attribute_never_answers_an_unprefixed_lookup() {
+        for text in [
+            r#"<Ui><Frame xsi:name="Ghost" text="real"/></Ui>"#,
+            r#"<Ui xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                 <Frame xsi:name="Ghost" text="real"/>
+               </Ui>"#,
+        ] {
+            let doc = parse(text).unwrap();
+            let TopLevel::Instance(el) = &doc.items[0] else {
+                panic!()
+            };
+            assert_eq!(el.name(), None, "a prefixed name= is unreachable: {text}");
+            assert_eq!(el.attr("text"), Some("real"), "{text}");
+        }
+    }
+
+    /// A genuinely malformed document still fails — the repair answers `UnknownNamespace` and
+    /// nothing else, so a mismatched tag is still the error a reader gets.
+    #[test]
+    fn a_malformed_document_still_fails_with_its_own_error() {
+        assert!(parse(r#"<Ui xsi:a="b"><Frame></Ui>"#).is_err());
+    }
+
+    /// The insertion point is found in the ROOT's start tag, past a prolog and past a `>` that
+    /// lives inside an attribute value — the shape `hyperlinkFormat="|H%s|h[%s]|h"` has in this
+    /// corpus, and the reason this walks quotes rather than searching for the first `>`.
+    #[test]
+    fn the_root_tag_is_found_past_a_prolog_and_a_quoted_angle_bracket() {
+        let doc = parse(
+            "<?xml version=\"1.0\"?>\n<!-- a > in a comment -->\n\
+             <Ui xsi:a=\"b\" note=\"a &gt; b\"><Frame name=\"Ok\"/></Ui>",
+        )
+        .unwrap();
+        assert_eq!(doc.items.len(), 1);
+        // …and a self-closing root: the attribute goes before the slash, not between it and `>`.
+        assert!(parse(r#"<Ui xsi:a="b"/>"#).is_ok());
+    }
 
     #[test]
     fn top_level_order_preserves_script_and_element_interleave() {

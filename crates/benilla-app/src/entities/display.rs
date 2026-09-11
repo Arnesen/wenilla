@@ -200,6 +200,14 @@ pub(crate) struct DisplayModel {
     /// the third-person camera targets ~neck height rather than a fixed offset (wow-re `follow-camera`).
     /// `0.0` for a bounds-less / WMO / model-less display (→ the camera floors it).
     pub(super) pivot_height_local: f32,
+    /// How far that framing pivot drops while this body **swims**, model-local yards, pre-scale —
+    /// [`M2Bounds::swim_pivot_drop`], captured in [`build_parts`] beside the height it modifies.
+    /// The reference builds its swim preset `cam+0x124` as the standing height less exactly this
+    /// (`0x50ccf6`: `StandSeq.bounds.max.z − SwimSeq.bounds.max.z`) and `0x50f880` picks it on
+    /// MOVEFLAG_SWIMMING. Stamped onto each instance as [`CameraPivot::swim_drop_local`]. `0.0` for
+    /// a model with no Swim sequence (every non-character model) and for a bounds-less / WMO /
+    /// model-less display — the swim preset then simply is the standing one.
+    pub(super) swim_pivot_drop_local: f32,
     /// The target selection-ring radius in **model-local yards, pre-scale**: the Stand-animation footprint
     /// `sqrt(0.5 · sqrt(dx² + dy²))` ([`M2Bounds::ring_footprint`]). The ring's world radius is this × the
     /// unit's `OBJECT_FIELD_SCALE_X` (wow-re selection-ring RE, `0x608e00`/`0x60aee0`, emulated to the
@@ -344,6 +352,7 @@ pub(crate) fn empty_shell() -> DisplayModel {
         animations: None,
         first_seq_span: None,
         pivot_height_local: 0.0,
+        swim_pivot_drop_local: 0.0,
         ground_radius_local: 0.0,
         portrait_camera: None,
         pane_camera: None,
@@ -398,6 +407,7 @@ pub(super) fn build_parts(
     let mut animations = None;
     let mut first_seq_span = None;
     let mut pivot_height_local = 0.0;
+    let mut swim_pivot_drop_local = 0.0;
     let mut ground_radius_local = 0.0;
     let mut portrait_camera = None;
     let mut pane_camera = None;
@@ -438,6 +448,12 @@ pub(super) fn build_parts(
                     .map(|z| z + 0.0972)
                     .unwrap_or_else(|| 0.9 * (b.bbox_max[2] - b.bbox_min[2]).max(0.0))
             });
+            // The camera's SWIM framing-pivot preset, as the delta the reference stores it as: the
+            // standing height above less `StandSeq.max.z − SwimSeq.max.z` is `cam+0x124`
+            // (`0x50ccf6`), and `0x50f880` selects it whenever the camera target carries
+            // MOVEFLAG_SWIMMING. `0.0` for a model with no Swim sequence, which is the reference's
+            // own both-present guard and means a body that cannot swim keeps one height.
+            swim_pivot_drop_local = model.bounds.map_or(0.0, |b| b.swim_pivot_drop);
             // The raw vertex-box z-extent — the overhead-anchor FALLBACK's input (see the struct
             // field). Kept separate from the pivot: the fallback is the client's own formula, and
             // only fires for a model with no PlayerName attachment.
@@ -592,6 +608,7 @@ pub(super) fn build_parts(
     dm.animations = animations;
     dm.first_seq_span = first_seq_span;
     dm.pivot_height_local = pivot_height_local;
+    dm.swim_pivot_drop_local = swim_pivot_drop_local;
     dm.ground_radius_local = ground_radius_local;
     dm.portrait_camera = portrait_camera;
     dm.pane_camera = pane_camera;

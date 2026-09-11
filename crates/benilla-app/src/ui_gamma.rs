@@ -29,9 +29,9 @@ use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
-use bevy::render::render_resource::binding_types::{sampler, texture_2d};
+use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::view::ViewTarget;
 use bevy::render::{RenderApp, RenderStartup};
 use bevy::ui_render::graph::NodeUi;
@@ -40,9 +40,73 @@ use bevy::ui_render::ui_texture_slice_pipeline::{
 };
 use bevy::ui_render::{init_ui_pipeline, UiPipeline};
 
-/// Marks the camera whose target holds a gamma-composited image awaiting this pass's one decode.
-#[derive(Component, Clone, Copy, Default, ExtractComponent)]
-pub(crate) struct UiGammaLane;
+/// Marks the camera whose target holds a gamma-composited image awaiting this pass's one decode,
+/// and carries the [`DisplayGamma`] exponent that decode applies on the way through (2182).
+#[derive(Component, Clone, Copy, ExtractComponent)]
+pub(crate) struct UiGammaLane {
+    /// The `gamma` CVar's value, ready for the shader. `1.0` is the identity ramp.
+    pub(crate) gamma: f32,
+}
+
+impl Default for UiGammaLane {
+    fn default() -> Self {
+        Self {
+            gamma: DEFAULT_GAMMA,
+        }
+    }
+}
+
+/// **The display-brightness correction** (decision 2182) — the `gamma` CVar, as the reference
+/// registers it (`0x402d70`, name `0x82e924`, default string `0x82e92c` = `"1.0"`, flags 0).
+///
+/// The reference applies it as an OS **hardware gamma ramp**: its change callback `0x4034d0`
+/// builds `ramp[i] = __ftol(pow(i · 1/255, gamma) · 65535)` at `0x591680` and hands the 3×256 words
+/// to `GDI32!SetDeviceGammaRamp` (wow-re `ffxeffects/scratch/whole-frame-grade-verdict.md` §(a);
+/// the same note proves there is no other whole-frame grade in the client, and that
+/// `Brightness`/`Contrast` CVars do not exist in the binary at all). That upload is **skipped
+/// windowed** — `byte[dev+0x20b]` is `CGxFormat +0x07`, which is `gxWindow` — and windowed is every
+/// mode benilla has (1627), so copying the mechanism byte for byte would ship a slider that never
+/// moves a pixel.
+///
+/// So the ramp goes where a ramp goes when you own the compositor: **the same curve, applied to the
+/// same values, one stage later.** `i/255` is the framebuffer byte the RAMDAC would have read;
+/// [`UiGammaNode`] samples exactly that value (the UI lane composites in gamma bytes — the module
+/// doc above) and raising it to `gamma` before the one decode is the continuous form of the
+/// reference's 256-entry LUT.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DisplayGamma(pub(crate) f32);
+
+/// The reference's registered `"1.0"` — the identity ramp, and the value the pass is a **no-op**
+/// at, byte for byte (see [`UiGammaNode`]'s uniform branch).
+pub(crate) const DEFAULT_GAMMA: f32 = 1.0;
+
+/// **The clamp is ours, and the reference has none** — `SetGamma(5)` writes `gamma = "-4.000000"`
+/// there with no arm anywhere to catch it (wow-re `ui/scratch/video-options-verbs.md` §3, with
+/// `baseMip`'s validating callback `0x689090` as the positive control). The reference can afford
+/// that because its ramp is a fullscreen-only OS call a player can escape by alt-tabbing; ours is
+/// the image itself, and `pow(x, 12)` is a black screen with the panel that undoes it somewhere
+/// inside it. This range is the widest that keeps the client legible enough to reach that panel —
+/// it spans the stock slider's own `[0.5, 1.5]` four times over, so nothing a player can do from
+/// the UI ever meets it, and the CVar still keeps whatever truth was written to it (0959's posture:
+/// the consumer clamps at its own edge, the store does not lie).
+pub(crate) const GAMMA_RANGE: std::ops::RangeInclusive<f32> = 0.25..=4.0;
+
+impl Default for DisplayGamma {
+    fn default() -> Self {
+        Self(DEFAULT_GAMMA)
+    }
+}
+
+/// Carry the knob onto the camera the pass runs on. Change-detected on the resource, so a settled
+/// session writes nothing.
+fn stamp_lane_gamma(gamma: Res<DisplayGamma>, mut lanes: Query<&mut UiGammaLane>) {
+    if !gamma.is_changed() {
+        return;
+    }
+    for mut lane in &mut lanes {
+        lane.gamma = gamma.0.clamp(*GAMMA_RANGE.start(), *GAMMA_RANGE.end());
+    }
+}
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 struct UiGammaLabel;
@@ -52,6 +116,10 @@ struct UiGammaPipeline {
     layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     decode: CachedRenderPipelineId,
+    /// The ramp exponent's 16-byte uniform, rewritten each frame with a queue write (which lands
+    /// before the graph's submit executes) — the same shape `ffx_glow`'s combine uses. One buffer,
+    /// not one per view: [`UiGammaLane`] is on exactly one camera.
+    ramp: Buffer,
 }
 
 fn init_pipeline(
@@ -68,6 +136,9 @@ fn init_pipeline(
             (
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
+                // The ramp exponent, as a `vec4<f32>` — one scalar, but a uniform struct is
+                // 16-byte aligned and a vec4 says so without a padding field to keep in step.
+                uniform_buffer_sized(false, Some(std::num::NonZero::new(16).unwrap())),
             ),
         ),
     );
@@ -97,10 +168,17 @@ fn init_pipeline(
         }),
         ..default()
     });
+    let ramp = render_device.create_buffer(&BufferDescriptor {
+        label: Some("ui_gamma_ramp"),
+        size: 16,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     commands.insert_resource(UiGammaPipeline {
         layout,
         sampler,
         decode,
+        ramp,
     });
 }
 
@@ -114,7 +192,7 @@ impl ViewNode for UiGammaNode {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (view_target, _): QueryItem<'w, '_, Self::ViewQuery>,
+        (view_target, lane): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let pipelines = world.resource::<UiGammaPipeline>();
@@ -124,12 +202,22 @@ impl ViewNode for UiGammaNode {
             // which beats dropping the UI entirely.
             return Ok(());
         };
+        // The ramp exponent for this frame (2182). `[g, 0, 0, 0]` — the shader reads `.x`.
+        world.resource::<RenderQueue>().write_buffer(
+            &pipelines.ramp,
+            0,
+            bytemuck::cast_slice(&[lane.gamma, 0.0, 0.0, 0.0]),
+        );
         let post = view_target.post_process_write();
         let layout = pipeline_cache.get_bind_group_layout(&pipelines.layout);
         let bind = render_context.render_device().create_bind_group(
             "ui_gamma_decode",
             &layout,
-            &BindGroupEntries::sequential((post.source, &pipelines.sampler)),
+            &BindGroupEntries::sequential((
+                post.source,
+                &pipelines.sampler,
+                pipelines.ramp.as_entire_binding(),
+            )),
         );
         // Its diagnostic span: the journal's `gpu_ui` column counts this decode (2008).
         let diagnostics = render_context.diagnostic_recorder();
@@ -188,7 +276,9 @@ pub(crate) struct UiGammaPlugin;
 
 impl Plugin for UiGammaPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(ExtractComponentPlugin::<UiGammaLane>::default());
+        app.init_resource::<DisplayGamma>()
+            .add_plugins(ExtractComponentPlugin::<UiGammaLane>::default())
+            .add_systems(Update, stamp_lane_gamma);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

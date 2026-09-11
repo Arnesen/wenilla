@@ -264,8 +264,8 @@ pub fn new_shared_light_buffer(device: &RenderDevice) -> SharedLightBuffer {
 
 /// The full byte size of the shared light BUFFER: the per-frame blob ([`LightStd430`] — 19 header
 /// rows + the point-light table) PLUS the interior-prop probe region PLUS the skin-palette
-/// regions (rig slot table + tint table + rig-origin table + palette rows — decisions
-/// 0720/0812/0974) at the tail. **Every buffer bound as
+/// regions (rig slot table + tint table + rig-origin table + mat-anim table + straddle clip
+/// table + palette rows — decisions 0720/0812/0974/1381/2188) at the tail. **Every buffer bound as
 /// `wow_light` must be at least this big** — `wow_model.wgsl` declares the whole layout,
 /// and wgpu validates bound size against the shader's struct at draw time. The portrait booth's
 /// frozen studio-light buffer sizes itself with this (its table regions stay zeroed ⇒ no scene

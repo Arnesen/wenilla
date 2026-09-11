@@ -771,22 +771,28 @@ fn the_row_tag_is_its_own_right_flush_string_and_the_state_word_wins() {
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
+    // `Option`: an untagged row's string is blank, and a blank FontString reads back **nil** —
+    // `FontString:GetText 0x79d690` substitutes nil for an empty string (decision 2110).
     let tag = |s: &mut UiScript, i: u32| {
-        s.eval::<String>(&format!("return QuestLogTitle{i}Tag:GetText()"))
+        s.eval::<Option<String>>(&format!("return QuestLogTitle{i}Tag:GetText()"))
             .unwrap()
     };
     assert_eq!(
-        tag(&mut s, 1),
-        "(Elite)",
+        tag(&mut s, 1).as_deref(),
+        Some("(Elite)"),
         "the engine's tag, in parentheses"
     );
     assert_eq!(
-        tag(&mut s, 2),
-        "(Complete)",
+        tag(&mut s, 2).as_deref(),
+        Some("(Complete)"),
         "COMPLETE overwrites the quest's own tag — ref l.190-192"
     );
-    assert_eq!(tag(&mut s, 3), "(Failed)", "FAILED, same override");
-    assert_eq!(tag(&mut s, 4), "", "a header carries no tag");
+    assert_eq!(
+        tag(&mut s, 3).as_deref(),
+        Some("(Failed)"),
+        "FAILED, same override"
+    );
+    assert_eq!(tag(&mut s, 4), None, "a header carries no tag");
 
     // The title is the bare (indented) name — the state word lives on the tag string now, so
     // appending it here too would double it.
@@ -1290,7 +1296,8 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
 }
 
 /// The SHARED item tooltip on a quest reward row (the director's "same tooltip as vendor items"):
-/// hovering the reward fires the row's OnEnter → `SetItemById` → the ask-once store. First hover
+/// hovering the reward fires the row's OnEnter → `SetQuestLogItem` → the shared id-keyed render
+/// → the ask-once store. First hover
 /// (store cold) shows the fallback name line AND records the ask; after the app's push, a re-hover
 /// renders the full stat head — the identical lines a vendor row/bag slot gets for this item.
 #[test]

@@ -639,6 +639,18 @@ impl SpellDisplay {
             )
     }
 
+    /// The spell **tooltip's** range gate — the two attribute tests the builder runs BEFORE it
+    /// ever calls `GetMinMaxRange 0x6e3480` (`0x52e9a5`: `Attributes & 0x404`, the on-next-swing
+    /// pair; `0x52e9b2`: `AttributesEx3 & 0x40000000`), each jumping straight past the cell.
+    /// The third absence case is not an attribute — it is a resolved `max <= 0`, which is what
+    /// the 11 777 self-only rows produce and is by far the dominant one (wow-re
+    /// `tooltip-globalstring-key-resolves.md` §A3, VERIFIED).
+    ///
+    /// So a Heroic Strike or a Backstab shows **no range cell at all** — not a melee wording.
+    pub fn tooltip_omits_range_line(&self) -> bool {
+        self.on_next_swing() || self.attributes_ex3 & 0x4000_0000 != 0
+    }
+
     /// The cooldown getter's HEAD exclusion (`GetCooldownInfo 0x6e13e0` @ `6e1439`/`6e1442`,
     /// wow-re `gcd-power-gate.md` §2, §5-verified): `Effect[0] ∈ {0x4e ATTACK, 0x2f TRADE_SKILL}`
     /// returns "no cooldown" unconditionally — the reason the Attack and profession buttons never

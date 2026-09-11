@@ -34,7 +34,7 @@ fn button_state_textures_switch_with_interaction() {
     s.run(
         r#"
         local b = CreateFrame("Button", "StateBtn")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
         b:SetNormalTexture("Interface\\N.blp")
         b:SetPushedTexture("Interface\\P.blp")
         b:SetDisabledTexture("Interface\\D.blp")
@@ -110,7 +110,7 @@ fn a_state_with_no_texture_leaves_the_shown_one_standing() {
     s.run(
         r#"
         local b = CreateFrame("Button", "StickyBtn")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
         b:SetNormalTexture("Interface\\N.blp")
     "#,
     )
@@ -162,7 +162,7 @@ fn a_state_with_no_texture_leaves_the_shown_one_standing() {
     s.run(
         r#"
         local b = CreateFrame("Button", "BornDeadBtn")
-        b:SetPoint("BOTTOMLEFT", 200, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 200, 0); b:SetWidth(100); b:SetHeight(100)
         b:Disable()
         b:SetNormalTexture("Interface\\N.blp")
     "#,
@@ -191,7 +191,7 @@ fn disabling_a_button_takes_its_whole_highlight_layer() {
     s.run(
         r#"
         local b = CreateFrame("Button", "LayerBtn")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
         b:SetNormalTexture("Interface\\N.blp")
         b:SetHighlightTexture("Interface\\H.blp")
         local own = b:CreateTexture(nil, "HIGHLIGHT")
@@ -271,7 +271,7 @@ fn any_registered_mouse_button_shows_the_pushed_texture() {
         r#"
         local function slot(name, x)
             local b = CreateFrame("Button", name)
-            b:SetPoint("BOTTOMLEFT", x, 0); b:SetSize(100, 100)
+            b:SetPoint("BOTTOMLEFT", x, 0); b:SetWidth(100); b:SetHeight(100)
             b:SetNormalTexture("Interface\\" .. name .. "N.blp")
             b:SetPushedTexture("Interface\\" .. name .. "P.blp")
             return b
@@ -331,7 +331,7 @@ fn set_button_state_drives_the_pushed_visual() {
     s.run(
         r#"
         local b = CreateFrame("Button", "PushBtn")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
         b:SetNormalTexture("Interface\\N.blp")
         b:SetPushedTexture("Interface\\P.blp")
     "#,
@@ -375,7 +375,7 @@ fn disabled_button_swallows_clicks_checkbutton_toggles_before_onclick() {
         r#"
         clicks, seen_checked = 0, nil
         local cb = CreateFrame("CheckButton", "Toggler")
-        cb:SetPoint("BOTTOMLEFT", 0, 0); cb:SetSize(100, 100)
+        cb:SetPoint("BOTTOMLEFT", 0, 0); cb:SetWidth(100); cb:SetHeight(100)
         cb:SetScript("OnClick", function(self, button, down)
             clicks = clicks + 1
             seen_checked = self:GetChecked()
@@ -422,7 +422,7 @@ fn default_registration_is_left_click_only_right_click_reaches_nothing() {
         r#"
         clicks = 0
         local btn = CreateFrame("Button", "Vendor")
-        btn:SetPoint("BOTTOMLEFT", 0, 0); btn:SetSize(100, 100)
+        btn:SetPoint("BOTTOMLEFT", 0, 0); btn:SetWidth(100); btn:SetHeight(100)
         btn:SetScript("OnClick", function(self, button, down) clicks = clicks + 1 end)
     "#,
     )
@@ -445,7 +445,7 @@ fn register_for_clicks_grows_right_click_and_carries_the_button_name() {
         r#"
         clicks, click_btn, arg1_btn = 0, nil, nil
         local btn = CreateFrame("Button", "Vendor")
-        btn:SetPoint("BOTTOMLEFT", 0, 0); btn:SetSize(100, 100)
+        btn:SetPoint("BOTTOMLEFT", 0, 0); btn:SetWidth(100); btn:SetHeight(100)
         btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         btn:SetScript("OnClick", function(self, button, down)
             clicks = clicks + 1
@@ -478,7 +478,7 @@ fn down_registration_fires_on_press_and_toggles_checked_once() {
         r#"
         clicks, seen_down = 0, nil
         local cb = CreateFrame("CheckButton", "QuickSell")
-        cb:SetPoint("BOTTOMLEFT", 0, 0); cb:SetSize(100, 100)
+        cb:SetPoint("BOTTOMLEFT", 0, 0); cb:SetWidth(100); cb:SetHeight(100)
         cb:RegisterForClicks("LeftButtonDown")
         cb:SetScript("OnClick", function(self, button, down)
             clicks = clicks + 1
@@ -509,9 +509,9 @@ fn highlight_is_additive_and_state_textures_fill_then_anchor() {
     s.run(
         r#"
         local b = CreateFrame("Button", "AddBtn")
-        b:SetPoint("BOTTOMLEFT", 100, 100); b:SetSize(36, 36)
+        b:SetPoint("BOTTOMLEFT", 100, 100); b:SetWidth(36); b:SetHeight(36)
         b:SetNormalTexture("Interface\\Ring.blp")
-        b:GetNormalTexture():SetSize(64, 64)
+        local nt = b:GetNormalTexture(); nt:SetWidth(64); nt:SetHeight(64)
         b:SetHighlightTexture("Interface\\Hi.blp")
     "#,
     )
@@ -533,7 +533,7 @@ fn highlight_is_additive_and_state_textures_fill_then_anchor() {
     ));
     // A fresh state texture gets the creation-path implicit SetAllPoints (decision 1310 — the
     // reference's string setters anchor a freshly built texture to the button outright), whose
-    // two corners pin all four edges: the later SetSize(64) is structurally unread and the ring
+    // two corners pin all four edges: the later 64px size is structurally unread and the ring
     // FILLS the 36px button.
     let r = find("Interface\\Ring.blp").rect.unwrap();
     assert_eq!(
@@ -608,7 +608,7 @@ fn button_label_repaints_by_state_font_object() {
     s.run(
         r#"
         b = CreateFrame("Button", "FontBtn")
-        b:SetPoint("CENTER", 0, 0); b:SetSize(100, 20)
+        b:SetPoint("CENTER", 0, 0); b:SetWidth(100); b:SetHeight(20)
         b:SetText("Label")
         b:SetTextFontObject("GoldFont")
         b:SetDisabledFontObject("GrayFont")
@@ -696,7 +696,7 @@ fn a_locked_or_hovered_button_wears_its_highlight_font_over_its_normal_color() {
     s.run(
         r#"
         b = CreateFrame("Button", "RowBtn")
-        b:SetPoint("BOTTOMLEFT", 100, 100); b:SetSize(100, 20)
+        b:SetPoint("BOTTOMLEFT", 100, 100); b:SetWidth(100); b:SetHeight(20)
         b:SetText("Rough Copper Vest")
         b:SetTextFontObject("RowNormal")
         b:SetHighlightFontObject("RowHighlight")
@@ -1072,4 +1072,455 @@ fn a_lazily_made_label_is_anchored_by_the_normal_fonts_justify() {
     // was decided at adoption and is an ordinary anchor from then on.
     s.run("left:SetTextFontObject(ProbeFontRight)").unwrap();
     assert_eq!(point(&s, "left"), ("LEFT".into(), "LEFT".into(), 0.0, 0.0));
+}
+
+/// **A label that set its own face keeps it — the severance mask covers every axis, not three of
+/// six** (decision 2112).
+///
+/// `font_explicit` is the client's explicitly-set mask (`FONTINSTANCE+0x38`): an axis a widget
+/// writes for *itself* severs inheritance from the font instance it reads, and is never restored
+/// (wow-re `font-object-lua-surface.md`; the `button_font` block in `script::extract` cites it by
+/// name). `font::repaint` honours it on all seven axes. The extract's per-state re-point honoured
+/// it on shadow, colour and both justifies — and not on **face, height or outline**: the face and
+/// height read `fo.x.or(data.x)`, which makes the object outrank an explicit `SetFont`, and the
+/// outline was written unconditionally. A `<ButtonText>` that called
+/// `SetFont(path, h, "OUTLINE")` for itself therefore had all three silently put back from the
+/// button's font object on the very next extract — every frame, so no Lua could win the race.
+#[test]
+fn a_button_labels_own_setfont_survives_the_state_font_repoint() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.register_font_object(
+        "TemplateFont",
+        FontObject {
+            font: Some("Fonts\\FRIZQT__.TTF".into()),
+            height: Some(12.0),
+            color: Some([1.0, 0.82, 0.0, 1.0]),
+            outline: Outline::None,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        b = CreateFrame("Button", "SkinnedBtn")
+        b:SetPoint("CENTER", 0, 0); b:SetWidth(100); b:SetHeight(20)
+        b:SetText("Label")
+        b:SetTextFontObject("TemplateFont")
+        b:GetFontString():SetFont("Interface\\Addons\\Skin\\Fonts\\porky.ttf", 18, "OUTLINE")
+    "#,
+    )
+    .unwrap();
+    let painted = |s: &mut crate::script::UiScript| {
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                QuadContent::Text {
+                    text: Some(t),
+                    ref font,
+                    font_height,
+                    outline,
+                    ..
+                } if t == "Label" => Some((font.clone(), font_height, outline)),
+                _ => None,
+            })
+            .expect("label text quad")
+    };
+    assert_eq!(
+        painted(&mut s),
+        (
+            Some("Interface\\Addons\\Skin\\Fonts\\porky.ttf".to_string()),
+            Some(18.0),
+            Outline::Normal
+        ),
+        "the label's own SetFont severs face, height AND outline from the state font object"
+    );
+    // …and it survives a state change, which is what re-runs the re-point.
+    s.run("b:Disable()").unwrap();
+    assert_eq!(
+        painted(&mut s),
+        (
+            Some("Interface\\Addons\\Skin\\Fonts\\porky.ttf".to_string()),
+            Some(18.0),
+            Outline::Normal
+        ),
+        "…and a disable re-points the instance without restoring what the label severed"
+    );
+    // The axes the label did NOT set still follow the object: the colour is the template's gold.
+    s.resolve();
+    let color = s
+        .extract()
+        .into_iter()
+        .find_map(|q| match q.content {
+            QuadContent::Text {
+                text: Some(t),
+                color,
+                ..
+            } if t == "Label" => Some(color),
+            _ => None,
+        })
+        .expect("label text quad");
+    assert_eq!(
+        color,
+        Some([1.0, 0.82, 0.0, 1.0]),
+        "an axis the label never set still inherits — severance is per-axis"
+    );
+}
+
+/// **A state-texture setter takes an OBJECT and takes nil**, not only a path — the reference's
+/// `0x781970` forks on `lua_type(L, 2)` into four legs and benilla honoured one of them
+/// (wow-re `button-state-texture-path-setter.md` §1; decision 2124).
+///
+/// Both missing legs are silent no-ops rather than errors, which is why nothing caught them:
+///
+/// * **the object leg** (`0x781b0b` → `0x778fd0`) installs the handed Texture *into the slot*.
+///   Three corpus addons build a highlight this way and every one of them drew nothing —
+///   `Bongos/bar.lua:64-71`, `_Nameplates/_Nameplates.lua:217-222`,
+///   `Quiver/Quiver.bundle.lua:8949-8953`. The idiom below is Bongos', verbatim in shape.
+/// * **the nil leg** (`0x781b5a` → `0x778fd0` with 0) clears the slot and dtors what was in it.
+///   `TheoryCraft/TheoryCraftUI.lua:215-217` strips a talent-rank button with three of these.
+///   Clearing the *pointer* alone would be worse than the no-op: `region_visible` draws any region
+///   that is not one of the button's slots unconditionally, so a merely unhooked state texture
+///   would appear in every state instead of none — which is what this test's last assertion pins.
+#[test]
+fn a_state_texture_slot_takes_an_object_and_a_nil() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        b = CreateFrame("Button", "SlotBtn")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
+        b:SetNormalTexture("Interface\\N.blp")
+        -- Bongos' own idiom: build the highlight yourself and hand the object over.
+        hl = b:CreateTexture()
+        hl:SetTexture("Interface\\OWN.blp")
+        hl:SetAllPoints(b)
+        b:SetHighlightTexture(hl)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    let drawn = |s: &UiScript| -> Vec<String> {
+        s.extract()
+            .iter()
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture { path: Some(p), .. } => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // The handed object IS the slot now: it draws on hover and only on hover, exactly as a
+    // path-loaded highlight does.
+    assert_eq!(drawn(&s), vec!["Interface\\N.blp".to_string()]);
+    assert!(
+        s.eval::<bool>("return b:GetHighlightTexture() == hl")
+            .unwrap(),
+        "the getter must hand back the object that was installed, not a slot region of our own"
+    );
+    s.mouse_move(50.0, 50.0); // hover, so the highlight slot draws
+    s.resolve();
+    assert_eq!(
+        drawn(&s),
+        vec![
+            "Interface\\N.blp".to_string(),
+            "Interface\\OWN.blp".to_string()
+        ]
+    );
+
+    // nil clears — and the cleared art is gone from every state, not merely unhooked.
+    s.run("b:SetHighlightTexture(nil) b:SetNormalTexture(nil)")
+        .unwrap();
+    s.resolve();
+    assert!(
+        drawn(&s).is_empty(),
+        "a cleared slot still draws: {:?}",
+        drawn(&s)
+    );
+    assert!(
+        s.eval::<bool>("return b:GetHighlightTexture() == nil")
+            .unwrap(),
+        "the slot must read empty after nil"
+    );
+}
+
+/// **The unlocked scripted push is released by the next mouse release — Tablet-2.0's rows**
+/// (decision 2134).
+///
+/// `SetButtonState(state[, lock])` writes `[+0x32c]` unconditionally, and the mouse-up edge
+/// `0x7793de` un-presses whenever `locked == 0`. Tablet-2.0 (`Tablet-2.0.lua:1645`) pushes a row it
+/// finds `clicked` and calls `SetButtonState("NORMAL")` *nowhere in the library* — it relies on
+/// exactly this. Ours kept a scripted push until Lua cleared it, so a Questie/FuBar/oRA2 row stayed
+/// depressed for the rest of the session.
+#[test]
+fn an_unlocked_scripted_push_is_released_by_the_next_mouse_release() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        row = CreateFrame("Button", "TabletRow")
+        row:SetPoint("BOTTOMLEFT", 0, 0); row:SetWidth(100); row:SetHeight(100)
+        row:SetNormalTexture("Interface\\RowN.blp")
+        row:SetPushedTexture("Interface\\RowP.blp")
+        row:SetButtonState("PUSHED")            -- Tablet-2.0's call, verbatim: no lock argument
+    "#,
+    )
+    .unwrap();
+    s.resolve(); // a press only reaches a frame with a resolved rect
+    assert_eq!(
+        s.eval::<String>("return TabletRow:GetButtonState()")
+            .unwrap(),
+        "PUSHED"
+    );
+
+    // A press and release over the row: the release edge finds it PUSHED and unlocked.
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert_eq!(
+        s.eval::<String>("return TabletRow:GetButtonState()")
+            .unwrap(),
+        "NORMAL",
+        "the release un-pushes an unlocked scripted push — the row does not stay depressed"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **`lock` pins the state against the mouse — the micro buttons** (`0x780270`'s third index,
+/// `GetBoolOrDefault` with default 0; wow-re `binding-shape-arity-law.md` §3).
+///
+/// `MainMenuBarMicroButtons.lua` calls `SetButtonState("PUSHED", 1)` when its panel opens, and the
+/// button must stay depressed through every press and release until the panel closes. The same
+/// flag pins a NORMAL button *against* being pushed, which is the half a "sticky push" model
+/// cannot express at all.
+#[test]
+fn a_locked_state_ignores_the_mouse_and_enable_disable_clears_the_lock() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        micro = CreateFrame("Button", "MicroButton")
+        micro:SetPoint("BOTTOMLEFT", 0, 0); micro:SetWidth(100); micro:SetHeight(100)
+        micro:SetButtonState("PUSHED", 1)       -- MainMenuBarMicroButtons.lua, verbatim
+        pin = CreateFrame("Button", "PinnedNormal")
+        pin:SetPoint("BOTTOMLEFT", 200, 0); pin:SetWidth(100); pin:SetHeight(100)
+        pin:SetButtonState("NORMAL", 1)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert_eq!(
+        s.eval::<String>("return MicroButton:GetButtonState()")
+            .unwrap(),
+        "PUSHED",
+        "a locked push survives a whole click"
+    );
+
+    s.mouse_move(250.0, 50.0);
+    s.mouse_button(250.0, 50.0, "LeftButton", true);
+    assert_eq!(
+        s.eval::<String>("return PinnedNormal:GetButtonState()")
+            .unwrap(),
+        "NORMAL",
+        "…and a locked NORMAL cannot be pushed by the mouse at all"
+    );
+    s.mouse_button(250.0, 50.0, "LeftButton", false);
+
+    // `0x779160` passes `locked = 0` on both arms, so Enable/Disable UNLOCK. The panel closing
+    // with a plain `SetButtonState("NORMAL")` (flag defaulting to 0) does the same.
+    s.run("MicroButton:Disable() MicroButton:Enable()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return MicroButton:GetButtonState()")
+            .unwrap(),
+        "NORMAL",
+        "Disable() wrote DISABLED, Enable() wrote NORMAL — and both cleared the lock"
+    );
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    assert_eq!(
+        s.eval::<String>("return MicroButton:GetButtonState()")
+            .unwrap(),
+        "PUSHED",
+        "so the mouse reaches it again"
+    );
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **Walking off a held button does NOT un-press it, and walking back on does not re-press it.**
+///
+/// The correction decision 2134 is built on. Our old model derived the press as
+/// `(held && hovered) || pushed_state` and re-evaluated it whenever the hover moved; the
+/// reference's enter and leave notifies (`0x779490`/`0x7794e0`) read `[+0x328]` only as a DISABLED
+/// guard and **never write it** — proved by a §5 census of every store to the field image-wide.
+/// The only thing that un-presses a held button before its release is the drag-threshold crossing,
+/// and only for a frame that registered for drag.
+#[test]
+fn the_hover_is_not_an_input_to_the_press_state() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        b = CreateFrame("Button", "HeldButton")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
+        b:SetNormalTexture("Interface\\HeldN.blp")
+        b:SetPushedTexture("Interface\\HeldP.blp")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let shows = |s: &UiScript, path: &str| {
+        s.extract()
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p == path))
+    };
+
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    assert!(shows(&s, "Interface\\HeldP.blp"), "the press pushed it");
+
+    // Walk the cursor right off it, still holding.
+    s.mouse_move(500.0, 400.0);
+    assert!(
+        shows(&s, "Interface\\HeldP.blp"),
+        "…and it stays pushed off the rect: the leave notify does not write the state"
+    );
+    assert_eq!(
+        s.eval::<String>("return HeldButton:GetButtonState()")
+            .unwrap(),
+        "PUSHED"
+    );
+
+    // The release, off the button, still un-presses it — `0x7792d0` runs no hit test of its own.
+    s.mouse_button(500.0, 400.0, "LeftButton", false);
+    assert!(
+        shows(&s, "Interface\\HeldN.blp"),
+        "the release is the edge, wherever the cursor is"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **A button hidden while held comes back NORMAL** — `CSimpleButton`'s hide override
+/// (`+0x34` = `0x7791e0`), which un-presses and then tail-jumps the base notify so `<OnHide>`
+/// still fires. It hangs off the visibility transition, not off the hover, so it reaches a button
+/// hidden nowhere near the cursor too.
+#[test]
+fn hiding_a_held_button_un_presses_it() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        h = CreateFrame("Button", "HidButton")
+        h:SetPoint("BOTTOMLEFT", 0, 0); h:SetWidth(100); h:SetHeight(100)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_move(50.0, 50.0);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    assert_eq!(
+        s.eval::<String>("return HidButton:GetButtonState()")
+            .unwrap(),
+        "PUSHED"
+    );
+    s.run("HidButton:Hide()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return HidButton:GetButtonState()")
+            .unwrap(),
+        "NORMAL",
+        "the hide edge un-pressed it"
+    );
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// `Button:GetTextColor()` — **FOUR** values, r/g/b/a (`0x781100`, table `0x879d00`, argc 1,
+/// arity 4, kinds `(number,number,number,number)`). Three is the plausible wrong answer, and the
+/// shapes table flags the name `name-not-unique` because seven tables register it — this asserts
+/// the BUTTON one, on a Button, and its two inheritance legs.
+///
+/// Completeness rather than a live break: no corpus site has a Button receiver today (every
+/// measured `GetTextColor` is on a FontString or a font object). It is here because the reference
+/// registers it, so the widget shape gate can cover it from now on.
+#[test]
+fn button_get_text_color_answers_four_values_through_the_state_font() {
+    let s = script();
+    s.register_font_object(
+        "BtnGold",
+        FontObject {
+            color: Some([1.0, 0.82, 0.0, 1.0]),
+            height: Some(12.0),
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        Plain = CreateFrame("Button", "PlainBtn")
+        Themed = CreateFrame("Button", "ThemedBtn")
+        Themed:SetTextFontObject("BtnGold")
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        s.arity("PlainBtn:GetTextColor()").unwrap(),
+        4,
+        "arity 4 — not 3, the plausible wrong answer"
+    );
+    let kinds: String = s
+        .eval(
+            r#"local r,g,b,a = PlainBtn:GetTextColor()
+               return type(r)..","..type(g)..","..type(b)..","..type(a)"#,
+        )
+        .unwrap();
+    assert_eq!(kinds, "number,number,number,number");
+
+    // A button with nothing set anywhere is the untinted white every other colour getter here
+    // (`GetVertexColor`, `FontString:GetTextColor`) answers.
+    let plain: Vec<f32> = (1..=4)
+        .map(|i| {
+            let discards = "_, ".repeat(i - 1);
+            s.eval::<f32>(&format!(
+                "local {discards}v = PlainBtn:GetTextColor() return v"
+            ))
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(plain, vec![1.0, 1.0, 1.0, 1.0]);
+
+    // With no local colour it reads THROUGH what the normal state inherits — the same leg
+    // `Button:GetFont` takes, and the one a stock `GameMenuButtonTemplate` button relies on.
+    let themed: Vec<f32> = (1..=4)
+        .map(|i| {
+            let discards = "_, ".repeat(i - 1);
+            s.eval::<f32>(&format!(
+                "local {discards}v = ThemedBtn:GetTextColor() return v"
+            ))
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(themed, vec![1.0, 0.82, 0.0, 1.0]);
+
+    // A local SetTextColor wins, alpha included, and round-trips.
+    s.run("ThemedBtn:SetTextColor(0.1, 0.2, 0.3, 0.4)").unwrap();
+    let set: Vec<f32> = (1..=4)
+        .map(|i| {
+            let discards = "_, ".repeat(i - 1);
+            s.eval::<f32>(&format!(
+                "local {discards}v = ThemedBtn:GetTextColor() return v"
+            ))
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(set, vec![0.1, 0.2, 0.3, 0.4]);
+
+    // A CheckButton reaches it through Button's table, as it does the rest of the trio.
+    s.run(r#"CreateFrame("CheckButton", "ChkColorBtn")"#)
+        .unwrap();
+    assert_eq!(s.arity("ChkColorBtn:GetTextColor()").unwrap(), 4);
 }

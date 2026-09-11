@@ -628,11 +628,7 @@ mod tests {
             "and the app hears the same click, so its copy of the chain follows"
         );
         // Zero return values (`0x5ad9f8 xor eax,eax; ret`).
-        assert_eq!(
-            s.eval::<i64>(r#"return select('#', SortWho("name"))"#)
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity(r#"SortWho("name")"#).unwrap(), 0);
         assert!(s.errors().is_empty(), "{:?}", s.errors());
     }
 
@@ -703,9 +699,7 @@ mod tests {
     #[test]
     fn the_lfg_pair_stores_the_comment_and_sends_only_on_a_change() {
         let mut s = UiScript::new().unwrap();
-        assert!(s
-            .eval::<bool>("return select('#', GetLookingForGroup()) == 4")
-            .unwrap());
+        assert_eq!(s.arity("GetLookingForGroup()").unwrap(), 4);
         assert!(s
             .eval::<bool>(
                 "local a, b, c, d = GetLookingForGroup() return a == nil and b == nil and c == nil and d == \"\""
@@ -728,7 +722,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            s.eval::<String>("return select(4, GetLookingForGroup())")
+            s.eval::<String>("local _, _, _, comment = GetLookingForGroup() return comment")
                 .unwrap(),
             "LF2M UBRS"
         );
@@ -741,7 +735,7 @@ mod tests {
             .unwrap();
         assert!(s.take_social_requests().is_empty());
         assert_eq!(
-            s.eval::<String>("return select(4, GetLookingForGroup())")
+            s.eval::<String>("local _, _, _, comment = GetLookingForGroup() return comment")
                 .unwrap(),
             "LF2M UBRS"
         );
@@ -752,7 +746,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            s.eval::<String>("return select(4, GetLookingForGroup())")
+            s.eval::<String>("local _, _, _, comment = GetLookingForGroup() return comment")
                 .unwrap()
                 .len(),
             127

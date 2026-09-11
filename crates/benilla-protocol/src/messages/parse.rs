@@ -180,6 +180,59 @@ const fn is_movement_relay(o: u16) -> bool {
 }
 
 /// Parse a server packet body (already decrypted + sized) by opcode.
+/// `SMSG_ADDON_INFO`'s record stream — **no count, no names, no trailer** (decision 2175).
+///
+/// The grammar is the one `AddOn_ReadAddonInfoReply 0x51da70` reads, per record (wow-re
+/// `system/net/scratch/cmsg-auth-session-addon-block.md` §6):
+///
+/// ```text
+/// u8  status              ; 2 -> [rec+0x29] = 1 (hidden from the Lua index space)
+///                         ; 0 -> [rec+0x24] = 2 (rejected)
+///                         ; else -> verify the .toc/Bindings.xml signature
+/// u8  infoProvided        ; persisted into the .pub and echoed next logon
+/// if infoProvided:
+///     u8 keyProvided
+///     if keyProvided: u8[256] modulus
+///     u32 revision
+/// u8  urlProvided
+/// if urlProvided: u8[256] url
+/// ```
+///
+/// The retail capture is the minimal form — 12 x 8 bytes of `{2, 1, 0, 0u32, 0}`.
+///
+/// **A truncated record ends the walk and keeps the records before it**, rather than failing the
+/// packet. Only a record that parsed whole contributes a status, so `statuses[i]` is always
+/// record *i*'s and the pairing against what we sent cannot slip. The stream is self-delimiting only if every field is read exactly right, so a grammar
+/// error here would otherwise turn a working login into an unparseable packet; the statuses we did
+/// read are still true, and a short read is visible as a count that does not match what we sent.
+fn read_addon_info(r: &mut &[u8]) -> Vec<u8> {
+    let mut statuses = Vec::new();
+    while !r.is_empty() {
+        let Ok(status) = read_u8(r) else { break };
+        let Ok(info_provided) = read_u8(r) else { break };
+        if info_provided != 0 {
+            let Ok(key_provided) = read_u8(r) else { break };
+            if key_provided != 0 && skip(r, 256).is_none() {
+                break;
+            }
+            if read_u32_le(r).is_err() {
+                break;
+            }
+        }
+        let Ok(url_provided) = read_u8(r) else { break };
+        if url_provided != 0 && skip(r, 256).is_none() {
+            break;
+        }
+        statuses.push(status);
+    }
+    statuses
+}
+
+/// Advance `r` by `n` bytes, or `None` when it holds fewer.
+fn skip(r: &mut &[u8], n: usize) -> Option<()> {
+    (r.len() >= n).then(|| *r = &r[n..])
+}
+
 pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
     let mut r = body;
     Ok(match opcode {
@@ -1596,6 +1649,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 transport: info.transport,
             }
         }
+        opcode::SMSG_ADDON_INFO => ServerPacket::AddonInfo {
+            statuses: read_addon_info(&mut r),
+        },
         other => ServerPacket::Other { opcode: other },
     })
 }

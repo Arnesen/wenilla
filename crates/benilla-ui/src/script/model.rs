@@ -64,6 +64,17 @@ pub(crate) struct Model {
     /// Every discovered addon, in load order — the AddOn API's registry, filled by the host at
     /// world entry ([`super::UiScript::register_addons`]). See [`super::addon`].
     pub(crate) addons: Vec<super::addon::AddOnInfo>,
+    /// **The Lua index space** — positions into [`Self::addons`], `## Title`-sorted and
+    /// hidden-filtered (decision 2175). NOT the registry: the reference keeps two structures and
+    /// they are different permutations of different sets (wow-re
+    /// `system/ui/scratch/addon-registry-scan-and-order.md` §7).
+    pub(crate) addon_index: Vec<usize>,
+    /// The lowercased names `SMSG_ADDON_INFO` marked `status = 2`, or **`None` when no reply has
+    /// arrived this session** — and `None` is why [`Self::addon_index`] can be legitimately empty
+    /// (decision 2175). `[0xbe1b90]` is zeroed by the registry reset `0x51fad1` and written
+    /// nowhere but the reply's own rebuild, so `GetNumAddOns()` really is 0 until the server
+    /// answers.
+    pub(crate) addon_info_hidden: Option<Vec<String>>,
     /// The AddOns folder, so `LoadAddOn` can read an addon's files from inside a Lua binding.
     pub(crate) addons_root: Option<std::path::PathBuf>,
     /// The host's reader for a chain-sourced addon's files (`AddOnInfo::chain`), by
@@ -125,6 +136,17 @@ pub(crate) struct Model {
     /// the same kind of thing — VM-global registries the loader fills.
     pub(crate) framexml_templates:
         std::cell::RefCell<std::collections::HashMap<String, crate::framexml::Element>>,
+    /// **`FrameXML_Debug`'s flag** — the loader's own trace-severity switch (decision 2160).
+    ///
+    /// `0x488440` is a get-or-set over the single global `[0xceea30]`, which boots at 0 and is
+    /// read at six sites image-wide: the binding itself and five inside the XML loader, each
+    /// gating a severity-0 trace line behind `flag > 0` (`0x6ee298 jle` — **greater than**, not
+    /// non-zero, which is why this is signed). The one site walked to the bytes is
+    /// `Instantiate 0x6ee280`, whose gated line is `0x871154 "-- Creating %s named %s"`.
+    ///
+    /// Here rather than on `UiScript` for `framexml_templates`' reason: the loader runs from a
+    /// bare `&Lua`, and so does the binding that writes this.
+    pub(crate) framexml_debug: std::cell::Cell<i32>,
     /// The FrameXML **font-element registry** (a separate namespace — a font inherits a font,
     /// never a frame template), persisted for the same cross-file reason.
     pub(crate) framexml_fonts:
@@ -132,7 +154,7 @@ pub(crate) struct Model {
     /// The frame arena (create/destroy + show/hide/strata/level/scale/alpha propagation).
     pub(crate) arena: WidgetArena,
     /// Per-frame layout input (anchors/size/scale). Every live frame has one (created at
-    /// `CreateFrame`); `SetPoint`/`SetSize`/… mutate it; `resolve` runs the graph over them.
+    /// `CreateFrame`); `SetPoint`/`SetWidth`/… mutate it; `resolve` runs the graph over them.
     pub(crate) layout_inputs: HashMap<FrameHandle, LayoutInput>,
     /// The last [`UiScript::resolve`] result: each resolvable frame's rect. Empty until `resolve`.
     pub(crate) resolved: HashMap<FrameHandle, Rect>,
@@ -374,6 +396,20 @@ pub(crate) struct Model {
     pub(crate) event_to_frames: HashMap<String, Vec<FrameHandle>>,
     /// `frame → its registered events` (for UnregisterEvent / cleanup).
     pub(crate) frame_events: HashMap<FrameHandle, HashSet<String>>,
+    /// The frames registered for **every** event (`RegisterAllEvents`), in registration order —
+    /// the same ordered-Vec-never-a-set discipline as [`Self::event_to_frames`], and dispatched
+    /// after it for the same reason: a frame that asks for all events asks *after* the frames
+    /// already listening for a given one, so it takes the tail of that event's list.
+    ///
+    /// **A flag rather than an expansion.** 1.12's event ids run to `0x225` = 549
+    /// (`FrameScript_InitEvents`), so writing the frame into every per-event list on registration
+    /// would mean 549 vector pushes per call and 549 scans per `UnregisterAllEvents` — and would
+    /// also invent a name list this engine has no business owning (ours registers by string, and
+    /// an event the server sends that no name list knows about would be silently excluded).
+    /// `UnregisterAllEvents` empties this alongside the per-event registrations, which is the half
+    /// AceEvent-2.0 depends on: it calls `frame:UnregisterAllEvents()` and then re-registers each
+    /// individual event it still wants.
+    pub(crate) all_event_frames: Vec<FrameHandle>,
 
     /// The EditBox that currently owns keyboard focus — the engine's twin of the client's
     /// class-owned focus global `DAT_00cf4dc8` (`CSimpleEditBox* E`, 0 = none; RF-0082 §1). A focused
@@ -604,6 +640,23 @@ pub(crate) struct Model {
     pub(crate) zone_channel_catalog: Vec<super::channel::ZoneChannelRow>,
     /// Channel verbs since the last [`super::UiScript::take_channel_commands`] drain.
     pub(crate) channel_commands: Vec<super::channel::ChannelCommand>,
+    /// **The guild-recruitment auto-join latch** — the reference's int global `[0x843608]`, which
+    /// `GetGuildRecruitmentMode` returns and `SetGuildRecruitmentMode` writes (decision 2115).
+    ///
+    /// `0` = STANDARD, `1` = AUTO, and those two words are literally what the per-character chat
+    /// cache stores it as (`OPTION_GUILD_RECRUITMENT_CHANNEL STANDARD|AUTO`; wow-re
+    /// `system/ui/scratch/chat-cache-grammar.md` — the reader maps `STANDARD` to 0 and anything
+    /// else, `AUTO` included, to 1). It boots at **1**: every one of the 33 `chat-cache.txt` files
+    /// the reference client itself wrote in this repo's install says `AUTO`, on characters that
+    /// never opened the option.
+    pub(crate) guild_recruitment_mode: u8,
+    /// A `SetGuildRecruitmentMode(1)` since the last drain — `0x49ea70`'s tail-jump into the
+    /// cascade `0x49ea90`, which the app runs (decision 2144). Keyed on the *new value alone*, not
+    /// on a change: the reference's store is unconditional and the jump reads only `ecx == 1`.
+    pub(crate) guild_recruitment_cascade: bool,
+    /// Whether Lua has moved [`Self::guild_recruitment_mode`] since the last drain — the chat
+    /// cache's dirty signal, the peer of `chat_window_changes`.
+    pub(crate) guild_recruitment_changed: bool,
     /// `DoEmote` calls since the last drain.
     pub(crate) emote_requests: Vec<super::chat_misc::EmoteRequest>,
     /// `RandomRoll` calls since the last drain.
@@ -750,6 +803,29 @@ pub(crate) struct Model {
     /// until the host pushes it — a VM with no device behind it (every extract test) offers no
     /// formats rather than inventing some.
     pub(crate) multisample_formats: Vec<super::cvars::MultisampleFormat>,
+
+    /// The screen resolutions the Video options window's dropdown offers, ascending — pushed by
+    /// the host ([`super::UiScript::set_screen_resolutions`]) from the display this client is on,
+    /// and read by `GetScreenResolutions` / `GetCurrentResolution` / `SetScreenResolution`.
+    ///
+    /// Empty until the host pushes it. A VM with no window behind it (every extract test) offers
+    /// none rather than inventing a ladder, and the reference's own consumer walks it zero times.
+    pub(crate) screen_resolutions: Vec<super::cvars::ScreenResolution>,
+    /// **Where in that list the client actually is** — the index `GetCurrentResolution` answers,
+    /// 0-based here and reported 1-based, which is the form `CT_Viewport.lua:105` indexes the
+    /// `GetScreenResolutions` varargs with (`arg[GetCurrentResolution()]`).
+    ///
+    /// Held as an index rather than a size so the two can never disagree: the host guarantees the
+    /// live size is IN the list when it pushes, which is what makes that addon's read total.
+    /// `None` while the list is empty.
+    pub(crate) current_resolution: Option<usize>,
+    /// What this run's device and presentation path really offer, behind `GetVideoCaps` — pushed
+    /// by the host, which is the only side holding a `RenderAdapter`.
+    pub(crate) video_caps: super::cvars::VideoCaps,
+    /// `RestartGx()` calls queued since the host last drained them — the video window's
+    /// "apply the staged settings now" button, counted like [`Self::screenshot_asks`] because the
+    /// request carries no payload.
+    pub(crate) restart_gx_asks: u32,
 
     /// The globals `RegisterForSave` declared, in registration order — the saved-variables set the
     /// host writes out at logout/exit and re-executes at load (decision 1128, [`super::saved`]).
@@ -1588,6 +1664,11 @@ pub(crate) struct Model {
     /// The world-map seam ([`worldmap`](super::worldmap)): the pushed catalog/feed + the
     /// engine-owned selection.
     pub(crate) worldmap: super::worldmap::WorldMapState,
+    /// The V-key nameplate pool — engine-owned `Button` widgets under the `WorldFrame`, grown on
+    /// demand and never shrunk, in creation order (decision 2148). Lives here rather than on
+    /// [`super::UiScript`] because it IS model state: the plates are arena frames, and an addon
+    /// walking `WorldFrame:GetChildren()` reaches them like any other.
+    pub(crate) nameplates: super::nameplate::NamePlates,
     /// The always-up world-state readout's rows ([`worldstate`](super::worldstate)), already
     /// gated and resolved app-side.
     pub(crate) worldstate: super::worldstate::WorldStateUiState,
@@ -1732,6 +1813,35 @@ impl Model {
         self.errors.push(msg);
     }
 
+    /// **Record one non-fatal warning — the channel's one door** (decision 2135). Both halves:
+    /// the host's per-frame `warnings` drain (a `warn!` line in the terminal, for whoever is
+    /// running the client), and the retained diagnostic log, which is the only copy a player or an
+    /// instrument can read after the frame that produced it.
+    ///
+    /// Before this there was only the first half, and it was a dead end: `take_warnings` empties
+    /// every frame, so a warning existed for the length of one terminal line and then nowhere at
+    /// all. The messages it carries are the failures that never announce themselves — a dropped
+    /// `inherits=`, an unresolved anchor, an unregistered CVar — which is precisely the class the
+    /// diagnostic log was built for.
+    ///
+    /// Its sibling is [`Self::warn_host_only`], for the one message already retained under a
+    /// truer kind.
+    pub(crate) fn record_warning(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.diagnostics
+            .record(super::diagnostics::DiagnosticKind::Warning, &msg);
+        self.warnings.push(msg);
+    }
+
+    /// The host channel **alone** — for a message that is already retained under a kind that says
+    /// more than `Warning` does. Exactly one caller: `LoadAddOn`'s failure line, which
+    /// `record_load_failure` has already filed as a [`Load`](super::diagnostics::DiagnosticKind)
+    /// row ("the addon isn't running", which is the fact worth keeping) and which still wants its
+    /// terminal line. Retaining it twice would put the same sentence in the log under two kinds.
+    pub(crate) fn warn_host_only(&mut self, msg: String) {
+        self.warnings.push(msg);
+    }
+
     pub(crate) fn unit(&self, token: &str) -> Option<&UnitState> {
         if token.bytes().any(|b| b.is_ascii_uppercase()) {
             self.units_by_lower.get(&token.to_ascii_lowercase())
@@ -1743,6 +1853,8 @@ impl Model {
     pub(crate) fn new() -> Model {
         Model {
             addons: Vec::new(),
+            addon_index: Vec::new(),
+            addon_info_hidden: None,
             addons_root: None,
             addons_chain_reader: None,
             measurer: None,
@@ -1752,6 +1864,7 @@ impl Model {
             addons_saved_account: None,
             addons_saved_character: None,
             framexml_templates: Default::default(),
+            framexml_debug: Default::default(),
             framexml_fonts: Default::default(),
             arena: WidgetArena::new(),
             layout_inputs: HashMap::new(),
@@ -1793,6 +1906,7 @@ impl Model {
             dirty_editboxes: Vec::new(),
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
+            all_event_frames: Vec::new(),
             focused_editbox: None,
             mouseover: None,
             hover_repick: false,
@@ -1845,6 +1959,9 @@ impl Model {
             known_languages: Vec::new(),
             zone_channel_catalog: Vec::new(),
             channel_commands: Vec::new(),
+            guild_recruitment_mode: 1,
+            guild_recruitment_cascade: false,
+            guild_recruitment_changed: false,
             emote_requests: Vec::new(),
             roll_requests: Vec::new(),
             uninvite_requests: Vec::new(),
@@ -1875,6 +1992,10 @@ impl Model {
             cvar_changes: Vec::new(),
             cvars_warned: HashSet::new(),
             multisample_formats: Vec::new(),
+            screen_resolutions: Vec::new(),
+            current_resolution: None,
+            video_caps: super::cvars::VideoCaps::default(),
+            restart_gx_asks: 0,
             saved_names: Vec::new(),
             keybinds: super::keybind::KeybindState::default(),
             actions: HashMap::new(),
@@ -2082,6 +2203,7 @@ impl Model {
             quest_log_watched: Vec::new(),
             server_unix_time: None,
             worldmap: super::worldmap::WorldMapState::default(),
+            nameplates: super::nameplate::NamePlates::default(),
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
             event_tap: None,

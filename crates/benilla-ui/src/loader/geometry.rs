@@ -12,8 +12,37 @@ impl Loader<'_> {
         if el.attr_bool("hidden") {
             self.call(wrapper, "Hide", (), dbg);
         }
+        // **An unrecognised `frameStrata=` WARNS and skips; it does not raise** (decision 2160).
+        //
+        // The two doors are genuinely different in the reference and this is the one that is
+        // quiet. `CSimpleFrame::LoadXML 0x769820` resolves the name through `0x6f17d0`, whose miss
+        // arm returns `eax = 0` without writing the caller's out-parameter (`0x6f17ff`); the miss
+        // leg then pushes `0x878658 "Frame %s: Unknown frame strata: %s"` at severity 1 into the
+        // document's `CStatus` sink (`0x7699a4 call [edx+0xc]`, which returns — all five `Add`
+        // implementations image-wide are raise-free) and **reconverges with the hit path at
+        // `0x7699ad`**, carrying straight on into `frameLevel` and the rest of the subtree.
+        // `SetFrameStrata 0x76a470` is called only on the hit arm (`0x769971`), so the frame keeps
+        // whatever stratum it already had — its template's, its parent's, or the ctor's MEDIUM
+        // (`[+0xc0] = 3` at `0x7690c2`).
+        //
+        // The **Lua** binding is the loud one and stays as it is: `0x774360`'s miss reaches
+        // `0x774456 call 0x6f4940` (`luaL_error`), whose callee chain `luaG_errormsg 0x6fc780` /
+        // `luaD_throw 0x6f5d80` contains no `ret` at all — the epilogue after it is dead code.
+        //
+        // (wow-re `ui/scratch/frame-strata-miss-law.md`, §5 trio + orchestrator arbitration.)
+        //
+        // Resolving here rather than letting `SetFrameStrata` raise is what reproduces that split:
+        // routed through `self.call`, a bad value became a `report.errors` row, which is a script
+        // error the player sees — and it cost `EQL3` its whole `EQL3_Log.xml`, on a `<Frame
+        // frameStrata="ARTWORK">` (a draw-LAYER name) the real client shrugs at.
         if let Some(strata) = el.attr("frameStrata") {
-            self.call(wrapper, "SetFrameStrata", strata.to_string(), dbg);
+            if crate::script::object::strata_from_str(strata).is_some() {
+                self.call(wrapper, "SetFrameStrata", strata.to_string(), dbg);
+            } else {
+                self.report
+                    .warnings
+                    .push(format!("{dbg}: Unknown frame strata: {strata}"));
+            }
         }
         if let Some(level) = el.attr("frameLevel") {
             if let Ok(n) = level.parse::<i64>() {
@@ -255,21 +284,15 @@ impl Loader<'_> {
                     x.unwrap_or(0.0),
                     y.unwrap_or(0.0),
                 );
-                // A target that is not built yet waits for the frame's subtree (`Loader::deferred_anchors`).
-                if args
-                    .1
-                    .as_deref()
-                    .is_some_and(|n| !self.anchor_target_exists(n))
-                {
-                    self.deferred_anchors.push(super::DeferredAnchor {
-                        wrapper: wrapper.clone(),
-                        region: false,
-                        args,
-                        dbg: dbg.to_string(),
-                    });
-                    continue;
-                }
-                self.call(wrapper, "SetPoint", args, dbg);
+                let d = super::DeferredAnchor {
+                    wrapper: wrapper.clone(),
+                    region: false,
+                    args,
+                    dbg: dbg.to_string(),
+                };
+                // The XML path's own law, which resolves the name itself and defers a target
+                // the enclosing frame's subtree has not built yet (`Loader::apply_anchor`).
+                self.apply_anchor(d, true);
             }
         }
     }

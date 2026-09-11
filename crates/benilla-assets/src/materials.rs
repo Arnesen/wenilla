@@ -29,6 +29,7 @@ use bevy::image::Image;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{
     ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+    MeshPipelineKey,
 };
 use bevy::prelude::*;
 use bevy::render::render_resource::{
@@ -421,6 +422,20 @@ impl MaterialExtension for WowModelExt {
             }
             if let Some(ds) = descriptor.depth_stencil.as_mut() {
                 ds.depth_write_enabled = true;
+            }
+        }
+        // The straddle split's waterline clip (decision 2188 — `benilla_world::straddle`): only a
+        // transparent-pass batch is ever classified against the water plane, so only its
+        // pipelines carry the clip. Keyed on the blend pass Bevy already specializes on, so it
+        // mints no pipeline of its own; the fragment clips nothing unless the instance's slot
+        // says it straddles.
+        if key
+            .mesh_key
+            .intersection(MeshPipelineKey::BLEND_RESERVED_BITS)
+            == MeshPipelineKey::BLEND_ALPHA
+        {
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("WOW_WATER_CLIP".into());
             }
         }
         let key = &key.bind_group_data;

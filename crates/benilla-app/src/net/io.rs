@@ -877,6 +877,27 @@ async fn run(
 
         let billing_time_rested = session.billing_time_rested();
         let tutorial_flags = session.take_tutorial_flags();
+        // `SMSG_ADDON_INFO`'s verdict, paired back against the block we sent — the reply carries no
+        // names (decision 2175). No reply at all means no hidden addons *and* no Lua index space;
+        // the distinction is the script's to draw, so both arrive as the same empty list here and
+        // the "did it answer" bit rides separately.
+        let statuses = session.take_addon_info();
+        let addon_info = statuses.as_deref().map(|statuses| {
+            benilla_protocol::messages::hidden_from_reply(
+                statuses,
+                &benilla_protocol::messages::STOCK_SECURE_ADDONS,
+            )
+        });
+        match (&statuses, &addon_info) {
+            (Some(statuses), Some(hidden)) => bevy::log::info!(
+                "net: SMSG_ADDON_INFO — {} record(s), {} hidden from the AddOn index space",
+                statuses.len(),
+                hidden.len()
+            ),
+            _ => bevy::log::warn!(
+                "net: no SMSG_ADDON_INFO — GetNumAddOns() stays 0, as the reference's would"
+            ),
+        }
         let (mut reader, writer) = session.into_split()?;
         if events_tx
             .send(SessionEvent::Connected {
@@ -884,6 +905,7 @@ async fn run(
                 name,
                 billing_time_rested,
                 tutorial_flags,
+                addon_info,
             })
             .is_err()
         {

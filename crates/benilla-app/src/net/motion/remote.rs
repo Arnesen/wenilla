@@ -680,7 +680,17 @@ pub(in crate::net) fn extrapolate_remote_units(
                         steep: false,
                     },
                 );
-                g.center
+                // **The no-floor drop is declined here too** (decision 2174, closing 1545's own
+                // residual). 1545 named this exact defect — *"`grounded_step`'s no-hit branch
+                // spends that whole reach descending — right for the local mover, whose next frame
+                // elects a real fall, and open-loop for a remote, which has no fall election at
+                // all"* — and closed only the flag-still case with the `INTEGRATED` gate; a mover
+                // that is *moving* kept ratcheting. A miss means our world could not answer, so the
+                // frame keeps the height the last packet gave and takes only the horizontal.
+                match g.unsupported {
+                    Some(_) => Vec3::new(g.center.x, from.y, g.center.z),
+                    None => g.center,
+                }
             };
             let resolved = bevy_to_wow(resolved_center - half_h);
             held = (pos[0] - resolved[0]).hypot(pos[1] - resolved[1]);
@@ -1135,14 +1145,62 @@ mod under_floor {
         );
     }
 
-    /// The control: 0626's resolve is untouched for a mover the reference *does* integrate.
+    /// The control: 0626's resolve is untouched for a mover the reference *does* integrate — the
+    /// `INTEGRATED` gate lets it through and it is stepped through the world.
+    ///
+    /// **Its Z assertion is 2174's, and it is the opposite of the one 1545 wrote here.** 1545
+    /// proved "integrated and resolved" by watching this mover *descend*, which works because four
+    /// seconds of FORWARD walk it clean off the 10x10 terrain quad — so what it was actually
+    /// pinning, past the edge, was `grounded_step`'s no-floor drop running open-loop, the very
+    /// ratchet 1545's own comment called out two screens up and closed only for a flag-still mover.
+    /// Past the edge our world has nothing to answer with, so the wire's height is the answer.
     #[test]
     fn a_moving_mover_still_meets_the_world() {
         let (mut app, e) = half_arrived_world(move_flags::FORWARD);
         frames(&mut app, 240);
+        assert_eq!(
+            z_of(&app, e),
+            WIRE_Y,
+            "the terrain 2.10 yd down is outside any walking frame's election reach, so there is \
+             no floor of ours to find and the wire's height stands — instead of a per-frame \
+             descent that nothing here would ever end (2174)"
+        );
+    }
+
+    /// …and the **vertical** half of that resolve still runs, which is what 2174 must not have
+    /// taken away with the drop: a moving mover with ground actually inside the election's reach is
+    /// put on it. Without this the test above would be satisfied by an extrapolator that had
+    /// stopped meeting the world at all.
+    #[test]
+    fn a_moving_mover_is_still_settled_onto_ground_it_can_see() {
+        let (mut app, e) = half_arrived_world(move_flags::FORWARD);
+        // This harness's mover carries no speeds, so a direction bit alone travels nowhere and the
+        // election's reach collapses to its slack. Give it a walk speed: now the frame travels
+        // 0.033 yd and reaches `·1.8494 + 1/36` = 0.089 below the feet.
+        app.world_mut().entity_mut(e).insert(crate::net::UnitSpeeds(
+            benilla_protocol::events::MoveSpeeds {
+                walk: 2.0,
+                run: 2.0,
+                run_back: 2.0,
+                swim: 2.0,
+                swim_back: 2.0,
+                turn_rate: 0.0,
+            },
+        ));
+        // A floor 0.06 under the wire Z: past the standing slack (0.028), inside the moving reach.
+        floor_at(&mut app, WIRE_Y - 0.06);
+        app.world_mut().resource_mut::<ColliderEpoch>().bump();
+        app.update();
+        frames(&mut app, 4);
+        let z = z_of(&app, e);
         assert!(
-            z_of(&app, e) < WIRE_Y,
-            "a mover carrying a direction bit is integrated and resolved, as it was before 1545"
+            z < WIRE_Y,
+            "the floor is inside a moving frame's reach, so the election still settles the body \
+             onto it — 2174 declines the no-FLOOR drop, never the resolve (z={z:.3})"
+        );
+        assert!(
+            z > WIRE_Y - 0.5,
+            "…and it settles ONTO that floor rather than carrying on down (z={z:.3})"
         );
     }
 

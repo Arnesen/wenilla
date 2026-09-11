@@ -42,13 +42,13 @@ fn board_and_dialog() -> UiScript {
         r#"
         Board = CreateFrame("Frame", "Board")
         Board:SetPoint("BOTTOMLEFT", 100, 100)
-        Board:SetSize(300, 300)
+        Board:SetWidth(300); Board:SetHeight(300)
         Board:SetFrameLevel(5)
         Board:CreateTexture(nil, "ARTWORK"):SetTexture("Board.blp")
 
         Dialog = CreateFrame("Frame", "Dialog")
         Dialog:SetPoint("BOTTOMLEFT", 200, 200)   -- overlaps Board's top-right quadrant
-        Dialog:SetSize(300, 300)
+        Dialog:SetWidth(300); Dialog:SetHeight(300)
         Dialog:CreateTexture(nil, "ARTWORK"):SetTexture("Dialog.blp")
         Dialog:Hide()
         "#,
@@ -200,7 +200,7 @@ fn the_trigger_is_the_effective_visibility_transition_not_the_show_call() {
         r#"
         Holder = CreateFrame("Frame", "Holder")
         Holder:SetPoint("BOTTOMLEFT", 200, 200)
-        Holder:SetSize(300, 300)
+        Holder:SetWidth(300); Holder:SetHeight(300)
         Holder:Hide()
         Dialog:SetParent(Holder)
         Dialog:SetToplevel(true)
@@ -239,7 +239,7 @@ fn a_raise_on_a_frame_that_overlaps_nothing_is_a_total_no_op() {
         r#"
         Dialog:ClearAllPoints()
         Dialog:SetPoint("BOTTOMLEFT", 600, 450)   -- clear of Board's (100,100)-(400,400)
-        Dialog:SetSize(100, 100)
+        Dialog:SetWidth(100); Dialog:SetHeight(100)
         Dialog:SetToplevel(true)
         Dialog:Show()
         "#,
@@ -311,20 +311,20 @@ fn a_raise_can_never_lift_a_frame_out_of_its_stratum() {
         r#"
         Med = CreateFrame("Frame", "Med")
         Med:SetPoint("BOTTOMLEFT", 100, 100)
-        Med:SetSize(300, 300)
+        Med:SetWidth(300); Med:SetHeight(300)
         Med:CreateTexture(nil, "ARTWORK"):SetTexture("Med.blp")
 
         LowOther = CreateFrame("Frame", "LowOther")
         LowOther:SetFrameStrata("LOW")
         LowOther:SetPoint("BOTTOMLEFT", 100, 100)
-        LowOther:SetSize(300, 300)
+        LowOther:SetWidth(300); LowOther:SetHeight(300)
         LowOther:SetFrameLevel(4)
         LowOther:CreateTexture(nil, "ARTWORK"):SetTexture("LowOther.blp")
 
         LowTop = CreateFrame("Frame", "LowTop")
         LowTop:SetFrameStrata("LOW")
         LowTop:SetPoint("BOTTOMLEFT", 150, 150)
-        LowTop:SetSize(300, 300)
+        LowTop:SetWidth(300); LowTop:SetHeight(300)
         LowTop:SetToplevel(true)
         LowTop:CreateTexture(nil, "ARTWORK"):SetTexture("LowTop.blp")
         LowTop:Hide()
@@ -408,11 +408,11 @@ fn compaction_bounds_the_raise_across_repeated_shows() {
         r#"
         A = CreateFrame("Frame", "A")
         A:SetPoint("BOTTOMLEFT", 100, 100)
-        A:SetSize(300, 300)
+        A:SetWidth(300); A:SetHeight(300)
         A:SetToplevel(true)
         B = CreateFrame("Frame", "B")
         B:SetPoint("BOTTOMLEFT", 200, 200)
-        B:SetSize(300, 300)
+        B:SetWidth(300); B:SetHeight(300)
         B:SetToplevel(true)
         "#,
     )
@@ -451,7 +451,7 @@ fn lua_raise_acts_on_the_nearest_toplevel_ancestor_and_is_silent_without_one() {
         Kid = CreateFrame("Frame", "Kid", Dialog)
         Loose = CreateFrame("Frame", "Loose")
         Loose:SetPoint("BOTTOMLEFT", 200, 200)
-        Loose:SetSize(300, 300)
+        Loose:SetWidth(300); Loose:SetHeight(300)
         "#,
     )
     .unwrap();
@@ -575,7 +575,7 @@ fn pressing_a_child_of_a_toplevel_window_raises_the_window() {
         Dialog:Show()
         Knob = CreateFrame("Frame", "Knob", Dialog)
         Knob:SetPoint("CENTER", Dialog, "CENTER")
-        Knob:SetSize(40, 40)
+        Knob:SetWidth(40); Knob:SetHeight(40)
         Knob:EnableMouse(true)
         Board:SetFrameLevel(9)
         Dialog:SetFrameLevel(0)
@@ -643,12 +643,12 @@ fn a_chorded_press_raises_the_held_frame_not_the_one_under_the_cursor() {
         -- gate is occlusion, so a frame overlapping nothing would decline whatever we press.
         Other = CreateFrame("Frame", "Other")
         Other:SetPoint("BOTTOMLEFT", 500, 100)
-        Other:SetSize(200, 200)
+        Other:SetWidth(200); Other:SetHeight(200)
         Other:EnableMouse(true)
         Other:SetToplevel(true)
         Tile = CreateFrame("Frame", "Tile")
         Tile:SetPoint("BOTTOMLEFT", 660, 260)     -- clips Other's far corner only
-        Tile:SetSize(60, 60)
+        Tile:SetWidth(60); Tile:SetHeight(60)
         Tile:SetFrameLevel(9)
 
         Board:SetFrameLevel(9)
@@ -725,7 +725,7 @@ fn a_raise_with_a_hidden_child_keeps_the_windows_own_siblings_level() {
         Other:SetFrameStrata("DIALOG")
         Other:SetFrameLevel(1)
         Other:SetPoint("BOTTOMLEFT", 50, 50)
-        Other:SetSize(400, 400)
+        Other:SetWidth(400); Other:SetHeight(400)
         Other:EnableMouse(true)
         Other:SetToplevel(true)
         OtherKid = CreateFrame("Frame", "OtherKid", Other)   -- level 2
@@ -734,13 +734,13 @@ fn a_raise_with_a_hidden_child_keeps_the_windows_own_siblings_level() {
         Win:SetFrameStrata("DIALOG")
         Win:SetFrameLevel(1)
         Win:SetPoint("BOTTOMLEFT", 200, 100)
-        Win:SetSize(400, 400)
+        Win:SetWidth(400); Win:SetHeight(400)
         Win:EnableMouse(true)
         Win:SetToplevel(true)
 
         Close = CreateFrame("Button", "Close", Win)          -- level 2, visible with Win
         Close:SetPoint("BOTTOMRIGHT", Win, "BOTTOMRIGHT", -15, 15)
-        Close:SetSize(100, 21)
+        Close:SetWidth(100); Close:SetHeight(21)
         Close:EnableMouse(true)
         Close:SetScript("OnEnter", function(self) hovered = self:GetName() end)
         Close:SetScript("OnClick", function(self) clicked = self:GetName() end)
@@ -800,4 +800,30 @@ fn a_raise_with_a_hidden_child_keeps_the_windows_own_siblings_level() {
          split them just because one of them was hidden when it ran"
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **A script level change carries no children** (decision 2189): the Lua binding `0x774560`
+/// calls `set_frame_level 0x76a4f0` with `propagate=0` — only the raise shifts a subtree. Stock
+/// FrameXML is written against it (`BonusActionButtonTemplate` raises the button and then its
+/// cooldown by hand), and carrying the children put the bonus bar's sweep over an addon's
+/// cooldown count.
+#[test]
+fn a_script_level_change_leaves_the_children_where_they_were() {
+    let mut s = script();
+    s.run(
+        r#"
+        Parent = CreateFrame("Frame", "Parent")
+        Child = CreateFrame("Frame", "Child", Parent)
+        Grandchild = CreateFrame("Frame", "Grandchild", Child)
+        "#,
+    )
+    .unwrap();
+    let (child, grandchild) = (level(&mut s, "Child"), level(&mut s, "Grandchild"));
+    s.run("Parent:SetFrameLevel(7)").unwrap();
+    assert_eq!(level(&mut s, "Parent"), 7);
+    assert_eq!(
+        (level(&mut s, "Child"), level(&mut s, "Grandchild")),
+        (child, grandchild),
+        "the children keep their absolute levels"
+    );
 }

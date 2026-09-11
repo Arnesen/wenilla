@@ -1530,7 +1530,7 @@ mod tests {
     #[test]
     fn only_entering_the_world_writes_the_cvar() {
         let (tx, _rx) = async_channel::unbounded();
-        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        let script = benilla_ui::script::UiScript::new().unwrap();
         script.register_cvars([(CVAR_LAST_CHARACTER, "0")]);
 
         let mut app = App::new();
@@ -1578,7 +1578,7 @@ mod tests {
     fn a_replaced_vm_is_told_the_remembered_row_again() {
         let (tx, _rx) = async_channel::unbounded();
         let fresh = || {
-            let mut s = benilla_ui::script::UiScript::new().unwrap();
+            let s = benilla_ui::script::UiScript::new().unwrap();
             s.register_cvars([(CVAR_LAST_CHARACTER, "0")]);
             s
         };

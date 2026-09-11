@@ -21,7 +21,7 @@
 
 use mlua::{Lua, Value};
 
-use super::binding_abi::{bool_or_default, coerced_number, predicate};
+use super::binding_abi::{bool_or_default, coerced_number, flag};
 use super::Model;
 
 /// The area spirit healer's aura, `0xA18` — the one spell id `CancelAreaSpiritHeal` cancels, and
@@ -172,7 +172,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsInMeetingStoneQueue",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(model.meeting_stone_area != 0))
+            Ok(flag(model.meeting_stone_area != 0))
         })?,
     )?;
 
@@ -195,7 +195,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "CheckPetUntrainerDist",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(model.pet_untrainer_pending))
+            Ok(flag(model.pet_untrainer_pending))
         })?,
     )?;
     // §9: the confirm arm — the latch's guid, the money gate (`ERR_NOT_ENOUGH_MONEY`, no packet)
@@ -302,11 +302,7 @@ mod tests {
     #[test]
     fn the_meeting_stone_pair_answers_one_or_nil_and_string_or_nil() {
         let mut s = UiScript::new().unwrap();
-        assert_eq!(
-            s.eval::<i64>("return select('#', IsInMeetingStoneQueue())")
-                .unwrap(),
-            1
-        );
+        assert_eq!(s.arity("IsInMeetingStoneQueue()").unwrap(), 1);
         assert!(s
             .eval::<bool>("return IsInMeetingStoneQueue() == nil")
             .unwrap());

@@ -771,7 +771,7 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
         r#"
             local loot = CreateFrame("Frame", "LootFrame")
             loot:Hide()
-            loot:SetSize(50, 50)
+            loot:SetWidth(50); loot:SetHeight(50)
             ShowUIPanel(loot)
         "#,
     )
@@ -1257,8 +1257,8 @@ fn a_dead_player_opens_only_whiledead_windows() {
     // Stand-ins for two shipped rows: GossipFrame (no whileDead) and QuestLogFrame (whileDead=1).
     // Bare frames are enough — the guard runs before any seat is chosen.
     s.run(
-        r#"local g = CreateFrame("Frame", "GossipFrame") g:SetSize(50, 50) g:Hide()
-           local q = CreateFrame("Frame", "QuestLogFrame") q:SetSize(50, 50) q:Hide()
+        r#"local g = CreateFrame("Frame", "GossipFrame") g:SetWidth(50); g:SetHeight(50) g:Hide()
+           local q = CreateFrame("Frame", "QuestLogFrame") q:SetWidth(50); q:SetHeight(50) q:Hide()
            ShowUIPanel(GossipFrame)"#,
     )
     .unwrap();
@@ -1321,9 +1321,9 @@ fn a_frame_arriving_at_center_puts_the_child_windows_away() {
     // holds left, TradeFrame (pushable 1) then ARRIVES at center (UIParent.lua l.734-741's
     // else-arm: the incumbent outranks nobody, the newcomer settles at center).
     s.run(
-        r#"local m = CreateFrame("Frame", "OpenMailFrame") m:SetSize(50, 50)
-           local a = CreateFrame("Frame", "MerchantFrame") a:SetSize(50, 50) a:Hide()
-           local b = CreateFrame("Frame", "TradeFrame") b:SetSize(50, 50) b:Hide()
+        r#"local m = CreateFrame("Frame", "OpenMailFrame") m:SetWidth(50); m:SetHeight(50)
+           local a = CreateFrame("Frame", "MerchantFrame") a:SetWidth(50); a:SetHeight(50) a:Hide()
+           local b = CreateFrame("Frame", "TradeFrame") b:SetWidth(50); b:SetHeight(50) b:Hide()
            ShowUIPanel(MerchantFrame)
            ShowUIPanel(TradeFrame)"#,
     )
@@ -1344,7 +1344,7 @@ fn a_frame_arriving_at_center_puts_the_child_windows_away() {
     s.run(
         r#"HideUIPanel(TradeFrame) HideUIPanel(MerchantFrame)
            OpenMailFrame:Show()
-           local l = CreateFrame("Frame", "LootFrame") l:SetSize(50, 50) l:Hide()
+           local l = CreateFrame("Frame", "LootFrame") l:SetWidth(50); l:SetHeight(50) l:Hide()
            ShowUIPanel(LootFrame)
            ShowUIPanel(MerchantFrame)"#,
     )

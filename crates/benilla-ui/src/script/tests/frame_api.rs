@@ -1,9 +1,15 @@
-//! Small frame-API wins: GetLocale, SetAllPoints, SetFormattedText, SetShown, and GetPoint readback.
+//! Small frame-API wins: GetLocale, SetAllPoints, and GetPoint readback.
 
 use super::common::script;
 
+/// Two era names, asserted together because neither earns a file of its own.
+///
+/// This test carried two more legs until decision 2142, `SetFormattedText` and `SetShown`, and
+/// both went with the verbs: neither is in a 1.12 method table. What the first of them actually
+/// proved — that `%N$s` reorders rather than consumes — is `string.format`'s own behaviour and is
+/// pinned where it lives, in [`crate::strings`].
 #[test]
-fn consensus_api_small_wins() {
+fn get_locale_and_set_all_points() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     // GetLocale — benilla is enUS-data-only.
@@ -12,13 +18,11 @@ fn consensus_api_small_wins() {
     s.run(
         r#"
         p = CreateFrame("Frame", "SAP_Parent")
-        p:SetPoint("BOTTOMLEFT", 100, 100); p:SetSize(200, 50)
+        p:SetPoint("BOTTOMLEFT", 100, 100); p:SetWidth(200); p:SetHeight(50)
         c = CreateFrame("Frame", "SAP_Child", p)
         c:SetAllPoints()                          -- default: the parent
         f = CreateFrame("Frame", "SAP_Free")
         f:SetAllPoints("SAP_Parent")              -- by name
-        fs = p:CreateFontString(nil, "OVERLAY")
-        fs:SetFormattedText("%2$s %1$s (%3$d)", "world", "hello", 7)
     "#,
     )
     .unwrap();
@@ -34,20 +38,6 @@ fn consensus_api_small_wins() {
         )
         .unwrap();
     assert!(ok, "SetAllPoints matched the target rect");
-
-    // SetFormattedText routes through the positional-aware format.
-    assert_eq!(
-        s.eval::<String>("return fs:GetText()").unwrap(),
-        "hello world (7)"
-    );
-
-    // SetShown: truthy shows, nil/false hides.
-    s.run("p:SetShown(false)").unwrap();
-    assert!(!s.eval::<bool>("return p:IsShown()").unwrap());
-    s.run("p:SetShown(1)").unwrap();
-    assert!(s.eval::<bool>("return p:IsShown()").unwrap());
-    s.run("p:SetShown(nil)").unwrap();
-    assert!(!s.eval::<bool>("return p:IsShown()").unwrap());
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 

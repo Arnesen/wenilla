@@ -46,7 +46,7 @@
 //!   Windows/Linux; decision 0301) and reuse the byte-verified word classes + selection-first
 //!   delete law.
 
-use mlua::{Lua, Table};
+use mlua::{Lua, Table, Value};
 
 use super::object::frame_handle_of;
 use super::types::{EditAction, EditUnit};
@@ -610,6 +610,91 @@ fn fire_script(lua: &Lua, id: u32, name: &str) {
             .push(e.to_string());
     }
 }
+
+/// **The caret flush's fire — `OnCursorChanged(x, y, w, h)`** (`0x77da80`).
+///
+/// The reference recomputes the caret's anchor inside `0x77da80` and, having done so, fires this
+/// with four floats *"each value scaled by `f`, so all four are in FrameXML UI units"* (wow-re
+/// `system/ui/ui.md`, the RF-0085 caret law, VERIFIED):
+///
+/// * `x` — the caret's advance from its line's start, the same number the paint anchors by
+///   ([`EditBoxState::caret_row_x`]).
+/// * `y` — `−lineIndex · (snap(H·scale) + snap(spacing·scale))/scale`, i.e. minus the row index
+///   times the row pitch. **Negative-downward**, which is what `ScrollingEdit_OnCursorChanged`'s
+///   `cursorOffset = y` then `-this.cursorOffset` reads as a positive distance down the page.
+/// * `w` — **`≡ 4.0`**, a constant in the reference (the caret texture's own width, read through
+///   its layout vtable `+0x1c`).
+/// * `h` — the font line height, read through `+0x20`.
+///
+/// Ours takes the row pitch [`EditBoxState::cell_h`] for both the `y` factor and `h`. The two are
+/// the same number whenever the font declares no extra `spacing`, which is every box in the
+/// shipped 1.12 UI; a box that *does* set spacing would report an `h` a little tall. Named rather
+/// than guessed at — the alternative is carrying a second measured number through the advance
+/// answer for a case nothing in the corpus produces.
+///
+/// **The edge is a CHANGE, not a frame.** `0x77da80` has exactly one caller, `0x77d475`, gated on
+/// dirty bit 2, so the handler runs when the caret has actually moved — which is what makes
+/// `ScrollingEdit_OnUpdate`'s `if (this.cursorOffset)` idiom terminate. [`EditBoxState::cursor_fired`]
+/// is that bit's memory here.
+///
+/// **Scoped to the focused box**, because the caret geometry rides the advance table and only the
+/// focused box asks the host for one ([`super::editbox::seam`]). The reference flushes any dirty
+/// box; the difference is invisible for the customer this exists for — you are typing in the box
+/// you are looking at — and an unfocused box's caret is never drawn either way.
+pub(in crate::script) fn drain_cursor_changed(lua: &Lua) {
+    let fire = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let Some(h) = model.focused_editbox else {
+            return;
+        };
+        if !model.arena.frame(h).is_some_and(|f| f.effective_visible) {
+            return;
+        }
+        let id = model.frame_id(h);
+        let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state)
+        else {
+            return;
+        };
+        // No answered advance table yet ⇒ no caret geometry to report. The next tick after the
+        // host answers carries it, exactly as the reference's next flush would.
+        let display = eb.display();
+        if eb.advances.len() != display.len() + 1 {
+            return;
+        }
+        let cursor_d = eb.text_to_display(eb.cursor).min(display.len());
+        let (row, x) = if eb.multi_line {
+            eb.caret_row_x(cursor_d)
+        } else {
+            (0, eb.advances[cursor_d])
+        };
+        if eb.cursor_fired == Some((row, x)) {
+            return;
+        }
+        eb.cursor_fired = Some((row, x));
+        let pitch = eb.cell_h;
+        (id, x, -(row as f32) * pitch, pitch)
+    };
+    let (id, x, y, h) = fire;
+    if let Err(e) = event::fire_widget_handler(
+        lua,
+        id,
+        "OnCursorChanged",
+        vec![
+            Value::Number(f64::from(x)),
+            Value::Number(f64::from(y)),
+            Value::Number(f64::from(CARET_WIDTH)),
+            Value::Number(f64::from(h)),
+        ],
+    ) {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .record_script_error(e.to_string());
+    }
+}
+
+/// The caret's width as `OnCursorChanged` reports it — **a constant in the reference**, not a
+/// measurement (wow-re: `w ≡ 4.0`).
+const CARET_WIDTH: f32 = 4.0;
 
 // The Lua method surface (SetText/GetText/HighlightText/SetFocus/…, consulted before the shared
 // frame table only for EditBox frames) — a child module over this file's focus/editing

@@ -497,14 +497,42 @@ fn feed_meeting_stone(
     }
 }
 
-/// The enter-world bring-up's meeting-stone leg: the text reset, then the empty `CMSG 0x296`
-/// — once per world session, which is what the reference's run-once byte amounts to.
+/// The enter-world bring-up's meeting-stone leg: the text reset, then the empty `CMSG 0x296`.
+///
+/// **Once per UI LIFECYCLE, not once per world session**, and that distinction is the whole bug.
+/// The reference's run-once byte `[0xb4b424]` is *cleared by the UI teardown* — `0x490bd0` calls
+/// `0x490a80` at `0x490c20`, which zeroes it at `0x490a8d` — and `UI_Init` (`0x48fbf0`) then calls
+/// `0x4908c0` at `0x490168` behind the same live-player gate, finds the byte clear, and re-runs
+/// this entire bring-up: `0x490a14` → `0x4c9f40` → `0x4ca1c0` → `PutUInt32(0x296)` + Send. So a
+/// `ReloadUI()` **re-asks the server**, and that is what brings the icon back.
+///
+/// Gated on `MessageReader<EnteredWorldMessage>`, this leg never ran for a `/reload`, which never
+/// leaves the world (1291) and so produces no such message. Nothing re-armed
+/// [`MeetingStone::dirty`] and nothing re-queried, so `IsInMeetingStoneQueue()` and
+/// `GetMeetingStoneStatusText()` answered nil for the rest of the session — and stock
+/// `Minimap.xml`'s `MiniMapMeetingStoneFrame` (built `hidden="true"`, shown only by
+/// `MEETINGSTONE_CHANGED`, whose single firing site image-wide is the `0x295` handler at
+/// `0x4ca38f`) stayed gone while the player was still queued.
+///
+/// **A [`crate::ui_script::VmMemo`] claim IS the reference's gate.** A byte the UI teardown clears
+/// is exactly "once per VM", and 1290's name for that is `claim` — so this reads as the same
+/// question the binary asks, rather than as a workaround for the missing message. The one
+/// round trip during which the icon is genuinely absent is faithful, not a defect: the reference
+/// has the same gap, because only the server's reply fires the event.
+///
+/// The queued area itself is untouched here, matching `[0xb72038]`, which the RE round found is
+/// referenced six times image-wide and by nothing in either reload closure — it survives, and
+/// [`MeetingStone::enter_world`]'s `dirty` is what re-pushes it to the fresh VM.
 fn meeting_stone_enter_world(
-    mut entered: MessageReader<crate::net::EnteredWorldMessage>,
+    script: Option<NonSendMut<UiScript>>,
     mut stone: ResMut<MeetingStone>,
     commands: Res<NetCommands>,
+    mut asked: Local<crate::ui_script::VmMemo<bool>>,
 ) {
-    if entered.read().next().is_none() {
+    let Some(script) = script else {
+        return;
+    };
+    if !asked.claim(&script) {
         return;
     }
     stone.enter_world();
@@ -675,7 +703,11 @@ impl Plugin for UiDialogVerbsPlugin {
                 (
                     close_npc_session_out_of_range::<PetUnlearnState>.before(feed_dialog_verbs),
                     feed_dialog_verbs.before(UiInput),
-                    meeting_stone_enter_world.before(feed_meeting_stone),
+                    // In-world only: the claim is about the VM, but the query is a world
+                    // packet, and the boot VM exists at the glue screen too.
+                    meeting_stone_enter_world
+                        .before(feed_meeting_stone)
+                        .run_if(in_state(crate::char_select::ClientState::InWorld)),
                     feed_meeting_stone.before(UiInput),
                     drain_latch_verbs.after(UiInput),
                     drain_queue_verbs.after(UiInput),
@@ -705,6 +737,74 @@ fn cancel_gate_could_apply(attributes_ex: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The `/reload` re-query** — the meeting-stone half of 1290's class, and the reference's
+    /// own behaviour rather than an invention of ours.
+    ///
+    /// wow-re's §5 trio (3/3 unanimous, every byte re-decoded from the raw image) settled that
+    /// the run-once byte `[0xb4b424]` is cleared by the UI teardown at `0x490a8d` and that
+    /// `UI_Init` re-runs the bring-up and re-sends `CMSG 0x296`. So the gate is once per **VM**,
+    /// not once per world session — and against the old `MessageReader<EnteredWorldMessage>`
+    /// shape this fails on the second VM, which is exactly the reported symptom: the queued
+    /// player's minimap icon never comes back after a `/reload`.
+    ///
+    /// It also corrects wow-re's own `meeting-stone-status.md` §6, which asserted the query "is
+    /// sent exactly once per world session … has no other trigger" — true of the entry points it
+    /// enumerated, but it never asked who *clears* the byte.
+    ///
+    /// **A registered schedule, not `run_system_once`**: the gate is a `Local<VmMemo<bool>>`, and
+    /// `run_system_once` builds a fresh system — and so a fresh `Local` — on every call, which
+    /// would make the claim look unclaimed every frame (the same trap `ui_loot`'s tests name).
+    #[test]
+    fn a_rebuilt_vm_re_asks_the_server_for_the_meeting_stone_queue() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<MeetingStone>()
+            .insert_resource(NetCommands(tx))
+            .add_systems(Update, meeting_stone_enter_world);
+
+        let queries = |rx: &crossbeam_channel::Receiver<ClientCommand>| {
+            rx.try_iter()
+                .filter(|c| matches!(c, ClientCommand::MeetingStoneStatusQuery))
+                .count()
+        };
+
+        // No VM yet — the glue screen: nothing is asked.
+        app.update();
+        assert_eq!(queries(&rx), 0, "no VM, no bring-up");
+
+        // The first VM: the bring-up runs once, however many frames pass.
+        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.update();
+        assert_eq!(queries(&rx), 1, "the first VM asks the server");
+        app.update();
+        app.update();
+        assert_eq!(queries(&rx), 0, "…and does not ask again on later frames");
+
+        // The server answers: the player IS queued, and the host holds that.
+        app.world_mut().resource_mut::<MeetingStone>().area = 1519;
+        app.world_mut().resource_mut::<MeetingStone>().dirty = false;
+
+        // `ReloadUI()`: a fresh VM, and nothing on the wire.
+        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.update();
+        assert_eq!(
+            queries(&rx),
+            1,
+            "a rebuilt VM re-asks — the reference's UI teardown clears the run-once byte, so \
+             `UI_Init` re-sends `CMSG 0x296` (0x490a8d / 0x490168)"
+        );
+
+        let stone = app.world().resource::<MeetingStone>();
+        assert!(
+            stone.dirty,
+            "the bring-up re-armed the push, so the fresh VM is told the queued area again"
+        );
+        assert_eq!(
+            stone.area, 1519,
+            "the queued area itself is untouched, matching `[0xb72038]` surviving the reload"
+        );
+    }
 
     /// Spell 2584's flags off the shipped Spell.dbc: the cancel-aura gate's first two legs.
     #[test]

@@ -643,8 +643,10 @@ mod tests {
         // The 8th return: Professions rows are abandonable (fixture rule), weapon rows and
         // headers are not — 1/nil, the 1.12 boolean shape.
         let ab = |s: &mut UiScript, i: i64| {
-            s.eval::<Option<i64>>(&format!("return (select(8, GetSkillLineInfo({i})))"))
-                .unwrap()
+            s.eval::<Option<i64>>(&format!(
+                "local _,_,_,_,_,_,_,ab = GetSkillLineInfo({i}) return ab"
+            ))
+            .unwrap()
         };
         assert_eq!(ab(&mut s, 2), None, "Defense is not abandonable");
         assert_eq!(ab(&mut s, 5), Some(1), "First Aid is abandonable");
@@ -757,12 +759,13 @@ mod tests {
             ),
             ("Weapon Skills", 1, Some(1), 0, 0, 0, 0)
         );
-        let (abandon_nil, step_nil, rank_cost_nil, min_level, cost_type, count) = s
-            .eval::<(bool, bool, bool, i64, i64, i64)>(
-                "local a,st,rc,ml,ct = select(8, GetSkillLineInfo(1)) \
-                 return a==nil, st==nil, rc==nil, ml, ct, select('#', GetSkillLineInfo(1))",
+        let (abandon_nil, step_nil, rank_cost_nil, min_level, cost_type) = s
+            .eval::<(bool, bool, bool, i64, i64)>(
+                "local _,_,_,_,_,_,_,a,st,rc,ml,ct = GetSkillLineInfo(1) \
+                 return a==nil, st==nil, rc==nil, ml, ct",
             )
             .unwrap();
+        let count = s.arity("GetSkillLineInfo(1)").unwrap();
         assert!(abandon_nil);
         assert!(
             step_nil && rank_cost_nil,
@@ -792,16 +795,17 @@ mod tests {
         );
         // The 13th return is the REAL description (SkillLine.dbc col 12 through the feed) — an
         // entry row's alone: a header stops at 12 (asserted above).
-        let (count, desc) = s
-            .eval::<(i64, String)>(
-                "return select('#', GetSkillLineInfo(2)), select(13, GetSkillLineInfo(2))",
-            )
+        let count = s.arity("GetSkillLineInfo(2)").unwrap();
+        let desc = s
+            .eval::<String>("local _,_,_,_,_,_,_,_,_,_,_,_,d = GetSkillLineInfo(2) return d")
             .unwrap();
         assert_eq!((count, desc.as_str()), (13, "About Defense."));
         // minLevel and skillCostType are real NUMBERS on an entry — and the cost type is the
         // row's index PLUS ONE (the client's own `0x4d3a06`), so a fixture at index 0 reads 1.
         let (min_level, cost_type) = s
-            .eval::<(i64, i64)>("local ml,ct = select(11, GetSkillLineInfo(2)) return ml,ct")
+            .eval::<(i64, i64)>(
+                "local _,_,_,_,_,_,_,_,_,_,ml,ct = GetSkillLineInfo(2) return ml,ct",
+            )
             .unwrap();
         assert_eq!((min_level, cost_type), (0, 1));
     }
@@ -884,7 +888,7 @@ mod tests {
         );
         // Defense (a weapon line, not mono) still reports its real 300.
         assert_eq!(
-            s.eval::<i64>("return (select(7, GetSkillLineInfo(4)))")
+            s.eval::<i64>("local _,_,_,_,_,_,mx = GetSkillLineInfo(4) return mx")
                 .unwrap(),
             300
         );
@@ -906,8 +910,7 @@ mod tests {
         let s = UiScript::new().unwrap();
         for idx in ["0", "1", "99"] {
             assert_eq!(
-                s.eval::<i64>(&format!("return select('#', GetSkillLineInfo({idx}))"))
-                    .unwrap(),
+                s.arity(&format!("GetSkillLineInfo({idx})")).unwrap(),
                 13,
                 "GetSkillLineInfo({idx}) must answer 13 values"
             );

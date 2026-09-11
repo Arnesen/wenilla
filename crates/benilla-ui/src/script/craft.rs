@@ -809,15 +809,11 @@ mod tests {
             ("Runed Copper Rod", Some(1), "Arcanite Rod", None)
         );
 
-        // A recipe with no tools returns an empty multivalue (select('#', ...) == 0).
+        // A recipe with no tools returns an empty multivalue (arity 0, not one nil).
         let mut c2 = state();
         c2.recipes[1].tools.clear();
         s.set_craft(Some(c2));
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetCraftSpellFocus(1))")
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity("GetCraftSpellFocus(1)").unwrap(), 0);
     }
 
     #[test]
@@ -962,8 +958,9 @@ mod tests {
                 .unwrap(),
             "|cff1eff00|Hitem:10940:0:0:0|h[Illusion Dust]|h|r"
         );
+        assert_eq!(s.arity("GetCraftReagentItemLink(1, 5)").unwrap(), 1);
         assert!(s
-            .eval::<bool>("return select('#', GetCraftReagentItemLink(1, 5)) == 1 and GetCraftReagentItemLink(1, 5) == nil")
+            .eval::<bool>("return GetCraftReagentItemLink(1, 5) == nil")
             .unwrap());
         for bad in ["GetCraftItemLink(nil)", "GetCraftReagentItemLink(1)"] {
             let err = s.run(bad).expect_err(bad).to_string();
@@ -972,9 +969,9 @@ mod tests {
         let mut beasts = state();
         beasts.craft_type = 1;
         s.set_craft(Some(beasts));
-        assert!(
-            s.eval::<bool>("return select('#', GetCraftItemLink(1)) == 0")
-                .unwrap(),
+        assert_eq!(
+            s.arity("GetCraftItemLink(1)").unwrap(),
+            0,
             "a non-Enchanting craft answers zero values"
         );
     }

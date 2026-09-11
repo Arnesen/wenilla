@@ -13,7 +13,7 @@ fn set_tex_coord_changes_extracted_uv() {
     s.run(
         r#"
         f = CreateFrame("Frame", "TcF")
-        f:SetWidth(100); f:SetHeight(100); f:SetPoint("CENTER")
+        f:SetWidth(100); f:SetHeight(100); f:SetPoint("CENTER", 0, 0)
         t = f:CreateTexture("TcTex", "ARTWORK")
         t:SetTexture("Interface\\Foo")
         t:SetTexCoord(0.1, 0.6, 0.2, 0.8)
@@ -107,7 +107,7 @@ fn set_font_object_repoints_fontstring() {
     s.run(
         r#"
         f = CreateFrame("Frame", "FoF")
-        f:SetWidth(120); f:SetHeight(30); f:SetPoint("CENTER")
+        f:SetWidth(120); f:SetHeight(30); f:SetPoint("CENTER", 0, 0)
         fs = f:CreateFontString("FoText", "ARTWORK")
         fs:SetText("Hi")
         fs:SetFontObject("Big")
@@ -170,7 +170,7 @@ fn justify_v_defaults_middle_and_overrides() {
     s.run(
         r#"
         f = CreateFrame("Frame", "JvF")
-        f:SetWidth(100); f:SetHeight(30); f:SetPoint("CENTER")
+        f:SetWidth(100); f:SetHeight(30); f:SetPoint("CENTER", 0, 0)
         fs = f:CreateFontString("JvText", "ARTWORK")
         fs:SetText("Hi")
     "#,

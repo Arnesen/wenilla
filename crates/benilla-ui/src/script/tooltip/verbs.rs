@@ -6,13 +6,14 @@
 use mlua::{Lua, Table, Value, Variadic};
 
 use crate::layout::{Anchor, Point};
+use crate::script::binding_abi::optional_string;
 use crate::script::object::{frame_handle_of, frame_wrapper};
 use crate::script::region::region_handle_of;
 use crate::script::Model;
-use crate::widget::{KindState, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
+use crate::widget::{KindState, TooltipAnchor, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
 
 use super::{
-    append_line, bool_arg, cancel_fade, clear_content, fire_cleared, hide_tooltip, now,
+    append_line, bool_arg, clear_content, fire_cleared, full_alpha, hide_tooltip, now,
     parse_line_color, parse_line_tail, set_shown, text_of, tip_mut, with_tip, write_cell,
     REG_TOOLTIP_METHODS,
 };
@@ -20,96 +21,153 @@ use super::{
 pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
-    // SetOwner(owner, anchorType [, x, y]) — remember the owner, clear the content (the engine
-    // fires OnTooltipCleared: a fresh owner never inherits the last hover's lines or money), and
-    // point the plate per the anchor law. The six owner anchors are the documented 1.12 API set
-    // (spec-faithful, same posture as StatusBar's contract; the corpus exercises RIGHT/LEFT/
-    // BOTTOMRIGHT); ANCHOR_NONE leaves pointing to the caller (GameTooltip_SetDefaultAnchor),
-    // ANCHOR_PRESERVE keeps the previous placement.
+    // SetOwner(owner, anchorType [, x, y]) — the binding `0x5310d0` and the core it calls,
+    // `0x52ffe0(owner_region, mode, dx, dy)`: SetAlpha(255) (`0x52fff4`), fade-disarm
+    // (`0x530002`), `+0x314 = owner` (`0x53000c`), the mode (`0x530031`), the offsets, then the
+    // anchor-apply `0x52fe90`. We clear the content too, because the engine fires
+    // OnTooltipCleared: a fresh owner never inherits the last hover's lines or money.
+    //
+    // **The omitted / unreadable / unrecognised anchorType is mode 0 = ANCHOR_LEFT, silently.**
+    // `0x53120d` writes 0 into the binding's local mode *before any compare runs*; `0x531214`'s
+    // `lua_isstring` gate jumps the whole `SStrCmpI` chain when arg 3 is absent, nil, boolean or a
+    // table; the chain's last `jne` reaches the same join untouched; and `[0x531221, 0x53133a)`
+    // contains no `luaL_error` (earned zero, positive-controlled against the five this function
+    // *does* have in its owner-validation prologue). `0x5313c0` then hands that local to the core.
+    //
+    // The core's own `mov [+0x318],7` at `0x530012` is **not** that default: it is an
+    // unconditional pre-store that `0x530031` overwrites with the argument, and it survives only
+    // when the owner pointer is NULL — the un-own path `0x530a60` takes on every hide.
+    //
+    // **The anchor-apply clears, and only ANCHOR_PRESERVE escapes it** (`0x52fe90` read
+    // contiguously): a NULL owner returns at `0x52fe9e`; **mode 8 returns at `0x52fead`, before
+    // the clear**; then `0x52feb8` tests the caller's arg1, which `0x530037` always passes as
+    // **1** (`0x53002d push 0x1`), so the mode-7 skip at `0x52feba` is dead on this path and
+    // `0x52fec2 call 0x767ed0` (ClearAllPoints) runs for **every mode 0..7**; and only then does
+    // `0x52fed0 ja` send 6 and 7 home while 0..5 take the SetPoint jump table `0x52ffbc`.
+    //
+    // So the three arms below are: 0..5 clear-and-point, **6 and 7 clear**, 8 nothing. Decision
+    // 2176 replaces 2142's open thread 1, which had it backwards on both counts — it read the
+    // core's pre-store as the Lua default and read "no SetPoint" as "no clear", and a wow-re §5
+    // dispatched for the CURSOR mechanism refuted both at the bytes (`system/ui/scratch/`
+    // `tooltip-cursor-anchor-law.md` §0.2/§0.3/§2).
     m.set(
         "SetOwner",
         lua.create_function(
-            |lua,
-             (this, owner, anchor, x, y): (
-                Table,
-                Table,
-                Option<String>,
-                Option<f32>,
-                Option<f32>,
-            )| {
+            |lua, (this, owner, anchor, x, y): (Table, Table, Value, Option<f32>, Option<f32>)| {
                 let h = frame_handle_of(lua, &this)?;
                 let owner_h = frame_handle_of(lua, &owner)?;
+                // The gate is `lua_isstring 0x6f3510`, whose whole body is `lua_type` then
+                // `cmp eax,4 / cmp eax,3` — LUA_TSTRING or LUA_TNUMBER and nothing else — so the
+                // anchor argument is read the reference's way, by COERCION, and a boolean, table,
+                // function or userdata is indistinguishable from absent. Taking it as
+                // `Option<String>` made mlua's converter the gate instead, and mlua raises on a
+                // table: `Questie`'s `Tooltip:SetOwner(this, this)` (QuestieNotes.lua, the map-note
+                // hover) died with "bad argument #3: error converting Lua table to String" on a
+                // call the reference completes silently at mode 0. This function's doc comment has
+                // stated the law since 2176 — only the signature disagreed.
+                let anchor = optional_string(lua, &anchor);
                 {
                     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                     clear_content(&mut model, h);
-                    cancel_fade(&mut model, h);
+                    full_alpha(&mut model, h);
                     tip_mut(&mut model, h)?.owner = Some(owner_h);
                     let owner_id = model.frame_id(owner_h);
-                    let anchor = anchor.unwrap_or_else(|| "ANCHOR_RIGHT".into());
-                    let pts = match anchor.to_ascii_uppercase().as_str() {
-                        "ANCHOR_RIGHT" => Some((Point::BottomLeft, Point::TopRight)),
-                        "ANCHOR_LEFT" => Some((Point::BottomRight, Point::TopLeft)),
-                        "ANCHOR_TOPRIGHT" => Some((Point::BottomRight, Point::TopRight)),
-                        "ANCHOR_TOPLEFT" => Some((Point::BottomLeft, Point::TopLeft)),
-                        "ANCHOR_BOTTOMRIGHT" => Some((Point::TopLeft, Point::BottomRight)),
-                        "ANCHOR_BOTTOMLEFT" => Some((Point::TopRight, Point::BottomLeft)),
-                        "ANCHOR_NONE" | "ANCHOR_PRESERVE" => None,
+                    // The anchor mode is resolved ONCE, into the reference's own enum, and both
+                    // the placement below and `GetAnchorType`'s answer are taken from that one
+                    // value — so the plate and the getter can never tell different stories.
+                    //
+                    // Absent, unreadable and unrecognised all land on **ANCHOR_LEFT**, which is
+                    // the binding's zero-initialised local (`0x53120d`) surviving the
+                    // `lua_isstring` gate or the compare chain, with no raise. The warning on the
+                    // unrecognised leg is ours and stays: the reference is silent, but nothing
+                    // observable to Lua changes, and this exact warning is what made
+                    // `ANCHOR_CURSOR` visible as a real ninth mode nine corpus files ask for
+                    // rather than a typo (2142's open thread 2).
+                    let anchor = match anchor
+                        .as_deref()
+                        .map(str::to_ascii_uppercase)
+                        .as_deref()
+                        .unwrap_or("")
+                    {
+                        "ANCHOR_LEFT" => TooltipAnchor::Left,
+                        "ANCHOR_RIGHT" => TooltipAnchor::Right,
+                        "ANCHOR_BOTTOMLEFT" => TooltipAnchor::BottomLeft,
+                        "ANCHOR_BOTTOMRIGHT" => TooltipAnchor::BottomRight,
+                        "ANCHOR_TOPLEFT" => TooltipAnchor::TopLeft,
+                        "ANCHOR_TOPRIGHT" => TooltipAnchor::TopRight,
+                        "ANCHOR_CURSOR" => TooltipAnchor::Cursor,
+                        "ANCHOR_NONE" => TooltipAnchor::None,
+                        "ANCHOR_PRESERVE" => TooltipAnchor::Preserve,
+                        "" => TooltipAnchor::Left,
                         other => {
-                            model.warnings.push(format!(
-                                "SetOwner: unknown anchor '{other}' (kept ANCHOR_RIGHT)"
+                            model.record_warning(format!(
+                                "SetOwner: unknown anchor '{other}' (mode 0, ANCHOR_LEFT)"
                             ));
-                            Some((Point::BottomLeft, Point::TopRight))
+                            TooltipAnchor::Left
                         }
                     };
-                    match pts {
-                        Some((own, rel)) => {
-                            let new =
-                                Anchor::new(own, owner_id, rel, x.unwrap_or(0.0), y.unwrap_or(0.0));
-                            let input = model.layout_inputs.entry(h).or_default();
-                            // The no-op compare keeps the per-frame SetOwner idiom (the bag
-                            // hover's OnUpdate re-enter) from dirtying tier 1 by itself; the
-                            // content clear above already reports its own writes.
-                            let same = input.anchors.len() == 1
-                                && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
-                            if !same {
-                                // The plate re-points at the button under the cursor, which moves
-                                // an EDGE — structural under 1388, and therefore a whole-graph
-                                // derivation on every bag slot and every spellbook button a hover
-                                // sweep crossed. It names its node now (decision 1625): the old
-                                // and new target lists are both right here, so the cached graph's
-                                // edges are re-pointed instead of thrown away.
-                                let old_targets: Vec<u32> =
-                                    input.anchors.iter().map(|a| a.relative_to).collect();
-                                input.anchors = vec![new];
-                                model.touch_layout_retarget_frame(h, &old_targets, &[owner_id]);
-                            }
+                    tip_mut(&mut model, h)?.anchor = anchor;
+                    let pts = match anchor {
+                        TooltipAnchor::Right => Some((Point::BottomLeft, Point::TopRight)),
+                        TooltipAnchor::Left => Some((Point::BottomRight, Point::TopLeft)),
+                        TooltipAnchor::TopRight => Some((Point::BottomRight, Point::TopRight)),
+                        TooltipAnchor::TopLeft => Some((Point::BottomLeft, Point::TopLeft)),
+                        TooltipAnchor::BottomRight => Some((Point::TopLeft, Point::BottomRight)),
+                        TooltipAnchor::BottomLeft => Some((Point::TopRight, Point::BottomLeft)),
+                        TooltipAnchor::Cursor | TooltipAnchor::None | TooltipAnchor::Preserve => {
+                            None
                         }
-                        None if anchor.eq_ignore_ascii_case("ANCHOR_NONE") => {
-                            // The caller points it (ClearAllPoints+SetPoint) — drop ours now so a
-                            // stale owner anchor never wins the frame the caller forgets to.
-                            //
-                            // Dropping every anchor is a retarget to the EMPTY target set, and it
-                            // names its node like any other (decision 1625). It matters here more
-                            // than anywhere: this arm is `GameTooltip_SetDefaultAnchor`'s, which is
-                            // the path EVERY action-bar hover takes (stock `ActionButton_SetTooltip`, the
-                            // `UberTooltips` default; the stance, pet and bonus bars the same) —
-                            // while a bag slot anchors straight to its button and never comes
-                            // through here. So a conservative touch on this line was a whole-graph
-                            // derivation on every action button the cursor crossed, and on nothing
-                            // else, which is exactly the shape the director's recorder reported (decision 1630):
-                            // every derive frame owned by a MultiBar/BonusAction button.
-                            let dropped = match model.layout_inputs.get_mut(&h) {
-                                Some(input) if !input.anchors.is_empty() => {
-                                    Some(input.anchors.drain(..).map(|a| a.relative_to).collect())
-                                }
-                                _ => None,
-                            };
-                            if let Some(old_targets) = dropped {
-                                let old_targets: Vec<u32> = old_targets;
-                                model.touch_layout_retarget_frame(h, &old_targets, &[]);
+                    };
+                    // **Modes 6 and 7 CLEAR and stop; mode 8 does neither.** `0x52fe90` reaches
+                    // `0x52fec2 call 0x767ed0` for every mode 0..7 — the mode-7 skip beside it is
+                    // gated on an arg1 that `SetOwner`'s core always passes as 1 — and mode 8
+                    // returned two compares earlier, at `0x52fead`, without touching anything.
+                    //
+                    // For ANCHOR_NONE that clear is what makes `GameTooltip_SetDefaultAnchor`
+                    // (`SetOwner(owner, "ANCHOR_NONE")` → `ClearAllPoints()` → `SetPoint(...)`,
+                    // the path of every action-bar hover) safe: a stale owner anchor cannot win
+                    // the frame the caller forgets to re-point. For ANCHOR_CURSOR it is the
+                    // opening move of a placement the per-frame update finishes
+                    // (`script::tooltip::cursor_anchor`).
+                    //
+                    // Dropping every anchor is a retarget to the EMPTY target set, and it names
+                    // its node like any other (decision 1625). It matters here more than
+                    // anywhere: left on the conservative touch, this line was a whole-graph
+                    // derivation on every action button the cursor crossed and on nothing else —
+                    // exactly the shape the director's recorder reported (decision 1630).
+                    if matches!(anchor, TooltipAnchor::Cursor | TooltipAnchor::None) {
+                        let dropped = match model.layout_inputs.get_mut(&h) {
+                            Some(input) if !input.anchors.is_empty() => {
+                                Some(input.anchors.drain(..).map(|a| a.relative_to).collect())
                             }
+                            _ => None,
+                        };
+                        if let Some(old_targets) = dropped {
+                            let old_targets: Vec<u32> = old_targets;
+                            model.touch_layout_retarget_frame(h, &old_targets, &[]);
                         }
-                        None => {} // ANCHOR_PRESERVE
+                    }
+                    if let Some((own, rel)) = pts {
+                        let new =
+                            Anchor::new(own, owner_id, rel, x.unwrap_or(0.0), y.unwrap_or(0.0));
+                        let input = model.layout_inputs.entry(h).or_default();
+                        // The no-op compare keeps the per-frame SetOwner idiom (the bag
+                        // hover's OnUpdate re-enter) from dirtying tier 1 by itself; the
+                        // content clear above already reports its own writes.
+                        let same = input.anchors.len() == 1
+                            && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
+                        if !same {
+                            // The plate re-points at the button under the cursor, which moves
+                            // an EDGE — structural under 1388, and therefore a whole-graph
+                            // derivation on every bag slot and every spellbook button a hover
+                            // sweep crossed. It names its node now (decision 1625): the old
+                            // and new target lists are both right here, so the cached graph's
+                            // edges are re-pointed instead of thrown away.
+                            let old_targets: Vec<u32> =
+                                input.anchors.iter().map(|a| a.relative_to).collect();
+                            input.anchors = vec![new];
+                            model.touch_layout_retarget_frame(h, &old_targets, &[owner_id]);
+                        }
                     }
                 }
                 fire_cleared(lua, h);
@@ -117,8 +175,16 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             },
         )?,
     )?;
+    // GameTooltip:BenillaGetTooltipOwner() — **ours, and the prefix is what makes it honest.**
+    // 1.12 registers `IsOwned` (ask about ONE frame) and no getter at all, so there is no
+    // reference spelling for "which frame owns this plate" to be faithful to; a `GetOwner` here
+    // would be an unexplained superset an addon can feature-detect (1188, and the census that
+    // moved it, 2142). Under the `Benilla` prefix it is unreachable by accident from an addon
+    // that means to call a WoW function. Its one caller is the dev-only hover recorder
+    // (`benilla-app/src/hover_log.rs`), which needs the owner's NAME per frame so a trace reads
+    // the same names the director sees.
     m.set(
-        "GetOwner",
+        "BenillaGetTooltipOwner",
         lua.create_function(|lua, this: Table| {
             let owner = with_tip(lua, &this, |t| t.owner)?;
             let id = {
@@ -131,6 +197,28 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(id) => Ok(Value::Table(frame_wrapper(lua, id)?)),
                 None => Ok(Value::Nil),
             }
+        })?,
+    )?;
+    // GetAnchorType() — ONE string, the mode the last SetOwner placed this plate by
+    // (`0x5313e0`, table `0x854198`, argc 1, arity 1, kinds `(string)`; it reads `[+0x318]` back
+    // through the 9-entry name table `0x531530`). The kinds column has no nil alternative and this
+    // does not answer one: a tooltip nothing has owned yet answers `"ANCHOR_NONE"`, which is
+    // [`TooltipAnchor`]'s default and the same mode the reference's own SetOwner core falls back to.
+    //
+    // Two corpus callers, both unguarded, both raising against this VM until now, and they are the
+    // two shapes the verb has: `pfUI/modules/tooltip.lua:97` compares against ONE mode
+    // (`if GameTooltip:GetAnchorType() == "ANCHOR_NONE" then` — its OnShow reposition, so an equality
+    // on the exact reference spelling), and `_Nameplates/_Nameplates.lua:479` compares against a
+    // mode it computed (`if GameTooltip:GetAnchorType() ~= Anchor then GameTooltip:SetOwner(Column,
+    // Anchor) end` — a re-SetOwner suppressor, so an answer that never equals what SetOwner was
+    // given would re-own the plate on every OnUpdate). Both need the string to round-trip through
+    // the setter verbatim, which is why the mode is resolved once up there and read straight back
+    // here rather than re-derived from the plate's anchors.
+    m.set(
+        "GetAnchorType",
+        lua.create_function(|lua, this: Table| {
+            let anchor = with_tip(lua, &this, |t| t.anchor)?;
+            Ok(anchor.name())
         })?,
     )?;
     // IsOwned(frame) — the hover re-enter loop's gate (ref ContainerFrame.lua OnUpdate): true
@@ -370,15 +458,41 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // Show/Hide — shadow the shared pair (kind tables resolve first) to keep the tooltip's
     // state honest: Show cancels a fade at full alpha; Hide drops the owner + content and fires
     // OnTooltipCleared (the ref clears its money row through exactly that script).
+    // Show is an EXISTENCE GATE, not a plain show. `0x530a80` — the CGameTooltip override of
+    // `vtbl+0x88`, which is the slot a Lua `:Show()` lands in (the generic widget Show path
+    // `0x7a3350` sets `[+0xd0]=1` then calls slot `+0x88`) — shows only when BOTH `+0x314` (the
+    // owner) and `+0x31c` (the line count) are non-zero; otherwise it calls its own `vtbl+0x84`
+    // effective-hide `0x530a60`, which is the SetOwner core with a NULL owner, so the plate is
+    // hidden AND un-owned and OnTooltipCleared fires. Evaluated at Show time only — it is never a
+    // visibility poll. (wow-re `system/ui/ledger.tsv` row `0x530a80`, verified, and
+    // `scratch/hover-hide-and-tooltip-owner-law.md` §4.)
+    //
+    // Without the gate an addon that reaches `Show()` having added no lines leaves a VISIBLE
+    // empty plate — and, because `layout_tooltips` skips a zero-line plate rather than collapsing
+    // it, one still wearing the last hover's width and height. That is what `Questie`'s tracker
+    // does: `QuestieTracker.lua`'s quest-button OnEnter has a dead zone between its two arms (an
+    // in-progress quest whose objective text IS in its database adds nothing) and then calls
+    // `Tooltip:Show()` unconditionally. On the reference `0x530a80` swallows it; we drew the
+    // empty plate.
+    //
+    // `show_or_hide_empty` is the same law for the app-answered content asks, and deliberately
+    // does NOT un-own (its re-enter repaint needs the owner). This path is the reference's own,
+    // so it takes the reference's full effective-hide.
     m.set(
         "Show",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            {
+            let live = {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                cancel_fade(&mut model, h);
+                full_alpha(&mut model, h);
+                tip_mut(&mut model, h)
+                    .map(|t| t.owner.is_some() && t.num_lines > 0)
+                    .unwrap_or(false)
+            };
+            match live {
+                true => set_shown(lua, h, true),
+                false => hide_tooltip(lua, h),
             }
-            set_shown(lua, h, true);
             Ok(())
         })?,
     )?;
@@ -391,7 +505,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The item content channels (SetItemById/SetBagItem/SetMerchantItem/SetBuybackItem) live in
+    // The item content channels (BenillaSetItemById/SetBagItem/SetMerchantItem/SetBuybackItem) live in
     // their own module — the one shared renderer + the red usable law (decision 0274 P1).
     crate::script::tooltip_item::install_methods(lua, &m)?;
     // The spell/aura/action content channels (SetSpell/SetShapeshift/SetPlayerBuff/SetAction) —

@@ -246,9 +246,11 @@ impl AddonsPanel {
                     self.staged.push(rows.iter().map(|a| a.enabled).collect());
                     self.list = rows;
                 } else {
-                    // Same folder, same deterministic (alphabetical) discovery, read
-                    // back-to-back: every call answers the same rows in the same order, only the
-                    // `enabled` bits differ. That is what lets ONE metadata list carry N columns.
+                    // Same folder, same deterministic discovery order, read back-to-back:
+                    // every call answers the same rows in the same order, only the `enabled` bits
+                    // differ. That is what lets ONE metadata list carry N columns. The order is
+                    // `addons::sort_by_directory_order` — NTFS's, the reference's own listing
+                    // order — and the point here is only that it is a pure function of the names.
                     debug_assert_eq!(
                         rows.len(),
                         self.list.len(),

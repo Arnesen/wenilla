@@ -61,7 +61,7 @@ fn creature_line_law() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "UF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "UF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         assert(tt:SetUnit("target") == 1, "SetUnit returns 1 on a live unit")
@@ -130,7 +130,7 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
     s.run(
         r#"
         UNKNOWNOBJECT = "Unknown"   -- GlobalStrings.lua:4444, enUS
-        local a = CreateFrame("Button", "UF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "UF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         assert(tt:SetUnit("target") == 1, "a resolved unit shows, name or no name")
@@ -241,7 +241,7 @@ fn faction_line_and_civilian_gate() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "UF9"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "UF9"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetUnit("target")
@@ -329,7 +329,7 @@ fn level_line_variants() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "UF2"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "UF2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetUnit("target")
@@ -450,7 +450,7 @@ fn world_hover_drive_and_health_watcher() {
             getglobal("GameTooltipTextLeft1"):SetTextColor(1, 0, 0)
         end)
         local bar = CreateFrame("StatusBar", "GameTooltipStatusBar", tt)
-        bar:SetPoint("TOPLEFT", tt, "BOTTOMLEFT", 2, -1); bar:SetSize(100, 8)
+        bar:SetPoint("TOPLEFT", tt, "BOTTOMLEFT", 2, -1); bar:SetWidth(100); bar:SetHeight(8)
     "#,
     )
     .unwrap();
@@ -512,7 +512,7 @@ fn minimap_blip_tooltip_shows_and_fades() {
     s.run(
         r#"
         local up = CreateFrame("Frame", "UIParent")
-        up:SetPoint("BOTTOMLEFT"); up:SetSize(800, 600)
+        up:SetPoint("BOTTOMLEFT", 0, 0); up:SetWidth(800); up:SetHeight(600)
     "#,
     )
     .unwrap();

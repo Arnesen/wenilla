@@ -187,6 +187,11 @@ struct WowLight {
     // Zero region = every batch at its built seed — the studio buffers and deterministic
     // captures ride that exactly like the tint table's zero-identity.
     matanim: array<vec4<f32>, 2048>,
+    // The straddle split's waterline (decision 2188; benilla-world straddle.rs mirrors the size),
+    // on the SAME slot index again: `x` = the plane's world height (Bevy Y), `y` = the side the
+    // instance's NEAR copy keeps (+1 above, −1 below). `y == 0` is "not straddling" — slot 0,
+    // every slot nothing wrote, every zeroed studio buffer — so a dry world pays one compare.
+    water_clip: array<vec2<f32>, 2048>,
     palettes: array<vec4<f32>>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
@@ -635,6 +640,21 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
             discard;
         }
     }
+#ifdef WOW_WATER_CLIP
+    // THE STRADDLE SPLIT (decision 2188, straddle.rs; wow-re water-frame-straddle.md §2): a
+    // translucent model crossing its water plane draws on BOTH sides of the water pass — this
+    // batch on the eye's (near) list, its far twin (FAR_SIDE_MARKER, `clutter_fade.z` bit 11)
+    // before the water — and each copy keeps only its own half: the reference's `M2UseClipPlanes`
+    // hardware clip plane at the waterline. `straddle::keeps` is this block's Rust twin.
+    let water_clip = wow_light.water_clip[(mesh_functions::get_tag(in.instance_index) >> 19u) & 0x7ffu];
+    if (water_clip.y != 0.0) {
+        let far_copy = (u32(m.clutter_fade.z) & 2048u) != 0u;
+        let keep_side = select(water_clip.y, -water_clip.y, far_copy);
+        if (keep_side * (in.world_position.y - water_clip.x) < 0.0) {
+            discard;
+        }
+    }
+#endif
     // Rebuild bevy's `VertexOutput` from our extended interstage struct (WowVsOut carries one extra
     // interpolant — the per-vertex point term — which the pbr entry point doesn't know about).
     // M2 UV animation folds in here (decision 0130 phase 3, wow-re m2-texanim-uv; the full law

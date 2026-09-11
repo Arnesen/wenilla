@@ -410,16 +410,21 @@ pub(super) fn step(
         // The step-up probe (this is the LOCAL mover; a remote's dead-reckon is not a report
         // anyone is looking at): a walk frame that went nowhere writes the `stup` deep report —
         // the surface profile ahead, the advance ladder, the candidate faces.
+        // **The local controller is the caller that HAS a fall** (decision 2174), so the no-floor
+        // drop is spent here: `pos.z -= achieved` before the classify, exactly as `0x636e45` does,
+        // and the frame that leaves a ledge starts its fall lower instead of flat. The two
+        // open-loop callers decline it — they have nothing that would ever end it.
+        let resolved = g.center - Vec3::Y * g.unsupported.unwrap_or(0.0);
         super::step_probe::watch(
             world,
             capsule,
             center,
-            g.center,
+            resolved,
             player.horiz_vel,
             dt,
             time.elapsed_secs(),
         );
-        center = g.center;
+        center = resolved;
         climb = g.climb;
         snap_probe = g.snap;
         player.steep_support = g.steep_support;
@@ -652,6 +657,22 @@ pub(crate) struct GroundedStep {
     /// The election snap's `(probe reach, what it found)` — trace fodder, `None` when the step-up
     /// took the frame instead. The inner pair is `(hit distance, hit normal.y)`.
     pub(crate) snap: Option<(f32, Option<(f32, f32)>)>,
+    /// **The fall's opening drop, when the election found NO floor at all** — `Some(yd)` iff the
+    /// probe came back empty and the body is not mid-ride, `None` on every frame a surface was
+    /// found (including a step-up commit and a mid-ledge steep support, which both leave
+    /// [`Self::ground`] `None` for their own reasons and must not be confused with this).
+    ///
+    /// It is **not applied to [`Self::center`]** (decision 2174). The reference's finalize does
+    /// write `pos.z -= achieved` on its no-hit leg — and then *classifies*, electing a fall that
+    /// gravity finishes and a landing ends. That election is the **caller's**, and only one of this
+    /// function's three callers has one: the local controller ([`step`]) applies this drop and
+    /// falls. The creature ground clamp and the remote dead-reckon have no fall to elect and sweep
+    /// again next frame from their own answer, so for them the drop is not an opening — it is a
+    /// ratchet with no floor to end it, and it walked Stormwind's patrolling guards 31 yd down
+    /// through the world while their colliders were still streaming in. They read this as "our
+    /// world could not answer" and hold the server's pose instead, which is the law their idle
+    /// paths already obey ([`crate::net::motion::spline::grounded_y`]).
+    pub(crate) unsupported: Option<f32>,
 }
 
 /// **One grounded walk step, resolved against the world** — step-up → slide → election snap, from
@@ -887,6 +908,8 @@ pub(crate) fn grounded_step(
     let snap = Some((reach, floor.map(|(d, n, _)| (d, n))));
     let mut ground = None;
     let mut steep_support = false;
+    // The no-floor drop, measured here and spent by whoever has a fall to elect (see the field).
+    let mut unsupported = None;
     // **A ride's height is earned; the snap follows ground *down*, it never undoes a climb.**
     //
     // This is where our capsule and the reference's cone part company, and it has to be said out
@@ -977,7 +1000,10 @@ pub(crate) fn grounded_step(
         // the director was still feeling after 1132 capped the other two legs: their fence
         // step-downs came through *this* branch, `snap miss (reach 1.25) dy=-1.250`, five of them in
         // one capture. The cap is a property of our body, not of which leg found the floor.
-        slid.y -= (reach - surface_offset).max(0.0).min(cone_reach);
+        // **Measured, not applied** (decision 2174) — [`GroundedStep::unsupported`] is the whole
+        // story: this is the first frame of a fall, and only a caller that can finish one may
+        // spend it.
+        unsupported = Some((reach - surface_offset).max(0.0).min(cone_reach));
     }
     GroundedStep {
         center: slid,
@@ -994,6 +1020,7 @@ pub(crate) fn grounded_step(
         steep_support: ((rode || popped.is_some()) && ground.is_none()) || steep_support,
         ground,
         snap,
+        unsupported,
     }
 }
 

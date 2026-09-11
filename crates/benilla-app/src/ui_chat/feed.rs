@@ -683,6 +683,32 @@ pub(super) fn deliver(
     let notice = event
         .notice_byte()
         .filter(|_| event.kind == Some(ChatEventKind::ChannelNotice));
+    // **First, before anything below moves it.** The reference's notice arms read `slot+0x9c` to
+    // choose the token and only then write it (`0x49c0c2` reads, `0x49bb20` writes), and the two
+    // alternates are what keep a renamed or suspended channel registered with the window
+    // ([`super::event::notice_token`], decision 2130).
+    event.slot_state = channels.slot_state(&event.channel);
+    if let Some(byte) = notice {
+        // The one trace of the server's half of every join and leave — a probe log's only way to
+        // tell "we asked" from "the server agreed" (decision 2144's live runs read it).
+        debug!(
+            "chat: channel notice {byte:#04x} for {:?} (slot {:?}, {:?})",
+            event.channel,
+            channels.number_of(&event.channel),
+            event.slot_state
+        );
+    }
+    if notice == Some(channel_notice::YOU_JOINED) {
+        // The reference's `0x49bbaf`: the confirmed join is what sets the channel's
+        // `ZONECHANNELS` bit, and it is the ONLY thing that grows that mask at runtime
+        // (decision 2120). Outside the slot claim below because it is not about slots — a
+        // re-confirmation of a channel we already number still owns the bit.
+        channels.note_zone_channel_joined(&event.channel);
+        // …and the slot the walk RENAMED is already numbered, so the claim below skips it — but
+        // its state still has to come back to `Joined`, or the next notice on that row reads as
+        // another rename. A no-op for a channel we hold no slot for, which is the claim's case.
+        channels.confirm_slot(&event.channel);
+    }
     if notice == Some(channel_notice::YOU_JOINED) && channels.number_of(&event.channel).is_none() {
         match channels.claim_slot(&event.channel) {
             Some(slot) => {
@@ -690,7 +716,7 @@ pub(super) fn deliver(
                     "chat: server confirms channel {:?} joined (slot {slot})",
                     event.channel
                 );
-                script.set_joined_channels(channels.joined.clone());
+                script.set_joined_channels(channels.names());
             }
             // The reference's own ceiling, reached: ten slots, all taken. It answers with a chat
             // error and no record, so the channel stays unnumbered here too.
@@ -708,11 +734,19 @@ pub(super) fn deliver(
     channels.stamp_channel(event);
     route(script, windows, event);
     if let Some(name) = leaving {
-        // Cleared in place, never compacted: slot 2 going empty must not make slot 3 into 2
-        // ([`ChannelState`], 1286).
-        let freed = channels.free_slot(&name);
-        debug!("chat: server confirms channel {name:?} left (slot {freed:?} now free)");
-        script.set_joined_channels(channels.joined.clone());
+        // **A suspended slot survives its own leave** (`0x49c0e0`, decision 2130). The reference's
+        // `0x03` arm jumps past the teardown (`0x49c115`) when the record is in state 3, so walking
+        // out of a capital keeps `Trade`'s record AND its number — which is what lets walking back
+        // in re-join through the state-3 bypass, and what stops the stock handler deregistering it.
+        if event.slot_state == Some(super::edit::SlotState::Suspended) {
+            debug!("chat: channel {name:?} suspended — the record and its number stay");
+        } else {
+            // Cleared in place, never compacted: slot 2 going empty must not make slot 3 into 2
+            // ([`ChannelState`], 1286).
+            let freed = channels.free_slot(&name);
+            debug!("chat: server confirms channel {name:?} left (slot {freed:?} now free)");
+            script.set_joined_channels(channels.names());
+        }
     }
 }
 

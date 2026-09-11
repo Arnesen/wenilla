@@ -1013,9 +1013,12 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::Bare),
     },
     // The V-key nameplate over a synthetic Timber Wolf, framed like the reference screenshot
-    // (an eye-height look at a wolf ~8 yd off, Northshire ground). Plates draw through the
-    // UiQuads overlay, which renders in every capture — no WOW_CAPTURE_UI needed. Run with
-    // `WOW_CAPTURE=vplates` (main.rs sizes this window 1024×768 — the 1:1 gx window).
+    // (an eye-height look at a wolf ~8 yd off, Northshire ground). **Plates are real widgets since
+    // 2148**, so they need the UI VM and a `WorldFrame` to hang off — which this scenario's own
+    // `ui:` fixture supplies (it is what makes `run_mode::capture_ui_opted_in` true). The older
+    // note here said the opposite ("plates draw through the UiQuads overlay… no WOW_CAPTURE_UI
+    // needed"), which was the painter's truth and stopped being true the day they became frames.
+    // Run with `WOW_CAPTURE=vplates` (main.rs sizes this window 1024×768 — the 1:1 gx window).
     Scenario {
         name: "vplates",
         map: Some(MAP_AZEROTH),
@@ -1198,6 +1201,19 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::NameWater),
     },
 ];
+
+/// The `name-close` instrument's subject: the `name-water` wolf's overhead NAME, orbited at an
+/// arbitrary distance. **World text is the only consumer that draws the glyph sheet at anything
+/// but 1:1** — the 2-D path rasterizes at the size it draws, texel for pixel, by construction — so
+/// a defect in how a glyph CELL is sampled can only appear in a magnified name, and nothing
+/// photographed one: `name-water`'s 25 yd MINIFIES the same glyphs, which hides exactly this.
+///
+/// Not a golden scenario (its output is the knobs', not the name's), same as `fxview`/`vista`:
+/// `WOW_NAME_DIST` (yd from the name, default 4), `WOW_NAME_AZ` (compass bearing the eye stands
+/// on, degrees, 0 = +X), `WOW_NAME_EL` (eye elevation above the name, degrees), `WOW_NAME_H` (the
+/// name's height above the unit's feet, yd — the anchor this aims at). The camera looks straight
+/// at the name, so the shot is centred and the magnification is `WOW_NAME_DIST` alone.
+pub(super) const NAME_CLOSE_AT: [f32; 3] = super::fixtures::NAME_WATER_POS;
 
 /// The Deeprun Tram undersea tube — see the `tram-undersea` scenario. Raw WoW coords; the Subway
 /// WMO is the map's global `MODF` at the origin with identity rotation, so these are also its

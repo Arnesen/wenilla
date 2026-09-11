@@ -1,54 +1,36 @@
 //! Frame method-table cluster: anchoring and size — `SetPoint`/`ClearAllPoints`/`GetPoint`/
-//! `SetAllPoints`/`SetWidth`/`SetHeight`/`SetSize`/`GetWidth`/`GetHeight` and the resolved-edge
-//! readers (`GetLeft`/`GetRight`/`GetTop`/`GetBottom`). Split out of [`super`] purely for size — see
+//! `SetAllPoints`/`SetWidth`/`SetHeight`/`GetWidth`/`GetHeight` and the resolved-edge readers
+//! (`GetLeft`/`GetRight`/`GetTop`/`GetBottom`). Split out of [`super`] purely for size — see
 //! its module doc for the shared id/handle plumbing and method-table wiring.
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::layout::{Anchor, Point};
 use crate::script::{Model, SCREEN};
 use crate::widget::FrameHandle;
 
-use super::{
-    as_f32, decode_id, frame_handle_of, frame_parent_token_base, frame_wrapper, point_from_str,
-    point_name, prefetch_named_target, resolve_named_target, NamedTarget,
-};
+use super::anchor_args::{parse_set_all_points, parse_set_point, resolve_rel_target, UNNAMED};
+use super::{frame_handle_of, frame_parent_token_base, frame_wrapper, point_name};
 
-/// Phase 1 of a `relativeTo`/`SetAllPoints` target: when the argument is a **name string**, expand
-/// a leading `$parent` against `h`'s first named ancestor and read `_G` — all of it with **no**
-/// `Model` guard alive, because the reference's read is a gettable and an `__index` on `_G` can run
-/// Lua that calls straight back into a binding ([`NamedTarget`]).
-///
-/// Anything else needs no prefetch and answers `None`.
-fn prefetch_relative_to(
-    lua: &Lua,
-    arg: Option<&Value>,
-    h: FrameHandle,
-) -> mlua::Result<Option<NamedTarget>> {
-    let Some(Value::String(s)) = arg else {
-        return Ok(None);
-    };
-    // A name we cannot even read names nothing; the caller's miss path reports it as before.
-    let Ok(raw) = s.to_str() else {
-        return Ok(Some(NamedTarget::unreadable()));
-    };
-    let base = {
-        let model = lua.app_data_ref::<Model>().expect("model");
-        frame_parent_token_base(&model, h)
-    };
-    Ok(Some(prefetch_named_target(lua, raw.as_ref(), Some(&base))))
+/// The two things the shared ladder needs off the receiver, read under **one short** `Model`
+/// borrow that is dropped before the `_G` read: the name the reference puts in its error strings
+/// (`GetName`, else the literal `"<unnamed>"`), and the name a leading `$parent` expands to.
+fn frame_ladder_context(lua: &Lua, h: FrameHandle) -> (String, String) {
+    let model = lua.app_data_ref::<Model>().expect("model");
+    let who = model
+        .arena
+        .frame(h)
+        .and_then(|f| f.name.clone())
+        .unwrap_or_else(|| UNNAMED.to_string());
+    (who, frame_parent_token_base(&model, h))
 }
 
 /// Populate `m`'s layout (anchor/size) methods (see the module doc).
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
-    // Layout: SetPoint / ClearAllPoints / SetSize / SetWidth / SetHeight / GetWidth / GetHeight
+    // Layout: SetPoint / ClearAllPoints / SetWidth / SetHeight / GetWidth / GetHeight
     m.set(
         "SetPoint",
-        lua.create_function(
-            |lua, (this, p, a2, a3, a4, a5): (Table, String, Value, Value, Value, Value)| {
-                set_point(lua, &this, &p, [a2, a3, a4, a5])
-            },
-        )?,
+        lua.create_function(|lua, (this, rest): (Table, MultiValue)| set_point(lua, &this, &rest))?,
     )?;
     m.set(
         "ClearAllPoints",
@@ -60,15 +42,24 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // keeps an idempotent per-frame caller (the classic OnUpdate re-SetPoint idiom) from
             // pinning the gate open — the same absorption the fingerprint gives, paid once at
             // the write instead of per-frame over the whole model.
-            let changed = match model.layout_inputs.get_mut(&h) {
+            //
+            // **And it NAMES its node** (decision 2114, completing 1625's migration). Dropping
+            // every anchor is a retarget whose NEW target list is empty, and both lists are right
+            // here — so the cached graph's edges get unlinked instead of thrown away. Left on the
+            // conservative touch, this was the one recurring `[layout-derive]` site in a live
+            // hover sweep: `Bagnon_AnchorTooltip` opens with `GameTooltip:ClearAllPoints()` and
+            // then asks `frame:GetLeft()`, so the whole graph was re-derived INSIDE the handler,
+            // once per hovered item, and billed to `[ui-handlers]`' `OnEnter`.
+            let old: Option<Vec<u32>> = match model.layout_inputs.get_mut(&h) {
                 Some(input) if !input.anchors.is_empty() => {
+                    let old = input.anchors.iter().map(|a| a.relative_to).collect();
                     input.anchors.clear();
-                    true
+                    Some(old)
                 }
-                _ => false,
+                _ => None,
             };
-            if changed {
-                model.touch_layout();
+            if let Some(old) = old {
+                model.touch_layout_retarget_frame(h, &old, &[]);
             }
             Ok(())
         })?,
@@ -126,30 +117,17 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // the XML `setAllPoints="true"` behavior as a method (rf24 `0x767800`'s SetAllPoints path).
     m.set(
         "SetAllPoints",
-        lua.create_function(|lua, (this, target): (Table, Value)| {
+        lua.create_function(|lua, (this, rest): (Table, MultiValue)| {
             let h = frame_handle_of(lua, &this)?;
-            // The `_G` read runs before the guard — see `set_point` and `object::NamedTarget`.
-            let named = prefetch_relative_to(lua, Some(&target), h)?;
+            // `who`/`$parent` first, then the `_G` read, then the guard — see `set_point` and
+            // `object::NamedTarget`.
+            let (who, base) = frame_ladder_context(lua, h);
+            let target = parse_set_all_points(lua, rest.front(), &base);
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            let rel_id: u32 = match &target {
-                // Same id_to_region fallback as `set_point` above (and `region.rs`'s own
-                // `resolve_target`, which already checked both) — a table wrapper may name a region.
-                Value::Table(t) => decode_id(t)
-                    .ok()
-                    .filter(|id| {
-                        model.id_to_frame.contains_key(id) || model.id_to_region.contains_key(id)
-                    })
-                    .unwrap_or_else(|| default_parent_id(&mut model, h)),
-                Value::String(_) => {
-                    // `_G[name]` — the client's one widget namespace, frames and regions alike
-                    // (`object::NamedTarget`). The real XML anchors frames to REGIONS too (gossip
-                    // option rows → the greeting FontString), and both publish there.
-                    let nt = named.as_ref().expect("a String argument is prefetched");
-                    let hit = resolve_named_target(&model, nt);
-                    hit.unwrap_or_else(|| default_parent_id(&mut model, h))
-                }
-                _ => default_parent_id(&mut model, h),
-            };
+            let me = model.frame_id(h);
+            let parent = default_parent_id(&mut model, h);
+            let rel_id: u32 =
+                resolve_rel_target(&model, &target, &who, "SetAllPoints", me, parent)?;
             let pair = [
                 Anchor::new(Point::TopLeft, rel_id, Point::TopLeft, 0.0, 0.0),
                 Anchor::new(Point::BottomRight, rel_id, Point::BottomRight, 0.0, 0.0),
@@ -200,23 +178,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    m.set(
-        "SetSize",
-        lua.create_function(|lua, (this, w, ht): (Table, f32, f32)| {
-            let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            let input = model.layout_inputs.entry(h).or_default();
-            let changed =
-                input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
-            input.width = w;
-            input.height = ht;
-            if changed {
-                model.touch_layout_frame(h);
-            }
-            model.note_authored_size(h);
-            Ok(())
-        })?,
-    )?;
+    // **No `SetSize`.** It is an Era geometry verb, in neither the Frame nor the Region method
+    // table of 1.12 — and neither the stock chain nor either addon corpus writes it (decision
+    // 2142's census). The two setters above are the era's whole size surface.
     m.set(
         "GetWidth",
         lua.create_function(|lua, this: Table| {
@@ -361,7 +325,7 @@ pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
 /// `GetWidth`/`GetHeight`: the resolved rect's span in LOCAL units (screen ÷ effective scale — the
 /// client returns the value as authored, and `SetWidth(w)` on a scaled frame resolves to `w·scale`
 /// screen px) if `resolve` has produced one, else the explicit size the frame was given
-/// (`SetWidth`/`SetHeight`/`SetSize`, already local) — matching the client's "0 = derive".
+/// (`SetWidth`/`SetHeight`, already local) — matching the client's "0 = derive".
 fn size_read(model: &Model, h: FrameHandle, width: bool) -> f32 {
     if let Some(r) = model.resolved.get(&h) {
         let span = if width { r.width() } else { r.height() };
@@ -374,91 +338,22 @@ fn size_read(model: &Model, h: FrameHandle, width: bool) -> f32 {
         .unwrap_or(0.0)
 }
 
-/// `SetPoint(point [, relativeTo [, relativePoint]] [, x, y])` (RF-0023/RF-0024). Defaults per the
-/// client: `relativeTo` = the frame's parent (the screen root if top-level), `relativePoint` =
-/// `point`. Overload disambiguated by argument *type* (a string/table after `point` is `relativeTo`;
-/// a number is the first offset).
-fn set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> mlua::Result<()> {
-    let point = point_from_str(point)
-        .ok_or_else(|| mlua::Error::runtime(format!("SetPoint: unknown point '{point}'")))?;
+/// `SetPoint(point [, relativeTo [, relativePoint]] [, x, y])` — `0x7a2540`, whose argument ladder
+/// (and whose five raises) live in [`super::anchor_args`] because the reference runs **one**
+/// function for frames and regions alike. What is this side's own is only what the reference reads
+/// off a *frame*: the layout parent's default id, and the anchor list the commit writes.
+fn set_point(lua: &Lua, this: &Table, args: &MultiValue) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-
-    // A name target is read out of `_G` FIRST, with no model guard alive — the reference's read is
-    // a gettable, so an `__index` on `_G` can run Lua that calls back in (`object::NamedTarget`).
-    let named = prefetch_relative_to(lua, rest.first(), h)?;
+    let (who, base) = frame_ladder_context(lua, h);
+    // The `_G` read inside the ladder runs with NO model guard alive — the reference's read is a
+    // gettable, so an `__index` on `_G` can run Lua that calls back in (`object::NamedTarget`).
+    let p = parse_set_point(lua, args, &who, &base)?;
 
     let mut model = lua.app_data_mut::<Model>().expect("model");
-
-    // relativeTo: a table (wrapper) or a string (name), else default to the parent/screen. A table
-    // wrapper may name a FRAME or a REGION (a Button anchored to a FontString by direct reference —
-    // e.g. `button:SetPoint("TOPLEFT", someFontString, "BOTTOMLEFT", ...)` — is exactly as legal in
-    // the real client as anchoring to a frame, and the string-branch below already accepts both), so
-    // this must check id_to_region too, not just id_to_frame: an id that only lives in id_to_region
-    // used to fail the frame-only filter and silently fall back to the default parent, misdirecting
-    // the anchor with no error (caught via the quest-log reward rows, which anchor Buttons to
-    // FontString regions by table reference — QuestLogFrame.xml's own comment on the port).
-    let mut cursor = 0usize;
-    let rel_to_id: u32 = match rest.first() {
-        Some(Value::Table(t)) => {
-            cursor = 1;
-            decode_id(t)
-                .ok()
-                .filter(|id| {
-                    model.id_to_frame.contains_key(id) || model.id_to_region.contains_key(id)
-                })
-                .unwrap_or_else(|| default_parent_id(&mut model, h))
-        }
-        Some(Value::String(_)) => {
-            cursor = 1;
-            // `_G[name]`, frames and regions alike (see SetAllPoints above — same rationale), with
-            // a leading `$parent` already expanded against this frame's first named ancestor.
-            let nt = named.as_ref().expect("a String argument is prefetched");
-            let hit = resolve_named_target(&model, nt);
-            hit.unwrap_or_else(|| {
-                // **The reference RAISES here** — `luaL_error(0x87ccd4, "%s:SetPoint(): Couldn't
-                // find region named '%s'")`, no fallback and no no-op (`luaG_errormsg`/`luaD_throw`
-                // contain no `ret`). Ours still falls back to the parent and warns, because we
-                // cannot yet see how many of our own transcriptions and of the addon corpus that
-                // raise would abort — the harness reports no engine warnings, which is the
-                // instrument that has to come first (decision 2105, "Named, not done").
-                //
-                // The warning is worth keeping regardless: a *named* target that doesn't resolve is
-                // almost always a bug, and this exact silence cost a hunt twice (QuestLogFrame's
-                // reward rows, ItemTextFrame's scrollbar track).
-                let who = model
-                    .arena
-                    .frame(h)
-                    .and_then(|f| f.name.clone())
-                    .unwrap_or_else(|| "<anonymous>".into());
-                model.warnings.push(format!(
-                    "SetPoint({who}): relativeTo '{}' does not resolve — anchored to the parent",
-                    nt.name
-                ));
-                default_parent_id(&mut model, h)
-            })
-        }
-        // An *explicit* `nil` relativeTo (`SetPoint(point, nil, relPoint, x, y)`) means "default
-        // target" but still occupies its argument slot — consume it so the relativePoint/offsets
-        // that follow line up. Only a leading *number* (the `SetPoint(point, x, y)` overload) or a
-        // truly-absent arg leaves the cursor at 0.
-        Some(Value::Nil) => {
-            cursor = 1;
-            default_parent_id(&mut model, h)
-        }
-        _ => default_parent_id(&mut model, h),
-    };
-
-    // relativePoint: a string in the next slot, else defaults to `point`.
-    let mut rel_point = point;
-    if let Some(Value::String(s)) = rest.get(cursor) {
-        if let Some(p) = s.to_str().ok().and_then(|n| point_from_str(n.as_ref())) {
-            rel_point = p;
-            cursor += 1;
-        }
-    }
-
-    let x = rest.get(cursor).map(as_f32).unwrap_or(0.0);
-    let y = rest.get(cursor + 1).map(as_f32).unwrap_or(0.0);
+    let me = model.frame_id(h);
+    let parent = default_parent_id(&mut model, h);
+    let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, parent)?;
+    let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
 
     let input = model.layout_inputs.entry(h).or_default();
     let new = Anchor::new(point, rel_to_id, rel_point, x, y);

@@ -160,7 +160,7 @@ fn feed_talents(
         build_pages(
             &talents.catalog,
             &actions.spells,
-            spells,
+            &spells.catalog,
             race,
             class,
             points,
@@ -223,10 +223,13 @@ fn rank_of(t: &Talent, known: &BTreeSet<u32>) -> u32 {
 
 /// Build the pushed snapshot — the app's whole resolve (module doc).
 #[allow(clippy::too_many_arguments)] // the catalogs, the player's state, and the string table
-fn build_pages(
+pub(crate) fn build_pages(
     catalog: &TalentCatalog,
     known: &BTreeSet<u32>,
-    spells: &Spells,
+    // The DISPLAY catalog only — `Spell.dbc` for each talent's name and icon. Narrowed from the
+    // whole `Spells` resource (2167) so the addon-corpus survey can build the same snapshot off
+    // the player's chain without standing up five more DBCs it has no use for.
+    spells: &benilla_formats::SpellCatalog,
     race: u8,
     class: u8,
     points: (u32, u32),
@@ -249,7 +252,7 @@ fn build_pages(
             } else {
                 0
             };
-            let d = spells.catalog.get(display_spell);
+            let d = spells.get(display_spell);
             // meetsPrereq is the requiredSpell known-check ONLY (byte-verified GetTalentInfo,
             // wow-re talent-api.md — the 0305 fold-back; talent prereqs live in the triplets).
             let meets_prereq = t.required_spell == 0 || known.contains(&t.required_spell);
@@ -266,7 +269,7 @@ fn build_pages(
             // key reused) — byte-verified in the SetTalent builder, wow-re talent-api.md. It is
             // NOT the `LOCKED_WITH_*`/`SPELL_FAILED_*` family, which reads identically in enUS.
             if !meets_prereq {
-                if let Some(req) = spells.catalog.get(t.required_spell) {
+                if let Some(req) = spells.get(t.required_spell) {
                     req_lines.extend(get("ITEM_REQ_SKILL").map(|f| fill(&f, &[Arg::S(&req.name)])));
                 }
             }
@@ -282,7 +285,6 @@ fn build_pages(
                     });
                     if !learnable {
                         let p_name = spells
-                            .catalog
                             .get(p.ranks[0])
                             .map(|d| d.name.clone())
                             .unwrap_or_default();

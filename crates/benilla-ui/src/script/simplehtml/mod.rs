@@ -244,7 +244,9 @@ pub(crate) fn set_text(model: &mut Model, fh: FrameHandle, raw: &str) -> bool {
     let parsed = parse::parse_markup(raw, &frame_name, &hyperlink_format);
     // The reference pushes these through the frame's error sink to the console. Ours are host
     // warnings: a malformed page is the player's content being wrong, not a script raising.
-    model.warnings.extend(parsed.errors.iter().cloned());
+    for e in &parsed.errors {
+        model.record_warning(e.clone());
+    }
 
     build(model, fh, &parsed.blocks);
     parsed.used_markup
@@ -836,7 +838,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetText",
         lua.create_function(|lua, (this, text): (Table, Value)| {
             let raw = match &text {
-                Value::String(s) => s.to_str()?.to_string(),
+                // Bytes, lossily — never a raise (2138).
+                Value::String(s) => s.to_string_lossy(),
                 Value::Number(_) | Value::Integer(_) => super::object::as_f32(&text).to_string(),
                 _ => String::new(),
             };

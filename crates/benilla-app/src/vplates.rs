@@ -33,33 +33,21 @@
 //!   plates diagonal-linear without limit (§9, byte-closed) and the director rejected that
 //!   look; past 1024×768 the plate grows at half the real rate (midway between faithful and
 //!   the native size).
-//! - **Anatomy — the §7 draw list, byte-verified** (frame offsets/sizes in gx screencoord
-//!   units; TEXT heights resolve through the same damped basis, [`text_px`];
-//!   back → front): the `Nameplate-Border` frame filling the 0.1 × 0.025 rect — its 128 × 32 art
-//!   **sharp-resampled** to the plate's exact size ([`border`], 0188) so it reads crisp, not
-//!   bilinear-magnified; the
-//!   `UI-TargetingFrame-BarFill` health bar (0.0804 × 0.007025 at BOTTOMLEFT + (0.0031,
-//!   0.003125)) — fill = HEALTH/MAXHEALTH as a **left-anchored crop** (u1 = fraction), instant,
-//!   REACTION-tinted (hostile red / neutral yellow / friendly green / player pure blue — the
-//!   confirmed dwords), **no backing behind missing health** (the border alone), the BORDER
-//!   drawn over the fill (its rounded bevels cap the fill's ends — the reference look, a
-//!   director-pinned correction to the §7 order); the name (`NAMEPLATE_FONT` = Friz, h 0.01,
-//!   BOTTOM at plate CENTER, black 1 px drop shadow — director-tuned from the recorded ±0.001 gx,
-//!   no truncation) in WHITE; the level (h 0.0086 — director-pinned one em under the byte 0.009;
-//!   CENTER at BOTTOMRIGHT + (−0.0092, +0.0071)) in
-//!   the client's exact con dwords over its own grayband table; the skull
-//!   (`UI-TargetingFrame-Skull`, 0.01², OVERLAY on the level's anchor) replacing the number for
-//!   a world boss (creature rank 3, unconditional) or a hostile ≥ 10 levels up. **No cast bar** exists on 1.12 plates
-//!   (ctor-verified: exactly 7 children — the ctor's `Nameplate-Glow` child renders as the
-//!   bar brighten below, not as a drawn overlay).
+//! - **Anatomy — not here any more.** The plate's six regions, its health-bar child, their
+//!   layers and the anchors between them live with the widgets that carry them
+//!   ([`benilla_ui::script::nameplate`], decision 2148): the plate is a real `Button` under the
+//!   `WorldFrame` and the shared frame→quad path draws it. What stays this file's is everything
+//!   about the WORLD — the gate above, the anchor, the projection, the seat, and the damped
+//!   basis the geometry is computed in ([`plate_basis`], [`gx_px`], [`text_px`]).
 //! - **Highlight = the mouseover unit ∪ the target** (the watcher `0x606f20 → 0x607080` reads
 //!   both globals): the bar's own colour brightens — a uniform [`LIT_BOOST`] lift of the fill
 //!   tint, gradient untouched, nothing else changes (director-pinned form, 0184; the recorded
 //!   ADD `Nameplate-Glow` rim read as hard edge lines on our linear-blending pipeline and is
-//!   not drawn). The plate rect is itself mouse-enabled UI: hovering it makes its unit the
-//!   mouseover (OnEnter `0x7cb850` → `[0xb4e2c8]`; [`PlateRects`] feeds the shared [`Hovered`]
-//!   pick), which also lifts the model emissive and lets clicks select through the plate;
-//!   plate-rect hover additionally turns the name yellow `0xFFFFFF00` (OnEnter, name-only).
+//!   not drawn). The plate is itself mouse-enabled UI: hovering it makes its unit the mouseover
+//!   (OnEnter `0x7cb850` → `[0xb4e2c8]` — [`PlateHover`], read straight off the widget the
+//!   pointer landed on since 2159), which also lifts the model emissive, and a completed click
+//!   selects through the plate ([`PlateClicks`]); the hover additionally turns the name yellow
+//!   `0xFFFFFF00` (OnEnter, name-only).
 //!   All decoupled from the target dim below.
 //! - **Target highlight**: relative alpha — with a target, the target's plate is opaque and
 //!   every other plate drops to `0x7F`; with no target all are opaque.
@@ -79,20 +67,17 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use benilla_protocol::EntityKind;
-use benilla_ui::script::{unit_is_grey, JustifyH, JustifyV, Outline};
+use benilla_ui::script::{unit_is_grey, PlateGeometry, PlateState};
 
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
 use crate::target::{ring_reaction, Factions, Hovered, Selection, TargetUpdate};
-use crate::ui_pass::{overlay_z, UiQuad, UiQuadAppend, UiQuads, UvRect};
-use crate::ui_text::{layout_text_quads, FontSpec, Justify, UiFontAtlas};
-use benilla_assets::{AssetSet, WorldAssets};
 use benilla_world::view::WorldCamera;
 
 /// Sharp-resampling the frame border ([`border::resample_sharp`]) so the 128×32 art reads crisp at
 /// the plate's larger size instead of bilinear-magnified soft (0188).
-mod border;
+pub(crate) mod border;
 
 /// The master bitmask (`[0xc4da34]`): bit 0 enemy plates, bit 3 friendly. **Both boot OFF, the
 /// real client's own state** — see the derivation below. Enemy plates booted ON here from the 0167
@@ -120,7 +105,7 @@ mod border;
 /// re-weighed as a default. The `Default` is derived now that the claim is "both false", and it is
 /// still a *claim*: `cvars::tests` welds it to the registered `nameplateShowEnemies`/`Friendly`
 /// defaults and asserts the pair is off in as many words, so the derive cannot drift quietly.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone, Copy)]
 pub(crate) struct VPlateMode {
     pub(crate) enemies: bool,
     pub(crate) friends: bool,
@@ -137,19 +122,27 @@ pub(crate) const CVAR_FRIENDS: &str = benilla_ui::script::CVAR_NAMEPLATE_FRIENDS
 #[derive(Resource, Default)]
 pub(crate) struct VPlates(pub(crate) EntityHashSet);
 
-/// The plates' screen rects this frame, in push (= draw) order. The plate is mouse-enabled UI on
-/// the reference (`RegisterForClicks` in the ctor; OnEnter `0x7cb850` sets the mouseover-unit
-/// global), so the hover pick (`crate::target::hover`) consults these — last frame's layout, the
-/// reference's own input-vs-layout latency — before ray-testing the world.
+/// **The unit whose plate the pointer is inside** — the plate's own OnEnter publishing the
+/// mouseover, from this side (`0x7cb850` → `[0xb4e2c8]`).
+///
+/// The plate is real mouse-enabled UI now (2148), so the UI pointer pass owns the cursor over it
+/// and `target::hover`'s world pick correctly stands down; this is how the unit still reaches
+/// [`crate::target::Hovered`]. Written by the plate driver from
+/// [`benilla_ui::script::UiScript::hovered_nameplate`] — last frame's layout, which is the
+/// reference's own input-vs-layout latency.
 #[derive(Resource, Default)]
-pub(crate) struct PlateRects(pub(crate) Vec<(Rect, Entity)>);
+pub(crate) struct PlateHover(pub(crate) Option<Entity>);
 
-/// The plate's textures — its own art, chain-verified present (§7 draw list). The name
-/// `NAMEPLATE_FONT` resolves to Friz Quadrata, our atlas default.
-const BAR_TEXTURE: &str = "Interface\\TargetingFrame\\UI-TargetingFrame-BarFill";
-const BORDER_TEXTURE: &str = "Interface\\Tooltips\\Nameplate-Border";
-const SKULL_TEXTURE: &str = "Interface\\TargetingFrame\\UI-TargetingFrame-Skull";
-const RAID_TEXTURE: &str = "Interface\\TargetingFrame\\UI-RaidTargetingIcons";
+/// Completed clicks on plates, waiting for the targeting chain — the reference's plate click slot
+/// (`0x7cb910`), which ends in the same `SetSelection` a click on the body does.
+///
+/// Both a physical click and an addon's `plate:Click("LeftButton")` land here: the engine records
+/// them at the one click funnel both go through.
+#[derive(Resource, Default)]
+pub(crate) struct PlateClicks {
+    pub(crate) left: Vec<Entity>,
+    pub(crate) right: Vec<Entity>,
+}
 
 /// The plate frame, gx screen-height units (`[0x87d9cc]`/`[0x87d9d0]`): 0.1 × 0.025. The border
 /// SetAllPoints-fills it; everything else anchors inside it (§7, byte-verified offsets).
@@ -184,25 +177,6 @@ const MAX_DIST_SQ: f32 = 20.0 * 20.0;
 /// (2026-07-07) from the faithful `0x7F` (0.5), which faded the other plates too hard; raised so
 /// non-target plates stay readable. Tunable: 0.5 = the byte law, 1.0 = no dim.
 const DIM_ALPHA: f32 = 178.0 / 255.0;
-/// The LIT (mouseover ∪ target) bar brighten — a uniform multiplicative lift of the fill tint
-/// (director-pinned form: brighter colour, gradient untouched). Quad colors are client-space
-/// sRGB (`srgb_quad_color` linearizes them), so this multiplies ENCODED texels ~1:1 — the
-/// gamma-space modulate the client's FFP would do. 255/215 is the largest clean value: the
-/// fill texture's encoded peak (215) lands exactly on white, no row clips, every row scales
-/// by the same visible factor. (A first cut of 1.45 assumed a linear-space multiply and
-/// flattened six rows against white — the very gradient change the director banned.)
-const LIT_BOOST: f32 = 255.0 / 215.0;
-/// The plate quads' z keys — back→front: bar fill, then the border OVER it (the border art's
-/// rounded inner bevels cap the fill's square ends and crop the gradient's soft edges — the
-/// reference look, director-pinned from a ref crop 2026-07-07; corrects the §7 transcription's
-/// border-first order), then texts → skull; all above the floating combat text and the chat
-/// bubbles (the append lane's lower bands, [`crate::ui_pass::overlay_z`]) and far below every
-/// scripted-UI packed key.
-const Z_FILL: u64 = overlay_z::VPLATE;
-const Z_BORDER: u64 = overlay_z::VPLATE + 1;
-const Z_TEXT: u64 = overlay_z::VPLATE + 2;
-const Z_RAID: u64 = overlay_z::VPLATE + 3;
-const Z_SKULL: u64 = overlay_z::VPLATE + 4;
 
 /// The bar-fill palette — the byte-confirmed dwords (`0xcf60d0/e8/c8/dc`): pure
 /// red/blue/yellow/green (NOT the ring's pale player-blue). Client-space sRGB, the [`UiQuads`]
@@ -328,6 +302,60 @@ pub(crate) fn text_px(h: f32, basis: f32) -> f32 {
     (h * basis).round().min(32.0)
 }
 
+/// **The FrameXML mirror of the two toggles** — `NAMEPLATES_ON` and `FRIENDNAMEPLATES_ON`
+/// (decision 2132), pushed into whichever VM is live.
+///
+/// The reference keeps the plate state in **two** levels: the engine bitmask `[0xc4da34]`, which
+/// is volatile and cleared on every `EnterWorld`, and those two FrameXML globals, which are the
+/// saved store. `UpdateNameplates` (`UIOptionsFrame.lua` l.768) replays the store into the
+/// bitmask, from `UIParent_OnEvent`'s VARIABLES_LOADED and PLAYER_ENTERING_WORLD arms
+/// (`UIParent.lua` l.234, l.367).
+///
+/// **benilla has only one level.** [`VPlateMode`] is the state and the [`CVAR_ENEMIES`] /
+/// [`CVAR_FRIENDS`] pair is its persistence, and nothing clears it at a world entry — so on this
+/// engine the replay has nothing to restore and everything to break. With the globals left nil
+/// (nothing here ever wrote them) `UpdateNameplates` took its else branch and called
+/// `HideNameplates()`, which writes the CVar, which IS the store: the player's setting was erased
+/// at every world entry and `config.toml` lost the line as "at default".
+///
+/// So the globals are kept TRUE, which makes the stock replay a value-preserving no-op — and is
+/// what a third-party addon reading `NAMEPLATES_ON` is owed anyway, which was 2115's whole
+/// argument for loading the stock window in the first place.
+pub(crate) fn push_plate_globals(script: &benilla_ui::script::UiScript, mode: VPlateMode) {
+    // The reference's own truthiness for these two: the number `1`, or nil. Never `0` — a Lua
+    // `0` is truthy, so `NAMEPLATES_ON = 0` would read as ON in `UpdateNameplates`'s `if`.
+    let on = |b: bool| b.then_some(1i64);
+    let g = script.lua().globals();
+    if let Err(e) = g
+        .set("NAMEPLATES_ON", on(mode.enemies))
+        .and_then(|()| g.set("FRIENDNAMEPLATES_ON", on(mode.friends)))
+    {
+        warn!("nameplates: FrameXML globals: {e}");
+    }
+}
+
+/// The globals kept in step with the mode for the life of each VM ([`push_plate_globals`]).
+///
+/// Behind a [`crate::ui_script::VmMemo`] (1290) because "this VM has been told" is a fact about
+/// the VM, not about the process. The world-entry load seeds them earlier still — ahead of
+/// `VARIABLES_LOADED`, which no `Update` system can reach — so this is the steady-state half:
+/// a V press, an options checkbox, a `/console` write, an addon's `SetCVar`.
+fn feed_plate_globals(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mode: Res<VPlateMode>,
+    mut told: Local<crate::ui_script::VmMemo<Option<(bool, bool)>>>,
+) {
+    let Some(script) = script else {
+        return;
+    };
+    let now = (mode.enemies, mode.friends);
+    let told = told.get(&script);
+    if *told != Some(now) {
+        *told = Some(now);
+        push_plate_globals(&script, *mode);
+    }
+}
+
 /// NAMEPLATES / FRIENDNAMEPLATES / ALLNAMEPLATES through the binding table (0997; defaults V /
 /// SHIFT-V / CTRL-V). The typing gate and 0585's modifier law live in the dispatch now.
 ///
@@ -407,88 +435,27 @@ struct PlateWorld<'w, 's> {
     window: Query<'w, 's, &'static Window, With<bevy::window::PrimaryWindow>>,
 }
 
-/// The plate bitmap art, loaded once at STARTUP (not lazily on the first shown frame — the
-/// director's first-toggle screenshot caught plates drawing before their textures had decoded).
-/// The frame border is NOT here — it lives in [`PlateBorder`], resampled per size.
-#[derive(Resource)]
-struct PlateArt {
-    fill: Handle<Image>,
-    skull: Handle<Image>,
-    raid_icons: Handle<Image>,
-}
-
-/// The frame border: the decoded `Nameplate-Border` BLP (`src`, the exact 128×32 art) plus the
-/// sharpened texture cached at the plate's current physical size. Blitted at the plate's larger
-/// size the GPU bilinear-magnifies the BLP into a soft blur, so instead we resample the SAME pixels
-/// to the display size with sharp bilinear ([`border::resample_sharp`]) — crisp edges, same art
-/// (0188, the director's "sharpen the same frame"). Redrawn only when the size changes.
-#[derive(Resource)]
-struct PlateBorder {
-    src_w: u32,
-    src_h: u32,
-    src: Vec<u8>,
-    size: Option<(u32, u32)>,
-    handle: Option<Handle<Image>>,
-}
-
-/// Warm the plate textures at boot so the first V press draws complete plates. Through
-/// [`WorldAssets::sprite_texture`] — the player-UI decode (**sRGB**, clamp, mip 0), the format the
-/// UI pass's linearize-multiply-reencode contract requires. The raw `asset_server.load` this
-/// shipped with took the `WorldArt` default (gamma-space `Unorm`, repeat): every plate texel got
-/// sampled as linear and re-encoded brighter — the director's washed-out lime-instead-of-gold.
-fn load_plate_art(
-    mut commands: Commands,
-    assets: Option<ResMut<WorldAssets>>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    let Some(mut assets) = assets else {
-        return; // no game data (bare test app) — drive_vplates tolerates the missing resource
-    };
-    let fill = assets.sprite_texture(BAR_TEXTURE, &mut images);
-    let skull = assets.sprite_texture(SKULL_TEXTURE, &mut images);
-    let raid_icons = assets.sprite_texture(RAID_TEXTURE, &mut images);
-    let (Some(fill), Some(skull), Some(raid_icons)) = (fill, skull, raid_icons) else {
-        warn!("vplates: plate art missing from the patch chain — plates will not draw");
-        return;
-    };
-    // Decode the border BLP's raw pixels once; drive_vplates resamples them per plate size.
-    let Some((src_w, src_h, src)) = assets.decode_rgba(BORDER_TEXTURE) else {
-        warn!("vplates: border art missing from the patch chain — plates will not draw");
-        return;
-    };
-    commands.insert_resource(PlateArt {
-        fill,
-        skull,
-        raid_icons,
-    });
-    commands.insert_resource(PlateBorder {
-        src_w,
-        src_h,
-        src,
-        size: None,
-        handle: None,
-    });
-}
-
 /// Gate + draw, every frame: decide which units carry a plate (into [`VPlates`], the
-/// name-exclusivity verdict) and append the §7 draw list — border, left-cropped reaction fill,
-/// shadowed name (yellow under the mouse), con-colored level or the skull — at constant
-/// screen size over the projected anchor + 2/3 yd. Runs in the [`UiQuadAppend`] window (after
+/// name-exclusivity verdict), seat each one, and hand the result to the widget layer as
+/// [`PlateState`] — at constant screen size over the projected anchor + 2/3 yd. Runs after
 /// the script extract), after the targeting chain (it reads the frame's selection verdict).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
 fn drive_vplates(
     mode: Res<VPlateMode>,
     mut plates: ResMut<VPlates>,
-    mut rects: ResMut<PlateRects>,
+    mut plate_hover: ResMut<PlateHover>,
+    mut plate_clicks: ResMut<PlateClicks>,
+    // Camera freelook, for the mouselook toggle `0x60f830`: plates stop taking the mouse while
+    // the pointer is driving the camera.
+    rig: Res<crate::player::CameraControl>,
     world: PlateWorld,
     mut names: ResMut<NameCache>,
     net_commands: Res<NetCommands>,
-    mut atlas: Option<ResMut<UiFontAtlas>>,
-    mut quads: ResMut<UiQuads>,
-    art: Option<Res<PlateArt>>,
-    // The border source + size-keyed cache, and the image store it resamples into.
-    plate_border: Option<ResMut<PlateBorder>>,
-    mut images: ResMut<Assets<Image>>,
+    // The widget layer this drives (decision 2148). `None` in a VM-less run (a capture with the
+    // interface off, a bare test app) — the gate below then costs one early return.
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    // The seam this frame's px↔unit conversion runs at (`windowH/768 × uiScale`).
+    ui_scale: Res<crate::ui_script::UiScaleCvar>,
     // The overhead-anchor inputs ([`overhead_anchor`]).
     anchor_q: (
         Query<&BoneAttach>,
@@ -502,51 +469,73 @@ fn drive_vplates(
     mut bucket: Local<crate::smart_rect::SmartBucket>,
     // The raid-target board (decision 0434 §6) — the plate's raid-icon child reads it.
     group: Res<crate::ui_party::GroupState>,
+    // Whether this VM's plates have been told about freelook (the `0x60f830` edge).
+    mut mouse_told: Local<crate::ui_script::VmMemo<Option<bool>>>,
 ) {
     plates.0.clear();
-    rects.0.clear();
+    plate_hover.0 = None;
     bucket.clear();
+    // **Every early return has to RETIRE the plates first, and that is new with 2148.** A painter
+    // could stop drawing and the plates were gone with the frame's quads; widgets stay until they
+    // are hidden, so a V press that turns plates off — or a camera-less frame, or a world exit —
+    // would otherwise leave the last frame's plates standing on screen forever. `sync` with no
+    // states is exactly the reference's own answer: `0x608a10` on every live plate, hiding each and
+    // returning it to the pool.
+    let retire_all = |script: Option<NonSendMut<benilla_ui::script::UiScript>>| {
+        if let Some(mut script) = script {
+            script.retire_nameplates();
+        }
+    };
     if !mode.enemies && !mode.friends {
+        retire_all(script);
         return;
     }
-    let (Ok((cam, cam_pose)), Ok((self_tf, self_store)), Some(atlas), Some(art), Some(mut border)) = (
-        world.camera.single(),
-        world.self_q.single(),
-        atlas.as_mut(),
-        art.as_deref(),
-        plate_border,
-    ) else {
+    let (Ok((cam, cam_pose)), Ok((self_tf, self_store))) =
+        (world.camera.single(), world.self_q.single())
+    else {
+        retire_all(script);
+        return;
+    };
+    let Some(mut script) = script else {
         return;
     };
     let cam_tf = GlobalTransform::from(*cam_pose);
     let Some(viewport) = cam.logical_viewport_size() else {
+        script.retire_nameplates();
         return;
     };
     let basis = plate_basis(viewport);
     let gx = |v: f32| gx_px(v, basis);
     let window = world.window.single().ok();
-    let cursor = window.and_then(|w| w.cursor_position());
+    // **The mouselook toggle** (`0x60f830`, called from `0x483e80`/`0x483e70`): plates stop taking
+    // the mouse while the camera is in freelook, so a right-drag that starts over a plate turns the
+    // camera instead of clicking the plate, and the plates are not holding a pointer that has left
+    // the screen. Written on the EDGE, not per frame — the reference's own is two call sites on the
+    // freelook transitions, and the memo is keyed to the VM because that is what it is memory about
+    // (1290). A fresh VM's plates are born with the bit, so the memo starting empty is right.
+    // Which unit's plate the pointer is inside (last frame's layout), and the completed clicks
+    // waiting on the targeting chain. Both come from the plate widgets themselves, which is the
+    // reference's own arrangement: the plate's OnEnter publishes the mouseover and its click slot
+    // ends in `SetSelection`.
+    let looking = rig.is_looking();
+    if *mouse_told.get(&script) != Some(looking) {
+        *mouse_told.get(&script) = Some(looking);
+        script.set_nameplate_mouse(!looking);
+    }
+    let hovered_key = script.hovered_nameplate();
+    let clicked = script.take_nameplate_clicks();
     let my_level = self_store.and_then(|s| s.0.unit_level()).unwrap_or(1);
     let has_target = world.selection.target.is_some();
 
-    // The plate frame is constant-size this frame; resample the 128×32 border BLP to its exact
-    // PHYSICAL pixel size (logical × scale_factor — like the glyph atlas) with sharp bilinear, and
-    // cache it. Redrawn only when that size changes; drawn 1:1 so the SAME art reads crisp instead
-    // of GPU-bilinear-magnified soft (0188 — the director's "sharpen the same frame").
     let (pw, ph) = (gx(PLATE_W), gx(PLATE_H));
     let scale = window.map_or(1.0, |w| w.scale_factor());
-    let tex = (
-        (pw * scale).round().max(1.0) as u32,
-        (ph * scale).round().max(1.0) as u32,
-    );
-    if border.size != Some(tex) {
-        let rgba = border::resample_sharp(&border.src, border.src_w, border.src_h, tex.0, tex.1);
-        border.handle = Some(images.add(benilla_assets::sprite_image(tex.0, tex.1, rgba)));
-        border.size = Some(tex);
-    }
-    let Some(border_tex) = border.handle.clone() else {
-        return;
-    };
+    // The px↔unit seam. Every number below is computed in window px exactly as it always was —
+    // the projection, the seat, the solve, the device snap — and divided through this once, at
+    // the boundary, because the widget layer speaks FrameXML units.
+    let seam = window.map_or(1.0, |w| {
+        crate::ui_script::seam_scale(w.height(), ui_scale.0)
+    });
+    let mut states: Vec<PlateState> = Vec::new();
 
     // The seat PRIORITY (`0x608870`/`0x6089a0` + the per-frame walk `0x608ce0`): plates seat in
     // squared-distance order from the fixed gx point (0.4, 0.3) — the 4:3 screen center, a
@@ -687,17 +676,13 @@ fn drive_vplates(
         };
         // The bar tint: the NAMEPLATE palette in `0x7cbaa0`'s exact order.
         let tint = plate_tint(rank, is_player);
-        let frac = store
-            .and_then(|s| Some(s.0.unit_health()? as f32 / s.0.unit_max_health()?.max(1) as f32))
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0);
         // The frame SEAT (§8 Q5, byte-confirmed): the plate's TOP-CENTER lands on the projected
         // point — the plate HANGS BELOW head + 2/3 yd — and the point is edge-clamped half a
         // plate inside every screen border (`SetPoint(TOP ← root.BOTTOMLEFT, clampedX/Y)`).
         // The highlight is a 2-D hover over THIS rect (the frame's OnEnter — yellow name). `pw`/`ph`
         // (the plate's logical size) are hoisted above the loop — the border resample keys off them.
-        // Geometry trace for the vplates capture (`WOW_VPLATE_TRACE=1`): the exact quad rects
-        // pushed this frame, in logical px — the machine-side check the capture PNG can't give
+        // Geometry trace for the vplates capture (`WOW_VPLATE_TRACE=1`): the exact plate rects
+        // this frame, in logical px — the machine-side check the capture PNG can't give
         // (fill/border/text hues overlap under zoom).
         let trace = std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1");
         // The full seat (`0x509ec0`): the desired rect TOP-anchored on the raw projected point
@@ -755,12 +740,13 @@ fn drive_vplates(
             );
         }
         bucket.claim(plate);
-        rects.0.push((plate, entity));
-        let hover = cursor.is_some_and(|c| plate.contains(c));
+        // The plate's own hover, from last frame's layout: the widget layer answers which unit's
+        // plate the pointer is inside, and the driver resolves it to this frame's entity below.
+        let hover = hovered_key == Some(guid.0);
         // The highlight trigger — the watcher's OR over the two globals: this unit is the
-        // MOUSEOVER (the 3-D body pick, or a plate hover routed through [`PlateRects`] last
-        // frame) or the current TARGET. `hover` (this frame's rect) joins in so the bar
-        // brighten never lags the yellow name.
+        // MOUSEOVER (the 3-D body pick, or the plate's own hover — [`PlateHover`], which the
+        // widget layer answered above) or the current TARGET. `hover` joins in directly so the
+        // bar brighten never lags the yellow name by the frame the mouseover takes to publish.
         let lit =
             hover || world.hovered.target == Some(entity) || world.selection.target == Some(entity);
         if trace {
@@ -769,258 +755,110 @@ fn drive_vplates(
                 screen.x, screen.y, plate.min.x, plate.min.y, plate.max.x, plate.max.y
             );
         }
-        // The border, drawn OVER the fill (z 5 > z 4): its rounded inner bevels cap the fill's
-        // square ends and crop the gradient's soft top/bottom rows — the reference look
-        // (director-pinned from a ref crop; corrects the §7 transcription's border-first order).
-        quads.overlays.push(UiQuad {
-            rect: plate,
-            z_key: Z_BORDER,
-            texture: Some(border_tex.clone()),
-            uv: UvRect::FULL,
-            color: [1.0, 1.0, 1.0, alpha],
-            ..default()
-        });
-        // The health fill, bottommost — a left-anchored CROP (quad right = left + frac·width,
-        // u1 = frac; byte-verified `SetValue → 0x770410`), reaction-tinted, instant. No backing
-        // quad — the border alone sits behind missing health.
-        let bar_left = plate.min.x + gx(BAR_OFF_X);
-        let bar_bottom = plate.max.y - gx(BAR_OFF_Y);
-        let bar = Rect::new(
-            bar_left,
-            bar_bottom - gx(BAR_H),
-            bar_left + gx(BAR_W),
-            bar_bottom,
-        );
-        if trace {
-            eprintln!(
-                "vplate-trace: fill=({:.1},{:.1})..({:.1},{:.1}) frac={frac:.3}",
-                bar.min.x, bar.min.y, bar.max.x, bar.max.y
-            );
+        // ── The plate's state, handed to the widget layer ─────────────────────────────────
+        //
+        // Everything above is unchanged: the gate, the anchor, the projection's ACCEPT verdict,
+        // the distance-sorted seat and the bucket solve are all about the WORLD, and they stay
+        // the app's. What changed in decision 2148 is only what happens with the answer — it used
+        // to become six quads, and it now becomes one [`PlateState`] for a real widget, which the
+        // shared frame→quad path draws and an addon can read, hook, restyle or take over.
+        //
+        // The seam scale (`windowH/768 × uiScale`) converts our window px into the FrameXML units
+        // the widget layer speaks. Dividing it out here is deliberate and is a DIVERGENCE worth
+        // naming: the reference's plates are outside the `uiScale` cascade (uiScale is
+        // `UIParent`'s own frame scale there, and the WorldFrame is a sibling root), while
+        // benilla folds uiScale into one global seam (0582/0584). Until that seam grows a
+        // per-cascade answer, the driver compensates, so a plate's PIXELS stay uiScale-blind the
+        // way the reference's are.
+        // The raid-target board (decision 0434 §6): 1-based here, 0-based for the atlas cell.
+        let mark = group.raid_target_index(guid.0);
+        let x_units = (plate.min.x + plate.max.x) * 0.5 / seam;
+        let y_units = (viewport.y - plate.min.y) / seam;
+        if hovered_key == Some(guid.0) {
+            plate_hover.0 = Some(entity);
         }
-        // The highlight: LIT (mouseover ∪ target), the bar's own colour simply brightens — a
-        // uniform [`LIT_BOOST`] lift of the fill tint, nothing else changes (director-pinned
-        // 2026-07-07: no rim, no gradient change — the additive Nameplate-Glow rim we tried
-        // first read as hard edge lines, see 0184).
-        let boost = if lit { LIT_BOOST } else { 1.0 };
-        quads.overlays.push(UiQuad {
-            rect: Rect::new(
-                bar.min.x,
-                bar.min.y,
-                bar.min.x + bar.width() * frac,
-                bar.max.y,
-            ),
-            z_key: Z_FILL,
-            texture: Some(art.fill.clone()),
-            uv: UvRect {
-                corners: [[0.0, 0.0], [frac, 0.0], [frac, 1.0], [0.0, 1.0]],
-            },
-            color: [tint[0] * boost, tint[1] * boost, tint[2] * boost, alpha],
-            ..default()
-        });
-        // Director-tuned (2026-07-07): a constant 1 logical px. The recorded ±0.001 gx rounds
-        // to 1 px at the ref's 1152×648 but 2 px at larger windows — which read chunky.
-        let shadow = 1.0;
-        // The name — its BOTTOM at the plate CENTER, white (yellow while hovered, never
-        // reaction-colored), with the FontString's black drop shadow.
-        if let Some(name) = names.resolve(guid.0, &net_commands).map(str::to_owned) {
-            let color = if hover {
-                [1.0, 1.0, 0.0, alpha]
-            } else {
-                [1.0, 1.0, 1.0, alpha]
-            };
-            plate_text(
-                atlas,
-                &mut quads,
-                &name,
-                Vec2::new(
-                    (plate.min.x + plate.max.x) * 0.5,
-                    (plate.min.y + plate.max.y) * 0.5,
-                ),
-                true,
-                text_px(NAME_H, basis),
-                shadow,
-                color,
-                trace,
-            );
-        }
-        // The level element — CENTER at plate BOTTOMRIGHT + (−0.0092, +0.0071): the skull
-        // replaces the number for a hostile ≥ 10 levels up that isn't trivial-gray (the
-        // world-boss rank leg waits on caching the query's rank field; the exact trivial
-        // predicate `0x5f0700` is INFERRED — we use the con gray).
-        let lvl_at = Vec2::new(plate.max.x - gx(LEVEL_OFF_X), plate.max.y - gx(LEVEL_OFF_Y));
-        if let Some(level) = store.and_then(|s| s.0.unit_level()) {
-            let con = con_color(my_level, level);
-            // The skull's two legs (`0x7cbb40`, §7-VERIFIED): a WORLD BOSS — creature-
-            // classification rank 3, from the ask-once creature record (it lands with the
-            // name query; a miss just means no skull yet) — unconditionally; or a hostile
-            // ≥ 10 levels up that isn't trivial-grey (`0x5f0700`, the shared grey check).
-            // The rank goes through the client's own getter (`gated_rank`, decision 0782), which is
-            // what makes a MIND-CONTROLLED world boss show its NUMBER here rather than a skull:
-            // `0x7cbb40` reads rank via `0x605620`, pet gate and all.
-            let world_boss = crate::names::gated_rank(
-                benilla_protocol::guid::entry(guid.0).and_then(|e| names.creature_record(e)),
-                store,
-            ) == 3;
-            if world_boss || (rank <= 1 && level >= my_level + 10 && !unit_is_grey(my_level, level))
-            {
-                let half = gx(SKULL_SIZE) * 0.5;
-                quads.overlays.push(UiQuad {
-                    rect: Rect::new(
-                        lvl_at.x - half,
-                        lvl_at.y - half,
-                        lvl_at.x + half,
-                        lvl_at.y + half,
-                    ),
-                    z_key: Z_SKULL,
-                    texture: Some(art.skull.clone()),
-                    uv: UvRect::FULL,
-                    color: [1.0, 1.0, 1.0, alpha],
-                    ..default()
-                });
-            } else {
-                let mut c = con;
-                c[3] *= alpha;
-                plate_text(
-                    atlas,
-                    &mut quads,
-                    &level.to_string(),
-                    lvl_at,
-                    false,
-                    text_px(LEVEL_H, basis),
-                    shadow,
-                    c,
-                    trace,
-                );
+        for click in &clicked {
+            if click.key == guid.0 {
+                match click.button.as_str() {
+                    "RightButton" => plate_clicks.right.push(entity),
+                    _ => plate_clicks.left.push(entity),
+                }
             }
         }
-        // The raid icon (vkey §7 + "Raid icon", VERIFIED — the 0434 §6 board finally streams):
-        // shown iff the unit's guid holds a mark; RIGHT ← border.LEFT (0,0) so it hangs off the
-        // plate's left edge, 0.02×0.02, the 4-column atlas cell (col=idx&3, row=idx>>2, cell
-        // 0.25). Drawn between the level and the skull (the §7 draw order).
-        let mark = group.raid_target_index(guid.0);
-        if mark >= 1 {
-            let i = u32::from(mark - 1);
-            let (u0, v0) = ((i & 3) as f32 * 0.25, (i >> 2) as f32 * 0.25);
-            let size = gx(RAID_ICON_SIZE);
-            let cy = (plate.min.y + plate.max.y) * 0.5;
-            quads.overlays.push(UiQuad {
-                rect: Rect::new(
-                    plate.min.x - size,
-                    cy - size * 0.5,
-                    plate.min.x,
-                    cy + size * 0.5,
-                ),
-                z_key: Z_RAID,
-                texture: Some(art.raid_icons.clone()),
-                uv: UvRect {
-                    corners: [
-                        [u0, v0],
-                        [u0 + 0.25, v0],
-                        [u0 + 0.25, v0 + 0.25],
-                        [u0, v0 + 0.25],
-                    ],
-                },
-                color: [1.0, 1.0, 1.0, alpha],
-                ..default()
-            });
-        }
+        states.push(PlateState {
+            // The plate's identity is the UNIT's, for the life of the plate — the reference's
+            // `[unit+0xe60]` binding, which every addon's per-plate cache rests on.
+            key: guid.0,
+            top_centre: (x_units, y_units),
+            // RAW health and its max — `healthbar:GetValue()` is `[bar+0x320]`, not a fraction
+            // (`nameplate-lua-surface.md` Q5, which corrected wow-re's own note). pfUI and
+            // CustomNameplates both divide, and a fraction here would read as full health.
+            health: store.and_then(|s| s.0.unit_health()).unwrap_or(0) as f32,
+            max_health: store
+                .and_then(|s| s.0.unit_max_health())
+                .unwrap_or(1)
+                .max(1) as f32,
+            bar_colour: [tint[0], tint[1], tint[2]],
+            name: names
+                .resolve(guid.0, &net_commands)
+                .map(str::to_owned)
+                .unwrap_or_default(),
+            // The skull's two legs (`0x7cbb40`, §7-VERIFIED): a WORLD BOSS — creature-
+            // classification rank 3, through the client's own getter (`gated_rank`, decision
+            // 0782, which is why a MIND-CONTROLLED boss shows its number) — unconditionally; or a
+            // hostile ≥ 10 levels up that isn't trivial-grey (`0x5f0700`, the shared check,
+            // vacuous on a ≥ +10 hostile and kept for transcription fidelity).
+            //
+            // **A unit with no level yet is not a boss.** The two facts travel separately, because
+            // folding them into one `Option` made a missing `UNIT_FIELD_LEVEL` read as a skull —
+            // the old painter kept the whole block inside `if let Some(level)`, so no level meant
+            // no number AND no skull, and that is the behaviour restored here.
+            level: store.and_then(|s| s.0.unit_level()),
+            skull: store.and_then(|s| s.0.unit_level()).is_some_and(|level| {
+                crate::names::gated_rank(
+                    benilla_protocol::guid::entry(guid.0).and_then(|e| names.creature_record(e)),
+                    store,
+                ) == 3
+                    || (rank <= 1 && level >= my_level + 10 && !unit_is_grey(my_level, level))
+            }),
+            level_colour: {
+                let c = store
+                    .and_then(|s| s.0.unit_level())
+                    .map_or([1.0, 1.0, 1.0, 1.0], |level| con_color(my_level, level));
+                [c[0], c[1], c[2]]
+            },
+            // The 0434 §6 board, 0-based for the atlas (`col = idx & 3`, `row = idx >> 2`).
+            raid_icon: (mark >= 1).then(|| mark - 1),
+            alpha,
+            lit,
+            hovered: hover,
+        });
     }
-}
 
-/// One line of plate text at `anchor` — ink centered on `anchor.x`; `bottom_seated` puts the
-/// ink's bottom edge on `anchor.y` (the name's BOTTOM anchor), else its ink middle (the level's
-/// CENTER) — with the plate FontString's black drop shadow one [`SHADOW_OFF`] right+down.
-/// Both seats are computed from the **measured ink**, never the layout's line box: cosmic-text's
-/// `Middle` centers the em box (ascent-heavy for Friz), which sat the level digit ~8 px below its
-/// anchor — half outside the plate, the director's "level is not aligned".
-/// `NAMEPLATE_FONT` resolves to Friz, the atlas default.
-#[allow(clippy::too_many_arguments)]
-fn plate_text(
-    atlas: &mut UiFontAtlas,
-    quads: &mut UiQuads,
-    text: &str,
-    anchor: Vec2,
-    bottom_seated: bool,
-    px: f32,
-    shadow_px: f32,
-    color: [f32; 4],
-    trace: bool,
-) {
-    // Laid out AT the target em. Plate ems are window-derived (8 at 768, 11 at 1080,
-    // [`text_px`]) and so landed on almost nothing in the old fixed size ladder: every plate on
-    // screen used to be shaped at the nearest rung and rescaled about the anchor. Since decision
-    // 1342 the raster follows the request, so the rescale — and its sub-pixel scatter — is gone.
-    let mut e = atlas.lock();
-    let spec = FontSpec {
-        path: None,
-        height: Some(px),
-        outline: Outline::None,
-        alpha_gradient: None,
-    };
-    let justify = Justify {
-        h: JustifyH::Center,
-        v: JustifyV::Middle,
-    };
-    let mut main = layout_text_quads(
-        &mut e,
-        text,
-        Rect::from_center_size(anchor, Vec2::ZERO),
-        color,
-        justify,
-        Z_TEXT,
-        spec,
+    // The window-derived half, once per frame — the widget layer rewrites the static anchors only
+    // when this actually moves, which is what keeps an addon's own re-anchoring alive between
+    // resizes (decision 2148 §5).
+    script.sync_nameplates(
+        PlateGeometry {
+            width: pw / seam,
+            height: ph / seam,
+            bar_off_x: gx(BAR_OFF_X) / seam,
+            bar_off_y: gx(BAR_OFF_Y) / seam,
+            bar_width: gx(BAR_W) / seam,
+            bar_height: gx(BAR_H) / seam,
+            level_off_x: gx(LEVEL_OFF_X) / seam,
+            level_off_y: gx(LEVEL_OFF_Y) / seam,
+            skull_size: gx(SKULL_SIZE) / seam,
+            raid_size: gx(RAID_ICON_SIZE) / seam,
+            name_height: text_px(NAME_H, basis) / seam,
+            level_height: text_px(LEVEL_H, basis) / seam,
+            // A constant ONE LOGICAL PIXEL of drop shadow, in the widget layer's units — the
+            // director's 2026-07-07 tuning, which the shared text arm would otherwise scale by
+            // this same seam and draw 2 px thick from a 1152-tall window up.
+            shadow_offset: 1.0 / seam,
+        },
+        &states,
     );
-    drop(e);
-    if main.is_empty() {
-        return;
-    }
-    // Seat by measured INK, then the shadow is the same run offset one step right+down.
-    let dy = {
-        let bottom = main.iter().map(|q| q.rect.max.y).fold(f32::MIN, f32::max);
-        if bottom_seated {
-            anchor.y - bottom
-        } else {
-            let top = main.iter().map(|q| q.rect.min.y).fold(f32::MAX, f32::min);
-            anchor.y - (top + bottom) * 0.5
-        }
-    };
-    for q in main.iter_mut() {
-        q.rect = Rect::new(
-            q.rect.min.x,
-            q.rect.min.y + dy,
-            q.rect.max.x,
-            q.rect.max.y + dy,
-        );
-    }
-    let mut shadow: Vec<UiQuad> = main
-        .iter()
-        .map(|q| UiQuad {
-            rect: Rect::new(
-                q.rect.min.x + shadow_px,
-                q.rect.min.y + shadow_px,
-                q.rect.max.x + shadow_px,
-                q.rect.max.y + shadow_px,
-            ),
-            color: [0.0, 0.0, 0.0, color[3]],
-            ..q.clone()
-        })
-        .collect();
-    if trace {
-        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for q in main.iter() {
-            x0 = x0.min(q.rect.min.x);
-            y0 = y0.min(q.rect.min.y);
-            x1 = x1.max(q.rect.max.x);
-            y1 = y1.max(q.rect.max.y);
-        }
-        eprintln!(
-            "vplate-trace: text {text:?} px={px:.1} ink=({x0:.1},{y0:.1})..({x1:.1},{y1:.1}) anchor=({:.1},{:.1})",
-            anchor.x, anchor.y
-        );
-    }
-    // Shadow first, main over it (equal z resolves by push order — the stable sort).
-    quads.overlays.append(&mut shadow);
-    quads.overlays.append(&mut main);
 }
 
 /// The set the plate drive runs in — the overhead-name driver orders after it (the
@@ -1035,19 +873,37 @@ impl Plugin for VPlatesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VPlateMode>()
             .init_resource::<VPlates>()
-            .init_resource::<PlateRects>()
-            .add_systems(Startup, load_plate_art.after(AssetSet::Open))
+            .init_resource::<PlateHover>()
+            .init_resource::<PlateClicks>()
             .add_systems(
                 Update,
                 (
                     toggle_vplates,
-                    // After the targeting chain (selection/hover verdicts), inside the UI-quad
-                    // append window (the mesh rebuild waits on it).
-                    drive_vplates.after(TargetUpdate).in_set(UiQuadAppend),
+                    // After the targeting chain (selection/hover verdicts) — which is
+                    // `.after(WorldStage::Input)`, so the camera this projects through is THIS
+                    // frame's, the freshest data a plate can be built from.
+                    //
+                    // **And the paint is this frame's too, since decision 2168.** The UI pass is
+                    // two systems: the tick/resolve half stays ahead of `WorldStage::Input`
+                    // (the hit test feeds `PointerOverUi`, which the camera reads), and the QUAD
+                    // half — `ui_script::extract::paint_script` — runs after this driver. 2148
+                    // shipped with the whole pass ahead of the camera, so the anchors written here
+                    // were drawn by the NEXT frame's extract: the seat reached the paint 16 ms
+                    // late, every frame, which is the director's "way more jittered when the
+                    // creature is moving" (measured both ways on the `vpl` trace, 2026-09-10 —
+                    // median driver→paint gap 16.0 ms before, 0.0 ms after).
+                    drive_vplates.after(TargetUpdate),
                 )
                     .chain()
                     .in_set(VPlateSet),
-            );
+            )
+            // **Outside [`VPlateSet`] deliberately.** Its only ordering need is to be ahead of the
+            // script tick, and three sets order *after* `VPlateSet` while `drive_vplates` runs
+            // after the targeting chain — pulling the whole set in front of `UiInput` to carry one
+            // system would rewire all of that. A V press can therefore reach the globals a frame late,
+            // which costs nothing: their only readers are `UpdateNameplates` at the two world-entry
+            // events and an addon that calls it, never a per-frame path.
+            .add_systems(Update, feed_plate_globals.before(crate::ui_script::UiInput));
     }
 }
 
@@ -1135,7 +991,7 @@ mod tests {
     fn the_v_key_mirrors_into_the_cvar_table() {
         use crate::bindings::{cmd, BindingsState};
         let mut app = App::new();
-        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        let script = benilla_ui::script::UiScript::new().unwrap();
         script.register_cvars([(CVAR_ENEMIES, "0"), (CVAR_FRIENDS, "0")]);
         app.add_systems(Update, toggle_vplates)
             .init_resource::<VPlateMode>()
@@ -1185,6 +1041,55 @@ mod tests {
             .non_send_resource_mut::<benilla_ui::script::UiScript>()
             .take_cvar_changes()
             .is_empty());
+    }
+
+    /// **The FrameXML mirror is owed to every VM** (decision 2132) — the mode's two bits reach
+    /// `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON` as the reference's `1`-or-nil, follow a change, and
+    /// are handed to a rebuilt VM (a `/reload`) without one.
+    #[test]
+    fn the_plate_globals_follow_the_mode_and_survive_a_rebuilt_vm() {
+        let read = |app: &mut App| {
+            let s = app
+                .world_mut()
+                .non_send_resource_mut::<benilla_ui::script::UiScript>();
+            (
+                s.lua().globals().get::<Option<i64>>("NAMEPLATES_ON").ok(),
+                s.lua()
+                    .globals()
+                    .get::<Option<i64>>("FRIENDNAMEPLATES_ON")
+                    .ok(),
+            )
+        };
+        let mut app = App::new();
+        app.add_systems(Update, feed_plate_globals)
+            .init_resource::<VPlateMode>()
+            .insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+
+        app.update();
+        assert_eq!(read(&mut app), (Some(None), Some(None)), "both off ⇒ nil");
+
+        app.world_mut().resource_mut::<VPlateMode>().enemies = true;
+        app.update();
+        assert_eq!(
+            read(&mut app),
+            (Some(Some(1)), Some(None)),
+            "the reference's own truthiness: the NUMBER 1, never a truthy `0`"
+        );
+
+        // `ReloadUI()`: a fresh VM, and the mode did not move. The memo is keyed on the VM's
+        // session (1290), so the new one is told again rather than inheriting the old one's claim.
+        app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+        assert_eq!(
+            read(&mut app),
+            (Some(None), Some(None)),
+            "a fresh VM knows nothing"
+        );
+        app.update();
+        assert_eq!(
+            read(&mut app),
+            (Some(Some(1)), Some(None)),
+            "…and is handed the mode again"
+        );
     }
 
     /// The palette selector follows `0x7cbaa0`'s exact test order — notably reaction 2

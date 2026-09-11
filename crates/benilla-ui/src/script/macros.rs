@@ -217,14 +217,12 @@ fn create_macro(
 ) -> Option<usize> {
     let name = clamp_chars(name.trim(), MAX_MACRO_NAME);
     if name.is_empty() {
-        model
-            .warnings
-            .push("CreateMacro() failed, no name specified".into());
+        model.record_warning("CreateMacro() failed, no name specified");
         return None;
     }
     let list = model.macros.list_mut(per_character);
     if list.len() >= MAX_MACROS {
-        model.warnings.push(format!(
+        model.record_warning(format!(
             "CreateMacro() failed, already have {MAX_MACROS} macros"
         ));
         return None;

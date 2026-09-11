@@ -133,7 +133,20 @@ impl std::error::Error for Error {
 /// nothing for the reference's record to key on. Defensive rather than observed — all 228 of the
 /// client's own are named.
 pub fn parse(text: &str) -> Result<Vec<AddonBinding>, Error> {
-    let doc = roxmltree::Document::parse(text).map_err(Error::Xml)?;
+    // Namespace-oblivious, like the FrameXML document layer beside it and for the same reason
+    // (decision 2155; `framexml::parse`'s comment is the mechanism): a `Bindings.xml` is read by
+    // the same `XMLTree.cpp` tree the client builds with expat's `XML_ParserCreate`, which has no
+    // namespace processing at all — so an undeclared prefix cannot be an error there, and must not
+    // cost the whole file here.
+    let repaired;
+    let doc = match roxmltree::Document::parse(text) {
+        Ok(doc) => doc,
+        Err(roxmltree::Error::UnknownNamespace(..)) => {
+            repaired = crate::framexml::bind_undeclared_prefixes(text);
+            roxmltree::Document::parse(&repaired).map_err(Error::Xml)?
+        }
+        Err(e) => return Err(Error::Xml(e)),
+    };
     let mut out = Vec::new();
     for node in doc.root_element().descendants() {
         if !node.is_element() || !node.tag_name().name().eq_ignore_ascii_case("Binding") {

@@ -548,6 +548,7 @@ impl UiScript {
                     text_height: None, // message lines are never SetTextHeight'd
                     outline: font.outline,
                     alpha_gradient: None,
+                    world_seat: false, // a chat frame is interface, on the interface's grid
                 },
                 scale: paint.scale,
             });

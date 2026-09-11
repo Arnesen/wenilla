@@ -96,6 +96,10 @@ pub struct WorldSession {
     /// `SMSG_TUTORIAL_FLAGS` if it landed during the login handshake rather than in the world
     /// stream (decision 1976) — handed to the world entry the way the billing minutes are.
     tutorial_flags: Option<Vec<u8>>,
+    /// `SMSG_ADDON_INFO`'s per-record `status` bytes, in arrival order — `None` until the server
+    /// answers our addon block, which is the state that keeps the Lua index space empty
+    /// (decision 2175). Read by [`Self::take_addon_info`].
+    addon_info: Option<Vec<u8>>,
 }
 
 impl WorldSession {
@@ -214,6 +218,7 @@ impl WorldSession {
             chat_language: messages::LANGUAGE_COMMON,
             billing_time_rested: 0,
             tutorial_flags: None,
+            addon_info: None,
         };
 
         // 4. Wait for SMSG_AUTH_RESPONSE. Usually the first encrypted packet, but not always first
@@ -308,9 +313,26 @@ impl WorldSession {
         futures_lite::future::block_on(self.recv_async())
     }
 
+    /// The `SMSG_ADDON_INFO` verdict, taken once — `None` when the server never answered our addon
+    /// block, which is a real state and not a failure: vmangos only replies when
+    /// `BuildAddonPacket` accepts the block, and a rejection leaves the session alive and silent
+    /// (`WorldSocket.cpp:447`). The reference behaves the same way — no reply, no Lua index space.
+    pub fn take_addon_info(&mut self) -> Option<Vec<u8>> {
+        self.addon_info.take()
+    }
+
     /// Read + decrypt + parse one server packet.
     pub async fn recv_async(&mut self) -> Result<ServerPacket> {
-        recv_packet(&mut self.conn, Some(self.crypto.decrypter())).await
+        let packet = recv_packet(&mut self.conn, Some(self.crypto.decrypter())).await?;
+        // **Captured here rather than in a loop arm**, because it is not one loop's business:
+        // `SMSG_ADDON_INFO` lands somewhere between `CMSG_AUTH_SESSION` and the roster, and which
+        // of the handshake's three read loops sees it is the server's timing, not our contract.
+        // `recv_async` is the one place all of them go through — the native `recv` included
+        // (decision 2175).
+        if let ServerPacket::AddonInfo { statuses } = &packet {
+            self.addon_info = Some(statuses.clone());
+        }
+        Ok(packet)
     }
 
     /// Send a client packet (encrypted header + plaintext body). Synchronous on every target — a

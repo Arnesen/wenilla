@@ -186,6 +186,11 @@ pub struct EditBoxState {
     /// The row pitch in px (the snapped font em — the same `N·S` block law the host's measure
     /// uses), answered with [`Self::advances`]. `0.0` until answered.
     pub cell_h: f32,
+    /// The `(row, x)` the last `OnCursorChanged` was fired with — the caret-flush edge's memory
+    /// (`0x77da80`, whose one caller `0x77d475` is gated on dirty bit 2, so the fire is per
+    /// *change*, not per frame). `None` = never fired, which is what makes the first flush after
+    /// a focus fire even though the caret is at the home position.
+    pub cursor_fired: Option<(usize, f32)>,
     /// First visible byte of the display window (`E+0x348` display/scroll start index) — the
     /// char-granular h-scroll. Clamped each read so the cursor stays inside the window
     /// (`0x77da80`'s early-out hides the caret outside `[start, start+visible]`).
@@ -310,6 +315,7 @@ impl Default for EditBoxState {
             advances_key: 0,
             rows: vec![0],
             cell_h: 0.0,
+            cursor_fired: None,
             scroll_start: 0,
             drag_active: false,
             blink_period: 0.5,

@@ -1589,6 +1589,19 @@ pub enum ServerPacket {
         id: u32,
         value: u32,
     },
+    /// `SMSG_ADDON_INFO` (`0x2ef`) — the server's per-addon verdict on the block we sent in
+    /// `CMSG_AUTH_SESSION` (decision 2175).
+    ///
+    /// **It carries no count and no names.** The client re-walks its own `## Secure:` list in the
+    /// same order it sent it and reads one record per addon, so record *i* is
+    /// `STOCK_SECURE_ADDONS[i]` (wow-re `system/net/scratch/cmsg-auth-session-addon-block.md` §6).
+    /// Only the `status` byte matters to us: **2** is what makes the client set `[rec+0x29] = 1`
+    /// and drop the addon from the Lua index space, which is why a stock install's AddOns list
+    /// shows the player's addons and none of Blizzard's.
+    AddonInfo {
+        /// One `status` per record, in the order the records arrived.
+        statuses: Vec<u8>,
+    },
     Other {
         opcode: u16,
     },
@@ -1934,6 +1947,7 @@ impl ServerPacket {
             ServerPacket::TradeStatusExtended { .. } => "SMSG_TRADE_STATUS_EXTENDED".into(),
             ServerPacket::InitWorldStates(_) => "SMSG_INIT_WORLD_STATES".into(),
             ServerPacket::UpdateWorldState { .. } => "SMSG_UPDATE_WORLD_STATE".into(),
+            ServerPacket::AddonInfo { .. } => "SMSG_ADDON_INFO".into(),
             ServerPacket::Other { opcode } => format!("opcode {opcode:#06x}"),
         }
     }

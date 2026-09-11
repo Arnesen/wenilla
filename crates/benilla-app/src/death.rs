@@ -344,7 +344,29 @@ fn feed_death(
     if death_net.spirit_healer.is_some() && memo.confirm_generation != death_net.confirm_generation
     {
         memo.confirm_generation = death_net.confirm_generation;
-        script.fire_event("CONFIRM_XP_LOSS", vec![]);
+        // **`arg1` is the XP the resurrection will cost** — byte-read at the fire site
+        // (`0x5df837`, `SignalEvent2(396, "%d", …)`), because the argument gate (2140) found this
+        // fired argless and the shapes table says one number:
+        //
+        // ```
+        // 5df80f  mov ecx,[ebx+0xe68]          ; the player's descriptor window
+        // 5df815  mov edx,[ecx+0x844]          ; +0x844 -> field 188 + 529 = PLAYER_NEXT_LEVEL_XP
+        // 5df81e  fild [ebp+8]
+        // 5df821  fmul ds:0x80ae90             ; 0.05f
+        // 5df827  call 0x40a2b0                ; _ftol — TRUNCATES, not rounds
+        // ```
+        //
+        // and `0x5df806`'s arm pushes **0** when the object is not the local player, which is why
+        // an absent field answers 0 here rather than suppressing the event.
+        //
+        // Nothing in 1.12 FrameXML reads it — `UIParent.lua:399` asks `GetResSicknessDuration()`
+        // instead — so this is fidelity for the callers that are not ours, exactly 1776's reason
+        // for settling `PLAYERBANKSLOTS_CHANGED`'s shape when nothing read that either.
+        let xp_cost = store
+            .0
+            .player_next_level_xp()
+            .map_or(0, |next| (f64::from(next) * 0.05) as i64);
+        script.fire_event("CONFIRM_XP_LOSS", vec![ScriptValue::Int(xp_cost)]);
     }
 
     // ── The corpse-run range gate (0308 §5): fires the reference's range events on the edges. ──

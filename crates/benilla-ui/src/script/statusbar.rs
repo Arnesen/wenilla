@@ -211,10 +211,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
+    // **Shape C on r, g, b** (`StatusBar:SetStatusBarColor `0x78fc20``, `2=C 3=C 4=C 5=B`, wow-re
+    // `numeric-arg-coercion-law.md`): a bare `lua_tonumber` with no `lua_isnumber` gate, so a nil,
+    // a table or a string is **0.0** and the call never raises. Taking them as `f32` made mlua's
+    // converter the gate instead — the 2176 class — and the stock
+    // `QuestLogFrame.lua:337` idiom hands three nils (`titleButton.r/g/b` are only assigned in
+    // `QuestLog_Update`) on any path that selects a quest-log entry before the window has painted.
     m.set(
         "SetStatusBarColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+                let (r, g, b) = (
+                    crate::script::object::as_f32(&r),
+                    crate::script::object::as_f32(&g),
+                    crate::script::object::as_f32(&b),
+                );
                 let id = ensure_bar(lua, &this, None)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let rh = *model.id_to_region.get(&id).expect("bar region id");
@@ -262,6 +273,32 @@ fn fire_value_changed(lua: &Lua, this: &Table, changed: Option<f32>) -> mlua::Re
             .push(e.to_string());
     }
     Ok(())
+}
+
+/// `OnValueChanged` for a bar the ENGINE moved rather than Lua — the nameplate health bars, whose
+/// value the plate driver re-sets from the unit's descriptor each time it changes (decision 2148).
+///
+/// The reference fires the same script from the same place: the plate's bar is driven by a
+/// GUID-watch callback (`0x7cc570`, registered `0x467e70`) that re-reads health and re-sets the bar
+/// synchronously on every server update, and `SetValue` is `SetValue`. pfUI hooks this
+/// (`nameplates.lua:393` `HookScript(healthbar, "OnValueChanged", …)`) and reads `this:GetParent()`
+/// inside the handler, so a driver that moved the value silently would leave it blind.
+pub(super) fn fire_engine_value_changed(lua: &Lua, bar: crate::widget::FrameHandle, value: f32) {
+    let id = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        model.frame_id(bar)
+    };
+    if let Err(e) = event::fire_widget_handler(
+        lua,
+        id,
+        "OnValueChanged",
+        vec![Value::Number(f64::from(value))],
+    ) {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .errors
+            .push(e.to_string());
+    }
 }
 
 /// A Lua number-ish → f32 (nil/other → 0.0), for the color-form arguments.

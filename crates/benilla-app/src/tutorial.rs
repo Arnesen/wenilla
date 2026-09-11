@@ -147,8 +147,6 @@ pub(crate) struct Tutorials {
     /// Published ids (`id + 1`) whose event and cue are owed this frame.
     fired: Vec<u32>,
     sends: Vec<TutorialSend>,
-    /// Bank B changed since the VM last saw it.
-    dirty: bool,
     /// Item pushes for us since the last feed (`0x491a60`'s sites): `(entry, bag, slot)`.
     pushes: Vec<(u32, u8, u32)>,
 }
@@ -158,7 +156,6 @@ impl Tutorials {
     pub(crate) fn apply_flags(&mut self, bytes: &[u8]) {
         self.fire_once = Some(bytes.to_vec());
         self.acknowledged = Some(bytes.to_vec());
-        self.dirty = true;
     }
 
     /// The bring-up `0x4b5330`: both banks zeroed if present (the bit count stays).
@@ -169,7 +166,6 @@ impl Tutorials {
         {
             bank.iter_mut().for_each(|b| *b = 0);
         }
-        self.dirty = true;
     }
 
     /// The teardown `0x4b5380`: every pending timer flushed.
@@ -210,7 +206,6 @@ impl Tutorials {
             set_bank_bit(bank_a, id);
         }
         self.sends.push(TutorialSend::Flag(id));
-        self.dirty = true;
     }
 
     /// `ClearTutorials()`: the timers flushed, every bit of both banks set, the empty clear sent.
@@ -223,7 +218,6 @@ impl Tutorials {
             bank.iter_mut().for_each(|b| *b = 0xFF);
         }
         self.sends.push(TutorialSend::Clear);
-        self.dirty = true;
     }
 
     /// `ResetTutorials()`: every bit of both banks cleared — the timers NOT flushed — the empty
@@ -236,7 +230,6 @@ impl Tutorials {
             bank.iter_mut().for_each(|b| *b = 0);
         }
         self.sends.push(TutorialSend::Reset);
-        self.dirty = true;
     }
 
     /// `ProcessTutorialTimers`: every due node fires the same cue and event.
@@ -289,7 +282,7 @@ const KEYRING_BAG: u8 = 0xff;
 const KEYRING_SLOTS: std::ops::RangeInclusive<u32> = 0x51..=0x70;
 
 /// Before the script tick: the sites' asks, the descriptor edges, the timers, the cue and the
-/// event, and the acknowledged bank's push to the VM.
+/// event, and the acknowledged bank's push to whichever VM is live.
 fn feed_tutorials(
     script: Option<NonSendMut<UiScript>>,
     mut tutorials: ResMut<Tutorials>,
@@ -297,6 +290,7 @@ fn feed_tutorials(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     items: Res<crate::items::Items>,
     mut sounds: ResMut<crate::sound::MessageSounds>,
+    mut told: Local<crate::ui_script::VmMemo<Option<Vec<u8>>>>,
 ) {
     let now = Instant::now();
     for ask in asks.read() {
@@ -342,7 +336,16 @@ fn feed_tutorials(
             vec![ScriptValue::Int(i64::from(published))],
         );
     }
-    if std::mem::take(&mut tutorials.dirty) {
+    // **The bank is owed to every VM, not to the process** (decision 2131). What the acknowledged
+    // bank holds is the app's; whether a VM has been *told* it is that VM's, so the memory sits
+    // behind a [`crate::ui_script::VmMemo`] and expires with the session it was written against
+    // (1290/1291 — a `/reload` is a logout and a login back to back). A plain "changed since the
+    // last push" flag is the same mistake 2113 names: it answers "did the bank move?" when the
+    // question is "does THIS VM know it?", and after a reload the answer was no for the rest of
+    // the session.
+    let told = told.get(&script);
+    if *told != tutorials.acknowledged {
+        told.clone_from(&tutorials.acknowledged);
         script.set_tutorial_bank(tutorials.acknowledged.clone());
     }
 }
@@ -705,5 +708,83 @@ mod tests {
         assert_eq!(b.unwrap(), &[0u8; 4]);
         assert_eq!(bank_bit(a.unwrap(), 31), Some(false));
         assert_eq!(bank_bit(a.unwrap(), 32), None, "past a 4-byte bank");
+    }
+
+    /// A bare app around [`feed_tutorials`] — the one system that owes the VM the bank.
+    fn feeder() -> App {
+        let mut app = App::new();
+        app.init_resource::<Tutorials>()
+            .init_resource::<crate::items::Items>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .add_message::<TutorialEvent>()
+            .add_systems(Update, feed_tutorials);
+        app
+    }
+
+    fn enabled(app: &mut App) -> bool {
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .eval::<bool>("return TutorialsEnabled() ~= nil")
+            .unwrap()
+    }
+
+    /// **The bank is owed to every VM** (decision 2131) — the `/reload` bug, reproduced.
+    ///
+    /// `ReloadUI()` is `end_ui_session` + the entry load back to back (1290/1291), and only the
+    /// first of those mints a VM: the world-entry path that fills the banks
+    /// ([`Tutorials::world_enter`]) never runs, so a push gated on "the bank moved" never fires
+    /// again. `TutorialsEnabled()` then answers nil for the rest of the session, the Show
+    /// Tutorials row loads OFF, and ticking it back on passes `BenillaOptionsFrame_SetTutorialsEnabled`'s
+    /// `~=` guard into `ResetTutorials()` — a `CMSG_TUTORIAL_RESET` that re-arms, account-wide,
+    /// every popup the player had already dismissed.
+    #[test]
+    fn a_rebuilt_vm_is_told_the_acknowledged_bank_again() {
+        let mut app = feeder();
+        // The packet lands: one unacknowledged bit is all `TutorialsEnabled()` scans for.
+        let mut bank = vec![0xFFu8; 32];
+        bank[0] = 0xFE;
+        app.world_mut()
+            .resource_mut::<Tutorials>()
+            .apply_flags(&bank);
+
+        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.update();
+        assert!(
+            enabled(&mut app),
+            "the VM that was live when the bank landed"
+        );
+
+        // `ReloadUI()`: a fresh VM, and nothing touches the app's banks.
+        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        assert!(
+            !enabled(&mut app),
+            "a fresh VM starts knowing no bank — this is the state the row used to load in"
+        );
+        app.update();
+        assert!(enabled(&mut app), "…and must be told it again");
+    }
+
+    /// The push is per-VM, not per-frame: a steady session hands the bank over once.
+    #[test]
+    fn an_unchanged_bank_is_not_re_pushed_every_frame() {
+        let mut app = feeder();
+        app.world_mut()
+            .resource_mut::<Tutorials>()
+            .apply_flags(&[0u8; 32]);
+        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.update();
+        // A bank the VM has already been told is not handed over again — proven by clearing it
+        // behind the feed's back and watching the next frame leave it cleared.
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_tutorial_bank(None);
+        app.update();
+        assert!(!enabled(&mut app), "unchanged ⇒ nothing pushed");
+        // A real change is still pushed, on the same VM.
+        app.world_mut()
+            .resource_mut::<Tutorials>()
+            .acknowledge(id::CHATTING);
+        app.update();
+        assert!(enabled(&mut app), "a moved bank reaches the live VM");
     }
 }

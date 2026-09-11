@@ -13,12 +13,21 @@ use super::TerrainStreamer;
 /// resident chunk's MCNK `areaId` (decision 0070: drives zone music/ambience/reverb; later the
 /// minimap zone text). `None` until the ground tile is resident (or off-terrain). Written each
 /// frame by [`update_current_area`]; consumers change-detect on the inner value.
+///
+/// **It is scoped to the character session, not to the process** (decision 2130). It goes back to
+/// `None` the moment there is no avatar to measure from, so "we have not answered yet" is never
+/// spelled the same way as "here is the character before this one".
 #[derive(Resource, Default, PartialEq, Eq)]
 pub struct CurrentArea(pub Option<u32>);
 
 /// Ordering handle on [`update_current_area`] — the leaf-authority write. The zone-text feed
 /// (`crate::area`) orders after it (which itself orders after the interior claim), so leaf +
 /// indoor bit + names always come from one coherent frame — the client's single-pass resolve.
+///
+/// **Every consumer that ACTS on the area belongs after it**, and the zone-channel walk is the
+/// case that proves it (decision 2130): unordered, it read whatever the previous frame had
+/// published and paid for the difference in `CMSG_JOIN_CHANNEL`/`CMSG_LEAVE_CHANNEL` traffic for
+/// zones the player was never in.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AreaAuthoritySet;
 
@@ -153,7 +162,26 @@ pub(super) fn update_current_area(
     wmo_areas: Option<Res<crate::wmo_portal::WmoAreas>>,
 ) {
     let Some(wow) = focus.body_pos() else {
-        return; // no avatar — the area authority follows the character, and there is none
+        // **No avatar — and the authority DIES with the character session** (decision 2130).
+        //
+        // The hold below is a within-session convenience (a tile-edge crossing must not flicker
+        // through `None`). Holding across the *session* boundary is a different thing entirely:
+        // this resource had exactly one writer, which only ever assigned `Some`, so once set it
+        // could never return to `None` for the life of the process — and the next character's
+        // login read the PREVIOUS character's zone until their own tiles decoded. The zone-channel
+        // walk believed it and joined `General - Stormwind City` for a character standing in the
+        // Eastern Plaguelands, then left it again a beat later; `sound/mod.rs`'s `world_audio_live`
+        // already carried a hand-written guard against the same staleness, which is the tell that
+        // the defect was the lifetime and not either consumer.
+        //
+        // `body_pos()` is `Some` only for a live avatar (`ViewFocus::body`/`detached`) and `None`
+        // for both glue-screen focuses, so this is the session edge without a state transition to
+        // subscribe to. A recoverable disconnect keeps the body as the local puppet (0065), so the
+        // area correctly survives one.
+        if area.0.is_some() {
+            *area = CurrentArea(None);
+        }
+        return;
     };
     if !focus.body_settled() {
         // …and one whose own world is still arriving has no area worth publishing: the leaf under
@@ -181,5 +209,83 @@ pub(super) fn update_current_area(
     let found = found.filter(|&id| id != 0);
     if found.is_some() && *area != CurrentArea(found) {
         *area = CurrentArea(found);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A world with every resource [`update_current_area`] reads, and no terrain at all — so the
+    /// only thing under test is what the system does about the *body*, not what it finds under one.
+    fn bare_world() -> World {
+        let mut w = World::new();
+        w.init_resource::<CurrentArea>();
+        w.init_resource::<crate::terrain_stream::ViewFocus>();
+        w.init_resource::<TerrainStreamer>();
+        w.init_resource::<Assets<AdtTile>>();
+        w.init_resource::<crate::wmo_portal::CurrentAreaInterior>();
+        w
+    }
+
+    /// **The area authority dies with the character session** (decision 2130).
+    ///
+    /// It had exactly one writer, which only ever assigned `Some`, and nothing reset it — so once
+    /// a character had published a zone it stayed published for the life of the *process*. The
+    /// next login read it before its own tiles decoded, and the zone-channel walk turned that into
+    /// `CMSG_JOIN_CHANNEL` for the previous character's capital: the director logged into a
+    /// character in the Eastern Plaguelands and watched Stormwind City's three channels join and
+    /// then leave again.
+    #[test]
+    fn no_avatar_means_no_area() {
+        let mut w = bare_world();
+        // A character session that published its zone…
+        w.insert_resource(CurrentArea(Some(1519))); // Stormwind City
+        w.insert_resource(crate::terrain_stream::ViewFocus::body(
+            [-8900.0, -130.0, 80.0],
+            true,
+        ));
+        w.run_system_once(update_current_area).unwrap();
+        assert_eq!(
+            w.resource::<CurrentArea>().0,
+            Some(1519),
+            "with a body and no resident tile the last real answer is HELD — that is the \
+             tile-edge/flicker guard, and it stays"
+        );
+
+        // …and then logged out. `ViewFocus` carries no body at either glue screen.
+        w.insert_resource(crate::terrain_stream::ViewFocus::camera());
+        w.run_system_once(update_current_area).unwrap();
+        assert_eq!(
+            w.resource::<CurrentArea>().0,
+            None,
+            "the authority follows the character, and there is none — a held value here is the \
+             NEXT character's login reading THIS character's zone"
+        );
+
+        // And the entry-window focus (decision 0777) is the same: a picked row is not a body.
+        w.insert_resource(CurrentArea(Some(1519)));
+        w.insert_resource(crate::terrain_stream::ViewFocus::entry(
+            0,
+            [-8900.0, -130.0, 80.0],
+        ));
+        w.run_system_once(update_current_area).unwrap();
+        assert_eq!(w.resource::<CurrentArea>().0, None);
+    }
+
+    /// A **recoverable** disconnect keeps the avatar as the local puppet (0065), so the area must
+    /// survive one: nothing about the world under the player's feet changed when the socket died.
+    /// This is why the clear hangs off "is there a body" rather than off the net session.
+    #[test]
+    fn a_body_that_survives_a_drop_keeps_its_area() {
+        let mut w = bare_world();
+        w.insert_resource(CurrentArea(Some(12)));
+        w.insert_resource(crate::terrain_stream::ViewFocus::body(
+            [0.0, 0.0, 0.0],
+            false,
+        ));
+        w.run_system_once(update_current_area).unwrap();
+        assert_eq!(w.resource::<CurrentArea>().0, Some(12));
     }
 }

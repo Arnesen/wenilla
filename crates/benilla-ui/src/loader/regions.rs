@@ -283,21 +283,15 @@ impl Loader<'_> {
                     x.unwrap_or(0.0),
                     y.unwrap_or(0.0),
                 );
-                // A target that is not built yet waits for the frame's subtree (`Loader::deferred_anchors`).
-                if args
-                    .1
-                    .as_deref()
-                    .is_some_and(|n| !self.anchor_target_exists(n))
-                {
-                    self.deferred_anchors.push(super::DeferredAnchor {
-                        wrapper: wrapper.clone(),
-                        region: true,
-                        args,
-                        dbg: dbg.to_string(),
-                    });
-                    continue;
-                }
-                self.call_region(wrapper, "SetPoint", args, dbg);
+                let d = super::DeferredAnchor {
+                    wrapper: wrapper.clone(),
+                    region: true,
+                    args,
+                    dbg: dbg.to_string(),
+                };
+                // The XML path's own law, which resolves the name itself and defers a target
+                // the enclosing frame's subtree has not built yet (`Loader::apply_anchor`).
+                self.apply_anchor(d, true);
             }
         }
     }

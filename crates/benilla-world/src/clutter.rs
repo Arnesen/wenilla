@@ -160,7 +160,9 @@ pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 70.0;
 /// Ground-clutter tunables (read at tile scatter; a `density` change re-scatters LOADED tiles too —
 /// `terrain_stream::rescatter_clutter`, the 1.12 setter's own chunk-rebuild law, 0992):
 /// `density` multiplies the per-chunk cell-visit count (the client's `frillDensity`, faithful=16 at ×1)
-/// — player-settable as the `WorldDetail` CVar (panel 0/1/2 → ×1/×2/×3; the arm in [`crate::cvars`]);
+/// — player-settable through **either** registered CVar over this one field, [`ClutterConfig::frill_density`]
+/// being the conversion: `WorldDetail` (the panel's stop, 0/1/2 → ×1/×2/×3) or `frillDensity` (the
+/// reference's own cells-per-chunk, 1..256), both arms in `benilla-app`'s `cvars`;
 /// `scale` resizes each doodad model; `alpha_ref` is the alpha-test cutout threshold
 /// ([`DETAIL_DOODAD_ALPHA_REF`]); `fade_far` is the clutter draw-distance horizon (yd,
 /// [`DETAIL_DOODAD_FADE_FAR`]; fade starts at 0.75×). Initial values from `$WOW_CLUTTER_DENSITY` /
@@ -171,6 +173,34 @@ pub struct ClutterConfig {
     pub scale: f32,
     pub alpha_ref: f32,
     pub fade_far: f32,
+}
+
+impl ClutterConfig {
+    /// This session's ground cover in the **reference's own unit** — `frillDensity`, the number of
+    /// cells the scatter visits per chunk ([`benilla_formats::FRILL_DENSITY`] at ×1).
+    ///
+    /// The multiplier above is benilla's spelling of a knob 1.12 keeps in cells: its slider stops
+    /// are `SetWorldDetail 0x488dd0`'s 16/32/48, which are this constant times 1/2/3. So the two
+    /// registered CVars over this field — `WorldDetail` (the stop) and `frillDensity` (the cells) —
+    /// are one knob read two ways, and this pair is where that conversion lives so neither the CVar
+    /// host nor the scatter carries a bare 16.
+    pub fn frill_density(&self) -> f32 {
+        self.density * benilla_formats::FRILL_DENSITY as f32
+    }
+
+    /// Set the ground cover from a `frillDensity`, under the reference's own clamp.
+    ///
+    /// `[1, 256]` is what the real client's change callback `0x688de0` pins a written value to —
+    /// **not** `[16, 48]`: the slider's three stops are one writer of this CVar, and a console
+    /// `frillDensity 200` is another. It is also why the `WorldDetail` arm's clamp is the tighter
+    /// one: there the stop is the value, here the cells are.
+    ///
+    /// Zero is deliberately NOT reachable here, matching that callback — clutter-off stays the
+    /// `$WOW_CLUTTER_DENSITY=0` lever's, which is an instrument rather than a setting.
+    pub fn set_frill_density(&mut self, frill: f32) {
+        self.density = frill.clamp(1.0, benilla_formats::FRILL_DENSITY_MAX as f32)
+            / benilla_formats::FRILL_DENSITY as f32;
+    }
 }
 
 impl Default for ClutterConfig {

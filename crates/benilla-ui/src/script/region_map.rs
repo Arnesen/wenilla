@@ -53,8 +53,9 @@
 //! **Exactly the 19, and no more.** `Show`/`Hide`/`IsShown`/`IsVisible`/`SetAlpha`/`GetAlpha` look
 //! like they belong and do not: Frame and Texture each register their *own*, at different
 //! addresses (`texture-fontstring-method-split.md` §3), so `WorldFrame.Show(someTexture)` fails on
-//! the real client and must keep failing here. `SetSize` is in neither table — it is 1.12-absent
-//! and ours, so it stays where it is. The map is the unit.
+//! the real client and must keep failing here. (`SetSize` used to sit outside the 19 for the
+//! opposite reason — in neither table because 1.12 has no such verb at all; decision 2142 removed
+//! it rather than filing it.) The map is the unit.
 
 use mlua::{Function, Lua, MultiValue, Table, Value};
 

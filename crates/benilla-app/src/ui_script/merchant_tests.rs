@@ -709,13 +709,20 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     for line in [
         "Vendor Blade",
         "Main Hand",
-        "Sword",
         "5 - 9 Damage",
         "Speed 2.60",
         "(2.7 damage per second)",
     ] {
         assert!(has_text(&quads, line), "tooltip line {line:?} missing");
     }
+    // The type cell ("Sword") is deliberately NOT here. This row renders through the stat-head
+    // FALLBACK — the shape a hover takes only while the full template view is still in flight —
+    // and the type word is `ItemSubClass.dbc`'s DisplayName, which only the app can resolve. The
+    // head carries `class`/`subclass` numbers and no name, so the cell stands empty rather than
+    // being composed from a table in the engine (the renderer's hand-typed copy of that DBC is
+    // gone — decision 2080's shape). A hover whose template HAS landed takes `view_of` and prints
+    // it; that path is pinned in `benilla-ui`'s own item-law tests.
+    assert!(!has_text(&quads, "Sword"), "the head carries no type word");
     // Two "Vendor Blade" quads exist — the merchant row's own gold name and the tooltip's header
     // line; the tooltip's is the quality-green one.
     let name_colors: Vec<[f32; 4]> = quads
@@ -770,18 +777,13 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     );
     s.resolve();
     let quads = s.extract();
-    for line in [
-        "Chipped Buckler",
-        "Off Hand",
-        "Shield",
-        "85 Armor",
-        "1 Block",
-    ] {
+    for line in ["Chipped Buckler", "Off Hand", "85 Armor", "1 Block"] {
         assert!(
             has_text(&quads, line),
             "shield tooltip line {line:?} missing"
         );
     }
+    assert!(!has_text(&quads, "Shield"), "the head carries no type word");
     assert!(!has_text(&quads, "Main Hand"), "row 1's tooltip cleared");
 
     // Leave the window entirely: tooltip + highlight gone.

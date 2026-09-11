@@ -122,11 +122,7 @@ fn get_channel_list_is_a_flat_slot_name_vararg_in_join_order() {
     let s = joined();
 
     // Exactly two pairs for two joined channels — the arity `FCFDropDown_LoadChannels` steps over.
-    assert_eq!(
-        s.eval::<i64>("return select('#', GetChannelList())")
-            .unwrap(),
-        4
-    );
+    assert_eq!(s.arity("GetChannelList()").unwrap(), 4);
 
     // Pair order and join order, both at once: slot 1 is the FIRST joined, not the alphabetical
     // first ("Trade - City" would sort ahead of "World").
@@ -152,10 +148,156 @@ fn get_channel_list_is_a_flat_slot_name_vararg_in_join_order() {
     // No channels joined is ZERO returns, so `{ GetChannelList() }` is an empty table rather than
     // a table of nils — every consumer above already handles that shape.
     let empty = crate::script::tests::common::script();
+    assert_eq!(empty.arity("GetChannelList()").unwrap(), 0);
+}
+
+/// **The guild-recruitment latch boots at AUTO and round-trips as a NUMBER** (decision 2115).
+///
+/// `GetGuildRecruitmentMode 0x4a0040` is 23 bytes and one path — `fild` the int global,
+/// `lua_pushnumber`, `mov eax,1`, `ret` — so it has no nil leg at all, and
+/// `UIOptionsFrame_Load`'s `== 1` would read a nil as a silent "not auto". The boot value is 1
+/// from a `.data` initialiser (`raw 0x443608` = `01 00 00 00`), corroborated by
+/// `UIOptionsFrame_SetDefaults`'s `SetGuildRecruitmentMode(1)` and by all 33 `chat-cache.txt`
+/// files the reference client itself wrote in this repo's install.
+#[test]
+fn the_guild_recruitment_mode_boots_auto_and_answers_a_number() {
+    let s = script();
     assert_eq!(
-        empty
-            .eval::<i64>("return select('#', GetChannelList())")
-            .unwrap(),
-        0
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        1.0,
+        "the reference's own .data initialiser, not a BSS zero"
     );
+    assert!(s
+        .eval::<bool>("return type(GetGuildRecruitmentMode()) == 'number'")
+        .unwrap());
+    s.run("SetGuildRecruitmentMode(0)").unwrap();
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        0.0
+    );
+}
+
+/// **The setter is shape A — it RAISES rather than swallowing a bad argument** (decision 2115).
+///
+/// `0x4a0060` gates on `lua_isnumber 0x6f34d0` (so a numeric STRING passes) and otherwise
+/// `luaL_error`s `Usage: SetGuildRecruitmentMode(mode)`; it then truncates toward zero through
+/// `__ftol 0x40a2b0` and range-gates `0 <= mode < 2`, raising
+/// `SetGuildRecruitmentMode: invalid mode` outside it. Most 1.12 numeric bindings swallow a nil
+/// as 0.0 — this one does not, and a client that guessed the common shape would turn an addon's
+/// own bug into silence (wow-re `numeric-arg-coercion-law.md`; the per-binding split is the whole
+/// point of that note).
+///
+/// Success pushes **0 values**, not nil.
+#[test]
+fn the_guild_recruitment_setter_gates_its_argument_the_way_the_reference_does() {
+    let s = script();
+
+    // A numeric string is a number to `lua_isnumber`.
+    s.run(r#"SetGuildRecruitmentMode("0")"#).unwrap();
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        0.0
+    );
+
+    // Truncation toward zero, not rounding: 1.7 is a legal 1.
+    s.run("SetGuildRecruitmentMode(1.7)").unwrap();
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        1.0
+    );
+
+    for bad in ["", "nil", r#""AUTO""#, "{}", "true"] {
+        let e = s
+            .run(&format!("SetGuildRecruitmentMode({bad})"))
+            .expect_err(&format!("SetGuildRecruitmentMode({bad}) must raise"));
+        assert!(
+            e.to_string().contains("Usage: SetGuildRecruitmentMode"),
+            "{bad}: {e}"
+        );
+    }
+    for bad in ["-1", "2", "-1.7", "37"] {
+        let e = s
+            .run(&format!("SetGuildRecruitmentMode({bad})"))
+            .expect_err(&format!("SetGuildRecruitmentMode({bad}) must raise"));
+        assert!(e.to_string().contains("invalid mode"), "{bad}: {e}");
+    }
+
+    // …and none of the refused calls moved the latch.
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        1.0
+    );
+    assert_eq!(
+        s.arity("SetGuildRecruitmentMode(0)").unwrap(),
+        0,
+        "0x4a0060 returns `xor eax,eax` — zero values, not a nil"
+    );
+}
+
+/// **The setter is not inert** (decision 2144). `0x49ea70` stores the latch and tail-jumps into
+/// the cascade `0x49ea90` on the new value alone — `Set(1)` raises the app's cue whether or not
+/// the value moved; `Set(0)` never does — and `0x4a00a4`/`0x4a00a9` fire `UPDATE_CHAT_WINDOWS`
+/// on every successful call, before any cascade fires it again.
+#[test]
+fn the_setter_asks_for_the_cascade_on_one_and_fires_update_chat_windows() {
+    let mut s = script();
+    s.run(
+        r#"
+        n = 0
+        local f = CreateFrame("Frame", "GRF")
+        f:RegisterEvent("UPDATE_CHAT_WINDOWS")
+        f:SetScript("OnEvent", function() n = n + 1 end)
+    "#,
+    )
+    .unwrap();
+    assert!(!s.take_guild_recruitment_cascade(), "nothing asked yet");
+
+    // Boots at 1; a Set(1) that moves nothing still asks — the reference's store is
+    // unconditional and the jump reads only `ecx == 1`.
+    s.run("SetGuildRecruitmentMode(1)").unwrap();
+    assert!(s.take_guild_recruitment_cascade());
+    assert!(!s.take_guild_recruitment_cascade(), "drained");
+    assert!(
+        !s.take_guild_recruitment_change(),
+        "…and the file is not dirtied by a no-move"
+    );
+
+    s.run("SetGuildRecruitmentMode(0)").unwrap();
+    assert!(
+        !s.take_guild_recruitment_cascade(),
+        "mode 0 is the latch alone"
+    );
+    assert!(
+        s.take_guild_recruitment_change(),
+        "the file is dirtied by the move"
+    );
+
+    // A refused call fires nothing.
+    s.run("SetGuildRecruitmentMode(2)").unwrap_err();
+    s.tick(0.016);
+    assert_eq!(
+        s.eval::<i64>("return n").unwrap(),
+        2,
+        "one UPDATE_CHAT_WINDOWS per successful call: Set(1), Set(0); the raise fired none"
+    );
+}
+
+/// **A manual join or leave of `GuildRecruitment` forces the latch to 0** — `0x49ed3d`/
+/// `0x49ef8f`, `call 0x49ea70(0)`. A player gesture, so it dirties the file; and mode 0 is the
+/// latch alone, so it asks for no cascade.
+#[test]
+fn a_manual_guild_recruitment_verb_resets_the_latch() {
+    let mut s = script();
+    assert!(s.reset_guild_recruitment_mode(), "1 → 0 moved");
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        0.0
+    );
+    assert!(s.take_guild_recruitment_change());
+    assert!(!s.take_guild_recruitment_cascade());
+    assert!(
+        !s.reset_guild_recruitment_mode(),
+        "already 0: nothing moved"
+    );
+    assert!(!s.take_guild_recruitment_change());
 }

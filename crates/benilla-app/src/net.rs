@@ -135,6 +135,7 @@ impl Plugin for NetPlugin {
             .insert_resource(PingShared(handles.ping))
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
+            .init_resource::<AddonInfoReply>()
             .init_resource::<PendingTransfer>()
             .init_resource::<NetStatus>()
             .init_resource::<DroppedOpcodes>()
@@ -2521,6 +2522,17 @@ pub(crate) struct EnteredWorldMessage {
     /// otherwise it arrives in the world stream.
     pub(crate) tutorial_flags: Option<Vec<u8>>,
 }
+
+/// **`SMSG_ADDON_INFO`'s verdict for the live session** (decision 2175) — the addons the server
+/// hid from the Lua index space, or `None` when it never answered our addon block.
+///
+/// A resource rather than a field on [`EnteredWorldMessage`], because of *when* it is needed: the
+/// index space has to exist before the first addon's file-scope code runs, and the world-entry UI
+/// load ([`crate::ui_script::lifecycle::load_ingame_ui_on_world_entry`]) is inside that same edge.
+/// A message read a frame later by some other feed would seat it after every addon had already
+/// asked. Rewritten on every login, so a second server's silence cannot inherit the first's answer.
+#[derive(Resource, Default)]
+pub(crate) struct AddonInfoReply(pub(crate) Option<Vec<String>>);
 
 /// The server asked us to play a cinematic (`SMSG_TRIGGER_CINEMATIC`) — a `CinematicSequences.dbc`
 /// id. Read by [`crate::cinematic`], which owns the playback *and* the ack (decision 0196: the ack

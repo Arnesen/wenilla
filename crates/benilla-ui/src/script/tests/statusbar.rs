@@ -72,7 +72,7 @@ fn statusbar_bar_region_scales_by_fraction_on_extract() {
         r#"
         local b = CreateFrame("StatusBar", "SbFill")
         b:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)
-        b:SetSize(200, 20)
+        b:SetWidth(200); b:SetHeight(20)
         b:SetStatusBarTexture(0.2, 0.7, 0.2)
         b:SetMinMaxValues(0, 100)
         b:SetValue(25)
@@ -137,7 +137,7 @@ fn statusbar_bar_region_crops_its_texture_rather_than_stretching_it() {
         r#"
         local b = CreateFrame("StatusBar", "SbCrop")
         b:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 0, 0)
-        b:SetSize(200, 20)
+        b:SetWidth(200); b:SetHeight(20)
         b:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
         b:SetMinMaxValues(0, 100)
         b:SetValue(25)

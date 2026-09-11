@@ -13,7 +13,7 @@ fn minimap_zoom_api_and_extract() {
     s.run(
         r#"
         m = CreateFrame("Minimap", "TestMinimap")
-        m:SetWidth(140); m:SetHeight(140); m:SetPoint("TOPRIGHT")
+        m:SetWidth(140); m:SetHeight(140); m:SetPoint("TOPRIGHT", 0, 0)
     "#,
     )
     .unwrap();
@@ -80,7 +80,7 @@ fn minimap_indoor_and_outdoor_zoom_indices_are_independent() {
     s.run(
         r#"
         m = CreateFrame("Minimap", "TestMinimap")
-        m:SetWidth(140); m:SetHeight(140); m:SetPoint("TOPRIGHT")
+        m:SetWidth(140); m:SetHeight(140); m:SetPoint("TOPRIGHT", 0, 0)
     "#,
     )
     .unwrap();

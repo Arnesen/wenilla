@@ -61,7 +61,16 @@ pub(super) fn drive(
                 descent: player.fall_start_y - player.pos.y,
             });
         }
-        cam_pivot_target = pivot_target(pivot, net_entity);
+        // The camera's framing-pivot target, taken off the same word the body pitch above reads:
+        // `0x50f880` selects the swim preset on the CAMERA TARGET's own MOVEFLAG_SWIMMING, and the
+        // camera target is this driven body (0041/1277). Reading the flag word rather than the
+        // `swimming` argument keeps the pitch and the pivot on one source, which is what stops them
+        // ever disagreeing about which frame the water started.
+        cam_pivot_target = pivot_target(
+            pivot,
+            net_entity,
+            move_flags_now & crate::creature_anim::move_flags::SWIMMING != 0,
+        );
         if let Some(mut motion) = motion {
             // A swimmer's stroke rate takes the flag-scalar directional speed (full rate at
             // any pitch — a vertical climb must not freeze the stroke); the ground gaits
@@ -94,6 +103,12 @@ pub(super) fn drive(
 /// The camera pivot's **target** height for a driven body: its model-local [`CameraPivot`] × the
 /// body's raw `OBJECT_FIELD_SCALE_X`, clamped — or `None` before its model has attached.
 ///
+/// `swimming` is the body's own MOVEFLAG_SWIMMING, and it picks the preset exactly as `0x50f880`
+/// does (`0x50f89e test [[unit+0x118]+0x40],0x200000` → `cam+0x124`): the framing pivot sits lower
+/// on a swimmer by the model's [`CameraPivot::swim_drop_local`]. Nothing here glides — the preset is
+/// a step function of the flag, and [`super::camera::PivotGlide`] is what walks the channel between
+/// two of them, so entering the water reads as one smooth dip for free.
+///
 /// `None` is the load-bearing half. The reference recomputes the pivot preset only on a model event
 /// and *skips the camera update entirely* while the model is unresolved (`0x50e907`), so a
 /// display swap reads as a brief hold and then one glide. Aiming the channel at a placeholder height
@@ -104,8 +119,9 @@ pub(super) fn drive(
 pub(super) fn pivot_target(
     pivot: Option<&CameraPivot>,
     net: Option<&crate::net::NetEntity>,
+    swimming: bool,
 ) -> Option<f32> {
-    pivot.map(|p| model_pivot_height(p, net.map_or(1.0, |n| n.scale)))
+    pivot.map(|p| model_pivot_height(p, net.map_or(1.0, |n| n.scale), swimming))
 }
 
 /// `WOW_TWIST_GAP=<radians>`: pin the body counter-twist's yaw gap instead of deriving it from

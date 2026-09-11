@@ -610,6 +610,8 @@ pub(crate) struct SelectCommit<'w, 's> {
     index: Res<'w, GuidIndex>,
     factions: Option<Res<'w, super::Factions>>,
     reputations: Res<'w, crate::net::Reputations>,
+    /// `assistAttack` — the assist tail's second leg (see [`Self::assist`]).
+    assist_attack: Res<'w, super::AssistAttack>,
 }
 
 impl SelectCommit<'_, '_> {
@@ -623,8 +625,9 @@ impl SelectCommit<'_, '_> {
     /// of them silent and none of them a deselect: no basis, a basis targeting nothing, and a
     /// target guid that is not streamed (`0x489a40`'s arm 3 is a bare `ret`).
     ///
-    /// The `assistAttack` swing leg is correctly absent — the CVar's registered default is `"0"`
-    /// (VERIFIED at `0x48fc50`), so stock assist selects and does not swing. See the drain below.
+    /// **The `assistAttack` swing leg** (`0x489c02`/`0x489d02 call 0x5ecb70`) runs after the
+    /// selection when that CVar is non-zero — its registered default is `"0"`, so stock assist
+    /// selects and does not swing.
     pub(super) fn assist(&mut self, basis: Entity, how: &str) {
         let Some(guid) = self
             .stores
@@ -644,7 +647,28 @@ impl SelectCommit<'_, '_> {
             return;
         };
         info!("assist ({how}) -> the basis unit's target, guid {guid:#x}");
+        // `engaged` and the attackability walk are read BEFORE the selection, and that ordering is
+        // the reference's own seen from outside: `SetSelection` may itself have re-pointed a swing
+        // we already had (`0x4938c8`), and `0x5ecb70`'s already-attacking test then skips the
+        // *send* while still running the tail — the skip's `jmp` lands inside it. So the second leg
+        // is a no-op send plus a real sheath snap when we were already fighting, and a fresh swing
+        // when we were not.
+        let me = self.me.single().ok();
+        let engaged = me.is_some_and(|(_, _, engaged)| engaged);
+        let attackable = super::relations::can_attack(
+            self.stores.get(entity).ok(),
+            self.factions.as_deref(),
+            &self.reputations,
+            me.and_then(|(_, store, _)| store),
+        );
         self.commit(entity, guid);
+        // The second leg. `0x5ecb70`'s own attackability walk is the caller's here, as it is at
+        // every other benilla call site (`start_attack_local`'s header): a friendly assist target
+        // is selected and not swung at.
+        if self.assist_attack.0 && attackable {
+            info!("assist ({how}): assistAttack is on -> opening the swing");
+            self.seam.start(guid, engaged, false);
+        }
     }
 
     /// Select a guid that is already resolved — `0x489a40`'s arm 1, plus [`scan::commit`]'s law.

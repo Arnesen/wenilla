@@ -701,7 +701,7 @@ mod tests {
         Mat4::perspective_infinite_reverse_rh(
             std::f32::consts::FRAC_PI_4,
             3200.0 / 1800.0,
-            benilla_world::view::CAM_NEAR,
+            benilla_world::view::NEARCLIP_DEFAULT,
         )
     }
 

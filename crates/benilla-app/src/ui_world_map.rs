@@ -52,7 +52,7 @@ pub(crate) struct WorldMapUiData {
     continents: Vec<ContinentEntry>,
 }
 
-struct ContinentEntry {
+pub(crate) struct ContinentEntry {
     map_id: u32,
     proj: Option<WorldProj>,
     rect: ZoneRect,
@@ -73,39 +73,28 @@ fn zone_rect(a: &WorldMapArea) -> ZoneRect {
     }
 }
 
-/// Build + push the static catalog once the patch chain, the VM, and the Map.dbc catalog all
-/// exist (Update-gated rather than Startup-ordered, like every feed that needs the script).
-fn load_world_map_ui(
-    mut done: Local<crate::ui_script::VmMemo<bool>>,
-    script: Option<NonSendMut<UiScript>>,
-    world_assets: Option<ResMut<WorldAssets>>,
-    maps: Option<Res<MapCatalogRes>>,
-    areas: Option<Res<crate::area::AreaTableRes>>,
-    mut commands: Commands,
-) {
-    let (Some(mut script), Some(assets), Some(maps), Some(areas)) =
-        (script, world_assets, maps, areas)
-    else {
-        return;
-    };
-    // Once per **VM** (1290), not once per process: the catalog is static, the VM it is pushed
-    // into is not — a login builds a fresh one, and without this the map window has no continents.
-    if !done.claim(&script) {
-        return;
-    }
-    let areas = &areas.0;
-
-    let mut chain = assets.chain.lock_recover();
-    let loaded = load_world_map_area_catalog(&mut chain).and_then(|wma| {
-        let wmc = load_world_map_continent_catalog(&mut chain)?;
-        let wmo = load_world_map_overlay_catalog(&mut chain)?;
+/// Build the catalog off the patch chain — the pure half of [`load_world_map_ui`], split out
+/// so a test can drive the REAL `WorldMapArea` × `AreaTable` × `WorldMapContinent` × `Map` ×
+/// `.zmp` build rather than a hand-written stand-in. A fixture catalog can only ever prove the
+/// engine's arithmetic; what the player hovers is this, and the two were never joined before
+/// ([`super::ui_script::world_map_tests`]'s real-data hover).
+///
+/// `None` when a DBC fails to load — the caller disables the map window and says so.
+pub(crate) fn build_catalog(
+    chain: &mut benilla_formats::Chain,
+    areas: &benilla_formats::AreaTableCatalog,
+    maps: &MapCatalogRes,
+) -> Option<(Vec<WorldMapContinentView>, Vec<ContinentEntry>)> {
+    let loaded = load_world_map_area_catalog(&mut *chain).and_then(|wma| {
+        let wmc = load_world_map_continent_catalog(&mut *chain)?;
+        let wmo = load_world_map_overlay_catalog(&mut *chain)?;
         Ok((wma, wmc, wmo))
     });
     let (wma, wmc, wmo) = match loaded {
         Ok(t) => t,
         Err(e) => {
             error!("world map: DBC load failed, map window disabled: {e:#}");
-            return;
+            return None;
         }
     };
 
@@ -157,7 +146,7 @@ fn load_world_map_ui(
         // The continent's area bitmap, remapped from raw AreaTable ids to 1-based zone indices —
         // the client's load-time remap (one-hop parent rollup, then the (mapId, areaId) match;
         // wow-re Q1(b)), fused with its zone-index resolution since our engine consumes indices.
-        let zone_grid: Vec<u16> = match load_zone_map(&mut chain, &cont.name) {
+        let zone_grid: Vec<u16> = match load_zone_map(&mut *chain, &cont.name) {
             Ok(grid) => grid
                 .iter()
                 .map(|&raw| {
@@ -246,7 +235,37 @@ fn load_world_map_ui(
                 .collect(),
         });
     }
+    Some((views, entries))
+}
+
+/// Build + push the static catalog once the patch chain, the VM, and the Map.dbc catalog all
+/// exist (Update-gated rather than Startup-ordered, like every feed that needs the script).
+fn load_world_map_ui(
+    mut done: Local<crate::ui_script::VmMemo<bool>>,
+    script: Option<NonSendMut<UiScript>>,
+    world_assets: Option<ResMut<WorldAssets>>,
+    maps: Option<Res<MapCatalogRes>>,
+    areas: Option<Res<crate::area::AreaTableRes>>,
+    mut commands: Commands,
+) {
+    let (Some(mut script), Some(assets), Some(maps), Some(areas)) =
+        (script, world_assets, maps, areas)
+    else {
+        return;
+    };
+    // Once per **VM** (1290), not once per process: the catalog is static, the VM it is pushed
+    // into is not — a login builds a fresh one, and without this the map window has no continents.
+    if !done.claim(&script) {
+        return;
+    }
+    let areas = &areas.0;
+
+    let mut chain = assets.chain.lock_recover();
+    let built = build_catalog(&mut chain, areas, &maps);
     drop(chain);
+    let Some((views, entries)) = built else {
+        return;
+    };
 
     info!(
         "world map: catalog — {} continents, {} zones",
@@ -424,6 +443,53 @@ fn landmark_texture_index(poi: &benilla_formats::AreaPoi, level: MapLevel) -> u3
     }
 }
 
+/// `SetMapToCurrentZone`'s resolver, whose two halves fail SEPARATELY — see the call site in
+/// [`feed_world_map`] for the byte citation. `map_id` is the player's `Map.dbc` id; `top_zone` is
+/// their current area walked up to its top-level zone, or `None` while the area feed has not
+/// answered. The answer is the 1-based `(continent, zone)` the Lua selection verbs speak, with
+/// **zone 0 meaning the continent map** — the reference's `SetMap(continent, −1)` as
+/// `GetCurrentMapZone` reads it back.
+fn resolve_player_zone(
+    data: &WorldMapUiData,
+    map_id: u32,
+    top_zone: Option<u32>,
+) -> Option<(u32, u32)> {
+    let ci = data.continents.iter().position(|c| c.map_id == map_id)?;
+    let zone = top_zone
+        .and_then(|top| {
+            data.continents[ci]
+                .zones
+                .iter()
+                .position(|z| z.area_id == top)
+        })
+        .map_or(0, |zi| zi as u32 + 1);
+    Some((ci as u32 + 1, zone))
+}
+
+/// The engine-side world-enter sync's gate and answer — `0x494780`'s `old == 0` leg into the
+/// resolver `0x4a6650`. `None` = do not sync this frame; `Some(sel)` = apply `sel` and never
+/// sync again this session.
+///
+/// Two things it has to get right, both from the bytes:
+///
+/// - **The trigger is the zone id becoming known, not the frame count.** `0x67e510` bails before
+///   `0x494780` whenever the resolved zone id is 0, so the reference's sync cannot fire before
+///   the player's area is real. `top_zone.is_some()` is that same precondition; without it we
+///   would sync on frame 1 to the bare continent and — since the reference never re-syncs — stay
+///   there.
+/// - **Every exit of `0x4a6650` writes the selection**, including its two failure legs
+///   (`0x4a667e`/`0x4a670b` ⇒ `SetMap(−1, −1)`). So an unresolvable player — an instance map, no
+///   continent row — still counts as synced, at the world view, rather than re-arming the gate
+///   every frame. That is `player_zone.unwrap_or((0, 0))`: our `None` IS the reference's
+///   `(−1, −1)`, which `GetCurrentMapContinent` reads back to Lua as `0`.
+fn world_enter_selection(
+    synced: bool,
+    top_zone: Option<u32>,
+    player_zone: Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    (!synced && top_zone.is_some()).then(|| player_zone.unwrap_or((0, 0)))
+}
+
 /// Per frame: selection read-back → projection → feed push (see the module doc).
 /// One projection law for every blip on the DISPLAYED map: world-sheet mode (selection
 /// `(0, _)`) projects through the POSITION's own map's continent constants; continent and zone
@@ -456,6 +522,21 @@ pub(crate) fn project_on_displayed(
     }
 }
 
+/// [`feed_world_map`]'s memos, bundled behind ONE [`crate::ui_script::VmMemo`] because the feed
+/// sits at Bevy's system-parameter ceiling. Keeping the memo on the outside rather than on each
+/// field is the point: a login is a new VM, and the whole bundle resets with it in one place —
+/// there is no field that can be added later and quietly outlive the session it is memory about
+/// (decision 1290).
+#[derive(Default)]
+struct FeedMemos {
+    /// The last pushed `PLAYER_EXPLORED_ZONES` bitset.
+    explored: Option<Vec<u32>>,
+    /// The inputs the last landmark rebuild was keyed on.
+    landmarks: Option<LandmarkKey>,
+    /// The reference's `old == 0` gate on the engine-side map sync — see the call site.
+    map_synced: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn feed_world_map(
     script: Option<NonSendMut<UiScript>>,
@@ -474,8 +555,7 @@ fn feed_world_map(
     unit_pos: Query<&GlobalTransform, With<crate::net::NetEntity>>,
     pois: Option<Res<crate::area_poi::AreaPoiRes>>,
     world_states: Res<crate::world_state::WorldStates>,
-    mut last_explored: Local<crate::ui_script::VmMemo<Option<Vec<u32>>>>,
-    mut last_landmarks: Local<crate::ui_script::VmMemo<Option<LandmarkKey>>>,
+    mut memo: Local<crate::ui_script::VmMemo<FeedMemos>>,
 ) {
     let (Some(mut script), Some(data), Some(map), Some(areas)) = (script, data, map, areas) else {
         return;
@@ -494,9 +574,9 @@ fn feed_world_map(
         })
         .unwrap_or_default();
     {
-        let last_explored = last_explored.get(&script);
-        if !explored.is_empty() && last_explored.as_ref() != Some(&explored) {
-            *last_explored = Some(explored.clone());
+        let memo = memo.get(&script);
+        if !explored.is_empty() && memo.explored.as_ref() != Some(&explored) {
+            memo.explored = Some(explored.clone());
             script.set_world_map_explored(explored.clone());
         }
     }
@@ -505,18 +585,59 @@ fn feed_world_map(
 
     // The player's (continent, zone) — CurrentArea's MCNK areaId walked up the AreaTable parent
     // chain to its top-level zone, matched against the displayed catalog (1-based indices).
-    let player_zone = world
-        .area()
-        .and_then(|aid| areas.0.top_zone(aid))
-        .and_then(|top| {
-            data.continents.iter().enumerate().find_map(|(ci, cont)| {
-                if cont.map_id != map.0 {
-                    return None;
-                }
-                let zi = cont.zones.iter().position(|z| z.area_id == top)?;
-                Some((ci as u32 + 1, zi as u32 + 1))
-            })
-        });
+    //
+    // **The two halves fail SEPARATELY, and that is the reference's law, not a convenience.**
+    // `SetMapToCurrentZone 0x4a7e20`'s resolver `0x4a6650` matches the player's map id against
+    // each continent record's `+0x00`, then walks that record's sorted child-zone array for the
+    // zone whose WMA areaID equals the player's current-area global — and **"no zone match ⇒
+    // `SetMap(continent, −1)`"**, i.e. the CONTINENT map, with only "no continent match" falling
+    // through to the orphan list and then `SetMap(−1, −1)` = the world view (wow-re
+    // `system/ui/scratch/geometry.md` §"Worldmap data model"; `GetCurrentMapZone 0x4a7f00` is
+    // `DAT_00845070 + 1`, so that −1 reads back to Lua as **0**).
+    //
+    // We used to resolve both or neither, so a zone the catalog has no row for — and, before the
+    // area feed answers, a zone we simply do not know yet — slammed the selection to the WORLD
+    // view instead of the player's continent. That matters beyond the picture: at the world level
+    // `GetPlayerMapPosition` answers a world-SHEET uv (`0x4a7360`'s step-2 continent formula), and
+    // every consumer that assumes a zone uv — Astrolabe, and so every addon built on it — silently
+    // mis-scales it.
+    //
+    // NOT modelled, and deliberately: the `−2` orphan/direct-area leg for a map that is no
+    // continent's child (the instance maps). We have no orphan list, so those still land on the
+    // world view rather than the reference's direct-area selection.
+    let top_zone = world.area().and_then(|aid| areas.0.top_zone(aid));
+    let player_zone = resolve_player_zone(&data, map.0, top_zone);
+
+    // ── First world-enter: the ENGINE selects the player's zone, with no Lua in the loop.
+    //
+    // `0x494780` — the zone updater we already transcribe verbatim in `crate::area` for its
+    // ZONE_CHANGED event election — carries one more effect that election note called "an
+    // unrelated side call": when the cached zone id was **0** (the zeroed BSS, i.e. the first
+    // world-enter of the session) it also calls `0x4a6650`, the same player→(continent, zone)
+    // resolver `SetMapToCurrentZone` uses, and hands it to the `SetMap` setter `0x4a67a0`. So a
+    // freshly-logged-in reference client is ALREADY on the player's own zone map before a single
+    // line of FrameXML or addon Lua has asked for it.
+    //
+    // We modelled the election and dropped the side call, so our selection stayed at the world
+    // level until something opened the map. That is not cosmetic: at the world level
+    // `GetPlayerMapPosition` answers a world-SHEET uv (`0x4a7360` step 2) instead of a zone uv,
+    // and every addon built on Astrolabe scales it with the *zone's* yard dimensions — Questie's
+    // quest arrow pointed ~100 yards off the turn-in, on a client where the reference is exact.
+    // Astrolabe's own rescue cannot save it: that is gated on `(x <= 0 and y <= 0)`, and a
+    // world-sheet uv is a perfectly non-zero pair.
+    //
+    // **The gate is the zone id becoming known, not the frame count.** The reference reaches
+    // `0x494780` only with a nonzero resolved zone (`0x67e510` bails on 0), so its sync cannot
+    // fire before the player's area is real; ours must not either, or `resolve_player_zone`
+    // answers the bare continent and nothing re-asks. `top_zone.is_some()` is that same
+    // precondition. Per **VM**, not per process: a new login is a new session's first enter.
+    {
+        let memo = memo.get(&script);
+        if let Some((c, z)) = world_enter_selection(memo.map_synced, top_zone, player_zone) {
+            memo.map_synced = true;
+            script.sync_world_map_to_player_zone(c, z);
+        }
+    }
 
     // The player's UV on the DISPLAYED map. Off-map (wrong continent, outside the rect, or an
     // instance map) resolves to None/(0,0) — the reference's hide-the-blip sentinel.
@@ -543,8 +664,9 @@ fn feed_world_map(
         .on_map(map.0)
         .map(|m| (m.continent_id, m.pos.map(f32::to_bits), m.icon));
     let states_gen = world_states.generation();
-    let unchanged = last_landmarks
+    let unchanged = memo
         .get(&script)
+        .landmarks
         .as_ref()
         .is_some_and(|k| k.matches((c, z), map.0, states_gen, &explored, marker));
     if !unchanged {
@@ -588,7 +710,7 @@ fn feed_world_map(
                 }
             }
         }
-        *last_landmarks.get(&script) = Some(LandmarkKey {
+        memo.get(&script).landmarks = Some(LandmarkKey {
             selection: (c, z),
             map: map.0,
             states: states_gen,
@@ -1049,5 +1171,112 @@ mod tests {
             },
             "and it is genuinely file order, not id order"
         );
+    }
+}
+
+#[cfg(test)]
+mod player_zone_tests {
+    use super::*;
+
+    fn rect() -> ZoneRect {
+        ZoneRect {
+            left: 1.0,
+            right: -1.0,
+            top: 1.0,
+            bottom: -1.0,
+        }
+    }
+
+    /// Azeroth (map 0) with Elwynn at catalog index 9 (→ Lua zone 10), plus Kalimdor (map 1).
+    fn data() -> WorldMapUiData {
+        WorldMapUiData {
+            continents: vec![
+                ContinentEntry {
+                    map_id: 1,
+                    proj: None,
+                    rect: rect(),
+                    zones: Vec::new(),
+                },
+                ContinentEntry {
+                    map_id: 0,
+                    proj: None,
+                    rect: rect(),
+                    zones: (0..10)
+                        .map(|i| ZoneEntry {
+                            // index 9 is Elwynn's areaId 12; the rest are filler ids.
+                            area_id: if i == 9 { 12 } else { 900 + i },
+                            rect: rect(),
+                        })
+                        .collect(),
+                },
+            ],
+        }
+    }
+
+    /// **The two halves fail separately** — `SetMapToCurrentZone`'s resolver `0x4a6650`:
+    /// "no zone match ⇒ `SetMap(continent, −1)`", and only "no continent match" reaches the world
+    /// view (wow-re `system/ui/scratch/geometry.md`). Resolving both-or-neither sent a player
+    /// whose zone the catalog cannot name — and, for the frames before the area feed answers,
+    /// EVERY player — to the world level, where `GetPlayerMapPosition` answers a world-SHEET uv
+    /// that every zone-uv consumer silently mis-scales.
+    #[test]
+    fn an_unresolved_zone_falls_back_to_the_continent_not_the_world() {
+        let d = data();
+
+        // Both halves resolve: Elwynn is continent 2, zone 10.
+        assert_eq!(resolve_player_zone(&d, 0, Some(12)), Some((2, 10)));
+
+        // The continent resolves, the zone does not — an area the catalog has no row for.
+        assert_eq!(
+            resolve_player_zone(&d, 0, Some(4242)),
+            Some((2, 0)),
+            "SetMap(continent, -1); GetCurrentMapZone reads that back as 0"
+        );
+
+        // The area feed has not answered yet — same leg, not the world view.
+        assert_eq!(
+            resolve_player_zone(&d, 0, None),
+            Some((2, 0)),
+            "a zone we do not know YET is still this continent"
+        );
+
+        // No continent match at all (an instance map) — the one leg that is genuinely None, and
+        // whose reference counterpart is the -2 orphan list we do not model.
+        assert_eq!(resolve_player_zone(&d, 389, Some(12)), None);
+    }
+
+    /// **The engine selects the player's zone itself, on the first world-enter** — the side call
+    /// `0x494780` makes to `0x4a6650` when the cached zone id was 0. We transcribed that
+    /// function's event election (`crate::area`) and dropped this half; wow-re carved it as
+    /// `system/ui/scratch/worldmap-selection-autosync.md` (`0x4947ac`, guarded by `sete al` on
+    /// `[0xb4e314] == 0`, with the new zone committed *before* the call).
+    ///
+    /// Dropping it is why Questie's quest arrow pointed ~100 yards off the turn-in while the
+    /// reference was exact: with no zone selected, `GetPlayerMapPosition` answers a world-SHEET
+    /// uv, and Astrolabe scales it with the *zone's* yard dimensions. Astrolabe's own rescue
+    /// cannot catch it — that is gated on `(x <= 0 and y <= 0)`, and a world-sheet uv is a
+    /// perfectly non-zero pair.
+    #[test]
+    fn the_engine_selects_the_players_zone_on_first_world_enter() {
+        // Frame 1, no area yet: the reference cannot be here at all (`0x67e510` bails before
+        // `0x494780` on a zero zone id), so neither are we — syncing now would take the
+        // continent leg and, since the engine never re-syncs, strand us there.
+        assert_eq!(world_enter_selection(false, None, Some((2, 0))), None);
+
+        // The area answers: sync, once, to the player's own zone.
+        assert_eq!(
+            world_enter_selection(false, Some(12), Some((2, 10))),
+            Some((2, 10))
+        );
+
+        // And never again. A later zone change — even cross-continent — leaves the selection
+        // alone: the guard is `old == 0`, and only the world-session teardown `0x491180`
+        // re-zeroes `[0xb4e314]`.
+        assert_eq!(world_enter_selection(true, Some(40), Some((2, 22))), None);
+
+        // An unresolvable player still counts as synced rather than re-arming the gate every
+        // frame: EVERY exit of `0x4a6650` writes the selection, and its two failure legs write
+        // `SetMap(-1, -1)` — which `GetCurrentMapContinent` reads back to Lua as `0`.
+        assert_eq!(world_enter_selection(false, Some(12), None), Some((0, 0)));
     }
 }

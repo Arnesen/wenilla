@@ -20,7 +20,7 @@ fn a_resize_fires_on_size_changed_and_a_move_does_not() {
         fires, w, h = 0, nil, nil
         Panel = CreateFrame("Frame", "SizedPanel")
         Panel:SetPoint("BOTTOMLEFT", 100, 100)
-        Panel:SetSize(200, 50)
+        Panel:SetWidth(200); Panel:SetHeight(50)
         Panel:SetScript("OnSizeChanged", function(self, aw, ah)
             fires = fires + 1 w = aw h = ah
         end)
@@ -70,7 +70,7 @@ fn an_anchor_driven_resize_fires_it_too() {
         fires, w = 0, nil
         Parent = CreateFrame("Frame", "SizeParent")
         Parent:SetPoint("BOTTOMLEFT", 0, 0)
-        Parent:SetSize(300, 200)
+        Parent:SetWidth(300); Parent:SetHeight(200)
         Child = CreateFrame("Frame", "SizeChild", Parent)
         Child:SetPoint("BOTTOMLEFT", Parent, "BOTTOMLEFT", 0, 0)
         Child:SetPoint("TOPRIGHT", Parent, "TOPRIGHT", 0, 0)
@@ -107,7 +107,7 @@ fn a_handler_that_resizes_its_own_frame_settles_instead_of_spinning() {
         fires = 0
         Sq = CreateFrame("Frame", "SquarePanel")
         Sq:SetPoint("BOTTOMLEFT", 0, 0)
-        Sq:SetSize(200, 50)
+        Sq:SetWidth(200); Sq:SetHeight(50)
         -- The idiom: "keep me square". It writes back into the very input that fired it.
         Sq:SetScript("OnSizeChanged", function(self, aw, ah)
             fires = fires + 1
@@ -148,7 +148,7 @@ fn set_script_on_size_changed_is_accepted_because_the_resolve_pass_fires_it() {
         ran = false
         Accepted = CreateFrame("Frame", "SizeAccepted")
         Accepted:SetPoint("BOTTOMLEFT", 0, 0)
-        Accepted:SetSize(10, 10)
+        Accepted:SetWidth(10); Accepted:SetHeight(10)
         Accepted:SetScript("OnSizeChanged", function() ran = true end)
     "#,
     )
@@ -180,7 +180,7 @@ fn the_on_size_changed_watch_list_is_exactly_the_frames_carrying_the_script() {
         fires = 0
         Watched = CreateFrame("Frame", "WatchedPanel")
         Watched:SetPoint("BOTTOMLEFT", 0, 0)
-        Watched:SetSize(10, 10)
+        Watched:SetWidth(10); Watched:SetHeight(10)
         Other = CreateFrame("Frame", "UnwatchedPanel")
         Other:SetScript("OnShow", function() end)      -- another kind never enrols
         local bump = function() fires = fires + 1 end
@@ -199,7 +199,8 @@ fn the_on_size_changed_watch_list_is_exactly_the_frames_carrying_the_script() {
     assert_eq!(watched(&s), 1, "one frame carries the script");
 
     s.resolve();
-    s.run("Watched:SetSize(40, 40)").unwrap();
+    s.run("Watched:SetWidth(40); Watched:SetHeight(40)")
+        .unwrap();
     s.resolve();
     assert_eq!(
         s.eval::<i64>("return fires").unwrap(),

@@ -48,6 +48,7 @@
 
 use mlua::{Lua, Value};
 
+use super::binding_abi::flag;
 use super::{binding_abi, Model};
 
 /// The 1.12 weapon-subclass → `SkillLine.dbc` id table, transcribed from vmangos
@@ -182,6 +183,23 @@ pub struct UnitCombatStats {
     /// Whether a wand is equipped (`HasWandEquipped` — the ref swaps the ranged-attack action for
     /// wand Shoot on it).
     pub has_wand: bool,
+    /// `GetDodgeChance()` / `GetParryChance()` / `GetBlockChance()` — the player's avoidance
+    /// percentages (`PLAYER_DODGE_PERCENTAGE` and its two siblings), already a percent on the
+    /// wire: `2.62` is "2.62%".
+    ///
+    /// **The player's only, and no unit argument.** All three bindings take zero arguments and
+    /// return exactly one number (`reference/1.12-shapes.tsv`: `GetDodgeChance 0x516f00`,
+    /// `GetBlockChance 0x516f60`, `GetParryChance 0x516fc0` — argc 0, arity 1, kind number, all
+    /// `exact`), so there is no pet leg to mirror and no absent answer to model: a field that has
+    /// not streamed reads 0, which is what the wire's own default is.
+    ///
+    /// The shipped 1.12 FrameXML never calls them — the character sheet's own defense block is
+    /// `UnitDefense` — so this trio is addon-facing surface, and the corpus asks for it: four
+    /// vanilla addons read `GetDodgeChance` (FuBar_TankPointsFu, FuBar_DakSmak, Outfitter,
+    /// BetterCharacterStats) and three read each of the other two.
+    pub dodge_percent: f32,
+    pub parry_percent: f32,
+    pub block_percent: f32,
 }
 
 impl Default for UnitCombatStats {
@@ -219,6 +237,9 @@ impl Default for UnitCombatStats {
             ranged_weapon_skill: (0, 0),
             defense_skill: (0, 0),
             has_wand: false,
+            dodge_percent: 0.0,
+            parry_percent: 0.0,
+            block_percent: 0.0,
         }
     }
 }
@@ -933,6 +954,31 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetDodgeChance() / GetParryChance() / GetBlockChance() → one number each, no unit argument
+    // (`reference/1.12-shapes.tsv`, all three `exact` on argc, arity and kind). Player-implicit,
+    // like `HasWandEquipped` below; a field that has not streamed reads 0, which is the wire's own
+    // default rather than an absence to model.
+    for (name, pick) in [
+        ("GetDodgeChance", 0usize),
+        ("GetParryChance", 1),
+        ("GetBlockChance", 2),
+    ] {
+        g.set(
+            name,
+            lua.create_function(move |lua, ()| {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                Ok(model
+                    .player_combat_stats
+                    .as_ref()
+                    .map_or(0.0, |s| match pick {
+                        0 => f64::from(s.dodge_percent),
+                        1 => f64::from(s.parry_percent),
+                        _ => f64::from(s.block_percent),
+                    }))
+            })?,
+        )?;
+    }
+
     // UnitRangedDamage("player") → (speed, minDamage, maxDamage, physicalBonusPos,
     // physicalBonusNeg, percent) — RANGEDATTACKTIME/1000 + the ranged damage range + the same
     // school-0 mods as UnitDamage.
@@ -952,16 +998,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // HasWandEquipped() → boolean (the ref's ranged block swaps "Shoot" in on it). No unit arg —
+    // HasWandEquipped() → 1/nil (the ref's ranged block swaps "Shoot" in on it). No unit arg —
     // the live global is player-implicit.
     g.set(
         "HasWandEquipped",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model
-                .player_combat_stats
-                .as_ref()
-                .is_some_and(|s| s.has_wand))
+            Ok(flag(
+                model
+                    .player_combat_stats
+                    .as_ref()
+                    .is_some_and(|s| s.has_wand),
+            ))
         })?,
     )?;
 
@@ -1246,6 +1294,9 @@ mod tests {
             ranged_weapon_skill: (18, 0),
             defense_skill: (55, 4),
             has_wand: false,
+            dodge_percent: 0.0,
+            parry_percent: 0.0,
+            block_percent: 0.0,
         }
     }
 
@@ -1289,6 +1340,43 @@ mod tests {
         for sub in [9u32, 11, 12, 14, 21, 100] {
             assert_eq!(weapon_subclass_skill(sub), None, "subclass {sub}");
         }
+    }
+
+    /// **The three avoidance verbs are player-implicit and answer ONE number each.**
+    ///
+    /// `reference/1.12-shapes.tsv` has all three at argc 0 / arity 1 / kind number, every column
+    /// `exact` (`GetDodgeChance 0x516f00`, `GetBlockChance 0x516f60`, `GetParryChance 0x516fc0`),
+    /// so an argument is ignored rather than resolved and there is no pet leg. The absent
+    /// snapshot answers 0 — the wire's own default for a field that has not streamed, and the
+    /// only answer a one-number arity can give.
+    ///
+    /// The three values below are exactly representable in `f32`, so the widening to Lua's double
+    /// is lossless and the assertions can be equalities rather than epsilons.
+    #[test]
+    fn the_avoidance_verbs_are_player_implicit_and_answer_one_number() {
+        let mut s = UiScript::new().unwrap();
+        // Before anything streams: a number, not nil — the arity is exact.
+        assert_eq!(s.eval::<f64>("return GetDodgeChance()").unwrap(), 0.0);
+        s.set_player_combat_stats(Some(UnitCombatStats {
+            dodge_percent: 5.25,
+            parry_percent: 3.5,
+            block_percent: 2.75,
+            ..stats()
+        }));
+        assert_eq!(s.eval::<f64>("return GetDodgeChance()").unwrap(), 5.25);
+        assert_eq!(s.eval::<f64>("return GetParryChance()").unwrap(), 3.5);
+        assert_eq!(s.eval::<f64>("return GetBlockChance()").unwrap(), 2.75);
+        // Exactly one return, and a unit token is not a parameter — an addon passing one gets the
+        // player's number, which is what a zero-argc binding does with a stack it never reads.
+        assert_eq!(
+            s.eval::<i64>("local a, b = GetDodgeChance() return b == nil and 1 or 2")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.eval::<f64>(r#"return GetDodgeChance("target")"#).unwrap(),
+            5.25
+        );
     }
 
     #[test]

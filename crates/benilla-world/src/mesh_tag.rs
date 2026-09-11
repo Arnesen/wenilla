@@ -30,10 +30,13 @@
 //!       ([`crate::instance_tint`], 0812) — for every part, skinned or not.
 //!
 //!   That asymmetry is why the field is written from the **unit** and not from the part: a unit's
-//!   boneless geosets, its helm and shoulders, its held items and its billboard cards all carry
-//!   their wearer's slot, so a tinted unit tints *whole* — the reference's own rule (an
-//!   attached/chained model inherits the parent CM2's computed colours, `0x714000`). Before 0820 the
-//!   field was skinning-only, and a dwarf's Stoneform tint stopped at his pauldrons.
+//!   boneless geosets and its billboard cards carry their wearer's slot, so a tinted unit tints
+//!   *whole* — the reference's own rule (an attached/chained model inherits the parent CM2's
+//!   computed colours, `0x714000`). Before 0820 the field was skinning-only, and a dwarf's
+//!   Stoneform tint stopped at his pauldrons. **Worn gear is the exception:** since 1609 every
+//!   ordinary item owns a rider slot (0841's welded items a joint rig), so its per-slot state —
+//!   the tint (`aura_visual`'s chain walk) and the straddle waterline (`crate::straddle`, 2190) —
+//!   reaches it through the item's `ParentModel` chain, never through a shared slot.
 //!
 //!   Written ONCE at part spawn ([`rig_bits`]); every runtime writer below preserves it by
 //!   construction (the `with_*` accessors carry bits the writer doesn't own). 11 bits ⇔

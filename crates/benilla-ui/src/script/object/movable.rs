@@ -405,11 +405,11 @@ fn set_flag(lua: &Lua, this: &Table, which: Flag, value: bool) -> mlua::Result<(
 }
 
 /// `IsMovable`/`IsResizable`/`IsUserPlaced` — the NUMBER 1 or nil, never a boolean (1830,
-/// [`crate::script::binding_abi::predicate`]).
+/// [`crate::script::binding_abi::flag`]).
 fn get_flag(lua: &Lua, this: &Table, which: Flag) -> mlua::Result<Value> {
     let h = frame_handle_of(lua, this)?;
     let model = lua.app_data_ref::<Model>().expect("model");
-    Ok(crate::script::binding_abi::predicate(
+    Ok(crate::script::binding_abi::flag(
         model.arena.frame(h).is_some_and(|f| match which {
             Flag::Movable => f.movable,
             Flag::Resizable => f.resizable,

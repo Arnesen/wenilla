@@ -469,6 +469,21 @@ impl super::UiScript {
         self.model_ref().worldmap.selection
     }
 
+    /// Move the selection **from the engine**, with no Lua in the loop — the reference's
+    /// `SetMap` setter `0x4a67a0` reached from the zone updater `0x494780` rather than from a
+    /// binding, which is how a freshly-logged-in client already shows the player's own zone.
+    ///
+    /// The reference has TWO writers of `[0x84506c]`/`[0x845070]`: the Lua verbs
+    /// (`SetMapZoom`/`SetMapToCurrentZone`/`ProcessMapClick`), and this one. We only ever had the
+    /// first, so until some addon opened the map we sat at the world level — and at the world
+    /// level `GetPlayerMapPosition` answers a world-SHEET uv (`0x4a7360` step 2), which every
+    /// addon that assumes a zone uv silently mis-scales. See [`crate::script::worldmap`]'s caller
+    /// in `ui_world_map::feed_world_map` for the gate.
+    pub fn sync_world_map_to_player_zone(&mut self, continent: u32, zone: u32) {
+        let mut model = self.model_mut();
+        select(&mut model, i64::from(continent), i64::from(zone));
+    }
+
     /// The **normalized position within the map art** at UI-space `(x, y)`, or `None` when the
     /// point isn't over it. Reproduces the reference's own click normalization verbatim —
     /// `WorldMapFrame.xml`'s `WorldMapButton_OnClick`: `u = (x − left)/width`,

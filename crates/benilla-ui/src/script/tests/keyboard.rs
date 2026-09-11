@@ -184,3 +184,90 @@ fn a_raising_handler_still_consumes_and_is_recorded() {
         s.errors()
     );
 }
+
+/// **A `CSimpleEditBox` in the walk is asked about FOCUS, never about a script slot** (§1's vtable
+/// table + `0x77a900`). Its ctor registers it in both key buckets, and vtable `0x81c910` replaces
+/// `+0x5c`/`+0x60` with overrides that *never chain to the base* — "there is no `call 0x76b760`
+/// anywhere in it, so the generic `OnChar` slot `+0x180` is unreachable on an editbox". An
+/// unfocused box therefore takes the `0x77a956 xor eax,eax` leg: decline, walk continues.
+///
+/// Modelling the box as a plain frame here is not a subtle divergence. Stock
+/// `SendMailNameEditBox` carries an XML `<OnChar>` (`SendMailFrame_SendeeAutocomplete`), which
+/// auto-enables it, and it registers first in the mail window — so it consumed every keystroke and
+/// the send tab's other four boxes took no input at all (decision 2145).
+#[test]
+fn an_unfocused_editbox_declines_rather_than_eating_its_neighbours_keys() {
+    let mut s = script();
+    s.run(
+        r#"
+        decoyChars = 0
+        decoy = CreateFrame("EditBox", "KbDecoyBox")
+        decoy:SetAutoFocus(false)
+        decoy:EnableKeyboard(true)
+        decoy:SetScript("OnChar", function() decoyChars = decoyChars + 1 end)
+        target = CreateFrame("EditBox", "KbTargetBox")
+        target:SetAutoFocus(false)
+        target:SetFocus()
+    "#,
+    )
+    .unwrap();
+    assert!(s.char_input("k"), "the focused box consumes");
+    assert_eq!(
+        s.eval::<String>("return KbTargetBox:GetText()").unwrap(),
+        "k",
+        "the keystroke reaches the box that holds the focus"
+    );
+    assert_eq!(
+        s.eval::<i64>("return decoyChars").unwrap(),
+        0,
+        "the unfocused box's own OnChar is unreachable from the walk — it declines"
+    );
+
+    // Give the decoy the focus and its handler is reachable again — through the INSERT, which is
+    // where an editbox's `OnChar` is fired from (`0x77c200`), not through the walk's base gate.
+    s.run("KbDecoyBox:SetFocus()").unwrap();
+    assert!(s.char_input("j"), "…and now it is the one that consumes");
+    assert_eq!(s.eval::<i64>("return decoyChars").unwrap(), 1);
+    assert_eq!(
+        s.eval::<String>("return KbDecoyBox:GetText()").unwrap(),
+        "j"
+    );
+    assert_eq!(
+        s.eval::<String>("return KbTargetBox:GetText()").unwrap(),
+        "k",
+        "and the box that lost focus keeps what it had"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The same clause on the key-down channel (`+0x60` → `0x77b160`, focus guard at `0x77b1c7`), which
+/// is the [`super::super::keyboard::frame_key_input`] walk: an unfocused box carrying only an
+/// `OnKeyUp` must not swallow a BACKSPACE the focused box is waiting for. The plain-frame
+/// asymmetry above is real *for plain frames*; on a box the base gate is not reached at all.
+#[test]
+fn an_unfocused_editbox_does_not_swallow_a_focused_boxs_editing_key() {
+    let mut s = script();
+    s.run(
+        r#"
+        decoy = CreateFrame("EditBox", "KbDecoyBox2")
+        decoy:SetAutoFocus(false)
+        decoy:EnableKeyboard(true)
+        decoy:SetScript("OnKeyUp", function() end)
+        target = CreateFrame("EditBox", "KbTargetBox2")
+        target:SetAutoFocus(false)
+        target:SetText("ab")
+        target:SetFocus()
+    "#,
+    )
+    .unwrap();
+    s.editbox_action(crate::script::EditAction::Delete {
+        unit: crate::script::EditUnit::Char,
+        back: true,
+    });
+    assert_eq!(
+        s.eval::<String>("return KbTargetBox2:GetText()").unwrap(),
+        "a",
+        "the backspace reached the focused box"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

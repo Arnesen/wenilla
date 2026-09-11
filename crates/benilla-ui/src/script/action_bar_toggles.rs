@@ -247,9 +247,7 @@ mod tests {
                  return a == nil and b == nil and c == nil and d == nil"
             )
             .unwrap());
-        assert!(s
-            .eval::<bool>("return select('#', GetActionBarToggles()) == 4")
-            .unwrap());
+        assert_eq!(s.arity("GetActionBarToggles()").unwrap(), 4);
 
         s.set_action_bar_toggles(0x0a);
         assert!(s
@@ -311,9 +309,7 @@ mod tests {
         s.run("SetActionBarToggles(1) SetActionBarToggles(1) SetActionBarToggles(nil)")
             .unwrap();
         assert_eq!(s.take_action_bar_toggle_sends(), vec![0x01, 0x01, 0x00]);
-        assert!(s
-            .eval::<bool>("return select('#', SetActionBarToggles(1)) == 0")
-            .unwrap());
+        assert_eq!(s.arity("SetActionBarToggles(1)").unwrap(), 0);
         assert_eq!(s.take_action_bar_toggle_sends(), vec![0x01]);
     }
 }

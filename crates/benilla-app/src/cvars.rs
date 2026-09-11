@@ -45,11 +45,13 @@ use crate::chat_bubble::BubbleConfig;
 use crate::minimap::MinimapZoom;
 use crate::nameplates::NameConfig;
 use crate::player::camera::{
-    FollowConfig, FollowStyle, LookConfig, ZoomLimit, FOLLOW_SPEED_RANGE, MOUSE_SPEED_RANGE,
+    FollowConfig, FollowStyle, LookConfig, ZoomLimit, CAMERA_SPEED_RANGE, FOLLOW_SPEED_RANGE,
+    MOUSE_SPEED_RANGE,
 };
 use crate::portrait::PaneRate;
 use crate::sound::SoundConfig;
 use crate::target::ClickConfig;
+use crate::ui_chat::combat::UnitClass as CombatClass;
 use crate::ui_loot::LootConfig;
 use crate::ui_script::UiScaleCvar;
 use crate::video::VideoConfig;
@@ -306,10 +308,48 @@ pub(crate) const REGISTERED: &[Registered] = &[
          (`0x48fce4`), and the OFF leg `0x492f70` computes clamp(768/height, 0.9, 1.0) instead — \
          0.9 at 854 px tall and up, which is every window we ship against. It is 1.0 at 768 and \
          below, where our flat 0.9 does diverge; `ui_script::DEFAULT_UI_SCALE` carries that. \
-         `useUiScale` itself has no row here: nothing reads it, and registering it would only \
-         offer a switch whose ON path we do not implement",
+         See `useUiScale` below, whose row this one used to say did not exist",
     ),
+    // **`useUiScale` (`0x8430c0`, default `"0"`)** — the switch the row above gates on.
+    //
+    // Its absence used to be argued for here as *"nothing reads it, and registering it would only
+    // offer a switch whose ON path we do not implement"*, and the first half of that has been
+    // false since the interface went stock: `ContainerFrame.lua:483` and `UIDropDownMenu.lua:525`
+    // both branch on `GetCVar("useUiScale") == "1"`, and `OptionsFrame.lua:13` gives it a
+    // checkbox. Nobody noticed because the only thing that said so was a host warning with
+    // nowhere to go (decision 2135, which is how this was found).
+    //
+    // Registering it changes no behaviour today — `nil ~= "1"` and `"0" ~= "1"` take the same
+    // branch — and makes the read the reference's read rather than an accident. The ON path
+    // lands where the reference's does, because our `uiScale` default *is* the reference's OFF-leg
+    // result: at `useUiScale = 1` both clients scale the bag frames and the dropdown list by
+    // `GetCVar("uiscale")`, and both read 0.9 there on every window we ship against.
+    same("useUiScale", "0"),
     same("farclip", "350"),
+    // **`nearclip` — farclip's other half, and a knob we had been holding as a constant** (2163).
+    // `0x68867a` passes name `0x84ffb0` `"nearclip"`, default string `0x84fb48` `"0.1"`, help
+    // "Near clip plane distance", flags `1`, callback `0x688d90`, record `[0xc7f348]` (wow-re
+    // `re/cvar/cvar-register-sites.tsv` row 187).
+    //
+    // **The reader is the camera, and it re-reads every frame.** `0x511bc0` — the per-frame camera
+    // outer, sole caller `0x483094` — stamps `[cam+0x38]` from this record's float before the
+    // `[cam+0x48]` branch and unconditionally: `511bcf mov eax,[0xbe1078]; 511bd4 fld [eax+0x24];
+    // 511bdc fstp [esi+0x38]`, with `[0xbe1078]` the handle `0x50b728` caches from a `"nearclip"`
+    // Lookup. `farclip` is the next four instructions. `benilla_world::view::stamp_near_clip` is
+    // that, and `ViewDistance` is the pair.
+    //
+    // **Why it was not registered for so long, and why that reasoning was wrong.** The near plane
+    // was a `CAM_NEAR = 1.0/9.0` const documented as the reference's own, on the true finding that
+    // the callback's *derived global* `[0xc7b480]` has one writer and no readers (wow-re
+    // `cvar/scratch/graphics-cost-cvar-census.md` §8 lists `nearclip` among the eleven dead knobs
+    // for exactly that). The camera does not read that global; it reads the record. So the ctor's
+    // `0x3de38e39` = 1/9 is overwritten by the first frame's stamp and never reaches a picture —
+    // a verified-but-partial mechanism, which the contract §4 names as the classic trap.
+    //
+    // pfUI's `hdgraphic` writes it (`ConsoleExec("nearClip " .. arg*2/100)`, 0.06..0.30 across its
+    // extended stops) — every value inside the reference's own `[0.01, 0.33]`, which is why that
+    // module could ask for it.
+    same("nearclip", "0.1"),
     // The Controls-page trio (0961). `deselectOnClick`/`mouseInvertPitch` are 1.12's own
     // Interface Options CVars (UIOptionsFrame.lua indices 45/1); their defaults are the
     // reference behaviors benilla already shipped (empty-world click clears the target; no
@@ -434,6 +474,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("UnitNamePlayer", "1"),
     same("UnitNameNPC", "0"),
     same("UnitNameOwn", "0"),
+    // The fourth of the same registrar's five (2149): `UnitNamePlayerGuild` `0x86c680` -> `"1"`
+    // `0x82e748`, mask bit `0x10`. It is NOT a show gate like the three above — `ShouldShowName
+    // 0x6070a0` consults only bits `0x1/0x2/0x4` — it gates ONE LINE of the player stack, the a5
+    // `"\n<%s>"` guild decoration at `0x609085` (wow-re `object-layer/scratch/overhead-name.md`
+    // Q4 point 3 + the registrar table). Its fifth sibling `UnitNamePlayerPVPTitle` (bit `0x20`,
+    // also `"1"`) has no row: a4's rank prefix needs a faction side `ui_unit` cannot resolve for
+    // an arbitrary player, so there is no reader and 1134 §4 says no key.
+    same("UnitNamePlayerGuild", "1"),
     // The two V-plate toggles over `VPlateMode` — the engine bitmask `[0xc4da34]`'s bit 0 and
     // bit 3. 1.12 registers NO nameplate CVar (wow-re, VERIFIED — the bitmask is a plain runtime
     // global, persisted FrameXML-side as the `RegisterForSave`'d `NAMEPLATES_ON` /
@@ -444,9 +492,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // **`same`, not `ours`, and that distinction is the point**: the reference has no CVar to
     // match, but it very much has a *setting* to match, and it boots both halves OFF —
     // `UIOptionsFrame_Init` assigns `NAMEPLATES_ON = nil` / `FRIENDNAMEPLATES_ON = nil` and
-    // `OptionsFrame_ApplySavedSettings` only calls `ShowNameplates()` on a truthy SAVED value
-    // (the install's `Interface\FrameXML\UIOptionsFrame.lua` l.180-183 / l.769-775). A fresh
-    // 1.12 client draws no plates until V is pressed. Enemy plates shipped ON here from 0167
+    // `UpdateNameplates` only calls `ShowNameplates()` on a truthy value (the install's
+    // `Interface\FrameXML\UIOptionsFrame.lua` l.180-183 / l.769-775 — both of them the stock
+    // file's own, off the chain since 2115; our copies of each are gone). A fresh 1.12 client
+    // draws no plates until V is pressed. Enemy plates shipped ON here from 0167
     // until 1804 — `VPlateMode::default()` carries that history.
     same(crate::vplates::CVAR_ENEMIES, "0"),
     same(crate::vplates::CVAR_FRIENDS, "0"),
@@ -474,8 +523,138 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // default: our stop 1 scatters ×2 (32) where the reference's boot `frillDensity` is 16
     // registered, 24 after `hwDetect` reads `VideoHardware.dbc` (row 170 on any D3D9-class part,
     // 8 on the weakest). 24 is on no stop of ours; 1649 broke that tie toward the denser stop,
-    // because erring sparse is the worse failure for a knob about ground cover.
+    // because erring sparse is the worse failure for a knob about ground cover. **That divergence
+    // is a row of its own now** — 2151 registered the CVar it lives in, immediately below, so it
+    // is on the deviation inventory instead of only in this paragraph.
     same("WorldDetail", "1"),
+    // The SAME knob in the reference's own unit (2151), and the CVar 1.12 actually registers for
+    // it: `0x68862e` passes name `0x8423d8` `"frillDensity"`, default string `0x864644` `"16"`,
+    // help "Terrain frill density", flags `1`, callback `0x688de0`, record `[0xc7f2f4]` (wow-re
+    // `re/cvar/cvar-register-sites.tsv` row 185). The value is **cells visited per chunk**: the
+    // callback clamps `[1, 256]` and hands the number to `0x6725a0` → `[0xc7b494]`, which bounds
+    // the detail-doodad scatter loop at `0x6bfcfb`/`0x6bff1c`. Our scatter is the byte-exact port
+    // of that loop, so `frillDensity` is not a new dial — it is the unit
+    // `benilla_formats::scatter_ground_doodads` has always counted in, and
+    // `ClutterConfig::frill_density` is the conversion.
+    //
+    // **Two names for one knob is the reference's own shape, not ours.** `SetWorldDetail 0x488dd0`
+    // writes this CVar per stop (16/32/48) alongside `SmallCull` — the row above is that stop,
+    // this row is what the stop wrote. Writing either moves the same ground cover here, and each
+    // keeps the clamp its own writer has: the stop's `[0, 2]`, the cells' `[1, 256]`. So a console
+    // `frillDensity 200` is honoured, exactly as it is there, and the panel row then reads
+    // off-grid — which is already this pair's stated posture for an off-grid multiplier.
+    //
+    // **It has a live Lua consumer, which is why it is registered now** (the module doc's rule):
+    // pfUI's `hdgraphic` replaces `GetWorldDetail` with `tonumber(GetCVar("frillDensity")) > 48`,
+    // and unregistered that is `nil > 48` — an error, not a fallback. Its extended arm drives the
+    // knob the other way, `ConsoleExec("frillDensity " .. (arg+1)*16)` up to 256, which is the
+    // whole reason the reference's range is wider than its slider.
+    //
+    // **The deviation is 1649's grass, finally visible as a row.** 1804 recorded it in prose and
+    // could not table it, because the CVar it is a deviation *in* was not registered: our stop 1
+    // scatters 32 where the reference's boot value is 16 registered, and 24 after `hwDetect`
+    // (`0x639a60` CVar::Sets sixteen video CVars from the matched `VideoHardware.dbc` row; field
+    // `+0x18` holds 8/12/16/24 across the table, 24 on the videoID 170 that the reference
+    // install's own `Logs/gx.log` resolves to). 24 is on no stop of ours.
+    deviates(
+        "frillDensity",
+        "32",
+        "16",
+        "1649/1804: the reference's registered 16 is stop 0 and its post-`hwDetect` 24 is on no \
+         stop at all, so every stop diverges; Medium (32) is the nearest one no sparser than a \
+         fresh install, and erring sparse is the worse failure for ground cover",
+    ),
+    // ── The combat log's display ranges: the reference's own `0x8629e0` table, in yards ─────────
+    //
+    // Eight rows, registered by the reference in ONE place — `0x626d00`, a loop over the
+    // `{cvarName, defaultValue}` pairs at `0x8629e0` skipping the NULL/empty names, then one
+    // unrolled call for the death range (wow-re `object-layer/scratch/combat-log-chat-law.md`
+    // §5.2). They read as the CVar record's **float** (`+0x24`), unlike the periodic gate below,
+    // which reads the int.
+    //
+    // **They are why a damage meter's range slider does something.** `BigWigs/Plugins/Range.lua`
+    // and `DPSMate/DPSMate_DataBuilder.lua` both read and write all eight; unregistered, every
+    // `SetCVar` here wrote nothing and every `GetCVar` answered nil. The reader was already built
+    // — `ui_chat::combat::in_range` has run this exact table since 1571, off the compiled-in
+    // defaults, with `UnitClass::range_cvar` parked under `#[cfg(test)]` waiting for this row.
+    //
+    // Classes 0 and 1 — you and your pet — have NO CVar in the reference's table (a NULL name and
+    // the `100000.0` sentinel), so there is nothing to register for them and nothing to miss.
+    same("CombatLogRangeParty", "50"),
+    same("CombatLogRangePartyPet", "50"),
+    same("CombatLogRangeFriendlyPlayers", "50"),
+    same("CombatLogRangeFriendlyPlayersPets", "50"),
+    same("CombatLogRangeHostilePlayers", "50"),
+    same("CombatLogRangeHostilePlayersPets", "50"),
+    same("CombatLogRangeCreature", "30"),
+    // The one range CVar OUTSIDE that table (`0x626d5f`, default string `"60"` at `0x862e14`) —
+    // and the only formatter with a range of its own. `0x62c160` reads it first and falls back to
+    // the per-class getter only when the *lookup* fails, which a registered client never sees.
+    same(crate::ui_chat::combat::DEATH_LOG_RANGE_CVAR, "60"),
+    // ── The floating-combat-text gates, and the periodic one ────────────────────────────────────
+    //
+    // `CombatDamage` (`0x6032df`, record `[0xc4d944]`) is the MASTER: its only two readers are the
+    // localized-WORD emitter `0x607140` and the `"%d"` NUMBER emitter `0x6128b0`, and both branch
+    // targets are epilogues — so at "0" nothing floats over any unit from any source, words
+    // included, despite the CVar's own help text saying "damage numbers". The two `Pet*` rows are
+    // sub-gates below it, on the owned-by-you branch only; the self sub-case is unconditional.
+    //
+    // `PetSpellDamage` has no row in `UIOptionsFrameCheckButtons` — the *Show Pet Melee Damage*
+    // box writes both (`UIOptionsFrame_Save` l.334-336) — which is why 2077's census, which reads
+    // that table, could not see it while it saw its two siblings. Our own Pet Damage row carries
+    // the same partner write (2180); all three are on the Combat page, under `CombatDamage`.
+    same("CombatDamage", "1"),
+    same("PetMeleeDamage", "1"),
+    same("PetSpellDamage", "1"),
+    // `CombatLogPeriodicSpells` (`0x6033b3`, handle deliberately DISCARDED — every use re-looks it
+    // up by name). Read as the record's INT, unlike the ranges above, which read its float.
+    same(crate::ui_chat::combat::LOG_PERIODIC_CVAR, "1"),
+    // ── The three Sound-panel check buttons benilla had the machinery for and no key to ─────────
+    //
+    // All three are category-7 (sound) registrations that keep **no** `CVar::Register` handle: the
+    // reference looks each up by name at the point of use. Each already had its reader here.
+    //
+    // `SoundListenerAtCharacter` (`0x457890`, "lock listener at character"): both of its branches
+    // were already written in `update_audio_listener` — the at-character seat and the at-camera
+    // one — with the camera path reachable only as a no-character fallback. This is the selector
+    // they were missing.
+    same("SoundListenerAtCharacter", "1"),
+    // `EmoteSounds` (`0x4573b9`): the received text-emote voice kit, and only that.
+    same("EmoteSounds", "1"),
+    // `SoundZoneMusicNoDelay` (`0x4578b3`): `next_track_time`'s own comment named it as "the
+    // immediate path, a \"0\" CVar we don't expose". Now exposed, at the reference's `"0"`.
+    same("SoundZoneMusicNoDelay", "0"),
+    // `assistAttack` (`0x48fc50`, record `[0xb4d8f8]`) — `/assist`'s opt-in second leg: select the
+    // basis unit's target AND open the swing on it. Three references image-wide, two of them the
+    // shared assist tails; `CanAssist 0x6066f0` is verified NOT on the path. The `"0"` default is
+    // the one wow-re had to correct against itself — its first pass read `"3"` off the *next*
+    // registration's default (`minimapZoom`), the `mov ds:` adjacency trap — so it is worth saying
+    // plainly here: stock `/assist` selects and does not swing.
+    same("assistAttack", "0"),
+    // ── Mouse-look, per axis: the two CVars whose absence RAISED in the stock window ────────────
+    //
+    // `cameraYawMoveSpeed` is `UIOptionsFrameSliders` row 3, MOUSE_LOOK_SPEED (90…270 step 10) —
+    // and it is what made stock `UIOptionsFrame_Load()` die: `slider:SetValue(GetCVar(value.cvar))`
+    // is a shape-A binding (`0x790980`) that raises on a nil in the reference too, so the whole
+    // window's `_Load` (and `_SetDefaults`, through `GetCVarDefault`) stopped at slider 3.
+    // `cameraPitchMoveSpeed` has no row of its own: `UIOptionsFrame_Save` writes it as
+    // `sliderValue / 2` beside the yaw one (l.352-356), which is exactly this 180/90 pair — and
+    // the Controls page's Mouse Look Speed row carries that partner write (2180), so dragging it
+    // keeps the two axes in the ratio the registrar ships them at.
+    //
+    // **Both defaults are the reference's, and the shipped feel does not change** — the two facts
+    // are compatible only because the unit divergence is carried in `camera::LOOK_YAW_PER_SPEED`
+    // instead of in these numbers. The reference integrates OS-accelerated `WM_MOUSEMOVE` pixels
+    // (it imports no DirectInput at all) while we integrate winit's raw device delta, so its
+    // `deg per pixel` is not our `deg per unit` and the factor between them is a per-machine
+    // pointer setting. Anchoring the scale there and keeping the defaults here is what lets 1804
+    // hold honestly rather than by picking a number that merely looks right.
+    //
+    // The validator is `0x50c000` → `0x50b330`, range [0.1, 360], and it **rejects rather than
+    // clamps** — `apply_to_knobs` does the same below, which is why these two do not use the
+    // clamping shape every other numeric row uses.
+    same("cameraYawMoveSpeed", "180"),
+    same("cameraPitchMoveSpeed", "90"),
     // Mouse Sensitivity (1140): 1.12's own MOUSE_SENSITIVITY slider (`UIOptionsFrameSliders` row
     // 1, 0.5..1.5 step 0.05), a MULTIPLIER over the camera's own per-pixel rate — which was a
     // frozen constant until this row. Default "1" is the shipped feel exactly, welded to
@@ -519,8 +698,68 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // The auto-follow's rate (1502), °/s — 1.12's own AUTO_FOLLOW_SPEED slider
     // (`UIOptionsFrameSliders`, 90..270 by 10), registered at the binary's "180.0" (`[0xbe1070]`).
     // It sets the transition's DURATION (`|dyaw| / rate * factor`), so it is an average rate, not a
-    // slew. No row yet — the slider is a one-line follow-on now that the knob exists.
+    // slew. Its slider is the Controls page's Auto-Follow Speed row (2180), greyed while the
+    // following style is Never — and it writes only this one, where the reference also writes
+    // `cameraPitchSmoothSpeed` at a quarter of it: that name is deliberately unregistered here,
+    // because `FollowRig` has a single rate and a key with no reader is 1134 §4's pretence.
     same("cameraYawSmoothSpeed", "180"),
+    // **The four 1.12 camera-option toggles** (decision 2149) — the `UIOptionsFrame` checkboxes
+    // FOLLOW_TERRAIN / HEAD_BOB / SMART_PIVOT / WATER_COLLISION, all four of which sat on the
+    // unbacked-CVar census with a byte-level spec and no feature until now. Defaults are the
+    // registrar's own (`re/cvar/cvar-register-sites.tsv`), and two of them are **"1"** — which is
+    // why building them was not cosmetic: benilla was the divergence on those, not the reference.
+    //
+    // `cameraPivot` `[0xbe10a4]` "1" (`0x50bda3`) — smart pivot. Mechanism: wow-re
+    // `ui/scratch/camera-cvar-gates.md` §3 (gate `0x510690`, routing `0x50fee0`, release
+    // `0x5107f0`); ours is `player::camera_dynamics::SmartPivot`.
+    same("cameraPivot", "1"),
+    // Its two drag-shape thresholds, both read by that routing (`0x50fff5`/`0x510004`) and both
+    // in RADIANS of camera rotation — the deltas they are compared against are already scaled by
+    // `camera<Yaw|Pitch>MoveSpeed · π/180`, so unlike the sensitivity itself these two transfer
+    // to benilla's raw-device units exactly (see `camera::LOOK_YAW_PER_SPEED`'s note).
+    same("cameraPivotDXMax", "0.05"),
+    same("cameraPivotDYMin", "0"),
+    // The rate the pitch bias eases back on once the pivot lets go, deg/s (`[0xbe0fc8]`,
+    // `0x512a50`'s `duration = |Δ| / (rate · π/180)`). No panel row here or there — the reader is
+    // the host, exactly like `cameraSmoothTrackingStyle` above it.
+    same("cameraTargetSmoothSpeed", "90"),
+    // **`cameraWaterCollision`** `[0xbe1088]` "1" (`0x50bd63`, default string `0x82e748`) — one of
+    // the two that ship ON, and this row is its THIRD life. It is **one CVar with two consumers**,
+    // and this tree has now shipped each of them alone and broken the camera both times: 2149 the
+    // pivot corridor without the trace (a 19/18 yd step reached continuously), 2170 the trace
+    // without the corridor (the boom straddling a plane the pivot sits 11 mm under — 2173 §1).
+    // Both halves are here now, and the row exists to say they may never again be separated.
+    //
+    // `0x50e5ec` produces one register. Its `0xf0000` nibble rides the trace mask to all three of
+    // `0x50e570`'s queries, reaching `0x69cc13` through four direct calls; and `0x50e629` tests
+    // the SAME register to admit the floor/cap block that lifts the sweep origin to
+    // `surface + 2/9`. Readers: the camera boom's collision filter
+    // (`benilla_world::collision::camera_filter`) and `player::camera_water`.
+    same("cameraWaterCollision", "1"),
+    // `cameraTerrainTilt` `[0xbe0fd4]` **"0"** (`0x50bcfd`) — Follow Terrain, and the one of the
+    // four that ships OFF, so building it changed nothing until a player ticks the box. Mechanism:
+    // wow-re `camera-cvar-kernels.md` §2 (the ahead-probe and the five-step staircase) and
+    // `camera-smooth-style.md` §9 (the arm); ours is `player::camera_dynamics::TerrainTilt`.
+    same("cameraTerrainTilt", "0"),
+    // The ground channel's rate, deg/s (`[0xbe0fc0]`) and the duration bound its `Factor` scales
+    // (`[0xbe1050]`/`[0xbe1054]`, seconds). The floor always binds — `20° / 7.5°/s` is 2.67 s
+    // against a 3 s minimum — which is why a followed terrain leans rather than tracks.
+    same("cameraGroundSmoothSpeed", "7.5"),
+    same("cameraTerrainTiltTimeMin", "3"),
+    same("cameraTerrainTiltTimeMax", "10"),
+    // `cameraBobbing` `[0xbe10c0]` **"0"** (`0x50b76d`) — head bob, the fourth of the four and the
+    // second that ships OFF. Mechanism: wow-re `camera-cvar-kernels.md` §4 and
+    // `camera-cvar-gates.md` §2; ours is `player::camera_dynamics::HeadBob`.
+    same("cameraBobbing", "0"),
+    // Its four numeric siblings. The two amplitudes are in the CVar's own units — the kernel
+    // scales both by 1/36 (`[0x7ff9d0]`) to reach yards. `cameraBobbingSmoothSpeed` is the odd one
+    // and its name is the trap: it is **not** a bob rate, it is the DECAY rate, and its single
+    // image-wide read is in the disarm `0x51113a`, where `|largest component| / speed` becomes the
+    // ramp's duration (~0.069 s at these defaults).
+    same("cameraBobbingLRAmplitude", "2"),
+    same("cameraBobbingUDAmplitude", "2"),
+    same("cameraBobbingFrequency", "0.8"),
+    same("cameraBobbingSmoothSpeed", "0.8"),
     // Status Text (1140): 1.12's `statusBarText`, the "always show value / max on a status bar"
     // switch. **No host knob** — its consumer is Lua (TextStatusBar.xml, decision 1082, which was
     // written waiting for this key and reads it on every repaint). Default "0": the reference's
@@ -608,6 +847,39 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // skip-default rule). No host knob: its consumers are the load walk (via the persisted value,
     // [`CvarPersist::addon_version_check`]) and the gate's live per-query read in the VM.
     same("checkAddonVersion", "1"),
+    // **Which graphics API this run is actually on** (2151) — 1.12's own `gxApi`, byte-read at
+    // `0x63a833`: name `0x842a64`, default string `0x864f7c` `"direct3d"`, help "graphics api",
+    // flags `3` (registered | latched), callback `0x63b030`, record `[0xc4ea94]`. There it is a
+    // real selector — `0x63a3c4` compares the live value case-insensitively against `"OpenGl"`
+    // (`0x842a5c`) and `GxDevCreate` builds `CGxDeviceD3d` on anything else — but no shipped
+    // `WTF` overrides it, so the stock client is always D3D9 and the whole GL arm is dead code
+    // image-wide (wow-re states this from a dozen nodes; `models/scratch/part-additive-combine.md`
+    // §"the gxApi selector" is the decoded compare).
+    //
+    // **Here it DESCRIBES, it does not steer** — the `gxColorBits`/`gxDepthBits` posture. benilla
+    // renders through wgpu, which has no D3D9 backend to name and no chooser to offer: the backend
+    // is the adapter's, picked before the first frame, and this row is the honest report of it
+    // (`wgpu::Backend::to_str` — `metal`, `vulkan`, `dx12`, `gl`). Answering `"direct3d"` on a Mac
+    // would be a name with no behaviour behind it, which is the one thing 1203 forbids outright.
+    //
+    // **Default EMPTY, and pushed live** — the `realmName` posture (1140), for the same reason:
+    // the value is a fact about the machine, written from `RenderAdapterInfo` the moment the VM's
+    // table is seeded, so the default only ever describes a client with no render adapter (a
+    // headless test). Inventing a backend for that case would be worse than admitting we have
+    // none. And because it is the machine's fact rather than the player's choice, it is
+    // **session-owned**: `SetCVar` consumes it and `config.toml` never carries it, so a GPU swap
+    // or a `WGPU_BACKEND` run cannot leave a stale renderer name pinned in the file.
+    //
+    // Its live Lua consumer is pfUI's system panel — `panel.lua:185` does
+    // `"|cffffffff" .. GetCVar("gxApi")` in a tooltip, which on a nil is a concat error rather
+    // than a blank row.
+    deviates(
+        "gxApi",
+        "",
+        "direct3d",
+        "2151: descriptive, not a selector — benilla renders through wgpu, which has no D3D9 \
+         backend and no chooser; the value is the live adapter's own and is never persisted",
+    ),
     // Vertical Sync — 1.12's own `gxVSync`, the Video Options checkbox at index 5
     // (`OptionsFrame.lua`'s `OptionsFrameCheckButtons["VERTICAL_SYNC"]`, in the install's
     // FrameXML). The knob is [`crate::video::VideoConfig::vsync`], which the window's
@@ -764,6 +1036,53 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // **not** one of `hwDetect`'s sixteen (scan of `[0x639a60, 0x639b80)`: sixteen record-pointer
     // reads, `0xc7f2e4` absent), so nothing overwrites it on any path.
     same("anisotropic", "1"),
+    // **Weather Intensity** — the video panel's slider 9 (`OptionsFrame.lua:29`,
+    // `func = "weatherDensity"`, a real CVar name rather than an engine binding), and the nearest
+    // of 2177 §10's named-not-done: benilla has had the feature since 0310 and only the switch was
+    // missing. The reader is `benilla_world::weather::WeatherState::weather_density`, which scales
+    // the rain/snow/mist spawn rate through the reference's own `0x67b870` quality table
+    // {0.1, 0.33, 0.66, 1.0}. Rendering only — it never touches the wire grade, the two ramp
+    // channels, or the storm/fog blend, so no server-visible behaviour rides it.
+    //
+    // The reference registers **`"2"`** at `0x67b806` (flags 0, callback `0x67b870`, name string
+    // `0x8685ac`) — wow-re `cvar/scratch/graphics-cost-cvar-census.md` §4, whose §10 table also
+    // lists this row among the twelve the reference install's `Config.wtf` moves off its default.
+    deviates(
+        "weatherDensity",
+        "3",
+        "2",
+        "2181: every precipitation rate in `benilla-world`'s own precipitation module was \
+         derived and graded against the reference install's own apitrace captures, and that \
+         install runs \
+         `SET weatherDensity \"3\"` (K = 1.0) — so 3 is the value a benilla-vs-reference \
+         side-by-side is correct at, and the registered 2 would thin every rate to 0.66 against \
+         the only client we compare with. The slider is how a player takes it back down",
+    ),
+    // **Brightness** (decision 2182) — the reference's `gamma`, registered at `0x402d70` with
+    // name `0x82e924` `"Gamma"`, default string `0x82e92c` **`"1.0"`** and flags **0** (not
+    // latched, so its change callback `0x4034d0` applies on the write).
+    //
+    // There the callback builds `ramp[i] = __ftol(pow(i · 1/255, gamma) · 65535)` (`0x591680`) and
+    // hands the 3×256 words to `GDI32!SetDeviceGammaRamp` — and **skips the upload windowed**
+    // (`byte[dev+0x20b]` = `CGxFormat +0x07` = `gxWindow`), which is every mode benilla has. So the
+    // reader here is not a ramp upload: it is [`crate::ui_gamma::DisplayGamma`], the same curve
+    // applied to the same values one stage later, inside the pass that already owns the composited
+    // image's single decode. wow-re `ffxeffects/scratch/whole-frame-grade-verdict.md` §(a) for the
+    // curve and `ui/scratch/video-options-verbs.md` §3 for the verbs.
+    //
+    // 1.0 is the identity ramp — load-bearing rather than tidy: at the default this client's
+    // output is what it was before the setting existed, so no visual golden moves.
+    //
+    // **Written `"1.000000"` rather than `"1.0"` or `"1"`, and that is not cosmetic.** Every value
+    // this key ever receives comes through `SetGamma`, whose `SStrPrintf(buf, 0x10, "%f", …)` is
+    // six decimals — so the row that Restore Defaults produces is `"1.000000"`, and a default
+    // string in any other spelling would make it compare *moved* and write a `config.toml` line
+    // holding the default value. The slider rows dodge this with their own trailing-zero strip
+    // (`OptionsSlider_OnValueChanged`); a row whose store is an engine verb cannot, because the
+    // verb owns the formatting. So the table speaks the verb's spelling instead, and
+    // [`sync_cvars`] seeds it the same way. `Same` is still exact: the test parse-compares, and
+    // the reference registers this value as `"1.0"` (`0x82e92c`).
+    same("gamma", "1.000000"),
     // **Render scale** (decision 1639) — benilla's own CVar, no 1.12 counterpart, in the
     // `boothHalfRate` / `SoundOutputLimiter` mould: the reference has no such dial because it has
     // no second buffer to hang one on. The world renders into the composite lane's off-screen image
@@ -812,10 +1131,17 @@ struct LocalConfig {
 #[derive(Resource, Default)]
 pub(crate) struct CvarPersist {
     /// The file's `[cvars]` entries, verbatim spelling — the merge base every save starts from
-    /// (unknown keys ride through untouched, env-overridden keys keep their stored value).
+    /// (unknown keys ride through untouched, session-owned keys keep their stored value).
     file: BTreeMap<String, String>,
-    /// Lowercased names whose value came from an env var this session (never saved).
-    env_overridden: HashSet<String>,
+    /// Lowercased names this SESSION owns rather than the player — never saved, and the file's
+    /// own entry for them is left exactly as it was found.
+    ///
+    /// Almost all of them are env levers (`$WOW_UI_SCALE`, `$WOW_MSAA`, `$WOW_HOST`, …): a value
+    /// that stuck in `config.toml` would make an A/B or an instrument run sticky across
+    /// relaunches. `gxApi` (2151) is the member that is not — it is owned by the session because
+    /// it is a fact about the *machine* (the render adapter's backend), which is nobody's setting
+    /// to persist. The field was `env_overridden` until it gained that one.
+    session_owned: HashSet<String>,
     /// The engine table has been registered + seeded — **once per VM**, not once per process
     /// (decision 1290). A login builds a fresh VM, so the seed has to happen again: an
     /// unregistered table answers every `GetCVar` with nil, and [`save_config`] composes
@@ -827,6 +1153,22 @@ pub(crate) struct CvarPersist {
 }
 
 impl CvarPersist {
+    /// The saved-base pairs a VM's table is seeded from — the file's entries minus the ones the
+    /// session owns ([`CvarPersist::session_owned`]), which are never persisted.
+    ///
+    /// Extracted so `ui_script::lifecycle`'s world-entry edge can run the same seed before the
+    /// interface loads (decision 2115): the reference's own `UIOptionsFrame.xml` reads two CVars
+    /// in its dropdowns' `OnLoad`, and a `/reloadui` builds a fresh VM and loads the whole
+    /// interface before [`sync_cvars`]'s `Update` claim gets a turn. The ORDER at both call sites
+    /// is this first, `register_cvars` second (1291) — reversed, a reload resets every knobless
+    /// CVar to its factory value.
+    pub(crate) fn saved_base(&self) -> impl Iterator<Item = (String, String)> + '_ {
+        self.file
+            .iter()
+            .filter(|(k, _)| !self.session_owned.contains(&k.to_ascii_lowercase()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+    }
+
     /// One CVar as `config.toml` holds it — matched case-insensitively, so a hand-edited
     /// spelling still answers.
     ///
@@ -931,10 +1273,13 @@ pub(crate) struct KnobParams<'w> {
     names: ResMut<'w, NameConfig>,
     plates: ResMut<'w, VPlateMode>,
     clutter: ResMut<'w, ClutterConfig>,
+    weather: ResMut<'w, benilla_world::weather::WeatherState>,
+    display_gamma: ResMut<'w, crate::ui_gamma::DisplayGamma>,
     minimap: ResMut<'w, MinimapZoom>,
     bubbles: ResMut<'w, BubbleConfig>,
     zoom: ResMut<'w, ZoomLimit>,
     follow: ResMut<'w, FollowConfig>,
+    camera_opts: ResMut<'w, crate::player::camera_dynamics::CameraOptions>,
     video: ResMut<'w, VideoConfig>,
     render_scale: ResMut<'w, RenderScale>,
     tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
@@ -946,6 +1291,10 @@ pub(crate) struct KnobParams<'w> {
     auto_self_cast: ResMut<'w, crate::ui_action::AutoSelfCast>,
     realmlist: ResMut<'w, crate::realmlist::Realmlist>,
     fps_journal: ResMut<'w, crate::perf::FpsJournalSetting>,
+    assist_attack: ResMut<'w, crate::target::AssistAttack>,
+    combat_ranges: ResMut<'w, crate::ui_chat::combat::CombatLogRanges>,
+    damage_text: ResMut<'w, crate::combat_text::DamageTextGates>,
+    log_periodic: ResMut<'w, crate::ui_chat::combat::LogPeriodicSpells>,
 }
 
 impl KnobParams<'_> {
@@ -969,10 +1318,13 @@ impl KnobParams<'_> {
             names: &mut self.names,
             plates: &mut self.plates,
             clutter: &mut self.clutter,
+            weather: &mut self.weather,
+            display_gamma: &mut self.display_gamma,
             minimap: &mut self.minimap,
             bubbles: &mut self.bubbles,
             zoom: &mut self.zoom,
             follow: &mut self.follow,
+            camera_opts: &mut self.camera_opts,
             video: &mut self.video,
             render_scale: &mut self.render_scale,
             tex_filter: &mut self.tex_filter,
@@ -984,6 +1336,10 @@ impl KnobParams<'_> {
             auto_self_cast: &mut self.auto_self_cast,
             realmlist: &mut self.realmlist,
             fps_journal: &mut self.fps_journal,
+            assist_attack: &mut self.assist_attack,
+            combat_ranges: &mut self.combat_ranges,
+            damage_text: &mut self.damage_text,
+            log_periodic: &mut self.log_periodic,
         }
     }
 }
@@ -1003,10 +1359,17 @@ struct Knobs<'a> {
     names: &'a mut NameConfig,
     plates: &'a mut VPlateMode,
     clutter: &'a mut ClutterConfig,
+    /// The weather driver's own state — `weatherDensity` writes ONE byte of it
+    /// ([`benilla_world::weather::WeatherState::weather_density`]), the particle-density
+    /// step; every other field on it is the wire's, not a setting's (2181).
+    weather: &'a mut benilla_world::weather::WeatherState,
+    /// The display-brightness ramp the UI lane's decode applies (2182).
+    display_gamma: &'a mut crate::ui_gamma::DisplayGamma,
     minimap: &'a mut MinimapZoom,
     bubbles: &'a mut BubbleConfig,
     zoom: &'a mut ZoomLimit,
     follow: &'a mut FollowConfig,
+    camera_opts: &'a mut crate::player::camera_dynamics::CameraOptions,
     video: &'a mut VideoConfig,
     render_scale: &'a mut RenderScale,
     tex_filter: &'a mut benilla_assets::TexFilterSetting,
@@ -1018,6 +1381,10 @@ struct Knobs<'a> {
     auto_self_cast: &'a mut crate::ui_action::AutoSelfCast,
     realmlist: &'a mut crate::realmlist::Realmlist,
     fps_journal: &'a mut crate::perf::FpsJournalSetting,
+    assist_attack: &'a mut crate::target::AssistAttack,
+    combat_ranges: &'a mut crate::ui_chat::combat::CombatLogRanges,
+    damage_text: &'a mut crate::combat_text::DamageTextGates,
+    log_periodic: &'a mut crate::ui_chat::combat::LogPeriodicSpells,
 }
 
 /// **The string-valued rows**, matched ahead of the numeric parse every other row goes through —
@@ -1053,6 +1420,13 @@ fn apply_string_valued(key: &str, name: &str, value: &str, knobs: &mut Knobs) ->
         // posture — so the value is CONSUMED rather than falling to a numeric parse that can only
         // reject it, and so a toggle still dirties the config.
         "realmname" => {}
+        // Descriptive, not a knob (2151): the live value is the render adapter's backend, pushed
+        // into the table by [`sync_cvars`]. Claimed for the same reason `realmname` is — so a
+        // write is CONSUMED rather than falling to a numeric parse that can only reject it — and
+        // it goes no further: the reference latches this CVar for the next `GxDevCreate`, and we
+        // have no device to re-create it on. `load_config` marks it session-owned, so the write
+        // also never reaches `config.toml`.
+        "gxapi" => {}
         _ => {}
     }
     true
@@ -1063,7 +1437,7 @@ fn apply_string_valued(key: &str, name: &str, value: &str, knobs: &mut Knobs) ->
 /// registered row whose default does not parse as a number is named here
 /// ([`every_string_valued_row_is_claimed_before_the_numeric_parse`]).
 fn is_string_valued(key: &str) -> bool {
-    matches!(key, "gxresolution" | "realmlist" | "realmname")
+    matches!(key, "gxapi" | "gxresolution" | "realmlist" | "realmname")
 }
 
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
@@ -1091,10 +1465,18 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // The client's own parse for this one is literally `!= 0` too (`0x4574d0`: `setne al`).
         "soundreverb" => knobs.sound.reverb = v != 0.0,
         "soundoutputlimiter" => knobs.sound.limiter = v != 0.0,
+        "soundlisteneratcharacter" => knobs.sound.listener_at_character = v != 0.0,
+        "emotesounds" => knobs.sound.emote_sounds = v != 0.0,
+        "soundzonemusicnodelay" => knobs.sound.zone_music_no_delay = v != 0.0,
         "uiscale" => knobs.scale.0 = v.clamp(0.5, 1.5),
         "farclip" => knobs.view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
+        // The reference REFUSES an out-of-range write here rather than clamping (`0x688d90` echoes
+        // "NearClip must be in range 0.01 - 0.33" and returns 0). We clamp, which is this table's
+        // standing posture for every range — the consumer clamps at its own edge.
+        "nearclip" => knobs.view.set_nearclip(v),
         "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
         "autoselfcast" => knobs.auto_self_cast.0 = v != 0.0,
+        "assistattack" => knobs.assist_attack.0 = v != 0.0,
         // The sixteen camera-view CVars have no knob to apply to: `CameraViews` is their writer,
         // not their reader (it seeds itself from the persisted file at startup, and `SaveView`
         // writes back). They are claimed here so the table's own "not a knob this build knows"
@@ -1116,10 +1498,55 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "mousespeed" => {
             knobs.look.sensitivity = v.clamp(*MOUSE_SPEED_RANGE.start(), *MOUSE_SPEED_RANGE.end());
         }
+        // The reference's `0x50b330` validator REJECTS an out-of-range value rather than clamping
+        // it: it prints `Value out of range (%f - %f)` and `CVar::Set` never stores, so the old
+        // value stands. That is a different posture from every clamping row above, and it is the
+        // faithful one — a script writing 1e9 gets a refusal, not a silently pinned camera.
+        "camerayawmovespeed" | "camerapitchmovespeed" => {
+            if !CAMERA_SPEED_RANGE.contains(&v) {
+                warn!(
+                    "cvar {name}: value out of range ({} - {}) — ignored",
+                    CAMERA_SPEED_RANGE.start(),
+                    CAMERA_SPEED_RANGE.end()
+                );
+                return true;
+            }
+            if key == "camerayawmovespeed" {
+                knobs.look.yaw_speed = v;
+            } else {
+                knobs.look.pitch_speed = v;
+            }
+        }
+        "combatdamage" => knobs.damage_text.combat_damage = v != 0.0,
+        "petmeleedamage" => knobs.damage_text.pet_melee = v != 0.0,
+        "petspelldamage" => knobs.damage_text.pet_spell = v != 0.0,
+        "combatlogperiodicspells" => knobs.log_periodic.0 = v != 0.0,
+        // The combat log's eight display ranges (yards, the CVar's float field). One arm for all
+        // of them: `CombatLogRanges::set` walks the class table through `UnitClass::range_cvar`,
+        // so the seven names live in exactly one place and this arm cannot drift from them.
+        _ if knobs.combat_ranges.set(name, v) => {}
         "autolootdefault" => knobs.loot.auto_loot = v != 0.0,
         "unitnameplayer" => knobs.names.player = v != 0.0,
         "unitnamenpc" => knobs.names.npc = v != 0.0,
         "unitnameown" => knobs.names.own = v != 0.0,
+        "unitnameplayerguild" => knobs.names.player_guild = v != 0.0,
+        // The camera options (2149). The three numeric ones take the value straight: the
+        // reference's own validator on them is `0x50b330`'s range REFUSAL, which lives in
+        // `benilla_ui`'s `SetCVar` path, not here.
+        "camerapivot" => knobs.camera_opts.pivot = v != 0.0,
+        "camerawatercollision" => knobs.camera_opts.water_collision = v != 0.0,
+        "camerapivotdxmax" => knobs.camera_opts.pivot_dx_max = v,
+        "camerapivotdymin" => knobs.camera_opts.pivot_dy_min = v,
+        "cameratargetsmoothspeed" => knobs.camera_opts.target_smooth_speed = v,
+        "cameraterraintilt" => knobs.camera_opts.terrain_tilt = v != 0.0,
+        "cameragroundsmoothspeed" => knobs.camera_opts.ground_smooth_speed = v,
+        "cameraterraintilttimemin" => knobs.camera_opts.tilt_time_min = v,
+        "cameraterraintilttimemax" => knobs.camera_opts.tilt_time_max = v,
+        "camerabobbing" => knobs.camera_opts.bobbing = v != 0.0,
+        "camerabobbinglramplitude" => knobs.camera_opts.bob_lr_amplitude = v,
+        "camerabobbingudamplitude" => knobs.camera_opts.bob_ud_amplitude = v,
+        "camerabobbingfrequency" => knobs.camera_opts.bob_frequency = v,
+        "camerabobbingsmoothspeed" => knobs.camera_opts.bob_smooth_speed = v,
         // The two V-plate toggles — the bitmask's two bits, flags like every other checkbox.
         // Lowercased here like every arm; `VPlateMode`'s consts carry the registered spelling.
         "nameplateshowenemies" => knobs.plates.enemies = v != 0.0,
@@ -1144,6 +1571,29 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // The panel's 0/1/2 lands as the density multiplier ×1/×2/×3; the clamp is the 1.12
         // slider's own range (an off-grid hand-edit rides between stops, like every slider).
         "worlddetail" => knobs.clutter.density = v.clamp(0.0, 2.0) + 1.0,
+        // The SAME knob in the reference's own cells-per-chunk (2151), with the reference's own
+        // `[1, 256]` clamp rather than the stop's — `ClutterConfig::set_frill_density` carries
+        // both, and `terrain_stream::rescatter_clutter` re-scatters the loaded tiles off the
+        // resulting density change exactly as it does for the row above (0992's setter law, which
+        // is the callback's own chunk rebuild).
+        "frilldensity" => knobs.clutter.set_frill_density(v),
+        // Weather Intensity, the panel's 0..3 step 1 (2181). The reference's callback is
+        // `0x67b870`, a jump table (`0x67b8e8`) mapping 0/1/2/3 onto the quality cells
+        // {0.1, 0.33, 0.66, 1.0} in `[0x8680ec]` (wow-re
+        // `cvar/scratch/graphics-cost-cvar-census.md` §4). What that table does with an
+        // off-grid int is NOT carved, so the clamp here is this table's own standing
+        // posture rather than a fidelity claim — and it costs nothing either way, because
+        // `WeatherState::density_gain` already `.min(3)`s its own index.
+        "weatherdensity" => knobs.weather.weather_density = v.trunc().clamp(0.0, 3.0) as u8,
+        // Brightness (2182). The clamp is OURS and the reference has none — the reason it
+        // costs one is on [`crate::ui_gamma::GAMMA_RANGE`], and nothing a player can reach
+        // from the panel meets it.
+        "gamma" => {
+            knobs.display_gamma.0 = v.clamp(
+                *crate::ui_gamma::GAMMA_RANGE.start(),
+                *crate::ui_gamma::GAMMA_RANGE.end(),
+            )
+        }
         // The two zoom indices (1131) clamp exactly like the client's `set_zoom` (`0x6daa10`:
         // clamp at 5) — the widget clamps again on the way in, so a hand-edited level lands
         // in range whichever path it takes.
@@ -1252,61 +1702,80 @@ fn zoom_index(v: f32) -> u8 {
     v.clamp(0.0, f32::from(MINIMAP_ZOOM_LEVELS - 1)) as u8
 }
 
+/// The two registered spellings of `ClutterConfig::density`, lowercased (2151) — `WorldDetail`'s
+/// panel stop and `frillDensity`'s cells-per-chunk.
+///
+/// Named as a **pair**, because that is the thing about them that is easy to get wrong: anything
+/// which takes the knob for the session has to take *both* keys. `$WOW_CLUTTER_DENSITY` marked
+/// only `worlddetail` for exactly as long as it was the only spelling, and the moment the second
+/// row landed that would have let an A/B lever ride into `config.toml` through the other name and
+/// pin itself on every later launch.
+const CLUTTER_DENSITY_CVARS: [&str; 2] = ["worlddetail", "frilldensity"];
+
 /// Startup: read `benilla-config/config.toml` (absent file = all defaults, not an error) and apply it
-/// to the knob resources — except keys the environment overrides this session (their resources
-/// already read the env var in their `Default`s). The VM does not exist yet; [`sync_cvars`]
-/// seeds the table when it does.
+/// to the knob resources — except the keys this session owns rather than the player
+/// ([`CvarPersist::session_owned`]): an env lever's resource has already read the variable in its
+/// `Default`, and `gxApi` is the machine's own. The VM does not exist yet; [`sync_cvars`] seeds
+/// the table when it does.
 fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
     let mut knobs = params.knobs();
     if std::env::var_os("WOW_UI_SCALE").is_some() {
-        persist.env_overridden.insert("uiscale".into());
+        persist.session_owned.insert("uiscale".into());
     }
     if std::env::var_os("WOW_FARCLIP").is_some() {
-        persist.env_overridden.insert("farclip".into());
+        persist.session_owned.insert("farclip".into());
     }
-    // The clutter A/B env drives the same knob WorldDetail lands on — same session-only law.
+    // The clutter A/B env drives the same knob WorldDetail lands on — same session-only law, over
+    // BOTH of that knob's spellings ([`CLUTTER_DENSITY_CVARS`]).
     if std::env::var_os("WOW_CLUTTER_DENSITY").is_some() {
-        persist.env_overridden.insert("worlddetail".into());
+        for key in CLUTTER_DENSITY_CVARS {
+            persist.session_owned.insert(key.into());
+        }
     }
     // `$WOW_NOVSYNC=1` is the measurement uncap: session-only, exactly like the taste-iteration
     // overrides above. Pinning it into the config would make an instrument run sticky.
     if crate::video::novsync_env() {
-        persist.env_overridden.insert("gxvsync".into());
+        persist.session_owned.insert("gxvsync".into());
     }
     // The filter policy's A/B levers, under the same law: pricing mode 3 against mode 5 on one
     // machine in one session is exactly what these are for, and a value that stuck in
     // `config.toml` would silently denominate every later reading.
     if std::env::var_os("WOW_TRILINEAR").is_some() {
-        persist.env_overridden.insert("trilinear".into());
+        persist.session_owned.insert("trilinear".into());
     }
     if std::env::var_os("WOW_ANISO").is_some() {
-        persist.env_overridden.insert("anisotropic".into());
+        persist.session_owned.insert("anisotropic".into());
     }
     // `$WOW_WIN`, a capture scenario, or any instrumented run owns the window's geometry for the
     // session (decision 1627), so the two CVars that would otherwise move it mid-run are
     // session-only under exactly the same law as the four above.
     if crate::video::windowed_env() {
-        persist.env_overridden.insert("gxwindow".into());
-        persist.env_overridden.insert("gxresolution".into());
+        persist.session_owned.insert("gxwindow".into());
+        persist.session_owned.insert("gxresolution".into());
     }
     // `$WOW_MSAA` is the multisampling A/B lever (1629), session-only under the same law as every
     // override above: a value pinned into the file would make a measurement sticky across
     // relaunches.
     if std::env::var_os("WOW_MSAA").is_some() {
-        persist.env_overridden.insert("gxmultisample".into());
+        persist.session_owned.insert("gxmultisample".into());
     }
     // `$WOW_RENDER_SCALE` is the render-scale A/B lever (1639), and doubly session-only: it is
     // also the supersampling instrument this machine prices pixels with, and an instrument run
     // that pinned 4× into the file would come back at 4× the next time the client opened.
     if crate::webenv::var("WOW_RENDER_SCALE").is_some() {
-        persist.env_overridden.insert("renderscale".into());
+        persist.session_owned.insert("renderscale".into());
     }
     // `$WOW_HOST` is the realmlist for the session (1667) — every probe, smoke run and harness leg
     // sets it, and a value pinned into the file would silently repoint the player's client at
     // whatever a test dialed. `Realmlist::default()` has already taken it; this keeps it off disk.
     if crate::webenv::var("WOW_HOST").is_some() {
-        persist.env_overridden.insert("realmlist".into());
+        persist.session_owned.insert("realmlist".into());
     }
+    // The one member with no env var behind it (2151): `gxApi` reports the render adapter's
+    // backend, which is a fact about the machine rather than a setting the player chose. It is
+    // pushed live by `sync_cvars` on every launch, so persisting it could only ever write a name
+    // that the next launch overwrites — or, worse, a stale one that outlives the GPU it described.
+    persist.session_owned.insert("gxapi".into());
     let cvars = match stored_config() {
         StoredConfig::Absent => {
             // No file, hermetic capture, or no install — the URL levers still apply.
@@ -1332,8 +1801,8 @@ fn load_config(mut persist: ResMut<CvarPersist>, mut params: KnobParams) {
             warn!("config: unknown cvar '{name}' — preserved, not applied");
             continue;
         }
-        if persist.env_overridden.contains(&key) {
-            info!("config: {name} overridden by env for this session (file value kept)");
+        if persist.session_owned.contains(&key) {
+            info!("config: {name} is owned by this session, not the file (file value kept)");
             continue;
         }
         apply_to_knobs(name, value, &mut knobs);
@@ -1431,6 +1900,7 @@ fn sync_cvars(
     script: Option<NonSendMut<UiScript>>,
     mut persist: ResMut<CvarPersist>,
     mut params: KnobParams,
+    adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -1439,6 +1909,7 @@ fn sync_cvars(
         // Read-only borrows for the seed: field access through `ResMut`'s `Deref` flags nothing,
         // which is the half of 0992's change-detection trap this system has to keep.
         let KnobParams {
+            camera_opts,
             sound,
             scale,
             view,
@@ -1448,6 +1919,8 @@ fn sync_cvars(
             names,
             plates,
             clutter,
+            weather,
+            display_gamma,
             minimap,
             bubbles,
             zoom,
@@ -1465,19 +1938,17 @@ fn sync_cvars(
             tex_filter,
             realmlist,
             fps_journal,
+            assist_attack,
+            combat_ranges,
+            damage_text,
+            log_periodic,
         } = &params;
         // The config file's values go in FIRST (decision 1291): registration — ours below, or an
         // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
         // knobless CVar (`statusBarText`) and an addon-declared one across a VM replacement; the
         // knob-derived session rows below still win for every key a host knob backs, and an
         // env-overridden key keeps its env value the same way (its knob carries it).
-        script.set_cvar_saved_base(
-            persist
-                .file
-                .iter()
-                .filter(|(k, _)| !persist.env_overridden.contains(&k.to_ascii_lowercase()))
-                .map(|(k, v)| (k.clone(), v.clone())),
-        );
+        script.set_cvar_saved_base(persist.saved_base().collect::<Vec<_>>());
         script.register_cvars(registered_pairs());
         // The Video dropdown's menu — what this device actually accepts, enumerated once at
         // `finish()` by `view::MsaaSupportPlugin` (decision 1631) and handed over whole. Pushed
@@ -1496,8 +1967,39 @@ fn sync_cvars(
                 )
                 .collect(),
         );
+        // **What `GetVideoCaps` answers with** (decision 2177) — the seven values the stock video
+        // window's `OptionsFrame_Load` destructures. Pushed beside the multisample list because it
+        // is the same kind of fact: what this client's device and presentation path really offer,
+        // which the VM has no way to ask.
+        //
+        // Six of the seven are properties of the client rather than of the adapter, and each is
+        // true here by construction:
+        //   * shaders — wgpu has no non-programmable path; there is no fixed-function fallback to
+        //     be missing. The reference asked because 2004 hardware could genuinely lack them.
+        //   * trilinear and anisotropy — `benilla_assets::tex_filter` builds every sampler with
+        //     both available; `ANISO_RANGE`'s top is the ceiling the `anisotropic` CVar clamps to
+        //     and is reported raw, because `OptionsFrame.lua:124` matches it against
+        //     `ANISOTROPIC_VALUES = {"1","2","4","8","16"}` with `tonumber` and ignores a value
+        //     that is not one of them.
+        //   * the hardware cursor — `crate::cursor` composites the reference's own
+        //     `Interface\Cursor\*.blp` into an OS cursor on every target (an `NSCursor` on macOS,
+        //     winit's `CursorIcon::Custom` elsewhere).
+        //   * triple buffering — **false, and it is the one that does visible work**. wgpu's
+        //     surface decides its own buffering and benilla exposes no knob, so the reference's own
+        //     `OptionsFrame_Load` hides check button 13 and re-seats button 6 against button 5
+        //     (`OptionsFrame.lua:168-175`). Answering `true` would light a checkbox writing a CVar
+        //     nothing reads — 2115 §2's wrong answer that succeeds.
+        script.set_video_caps(benilla_ui::script::VideoCaps {
+            anisotropic: true,
+            pixel_shaders: true,
+            vertex_shaders: true,
+            trilinear: true,
+            triple_buffering: false,
+            max_anisotropy: *benilla_assets::ANISO_RANGE.end(),
+            hardware_cursor: true,
+        });
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 49] = [
+        let session: [(&str, String); 87] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1512,12 +2014,22 @@ fn sync_cvars(
             ),
             ("SoundReverb", flag(sound.reverb)),
             ("SoundOutputLimiter", flag(sound.limiter)),
+            (
+                "SoundListenerAtCharacter",
+                flag(sound.listener_at_character),
+            ),
+            ("EmoteSounds", flag(sound.emote_sounds)),
+            ("SoundZoneMusicNoDelay", flag(sound.zone_music_no_delay)),
             ("uiScale", scale.0.to_string()),
             ("farclip", view.farclip.to_string()),
+            ("nearclip", view.nearclip.to_string()),
             ("deselectOnClick", flag(click.deselect_on_click)),
             ("autoSelfCast", flag(auto_self_cast.0)),
+            ("assistAttack", flag(assist_attack.0)),
             ("mouseInvertPitch", flag(look.invert_pitch)),
             ("mousespeed", look.sensitivity.to_string()),
+            ("cameraYawMoveSpeed", look.yaw_speed.to_string()),
+            ("cameraPitchMoveSpeed", look.pitch_speed.to_string()),
             ("cameraDistanceMaxFactor", zoom.factor().to_string()),
             ("cameraSmoothStyle", follow.style.cvar().to_string()),
             (
@@ -1525,6 +2037,44 @@ fn sync_cvars(
                 follow.tracking_style.cvar().to_string(),
             ),
             ("cameraYawSmoothSpeed", follow.yaw_speed.to_string()),
+            ("cameraPivot", flag(camera_opts.pivot)),
+            ("cameraPivotDXMax", camera_opts.pivot_dx_max.to_string()),
+            ("cameraPivotDYMin", camera_opts.pivot_dy_min.to_string()),
+            (
+                "cameraTargetSmoothSpeed",
+                camera_opts.target_smooth_speed.to_string(),
+            ),
+            ("cameraWaterCollision", flag(camera_opts.water_collision)),
+            ("cameraTerrainTilt", flag(camera_opts.terrain_tilt)),
+            (
+                "cameraGroundSmoothSpeed",
+                camera_opts.ground_smooth_speed.to_string(),
+            ),
+            (
+                "cameraTerrainTiltTimeMin",
+                camera_opts.tilt_time_min.to_string(),
+            ),
+            (
+                "cameraTerrainTiltTimeMax",
+                camera_opts.tilt_time_max.to_string(),
+            ),
+            ("cameraBobbing", flag(camera_opts.bobbing)),
+            (
+                "cameraBobbingLRAmplitude",
+                camera_opts.bob_lr_amplitude.to_string(),
+            ),
+            (
+                "cameraBobbingUDAmplitude",
+                camera_opts.bob_ud_amplitude.to_string(),
+            ),
+            (
+                "cameraBobbingFrequency",
+                camera_opts.bob_frequency.to_string(),
+            ),
+            (
+                "cameraBobbingSmoothSpeed",
+                camera_opts.bob_smooth_speed.to_string(),
+            ),
             ("autoLootDefault", flag(loot.auto_loot)),
             ("showLootSpam", flag(loot.show_loot_spam)),
             ("guildMemberNotify", flag(guild_notify.0)),
@@ -1532,12 +2082,20 @@ fn sync_cvars(
             ("UnitNamePlayer", flag(names.player)),
             ("UnitNameNPC", flag(names.npc)),
             ("UnitNameOwn", flag(names.own)),
+            ("UnitNamePlayerGuild", flag(names.player_guild)),
             (crate::vplates::CVAR_ENEMIES, flag(plates.enemies)),
             (crate::vplates::CVAR_FRIENDS, flag(plates.friends)),
             // The session density on the panel scale (×1..×3 → 0..2). An env-driven off-grid
             // multiplier seeds off-grid honestly — the dropdown shows the raw number, checks
-            // nothing (the 0959 out-of-range posture, dropdown-flavored).
+            // nothing (the 0959 out-of-range posture, dropdown-flavored). A console
+            // `frillDensity` past the top stop reads off-grid here for the same reason, which is
+            // the reference's own inconsistency between its two writers (2151).
             ("WorldDetail", (clutter.density - 1.0).to_string()),
+            // …and the same density in the reference's own cells-per-chunk (2151).
+            ("frillDensity", clutter.frill_density().to_string()),
+            ("weatherDensity", weather.weather_density.to_string()),
+            // Six decimals, matching `SetGamma`'s own `"%f"` — see the row's comment.
+            ("gamma", format!("{:.6}", display_gamma.0)),
             ("ChatBubbles", flag(bubbles.all)),
             ("ChatBubblesParty", flag(bubbles.party)),
             ("profanityFilter", flag(text_filter.profanity)),
@@ -1546,6 +2104,15 @@ fn sync_cvars(
             ("gameTip", game_tip.next.to_string()),
             ("minimapZoom", minimap.outdoor.to_string()),
             ("minimapInsideZoom", minimap.inside.to_string()),
+            // **The machine's, not the player's** (2151): the live render backend, so `GetCVar`
+            // and pfUI's system tooltip answer what this run is actually on. `None` only in a
+            // headless app with no renderer, where the registered `""` stands and says so.
+            (
+                "gxApi",
+                adapter
+                    .as_ref()
+                    .map_or_else(String::new, |a| a.backend.to_str().to_string()),
+            ),
             ("gxVSync", flag(video.vsync)),
             // The reference's polarity: the CVar is `gxWindow`, so `1` is the WINDOWED state.
             (
@@ -1568,6 +2135,48 @@ fn sync_cvars(
             (
                 crate::realmlist::CVAR_REALMLIST,
                 realmlist.address().to_string(),
+            ),
+            // The combat log's eight display ranges, off the live table — written out one class at
+            // a time rather than composed in a loop, because this array is the readable census of
+            // what a session's `GetCVar` answers and a loop would hide eight rows inside one.
+            (
+                "CombatLogRangeParty",
+                combat_ranges.class(CombatClass::Party).to_string(),
+            ),
+            (
+                "CombatLogRangePartyPet",
+                combat_ranges.class(CombatClass::PartyPet).to_string(),
+            ),
+            (
+                "CombatLogRangeFriendlyPlayers",
+                combat_ranges.class(CombatClass::FriendlyPlayer).to_string(),
+            ),
+            (
+                "CombatLogRangeFriendlyPlayersPets",
+                combat_ranges.class(CombatClass::FriendlyPet).to_string(),
+            ),
+            (
+                "CombatLogRangeHostilePlayers",
+                combat_ranges.class(CombatClass::HostilePlayer).to_string(),
+            ),
+            (
+                "CombatLogRangeHostilePlayersPets",
+                combat_ranges.class(CombatClass::HostilePet).to_string(),
+            ),
+            (
+                "CombatLogRangeCreature",
+                combat_ranges.class(CombatClass::Creature).to_string(),
+            ),
+            (
+                crate::ui_chat::combat::DEATH_LOG_RANGE_CVAR,
+                combat_ranges.death().to_string(),
+            ),
+            ("CombatDamage", flag(damage_text.combat_damage)),
+            ("PetMeleeDamage", flag(damage_text.pet_melee)),
+            ("PetSpellDamage", flag(damage_text.pet_spell)),
+            (
+                crate::ui_chat::combat::LOG_PERIODIC_CVAR,
+                flag(log_periodic.0),
             ),
         ];
         for (name, value) in session {
@@ -1654,21 +2263,21 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
     if snapshot.is_empty() {
         return; // a VM that never registered (a capture) has nothing to say about the file
     }
-    persist.file = compose_file(&persist.file, &persist.env_overridden, &snapshot);
+    persist.file = compose_file(&persist.file, &persist.session_owned, &snapshot);
 }
 
 /// Compose the file to save: the previous file as the merge base, every registered var that
-/// moved off its default written, every one back at its default removed — env-overridden keys
-/// untouched (the session value is the env's, not the player's).
+/// moved off its default written, every one back at its default removed — session-owned keys
+/// untouched (that value is the env's or the machine's, not the player's).
 fn compose_file(
     previous: &BTreeMap<String, String>,
-    env_overridden: &HashSet<String>,
+    session_owned: &HashSet<String>,
     snapshot: &[(String, String, String)],
 ) -> BTreeMap<String, String> {
     let mut out = previous.clone();
     for (name, value, default) in snapshot {
         let key = name.to_ascii_lowercase();
-        if env_overridden.contains(&key) {
+        if session_owned.contains(&key) {
             continue;
         }
         // Match any existing entry case-insensitively so a hand-edited spelling doesn't fork.
@@ -1722,7 +2331,7 @@ fn save_config(
         persist.dirty = false; // nothing to save, and retrying every frame changes nothing
         return;
     }
-    let cvars = compose_file(&persist.file, &persist.env_overridden, &snapshot);
+    let cvars = compose_file(&persist.file, &persist.session_owned, &snapshot);
     let body = toml::to_string(&LocalConfig {
         cvars: cvars.clone(),
     })
@@ -1838,10 +2447,13 @@ mod tests {
             vec![
                 "SoundReverb",
                 "autoSelfCast",
+                "frillDensity",
+                "gxApi",
                 "gxColorBits",
                 "gxDepthBits",
                 "gxResolution",
                 "realmList",
+                "weatherDensity",
             ],
         );
     }
@@ -1887,6 +2499,14 @@ mod tests {
         // ViewDistance::default() reads $WOW_FARCLIP; the registered default mirrors the
         // env-less 350 literal (view.rs doc: "Default 350" — the reference's own, 1624).
         assert_eq!(d["farclip"], 350.0);
+        // `nearclip` welds to the const the off-world spawners use, so the viewer, the depth probe
+        // and the player's camera cannot open on three different near planes again (2163).
+        assert_eq!(d["nearclip"], benilla_world::view::NEARCLIP_DEFAULT);
+        assert_eq!(
+            d["nearclip"],
+            ViewDistance::default().nearclip,
+            "the registered default and the resource's own must be one number"
+        );
         // Same shape as farclip: `MsaaSetting::default()` reads $WOW_MSAA, so the registered
         // default mirrors the env-less literal — 1, the reference's own (1629).
         assert_eq!(d["gxMultisample"], 1.0);
@@ -1941,13 +2561,63 @@ mod tests {
         assert_eq!(d["UnitNamePlayer"] != 0.0, names.player);
         assert_eq!(d["UnitNameNPC"] != 0.0, names.npc);
         assert_eq!(d["UnitNameOwn"] != 0.0, names.own);
+        assert_eq!(d["UnitNamePlayerGuild"] != 0.0, names.player_guild);
         assert!(
-            names.player && !names.npc && !names.own,
-            "the binary registers UnitNamePlayer \"1\", NPC \"0\", Own \"0\""
+            names.player && !names.npc && !names.own && names.player_guild,
+            "the binary registers UnitNamePlayer \"1\", NPC \"0\", Own \"0\", \
+             PlayerGuild \"1\""
+        );
+        // The camera options weld to `CameraOptions::default()` the same way (2149) — and the one
+        // that matters here is the one registered "1": a `cameraPivot` that shipped OFF would be
+        // benilla diverging from the reference on a feature it now has.
+        let camera_opts = crate::player::camera_dynamics::CameraOptions::default();
+        assert_eq!(d["cameraPivot"] != 0.0, camera_opts.pivot);
+        assert!(camera_opts.pivot, "the binary registers cameraPivot \"1\"");
+        assert_eq!(
+            d["cameraWaterCollision"] != 0.0,
+            camera_opts.water_collision
+        );
+        assert!(
+            camera_opts.pivot && camera_opts.water_collision,
+            "the binary registers cameraPivot and cameraWaterCollision both \"1\""
+        );
+        assert_eq!(d["cameraTerrainTilt"] != 0.0, camera_opts.terrain_tilt);
+        assert!(
+            !camera_opts.terrain_tilt,
+            "the binary registers cameraTerrainTilt \"0\""
+        );
+        assert_eq!(
+            d["cameraGroundSmoothSpeed"],
+            camera_opts.ground_smooth_speed
+        );
+        assert_eq!(d["cameraTerrainTiltTimeMin"], camera_opts.tilt_time_min);
+        assert_eq!(d["cameraTerrainTiltTimeMax"], camera_opts.tilt_time_max);
+        assert_eq!(d["cameraBobbing"] != 0.0, camera_opts.bobbing);
+        assert!(
+            !camera_opts.bobbing && !camera_opts.terrain_tilt,
+            "the binary registers cameraBobbing and cameraTerrainTilt both \"0\""
+        );
+        assert_eq!(d["cameraBobbingLRAmplitude"], camera_opts.bob_lr_amplitude);
+        assert_eq!(d["cameraBobbingUDAmplitude"], camera_opts.bob_ud_amplitude);
+        assert_eq!(d["cameraBobbingFrequency"], camera_opts.bob_frequency);
+        assert_eq!(d["cameraBobbingSmoothSpeed"], camera_opts.bob_smooth_speed);
+        assert_eq!(d["cameraPivotDXMax"], camera_opts.pivot_dx_max);
+        assert_eq!(d["cameraPivotDYMin"], camera_opts.pivot_dy_min);
+        assert_eq!(
+            d["cameraTargetSmoothSpeed"],
+            camera_opts.target_smooth_speed
         );
         // The V-plate pair welds to VPlateMode's defaults — both OFF, which is the reference's
         // own boot state on both of its halves (the `[0xc4da34]` bitmask and FrameXML's
         // `NAMEPLATES_ON = nil`). Enemy plates were the 0167 director pin until 1804.
+        // Weather Intensity (2181): the CVar's default and the weather driver's own must be
+        // the same rain, or a fresh config writes a row the world does not agree with. This is
+        // also where the DEVIATION is held honest — the reference registers "2" and the row
+        // above says why we ship 3; the weld makes sure it is 3 in both places.
+        assert_eq!(
+            d["weatherDensity"],
+            f32::from(benilla_world::weather::WeatherState::default().weather_density)
+        );
         let plates = VPlateMode::default();
         assert_eq!(d[crate::vplates::CVAR_ENEMIES] != 0.0, plates.enemies);
         assert_eq!(d[crate::vplates::CVAR_FRIENDS] != 0.0, plates.friends);
@@ -1960,6 +2630,13 @@ mod tests {
         // scale. The weld is the point: the CVar's default and the engine's must be the same
         // ground cover, or a fresh config writes a row the world does not agree with.
         assert_eq!(d["WorldDetail"], 1.0);
+        // …and its twin in the reference's own unit (2151) welds to it, not beside it: the two
+        // rows are one knob read two ways, so a default that disagreed would ship a client whose
+        // panel stop and whose cells-per-chunk describe different ground.
+        assert_eq!(
+            d["frillDensity"],
+            (d["WorldDetail"] + 1.0) * benilla_formats::FRILL_DENSITY as f32
+        );
         // The bubble pair (1139) welds to BubbleConfig's defaults — both the binary's own since
         // 1804 (`ChatBubbles` "1", `ChatBubblesParty` "0"; the party half was 0598's director pin).
         let bubbles = BubbleConfig::default();
@@ -1987,12 +2664,19 @@ mod tests {
     fn apply_parses_clamps_and_reports_unknowns() {
         let mut sound = SoundConfig::default();
         let mut scale = UiScaleCvar(0.9);
-        let mut view = ViewDistance { farclip: 350.0 };
+        let mut view = ViewDistance {
+            farclip: 350.0,
+            nearclip: benilla_world::view::NEARCLIP_DEFAULT,
+        };
         let mut look = LookConfig::default();
         let mut click = ClickConfig::default();
         let mut loot = LootConfig::default();
         let mut names = NameConfig::default();
         let mut plates = VPlateMode::default();
+        let mut assist_attack = crate::target::AssistAttack::default();
+        let mut combat_ranges = crate::ui_chat::combat::CombatLogRanges::default();
+        let mut damage_text = crate::combat_text::DamageTextGates::default();
+        let mut log_periodic = crate::ui_chat::combat::LogPeriodicSpells::default();
         // Literal fields, not Default: ClutterConfig::default() reads the env A/B vars.
         let mut clutter = ClutterConfig {
             density: 3.0,
@@ -2000,6 +2684,8 @@ mod tests {
             alpha_ref: 0.5,
             fade_far: 70.0,
         };
+        let mut weather = benilla_world::weather::WeatherState::default();
+        let mut display_gamma = crate::ui_gamma::DisplayGamma::default();
         let mut minimap = MinimapZoom::default();
         let mut bubbles = BubbleConfig::default();
         let mut zoom = ZoomLimit::default();
@@ -2031,7 +2717,9 @@ mod tests {
         let mut fps_journal = crate::perf::FpsJournalSetting::default();
         let mut text_filter = crate::text_filter::TextFilterSwitches::default();
         let mut game_tip = crate::game_tip::GameTipSetting::default();
+        let mut camera_opts = crate::player::camera_dynamics::CameraOptions::default();
         let mut knobs = Knobs {
+            camera_opts: &mut camera_opts,
             sound: &mut sound,
             auto_self_cast: &mut auto_self_cast,
             text_filter: &mut text_filter,
@@ -2044,6 +2732,8 @@ mod tests {
             names: &mut names,
             plates: &mut plates,
             clutter: &mut clutter,
+            weather: &mut weather,
+            display_gamma: &mut display_gamma,
             minimap: &mut minimap,
             bubbles: &mut bubbles,
             zoom: &mut zoom,
@@ -2058,6 +2748,10 @@ mod tests {
             msaa_formats: &msaa_formats,
             realmlist: &mut realmlist,
             fps_journal: &mut fps_journal,
+            assist_attack: &mut assist_attack,
+            combat_ranges: &mut combat_ranges,
+            damage_text: &mut damage_text,
+            log_periodic: &mut log_periodic,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -2087,6 +2781,17 @@ mod tests {
         assert_eq!(knobs.sound.master, 1.0);
         assert!(apply_to_knobs("farclip", "50", &mut knobs));
         assert_eq!(knobs.view.farclip, *FARCLIP_RANGE.start());
+        // `nearclip` clamps to the reference's own callback bounds `[0.01, 0.33]` (`0x688d90`),
+        // both ends. pfUI's extended stops write 0.06..0.30, so its whole range passes untouched.
+        assert!(apply_to_knobs("nearclip", "0.001", &mut knobs));
+        assert_eq!(
+            knobs.view.nearclip, 0.01,
+            "[0x8029d0], the callback's low bound"
+        );
+        assert!(apply_to_knobs("nearclip", "9", &mut knobs));
+        assert_eq!(knobs.view.nearclip, 0.33, "[0x808300], its high bound");
+        assert!(apply_to_knobs("nearclip", "0.3", &mut knobs));
+        assert_eq!(knobs.view.nearclip, 0.3);
         // Multisampling clamps to the reference's own [1, 16] and takes an int the way its `atoi`
         // does — the value reaching the camera is a sample COUNT, where 1 is none (1629).
         assert!(apply_to_knobs("gxMultisample", "4", &mut knobs));
@@ -2206,6 +2911,130 @@ mod tests {
         assert_eq!(knobs.clutter.density, 1.0);
         assert!(apply_to_knobs("worlddetail", "7", &mut knobs));
         assert_eq!(knobs.clutter.density, 3.0);
+        // frillDensity: the SAME field in the reference's cells-per-chunk (2151), and the two
+        // arms' clamps are deliberately different — the stop's `[0, 2]` above, the cells'
+        // `[1, 256]` here (callback `0x688de0`). The stops round-trip through both spellings,
+        // which is the property that makes them one knob rather than two that agree by habit.
+        assert!(apply_to_knobs("frillDensity", "48", &mut knobs));
+        assert_eq!(knobs.clutter.density, 3.0);
+        assert!(apply_to_knobs("frilldensity", "16", &mut knobs));
+        assert_eq!(knobs.clutter.density, 1.0);
+        // Past the top stop is HONOURED, not clamped to it — pfUI's `hdgraphic` drives exactly
+        // this, `ConsoleExec("frillDensity " .. (arg+1)*16)` for arg up to 15.
+        assert!(apply_to_knobs("frillDensity", "256", &mut knobs));
+        assert_eq!(knobs.clutter.density, 16.0);
+        // …and the reference's own bounds hold at both ends. `0` is NOT clutter-off: the callback
+        // pins it to 1, and turning grass off stays the `$WOW_CLUTTER_DENSITY` instrument's.
+        assert!(apply_to_knobs("frillDensity", "9000", &mut knobs));
+        assert_eq!(knobs.clutter.density, 16.0);
+        assert!(apply_to_knobs("frillDensity", "0", &mut knobs));
+        assert_eq!(knobs.clutter.density, 1.0 / 16.0);
+        // The row `GetCVar` answers is the same field seen the other way round.
+        assert!(apply_to_knobs("WorldDetail", "1", &mut knobs));
+        assert_eq!(knobs.clutter.density, 2.0);
+        // Weather Intensity (2181): the panel's four stops land whole, an off-grid value
+        // truncates toward zero the way every int-valued row here does, and both ends clamp.
+        for (wrote, want) in [
+            ("0", 0u8),
+            ("1", 1),
+            ("2", 2),
+            ("3", 3),
+            ("2.9", 2),
+            ("9", 3),
+            ("-4", 0),
+        ] {
+            assert!(apply_to_knobs("weatherDensity", wrote, &mut knobs));
+            assert_eq!(
+                knobs.weather.weather_density, want,
+                "weatherDensity {wrote}"
+            );
+        }
+        // Brightness (2182): the CVar's own unit is the ramp exponent, NOT the slider's offset —
+        // `SetGamma` does the `1 - v` on the way in, so what arrives here is already `gamma`.
+        // Both ends of the stock slider land whole, and the consumer's clamp holds the values the
+        // reference accepts without one (`SetGamma(5)` writes -4 there).
+        for (wrote, want) in [("1.000000", 1.0), ("0.500000", 0.5), ("1.500000", 1.5)] {
+            assert!(apply_to_knobs("gamma", wrote, &mut knobs));
+            assert_eq!(knobs.display_gamma.0, want, "gamma {wrote}");
+        }
+        assert!(apply_to_knobs("gamma", "-4.000000", &mut knobs));
+        assert_eq!(
+            knobs.display_gamma.0,
+            *crate::ui_gamma::GAMMA_RANGE.start(),
+            "a negative exponent clamps at the consumer, where it cannot blank the screen"
+        );
+        assert!(apply_to_knobs("gamma", "99", &mut knobs));
+        assert_eq!(knobs.display_gamma.0, *crate::ui_gamma::GAMMA_RANGE.end());
+        assert_eq!(knobs.clutter.frill_density(), 32.0);
+        // And the pair is NAMED as a pair, in the registered spelling and the lowercased one, so
+        // `$WOW_CLUTTER_DENSITY` cannot take one spelling of this knob for the session and leave
+        // the other free to persist the lever (2151).
+        for key in CLUTTER_DENSITY_CVARS {
+            assert!(
+                REGISTERED.iter().any(|r| r.name.eq_ignore_ascii_case(key)),
+                "{key}: named as a clutter-density spelling but not registered"
+            );
+            assert_eq!(key.to_ascii_lowercase(), key, "the set is lowercased keys");
+        }
+        // Both of them reach the same field, from a state neither of them holds.
+        for key in CLUTTER_DENSITY_CVARS {
+            knobs.clutter.density = 0.5;
+            assert!(apply_to_knobs(key, "48", &mut knobs));
+            assert_ne!(knobs.clutter.density, 0.5, "{key}: reached no knob");
+        }
+        // **The engine verbs' half of the same weld** (2163). `SetWorldDetail`/`GetWorldDetail` live
+        // in `benilla-ui`, which cannot see this table, so the two CVar names and the stop table it
+        // writes are consts there — and if either name stopped being registered, or the reference's
+        // {16, 32, 48} stopped being `frillDensity`'s unit times the stop, the verbs would write
+        // into nothing and only this assertion would say so.
+        assert!(REGISTERED
+            .iter()
+            .any(|r| r.name == benilla_ui::script::CVAR_WORLD_DETAIL));
+        assert!(REGISTERED
+            .iter()
+            .any(|r| r.name == benilla_ui::script::CVAR_FRILL_DENSITY));
+        // …and the display-gamma pair's (2182), for exactly the same reason: `GetGamma` answers
+        // `1 - <this CVar>` and `SetGamma` writes `1 - v` into it, both from a crate that cannot
+        // see this table, so an unregistered name would make the getter answer a constant 0 and
+        // the setter write into nothing.
+        assert!(REGISTERED
+            .iter()
+            .any(|r| r.name == benilla_ui::script::CVAR_GAMMA));
+        // **`RestoreVideoDefaults`' row list, welded the same way** (2177). It lives in
+        // `benilla-ui` beside the binding that walks it and cannot see this table, so a rename or
+        // a retirement here would turn one of its rows into a silent skip — the verb would restore
+        // eleven settings out of twelve and say nothing. This is the only place that can notice.
+        for key in benilla_ui::script::VIDEO_DEFAULT_CVARS {
+            assert!(
+                REGISTERED.iter().any(|r| r.name.eq_ignore_ascii_case(key)),
+                "{key}: RestoreVideoDefaults would restore it, and nothing registers it"
+            );
+        }
+        for (n, frill) in benilla_ui::script::WORLD_DETAIL_STOPS.iter().enumerate() {
+            assert_eq!(
+                *frill,
+                benilla_formats::FRILL_DENSITY * (n as u32 + 1),
+                "stop {n}: the reference's own 0x804518 entry must be this knob's unit times the stop"
+            );
+            // Either spelling of the stop lands on the same ground cover — which is what lets the
+            // setter write `frillDensity` and the getter read `WorldDetail` without disagreeing.
+            assert!(apply_to_knobs("WorldDetail", &n.to_string(), &mut knobs));
+            let by_stop = knobs.clutter.density;
+            knobs.clutter.density = 0.5;
+            assert!(apply_to_knobs(
+                "frillDensity",
+                &frill.to_string(),
+                &mut knobs
+            ));
+            assert_eq!(
+                knobs.clutter.density, by_stop,
+                "stop {n}: the two spellings disagree"
+            );
+            assert_eq!(knobs.clutter.frill_density(), *frill as f32);
+        }
+        // Back to the shipped stop, so the rows after this one read the default ground cover.
+        assert!(apply_to_knobs("WorldDetail", "1", &mut knobs));
+        assert_eq!(knobs.clutter.density, 2.0);
         // The zoom pair (1131): each index lands on its own field, clamped like `set_zoom`.
         assert!(apply_to_knobs("minimapZoom", "5", &mut knobs));
         assert_eq!(knobs.minimap.outdoor, 5);
@@ -2348,7 +3177,10 @@ mod tests {
         app.add_plugins(bevy::MinimalPlugins)
             .insert_resource(SoundConfig::default())
             .insert_resource(UiScaleCvar(DEFAULT_UI_SCALE))
-            .insert_resource(ViewDistance { farclip: 350.0 })
+            .insert_resource(ViewDistance {
+                farclip: 350.0,
+                nearclip: benilla_world::view::NEARCLIP_DEFAULT,
+            })
             .insert_resource(MsaaSetting { samples: 1 })
             // Literal for the same reason (1642): TexFilterSetting::default() reads
             // $WOW_TRILINEAR / $WOW_ANISO. These are what ships (1645).
@@ -2362,7 +3194,14 @@ mod tests {
                 formats: vec![(32, 32, 1), (32, 32, 2), (32, 32, 4)],
             })
             .init_resource::<LookConfig>()
+            .init_resource::<crate::player::camera_dynamics::CameraOptions>()
+            .init_resource::<crate::ui_chat::combat::CombatLogRanges>()
+            .init_resource::<crate::combat_text::DamageTextGates>()
+            .init_resource::<crate::ui_chat::combat::LogPeriodicSpells>()
+            .init_resource::<benilla_world::weather::WeatherState>()
+            .init_resource::<crate::ui_gamma::DisplayGamma>()
             .init_resource::<ClickConfig>()
+            .init_resource::<crate::target::AssistAttack>()
             .init_resource::<LootConfig>()
             .init_resource::<NameConfig>()
             .init_resource::<VPlateMode>()
@@ -2588,7 +3427,10 @@ mod tests {
             .map(|r| r.name)
             .collect();
         strings.sort_unstable(); // the list is the claim, not where the rows sit in the table
-        assert_eq!(strings, vec!["gxResolution", "realmList", "realmName"]);
+        assert_eq!(
+            strings,
+            vec!["gxApi", "gxResolution", "realmList", "realmName"]
+        );
         let default_of = |name: &str| {
             REGISTERED
                 .iter()
@@ -2597,6 +3439,12 @@ mod tests {
                 .expect("registered")
         };
         assert_eq!(default_of("realmName"), "");
+        // **`gxApi` defaults EMPTY on the same argument** (2151): the value is the render
+        // adapter's backend, written by `sync_cvars` on every launch, so the default only ever
+        // describes a client with no renderer. Naming one — `"direct3d"` least of all, which is
+        // the reference's and is a backend wgpu does not have — would be a claim about a machine
+        // we have not looked at.
+        assert_eq!(default_of("gxApi"), "");
         assert_eq!(
             crate::video::parse_resolution(default_of("gxResolution")),
             Some(crate::video::DEFAULT_WINDOWED)

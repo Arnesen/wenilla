@@ -145,11 +145,7 @@ mod tests {
         let mut s = UiScript::new().unwrap();
 
         // Nothing equipped or nothing enchanted: six nils, not zero values.
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetWeaponEnchantInfo())")
-                .unwrap(),
-            6
-        );
+        assert_eq!(s.arity("GetWeaponEnchantInfo()").unwrap(), 6);
         assert!(s
             .eval::<bool>(
                 "local a, b, c, d, e, f = GetWeaponEnchantInfo() \
@@ -170,8 +166,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            s.eval::<i64>("return select('#', GetWeaponEnchantInfo())")
-                .unwrap(),
+            s.arity("GetWeaponEnchantInfo()").unwrap(),
             6,
             "still six with only one weapon enchanted"
         );
@@ -243,8 +238,7 @@ mod tests {
         // `GetInventoryAlertStatus`, which has both), so an addon that guesses at a slot argument
         // still gets an answer rather than a raised error.
         assert_eq!(
-            s.eval::<i64>("return select('#', GetWeaponEnchantInfo(16, \"nonsense\"))")
-                .unwrap(),
+            s.arity("GetWeaponEnchantInfo(16, \"nonsense\")").unwrap(),
             6
         );
     }

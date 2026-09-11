@@ -15,7 +15,7 @@ fn setpoint_explicit_nil_relative_to_keeps_offsets() {
         r#"
         local f = CreateFrame("Frame", "Nil")
         f:SetPoint("TOPLEFT", nil, "TOPLEFT", 40, -40)
-        f:SetSize(300, 200)
+        f:SetWidth(300); f:SetHeight(200)
     "#,
     )
     .unwrap();
@@ -40,7 +40,7 @@ fn setpoint_resolve_size_and_rect() {
         r#"
         local f = CreateFrame("Frame", "Sized")
         f:SetPoint("TOPLEFT", 10, -5)   -- relativeTo = screen (default), relativePoint = TOPLEFT
-        f:SetSize(200, 50)
+        f:SetWidth(200); f:SetHeight(50)
     "#,
     )
     .unwrap();
@@ -68,44 +68,162 @@ fn setpoint_resolve_size_and_rect() {
 #[test]
 fn getwidth_falls_back_to_explicit_size_before_resolve() {
     let s = script();
-    // No SetPoint ⇒ unresolvable; GetWidth returns the explicit SetSize value.
+    // No SetPoint ⇒ unresolvable; GetWidth returns the explicit SetWidth value.
     let w: f32 = s
         .eval(r#"local f = CreateFrame("Frame"); f:SetWidth(123); return f:GetWidth()"#)
         .unwrap();
     assert_eq!(w, 123.0);
 }
 
-// A *named* relativeTo that doesn't resolve falls back to the parent/owner — the client's
-// behavior — but must SAY so: the silent version misdirected ItemTextFrame's scrollbar track
-// onto the parchment (an XML forward reference; anchors resolve at SetPoint time). Both the
-// frame and the region SetPoint paths warn.
+/// A *named* `relativeTo` that does not resolve **RAISES** and abandons the call — the reference's
+/// `luaL_error(0x87ccd4, "%s:SetPoint(): Couldn't find region named '%s'")`, with no fallback and
+/// no no-op (decision 2176; 2105 pinned the bytes and deferred the change until the addon survey
+/// could see engine warnings). The region path is the same registered function, so it raises the
+/// same way — and both quote the receiver's own name, `<unnamed>` (`0x84c7f0`) when it has none.
+///
+/// **This replaces a parent/owner fallback plus a warning.** That fallback is what misdirected
+/// ItemTextFrame's scrollbar track onto the parchment; the XML half of the same miss is a
+/// different law and keeps its warning (`Loader::apply_anchor`, `0x767800`).
 #[test]
-fn setpoint_unresolved_name_warns() {
+fn setpoint_unresolved_name_raises() {
     let mut s = script();
-    s.run(
-        r#"
-        local f = CreateFrame("Frame", "Orphan")
-        f:SetPoint("TOPLEFT", "NoSuchFrame", "TOPLEFT", 0, 0)
-        local t = f:CreateTexture(nil, "ARTWORK")
-        t:SetPoint("TOPRIGHT", "NoSuchRegion")
-    "#,
-    )
-    .unwrap();
-    let w = s.take_warnings();
+    s.run(r#"f = CreateFrame("Frame", "Orphan")"#).unwrap();
+
+    let e = s
+        .run(r#"Orphan:SetPoint("TOPLEFT", "NoSuchFrame", "TOPLEFT", 0, 0)"#)
+        .unwrap_err()
+        .to_string();
     assert!(
-        w.iter()
-            .any(|w| w.contains("Orphan") && w.contains("NoSuchFrame")),
-        "frame path: {w:#?}"
+        e.contains("Orphan:SetPoint(): Couldn't find region named 'NoSuchFrame'"),
+        "frame path: {e}"
     );
+
+    let e = s
+        .run(
+            r#"t = Orphan:CreateTexture(nil, "ARTWORK")
+               t:SetPoint("TOPRIGHT", "NoSuchRegion")"#,
+        )
+        .unwrap_err()
+        .to_string();
     assert!(
-        w.iter()
-            .any(|w| w.contains("Orphan") && w.contains("NoSuchRegion")),
-        "region path: {w:#?}"
+        e.contains("<unnamed>:SetPoint(): Couldn't find region named 'NoSuchRegion'"),
+        "region path (anonymous receiver): {e}"
     );
-    // A resolvable name stays silent.
+
+    // The anchor was ABANDONED, not applied to the parent: the frame still has none.
+    let n: i64 = s.eval("return Orphan:GetNumPoints()").unwrap();
+    assert_eq!(n, 0, "the raise must leave no anchor behind");
+
+    // `SetAllPoints` has its own string, and a NUMBER takes the name path there (`lua_isstring`)
+    // where `SetPoint` would read it as an offset.
+    let e = s
+        .run(r#"Orphan:SetAllPoints("NoSuchFrame")"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("Orphan:SetAllPoints(): Couldn't find region named 'NoSuchFrame'"),
+        "{e}"
+    );
+    let e = s.run("Orphan:SetAllPoints(42)").unwrap_err().to_string();
+    assert!(
+        e.contains("Orphan:SetAllPoints(): Couldn't find region named '42'"),
+        "a number is a string to `lua_isstring`, so it is looked up as `_G[\"42\"]`: {e}"
+    );
+
+    // A resolvable name still works, and warns about nothing.
     s.run(r#"CreateFrame("Frame", "Target"); Orphan:SetPoint("BOTTOMLEFT", "Target", "TOPLEFT")"#)
         .unwrap();
     assert!(s.take_warnings().is_empty());
+}
+
+/// The other four raises of the same ladder, each read out of the reference image.
+///
+/// * **Usage** `0x87cc28` — an absent `relativeTo` is `TNONE` and fails the `lua_type(L,3)` gate
+///   (`0x7a25e6`–`0x7a2620`), so a one-argument `SetPoint` is an error on a 1.12 client. Stock
+///   content makes none (349 call sites, arity histogram `{3:5, 4:1, 5:343}`); five sites in the
+///   219-addon vanilla corpus do, all of them in multi-client code.
+/// * **Unknown region point** `0x87cd04`, from the 9-entry scan `0x6f1840`.
+/// * **trying to anchor to itself** `0x87cca8` / `0x87cd54`.
+/// * And the ORDER is observable: the two tag gates run before the point-name scan, so an unknown
+///   point with an absent `relativeTo` answers Usage, not "Unknown region point".
+#[test]
+fn the_other_setpoint_raises() {
+    let s = script();
+    s.run(r#"f = CreateFrame("Frame", "Ladder")"#).unwrap();
+
+    let e = s
+        .run(r#"Ladder:SetPoint("CENTER")"#)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("Usage: Ladder:SetPoint(\"point\""), "{e}");
+
+    let e = s
+        .run(r#"Ladder:SetPoint("MIDDLE", nil, "MIDDLE", 0, 0)"#)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("Ladder:SetPoint(): Unknown region point"), "{e}");
+
+    // Unknown point AND absent relativeTo: the tag gate is first, so this is Usage.
+    let e = s
+        .run(r#"Ladder:SetPoint("MIDDLE")"#)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("Usage:"), "the tag gate runs first: {e}");
+
+    let e = s
+        .run(r#"Ladder:SetPoint("CENTER", Ladder, "CENTER", 0, 0)"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("Ladder:SetPoint(): trying to anchor to itself"),
+        "{e}"
+    );
+}
+
+/// **A trailing explicit `nil` is PRESENT, and absent is absent** — the one thing that would make
+/// the Usage raise over-fire. `lua_type(L,3)` distinguishes `LUA_TNIL` (0, the screen-root arm)
+/// from `LUA_TNONE` (−1, which fails the gate), so the ladder must see the argument count Lua saw
+/// and not a tuple padded or trimmed on the way in.
+#[test]
+fn a_trailing_nil_relative_to_is_present_where_an_absent_one_is_not() {
+    let s = script();
+    s.run(r#"f = CreateFrame("Frame", "Trail")"#).unwrap();
+    // Present-and-nil: legal, the screen root, no offsets.
+    s.run(r#"Trail:SetPoint("CENTER", nil)"#).unwrap();
+    assert_eq!(s.eval::<i64>("return Trail:GetNumPoints()").unwrap(), 1);
+    // Absent: Usage.
+    let e = s
+        .run(r#"Trail:SetPoint("CENTER")"#)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("Usage:"), "{e}");
+}
+
+/// An explicit `nil` `relativeTo` is the **SCREEN ROOT** (`0x7a2710 mov eax,ds:0xcf0bd8`), not the
+/// parent — the arm benilla answered with the parent until 2176. `UIParent.lua:1549` is the one
+/// stock site; fourteen corpus sites take it, every one of them meaning "the screen"
+/// (`pfUI`'s screenshot caption, `FixCTGroups`' cursor-space plate).
+#[test]
+fn an_explicit_nil_relative_to_is_the_screen_not_the_parent() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        host = CreateFrame("Frame", "NilHost")
+        NilHost:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 200, 100)
+        NilHost:SetWidth(100) NilHost:SetHeight(100)
+        kid = CreateFrame("Frame", "NilKid", NilHost)
+        NilKid:SetWidth(10) NilKid:SetHeight(10)
+        NilKid:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 0, 0)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let left: f32 = s.eval("return NilKid:GetLeft()").unwrap();
+    assert_eq!(
+        left, 0.0,
+        "the screen's BOTTOMLEFT, not NilHost's (which is 200)"
+    );
 }
 
 /// **A region whose OWNER has no rect still resolves from its own anchors.**
@@ -141,7 +259,7 @@ fn a_region_resolves_even_when_its_owner_frame_has_no_rect() {
 
         -- control: identical region, owner that DOES resolve
         sized = CreateFrame("Frame", "SizedOwner")
-        sized:SetWidth(10) sized:SetHeight(10) sized:SetPoint("CENTER")
+        sized:SetWidth(10) sized:SetHeight(10) sized:SetPoint("CENTER", 0, 0)
         ctl = sized:CreateTexture("SizedMark", "ARTWORK")
         ctl:SetWidth(20) ctl:SetHeight(10)
         ctl:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 5, 7)
@@ -201,7 +319,7 @@ fn an_unanchored_owners_region_chain_resolves_nowhere() {
         -- $parentLeft: anchored to the OWNER (no relativeTo = the owner frame), which has no rect.
         cap = bare:CreateTexture("StrayLeft", "ARTWORK")
         cap:SetWidth(25) cap:SetHeight(64)
-        cap:SetPoint("TOPLEFT")
+        cap:SetPoint("TOPLEFT", 0, 0)
 
         -- $parentMiddle: the sibling chain that turned a zero rect into 115x64 of visible capsule.
         mid = bare:CreateTexture("StrayMiddle", "ARTWORK")

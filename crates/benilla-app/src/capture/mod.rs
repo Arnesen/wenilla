@@ -791,6 +791,37 @@ impl Plugin for CapturePlugin {
                     minute: knob("WOW_VISTA_MIN", 720.0) as u32,
                     ui: None,
                 }
+            } else if name == "name-close" {
+                // The magnified overhead-name instrument (see `scenarios::NAME_CLOSE_AT`): the
+                // `name-water` wolf, orbited by knob and looked straight at, so the ONE variable
+                // is how many device pixels a glyph texel is drawn into. Not a golden scenario.
+                let knob = |k: &str, d: f32| {
+                    std::env::var(k)
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(d)
+                };
+                let at = scenarios::NAME_CLOSE_AT;
+                // The name hangs `h` above the unit's FEET (the posed PlayerName attachment plus
+                // the block's own line of rise) — that point is what the camera orbits and aims at.
+                let name_at = [at[0], at[1], at[2] + knob("WOW_NAME_H", 1.4)];
+                let (dist, az, el) = (
+                    knob("WOW_NAME_DIST", 4.0),
+                    knob("WOW_NAME_AZ", 124.0).to_radians(),
+                    knob("WOW_NAME_EL", 8.0).to_radians(),
+                );
+                Scenario {
+                    name: "name-close",
+                    map: Some(scenarios::MAP_AZEROTH),
+                    eye: [
+                        name_at[0] + dist * el.cos() * az.cos(),
+                        name_at[1] + dist * el.cos() * az.sin(),
+                        name_at[2] + dist * el.sin(),
+                    ],
+                    look: name_at,
+                    minute: 720,
+                    ui: Some(UiFixture::NameWater),
+                }
             // By name, EITHER table: the blessed six or an on-demand fixture. Only the sweep is
             // narrowed — every old viewpoint is still capturable by name (decision 0632).
             } else if let Some(&s) = SCENARIOS
@@ -807,7 +838,7 @@ impl Plugin for CapturePlugin {
                     .map(|s| s.name)
                     .collect();
                 eprintln!(
-                "WOW_CAPTURE={name:?} is not a known scenario; choose one of: {known:?}, {glue_known:?} (or fxview, waterfx)"
+                "WOW_CAPTURE={name:?} is not a known scenario; choose one of: {known:?}, {glue_known:?} (or fxview, waterfx, name-close)"
             );
                 std::process::exit(2);
             })

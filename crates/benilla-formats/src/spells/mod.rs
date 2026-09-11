@@ -128,7 +128,10 @@ pub use forms::{load_shapeshift_forms, ShapeshiftForm};
 mod immunity;
 pub use immunity::{cc_exemption, grants_immunity, CcExemption};
 pub use radius::{load_spell_radii, SpellRadius, SpellRadiusCatalog};
-pub use ranges::{load_spell_ranges, SpellRange, SpellRangeCatalog};
+pub use ranges::{
+    load_spell_ranges, min_max_range, SpellRange, SpellRangeCatalog, COMBAT_REACH_ADD,
+    MELEE_RANGE_FLOOR, ON_NEXT_SWING_RANGE,
+};
 pub use tokens::{substitute, TokenContext};
 
 use std::collections::HashMap;
