@@ -1166,3 +1166,81 @@ fn a_button_labels_own_setfont_survives_the_state_font_repoint() {
         "an axis the label never set still inherits — severance is per-axis"
     );
 }
+
+/// **A state-texture setter takes an OBJECT and takes nil**, not only a path — the reference's
+/// `0x781970` forks on `lua_type(L, 2)` into four legs and benilla honoured one of them
+/// (wow-re `button-state-texture-path-setter.md` §1; decision 2124).
+///
+/// Both missing legs are silent no-ops rather than errors, which is why nothing caught them:
+///
+/// * **the object leg** (`0x781b0b` → `0x778fd0`) installs the handed Texture *into the slot*.
+///   Three corpus addons build a highlight this way and every one of them drew nothing —
+///   `Bongos/bar.lua:64-71`, `_Nameplates/_Nameplates.lua:217-222`,
+///   `Quiver/Quiver.bundle.lua:8949-8953`. The idiom below is Bongos', verbatim in shape.
+/// * **the nil leg** (`0x781b5a` → `0x778fd0` with 0) clears the slot and dtors what was in it.
+///   `TheoryCraft/TheoryCraftUI.lua:215-217` strips a talent-rank button with three of these.
+///   Clearing the *pointer* alone would be worse than the no-op: `region_visible` draws any region
+///   that is not one of the button's slots unconditionally, so a merely unhooked state texture
+///   would appear in every state instead of none — which is what this test's last assertion pins.
+#[test]
+fn a_state_texture_slot_takes_an_object_and_a_nil() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        b = CreateFrame("Button", "SlotBtn")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetNormalTexture("Interface\\N.blp")
+        -- Bongos' own idiom: build the highlight yourself and hand the object over.
+        hl = b:CreateTexture()
+        hl:SetTexture("Interface\\OWN.blp")
+        hl:SetAllPoints(b)
+        b:SetHighlightTexture(hl)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    let drawn = |s: &UiScript| -> Vec<String> {
+        s.extract()
+            .iter()
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture { path: Some(p), .. } => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // The handed object IS the slot now: it draws on hover and only on hover, exactly as a
+    // path-loaded highlight does.
+    assert_eq!(drawn(&s), vec!["Interface\\N.blp".to_string()]);
+    assert!(
+        s.eval::<bool>("return b:GetHighlightTexture() == hl")
+            .unwrap(),
+        "the getter must hand back the object that was installed, not a slot region of our own"
+    );
+    s.mouse_move(50.0, 50.0); // hover, so the highlight slot draws
+    s.resolve();
+    assert_eq!(
+        drawn(&s),
+        vec![
+            "Interface\\N.blp".to_string(),
+            "Interface\\OWN.blp".to_string()
+        ]
+    );
+
+    // nil clears — and the cleared art is gone from every state, not merely unhooked.
+    s.run("b:SetHighlightTexture(nil) b:SetNormalTexture(nil)")
+        .unwrap();
+    s.resolve();
+    assert!(
+        drawn(&s).is_empty(),
+        "a cleared slot still draws: {:?}",
+        drawn(&s)
+    );
+    assert!(
+        s.eval::<bool>("return b:GetHighlightTexture() == nil")
+            .unwrap(),
+        "the slot must read empty after nil"
+    );
+}

@@ -442,7 +442,7 @@ Interface\FrameXML\OptionsFrame.lua
 # honest answer — and it is free, because the file is the player's own.
 #
 # IT IS ALSO WHERE THE REFERENCE KEEPS ITS OPTIONS STATE, so loading it retires three duplications
-# our own window carried (2115): `UIOptionsFrame_Init` assigns and `RegisterForSave`s all 38
+# our own window carried (2115): `UIOptionsFrame_Init` assigns and `RegisterForSave`s all 30
 # options uvars; `UIOptionsFrameCheckButtons` is declared here — the table stock
 # `MultiActionBars.lua:10` writes five rows into at ITS load, which is why this row must stay
 # above that one; and `UpdateNameplates` is this file's function.

@@ -200,7 +200,7 @@
         -- thing instead of an alias onto us. Three things this file used to carry are the stock
         -- file's, and are gone from here rather than duplicated:
         --
-        --   · **The 38 options uvars.** `UIOptionsFrame_Init` (stock UIOptionsFrame.lua l.93-185)
+        --   · **The 30 options uvars.** `UIOptionsFrame_Init` (stock UIOptionsFrame.lua l.93-185)
         --     assigns every one its factory value and `RegisterForSave`s it — SIMPLE_CHAT,
         --     CHAT_LOCKED, REMOVE_CHAT_DELAY, SHOW_NEWBIE_TIPS, LOCK_ACTIONBAR,
         --     SHOW_BUFF_DURATIONS, ALWAYS_SHOW_MULTIBARS, SHOW_PARTY_PETS, QUEST_FADING_DISABLE,

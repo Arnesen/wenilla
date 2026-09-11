@@ -2453,17 +2453,22 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
         .non_send_resource::<benilla_ui::script::UiScript>()
         .run(
             r#"
-            ChatOrderProbe = {}
+            ChatOrderProbe = { order = "" }
             local f = CreateFrame("Frame")
+            f:RegisterEvent("VARIABLES_LOADED")
             f:RegisterEvent("UPDATE_CHAT_WINDOWS")
             f:RegisterEvent("UPDATE_CHAT_COLOR")
             f:RegisterEvent("PLAYER_LOGIN")
             f:SetScript("OnEvent", function()
+                -- The burst is 100+ events; record it once so the order string stays readable.
+                if not string.find(ChatOrderProbe.order, event, 1, 1) then
+                    ChatOrderProbe.order = ChatOrderProbe.order .. event .. " "
+                end
                 if event == "UPDATE_CHAT_WINDOWS" then
                     ChatOrderProbe.windows = (ChatOrderProbe.windows or 0) + 1
                 elseif event == "UPDATE_CHAT_COLOR" then
                     ChatOrderProbe.colors = (ChatOrderProbe.colors or 0) + 1
-                else
+                elseif event == "PLAYER_LOGIN" then
                     ChatOrderProbe.loginWindows = ChatOrderProbe.windows or 0
                     ChatOrderProbe.loginColors = ChatOrderProbe.colors or 0
                     ChatOrderProbe.loginRegistered =
@@ -2529,6 +2534,15 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
         read("ChatOrderProbe.loginRegistered").contains("SYSTEM"),
         "ChatFrame1 must carry the SYSTEM message group at PLAYER_LOGIN, not {:?}",
         read("ChatOrderProbe.loginRegistered")
+    );
+    // The reference's own login order, byte-derived (wow-re `login-chat-colour-pipeline.md`;
+    // decision 2125): addons and their `ADDON_LOADED` (`0x4900a3`), then `VARIABLES_LOADED`
+    // (`0x4900b2`), then the chat-cache reader's burst (`0x4900d6`), then `PLAYER_LOGIN`
+    // (`0x490959`). 2119 put the burst ahead of `VARIABLES_LOADED`, one step too early.
+    assert_eq!(
+        read("ChatOrderProbe.order"),
+        "VARIABLES_LOADED UPDATE_CHAT_WINDOWS UPDATE_CHAT_COLOR PLAYER_LOGIN ",
+        "the reference fires the chat-cache burst BETWEEN VARIABLES_LOADED and PLAYER_LOGIN"
     );
 
     drop(world);

@@ -106,10 +106,15 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // Making it exact means per-type SCRIPT_KINDS, which newly RAISES on 30 sites that work today
     // (9 in our own FrameXML). That is behaviour removal and belongs in its own change, with its
     // own measurement; it is not a tail on this one.
+    //
+    // 1/nil, not a Lua boolean: the reference's row is `(nil) | (number)` like every other
+    // predicate (decision 2118).
     m.set(
         "HasScript",
         lua.create_function(|_, (_this, name): (Table, String)| {
-            Ok(SCRIPT_KINDS.iter().any(|k| k.eq_ignore_ascii_case(&name)))
+            Ok(crate::script::binding_abi::flag(
+                SCRIPT_KINDS.iter().any(|k| k.eq_ignore_ascii_case(&name)),
+            ))
         })?,
     )?;
     // RegisterForDrag(...varargs of button names) — the drag-gesture twin of `RegisterForClicks`

@@ -61,15 +61,15 @@ impl Slot {
     /// `0x778fd0` family, which stores the slot *and* pushes it to the shown pointer when it is
     /// the current state's. Every other slot is a plain field: the highlight, the checked pair
     /// and the label are not in the state array and have show rules of their own.
-    fn set(self, bs: &mut ButtonState, rh: crate::widget::RegionHandle) {
+    fn set(self, bs: &mut ButtonState, rh: Option<crate::widget::RegionHandle>) {
         match self {
-            Slot::Normal => bs.set_state_slot(ButtonVisualState::Normal, Some(rh)),
-            Slot::Pushed => bs.set_state_slot(ButtonVisualState::Pushed, Some(rh)),
-            Slot::Disabled => bs.set_state_slot(ButtonVisualState::Disabled, Some(rh)),
-            Slot::Highlight => bs.highlight = Some(rh),
-            Slot::Checked => bs.checked_tex = Some(rh),
-            Slot::DisabledChecked => bs.disabled_checked = Some(rh),
-            Slot::Text => bs.text = Some(rh),
+            Slot::Normal => bs.set_state_slot(ButtonVisualState::Normal, rh),
+            Slot::Pushed => bs.set_state_slot(ButtonVisualState::Pushed, rh),
+            Slot::Disabled => bs.set_state_slot(ButtonVisualState::Disabled, rh),
+            Slot::Highlight => bs.highlight = rh,
+            Slot::Checked => bs.checked_tex = rh,
+            Slot::DisabledChecked => bs.disabled_checked = rh,
+            Slot::Text => bs.text = rh,
         }
     }
 
@@ -380,7 +380,7 @@ fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
             model.touch_layout(); // a region entered the layout gate's read set (decision 0740)
             if let Some(frame) = model.arena.frame_mut(h) {
                 if let KindState::Button(bs) = &mut frame.kind_state {
-                    slot.set(bs, rh);
+                    slot.set(bs, Some(rh));
                 }
             }
             // A freshly built slot region gets its creation-path implicit anchor (decision 1310)
@@ -401,8 +401,91 @@ fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
     Ok(model.region_id(rh))
 }
 
-/// The shared body of `Set<State>Texture(path)` / `(r, g, b [, a])`.
+/// Point `slot` at `rh` (or at nothing) and hand back whatever it held before, when that is a
+/// different region. The reference's slot store `0x778fd0` ends in the outgoing object's
+/// vtable-slot-0 dtor, so the caller frees it.
+fn swap_slot(
+    model: &mut Model,
+    h: FrameHandle,
+    slot: Slot,
+    rh: Option<RegionHandle>,
+) -> mlua::Result<Option<RegionHandle>> {
+    let frame = model
+        .arena
+        .frame_mut(h)
+        .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
+    let KindState::Button(bs) = &mut frame.kind_state else {
+        return Err(mlua::Error::runtime("not a Button"));
+    };
+    let outgoing = slot.get(bs).filter(|old| Some(*old) != rh);
+    slot.set(bs, rh);
+    model.touch_layout();
+    Ok(outgoing)
+}
+
+/// Free the region a slot just gave up — never the one that just moved in.
+fn free_outgoing(lua: &Lua, outgoing: Option<RegionHandle>, incoming: RegionHandle) {
+    if let Some(old) = outgoing.filter(|old| *old != incoming) {
+        super::region::free_region(
+            &mut lua.app_data_mut::<Model>().expect("model app_data"),
+            old,
+        );
+    }
+}
+
+/// The shared body of `Set<State>Texture(texture | "path" | nil)` / `(r, g, b [, a])`.
+///
+/// The reference forks on `lua_type(L, 2)` into four legs (`0x781970`, carved instruction by
+/// instruction in wow-re `button-state-texture-path-setter.md` §1). **Two of them never touch the
+/// slot's own region at all**, so they are resolved *before* [`ensure_slot`] — which would
+/// otherwise lazily build a region for a call whose entire purpose is to replace or drop one.
 fn set_slot_texture(lua: &Lua, this: &Table, slot: Slot, args: &MultiValue) -> mlua::Result<()> {
+    match args.front() {
+        // **A widget object installs THAT region into the slot** (`0x781b0b`: `push the Texture
+        // object; push idx; call 0x778fd0`) — it does not load a path into the slot's own region.
+        // Three corpus addons build a highlight exactly this way and every one of them was a
+        // silent no-op here: Bongos' bar-drag button (`bar.lua:64-71`), _Nameplates' mouseover
+        // glow (`_Nameplates.lua:217-222`) and Quiver's option rows (`Quiver.bundle.lua:8949-53`)
+        // each `CreateTexture` on the button, colour it, `SetAllPoints`, and hand it over.
+        Some(Value::Table(t)) => {
+            let rh = super::region::region_handle_of(lua, t)?;
+            let h = frame_handle_of(lua, this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // The reference type-checks the handed object and raises rather than installing a
+            // FontString into a texture slot (`0x781ab1`, `0x87a1e0`).
+            if model.arena.region(rh).map(|r| r.kind) != Some(RegionKind::Texture) {
+                return Err(mlua::Error::runtime("Wrong object type, expected texture"));
+            }
+            let outgoing = swap_slot(&mut model, h, slot, Some(rh))?;
+            drop(model);
+            free_outgoing(lua, outgoing, rh);
+            return Ok(());
+        }
+        // **nil CLEARS the slot** (`0x781b5a`: `push 0; push idx; call 0x778fd0`, whose tail runs
+        // the outgoing object's dtor). Clearing the pointer alone would be worse than doing
+        // nothing: `ButtonState::region_visible` shows any region that is not one of the button's
+        // own slots unconditionally, so an unhooked state texture would start drawing in *every*
+        // state instead of none. `TheoryCraft/TheoryCraftUI.lua:215-217` strips a talent-rank
+        // button's normal/pushed/highlight art with three of these.
+        //
+        // A call with NO argument is left alone: `LUA_TNONE` is not `LUA_TNIL`, and the
+        // reference's own nil test is `0x781b4f call 0x6f3400 == 0`.
+        Some(Value::Nil) => {
+            let h = frame_handle_of(lua, this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let outgoing = swap_slot(&mut model, h, slot, None)?;
+            drop(model);
+            if let Some(old) = outgoing {
+                super::region::free_region(
+                    &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                    old,
+                );
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let id = ensure_slot(lua, this, slot)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let rh = *model.id_to_region.get(&id).expect("slot region id");

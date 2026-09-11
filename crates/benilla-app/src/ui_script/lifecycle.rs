@@ -432,21 +432,21 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // back. Startup always precedes this state edge (1038), so the knob is already loaded.
     let zoom = world.resource::<crate::minimap::MinimapZoom>();
     script.set_minimap_zoom(zoom.outdoor, zoom.inside);
-    // **The chat cache restores HERE — after every chat frame exists, before anything prints into
-    // one** (decision 2119). It is the sole firer of `UPDATE_CHAT_WINDOWS`, which is the only
-    // thing that registers a chat frame for any `CHAT_MSG_*` (ref `ChatFrame.lua` l.1261-1273),
-    // and of the `UPDATE_CHAT_COLOR` burst, whose `WHISPER`→`REPLY` mirror repaints every line
-    // already in the window that was printed with no explicit colour (`ChatTypeInfo["REPLY"].id`
-    // is 0, and so is such a line's). As an `Update` system both landed too late: the login MOTD
-    // was routed to a window registered for nothing, and every Ace2 addon's `Print` at
-    // `PLAYER_LOGIN` came out whisper-pink. Placed after `load_ingame_ui` so an ADDON's chat frame
-    // is registered too, and before `finish_ui_load` so the burst precedes `PLAYER_LOGIN`.
-    crate::ui_chat::restore_chat_looks(world, &mut script);
     // The saved-variables chunk runs HERE — after the XML assigned its file-scope defaults, before
     // any consumer reads them — then `VARIABLES_LOADED`. That is the reference's own load order
     // (`AddOn_Load 0x51f240` steps 2 → 4 → 6, decision 1128); reversing it means the defaults
     // always win and nothing can ever be remembered.
-    finish_ui_load(&mut script);
+    //
+    // **And the chat cache restores inside it, between `VARIABLES_LOADED` and `PLAYER_LOGIN`** —
+    // the reference's own slot for the reader's `UPDATE_CHAT_WINDOWS` + `UPDATE_CHAT_COLOR` burst
+    // (`0x4900d6`, after `0x4900b2` and before `0x490959`; decisions 2119 and 2125). It is the
+    // sole firer of `UPDATE_CHAT_WINDOWS`, which is the only thing that registers a chat frame for
+    // any `CHAT_MSG_*` (ref `ChatFrame.lua` l.1261-1273) — as an `Update` system it landed after
+    // the session's first chat had already been routed, and the login MOTD went to a window
+    // registered for nothing.
+    finish_ui_load_with(&mut script, |script| {
+        crate::ui_chat::restore_chat_looks(world, script);
+    });
     // **Say it out loud when an addon didn't load** (decision 1495). Every failure the walk found
     // is retained now, but a log nobody knows to open does not fix silence — and silence is the
     // actual defect B293 reports: *"there are a lot of addons that still doesn't work"*, with
@@ -754,12 +754,34 @@ pub(crate) fn shutdown_on_exit(
 /// [`load_ingame_ui_on_world_entry`], on the same edge that built the tree.
 /// `PLAYER_ENTERING_WORLD` keeps its own per-entry latch in [`crate::ui_unit`] and still lands
 /// after this, since it waits on the self descriptor arriving over the wire.
+/// Test-only since 2125: the production edge is [`finish_ui_load_with`], because the chat-cache
+/// restore has to sit inside it. A test that only wants the tail keeps the plain shape.
+#[cfg(test)]
 pub(crate) fn finish_ui_load(script: &mut UiScript) {
+    finish_ui_load_with(script, |_| {});
+}
+
+/// [`finish_ui_load`] with the one step that has to land **between** `VARIABLES_LOADED` and
+/// `PLAYER_LOGIN`: the chat-cache restore's `UPDATE_CHAT_WINDOWS` + `UPDATE_CHAT_COLOR` burst
+/// (decision 2125, correcting 2119's placement).
+///
+/// The reference's login is `FrameXML → addons + ADDON_LOADED (0x4900a3) → VARIABLES_LOADED
+/// (0x4900b2) → the chat-cache reader's burst (0x4900d6, firing synchronously through the
+/// register-or-fire-now trampoline 0x498a20) → PLAYER_LOGIN (0x490959) → PLAYER_ENTERING_WORLD
+/// (0x49096a)` — byte-derived in wow-re `system/ui/scratch/login-chat-colour-pipeline.md`, §5
+/// cross-checked. 2119 put the restore ahead of `VARIABLES_LOADED`, which is one step too early:
+/// an addon reading its chat colours out of a `VARIABLES_LOADED` handler would see the file's
+/// values where the reference shows it the boot ones.
+///
+/// A callback rather than a split pair because the budget re-arm and the two fires are one edge,
+/// and a caller that forgets the middle step should not be able to compile.
+pub(crate) fn finish_ui_load_with(script: &mut UiScript, between: impl FnOnce(&mut UiScript)) {
     // Still the load edge, so still bounded (1306) — re-armed because the walk's last addon left
     // an arbitrary amount on the counter, and the saved-variables chunk plus every PLAYER_LOGIN
     // handler deserve the full allowance. The entry edge disarms after this returns.
     script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
     crate::ui_saved::load_saved_variables(script);
+    between(script);
     script.fire_event("PLAYER_LOGIN", vec![]);
 }
 

@@ -190,14 +190,15 @@ pub fn sprite_dimensions(
 /// *before* inserting — so the warning is self-limiting by construction (one line per distinct key
 /// for the process's life), with no separate "already warned" set to keep.
 ///
-/// It exists because the renderer's fallback for an unresolvable path is **silent and looks like
-/// art**: a `Texture` region whose file can't be found still pushes a quad, which `ui_pass` draws
-/// with the shared 1×1 white image tinted white — an opaque WHITE RECTANGLE at the region's exact
-/// rect. That fallback can't itself be made loud (it is what lets flat-shaded quads batch into one
-/// texture run), so a miss has to be reported here instead. Bug B221 — macro-chooser icons
-/// rendering as white squares — was invisible to every layer of the client until this line existed:
-/// `shipped_xml_tests` sweeps only static XML `file=` attributes, never a path that arrives at
-/// runtime from a DBC.
+/// It exists because the renderer's fallback for an unresolvable path is **silent**. It used to be
+/// silent *and* look like art: a `Texture` region whose file could not be found still pushed a
+/// quad, which `ui_pass` drew with the shared 1×1 white image tinted white — an opaque WHITE
+/// RECTANGLE at the region's exact rect, which is how bug B221's macro-chooser icons looked. That
+/// half is gone (`ui_script::extract` now drops the quad outright when the resolve misses), so the
+/// miss draws *nothing* rather than a white square. It is no less silent for that: nothing on
+/// screen and nothing in Lua says why, and `shipped_xml_tests` sweeps only static XML `file=`
+/// attributes, never a path that arrives at runtime from a DBC or from an addon. So the report
+/// still belongs here.
 ///
 /// Walks [`sprite_candidates`] in order and takes the first that both reads and decodes; only when
 /// **all** fail is it a miss. A candidate that reads but won't decode falls through exactly like
@@ -231,15 +232,38 @@ fn decode_sprite(
             }
         }
     }
-    warn!(
-        "texture miss: '{path}' does not resolve in the patch chain{} (tried {})",
-        if loose_root.is_some() {
-            " or the AddOns folder"
-        } else {
-            ""
-        },
-        candidates.join(", ")
-    );
+    // **"Not there" and "there but would not decode" are different faults, and saying only the
+    // first sends the reader hunting a path that is sitting on disk.** Three colour-mapped TGAs in
+    // the addon corpus read fine and failed to decode for years while this line asserted they did
+    // not resolve (decision 2128).
+    let found_but_undecodable: Vec<&String> = candidates
+        .iter()
+        .filter(|c| {
+            chain.read_file(c).is_ok()
+                || loose_root.is_some_and(|root| loose_addon_file(root, c).is_some())
+        })
+        .collect();
+    if found_but_undecodable.is_empty() {
+        warn!(
+            "texture miss: '{path}' does not resolve in the patch chain{} (tried {})",
+            if loose_root.is_some() {
+                " or the AddOns folder"
+            } else {
+                ""
+            },
+            candidates.join(", ")
+        );
+    } else {
+        warn!(
+            "texture miss: '{path}' RESOLVES but will not decode ({}) — the file is there and the \
+             decoder refused it",
+            found_but_undecodable
+                .iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     None
 }
 

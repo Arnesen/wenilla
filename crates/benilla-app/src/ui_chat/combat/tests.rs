@@ -158,7 +158,7 @@ fn the_school_and_power_words_resolve() {
     for school in 0..=6u8 {
         assert!(
             school_word(&script, school).is_some(),
-            "SPELL_SCHOOL{school}_NAME missing"
+            "SPELL_SCHOOL{school}_CAP missing"
         );
     }
     for power in 0..=3u32 {
@@ -219,7 +219,10 @@ fn the_reported_sentences_read_correctly() {
     );
     assert_eq!(
         line(PERIODICAURADAMAGE, Variant::SelfOther),
-        "Victim suffers 120 fire damage from your Fireball."
+        // **Capitalized** — the reference words this cell out of `Resistances.dbc`, not out of
+        // `SPELL_SCHOOL<n>_NAME` (decision 2127). Lowercase is what MikScrollingBattleText's
+        // school compare misses.
+        "Victim suffers 120 Fire damage from your Fireball."
     );
     assert_eq!(
         line(POWERGAIN, Variant::SelfSelf),
@@ -231,7 +234,7 @@ fn the_reported_sentences_read_correctly() {
     );
     assert_eq!(
         line(DAMAGESHIELD, Variant::SelfOther),
-        "You reflect 120 fire damage to Victim."
+        "You reflect 120 Fire damage to Victim."
     );
     // The double-subject family: the drainer is named twice and the second gain has its own pair.
     assert_eq!(

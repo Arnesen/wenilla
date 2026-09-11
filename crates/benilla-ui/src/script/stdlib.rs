@@ -38,39 +38,58 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
         g.set(name, Value::Nil)?;
     }
 
-    // `debugstack([start [, count1 [, count2]]])` — a REAL traceback, not the `""` stub this used
-    // to be.
+    // `debugstack([start [, count1 [, count2]]])` — the client's own traceback, **frames only**.
     //
-    // The stub was justified as "real addons call it in error paths; returning \"\" keeps them
-    // running", and that was true of the addons that only ever DISPLAY it. It is false of the ones
-    // that PARSE it, and the biggest family in the corpus is one of those: `FuBarPlugin-2.0.lua:752`
-    // derives every plugin's own folder with
-    // `string.find(debugstack(6, 1, 0), "\\AddOns\\(.*)\\")`, then formats the capture into an
-    // icon path. Against `""` the find returns nil, `folderName` stays nil, and the plugin dies in
-    // `format` — 20 corpus addons, every one of them a FuBar plugin, and the error surfaced as a
-    // `format` complaint three frames away from the cause.
+    // The stub this replaced returned `""`, which was justified as "real addons only display it".
+    // False: the corpus PARSES it, three different ways, and every one of them reads the string's
+    // shape rather than its contents.
     //
-    // `start` is the stack level to begin at and defaults to 1, matching the client's own callers
-    // (`debugstack(6, 1, 0)` walks past FuBar's own wrapper frames to the plugin file). The two
-    // count arguments bound how many frames are shown at the top and bottom; mlua's traceback does
-    // not take them, so they are accepted and ignored — stated rather than silently dropped, and
-    // harmless because every corpus caller passes a shape whose whole purpose is "give me the
-    // frames", never an exact line count.
+    // **There is no `stack traceback:` header, and line 1 is the caller's frame** (decision 2121).
+    // mlua's `Lua::traceback` is `luaL_traceback`, which emits that header — and the header cost a
+    // whole addon family its saved variables. `AceDB-2.0:RegisterDB` (`AceDB-2.0.lua:742`) does
+    //
+    //     local addonName = string.gsub(debugstack(), ".-\n.-\\AddOns\\(.-)\\.*", "%1")
+    //
+    // — skip exactly ONE line (its own frame), read the folder out of the NEXT one (its caller's).
+    // With a header in front, the "next" line is AceDB's own chunk, so every Ace2 addon resolved to
+    // whichever addon happened to ship the winning copy of the library. `AceDB.addonsLoaded` has
+    // that one flagged already, so `RegisterDB` took its *immediate* branch and bound `db.raw` to a
+    // fresh table at the addon's FILE SCOPE — before the SavedVariables chunk runs. The chunk then
+    // rebound the global and `db.raw` kept pointing at the orphan, so Bartender2 printed
+    // `Creating new DB` at every login and its file was frozen at what a first-run reset writes.
+    // Measured live: `Bartender.db.raw == BarDB` was **false**.
+    //
+    // Two more corpus readers pin the same shape independently, and they are the reason this emits
+    // Lua 5.0's frame wording rather than 5.4's:
+    //   - `AceLibrary.lua:70` takes the FIRST line whole (`string.gsub(stack, "\n.*", "")`) and
+    //     matches it against `".*\\(.*).lua:%d+: .*"` — so line 1 is a frame, `<src>:<line>: …`,
+    //     with no leading newline and no header above it.
+    //   - `AceLibrary.lua:139`'s `argCheck` reads the function name with `"([`<].-['>])"` — a
+    //     BACKTICK or `<` opening it. 5.0 writes ``in function `name'``; 5.4 writes
+    //     `in function 'name'`, which that pattern cannot match at all.
+    //
+    // So the body is `db_errorfb`'s (Lua 5.0 `ldblib.c`) with its header line removed: per frame
+    // `short_src`, then `:line` when there is one, then one of ``  in function `name' ``,
+    // `" in main chunk"`, `" ?"` (a C function) or `" in function <src:linedefined>"`.
+    //
+    // `start` is the level to begin at, default 1 = the caller (level 0 is this binding itself).
+    // `count1`/`count2` are 5.0's `LEVELS1`/`LEVELS2`: show `count1` frames from the top, then
+    // `...`, then the last `count2`. They are honoured rather than ignored because
+    // `FuBarPlugin-2.0.lua:752` passes `debugstack(6, 1, 0)` and reads the capture with a GREEDY
+    // `"\\AddOns\\(.*)\\"` — extra frames would hand it the LAST addon on the stack instead
+    // of its own.
     g.set(
         "debugstack",
         lua.create_function(|lua, args: Variadic<Value>| {
-            let start = match args.first() {
-                Some(Value::Integer(i)) => *i as usize,
-                Some(Value::Number(n)) => *n as usize,
-                _ => 1,
+            let num = |v: Option<&Value>, default: usize| match v {
+                Some(Value::Integer(i)) => usize::try_from(*i).unwrap_or(0),
+                Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
+                _ => default,
             };
-            // A level past the top of the stack is not an error here, it is an empty trace — the
-            // same shape the old stub returned, so a caller that guessed too deep still gets a
-            // string rather than a raise.
-            Ok(lua
-                .traceback(None, start)
-                .and_then(|t| t.to_str().map(|s| s.to_owned()))
-                .unwrap_or_default())
+            let start = num(args.first(), 1);
+            let count1 = num(args.get(1), 12);
+            let count2 = num(args.get(2), 10);
+            Ok(traceback_frames(lua, start, count1, count2))
         })?,
     )?;
 
@@ -593,6 +612,135 @@ fn format_epoch(secs: i64, fmt: &str) -> String {
     }
     out
 }
+/// `luaO_chunkid` (`0x6f5c40`), the reference's own — because `debugstack`'s frames carry
+/// `short_src`, and **it truncates from the FRONT** (decision 2121, wow-re
+/// `system/ui/scratch/debugstack-return-shape.md`).
+///
+/// An `@`-named chunk longer than [`CHUNKID_KEEP`] characters after the `@` becomes `"..."` plus
+/// its LAST [`CHUNKID_KEEP`], so the head of the path is what is lost. That is not a detail: over a
+/// 2189-file vanilla corpus, 60% of addon `.lua` chunk names truncate and **38% lose `\AddOns\`
+/// entirely**, which is exactly the substring three different corpus libraries search for. A client
+/// that keeps the whole name matches at a different frame than the reference for a third of library
+/// frames — silently, and in the addon's favour, which is worse than failing the same way.
+fn chunk_id(source: &str) -> String {
+    if let Some(rest) = source.strip_prefix('=') {
+        // A `=name` chunk is taken verbatim, clipped to the buffer from the front.
+        return rest.chars().take(LUA_IDSIZE - 1).collect();
+    }
+    if let Some(rest) = source.strip_prefix('@') {
+        let n = rest.chars().count();
+        if n <= CHUNKID_KEEP {
+            return rest.to_string();
+        }
+        let tail: String = rest.chars().skip(n - CHUNKID_KEEP).collect();
+        return format!("...{tail}");
+    }
+    // A string chunk: `[string "<first line, clipped>"]`.
+    let first = source.split('\n').next().unwrap_or_default();
+    let budget = LUA_IDSIZE - STRING_CHUNK_OVERHEAD;
+    if first.chars().count() > budget || first.len() < source.len() {
+        let clipped: String = first.chars().take(budget).collect();
+        format!("[string \"{clipped}...\"]")
+    } else {
+        format!("[string \"{first}\"]")
+    }
+}
+
+/// `LUA_IDSIZE` — the `short_src` buffer, 60 bytes including the terminator.
+const LUA_IDSIZE: usize = 60;
+
+/// How many characters of an `@`-named chunk survive truncation, tail-first: the reference keeps
+/// the last 52 behind a `"..."` (wow-re's measurement off `0x6f5c40`).
+const CHUNKID_KEEP: usize = 52;
+
+/// What `[string "…"]` costs the budget in the third `luaO_chunkid` arm.
+const STRING_CHUNK_OVERHEAD: usize = 17;
+
+/// One `debugstack` frame, in the reference's own wording (decision 2121):
+/// `short_src ":" [currentline ":"] DESC`, with the `\n` pushed **after** it by the caller.
+///
+/// `DESC` is the `*namewhat` switch at `0x7038fa`: a `f`/`g`/`l`/`m` name renders
+/// `` in function `%s' `` (`0x872c98`) — Lua **5.0**'s backtick quoting, which is what
+/// `AceLibrary.lua:139`'s `"([`<].-['>])"` needs and what 5.4's `'%s'` cannot satisfy — and
+/// otherwise the `*what` arms decide: `m` → `" in main chunk"` (`0x872c88`), `C` or `t` → `" ?"`
+/// (`0x872c6c`), else `" in function <%s:%d>"` (`0x872c70`).
+fn traceback_frame(d: &mlua::Debug) -> String {
+    let src = d.source();
+    let names = d.names();
+    let short = src
+        .source
+        .as_deref()
+        .map(chunk_id)
+        .or_else(|| src.short_src.as_deref().map(str::to_owned))
+        .unwrap_or_else(|| "?".to_string());
+    let mut line = String::with_capacity(short.len() + 32);
+    line.push_str(&short);
+    line.push(':');
+    if let Some(n) = d.current_line() {
+        line.push_str(&n.to_string());
+        line.push(':');
+    }
+    // A tail call has no calling instruction to name it from. 5.0 gave that frame `what == "tail"`
+    // and the `" ?"` arm; 5.4 hands us a `(tail call)` pseudo-frame instead, which lands in the
+    // same arm by the same rule.
+    let tail_call = src.what == "t" || short == "(tail call)";
+    match names.name.as_deref() {
+        Some(name) if !name.is_empty() && !tail_call => {
+            line.push_str(" in function `");
+            line.push_str(name);
+            line.push('\'');
+        }
+        _ if src.what == "main" => line.push_str(" in main chunk"),
+        _ if src.what == "C" || tail_call => line.push_str(" ?"),
+        _ => {
+            line.push_str(" in function <");
+            line.push_str(&short);
+            line.push(':');
+            line.push_str(&src.line_defined.unwrap_or(0).to_string());
+            line.push('>');
+        }
+    }
+    line
+}
+
+/// `debugstack`'s body — `0x703760`'s walk, which is stock Lua 5.0's `db_errorfb` with its header
+/// and its `"\n\t"` prefix replaced by a `"\n"` pushed **after** each frame (`0x703971`). That one
+/// substitution is the whole difference in shape, and it is why line 1 is a frame and why
+/// `AceDB-2.0`'s skip-one-line lands on its caller (decision 2121).
+///
+/// **`count1` bounds nothing on its own.** The loop formats while the level is `<= start + count1`
+/// (`0x703857` is `jbe`, unsigned ≤), and past that it probes `getstack(level + count2)`: a probe
+/// that FAILS steps back and prints that level as an ordinary frame, so `count1 = 1` returns *two*
+/// frames on a two-deep stack and one frame plus `"...\n"` on a three-deep one. Clamping to
+/// `count1` instead would diverge from the reference at exactly `depth == count1 + 1` — which is
+/// `FuBarPlugin-2.0.lua:752`'s `debugstack(6, 1, 0)`, whose greedy `"\\AddOns\\(.*)\\"` reads the
+/// LAST path in the string. wow-re `debugstack-return-shape.md` maps the whole regime.
+fn traceback_frames(lua: &Lua, start: usize, count1: usize, count2: usize) -> String {
+    let mut out = String::new();
+    let mut level = start;
+    let mut first_part = true;
+    while lua.inspect_stack(level, |_| ()).is_some() {
+        level += 1;
+        if level > start + count1 && first_part {
+            first_part = false;
+            if lua.inspect_stack(level + count2, |_| ()).is_none() {
+                level -= 1; // the probe found nothing to elide — print this level after all
+            } else {
+                out.push_str("...\n");
+                while lua.inspect_stack(level + count2, |_| ()).is_some() {
+                    level += 1;
+                }
+            }
+            continue;
+        }
+        if let Some(f) = lua.inspect_stack(level - 1, traceback_frame) {
+            out.push_str(&f);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod date_table_tests {
     use crate::script::UiScript;

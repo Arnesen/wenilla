@@ -23,6 +23,12 @@ pub struct Toc {
     pub files: Vec<String>,
 }
 
+/// Case-insensitive ASCII prefix test — the reference's `SStrCmpI(line, key, SStrLen(key))`.
+fn starts_with_ci(s: &str, prefix: &str) -> bool {
+    let (s, p) = (s.as_bytes(), prefix.as_bytes());
+    s.len() >= p.len() && s[..p.len()].eq_ignore_ascii_case(p)
+}
+
 impl Toc {
     /// Parse manifest text. Never fails: unrecognizable lines are file entries by definition of
     /// the grammar, and an empty input is an empty manifest.
@@ -51,12 +57,21 @@ impl Toc {
         toc
     }
 
-    /// The first directive whose key matches `key` case-insensitively. Duplicate keys: we read the
-    /// first occurrence (client behavior on duplicates is unverified — flag for the loader work;
-    /// shipped manifests don't duplicate keys).
+    /// The directive whose key matches `key` case-insensitively — **the LAST one, when a manifest
+    /// writes the key twice**.
+    ///
+    /// This read the first for as long as the doc here said "shipped manifests don't duplicate
+    /// keys", which two of them do: `MoveAnything.toc` has `## Notes` on lines 3 and 5, and
+    /// `AtlasLoot.toc` has `## Author` on lines 6 and 9. The reference hashes each directive into
+    /// the metadata map at `[rec+0x98]` (`0x51d580`) and, on an existing entry, **frees the old
+    /// value and stores the new** (`0x51d77b`) — a hash insert, so the last line written wins.
+    ///
+    /// Note the asymmetry with [`Self::list`] one function down, and that both halves were wrong
+    /// here in the same direction: a **scalar** replaces, a **list** appends.
     pub fn directive(&self, key: &str) -> Option<&str> {
         self.directives
             .iter()
+            .rev()
             .find(|(k, _)| k.eq_ignore_ascii_case(key))
             .map(|(_, v)| v.as_str())
     }
@@ -85,33 +100,56 @@ impl Toc {
             .unwrap_or(0)
     }
 
-    /// A comma-separated list directive (`SavedVariables`, `OptionalDeps`, `Dependencies`, …),
-    /// split and trimmed. Missing directive = empty list.
+    /// A list directive (`SavedVariables`, `OptionalDeps`, `Dependencies`, …), tokenized the way
+    /// the reference tokenizes it. Missing directive = empty list.
+    ///
+    /// **Two departures from the obvious read, both byte-derived, both of which were losing real
+    /// data** (decision 2126):
+    ///
+    /// * **A repeated directive APPENDS.** The reference `strdup`s each item into a `0x40`-granular
+    ///   array at `[rec+0x80]` with a running count at `[rec+0x7c]` (wow-re
+    ///   `savedvariables-protocol.md` §4), so a second `## SavedVariables:` line continues the
+    ///   first rather than being ignored. Reading only the first line cost `CT_RaidAssist` 18 of
+    ///   its 25 saved globals — it declares them across four lines and got seven, so raid
+    ///   positions, menu state, boss timers, debuff templates, the loot method and the squelch
+    ///   list were never written and never restored.
+    /// * **A space separates as surely as a comma.** The tokenizer is `SStrTokenize 0x64ae50` over
+    ///   the delimiter SET `" ,"` at `0x8537c4` — readable in the image's own `.rdata`, sitting
+    ///   between the `RequiredDep` and `OptionalDep` literals. `SpecialTalentUI` writes
+    ///   `## SavedVariables: SpecialTalentPlannedSaved SpecialTalentFrameSaved` and we registered
+    ///   one "global" whose name contained a space.
     pub fn list(&self, key: &str) -> Vec<&str> {
-        self.directive(key)
-            .map(|v| {
-                v.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.list_where(|k| k.eq_ignore_ascii_case(key))
     }
 
-    /// Hard dependencies: the client accepts both `## Dependencies:` and `## RequiredDeps:`
-    /// (and `## RequiredDep:`) as synonyms.
+    /// [`Self::list`] over every directive whose key satisfies `pick`, in file order.
+    fn list_where(&self, mut pick: impl FnMut(&str) -> bool) -> Vec<&str> {
+        self.directives
+            .iter()
+            .filter(|(k, _)| pick(k))
+            .flat_map(|(_, v)| v.split([',', ' ']).map(str::trim))
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// Hard dependencies — **every directive whose key STARTS WITH `Dep` or `RequiredDep`**.
+    ///
+    /// The three dependency keys are the only ones in the reference's directive table that carry
+    /// **no colon**: the `.rdata` cluster reads
+    /// `SavedVariablesPerCharacter:\0 SavedVariables:\0 LoadWith:\0 \0\0 Dep\0 RequiredDep\0 " ,"\0\0 OptionalDep\0 Revision:\0`,
+    /// and a whole-key compare against `"Dep"` could never match a line reading `Dependencies:`.
+    /// So the compare is a PREFIX compare — `SStrCmpI(line, key, SStrLen(key))` at
+    /// `0x51cd4e`-`0x51cd5f` — and `## Dependencies`, `## RequiredDependencies` and
+    /// `## Dependency` all land here (decision 2126).
+    ///
+    /// Both keys feed the SAME array in the reference (`[rec+0x50]`), so a manifest writing both
+    /// gets their union rather than whichever this function happened to test first.
     pub fn dependencies(&self) -> Vec<&str> {
-        for key in ["Dependencies", "RequiredDeps", "RequiredDep"] {
-            let deps = self.list(key);
-            if !deps.is_empty() {
-                return deps;
-            }
-        }
-        Vec::new()
+        self.list_where(|k| starts_with_ci(k, "RequiredDep") || starts_with_ci(k, "Dep"))
     }
 
-    /// Soft dependencies: `## OptionalDeps:` (and `## OptionalDep:` by symmetry with the required
-    /// pair above).
+    /// Soft dependencies — every directive whose key starts with `OptionalDep`, on the same
+    /// prefix rule as [`Self::dependencies`].
     ///
     /// **They load FIRST and their failures are ignored** — `AddOn_Load 0x51f240`'s own order,
     /// quoted in 1191 §2 — which is what lets `## OptionalDeps: FuBar, Ace2` mean "if Ace2 is
@@ -120,18 +158,13 @@ impl Toc {
     /// lists `FuBarPlugin-2.0.lua` BEFORE `AceLibrary.lua`, which only works because the `Ace2`
     /// addon went first.
     ///
-    /// **`## OptionalDependencies:` is NOT accepted here**, though 4 corpus addons write it. The
-    /// long form is verified for the required half (`Dependencies`) and merely plausible for this
-    /// one, and 1204's rule is to be lenient only where the grammar admits no ambiguity. Queued as
-    /// an RE question with its cost attached: four addons.
+    /// The long form `## OptionalDependencies:` — which 4 corpus addons write — used to be
+    /// refused here, on the reasoning that it was "verified for the required half and merely
+    /// plausible for this one, queued as an RE question". The premise was wrong: the reference
+    /// matches all three dependency keys by the same colon-less prefix, so the long form was never
+    /// a separate question.
     pub fn optional_dependencies(&self) -> Vec<&str> {
-        for key in ["OptionalDeps", "OptionalDep"] {
-            let deps = self.list(key);
-            if !deps.is_empty() {
-                return deps;
-            }
-        }
-        Vec::new()
+        self.list_where(|k| starts_with_ci(k, "OptionalDep"))
     }
 
     /// `## LoadOnDemand: 1` (Era loader; absent in 1.12 manifests).
@@ -187,8 +220,12 @@ mod tests {
         assert_eq!(toc.files.len(), 2);
     }
 
+    /// **A scalar directive REPLACES on a repeat; a list directive APPENDS** — the reference's two
+    /// stores, and this file had both backwards (decision 2126). `MoveAnything.toc` writes
+    /// `## Notes` twice and `AtlasLoot.toc` writes `## Author` twice, so the scalar half is not
+    /// hypothetical either.
     #[test]
-    fn dependency_synonyms_and_first_occurrence_wins() {
+    fn a_scalar_directive_replaces_and_a_list_directive_appends() {
         let toc = Toc::parse(
             "## RequiredDeps: LibA, LibB\n\
              ## Title: first\n\
@@ -196,8 +233,54 @@ mod tests {
              ## LoadOnDemand: 1\n",
         );
         assert_eq!(toc.dependencies(), vec!["LibA", "LibB"]);
-        assert_eq!(toc.directive("Title"), Some("first"));
+        assert_eq!(toc.directive("Title"), Some("second"));
         assert!(toc.load_on_demand());
+    }
+
+    /// **`CT_RaidAssist`'s own manifest, in shape** — 25 saved globals across four lines, of which
+    /// we registered the first seven. The rest (raid positions, menu state, boss timers, debuff
+    /// templates, the loot method, the squelch list) were never written and never restored.
+    ///
+    /// Plus `SpecialTalentUI`'s: two names separated by a SPACE, which we read as one global whose
+    /// name contained a space. The tokenizer is `SStrTokenize 0x64ae50` over the delimiter set
+    /// `" ,"` at `0x8537c4`.
+    #[test]
+    fn a_repeated_list_directive_accumulates_across_lines_and_splits_on_space() {
+        let toc = Toc::parse(
+            "## SavedVariables: A, B\n\
+             ## SavedVariables: C, D\n\
+             ## SavedVariablesPerCharacter: E F\n",
+        );
+        assert_eq!(toc.list("SavedVariables"), vec!["A", "B", "C", "D"]);
+        assert_eq!(toc.list("SavedVariablesPerCharacter"), vec!["E", "F"]);
+    }
+
+    /// **The three dependency keys are matched by PREFIX**, because they are the only directives in
+    /// the reference's table with no colon: the `.rdata` cluster is
+    /// `… LoadWith:\0 \0\0 Dep\0 RequiredDep\0 " ,"\0\0 OptionalDep\0 Revision:\0 …`, and a
+    /// whole-key compare against `"Dep"` could never match a line reading `Dependencies:`.
+    ///
+    /// Four corpus addons write the long optional form (`FuBar_CRDelayFu`, `FuBar_PetInFu`,
+    /// `FuBar_ToFu`, `FuBar_WeaponRebuffFu`), which this file used to refuse on the reasoning that
+    /// the long form was "merely plausible" for the optional half. It was never a separate
+    /// question.
+    #[test]
+    fn the_dependency_keys_match_by_prefix_and_both_required_spellings_union() {
+        let toc = Toc::parse(
+            "## Dependencies: LibA\n\
+             ## RequiredDependencies: LibB\n\
+             ## OptionalDependencies: LibC, LibD\n\
+             ## OptionalDeps: LibE\n",
+        );
+        assert_eq!(toc.dependencies(), vec!["LibA", "LibB"]);
+        assert_eq!(
+            toc.optional_dependencies(),
+            vec!["LibC", "LibD", "LibE"],
+            "the long and short optional spellings are the same key"
+        );
+        // And the prefixes do not bleed into each other: `OptionalDependencies` does not start
+        // with `Dep`, so it never lands in the required list.
+        assert!(!toc.dependencies().contains(&"LibC"));
     }
 
     #[test]

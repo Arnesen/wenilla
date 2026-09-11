@@ -1333,3 +1333,56 @@ fn an_empty_fontstring_reads_back_nil_and_an_edit_box_does_not() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **A `SetTexture` the host cannot resolve leaves the region's art alone** — it does not overwrite
+/// it with the path that failed (decision 2124).
+///
+/// The reference's load-failure arm is explicit about it: `0x770288 cmp [ebp-4],2; jl` →
+/// `0x77028e`–`0x7702b2` releases the handle it just built and returns 0 **without ever touching
+/// `+0xcc`** (wow-re `texture-service-name-resolution.md`). Ours stored the path first and used the
+/// probe's verdict only for the return value, so a mistyped or not-yet-shipped path erased the art
+/// it failed to replace — `GetTexture()` echoed the miss, and the extract dropped the quad, so the
+/// region went blank with nothing said anywhere.
+///
+/// The control that must not change is the second half: a resolvable path still replaces, and a VM
+/// with **no probe at all** still stores, because it has no backend to ask.
+#[test]
+fn an_unresolvable_set_texture_keeps_the_art_the_region_had() {
+    let mut s = script();
+    s.set_texture_probe(Box::new(|path: &str| !path.contains("Nope")));
+    s.run(
+        r#"
+        f = CreateFrame("Frame", "ProbeHost")
+        t = f:CreateTexture("ProbeTex")
+        t:SetTexture("Interface\\Real")
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return t:GetTexture()").unwrap(),
+        "Interface\\Real"
+    );
+
+    // The miss: nil back, and the art it could not replace is still there.
+    assert!(
+        s.eval::<bool>(r#"return t:SetTexture("Interface\\Nope") == nil"#)
+            .unwrap(),
+        "an unresolvable path must answer nil"
+    );
+    assert_eq!(
+        s.eval::<String>("return t:GetTexture()").unwrap(),
+        "Interface\\Real",
+        "the failed load overwrote the art the region was holding"
+    );
+
+    // The control: a hit still replaces, and an explicit clear still clears.
+    assert!(s
+        .eval::<bool>(r#"return t:SetTexture("Interface\\Other") == 1"#)
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>("return t:GetTexture()").unwrap(),
+        "Interface\\Other"
+    );
+    s.run("t:SetTexture(nil)").unwrap();
+    assert!(s.eval::<bool>("return t:GetTexture() == nil").unwrap());
+}

@@ -453,8 +453,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .is_none_or(|r| super::item_stats::item_usable_by_id(&model, r.item_id));
                 (row, usable)
             };
+            // **Five values on every path**, and the empty leg is `(nil, nil, 0, 0, nil)` —
+            // `GetInboxItem 0x4af5d0`, the sibling of the `GetSendMailItem` block above (wow-re
+            // `mail-interaction.md` §5.1; decision 2129). This answered ONE value, which a caller
+            // destructuring five reads as four nils — and the reference's own row
+            // (`(nil,nil,number,number,nil) | …`) has no one-value alternative at all.
             let Some(r) = row.filter(|r| r.item_id != 0) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(MultiValue::from_vec(vec![
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Integer(0),
+                    Value::Integer(0),
+                    Value::Nil,
+                ]));
             };
             let name = match &r.item_name {
                 Some(n) => Value::String(lua.create_string(n)?),
@@ -464,10 +475,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(t) => Value::String(lua.create_string(t)?),
                 None => Value::Nil,
             };
-            let quality = match r.item_quality {
-                Some(q) => Value::Integer(i64::from(q)),
-                None => Value::Nil,
-            };
+            // A number on every path, like the send tab's.
+            let quality = Value::Integer(i64::from(r.item_quality.unwrap_or(0)));
             Ok(MultiValue::from_vec(vec![
                 name,
                 texture,
@@ -643,7 +652,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetSendMailItem() → name, texture, stackCount, quality off the attached cursor item
-    // (MailFrame.lua l.511). All-nil/1 when nothing is attached.
+    // (MailFrame.lua l.511).
+    //
+    // **The empty leg is `(nil, nil, 0, 0)`** — four values, and slots 3 and 4 are NUMBERS. Read at
+    // `0x4ae590`: `0x4ae6d3`/`0x4ae6da` push nil, then two `push 0; push 0; lua_pushnumber` pairs
+    // at `0x4ae6df`/`0x4ae6ea`, `eax = 4` (wow-re `mail-interaction.md` §5.1, §5-cross-checked;
+    // decision 2129). All three of the reference's failure guards share that one block, so "nothing
+    // attached" and "the item template has not loaded yet" are indistinguishable to a script.
+    //
+    // The `1` this used to push in slot 3 was borrowed from the wrong binding: it is
+    // `GetAuctionSellItemInfo 0x4ce590`'s empty leg (`1.0`/`-1.0`), not this one's.
+    //
+    // **Still not faithful, and stated rather than implied:** on the LOADED leg the reference reads
+    // quality from `[rec+0x1c]` gated on `[rec+0x2c] != 0` = InventoryType, so a **non-equippable**
+    // item answers quality `-1` (`0x4ae6bf`). We do not carry an inventory type here, so an item
+    // whose quality we have not cached answers 0 rather than -1.
     g.set(
         "GetSendMailItem",
         lua.create_function(|lua, ()| {
@@ -660,8 +683,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
                     Value::Nil,
-                    Value::Integer(1),
-                    Value::Nil,
+                    Value::Integer(0),
+                    Value::Integer(0),
                 ]));
             };
             let name = cursor::item_link_name(it.link.as_deref());
@@ -674,10 +697,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(t) => Value::String(lua.create_string(t)?),
                 None => Value::Nil,
             };
-            let quality = match it.quality {
-                Some(q) => Value::Integer(i64::from(q)),
-                None => Value::Nil,
-            };
+            // A number on every path — the reference's row has no nil alternative in this slot.
+            let quality = Value::Integer(i64::from(it.quality.unwrap_or(0)));
             Ok(MultiValue::from_vec(vec![
                 name,
                 texture,

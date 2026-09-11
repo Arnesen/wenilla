@@ -534,82 +534,85 @@ pub(crate) fn restore_chat_looks(world: &mut World, script: &mut UiScript) {
         .map(|r| (r.shortcut.clone(), r.id))
         .collect();
     let commands = world.get_resource::<NetCommands>().map(|c| c.0.clone());
-    let Some(mut file) = world.get_resource_mut::<ChatWindowFile>() else {
-        return;
-    };
-    if file.identity.get(script).as_ref() == Some(&id) {
-        return; // already restored for this character, into the VM that is live now
-    }
-    let who = format!("{} on {}", id.1, id.0);
-    file.path = crate::local_state::chat_character_path(&id.0, &id.1);
-    *file.identity.get(script) = Some(id);
-    *file.dirty.get(script) = false;
-    file.last_change = None;
-    let text = file
-        .path
-        .as_ref()
-        .and_then(|path| match std::fs::read_to_string(path) {
-            Ok(t) => Some(t),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                warn!("chat cache: cannot read {}: {e}", path.display());
-                None
-            }
-        });
-    let had_file = text.is_some();
-    // A file our own pre-2120 writer damaged: no marker, so its `ZONECHANNELS` words may have been
-    // composed from an empty roster and its window channel lists erased with them. Repaired below,
-    // once — the next save stamps the marker.
-    let damaged = text
-        .as_deref()
-        .is_some_and(|t| !t.contains(WRITER_GENERATION));
-    let mut parsed = text.map(|t| parse(&t, &rows)).unwrap_or_default();
     // The DBC seed — every `ChatChannels.dbc` row the client joins by itself (`flags & 1`).
     let seed_mask = auto_rows.iter().fold(0, |m, (_, id)| m | zone_bit(*id));
-    if !had_file {
-        // The loader's no-file path (§3, `0x4997ad`): the mask is seeded from those rows, and
-        // window 1's channel slots get each of them as `(Shortcut, id)` — the rows
-        // `ChatFrame_RegisterForChannels` will match zone speech against by id. The rest of the
-        // record is the boot init the VM already holds.
-        let mut general = ChatWindowLook::stock(0);
-        general.channels = auto_rows.clone();
-        parsed.looks.push((0, general));
-    }
-    if !parsed.looks.is_empty() || !parsed.colors.is_empty() {
-        info!(
-            "chat cache: {} windows, {} colour rows, {} custom channels restored",
-            parsed.looks.len(),
-            parsed.colors.len(),
-            parsed.joined.len()
-        );
-    }
-    if damaged {
-        // **The one-time repair** (decision 2120, [`WRITER_GENERATION`]). Re-seed window 1 the way
-        // the loader's no-file path seeds it, and OR the DBC bits back into the mask. Additive and
-        // deduplicated, exactly like the in-window `ZONECHANNELS` arm (`0x499332`-`0x4994e7`), so a
-        // file that survived intact is left alone and one that was zeroed gets its channels back.
-        if let Some((_, general)) = parsed.looks.iter_mut().find(|(w, _)| *w == 0) {
-            for (shortcut, id) in &auto_rows {
-                if !general
-                    .channels
-                    .iter()
-                    .any(|(c, _)| c.eq_ignore_ascii_case(shortcut))
-                {
-                    general.channels.push((shortcut.clone(), *id));
+    // `ChatWindowFile`'s borrow is scoped, because the mask has to go home to `ChannelState`
+    // afterwards and a `&mut World` hands out one resource borrow at a time.
+    let mut parsed;
+    {
+        let Some(mut file) = world.get_resource_mut::<ChatWindowFile>() else {
+            return;
+        };
+        if file.identity.get(script).as_ref() == Some(&id) {
+            return; // already restored for this character, into the VM that is live now
+        }
+        let who = format!("{} on {}", id.1, id.0);
+        file.path = crate::local_state::chat_character_path(&id.0, &id.1);
+        *file.identity.get(script) = Some(id);
+        *file.dirty.get(script) = false;
+        file.last_change = None;
+        let text = file
+            .path
+            .as_ref()
+            .and_then(|path| match std::fs::read_to_string(path) {
+                Ok(t) => Some(t),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    warn!("chat cache: cannot read {}: {e}", path.display());
+                    None
+                }
+            });
+        let had_file = text.is_some();
+        // A file our own pre-2120 writer damaged: no marker, so its `ZONECHANNELS` words may have been
+        // composed from an empty roster and its window channel lists erased with them. Repaired below,
+        // once — the next save stamps the marker.
+        let damaged = text
+            .as_deref()
+            .is_some_and(|t| !t.contains(WRITER_GENERATION));
+        parsed = text.map(|t| parse(&t, &rows)).unwrap_or_default();
+        if !had_file {
+            // The loader's no-file path (§3, `0x4997ad`): the mask is seeded from those rows, and
+            // window 1's channel slots get each of them as `(Shortcut, id)` — the rows
+            // `ChatFrame_RegisterForChannels` will match zone speech against by id. The rest of the
+            // record is the boot init the VM already holds.
+            let mut general = ChatWindowLook::stock(0);
+            general.channels = auto_rows.clone();
+            parsed.looks.push((0, general));
+        }
+        if !parsed.looks.is_empty() || !parsed.colors.is_empty() {
+            info!(
+                "chat cache: {} windows, {} colour rows, {} custom channels restored",
+                parsed.looks.len(),
+                parsed.colors.len(),
+                parsed.joined.len()
+            );
+        }
+        if damaged {
+            // **The one-time repair** (decision 2120, [`WRITER_GENERATION`]). Re-seed window 1 the way
+            // the loader's no-file path seeds it, and OR the DBC bits back into the mask. Additive and
+            // deduplicated, exactly like the in-window `ZONECHANNELS` arm (`0x499332`-`0x4994e7`), so a
+            // file that survived intact is left alone and one that was zeroed gets its channels back.
+            if let Some((_, general)) = parsed.looks.iter_mut().find(|(w, _)| *w == 0) {
+                for (shortcut, id) in &auto_rows {
+                    if !general
+                        .channels
+                        .iter()
+                        .any(|(c, _)| c.eq_ignore_ascii_case(shortcut))
+                    {
+                        general.channels.push((shortcut.clone(), *id));
+                    }
                 }
             }
+            parsed.zone_mask = Some(parsed.zone_mask.unwrap_or(0) | seed_mask);
+            // Owed a write, so the repair is genuinely ONCE: the next save composes the repaired
+            // record and stamps [`WRITER_GENERATION`], and this branch never runs for the character
+            // again. `last_change` is `None` here, so that save is the very next frame's.
+            *file.dirty.get(script) = true;
+            info!("chat cache: repaired a pre-2120 file's zone channels for {who}");
         }
-        parsed.zone_mask = Some(parsed.zone_mask.unwrap_or(0) | seed_mask);
-        // Owed a write, so the repair is genuinely ONCE: the next save composes the repaired
-        // record and stamps [`WRITER_GENERATION`], and this branch never runs for the character
-        // again. `last_change` is `None` here, so that save is the very next frame's.
-        *file.dirty.get(script) = true;
-        info!("chat cache: repaired a pre-2120 file's zone channels for {who}");
-    }
-    // …and `ChatWindowFile` is finished with, so the mask can go home to `ChannelState`.
-    drop(file);
-    // The mask is durable state from here on (decision 2120): the file's word when it carried one,
-    // the DBC seed when it did not, and from then on the confirmed joins' own OR.
+    } // …and `ChatWindowFile`'s borrow ends here.
+      // The mask is durable state from here on (decision 2120): the file's word when it carried one,
+      // the DBC seed when it did not, and from then on the confirmed joins' own OR.
     let mask = parsed.zone_mask.unwrap_or(seed_mask);
     if let Some(mut channels) = world.get_resource_mut::<super::edit::ChannelState>() {
         channels.zone_mask = mask;

@@ -178,7 +178,10 @@ pub(super) fn spell_damage_log(
         );
     }
     if s.periodic {
-        let Some(kind) = combat::periodic_kind(attacker, false) else {
+        // **The TARGET's class, not the caster's** (decision 2127): this leg lands in the shared
+        // `PERIODICAURADAMAGE` formatter `0x628100`, whose msg-id selector takes `outClassB`
+        // (`0x628235`), and B is the victim at every call site.
+        let Some(kind) = combat::periodic_kind(victim, false) else {
             return;
         };
         let fills = Fills {
@@ -462,7 +465,7 @@ pub(super) fn periodic_aura_log(
                 )
             }
         };
-        let Some(kind) = combat::periodic_kind(caster, buff) else {
+        let Some(kind) = combat::periodic_kind(periodic_subject(tick, caster, target), buff) else {
             continue;
         };
         queue(
@@ -1036,6 +1039,24 @@ fn power_gain(power: u32, amount: u32) -> i64 {
     i64::from(amount) / power_divisor(power)
 }
 
+/// Which endpoint a periodic tick's formatter hands its **msg-id selector** — the choice that
+/// decides whether a line types as `SPELL_PERIODIC_SELF_*` or `SPELL_PERIODIC_CREATURE_*`
+/// (decision 2127).
+///
+/// It is a function, exhaustive over the wire enum, because the four periodic formatters disagree
+/// and one shared `periodic_kind(caster, …)` was wrong for half of them: `0x628100`
+/// (`PERIODICAURADAMAGE`) and `0x627240` (`PERIODICAURAHEAL`) hand the selector `outClassB`, the
+/// **target** (`0x628235`, `0x62732c`); `0x627520` (`POWERGAIN`) and `0x627930`
+/// (`SPELLPOWERLEECH`/`…DRAIN`) hand it `outClassA`, the **caster** (`0x6275fb`,
+/// `0x627a0f`/`0x627a3a`). A new tick kind has to answer this question rather than inherit an
+/// answer.
+fn periodic_subject(tick: &PeriodicTick, caster: UnitClass, target: UnitClass) -> UnitClass {
+    match tick {
+        PeriodicTick::Damage { .. } | PeriodicTick::Heal { .. } => target,
+        PeriodicTick::Energize { .. } | PeriodicTick::ManaLeech { .. } => caster,
+    }
+}
+
 /// The `(drained, gained)` pair a leech/drain sentence words, or `None` when the line is dropped.
 ///
 /// One function because the reference has one formatter: `0x627930` serves both
@@ -1228,7 +1249,58 @@ fn queue_named(
 
 #[cfg(test)]
 mod tests {
-    use super::{leech_figures, power_gain};
+    use super::{leech_figures, periodic_subject, power_gain, PeriodicTick, UnitClass};
+
+    /// **A periodic line is typed off the endpoint its own formatter reads** (decision 2127).
+    ///
+    /// The report: MikScrollingBattleText showed no DoT lines at all, in either direction. Every
+    /// periodic tick took `periodic_kind(caster, …)`, so a creature's poison ticking you came out
+    /// as `CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE` where the reference sends
+    /// `…_PERIODIC_SELF_DAMAGE`, and your own DoT on a creature came out the other way round —
+    /// the two swapped. MSBT matches a different GlobalString pattern per event name, so with
+    /// both events swapped neither line matched anything and both were dropped.
+    #[test]
+    fn a_periodic_damage_or_heal_tick_is_typed_off_the_target() {
+        let dmg = PeriodicTick::Damage {
+            amount: 12,
+            school: 3,
+            absorb: 0,
+            resist: 0,
+        };
+        let heal = PeriodicTick::Heal { amount: 12 };
+        // A creature's DoT ticking me: the subject is ME, so the line types SELF.
+        assert_eq!(
+            periodic_subject(&dmg, UnitClass::Creature, UnitClass::Me),
+            UnitClass::Me
+        );
+        // My DoT ticking a creature: the subject is the CREATURE.
+        assert_eq!(
+            periodic_subject(&dmg, UnitClass::Me, UnitClass::Creature),
+            UnitClass::Creature
+        );
+        assert_eq!(
+            periodic_subject(&heal, UnitClass::Creature, UnitClass::Me),
+            UnitClass::Me
+        );
+        // The other two formatters read the CASTER, which is why this is a table and not a rule.
+        let gain = PeriodicTick::Energize {
+            power: 1,
+            amount: 10,
+        };
+        let leech = PeriodicTick::ManaLeech {
+            power: 0,
+            amount: 40,
+            multiplier: 1.0,
+        };
+        assert_eq!(
+            periodic_subject(&gain, UnitClass::Creature, UnitClass::Me),
+            UnitClass::Creature
+        );
+        assert_eq!(
+            periodic_subject(&leech, UnitClass::Creature, UnitClass::Me),
+            UnitClass::Creature
+        );
+    }
 
     /// The report this arithmetic was written for: MSBT read `+10 Rage` off our combat log where
     /// the reference reads `+1 Rage`, for the same swing against the same server.

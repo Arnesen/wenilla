@@ -221,16 +221,38 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             data.fill = None;
                             false
                         }
+                        // **Ask the probe BEFORE writing the slot.** The reference's load-FAILURE
+                        // arm (`cmp [ebp-4],2; jl` at `0x770288` → `0x77028e`–`0x7702b2`) releases
+                        // the handle it just built and returns 0 **leaving `+0xcc` and `+0x128` as
+                        // they were** — "the widget keeps whatever texture it already had"
+                        // (wow-re `texture-service-name-resolution.md` §161-169). Storing the path
+                        // first and letting the verdict drive only the *return value* meant a
+                        // mistyped or not-yet-shipped path ERASED the art it failed to replace,
+                        // and did it silently: `GetTexture()` echoed the missing path and the quad
+                        // was dropped, so the region went blank with nothing said (decision 2124).
+                        //
+                        // The store and the return ask deliberately different questions. A VM with
+                        // **no probe installed** has no backend to ask, so it stores — that is
+                        // every engine-less test's world, and the module head already states that
+                        // such a VM's path form "stays nil", which is the return, not the slot.
                         Value::String(s) => {
                             let path = s.to_str()?.to_string();
-                            data.texture = Some(path.clone());
-                            data.fill = None;
                             drop(model);
-                            let model = lua.app_data_ref::<Model>().expect("model");
-                            model
-                                .texture_probe
-                                .as_ref()
-                                .is_some_and(|probe| probe(&path))
+                            let resolvable = {
+                                let model = lua.app_data_ref::<Model>().expect("model");
+                                model
+                                    .texture_probe
+                                    .as_ref()
+                                    .is_none_or(|probe| probe(&path))
+                            };
+                            let mut model = lua.app_data_mut::<Model>().expect("model");
+                            let had_probe = model.texture_probe.is_some();
+                            if resolvable {
+                                let data = model.region_data.entry(rh).or_default();
+                                data.texture = Some(path);
+                                data.fill = None;
+                            }
+                            resolvable && had_probe
                         }
                         // The colour form, and the ONLY branch that looks at the trailing three. A
                         // non-numeric there takes the same default a missing one does, which is what

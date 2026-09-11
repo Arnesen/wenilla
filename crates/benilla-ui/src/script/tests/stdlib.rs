@@ -92,22 +92,137 @@ fn sandbox_removes_dangerous_globals() {
         )
         .unwrap();
     assert!(all_nil);
-    // `debugstack` survives the sandbox — and now returns a REAL traceback, not the `""` this
-    // used to assert. The stub was fine for addons that only DISPLAY it and wrong for the ones
-    // that PARSE it: `FuBarPlugin-2.0.lua:752` finds each plugin's own folder in
-    // `debugstack(6, 1, 0)`, and against `""` that returned nil and killed 20 corpus addons.
+    // `debugstack` survives the sandbox — and returns a REAL traceback, not the `""` this used to
+    // assert. The stub was fine for addons that only DISPLAY it and wrong for the ones that PARSE
+    // it: `FuBarPlugin-2.0.lua:752` finds each plugin's own folder in `debugstack(6, 1, 0)`, and
+    // against `""` that returned nil and killed 20 corpus addons.
     let trace = s.eval::<String>("return debugstack()").unwrap();
     assert!(
-        trace.contains("traceback"),
+        !trace.is_empty(),
         "debugstack must return a real traceback: {trace:?}"
     );
-    // A level far past the top of the stack yields the bare header and never raises — a caller
-    // that guesses too deep still gets a string it can `string.find` against, which is exactly how
-    // every corpus caller uses it.
-    assert_eq!(
-        s.eval::<String>("return debugstack(99)").unwrap().trim(),
-        "stack traceback:"
+    // **Frames only — no `stack traceback:` header** (decision 2121). Line 1 IS a frame, which is
+    // what `AceLibrary.lua:70` reads (`string.gsub(stack, "\n.*", "")` then
+    // `".*\\(.*).lua:%d+: .*"`), and what `AceDB-2.0.lua:742` counts on when it skips exactly one
+    // line to reach its caller's.
+    assert!(
+        !trace.starts_with("stack traceback"),
+        "the reference has no header line: {trace:?}"
     );
+    // A level far past the top of the stack is an empty string, never a raise — a caller that
+    // guesses too deep still gets something it can `string.find` against.
+    assert_eq!(s.eval::<String>("return debugstack(99)").unwrap(), "");
+}
+
+/// **AceDB-2.0's own capture, run for real across two chunks** (decision 2121).
+///
+/// `RegisterDB` reads the calling addon's folder out of `debugstack()` by skipping exactly one
+/// line — its own frame — and taking the `\AddOns\<folder>\` out of the next. That only works if
+/// line 1 is a frame; with mlua's `stack traceback:` header in front, the capture returned the
+/// folder of whichever addon shipped the winning copy of the library, `RegisterDB` took its
+/// already-loaded branch, and `db.raw` was bound to a fresh table at the addon's file scope —
+/// before the SavedVariables chunk ran. Bartender2 then printed `Creating new DB` at every login.
+///
+/// The two chunks here are the real configuration: the library lives in one addon's folder, the
+/// caller in another's.
+#[test]
+fn acedbs_capture_names_the_calling_addon_not_the_librarys_owner() {
+    let s = script();
+    s.run_chunk_named(
+        b"function BenillaProbeRegisterDB()
+            return string.gsub(debugstack(), \".-\\n.-\\\\AddOns\\\\(.-)\\\\.*\", \"%1\")
+          end",
+        &crate::script::addon_chunk_name("AtlasLoot", "Libs\\AceDB-2.0\\AceDB-2.0.lua"),
+    )
+    .unwrap();
+    s.run_chunk_named(
+        b"BenillaProbeCaller = BenillaProbeRegisterDB()",
+        &crate::script::addon_chunk_name("Bartender2", "Bartender2.lua"),
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return BenillaProbeCaller").unwrap(),
+        "Bartender2",
+        "the capture must name the CALLER's addon, not the library owner's"
+    );
+}
+
+/// `AceLibrary.lua:70`'s reader: the first line, whole, is a frame it can pull a file name out of.
+#[test]
+fn the_first_debugstack_line_is_a_frame() {
+    let s = script();
+    s.run_chunk_named(
+        b"function BenillaProbeFirstLine()
+            local first = string.gsub(debugstack(), \"\\n.*\", \"\")
+            return string.gsub(first, \".*\\\\(.*).lua:%d+: .*\", \"%1\")
+          end",
+        &crate::script::addon_chunk_name("Atlas", "Libs\\AceLibrary\\AceLibrary.lua"),
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return BenillaProbeFirstLine()").unwrap(),
+        "AceLibrary",
+        "line 1 is the calling function's own frame"
+    );
+}
+
+/// `AceLibrary.lua:139`'s `argCheck` names the offending function with `"([`<].-['>])"` — a
+/// BACKTICK opening it. Lua 5.4 writes `in function 'name'`, which that pattern cannot match; the
+/// reference's 5.0 wording is `` in function `name' ``.
+#[test]
+fn a_named_frame_uses_the_5_0_backtick_quoting() {
+    let s = script();
+    let found: String = s
+        .eval(
+            "function BenillaProbeNamed()                 local _, _, f = string.find(debugstack(), \"([`<].-['>])\")                 return f or '<no match>'              end              local r = BenillaProbeNamed() return r",
+        )
+        .unwrap();
+    assert_eq!(found, "`BenillaProbeNamed'");
+}
+
+/// **Every frame carries its own trailing `\n`, and `count1` bounds nothing on its own**
+/// (decision 2121, wow-re `debugstack-return-shape.md` §3.1).
+///
+/// Stock Lua 5.0 pushes `"\n\t"` *before* each frame plus a header once; the reference pushes a
+/// single `"\n"` after each frame and no header (`0x703971`). And the walk formats while the level
+/// is `<= start + count1` — `0x703857` is `jbe`, unsigned ≤ — then probes
+/// `getstack(level + count2)`: a probe that FAILS steps back and prints that level as an ordinary
+/// frame. So with `count1 = 1, count2 = 0` a two-deep stack returns TWO frames and no marker, and a
+/// three-deep one returns one frame plus `"...\n"` and nothing after. A client that clamped to
+/// `count1` would diverge at exactly `depth == count1 + 1` — and that is
+/// `FuBarPlugin-2.0.lua:752`'s `debugstack(6, 1, 0)`, whose capture is a GREEDY
+/// `"\\AddOns\\(.*)\\"` reading the LAST path in the string.
+#[test]
+fn debugstack_frames_end_in_newline_and_count1_does_not_clamp() {
+    let s = script();
+    let trace = s.eval::<String>("return debugstack()").unwrap();
+    assert!(
+        trace.ends_with('\n'),
+        "the newline is pushed AFTER each frame: {trace:?}"
+    );
+    // Two levels at or above `start`, `count1 = 1`: the elision probe fails, so the second frame
+    // prints in full and no marker appears.
+    let two: String = s
+        .eval(
+            "function BenillaProbeDepth2() local r = debugstack(1, 1, 0) return r end \
+             local r = BenillaProbeDepth2() return r",
+        )
+        .unwrap();
+    let lines: Vec<&str> = two.trim_end().split('\n').collect();
+    assert_eq!(lines.len(), 2, "two frames, no marker: {two:?}");
+    assert!(!two.contains("..."), "no elision at depth 2: {two:?}");
+    // Deeper: one frame, then the marker on its own line, and nothing after it (count2 = 0).
+    let deep: String = s
+        .eval(
+            "function BenillaProbeC() local r = debugstack(1, 1, 0) return r end \
+             function BenillaProbeB() local r = BenillaProbeC() return r end \
+             function BenillaProbeA() local r = BenillaProbeB() return r end \
+             local r = BenillaProbeA() return r",
+        )
+        .unwrap();
+    let lines: Vec<&str> = deep.trim_end().split('\n').collect();
+    assert_eq!(lines.len(), 2, "one frame then the marker: {deep:?}");
+    assert_eq!(lines[1], "...", "the marker is its own complete line");
 }
 
 /// **An addon's chunk is named the way the CLIENT names it**, because addons parse that name.

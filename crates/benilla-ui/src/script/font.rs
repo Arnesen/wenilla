@@ -368,7 +368,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         )?,
     )?;
     // GetFont() → path, height, flags. `Tablet-2.0.lua:289`'s `_, headerSize =
-    // GameTooltipHeaderText:GetFont()` is the corpus's single biggest font-object read (268 sites).
+    // GameTooltipHeaderText:GetFont()` is the corpus's single biggest font-object read (268 sites),
+    // and it does arithmetic on the second value.
+    //
+    // **An unset Font answers `(nil, 0, "")`, all three ctor-determined** — `0x783a40` writes
+    // `[esi+0x48]` and `[esi+0x4c]` from a zeroed register, and its `0x41e3a0(NULL)` stores the
+    // shared empty record whose `char*` is NULL, which `lua_pushstring` turns into nil. So the
+    // height is the NUMBER zero, not nil (wow-re `font-object-lua-surface.md` §9.3,
+    // §5-cross-checked; decision 2129).
     m.set(
         "GetFont",
         lua.create_function(|lua, this: Table| {
@@ -377,7 +384,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(p) => Value::String(lua.create_string(&p)?),
                 None => Value::Nil,
             };
-            Ok((path, fo.height, fo.outline.as_str()))
+            Ok((path, fo.height.unwrap_or(0.0), fo.outline.as_str()))
         })?,
     )?;
 

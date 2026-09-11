@@ -67,33 +67,23 @@ const NOT_YET_ASSERTED: &[(&str, usize, &str)] = &[];
 
 /// The **kind** gate's own shrinking list, same rules as [`NOT_YET_ASSERTED`]: a name, the wrong
 /// kinds it currently answers, and the dispatched question that will settle it. An entry whose
-/// binding has come into agreement fails the gate, so it cannot outlive its fix.
+/// binding has come into agreement fails the gate, so it cannot outlive its fix — and both of the
+/// two it held did exactly that, within the day.
 ///
-/// Both entries are edge-case *values* the shapes table states the kind of and the recorded wow-re
-/// notes state no value for, dispatched into wow-re as one batched question (decision 2118):
-///
-/// * `GetSendMailItem` — slots 3 and 4 are `number` on every alternative including the
-///   `(nil,nil,…)` empty one, so the no-attachment leg pushes two numbers. Which two is a byte
-///   question; ours answers `(nil, nil, 1, nil)` and the slot-4 nil is provably wrong.
-const KINDS_NOT_YET_ASSERTED: &[(&str, &str, &str)] = &[(
-    "GetSendMailItem",
-    "nil,nil,number,nil",
-    "the reference's no-attachment leg pushes numbers in slots 3 and 4; the two values are      dispatched into wow-re (GetSendMailItem 0x4ae590)",
-)];
+/// **It is empty.** It held `GetSendMailItem`, whose no-attachment leg the shapes table types as
+/// two numbers and no recorded note gave the values of. wow-re answered it at the bytes —
+/// `0x4ae590` pushes `(nil, nil, 0, 0)`, and the stray `1` we had was borrowed from
+/// `GetAuctionSellItemInfo`'s empty leg — and 2129 folded the verdict back.
+const KINDS_NOT_YET_ASSERTED: &[(&str, &str, &str)] = &[];
 
 /// The widget kind gate's shrinking list — see [`KINDS_NOT_YET_ASSERTED`].
 ///
-/// `GetFont`'s height slot is `number` in the reference's single alternative, and ours answers nil
-/// on a FontString that has never been given a font. wow-re's `font-object-lua-surface.md` §9.3
-/// records that the FontString reads back through its resolved `CGxFont`, so a NULL one yields nil
-/// for the path and the flags — but it does not say what the *height* slot then carries, and that
-/// is the value the corpus does arithmetic on (`aux-addon`'s font-resize wheel handler,
-/// `tabs/search/frame.lua:481`). Dispatched.
-const WIDGET_KINDS_NOT_YET_ASSERTED: &[(&str, &str, &str)] = &[(
-    "GetFont",
-    "nil,nil,string",
-    "the reference's height slot is a number even with no CGxFont resolved; the value is      dispatched into wow-re (CSimpleFontString::GetFont 0x79d400)",
-)];
+/// **Also empty.** It held `GetFont`, whose height slot the table types as a number and which we
+/// answered nil on a FontString that was never given a font. The recorded note read as though a
+/// NULL `CGxFont` should nil all three slots; the bytes say otherwise — `0x7727b0`'s unconditional
+/// `fld [esi+0xe4]` sits in front of the `+0xe0` test, behind a branch `GetFont` never takes — and
+/// 2129 folded that back too.
+const WIDGET_KINDS_NOT_YET_ASSERTED: &[(&str, &str, &str)] = &[];
 
 /// The widget half's own shrinking list — see [`NOT_YET_ASSERTED`], same rules. Also empty:
 /// `GetFogColor` came off it with 1845, which found the fog colour was a packed `0xAARRGGBB` dword
@@ -753,6 +743,94 @@ fn no_query_binding_answers_a_lua_boolean() {
         booleans.is_empty(),
         "{} bindings answer a Lua boolean; 1.12 pushes 1/nil and only {REFERENCE_BOOLEANS:?} are \
          boolean in the reference:\n  {}",
+        booleans.len(),
+        booleans.join("\n  ")
+    );
+}
+
+/// The widget half of [`no_query_binding_answers_a_lua_boolean`], and the reason it is worth having
+/// separately from the widget *kind* gate: the kind gate calls each method with no arguments and
+/// skips whatever raises, so a predicate that gates its argument — `HasScript("OnClick")`,
+/// `IsObjectType("Frame")` — is never measured. The argument ladder reaches those, and `boolean`
+/// stays wrong under every one of them.
+#[test]
+fn no_widget_method_answers_a_lua_boolean() {
+    let tsv = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../reference/1.12-shapes.tsv"
+    );
+    let text = std::fs::read_to_string(tsv).expect("reference/1.12-shapes.tsv");
+
+    let s = benilla_ui::script::UiScript::new().expect("VM");
+    s.run(KIND_HELPER).expect("kind helper");
+    let mut made: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    for (table, kind, name) in WIDGET_PROBES {
+        if s.run(&format!(
+            "{name} = CreateFrame(\"{kind}\", \"{name}\", UIParent)"
+        ))
+        .is_ok()
+        {
+            made.insert(table, (*name).to_string());
+        }
+    }
+    for (table, expr) in REGION_PROBES {
+        let var = format!("PGR{}", made.len());
+        if s.run(&format!("{var} = {expr}")).is_ok() {
+            made.insert(table, var);
+        }
+    }
+
+    // A widget predicate's argument is a script or object-type NAME far more often than a number,
+    // so the ladder differs from the global one.
+    const WIDGET_ARGS: &[&str] = &["", "\"OnClick\"", "\"Frame\"", "1", "1, 1"];
+
+    let mut checked = 0usize;
+    let mut booleans: Vec<String> = Vec::new();
+    for line in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.starts_with("name\t"))
+    {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 9 || f[4] != "widget" || f[8] != "exact" {
+            continue;
+        }
+        let (name, table) = (f[0], f[3]);
+        if !["Get", "Is", "Has", "Can", "Num"]
+            .iter()
+            .any(|p| name.starts_with(p))
+        {
+            continue;
+        }
+        // The reference's own boolean, and the only widget one: `IsPetAttackActive` is a global.
+        let Some(obj) = made.get(table) else { continue };
+        for args in WIDGET_ARGS {
+            let probe = format!(
+                "if type({obj}.{name}) ~= 'function' then return '?' end \
+                 local ok, s = pcall(function() return PGKinds({obj}:{name}({args})) end) \
+                 if not ok then return '?' end return s"
+            );
+            let Ok(got) = s.eval::<String>(&probe) else {
+                continue;
+            };
+            if got == "?" {
+                continue;
+            }
+            checked += 1;
+            if got.split(',').any(|k| k == "boolean") {
+                booleans.push(format!("{obj}:{name}({args}) answers ({got})"));
+            }
+            break;
+        }
+    }
+
+    assert!(
+        checked >= 100,
+        "the widget boolean gate measured only {checked} methods — it has stopped covering anything"
+    );
+    assert!(
+        booleans.is_empty(),
+        "{} widget methods answer a Lua boolean; every predicate row in the reference's widget \
+         tables is `(nil) | (number)`:\n  {}",
         booleans.len(),
         booleans.join("\n  ")
     );

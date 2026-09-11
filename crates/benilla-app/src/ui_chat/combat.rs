@@ -385,13 +385,29 @@ pub(crate) fn spell_kind(
 /// `0x627d80` (damage) / `0x6274a0` (buffs) — the periodic family, and it is **a different shape**.
 ///
 /// Ten rows, not sixteen: there is no PET bucket and no `CREATURE_VS_*` split, so a pet folds into
-/// its owner's row and every creature source lands on one `SPELL_PERIODIC_CREATURE_*` row. And the
-/// **victim is not consulted at all** — both selectors take a single argument. A DoT you put on a
-/// hostile player and a DoT that player put on you are told apart by the *source* alone.
-pub(crate) fn periodic_kind(attacker: UnitClass, buff: bool) -> Option<ChatEventKind> {
+/// its owner's row and every creature source lands on one `SPELL_PERIODIC_CREATURE_*` row.
+///
+/// **Both selectors take ONE class, and WHICH one is the caller's to know** (decision 2127). This
+/// doc used to say the endpoint was "the *source* alone", and it is not: `0x626630` fills classA
+/// (the sentence's subject, the caster) and classB (the target), and the four periodic formatters
+/// disagree about which one they hand this selector.
+///
+/// | formatter | msg-id argument | the byte |
+/// |---|---|---|
+/// | `PERIODICAURADAMAGE*` `0x628100` | **classB — the TARGET** | `0x628235 mov ecx,edi` where `edi = [ebp-0x10]` is `outClassB` |
+/// | `PERIODICAURAHEAL*` `0x627240` | **classB — the TARGET** | `0x62732c mov ecx,[ebp-0x4]`, its own `outClassB` |
+/// | `POWERGAIN*` `0x627520` | classA — the caster | `0x6275fb mov ecx,esi`, `esi = [ebp-0x18]` = `outClassA` |
+/// | `SPELLPOWERLEECH*`/`…DRAIN*` `0x627930` | classA — the caster | `0x627a0f`/`0x627a3a mov ecx,esi`, `esi = [ebp-0x10]` = `outClassA` |
+///
+/// Passing the caster for the first two is not a cosmetic slip: a creature's DoT ticking **you**
+/// types as `SPELL_PERIODIC_CREATURE_DAMAGE` instead of `SPELL_PERIODIC_SELF_DAMAGE`, and your own
+/// DoT on a creature types as SELF instead of CREATURE — the two swap. Every addon that parses the
+/// combat log by event name (MikScrollingBattleText matches a *different GlobalString pattern* per
+/// event) then finds no pattern for either line and drops both.
+pub(crate) fn periodic_kind(subject: UnitClass, buff: bool) -> Option<ChatEventKind> {
     use ChatEventKind as K;
     use UnitClass as C;
-    let damage = match attacker {
+    let damage = match subject {
         C::Me | C::MyPet => K::SpellPeriodicSelfDamage,
         C::Party | C::PartyPet => K::SpellPeriodicPartyDamage,
         C::FriendlyPlayer | C::FriendlyPet => K::SpellPeriodicFriendlyPlayerDamage,
@@ -836,11 +852,30 @@ pub(crate) fn global_string(script: &benilla_ui::script::UiScript, key: &str) ->
         .filter(|s| !s.is_empty())
 }
 
-/// The lowercase school word a `…SCHOOL…` template's `%s` takes — `SPELL_SCHOOL<n>_NAME`
-/// ("physical", "holy", "fire", …), resolved through the install's own strings like every other
-/// template slot.
+/// The school word a `…SCHOOL…` template's `%s` takes — **capitalized** (decision 2127).
+///
+/// The reference does not read a GlobalString here at all: `0x6264b0(schoolIndex)` indexes
+/// `Resistances.dbc` (row array `[0xc0d9a4]`, 7 rows of 0x30 bytes, localized name at
+/// `row + 0xc + locale*4`) — wow-re `combat-log-chat-law.md` §4.5 — and those seven rows are
+/// `Physical · Holy · Fire · Nature · Frost · Shadow · Arcane`. `SPELL_SCHOOL<n>_NAME` is a
+/// *different* table in GlobalStrings.lua and holds the same seven words **lowercased**
+/// (`GlobalStrings.lua:4102-4114`), which is what this used to return: "12 nature damage" where
+/// the reference writes "12 Nature damage".
+///
+/// It reads as a nicety and is not one. MikScrollingBattleText classifies a parsed line's damage
+/// school by an exact string compare against `SPELL_SCHOOL<n>_CAP`
+/// (`MikCombatEventHelper.lua:3471-3492`) — an addon written against the live client's own output,
+/// so it is independent evidence for the capital. A lowercase word falls through to
+/// `DAMAGETYPE_UNKNOWN` and every school-coloured number in the addon loses its tint.
+///
+/// **Named residue:** the *source* is still the GlobalString, not the DBC. `SPELL_SCHOOL<n>_CAP`
+/// carries the same seven strings as `Resistances.dbc` in enUS (both read, 2127), and this client
+/// is enUS-only by construction (`combat_text::law::WORDS` and the rest of the string data are
+/// hardcoded enUS). A locale where the two tables disagree would diverge; a `Resistances.dbc`
+/// catalog is what closes it, and it is a data change rather than a string one — `compose_line`
+/// is handed the Lua VM and nothing else.
 pub(crate) fn school_word(script: &benilla_ui::script::UiScript, school: u8) -> Option<String> {
-    global_string(script, &format!("SPELL_SCHOOL{school}_NAME"))
+    global_string(script, &format!("SPELL_SCHOOL{school}_CAP"))
 }
 
 /// The power word a `POWERGAIN`/`SPELLPOWERLEECH`/`SPELLPOWERDRAIN` template takes, by the vmangos
