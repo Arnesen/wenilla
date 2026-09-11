@@ -989,7 +989,9 @@ pub(super) fn drain_chat_input(
                             .joined
                             .iter()
                             .enumerate()
-                            .filter_map(|(i, c)| c.as_ref().map(|c| format!("{}. {c}", i + 1)))
+                            .filter_map(|(i, c)| {
+                                c.as_ref().map(|c| format!("{}. {}", i + 1, c.name))
+                            })
                             .collect();
                         let text = if roster.is_empty() {
                             "You are not in any channels.".to_string()

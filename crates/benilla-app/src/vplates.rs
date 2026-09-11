@@ -120,7 +120,7 @@ mod border;
 /// re-weighed as a default. The `Default` is derived now that the claim is "both false", and it is
 /// still a *claim*: `cvars::tests` welds it to the registered `nameplateShowEnemies`/`Friendly`
 /// defaults and asserts the pair is off in as many words, so the derive cannot drift quietly.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone, Copy)]
 pub(crate) struct VPlateMode {
     pub(crate) enemies: bool,
     pub(crate) friends: bool,
@@ -326,6 +326,60 @@ pub(crate) fn gx_px(v: f32, basis: f32) -> f32 {
 /// Shared with the chat bubble (`NAMEPLATE_FONT` at the same 0.01 gx), like [`plate_basis`].
 pub(crate) fn text_px(h: f32, basis: f32) -> f32 {
     (h * basis).round().min(32.0)
+}
+
+/// **The FrameXML mirror of the two toggles** — `NAMEPLATES_ON` and `FRIENDNAMEPLATES_ON`
+/// (decision 2132), pushed into whichever VM is live.
+///
+/// The reference keeps the plate state in **two** levels: the engine bitmask `[0xc4da34]`, which
+/// is volatile and cleared on every `EnterWorld`, and those two FrameXML globals, which are the
+/// saved store. `UpdateNameplates` (`UIOptionsFrame.lua` l.768) replays the store into the
+/// bitmask, from `UIParent_OnEvent`'s VARIABLES_LOADED and PLAYER_ENTERING_WORLD arms
+/// (`UIParent.lua` l.234, l.367).
+///
+/// **benilla has only one level.** [`VPlateMode`] is the state and the [`CVAR_ENEMIES`] /
+/// [`CVAR_FRIENDS`] pair is its persistence, and nothing clears it at a world entry — so on this
+/// engine the replay has nothing to restore and everything to break. With the globals left nil
+/// (nothing here ever wrote them) `UpdateNameplates` took its else branch and called
+/// `HideNameplates()`, which writes the CVar, which IS the store: the player's setting was erased
+/// at every world entry and `config.toml` lost the line as "at default".
+///
+/// So the globals are kept TRUE, which makes the stock replay a value-preserving no-op — and is
+/// what a third-party addon reading `NAMEPLATES_ON` is owed anyway, which was 2115's whole
+/// argument for loading the stock window in the first place.
+pub(crate) fn push_plate_globals(script: &benilla_ui::script::UiScript, mode: VPlateMode) {
+    // The reference's own truthiness for these two: the number `1`, or nil. Never `0` — a Lua
+    // `0` is truthy, so `NAMEPLATES_ON = 0` would read as ON in `UpdateNameplates`'s `if`.
+    let on = |b: bool| b.then_some(1i64);
+    let g = script.lua().globals();
+    if let Err(e) = g
+        .set("NAMEPLATES_ON", on(mode.enemies))
+        .and_then(|()| g.set("FRIENDNAMEPLATES_ON", on(mode.friends)))
+    {
+        warn!("nameplates: FrameXML globals: {e}");
+    }
+}
+
+/// The globals kept in step with the mode for the life of each VM ([`push_plate_globals`]).
+///
+/// Behind a [`crate::ui_script::VmMemo`] (1290) because "this VM has been told" is a fact about
+/// the VM, not about the process. The world-entry load seeds them earlier still — ahead of
+/// `VARIABLES_LOADED`, which no `Update` system can reach — so this is the steady-state half:
+/// a V press, an options checkbox, a `/console` write, an addon's `SetCVar`.
+fn feed_plate_globals(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mode: Res<VPlateMode>,
+    mut told: Local<crate::ui_script::VmMemo<Option<(bool, bool)>>>,
+) {
+    let Some(script) = script else {
+        return;
+    };
+    let now = (mode.enemies, mode.friends);
+    let told = told.get(&script);
+    if *told != Some(now) {
+        *told = Some(now);
+        push_plate_globals(&script, *mode);
+    }
 }
 
 /// NAMEPLATES / FRIENDNAMEPLATES / ALLNAMEPLATES through the binding table (0997; defaults V /
@@ -1047,7 +1101,14 @@ impl Plugin for VPlatesPlugin {
                 )
                     .chain()
                     .in_set(VPlateSet),
-            );
+            )
+            // **Outside [`VPlateSet`] deliberately.** Its only ordering need is to be ahead of the
+            // script tick, and three sets order *after* `VPlateSet` while `drive_vplates` sits in
+            // `UiQuadAppend` — pulling the whole set in front of `UiInput` to carry one system
+            // would rewire all of that. A V press can therefore reach the globals a frame late,
+            // which costs nothing: their only readers are `UpdateNameplates` at the two world-entry
+            // events and an addon that calls it, never a per-frame path.
+            .add_systems(Update, feed_plate_globals.before(crate::ui_script::UiInput));
     }
 }
 
@@ -1185,6 +1246,55 @@ mod tests {
             .non_send_resource_mut::<benilla_ui::script::UiScript>()
             .take_cvar_changes()
             .is_empty());
+    }
+
+    /// **The FrameXML mirror is owed to every VM** (decision 2132) — the mode's two bits reach
+    /// `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON` as the reference's `1`-or-nil, follow a change, and
+    /// are handed to a rebuilt VM (a `/reload`) without one.
+    #[test]
+    fn the_plate_globals_follow_the_mode_and_survive_a_rebuilt_vm() {
+        let read = |app: &mut App| {
+            let s = app
+                .world_mut()
+                .non_send_resource_mut::<benilla_ui::script::UiScript>();
+            (
+                s.lua().globals().get::<Option<i64>>("NAMEPLATES_ON").ok(),
+                s.lua()
+                    .globals()
+                    .get::<Option<i64>>("FRIENDNAMEPLATES_ON")
+                    .ok(),
+            )
+        };
+        let mut app = App::new();
+        app.add_systems(Update, feed_plate_globals)
+            .init_resource::<VPlateMode>()
+            .insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+
+        app.update();
+        assert_eq!(read(&mut app), (Some(None), Some(None)), "both off ⇒ nil");
+
+        app.world_mut().resource_mut::<VPlateMode>().enemies = true;
+        app.update();
+        assert_eq!(
+            read(&mut app),
+            (Some(Some(1)), Some(None)),
+            "the reference's own truthiness: the NUMBER 1, never a truthy `0`"
+        );
+
+        // `ReloadUI()`: a fresh VM, and the mode did not move. The memo is keyed on the VM's
+        // session (1290), so the new one is told again rather than inheriting the old one's claim.
+        app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+        assert_eq!(
+            read(&mut app),
+            (Some(None), Some(None)),
+            "a fresh VM knows nothing"
+        );
+        app.update();
+        assert_eq!(
+            read(&mut app),
+            (Some(Some(1)), Some(None)),
+            "…and is handed the mode again"
+        );
     }
 
     /// The palette selector follows `0x7cbaa0`'s exact test order — notably reaction 2

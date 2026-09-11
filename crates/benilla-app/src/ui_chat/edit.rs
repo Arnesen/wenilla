@@ -123,11 +123,18 @@ pub(crate) const MAX_CHANNELS: usize = 10;
 /// A `Vec<String>` cannot express that: `retain` closed the hole and renumbered everything above
 /// it, so walking out of a zone renamed *other* channels — the director saw General and
 /// LocalDefense trade numbers on one zone change, and a `/2` typed after that went somewhere else.
+///
+/// **And each slot carries a state, because the reference's does** (`+0x9c`, decision 2130). We
+/// model the one value of it that changes what the player sees: **3, locally suspended**. States
+/// 0 (server-confirmed), 1 (join not yet acknowledged) and 2 (renamed, re-join pending) collapse
+/// here, and that is sound rather than lazy — the reference reads 0 to decide whether a LEAVE goes
+/// out, and our walk decides that from [`super::channels::ZoneChannelWalk::held`], the request side
+/// (1284). State 3 does not collapse: it is the difference between keeping a channel and losing it.
 #[derive(Resource, Default)]
 pub(crate) struct ChannelState {
     /// Slot `i` is channel number `i + 1`; `None` is a freed slot, kept so the numbers above it
     /// do not move. Never longer than [`MAX_CHANNELS`].
-    pub joined: Vec<Option<String>>,
+    pub joined: Vec<Option<ChannelSlot>>,
     /// `ChatChannels.dbc`, loaded once at Startup ([`super::channels::load_chat_channels`]).
     ///
     /// It lives here because both of its consumers are this type's own business: composing the
@@ -164,6 +171,58 @@ pub(crate) struct ChannelState {
     pub zone_mask: u32,
 }
 
+/// One joined-channel record — the reference's `[0xb4fe04] + n*0xa0` slot, in the fields this
+/// client uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChannelSlot {
+    /// `+0x04` — the channel's current name. The zone walk RENAMES this in place
+    /// ([`ChannelState::rename_slot`]).
+    pub name: String,
+    /// `+0x9c` — the slot's state, in the three values that change what the player sees.
+    pub state: SlotState,
+}
+
+/// The reference's per-slot state (`slot+0x9c`), modelled in the values whose **notice token**
+/// differs — because the token is what the stock `ChatFrame_OnEvent` branches on, and one of those
+/// branches deletes the window's channel registration.
+///
+/// The complete writer census is wow-re `zone-chat-channel-autojoin.md` §6.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SlotState {
+    /// `0` (server-confirmed) and `1` (join not yet acknowledged), which we cannot tell apart and
+    /// do not need to: the reference reads `0` to decide whether a LEAVE goes out, and our walk
+    /// decides that from [`super::channels::ZoneChannelWalk::held`], the request side (1284).
+    #[default]
+    Joined,
+    /// `2` — **renamed, re-join pending**: the zone walk moved this row's name because the player
+    /// crossed a border (`0x49bcd3`, inside the rename `0x49bc50`). The confirming `YOU_JOINED`
+    /// then carries the `YOU_CHANGED` token instead, which is `CHAT_YOU_CHANGED_NOTICE` —
+    /// *"Changed Channel: [%s]"*, a line the reference has and we never printed.
+    Renamed,
+    /// `3` — **locally suspended**: the row lost its eligibility, which in the 1.12 data means
+    /// exactly one thing, walking out of a capital with `Trade` joined (§5/§6). `0x49bcf0` sets it
+    /// and sends nothing; the LEAVE has already gone out earlier in the same iteration.
+    ///
+    /// The record and its number survive, and the arriving `YOU_LEFT` carries the `SUSPENDED`
+    /// token instead (`0x49c0e0`) — same rendered text, different arg1, which is exactly what stops
+    /// `ChatFrame_OnEvent` from deleting the registration. Walking back into a city then re-joins
+    /// through the state-3 bypass (§7 pass 1 step 2), where the name has not changed and the
+    /// comparison would otherwise say there was nothing to do.
+    Suspended,
+}
+
+impl ChannelSlot {
+    /// A server-confirmed slot — the only way one is ever born here, because this client registers
+    /// a slot on `YOU_JOINED` rather than at send time (the reference's `0x49b980` does the latter,
+    /// at state 1; the difference is invisible to everything we model).
+    pub(crate) fn joined(name: &str) -> Self {
+        ChannelSlot {
+            name: name.to_string(),
+            state: SlotState::Joined,
+        }
+    }
+}
+
 /// The bit `id` occupies in a `ZONECHANNELS` word — `1 << (ChannelID - 1)`; nothing outside
 /// `1..=32` has one.
 pub(crate) fn zone_bit(id: u32) -> u32 {
@@ -189,11 +248,107 @@ impl ChannelState {
         self.zone_mask &= !zone_bit(self.channels.zone_channel_id(name));
     }
 
+    /// **Rename a slot in place — the zone walk crossing a border** (decision 2130).
+    ///
+    /// The reference's `0x49bc50(oldName, newName)`, called from `ZoneChannelRefresh`'s pass 1
+    /// step 6 (wow-re `zone-chat-channel-autojoin.md` §7, VERIFIED): it copies the new name into
+    /// the slot and moves its state to "re-join pending" — **at send time**, before the server has
+    /// answered the `CMSG_LEAVE_CHANNEL` that went out a moment earlier.
+    ///
+    /// That ordering is the whole point, and it is not bookkeeping. When the server's `YOU_LEFT`
+    /// for the *old* name arrives, no slot carries that name any more — `0x49be90` is a pure name
+    /// scan with no state filter — so the marshaller (`0x49b0b0`) takes its NULL-slot leg
+    /// (`0x49b12f`) and defaults `arg7`, `arg8`, `arg9` and `arg10` to `0 / 0 / "" / 0` **together**,
+    /// and the stock `ChatFrame_OnEvent` finds no match and returns (`found == 0`). Which means it
+    /// never reaches its own `YOU_LEFT` arm, and that arm is the one that **deletes the window's
+    /// channel registration** (`ChatFrame.lua` l.1382-1384):
+    ///
+    /// ```lua
+    /// this.channelList[index] = nil;
+    /// this.zoneChannelList[index] = nil;
+    /// ```
+    ///
+    /// Nothing in stock FrameXML ever re-adds one on a join, and **nothing in the engine does
+    /// either**: a closed census of event 395 (`0x18b`) leaves five fire sites in the image, none of
+    /// them reachable from a zone change, for guilded and unguilded players alike (wow-re §11.1,
+    /// VERIFIED). The rename is not one repopulation mechanism among several — it is the only thing
+    /// standing between a border crossing and a dead channel.
+    ///
+    /// So without it, one crossing costs the window General and LocalDefense **for the rest of the
+    /// session** — the replacement join notice dropped unprinted, and every line spoken in the new
+    /// zone with it. `ui_chat::tests::a_zone_change_must_not_deregister_the_channel_it_renames` is
+    /// that claim.
+    ///
+    /// Freeing and re-claiming instead would also renumber: the slot is the channel's `/N`.
+    ///
+    /// Returns the slot number when there was one to rename.
+    pub(crate) fn rename_slot(&mut self, old: &str, new: &str) -> Option<u32> {
+        let n = self.number_of(old)?;
+        let slot = self.joined[n as usize - 1].as_mut()?;
+        slot.name = new.to_string();
+        // `0x49bcd3`: `(old == 3) ? 1 : 2` — either way the slot is awaiting a re-join, and the
+        // confirming notice is the one that resolves it.
+        slot.state = SlotState::Renamed;
+        Some(n)
+    }
+
+    /// **Suspend the slot holding `name` — the row stopped applying** (`0x49bcf0`, state 3).
+    ///
+    /// Walking out of a capital with `Trade` joined is the only case the 1.12 data produces. The
+    /// LEAVE has already gone out; this is what keeps the record, so the notice that comes back is
+    /// `SUSPENDED` rather than `YOU_LEFT` and the window keeps its registration
+    /// ([`ChannelSlot::suspended`]). Freeing it instead is the same bug the rename fixes, on the
+    /// one row a rename cannot reach.
+    pub(crate) fn suspend_slot(&mut self, name: &str) -> Option<u32> {
+        let n = self.number_of(name)?;
+        self.joined[n as usize - 1].as_mut()?.state = SlotState::Suspended;
+        Some(n)
+    }
+
+    /// **The confirming `YOU_JOINED` resolves the slot's state** — the reference's `0x49bb20`
+    /// writes `+0x9c = 0` unconditionally on that arm. Without this a renamed slot would stay in
+    /// [`SlotState::Renamed`] for good and every later join notice would read "Changed Channel".
+    ///
+    /// Separate from [`Self::claim_slot`] because the notice arrives for slots we already number —
+    /// a rename is exactly that case, and it is the one that must not take a second slot.
+    pub(crate) fn confirm_slot(&mut self, name: &str) {
+        if let Some(n) = self.number_of(name) {
+            if let Some(slot) = self.joined[n as usize - 1].as_mut() {
+                slot.state = SlotState::Joined;
+            }
+        }
+    }
+
+    /// The state of the slot holding `name` — the notice arms' own split. A name we hold no slot
+    /// for answers `None`, which is the leg where the reference defaults every derived arg.
+    pub(crate) fn slot_state(&self, name: &str) -> Option<SlotState> {
+        self.number_of(name)
+            .and_then(|n| self.joined[n as usize - 1].as_ref())
+            .map(|s| s.state)
+    }
+
+    /// The roster as the VM's mirror wants it — `GetChannelName`/`GetChannelList` read names, and
+    /// the holes have to survive the trip or `/N` addresses the wrong channel.
+    pub(crate) fn names(&self) -> Vec<Option<String>> {
+        self.joined
+            .iter()
+            .map(|s| s.as_ref().map(|s| s.name.clone()))
+            .collect()
+    }
+
+    /// Every joined channel's name, holes skipped.
+    pub(crate) fn iter_names(&self) -> impl Iterator<Item = &str> {
+        self.joined.iter().flatten().map(|s| s.name.as_str())
+    }
+
     /// The 1-based number of `name` (case-insensitive), if joined.
     pub(crate) fn number_of(&self, name: &str) -> Option<u32> {
         self.joined
             .iter()
-            .position(|c| c.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(name)))
+            .position(|c| {
+                c.as_ref()
+                    .is_some_and(|c| c.name.eq_ignore_ascii_case(name))
+            })
             .map(|i| i as u32 + 1)
     }
 
@@ -206,16 +361,23 @@ impl ChannelState {
     /// error-string table this build indexes by id, and the structural half is what matters.
     pub(crate) fn claim_slot(&mut self, name: &str) -> Option<u32> {
         if let Some(n) = self.number_of(name) {
+            // A confirmed join on a slot we already hold clears its suspension — the reference's
+            // `0x49bb20` writes state 0 unconditionally. This is the other half of the state-3
+            // bypass: walking back into a capital re-joins `Trade - City` under the name the slot
+            // already carries.
+            if let Some(slot) = self.joined[n as usize - 1].as_mut() {
+                slot.state = SlotState::Joined;
+            }
             return Some(n);
         }
         if let Some(i) = self.joined.iter().position(Option::is_none) {
-            self.joined[i] = Some(name.to_string());
+            self.joined[i] = Some(ChannelSlot::joined(name));
             return Some(i as u32 + 1);
         }
         if self.joined.len() >= MAX_CHANNELS {
             return None;
         }
-        self.joined.push(Some(name.to_string()));
+        self.joined.push(Some(ChannelSlot::joined(name)));
         Some(self.joined.len() as u32)
     }
 

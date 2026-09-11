@@ -37,7 +37,7 @@ use benilla_formats::ChatChannelsCatalog;
 use crate::area::AreaTableRes;
 use crate::net::{ClientCommand, NetCommands};
 
-use super::edit::ChannelState;
+use super::edit::{ChannelState, SlotState};
 
 /// `AreaTable.dbc` flag `0x08` — vmangos calls it `AREA_FLAG_SLAVE_CAPITAL`, with the comment
 /// *"Allow trade channel"* (`src/game/Database/DBCEnums.h:58`). In the shipped 5875 table exactly
@@ -149,7 +149,7 @@ pub(super) fn seed_channels(
         return;
     };
     if seeded.claim(&script) {
-        script.set_joined_channels(channels.joined.clone());
+        script.set_joined_channels(channels.names());
     }
 }
 
@@ -215,15 +215,49 @@ pub(crate) fn wanted_channels(
     in_city: bool,
     city_word: Option<&str>,
 ) -> Vec<String> {
+    composed_auto_rows(catalog, zone_name, city_word)
+        .filter(|(r, _)| in_city || !r.is_city_only())
+        .map(|(_, name)| name)
+        .collect()
+}
+
+/// **Every auto-join row that COMPOSES for this zone, city gate deliberately not applied** —
+/// the set that takes slots (decision 2137).
+///
+/// The reference registers the slot (`0x49b980`) *before* it asks whether the row is eligible:
+/// `0x49a50d` precedes the city gate at `0x49a512` (wow-re `zone-chat-channel-autojoin.md` §7 pass
+/// 2, §11). So a character standing outside a capital still holds a `Trade - City` slot — created,
+/// never joined, state 3 — and it still occupies **number 2**, because the `N.` a channel line
+/// carries is `slot[+0x00]`, the client-local index, never the `ChatChannels.dbc` ChannelID.
+///
+/// [`wanted_channels`] is the subset the gate then lets us actually join. Filtering the city rows
+/// out *before* they could take a number is what made our `/2` reach LocalDefense where the
+/// reference's reaches Trade.
+pub(crate) fn tracked_channels(
+    catalog: &ChatChannelsCatalog,
+    zone_name: &str,
+    city_word: Option<&str>,
+) -> Vec<String> {
+    composed_auto_rows(catalog, zone_name, city_word)
+        .map(|(_, name)| name)
+        .collect()
+}
+
+/// The shared half: the auto-join rows whose name can actually be composed here, in table order.
+/// Both callers derive from this so the resolvability rules cannot drift apart — the city gate is
+/// the *only* thing that separates them.
+fn composed_auto_rows<'a>(
+    catalog: &'a ChatChannelsCatalog,
+    zone_name: &'a str,
+    city_word: Option<&'a str>,
+) -> impl Iterator<Item = (&'a benilla_formats::ChatChannelRow, String)> + 'a {
     catalog
         .auto_join_rows()
-        .filter(|r| in_city || !r.is_city_only())
-        .filter(|r| !r.takes_city_name() || city_word.is_some())
+        .filter(move |r| !r.takes_city_name() || city_word.is_some())
         // A zone-dependent name with no zone to put in it would join a channel called
         // "General - " — join nothing rather than something wrong.
-        .filter(|r| !r.is_zone_dependent() || !zone_name.is_empty())
-        .map(|r| r.joinable_name(zone_name, city_word.unwrap_or_default()))
-        .collect()
+        .filter(move |r| !r.is_zone_dependent() || !zone_name.is_empty())
+        .map(move |r| (r, r.joinable_name(zone_name, city_word.unwrap_or_default())))
 }
 
 /// Is the zone under the player the one they are actually standing in?
@@ -267,9 +301,12 @@ fn zone_is_settled(player: Option<&crate::player::Player>) -> bool {
 ///
 /// **Selection:** the client's live predicate is the *saved* `ZONECHANNELS` mask, not `flags & 1`
 /// read fresh — but that mask is **seeded from `flags & 1` when there is no usable chat-cache
-/// file** (`0x4997fc`, gated `0x4997e8`). We persist no chat cache, so every session is that
-/// fresh-character path and reading the DBC bit directly is exactly right. It stops being right
-/// the day per-window channel settings are persisted.
+/// file** (`0x4997fc`, gated `0x4997e8`). We now persist that file and seat the mask from it
+/// ([`super::edit::ChannelState::zone_mask`], decision 2120), but the walk still reads the DBC bit
+/// directly: making the mask the join predicate means a character whose mask is 0 joins nothing at
+/// all, which 2120 deliberately left for its own change once the repair had swept through. Named
+/// here rather than left implicit — it is the one place this file diverges from the reference on
+/// purpose.
 /// Every `ChatChannels.dbc` row as the VM needs it (decision 1908; wow-re chat-cache-grammar.md
 /// §5-6): the id, the Shortcut the verbs compare a typed name against, the name composed for
 /// `zone_name` — `None` when the composition has nothing to substitute (a zone-dependent row with
@@ -301,7 +338,7 @@ pub(crate) fn zone_channel_catalog(
 #[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn auto_join_zone_channels(
     commands: Res<NetCommands>,
-    channels: Res<ChannelState>,
+    mut channels: ResMut<ChannelState>,
     areas: Option<Res<AreaTableRes>>,
     world: benilla_world::world_point::WorldPoint,
     // One param (clippy's argument ceiling), and they belong together: both answer "is the zone
@@ -322,63 +359,84 @@ pub(super) fn auto_join_zone_channels(
     if entered.read().next().is_some() {
         walk.live = true;
     }
-    if !walk.live {
-        return; // no character session — see `ZoneChannelWalk::live`
-    }
+
     // **A cinematic suppresses the rejoin, and it resumes when the shot ends.** Two of the ten
     // sites that read the reference's cinematic-state cell exist for exactly this — `0x49491e`
     // (the zone-text update) and `0x5ff566` (a `UPDATEFLAGS` reflex) both skip
     // `ZoneChannelRefresh` (`0x49a210`) while one runs, and `EndCinematic` calls it once at
     // `0x48f1d0` (wow-re `ui/scratch/cinematic-camera-law.md` §3.3, the complete 10-site census).
     //
-    // The walk stays armed, so "rejoin once at the end" is what falling through here the next
-    // frame already does — there is nothing to re-arm. It matters because a race intro flies the
-    // streaming focus hundreds of yards off the body, so `world.area()` changes under a player
-    // who has not moved, and the joins would otherwise fire against zones they are only
-    // *looking* at.
-    if cinematic.as_deref().is_some_and(|c| c.is_playing()) {
-        return;
-    }
-    let (Some(areas), false) = (areas, channels.channels.is_empty()) else {
-        return;
-    };
-    // Not until the world under the player is the one they are actually standing in — see the
-    // "Timing" note above.
-    if !zone_is_settled(player.as_deref()) {
-        return;
-    }
-    // The zone under the player, or nothing to do yet (tiles not streamed, no body).
-    let Some(zone_row) = world
-        .area()
-        .and_then(|leaf| areas.0.top_zone(leaf))
-        .and_then(|zone| areas.0.get(zone))
-    else {
-        return;
-    };
-    let at = (
-        zone_row.name.clone(),
-        zone_row.flags & AREA_FLAG_TRADE_CHANNEL != 0,
-    );
-    // The VM's zone-channel catalog — what `JoinChannelByName` resolves a typed name against and
-    // `EnumerateServerChannels` lists — is a function of the same zone; refed on a zone change
-    // and on a fresh VM, keyed like every other feed (1290).
-    if let Some(mut script) = script {
-        let fed = catalog_fed.get(&script);
-        if fed.as_ref() != Some(&at) {
-            script.set_zone_channel_catalog(zone_channel_catalog(
-                &channels.channels,
-                &at.0,
-                at.1,
-                city_word(&areas.0),
-            ));
-            *fed = Some(at.clone());
+    // The walk stays armed and only its *zone* goes unknown, so "rejoin once at the end" is what
+    // the first frame after the shot already does — there is nothing to re-arm. It matters because
+    // a race intro flies the streaming focus hundreds of yards off the body, so `world.area()`
+    // changes under a player who has not moved, and the joins would otherwise fire against zones
+    // they are only *looking* at.
+    let cinematic_running = cinematic.as_deref().is_some_and(|c| c.is_playing());
+    let areas = areas.as_deref();
+
+    // **The zone the walk may act on** — `None` whenever any gate says the leaf under the player
+    // is not the one they are standing in: no character session yet ([`ZoneChannelWalk::live`]), a
+    // cinematic flying the streaming focus off the body, a world still arriving ([`zone_is_settled`]),
+    // or an area authority with no answer for this session (decision 2130 made that a real state
+    // again rather than the previous character's zone).
+    let zone = (walk.live && !cinematic_running && zone_is_settled(player.as_deref()))
+        .then(|| {
+            let areas = areas?;
+            let row = world
+                .area()
+                .and_then(|leaf| areas.0.top_zone(leaf))
+                .and_then(|zone| areas.0.get(zone))?;
+            Some((row.name.clone(), row.flags & AREA_FLAG_TRADE_CHANNEL != 0))
+        })
+        .flatten();
+
+    // **The VM's zone-channel catalog is a `ChatChannels.dbc` fact, and it is fed BEFORE any of
+    // those gates** — because the thing the verbs read out of it is the row **Shortcut**, which no
+    // zone ever changes.
+    //
+    // It used to be fed only once a zone was known, and an empty catalog is not "no zone yet" to
+    // any of its three readers — it is *"no such built-in channel"*. `AddChatWindowChannel(1,
+    // "General")` took the no-match leg and stored `("General", 0)` as a **custom** channel, which
+    // the chat cache then wrote out as a name in the window's `CHANNELS` block with its zone bit
+    // dropped from `ZONECHANNELS`; the director's own `Onewarrior` file carries exactly that
+    // damage, and a window that has lost a zone channel's id drops every line the stock
+    // `ChatFrame_OnEvent` matches by id (ref `ChatFrame.lua` l.1379). `JoinChannelByName("General")`
+    // was worse: `(0, nil)` is the custom-channel leg, so it **sent `CMSG_JOIN_CHANNEL("General")`**
+    // — a real custom channel of that name on the server.
+    //
+    // Fed zone-less, every zone-dependent row carries `resolved: None`, which is the reference's
+    // own "matched a row but there is no zone text yet" leg: `AddChatWindowChannel` stores nothing
+    // and answers nil, `JoinChannelByName` returns nil and sends nothing (chat-cache-grammar.md §5,
+    // decision 1908). Right answer instead of a wrong one, and the walk re-feeds the moment a zone
+    // lands.
+    let mut script = script;
+    if !channels.channels.is_empty() {
+        if let Some(script) = script.as_mut() {
+            let at = zone.clone().unwrap_or_default();
+            let fed = catalog_fed.get(script);
+            if fed.as_ref() != Some(&at) {
+                script.set_zone_channel_catalog(zone_channel_catalog(
+                    &channels.channels,
+                    &at.0,
+                    at.1,
+                    areas.and_then(|a| city_word(&a.0)),
+                ));
+                *fed = Some(at);
+            }
         }
     }
+
+    let (Some(at), Some(areas)) = (zone, areas) else {
+        return; // nothing to walk against yet
+    };
     if walk.at.as_ref() == Some(&at) {
         return; // same zone as last frame — the common case, and free
     }
 
     let wanted = wanted_channels(&channels.channels, &at.0, at.1, city_word(&areas.0));
+    // Every row that composes here — the set that takes SLOTS, city gate not applied
+    // ([`tracked_channels`], decision 2137). `wanted` is the subset we may actually join.
+    let tracked = tracked_channels(&channels.channels, &at.0, city_word(&areas.0));
 
     // The diff is **per DBC row**, not per name — because a zone change does not add and remove
     // channels, it *renames* one: `General - Felwood` and `General - Winterspring` are the same
@@ -404,25 +462,127 @@ pub(super) fn auto_join_zone_channels(
     // retail sniff shows the pairs adjacent on the wire in exactly that order: LEAVE
     // `General - Felwood` → JOIN `General - Winterspring` → LEAVE `LocalDefense - Felwood` → …
     // (wow-re `zone-chat-channel-autojoin.md` §5).
-    for name in &wanted {
+    //
+    // The renames are collected rather than applied inside the loop only because `row_of` borrows
+    // the catalog that lives beside the slots; the order on the wire is unchanged.
+    //
+    // **The walk is over `tracked`, not `wanted`** (decision 2137): every composable row gets a
+    // slot, and the city gate then decides join-versus-suspend. Registering first is what gives
+    // `Trade - City` number 2 on a character who is nowhere near a city.
+    let eligible = |name: &String| wanted.iter().any(|w| w == name);
+    let mut renamed: Vec<(String, String)> = Vec::new();
+    let mut registered: Vec<String> = Vec::new();
+    let mut suspended: Vec<String> = Vec::new();
+    let mut bypassed: Vec<String> = Vec::new();
+    for name in &tracked {
         match walk.held.iter().find(|h| row_of(h) == row_of(name)) {
-            Some(old) if old == name => continue, // this row's name did not move
-            Some(old) => leave(old),
-            None => {}
+            // This row's name did not move. Normally nothing to do — **except** that a
+            // locally-suspended slot bypasses the name comparison entirely (`0x49a31c`, §7 pass 1
+            // step 2), which is exactly how walking back into a city re-joins `Trade - City` under
+            // a name that never changed.
+            Some(old) if old == name => {
+                if eligible(name) {
+                    if channels.slot_state(name) == Some(SlotState::Suspended) {
+                        join(name);
+                        // **And the slot leaves state 3 at SEND time, not when the notice lands.**
+                        // The reference's rename runs on the bypass leg too, with the name
+                        // unchanged, and writes `(old == 3) ? 1 : 2` — so a bypassed slot goes to
+                        // **1**, not 2: a plain `YOU_JOINED` when it confirms, never
+                        // `YOU_CHANGED`. Our `Joined` is that state 1 (see [`SlotState`]).
+                        //
+                        // Leaving it at 3 until the notice arrived would be wrong twice: a second
+                        // zone change inside that window would take this arm again and send a
+                        // duplicate join, and walking straight back out would find a slot that is
+                        // not `Joined` and so skip the LEAVE for a channel we really had joined.
+                        bypassed.push(name.clone());
+                    }
+                } else if channels.slot_state(name) == Some(SlotState::Joined) {
+                    // Walking OUT of the city: the LEAVE goes out here, before the eligibility
+                    // test suspends the slot — "the LEAVE still goes out, because it happens
+                    // earlier in the same iteration" (§5).
+                    leave(name);
+                    suspended.push(name.clone());
+                }
+                continue;
+            }
+            // The name moved. LEAVE(old) only from a server-confirmed slot (`0x49a35e`), then the
+            // rename, then the gate.
+            Some(old) => {
+                if channels.slot_state(old) == Some(SlotState::Joined) {
+                    leave(old);
+                }
+                renamed.push((old.clone(), name.clone()));
+            }
+            // Never tracked: the slot is claimed BEFORE the gate.
+            None => registered.push(name.clone()),
         }
-        join(name);
+        if eligible(name) {
+            join(name);
+        } else {
+            suspended.push(name.clone());
+        }
     }
-    // Rows that stopped applying entirely — walking out of a capital drops Trade with nothing to
-    // replace it.
+    // Rows that stopped COMPOSING entirely — a zone with no name at all, which drops the row from
+    // `tracked` rather than merely making it ineligible. The slot is kept and suspended, never
+    // freed, for the same reason as everything above.
     for old in walk
         .held
         .iter()
-        .filter(|h| !wanted.iter().any(|w| row_of(w) == row_of(h)))
+        .filter(|h| !tracked.iter().any(|t| row_of(t) == row_of(h)))
     {
-        leave(old);
+        if channels.slot_state(old) == Some(SlotState::Joined) {
+            leave(old);
+        }
+        suspended.push(old.clone());
     }
 
-    walk.held = wanted;
+    // **The slot is renamed in place, at send time** — [`ChannelState::rename_slot`] carries the
+    // whole why. In one line: the server's `YOU_LEFT` for the old name must find no slot, or the
+    // stock `ChatFrame_OnEvent` deletes the window's registration for that channel and never
+    // rebuilds it.
+    for (old, new) in &renamed {
+        if let Some(n) = channels.rename_slot(old, new) {
+            debug!("chat: zone channel slot {n} renamed {old:?} → {new:?}");
+        }
+    }
+    // **A row we have never tracked takes its slot here — before the gate decided anything**
+    // (`0x49b980` at `0x49a50d`, ahead of the city gate at `0x49a512`). In DBC row order, which is
+    // what makes the numbering `1 General`, `2 Trade`, `3 LocalDefense` whether or not Trade is
+    // joinable from where the player is standing.
+    // The state-3 bypass's own write, before the suspends below so the two can never fight over
+    // one slot in a single pass.
+    for name in &bypassed {
+        channels.confirm_slot(name);
+    }
+    for name in &registered {
+        match channels.claim_slot(name) {
+            Some(n) => debug!("chat: zone channel {name:?} registered as slot {n}"),
+            None => warn!(
+                "chat: no free slot for zone channel {name:?} — all {} are taken",
+                super::edit::MAX_CHANNELS
+            ),
+        }
+    }
+    // **…and a row that stopped applying is SUSPENDED, not freed** (`0x49bcf0`, state 3). The slot
+    // and its number survive, so the `YOU_LEFT` that comes back carries the `SUSPENDED` token and
+    // the window keeps its registration — otherwise walking out of Stormwind kills Trade for the
+    // session exactly the way a border crossing used to kill General.
+    for old in &suspended {
+        if let Some(n) = channels.suspend_slot(old) {
+            debug!("chat: zone channel slot {n} ({old:?}) suspended — out of its city");
+        }
+    }
+    if !(renamed.is_empty() && registered.is_empty()) {
+        if let Some(script) = script.as_mut() {
+            // `GetChannelName(n)` answers the new name from this frame on, as it does in the
+            // reference — the slot moved, not the numbering.
+            script.set_joined_channels(channels.names());
+        }
+    }
+
+    // `held` tracks every COMPOSED row, not only the joined ones — that is what makes the
+    // "name unchanged, eligibility changed" arms above reachable at all.
+    walk.held = tracked;
     walk.at = Some(at);
 }
 
@@ -533,7 +693,11 @@ mod tests {
             at: Some(("Tanaris".into(), false)),
             ..Default::default()
         };
-        channels.joined = walk.held.iter().cloned().map(Some).collect();
+        channels.joined = walk
+            .held
+            .iter()
+            .map(|n| Some(crate::ui_chat::edit::ChannelSlot::joined(n)))
+            .collect();
 
         // No VM in a unit test; the mirror leg is the one line this cannot reach, and
         // `end_session_channels` is a two-line wrapper over exactly this call.
@@ -574,6 +738,141 @@ mod tests {
             "…but they are the same DBC rows: [1, 22] either side of the border"
         );
         assert_eq!(ids(&felwood), vec![1, 22]);
+    }
+
+    /// **The slot number never moves across the whole city round trip** (decision 2137).
+    ///
+    /// The exact state sequence the walk drives for `Trade - City`: registered and joined on the
+    /// way in, suspended on the way out (record kept, `0x49bcf0`), and put back to *joined at send
+    /// time* on the way back in — the state-3 bypass, where the reference's rename writes
+    /// `(old == 3) ? 1 : 2` and so lands on **1**, not 2. Our `Joined` is that state 1, which is
+    /// why the re-join confirms as a plain `YOU_JOINED` rather than `Changed Channel`.
+    ///
+    /// Leaving the slot at `Suspended` until the notice arrived would break two things: a second
+    /// zone change inside that window would send a duplicate join, and walking straight back out
+    /// would skip the LEAVE for a channel we had really joined.
+    ///
+    /// **What this does NOT cover:** that the walk actually calls `confirm_slot` on the bypass leg.
+    /// The state machine is asserted here; the wiring is not, because the walk is a Bevy system
+    /// with no harness yet. That harness is the obvious next instrument for this module.
+    #[test]
+    fn a_city_round_trip_keeps_the_slot_and_its_number() {
+        let mut c = ChannelState::default();
+        assert_eq!(c.claim_slot("General - Elwynn Forest"), Some(1));
+        assert_eq!(c.claim_slot("Trade - City"), Some(2));
+        assert_eq!(c.claim_slot("LocalDefense - Elwynn Forest"), Some(3));
+
+        // Out of the city: the record and the number survive.
+        assert_eq!(c.suspend_slot("Trade - City"), Some(2));
+        assert_eq!(c.slot_state("Trade - City"), Some(SlotState::Suspended));
+        assert_eq!(c.number_of("Trade - City"), Some(2));
+        assert_eq!(
+            c.number_of("LocalDefense - Elwynn Forest"),
+            Some(3),
+            "and nothing above it renumbered — the slot went quiet, it did not go away"
+        );
+
+        // Back in: the bypass sends the join AND clears the suspension in the same pass.
+        c.confirm_slot("Trade - City");
+        assert_eq!(c.slot_state("Trade - City"), Some(SlotState::Joined));
+        assert_eq!(c.number_of("Trade - City"), Some(2), "still slot 2");
+    }
+
+    /// **A city-only row still takes a slot when you are nowhere near a city** (decision 2137).
+    ///
+    /// The reference registers the slot (`0x49b980` at `0x49a50d`) *before* the city gate
+    /// (`0x49a512`), so a character standing in Elwynn Forest holds three slots — General, a
+    /// created-but-never-joined `Trade - City`, and LocalDefense — and the `N.` a channel line
+    /// carries is `slot[+0x00]`, the client-local index. `/2` therefore reaches **Trade** there.
+    ///
+    /// We filtered the city rows out before they could take a number, so ours gave LocalDefense 2
+    /// and `/2` reached a different channel than the reference's. Invisible inside a capital, where
+    /// all three join and the numbering agrees — which is why the director's screenshot, taken on a
+    /// login into Stormwind, does not show it.
+    #[test]
+    fn a_city_row_takes_its_number_even_outside_a_city() {
+        let cat = catalog();
+        assert_eq!(
+            tracked_channels(&cat, "Elwynn Forest", CITY),
+            vec![
+                "General - Elwynn Forest",
+                "Trade - City",
+                "LocalDefense - Elwynn Forest",
+            ],
+            "all three rows take slots in DBC order, city or no city"
+        );
+        assert_eq!(
+            wanted_channels(&cat, "Elwynn Forest", false, CITY),
+            vec!["General - Elwynn Forest", "LocalDefense - Elwynn Forest"],
+            "…but only two of them are JOINED out here — the gate decides the packet, not the slot"
+        );
+
+        // Inside a capital the two lists agree, which is the case that hid this.
+        assert_eq!(
+            tracked_channels(&cat, "Stormwind City", CITY),
+            wanted_channels(&cat, "Stormwind City", true, CITY)
+        );
+    }
+
+    /// The two lists never disagree about *resolvability* — only about the city gate. A missing
+    /// city word or an unknown zone drops the row from both, so a slot is never taken for a name
+    /// we could not compose.
+    #[test]
+    fn the_slot_set_and_the_join_set_differ_only_by_the_city_gate() {
+        let cat = catalog();
+        assert_eq!(
+            tracked_channels(&cat, "Stormwind City", None),
+            wanted_channels(&cat, "Stormwind City", true, None),
+            "no city word: the city-NAMED rows are unresolvable, so neither list carries them"
+        );
+        assert!(
+            tracked_channels(&cat, "", CITY).is_empty(),
+            "no zone: nothing zone-dependent composes, so nothing takes a slot either"
+        );
+    }
+
+    /// **A catalog fed with no zone is not the same thing as no catalog** (decision 2130).
+    ///
+    /// The VM's three readers all treat an *empty* catalog as "no such built-in channel":
+    /// `AddChatWindowChannel` stores the name as a custom channel with id 0, and
+    /// `JoinChannelByName` returns `(0, nil)` — the custom leg — and **sends
+    /// `CMSG_JOIN_CHANNEL("General")`**. Fed zone-less instead, every zone-dependent row is present
+    /// but carries `resolved: None`, which is the reference's own "matched a row, no zone text yet"
+    /// leg: store nothing, answer nil, send nothing (chat-cache-grammar.md §5).
+    ///
+    /// That gap is what wrote `CHANNELS / General / LocalDefense` into the director's `Onewarrior`
+    /// window block with the zone bits stripped, and it was open on every login until the world
+    /// settled — because the catalog used to be fed only once a zone was known.
+    #[test]
+    fn a_zoneless_catalog_still_carries_every_row() {
+        let rows = zone_channel_catalog(&catalog(), "", false, None);
+        assert_eq!(rows.len(), 6, "every DBC row is present, zone or no zone");
+
+        let by = |s: &str| rows.iter().find(|r| r.shortcut == s).unwrap().clone();
+        assert_eq!(by("General").id, 1, "…and each carries its ChannelID");
+        assert_eq!(
+            by("General").resolved,
+            None,
+            "a zone-dependent row with no zone is UNRESOLVED — the nil leg, not the custom leg"
+        );
+        assert_eq!(by("Trade").resolved, None);
+        assert_eq!(
+            by("WorldDefense").resolved,
+            Some("WorldDefense".to_string()),
+            "a row whose name carries no %s resolves with no zone at all"
+        );
+
+        // And the moment a zone lands, the same rows resolve.
+        let rows = zone_channel_catalog(&catalog(), "Elwynn Forest", false, CITY);
+        let by = |s: &str| rows.iter().find(|r| r.shortcut == s).unwrap().clone();
+        assert_eq!(
+            by("General").resolved,
+            Some("General - Elwynn Forest".to_string())
+        );
+        assert!(
+            !by("Trade").listed,
+            "…and Trade is city-only, so it is not listed out here"
+        );
     }
 
     /// arg7: the composed names resolve back to their `ChatChannels.dbc` id, custom ones to 0 —

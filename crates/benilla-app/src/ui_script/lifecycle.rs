@@ -444,9 +444,23 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // any `CHAT_MSG_*` (ref `ChatFrame.lua` l.1261-1273) — as an `Update` system it landed after
     // the session's first chat had already been routed, and the login MOTD went to a window
     // registered for nothing.
-    finish_ui_load_with(&mut script, |script| {
-        crate::ui_chat::restore_chat_looks(world, script);
-    });
+    // The plate pair is read out of the world FIRST: the second closure borrows `world` for the
+    // chat-cache restore, and a `Copy` of two bools costs nothing next to fighting that borrow.
+    // Absent in a bare test world, where "both off" is also the resource's own default.
+    let plates = world
+        .get_resource::<crate::vplates::VPlateMode>()
+        .copied()
+        .unwrap_or_default();
+    finish_ui_load_with(
+        &mut script,
+        // `NAMEPLATES_ON` / `FRIENDNAMEPLATES_ON` (2132). This seat, and not the `Update` feed
+        // beside it, is what fixes the bug: `UIParent_OnEvent`'s first `UpdateNameplates()` runs
+        // inside the `VARIABLES_LOADED` fired at the end of this very call.
+        |script| crate::vplates::push_plate_globals(script, plates),
+        |script| {
+            crate::ui_chat::restore_chat_looks(world, script);
+        },
+    );
     // **Say it out loud when an addon didn't load** (decision 1495). Every failure the walk found
     // is retained now, but a log nobody knows to open does not fix silence — and silence is the
     // actual defect B293 reports: *"there are a lot of addons that still doesn't work"*, with
@@ -758,7 +772,7 @@ pub(crate) fn shutdown_on_exit(
 /// restore has to sit inside it. A test that only wants the tail keeps the plain shape.
 #[cfg(test)]
 pub(crate) fn finish_ui_load(script: &mut UiScript) {
-    finish_ui_load_with(script, |_| {});
+    finish_ui_load_with(script, |_| {}, |_| {});
 }
 
 /// [`finish_ui_load`] with the one step that has to land **between** `VARIABLES_LOADED` and
@@ -773,14 +787,23 @@ pub(crate) fn finish_ui_load(script: &mut UiScript) {
 /// an addon reading its chat colours out of a `VARIABLES_LOADED` handler would see the file's
 /// values where the reference shows it the boot ones.
 ///
-/// A callback rather than a split pair because the budget re-arm and the two fires are one edge,
-/// and a caller that forgets the middle step should not be able to compile.
-pub(crate) fn finish_ui_load_with(script: &mut UiScript, between: impl FnOnce(&mut UiScript)) {
+/// `host_settings` is the earlier of the two seams — **between the saved-variables chunk and
+/// `VARIABLES_LOADED`** — where the settings benilla keeps in `config.toml` rather than in that
+/// file are pushed into the VM (decision 2132; the rationale for the exact seat is on
+/// [`crate::ui_saved::load_saved_variables`]).
+///
+/// Callbacks rather than a split trio because the budget re-arm and the two fires are one edge,
+/// and a caller that forgets a middle step should not be able to compile.
+pub(crate) fn finish_ui_load_with(
+    script: &mut UiScript,
+    host_settings: impl FnOnce(&mut UiScript),
+    between: impl FnOnce(&mut UiScript),
+) {
     // Still the load edge, so still bounded (1306) — re-armed because the walk's last addon left
     // an arbitrary amount on the counter, and the saved-variables chunk plus every PLAYER_LOGIN
     // handler deserve the full allowance. The entry edge disarms after this returns.
     script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
-    crate::ui_saved::load_saved_variables(script);
+    crate::ui_saved::load_saved_variables(script, host_settings);
     between(script);
     script.fire_event("PLAYER_LOGIN", vec![]);
 }

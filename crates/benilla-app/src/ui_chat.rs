@@ -179,6 +179,12 @@ impl Plugin for UiChatPlugin {
             // drop that stays in-world for the reconnect. The disconnect twin is chained BEFORE the
             // walk so a drop and a walk landing on the same frame cannot re-diff against membership
             // the drop just invalidated.
+            //
+            // **After `AreaAuthoritySet`** (decision 2130), like the zone-text feed and the breath
+            // classifier — the other two systems that act on the leaf area. The walk turns the zone
+            // into packets, so reading last frame's answer is not a cosmetic lag: it joined the
+            // previous character's capital at login and then left it again, and the leave took the
+            // stock `ChatFrame_OnEvent`'s channel registration with it.
             .add_systems(
                 Update,
                 (
@@ -186,7 +192,8 @@ impl Plugin for UiChatPlugin {
                     channels::auto_join_zone_channels
                         .run_if(in_state(crate::char_select::ClientState::InWorld)),
                 )
-                    .chain(),
+                    .chain()
+                    .after(benilla_world::terrain_stream::AreaAuthoritySet),
             )
             .add_systems(
                 OnExit(crate::char_select::ClientState::InWorld),

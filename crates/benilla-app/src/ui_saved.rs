@@ -41,13 +41,25 @@ impl Plugin for UiSavedPlugin {
     }
 }
 
-/// Execute the saved-variables file into the VM and fire `VARIABLES_LOADED`.
+/// Execute the saved-variables file into the VM, let the host restore what it keeps elsewhere,
+/// and fire `VARIABLES_LOADED`.
 ///
 /// Called from the in-game UI load ([`crate::ui_script`]) at the reference's own seam — after the
 /// XML, before anything consumes it. A missing file is the normal first-run case (defaults stand);
 /// a malformed one warns and is left on disk untouched, so a hand edit that fails to parse costs
 /// this session's settings and not the file.
-pub(crate) fn load_saved_variables(script: &mut UiScript) {
+///
+/// **`host_settings` is the third store's turn** (decision 2132). A handful of the reference's
+/// `RegisterForSave` globals are settings benilla persists in `config.toml` instead — the
+/// nameplate pair is the first — and those have to land in the VM too, or the stock file reads
+/// nil and acts on it. The seat is exact and both edges are load-bearing: **after** the chunk, so
+/// a stale line in this file cannot outvote `config.toml` (0954's store), and **before** the
+/// event, because `VARIABLES_LOADED` is precisely where the consumers run
+/// (`UIParent_OnEvent` → `UpdateNameplates`).
+pub(crate) fn load_saved_variables(
+    script: &mut UiScript,
+    host_settings: impl FnOnce(&mut UiScript),
+) {
     // `None` = hermetic capture, or no install — session-only state, and the event below still fires.
     if let Some(path) = crate::local_state::saved_variables_path() {
         match std::fs::read_to_string(&path) {
@@ -65,6 +77,7 @@ pub(crate) fn load_saved_variables(script: &mut UiScript) {
             Err(e) => warn!("saved variables: cannot read {}: {e}", path.display()),
         }
     }
+    host_settings(script);
     // `VARIABLES_LOADED` fires whether or not there was a file: it means "the settings are now what
     // they are going to be", which is as true on a first run or a hermetic capture as after a real
     // restore — the reference fires it as a step of the load sequence, not conditionally. A window
@@ -146,7 +159,7 @@ mod tests {
 
         // The restart: this VM's own default is 1, the file says 7, and the file wins.
         let mut fresh = script("1");
-        load_saved_variables(&mut fresh);
+        load_saved_variables(&mut fresh, |_| {});
         assert_eq!(fresh.eval::<i64>("return KEPT").unwrap(), 7);
         assert_eq!(
             fresh.eval::<i64>("return VL_SEEN").unwrap(),
@@ -157,7 +170,7 @@ mod tests {
         // A malformed file is left alone, and this session simply runs on defaults.
         crate::local_state::write_atomic(&path, "KEPT = = 3\n").unwrap();
         let mut broken = script("1");
-        load_saved_variables(&mut broken);
+        load_saved_variables(&mut broken, |_| {});
         assert_eq!(broken.eval::<i64>("return KEPT").unwrap(), 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "KEPT = = 3\n");
         std::fs::remove_dir_all(&tmp).ok();
@@ -180,7 +193,7 @@ mod tests {
         assert!(!tmp.exists(), "a capture must not plant a settings file");
         // The load is a no-op too — but the event still fires, so a window waiting on it is not stuck.
         let mut fresh = script("1");
-        load_saved_variables(&mut fresh);
+        load_saved_variables(&mut fresh, |_| {});
         assert_eq!(fresh.eval::<i64>("return KEPT").unwrap(), 1);
         assert_eq!(fresh.eval::<i64>("return VL_SEEN").unwrap(), 1);
     }

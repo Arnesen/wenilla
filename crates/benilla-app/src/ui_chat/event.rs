@@ -406,6 +406,11 @@ pub(crate) struct ChatEvent {
     pub channel_number: u32,
     pub channel_base: String,
     pub notice: String,
+    /// The state of our own slot for this channel **as the notice arrived**, or `None` when we
+    /// hold no slot for it. Set once at the top of [`super::feed::deliver`], before that function
+    /// changes any of it — because the reference's notice arms read `slot+0x9c` to pick the token
+    /// and only then move it (`0x49c0c2` reads, `0x49bb20` writes).
+    pub slot_state: Option<super::edit::SlotState>,
 }
 
 impl ChatEvent {
@@ -433,7 +438,9 @@ impl ChatEvent {
         // one slot whose meaning is type-dependent (`ChatFrame_OnEvent` l.1416/1424 vs l.1396).
         let arg1 = match (self.kind, self.notice_byte()) {
             (Some(ChatEventKind::ChannelNotice | ChatEventKind::ChannelNoticeUser), Some(byte)) => {
-                notice_token(byte).unwrap_or_default().to_string()
+                notice_token(byte, self.slot_state)
+                    .unwrap_or_default()
+                    .to_string()
             }
             _ => self.text.clone(),
         };
@@ -577,15 +584,29 @@ pub(crate) fn event_name(kind: ChatEventKind) -> &'static str {
 /// [`super::feed::ChatLog::push_channel_notice`] drops it before it becomes an event), and anything
 /// past `0x1F` is outside vmangos's range.
 ///
-/// **Two state-dependent tokens we do not model:** the client answers `"YOU_CHANGED"` for `0x02`
-/// and `"SUSPENDED"` for `0x03` when its own channel record is in the matching state
-/// (`rec+0x9c == 2` / `== 3`) — a per-channel state benilla keeps nothing equivalent to, so we
-/// always send the plain `YOU_JOINED` / `YOU_LEFT`. Both alternates are `CHAT_<X>_NOTICE` strings
-/// that exist in GlobalStrings (`CHAT_YOU_CHANGED_NOTICE`, `CHAT_SUSPENDED_NOTICE`).
-pub(crate) fn notice_token(byte: u8) -> Option<&'static str> {
+/// **Two of the arms are state-dependent** (decision 2130): the client answers `"YOU_CHANGED"` for
+/// `0x02` and `"SUSPENDED"` for `0x03` when its own channel record is in the matching state
+/// (`rec+0x9c == 2` at `0x49c087` / `== 3` at `0x49c0e0`; wow-re
+/// `zone-chat-channel-autojoin.md` §11.3, VERIFIED), and both alternates are real
+/// `CHAT_<X>_NOTICE` strings —
+/// *"Changed Channel: [%s]"* and *"Left Channel: [%s]"*. We modelled neither until the zone walk's
+/// registration loss made it matter: `arg1` is what the stock `ChatFrame_OnEvent` branches on, and
+/// the `YOU_LEFT` branch **deletes the window's channel registration** (`ChatFrame.lua`
+/// l.1382-1384). A suspended channel that answers the plain token loses its registration for good.
+pub(crate) fn notice_token(
+    byte: u8,
+    state: Option<super::edit::SlotState>,
+) -> Option<&'static str> {
+    use super::edit::SlotState;
     use benilla_protocol::messages::channel_notice as n;
     Some(match byte {
+        // The confirming notice for a slot the zone walk renamed — crossing a zone border prints
+        // "Changed Channel: [1. General - Westfall]", not a leave and a join.
+        n::YOU_JOINED if state == Some(SlotState::Renamed) => "YOU_CHANGED",
         n::YOU_JOINED => "YOU_JOINED",
+        // Walking out of a capital: the record and its number stay, so this must NOT be the token
+        // that tears the registration down.
+        n::YOU_LEFT if state == Some(SlotState::Suspended) => "SUSPENDED",
         n::YOU_LEFT => "YOU_LEFT",
         n::WRONG_PASSWORD => "WRONG_PASSWORD",
         n::NOT_MEMBER => "NOT_MEMBER",

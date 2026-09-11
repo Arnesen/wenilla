@@ -336,8 +336,24 @@ fn parse(text: &str, rows: &[(u32, String)]) -> Parsed {
                 if is_end {
                     block = Block::Top;
                 } else if let Some((_, look)) = current.as_mut() {
-                    // The loader takes the first word, id 0.
-                    look.channels.push((head.to_string(), 0));
+                    // The loader takes the first word, id 0 — **unless the word is a
+                    // `ChatChannels.dbc` Shortcut**, in which case it is a zone channel that lost
+                    // its id and this restores it (decision 2130).
+                    //
+                    // Not a heuristic: the reference's engine resolves every name through the
+                    // shortcut walk before it stores one (`AddChatWindowChannel 0x4a1000`,
+                    // chat-cache-grammar.md §5), so a *custom* entry can never be spelled exactly
+                    // like a built-in shortcut — all 34 stock files carry an empty per-window
+                    // `CHANNELS` block beside a non-zero `ZONECHANNELS`. Ours could, because the
+                    // VM's catalog was still empty when the window was written, and `General` came
+                    // back as a custom channel with the id the id-match at `ChatFrame.lua:1379`
+                    // needs. The write side is fixed; this is what heals the files it already
+                    // damaged, and it is idempotent — a healed file has no such name to match.
+                    let id = rows
+                        .iter()
+                        .find(|(_, shortcut)| shortcut.eq_ignore_ascii_case(head))
+                        .map_or(0, |(id, _)| *id);
+                    look.channels.push((head.to_string(), id));
                 }
                 continue;
             }
@@ -482,10 +498,8 @@ fn shortcut_rows(channels: &super::edit::ChannelState) -> Vec<(u32, String)> {
 /// of.
 fn roster(channels: &super::edit::ChannelState) -> Vec<(String, u32)> {
     channels
-        .joined
-        .iter()
-        .flatten()
-        .map(|name| (name.clone(), channels.channels.zone_channel_id(name)))
+        .iter_names()
+        .map(|name| (name.to_string(), channels.channels.zone_channel_id(name)))
         .collect()
 }
 
@@ -770,10 +784,14 @@ mod tests {
         }
     }
 
+    /// `ChatChannels.dbc` as the loader hands it to [`parse`] — a subset of the shipped six, but
+    /// carrying all three `INITIAL` rows, because the ids 1 / 2 / 22 are what the window blocks are
+    /// actually about.
     fn rows() -> Vec<(u32, String)> {
         vec![
             (1, "General".to_string()),
             (2, "Trade".to_string()),
+            (22, "LocalDefense".to_string()),
             (24, "LookingForGroup".to_string()),
         ]
     }
@@ -835,6 +853,43 @@ mod tests {
             ]
         );
         assert_eq!(parsed.joined, vec!["MyChan".to_string()]);
+    }
+
+    /// **A window `CHANNELS` name that IS a DBC shortcut is a zone channel, not a custom one**
+    /// (decision 2130) — the repair for the files our own writer damaged.
+    ///
+    /// The director's `Onewarrior` file carried this verbatim: `CHANNELS / General / LocalDefense
+    /// / END` beside `ZONECHANNELS 2`, so window 1 held General and LocalDefense with id **0** and
+    /// only Trade kept its bit. The stock `ChatFrame_OnEvent` matches a channel line by
+    /// `zoneChannelList[index] == arg7` (`ChatFrame.lua:1379`), so that character silently lost
+    /// every General and LocalDefense line — join notices and speech alike — while Trade still
+    /// worked.
+    ///
+    /// The write side no longer produces it (the VM's catalog is fed before any verb can ask), and
+    /// this heals what it already wrote. Idempotent by construction: a healed file writes the name
+    /// as a bit, so there is no name left here to match.
+    #[test]
+    fn a_window_channel_named_like_a_dbc_shortcut_regains_its_id() {
+        let text = "WINDOW 1\nSIZE 0\n\nMESSAGES\nEND\n\nCHANNELS\nGeneral\nMyChan\n                    LocalDefense\nEND\n\nZONECHANNELS 2\n\nEND\n";
+        let parsed = parse(text, &rows());
+        assert_eq!(
+            parsed.looks[0].1.channels,
+            vec![
+                ("General".to_string(), 1),
+                ("MyChan".to_string(), 0),
+                ("LocalDefense".to_string(), 22),
+                ("Trade".to_string(), 2),
+            ],
+            "the two shortcuts come back as their DBC rows; the genuinely custom name keeps id 0, \
+             and the ZONECHANNELS bit still contributes Trade"
+        );
+
+        // …and the next save writes them as bits again rather than as names, which is what makes
+        // the repair one-way.
+        let out = render(&[parsed.looks[0].1.clone()], &[], &[], 0x0020_0003, false);
+        let window = out.split("WINDOW 1").nth(1).unwrap();
+        assert!(window.contains("CHANNELS\nMyChan\nEND"), "{out}");
+        assert!(window.contains("ZONECHANNELS 2097155\n"), "{out}");
     }
 
     /// A window's zone bits are masked by the joined set — a zone channel the client has left

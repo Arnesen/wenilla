@@ -1363,6 +1363,98 @@ fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
 /// The Nameplates page (0992 — live at last): the three 1.12 UnitName* checkbox rows read the
 /// table on select and write their flags on the interface panel's own click kit (checked →
 /// CheckBoxOn; these rows carry no soundQuirk).
+/// **A world entry must leave the saved nameplate setting alone** (decision 2132) — the report,
+/// on the real manifest with a real CVar table, which is the one combination no test had.
+///
+/// `UIParent_OnEvent` calls `UpdateNameplates()` twice per entry — `UIParent.lua` l.234
+/// (VARIABLES_LOADED) and l.367 (PLAYER_ENTERING_WORLD) — and it acts on
+/// `NAMEPLATES_ON`/`FRIENDNAMEPLATES_ON`. On benilla the four verbs it calls write the CVar pair,
+/// and the CVar pair IS the store, so with the globals left nil every entry wrote `"0"` over the
+/// player's `"1"` and `config.toml` then dropped the line as "at default".
+///
+/// Two mechanisms are needed and this asserts both: the host seeding the globals ahead of
+/// `VARIABLES_LOADED` (the enemy half), and our re-declared `UpdateNameplates` without the stock
+/// `ShowFriendNameplates(); HideFriendNameplates();` typo (the friendly half). Drop either and the
+/// matching row here goes back to `"0"`.
+#[test]
+fn a_world_entry_leaves_the_saved_nameplate_setting_alone() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // A manifest load with no player is a state the client never reaches (1848).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "loader errors: {failures:?}");
+    let _ = s.errors();
+
+    // The player has both halves on, restored from `config.toml` — a host write, so nothing is
+    // queued and the file is not re-dirtied by having been read.
+    let plates = crate::vplates::VPlateMode {
+        enemies: true,
+        friends: true,
+    };
+    let saved = |s: &mut UiScript| {
+        s.set_cvar_host(crate::vplates::CVAR_ENEMIES, "1");
+        s.set_cvar_host(crate::vplates::CVAR_FRIENDS, "1");
+        assert!(s.take_cvar_changes().is_empty(), "the host write is silent");
+    };
+
+    // ── The bug, kept as the control: with the globals nil the entry erases both halves ────────
+    saved(&mut s);
+    s.fire_event("VARIABLES_LOADED", vec![]);
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    assert_eq!(
+        (
+            s.cvar(crate::vplates::CVAR_ENEMIES),
+            s.cvar(crate::vplates::CVAR_FRIENDS)
+        ),
+        (Some("0".into()), Some("0".into())),
+        "nil globals ⇒ the replay writes the store off — this is what the report saw"
+    );
+    let _ = s.take_cvar_changes();
+
+    // ── The fix: the host seeds the globals, and the entry is a no-op end to end ───────────────
+    saved(&mut s);
+    crate::vplates::push_plate_globals(&s, plates);
+    assert_eq!(
+        s.eval::<i64>("return NAMEPLATES_ON").unwrap(),
+        1,
+        "the reference's own truthiness — the NUMBER 1, never the truthy `0`"
+    );
+    s.fire_event("VARIABLES_LOADED", vec![]);
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    assert_eq!(
+        (
+            s.cvar(crate::vplates::CVAR_ENEMIES),
+            s.cvar(crate::vplates::CVAR_FRIENDS)
+        ),
+        (Some("1".into()), Some("1".into())),
+        "the player's setting survives the entry"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "and queues nothing, so `config.toml` is never dirtied by a world entry"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The other direction still works: an addon that moves a global and calls the verb.
+    s.run("FRIENDNAMEPLATES_ON = nil UpdateNameplates()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![(crate::vplates::CVAR_FRIENDS.to_string(), "0".to_string())],
+        "UpdateNameplates keeps its contract — it is adapted, not stubbed"
+    );
+}
+
 #[test]
 fn the_nameplates_page_toggles_the_unit_name_cvars() {
     let mut s = harness_on(audio_harness());

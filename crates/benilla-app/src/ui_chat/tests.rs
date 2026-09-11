@@ -778,6 +778,283 @@ fn a_channel_notice_renders_in_the_channels_color_not_the_notice_row() {
     );
 }
 
+/// **Crossing a zone border must not deregister the channel it renames** (decision 2130).
+///
+/// The walk sends `LEAVE(General - Elwynn Forest)` then `JOIN(General - Westfall)` — one DBC row,
+/// renamed, and the retail sniff in wow-re `zone-chat-channel-autojoin.md` §7 shows exactly that
+/// pair on the wire. The server answers each with a notice, and the stock `ChatFrame_OnEvent`'s
+/// `YOU_LEFT` arm **deletes the window's registration for whatever it matched**
+/// (`ChatFrame.lua` l.1382-1384):
+///
+/// ```lua
+/// this.channelList[index] = nil;
+/// this.zoneChannelList[index] = nil;
+/// ```
+///
+/// Nothing in stock FrameXML ever re-adds one on `YOU_JOINED` — `ChatFrame_AddChannel` is reachable
+/// only from the `/join` popup and the chat-tab dropdown. So if our `YOU_LEFT` still resolves to a
+/// slot, the window loses General for the rest of the session: the replacement join notice is
+/// dropped unprinted, and so is every General line spoken in the new zone. That is the director's
+/// *"sometimes I get no channel stuff"*, and this test is the observable.
+///
+/// The window is registered here the way the chat cache registers it at login — the row's
+/// **Shortcut** against its **ChannelID**, which is the id-match at `ChatFrame.lua:1379` — because
+/// that is the registration the reference's own `chat-cache.txt` produces (`ZONECHANNELS` bits, not
+/// names).
+#[test]
+fn a_zone_change_must_not_deregister_the_channel_it_renames() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    let mut channels = super::edit::ChannelState {
+        channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+            benilla_formats::ChatChannelRow {
+                id: 1,
+                flags: 0x0_0003,
+                pattern: "General - %s".into(),
+                shortcut: "General".into(),
+            },
+        ]),
+        ..Default::default()
+    };
+    channels.claim_slot("General - Elwynn Forest");
+
+    // `ChatFrame_RegisterForChannels(GetChatWindowChannels(1))`, by hand: it does exactly this pair
+    // of writes, and calling it needs the `this` the event dispatch supplies.
+    s.run("ChatFrame1.channelList[1] = 'General' ChatFrame1.zoneChannelList[1] = 1")
+        .unwrap();
+
+    let channel_line = |name: &str| {
+        let mut e = ChatEvent::text_only(K::Channel, "anybody out here".into());
+        e.sender = "Bob".into();
+        e.channel = name.into();
+        e
+    };
+    let notice = |name: &str, byte: &str| {
+        let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
+        e.channel = name.into();
+        e.notice = byte.into();
+        e
+    };
+
+    // The control: registered by id, a General line reaches the window.
+    let before = lines_in_window(&s);
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut channel_line("General - Elwynn Forest"),
+    );
+    assert_eq!(
+        lines_in_window(&s),
+        before + 1,
+        "the control must print — otherwise the assertion below proves nothing"
+    );
+
+    // The border crossing, in the order the walk actually produces it: `CMSG_LEAVE_CHANNEL(old)`
+    // goes out, **the slot is renamed in place before the answer can arrive**
+    // ([`super::edit::ChannelState::rename_slot`], the reference's `0x49bc50` at pass 1 step 6),
+    // `CMSG_JOIN_CHANNEL(new)` goes out, and only then do the two notices land.
+    let renamed = channels.rename_slot("General - Elwynn Forest", "General - Westfall");
+    assert_eq!(
+        renamed,
+        Some(1),
+        "renamed in place — the slot number does not move"
+    );
+
+    let before = lines_in_window(&s);
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut notice("General - Elwynn Forest", "3"), // YOU_LEFT
+    );
+    assert_eq!(
+        lines_in_window(&s),
+        before,
+        "the leave prints NOTHING: no slot carries the old name any more, so arg7/arg8/arg9 come \
+         out defaulted and the stock handler returns at `found == 0` — which is also why it never \
+         reaches the arm that would deregister the channel"
+    );
+
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut notice("General - Westfall", "2"), // YOU_JOINED
+    );
+
+    assert_eq!(
+        s.eval::<Option<i64>>("return ChatFrame1.zoneChannelList[1]")
+            .unwrap(),
+        Some(1),
+        "the window must still be registered for ChannelID 1 after the rename — a nil here is \
+         General going silent for the rest of the session"
+    );
+
+    // …and the observable that actually matters: speech from the NEW zone still lands.
+    let before = lines_in_window(&s);
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut channel_line("General - Westfall"),
+    );
+    assert_eq!(
+        lines_in_window(&s),
+        before + 1,
+        "a General line in the new zone must reach the window"
+    );
+}
+
+/// **Walking out of a capital SUSPENDS Trade — it does not free it** (decision 2130).
+///
+/// The zone walk's other leave: a row that stops applying entirely, which in the 1.12 data means
+/// exactly `Trade` when you step out of a city (wow-re `zone-chat-channel-autojoin.md` §5). The
+/// `CMSG_LEAVE_CHANNEL` still goes out, but the client marks its own slot state 3 (`0x49bcf0`) and
+/// keeps the record — so the notice comes back as the `SUSPENDED` token, the stock handler's
+/// `YOU_LEFT` arm never runs, and the window keeps its registration. Walking back in re-joins
+/// through the state-3 bypass onto the same slot, with the same number.
+///
+/// Freeing it — which is what we did — cost Trade its registration on the way out and left the
+/// re-join notice unprintable on the way back in. Same bug as the border crossing, one row over.
+#[test]
+fn leaving_a_capital_suspends_trade_rather_than_deregistering_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    let mut channels = super::edit::ChannelState {
+        channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+            benilla_formats::ChatChannelRow {
+                id: 2,
+                flags: 0x0_003B,
+                pattern: "Trade - %s".into(),
+                shortcut: "Trade".into(),
+            },
+        ]),
+        ..Default::default()
+    };
+    channels.claim_slot("Trade - City");
+    s.run("ChatFrame1.channelList[1] = 'Trade' ChatFrame1.zoneChannelList[1] = 2")
+        .unwrap();
+
+    let notice = |name: &str, byte: &str| {
+        let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
+        e.channel = name.into();
+        e.notice = byte.into();
+        e
+    };
+
+    // The walk: LEAVE goes out, then the eligibility test suspends the slot.
+    assert_eq!(channels.suspend_slot("Trade - City"), Some(1));
+    let before = lines_in_window(&s);
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut notice("Trade - City", "3"), // YOU_LEFT
+    );
+    s.resolve();
+
+    // The line still PRINTS — `CHAT_SUSPENDED_NOTICE` is "Left Channel: [%s]", the same text as
+    // `CHAT_YOU_LEFT_NOTICE`. Only arg1 differs, and arg1 is what the stock handler branches on.
+    // Asserted because a missing string would make `compose_notice` answer `None` and the line
+    // would vanish silently — the failure this whole area is prone to.
+    assert_eq!(lines_in_window(&s), before + 1);
+    assert!(
+        s.extract().iter().any(|q| matches!(
+            &q.content,
+            benilla_ui::script::QuadContent::Text { text: Some(t), .. }
+                if t == "Left Channel: [1. Trade - City]"
+        )),
+        "the suspended leave renders the same text as an ordinary one"
+    );
+
+    assert_eq!(
+        channels.number_of("Trade - City"),
+        Some(1),
+        "the record and its number survive — `/1` still addresses Trade, and the state-3 bypass \
+         needs the slot to be there to bypass onto"
+    );
+    assert_eq!(
+        s.eval::<Option<i64>>("return ChatFrame1.zoneChannelList[1]")
+            .unwrap(),
+        Some(2),
+        "and the window is still registered for it: the notice carried the SUSPENDED token, so \
+         the stock handler never reached the arm that deletes the registration"
+    );
+
+    // Walking back in: the same slot, the same number, and the notice prints again.
+    let before = lines_in_window(&s);
+    super::feed::deliver(
+        &mut s,
+        &mut windows,
+        &mut channels,
+        &mut notice("Trade - City", "2"), // YOU_JOINED
+    );
+    assert_eq!(
+        lines_in_window(&s),
+        before + 1,
+        "the re-join prints — it could not have, with the registration gone"
+    );
+    assert_eq!(channels.number_of("Trade - City"), Some(1));
+    assert_eq!(
+        channels.slot_state("Trade - City"),
+        Some(super::edit::SlotState::Joined),
+        "and the slot is back to plain joined"
+    );
+}
+
+/// **A renamed row's confirming notice is `YOU_CHANGED`, and it renders "Changed Channel:"**
+/// (decision 2130).
+///
+/// `CHAT_YOU_CHANGED_NOTICE = "Changed Channel: [%s]"` is a string 1.12 ships and we had never
+/// printed, because we modelled no per-slot state to select it with (`0x02`'s arm splits on
+/// `rec+0x9c == 2`). It is what a zone-border crossing actually looks like in the reference: one
+/// line, not a leave and a join.
+#[test]
+fn a_renamed_zone_channel_confirms_as_changed_not_joined() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    let mut channels = super::edit::ChannelState {
+        channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+            benilla_formats::ChatChannelRow {
+                id: 1,
+                flags: 0x0_0003,
+                pattern: "General - %s".into(),
+                shortcut: "General".into(),
+            },
+        ]),
+        ..Default::default()
+    };
+    channels.claim_slot("General - Elwynn Forest");
+    s.run("ChatFrame1.channelList[1] = 'General' ChatFrame1.zoneChannelList[1] = 1")
+        .unwrap();
+    channels.rename_slot("General - Elwynn Forest", "General - Westfall");
+
+    let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
+    e.channel = "General - Westfall".into();
+    e.notice = "2".into(); // YOU_JOINED
+    super::feed::deliver(&mut s, &mut windows, &mut channels, &mut e);
+    s.resolve();
+
+    let want = "Changed Channel: [1. General - Westfall]";
+    assert!(
+        s.extract().iter().any(|q| matches!(
+            &q.content,
+            benilla_ui::script::QuadContent::Text { text: Some(t), .. } if t == want
+        )),
+        "expected {want:?} in the window"
+    );
+    assert_eq!(
+        channels.slot_state("General - Westfall"),
+        Some(super::edit::SlotState::Joined),
+        "and the confirming notice resolves the state — a second crossing must read as a rename \
+         of its own, not as a leftover"
+    );
+}
+
 /// **The leave line still knows its number, because the record dies after the line** (1275).
 ///
 /// [`super::feed::deliver`] is the ordering under test: we used to drop the channel from the joined
@@ -809,7 +1086,7 @@ fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
         "Left Channel: [2. General - Elwynn Forest]"
     );
     assert_eq!(
-        channels.joined,
+        channels.names(),
         [Some("World".to_string()), None],
         "and only THEN is the record gone — as a HOLE at slot 2, not a shortened list (1286)"
     );
@@ -920,7 +1197,7 @@ fn every_notice_token_resolves_and_the_tokenless_bytes_stay_silent() {
                 s.lua().globals().get::<String>(key).ok()
             })
         });
-        match super::event::notice_token(byte) {
+        match super::event::notice_token(byte, None) {
             Some(token) => assert!(
                 rendered.is_some(),
                 "notice {byte:#04x} has token {token} but CHAT_{token}_NOTICE resolves to nothing"

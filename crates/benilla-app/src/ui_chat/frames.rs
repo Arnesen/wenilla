@@ -251,7 +251,7 @@ pub(crate) fn compose_notice(
     kind: ChatEventKind,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let token = notice_token(event.notice_byte()?)?;
+    let token = notice_token(event.notice_byte()?, event.slot_state)?;
     let template = get(&format!("CHAT_{token}_NOTICE"))?;
     let mut args = vec![Arg::S(event.channel.as_str())];
     if kind == ChatEventKind::ChannelNoticeUser {

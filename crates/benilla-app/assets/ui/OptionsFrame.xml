@@ -223,7 +223,8 @@
         --
         --   · **`UpdateNameplates`.** `UIOptionsFrame.lua` l.768-780 — the reference's own home
         --     for it, and the four verbs it calls (Show/HideNameplates, Show/HideFriendNameplates)
-        --     are ours in `script/cvars.rs`, unchanged.
+        --     are ours in `script/cvars.rs`, unchanged. **One line of that body came back here**
+        --     (decision 2132) — see the re-declaration below; the de-duplication otherwise stands.
         --
         -- ── THE ONE ASSIGNMENT THAT STAYS, AND WHY IT IS AN OVERRIDE ────────────────────────────
         -- `AUTO_QUEST_WATCH` is the string `"1"` ON PURPOSE (decision 1136): the reference assigns
@@ -285,6 +286,42 @@
                     ClearTutorials()
                 end
                 TutorialFrame_HideAllAlerts()
+            end
+        end
+
+        -- ── `UpdateNameplates` — OURS AGAIN, and the deviation is ONE LINE (decision 2132) ──────
+        -- The stock body is `UIOptionsFrame.lua` l.768-780, running off the chain since 2115.
+        -- This file loads after it (manifest l.21 vs this window's seat), so this re-declaration
+        -- wins. It is transcribed verbatim except that l.776 is dropped, and both halves of the
+        -- reason are benilla facts, not taste:
+        --
+        --   · **l.774-776 is a stock typo.** `if ( FRIENDNAMEPLATES_ON ) then
+        --     ShowFriendNameplates(); HideFriendNameplates();` — show, then hide, so BOTH branches
+        --     end hidden. On 1.12 that only clears volatile engine bits, and the friendly global is
+        --     not even saved (its l.182 registers `NAMEPLATES_ON` a second time where
+        --     `FRIENDNAMEPLATES_ON` was meant). On benilla the four verbs write the CVar pair, and
+        --     the CVar pair IS the store (`vplates.rs`, `script/cvars.rs`) — so those two lines
+        --     erase a persisted setting at every world entry and untick this window's own
+        --     Friendly Name Plates row.
+        --   · **There is no volatile level here to replay into.** The reference clears
+        --     `[0xc4da34]` on every EnterWorld and this function restores it; `VPlateMode` is never
+        --     cleared, so the replay has nothing to restore. What it still owes is the other
+        --     direction — an addon that sets `NAMEPLATES_ON` and calls this expects plates to move
+        --     — which is why the body stays rather than becoming a no-op (1203's posture).
+        --
+        -- The globals it reads are kept true by the host (`vplates::push_plate_globals`), seeded
+        -- ahead of `VARIABLES_LOADED` on the load edge, so in the steady state every branch here
+        -- writes a value the CVar already holds and queues nothing at all.
+        function UpdateNameplates()
+            if ( NAMEPLATES_ON ) then
+                ShowNameplates()
+            else
+                HideNameplates()
+            end
+            if ( FRIENDNAMEPLATES_ON ) then
+                ShowFriendNameplates()
+            else
+                HideFriendNameplates()
             end
         end
 

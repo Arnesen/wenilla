@@ -451,9 +451,15 @@ impl Default for AudioListener {
 /// The world soundscape is live: in the world AND seated on the avatar ([`Player::active`]).
 /// The state half is the session boundary — the world's followers must not keep tracking (or
 /// restarting) its audio from the glue screens after a logout. The seated half covers the edges:
-/// after a logout the camera — and with it [`benilla_world::terrain_stream::CurrentArea`] — still sits at
-/// the old spot until the next login's take-control, and following it would start the *previous*
-/// session's soundscape for those frames.
+/// after a logout the camera still sits at the old spot until the next login's take-control,
+/// and following it would start the *previous* session's soundscape for those frames.
+///
+/// It used to have to carry [`benilla_world::terrain_stream::CurrentArea`] too — that resource
+/// had no way back to `None`, so it held the last character's zone across the whole boundary.
+/// Decision 2130 gave it one (the area authority follows the body, and there is no body at a
+/// glue screen), so this gate is about the camera alone now. The zone-channel walk was paying
+/// for that same staleness one module over, behind its own private guard — which is what made
+/// the lifetime the bug rather than either consumer.
 fn world_audio_live(
     state: Res<State<crate::char_select::ClientState>>,
     player: Res<Player>,

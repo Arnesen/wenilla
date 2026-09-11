@@ -227,8 +227,9 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
     RaidOptionsFrame_UpdatePartyFrames = RaidOptionsFrame_UpdatePartyFrames or function() end
     LocalizeFrames = LocalizeFrames or function() end
     updateContainerFrameAnchors = updateContainerFrameAnchors or function() end
-    -- Ours, not the reference's file: 1.12 keeps UpdateNameplates in UIOptionsFrame.lua and
-    -- benilla's own options window carries it (the options family stays ours).
+    -- 1.12 keeps UpdateNameplates in UIOptionsFrame.lua, which a kit reaches only at manifest
+    -- l.21; our own OptionsFrame.xml re-declares it below that (decision 2132). Both are plain
+    -- `function X()` writes, so a full kit ends on ours and a short one keeps this no-op.
     UpdateNameplates = UpdateNameplates or function() end
     CloseAllBags = CloseAllBags or function() end
     OpenBackpack = OpenBackpack or function() end
