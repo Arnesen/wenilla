@@ -88,7 +88,6 @@ pub(super) fn control(
     speed_capsule: (
         Res<MoveSpeed>,
         Res<PlayerCapsule>,
-        Res<CameraProbe>,
         Res<InspectMode>,
         Res<crate::ui_script::UiKeyboardCapture>,
         Res<crate::ui_script::PlayerUiClickConsumed>,
@@ -155,19 +154,18 @@ pub(super) fn control(
     let mouse_motion = &pointer.0;
     let look_cfg = *pointer.1;
     let zoom_max = pointer.2.max;
-    let (move_speed, capsule, cam_probe, inspect, ui_capture, click_consumed) = (
+    let (move_speed, capsule, inspect, ui_capture, click_consumed) = (
         &speed_capsule.0,
         &speed_capsule.1 .0,
-        &speed_capsule.2 .0,
+        &speed_capsule.2,
         &speed_capsule.3,
         &speed_capsule.4,
-        &speed_capsule.5,
     );
-    let binds = &speed_capsule.6;
-    let view_subject = &speed_capsule.7;
-    let self_guid = speed_capsule.8 .0;
-    let scoped = &speed_capsule.9;
-    let covered = speed_capsule.10.covering();
+    let binds = &speed_capsule.5;
+    let view_subject = &speed_capsule.6;
+    let self_guid = speed_capsule.7 .0;
+    let scoped = &speed_capsule.8;
+    let covered = speed_capsule.9.covering();
     // The auto-follow knobs (decisions 1493/1502), with far sight's one exception folded in here so
     // both camera seats below agree: while the rig orbits somebody ELSE's body (Mind Vision, Sentry
     // Totem), our own facing is not what "behind" means, so the return is forced off rather than
@@ -545,7 +543,6 @@ pub(super) fn control(
                 &mut cam,
                 &mut cam_t,
                 &collide,
-                cam_probe,
                 &camera::FollowInput {
                     cfg: follow_cfg,
                     face_yaw: player.face_yaw,
@@ -1123,7 +1120,6 @@ pub(super) fn control(
             &mut cam,
             &mut cam_t,
             &collide,
-            cam_probe,
             &follow,
             &dynamics,
         );

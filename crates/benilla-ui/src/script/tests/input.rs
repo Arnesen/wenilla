@@ -672,6 +672,35 @@ fn hiding_the_hovered_frame_fires_its_onleave_before_onhide() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
+/// The removal tail's own DISABLED case: `0x764cce` dispatches `[edx+0x50]` **virtually**, so a
+/// Button lands in `0x7794e0` and the guard swallows the leave there too. The `OnHide` half is the
+/// control — that one is not the hover notify and fires either way.
+#[test]
+fn hiding_a_hovered_disabled_button_fires_onhide_but_no_onleave() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        log = {}
+        local slot = CreateFrame("Button", "Slot")
+        slot:SetPoint("BOTTOMLEFT", 100, 100); slot:SetWidth(100); slot:SetHeight(100); slot:EnableMouse(true)
+        slot:SetScript("OnLeave", function() table.insert(log, "leave") end)
+        slot:SetScript("OnHide", function() table.insert(log, "hide") end)
+        slot:Disable()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_move(150.0, 150.0);
+    s.run("Slot:Hide()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ',')").unwrap(),
+        "hide",
+        "the removal tail reaches the button's own leave notify, which is DISABLED-gated"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 /// The negative: hiding a frame the cursor is NOT over fires no OnLeave (the reference's removal
 /// tail acts only when the removed frame IS the cached hover).
 #[test]
@@ -834,4 +863,71 @@ fn the_capture_is_per_button() {
         "A:down",
         "the right button captured nothing, so its release dispatches nothing"
     );
+}
+
+/// **A DISABLED Button runs neither `<OnEnter>` nor `<OnLeave>`** — `CSimpleButton::OnEnter
+/// 0x779490` / `OnLeave 0x7794e0` open `mov eax,[esi+0x328]; test eax,eax; je`, branching past the
+/// base notify that owns both script slots (wow-re `scratch/button-state-edge-set.md` §3.1). It
+/// still TAKES the hover, because the walk reassigns `[root+0x7c]` before it fires the notify.
+///
+/// The customer is every 1.12 addon that wrote `if this:IsEnabled() then` at the top of an
+/// `<OnEnter>` and expected it to be false: `IsEnabled()` is the NUMBER `1`/`0`, always truthy, so
+/// the body runs unless the ENGINE holds it back. AtlasLoot's four QuickLook buttons are the live
+/// case — unset, they disable themselves in `<OnShow>` and their `<OnEnter>` indexes a nil
+/// `AtlasLootCharDB.QuickLooks[n]`.
+#[test]
+fn a_disabled_button_takes_the_hover_but_fires_no_enter_or_leave() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        log = {}
+        local function mk(name, x)
+            local b = CreateFrame("Button", name)
+            b:SetPoint("BOTTOMLEFT", x, 0); b:SetWidth(100); b:SetHeight(100); b:EnableMouse(true)
+            b:SetScript("OnEnter", function(self) table.insert(log, self:GetName()..":enter") end)
+            b:SetScript("OnLeave", function(self) table.insert(log, self:GetName()..":leave") end)
+            return b
+        end
+        Off = mk("Off", 0)
+        On  = mk("On", 200)
+        Off:Disable()
+        -- The guard the addons actually wrote, and why it cannot be theirs: a NUMBER, never nil.
+        assert(Off:IsEnabled() == 0 and On:IsEnabled() == 1)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    let hit = s.mouse_move(50.0, 50.0);
+    assert!(hit.is_some(), "a disabled button still captures the point");
+    assert_eq!(
+        s.eval::<String>("return GetMouseFocus():GetName()")
+            .unwrap(),
+        "Off",
+        "the hover target moves before the notify — a disabled button IS the mouse focus"
+    );
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ',')").unwrap(),
+        "",
+        "entering a disabled button fires nothing"
+    );
+
+    // Leaving it is as silent as entering it, and the enabled neighbour is the control.
+    s.mouse_move(250.0, 50.0);
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ',')").unwrap(),
+        "On:enter",
+        "no leave from the disabled button; the enabled one notifies normally"
+    );
+
+    // Disabled WHILE hovered: the leave is gated on the state at leave time, not at enter time.
+    s.run("On:Disable()").unwrap();
+    s.mouse_move(400.0, 50.0);
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ',')").unwrap(),
+        "On:enter",
+        "a button disabled under the cursor swallows its own leave"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

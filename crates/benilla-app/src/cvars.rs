@@ -601,7 +601,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     //
     // `PetSpellDamage` has no row in `UIOptionsFrameCheckButtons` — the *Show Pet Melee Damage*
     // box writes both (`UIOptionsFrame_Save` l.334-336) — which is why 2077's census, which reads
-    // that table, could not see it while it saw its two siblings.
+    // that table, could not see it while it saw its two siblings. Our own Pet Damage row carries
+    // the same partner write (2180); all three are on the Combat page, under `CombatDamage`.
     same("CombatDamage", "1"),
     same("PetMeleeDamage", "1"),
     same("PetSpellDamage", "1"),
@@ -637,7 +638,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // is a shape-A binding (`0x790980`) that raises on a nil in the reference too, so the whole
     // window's `_Load` (and `_SetDefaults`, through `GetCVarDefault`) stopped at slider 3.
     // `cameraPitchMoveSpeed` has no row of its own: `UIOptionsFrame_Save` writes it as
-    // `sliderValue / 2` beside the yaw one (l.352-356), which is exactly this 180/90 pair.
+    // `sliderValue / 2` beside the yaw one (l.352-356), which is exactly this 180/90 pair — and
+    // the Controls page's Mouse Look Speed row carries that partner write (2180), so dragging it
+    // keeps the two axes in the ratio the registrar ships them at.
     //
     // **Both defaults are the reference's, and the shipped feel does not change** — the two facts
     // are compatible only because the unit divergence is carried in `camera::LOOK_YAW_PER_SPEED`
@@ -695,7 +698,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // The auto-follow's rate (1502), °/s — 1.12's own AUTO_FOLLOW_SPEED slider
     // (`UIOptionsFrameSliders`, 90..270 by 10), registered at the binary's "180.0" (`[0xbe1070]`).
     // It sets the transition's DURATION (`|dyaw| / rate * factor`), so it is an average rate, not a
-    // slew. No row yet — the slider is a one-line follow-on now that the knob exists.
+    // slew. Its slider is the Controls page's Auto-Follow Speed row (2180), greyed while the
+    // following style is Never — and it writes only this one, where the reference also writes
+    // `cameraPitchSmoothSpeed` at a quarter of it: that name is deliberately unregistered here,
+    // because `FollowRig` has a single rate and a key with no reader is 1134 §4's pretence.
     same("cameraYawSmoothSpeed", "180"),
     // **The four 1.12 camera-option toggles** (decision 2149) — the `UIOptionsFrame` checkboxes
     // FOLLOW_TERRAIN / HEAD_BOB / SMART_PIVOT / WATER_COLLISION, all four of which sat on the
@@ -1030,6 +1036,53 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // **not** one of `hwDetect`'s sixteen (scan of `[0x639a60, 0x639b80)`: sixteen record-pointer
     // reads, `0xc7f2e4` absent), so nothing overwrites it on any path.
     same("anisotropic", "1"),
+    // **Weather Intensity** — the video panel's slider 9 (`OptionsFrame.lua:29`,
+    // `func = "weatherDensity"`, a real CVar name rather than an engine binding), and the nearest
+    // of 2177 §10's named-not-done: benilla has had the feature since 0310 and only the switch was
+    // missing. The reader is `benilla_world::weather::WeatherState::weather_density`, which scales
+    // the rain/snow/mist spawn rate through the reference's own `0x67b870` quality table
+    // {0.1, 0.33, 0.66, 1.0}. Rendering only — it never touches the wire grade, the two ramp
+    // channels, or the storm/fog blend, so no server-visible behaviour rides it.
+    //
+    // The reference registers **`"2"`** at `0x67b806` (flags 0, callback `0x67b870`, name string
+    // `0x8685ac`) — wow-re `cvar/scratch/graphics-cost-cvar-census.md` §4, whose §10 table also
+    // lists this row among the twelve the reference install's `Config.wtf` moves off its default.
+    deviates(
+        "weatherDensity",
+        "3",
+        "2",
+        "2181: every precipitation rate in `benilla-world`'s own precipitation module was \
+         derived and graded against the reference install's own apitrace captures, and that \
+         install runs \
+         `SET weatherDensity \"3\"` (K = 1.0) — so 3 is the value a benilla-vs-reference \
+         side-by-side is correct at, and the registered 2 would thin every rate to 0.66 against \
+         the only client we compare with. The slider is how a player takes it back down",
+    ),
+    // **Brightness** (decision 2182) — the reference's `gamma`, registered at `0x402d70` with
+    // name `0x82e924` `"Gamma"`, default string `0x82e92c` **`"1.0"`** and flags **0** (not
+    // latched, so its change callback `0x4034d0` applies on the write).
+    //
+    // There the callback builds `ramp[i] = __ftol(pow(i · 1/255, gamma) · 65535)` (`0x591680`) and
+    // hands the 3×256 words to `GDI32!SetDeviceGammaRamp` — and **skips the upload windowed**
+    // (`byte[dev+0x20b]` = `CGxFormat +0x07` = `gxWindow`), which is every mode benilla has. So the
+    // reader here is not a ramp upload: it is [`crate::ui_gamma::DisplayGamma`], the same curve
+    // applied to the same values one stage later, inside the pass that already owns the composited
+    // image's single decode. wow-re `ffxeffects/scratch/whole-frame-grade-verdict.md` §(a) for the
+    // curve and `ui/scratch/video-options-verbs.md` §3 for the verbs.
+    //
+    // 1.0 is the identity ramp — load-bearing rather than tidy: at the default this client's
+    // output is what it was before the setting existed, so no visual golden moves.
+    //
+    // **Written `"1.000000"` rather than `"1.0"` or `"1"`, and that is not cosmetic.** Every value
+    // this key ever receives comes through `SetGamma`, whose `SStrPrintf(buf, 0x10, "%f", …)` is
+    // six decimals — so the row that Restore Defaults produces is `"1.000000"`, and a default
+    // string in any other spelling would make it compare *moved* and write a `config.toml` line
+    // holding the default value. The slider rows dodge this with their own trailing-zero strip
+    // (`OptionsSlider_OnValueChanged`); a row whose store is an engine verb cannot, because the
+    // verb owns the formatting. So the table speaks the verb's spelling instead, and
+    // [`sync_cvars`] seeds it the same way. `Same` is still exact: the test parse-compares, and
+    // the reference registers this value as `"1.0"` (`0x82e92c`).
+    same("gamma", "1.000000"),
     // **Render scale** (decision 1639) — benilla's own CVar, no 1.12 counterpart, in the
     // `boothHalfRate` / `SoundOutputLimiter` mould: the reference has no such dial because it has
     // no second buffer to hang one on. The world renders into the composite lane's off-screen image
@@ -1214,6 +1267,8 @@ pub(crate) struct KnobParams<'w> {
     names: ResMut<'w, NameConfig>,
     plates: ResMut<'w, VPlateMode>,
     clutter: ResMut<'w, ClutterConfig>,
+    weather: ResMut<'w, benilla_world::weather::WeatherState>,
+    display_gamma: ResMut<'w, crate::ui_gamma::DisplayGamma>,
     minimap: ResMut<'w, MinimapZoom>,
     bubbles: ResMut<'w, BubbleConfig>,
     zoom: ResMut<'w, ZoomLimit>,
@@ -1257,6 +1312,8 @@ impl KnobParams<'_> {
             names: &mut self.names,
             plates: &mut self.plates,
             clutter: &mut self.clutter,
+            weather: &mut self.weather,
+            display_gamma: &mut self.display_gamma,
             minimap: &mut self.minimap,
             bubbles: &mut self.bubbles,
             zoom: &mut self.zoom,
@@ -1296,6 +1353,12 @@ struct Knobs<'a> {
     names: &'a mut NameConfig,
     plates: &'a mut VPlateMode,
     clutter: &'a mut ClutterConfig,
+    /// The weather driver's own state — `weatherDensity` writes ONE byte of it
+    /// ([`benilla_world::weather::WeatherState::weather_density`]), the particle-density
+    /// step; every other field on it is the wire's, not a setting's (2181).
+    weather: &'a mut benilla_world::weather::WeatherState,
+    /// The display-brightness ramp the UI lane's decode applies (2182).
+    display_gamma: &'a mut crate::ui_gamma::DisplayGamma,
     minimap: &'a mut MinimapZoom,
     bubbles: &'a mut BubbleConfig,
     zoom: &'a mut ZoomLimit,
@@ -1508,6 +1571,23 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // resulting density change exactly as it does for the row above (0992's setter law, which
         // is the callback's own chunk rebuild).
         "frilldensity" => knobs.clutter.set_frill_density(v),
+        // Weather Intensity, the panel's 0..3 step 1 (2181). The reference's callback is
+        // `0x67b870`, a jump table (`0x67b8e8`) mapping 0/1/2/3 onto the quality cells
+        // {0.1, 0.33, 0.66, 1.0} in `[0x8680ec]` (wow-re
+        // `cvar/scratch/graphics-cost-cvar-census.md` §4). What that table does with an
+        // off-grid int is NOT carved, so the clamp here is this table's own standing
+        // posture rather than a fidelity claim — and it costs nothing either way, because
+        // `WeatherState::density_gain` already `.min(3)`s its own index.
+        "weatherdensity" => knobs.weather.weather_density = v.trunc().clamp(0.0, 3.0) as u8,
+        // Brightness (2182). The clamp is OURS and the reference has none — the reason it
+        // costs one is on [`crate::ui_gamma::GAMMA_RANGE`], and nothing a player can reach
+        // from the panel meets it.
+        "gamma" => {
+            knobs.display_gamma.0 = v.clamp(
+                *crate::ui_gamma::GAMMA_RANGE.start(),
+                *crate::ui_gamma::GAMMA_RANGE.end(),
+            )
+        }
         // The two zoom indices (1131) clamp exactly like the client's `set_zoom` (`0x6daa10`:
         // clamp at 5) — the widget clamps again on the way in, so a hand-edited level lands
         // in range whichever path it takes.
@@ -1805,6 +1885,8 @@ fn sync_cvars(
             names,
             plates,
             clutter,
+            weather,
+            display_gamma,
             minimap,
             bubbles,
             zoom,
@@ -1883,7 +1965,7 @@ fn sync_cvars(
             hardware_cursor: true,
         });
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 85] = [
+        let session: [(&str, String); 87] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1977,6 +2059,9 @@ fn sync_cvars(
             ("WorldDetail", (clutter.density - 1.0).to_string()),
             // …and the same density in the reference's own cells-per-chunk (2151).
             ("frillDensity", clutter.frill_density().to_string()),
+            ("weatherDensity", weather.weather_density.to_string()),
+            // Six decimals, matching `SetGamma`'s own `"%f"` — see the row's comment.
+            ("gamma", format!("{:.6}", display_gamma.0)),
             ("ChatBubbles", flag(bubbles.all)),
             ("ChatBubblesParty", flag(bubbles.party)),
             ("profanityFilter", flag(text_filter.profanity)),
@@ -2334,6 +2419,7 @@ mod tests {
                 "gxDepthBits",
                 "gxResolution",
                 "realmList",
+                "weatherDensity",
             ],
         );
     }
@@ -2490,6 +2576,14 @@ mod tests {
         // The V-plate pair welds to VPlateMode's defaults — both OFF, which is the reference's
         // own boot state on both of its halves (the `[0xc4da34]` bitmask and FrameXML's
         // `NAMEPLATES_ON = nil`). Enemy plates were the 0167 director pin until 1804.
+        // Weather Intensity (2181): the CVar's default and the weather driver's own must be
+        // the same rain, or a fresh config writes a row the world does not agree with. This is
+        // also where the DEVIATION is held honest — the reference registers "2" and the row
+        // above says why we ship 3; the weld makes sure it is 3 in both places.
+        assert_eq!(
+            d["weatherDensity"],
+            f32::from(benilla_world::weather::WeatherState::default().weather_density)
+        );
         let plates = VPlateMode::default();
         assert_eq!(d[crate::vplates::CVAR_ENEMIES] != 0.0, plates.enemies);
         assert_eq!(d[crate::vplates::CVAR_FRIENDS] != 0.0, plates.friends);
@@ -2556,6 +2650,8 @@ mod tests {
             alpha_ref: 0.5,
             fade_far: 70.0,
         };
+        let mut weather = benilla_world::weather::WeatherState::default();
+        let mut display_gamma = crate::ui_gamma::DisplayGamma::default();
         let mut minimap = MinimapZoom::default();
         let mut bubbles = BubbleConfig::default();
         let mut zoom = ZoomLimit::default();
@@ -2602,6 +2698,8 @@ mod tests {
             names: &mut names,
             plates: &mut plates,
             clutter: &mut clutter,
+            weather: &mut weather,
+            display_gamma: &mut display_gamma,
             minimap: &mut minimap,
             bubbles: &mut bubbles,
             zoom: &mut zoom,
@@ -2800,6 +2898,23 @@ mod tests {
         // The row `GetCVar` answers is the same field seen the other way round.
         assert!(apply_to_knobs("WorldDetail", "1", &mut knobs));
         assert_eq!(knobs.clutter.density, 2.0);
+        // Weather Intensity (2181): the panel's four stops land whole, an off-grid value
+        // truncates toward zero the way every int-valued row here does, and both ends clamp.
+        for (wrote, want) in [
+            ("0", 0u8),
+            ("1", 1),
+            ("2", 2),
+            ("3", 3),
+            ("2.9", 2),
+            ("9", 3),
+            ("-4", 0),
+        ] {
+            assert!(apply_to_knobs("weatherDensity", wrote, &mut knobs));
+            assert_eq!(
+                knobs.weather.weather_density, want,
+                "weatherDensity {wrote}"
+            );
+        }
         assert_eq!(knobs.clutter.frill_density(), 32.0);
         // And the pair is NAMED as a pair, in the registered spelling and the lowercased one, so
         // `$WOW_CLUTTER_DENSITY` cannot take one spelling of this knob for the session and leave
@@ -2828,6 +2943,13 @@ mod tests {
         assert!(REGISTERED
             .iter()
             .any(|r| r.name == benilla_ui::script::CVAR_FRILL_DENSITY));
+        // …and the display-gamma pair's (2182), for exactly the same reason: `GetGamma` answers
+        // `1 - <this CVar>` and `SetGamma` writes `1 - v` into it, both from a crate that cannot
+        // see this table, so an unregistered name would make the getter answer a constant 0 and
+        // the setter write into nothing.
+        assert!(REGISTERED
+            .iter()
+            .any(|r| r.name == benilla_ui::script::CVAR_GAMMA));
         // **`RestoreVideoDefaults`' row list, welded the same way** (2177). It lives in
         // `benilla-ui` beside the binding that walks it and cannot see this table, so a rename or
         // a retirement here would turn one of its rows into a silent skip — the verb would restore
@@ -2986,6 +3108,8 @@ mod tests {
             .init_resource::<crate::ui_chat::combat::CombatLogRanges>()
             .init_resource::<crate::combat_text::DamageTextGates>()
             .init_resource::<crate::ui_chat::combat::LogPeriodicSpells>()
+            .init_resource::<benilla_world::weather::WeatherState>()
+            .init_resource::<crate::ui_gamma::DisplayGamma>()
             .init_resource::<ClickConfig>()
             .init_resource::<crate::target::AssistAttack>()
             .init_resource::<LootConfig>()

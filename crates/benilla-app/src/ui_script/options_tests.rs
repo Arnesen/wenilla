@@ -2039,6 +2039,12 @@ fn settle(s: &mut UiScript) {
 fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    // On NAMEPLATES, not the default Controls page: since 2180 seated the four camera toggles and
+    // the two camera-speed sliders, Controls is sixteen rows and overflows its area on its own —
+    // which is the scroll body doing its job, and no longer a control for "nothing overflows".
+    // Nameplates is six rows and fits.
+    s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
+        .unwrap();
     settle(&mut s);
 
     // Control first: a settled page fits, so there is no scroll and no bar at all — and the body
@@ -2047,7 +2053,7 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
         s.eval::<f32>("return BenillaOptionsFrameContainerScroll:GetVerticalScrollRange()")
             .unwrap(),
         0.0,
-        "the Controls page fits its area"
+        "the Nameplates page fits its area"
     );
     for f in [
         "BenillaOptionsFrameContainerScrollBar",
@@ -2276,6 +2282,32 @@ fn hover_label(s: &mut UiScript, frame: &str) {
     s.mouse_move(l + 60.0, (t + b) * 0.5);
 }
 
+/// Bring `frame` inside the page's scroll rect, if the page scrolls at all. A page longer than
+/// its area clips everything past the fold (B217), so a row down there cannot be hovered where its
+/// rect says it is — the cursor lands outside the scroll frame and hits nothing. Nine of the
+/// Controls page's sixteen rows and the last of Combat's seventeen live there since 2180.
+fn scroll_into_view(s: &mut UiScript, frame: &str) {
+    s.resolve();
+    s.run(&format!(
+        "local sf = BenillaOptionsFrameContainerScroll \
+         local range = sf:GetVerticalScrollRange() \
+         if range and range > 0 then \
+           local row = getglobal(\"{frame}\") \
+           local want = sf:GetVerticalScroll() \
+           if row:GetBottom() < sf:GetBottom() then \
+             want = want + (sf:GetBottom() - row:GetBottom()) + 2 \
+           elseif row:GetTop() > sf:GetTop() then \
+             want = want - (row:GetTop() - sf:GetTop()) - 2 \
+           end \
+           if want < 0 then want = 0 end \
+           if want > range then want = range end \
+           sf:SetVerticalScroll(want) \
+         end"
+    ))
+    .unwrap();
+    s.resolve();
+}
+
 /// A hovered row raises its 1.12 description, on the era's seat, and drops it on leave — the row
 /// itself, its checkbox, and (B223's report) the label the cursor actually crosses. The string
 /// resolves by KEY at hover, so seeding it AFTER the window loaded still paints: that is the
@@ -2433,11 +2465,13 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             continue;
         }
         // The deliberate exceptions (1639 Render Scale, 1650 Display Mode, 1847 Enable Sound in
-        // Background). None has a 1.12 counterpart whose `OPTION_TOOLTIP_*` could be resolved —
-        // Render Scale has no era row at all, Display Mode's era row was a CHECKBOX whose string
-        // says "Check to…", and 1.12 has no background-sound setting at all (it mutes on its
-        // window-activation event and offers no way out) — and each is a row a player needs a
-        // description for. Each carries one under a `BENILLA_` prefix so the reference's
+        // Background, 2182 Brightness). None has a 1.12 counterpart whose `OPTION_TOOLTIP_*` could
+        // be resolved — Render Scale has no era row at all, Display Mode's era row was a CHECKBOX
+        // whose string says "Check to…", 1.12 has no background-sound setting at all (it mutes on
+        // its window-activation event and offers no way out), and `OPTION_TOOLTIP_GAMMA` spends
+        // its second sentence on "all 21 levels of gray bars to the right", which is the stock
+        // video window's own calibration art and not something this page has — and each is a row a
+        // player needs a description for. Each carries one under a `BENILLA_` prefix so the reference's
         // namespace stays the reference's, which is exactly what this guard is here to protect.
         // Everything the guard was built to catch — an invented or typo'd `OPTION_TOOLTIP_` key
         // that silently resolves to nothing — is untouched: the pairing below is exact, so a
@@ -2449,6 +2483,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "BENILLA_TOOLTIP_BACKGROUND_SOUND",
                 "AudioRowBackgroundSound",
             ),
+            ("BENILLA_TOOLTIP_BRIGHTNESS", "GraphicsRowBrightness"),
         ];
         if let Some((_, want_row)) = BENILLA_OWNED.iter().find(|(k, _)| *k == key) {
             assert_eq!(row, *want_row, "{row}: not this row's string");
@@ -2498,7 +2533,16 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // key OPTION_TOOLTIP_SHOW_TUTORIALS is 1.12's own.
     // The 30th and 31st CVar rows are the two text filters (2077): Profanity Filter on the
     // Interface page and Disable Spam Filter on the Chat page, both keys 1.12's own.
-    assert_eq!(checked, 62, "every tipped row carries a live key");
+    // 2180 added fourteen rows, every one of them tipped with the reference's own key: the
+    // four camera toggles and two camera-speed sliders plus Attack on assist, Auto Clear AFK and
+    // Auto Self Cast on Controls, Enhanced Tooltips on Interface, Player Guild Names on
+    // Nameplates, and the damage-number trio on Combat. 62 -> 76.
+    // …and Weather Intensity (2181), on the Graphics page, whose OPTION_TOOLTIP_WEATHER_DETAIL is
+    // 1.12's own and rides its own slider-9 row verbatim. 76 -> 77.
+    // …and Brightness (2182), the FOURTH row whose description is benilla's own rather than 1.12
+    // GlobalStrings — OPTION_TOOLTIP_GAMMA spends its second sentence on the stock window's
+    // 21-step grey ramp, which this page does not have (see the guard above). 77 -> 78.
+    assert_eq!(checked, 78, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2564,6 +2608,7 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             .unwrap();
         for rkey in rows.split(',') {
             let row = format!("BenillaOptionsFrameContainerBody{page}{rkey}");
+            scroll_into_view(&mut s, &row);
             hover_label(&mut s, &row);
             s.resolve();
             let tipped: bool = s.eval(&format!("return {row}.tip ~= nil")).unwrap();
@@ -2610,7 +2655,14 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     // (1815), the Audio page's fourth checkbox and 1.12's own.
     // …and Show Tutorials (2077), the Interface page's seventh API row.
     // …and the two text-filter rows (2077).
-    assert_eq!(raised, 62, "every row but Auto Loot raises a description");
+    // …and 2180's fourteen: Attack on assist, Auto Clear AFK, Auto Self Cast, Follow Terrain,
+    // Head Bob, Auto-Follow Speed, Water Collision, Smart Pivot and Mouse Look Speed on Controls;
+    // Enhanced Tooltips on Interface; Player Guild Names on Nameplates; Show Target Damage,
+    // Periodic Damage and Pet Damage on Combat. Every one of them tipped with the reference's
+    // own key, which is what makes the count move by exactly the number of rows added.
+    // …and Weather Intensity (2181) and Brightness (2182), the Graphics page's fourth and fifth
+    // sliders.
+    assert_eq!(raised, 78, "every row but Auto Loot raises a description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a
@@ -4589,4 +4641,326 @@ fn every_cvar_the_reference_table_names_is_registered_or_listed_with_its_blocker
         phantom.is_empty(),
         "UNBACKED_REFERENCE_CVARS names CVars the reference's table does not: {phantom:?}"
     );
+}
+
+/// **Nothing the reference lets a player change, and this client backs, is out of reach**
+/// (decision 2180) — the other half of the census above, and the half that was missing.
+///
+/// The test above asks the ENGINE's question: is the CVar registered? It was green the entire time
+/// the four camera toggles had no box on any window a player can open. 2149 built their
+/// mechanisms and dropped them off `UNBACKED_REFERENCE_CVARS`; 2115 loads the stock window that
+/// carries their checkboxes deliberately HIDDEN, so addons find real frames and the player never
+/// sees it; and our own window — the one the ESC menu opens — simply had no rows. Two records were
+/// individually right and the setting was unreachable, because no check compared them.
+///
+/// This asks the UI's question. A CVar that lands on the list below is one the reference lets a
+/// player change and benilla does not, and it costs a stated reason at the row.
+#[test]
+fn every_registered_reference_cvar_has_a_row_on_our_own_window() {
+    let s = harness();
+
+    // Both of the reference's own option tables, exactly as the registration census reads them.
+    let named: Vec<String> = s
+        .eval::<Vec<String>>(
+            "local out = {} \
+             for key, v in pairs(UIOptionsFrameCheckButtons) do \
+                 if v.cvar then table.insert(out, v.cvar) end \
+             end \
+             for _, v in ipairs(UIOptionsFrameSliders) do \
+                 if v.cvar then table.insert(out, v.cvar) end \
+             end \
+             table.sort(out) \
+             return out",
+        )
+        .expect("read the reference's two option tables");
+
+    // What OUR window can actually move. A row's own `cvar`, plus the `partner` a handful of rows
+    // write beside it (`PetSpellDamage`, `cameraPitchMoveSpeed`) — those are moved by a control
+    // the player uses, which is what "reachable" means here, even though neither is table-named.
+    let ours: std::collections::HashSet<String> = s
+        .eval::<Vec<String>>(
+            "local out = {} \
+             for page, rows in pairs(OPTIONS_PAGE_ROWS) do \
+                 for _, rkey in ipairs(rows) do \
+                     local row = getglobal(\"BenillaOptionsFrameContainerBody\" .. page .. rkey) \
+                     if row.cvar then table.insert(out, row.cvar) end \
+                     if row.partner then table.insert(out, row.partner.cvar) end \
+                 end \
+             end \
+             return out",
+        )
+        .expect("read our own window's rows")
+        .into_iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+
+    let registered: std::collections::HashSet<String> = crate::cvars::registered_pairs()
+        .map(|(n, _)| n.to_ascii_lowercase())
+        .collect();
+    let excused: std::collections::HashSet<String> = UNREACHABLE_REFERENCE_CVARS
+        .iter()
+        .map(|(n, _)| n.to_ascii_lowercase())
+        .collect();
+
+    // Two floors, because the failure this check is worth having is the one where it passes for
+    // the wrong reason: a harness whose stock tables did not load reads no names, and one whose
+    // window did not build reads no rows, and either way `missing` is empty and green.
+    let backed = named
+        .iter()
+        .filter(|c| registered.contains(&c.to_ascii_lowercase()))
+        .count();
+    assert!(
+        backed >= 28,
+        "the reference's tables did not load: only {backed} of their names are registered here"
+    );
+    assert!(
+        ours.len() >= 40,
+        "our own window's rows did not build: only {} carry a cvar",
+        ours.len()
+    );
+
+    let missing: Vec<&str> = named
+        .iter()
+        .filter(|c| {
+            let k = c.to_ascii_lowercase();
+            registered.contains(&k) && !ours.contains(&k) && !excused.contains(&k)
+        })
+        .map(String::as_str)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these are backed and the reference lets a player change them, and our own options \
+         window has no row for them: {missing:?} — seat a row, or add them to \
+         UNREACHABLE_REFERENCE_CVARS with the reason"
+    );
+
+    // The other direction, the one that keeps the list from rotting: an excuse for a row that now
+    // exists is an excuse describing nothing.
+    let stale: Vec<&str> = UNREACHABLE_REFERENCE_CVARS
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| ours.contains(&n.to_ascii_lowercase()))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these have a row now — drop them from UNREACHABLE_REFERENCE_CVARS: {stale:?}"
+    );
+}
+
+/// **It is empty, and that is the finding, not an omission.** Every CVar the reference's own two
+/// option tables name is now either unregistered (and on `UNBACKED_REFERENCE_CVARS` above with the
+/// feature it waits on) or reachable from benilla's own options window. `autointeract` and
+/// `UnitNamePlayerPVPTitle`, the last two unbacked rows, will each need a row here the day their
+/// feature lands — which is exactly what the census above will say when it calls them stale.
+///
+/// A name arriving here needs a reason of the same shape as the list above's: what the *player*
+/// cannot do, and why the row is not simply seated.
+const UNREACHABLE_REFERENCE_CVARS: &[(&str, &str)] = &[];
+
+/// The four camera toggles (2149's mechanisms, 2179's water-collision rebuild) on the page a
+/// player can open. Each box opens showing the value the reference registers — two of them "1",
+/// which is the half that makes this more than cosmetic: on `cameraPivot` and
+/// `cameraWaterCollision` a player who wants them OFF had no way to say so at all.
+#[test]
+fn the_four_camera_toggles_read_their_shipped_defaults_and_write_on_the_click() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
+        .unwrap();
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the four on open must not write them back"
+    );
+
+    let checked = |s: &mut UiScript, row: &str| -> bool {
+        s.eval::<bool>(&format!(
+            "return BenillaOptionsFrameContainerBodyControls{row}Check:GetChecked()"
+        ))
+        .unwrap()
+    };
+    // The registrar's own values: pivot and water collision ON, terrain tilt and head bob OFF.
+    assert!(checked(&mut s, "RowSmartPivot"));
+    assert!(checked(&mut s, "RowWaterCollision"));
+    assert!(!checked(&mut s, "RowFollowTerrain"));
+    assert!(!checked(&mut s, "RowHeadBob"));
+
+    // And the click writes — the first flip of each is the one that could not be expressed before.
+    for (row, cvar, want) in [
+        ("RowFollowTerrain", "cameraTerrainTilt", "1"),
+        ("RowHeadBob", "cameraBobbing", "1"),
+        ("RowWaterCollision", "cameraWaterCollision", "0"),
+        ("RowSmartPivot", "cameraPivot", "0"),
+    ] {
+        s.run(&format!(
+            "BenillaOptionsFrameContainerBodyControls{row}Check:Click()"
+        ))
+        .unwrap();
+        assert_eq!(
+            s.take_cvar_changes(),
+            vec![(cvar.to_string(), want.to_string())],
+            "{row} writes {cvar}"
+        );
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The partner write** (2180): two rows drive a second CVar that appears in neither option
+/// table, because `UIOptionsFrame_Save` keeps a special-case arm for each. Without it the control
+/// is a half-write, and a silent one — `SetCVar` on a name nobody wrote is not an error, it is a
+/// value that stayed where it was, so the box would read "pet damage off" while pet SPELL damage
+/// kept floating.
+#[test]
+fn the_pet_damage_box_and_the_look_slider_each_write_their_unnamed_twin() {
+    let mut s = combat_harness();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
+        .unwrap();
+    let _ = s.take_cvar_changes();
+
+    // Pet Damage off: both pet CVars move, the melee one through the row and the spell one
+    // through the partner (UIOptionsFrame_Save l.334-336).
+    s.run("BenillaOptionsFrameContainerBodyCombatRowPetDamageCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![
+            ("PetMeleeDamage".to_string(), "0".to_string()),
+            ("PetSpellDamage".to_string(), "0".to_string()),
+        ],
+        "one box, both pet knobs"
+    );
+
+    // Mouse Look Speed: the pitch twin at half the yaw value (l.355-356) — which is exactly the
+    // 180/90 pair the two are registered at, so the ratio the reference ships is preserved by
+    // dragging rather than broken by it.
+    s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
+        .unwrap();
+    let _ = s.take_cvar_changes();
+    s.run("BenillaOptionsFrameContainerBodyControlsRowMouseLookSpeedControlSlider:SetValue(240)")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![
+            ("cameraYawMoveSpeed".to_string(), "240".to_string()),
+            ("cameraPitchMoveSpeed".to_string(), "120".to_string()),
+        ]
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return BenillaOptionsFrameContainerBodyControlsRowMouseLookSpeedControlValue:GetText()"
+        )
+        .unwrap(),
+        "240",
+        "a deg/s slider reads out the raw number, not a percent of nothing"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Show Target Damage is a SECOND master on the Combat page, and the floating-text one does not
+/// own it.** The reference keeps the two dependency blocks apart —
+/// `UIOptionsFrame_UpdateDependencies` greys 53…69 from CheckButton52 and greys 9 and 11 from 19,
+/// in two separate `if`s — and collapsing them would tell a player that turning off scrolling
+/// combat text also turns off damage numbers, which is the opposite of what `CombatDamage` does.
+#[test]
+fn show_target_damage_greys_its_own_pair_and_the_floating_text_master_leaves_it_alone() {
+    let mut s = combat_harness();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
+        .unwrap();
+    let enabled = |s: &mut UiScript, row: &str| -> bool {
+        s.eval::<bool>(&format!(
+            "return BenillaOptionsFrameContainerBodyCombat{row}Check:IsEnabled() ~= 0"
+        ))
+        .unwrap()
+    };
+
+    // `SHOW_COMBAT_TEXT` ships "0", so the page arrives with the floating-text family greyed —
+    // and the damage trio live beside it, which is the whole point of the split.
+    assert_eq!(s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(), "0");
+    assert!(!enabled(&mut s, "RowAuras"));
+    assert!(enabled(&mut s, "RowShowDamage"));
+    assert!(enabled(&mut s, "RowPeriodicDamage"));
+    assert!(enabled(&mut s, "RowPetDamage"));
+
+    // The other master: Show Target Damage off greys its two children and nothing else.
+    s.run("BenillaOptionsFrameContainerBodyCombatRowShowDamageCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return GetCVar(\"CombatDamage\")")
+            .unwrap(),
+        "0"
+    );
+    assert!(!enabled(&mut s, "RowPeriodicDamage"));
+    assert!(!enabled(&mut s, "RowPetDamage"));
+    assert!(
+        enabled(&mut s, "RowShowDamage"),
+        "the master is the way back in"
+    );
+
+    // Waking the floating-text family does not wake them: the two gates are independent.
+    s.run("BenillaOptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+        .unwrap();
+    assert!(enabled(&mut s, "RowAuras"));
+    assert!(
+        !enabled(&mut s, "RowPetDamage"),
+        "scrolling combat text does not own the damage numbers"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The two other dependencies 2180 seated, both the reference's own: Player Guild Names is dead
+/// while player names are off (l.702-708 — there is no overhead stack for the guild line to be
+/// the second row of), and Auto-Follow Speed is dead while the following style is Never
+/// (l.715-719 — there is no follow to set a speed for).
+#[test]
+fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+
+    // Nameplates: `UnitNamePlayer` ships "1", so the child arrives live.
+    s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
+        .unwrap();
+    let guild_on = |s: &mut UiScript| -> bool {
+        s.eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyNameplatesRowGuildNamesCheck:IsEnabled() ~= 0",
+        )
+        .unwrap()
+    };
+    assert!(guild_on(&mut s));
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:Click()")
+        .unwrap();
+    assert!(!guild_on(&mut s), "no names, no guild line to gate");
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:Click()")
+        .unwrap();
+    assert!(guild_on(&mut s));
+
+    // Controls: the style ships "1" (Smart), so the slider arrives live; "0" is Never.
+    s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
+        .unwrap();
+    let speed_thumb = |s: &mut UiScript| -> bool {
+        s.eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyControlsRowAutoFollowSpeedControlSliderThumb\
+             :IsShown()",
+        )
+        .unwrap()
+    };
+    assert!(speed_thumb(&mut s));
+    s.run("SetCVar(\"cameraSmoothStyle\", \"0\") OptionsPage_Refresh(\"Controls\")")
+        .unwrap();
+    assert!(
+        !speed_thumb(&mut s),
+        "a Never follow leaves the speed groove thumbless, 1.12's own way of saying dead"
+    );
+    // …and the groove refuses the press as well as looking refused, which the reference never
+    // needed: its slider has no track jump to refuse.
+    assert!(!s
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyControlsRowAutoFollowSpeedControlSlider\
+             :IsMouseEnabled()"
+        )
+        .unwrap());
+    s.run("SetCVar(\"cameraSmoothStyle\", \"1\") OptionsPage_Refresh(\"Controls\")")
+        .unwrap();
+    assert!(speed_thumb(&mut s));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

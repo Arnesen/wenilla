@@ -586,7 +586,7 @@ pub const VIDEO_DEFAULT_CVARS: &[&str] = &[
     "WorldDetail",
 ];
 
-/// **The Video options window's own engine verbs** — the seven `OptionsFrame.xml` needs that
+/// **The Video options window's own engine verbs** — the nine `OptionsFrame.xml` needs that
 /// nothing else in this client provides.
 ///
 /// The window is loaded off the player's chain and kept hidden (decision 2177, the shape 2115 and
@@ -594,7 +594,7 @@ pub const VIDEO_DEFAULT_CVARS: &[&str] = &[
 /// an addon reaching for the reference's video-options names finds real frames and real functions
 /// instead of an alias onto a window of ours.
 ///
-/// **Three of the seven run at LOAD** — `GetScreenResolutions`, `GetCurrentResolution` and
+/// **Three of the nine run at LOAD** — `GetScreenResolutions`, `GetCurrentResolution` and
 /// `GetRefreshRates`, from the resolution and refresh dropdowns' `<OnLoad>`, because
 /// `UIDropDownMenu_Initialize` calls the initializer it is handed *immediately*
 /// (`UIDropDownMenu.lua:48-50`). The file cannot load at all without them, and the window being
@@ -603,9 +603,10 @@ pub const VIDEO_DEFAULT_CVARS: &[&str] = &[
 /// window missed, is plain `GetCVar` (`OptionsFrame.lua:300`, `GetCVar("gxRefresh")`).
 ///
 /// The three multisample verbs the same window needs are above; `GetWorldDetail`/`SetWorldDetail`
-/// are in [`install_world_detail_verbs`]. `GetGamma`/`SetGamma` are deliberately NOT here — see
-/// `ui_script::reference_ui`'s KNOWN table for what they would cost and why they are a feature of
-/// their own rather than a line in this function.
+/// are in [`install_world_detail_verbs`]. `GetGamma`/`SetGamma` are the last two: 2177 shipped
+/// seven and left that pair **loudly absent** under 1203, because a byte-faithful copy would have
+/// driven a hardware ramp this client never uploads. 2182 built the render feature behind them, so
+/// they have a real reader now and the window's engine verbs are nine of nine.
 ///
 /// **What must NOT be defined, which is as load-bearing as what is.** `OptionsFrame_Load:110` does
 /// `getglobal("Get"..value.func)` over the nine slider rows and branches on the result; of the
@@ -855,8 +856,79 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // ── GetGamma / SetGamma ──────────────────────────────────────────────────────────────────
+    // **The display-brightness pair** (2182) — `GetGamma 0x4891c0` and `SetGamma 0x4891f0`, carved
+    // end to end in wow-re `ui/scratch/video-options-verbs.md` §3.
+    //
+    // The one thing about them that is not obvious from the name: **the unit is the SLIDER's
+    // offset, not the CVar's.** `0x4891d0` is `dc 2d`, ModRM reg field 5 = **FSUBR** (`mem − ST(0)`,
+    // not `FSUB`), over `[0x8015b8]` = the f64 `1.0`. So `GetGamma()` answers `1.0 − gamma` and
+    // `SetGamma(v)` writes `gamma := 1.0 − v` — the two compose to the identity, and with the
+    // registered `gamma = "1.0"` the getter answers **0.0**, the exact centre of the stock
+    // slider's `[-0.5, 0.5]`. Reading the pair as "gamma in, gamma out" would put a 1.0 through
+    // `SetGamma` and write `gamma = 0`, i.e. `pow(x, 0) = 1`, a fully white ramp.
+    //
+    // **No clamp exists anywhere in the reference** — not in the binding, not in `CVar::Set`, not
+    // in the change callback, not in the ramp builder — and the absence is earned rather than
+    // assumed: the positive control is `baseMip`'s own callback `0x689090`, which *does* reject
+    // out-of-`[0,1]` with `al = 0`. `SetGamma(5)` is accepted and writes `gamma = "-4.000000"`.
+    // benilla's clamp is at the consumer (`ui_gamma::GAMMA_RANGE`), which is this crate's standing
+    // posture and leaves the store's truth alone.
+    lua.globals().set(
+        "GetGamma",
+        // No argument is read (the getter never calls `lua_gettop`), and one number comes back.
+        lua.create_function(|lua, _: mlua::MultiValue| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let gamma = model
+                .cvars
+                .get(&CVAR_GAMMA.to_ascii_lowercase())
+                .and_then(|slot| slot.value.parse::<f64>().ok())
+                // A VM whose host registered nothing (a bare test kit) answers as if the
+                // registered default were in place, which is 0.0 — the slider's centre. The
+                // reference has no such arm: its `0x63de30` lookup CREATES the record on a miss,
+                // so `[eax+0x24]` is always readable.
+                .unwrap_or(1.0);
+            Ok(1.0 - gamma)
+        })?,
+    )?;
+    lua.globals().set(
+        "SetGamma",
+        lua.create_function(|lua, value: Value| {
+            // `lua_isnumber` (`0x4891fe`): a number, or a string Lua can convert to one. Anything
+            // else raises through `0x6f4940`, which does not return — the trailing `xor eax,eax`
+            // at `0x489215` is dead code.
+            let v = match &value {
+                Value::Integer(i) => *i as f64,
+                Value::Number(n) => *n,
+                Value::String(s) => {
+                    match s.to_str().ok().and_then(|s| s.trim().parse::<f64>().ok()) {
+                        Some(n) => n,
+                        None => return Err(mlua::Error::runtime(USAGE_SET_GAMMA)),
+                    }
+                }
+                _ => return Err(mlua::Error::runtime(USAGE_SET_GAMMA)),
+            };
+            // `SStrPrintf(buf, 0x10, "%f", 1.0 - v)` — six decimals into a SIXTEEN-byte buffer, so
+            // a long value is truncated to 15 characters rather than rejected. Reproduced because
+            // the truncated string is what the CVar then holds and what `GetCVar("gamma")` answers.
+            let mut written = format!("{:.6}", 1.0 - v);
+            written.truncate(15);
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            write_cvar(&mut model, CVAR_GAMMA, written, None);
+            // Zero return values, not nil (`eax = 0` at every `ret`).
+            Ok(mlua::MultiValue::new())
+        })?,
+    )?;
     Ok(())
 }
+
+/// The reference's own display-gamma CVar — `0x402d70`, name string `0x82e924`, registered `"1.0"`,
+/// flags 0. Defined in the crate that publishes the two verbs that read and write it, so the
+/// binding and the name cannot drift apart; the app welds it to its own table.
+pub const CVAR_GAMMA: &str = "gamma";
+
+/// `0x8424cc`, verbatim.
+const USAGE_SET_GAMMA: &str = "Usage: SetGamma(value)";
 
 /// The `WorldDetail` slider's **stop**, benilla's spelling — the panel position `0`/`1`/`2`, held as
 /// a CVar because 1.12 has no such CVar and our own Graphics page needs somewhere to keep it (the

@@ -2072,6 +2072,119 @@ fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **The display-brightness pair** (decision 2182) — `GetGamma`/`SetGamma` and the Graphics page
+/// row that drives them, held to the reference's own carve.
+///
+/// The claim that needs an assertion rather than a comment is the **unit**: `0x4891d0` is FSUBR,
+/// so `GetGamma()` is `1.0 − gamma` and `SetGamma(v)` writes `gamma := 1.0 − v`. Read as
+/// "gamma in, gamma out" the pair still composes to the identity and still *looks* right in a
+/// round-trip test — but the panel would then put `gamma = 0` (`pow(x, 0) = 1`, a white screen)
+/// at the top of a slider whose top is supposed to be the brightest legible picture. So this
+/// checks the two ENDS of the reference's own `[-0.5, 0.5]` against the CVar text, not just that
+/// get and set agree with each other.
+///
+/// And the second claim: **there is no clamp**, anywhere, in the reference (the positive control
+/// is `baseMip`'s validating callback `0x689090`). `SetGamma(5)` writes `"-4.000000"` and the
+/// store keeps it — benilla's clamp is at the render consumer, where it cannot lie to `GetCVar`.
+///
+/// (wow-re `ui/scratch/video-options-verbs.md` §3 and
+/// `ffxeffects/scratch/whole-frame-grade-verdict.md` §(a), both VERIFIED.)
+#[test]
+fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+
+    // The reference registers `gamma = "1.0"` (our table spells it `"1.000000"`, the spelling
+    // `SetGamma` itself writes — see its row in `crate::cvars`), and 0.0 is what that reads as:
+    // the exact centre of the stock slider.
+    assert_eq!(
+        s.eval::<f64>("return GetGamma()").unwrap(),
+        0.0,
+        "a fresh client sits at the centre of the stock slider's [-0.5, 0.5]"
+    );
+    // Both ends, in the CVar's own text — `SStrPrintf(buf, 0x10, "%f", 1.0 - v)`.
+    for (slider, cvar) in [
+        (0.5, "0.500000"),
+        (-0.5, "1.500000"),
+        (0.0, "1.000000"),
+        // No clamp: the reference accepts this and writes a negative gamma.
+        (5.0, "-4.000000"),
+    ] {
+        s.eval::<()>(&format!("SetGamma({slider})")).unwrap();
+        assert_eq!(
+            s.eval::<String>("return GetCVar(\"gamma\")").unwrap(),
+            cvar,
+            "SetGamma({slider}) writes 1 - v with six decimals"
+        );
+        assert_eq!(
+            s.eval::<f64>("return GetGamma()").unwrap(),
+            slider,
+            "…and the getter is its exact inverse"
+        );
+    }
+    // Zero return values, not nil (`eax = 0` at every `ret`). `select` is not in this VM (2171),
+    // so the count is read the way 1.12 Lua reads one: a multiple assignment.
+    assert_eq!(
+        s.eval::<i64>(
+            "local a, b = SetGamma(0) \
+             if a ~= nil or b ~= nil then return 1 end \
+             return 0"
+        )
+        .unwrap(),
+        0,
+        "SetGamma pushes nothing"
+    );
+    // …and it REQUIRES its argument (`0x4891fe`, raising through `0x6f4940`, which never returns).
+    let err = s.eval::<()>("SetGamma()").unwrap_err().to_string();
+    assert!(
+        err.contains("Usage: SetGamma(value)"),
+        "the reference's own usage string, verbatim: {err}"
+    );
+
+    // The row: our Graphics page drives the PAIR, not the CVar, which is 1.12's own arrangement
+    // for this one slider — and it reads its bounds off the reference's `OptionsFrameSliders[6]`.
+    s.eval::<()>("SetGamma(0)").unwrap();
+    let row = "BenillaOptionsFrameContainerBodyGraphicsRowBrightness";
+    let bounds = s
+        .eval::<Vec<f64>>(&format!(
+            "local r = getglobal({row:?}) \
+             local sl = getglobal({row:?} .. \"ControlSlider\") \
+             local lo, hi = sl:GetMinMaxValues() \
+             return {{ lo, hi, sl:GetValueStep(), r.numeric }}"
+        ))
+        .unwrap();
+    // The step is an f32 on the widget, so it comes back as 0.100000001…; the two bounds and the
+    // numeric flag are exact.
+    assert_eq!(
+        (bounds[0], bounds[1], bounds[3]),
+        (-0.5, 0.5, 1.0),
+        "the reference's slider-6 bounds, on a numeric api row"
+    );
+    assert!(
+        (bounds[2] - 0.1).abs() < 1e-6,
+        "…and its step: {}",
+        bounds[2]
+    );
+    // The readout is the thumb's share of the groove (0..100 with the default at 50), never the
+    // stored offset — "0%" on a brightness control doing nothing wrong is exactly backwards. It is
+    // written by the page's own refresh, so the window has to be up for there to be one.
+    s.eval::<()>(
+        "ShowUIPanel(BenillaOptionsFrame) \
+         BenillaOptionsFrameCategoryListRowGraphics:Click()",
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>(&format!(
+            "return getglobal({row:?} .. \"ControlValue\"):GetText()"
+        ))
+        .unwrap(),
+        "50%",
+    );
+}
+
 /// **The ten names the video window's slider walk must NOT find** (decision 2177).
 ///
 /// `OptionsFrame_Load:110` and `_Save:208-209` do `getglobal("Get"..value.func)` /

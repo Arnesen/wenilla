@@ -1,5 +1,6 @@
 // The UI gamma lane's ONE decode (decision 0254) — the twin of `ffx_glow.wgsl`'s combine, which owns
-// the world lane's single decode (0161).
+// the world lane's single decode (0161) — and the client's display-gamma ramp (2182), which rides in
+// front of it because the value this pass samples is exactly the byte the RAMDAC would have read.
 //
 // `ui_quad.wgsl` composites the whole UI in gamma bytes, like the reference's fixed-function
 // backbuffer. The UI camera's target is `Rgba8UnormSrgb`, so a stored byte round-trips through the
@@ -13,6 +14,8 @@
 
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;
 @group(0) @binding(1) var screen_sampler: sampler;
+// `.x` = the `gamma` CVar. The rest is padding — a uniform struct is 16-byte aligned.
+@group(0) @binding(2) var<uniform> ramp: vec4<f32>;
 
 // sRGB → linear (IEC 61966-2-1), the exact inverse of `ui_quad.wgsl`'s `linear_to_srgb`.
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -24,5 +27,16 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_decode(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let ui = textureSample(screen_texture, screen_sampler, in.uv);
-    return vec4<f32>(srgb_to_linear(ui.rgb), ui.a);
+    var rgb = ui.rgb;
+    // The reference's hardware ramp `ramp[i] = pow(i/255, gamma)` (`0x591680`), in its continuous
+    // form: `i/255` IS `rgb` here, so this is the same curve over the same values.
+    //
+    // **The branch is not an optimisation.** It is uniform across the draw, so it costs nothing —
+    // and at the registered default the pass has to be the exact identity it was before this
+    // existed, which `pow` is not: `pow(x, 1.0)` compiles to `exp2(log2(x))` and `log2(0)` is
+    // undefined. The floor inside the taken arm is the same guard for a non-default gamma.
+    if (ramp.x != 1.0) {
+        rgb = pow(max(rgb, vec3<f32>(1e-6)), vec3<f32>(ramp.x));
+    }
+    return vec4<f32>(srgb_to_linear(rgb), ui.a);
 }

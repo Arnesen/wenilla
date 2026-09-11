@@ -111,8 +111,7 @@ use controller::control;
 // `/follow` (decision 0890): chat asks with the message, `crate::target` resolves the subject into
 // the state, and this module owns the motion.
 use camera::{
-    apply_zoom_scroll, model_pivot_height, run_look_session, CameraProbe, FlyCam, LookButton,
-    CAM_COLLISION_RADIUS, CAM_DIST_DEFAULT,
+    apply_zoom_scroll, model_pivot_height, run_look_session, FlyCam, LookButton, CAM_DIST_DEFAULT,
 };
 pub(crate) use camera::{head_height, CameraControl, CameraPivot};
 pub(crate) use follow::{FollowRequest, FollowState};
@@ -291,7 +290,7 @@ pub(super) type TransportQuery<'w, 's> = Query<
 /// before the controller reads them orders against this — the two scripted probe drivers do
 /// (`capture::probe_look` / `capture::probe_cam`, decision 1174). A set rather than the `control`
 /// symbol itself: an instrument may name the gameplay system it runs against, but exporting
-/// `control` would drag its private parameter types (`MoveSpeed`, `CameraProbe`, `PressGesture`)
+/// `control` would drag its private parameter types (`MoveSpeed`, `PlayerCapsule`, `PressGesture`)
 /// out with it, which is exactly the internals-publishing 1173 rejected a crate wall to avoid.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PlayerControlSet;

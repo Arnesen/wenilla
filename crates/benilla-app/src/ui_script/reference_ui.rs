@@ -1513,56 +1513,6 @@ mod tests {
         // binding or one sourced file away.
         const KNOWN: &[(&str, &str, &str)] = &[
             (
-                "OptionsFrame.xml",
-                "GetGamma",
-                "the display-gamma pair, and the only two of the video window's engine verbs \
-                 decision 2177 did not build. **Fully pinned and deliberately absent**, which is \
-                 1203's other permitted outcome. wow-re `ui/scratch/video-options-verbs.md` §3 \
-                 carves both: `GetGamma 0x4891c0` returns `1.0 - gamma` and `SetGamma 0x4891f0` \
-                 writes `gamma := 1.0 - v` (the `dc 2d` at `0x4891d0` is FSUBR, `mem - ST(0)`), so \
-                 the unit is the SLIDER's offset and not the CVar's — a `gamma`-valued 1.0 passed \
-                 in writes `gamma = 0`, `pow(x,0) = 1`, a fully white ramp, with no clamp anywhere \
-                 to catch it. The value reaches the hardware synchronously inside `SetCVar`, \
-                 through the change callback `0x4034d0` uploading a ramp. **And that upload is \
-                 skipped in windowed mode** (format byte `+0x07` = `gxWindow`) — which is every \
-                 mode benilla has, since this client ships borderless fullscreen and no exclusive \
-                 mode-set at all (`crate::video`'s module doc). So a byte-faithful pair here would \
-                 be a setting that never moves a pixel, and the honest mechanism is a different \
-                 one: a final full-screen correction over the composited image. That is a render \
-                 feature with its own look, its own `gamma` CVar row and its own record — not a \
-                 line in a bindings file, and not something to register a key for with no reader \
-                 (1134 §4). Neither verb is reachable at LOAD; both are `OptionsFrame_Load` \
-                 (l.153) / `_Cancel` (l.260) / slider 6's `OnValueChanged`, and that function \
-                 already stops earlier — at slider 4, `TerrainMip`, whose `GetCVar` is nil, the \
-                 reference having a real `GetTerrainMip 0x488fb0` where we have none — so building \
-                 the pair alone would move the raise, not remove it.",
-            ),
-            (
-                "OptionsFrame.xml",
-                "SetGamma",
-                "the display-gamma pair, and the only two of the video window's engine verbs \
-                 decision 2177 did not build. **Fully pinned and deliberately absent**, which is \
-                 1203's other permitted outcome. wow-re `ui/scratch/video-options-verbs.md` §3 \
-                 carves both: `GetGamma 0x4891c0` returns `1.0 - gamma` and `SetGamma 0x4891f0` \
-                 writes `gamma := 1.0 - v` (the `dc 2d` at `0x4891d0` is FSUBR, `mem - ST(0)`), so \
-                 the unit is the SLIDER's offset and not the CVar's — a `gamma`-valued 1.0 passed \
-                 in writes `gamma = 0`, `pow(x,0) = 1`, a fully white ramp, with no clamp anywhere \
-                 to catch it. The value reaches the hardware synchronously inside `SetCVar`, \
-                 through the change callback `0x4034d0` uploading a ramp. **And that upload is \
-                 skipped in windowed mode** (format byte `+0x07` = `gxWindow`) — which is every \
-                 mode benilla has, since this client ships borderless fullscreen and no exclusive \
-                 mode-set at all (`crate::video`'s module doc). So a byte-faithful pair here would \
-                 be a setting that never moves a pixel, and the honest mechanism is a different \
-                 one: a final full-screen correction over the composited image. That is a render \
-                 feature with its own look, its own `gamma` CVar row and its own record — not a \
-                 line in a bindings file, and not something to register a key for with no reader \
-                 (1134 §4). Neither verb is reachable at LOAD; both are `OptionsFrame_Load` \
-                 (l.153) / `_Cancel` (l.260) / slider 6's `OnValueChanged`, and that function \
-                 already stops earlier — at slider 4, `TerrainMip`, whose `GetCVar` is nil, the \
-                 reference having a real `GetTerrainMip 0x488fb0` where we have none — so building \
-                 the pair alone would move the raise, not remove it.",
-            ),
-            (
                 "ContainerFrame.xml",
                 "KeyRingButtonIDToInvSlotID",
                 "an engine binding (`1.12-globals.tsv`). `ContainerFrame.lua:617` hovers a KEYRING \

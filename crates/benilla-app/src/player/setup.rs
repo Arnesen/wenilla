@@ -15,8 +15,8 @@ use benilla_world::terrain_stream::SPAWN_XY;
 use benilla_world::view::{WorldCamera, CAM_FAR, CAM_FOVY, NEARCLIP_DEFAULT};
 
 use super::{
-    CameraControl, CameraProbe, FlyCam, MoveSpeed, Player, PlayerCapsule, CAM_COLLISION_RADIUS,
-    CAM_DIST_DEFAULT, CAPSULE_HEIGHT, CAPSULE_RADIUS,
+    CameraControl, FlyCam, MoveSpeed, Player, PlayerCapsule, CAM_DIST_DEFAULT, CAPSULE_HEIGHT,
+    CAPSULE_RADIUS,
 };
 
 /// Default avatar speed in yards/second — the **VERIFIED** vanilla run speed (`MOVE_RUN` 7.0). Ctrl
@@ -70,7 +70,6 @@ pub(super) fn setup_player(
         CAPSULE_RADIUS,
         CAPSULE_HEIGHT - 2.0 * CAPSULE_RADIUS,
     )));
-    commands.insert_resource(CameraProbe(Collider::sphere(CAM_COLLISION_RADIUS)));
     commands.insert_resource(CameraControl {
         distance: CAM_DIST_DEFAULT,
         target_distance: CAM_DIST_DEFAULT,

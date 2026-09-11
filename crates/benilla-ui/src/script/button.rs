@@ -343,6 +343,45 @@ pub(super) fn edge(model: &mut Model, h: FrameHandle, f: impl FnOnce(&mut Button
     }
 }
 
+/// Does a hover edge on frame `h` reach the **base** enter/leave notify — the HIGHLIGHT layer and
+/// the Lua `<OnEnter>`/`<OnLeave>` script slots — or is it swallowed on the way there?
+///
+/// `CSimpleButton::OnEnter 0x779490` and `OnLeave 0x7794e0` both open on the state word, and the
+/// branch skips the *whole* body except the sound:
+///
+/// ```text
+/// 779493  mov eax,[esi+0x328]
+/// 779499  test eax,eax
+/// 77949b  je 0x7794b0          ; DISABLED -> skip the base notify AND the label restyle
+/// 77949d  call 0x76b6a0        ; CSimpleFrame::OnEnter — highlight layer on, <OnEnter> at +0x140
+/// ```
+///
+/// — so **a DISABLED Button runs neither script**, and `0x7794b0`'s hover sound is the only thing
+/// past the branch (wow-re `scratch/button-state-edge-set.md` §3.1, VERIFIED; the base pair's
+/// script slots `+0x140`/`+0x148` are `ledger.tsv:7944/7945`). Every path that delivers a hover
+/// edge dispatches through the object's own vtable, so there is no way around the guard: the hover
+/// walk (`0x766218`–`0x76623c`, `[vt+0x50]` then `[vt+0x4c]`), `SetMouseFocus 0x764dc0`
+/// (`0x764ddd push 0`), and the hide/removal tail (`0x764cce mov edx,[edi]; push 1;
+/// call [edx+0x50]`). `CheckButton` inherits both slots; the Hyperlink and NamePlate buttons
+/// override them and tail straight back into this pair (`0x7cb8a5`), so the guard covers the
+/// family.
+///
+/// The hover **target** still moves — the walk reassigns `[root+0x7c]` *before* it fires either
+/// notify — so `GetMouseFocus()` answers a disabled button; it is the scripts alone that stay
+/// quiet. This is what makes AtlasLoot's unset QuickLook buttons safe on the reference: their
+/// `<OnEnter>` guards with `if this:IsEnabled() then`, which is a NUMBER `1`/`0` and therefore
+/// always truthy (`scratch/button-enabled-state.md`), so the body would index a nil
+/// `QuickLooks[n]` — the reference never runs it at all.
+///
+/// `None` (the cursor over no frame) and every non-Button kind notify normally.
+pub(super) fn hover_notify_runs(model: &Model, h: Option<FrameHandle>) -> bool {
+    let Some(h) = h else { return true };
+    match model.arena.frame(h).map(|f| &f.kind_state) {
+        Some(KindState::Button(bs)) => bs.enabled(),
+        _ => true,
+    }
+}
+
 /// Write [`ButtonState::loot_slot`] — `LootButton:SetSlot`'s whole body, kept here beside the
 /// other `ButtonState` writers rather than reaching into the arena from `script::loot`.
 pub(super) fn set_loot_slot(lua: &Lua, this: &Table, slot: Option<u32>) -> mlua::Result<()> {

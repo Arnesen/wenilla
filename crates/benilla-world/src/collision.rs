@@ -53,6 +53,21 @@ pub(crate) enum CollisionLayer {
     Liquid,
 }
 
+/// **The camera-collision probe radius (yd)** — the sphere [`WorldCollision::cast_camera`] sweeps
+/// along the boom against the SOLID world.
+///
+/// It is the margin kept between the camera and the surface it stops at, so the near plane does
+/// not poke through the wall; smaller than the player capsule, so the camera threads gaps the body
+/// cannot. **benilla's own construction** — the reference's camera trace is a bare ray
+/// (`0x672170`) with no radius anywhere on it.
+///
+/// It lives *here*, in the crate that owns the trace, rather than beside the camera that spawns
+/// the probe, because a fixture that sweeps a different radius than the client ships is an
+/// instrument reading itself: decision 2179's gate swept `0.15` against a client shipping `0.3`
+/// and certified a camera that was being slammed onto the character on every level surface swim
+/// (2185). Nothing may hardcode this number.
+pub const CAMERA_PROBE_RADIUS: f32 = 0.3;
+
 /// `CollisionLayers` for a WMO's **walking** collider — member of [`CollisionLayer::Walk`] only, so the
 /// camera query (which omits `Walk`) never hits it.
 pub(crate) fn walk_layers() -> CollisionLayers {
@@ -200,16 +215,53 @@ impl WorldCollision<'_, '_> {
     /// …and what the third-person **camera** collides with: the other way round on those two WMO
     /// face layers (it takes NOCAMCOLLIDE faces the body walks through, and skips the DETAIL faces
     /// the body walks on).
-    /// `liquid` adds the waterline — `cameraWaterCollision`'s primary consumer. The reference does
-    /// exactly this and no more: `0x50e5ec` ORs `0xf0000` into the trace mask word the solver hands
-    /// its three collision queries, so the CVar changes *what this one query is allowed to see* and
-    /// re-lanes nothing. `false` and it is byte-for-byte the filter it always was.
-    pub(crate) fn camera_filter(liquid: bool) -> SpatialQueryFilter {
-        let mut mask = CollisionLayer::Default.to_bits() | CollisionLayer::Camera.to_bits();
-        if liquid {
-            mask |= CollisionLayer::Liquid.to_bits();
-        }
-        SpatialQueryFilter::from_mask(LayerMask(mask))
+    ///
+    /// **The waterline is deliberately not in here** — it rides its own ray
+    /// ([`waterline_ray`](Self::waterline_ray)), for the reason spelled out there. This mask is the
+    /// SOLID world only, and is byte-for-byte the filter it always was.
+    pub(crate) fn camera_filter() -> SpatialQueryFilter {
+        SpatialQueryFilter::from_mask(LayerMask(
+            CollisionLayer::Default.to_bits() | CollisionLayer::Camera.to_bits(),
+        ))
+    }
+
+    /// **The waterline leg of the camera trace — a RAY, not the probe sphere** (decision 2185).
+    ///
+    /// `cameraWaterCollision` is a trace mask (`0x50e5ec` ORs `0xf0000` into the word the solver
+    /// hands its three collision queries), and the query that word rides is a **line segment**:
+    /// `0x672170` takes `(start, end, out, frac, flags)` and carries no radius at all, bottoming
+    /// out in the Möller–Trumbore ray/triangle test at `0x7c2c40` (wow-re
+    /// `camera-water-atomicity.md` §145, `camera-cvar-kernels.md` §276). The reference's whole
+    /// camera trace is that ray; benilla's is a [`CAMERA_PROBE_RADIUS`] sphere, which is **our own
+    /// construction** — the margin that keeps the near plane out of a wall — and it stays, because
+    /// walls are what it is for.
+    ///
+    /// It cannot stay for water, because the corridor's clearance is a reference constant sized
+    /// for a ray. Arm A lifts the sweep origin to `surface + 2/9 = 0.2222` yd, and the probe's
+    /// radius is `0.3`: centred on that floor the sphere hangs **78 mm through the water plane
+    /// before the sweep has moved at all**, so a level camera behind a surface swimmer was returned
+    /// a hit at distance zero — the camera slammed onto the character, every frame the boom ran
+    /// flat. Tip it a couple of degrees down and the sweep escapes the plane and the hit vanishes;
+    /// that flip, against a snap-in/ease-out arm, is the "snaps in for a second every couple of
+    /// seconds" a surface swim was reported with.
+    ///
+    /// Two-sided, like the shape sweep beside it and for the same reason: a camera crossing the
+    /// surface from underneath has no facing contract to honour, it just must not end up through
+    /// the plane.
+    fn waterline_ray(&self, from: Vec3, movement: Vec3) -> Option<f32> {
+        let Ok(dir) = Dir3::new(movement) else {
+            return None;
+        };
+        self.ms
+            .spatial_query
+            .cast_ray(
+                from,
+                dir,
+                movement.length(),
+                true,
+                &SpatialQueryFilter::from_mask(LayerMask(CollisionLayer::Liquid.to_bits())),
+            )
+            .map(|h| h.distance)
     }
 
     /// Sweep `shape` along `movement` against the body's world.
@@ -246,32 +298,46 @@ impl WorldCollision<'_, '_> {
         one_sided::cast_move(&self.ms, shape, from, movement, skin_width, filter)
     }
 
-    /// Sweep the **camera boom** against the camera's world.
+    /// Sweep the **camera boom** against the camera's world — the distance along `movement` the
+    /// arm is free to reach, or `None` for an unobstructed boom.
     ///
     /// Deliberately avian's own two-sided cast rather than the one-sided law above: the facing
     /// gate exists because a *body* must not stand on a face wound away from it, and a camera has
     /// no such contract — it just must not end up inside geometry, from either side.
     ///
-    /// `liquid` is `cameraWaterCollision`, straight through: with it set the boom stops at a
-    /// waterline the way it stops at ground, which is the whole of the option's primary effect and
-    /// what its own tooltip promises the player.
-    pub fn cast_camera(
-        &self,
-        shape: &Collider,
-        from: Vec3,
-        rotation: Quat,
-        movement: Vec3,
-        skin_width: f32,
-        liquid: bool,
-    ) -> Option<MoveHitData> {
-        self.ms.cast_move(
-            shape,
-            from,
-            rotation,
-            movement,
-            skin_width,
-            &Self::camera_filter(liquid),
-        )
+    /// **Two legs, two shapes, and that is the point** (decision 2185). The solid world is swept
+    /// with the caller's probe sphere, which is benilla's own margin against a wall's near plane;
+    /// the waterline is a bare ray, which is the reference's own geometry and the only shape that
+    /// fits through the clearance the corridor budgets for it — see
+    /// [`waterline_ray`](Self::waterline_ray). `liquid` is `cameraWaterCollision`, straight
+    /// through: with it clear the water leg does not run and this is the query it always was.
+    ///
+    /// The nearer of the two wins, which is what one trace carrying both classes would have done.
+    ///
+    /// **The probe is this function's, not the caller's.** It used to be threaded in from a
+    /// `CameraProbe` resource in `benilla-app`, along with a rotation that was always the identity
+    /// (a sphere has no orientation) and a skin width that was always zero — three arguments of
+    /// noise around one number that belongs to the trace. That number is [`CAMERA_PROBE_RADIUS`],
+    /// and the whole of decision 2185 is that it must be read in the same place the clearance it
+    /// has to fit through is (`crates/benilla-app/tests/world_api_wall.rs` is what made the point:
+    /// exporting the constant widened the doorway, and owning the probe closes it instead).
+    pub fn cast_camera(&self, from: Vec3, movement: Vec3, liquid: bool) -> Option<f32> {
+        let solid = self
+            .ms
+            .cast_move(
+                &Collider::sphere(CAMERA_PROBE_RADIUS),
+                from,
+                Quat::IDENTITY,
+                movement,
+                0.0,
+                &Self::camera_filter(),
+            )
+            .map(|h| h.distance);
+        let water = liquid.then(|| self.waterline_ray(from, movement)).flatten();
+        match (solid, water) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// A one-sided ray against the body's world.
@@ -410,6 +476,7 @@ mod liquid_trace_mask {
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>();
+        app.init_resource::<MoverTraceExclusions>();
         app.world_mut().spawn((
             RigidBody::Static,
             Collider::trimesh(
@@ -430,17 +497,24 @@ mod liquid_trace_mask {
         app
     }
 
-    /// Drop a small probe from above the surface onto it, through `filter`.
-    fn descend(app: &mut App, filter: SpatialQueryFilter) -> Option<f32> {
+    /// Drop the camera boom from above the surface straight onto it.
+    fn descend_camera(app: &mut App, liquid: bool) -> Option<f32> {
         app.world_mut()
-            .run_system_once(move |ms: MoveAndSlide| {
-                ms.cast_move(
-                    &Collider::sphere(0.1),
+            .run_system_once(move |c: WorldCollision| {
+                c.cast_camera(Vec3::new(0.0, 3.0, 0.0), Vec3::new(0.0, -6.0, 0.0), liquid)
+            })
+            .expect("system runs")
+    }
+
+    /// …and the walking body, which must pass through either way.
+    fn descend_body(app: &mut App) -> Option<f32> {
+        app.world_mut()
+            .run_system_once(move |c: WorldCollision| {
+                c.cast_body(
+                    &Collider::sphere(CAMERA_PROBE_RADIUS),
                     Vec3::new(0.0, 3.0, 0.0),
-                    Quat::IDENTITY,
                     Vec3::new(0.0, -6.0, 0.0),
                     0.0,
-                    &filter,
                 )
                 .map(|h| h.distance)
             })
@@ -514,25 +588,48 @@ mod liquid_trace_mask {
     /// The arm length the solver settles on for a swimmer whose feet are at `feet_y`, framing at
     /// `pivot_over_feet`, sweeping from `origin_over_feet`, looking at `pitch` radians (+up).
     fn open_arm(app: &mut App, feet_y: f32, geo: (f32, f32), pitch: f32) -> f32 {
+        let (head, boom, len) = boom_from(feet_y, geo, pitch);
+        app.world_mut()
+            .run_system_once(move |c: WorldCollision| {
+                c.cast_camera(head, boom, true).unwrap_or(len)
+            })
+            .expect("system runs")
+    }
+
+    /// The same arm through the query benilla shipped **before** decision 2185: one sphere sweep
+    /// carrying the liquid layer on its own mask, exactly as `camera_filter(true)` built it.
+    ///
+    /// It stays as the positive control for both of the tests below, because it is the query in
+    /// which the defect lives — and a gate whose control cannot fail is not a gate.
+    fn open_arm_swept(app: &mut App, feet_y: f32, geo: (f32, f32), pitch: f32) -> f32 {
+        let (head, boom, len) = boom_from(feet_y, geo, pitch);
+        app.world_mut()
+            .run_system_once(move |ms: MoveAndSlide| {
+                ms.cast_move(
+                    &Collider::sphere(CAMERA_PROBE_RADIUS),
+                    head,
+                    Quat::IDENTITY,
+                    boom,
+                    0.0,
+                    &SpatialQueryFilter::from_mask(LayerMask(
+                        CollisionLayer::Default.to_bits()
+                            | CollisionLayer::Camera.to_bits()
+                            | CollisionLayer::Liquid.to_bits(),
+                    )),
+                )
+                .map_or(len, |h| h.distance)
+            })
+            .expect("system runs")
+    }
+
+    /// `(sweep origin, boom vector, its length)` for a swimmer at `feet_y` framing at `geo`.
+    fn boom_from(feet_y: f32, geo: (f32, f32), pitch: f32) -> (Vec3, Vec3, f32) {
         let feet = Vec3::new(0.0, feet_y, 0.0);
         let head = feet + Vec3::Y * geo.1;
         let pivot = feet + Vec3::Y * geo.0;
         let fwd = Quat::from_euler(EulerRot::YXZ, 0.0, pitch, 0.0) * Vec3::NEG_Z;
         let boom = (pivot - fwd * ZOOM) - head;
-        let len = boom.length();
-        app.world_mut()
-            .run_system_once(move |c: WorldCollision| {
-                c.cast_camera(
-                    &Collider::sphere(0.15),
-                    head,
-                    Quat::IDENTITY,
-                    boom,
-                    0.0,
-                    true,
-                )
-                .map_or(len, |h| h.distance)
-            })
-            .expect("system runs")
+        (head, boom, boom.length())
     }
 
     /// 2170's geometry at a given depth: the framing pivot is the bare swim preset, so it rides the
@@ -553,6 +650,7 @@ mod liquid_trace_mask {
     /// given pitch.
     fn worst_over_depth(
         app: &mut App,
+        arm: impl Fn(&mut App, f32, (f32, f32), f32) -> f32,
         geo: impl Fn(f32) -> (f32, f32),
         pitch: f32,
         span: f32,
@@ -562,7 +660,7 @@ mod liquid_trace_mask {
         let mut prev: Option<f32> = None;
         for i in 0..=n {
             let feet_y = -SURFACE_DEPTH - span * 0.5 + span * i as f32 / n as f32;
-            let d = open_arm(app, feet_y, geo(feet_y), pitch);
+            let d = arm(app, feet_y, geo(feet_y), pitch);
             if let Some(q) = prev {
                 worst = worst.max((d - q).abs());
             }
@@ -595,7 +693,14 @@ mod liquid_trace_mask {
         let mut app = flooded_world();
         // The control, at the pitch where the old geometry is worst: looking slightly down, which
         // swings the seat up across the plane.
-        let control = worst_over_depth(&mut app, uncorrected, (-2.0f32).to_radians(), 0.30, 600);
+        let control = worst_over_depth(
+            &mut app,
+            open_arm_swept,
+            uncorrected,
+            (-2.0f32).to_radians(),
+            0.30,
+            600,
+        );
         assert!(
             control > 5.0,
             "the positive control must reproduce the regression — half a millimetre of settle \
@@ -603,7 +708,14 @@ mod liquid_trace_mask {
         );
         // …and the corridor, across the whole range a swimmer looks through.
         for pitch_deg in [-25.0f32, -10.0, -2.0, -0.5, 0.0, 0.5, 2.0, 10.0, 25.0] {
-            let step = worst_over_depth(&mut app, corrected, pitch_deg.to_radians(), 0.30, 600);
+            let step = worst_over_depth(
+                &mut app,
+                open_arm,
+                corrected,
+                pitch_deg.to_radians(),
+                0.30,
+                600,
+            );
             assert!(
                 step < 0.1,
                 "at {pitch_deg} deg the settle moved the arm {step} yd — the corridor's whole \
@@ -612,21 +724,77 @@ mod liquid_trace_mask {
         }
     }
 
+    /// **The probe that did not fit through its own corridor** (decision 2185).
+    ///
+    /// The corridor lifts the camera's sweep origin to `surface + 2/9 = 0.2222` yd. That is a
+    /// **reference** constant, and the reference's trace is a bare ray: `0x672170` takes a start,
+    /// an end, an out-point and a `frac` and carries no radius anywhere, bottoming out in the
+    /// Möller–Trumbore ray/triangle test at `0x7c2c40`. benilla's camera probe is a
+    /// [`CAMERA_PROBE_RADIUS`] = `0.3` yd sphere — **our own** construction, the margin that keeps
+    /// the near plane out of a wall. `0.3 > 0.2222`, so centred on the corridor floor it hangs 78
+    /// mm through the water plane *before the sweep has moved at all*.
+    ///
+    /// A surface swimmer's boom runs from that origin to a seat at the same height — the corridor
+    /// pins both to `surface + 2/9` — so a **level** camera sweeps exactly parallel to the water,
+    /// and came back pinned at zero: the camera slammed onto the character. Tip it two degrees
+    /// down and the sphere escapes the plane and the hit vanishes. That flip, against an arm that
+    /// snaps in instantly and eases back out over about a second, is the "snaps in for a second
+    /// every couple of seconds" a surface swim was reported with — and it is the same mechanism
+    /// 2170 was reported for and 2179 could not reach, because the corridor it built is measured
+    /// in a clearance this probe was always too fat for.
+    #[test]
+    fn a_level_boom_behind_a_surface_swimmer_is_not_pinned_to_the_water() {
+        let mut app = flooded_world();
+        let feet_y = -SURFACE_DEPTH;
+        let geo = corrected(feet_y);
+
+        // The control, which must reproduce the defect: the pre-2185 query, level.
+        let control = open_arm_swept(&mut app, feet_y, geo, 0.0);
+        assert!(
+            control < 0.01,
+            "the positive control must reproduce the regression — a level boom swept as a sphere \
+             starts inside the plane and comes back pinned at zero, got {control}"
+        );
+
+        // …and the shipping query, across the band a surface swimmer actually looks through.
+        for deg in [-25.0f32, -10.0, -2.0, -0.5, 0.0, 0.25, 0.5] {
+            let open = open_arm(&mut app, feet_y, geo, deg.to_radians());
+            assert!(
+                open > ZOOM - 0.01,
+                "at {deg} deg the arm came back clipped at {open} — the water is 2/9 yd below a \
+                 boom that never descends to it"
+            );
+        }
+
+        // …and the option still does its job when the camera really is aimed under the water:
+        // 2/9 yd of clearance shed at sin(20 deg) crosses the plane 0.65 yd along the boom.
+        let aimed = open_arm(&mut app, feet_y, geo, 20.0f32.to_radians());
+        assert!(
+            (aimed - 0.65).abs() < 0.05,
+            "aimed 20 deg up the boom must still stop ON the surface, got {aimed}"
+        );
+    }
+
     #[test]
     fn the_waterline_stops_the_camera_only_when_the_cvar_asks_for_it() {
         let mut app = world_with_waterline();
-        let on = descend(&mut app, WorldCollision::camera_filter(true));
+        let on = descend_camera(&mut app, true);
         assert!(
-            on.is_some_and(|d| (d - 2.9).abs() < 0.05),
+            on.is_some_and(|d| (d - 3.0).abs() < 0.01),
             "with cameraWaterCollision the boom stops at the surface, got {on:?}"
         );
+        assert!(
+            on.is_some_and(|d| d > 2.95),
+            "and it stops ON the plane, not a probe radius short of it — the water leg is a ray \
+             (decision 2185), which is what makes the corridor's 2/9 yd of clearance a clearance"
+        );
         assert_eq!(
-            descend(&mut app, WorldCollision::camera_filter(false)),
+            descend_camera(&mut app, false),
             None,
             "with the CVar off the camera passes through, exactly as it did before this existed"
         );
         assert_eq!(
-            descend(&mut app, WorldCollision::body_filter()),
+            descend_body(&mut app),
             None,
             "and the BODY passes through either way — a swimmer is not stopped by their own water"
         );

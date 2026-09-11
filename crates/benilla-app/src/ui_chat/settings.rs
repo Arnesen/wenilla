@@ -755,14 +755,48 @@ fn save_chat_looks(
     flush(&script, &channels, &mut file, exiting);
 }
 
-/// The session-end flush — `OnExit(InWorld)`, the reference's chat teardown.
-fn save_on_session_end(
-    script: Option<NonSendMut<UiScript>>,
-    channels: Res<super::edit::ChannelState>,
-    mut file: ResMut<ChatWindowFile>,
-) {
-    let Some(script) = script else { return };
-    flush(&script, &channels, &mut file, true);
+/// The session-end flush — the reference's chat teardown (`0x499a80` from `0x490c55`), called
+/// from [`crate::ui_script::end_ui_session`] beside [`crate::cvars::fold_dying_vm_cvars`]:
+/// **after** the shutdown events, **before** the VM is replaced.
+///
+/// **It is not an `OnExit(InWorld)` system, and that is the whole point.** `/reload` rebuilds the
+/// VM without ever leaving the world (1291), so that edge does not fire for it — and nothing else
+/// covers the gap, because both halves of the debounce beside it are VM-keyed: [`ChatWindowFile::dirty`] is
+/// a [`VmMemo`] that resets to `false` with the new VM, and [`restore_chat_looks`] then re-seats
+/// the look table from the file **on disk**. So a window dragged, resized, recoloured or renamed
+/// within [`SAVE_QUIET`] of a `/reload` was written nowhere and read straight back stale: the
+/// player's change was discarded with no error and no trace.
+///
+/// `end_ui_session` is the one place every root meets — it is what the `OnExit(InWorld)`
+/// registration runs, and what `run_pending_reload` calls — so one call here covers the logout,
+/// the character switch and the reload. It also retires the hand-stated ordering this flush used
+/// to need: two unconstrained systems on one `OnExit` edge are placed by the executor, and that
+/// placement was measured (bevy 0.18) to move with nothing but their registration positions.
+/// Being *inside* the ender is an ordering no arrangement can lose.
+///
+/// A session whose UI never loaded writes nothing, by construction rather than by a guard:
+/// `restored` is false for a VM that never read the character's file, and [`owes_write`] refuses
+/// on it — which is the same protection against composing the player's file out of a stock table
+/// that [`ChatWindowFile::dirty`] exists for.
+pub(crate) fn fold_dying_vm_chat_cache(world: &mut World) {
+    // A world with no chat-cache state never added the plugin — a test world or a stripped
+    // scenario. Checked up front so the fetch below can be non-optional, exactly as
+    // `fold_dying_vm_cvars` checks its own.
+    if !world.contains_resource::<ChatWindowFile>() {
+        return;
+    }
+    // `resource_scope` rather than a `SystemState`: it lifts the file out for the call, which
+    // leaves the VM and the channel roster as two plain shared borrows of the world — the whole
+    // fetch, with no system machinery and nothing to keep in step with the signature.
+    world.resource_scope(|world, mut file: Mut<ChatWindowFile>| {
+        let (Some(script), Some(channels)) = (
+            world.get_non_send_resource::<UiScript>(),
+            world.get_resource::<super::edit::ChannelState>(),
+        ) else {
+            return;
+        };
+        flush(script, channels, &mut file, true);
+    });
 }
 
 pub(super) fn plugin(app: &mut App) {
@@ -780,21 +814,11 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             save_chat_looks.run_if(in_state(crate::char_select::ClientState::InWorld)),
-        )
-        .add_systems(
-            OnExit(crate::char_select::ClientState::InWorld),
-            // **Explicitly before the session ender, because the edge is not an ordering.** This
-            // flush composes the file out of the DYING VM, and `end_ui_session` replaces that VM
-            // with a fresh boot one on the same edge. Two unconstrained systems there are placed
-            // by the executor, and that placement was measured (bevy 0.18, five systems on one
-            // `OnExit`) to move with nothing but their registration positions — a VM-reading
-            // saver ran after the exclusive ender in one arrangement and before it in another.
-            // Winning that race by luck is what B353 cost the layout cache one module over; the
-            // layout cache answered it by joining the reference's shutdown tail, which this file
-            // cannot do (its reference is the type-7 chat-cache saver `0x499a80`, not
-            // `0x490bd0`'s tail), so it says the order instead.
-            save_on_session_end.before(crate::ui_script::end_ui_session),
         );
+    // **The session-end flush is not registered here.** It is called from inside
+    // `ui_script::end_ui_session` ([`fold_dying_vm_chat_cache`]) so that it covers `/reload` — a
+    // VM rebuild that never crosses `OnExit(InWorld)` — as well as the logout edge, and so that
+    // its position relative to the ender is structural instead of a registration-order bet.
     // The quit flush rides the exit edge rather than `Update` for decision 1528's reason: the
     // close button's `AppExit` is not written until `PostUpdate`, so a save chained beside the
     // watcher would lose the last second of drags to the process ending.
@@ -1205,5 +1229,116 @@ mod tests {
     fn an_empty_messages_block_is_an_empty_set() {
         let got = parse("ADDEDVERSION 2\nWINDOW 1\nMESSAGES\nEND\nEND\n", &rows());
         assert!(got.looks[0].1.messages.is_empty());
+    }
+
+    /// **The `/reload` flush** (the reload half of decision 1290's class): a window renamed in the
+    /// last second before a `ReloadUI()` must reach the player's file.
+    ///
+    /// Against the pre-fix shape this fails, and it is worth saying exactly why, because all three
+    /// of the mechanisms that look like they should cover it are VM-keyed and reset together:
+    /// `save_on_session_end` hung on `OnExit(InWorld)`, which `run_pending_reload` never crosses
+    /// (1291); the debounce beside it had not fired, because [`SAVE_QUIET`] had not elapsed; and
+    /// the new VM's [`ChatWindowFile::dirty`] memo came up `false` while [`restore_chat_looks`]
+    /// re-seated the look table from the file **on disk**. So the rename was discarded with no
+    /// error — and the assertion on the rebuilt VM below is the half the player would actually
+    /// see: the window comes back under its old name.
+    #[test]
+    fn a_window_renamed_just_before_a_reload_reaches_the_file() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-chat-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("benilla-config")).expect("hermetic home");
+        let _capture = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let _home = crate::local_state::test_env::EnvGuard::set(
+            "BENILLA_HOME",
+            tmp.join("benilla-config")
+                .to_str()
+                .expect("utf-8 temp path"),
+        );
+
+        let mut world = World::new();
+        world.init_resource::<crate::ui_script::AddOnIdentity>();
+        world.init_resource::<crate::minimap::MinimapZoom>();
+        world.init_resource::<crate::ui_script::ReloadUiPending>();
+        world.init_resource::<super::super::edit::ChannelState>();
+        world.init_resource::<ChatWindowFile>();
+        crate::ui_script::setup_script(&mut world);
+        world.insert_resource(crate::char_select::Roster::with_pending_pick(
+            vec![benilla_protocol::Character {
+                guid: 1,
+                name: "Reloadprobe".into(),
+                race: 1,  // Human → Alliance
+                class: 1, // Warrior
+                gender: 0,
+                level: 60,
+                skin: 0,
+                face: 0,
+                hair_style: 0,
+                hair_color: 0,
+                facial_hair: 0,
+                zone: 0,
+                map: 0,
+                position: benilla_protocol::wire::Vector3d {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                flags: 0,
+                equipment: [benilla_protocol::CharEnumItem::default(); 19],
+                pet_display_id: 0,
+                pet_level: 0,
+                pet_family: 0,
+            }],
+            1,
+        ));
+        crate::ui_script::load_ingame_ui_on_world_entry(&mut world);
+
+        let path = world
+            .resource::<ChatWindowFile>()
+            .path
+            .clone()
+            .expect("the character's chat cache path is seated by the entry load");
+
+        // The player renames window 1 — a Lua write, exactly what the debounce exists to coalesce.
+        world
+            .non_send_resource_mut::<UiScript>()
+            .run(r#"SetChatWindowName(1, "Reloaded")"#)
+            .expect("rename");
+        world
+            .run_system_once(watch_chat_looks)
+            .expect("the watcher arms the debounce");
+        assert!(
+            world.resource::<ChatWindowFile>().last_change.is_some(),
+            "precondition: the rename armed the debounce, so the write is owed but not yet due"
+        );
+
+        // `/reload`, immediately — inside `SAVE_QUIET`, which is the whole window of the bug.
+        world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+        world.resource_mut::<crate::ui_script::ReloadUiPending>().0 = true;
+        crate::ui_script::run_pending_reload(&mut world);
+
+        let on_disk = std::fs::read_to_string(&path).expect("the flush wrote the file");
+        assert!(
+            on_disk.contains("Reloaded"),
+            "the rename must survive the reload — the dying VM's cache is folded out by \
+             `fold_dying_vm_chat_cache`; file was:\n{on_disk}"
+        );
+
+        // And the half the player sees: the rebuilt VM read it back.
+        let name = world
+            .non_send_resource_mut::<UiScript>()
+            .eval::<String>("GetChatWindowInfo(1)")
+            .unwrap_or_default();
+        assert_eq!(
+            name, "Reloaded",
+            "the rebuilt VM restored the renamed window, not the stale one"
+        );
+
+        drop(world);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -208,6 +208,12 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
         let hidden_hover = model
             .mouseover
             .filter(|&m| items.iter().any(|&(h, _, vis)| h == m && !vis));
+        // The removal tail is a VIRTUAL dispatch — `0x764cce mov edx,[edi]; push 1;
+        // call [edx+0x50]` — so a Button reaches its own `0x7794e0`, whose DISABLED guard skips
+        // the base leave and with it the `<OnLeave>` script. Hiding a disabled hovered button is
+        // therefore as silent as walking off one ([`super::button::hover_notify_runs`]); the
+        // hover cache and the drag-arm still clear, because those are the *caller's* half.
+        let notified = super::button::hover_notify_runs(&model, hidden_hover);
         if let Some(m) = hidden_hover {
             model.mouseover = None;
             if model.drag.as_ref().is_some_and(|d| d.source == m) {
@@ -215,7 +221,9 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
             }
         }
         model.hover_repick |= hidden_hover.is_some() || items.iter().any(|&(_, _, vis)| vis);
-        hidden_hover.map(|m| (m, model.frame_id(m)))
+        hidden_hover
+            .filter(|_| notified)
+            .map(|m| (m, model.frame_id(m)))
     };
     if let Some((_, oid)) = left {
         if let Err(e) = fire_widget_handler(lua, oid, "OnLeave", vec![Value::Boolean(true)]) {

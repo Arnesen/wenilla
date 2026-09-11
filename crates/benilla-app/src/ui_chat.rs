@@ -45,7 +45,7 @@ mod logging;
 mod recruitment;
 /// The chat windows' saved look (B246, decision 1589) — where the tab menu's tint/alpha/font-size
 /// picks are read from at login and written back at logout.
-mod settings;
+pub(crate) mod settings;
 #[cfg(test)]
 mod tests;
 

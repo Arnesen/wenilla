@@ -9,7 +9,7 @@
 //!   `OnLeave`/`OnEnter` pair (RF-0025's `motion=true` hover boundary) — and, before that,
 //!   advances an armed drag gesture, an in-flight **Slider thumb drag**, and an in-flight
 //!   **frame move** (`StartMoving`, [`super::object`]'s `movable` cluster). All three move within
-//!   one frame, crossing no hover boundary, so they must run before the boundary early-return.
+//!   one frame, crossing no hover boundary, so they must run before the boundary test.
 //! - [`UiScript::mouse_button`] resolves `OnMouseDown`/`OnMouseUp`, the `OnClick`
 //!   press/release-registration rules ([`button::wants_click`]), the **drag trio** + **world
 //!   drop** below, the **Slider thumb-drag** capture (a left press on a thumb, decision 0250 §5),
@@ -269,8 +269,9 @@ impl UiScript {
     /// `OnEnter(self, motion=true)` on the newly-captured frame (if any). Tracks the current
     /// mouseover in the model. Also advances an armed [`super::Model::drag`] gesture (decision 0216 §3)
     /// and an in-flight [`super::Model::moving`] frame ([`super::object`]'s `movable` cluster):
-    /// both run BEFORE the no-boundary-crossed early return below, since dragging within one
-    /// frame crosses no hover boundary at all. Returns the captured frame id (so the app can drive
+    /// both run BEFORE the boundary test below, since dragging within one frame crosses no hover
+    /// boundary at all. A **DISABLED Button** takes the hover — `GetMouseFocus()` answers it — but
+    /// fires neither script ([`button::hover_notify_runs`]). Returns the captured frame id (so the app can drive
     /// `PointerOverUi`). Handler errors are collected into [`UiScript::errors`], never panicking.
     pub fn mouse_move(&mut self, x: f32, y: f32) -> Option<u32> {
         // A drag-active EditBox tracks every move (`0x77a860`): extend the selection to the
@@ -278,10 +279,10 @@ impl UiScript {
         editbox::drag_update(&self.lua, x, y);
         let new_id = self.hit_test(x, y);
         #[allow(clippy::type_complexity)]
-        let (old_id, drag_start, boundary_crossed, slider_change, color_change): (
+        let (leave_id, drag_start, enter_id, slider_change, color_change): (
             Option<u32>,
             Option<(u32, String)>,
-            bool,
+            Option<u32>,
             Option<(u32, f32)>,
             Option<(u32, f64, f64, f64)>,
         ) = {
@@ -303,7 +304,7 @@ impl UiScript {
             let new_handle = new_id.and_then(|id| model.id_to_frame.get(&id).copied());
             if new_handle == model.mouseover {
                 // no boundary crossed
-                (None, drag_start, false, slider_change, color_change)
+                (None, drag_start, None, slider_change, color_change)
             } else {
                 // Fire OnLeave only if the frame we're leaving is still live.
                 let old_id = model.mouseover.and_then(|h| {
@@ -326,8 +327,18 @@ impl UiScript {
                 // So a press held over a button and walked off it stays PUSHED in the reference —
                 // it is the *drag threshold* (below) that un-presses one, and only for a frame
                 // that registered for drag. Decision 2134.
-                let _ = old_handle;
-                (old_id, drag_start, true, slider_change, color_change)
+                //
+                // **A DISABLED Button swallows its own hover notify** and so runs neither script:
+                // both `0x779490` and `0x7794e0` open `mov eax,[esi+0x328]; test eax,eax; je`,
+                // branching past the base notify that owns the `<OnEnter>`/`<OnLeave>` slots
+                // ([`button::hover_notify_runs`]). The gate is per-side — leaving a button that
+                // was disabled *while* hovered is as silent as entering one — and it is applied
+                // AFTER `model.mouseover` moves, because the reference reassigns the hover target
+                // `[root+0x7c]` before it fires either notify: a disabled button is still the
+                // mouse focus, it just says nothing.
+                let old_id = old_id.filter(|_| button::hover_notify_runs(&model, old_handle));
+                let enter_id = new_id.filter(|_| button::hover_notify_runs(&model, new_handle));
+                (old_id, drag_start, enter_id, slider_change, color_change)
             }
         };
         // The thumb-drag value change fires OnValueChanged (outside the borrow) — the scrollbar's
@@ -359,17 +370,14 @@ impl UiScript {
                 self.push_error(e);
             }
         }
-        if !boundary_crossed {
-            return new_id;
-        }
-        if let Some(oid) = old_id {
+        if let Some(oid) = leave_id {
             if let Err(e) =
                 event::fire_widget_handler(&self.lua, oid, "OnLeave", vec![Value::Boolean(true)])
             {
                 self.push_error(e);
             }
         }
-        if let Some(nid) = new_id {
+        if let Some(nid) = enter_id {
             if let Err(e) =
                 event::fire_widget_handler(&self.lua, nid, "OnEnter", vec![Value::Boolean(true)])
             {

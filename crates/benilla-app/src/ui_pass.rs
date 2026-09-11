@@ -633,7 +633,7 @@ fn spawn_ui_camera(mut commands: Commands) {
         bevy::render::view::Msaa::Off,
         // The gamma composite lane's mandatory decode (decision 0254) — without it the UI presents
         // ~2.2× bright, since the quad pass leaves gamma values in the target.
-        crate::ui_gamma::UiGammaLane,
+        crate::ui_gamma::UiGammaLane::default(),
         // Every Bevy UI tree renders HERE (decision 0541) — the glue screens and the loading screen.
         // Without the marker, Bevy UI picks the highest-order camera targeting the window, which is
         // the egui dev overlay (order 2): the glue screens rode the dev camera, outside the gamma

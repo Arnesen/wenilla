@@ -10,8 +10,6 @@ use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-use avian3d::prelude::*;
-
 use super::camera_channel::{Arm, SmoothChannel};
 use super::camera_dynamics::{DynamicsInput, HeadBob, SmartPivot, TerrainTilt};
 use crate::creature_anim::wrap_pi;
@@ -628,11 +626,6 @@ impl FollowRig {
 /// 1.5533430576 rad; the pitch integrate `FUN_00510120`, wow-re `follow-camera`). A single uniform
 /// clamp at every zoom level — the reference has **no** distinct first-person look-down limit.
 pub(super) const CAM_PITCH_LIMIT: f32 = 89.0 * std::f32::consts::PI / 180.0;
-/// Camera-collision probe radius (yd): a small sphere swept from the camera pivot toward the desired
-/// camera seat each frame. Its radius is the margin kept between the camera and the surface it stops
-/// at, so the near plane doesn't poke through the wall. Smaller than the player capsule — the camera
-/// threads gaps the body can't fit.
-pub(super) const CAM_COLLISION_RADIUS: f32 = 0.3;
 /// How fast the camera glides back out to the player's chosen zoom once an obstruction clears (1/s).
 /// Pull-*in* is instant (a wall must never sit between the camera and the character); only the
 /// push-*out* eases — the vanilla feel of the camera snapping close past an obstacle and easing back.
@@ -777,12 +770,6 @@ impl PivotGlide {
         self.channel.probe()
     }
 }
-
-/// A small sphere swept from the camera pivot toward the desired camera seat each frame to keep walls
-/// from sliding between the camera and the character (camera collision). Built once at startup like
-/// [`PlayerCapsule`]; smaller than the body capsule so the camera can thread gaps the player can't.
-#[derive(Resource)]
-pub(super) struct CameraProbe(pub(super) Collider);
 
 /// Which mouse button is driving mouse-look, if any — the two vanilla look modes. While looking, the
 /// OS cursor is hidden + locked in place (relative motion drives the camera); `cursor_stash` is the
@@ -1250,7 +1237,6 @@ pub(super) fn seat_on_subject(
     cam: &mut FlyCam,
     cam_t: &mut Mut<Transform>,
     collide: &benilla_world::collision::WorldCollision<'_, '_>,
-    cam_probe: &Collider,
     follow: &FollowInput,
     dynamics: &DynamicsInput,
 ) {
@@ -1378,7 +1364,6 @@ pub(super) fn seat_on_subject(
         cam,
         cam_t,
         collide,
-        cam_probe,
         follow,
         dynamics,
     );
@@ -1408,7 +1393,6 @@ pub(super) fn seat_camera(
     cam: &mut FlyCam,
     cam_t: &mut Mut<Transform>,
     collide: &benilla_world::collision::WorldCollision<'_, '_>,
-    cam_probe: &Collider,
     follow: &FollowInput,
     dynamics: &DynamicsInput,
 ) {
@@ -1486,19 +1470,19 @@ pub(super) fn seat_camera(
     // the chunk's four MCLQ slots. Two-sided, and with no near floor — which is precisely why the
     // pivot corridor above is not optional: nothing in the trace itself stops a boom that starts
     // on the water plane, so the *origin* is what has to be lifted clear.
-    let hit = collide.cast_camera(
-        cam_probe,
-        head,
-        Quat::IDENTITY,
-        boom,
-        0.0,
-        dynamics.options.water_collision,
-    );
+    //
+    // **And that water leg is a RAY, not this probe sphere** (decision 2185): `0x7c2c40` is a
+    // ray/triangle test and `0x672170` carries no radius, so the `2/9` yd the corridor lifts the
+    // origin by is a clearance budgeted for a point. The probe is `0.3` — it does not fit, and a
+    // level boom behind a surface swimmer was coming back pinned at zero. The split lives in
+    // [`benilla_world::collision::WorldCollision::cast_camera`], which owns the probe now; the
+    // sphere still sweeps the solid world, which is what it was always for.
+    let hit = collide.cast_camera(head, boom, dynamics.options.water_collision);
     // The solver's own clip verdict (`0x50e570`'s `0x30000` return, OR'd into `[cam+0x90]` by the
     // driver) — [`SmartPivot`]'s sixth conjunct, and the reason an unobstructed camera never
     // pivots. Written here because here is the only place that knows.
     rig.clipped = hit.is_some();
-    let open = hit.map_or(boom_len, |h| h.distance);
+    let open = hit.unwrap_or(boom_len);
     // Snap in instantly when geometry intrudes (a wall must never sit between camera and character);
     // ease back out to the open arm length once it clears — the vanilla snap-close-then-glide-back.
     rig.collision_distance = if open < rig.collision_distance {

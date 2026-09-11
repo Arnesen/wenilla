@@ -668,6 +668,11 @@ pub(crate) fn end_ui_session(world: &mut World) {
     // that lands in an engine-side store that survives), before the VM is replaced. The next
     // VM's registration seeds from what this writes ([`crate::cvars`]'s saved base).
     crate::cvars::fold_dying_vm_cvars(world);
+    // The chat cache, on the same terms and for the same reason (decision NNNN): it composes the
+    // player's file out of the DYING VM, and `/reload` never crosses the `OnExit(InWorld)` edge
+    // its flush used to hang on — so a window moved in the last second before a reload was
+    // written nowhere and re-read stale from disk.
+    crate::ui_chat::settings::fold_dying_vm_chat_cache(world);
     world.insert_resource(AddOnIdentity(None));
 
     // **Everything the host is holding that came OUT of the dying VM goes with it.** A change memo
