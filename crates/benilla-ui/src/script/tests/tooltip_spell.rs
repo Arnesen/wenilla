@@ -701,6 +701,9 @@ fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
             quality: 1,
             class: 2,
             subclass: 7,
+            // The type cell's word is app-resolved off ItemSubClass.dbc, never composed in the
+            // renderer — a view that carries none prints no type cell.
+            sub_class_display: Some("Sword".into()),
             ..Default::default()
         },
     );

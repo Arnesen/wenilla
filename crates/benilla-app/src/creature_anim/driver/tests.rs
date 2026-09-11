@@ -203,7 +203,7 @@ fn stationary_cast_hold_stows_an_engaged_casters_weapon() {
             AnimationPlayer::default(),
             AnimationTransitions::new(),
             AnimDriver::default(),
-            Engaged,
+            Engaged(0),
             Wielded {
                 main: Some((2, 0xa)), // class 2 subclass 10: a staff
                 off: None,
@@ -257,7 +257,7 @@ fn moving_cast_hold_keeps_its_stow_between_plays() {
             AnimationPlayer::default(),
             AnimationTransitions::new(),
             AnimDriver::default(),
-            Engaged,
+            Engaged(0),
             Wielded {
                 main: Some((2, 0xa)),
                 off: None,
@@ -445,7 +445,7 @@ fn relaxed_base_arms_roll_variations_and_the_shuffle_drives_them() {
 fn engaged_base_arms_keep_the_head_variation() {
     let mut app = app();
     let (unit, nodes) = spawn_fidgeter(&mut app);
-    app.world_mut().entity_mut(unit).insert(Engaged);
+    app.world_mut().entity_mut(unit).insert(Engaged(0));
     app.update();
     let player = app.world().entity(unit).get::<AnimationPlayer>().unwrap();
     // Engaged with no weapon: the Ready pick resolves down to Stand — armed as the HEAD.
@@ -492,7 +492,7 @@ fn cast_hold_stows_even_when_the_model_lacks_the_spell_anims() {
             AnimationPlayer::default(),
             AnimationTransitions::new(),
             AnimDriver::default(),
-            Engaged,
+            Engaged(0),
             Wielded {
                 main: Some((2, 0xa)),
                 off: None,
@@ -614,7 +614,7 @@ fn spell_flinch_picks_the_wound_by_engagement() {
             AnimationPlayer::default(),
             AnimationTransitions::new(),
             AnimDriver::default(),
-            Engaged,
+            Engaged(0),
         ))
         .id();
     let idle = app
@@ -3640,7 +3640,7 @@ fn a_disarmed_attacker_swings_and_stands_unarmed() {
                 AnimationPlayer::default(),
                 AnimationTransitions::new(),
                 AnimDriver::default(),
-                Engaged,
+                Engaged(0),
                 Wielded {
                     main: Some((2, 0x7)), // 1H sword
                     off: Some((2, 0xf)),  // dagger

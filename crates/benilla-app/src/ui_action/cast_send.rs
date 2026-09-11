@@ -974,7 +974,7 @@ mod tests {
         world.insert_resource(combat_catalog());
         let mut me = world.spawn(SelfPlayer);
         if engaged {
-            me.insert(crate::creature_anim::Engaged);
+            me.insert(crate::creature_anim::Engaged(0));
         }
         (world, rx)
     }

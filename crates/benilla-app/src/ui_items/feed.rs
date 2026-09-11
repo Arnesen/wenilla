@@ -186,6 +186,10 @@ fn template_view(
         item_sub_type: sub_classes
             .and_then(|c| c.name(t.class, t.subclass))
             .map(str::to_string),
+        // …and the tooltip's own spelling of the same row — DisplayName alone.
+        sub_class_display: sub_classes
+            .and_then(|c| c.display_name(t.class, t.subclass))
+            .map(str::to_string),
         flags: t.flags,
         bonding: t.bonding,
         max_count: t.max_count,

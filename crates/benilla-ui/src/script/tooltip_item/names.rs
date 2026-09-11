@@ -9,10 +9,12 @@
 //! everywhere else; a table that stored the English could not tell them apart, and this one had
 //! them collapsed into a single arm until 2045's sweep.
 //!
-//! **What stays a Rust literal here, and why it is not the same thing**: [`subclass_name`],
-//! [`CLASS_NAMES`] and [`RACE_NAMES`] name rows the reference reads out of DBC records (the
-//! `{class,subclass}` table `0xc0db90`, ChrClasses, ChrRaces), never out of `GlobalStrings.lua`.
-//! Those belong to the DBC-feed question, not to this one.
+//! **What stays a Rust literal here, and why it is not the same thing**: [`CLASS_NAMES`] and
+//! [`RACE_NAMES`] name rows the reference reads out of DBC records (ChrClasses, ChrRaces), never
+//! out of `GlobalStrings.lua`. Those belong to the DBC-feed question, not to this one — and the
+//! subclass names that used to sit beside them have gone the whole way there: the type cell and
+//! the bag line both read `ItemSubClass.dbc`'s own DisplayName off the app-resolved view now,
+//! rather than a hand-typed copy of it.
 
 /// The client's 7-entry quality→color table (wow-re RF-0055, VERIFIED at `0xc0d3c8` behind
 /// `GetItemQualityColor 0x48dfb0`): Poor gray, Common white, Uncommon green, Rare blue, Epic
@@ -54,9 +56,15 @@ pub(super) const CREAM: [f32; 4] = [1.0, 1.0, 151.0 / 255.0, 1.0];
 /// **Four of these keys ship no value, and that is the reference's behaviour, not a gap.**
 /// `INVTYPE_AMMO` (24), `INVTYPE_THROWN` (25), `INVTYPE_RANGEDRIGHT` (26) and `INVTYPE_QUIVER`
 /// (27) are in the exe's table but absent from `GlobalStrings.lua`, so `FrameScript_GetText`
-/// hands the builder an empty left cell and an arrow shows only its type word. We had written
-/// "Projectile", "Thrown" and "Ranged" into those arms — three sentences 1.12 never shows, and
-/// exactly the invention class decision 2045 says a text-matching tripwire cannot catch.
+/// hands the builder an empty left cell. We had written "Projectile", "Thrown" and "Ranged" into
+/// those arms — the invention class decision 2045 says a text-matching tripwire cannot catch.
+///
+/// **But an arrow's cell is not empty, and this table is not why.** A class-6 item never reaches
+/// here at all: the builder forks to `ItemClass.dbc`'s own name for it one instruction earlier
+/// (`0x52c0bc`), so ammunition reads "Projectile | Arrow" — the word 2080 deleted, restored by
+/// the mechanism that actually produces it rather than by the key that does not. `INVTYPE_RANGED`
+/// (15) likewise **does** ship, so a bow reads "Ranged | Bow"; it is 25 and 26 — thrown weapons
+/// and guns/crossbows/wands, all ItemClass 2 — that genuinely draw the type word alone.
 pub(super) fn invtype_key(t: u32) -> Option<&'static str> {
     Some(match t {
         1 => "INVTYPE_HEAD",
@@ -89,33 +97,22 @@ pub(super) fn invtype_key(t: u32) -> Option<&'static str> {
     })
 }
 
-/// (class, subclass) → the slot line's right column (the client's ItemSubClass display names,
-/// enUS). Absent pairs (consumables, trade goods, armor Miscellaneous…) show no right column.
-pub(super) fn subclass_name(class: u32, sub: u32) -> Option<&'static str> {
-    Some(match (class, sub) {
-        (2, 0) | (2, 1) => "Axe",
-        (2, 2) => "Bow",
-        (2, 3) => "Gun",
-        (2, 4) | (2, 5) => "Mace",
-        (2, 6) => "Polearm",
-        (2, 7) | (2, 8) => "Sword",
-        (2, 10) => "Staff",
-        (2, 13) => "Fist Weapon",
-        (2, 15) => "Dagger",
-        (2, 16) => "Thrown",
-        (2, 17) => "Spear",
-        (2, 18) => "Crossbow",
-        (2, 19) => "Wand",
-        (2, 20) => "Fishing Pole",
-        (4, 1) => "Cloth",
-        (4, 2) => "Leather",
-        (4, 3) => "Mail",
-        (4, 4) => "Plate",
-        (4, 6) => "Shield",
-        (6, 2) => "Arrow",
-        (6, 3) => "Bullet",
-        _ => return None,
-    })
+/// The damage block's bias constant — `[0x808120]`, byte-exact `0.9999899864196777`
+/// (`0x3f7fff58`). Neither `0.5` nor `1.0`: the epsilon is what stops an exactly-integral max
+/// from being bumped by one, and a true `ceil()` differs from this expression for any value
+/// within ~1e-5 above an integer.
+const DAMAGE_BIAS: f32 = f32::from_bits(0x3f7f_ff58);
+
+/// `floor(DamageMin)` as the builder computes it — `fsub [0x808120]` iff the value is **not**
+/// greater than 0, then `__ftol`'s truncate-toward-zero (`0x52c253`–`0x52c276`).
+pub(super) fn floor_min(m: f32) -> i32 {
+    (if m > 0.0 { m } else { m - DAMAGE_BIAS }) as i32
+}
+
+/// `ceil(DamageMax)` — the mirror: `fadd [0x808120]` iff the value **is** greater than 0, then
+/// the same truncating conversion (`0x52c26e`–`0x52c28c`).
+pub(super) fn ceil_max(m: f32) -> i32 {
+    (if m > 0.0 { m + DAMAGE_BIAS } else { m }) as i32
 }
 
 /// A damage/resistance school's name key — `SPELL_SCHOOL%d_CAP`, the one string the builder

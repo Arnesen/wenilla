@@ -1681,7 +1681,7 @@ mod tests {
                 .spawn((Guid(10), SelfPlayer, ObjectStore::default()))
                 .id();
             if engaged {
-                app.world_mut().entity_mut(self_e).insert(Engaged);
+                app.world_mut().entity_mut(self_e).insert(Engaged(0));
             }
             let other_e = app
                 .world_mut()

@@ -194,8 +194,15 @@ impl Wielded {
 /// The unit is engaged in melee auto-attack (`SMSG_ATTACKSTART` .. `ATTACKSTOP`, decision 0073):
 /// standing still it plays the weapon-class Ready idle — the client's `0x5fd360` arm gates on the
 /// auto-attack-target GUID being set, i.e. engagement, **not** sheath state.
+///
+/// **It carries that GUID**, because the reference's `[+0xc48]` is the target and not a flag, and
+/// a second reader wants the unit and not just the fact: `0x6e3480`'s melee arm resolves
+/// `[caster+0xc48]` and uses THAT unit's combat reach, which is what the spell tooltip's range
+/// cell prints while you are auto-attacking (wow-re
+/// `tooltip-damage-matrix-and-container-slots.md` §D4.2b). Every animation reader still asks only
+/// `With`/`Has`, which is unchanged by the payload.
 #[derive(Component)]
-pub(crate) struct Engaged;
+pub(crate) struct Engaged(pub(crate) u64);
 
 /// The local player has fired an auto-repeat spell (Auto Shot / wand Shoot) — the client's
 /// `[+0xd58] & 0x200`, whose **only writer binary-wide** is the local cast-send tail (`0x6e593b`,

@@ -41,14 +41,6 @@ use crate::target::Selection;
 
 use super::{usable, AutoRepeatActive, PlayerActions, Spells};
 
-/// `GetMinMaxRange 0x6e3480`'s byte constants (wow-re `wave-cooldown.md` + the decomp
-/// `FUN_006e3480`, VERIFIED): the **melee-branch-only** reach pad (`0x80b058`; the ranged
-/// branch pads by the bare reach sum), the melee floor, and the self-cast short-circuit's
-/// flat max.
-const MELEE_REACH_PAD: f32 = 1.3333;
-const MELEE_RANGE_FLOOR: f32 = 5.0;
-const SELF_CAST_MAX: f32 = 100.0;
-
 /// The feed's memory: what was last pushed, and the edge detectors.
 #[derive(Default)]
 pub(super) struct StateMemory {
@@ -70,7 +62,7 @@ pub(super) const ERR_TOO_CLOSE: u8 = 0x76;
 /// → `IsTargetInRange 0x6e47b0` BEFORE `ArmCast`/`SendCast` (`wave-cast.md`, byte-verified), so
 /// an out-of-range or too-close press fails locally and the commit tail — the ranged sheath
 /// snap `0x6e5930` included — never runs. This is why a too-close Throw/Auto Shot must NOT draw
-/// the ranged weapon. Squared 3D distance against [`resolve_range`]'s {min, max}: beyond max² →
+/// the ranged weapon. Squared 3D distance against [`benilla_formats::min_max_range`]'s {min, max}: beyond max² →
 /// [`ERR_OUT_OF_RANGE`], inside a nonzero min² → [`ERR_TOO_CLOSE`]. Untestable inputs (no range
 /// row, unknown distance) pass — the server still judges the cast.
 pub(super) fn cast_range_refusal(
@@ -80,7 +72,7 @@ pub(super) fn cast_range_refusal(
     target_reach: Option<f32>,
     dist_sq: Option<f32>,
 ) -> Option<u8> {
-    let (min, max) = resolve_range(spell, row, self_reach, target_reach)?;
+    let (min, max) = benilla_formats::min_max_range(spell, row, self_reach, target_reach)?;
     let d2 = dist_sq?;
     if d2 > max * max {
         return Some(ERR_OUT_OF_RANGE);
@@ -344,50 +336,6 @@ pub(super) fn cast_moving_refusal(
             || d.channel_interrupt_flags & AURA_INTERRUPT_MOVING_TURNING != 0)
 }
 
-/// The resolved {min, max} for one action against one target — the `GetMinMaxRange 0x6e3480`
-/// law over our descriptor reaches.
-///
-/// Two decomp legs are deliberately UNMODELED (0426): the PvP max bonus (`6e3648` — +2.6667 yd
-/// when both units carry the `[unit+0x118]+0x40 & 0x200d` flags and the pair is hostile; its
-/// gate helpers `0x5fc350` are un-RE'd, so modeling it would be a guess) and the
-/// `Attributes & 2` item-scaling leg (`6e36aa` — `max *= item range-mod %` off the resolved
-/// item record; verified a data no-op 2026-07-16: vmangos `item_template.range_mod` is 100 on
-/// all 513 player-obtainable ranged weapons, 0 only on nine NPC "Monster -" wands). The melee
-/// no-target reach fallback also simplifies: the real client re-resolves the current-target
-/// global (`0x47bf60(0x498)`) and failing that doubles the caster's own reach — we default the
-/// missing side to 1.5.
-fn resolve_range(
-    spell: &SpellDisplay,
-    range: Option<&SpellRange>,
-    self_reach: f32,
-    target_reach: Option<f32>,
-) -> Option<(f32, f32)> {
-    // The self-cast short-circuit's attribute test (`SpellRec+0x18 & 0x404` at `0x6e34fb`) —
-    // the same on-next-swing mask the queue tracking reads, tested here by the range law.
-    if spell.on_next_swing() {
-        return Some((0.0, SELF_CAST_MAX));
-    }
-    let row = range?;
-    if row.is_melee() {
-        let reach_sum = self_reach + target_reach.unwrap_or(1.5) + MELEE_REACH_PAD;
-        return Some((0.0, reach_sum.max(MELEE_RANGE_FLOOR)));
-    }
-    if row.min == 0.0 && row.max == 0.0 {
-        return None; // the self row (id 1): no range to test
-    }
-    // The ranged branch (0x6e35ee) pads by the BARE reach sum — no 1.3333, that constant is
-    // melee-only — added to the max unconditionally but to the min ONLY when the row's min is
-    // already nonzero (the fcomp-vs-0.0 guard, decomp `if (*min != 0.0)`): a min-0 spell
-    // (Fireball, Shadow Bolt) must never grow a min range, or point-blank casts refuse
-    // TOO_CLOSE.
-    let Some(target_reach) = target_reach else {
-        return Some((row.min, row.max));
-    };
-    let pad = self_reach + target_reach;
-    let min = if row.min == 0.0 { 0.0 } else { row.min + pad };
-    Some((min, row.max + pad))
-}
-
 /// What a slot *is* once the MACRO indirection is applied — the reference's slot→spell resolver
 /// `0x4e5a50` plus the leg of the usable compute `0x4e5050` that reads its zero (decision 1636).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -586,7 +534,7 @@ pub(super) fn feed_action_state(
                 }
                 // C4: the range verdict vs the current target; nil without one.
                 let row = spells.as_ref().and_then(|s| s.ranges.get(d.range_index));
-                let resolved = resolve_range(d, row, self_reach, target_reach);
+                let resolved = benilla_formats::min_max_range(d, row, self_reach, target_reach);
                 st.has_range = resolved
                     .is_some_and(|(min, max)| min.abs() > f32::EPSILON || max.abs() > f32::EPSILON);
                 st.in_range = match (resolved, dist_sq) {
@@ -730,69 +678,6 @@ mod tests {
             attributes,
             ..Default::default()
         }
-    }
-
-    /// The `GetMinMaxRange 0x6e3480` transcription: melee reach floor, the ranged reach pad on
-    /// both bounds, the self-cast short-circuit, and the rangeless self row.
-    #[test]
-    fn resolve_range_follows_the_byte_law() {
-        let melee = SpellRange {
-            min: 0.0,
-            max: 5.0,
-            flags: 1,
-        };
-        // Two naked-reach units (1.5 + 1.5 + 1.3333 = 4.333) floor at 5.0…
-        let d = spell_with_range(2, 0);
-        assert_eq!(
-            resolve_range(&d, Some(&melee), 1.5, Some(1.5)),
-            Some((0.0, MELEE_RANGE_FLOOR))
-        );
-        // …a big pair (4 + 4 + 1.3333) exceeds it.
-        let (_, max) = resolve_range(&d, Some(&melee), 4.0, Some(4.0)).unwrap();
-        assert!((max - 9.3333).abs() < 1e-3);
-
-        // Charge's 8–25 row pads both bounds by the BARE reach sum (no 1.3333 — melee-only)
-        // against a unit target.
-        let charge_row = SpellRange {
-            min: 8.0,
-            max: 25.0,
-            flags: 0,
-        };
-        let (min, max) = resolve_range(&d, Some(&charge_row), 1.5, Some(1.5)).unwrap();
-        assert!((min - (8.0 + 3.0)).abs() < 1e-3);
-        assert!((max - (25.0 + 3.0)).abs() < 1e-3);
-
-        // A min-0 row (Fireball's 0–35) pads the max only — the fcomp-vs-0.0 guard keeps the
-        // min at zero, so a point-blank cast never reads a min range.
-        let fireball_row = SpellRange {
-            min: 0.0,
-            max: 35.0,
-            flags: 0,
-        };
-        let (min, max) = resolve_range(&d, Some(&fireball_row), 1.5, Some(1.5)).unwrap();
-        assert_eq!(min, 0.0);
-        assert!((max - 38.0).abs() < 1e-3);
-
-        // No unit target: the row's raw bounds, unpadded.
-        assert_eq!(
-            resolve_range(&d, Some(&charge_row), 1.5, None),
-            Some((8.0, 25.0))
-        );
-
-        // The self-cast attribute short-circuits to a flat 100 without touching the row.
-        let selfish = spell_with_range(1, 0x400);
-        assert_eq!(
-            resolve_range(&selfish, None, 1.5, None),
-            Some((0.0, SELF_CAST_MAX))
-        );
-
-        // The self row (0, 0, no melee flag) resolves to no range at all.
-        let self_row = SpellRange {
-            min: 0.0,
-            max: 0.0,
-            flags: 0,
-        };
-        assert_eq!(resolve_range(&d, Some(&self_row), 1.5, None), None);
     }
 
     /// The pre-send refusal (`IsTargetInRange 0x6e47b0`'s two compares over the resolved

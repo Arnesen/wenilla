@@ -56,6 +56,18 @@ fn seed_item_strings(s: &mut UiScript) {
         SPELL_SCHOOL3_CAP = "[SCHOOL3]"; SPELL_SCHOOL4_CAP = "[SCHOOL4]"
         SPELL_SCHOOL5_CAP = "[SCHOOL5]"; SPELL_SCHOOL6_CAP = "[SCHOOL6]"
 
+        DAMAGE_TEMPLATE                   = "[DMG %d - %d]"
+        PLUS_DAMAGE_TEMPLATE              = "[+DMG %d - %d]"
+        SINGLE_DAMAGE_TEMPLATE            = "[DMG1 %d]"
+        PLUS_SINGLE_DAMAGE_TEMPLATE       = "[+DMG1 %d]"
+        DAMAGE_TEMPLATE_WITH_SCHOOL       = "[DMGS %d - %d %s]"
+        PLUS_DAMAGE_TEMPLATE_WITH_SCHOOL  = "[+DMGS %d - %d %s]"
+        AMMO_DAMAGE_TEMPLATE              = "[AMMO %g]"
+        PLUS_AMMO_DAMAGE_TEMPLATE         = "[+AMMO %g]"
+        AMMO_SCHOOL_DAMAGE_TEMPLATE       = "[AMMOS %g %s]"
+        PLUS_AMMO_SCHOOL_DAMAGE_TEMPLATE  = "[+AMMOS %g %s]"
+        SPEED                 = "Speed"
+        CONTAINER_SLOTS       = "[SLOTS %d %s]"
         DPS_TEMPLATE          = "[DPS %.1f]"
         ARMOR_TEMPLATE        = "[ARMOR %d]"
         SHIELD_BLOCK_TEMPLATE = "[BLOCK %d]"
@@ -123,7 +135,10 @@ fn axe() -> ItemTemplateView {
         name: "Ravager".into(),
         quality: 3,
         class: 2,
-        subclass: 1, // two-hand axe shares the "Axe" display name
+        subclass: 1,
+        // ItemSubClass.dbc's DisplayName for (2, 1) — the app-resolved word the type cell
+        // prints; the two axe subclasses share it.
+        sub_class_display: Some("Axe".into()),
         inventory_type: 17,
         bonding: 2,
         stats: vec![(7, 12), (4, 9)],

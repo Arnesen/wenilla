@@ -48,6 +48,16 @@ pub struct ItemTemplateView {
     /// **This is a different spelling from the tooltip's type cell**, which reads `+0x28`
     /// (DisplayName) only — a one-handed sword is "One-Handed Swords" here and "Sword" there.
     pub item_sub_type: Option<String>,
+    /// What `(class, subclass)` is called on the TOOLTIP's own type cell — `ItemSubClass.dbc`'s
+    /// **DisplayName** alone (`row + 4*locale + 0x28`, column 10: the read the builder makes at
+    /// `0x52c0xx` off the `0xc0db90` row cache), which is the SINGULAR spelling: "Sword", not
+    /// [`Self::item_sub_type`]'s "One-Handed Swords". App-resolved, because the engine reads no
+    /// DBCs — and it is the same string the bag line's `CONTAINER_SLOTS` second hole takes.
+    ///
+    /// This used to be a hand-typed `(class, subclass) → &str` table in the renderer, which is
+    /// the shape decision 2080 caught one file over: a stale copy of data the catalog already
+    /// held, missing every container family outright.
+    pub sub_class_display: Option<String>,
     /// The alternate subclass whose proficiency also permits use (ItemSubClass.dbc
     /// prerequisite/postrequisite, app-resolved with the builder's sentinel walk: prerequisite
     /// wins, postrequisite only when prerequisite is −1). A weapon missing its own mask bit but

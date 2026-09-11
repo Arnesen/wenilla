@@ -40,8 +40,10 @@ fn item_line_law_and_red_requirements() {
             "[ITEM_BIND_ON_EQUIP]",
             "[INVTYPE_2HWEAPON]",
             // School 0 is physical: the reference names no school word for it either.
-            "68 - 103 Damage",
-            "+ 2 - 4 [SCHOOL5] Damage",
+            // The first emitted slot takes the plain key, a later one the `PLUS_` twin, and a
+            // school'd slot the `_WITH_SCHOOL` arm — the word sits INSIDE the template.
+            "[DMG 68 - 103]",
+            "[+DMGS 2 - 4 [SCHOOL5]]",
             "[DPS 25.3]",
             // Display order, NOT wire order: the fixture feeds (Stamina, Strength) but the
             // 0x808e88 table prints Strength first (STR,AGI,STA,INT,SPI,HP,MANA).
@@ -213,6 +215,34 @@ fn verified_families_signable_locked_resists_known() {
     "#,
     )
     .unwrap();
+    // …and the five that DO print come out in the builder's own order, which is not the field
+    // order: `0x52c8ad` runs `edi` 1..5 reading school `(edi == 1) ? 6 : edi`, so **Arcane leads**
+    // and Holy is displaced rather than skipped (decision 2080 named this; we printed plain field
+    // order, Fire first and Arcane last).
+    s.set_item_template(
+        5520,
+        ItemTemplateView {
+            name: "Prismatic Band".into(),
+            quality: 1,
+            resistances: [9, 1, 2, 3, 4, 5],
+            ..Default::default()
+        },
+    );
+    s.run(r#"TT:SetOwner(Slot5, "ANCHOR_RIGHT"); TT:BenillaSetItemById(5520)"#)
+        .unwrap();
+    let lines = lines_of(&mut s);
+    let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(
+        &texts[1..],
+        [
+            "[RESIST_SINGLE +5 [SCHOOL6]]",
+            "[RESIST_SINGLE +1 [SCHOOL2]]",
+            "[RESIST_SINGLE +2 [SCHOOL3]]",
+            "[RESIST_SINGLE +3 [SCHOOL4]]",
+            "[RESIST_SINGLE +4 [SCHOOL5]]",
+        ],
+        "Arcane, Fire, Nature, Frost, Shadow — and the +9 Holy never prints"
+    );
     assert!(s.take_errors().is_empty());
 }
 
@@ -321,6 +351,7 @@ fn proficiency_and_reputation_reds() {
             name: "Left-Hand Blade".into(),
             class: 2,
             subclass: 15,
+            sub_class_display: Some("Dagger".into()),
             inventory_type: 22,
             ..Default::default()
         },
@@ -811,4 +842,195 @@ fn a_runtime_bound_instance_overrides_the_bind_line_to_soulbound() {
     s.run(r#"TT:SetBagItem(0, 3)"#).unwrap();
     assert_eq!(bind_line(&mut s).0, "[ITEM_BIND_QUEST]");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The damage block's five-arm template matrix** (wow-re
+/// `tooltip-damage-matrix-and-container-slots.md` §D1, VERIFIED; decision 2080 named this cell and
+/// 2158 converted it). Each arm here names the leg it takes: the school predicate is the slot's
+/// school NUMBER, the ammo predicate is `ItemClass == 6` alone, the single predicate compares the
+/// two ROUNDED bounds, and the first/`PLUS_` flag is per-item — a skipped slot does not consume it.
+/// The rounding is `floor(min)` / `ceil(max)`, not a round-half pair.
+#[test]
+fn damage_matrix_arms_and_the_first_flag() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let show = |s: &mut UiScript, id: u32, v: ItemTemplateView| -> Vec<String> {
+        s.set_item_template(id, v);
+        s.run(&format!(
+            r#"local a = CreateFrame("Button", "S{id}"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+               if not TT then CreateFrame("GameTooltip", "TT") end
+               TT:SetOwner(S{id}, "ANCHOR_RIGHT"); TT:BenillaSetItemById({id})"#
+        ))
+        .unwrap();
+        lines_of(s).into_iter().map(|(t, _)| t).collect()
+    };
+    let weapon = |damages: Vec<(f32, f32, u32)>| ItemTemplateView {
+        name: "Probe".into(),
+        class: 2,
+        subclass: 7,
+        sub_class_display: Some("Sword".into()),
+        inventory_type: 13,
+        damages,
+        delay_ms: 2600,
+        ..Default::default()
+    };
+
+    // The plain two-number arm, the SKIP, and the PLUS_ twin — the skipped middle slot does not
+    // consume the first flag, so slot 2 still prints as a later line, and only the FIRST emitted
+    // line carries the Speed cell.
+    let lines = show(
+        &mut s,
+        900,
+        weapon(vec![(5.0, 9.0, 0), (0.0, 0.0, 0), (3.0, 6.0, 0)]),
+    );
+    assert_eq!(
+        &lines[2..5],
+        // (9+5)/2 + (6+3)/2 = 11.5 raw, over 2.6 s.
+        ["[DMG 5 - 9]", "[+DMG 3 - 6]", "[DPS 4.4]"],
+        "plain then PLUS_, the zero slot skipped: {lines:?}"
+    );
+    let speed: String = s
+        .eval("return TTTextRight3:GetText() or ''")
+        .expect("right cell 3");
+    assert_eq!(speed, "Speed 2.60", "the SPEED cell is the first line's");
+    let later: String = s
+        .eval("return TTTextRight4:GetText() or ''")
+        .expect("right cell 4");
+    assert_eq!(later, "", "a later damage line renders left-only");
+
+    // floor(min) / ceil(max) on fractional bounds — Fang of the Mystics' real numbers. A
+    // round-half pair would say "39 - 86"; the biased pair says 38.
+    let lines = show(&mut s, 901, weapon(vec![(38.7, 85.7, 0)]));
+    assert_eq!(lines[2], "[DMG 38 - 86]", "{lines:?}");
+
+    // The SINGLE arm — the two ROUNDED bounds equal. It is a no-school, non-ammo leaf only.
+    let lines = show(&mut s, 902, weapon(vec![(7.0, 7.0, 0)]));
+    assert_eq!(lines[2], "[DMG1 7]", "{lines:?}");
+    // …and a school'd slot with equal bounds still takes the WITH_SCHOOL arm, two identical
+    // numbers and all: there is no SINGLE_…_WITH_SCHOOL template.
+    let lines = show(&mut s, 903, weapon(vec![(7.0, 7.0, 4)]));
+    assert_eq!(lines[2], "[DMGS 7 - 7 [SCHOOL4]]", "{lines:?}");
+
+    // AMMO is `ItemClass == 6` alone. The `%g` value is the two rounded bounds averaged and is
+    // NOT divided by anything — Rough Arrow's 1–2 reads 1.5 — and ammo gets neither a Speed
+    // cell nor a DPS line, because both gate on class 2.
+    let arrow = ItemTemplateView {
+        name: "Rough Arrow".into(),
+        class: 6,
+        subclass: 2,
+        sub_class_display: Some("Arrow".into()),
+        // `ItemClass.dbc` row 6's own name — the LEFT cell for a class-6 item, which never
+        // consults the InventoryType key table.
+        item_type: Some("Projectile".into()),
+        inventory_type: 24,
+        damages: vec![(1.0, 2.0, 0)],
+        delay_ms: 3000,
+        ..Default::default()
+    };
+    let lines = show(&mut s, 904, arrow.clone());
+    // The slot|type line above it reads "Projectile | Arrow": a class-6 item takes
+    // `ItemClass.dbc`'s own row-6 name on the LEFT (`0x52c0bc`, read verbatim — never a
+    // GlobalString), not the empty `INVTYPE_AMMO` key.
+    assert_eq!(lines[1], "Projectile", "{lines:?}");
+    let ty: String = s
+        .eval("return TTTextRight2:GetText() or ''")
+        .expect("type cell");
+    assert_eq!(
+        ty, "Arrow",
+        "the RIGHT cell is unchanged on the class-6 leg"
+    );
+    assert_eq!(lines[2], "[AMMO 1.5]", "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.starts_with("[DPS")),
+        "ammo never reaches the DPS line: {lines:?}"
+    );
+    let right: String = s
+        .eval("return TTTextRight3:GetText() or ''")
+        .expect("right cell");
+    assert_eq!(right, "", "ammo gets no Speed cell either");
+    let lines = show(
+        &mut s,
+        905,
+        ItemTemplateView {
+            damages: vec![(1.0, 2.0, 3), (5.0, 6.0, 3)],
+            ..arrow
+        },
+    );
+    assert_eq!(
+        &lines[2..4],
+        ["[AMMOS 1.5 [SCHOOL3]]", "[+AMMOS 5.5 [SCHOOL3]]"],
+        "{lines:?}"
+    );
+
+    // A non-weapon that carries damage takes the ordinary arms but neither class-2 gate.
+    let lines = show(
+        &mut s,
+        906,
+        ItemTemplateView {
+            name: "Odd Trinket".into(),
+            class: 4,
+            subclass: 0,
+            hide_subclass: true,
+            inventory_type: 12,
+            damages: vec![(4.0, 8.0, 0)],
+            delay_ms: 2000,
+            ..Default::default()
+        },
+    );
+    assert_eq!(lines[2], "[DMG 4 - 8]", "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.starts_with("[DPS")),
+        "DPS is weapons-only: {lines:?}"
+    );
+}
+
+/// **The bag line** (wow-re §D2, VERIFIED): its gate is `InventoryType == 0x12` alone — never the
+/// slot count — and its second hole is the same `ItemSubClass` DisplayName the type cell reads, so
+/// the noun is per-subclass. A container whose row names nothing prints no slot line at all.
+#[test]
+fn container_slots_line_names_its_subclass() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let bag = |sub: u32, name: Option<&str>, slots: u32| ItemTemplateView {
+        name: "Pouch".into(),
+        class: 1,
+        subclass: sub,
+        sub_class_display: name.map(str::to_string),
+        inventory_type: 18,
+        container_slots: slots,
+        ..Default::default()
+    };
+    let show = |s: &mut UiScript, id: u32, v: ItemTemplateView| -> Vec<String> {
+        s.set_item_template(id, v);
+        s.run(&format!(
+            r#"local a = CreateFrame("Button", "B{id}"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+               if not TT then CreateFrame("GameTooltip", "TT") end
+               TT:SetOwner(B{id}, "ANCHOR_RIGHT"); TT:BenillaSetItemById({id})"#
+        ))
+        .unwrap();
+        lines_of(s).into_iter().map(|(t, _)| t).collect()
+    };
+
+    assert_eq!(
+        show(&mut s, 910, bag(0, Some("Bag"), 16))[1],
+        "[SLOTS 16 Bag]"
+    );
+    assert_eq!(
+        show(&mut s, 911, bag(1, Some("Soul Bag"), 24))[1],
+        "[SLOTS 24 Soul Bag]",
+        "the noun is the subclass's, not a constant"
+    );
+    // A quiver is InventoryType 18 like every other container — INVTYPE_QUIVER is a dead slot
+    // name in 1.12 — so it reaches this line and names itself.
+    let mut quiver = bag(2, Some("Quiver"), 8);
+    quiver.class = 11;
+    assert_eq!(show(&mut s, 912, quiver)[1], "[SLOTS 8 Quiver]");
+    // The gate never tests the slot count.
+    assert_eq!(
+        show(&mut s, 913, bag(0, Some("Bag"), 0))[1],
+        "[SLOTS 0 Bag]"
+    );
+    // No row name: NEITHER this line nor the ordinary slot|type one.
+    let lines = show(&mut s, 914, bag(0, None, 16));
+    assert_eq!(lines.len(), 1, "name line only: {lines:?}");
 }
