@@ -1,18 +1,28 @@
 //! The `ScrollFrame` method surface (`CSimpleScrollFrame`) — the ScrollFrame mechanism (decision
-//! 0112, the engine's last structural gap): `SetScrollChild`/`GetScrollChild`, the vertical scroll
-//! offset (`SetVerticalScroll`/`GetVerticalScroll`), and the live range
-//! (`GetVerticalScrollRange`/`UpdateScrollChildRect`). The offset setter and the range are
-//! byte-pinned (decisions 1338, 2017): `0x786db0` stores the offset VERBATIM — the engine never
-//! clamps it — and `0x786e30` measures the range off the scroll child's subtree. The rest is
-//! spec-faithful to the documented widget contract (the Era `ScrollFrameTemplate` Lua drives its
-//! scrollbar off exactly these), same posture as StatusBar's fill. Horizontal scroll
-//! (`SetHorizontalScroll`/…) is out of scope: no 1.12 template drives it.
+//! 0112, the engine's last structural gap): `SetScrollChild`/`GetScrollChild`, the two scroll
+//! offsets (`Set`/`GetVerticalScroll`, `Set`/`GetHorizontalScroll`), and the live ranges
+//! (`Get{Vertical,Horizontal}ScrollRange`/`UpdateScrollChildRect`). The offset setters and the
+//! ranges are byte-pinned (decisions 1338, 2017): `0x786db0` stores the offset VERBATIM — the
+//! engine never clamps it — and `0x786e30` measures both ranges off the scroll child's subtree. The
+//! rest is spec-faithful to the documented widget contract (the Era `ScrollFrameTemplate` Lua
+//! drives its scrollbar off exactly these), same posture as StatusBar's fill.
 //!
-//! The actual geometry — the scroll child's anchors pinned to the frame + the scroll offset, and
+//! **The two axes are one mechanism, not a mechanism and a special case.** The reference's nine
+//! ScrollFrame bindings are four symmetric pairs plus `UpdateScrollChildRect`, and the C++ under
+//! them is literally cloned: `0x786d30` (horizontal) is the byte-clone of `0x786db0` (vertical)
+//! against `[+0x324]`/`[+0x32c]` instead of `[+0x328]`/`[+0x334]`, and one `0x786e30` computes
+//! both ranges out of one subtree union (wow-re `scrollframe-offset-and-range-law.md`). This module
+//! is written that way too — one helper per concept, taken on the axis asked for. That the
+//! horizontal half went unwritten until the corpus asked for it (`aux-addon` reads and writes both
+//! axes in one function) is why this doc used to say horizontal scroll "is out of scope: no 1.12
+//! template drives it" — true of the stock templates, and never true of the addons.
+//!
+//! The actual geometry — the scroll child's anchors pinned to the frame + the scroll offsets, and
 //! the clip every descendant of the child draws/hits within — lives in [`super::mod@super`]'s
 //! `resolve`/`extract`/`hit_test` (the layout-graph override + the ancestor-walk clip helper); this
-//! module is the thin Lua binding over the per-frame [`ScrollFrameState`], plus the two script
-//! hooks (`OnVerticalScroll`/`OnScrollRangeChanged`) a scrollbar's `OnValueChanged`/`OnLoad` wires to.
+//! module is the thin Lua binding over the per-frame [`ScrollFrameState`], plus the three script
+//! hooks (`OnVerticalScroll`/`OnHorizontalScroll`/`OnScrollRangeChanged`) a scrollbar's
+//! `OnValueChanged`/`OnLoad` wires to.
 //!
 //! The methods live in their own registry table, consulted by the frame `__index` dispatcher only
 //! for ScrollFrame frames — so duck-typing addons (`if frame.SetScrollChild then …`) see `nil` on
@@ -47,9 +57,23 @@ fn with_scroll<T>(
     }
 }
 
-/// `GetVerticalScrollRange()`'s live computation: `max(0, contentExtent − frameHeight)` from the
-/// **resolved** rects — `0.0` when the frame is unresolved or there is no child. Never cached: the
-/// scroll offset always clamps against the current layout, not a stale snapshot.
+/// Which axis a scroll offset, span or range is taken on.
+///
+/// One type rather than two code paths, because the reference computes both ranges in ONE pass
+/// over ONE subtree union (`0x786e30`: `[+0x31c] = max(0, maxRIGHT − minLEFT − width) / scale`,
+/// `[+0x320] = max(0, maxTOP − minBOTTOM − height) / scale`) — the axes differ only in which pair
+/// of edges the union tracks and which frame dimension is subtracted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    /// `maxRIGHT − minLEFT` against the frame's width — `GetHorizontalScrollRange`, `[+0x31c]`.
+    Horizontal,
+    /// `maxTOP − minBOTTOM` against the frame's height — `GetVerticalScrollRange`, `[+0x320]`.
+    Vertical,
+}
+
+/// `Get{Vertical,Horizontal}ScrollRange()`'s live computation: `max(0, contentExtent − frameExtent)`
+/// from the **resolved** rects — `0.0` when the frame is unresolved or there is no child. Never
+/// cached: the scroll offset always clamps against the current layout, not a stale snapshot.
 ///
 /// **The content extent is the scroll child's whole SUBTREE, not the child frame's own height**
 /// (wow-re `system/ui/scratch/simplehtml-markup-engine.md` §4.5, byte-identified during the
@@ -66,7 +90,7 @@ fn with_scroll<T>(
 /// directly — the guild-info EditBox, the options panes, every faux list — is unchanged, because
 /// there its own rect already IS its subtree.
 ///
-/// In **LOCAL units**, each height divided by the owning frame's effective scale — i.e. exactly
+/// In **LOCAL units**, each extent divided by the owning frame's effective scale — i.e. exactly
 /// `child:GetHeight() - self:GetHeight()`, the widget contract this method states. The resolved
 /// rects are screen px, and the scroll offset is NOT: `SetVerticalScroll` becomes the scroll
 /// child's anchor y-offset, which the solver multiplies by that child's scale (`resolve`'s
@@ -75,7 +99,7 @@ fn with_scroll<T>(
 /// stops short of the end and the tail of the content is unreachable. Invisible at scale 1.0,
 /// which is every 1.12-native window; the era-scaled options window (ERA_WINDOW_SCALE 0.78) is the
 /// first real-scroll customer that isn't, and it lost 22% of its travel.
-fn scroll_range(model: &Model, h: FrameHandle) -> f32 {
+fn scroll_range(model: &Model, h: FrameHandle, axis: Axis) -> f32 {
     let child = match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::Scroll(s)) => s.child,
         _ => None,
@@ -89,28 +113,39 @@ fn scroll_range(model: &Model, h: FrameHandle) -> f32 {
             .filter(|s| s.abs() >= 1e-6)
             .unwrap_or(1.0)
     };
-    let Some(frame_h) = model.resolved.get(&h).map(|r| r.height() / scale_of(h)) else {
+    let Some(viewport) = model.resolved.get(&h).map(|r| {
+        let extent = match axis {
+            Axis::Horizontal => r.width(),
+            Axis::Vertical => r.height(),
+        };
+        extent / scale_of(h)
+    }) else {
         return 0.0;
     };
-    let Some((top, bottom)) = subtree_span(model, child) else {
+    let Some((far, near)) = subtree_span(model, child, axis) else {
         return 0.0;
     };
-    ((top - bottom) / scale_of(child) - frame_h).max(0.0)
+    ((far - near) / scale_of(child) - viewport).max(0.0)
 }
 
-/// The vertical span `(top, bottom)` of `f`'s subtree in SCREEN px — its own resolved rect unioned
-/// with every VISIBLE descendant region and child frame, recursively (`0x786f80`). `None` when
-/// nothing in the subtree resolved.
+/// The span of `f`'s subtree along `axis`, in SCREEN px, as `(far, near)` — `(top, bottom)`
+/// vertically, `(right, left)` horizontally — its own resolved rect unioned with every VISIBLE
+/// descendant region and child frame, recursively (`0x786f80`). `None` when nothing in the subtree
+/// resolved.
 ///
 /// Visibility is the client's own guard on both lists: a hidden block contributes no scroll range,
 /// which is what stops a window's parked art from inventing travel nobody can use.
-fn subtree_span(model: &Model, f: FrameHandle) -> Option<(f32, f32)> {
+fn subtree_span(model: &Model, f: FrameHandle, axis: Axis) -> Option<(f32, f32)> {
+    let edges = |r: &crate::layout::Rect| match axis {
+        Axis::Horizontal => (r.right, r.left),
+        Axis::Vertical => (r.top, r.bottom),
+    };
     let frame = model.arena.frame(f)?;
-    let mut span: Option<(f32, f32)> = model.resolved.get(&f).map(|r| (r.top, r.bottom));
-    let union = |s: &mut Option<(f32, f32)>, t: f32, b: f32| {
+    let mut span: Option<(f32, f32)> = model.resolved.get(&f).map(edges);
+    let union = |s: &mut Option<(f32, f32)>, far: f32, near: f32| {
         *s = Some(match *s {
-            Some((ot, ob)) => (ot.max(t), ob.min(b)),
-            None => (t, b),
+            Some((of, on)) => (of.max(far), on.min(near)),
+            None => (far, near),
         });
     };
     for &rh in &frame.regions {
@@ -118,15 +153,16 @@ fn subtree_span(model: &Model, f: FrameHandle) -> Option<(f32, f32)> {
             continue;
         }
         if let Some(r) = model.region_resolved.get(&rh) {
-            union(&mut span, r.top, r.bottom);
+            let (far, near) = edges(r);
+            union(&mut span, far, near);
         }
     }
     for &ch in &frame.children {
         if !model.arena.frame(ch).is_some_and(|c| c.effective_visible) {
             continue;
         }
-        if let Some((t, b)) = subtree_span(model, ch) {
-            union(&mut span, t, b);
+        if let Some((far, near)) = subtree_span(model, ch, axis) {
+            union(&mut span, far, near);
         }
     }
     span
@@ -242,7 +278,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             }
             lua.app_data_mut::<Model>().expect("model").touch_layout();
-            fire_vertical_scroll(lua, &this, px)
+            fire_scroll(lua, &this, "OnVerticalScroll", px)
         })?,
     )?;
     m.set(
@@ -254,7 +290,52 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(scroll_range(&model, h))
+            Ok(scroll_range(&model, h, Axis::Vertical))
+        })?,
+    )?;
+
+    // ── The horizontal axis: the same three verbs on `[+0x324]`/`[+0x31c]` ─────────────────────
+    //
+    // `SetHorizontalScroll(px)` `0x7912f0` → `0x786d30`, which is the BYTE-CLONE of
+    // `SetVerticalScroll`'s `0x786db0` against the horizontal fields (wow-re
+    // `scrollframe-offset-and-range-law.md` §2.2; `item9-firing34-glue786.md` identified the pair).
+    // So every law stated above holds verbatim on this axis: no clamp, the same 2⁻²² change-gate
+    // against the OLD offset alone, the same re-anchor, and `OnHorizontalScroll(self, offset)`
+    // fired only on a real change. Nothing here is a horizontal special case.
+    //
+    // The one thing that IS specific to this axis is the SIGN, and it is the reference's:
+    // `0x787100` passes both offsets to `SetPoint(TOPLEFT, self, TOPLEFT, +hScroll, +vScroll)`
+    // unnegated, so positive x pushes the child right (revealing nothing) where positive y lifts it
+    // (revealing content below). `aux-addon/tabs/search/filter.lua:315-322` — the corpus caller
+    // that made this pair worth writing, reading both axes in one line and writing both in the next
+    // — bounds x into `[min(0, frameWidth - contentWidth - 10), 0]` and y into
+    // `[0, contentHeight - frameHeight]`, which is the same asymmetry read off the other side of
+    // the API. See [`ScrollFrameState::horizontal`].
+    m.set(
+        "SetHorizontalScroll",
+        lua.create_function(|lua, (this, px): (Table, f32)| {
+            let changed = with_scroll(lua, &this, |s| {
+                let changed = s.horizontal.to_bits() != px.to_bits();
+                s.horizontal = px;
+                changed
+            })?;
+            if !changed {
+                return Ok(());
+            }
+            lua.app_data_mut::<Model>().expect("model").touch_layout();
+            fire_scroll(lua, &this, "OnHorizontalScroll", px)
+        })?,
+    )?;
+    m.set(
+        "GetHorizontalScroll",
+        lua.create_function(|lua, this: Table| with_scroll(lua, &this, |s| s.horizontal))?,
+    )?;
+    m.set(
+        "GetHorizontalScrollRange",
+        lua.create_function(|lua, this: Table| {
+            let h = frame_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(scroll_range(&model, h, Axis::Horizontal))
         })?,
     )?;
     // UpdateScrollChildRect() — the Era template calls this after resizing its content to re-drive
@@ -292,21 +373,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             for rh in strings {
                 super::measure::ensure_measured(lua, rh);
             }
-            let (id, range) = {
+            let (id, x_range, y_range) = {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 super::UiScript::resolve_layout(&mut model);
-                let range = scroll_range(&model, h);
-                (model.frame_id(h), range)
+                let x_range = scroll_range(&model, h, Axis::Horizontal);
+                let y_range = scroll_range(&model, h, Axis::Vertical);
+                (model.frame_id(h), x_range, y_range)
             };
             // That forced resolve can have MOVED sizes — this method exists precisely because the
             // caller just resized its content — so drain the queue before the range notify: the
             // reference fires `OnSizeChanged` from `ApplyRect`, i.e. during the layout, not after.
             event::fire_size_changes(lua);
+            // `OnScrollRangeChanged(self, xRange, yRange)` — **horizontal first**, and that order is
+            // byte-derived rather than assumed: at `0x786eff` the vertical result is on top of the
+            // x87 stack, is `fstp`'d first and therefore pushed DEEPEST, so it lands as `arg2`
+            // (wow-re `scrollframe-offset-and-range-law.md` §3.6, where two of the round's own
+            // workers published it the other way round). It is why stock
+            // `UIPanelScrollFrameTemplate` hands `arg2` to `ScrollFrame_OnScrollRangeChanged`.
+            // `arg1` was a hardcoded `0.0` here for as long as there was no horizontal range to
+            // put in it.
             if let Err(e) = event::fire_widget_handler(
                 lua,
                 id,
                 "OnScrollRangeChanged",
-                vec![Value::Number(0.0), Value::Number(f64::from(range))],
+                vec![
+                    Value::Number(f64::from(x_range)),
+                    Value::Number(f64::from(y_range)),
+                ],
             ) {
                 lua.app_data_mut::<Model>()
                     .expect("model app_data")
@@ -321,20 +414,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Fire `OnVerticalScroll(self, offset)` (the ScrollFrame's own script slot). Fired outside any
-/// model borrow; errors go to [`Model::errors`] like every other widget handler.
-fn fire_vertical_scroll(lua: &Lua, this: &Table, value: f32) -> mlua::Result<()> {
+/// Fire `On{Vertical,Horizontal}Scroll(self, offset)` (the ScrollFrame's own script slots — the
+/// reference's `[+0x334]`/`[+0x32c]`, fired from the setter clones `0x786db0`/`0x786d30`). Fired
+/// outside any model borrow; errors go to [`Model::errors`] like every other widget handler.
+fn fire_scroll(lua: &Lua, this: &Table, script: &str, value: f32) -> mlua::Result<()> {
     let id = {
         let h = frame_handle_of(lua, this)?;
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         model.frame_id(h)
     };
-    if let Err(e) = event::fire_widget_handler(
-        lua,
-        id,
-        "OnVerticalScroll",
-        vec![Value::Number(f64::from(value))],
-    ) {
+    if let Err(e) =
+        event::fire_widget_handler(lua, id, script, vec![Value::Number(f64::from(value))])
+    {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
             .errors

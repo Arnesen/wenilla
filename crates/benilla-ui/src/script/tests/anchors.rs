@@ -15,7 +15,7 @@ fn setpoint_explicit_nil_relative_to_keeps_offsets() {
         r#"
         local f = CreateFrame("Frame", "Nil")
         f:SetPoint("TOPLEFT", nil, "TOPLEFT", 40, -40)
-        f:SetSize(300, 200)
+        f:SetWidth(300); f:SetHeight(200)
     "#,
     )
     .unwrap();
@@ -40,7 +40,7 @@ fn setpoint_resolve_size_and_rect() {
         r#"
         local f = CreateFrame("Frame", "Sized")
         f:SetPoint("TOPLEFT", 10, -5)   -- relativeTo = screen (default), relativePoint = TOPLEFT
-        f:SetSize(200, 50)
+        f:SetWidth(200); f:SetHeight(50)
     "#,
     )
     .unwrap();
@@ -68,7 +68,7 @@ fn setpoint_resolve_size_and_rect() {
 #[test]
 fn getwidth_falls_back_to_explicit_size_before_resolve() {
     let s = script();
-    // No SetPoint ⇒ unresolvable; GetWidth returns the explicit SetSize value.
+    // No SetPoint ⇒ unresolvable; GetWidth returns the explicit SetWidth value.
     let w: f32 = s
         .eval(r#"local f = CreateFrame("Frame"); f:SetWidth(123); return f:GetWidth()"#)
         .unwrap();

@@ -16,7 +16,7 @@
 //!
 //! **Every predicate in this family answers the number `1` or `nil`, never a Lua boolean**, and it
 //! answers it through the one helper — [`unit_predicate`], over
-//! [`super::binding_abi::predicate`]. Decision 2043; the law is 1830's, which settled the same
+//! [`super::binding_abi::flag`]. Decision 2043; the law is 1830's, which settled the same
 //! question for the widget predicates a family earlier.
 //!
 //! v1 gaps, stated not hidden: the snapshot carries only the *active* power slot (see the
@@ -217,6 +217,24 @@ pub struct UnitState {
     /// and `0x1000`/`0x2000` (the play-time regimes) all move without touching either. Firing off
     /// the decoded pair would silently under-announce every one of them.
     pub player_flags: u32,
+    /// `UNIT_DYNAMIC_FLAGS` (descriptor index 143), raw — what **`UNIT_DYNAMIC_FLAGS`** the
+    /// *event* fires on, the [`Self::flags`] pattern a hundred fields over.
+    ///
+    /// The event is id **137**, and the id is not arbitrary: the reference's generic bridge
+    /// `0x51bbb0` registers one watch per unit-window field whose name-table slot is non-NULL, and
+    /// the id it dispatches is that field's own window index — `137 + 6 = 143`, this field.
+    /// Byte-verified here rather than taken from the note: `0xbe1198 + 137*4 = 0xbe13bc` has
+    /// exactly one writer image-wide (`0x51ad8b`), and the pointer it stores resolves to
+    /// `"UNIT_DYNAMIC_FLAGS"`. The watch **length** is 4 — selector byte `[0x51bc98 + 137] = 4`,
+    /// jump-table entry `0x51bbf9 mov eax,4` — so the gate is a `repe cmpsb` over exactly this one
+    /// dword against the object's shadow copy (`0x4655bb`), and **any** bit moving fires it.
+    ///
+    /// Raw for the same reason [`Self::player_flags`] is, and the cost of getting it wrong is
+    /// larger here: this struct decodes four of its bits ([`Self::tapped`],
+    /// [`Self::tapped_by_player`], and — through the store — lootable `0x1` and dead-looking
+    /// `0x20`), while `0x2` (tracked, Hunter's Mark) and `0x10` moves without touching any of
+    /// them. Firing off the decoded subset would silently under-announce those.
+    pub dynamic_flags: u32,
     /// The unit's owner — `UNIT_FIELD_SUMMONEDBY`, else its charmer, else its creator; `0` for
     /// nobody's. What `UnitPlayerOrPetInParty`/`InRaid` read for the "or pet" half (1958).
     pub owner: u64,
@@ -757,7 +775,7 @@ fn with_unit<T>(
 /// Rust `bool`, and mlua pushes tag 1. That is the one shape 1.12 cannot produce: `UnitExists`
 /// (`0x515fb0`) pushes `lua_pushnumber` (`0x6f3810`, tag 3, the double `1.0`) or `lua_pushnil`
 /// (`0x6f37f0`, tag 0) and nothing else, and so does every other predicate in the family. So the
-/// whole family goes through [`super::binding_abi::predicate`] — 1830's widget law, which is the
+/// whole family goes through [`super::binding_abi::flag`] — 1830's widget law, which is the
 /// *same* law, finally applied to the unit surface (decision 2043). A predicate that hand-computes
 /// its own bool calls that helper directly; one that reads a snapshot field calls this. Both end at
 /// the one push site, which is what stops the family drifting apart again.
@@ -770,9 +788,7 @@ fn unit_predicate(
     token: &Option<String>,
     f: impl FnOnce(&UnitState) -> bool,
 ) -> mlua::Result<mlua::Value> {
-    Ok(super::binding_abi::predicate(with_unit(
-        lua, token, false, f,
-    )?))
+    Ok(super::binding_abi::flag(with_unit(lua, token, false, f)?))
 }
 
 /// The `Unit*`/`GetQuestGreenRange` Lua binding registrations — split from this module's

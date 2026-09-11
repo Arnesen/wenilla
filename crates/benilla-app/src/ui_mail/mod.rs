@@ -584,8 +584,11 @@ fn feed_mail(
     for index in std::mem::take(&mut mail.close_inbox) {
         script.fire_event("CLOSE_INBOX_ITEM", vec![ScriptValue::Int(i64::from(index))]);
     }
+    // `SMSG_SEND_MAIL_RESULT 0x4ad050`, in its own order (wow-re `mail-interaction.md` §4): the
+    // GlobalString toast, then — on `action 0 / reason 0` only — the compose-tab reset `0x4acdc0(1)`
+    // with its three events, and **last, on every path, `MAIL_FAILED`** (`0x4ad15f`, unconditional:
+    // a successful send fires it too, as the generic "the send resolved, unblock the form" signal).
     for ack in std::mem::take(&mut mail.send_acks) {
-        script.fire_event("MAIL_FAILED", vec![]);
         let key = if ack.ok {
             Some(MAIL_SENT_KEY)
         } else {
@@ -594,9 +597,9 @@ fn feed_mail(
         let line = key.and_then(|k| crate::ui_action::keyed_line(&script, k));
         crate::ui_action::show_messages(&mut script, &mut sink, "ui_mail", line);
         if ack.ok {
-            script.fire_event("MAIL_SEND_SUCCESS", vec![]);
-            script.clear_send_mail_item();
+            script.reset_compose_tab();
         }
+        script.fire_event("MAIL_FAILED", vec![]);
     }
 
     // The macro subject, resolved before the row walk borrows the name cache again. `None` until
@@ -657,12 +660,12 @@ fn feed_mail(
         // The selection is cleared on open AND close (`0x4ace07`, 1970); the stock tab's reset
         // on MAIL_SHOW re-selects row 1.
         script.clear_stationery();
+        // The open core's own order (wow-re `mail-interaction.md` §1): store the mailbox, register
+        // the interaction target, **reset the compose tab** — a fresh window carries no stale
+        // attachment or money — and only THEN `MAIL_SHOW`. The reset's `MAIL_SEND_SUCCESS` is the
+        // byte-verified open side-effect, so the page-turn sound on open is faithful, not a bug.
+        script.reset_compose_tab();
         script.fire_event("MAIL_SHOW", vec![]);
-        // The compose tab resets on open — a fresh window carries no stale attachment/money.
-        script.clear_send_mail_item();
-        // Byte-verified open side-effect (wow-re §5): the client's compose-tab reset fires
-        // MAIL_SEND_SUCCESS on open too, so the page-turn sound on open is faithful, not a bug.
-        script.fire_event("MAIL_SEND_SUCCESS", vec![]);
     } else if closed {
         script.clear_stationery();
         script.fire_event("MAIL_CLOSED", vec![]);

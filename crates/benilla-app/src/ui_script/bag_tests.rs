@@ -1182,7 +1182,7 @@ fn the_split_frame_raises_over_a_same_stratum_window() {
         local w = CreateFrame("Frame", "FakeBagnon", UIParent)
         w:SetFrameStrata("HIGH")
         w:SetPoint("BOTTOMLEFT", 0, 0)
-        w:SetSize(1024, 768)
+        w:SetWidth(1024); w:SetHeight(768)
         local bg = w:CreateTexture(nil, "BACKGROUND")
         bg:SetTexture("Interface\\FakeBagnonBG")
         bg:SetAllPoints()

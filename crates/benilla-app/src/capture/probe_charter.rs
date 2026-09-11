@@ -351,7 +351,7 @@ fn charter_tooltip_lines(script: &UiScript, pos: Option<(i64, u32)>) -> Vec<Stri
         local a = getglobal("BenillaProbeTipAnchor")
         if not a then
             a = CreateFrame("Button", "BenillaProbeTipAnchor")
-            a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+            a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         end
         GameTooltip:SetOwner(a, "ANCHOR_RIGHT")
         GameTooltip:SetBagItem({bag}, {slot})

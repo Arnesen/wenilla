@@ -559,7 +559,13 @@ fn spending_an_arrow_starts_quivers_reload_through_the_real_item_feed() {
         )]))
     };
     let mut memory = FeedMemory::default();
-    apply_container_source(&mut s, &mut memory, quiver(200), [0; 10], Vec::new());
+    apply_container_source(
+        &mut s,
+        &mut memory,
+        quiver(200),
+        Default::default(),
+        Vec::new(),
+    );
 
     s.fire_event("START_AUTOREPEAT_SPELL", Vec::new());
     s.tick(0.1);
@@ -568,7 +574,13 @@ fn spending_an_arrow_starts_quivers_reload_through_the_real_item_feed() {
 
     // The server tells us the stack is one lighter. That is a fired shot, and the only way the
     // addon can ever know it.
-    apply_container_source(&mut s, &mut memory, quiver(199), [0; 10], Vec::new());
+    apply_container_source(
+        &mut s,
+        &mut memory,
+        quiver(199),
+        Default::default(),
+        Vec::new(),
+    );
     s.tick(0.1);
 
     let (_, reloading, reload_left, _) = shot_state(&mut s);

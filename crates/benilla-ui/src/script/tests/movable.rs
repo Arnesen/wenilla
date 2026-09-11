@@ -17,7 +17,7 @@ fn movable_panel() -> UiScript {
         starts, stops = 0, 0
         Panel = CreateFrame("Frame", "MovePanel")
         Panel:SetPoint("BOTTOMLEFT", 100, 100)
-        Panel:SetSize(200, 80)
+        Panel:SetWidth(200); Panel:SetHeight(80)
         Panel:EnableMouse(true)
         Panel:SetMovable(true)
         Panel:RegisterForDrag("LeftButton")
@@ -113,7 +113,7 @@ fn start_moving_on_a_frame_that_is_not_movable_raises_and_moves_nothing() {
         r#"
         Fixed = CreateFrame("Frame", "FixedPanel")
         Fixed:SetPoint("BOTTOMLEFT", 100, 100)
-        Fixed:SetSize(200, 80)
+        Fixed:SetWidth(200); Fixed:SetHeight(80)
         ok, err = pcall(function() Fixed:StartMoving() end)
         "#,
     )
@@ -153,7 +153,7 @@ fn stop_moving_or_sizing_is_harmless_with_nothing_moving_and_stops_only_its_own_
         r#"
         Other = CreateFrame("Frame", "OtherPanel")
         Other:SetPoint("BOTTOMLEFT", 400, 400)
-        Other:SetSize(50, 50)
+        Other:SetWidth(50); Other:SetHeight(50)
         MovePanel:StopMovingOrSizing()      -- nothing is moving
         MovePanel:StopMovingOrSizing()      -- twice
         OtherPanel:StopMovingOrSizing()
@@ -191,7 +191,7 @@ fn a_frame_stretched_between_two_anchors_moves_rigidly() {
     s.run(
         r#"
         Back = CreateFrame("Frame", "StretchBack")
-        Back:SetPoint("BOTTOMLEFT", 0, 0); Back:SetSize(800, 600)
+        Back:SetPoint("BOTTOMLEFT", 0, 0); Back:SetWidth(800); Back:SetHeight(600)
         Stretch = CreateFrame("Frame", "StretchPanel", Back)
         Stretch:SetPoint("BOTTOMLEFT", Back, "BOTTOMLEFT", 100, 100)
         Stretch:SetPoint("TOPRIGHT",   Back, "BOTTOMLEFT", 300, 200)
@@ -229,7 +229,7 @@ fn a_scaled_frame_tracks_the_cursor_one_to_one_on_screen() {
         r#"
         Scaled = CreateFrame("Frame", "ScaledPanel")
         Scaled:SetPoint("BOTTOMLEFT", 100, 100)
-        Scaled:SetSize(100, 100)
+        Scaled:SetWidth(100); Scaled:SetHeight(100)
         Scaled:SetScale(2)
         Scaled:SetMovable(true)
         Scaled:StartMoving()
@@ -266,7 +266,7 @@ fn the_three_flags_default_off_round_trip_and_user_placed_is_guarded() {
     s.run(
         r#"
         F = CreateFrame("Frame", "FlagPanel")
-        F:SetPoint("BOTTOMLEFT", 10, 10); F:SetSize(50, 50)
+        F:SetPoint("BOTTOMLEFT", 10, 10); F:SetWidth(50); F:SetHeight(50)
         "#,
     )
     .unwrap();
@@ -425,7 +425,7 @@ fn a_title_region_is_a_plain_region_and_creating_it_twice_is_destructive() {
         r#"
         TFrame = CreateFrame("Frame", "TFrame")
         TFrame:SetPoint("BOTTOMLEFT", 100, 100)
-        TFrame:SetSize(200, 80)
+        TFrame:SetWidth(200); TFrame:SetHeight(80)
         "#,
     )
     .unwrap();
@@ -549,7 +549,7 @@ fn a_title_region_drag_swallows_the_press_and_ends_on_release() {
         downs = 0
         TP = CreateFrame("Frame", "TP")
         TP:SetPoint("BOTTOMLEFT", 100, 100)
-        TP:SetSize(200, 80)
+        TP:SetWidth(200); TP:SetHeight(80)
         TP:EnableMouse(true)
         TP:SetScript("OnMouseDown", function() downs = downs + 1 end)
         TP:CreateTitleRegion():SetAllPoints(TP)

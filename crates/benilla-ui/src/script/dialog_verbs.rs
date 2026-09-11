@@ -21,7 +21,7 @@
 
 use mlua::{Lua, Value};
 
-use super::binding_abi::{bool_or_default, coerced_number, predicate};
+use super::binding_abi::{bool_or_default, coerced_number, flag};
 use super::Model;
 
 /// The area spirit healer's aura, `0xA18` — the one spell id `CancelAreaSpiritHeal` cancels, and
@@ -172,7 +172,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsInMeetingStoneQueue",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(model.meeting_stone_area != 0))
+            Ok(flag(model.meeting_stone_area != 0))
         })?,
     )?;
 
@@ -195,7 +195,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "CheckPetUntrainerDist",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(model.pet_untrainer_pending))
+            Ok(flag(model.pet_untrainer_pending))
         })?,
     )?;
     // §9: the confirm arm — the latch's guid, the money gate (`ERR_NOT_ENOUGH_MONEY`, no packet)

@@ -47,6 +47,37 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // `RegisterAllEvents()` — this frame's `OnEvent` receives EVERY event that is dispatched
+    // (`0x774c20`, table `0x878ec0`, argc 1, arity 0). Cleared by `UnregisterAllEvents` below, and
+    // by nothing else: there is no `UnregisterAllEvents`-less way back out, which is exactly how
+    // the reference's pair reads.
+    //
+    // **Latent, not live, and the widest-carried gap the corpus census found.** Nothing in either
+    // addon corpus calls it *today*, but 63 vanilla addons and 6 of the top 20 ship
+    // **AceEvent-2.0**, whose `AceEvent:RegisterAllEvents(handler)` runs
+    // `AceEvent.frame:RegisterAllEvents()` the first time any addon asks for all events — so the
+    // first one that does raised here. AceEvent is also why the *clearing* half is load-bearing
+    // rather than tidy: while all-events is on it deliberately stops calling
+    // `frame:UnregisterEvent(event)` at all, and `AceEvent:UnregisterAllEvents()` gets back to a
+    // per-event registration by calling `frame:UnregisterAllEvents()` and then re-registering each
+    // event it still wants. A `RegisterAllEvents` that outlived that call would leave every Ace2
+    // addon on the whole event stream forever.
+    //
+    // Registered as a FLAG (the frame joins `Model::all_event_frames`), never as an expansion into
+    // a name list — see that field for why, and `tick::fire_event_into` for the dispatch.
+    m.set(
+        "RegisterAllEvents",
+        lua.create_function(|lua, this: Table| {
+            let h = frame_handle_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            // Registration order, and re-registering keeps the original position — the same law
+            // `RegisterEvent` above holds, for the same reason.
+            if !model.all_event_frames.contains(&h) {
+                model.all_event_frames.push(h);
+            }
+            Ok(())
+        })?,
+    )?;
     // `UnregisterAllEvents()` — drop every registration this frame holds, in one call.
     //
     // 10 corpus addons stop on it (decision 1195), and the idiom is why: an addon's "disable me"
@@ -67,6 +98,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     list.retain(|x| x != &h);
                 }
             }
+            // …and the all-events registration, which is a registration like any other. See
+            // `RegisterAllEvents` above: AceEvent-2.0's own re-registration path depends on this.
+            model.all_event_frames.retain(|x| x != &h);
             Ok(())
         })?,
     )?;
@@ -320,12 +354,15 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 /// * **`OnAttributeChanged`** (1 site, `Roid-Macros`) — **raising, permanently.** It is 2.0's secure
 ///   frame/attribute system; there is no such slot in any 1.12 resolver. That addon is asking for a
 ///   later client and should hear so.
-/// * **`OnHorizontalScroll` · `OnHyperlinkEnter` · `OnHyperlinkLeave` · `OnMessageScrollChanged` ·
+/// * **`OnHyperlinkEnter` · `OnHyperlinkLeave` · `OnMessageScrollChanged` ·
 ///   `OnMovieFinished`/`ShowSubtitle`/`HideSubtitle` · `OnInputLanguageChanged`** — **raising.**
 ///   Real 1.12 slots that we do not fire, and measured at **zero** call sites across the
 ///   218-addon corpus, so there is nothing to weigh against the trap: they land when their
-///   mechanism does (horizontal scroll isn't modeled at all — see
-///   [`crate::script::scrollframe`]'s module doc).
+///   mechanism does.
+/// * **`OnHorizontalScroll`** — **accepted, because `SetHorizontalScroll` fires it.** It was on
+///   the line above while "horizontal scroll isn't modeled at all", which stopped being true when
+///   the ScrollFrame's horizontal offset pair landed beside the vertical one
+///   ([`crate::script::scrollframe`]); `aux-addon` reads and writes both axes.
 /// * **`OnUpdateModel` · `OnAnimFinished`** — **accepted since decision 2007**, because the tick
 ///   fires them: the model pane's scene clock runs in this engine now (`tick.rs`), `OnUpdateModel`
 ///   at the top of every paint of a visible pane with a file (`0x76d1a0`) and `OnAnimFinished`

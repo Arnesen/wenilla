@@ -242,7 +242,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // `UnitOnTaxi(unit)` (`0x517a40`) → **the number 1 or nil**, never a Lua boolean — the unit
     // predicate family's one return shape (decisions 1830, 2043; the push law is
-    // `crate::script::binding_abi::predicate`). It lives here rather than beside its 22 siblings
+    // `crate::script::binding_abi::flag`). It lives here rather than beside its 22 siblings
     // because the ride flag it reads is this module's, not `UnitState`'s — which is exactly how it
     // came to be the one predicate still answering a `bool` after the family was fixed.
     //
@@ -260,7 +260,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let unit =
                 crate::script::binding_abi::string_arg(lua, unit, r#"Usage: UnitOnTaxi("unit")"#)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 unit.eq_ignore_ascii_case("player") && model.taxi_riding,
             ))
         })?,

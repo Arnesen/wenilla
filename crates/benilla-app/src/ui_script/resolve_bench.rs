@@ -97,7 +97,7 @@ fn app_frame_ticked(s: &mut UiScript, dt: f32) {
 fn install_changing_tooltip(s: &UiScript, owner: &str, func: &str) {
     s.run(&format!(
         r#"
-        local a = CreateFrame("Button", "{owner}"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "{owner}"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         {func}_n = 0
         function {func}()
             {func}_n = {func}_n + 1
@@ -534,7 +534,7 @@ fn a_tooltip_line_flipping_wrapped_to_plain_costs_no_graph_derivation() {
     s.run(
         r#"
         FlipOwner = CreateFrame("Button", "FlipOwner"); FlipOwner:SetPoint("CENTER", 0, 0)
-        FlipOwner:SetSize(10, 10)
+        FlipOwner:SetWidth(10); FlipOwner:SetHeight(10)
         flip_n = 0
         -- The two shapes a hover alternates between. The trailing `1` on the wrap arm is
         -- `AddLine`'s positional wrapText flag (the byte-pinned 0x531630 signature) — it is what
@@ -606,7 +606,7 @@ fn a_hover_sweep_across_owners_costs_no_graph_derivation() {
         r#"
         for i = 1, 12 do
             local b = CreateFrame("Button", "SweepOwner" .. i)
-            b:SetPoint("CENTER", 0, 0); b:SetSize(10, 10)
+            b:SetPoint("CENTER", 0, 0); b:SetWidth(10); b:SetHeight(10)
         end
         sweep_n = 0
         -- A different owner AND a different line shape every step: the two halves of a real sweep
@@ -679,7 +679,7 @@ fn an_action_bar_hover_sweep_costs_no_graph_derivation() {
         r#"
         for i = 1, 12 do
             local b = CreateFrame("Button", "BarOwner" .. i)
-            b:SetPoint("CENTER", 0, 0); b:SetSize(36, 36)
+            b:SetPoint("CENTER", 0, 0); b:SetWidth(36); b:SetHeight(36)
         end
         bar_n = 0
         -- `GameTooltip_SetDefaultAnchor`'s body, which is what every action button actually runs:
@@ -754,7 +754,7 @@ fn a_bag_addon_hover_sweep_costs_no_graph_derivation() {
         r#"
         for i = 1, 12 do
             local b = CreateFrame("Button", "BagOwner" .. i)
-            b:SetPoint("CENTER", 0, 0); b:SetSize(37, 37)
+            b:SetPoint("CENTER", 0, 0); b:SetWidth(37); b:SetHeight(37)
         end
         bag_n = 0
         function bag_hover()

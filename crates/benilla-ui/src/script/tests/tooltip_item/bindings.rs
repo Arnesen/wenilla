@@ -93,7 +93,7 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         -- CreateFrame'd frames start SHOWN; the shipped XML instances are hidden="true".
         CreateFrame("GameTooltip", "GameTooltip"):Hide()
         CreateFrame("GameTooltip", "ShoppingTooltip1"):Hide()
@@ -101,7 +101,7 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
         compare_calls = {}
         for slot = 11, 12 do
             local f = CreateFrame("Button", "Doll" .. slot)
-            f:SetPoint("CENTER", 100, 0); f:SetSize(8, 8)
+            f:SetPoint("CENTER", 100, 0); f:SetWidth(8); f:SetHeight(8)
             f.invSlotId = slot
             f:RegisterEvent("SHOW_COMPARE_TOOLTIP")
             f:SetScript("OnEvent", function()
@@ -213,7 +213,7 @@ fn set_inventory_item_renders_full_outside_compare() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot9"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot9"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         assert(tt:SetInventoryItem("player", 16) == 1, "occupied slot answers 1")
@@ -266,7 +266,7 @@ fn set_hyperlink_renders_items_and_ignores_other_links() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot10"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot10"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetHyperlink("|cff1eff00|Hitem:7002:0:0:0|h[New Loop]|h|r")

@@ -1,7 +1,8 @@
 //! The engine **item-tooltip renderer** (decision 0274 P1) — the one line law every item hover
 //! renders through, mirroring the real client's single shared C++ renderer (`0x52b650`, behind
 //! 8 of the 9 `Set*Item` bindings — wow-re `ui/scratch/tooltip-money.md`). The entry methods
-//! (`SetItemById`, `SetBagItem`, `SetMerchantItem`, `SetBuybackItem`) register into the
+//! (`SetBagItem`, `SetMerchantItem`, `SetBuybackItem`, and the prefixed `BenillaSetItemById` —
+//! ours, because 1.12 has no id-keyed door onto the shared renderer) register into the
 //! GameTooltip kind table beside the widget verbs ([`super::tooltip`]).
 //!
 //! **The line law is BYTE-VERIFIED** — the 0274 §5 verdict on `0x52b650`'s emission order
@@ -32,7 +33,7 @@
 //! while the merchant window is open and repair mode is off — the engine computes
 //! `SellPrice × stack` and fires the `OnTooltipAddMoney` script; FrameXML renders the coins
 //! (`SetTooltipMoney`). A zero sell price in that context prints `ITEM_UNSELLABLE`
-//! (`0x854a74`, pushed at `0x52e4a3`). Template sources (`SetMerchantItem`/`SetItemById`/quest
+//! (`0x854a74`, pushed at `0x52e4a3`). Template sources (`SetMerchantItem`/`BenillaSetItemById`/quest
 //! rows) never show money, per the same law.
 
 use mlua::{Lua, MultiValue, Table, Value};
@@ -187,7 +188,7 @@ fn hyperlink_item_fields(link: &str) -> Option<(u32, u32, u32)> {
     (item_id != 0).then_some((item_id, enchant_id, random_property_id))
 }
 
-/// The shared id-keyed render (`SetItemById`/`SetHyperlink`): template hit → the full line law
+/// The shared id-keyed render (`BenillaSetItemById`/`SetHyperlink`): template hit → the full line law
 /// (+ the compare arm when this is the main GameTooltip); miss → the ask + a name-only line.
 fn render_by_id(
     lua: &Lua,
@@ -369,11 +370,22 @@ pub(super) fn on_shift_edge(lua: &Lua, down: bool) {
 
 /// Register the item content channels into the GameTooltip kind method table.
 pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
-    // GameTooltip:SetItemById(itemId [, fallbackName, fallbackQuality]) — the id-keyed hover
-    // (quest reward rows, loot rows; a benilla extension beside the era surface). Template
-    // source: no money row, per the byte-verified sell-price law.
+    // GameTooltip:BenillaSetItemById(itemId [, fallbackName, fallbackQuality]) — the id-keyed
+    // hover (quest reward rows, loot rows).
+    //
+    // **Ours, and the `Benilla` prefix is what keeps it honest.** 1.12's nine `Set*Item` bindings
+    // all name a CONTAINER — a bag slot, a merchant row, a loot slot — because the reference's
+    // callers always have one; nothing there takes a bare item id. Ours do: the channels in this
+    // module reach [`render_by_id`] as a Rust call, but the ones that live in a sibling module
+    // (`tooltip_spell`'s action-bar item arm, `SetTrainerService`, `SetCraftSpell`) reach it
+    // through the wrapper table, and that needs a NAME. Spelling that name like a WoW function
+    // would be an unexplained superset an addon can feature-detect (1188; the census that moved
+    // it, 2142); under the prefix it is unreachable by accident from an addon that means to call
+    // a WoW function, and no addon has reason to call it at all.
+    //
+    // Template source: no money row, per the byte-verified sell-price law.
     m.set(
-        "SetItemById",
+        "BenillaSetItemById",
         lua.create_function(
             |lua, (this, item_id, fb_name, fb_q): (Table, u32, Option<String>, Option<u32>)| {
                 render_by_id(lua, &this, item_id, fb_name, fb_q)
@@ -739,7 +751,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // supplies the instance block, p6=1), and that is the whole point of it existing here: a loot
     // slot is no item object, so its rolled random-suffix enchants reach the builder through the
     // block — never through `ITEM_FIELD_ENCHANTMENT`, which the wire does not carry for loot.
-    // Hovering a "… of the Monkey" drop through the template path `SetItemById` instead printed
+    // Hovering a "… of the Monkey" drop through the template path `BenillaSetItemById` instead printed
     // the `<Random enchantment>` placeholder until the item was in the bag (decision 1547).
     //
     // `slot` is the 1-based display row, like every other loot getter; the coin pile and a
@@ -1281,7 +1293,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
 
     // GameTooltip:SetTradeSkillItem(skillIndex [, reagentIndex]) — the tradeskill window's item
     // hover (decision 0437 phase 2): with reagentIndex, that recipe's reagent's item; without, the
-    // recipe's PRODUCT item. Routes through the same id-keyed renderer SetItemById uses. A product
+    // recipe's PRODUCT item. Routes through the same id-keyed renderer BenillaSetItemById uses. A product
     // id of 0 (a pure-effect recipe) or an in-flight ask-once answer both fall to render_by_id's own
     // name-only fallback line (the recipe's name for the product channel, the reagent's own —
     // possibly still-nil — name for the reagent channel) rather than a no-op: that fallback already

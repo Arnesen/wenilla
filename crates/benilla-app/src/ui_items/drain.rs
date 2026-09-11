@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 
 use benilla_protocol::messages::BAG_PLAYER_INVENTORY;
-use benilla_ui::script::{ScriptValue, UiScript, EQUIPMENT_BAG};
+use benilla_ui::script::{UiScript, EQUIPMENT_BAG};
 
 use crate::items::Items;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
@@ -574,10 +574,7 @@ pub(super) fn drain_container_uses(
                 .map(|store| slot_guid_count(Some(store), bag, slot, &ladder.items))
                 .unwrap_or((0, 0));
             pending_items.add([(bag, slot, guid, count)]);
-            script.fire_event(
-                "ITEM_LOCK_CHANGED",
-                vec![ScriptValue::Int(bag), ScriptValue::Int(i64::from(slot))],
-            );
+            script.fire_event("ITEM_LOCK_CHANGED", Vec::new());
             let _ = ladder.commands.0.send(ClientCommand::OpenItem {
                 bag_index,
                 slot: wire_slot,
@@ -831,11 +828,10 @@ pub(crate) fn send_container_move(
             (mv.src_bag, mv.src_slot, src_guid, src_count),
             (mv.dst_bag, mv.dst_slot, dst_guid, dst_count),
         ]);
-        for (bag, slot) in [(mv.src_bag, mv.src_slot), (mv.dst_bag, mv.dst_slot)] {
-            script.fire_event(
-                "ITEM_LOCK_CHANGED",
-                vec![ScriptValue::Int(bag), ScriptValue::Int(i64::from(slot))],
-            );
+        // One per locked end, as the reference's own per-slot unlock does — the slot travels in
+        // how many times it fires, never in an argument (see `feed`'s note).
+        for _ in 0..2 {
+            script.fire_event("ITEM_LOCK_CHANGED", Vec::new());
         }
     }
     true
@@ -873,10 +869,7 @@ pub(super) fn drain_container_destroys(
         });
         let (guid, stack) = slot_guid_count(store, bag, slot, &items);
         pending.add([(bag, slot, guid, stack)]);
-        script.fire_event(
-            "ITEM_LOCK_CHANGED",
-            vec![ScriptValue::Int(bag), ScriptValue::Int(i64::from(slot))],
-        );
+        script.fire_event("ITEM_LOCK_CHANGED", Vec::new());
     }
 }
 

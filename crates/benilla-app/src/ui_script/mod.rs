@@ -920,6 +920,11 @@ mod panel_template_tests;
 #[cfg(test)]
 mod shape_gate;
 
+/// The event ARGUMENT-shape gate (decision 2140) — the same question one API over: the two event
+/// gates in `reference_ui` compare names, and nothing compared what a fire site pushes.
+#[cfg(test)]
+mod event_shape_gate;
+
 /// The reference's BasicControls.xml — TEXT/message/_ERRORMESSAGE and the ScriptErrors dialog,
 /// none of which benilla itself calls: every test enters from Lua the way an addon does.
 #[cfg(test)]

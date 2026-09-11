@@ -259,6 +259,67 @@ impl KindState {
     }
 }
 
+/// A tooltip's anchor mode — the reference's `+0x318`, which `SetOwner` writes and
+/// `GetAnchorType 0x5313e0` reads back through the 9-entry `{value, name}` table `0x531530`
+/// (wow-re `bag-portrait-and-appendtext.md` §5; the mode ids in
+/// `hover-hide-and-tooltip-owner-law.md` §4).
+///
+/// **All nine of the reference's modes are named here even though `SetOwner` cannot reach
+/// [`TooltipAnchor::Cursor`].** The variant is not decoration: mode 6 is the cursor-following
+/// tooltip, driven per frame by the class's own OnUpdate override `0x530b20` (re-anchor to
+/// `[root+0x1118/0x111c]`), and nine corpus files ask for it by name — `pfUI`'s tooltip, xpbar and
+/// chat modules, `pfQuest/browser.lua`, `TipBuddy`. Following the cursor is a mechanism this engine
+/// does not have yet, and 1203 says a verb is not stubbed to make a caller happy, so
+/// `tooltip::verbs`'s `SetOwner` still warns on the string and keeps its previous placement rather
+/// than silently pretending. Naming the variant is what keeps that gap visible instead of implicit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TooltipAnchor {
+    /// `ANCHOR_LEFT` — the plate's right edge on the owner's left.
+    Left,
+    /// `ANCHOR_RIGHT` — the plate's left edge on the owner's right; the stock UI's overwhelming
+    /// default (87 of the 123 `ANCHOR_*` mentions in 1.12's FrameXML).
+    Right,
+    /// `ANCHOR_BOTTOMLEFT`.
+    BottomLeft,
+    /// `ANCHOR_BOTTOMRIGHT`.
+    BottomRight,
+    /// `ANCHOR_TOPLEFT`.
+    TopLeft,
+    /// `ANCHOR_TOPRIGHT`.
+    TopRight,
+    /// `ANCHOR_CURSOR` — mode 6, the plate re-anchored to the live cursor every frame. Reachable
+    /// in the reference and NOT constructible here; see the type doc.
+    Cursor,
+    /// `ANCHOR_NONE` — mode 7: the owner is recorded and no `SetPoint` is applied, leaving the
+    /// caller to point the plate (`GameTooltip_SetDefaultAnchor` does exactly that on the next
+    /// line). **The default**, because it is the mode the reference's own `SetOwner` core stores
+    /// when the caller passes no anchor string (`0x530012`), and the only one of the nine that is
+    /// true of a plate nothing has anchored yet.
+    #[default]
+    None,
+    /// `ANCHOR_PRESERVE` — mode 8: the owner is recorded and the previous placement is kept
+    /// (`0x52fe90` skips the anchor-apply). Stored like any other mode, so `GetAnchorType` answers
+    /// `"ANCHOR_PRESERVE"` after one — the reference does not resolve it back to what it preserved.
+    Preserve,
+}
+
+impl TooltipAnchor {
+    /// The reference's own spelling, as `GetAnchorType()` answers it (table `0x531530`).
+    pub const fn name(self) -> &'static str {
+        match self {
+            TooltipAnchor::Left => "ANCHOR_LEFT",
+            TooltipAnchor::Right => "ANCHOR_RIGHT",
+            TooltipAnchor::BottomLeft => "ANCHOR_BOTTOMLEFT",
+            TooltipAnchor::BottomRight => "ANCHOR_BOTTOMRIGHT",
+            TooltipAnchor::TopLeft => "ANCHOR_TOPLEFT",
+            TooltipAnchor::TopRight => "ANCHOR_TOPRIGHT",
+            TooltipAnchor::Cursor => "ANCHOR_CURSOR",
+            TooltipAnchor::None => "ANCHOR_NONE",
+            TooltipAnchor::Preserve => "ANCHOR_PRESERVE",
+        }
+    }
+}
+
 /// A `GameTooltip`'s runtime state (decision 0274). The line *text/color/wrap* is not duplicated
 /// here — each line pair is a real named FontString region (`<name>TextLeftN`/`TextRightN`,
 /// engine-created on demand, published as Lua globals exactly like the real template's 30
@@ -282,6 +343,10 @@ pub struct TooltipState {
     /// `SetOwner`'s frame — dropped on hide (`IsOwned` is the hover re-enter loop's gate,
     /// ref `ContainerFrame.lua` OnUpdate).
     pub owner: Option<FrameHandle>,
+    /// The anchor mode the last `SetOwner` placed this plate by, read back by `GetAnchorType()` —
+    /// the reference's `+0x318` (wow-re `bag-portrait-and-appendtext.md` §5,
+    /// `hover-hide-and-tooltip-owner-law.md` §4).
+    pub anchor: TooltipAnchor,
     /// `SetMinimumWidth(w)` — a floor on the auto-sized width (the ref's money-row floor).
     /// Cleared (0.0) by `ClearLines`/hide, like the content.
     pub min_width: f32,
@@ -407,7 +472,7 @@ pub struct ModelState {
     /// written by the engine because the pane authored no size (decision 2015). The geometry
     /// getters `0x76d080`/`0x76d0d0` answer it whenever no size is authored; here it is written
     /// into the layout input when the file's facts land and re-derived when the screen's aspect
-    /// moves, and an authored `SetWidth`/`SetHeight`/`SetSize` clears it for good.
+    /// moves, and an authored `SetWidth`/`SetHeight` clears it for good.
     pub implicit_size: bool,
     /// The pane's yaw in radians — `CSimpleModel+0x39c`. **One slot, written by two verbs on two
     /// different classes**: `Model:SetFacing` (`0x76dce0`) and `PlayerModel:SetRotation`
@@ -961,15 +1026,29 @@ pub const MINIMAP_DEFAULT_PLAYER_MODEL: &str = "Interface\\Minimap\\MinimapArrow
 
 /// A `CSimpleScrollFrame`'s runtime state: the frame whose anchors are overridden to track the
 /// scroll offset ([`crate::script::UiScript::resolve`]'s scroll-child override), and the current
-/// vertical scroll position. `SetVerticalScroll` stores the offset VERBATIM — the reference's
-/// `0x786db0` never reads the range (decision 2017) — and the range is always computed live from
-/// the resolved rects (never cached here), so this struct carries only the two members the
-/// client's `SetScrollChild`/`SetVerticalScroll` actually set (`[+0x318]`, `[+0x328]`).
+/// scroll position on each axis. `SetVerticalScroll` stores the offset VERBATIM — the reference's
+/// `0x786db0` never reads the range (decision 2017) — and the ranges are always computed live from
+/// the resolved rects (never cached here), so this struct carries only the three members the
+/// client's `SetScrollChild`/`SetHorizontalScroll`/`SetVerticalScroll` actually set (`[+0x318]`,
+/// `[+0x324]`, `[+0x328]`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScrollFrameState {
     /// The scroll child (`SetScrollChild`) — the one frame whose content pans within this frame's
     /// rect. `None` = no child (nothing to clip or offset).
     pub child: Option<FrameHandle>,
+    /// The horizontal scroll offset in px (`SetHorizontalScroll`), unclamped — the reference's
+    /// `[+0x324]`, whose setter `0x786d30` is the byte-clone of the vertical one's `0x786db0`.
+    ///
+    /// **The sign is the mirror of the vertical one below, and that is the reference's, not a
+    /// slip.** `0x787100` re-anchors the child as
+    /// `SetPoint(TOPLEFT, self, TOPLEFT, +[+0x324], +[+0x328])` — both offsets handed over raw,
+    /// neither negated (wow-re `scrollframe-offset-and-range-law.md` §2.3/§6.2). x grows right, so
+    /// a POSITIVE horizontal offset pushes the child right and reveals nothing new; scrolling
+    /// right takes a NEGATIVE one, where scrolling down takes a positive vertical.
+    /// `aux-addon/tabs/search/filter.lua:315-322` corroborates it from the caller's side: it
+    /// bounds x into `[min(0, frameWidth - contentWidth - 10), 0]` and y into
+    /// `[0, contentHeight - frameHeight]`.
+    pub horizontal: f32,
     /// The vertical scroll offset in px (`SetVerticalScroll`), unclamped — the reference's
     /// `[+0x328]`. XML y-positive-up: a positive offset lifts the child
     /// (`child.top = scrollframe.top + vertical`), bringing content below the fold into view. The
@@ -1480,9 +1559,6 @@ pub struct SliderState {
     /// `true` = VERTICAL (the ctor default; value maps along the track's height, min at the top),
     /// `false` = HORIZONTAL (`orientation`; shared enum `0x811b00` HORIZONTAL=0/VERTICAL=1).
     pub vertical: bool,
-    /// `Enable`/`Disable` (`IsEnabled`). A disabled slider does not respond to thumb drag; the ctor
-    /// enables it (the interactive-widget ctors take mouse — Button/EditBox/ScrollFrame do too).
-    pub enabled: bool,
     /// The thumb texture region (`SetThumbTexture`/`<ThumbTexture>`), created on first set. A
     /// renderer positions this region's rect at [`Self::fraction`] along the orientation axis.
     pub thumb: Option<RegionHandle>,
@@ -1498,7 +1574,6 @@ impl Default for SliderState {
             has_value: false,
             step: 0.0,
             vertical: true,
-            enabled: true,
             thumb: None,
         }
     }

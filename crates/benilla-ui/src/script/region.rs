@@ -484,11 +484,13 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     // ours was ONE table for both, so a Texture answered `SetText` and a FontString answered
     // `SetTexture`: a superset in both directions.
     //
-    // **Partitioned, not pruned.** Every name we install keeps a home; what changes is which leaf
-    // can see it. Removing the five names that are in NEITHER client map (`SetPortraitToTexture`,
-    // `SetRotation`, `SetSize`, `SetFormattedText`, `GetStringHeight`) is a separate question per
-    // name — and getting a split wrong REMOVES verbs addons use, which is worse than the superset
-    // it fixes.
+    // **Partitioned first, then pruned name by name.** The 1244/1245 split only decided which
+    // leaf could SEE each name, because getting a split wrong REMOVES verbs addons use, which is
+    // worse than the superset it fixes. The five that were in NEITHER client map were left in
+    // place as a separate question per name, and all five have since been answered:
+    // `GetStringHeight` (1251), `SetRotation` and `SetPortraitToTexture` (the latter a 1.12
+    // GLOBAL, and it lives there now), and `SetFormattedText` and `SetSize` (2142). Both leaves
+    // are the client's own lists now.
     //
     // Copied out of the full table rather than installed twice, so one implementation stands behind
     // both visibilities — and note the carve's warning that the shared names use the IDENTICAL
@@ -892,7 +894,8 @@ pub(super) fn region_set_point(
 /// Two details of the FontString row are worth spelling out, because both were wrong here before
 /// and neither is guessable from the name:
 ///
-/// * **The authored value WINS.** The old code preferred the measure and fell back to `SetSize`;
+/// * **The authored value WINS.** The old code preferred the measure and fell back to the
+///   authored size;
 ///   the reference's `jp` at `0x77294a` skips the measure entirely when the authored value is
 ///   non-zero. Per axis, not per region — `<Size x="290" y="0"/>` takes 290 from the author and
 ///   the height from the text.

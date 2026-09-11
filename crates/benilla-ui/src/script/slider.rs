@@ -171,21 +171,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // Enable/Disable/IsEnabled — a disabled slider ignores thumb drag (gated in the pointer path).
-    m.set(
-        "Enable",
-        lua.create_function(|lua, this: Table| with_slider(lua, &this, |s| s.enabled = true))?,
-    )?;
-    m.set(
-        "Disable",
-        lua.create_function(|lua, this: Table| with_slider(lua, &this, |s| s.enabled = false))?,
-    )?;
-    m.set(
-        "IsEnabled",
-        // 1.12 returns 1/nil; the house API target is the Era boolean (decision 0068) — every
-        // transcribed `if slider:IsEnabled()` reads both identically.
-        lua.create_function(|lua, this: Table| with_slider(lua, &this, |s| s.enabled))?,
-    )?;
+    // `Enable`/`Disable`/`IsEnabled` WERE here and are GONE, with the `enabled` state they drove.
+    // **A 1.12 Slider has no enabled state at all**: the three names are registered once each, in
+    // the BUTTON table `0x879d00` (`0x77fef0`/`0x77ffd0`/`0x7800b0`), and the Slider's own LoadXML
+    // `0x789580` takes `drawLayer`/`minValue`/`maxValue`/`valueStep`/`defaultValue`/`orientation`
+    // and nothing else (wow-re `rf28-typed-widget-loadxml.md` §Slider) — so there was no way in
+    // from Lua *or* from XML, and the flag could only ever read `true`.
+    //
+    // They were a superset in PRESENCE, which is what 1189 records the cost of: a duck-typing addon
+    // that branches on `if widget.IsEnabled then` reads a Slider as a Button. Ours also answered a
+    // Lua BOOLEAN, which the reference has no query that does (decision 2118) — `IsEnabled 0x7800b0`
+    // is number-1/number-0 and never even nil.
+    //
+    // Removed rather than corrected because nothing calls them on a Slider receiver: a
+    // receiver-typed grep over this repo, `assets/ui`, the stock FrameXML/GlueXML and both addon
+    // corpora (110 top-20 + 219 vanilla) finds zero `slider*:Enable/Disable/IsEnabled` sites.
+    // `begin_drag` below lost its `enabled` gate with them — behaviour-neutral, since no caller
+    // could clear the flag.
 
     // SetThumbTexture(path [, drawLayer]) | SetThumbTexture(r, g, b [, a]) — the same two forms as a
     // region's SetTexture, targeting the thumb region (created on first use). Mirrors
@@ -339,10 +341,15 @@ pub(crate) struct SliderDrag {
     pub(crate) grab_offset: f32,
 }
 
-/// On a LeftButton press at `(x, y)` whose hit frame is `hit`: if that frame is an **enabled**
-/// Slider with a resolved rect, begin a drag capture (records [`Model::slider_drag`]). Where the
-/// press grabs is [`slider_grab`]'s to say — one law, shared with the glue lane's scrollbars, so
-/// an in-game bar and a character-screen bar cannot drift apart on feel.
+/// On a LeftButton press at `(x, y)` whose hit frame is `hit`: if that frame is a Slider with a
+/// resolved rect, begin a drag capture (records [`Model::slider_drag`]). Where the press grabs is
+/// [`slider_grab`]'s to say — one law, shared with the glue lane's scrollbars, so an in-game bar
+/// and a character-screen bar cannot drift apart on feel.
+///
+/// There is no enabled gate: 1.12 gives a Slider no enabled state to gate on (see `install`'s note
+/// where `Enable`/`Disable`/`IsEnabled` used to be). A slider that should not take the press is
+/// kept off it the way the reference keeps anything off it — `EnableMouse(false)`, upstream of here
+/// in the hit test.
 ///
 /// Returns `Some((frame id, new value))` when the press itself changed the value (the track jump)
 /// — the caller fires `OnValueChanged` outside the model borrow, exactly like [`drag_move`]'s
@@ -355,13 +362,10 @@ pub(super) fn begin_drag(
 ) -> Option<(u32, f32)> {
     let h = hit?;
     let r = model.resolved.get(&h).copied()?;
-    let (enabled, vertical, fraction, thumb) = match model.arena.frame(h).map(|f| &f.kind_state) {
-        Some(KindState::Slider(s)) => (s.enabled, s.vertical, s.fraction(), s.thumb),
+    let (vertical, fraction, thumb) = match model.arena.frame(h).map(|f| &f.kind_state) {
+        Some(KindState::Slider(s)) => (s.vertical, s.fraction(), s.thumb),
         _ => return None,
     };
-    if !enabled {
-        return None;
-    }
     // No thumb region → `0x789ba0`'s `+0x328` gate: the press still captures (the dispatcher's
     // `mov [ebx+0x80],esi` is unconditional), the value never moves.
     let Some(size) = thumb_extent(model, thumb) else {

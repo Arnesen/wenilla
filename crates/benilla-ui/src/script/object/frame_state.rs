@@ -14,7 +14,10 @@ use super::{decode_id, draw_layer_from_str, frame_handle_of, frame_wrapper, stra
 
 /// Populate `m`'s visibility/hierarchy/strata/backdrop/mouse methods (see the module doc).
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
-    // Show / Hide / visibility
+    // Show / Hide / visibility. **`SetShown` is not here and must not come back**: the branchless
+    // setter belongs to a later expansion — no 1.12 method table registers it, and neither the
+    // stock chain nor either addon corpus calls it (decision 2142's census). A frame is shown or
+    // hidden by the two verbs the era has.
     m.set(
         "Show",
         lua.create_function(|lua, this: Table| set_shown(lua, &this, true))?,
@@ -23,21 +26,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "Hide",
         lua.create_function(|lua, this: Table| set_shown(lua, &this, false))?,
     )?;
-    // SetShown(bool) — the live API's branchless Show/Hide (a consensus call across the 0068
-    // target addons; Lua truthiness, so SetShown(nil) hides).
-    m.set(
-        "SetShown",
-        lua.create_function(|lua, (this, shown): (Table, Value)| {
-            let show = !matches!(shown, Value::Nil | Value::Boolean(false));
-            set_shown(lua, &this, show)
-        })?,
-    )?;
     m.set(
         "IsShown",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model.arena.frame(h).map(|f| f.shown).unwrap_or(false),
             ))
         })?,
@@ -47,7 +41,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model
                     .arena
                     .frame(h)
@@ -759,7 +753,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model.arena.is_mouse_enabled(h),
             ))
         })?,
@@ -795,7 +789,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model.arena.is_keyboard_enabled(h),
             ))
         })?,
@@ -863,7 +857,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model.arena.is_mouse_wheel_enabled(h),
             ))
         })?,
@@ -889,7 +883,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(crate::script::binding_abi::predicate(
+            Ok(crate::script::binding_abi::flag(
                 model.arena.is_clamped_to_screen(h),
             ))
         })?,

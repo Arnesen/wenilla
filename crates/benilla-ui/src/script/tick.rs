@@ -96,6 +96,7 @@ pub(crate) fn fire_event_into(lua: &Lua, event: &str, args: Vec<ScriptValue>) {
             at = next;
         }
     }
+    event::fire_all_event_listeners(lua, event, &args);
 }
 
 impl super::UiScript {

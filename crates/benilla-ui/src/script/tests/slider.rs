@@ -27,10 +27,10 @@ fn slider_thumb_draws_at_value_fraction_along_the_track() {
         local sl = CreateFrame("Slider", "SlRender")
         -- A vertical scrollbar: 16 wide, 100 tall, bottom-left at (100, 100) -> track y in [100, 200].
         sl:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)
-        sl:SetSize(16, 100)
+        sl:SetWidth(16); sl:SetHeight(100)
         sl:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
         local t = sl:GetThumbTexture()
-        t:SetSize(16, 16)
+        t:SetWidth(16); t:SetHeight(16)
         sl:SetMinMaxValues(0, 100)
         sl:SetValue(0)
     "#,
@@ -73,9 +73,9 @@ fn slider_thumb_drag_maps_cursor_to_value() {
         r#"
         bar = CreateFrame("Slider", "SlDrag")
         bar:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)
-        bar:SetSize(16, 100)
+        bar:SetWidth(16); bar:SetHeight(100)
         bar:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
-        bar:GetThumbTexture():SetSize(16, 16)
+        local thumb = bar:GetThumbTexture(); thumb:SetWidth(16); thumb:SetHeight(16)
         bar:SetMinMaxValues(0, 100)
         bar:SetValue(0)
     "#,
@@ -104,16 +104,16 @@ fn slider_thumb_drag_maps_cursor_to_value() {
 }
 
 #[test]
-fn slider_track_press_seats_the_thumb_and_a_disabled_slider_ignores_it() {
+fn slider_track_press_seats_the_thumb_and_a_mouseless_slider_ignores_it() {
     let mut s = script();
     s.set_screen_size(1024.0, 768.0);
     s.run(
         r#"
         bar = CreateFrame("Slider", "SlTrack")
         bar:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)
-        bar:SetSize(16, 100)
+        bar:SetWidth(16); bar:SetHeight(100)
         bar:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
-        bar:GetThumbTexture():SetSize(16, 16)
+        local thumb = bar:GetThumbTexture(); thumb:SetWidth(16); thumb:SetHeight(16)
         bar:SetMinMaxValues(0, 100)
         bar:SetValue(0)
         fired = {}
@@ -142,18 +142,25 @@ fn slider_track_press_seats_the_thumb_and_a_disabled_slider_ignores_it() {
     assert_eq!(v, 100.0, "the gesture drags on without re-grabbing");
     s.mouse_button(108.0, 108.0, "LeftButton", false);
 
-    // A disabled slider ignores a press anywhere — thumb and track alike.
-    s.run(r#"SlTrack:SetValue(0); SlTrack:Disable(); fired = {}"#)
+    // A slider the mouse cannot reach ignores a press anywhere — thumb and track alike. This was
+    // `SlTrack:Disable()` until the Button-only `Enable`/`Disable`/`IsEnabled` trio came off the
+    // Slider table (1.12 registers them on `0x879d00` alone, and the Slider's LoadXML has no
+    // `enabled` attribute either). `EnableMouse(false)` is how the reference keeps a slider off a
+    // press, and it gates upstream in the hit test rather than inside `begin_drag`.
+    s.run(r#"SlTrack:SetValue(0); SlTrack:EnableMouse(false); fired = {}"#)
         .unwrap();
     for y in [192.0, 150.0] {
         s.mouse_button(108.0, y, "LeftButton", true);
         s.mouse_move(108.0, 130.0);
         let v: f32 = s.eval("return SlTrack:GetValue()").unwrap();
-        assert_eq!(v, 0.0, "disabled slider does not move (press at y={y})");
+        assert_eq!(
+            v, 0.0,
+            "mouse-disabled slider does not move (press at y={y})"
+        );
         s.mouse_button(108.0, 130.0, "LeftButton", false);
     }
     let n: usize = s.eval("return table.getn(fired)").unwrap();
-    assert_eq!(n, 0, "disabled: no OnValueChanged at all");
+    assert_eq!(n, 0, "mouse disabled: no OnValueChanged at all");
 }
 
 #[test]
@@ -235,17 +242,30 @@ fn slider_setvalue_fires_onvaluechanged_only_on_change() {
     .unwrap();
 }
 
+/// `Enable`/`Disable`/`IsEnabled` are a **Button** trio in 1.12 (table `0x879d00`), and a Slider
+/// must not answer them: a duck-typing addon that branches on `if widget.IsEnabled then` reads a
+/// superset as the wrong class (1189/1250 §5). This asserts the removal *and* its control — the
+/// same three names still present on a Button, so a regression that emptied the Button table would
+/// fail here rather than pass by accident.
 #[test]
-fn slider_enable_disable_roundtrips() {
+fn a_slider_does_not_answer_the_buttons_enable_trio() {
     let s = script();
     s.run(
         r#"
         local sl = CreateFrame("Slider", "SlEnable")
-        assert(sl:IsEnabled(), "enabled by ctor")
-        sl:Disable()
-        assert(not sl:IsEnabled(), "disabled")
-        sl:Enable()
-        assert(sl:IsEnabled(), "re-enabled")
+        for _, name in ipairs({ "Enable", "Disable", "IsEnabled" }) do
+            assert(sl[name] == nil, "Slider must not answer " .. name)
+        end
+        local b = CreateFrame("Button", "SlEnableControl")
+        for _, name in ipairs({ "Enable", "Disable", "IsEnabled" }) do
+            assert(type(b[name]) == "function", "Button still answers " .. name)
+        end
+        -- The Button's own predicate is the NUMBER 1 / the NUMBER 0, never a Lua boolean — its
+        -- false leg is 0 rather than nil, settled per body at `0x7800b0`'s `setne`+`fild`
+        -- (wow-re `button-enabled-state.md`; decision 2118's `binding_abi::flag` doc).
+        assert(b:IsEnabled() == 1, "1, not true")
+        b:Disable()
+        assert(b:IsEnabled() == 0, "0, not false and not nil")
     "#,
     )
     .unwrap();
@@ -279,9 +299,9 @@ fn slider_scrollbar_wiring_does_not_recurse() {
         r#"
         local sf = CreateFrame("ScrollFrame", "SlSF")
         sf:SetPoint("TOPLEFT", nil, "TOPLEFT", 0, 0)
-        sf:SetSize(100, 100)
+        sf:SetWidth(100); sf:SetHeight(100)
         local child = CreateFrame("Frame", "SlSFChild", sf)
-        child:SetSize(100, 300)         -- 200px taller than the frame -> scroll range 200
+        child:SetWidth(100); child:SetHeight(300)  -- 200px taller than the frame -> scroll range 200
         sf:SetScrollChild(child)
 
         bar = CreateFrame("Slider", "SlSFBar")
@@ -399,7 +419,7 @@ fn a_thumb_with_no_authored_size_takes_its_arts_texel_span_and_still_drags() {
         -- Slider and not to the mouse-enabled host sitting under it.
         host = CreateFrame("Frame", "DdHost", nil)
         host:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)
-        host:SetSize(80, 170)
+        host:SetWidth(80); host:SetHeight(170)
         host:SetFrameStrata("FULLSCREEN_DIALOG")
         host:EnableMouse(true)
         bar = CreateFrame("Slider", "DdSlider", host)

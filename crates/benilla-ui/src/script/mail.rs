@@ -226,7 +226,7 @@ impl super::UiScript {
 
     /// Drain the `SendMail` intent, if one was queued since the last drain — folds in the last
     /// `SetSendMailMoney`/`SetSendMailCOD` amounts and the attached item's `(bag, slot)`. The
-    /// attachment is left in place (a failed send keeps it; [`Self::clear_send_mail_item`] drops it
+    /// attachment is left in place (a failed send keeps it; [`Self::reset_compose_tab`] drops it
     /// on success).
     pub fn take_mail_send(&mut self) -> Option<MailSendRequest> {
         let mut model = self.model_mut();
@@ -243,13 +243,37 @@ impl super::UiScript {
         })
     }
 
-    /// Drop the send tab's attached item + money/COD amounts — the app calls this on
-    /// `MAIL_SEND_SUCCESS` (the reference `SendMailFrame_Reset`, MailFrame.lua l.49/552).
-    pub fn clear_send_mail_item(&mut self) {
-        let mut model = self.model_mut();
-        model.mail_send_item = None;
-        model.mail_send_money = 0;
-        model.mail_send_cod = 0;
+    /// **`0x4acdc0(1)` — the client's compose-tab reset**, whole. Zeroes the send tab's attachment
+    /// (`0xb6ef90/94`), money (`0xb6efa4`) and COD (`0xb6efa8`) globals and then **tail-fires its
+    /// three events**, in this order: `SEND_MAIL_MONEY_CHANGED`, `SEND_MAIL_COD_CHANGED`,
+    /// `MAIL_SEND_SUCCESS` (`@0x4ace14/1e/28` — wow-re `system/ui/scratch/mail-interaction.md`
+    /// §1/§4).
+    ///
+    /// **The fire belongs to the reset, and that is the whole point of this shape.** Both call
+    /// sites used to fire `MAIL_SEND_SUCCESS` themselves, and the send-result one fired it
+    /// *before* clearing — so the stock `SendMailFrame_Reset` ran while `GetSendMailItem()` still
+    /// answered with the item that had just been sent, and its own `SendMailFrame_Update()` tail
+    /// put the item's name straight back into the subject box and its texture back on
+    /// `SendMailPackageButton`. Nothing re-ran the update after the clear landed, so a sent letter
+    /// left its subject and its icon sitting in the form (director's report, decision 2145).
+    ///
+    /// `MAIL_SEND_SUCCESS` is **overloaded** — it means "the compose form is now clean", not "a
+    /// mail was sent" (the anomaly wow-re verified twice: opening a mailbox fires it too).
+    pub fn reset_compose_tab(&mut self) {
+        {
+            let mut model = self.model_mut();
+            model.mail_send_item = None;
+            model.mail_send_money = 0;
+            model.mail_send_cod = 0;
+        }
+        // Fired here, immediately, rather than queued on `pending_events`: this is a host-side
+        // edge (the mail system driving the VM), not a Lua binding queueing work for the next
+        // tick, and its order against the caller's own `MAIL_SHOW`/`MAIL_FAILED` is the law.
+        // Spelled out one call each — the three are a fixed sequence at three addresses, and the
+        // chain-file event census (`ui_script::reference_ui`) reads producers as literals.
+        self.fire_event("SEND_MAIL_MONEY_CHANGED", Vec::new()); // 0x4ace14
+        self.fire_event("SEND_MAIL_COD_CHANGED", Vec::new()); // 0x4ace1e
+        self.fire_event("MAIL_SEND_SUCCESS", Vec::new()); // 0x4ace28
     }
 
     /// Drop the attachment alone — `SendMail`'s attached-item-gone abort (`ERR_ITEM_NOT_FOUND`, no
@@ -1223,7 +1247,7 @@ mod tests {
         }));
         s.run("ClickSendMailItemButton()").unwrap();
         s.run("SetSendMailMoney(99) SetSendMailCOD(5)").unwrap();
-        s.clear_send_mail_item();
+        s.reset_compose_tab();
         select_default_stationery(&mut s);
         s.run("SendMail('x','y','z')").unwrap();
         let req = s.take_mail_send().unwrap();

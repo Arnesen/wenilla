@@ -9,8 +9,8 @@
 //! EditBox's table gets them. The justify law likewise lives once in [`crate::justify`].
 //!
 //! What legitimately stays here is the surface a FontString alone has: the string itself
-//! (`SetText`/`SetFormattedText`/`GetText`), the measured extents, `Set/GetJustifyH`/`V`,
-//! `SetNonSpaceWrap`/`CanNonSpaceWrap`, and `SetTextHeight`.
+//! (`SetText`/`GetText`), the measured extents, `Set/GetJustifyH`/`V`, `SetNonSpaceWrap`/
+//! `CanNonSpaceWrap`, and `SetTextHeight`.
 //!
 //! The per-property override a region has over its inherited font object is unaffected — that is
 //! the severance mask (`FontExplicit`), which the shared block writes the same way this file did.
@@ -44,26 +44,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetFormattedText(fmt, ...) = SetText(format(fmt, ...)) — routed through the stdlib's
-    // positional-aware `format` so `%N$s` specs behave (a consensus call across the 0068 targets).
-    m.set(
-        "SetFormattedText",
-        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
-            let format: mlua::Function = lua
-                .globals()
-                .get::<Table>("string")?
-                .get::<mlua::Function>("format")?;
-            // The formatted result is bytes too — `%s` of a sliced string is a sliced string.
-            let text = format.call::<mlua::String>(args)?.to_string_lossy();
-            let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            let data = model.region_data.entry(rh).or_default();
-            data.text = Some(text);
-            data.alpha_gradient = None;
-            model.touch_measure(rh);
-            Ok(())
-        })?,
-    )?;
+    // **No `SetFormattedText`.** A later-expansion name: absent from the client's 32-entry
+    // FontString map, from the stock 1.12 chain, and from both addon corpora (2142's census). The
+    // era spelling is `SetText(format(fmt, ...))`, and `format` here is already the
+    // positional-aware one ([`crate::strings`]), so `%N$s` behaves at the call site the same way
+    // it behaved inside this shim.
 
     // GetText — **an EMPTY string comes back as `nil`, and that substitution is the getter's own**
     // (`FontString:GetText 0x79d690`, wow-re
@@ -138,7 +123,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // GetStringWidth is the **natural, unwrapped** extent — never the declared box, and never the
     // wrapped one (wow-re `fontstring-overflow.md`, "The measurement echo": the reference's getter
     // re-measures the raw text with NO wrap constraint). Unlike `GetWidth` below it deliberately
-    // does NOT fall back to an explicit `SetSize`: the declared width is the very thing a caller
+    // does NOT fall back to a declared `SetWidth`: that width is the very thing a caller
     // asks this to be independent of. A kit that sizes a box from this number and then sets a width
     // on the string — which is what the reference's own `PanelTemplates_TabResize` does — would
     // otherwise read its own output back as its next input and never settle (decision 0997, the

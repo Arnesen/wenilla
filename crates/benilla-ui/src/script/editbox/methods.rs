@@ -7,7 +7,6 @@
 use mlua::{Lua, Table, Value};
 
 use crate::script::object::frame_handle_of;
-use crate::script::Model;
 use crate::widget::EditBoxState;
 
 use super::{
@@ -127,14 +126,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    m.set(
-        "HasFocus",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.focused_editbox == Some(h))
-        })?,
-    )?;
+    // **No `HasFocus`.** 1.12's EditBox table registers the two setters above and no getter at
+    // all, and an addon that wants the answer keeps its own flag around `SetFocus`/`ClearFocus` —
+    // `pfQuest/browser.lua:760` documents exactly that and ships the workaround. Ours was an
+    // unexplained superset a feature-detecting addon would take the wrong branch on (1188, and
+    // the census that removed it, 2142). Host-side, the focus cell reads back through
+    // [`crate::script::UiScript::focused_editbox_name`].
 
     // GetInputLanguage() / ToggleInputLanguage() — `0x799550` / `0x799610`, the edit box's
     // **IME** language, not the chat language: `ChatEdit_OnInputLanguageChanged` shows

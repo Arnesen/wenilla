@@ -29,10 +29,10 @@ fn setpoint_relative_to_resolves_an_alias_global() {
         -- The reference UI's own frames.
         Bar = CreateFrame("Frame", "Bar")
         Bar:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 50)
-        Bar:SetSize(200, 40)
+        Bar:SetWidth(200); Bar:SetHeight(40)
         for i = 1, 5 do
             local b = CreateFrame("Button", "StockButton" .. i, Bar)
-            b:SetSize(30, 30)
+            b:SetWidth(30); b:SetHeight(30)
         end
 
         -- The addon's aliases: plain globals, no frame's name (Bartender2's Alias.lua).
@@ -84,14 +84,14 @@ fn setpoint_relative_to_resolves_a_region_alias_global() {
         r#"
         Panel = CreateFrame("Frame", "Panel")
         Panel:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 0, 0)
-        Panel:SetSize(400, 300)
+        Panel:SetWidth(400); Panel:SetHeight(300)
         local tex = Panel:CreateTexture("PanelSwatch", "ARTWORK")
         tex:SetPoint("BOTTOMLEFT", "Panel", "BOTTOMLEFT", 10, 20)
-        tex:SetSize(50, 50)
+        tex:SetWidth(50); tex:SetHeight(50)
         Swatch = PanelSwatch          -- the alias
 
         Tag = CreateFrame("Frame", "Tag", Panel)
-        Tag:SetSize(10, 10)
+        Tag:SetWidth(10); Tag:SetHeight(10)
         Tag:SetPoint("BOTTOMLEFT", "Swatch", "BOTTOMRIGHT", 4, 0)
     "#,
     )
@@ -117,10 +117,10 @@ fn setpoint_relative_to_ignores_a_non_widget_global() {
         r#"
         Host = CreateFrame("Frame", "Host")
         Host:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 10, 10)
-        Host:SetSize(100, 100)
+        Host:SetWidth(100); Host:SetHeight(100)
         NotAWidget = 5
         Child = CreateFrame("Frame", "Child", Host)
-        Child:SetSize(20, 20)
+        Child:SetWidth(20); Child:SetHeight(20)
         Child:SetPoint("BOTTOMLEFT", "NotAWidget", "BOTTOMRIGHT", 0, 0)
     "#,
     )
@@ -150,17 +150,17 @@ fn setpoint_relative_to_expands_parent_against_the_first_named_ancestor() {
         r#"
         Root = CreateFrame("Frame", "Root")
         Root:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 0, 0)
-        Root:SetSize(300, 200)
+        Root:SetWidth(300); Root:SetHeight(200)
 
         Peg = CreateFrame("Frame", "RootPeg", Root)
         Peg:SetPoint("BOTTOMLEFT", "Root", "BOTTOMLEFT", 20, 30)
-        Peg:SetSize(10, 10)
+        Peg:SetWidth(10); Peg:SetHeight(10)
 
         -- An ANONYMOUS link in between: the walk skips it and lands on Root.
         Anon = CreateFrame("Frame", nil, Root)
         Anon:SetAllPoints(Root)
         Kid = CreateFrame("Frame", "Kid", Anon)
-        Kid:SetSize(5, 5)
+        Kid:SetWidth(5); Kid:SetHeight(5)
         Kid:SetPoint("BOTTOMLEFT", "$parentPeg", "BOTTOMRIGHT", 0, 0)
     "#,
     )
@@ -227,7 +227,7 @@ fn setallpoints_resolves_an_alias_global() {
         r#"
         Plate = CreateFrame("Frame", "Plate")
         Plate:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 30, 40)
-        Plate:SetSize(120, 60)
+        Plate:SetWidth(120); Plate:SetHeight(60)
         PlateAlias = Plate
         Overlay = CreateFrame("Frame", "Overlay")
         Overlay:SetAllPoints("PlateAlias")

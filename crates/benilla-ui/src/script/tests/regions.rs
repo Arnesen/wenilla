@@ -40,10 +40,10 @@ fn region_texture_anchored_topleft_resolves_exact_rect() {
         r#"
         local f = CreateFrame("Frame", "Owner")
         f:SetPoint("BOTTOMLEFT", 0, 0)   -- owner [bottom 0, left 0, top 50, right 100]
-        f:SetSize(100, 50)
+        f:SetWidth(100); f:SetHeight(50)
         local t = f:CreateTexture("Tex", "ARTWORK")
         t:SetTexture("Interface\\Icon")
-        t:SetSize(24, 24)
+        t:SetWidth(24); t:SetHeight(24)
         t:SetPoint("TOPLEFT", 4, -4)
     "#,
     )
@@ -69,7 +69,7 @@ fn region_fontstring_span_floors_at_one_unit_until_measured() {
         r#"
         local f = CreateFrame("Frame", "Owner")
         f:SetPoint("BOTTOMLEFT", 0, 0)   -- owner [0, 0, 50, 100]
-        f:SetSize(100, 50)
+        f:SetWidth(100); f:SetHeight(50)
         local fs = f:CreateFontString("FS", "ARTWORK")
         fs:SetText("Name")
         fs:SetJustifyH("LEFT")
@@ -116,7 +116,7 @@ fn a_zero_width_solid_spans_eight_units_and_its_artless_twin_gets_no_rect() {
         r#"
         local f = CreateFrame("Frame", "Owner")
         f:SetPoint("BOTTOMLEFT", 0, 0)   -- owner [0, 0, 50, 100]
-        f:SetSize(100, 50)
+        f:SetWidth(100); f:SetHeight(50)
         Fill = f:CreateTexture("Fill", "BORDER")
         Fill:SetTexture(1, 1, 1, 1)      -- the <Color> form: an 8x8 solid
         Fill:SetWidth(0); Fill:SetHeight(13)
@@ -153,10 +153,10 @@ fn templateless_lua_region_without_anchors_never_draws() {
         r#"
         local f = CreateFrame("Frame", "Owner")
         f:SetPoint("BOTTOMLEFT", 0, 0)   -- owner [0, 0, 50, 100]
-        f:SetSize(100, 50)
+        f:SetWidth(100); f:SetHeight(50)
         local t = f:CreateTexture("Tex", "ARTWORK")
         t:SetTexture("Interface\\Ring")
-        t:SetSize(24, 24)                -- no anchors, and no template ⇒ no rect, no draw
+        t:SetWidth(24); t:SetHeight(24)  -- no anchors, and no template ⇒ no rect, no draw
         assert(t:GetLeft() == nil, "a rect-less region reads nil edges")
     "#,
     )
@@ -178,10 +178,10 @@ fn region_set_all_points_fills_owner() {
         r#"
         local f = CreateFrame("Frame", "Owner")
         f:SetPoint("BOTTOMLEFT", 0, 0)   -- owner [0, 0, 50, 100]
-        f:SetSize(100, 50)
+        f:SetWidth(100); f:SetHeight(50)
         local t = f:CreateTexture("Tex", "ARTWORK")
         t:SetTexture("Interface\\Fill")
-        t:SetSize(24, 24)                -- size present, but setAllPoints wins
+        t:SetWidth(24); t:SetHeight(24)  -- size present, but setAllPoints wins
         t:SetAllPoints()
     "#,
     )
@@ -205,14 +205,14 @@ fn region_anchors_to_sibling_region_by_name() {
     s.run(
         r#"
         local row = CreateFrame("Button", "Row")
-        row:SetPoint("BOTTOMLEFT", 100, 100); row:SetSize(153, 44)
+        row:SetPoint("BOTTOMLEFT", 100, 100); row:SetWidth(153); row:SetHeight(44)
         -- Plate first: its target doesn't exist yet at SetPoint time in XML order terms; the
         -- name lookup happens at SetPoint (both exist by then in real loads), the RECT ordering
         -- is the fixpoint's job.
         local plate = row:CreateTexture("RowPlate", "BACKGROUND")
-        plate:SetSize(128, 78)
+        plate:SetWidth(128); plate:SetHeight(78)
         local slot = row:CreateTexture("RowSlot", "BACKGROUND")
-        slot:SetSize(64, 64)
+        slot:SetWidth(64); slot:SetHeight(64)
         slot:SetPoint("TOPLEFT", "Row", "TOPLEFT", -13, 13)
         plate:SetPoint("LEFT", "RowSlot", "RIGHT", -9, -18)
     "#,
@@ -266,9 +266,9 @@ fn set_portrait_texture_binds_unit_token_then_settexture_clears_it() {
         r#"
         local f = CreateFrame("Frame", "PFrame")
         f:SetPoint("TOPLEFT", 0, 0)
-        f:SetSize(100, 100)
+        f:SetWidth(100); f:SetHeight(100)
         local p = f:CreateTexture("PFramePortrait", "BACKGROUND")
-        p:SetSize(64, 64)
+        p:SetWidth(64); p:SetHeight(64)
         p:SetPoint("TOPLEFT", 0, 0)
         SetPortraitTexture(p, "player")
     "#,
@@ -319,7 +319,7 @@ fn benilla_set_booth_texture_binds_square() {
         r#"
         local f = CreateFrame("Frame", "DollFrame")
         f:SetPoint("TOPLEFT", 0, 0)
-        f:SetSize(200, 300)
+        f:SetWidth(200); f:SetHeight(300)
         local m = f:CreateTexture("DollFrameModel", "ARTWORK")
         m:SetAllPoints()
         BenillaSetBoothTexture(m, "paperdoll")
@@ -359,11 +359,11 @@ fn long_region_chain_resolves_and_a_frame_binds_to_its_tail() {
         r#"
         local f = CreateFrame("Frame", "Book")
         f:SetPoint("TOPLEFT", 0, 0)
-        f:SetSize(384, 512)
+        f:SetWidth(384); f:SetHeight(512)
         for i = 1, 12 do
             local t = f:CreateTexture("Line" .. i, "ARTWORK")
             t:SetTexture("Interface\\Line" .. i)
-            t:SetSize(300, 10)
+            t:SetWidth(300); t:SetHeight(10)
             if i == 1 then
                 t:SetPoint("TOPLEFT", "Book", "TOPLEFT", 5, -5)
             else
@@ -371,7 +371,7 @@ fn long_region_chain_resolves_and_a_frame_binds_to_its_tail() {
             end
         end
         local b = CreateFrame("Button", "TailButton", f)
-        b:SetSize(147, 41)
+        b:SetWidth(147); b:SetHeight(41)
         b:SetPoint("TOPLEFT", "Line12", "BOTTOMLEFT", 0, -6)
     "#,
     )
@@ -414,13 +414,13 @@ fn child_frame_layers_regions_render_after_the_fixpoint() {
         r#"
         local parent = CreateFrame("Frame", "Win")
         parent:SetPoint("TOPLEFT", 10, -10)
-        parent:SetSize(400, 300)
+        parent:SetWidth(400); parent:SetHeight(300)
         local child = CreateFrame("Frame", "SubPanel", parent)
         child:SetPoint("TOPLEFT", "Win", "TOPLEFT", 20, -20)
-        child:SetSize(200, 100)
+        child:SetWidth(200); child:SetHeight(100)
         local fs = child:CreateFontString("SubText", "ARTWORK")
         fs:SetPoint("TOPLEFT", "SubPanel", "TOPLEFT", 5, -5)
-        fs:SetSize(150, 12)
+        fs:SetWidth(150); fs:SetHeight(12)
         fs:SetText("hello from the child")
         local tex = child:CreateTexture("SubTex", "BACKGROUND")
         tex:SetTexture("Interface\\SubFill")
@@ -462,7 +462,7 @@ fn region_alpha_is_its_own_and_multiplies_the_owner_frames() {
         r#"
         f = CreateFrame("Frame", "AlphaOwner")
         f:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 0, 0)
-        f:SetSize(10, 10)
+        f:SetWidth(10); f:SetHeight(10)
         tex = f:CreateTexture("AlphaTex", "ARTWORK")
         tex:SetTexture("Interface\\Foo")
         assert(tex:GetAlpha() == 1, "an untouched region is opaque")
@@ -895,10 +895,21 @@ fn the_two_region_leaves_answer_their_own_maps() {
         "GetTexture",
         "SetTexCoord",
         "SetBlendMode",
+        "GetBlendMode",
+        "SetTexCoordModifiesRect",
+        "GetTexCoordModifiesRect",
         "GetVertexColor",
     ] {
         assert!(has(&s, "Tex", m), "a Texture answers {m}");
         assert!(!has(&s, "Str", m), "a FontString must NOT answer {m}");
+    }
+    // `SetRotation` is 1.12's PLAYERMODEL verb (`0x84f1fc`/`0x505f00`), not a region one — it is in
+    // neither leaf map, and ours used to put it on Texture.
+    for leaf in ["Tex", "Str"] {
+        assert!(
+            !has(&s, leaf, "SetRotation"),
+            "SetRotation is not a region method"
+        );
     }
     // FontString-only.
     for m in [
@@ -1012,7 +1023,7 @@ fn the_size_getters_take_the_author_first_then_the_natural_width_and_wrapped_hei
     s.run(
         r#"
         local f = CreateFrame("Frame", "Owner")
-        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetSize(100, 50)
+        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetWidth(100); f:SetHeight(50)
         Sized = f:CreateFontString("Sized", "ARTWORK")
         Sized:SetPoint("TOPLEFT"); Sized:SetWidth(300); Sized:SetText("Name")
         Auto = f:CreateFontString("Auto", "ARTWORK")
@@ -1054,7 +1065,7 @@ fn an_empty_string_reads_back_one_unit_and_a_pending_measure_reads_back_zero() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Owner")
-        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetSize(100, 50)
+        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetWidth(100); f:SetHeight(50)
         Pending = f:CreateFontString("Pending", "ARTWORK")
         Pending:SetPoint("TOPLEFT"); Pending:SetText("Name")
         Empty = f:CreateFontString("Empty", "ARTWORK")
@@ -1080,7 +1091,7 @@ fn a_textures_getters_report_its_texel_span_on_an_unsized_axis() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Owner")
-        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetSize(100, 50)
+        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetWidth(100); f:SetHeight(50)
         Art = f:CreateTexture("Art", "ARTWORK")
         Art:SetTexture("Interface\\Crest"); Art:SetPoint("TOPLEFT")
         Half = f:CreateTexture("Half", "ARTWORK")
@@ -1214,9 +1225,9 @@ fn set_portrait_texture_folds_the_token_to_lowercase() {
         r#"
         local f = CreateFrame("Frame", "NFrame")
         f:SetPoint("TOPLEFT", 0, 0)
-        f:SetSize(100, 100)
+        f:SetWidth(100); f:SetHeight(100)
         local p = f:CreateTexture("NFramePortrait", "BACKGROUND")
-        p:SetSize(64, 64)
+        p:SetWidth(64); p:SetHeight(64)
         p:SetPoint("TOPLEFT", 0, 0)
         SetPortraitTexture(p, "NPC")
     "#,
@@ -1278,11 +1289,7 @@ fn an_empty_fontstring_reads_back_nil_and_an_edit_box_does_not() {
 
     // Never written, and every shape of an empty write, all nil.
     assert_eq!(text_of(&s, "fresh"), None);
-    for write in [
-        r#"fresh:SetText("")"#,
-        r#"fresh:SetText(nil)"#,
-        r#"fresh:SetFormattedText("%s", "")"#,
-    ] {
+    for write in [r#"fresh:SetText("")"#, r#"fresh:SetText(nil)"#] {
         s.run(write).unwrap();
         assert_eq!(text_of(&s, "fresh"), None, "after `{write}`");
     }
@@ -1385,4 +1392,145 @@ fn an_unresolvable_set_texture_keeps_the_art_the_region_had() {
     );
     s.run("t:SetTexture(nil)").unwrap();
     assert!(s.eval::<bool>("return t:GetTexture() == nil").unwrap());
+}
+
+/// `Texture:GetBlendMode()` — ONE string, the reference's own spelling, round-tripping whatever
+/// `SetBlendMode` was given (`0x79a890`/`0x79a950`, table `0x87c128`, argc 1, arity 1, kinds
+/// `(string?)`).
+///
+/// The untouched default is asserted alongside the round trip because it is the load-bearing half:
+/// `ShaguTweaks/mods/dark-ui-elements.lua:169` guards a recolour with
+/// `region.GetBlendMode and region:GetBlendMode() == "ADD"`, so the answer an ordinary texture gives
+/// decides whether the reference's additive art is left alone. `"BLEND"` is the CSimpleTexture
+/// ctor's `[+0xd0] = 2` (`0x76fc64`).
+#[test]
+fn get_blend_mode_answers_one_string_and_defaults_to_the_ctors_blend() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.run(
+        r#"
+        BlendOwner = CreateFrame("Frame", "BlendOwner")
+        BTex = BlendOwner:CreateTexture("BTex", "ARTWORK")
+        "#,
+    )
+    .unwrap();
+
+    // Arity 1 and kind string, measured the way the shape gate measures it.
+    assert_eq!(
+        s.eval::<i64>("return select('#', BTex:GetBlendMode())")
+            .unwrap(),
+        1,
+        "arity 1"
+    );
+    assert_eq!(
+        s.eval::<String>("return type(BTex:GetBlendMode())")
+            .unwrap(),
+        "string",
+        "kind string"
+    );
+    assert_eq!(
+        s.eval::<String>("return BTex:GetBlendMode()").unwrap(),
+        "BLEND",
+        "an untouched texture is the ctor's mode 2"
+    );
+
+    // Every one of the enum's five round-trips, including the three the renderer flattens.
+    for mode in ["DISABLE", "ALPHAKEY", "BLEND", "ADD", "MOD"] {
+        s.run(&format!(r#"BTex:SetBlendMode("{mode}")"#)).unwrap();
+        assert_eq!(
+            s.eval::<String>("return BTex:GetBlendMode()").unwrap(),
+            mode,
+            "round trip through the setter"
+        );
+    }
+    // Case-insensitive in, canonical out — the setter coerces, the getter answers the table's name.
+    s.run(r#"BTex:SetBlendMode("add")"#).unwrap();
+    assert_eq!(
+        s.eval::<String>("return BTex:GetBlendMode()").unwrap(),
+        "ADD"
+    );
+    // A name outside the enum leaves the mode alone rather than inventing one.
+    s.run(r#"BTex:SetBlendMode("NOT_A_MODE")"#).unwrap();
+    assert_eq!(
+        s.eval::<String>("return BTex:GetBlendMode()").unwrap(),
+        "ADD",
+        "an unknown name changes nothing"
+    );
+
+    // A FontString is not a Texture: neither half of the pair is on its map.
+    assert!(s
+        .eval::<bool>(
+            r#"local fs = BlendOwner:CreateFontString("BStr", "ARTWORK")
+               return fs.GetBlendMode == nil and fs.SetBlendMode == nil"#
+        )
+        .unwrap());
+}
+
+/// `Texture:GetTexCoordModifiesRect()` — the 1.12 predicate return, `1`/`nil` and never a Lua
+/// boolean (`0x79c120`, table `0x87c128`, argc 1, arity 1, kinds `(nil) | (number)`; decision 2118).
+/// `pfUI/modules/thirdparty-tbc.lua:319` calls it bare on a Texture.
+///
+/// The flag's effect on the region's rect is deliberately NOT wired (see
+/// `RegionData::tex_coord_modifies_rect`), so this asserts the state and the shape — and asserts
+/// the un-wiring too, by checking that setting the flag moves no rect: a future change that wires
+/// the geometry will fail here and have to say so.
+#[test]
+fn tex_coord_modifies_rect_is_one_slash_nil_and_moves_no_rect_yet() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        r#"
+        TCMOwner = CreateFrame("Frame", "TCMOwner")
+        TCMOwner:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)
+        TCMOwner:SetWidth(200); TCMOwner:SetHeight(200)
+        TCMTex = TCMOwner:CreateTexture("TCMTex", "ARTWORK")
+        TCMTex:SetTexture("Interface\\TcmArt")
+        TCMTex:SetPoint("BOTTOMLEFT", TCMOwner, "BOTTOMLEFT", 0, 0)
+        TCMTex:SetWidth(64); TCMTex:SetHeight(32)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    let before = region_tex_rect(&s, "TcmArt");
+
+    assert_eq!(
+        s.eval::<i64>("return select('#', TCMTex:GetTexCoordModifiesRect())")
+            .unwrap(),
+        1,
+        "arity 1"
+    );
+    assert!(
+        s.eval::<bool>("return TCMTex:GetTexCoordModifiesRect() == nil")
+            .unwrap(),
+        "unset is nil, not false"
+    );
+
+    s.run("TCMTex:SetTexCoordModifiesRect(1)").unwrap();
+    assert!(
+        s.eval::<bool>("return TCMTex:GetTexCoordModifiesRect() == 1")
+            .unwrap(),
+        "set is the NUMBER 1, not true"
+    );
+    assert_eq!(
+        s.eval::<String>("return type(TCMTex:GetTexCoordModifiesRect())")
+            .unwrap(),
+        "number",
+        "kind number, never boolean"
+    );
+
+    // The flag is state only: a SetTexCoord under it still leaves the rect where the anchors and
+    // the size put it. When the geometry leg is built, this assertion is the one that must change.
+    s.run("TCMTex:SetTexCoord(0, 0.25, 0, 0.5)").unwrap();
+    s.resolve();
+    assert_eq!(
+        region_tex_rect(&s, "TcmArt"),
+        before,
+        "the flag does not (yet) let SetTexCoord re-derive the region's rect"
+    );
+
+    s.run("TCMTex:SetTexCoordModifiesRect(nil)").unwrap();
+    assert!(
+        s.eval::<bool>("return TCMTex:GetTexCoordModifiesRect() == nil")
+            .unwrap(),
+        "cleared back to nil"
+    );
 }

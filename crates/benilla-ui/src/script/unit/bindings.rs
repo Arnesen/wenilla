@@ -3,11 +3,11 @@
 //! through the parent's `with_unit`/`pick_unit_token` helpers.
 //!
 //! **Every predicate here returns through one function** — [`super::unit_predicate`] when it reads
-//! a snapshot field, [`predicate`] when it computes its own bool. Neither ever hands mlua a Rust
-//! `bool`: all 29 of the reference's unit predicates push the constant double `1.0`
-//! (`lua_pushnumber 0x6f3810`) or `nil` (`lua_pushnil 0x6f37f0`), exactly one value at every live
-//! `ret`, and **no binding in the 83-entry table at `0x850438` calls `lua_pushboolean 0x6f39f0` at
-//! all** (decisions 1830, 2043, 2048). A new predicate that open-codes
+//! a snapshot field, [`flag`](super::super::binding_abi::flag) when it computes its own bool.
+//! Neither ever hands mlua a Rust `bool`: all 29 of the reference's unit predicates push the
+//! constant double `1.0` (`lua_pushnumber 0x6f3810`) or `nil` (`lua_pushnil 0x6f37f0`), one value
+//! at every live `ret`, and **no binding in the 83-entry table at `0x850438` calls
+//! `lua_pushboolean 0x6f39f0` at all** (decisions 1830, 2043, 2048). A new predicate that open-codes
 //! `Value::Integer(1)`/`Value::Nil`, or returns a `bool`, is the drift those records exist to stop.
 //!
 //! **The scope of that claim is the unit table, not "the binding surface"** — 2043 said the wider
@@ -17,7 +17,7 @@
 
 use mlua::{Lua, Value};
 
-use super::super::binding_abi::predicate;
+use super::super::binding_abi::flag;
 use super::super::Model;
 use super::{
     check_unit_token, classification_word, grey_band, level_reads_unknown, pick_unit_token,
@@ -112,7 +112,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 })?;
                 // One value, and it is the NUMBER 1 or nil — never a boolean, the same shape the
                 // rest of this family answers in.
-                Ok(predicate(hit))
+                Ok(flag(hit))
             })?,
         )?;
     }
@@ -154,7 +154,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 .as_ref()
                 .and_then(|t| model.unit(t))
                 .map_or(0, |u| u.guid);
-            Ok(predicate(by_flag || guid == model.party.leader_guid))
+            Ok(flag(by_flag || guid == model.party.leader_guid))
         })?,
     )?;
 
@@ -417,7 +417,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let token = pick_unit_token(&a, &b);
             let r = with_unit(lua, &token, 0u8, |u| u.reaction)?;
-            Ok(predicate((1..=2).contains(&r)))
+            Ok(flag((1..=2).contains(&r)))
         })?,
     )?;
     g.set(
@@ -437,7 +437,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let token = pick_unit_token(&a, &b);
             let r = with_unit(lua, &token, 0u8, |u| u.reaction)?;
-            Ok(predicate(r >= 5))
+            Ok(flag(r >= 5))
         })?,
     )?;
 
@@ -467,7 +467,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let player_level = model.player_req.level;
-            Ok(predicate(
+            Ok(flag(
                 unit.and_then(|u| model.unit(&u))
                     .is_some_and(|u| super::is_civilian_kill(u, player_level)),
             ))
@@ -482,7 +482,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "UnitPlayerControlled",
         lua.create_function(|lua, unit: Option<String>| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(
+            Ok(flag(
                 unit.and_then(|u| model.unit(&u))
                     .is_some_and(|u| u.player_controlled),
             ))
@@ -525,7 +525,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             if !ua.exists || !ub.exists {
                 return Ok(Value::Nil);
             }
-            Ok(predicate(a == b || (ua.guid != 0 && ua.guid == ub.guid)))
+            Ok(flag(a == b || (ua.guid != 0 && ua.guid == ub.guid)))
         })?,
     )?;
 
@@ -549,7 +549,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: UnitAffectingCombat(\"unit\")",
             )?;
             let hot = with_unit(lua, &Some(token), false, |u| u.exists && u.in_combat)?;
-            Ok(predicate(hot))
+            Ok(flag(hot))
         })?,
     )?;
 
@@ -578,7 +578,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "HasFullControl",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(model.player_control))
+            Ok(flag(model.player_control))
         })?,
     )?;
 
@@ -617,7 +617,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     !model.party.members.is_empty()
                 };
                 let hit = grouped && (in_group(u.guid) || in_group(u.owner));
-                Ok(predicate(hit))
+                Ok(flag(hit))
             })?,
         )?;
     }
@@ -638,7 +638,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                         .iter()
                         .any(|m| m.guid != 0 && m.guid == u.guid)
                 });
-            Ok(predicate(hit))
+            Ok(flag(hit))
         })?,
     )?;
 
@@ -668,7 +668,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                             .members
                             .iter()
                             .any(|m| m.guid != 0 && m.guid == u.guid)));
-            Ok(predicate(hit))
+            Ok(flag(hit))
         })?,
     )?;
 
@@ -695,7 +695,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let ok = with_unit(lua, &token, false, |u| {
                 u.exists && u.is_player && u.reaction >= 5
             })?;
-            Ok(predicate(ok))
+            Ok(flag(ok))
         })?,
     )?;
 
@@ -895,7 +895,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 r#"Usage: UnitHasRelicSlot("unit")"#,
             )?);
             let has = with_unit(lua, &token, false, |u| u.has_relic_slot)?;
-            Ok(predicate(has))
+            Ok(flag(has))
         })?,
     )?;
 
@@ -1210,7 +1210,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsResting",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(model.resting))
+            Ok(flag(model.resting))
         })?,
     )?;
     // PartialPlayTime() / NoPlayTime() → 1/nil: the two anti-addiction play-time regimes, read
@@ -1223,14 +1223,14 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "PartialPlayTime",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(model.partial_play_time))
+            Ok(flag(model.partial_play_time))
         })?,
     )?;
     g.set(
         "NoPlayTime",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(model.no_play_time))
+            Ok(flag(model.no_play_time))
         })?,
     )?;
     // GetBillingTimeRested() → the account's rested billing MINUTES, as one number, always
@@ -1456,7 +1456,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             if had {
                 model.target_clear = true;
             }
-            Ok(predicate(had))
+            Ok(flag(had))
         })?,
     )?;
 

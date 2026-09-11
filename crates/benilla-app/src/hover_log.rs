@@ -111,7 +111,7 @@ impl Plugin for HoverLogPlugin {
 fn tooltip_context(script: &UiScript) -> Option<(String, i64, String)> {
     let chunk = r#"
         if not GameTooltip or not GameTooltip:IsShown() then return "" end
-        local owner = GameTooltip:GetOwner()
+        local owner = GameTooltip:BenillaGetTooltipOwner()
         local name = "(no owner)"
         if owner and owner.GetName and owner:GetName() then name = owner:GetName() end
         local first = ""

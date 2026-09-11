@@ -15,7 +15,7 @@
 
 use mlua::{Lua, Value};
 
-use super::binding_abi::{number_arg, predicate};
+use super::binding_abi::{flag, number_arg};
 use super::Model;
 
 /// `FlagTutorial`'s clamp: `0 ≤ n − 1 < 0x32` — the fifty ids `GlobalStrings.lua` names.
@@ -57,7 +57,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .tutorial_bank
                 .as_ref()
                 .is_some_and(|b| b.iter().any(|&byte| byte != 0xFF));
-            Ok(predicate(enabled))
+            Ok(flag(enabled))
         })?,
     )?;
 

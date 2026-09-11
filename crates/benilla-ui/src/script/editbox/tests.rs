@@ -32,7 +32,7 @@ fn an_autofocus_box_self_acquires_on_the_first_event() {
         .unwrap();
     // No show transition has run for this box, so nothing owns the keyboard yet.
     assert!(!s.has_keyboard_focus());
-    assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name(), None);
 
     // The first char self-acquires focus AND processes that same event.
     assert!(
@@ -40,7 +40,7 @@ fn an_autofocus_box_self_acquires_on_the_first_event() {
         "an autoFocus box consumes the acquiring event"
     );
     assert!(s.has_keyboard_focus());
-    assert!(s.eval::<bool>("return E:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name().as_deref(), Some("E"));
     assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "a");
 }
 
@@ -62,8 +62,9 @@ fn an_autofocus_box_takes_the_keyboard_when_it_is_shown() {
     assert!(!s.has_keyboard_focus(), "hidden and unfocused to start");
 
     s.run("E:Show()").unwrap();
-    assert!(
-        s.eval::<bool>("return E:HasFocus()").unwrap(),
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("E"),
         "showing an autoFocus box focuses it",
     );
 
@@ -108,18 +109,19 @@ fn the_show_focus_is_refused_without_autofocus_or_with_the_keyboard_taken() {
     )
     .unwrap();
     s.run("LATE:Show()").unwrap();
-    assert!(
-        s.eval::<bool>("return HOLDER:HasFocus()").unwrap(),
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("Holder"),
         "a shown autoFocus box does not steal a focus that is already held",
     );
-    assert!(!s.eval::<bool>("return LATE:HasFocus()").unwrap());
 
     // And hiding a box that does NOT hold the keyboard leaves it where it is — `0x77e410`'s own
     // per-box guard (`cmp ecx,eax; jne ret`), which is what makes the override's unconditional
     // tail-jmp harmless.
     s.run("LATE:Hide()").unwrap();
-    assert!(
-        s.eval::<bool>("return HOLDER:HasFocus()").unwrap(),
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("Holder"),
         "hiding an unfocused box does not clear somebody else's focus",
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
@@ -179,7 +181,7 @@ fn set_focus_on_hidden_box_is_a_noop() {
     "#,
     )
     .unwrap();
-    assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name(), None);
     assert!(!s.has_keyboard_focus());
     assert_eq!(
         s.eval::<i64>("return gained").unwrap(),
@@ -198,7 +200,7 @@ fn click_focuses_regardless_of_autofocus_and_transition_order_is_lost_then_gaine
         local function wire(name, y)
             local f = CreateFrame("EditBox", name)
             f:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 0, y)
-            f:SetSize(100, 20)
+            f:SetWidth(100); f:SetHeight(20)
             f:SetScript("OnEditFocusGained", function() table.insert(log, "gained"..name) end)
             f:SetScript("OnEditFocusLost", function() table.insert(log, "lost"..name) end)
         end
@@ -212,11 +214,11 @@ fn click_focuses_regardless_of_autofocus_and_transition_order_is_lost_then_gaine
     // Neither box has autoFocus, yet a click focuses each.
     s.mouse_button(50.0, 10.0, "LeftButton", true);
     s.mouse_button(50.0, 10.0, "LeftButton", false);
-    assert!(s.eval::<bool>("return A:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name().as_deref(), Some("A"));
 
     s.mouse_button(50.0, 110.0, "LeftButton", true);
     s.mouse_button(50.0, 110.0, "LeftButton", false);
-    assert!(s.eval::<bool>("return B:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name().as_deref(), Some("B"));
 
     let log: Vec<String> = s.eval("return log").unwrap();
     assert_eq!(log, vec!["gainedA", "lostA", "gainedB"]);
@@ -473,8 +475,9 @@ fn enter_escape_tab_space_fire_their_slots() {
     .unwrap();
     assert!(s.key_input("ENTER")); // single-line → OnEnterPressed
     assert!(s.key_input("ESCAPE")); // fires, does NOT release focus
-    assert!(
-        s.eval::<bool>("return E:HasFocus()").unwrap(),
+    assert_eq!(
+        s.focused_editbox_name().as_deref(),
+        Some("E"),
         "ESCAPE keeps focus"
     );
     assert!(s.key_input("TAB"));
@@ -1353,7 +1356,7 @@ fn creating_a_box_does_not_focus_it_the_way_showing_one_does() {
         !s.has_keyboard_focus(),
         "a box born visible has not been SHOWN, so it takes no keyboard",
     );
-    assert!(!s.eval::<bool>("return E:HasFocus()").unwrap());
+    assert_eq!(s.focused_editbox_name(), None);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 

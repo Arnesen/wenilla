@@ -35,7 +35,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::binding_abi::{bool_or_default, number_arg, predicate};
+use super::binding_abi::{bool_or_default, flag, number_arg};
 use super::Model;
 
 /// One queue slot as the app pushes it — the reference's `0x20`-byte slot (§2.2) plus the map
@@ -371,7 +371,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "CanJoinBattlefieldAsGroup",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(predicate(model.battlefield_list.group_queue))
+            Ok(flag(model.battlefield_list.group_queue))
         })?,
     )?;
 

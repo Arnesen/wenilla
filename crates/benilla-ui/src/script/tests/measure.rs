@@ -14,13 +14,13 @@ fn measured_fontstring_height_feeds_frame_anchors() {
     s.run(
         r#"
         local w = CreateFrame("Frame", "Win")
-        w:SetPoint("TOPLEFT", 0, -100); w:SetSize(384, 512)
+        w:SetPoint("TOPLEFT", 0, -100); w:SetWidth(384); w:SetHeight(512)
         local g = w:CreateFontString("Greeting", "ARTWORK")
         g:SetText("a long greeting that wraps")
         g:SetWidth(270)
         g:SetPoint("TOPLEFT", 33, -91)
         local row = CreateFrame("Button", "Row1")
-        row:SetSize(300, 16)
+        row:SetWidth(300); row:SetHeight(16)
         row:SetPoint("TOPLEFT", "Greeting", "BOTTOMLEFT", -10, -20)
     "#,
     )
@@ -74,7 +74,7 @@ fn a_changed_text_reads_zero_until_its_own_measure_lands() {
     s.run(
         r#"
         local w = CreateFrame("Frame", "Win")
-        w:SetPoint("TOPLEFT", 0, -100); w:SetSize(384, 512)
+        w:SetPoint("TOPLEFT", 0, -100); w:SetWidth(384); w:SetHeight(512)
         local h = w:CreateFontString("Header", "ARTWORK")
         h:SetText("Say: ")
         h:SetPoint("LEFT", 13, 0)
@@ -129,14 +129,14 @@ fn zero_width_fontstring_autosizes_to_its_line() {
     s.run(
         r#"
         local w = CreateFrame("Frame", "Win")
-        w:SetPoint("TOPLEFT", 0, -100); w:SetSize(384, 512)
+        w:SetPoint("TOPLEFT", 0, -100); w:SetWidth(384); w:SetHeight(512)
         local label = w:CreateFontString("FromLabel", "ARTWORK")
         label:SetText("From:")
-        label:SetSize(0, 16)
+        label:SetWidth(0); label:SetHeight(16)
         label:SetPoint("TOPRIGHT", "Win", "TOPLEFT", 114, -45)
         local value = w:CreateFontString("FromValue", "ARTWORK")
         value:SetText("Thrall")
-        value:SetSize(110, 0)
+        value:SetWidth(110); value:SetHeight(0)
         value:SetPoint("LEFT", "FromLabel", "RIGHT", 5, 0)
     "#,
     )
@@ -181,7 +181,7 @@ fn frame_scale_rides_the_quads_and_the_measure_key() {
     s.run(
         r#"
         local w = CreateFrame("Frame", "Win")
-        w:SetPoint("TOPLEFT", 0, -100); w:SetSize(400, 300)
+        w:SetPoint("TOPLEFT", 0, -100); w:SetWidth(400); w:SetHeight(300)
         w:SetScale(0.8)
         local t = w:CreateFontString("ScaledLabel", "ARTWORK")
         t:SetText("Options")
@@ -234,7 +234,7 @@ fn invalidate_text_measures_reopens_the_round_trip() {
     s.run(
         r#"
         local w = CreateFrame("Frame", "Win")
-        w:SetPoint("TOPLEFT", 0, -100); w:SetSize(400, 300)
+        w:SetPoint("TOPLEFT", 0, -100); w:SetWidth(400); w:SetHeight(300)
         local t = w:CreateFontString("Label", "ARTWORK")
         t:SetText("Keybindings")
         t:SetPoint("TOPLEFT", 10, -10)
@@ -382,7 +382,7 @@ fn a_width_read_in_the_tick_that_set_the_text_is_not_zero() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Host")
-        f:SetPoint("TOPLEFT"); f:SetSize(400, 300)
+        f:SetPoint("TOPLEFT"); f:SetWidth(400); f:SetHeight(300)
         local fs = f:CreateFontString("Label", "ARTWORK")
         fs:SetPoint("TOPLEFT")
         -- the corpus idiom: set, then measure, in one statement sequence
@@ -408,7 +408,7 @@ fn with_no_engine_installed_the_round_trip_is_still_the_only_answer() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Host")
-        f:SetPoint("TOPLEFT"); f:SetSize(400, 300)
+        f:SetPoint("TOPLEFT"); f:SetWidth(400); f:SetHeight(300)
         local fs = f:CreateFontString("Label", "ARTWORK")
         fs:SetPoint("TOPLEFT")
         fs:SetText("Onewarrior")
@@ -435,7 +435,7 @@ fn resolve_closes_the_round_trip_when_an_engine_is_installed() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Host")
-        f:SetPoint("TOPLEFT"); f:SetSize(400, 300)
+        f:SetPoint("TOPLEFT"); f:SetWidth(400); f:SetHeight(300)
         local fs = f:CreateFontString("Label", "ARTWORK")
         fs:SetPoint("TOPLEFT")
         fs:SetWidth(35)                 -- a declared width ⇒ the two extents differ
@@ -469,7 +469,7 @@ fn a_synchronous_measure_satisfies_the_batch_request_too() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Host")
-        f:SetPoint("TOPLEFT"); f:SetSize(400, 300)
+        f:SetPoint("TOPLEFT"); f:SetWidth(400); f:SetHeight(300)
         local fs = f:CreateFontString("Label", "ARTWORK")
         fs:SetPoint("TOPLEFT")
         fs:SetText("hello")
@@ -505,7 +505,7 @@ fn a_settled_region_is_refound_after_each_measure_input_write() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "Host")
-        f:SetPoint("TOPLEFT"); f:SetSize(400, 300)
+        f:SetPoint("TOPLEFT"); f:SetWidth(400); f:SetHeight(300)
         local fs = f:CreateFontString("Label", "ARTWORK")
         fs:SetPoint("TOPLEFT")
         fs:SetText("one")
@@ -514,7 +514,8 @@ fn a_settled_region_is_refound_after_each_measure_input_write() {
     .unwrap();
     let writes: &[(&str, &str)] = &[
         ("SetText", "Label:SetText('two')"),
-        ("SetFormattedText", "Label:SetFormattedText('n=%d', 3)"),
+        // `SetFormattedText` was a second row here; it is gone (2142), and its era spelling
+        // `SetText(format(...))` is the row above's path exactly.
         (
             "SetFont",
             r#"Label:SetFont("Fonts\\FRIZQT__.TTF", 14, "OUTLINE")"#,
@@ -550,7 +551,7 @@ fn a_settled_region_is_refound_after_each_measure_input_write() {
     s.run(
         r#"
         local b = CreateFrame("Button", "Btn")
-        b:SetPoint("TOPLEFT", 0, -50); b:SetSize(80, 22)
+        b:SetPoint("TOPLEFT", 0, -50); b:SetWidth(80); b:SetHeight(22)
     "#,
     )
     .unwrap();

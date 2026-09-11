@@ -23,11 +23,11 @@ fn item_line_law_and_red_requirements() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetItemById(871)
-        assert(tt:IsShown(), "SetItemById shows")
+        tt:BenillaSetItemById(871)
+        assert(tt:IsShown(), "BenillaSetItemById shows")
     "#,
     )
     .unwrap();
@@ -95,10 +95,10 @@ fn red_lines_track_player_state() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot2"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetItemById(871)
+        tt:BenillaSetItemById(871)
     "#,
     )
     .unwrap();
@@ -122,7 +122,7 @@ fn red_lines_track_player_state() {
 /// The §5-verified families folded back 2026-07-10 (tooltip-content-law.md): SIGNABLE green,
 /// UNIQUE before STARTS_QUEST, LOCKED red, six-equal resistances collapse to the ALL line (and
 /// Holy never prints singly), a known taught spell reds "Already known", the description gold —
-/// and NO openable line: `SetItemById` is a template source, and the whole openable/readable/
+/// and NO openable line: `BenillaSetItemById` is a template source, and the whole openable/readable/
 /// creator tail rides the ref's item-OBJECT gate (`0x52e1c7`/`0x52e2e0` — byte-read 2026-07-20;
 /// the instance-tail law itself is in [`instance_tail_creator_and_readable`]).
 #[test]
@@ -154,10 +154,10 @@ fn verified_families_signable_locked_resists_known() {
     });
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot5"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot5"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetItemById(5518)
+        tt:BenillaSetItemById(5518)
     "#,
     )
     .unwrap();
@@ -208,7 +208,7 @@ fn verified_families_signable_locked_resists_known() {
     s.run(
         r#"
         TT:SetOwner(Slot5, "ANCHOR_RIGHT")
-        TT:SetItemById(5519)
+        TT:BenillaSetItemById(5519)
         assert(TT:NumLines() == 1, "a lone Holy resist prints no line, got " .. TT:NumLines())
     "#,
     )
@@ -243,10 +243,10 @@ fn proficiency_and_reputation_reds() {
     s.set_player_req_state(req.clone());
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot9"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot9"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetItemById(871)
+        tt:BenillaSetItemById(871)
     "#,
     )
     .unwrap();
@@ -281,7 +281,7 @@ fn proficiency_and_reputation_reds() {
     req2.proficiency.insert(2, 1 << 0);
     req2.rep_ranks.insert(72, 4);
     s.set_player_req_state(req2.clone());
-    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(871)"#)
+    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(871)"#)
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
@@ -300,7 +300,7 @@ fn proficiency_and_reputation_reds() {
     let mut alt = item;
     alt.proficiency_alt = Some(0);
     s.set_item_template(871, alt);
-    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(871)"#)
+    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(871)"#)
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
@@ -328,7 +328,7 @@ fn proficiency_and_reputation_reds() {
     let mut req3 = req2.clone();
     req3.proficiency.insert(2, 1 << 15);
     s.set_player_req_state(req3.clone());
-    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(872)"#)
+    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(872)"#)
         .unwrap();
     let lines = lines_of(&mut s);
     // `INVTYPE_WEAPONOFFHAND`, NOT `INVTYPE_SHIELD` — one enUS sentence, two keys, and only the
@@ -345,7 +345,7 @@ fn proficiency_and_reputation_reds() {
     );
     req3.can_dual_wield = true;
     s.set_player_req_state(req3);
-    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(872)"#)
+    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(872)"#)
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
@@ -365,7 +365,7 @@ fn proficiency_and_reputation_reds() {
             ..Default::default()
         },
     );
-    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(118)"#)
+    s.run(r#"TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(118)"#)
         .unwrap();
     let lines = lines_of(&mut s);
     assert_eq!(
@@ -387,7 +387,7 @@ fn proficiency_and_reputation_reds() {
     );
     s.run(
         r#"
-        TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:SetItemById(889)
+        TT:SetOwner(Slot9, "ANCHOR_RIGHT"); TT:BenillaSetItemById(889)
         assert(TTTextLeft2:GetText() == "[INVTYPE_FINGER]")
         assert(TTTextRight2:GetText() == nil or TTTextRight2:GetText() == "",
                "a ring never prints its Miscellaneous type")
@@ -416,13 +416,13 @@ fn required_level_one_is_hidden() {
     }
     s.run(
         r#"
-        local a = CreateFrame("Button", "SlotR"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "SlotR"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
-        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetItemById(11)
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:BenillaSetItemById(11)
         assert(tt:NumLines() == 1, "req 0: name only, got " .. tt:NumLines())
-        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetItemById(12)
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:BenillaSetItemById(12)
         assert(tt:NumLines() == 1, "req 1 hides like req 0, got " .. tt:NumLines())
-        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetItemById(13)
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:BenillaSetItemById(13)
         assert(tt:NumLines() == 2, "req 2 prints, got " .. tt:NumLines())
         assert(TTTextLeft2:GetText() == "[MIN_LEVEL 2]")
     "#,
@@ -515,7 +515,7 @@ fn charter_lines_sit_between_the_name_and_the_signable_line() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "SlotC"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "SlotC"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetBagItem(0, 1)
     "#,
@@ -651,7 +651,7 @@ fn instance_tail_creator_and_readable() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "SlotL"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "SlotL"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetBagItem(0, 1)
     "#,
@@ -770,7 +770,7 @@ fn a_runtime_bound_instance_overrides_the_bind_line_to_soulbound() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(Slot, "ANCHOR_RIGHT")
         tt:SetBagItem(0, 1)
@@ -804,7 +804,7 @@ fn a_runtime_bound_instance_overrides_the_bind_line_to_soulbound() {
     assert_eq!(bind_line(&mut s).0, "[ITEM_BIND_ON_EQUIP]");
 
     // Control 2: a TEMPLATE hover carries no instance at all, so nothing can override.
-    s.run(r#"TT:SetItemById(871)"#).unwrap();
+    s.run(r#"TT:BenillaSetItemById(871)"#).unwrap();
     assert_eq!(bind_line(&mut s).0, "[ITEM_BIND_ON_EQUIP]");
 
     // Control 3: the override's other arm is ITEM_BIND_QUEST — the same text 4|5 already print.

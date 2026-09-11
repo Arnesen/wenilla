@@ -361,9 +361,9 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
         s.run(
-            r#"WM = CreateFrame("Frame", "WM") WM:SetSize(1024, 768) WM:SetPoint("CENTER")
+            r#"WM = CreateFrame("Frame", "WM") WM:SetWidth(1024); WM:SetHeight(768) WM:SetPoint("CENTER")
                Detail = CreateFrame("Frame", "WorldMapDetailFrame", WM)
-               Detail:SetSize(1002, 668) Detail:SetPoint("CENTER")"#,
+               Detail:SetWidth(1002); Detail:SetHeight(668) Detail:SetPoint("CENTER")"#,
         )
         .unwrap();
         s

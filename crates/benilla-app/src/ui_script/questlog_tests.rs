@@ -1296,7 +1296,8 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
 }
 
 /// The SHARED item tooltip on a quest reward row (the director's "same tooltip as vendor items"):
-/// hovering the reward fires the row's OnEnter → `SetItemById` → the ask-once store. First hover
+/// hovering the reward fires the row's OnEnter → `SetQuestLogItem` → the shared id-keyed render
+/// → the ask-once store. First hover
 /// (store cold) shows the fallback name line AND records the ask; after the app's push, a re-hover
 /// renders the full stat head — the identical lines a vendor row/bag slot gets for this item.
 #[test]

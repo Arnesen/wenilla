@@ -393,7 +393,11 @@ fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
             model.region_data.insert(
                 rh,
                 RegionData {
-                    additive: slot == Slot::Highlight,
+                    blend: if slot == Slot::Highlight {
+                        crate::script::BlendMode::Add
+                    } else {
+                        crate::script::BlendMode::default()
+                    },
                     ..Default::default()
                 },
             );
@@ -934,6 +938,40 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             },
         )?,
     )?;
+    // GetTextColor() → r, g, b, a — **FOUR values** (`0x781100`, table `0x879d00`, argc 1, arity 4,
+    // kinds `(number,number,number,number)`), the same shape as the FontString/Font-object twins
+    // (`0x79d840` table `0x87c1d8`, `0x79f680`) this codebase already answers. Three is the
+    // plausible wrong answer, and the shapes table calls the name `name-not-unique` precisely
+    // because it is registered on seven tables; this is the Button one.
+    //
+    // **Read like `GetFont` right above, not like `SetTextColor` right above that.** The reference
+    // reads the colour back off the button's NORMAL embedded `CSimpleFont`, and an unset local
+    // colour there still resolves through what the normal state INHERITS
+    // (`<NormalFont>`/`SetTextFontObject`) — which is how a `GameMenuButtonTemplate` button answers
+    // `GameFontNormal`'s colour before anything calls `SetTextColor`. Falling back to white would
+    // be wrong in exactly the case the corpus cares about: reading a stock button's colour to
+    // restore it after a temporary recolour. White is the last resort, matching every other colour
+    // getter here (`GetVertexColor`, `FontString:GetTextColor`) — the untinted default a region
+    // with no colour anywhere draws at.
+    //
+    // Completeness rather than a live break: the census found no corpus site with a Button
+    // receiver (every measured `GetTextColor` call is on a FontString or a font object). It is here
+    // because the reference registers it and the widget shape gate can then cover it.
+    m.set(
+        "GetTextColor",
+        lua.create_function(|lua, this: Table| {
+            let (own, inherits) =
+                with_button(lua, &this, |bs| (bs.normal_color, bs.normal_font.clone()))?;
+            let c = own.unwrap_or_else(|| {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                inherits
+                    .and_then(|n| model.font_object(&n))
+                    .and_then(|f| f.color)
+                    .unwrap_or([1.0, 1.0, 1.0, 1.0])
+            });
+            Ok((c[0], c[1], c[2], c[3]))
+        })?,
+    )?;
     m.set(
         "SetHighlightTextColor",
         lua.create_function(
@@ -1006,9 +1044,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `guildButtonDisabled` read BOTH spellings and said so); those workarounds go with this
     // change, which is 1719's bar — a prior call revisited because a new measurement arrived.
     //
-    // Slider carries its own `IsEnabled` (slider.rs) and is deliberately NOT changed here: the
-    // note above is the BUTTON method table, and whether the slider widget shares the contract is
-    // unverified. Assuming they match is exactly the guess this comment exists to have avoided.
+    // Slider used to carry its own `IsEnabled` (slider.rs), left alone here because "whether the
+    // slider widget shares the contract is unverified". It does not share it — it does not HAVE
+    // one: 1.12 registers `Enable`/`Disable`/`IsEnabled` on this table alone, and the Slider's
+    // LoadXML `0x789580` has no `enabled` attribute either, so ours was a superset. The trio came
+    // off the Slider rather than being brought into line with this contract; see the note at its
+    // old site in `slider.rs`.
     m.set(
         "IsEnabled",
         lua.create_function(|lua, this: Table| {
@@ -1144,7 +1185,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetChecked",
         lua.create_function(|lua, this: Table| {
             let checked = with_button(lua, &this, |bs| bs.checked)?;
-            Ok(crate::script::binding_abi::predicate(checked))
+            Ok(crate::script::binding_abi::flag(checked))
         })?,
     )?;
     lua.set_named_registry_value(REG_CHECKBUTTON_METHODS, c)?;

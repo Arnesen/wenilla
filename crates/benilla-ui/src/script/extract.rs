@@ -487,7 +487,11 @@ impl UiScript {
                             color: has_texture
                                 .then(|| texture_color(fill, data.vertex_color))
                                 .flatten(),
-                            additive: data.additive,
+                            // ADD is the one blend mode the renderer acts on; the other four of
+                            // the client's `alphaMode` enum are carried on `RegionData::blend`
+                            // (and answered by `GetBlendMode`) but drawn as straight alpha — the
+                            // stated v1 gap, see [`crate::script::BlendMode`].
+                            additive: data.blend == crate::script::BlendMode::Add,
                             tex_coords: data.tex_coords,
                             circular: data.circular,
                             portrait_unit: data.portrait_unit,

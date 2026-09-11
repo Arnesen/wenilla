@@ -1001,7 +1001,7 @@ mod loader_tests {
         s.resolve();
         s.mouse_button(50.0, 10.0, "LeftButton", true);
         s.mouse_button(50.0, 10.0, "LeftButton", false);
-        assert!(s.eval::<bool>("return XmlEdit:HasFocus()").unwrap());
+        assert_eq!(s.focused_editbox_name().as_deref(), Some("XmlEdit"));
         s.run("typed = false").unwrap();
         assert!(s.char_input("7"));
         s.tick(0.0);
@@ -1039,8 +1039,7 @@ mod loader_tests {
             ))
             .unwrap();
             assert_eq!(
-                s.eval::<bool>(&format!("return {name}:HasFocus()"))
-                    .unwrap(),
+                s.focused_editbox_name().as_deref() == Some(name),
                 want,
                 "{name}: autoFocus should be {want} (absent = the ctor default, ON)",
             );

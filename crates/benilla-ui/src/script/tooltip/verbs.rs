@@ -9,7 +9,7 @@ use crate::layout::{Anchor, Point};
 use crate::script::object::{frame_handle_of, frame_wrapper};
 use crate::script::region::region_handle_of;
 use crate::script::Model;
-use crate::widget::{KindState, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
+use crate::widget::{KindState, TooltipAnchor, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
 
 use super::{
     append_line, bool_arg, cancel_fade, clear_content, fire_cleared, hide_tooltip, now,
@@ -25,7 +25,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // point the plate per the anchor law. The six owner anchors are the documented 1.12 API set
     // (spec-faithful, same posture as StatusBar's contract; the corpus exercises RIGHT/LEFT/
     // BOTTOMRIGHT); ANCHOR_NONE leaves pointing to the caller (GameTooltip_SetDefaultAnchor),
-    // ANCHOR_PRESERVE keeps the previous placement.
+    // ANCHOR_PRESERVE keeps the previous placement. The mode is stored on the tooltip and read back
+    // by `GetAnchorType` below.
+    //
+    // **The `anchorType`-omitted default here is ANCHOR_RIGHT and the reference's is ANCHOR_NONE.**
+    // The reference's SetOwner core defaults `[+0x318]` to mode 7 = ANCHOR_NONE (`0x530012`, wow-re
+    // `bag-portrait-and-appendtext.md` §5) — no `SetPoint` at all, the plate left wherever it was.
+    // Two stock 1.12 files reach that leg (`QuestTimerFrame.xml:19`, `WorldStateFrame.xml:681`,
+    // both `GameTooltip:SetOwner(this)`), and neither is on `benilla.toc` yet, so nothing today
+    // takes it. It is left alone deliberately rather than quietly flipped: our ANCHOR_NONE arm
+    // below DROPS the plate's anchors where the reference merely skips the SetPoint, so changing
+    // the default would land those two hovers at the layout origin rather than "wherever it was" —
+    // the two questions have to be settled together, and the second one is a visible-placement
+    // change. Recorded here so the next reader sees a stated divergence, not an oversight.
     m.set(
         "SetOwner",
         lua.create_function(
@@ -45,20 +57,43 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     cancel_fade(&mut model, h);
                     tip_mut(&mut model, h)?.owner = Some(owner_h);
                     let owner_id = model.frame_id(owner_h);
-                    let anchor = anchor.unwrap_or_else(|| "ANCHOR_RIGHT".into());
-                    let pts = match anchor.to_ascii_uppercase().as_str() {
-                        "ANCHOR_RIGHT" => Some((Point::BottomLeft, Point::TopRight)),
-                        "ANCHOR_LEFT" => Some((Point::BottomRight, Point::TopLeft)),
-                        "ANCHOR_TOPRIGHT" => Some((Point::BottomRight, Point::TopRight)),
-                        "ANCHOR_TOPLEFT" => Some((Point::BottomLeft, Point::TopLeft)),
-                        "ANCHOR_BOTTOMRIGHT" => Some((Point::TopLeft, Point::BottomRight)),
-                        "ANCHOR_BOTTOMLEFT" => Some((Point::TopRight, Point::BottomLeft)),
-                        "ANCHOR_NONE" | "ANCHOR_PRESERVE" => None,
+                    // The anchor mode is resolved ONCE, into the reference's own enum, and both
+                    // the placement below and `GetAnchorType`'s answer are taken from that one
+                    // value — so the plate and the getter can never tell different stories. An
+                    // unrecognised string (`ANCHOR_CURSOR` among them, which this engine cannot
+                    // honour — see [`TooltipAnchor::Cursor`]) warns and is recorded as the
+                    // ANCHOR_RIGHT it is actually placed by, not as the string it was handed.
+                    let anchor = match anchor
+                        .as_deref()
+                        .map(str::to_ascii_uppercase)
+                        .as_deref()
+                        .unwrap_or("ANCHOR_RIGHT")
+                    {
+                        "ANCHOR_RIGHT" => TooltipAnchor::Right,
+                        "ANCHOR_LEFT" => TooltipAnchor::Left,
+                        "ANCHOR_TOPRIGHT" => TooltipAnchor::TopRight,
+                        "ANCHOR_TOPLEFT" => TooltipAnchor::TopLeft,
+                        "ANCHOR_BOTTOMRIGHT" => TooltipAnchor::BottomRight,
+                        "ANCHOR_BOTTOMLEFT" => TooltipAnchor::BottomLeft,
+                        "ANCHOR_NONE" => TooltipAnchor::None,
+                        "ANCHOR_PRESERVE" => TooltipAnchor::Preserve,
                         other => {
                             model.record_warning(format!(
                                 "SetOwner: unknown anchor '{other}' (kept ANCHOR_RIGHT)"
                             ));
-                            Some((Point::BottomLeft, Point::TopRight))
+                            TooltipAnchor::Right
+                        }
+                    };
+                    tip_mut(&mut model, h)?.anchor = anchor;
+                    let pts = match anchor {
+                        TooltipAnchor::Right => Some((Point::BottomLeft, Point::TopRight)),
+                        TooltipAnchor::Left => Some((Point::BottomRight, Point::TopLeft)),
+                        TooltipAnchor::TopRight => Some((Point::BottomRight, Point::TopRight)),
+                        TooltipAnchor::TopLeft => Some((Point::BottomLeft, Point::TopLeft)),
+                        TooltipAnchor::BottomRight => Some((Point::TopLeft, Point::BottomRight)),
+                        TooltipAnchor::BottomLeft => Some((Point::TopRight, Point::BottomLeft)),
+                        TooltipAnchor::Cursor | TooltipAnchor::None | TooltipAnchor::Preserve => {
+                            None
                         }
                     };
                     match pts {
@@ -84,7 +119,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                                 model.touch_layout_retarget_frame(h, &old_targets, &[owner_id]);
                             }
                         }
-                        None if anchor.eq_ignore_ascii_case("ANCHOR_NONE") => {
+                        None if anchor == TooltipAnchor::None => {
                             // The caller points it (ClearAllPoints+SetPoint) — drop ours now so a
                             // stale owner anchor never wins the frame the caller forgets to.
                             //
@@ -109,7 +144,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                                 model.touch_layout_retarget_frame(h, &old_targets, &[]);
                             }
                         }
-                        None => {} // ANCHOR_PRESERVE
+                        // ANCHOR_PRESERVE. `TooltipAnchor::Cursor` shares the arm for
+                        // exhaustiveness only — the string match above never produces it (it warns
+                        // and records ANCHOR_RIGHT instead), so nothing reaches here that way.
+                        None => {}
                     }
                 }
                 fire_cleared(lua, h);
@@ -117,8 +155,16 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             },
         )?,
     )?;
+    // GameTooltip:BenillaGetTooltipOwner() — **ours, and the prefix is what makes it honest.**
+    // 1.12 registers `IsOwned` (ask about ONE frame) and no getter at all, so there is no
+    // reference spelling for "which frame owns this plate" to be faithful to; a `GetOwner` here
+    // would be an unexplained superset an addon can feature-detect (1188, and the census that
+    // moved it, 2142). Under the `Benilla` prefix it is unreachable by accident from an addon
+    // that means to call a WoW function. Its one caller is the dev-only hover recorder
+    // (`benilla-app/src/hover_log.rs`), which needs the owner's NAME per frame so a trace reads
+    // the same names the director sees.
     m.set(
-        "GetOwner",
+        "BenillaGetTooltipOwner",
         lua.create_function(|lua, this: Table| {
             let owner = with_tip(lua, &this, |t| t.owner)?;
             let id = {
@@ -131,6 +177,28 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(id) => Ok(Value::Table(frame_wrapper(lua, id)?)),
                 None => Ok(Value::Nil),
             }
+        })?,
+    )?;
+    // GetAnchorType() — ONE string, the mode the last SetOwner placed this plate by
+    // (`0x5313e0`, table `0x854198`, argc 1, arity 1, kinds `(string)`; it reads `[+0x318]` back
+    // through the 9-entry name table `0x531530`). The kinds column has no nil alternative and this
+    // does not answer one: a tooltip nothing has owned yet answers `"ANCHOR_NONE"`, which is
+    // [`TooltipAnchor`]'s default and the same mode the reference's own SetOwner core falls back to.
+    //
+    // Two corpus callers, both unguarded, both raising against this VM until now, and they are the
+    // two shapes the verb has: `pfUI/modules/tooltip.lua:97` compares against ONE mode
+    // (`if GameTooltip:GetAnchorType() == "ANCHOR_NONE" then` — its OnShow reposition, so an equality
+    // on the exact reference spelling), and `_Nameplates/_Nameplates.lua:479` compares against a
+    // mode it computed (`if GameTooltip:GetAnchorType() ~= Anchor then GameTooltip:SetOwner(Column,
+    // Anchor) end` — a re-SetOwner suppressor, so an answer that never equals what SetOwner was
+    // given would re-own the plate on every OnUpdate). Both need the string to round-trip through
+    // the setter verbatim, which is why the mode is resolved once up there and read straight back
+    // here rather than re-derived from the plate's anchors.
+    m.set(
+        "GetAnchorType",
+        lua.create_function(|lua, this: Table| {
+            let anchor = with_tip(lua, &this, |t| t.anchor)?;
+            Ok(anchor.name())
         })?,
     )?;
     // IsOwned(frame) — the hover re-enter loop's gate (ref ContainerFrame.lua OnUpdate): true
@@ -391,7 +459,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The item content channels (SetItemById/SetBagItem/SetMerchantItem/SetBuybackItem) live in
+    // The item content channels (BenillaSetItemById/SetBagItem/SetMerchantItem/SetBuybackItem) live in
     // their own module — the one shared renderer + the red usable law (decision 0274 P1).
     crate::script::tooltip_item::install_methods(lua, &m)?;
     // The spell/aura/action content channels (SetSpell/SetShapeshift/SetPlayerBuff/SetAction) —

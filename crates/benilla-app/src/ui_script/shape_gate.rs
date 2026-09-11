@@ -419,13 +419,37 @@ const WIDGET_PROBES: &[(&str, &str, &str)] = &[
     ("0x87abb0", "ColorSelect", "PGColor"),
     ("0x87b960", "MessageFrame", "PGMessage"),
     ("0x87b5c0", "ScrollingMessageFrame", "PGScrollMsg"),
-    ("0x878948", "PlayerModel", "PGModel"),
+    ("0x878948", "Model", "PGModel"),
+    // ── The eleven tables this list did NOT cover until 2142 ──────────────────────────────────
+    // Twelve of the reference's twenty-three widget tables were mapped, so 11 classes — 190 of
+    // its 481 widget rows, `GameTooltip`'s 46 among them — were skipped by BOTH the arity gate
+    // and the kind gate, silently and by omission rather than by a stated narrowing. The
+    // identities are the corpus census's (2142), each read off its table's own distinctive
+    // members rather than guessed: `SetOwner`/`AddDoubleLine` is GameTooltip's, `CopyFontObject`
+    // the Font object's, `PingLocation` the Minimap's, `Dress`/`TryOn` DressUpModel's,
+    // `CycleVariation` TabardModel's, `StartMovie` MovieFrame's, `SetSlot` LootButton's.
+    ("0x854198", "GameTooltip", "PGTip"),
+    ("0x84c538", "Minimap", "PGMinimap"),
+    ("0x84ee40", "TabardModel", "PGTabard"),
+    ("0x84f190", "DressUpModel", "PGDress"),
+    // `PlayerModel` is `Model` plus three verbs, so its own table needs its own instance — the
+    // `0x878948` row above is now the plain `Model` it always was.
+    ("0x84f1fc", "PlayerModel", "PGPlayerModel"),
+    ("0x87ab4c", "MovieFrame", "PGMovie"),
+    ("0x847ce4", "LootButton", "PGLoot"),
+    // The base map every widget misses into (its 19 names are exactly `script/mod.rs`'s
+    // `REGION_MAP_METHODS`). It has no class of its own, so it is probed on a Frame — which is
+    // what "its own class" means for a base: every widget answers it.
+    ("0x87c9b8", "Frame", "PGRegionBase"),
 ];
 
 /// The two region classes, which are made by a frame rather than by `CreateFrame`.
 const REGION_PROBES: &[(&str, &str)] = &[
     ("0x87c128", "PGFrame:CreateTexture('PGTex')"),
     ("0x87c1d8", "PGFrame:CreateFontString('PGFS')"),
+    // The FONT OBJECT (`CreateFont`), not a FontString — 22 methods of its own, and the third
+    // thing here that `CreateFrame` cannot make (2142).
+    ("0x87c7c8", "CreateFont('PGFontObject')"),
 ];
 
 /// **The widget half of the gate** (decision 1843) — the half that would have caught 1840's
@@ -461,7 +485,7 @@ fn every_widget_method_answers_the_reference_s_return_arity() {
         }
     }
     assert!(
-        made.len() >= 8,
+        made.len() >= 20,
         "only {} widget classes could be instantiated — the probe set is broken",
         made.len()
     );
@@ -511,7 +535,10 @@ fn every_widget_method_answers_the_reference_s_return_arity() {
     }
 
     assert!(
-        checked >= 60,
+        // 121 at 2142, when the probe set went from 12 of the reference's 23 widget tables to
+        // all 23. The floor it replaces was 60 — set at the coverage of 1843's day, and never
+        // raised, so eleven whole classes could go unprobed without this number moving.
+        checked >= 110,
         "the widget gate measured only {checked} methods — it has stopped covering anything"
     );
     assert!(
@@ -788,7 +815,8 @@ fn every_widget_method_answers_the_reference_s_return_kinds() {
     }
 
     assert!(
-        checked >= 40,
+        // 119 at 2142 — the same widening. The floor it replaces was 40.
+        checked >= 110,
         "the widget kind gate measured only {checked} methods — it has stopped covering anything"
     );
     assert!(

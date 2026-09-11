@@ -91,6 +91,13 @@ struct CharFeedMemo {
     last_stats: Option<UnitCombatStats>,
     last_inv: Option<InventorySlots>,
     last_bank_bags: Option<BankBagSlots>,
+    /// The item guid **of the bag itself** in each of the six bank bag slots (absolute player
+    /// slots 63..68). `PLAYERBANKSLOTS_CHANGED`'s producer discriminator for this band — the same
+    /// question `ui_items::feed`'s `SlotGuids::vault` answers for the vault, and for the same
+    /// reason: the pushed view cannot tell two instances of one bag model apart, so a swap of two
+    /// identical bags between two slots reads as no change and the reference fires twice
+    /// (decision 2140).
+    last_bank_bag_guids: [u64; BANK_BAG_SLOT_COUNT],
     /// The gate's counter memories (1439) — the stores whose lazy resolves poison `is_changed`
     /// for this feed (the equipment templates' ask-once, the enchant-name creator lookups).
     items_objects: gate::Watch,
@@ -1186,15 +1193,26 @@ pub(crate) fn feed_char(
     // One transition for both bands: they are the same descriptor read at two offsets, and
     // `UNIT_INVENTORY_CHANGED` is the one repaint signal either has. Pushing them separately
     // would fire it twice for a single wire update.
+    // `PLAYERBANKSLOTS_CHANGED`'s two producers, planned off the OLD memo before the push
+    // replaces it. `false` = P1, the player-descriptor path (`0x5ddd6e`, no arguments — a bag
+    // arriving, leaving or exchanged); `true` = P2, the item-object path (`0x4c728d`,
+    // `arg1 = "player"` — the same bag, its own fields changed). The full carve and why the guid
+    // is the only sound discriminator are at `ui_items::feed`'s vault twin; decision 2140.
+    let bank_bag_guids: [u64; BANK_BAG_SLOT_COUNT] =
+        std::array::from_fn(|i| store.0.player_bank_bag_slot(i as u8).unwrap_or(0));
+    let repainted: Vec<bool> = (0..BANK_BAG_SLOT_COUNT)
+        .filter_map(|i| {
+            if bank_bag_guids[i] != memo.last_bank_bag_guids[i] {
+                Some(false)
+            } else {
+                let was = memo.last_bank_bags.as_ref().and_then(|b| b[i].as_ref());
+                (!same_item(was, bank_bags[i].as_ref())).then_some(true)
+            }
+        })
+        .collect();
+    memo.last_bank_bag_guids = bank_bag_guids;
     if memo.last_inv.as_ref() != Some(&inv) || memo.last_bank_bags.as_ref() != Some(&bank_bags) {
         gate.audit("feed_char", "the inventory snapshot");
-        // Read off the OLD memo, before the push replaces it.
-        let repainted: Vec<usize> = (0..BANK_BAG_SLOT_COUNT)
-            .filter(|&i| {
-                let was = memo.last_bank_bags.as_ref().and_then(|b| b[i].as_ref());
-                !same_item(was, bank_bags[i].as_ref())
-            })
-            .collect();
         script.set_inventory_slots(inv.clone());
         script.set_bank_bag_slots(bank_bags.clone());
         script.fire_event(
@@ -1213,19 +1231,28 @@ pub(crate) fn feed_char(
         // announces the band whose data it owns, and `feed_char` is ordered first, so both fire
         // after their own push.
         //
-        // **It carries NO arguments** (CARVED — wow-re `system/object-layer/scratch/
-        // bank-slot-event-law.md`). The descriptor watcher's fire site `0x5ddd6e` calls
-        // `FrameScript_SignalEvent 0x703e50`, which is `__fastcall(ecx = id)` with a plain `ret`
-        // and no vararg push at all — zero Lua values. (The image's only other fire site,
-        // `0x4c728d` in the item-GUID→slot notifier, pushes the literal string `"player"`, not a
-        // slot; nothing in FrameXML reads either, both consumers branching on `event` alone.) An
-        // event is fired per changed slot, as the watcher does — the slot travels in *how many*
-        // times it fires, never in an argument.
-        for _ in repainted {
-            script.fire_event("PLAYERBANKSLOTS_CHANGED", vec![]);
-        }
+        // **Which arguments it carries depends on WHICH producer fired** (CARVED — wow-re
+        // `system/object-layer/scratch/bank-slot-event-law.md` §3/§4, folded back in 2140). The
+        // descriptor watcher `0x5ddd6e` calls `FrameScript_SignalEvent 0x703e50`, an
+        // `__fastcall(ecx = id)` with a plain `ret` and no vararg push — zero Lua values; the
+        // item-object notifier `0x4c728d` goes through `SignalEvent2` and pushes the literal
+        // string `"player"`. benilla fired the argless one for both until 2140. An event is fired
+        // per changed slot, as the watcher does — the slot travels in *how many* times it fires,
+        // never in an argument (1776).
         memo.last_inv = Some(inv);
         memo.last_bank_bags = Some(bank_bags);
+    }
+    // Outside the push block, because the identical-bag swap it exists for moves no view at all.
+    if !repainted.is_empty() {
+        gate.audit("feed_char", "a bank bag slot transition");
+    }
+    for same_bag in repainted {
+        let args = if same_bag {
+            vec![ScriptValue::Str("player".to_string())]
+        } else {
+            Vec::new()
+        };
+        script.fire_event("PLAYERBANKSLOTS_CHANGED", args);
     }
 }
 
@@ -1342,6 +1369,8 @@ mod tests {
     const F_BANK_BAG_1: u16 = 612;
     /// `OBJECT_FIELD_ENTRY` on the item object.
     const F_OBJECT_ENTRY: u16 = 3;
+    /// `ITEM_FIELD_STACK_COUNT` — one of the six item fields the reference's own watcher covers.
+    const F_ITEM_STACK_COUNT: u16 = 14;
     /// "Traveler's Backpack" — any container entry; the feed only needs it to resolve.
     const BAG_ENTRY: u32 = 4500;
     const BAG: u64 = 0x4000_0000_0000_0abc;
@@ -1417,6 +1446,74 @@ mod tests {
         assert!(
             events.contains(&"UNIT_INVENTORY_CHANGED player".to_string()),
             "and the doll's, unchanged, got {events:?}"
+        );
+    }
+
+    /// **The second producer** (decision 2140). The same bag, its own `ITEM_FIELD_STACK_COUNT`
+    /// moving, is not the descriptor path — it is `0x4c7180`'s item-object path, which goes
+    /// through `SignalEvent2` and pushes the unit token `"player"`. benilla fired the argless
+    /// descriptor shape for both.
+    #[test]
+    fn a_bank_bags_own_field_moving_fires_the_item_object_producer() {
+        let mut app = world_with_bank_bag(Some(BAG));
+        app.world_mut().run_system_once(feed_char).unwrap();
+        assert!(seen(&mut app).contains(&"PLAYERBANKSLOTS_CHANGED nil".to_string()));
+
+        // The SAME bag guid, restacked. Only the item object moved.
+        app.world_mut().resource_mut::<Items>().insert_object(
+            BAG,
+            ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, BAG_ENTRY), (F_ITEM_STACK_COUNT, 3)]),
+        );
+        app.world_mut().run_system_once(feed_char).unwrap();
+        let events = seen(&mut app);
+        assert!(
+            events.contains(&"PLAYERBANKSLOTS_CHANGED player".to_string()),
+            "the item path pushes the token, got {events:?}"
+        );
+    }
+
+    /// Two IDENTICAL bags exchanged between two bank bag slots — the case the pushed view cannot
+    /// see, because two instances of one bag model push the same `InvSlotView`. The reference
+    /// watches the descriptor GUIDs, so it fires the argless event twice; benilla, diffing the
+    /// view, fired nothing at all. Same shape as 1777's `BAG_CLOSED`, one band over.
+    #[test]
+    fn two_identical_bags_swapped_between_bank_bag_slots_still_announce() {
+        let mut app = world_with_bank_bag(Some(BAG));
+        // A second, byte-identical bag in bank bag slot 2.
+        const BAG2: u64 = 0x4000_0000_0000_0abd;
+        // The two bank bag slots' guids, rewritten wholesale — `ObjectFields` has no setter, and
+        // a fresh store is what a descriptor update produces anyway.
+        let set_slots = |app: &mut App, a: u64, b: u64| {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&mut ObjectStore, With<SelfPlayer>>();
+            let mut store = q.single_mut(app.world_mut()).unwrap();
+            *store = ObjectStore(ObjectFields::from_pairs(&[
+                (F_BANK_BAG_1, a as u32),
+                (F_BANK_BAG_1 + 1, (a >> 32) as u32),
+                (F_BANK_BAG_1 + 2, b as u32),
+                (F_BANK_BAG_1 + 3, (b >> 32) as u32),
+            ]));
+        };
+        set_slots(&mut app, BAG, BAG2);
+        app.world_mut().resource_mut::<Items>().insert_object(
+            BAG2,
+            ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, BAG_ENTRY)]),
+        );
+        app.world_mut().run_system_once(feed_char).unwrap();
+        let _ = seen(&mut app);
+
+        // Exchange them. Every pushed view is equal before and after.
+        set_slots(&mut app, BAG2, BAG);
+        app.world_mut().run_system_once(feed_char).unwrap();
+        let events = seen(&mut app);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| *e == "PLAYERBANKSLOTS_CHANGED nil")
+                .count(),
+            2,
+            "one argless event per slot whose guid moved, got {events:?}"
         );
     }
 

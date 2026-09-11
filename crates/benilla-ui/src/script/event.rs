@@ -46,6 +46,46 @@ pub(super) fn fire_global(lua: &Lua, event: &str, args: &[ScriptValue]) {
         }
         i += 1;
     }
+    fire_all_event_listeners(lua, event, args);
+}
+
+/// The `RegisterAllEvents()` half of one dispatch: every frame that asked for the whole stream,
+/// after the event's own listeners and skipping any frame that was already visited as one of them.
+///
+/// **After, and de-duplicated, because that is where such a frame would sit if the registration
+/// were expanded.** A frame joins the all-events set later than the frames already listening for a
+/// given event, so it takes the tail of that event's list; and a frame holding both an all-events
+/// registration and a `RegisterEvent` for *this* event is one listener, not two — `RegisterEvent`'s
+/// own `if !list.contains(&h)` is the same rule one level down.
+///
+/// Same mid-dispatch discipline as the walk above (`0x703ee8`, decision 1324): the next frame is
+/// re-found by position each step, so a handler that unregisters the walk's successor stops the
+/// dispatch there rather than robbing it.
+pub(super) fn fire_all_event_listeners(lua: &Lua, event: &str, args: &[ScriptValue]) {
+    let model_mut = || lua.app_data_mut::<Model>().expect("model app_data set");
+    let mut at = model_mut().all_event_frames.first().copied();
+    while let Some(h) = at {
+        let mut model = model_mut();
+        let Some(pos) = model.all_event_frames.iter().position(|&x| x == h) else {
+            break;
+        };
+        let next = model.all_event_frames.get(pos + 1).copied();
+        let already = model
+            .event_to_frames
+            .get(event)
+            .is_some_and(|l| l.contains(&h));
+        let id = model.frame_id(h);
+        drop(model);
+        if !already {
+            if let Err(e) = fire_event_handler(lua, id, event, args) {
+                lua.app_data_mut::<Model>()
+                    .expect("model app_data")
+                    .errors
+                    .push(e.to_string());
+            }
+        }
+        at = next;
+    }
 }
 
 /// Fire a frame's `OnEvent` (both conventions) with the given args.

@@ -187,7 +187,7 @@ fn the_hover_re_enter_loop_neither_re_measures_nor_re_solves() {
     s.run(
         r#"
         local owner = CreateFrame("Button", "Slot")
-        owner:SetPoint("TOPLEFT", 100, -100); owner:SetSize(40, 40)
+        owner:SetPoint("TOPLEFT", 100, -100); owner:SetWidth(40); owner:SetHeight(40)
         tt = CreateFrame("GameTooltip", "TT")
         -- One bag-slot OnEnter: the clear (SetOwner) + the content rebuild, verbatim in shape.
         function reenter()

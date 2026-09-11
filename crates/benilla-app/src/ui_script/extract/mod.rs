@@ -1980,9 +1980,9 @@ mod clip_plumb_tests {
                 r#"
             local frame = CreateFrame("ScrollFrame", "SF")
             frame:SetPoint("TOPLEFT", 0, -100)  -- screen top 768 -> frame top 668
-            frame:SetSize(300, 200)             -- frame bottom 300, right 300
+            frame:SetWidth(300); frame:SetHeight(200)  -- frame bottom 300, right 300
             local child = CreateFrame("Frame", "Child")
-            child:SetSize(300, 600)
+            child:SetWidth(300); child:SetHeight(600)
             frame:SetScrollChild(child)
             local marker = child:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(1, 0, 0)          -- pathless colored quad: no BLP asset needed
@@ -2070,7 +2070,7 @@ mod clip_plumb_tests {
                 r#"
             local plain = CreateFrame("Frame", "Plain")
             plain:SetPoint("TOPLEFT", 0, 0)
-            plain:SetSize(50, 50)
+            plain:SetWidth(50); plain:SetHeight(50)
             local m = plain:CreateTexture(nil, "ARTWORK")
             m:SetTexture(0, 1, 0)
             m:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
@@ -2134,7 +2134,7 @@ mod align_tests {
             for i = 1, 2 do
               local f = CreateFrame("Frame", "F" .. i)
               f:SetPoint("TOPLEFT", 0, 0)
-              f:SetSize(50, 50)
+              f:SetWidth(50); f:SetHeight(50)
               for j = 1, 2 do
                 local t = f:CreateTexture(nil, "ARTWORK")
                 t:SetTexture(i / 4, j / 4, 0)
@@ -2271,7 +2271,7 @@ mod extract_gate_tests {
             r#"
             local plain = CreateFrame("Frame", "Plain")
             plain:SetPoint("TOPLEFT", 0, 0)
-            plain:SetSize(50, 50)
+            plain:SetWidth(50); plain:SetHeight(50)
             marker = plain:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(1, 0, 0)
             marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
@@ -2379,11 +2379,11 @@ mod extract_gate_tests {
             r#"
             local doll = CreateFrame("PlayerModel", "CharacterModelFrame")
             doll:SetPoint("TOPLEFT", 0, 0)
-            doll:SetSize(233, 224)
+            doll:SetWidth(233); doll:SetHeight(224)
             doll:SetUnit("player")
             local stray = CreateFrame("PlayerModel", "SomeAddonsModelPane")
             stray:SetPoint("TOPLEFT", 300, 0)
-            stray:SetSize(233, 224)
+            stray:SetWidth(233); stray:SetHeight(224)
             stray:SetUnit("player")
         "#,
         );
@@ -2501,7 +2501,7 @@ mod extract_gate_tests {
             r#"
             local plain = CreateFrame("Frame", "Plain")
             plain:SetPoint("TOPLEFT", 0, 0)
-            plain:SetSize(50, 50)
+            plain:SetWidth(50); plain:SetHeight(50)
             marker = plain:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(0, 0, 1)
             marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
@@ -2560,7 +2560,7 @@ mod extract_gate_tests {
             r#"
             local plain = CreateFrame("Frame", "Plain")
             plain:SetPoint("TOPLEFT", 0, 0)
-            plain:SetSize(50, 50)
+            plain:SetWidth(50); plain:SetHeight(50)
             marker = plain:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(0, 1, 0)
             marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
@@ -2587,7 +2587,7 @@ mod extract_gate_tests {
             local function box(name, x, r, g, b)
               local f = CreateFrame("Frame", name)
               f:SetPoint("TOPLEFT", x, 0)
-              f:SetSize(50, 50)
+              f:SetWidth(50); f:SetHeight(50)
               local t = f:CreateTexture(nil, "ARTWORK")
               t:SetTexture(r, g, b)
               t:SetAllPoints()

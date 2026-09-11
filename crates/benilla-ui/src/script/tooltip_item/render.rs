@@ -439,7 +439,7 @@ pub(super) fn render_view(
     // "No id source" is the reference's own three-way fork (§E1): a wrapped gift, or no item
     // object AND no caller-supplied instance block (`+0x440 == 0`). Ours reads the same: a hover
     // that passes NO [`ItemInstance`] is a p6=0 leg — the template sources (merchant, quest,
-    // craft, buyback, send-mail, the compare legs, `SetItemById`) — plus the wrapped-gift bit.
+    // craft, buyback, send-mail, the compare legs, `BenillaSetItemById`) — plus the wrapped-gift bit.
     //
     // **A block-supplying source never prints the placeholder, even carrying no ids at all.** The
     // fork tests the block's presence, not its contents, so `SetLootItem`/`SetHyperlink`/

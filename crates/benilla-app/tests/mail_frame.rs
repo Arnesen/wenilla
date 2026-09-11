@@ -74,6 +74,30 @@ fn row(sender: &str, subject: &str, was_read: bool, item_id: u32, cod: u32) -> M
     }
 }
 
+/// One Linen Cloth in the backpack — the send tab's attachment fixture. `ClickSendMailItemButton`
+/// reads the cursor, and `GetSendMailItem` answers off the bag slot it came from, so the row needs
+/// a real name and texture for the stock tab to title the letter with.
+fn one_linen_backpack() -> benilla_ui::script::ContainerState {
+    let mut slots = std::collections::HashMap::new();
+    slots.insert(
+        1,
+        benilla_ui::script::ContainerSlot {
+            item_id: 2589,
+            count: 20,
+            quality: Some(1),
+            texture: Some("Interface\\Icons\\INV_Fabric_Linen_01".into()),
+            link: Some("|cffffffff|Hitem:2589|h[Linen Cloth]|h|r".into()),
+            bar_placeable: true,
+            ..Default::default()
+        },
+    );
+    benilla_ui::script::ContainerState {
+        name: Some("Backpack".into()),
+        num_slots: 16,
+        slots,
+    }
+}
+
 /// A one-page inbox (2 mails).
 fn small_inbox() -> MailState {
     MailState {
@@ -256,7 +280,7 @@ fn a_letter_and_the_centre_occupant_evict_each_other() {
 
     // The director's setup: mailbox left, character sheet pushed to centre beside it.
     s.run(
-        r#"local c = CreateFrame("Frame", "CharacterFrame") c:SetSize(50, 50) c:Hide()
+        r#"local c = CreateFrame("Frame", "CharacterFrame") c:SetWidth(50); c:SetHeight(50) c:Hide()
            ShowUIPanel(CharacterFrame)"#,
     )
     .unwrap();
@@ -743,5 +767,116 @@ fn the_open_letters_ring_icon_is_masked_but_the_inboxs_is_not() {
         !mail_icon.contains(&true),
         "the inbox window's own ring is purpose-drawn art and stays raw, as in the reference; \
          got {mail_icon:?}"
+    );
+}
+
+/// **"I can't even type anything in the mailbox window"** — the director's report, at its cause.
+///
+/// The send tab has five edit boxes, and exactly one of them — `SendMailNameEditBox` — carries an
+/// XML `<OnChar>` (`SendMailFrame_SendeeAutocomplete`). That handler auto-enables the box for the
+/// keyboard walk, and the box is the first-registered keyboard frame in the window, so on every
+/// keystroke the walk reached it first and the **base** `CSimpleFrame::OnChar` gate consumed:
+/// script present → fire → stop. Nothing downstream of it ever saw a character. The reference
+/// cannot do that — `CSimpleEditBox` replaces slot `+0x5c` with `0x77a900`, which asks about focus
+/// and declines (`0x77a956`) when another box owns it, and never chains to the base gate at all
+/// ([`benilla_ui`]'s `script::keyboard::is_editbox`, decision 2145).
+///
+/// The one box that DID work is the assertion's control: the autocomplete box types, once per
+/// character, and the four that were dead now type too.
+#[test]
+fn every_send_tab_box_takes_a_keystroke_not_just_the_one_with_an_onchar() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_ui(&s);
+    s.fire_event("MAIL_SHOW", vec![]);
+    s.run("MailFrameTab_OnClick(2)").unwrap();
+    s.resolve();
+    assert!(s.eval::<bool>("return SendMailFrame:IsVisible()").unwrap());
+
+    // The box whose handler was eating everyone else's keys: it still types, and its OnChar still
+    // fires exactly once per character (the insert path's fire — never the walk's).
+    s.run("SendMailNameEditBox:SetText('') SendMailNameEditBox:SetFocus()")
+        .unwrap();
+    s.run("SendMailChars = 0 \
+           SendMailNameEditBox:SetScript('OnChar', function() SendMailChars = SendMailChars + 1 end)")
+        .unwrap();
+    for c in ["T", "h", "r"] {
+        assert!(s.char_input(c), "the focused box consumes");
+    }
+    assert_eq!(
+        s.eval::<String>("return SendMailNameEditBox:GetText()")
+            .unwrap(),
+        "Thr"
+    );
+    assert_eq!(
+        s.eval::<i64>("return SendMailChars").unwrap(),
+        3,
+        "OnChar fires once per character, from the insert — not a second time from the walk"
+    );
+
+    // …and the four that took nothing at all. The money boxes are `numeric`, so they get digits.
+    for (box_name, typed, expect) in [
+        ("SendMailSubjectEditBox", ["H", "e", "y"], "Hey"),
+        ("SendMailBodyEditBox", ["o", "d", "d"], "odd"),
+        ("SendMailMoneyGold", ["1", "2", "3"], "123"),
+        ("SendMailMoneySilver", ["4", "5", "5"], "45"), // letters="2"
+    ] {
+        s.run(&format!("{box_name}:SetText('') {box_name}:SetFocus()"))
+            .unwrap();
+        for c in typed {
+            assert!(s.char_input(c), "{box_name} consumes the keystroke");
+        }
+        assert_eq!(
+            s.eval::<String>(&format!("return {box_name}:GetText()"))
+                .unwrap(),
+            expect,
+            "{box_name} takes what was typed into it"
+        );
+    }
+    assert!(s.take_errors().is_empty(), "and nothing raised on the way");
+}
+
+/// **"Sending an item still leaves the subject and the item image in the input"** — the director's
+/// second report, at its cause: the compose-tab reset used to fire `MAIL_SEND_SUCCESS` *before* it
+/// dropped the attachment, so the stock `SendMailFrame_Reset`'s own tail
+/// (`SendMailFrame_Update` → `GetSendMailItem`) painted the just-sent item straight back into the
+/// form it had blanked one line earlier. `UiScript::reset_compose_tab` is now `0x4acdc0(1)` whole —
+/// zero the globals, THEN tail-fire the three events — so there is no window in which the two
+/// disagree (decision 2145).
+#[test]
+fn the_compose_reset_clears_the_subject_and_the_attachment_together() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_ui(&s);
+    s.set_container(0, Some(one_linen_backpack()));
+    s.fire_event("MAIL_SHOW", vec![]);
+    s.run("MailFrameTab_OnClick(2)").unwrap();
+
+    // Attach the item the way the player does: pick it up, click the send slot. The stock tab
+    // names the letter after it, which is the text that used to survive the send.
+    s.run("PickupContainerItem(0, 1) ClickSendMailItemButton()")
+        .unwrap();
+    s.fire_event("MAIL_SEND_INFO_UPDATE", vec![]);
+    assert_eq!(
+        s.eval::<String>("return SendMailSubjectEditBox:GetText()")
+            .unwrap(),
+        "Linen Cloth (20)",
+        "the stock tab titles the letter after its attachment"
+    );
+
+    // The send lands. This is the whole edge: one call, and the form is clean when the FrameXML
+    // handler reads it.
+    s.reset_compose_tab();
+    assert_eq!(
+        s.eval::<String>("return SendMailSubjectEditBox:GetText()")
+            .unwrap(),
+        "",
+        "the subject does not come back from the attachment that just left"
+    );
+    assert!(
+        s.eval::<bool>("return GetSendMailItem() == nil").unwrap(),
+        "and the attachment is gone with it"
     );
 }

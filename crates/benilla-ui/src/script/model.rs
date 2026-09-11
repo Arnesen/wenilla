@@ -132,7 +132,7 @@ pub(crate) struct Model {
     /// The frame arena (create/destroy + show/hide/strata/level/scale/alpha propagation).
     pub(crate) arena: WidgetArena,
     /// Per-frame layout input (anchors/size/scale). Every live frame has one (created at
-    /// `CreateFrame`); `SetPoint`/`SetSize`/… mutate it; `resolve` runs the graph over them.
+    /// `CreateFrame`); `SetPoint`/`SetWidth`/… mutate it; `resolve` runs the graph over them.
     pub(crate) layout_inputs: HashMap<FrameHandle, LayoutInput>,
     /// The last [`UiScript::resolve`] result: each resolvable frame's rect. Empty until `resolve`.
     pub(crate) resolved: HashMap<FrameHandle, Rect>,
@@ -374,6 +374,20 @@ pub(crate) struct Model {
     pub(crate) event_to_frames: HashMap<String, Vec<FrameHandle>>,
     /// `frame → its registered events` (for UnregisterEvent / cleanup).
     pub(crate) frame_events: HashMap<FrameHandle, HashSet<String>>,
+    /// The frames registered for **every** event (`RegisterAllEvents`), in registration order —
+    /// the same ordered-Vec-never-a-set discipline as [`Self::event_to_frames`], and dispatched
+    /// after it for the same reason: a frame that asks for all events asks *after* the frames
+    /// already listening for a given one, so it takes the tail of that event's list.
+    ///
+    /// **A flag rather than an expansion.** 1.12's event ids run to `0x225` = 549
+    /// (`FrameScript_InitEvents`), so writing the frame into every per-event list on registration
+    /// would mean 549 vector pushes per call and 549 scans per `UnregisterAllEvents` — and would
+    /// also invent a name list this engine has no business owning (ours registers by string, and
+    /// an event the server sends that no name list knows about would be silently excluded).
+    /// `UnregisterAllEvents` empties this alongside the per-event registrations, which is the half
+    /// AceEvent-2.0 depends on: it calls `frame:UnregisterAllEvents()` and then re-registers each
+    /// individual event it still wants.
+    pub(crate) all_event_frames: Vec<FrameHandle>,
 
     /// The EditBox that currently owns keyboard focus — the engine's twin of the client's
     /// class-owned focus global `DAT_00cf4dc8` (`CSimpleEditBox* E`, 0 = none; RF-0082 §1). A focused
@@ -1828,6 +1842,7 @@ impl Model {
             dirty_editboxes: Vec::new(),
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
+            all_event_frames: Vec::new(),
             focused_editbox: None,
             mouseover: None,
             hover_repick: false,

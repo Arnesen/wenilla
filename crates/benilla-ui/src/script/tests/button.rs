@@ -34,7 +34,7 @@ fn button_state_textures_switch_with_interaction() {
     s.run(
         r#"
         local b = CreateFrame("Button", "StateBtn")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
         b:SetNormalTexture("Interface\\N.blp")
         b:SetPushedTexture("Interface\\P.blp")
         b:SetDisabledTexture("Interface\\D.blp")
@@ -110,7 +110,7 @@ fn a_state_with_no_texture_leaves_the_shown_one_standing() {
     s.run(
         r#"
         local b = CreateFrame("Button", "StickyBtn")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
         b:SetNormalTexture("Interface\\N.blp")
     "#,
     )
@@ -162,7 +162,7 @@ fn a_state_with_no_texture_leaves_the_shown_one_standing() {
     s.run(
         r#"
         local b = CreateFrame("Button", "BornDeadBtn")
-        b:SetPoint("BOTTOMLEFT", 200, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 200, 0); b:SetWidth(100); b:SetHeight(100)
         b:Disable()
         b:SetNormalTexture("Interface\\N.blp")
     "#,
@@ -191,7 +191,7 @@ fn disabling_a_button_takes_its_whole_highlight_layer() {
     s.run(
         r#"
         local b = CreateFrame("Button", "LayerBtn")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
         b:SetNormalTexture("Interface\\N.blp")
         b:SetHighlightTexture("Interface\\H.blp")
         local own = b:CreateTexture(nil, "HIGHLIGHT")
@@ -271,7 +271,7 @@ fn any_registered_mouse_button_shows_the_pushed_texture() {
         r#"
         local function slot(name, x)
             local b = CreateFrame("Button", name)
-            b:SetPoint("BOTTOMLEFT", x, 0); b:SetSize(100, 100)
+            b:SetPoint("BOTTOMLEFT", x, 0); b:SetWidth(100); b:SetHeight(100)
             b:SetNormalTexture("Interface\\" .. name .. "N.blp")
             b:SetPushedTexture("Interface\\" .. name .. "P.blp")
             return b
@@ -331,7 +331,7 @@ fn set_button_state_drives_the_pushed_visual() {
     s.run(
         r#"
         local b = CreateFrame("Button", "PushBtn")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
         b:SetNormalTexture("Interface\\N.blp")
         b:SetPushedTexture("Interface\\P.blp")
     "#,
@@ -375,7 +375,7 @@ fn disabled_button_swallows_clicks_checkbutton_toggles_before_onclick() {
         r#"
         clicks, seen_checked = 0, nil
         local cb = CreateFrame("CheckButton", "Toggler")
-        cb:SetPoint("BOTTOMLEFT", 0, 0); cb:SetSize(100, 100)
+        cb:SetPoint("BOTTOMLEFT", 0, 0); cb:SetWidth(100); cb:SetHeight(100)
         cb:SetScript("OnClick", function(self, button, down)
             clicks = clicks + 1
             seen_checked = self:GetChecked()
@@ -422,7 +422,7 @@ fn default_registration_is_left_click_only_right_click_reaches_nothing() {
         r#"
         clicks = 0
         local btn = CreateFrame("Button", "Vendor")
-        btn:SetPoint("BOTTOMLEFT", 0, 0); btn:SetSize(100, 100)
+        btn:SetPoint("BOTTOMLEFT", 0, 0); btn:SetWidth(100); btn:SetHeight(100)
         btn:SetScript("OnClick", function(self, button, down) clicks = clicks + 1 end)
     "#,
     )
@@ -445,7 +445,7 @@ fn register_for_clicks_grows_right_click_and_carries_the_button_name() {
         r#"
         clicks, click_btn, arg1_btn = 0, nil, nil
         local btn = CreateFrame("Button", "Vendor")
-        btn:SetPoint("BOTTOMLEFT", 0, 0); btn:SetSize(100, 100)
+        btn:SetPoint("BOTTOMLEFT", 0, 0); btn:SetWidth(100); btn:SetHeight(100)
         btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         btn:SetScript("OnClick", function(self, button, down)
             clicks = clicks + 1
@@ -478,7 +478,7 @@ fn down_registration_fires_on_press_and_toggles_checked_once() {
         r#"
         clicks, seen_down = 0, nil
         local cb = CreateFrame("CheckButton", "QuickSell")
-        cb:SetPoint("BOTTOMLEFT", 0, 0); cb:SetSize(100, 100)
+        cb:SetPoint("BOTTOMLEFT", 0, 0); cb:SetWidth(100); cb:SetHeight(100)
         cb:RegisterForClicks("LeftButtonDown")
         cb:SetScript("OnClick", function(self, button, down)
             clicks = clicks + 1
@@ -509,9 +509,9 @@ fn highlight_is_additive_and_state_textures_fill_then_anchor() {
     s.run(
         r#"
         local b = CreateFrame("Button", "AddBtn")
-        b:SetPoint("BOTTOMLEFT", 100, 100); b:SetSize(36, 36)
+        b:SetPoint("BOTTOMLEFT", 100, 100); b:SetWidth(36); b:SetHeight(36)
         b:SetNormalTexture("Interface\\Ring.blp")
-        b:GetNormalTexture():SetSize(64, 64)
+        local nt = b:GetNormalTexture(); nt:SetWidth(64); nt:SetHeight(64)
         b:SetHighlightTexture("Interface\\Hi.blp")
     "#,
     )
@@ -533,7 +533,7 @@ fn highlight_is_additive_and_state_textures_fill_then_anchor() {
     ));
     // A fresh state texture gets the creation-path implicit SetAllPoints (decision 1310 — the
     // reference's string setters anchor a freshly built texture to the button outright), whose
-    // two corners pin all four edges: the later SetSize(64) is structurally unread and the ring
+    // two corners pin all four edges: the later 64px size is structurally unread and the ring
     // FILLS the 36px button.
     let r = find("Interface\\Ring.blp").rect.unwrap();
     assert_eq!(
@@ -608,7 +608,7 @@ fn button_label_repaints_by_state_font_object() {
     s.run(
         r#"
         b = CreateFrame("Button", "FontBtn")
-        b:SetPoint("CENTER", 0, 0); b:SetSize(100, 20)
+        b:SetPoint("CENTER", 0, 0); b:SetWidth(100); b:SetHeight(20)
         b:SetText("Label")
         b:SetTextFontObject("GoldFont")
         b:SetDisabledFontObject("GrayFont")
@@ -696,7 +696,7 @@ fn a_locked_or_hovered_button_wears_its_highlight_font_over_its_normal_color() {
     s.run(
         r#"
         b = CreateFrame("Button", "RowBtn")
-        b:SetPoint("BOTTOMLEFT", 100, 100); b:SetSize(100, 20)
+        b:SetPoint("BOTTOMLEFT", 100, 100); b:SetWidth(100); b:SetHeight(20)
         b:SetText("Rough Copper Vest")
         b:SetTextFontObject("RowNormal")
         b:SetHighlightFontObject("RowHighlight")
@@ -1103,7 +1103,7 @@ fn a_button_labels_own_setfont_survives_the_state_font_repoint() {
     s.run(
         r#"
         b = CreateFrame("Button", "SkinnedBtn")
-        b:SetPoint("CENTER", 0, 0); b:SetSize(100, 20)
+        b:SetPoint("CENTER", 0, 0); b:SetWidth(100); b:SetHeight(20)
         b:SetText("Label")
         b:SetTextFontObject("TemplateFont")
         b:GetFontString():SetFont("Interface\\Addons\\Skin\\Fonts\\porky.ttf", 18, "OUTLINE")
@@ -1189,7 +1189,7 @@ fn a_state_texture_slot_takes_an_object_and_a_nil() {
     s.run(
         r#"
         b = CreateFrame("Button", "SlotBtn")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
         b:SetNormalTexture("Interface\\N.blp")
         -- Bongos' own idiom: build the highlight yourself and hand the object over.
         hl = b:CreateTexture()
@@ -1260,7 +1260,7 @@ fn an_unlocked_scripted_push_is_released_by_the_next_mouse_release() {
     s.run(
         r#"
         row = CreateFrame("Button", "TabletRow")
-        row:SetPoint("BOTTOMLEFT", 0, 0); row:SetSize(100, 100)
+        row:SetPoint("BOTTOMLEFT", 0, 0); row:SetWidth(100); row:SetHeight(100)
         row:SetNormalTexture("Interface\\RowN.blp")
         row:SetPushedTexture("Interface\\RowP.blp")
         row:SetButtonState("PUSHED")            -- Tablet-2.0's call, verbatim: no lock argument
@@ -1301,10 +1301,10 @@ fn a_locked_state_ignores_the_mouse_and_enable_disable_clears_the_lock() {
     s.run(
         r#"
         micro = CreateFrame("Button", "MicroButton")
-        micro:SetPoint("BOTTOMLEFT", 0, 0); micro:SetSize(100, 100)
+        micro:SetPoint("BOTTOMLEFT", 0, 0); micro:SetWidth(100); micro:SetHeight(100)
         micro:SetButtonState("PUSHED", 1)       -- MainMenuBarMicroButtons.lua, verbatim
         pin = CreateFrame("Button", "PinnedNormal")
-        pin:SetPoint("BOTTOMLEFT", 200, 0); pin:SetSize(100, 100)
+        pin:SetPoint("BOTTOMLEFT", 200, 0); pin:SetWidth(100); pin:SetHeight(100)
         pin:SetButtonState("NORMAL", 1)
     "#,
     )
@@ -1367,7 +1367,7 @@ fn the_hover_is_not_an_input_to_the_press_state() {
     s.run(
         r#"
         b = CreateFrame("Button", "HeldButton")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(100, 100)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
         b:SetNormalTexture("Interface\\HeldN.blp")
         b:SetPushedTexture("Interface\\HeldP.blp")
     "#,
@@ -1416,7 +1416,7 @@ fn hiding_a_held_button_un_presses_it() {
     s.run(
         r#"
         h = CreateFrame("Button", "HidButton")
-        h:SetPoint("BOTTOMLEFT", 0, 0); h:SetSize(100, 100)
+        h:SetPoint("BOTTOMLEFT", 0, 0); h:SetWidth(100); h:SetHeight(100)
     "#,
     )
     .unwrap();
@@ -1437,4 +1437,87 @@ fn hiding_a_held_button_un_presses_it() {
     );
     s.mouse_button(50.0, 50.0, "LeftButton", false);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// `Button:GetTextColor()` — **FOUR** values, r/g/b/a (`0x781100`, table `0x879d00`, argc 1,
+/// arity 4, kinds `(number,number,number,number)`). Three is the plausible wrong answer, and the
+/// shapes table flags the name `name-not-unique` because seven tables register it — this asserts
+/// the BUTTON one, on a Button, and its two inheritance legs.
+///
+/// Completeness rather than a live break: no corpus site has a Button receiver today (every
+/// measured `GetTextColor` is on a FontString or a font object). It is here because the reference
+/// registers it, so the widget shape gate can cover it from now on.
+#[test]
+fn button_get_text_color_answers_four_values_through_the_state_font() {
+    let s = script();
+    s.register_font_object(
+        "BtnGold",
+        FontObject {
+            color: Some([1.0, 0.82, 0.0, 1.0]),
+            height: Some(12.0),
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        Plain = CreateFrame("Button", "PlainBtn")
+        Themed = CreateFrame("Button", "ThemedBtn")
+        Themed:SetTextFontObject("BtnGold")
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        s.eval::<i64>("return select('#', PlainBtn:GetTextColor())")
+            .unwrap(),
+        4,
+        "arity 4 — not 3, the plausible wrong answer"
+    );
+    let kinds: String = s
+        .eval(
+            r#"local r,g,b,a = PlainBtn:GetTextColor()
+               return type(r)..","..type(g)..","..type(b)..","..type(a)"#,
+        )
+        .unwrap();
+    assert_eq!(kinds, "number,number,number,number");
+
+    // A button with nothing set anywhere is the untinted white every other colour getter here
+    // (`GetVertexColor`, `FontString:GetTextColor`) answers.
+    let plain: Vec<f32> = (1..=4)
+        .map(|i| {
+            s.eval::<f32>(&format!("return select({i}, PlainBtn:GetTextColor())"))
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(plain, vec![1.0, 1.0, 1.0, 1.0]);
+
+    // With no local colour it reads THROUGH what the normal state inherits — the same leg
+    // `Button:GetFont` takes, and the one a stock `GameMenuButtonTemplate` button relies on.
+    let themed: Vec<f32> = (1..=4)
+        .map(|i| {
+            s.eval::<f32>(&format!("return select({i}, ThemedBtn:GetTextColor())"))
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(themed, vec![1.0, 0.82, 0.0, 1.0]);
+
+    // A local SetTextColor wins, alpha included, and round-trips.
+    s.run("ThemedBtn:SetTextColor(0.1, 0.2, 0.3, 0.4)").unwrap();
+    let set: Vec<f32> = (1..=4)
+        .map(|i| {
+            s.eval::<f32>(&format!("return select({i}, ThemedBtn:GetTextColor())"))
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(set, vec![0.1, 0.2, 0.3, 0.4]);
+
+    // A CheckButton reaches it through Button's table, as it does the rest of the trio.
+    assert_eq!(
+        s.eval::<i64>(
+            r#"local c = CreateFrame("CheckButton", "ChkColorBtn")
+               return select('#', c:GetTextColor())"#
+        )
+        .unwrap(),
+        4
+    );
 }

@@ -13,7 +13,7 @@ fn backdrop_installs_and_extracts_pieces_with_colors() {
         r#"
         local f = CreateFrame("Frame", "Plate")
         f:SetPoint("TOPLEFT", nil, "TOPLEFT", 100, -100)
-        f:SetSize(200, 100)
+        f:SetWidth(200); f:SetHeight(100)
         f:SetBackdrop({
             bgFile = "bg", edgeFile = "edge", tile = true,
             tileSize = 16, edgeSize = 16,
@@ -129,7 +129,7 @@ fn get_backdrop_round_trips_through_set_backdrop() {
         r#"
         local f = CreateFrame("Frame", "BC2Plate")
         f:SetPoint("CENTER")
-        f:SetSize(54, 54)
+        f:SetWidth(54); f:SetHeight(54)
         f:SetBackdrop({ bgFile = "bg", edgeFile = "edge", tile = true,
                         tileSize = 32, edgeSize = 32,
                         insets = { left = 11, right = 12, top = 12, bottom = 11 } })
@@ -166,7 +166,7 @@ fn set_backdrop_nil_tears_down() {
         r#"
         local f = CreateFrame("Frame", "Plate2")
         f:SetPoint("CENTER")
-        f:SetSize(100, 100)
+        f:SetWidth(100); f:SetHeight(100)
         f:SetBackdrop({ bgFile = "bg", edgeFile = "edge" })
         f:SetBackdrop(nil)
     "#,

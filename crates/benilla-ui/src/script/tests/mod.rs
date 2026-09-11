@@ -49,6 +49,7 @@ mod tooltip_spell;
 mod tooltip_unit;
 mod toplevel;
 mod visibility;
+mod widget_surface;
 mod worldframe;
 mod worldmap;
 

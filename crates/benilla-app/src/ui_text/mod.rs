@@ -294,7 +294,7 @@ mod ellipsis_memo_tests {
                 r#"
                 local f = CreateFrame("Frame", "MemoHost")
                 f:SetPoint("TOPLEFT", 0, 0)
-                f:SetSize(100, 100)
+                f:SetWidth(100); f:SetHeight(100)
                 for i = 1, 8 do
                     local t = f:CreateTexture(nil, "ARTWORK")
                     t:SetTexture(1, 0, 0)

@@ -48,8 +48,15 @@ fn reference() -> Vec<(String, String)> {
 fn allowed_beyond_1_12() -> HashSet<&'static str> {
     [
         // ── our Lua runtime is 5.1 where 1.12's is 5.0 ────────────────────────────────────────
-        // `select` is load-bearing and stays on purpose — our transcribed FrameXML uses it in 16
-        // files as the 5.1 spelling of 5.0's implicit `arg` table.
+        // `select`'s old reason here — "our transcribed FrameXML uses it in 16 files as the 5.1
+        // spelling of 5.0's implicit `arg` table" — **was true and is not any more**: 1751's
+        // stock-first migration retired those files, and `assets/ui`'s seven survivors contain
+        // zero `select(` call sites (measured 2026-09-09, decision 2142). What keeps it is now a
+        // different fact, and a weaker one: it is mlua's, not ours to remove without replacing the
+        // 5.1 varargs it comes with. The corpus reads it as a version probe —
+        // `pfUI/libs/libpredict.lua:141` and `ShaguTweaks/libs/libpredict.lua:82` both branch on
+        // `elseif select and UnitCastingInfo then`, and only our NOT having `UnitCastingInfo`
+        // keeps them off the TBC cast path.
         //
         // `_G` is the last one inherited rather than chosen: 1.12's base library does not export
         // it (an addon reaches the globals with `getfenv(0)`, which is what AceLibrary does), but
@@ -64,9 +71,38 @@ fn allowed_beyond_1_12() -> HashSet<&'static str> {
         "_G",
         "select",
         // ── WoW API past 1.12 — 1188 phase 5's list, and the reason that phase exists ─────────
-        // Every one of these predates 1189 and is used by our own transcribed FrameXML today.
-        // Resolving each means either replacing it with its 1.12 equivalent (`UnitPower` →
-        // `UnitMana`, which 1.12 has and we do not) or recording why it stays.
+        // **The reason written here was "every one of these is used by our own transcribed
+        // FrameXML today", and as of 2026-09-09 that is true of exactly ONE of the sixteen**
+        // (`SubmitChatInput`, in the dev-only `ScriptLogFrame.xml`) — a corpus census measured it
+        // and this file's own claim was checked against `assets/ui`'s seven remaining files, name
+        // by name, before this comment was rewritten (decision 2142). 1751's migration retired the
+        // windows that used the rest; the list outlived its justification, which is exactly how
+        // 2118 found the modifier keys still answering booleans years after 0068's reason for it
+        // had gone.
+        //
+        // **What they are NOT is load-bearing for the addon corpus, and 2143 corrects 2142 for
+        // saying so.** The claim written here was that the vanilla ecosystem assumes several of
+        // these exist — `pfUI/modules/loot.lua` calling `wipe` 25 times and defining it nowhere,
+        // so ours "makes that module run at all". That is wrong twice over, and the error is
+        // instructive: **a "1.12 addon" in that corpus is usually a MULTI-CLIENT addon**. pfUI
+        // ships one codebase for three clients and gates per module —
+        // `pfUI:RegisterModule("loot", "vanilla:tbc", …)`, matched by
+        // `strfind(version, pfUI.expansion)` at `pfUI.lua:250` — so a TBC-era habit sits in code
+        // the vanilla client reaches. The `wipe` calls are in `RequestRolls`,
+        // `BuildSpecialRecipientsMenu` and `ClearRolls`: the master-looter's roll helper, not the
+        // loot window, and that path throws on a real 1.12 client too. And `strsplit` was worse —
+        // pfUI has its own `pfUI.api.strsplit` (`api/api.lua:16`) and ShaguTweaks its own
+        // `ShaguTweaks.strsplit`; the bare calls are inside the vendored `libs/libpredict.lua`,
+        // which has TBC branches of its own.
+        //
+        // So our superset was HIDING those latent nil-calls, never enabling anything. The one
+        // real interaction left is the other direction: `AtlasLoot/Core/AtlasLoot.lua:2119`/`:2148`
+        // define GLOBAL `strsplit`/`strtrim` unconditionally, with incompatible pattern-based
+        // two-return semantics, and clobber ours for everything loaded after them — so ours is not
+        // authoritative at runtime either.
+        //
+        // Resolving each means replacing it with its 1.12 equivalent (`UnitPower` → `UnitMana`,
+        // which 1.12 has and we do not), deleting it, or recording why it stays.
         //
         // Three left with 1751's gossip work: `GetNumGossipQuests`, `GetGossipQuestInfo` and
         // `SelectGossipQuest` were benilla's own single-list shape over the gossip packet's quest
@@ -332,12 +368,12 @@ fn region_set_parent_relinks_the_draw_owner_and_leaves_anchors_alone() {
     s.run(
         r#"
         A = CreateFrame("Frame", "SPOwnerA")
-        A:SetPoint("BOTTOMLEFT", 0, 0)  A:SetSize(100, 50)
+        A:SetPoint("BOTTOMLEFT", 0, 0)  A:SetWidth(100); A:SetHeight(50)
         B = CreateFrame("Frame", "SPOwnerB")
-        B:SetPoint("BOTTOMLEFT", 300, 0)  B:SetSize(100, 50)
+        B:SetPoint("BOTTOMLEFT", 300, 0)  B:SetWidth(100); B:SetHeight(50)
         Spark = A:CreateTexture("SPSpark", "ARTWORK")
         Spark:SetTexture("Interface\\SPGlow")
-        Spark:SetSize(24, 24)
+        Spark:SetWidth(24); Spark:SetHeight(24)
         Spark:SetPoint("TOPLEFT", 4, -4)
         "#,
     )
@@ -1161,7 +1197,7 @@ fn every_region_map_method_is_callable_on_a_texture_and_a_fontstring() {
     s.run(
         r#"
         RMOwner = CreateFrame("Frame", "RMOwner")
-        RMOwner:SetPoint("BOTTOMLEFT", 0, 0)  RMOwner:SetSize(100, 50)
+        RMOwner:SetPoint("BOTTOMLEFT", 0, 0)  RMOwner:SetWidth(100); RMOwner:SetHeight(50)
         RMTex = RMOwner:CreateTexture("RMTex", "ARTWORK")
         RMStr = RMOwner:CreateFontString("RMStr", "ARTWORK")
         "#,
@@ -1197,9 +1233,9 @@ fn the_region_map_readers_answer_the_way_the_edges_do() {
     s.run(
         r#"
         RRFrame = CreateFrame("Frame", "RRFrame")
-        RRFrame:SetPoint("BOTTOMLEFT", 100, 200)  RRFrame:SetSize(200, 100)
+        RRFrame:SetPoint("BOTTOMLEFT", 100, 200)  RRFrame:SetWidth(200); RRFrame:SetHeight(100)
         RRPlate = RRFrame:CreateTexture("RRPlate", "ARTWORK")
-        RRPlate:SetPoint("TOPLEFT", 10, -10)  RRPlate:SetSize(50, 20)
+        RRPlate:SetPoint("TOPLEFT", 10, -10)  RRPlate:SetWidth(50); RRPlate:SetHeight(20)
         -- the sibling-region anchor the real XML uses everywhere
         RRLabel = RRFrame:CreateFontString("RRLabel", "OVERLAY")
         RRLabel:SetPoint("LEFT", RRPlate, "RIGHT", 4, 0)

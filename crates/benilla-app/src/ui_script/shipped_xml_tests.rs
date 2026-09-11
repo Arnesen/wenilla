@@ -681,7 +681,9 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
     // — so XML comment blocks are tracked across lines and Lua `--` lines are dropped.
     fn sink_literals(line: &str) -> Vec<&str> {
         let mut out = Vec::new();
-        for sink in [":SetText(", ":SetFormattedText(", ":SetButtonText("] {
+        // `:SetFormattedText(` used to sit between these two and never could have matched —
+        // it is not a 1.12 verb, so no shipped script writes it (2142 retired ours).
+        for sink in [":SetText(", ":SetButtonText("] {
             let mut rest = line;
             while let Some(at) = rest.find(sink) {
                 rest = &rest[at + sink.len()..];

@@ -270,3 +270,112 @@ fn mid_dispatch_removal_of_the_next_stops_and_append_is_visited() {
         "a tail-append during dispatch is still visited this dispatch"
     );
 }
+
+/// `Frame:RegisterAllEvents()` — the frame's `OnEvent` receives every event dispatched
+/// (`0x774c20`, table `0x878ec0`, argc 1, arity 0), and `UnregisterAllEvents` clears that state
+/// along with the per-event ones.
+///
+/// **The clearing half is the load-bearing one.** AceEvent-2.0 — shipped by 63 vanilla addons and
+/// 6 of the top 20 — turns all-events on once (`AceEvent.frame:RegisterAllEvents()`), deliberately
+/// stops calling `frame:UnregisterEvent(event)` while it is on, and gets back to per-event
+/// registration by calling `frame:UnregisterAllEvents()` and then re-registering each event it
+/// still wants. A `RegisterAllEvents` that survived that call would leave every Ace2 addon on the
+/// whole event stream for the session.
+#[test]
+fn register_all_events_takes_every_event_and_unregister_all_clears_it() {
+    let mut s = script();
+    s.run(
+        r#"
+        seen = {}
+        All = CreateFrame("Frame", "AllEv")
+        All:SetScript("OnEvent", function() table.insert(seen, event) end)
+        "#,
+    )
+    .unwrap();
+
+    // Arity 0 — the verb answers nothing.
+    assert_eq!(
+        s.eval::<i64>("return select('#', All:RegisterAllEvents())")
+            .unwrap(),
+        0
+    );
+
+    // Anything dispatched now reaches it, including an event no name list could have enumerated.
+    for ev in [
+        "PLAYER_LOGIN",
+        "UNIT_HEALTH",
+        "SOME_SERVER_EVENT_NOBODY_LISTED",
+    ] {
+        s.fire_event(ev, vec![]);
+    }
+    assert_eq!(
+        s.eval::<i64>("return table.getn(seen)").unwrap(),
+        3,
+        "every event dispatched, whatever its name"
+    );
+    assert_eq!(
+        s.eval::<String>("return seen[3]").unwrap(),
+        "SOME_SERVER_EVENT_NOBODY_LISTED"
+    );
+
+    // Registering twice is a no-op, and a frame holding BOTH an all-events registration and a
+    // RegisterEvent for the same event is one listener, not two — the same rule `RegisterEvent`'s
+    // own `if not already in the list` holds one level down.
+    s.run(r#"seen = {}; All:RegisterAllEvents(); All:RegisterEvent("UNIT_HEALTH")"#)
+        .unwrap();
+    s.fire_event("UNIT_HEALTH", vec![]);
+    assert_eq!(
+        s.eval::<i64>("return table.getn(seen)").unwrap(),
+        1,
+        "fired once, not twice"
+    );
+
+    // UnregisterAllEvents clears BOTH: the explicit UNIT_HEALTH registration and the all-events one.
+    s.run("seen = {}; All:UnregisterAllEvents()").unwrap();
+    for ev in ["UNIT_HEALTH", "PLAYER_LOGIN"] {
+        s.fire_event(ev, vec![]);
+    }
+    assert_eq!(
+        s.eval::<i64>("return table.getn(seen)").unwrap(),
+        0,
+        "the all-events registration does not outlive UnregisterAllEvents"
+    );
+
+    // …and the AceEvent path back: re-register the individual events it still wants.
+    s.run(r#"All:RegisterEvent("UNIT_HEALTH")"#).unwrap();
+    for ev in ["UNIT_HEALTH", "PLAYER_LOGIN"] {
+        s.fire_event(ev, vec![]);
+    }
+    assert_eq!(
+        s.eval::<i64>("return table.getn(seen)").unwrap(),
+        1,
+        "back to exactly one event"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// An all-events frame dispatches AFTER the event's own listeners — where it would sit if the
+/// registration were expanded into every per-event list, since it joined later than they did.
+/// Cross-frame order is a law consumers depend on (the two ZoneText frames writing one FontString);
+/// it does not stop being one because a listener asked for everything.
+#[test]
+fn an_all_events_listener_runs_after_the_events_own() {
+    let mut s = script();
+    s.run(
+        r#"
+        order = {}
+        Named = CreateFrame("Frame", "NamedEv")
+        Named:SetScript("OnEvent", function() table.insert(order, "named") end)
+        Named:RegisterEvent("PLAYER_LOGIN")
+
+        Everything = CreateFrame("Frame", "EveryEv")
+        Everything:SetScript("OnEvent", function() table.insert(order, "all") end)
+        Everything:RegisterAllEvents()
+        "#,
+    )
+    .unwrap();
+    s.fire_event("PLAYER_LOGIN", vec![]);
+    assert_eq!(s.eval::<String>("return order[1]").unwrap(), "named");
+    assert_eq!(s.eval::<String>("return order[2]").unwrap(), "all");
+    assert_eq!(s.eval::<i64>("return table.getn(order)").unwrap(), 2);
+}

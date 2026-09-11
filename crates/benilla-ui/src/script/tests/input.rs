@@ -12,10 +12,10 @@ fn enable_mouse_gates_hit_testing() {
         -- Two full-screen frames. `b` is created later (drawn on top) but mouse-disabled, so it is
         -- transparent to hits; the enabled frame behind it (`a`) must capture.
         local a = CreateFrame("Frame", "A")
-        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(800, 600); a:EnableMouse(true)
+        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(800); a:SetHeight(600); a:EnableMouse(true)
         a:SetScript("OnEnter", function(self) who = self:GetName() end)
         local b = CreateFrame("Frame", "B")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(800, 600); b:EnableMouse(false)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(800); b:SetHeight(600); b:EnableMouse(false)
         b:SetScript("OnEnter", function(self) who = self:GetName() end)
         -- 1/nil, not a boolean (1830): this is the exact comparison shape that inverts, so the
         -- test asserts it rather than leaning on truthiness.
@@ -51,10 +51,10 @@ fn hit_order_is_strata_then_level_then_the_earlier_linked_frame() {
         r#"
         who = nil
         local a = CreateFrame("Frame", "A")
-        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(800, 600); a:EnableMouse(true)
+        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(800); a:SetHeight(600); a:EnableMouse(true)
         a:SetScript("OnEnter", function(self) who = self:GetName() end)
         local b = CreateFrame("Frame", "B")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(800, 600); b:EnableMouse(true)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(800); b:SetHeight(600); b:EnableMouse(true)
         b:SetScript("OnEnter", function(self) who = self:GetName() end)
     "#,
     )
@@ -96,7 +96,7 @@ fn mouse_move_fires_enter_then_leave_across_a_boundary_with_correct_self() {
         enters, leaves = 0, 0
         enter_self_ok, leave_self_ok = false, false
         local a = CreateFrame("Frame", "A")   -- left half only
-        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(400, 600); a:EnableMouse(true)
+        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
         a:SetScript("OnEnter", function(self) enters = enters + 1; enter_self_ok = (self == a) end)
         a:SetScript("OnLeave", function(self) leaves = leaves + 1; leave_self_ok = (self == a) end)
     "#,
@@ -127,10 +127,10 @@ fn onclick_fires_on_press_release_same_frame_not_when_release_lands_elsewhere() 
         r#"
         clicks_a, clicks_b, click_btn = 0, 0, nil
         local a = CreateFrame("Frame", "A")   -- left half
-        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(400, 600); a:EnableMouse(true)
+        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
         a:SetScript("OnClick", function(self, button, down) clicks_a = clicks_a + 1; click_btn = button end)
         local b = CreateFrame("Frame", "B")   -- right half
-        b:SetPoint("BOTTOMLEFT", 400, 0); b:SetSize(400, 600); b:EnableMouse(true)
+        b:SetPoint("BOTTOMLEFT", 400, 0); b:SetWidth(400); b:SetHeight(600); b:EnableMouse(true)
         b:SetScript("OnClick", function(self, button, down) clicks_b = clicks_b + 1 end)
     "#,
     )
@@ -168,14 +168,14 @@ fn hidden_or_effective_hidden_frame_never_captures() {
         entered = false
         -- own shown = false
         local own = CreateFrame("Frame", "OwnHidden")
-        own:SetPoint("BOTTOMLEFT", 0, 0); own:SetSize(800, 600); own:EnableMouse(true)
+        own:SetPoint("BOTTOMLEFT", 0, 0); own:SetWidth(800); own:SetHeight(600); own:EnableMouse(true)
         own:SetScript("OnEnter", function() entered = true end)
         own:Hide()
         -- effective-hidden: child is shown but its parent is hidden
         local parent = CreateFrame("Frame", "Par")
-        parent:SetPoint("BOTTOMLEFT", 0, 0); parent:SetSize(800, 600)
+        parent:SetPoint("BOTTOMLEFT", 0, 0); parent:SetWidth(800); parent:SetHeight(600)
         local child = CreateFrame("Frame", "Ch", parent)
-        child:SetPoint("BOTTOMLEFT", 0, 0); child:SetSize(800, 600); child:EnableMouse(true)
+        child:SetPoint("BOTTOMLEFT", 0, 0); child:SetWidth(800); child:SetHeight(600); child:EnableMouse(true)
         child:SetScript("OnEnter", function() entered = true end)
         parent:Hide()
     "#,
@@ -203,7 +203,7 @@ fn mouse_wheel_passes_delta_to_the_captured_frame() {
         r#"
         wheel = nil
         local a = CreateFrame("Frame", "A")
-        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(800, 600); a:EnableMouse(true)
+        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(800); a:SetHeight(600); a:EnableMouse(true)
         -- The wheel is its own index and its own flag: SetScript never auto-enables (that law is
         -- XML-load-time only), so a runtime-created frame needs this explicitly, exactly as it
         -- needs EnableMouse. Mouse-enablement alone puts nothing in the wheel index.
@@ -231,7 +231,7 @@ fn hit_rect_insets_shrink_the_mouse_rect_only() {
         r#"
         entered = false
         local a = CreateFrame("Frame", "A")
-        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(100, 100); a:EnableMouse(true)
+        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(100); a:SetHeight(100); a:EnableMouse(true)
         a:SetScript("OnEnter", function() entered = true end)
         a:SetHitRectInsets(5, 5, 18, 5)
         local l, r, t, b = a:GetHitRectInsets()
@@ -375,7 +375,7 @@ fn a_second_fast_click_fires_on_double_click_instead_of_the_second_on_click() {
         r#"
         clicks, doubles, dblbtn = 0, 0, nil
         local b = CreateFrame("Button", "DblB")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(200, 200); b:EnableMouse(true)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(200); b:SetHeight(200); b:EnableMouse(true)
         b:SetScript("OnClick", function(self, button) clicks = clicks + 1 end)
         b:SetScript("OnDoubleClick", function(self, button) doubles = doubles + 1 dblbtn = button end)
     "#,
@@ -432,7 +432,7 @@ fn a_frame_with_no_double_click_handler_keeps_every_rapid_on_click() {
         r#"
         clicks = 0
         local b = CreateFrame("Button", "NoDbl")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(200, 200); b:EnableMouse(true)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(200); b:SetHeight(200); b:EnableMouse(true)
         b:SetScript("OnClick", function() clicks = clicks + 1 end)
     "#,
     )
@@ -465,9 +465,9 @@ fn the_double_click_boundary_is_time_and_frame_and_clicks_pair_up() {
             f:SetScript("OnDoubleClick", function() doubles = doubles + 1 end)
         end
         local a = CreateFrame("Button", "DblA")
-        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(100, 100); a:EnableMouse(true); watch(a)
+        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(100); a:SetHeight(100); a:EnableMouse(true); watch(a)
         local b = CreateFrame("Button", "DblBB")
-        b:SetPoint("BOTTOMLEFT", 300, 0); b:SetSize(100, 100); b:EnableMouse(true); watch(b)
+        b:SetPoint("BOTTOMLEFT", 300, 0); b:SetWidth(100); b:SetHeight(100); b:EnableMouse(true); watch(b)
     "#,
     )
     .unwrap();
@@ -522,7 +522,7 @@ fn a_multi_registered_button_pairs_a_left_click_with_a_right_one() {
         r#"
         doubles, dblbtn = 0, nil
         local b = CreateFrame("Button", "MixDbl")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(200, 200); b:EnableMouse(true)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(200); b:SetHeight(200); b:EnableMouse(true)
         b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         b:SetScript("OnDoubleClick", function(self, button) doubles = doubles + 1 dblbtn = button end)
     "#,
@@ -555,7 +555,7 @@ fn a_half_finished_double_click_survives_the_cursor_leaving_the_window() {
         r#"
         doubles = 0
         local b = CreateFrame("Button", "LeaveDbl")
-        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(200, 200); b:EnableMouse(true)
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(200); b:SetHeight(200); b:EnableMouse(true)
         b:SetScript("OnDoubleClick", function() doubles = doubles + 1 end)
     "#,
     )
@@ -585,7 +585,7 @@ fn set_script_on_double_click_is_accepted_because_something_fires_it() {
         r#"
         ran = false
         Btn = CreateFrame("Button", "DblAccepted")
-        Btn:SetPoint("BOTTOMLEFT", 0, 0); Btn:SetSize(100, 100); Btn:EnableMouse(true)
+        Btn:SetPoint("BOTTOMLEFT", 0, 0); Btn:SetWidth(100); Btn:SetHeight(100); Btn:EnableMouse(true)
         Btn:SetScript("OnDoubleClick", function() ran = true end)
     "#,
     )
@@ -625,8 +625,8 @@ fn the_unfired_script_kinds_still_raise_rather_than_silently_accepting() {
         "OnAttributeChanged",
         // Real 1.12 slots we do not fire, and zero corpus call sites. (`OnUpdateModel` and
         // `OnAnimFinished` left this list with decision 2007: the tick's model pass fires
-        // them — `script::tests::model_clock`.)
-        "OnHorizontalScroll",
+        // them — `script::tests::model_clock`. `OnHorizontalScroll` left it with the ScrollFrame's
+        // horizontal offset pair, which fires it — `script::tests::scrollframe`.)
         "OnHyperlinkEnter",
         "OnMessageScrollChanged",
         "OnInputLanguageChanged",
@@ -653,9 +653,9 @@ fn hiding_the_hovered_frame_fires_its_onleave_before_onhide() {
         r#"
         log = {}
         local win = CreateFrame("Frame", "Win")
-        win:SetPoint("BOTTOMLEFT", 0, 0); win:SetSize(800, 600)
+        win:SetPoint("BOTTOMLEFT", 0, 0); win:SetWidth(800); win:SetHeight(600)
         local slot = CreateFrame("Button", "Slot", win)
-        slot:SetPoint("BOTTOMLEFT", 100, 100); slot:SetSize(100, 100); slot:EnableMouse(true)
+        slot:SetPoint("BOTTOMLEFT", 100, 100); slot:SetWidth(100); slot:SetHeight(100); slot:EnableMouse(true)
         slot:SetScript("OnLeave", function() table.insert(log, "leave") end)
         slot:SetScript("OnHide", function() table.insert(log, "hide") end)
     "#,
@@ -682,7 +682,7 @@ fn hiding_an_unhovered_frame_fires_no_onleave() {
         r#"
         leaves = 0
         local a = CreateFrame("Button", "Away")
-        a:SetPoint("BOTTOMLEFT", 500, 500); a:SetSize(50, 50); a:EnableMouse(true)
+        a:SetPoint("BOTTOMLEFT", 500, 500); a:SetWidth(50); a:SetHeight(50); a:EnableMouse(true)
         a:SetScript("OnLeave", function() leaves = leaves + 1 end)
     "#,
     )
@@ -706,10 +706,10 @@ fn the_repick_re_hovers_without_a_mouse_move() {
         r#"
         entered = {}
         local under = CreateFrame("Button", "Under")
-        under:SetPoint("BOTTOMLEFT", 100, 100); under:SetSize(100, 100); under:EnableMouse(true)
+        under:SetPoint("BOTTOMLEFT", 100, 100); under:SetWidth(100); under:SetHeight(100); under:EnableMouse(true)
         under:SetScript("OnEnter", function() table.insert(entered, "under") end)
         local over = CreateFrame("Button", "Over")
-        over:SetPoint("BOTTOMLEFT", 100, 100); over:SetSize(100, 100); over:EnableMouse(true)
+        over:SetPoint("BOTTOMLEFT", 100, 100); over:SetWidth(100); over:SetHeight(100); over:EnableMouse(true)
         over:SetScript("OnEnter", function() table.insert(entered, "over") end)
         -- Say "on top" with the LEVEL, not with declaration order: at equal levels the sweep takes
         -- the earlier-linked frame (`Under`), which is the tie law, not what this test is about.
@@ -752,7 +752,7 @@ fn two_frames() -> crate::script::UiScript {
         log = {}
         local function mk(name, x)
             local f = CreateFrame("Frame", name)
-            f:SetPoint("BOTTOMLEFT", x, 200); f:SetSize(200, 200); f:EnableMouse(true)
+            f:SetPoint("BOTTOMLEFT", x, 200); f:SetWidth(200); f:SetHeight(200); f:EnableMouse(true)
             f:SetScript("OnMouseDown", function(self) table.insert(log, self:GetName()..":down") end)
             f:SetScript("OnMouseUp", function(self) table.insert(log, self:GetName()..":up") end)
             return f

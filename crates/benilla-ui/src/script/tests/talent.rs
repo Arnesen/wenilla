@@ -147,7 +147,7 @@ fn set_talent_renders_the_interleaved_tooltip() {
     );
     s.run(
         r#"
-        local a = CreateFrame("Button", "TB1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "TB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetTalent(1, 1)
@@ -183,7 +183,7 @@ fn set_talent_locked_reqs_and_the_ask_once_miss() {
     // No spell view pushed for Ignite (11119): the render falls back, the ask is recorded.
     s.run(
         r#"
-        local a = CreateFrame("Button", "TB2"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local a = CreateFrame("Button", "TB2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT2")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetTalent(1, 2)
