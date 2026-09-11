@@ -1,4 +1,4 @@
-//! The WoW stdlib: positional `format`, the `getglobal`/`strsplit`/`wipe` alias layer, and the
+//! The WoW stdlib: positional `format`, the `getglobal` alias layer, and the
 //! sandbox holes (`loadstring` text-only, dangerous globals removed).
 
 use super::common::script;
@@ -36,7 +36,7 @@ fn positional_format_reorders_and_mix_is_an_error() {
     assert!(!mixed_ok, "mixed positional+sequential must error");
 }
 
-// ── getglobal / strsplit / wipe / the alias layer ───────────────────────────────────────────────
+// ── getglobal / the alias layer ───────────────────────────────────────────────
 
 #[test]
 fn stdlib_aliases_and_helpers() {
@@ -46,17 +46,6 @@ fn stdlib_aliases_and_helpers() {
         -- getglobal on a named frame
         local f = CreateFrame("Frame", "GG")
         assert(getglobal("GG") == f)
-
-        -- strsplit returns pieces (empty fields preserved)
-        local a, b, c = strsplit(",", "x,y,z")
-        assert(a == "x" and b == "y" and c == "z")
-        local e1, e2 = strsplit(",", ",tail")
-        assert(e1 == "" and e2 == "tail")
-
-        -- strjoin / strconcat / strtrim
-        assert(strjoin("-", "a", "b", "c") == "a-b-c")
-        assert(strconcat("a", "b", "c") == "abc")
-        assert(strtrim("  hi \t") == "hi")
 
         -- the bare-global aliases
         assert(strupper("ab") == "AB" and strlower("AB") == "ab")
@@ -68,13 +57,9 @@ fn stdlib_aliases_and_helpers() {
         tremove(t, 1)
         assert(t[1] == 20)
 
-        -- wipe empties a table in place
-        local w = { 1, 2, x = 3 }
-        assert(wipe(w) == w and next(w) == nil)
-
-        -- tostringall
-        local s1, s2 = tostringall(1, true)
-        assert(s1 == "1" and s2 == "true")
+        -- and the six 2.0 names that are NOT here (decision 2146)
+        assert(wipe == nil and tostringall == nil)
+        assert(strsplit == nil and strjoin == nil and strconcat == nil and strtrim == nil)
     "#,
     )
     .unwrap();

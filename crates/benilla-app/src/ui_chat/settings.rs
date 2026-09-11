@@ -629,7 +629,9 @@ pub(crate) fn restore_chat_looks(world: &mut World, script: &mut UiScript) {
       // the DBC seed when it did not, and from then on the confirmed joins' own OR.
     let mask = parsed.zone_mask.unwrap_or(seed_mask);
     if let Some(mut channels) = world.get_resource_mut::<super::edit::ChannelState>() {
-        channels.zone_mask = mask;
+        // `Some` is the reference's "chat system ready" flag (`0x499a18`): the walk and the
+        // guild-recruitment cascade both hold until this line has run (decision 2144).
+        channels.zone_mask = Some(mask);
     }
     script.set_guild_recruitment_mode(u8::from(parsed.guild_recruitment_auto));
     script.set_chat_colors(parsed.colors);
@@ -677,16 +679,68 @@ fn watch_chat_looks(script: Option<NonSendMut<UiScript>>, mut file: ResMut<ChatW
 }
 
 fn write(script: &UiScript, channels: &super::edit::ChannelState, path: &std::path::Path) {
+    // Never compose a file from an unseated mask: `ZONECHANNELS 0` in every block is exactly the
+    // damage 2120 repaired, and a `None` here means the character's file was never read.
+    let Some(zone_mask) = channels.zone_mask else {
+        warn!(
+            "chat cache: refusing to write {} — the zone mask has not been seated",
+            path.display()
+        );
+        return;
+    };
     let body = render(
         &script.chat_window_looks(),
         &script.chat_colors(),
         &roster(channels),
-        channels.zone_mask,
+        zone_mask,
         script.guild_recruitment_mode() != 0,
     );
     if let Err(e) = crate::local_state::write_atomic(path, &body) {
         warn!("chat cache: cannot write {}: {e}", path.display());
     }
+}
+
+/// Is a write owed **now**? Two reasons, and they gate differently (decision 2144):
+///
+/// - **A flush** (`exiting`) — the session end or the window close — writes **unconditionally**,
+///   provided this VM restored the character's file (`restored`): the reference rewrites the
+///   whole file at chat teardown (`0x499a80` from `0x490c55`) with no dirty flag in the way
+///   (`[0xb6e5c4]` has three writers and no reader; wow-re `guild-recruitment-mode.md` §6). The
+///   `ZONECHANNELS` word and the guild-recruitment latch are host state that no Lua write ever
+///   dirties — gating the flush on `dirty` is how a `/leave General` was persisted only when the
+///   player also happened to drag a window, and 2120's "durable state" was durable on paper.
+/// - **The debounce** writes only what Lua moved (`dirty`) once the quiet time has passed — our
+///   own improvement over the reference's teardown-only write, so a crash loses at most a second
+///   of drags; it never fires for host-only changes, which the flush carries.
+///
+/// `restored` is the guard that keeps a fresh VM — whose look table is back at the stock row —
+/// from composing the player's file out of nothing: it is exactly "the file was read into this
+/// VM", the `identity` memo.
+fn owes_write(exiting: bool, restored: bool, dirty: bool, quiet: bool) -> bool {
+    if exiting {
+        restored
+    } else {
+        dirty && quiet
+    }
+}
+
+/// The write itself, on the terms [`owes_write`] set.
+fn flush(
+    script: &UiScript,
+    channels: &super::edit::ChannelState,
+    file: &mut ChatWindowFile,
+    exiting: bool,
+) {
+    let restored = file.identity.get(script).is_some();
+    let dirty = *file.dirty.get(script);
+    let quiet = file.last_change.is_none_or(|t| t.elapsed() >= SAVE_QUIET);
+    if !owes_write(exiting, restored, dirty, quiet) {
+        return;
+    }
+    if let Some(path) = file.path.clone() {
+        write(script, channels, &path);
+    }
+    *file.dirty.get(script) = false;
 }
 
 /// The debounced save, and the `AppExit` flush.
@@ -698,34 +752,17 @@ fn save_chat_looks(
 ) {
     let exiting = exits.read().next().is_some();
     let Some(script) = script else { return };
-    if !*file.dirty.get(&script) {
-        return;
-    }
-    if !(exiting || file.last_change.is_none_or(|t| t.elapsed() >= SAVE_QUIET)) {
-        return;
-    }
-    let Some(path) = file.path.clone() else {
-        *file.dirty.get(&script) = false;
-        return;
-    };
-    write(&script, &channels, &path);
-    *file.dirty.get(&script) = false;
+    flush(&script, &channels, &mut file, exiting);
 }
 
-/// The session-end flush — `OnExit(InWorld)`.
+/// The session-end flush — `OnExit(InWorld)`, the reference's chat teardown.
 fn save_on_session_end(
     script: Option<NonSendMut<UiScript>>,
     channels: Res<super::edit::ChannelState>,
     mut file: ResMut<ChatWindowFile>,
 ) {
     let Some(script) = script else { return };
-    if !*file.dirty.get(&script) {
-        return;
-    }
-    if let Some(path) = file.path.clone() {
-        write(&script, &channels, &path);
-    }
-    *file.dirty.get(&script) = false;
+    flush(&script, &channels, &mut file, true);
 }
 
 pub(super) fn plugin(app: &mut App) {
@@ -986,13 +1023,45 @@ mod tests {
             ]),
             ..Default::default()
         };
+        // Unseated, a join is dropped rather than absorbed into a word nobody has read yet.
+        state.note_zone_channel_joined("General - Elwynn Forest");
+        assert_eq!(state.zone_mask, None, "not seated: nothing to OR into");
+        state.zone_mask = Some(0);
         state.note_zone_channel_joined("General - Elwynn Forest");
         state.note_zone_channel_joined("Trade - City");
-        assert_eq!(state.zone_mask, 0b11);
+        assert_eq!(state.zone_mask, Some(0b11));
         state.note_zone_channel_joined("MyChan");
-        assert_eq!(state.zone_mask, 0b11, "a custom channel has no bit");
+        assert_eq!(state.zone_mask, Some(0b11), "a custom channel has no bit");
+        // The clear is keyed on the SLOT the wire name finds, and its own id (decision 2144,
+        // wow-re `leavechannelbyname-contract.md` §8) — a name we hold no slot for clears nothing.
         state.note_zone_channel_left("Trade - City");
-        assert_eq!(state.zone_mask, 0b01, "an explicit leave clears one bit");
+        assert_eq!(state.zone_mask, Some(0b11), "no slot carries it yet");
+        state.claim_slot("Trade - City");
+        state.note_zone_channel_left("Trade - City");
+        assert_eq!(
+            state.zone_mask,
+            Some(0b01),
+            "an explicit leave clears one bit"
+        );
+    }
+
+    /// **The teardown write is unconditional; only the debounce reads the dirty flag** (decision
+    /// 2144). A `/leave General` moves host state alone — the mask — and the reference persists
+    /// it because its teardown saver has no dirty flag; ours gated the same write on a Lua-side
+    /// flag, so the leave came back on the next login unless a window had also been dragged.
+    #[test]
+    fn a_flush_writes_whatever_was_restored_and_the_debounce_writes_only_lua_moves() {
+        // The flush: restored is the whole condition.
+        assert!(owes_write(true, true, false, false));
+        assert!(owes_write(true, true, true, true));
+        assert!(
+            !owes_write(true, false, true, true),
+            "a VM that never read the file has nothing of the player's to write"
+        );
+        // The debounce: dirty AND quiet, never on host-only state.
+        assert!(owes_write(false, true, true, true));
+        assert!(!owes_write(false, true, true, false), "still being dragged");
+        assert!(!owes_write(false, true, false, true), "nothing Lua moved");
     }
 
     /// The header is a comment block and survives the round trip as one — a reader that choked on

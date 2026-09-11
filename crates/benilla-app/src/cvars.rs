@@ -45,11 +45,13 @@ use crate::chat_bubble::BubbleConfig;
 use crate::minimap::MinimapZoom;
 use crate::nameplates::NameConfig;
 use crate::player::camera::{
-    FollowConfig, FollowStyle, LookConfig, ZoomLimit, FOLLOW_SPEED_RANGE, MOUSE_SPEED_RANGE,
+    FollowConfig, FollowStyle, LookConfig, ZoomLimit, CAMERA_SPEED_RANGE, FOLLOW_SPEED_RANGE,
+    MOUSE_SPEED_RANGE,
 };
 use crate::portrait::PaneRate;
 use crate::sound::SoundConfig;
 use crate::target::ClickConfig;
+use crate::ui_chat::combat::UnitClass as CombatClass;
 use crate::ui_loot::LootConfig;
 use crate::ui_script::UiScaleCvar;
 use crate::video::VideoConfig;
@@ -491,6 +493,94 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // 8 on the weakest). 24 is on no stop of ours; 1649 broke that tie toward the denser stop,
     // because erring sparse is the worse failure for a knob about ground cover.
     same("WorldDetail", "1"),
+    // ── The combat log's display ranges: the reference's own `0x8629e0` table, in yards ─────────
+    //
+    // Eight rows, registered by the reference in ONE place — `0x626d00`, a loop over the
+    // `{cvarName, defaultValue}` pairs at `0x8629e0` skipping the NULL/empty names, then one
+    // unrolled call for the death range (wow-re `object-layer/scratch/combat-log-chat-law.md`
+    // §5.2). They read as the CVar record's **float** (`+0x24`), unlike the periodic gate below,
+    // which reads the int.
+    //
+    // **They are why a damage meter's range slider does something.** `BigWigs/Plugins/Range.lua`
+    // and `DPSMate/DPSMate_DataBuilder.lua` both read and write all eight; unregistered, every
+    // `SetCVar` here wrote nothing and every `GetCVar` answered nil. The reader was already built
+    // — `ui_chat::combat::in_range` has run this exact table since 1571, off the compiled-in
+    // defaults, with `UnitClass::range_cvar` parked under `#[cfg(test)]` waiting for this row.
+    //
+    // Classes 0 and 1 — you and your pet — have NO CVar in the reference's table (a NULL name and
+    // the `100000.0` sentinel), so there is nothing to register for them and nothing to miss.
+    same("CombatLogRangeParty", "50"),
+    same("CombatLogRangePartyPet", "50"),
+    same("CombatLogRangeFriendlyPlayers", "50"),
+    same("CombatLogRangeFriendlyPlayersPets", "50"),
+    same("CombatLogRangeHostilePlayers", "50"),
+    same("CombatLogRangeHostilePlayersPets", "50"),
+    same("CombatLogRangeCreature", "30"),
+    // The one range CVar OUTSIDE that table (`0x626d5f`, default string `"60"` at `0x862e14`) —
+    // and the only formatter with a range of its own. `0x62c160` reads it first and falls back to
+    // the per-class getter only when the *lookup* fails, which a registered client never sees.
+    same(crate::ui_chat::combat::DEATH_LOG_RANGE_CVAR, "60"),
+    // ── The floating-combat-text gates, and the periodic one ────────────────────────────────────
+    //
+    // `CombatDamage` (`0x6032df`, record `[0xc4d944]`) is the MASTER: its only two readers are the
+    // localized-WORD emitter `0x607140` and the `"%d"` NUMBER emitter `0x6128b0`, and both branch
+    // targets are epilogues — so at "0" nothing floats over any unit from any source, words
+    // included, despite the CVar's own help text saying "damage numbers". The two `Pet*` rows are
+    // sub-gates below it, on the owned-by-you branch only; the self sub-case is unconditional.
+    //
+    // `PetSpellDamage` has no row in `UIOptionsFrameCheckButtons` — the *Show Pet Melee Damage*
+    // box writes both (`UIOptionsFrame_Save` l.334-336) — which is why 2077's census, which reads
+    // that table, could not see it while it saw its two siblings.
+    same("CombatDamage", "1"),
+    same("PetMeleeDamage", "1"),
+    same("PetSpellDamage", "1"),
+    // `CombatLogPeriodicSpells` (`0x6033b3`, handle deliberately DISCARDED — every use re-looks it
+    // up by name). Read as the record's INT, unlike the ranges above, which read its float.
+    same(crate::ui_chat::combat::LOG_PERIODIC_CVAR, "1"),
+    // ── The three Sound-panel check buttons benilla had the machinery for and no key to ─────────
+    //
+    // All three are category-7 (sound) registrations that keep **no** `CVar::Register` handle: the
+    // reference looks each up by name at the point of use. Each already had its reader here.
+    //
+    // `SoundListenerAtCharacter` (`0x457890`, "lock listener at character"): both of its branches
+    // were already written in `update_audio_listener` — the at-character seat and the at-camera
+    // one — with the camera path reachable only as a no-character fallback. This is the selector
+    // they were missing.
+    same("SoundListenerAtCharacter", "1"),
+    // `EmoteSounds` (`0x4573b9`): the received text-emote voice kit, and only that.
+    same("EmoteSounds", "1"),
+    // `SoundZoneMusicNoDelay` (`0x4578b3`): `next_track_time`'s own comment named it as "the
+    // immediate path, a \"0\" CVar we don't expose". Now exposed, at the reference's `"0"`.
+    same("SoundZoneMusicNoDelay", "0"),
+    // `assistAttack` (`0x48fc50`, record `[0xb4d8f8]`) — `/assist`'s opt-in second leg: select the
+    // basis unit's target AND open the swing on it. Three references image-wide, two of them the
+    // shared assist tails; `CanAssist 0x6066f0` is verified NOT on the path. The `"0"` default is
+    // the one wow-re had to correct against itself — its first pass read `"3"` off the *next*
+    // registration's default (`minimapZoom`), the `mov ds:` adjacency trap — so it is worth saying
+    // plainly here: stock `/assist` selects and does not swing.
+    same("assistAttack", "0"),
+    // ── Mouse-look, per axis: the two CVars whose absence RAISED in the stock window ────────────
+    //
+    // `cameraYawMoveSpeed` is `UIOptionsFrameSliders` row 3, MOUSE_LOOK_SPEED (90…270 step 10) —
+    // and it is what made stock `UIOptionsFrame_Load()` die: `slider:SetValue(GetCVar(value.cvar))`
+    // is a shape-A binding (`0x790980`) that raises on a nil in the reference too, so the whole
+    // window's `_Load` (and `_SetDefaults`, through `GetCVarDefault`) stopped at slider 3.
+    // `cameraPitchMoveSpeed` has no row of its own: `UIOptionsFrame_Save` writes it as
+    // `sliderValue / 2` beside the yaw one (l.352-356), which is exactly this 180/90 pair.
+    //
+    // **Both defaults are the reference's, and the shipped feel does not change** — the two facts
+    // are compatible only because the unit divergence is carried in `camera::LOOK_YAW_PER_SPEED`
+    // instead of in these numbers. The reference integrates OS-accelerated `WM_MOUSEMOVE` pixels
+    // (it imports no DirectInput at all) while we integrate winit's raw device delta, so its
+    // `deg per pixel` is not our `deg per unit` and the factor between them is a per-machine
+    // pointer setting. Anchoring the scale there and keeping the defaults here is what lets 1804
+    // hold honestly rather than by picking a number that merely looks right.
+    //
+    // The validator is `0x50c000` → `0x50b330`, range [0.1, 360], and it **rejects rather than
+    // clamps** — `apply_to_knobs` does the same below, which is why these two do not use the
+    // clamping shape every other numeric row uses.
+    same("cameraYawMoveSpeed", "180"),
+    same("cameraPitchMoveSpeed", "90"),
     // Mouse Sensitivity (1140): 1.12's own MOUSE_SENSITIVITY slider (`UIOptionsFrameSliders` row
     // 1, 0.5..1.5 step 0.05), a MULTIPLIER over the camera's own per-pixel rate — which was a
     // frozen constant until this row. Default "1" is the shipped feel exactly, welded to
@@ -971,6 +1061,10 @@ pub(crate) struct KnobParams<'w> {
     auto_self_cast: ResMut<'w, crate::ui_action::AutoSelfCast>,
     realmlist: ResMut<'w, crate::realmlist::Realmlist>,
     fps_journal: ResMut<'w, crate::perf::FpsJournalSetting>,
+    assist_attack: ResMut<'w, crate::target::AssistAttack>,
+    combat_ranges: ResMut<'w, crate::ui_chat::combat::CombatLogRanges>,
+    damage_text: ResMut<'w, crate::combat_text::DamageTextGates>,
+    log_periodic: ResMut<'w, crate::ui_chat::combat::LogPeriodicSpells>,
 }
 
 impl KnobParams<'_> {
@@ -1009,6 +1103,10 @@ impl KnobParams<'_> {
             auto_self_cast: &mut self.auto_self_cast,
             realmlist: &mut self.realmlist,
             fps_journal: &mut self.fps_journal,
+            assist_attack: &mut self.assist_attack,
+            combat_ranges: &mut self.combat_ranges,
+            damage_text: &mut self.damage_text,
+            log_periodic: &mut self.log_periodic,
         }
     }
 }
@@ -1043,6 +1141,10 @@ struct Knobs<'a> {
     auto_self_cast: &'a mut crate::ui_action::AutoSelfCast,
     realmlist: &'a mut crate::realmlist::Realmlist,
     fps_journal: &'a mut crate::perf::FpsJournalSetting,
+    assist_attack: &'a mut crate::target::AssistAttack,
+    combat_ranges: &'a mut crate::ui_chat::combat::CombatLogRanges,
+    damage_text: &'a mut crate::combat_text::DamageTextGates,
+    log_periodic: &'a mut crate::ui_chat::combat::LogPeriodicSpells,
 }
 
 /// **The string-valued rows**, matched ahead of the numeric parse every other row goes through —
@@ -1116,10 +1218,14 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // The client's own parse for this one is literally `!= 0` too (`0x4574d0`: `setne al`).
         "soundreverb" => knobs.sound.reverb = v != 0.0,
         "soundoutputlimiter" => knobs.sound.limiter = v != 0.0,
+        "soundlisteneratcharacter" => knobs.sound.listener_at_character = v != 0.0,
+        "emotesounds" => knobs.sound.emote_sounds = v != 0.0,
+        "soundzonemusicnodelay" => knobs.sound.zone_music_no_delay = v != 0.0,
         "uiscale" => knobs.scale.0 = v.clamp(0.5, 1.5),
         "farclip" => knobs.view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
         "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
         "autoselfcast" => knobs.auto_self_cast.0 = v != 0.0,
+        "assistattack" => knobs.assist_attack.0 = v != 0.0,
         // The sixteen camera-view CVars have no knob to apply to: `CameraViews` is their writer,
         // not their reader (it seeds itself from the persisted file at startup, and `SaveView`
         // writes back). They are claimed here so the table's own "not a knob this build knows"
@@ -1141,6 +1247,33 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "mousespeed" => {
             knobs.look.sensitivity = v.clamp(*MOUSE_SPEED_RANGE.start(), *MOUSE_SPEED_RANGE.end());
         }
+        // The reference's `0x50b330` validator REJECTS an out-of-range value rather than clamping
+        // it: it prints `Value out of range (%f - %f)` and `CVar::Set` never stores, so the old
+        // value stands. That is a different posture from every clamping row above, and it is the
+        // faithful one — a script writing 1e9 gets a refusal, not a silently pinned camera.
+        "camerayawmovespeed" | "camerapitchmovespeed" => {
+            if !CAMERA_SPEED_RANGE.contains(&v) {
+                warn!(
+                    "cvar {name}: value out of range ({} - {}) — ignored",
+                    CAMERA_SPEED_RANGE.start(),
+                    CAMERA_SPEED_RANGE.end()
+                );
+                return true;
+            }
+            if key == "camerayawmovespeed" {
+                knobs.look.yaw_speed = v;
+            } else {
+                knobs.look.pitch_speed = v;
+            }
+        }
+        "combatdamage" => knobs.damage_text.combat_damage = v != 0.0,
+        "petmeleedamage" => knobs.damage_text.pet_melee = v != 0.0,
+        "petspelldamage" => knobs.damage_text.pet_spell = v != 0.0,
+        "combatlogperiodicspells" => knobs.log_periodic.0 = v != 0.0,
+        // The combat log's eight display ranges (yards, the CVar's float field). One arm for all
+        // of them: `CombatLogRanges::set` walks the class table through `UnitClass::range_cvar`,
+        // so the seven names live in exactly one place and this arm cannot drift from them.
+        _ if knobs.combat_ranges.set(name, v) => {}
         "autolootdefault" => knobs.loot.auto_loot = v != 0.0,
         "unitnameplayer" => knobs.names.player = v != 0.0,
         "unitnamenpc" => knobs.names.npc = v != 0.0,
@@ -1462,6 +1595,10 @@ fn sync_cvars(
             tex_filter,
             realmlist,
             fps_journal,
+            assist_attack,
+            combat_ranges,
+            damage_text,
+            log_periodic,
         } = &params;
         // The config file's values go in FIRST (decision 1291): registration — ours below, or an
         // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
@@ -1488,7 +1625,7 @@ fn sync_cvars(
                 .collect(),
         );
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 49] = [
+        let session: [(&str, String); 67] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -1503,12 +1640,21 @@ fn sync_cvars(
             ),
             ("SoundReverb", flag(sound.reverb)),
             ("SoundOutputLimiter", flag(sound.limiter)),
+            (
+                "SoundListenerAtCharacter",
+                flag(sound.listener_at_character),
+            ),
+            ("EmoteSounds", flag(sound.emote_sounds)),
+            ("SoundZoneMusicNoDelay", flag(sound.zone_music_no_delay)),
             ("uiScale", scale.0.to_string()),
             ("farclip", view.farclip.to_string()),
             ("deselectOnClick", flag(click.deselect_on_click)),
             ("autoSelfCast", flag(auto_self_cast.0)),
+            ("assistAttack", flag(assist_attack.0)),
             ("mouseInvertPitch", flag(look.invert_pitch)),
             ("mousespeed", look.sensitivity.to_string()),
+            ("cameraYawMoveSpeed", look.yaw_speed.to_string()),
+            ("cameraPitchMoveSpeed", look.pitch_speed.to_string()),
             ("cameraDistanceMaxFactor", zoom.factor().to_string()),
             ("cameraSmoothStyle", follow.style.cvar().to_string()),
             (
@@ -1559,6 +1705,48 @@ fn sync_cvars(
             (
                 crate::realmlist::CVAR_REALMLIST,
                 realmlist.address().to_string(),
+            ),
+            // The combat log's eight display ranges, off the live table — written out one class at
+            // a time rather than composed in a loop, because this array is the readable census of
+            // what a session's `GetCVar` answers and a loop would hide eight rows inside one.
+            (
+                "CombatLogRangeParty",
+                combat_ranges.class(CombatClass::Party).to_string(),
+            ),
+            (
+                "CombatLogRangePartyPet",
+                combat_ranges.class(CombatClass::PartyPet).to_string(),
+            ),
+            (
+                "CombatLogRangeFriendlyPlayers",
+                combat_ranges.class(CombatClass::FriendlyPlayer).to_string(),
+            ),
+            (
+                "CombatLogRangeFriendlyPlayersPets",
+                combat_ranges.class(CombatClass::FriendlyPet).to_string(),
+            ),
+            (
+                "CombatLogRangeHostilePlayers",
+                combat_ranges.class(CombatClass::HostilePlayer).to_string(),
+            ),
+            (
+                "CombatLogRangeHostilePlayersPets",
+                combat_ranges.class(CombatClass::HostilePet).to_string(),
+            ),
+            (
+                "CombatLogRangeCreature",
+                combat_ranges.class(CombatClass::Creature).to_string(),
+            ),
+            (
+                crate::ui_chat::combat::DEATH_LOG_RANGE_CVAR,
+                combat_ranges.death().to_string(),
+            ),
+            ("CombatDamage", flag(damage_text.combat_damage)),
+            ("PetMeleeDamage", flag(damage_text.pet_melee)),
+            ("PetSpellDamage", flag(damage_text.pet_spell)),
+            (
+                crate::ui_chat::combat::LOG_PERIODIC_CVAR,
+                flag(log_periodic.0),
             ),
         ];
         for (name, value) in session {
@@ -1984,6 +2172,10 @@ mod tests {
         let mut loot = LootConfig::default();
         let mut names = NameConfig::default();
         let mut plates = VPlateMode::default();
+        let mut assist_attack = crate::target::AssistAttack::default();
+        let mut combat_ranges = crate::ui_chat::combat::CombatLogRanges::default();
+        let mut damage_text = crate::combat_text::DamageTextGates::default();
+        let mut log_periodic = crate::ui_chat::combat::LogPeriodicSpells::default();
         // Literal fields, not Default: ClutterConfig::default() reads the env A/B vars.
         let mut clutter = ClutterConfig {
             density: 3.0,
@@ -2049,6 +2241,10 @@ mod tests {
             msaa_formats: &msaa_formats,
             realmlist: &mut realmlist,
             fps_journal: &mut fps_journal,
+            assist_attack: &mut assist_attack,
+            combat_ranges: &mut combat_ranges,
+            damage_text: &mut damage_text,
+            log_periodic: &mut log_periodic,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -2313,7 +2509,11 @@ mod tests {
                 formats: vec![(32, 32, 1), (32, 32, 2), (32, 32, 4)],
             })
             .init_resource::<LookConfig>()
+            .init_resource::<crate::ui_chat::combat::CombatLogRanges>()
+            .init_resource::<crate::combat_text::DamageTextGates>()
+            .init_resource::<crate::ui_chat::combat::LogPeriodicSpells>()
             .init_resource::<ClickConfig>()
+            .init_resource::<crate::target::AssistAttack>()
             .init_resource::<LootConfig>()
             .init_resource::<NameConfig>()
             .init_resource::<VPlateMode>()

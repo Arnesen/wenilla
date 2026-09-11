@@ -628,6 +628,10 @@ pub(crate) struct Model {
     /// the reference client itself wrote in this repo's install says `AUTO`, on characters that
     /// never opened the option.
     pub(crate) guild_recruitment_mode: u8,
+    /// A `SetGuildRecruitmentMode(1)` since the last drain — `0x49ea70`'s tail-jump into the
+    /// cascade `0x49ea90`, which the app runs (decision 2144). Keyed on the *new value alone*, not
+    /// on a change: the reference's store is unconditional and the jump reads only `ecx == 1`.
+    pub(crate) guild_recruitment_cascade: bool,
     /// Whether Lua has moved [`Self::guild_recruitment_mode`] since the last drain — the chat
     /// cache's dirty signal, the peer of `chat_window_changes`.
     pub(crate) guild_recruitment_changed: bool,
@@ -1896,6 +1900,7 @@ impl Model {
             zone_channel_catalog: Vec::new(),
             channel_commands: Vec::new(),
             guild_recruitment_mode: 1,
+            guild_recruitment_cascade: false,
             guild_recruitment_changed: false,
             emote_requests: Vec::new(),
             roll_requests: Vec::new(),

@@ -17,6 +17,11 @@
 //! measure demand. It measures the SURFACE, and every entry in the two declared lists below is
 //! where the reading of the demand got written down.
 //!
+//! When re-reading that demand: those corpora hold addons that *run on* 1.12, not addons written
+//! only for it — most of the big ones are multi-client and pick a code path at load, and they come
+//! in several versions of themselves. `scripts/api-coverage.sh`'s header has the detail; decision
+//! 2146 is the case that made it matter.
+//!
 //! ## The reference side is a CHAIN, not 23 flat surfaces
 //!
 //! The reference's 23 widget registrar tables are mutually **disjoint** — a class's real surface is

@@ -89,24 +89,23 @@ impl Poses for Query<'_, '_, &Transform> {
 /// OUT and a NaN is out. 1571 used `<=`; the boundary is exact in the binary and there is no reason
 /// for us to be looser.
 ///
-/// **The ranges are the compiled-in defaults, not live CVars** — the same standing shape as
-/// [`crate::combat_text`]'s `COMBAT_DAMAGE`/`PET_*` gates, and for the same reason: the values are
-/// byte-read and correct, and the CVars (`CombatLogRangeParty` and its six siblings) can be wired to
-/// the live table without changing anything here. [`UnitClass::default_range`] carries them,
-/// including the two sentinels that make the gate a no-op for you and your pet (`100000.0`) and
-/// unconditional for an unresolvable unit (`0.0`).
+/// **The range is the caller's, read off [`CombatLogRanges`]** — the live table the reference's
+/// `0x626810` walks, not a compiled-in constant. The caller picks which entry: a class range for
+/// the fourteen two-ended and one-ended formatters, and [`CombatLogRanges::death`] for the one
+/// formatter that has a range CVar of its own. The two sentinels ride in the table like any other
+/// entry: `100000.0` makes the gate a no-op for you and your pet, `0.0` refuses an unresolvable
+/// unit outright.
 ///
 /// A pose we do not hold is treated as **in** range: dropping a line because a unit's transform had
 /// not landed yet would silently lose the killing blow on a mob that despawns, which is a worse
 /// failure than logging one fight too far away.
 pub(crate) fn in_range(
     guid: u64,
-    class: UnitClass,
+    range: f32,
     self_guid: &SelfGuid,
     index: &GuidIndex,
     poses: &impl Poses,
 ) -> bool {
-    let range = class.default_range();
     if range >= 100_000.0 {
         return true;
     }
@@ -119,6 +118,135 @@ pub(crate) fn in_range(
     };
     me.distance_squared(them) < range * range
 }
+
+/// **The combat log's display ranges, live** — the reference's `{cvarName, defaultValue}` table at
+/// `0x8629e0` plus the one range CVar that sits outside it, `CombatDeathLogRange`.
+///
+/// The reference registers all eight in one place (`0x626d00`, a loop over `0x8629e0` skipping the
+/// NULL/empty names, then one unrolled call — wow-re `combat-log-chat-law.md` §5.2), stores **no
+/// handle for any of them**, and looks each up by name at every use. We keep the resolved numbers
+/// instead: the lookup-by-name is the reference's way of not caching, not a behaviour, and
+/// `crate::cvars` already owns the string table.
+///
+/// **Yards, and read as the CVar's FLOAT field.** The record carries both `+0x24` float and `+0x28`
+/// int, written from the same string at registration; the range gate reads the float and the
+/// periodic gates read the int (§5.1). `0` is a real value and means *silence this class* —
+/// `dist² < 0` is never true — which is why nothing here clamps to a floor.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct CombatLogRanges {
+    /// By [`UnitClass`] index `0..=9`. Classes 0/1 (you and your pet) have no CVar and sit at the
+    /// reference's `100000.0` sentinel; class 9 (unresolvable) sits at its `0.0`.
+    class: [f32; 10],
+    /// `CombatDeathLogRange` — the death line's own range, and the **only** formatter that has
+    /// one. Not part of the `0x8629e0` table.
+    death: f32,
+}
+
+impl Default for CombatLogRanges {
+    fn default() -> Self {
+        let mut class = [0.0; 10];
+        for (i, slot) in class.iter_mut().enumerate() {
+            *slot = UnitClass::from_index(i).default_range();
+        }
+        Self {
+            class,
+            death: DEATH_LOG_RANGE_DEFAULT,
+        }
+    }
+}
+
+impl CombatLogRanges {
+    /// This class's live display range, in yards.
+    pub(crate) fn class(&self, class: UnitClass) -> f32 {
+        self.class[class as usize]
+    }
+
+    /// The death line's live range — `CombatDeathLogRange`, for every class alike.
+    ///
+    /// **It really is every class.** The death formatter `0x62c160` looks the CVar up first
+    /// (`0x62c19c`) and falls back to the per-class getter only when the *lookup* fails; the CVar
+    /// is registered at startup, so the fallback is unreachable in a running client. So your own
+    /// death passes on distance 0 rather than on class 0's sentinel, and an unresolvable unit's
+    /// death is logged at 60 yd rather than refused by class 9's `0.0`.
+    pub(crate) fn death(&self) -> f32 {
+        self.death
+    }
+
+    /// Apply one `SetCVar` to the table — `true` if the name was one of the eight.
+    ///
+    /// The class names are walked through [`UnitClass::range_cvar`] so this module keeps exactly
+    /// one copy of them.
+    pub(crate) fn set(&mut self, name: &str, value: f32) -> bool {
+        if name.eq_ignore_ascii_case(DEATH_LOG_RANGE_CVAR) {
+            self.death = value;
+            return true;
+        }
+        for i in 0..self.class.len() {
+            let class = UnitClass::from_index(i);
+            if class
+                .range_cvar()
+                .is_some_and(|c| c.eq_ignore_ascii_case(name))
+            {
+                self.class[i] = value;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// **`CombatLogPeriodicSpells`** — "Log Periodic Effects", and its blast radius is wider than the
+/// options row's wording.
+///
+/// Its first read site (`0x626dee`) is at the **top of the `SMSG_PERIODICAURALOG` handler**
+/// `0x626dd0`, and a zero jumps to `0x6271b4`, a bare epilogue — so the whole packet body is
+/// suppressed: every `CHAT_MSG_SPELL_PERIODIC_*` line **and** the floating DoT/HoT tick number
+/// **and** the periodic miss-word. The other two sites are pure chat-line filters that leave the
+/// floats alone: `0x62d9ae` (the `SMSG_SPELLNONMELEEDAMAGELOG` leg whose `periodicLog` byte is
+/// set) and `0x62d25f` (`SMSG_SPELLORDAMAGE_IMMUNE`'s `IMMUNESPELL*` lines, only when the
+/// packet's periodic byte is set).
+///
+/// Read as the CVar record's **int** `+0x28`, unlike [`CombatLogRanges`] which reads the float —
+/// both fields are written from the same string at registration (wow-re
+/// `object-layer/scratch/combat-log-chat-law.md` §5.1/§5.4).
+///
+/// A **missing record counts as OFF** in the reference, because the gate is
+/// `cvar == NULL || cvar->int == 0`. That cannot happen here — the row is registered at startup —
+/// and it is why the reference's own default `"1"` is load-bearing rather than incidental.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct LogPeriodicSpells(pub(crate) bool);
+
+impl Default for LogPeriodicSpells {
+    /// The reference's registered default, `"1"`.
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// `CombatLogPeriodicSpells`' registered name.
+pub(crate) const LOG_PERIODIC_CVAR: &str = "CombatLogPeriodicSpells";
+
+/// **The combat-feedback CVars, as one system parameter** — what a packet handler needs to know
+/// about the player's settings before it emits a line or a floating number.
+///
+/// Bundled for the reason [`crate::cvars::KnobParams`] is: `net::apply::apply_net_updates` lives
+/// against Bevy's 16-parameter ceiling, and three more `Res` would have gone into a nested tuple
+/// as positional fields nobody can read at the use site. They are one concern anyway — the
+/// reference reads all three inside the same combat-log/world-text translation unit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct CombatFeedbackCvars<'w> {
+    /// The eight display ranges.
+    pub ranges: Res<'w, CombatLogRanges>,
+    /// `CombatLogPeriodicSpells`.
+    pub periodic: Res<'w, LogPeriodicSpells>,
+    /// `CombatDamage` + the two `Pet*` sub-gates.
+    pub damage_text: Res<'w, crate::combat_text::DamageTextGates>,
+}
+
+/// `CombatDeathLogRange`'s registered name and default — `0x626d5f`, default string `"60"`
+/// (`0x862e14`).
+pub(crate) const DEATH_LOG_RANGE_CVAR: &str = "CombatDeathLogRange";
+pub(crate) const DEATH_LOG_RANGE_DEFAULT: f32 = 60.0;
 
 /// A unit's standing relative to the active player — the `0..9` index every combat-log selector in
 /// the reference takes, in both parameter positions.
@@ -161,15 +289,29 @@ pub(crate) enum UnitClass {
 }
 
 impl UnitClass {
+    /// The `0..=9` index back to its class — the inverse of the discriminant, for walking the
+    /// reference's own table order.
+    pub(crate) fn from_index(i: usize) -> Self {
+        match i {
+            0 => Self::Me,
+            1 => Self::MyPet,
+            2 => Self::Party,
+            3 => Self::PartyPet,
+            4 => Self::FriendlyPlayer,
+            5 => Self::FriendlyPet,
+            6 => Self::HostilePlayer,
+            7 => Self::HostilePet,
+            8 => Self::Creature,
+            _ => Self::Unknown,
+        }
+    }
+
     /// The CVar naming this class's display range, `None` for the two ungated classes (0/1).
     ///
-    /// **Test-only, deliberately.** The gate itself runs on [`Self::default_range`] — the
-    /// compiled-in values — following the standing shape of [`crate::combat_text`]'s own cvar
-    /// gates. This function is the other half of that table, kept so
-    /// `tests::the_class_range_table_is_the_binarys` can pin what was read out of `WoW.exe`; it
-    /// becomes the production lookup the day the live CVar table is wired in, and until then a
-    /// name that drifted would otherwise have nothing checking it.
-    #[cfg(test)]
+    /// **This is the production lookup** — `CombatLogRanges::set` walks the classes through it to
+    /// find the one a `SetCVar` names, so the table above is the only place these seven names are
+    /// written down. It was `#[cfg(test)]` until the CVars were registered, with a comment saying
+    /// it "becomes the production lookup the day the live CVar table is wired in".
     pub(crate) fn range_cvar(self) -> Option<&'static str> {
         Some(match self {
             Self::Me | Self::MyPet | Self::Unknown => return None,
@@ -183,7 +325,9 @@ impl UnitClass {
         })
     }
 
-    /// The compiled-in default range in yards, before any CVar override.
+    /// The **registered default** range in yards — the `defaultValue` half of the reference's own
+    /// `{cvarName, defaultValue}` pairs at `0x8629e0`, and therefore what [`CombatLogRanges`] seeds
+    /// itself with and what `cvars::REGISTERED` ships. The live value is the CVar's.
     pub(crate) fn default_range(self) -> f32 {
         match self {
             Self::Me | Self::MyPet => 100_000.0,

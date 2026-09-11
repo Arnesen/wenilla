@@ -119,6 +119,13 @@ fn emote_sounds(
         };
         let kit = match m.kind {
             EmoteKind::Text(text_id) => {
+                // **`EmoteSounds` gates the received text-emote voice, and only that** — the
+                // reference looks the CVar up by name at play time and, on a zero, never fetches
+                // the kit at all (silence, not a muted play). The `Anim` arm below is the
+                // `Emotes.dbc` `EventSoundID` one-shot, a different channel with no such gate.
+                if !config.emote_sounds {
+                    continue;
+                }
                 let (Some(race), Some(sex)) = (store.0.unit_race(), store.0.unit_gender()) else {
                     continue;
                 };

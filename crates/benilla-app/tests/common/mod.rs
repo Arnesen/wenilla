@@ -138,8 +138,10 @@ const UIPARENT_STAND_INS: &str = r#"
     end
     -- The four options/menu windows `IsOptionFrameOpen` (l.997) and `ToggleGameMenu` (l.1467)
     -- index unguarded. `IsOptionFrameOpen` is on the path of every window close, so a kit that
-    -- loads no options window raised on the first bag click; ours answers all three of the
-    -- reference's options windows (1987) and a kit may load none of them.
+    -- loads no options window raised on the first bag click. In the shipped manifest all four
+    -- names are real — `OptionsFrame` is our window's own, `UIOptionsFrame` and
+    -- `SoundOptionsFrame` are the reference's own files loaded hidden — but a KIT is a prefix of
+    -- the manifest and may load none of them, which is what these stand-ins are for.
     local function benilla_seat_options()
         benilla_seat({ "GameMenuFrame", "OptionsFrame", "UIOptionsFrame", "SoundOptionsFrame" })
         if not OptionsFrameCancel then

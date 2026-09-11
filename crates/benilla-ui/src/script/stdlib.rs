@@ -7,8 +7,8 @@
 //!   not anti-automation, but running untrusted addon Lua still means no filesystem/OS/native reach.
 //! - **Stdlib** ([`install`]): the nine bare-global aliases probe A found in the real corpus
 //!   (`format`/`strlen`/`gsub`/`strsub`/`strupper`/`tinsert`/`getn`/`tremove`/`strfind`), plus
-//!   `strlower`/`strrep`, `getglobal`/`setglobal`, the `strsplit`/`strjoin`/`strtrim`/`strconcat`
-//!   family, `wipe`, `tostringall`, and — the one non-trivial piece — a `string.format` replacement
+//!   `strlower`/`strrep`, `getglobal`/`setglobal`, and — the one non-trivial piece — a
+//!   `string.format` replacement
 //!   that supports Blizzard's positional `%N$` extension (probe A confirmed stock 5.1 rejects it).
 //!
 //! ## The positional `format` (`%N$`)
@@ -157,7 +157,7 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Install the WoW stdlib layer (aliases, `strsplit` family, positional `format`, …).
+/// Install the WoW stdlib layer (the bare-global aliases, positional `format`, …).
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // The default `geterrorhandler()` reports into the same channel a failed handler uses, so an
     // addon's `geterrorhandler()(msg)` surfaces where every other script error does rather than
@@ -193,7 +193,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 }
 
 /// The stdlib layer, in Lua. One place, so each alias is the one-liner the task calls for and the
-/// `format`/`strsplit` logic is readable. Runs once at construction.
+/// `format` logic is readable. Runs once at construction.
 const WOW_STDLIB: &str = r#"
 -- ── the bare string family ─────────────────────────────────────────────────────────────────────
 -- Every name here is present in the REAL 1.12 client's global table — the in-world `_G` captured
@@ -359,61 +359,14 @@ __benilla_game_hour = 0
 __benilla_game_minute = 0
 function GetGameTime() return __benilla_game_hour, __benilla_game_minute end
 
--- ── wipe / tostringall ─────────────────────────────────────────────────────────────────────────
-function wipe(t)
-    for k in pairs(t) do t[k] = nil end
-    return t
-end
-
--- 5.0 spelling throughout this file: a vararg function reads `arg`/`arg.n`, never `...` as a
--- value, because 1.12's Lua has no grammar for that (decision 2101) and neither does ours.
-function tostringall(...)
-    local n = arg.n
-    local t = {}
-    for i = 1, n do t[i] = tostring(arg[i]) end
-    return unpack(t, 1, n)
-end
-
--- ── the strsplit / strjoin / strtrim / strconcat family ────────────────────────────────────────
--- strsplit(delimiters, str [, limit]): each char of `delimiters` is a single-char delimiter;
--- returns the pieces as multiple values (empty fields preserved), matching WoW's behavior.
-function strsplit(delim, str, limit)
-    local set = "[" .. delim:gsub("(.)", "%%%1") .. "]"
-    local result = {}
-    local n = 0
-    local start = 1
-    while true do
-        if limit and n >= limit - 1 then
-            n = n + 1; result[n] = str:sub(start)
-            break
-        end
-        local s, e = str:find(set, start)
-        if not s then
-            n = n + 1; result[n] = str:sub(start)
-            break
-        end
-        n = n + 1; result[n] = str:sub(start, s - 1)
-        start = e + 1
-    end
-    return unpack(result, 1, n)
-end
-
--- strjoin(sep, ...): join the varargs with `sep`.
-function strjoin(sep, ...)
-    return table.concat(arg, sep, 1, arg.n)
-end
-
--- strconcat(...): concatenate all args (WoW's join with no separator).
-function strconcat(...)
-    return table.concat(arg, "", 1, arg.n)
-end
-
--- strtrim(s [, chars]): trim leading/trailing chars (default whitespace).
-function strtrim(s, chars)
-    chars = chars or " \t\r\n"
-    local set = chars:gsub("(.)", "%%%1")
-    return (s:gsub("^[" .. set .. "]*(.-)[" .. set .. "]*$", "%1"))
-end
+-- ── NOT here: wipe / tostringall / strsplit / strjoin / strconcat / strtrim ────────────────────
+-- Six 2.0+ names benilla used to define. 1.12 has none of them (absent from
+-- `reference/1.12-globals.tsv`, from the stock chain, and from every registrar table), and the
+-- reason they were kept — that the vanilla addon ecosystem assumes them — did not survive being
+-- checked: the corpus callers are multi-client addons whose vanilla paths raise on a real 1.12
+-- client too, or that define the name themselves under their own namespace (decision 2146).
+-- An addon reaching for one of these is reaching for a later client's API, and it should find
+-- what it would find there: nothing.
 
 -- ── Blizzard's positional string.format (%N$) ──────────────────────────────────────────────────
 do

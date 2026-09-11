@@ -424,6 +424,33 @@ Interface\FrameXML\OptionsFrameTemplates.xml
 #     this manifest calls them; an addon that does gets a raise where it used to get "call a nil
 #     value", which is not worse and is 1203's "loudly absent" either way.
 Interface\FrameXML\OptionsFrame.lua
+# ══ THE STOCK SOUND OPTIONS WINDOW — loaded, and HIDDEN, by 2115's own argument ══════════════
+# The reference's `FrameXML.toc` seats this file at l.20, exactly between the video window (l.19,
+# whose `.lua` is the row above) and the interface window (l.21, the row below). Ours now does too,
+# and the seat is the reference's rather than convenient: `SoundOptionsFrame.xml` inherits
+# `OptionsCheckButtonTemplate` and `OptionsSliderTemplate` from `OptionsFrameTemplates.xml` and
+# `GameMenuButtonTemplate` from `UIPanelTemplates.xml`, both already above.
+#
+# **It brings nothing else with it.** Unlike `UIOptionsFrame.xml`, which `<Include>`s
+# `CharacterFrameTemplates.xml`, this file's only dependency line is its own
+# `<Script file="SoundOptionsFrame.lua"/>`. And nothing below depends on IT — no file on this
+# manifest indexes `SoundOptionsFrameCheckButtons`, so there is no `MultiActionBars`-shaped
+# load-order edge under it the way 2115 §3 had to argue for the interface window.
+#
+# **Zero unbuilt engine verbs**, which is why this is one row and not a project: the whole surface
+# is `Get`/`SetCVar`/`GetCVarDefault`, `getglobal`, `TEXT`, `PlaySound`, `Show`/`HideUIPanel`,
+# `GetBindingKey`/`RunBinding`, `Disable_BagButtons`, `UpdateMicroButtons`, the seven
+# `OptionsFrame_*` helpers the row above already loads, and its own functions. All present.
+#
+# **All eleven CVars it names are registered**, so its `_Load` runs clean — including
+# `slider:SetValue(value.initialValue)`, the shape-A path that raised on the interface window's
+# `cameraYawMoveSpeed`. The three that were missing — `SoundListenerAtCharacter`, `EmoteSounds`,
+# `SoundZoneMusicNoDelay` — are check buttons (nil-safe either way) and were built rather than
+# listed, so this row costs no census entry at all.
+#
+# Its own `hidden="true"` (xml l.18) is the whole mechanism, exactly as for the interface window.
+# Nothing of ours may ever `Show()` it.
+Interface\FrameXML\SoundOptionsFrame.xml
 # ══ THE STOCK INTERFACE OPTIONS WINDOW — loaded, and HIDDEN (decision 2115) ══════════════════
 # **This row is not a migration, and it is the one row in this file where that has to be said.**
 # benilla's own options window is `OptionsFrame.xml` below, and it stays the window the player
@@ -544,8 +571,8 @@ Interface\FrameXML\PetActionBarFrame.xml
 # UpdateMicroButtons this file defines, and that function reads CharacterFrame, SpellBookFrame,
 # QuestLogFrame, GameMenuFrame, OptionsFrame, SoundOptionsFrame, UIOptionsFrame, FriendsFrame,
 # WorldMapFrame, HelpFrame and KeyRingButton UNGUARDED at call time, so every one of them is up
-# before anything can be shown (SoundOptionsFrame and UIOptionsFrame are OptionsFrame.xml's two
-# aliases — our one options window answers for the reference's three).
+# before anything can be shown. `SoundOptionsFrame` and `UIOptionsFrame` are the reference's own
+# frames now, both loaded hidden above; `OptionsFrame` is our window's own name. All three answer.
 Interface\FrameXML\MainMenuBarMicroButtons.xml
 # ══ THE BATTLEGROUND LIST + THE MINIMAP CLUSTER — the reference's own, off the player's chain
 # (1751; decision 1974) ══

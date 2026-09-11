@@ -243,3 +243,71 @@ fn the_guild_recruitment_setter_gates_its_argument_the_way_the_reference_does() 
         "0x4a0060 returns `xor eax,eax` — zero values, not a nil"
     );
 }
+
+/// **The setter is not inert** (decision 2144). `0x49ea70` stores the latch and tail-jumps into
+/// the cascade `0x49ea90` on the new value alone — `Set(1)` raises the app's cue whether or not
+/// the value moved; `Set(0)` never does — and `0x4a00a4`/`0x4a00a9` fire `UPDATE_CHAT_WINDOWS`
+/// on every successful call, before any cascade fires it again.
+#[test]
+fn the_setter_asks_for_the_cascade_on_one_and_fires_update_chat_windows() {
+    let mut s = script();
+    s.run(
+        r#"
+        n = 0
+        local f = CreateFrame("Frame", "GRF")
+        f:RegisterEvent("UPDATE_CHAT_WINDOWS")
+        f:SetScript("OnEvent", function() n = n + 1 end)
+    "#,
+    )
+    .unwrap();
+    assert!(!s.take_guild_recruitment_cascade(), "nothing asked yet");
+
+    // Boots at 1; a Set(1) that moves nothing still asks — the reference's store is
+    // unconditional and the jump reads only `ecx == 1`.
+    s.run("SetGuildRecruitmentMode(1)").unwrap();
+    assert!(s.take_guild_recruitment_cascade());
+    assert!(!s.take_guild_recruitment_cascade(), "drained");
+    assert!(
+        !s.take_guild_recruitment_change(),
+        "…and the file is not dirtied by a no-move"
+    );
+
+    s.run("SetGuildRecruitmentMode(0)").unwrap();
+    assert!(
+        !s.take_guild_recruitment_cascade(),
+        "mode 0 is the latch alone"
+    );
+    assert!(
+        s.take_guild_recruitment_change(),
+        "the file is dirtied by the move"
+    );
+
+    // A refused call fires nothing.
+    s.run("SetGuildRecruitmentMode(2)").unwrap_err();
+    s.tick(0.016);
+    assert_eq!(
+        s.eval::<i64>("return n").unwrap(),
+        2,
+        "one UPDATE_CHAT_WINDOWS per successful call: Set(1), Set(0); the raise fired none"
+    );
+}
+
+/// **A manual join or leave of `GuildRecruitment` forces the latch to 0** — `0x49ed3d`/
+/// `0x49ef8f`, `call 0x49ea70(0)`. A player gesture, so it dirties the file; and mode 0 is the
+/// latch alone, so it asks for no cascade.
+#[test]
+fn a_manual_guild_recruitment_verb_resets_the_latch() {
+    let mut s = script();
+    assert!(s.reset_guild_recruitment_mode(), "1 → 0 moved");
+    assert_eq!(
+        s.eval::<f64>("return GetGuildRecruitmentMode()").unwrap(),
+        0.0
+    );
+    assert!(s.take_guild_recruitment_change());
+    assert!(!s.take_guild_recruitment_cascade());
+    assert!(
+        !s.reset_guild_recruitment_mode(),
+        "already 0: nothing moved"
+    );
+    assert!(!s.take_guild_recruitment_change());
+}

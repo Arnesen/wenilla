@@ -183,6 +183,26 @@ fn engine_verbs(
     out
 }
 
+/// **A manual join or leave of `GuildRecruitment` turns the auto-join option off** — the
+/// reference's `0x49ed3d` (join) and `0x49ef8f` (leave), each `call 0x49ea70(0)` gated on the
+/// matched `ChatChannels.dbc` row carrying `flags & 0x20000` and on the caller's own flag, which
+/// the Lua bindings pass and the cascade's internal calls do not (wow-re
+/// `guild-recruitment-mode.md` §3; decision 2144). The player has taken manual control, and an
+/// option left checked would silently re-join or re-leave behind them.
+fn manual_join_or_leave(
+    channels: &super::edit::ChannelState,
+    script: &mut benilla_ui::script::UiScript,
+    wire_name: &str,
+) {
+    let guild_row = channels
+        .channels
+        .row_for_name(wire_name)
+        .is_some_and(|r| r.is_guild_recruitment());
+    if guild_row && script.reset_guild_recruitment_mode() {
+        info!("chat: manual {wire_name:?} — auto-join guild recruitment channel switched off");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn drain_chat_input(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
@@ -261,16 +281,27 @@ pub(super) fn drain_chat_input(
             // `/r` is `SLASH_REPLY`, one of the reference's own built-ins (`ChatEdit_ParseText`'s
             // REPLY arm over the box's tell ring) — the line never reaches this queue.
             ParsedChat::Reply { .. } => {}
+            // `/join` and `/leave` are stock built-ins (`SlashCmdList["JOIN"]`/`["LEAVE"]`, ref
+            // `ChatFrame.lua` l.778/l.803), so a typed line never reaches here — only a probe's,
+            // which skips the edit box. It takes the same handler, not a shortcut past it: the
+            // command-table arm used to send the token verbatim, and a probe's `/join General`
+            // created a CUSTOM channel called "General" on the server (decision 2144's live
+            // run D). The handlers resolve through `JoinChannelByName`/`LeaveChannelByName`,
+            // whose commands the `Channel` arm below drains next frame.
             ParsedChat::Join { name, password } => {
-                let _ = commands
-                    .0
-                    .send(ClientCommand::JoinChannel { name, password });
+                let body = format!(
+                    "SlashCmdList['JOIN']({:?})",
+                    format!("{name} {password}").trim_end()
+                );
+                if let Err(e) = script.run(&body) {
+                    warn!("ui_chat: {body}: {e}");
+                }
             }
             ParsedChat::Leave { name } => {
-                // `/leave` is leave-by-name: the reference clears the mask bit here and nowhere
-                // else (decision 2120).
-                channels.note_zone_channel_left(&name);
-                let _ = commands.0.send(ClientCommand::LeaveChannel { name });
+                let body = format!("SlashCmdList['LEAVE']({name:?})");
+                if let Err(e) = script.run(&body) {
+                    warn!("ui_chat: {body}: {e}");
+                }
             }
             ParsedChat::ChatList { name } => {
                 let _ = commands.0.send(ClientCommand::ChannelList { name });
@@ -975,10 +1006,19 @@ pub(super) fn drain_chat_input(
             ParsedChat::Channel(cmd) => {
                 use benilla_ui::script::ChannelCommand as C;
                 let cmd = match cmd {
-                    C::Join { name, password } => ClientCommand::JoinChannel { name, password },
+                    C::Join { name, password } => {
+                        manual_join_or_leave(&channels, &mut script, &name);
+                        ClientCommand::JoinChannel { name, password }
+                    }
                     C::Leave { name } => {
-                        // `LeaveChannelByName` — the same leave-by-name path as `/leave`, so the
-                        // same mask clear (decision 2120).
+                        // `LeaveChannelByName` (`0x4a0000` → `0x49ee70`): the VM composed a
+                        // shortcut or passed a custom name; a number names a confirmed slot here
+                        // or the call is a no-op. The mask clear is this path's and no other's
+                        // (decisions 2120, 2144).
+                        let Some(name) = channels.leave_target(&name) else {
+                            continue;
+                        };
+                        manual_join_or_leave(&channels, &mut script, &name);
                         channels.note_zone_channel_left(&name);
                         ClientCommand::LeaveChannel { name }
                     }

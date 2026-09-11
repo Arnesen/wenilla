@@ -219,6 +219,54 @@ pub(crate) struct SoundConfig {
     /// kits overlap — see [`limiter`] for the measured arithmetic. This exists so the fix can be
     /// A/B'd against what it fixed: `/run SetCVar("SoundOutputLimiter", 0)` applies live.
     pub limiter: bool,
+    /// **Where the 3-D listener sits** — 1.12's `SoundListenerAtCharacter` (`0x457890`, registrar
+    /// default `"1"`, help "lock listener at character"; the stock Sound panel's check button 7).
+    /// Read by [`update_audio_listener`], whose two branches ARE the reference's two branches.
+    ///
+    /// The reference keeps no `CVar::Register` handle for it: `0x481ba0` looks it up by name once
+    /// and caches the record at `[0xb4b2b4]`, and the single read is `0x483125` inside the
+    /// per-frame driver `0x482ea0`. The sink `FSOUND_3D_Listener_SetAttributes` has exactly one
+    /// call site image-wide (`0x483218`), so this one branch decides the whole listener.
+    ///
+    /// **It selects position AND orientation together, never one alone** (wow-re
+    /// `sound/scratch/benilla-pins.md` §B14, VERIFIED): `1` puts the listener on the active
+    /// mover with the character's *facing* about world-up — so volume and pan never change with
+    /// zoom or camera orbit — and `0` puts it at the camera eye with the camera's own basis.
+    /// Velocity is NULL either way, so the listener contributes no doppler in either mode.
+    ///
+    /// **A cinematic overrides it outright** and is checked first (`0x483112`, ahead of the CVar);
+    /// so do our own pre-login / free-fly / no-pivot cases, which have no character to sit on.
+    pub listener_at_character: bool,
+    /// **Emote sounds** — 1.12's `EmoteSounds` (`0x4573b9`, registrar default `"1"`; the stock
+    /// Sound panel's check button 8). Gates the **received** text-emote voice line only: the
+    /// race/sex kit from `EmotesTextSound.dbc` that `SMSG_TEXT_EMOTE` plays through
+    /// [`emote::emote_sounds`]. Looked up by name at play time in the reference (`0x63de30` over
+    /// `0x835b60`), tested at `+0x28`, and on a zero no kit is fetched at all — silence, not a
+    /// muted play.
+    ///
+    /// **It does NOT gate:** creature reaction barks, NPC greetings, `$ESD` emote-state sounds, or
+    /// FrameXML `PlaySound()` — those are the other per-unit channels.
+    ///
+    /// **One thing wow-re does not settle**, and it is recorded rather than guessed: two of its
+    /// notes place the lookup in `0x623c80` (received text-emote only), a third places it on the
+    /// shared leg `0x623c10`, which the `$CSD` M2 anim-event also enters — and if it is really
+    /// `0x623c10`, this CVar silences those too. Nothing records whether the *outgoing* local
+    /// `DoEmote` vocal is gated at all. We take the narrower, twice-recorded reading: the received
+    /// path. Widening it later is one more call site, not a redesign.
+    pub emote_sounds: bool,
+    /// **Zone music with no silence gap** — 1.12's `SoundZoneMusicNoDelay` (`0x4578b3`, registrar
+    /// default `"0"`; the stock Sound panel's check button 6, labelled *Loop Music*). Read by
+    /// [`zone::next_track_time`], which is the reference's `0x4601f0` — and its sole caller there
+    /// is the natural end-of-track reap, which is exactly ours.
+    ///
+    /// **It removes the intra-zone loop-restart gap, not the zone-change transition** (wow-re
+    /// `sound/scratch/zone-music-ambience-transition.md` Q1/Q2, which corrects that note's own
+    /// earlier framing): the thing it deletes is the randomised `ZoneMusic.dbc`
+    /// SilenceIntervalMin/Max wait between successive plays of the *same* zone's track, whose
+    /// length is data rather than a constant. A zone CHANGE is already immediate and always was —
+    /// the incoming track starts on the next tick while the outgoing fades over 4 s, an overlap
+    /// rather than a gap.
+    pub zone_music_no_delay: bool,
 }
 
 impl SoundConfig {
@@ -253,6 +301,10 @@ impl Default for SoundConfig {
             world_hold: false,
             music_suppressed: false,
             limiter: true,
+            // The reference's registered defaults: "1", "1", "0".
+            listener_at_character: true,
+            emote_sounds: true,
+            zone_music_no_delay: false,
         }
     }
 }
@@ -580,13 +632,15 @@ impl Plugin for SoundPlugin {
 }
 
 /// Compute this frame's [`AudioListener`] and feed it to the backend. The listener sits at the
-/// **character** (`SoundListenerAtCharacter=1`, wow-re benilla-pins B14): position at the avatar's
-/// head, orientation at the character's *facing* about world-up — so 3D volume and pan never change
-/// with zoom or camera orbit. The camera eye + basis are the fallback (the client's `=0` path): before
-/// login, in free-fly (`detached`), or before the body model attaches (no `CameraPivot` yet).
+/// **character** ([`SoundConfig::listener_at_character`], the reference's default): position at the
+/// avatar's head, orientation at the character's *facing* about world-up — so 3D volume and pan
+/// never change with zoom or camera orbit. The camera eye + basis are the client's `=0` path, and
+/// also our fallback whether or not the CVar asks for it: before login, in free-fly (`detached`),
+/// or before the body model attaches (no `CameraPivot` yet), there is no character to sit on.
 fn update_audio_listener(
     mut listener: ResMut<AudioListener>,
     mut out: NonSendMut<SoundOutput>,
+    config: Res<SoundConfig>,
     player: Res<Player>,
     cinematic: Option<Res<crate::cinematic::Cinematic>>,
     self_av: Query<(&Transform, Option<&CameraPivot>), With<Embodied>>,
@@ -606,7 +660,7 @@ fn update_audio_listener(
         .is_some_and(crate::cinematic::Cinematic::is_playing);
     // At-character (the default). `player.pos` is the feet; the head offset is the shared
     // model-derived pivot height, and the facing is the aim yaw about world-up (world +Y).
-    if player.active && !player.detached && !flying {
+    if config.listener_at_character && player.active && !player.detached && !flying {
         if let Ok((t, pivot)) = self_av.single() {
             listener.pos = player.pos + Vec3::Y * head_height(pivot, t.scale.x);
             listener.rot = Quat::from_rotation_y(player.facing());
@@ -616,7 +670,9 @@ fn update_audio_listener(
             return;
         }
     }
-    // At-camera (the `SoundListenerAtCharacter=0` path, and the cinematic override above).
+    // At-camera: the `SoundListenerAtCharacter=0` path, the cinematic override above, and the
+    // no-character cases the reference also has (it simply does not update the listener that
+    // frame; we seat it on the camera, which is where the view is).
     if let Ok(t) = cam.single() {
         listener.pos = t.translation;
         listener.rot = t.rotation;

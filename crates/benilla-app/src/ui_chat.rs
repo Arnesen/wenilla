@@ -40,6 +40,9 @@ mod input;
 mod language;
 /// `LoggingChat`/`LoggingCombat` — the two log files `/chatlog` and `/combatlog` toggle.
 mod logging;
+/// The `AUTO_JOIN_GUILD_CHANNEL` cascade (decision 2144) — the one place the client joins or
+/// leaves `GuildRecruitment - City` on its own.
+mod recruitment;
 /// The chat windows' saved look (B246, decision 1589) — where the tab menu's tint/alpha/font-size
 /// picks are read from at login and written back at logout.
 mod settings;
@@ -75,7 +78,16 @@ impl Plugin for UiChatPlugin {
             .init_resource::<frames::ChatWindows>()
             .init_resource::<edit::ChannelState>()
             .init_resource::<channels::ZoneChannelWalk>()
+            .init_resource::<recruitment::GuildRecruitmentCascade>()
             .init_resource::<language::ChatLanguages>()
+            .init_resource::<combat::CombatLogRanges>()
+            // `CombatLogPeriodicSpells`' knob, beside its sibling range set — both are
+            // `KnobParams` members, so a missing one is not a dormant default but a
+            // STARTUP PANIC in `cvars::load_config` (which takes them all as `ResMut`).
+            // 947ba585f registered it only in the `cvar_app()` test helper, and the client
+            // stopped booting; the unit suites never noticed because each builds its own
+            // world. `scripts/smoke.sh` is the gate that sees this class.
+            .init_resource::<combat::LogPeriodicSpells>()
             // `ChatChannels.dbc` — six rows, read once; the auto-join walk and every chat event's
             // arg7 both come out of it. **`.after(AssetSet::Open)` is load-bearing**: without it
             // this runs before the patch chain exists, takes its `assets: Option<Res<_>>` `None`
@@ -185,11 +197,17 @@ impl Plugin for UiChatPlugin {
             // into packets, so reading last frame's answer is not a cosmetic lag: it joined the
             // previous character's capital at login and then left it again, and the leave took the
             // stock `ChatFrame_OnEvent`'s channel registration with it.
+            //
+            // The guild-recruitment cascade (decision 2144) runs **after the walk**, where the
+            // reference runs it — the tail of `ZoneChannelRefresh` — and reads the zone the walk
+            // just published.
             .add_systems(
                 Update,
                 (
                     channels::end_session_channels_on_disconnect,
                     channels::auto_join_zone_channels
+                        .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                    recruitment::guild_recruitment_cascade
                         .run_if(in_state(crate::char_select::ClientState::InWorld)),
                 )
                     .chain()

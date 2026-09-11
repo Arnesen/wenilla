@@ -21,7 +21,9 @@ use benilla_protocol::messages::{
     SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss, XpGain,
 };
 
-use crate::combat_text::{damage_color, miss_word, spell_text, CombatTextSpawn, DamageSource};
+use crate::combat_text::{
+    damage_color, miss_word, spell_text, CombatTextSpawn, DamageSource, DamageTextGates,
+};
 use crate::names::NameCache;
 use crate::ui_chat::ChatLog;
 use crate::ui_unit::{CombatTextEvent, UnitCombatFeedback};
@@ -186,6 +188,7 @@ pub(super) fn spell_damage_log(
     self_guid: &SelfGuid,
     stores: &Query<&mut ObjectStore>,
     spells: Option<&crate::ui_action::Spells>,
+    gates: DamageTextGates,
     text: &mut MessageWriter<CombatTextSpawn>,
     feedback: &mut MessageWriter<UnitCombatFeedback>,
     center: &mut MessageWriter<CombatTextEvent>,
@@ -231,7 +234,7 @@ pub(super) fn spell_damage_log(
     };
     // B = the melee-styled bit: a ranged basic shot (Throw/Auto Shot — AttributesEx3 & 0x8000)
     // floats WHITE off this spell packet, exactly like the client (decision 0376).
-    let Some(color) = damage_color(source, melee_styled(spells, s.spell_id)) else {
+    let Some(color) = damage_color(gates, source, melee_styled(spells, s.spell_id)) else {
         return; // the CombatDamage / PetSpellDamage gates
     };
     if let (Some(anchor), Some((category, body))) = (
@@ -256,6 +259,7 @@ pub(super) fn periodic_aura_log(
     self_guid: &SelfGuid,
     stores: &Query<&mut ObjectStore>,
     spells: Option<&crate::ui_action::Spells>,
+    gates: DamageTextGates,
     text: &mut MessageWriter<CombatTextSpawn>,
     feedback: &mut MessageWriter<UnitCombatFeedback>,
     center: &mut MessageWriter<CombatTextEvent>,
@@ -357,7 +361,7 @@ pub(super) fn periodic_aura_log(
     };
     // Same B computation as the direct-damage emit (the periodic emitter `0x626dd0` pushes the
     // resolved record to the same `0x6128b0` law).
-    let Some(color) = damage_color(source, melee_styled(spells, s.spell_id)) else {
+    let Some(color) = damage_color(gates, source, melee_styled(spells, s.spell_id)) else {
         return;
     };
     let Some(anchor) = gated_anchor(s.target, index, self_guid) else {
@@ -393,6 +397,7 @@ pub(super) fn damage_shield(
     index: &GuidIndex,
     self_guid: &SelfGuid,
     stores: &Query<&mut ObjectStore>,
+    gates: DamageTextGates,
     text: &mut MessageWriter<CombatTextSpawn>,
     feedback: &mut MessageWriter<UnitCombatFeedback>,
 ) {
@@ -413,7 +418,7 @@ pub(super) fn damage_shield(
     let Some(source) = classify_source(s.victim, index, self_guid, stores) else {
         return; // K = other: never drawn
     };
-    let Some(color) = damage_color(source, true) else {
+    let Some(color) = damage_color(gates, source, true) else {
         return;
     };
     if let Some(anchor) = gated_anchor(s.attacker, index, self_guid) {
@@ -526,11 +531,14 @@ fn miss_action(code: u8) -> Option<&'static str> {
 /// SPELL_GO miss list in practice: vmangos routes only impact-time outcomes (immune, evade) here.
 /// Source-classified like every emitter (the classifier lives inside the word twin too); the
 /// site's record push is unpinned, so the words keep the row-default white (flagged open).
+#[allow(clippy::too_many_arguments)] // one dispatch arm's full writer set
 pub(super) fn spell_log_miss(
     s: SpellLogMiss,
     index: &GuidIndex,
     self_guid: &SelfGuid,
     stores: &Query<&mut ObjectStore>,
+    spells: Option<&crate::ui_action::Spells>,
+    gates: DamageTextGates,
     text: &mut MessageWriter<CombatTextSpawn>,
     feedback: &mut MessageWriter<UnitCombatFeedback>,
     center: &mut MessageWriter<CombatTextEvent>,
@@ -558,9 +566,22 @@ pub(super) fn spell_log_miss(
             }
         }
     }
-    if classify_source(s.caster, index, self_guid, stores).is_none() {
+    // **The WORD emitter carries the same three CVar gates as the number emitter.** `0x607140`
+    // reads `CombatDamage` (`0x60718f`), `PetSpellDamage` (`0x6071a6`) and `PetMeleeDamage`
+    // (`0x6071c5`) exactly as `0x6128b0` does, and each failure jumps to the epilogue — so a miss
+    // word is suppressed by the same settings that suppress a number. It made no difference while
+    // the three were `const bool` = true; it does now.
+    let Some(source) = classify_source(s.caster, index, self_guid, stores) else {
         return; // K = other: never drawn
-    }
+    };
+    let Some(_override_color) = damage_color(gates, source, melee_styled(spells, s.spell_id))
+    else {
+        return; // the CombatDamage / Pet* gates
+    };
+    // The colour it picks is deliberately NOT applied here — that is the doc comment's "unpinned
+    // record push", and closing it is a visible change that belongs to whoever is looking at
+    // combat-text colour, not to the CVar wiring. (`melee_impact_text` already applies the
+    // override to ITS words, so the inconsistency is ours, not the reference's.)
     for &(target, code) in &s.misses {
         if let (Some(anchor), Some((word, category))) =
             (gated_anchor(target, index, self_guid), miss_word(code))

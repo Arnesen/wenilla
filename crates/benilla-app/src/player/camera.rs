@@ -175,6 +175,49 @@ const LOOK_SENSITIVITY: f32 = 0.003;
 /// reproduces the shipped feel exactly.
 pub(crate) const MOUSE_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
 
+/// **The mouse-look rate law, and the one place benilla's units are not the reference's.**
+///
+/// The reference's own law is byte-VERIFIED (wow-re `world-click-drag-arbitration.md` §3.3):
+///
+/// ```text
+///   Δyaw_deg   = cameraYawMoveSpeed   × Δx / 800
+///   Δpitch_deg = cameraPitchMoveSpeed × Δy / 600
+/// ```
+///
+/// **800 × 600 is a screen, not a magic number** — the era's reference resolution. At the shipped
+/// `180`/`90` the law reads: a drag across the full screen width is a half-turn, and a drag up the
+/// full screen height is horizon-to-zenith. That is what makes the two divisors and the two
+/// defaults one design rather than four constants.
+///
+/// **What does NOT transfer is the unit.** The reference has *no DirectInput import at all*
+/// (wow-re `idle-timer-input-stamp-law.md`): it integrates `WM_MOUSEMOVE`, so its `Δ` is a
+/// **screen pixel after Windows pointer acceleration** — which is exactly why its `mousespeed`
+/// slider works by calling `SPI_SETMOUSESPEED` on the OS rather than scaling anything in-engine.
+/// benilla's `Δ` is `AccumulatedMouseMotion`, i.e. winit's `DeviceEvent::MouseMotion`: **raw,
+/// unaccelerated device units**. `deg per accelerated pixel` and `deg per raw unit` are different
+/// quantities, and the factor between them is a per-machine OS setting, not a fact about the
+/// client — so transplanting `180`/`90` as absolute numbers would be a confident guess on a
+/// load-bearing constant.
+///
+/// So we take the law's **shape** — per-axis, linear in the CVar — and anchor its **scale** to
+/// [`LOOK_SENSITIVITY`], the rate this client has shipped and the director has been looking at
+/// since 1140. The CVars therefore keep the reference's own defaults (1804: a setting's default is
+/// the reference's) and the divergence lands here, in a named constant, where it can be read.
+///
+/// **The one live divergence this leaves**, stated rather than buried: the reference is
+/// *anisotropic* at its defaults — `180/800 = 0.225` deg/px of yaw against `90/600 = 0.15` of
+/// pitch, so its yaw turns 1.5× faster than its pitch. Ours is isotropic, because
+/// [`LOOK_SENSITIVITY`] is one number. The **ratio** is unit-independent (both axes take the same
+/// acceleration curve), so unlike the absolute scale it *is* transferable — it is simply a feel
+/// change, and feel is the director's call, not a fidelity bug to fix quietly.
+const LOOK_YAW_PER_SPEED: f32 = LOOK_SENSITIVITY / 180.0;
+const LOOK_PITCH_PER_SPEED: f32 = LOOK_SENSITIVITY / 90.0;
+
+/// The reference's validator range for all four `camera*MoveSpeed`/`SmoothSpeed` CVars
+/// (`0x50c000` → `0x50b330`). It **rejects rather than clamps**: out of range prints
+/// `"Value out of range (%f - %f)"` and `CVar::Set` skips the store, so the old value stands.
+pub(crate) const CAMERA_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.1..=360.0;
+
 /// The mouse-look player knobs (decision 0961): `mouseInvertPitch` is 1.12's own Interface
 /// Options checkbox (UIOptionsFrame.lua index 1, CVar-backed), settable from the Options
 /// window's Controls page through the CVar store (0954). Inverted, moving the mouse up pitches
@@ -189,6 +232,12 @@ pub(crate) const MOUSE_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
 pub(crate) struct LookConfig {
     pub(crate) invert_pitch: bool,
     pub(crate) sensitivity: f32,
+    /// `cameraYawMoveSpeed` — the MOUSE_LOOK_SPEED slider (90…270 by 10). See
+    /// [`LOOK_YAW_PER_SPEED`] for why the number is the reference's and the scale is ours.
+    pub(crate) yaw_speed: f32,
+    /// `cameraPitchMoveSpeed` — no slider of its own; `UIOptionsFrame_Save` writes it as
+    /// `cameraYawMoveSpeed / 2` beside the yaw one, which is exactly the reference's 180/90 pair.
+    pub(crate) pitch_speed: f32,
 }
 
 impl Default for LookConfig {
@@ -196,6 +245,10 @@ impl Default for LookConfig {
         Self {
             invert_pitch: false,
             sensitivity: 1.0,
+            // The reference's registered defaults, and with them the shipped feel: at these two
+            // values both axes land on `LOOK_SENSITIVITY` exactly.
+            yaw_speed: 180.0,
+            pitch_speed: 90.0,
         }
     }
 }
@@ -205,8 +258,14 @@ impl LookConfig {
     /// both readers must agree: the look rotation itself and the click-vs-drag travel budget that
     /// decides whether a press was a click. Splitting them would let the slider move the drag
     /// threshold out from under the gesture (decision 1140).
-    pub(super) fn rate(self) -> f32 {
-        LOOK_SENSITIVITY * self.sensitivity
+    pub(super) fn yaw_rate(self) -> f32 {
+        self.yaw_speed * LOOK_YAW_PER_SPEED * self.sensitivity
+    }
+
+    /// The pitch axis's rate — its own CVar, because the reference's law has its own divisor for
+    /// it (600, the reference screen's height) and its own default (90).
+    pub(super) fn pitch_rate(self) -> f32 {
+        self.pitch_speed * LOOK_PITCH_PER_SPEED * self.sensitivity
     }
 }
 /// The auto-follow's angular rate — 1.12's `cameraYawSmoothSpeed`, registrar default **180 °/s**
@@ -998,9 +1057,9 @@ pub(super) fn run_look_session(
     // the release decides. The travel is charged from the *input* delta, before the pitch clamp —
     // the reference accumulates raw device motion, so a drag pinned at the pitch limit still spends
     // its budget.
-    let rate = look_cfg.rate();
-    let dyaw = (mouse_motion.delta.x * rate).abs();
-    let dpitch = (mouse_motion.delta.y * rate).abs();
+    let (yaw_rate, pitch_rate) = (look_cfg.yaw_rate(), look_cfg.pitch_rate());
+    let dyaw = (mouse_motion.delta.x * yaw_rate).abs();
+    let dpitch = (mouse_motion.delta.y * pitch_rate).abs();
     for test in [&mut *left_click, &mut *right_click].into_iter().flatten() {
         test.yaw_travel += dyaw;
         test.pitch_travel += dpitch;
@@ -1088,14 +1147,14 @@ pub(super) fn run_look_session(
     // turns the character (its facing tracks the camera yaw); left-drag leaves the character facing.
     if let Some(active) = rig.look {
         let delta = mouse_motion.delta;
-        cam.yaw -= delta.x * rate;
+        cam.yaw -= delta.x * yaw_rate;
         // `mouseInvertPitch` flips only the pitch axis (the 1.12 checkbox's whole meaning).
         let dy = if look_cfg.invert_pitch {
             -delta.y
         } else {
             delta.y
         };
-        cam.pitch = (cam.pitch - dy * rate).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
+        cam.pitch = (cam.pitch - dy * pitch_rate).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
         if active == LookButton::Right || both_buttons {
             *face_yaw = cam.yaw;
         }
@@ -1782,17 +1841,72 @@ mod tests {
     /// scales with the pointer instead of drifting away from it.
     #[test]
     fn the_sensitivity_slider_is_a_multiplier_over_the_shipped_rate() {
-        assert_eq!(LookConfig::default().rate(), LOOK_SENSITIVITY);
+        // **The shipped feel is unchanged by the two move-speed CVars landing**: at the
+        // reference's own defaults BOTH axes come out at exactly the rate this client has always
+        // used. That is the whole point of anchoring the scale to `LOOK_SENSITIVITY` rather than
+        // transplanting the reference's deg-per-accelerated-pixel onto our raw device delta.
+        let d = LookConfig::default();
+        assert_eq!(d.yaw_rate(), LOOK_SENSITIVITY);
+        assert_eq!(d.pitch_rate(), LOOK_SENSITIVITY);
+
         let fast = LookConfig {
             sensitivity: 1.5,
             ..Default::default()
         };
-        assert_eq!(fast.rate(), LOOK_SENSITIVITY * 1.5);
+        assert_eq!(fast.yaw_rate(), LOOK_SENSITIVITY * 1.5);
+        assert_eq!(fast.pitch_rate(), LOOK_SENSITIVITY * 1.5);
         let slow = LookConfig {
             sensitivity: *MOUSE_SPEED_RANGE.start(),
             ..Default::default()
         };
-        assert_eq!(slow.rate(), LOOK_SENSITIVITY * 0.5);
+        assert_eq!(slow.yaw_rate(), LOOK_SENSITIVITY * 0.5);
+        assert_eq!(slow.pitch_rate(), LOOK_SENSITIVITY * 0.5);
+    }
+
+    /// **Each move-speed CVar scales its own axis, linearly, and only its own** — the reference's
+    /// law shape (`Δyaw_deg = value × Δx / 800`, `Δpitch_deg = value × Δy / 600`).
+    ///
+    /// The slider's own stops are the check: `UIOptionsFrameSliders`' MOUSE_LOOK_SPEED row runs
+    /// 90…270, so its ends are half and one-and-a-half times the shipped rate.
+    #[test]
+    fn each_move_speed_cvar_scales_its_own_axis() {
+        let doubled_yaw = LookConfig {
+            yaw_speed: 360.0,
+            ..Default::default()
+        };
+        assert_eq!(doubled_yaw.yaw_rate(), LOOK_SENSITIVITY * 2.0);
+        assert_eq!(
+            doubled_yaw.pitch_rate(),
+            LOOK_SENSITIVITY,
+            "the yaw CVar must not move the pitch axis"
+        );
+
+        let doubled_pitch = LookConfig {
+            pitch_speed: 180.0,
+            ..Default::default()
+        };
+        assert_eq!(doubled_pitch.pitch_rate(), LOOK_SENSITIVITY * 2.0);
+        assert_eq!(doubled_pitch.yaw_rate(), LOOK_SENSITIVITY);
+
+        // The MOUSE_LOOK_SPEED slider's two ends. Approximate, because the two sides multiply
+        // the same three factors in a different order and f32 is not associative — the property
+        // under test is the ratio, not the last bit.
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-9;
+        for (speed, factor) in [(90.0_f32, 0.5_f32), (270.0, 1.5)] {
+            let at = LookConfig {
+                yaw_speed: speed,
+                ..Default::default()
+            };
+            assert!(near(at.yaw_rate(), LOOK_SENSITIVITY * factor));
+        }
+
+        // `mousespeed` still multiplies on top of both — the 1140 property, unchanged.
+        let both = LookConfig {
+            yaw_speed: 270.0,
+            sensitivity: 1.5,
+            ..Default::default()
+        };
+        assert!(near(both.yaw_rate(), LOOK_SENSITIVITY * 1.5 * 1.5));
     }
 
     /// **The auto-follow** (decisions 1493/1502) — 1.12's `cameraSmoothStyle`, the setting benilla

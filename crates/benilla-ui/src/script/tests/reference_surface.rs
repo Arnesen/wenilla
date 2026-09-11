@@ -119,12 +119,6 @@ fn allowed_beyond_1_12() -> HashSet<&'static str> {
         "UnitAura",
         "UnitIsAFK",
         "UnitIsDND",
-        "strconcat",
-        "strjoin",
-        "strsplit",
-        "strtrim",
-        "tostringall",
-        "wipe",
     ]
     .into_iter()
     .collect()

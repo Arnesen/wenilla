@@ -106,7 +106,7 @@ use law::{
     argb, claimed_box_px, fade_alpha, melee_text, scale_value, shadow_offset_px, text_px,
     CATEGORIES,
 };
-pub(crate) use law::{damage_color, miss_word, spell_text, DamageSource};
+pub(crate) use law::{damage_color, miss_word, spell_text, DamageSource, DamageTextGates};
 
 use bevy::prelude::*;
 
@@ -420,6 +420,7 @@ fn melee_impact_text(
     self_player: Query<(), With<crate::net::SelfPlayer>>,
     self_guid: Res<crate::net::SelfGuid>,
     stores: Query<&crate::net::ObjectStore>,
+    gates: Res<DamageTextGates>,
     mut text: MessageWriter<CombatTextSpawn>,
 ) {
     for crate::creature_anim::SwingImpact { swing: s, .. } in impacts.read() {
@@ -440,7 +441,7 @@ fn melee_impact_text(
         } else {
             continue; // K = other: never drawn
         };
-        let Some(color) = damage_color(source, true) else {
+        let Some(color) = damage_color(*gates, source, true) else {
             continue; // the CombatDamage / PetMeleeDamage gates
         };
         if let Some((category, body)) = melee_text(s.hit_info, s.victim_state, s.damage) {
@@ -463,6 +464,7 @@ impl Plugin for CombatTextPlugin {
         // The Update append window (see [`UiQuadAppend`]): after the camera controller, and
         // projecting through the camera's FRESH Transform (not the stale propagated global).
         app.init_resource::<WorldTexts>()
+            .init_resource::<DamageTextGates>()
             .add_message::<CombatTextSpawn>()
             .add_systems(
                 Update,

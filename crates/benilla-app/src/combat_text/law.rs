@@ -112,12 +112,47 @@ pub(crate) fn miss_word(code: u8) -> Option<(&'static str, u8)> {
 pub(crate) const COLOR_SPELL_GOLD: u32 = 0xFFFF_DE00;
 pub(crate) const COLOR_PET_MELEE_ORANGE: u32 = 0xFFFF_8400;
 
-/// The cvar gates at their shipped defaults (like the nameplate cvars, consts until a cvar
-/// system exists): CombatDamage masters ALL floating damage text; the Pet* pair gates only the
-/// owned-source sub-cases (the self sub-case is unconditional — the byte refinement).
-const COMBAT_DAMAGE: bool = true;
-const PET_MELEE_DAMAGE: bool = true;
-const PET_SPELL_DAMAGE: bool = true;
+/// **The three floating-combat-text CVar gates, live** — `CombatDamage` (`[0xc4d944]`),
+/// `PetMeleeDamage` (`[0xc4d9cc]`) and `PetSpellDamage` (`[0xc4d99c]`), each read as the record's
+/// int `+0x28`.
+///
+/// Each has a **closed reader census** in the reference: one store and exactly two reads
+/// image-wide, one in the localized-WORD emitter `0x607140` and one in the `"%d"` NUMBER emitter
+/// `0x6128b0` (wow-re `playername/scratch/worldtext-spawn-and-law.md` §4,
+/// `combattext-color-law.md`). Both branch targets are function epilogues, so a gate that fails
+/// **suppresses the emit entirely** — it never falls through to a default colour, which is why
+/// [`damage_color`] returns `Option` rather than a colour.
+///
+/// `CombatDamage` is the master: off, nothing floats over any unit from any source, and — despite
+/// the CVar's own help text saying "damage numbers" — that includes the miss/dodge/parry/block/
+/// absorb/resist WORDS, because the word emitter carries the same gate. The `Pet*` pair are
+/// downstream sub-gates that only ever see the owned-by-you branch; the self sub-case is
+/// unconditional.
+///
+/// **`PetMeleeDamage` and `PetSpellDamage` do not split on "melee vs spell" the way a player
+/// would mean it.** The selector is `B` — no spell record (a real melee swing) *or* the spell's
+/// `AttributesEx` bit 15 — so a pet spell carrying that bit is gated by `PetMeleeDamage` and
+/// coloured orange. Which spell ids carry it is on wow-re's own Open board.
+///
+/// These were `const bool`s with the comment "consts until a cvar system exists". The CVar system
+/// existed; this is the row 2077's census was holding the place for.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct DamageTextGates {
+    pub(crate) combat_damage: bool,
+    pub(crate) pet_melee: bool,
+    pub(crate) pet_spell: bool,
+}
+
+impl Default for DamageTextGates {
+    /// The reference's registered defaults — all three `"1"`.
+    fn default() -> Self {
+        Self {
+            combat_damage: true,
+            pet_melee: true,
+            pet_spell: true,
+        }
+    }
+}
 
 /// The `0x5efea0` source-ownership classes that may draw (`K`): the active player itself, or a
 /// unit it owns (pet/guardian/totem — Summoned/CreatedBy = me). Every other source class (other
@@ -133,15 +168,19 @@ pub(crate) enum DamageSource {
 /// `K`. `None` = the whole emit is gated off (CombatDamage master, or the pet path's Pet* cvar);
 /// `Some(None)` = draw with the category row's default (white); `Some(Some(argb))` = draw with
 /// the override. Crit never enters this pick.
-pub(crate) fn damage_color(source: DamageSource, melee: bool) -> Option<Option<u32>> {
-    if !COMBAT_DAMAGE {
+pub(crate) fn damage_color(
+    gates: DamageTextGates,
+    source: DamageSource,
+    melee: bool,
+) -> Option<Option<u32>> {
+    if !gates.combat_damage {
         return None;
     }
     match (source, melee) {
         (DamageSource::Player, true) => Some(None),
         (DamageSource::Player, false) => Some(Some(COLOR_SPELL_GOLD)),
-        (DamageSource::Pet, true) => PET_MELEE_DAMAGE.then_some(Some(COLOR_PET_MELEE_ORANGE)),
-        (DamageSource::Pet, false) => PET_SPELL_DAMAGE.then_some(Some(COLOR_SPELL_GOLD)),
+        (DamageSource::Pet, true) => gates.pet_melee.then_some(Some(COLOR_PET_MELEE_ORANGE)),
+        (DamageSource::Pet, false) => gates.pet_spell.then_some(Some(COLOR_SPELL_GOLD)),
     }
 }
 
@@ -467,21 +506,71 @@ mod tests {
     /// (PetSpellDamage). Crit never enters the pick (it only selects the pop row).
     #[test]
     fn damage_color_matches_the_byte_table() {
-        assert_eq!(damage_color(DamageSource::Player, true), Some(None));
+        let on = DamageTextGates::default();
+        assert_eq!(damage_color(on, DamageSource::Player, true), Some(None));
         assert_eq!(
-            damage_color(DamageSource::Player, false),
+            damage_color(on, DamageSource::Player, false),
             Some(Some(COLOR_SPELL_GOLD))
         );
         assert_eq!(
-            damage_color(DamageSource::Pet, true),
+            damage_color(on, DamageSource::Pet, true),
             Some(Some(COLOR_PET_MELEE_ORANGE))
         );
         assert_eq!(
-            damage_color(DamageSource::Pet, false),
+            damage_color(on, DamageSource::Pet, false),
             Some(Some(COLOR_SPELL_GOLD))
         );
         // The byte values themselves (`0x5fa0b0`/`0x5fa0f0` hard-inits).
         assert_eq!(COLOR_SPELL_GOLD, 0xFFFF_DE00);
         assert_eq!(COLOR_PET_MELEE_ORANGE, 0xFFFF_8400);
+    }
+
+    /// **The three gates SUPPRESS; they never recolour** — both of the reference's read sites
+    /// branch to a function epilogue, so a failed gate means no emit at all. And the master's
+    /// reach is total: `CombatDamage = 0` takes the self sub-case with it, which is the one case
+    /// no `Pet*` row can reach.
+    #[test]
+    fn the_three_gates_suppress_the_emit_rather_than_recolour_it() {
+        let master_off = DamageTextGates {
+            combat_damage: false,
+            ..Default::default()
+        };
+        for source in [DamageSource::Player, DamageSource::Pet] {
+            for melee in [true, false] {
+                assert_eq!(
+                    damage_color(master_off, source, melee),
+                    None,
+                    "CombatDamage=0 must suppress {source:?} melee={melee}"
+                );
+            }
+        }
+
+        // A pet sub-gate takes ONLY its own branch — and leaves the player's alone, because the
+        // self sub-case is unconditional in the reference.
+        let no_pet_melee = DamageTextGates {
+            pet_melee: false,
+            ..Default::default()
+        };
+        assert_eq!(damage_color(no_pet_melee, DamageSource::Pet, true), None);
+        assert_eq!(
+            damage_color(no_pet_melee, DamageSource::Pet, false),
+            Some(Some(COLOR_SPELL_GOLD)),
+            "PetSpellDamage still governs the pet's spell branch"
+        );
+        assert_eq!(
+            damage_color(no_pet_melee, DamageSource::Player, true),
+            Some(None),
+            "the self sub-case is unconditional"
+        );
+
+        let no_pet_spell = DamageTextGates {
+            pet_spell: false,
+            ..Default::default()
+        };
+        assert_eq!(damage_color(no_pet_spell, DamageSource::Pet, false), None);
+        assert_eq!(
+            damage_color(no_pet_spell, DamageSource::Pet, true),
+            Some(Some(COLOR_PET_MELEE_ORANGE))
+        );
     }
 }

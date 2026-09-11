@@ -2165,6 +2165,7 @@ mod tests {
         world.init_resource::<crate::ui_party::GroupState>();
         world.init_resource::<crate::net::GuidIndex>();
         world.init_resource::<crate::net::Reputations>();
+        world.init_resource::<super::AssistAttack>();
         world.init_resource::<Selection>();
         world.init_resource::<scan::LastEnemy>();
         world.init_resource::<Messages<super::by_name::AssistRequest>>();

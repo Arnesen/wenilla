@@ -4380,39 +4380,87 @@ fn without_a_seated_measurer_the_same_fit_reads_zero() {
 // and the reason is the row's whole point — "no key without a reader" (1134 §4) is why the CVar is
 // absent, and this is where that decision is written down per setting.
 const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
-    ("autointeract", "click-to-move"),
-    ("assistAttack", "assist-attack"),
-    ("UnitNamePlayerGuild", "guild names over player nameplates"),
+    // **A blocker is now a SPEC, not a label.** Every row below has had its mechanism derived at
+    // the bytes since 2115 wrote this list, so what is missing is the *feature*, never the
+    // knowledge — and saying which is the difference between a row somebody can pick up and a row
+    // that just reads "not done".
+    (
+        "autointeract",
+        "click-to-move — the one row here that is a whole movement mode rather than a knob. \
+         `CanAutoInteract 0x60f900` gates the world-click pick mask's bit 0 and inverts \
+         `0x5ec110`'s interaction-distance refusal, so an out-of-range corpse/GO/NPC/cast click \
+         queues an approach (`0x60fed0`, move kinds 6/7/9/0xa) instead of refusing. The commit \
+         itself puts NOTHING on the wire — it stamps a local goal at `0x611130` — and the packets \
+         are its consequences (a stand, then the original verb on arrival). benilla has only the \
+         keyboard controller and /follow (mode 3). Registered default is \"0\" on every locale but \
+         koKR (`0x603374` selects on the locale index), so stock West ships it OFF",
+    ),
+    (
+        "UnitNamePlayerGuild",
+        "the `\\n<%s>` guild line in the OVERHEAD name stack — slot a5 of `0x608f50`, gated by bit \
+         `0x10` of the render mask `[0xce8720]`, player branch only, text from `0x5e09f0` through \
+         the WGLD guild-identity cache. NOT the V-key nameplate (`ShouldShowName 0x6070a0` \
+         returns 0 whenever a plate frame is live) and NOT the tooltip (FrameXML's own \
+         `GetGuildInfo`). The data resolves here now — `ui_guild::GuildState` serves \
+         `GetGuildInfo` — so what is missing is the third line in `nameplates::drive_nameplates` \
+         plus its `lines_current` comparator arm and that comparator's differential test",
+    ),
     (
         "UnitNamePlayerPVPTitle",
-        "PvP titles over player nameplates",
+        "the PvP rank prefix on the overhead name line — slot a4 of `0x608f50`, bit `0x20` of the \
+         same mask, resolved by `0x609370` through the `PVP_RANK_%d_%d` GlobalStrings key. Blocked \
+         one step further back than its guild twin: the rank byte streams, but the key's second \
+         index is a FACTION SIDE that `ui_unit` does not resolve for an arbitrary player yet",
     ),
-    ("cameraTerrainTilt", "camera terrain tilt"),
-    ("cameraBobbing", "camera head bob"),
-    ("cameraWaterCollision", "camera water collision"),
-    ("cameraPivot", "the smart-pivot camera"),
     (
-        "CombatDamage",
-        "the floating-combat-text master gate is `combat_text::law::COMBAT_DAMAGE`, a const bool \
-         — the same shape ChatBubbles had before 1139: a faithful gate with no way to reach it",
+        "cameraTerrainTilt",
+        "the camera's ground-pitch channel. VERIFIED end to end by the §5 round this work \
+         dispatched (wow-re `ui/scratch/camera-cvar-gates.md`): the CVar gates predicate \
+         `0x5105a0`, whose false leg zeroes `[cam+0xa0]` at `0x50d922` and skips both `0x672170` \
+         terrain raycasts; `0x50d900` forms `slope = (Δz + 5/3)/√(Δx²+Δy²)`, walks the 10-entry \
+         slope→pitch table at `0x808a40`, clamps ±20°, throttled to 100 ms. Registered \"0\", so \
+         building it changes nothing until a player asks",
     ),
-    ("CombatLogPeriodicSpells", "a combat log"),
     (
-        "PetMeleeDamage",
-        "`combat_text::law::PET_MELEE_DAMAGE`, a const bool — see CombatDamage",
+        "cameraBobbing",
+        "head bob. VERIFIED by the same §5 round, including the threshold nobody had read: \
+         `[0x8089ac] = 1/6` is a camera DISTANCE and the compare is inclusive, so head bob is \
+         FIRST-PERSON ONLY. `0x511920` computes `ampH/ampV` from the two amplitude CVars × 1/36, \
+         `speed = clamp(moveSpeed/7.2, [0.5,1.5])`, horizontal at `freq` and vertical at `2×freq`, \
+         into the same eye-translation accumulator as the shake; `0x5106f0` is the DECAY \
+         predicate and fades the residual rather than snapping it. Registered \"0\"",
     ),
-    // …and the SLIDERS' half, which this census was blind to until 2115 extended it from
-    // `UIOptionsFrameCheckButtons` to `UIOptionsFrameSliders` as well. One row, and it is not
-    // cosmetic: `UIOptionsFrame_Load` does `slider:SetValue(GetCVar(value.cvar))`, and
-    // `Slider:SetValue` is a shape-A binding (`0x790980`, wow-re `numeric-arg-coercion-law.md`)
-    // that RAISES on a nil in the reference too — so this is what stops the stock window's
-    // `_Load()` running clean, and pfUI's GVAR path with it.
     (
-        "cameraYawMoveSpeed",
-        "the Mouse Look Speed slider — benilla's mouse-look yaw rate is not a CVar-driven knob \
-         yet; its sibling `cameraYawSmoothSpeed` (auto-follow) is registered and drives \
-         `follow.yaw_speed`, and this one has no counterpart in `player::camera`",
+        "cameraWaterCollision",
+        "two consumers, both VERIFIED by the §5 round. (1) the collision sweep's class mask \
+         becomes `0x1f0171` instead of `0x100171` — the `0xf0000` nibble is the ADT liquid layers \
+         — and `0x511ad0`'s bands re-base the pivot floor/cap. (2) a band CROSSING (not a level \
+         test: `0x50eb14` snapshots the previous frame's bits before `0x511ad0` rewrites them) \
+         arms a 5° pitch through the `+0xf4` channel. Registered \"1\", so this one is ON in the \
+         reference and benilla is the divergence — but the eye/arm verdict of \
+         `camera-arm-liquid-blind.md` still stands: it is the PIVOT that is liquid-aware",
     ),
+    (
+        "cameraPivot",
+        "smart pivot. VERIFIED by the §5 round, which also corrected the ±89° claim: predicate \
+         `0x510690` is `enabled ∧ TYPEMASK_UNIT ∧ not moving/strafing (`&0xf`, so turning in place \
+         passes) ∧ pitched down ∧ the collision solver's own clip flags `0x30000` nonzero` — i.e. \
+         it only engages in a frame the camera was ACTUALLY clipped. A mostly-vertical drag then \
+         routes into the pitch-BIAS channel `cam+0x104` instead of the pitch integrator, with a \
+         one-sided floor, and `0x5107f0` eases it back at `cameraTargetSmoothSpeed` when the \
+         predicate drops. Registered \"1\"",
+    ),
+    // **The SLIDERS' half is empty, and that is the point.** 2115 extended this census from
+    // `UIOptionsFrameCheckButtons` to `UIOptionsFrameSliders` and it caught exactly one row —
+    // `cameraYawMoveSpeed`, the MOUSE_LOOK_SPEED slider — which was not cosmetic:
+    // `UIOptionsFrame_Load` does `slider:SetValue(GetCVar(value.cvar))`, `Slider:SetValue` is a
+    // shape-A binding (`0x790980`) that RAISES on a nil in the reference too, and that raise is
+    // what stopped the stock window's `_Load()` (and `_SetDefaults`, through `GetCVarDefault`).
+    // It is registered now, so all four slider CVars are backed and the window's `_Load()` runs to
+    // completion. Every row left below is a check button, and a check button's
+    // `GetCVar(x) == "1"` is nil-safe — so nothing on this list can raise any more. A new SLIDER
+    // row arriving here is therefore a live raise, not a missing feature, and should be read that
+    // way by whoever adds it.
 ];
 
 /// **Every CVar the reference's own options table names is registered here, or listed above with

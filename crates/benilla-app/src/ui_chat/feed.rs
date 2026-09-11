@@ -688,6 +688,16 @@ pub(super) fn deliver(
     // alternates are what keep a renamed or suspended channel registered with the window
     // ([`super::event::notice_token`], decision 2130).
     event.slot_state = channels.slot_state(&event.channel);
+    if let Some(byte) = notice {
+        // The one trace of the server's half of every join and leave — a probe log's only way to
+        // tell "we asked" from "the server agreed" (decision 2144's live runs read it).
+        debug!(
+            "chat: channel notice {byte:#04x} for {:?} (slot {:?}, {:?})",
+            event.channel,
+            channels.number_of(&event.channel),
+            event.slot_state
+        );
+    }
     if notice == Some(channel_notice::YOU_JOINED) {
         // The reference's `0x49bbaf`: the confirmed join is what sets the channel's
         // `ZONECHANNELS` bit, and it is the ONLY thing that grows that mask at runtime

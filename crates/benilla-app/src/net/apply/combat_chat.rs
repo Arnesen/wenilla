@@ -36,6 +36,11 @@ pub(super) struct ChatCtx<'a> {
     pub factions: Option<&'a crate::target::ring::Factions>,
     pub reputations: &'a Reputations,
     pub spells: Option<&'a crate::ui_action::Spells>,
+    /// The live display ranges — the reference's `0x8629e0` table, now CVar-backed.
+    pub ranges: &'a combat::CombatLogRanges,
+    /// `CombatLogPeriodicSpells`. The whole-packet gate lives at the `PeriodicAuraLog` dispatch
+    /// arm (it suppresses the floats too); this carries the two *chat-only* read sites.
+    pub periodic: bool,
 }
 
 impl ChatCtx<'_> {
@@ -54,7 +59,13 @@ impl ChatCtx<'_> {
     /// One endpoint's half of the display-range gate — the law is
     /// [`combat::in_range`]; this only supplies the context it reads.
     fn in_range(&self, guid: u64, class: UnitClass, poses: &Query<&mut Transform>) -> bool {
-        combat::in_range(guid, class, self.self_guid, self.index, poses)
+        combat::in_range(
+            guid,
+            self.ranges.class(class),
+            self.self_guid,
+            self.index,
+            poses,
+        )
     }
 
     /// A spell's display name, or `None` when the reference would emit **no line at all** for this
@@ -178,6 +189,12 @@ pub(super) fn spell_damage_log(
         );
     }
     if s.periodic {
+        // The second of `CombatLogPeriodicSpells`' two chat-only read sites: `0x62d9ae` inside
+        // `0x62d9a0` skips the `call 0x628100` line emit and nothing else — both branches converge
+        // and still reach the float emitters, which is why this returns instead of gating the arm.
+        if !ctx.periodic {
+            return;
+        }
         // **The TARGET's class, not the caster's** (decision 2127): this leg lands in the shared
         // `PERIODICAURADAMAGE` formatter `0x628100`, whose msg-id selector takes `outClassB`
         // (`0x628235`), and B is the victim at every call site.
@@ -594,9 +611,10 @@ pub(super) fn spell_insta_kill_log(
 /// `IMMUNESPELL` through the plain damage selector `0x626be0`. The difference is real: an immunity
 /// to a *helpful* spell still files under `…_DAMAGE`.
 ///
-/// `IMMUNESPELL`'s `log_format` byte is the reference's "is periodic" flag, and it is the only
-/// thing `CombatLogPeriodicSpells` would gate here — a CVar we do not read live yet, so the flag
-/// changes nothing today and is named rather than dropped.
+/// **`IMMUNESPELL`'s `log_format` byte is the reference's "is periodic" flag, and it is now read.**
+/// `0x62d25f` inside `0x62d240` gates *this formatter only*, and only when that byte is set — so a
+/// direct immunity still prints with `CombatLogPeriodicSpells` off, and a periodic one does not.
+/// `PROCRESIST` is not gated at all: the read site is in the `SPELLORDAMAGE_IMMUNE` arm.
 pub(super) fn spell_outcome_log(
     s: SpellOutcomeLog,
     immune: bool,
@@ -605,6 +623,11 @@ pub(super) fn spell_outcome_log(
     poses: &Query<&mut Transform>,
     log: &mut ChatLog,
 ) {
+    // The periodic gate, on the one arm that has it: `IMMUNESPELL` with the packet's periodic
+    // byte set. `PROCRESIST` shares this body but not the gate — its formatter has no read site.
+    if immune && s.log_format != 0 && !ctx.periodic {
+        return;
+    }
     let caster = ctx.classify(s.caster, stores);
     let target = ctx.classify(s.target, stores);
     let Some(spell) = ctx.spell_name(s.spell_id) else {

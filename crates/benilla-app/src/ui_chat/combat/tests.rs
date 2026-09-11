@@ -482,3 +482,51 @@ fn the_class_range_table_is_the_binarys() {
     assert_eq!(C::Creature.default_range(), 30.0);
     assert_eq!(C::Unknown.default_range(), 0.0);
 }
+
+/// **The eight range CVars reach the gate** — the table is live, not compiled in.
+///
+/// The reference registers all eight in one place (`0x626d00`) and looks each up by name at every
+/// use; we resolve them once into [`CombatLogRanges`]. What this pins is the property that made
+/// them worth registering: a `SetCVar` moves the number the gate actually compares against, for
+/// each of the seven classes independently and for the death line separately.
+///
+/// The control is class 0: it has NO CVar in the reference's table, so no name may reach it.
+#[test]
+fn a_set_cvar_moves_the_range_the_gate_compares_against() {
+    use super::{CombatLogRanges, UnitClass as C};
+
+    let mut r = CombatLogRanges::default();
+    // Seeded from the reference's own `{cvarName, defaultValue}` pairs.
+    assert_eq!(r.class(C::Party), 50.0);
+    assert_eq!(r.class(C::Creature), 30.0);
+    assert_eq!(r.class(C::Me), 100_000.0);
+    assert_eq!(r.death(), 60.0);
+
+    // Each of the seven moves its own class and nothing else — BigWigs' slider, which wrote
+    // nothing at all before these rows were registered.
+    assert!(r.set("CombatLogRangeParty", 200.0));
+    assert_eq!(r.class(C::Party), 200.0);
+    assert_eq!(r.class(C::PartyPet), 50.0, "a sibling class must not move");
+    assert!(r.set("CombatLogRangeCreature", 15.0));
+    assert_eq!(r.class(C::Creature), 15.0);
+
+    // The name match is case-insensitive, like the reference's own `SStrCmpI` lookup.
+    assert!(r.set("combatlograngehostileplayers", 80.0));
+    assert_eq!(r.class(C::HostilePlayer), 80.0);
+
+    // The death range is its own store, and moving it leaves every class alone.
+    assert!(r.set(super::DEATH_LOG_RANGE_CVAR, 5.0));
+    assert_eq!(r.death(), 5.0);
+    assert_eq!(r.class(C::Party), 200.0);
+
+    // Zero is a real value, not "unset": the reference's `dist² < 0` is never true, so the class
+    // goes silent. Nothing may clamp it up to a floor.
+    assert!(r.set("CombatLogRangePartyPet", 0.0));
+    assert_eq!(r.class(C::PartyPet), 0.0);
+
+    // The control: classes 0 and 1 have a NULL name in the reference's table, and an unrelated
+    // name is refused rather than silently swallowed.
+    assert!(!r.set("CombatLogRangeMe", 10.0));
+    assert!(!r.set("mousespeed", 10.0));
+    assert_eq!(r.class(C::Me), 100_000.0);
+}

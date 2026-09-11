@@ -128,8 +128,8 @@ pub(crate) const MAX_CHANNELS: usize = 10;
 /// model the one value of it that changes what the player sees: **3, locally suspended**. States
 /// 0 (server-confirmed), 1 (join not yet acknowledged) and 2 (renamed, re-join pending) collapse
 /// here, and that is sound rather than lazy — the reference reads 0 to decide whether a LEAVE goes
-/// out, and our walk decides that from [`super::channels::ZoneChannelWalk::held`], the request side
-/// (1284). State 3 does not collapse: it is the difference between keeping a channel and losing it.
+/// out, and our walk decides that from the slot's own state on the request side (1284). State 3
+/// does not collapse: it is the difference between keeping a channel and losing it.
 #[derive(Resource, Default)]
 pub(crate) struct ChannelState {
     /// Slot `i` is channel number `i + 1`; `None` is a freed slot, kept so the numbers above it
@@ -168,7 +168,16 @@ pub(crate) struct ChannelState {
     ///
     /// Not cleared by the session end: it belongs to the character's file, and the login that
     /// reads that file is what seats it.
-    pub zone_mask: u32,
+    ///
+    /// **`None` until that login has read the file** — the reference's "chat system ready" flag
+    /// `ds:0xb6e5c8`, set at the tail of the cache loader (`0x499a18`) and the first thing
+    /// `ZoneChannelRefresh` tests (`0x49a219`, a full bail). The walk is the mask's consumer
+    /// (decision 2144: **the mask is the join predicate**, `0x49a494`), so a walk before the seat
+    /// would read an empty word and join nothing — and nothing re-triggers it when the word
+    /// lands. An `Option` says "not seated" in the type rather than in a second flag that could
+    /// drift from it; the saver refuses to compose a file from `None` for the same reason
+    /// (writing `ZONECHANNELS 0` is the damage 2120 repaired).
+    pub zone_mask: Option<u32>,
 }
 
 /// One joined-channel record — the reference's `[0xb4fe04] + n*0xa0` slot, in the fields this
@@ -191,7 +200,8 @@ pub(crate) struct ChannelSlot {
 pub(crate) enum SlotState {
     /// `0` (server-confirmed) and `1` (join not yet acknowledged), which we cannot tell apart and
     /// do not need to: the reference reads `0` to decide whether a LEAVE goes out, and our walk
-    /// decides that from [`super::channels::ZoneChannelWalk::held`], the request side (1284).
+    /// reads this state for the same decision — a slot it registered and never confirmed sends
+    /// one LEAVE the server answers "Not on channel", which is the one cost of the collapse.
     #[default]
     Joined,
     /// `2` — **renamed, re-join pending**: the zone walk moved this row's name because the player
@@ -238,14 +248,71 @@ impl ChannelState {
     /// which ORs `1 << (slot.ChannelID - 1)` in the `YOU_JOINED` arm. A custom channel has no DBC
     /// id and so no bit, which is why this is a no-op for one.
     pub(crate) fn note_zone_channel_joined(&mut self, name: &str) {
-        self.zone_mask |= zone_bit(self.channels.zone_channel_id(name));
+        let bit = zone_bit(self.channels.zone_channel_id(name));
+        match &mut self.zone_mask {
+            Some(mask) => *mask |= bit,
+            // Nothing sends a join before the cache loader has run — the walk waits for the seat
+            // and the file's own custom re-joins come after it — so this is a broken ordering,
+            // not a state to absorb.
+            None if bit != 0 => warn!(
+                "chat: {name:?} confirmed joined before the chat cache seated the zone mask — bit                  {bit:#x} dropped"
+            ),
+            None => {}
+        }
     }
 
     /// An **explicit** leave clears the bit — `0x49f10a`/`0x49f11a` inside leave-by-name
     /// `0x49ee70`, and only there. The zone walk's LEAVE goes out on a different path and leaves
     /// the mask alone: crossing a border is not "I left this channel".
+    ///
+    /// Keyed the way the reference keys it (wow-re `leavechannelbyname-contract.md` §8): the slot
+    /// found by the **wire name**, and its own DBC id — so a name no slot carries clears nothing,
+    /// whatever row it would resolve to.
     pub(crate) fn note_zone_channel_left(&mut self, name: &str) {
-        self.zone_mask &= !zone_bit(self.channels.zone_channel_id(name));
+        if self.number_of(name).is_none() {
+            return;
+        }
+        if let Some(mask) = &mut self.zone_mask {
+            *mask &= !zone_bit(self.channels.zone_channel_id(name));
+        }
+    }
+
+    /// Does the mask carry `id`'s bit — is this `ChatChannels.dbc` row one the walk joins? The
+    /// reference's live predicate `0x49a494` (decision 2144). `None` (not seated) answers false.
+    pub(crate) fn zone_row_wanted(&self, id: u32) -> bool {
+        self.zone_mask.is_some_and(|mask| mask & zone_bit(id) != 0)
+    }
+
+    /// **The numeric leg of leave-by-name** — `0x49ee70` step 1 (wow-re
+    /// `leavechannelbyname-contract.md` §3, VERIFIED): a `SStrToInt` of the argument that is not
+    /// zero names joined slot `n`, and only a **server-confirmed** one (`slot+0x9c == 0`,
+    /// `0x49be50`); a hole, an out-of-range number or a suspended slot make the whole call a
+    /// no-op — no packet, no mask change. `None` is that no-op. Anything else is already the wire
+    /// name: the VM's `LeaveChannelByName` composed a shortcut or passed a custom name through.
+    ///
+    /// Here rather than in the VM because the slot **states** live here; the VM's mirror carries
+    /// names alone.
+    pub(crate) fn leave_target(&self, arg: &str) -> Option<String> {
+        let digits: String = arg
+            .strip_prefix('-')
+            .unwrap_or(arg)
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits.is_empty() || digits.chars().all(|c| c == '0') {
+            return Some(arg.to_string());
+        }
+        if arg.starts_with('-') {
+            return None; // a negative never names a slot
+        }
+        digits
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .and_then(|n| self.joined.get(n - 1))
+            .and_then(|slot| slot.as_ref())
+            .filter(|slot| slot.state == SlotState::Joined)
+            .map(|slot| slot.name.clone())
     }
 
     /// **Rename a slot in place — the zone walk crossing a border** (decision 2130).
@@ -286,9 +353,15 @@ impl ChannelState {
         let n = self.number_of(old)?;
         let slot = self.joined[n as usize - 1].as_mut()?;
         slot.name = new.to_string();
-        // `0x49bcd3`: `(old == 3) ? 1 : 2` — either way the slot is awaiting a re-join, and the
-        // confirming notice is the one that resolves it.
-        slot.state = SlotState::Renamed;
+        // `0x49bcd3`: `(old == 3) ? 1 : 2`. A suspended slot comes back as a plain pending join —
+        // our `Joined` is that state 1 — so its confirming notice reads `YOU_JOINED`, not
+        // `YOU_CHANGED`; any other state is a rename awaiting its re-join, and the notice resolves
+        // it.
+        slot.state = if slot.state == SlotState::Suspended {
+            SlotState::Joined
+        } else {
+            SlotState::Renamed
+        };
         Some(n)
     }
 

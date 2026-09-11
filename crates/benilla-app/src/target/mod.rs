@@ -339,6 +339,24 @@ impl Default for ClickConfig {
     }
 }
 
+/// **`assistAttack`** — the second, opt-in leg of `/assist` (1.12's *Assist Attack* checkbox).
+///
+/// `/assist` always does leg 1: read the basis unit's `UNIT_FIELD_TARGET` and select it
+/// (`CMSG_SET_SELECTION`). With this CVar non-zero the reference's shared tail runs a **second**
+/// leg — `0x489c02`/`0x489d02 call 0x5ecb70` `StartAttack(&guid)` — which stands you and sends
+/// `CMSG_ATTACKSWING`. So `/assist` stops meaning "select what my friend is fighting" and starts
+/// meaning "select it and open the swing".
+///
+/// Its record `[0xb4d8f8]` has exactly **three references image-wide**: the registration store and
+/// the two shared assist tails. `CanAssist 0x6066f0` is *not* on this path (verified negative over
+/// all 25 of its call sites).
+///
+/// **Registered default `"0"`, so nothing changes until a player asks for it.** That number cost
+/// wow-re a correction it records against itself: its first pass read `"3"` off the *next*
+/// registration's default (`minimapZoom`), the `mov ds:` adjacency trap.
+#[derive(Resource, Default)]
+pub(crate) struct AssistAttack(pub(crate) bool);
+
 /// Targeting: click-to-select + the ground selection ring.
 pub(crate) struct TargetPlugin;
 
@@ -346,6 +364,7 @@ impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Selection>()
             .init_resource::<ClickConfig>()
+            .init_resource::<AssistAttack>()
             .init_resource::<Hovered>()
             .init_resource::<HoveredObject>()
             .init_resource::<PickOcclusion>()

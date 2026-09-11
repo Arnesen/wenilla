@@ -4025,28 +4025,36 @@
             </OnHide>
         </Scripts>
     </Frame>
-    <!-- ══ THE TWO SURVIVING ALIASES, AND THE ONE THAT HAD TO GO (decision 2115) ══════════════
+    <!-- ══ THE ONE SURVIVING ALIAS (decisions 2115, and the Sound window's row) ═══════════════
          The reference has THREE options windows — `OptionsFrame` (video), `SoundOptionsFrame` and
-         `UIOptionsFrame` (interface) — and benilla's one window answers to the first name outright,
-         because that is what this frame is called. What happens to the other two is not one
-         question but two:
+         `UIOptionsFrame` (interface). benilla's one window answers to the first name outright,
+         because that is what this frame is called; the other two are **the reference's own frames,
+         loaded hidden off the chain**, and neither may ever be aliased onto this one again.
 
-         **`UIOptionsFrame` is NO LONGER ALIASED, and must never be.** The reference's own
-         `UIOptionsFrame.xml` is loaded, hidden, at the manifest's l.21 seat, so that name is a real
-         frame with real children — which is the whole point of 2115: pfUI's
+         **`UIOptionsFrame`** is loaded at the manifest's l.21 seat, so that name is a real frame
+         with real children — the whole point of 2115: pfUI's
          `skins/blizzard/options-interface.lua` does `UIOptionsFrame:SetWidth(1024)` and then walks
-         `UIOptionsFrameCheckButton1..69`. Under the old alias that `SetWidth` landed on THIS window,
-         the one the player opens. Nothing of ours may `Show()` the stock frame either; it is
-         `hidden="true"` in its own file and that is what keeps it off the screen.
+         `UIOptionsFrameCheckButton1..69`. Under the old alias that `SetWidth` landed on THIS
+         window, the one the player opens.
 
-         **`SoundOptionsFrame` stays aliased**, because we do not load the reference's
-         `SoundOptionsFrame.xml` at all (2115 says why: nothing in the addon corpus needs it beyond
-         one optional pfUI skin). It answers exactly two stock consumers, both of which read all
-         three window names UNGUARDED and both of which are asking "is an options window open":
-         `MainMenuBarMicroButtons.lua` l.47-52 (`UpdateMicroButtons`, deciding whether the Main Menu
-         micro button is pushed — decision 1987) and `UIParent.lua:996` (`IsOptionFrameOpen`, on the
-         path of every window close). While ours is up the honest answer to both is yes, and the
-         alias is how they get it. `OptionsFrame`, being this frame's own name, answers them too.
+         **`SoundOptionsFrame` is no longer aliased either**, and the reason it had to go is
+         sharper than the reason it existed. Our file loads AFTER the stock one, so the alias would
+         not have sat harmlessly beside the real frame — it would have **clobbered it**, and pfUI's
+         `skins/blizzard/options-sound.lua` would then `StripTextures`, `CreateBackdrop`,
+         `EnableMovable` and re-anchor THIS window. That is 2115 §2's harm restored, one window
+         over.
+
+         **Losing it costs nothing.** Its two stock consumers —
+         `MainMenuBarMicroButtons.lua` l.47-52 (`UpdateMicroButtons`) and `UIParent.lua:997`
+         (`IsOptionFrameOpen`) — read all three names UNGUARDED in one `or` chain, and that chain
+         already contains `OptionsFrame:IsVisible()`, which is this frame's own name. The
+         `SoundOptionsFrame` term goes from true-via-alias to false-via-real-hidden-frame, and in
+         both consumers it was redundant with a term that is already true. So while ours is up both
+         still answer yes, and while it is down both still answer no. 2115 §1 read that alias as
+         load-bearing for those two; walking them says it never was.
+
+         Nothing of ours may `Show()` either stock frame; both are `hidden="true"` in their own
+         files and that is what keeps them off the screen.
 
          **`OptionsFrameCancel` stays**, and it is the ESC ladder's: the stock `ToggleGameMenu`
          (UIParent.lua l.1465-1497, off the chain since 1988) closes an open options window with
@@ -4062,7 +4070,6 @@
          panel that does not. No adapter is added for it (2115).
          BENILLA_ALLOW_OWN_UI=1 -->
     <Script><![CDATA[
-        SoundOptionsFrame = OptionsFrame
         OptionsFrameCancel = OptionsFrameCloseButton
     ]]></Script>
 </Ui>
