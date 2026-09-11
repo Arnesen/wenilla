@@ -453,7 +453,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetShadowColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
+            // Shape C on r, g, b (`Font:SetShadowColor 0x79f730`, `2=C 3=C 4=C 5=B`, wow-re
+            // `numeric-arg-coercion-law.md`) — bare `lua_tonumber`, no gate, never raises.
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+                let (r, g, b) = (
+                    crate::script::object::as_f32(&r),
+                    crate::script::object::as_f32(&g),
+                    crate::script::object::as_f32(&b),
+                );
                 edit(lua, &this, |fo| {
                     let offset = fo.shadow.map_or([0.0, 0.0], |s| s.offset);
                     fo.shadow = Some(FontShadow {

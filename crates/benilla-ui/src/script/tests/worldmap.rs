@@ -219,6 +219,53 @@ fn worldmap_current_zone_and_player_feed() {
     assert_eq!(s.eval::<i64>("return GetCurrentMapContinent()").unwrap(), 0);
 }
 
+/// The **engine** moves the selection too, with no Lua in the loop — the reference's second
+/// writer of `[0x84506c]`/`[0x845070]`: `0x494780`'s `old == 0` side call to the resolver
+/// `0x4a6650`, which every exit of ends in the `SetMap` setter `0x4a67a0` (wow-re
+/// `system/ui/scratch/worldmap-selection-autosync.md`).
+///
+/// We only ever had the Lua writers, so until something opened the map we sat at the world
+/// level — and there `GetPlayerMapPosition` answers a world-SHEET uv, which every addon built on
+/// Astrolabe rescales as a zone uv. This pins that a fresh session can be on the player's own
+/// zone before a single line of FrameXML or addon Lua has asked for it.
+#[test]
+fn the_engine_can_select_a_zone_with_no_lua_call() {
+    let mut s = script();
+    push_catalog(&mut s);
+
+    // A fresh VM is the world sheet, and nothing Lua-side has run.
+    assert_eq!(
+        s.eval::<(i64, i64)>("return GetCurrentMapContinent(), GetCurrentMapZone()")
+            .unwrap(),
+        (0, 0)
+    );
+
+    s.sync_world_map_to_player_zone(1, 2);
+
+    assert_eq!(
+        s.eval::<(i64, i64)>("return GetCurrentMapContinent(), GetCurrentMapZone()")
+            .unwrap(),
+        (1, 2),
+        "the engine's own SetMap is what Lua reads back"
+    );
+    // The WHOLE selection moved, not just the pair of globals: GetMapInfo names the zone sheet,
+    // which is what `WorldMapFrame_Update` loads art from and what Astrolabe keys its scale on.
+    assert!(
+        s.eval::<Option<String>>("return GetMapInfo()")
+            .unwrap()
+            .is_some(),
+        "a selected zone names its map file; the world level is the nil that mis-scales"
+    );
+
+    // It clamps through the same tail as the Lua verbs — an out-of-range pair cannot corrupt
+    // the selection (`0x4a67a0` range-checks the zone against the continent's child count).
+    s.sync_world_map_to_player_zone(99, 99);
+    let (c, _) = s
+        .eval::<(i64, i64)>("return GetCurrentMapContinent(), GetCurrentMapZone()")
+        .unwrap();
+    assert!(c > 0, "clamped into the catalog, never past it");
+}
+
 /// World-level ProcessMapClick picks the continent whose sheet-rect contains the click (the
 /// 0x4a7100 AABB walk — the real kernel rects are disjoint); continent-level clicks resolve
 /// through the 0x4a6ec0 zone grid; hover names ride the same cell law.

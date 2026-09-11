@@ -742,15 +742,93 @@ mod loader_tests {
             .any(|w| w.contains("OnAttributeChanged")));
     }
 
-    /// An unknown frame type is an error that drops that subtree but not the rest of the load.
+    /// **An unknown frame type at the XML door is LOGGED, and its node is skipped — nothing
+    /// raises** (decision 2191).
+    ///
+    /// `Instantiate 0x6ee280` prints `"Unknown frame type: %s"` (`0x871124`) at `0x6ee356` and makes
+    /// no object for that node; only the Lua `CreateFrame` binding raises (`0x872fa8` via
+    /// `luaL_error`). The node's own `<Frames>` go with it — there is no object to parent them —
+    /// and the walk carries on to the next sibling.
     #[test]
-    fn unknown_frame_type_errors_but_continues() {
+    fn an_unknown_xml_frame_type_is_logged_and_its_node_skipped() {
         let s = UiScript::new().unwrap();
-        let doc = parse(r#"<Ui><Bogus name="X"/><Frame name="Real"/></Ui>"#);
+        let doc = parse(
+            r#"<Ui>
+                 <Bogus name="X"><Frames><Frame name="Inside"/></Frames></Bogus>
+                 <Frame name="Real"/>
+               </Ui>"#,
+        );
         let report = load(&s, &doc, &no_files);
+        assert!(
+            report.errors.is_empty(),
+            "nothing raised on the XML door: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w == "Unknown frame type: Bogus"),
+            "the reference's own wording, in the log channel: {:?}",
+            report.warnings
+        );
         assert_eq!(report.frames, 1, "only the real frame built");
-        assert!(report.errors.iter().any(|e| e.contains("CreateFrame")));
+        assert!(s.eval::<bool>("return X == nil and Inside == nil").unwrap());
         assert!(s.eval::<bool>("return Real ~= nil").unwrap());
+        // …and the Lua door still raises, on the same lookup.
+        let err = s.run(r#"CreateFrame("Bogus")"#).unwrap_err().to_string();
+        assert!(err.contains("unknown frame type 'Bogus'"), "{err}");
+    }
+
+    /// **A `.toc`-listed `Bindings.xml` loads as XML and costs nothing but log lines** (decision
+    /// 2191) — MonkeyDev's shape, the director's live report. The `.toc` line runner hands every
+    /// non-`.lua` entry to the same file loader (`0x6edd51` → `0x6ede10`), whose walk ignores the
+    /// root's own tag (`<Bindings>`, tolerated) and sees three `<Binding>` elements: three unknown
+    /// frame types, logged. The file's real reading as bindings is `0x51f400`'s, which runs anyway.
+    #[test]
+    fn a_bindings_document_loaded_as_framexml_raises_nothing() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Bindings>
+                 <Binding name="MONKEYDEV_STEPUP" header="MONKEYDEV">MonkeyStep_Inc()</Binding>
+                 <Binding name="MONKEYDEV_STEPDOWN">MonkeyStep_Dec()</Binding>
+               </Bindings>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|w| *w == "Unknown frame type: Binding")
+                .count(),
+            2,
+            "one log line per <Binding>: {:?}",
+            report.warnings
+        );
+        assert!(
+            s.eval::<bool>("return MONKEYDEV_STEPUP == nil").unwrap(),
+            "and no frame published under a binding's name"
+        );
+    }
+
+    /// The WorldFrame's one-shot record, at the XML door: a second `<WorldFrame>` is an unknown
+    /// type, so it logs and builds nothing (decisions 1984, 2191) where `CreateFrame` raises.
+    #[test]
+    fn a_second_xml_world_frame_is_logged_not_raised() {
+        let s = UiScript::new().unwrap();
+        s.run(r#"CreateFrame("WorldFrame", "WorldFrame")"#).unwrap();
+        let report = load(
+            &s,
+            &parse(r#"<Ui><WorldFrame name="Another"/></Ui>"#),
+            &no_files,
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w == "Unknown frame type: WorldFrame"));
+        assert!(s.eval::<bool>("return Another == nil").unwrap());
     }
 
     /// Env-gated smoke test over a real extracted FrameXML file (never committed; extract with

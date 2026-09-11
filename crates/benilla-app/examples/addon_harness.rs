@@ -2,7 +2,9 @@
 //!
 //! ```text
 //! cargo run -q -p benilla-app --example addon_harness -- <folder> [--verbose] [--why <substr>] [--deep [n]] [--status <file>] [--diff <file>]
-//!   or: ... -- <folder> --probe <Name> [--eval <lua>]...   (one addon, then ask its VM)
+//!   or: ... -- <folder> --probe <Name> [--eval <lua> | --mouse <x>,<y> | --tick <secs>]...   (one addon, then
+//!       ask its VM — the steps run in the order given, so a read can be taken with the cursor
+//!       parked somewhere the addon cares about)
 //! ```
 //!
 //! The instrument decision 1188 phase 6 asks for: *"which addons work" is a number that can be
@@ -404,13 +406,28 @@ fn main() {
         .position(|a| a == "--probe")
         .and_then(|i| rest.get(i + 1))
     {
-        let evals: Vec<String> = rest
+        // `--eval <lua>` and `--mouse <x>,<y>` are ONE ordered list, not two: a read taken
+        // before the cursor arrived and one taken after answer different questions, and which is
+        // which is the order the caller typed.
+        let steps: Vec<addon_harness::probe::Step> = rest
             .iter()
             .enumerate()
-            .filter(|(_, a)| *a == "--eval")
-            .filter_map(|(i, _)| rest.get(i + 1).cloned())
+            .filter_map(|(i, a)| match a.as_str() {
+                "--eval" => Some(addon_harness::probe::Step::Eval(rest.get(i + 1)?.clone())),
+                "--tick" => Some(addon_harness::probe::Step::Tick(
+                    rest.get(i + 1)?.parse().ok()?,
+                )),
+                "--mouse" => {
+                    let (x, y) = rest.get(i + 1)?.split_once(',')?;
+                    Some(addon_harness::probe::Step::Mouse(
+                        x.trim().parse().ok()?,
+                        y.trim().parse().ok()?,
+                    ))
+                }
+                _ => None,
+            })
             .collect();
-        let Some(out) = addon_harness::probe::probe(&root, name, &evals) else {
+        let Some(out) = addon_harness::probe::probe(&root, name, &steps) else {
             eprintln!(
                 "no manifest under {}/{name} — is that an addon folder?",
                 root.display()
@@ -421,7 +438,7 @@ fn main() {
         report_lines("load errors", &out.load_errors);
         report_lines("session errors", &out.session_errors);
         if out.answers.is_empty() {
-            println!("  (no --eval given — load and session errors only)");
+            println!("  (no --eval/--mouse given — load and session errors only)");
         }
         for (chunk, answer) in &out.answers {
             println!("\n  {chunk}");

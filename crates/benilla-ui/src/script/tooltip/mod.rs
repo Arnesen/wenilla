@@ -375,14 +375,32 @@ pub(super) fn show_or_hide_empty(lua: &Lua, h: FrameHandle) {
     set_shown(lua, h, lines > 0);
 }
 
-/// Cancel a running fade and restore full alpha (any fresh content or an explicit Show does
-/// this — re-hovering during the fade-out resurrects the tooltip at full strength).
+/// Cancel a running fade and restore full alpha (fresh CONTENT does this — re-hovering during
+/// the fade-out resurrects the tooltip at full strength). Conditional on a fade actually running,
+/// because an addon that lowered the plate's alpha itself and then added a line keeps its alpha:
+/// only the three sites in [`full_alpha`] are documented to stamp it back.
 fn cancel_fade(model: &mut Model, h: FrameHandle) {
     if let Ok(t) = tip_mut(model, h) {
         if t.fade_start.take().is_some() {
             model.arena.set_alpha(h, 1.0);
         }
     }
+}
+
+/// `SetAlpha(255)` — **UNCONDITIONAL**, and the FIRST thing the SetOwner core `0x52ffe0` does
+/// (`0x52fff4`), before the five stores; `0x530a80`'s show arm does it too, and its self-hide arm
+/// reaches it through `0x530a60` → `0x52ffe0(0, 0, 0, 0)`. So all three of SetOwner, Show and the
+/// effective-hide leave the plate at full strength whether or not one of OUR fades was running
+/// (wow-re `system/ui/ledger.tsv` rows `0x52ffe0` / `0x530a80`, both verified, and
+/// `scratch/hover-hide-and-tooltip-owner-law.md` §4).
+///
+/// [`cancel_fade`] is not this: it only restores the alpha a fade of ours took away, so a plate
+/// left dim by any other path never recovered where the reference recovers on the next SetOwner.
+fn full_alpha(model: &mut Model, h: FrameHandle) {
+    if let Ok(t) = tip_mut(model, h) {
+        t.fade_start = None;
+    }
+    model.arena.set_alpha(h, 1.0);
 }
 
 /// The engine's `GetTime` clock (the `__benilla_now` global [`super::UiScript::tick`] advances).
@@ -622,7 +640,7 @@ pub(super) use verbs::install;
 pub(super) fn hide_tooltip(lua: &Lua, h: FrameHandle) {
     {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        cancel_fade(&mut model, h);
+        full_alpha(&mut model, h);
         if let Ok(t) = tip_mut(&mut model, h) {
             t.owner = None;
         }

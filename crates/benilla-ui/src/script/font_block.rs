@@ -358,7 +358,15 @@ pub(super) fn install(
     m.set(
         "SetShadowColor",
         lua.create_function(
-            move |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
+            // Shape C on r, g, b (`FontString:SetShadowColor 0x79dd40`, `2=C 3=C 4=C 5=B`) — the
+            // same law this module's header already states for its `SetTextColor` sibling, which
+            // 1973 closed there and not here.
+            move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+                let (r, g, b) = (
+                    super::object::as_f32(&r),
+                    super::object::as_f32(&g),
+                    super::object::as_f32(&b),
+                );
                 let rh = resolve(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();

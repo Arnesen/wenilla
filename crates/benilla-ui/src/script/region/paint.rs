@@ -54,10 +54,18 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // known live case is the action bar's grid ring: stock `ActionButton_ShowGrid` passes the
     // fourth argument explicitly (`SetVertexColor(1.0, 1.0, 1.0, 0.5)`), so closing this cannot
     // silently change that file.
+    //
+    // **Shape C on r, g, b** (`Texture:SetVertexColor `0x79abd0``, `2=C 3=C 4=C 5=B`, wow-re
+    // `numeric-arg-coercion-law.md`): a bare `lua_tonumber` with no `lua_isnumber` gate, so a nil,
+    // a table or a string is **0.0** and the call never raises. Taking them as `f32` made mlua's
+    // converter the gate instead — the 2176 class — and the stock
+    // `QuestLogFrame.lua:337` idiom hands three nils (`titleButton.r/g/b` are only assigned in
+    // `QuestLog_Update`) on any path that selects a quest-log entry before the window has painted.
     m.set(
         "SetVertexColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+                let (r, g, b) = (as_f32(&r), as_f32(&g), as_f32(&b));
                 let rh = region_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
@@ -569,7 +577,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // corner in the renderer's screen winding.
     m.set(
         "SetTexCoord",
-        lua.create_function(|lua, (this, rest): (Table, mlua::Variadic<f32>)| {
+        // Every coordinate is **shape C** (`Texture:SetTexCoord 0x79beb0`, all positions C,
+        // wow-re `numeric-arg-coercion-law.md`): bare `lua_tonumber`, nil/table/string → 0.0. Only
+        // the ARITY raises (`0x79bf5d dec eax ; cmp eax,4 ; je ; cmp eax,8 ; je`), which is the
+        // match below. `Variadic<f32>` made mlua the per-coordinate gate; it is not one.
+        lua.create_function(|lua, (this, args): (Table, mlua::Variadic<Value>)| {
+            let rest: Vec<f32> = args.iter().map(as_f32).collect();
             let rh = region_handle_of(lua, &this)?;
             let coords = match rest.len() {
                 4 => Some(TexCoords::Rect([rest[0], rest[1], rest[2], rest[3]])),

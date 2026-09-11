@@ -63,11 +63,34 @@ fn wrapped(chunk: &str) -> String {
     )
 }
 
-/// Load `name` out of `root` the way the survey does, drive the session start, then evaluate each
-/// chunk in `evals` against the VM that is left.
+/// One step of a probe run, in the order the caller asked for it.
+///
+/// A probe used to be a list of chunks alone, which cannot ask the question half of this corpus
+/// is about: an addon's map, bar and tooltip behaviour is **hover-driven**, and the state a read
+/// finds with the cursor parked off-screen is not the state a player is in. Cartographer's world
+/// map is the case that forced this — its area label is hidden at every zone change and shown
+/// again only by `WorldMapButton`'s `OnEnter`, so `WorldMapFrameAreaLabel:IsShown()` reads `nil`
+/// in a cursor-less VM whether the hover works or not. Interleaving the move with the reads is
+/// what tells those two apart.
+#[derive(Debug, Clone)]
+pub enum Step {
+    /// Lua to evaluate against the VM as it stands.
+    Eval(String),
+    /// Move the cursor to `(x, y)` in UI units (y-up from the bottom-left), firing the real
+    /// `OnLeave`/`OnEnter` pair exactly as [`UiScript::mouse_move`] does for the app.
+    Mouse(f32, f32),
+    /// Advance the engine one frame of `secs` — the `OnUpdate` pump. An addon that hooks a
+    /// FrameXML `OnUpdate` (Cartographer secure-hooks `WorldMapButton_OnUpdate`) raises there and
+    /// nowhere else, so a probe that never ticks reports it clean. The answer is what the tick
+    /// raised, or `no errors`.
+    Tick(f32),
+}
+
+/// Load `name` out of `root` the way the survey does, drive the session start, then run each
+/// [`Step`] against the VM that is left.
 ///
 /// `None` when the folder has no manifest — the same refusal [`super::survey`] makes by filtering.
-pub fn probe(root: &Path, name: &str, evals: &[String]) -> Option<ProbeOutcome> {
+pub fn probe(root: &Path, name: &str, steps: &[Step]) -> Option<ProbeOutcome> {
     let toc_path = super::manifest_path(root, name)?;
     // Decoded, not `read_to_string`'d, for the reason `survey_one` states: a cp1252 manifest read
     // as UTF-8 parses as an EMPTY toc, and an addon with no files reads as a clean pass.
@@ -114,15 +137,41 @@ pub fn probe(root: &Path, name: &str, evals: &[String]) -> Option<ProbeOutcome> 
     script.mark_addon_loaded(name);
     let session_errors = super::drive_session_start(&mut script, name, &installed);
 
-    let answers = evals
+    let answers = steps
         .iter()
-        .map(|chunk| {
-            let answer = script
-                .eval::<String>(&wrapped(chunk))
-                // A raise HERE is the wrapper failing to compile the caller's chunk — a syntax
-                // error in what they typed — not the chunk raising, which `pcall` already caught.
-                .unwrap_or_else(|e| format!("SYNTAX: {e}"));
-            (chunk.clone(), answer)
+        .map(|step| match step {
+            Step::Eval(chunk) => {
+                let answer = script
+                    .eval::<String>(&wrapped(chunk))
+                    // A raise HERE is the wrapper failing to compile the caller's chunk — a syntax
+                    // error in what they typed — not the chunk raising, which `pcall` already
+                    // caught.
+                    .unwrap_or_else(|e| format!("SYNTAX: {e}"));
+                (chunk.clone(), answer)
+            }
+            Step::Tick(secs) => {
+                let before = script.errors().len();
+                script.tick(*secs);
+                let raised: Vec<String> = script.errors().into_iter().skip(before).collect();
+                (
+                    format!("--tick {secs}"),
+                    if raised.is_empty() {
+                        "= no errors".to_string()
+                    } else {
+                        format!("= RAISED: {}", raised.join(" | "))
+                    },
+                )
+            }
+            Step::Mouse(x, y) => {
+                // `resolve` first: the hit-test reads resolved rects, and a frame the addon
+                // created or moved since the last resolve has none (`pointer`'s module doc).
+                script.resolve();
+                script.mouse_move(*x, *y);
+                let focus = script
+                    .hit_test_name(*x, *y)
+                    .unwrap_or_else(|| "<nothing>".into());
+                (format!("--mouse {x},{y}"), format!("= over {focus}"))
+            }
         })
         .collect();
 

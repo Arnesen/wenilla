@@ -670,6 +670,88 @@ fn set_owner_defaults_to_anchor_left_and_only_preserve_keeps_the_placement() {
     );
 }
 
+/// **`SetAlpha(255)` on SetOwner is UNCONDITIONAL** — `0x52fff4`, the first thing the SetOwner
+/// core `0x52ffe0` does, before its five stores (wow-re `system/ui/ledger.tsv` row `0x52ffe0`,
+/// verified). Ours only ever restored the alpha one of OUR OWN fades had taken away, so a plate
+/// left dim by any other path — an addon's `SetAlpha`, an inherited parent alpha — stayed dim
+/// through every subsequent hover, where the reference stamps it back to full on each SetOwner.
+#[test]
+fn set_owner_stamps_full_alpha_even_with_no_fade_running() {
+    let s = script();
+    s.run(
+        r#"
+        Owner = CreateFrame("Frame", "Owner")
+        Tip = CreateFrame("GameTooltip", "Tip")
+        Tip:SetOwner(Owner, "ANCHOR_RIGHT")
+        Tip:AddLine("Tough Jerky", 1, 1, 1)
+        Tip:Show()
+        -- No fade is running: this is an outside party dimming the plate.
+        Tip:SetAlpha(0.3)
+        assert(Tip:GetAlpha() < 0.31, "the dimming took")
+        Tip:SetOwner(Owner, "ANCHOR_RIGHT")
+        assert(Tip:GetAlpha() > 0.99, "the next SetOwner stamps 255 back, fade or no fade")
+        "#,
+    )
+    .unwrap();
+}
+
+/// **`Show` is an EXISTENCE GATE, not a plain show** — `0x530a80`, the CGameTooltip override of
+/// `vtbl+0x88` (the slot a Lua `:Show()` lands in). It shows only when BOTH the owner `+0x314`
+/// and the line count `+0x31c` are non-zero, and otherwise calls its own `vtbl+0x84`
+/// effective-hide `0x530a60` — the SetOwner core with a NULL owner, so the plate is hidden AND
+/// un-owned (wow-re `system/ui/ledger.tsv` row `0x530a80`, verified;
+/// `scratch/hover-hide-and-tooltip-owner-law.md` §4).
+///
+/// The symptom that found it: `Questie`'s tracker draws an EMPTY plate on hover — correctly
+/// sized and bordered, with no text. `QuestieTracker.lua`'s quest-button OnEnter has a dead zone
+/// between its two arms (an in-progress quest that has objectives AND whose objective text is in
+/// the Questie database matches neither), so it adds no line and then calls `Tooltip:Show()`
+/// unconditionally. The reference swallows that; we drew it — and, because `layout_tooltips`
+/// skips a zero-line plate instead of collapsing it, we drew it at the LAST hover's size, which
+/// is why it looked like a real tooltip with the text missing rather than a stub.
+#[test]
+fn show_with_no_lines_self_hides_and_un_owns() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Owner = CreateFrame("Button", "Owner")
+        Owner:SetPoint("TOPLEFT", nil, "TOPLEFT", 100, -100)
+        Owner:SetWidth(40) Owner:SetHeight(40)
+        Tip = CreateFrame("GameTooltip", "Tip")
+        Tip:SetOwner(Owner, "ANCHOR_RIGHT")
+        Tip:AddLine("Tough Jerky", 1, 1, 1)
+        Tip:Show()
+        assert(Tip:IsShown(), "owner + 1 line: both halves of the gate pass")
+        assert(Tip:IsOwned(Owner), "and the owner survives a real show")
+        "#,
+    )
+    .unwrap();
+
+    // Questie's exact shape: the re-hover's SetOwner clears the content, the handler's dead zone
+    // adds nothing, and Show() runs anyway.
+    s.run(
+        r#"
+        Tip:SetOwner(Owner, "ANCHOR_RIGHT")
+        assert(Tip:NumLines() == 0, "SetOwner cleared the last hover's lines")
+        Tip:Show()
+        assert(not Tip:IsShown(), "zero lines takes the self-hide leg of 0x530a80")
+        assert(not Tip:IsOwned(Owner), "and 0x530a60 un-owns: it is the SetOwner core with NULL")
+        "#,
+    )
+    .unwrap();
+
+    // The other half of the gate, on its own: a line but no owner is equally not shown.
+    s.run(
+        r#"
+        Tip:AddLine("Orphan", 1, 1, 1)
+        Tip:Show()
+        assert(not Tip:IsShown(), "lines without an owner is the same self-hide")
+        "#,
+    )
+    .unwrap();
+}
+
 /// **A NON-STRING anchor argument must not raise** — and for a year it did, because the binding
 /// took arg 3 as `Option<String>` and let mlua's converter be the gate.
 ///

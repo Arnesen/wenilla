@@ -1543,6 +1543,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// **A `.toc` that lists its own `Bindings.xml` loads without a script error** (decision 2191)
+    /// — MonkeyDev's manifest, the director's live report: three red dialogs reading
+    /// `CreateFrame(<Binding> name="MONKEYDEV_STEPUP"): unknown frame type`.
+    ///
+    /// The `.toc` line runner hands every non-`.lua` entry to the one file loader, so the file is
+    /// walked as FrameXML and each `<Binding>` is a frame element of no registered type. The
+    /// reference logs `"Unknown frame type: %s"` for each and carries on (`0x6ee356`); it raises
+    /// nothing, and the file's reading AS bindings is `0x51f400`'s, which happens anyway.
+    #[test]
+    fn a_toc_listed_bindings_xml_is_not_a_script_error() {
+        let tmp =
+            std::env::temp_dir().join(format!("benilla-addon-tocbindings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("AddOns");
+        std::fs::create_dir_all(root.join("Probe")).unwrap();
+        std::fs::write(
+            root.join("Probe/Bindings.xml"),
+            r#"<Bindings>
+  <Binding name="PROBE_STEPUP" header="PROBE">ProbeStep_Inc()</Binding>
+  <Binding name="PROBE_STEPDOWN">ProbeStep_Dec()</Binding>
+</Bindings>"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("Probe/Probe.lua"), "PROBE_RAN = 1").unwrap();
+        let addon = Addon {
+            name: "Probe".into(),
+            toc: Toc::parse("## Interface: 11200\nBindings.xml\nProbe.lua\n"),
+            source: Source::Dir(root),
+        };
+
+        let script = UiScript::new().unwrap();
+        let failures = addon.load(&script);
+        assert!(
+            failures.is_empty(),
+            "a listed Bindings.xml costs log lines, not script errors: {failures:?}"
+        );
+        assert!(
+            script.eval::<bool>("return PROBE_RAN == 1").unwrap(),
+            "and the manifest carries on to the next line"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// **A `.toc`-listed `.lua` and an XML-referenced one get the SAME chunk name** — the defect
     /// decision 2155 found, asserted from the outside because it is only visible from there.
     ///

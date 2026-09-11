@@ -36,6 +36,17 @@
 //!   **query B** (the hit group's own row, exact key, `0x69d8f0`) re-populates the subzone
 //!   ("Main Hall"). No name-set retry, no cross-row fallback anywhere.
 //!
+//! **`0x494780` has one more effect than the election, and it does NOT live here** (2192): when
+//! the cached zone id was 0 — the first world-enter of a session — it also calls `0x4a6650`, the
+//! player→(continent, zone) resolver, and hands the answer to the world map's `SetMap` setter, so
+//! a freshly-logged-in client is already on the player's own zone map before any Lua asks. That
+//! half is modelled where the map data lives, in
+//! [`crate::ui_world_map::world_enter_selection`] — the gate there is the same precondition
+//! (`0x67e510` never reaches this updater with a zero zone id), read off our own area feed rather
+//! than off the cache below. wow-re carved it as
+//! `system/ui/scratch/worldmap-selection-autosync.md`, correcting this note's own earlier source,
+//! which had dismissed the call as unrelated.
+//!
 //! The area *authority* stays `terrain_stream::CurrentArea` (decision 0232 — the MCNK `areaId`
 //! with the WMO-interior override, now off the same faces-only claim). Host globals are written
 //! before the event fires, so a handler's `GetZoneText()` already sees the new state.

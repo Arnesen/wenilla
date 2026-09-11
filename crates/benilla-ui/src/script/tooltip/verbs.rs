@@ -13,7 +13,7 @@ use crate::script::Model;
 use crate::widget::{KindState, TooltipAnchor, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
 
 use super::{
-    append_line, bool_arg, cancel_fade, clear_content, fire_cleared, hide_tooltip, now,
+    append_line, bool_arg, clear_content, fire_cleared, full_alpha, hide_tooltip, now,
     parse_line_color, parse_line_tail, set_shown, text_of, tip_mut, with_tip, write_cell,
     REG_TOOLTIP_METHODS,
 };
@@ -69,7 +69,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 {
                     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                     clear_content(&mut model, h);
-                    cancel_fade(&mut model, h);
+                    full_alpha(&mut model, h);
                     tip_mut(&mut model, h)?.owner = Some(owner_h);
                     let owner_id = model.frame_id(owner_h);
                     // The anchor mode is resolved ONCE, into the reference's own enum, and both
@@ -458,15 +458,41 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // Show/Hide — shadow the shared pair (kind tables resolve first) to keep the tooltip's
     // state honest: Show cancels a fade at full alpha; Hide drops the owner + content and fires
     // OnTooltipCleared (the ref clears its money row through exactly that script).
+    // Show is an EXISTENCE GATE, not a plain show. `0x530a80` — the CGameTooltip override of
+    // `vtbl+0x88`, which is the slot a Lua `:Show()` lands in (the generic widget Show path
+    // `0x7a3350` sets `[+0xd0]=1` then calls slot `+0x88`) — shows only when BOTH `+0x314` (the
+    // owner) and `+0x31c` (the line count) are non-zero; otherwise it calls its own `vtbl+0x84`
+    // effective-hide `0x530a60`, which is the SetOwner core with a NULL owner, so the plate is
+    // hidden AND un-owned and OnTooltipCleared fires. Evaluated at Show time only — it is never a
+    // visibility poll. (wow-re `system/ui/ledger.tsv` row `0x530a80`, verified, and
+    // `scratch/hover-hide-and-tooltip-owner-law.md` §4.)
+    //
+    // Without the gate an addon that reaches `Show()` having added no lines leaves a VISIBLE
+    // empty plate — and, because `layout_tooltips` skips a zero-line plate rather than collapsing
+    // it, one still wearing the last hover's width and height. That is what `Questie`'s tracker
+    // does: `QuestieTracker.lua`'s quest-button OnEnter has a dead zone between its two arms (an
+    // in-progress quest whose objective text IS in its database adds nothing) and then calls
+    // `Tooltip:Show()` unconditionally. On the reference `0x530a80` swallows it; we drew the
+    // empty plate.
+    //
+    // `show_or_hide_empty` is the same law for the app-answered content asks, and deliberately
+    // does NOT un-own (its re-enter repaint needs the owner). This path is the reference's own,
+    // so it takes the reference's full effective-hide.
     m.set(
         "Show",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            {
+            let live = {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                cancel_fade(&mut model, h);
+                full_alpha(&mut model, h);
+                tip_mut(&mut model, h)
+                    .map(|t| t.owner.is_some() && t.num_lines > 0)
+                    .unwrap_or(false)
+            };
+            match live {
+                true => set_shown(lua, h, true),
+                false => hide_tooltip(lua, h),
             }
-            set_shown(lua, h, true);
             Ok(())
         })?,
     )?;

@@ -211,10 +211,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
+    // **Shape C on r, g, b** (`StatusBar:SetStatusBarColor `0x78fc20``, `2=C 3=C 4=C 5=B`, wow-re
+    // `numeric-arg-coercion-law.md`): a bare `lua_tonumber` with no `lua_isnumber` gate, so a nil,
+    // a table or a string is **0.0** and the call never raises. Taking them as `f32` made mlua's
+    // converter the gate instead — the 2176 class — and the stock
+    // `QuestLogFrame.lua:337` idiom hands three nils (`titleButton.r/g/b` are only assigned in
+    // `QuestLog_Update`) on any path that selects a quest-log entry before the window has painted.
     m.set(
         "SetStatusBarColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+                let (r, g, b) = (
+                    crate::script::object::as_f32(&r),
+                    crate::script::object::as_f32(&g),
+                    crate::script::object::as_f32(&b),
+                );
                 let id = ensure_bar(lua, &this, None)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let rh = *model.id_to_region.get(&id).expect("bar region id");
