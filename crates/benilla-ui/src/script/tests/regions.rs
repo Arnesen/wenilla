@@ -1415,12 +1415,7 @@ fn get_blend_mode_answers_one_string_and_defaults_to_the_ctors_blend() {
     .unwrap();
 
     // Arity 1 and kind string, measured the way the shape gate measures it.
-    assert_eq!(
-        s.eval::<i64>("return select('#', BTex:GetBlendMode())")
-            .unwrap(),
-        1,
-        "arity 1"
-    );
+    assert_eq!(s.arity("BTex:GetBlendMode()").unwrap(), 1, "arity 1");
     assert_eq!(
         s.eval::<String>("return type(BTex:GetBlendMode())")
             .unwrap(),
@@ -1493,8 +1488,7 @@ fn tex_coord_modifies_rect_is_one_slash_nil_and_moves_no_rect_yet() {
     let before = region_tex_rect(&s, "TcmArt");
 
     assert_eq!(
-        s.eval::<i64>("return select('#', TCMTex:GetTexCoordModifiesRect())")
-            .unwrap(),
+        s.arity("TCMTex:GetTexCoordModifiesRect()").unwrap(),
         1,
         "arity 1"
     );

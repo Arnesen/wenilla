@@ -12,7 +12,8 @@
 //!   OnEvent (`(self, elapsed)` for OnUpdate, `(self)` for OnShow/OnHide/OnLoad) — the form Era
 //!   addons are written against.
 //!
-//! So inside one OnEvent handler `this == self` and `arg1 == select(1, ...)`. Handler errors are
+//! So inside one OnEvent handler `this == self` and `arg1` is the first positional argument (5.0's
+//! own `arg[1]`; `...` as a value, and `select` with it, are not in this dialect). Handler errors are
 //! caught (mlua's `Function::call` is a protected call) and returned to the caller, which records
 //! them in [`super::Model::errors`] — never a panic, never a print.
 

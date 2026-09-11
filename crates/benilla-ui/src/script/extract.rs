@@ -472,6 +472,11 @@ impl UiScript {
                             shadow: data.font_shadow,
                             outline: data.outline,
                             alpha_gradient: data.alpha_gradient,
+                            // A property of the OWNER, not of the string: the plate's own name
+                            // and level and an addon's replacements for them are all drawn
+                            // inside the same sliding rect.
+                            world_seat: owner
+                                .is_some_and(|o| super::nameplate::is_world_seated(&model, o)),
                         }
                     } else {
                         // The draw gate is the TEXTURE slot, never the colour (`0x7706e0`: `+0xcc`

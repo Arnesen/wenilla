@@ -141,11 +141,7 @@ fn request_time_played_queues_an_ask_and_the_answer_arrives_as_an_event() {
     let mut s = crate::script::UiScript::new().unwrap();
 
     // The verb returns NOTHING — the answer is an event, never a return value.
-    assert_eq!(
-        s.eval::<i64>("return select('#', RequestTimePlayed())")
-            .unwrap(),
-        0
-    );
+    assert_eq!(s.arity("RequestTimePlayed()").unwrap(), 0);
     // …and that call queued one ask. A COUNT, not a payload: the packet is empty, so two asks in a
     // frame are two sends rather than one collapsed intent (the pvp queue's rule).
     s.run("RequestTimePlayed() RequestTimePlayed()").unwrap();

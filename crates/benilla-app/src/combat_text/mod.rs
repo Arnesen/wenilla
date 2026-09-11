@@ -366,6 +366,9 @@ pub(crate) fn float_combat_text(
                 outline: Outline::None,
                 alpha_gradient: None,
             },
+            // A world overlay riding its own rise/fade seat — the UI grid never applied (the
+            // degenerate rect above already skipped it; this says so out loud).
+            crate::ui_text::TextSeat::Exact,
         );
         drop(e);
         let (alpha_text, alpha_shadow) = fade_alpha(cat, elapsed_ms);

@@ -446,32 +446,25 @@ mod tests {
     fn get_battlefield_info_answers_nine_or_none() {
         let mut s = vm();
         assert_eq!(
-            s.eval::<i64>("return select('#', GetBattlefieldInfo())")
-                .unwrap(),
+            s.arity("GetBattlefieldInfo()").unwrap(),
             0,
             "no list at all: the map gate"
         );
         s.set_battlefield_list(list(&[7, 3]));
         s.set_unit("player", None);
         assert_eq!(
-            s.eval::<i64>("return select('#', GetBattlefieldInfo())")
-                .unwrap(),
+            s.arity("GetBattlefieldInfo()").unwrap(),
             0,
             "no player: the other gate, read at call time"
         );
         assert_eq!(
-            s.eval::<i64>("return select('#', GetBattlefieldInstanceInfo(1))")
-                .unwrap(),
+            s.arity("GetBattlefieldInstanceInfo(1)").unwrap(),
             0,
             "…and the instance verb's"
         );
         s = vm();
         s.set_battlefield_list(list(&[7, 3]));
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetBattlefieldInfo())")
-                .unwrap(),
-            9
-        );
+        assert_eq!(s.arity("GetBattlefieldInfo()").unwrap(), 9);
         let got = s
             .eval::<String>(
                 "local n, d, a, b, c, x, y, lo, hi = GetBattlefieldInfo() \
@@ -497,16 +490,8 @@ mod tests {
             -1,
             "a numeric string passes; the id is pushed signed"
         );
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetBattlefieldInstanceInfo(3))")
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetBattlefieldInstanceInfo(0))")
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity("GetBattlefieldInstanceInfo(3)").unwrap(), 0);
+        assert_eq!(s.arity("GetBattlefieldInstanceInfo(0)").unwrap(), 0);
         let err = s
             .run("GetBattlefieldInstanceInfo(nil)")
             .unwrap_err()
@@ -576,10 +561,7 @@ mod tests {
     fn get_battlefield_status_answers_five_values_on_every_leg() {
         let mut s = UiScript::new().unwrap();
         s.set_battlefield_queue(vec![slot(489, 1, 5), slot(0, 0, 0), slot(529, 9, 2)], 0);
-        let n = |s: &mut UiScript, i: &str| {
-            s.eval::<i64>(&format!("return select('#', GetBattlefieldStatus({i}))"))
-                .unwrap()
-        };
+        let n = |s: &mut UiScript, i: &str| s.arity(&format!("GetBattlefieldStatus({i})")).unwrap();
         assert_eq!(n(&mut s, "1"), 5);
         assert_eq!(n(&mut s, "0"), 5);
         assert_eq!(n(&mut s, "4"), 5);

@@ -256,6 +256,17 @@ pub enum QuadContent {
         /// renderer multiplies each glyph's alpha by the ramp at its character position (before
         /// `start` opaque, the next `length` chars 1→0, beyond invisible). `None` = draw whole.
         alpha_gradient: Option<(f32, f32)>,
+        /// **Seat this block exactly where `rect` puts it**, skipping the UI grid's vertical
+        /// block-top snap — true for a FontString owned by a V-plate, false for every other one
+        /// (`super::nameplate::is_world_seated`, decision 2172).
+        ///
+        /// Not a client concept: in the reference the whole interface *is* the pixel grid, so the
+        /// snap and the rect agree by construction. benilla has one family of frames that lives
+        /// outside it — the WorldFrame overlays that slide continuously over the 3-D scene, whose
+        /// seat law is a DEVICE-pixel snap (`vplates::device_snap`, 0188/1398) rather than the
+        /// UI's logical-pixel one. Snapping their text on the coarser UI grid makes it *beat*
+        /// against the art it is supposed to be rigid to: two quantizers on one sliding object.
+        world_seat: bool,
     },
 }
 

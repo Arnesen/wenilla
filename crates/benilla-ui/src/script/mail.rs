@@ -949,15 +949,12 @@ mod tests {
         });
         s.set_mail(Some(st));
 
-        assert_eq!(
-            s.eval::<usize>("return select('#', GetInboxInvoiceInfo(1))")
-                .unwrap(),
-            7
-        );
+        assert_eq!(s.arity("GetInboxInvoiceInfo(1)").unwrap(), 7);
         let vals: Vec<String> = (1..=7)
             .map(|i| {
+                let discards = "_, ".repeat(i - 1);
                 s.eval::<String>(&format!(
-                    "return tostring((select({i}, GetInboxInvoiceInfo(1))))"
+                    "local {discards}v = GetInboxInvoiceInfo(1) return tostring(v)"
                 ))
                 .unwrap()
             })
@@ -979,15 +976,15 @@ mod tests {
         // Row 2 carries no invoice — and neither does an index off the end.
         for idx in [2, 99] {
             assert_eq!(
-                s.eval::<usize>(&format!("return select('#', GetInboxInvoiceInfo({idx}))"))
-                    .unwrap(),
+                s.arity(&format!("GetInboxInvoiceInfo({idx})")).unwrap(),
                 7,
                 "the miss is still seven values"
             );
             let tail: Vec<String> = (1..=7)
                 .map(|i| {
+                    let discards = "_, ".repeat(i - 1);
                     s.eval::<String>(&format!(
-                        "return tostring((select({i}, GetInboxInvoiceInfo({idx}))))"
+                        "local {discards}v = GetInboxInvoiceInfo({idx}) return tostring(v)"
                     ))
                     .unwrap()
                 })
@@ -1010,8 +1007,7 @@ mod tests {
         s.set_mail(Some(st));
 
         assert_eq!(
-            s.eval::<usize>("return select('#', GetInboxText(1))")
-                .unwrap(),
+            s.arity("GetInboxText(1)").unwrap(),
             4,
             "four values, invoice or not"
         );

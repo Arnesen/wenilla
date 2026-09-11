@@ -892,8 +892,7 @@ fn unit_is_charmed_answers_one_or_nil_and_only_for_the_charmed_side() {
         "the reference pushes a number, not a boolean"
     );
     assert_eq!(
-        s.eval::<i64>(r#"return select('#', UnitIsCharmed("target"))"#)
-            .unwrap(),
+        s.arity(r#"UnitIsCharmed("target")"#).unwrap(),
         1,
         "exactly one value on the hit path"
     );
@@ -1801,8 +1800,7 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
             "{name}: `== true` must NEVER match — the reference cannot push tag 1"
         );
         assert_eq!(
-            s.eval::<i64>(&format!("return select('#', {call})"))
-                .unwrap(),
+            s.arity(call).unwrap(),
             1,
             "{name} returns exactly one value on the true leg"
         );
@@ -1824,8 +1822,7 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
             "{name}: `== false` must never match"
         );
         assert_eq!(
-            s.eval::<i64>(&format!("return select('#', {call})"))
-                .unwrap(),
+            s.arity(call).unwrap(),
             1,
             "{name} returns exactly one value on the false leg too — nil, never zero values"
         );

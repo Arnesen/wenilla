@@ -997,9 +997,7 @@ mod tests {
     #[test]
     fn a_missing_row_still_answers_twelve_values() {
         let s = UiScript::new().unwrap();
-        let n: i64 = s
-            .eval(r##"return select("#", GetAuctionItemInfo("list", 99))"##)
-            .unwrap();
+        let n = s.arity(r#"GetAuctionItemInfo("list", 99)"#).unwrap();
         assert_eq!(n, 12, "twelve, even with no session open at all");
         let (count, quality): (i64, i64) = s
             .eval(r#"local _, _, c, q = GetAuctionItemInfo("list", 99) return c, q"#)
@@ -1007,9 +1005,7 @@ mod tests {
         assert_eq!((count, quality), (1, -1));
 
         // The link, by contrast, answers with NO values on a miss — not a nil.
-        let n: i64 = s
-            .eval(r##"return select("#", GetAuctionItemLink("list", 99))"##)
-            .unwrap();
+        let n = s.arity(r#"GetAuctionItemLink("list", 99)"#).unwrap();
         assert_eq!(n, 0, "zero values, not one nil");
     }
 

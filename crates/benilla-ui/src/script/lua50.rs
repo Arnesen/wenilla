@@ -139,6 +139,62 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // "inherited rather than chosen"; it is now neither.
     g.set("coroutine", Value::Nil)?;
 
+    // `select` is 5.1's base library, not 5.0's, and the 1.12 client's `_G` has no row for it.
+    // It sat on `reference_surface`'s beyond-1.12 exception list under a reason that expired twice
+    // over: first "our transcribed FrameXML uses it in 16 files" — 1751's migration retired every
+    // one of those files, measured at zero by 2142 — then "it is mlua's, not ours to remove
+    // without the 5.1 varargs it comes with". 2101 deleted those varargs from the grammar, which
+    // is what turns this from a trade into a deletion: with `...`-as-a-value gone, `select`'s one
+    // idiomatic shape cannot be written at all, and what is left — `select(k, f())` — is a 5.1
+    // spelling of the multiple assignment 5.0 writes with commas.
+    //
+    // **Nothing of ours called it in production**: 177 sites in 55 files were our own TESTS asking
+    // a binding's arity, which is a host-side question and is now asked host-side
+    // ([`super::UiScript::arity`]). The handful that need the count *inside* Lua use 5.0's own
+    // answer, `arg.n` — which this VM hands every vararg function since 2101 deleted the arm that
+    // cleared `VARARG_NEEDSARG`.
+    g.set("select", Value::Nil)?;
+
+    // **The string type has NO metatable in 1.12**, so `("x"):upper()` — and `s:sub(1, 2)` for a
+    // string `s` — raises `attempt to index a string value` there and quietly worked here. 5.1's
+    // `luaopen_string` ends in a `createmetatable` 5.0's does not have, and mlua runs 5.1.
+    //
+    // Read out of the client, and the claim is stronger than "nobody installs one": the type
+    // *cannot* carry one, on the **reader** side, so the writer side never has to be argued.
+    // `luaT_gettmbyobj 0x6f7bd0` is the one function the VM asks for any value's metamethod (7
+    // rel32 callers, covering TM_INDEX/TM_NEWINDEX/TM_CALL/order/arith). It loads `o->tt` at
+    // `0x6f7be2` and enumerates two tags — `sub ecx,5; je` (LUA_TTABLE), `sub ecx,2; je`
+    // (LUA_TUSERDATA) — then falls through at `0x6f7bee` to `mov eax,0x811bc0`, `&luaO_nilobject`
+    // in **`.rdata`**: sixteen zero bytes with no writers by construction. There is nothing to
+    // read, so a `__index` for a string cannot exist however it were installed. `G+0x80` is
+    // `tmname[15]`, the metamethod *name* strings, not a per-type metatable array; a ModRM/SIB
+    // census of every ×4-indexed operand across the text section finds no such read into writable
+    // `.data` at all.
+    //
+    // The writer agrees from the other end. `lua_setmetatable 0x6f4020` takes the same two arms
+    // (`0x6f409e`, `0x6f40a3`) into one `mov [edx+8], esi` — 5.0 puts `metatable` at offset 8 of
+    // both `Table` and `Udata` — and every other tag falls to `0x6f40a8`'s `xor eax,eax`: return
+    // 0, write nothing. `lua_getmetatable 0x6f3cf0` carries the identical `{5, 7}` switch. And the
+    // layout settles it a third way: `luaS_newlstr 0x6f9d00` puts a string's **hash** at `+8`
+    // (`0x6f9dbb`), the very offset the other two use for the metatable pointer.
+    //
+    // `luaopen_string 0x7fd810` is six instructions, `[0x7fd810, 0x7fd827)` — `push 0;
+    // push 0x822d88; mov edx,0x871938; call luaL_openlib; mov eax,1; ret` — with no
+    // `createmetatable` step, and `luaL_openlib` does not reach `0x6f4020` either. (wow-re
+    // `system/ui/scratch/string-metatable-closure.md`, whose §5 cross-check produced all of the
+    // above and retired `lua-dialect.md` §3's INFERRED flag on it. Two of ours came from that
+    // note before it was re-read: it said "four instructions" while quoting six, and it stopped at
+    // "no `lua_setmetatable` call" where the reader-side argument was available.)
+    //
+    // So this is not a policy choice about a superset — it is the type system. Note the reference
+    // also *raises* rather than no-ops if an addon tries it itself: base `setmetatable 0x702a40`'s
+    // first act is `luaL_checktype(L, 1, LUA_TTABLE)`, which mlua's 5.1 matches.
+    //
+    // Same rule as `coroutine` above, one layer below `_G`: an addon writing `s:gsub(...)` or
+    // testing `getmetatable("")` is asking which interpreter it is on, and the branch it should
+    // get is 1.12's.
+    lua.set_type_metatable::<mlua::String>(None);
+
     // ── 3 · the 5.0 compat globals the reference has and we lacked ────────────────────────────
     // `sort`/`foreach`/`foreachi` are in `reference/1.12-globals.tsv`; `setn` deliberately is not,
     // so no bare `setn` is installed even though `table.setn` now works. The client's compat set
@@ -461,7 +517,7 @@ mod tests {
     fn gcinfo_answers_two_numbers_as_1_12_does() {
         let s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<i64>("return select('#', gcinfo())").unwrap(),
+            s.arity("gcinfo()").unwrap(),
             2,
             "`mov eax, 2` at 0x703239 — one value is 5.1's shape, not 1.12's"
         );
@@ -500,17 +556,12 @@ mod tests {
     fn collectgarbage_answers_nothing_and_takes_a_number() {
         let s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<i64>("return select('#', collectgarbage())")
-                .unwrap(),
+            s.arity("collectgarbage()").unwrap(),
             0,
             "`xor eax,eax` at 0x70326f — 5.1 returns one value here"
         );
         // The reference's ONLY argument form, which stock 5.1 rejects as ``invalid option `0'``.
-        assert_eq!(
-            s.eval::<i64>("return select('#', collectgarbage(0))")
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity("collectgarbage(0)").unwrap(), 0);
         assert!(s.eval::<()>("collectgarbage(2048)").is_ok());
         // `lua_tonumber` coerces a numeric string through `strtod`, so this one is accepted.
         assert!(s.eval::<()>(r#"collectgarbage("100")"#).is_ok());
@@ -584,14 +635,13 @@ mod tests {
     fn assert_answers_one_value_and_keeps_5_0_s_messages() {
         let s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<i64>("return select('#', assert(1, 2, 3))")
-                .unwrap(),
+            s.arity("assert(1, 2, 3)").unwrap(),
             1,
             "5.0 truncates to the first argument; 5.1 returns them all"
         );
         assert_eq!(s.eval::<i64>("return (assert(7, 'x'))").unwrap(), 7);
         // A truthy `false`-adjacent value is still truthy: only nil and false take the raise.
-        assert_eq!(s.eval::<i64>("return select('#', assert(0))").unwrap(), 1);
+        assert_eq!(s.arity("assert(0)").unwrap(), 1);
 
         let raised = |call: &str| -> String {
             s.eval::<String>(&format!(
@@ -928,7 +978,8 @@ mod tests {
     #[test]
     fn the_debug_family_is_six_stubs_and_two_real_ones() {
         let s = UiScript::new().unwrap();
-        // Zero values, not nil — `select('#')` is the only check that can tell them apart.
+        // Zero values, not nil — a count is the only check that can tell them apart, and
+        // `arity` is where it is taken now that `select` is gone (2171).
         for name in [
             "debuginfo",
             "debugload",
@@ -938,8 +989,7 @@ mod tests {
             "debugtimestamp",
         ] {
             assert_eq!(
-                s.eval::<i64>(&format!("return select('#', {name}())"))
-                    .unwrap(),
+                s.arity(&format!("{name}()")).unwrap(),
                 0,
                 "{name} returns nothing at all"
             );
@@ -1104,5 +1154,105 @@ mod error_quoting_tests {
                 "a 5.1-quoted element survives in: {e}"
             );
         }
+    }
+
+    /// **`select` is not a 1.12 global** (decision 2171) — and 5.0's own answer to the same
+    /// question still is.
+    ///
+    /// The pair matters more than the removal. `select('#', …)` was how 177 of our own tests asked
+    /// a binding's arity, and the property those gates rest on is that **zero returns and one
+    /// `nil` are different answers** (`binding_abi` §2) — a distinction no `Option<T>` return type
+    /// can hold. 5.0 answers it with the implicit vararg table's `n`, which this VM hands every
+    /// vararg function since 2101 deleted the parser arm that cleared `VARARG_NEEDSARG`; the host
+    /// answers it with [`UiScript::arity`]. If either ever stops telling those apart, the arity
+    /// gates start silently passing a binding that returns nothing.
+    ///
+    /// The removal's own reach is in the corpus rather than here: `pfUI/libs/libpredict.lua:141`
+    /// gates its **TBC** HealComm parser on `select and UnitCastingInfo`, and pfUI supplies the
+    /// second name itself (`libs/libcast.lua:86`, loaded 3rd against libpredict's 10th), so
+    /// publishing `select` was the whole reason that branch ran. `BuffCheck2.lua:1157` is
+    /// `select = select or function(idx, ...)` — a 1.12 addon's own polyfill that ours suppressed.
+    #[test]
+    fn select_is_not_a_1_12_global_and_arg_n_answers_instead() {
+        let s = UiScript::new().unwrap();
+        assert!(
+            s.eval::<bool>("return select == nil").unwrap(),
+            "`select` is 5.1's base library; `reference/1.12-globals.tsv` has no row for it"
+        );
+
+        // 5.0's spelling, in the shape an addon writes it.
+        assert_eq!(
+            s.eval::<Vec<i64>>(
+                "local function n(...) return arg.n end \
+                 local function two_with_a_nil() return 1, nil end \
+                 local function nothing() end \
+                 return { n(), n(nil), n(two_with_a_nil()), n(nothing()), n(1, 2, 3) }",
+            )
+            .unwrap(),
+            vec![0, 1, 2, 0, 3],
+            "arg.n must count trailing nils AND tell zero returns from one nil"
+        );
+
+        // And the host's, which is what our own tests ask now.
+        assert_eq!(s.arity("nil").unwrap(), 1, "one nil is one value");
+        assert_eq!(s.arity("ShowNameplates()").unwrap(), 0, "and zero is zero");
+    }
+
+    /// **1.12 installs no metatable on the string type**, so method-call syntax on a string raises
+    /// there and quietly worked here (decision 2171).
+    ///
+    /// The claim is stronger than "nobody installs one": the reference's `lua_setmetatable
+    /// 0x6f4020` accepts exactly two type tags — `LUA_TTABLE` and `LUA_TUSERDATA`, sharing one
+    /// `mov [edx+8], esi` because 5.0 puts `metatable` at offset 8 of both structs — and returns 0
+    /// without writing for every other tag. 5.0 has no `G(L)->mt[]` array for a string to have a
+    /// slot in, so the type *cannot* carry one; `luaopen_string 0x7fd810`'s four instructions
+    /// (wow-re `lua-dialect.md` §4) are the same fact from the other end.
+    ///
+    /// The **wording** is asserted, not just the raise: it is what a player sees in a script
+    /// error, and 5.0's quoting convention is already load-bearing one file over — `sandbox`'s
+    /// `debugstack` emits 5.0 frames because `AceLibrary.lua:139`'s `argCheck` matches
+    /// ``"([`<].-['>])"`` and cannot see 5.4's `'name'` at all. Both strings are byte-verified
+    /// and executed on the reference: `.data 0x871c10` ``attempt to %s a %s value`` for the
+    /// anonymous form, `.data 0x871c2c` ``attempt to %s %s `%s' (a %s value)`` for the named one —
+    /// **backtick open, apostrophe close**.
+    #[test]
+    fn the_string_type_has_no_metatable() {
+        let s = UiScript::new().unwrap();
+        assert!(
+            s.eval::<bool>(r#"return getmetatable("") == nil"#).unwrap(),
+            "5.1's luaopen_string ends in a createmetatable 5.0's does not have"
+        );
+
+        let literal: String = s
+            .eval(
+                r#"local ok, err = pcall(function() return ("abc"):upper() end) return tostring(err)"#,
+            )
+            .unwrap();
+        assert!(
+            literal.contains("attempt to index a string value"),
+            "5.0's own luaG_typeerror wording: {literal:?}"
+        );
+        let named: String = s
+            .eval(
+                "local ok, err = pcall(function() local v = 'abc' return v:sub(1, 2) end) \
+                 return tostring(err)",
+            )
+            .unwrap();
+        assert!(
+            named.contains("attempt to index local `v' (a string value)"),
+            "the named form, with 5.0's backtick-apostrophe quoting: {named:?}"
+        );
+
+        // The other direction, and the one that makes this a regression if it ever fails:
+        // removing the metatable removes a *dispatch*, never a function. The 12-member string
+        // library and the bare aliases the reference publishes over it are untouched.
+        s.run(
+            r#"assert(string.upper("ab") == "AB")
+               assert(string.sub("hello", 2, 3) == "el")
+               assert(string.find("hello", "ll") == 3)
+               assert(strupper("ab") == "AB" and strsub("hello", 2, 3) == "el")
+               assert(format("%2$s %1$s", "a", "b") == "b a")"#,
+        )
+        .unwrap();
     }
 }

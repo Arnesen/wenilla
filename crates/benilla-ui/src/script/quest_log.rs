@@ -937,11 +937,7 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         // Empty log: the first return is still nil (so the ref's `if ( questLogTitleText )`
         // reads the same), but the tuple is full and the level is a NUMBER.
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetQuestLogTitle(1))")
-                .unwrap(),
-            6
-        );
+        assert_eq!(s.arity("GetQuestLogTitle(1)").unwrap(), 6);
         assert!(s
             .eval::<bool>("local t, l = GetQuestLogTitle(1) return t == nil and l == 0")
             .unwrap());
@@ -1032,10 +1028,10 @@ mod tests {
         state.entries[1].tag = Some("Elite".into());
         s.set_quest_log(state);
         assert!(s
-            .eval::<bool>("return select(3, GetQuestLogTitle(1)) == nil")
+            .eval::<bool>("local _, _, tag = GetQuestLogTitle(1) return tag == nil")
             .unwrap());
         assert!(s
-            .eval::<bool>("return select(3, GetQuestLogTitle(2)) == 'Elite'")
+            .eval::<bool>("local _, _, tag = GetQuestLogTitle(2) return tag == 'Elite'")
             .unwrap());
     }
 
@@ -1201,23 +1197,15 @@ mod tests {
         s.set_quest_log(state);
 
         // No clock sample yet: nothing to subtract from, so nothing is claimed.
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetQuestTimers())")
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity("GetQuestTimers()").unwrap(), 0);
         assert!(s
             .eval::<bool>("return GetQuestLogTimeLeft() == nil")
             .unwrap());
 
         // 400 s in.
         s.set_server_unix_time(1_000_400.0);
-        assert!(s
-            .eval::<bool>(
-                "local n, a = select('#', GetQuestTimers()), GetQuestTimers()\n\
-                 return n == 1 and a == 499"
-            )
-            .unwrap());
+        assert_eq!(s.arity("GetQuestTimers()").unwrap(), 1);
+        assert_eq!(s.eval::<i64>("return (GetQuestTimers())").unwrap(), 499);
         // The timer maps back to entry 2 — the untimed row 1 does not shift the mapping.
         assert_eq!(s.eval::<i64>("return GetQuestIndexForTimer(1)").unwrap(), 2);
         assert!(s
@@ -1245,11 +1233,7 @@ mod tests {
         // the row (its `js`), while GetQuestLogTimeLeft clamps at 0 and keeps answering.
         s.set_server_unix_time(1_000_910.0);
         assert_eq!(s.eval::<i64>("return GetQuestLogTimeLeft()").unwrap(), 0);
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetQuestTimers())")
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity("GetQuestTimers()").unwrap(), 0);
         assert!(s
             .eval::<bool>("return GetQuestIndexForTimer(1) == nil")
             .unwrap());
@@ -1268,12 +1252,8 @@ mod tests {
         s.set_quest_log(state);
         s.set_server_unix_time(1_000_400.0);
 
-        assert!(s
-            .eval::<bool>(
-                "local n, a = select('#', GetQuestTimers()), GetQuestTimers()\n\
-                 return n == 1 and a == 499"
-            )
-            .unwrap());
+        assert_eq!(s.arity("GetQuestTimers()").unwrap(), 1);
+        assert_eq!(s.eval::<i64>("return (GetQuestTimers())").unwrap(), 499);
         assert_eq!(s.eval::<i64>("return GetQuestIndexForTimer(1)").unwrap(), 1);
         s.run("SelectQuestLogEntry(2)").unwrap();
         assert!(s

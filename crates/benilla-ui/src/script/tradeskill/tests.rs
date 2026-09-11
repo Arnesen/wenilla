@@ -266,11 +266,7 @@ fn do_trade_skill_and_getters_no_op_on_a_header_index() {
     assert!(s
         .eval::<bool>("return GetTradeSkillReagentInfo(1, 1) == nil")
         .unwrap());
-    assert_eq!(
-        s.eval::<i64>("return select('#', GetTradeSkillTools(1))")
-            .unwrap(),
-        0
-    );
+    assert_eq!(s.arity("GetTradeSkillTools(1)").unwrap(), 0);
 
     s.run("DoTradeSkill(1, 5)").unwrap();
     assert!(
@@ -298,8 +294,7 @@ fn do_trade_skill_and_getters_no_op_on_a_header_index() {
 fn get_trade_skill_sub_classes_returns_group_names_in_order() {
     let mut s = UiScript::new().unwrap();
     assert_eq!(
-        s.eval::<i64>("return select('#', GetTradeSkillSubClasses())")
-            .unwrap(),
+        s.arity("GetTradeSkillSubClasses()").unwrap(),
         0,
         "no window open, no groups"
     );
@@ -563,22 +558,14 @@ fn get_trade_skill_tools_multivalue_shape() {
         ("Anvil", Some(1), "Mining Pick", None)
     );
 
-    // A recipe with no tools returns an empty multivalue (select('#', ...) == 0).
+    // A recipe with no tools returns an empty multivalue (arity 0, not one nil).
     let mut t2 = two_recipe_state();
     t2.recipes[0].tools.clear();
     s.set_trade_skill(Some(t2));
-    assert_eq!(
-        s.eval::<i64>("return select('#', GetTradeSkillTools(3))")
-            .unwrap(),
-        0
-    );
+    assert_eq!(s.arity("GetTradeSkillTools(3)").unwrap(), 0);
 
     // A HEADER index (row 1) also returns an empty multivalue.
-    assert_eq!(
-        s.eval::<i64>("return select('#', GetTradeSkillTools(1))")
-            .unwrap(),
-        0
-    );
+    assert_eq!(s.arity("GetTradeSkillTools(1)").unwrap(), 0);
 }
 
 /// The verified persistence story (wow-re `tradeskill` TU-G §6, the `0xbde064` cache key):
@@ -648,8 +635,7 @@ fn subclass_filter_exclusive_narrows_list_but_not_vocabulary() {
     assert_eq!(s.eval::<i64>("return GetNumTradeSkills()").unwrap(), 3);
     assert_eq!(row_kind(&mut s, 1), ("Armor Kit".into(), "header".into()));
     assert_eq!(
-        s.eval::<i64>("return select('#', GetTradeSkillSubClasses())")
-            .unwrap(),
+        s.arity("GetTradeSkillSubClasses()").unwrap(),
         4,
         "the dropdown vocabulary stays full under a filter"
     );
@@ -869,9 +855,9 @@ fn the_link_verbs_answer_the_clients_shapes() {
             ..Default::default()
         },
     );
-    assert!(
-        s.eval::<bool>("return select('#', GetTradeSkillItemLink(1)) == 0")
-            .unwrap(),
+    assert_eq!(
+        s.arity("GetTradeSkillItemLink(1)").unwrap(),
+        0,
         "a header row answers zero values"
     );
     let link = s
@@ -906,10 +892,15 @@ fn the_link_verbs_answer_the_clients_shapes() {
             r.reagents[0].item
         )
     );
+    assert_eq!(
+        s.arity("GetTradeSkillReagentItemLink(2, 9)").unwrap(),
+        1,
+        "past the reagents: still exactly one value"
+    );
     assert!(
-        s.eval::<bool>("return select('#', GetTradeSkillReagentItemLink(2, 9)) == 1 and GetTradeSkillReagentItemLink(2, 9) == nil")
+        s.eval::<bool>("return GetTradeSkillReagentItemLink(2, 9) == nil")
             .unwrap(),
-        "past the reagents: still exactly one value, nil"
+        "past the reagents: that one value is nil"
     );
     let err = s
         .run("GetTradeSkillReagentItemLink(2, nil)")

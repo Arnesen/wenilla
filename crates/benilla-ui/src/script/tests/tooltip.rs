@@ -611,12 +611,7 @@ fn tooltip_anchor_type_round_trips_every_reachable_mode() {
 
     // Arity 1, kind string, and NO nil leg — the shapes row is `(string)` with no alternative, so
     // a plate nobody has owned still answers a string.
-    assert_eq!(
-        s.eval::<i64>("return select('#', AnchorTip:GetAnchorType())")
-            .unwrap(),
-        1,
-        "arity 1"
-    );
+    assert_eq!(s.arity("AnchorTip:GetAnchorType()").unwrap(), 1, "arity 1");
     assert_eq!(
         s.eval::<String>("return type(AnchorTip:GetAnchorType())")
             .unwrap(),

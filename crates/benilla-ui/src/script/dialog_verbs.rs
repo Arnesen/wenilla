@@ -302,11 +302,7 @@ mod tests {
     #[test]
     fn the_meeting_stone_pair_answers_one_or_nil_and_string_or_nil() {
         let mut s = UiScript::new().unwrap();
-        assert_eq!(
-            s.eval::<i64>("return select('#', IsInMeetingStoneQueue())")
-                .unwrap(),
-            1
-        );
+        assert_eq!(s.arity("IsInMeetingStoneQueue()").unwrap(), 1);
         assert!(s
             .eval::<bool>("return IsInMeetingStoneQueue() == nil")
             .unwrap());

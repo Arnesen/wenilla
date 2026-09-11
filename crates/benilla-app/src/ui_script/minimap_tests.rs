@@ -326,11 +326,7 @@ fn get_ping_position_answers_two_numbers_always() {
     load_xml(&s, "Interface\\FrameXML\\BattlefieldFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\Minimap.xml");
 
-    assert_eq!(
-        s.eval::<i64>("return select('#', Minimap:GetPingPosition())")
-            .unwrap(),
-        2
-    );
+    assert_eq!(s.arity("Minimap:GetPingPosition()").unwrap(), 2);
     assert_eq!(
         s.eval::<f32>("return (Minimap:GetPingPosition())").unwrap(),
         0.0,

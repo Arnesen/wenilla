@@ -432,6 +432,77 @@ fn a_hovered_plate_emits_no_glow_quad() {
     );
 }
 
+/// **The plate's name and level seat off the UI pixel grid** (decision 2172).
+///
+/// The plate is a WorldFrame overlay: the driver snaps its rect to the DEVICE pixel grid
+/// (`vplates::device_snap` — half a logical pixel at 2×) because it slides continuously over the
+/// world, and everything drawn inside it has to be rigid to that. The renderer's UI seat snap
+/// quantizes a text block's top on the coarser LOGICAL grid, so with both laws in force the name
+/// and the level pop a whole pixel every second step the border takes.
+///
+/// The painter this port replaced never snapped them — it measured into degenerate rects, which
+/// the renderer's carve-out skips — so this flag is what carries that seating law across decision
+/// 2148's move into the frame system. It rides the extract, one field per Text quad, because the
+/// renderer is the only thing that can act on it.
+///
+/// It is answered from the OWNER, which is why the third block here matters: pfUI and
+/// ShaguTweaks blank the stock regions and hang their own FontStrings on the plate, and a rule
+/// written on our six regions would have left an addon's strings jittering inside a plate whose
+/// own text had stopped.
+#[test]
+fn the_plates_texts_carry_the_world_seat_and_its_textures_do_not() {
+    use crate::script::QuadContent;
+    let mut s = vm();
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+
+    let seats: Vec<(String, bool)> = s
+        .extract()
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Text {
+                text: Some(t),
+                world_seat,
+                ..
+            } => Some((t.clone(), *world_seat)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        seats,
+        vec![("Wolf".to_string(), true), ("12".to_string(), true)],
+        "the plate draws exactly its name and level, both seated off the UI grid"
+    );
+
+    // A FontString on an ordinary frame is interface, and interface is ON the grid — the flag has
+    // to be the plate's claim, not something every string picked up.
+    s.run(
+        r#"local f = CreateFrame("Frame", "Chrome", UIParent) f:SetAllPoints()
+           local t = f:CreateFontString("ChromeText") t:SetAllPoints() t:SetText("Chrome")"#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(s.extract().iter().any(|q| matches!(
+        &q.content,
+        QuadContent::Text { text: Some(t), world_seat: false, .. } if t == "Chrome"
+    )));
+
+    // An addon's own string on the plate — pfUI's whole vanilla branch — is drawn inside the same
+    // sliding rect, so it gets the same seat.
+    s.run(
+        r#"local plate = WorldFrame:GetChildren()
+           local t = plate:CreateFontString() t:SetAllPoints() t:SetText("pfName")"#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(
+        s.extract().iter().any(|q| matches!(
+            &q.content,
+            QuadContent::Text { text: Some(t), world_seat: true, .. } if t == "pfName"
+        )),
+        "an addon's FontString on the plate seats off the UI grid too"
+    );
+}
+
 /// The suppression is **the reference's own glow art on an ADD region**, and nothing wider: an
 /// addon that re-textures the region gets its art painted like any other texture.
 ///

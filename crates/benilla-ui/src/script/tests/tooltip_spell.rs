@@ -389,7 +389,7 @@ fn requirement_and_reagent_lines_render_in_law_order() {
         assert(TTTextLeft2:GetText() == "30 yd range", "cost absent: range moves left")
         assert(TTTextLeft3:GetText() == "Instant")
         assert(TTTextLeft4:GetText() == "Requires Wands", "law §3.6 sits above the reagents")
-        assert(TTTextLeft5:GetText():find("Light Feather") ~= nil, "law §3.8")
+        assert(string.find(TTTextLeft5:GetText(), "Light Feather") ~= nil, "law §3.8")
         assert(TTTextLeft6:GetText() == "Attack with an equipped wand.", "description last")
     "#,
     )
@@ -1014,8 +1014,7 @@ fn quest_reward_spell_getters_and_hovers() {
 
     s.set_quest(Some(QuestState::default()));
     assert_eq!(
-        s.eval::<i64>("return select('#', GetRewardSpell())")
-            .unwrap(),
+        s.arity("GetRewardSpell()").unwrap(),
         3,
         "three values on the empty path"
     );

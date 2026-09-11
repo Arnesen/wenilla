@@ -294,11 +294,7 @@ fn register_all_events_takes_every_event_and_unregister_all_clears_it() {
     .unwrap();
 
     // Arity 0 — the verb answers nothing.
-    assert_eq!(
-        s.eval::<i64>("return select('#', All:RegisterAllEvents())")
-            .unwrap(),
-        0
-    );
+    assert_eq!(s.arity("All:RegisterAllEvents()").unwrap(), 0);
 
     // Anything dispatched now reaches it, including an event no name list could have enumerated.
     for ev in [

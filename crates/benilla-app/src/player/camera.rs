@@ -1429,22 +1429,7 @@ pub(super) fn seat_camera(
     let boom_len = boom.length().max(1.0e-3);
     // The camera collides with the WMO *camera/LOS* faces (keeps DETAIL overhangs like forge pipes,
     // drops NOCAMCOLLIDE) + terrain/doodads/GameObjects — its own audience, not the walking mesh.
-    //
-    // **And the waterline, under `cameraWaterCollision`** — registered `"1"`, so this is on out of
-    // the box. It is a change to the trace's MASK and nothing else, which is the shape the
-    // reference gives it (`0x50e5ec` ORs the `0xf0000` ADT-liquid nibble into the word all three of
-    // `0x50e570`'s queries carry). Decision 2149 read the arm as liquid-blind and built a pivot
-    // corridor in its place; wow-re's `water-band-discontinuity.md` refuted that — the nibble
-    // reaches `0x69cc13` through four direct calls and gates a per-layer intersection over the
-    // chunk's four MCLQ slots, so the sweep hits bare water and cannot tell it from ground.
-    let hit = collide.cast_camera(
-        cam_probe,
-        head,
-        Quat::IDENTITY,
-        boom,
-        0.0,
-        dynamics.options.water_collision,
-    );
+    let hit = collide.cast_camera(cam_probe, head, Quat::IDENTITY, boom, 0.0);
     // The solver's own clip verdict (`0x50e570`'s `0x30000` return, OR'd into `[cam+0x90]` by the
     // driver) — [`SmartPivot`]'s sixth conjunct, and the reason an unobstructed camera never
     // pivots. Written here because here is the only place that knows.

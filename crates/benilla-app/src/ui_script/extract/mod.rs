@@ -1866,6 +1866,7 @@ fn convert_entry(
             shadow,
             outline,
             alpha_gradient,
+            world_seat,
         } => {
             // No atlas (no client data / Friz Quadrata unreadable — see `ui_text`'s startup
             // system) means text simply doesn't render, same graceful-absence posture as a
@@ -1887,6 +1888,7 @@ fn convert_entry(
                     shadow,
                     outline,
                     alpha_gradient,
+                    world_seat,
                 },
                 text::TextHost {
                     z: eq.z,

@@ -1468,8 +1468,7 @@ fn button_get_text_color_answers_four_values_through_the_state_font() {
     .unwrap();
 
     assert_eq!(
-        s.eval::<i64>("return select('#', PlainBtn:GetTextColor())")
-            .unwrap(),
+        s.arity("PlainBtn:GetTextColor()").unwrap(),
         4,
         "arity 4 — not 3, the plausible wrong answer"
     );
@@ -1485,8 +1484,11 @@ fn button_get_text_color_answers_four_values_through_the_state_font() {
     // (`GetVertexColor`, `FontString:GetTextColor`) answers.
     let plain: Vec<f32> = (1..=4)
         .map(|i| {
-            s.eval::<f32>(&format!("return select({i}, PlainBtn:GetTextColor())"))
-                .unwrap()
+            let discards = "_, ".repeat(i - 1);
+            s.eval::<f32>(&format!(
+                "local {discards}v = PlainBtn:GetTextColor() return v"
+            ))
+            .unwrap()
         })
         .collect();
     assert_eq!(plain, vec![1.0, 1.0, 1.0, 1.0]);
@@ -1495,8 +1497,11 @@ fn button_get_text_color_answers_four_values_through_the_state_font() {
     // `Button:GetFont` takes, and the one a stock `GameMenuButtonTemplate` button relies on.
     let themed: Vec<f32> = (1..=4)
         .map(|i| {
-            s.eval::<f32>(&format!("return select({i}, ThemedBtn:GetTextColor())"))
-                .unwrap()
+            let discards = "_, ".repeat(i - 1);
+            s.eval::<f32>(&format!(
+                "local {discards}v = ThemedBtn:GetTextColor() return v"
+            ))
+            .unwrap()
         })
         .collect();
     assert_eq!(themed, vec![1.0, 0.82, 0.0, 1.0]);
@@ -1505,19 +1510,17 @@ fn button_get_text_color_answers_four_values_through_the_state_font() {
     s.run("ThemedBtn:SetTextColor(0.1, 0.2, 0.3, 0.4)").unwrap();
     let set: Vec<f32> = (1..=4)
         .map(|i| {
-            s.eval::<f32>(&format!("return select({i}, ThemedBtn:GetTextColor())"))
-                .unwrap()
+            let discards = "_, ".repeat(i - 1);
+            s.eval::<f32>(&format!(
+                "local {discards}v = ThemedBtn:GetTextColor() return v"
+            ))
+            .unwrap()
         })
         .collect();
     assert_eq!(set, vec![0.1, 0.2, 0.3, 0.4]);
 
     // A CheckButton reaches it through Button's table, as it does the rest of the trio.
-    assert_eq!(
-        s.eval::<i64>(
-            r#"local c = CreateFrame("CheckButton", "ChkColorBtn")
-               return select('#', c:GetTextColor())"#
-        )
-        .unwrap(),
-        4
-    );
+    s.run(r#"CreateFrame("CheckButton", "ChkColorBtn")"#)
+        .unwrap();
+    assert_eq!(s.arity("ChkColorBtn:GetTextColor()").unwrap(), 4);
 }

@@ -231,15 +231,17 @@ fn set_inventory_item_renders_full_outside_compare() {
         -- empty slot answering ONE value hands its caller a nil where a number belongs. pfUI's
         -- durability scan (panel.lua:499) does `totalRep + repCost` with no guard at all and died
         -- exactly there.
-        -- Counted with `select`, NOT `table.getn` on a captured table: 5.0's `luaL_getn` counts
-        -- rawgeti to the first nil (decision 2102), so `{ f() }` where f answers `1, nil, 0`
-        -- measures ONE — a hole, not a short return.
-        assert(select('#', tt:SetInventoryItem("player", 16)) == 3,
-            "occupied: three returns, got " .. select('#', tt:SetInventoryItem("player", 16)))
+        -- Counted through the implicit vararg table's `n` — 5.0's own answer, and the only one
+        -- this VM has (`select` is 5.1's base library, not a 1.12 global). NOT `table.getn` on a
+        -- captured table: 5.0's `luaL_getn` counts rawgeti to the first nil (decision 2102), so
+        -- `{ f() }` where f answers `1, nil, 0` measures ONE — a hole, not a short return.
+        local function count(...) return arg.n end
+        assert(count(tt:SetInventoryItem("player", 16)) == 3,
+            "occupied: three returns, got " .. count(tt:SetInventoryItem("player", 16)))
         local _, _, repairCost = tt:SetInventoryItem("player", 16)
         assert(repairCost == 0, "repairCost is a NUMBER — the reference always pushes one; 0 INTERIM")
-        assert(select('#', tt:SetInventoryItem("player", 5)) == 3,
-            "empty: three returns too, got " .. select('#', tt:SetInventoryItem("player", 5)))
+        assert(count(tt:SetInventoryItem("player", 5)) == 3,
+            "empty: three returns too, got " .. count(tt:SetInventoryItem("player", 5)))
         local hasItem, _, emptyCost = tt:SetInventoryItem("player", 5)
         assert(hasItem == nil and emptyCost == 0,
             "empty slot: no item, but still a numeric repairCost")

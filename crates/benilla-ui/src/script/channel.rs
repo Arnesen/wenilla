@@ -742,8 +742,7 @@ mod command_tests {
     fn enumerate_server_channels_lists_the_shortcuts_the_zone_admits() {
         let mut s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<i64>("return select('#', EnumerateServerChannels())")
-                .unwrap(),
+            s.arity("EnumerateServerChannels()").unwrap(),
             0,
             "no zone yet — 0 values"
         );
@@ -907,10 +906,6 @@ mod command_tests {
 
         let e = s.run("LeaveChannelByName()").unwrap_err();
         assert!(e.to_string().contains("Usage: LeaveChannelByName"), "{e}");
-        assert_eq!(
-            s.eval::<i64>("return select('#', LeaveChannelByName('x'))")
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.arity("LeaveChannelByName('x')").unwrap(), 0);
     }
 }

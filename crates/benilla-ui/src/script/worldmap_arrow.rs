@@ -434,9 +434,9 @@ mod tests {
             (pos.0 - 0.0131).abs() < 1e-5 && (pos.1 - 0.01315).abs() < 1e-5 && pos.2 == 0.0,
             "centred on the box: {pos:?}"
         );
-        assert!(
-            s.eval::<bool>("return select('#', CreateWorldMapArrowFrame(WM)) == 0")
-                .unwrap(),
+        assert_eq!(
+            s.arity("CreateWorldMapArrowFrame(WM)").unwrap(),
+            0,
             "zero values"
         );
     }

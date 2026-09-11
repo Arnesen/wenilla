@@ -35,22 +35,6 @@ pub(crate) enum CollisionLayer {
     Walk,
     /// WMO faces only the **camera** collides with — the camera/LOS gather (skip NOCAMCOLLIDE `0x02`).
     Camera,
-    /// **Liquid surfaces** — the wet-cell lattice of every MCLQ layer and WMO pool, on a layer of
-    /// their own so that *no* query sees them unless it asks.
-    ///
-    /// This is `cameraWaterCollision`'s primary consumer and the shape the reference gives it: the
-    /// CVar does not re-lane any geometry, it adds `0xf0000` to the **trace mask** the solver hands
-    /// its three collision queries (`0x50e5ec`; the nibble is read at `0x69cc13` and gates a
-    /// per-layer intersection over the chunk's four MCLQ slots — `0x10000` river/lake, `0x20000`
-    /// ocean, `0x40000` magma, `0x80000` slime). A per-trace mask is exactly a `SpatialQueryFilter`,
-    /// which is why this is a layer and not a component the camera looks for.
-    ///
-    /// wow-re `ui/scratch/water-band-discontinuity.md`. It **refutes** that tree's own
-    /// `camera-arm-liquid-blind.md` §2, a VERIFIED NEGATIVE that stood from June: the census was
-    /// correct and controlled, but a capability requested through an argument flag is invisible to
-    /// any census of call sites. Decision 2149 rested benilla on that verdict and built the wrong
-    /// half of the feature; 2165 took it out.
-    Liquid,
 }
 
 /// `CollisionLayers` for a WMO's **walking** collider — member of [`CollisionLayer::Walk`] only, so the
@@ -63,16 +47,6 @@ pub(crate) fn walk_layers() -> CollisionLayers {
 /// the player movement query (which omits `Camera`) never hits it.
 pub(crate) fn camera_layers() -> CollisionLayers {
     CollisionLayers::new(CollisionLayer::Camera, LayerMask::ALL)
-}
-
-/// `CollisionLayers` for a **liquid surface** — member of [`CollisionLayer::Liquid`] only.
-///
-/// Every existing filter omits that bit, so these colliders are inert to the body, the camera, the
-/// mouse pick and the particle snap alike until a query asks for them by name. A swimmer must not
-/// be stopped by the water they are in, and nothing but the camera sweep under
-/// `cameraWaterCollision` has any business hitting a waterline.
-pub(crate) fn liquid_layers() -> CollisionLayers {
-    CollisionLayers::new(CollisionLayer::Liquid, LayerMask::ALL)
 }
 
 /// **How many times the world's collider set has changed** — bumped when [`crate::terrain_stream`]
@@ -200,16 +174,10 @@ impl WorldCollision<'_, '_> {
     /// …and what the third-person **camera** collides with: the other way round on those two WMO
     /// face layers (it takes NOCAMCOLLIDE faces the body walks through, and skips the DETAIL faces
     /// the body walks on).
-    /// `liquid` adds the waterline — `cameraWaterCollision`'s primary consumer. The reference does
-    /// exactly this and no more: `0x50e5ec` ORs `0xf0000` into the trace mask word the solver hands
-    /// its three collision queries, so the CVar changes *what this one query is allowed to see* and
-    /// re-lanes nothing. `false` and it is byte-for-byte the filter it always was.
-    pub(crate) fn camera_filter(liquid: bool) -> SpatialQueryFilter {
-        let mut mask = CollisionLayer::Default.to_bits() | CollisionLayer::Camera.to_bits();
-        if liquid {
-            mask |= CollisionLayer::Liquid.to_bits();
-        }
-        SpatialQueryFilter::from_mask(LayerMask(mask))
+    pub(crate) fn camera_filter() -> SpatialQueryFilter {
+        SpatialQueryFilter::from_mask(LayerMask(
+            CollisionLayer::Default.to_bits() | CollisionLayer::Camera.to_bits(),
+        ))
     }
 
     /// Sweep `shape` along `movement` against the body's world.
@@ -251,10 +219,6 @@ impl WorldCollision<'_, '_> {
     /// Deliberately avian's own two-sided cast rather than the one-sided law above: the facing
     /// gate exists because a *body* must not stand on a face wound away from it, and a camera has
     /// no such contract — it just must not end up inside geometry, from either side.
-    ///
-    /// `liquid` is `cameraWaterCollision`, straight through: with it set the boom stops at a
-    /// waterline the way it stops at ground, which is the whole of the option's primary effect and
-    /// what its own tooltip promises the player.
     pub fn cast_camera(
         &self,
         shape: &Collider,
@@ -262,7 +226,6 @@ impl WorldCollision<'_, '_> {
         rotation: Quat,
         movement: Vec3,
         skin_width: f32,
-        liquid: bool,
     ) -> Option<MoveHitData> {
         self.ms.cast_move(
             shape,
@@ -270,7 +233,7 @@ impl WorldCollision<'_, '_> {
             rotation,
             movement,
             skin_width,
-            &Self::camera_filter(liquid),
+            &Self::camera_filter(),
         )
     }
 
@@ -386,85 +349,6 @@ impl WorldCollision<'_, '_> {
     /// Every front-facing triangle in a box around `at` — the step probe's face gather.
     pub fn faces_near_body(&self, at: Vec3, half: Vec3, limit: usize) -> Vec<one_sided::FaceProbe> {
         one_sided::faces_near(&self.ms, at, half, &Self::body_filter(), limit)
-    }
-}
-
-/// **`cameraWaterCollision` is a trace mask and nothing else.** The same waterline collider is a
-/// wall to the camera boom with the CVar on, thin air with it off, and thin air to the walking body
-/// either way — which is the whole of the reference's `0x50e5ec`, and the reason a swimmer is never
-/// stopped by the water they are in.
-#[cfg(test)]
-mod liquid_trace_mask {
-    use super::*;
-    use bevy::ecs::system::RunSystemOnce;
-    use bevy::prelude::*;
-
-    /// A headless world holding one 10×10 horizontal surface on [`CollisionLayer::Liquid`].
-    fn world_with_waterline() -> App {
-        let mut app = App::new();
-        app.add_plugins((
-            MinimalPlugins,
-            bevy::transform::TransformPlugin,
-            bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
-            PhysicsPlugins::new(bevy::app::PostUpdate),
-        ));
-        app.init_asset::<Mesh>();
-        app.world_mut().spawn((
-            RigidBody::Static,
-            Collider::trimesh(
-                vec![
-                    Vec3::new(-5.0, 0.0, -5.0),
-                    Vec3::new(5.0, 0.0, -5.0),
-                    Vec3::new(5.0, 0.0, 5.0),
-                    Vec3::new(-5.0, 0.0, 5.0),
-                ],
-                vec![[0u32, 2, 1], [0, 3, 2]],
-            ),
-            liquid_layers(),
-            Transform::default(),
-        ));
-        app.finish();
-        app.cleanup();
-        app.update();
-        app
-    }
-
-    /// Drop a small probe from above the surface onto it, through `filter`.
-    fn descend(app: &mut App, filter: SpatialQueryFilter) -> Option<f32> {
-        app.world_mut()
-            .run_system_once(move |ms: MoveAndSlide| {
-                ms.cast_move(
-                    &Collider::sphere(0.1),
-                    Vec3::new(0.0, 3.0, 0.0),
-                    Quat::IDENTITY,
-                    Vec3::new(0.0, -6.0, 0.0),
-                    0.0,
-                    &filter,
-                )
-                .map(|h| h.distance)
-            })
-            .expect("system runs")
-    }
-
-    #[test]
-    fn the_waterline_stops_the_camera_only_when_the_cvar_asks_for_it() {
-        let mut app = world_with_waterline();
-        let on = descend(&mut app, WorldCollision::camera_filter(true));
-        assert!(
-            on.is_some_and(|d| (d - 2.9).abs() < 0.05),
-            "with cameraWaterCollision the boom stops at the surface, got {on:?}"
-        );
-        assert_eq!(
-            descend(&mut app, WorldCollision::camera_filter(false)),
-            None,
-            "with the CVar off the camera passes through, exactly as it did before this existed"
-        );
-        assert_eq!(
-            descend(&mut app, WorldCollision::body_filter()),
-            None,
-            "and the BODY passes through either way — a swimmer is not stopped by their own water"
-        );
     }
 }
 

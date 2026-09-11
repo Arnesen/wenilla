@@ -284,7 +284,9 @@ pub(super) fn install(
     // ctor-determined `+0x48` gives (decision 2129).
     //
     // A nil here is not a cosmetic difference. `aux-addon/tabs/search/frame.lua:481` computes
-    // `select(2, child:GetFont()) + arg1*2` in its font-resize wheel handler.
+    // `aux.select(2, child:GetFont()) + arg1*2` in its font-resize wheel handler — `aux.select`,
+    // the addon's own (`util.lua:26`), which is why that line survives 2171 taking the global
+    // `select` away.
     m.set(
         "GetFont",
         lua.create_function(move |lua, this: Table| {

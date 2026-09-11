@@ -311,18 +311,10 @@ fn the_bindings_answer_the_reference_shape() {
          Alliance Towers Controlled|||1|2|3",
         "empty columns are empty strings, never nil"
     );
-    assert_eq!(
-        s.eval::<i64>("return select('#', GetWorldStateUIInfo(1))")
-            .unwrap(),
-        10
-    );
+    assert_eq!(s.arity("GetWorldStateUIInfo(1)").unwrap(), 10);
 
     // Out of range: ONE value, the number 0.
-    assert_eq!(
-        s.eval::<i64>("return select('#', GetWorldStateUIInfo(2))")
-            .unwrap(),
-        1
-    );
+    assert_eq!(s.arity("GetWorldStateUIInfo(2)").unwrap(), 1);
     assert_eq!(s.eval::<i64>("return GetWorldStateUIInfo(2)").unwrap(), 0);
     assert_eq!(
         s.eval::<i64>("return GetWorldStateUIInfo(0)").unwrap(),

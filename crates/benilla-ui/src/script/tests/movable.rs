@@ -432,11 +432,7 @@ fn a_title_region_is_a_plain_region_and_creating_it_twice_is_destructive() {
 
     // GetTitleRegion answers ONE value and it is nil — not zero values, which is the asymmetry
     // Q6 flags against `GetBackdrop`.
-    assert_eq!(
-        s.eval::<i64>("return select('#', TFrame:GetTitleRegion())")
-            .unwrap(),
-        1
-    );
+    assert_eq!(s.arity("TFrame:GetTitleRegion()").unwrap(), 1);
     assert!(s
         .eval::<Option<bool>>("return TFrame:GetTitleRegion() ~= nil and true or nil")
         .unwrap()

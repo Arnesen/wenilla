@@ -166,9 +166,5 @@ fn an_unknown_name_echoes_itself_rather_than_a_placeholder_literal() {
             .unwrap(),
         "nil"
     );
-    assert_eq!(
-        s.eval::<i64>(r##"return select("#", GetAddOnDependencies("Nope"))"##)
-            .unwrap(),
-        0
-    );
+    assert_eq!(s.arity(r##"GetAddOnDependencies("Nope")"##).unwrap(), 0);
 }

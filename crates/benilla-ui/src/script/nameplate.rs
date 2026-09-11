@@ -843,6 +843,27 @@ fn font_string(model: &mut Model, frame: FrameHandle, justify_v: JustifyV) -> Re
     rh
 }
 
+/// **Is this frame a V-plate?** — the seat question, asked of the OWNER (decision 2172).
+///
+/// A plate is a WorldFrame overlay: the driver snaps its rect to the DEVICE pixel grid
+/// (`vplates::device_snap`, 0188/1398) because it slides continuously over the world, and
+/// everything drawn inside it has to be rigid to that rect. The renderer's UI seat snap quantizes
+/// a text block's top on the coarser LOGICAL grid, so with both laws in force a plate's name and
+/// level pop a whole logical pixel every second step the border takes — two quantizers on one
+/// sliding object, and the "janky text walking up to a mob" the director reported the day after
+/// decision 2148 moved these strings out of a painter that never snapped them (its host-measure
+/// rects were degenerate, and a degenerate rect skips the snap — the carve-out the port silently
+/// stopped selecting).
+///
+/// **Asked of the frame rather than written on our six regions**, because it is the frame that
+/// slides: pfUI and ShaguTweaks blank the stock regions and hang their *own* FontStrings on the
+/// plate, and those are drawn inside the same rect and want the same answer. (A string an addon
+/// puts on the plate's health-BAR child is one level further down and still takes the UI grid —
+/// the named residual, and the shape of the fix if it ever bites is an ancestor walk.)
+pub(super) fn is_world_seated(model: &Model, frame: FrameHandle) -> bool {
+    model.nameplates.by_frame.contains_key(&frame)
+}
+
 /// **The plate's glow region paints nothing here** — the region is real, shown, textured and ADD,
 /// and the quad walk skips it ([`super::extract`]). Decision 0184, and it is the director's call
 /// rather than a gap we could close by trying harder.

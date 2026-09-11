@@ -265,8 +265,7 @@ mod tests {
         assert!(s.eval::<bool>("return LoggingChat() == nil").unwrap());
         assert!(s.eval::<bool>("return LoggingCombat() == nil").unwrap());
         assert_eq!(
-            s.eval::<i64>("return select('#', LoggingChat(true))")
-                .unwrap(),
+            s.arity("LoggingChat(true)").unwrap(),
             0,
             "the setter returns nothing"
         );

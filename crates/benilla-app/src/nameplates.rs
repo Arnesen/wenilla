@@ -79,7 +79,7 @@ use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
 use crate::target::{ring_reaction, ring_variant, CombatFlash, Factions, RingVariant, Selection};
-use crate::ui_text::{layout_text_quads, FontSpec, Justify, UiFontAtlas};
+use crate::ui_text::{layout_text_quads, FontSpec, Justify, TextSeat, UiFontAtlas};
 use benilla_world::view::WorldCamera;
 
 /// The height-scale law (`0x6c6e90`): `d > KNEE ? d/KNEE · RATE · FLOOR : FLOOR`, `d` the anchor's
@@ -339,6 +339,10 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
                 outline: Outline::None,
                 alpha_gradient: None,
             },
+            // A world billboard: the glyphs are re-seated by ink into name-local pitch units two
+            // statements below, so the UI grid never had anything to say here (the degenerate
+            // rect above already skipped it — this only says so out loud).
+            TextSeat::Exact,
         );
         // Recenter the ink box on x = 0, then normalize px → pitch units, flipping y-down px into
         // y-up locals within this line's band.

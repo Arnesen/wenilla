@@ -106,11 +106,7 @@ mod tests {
     #[test]
     fn tutorials_enabled_scans_the_whole_acknowledged_bank() {
         let mut s = UiScript::new().unwrap();
-        assert_eq!(
-            s.eval::<i64>("return select('#', TutorialsEnabled())")
-                .unwrap(),
-            1
-        );
+        assert_eq!(s.arity("TutorialsEnabled()").unwrap(), 1);
         assert!(
             s.eval::<bool>("return TutorialsEnabled() == nil").unwrap(),
             "no bank"

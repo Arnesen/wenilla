@@ -999,6 +999,28 @@ impl UiScript {
         self.lua.load(chunk).set_mode(mlua::ChunkMode::Text).eval()
     }
 
+    /// **How many values does `expr` return?** — the return-shape question, asked at the host
+    /// boundary instead of inside Lua.
+    ///
+    /// This is what `select('#', expr)` used to answer in ~170 of our own tests. `select` is not a
+    /// 1.12 global and is gone (`lua50::install`), and the replacement is not a workaround: a
+    /// binding's arity is a fact about the **binding ABI**, and on this side of it a multiple
+    /// return already *is* a `MultiValue` whose length nothing can round off. It keeps the property
+    /// the arity gates rest on — **zero values and one `nil` are different answers**, `0` and `1`
+    /// (`binding_abi`'s §2), which is exactly what a `Option<T>` return type cannot tell apart.
+    ///
+    /// `expr` is a Lua **expression**, not a chunk: pass `"GetItemInfo(1)"`, not `"return …"`.
+    /// A raise propagates — a call that errors has no arity, and swallowing that into `0` is how a
+    /// broken binding scores as a zero-return verb.
+    ///
+    /// The one place this cannot serve is a probe that has to hold the count *inside* Lua (a
+    /// `pcall` loop over generated calls, as `shape_gate` runs). There the 5.0 spelling is 1.12's
+    /// own and reads the same: `(function(...) return arg.n end)(expr)`.
+    pub fn arity(&self, expr: &str) -> mlua::Result<usize> {
+        let values: mlua::Variadic<mlua::Value> = self.eval(&format!("return {expr}"))?;
+        Ok(values.len())
+    }
+
     /// The owning frame's name for an [`ExtractedQuad`] target — a debugging affordance for
     /// capture/probe tooling, which sees quads but not widgets ("whose quad is this?").
     pub fn quad_owner_name(&self, target: ZTarget) -> Option<String> {

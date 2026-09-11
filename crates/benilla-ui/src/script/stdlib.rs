@@ -370,7 +370,13 @@ function GetGameTime() return __benilla_game_hour, __benilla_game_minute end
 
 -- ── Blizzard's positional string.format (%N$) ──────────────────────────────────────────────────
 do
-    local _format = string.format
+    -- `_find`/`_sub` are captured for the same reason `_format` is: this wrapper runs on every
+    -- `format` call in the UI and must not follow an addon's later replacement of `string.*`.
+    -- They are CALLS and not method syntax because 1.12 installs no string metatable, so
+    -- `fmt:find(...)` — which this used to be written as — raises there (decision 2101's
+    -- left-open item, closed in `lua50::install`). No chunk of ours may use what the reference's
+    -- VM cannot resolve; the parser enforces that for the grammar, and this is its runtime twin.
+    local _format, _find, _sub, _len = string.format, string.find, string.sub, string.len
     local CONV = "diouxXeEfgGqscp"  -- Lua 5.1 conversion letters
 
     local function reformat(fmt, ...)
@@ -378,7 +384,7 @@ do
             return _format(fmt, unpack(arg, 1, arg.n))
         end
         -- fast path: no "%<digit>" at all ⇒ definitely no positional spec.
-        if not fmt:find("%%%d") then
+        if not _find(fmt, "%%%d") then
             return _format(fmt, unpack(arg, 1, arg.n))
         end
 
@@ -387,33 +393,33 @@ do
         local order = {}       -- for each real conversion: the source arg index, or false=sequential
         local seen_pos, seen_seq = false, false
         local npieces, norder = 0, 0
-        local i, len = 1, string.len(fmt)
+        local i, len = 1, _len(fmt)
 
         while i <= len do
-            local c = fmt:sub(i, i)
+            local c = _sub(fmt, i, i)
             if c ~= "%" then
                 npieces = npieces + 1; pieces[npieces] = c
                 i = i + 1
-            elseif fmt:sub(i + 1, i + 1) == "%" then
+            elseif _sub(fmt, i + 1, i + 1) == "%" then
                 npieces = npieces + 1; pieces[npieces] = "%%"
                 i = i + 2
             else
                 local j = i + 1
-                local ds, de = fmt:find("^%d+%$", j)  -- optional N$
+                local ds, de = _find(fmt, "^%d+%$", j)  -- optional N$
                 if ds then
                     seen_pos = true
-                    norder = norder + 1; order[norder] = tonumber(fmt:sub(ds, de - 1))
+                    norder = norder + 1; order[norder] = tonumber(_sub(fmt, ds, de - 1))
                     j = de + 1
                 else
                     seen_seq = true
                     norder = norder + 1; order[norder] = false
                 end
                 -- copy flags/width/precision + the conversion letter
-                local ce = fmt:find("[" .. CONV .. "]", j)
+                local ce = _find(fmt, "[" .. CONV .. "]", j)
                 if not ce then
                     error("invalid conversion in format string", 2)
                 end
-                npieces = npieces + 1; pieces[npieces] = "%" .. fmt:sub(j, ce)
+                npieces = npieces + 1; pieces[npieces] = "%" .. _sub(fmt, j, ce)
                 i = ce + 1
             end
         end

@@ -71,19 +71,6 @@ pub(crate) struct CameraOptions {
     pub(crate) pivot_dy_min: f32,
     /// `cameraTargetSmoothSpeed` — see [`TARGET_SMOOTH_SPEED_DEFAULT`].
     pub(crate) target_smooth_speed: f32,
-    /// **`cameraWaterCollision`** — registered **"1"**, so this is ON out of the box.
-    ///
-    /// One consumer, and it is a **trace mask**: it adds the liquid layer to the camera boom's
-    /// collision filter, so the arm stops at a waterline. Decision 2149 built a pivot corridor
-    /// instead, on `camera-arm-liquid-blind.md`'s verdict that the arm never touches liquid; that
-    /// verdict is **refuted** by wow-re's `water-band-discontinuity.md` (the capability is
-    /// requested through an argument flag, which no census of call sites could see), and the
-    /// corridor it built had a 19/18 yd discontinuity that 2165 took back out.
-    ///
-    /// The corridor is the CVar's *second* consumer in the reference and is **not** rebuilt here
-    /// yet: it is only safe once the framing pivot's depth is pinned the way the reference pins it,
-    /// and that is a separate piece of work with its own continuity sweep to earn.
-    pub(crate) water_collision: bool,
     /// `cameraTerrainTilt` — registered **"0"**, so Follow Terrain is OFF out of the box.
     pub(crate) terrain_tilt: bool,
     /// `cameraGroundSmoothSpeed`, deg/s — the ground channel's rate (`[0xbe0fc0]`, `"7.5"`).
@@ -110,7 +97,6 @@ impl Default for CameraOptions {
             pivot_dx_max: PIVOT_DX_MAX_DEFAULT,
             pivot_dy_min: PIVOT_DY_MIN_DEFAULT,
             target_smooth_speed: TARGET_SMOOTH_SPEED_DEFAULT,
-            water_collision: true,
             terrain_tilt: false,
             ground_smooth_speed: GROUND_SMOOTH_SPEED_DEFAULT,
             tilt_time_min: TILT_TIME_MIN_DEFAULT,

@@ -170,7 +170,7 @@ fn fire_ground_census(
             drop,
             swimming,
             format!(
-                "UGD {:#018x} {} {name:?} pos=({:.2},{:.2},{:.2}) z={z:.2} seat={seat:.2} \
+                "UGD {:#018x} {} {name:?} display={} pos=({:.2},{:.2},{:.2}) z={z:.2} seat={seat:.2} \
                  drop={drop:+.2} terrain={} above={} spline={} swim={}",
                 guid.0,
                 // Which kind this row is: since B357 the listing is not all creatures, and a
@@ -180,6 +180,10 @@ fn fire_ground_census(
                 } else {
                     "unit"
                 },
+                // The display id, so a row hands straight to `WOW_CLAMP_TRACE=<display>` — the
+                // per-frame `clmp` readout is filtered by display and nothing else, and a census
+                // row that names only a guid cannot be followed up with it.
+                net.display_id.unwrap_or(0),
                 wow[0],
                 wow[1],
                 wow[2],

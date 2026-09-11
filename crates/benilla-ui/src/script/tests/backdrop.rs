@@ -60,8 +60,12 @@ fn get_backdrop_reconstructs_from_the_struct() {
         r#"
         local f = CreateFrame("Frame", "GB")
 
-        -- TRAP 2: no backdrop => ZERO values, not nil. `select('#')` is the only way to see it.
-        assert(select('#', f:GetBackdrop()) == 0, "unset backdrop must return no values at all")
+        -- How many values did that return? 5.0 answers with the implicit vararg table's `n`;
+        -- `select` is 5.1's base library and is not a 1.12 global (`lua50::install`).
+        local function count(...) return arg.n end
+
+        -- TRAP 2: no backdrop => ZERO values, not nil. The count is the only way to see it.
+        assert(count(f:GetBackdrop()) == 0, "unset backdrop must return no values at all")
 
         -- TRAP 1: the result is rebuilt from the struct, not the caller's table. The alien key is
         -- the proof: SetBackdrop never accepted it, so it cannot come back out.
@@ -71,7 +75,7 @@ fn get_backdrop_reconstructs_from_the_struct() {
                          alien = "must not survive" }
         f:SetBackdrop(passed)
         local b = f:GetBackdrop()
-        assert(select('#', f:GetBackdrop()) == 1, "a set backdrop is exactly one value")
+        assert(count(f:GetBackdrop()) == 1, "a set backdrop is exactly one value")
         assert(b ~= passed, "must not hand back the caller's own table")
         assert(b.alien == nil, "keys SetBackdrop never read cannot reappear")
         assert(b.insets ~= passed.insets, "the insets subtable is rebuilt too")
@@ -113,7 +117,7 @@ fn get_backdrop_reconstructs_from_the_struct() {
 
         -- SetBackdrop(nil) is indistinguishable from never having set one: back to zero values.
         f:SetBackdrop(nil)
-        assert(select('#', f:GetBackdrop()) == 0, "SetBackdrop(nil) returns to the zero-value shape")
+        assert(count(f:GetBackdrop()) == 0, "SetBackdrop(nil) returns to the zero-value shape")
     "#,
     )
     .unwrap();

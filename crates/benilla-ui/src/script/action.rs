@@ -642,11 +642,7 @@ mod tests {
             );
         }
         // One value on every non-raising path — never zero values.
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetActionText(4))")
-                .unwrap(),
-            1
-        );
+        assert_eq!(s.arity("GetActionText(4)").unwrap(), 1);
     }
 
     /// A missing or non-number slot **raises** (`0x4e70be` → `0x6f4940`, which never returns).

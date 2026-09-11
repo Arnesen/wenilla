@@ -38,7 +38,8 @@
 //!
 //! 1. **push nil**, one Lua value (`UnitAffectingCombat` on a false/unresolved unit,
 //!    `GetActionText` on a non-macro slot, `UnitInRaid` on a miss).
-//! 2. **zero Lua values** — distinct from `nil` for `select('#', …)` and for a multiple
+//! 2. **zero Lua values** — distinct from `nil` for anything that counts the return list (5.0's
+//!    `arg.n`, or [`crate::script::UiScript::arity`] on the host side) and for a multiple
 //!    assignment, identical to it for a single-value caller (`GetDefaultLanguage`'s failure edges).
 //! 3. **raise** — the statement is abandoned.
 

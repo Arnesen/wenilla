@@ -948,11 +948,7 @@ mod tests {
     #[test]
     fn get_chat_window_info_answers_the_nine_value_tuple() {
         let s = UiScript::new().unwrap();
-        assert_eq!(
-            s.eval::<i64>("return select('#', GetChatWindowInfo(1))")
-                .unwrap(),
-            9
-        );
+        assert_eq!(s.arity("GetChatWindowInfo(1)").unwrap(), 9);
     }
 
     /// Trap 1: a stock client has never been told a window's name, so the getter answers `""` and
@@ -1264,7 +1260,7 @@ mod record_tests {
             ("Loot".to_string(), Some(1))
         );
         assert!(s
-            .eval::<bool>("return select(7, GetChatWindowInfo(1)) == nil")
+            .eval::<bool>("local _, _, _, _, _, _, sh = GetChatWindowInfo(1) return sh == nil")
             .unwrap());
         assert_eq!(s.take_chat_window_changes(), vec![0, 2]);
         s.run("SetChatWindowName(3, 'Loot')").unwrap();

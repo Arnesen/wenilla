@@ -327,7 +327,7 @@ mod tests {
             vec!["1.12.1", "5875", "Sep 19 2006"]
         );
         assert_eq!(
-            s.eval::<i64>("return select('#', GetBuildInfo())").unwrap(),
+            s.arity("GetBuildInfo()").unwrap(),
             3,
             "three values, never a fourth"
         );
@@ -402,13 +402,13 @@ mod tests {
     fn the_client_identity_pair_answers_its_reference_arity() {
         let s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<i64>("return select('#', GetLocale())").unwrap(),
+            s.arity("GetLocale()").unwrap(),
             1,
             "GetLocale pushes exactly one value"
         );
         assert_eq!(s.eval::<String>("return GetLocale()").unwrap(), "enUS");
         assert_eq!(
-            s.eval::<i64>("return select('#', IsMacClient())").unwrap(),
+            s.arity("IsMacClient()").unwrap(),
             1,
             "IsMacClient pushes one value, and it is nil"
         );

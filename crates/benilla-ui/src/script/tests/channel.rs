@@ -122,11 +122,7 @@ fn get_channel_list_is_a_flat_slot_name_vararg_in_join_order() {
     let s = joined();
 
     // Exactly two pairs for two joined channels — the arity `FCFDropDown_LoadChannels` steps over.
-    assert_eq!(
-        s.eval::<i64>("return select('#', GetChannelList())")
-            .unwrap(),
-        4
-    );
+    assert_eq!(s.arity("GetChannelList()").unwrap(), 4);
 
     // Pair order and join order, both at once: slot 1 is the FIRST joined, not the alphabetical
     // first ("Trade - City" would sort ahead of "World").
@@ -152,12 +148,7 @@ fn get_channel_list_is_a_flat_slot_name_vararg_in_join_order() {
     // No channels joined is ZERO returns, so `{ GetChannelList() }` is an empty table rather than
     // a table of nils — every consumer above already handles that shape.
     let empty = crate::script::tests::common::script();
-    assert_eq!(
-        empty
-            .eval::<i64>("return select('#', GetChannelList())")
-            .unwrap(),
-        0
-    );
+    assert_eq!(empty.arity("GetChannelList()").unwrap(), 0);
 }
 
 /// **The guild-recruitment latch boots at AUTO and round-trips as a NUMBER** (decision 2115).
@@ -237,8 +228,7 @@ fn the_guild_recruitment_setter_gates_its_argument_the_way_the_reference_does() 
         1.0
     );
     assert_eq!(
-        s.eval::<i64>("return select('#', SetGuildRecruitmentMode(0))")
-            .unwrap(),
+        s.arity("SetGuildRecruitmentMode(0)").unwrap(),
         0,
         "0x4a0060 returns `xor eax,eax` — zero values, not a nil"
     );

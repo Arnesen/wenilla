@@ -1451,8 +1451,7 @@ fn an_editbox_is_born_with_the_ctors_five_regions_ahead_of_its_authored_ones() {
         "5 ctor regions + 2 authored textures, and the <FontString> adds none"
     );
     assert_eq!(
-        s.eval::<i64>("return select('#', Box:GetRegions())")
-            .unwrap(),
+        s.arity("Box:GetRegions()").unwrap(),
         7,
         "GetNumRegions is exactly the length GetRegions enumerates"
     );

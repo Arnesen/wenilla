@@ -88,6 +88,11 @@ type MotionReadout = (
     Option<&'static crate::net::Spline>,
     Option<&'static crate::net::RemoteMotion>,
     Option<&'static crate::net::UnitMoveModes>,
+    // The clamp's memo, for the card's `ground` line — the only place a "this mob is under the
+    // world" sighting becomes a measurement instead of a picture.
+    Option<&'static crate::net::GroundClamped>,
+    // Where the unit is standing *now*, which the `ground` line reads the terrain against.
+    &'static Transform,
 );
 
 /// The inspector's entity LIGHT readout (decision 0776): the lane this object's parts render
@@ -134,6 +139,9 @@ pub(super) struct InspectStores<'w, 's> {
     collision: Query<'w, 's, GoCollisionReadout>,
     lit: Query<'w, 's, EntityLightReadout>,
     motion: Query<'w, 's, MotionReadout>,
+    /// The MCNK heightfield under the hovered unit — the `ground` line's third number, and the one
+    /// that separates "the server put it there" from "we sank it".
+    points: benilla_world::world_point::WorldPoint<'w, 's>,
     factions: Option<Res<'w, crate::target::ring::Factions>>,
     self_store: Query<'w, 's, &'static ObjectStore, With<crate::net::SelfPlayer>>,
     /// The live standings — the other half of the reaction resolve (`ring_reaction` takes the
@@ -321,12 +329,13 @@ pub(super) fn inspect_ui(
             )
         }
     };
-    let (stores, kinds, collision, lit, motion, go_anims) = (
+    let (stores, kinds, collision, lit, motion, points, go_anims) = (
         &stores.stores,
         &stores.kinds,
         &stores.collision,
         &stores.lit,
         &stores.motion,
+        &stores.points,
         &stores.go_anims,
     );
     let store = net_entity.and_then(|p| stores.get(p).ok());
@@ -562,7 +571,7 @@ pub(super) fn inspect_ui(
     let motion_line = net_entity
         .filter(|_| is_unit)
         .and_then(|p| motion.get(p).ok())
-        .map(|(spline, remote, modes)| {
+        .map(|(spline, remote, modes, _, _)| {
             let moving = match (spline, remote) {
                 (Some(sp), _) => format!(
                     "motion {:.2} yd/s · {} path {:.0}% of {:.0}s",
@@ -580,6 +589,42 @@ pub(super) fn inspect_ui(
                 Some(m) => format!("{moving} · {m}"),
                 None => moving,
             }
+        });
+    // **Where its feet came from** ([`crate::net::GroundClamped`]) — the ground clamp's own memo,
+    // shown because "that mob is standing inside the hill" is a claim about three numbers and no
+    // screenshot carries them:
+    //
+    //   `ground z 12.34 · seat 12.42 (drop +0.08) · terrain 12.34 · walk hit`
+    //
+    // - **`z`** is where we are drawing it; **`seat`** is the pose the server last wrote, before
+    //   the clamp had its say, and **`drop`** = `seat − z` is the clamp's own correction. A big
+    //   positive drop is *ours*; a `z` far under `terrain` with `drop ≈ 0` is the server's.
+    // - **`terrain`** is the MCNK height under it — so "is it under the world?" reads off the card
+    //   rather than off a guess about what the hill looks like from here.
+    // - **the arm and the probe verdict**: `walk` is the swept step continuing a server path,
+    //   `idle` the settle from the seat, and they answer a MISS differently — an idle miss leaves
+    //   the unit at its seat, a walk miss descends. `MISS` is upper-case because on the `walk` arm
+    //   it is the interesting state, not a neutral one.
+    //
+    // The same three numbers `WOW_GROUND_CENSUS` prints per unit, on the unit the director is
+    // actually pointing at: the census answers "is anything sunk in this scene", this answers "why
+    // is *that* one".
+    let ground_line = net_entity
+        .filter(|_| is_unit)
+        .and_then(|p| motion.get(p).ok())
+        .and_then(|(_, _, _, clamped, t)| clamped.map(|c| (c, t)))
+        .map(|(c, t)| {
+            let z = t.translation.y;
+            format!(
+                "ground z {z:.2} · seat {:.2} (drop {:+.2}) · terrain {} · {} {}",
+                c.seat_y,
+                c.seat_y - z,
+                points
+                    .terrain_height_under(t.translation)
+                    .map_or_else(|| "none".to_string(), |v| format!("{v:.2}")),
+                if c.walking() { "walk" } else { "idle" },
+                if c.hit { "hit" } else { "MISS" },
+            )
         });
     // An `AnimationData` id as the card names it — shared by the creature and GameObject anim
     // lines below, which read the same id space.
@@ -670,6 +715,9 @@ pub(super) fn inspect_ui(
         lines.push(line.clone());
     }
     if let Some(line) = &motion_line {
+        lines.push(line.clone());
+    }
+    if let Some(line) = &ground_line {
         lines.push(line.clone());
     }
     if let Some(line) = &anim_line {

@@ -48,28 +48,24 @@ fn reference() -> Vec<(String, String)> {
 fn allowed_beyond_1_12() -> HashSet<&'static str> {
     [
         // ── our Lua runtime is 5.1 where 1.12's is 5.0 ────────────────────────────────────────
-        // `select`'s old reason here — "our transcribed FrameXML uses it in 16 files as the 5.1
-        // spelling of 5.0's implicit `arg` table" — **was true and is not any more**: 1751's
-        // stock-first migration retired those files, and `assets/ui`'s seven survivors contain
-        // zero `select(` call sites (measured 2026-09-09, decision 2142). What keeps it is now a
-        // different fact, and a weaker one: it is mlua's, not ours to remove without replacing the
-        // 5.1 varargs it comes with. The corpus reads it as a version probe —
-        // `pfUI/libs/libpredict.lua:141` and `ShaguTweaks/libs/libpredict.lua:82` both branch on
-        // `elseif select and UnitCastingInfo then`, and only our NOT having `UnitCastingInfo`
-        // keeps them off the TBC cast path.
-        //
-        // `_G` is the last one inherited rather than chosen: 1.12's base library does not export
-        // it (an addon reaches the globals with `getfenv(0)`, which is what AceLibrary does), but
-        // our own `getglobal`/`setglobal` are written over it. Closing it means rewriting those
-        // against the registry first.
+        // `_G` is the last of these inherited rather than chosen: 1.12's base library does not
+        // export it (an addon reaches the globals with `getfenv(0)`, which is what AceLibrary
+        // does), but our own `getglobal`/`setglobal` are written over it. Closing it means
+        // rewriting those against the registry first.
         //
         // **This list has been shrinking as the dialect got measured**: `coroutine` left in 1194
         // with the 5.1-only members of `string`/`table`/`math`; `print` and `_VERSION` left in
         // 1197, when the RE dispatch read the base library's 36-entry array and neither was in it.
+        // `select` left last, and it is the one that shows what a written reason is worth — it
+        // carried two and outlived both. The first ("our transcribed FrameXML uses it in 16 files
+        // as the 5.1 spelling of 5.0's implicit `arg` table") was retired by 1751's migration and
+        // caught by 2142's census at *zero* sites. The second, written in its place, was that
+        // removing it meant giving up the 5.1 varargs it comes with — which 2101 had already given
+        // up, three days earlier, in the parser. A reason nobody re-derives is a reason with an
+        // expiry date; this list's job is to make the expiry visible, and twice it did not.
         // The list only ever covered globals — the members needed `dump_globals --members` before
         // anyone could see them at all.
         "_G",
-        "select",
         // ── WoW API past 1.12 — 1188 phase 5's list, and the reason that phase exists ─────────
         // **The reason written here was "every one of these is used by our own transcribed
         // FrameXML today", and as of 2026-09-09 that is true of exactly ONE of the sixteen**
@@ -241,8 +237,10 @@ fn get_texture_returns_the_stripped_path_and_solid_texture_for_a_fill() {
         None
     );
     assert_eq!(
-        s.eval::<i64>("local a,b = GTFTex:GetTexture() return select('#', GTFTex:GetTexture())")
-            .unwrap_or(1),
+        // `.unwrap()`, not the `.unwrap_or(1)` this carried while it was spelled with `select`:
+        // that default made a raise indistinguishable from the answer being asserted, which is the
+        // one thing an arity check must not do (2171).
+        s.arity("GTFTex:GetTexture()").unwrap(),
         1,
         "exactly one return value"
     );
@@ -299,16 +297,11 @@ fn region_shadow_accessors_round_trip_four_values() {
         .unwrap();
 
     assert_eq!(
-        s.eval::<i64>("return select('#', SHFText:GetShadowColor())")
-            .unwrap(),
+        s.arity("SHFText:GetShadowColor()").unwrap(),
         4,
         "GetShadowColor returns FOUR values — three drops the alpha"
     );
-    assert_eq!(
-        s.eval::<i64>("return select('#', SHFText:GetShadowOffset())")
-            .unwrap(),
-        2
-    );
+    assert_eq!(s.arity("SHFText:GetShadowOffset()").unwrap(), 2);
 
     // NavigatorFu's line, in shape: a font object's shadow piped straight into a region's.
     s.run("SHFText:SetShadowColor(0, 0, 0, 0.3) SHFText:SetShadowOffset(1, -1)")
@@ -379,8 +372,7 @@ fn region_set_parent_relinks_the_draw_owner_and_leaves_anchors_alone() {
 
     // FuXPFu's line, and it returns nothing at all.
     assert_eq!(
-        s.eval::<i64>("return select('#', Spark:SetParent(B))")
-            .unwrap(),
+        s.arity("Spark:SetParent(B)").unwrap(),
         0,
         "SetParent returns zero values on every path"
     );
@@ -467,7 +459,7 @@ fn button_set_font_returns_nothing_and_is_a_no_op_without_a_label() {
 
     // _LazyPig's line, on a Button that has no label at all.
     assert_eq!(
-        s.eval::<i64>(r#"return select('#', SFBare:SetFont("Fonts\\FRIZQT__.TTF", 8))"#)
+        s.arity(r#"SFBare:SetFont("Fonts\\FRIZQT__.TTF", 8)"#)
             .unwrap(),
         0,
         "SetFont returns ZERO values — the delegate's 1/nil is discarded by a Button"
@@ -479,8 +471,7 @@ fn button_set_font_returns_nothing_and_is_a_no_op_without_a_label() {
     );
 
     assert_eq!(
-        s.eval::<i64>("return select('#', SFBare:GetFont())")
-            .unwrap(),
+        s.arity("SFBare:GetFont()").unwrap(),
         3,
         "GetFont returns THREE values"
     );
@@ -490,11 +481,7 @@ fn button_set_font_returns_nothing_and_is_a_no_op_without_a_label() {
         ("Fonts\\FRIZQT__.TTF".to_string(), 8.0, String::new())
     );
     // Still three when nothing has ever set a font — path and height are nil, not absent.
-    assert_eq!(
-        s.eval::<i64>("return select('#', SFLabelled:GetFont())")
-            .unwrap(),
-        3
-    );
+    assert_eq!(s.arity("SFLabelled:GetFont()").unwrap(), 3);
     assert!(s
         .eval::<bool>("local f = SFLabelled:GetFont() return f == nil")
         .unwrap());
@@ -698,8 +685,7 @@ fn editbox_font_block_return_shapes_are_the_shared_implementations() {
         r#"SetJustifyV("TOP")"#,
     ] {
         assert_eq!(
-            s.eval::<i64>(&format!("return select('#', EBShape:{call})"))
-                .unwrap(),
+            s.arity(&format!("EBShape:{call}")).unwrap(),
             0,
             "EditBox:{call} must return ZERO values"
         );
@@ -716,8 +702,7 @@ fn editbox_font_block_return_shapes_are_the_shared_implementations() {
         ("GetJustifyV()", 1),
     ] {
         assert_eq!(
-            s.eval::<i64>(&format!("return select('#', EBShape:{call})"))
-                .unwrap(),
+            s.arity(&format!("EBShape:{call}")).unwrap(),
             want,
             "EditBox:{call} must return {want} value(s)"
         );
@@ -725,7 +710,7 @@ fn editbox_font_block_return_shapes_are_the_shared_implementations() {
 
     // SetFont: ONE value, and it is the number 1 — not `true`, and not nothing (the Button shape).
     assert_eq!(
-        s.eval::<i64>(r#"return select('#', EBShape:SetFont("Fonts\\SKURRI.TTF", 12))"#)
+        s.arity(r#"EBShape:SetFont("Fonts\\SKURRI.TTF", 12)"#)
             .unwrap(),
         1,
         "EditBox:SetFont returns one value, unlike Button:SetFont"
@@ -976,8 +961,7 @@ fn set_desaturated_reports_shader_support_and_does_not_raise() {
         "shaderSupported must be 1 (1|nil C shape), not true"
     );
     assert_eq!(
-        s.eval::<i64>("return select('#', DsTex:SetDesaturated(true))")
-            .unwrap(),
+        s.arity("DsTex:SetDesaturated(true)").unwrap(),
         1,
         "one return value"
     );
@@ -1093,11 +1077,7 @@ fn get_inventory_slot_info_folds_case_and_flags_only_the_ranged_slot() {
     );
 
     // Three values, and the second is the empty-slot background art the paper-doll buttons use.
-    assert_eq!(
-        s.eval::<i64>("return select('#', GetInventorySlotInfo('HeadSlot'))")
-            .unwrap(),
-        3
-    );
+    assert_eq!(s.arity("GetInventorySlotInfo('HeadSlot')").unwrap(), 3);
     let (id, art) = s
         .eval::<(i64, String)>("return GetInventorySlotInfo('HeadSlot')")
         .unwrap();
@@ -1279,8 +1259,7 @@ fn the_region_map_readers_answer_the_way_the_edges_do() {
     );
     // Out of range is five nils, like the frame twin.
     assert_eq!(
-        s.eval::<i64>("return select('#', RRPlate:GetPoint(7))")
-            .unwrap(),
+        s.arity("RRPlate:GetPoint(7)").unwrap(),
         5,
         "an out-of-range index still answers five values, all nil"
     );
@@ -1320,8 +1299,7 @@ fn the_type_identity_verbs_answer_what_the_binary_answers() {
         "FontString"
     );
     assert_eq!(
-        s.eval::<i64>("return select('#', TITex:GetObjectType('ignored'))")
-            .unwrap(),
+        s.arity("TITex:GetObjectType('ignored')").unwrap(),
         1,
         "one value, and a stray argument is ignored rather than an arity error"
     );
@@ -1386,8 +1364,7 @@ fn the_type_identity_verbs_answer_what_the_binary_answers() {
     );
     for arg in ["'Texture'", "'nope'"] {
         assert_eq!(
-            s.eval::<i64>(&format!("return select('#', TITex:IsObjectType({arg}))"))
-                .unwrap(),
+            s.arity(&format!("TITex:IsObjectType({arg})")).unwrap(),
             1,
             "exactly one value on both the hit and the miss path"
         );
@@ -1750,16 +1727,11 @@ fn set_world_detail_writes_the_stop_table_and_validates_like_the_reference() {
     // Zero return values from the setter; exactly one number from the getter.
     s.run("SetWorldDetail(1)").unwrap();
     assert_eq!(
-        s.eval::<usize>("return select('#', SetWorldDetail(1))")
-            .unwrap(),
+        s.arity("SetWorldDetail(1)").unwrap(),
         0,
         "every `ret` in 0x488dd0 leaves eax = 0"
     );
-    assert_eq!(
-        s.eval::<usize>("return select('#', GetWorldDetail())")
-            .unwrap(),
-        1
-    );
+    assert_eq!(s.arity("GetWorldDetail()").unwrap(), 1);
     assert_eq!(
         s.eval::<String>("return type(GetWorldDetail())").unwrap(),
         "number"
@@ -1831,7 +1803,7 @@ fn the_pfui_hdgraphic_extended_arm_runs() {
 /// - **No argument is read.** `ShowNameplates(false)` still shows — there is no `lua_gettop` and
 ///   no `lua_toboolean` in any of the four. That is *why* there are four verbs instead of two
 ///   taking a flag, and a binding typed `fn(bool)` would reject a call the reference accepts.
-/// - **Zero return values, not nil.** `select('#', ...)` sees 0, which is observably different
+/// - **Zero return values, not nil.** The return-list count is 0, which is observably different
 ///   from one nil for a caller that counts.
 #[test]
 fn the_nameplate_verbs_ignore_their_arguments_and_return_nothing() {
@@ -1884,8 +1856,7 @@ fn the_nameplate_verbs_ignore_their_arguments_and_return_nothing() {
 
     // ZERO return values, not one nil.
     assert_eq!(
-        s.eval::<usize>("return select('#', ShowNameplates())")
-            .unwrap(),
+        s.arity("ShowNameplates()").unwrap(),
         0,
         "zero values — observably different from nil for a caller that counts"
     );

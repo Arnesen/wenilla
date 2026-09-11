@@ -207,6 +207,12 @@ fn every_query_binding_answers_the_reference_s_return_arity() {
         // A call that raises still says nothing about arity. The unit bindings are the reason:
         // they gate their arguments and raise on a nil token (1834/1836), so they are called with
         // a real token against the body seated above rather than with nothing.
+        //
+        // The count is taken with 5.0's own `arg.n`, for the reason [`KIND_HELPER`] states one
+        // gate down plus the one that settled it: `select` is 5.1's base library, not a 1.12
+        // global, and `lua50::install` removes it. Where the count is wanted on the HOST side we
+        // ask `UiScript::arity`; these four probes have to hold it INSIDE a `pcall`, and there
+        // the vararg's own `n` is the 1.12 spelling.
         let call = if name.starts_with("Unit") {
             format!(r#"{name}("player")"#)
         } else {
@@ -214,7 +220,7 @@ fn every_query_binding_answers_the_reference_s_return_arity() {
         };
         let probe = format!(
             "if type({name}) ~= 'function' then return -1 end \
-             local ok, n = pcall(function() return select('#', {call}) end) \
+             local ok, n = pcall(function() return (function(...) return arg.n end)({call}) end) \
              if not ok then return -1 end return n"
         );
         let got: i64 = match s.eval(&probe) {
@@ -256,7 +262,7 @@ fn every_query_binding_answers_the_reference_s_return_arity() {
             by_name.get(n).is_some_and(|rs| {
                 let want = rs[0].arity;
                 s.eval::<i64>(&format!(
-                    "local ok, n = pcall(function() return select('#', {n}()) end) \
+                    "local ok, n = pcall(function() return (function(...) return arg.n end)({n}()) end) \
                      if not ok then return -1 end return n"
                 ))
                 .is_ok_and(|got| got >= 0 && got as usize == want)
@@ -374,7 +380,7 @@ fn the_base_library_answers_the_reference_s_return_arity_and_kinds() {
         let name = &r.name;
         let probe = format!(
             "if type({name}) ~= 'function' then return -1 end \
-             local ok, n = pcall(function() return select('#', {name}({args})) end) \
+             local ok, n = pcall(function() return (function(...) return arg.n end)({name}({args})) end) \
              if not ok then return -1 end return n"
         );
         let got: i64 = match s.eval(&probe) {
@@ -572,7 +578,7 @@ fn every_widget_method_answers_the_reference_s_return_arity() {
 
         let probe = format!(
             "if type({obj}.{name}) ~= 'function' then return -1 end \
-             local ok, n = pcall(function() return select('#', {obj}:{name}()) end) \
+             local ok, n = pcall(function() return (function(...) return arg.n end)({obj}:{name}()) end) \
              if not ok then return -1 end return n"
         );
         let Ok(got) = s.eval::<i64>(&probe) else {

@@ -673,16 +673,8 @@ fn scroll_child_left_tracks_horizontal_scroll_unclamped_and_fires_on_change() {
     );
 
     // Arity/kind, the way the shape gate measures them.
-    assert_eq!(
-        s.eval::<i64>("return select('#', HSF:GetHorizontalScroll())")
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        s.eval::<i64>("return select('#', HSF:GetHorizontalScrollRange())")
-            .unwrap(),
-        1
-    );
+    assert_eq!(s.arity("HSF:GetHorizontalScroll()").unwrap(), 1);
+    assert_eq!(s.arity("HSF:GetHorizontalScrollRange()").unwrap(), 1);
     assert_eq!(
         s.eval::<String>("return type(HSF:GetHorizontalScroll())")
             .unwrap(),
@@ -694,8 +686,7 @@ fn scroll_child_left_tracks_horizontal_scroll_unclamped_and_fires_on_change() {
         "number"
     );
     assert_eq!(
-        s.eval::<i64>("return select('#', HSF:SetHorizontalScroll(450))")
-            .unwrap(),
+        s.arity("HSF:SetHorizontalScroll(450)").unwrap(),
         0,
         "the setter answers nothing"
     );

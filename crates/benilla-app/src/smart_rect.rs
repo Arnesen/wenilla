@@ -179,29 +179,42 @@ fn band_flags(r: Rect, viewport: Vec2) -> u8 {
 
 /// `0x509bf0` mode 0: the flags PLUS a size-preserving clamp of each offending edge back to its
 /// band boundary (X to the screen edge, Y to the band edge) — the solve's seed rect.
+///
+/// **The offending edge is ASSIGNED the boundary and its opposite derived from the size** — the
+/// law's own spelling (`bit2 → top = Y_hi; bottom = Y_hi − height`), and not the equivalent
+/// translate-by-the-gap this shipped with, because the two are not equivalent in `f32` and the
+/// difference is a whole plate jumping 19 px for one frame (decision 2172).
+///
+/// The seed this returns is immediately re-tested by [`band_flags`] inside [`SmartBucket::solve`]
+/// (the per-node skip, `0x509bf0` mode 1), and the boundary test is a strict `<`/`>`, so a seed
+/// sitting EXACTLY on the boundary passes. `r.min.y + (band - r.min.y)` does not land exactly on
+/// `band`: for most inputs it does, and for the ones where the subtraction loses a bit it lands
+/// one ULP below — the seed then re-fires its own flag, every try is skipped, the worklist empties
+/// and the solve returns the UNCLAMPED input, which the seat tail clamps to half a plate from the
+/// screen top instead. Measured on a Goldshire walk (the `vpl` trace): a plate riding the near-top
+/// band at 27.54 px dropped to 9.0 for exactly one frame and came back, three times in ten
+/// seconds — at `scr.y = 8.064` and nowhere either side of it, which is the signature of a
+/// rounding tie rather than of any law.
 fn clamp_to_bands(r: Rect, viewport: Vec2) -> (Rect, u8) {
     let diag = viewport.length();
     let flags = band_flags(r, viewport);
+    let (w, h) = (r.width(), r.height());
     let mut r = r;
     if flags & 1 != 0 {
-        let d = -r.min.x;
-        r.min.x += d;
-        r.max.x += d;
+        r.min.x = 0.0;
+        r.max.x = w;
     }
     if flags & 2 != 0 {
-        let d = r.max.x - viewport.x;
-        r.min.x -= d;
-        r.max.x -= d;
+        r.max.x = viewport.x;
+        r.min.x = viewport.x - w;
     }
     if flags & 4 != 0 {
-        let d = DDC_NEAR_TOP * diag - r.min.y;
-        r.min.y += d;
-        r.max.y += d;
+        r.min.y = DDC_NEAR_TOP * diag;
+        r.max.y = r.min.y + h;
     }
     if flags & 8 != 0 {
-        let d = r.max.y - (viewport.y - DDC_NEAR_BOTTOM * diag);
-        r.min.y -= d;
-        r.max.y -= d;
+        r.max.y = viewport.y - DDC_NEAR_BOTTOM * diag;
+        r.min.y = r.max.y - h;
     }
     (r, flags)
 }
@@ -289,6 +302,37 @@ mod tests {
         let r = bucket.resolve(desired, VP);
         bucket.claim(r);
         r
+    }
+
+    /// **A plate riding the near-top band seats at the band edge, at EVERY approach height.**
+    ///
+    /// The seed clamp puts an offending edge on its band boundary and the per-node skip then
+    /// re-tests that same rect against the same boundary with a strict compare, so the clamp has
+    /// to land ON it, exactly. Translating by the gap instead lands one ULP below for some inputs;
+    /// the seed then skips itself, the worklist empties, `solve` returns the UNCLAMPED input and
+    /// the seat tail parks it half a plate from the screen top — 19 px above where the previous
+    /// frame drew it, for one frame, and back.
+    ///
+    /// The walk is the live one that found it: a 73×18 plate at the probe's 640×360 viewport,
+    /// approaching the band from above a tenth of a pixel at a time. `scr.y = 8.064` is the value
+    /// that popped on the director's screen; the sweep is here so the next such value cannot.
+    #[test]
+    fn a_plate_in_the_near_top_band_never_pops_to_the_seat_clamp() {
+        const VP2: Vec2 = Vec2::new(640.0, 360.0);
+        let band = DDC_NEAR_TOP * VP2.length();
+        for step in 0..2800 {
+            #[allow(clippy::cast_precision_loss)]
+            let top = step as f32 * 0.01;
+            let desired = Rect::new(172.0, top, 245.0, top + 18.0);
+            let got = SmartBucket::default().resolve(desired, VP2);
+            let want = if top < band { band } else { top };
+            assert!(
+                (got.min.y - want).abs() < 1e-3,
+                "a plate seeded at y={top} seats at {} — the band edge is {band} \
+                 (a 19px pop means the seed skipped itself)",
+                got.min.y
+            );
+        }
     }
 
     /// A free rect adopts unmoved on its first try — the every-frame fast path.

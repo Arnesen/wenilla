@@ -951,11 +951,7 @@ fn the_font_block_reaches_both_message_frame_tables() {
             .unwrap();
         assert_eq!(height, 16.0, "{obj}:GetFont reads back what SetFont wrote");
         // The four-value getters the carve pins at 4 for every one of the six tables.
-        assert_eq!(
-            s.eval::<i64>(&format!("return select('#', {obj}:GetShadowColor())"))
-                .unwrap(),
-            4
-        );
+        assert_eq!(s.arity(&format!("{obj}:GetShadowColor()")).unwrap(), 4);
     }
 
     // Styling the frame must not move its text: the lines still run flush LEFT.

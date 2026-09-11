@@ -11,7 +11,7 @@ use benilla_ui::script::{EditBoxTextUi, FontShadow, JustifyH, JustifyV, Outline}
 use benilla_ui::widget::FrameHandle;
 
 use crate::ui_pass::{UiQuad, UvRect};
-use crate::ui_text::{layout_text_quads, layout_text_quads_links, UiFontAtlas};
+use crate::ui_text::{layout_text_quads, layout_text_quads_links, TextSeat, UiFontAtlas};
 
 /// `WOW_TEXT_PROBE=1` — launch-time knob, read once (the check ran per Text quad per frame).
 static TEXT_PROBE: std::sync::LazyLock<bool> =
@@ -29,6 +29,9 @@ pub(super) struct TextStyle {
     pub shadow: Option<FontShadow>,
     pub outline: Outline,
     pub alpha_gradient: Option<(f32, f32)>,
+    /// The region's seat claim (`benilla_ui`'s `RegionData::world_seat`) — true for the V-plate's
+    /// name and level, which are rigid to a device-snapped overlay rather than to the UI grid.
+    pub world_seat: bool,
 }
 
 /// The host-loop context one Text quad draws under: the extracted quad's identity (z/alpha/
@@ -71,6 +74,14 @@ pub(super) fn emit(
     link_spans: &mut Vec<(FrameHandle, benilla_ui::layout::Rect, String, String)>,
 ) {
     let base_color = style.color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+    // Which pixel grid this block's top may land on (decision 2172): the interface's, or none —
+    // the WorldFrame overlays carry their own device-pixel seat and their text has to be rigid
+    // to it. The shadow pass below inherits it, like every other layout input.
+    let seat = if style.world_seat {
+        TextSeat::Exact
+    } else {
+        TextSeat::UiGrid
+    };
     let spec = crate::ui_text::FontSpec {
         path: style.font.as_deref(),
         // The drawn px under the two size regimes × the 768-virtual scale × the owner's frame
@@ -249,6 +260,7 @@ pub(super) fn emit(
             draw_justify,
             host.z,
             shadow_spec,
+            seat,
         );
         for q in &mut sq {
             // Flatten rgb to the shadow color (markup tints ride the fill only); the alpha is
@@ -282,6 +294,7 @@ pub(super) fn emit(
             },
             host.z,
             spec,
+            seat,
             &mut spans,
         );
         for sp in spans {
@@ -308,6 +321,7 @@ pub(super) fn emit(
             draw_justify,
             host.z,
             spec,
+            seat,
         )
     };
     for q in &mut glyphs {
@@ -321,21 +335,43 @@ pub(super) fn emit(
     // (`fontstring-vertical-placement.md`): compare `ink` against the law's `d + ascender` seat
     // when hunting a vertical offset. Fill quads only (the shadow pass above would smear the
     // bounds one px down-right).
-    if probe && !glyphs.is_empty() {
+    let vpl = style.world_seat && benilla_assets::trace::enabled_for("vpl");
+    if (probe || vpl) && !glyphs.is_empty() {
         let (mut y0, mut y1) = (f32::MAX, f32::MIN);
         for q in &glyphs {
             y0 = y0.min(q.rect.min.y);
             y1 = y1.max(q.rect.max.y);
         }
-        info!(
-            "seat probe: top={:.2} ink=[{:.2}..{:.2}] (rel {:.2}..{:.2}) {:?}",
-            host.rect.min.y,
-            y0,
-            y1,
-            y0 - host.rect.min.y,
-            y1 - host.rect.min.y,
-            &draw_text[..draw_text.len().min(20)]
-        );
+        // **Where the plate's text actually inked**, on the same `vpl` tag the driver's `plate=`
+        // seat and the border's `paint=` line ride ([`crate::vplates`], decision 2168's
+        // measurement). The question the three lines answer together is not "does the text
+        // move?" — it is "does it move WITH the border?", which is a difference of two numbers
+        // per frame. Decision 2168 §5 named this line as the missing third; 2172 is what it
+        // found when it was built.
+        if vpl {
+            benilla_assets::trace::line(
+                "vpl",
+                &format!(
+                    "text x={:.3} rect={:.3} ink={:.3} rel={:.3} txt={}",
+                    host.rect.min.x,
+                    host.rect.min.y,
+                    y0,
+                    y0 - host.rect.min.y,
+                    draw_text.chars().take(16).collect::<String>()
+                ),
+            );
+        }
+        if probe {
+            info!(
+                "seat probe: top={:.2} ink=[{:.2}..{:.2}] (rel {:.2}..{:.2}) {:?}",
+                host.rect.min.y,
+                y0,
+                y1,
+                y0 - host.rect.min.y,
+                y1 - host.rect.min.y,
+                draw_text.chars().take(20).collect::<String>()
+            );
+        }
     }
     out.extend(glyphs);
     // The focused box's caret: a 1-px WHITE bar (the client's ctor `0xffffffff` caret texture —

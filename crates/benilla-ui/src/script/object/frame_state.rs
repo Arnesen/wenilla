@@ -614,7 +614,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     //    keep stale values a later `SetBackdropColor` changed.
     // 2. **No backdrop ⇒ ZERO Lua values, not `nil`** — the early bail is `xor eax,eax; ret`, which
     //    for a *return* path really is "no values" (contrast `binding_abi`'s note: the same two
-    //    bytes after a `luaL_error` are unreachable boilerplate). Observable through `select('#')`,
+    //    bytes after a `luaL_error` are unreachable boilerplate). Observable through the count,
     //    and it is the shape our `GetTitleRegion` will *not* have when it lands — that one pushes
     //    nil, i.e. one value. The client cannot distinguish "never set" from `SetBackdrop(nil)`.
     // 3. **A partial `SetBackdrop` omits nothing on the way out.** Every `SetBackdrop` allocates a

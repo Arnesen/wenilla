@@ -24,9 +24,7 @@ use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 
 use super::query::{wet_footprint, FoamPatch, LiquidSource, WmoPool};
-use crate::collision::liquid_layers;
 use crate::lighting::WATER_SHININESS;
-use avian3d::prelude::{Collider, RigidBody};
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::materials::{LiquidExt, LiquidMaterial};
 use benilla_assets::LockRecover;
@@ -294,39 +292,7 @@ pub(crate) fn spawn_liquids<'a>(
                 .entity(*entities.last().expect("just pushed"))
                 .insert(FoamPatch);
         }
-        // **The waterline the camera sweep can hit** under `cameraWaterCollision` — inert to every
-        // other query, because nothing else asks for [`CollisionLayer::Liquid`].
-        if let Some(collider) = liquid_collider(lq) {
-            commands
-                .entity(*entities.last().expect("just pushed"))
-                .insert((collider, RigidBody::Static, liquid_layers()));
-        }
     }
-}
-
-/// The **collision** shape for one [`LiquidMesh`] — the same wet-cell triangles the render mesh
-/// draws, as a parry trimesh on [`CollisionLayer::Liquid`](crate::collision::CollisionLayer).
-///
-/// `lq.indices` is already the wet derivative (6 per wet cell), so this is the waterline exactly
-/// where there is water and nothing over the dry cells of a part-flooded chunk — which is the
-/// difference between a camera that stops at a lake's edge and one that stops in mid-air over the
-/// shore. Built inline rather than through [`crate::terrain_stream::PendingCollider`]'s async pool:
-/// an MCNK layer's 9×9 lattice is at most 64 cells, 128 triangles, next to the 256 a terrain chunk
-/// defers, and a WMO pool's MLIQ is the same order.
-///
-/// `None` for a degenerate layer with no triangles, which is a real case (an MCLQ layer whose cells
-/// are all dry) and not a failure.
-fn liquid_collider(lq: &LiquidMesh) -> Option<Collider> {
-    let tris: Vec<[u32; 3]> = lq
-        .indices
-        .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
-    if tris.is_empty() {
-        return None;
-    }
-    let verts: Vec<Vec3> = lq.positions.iter().map(|p| wow_to_bevy(*p)).collect();
-    Some(Collider::trimesh(verts, tris))
 }
 
 /// Build the Bevy render mesh for one [`LiquidMesh`]: positions mapped WoW→Bevy (`lq.positions` are
@@ -472,15 +438,6 @@ pub(crate) fn spawn_wmo_liquids<'a>(
         // Foam stays water-only: it is white surf, and there is no such thing on magma.
         if !lq.kind.is_fullbright() {
             commands.entity(surface).insert(FoamPatch);
-        }
-        // The camera's waterline, as on the ADT path. The shape is MODEL-LOCAL here and the
-        // entity carries the placement `transform`, so avian lifts it into the world the same way
-        // it lifts the render mesh — no second bake, and a rotated pool stays consistent with the
-        // surface the player sees.
-        if let Some(collider) = liquid_collider(lq) {
-            commands
-                .entity(surface)
-                .insert((collider, RigidBody::Static, liquid_layers()));
         }
         entities.push(surface);
     }
