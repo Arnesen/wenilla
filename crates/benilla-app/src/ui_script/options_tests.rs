@@ -1328,6 +1328,82 @@ fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
 /// Environment Detail is the reference's own slider (1649): 0..2 step 1 over `WorldDetail`, with
 /// 0992's Low/Medium/High names kept in the readout seat — a groove whose readout says "1" tells a
 /// player nothing. Dragging writes the CVar; a value from outside the range shows the nearest stop
+/// **The Brightness slider actually writes** (decision 2182, and the bug that shipped with it).
+///
+/// This row is the kit's first slider whose store is an engine PAIR rather than a CVar or a
+/// saved-variable global — 1.12's own arrangement for its slider 6 — and
+/// `OptionsSlider_OnValueChanged` guarded its write on `row.cvar or row.uvar`, two of the kit's
+/// three stores. So dragging it moved the READOUT and wrote nothing: the control looked alive, the
+/// picture never changed, and reopening the window re-read an untouched CVar and snapped back to
+/// the centre. No error anywhere, on any path.
+///
+/// The shipped test missed it by calling `SetGamma` directly and checking the row's *wiring* — the
+/// bounds, the numeric flag, the readout at the default. Everything it asserted was true. What it
+/// never did was move the slider, which is the only thing a player does. So this one drags.
+#[test]
+fn the_brightness_slider_writes_through_its_engine_pair_and_survives_a_reopen() {
+    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowBrightness";
+    let s = audio_harness();
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}Label:GetText()"))
+            .unwrap(),
+        "Brightness"
+    );
+    // The registered `gamma = "1.0"` is `GetGamma() == 0`, the centre of the stock slider's
+    // travel — and selecting the page must not write it back.
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
+        "50%"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the pair on select must not write it back"
+    );
+
+    // **A drag to each end WRITES.** The value is the reference's own `1 - slider`, six decimals,
+    // because `SetGamma` owns the formatting — this is the assertion the shipped test lacked.
+    for (slider, cvar, readout) in [
+        (0.5, "0.500000", "100%"),
+        (-0.5, "1.500000", "0%"),
+        (0.2, "0.800000", "70%"),
+    ] {
+        s.run(&format!("{ROW}ControlSlider:SetValue({slider})"))
+            .unwrap();
+        assert_eq!(
+            s.take_cvar_changes(),
+            vec![("gamma".to_string(), cvar.to_string())],
+            "dragging to {slider} must reach the store"
+        );
+        assert_eq!(
+            s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+                .unwrap(),
+            readout
+        );
+    }
+
+    // **And it comes back.** Leaving the page and returning re-reads the pair rather than the
+    // control, which is the half the player sees as "it didn't save": the row was left at 0.2.
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
+        "70%",
+        "the reopened page reads the store, not the registered default"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "…and the refresh itself writes nothing"
+    );
+}
+
 /// and writes nothing back (0959's out-of-range law).
 #[test]
 fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {

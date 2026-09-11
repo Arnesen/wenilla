@@ -670,6 +670,63 @@ fn set_owner_defaults_to_anchor_left_and_only_preserve_keeps_the_placement() {
     );
 }
 
+/// **A NON-STRING anchor argument must not raise** — and for a year it did, because the binding
+/// took arg 3 as `Option<String>` and let mlua's converter be the gate.
+///
+/// The reference's gate is `lua_isstring 0x6f3510`, whose entire body is `lua_type` then
+/// `cmp eax,4 / cmp eax,3`: LUA_TSTRING or LUA_TNUMBER pass and are read by coercion, and every
+/// other tag takes `0x53121b je 0x53133a` over the whole compare chain to the join, leaving the
+/// zeroed local — mode 0, `ANCHOR_LEFT`, silently, with no `luaL_error` anywhere in
+/// `[0x531221, 0x53133a)` (wow-re `system/ui/scratch/tooltip-cursor-anchor-law.md` §0.2, the same
+/// section decision 2176 already quotes in this file's doc comments). So a boolean, a table, a
+/// function and absent are *indistinguishable* at this position.
+///
+/// The symptom that found it: `Questie` hovers a world-map note with
+/// `Tooltip:SetOwner(this, this)` (`QuestieNotes.lua` `Questie_Tooltip_OnEnter`) — a frame where
+/// the anchor goes — and got `bad argument #3: error converting Lua table to String` where the
+/// reference draws the tooltip.
+#[test]
+fn a_non_string_anchor_is_silently_mode_zero_and_never_raises() {
+    let s = script();
+    s.run(
+        r#"
+        Plate = CreateFrame("GameTooltip", "Plate")
+        Owner = CreateFrame("Frame", "Owner")
+        "#,
+    )
+    .unwrap();
+
+    // A TABLE — Questie's own call shape, a frame passed where the anchor string goes.
+    s.run("Plate:SetOwner(Owner, Owner)")
+        .expect("a table anchor takes the isstring gate's jump, it does not raise");
+    assert_eq!(
+        s.eval::<String>("return Plate:GetAnchorType()").unwrap(),
+        "ANCHOR_LEFT"
+    );
+
+    // A BOOLEAN and an explicit nil are the same jump.
+    for arg in ["true", "false", "nil"] {
+        s.run(&format!(
+            r#"Plate:SetOwner(Owner, "ANCHOR_RIGHT") Plate:SetOwner(Owner, {arg})"#
+        ))
+        .unwrap_or_else(|e| panic!("SetOwner(Owner, {arg}) raised: {e}"));
+        assert_eq!(
+            s.eval::<String>("return Plate:GetAnchorType()").unwrap(),
+            "ANCHOR_LEFT",
+            "{arg} is indistinguishable from absent at this position"
+        );
+    }
+
+    // A NUMBER is the one non-string tag the gate DOES admit: it is stringified and run through
+    // the chain, which no number can match — the same mode 0, by the other route.
+    s.run(r#"Plate:SetOwner(Owner, "ANCHOR_RIGHT") Plate:SetOwner(Owner, 5)"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return Plate:GetAnchorType()").unwrap(),
+        "ANCHOR_LEFT"
+    );
+}
+
 /// **`ANCHOR_CURSOR` is a real ninth mode**, not a string to warn about (2142's open thread 2, and
 /// nine corpus files ask for it): mode 6 clears at `SetOwner` time like mode 7, and then the
 /// per-frame update `0x530b20` pins the plate's **BOTTOM** to the screen's **BOTTOMLEFT** at the

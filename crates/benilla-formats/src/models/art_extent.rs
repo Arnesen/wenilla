@@ -79,8 +79,9 @@ pub const GLUE_AUTHORED_ASPECT: f32 = 4.0 / 3.0;
 /// (wow-re `models.md` — `ALPHAREF` 224, `GEQUAL`). The one threshold this module paints by.
 pub const ALPHA_KEY_REF: u8 = 224;
 
-/// The **shipped** scenes' measured extents — `benilla-extract glueextent` on the 1.12.1 (5875)
-/// chain, transcribed. Keyed by the scene token (`UI_<token>.m2`). The test re-measures them.
+/// The **shipped** scenes' measured extents and authored fovs — `benilla-extract glueextent` on
+/// the 1.12.1 (5875) chain, transcribed. Keyed by the scene token (`UI_<token>.m2`). The test
+/// re-measures them.
 ///
 /// Read as aspects (`half_w / t0`, the window aspect past which the art runs out of width under
 /// the authored vertical): MainMenu 1.54 · Human 1.47 · Orc 1.57 · Dwarf 1.42 · NightElf 1.31 ·
@@ -94,62 +95,92 @@ pub const ALPHA_KEY_REF: u8 = 224;
 /// what shows through is the page behind the scene, near-black, read as sky. The framing law never
 /// opens past the authored box on an axis the art does not reach, so the number costs nothing
 /// there.
-const SHIPPED: [(&str, ArtExtent); 7] = [
-    (
-        "MainMenu",
-        ArtExtent {
+/// One degree in radians — the unit the `UI_*` cameras were dialled in. Every one of the seven
+/// authored fovs is a whole number of degrees, to the last bit of the `f32` the M2 carries
+/// (`benilla-extract glueextent`: 86°, 80°, 65°, 60°), so the table says so rather than
+/// transcribing decimals.
+const DEG: f32 = std::f32::consts::PI / 180.0;
+
+/// One shipped glue scene, as the framing law needs it: the scene token, its authored camera-0
+/// **fov** ([`DEG`] — 86° on the gate, 80° on the human street, 65° on the four orc-family
+/// stages, 60° in the night elf grove), and the measured
+/// [`ArtExtent`]. The fov rides the table because the framing constant is derived from it
+/// ([`benilla`]'s `GLUE_BOX_ASPECT`) and both halves are re-measured by the same chain test.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShippedGlueScene {
+    pub token: &'static str,
+    pub fov: f32,
+    pub art: ArtExtent,
+}
+
+/// The seven shipped scenes: the login gate plus the six race stages (Gnome shares Dwarf's,
+/// Troll shares Orc's). See [`ShippedGlueScene`].
+pub const SHIPPED_GLUE_SCENES: [ShippedGlueScene; 7] = [
+    ShippedGlueScene {
+        token: "MainMenu",
+        fov: 86.0 * DEG,
+        art: ArtExtent {
             half_w: 0.7431,
             half_h: 0.5067,
         },
-    ),
-    (
-        "Human",
-        ArtExtent {
+    },
+    ShippedGlueScene {
+        token: "Human",
+        fov: 80.0 * DEG,
+        art: ArtExtent {
             half_w: 0.6548,
             half_h: 0.4866,
         },
-    ),
-    (
-        "Orc",
-        ArtExtent {
+    },
+    ShippedGlueScene {
+        token: "Orc",
+        fov: 65.0 * DEG,
+        art: ArtExtent {
             half_w: 0.5573,
             half_h: 0.3954,
         },
-    ),
-    (
-        "Dwarf",
-        ArtExtent {
+    },
+    ShippedGlueScene {
+        token: "Dwarf",
+        fov: 65.0 * DEG,
+        art: ArtExtent {
             half_w: 0.5040,
             half_h: 0.4272,
         },
-    ),
-    (
-        "NightElf",
-        ArtExtent {
+    },
+    ShippedGlueScene {
+        token: "NightElf",
+        fov: 60.0 * DEG,
+        art: ArtExtent {
             half_w: 0.4262,
             half_h: 0.1221,
         },
-    ),
-    (
-        "Scourge",
-        ArtExtent {
+    },
+    ShippedGlueScene {
+        token: "Scourge",
+        fov: 65.0 * DEG,
+        art: ArtExtent {
             half_w: 0.5542,
             half_h: 0.4776,
         },
-    ),
-    (
-        "Tauren",
-        ArtExtent {
+    },
+    ShippedGlueScene {
+        token: "Tauren",
+        fov: 65.0 * DEG,
+        art: ArtExtent {
             half_w: 0.5177,
             half_h: 0.4066,
         },
-    ),
+    },
 ];
 
 /// The shipped scene's measured [`ArtExtent`] by token, `None` for a token that is not one of
 /// the seven `UI_*` dioramas (the consumer then keeps 1587's unbounded law).
 pub fn shipped_glue_art_extent(token: &str) -> Option<ArtExtent> {
-    SHIPPED.iter().find(|(t, _)| *t == token).map(|(_, e)| *e)
+    SHIPPED_GLUE_SCENES
+        .iter()
+        .find(|s| s.token == token)
+        .map(|s| s.art)
 }
 
 /// The authored **vertical** half-extent (tan units) of a glue camera's `fov` at 4:3 — the number
@@ -821,14 +852,14 @@ mod tests {
     }
 
     /// Measure one shipped scene off the chain, the way the tool does.
-    fn measure(chain: &mut Chain, token: &str) -> (ArtExtent, f32) {
+    fn measure(chain: &mut Chain, token: &str) -> (ArtExtent, f32, f32) {
         let name = format!("Interface\\Glues\\Models\\UI_{token}\\UI_{token}.m2");
         let bytes = chain.read_file(&name).expect("read scene");
         let subs = crate::parse_m2_render_submeshes(&bytes, "", &[]).expect("parse");
         let cam = crate::parse_m2_camera(&bytes, 0).expect("camera 0");
         let mut reader = CoverageReader::new(chain);
         let ext = glue_art_extent(&subs, &cam, |s| reader.coverage(s).expect("texture"));
-        (ext, authored_half_height(cam.fov))
+        (ext, cam.fov, authored_half_height(cam.fov))
     }
 
     /// The transcription is the measurement: every shipped scene re-measures to the table's
@@ -838,12 +869,20 @@ mod tests {
     fn the_shipped_table_matches_the_measurement() {
         let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
-        for (token, shipped) in SHIPPED {
-            let (ext, t0) = measure(&mut chain, token);
+        for scene in SHIPPED_GLUE_SCENES {
+            let token = scene.token;
+            let shipped = scene.art;
+            let (ext, fov, t0) = measure(&mut chain, token);
             assert!(
                 (ext.half_w - shipped.half_w).abs() < 2e-3
                     && (ext.half_h - shipped.half_h).abs() < 2e-3,
                 "UI_{token}: measured {ext:?}, table {shipped:?}"
+            );
+            // The fov rides the table because the glue framing constant is derived from it.
+            assert!(
+                (fov - scene.fov).abs() < 1e-6,
+                "UI_{token}: camera 0 fov {fov}, table {}",
+                scene.fov
             );
             let runs_out_at = ext.half_w / t0;
             assert!(

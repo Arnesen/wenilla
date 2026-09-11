@@ -801,3 +801,29 @@ fn a_raise_with_a_hidden_child_keeps_the_windows_own_siblings_level() {
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+/// **A script level change carries no children** (decision 2189): the Lua binding `0x774560`
+/// calls `set_frame_level 0x76a4f0` with `propagate=0` — only the raise shifts a subtree. Stock
+/// FrameXML is written against it (`BonusActionButtonTemplate` raises the button and then its
+/// cooldown by hand), and carrying the children put the bonus bar's sweep over an addon's
+/// cooldown count.
+#[test]
+fn a_script_level_change_leaves_the_children_where_they_were() {
+    let mut s = script();
+    s.run(
+        r#"
+        Parent = CreateFrame("Frame", "Parent")
+        Child = CreateFrame("Frame", "Child", Parent)
+        Grandchild = CreateFrame("Frame", "Grandchild", Child)
+        "#,
+    )
+    .unwrap();
+    let (child, grandchild) = (level(&mut s, "Child"), level(&mut s, "Grandchild"));
+    s.run("Parent:SetFrameLevel(7)").unwrap();
+    assert_eq!(level(&mut s, "Parent"), 7);
+    assert_eq!(
+        (level(&mut s, "Child"), level(&mut s, "Grandchild")),
+        (child, grandchild),
+        "the children keep their absolute levels"
+    );
+}

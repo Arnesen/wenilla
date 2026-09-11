@@ -980,6 +980,19 @@
         -- The third kind is what Show Helm / Show Cloak are: the preference is a bit of the
         -- character's own server-side PLAYER_FLAGS, so there is nothing local to save and nothing
         -- to restore at load — the getter IS the state (decision 1472).
+        -- **Does this row have somewhere to put a value?** The three stores of 1134, asked in the
+        -- order `OptionsRow_Set` tries them. A row with none is display-only and must not be
+        -- written.
+        --
+        -- It exists because the slider's OnValueChanged guarded on `row.cvar or row.uvar` — two of
+        -- the three — and so wrote nothing for a row whose store is an engine pair. The readout
+        -- still moved, which is the worst shape that bug can take: the control looks alive, the
+        -- setting never leaves the window, and nothing anywhere errors. Asking one predicate keeps
+        -- every caller in step with the setter by construction instead of by memory.
+        function OptionsRow_HasStore(row)
+            return row.uvar or row.setFunc or row.cvar
+        end
+
         function OptionsRow_Get(row)
             if row.uvar then return getglobal(row.uvar) end
             if row.getFunc then
@@ -1441,7 +1454,7 @@
                 end
             end
             getglobal(control:GetName() .. "Value"):SetText(OptionsRow_FormatValue(row, value))
-            if (row.cvar or row.uvar) and not row.refreshing then
+            if OptionsRow_HasStore(row) and not row.refreshing then
                 -- Two decimals cover every page's grid (the 5% volumes, uiScale's 0.01, whole
                 -- yards); trailing zeros stripped so a value at the registered default
                 -- compares equal to it as a STRING and stays out of the config file ("0.40"

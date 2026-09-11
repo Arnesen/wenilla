@@ -2915,6 +2915,22 @@ mod tests {
                 "weatherDensity {wrote}"
             );
         }
+        // Brightness (2182): the CVar's own unit is the ramp exponent, NOT the slider's offset —
+        // `SetGamma` does the `1 - v` on the way in, so what arrives here is already `gamma`.
+        // Both ends of the stock slider land whole, and the consumer's clamp holds the values the
+        // reference accepts without one (`SetGamma(5)` writes -4 there).
+        for (wrote, want) in [("1.000000", 1.0), ("0.500000", 0.5), ("1.500000", 1.5)] {
+            assert!(apply_to_knobs("gamma", wrote, &mut knobs));
+            assert_eq!(knobs.display_gamma.0, want, "gamma {wrote}");
+        }
+        assert!(apply_to_knobs("gamma", "-4.000000", &mut knobs));
+        assert_eq!(
+            knobs.display_gamma.0,
+            *crate::ui_gamma::GAMMA_RANGE.start(),
+            "a negative exponent clamps at the consumer, where it cannot blank the screen"
+        );
+        assert!(apply_to_knobs("gamma", "99", &mut knobs));
+        assert_eq!(knobs.display_gamma.0, *crate::ui_gamma::GAMMA_RANGE.end());
         assert_eq!(knobs.clutter.frill_density(), 32.0);
         // And the pair is NAMED as a pair, in the registered spelling and the lowercased one, so
         // `$WOW_CLUTTER_DENSITY` cannot take one spelling of this knob for the session and leave

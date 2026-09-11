@@ -469,41 +469,8 @@ fn a_cooldown_count_addons_hook_leaves_the_sweep_running() {
     load_action_bar(&s);
     // The addon loads after FrameXML (`!` sorts it first among addons, all of which run after the
     // interface), so the global it captures is the stock one.
-    s.run(
-        r#"
-        local original = CooldownFrame_SetTimer
-        seen = 0
-        CooldownFrame_SetTimer = function(cd, start, duration, enable)
-            seen = seen + 1
-            original(cd, start, duration, enable)
-            if start > 0 and duration > 3 and enable > 0 then
-                local count = cd.textFrame
-                if not count then
-                    local icon = getglobal(cd:GetParent():GetName() .. "Icon")
-                    if icon then
-                        count = CreateFrame("Frame", nil, cd:GetParent())
-                        count:SetAllPoints(cd:GetParent())
-                        count:SetFrameLevel(count:GetFrameLevel() + 1)
-                        count.text = count:CreateFontString(nil, "OVERLAY")
-                        count.text:SetFontObject(GameFontNormal)
-                        count.text:SetPoint("CENTER", count, "CENTER", 0, 1)
-                        count.icon = icon
-                        count:SetScript("OnUpdate", function() end)
-                        cd.textFrame = count
-                    end
-                end
-                if count then
-                    count.start = start
-                    count.duration = duration
-                    count:Show()
-                end
-            elseif cd.textFrame then
-                cd.textFrame:Hide()
-            end
-        end
-    "#,
-    )
-    .expect("the addon's hook installs");
+    s.run(COOLDOWN_COUNT_HOOK)
+        .expect("the addon's hook installs");
 
     s.set_action(
         1,
@@ -559,6 +526,120 @@ fn a_cooldown_count_addons_hook_leaves_the_sweep_running() {
         super::test_ui::cooldown_play(&s, "ActionButton1Cooldown"),
         None,
         "an elapsed cooldown hides the pane through the wrap exactly as it does without it"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// `!OmniCC` 6.8.30's hook, as shape: it captures `CooldownFrame_SetTimer` in an upvalue, replaces
+/// the global with a function that calls through, and hangs its countdown off the BUTTON — a
+/// `CreateFrame` parented there lands at `button + 1`, then its own `+ 1` puts it at `button + 2`,
+/// one over where it trusts the cooldown to sit. The handle rides a field of the cooldown widget
+/// itself (`cd.textFrame`).
+const COOLDOWN_COUNT_HOOK: &str = r#"
+    local original = CooldownFrame_SetTimer
+    seen = 0
+    CooldownFrame_SetTimer = function(cd, start, duration, enable)
+        seen = seen + 1
+        original(cd, start, duration, enable)
+        if start > 0 and duration > 3 and enable > 0 then
+            local count = cd.textFrame
+            if not count then
+                local icon = getglobal(cd:GetParent():GetName() .. "Icon")
+                if icon then
+                    count = CreateFrame("Frame", nil, cd:GetParent())
+                    count:SetAllPoints(cd:GetParent())
+                    count:SetFrameLevel(count:GetFrameLevel() + 1)
+                    count.text = count:CreateFontString(nil, "OVERLAY")
+                    count.text:SetFontObject(GameFontNormal)
+                    count.text:SetPoint("CENTER", count, "CENTER", 0, 1)
+                    count.icon = icon
+                    count:SetScript("OnUpdate", function() end)
+                    cd.textFrame = count
+                end
+            end
+            if count then
+                count.start = start
+                count.duration = duration
+                count:Show()
+            end
+        elseif cd.textFrame then
+            cd.textFrame:Hide()
+        end
+    end
+"#;
+
+/// **On the bonus bar the countdown draws over the sweep, as it does on every other bar**
+/// (decision 2189). It came in as "the cooldown counter on action bar 1 is hidden behind the pie";
+/// a warrior in a stance — a druid in a form, a rogue in stealth — sees the bonus bar there.
+///
+/// Stock `BonusActionButtonTemplate`'s `OnLoad` raises the button `+2` and then its cooldown `+2`
+/// **by hand**, which is only one level of separation because a script level change carries no
+/// children (`0x774560` → `set_frame_level(…, propagate=0)`). Our binding carried them, so the
+/// cooldown came out at `button + 3` — over the count text the hook hangs at `button + 2`.
+#[test]
+fn a_cooldown_count_draws_over_the_bonus_bars_sweep() {
+    use benilla_ui::script::ActionState;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    s.run(COOLDOWN_COUNT_HOOK)
+        .expect("the addon's hook installs");
+    let level = |s: &UiScript, frame: &str| {
+        s.eval::<i64>(&format!("return {frame}:GetFrameLevel()"))
+            .unwrap()
+    };
+    assert_eq!(
+        level(&s, "BonusActionButton1Cooldown"),
+        level(&s, "BonusActionButton1") + 1,
+        "the template's two hand raises leave the sweep ONE level over its button"
+    );
+
+    // Bonus page 1 (a warrior's Battle Stance): button 1 is action 73.
+    s.set_action(
+        73,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Ability_Racial_BloodRage".into()),
+            kind: 0x00,
+            action: 2687,
+            count: 0,
+            consumable: false,
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.run("BonusActionBarFrame:Show()").unwrap();
+    s.tick(10.0);
+    s.set_action_state(
+        73,
+        Some(ActionState {
+            usable: true,
+            cooldown: Some((6_000, 60_000, true)),
+            ..Default::default()
+        }),
+    );
+    s.fire_event("ACTIONBAR_UPDATE_COOLDOWN", vec![]);
+    super::test_ui::cooldown_facts(&mut s);
+    // The addon writes its digits from its OnUpdate; the transcription's is a no-op.
+    s.run(r#"BonusActionButton1Cooldown.textFrame.text:SetText("27")"#)
+        .expect("the hook hung its countdown off the bonus button");
+    s.tick(0.0);
+    s.resolve();
+
+    let quads = s.extract();
+    let sweep = quads
+        .iter()
+        .position(|q| {
+            matches!(q.content, QuadContent::ModelPane { .. })
+                && s.quad_owner_name(q.target).as_deref() == Some("BonusActionButton1Cooldown")
+        })
+        .expect("the bonus button's sweep is on the paint list");
+    let count = quads
+        .iter()
+        .position(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "27"))
+        .expect("the countdown is on the paint list");
+    assert!(
+        sweep < count,
+        "the countdown (index {count}) must paint over the bonus button's sweep (index {sweep})"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

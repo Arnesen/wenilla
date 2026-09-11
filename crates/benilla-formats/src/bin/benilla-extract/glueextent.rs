@@ -23,7 +23,7 @@ const SCENES: [&str; 7] = [
 
 pub fn glueextent(chain: &mut Chain, batches: bool) -> Result<()> {
     println!(
-        "{:<9} {:>6} {:>7} {:>7} | {:>7} {:>7} | {:>9} {:>9} | {:>7} {:>7}",
+        "{:<9} {:>10} {:>7} {:>7} | {:>7} {:>7} | {:>9} {:>9} | {:>7} {:>7}",
         "scene", "fov", "t0", "h0", "half_w", "half_h", "wide@", "narrow@", "opaque", "+all"
     );
     for token in SCENES {
@@ -65,7 +65,7 @@ pub fn glueextent(chain: &mut Chain, batches: bool) -> Result<()> {
             / t0;
         let with_all = glue_art_extent(&subs, &cam, |_| Some(Coverage::Full)).half_w / t0;
         println!(
-            "{token:<9} {:>6.3} {:>7.4} {:>7.4} | {:>7.4} {:>7.4} | {:>9.3} {:>9.3} | {:>7.3} {:>7.3}",
+            "{token:<9} {:>10.7} {:>7.4} {:>7.4} | {:>7.4} {:>7.4} | {:>9.3} {:>9.3} | {:>7.3} {:>7.3}",
             cam.fov,
             t0,
             h0,

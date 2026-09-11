@@ -511,10 +511,16 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, level): (Table, i64)| {
             let h = frame_handle_of(lua, &this)?;
             let lvl = level.clamp(0, i64::from(u16::MAX)) as u16;
+            // **A script level change carries no children** — the binding `0x774560` calls
+            // `set_frame_level 0x76a4f0` with `propagate=0` (wow-re `ui/ui.md`, default levels).
+            // Only the toplevel raise shifts a subtree. Stock `BonusActionButtonTemplate` is written
+            // for this: it raises the button +2 and then its cooldown +2 by hand, landing the sweep
+            // one level over the button — carrying the children made it three, over the
+            // cooldown-count text an addon hangs at button + 2 (decision 2189).
             lua.app_data_mut::<Model>()
                 .expect("model")
                 .arena
-                .set_frame_level(h, lvl, true);
+                .set_frame_level(h, lvl, false);
             Ok(())
         })?,
     )?;

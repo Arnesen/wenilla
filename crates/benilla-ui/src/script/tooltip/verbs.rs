@@ -6,6 +6,7 @@
 use mlua::{Lua, Table, Value, Variadic};
 
 use crate::layout::{Anchor, Point};
+use crate::script::binding_abi::optional_string;
 use crate::script::object::{frame_handle_of, frame_wrapper};
 use crate::script::region::region_handle_of;
 use crate::script::Model;
@@ -52,16 +53,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetOwner",
         lua.create_function(
-            |lua,
-             (this, owner, anchor, x, y): (
-                Table,
-                Table,
-                Option<String>,
-                Option<f32>,
-                Option<f32>,
-            )| {
+            |lua, (this, owner, anchor, x, y): (Table, Table, Value, Option<f32>, Option<f32>)| {
                 let h = frame_handle_of(lua, &this)?;
                 let owner_h = frame_handle_of(lua, &owner)?;
+                // The gate is `lua_isstring 0x6f3510`, whose whole body is `lua_type` then
+                // `cmp eax,4 / cmp eax,3` — LUA_TSTRING or LUA_TNUMBER and nothing else — so the
+                // anchor argument is read the reference's way, by COERCION, and a boolean, table,
+                // function or userdata is indistinguishable from absent. Taking it as
+                // `Option<String>` made mlua's converter the gate instead, and mlua raises on a
+                // table: `Questie`'s `Tooltip:SetOwner(this, this)` (QuestieNotes.lua, the map-note
+                // hover) died with "bad argument #3: error converting Lua table to String" on a
+                // call the reference completes silently at mode 0. This function's doc comment has
+                // stated the law since 2176 — only the signature disagreed.
+                let anchor = optional_string(lua, &anchor);
                 {
                     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                     clear_content(&mut model, h);
