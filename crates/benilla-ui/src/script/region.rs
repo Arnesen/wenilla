@@ -10,6 +10,7 @@ use super::object::anchor_args::{parse_set_point, resolve_rel_target, UNNAMED};
 use super::object::{
     anchor_bits_eq, anchor_retarget_is_structural, decode_id, id_to_lud, NamedTarget,
 };
+use super::region_map::{set_shared, Side};
 use super::{
     Model, REG_FONTSTRING_META, REG_FONTSTRING_METHODS, REG_REGION_META, REG_REGION_METHODS,
     REG_TEXTURE_META, REG_TEXTURE_METHODS, REG_TITLE_META, REG_TITLE_METHODS, REG_WRAPPERS, SCREEN,
@@ -211,12 +212,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // **`__index` is the method TABLE, not a dispatcher function** (decision 2310) — here and at
+    // the three leaf metatables below. A Rust `__index` makes every `t.SetTexture` a Lua→Rust→Lua
+    // round trip plus a named-registry string lookup; measured at ~195 ns against ~9 ns for the
+    // table form, paid by every widget method access in the client. Nothing mutates these tables
+    // after install (`super::region_map::install` writes into them in place, and runs inside
+    // `super::object::install`), so holding the table itself cannot go stale.
     let region_meta = lua.create_table()?;
-    let region_index = lua.create_function(|lua, (_this, key): (Table, Value)| {
-        let methods: Table = lua.named_registry_value(REG_REGION_METHODS)?;
-        methods.get::<Value>(key)
-    })?;
-    region_meta.set("__index", region_index)?;
+    region_meta.set(
+        "__index",
+        lua.named_registry_value::<Table>(REG_REGION_METHODS)?,
+    )?;
     lua.set_named_registry_value(REG_REGION_META, region_meta)?;
     Ok(())
 }
@@ -236,17 +242,14 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     //
     // Resolution is [`region_name_of`], shared with `IsObjectType`'s `Usage:` text so the two can
     // never disagree about what this region is called.
-    m.set(
-        "GetName",
-        lua.create_function(|lua, this: Table| {
-            let id = decode_id(&this)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            match region_name_of(&model, id) {
-                Some(n) => Ok(Value::String(lua.create_string(&n)?)),
-                None => Ok(Value::Nil),
-            }
-        })?,
-    )?;
+    set_shared(lua, &m, Side::Region, "GetName", |lua, this: Table| {
+        let id = decode_id(&this)?;
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        match region_name_of(&model, id) {
+            Some(n) => Ok(Value::String(lua.create_string(&n)?)),
+            None => Ok(Value::Nil),
+        }
+    })?;
 
     // ── GetObjectType / IsObjectType: the last two of the Region map (1244 §4 closed) ───────────
     //
@@ -258,13 +261,16 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     // `GetObjectType` is a per-class `.data` `const char*` read through `vtable[+0x1c]` — Texture
     // `0x773480` → `"Texture"`, FontString `0x7735d0` → `"FontString"` — pushed with
     // `lua_pushstring`, exactly one value, extra arguments ignored with no arity check.
-    m.set(
+    set_shared(
+        lua,
+        &m,
+        Side::Region,
         "GetObjectType",
-        lua.create_function(|lua, this: Table| {
+        |lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
             Ok(region_type_name(&model, rh))
-        })?,
+        },
     )?;
 
     // `IsObjectType(name)` — binding `0x7a1290`. Four traps, all verified, all here:
@@ -288,9 +294,12 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     //    in place, so `tex:IsObjectType(5)` compares against `"5"` and quietly answers nil — we
     //    format it and compare for real rather than short-circuiting, though no type name is
     //    numeric so the answer is nil either way.
-    m.set(
+    set_shared(
+        lua,
+        &m,
+        Side::Region,
         "IsObjectType",
-        lua.create_function(|lua, (this, want): (Table, Value)| {
+        |lua, (this, want): (Table, Value)| {
             let rh = region_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
             let want = match &want {
@@ -308,7 +317,7 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             let leaf = region_type_name(&model, rh);
             let hit = want.eq_ignore_ascii_case(leaf) || want.eq_ignore_ascii_case("Region");
             Ok(if hit { Value::Number(1.0) } else { Value::Nil })
-        })?,
+        },
     )?;
 
     // SetParent(frame) — **a Texture/FontString really does have this**, and we were the ones
@@ -335,9 +344,12 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     //
     // The mechanism half — full re-link, layer and sub-level preserved, `nil` = orphaned but not
     // destroyed — is [`crate::widget::WidgetArena::set_region_owner`]'s doc.
-    m.set(
+    set_shared(
+        lua,
+        &m,
+        Side::Region,
         "SetParent",
-        lua.create_function(|lua, args: mlua::MultiValue| {
+        |lua, args: mlua::MultiValue| {
             let mut it = args.into_iter();
             let Some(Value::Table(this)) = it.next() else {
                 return Err(mlua::Error::runtime("SetParent: expected a region"));
@@ -393,7 +405,7 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 model.touch_layout();
             }
             Ok(())
-        })?,
+        },
     )?;
 
     // Region-level visibility — the real VisibleRegion Show/Hide on Textures/FontStrings (the
@@ -515,20 +527,12 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         (REG_FONTSTRING_META, REG_FONTSTRING_METHODS),
     ] {
         let meta = lua.create_table()?;
-        let index = lua.create_function(move |lua, (_this, key): (Table, Value)| {
-            let methods: Table = lua.named_registry_value(methods_key)?;
-            methods.get::<Value>(key)
-        })?;
-        meta.set("__index", index)?;
+        meta.set("__index", lua.named_registry_value::<Table>(methods_key)?)?;
         lua.set_named_registry_value(meta_key, meta)?;
     }
 
     let title_meta = lua.create_table()?;
-    let title_index = lua.create_function(|lua, (_this, key): (Table, Value)| {
-        let methods: Table = lua.named_registry_value(REG_TITLE_METHODS)?;
-        methods.get::<Value>(key)
-    })?;
-    title_meta.set("__index", title_index)?;
+    title_meta.set("__index", title.clone())?;
     lua.set_named_registry_value(REG_TITLE_METHODS, title)?;
     lua.set_named_registry_value(REG_TITLE_META, title_meta)?;
 

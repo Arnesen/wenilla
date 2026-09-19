@@ -203,3 +203,64 @@ fn the_binding_raises_on_cycle_bad_name_and_absent_argument() {
         "0x76ab20 skips everything — the level is not re-derived"
     );
 }
+
+/// **A reparent under a scale change still moves the child's resolved rect** — the falsifier for
+/// decision 2314's claim that `SetParent` is a value-only write the ledger can NAME.
+///
+/// The gate's two tiers police each other under `WOW_LAYOUT_VERIFY`, which is forced on for this
+/// crate's tests: an incremental pass that names its nodes is re-run from scratch and the rects
+/// must be identical. So this test does not have to assert the epoch bookkeeping — it only has to
+/// make the reparent *observable in geometry*, which is what the conservative touch used to buy
+/// wholesale. A child anchored inside a parent inherits `parentScale · ownScale` as its
+/// `LayoutInput.scale`; move it to a parent with a different scale and both its offsets and its
+/// span change.
+#[test]
+fn a_reparent_under_a_scale_change_moves_the_childs_rect() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        one = CreateFrame("Frame", "ScaleOne")
+        one:SetPoint("BOTTOMLEFT", 0, 0); one:SetWidth(800); one:SetHeight(600)
+        two = CreateFrame("Frame", "ScaleTwo")
+        two:SetPoint("BOTTOMLEFT", 0, 0); two:SetWidth(800); two:SetHeight(600)
+        two:SetScale(2)
+        kid = CreateFrame("Frame", "ScaleKid", one)
+        kid:SetPoint("BOTTOMLEFT", one, "BOTTOMLEFT", 10, 20); kid:SetWidth(100); kid:SetHeight(50)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let at_one: (f32, f32, f32) = s
+        .eval("return ScaleKid:GetLeft(), ScaleKid:GetBottom(), ScaleKid:GetWidth()")
+        .unwrap();
+
+    // The whole point: the write between the two reads is the reparent, and the read after it must
+    // see it. Scale 2 doubles the offsets and the span in screen units — and `GetWidth` reports in
+    // the frame's OWN scaled space, so the width reads back unchanged while the edges move.
+    s.run("kid:SetParent(two)").unwrap();
+    s.resolve();
+    let at_two: (f32, f32, f32) = s
+        .eval("return ScaleKid:GetLeft(), ScaleKid:GetBottom(), ScaleKid:GetWidth()")
+        .unwrap();
+
+    assert_eq!(at_one, (10.0, 20.0, 100.0), "seated in the unscaled parent");
+    assert_eq!(
+        at_two,
+        (10.0, 20.0, 100.0),
+        "own-space coordinates are scale-relative, so these do not move"
+    );
+    // …but the SCREEN rect does. Read it off the extraction, which is in screen units.
+    let widths: Vec<f32> = s
+        .extract()
+        .iter()
+        .filter_map(|q| match q.target {
+            crate::order::ZTarget::Frame(_) => q.rect.map(|r| r.right - r.left),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        widths.iter().any(|w| (w - 200.0).abs() < 1e-3),
+        "the reparented child should be 100 x scale 2 = 200 screen units wide; got {widths:?}"
+    );
+}

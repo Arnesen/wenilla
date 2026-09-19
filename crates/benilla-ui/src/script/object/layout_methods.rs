@@ -6,6 +6,7 @@
 use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::layout::{Anchor, Point};
+use crate::script::region_map::{set_shared, Side};
 use crate::script::{Model, SCREEN};
 use crate::widget::FrameHandle;
 
@@ -28,49 +29,52 @@ fn frame_ladder_context(lua: &Lua, h: FrameHandle) -> (String, String) {
 /// Populate `m`'s layout (anchor/size) methods (see the module doc).
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // Layout: SetPoint / ClearAllPoints / SetWidth / SetHeight / GetWidth / GetHeight
-    m.set(
+    set_shared(
+        lua,
+        m,
+        Side::Frame,
         "SetPoint",
-        lua.create_function(|lua, (this, rest): (Table, MultiValue)| set_point(lua, &this, &rest))?,
+        |lua, (this, rest): (Table, MultiValue)| set_point(lua, &this, &rest),
     )?;
-    m.set(
-        "ClearAllPoints",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            // Every layout setter here follows one law: mutate ONLY on an actual value change,
-            // and report the change to the tier-1 epoch (`touch_layout`). The compare is what
-            // keeps an idempotent per-frame caller (the classic OnUpdate re-SetPoint idiom) from
-            // pinning the gate open — the same absorption the fingerprint gives, paid once at
-            // the write instead of per-frame over the whole model.
-            //
-            // **And it NAMES its node** (decision 2114, completing 1625's migration). Dropping
-            // every anchor is a retarget whose NEW target list is empty, and both lists are right
-            // here — so the cached graph's edges get unlinked instead of thrown away. Left on the
-            // conservative touch, this was the one recurring `[layout-derive]` site in a live
-            // hover sweep: `Bagnon_AnchorTooltip` opens with `GameTooltip:ClearAllPoints()` and
-            // then asks `frame:GetLeft()`, so the whole graph was re-derived INSIDE the handler,
-            // once per hovered item, and billed to `[ui-handlers]`' `OnEnter`.
-            let old: Option<Vec<u32>> = match model.layout_inputs.get_mut(&h) {
-                Some(input) if !input.anchors.is_empty() => {
-                    let old = input.anchors.iter().map(|a| a.relative_to).collect();
-                    input.anchors.clear();
-                    Some(old)
-                }
-                _ => None,
-            };
-            if let Some(old) = old {
-                model.touch_layout_retarget_frame(h, &old, &[]);
+    set_shared(lua, m, Side::Frame, "ClearAllPoints", |lua, this: Table| {
+        let h = frame_handle_of(lua, &this)?;
+        let mut model = lua.app_data_mut::<Model>().expect("model");
+        // Every layout setter here follows one law: mutate ONLY on an actual value change,
+        // and report the change to the tier-1 epoch (`touch_layout`). The compare is what
+        // keeps an idempotent per-frame caller (the classic OnUpdate re-SetPoint idiom) from
+        // pinning the gate open — the same absorption the fingerprint gives, paid once at
+        // the write instead of per-frame over the whole model.
+        //
+        // **And it NAMES its node** (decision 2114, completing 1625's migration). Dropping
+        // every anchor is a retarget whose NEW target list is empty, and both lists are right
+        // here — so the cached graph's edges get unlinked instead of thrown away. Left on the
+        // conservative touch, this was the one recurring `[layout-derive]` site in a live
+        // hover sweep: `Bagnon_AnchorTooltip` opens with `GameTooltip:ClearAllPoints()` and
+        // then asks `frame:GetLeft()`, so the whole graph was re-derived INSIDE the handler,
+        // once per hovered item, and billed to `[ui-handlers]`' `OnEnter`.
+        let old: Option<Vec<u32>> = match model.layout_inputs.get_mut(&h) {
+            Some(input) if !input.anchors.is_empty() => {
+                let old = input.anchors.iter().map(|a| a.relative_to).collect();
+                input.anchors.clear();
+                Some(old)
             }
-            Ok(())
-        })?,
-    )?;
+            _ => None,
+        };
+        if let Some(old) = old {
+            model.touch_layout_retarget_frame(h, &old, &[]);
+        }
+        Ok(())
+    })?;
     // GetPoint([n]) → point, relativeTo, relativePoint, xOfs, yOfs — the n-th (1-based, default
     // first) anchor. relativeTo is nil when the target is the screen root (the client returns
     // UIParent there; ours is the distinct `script::SCREEN` sentinel, which has no wrapper of its
     // own — the arena's `UIParent` frame is a different handle — stated, a consensus-list call).
-    m.set(
+    set_shared(
+        lua,
+        m,
+        Side::Frame,
         "GetPoint",
-        lua.create_function(|lua, (this, n): (Table, Option<i64>)| {
+        |lua, (this, n): (Table, Option<i64>)| {
             let h = frame_handle_of(lua, &this)?;
             let anchor = {
                 let model = lua.app_data_ref::<Model>().expect("model");
@@ -96,28 +100,28 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 Value::Number(f64::from(a.x_off)),
                 Value::Number(f64::from(a.y_off)),
             ))
-        })?,
+        },
     )?;
     // GetNumPoints() → how many anchors this frame carries. On the Region map (`0x87c9b8`), so
     // every widget answers it — the region twin shipped first and noted this side was missing;
     // collapsing the map to one implementation each (decision 1501) is what made the gap fatal
     // rather than merely absent, and this is the arm it was missing.
-    m.set(
-        "GetNumPoints",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model
-                .layout_inputs
-                .get(&h)
-                .map_or(0, |i| i.anchors.len() as i64))
-        })?,
-    )?;
+    set_shared(lua, m, Side::Frame, "GetNumPoints", |lua, this: Table| {
+        let h = frame_handle_of(lua, &this)?;
+        let model = lua.app_data_ref::<Model>().expect("model");
+        Ok(model
+            .layout_inputs
+            .get(&h)
+            .map_or(0, |i| i.anchors.len() as i64))
+    })?;
     // SetAllPoints([relativeTo]) — pin TOPLEFT+BOTTOMRIGHT to the target (default: the parent),
     // the XML `setAllPoints="true"` behavior as a method (rf24 `0x767800`'s SetAllPoints path).
-    m.set(
+    set_shared(
+        lua,
+        m,
+        Side::Frame,
         "SetAllPoints",
-        lua.create_function(|lua, (this, rest): (Table, MultiValue)| {
+        |lua, (this, rest): (Table, MultiValue)| {
             let h = frame_handle_of(lua, &this)?;
             // `who`/`$parent` first, then the `_G` read, then the guard — see `set_point` and
             // `object::NamedTarget`.
@@ -145,11 +149,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 model.touch_layout();
             }
             Ok(())
-        })?,
+        },
     )?;
-    m.set(
+    set_shared(
+        lua,
+        m,
+        Side::Frame,
         "SetWidth",
-        lua.create_function(|lua, (this, w): (Table, f32)| {
+        |lua, (this, w): (Table, f32)| {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let input = model.layout_inputs.entry(h).or_default();
@@ -161,11 +168,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
             model.note_authored_size(h);
             Ok(())
-        })?,
+        },
     )?;
-    m.set(
+    set_shared(
+        lua,
+        m,
+        Side::Frame,
         "SetHeight",
-        lua.create_function(|lua, (this, ht): (Table, f32)| {
+        |lua, (this, ht): (Table, f32)| {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let input = model.layout_inputs.entry(h).or_default();
@@ -176,51 +186,42 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
             model.note_authored_size(h);
             Ok(())
-        })?,
+        },
     )?;
     // **No `SetSize`.** It is an Era geometry verb, in neither the Frame nor the Region method
     // table of 1.12 — and neither the stock chain nor either addon corpus writes it (decision
     // 2142's census). The two setters above are the era's whole size surface.
-    m.set(
-        "GetWidth",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            settle(lua);
-            let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(size_read(&model, h, true))
-        })?,
-    )?;
-    m.set(
-        "GetHeight",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            settle(lua);
-            let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(size_read(&model, h, false))
-        })?,
-    )?;
+    set_shared(lua, m, Side::Frame, "GetWidth", |lua, this: Table| {
+        let h = frame_handle_of(lua, &this)?;
+        settle(lua);
+        let model = lua.app_data_ref::<Model>().expect("model");
+        Ok(size_read(&model, h, true))
+    })?;
+    set_shared(lua, m, Side::Frame, "GetHeight", |lua, this: Table| {
+        let h = frame_handle_of(lua, &this)?;
+        settle(lua);
+        let model = lua.app_data_ref::<Model>().expect("model");
+        Ok(size_read(&model, h, false))
+    })?;
 
     // GetCenter() → centerX, centerY — the resolved rect's center in LOCAL units (y-up; screen ÷
     // the frame's effective scale — the client's convention: coordinate getters report the frame's
     // own scaled space, and callers divide GetCursorPosition (screen px) by GetEffectiveScale to
     // meet them there; the ref world map's hover math does exactly that). nil pair before the
     // first resolve, like the edge readers.
-    m.set(
-        "GetCenter",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            settle(lua);
-            let model = lua.app_data_ref::<Model>().expect("model");
-            let inv = 1.0 / eff_scale(&model, h);
-            Ok(match model.resolved.get(&h) {
-                Some(r) => (
-                    Value::Number(f64::from((r.left + r.right) * 0.5 * inv)),
-                    Value::Number(f64::from((r.bottom + r.top) * 0.5 * inv)),
-                ),
-                None => (Value::Nil, Value::Nil),
-            })
-        })?,
-    )?;
+    set_shared(lua, m, Side::Frame, "GetCenter", |lua, this: Table| {
+        let h = frame_handle_of(lua, &this)?;
+        settle(lua);
+        let model = lua.app_data_ref::<Model>().expect("model");
+        let inv = 1.0 / eff_scale(&model, h);
+        Ok(match model.resolved.get(&h) {
+            Some(r) => (
+                Value::Number(f64::from((r.left + r.right) * 0.5 * inv)),
+                Value::Number(f64::from((r.bottom + r.top) * 0.5 * inv)),
+            ),
+            None => (Value::Nil, Value::Nil),
+        })
+    })?;
 
     // GetEffectiveScale() — the frame's real effective scale (parentScale · ownScale, the arena's
     // propagated product). The ROOT factor is 1, and that is not because benilla lacks a `uiScale`
@@ -250,23 +251,20 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         ("GetTop", 2u8),
         ("GetBottom", 3u8),
     ] {
-        m.set(
-            name,
-            lua.create_function(move |lua, this: Table| {
-                let h = frame_handle_of(lua, &this)?;
-                settle(lua);
-                let model = lua.app_data_mut::<Model>().expect("model");
-                let inv = 1.0 / eff_scale(&model, h);
-                Ok(model.resolved.get(&h).map(|r| {
-                    inv * match pick {
-                        0 => r.left,
-                        1 => r.right,
-                        2 => r.top,
-                        _ => r.bottom,
-                    }
-                }))
-            })?,
-        )?;
+        set_shared(lua, m, Side::Frame, name, move |lua, this: Table| {
+            let h = frame_handle_of(lua, &this)?;
+            settle(lua);
+            let model = lua.app_data_mut::<Model>().expect("model");
+            let inv = 1.0 / eff_scale(&model, h);
+            Ok(model.resolved.get(&h).map(|r| {
+                inv * match pick {
+                    0 => r.left,
+                    1 => r.right,
+                    2 => r.top,
+                    _ => r.bottom,
+                }
+            }))
+        })?;
     }
     Ok(())
 }

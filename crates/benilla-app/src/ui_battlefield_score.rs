@@ -171,10 +171,31 @@ fn drain_battlefield_score(
     }
 }
 
+/// The scoreboard's packet handler (in the net handler table since 2313).
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::BattlefieldScoreboard;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handler — called from [`super::BattlefieldScorePlugin`].
+    pub(super) fn register(app: &mut App) {
+        app.net_handler(SessionEventKind::PvpLogData, on_pvp_log_data);
+    }
+
+    fn on_pvp_log_data(In(ev): In<SessionEvent>, mut board: ResMut<BattlefieldScoreboard>) {
+        if let SessionEvent::PvpLogData(data) = ev {
+            board.apply(data);
+        }
+    }
+}
+
 pub(crate) struct BattlefieldScorePlugin;
 
 impl Plugin for BattlefieldScorePlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<BattlefieldScoreboard>().add_systems(
             Update,
             (

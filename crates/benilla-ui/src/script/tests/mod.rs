@@ -13,6 +13,7 @@ mod channel;
 mod common;
 mod cooldown;
 mod create_frame_template;
+mod dispatch_bench;
 mod end_to_end;
 mod events;
 mod font_object;

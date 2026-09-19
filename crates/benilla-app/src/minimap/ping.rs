@@ -207,6 +207,26 @@ pub(super) fn drive_minimap_ping(
     );
 }
 
+/// Register the ping's packet handler — called from [`super::MinimapPlugin`] (in the net handler
+/// table since 2313).
+pub(super) fn register(app: &mut App) {
+    use crate::net::NetHandlerApp;
+    app.net_handler(
+        benilla_protocol::SessionEventKind::MinimapPing,
+        on_minimap_ping,
+    );
+}
+
+/// A group member pinged (decision 1596). The wire carries raw world floats and the relay is
+/// stateless in the reference too — we seat them as the pin and the minimap derives the rest.
+/// The server only relays a ping between people who are grouped, and a ping from another map
+/// would be dropped by the renderer's own map test anyway.
+fn on_minimap_ping(In(ev): In<benilla_protocol::SessionEvent>, mut ping: ResMut<MinimapPing>) {
+    if let benilla_protocol::SessionEvent::MinimapPing { guid, x, y } = ev {
+        ping.seat((x, y), guid);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

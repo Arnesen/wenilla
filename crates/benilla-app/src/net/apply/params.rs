@@ -171,47 +171,18 @@ pub(crate) struct WindowStores<'w> {
     /// The pending logout/quit (decision 0674): the server's response and cancel-ack land here,
     /// and `crate::ui_logout` turns them into the countdown dialog.
     pub logout: ResMut<'w, crate::ui_logout::LogoutState>,
-    /// The mirror-timer queue (decision 0874): the breath/fatigue START/PAUSE/STOP edges, drained
-    /// into the FrameXML bars by `crate::ui_mirror`.
-    pub mirror_timers: ResMut<'w, crate::ui_mirror::MirrorTimerFeed>,
     /// The pet action bar's server-authoritative state + its own cooldown store (decision 0982),
     /// replaced wholesale on every `SMSG_PET_SPELLS`.
     pub pet_bar: ResMut<'w, crate::ui_pet::PetBar>,
     /// The by-key red error queue the pet bar's refused-order feedback rides (the `DisplayError`
     /// route, resolved through the VM's own GlobalStrings by `ui_action::feed_actions`).
     pub ui_error_keys: ResMut<'w, crate::ui_action::UiErrorKeys>,
-    /// The ask-once book-page cache (decision 1105) — every readable's text, keyed by `PageText`
-    /// id; the reader session repaints off it.
-    pub page_texts: ResMut<'w, crate::ui_item_text::PageTexts>,
     pub played_time_answer: ResMut<'w, crate::net::PlayedTimeAnswer>,
-    /// The class trainer's pending respec question (decision 1580) — the inbound
-    /// `MSG_TALENT_WIPE_CONFIRM` parks the trainer's guid + cost here and
-    /// `crate::ui_talent_wipe` turns it into the CONFIRM_TALENT_WIPE dialog, whose Accept is the
-    /// only thing that unlearns anything. The binder's twin.
-    pub talent_wipe: ResMut<'w, crate::ui_talent_wipe::TalentWipeState>,
-    /// The dialog engine's verbs (decision 1963): the pet trainer's latch, the instance-boot
-    /// clock, the area spirit healer, the battleground queue and the meeting-stone queue — each
-    /// a feed for a stock dialog.
-    pub pet_unlearn: ResMut<'w, crate::ui_dialog_verbs::PetUnlearnState>,
-    pub instance_boot: ResMut<'w, crate::ui_dialog_verbs::InstanceBoot>,
-    pub area_spirit: ResMut<'w, crate::ui_dialog_verbs::AreaSpiritHealer>,
-    pub battlefield_queue: ResMut<'w, crate::ui_dialog_verbs::BattlefieldQueue>,
-    pub meeting_stone: ResMut<'w, crate::ui_dialog_verbs::MeetingStone>,
-    pub battlefield_scoreboard: ResMut<'w, crate::ui_battlefield_score::BattlefieldScoreboard>,
-    pub battlefield: ResMut<'w, crate::ui_battlefield::Battlefield>,
     pub tutorials: ResMut<'w, crate::tutorial::Tutorials>,
-    pub battlefield_positions: ResMut<'w, crate::ui_battlefield_positions::BattlefieldPositions>,
     /// The guard's directions marker (`SMSG_GOSSIP_POI`) — the wire carries no map field, so
     /// "where you were standing when the guard told you" is the client's to remember
     /// (`crate::poi_marker`).
     pub poi_marker: ResMut<'w, crate::poi_marker::PoiMarker>,
-    /// The inspect-honor reply (decision 1512) — `MSG_INSPECT_HONOR_STATS` is the only source of
-    /// another player's honor numbers, so the reply parks here and `crate::ui_honor` pushes it
-    /// into the pane and fires `INSPECT_HONOR_UPDATE`.
-    pub inspect_honor: ResMut<'w, crate::ui_honor::InspectHonor>,
-    /// The minimap ping (decision 1596) — a group member's `MSG_MINIMAP_PING` seats the world
-    /// point here and the minimap renderer derives everything else from it.
-    pub ping: ResMut<'w, crate::minimap::MinimapPing>,
 }
 
 /// The action bar's family: the cast/cooldown state and every error queue the red line drains

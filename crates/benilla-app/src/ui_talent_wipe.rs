@@ -196,10 +196,39 @@ fn drain_talent_wipe(
 }
 
 /// The respec flow: the range guard, the dialog's feed, and its answer.
+/// The talent-wipe question's packet handler (decision 1580; in the net handler table since 2313).
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::TalentWipeState;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handler — called from [`super::UiTalentWipePlugin`].
+    pub(super) fn register(app: &mut App) {
+        app.net_handler(SessionEventKind::TalentWipeConfirm, on_confirm);
+    }
+
+    /// A zero trainer guid is vmangos's "you have no talents to reset" refusal, not a question —
+    /// there is nothing to ask about, so nothing goes on screen (this module's header carries
+    /// why the reference instead re-sends here).
+    fn on_confirm(In(ev): In<SessionEvent>, mut wipe: ResMut<TalentWipeState>) {
+        if let SessionEvent::TalentWipeConfirm { trainer, cost } = ev {
+            if trainer == 0 {
+                debug!("net: talent wipe refused (no talents to reset) — no dialog");
+            } else {
+                debug!("net: trainer {trainer:#x} asks to wipe talents for {cost} copper");
+                wipe.ask(trainer, cost);
+            }
+        }
+    }
+}
+
 pub(crate) struct UiTalentWipePlugin;
 
 impl Plugin for UiTalentWipePlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<TalentWipeState>().add_systems(
             Update,
             (

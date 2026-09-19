@@ -358,10 +358,40 @@ fn reset_on_world_enter(
     let _ = commands.0.send(ClientCommand::BattlefieldStatusRequest);
 }
 
+/// The battlemaster window's packet handlers (in the net handler table since 2313).
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::Battlefield;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handlers — called from [`super::BattlefieldPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::BattlefieldList, on_packet)
+            .net_handler(K::GroupJoinedBattleground, on_packet)
+            .net_handler(K::BattlegroundPlayer, on_packet);
+    }
+
+    /// One handler for the three: each is a one-line fold into the same state.
+    fn on_packet(In(ev): In<SessionEvent>, mut battlefield: ResMut<Battlefield>) {
+        match ev {
+            SessionEvent::BattlefieldList(list) => battlefield.apply_list(list),
+            SessionEvent::GroupJoinedBattleground { result } => battlefield.apply_verdict(result),
+            SessionEvent::BattlegroundPlayer { guid, joined } => {
+                battlefield.apply_player(guid, joined)
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) struct BattlefieldPlugin;
 
 impl Plugin for BattlefieldPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<Battlefield>().add_systems(
             Update,
             (

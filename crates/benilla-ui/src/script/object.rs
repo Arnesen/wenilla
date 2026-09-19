@@ -79,18 +79,22 @@ pub(super) fn frame_wrapper(lua: &Lua, id: u32) -> mlua::Result<Table> {
     }
     let t = lua.create_table()?;
     t.raw_set(0, Value::LightUserData(id_to_lud(id)))?;
-    let meta: Table = lua.named_registry_value(REG_FRAME_META)?;
-    t.set_metatable(Some(meta))?;
-    wrappers.set(id, t.clone())?;
-
-    let name: Option<String> = {
+    // The frame's kind and name in one borrow. **The KIND picks the metatable, here rather than
+    // per lookup** — the region side's shape since its leaves split, and decision 2310's whole
+    // change on this side: a wrapper is built once per frame, so resolving the class chain at
+    // construction costs nothing, while resolving it inside `__index` put a Rust call, a model
+    // borrow and a registry lookup in front of EVERY widget method access in the client. A frame's
+    // kind never changes and `id_to_frame` never loses an entry, so the choice cannot go stale.
+    let (kind, name): (Option<FrameKind>, Option<String>) = {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
-        model
+        let frame = model
             .id_to_frame
             .get(&id)
-            .and_then(|h| model.arena.frame(*h))
-            .and_then(|f| f.name.clone())
+            .and_then(|h| model.arena.frame(*h));
+        (frame.map(|f| f.kind), frame.and_then(|f| f.name.clone()))
     };
+    t.set_metatable(Some(frame_meta_for(lua, kind)?))?;
+    wrappers.set(id, t.clone())?;
     if let Some(name) = name {
         publish_global(lua, &name, &t)?;
     }
@@ -409,6 +413,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.set_named_registry_value(REG_WRAPPERS, lua.create_table()?)?;
     lua.set_named_registry_value(REG_SCRIPTS, lua.create_table()?)?;
 
+    // The Region-map arm collection, opened before either method table is built and closed by
+    // `region_map::install` below (its [`super::region_map::Arms`] doc says why it is app_data).
+    super::region_map::open_arms(lua);
     install_frame_methods(lua)?;
     super::region::install(lua)?;
     super::statusbar::install(lua)?;
@@ -418,23 +425,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // implementation each, so a method pulled off a frame works on a texture (decision 1501).
     super::region_map::install(lua)?;
 
-    // Shared frame metatable: __index is a Rust dispatcher over the frame method table (RF-0023),
-    // checking the frame's *kind-specific* method table first. Per-kind resolution matters beyond
-    // correctness: addons duck-type widgets (`if frame.SetValue then …`), so a plain frame must
-    // resolve `SetValue` to nil — one shared table would make every frame quack like every widget.
-    let frame_meta = lua.create_table()?;
-    let frame_index = lua.create_function(|lua, (this, key): (Table, Value)| {
-        for reg in kind_method_registries(lua, &this) {
-            let methods: Table = lua.named_registry_value(reg)?;
-            let v = methods.get::<Value>(key.clone())?;
-            if !v.is_nil() {
-                return Ok(v);
-            }
-        }
-        let methods: Table = lua.named_registry_value(REG_FRAME_METHODS)?;
-        methods.get::<Value>(key)
-    })?;
-    frame_meta.set("__index", frame_index)?;
+    // The per-kind metatable cache ([`frame_meta_for`]) and the base metatable in it: the one a
+    // plain `Frame` wears, whose `__index` is the shared frame method table itself.
+    lua.set_named_registry_value(REG_KIND_METAS, lua.create_table()?)?;
+    let frame_meta = frame_meta_for(lua, None)?;
     lua.set_named_registry_value(REG_FRAME_META, frame_meta.clone())?;
     // RF-0023 publishes the shared metatable as _G["__framescript_meta"].
     lua.globals().set("__framescript_meta", frame_meta)?;
@@ -536,17 +530,71 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// The registry keys of a frame's kind-specific method tables, in resolution order — the `__index`
-/// dispatcher walks them before the shared table, mirroring the client's class chain (CheckButton
-/// resolves through Button's map, RF-28). Empty for plain kinds (and for anything that isn't a live
-/// frame, e.g. a region wrapper passing through).
-fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
-    let Ok(id) = decode_id(this) else { return &[] };
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
-    let Some(h) = model.id_to_frame.get(&id) else {
-        return &[];
-    };
-    match model.arena.frame(*h).map(|f| f.kind) {
+/// The registry table of per-kind frame metatables, keyed by the head of the kind's method chain
+/// (`""` for a kind with none). Lua-side, like every other root here — the MAXCSTACK discipline.
+const REG_KIND_METAS: &str = "__benilla_frame_meta_by_kind";
+
+/// The metatable a frame of `kind` wears — built once per kind, cached in [`REG_KIND_METAS`].
+///
+/// ## `__index` is a TABLE, and that is the whole point (decision 2310)
+///
+/// This used to be one shared metatable whose `__index` was a **Rust function** that resolved the
+/// receiver's kind and walked its registries per lookup. Every `frame:SetPoint(...)` — every plain
+/// `frame.Foo` read, including the `if frame.SetValue then` duck-type probe addons open with —
+/// therefore crossed into Rust, took a model borrow, resolved a handle and did one to three
+/// named-registry string lookups. Measured in a release build: **217 ns for a plain Frame, 320 ns
+/// for a Button, against 8.7 ns for a plain Lua table `__index`.** A live sample of a quest-accept
+/// spike with the director's addon set put ~20 % of the whole UI tick inside that metamethod
+/// before any method body ran — Questie redraws its map notes with ~19 widget calls per cluster
+/// over hundreds of clusters, and pays the tax on every one.
+///
+/// A table costs one `luaH_get` inside `luaV_gettable`, in C, with no call at all.
+///
+/// ## The chain is the reference's own, expressed as metatables
+///
+/// 1.12's widget classes are not a Lua metatable chain — each class owns a flat method map and its
+/// lookup tail-calls exactly one base's lookup ([`super::region_map`]'s header has the tables). But
+/// `luaV_gettable` follows a table `__index` iteratively, so a chain of metatables IS that probe
+/// sequence: `CheckButton`'s map, miss, `Button`'s map, miss, `Frame`'s map. So rather than merging
+/// each kind's methods into one flat copy, this links the existing tables — no copies to go stale
+/// when a method table is written after the fact, and the per-kind surface stays exactly what
+/// [`kind_method_registries`] declares. Duck typing is preserved by construction: a plain Frame's
+/// chain never reaches `StatusBar`'s map, so `frame.SetValue` is still nil.
+fn frame_meta_for(lua: &Lua, kind: Option<FrameKind>) -> mlua::Result<Table> {
+    let chain = kind_method_registries(kind);
+    let key = chain.first().copied().unwrap_or("");
+    let metas: Table = lua.named_registry_value(REG_KIND_METAS)?;
+    if let Value::Table(meta) = metas.raw_get::<Value>(key)? {
+        return Ok(meta);
+    }
+    // Link `own -> base -> ... -> Frame`, idempotently: a base table shared by several kinds (every
+    // button kind reaches `Button`'s) is simply re-pointed at the same place.
+    let frame_methods: Table = lua.named_registry_value(REG_FRAME_METHODS)?;
+    let mut below = frame_methods.clone();
+    for reg in chain.iter().rev() {
+        let own: Table = lua.named_registry_value(reg)?;
+        let link = lua.create_table()?;
+        link.set("__index", below)?;
+        own.set_metatable(Some(link))?;
+        below = own;
+    }
+    let meta = lua.create_table()?;
+    meta.set("__index", below)?;
+    metas.raw_set(key, meta.clone())?;
+    Ok(meta)
+}
+
+/// The registry keys of a frame's kind-specific method tables, **in resolution order** — the
+/// client's own class chain (CheckButton resolves through Button's map, RF-28). Empty for a plain
+/// kind, and for a wrapper whose frame is not live.
+///
+/// Every chain here is *its own table followed by its base's whole chain*, which is what lets
+/// [`frame_meta_for`] realize it as a metatable chain instead of a search: `CheckButton`'s table
+/// gets `Button`'s as its `__index`, `Button`'s gets `Frame`'s, and one `luaV_gettable` walks the
+/// lot in C. Keep that property when adding a kind — a chain that is not a suffix of its base's
+/// cannot be expressed this way.
+fn kind_method_registries(kind: Option<FrameKind>) -> &'static [&'static str] {
+    match kind {
         Some(FrameKind::StatusBar) => &[super::statusbar::REG_STATUSBAR_METHODS],
         Some(FrameKind::EditBox) => &[super::editbox::REG_EDITBOX_METHODS],
         Some(FrameKind::ScrollingMessageFrame) => {

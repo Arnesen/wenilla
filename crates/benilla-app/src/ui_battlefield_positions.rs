@@ -223,10 +223,31 @@ fn reset_on_world_enter(
     state.last_request = None;
 }
 
+/// The battlefield map's packet handler (in the net handler table since 2313).
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::BattlefieldPositions;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handler — called from [`super::BattlefieldPositionsPlugin`].
+    pub(super) fn register(app: &mut App) {
+        app.net_handler(SessionEventKind::BattlefieldPositions, on_positions);
+    }
+
+    fn on_positions(In(ev): In<SessionEvent>, mut positions: ResMut<BattlefieldPositions>) {
+        if let SessionEvent::BattlefieldPositions(packet) = ev {
+            positions.apply(packet);
+        }
+    }
+}
+
 pub(crate) struct BattlefieldPositionsPlugin;
 
 impl Plugin for BattlefieldPositionsPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<BattlefieldPositions>().add_systems(
             Update,
             (

@@ -224,24 +224,11 @@ fn apply_unpeeled(
         mut world_states,
         social,
         mut logout,
-        mut mirror_timers,
         mut pet_bar,
         mut ui_error_keys,
-        mut page_texts,
         mut played_time_answer,
-        mut talent_wipe,
-        mut pet_unlearn,
-        mut instance_boot,
-        mut area_spirit,
-        mut battlefield_queue,
-        mut meeting_stone,
-        mut battlefield_scoreboard,
-        mut battlefield,
         mut tutorials,
-        mut battlefield_positions,
         mut poi_marker,
-        mut inspect_honor,
-        mut ping,
     } = windows;
     let Session {
         mut teleports,
@@ -619,13 +606,8 @@ fn apply_unpeeled(
                 session::reputation_visible(list_id, &mut reputations)
             }
             SessionEvent::BindPoint { area } => home_bind.0 = Some(area),
-            // The honor arc's two inbound messages (decision 1512).
-            //
-            // The inspect reply REPLACES whatever is held, including for a different player: the
-            // reference's latch is a single slot, and a pane still showing the last target's
-            // kills is the failure keeping the old one produces.
-            SessionEvent::InspectHonorStats(stats) => inspect_honor.0 = Some(stats),
-            // An honor award: the combat-log line (name-resolved, so it queues) and the floating
+            // An honor award (decision 1512 — the arc's other inbound message, the inspect reply,
+            // is `ui_honor`'s own handler): the combat-log line (name-resolved, so it queues) and the floating
             // number, which are two different surfaces of one packet and are both the reference's.
             // A DISHONORABLE kill arrives here too, carrying NEGATIVE honor — the floating text
             // takes it signed, because the shipped `COMBAT_TEXT_HONOR_GAINED` handler prefixes a
@@ -642,49 +624,7 @@ fn apply_unpeeled(
                     extra: None,
                 });
             }
-            // A zero trainer guid is vmangos's "you have no talents to reset" refusal, not a
-            // question — there is nothing to ask about, so nothing goes on screen (decision 1580;
-            // `crate::ui_talent_wipe`'s header carries why the reference instead re-sends here).
-            SessionEvent::TalentWipeConfirm { trainer, cost } => {
-                if trainer == 0 {
-                    debug!("net: talent wipe refused (no talents to reset) — no dialog");
-                } else {
-                    debug!("net: trainer {trainer:#x} asks to wipe talents for {cost} copper");
-                    talent_wipe.ask(trainer, cost);
-                }
-            }
-            // The pet trainer's question (decision 1963) — the talent-wipe twin above; a zero
-            // guid is the reference's own `ERR_TALENT_WIPE_ERROR` leg, carried over as observed.
-            SessionEvent::PetUnlearnConfirm { trainer, cost } => {
-                if trainer == 0 {
-                    debug!("net: pet unlearn refused (zero trainer) — no dialog");
-                    ui_error_keys
-                        .0
-                        .push(crate::ui_action::UiError::key("ERR_TALENT_WIPE_ERROR"));
-                } else {
-                    debug!("net: trainer {trainer:#x} asks to unlearn the pet for {cost} copper");
-                    pet_unlearn.ask(trainer, cost);
-                }
-            }
-            SessionEvent::RaidGroupOnly { delay_ms, reason } => {
-                instance_boot.apply(delay_ms, reason, std::time::Instant::now());
-            }
-            SessionEvent::AreaSpiritHealerTime { healer, ms } => {
-                area_spirit.on_time(healer, ms, std::time::Instant::now());
-            }
-            SessionEvent::BattlefieldStatus(status) => battlefield_queue.apply(status),
-            SessionEvent::PvpLogData(data) => battlefield_scoreboard.apply(data),
-            SessionEvent::BattlefieldList(list) => battlefield.apply_list(list),
-            SessionEvent::GroupJoinedBattleground { result } => battlefield.apply_verdict(result),
-            SessionEvent::BattlegroundPlayer { guid, joined } => {
-                battlefield.apply_player(guid, joined);
-            }
-            SessionEvent::MeetingStoneSetQueue { area, status } => {
-                meeting_stone.apply(area, status);
-            }
-            SessionEvent::MeetingStoneNotice(notice) => meeting_stone.apply_notice(notice),
             SessionEvent::TutorialFlags(bytes) => tutorials.apply_flags(&bytes),
-            SessionEvent::BattlefieldPositions(packet) => battlefield_positions.apply(packet),
             SessionEvent::Proficiency {
                 item_class,
                 subclass_mask,
@@ -949,30 +889,9 @@ fn apply_unpeeled(
                 group::ready_check_request(&mut group, &mut ui_error_keys, &self_guid)
             }
             SessionEvent::RaidInstanceInfo { entries } => group.apply_raid_instance_info(entries),
-            // A group member pinged (decision 1596). The wire carries raw world floats and the
-            // relay is stateless in the reference too — we seat them as the pin and the minimap
-            // derives the rest. `map` is the map we are standing on: the server only relays a ping
-            // between people who are grouped, and a ping from another map would be dropped by the
-            // renderer's own map test anyway.
-            SessionEvent::MinimapPing { guid, x, y } => {
-                ping.seat((x, y), guid);
-            }
             SessionEvent::ReadyCheckAnswer { guid, ready } => {
                 group.apply_ready_check_answer(guid, ready != 0)
             }
-            // ── The mirror timers (decision 0874): breath / fatigue / feign-death. Pure queue
-            // arms — every meaning (which bar, what colour, what caption, how fast it drains)
-            // is resolved at the UI seam in `ui_mirror`, and the countdown itself is the
-            // FrameXML's own OnUpdate integration ──────────────────────────────────────────────
-            SessionEvent::MirrorTimerStart(start) => mirror_timers
-                .0
-                .push(crate::ui_mirror::MirrorTimerEdge::Start(start)),
-            SessionEvent::MirrorTimerPause { kind, paused } => mirror_timers
-                .0
-                .push(crate::ui_mirror::MirrorTimerEdge::Pause { kind, paused }),
-            SessionEvent::MirrorTimerStop { kind } => mirror_timers
-                .0
-                .push(crate::ui_mirror::MirrorTimerEdge::Stop { kind }),
             SessionEvent::LootResponse {
                 guid,
                 loot_type,
@@ -1633,13 +1552,6 @@ fn apply_unpeeled(
                 opcode,
                 unparseable,
             } => session::packet_dropped(opcode, unparseable, &mut dropped),
-            // The book-page cache (decision 1105) — one page per packet, the whole chain in
-            // answer to the first ask; the reader repaints off it on the next feed.
-            SessionEvent::PageText {
-                page_id,
-                text,
-                next_page_id,
-            } => page_texts.insert(page_id, text, next_page_id),
             SessionEvent::WorldStates { scope, states } => {
                 world::world_states(scope, states, &mut world_states)
             }

@@ -1078,10 +1078,79 @@ fn poll_area_spirit_healer(
     }
 }
 
+/// The dialog verbs' packet handlers (in the net handler table since 2313) — each parks a
+/// question or a countdown on its own store for the feed to turn into a StaticPopup.
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::{AreaSpiritHealer, BattlefieldQueue, InstanceBoot, MeetingStone, PetUnlearnState};
+    use crate::net::NetHandlerApp;
+
+    /// Register the handlers — called from [`super::UiDialogVerbsPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::PetUnlearnConfirm, on_pet_unlearn_confirm)
+            .net_handler(K::RaidGroupOnly, on_raid_group_only)
+            .net_handler(K::AreaSpiritHealerTime, on_area_spirit_healer_time)
+            .net_handler(K::BattlefieldStatus, on_battlefield_status)
+            .net_handler(K::MeetingStoneSetQueue, on_meeting_stone)
+            .net_handler(K::MeetingStoneNotice, on_meeting_stone);
+    }
+
+    /// The pet trainer's question (decision 1963) — the talent wipe's twin
+    /// ([`crate::ui_talent_wipe`]); a zero guid is the reference's own `ERR_TALENT_WIPE_ERROR`
+    /// leg, carried over as observed.
+    fn on_pet_unlearn_confirm(
+        In(ev): In<SessionEvent>,
+        mut unlearn: ResMut<PetUnlearnState>,
+        mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+    ) {
+        if let SessionEvent::PetUnlearnConfirm { trainer, cost } = ev {
+            if trainer == 0 {
+                debug!("net: pet unlearn refused (zero trainer) — no dialog");
+                errors
+                    .0
+                    .push(crate::ui_action::UiError::key("ERR_TALENT_WIPE_ERROR"));
+            } else {
+                debug!("net: trainer {trainer:#x} asks to unlearn the pet for {cost} copper");
+                unlearn.ask(trainer, cost);
+            }
+        }
+    }
+
+    fn on_raid_group_only(In(ev): In<SessionEvent>, mut boot: ResMut<InstanceBoot>) {
+        if let SessionEvent::RaidGroupOnly { delay_ms, reason } = ev {
+            boot.apply(delay_ms, reason, std::time::Instant::now());
+        }
+    }
+
+    fn on_area_spirit_healer_time(In(ev): In<SessionEvent>, mut spirit: ResMut<AreaSpiritHealer>) {
+        if let SessionEvent::AreaSpiritHealerTime { healer, ms } = ev {
+            spirit.on_time(healer, ms, std::time::Instant::now());
+        }
+    }
+
+    fn on_battlefield_status(In(ev): In<SessionEvent>, mut queue: ResMut<BattlefieldQueue>) {
+        if let SessionEvent::BattlefieldStatus(status) = ev {
+            queue.apply(status);
+        }
+    }
+
+    fn on_meeting_stone(In(ev): In<SessionEvent>, mut stone: ResMut<MeetingStone>) {
+        match ev {
+            SessionEvent::MeetingStoneSetQueue { area, status } => stone.apply(area, status),
+            SessionEvent::MeetingStoneNotice(notice) => stone.apply_notice(notice),
+            _ => {}
+        }
+    }
+}
+
 pub(crate) struct UiDialogVerbsPlugin;
 
 impl Plugin for UiDialogVerbsPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<PetUnlearnState>()
             .init_resource::<InstanceBoot>()
             .init_resource::<AreaSpiritHealer>()

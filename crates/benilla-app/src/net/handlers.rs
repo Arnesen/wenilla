@@ -432,7 +432,8 @@ mod tests {
                     continue;
                 };
                 let kind = kind.trim().rsplit("::").next().unwrap_or_default();
-                let handler = handler.trim();
+                // rustfmt breaks a long call one argument a line, with a trailing comma.
+                let handler = handler.trim().trim_end_matches(',').trim_end();
                 seen += 1;
                 if kind == "Disconnected" {
                     continue;

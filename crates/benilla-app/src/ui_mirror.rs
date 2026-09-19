@@ -191,10 +191,43 @@ fn feed_mirror_timers(
 
 /// The mirror-timer UI seam: the queue + its drain, ordered like the cast bar's — before the VM
 /// ticks, so an edge and its first OnUpdate land on the same frame.
+/// The mirror timers' packet handlers (decision 0874; in the net handler table since 2313):
+/// breath / fatigue / feign-death. Pure queue handlers — every meaning (which bar, what colour,
+/// what caption, how fast it drains) is resolved at the UI seam in this module, and the
+/// countdown itself is the FrameXML's own OnUpdate integration.
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::{MirrorTimerEdge, MirrorTimerFeed};
+    use crate::net::NetHandlerApp;
+
+    /// Register the handlers — called from [`super::UiMirrorPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::MirrorTimerStart, on_edge)
+            .net_handler(K::MirrorTimerPause, on_edge)
+            .net_handler(K::MirrorTimerStop, on_edge);
+    }
+
+    fn on_edge(In(ev): In<SessionEvent>, mut feed: ResMut<MirrorTimerFeed>) {
+        let edge = match ev {
+            SessionEvent::MirrorTimerStart(start) => MirrorTimerEdge::Start(start),
+            SessionEvent::MirrorTimerPause { kind, paused } => {
+                MirrorTimerEdge::Pause { kind, paused }
+            }
+            SessionEvent::MirrorTimerStop { kind } => MirrorTimerEdge::Stop { kind },
+            _ => return,
+        };
+        feed.0.push(edge);
+    }
+}
+
 pub(crate) struct UiMirrorPlugin;
 
 impl Plugin for UiMirrorPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<MirrorTimerFeed>()
             .add_systems(Update, feed_mirror_timers.in_set(UnitFeed));
     }

@@ -57,7 +57,10 @@
 //! opposite reason — in neither table because 1.12 has no such verb at all; decision 2142 removed
 //! it rather than filing it.) The map is the unit.
 
-use mlua::{Function, Lua, MultiValue, Table, Value};
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use mlua::{FromLuaMulti, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
 use super::object::decode_id;
 use super::{
@@ -67,7 +70,8 @@ use super::{
 
 /// Which side of the object model a wrapper's `T[0]` id names. Ids come from one counter
 /// ([`Model::next_id`]), so a region id can never be mistaken for a frame's.
-enum Side {
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Side {
     Frame,
     Region,
 }
@@ -84,6 +88,70 @@ fn side_of(lua: &Lua, this: &Table) -> mlua::Result<Option<Side>> {
     } else {
         None
     })
+}
+
+/// One side's implementation of one of the 19, type-erased to the variadic ABI.
+///
+/// **The erasure is the point** (decision 2310). The dispatcher used to hold each side as an
+/// `mlua::Function` and reach it with `Function::call`, which re-enters Lua: every argument and
+/// every return value round-trips through mlua's ref thread twice, and the whole call is wrapped
+/// in a `lua_pcall`. Measured in a release build, a `MultiValue` relay costs **~420 ns** against
+/// ~40 ns for a scalar one, and a bridged `GetWidth()` measured **~750 ns against ~99 ns** for an
+/// unbridged frame method — a 7x tax on `SetPoint`, `GetWidth`, `ClearAllPoints`, `GetParent`, the
+/// verbs every UI calls most. An `Rc<dyn Fn>` is one ordinary Rust call.
+///
+/// The ABI is exactly what `Lua::create_function` builds internally for a typed body — see
+/// [`shared`], which is the only thing that makes one — so nothing about argument conversion,
+/// arity or coercion changes by going through it.
+pub(super) type Arm = Rc<dyn Fn(&Lua, MultiValue) -> mlua::Result<MultiValue>>;
+
+/// The arms the two method-table installers register, collected for [`install`].
+///
+/// It lives in the VM's `app_data` rather than being threaded through four `install` signatures:
+/// the installers are deep (`object::install` → `layout_methods::install`, `region::install` →
+/// `region::layout::install`) and the collection is install-time scaffolding, removed by
+/// [`install`] the moment it has been consumed.
+#[derive(Default)]
+pub(super) struct Arms(HashMap<(Side, &'static str), Arm>);
+
+/// Register one of the [`REGION_MAP_METHODS`] into its side's method table **and** record its arm.
+///
+/// Every one of the 38 (19 names x 2 sides) goes through here instead of
+/// `m.set(name, lua.create_function(body)?)?`, and [`install`] fails loudly if one did not — so a
+/// name added to the map without both arms cannot reach an addon as a half-registered method.
+/// The table entry it writes is transient: [`install`] replaces all 19 in every table with the
+/// shared dispatcher. It exists so the pre-bridge tables are still complete for anything that
+/// reads them in between (the leaf tables are *copied* out of the region table, mid-install).
+pub(super) fn set_shared<A, R, F>(
+    lua: &Lua,
+    m: &Table,
+    side: Side,
+    name: &'static str,
+    f: F,
+) -> mlua::Result<()>
+where
+    A: FromLuaMulti + 'static,
+    R: IntoLuaMulti + 'static,
+    F: Fn(&Lua, A) -> mlua::Result<R> + 'static,
+{
+    let arm: Arm =
+        Rc::new(move |lua, args| f(lua, A::from_lua_multi(args, lua)?)?.into_lua_multi(lua));
+    let entry = arm.clone();
+    m.set(
+        name,
+        lua.create_function(move |lua, args: MultiValue| entry(lua, args))?,
+    )?;
+    lua.app_data_mut::<Arms>()
+        .expect("Region-map arms — installed by `super::object::install`")
+        .0
+        .insert((side, name), arm);
+    Ok(())
+}
+
+/// Open the arm collection. Called once, at the top of [`super::object::install`], before either
+/// method table is built; [`install`] closes it.
+pub(super) fn open_arms(lua: &Lua) {
+    lua.set_app_data(Arms::default());
 }
 
 /// Replace each of the 19 Region-map entries in every table the chain reaches with one shared
@@ -103,31 +171,45 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     .map(|k| lua.named_registry_value::<Table>(k))
     .collect::<mlua::Result<_>>()?;
 
+    let arms = lua
+        .remove_app_data::<Arms>()
+        .expect("Region-map arms — opened by `open_arms`");
+
     for name in REGION_MAP_METHODS {
-        // Both arms must already exist. A missing one is not a thing to paper over with a
-        // one-sided shared function: the reference gives every widget all 19, so a gap on either
-        // side is a hole in the surface and says so here rather than at some addon's call site.
-        // (`GetNumPoints` was exactly that hole on the frame side until this module went in.)
-        let on_frame: Function = frame.get(name).map_err(|_| {
-            mlua::Error::runtime(format!("Region map: the FRAME table has no {name}"))
-        })?;
-        let on_region: Function = region.get(name).map_err(|_| {
-            mlua::Error::runtime(format!("Region map: the REGION table has no {name}"))
-        })?;
+        // Both arms must exist. A missing one is not a thing to paper over with a one-sided shared
+        // function: the reference gives every widget all 19, so a gap on either side is a hole in
+        // the surface and says so here rather than at some addon's call site. (`GetNumPoints` was
+        // exactly that hole on the frame side until this module went in.)
+        let arm = |side: Side, which: &str| -> mlua::Result<Arm> {
+            arms.0.get(&(side, name)).cloned().ok_or_else(|| {
+                mlua::Error::runtime(format!(
+                    "Region map: the {which} side never registered {name} through `set_shared`"
+                ))
+            })
+        };
+        let on_frame = arm(Side::Frame, "FRAME")?;
+        let on_region = arm(Side::Region, "REGION")?;
         let shared = lua.create_function(move |lua, args: MultiValue| {
             // The receiver is argument 1 on every one of the 19 — a method call always passes it,
-            // and a pulled-off `Api._Height(x)` call passes it as the only argument.
-            let Some(Value::Table(this)) = args.iter().next().cloned() else {
-                return Err(mlua::Error::runtime(
-                    "expected a frame or region as the first argument",
-                ));
+            // and a pulled-off `Api._Height(x)` call passes it as the only argument. Borrowed
+            // rather than cloned: an mlua `Value::Table` clone registers a second reference in the
+            // ref thread, and this is the entry point for the verbs a map-note redraw calls
+            // thousands of times.
+            let side = {
+                let Some(Value::Table(this)) = args.iter().next() else {
+                    return Err(mlua::Error::runtime(
+                        "expected a frame or region as the first argument",
+                    ));
+                };
+                side_of(lua, this)?
             };
-            match side_of(lua, &this)? {
-                Some(Side::Frame) => on_frame.call::<MultiValue>(args),
-                Some(Side::Region) => on_region.call::<MultiValue>(args),
+            match side {
+                // One ordinary Rust call, not a re-entry into Lua — see [`Arm`].
+                Some(Side::Frame) => on_frame(lua, args),
+                Some(Side::Region) => on_region(lua, args),
                 // A wrapper whose widget is gone. Deliberately ONE message for both sides — at
                 // this point the receiver's kind is exactly what could not be established, and
-                // each side's old wording claimed it.
+                // each side's own wording claimed it.
                 None => Err(mlua::Error::runtime("stale or invalid widget handle")),
             }
         })?;

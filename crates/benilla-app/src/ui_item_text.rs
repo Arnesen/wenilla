@@ -178,10 +178,38 @@ impl ItemTextOpen {
     }
 }
 
+/// The book reader's packet handler (decision 1105; in the net handler table since 2313).
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::PageTexts;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handler — called from [`super::UiItemTextPlugin`].
+    pub(super) fn register(app: &mut App) {
+        app.net_handler(SessionEventKind::PageText, on_page_text);
+    }
+
+    /// The book-page cache — one page per packet, the whole chain in answer to the first ask;
+    /// the reader repaints off it on the next feed.
+    fn on_page_text(In(ev): In<SessionEvent>, mut pages: ResMut<PageTexts>) {
+        if let SessionEvent::PageText {
+            page_id,
+            text,
+            next_page_id,
+        } = ev
+        {
+            pages.insert(page_id, text, next_page_id);
+        }
+    }
+}
+
 pub(crate) struct UiItemTextPlugin;
 
 impl Plugin for UiItemTextPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         crate::query_cache::register::<PageTexts>(app);
         app.init_resource::<ItemTextOpen>()
             .init_resource::<PageTexts>()

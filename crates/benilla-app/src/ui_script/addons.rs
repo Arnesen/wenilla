@@ -855,6 +855,11 @@ pub(crate) fn installed_rows() -> Vec<InstalledAddOn> {
 /// `ds:0xbe1bd8`), which `AddOnList_LoadCharacter 0x51ebe0` fills one node per character at
 /// char-list population (wow-5875-re `system/ui/scratch/addon-enable-store.md` §1/§5).
 ///
+/// That the node set is the **char-list, in wire order, rebuilt whole** is verified rather than
+/// assumed (wow-re `addon-defaultstate-and-node-set.md`, decision 2316): the per-record callback
+/// `0x472300` is handed to an enumerator that walks every `SMSG_CHAR_ENUM` record with no filter
+/// and no early-out, and its driver destroys every existing node first (`0x51f0b0(NULL)`).
+///
 /// **A node with no file is EMPTY, not absent**, and the difference is the whole point: an empty
 /// node contributes no opinion to the aggregate, but it is still a character whose enable bit has
 /// to be answered — and the reference answers it from the *other* characters, never with a bare
@@ -917,25 +922,37 @@ impl EnableStore {
     }
 
     /// **The bit a character actually gets** — `0x51e470(addon, character, useDefault = 1)`
-    /// lowered to a bool (a single-character query returns only 0 or 2, §4).
+    /// lowered to a bool (a single-character query returns only 0 or 2).
     ///
-    /// Their own explicit row when their file has one; otherwise the aggregate above, and where
-    /// that is undecided, the addon's `## DefaultState`. `None` is the no-character case (nobody
-    /// picked yet), which is the aggregate alone.
+    /// Three cases, and the reference distinguishes the last two (decision 2316, which corrects
+    /// 2311's reading of them as one):
+    ///
+    /// * **their file has an explicit row** → that row, and nothing else is consulted;
+    /// * **they have a node but no row for this addon** → [`Self::aggregate`], the explicit-only
+    ///   fold over the character list (`0x51e5f0`'s self-recursion), falling to `## DefaultState`
+    ///   only where that is undecided;
+    /// * **no node carries their name at all** → `## DefaultState`, *not* the aggregate. The walk
+    ///   compares the name at every node and advances past each mismatch
+    ///   (`0x51e55a jne 0x51e611`, bypassing the stop-check at `0x51e60a`), so it exhausts with
+    ///   `total == 0` and takes that epilogue. A character the list does not carry inherits
+    ///   nothing. `None` — nobody picked yet — is this case too.
+    ///
+    /// That third arm is unreachable from our own callers: every panel column is a node, and
+    /// [`store_nodes`] seats the loading character. It is written faithfully anyway, because the
+    /// next caller would otherwise find the wrong branch sitting here and have no way to know.
     pub(crate) fn enabled_for(
         &self,
         addon: &str,
         default_state: bool,
         character: Option<&str>,
     ) -> bool {
-        let key = addon.to_ascii_lowercase();
-        if let Some(explicit) = character
-            .and_then(|c| self.node(c))
-            .and_then(|h| h.get(&key))
-        {
-            return *explicit;
+        let Some(node) = character.and_then(|c| self.node(c)) else {
+            return default_state;
+        };
+        match node.get(&addon.to_ascii_lowercase()) {
+            Some(&explicit) => explicit,
+            None => self.aggregate(addon).unwrap_or(default_state),
         }
-        self.aggregate(addon).unwrap_or(default_state)
     }
 
     fn node(&self, character: &str) -> Option<&HashMap<String, bool>> {
@@ -2961,6 +2978,64 @@ mod tests {
             Some(true),
             "…and a contested addon falls to its `## DefaultState`, which is enabled"
         );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// **A name the character list does not carry inherits nothing** — the third arm of
+    /// `0x51e470(addon, character, useDefault = 1)`, and the one 2311 got wrong (decision 2316).
+    ///
+    /// 2311 read "no explicit row" and "no node" as one case and sent both to the aggregate. The
+    /// reference splits them: the walk compares the name at every node and advances past each
+    /// mismatch (`0x51e55a jne 0x51e611`, bypassing the stop-check), so an unknown name exhausts
+    /// the list with `total == 0` and takes the `DefaultState ? 2 : 0` epilogue. Only a character
+    /// that *has* a node inherits.
+    ///
+    /// Unreachable from our own callers — every panel column is a node, and `store_nodes` seats
+    /// the loading character — so this is the falsifier standing in for the caller that does not
+    /// exist yet. `Known`, who has a node and no row, is the control that keeps the two arms
+    /// honestly distinguishable: both addons are unanimous, so an implementation that collapsed
+    /// the cases would answer `false` for `Stranger` too.
+    #[test]
+    fn an_unknown_character_takes_the_manifest_default_not_the_aggregate() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("unknown-char");
+        // One unanimous `disabled`, and one addon whose manifest ships `DefaultState: disabled`
+        // so the epilogue's two outcomes are told apart rather than both reading `true`.
+        write_addon(&home, "Shunned", "## Interface: 11200\n", &[]);
+        write_addon(
+            &home,
+            "OptIn",
+            "## Interface: 11200\n## DefaultState: disabled\n",
+            &[],
+        );
+        for who in ["Onemage", "Onerogue"] {
+            let id = ("Realm".to_string(), who.to_string());
+            write_enable_state(
+                Some(&id),
+                &[("Shunned".into(), false), ("OptIn".into(), true)],
+            );
+        }
+        let roster = [
+            "Onemage".to_string(),
+            "Onerogue".to_string(),
+            "Known".to_string(),
+        ];
+        let store = EnableStore::load("Realm", &roster);
+
+        // `Known` has a node and no rows: both addons inherit their unanimous aggregate.
+        assert!(!store.enabled_for("Shunned", true, Some("Known")));
+        assert!(store.enabled_for("OptIn", false, Some("Known")));
+
+        // `Stranger` is on no node: neither aggregate reaches them — each addon answers with its
+        // own manifest default, which is the opposite verdict in both cases.
+        assert!(store.enabled_for("Shunned", true, Some("Stranger")));
+        assert!(!store.enabled_for("OptIn", false, Some("Stranger")));
+        // …and `None` (nobody picked yet) is the same epilogue.
+        assert!(store.enabled_for("Shunned", true, None));
+        assert!(!store.enabled_for("OptIn", false, None));
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 

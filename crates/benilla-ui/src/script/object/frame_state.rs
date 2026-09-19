@@ -6,6 +6,8 @@
 
 use mlua::{Lua, Table, Value};
 
+use crate::script::region_map::{set_shared, Side};
+
 use crate::order::Strata;
 use crate::script::{event, Backdrop, Insets, Model};
 use crate::widget::FrameKind;
@@ -51,20 +53,17 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
     // Identity / hierarchy
-    m.set(
-        "GetName",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            let name = {
-                let model = lua.app_data_ref::<Model>().expect("model");
-                model.arena.frame(h).and_then(|f| f.name.clone())
-            };
-            match name {
-                Some(n) => Ok(Value::String(lua.create_string(&n)?)),
-                None => Ok(Value::Nil),
-            }
-        })?,
-    )?;
+    set_shared(lua, m, Side::Frame, "GetName", |lua, this: Table| {
+        let h = frame_handle_of(lua, &this)?;
+        let name = {
+            let model = lua.app_data_ref::<Model>().expect("model");
+            model.arena.frame(h).and_then(|f| f.name.clone())
+        };
+        match name {
+            Some(n) => Ok(Value::String(lua.create_string(&n)?)),
+            None => Ok(Value::Nil),
+        }
+    })?;
     // GetID/SetID — the app-meaning-free numeric label (XML `id=`, the client's `+0xb4`): a
     // dropdown row's list position, a tab index. Default 0 (see `Frame::wow_id`).
     m.set(
@@ -148,19 +147,19 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             .map_or(&["Frame", "Region"][..], |f| type_chain(f.kind)))
     }
 
-    m.set(
-        "GetObjectType",
-        lua.create_function(|lua, this: Table| {
-            Ok(Value::String(lua.create_string(chain_of(lua, &this)?[0])?))
-        })?,
-    )?;
+    set_shared(lua, m, Side::Frame, "GetObjectType", |lua, this: Table| {
+        Ok(Value::String(lua.create_string(chain_of(lua, &this)?[0])?))
+    })?;
 
     // Same four traps as the region twin (see `script::region`): case-insensitive whole-string,
     // number 1 on a hit and nil on a miss, exactly one value either way, and a non-string
     // non-number argument raises the reference's own `Usage:` text.
-    m.set(
+    set_shared(
+        lua,
+        m,
+        Side::Frame,
         "IsObjectType",
-        lua.create_function(|lua, (this, want): (Table, Value)| {
+        |lua, (this, want): (Table, Value)| {
             let chain = chain_of(lua, &this)?;
             let want = match &want {
                 Value::String(s) => s.to_str()?.to_string(),
@@ -184,7 +183,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             } else {
                 Value::Nil
             })
-        })?,
+        },
     )?;
 
     // ── GetFrameType / IsFrameType: the FRAME-side spellings of the pair above (decision 2106) ──
@@ -255,24 +254,21 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    m.set(
-        "GetParent",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            let parent_id = {
-                let mut model = lua.app_data_mut::<Model>().expect("model");
-                model
-                    .arena
-                    .frame(h)
-                    .and_then(|f| f.parent)
-                    .map(|p| model.frame_id(p))
-            };
-            match parent_id {
-                Some(pid) => Ok(Value::Table(frame_wrapper(lua, pid)?)),
-                None => Ok(Value::Nil),
-            }
-        })?,
-    )?;
+    set_shared(lua, m, Side::Frame, "GetParent", |lua, this: Table| {
+        let h = frame_handle_of(lua, &this)?;
+        let parent_id = {
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            model
+                .arena
+                .frame(h)
+                .and_then(|f| f.parent)
+                .map(|p| model.frame_id(p))
+        };
+        match parent_id {
+            Some(pid) => Ok(Value::Table(frame_wrapper(lua, pid)?)),
+            None => Ok(Value::Nil),
+        }
+    })?;
     // ── The four structure queries: GetChildren / GetNumChildren / GetRegions / GetNumRegions ──
     //
     // Registered bindings in 1.12 (`GetNumRegions 0x773e60`, `GetRegions 0x773f60`,
@@ -378,9 +374,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // reference's hide→show round-trip does — `fire_visibility_changes` reads each frame's live
     // state for direction, so hide and show must be fired from their own phase, never one
     // combined list.
-    m.set(
+    set_shared(
+        lua,
+        m,
+        Side::Frame,
         "SetParent",
-        lua.create_function(|lua, args: mlua::MultiValue| {
+        |lua, args: mlua::MultiValue| {
             let mut it = args.into_iter();
             let this = match it.next() {
                 Some(Value::Table(t)) => t,
@@ -472,16 +471,23 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let shown = {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let shown = model.arena.reparent_finish(h, new_parent, was_visible);
-                // A real reparent moves the subtree's effective scale and anchors — a
-                // layout-gate input, and the scale is a measure-key input the subtree's
-                // FontStrings cannot name one by one (human-rate; the sweep walks once).
-                model.touch_layout();
+                // A real reparent moves the subtree's effective scale — a layout-gate input,
+                // and a measure-key input the subtree's FontStrings cannot name one by one.
+                //
+                // **The layout half NAMES its nodes** (decision 2314). This was the conservative
+                // touch, on the reading that a reparent is human-rate; a pooled widget's recycle
+                // is a reparent, and `WOW_LAYOUT_DERIVE_TRACE` put every sampled give-up in a
+                // quest-accept spike on this one line — 58 whole-graph derivations in one frame,
+                // 128 ms of a 161 ms hitch. `touch_layout_reparent`'s doc has why the subtree is
+                // the whole of what moved. The measure sweep keeps the wide form: a measure key
+                // is not a layout input and its sweep is a different cost.
+                model.touch_layout_reparent(h);
                 model.touch_measure_all();
                 shown
             };
             event::fire_visibility_changes(lua, shown);
             Ok(())
-        })?,
+        },
     )?;
     // Strata / level / scale / alpha
     m.set(

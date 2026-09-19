@@ -2386,6 +2386,67 @@ impl Model {
         }
     }
 
+    /// A **REPARENT** that names its nodes: `SetParent` moved the effective scale of every frame
+    /// in the subtree rooted at `root`, and moved nothing else the layout graph is made of
+    /// (decision 2314, extending 1388).
+    ///
+    /// ## Why a reparent is a value-only write here
+    ///
+    /// `LayoutInput.scale` is the only layout input a reparent touches: the arena recomputes the
+    /// subtree's `effective_scale` and the derive syncs it per frame. Nothing else moves —
+    /// **an anchor's target is an id resolved at `SetPoint` time** ([`super::object::anchor_args::
+    /// resolve_rel_target`]), not a live "my parent" link, so no edge is retargeted; no node is
+    /// born or dies, so the roster is unchanged; and visibility, strata and level are not layout
+    /// inputs at all (the derive walks liveness, not `effective_visible`). A region carries no
+    /// scale of its own — it reads its owner frame's — so naming the frames is enough: the dirty
+    /// closure pulls the regions that read them.
+    ///
+    /// ## Why it is worth naming a whole subtree
+    ///
+    /// `SetParent` used to take [`Self::touch_layout`], on the reading that a reparent is
+    /// human-rate. **It is not.** A pooled widget's recycle is a reparent, and an addon's map-note
+    /// pool recycles hundreds per redraw: with the director's addon set, every quest-log change
+    /// cost two frames of ~160 ms, of which `WOW_LAYOUT_PROF` attributed **128 ms to 58 full
+    /// graph derivations** — 5,267 frames and 16,124 anchored regions walked and hashed, ~3.2 ms
+    /// each, and `WOW_LAYOUT_DERIVE_TRACE` put all fourteen sampled give-ups on this one call.
+    /// A subtree is a handful of nodes; the roster is twenty thousand.
+    ///
+    /// Falls back to the conservative touch the moment a node of the subtree is not a node of the
+    /// cached graph — [`Self::touch_layout_frame`]'s own rule, and the same "worst case is a
+    /// derivation" safety every precise touch has.
+    pub(crate) fn touch_layout_reparent(&mut self, root: FrameHandle) {
+        // The walk first, then the writing: `touch_layout_frame` takes `&mut self` and the arena
+        // walk holds `&self`.
+        let mut subtree = vec![root];
+        let mut at = 0;
+        while at < subtree.len() {
+            let h = subtree[at];
+            at += 1;
+            if let Some(f) = self.arena.frame(h) {
+                subtree.extend(f.children.iter().copied());
+            }
+        }
+        // **The write itself, not only its name.** `LayoutInput.scale` was synced from the arena
+        // inside [`super::UiScript::resolve_layout`]'s DERIVATION — so a pass that skips the
+        // derivation never learned the new scale, and a named-but-unwritten node is the one shape
+        // that ships a stale rect. `WOW_LAYOUT_VERIFY` caught exactly that on the first run of
+        // `setparent::a_reparent_under_a_scale_change_moves_the_childs_rect`; naming is a claim
+        // about what moved, and this is what makes the claim true.
+        let Model {
+            arena,
+            layout_inputs,
+            ..
+        } = self;
+        for &h in &subtree {
+            if let Some(f) = arena.frame(h) {
+                layout_inputs.entry(h).or_default().scale = f.effective_scale;
+            }
+        }
+        for h in subtree {
+            self.touch_layout_frame(h);
+        }
+    }
+
     /// An anchor RETARGET that names its node: the write moved node `h`'s (or `rh`'s) set of
     /// anchor TARGETS, and hands over both target lists so the cached graph's edges can be
     /// re-pointed instead of thrown away (decision 1625, extending 1388).

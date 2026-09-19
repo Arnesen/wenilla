@@ -84,10 +84,36 @@ struct HonorFeedMemo {
     last_inspect: Option<u64>,
 }
 
+/// The honor pane's packet handler (decision 1512; in the net handler table since 2313). The
+/// honor arc's other inbound message, the award (`PvpCredit`), is a chat line and a floating
+/// number and stays with the chat family.
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::InspectHonor;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handler — called from [`super::UiHonorPlugin`].
+    pub(super) fn register(app: &mut App) {
+        app.net_handler(SessionEventKind::InspectHonorStats, on_inspect_stats);
+    }
+
+    /// The inspect reply REPLACES whatever is held, including for a different player: the
+    /// reference's latch is a single slot, and a pane still showing the last target's kills is
+    /// the failure keeping the old one produces.
+    fn on_inspect_stats(In(ev): In<SessionEvent>, mut inspect: ResMut<InspectHonor>) {
+        if let SessionEvent::InspectHonorStats(stats) = ev {
+            inspect.0 = Some(stats);
+        }
+    }
+}
+
 pub(crate) struct UiHonorPlugin;
 
 impl Plugin for UiHonorPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<InspectHonor>()
             .init_resource::<HonorFeedState>()
             .add_systems(Update, feed_honor.in_set(UiFeed));

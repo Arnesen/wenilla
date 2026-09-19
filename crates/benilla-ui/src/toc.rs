@@ -181,10 +181,18 @@ impl Toc {
     /// falls back to this byte whenever the characters disagree, and whenever *none* of them has
     /// an opinion at all — which is every addon on a fresh install.
     ///
-    /// **A manifest that does not write the line is enabled**, which is what makes a folder
-    /// dropped into `AddOns/` just work. That is the two literals' fall-through, not a guess at
-    /// the record's initial byte — a value that is neither `enabled` nor `disabled` reads the
-    /// same way, because neither compare matches it and the field keeps whatever it had.
+    /// **A manifest that does not write the line is enabled** — which is what makes a folder
+    /// dropped into `AddOns/` just work, and is the record's initial byte, read at the bytes and
+    /// not inferred from the two literals' fall-through (wow-re
+    /// `addon-defaultstate-and-node-set.md`, decision 2316). The ctor `0x520550` seeds this one
+    /// field to 1 explicitly — `0x5205b9 mov [esi+0x2b],al` with `eax = 1`, where its five
+    /// neighbours take `bl = 0` — over an allocation that does zero-fill, which is exactly what
+    /// made "the ctor zeroes it" read as true.
+    ///
+    /// Two consequences this function depends on, both verified there: a value matching **neither**
+    /// literal leaves the 1 (`0x51d21a jne`, no store — there is no "unrecognised means
+    /// disabled"), and a duplicated directive is **last-wins**, which is [`Self::directive`]'s own
+    /// rule.
     pub fn default_state(&self) -> bool {
         !self
             .directive("DefaultState")
@@ -222,6 +230,37 @@ mod tests {
         );
         // Comments and malformed directives contribute nothing.
         assert_eq!(toc.directives.len(), 4);
+    }
+
+    /// **`## DefaultState:` and its three non-obvious answers**, all byte-verified (wow-re
+    /// `addon-defaultstate-and-node-set.md`): an absent line is *enabled* because the record's
+    /// ctor seeds `[rec+0x2b]` to 1, a value matching neither literal leaves that 1 rather than
+    /// meaning disabled, and a duplicated line is last-wins.
+    ///
+    /// Only `disabled` disables, in other words — which is the same asymmetry `AddOns.txt`'s own
+    /// value grammar has, and worth a falsifier because "unrecognised means off" is the reading
+    /// anyone would write by hand.
+    #[test]
+    fn default_state_is_enabled_unless_the_manifest_says_disabled() {
+        let d = |body: &str| Toc::parse(body).default_state();
+        assert!(d("## Interface: 11200\n"), "absent: the ctor's own 1");
+        assert!(d("## DefaultState: enabled\n"));
+        assert!(!d("## DefaultState: disabled\n"));
+        assert!(
+            !d("## DefaultState:    DISABLED   \n"),
+            "trimmed, case-folded"
+        );
+        assert!(
+            d("## DefaultState: maybe\n"),
+            "neither literal: no store, the 1 stands"
+        );
+        assert!(
+            d("## DefaultState:\n"),
+            "empty value is not `disabled` either"
+        );
+        // Last-wins, the reference's hash insert — not first-wins, and not an append.
+        assert!(!d("## DefaultState: enabled\n## DefaultState: disabled\n"));
+        assert!(d("## DefaultState: disabled\n## DefaultState: enabled\n"));
     }
 
     #[test]

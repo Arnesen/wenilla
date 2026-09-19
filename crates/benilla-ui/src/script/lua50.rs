@@ -58,6 +58,17 @@
 //! answers 2 in this VM. That matters for 1751: a stock file using 5.0 varargs needs nothing from
 //! this module, and the rewrite was a precaution against a problem we did not have.
 //!
+//! **And the other half of that, which costs an hour to rediscover: `...` is a DECLARATION token
+//! here and nothing else.** This VM parses `function(x, ...)`, and then rejects every *use* of
+//! `...` as an expression — `return ...`, `f(x, ...)`, and `local a = ...` at chunk level — with
+//! `unexpected symbol near '...'`. `arg` and `unpack(arg)` are the only forwarding forms
+//! ([`vararg_is_a_declaration_only`] pins all six). That is 5.0's own shape and exactly right for
+//! the content we run, but it also binds anything WE write in Lua: an engine-side helper cannot
+//! forward an unknown argument list without a table, so a verb whose arity matters (`GetPoint()`
+//! vs `GetPoint(nil)`, `SetAllPoints()` vs `SetAllPoints(nil)`) has to stay on the Rust side.
+//! Decision 2310 is where that bit — a Lua dispatcher for the Region method map would have been
+//! ~4x cheaper than the Rust one and cannot be written in this dialect.
+//!
 //! ## The one known divergence, stated rather than hidden
 //!
 //! `table.insert`/`table.remove` stay on 5.1's `#t` border rather than consulting `getn`. **This
@@ -778,6 +789,28 @@ mod tests {
         let s = UiScript::new().unwrap();
         assert_eq!(s.eval::<f64>("return mod(7, 3)").unwrap(), 1.0);
         assert_eq!(s.eval::<f64>("return floor(2.7)").unwrap(), 2.0);
+    }
+
+    /// **`...` declares a vararg function here and can never be read.** The six forms, together,
+    /// because the split between them is the whole surprise: the declaration parses, every use
+    /// does not, and `arg` carries what `...` cannot (the module header's second vararg note).
+    #[test]
+    fn vararg_is_a_declaration_only() {
+        let s = UiScript::new().unwrap();
+        let parses = |src: &str| s.run(src).is_ok();
+        // Declaration, and the 5.0 way to read what it captured.
+        assert!(parses("return function(x, ...) return x end"));
+        assert!(parses("return function(x, ...) return arg.n end"));
+        assert!(parses(
+            "local f = tostring return function(x, ...) return f(x, unpack(arg)) end"
+        ));
+        // Every use of `...` as an expression — including at chunk level, where 5.1 proper allows
+        // it and this build does not.
+        assert!(!parses("return function(x, ...) return ... end"));
+        assert!(!parses(
+            "local f = tostring return function(x, ...) return f(x, ...) end"
+        ));
+        assert!(!parses("local a = ... return a"));
     }
 
     /// The three compat globals the reference has and we did not.
