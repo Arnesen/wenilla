@@ -20,14 +20,11 @@ mod combat_chat;
 mod combat_log;
 mod death;
 mod group;
-mod loot;
 mod mount;
 mod names;
-mod npc;
 mod objects;
 mod params;
 mod pet;
-mod quests;
 #[cfg(test)]
 mod seam_tests;
 mod session;
@@ -38,17 +35,6 @@ use params::{ActionStores, AnimWriters, Catalogs, Clocks, ObjectQueries, Session
 
 // The arm families, split out of the dispatch match below (each `pub(super)` fn is one arm's
 // body; the match stays the dispatcher, one call per arm — see the child modules).
-use loot::{
-    inventory_failure, item_push_result, item_template, loot_all_passed, loot_clear_money,
-    loot_error, loot_master_list, loot_money_notify, loot_release_response, loot_removed,
-    loot_response, loot_roll, loot_roll_won, loot_start_roll,
-};
-use quests::{
-    quest_complete, quest_confirm_accept, quest_detail, quest_failed, quest_giver_failed,
-    quest_giver_invalid, quest_giver_status, quest_greeting, quest_log_full, quest_objective_item,
-    quest_objective_kill, quest_objectives_complete, quest_offer, quest_progress,
-    quest_push_result, quest_template,
-};
 use spells::{
     action_buttons, aura_duration, cancel_auto_repeat, cast_result, channel_start, channel_update,
     clear_cooldown, cooldown_cheat, cooldown_event, item_cooldown, learned_spell, removed_spell,
@@ -146,13 +132,7 @@ fn apply_unpeeled(
         mut chain_casts,
         mut pet_tame_failures,
         mut learned_in_tab,
-        mut equip_errors,
-        mut merchant_errors,
         mut cast_bar,
-        mut pending_item_ops,
-        mut lock_transitions,
-        mut trainer_errors,
-        mut stable_errors,
         mut pending_cast,
         cooldowns: mut cooldown_store,
         mut auto_repeat,
@@ -193,7 +173,6 @@ fn apply_unpeeled(
         env_damage: env_damage_table,
         area_table,
         exploration_sounds,
-        current_map,
     } = catalogs;
     // A `&mut` to the counter itself (deref-coerced through the `ResMut`), so the arms that stamp
     // it *conditionally* can take it by reference and only advance it when they emit.
@@ -201,26 +180,15 @@ fn apply_unpeeled(
     let WindowStores {
         mut names,
         mut items,
-        mut gossip,
-        mut merchant,
-        mut trainer_open,
-        mut stable_open,
-        mut loot,
         mut loot_latch,
-        mut loot_rolls,
         mut chat_log,
         mut quest,
-        mut quest_log,
-        mut quest_share,
         mut go_templates,
         mut home_bind,
         mut proficiencies,
         mut dropped,
         mut death_net,
         mut group,
-        mut taxi,
-        mut bank_open,
-        mut bank_errors,
         mut world_states,
         social,
         mut logout,
@@ -228,7 +196,6 @@ fn apply_unpeeled(
         mut ui_error_keys,
         mut played_time_answer,
         mut tutorials,
-        mut poi_marker,
     } = windows;
     let Session {
         mut teleports,
@@ -348,20 +315,9 @@ fn apply_unpeeled(
                     &mut status,
                     &mut names,
                     &mut items,
-                    &mut gossip,
-                    &mut merchant,
-                    &mut trainer_open,
-                    &mut loot,
-                    &mut loot_latch,
-                    &mut loot_rolls,
                     &mut chat_log,
-                    &mut quest,
-                    &mut quest_log,
-                    &mut quest_share,
                     &mut death_net,
                     &mut group,
-                    &mut taxi,
-                    &mut bank_open,
                     &mut cooldown_store,
                     &mut pending_transfer,
                     &mut disconnects,
@@ -680,8 +636,6 @@ fn apply_unpeeled(
             SessionEvent::GameObjectDespawnAnim { guid } => {
                 objects::gameobject_despawn_anim(guid, &mut commands, &index)
             }
-            SessionEvent::FishNotHooked => loot::fish_verdict(false, &mut ui_error_keys),
-            SessionEvent::FishEscaped => loot::fish_verdict(true, &mut ui_error_keys),
             SessionEvent::PlaySound { sound_id } => world::play_sound(sound_id, &mut server_sounds),
             SessionEvent::PlayMusic { music_id } => world::play_music(music_id, &mut server_sounds),
             SessionEvent::PlayObjectSound { sound_id, guid } => {
@@ -769,21 +723,6 @@ fn apply_unpeeled(
                 &net_commands,
                 &mut chain_casts,
                 play_seq.next(),
-            ),
-            SessionEvent::InventoryFailure {
-                reason,
-                required_level,
-                item_guid,
-                bag_slot,
-            } => inventory_failure(
-                reason,
-                required_level,
-                item_guid,
-                bag_slot,
-                &mut equip_errors,
-                &mut pending_item_ops,
-                &mut lock_transitions,
-                &mut loot_latch,
             ),
             SessionEvent::Chat(m) => {
                 chat::chat(m, &mut chat_log, &social, &net_commands, &mut server_said)
@@ -892,39 +831,6 @@ fn apply_unpeeled(
             SessionEvent::ReadyCheckAnswer { guid, ready } => {
                 group.apply_ready_check_answer(guid, ready != 0)
             }
-            SessionEvent::LootResponse {
-                guid,
-                loot_type,
-                gold,
-                items,
-            } => loot_response(
-                guid,
-                loot_type,
-                gold,
-                items,
-                &mut loot,
-                &mut loot_latch,
-                &net_commands,
-            ),
-            SessionEvent::LootError { guid, error } => {
-                loot_error(guid, error, &mut ui_error_keys, &mut loot_latch)
-            }
-            SessionEvent::LootRemoved { slot } => loot_removed(slot, &mut loot),
-            SessionEvent::LootMoneyNotify { amount } => loot_money_notify(amount),
-            SessionEvent::LootClearMoney => loot_clear_money(&mut loot),
-            SessionEvent::LootReleaseResponse { guid } => {
-                loot_release_response(guid, &mut loot, &mut loot_latch)
-            }
-            SessionEvent::ItemPushResult(p) => {
-                item_push_result(p, &self_guid, &mut loot, &mut tutorials)
-            }
-            // ── The group-loot roll family (decision 0591) — the GroupLootFrame feed ───────────
-            SessionEvent::LootStartRoll(p) => loot_start_roll(p, &mut loot_rolls),
-            SessionEvent::LootRoll(p) => loot_roll(p, &mut loot_rolls),
-            SessionEvent::LootRollWon(p) => loot_roll_won(p, &mut loot_rolls),
-            SessionEvent::LootAllPassed(p) => loot_all_passed(p, &mut loot_rolls),
-            // ── Master loot (decision 1675) — the candidate list, ahead of its LootResponse ───
-            SessionEvent::LootMasterList { candidates } => loot_master_list(candidates, &mut loot),
             // ── The death arc (decision 0308) — arm bodies in `death` ─────────────────────────
             SessionEvent::CorpseQuery {
                 found,
@@ -976,8 +882,14 @@ fn apply_unpeeled(
                 counter,
                 launch,
             } => session::knock_back(guid, counter, launch, &self_guid, &mut knockbacks),
+            // An item template's display head (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`, answering our
+            // `CMSG_ITEM_QUERY_SINGLE`): fill the ask-once template cache (decisions 0068/0072 —
+            // one cache serves held-item resolution and the container layer); a server miss
+            // records `None` so the entry is never re-asked. Consumers re-read it next frame.
             SessionEvent::ItemTemplate { entry, info } => {
-                item_template(entry, info.map(|b| *b), &mut items)
+                let info = info.map(|b| *b);
+                debug!("net: item template {entry} → {info:?}");
+                items.insert_template(entry, info);
             }
             SessionEvent::AttackStart { attacker, victim } => {
                 combat::attack_start(attacker, victim, &mut commands, &index)
@@ -1376,137 +1288,7 @@ fn apply_unpeeled(
                     &mut kit_pushes,
                 )
             }
-            // The gossip/vendor/trainer NPC-interaction family — arm bodies in `npc`.
-            SessionEvent::GossipMenu {
-                npc,
-                text_id,
-                options,
-                quests,
-            } => npc::gossip_menu(
-                npc,
-                text_id,
-                options,
-                quests,
-                &mut gossip,
-                &net_commands,
-                &index,
-                &stores,
-            ),
-            SessionEvent::NpcGreeting { text_id, blocks } => {
-                npc::npc_greeting(text_id, blocks, &mut gossip, &index, &stores)
-            }
-            SessionEvent::GossipComplete => npc::gossip_complete(&mut gossip, &mut quest),
-            SessionEvent::GossipPoi(poi) => npc::gossip_poi(
-                &poi,
-                &mut poi_marker,
-                current_map.as_ref().map_or(0, |m| m.0),
-                real_clock.elapsed_secs_f64(),
-            ),
-            // Questgiver panels (decision 0088): fill the `QuestGiver` the quest feed
-            // (`crate::ui_quest`) reads. Each panel packet replaces the open view; the greeting/gossip
-            // quest-row clicks and the panel buttons flow back out through the quest/gossip drains.
-            SessionEvent::QuestGiverStatus { npc, status } => {
-                quest_giver_status(npc, status, &mut quest)
-            }
-            SessionEvent::QuestGreeting(list) => quest_greeting(list, &mut quest),
-            SessionEvent::QuestDetail(d) => quest_detail(d, &mut quest, &net_commands),
-            SessionEvent::QuestProgress(p) => quest_progress(p, &mut quest),
-            SessionEvent::QuestOffer(o) => quest_offer(o, &mut quest),
-            SessionEvent::QuestComplete(c) => quest_complete(c, &mut quest),
-            // Quest log (decision 0088's deferred second slice): the full template feeds the log
-            // window's ask-once detail cache; the `SMSG_QUESTUPDATE_*` toasts have no dedicated
-            // window of their own on this server (no ErrorsFrame-style transient panel yet), so they
-            // route through the chat window's system-line seam ([`crate::ui_chat::ChatLog`]) — the
-            // same seam the loot feed's refusal/receive lines use — colored SYSTEM yellow, the
-            // GM-feedback color.
-            SessionEvent::QuestTemplate(t) => quest_template(t, &mut quest_log),
-            SessionEvent::QuestObjectiveKill {
-                quest_id: _,
-                entry,
-                count,
-                required,
-            } => quest_objective_kill(entry, count, required, &mut quest),
-            SessionEvent::QuestObjectiveItem { item_id, count } => {
-                quest_objective_item(item_id, count, &mut quest)
-            }
-            SessionEvent::QuestObjectivesComplete { quest_id } => {
-                quest_objectives_complete(quest_id, &mut quest)
-            }
-            SessionEvent::QuestFailed { quest_id, timed } => {
-                quest_failed(quest_id, timed, &mut quest_log, &net_commands, &mut quest)
-            }
-            SessionEvent::QuestLogFull => quest_log_full(&mut quest),
-            // The party quest-share (decision 1733): one member's verdict on a quest we pushed,
-            // and the escort-quest confirm. Both park in `QuestShare` for `crate::ui_quest_share`
-            // to name and raise — the guid needs a name query the apply pass has no VM to await.
-            SessionEvent::QuestPushResult { member, msg } => {
-                quest_push_result(member, msg, &mut quest_share)
-            }
-            SessionEvent::QuestConfirmAccept(c) => quest_confirm_accept(c, &mut quest_share),
-            SessionEvent::QuestGiverInvalid { reason } => quest_giver_invalid(reason, &mut quest),
-            SessionEvent::QuestGiverFailed { quest_id, reason } => {
-                quest_giver_failed(quest_id, reason, &mut quest, &mut quest_log, &net_commands)
-            }
-            SessionEvent::VendorInventory { vendor, items } => {
-                npc::vendor_inventory(vendor, items, &mut merchant)
-            }
-            SessionEvent::ShowBank { banker } => {
-                npc::show_bank(banker, &mut bank_open, &mut gossip, &mut quest)
-            }
-            SessionEvent::BuyBankSlotResult { result } => {
-                npc::bank_buy_slot_result(result, &mut bank_errors)
-            }
-            SessionEvent::TrainerList {
-                trainer,
-                trainer_type,
-                services,
-                greeting,
-            } => npc::trainer_list(trainer, trainer_type, services, greeting, &mut trainer_open),
-            SessionEvent::TrainerBuySucceeded { trainer, spell_id } => {
-                npc::trainer_buy_succeeded(trainer, spell_id, &mut trainer_open, &net_commands)
-            }
-            SessionEvent::TrainerBuyFailed { error, .. } => {
-                npc::trainer_buy_failed(error, &mut trainer_errors)
-            }
             SessionEvent::InvalidatePlayer { guid } => names::invalidate_player(guid, &mut names),
-            SessionEvent::ListStabledPets {
-                npc,
-                num_stable_slots,
-                pets,
-            } => npc::list_stabled_pets(npc, num_stable_slots, pets, &mut stable_open, &mut names),
-            SessionEvent::StableResult { result } => {
-                npc::stable_result(result, &mut stable_open, &mut stable_errors, &net_commands)
-            }
-            SessionEvent::TaxiNodesShown {
-                flightmaster,
-                nearest_node,
-                known_mask,
-            } => npc::taxi_nodes_shown(flightmaster, nearest_node, known_mask, &mut taxi),
-            SessionEvent::TaxiNodeStatus { guid, known } => {
-                npc::taxi_node_status(guid, known, &mut commands, &index)
-            }
-            SessionEvent::ActivateTaxiReply { code } => npc::taxi_activate_reply(code, &mut taxi),
-            SessionEvent::NewTaxiPath => npc::taxi_new_path(&mut taxi),
-            SessionEvent::VendorBuyResult {
-                vendor,
-                slot,
-                new_count,
-                ..
-            } => npc::vendor_buy_result(vendor, slot, new_count, &mut merchant),
-            SessionEvent::VendorBuyFailed {
-                vendor,
-                item_entry,
-                reason,
-            } => npc::vendor_buy_failed(
-                vendor,
-                item_entry,
-                reason,
-                &mut merchant,
-                &mut merchant_errors,
-            ),
-            SessionEvent::VendorSellFailed { reason, .. } => {
-                npc::vendor_sell_failed(reason, &mut merchant_errors)
-            }
             SessionEvent::ForceSpeedChange {
                 guid,
                 kind,

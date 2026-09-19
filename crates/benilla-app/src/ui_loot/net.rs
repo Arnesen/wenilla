@@ -1,23 +1,126 @@
-//! Loot-window + item-template/inventory-failure arm bodies for [`super::apply_net_updates`]'s
-//! dispatch match — one of the largest arm families, split out on its own (decision 0084's loot
-//! feed, plus the item-template ask-once cache and the equip-refusal UI line). Each `pub(super)` fn
-//! here is exactly one arm's body; the match at the call site stays the dispatcher, one call per
-//! arm.
+//! The loot window's packet handlers (decision 0084; in the net handler table since 2319, moved
+//! out of the drain's loot arm file) — the [`LootState`] session and the [`LootLatch`] the loot
+//! feed ([`super`]) reads, the fishing verdicts, and the item push that prints "You receive …".
+//! The group rolls are [`crate::ui_loot_roll`]'s and the inventory refusal is
+//! [`crate::ui_items`]'s.
 
-use benilla_protocol::messages::{
-    ItemPushResult, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll,
-};
-use benilla_protocol::ItemInfo;
+use benilla_protocol::messages::{ItemPushResult, LootItem};
+use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
-use super::super::SelfGuid;
-use crate::items::Items;
-use crate::net::ClientCommand;
-use crate::pending_item_ops::{LockTransitions, PendingItemOps};
+use super::{LootLatch, LootState};
+use crate::net::{ClientCommand, NetCommands, NetHandlerApp, SelfGuid};
 use crate::ui_action::{UiError, UiErrorKeys};
-use crate::ui_items::{EquipError, EquipErrors};
-use crate::ui_loot::{LootLatch, LootState};
-use crate::ui_loot_roll::LootRolls;
+
+/// Register the loot handlers — called from [`super::UiLootPlugin`]. One per kind, plus the
+/// session-end listener.
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::LootResponse, on_response)
+        .net_handler(K::LootError, on_error)
+        .net_handler(K::LootRemoved, on_removed)
+        .net_handler(K::LootMoneyNotify, on_money_notify)
+        .net_handler(K::LootClearMoney, on_clear_money)
+        .net_handler(K::LootReleaseResponse, on_release_response)
+        .net_handler(K::LootMasterList, on_master_list)
+        .net_handler(K::FishNotHooked, on_fish_verdict)
+        .net_handler(K::FishEscaped, on_fish_verdict)
+        .net_handler(K::ItemPushResult, on_item_push_result)
+        .net_handler(K::Disconnected, on_session_end);
+}
+
+fn on_response(
+    In(ev): In<SessionEvent>,
+    mut loot: ResMut<LootState>,
+    mut latch: ResMut<LootLatch>,
+    commands: Res<NetCommands>,
+) {
+    if let SessionEvent::LootResponse {
+        guid,
+        loot_type,
+        gold,
+        items,
+    } = ev
+    {
+        loot_response(
+            guid, loot_type, gold, items, &mut loot, &mut latch, &commands,
+        );
+    }
+}
+
+fn on_error(
+    In(ev): In<SessionEvent>,
+    mut errors: ResMut<UiErrorKeys>,
+    mut latch: ResMut<LootLatch>,
+) {
+    if let SessionEvent::LootError { guid, error } = ev {
+        loot_error(guid, error, &mut errors, &mut latch);
+    }
+}
+
+fn on_removed(In(ev): In<SessionEvent>, mut loot: ResMut<LootState>) {
+    if let SessionEvent::LootRemoved { slot } = ev {
+        loot_removed(slot, &mut loot);
+    }
+}
+
+fn on_money_notify(In(ev): In<SessionEvent>) {
+    if let SessionEvent::LootMoneyNotify { amount } = ev {
+        loot_money_notify(amount);
+    }
+}
+
+fn on_clear_money(In(ev): In<SessionEvent>, mut loot: ResMut<LootState>) {
+    if let SessionEvent::LootClearMoney = ev {
+        loot_clear_money(&mut loot);
+    }
+}
+
+fn on_release_response(
+    In(ev): In<SessionEvent>,
+    mut loot: ResMut<LootState>,
+    mut latch: ResMut<LootLatch>,
+) {
+    if let SessionEvent::LootReleaseResponse { guid } = ev {
+        loot_release_response(guid, &mut loot, &mut latch);
+    }
+}
+
+fn on_master_list(In(ev): In<SessionEvent>, mut loot: ResMut<LootState>) {
+    if let SessionEvent::LootMasterList { candidates } = ev {
+        loot_master_list(candidates, &mut loot);
+    }
+}
+
+fn on_fish_verdict(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorKeys>) {
+    match ev {
+        SessionEvent::FishNotHooked => fish_verdict(false, &mut errors),
+        SessionEvent::FishEscaped => fish_verdict(true, &mut errors),
+        _ => {}
+    }
+}
+
+fn on_item_push_result(
+    In(ev): In<SessionEvent>,
+    self_guid: Res<SelfGuid>,
+    mut loot: ResMut<LootState>,
+    mut tutorials: ResMut<crate::tutorial::Tutorials>,
+) {
+    if let SessionEvent::ItemPushResult(p) = ev {
+        item_push_result(p, &self_guid, &mut loot, &mut tutorials);
+    }
+}
+
+/// An open loot window and the kneel latch die with the socket (unconditionally). A listener on
+/// the session end ([`crate::net::handlers::BROADCAST`]).
+fn on_session_end(
+    In(_): In<SessionEvent>,
+    mut loot: ResMut<LootState>,
+    mut latch: ResMut<LootLatch>,
+) {
+    loot.clear_session();
+    latch.0 = None;
+}
 
 /// The wire `loot_type` values `SMSG_LOOT_RESPONSE`'s **cold-latch** admission accepts
 /// (`0x5eb94b`/`0x5eb953`/`0x5eb95b`) — vmangos `LootType`'s `PICKPOCKETING(2)` · `FISHING(3)` ·
@@ -46,14 +149,14 @@ const SERVER_STARTED_LOOT: [u8; 3] = [2, 3, 4];
 /// The accepted arm writes the latch verbatim (`0x5ebb60`) and — verified over the whole success
 /// path — calls **neither** the base-anim recompute nor the Loot-50 force-play. A chest is already
 /// kneeling by now: its arm was `SMSG_SPELL_GO` (§6, [`super::spells`]), one packet earlier.
-pub(super) fn loot_response(
+fn loot_response(
     guid: u64,
     loot_type: u8,
     gold: u32,
     items: Vec<LootItem>,
     loot: &mut LootState,
     latch: &mut LootLatch,
-    net: &crate::net::NetCommands,
+    net: &NetCommands,
 ) {
     // `0x5eb924`–`0x5eb95b`, transcribed.
     let accept = match latch.0 {
@@ -75,7 +178,7 @@ pub(super) fn loot_response(
         return;
     }
     // The loot window opens (decision 0084): fill LootState from the wire; the feed
-    // ([`crate::ui_loot`]) resolves rows + fires LOOT_OPENED next frame. `loot_type` rides along
+    // ([`super`]) resolves rows + fires LOOT_OPENED next frame. `loot_type` rides along
     // for `IsFishingLoot()` (decision 1086).
     debug!(
         "net: loot response {guid:#x} type {loot_type} gold {gold} {} item(s)",
@@ -85,7 +188,7 @@ pub(super) fn loot_response(
     // `0x5ebb60` — the packet's guid, verbatim. Re-arming a corpse's already-matching latch is a
     // no-op; a chest re-arms what `SMSG_SPELL_GO` armed; a **fishing** bobber arms here for the
     // first time and still does not kneel, because the pose is predicate B's call, not the
-    // latch's ([`crate::ui_loot::LootKneel`]).
+    // latch's ([`super::LootKneel`]).
     latch.0 = Some(guid);
 }
 
@@ -96,7 +199,7 @@ pub(super) fn loot_response(
 /// red: the reference handlers (`0x5e3fc5`/`0x5e3fe2` → `DisplayError` ids `0x13e`/`0x13f`) are
 /// **type-1** registry entries, which fire `UI_INFO_MESSAGE` — byte-verified in wow-re
 /// `fish-msg-handlers.md`, correcting 1086's shipped guess (the fold-back record).
-pub(super) fn fish_verdict(escaped: bool, errors: &mut UiErrorKeys) {
+fn fish_verdict(escaped: bool, errors: &mut UiErrorKeys) {
     let key = if escaped {
         "ERR_FISH_ESCAPED"
     } else {
@@ -216,7 +319,7 @@ fn loot_refusal(reason: u8) -> LootRefusal {
 ///    `[item+0x314]` bit 0. That matters only when the loot source is an ITEM guid — a lockbox —
 ///    where a refused open should drop the item's pending lock; for a corpse or chest guid there
 ///    is no item to unlock. benilla does not touch [`LockTransitions`] here.
-pub(super) fn loot_error(guid: u64, error: u8, errors: &mut UiErrorKeys, latch: &mut LootLatch) {
+fn loot_error(guid: u64, error: u8, errors: &mut UiErrorKeys, latch: &mut LootLatch) {
     let LootRefusal { key, releases } = loot_refusal(error);
     debug!("net: loot error {error} on {guid:#x} → {key} (releases: {releases})");
     errors.0.push(UiError::key(key));
@@ -228,21 +331,21 @@ pub(super) fn loot_error(guid: u64, error: u8, errors: &mut UiErrorKeys, latch: 
 }
 
 /// One loot-window row was taken, by anyone (`SMSG_LOOT_REMOVED`) — the UI clears that row.
-pub(super) fn loot_removed(slot: u8, loot: &mut LootState) {
+fn loot_removed(slot: u8, loot: &mut LootState) {
     // A row was taken (by anyone): drop it; the feed repaints via LOOT_UPDATE.
     debug!("net: loot slot {slot} removed");
     loot.remove_slot(slot);
 }
 
 /// Our share of the loot's coin pile (`SMSG_LOOT_MONEY_NOTIFY`), answering our `CMSG_LOOT_MONEY`.
-pub(super) fn loot_money_notify(amount: u32) {
+fn loot_money_notify(amount: u32) {
     // Our share of the coin pile — informational; the coin row drops on CLEAR_MONEY and
     // the purse rides the ordinary COINAGE flush. Solo looting rarely sends this.
     debug!("net: loot money {amount}");
 }
 
 /// The coin line disappears for every current looter (`SMSG_LOOT_CLEAR_MONEY`).
-pub(super) fn loot_clear_money(loot: &mut LootState) {
+fn loot_clear_money(loot: &mut LootState) {
     // The coin line disappears for everyone → drop the coin row.
     debug!("net: loot coin line cleared");
     loot.clear_money();
@@ -252,52 +355,16 @@ pub(super) fn loot_clear_money(loot: &mut LootState) {
 /// Idempotent — a client-side close already cleared. The latch clear is **guid-matched**: under
 /// the corpse-switch race (loot B requested while A was open) the old window's release response
 /// must not drop the latch the new request just armed (decision 0515).
-pub(super) fn loot_release_response(guid: u64, loot: &mut LootState, latch: &mut LootLatch) {
+fn loot_release_response(guid: u64, loot: &mut LootState, latch: &mut LootLatch) {
     debug!("net: loot released {guid:#x}");
     loot.clear();
     latch.clear_for(guid);
 }
 
-/// A group roll opened on one drop (`SMSG_LOOT_START_ROLL`) — a `GroupLootFrame` goes up with
-/// Need/Greed/Pass and the countdown bar (decision 0591).
-pub(super) fn loot_start_roll(p: LootStartRoll, rolls: &mut LootRolls) {
-    debug!(
-        "net: loot roll opened on item {} ({:#x} slot {}), {} ms",
-        p.item_id, p.looted_target, p.item_slot, p.countdown_ms
-    );
-    rolls.start(p);
-}
-
-/// One roller's vote or dice result (`SMSG_LOOT_ROLL`) — the chat announcement line. The
-/// `(roll_number, roll_type)` pair is overloaded; `LootRoll::is_dice`/`vote` disentangle it.
-pub(super) fn loot_roll(p: LootRoll, rolls: &mut LootRolls) {
-    debug!(
-        "net: loot roll announce — roller {:#x} number {} type {}",
-        p.roller, p.roll_number, p.roll_type
-    );
-    rolls.announce(p);
-}
-
-/// A group roll resolved (`SMSG_LOOT_ROLL_WON`) — the "won" line, and that roll's frame closes.
-pub(super) fn loot_roll_won(p: LootRollWon, rolls: &mut LootRolls) {
-    debug!(
-        "net: loot roll won by {:#x} with {} (type {})",
-        p.winner, p.roll_number, p.roll_type
-    );
-    rolls.won(p);
-}
-
-/// Everyone passed (`SMSG_LOOT_ALL_PASSED`) — the frame closes and the item returns to the corpse
-/// as an ordinary lootable row.
-pub(super) fn loot_all_passed(p: LootAllPassed, rolls: &mut LootRolls) {
-    debug!("net: loot roll — everyone passed on item {}", p.item_id);
-    rolls.all_passed(p);
-}
-
 /// The master-loot candidate list (`SMSG_LOOT_MASTER_LIST`, decision 1675) — who the master looter
 /// may hand a row to. It arrives from inside the server's `SendLoot`, so it lands just AHEAD of the
 /// `SMSG_LOOT_RESPONSE` it belongs to; `LootState` stages it and the open claims it.
-pub(super) fn loot_master_list(candidates: Vec<u64>, loot: &mut LootState) {
+fn loot_master_list(candidates: Vec<u64>, loot: &mut LootState) {
     debug!("net: master-loot candidates: {} eligible", candidates.len());
     loot.set_master_candidates(candidates);
 }
@@ -325,7 +392,7 @@ fn is_our_push(p: &ItemPushResult, self_guid: &SelfGuid) -> bool {
 /// self check being the only thing that can stop a push here. The reference's
 /// `CGGameUI::OnItemPush 0x491a60` emits both from this one packet: it returns early only on a guid
 /// mismatch, and tests `showInChat` further down, after the `ITEM_PUSH` fire.
-pub(super) fn item_push_result(
+fn item_push_result(
     p: ItemPushResult,
     self_guid: &SelfGuid,
     loot: &mut LootState,
@@ -344,50 +411,6 @@ pub(super) fn item_push_result(
     // The item-received handler's tutorial sites (1976): resolved on the tutorial feed.
     tutorials.item_received(p.item_entry, p.bag_slot, p.item_slot);
     loot.push_receive(&p);
-}
-
-/// An item template's display head (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`, answering our
-/// `CMSG_ITEM_QUERY_SINGLE`).
-pub(super) fn item_template(entry: u32, info: Option<ItemInfo>, items: &mut Items) {
-    // Fill the ask-once template cache (decisions 0068/0072 — one cache serves held-
-    // item resolution and the container layer); a server miss records `None` so the
-    // entry is never re-asked. Consumers re-read it next frame.
-    debug!("net: item template {entry} → {info:?}");
-    items.insert_template(entry, info);
-}
-
-/// The server refused an inventory operation (`SMSG_INVENTORY_CHANGE_FAILURE` — equip level,
-/// proficiency, bag full, …): the UI error line's inventory vocabulary, the equip twin of the
-/// cast-result failure path. Also the pending-lock's failure-driven clear (decision 0216 §4 /
-/// 0218 §3): every arrival here already has reason ≠ 0 (reason 0 is filtered before this event
-/// exists at all — `benilla_protocol::events`'s `if reason != 0` guard), so it always tries a
-/// [`PendingItemOps::clear_by_failure`]. This site has no `UiScript` to fire `ITEM_LOCK_CHANGED`
-/// through, so the transitioned slots queue in [`LockTransitions`] for the container feed
-/// (`ui_items::feed::feed_containers`) to drain and fire next time it runs.
-pub(super) fn inventory_failure(
-    reason: u8,
-    required_level: Option<u32>,
-    item_guid: u64,
-    bag_slot: u8,
-    equip_errors: &mut EquipErrors,
-    pending: &mut PendingItemOps,
-    lock_cleared: &mut LockTransitions,
-    latch: &mut LootLatch,
-) {
-    debug!("net: inventory failure {reason:#04x} (item {item_guid:#x}, bag slot {bag_slot})");
-    equip_errors.0.push(EquipError {
-        reason,
-        required_level,
-        bag_slot,
-    });
-    lock_cleared.0.extend(pending.clear_by_failure(item_guid));
-    // The sixth loot-latch clear (`0x5e3a84`, wow-re `loot-anim-leg.md` §5; decision 1477): when
-    // the packet's **first item guid** is the object we are looting, the session ends here. It is
-    // how an item-container loot (a lockbox) closes when the move out of it fails — the one clear
-    // the 1471 census was missing. Guid-matched, as the bytes are.
-    if item_guid != 0 {
-        latch.clear_for(item_guid);
-    }
 }
 
 #[cfg(test)]
@@ -667,42 +690,6 @@ mod tests {
             matches!(rx.try_recv(), Ok(ClientCommand::LootRelease { guid }) if guid == CHEST),
             "…and it is B that gets released"
         );
-    }
-
-    /// The sixth clear (`0x5e3a84`): an inventory-move failure whose first item guid IS the loot
-    /// target ends that session. Guid-matched, so an unrelated bag failure leaves it alone.
-    #[test]
-    fn an_inventory_failure_on_the_looted_object_clears_the_latch() {
-        const LOCKBOX: u64 = 0x4000_0000_0000_0007;
-        let mut errs = EquipErrors::default();
-        let mut pending = PendingItemOps::default();
-        let mut cleared = LockTransitions::default();
-        let mut latch = LootLatch(Some(LOCKBOX));
-
-        // An unrelated item's failure must not end the session.
-        inventory_failure(
-            2,
-            None,
-            0x1234,
-            0,
-            &mut errs,
-            &mut pending,
-            &mut cleared,
-            &mut latch,
-        );
-        assert_eq!(latch.0, Some(LOCKBOX));
-
-        inventory_failure(
-            2,
-            None,
-            LOCKBOX,
-            0,
-            &mut errs,
-            &mut pending,
-            &mut cleared,
-            &mut latch,
-        );
-        assert_eq!(latch.0, None);
     }
 
     const ME: u64 = 0x0000_0000_0000_002A;

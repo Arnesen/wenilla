@@ -12,10 +12,19 @@ use super::{FrameHandle, RegionHandle, WidgetArena, SCALE_EPS};
 impl WidgetArena {
     // ── Visibility (effective_visible_show/_hide) ────────────────────────────────────────────────
 
-    /// Set a frame's own `shown` bit and propagate effective visibility through its subtree, per
+    /// Set a frame's own `shown` bit and propagate effective visibility through its subtree, after
     /// `effective_visible_show 0x76ae10` / `_hide 0x76ad50` (`propagation.md`). Returns, in
     /// pre-order (a node before its descendants), **every frame whose `effective_visible` actually
-    /// changed** — the caller fires `OnShow`/`OnHide` for those, in order. A no-op `shown` write, or
+    /// changed** — the caller fires `OnShow`/`OnHide` for those, in order.
+    ///
+    /// **Two recorded deviations from `0x76ae10`, both in this signature** (decision 2317). The
+    /// reference is **post-order** — it marks itself visible, recurses into its children, and fires
+    /// its own notify last (`0x76aef5`, past both child loops) — so descendants are notified before
+    /// ancestors. And it keeps **no snapshot**: each loop re-reads the live links after every
+    /// per-node call, so a frame hidden by a handler mid-cascade refuses at its own gate
+    /// (`0x76ae1d`) and is never notified, where the list returned here already holds it. The
+    /// auction window exercises exactly that case and lands on the same state by the other road;
+    /// 2317 has the measurements and the risk for whoever changes this. A no-op `shown` write, or
     /// a change that does not move any effective visibility (e.g. hiding an already-invisible frame),
     /// returns empty.
     pub fn set_shown(&mut self, h: FrameHandle, shown: bool) -> Vec<FrameHandle> {

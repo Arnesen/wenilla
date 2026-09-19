@@ -36,6 +36,8 @@ use crate::ui_items::KEYRING_CONTAINER;
 use crate::ui_party::{GroupState, GROUPTYPE_RAID, GROUP_MEMBER_SUBGROUP};
 use crate::ui_script::{UiFeed, UiInput};
 
+mod net;
+
 /// The coin-pile row icons (direct `Interface\Icons` paths — `SetTexture` takes them as-is, no DBC),
 /// **six of them, one per decade of copper**, all VERIFIED to extract from `interface.MPQ`.
 ///
@@ -630,6 +632,7 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut loot: ResMut<LootCo
 
 impl Plugin for UiLootPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.add_observer(on_cvar);
         app.init_resource::<LootState>()
             .init_resource::<LootConfig>()

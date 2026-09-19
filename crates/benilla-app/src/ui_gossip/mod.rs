@@ -189,11 +189,15 @@ impl GossipState {
     }
 }
 
+mod net;
+pub(crate) use net::gossip_complete as end_interaction;
+
 /// The gossip window's feed + drain (decision 0081), cloned from [`crate::ui_items::UiItemsPlugin`].
 pub(crate) struct UiGossipPlugin;
 
 impl Plugin for UiGossipPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<GossipState>().add_systems(
             Update,
             (

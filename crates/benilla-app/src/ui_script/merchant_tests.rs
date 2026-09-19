@@ -1179,7 +1179,7 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
             num_available: -1,
             item_id: 159,
             stats: None,
-            // Fed exactly as `ui_merchant.rs` builds it off the row's template answer.
+            // Fed exactly as `ui_merchant` builds it off the row's template answer.
             link: Some(WATER_LINK.into()),
             max_stack: Some(1),
         }],

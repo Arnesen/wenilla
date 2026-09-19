@@ -323,10 +323,13 @@ fn drain_taxi(
     }
 }
 
+mod net;
+
 pub(crate) struct UiTaxiPlugin;
 
 impl Plugin for UiTaxiPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<TaxiState>()
             .init_resource::<TaxiRouteCache>()
             .add_systems(

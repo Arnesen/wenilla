@@ -11,13 +11,7 @@ use bevy::prelude::*;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::ui_chat::ChatLog;
-use crate::ui_gossip::GossipState;
-use crate::ui_loot::LootState;
-use crate::ui_merchant::MerchantOpen;
 use crate::ui_quest::QuestGiver;
-use crate::ui_quest_log::QuestLog;
-use crate::ui_taxi::TaxiState;
-use crate::ui_trainer::TrainerOpen;
 
 use super::super::{
     CharActionResultMessage, CharListMessage, CharacterLoginFailedMessage,
@@ -177,20 +171,9 @@ pub(super) fn disconnected(
     status: &mut NetStatus,
     names: &mut NameCache,
     items: &mut Items,
-    gossip: &mut GossipState,
-    merchant: &mut MerchantOpen,
-    trainer_open: &mut TrainerOpen,
-    loot: &mut LootState,
-    loot_latch: &mut crate::ui_loot::LootLatch,
-    loot_rolls: &mut crate::ui_loot_roll::LootRolls,
     chat_log: &mut ChatLog,
-    quest: &mut QuestGiver,
-    quest_log: &mut QuestLog,
-    quest_share: &mut crate::ui_quest_share::QuestShare,
     death_net: &mut crate::death::DeathNet,
     group: &mut crate::ui_party::GroupState,
-    taxi: &mut TaxiState,
-    bank: &mut crate::ui_bank::BankOpen,
     cooldowns: &mut crate::cooldowns::Cooldowns,
     pending_transfer: &mut PendingTransfer,
     disconnects: &mut MessageWriter<DisconnectedMessage>,
@@ -236,22 +219,8 @@ pub(super) fn disconnected(
     // In-flight name queries died with the socket; let the next resolve re-ask.
     names.clear_pending();
     items.clear_session();
-    gossip.clear_session();
-    merchant.clear_session();
-    trainer_open.clear_session();
-    loot.clear_session();
-    loot_latch.0 = None; // the kneel latch dies with the socket (unconditional here)
-    loot_rolls.clear(); // open group rolls die with the socket (decision 0591)
     chat_log.clear_session();
-    quest.clear_session();
-    quest_log.clear_session();
-    // A verdict on a share nobody is listening for any more, and a confirm whose server-side
-    // latch died with the socket (decision 1733).
-    quest_share.clear_session();
     group.clear_session();
-    taxi.clear_session();
-    // The bank window dies with the socket (decision 0604) — a reconnect re-opens via the banker.
-    bank.clear_session();
     // The cooldown list is session-scoped — the next login may be a different character — and
     // had been missing from this sweep since it was built (decision 2116). `SMSG_INITIAL_SPELLS` carries every cooldown
     // still running at every world entry and `seed_initial` APPENDS, so a list that outlives the

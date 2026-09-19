@@ -289,10 +289,85 @@ impl LootRolls {
     }
 }
 
+/// The group rolls' packet handlers (decision 0591; in the net handler table since 2319, moved out
+/// of the drain's loot arm file).
+mod net {
+    use benilla_protocol::messages::{LootAllPassed, LootRoll, LootRollWon, LootStartRoll};
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::LootRolls;
+    use crate::net::NetHandlerApp;
+
+    /// Register the roll handlers — called from [`super::UiLootRollPlugin`]. One for the four
+    /// kinds, plus the session-end listener.
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::LootStartRoll, on_packet)
+            .net_handler(K::LootRoll, on_packet)
+            .net_handler(K::LootRollWon, on_packet)
+            .net_handler(K::LootAllPassed, on_packet)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    fn on_packet(In(ev): In<SessionEvent>, mut rolls: ResMut<LootRolls>) {
+        match ev {
+            SessionEvent::LootStartRoll(p) => loot_start_roll(p, &mut rolls),
+            SessionEvent::LootRoll(p) => loot_roll(p, &mut rolls),
+            SessionEvent::LootRollWon(p) => loot_roll_won(p, &mut rolls),
+            SessionEvent::LootAllPassed(p) => loot_all_passed(p, &mut rolls),
+            _ => {}
+        }
+    }
+
+    /// Open group rolls die with the socket (decision 0591). A listener on the session end
+    /// ([`crate::net::handlers::BROADCAST`]).
+    fn on_session_end(In(_): In<SessionEvent>, mut rolls: ResMut<LootRolls>) {
+        rolls.clear();
+    }
+
+    /// A group roll opened on one drop (`SMSG_LOOT_START_ROLL`) — a `GroupLootFrame` goes up with
+    /// Need/Greed/Pass and the countdown bar (decision 0591).
+    fn loot_start_roll(p: LootStartRoll, rolls: &mut LootRolls) {
+        debug!(
+            "net: loot roll opened on item {} ({:#x} slot {}), {} ms",
+            p.item_id, p.looted_target, p.item_slot, p.countdown_ms
+        );
+        rolls.start(p);
+    }
+
+    /// One roller's vote or dice result (`SMSG_LOOT_ROLL`) — the chat announcement line. The
+    /// `(roll_number, roll_type)` pair is overloaded; `LootRoll::is_dice`/`vote` disentangle it.
+    fn loot_roll(p: LootRoll, rolls: &mut LootRolls) {
+        debug!(
+            "net: loot roll announce — roller {:#x} number {} type {}",
+            p.roller, p.roll_number, p.roll_type
+        );
+        rolls.announce(p);
+    }
+
+    /// A group roll resolved (`SMSG_LOOT_ROLL_WON`) — the "won" line, and that roll's frame closes.
+    fn loot_roll_won(p: LootRollWon, rolls: &mut LootRolls) {
+        debug!(
+            "net: loot roll won by {:#x} with {} (type {})",
+            p.winner, p.roll_number, p.roll_type
+        );
+        rolls.won(p);
+    }
+
+    /// Everyone passed (`SMSG_LOOT_ALL_PASSED`) — the frame closes and the item returns to the corpse
+    /// as an ordinary lootable row.
+    fn loot_all_passed(p: LootAllPassed, rolls: &mut LootRolls) {
+        debug!("net: loot roll — everyone passed on item {}", p.item_id);
+        rolls.all_passed(p);
+    }
+}
+
 pub(crate) struct UiLootRollPlugin;
 
 impl Plugin for UiLootRollPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<LootRolls>().add_systems(
             Update,
             (

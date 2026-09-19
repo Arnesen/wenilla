@@ -130,10 +130,13 @@ impl TrainerOpen {
 #[derive(Resource, Default)]
 pub(crate) struct TrainerErrors(pub Vec<u32>);
 
+mod net;
+
 pub(crate) struct UiTrainerPlugin;
 
 impl Plugin for UiTrainerPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<TrainerOpen>()
             .init_resource::<TrainerErrors>()
             .add_systems(

@@ -1,20 +1,140 @@
-//! Questgiver-panel + quest-log arm bodies for [`super::apply_net_updates`]'s dispatch match — the
-//! largest arm family, split out on its own (decision 0088's panels + its deferred quest-log/toast
-//! slice). Each `pub(super)` fn here is exactly one arm's body; the match at the call site stays the
-//! dispatcher, one call per arm.
+//! The questgiver panels' packet handlers (decision 0088; in the net handler table since 2320,
+//! moved out of the drain's quests arm file) — each fills the [`QuestGiver`] the quest feed
+//! ([`super`]) reads; each panel packet replaces the open view, and the greeting/gossip quest-row
+//! clicks and the panel buttons flow back out through the quest/gossip drains. The quest log's
+//! template answer is [`crate::ui_quest_log`]'s and the party share's pair is
+//! [`crate::ui_quest_share`]'s.
 
 use benilla_protocol::messages::{
-    QuestComplete, QuestConfirmAccept, QuestDetails, QuestGiverList, QuestOfferReward,
-    QuestRequestItems, QuestShareMsg, QuestTemplate,
+    QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestRequestItems, QuestShareMsg,
 };
+use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
+use super::QuestGiver;
+use crate::net::{ClientCommand, NetCommands, NetHandlerApp};
 use crate::ui_action::UiError;
-use crate::ui_quest::QuestGiver;
 use crate::ui_quest_log::QuestLog;
-use crate::ui_quest_share::QuestShare;
 
-use super::super::{ClientCommand, NetCommands};
+/// Register the questgiver handlers — called from [`super::UiQuestPlugin`]. One per kind, plus
+/// the session-end listener.
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::QuestGiverStatus, on_giver_status)
+        .net_handler(K::QuestGreeting, on_greeting)
+        .net_handler(K::QuestDetail, on_detail)
+        .net_handler(K::QuestProgress, on_progress)
+        .net_handler(K::QuestOffer, on_offer)
+        .net_handler(K::QuestComplete, on_complete)
+        .net_handler(K::QuestObjectiveKill, on_objective_kill)
+        .net_handler(K::QuestObjectiveItem, on_objective_item)
+        .net_handler(K::QuestObjectivesComplete, on_objectives_complete)
+        .net_handler(K::QuestFailed, on_failed)
+        .net_handler(K::QuestLogFull, on_log_full)
+        .net_handler(K::QuestGiverInvalid, on_giver_invalid)
+        .net_handler(K::QuestGiverFailed, on_giver_failed)
+        .net_handler(K::Disconnected, on_session_end);
+}
+
+fn on_giver_status(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::QuestGiverStatus { npc, status } = ev {
+        quest_giver_status(npc, status, &mut quest);
+    }
+}
+
+fn on_greeting(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::QuestGreeting(list) = ev {
+        quest_greeting(list, &mut quest);
+    }
+}
+
+fn on_detail(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>, commands: Res<NetCommands>) {
+    if let SessionEvent::QuestDetail(d) = ev {
+        quest_detail(d, &mut quest, &commands);
+    }
+}
+
+fn on_progress(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::QuestProgress(p) = ev {
+        quest_progress(p, &mut quest);
+    }
+}
+
+fn on_offer(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::QuestOffer(o) = ev {
+        quest_offer(o, &mut quest);
+    }
+}
+
+fn on_complete(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::QuestComplete(c) = ev {
+        quest_complete(c, &mut quest);
+    }
+}
+
+fn on_objective_kill(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::QuestObjectiveKill {
+        quest_id: _,
+        entry,
+        count,
+        required,
+    } = ev
+    {
+        quest_objective_kill(entry, count, required, &mut quest);
+    }
+}
+
+fn on_objective_item(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::QuestObjectiveItem { item_id, count } = ev {
+        quest_objective_item(item_id, count, &mut quest);
+    }
+}
+
+fn on_objectives_complete(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::QuestObjectivesComplete { quest_id } = ev {
+        quest_objectives_complete(quest_id, &mut quest);
+    }
+}
+
+fn on_failed(
+    In(ev): In<SessionEvent>,
+    mut quest: ResMut<QuestGiver>,
+    mut quest_log: ResMut<QuestLog>,
+    commands: Res<NetCommands>,
+) {
+    if let SessionEvent::QuestFailed { quest_id, timed } = ev {
+        quest_failed(quest_id, timed, &mut quest_log, &commands, &mut quest);
+    }
+}
+
+fn on_log_full(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::QuestLogFull = ev {
+        quest_log_full(&mut quest);
+    }
+}
+
+fn on_giver_invalid(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::QuestGiverInvalid { reason } = ev {
+        quest_giver_invalid(reason, &mut quest);
+    }
+}
+
+fn on_giver_failed(
+    In(ev): In<SessionEvent>,
+    mut quest: ResMut<QuestGiver>,
+    mut quest_log: ResMut<QuestLog>,
+    commands: Res<NetCommands>,
+) {
+    if let SessionEvent::QuestGiverFailed { quest_id, reason } = ev {
+        quest_giver_failed(quest_id, reason, &mut quest, &mut quest_log, &commands);
+    }
+}
+
+/// An open questgiver panel dies with the socket. A listener on the session end
+/// ([`crate::net::handlers::BROADCAST`]).
+fn on_session_end(In(_): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    quest.clear_session();
+}
 
 /// A questgiver dialog status for one NPC (`SMSG_QUESTGIVER_STATUS`) — the `!`/`?` marker's
 /// [`crate::messages::dialog_status`] value, stored per guid for the marker layer and the minimap
@@ -33,14 +153,17 @@ use super::super::{ClientCommand, NetCommands};
 /// So the drop is what keeps a vmangos-only answer from putting a `!` over a wanted poster that
 /// the reference client leaves bare.
 ///
-/// The test is the GUID's own shape rather than a live type lookup on purpose: it gives the same
-/// partition as typemask 8 for anything a server can send us, and it cannot be defeated by a status
-/// that arrives in the same drain as its object's create block (descriptors are flushed at the end
-/// of the drain, so a type test would read a not-yet-seeded store and drop a *unit's* answer that
-/// would then never be re-asked for). The reference's second conjunct — `UNIT_NPC_FLAGS & 0x2` on
-/// the resolved unit — is deliberately not modelled here for that same ordering reason;
-/// [`crate::quest_markers::query`]'s teardown leg covers the flag-clearing case from the other end.
-pub(super) fn quest_giver_status(npc: u64, status: u32, quest: &mut QuestGiver) {
+/// The test is the GUID's own shape rather than a live type lookup: it gives the same partition
+/// as typemask 8 for anything a server can send us. It was chosen when this was an arm of the
+/// drain's match, where a status arriving in the same drain as its object's create block would
+/// have read a not-yet-seeded store (descriptors were flushed at the end of the drain) and
+/// dropped a *unit's* answer that would then never be re-asked for. As a packet handler it runs
+/// after the create has landed (decision 2306), so that reason is gone; the shape test stays
+/// because it is the same partition. The reference's second conjunct — `UNIT_NPC_FLAGS & 0x2` on
+/// the resolved unit — was left unmodelled for the same ordering reason and is buildable now;
+/// until it is, [`crate::quest_markers::query`]'s teardown leg covers the flag-clearing case from
+/// the other end.
+fn quest_giver_status(npc: u64, status: u32, quest: &mut QuestGiver) {
     use benilla_protocol::guid;
     if !(guid::is_player(npc) || guid::is_creature_or_pet(npc)) {
         debug!("net: dropping a non-unit questgiver status ({npc:#x} → {status}) — typemask 8");
@@ -51,7 +174,7 @@ pub(super) fn quest_giver_status(npc: u64, status: u32, quest: &mut QuestGiver) 
 }
 
 /// The greeting panel: an NPC's offered/active quest rows (`SMSG_QUESTGIVER_QUEST_LIST`).
-pub(super) fn quest_greeting(list: QuestGiverList, quest: &mut QuestGiver) {
+fn quest_greeting(list: QuestGiverList, quest: &mut QuestGiver) {
     debug!(
         "net: quest greeting on {:#x} — {} quests",
         list.npc,
@@ -61,7 +184,7 @@ pub(super) fn quest_greeting(list: QuestGiverList, quest: &mut QuestGiver) {
 }
 
 /// The accept panel: full quest text + rewards on offer (`SMSG_QUESTGIVER_QUEST_DETAILS`).
-pub(super) fn quest_detail(d: QuestDetails, quest: &mut QuestGiver, commands: &NetCommands) {
+fn quest_detail(d: QuestDetails, quest: &mut QuestGiver, commands: &NetCommands) {
     debug!("net: quest detail — quest {} on {:#x}", d.quest_id, d.npc);
     // **A share that arrives on top of an open window is refused, by the client** (`0x5dbf85`,
     // decision 1738): `MSG_QUEST_PUSH_RESULT{sharer, BUSY}` and the panel we are reading stays.
@@ -86,7 +209,7 @@ pub(super) fn quest_detail(d: QuestDetails, quest: &mut QuestGiver, commands: &N
 
 /// The progress panel: "bring me these" text + required items/money + completability
 /// (`SMSG_QUESTGIVER_REQUEST_ITEMS`).
-pub(super) fn quest_progress(p: QuestRequestItems, quest: &mut QuestGiver) {
+fn quest_progress(p: QuestRequestItems, quest: &mut QuestGiver) {
     debug!(
         "net: quest progress — quest {} on {:#x} (complete: {})",
         p.quest_id, p.npc, p.is_complete
@@ -95,7 +218,7 @@ pub(super) fn quest_progress(p: QuestRequestItems, quest: &mut QuestGiver) {
 }
 
 /// The reward panel: turn-in text + rewards to grant (`SMSG_QUESTGIVER_OFFER_REWARD`).
-pub(super) fn quest_offer(o: QuestOfferReward, quest: &mut QuestGiver) {
+fn quest_offer(o: QuestOfferReward, quest: &mut QuestGiver) {
     debug!(
         "net: quest reward offer — quest {} on {:#x}",
         o.quest_id, o.npc
@@ -104,7 +227,7 @@ pub(super) fn quest_offer(o: QuestOfferReward, quest: &mut QuestGiver) {
 }
 
 /// The turn-in result: XP/money granted + fixed items (`SMSG_QUESTGIVER_QUEST_COMPLETE`).
-pub(super) fn quest_complete(c: QuestComplete, quest: &mut QuestGiver) {
+fn quest_complete(c: QuestComplete, quest: &mut QuestGiver) {
     // The completion fanfare (QUESTCOMPLETED kit → iQuestComplete.wav) — the client's C++ plays
     // it on exactly this packet; the giver feed drains the flag into the UI sound path.
     quest.completed_fanfare = true;
@@ -123,13 +246,6 @@ pub(super) fn quest_complete(c: QuestComplete, quest: &mut QuestGiver) {
     quest.bump_reask();
 }
 
-/// The full quest template (`SMSG_QUEST_QUERY_RESPONSE`, answering our `CMSG_QUEST_QUERY`) — the
-/// quest log's ask-once detail source, cached by `quest_id`.
-pub(super) fn quest_template(t: Box<QuestTemplate>, quest_log: &mut QuestLog) {
-    debug!("net: quest template {} ({})", t.quest_id, t.title);
-    quest_log.insert_template(*t);
-}
-
 /// A kill/use objective ticked (`SMSG_QUESTUPDATE_ADD_KILL`) / an item-collection tick
 /// (`SMSG_QUESTUPDATE_ADD_ITEM`). The visible surface — the yellow `UI_INFO_MESSAGE` toast, the
 /// ref's `ERR_QUEST_ADD_*_SII` popups — no longer fires from here: it rides the quest-log
@@ -139,13 +255,13 @@ pub(super) fn quest_template(t: Box<QuestTemplate>, quest_log: &mut QuestLog) {
 /// chat-line stopgap here is retired: the reference shows no chat echo for objective progress
 /// (INFERRED from ref screenshots; the dispatched §5 adjudicates, and this fn is the fold-back
 /// seat if the real handler does more — a sound, a distinct format).
-pub(super) fn quest_objective_kill(entry: u32, count: u32, required: u32, quest: &mut QuestGiver) {
+fn quest_objective_kill(entry: u32, count: u32, required: u32, quest: &mut QuestGiver) {
     debug!("net: quest kill/use objective {entry:#x} at {count}/{required}");
     quest.bump_reask();
 }
 
 /// See [`quest_objective_kill`] — same surface, item flavor.
-pub(super) fn quest_objective_item(item_id: u32, count: u32, quest: &mut QuestGiver) {
+fn quest_objective_item(item_id: u32, count: u32, quest: &mut QuestGiver) {
     debug!("net: quest item objective {item_id} +{count}");
     quest.bump_reask();
 }
@@ -155,7 +271,7 @@ pub(super) fn quest_objective_item(item_id: u32, count: u32, quest: &mut QuestGi
 /// kind-1 → UI_INFO_MESSAGE, never a chat line) — rides the quest-log diff's COMPLETE-flip
 /// detection (`crate::ui_quest_log::feed_quest_log`), same as the progress toasts; the slot's
 /// state byte carries the durable fact.
-pub(super) fn quest_objectives_complete(quest_id: u32, quest: &mut QuestGiver) {
+fn quest_objectives_complete(quest_id: u32, quest: &mut QuestGiver) {
     debug!("net: quest {quest_id} objectives complete");
     // The turn-in `?` can go gold with no quest-log field change of its own, so the reference
     // sweeps from these `SMSG_QUESTUPDATE_*` handlers (0654).
@@ -178,7 +294,7 @@ pub(super) fn quest_objectives_complete(quest_id: u32, quest: &mut QuestGiver) {
 /// own `GlobalStrings.lua` and `show_messages` reads the row. **That also lands the sound the old
 /// path was dropping**: row 139 names the cue `igQuestFailed`, which the reference plays here and
 /// benilla had noted as an unbuilt follow-up.
-pub(super) fn quest_failed(
+fn quest_failed(
     quest_id: u32,
     timed: bool,
     quest_log: &mut QuestLog,
@@ -200,7 +316,7 @@ pub(super) fn quest_failed(
 /// bare `DisplayError(153)` and nothing else (no panel close): `ERR_QUEST_LOG_FULL` is a kind-2
 /// record, so it is the RED line, not a chat line (decision 0669 — it used to be a hardcoded
 /// English chat push here).
-pub(super) fn quest_log_full(quest: &mut QuestGiver) {
+fn quest_log_full(quest: &mut QuestGiver) {
     debug!("net: quest log full");
     quest.push_message(UiError::key("ERR_QUEST_LOG_FULL"));
 }
@@ -214,7 +330,7 @@ pub(super) fn quest_log_full(quest: &mut QuestGiver) {
 /// the current questgiver guid (`0xbe0810`) and signals Lua event `0x130` = `QUEST_FINISHED` —
 /// our [`QuestGiver::clear`] plus the feed's own `QUEST_FINISHED` on the cleared view. Without
 /// this the panel sat open on a refused accept (decision 0669).
-pub(super) fn quest_giver_invalid(reason: u32, quest: &mut QuestGiver) {
+fn quest_giver_invalid(reason: u32, quest: &mut QuestGiver) {
     debug!("net: questgiver refused to offer the quest (reason {reason})");
     quest.push_message(UiError::key(crate::ui_quest::questgiver_invalid_key(
         reason,
@@ -228,7 +344,7 @@ pub(super) fn quest_giver_invalid(reason: u32, quest: &mut QuestGiver) {
 /// is refusing IS this quest) and fall back to the template cache. A full-bag refusal shows a
 /// SECOND line, the ref's bare `DisplayError(0)` = `ERR_INV_FULL` on the red surface. Closes the
 /// window like [`quest_giver_invalid`].
-pub(super) fn quest_giver_failed(
+fn quest_giver_failed(
     quest_id: u32,
     reason: u32,
     quest: &mut QuestGiver,
@@ -252,30 +368,6 @@ pub(super) fn quest_giver_failed(
         quest.push_message(UiError::key("ERR_INV_FULL"));
     }
     quest.clear();
-}
-
-/// One party member's verdict on a quest we shared (`MSG_QUEST_PUSH_RESULT`, decision 1733).
-///
-/// Parked rather than shown: the line's `%s` is the member's NAME, which may still need a
-/// `CMSG_NAME_QUERY` round trip, and this pass has no VM to resolve GlobalStrings through either.
-/// [`crate::ui_quest_share`] owns both.
-pub(super) fn quest_push_result(member: u64, msg: QuestShareMsg, share: &mut QuestShare) {
-    debug!(
-        "net: quest push result — member {member:#x} verdict {}",
-        msg.0
-    );
-    share.push_verdict(member, msg);
-}
-
-/// A party member started a `QUEST_FLAGS_PARTY_ACCEPT` (escort) quest and we are being asked
-/// whether to start it too (`SMSG_QUEST_CONFIRM_ACCEPT`). Parked for the same reason: the popup
-/// names the member, and the name may not be cached yet.
-pub(super) fn quest_confirm_accept(c: QuestConfirmAccept, share: &mut QuestShare) {
-    debug!(
-        "net: quest confirm accept — quest {} ({:?}) from {:#x}",
-        c.quest_id, c.title, c.sender
-    );
-    share.set_confirm(c);
 }
 
 #[cfg(test)]

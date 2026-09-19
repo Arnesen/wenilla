@@ -127,10 +127,13 @@ pub(crate) enum MerchantRefusal {
     Sell(u8),
 }
 
+mod net;
+
 pub(crate) struct UiMerchantPlugin;
 
 impl Plugin for UiMerchantPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<MerchantOpen>()
             .init_resource::<MerchantErrors>()
             .add_systems(

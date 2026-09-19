@@ -44,10 +44,13 @@ use crate::ui_pet_stats::{PetFamilyTables, PetStatTables};
 use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
+mod net;
+
 pub(crate) struct UiStablePlugin;
 
 impl Plugin for UiStablePlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<StableOpen>()
             .init_resource::<StableErrors>()
             .add_systems(

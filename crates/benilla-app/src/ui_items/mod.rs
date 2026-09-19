@@ -50,6 +50,7 @@ use crate::ui_unit::UnitFeed;
 mod drain;
 mod equip_error;
 pub(crate) mod feed;
+mod net;
 
 pub(crate) use drain::send_auto_equip;
 use drain::{
@@ -1143,6 +1144,7 @@ pub(crate) struct UiItemsPlugin;
 
 impl Plugin for UiItemsPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         // The icon source — `ItemDisplayInfo.dbc` — is the `ItemDisplays` resource the equipment
         // renderer already loads (one parse serves the world and the bags).
         app.init_resource::<EquipErrors>()

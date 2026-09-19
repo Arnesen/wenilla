@@ -252,10 +252,13 @@ pub(crate) fn questgiver_failed_key(reason: u32) -> &'static str {
     }
 }
 
+mod net;
+
 pub(crate) struct UiQuestPlugin;
 
 impl Plugin for UiQuestPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<QuestGiver>().add_systems(
             Update,
             (

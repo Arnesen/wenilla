@@ -83,10 +83,13 @@ impl NpcSession for BankOpen {
 #[derive(Resource, Default)]
 pub(crate) struct BankErrors(pub Vec<u32>);
 
+mod net;
+
 pub(crate) struct UiBankPlugin;
 
 impl Plugin for UiBankPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<BankOpen>()
             .init_resource::<BankErrors>()
             .add_systems(

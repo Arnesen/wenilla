@@ -296,7 +296,7 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // Rows 1-2 carry the quest titles (active first, matching the order the menu supplied them —
-    // benilla's seam already flattens available/active into one ordered list, ui_gossip.rs), row 3
+    // benilla's seam already flattens available/active into one ordered list, `ui_gossip`), row 3
     // the option, row 4+ hidden.
     let (r1_text, r1_vis, r2_vis, r3_text, r3_vis, r4_vis, r5_text, r5_vis, r6_vis): (
         String,

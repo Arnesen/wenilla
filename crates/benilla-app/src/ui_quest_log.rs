@@ -129,10 +129,49 @@ impl QuestLog {
     }
 }
 
+/// The quest log's packet handler (decision 0088's second slice; in the net handler table since
+/// 2320, moved out of the drain's quests arm file).
+mod net {
+    use benilla_protocol::messages::QuestTemplate;
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::QuestLog;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handler and the session-end listener — called from
+    /// [`super::UiQuestLogPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::QuestTemplate, on_template)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    fn on_template(In(ev): In<SessionEvent>, mut quest_log: ResMut<QuestLog>) {
+        if let SessionEvent::QuestTemplate(t) = ev {
+            quest_template(t, &mut quest_log);
+        }
+    }
+
+    /// The log's session state dies with the socket. A listener on the session end
+    /// ([`crate::net::handlers::BROADCAST`]).
+    fn on_session_end(In(_): In<SessionEvent>, mut quest_log: ResMut<QuestLog>) {
+        quest_log.clear_session();
+    }
+
+    /// The full quest template (`SMSG_QUEST_QUERY_RESPONSE`, answering our `CMSG_QUEST_QUERY`) — the
+    /// quest log's ask-once detail source, cached by `quest_id`.
+    fn quest_template(t: Box<QuestTemplate>, quest_log: &mut QuestLog) {
+        debug!("net: quest template {} ({})", t.quest_id, t.title);
+        quest_log.insert_template(*t);
+    }
+}
+
 pub(crate) struct UiQuestLogPlugin;
 
 impl Plugin for UiQuestLogPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         crate::query_cache::register::<QuestLog>(app);
         app.init_resource::<QuestLog>()
             .add_systems(

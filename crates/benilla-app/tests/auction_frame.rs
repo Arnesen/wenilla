@@ -375,6 +375,90 @@ fn only_the_bids_pane_gets_its_page_without_being_opened() {
     assert!(s.take_errors().is_empty());
 }
 
+/// The show cascade, against the reference's own order — the mechanism the Bids pane's `page`
+/// rests on, checked rather than assumed. **Every outcome matches; the order does not** (2317).
+///
+/// wow-re (`system/ui/scratch/propagation.md`, "The show/hide visibility cascade") reads
+/// `0x76ae10` as **post-order**: a frame marks itself visible (`0x76ae7b`), walks its children, and
+/// fires its **own** `OnShow` last (`0x76aef5`, past both child loops), with no snapshot anywhere —
+/// each loop re-reads the live links, so a `Hide()` issued from a sibling's handler suppresses a
+/// later sibling by clearing its shown flag before the walk reaches it.
+///
+/// benilla fires the parent's own handler **first** and still notifies the descendant the parent's
+/// handler just hid. For this window the two routes land on the same state, which is why the
+/// assertions below are the reference's outcomes and only the order line is ours: the
+/// `hidden="false"` Bids pane gets exactly one `OnShow`, on the first open, taking the `page` its
+/// repaint needs and sending the one `GetBidderAuctionItems()` that pane's handler owes — and the
+/// reopen notifies neither, because the tab click left its own shown flag clear.
+///
+/// If the cascade is ever made post-order, the `ShowOrder` assertions are what should change here;
+/// nothing else in this test should have to.
+#[test]
+fn the_show_cascade_notifies_the_bids_pane_once_and_keeps_its_page() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    load_ui_with_classes(&mut s);
+    seat_player(&mut s, 500_000);
+    s.set_auction(Some(state(vec![row(
+        "Linen Cloth",
+        1000,
+        5000,
+        0,
+        "Seller",
+    )])));
+
+    // Both handlers are called by global name from their `<OnShow>`, so wrapping the globals
+    // records the order the cascade actually fired them in.
+    s.run(
+        "ShowOrder = {}          local pane, window = AuctionFrameBid_OnShow, AuctionFrame_OnShow          AuctionFrameBid_OnShow = function() table.insert(ShowOrder, \"pane\") pane() end          AuctionFrame_OnShow = function() table.insert(ShowOrder, \"window\") window() end",
+    )
+    .unwrap();
+    let order = |s: &UiScript| {
+        s.eval::<String>("return table.concat(ShowOrder, \",\")")
+            .unwrap()
+    };
+    let page = |s: &UiScript| {
+        s.eval::<String>("return tostring(AuctionFrameBid.page)")
+            .unwrap()
+    };
+
+    s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
+    assert_eq!(
+        order(&s),
+        "window,pane",
+        "OURS, and a known deviation (2317): the reference's cascade is post-order, \"pane,window\""
+    );
+    assert_eq!(
+        page(&s),
+        "0",
+        "the pane the XML leaves shown takes its page riding the window up — this is what keeps a \
+         mis-aimed AUCTION_BIDDER_LIST_UPDATE off the nil-page path"
+    );
+    assert_eq!(
+        s.take_auction_bidder_query(),
+        Some(0),
+        "and that OnShow is what asks for the bids list"
+    );
+
+    // Close and reopen. The tab click left the pane's own shown flag clear, so it is skipped:
+    // the page is kept from the first open rather than re-assigned, and nothing new goes out.
+    s.run("HideUIPanel(AuctionFrame)").unwrap();
+    let _ = s.take_auction_close();
+    s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
+    assert_eq!(
+        order(&s),
+        "window,pane,window",
+        "the reopen notifies the window and not the pane it left hidden"
+    );
+    assert_eq!(page(&s), "0", "kept from the first open, not re-assigned");
+    assert_eq!(
+        s.take_auction_bidder_query(),
+        None,
+        "and the reopen puts no second bids query on the wire"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 /// The part that proves it works: a fed snapshot paints the Browse rows.
 #[test]
 fn the_browse_list_populates_from_the_fed_snapshot() {

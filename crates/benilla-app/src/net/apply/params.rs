@@ -133,22 +133,12 @@ pub(crate) struct Session<'w> {
 pub(crate) struct WindowStores<'w> {
     pub names: ResMut<'w, crate::names::NameCache>,
     pub items: ResMut<'w, crate::items::Items>,
-    pub gossip: ResMut<'w, crate::ui_gossip::GossipState>,
-    pub merchant: ResMut<'w, crate::ui_merchant::MerchantOpen>,
-    /// The two gossip-reached NPC service sessions whose state is a whole open window.
-    pub trainer_open: ResMut<'w, crate::ui_trainer::TrainerOpen>,
-    pub stable_open: ResMut<'w, crate::ui_stable::StableOpen>,
-    /// The loot window state, the client-local loot-target latch (the kneel's self trigger,
-    /// decision 0515), and the open group-loot rolls (decision 0591).
-    pub loot: ResMut<'w, crate::ui_loot::LootState>,
+    /// The client-local loot-target latch (the kneel's self trigger, decision 0515). The loot
+    /// window's handlers own it since 2319 (`ui_loot::net`); it stays here for the one arm that
+    /// still arms it — `SMSG_SPELL_GO` on a chest (decision 1477) — and leaves with the spells.
     pub loot_latch: ResMut<'w, crate::ui_loot::LootLatch>,
-    pub loot_rolls: ResMut<'w, crate::ui_loot_roll::LootRolls>,
     pub chat_log: ResMut<'w, crate::ui_chat::ChatLog>,
     pub quest: ResMut<'w, crate::ui_quest::QuestGiver>,
-    /// The quest-log template cache, and the party quest-share state (decision 1733) — the
-    /// verdicts on a quest we pushed and the escort confirm: a share is a quest-log verb.
-    pub quest_log: ResMut<'w, crate::ui_quest_log::QuestLog>,
-    pub quest_share: ResMut<'w, crate::ui_quest_share::QuestShare>,
     pub go_templates: ResMut<'w, crate::go_templates::GameObjectTemplates>,
     pub home_bind: ResMut<'w, crate::net::HomeBind>,
     pub proficiencies: ResMut<'w, crate::net::Proficiencies>,
@@ -158,11 +148,6 @@ pub(crate) struct WindowStores<'w> {
     pub death_net: ResMut<'w, crate::death::DeathNet>,
     /// The party/raid roster mirror + its composed system lines (decision 0434).
     pub group: ResMut<'w, crate::ui_party::GroupState>,
-    /// The taxi-map session (decision 0484 phase 1).
-    pub taxi: ResMut<'w, crate::ui_taxi::TaxiState>,
-    /// The bank session and its purchase-refusal queue (decision 0604).
-    pub bank_open: ResMut<'w, crate::ui_bank::BankOpen>,
-    pub bank_errors: ResMut<'w, crate::ui_bank::BankErrors>,
     /// The world-state table the NPC-text `$<n>w` tokens read.
     pub world_states: ResMut<'w, crate::world_state::WorldStates>,
     /// Read-only here since 2312 — the social handlers own it (`ui_social::net`); the chat arm
@@ -179,10 +164,6 @@ pub(crate) struct WindowStores<'w> {
     pub ui_error_keys: ResMut<'w, crate::ui_action::UiErrorKeys>,
     pub played_time_answer: ResMut<'w, crate::net::PlayedTimeAnswer>,
     pub tutorials: ResMut<'w, crate::tutorial::Tutorials>,
-    /// The guard's directions marker (`SMSG_GOSSIP_POI`) — the wire carries no map field, so
-    /// "where you were standing when the guard told you" is the client's to remember
-    /// (`crate::poi_marker`).
-    pub poi_marker: ResMut<'w, crate::poi_marker::PoiMarker>,
 }
 
 /// The action bar's family: the cast/cooldown state and every error queue the red line drains
@@ -207,15 +188,7 @@ pub(crate) struct ActionStores<'w> {
     /// reason the reference sorts before it fires: the tab index is only correct against the
     /// rebuilt tab list, which is the spellbook feed's, not this apply's.
     pub learned_in_tab: ResMut<'w, crate::ui_spellbook::LearnedInTab>,
-    pub equip_errors: ResMut<'w, crate::ui_items::EquipErrors>,
-    pub merchant_errors: ResMut<'w, crate::ui_merchant::MerchantErrors>,
     pub cast_bar: ResMut<'w, crate::ui_cast::CastBarFeed>,
-    pub pending_item_ops: ResMut<'w, crate::pending_item_ops::PendingItemOps>,
-    pub lock_transitions: ResMut<'w, crate::pending_item_ops::LockTransitions>,
-    /// The two NPC-service windows' error queues, each drained onto its window's red line by its
-    /// own feed.
-    pub trainer_errors: ResMut<'w, crate::ui_trainer::TrainerErrors>,
-    pub stable_errors: ResMut<'w, crate::ui_stable::StableErrors>,
     pub pending_cast: ResMut<'w, crate::ui_cast::PendingCast>,
     /// The player's cooldown store (decision 0137 phase 4); the pet's is in its bar, and
     /// `addressed_store` picks between them.
@@ -307,6 +280,4 @@ pub(crate) struct Catalogs<'w> {
     /// 0828) — and the race-keyed discovery-jingle catalog (decision 0829).
     pub area_table: Option<Res<'w, crate::area::AreaTableRes>>,
     pub exploration_sounds: Option<Res<'w, crate::sound::ExplorationSounds>>,
-    /// The map the guard's directions marker is stamped with.
-    pub current_map: Option<Res<'w, benilla_world::world_map::CurrentMap>>,
 }

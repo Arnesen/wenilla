@@ -138,11 +138,57 @@ fn clear_on_world_entry(
     }
 }
 
+/// The marker's packet handler (in the net handler table since 2318, moved out of the drain's npc
+/// arm file) — registered from [`PoiMarkerPlugin`].
+fn on_gossip_poi(
+    In(ev): In<benilla_protocol::SessionEvent>,
+    mut marker: ResMut<PoiMarker>,
+    current_map: Option<Res<benilla_world::world_map::CurrentMap>>,
+    real_clock: Res<Time<Real>>,
+) {
+    if let benilla_protocol::SessionEvent::GossipPoi(poi) = ev {
+        gossip_poi(
+            &poi,
+            &mut marker,
+            current_map.as_ref().map_or(0, |m| m.0),
+            real_clock.elapsed_secs_f64(),
+        );
+    }
+}
+
+/// The guard's directions (`SMSG_GOSSIP_POI`): drop the marker at that spot. Volunteered by the
+/// server for a gossip option carrying an `action_poi_id` — it answers nothing we asked for, and
+/// it does **not** end the gossip session on its own (vmangos `Player::OnGossipSelect`'s
+/// `GOSSIP_OPTION_GOSSIP` arm sends the POI *before* it decides whether to move the menu on, leave
+/// it, or close it).
+///
+/// `map_id` is the map the player is standing on, which is the only place the marker can mean
+/// anything — the wire carries no map field, and the reference reads its own current-map global at
+/// exactly this point. `now_secs` starts the marker's 8-minute clock (this module); it
+/// is the same real clock the corpse reclaim delay is stamped against (decision 0846).
+fn gossip_poi(
+    poi: &benilla_protocol::messages::GossipPoi,
+    marker: &mut PoiMarker,
+    map_id: u32,
+    now_secs: f64,
+) {
+    debug!(
+        "net: directions to \"{}\" at ({:.1}, {:.1}) — icon {}, flags {:#x}",
+        poi.name, poi.pos[0], poi.pos[1], poi.icon, poi.flags
+    );
+    marker.set(poi, map_id, now_secs);
+}
+
 /// The guard's directions marker — see the module doc.
 pub(crate) struct PoiMarkerPlugin;
 
 impl Plugin for PoiMarkerPlugin {
     fn build(&self, app: &mut App) {
+        {
+            use crate::net::NetHandlerApp;
+            use benilla_protocol::SessionEventKind as K;
+            app.net_handler(K::GossipPoi, on_gossip_poi);
+        }
         app.init_resource::<PoiMarker>()
             .add_systems(Update, (expire_marker, clear_on_world_entry));
     }
