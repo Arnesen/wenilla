@@ -8,8 +8,8 @@ use super::{
     container, craft, cursor, death, duel, follow, gossip, guild, inspect, item_text, loot,
     loot_roll, macros, mail, merchant, party, petition, pvp, quest, quest_log, reputation, session,
     simplehtml, skills, slider, social, spellbook, stable, taxi, trade, tradeskill, trainer,
-    weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState,
-    RegionData, ScriptValue, SoundRequest, UnitState,
+    weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest,
+    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -755,6 +755,12 @@ pub(crate) struct Model {
     /// Sounds queued by the Lua `PlaySound`/`PlaySoundFile` bindings since the app's last
     /// [`UiScript::take_sounds`] drain — the outbound Lua→app intent seam ([`sound`]).
     pub(crate) sound_queue: Vec<SoundRequest>,
+
+    /// `PlayMusic`/`StopMusic` intents queued since the app's last
+    /// [`UiScript::take_music`] drain — the same seam, a different *slot*: these drive the music
+    /// stream the reference gives the Lua caller (`[0xb06ccc]`), not the kit player ([`sound`]).
+    /// Order-bearing, so a start and a stop in one frame settle the slot the way they were called.
+    pub(crate) music_queue: Vec<MusicRequest>,
 
     /// **The UI-load sound-suppression depth** — `[0xb05fa0]` in the reference, a counted scope
     /// with exactly three references image-wide: `0x458f50` (`inc`), `0x458f60` (`dec`), and one
@@ -2019,6 +2025,7 @@ impl Model {
             action_bar_toggles: None,
             action_bar_toggle_sends: Vec::new(),
             sound_queue: Vec::new(),
+            music_queue: Vec::new(),
             sound_suppression: 0,
             cvars: HashMap::new(),
             cvars_saved_base: HashMap::new(),

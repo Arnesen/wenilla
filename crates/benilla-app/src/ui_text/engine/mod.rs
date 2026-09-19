@@ -822,20 +822,15 @@ impl UiFontAtlas {
     }
 }
 
-/// Read one font path from the two stores, chain first.
+/// Read one font path from the two stores, chain first —
+/// [`benilla_assets::read_chain_or_loose`], the one rule every by-path addon asset resolves by.
 ///
-/// The loose leg goes through the same [`benilla_assets::loose_addon_file`] the sprite decoder
-/// uses, so it inherits its rules whole: only `Interface\AddOns\` paths reach the folder, the
-/// component walk is case-insensitive (MSBT names its own files `Interface\Addons\…` with a
-/// lowercase `d`, and ships `mailrays.TTF` while its table says `mailrays.ttf`), and a
+/// It inherits that rule whole rather than restating it: only `Interface\AddOns\` paths reach the
+/// folder, the component walk is case-insensitive (MSBT names its own files `Interface\Addons\…`
+/// with a lowercase `d`, and ships `mailrays.TTF` while its table says `mailrays.ttf`), and a
 /// dot-component is refused before any filesystem call.
 fn read_font_bytes(source: &FontSource, path: &str) -> Option<Vec<u8>> {
-    if let Ok(bytes) = source.chain.lock_recover().read(path) {
-        return Some(bytes);
-    }
-    let root = source.loose_root.as_deref()?;
-    let file = benilla_assets::loose_addon_file(root, &benilla_assets::normalize_path(path))?;
-    std::fs::read(file).ok()
+    benilla_assets::read_chain_or_loose(&source.chain, source.loose_root.as_deref(), path)
 }
 
 /// A real-font engine for a test: the client faces, read through the app's own patch chain. `None`

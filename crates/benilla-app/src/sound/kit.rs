@@ -1104,10 +1104,11 @@ impl SoundKits {
         if let Some(d) = self.cache.get(&key) {
             return Ok(d.clone());
         }
+        // **Two stores, one rule** — the chain, then an addon's own loose file
+        // ([`benilla_assets::read_chain_or_loose`], decision 1322's resolver): `PlaySoundFile` is
+        // a by-path verb, and the audio an addon ships lives on disk, never in an MPQ.
         let bytes = assets
-            .chain
-            .lock_recover()
-            .read_file(path)
+            .read_file_or_loose(path)
             .with_context(|| format!("reading {path}"))?;
         let data = mixer::sfx_from_bytes(bytes)?;
         self.cache.insert(key, data.clone());
