@@ -303,8 +303,10 @@ pub(crate) fn load_font_registry(script: &UiScript) -> Vec<String> {
 /// an addon.
 ///
 /// `identity` is `(realm, character)`, which names this character's AddOn enable-state file — the
-/// reference keys `AddOns.txt` per character too. `None` (no pick yet, a capture) means every
-/// discovered addon is enabled, the same answer an absent file gives.
+/// reference keys `AddOns.txt` per character too — and `roster` is every character on that realm's
+/// list, which is the enable store's node set (decision 2311: an addon this character has no row
+/// for is resolved from what the *other* characters said, never from a bare "enabled"). `None`
+/// with an empty roster is the no-pick case: every addon falls to its own `## DefaultState`.
 ///
 /// `version_check` is the persisted `checkAddonVersion` — the *Load out of date AddOns* toggle,
 /// inverted — resolved by the caller because at load time this VM's own CVar table does not
@@ -314,6 +316,7 @@ pub(crate) fn load_font_registry(script: &UiScript) -> Vec<String> {
 pub(crate) fn load_ingame_ui(
     script: &mut UiScript,
     identity: Option<&(String, String)>,
+    roster: &[String],
     version_check: bool,
 ) -> Vec<String> {
     // The whole load edge runs bounded (decision 1306): the reference files sourced off the
@@ -332,6 +335,7 @@ pub(crate) fn load_ingame_ui(
     failures.extend(super::addons::load_third_party(
         script,
         identity,
+        roster,
         version_check,
     ));
     failures

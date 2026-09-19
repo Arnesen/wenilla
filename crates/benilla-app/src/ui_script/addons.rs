@@ -47,7 +47,7 @@
 //! key-binding table the Key Bindings window edits, so an addon's binding is a row like any
 //! other; the app's dispatch runs its Lua body ([`crate::bindings`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
@@ -781,8 +781,14 @@ pub(crate) struct InstalledAddOn {
     /// LoadOnDemand addon is not "off", it is waiting for a `LoadAddOn` call (1191 §6).
     /// Read by the char-select AddOns screen's rows (`char_select::addons`).
     pub(crate) load_on_demand: bool,
-    /// From this character's enable file; an addon the file never mentions is **enabled** (1191 §7).
-    pub(crate) enabled: bool,
+    /// `## DefaultState:` — what this addon is for a character with no opinion, and the tie-break
+    /// when the realm's characters disagree.
+    ///
+    /// **This row carries no enable bit**, deliberately (decision 2311). It used to, read out of
+    /// one character's file with "absent means enabled" baked in — which is the bug: an absent
+    /// row is not enabled, it is [`EnableStore::enabled_for`]'s question, and the store needs the
+    /// realm's whole character list to answer it. Metadata here, state there.
+    pub(crate) default_state: bool,
 }
 
 impl InstalledAddOn {
@@ -814,14 +820,13 @@ impl InstalledAddOn {
 /// The array's *membership* needs nothing here: it excludes the addons the server hid, which on a
 /// stock install is Blizzard's twelve, and this walk is the player's own folder only — they were
 /// never in it.
-pub(crate) fn installed(identity: Option<&(String, String)>) -> Vec<InstalledAddOn> {
-    let disabled = disabled_set(identity);
+pub(crate) fn installed_rows() -> Vec<InstalledAddOn> {
     // The player's own folder only: the glue's list is what a player can toggle, and the
     // reference's Blizzard addons are not in it.
     let mut rows: Vec<InstalledAddOn> = discover_folder()
         .into_iter()
         .map(|addon| InstalledAddOn {
-            enabled: !disabled.contains(&addon.name.to_ascii_lowercase()),
+            default_state: addon.toc.default_state(),
             title: addon.toc.directive("Title").map(str::to_owned),
             notes: addon.toc.directive("Notes").map(str::to_owned),
             url: addon.toc.directive("URL").map(str::to_owned),
@@ -843,18 +848,115 @@ pub(crate) fn installed(identity: Option<&(String, String)>) -> Vec<InstalledAdd
     rows
 }
 
-/// The lowercased names this character has turned off.
-fn disabled_set(identity: Option<&(String, String)>) -> HashSet<String> {
-    enable_state_path(identity)
-        .and_then(|p| std::fs::read(p).ok())
-        .map(|b| {
-            parse_enable_state(&benilla_ui::source::decode(&b))
-                .into_iter()
-                .filter(|(_, on)| !on)
-                .map(|(n, _)| n.to_ascii_lowercase())
-                .collect()
-        })
-        .unwrap_or_default()
+// ── The enable store — the reference's `ADDONSTATELIST` ──────────────────────────────────────────
+
+/// **One node per character on the realm's character list, each holding the explicit rows that
+/// character's `AddOns.txt` carried** — the reference's `ADDONSTATELIST` (anchor `0xbe1bd0`, head
+/// `ds:0xbe1bd8`), which `AddOnList_LoadCharacter 0x51ebe0` fills one node per character at
+/// char-list population (wow-5875-re `system/ui/scratch/addon-enable-store.md` §1/§5).
+///
+/// **A node with no file is EMPTY, not absent**, and the difference is the whole point: an empty
+/// node contributes no opinion to the aggregate, but it is still a character whose enable bit has
+/// to be answered — and the reference answers it from the *other* characters, never with a bare
+/// "enabled". That was the bug this type was written for (decision 2311): benilla resolved an
+/// absent row as enabled, so creating a character re-enabled every addon the player had just
+/// turned off, on every character at once.
+#[derive(Default)]
+pub(crate) struct EnableStore {
+    /// `(character, explicit rows)` in character-list order; the map is the node's enable hash,
+    /// keyed lowercased because every compare in the reference is `SStrCmpI`.
+    nodes: Vec<(String, HashMap<String, bool>)>,
+}
+
+impl EnableStore {
+    /// Load a node per character, each from its own `AddOns.txt`
+    /// (`benilla-config/addons/<Realm>-<Char>.txt`, decision 1191 §7). A character with no file
+    /// still gets its node.
+    pub(crate) fn load(realm: &str, characters: &[String]) -> Self {
+        let nodes = characters
+            .iter()
+            .map(|character| {
+                let id = (realm.to_string(), character.clone());
+                let rows = enable_state_path(Some(&id))
+                    .and_then(|p| std::fs::read(p).ok())
+                    .map(|b| parse_enable_state(&benilla_ui::source::decode(&b)))
+                    .unwrap_or_default();
+                let hash = rows
+                    .into_iter()
+                    // Last line wins, like the reference's hash insert (§5's duplicate law).
+                    .map(|(name, on)| (name.to_ascii_lowercase(), on))
+                    .collect();
+                (character.clone(), hash)
+            })
+            .collect();
+        Self { nodes }
+    }
+
+    /// `0x51e470(addon, NULL, useDefault = 0)` — the **explicit-only** aggregate. A node with no
+    /// entry for this addon is not counted at all (`0x51e5df je 0x51e60a`).
+    ///
+    /// `Some(v)` is the reference's 2/0 (every counted node agrees on `v`); `None` folds its two
+    /// *undecided* returns together — the mixed `1` and the `total == 0` epilogue — because both
+    /// resolve the same way one level up, through `DefaultState`.
+    fn aggregate(&self, addon: &str) -> Option<bool> {
+        let key = addon.to_ascii_lowercase();
+        let mut total = 0usize;
+        let mut on = 0usize;
+        for (_, hash) in &self.nodes {
+            if let Some(&v) = hash.get(&key) {
+                total += 1;
+                on += usize::from(v);
+            }
+        }
+        match (total, on) {
+            (0, _) => None,
+            (_, 0) => Some(false),
+            (t, o) if o == t => Some(true),
+            _ => None,
+        }
+    }
+
+    /// **The bit a character actually gets** — `0x51e470(addon, character, useDefault = 1)`
+    /// lowered to a bool (a single-character query returns only 0 or 2, §4).
+    ///
+    /// Their own explicit row when their file has one; otherwise the aggregate above, and where
+    /// that is undecided, the addon's `## DefaultState`. `None` is the no-character case (nobody
+    /// picked yet), which is the aggregate alone.
+    pub(crate) fn enabled_for(
+        &self,
+        addon: &str,
+        default_state: bool,
+        character: Option<&str>,
+    ) -> bool {
+        let key = addon.to_ascii_lowercase();
+        if let Some(explicit) = character
+            .and_then(|c| self.node(c))
+            .and_then(|h| h.get(&key))
+        {
+            return *explicit;
+        }
+        self.aggregate(addon).unwrap_or(default_state)
+    }
+
+    fn node(&self, character: &str) -> Option<&HashMap<String, bool>> {
+        self.nodes
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(character))
+            .map(|(_, hash)| hash)
+    }
+}
+
+/// The store's node set for a load: the realm's character list, with the loading character
+/// appended when the caller had no list to give (a test, a capture, a `.go`-style entry) — so a
+/// one-identity caller still gets its own file honoured, and nothing else.
+fn store_nodes(identity: Option<&(String, String)>, roster: &[String]) -> Vec<String> {
+    let mut names = roster.to_vec();
+    if let Some((_, character)) = identity {
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(character)) {
+            names.push(character.clone());
+        }
+    }
+    names
 }
 
 /// Write a character's enable state — the AddOns screen's write (decision 1197) and, since 2139,
@@ -967,6 +1069,7 @@ const SAVED_HEADER: &str = "\
 pub(super) fn load_third_party(
     script: &mut UiScript,
     identity: Option<&(String, String)>,
+    roster: &[String],
     version_check: bool,
 ) -> Vec<String> {
     let addons = discover();
@@ -976,15 +1079,19 @@ pub(super) fn load_third_party(
     let mut infos: Vec<_> = addons.iter().map(info_for).collect();
     // The chain-sourced rows read through the reference's own store (1957).
     script.set_addon_chain_reader(Box::new(super::reference_ui::read));
-    if let Some(text) = enable_state_path(identity).and_then(|p| std::fs::read_to_string(p).ok()) {
-        for (name, enabled) in parse_enable_state(&text) {
-            if let Some(i) = infos
-                .iter_mut()
-                .find(|i| i.name.eq_ignore_ascii_case(&name))
-            {
-                i.enabled = enabled;
-            }
-        }
+    // Every addon's enable bit, through the reference's own query (decision 2311): this
+    // character's explicit `AddOns.txt` row when they have one, else what the realm's other
+    // characters agree on, else the manifest's `## DefaultState`. Reading an absent row as a
+    // bare "enabled" is what re-enabled every addon the moment a character was created.
+    let store = EnableStore::load(
+        identity
+            .map(|(realm, _)| realm.as_str())
+            .unwrap_or_default(),
+        &store_nodes(identity, roster),
+    );
+    let character = identity.map(|(_, c)| c.as_str());
+    for (info, addon) in infos.iter_mut().zip(addons.iter()) {
+        info.enabled = store.enabled_for(&info.name, addon.toc.default_state(), character);
     }
     let disabled_names: HashSet<String> = infos
         .iter()
@@ -1328,7 +1435,7 @@ mod tests {
         // No `## Title` at all — sorts under its folder name, the comparator's own fallback.
         write_addon(&home, "bravo", "## Interface: 11200\n", &[]);
 
-        let rows = installed(None);
+        let rows = installed_rows();
         assert_eq!(
             rows.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
             vec!["Zulu", "bravo", "Mike", "Alpha"],
@@ -1454,7 +1561,7 @@ mod tests {
             "benilla.toc lists a Blizzard addon eagerly; the reference loads every one on demand"
         );
         // The glue's list is the player's folder alone.
-        assert!(installed(None)
+        assert!(installed_rows()
             .iter()
             .all(|a| !a.name.starts_with("Blizzard_")));
     }
@@ -2102,7 +2209,7 @@ mod tests {
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
         script.run("EventLog = {}").unwrap();
-        let failures = load_third_party(&mut script, None, true);
+        let failures = load_third_party(&mut script, None, &[], true);
         assert!(failures.is_empty(), "load errors: {failures:?}");
         crate::ui_script::finish_ui_load(&mut script);
 
@@ -2175,7 +2282,7 @@ mod tests {
         );
 
         let mut script = UiScript::new().unwrap();
-        let failures = load_third_party(&mut script, None, true);
+        let failures = load_third_party(&mut script, None, &[], true);
         assert!(
             failures.iter().any(|f| f.contains("NeedsOld")),
             "the gated dependency is the dependent's failure: {failures:?}"
@@ -2199,7 +2306,7 @@ mod tests {
 
         // Force-load: the same folder, the checkbox's other state — everything loads.
         let mut open = UiScript::new().unwrap();
-        let failures = load_third_party(&mut open, None, false);
+        let failures = load_third_party(&mut open, None, &[], false);
         assert!(failures.is_empty(), "force-load load errors: {failures:?}");
         assert_eq!(
             open.eval::<bool>(
@@ -2273,7 +2380,7 @@ mod tests {
         );
 
         let mut script = UiScript::new().unwrap();
-        let failures = load_third_party(&mut script, None, true);
+        let failures = load_third_party(&mut script, None, &[], true);
         assert!(failures.is_empty(), "load errors: {failures:?}");
 
         // Discovery saw it at all — the `.toc` decoded rather than read as absent.
@@ -2394,7 +2501,7 @@ mod tests {
             &[],
         );
         let mut script = UiScript::new().unwrap();
-        let _ = load_third_party(&mut script, None, true);
+        let _ = load_third_party(&mut script, None, &[], true);
 
         // **One**, not one-plus-the-chain (decision 2175). The registry holds the chain's twelve
         // Blizzard rows too, but the Lua index space is a different set: `SMSG_ADDON_INFO` answers
@@ -2496,7 +2603,7 @@ mod tests {
 
         let mut script = UiScript::new().unwrap();
         let id = ("Realm".to_string(), "Char".to_string());
-        let failures = load_third_party(&mut script, Some(&id), true);
+        let failures = load_third_party(&mut script, Some(&id), &[], true);
 
         assert!(
             failures.is_empty(),
@@ -2554,7 +2661,7 @@ mod tests {
         );
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
-        let _ = load_third_party(&mut script, None, true);
+        let _ = load_third_party(&mut script, None, &[], true);
 
         // Discovered and described, but NOT run.
         // **One**, not one-plus-the-chain (decision 2175). The registry holds the chain's twelve
@@ -2650,7 +2757,7 @@ mod tests {
         );
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
-        let _ = load_third_party(&mut script, None, true);
+        let _ = load_third_party(&mut script, None, &[], true);
 
         // The dependency loaded at startup and the registry knows it — the stamp this rests on.
         assert_eq!(
@@ -2704,7 +2811,7 @@ mod tests {
         );
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
-        let _ = load_third_party(&mut script, None, true);
+        let _ = load_third_party(&mut script, None, &[], true);
 
         assert_eq!(
             script
@@ -2766,7 +2873,7 @@ mod tests {
 
         let mut script = UiScript::new().unwrap();
         let id = ("Realm".to_string(), "Char".to_string());
-        let _ = load_third_party(&mut script, Some(&id), true);
+        let _ = load_third_party(&mut script, Some(&id), &[], true);
 
         for (call, want) in [
             ("LoadAddOn('NoSuchAddon')", "MISSING"),
@@ -2785,6 +2892,75 @@ mod tests {
                 "{call}"
             );
         }
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// **A character with no enable file does not load what the realm has unanimously turned
+    /// off** — the world-entry half of the director's 2026-09-17 report (decision 2311).
+    ///
+    /// The glue list showing a new character's addons as off would be worth nothing if the world
+    /// then loaded them anyway, so the load walk resolves through the same [`EnableStore`]: the
+    /// reference's `AddOn_CanLoad` check 3 is `0x51e470(name, character, useDefault = 1)`, which
+    /// for a character with no explicit entry takes the explicit-only aggregate over the realm's
+    /// other characters (wow-5875-re `addon-enable-store.md` §4).
+    ///
+    /// The control is the second addon: one character left it on, so the roster does **not** agree
+    /// about it, and the newcomer gets its manifest's `## DefaultState` instead — enabled. Without
+    /// that half the test would pass on a client that simply disabled everything for new
+    /// characters.
+    #[test]
+    fn a_character_with_no_file_inherits_the_rosters_unanimous_disable() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let (home, _h) = hermetic_root("inherit");
+        write_addon(
+            &home,
+            "Shunned",
+            "## Interface: 11200\nran.lua\n",
+            &[("ran.lua", "ShunnedRan = true")],
+        );
+        write_addon(
+            &home,
+            "Contested",
+            "## Interface: 11200\nran.lua\n",
+            &[("ran.lua", "ContestedRan = true")],
+        );
+        // Two characters who have played and saved: both turned `Shunned` off, they disagree
+        // about `Contested`.
+        for (who, contested) in [("Onemage", false), ("Onerogue", true)] {
+            let id = ("Realm".to_string(), who.to_string());
+            write_enable_state(
+                Some(&id),
+                &[("Shunned".into(), false), ("Contested".into(), contested)],
+            );
+        }
+        let roster = [
+            "Onemage".to_string(),
+            "Onerogue".to_string(),
+            "Freshling".to_string(),
+        ];
+
+        // …and the character just created, who has no file of their own.
+        let fresh = ("Realm".to_string(), "Freshling".to_string());
+        assert!(
+            !enable_state_path(Some(&fresh)).unwrap().exists(),
+            "the premise: a newly created character has written nothing"
+        );
+        let mut script = UiScript::new().unwrap();
+        let _ = load_third_party(&mut script, Some(&fresh), &roster, true);
+
+        assert_eq!(
+            script.eval::<bool>("return ShunnedRan == nil").ok(),
+            Some(true),
+            "the unanimous disable reaches the character who never expressed one"
+        );
+        assert_eq!(
+            script.eval::<bool>("return ContestedRan == true").ok(),
+            Some(true),
+            "…and a contested addon falls to its `## DefaultState`, which is enabled"
+        );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 
@@ -2807,7 +2983,7 @@ mod tests {
         let id = ("Realm".to_string(), "Char".to_string());
 
         let mut script = UiScript::new().unwrap();
-        let _ = load_third_party(&mut script, Some(&id), true);
+        let _ = load_third_party(&mut script, Some(&id), &[], true);
         script.run("DisableAddOn('Drop')").unwrap();
         save_enable_state(&script, Some(&id));
 
@@ -2828,7 +3004,7 @@ mod tests {
 
         // A fresh session reads it back and the addon stays off.
         let mut next = UiScript::new().unwrap();
-        let _ = load_third_party(&mut next, Some(&id), true);
+        let _ = load_third_party(&mut next, Some(&id), &[], true);
         assert_eq!(
             next.eval::<bool>("return DropRan == nil").ok(),
             Some(true),
@@ -2879,7 +3055,7 @@ mod tests {
         // ── session one: defaults, then the addon changes them ──
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
-        let failures = load_third_party(&mut script, Some(&id), true);
+        let failures = load_third_party(&mut script, Some(&id), &[], true);
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(
             script.eval::<i64>("return KeeperSawAtEvent").ok(),
@@ -2894,7 +3070,7 @@ mod tests {
         // ── session two: a fresh VM reads them back ──
         let mut next = UiScript::new().unwrap();
         next.set_screen_size(1024.0, 768.0);
-        let failures = load_third_party(&mut next, Some(&id), true);
+        let failures = load_third_party(&mut next, Some(&id), &[], true);
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(
             next.eval::<i64>("return KeeperDB.count").ok(),
@@ -2945,7 +3121,7 @@ mod tests {
         );
         let id = ("Realm".to_string(), "Char".to_string());
         let mut script = UiScript::new().unwrap();
-        let _ = load_third_party(&mut script, Some(&id), true);
+        let _ = load_third_party(&mut script, Some(&id), &[], true);
         script
             .run("GramDB = { ['on'] = true, ['n'] = 2, ['s'] = 'a\\\"b', ['t'] = { 1 } } GramChar = 5")
             .unwrap();
@@ -3007,7 +3183,7 @@ mod tests {
         let id = ("Realm".to_string(), "Char".to_string());
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
-        let _ = load_third_party(&mut script, Some(&id), true);
+        let _ = load_third_party(&mut script, Some(&id), &[], true);
         crate::ui_script::shutdown_ui_state(&mut script, Some(&id), true);
 
         let written = std::fs::read_to_string(home.join("saved/Last.lua")).unwrap();
@@ -3048,7 +3224,7 @@ mod tests {
 
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
-        let _ = load_third_party(&mut script, Some(&id), true);
+        let _ = load_third_party(&mut script, Some(&id), &[], true);
         script.eval::<()>("DisableAddOn('MyAddon')").unwrap();
         save_enable_state(&script, Some(&id));
 
@@ -3132,7 +3308,7 @@ mod tests {
                  AddonOrder = AddonOrder .. arg1 .. ',' end)",
             )
             .unwrap();
-        let _ = load_third_party(&mut script, None, true);
+        let _ = load_third_party(&mut script, None, &[], true);
 
         // Neither ran at startup — the walk skips LoadOnDemand, which is why a cycle among them
         // is never observed until something demand-loads one.

@@ -353,6 +353,13 @@ fn outlined_spans<W: Bundle, T: Bundle>(
 /// visual), and the name label along the bottom (the ref's `HighlightText`, `GlueFontNormalSmall`,
 /// anchored BOTTOM +1 — over the icon's bottom edge). `dyn_icon`/`label_dyn` are the screen's
 /// refresh markers, spawned onto the face / real label text.
+///
+/// **It carries its own [`LockHighlight`]**, because the reference does: these are the
+/// `CheckButton`s that `SetCharacterRace`/`SetCharacterClass`/`SetCharacterGender` lock and
+/// unlock by hand (`CharacterCreate.lua` l.171/254/326). Leaving the flag to the screen is how
+/// the create screen lost every selected sheen *and* every icon name for ten days — 2072 added a
+/// `&mut LockHighlight` term to the screen's own visuals query and this spawn site had none, so
+/// the query matched nothing at all.
 pub(crate) fn icon_button<A: Component, I: Bundle, L: Bundle>(
     parent: &mut ChildSpawnerCommands,
     font: &Handle<Font>,
@@ -368,6 +375,7 @@ pub(crate) fn icon_button<A: Component, I: Bundle, L: Bundle>(
     let mut b = parent.spawn((
         action,
         Button,
+        LockHighlight::default(),
         Node {
             width: px(48.0),
             height: px(48.0),

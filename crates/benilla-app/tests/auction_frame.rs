@@ -256,6 +256,125 @@ fn auction_house_show_opens_the_window_on_the_browse_tab() {
     assert!(s.errors().is_empty(), "clean open: {:?}", s.errors());
 }
 
+/// **The bug the per-list fires were made for** (decision 2308), in the stock addon's own Lua.
+///
+/// `AuctionFrameAuctions_Update` computes `offset + i + (NUM_AUCTION_ITEMS_PER_PAGE *
+/// AuctionFrameAuctions.page)` on its very first line of loop body, and `AuctionFrameAuctions.page`
+/// is assigned in exactly one place in the whole addon: that tab's `OnShow`, three lines below its
+/// `GetOwnerAuctionItems()`. So the event is only safe to fire *after* the Auctions tab has been
+/// shown at least once — which the reference guarantees structurally, because every caller of
+/// `GetOwnerAuctionItems` lives *inside* that pane (the `OnShow`, and the two page-turner buttons,
+/// which pass `AuctionFrameAuctions.page` as their argument).
+///
+/// The feed used to fire all three list events on any change, so the first browse result of the
+/// session ran this repaint on a tab nobody had opened and put
+/// `attempt to perform arithmetic on field 'page' (a nil value)` on the player's screen. This test
+/// is the hazard itself, pinned: it fails the day the stock Lua stops caring, and `ui_auction`'s
+/// own `a_result_owes_only_its_own_lists_event` is the guarantee that we never hand it that event.
+#[test]
+fn the_auctions_tab_cannot_repaint_before_it_has_been_shown() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    load_ui_with_classes(&mut s);
+    seat_player(&mut s, 500_000);
+    s.set_auction(Some(state(vec![row(
+        "Linen Cloth",
+        1000,
+        5000,
+        0,
+        "Seller",
+    )])));
+
+    // Open, and land a browse result — the whole of what a search does. Clean.
+    s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
+    s.fire_event("AUCTION_ITEM_LIST_UPDATE", vec![]);
+    assert!(
+        s.take_errors().is_empty(),
+        "a browse result on the Browse tab is clean"
+    );
+
+    // The same result also announcing the *owned* list is what crashed: the Auctions tab has never
+    // been shown, so its `page` is nil and the repaint does arithmetic on it.
+    s.fire_event("AUCTION_OWNED_LIST_UPDATE", vec![]);
+    let errors = s.take_errors();
+    assert!(
+        errors.iter().any(|e| e.contains("page")),
+        "the never-shown Auctions tab raises the nil-page error: {errors:?}"
+    );
+
+    // And the same event is harmless the moment the tab has been shown once — which is the only
+    // state the app can now produce it in, since the owned list is only ever asked for from there.
+    s.run("AuctionFrameTab_OnClick(3)").unwrap();
+    assert!(s.take_errors().is_empty(), "opening the tab is clean");
+    s.fire_event("AUCTION_OWNED_LIST_UPDATE", vec![]);
+    assert!(
+        s.take_errors().is_empty(),
+        "and now the owned list may announce itself"
+    );
+}
+
+/// Why only the Auctions tab was in the screenshot — and why that is an accident of the XML.
+///
+/// All three panes read their `page` field in `_Update`, and each assigns it in exactly one place:
+/// its own `OnShow`. What differs is *when* that `OnShow` first runs, and it is decided by one
+/// attribute in the stock file — `AuctionFrameBrowse` and `AuctionFrameAuctions` are declared
+/// `hidden="true"`, `AuctionFrameBid` is declared **`hidden="false"`**. So the Bids pane becomes
+/// visible with the window itself, its `OnShow` runs on the very first `AUCTION_HOUSE_SHOW` —
+/// before `AuctionFrameTab_OnClick(1)` hides it again — and `AuctionFrameBid.page` is `0` while
+/// the player is still looking at Browse. The Auctions pane gets nothing at all until tab 3.
+///
+/// That is the whole reason a mis-aimed `AUCTION_OWNED_LIST_UPDATE` crashed and a mis-aimed
+/// `AUCTION_BIDDER_LIST_UPDATE` did not — and the reason the fix is the rule (an event names one
+/// list) rather than a guard on the one tab that happened to be reported.
+#[test]
+fn only_the_bids_pane_gets_its_page_without_being_opened() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    load_ui_with_classes(&mut s);
+
+    let page = |s: &UiScript, pane: &str| {
+        s.eval::<String>(&format!("return tostring({pane}.page)"))
+            .unwrap()
+    };
+
+    // At load, with no session: no pane has been shown, so none has a page.
+    for pane in [
+        "AuctionFrameBrowse",
+        "AuctionFrameBid",
+        "AuctionFrameAuctions",
+    ] {
+        assert_eq!(page(&s, pane), "nil", "{pane} before the window opens");
+    }
+
+    // The window opens on tab 1. Browse is shown by the tab click; Bid is shown by the window
+    // itself and hidden again a moment later, keeping the page its OnShow assigned.
+    seat_player(&mut s, 500_000);
+    s.set_auction(Some(state(vec![row(
+        "Linen Cloth",
+        1000,
+        5000,
+        0,
+        "Seller",
+    )])));
+    s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
+    assert_eq!(page(&s, "AuctionFrameBrowse"), "0");
+    assert_eq!(
+        page(&s, "AuctionFrameBid"),
+        "0",
+        "hidden=\"false\": the Bids pane rode the window up and back down"
+    );
+    assert!(
+        !s.eval::<bool>("return AuctionFrameBid:IsShown()").unwrap(),
+        "and it is not the visible tab"
+    );
+    assert_eq!(
+        page(&s, "AuctionFrameAuctions"),
+        "nil",
+        "the Auctions pane is the one an unowed event can still kill"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
 /// The part that proves it works: a fed snapshot paints the Browse rows.
 #[test]
 fn the_browse_list_populates_from_the_fed_snapshot() {

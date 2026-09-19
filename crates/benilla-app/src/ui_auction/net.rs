@@ -183,11 +183,33 @@ fn auction_command_result(
     // tell "the server said STARTED/OK" from "the server said nothing at all".
     auction.wire.last_command = Some((auction_id, action, error));
     if error == auction_error::OK {
-        // A successful sell/cancel/bid changes a list we are showing. The reference re-queries
-        // rather than patching its local copy, and so do we — the server is the only thing that
-        // knows what the page looks like now. Each also says so, in **chat** — the success arm
-        // shows `0x178`/`0x179`/`0x17f` keyed on the action field, with zero varargs
-        // (wow-re §11.2/§11.3).
+        // A successful sell/cancel/bid changes a list we are showing, so we re-ask: the server is
+        // the only thing that knows what the page looks like now, and the result carries an
+        // auction id, not a row.
+        //
+        // **The reference re-asks on two of these three, and neither ask is page 0** — VERIFIED
+        // (wow-re auction node §12: a closed caller census of both list senders, two callers each
+        // and zero address-takes; decision 2308):
+        //
+        // - `STARTED` — `[0xb7263c] = 1`, then `0x4cc4e0 call 0x4cd680` = `CMSG 0x259` at the
+        //   **saved page offset** `[0xb72650]`. No row patch, no event of its own.
+        // - `BID_PLACED` — drops the id from the outbid list, `[0xb72640] = 1`, then
+        //   `0x4cc528 call 0x4cd720` = `CMSG 0x264` at `[0xb72654]` — and *then* patches the
+        //   browse row optimistically (bid ← the amount we sent, high bidder ← our own guid,
+        //   deadline ← `max(deadline, now + 90 s)`) and fires 424.
+        // - `REMOVED` — **no query at all**: `0x4cc658 call 0x4cdfe0` deletes the id from all
+        //   three arrays locally, each list firing only if it actually lost a row.
+        //
+        // We re-ask on all three, always at page 0, and patch nothing. Two live differences fall
+        // out: a player on page 2 of their own auctions is thrown back to page 1 by a sale, and
+        // their own bid does not appear on the row until the next result lands. Both belong to the
+        // freshness-model slice 2308 leaves open, not to this arm. What 2308 *does* enforce here
+        // is that a re-ask may never **introduce** a list the interface never asked for — the
+        // reference cannot, because its notification handlers patch instead of asking
+        // (`AuctionOpen::refresh_owner`).
+        //
+        // Each success also says so, in **chat** — the success arm shows `0x178`/`0x179`/`0x17f`
+        // keyed on the action field, with zero varargs (wow-re §11.2/§11.3).
         match action {
             auction_action::STARTED => {
                 // The item is gone from the bag; the sell slot must stop claiming to hold it.

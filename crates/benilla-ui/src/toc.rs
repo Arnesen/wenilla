@@ -171,6 +171,25 @@ impl Toc {
     pub fn load_on_demand(&self) -> bool {
         self.directive("LoadOnDemand").map(str::trim) == Some("1")
     }
+
+    /// `## DefaultState:` — what this addon's enable state is for a character who has never
+    /// expressed one. The reference's `[rec+0x2b]`, stored by `Toc_Parse` at `0x51d204` from the
+    /// two literals `"enabled"` (`0x853764`) → `1` and `"disabled"` (`0x853758`) → `0`
+    /// (wow-5875-re `savedvariables-protocol.md`, the directive table).
+    ///
+    /// It is load-bearing well beyond a manifest that writes it: the enable query `0x51e470`
+    /// falls back to this byte whenever the characters disagree, and whenever *none* of them has
+    /// an opinion at all — which is every addon on a fresh install.
+    ///
+    /// **A manifest that does not write the line is enabled**, which is what makes a folder
+    /// dropped into `AddOns/` just work. That is the two literals' fall-through, not a guess at
+    /// the record's initial byte — a value that is neither `enabled` nor `disabled` reads the
+    /// same way, because neither compare matches it and the field keeps whatever it had.
+    pub fn default_state(&self) -> bool {
+        !self
+            .directive("DefaultState")
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("disabled"))
+    }
 }
 
 #[cfg(test)]

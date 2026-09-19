@@ -457,6 +457,14 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     let identity = world
         .get_resource::<crate::char_select::Roster>()
         .and_then(crate::ui_macro::identity);
+    // …and the realm's whole character list, which is the enable store's node set: the reference
+    // populates one `ADDONSTATELIST` node per character at char-list time, and an addon this
+    // character has never had an opinion about is resolved from what the others said
+    // (decision 2311).
+    let roster: Vec<String> = world
+        .get_resource::<crate::char_select::Roster>()
+        .map(|r| r.chars.iter().map(|c| c.name.clone()).collect())
+        .unwrap_or_default();
     // **The Lua index space, before a single addon file runs** (decision 2175). The reference has
     // the array in hand well before `UI_Init 0x48fbf0` reaches the addon walk — `SMSG_ADDON_INFO`
     // lands during the handshake — so an addon reading `GetNumAddOns()` at file scope sees a
@@ -576,7 +584,7 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // through its whole load edge and only converged a frame later off whatever poll the caller
     // had written to survive it.
     seat_raster_seam_for_load(world, &mut script);
-    let _ = load_ingame_ui(&mut script, identity.as_ref(), version_check);
+    let _ = load_ingame_ui(&mut script, identity.as_ref(), &roster, version_check);
     // The Minimap widget was born a moment ago with `MinimapState::default()`; seed its two live
     // zoom indices from the persisted CVars now, before anything reads them — the reference's own
     // minimap reset path copying each CVar object's int into its live index (decision 1131). Once
