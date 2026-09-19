@@ -648,14 +648,112 @@ fn guild_emblem(
     emblem.is_designed().then_some(emblem)
 }
 
-/// The net drain's `SessionEvent::Guild*` arms, factored here so the wire laws live beside the
-/// state they drive ([`crate::ui_social::apply`]'s shape). The ones that owe a line queue the
-/// **message id** [`lines`] named, the way `crate::net::apply`'s group shims do — the surface and
-/// the sound come off the catalog at the drain, not from here (decision 2054).
-pub(crate) mod apply {
+/// The guild family's packet handlers (decision 1257; in the net handler table since 2312),
+/// beside the state they drive ([`crate::ui_social::net`]'s shape): the identity cache, the
+/// roster, and the `ERR_GUILD_*` lines the engine composes; the guild EVENTS fire off the mirror
+/// in [`feed_guild`], on their edges. The ones that owe a line queue the **message id** [`lines`]
+/// named, the way `crate::net::apply`'s group shims do — the surface and the sound come off the
+/// catalog at the error frame's drain, not from here (decision 2054).
+pub(crate) mod net {
     use super::*;
     use crate::ui_action::{UiError, UiErrorKeys};
     use crate::ui_social::SocialState;
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+
+    use crate::net::NetHandlerApp;
+
+    /// Register the family's handlers — called from [`UiGuildPlugin`]. One per kind, plus the
+    /// session-end listener.
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::GuildQueryResponse, on_query_response)
+            .net_handler(K::GuildRoster, on_roster)
+            .net_handler(K::GuildEvent, on_event)
+            .net_handler(K::GuildCommandResult, on_command_result)
+            .net_handler(K::GuildInvite, on_invite)
+            .net_handler(K::GuildDecline, on_decline)
+            .net_handler(K::GuildInfo, on_info)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    fn on_query_response(In(ev): In<SessionEvent>, mut guild: ResMut<GuildState>) {
+        if let SessionEvent::GuildQueryResponse(response) = ev {
+            query_response(&mut guild, response);
+        }
+    }
+
+    fn on_roster(In(ev): In<SessionEvent>, mut guild: ResMut<GuildState>) {
+        if let SessionEvent::GuildRoster(r) = ev {
+            roster(&mut guild, r);
+        }
+    }
+
+    /// The sign-on/sign-off pair's trailing guid exists for exactly one purpose — the
+    /// four-conjunct display condition on their line — which is why this handler reads the
+    /// social lists, the notify knob and our own guid (decision 1589; the condition and its byte
+    /// addresses are on [`event`]).
+    fn on_event(
+        In(ev): In<SessionEvent>,
+        mut guild: ResMut<GuildState>,
+        mut errors: ResMut<UiErrorKeys>,
+        social: Res<SocialState>,
+        notify: Res<GuildMemberNotify>,
+        self_guid: Res<crate::net::SelfGuid>,
+    ) {
+        if let SessionEvent::GuildEvent(notice) = ev {
+            event(
+                &mut guild,
+                &mut errors,
+                &social,
+                &notify,
+                self_guid.0,
+                notice,
+            );
+        }
+    }
+
+    fn on_command_result(
+        In(ev): In<SessionEvent>,
+        mut guild: ResMut<GuildState>,
+        mut errors: ResMut<UiErrorKeys>,
+    ) {
+        if let SessionEvent::GuildCommandResult(result) = ev {
+            command_result(&mut guild, &mut errors, result);
+        }
+    }
+
+    fn on_invite(
+        In(ev): In<SessionEvent>,
+        mut guild: ResMut<GuildState>,
+        mut errors: ResMut<UiErrorKeys>,
+    ) {
+        if let SessionEvent::GuildInvite { inviter, guild: g } = ev {
+            invite(&mut guild, &mut errors, inviter, g);
+        }
+    }
+
+    fn on_decline(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorKeys>) {
+        if let SessionEvent::GuildDecline { name } = ev {
+            decline(&mut errors, &name);
+        }
+    }
+
+    fn on_info(In(ev): In<SessionEvent>, mut guild: ResMut<GuildState>) {
+        if let SessionEvent::GuildInfo(i) = ev {
+            info(&mut guild, i);
+        }
+    }
+
+    /// The guild session is login-scoped (decision 1257) — and strictly, because the next login
+    /// may be a *different character*, whose guild id, rank, rights and roster share nothing
+    /// with this one's. The identity cache goes too: it is keyed by guild id, so it would
+    /// survive correctly, but the reference's own is backed by `guildcache.wdb` and re-primed
+    /// lazily, and keeping a cache alive across a socket only to save one query is not worth the
+    /// one wrong name a renamed guild would show. A listener on the session end
+    /// ([`crate::net::handlers::BROADCAST`]).
+    fn on_session_end(In(_): In<SessionEvent>, mut guild: ResMut<GuildState>) {
+        *guild = GuildState::default();
+    }
 
     /// Queue what [`lines`] named. The key IS the lookup and the catalog row behind it names the
     /// surface and the sound, so nothing here decides either — which is the difference decision
@@ -790,6 +888,7 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut notify: ResMut<Guil
 
 impl Plugin for UiGuildPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.add_observer(on_cvar);
         crate::query_cache::register::<GuildState>(app);
         app.init_resource::<GuildState>()
@@ -853,37 +952,37 @@ mod tests {
     #[test]
     fn the_signon_condition_is_all_four_conjuncts() {
         let mut social = SocialState::default();
-        crate::ui_social::apply::friend_list(
+        crate::ui_social::net::friend_list(
             &mut social,
             vec![benilla_protocol::messages::FriendEntry {
                 guid: 7,
                 ..Default::default()
             }],
         );
-        crate::ui_social::apply::ignore_list(&mut social, vec![9]);
+        crate::ui_social::net::ignore_list(&mut social, vec![9]);
         let on = GuildMemberNotify(true);
         let off = GuildMemberNotify(false);
         let me = Some(1);
 
         // 2 · the CVar, which ships OFF — so the default client says nothing at all.
         assert!(
-            !apply::announce_signon(&social, &off, me, Some(5)),
+            !net::announce_signon(&social, &off, me, Some(5)),
             "guildMemberNotify off silences the whole family"
         );
-        assert!(apply::announce_signon(&social, &on, me, Some(5)));
+        assert!(net::announce_signon(&social, &on, me, Some(5)));
 
         // 3 · not you. vmangos broadcasts the sign-on to EVERY member including the signer
         // (`Guild::BroadcastPacket`, Guild.cpp:651-656), so without this you announce yourself at
         // every login.
         assert!(
-            !apply::announce_signon(&social, &on, me, Some(1)),
+            !net::announce_signon(&social, &on, me, Some(1)),
             "your own sign-on is not announced to you"
         );
 
         // 4 · not a friend — de-duplication against SMSG_FRIEND_STATUS, which says the same thing
         // with no CVar gate of its own. THIS is the conjunct benilla read as an ignore check.
         assert!(
-            !apply::announce_signon(&social, &on, me, Some(7)),
+            !net::announce_signon(&social, &on, me, Some(7)),
             "a guildmate who is also a friend is announced by the friend path, not twice"
         );
 
@@ -894,14 +993,14 @@ mod tests {
             "the fixture's ignore really is an ignore"
         );
         assert!(
-            apply::announce_signon(&social, &on, me, Some(9)),
+            net::announce_signon(&social, &on, me, Some(9)),
             "the reference announces an ignored guildmate — 0x5ae810 is not the ignore check"
         );
 
         // 1 · a local player, and the pair's own guid: either missing leaves the condition
         // unanswerable, and the reference's silent exit is the answer.
-        assert!(!apply::announce_signon(&social, &on, None, Some(5)));
-        assert!(!apply::announce_signon(&social, &on, me, None));
+        assert!(!net::announce_signon(&social, &on, None, Some(5)));
+        assert!(!net::announce_signon(&social, &on, me, None));
     }
 
     /// `show_offline` changes what `GetNumGuildMembers` counts and how the rows are ordered —

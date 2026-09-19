@@ -21,7 +21,6 @@ mod combat_log;
 mod death;
 mod group;
 mod loot;
-mod mail;
 mod mount;
 mod names;
 mod npc;
@@ -29,9 +28,10 @@ mod objects;
 mod params;
 mod pet;
 mod quests;
+#[cfg(test)]
+mod seam_tests;
 mod session;
 mod spells;
-mod trade;
 mod world;
 
 use params::{ActionStores, AnimWriters, Catalogs, Clocks, ObjectQueries, Session, WindowStores};
@@ -85,12 +85,12 @@ fn addressed_store<'a>(
 
 // ── The per-frame bridge systems ─────────────────────────────────────────────────────────────────
 
-/// The drain: take this frame's events off the channel and run them, **in packet order**, through
-/// the two halves of the dispatch (decision 2305) — first the kinds the `match` below still owns,
-/// through [`apply_unpeeled`], then the kinds a subsystem has claimed in the handler table
-/// ([`super::handlers`]), each handler a one-shot system over this exclusive world. One frame,
-/// packet order, before anything else in [`benilla_world::schedule::WorldStage::Net`] runs: the
-/// property 0006 built and 2265 said every split must keep.
+/// The drain: take this frame's events off the channel and run them **in wire order** — a run of
+/// kinds the `match` below still owns goes through [`apply_unpeeled`] as one batch, a kind a
+/// subsystem has claimed in the handler table ([`super::handlers`]) runs its handlers in place,
+/// each a one-shot system over this exclusive world (decisions 2305, 2306). One frame, packet
+/// order, before anything else in [`benilla_world::schedule::WorldStage::Net`] runs: the property
+/// 0006 built and 2265 said every split must keep.
 pub(crate) fn apply_net_updates(world: &mut World) {
     let events: Vec<SessionEvent> = world.resource::<NetEvents>().0.try_iter().collect();
     super::handlers::dispatch(world, events, |world, unclaimed| {
@@ -194,7 +194,6 @@ fn apply_unpeeled(
         area_table,
         exploration_sounds,
         current_map,
-        guild_notify,
     } = catalogs;
     // A `&mut` to the counter itself (deref-coerced through the `ResMut`), so the arms that stamp
     // it *conditionally* can take it by reference and only advance it when they emit.
@@ -220,22 +219,16 @@ fn apply_unpeeled(
         mut death_net,
         mut group,
         mut taxi,
-        mut mail_open,
-        mut mail_pending,
-        mut trade_session,
         mut bank_open,
         mut bank_errors,
         mut world_states,
-        mut duel,
-        mut social,
+        social,
         mut logout,
         mut mirror_timers,
         mut pet_bar,
         mut ui_error_keys,
         mut page_texts,
         mut played_time_answer,
-        mut guild,
-        mut binder,
         mut talent_wipe,
         mut pet_unlearn,
         mut instance_boot,
@@ -246,15 +239,9 @@ fn apply_unpeeled(
         mut battlefield,
         mut tutorials,
         mut battlefield_positions,
-        mut tabard,
         mut poi_marker,
         mut inspect_honor,
         mut ping,
-        mut gm_ticket,
-        mut registrar,
-        mut petition,
-        mut summon,
-        mut instances,
     } = windows;
     let Session {
         mut teleports,
@@ -387,14 +374,7 @@ fn apply_unpeeled(
                     &mut death_net,
                     &mut group,
                     &mut taxi,
-                    &mut mail_open,
-                    &mut mail_pending,
-                    &mut trade_session,
                     &mut bank_open,
-                    &mut duel,
-                    &mut social,
-                    &mut guild,
-                    &mut gm_ticket,
                     &mut cooldown_store,
                     &mut pending_transfer,
                     &mut disconnects,
@@ -662,62 +642,6 @@ fn apply_unpeeled(
                     extra: None,
                 });
             }
-            SessionEvent::BinderConfirm { binder: npc } => binder.ask(npc),
-            // Someone is asking to pull us to them (decision 1747). The reference gates this in
-            // the HANDLER, not the dialog: a dead or ghost player's request is dropped before the
-            // latch, so it cannot disturb a live question either (`0x5e6194`). The predicate is
-            // `0x605f30` — **health ≤ 0 OR (is-player AND `PLAYER_FLAGS` ghost bit)**, which is
-            // both of these accessors and not the one `unit_is_dead` alone would give (a ghost's
-            // wire health is 1). A self object we have not streamed yet reads as alive: the
-            // reference's own default (`0x5e6189` sends a NULL object through to the latch).
-            SessionEvent::SummonRequest {
-                summoner,
-                zone,
-                delay_ms,
-            } => {
-                let dead_or_ghost = self_guid
-                    .0
-                    .and_then(|g| index.0.get(&g))
-                    .and_then(|e| stores.get(*e).ok())
-                    .is_some_and(|s| s.0.unit_is_dead() || s.0.player_is_ghost());
-                crate::ui_summon::apply::request(
-                    summoner,
-                    zone,
-                    delay_ms,
-                    dead_or_ghost,
-                    real_clock.elapsed_secs_f64(),
-                    &mut summon,
-                );
-            }
-            // The GM ticket answers (decision 1673). The GETTICKET arm takes EVERY answer,
-            // including `None` ("you have no ticket") and including an unsolicited one pushed by a
-            // GM's `.ticket view`/`escalate`/`complete` — they are indistinguishable on the wire
-            // and want identical handling.
-            SessionEvent::GmTicket { ticket } => gm_ticket.answer(ticket),
-            SessionEvent::GmTicketSystemStatus { status } => gm_ticket.answer_queue(status),
-            // A GM touched the ticket. Value 1 makes the reference re-ask (`0x5e7932`), the same
-            // leg the create/update success codes take; 2 (closed) and 3 (survey offered) are
-            // recorded and not acted on — 3 is the survey trigger and that window is deferred.
-            // vmangos never sends this packet at all, so on our server the arm is dead; cmangos
-            // makes it the whole notification model, which is why it is parsed rather than dropped.
-            SessionEvent::GmTicketStatusUpdate { status } => {
-                crate::ui_gm_ticket::apply::status_update(status, &mut gm_ticket)
-            }
-            // The three response codes have no consumer in the shipped 1.12 UI — no event, no
-            // handler. Logged so a refusal is visible in a session log rather than silent; the
-            // `ERR_TICKET_*` display path is still unpinned (see `ui_gm_ticket::apply`).
-            // Create-ok (2) and update-ok (4) make the ENGINE re-ask for the ticket — the
-            // reference's own `0x5e4479` arm, and the reason the shipped UI needs no handler for
-            // either opcode. Without it a filed ticket goes unseen until the 10-minute poll.
-            SessionEvent::GmTicketCreated { response } => {
-                crate::ui_gm_ticket::apply::write_response("create", response, 2, &mut gm_ticket)
-            }
-            SessionEvent::GmTicketUpdated { response } => {
-                crate::ui_gm_ticket::apply::write_response("update", response, 4, &mut gm_ticket)
-            }
-            SessionEvent::GmTicketDeleted { response } => {
-                crate::ui_gm_ticket::apply::response("delete", response)
-            }
             // A zero trainer guid is vmangos's "you have no talents to reset" refusal, not a
             // question — there is nothing to ask about, so nothing goes on screen (decision 1580;
             // `crate::ui_talent_wipe`'s header carries why the reference instead re-sends here).
@@ -761,24 +685,6 @@ fn apply_unpeeled(
             SessionEvent::MeetingStoneNotice(notice) => meeting_stone.apply_notice(notice),
             SessionEvent::TutorialFlags(bytes) => tutorials.apply_flags(&bytes),
             SessionEvent::BattlefieldPositions(packet) => battlefield_positions.apply(packet),
-            SessionEvent::TabardVendorActivate(vendor) => tabard.open(vendor),
-            // A saved emblem evicts our guild's cached record (`0x5e715f`): the next query
-            // anywhere re-fetches it — no event, no packet.
-            SessionEvent::SaveGuildEmblemResult(result) => {
-                if tabard.apply_result(result) {
-                    guild.evict_own_identity();
-                }
-            }
-            SessionEvent::PlayerBound { binder: npc, area } => {
-                debug!("net: bound to area {area} by {npc:#x}");
-                crate::ui_binder::apply::bound(
-                    area,
-                    &mut binder,
-                    &mut ui_error_keys,
-                    area_table.as_deref(),
-                    &mut server_sounds,
-                )
-            }
             SessionEvent::Proficiency {
                 item_class,
                 subclass_mask,
@@ -1054,56 +960,6 @@ fn apply_unpeeled(
             SessionEvent::ReadyCheckAnswer { guid, ready } => {
                 group.apply_ready_check_answer(guid, ready != 0)
             }
-            // ── The duel family (decision 0633): the session mirror + the two DisplayError
-            // lines the handlers emit inline; the Era events fire off the mirror's edges in
-            // `ui_duel::feed_duel`, and the countdown ticks in its own system ──
-            SessionEvent::DuelRequested {
-                arbiter,
-                challenger,
-            } => crate::ui_duel::apply::requested(
-                &mut duel,
-                &mut ui_error_keys,
-                &net_commands,
-                arbiter,
-                challenger,
-                self_guid.0,
-                social.is_ignored(challenger),
-            ),
-            // ── The instance/raid lockout family (decision 1748): four lines the client
-            // composes itself out of GlobalStrings, and the two-packet latch behind the SELF
-            // menu's reset row. The lines are QUEUED — resolving them needs the VM, which this
-            // drain has no access to (decision 0669's split) ──
-            SessionEvent::RaidInstanceMessage { message } => {
-                crate::ui_instance::apply::raid_instance_message(&mut instances, message);
-            }
-            SessionEvent::InstanceSaveCreated { flag } => {
-                crate::ui_instance::apply::instance_save_created(&mut instances, flag);
-            }
-            SessionEvent::InstanceReset { map } => {
-                crate::ui_instance::apply::instance_reset(&mut instances, map);
-            }
-            SessionEvent::InstanceResetFailed { failure } => {
-                crate::ui_instance::apply::instance_reset_failed(&mut instances, failure);
-            }
-            SessionEvent::UpdateLastInstance { map } => {
-                crate::ui_instance::apply::update_last_instance(&mut instances, map);
-            }
-            SessionEvent::UpdateInstanceOwnership { owns } => {
-                crate::ui_instance::apply::update_instance_ownership(&mut instances, owns);
-            }
-            SessionEvent::DuelOutOfBounds => crate::ui_duel::apply::bounds(&mut duel, true),
-            SessionEvent::DuelInBounds => crate::ui_duel::apply::bounds(&mut duel, false),
-            SessionEvent::DuelComplete { started } => {
-                crate::ui_duel::apply::complete(&mut duel, &mut ui_error_keys, started);
-            }
-            SessionEvent::DuelWinner {
-                fled,
-                winner,
-                loser,
-            } => crate::ui_duel::apply::winner(&mut duel, fled, &winner, &loser),
-            SessionEvent::DuelCountdown { seconds } => {
-                crate::ui_duel::apply::countdown(&mut duel, seconds);
-            }
             // ── The mirror timers (decision 0874): breath / fatigue / feign-death. Pure queue
             // arms — every meaning (which bar, what colour, what caption, how fast it drains)
             // is resolved at the UI seam in `ui_mirror`, and the countdown itself is the
@@ -1117,94 +973,6 @@ fn apply_unpeeled(
             SessionEvent::MirrorTimerStop { kind } => mirror_timers
                 .0
                 .push(crate::ui_mirror::MirrorTimerEdge::Stop { kind }),
-            // ── The social family (decision 0668): the friend/ignore lists, the `/who`
-            // answer, and the result codes that print their own chat lines. The lines and the
-            // Era events fire off the mirror in `ui_social::feed_social` — every one of them
-            // needs a NAME the drain has no cache handle for.
-            SessionEvent::FriendList { friends } => {
-                crate::ui_social::apply::friend_list(&mut social, friends)
-            }
-            SessionEvent::IgnoreList { guids } => {
-                crate::ui_social::apply::ignore_list(&mut social, guids)
-            }
-            SessionEvent::FriendStatus(update) => {
-                crate::ui_social::apply::friend_status(&mut social, update)
-            }
-            SessionEvent::WhoResults(results) => crate::ui_social::apply::who(&mut social, results),
-            // ── The guild family (decision 1257): the identity cache, the roster, and the
-            // `ERR_GUILD_*` lines the engine composes. Every arm's law lives in
-            // `ui_guild::apply` beside the state it drives; the guild EVENTS fire off the mirror
-            // in `ui_guild::feed_guild`, on their edges.
-            SessionEvent::GuildQueryResponse(response) => {
-                crate::ui_guild::apply::query_response(&mut guild, response)
-            }
-            SessionEvent::GuildRoster(roster) => crate::ui_guild::apply::roster(&mut guild, roster),
-            // The sign-on/sign-off pair's trailing guid exists for exactly one purpose — the
-            // four-conjunct display condition on their line — which is why this arm reads
-            // `social`, the notify knob and our own guid (decision 1589; the condition and its
-            // byte addresses are on `ui_guild::apply::event`).
-            SessionEvent::GuildEvent(notice) => crate::ui_guild::apply::event(
-                &mut guild,
-                &mut ui_error_keys,
-                &social,
-                &guild_notify,
-                self_guid.0,
-                notice,
-            ),
-            SessionEvent::GuildCommandResult(result) => {
-                crate::ui_guild::apply::command_result(&mut guild, &mut ui_error_keys, result)
-            }
-            SessionEvent::GuildInvite { inviter, guild: g } => {
-                crate::ui_guild::apply::invite(&mut guild, &mut ui_error_keys, inviter, g)
-            }
-            SessionEvent::GuildDecline { name } => {
-                crate::ui_guild::apply::decline(&mut ui_error_keys, &name)
-            }
-            SessionEvent::GuildInfo(info) => crate::ui_guild::apply::info(&mut guild, info),
-            // ── The petition family (decision 1672): founding a guild. The registrar half is an
-            // NPC window, the charter half is item-bound, and they are two resources for that
-            // reason — see `ui_petition`'s module doc.
-            SessionEvent::PetitionShowList(list) => {
-                // The registrar's two `UNIT_NPC_FLAGS` gates are on LIVE NPC state rather than on
-                // the packet, so the flags are read here — this pass holds the store. An unstreamed
-                // guid reads `None` and fails the gate, as the client's own resolve does.
-                let flags = index
-                    .0
-                    .get(&list.npc)
-                    .and_then(|e| stores.get(*e).ok())
-                    .map(|s| s.0.unit_npc_flags());
-                crate::ui_petition::apply::show_list(&mut registrar, list, flags)
-            }
-            SessionEvent::PetitionShowSignatures(sigs) => {
-                // An ignored owner suppresses the ENTIRE update — no record fetch, no list, no
-                // event, no error line (`0x5eeefe`). Consulted before anything else happens.
-                let ignored = social.is_ignored(sigs.owner);
-                crate::ui_petition::apply::show_signatures(
-                    &mut petition,
-                    sigs,
-                    ignored,
-                    &net_commands,
-                )
-            }
-            SessionEvent::PetitionQueryResponse(response) => {
-                crate::ui_petition::apply::query_response(&mut petition, response)
-            }
-            SessionEvent::PetitionSignResults(results) => crate::ui_petition::apply::sign_results(
-                &mut petition,
-                &names,
-                self_guid.0.unwrap_or(0),
-                results,
-                &net_commands,
-            ),
-            SessionEvent::TurnInPetitionResults { result } => {
-                crate::ui_petition::apply::turn_in_results(&mut petition, &mut registrar, result)
-            }
-            SessionEvent::PetitionDeclined { player } => {
-                crate::ui_petition::apply::declined(&mut petition, &names, player)
-            }
-            SessionEvent::PetitionRenamed(rename) => {
-                crate::ui_petition::apply::renamed(&mut petition, rename)
-            }
             SessionEvent::LootResponse {
                 guid,
                 loot_type,
@@ -1865,31 +1633,6 @@ fn apply_unpeeled(
                 opcode,
                 unparseable,
             } => session::packet_dropped(opcode, unparseable, &mut dropped),
-            // The mail arc (decision 0544 P1/P2/P3): the inbox/body/send-result arms fill the
-            // mailbox session the feed reads (`crate::ui_mail`); the arrival pair feeds
-            // `MailPending` (`HasNewMail()`/the minimap icon).
-            SessionEvent::MailList { mails } => {
-                mail::mail_list(mails, &mut mail_open, &net_commands)
-            }
-            SessionEvent::SendMailResult {
-                mail_id,
-                action,
-                error,
-                equip_error,
-                item,
-            } => mail::send_mail_result(
-                mail_id,
-                action,
-                error,
-                equip_error,
-                item,
-                &mut mail_open,
-                &net_commands,
-                &mut equip_errors,
-            ),
-            SessionEvent::MailItemText { text_id, text } => {
-                mail::mail_item_text(text_id, text, &mut mail_open)
-            }
             // The book-page cache (decision 1105) — one page per packet, the whole chain in
             // answer to the first ask; the reader repaints off it on the next feed.
             SessionEvent::PageText {
@@ -1897,24 +1640,6 @@ fn apply_unpeeled(
                 text,
                 next_page_id,
             } => page_texts.insert(page_id, text, next_page_id),
-            SessionEvent::ReceivedMail { seconds } => {
-                mail::received_mail(seconds, &mut mail_pending, &mail_open, &net_commands)
-            }
-            SessionEvent::NextMailTime { seconds } => {
-                mail::next_mail_time(seconds, &mut mail_pending)
-            }
-            // The player-trade arc (decision 0592 P1): the status packet drives the open/accept/close
-            // state machine, the extended snapshot replaces one side's item/gold — both into the
-            // `TradeSession` the trade feed (`crate::ui_trade`) reads.
-            SessionEvent::TradeStatus { status } => trade::trade_status(
-                status,
-                &mut trade_session,
-                &mut ui_error_keys,
-                &net_commands,
-            ),
-            SessionEvent::TradeStatusExtended { state } => {
-                trade::trade_status_extended(&state, &mut trade_session)
-            }
             SessionEvent::WorldStates { scope, states } => {
                 world::world_states(scope, states, &mut world_states)
             }

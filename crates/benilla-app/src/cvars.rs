@@ -845,7 +845,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // silent when a guildmate logs in, and a whole-image census of the record global `0xc4d3c4`
     // finds exactly two readers, both inside `SMSG_GUILD_EVENT`'s handler. The knob is
     // [`crate::ui_guild::GuildMemberNotify`]; the other three conjuncts of the line's display
-    // condition live on `ui_guild::apply::event`.
+    // condition live on `ui_guild::net::event`.
     same("guildMemberNotify", "0"),
     // The minimap's two zoom indices (1131). Byte-verified 1.12 CVars, both registered `"3"`
     // (wow-re, at the `RegisterCVar 0x63db90` argument slot). No options row drives these — the

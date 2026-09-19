@@ -160,19 +160,14 @@ pub(crate) struct WindowStores<'w> {
     pub group: ResMut<'w, crate::ui_party::GroupState>,
     /// The taxi-map session (decision 0484 phase 1).
     pub taxi: ResMut<'w, crate::ui_taxi::TaxiState>,
-    /// The mailbox session + its login-scoped arrival countdown (decision 0544).
-    pub mail_open: ResMut<'w, crate::ui_mail::MailOpen>,
-    pub mail_pending: ResMut<'w, crate::ui_mail::MailPending>,
-    /// The player-trade session (decision 0592).
-    pub trade_session: ResMut<'w, crate::ui_trade::TradeSession>,
     /// The bank session and its purchase-refusal queue (decision 0604).
     pub bank_open: ResMut<'w, crate::ui_bank::BankOpen>,
     pub bank_errors: ResMut<'w, crate::ui_bank::BankErrors>,
     /// The world-state table the NPC-text `$<n>w` tokens read.
     pub world_states: ResMut<'w, crate::world_state::WorldStates>,
-    /// The duel session (decision 0633).
-    pub duel: ResMut<'w, crate::ui_duel::DuelState>,
-    pub social: ResMut<'w, crate::ui_social::SocialState>,
+    /// Read-only here since 2312 — the social handlers own it (`ui_social::net`); the chat arm
+    /// still reads the ignore list.
+    pub social: Res<'w, crate::ui_social::SocialState>,
     /// The pending logout/quit (decision 0674): the server's response and cancel-ack land here,
     /// and `crate::ui_logout` turns them into the countdown dialog.
     pub logout: ResMut<'w, crate::ui_logout::LogoutState>,
@@ -189,13 +184,6 @@ pub(crate) struct WindowStores<'w> {
     /// id; the reader session repaints off it.
     pub page_texts: ResMut<'w, crate::ui_item_text::PageTexts>,
     pub played_time_answer: ResMut<'w, crate::net::PlayedTimeAnswer>,
-    /// The guild session (decision 1257) — the identity/roster mirror the seven
-    /// `SessionEvent::Guild*` arms drive.
-    pub guild: ResMut<'w, crate::ui_guild::GuildState>,
-    /// The innkeeper's pending bind question (decision 1331) — `SMSG_BINDER_CONFIRM` parks the
-    /// innkeeper's guid here and `crate::ui_binder` turns it into the CONFIRM_BINDER dialog,
-    /// whose Accept is the only thing that binds anything.
-    pub binder: ResMut<'w, crate::ui_binder::BinderState>,
     /// The class trainer's pending respec question (decision 1580) — the inbound
     /// `MSG_TALENT_WIPE_CONFIRM` parks the trainer's guid + cost here and
     /// `crate::ui_talent_wipe` turns it into the CONFIRM_TALENT_WIPE dialog, whose Accept is the
@@ -213,7 +201,6 @@ pub(crate) struct WindowStores<'w> {
     pub battlefield: ResMut<'w, crate::ui_battlefield::Battlefield>,
     pub tutorials: ResMut<'w, crate::tutorial::Tutorials>,
     pub battlefield_positions: ResMut<'w, crate::ui_battlefield_positions::BattlefieldPositions>,
-    pub tabard: ResMut<'w, crate::ui_tabard::TabardOpen>,
     /// The guard's directions marker (`SMSG_GOSSIP_POI`) — the wire carries no map field, so
     /// "where you were standing when the guard told you" is the client's to remember
     /// (`crate::poi_marker`).
@@ -225,24 +212,6 @@ pub(crate) struct WindowStores<'w> {
     /// The minimap ping (decision 1596) — a group member's `MSG_MINIMAP_PING` seats the world
     /// point here and the minimap renderer derives everything else from it.
     pub ping: ResMut<'w, crate::minimap::MinimapPing>,
-    /// The GM ticket (decision 1673) — `SMSG_GMTICKET_GETTICKET` replaces the held ticket here
-    /// and BUMPS AN ANSWER COUNTER, which is what `crate::ui_gm_ticket` diffs on: the Help window
-    /// re-polls every 10 minutes and an unchanged answer still has to re-fire `UPDATE_TICKET`.
-    pub gm_ticket: ResMut<'w, crate::ui_gm_ticket::GmTicketState>,
-    /// The guild-charter session (decision 1672) — two resources because only the registrar
-    /// half is NPC-bound: `SMSG_PETITION_SHOWLIST` opens the registrar, and
-    /// `SMSG_PETITION_SHOW_SIGNATURES` opens the item-bound charter window, which must survive
-    /// walking away from the registrar.
-    pub registrar: ResMut<'w, crate::ui_petition::GuildRegistrarState>,
-    pub petition: ResMut<'w, crate::ui_petition::PetitionState>,
-    /// The pending summon question (decision 1747) — `SMSG_SUMMON_REQUEST` parks the summoner's
-    /// guid, zone and expiry here and `crate::ui_summon` turns it into the CONFIRM_SUMMON dialog,
-    /// whose Accept is the only packet in the flow.
-    pub summon: ResMut<'w, crate::ui_summon::SummonState>,
-    /// The instance-lockout bookkeeping (decision 1748) — four of its six packets queue a
-    /// GlobalStrings-templated chat line here for `crate::ui_instance` to resolve against the
-    /// VM, and two write the latch behind `CanShowResetInstances()`.
-    pub instances: ResMut<'w, crate::ui_instance::InstanceState>,
 }
 
 /// The action bar's family: the cast/cooldown state and every error queue the red line drains
@@ -369,7 +338,4 @@ pub(crate) struct Catalogs<'w> {
     pub exploration_sounds: Option<Res<'w, crate::sound::ExplorationSounds>>,
     /// The map the guard's directions marker is stamped with.
     pub current_map: Option<Res<'w, benilla_world::world_map::CurrentMap>>,
-    /// Guild Member Alert (decision 1589) — the CVar knob the sign-on/sign-off pair's display
-    /// condition reads; see `ui_guild::apply::event` for the four conjuncts.
-    pub guild_notify: Res<'w, crate::ui_guild::GuildMemberNotify>,
 }

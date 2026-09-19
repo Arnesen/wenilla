@@ -52,7 +52,7 @@
 //!   `SMSG_PETITION_SIGN_RESULTS` to both parties and **no fresh signatures packet**
 //!   (`:299`, `:312-316`), while the reference's `PetitionFrame` registers only `PETITION_SHOW` and
 //!   `PETITION_CLOSED`. Nothing would ever repaint the name rows. So an `OK` result naming the open
-//!   charter re-sends `CMSG_PETITION_SHOW_SIGNATURES` ([`apply::sign_results`]) — INFERRED, and
+//!   charter re-sends `CMSG_PETITION_SHOW_SIGNATURES` ([`net::sign_results`]) — INFERRED, and
 //!   flagged as such below.
 //! - **Two success paths are silent on the wire and speak locally.** Offering a charter answers the
 //!   *target*, not us, and finding no charter to turn in is refused before any packet is built —
@@ -414,6 +414,7 @@ pub(crate) struct UiPetitionPlugin;
 
 impl Plugin for UiPetitionPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         crate::query_cache::register::<PetitionState>(app);
         app.init_resource::<GuildRegistrarState>()
             .init_resource::<PetitionState>()
@@ -435,9 +436,111 @@ impl Plugin for UiPetitionPlugin {
 ///
 /// **Nothing here fires an event or writes a chat line directly.** Composed lines go onto
 /// [`PetitionState::lines`] and the feed drains them, because the red `UI_ERROR_MESSAGE` channel
-/// needs the `script` handle and apply has none (`crate::ui_bank`'s `BankErrors` shape).
-pub(crate) mod apply {
+/// needs the `script` handle and a packet handler has none (`crate::ui_bank`'s `BankErrors`
+/// shape). In the net handler table since 2312.
+pub(crate) mod net {
     use super::*;
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+
+    use crate::net::NetHandlerApp;
+
+    use crate::net::{GuidIndex, ObjectStore, SelfGuid};
+    use crate::ui_social::SocialState;
+
+    /// Register the family's handlers — called from [`UiPetitionPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::PetitionShowList, on_show_list)
+            .net_handler(K::PetitionShowSignatures, on_show_signatures)
+            .net_handler(K::PetitionQueryResponse, on_query_response)
+            .net_handler(K::PetitionSignResults, on_sign_results)
+            .net_handler(K::TurnInPetitionResults, on_turn_in_results)
+            .net_handler(K::PetitionDeclined, on_declined)
+            .net_handler(K::PetitionRenamed, on_renamed);
+    }
+
+    /// The registrar's two `UNIT_NPC_FLAGS` gates are on LIVE NPC state rather than on the
+    /// packet, so the flags are read here, off the store. An unstreamed guid reads `None` and
+    /// fails the gate, as the client's own resolve does.
+    fn on_show_list(
+        In(ev): In<SessionEvent>,
+        mut registrar: ResMut<GuildRegistrarState>,
+        index: Res<GuidIndex>,
+        stores: Query<&ObjectStore>,
+    ) {
+        if let SessionEvent::PetitionShowList(list) = ev {
+            let flags = index
+                .0
+                .get(&list.npc)
+                .and_then(|e| stores.get(*e).ok())
+                .map(|s| s.0.unit_npc_flags());
+            show_list(&mut registrar, list, flags);
+        }
+    }
+
+    /// An ignored owner suppresses the ENTIRE update — no record fetch, no list, no event, no
+    /// error line (`0x5eeefe`). Consulted before anything else happens.
+    fn on_show_signatures(
+        In(ev): In<SessionEvent>,
+        mut petition: ResMut<PetitionState>,
+        social: Res<SocialState>,
+        commands: Res<NetCommands>,
+    ) {
+        if let SessionEvent::PetitionShowSignatures(sigs) = ev {
+            let ignored = social.is_ignored(sigs.owner);
+            show_signatures(&mut petition, sigs, ignored, &commands);
+        }
+    }
+
+    fn on_query_response(In(ev): In<SessionEvent>, mut petition: ResMut<PetitionState>) {
+        if let SessionEvent::PetitionQueryResponse(response) = ev {
+            query_response(&mut petition, response);
+        }
+    }
+
+    fn on_sign_results(
+        In(ev): In<SessionEvent>,
+        mut petition: ResMut<PetitionState>,
+        names: Res<NameCache>,
+        self_guid: Res<SelfGuid>,
+        commands: Res<NetCommands>,
+    ) {
+        if let SessionEvent::PetitionSignResults(results) = ev {
+            sign_results(
+                &mut petition,
+                &names,
+                self_guid.0.unwrap_or(0),
+                results,
+                &commands,
+            );
+        }
+    }
+
+    fn on_turn_in_results(
+        In(ev): In<SessionEvent>,
+        mut petition: ResMut<PetitionState>,
+        mut registrar: ResMut<GuildRegistrarState>,
+    ) {
+        if let SessionEvent::TurnInPetitionResults { result } = ev {
+            turn_in_results(&mut petition, &mut registrar, result);
+        }
+    }
+
+    fn on_declined(
+        In(ev): In<SessionEvent>,
+        mut petition: ResMut<PetitionState>,
+        names: Res<NameCache>,
+    ) {
+        if let SessionEvent::PetitionDeclined { player } = ev {
+            declined(&mut petition, &names, player);
+        }
+    }
+
+    fn on_renamed(In(ev): In<SessionEvent>, mut petition: ResMut<PetitionState>) {
+        if let SessionEvent::PetitionRenamed(rename) = ev {
+            renamed(&mut petition, rename);
+        }
+    }
 
     /// `SMSG_PETITION_SHOWLIST` — the registrar's charter list, subject to its three gates.
     ///
@@ -725,7 +828,7 @@ mod tests {
             min_signatures: 9,
             ..Default::default()
         });
-        apply::renamed(
+        net::renamed(
             &mut petition,
             PetitionRename {
                 item: 0x99,
@@ -735,7 +838,7 @@ mod tests {
         assert_eq!(open_title(&petition), Some("Second"));
 
         // An echo for a charter we do not have open is not ours to apply.
-        apply::renamed(
+        net::renamed(
             &mut petition,
             PetitionRename {
                 item: 0xdead,

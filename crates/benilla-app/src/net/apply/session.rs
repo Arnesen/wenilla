@@ -13,7 +13,6 @@ use crate::names::NameCache;
 use crate::ui_chat::ChatLog;
 use crate::ui_gossip::GossipState;
 use crate::ui_loot::LootState;
-use crate::ui_mail::MailOpen;
 use crate::ui_merchant::MerchantOpen;
 use crate::ui_quest::QuestGiver;
 use crate::ui_quest_log::QuestLog;
@@ -191,14 +190,7 @@ pub(super) fn disconnected(
     death_net: &mut crate::death::DeathNet,
     group: &mut crate::ui_party::GroupState,
     taxi: &mut TaxiState,
-    mail: &mut MailOpen,
-    mail_pending: &mut crate::ui_mail::MailPending,
-    trade: &mut crate::ui_trade::TradeSession,
     bank: &mut crate::ui_bank::BankOpen,
-    duel: &mut crate::ui_duel::DuelState,
-    social: &mut crate::ui_social::SocialState,
-    guild: &mut crate::ui_guild::GuildState,
-    gm_ticket: &mut crate::ui_gm_ticket::GmTicketState,
     cooldowns: &mut crate::cooldowns::Cooldowns,
     pending_transfer: &mut PendingTransfer,
     disconnects: &mut MessageWriter<DisconnectedMessage>,
@@ -258,38 +250,10 @@ pub(super) fn disconnected(
     quest_share.clear_session();
     group.clear_session();
     taxi.clear_session();
-    mail.clear_session();
-    // The arrival countdown is login-scoped (decision 0544 P3): a fresh login re-queries
-    // `MSG_QUERY_NEXT_MAIL_TIME` at world-enter, so nothing carries over across a reconnect.
-    *mail_pending = crate::ui_mail::MailPending::default();
-    // An open trade dies with the socket too (decision 0592) — the reconnect starts with no trade.
-    trade.clear_session();
     // The bank window dies with the socket (decision 0604) — a reconnect re-opens via the banker.
     bank.clear_session();
-    // A pending challenge, a running duel, and its countdown all die with the socket
-    // (decision 0633) — the server drops the duel too (`Player::DuelComplete(DUEL_FLED)` on
-    // logout), and a stale arbiter guid would make the next AcceptDuel echo a dead object.
-    *duel = crate::ui_duel::DuelState::default();
-    // The friend/ignore lists and the last `/who` are session state too (decision 0668): the
-    // server re-pushes both lists at the next login, and a stale ignore list would silence the
-    // wrong guids after a reconnect renumbers nothing but re-streams everything. The `/who` sort
-    // chain is the one thing that survives — it is per-PROCESS in the reference, not per-login
-    // (decision 2030), which is why this is a `clear_session` and not a `default()`.
-    social.clear_session();
-    // The guild session is login-scoped the same way (decision 1257) — and more strictly, because
-    // the next login may be a *different character*, whose guild id, rank, rights and roster share
-    // nothing with this one's. The identity cache goes too: it is keyed by guild id, so it would
-    // survive correctly, but the reference's own is backed by `guildcache.wdb` and re-primed
-    // lazily, and keeping a cache alive across a socket only to save one query is not worth the
-    // one wrong name a renamed guild would show.
-    *guild = crate::ui_guild::GuildState::default();
-    // The GM ticket is login-scoped too (decision 1673), and for a sharper reason than most: the
-    // ticket belongs to the CHARACTER, and the next login may be a different one. Its answer
-    // counters go with it, so the first `SMSG_GMTICKET_GETTICKET` of the new session re-fires
-    // `UPDATE_TICKET` rather than being diffed away against the old character's answer count.
-    gm_ticket.clear_session();
-    // The cooldown list is session-scoped for the same reason and had been missing from this
-    // sweep since it was built (decision 2116). `SMSG_INITIAL_SPELLS` carries every cooldown
+    // The cooldown list is session-scoped — the next login may be a different character — and
+    // had been missing from this sweep since it was built (decision 2116). `SMSG_INITIAL_SPELLS` carries every cooldown
     // still running at every world entry and `seed_initial` APPENDS, so a list that outlives the
     // socket answers the old session's records: a second login on the same character reads its
     // own stale copy over the wire's fresh remainder, and a login on a different character

@@ -1,28 +1,111 @@
-//! The mail arc's drain-side arm bodies for [`super::apply_net_updates`]'s dispatch match
-//! (decision 0544 P1/P2). Each `pub(super)` fn here is one `SessionEvent` arm's body, filling the
-//! [`crate::ui_mail::MailOpen`] session the feed reads; the match at the call site stays the
-//! dispatcher. The `UiScript` events these ultimately drive are fired by [`crate::ui_mail::feed_mail`]
-//! (the feed owns the VM), so these arms only mutate resources + send the wire re-syncs.
+//! The mailbox's packet handlers (decision 0544 P1/P2/P3; in the net handler table since 2306) —
+//! the inbox/body/send-result kinds fill the [`MailOpen`] session the feed reads, the arrival
+//! pair feeds [`MailPending`] (`HasNewMail()`/the minimap icon). The `UiScript` events these
+//! ultimately drive are fired by [`super::feed_mail`] (the feed owns the VM), so nothing here
+//! touches it: the handlers only mutate resources + send the wire re-syncs.
 
 use benilla_protocol::messages::{mail_action, mail_error, mail_message_type, MailListEntry};
+use benilla_protocol::{SessionEvent, SessionEventKind};
+use bevy::prelude::*;
 
-use crate::net::{ClientCommand, NetCommands};
+use super::{mail_refusal, MailOpen, MailPending, MailSendAck};
+use crate::net::{ClientCommand, NetCommands, NetHandlerApp};
 use crate::ui_items::{EquipError, EquipErrors};
-use crate::ui_mail::{mail_refusal, MailOpen, MailPending, MailSendAck};
+
+/// Register the mailbox's handlers — called from [`super::UiMailPlugin`]. One per kind, plus the
+/// session-end listener.
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::MailList, on_mail_list)
+        .net_handler(K::SendMailResult, on_send_mail_result)
+        .net_handler(K::MailItemText, on_mail_item_text)
+        .net_handler(K::ReceivedMail, on_received_mail)
+        .net_handler(K::NextMailTime, on_next_mail_time)
+        .net_handler(K::Disconnected, on_session_end);
+}
+
+fn on_mail_list(In(ev): In<SessionEvent>, mut mail: ResMut<MailOpen>, commands: Res<NetCommands>) {
+    if let SessionEvent::MailList { mails } = ev {
+        mail_list(mails, &mut mail, &commands);
+    }
+}
+
+fn on_send_mail_result(
+    In(ev): In<SessionEvent>,
+    mut mail: ResMut<MailOpen>,
+    commands: Res<NetCommands>,
+    mut equip_errors: ResMut<EquipErrors>,
+) {
+    if let SessionEvent::SendMailResult {
+        mail_id,
+        action,
+        error,
+        equip_error,
+        item,
+    } = ev
+    {
+        send_mail_result(
+            mail_id,
+            action,
+            error,
+            equip_error,
+            item,
+            &mut mail,
+            &commands,
+            &mut equip_errors,
+        );
+    }
+}
+
+fn on_mail_item_text(In(ev): In<SessionEvent>, mut mail: ResMut<MailOpen>) {
+    if let SessionEvent::MailItemText { text_id, text } = ev {
+        mail_item_text(text_id, text, &mut mail);
+    }
+}
+
+fn on_received_mail(
+    In(ev): In<SessionEvent>,
+    mut pending: ResMut<MailPending>,
+    mail: Res<MailOpen>,
+    commands: Res<NetCommands>,
+) {
+    if let SessionEvent::ReceivedMail { seconds } = ev {
+        received_mail(seconds, &mut pending, &mail, &commands);
+    }
+}
+
+fn on_next_mail_time(In(ev): In<SessionEvent>, mut pending: ResMut<MailPending>) {
+    if let SessionEvent::NextMailTime { seconds } = ev {
+        next_mail_time(seconds, &mut pending);
+    }
+}
+
+/// An open mailbox dies with the socket, and the arrival countdown is login-scoped (decision
+/// 0544 P3): a fresh login re-queries `MSG_QUERY_NEXT_MAIL_TIME` at world-enter, so nothing
+/// carries over across a reconnect. A listener on the session end, which the drain's dispatch
+/// match still owns ([`crate::net::handlers::BROADCAST`]).
+fn on_session_end(
+    In(_): In<SessionEvent>,
+    mut mail: ResMut<MailOpen>,
+    mut pending: ResMut<MailPending>,
+) {
+    mail.clear_session();
+    *pending = MailPending::default();
+}
 
 /// `SessionEvent::MailList` (`SMSG_MAIL_LIST_RESULT`) — replace the session's rows + fire the inbox
 /// repaint (via the feed's diff). The inbox handler auto-purges expired mail: any row whose timer ran
 /// out (`expire_days <= 0`) is deleted server-side (`CMSG_MAIL_DELETE`) and dropped here (wow-re §5,
 /// `ui/scratch/mail-interaction.md`).
 ///
-/// **It does not touch [`crate::ui_mail::MailPending`]** — and that is a positive fact, not an
+/// **It does not touch [`MailPending`]** — and that is a positive fact, not an
 /// omission (decision 0913). This arm used to clear the countdown when the surviving list had
 /// nothing unread, on the inferred grounds that "checking your mail clears the icon" had to be the
 /// list's doing. A full write-xref of the countdown float in wow-re says otherwise: nothing on the
 /// inbox path writes it. The icon clears because **opening a letter arms the deferred-refresh flag
-/// and the mailbox *close* re-asks the server** — modelled in [`crate::ui_mail`], where the close
+/// and the mailbox *close* re-asks the server** — modelled in [`super`], where the close
 /// edge lives.
-pub(super) fn mail_list(mails: Vec<MailListEntry>, mail: &mut MailOpen, commands: &NetCommands) {
+fn mail_list(mails: Vec<MailListEntry>, mail: &mut MailOpen, commands: &NetCommands) {
     let mailbox = mail.mailbox;
     mail.mails = mails
         .into_iter()
@@ -76,7 +159,7 @@ fn take_empties(entry: &MailListEntry, action: u32) -> bool {
 /// take/return/delete then re-syncs the inbox with a fresh `CMSG_GET_MAIL_LIST` (the reference
 /// client's inbox-refresh moment); an EQUIP_ERROR routes to the existing inventory-error surface;
 /// any other failure surfaces the red error line.
-pub(super) fn send_mail_result(
+fn send_mail_result(
     mail_id: u32,
     action: u32,
     error: u32,
@@ -145,7 +228,7 @@ pub(super) fn send_mail_result(
 
 /// `SessionEvent::MailItemText` (`SMSG_ITEM_TEXT_QUERY_RESPONSE`) — land the letter body in the
 /// ask-once cache + clear its pending flag; the feed repaints (MAIL_INBOX_UPDATE) on the change.
-pub(super) fn mail_item_text(text_id: u32, text: String, mail: &mut MailOpen) {
+fn mail_item_text(text_id: u32, text: String, mail: &mut MailOpen) {
     mail.bodies.insert(text_id, Some(text));
 }
 
@@ -158,12 +241,7 @@ pub(super) fn mail_item_text(text_id: u32, text: String, mail: &mut MailOpen) {
 /// 60 s client-side throttle (decision 0544 P3), so a mail arriving while you stand at the mailbox
 /// shows up. The reference reaches the same place by its close-time re-query; leaving a mail you
 /// were just told about invisible for up to a minute is the worse client, and this costs one packet.
-pub(super) fn received_mail(
-    seconds: f32,
-    pending: &mut MailPending,
-    mail: &MailOpen,
-    commands: &NetCommands,
-) {
+fn received_mail(seconds: f32, pending: &mut MailPending, mail: &MailOpen, commands: &NetCommands) {
     pending.apply_received_mail(seconds, mail.mailbox.is_some());
     if let Some(mailbox) = mail.mailbox {
         let _ = commands.0.send(ClientCommand::GetMailList { mailbox });
@@ -175,6 +253,47 @@ pub(super) fn received_mail(
 /// signal site `0x4ad605`; decision 0913). `0.0` = mail waiting now, negative (vmangos always sends
 /// `-86400.0`) = none, a positive value counts down per frame in `crate::ui_mail`'s `feed_mail` and
 /// flips `HasNewMail()` true as it lands inside ε.
-pub(super) fn next_mail_time(seconds: f32, pending: &mut MailPending) {
+fn next_mail_time(seconds: f32, pending: &mut MailPending) {
     pending.apply_query_reply(seconds);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// End to end through the real registration: the wire's "mail is waiting" reaches the
+    /// countdown, a mailbox click survives until the session ends, and the session end — a
+    /// broadcast the match still owns — resets both.
+    #[test]
+    fn the_table_routes_the_arrival_and_the_session_end_to_the_mailbox() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<MailOpen>()
+            .init_resource::<MailPending>()
+            .init_resource::<EquipErrors>()
+            .insert_resource(NetCommands(tx));
+        register(&mut app);
+
+        app.world_mut().resource_mut::<MailOpen>().click(0x20);
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![SessionEvent::NextMailTime { seconds: 0.0 }],
+            |_, _| panic!("a claimed kind never reaches the match"),
+        );
+        assert!(app.world().resource::<MailPending>().has_new_mail());
+
+        let mut through_the_match = Vec::new();
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+            |_, unclaimed| through_the_match.extend(unclaimed.iter().map(SessionEventKind::from)),
+        );
+        assert_eq!(through_the_match, vec![SessionEventKind::Disconnected]);
+        assert!(!app.world().resource::<MailPending>().has_new_mail());
+        assert_eq!(app.world().resource::<MailOpen>().mailbox, None);
+    }
 }

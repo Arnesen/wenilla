@@ -9,7 +9,7 @@
 //! into the first `CMSG_GET_MAIL_LIST` — one request, Lua-driven, exactly the reference flow
 //! (MailFrame.lua l.42).
 //!
-//! The net bridge ([`crate::net::apply::mail`]) fills [`MailOpen`] from the wire
+//! The mailbox's packet handlers ([`net`]) fill [`MailOpen`] from the wire
 //! (`SMSG_MAIL_LIST_RESULT` → the inbox rows; `SMSG_ITEM_TEXT_QUERY_RESPONSE` → the body cache;
 //! `SMSG_SEND_MAIL_RESULT` → the send/take result queues). Each frame [`feed_mail`] resolves each
 //! wire [`MailListEntry`] to a Lua-facing [`MailInboxRow`] (sender via the ask-once name cache, item
@@ -58,6 +58,7 @@ use crate::query_cache::QueryCache;
 use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
+mod net;
 mod pending;
 
 pub(crate) use pending::MailPending;
@@ -100,7 +101,7 @@ pub(crate) struct MailSendAck {
     pub(crate) refusal: Option<&'static str>,
 }
 
-/// The open mailbox, filled by the net bridge ([`crate::net::apply::mail`]) and read by
+/// The open mailbox, filled by the packet handlers ([`net`]) and read by
 /// [`feed_mail`]. Holds the mailbox guid and the inbox rows exactly as the wire delivered them
 /// (`SMSG_MAIL_LIST_RESULT`), the ask-once letter-body cache, and the send-result queues; the feed
 /// resolves each row to a display row and the drain maps a clicked 1-based row to its wire mail id.
@@ -121,7 +122,7 @@ pub(crate) struct MailOpen {
     last_list_query: Option<f64>,
     /// SEND-action results the net bridge queued for the feed to fire ([`MailSendAck`]).
     pub(crate) send_acks: Vec<MailSendAck>,
-    /// 1-based inbox rows a take just emptied and purged (`net::apply::mail`) — the feed fires
+    /// 1-based inbox rows a take just emptied and purged ([`net`]) — the feed fires
     /// `CLOSE_INBOX_ITEM(index)` for each, ahead of the `MAIL_INBOX_UPDATE` the purge causes.
     pub(crate) close_inbox: Vec<u32>,
     /// Refusals (a take/return/delete failure) the feed shows, as message keys — resolved at the
@@ -206,6 +207,7 @@ pub(crate) struct UiMailPlugin;
 impl Plugin for UiMailPlugin {
     fn build(&self, app: &mut App) {
         crate::query_cache::register::<MailOpen>(app);
+        net::register(app);
         app.init_resource::<MailOpen>()
             .init_resource::<MailPending>()
             .add_systems(

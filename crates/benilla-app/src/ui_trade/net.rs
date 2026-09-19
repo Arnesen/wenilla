@@ -1,15 +1,49 @@
-//! The player-trade arc's drain-side arm bodies for [`super::apply_net_updates`]'s dispatch match
-//! (decision 0592 P1). Each `pub(super)` fn here is one `SessionEvent` arm's body, driving the
-//! [`crate::ui_trade::TradeSession`] state machine the feed reads; the match at the call site stays
-//! the dispatcher. The `UiScript` events these ultimately drive are fired by
-//! [`crate::ui_trade::feed_trade`] (the feed owns the VM), so these arms only mutate the session +
-//! send the auto-reply.
+//! The player trade's packet handlers (decision 0592 P1; in the net handler table since 2306) —
+//! the status packet drives the open/accept/close state machine, the extended snapshot replaces
+//! one side's item/gold, both into the [`TradeSession`] the feed reads. The `UiScript` events
+//! these ultimately drive are fired by [`super::feed_trade`] (the feed owns the VM), so the
+//! handlers only mutate the session + send the auto-reply.
 
 use benilla_protocol::messages::{TradeStatus, TradeStatusExtended};
+use benilla_protocol::{SessionEvent, SessionEventKind};
+use bevy::prelude::*;
 
-use crate::net::{ClientCommand, NetCommands};
+use super::{NamedLine, TradeSession};
+use crate::net::{ClientCommand, NetCommands, NetHandlerApp};
 use crate::ui_action::{UiError, UiErrorKeys};
-use crate::ui_trade::{NamedLine, TradeSession};
+
+/// Register the trade's handlers — called from [`super::UiTradePlugin`]. One per kind, plus the
+/// session-end listener.
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::TradeStatus, on_trade_status)
+        .net_handler(K::TradeStatusExtended, on_trade_status_extended)
+        .net_handler(K::Disconnected, on_session_end);
+}
+
+fn on_trade_status(
+    In(ev): In<SessionEvent>,
+    mut trade: ResMut<TradeSession>,
+    mut errors: ResMut<UiErrorKeys>,
+    commands: Res<NetCommands>,
+) {
+    if let SessionEvent::TradeStatus { status } = ev {
+        trade_status(status, &mut trade, &mut errors, &commands);
+    }
+}
+
+fn on_trade_status_extended(In(ev): In<SessionEvent>, mut trade: ResMut<TradeSession>) {
+    if let SessionEvent::TradeStatusExtended { state } = ev {
+        trade_status_extended(&state, &mut trade);
+    }
+}
+
+/// An open trade dies with the socket (decision 0592) — the reconnect starts with no trade. A
+/// listener on the session end, which the drain's dispatch match still owns
+/// ([`crate::net::handlers::BROADCAST`]).
+fn on_session_end(In(_): In<SessionEvent>, mut trade: ResMut<TradeSession>) {
+    trade.clear_session();
+}
 
 /// `SessionEvent::TradeStatus` (`SMSG_TRADE_STATUS`) — benilla's face of the reference's own
 /// 23-case dispatcher `CGTradeInfo 0x4bf720` (`ecx` = the status code; jump table `0x4bfa08`;
@@ -36,9 +70,9 @@ use crate::ui_trade::{NamedLine, TradeSession};
 /// unsettled; §11 settles them).
 ///
 /// `BEGIN_TRADE` records the incoming request **without answering it** (decision 1764 — the reply
-/// is a ladder of eight gates, so [`crate::ui_trade::answer_trade_request`] owns it, and it is the
+/// is a ladder of eight gates, so [`super::answer_trade_request`] owns it, and it is the
 /// only arm of the reference's dispatcher that speaks to the wire).
-pub(super) fn trade_status(
+fn trade_status(
     status: TradeStatus,
     trade: &mut TradeSession,
     errors: &mut UiErrorKeys,
@@ -138,7 +172,7 @@ enum Line {
 /// Five arms genuinely say nothing (`OPEN_WINDOW`, `TRADE_ACCEPT`, `BACK_TO_TRADE`, `REJECTED`,
 /// `UNKNOWN_13`); the other eighteen print. Two of those eighteen answer `None` *here* for reasons
 /// of their own: `BEGIN_TRADE`'s line is the ladder's
-/// ([`crate::ui_trade::answer_trade_request`]'s leg 8), and `CLOSE_WINDOW`'s is the gap at the
+/// ([`super::answer_trade_request`]'s leg 8), and `CLOSE_WINDOW`'s is the gap at the
 /// bottom of this doc.
 ///
 /// **Eleven of the ids are outside the trade block** `0xb9..=0xbf` — which is why the arc shipped
@@ -167,7 +201,7 @@ enum Line {
 /// | 22 | `ONLY_CONJURED` | `0x1ca` | `ERR_TRADE_WRONG_REALM` | `2` red |
 ///
 /// Case 1's own line (`ERR_TRADE_BLOCKED_S`, leg 8 only) is
-/// [`crate::ui_trade::answer_trade_request`]'s, and case 12's is the gap below.
+/// [`super::answer_trade_request`]'s, and case 12's is the gap below.
 ///
 /// **Nothing here decides a surface.** Three of these are chat lines and thirteen are toasts,
 /// split between yellow and red, and the split does not follow the English: the two *successful*
@@ -215,7 +249,7 @@ fn status_message(status: TradeStatus) -> Option<Line> {
 
 /// `SessionEvent::TradeStatusExtended` (`SMSG_TRADE_STATUS_EXTENDED`) — replace one side's item/gold
 /// snapshot (decision 0592 P1); the feed repaints (`TRADE_UPDATE`) on the change.
-pub(super) fn trade_status_extended(ext: &TradeStatusExtended, trade: &mut TradeSession) {
+fn trade_status_extended(ext: &TradeStatusExtended, trade: &mut TradeSession) {
     bevy::log::info!(
         target: "trade",
         "SMSG_TRADE_STATUS_EXTENDED their_window={} gold={} items={}",
@@ -302,6 +336,40 @@ mod tests {
         trade.partner_accepted();
         trade.take_named_lines_for_test();
         trade
+    }
+
+    /// End to end through the real registration: a status opens the window, and the session
+    /// end — a broadcast the match still owns — takes the trade with it.
+    #[test]
+    fn the_table_routes_the_status_and_the_session_end_to_the_trade() {
+        let (_, commands, _rx) = sink();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<TradeSession>()
+            .init_resource::<UiErrorKeys>()
+            .insert_resource(commands);
+        register(&mut app);
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![SessionEvent::TradeStatus {
+                status: TradeStatus::OpenWindow,
+            }],
+            |_, _| panic!("a claimed kind never reaches the match"),
+        );
+        assert!(app.world().resource::<TradeSession>().is_open());
+
+        let mut through_the_match = Vec::new();
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+            |_, unclaimed| through_the_match.extend(unclaimed.iter().map(SessionEventKind::from)),
+        );
+        assert_eq!(through_the_match, vec![SessionEventKind::Disconnected]);
+        assert!(!app.world().resource::<TradeSession>().is_open());
     }
 
     /// **Eighteen of the twenty-three arms print; this table carries sixteen.** The arc raised

@@ -2,7 +2,7 @@
 //! [`benilla_ui::script`]'s `trade` module, the two-sided twin of [`crate::ui_mail`]'s mailbox seam.
 //!
 //! Trade is entirely server-driven: a right-click → **Trade** ([`crate::ui_trade`] via the UnitPopup
-//! row) sends `CMSG_INITIATE_TRADE`; the net bridge ([`crate::net::apply::trade`]) then folds the two
+//! row) sends `CMSG_INITIATE_TRADE`; the packet handlers ([`net`]) then fold the two
 //! status packets into [`TradeSession`] — `SMSG_TRADE_STATUS` drives the open/accept/close state
 //! machine, `SMSG_TRADE_STATUS_EXTENDED` replaces one side's item/gold snapshot. Each frame
 //! [`feed_trade`] resolves both sides' wire [`TradeItem`]s to Lua-facing
@@ -18,12 +18,13 @@
 //! `SMSG_TRADE_STATUS(BEGIN_TRADE)` only *records* the request; [`answer_trade_request`] walks the
 //! reference's own eight-leg ladder (`0x4bf736`) and either refuses it — on one of three different
 //! opcodes, or with no packet at all — or accepts it, which is what the client did unconditionally
-//! before. The split is what makes the ladder possible: it reads the ignore list, the cinematic
-//! state, player control, the auction house, the initiator's descriptor, an outbound initiate of
-//! ours and the [`BlockTrades`] CVar, none of which can reach `apply_net_updates` at Bevy's
-//! 16-`SystemParam` ceiling — and its answer may span frames, which a wire decoder cannot do at
-//! all. Decision 1725 left the cinematic leg unbuilt for exactly that reason and said so; this is
-//! the seam that makes it, and the seven beside it, ordinary.
+//! before. The split is what made the ladder possible when it was built: it reads the ignore
+//! list, the cinematic state, player control, the auction house, the initiator's descriptor, an
+//! outbound initiate of ours and the [`BlockTrades`] CVar, none of which could reach the drain's
+//! dispatch match at Bevy's 16-`SystemParam` ceiling (decision 1725 left the cinematic leg unbuilt
+//! for exactly that reason and said so). Since 2306 the status packet is this module's own
+//! handler ([`net`]) and that ceiling is gone; what keeps the ladder a system of its own is that
+//! its answer may **span frames**, which a packet handler cannot do.
 //!
 //! **There is no consent prompt, and that is faithful rather than missing.** 1.12.1 registers a
 //! `TRADE_REQUEST` event and signals it from nowhere, so the `TRADE` StaticPopup that would have
@@ -60,6 +61,8 @@ use crate::ui_party::GroupState;
 use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::NpcSession;
 
+mod net;
+
 /// One side's offer as the wire delivered it — the seven slots (index 0 = trade slot 1 … index 6 =
 /// the non-traded / enchant slot) plus the gold and the enchant-slot spell. Filled from
 /// `SMSG_TRADE_STATUS_EXTENDED`; the feed resolves the [`TradeItem`]s to display rows.
@@ -71,7 +74,7 @@ struct TradeOffer {
     enchant_spell_id: u32,
 }
 
-/// The open trade window's session, filled by the net bridge ([`crate::net::apply::trade`]) and read
+/// The open trade window's session, filled by the packet handlers ([`net`]) and read
 /// by [`feed_trade`]. Holds the partner guid, the open flag, both sides' wire offers, and the two
 /// accept flags. Cleared on cancel/complete/close and on disconnect.
 ///
@@ -119,7 +122,7 @@ pub(crate) struct TradeSession {
     /// The partner pressed Trade (their accept glow) — set by `TRADE_STATUS_TRADE_ACCEPT`.
     their_accept: bool,
     /// **A `TRADE_REQUEST_CANCEL` is owed to the VM** — set by the `CANCELED` arm of
-    /// [`crate::net::apply::trade::trade_status`], drained by [`feed_trade`] on the next frame.
+    /// [`net`]'s status handler, drained by [`feed_trade`] on the next frame.
     ///
     /// It is a *pending signal* rather than session state, so it is the one field
     /// [`Self::close`] carries across the reset: the reference's own `CANCELED` arm signals the
@@ -455,7 +458,7 @@ impl TradeSession {
     }
 
     // ── Test windows onto the private state, for the sibling module that owns the status arm ──
-    //    (`crate::net::apply::trade`, whose tests drive `trade_status` and then have to ask what
+    //    ([`net`], whose tests drive `trade_status` and then have to ask what
     //    it did). Reading them through named accessors rather than opening the fields keeps the
     //    session's invariants — `partner`/`request` mutually exclusive, `open` gating `npc()` —
     //    enforced in exactly one file.
@@ -502,6 +505,7 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut block: ResMut<Block
 impl Plugin for UiTradePlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_cvar);
+        net::register(app);
         app.init_resource::<TradeSession>()
             .init_resource::<BlockTrades>()
             .add_systems(
@@ -544,14 +548,13 @@ pub(crate) struct BlockTrades(pub(crate) bool);
 /// **Answer an incoming trade request** — the arm the reference keeps inside `CGTradeInfo`'s
 /// dispatcher (`0x4bf736`, case 1 of the 23-case `0x4bf720`), lifted out to where its inputs live.
 ///
-/// The net drain only *records* the request ([`TradeSession::request`]); this system decides. The
-/// split is the point: the decision reads the ignore list, the cinematic state, player control, the
-/// auction house, the initiator's own descriptor, an outbound initiate of ours and a CVar, and none
-/// of those can reach `apply_net_updates`, whose signature is at Bevy's 16-`SystemParam` ceiling.
-/// That ceiling is exactly why decision 1725 left the cinematic leg unbuilt and said so; it is not
-/// a ceiling this side of the seam has. The answer can also **span frames**, which a wire decoder
-/// cannot do at all: the `BlockTrades` line names the initiator, and that name may need a
-/// `CMSG_NAME_QUERY` first.
+/// The status handler only *records* the request ([`TradeSession::request`]); this system decides.
+/// The split is the point: the answer can **span frames**, which a packet handler cannot do — the
+/// `BlockTrades` line names the initiator, and that name may need a `CMSG_NAME_QUERY` first. (It
+/// was first cut for a second reason that 2306 retired: the decision reads the ignore list, the
+/// cinematic state, player control, the auction house, the initiator's own descriptor, an outbound
+/// initiate of ours and a CVar, none of which could reach the drain's dispatch match at Bevy's
+/// 16-`SystemParam` ceiling — exactly why decision 1725 left the cinematic leg unbuilt and said so.)
 ///
 /// **The ladder is the reference's, in its order** — eight legs, walked contiguously over
 /// `[0x4bf736, 0x4bf7f8)` and cross-checked by four independent derivations (wow-re
@@ -1427,7 +1430,7 @@ mod tests {
         assert_eq!(cancels_seen(&mut app), 0, "nothing has cancelled anything");
 
         // A plain close — what `COMPLETE` and `CLOSE_WINDOW` do — signals nothing. (Which
-        // statuses reach which of these two is `net::apply::trade`'s own test; this is the half
+        // statuses reach which of these two is `ui_trade::net`'s own test; this is the half
         // that turns a signal into an event.)
         app.world_mut()
             .resource_mut::<TradeSession>()

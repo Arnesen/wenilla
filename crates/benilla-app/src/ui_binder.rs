@@ -207,14 +207,49 @@ fn drain_binder(
 /// silent but still audible, which is the reference's own ordering rather than an accident of ours.
 const SOUND_PLAYERBOUND: u32 = 1141;
 
-/// The net drain's `SessionEvent::PlayerBound` arm, factored here so the wire law lives beside the
-/// state it drives.
-pub(crate) mod apply {
+/// The innkeeper's packet handlers (in the net handler table since 2312), beside the state they
+/// drive.
+pub(crate) mod net {
     use super::*;
 
     use bevy::ecs::message::MessageWriter;
 
     use crate::net::{ServerSoundKind, ServerSoundMessage};
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+
+    use crate::net::NetHandlerApp;
+
+    /// Register the binder's handlers — called from [`UiBinderPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::BinderConfirm, on_confirm)
+            .net_handler(K::PlayerBound, on_bound);
+    }
+
+    fn on_confirm(In(ev): In<SessionEvent>, mut binder: ResMut<BinderState>) {
+        if let SessionEvent::BinderConfirm { binder: npc } = ev {
+            binder.ask(npc);
+        }
+    }
+
+    fn on_bound(
+        In(ev): In<SessionEvent>,
+        mut binder: ResMut<BinderState>,
+        mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+        areas: Option<Res<AreaTableRes>>,
+        mut sounds: MessageWriter<ServerSoundMessage>,
+    ) {
+        if let SessionEvent::PlayerBound { binder: npc, area } = ev {
+            debug!("net: bound to area {area} by {npc:#x}");
+            bound(
+                area,
+                &mut binder,
+                &mut errors,
+                areas.as_deref(),
+                &mut sounds,
+            );
+        }
+    }
 
     /// `SMSG_PLAYERBOUND` — the bind took. Retract the question, play the sound, and queue
     /// `DisplayError(0x138)` = `ERR_DEATHBIND_SUCCESS_S` (catalog row 312, `kind 0` — a system
@@ -260,6 +295,7 @@ pub(crate) struct UiBinderPlugin;
 
 impl Plugin for UiBinderPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<BinderState>().add_systems(
             Update,
             (

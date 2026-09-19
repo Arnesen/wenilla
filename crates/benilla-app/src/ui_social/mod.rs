@@ -288,10 +288,61 @@ fn status_flag_key(status: u8) -> Option<&'static str> {
     })
 }
 
-/// The net drain's `SessionEvent::Friend*`/`Who*` arms, factored here so the wire laws live
-/// beside the state they drive ([`crate::ui_duel::apply`]'s shape).
-pub(crate) mod apply {
+/// The social family's packet handlers (decision 0668; in the net handler table since 2312),
+/// beside the state they drive ([`crate::ui_duel::net`]'s shape): the friend/ignore lists, the
+/// `/who` answer, and the result codes that print their own chat lines. The lines and the Era
+/// events fire off the mirror in [`feed_social`] — every one of them needs a NAME, which the
+/// feed resolves.
+pub(crate) mod net {
     use super::*;
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+
+    use crate::net::NetHandlerApp;
+
+    /// Register the family's handlers — called from [`UiSocialPlugin`]. One per kind, plus the
+    /// session-end listener.
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::FriendList, on_friend_list)
+            .net_handler(K::IgnoreList, on_ignore_list)
+            .net_handler(K::FriendStatus, on_friend_status)
+            .net_handler(K::WhoResults, on_who)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    fn on_friend_list(In(ev): In<SessionEvent>, mut social: ResMut<SocialState>) {
+        if let SessionEvent::FriendList { friends } = ev {
+            friend_list(&mut social, friends);
+        }
+    }
+
+    fn on_ignore_list(In(ev): In<SessionEvent>, mut social: ResMut<SocialState>) {
+        if let SessionEvent::IgnoreList { guids } = ev {
+            ignore_list(&mut social, guids);
+        }
+    }
+
+    fn on_friend_status(In(ev): In<SessionEvent>, mut social: ResMut<SocialState>) {
+        if let SessionEvent::FriendStatus(update) = ev {
+            friend_status(&mut social, update);
+        }
+    }
+
+    fn on_who(In(ev): In<SessionEvent>, mut social: ResMut<SocialState>) {
+        if let SessionEvent::WhoResults(results) = ev {
+            who(&mut social, results);
+        }
+    }
+
+    /// The friend/ignore lists and the last `/who` are session state (decision 0668): the
+    /// server re-pushes both lists at the next login, and a stale ignore list would silence the
+    /// wrong guids after a reconnect renumbers nothing but re-streams everything. The `/who`
+    /// sort chain is the one thing that survives — it is per-PROCESS in the reference, not
+    /// per-login (decision 2030), which is why this is a `clear_session` and not a `default()`.
+    /// A listener on the session end ([`crate::net::handlers::BROADCAST`]).
+    fn on_session_end(In(_): In<SessionEvent>, mut social: ResMut<SocialState>) {
+        social.clear_session();
+    }
 
     /// `SMSG_FRIEND_LIST`.
     pub(crate) fn friend_list(social: &mut SocialState, friends: Vec<FriendEntry>) {
@@ -319,6 +370,7 @@ pub(crate) struct UiSocialPlugin;
 
 impl Plugin for UiSocialPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<SocialState>().add_systems(
             Update,
             (

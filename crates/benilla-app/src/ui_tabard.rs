@@ -287,10 +287,49 @@ fn reset_on_world_enter(
     design.0 = None;
 }
 
+/// The tabard vendor's packet handlers (in the net handler table since 2312), beside the state
+/// they drive.
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::TabardOpen;
+    use crate::net::NetHandlerApp;
+    use crate::ui_guild::GuildState;
+
+    /// Register the two handlers — called from [`super::TabardUiPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::TabardVendorActivate, on_activate)
+            .net_handler(K::SaveGuildEmblemResult, on_save_result);
+    }
+
+    fn on_activate(In(ev): In<SessionEvent>, mut tabard: ResMut<TabardOpen>) {
+        if let SessionEvent::TabardVendorActivate(vendor) = ev {
+            tabard.open(vendor);
+        }
+    }
+
+    /// A saved emblem evicts our guild's cached record (`0x5e715f`): the next query anywhere
+    /// re-fetches it — no event, no packet.
+    fn on_save_result(
+        In(ev): In<SessionEvent>,
+        mut tabard: ResMut<TabardOpen>,
+        mut guild: ResMut<GuildState>,
+    ) {
+        if let SessionEvent::SaveGuildEmblemResult(result) = ev {
+            if tabard.apply_result(result) {
+                guild.evict_own_identity();
+            }
+        }
+    }
+}
+
 pub(crate) struct TabardUiPlugin;
 
 impl Plugin for TabardUiPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<TabardOpen>()
             .init_resource::<TabardDesign>()
             .add_systems(
