@@ -1,6 +1,5 @@
-//! `--vendor`: the vendor wire (decision 0081 phase 4). Auto-find the nearest streamed vendor,
-//! `CMSG_LIST_INVENTORY` it, buy the cheapest row, and require a reaction — plus confirm the money
-//! accessor (`PLAYER_FIELD_COINAGE`) reads and that a coinage delta lands on that field.
+//! `--vendor`: list the nearest vendor, buy its cheapest row and require a reaction; a coinage
+//! delta confirms the `PLAYER_FIELD_COINAGE` accessor.
 
 use std::time::{Duration, Instant};
 
@@ -9,8 +8,8 @@ use benilla_protocol::{decode, SessionEvent};
 
 use crate::probes::{Ctx, Probe};
 
-/// vmangos `INTERACTION_DISTANCE` (`Objects/ObjectDefines.h:24`) — the range every NPC service
-/// opcode is gated on, silently.
+/// vmangos `INTERACTION_DISTANCE` (`Objects/ObjectDefines.h:24`): every NPC service opcode past
+/// it is silently ignored.
 const INTERACTION_DISTANCE: f32 = 5.0;
 
 pub(crate) struct Vendor;
@@ -21,8 +20,6 @@ impl Probe for Vendor {
         let session = &mut *cx.session;
         let self_guid = world.self_guid;
 
-        // --vendor: list the nearest streamed vendor and buy its cheapest row; also confirm the money
-        // accessor (`PLAYER_FIELD_COINAGE`) reads and that any coinage delta lands on that field.
         let sf = world
             .self_fields
             .as_mut()
@@ -36,7 +33,7 @@ impl Probe for Vendor {
         );
 
         let self_pos = world.tracked.get(&self_guid).map(|t| t.position);
-        // The nearest advertised vendor (2D distance from us; z ignored — Northshire is ~flat here).
+        // Nearest by 2D distance; Northshire is nearly flat.
         let vendor = self_pos.and_then(|p| {
             world
                 .vendors
@@ -48,12 +45,8 @@ impl Probe for Vendor {
             "no UNIT_NPC_FLAG_VENDOR creature streamed in range (fresh Northshire spawn has none — \
              re-run with a longer --seconds after moving toward a vendor, or grant GM to teleport)",
         )?;
-        // The server refuses SILENTLY past interaction range, so an out-of-range send looks exactly
-        // like a broken wire: no packet, a 5s drain, "nothing arrived". Name the real cause here
-        // instead of leaving it to be re-diagnosed. VERIFIED vmangos `INTERACTION_DISTANCE = 5.0f`
-        // (`Objects/ObjectDefines.h:24`), checked by `Player::CanInteractWithNPC`'s last gate
-        // (`Objects/Player.cpp:2556`) — a 3D check with both bounding radii allowed for, so this 2D
-        // screen is approximate and deliberately generous.
+        // The server's check (`Player::CanInteractWithNPC`, `Objects/Player.cpp:2556`) is 3D and
+        // allows for both bounding radii, so this 2D screen is only approximate.
         if dist > INTERACTION_DISTANCE {
             bail!(
                 "nearest vendor {vendor_guid:#x} is {dist:.1} yd away; vmangos refuses \
@@ -70,7 +63,6 @@ impl Probe for Vendor {
         );
         session.list_inventory(vendor_guid)?;
 
-        // Drain for the vendor's stock list.
         let mut items: Option<Vec<benilla_protocol::messages::VendorItem>> = None;
         let drain_until = Instant::now() + Duration::from_secs(5);
         while Instant::now() < drain_until && items.is_none() {
@@ -104,8 +96,7 @@ impl Probe for Vendor {
             bail!("the vendor listed 0 rows — can't exercise a buy");
         }
 
-        // Buy the cheapest priced, in-stock row (price > 0; current_count 0 = sold out — a limited
-        // row we already drained; 0xFFFF_FFFF = unlimited, always buyable), one stack.
+        // `current_count` 0 is sold out and 0xFFFF_FFFF unlimited.
         let cheapest = rows
             .iter()
             .filter(|r| r.price > 0 && r.current_count != 0)
@@ -117,10 +108,7 @@ impl Probe for Vendor {
         );
         session.buy_item(vendor_guid, cheapest.entry, 1)?;
 
-        // Drain for a reaction: the item arriving, the stock updating, a coinage delta on exactly the
-        // COINAGE field, or a decoded refusal — any one proves the round trip. Keep draining the full
-        // window (not stopping at the first) so a coinage delta — the strongest evidence, it confirms
-        // the accessor *index* — is captured even when the item-create lands first in the same batch.
+        // Keep draining past the first reaction: the coinage delta can trail the item create.
         let mut round_trip: Option<String> = None;
         let mut coinage_delta: Option<String> = None;
         let drain_until = Instant::now() + Duration::from_secs(5);

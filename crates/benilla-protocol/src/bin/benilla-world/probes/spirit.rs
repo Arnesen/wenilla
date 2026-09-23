@@ -1,7 +1,5 @@
-//! `--spirit`: the spirit-healer res + the 25% durability loss's wire (decision 0318). Repair to a
-//! full baseline (the [`crate::world::DeathArc`] dies + releases), teleport onto the graveyard's
-//! Spirit Healer, `CMSG_SPIRIT_HEALER_ACTIVATE`, and require BOTH the res (ghost flag clears) and
-//! the post-activate `ITEM_FIELD_DURABILITY` deltas the loss must push.
+//! `--spirit`: `CMSG_SPIRIT_HEALER_ACTIVATE` must clear the ghost flag and push the 25%
+//! durability loss as `ITEM_FIELD_DURABILITY` deltas.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -11,9 +9,7 @@ use benilla_protocol::{guid, EntityKind, ObjectFields, SessionEvent};
 
 use crate::probes::{Ctx, Probe};
 
-/// The merged per-item descriptor stores (create seed + every values-delta — the same shape the
-/// app's `Items` store holds), the durability baseline snapshotted at activate time, and the raw
-/// post-activate durability deltas the verdict requires.
+/// Per-item merged descriptors, the durability baseline at activate time, and the deltas after.
 #[derive(Default)]
 pub(crate) struct Spirit {
     healer: Option<(u64, [f32; 3])>,
@@ -27,18 +23,16 @@ pub(crate) struct Spirit {
 
 impl Probe for Spirit {
     fn stage(&mut self, cx: &mut Ctx) -> Result<()> {
-        // A full-durability baseline (`.repairitems`, vmangos `Chat.cpp:1297` SEC_GAMEMASTER):
-        // every post-activate delta must then read as a DROP, idempotent across probe re-runs
-        // (each spirit res costs a real 25%).
+        // Full durability, so each post-activate delta reads as a drop; `.repairitems` needs
+        // SEC_GAMEMASTER (vmangos `Chat.cpp:1297`).
         cx.session.send_chat(".repairitems")?;
         println!("sent GM: .repairitems (full-durability baseline)");
         Ok(())
     }
 
     fn poll(&mut self, cx: &mut Ctx) -> Result<()> {
-        // --spirit: once we're a released ghost and the graveyard's Spirit Healer has streamed,
-        // teleport onto it — the repop spot can land outside the activate's interaction gate
-        // (vmangos `GetNPCIfCanInteractWith`, INTERACTION_DISTANCE 5 yd).
+        // Teleport onto the healer: the repop spot can be outside the activate's 5 yd
+        // interaction gate (vmangos `GetNPCIfCanInteractWith`).
         if !self.healer_tp_sent
             && cx
                 .world
@@ -53,12 +47,9 @@ impl Probe for Spirit {
                 self.healer_tp_sent = true;
             }
         }
-        // --spirit: standing on the healer, snapshot the durability baseline (the merged item
-        // stores: create seed + the `.repairitems` deltas) and ask for the res — the XP_LOSS
-        // popup's accept. The 2s settle after the teleport ack lets the server PROCESS the ack
-        // first: the movement-ack and world-packet queues are separate, and an activate racing
-        // its own teleport ack is range-checked from the PRE-teleport spot (>5 yd → silently
-        // refused; live-observed on the first probe run).
+        // On the healer, snapshot the baseline and send the XP_LOSS popup's accept. The server
+        // queues movement acks apart from world packets, so an activate sent too soon after the
+        // teleport is range-checked from the old spot and silently refused; hence the 2 s wait.
         if !self.activate_sent {
             if let (Some((hg, hp)), Some(landed)) = (self.healer, self.healer_tp_landed) {
                 let (pos, _) = cx.world.self_pose();
@@ -92,10 +83,8 @@ impl Probe for Spirit {
 
     fn on_event(&mut self, ev: &SessionEvent, cx: &mut Ctx) -> Result<()> {
         match ev {
-            // --spirit: the graveyard's Spirit Healer advertises UNIT_NPC_FLAG_SPIRITHEALER (0x20 —
-            // vmangos `UnitDefines.h:662`, the flag `GetNPCIfCanInteractWith` gates the activate on).
-            // It only streams to ghosts, so it can't appear before release. (The capture condition is
-            // the arm guard so the whole match reads as one dispatch — clippy's collapsible_match.)
+            // `UNIT_NPC_FLAG_SPIRITHEALER` 0x20 (`UnitDefines.h:662`), which the activate's gate
+            // checks; the healer streams only to ghosts.
             SessionEvent::ObjectCreate {
                 guid,
                 kind,
@@ -112,11 +101,7 @@ impl Probe for Spirit {
                 self.healer = Some((*guid, *position));
             }
             SessionEvent::ItemCreate { guid, fields, .. } => {
-                // --spirit: seed/overlay the item's merged store (the app's `Items`
-                // discipline) — the durability baseline reads off these. The print
-                // is the created-semantics live proof: a broken item's create OMITS
-                // its zero `DURABILITY` word, and the pair must still read `0/max`
-                // (the director's "100% on broken gear" bug).
+                // A broken item's create omits its zero `DURABILITY`; it must still read `0/max`.
                 if let Some((d, m)) = fields
                     .item_durability()
                     .zip(fields.item_max_durability())
@@ -136,9 +121,7 @@ impl Probe for Spirit {
                     }
                 }
             }
-            // --spirit: an item values-delta — the durability wire under test. Log
-            // every `ITEM_FIELD_DURABILITY` it carries (post-activate ones are the
-            // verdict's evidence) and merge into the item's store.
+            // Item values deltas: the post-activate durability ones are the verdict's evidence.
             SessionEvent::ObjectValues { guid, fields } if guid::is_item(*guid) => {
                 if let Some(d) = fields.item_durability() {
                     if self.activate_sent {
@@ -162,10 +145,7 @@ impl Probe for Spirit {
                     }
                 }
             }
-            // The old Teleport arm's `else if cli.spirit … healer_tp_landed` branch. Its condition is
-            // equivalent to the else-if: `healer_tp_sent` can only become true after `graveyard_pos`
-            // is Some (the healer-TP poll requires it), so this and World's graveyard capture (the
-            // other branch) are temporally disjoint. (Folded into the arm guard — collapsible_match.)
+            // `healer_tp_sent` follows World's graveyard capture, so this is the healer teleport.
             SessionEvent::Teleport { guid, .. }
                 if *guid == cx.world.self_guid
                     && self.healer_tp_sent
@@ -184,8 +164,7 @@ impl Probe for Spirit {
         let healer_tp_sent = self.healer_tp_sent;
         let session = &mut *cx.session;
 
-        // Cleanup before judging: the res left the character alive at 75% — a GM repair keeps
-        // re-runs (and the shared GM character's gear) clean. Fire-and-forget; the stream is done.
+        // Repair before judging, so the 25% loss does not carry into the next run.
         session.send_chat(".repairitems")?;
 
         if !self.activate_sent {
@@ -195,7 +174,7 @@ impl Probe for Spirit {
             );
         }
         if !revived_seen {
-            // Don't leave the shared GM character a ghost (live-observed: the first run did).
+            // Do not leave the shared GM character a ghost.
             session.send_chat(".revive")?;
             bail!(
                 "--spirit: CMSG_SPIRIT_HEALER_ACTIVATE never cleared the ghost flag — the res didn't land (a cleanup .revive was sent)"

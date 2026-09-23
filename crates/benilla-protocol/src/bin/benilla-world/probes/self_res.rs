@@ -1,54 +1,36 @@
-//! `--self-res`: the self-resurrect wire (decision 1746) — `PLAYER_SELF_RES_SPELL` arriving at the
-//! death, `CMSG_SELF_RES` spending it, and the field zeroing as we stand back up.
-//!
-//! The whole mechanism is one private descriptor field and one bodyless opcode, so the only way to
-//! be sure of either is to watch a real death. The shared [`crate::world::DeathArc`] does the dying
-//! — with `hold_release` set, because the button being tested lives on the DEATH dialog and that
-//! dialog only exists *before* the release.
-//!
-//! **Reincarnation, not a soulstone**, because a soulstone needs a second character casting on us
-//! while a shaman's passive needs only what a GM account can grant itself: vmangos's
-//! `Player::SelectResurrectionSpellId` gates the Reincarnation arm on `HasSpell(20608)` +
-//! `IsSpellReady(21169)` + `HasItemCount(17030, 1)` and asks **no class question**, so the staging
-//! below arms it on whatever body the slot's probe account has. The two paths converge one line
-//! later — both write their effect id into the same field — so the field, the send and the
-//! resurrection are the same wire either way.
+//! `--self-res`: `PLAYER_SELF_RES_SPELL` arrives at death, the bodyless `CMSG_SELF_RES` spends it,
+//! and the field zeroes as we stand. The death holds its release: the button lives on the DEATH
+//! dialog, which exists only before release. Reincarnation stands in for a soulstone: vmangos
+//! `Player::SelectResurrectionSpellId` arms it with no class check, into the same field.
 
 use anyhow::{bail, Context, Result};
 use benilla_protocol::SessionEvent;
 
 use crate::probes::{Ctx, Probe};
 
-/// Reincarnation's learnable passive — the `HasSpell` half of the server's gate.
+/// Reincarnation's learnable passive, the `HasSpell` half of the server's gate.
 const REINCARNATION_PASSIVE: u32 = 20608;
-/// Reincarnation's *effect* spell — what the server writes into `PLAYER_SELF_RES_SPELL`, and what
-/// `Spell.dbc` names **"Reincarnation"** (the DEATH dialog's button text).
+/// Reincarnation's effect: the `PLAYER_SELF_RES_SPELL` value, named on the DEATH dialog's button.
 const REINCARNATION_EFFECT: u32 = 21169;
-/// Ankh — the reagent the same gate counts.
+/// Ankh, the reagent the same gate counts.
 const ITEM_ANKH: u32 = 17030;
 
 #[derive(Default)]
 pub(crate) struct SelfRes {
-    /// The first non-zero `PLAYER_SELF_RES_SPELL` seen, and whether we were already at 0 health
-    /// when it landed — the ordering question the DEATH dialog's `OnShow` read depends on.
+    /// The first non-zero `PLAYER_SELF_RES_SPELL`, and whether health was already 0 when it came:
+    /// the DEATH dialog's `OnShow` reads the field.
     self_res_spell: Option<u32>,
     self_res_after_death: bool,
     sent: bool,
-    /// `PLAYER_SELF_RES_SPELL` read back as zero *after* the send — the server spending it.
+    /// `PLAYER_SELF_RES_SPELL` read back as zero after the send: the server spent it.
     field_cleared: bool,
-    /// Health back above 0 after the send, without ever having been a ghost.
     revived_without_releasing: bool,
 }
 
 impl Probe for SelfRes {
     fn stage(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Arm the passive path. Reincarnation has a one-hour cooldown and a **successful run is
-        // what sets it**, so without this the probe passes once and then fails for an hour — which
-        // is exactly what it did, and the failure reads as "the server refused the gate" rather
-        // than "you already proved this". `.cooldown clear` (not `.cooldown`, which is a bare
-        // subcommand table and silently does nothing) removes all of the selected unit's
-        // cooldowns; with nothing selected `ChatHandler::GetSelectedUnit` falls back to self.
-        // The Ankh goes in every run because the resurrection spends it.
+        // A success starts Reincarnation's one-hour cooldown and spends the Ankh. Bare `.cooldown`
+        // does nothing; `.cooldown clear` with nothing selected clears our own.
         cx.session.send_chat(".cooldown clear")?;
         cx.session
             .send_chat(&format!(".learn {REINCARNATION_PASSIVE}"))?;
@@ -61,8 +43,7 @@ impl Probe for SelfRes {
     }
 
     fn poll(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Spend it once the death has landed AND the field has arrived — the same two facts the
-        // DEATH dialog's button2 waits on (`HasSoulstone()` non-nil while the popup is up).
+        // Dead, field set: the DEATH dialog offers button2 while `HasSoulstone()` is non-nil.
         let died = cx
             .world
             .death_arc
@@ -83,8 +64,7 @@ impl Probe for SelfRes {
         if *guid != cx.world.self_guid {
             return Ok(());
         }
-        // Read the DELTA for the arrival, not the merged store: the question is which packet
-        // carried the field, and a merged read cannot tell "arrived now" from "arrived earlier".
+        // The delta, not the merged store: only the delta says which packet carried the field.
         if let Some(spell) = fields.player_self_res_spell() {
             if self.self_res_spell.is_none() {
                 self.self_res_spell = Some(spell);
@@ -103,8 +83,8 @@ impl Probe for SelfRes {
                 );
             }
         } else if self.sent && !self.field_cleared {
-            // Zero and absent are the same `None` here, so the clear is only meaningful once the
-            // MERGED store also reads none — an unrelated delta must not be mistaken for it.
+            // A delta without the field also reads `None`, so the clear counts only once the
+            // merged store reads none too.
             if cx
                 .world
                 .self_fields

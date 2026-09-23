@@ -1,6 +1,5 @@
-//! `--swap-pack-slots`: `CMSG_SWAP_INV_ITEM` (the backpack pick/place/swap wire). Swap two 1-based
-//! backpack slots, assert the exchange, then swap back and assert the original layout (leaves the
-//! character as found).
+//! `--swap-pack-slots`: `CMSG_SWAP_INV_ITEM` swaps two 1-based backpack slots, then swaps them
+//! back so the character is left as found.
 
 use std::time::{Duration, Instant};
 
@@ -20,8 +19,7 @@ impl Probe for SwapPackSlots {
         let session = &mut *cx.session;
         let (a, b) = (self.a, self.b);
 
-        // --swap-pack-slots: swap two backpack slots, assert the exchange landed, then swap back and
-        // assert the original layout is restored (leaves the character as found).
+        // Backpack slots are player-array slots from 23 (`INVENTORY_SLOT_ITEM_START`).
         let sf = world
             .self_fields
             .as_mut()
@@ -38,8 +36,6 @@ impl Probe for SwapPackSlots {
              CMSG_SWAP_INV_ITEM src {wire_a} dst {wire_b}"
         );
 
-        // A closure would borrow `session` + `sf` at once; inline the drain so the borrows don't
-        // overlap. Await until both slots read their expected guids (or 5s).
         session.swap_inv_item(wire_a, wire_b)?;
         let mut settled = false;
         let drain_until = Instant::now() + Duration::from_secs(5);
@@ -64,7 +60,6 @@ impl Probe for SwapPackSlots {
         }
         println!("✅ swap: slots {a}↔{b} exchanged in the descriptor (guids confirmed).");
 
-        // Swap back and require the original layout to return.
         session.swap_inv_item(wire_a, wire_b)?;
         let mut restored = false;
         let drain_until = Instant::now() + Duration::from_secs(5);

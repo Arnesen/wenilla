@@ -1,5 +1,5 @@
-//! `--use-pack-slot`: `CMSG_USE_ITEM` on a 1-based backpack slot; require a server reaction — a
-//! stack-count delta, a destroy on the item's guid, or an explicit cast-result refusal.
+//! `--use-pack-slot`: `CMSG_USE_ITEM` on a 1-based backpack slot must draw a stack-count delta,
+//! a destroy of the item, or a cast-result refusal.
 
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,7 @@ impl Probe for UsePackSlot {
         let session = &mut *cx.session;
         let n = self.n;
 
-        // --use-pack-slot: poke a real item and require a server reaction on its guid.
+        // Bag 255 (`INVENTORY_SLOT_BAG_0`) is the player's own array; the backpack is slots 23-38.
         let sf = world
             .self_fields
             .as_ref()
