@@ -600,7 +600,9 @@ impl MaterialExtension for LiquidExt {
 ///
 /// **One shared sampler** (repeating, on `layer_array`) covers both arrays: `StandardMaterial`
 /// already uses ~6 of Metal's 16 fragment samplers and the view adds more, so extra samplers risk
-/// the per-stage limit. Layer UVs are tiled; the alpha map is sampled in 0..1 where repeat == clamp.
+/// the per-stage limit. Layer UVs are tiled. The alpha map is sampled in 0..1, where linear
+/// filtering on a repeating sampler would wrap at a chunk edge; `terrain.wgsl` insets its UVs by
+/// half a texel, which clamps instead.
 /// **All terrain Vec4 uniforms merge onto one binding (106).** AsBindGroup packs multiple
 /// `#[uniform(N)]` fields at the same `N` into a single buffer entry; the WGSL declares one
 /// `var<uniform> t: TerrainParams;` whose fields land in the SAME order as the Rust declaration
