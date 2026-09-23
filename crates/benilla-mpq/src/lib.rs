@@ -271,18 +271,6 @@ impl Archive {
         let compressed = block.flags & (FLAG_COMPRESS | FLAG_IMPLODE) != 0;
         let implode_only = block.flags & FLAG_IMPLODE != 0 && block.flags & FLAG_COMPRESS == 0;
 
-        if !compressed {
-            // Stored: raw bytes, exactly file_size.
-            file.seek(SeekFrom::Start(file_pos))?;
-            let mut out = vec![0u8; file_size];
-            file.read_exact(&mut out)?;
-            return Ok(out);
-        }
-
-        // Sectored read. The offset table is `sector_count + 1` u32s at file_pos; sector offsets are
-        // absolute from file_pos, so a SECTOR_CRC table (present only on the patch archives) sits
-        // between the offset table and the first sector and is skipped for free.
-        //
         // `file_size` (hence `sector_count`) and each sector's `comp_len` all come from the
         // block-table entry / on-disk offset table — the same attacker-controllable-header shape as
         // the hash/block tables (decision 0064). Cap every reservation below by what the archive file
@@ -290,6 +278,25 @@ impl Archive {
         // allocator aborting.
         let file_len = file.metadata()?.len();
         let avail = avail_from(file_len, file_pos);
+
+        if !compressed {
+            // Stored: raw bytes, exactly file_size — which the archive must hold from `file_pos`
+            // on. A stored entry claiming more is a corrupt block table, refused before the
+            // buffer is sized rather than after a 4 GiB one comes back short.
+            if capped(file_size, 1, avail) < file_size {
+                return Err(Error::Corrupt(format!(
+                    "{name}: stored size ({file_size}) larger than the archive"
+                )));
+            }
+            file.seek(SeekFrom::Start(file_pos))?;
+            let mut out = vec![0u8; file_size]; // proven <= avail above
+            file.read_exact(&mut out)?;
+            return Ok(out);
+        }
+
+        // Sectored read. The offset table is `sector_count + 1` u32s at file_pos; sector offsets are
+        // absolute from file_pos, so a SECTOR_CRC table (present only on the patch archives) sits
+        // between the offset table and the first sector and is skipped for free.
         let sector_count = file_size.div_ceil(idx.sector_size);
         let otab_len = sector_count.checked_add(1).ok_or_else(|| {
             Error::Corrupt(format!("{name}: sector count overflow ({sector_count})"))
@@ -327,7 +334,14 @@ impl Archive {
                     "{name}: sector {i} length ({comp_len}) larger than the archive"
                 )));
             }
+            // Every earlier sector yielded at most its own `want` (`decompress` is bounded to
+            // `expected`), so `out.len() <= file_size` and this cannot wrap; `want > 0` in-loop.
             let want = (file_size - out.len()).min(idx.sector_size); // last sector may be short
+                                                                     // Two equal consecutive offsets are a mis-built table, not a sector: zero bytes can
+                                                                     // carry no codec byte and no payload, so refuse before anything indexes into them.
+            if comp_len == 0 {
+                return Err(Error::Corrupt(format!("{name}: sector {i} is empty")));
+            }
 
             file.seek(SeekFrom::Start(file_pos + start))?;
             let mut raw = vec![0u8; comp_len]; // proven <= avail above
@@ -342,7 +356,7 @@ impl Archive {
                 out.extend_from_slice(&decompress(0x08, &raw, want, name)?);
             } else {
                 // COMPRESS: leading byte is the codec mask, rest is the payload.
-                let method = raw[0];
+                let method = raw[0]; // non-empty: refused above
                 out.extend_from_slice(&decompress(method, &raw[1..], want, name)?);
             }
         }
@@ -480,7 +494,11 @@ fn decompress(method: u8, data: &[u8], expected: usize, name: &str) -> Result<Ve
         0x02 => {
             use flate2::read::ZlibDecoder;
             let mut out = Vec::with_capacity(expected);
+            // Bounded to `expected`: a stream that inflates past its sector's slot would push the
+            // caller's output past `file_size` and wrap the next sector's `want` — a malformed
+            // sector, not a shape 1.12 data has, and never the caller's arithmetic to absorb.
             ZlibDecoder::new(data)
+                .take(expected as u64)
                 .read_to_end(&mut out)
                 .map_err(|e| Error::Decompress(format!("{name}: zlib: {e}")))?;
             Ok(out)
@@ -589,6 +607,12 @@ mod tests {
     /// stored `data`. Tables are encrypted with the real keys so the reader's decrypt round-trips
     /// them — enough to exercise flag handling (delete-marker vs. a plain stored file).
     fn archive_with_one_entry(name: &str, flags: u32, data: &[u8]) -> Vec<u8> {
+        archive_with_one_block(name, flags, data, data.len() as u32)
+    }
+
+    /// [`archive_with_one_entry`] with the block entry's `file_size` set independently of the
+    /// bytes actually appended — the shape of a lying block table.
+    fn archive_with_one_block(name: &str, flags: u32, data: &[u8], file_size: u32) -> Vec<u8> {
         use crypto::{encrypt_block, hash_type};
         const HASH_SLOTS: u32 = 4; // power of two — the reader masks with len-1
         let hash_pos = 32u32;
@@ -605,7 +629,7 @@ mod tests {
         encrypt_block(&mut hash, hash_string("(hash table)", hash_type::FILE_KEY));
 
         // Block table (plaintext): one entry pointing at the trailing data.
-        let mut block = vec![data_pos, data.len() as u32, data.len() as u32, flags];
+        let mut block = vec![data_pos, data.len() as u32, file_size, flags];
         encrypt_block(
             &mut block,
             hash_string("(block table)", hash_type::FILE_KEY),
@@ -662,5 +686,79 @@ mod tests {
         assert_eq!(avail_from(10, 100), 0);
         assert_eq!(avail_from(100, 10), 90);
         assert_eq!(avail_from(0, 0), 0);
+    }
+
+    /// A sector offset table with two equal consecutive offsets names a zero-length sector; the
+    /// codec-byte read (`raw[0]`) indexed that empty buffer and panicked on the first read of the
+    /// file. A private server's mis-built `patch-*.MPQ` is the realistic source.
+    #[test]
+    fn an_empty_sector_is_refused_not_indexed() {
+        // One 8-byte file, one sector: offsets [8, 8] — zero bytes for a sector that must yield 8.
+        let mut data = Vec::new();
+        data.extend_from_slice(&8u32.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes());
+        let (arc, path) = open_temp_kept(
+            "empty_sector",
+            &archive_with_one_entry("a.bin", FLAG_EXISTS | FLAG_COMPRESS, &data),
+        );
+        match arc.read_file("a.bin") {
+            Err(Error::Corrupt(_)) => {}
+            other => panic!("expected Error::Corrupt for an empty sector, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A sector that inflates past its own slot used to run the output past `file_size`, and the
+    /// next sector's `want = file_size - out.len()` wrapped (a panic in dev, a `usize::MAX`
+    /// reservation in release). The inflate is bounded to the sector's expected size instead.
+    #[test]
+    fn an_over_inflating_sector_cannot_run_the_output_past_file_size() {
+        use flate2::{write::ZlibEncoder, Compression};
+        use std::io::Write;
+        // A COMPRESS sector as stored: the 0x02 (zlib) codec byte, then the stream.
+        let zlib = |raw: &[u8]| {
+            let mut e = ZlibEncoder::new(vec![0x02u8], Compression::default());
+            e.write_all(raw).unwrap();
+            e.finish().unwrap()
+        };
+        // 612 bytes of file = one full 512-byte sector (shift 0) + a 100-byte tail. Sector 0's
+        // stream inflates to 1000 bytes, twice its slot.
+        let s0 = zlib(&[0u8; 1000]);
+        let s1 = zlib(&[7u8; 100]);
+        let otab_len = 12u32;
+        let mut data = Vec::new();
+        data.extend_from_slice(&otab_len.to_le_bytes());
+        data.extend_from_slice(&(otab_len + s0.len() as u32).to_le_bytes());
+        data.extend_from_slice(&(otab_len + (s0.len() + s1.len()) as u32).to_le_bytes());
+        data.extend_from_slice(&s0);
+        data.extend_from_slice(&s1);
+        let (arc, path) = open_temp_kept(
+            "over_inflate",
+            &archive_with_one_block("a.bin", FLAG_EXISTS | FLAG_COMPRESS, &data, 612),
+        );
+        let out = arc
+            .read_file("a.bin")
+            .expect("a bounded inflate reads cleanly");
+        assert_eq!(out.len(), 612);
+        assert!(out[..512].iter().all(|&b| b == 0));
+        assert!(out[512..].iter().all(|&b| b == 7));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A stored (uncompressed) entry's buffer was sized straight from the block table's
+    /// `file_size` — `vec![0u8; 4 GiB]` before the read that would have come back short. It is
+    /// now refused against what the archive holds from the entry's position, like the sectored
+    /// path's reservations; `Corrupt`, not the read's `Io`, pins that the guard fired first.
+    #[test]
+    fn a_stored_size_larger_than_the_archive_is_refused_before_allocating() {
+        let (arc, path) = open_temp_kept(
+            "stored_overflow",
+            &archive_with_one_block("a.txt", FLAG_EXISTS, b"hello", u32::MAX),
+        );
+        match arc.read_file("a.txt") {
+            Err(Error::Corrupt(_)) => {}
+            other => panic!("expected Error::Corrupt for a lying stored size, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -404,7 +404,7 @@ impl Cooldowns {
 
     /// **The list belongs to the world session, not to the process** (decision 2116) — the
     /// session-end clear every other net-backed store already had
-    /// ([`crate::net::apply::session::disconnected`]).
+    /// ([`crate::net::session::disconnected`]).
     ///
     /// `SMSG_INITIAL_SPELLS` carries the WHOLE set of cooldowns still running, at every world
     /// entry, and [`Self::seed_initial`] appends (the reference's `AddCooldown 0x6e12c0` never

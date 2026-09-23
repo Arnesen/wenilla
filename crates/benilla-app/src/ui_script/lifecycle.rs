@@ -1410,7 +1410,7 @@ mod tests {
         // …and the pair every `Instant`→`GetTime` conversion runs through moved with it: a
         // 10-minute cooldown armed 30 s before the rebuild still derives its real start.
         let clock = world.resource::<UiClock>();
-        let armed = crate::cooldowns::CooldownInfo {
+        let armed = crate::spell::cooldowns::CooldownInfo {
             start: startup + Duration::from_secs(60),
             remaining_ms: 570_000,
             duration_ms: 600_000,

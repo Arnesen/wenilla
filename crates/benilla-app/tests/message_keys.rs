@@ -97,7 +97,7 @@ fn every_error_key_in_the_source_resolves_to_real_text() {
     /// Keys whose row the shipped `GlobalStrings.lua` has **no string for**, so the reference
     /// itself shows nothing when it raises them. Each is documented where it is raised —
     /// `ui_items::equip_error` (errorId 362), `ui_action::cast_fail` (the pet-happiness arm), and
-    /// `net::apply::pet` (errorId 337, both pet handlers' NOPATH arm). A fourth entry here is a
+    /// `ui_pet::net` (errorId 337, both pet handlers' NOPATH arm). A fourth entry here is a
     /// defect until someone proves otherwise.
     ///
     /// `ERR_PET_SPELL_NOPATH` is the one worth reading twice, because it is a trap: 5875 *does*

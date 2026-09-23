@@ -56,6 +56,8 @@ mod blend_check;
 mod census;
 mod clock;
 #[cfg(feature = "dev")]
+mod crash_inject;
+#[cfg(feature = "dev")]
 mod gpu;
 #[cfg(feature = "dev")]
 mod hud;
@@ -196,6 +198,10 @@ impl Plugin for PerfPlugin {
             app.insert_resource(c);
             app.add_systems(Last, census::res_census::res_census);
         }
+        // `WOW_CRASH_INJECT=<at>` — the crash reporter's standing injector (its module doc says
+        // why it lives here): armed on every platform, and ahead of the stall sampler's own
+        // off-switch for the same reason the sampler arms its injectors first.
+        crash_inject::arm(app);
         #[cfg(target_os = "macos")]
         stall::plugin(app);
         // `WOW_FRAME_PHASES=<ms>` — which PHASE of a slow frame spent it (see the module doc).

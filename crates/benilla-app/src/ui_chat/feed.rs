@@ -1365,7 +1365,7 @@ fn needs_name(chat_type: u8) -> bool {
 /// the net apply pass fills, and it is delivered as the event rather than a return value, because
 /// that is how the API answers — `RequestTimePlayed()` itself returns nothing.
 ///
-/// **This does NOT replace the chat breakdown beside it.** `net::apply::chat::played_time` prints
+/// **This does NOT replace the chat breakdown beside it.** `ui_chat::net::played_time` prints
 /// the TIME_PLAYED_TOTAL/LEVEL lines because we do not ship `ChatFrame_DisplayTimePlayed`, which is
 /// what the reference's own `TIME_PLAYED_MSG` handler does. The two are the reference's two
 /// consumers of one packet, not a doubling: an addon that registers the event does its own thing

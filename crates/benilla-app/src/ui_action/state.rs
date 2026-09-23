@@ -33,13 +33,14 @@ use benilla_formats::{SpellDisplay, SpellRange};
 use benilla_protocol::messages::{ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL};
 use benilla_ui::script::{ActionState, UiScript};
 
-use crate::cooldowns::Cooldowns;
 use crate::creature_anim::{Casting, Engaged};
 use crate::items::Items;
 use crate::net::{GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+use crate::spell::Cooldowns;
 use crate::target::Selection;
 
-use super::{usable, AutoRepeatActive, PlayerActions, Spells};
+use super::{usable, PlayerActions, Spells};
+use crate::spell::AutoRepeatActive;
 
 /// The feed's memory: what was last pushed, and the edge detectors.
 #[derive(Default)]
@@ -328,7 +329,7 @@ pub(super) fn cast_moving_refusal(
     // The verified 0x200f: ANY_MOVE (0xf) | FALLING (0x2000), in our identical wire layout.
     const MOVING_MASK: u32 = move_flags::ANY_MOVE | move_flags::FALLING;
     let Some(d) = spell else { return false };
-    d.interrupt_flags & crate::ui_cast::SPELL_INTERRUPT_MOVEMENT != 0
+    d.interrupt_flags & crate::spell::SPELL_INTERRUPT_MOVEMENT != 0
         && move_flags_word & MOVING_MASK != 0
         && !d.auto_repeat()
         && (cast_time_ms != 0
@@ -398,12 +399,12 @@ pub(super) fn feed_action_state(
     // (decision 0983) and the talent spell-modifier tables that leg 12's cost reads through,
     // both of which ride here for the same ceiling reason.
     cast_state: (
-        Res<crate::ui_cast::PendingCast>,
-        Res<crate::ui_cast::QueuedMeleeSpell>,
-        Res<crate::ui_cast::ActiveChannel>,
+        Res<crate::spell::PendingCast>,
+        Res<crate::spell::QueuedMeleeSpell>,
+        Res<crate::spell::ActiveChannel>,
         Res<super::SpellTargeting>,
         Res<crate::ui_macro::MacroBoundSpells>,
-        Res<crate::spell_mods::SpellModifiers>,
+        Res<crate::spell::SpellModifiers>,
     ),
     self_q: Query<(&ObjectStore, &Transform, Has<Engaged>, Option<&Casting>), With<SelfPlayer>>,
     selection: Res<Selection>,
@@ -846,12 +847,12 @@ mod tests {
         app.insert_resource(actions)
             .insert_resource(bound)
             .init_resource::<Cooldowns>()
-            .init_resource::<crate::spell_mods::SpellModifiers>()
+            .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
-            .init_resource::<crate::ui_cast::PendingCast>()
-            .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
-            .init_resource::<crate::ui_cast::ActiveChannel>()
+            .init_resource::<crate::spell::PendingCast>()
+            .init_resource::<crate::spell::QueuedMeleeSpell>()
+            .init_resource::<crate::spell::ActiveChannel>()
             .init_resource::<crate::ui_action::SpellTargeting>()
             .init_resource::<Selection>()
             .init_resource::<GuidIndex>()
@@ -951,12 +952,12 @@ mod tests {
                     radii: Default::default(),
                 })
                 .init_resource::<Cooldowns>()
-                .init_resource::<crate::spell_mods::SpellModifiers>()
+                .init_resource::<crate::spell::SpellModifiers>()
                 .init_resource::<crate::ui_script::UiClock>()
                 .init_resource::<AutoRepeatActive>()
-                .init_resource::<crate::ui_cast::PendingCast>()
-                .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
-                .init_resource::<crate::ui_cast::ActiveChannel>()
+                .init_resource::<crate::spell::PendingCast>()
+                .init_resource::<crate::spell::QueuedMeleeSpell>()
+                .init_resource::<crate::spell::ActiveChannel>()
                 .init_resource::<crate::ui_action::SpellTargeting>()
                 .init_resource::<Selection>()
                 .init_resource::<GuidIndex>()

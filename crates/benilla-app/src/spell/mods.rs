@@ -101,7 +101,6 @@ use bevy::prelude::*;
 
 use benilla_formats::SpellDisplay;
 
-use crate::char_select::ClientState;
 use crate::chr_classes::ChrClassTable;
 use crate::net::{ObjectStore, SelfPlayer};
 
@@ -171,7 +170,7 @@ impl SpellMod {
 /// The two tables and the class family the gate compares against — benilla's `0xcead60` /
 /// `0xcecb30` / `0xcecaac`.
 ///
-/// Filled only by the wire (`net::apply::spells::set_spell_modifier`), cleared only at world-enter
+/// Filled only by the wire (`spell::net::set_spell_modifier`), cleared only at world-enter
 /// ([`clear_on_world_enter`]), and read live at every call site: like the reference, there is no
 /// derived cache to invalidate.
 #[derive(Resource)]
@@ -286,7 +285,7 @@ impl SpellModifiers {
 /// There is deliberately nothing else: no talent-change clear (the server re-sends absolute cells),
 /// and no world-LEAVE clear (the reference's own teardown `0x6e99e0` never touches them, and the
 /// next entry is what zeroes them).
-fn clear_on_world_enter(mut mods: ResMut<SpellModifiers>) {
+pub(super) fn clear_on_world_enter(mut mods: ResMut<SpellModifiers>) {
     mods.clear();
 }
 
@@ -299,7 +298,7 @@ fn clear_on_world_enter(mut mods: ResMut<SpellModifiers>) {
 /// the coupling it replaces. And it **never writes 0 back** — an absent avatar leaves the last
 /// value standing, because a cross-map worldport drops the entity mid-session while everything the
 /// server told us stays true (decision 0900's shape). Only the world-enter clear zeroes it.
-fn track_class_family(
+pub(super) fn track_class_family(
     mut mods: ResMut<SpellModifiers>,
     classes: Option<Res<ChrClassTable>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -316,27 +315,10 @@ fn track_class_family(
     }
 }
 
-pub(crate) struct SpellModsPlugin;
-
-impl Plugin for SpellModsPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<SpellModifiers>()
-            .add_systems(
-                Update,
-                // After the net stage that merges the avatar's descriptor, and before the feeds
-                // that read a cost through it — so the family is this frame's, never last
-                // frame's, on the frame the avatar first resolves.
-                track_class_family
-                    .after(benilla_world::schedule::WorldStage::Net)
-                    .before(crate::ui_unit::UnitFeed),
-            )
-            .add_systems(OnEnter(ClientState::InWorld), clear_on_world_enter);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::char_select::ClientState;
 
     /// A mage spell (family 3) with the given bits set, against a mage player.
     fn mage(bits: &[u8]) -> SpellDisplay {
@@ -493,12 +475,13 @@ mod tests {
     /// is.
     #[test]
     fn world_enter_clears_both_tables_and_the_family() {
-        // A bare app: the plugin's only Update system takes both of its inputs as an `Option`/an
-        // empty query, so the state machine the clear hangs off is all this needs.
+        // A bare app with the world-enter clear alone: the state machine it hangs off is
+        // all this needs.
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
             .insert_state(ClientState::Login)
-            .add_plugins(SpellModsPlugin);
+            .init_resource::<SpellModifiers>()
+            .add_systems(OnEnter(ClientState::InWorld), clear_on_world_enter);
 
         {
             let mut mods = app.world_mut().resource_mut::<SpellModifiers>();

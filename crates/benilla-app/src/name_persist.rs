@@ -263,7 +263,7 @@ mod tests {
         std::fs::write(&path, on_disk.to_tsv("Realm")).expect("write the realm cache");
 
         // The live session: the login has already seeded our own name (and a pet's), exactly as
-        // `net::apply::session::connected` does a moment after the pick goes out.
+        // `net::session::connected` does a moment after the pick goes out.
         let mut names = NameCache::default();
         names.insert_player(me, "Nelprifour".into(), None);
         names.insert_pet(PET_NUMBER, "Fluffy".into());

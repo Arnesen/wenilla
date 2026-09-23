@@ -251,7 +251,7 @@ fn leader_changed(
 /// shared-quest availability, so the questgiver sweep re-asks from here (0654).
 ///
 /// **A roster entry is a sighting** (decision 1564): every member guid is warmed into the
-/// [`NameCache`] here, the same ask-once discipline `net::apply::objects` applies the moment a unit
+/// [`NameCache`] here, the same ask-once discipline `net::objects` applies the moment a unit
 /// streams in. The roster wire carries a member's *name*, so this is not asked for the name — it is
 /// asked for the `(race, class, gender)` triple that rides the same answer, and which is the ONLY
 /// source of those three for a member we never see: their descriptor never arrives. Two surfaces

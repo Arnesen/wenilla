@@ -309,7 +309,7 @@ impl NameCache {
     /// the first writer of the session — and it is not. The loader fires the first frame the realm
     /// identity is known, which is the frame the *pick* is in flight; the login's
     /// `SMSG_..._VERIFY_WORLD` seed of our OWN name ([`Self::insert_player`], from
-    /// `net::apply::session::connected`) lands in the same neighbourhood, and whichever arrives
+    /// `net::session::connected`) lands in the same neighbourhood, and whichever arrives
     /// second wins. When the load won, it discarded the player's own name — so `UnitName("player")`
     /// answered nil for one wire round-trip while the feed re-asked for a guid it had just been
     /// told about, and every addon reading it in that window saw nil (the KLHThreatMeter

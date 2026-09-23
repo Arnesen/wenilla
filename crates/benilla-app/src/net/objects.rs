@@ -542,7 +542,7 @@ fn object_create(
         // Where and how big, the moment it streams in — the readout that answers "is this prop in
         // the wrong place, or the wrong size, or just drawn wrong" without a guess (decision 0637:
         // the duel flag read as huge and mislocated, and nothing in the client could say which).
-        // `RUST_LOG=benilla_app::net::apply::objects=debug`.
+        // `RUST_LOG=benilla_app::net::objects=debug`.
         debug!(
             "gameobject spawn: entry {:?} display {display_id:?} type {go_type:?} \
              pos [{:.2}, {:.2}, {:.2}] scale {scale}",
@@ -561,9 +561,11 @@ fn object_create(
         // Re-create of a tracked guid: refresh identity + pose. A create is a fresh server snapshot, so
         // any in-flight extrapolation is stale too — clear it.
         commands.entity(e).insert(net).remove::<RemoteMotion>();
-        // Speeds go through the drain's stage, never straight onto the entity — a
-        // `SMSG_FORCE_*_SPEED_CHANGE` riding the same tick as this create has to be able to land
-        // on top of it (decision 1478, B213).
+        // Speeds land straight on the entity (decision 2327 — the drain's staging maps are gone):
+        // a fresh create inserts them as a component at spawn, a re-create replaces them whole
+        // (below). A `SMSG_FORCE_*_SPEED_CHANGE` riding the same tick as this create still lands
+        // on top of it, because each handler's commands are applied before the next packet's
+        // runs — 1478's law unchanged (B213, `apply::seam_tests`).
         if let Some(s) = speeds {
             // A create is the server's newest snapshot of the mover: it replaces the set whole
             // (decision 1478), and lands before the next packet's handler reads it.

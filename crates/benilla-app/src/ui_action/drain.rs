@@ -149,7 +149,7 @@ pub(super) fn attack_target_binding(
 /// same entry a button press uses, so a chained Auto Shot is range-checked, form-checked and
 /// GCD-checked exactly like a pressed one, and refuses with the same red line.
 pub(super) fn drain_chain_casts(
-    mut queue: ResMut<crate::ui_action::ChainCasts>,
+    mut queue: ResMut<crate::spell::ChainCasts>,
     targeting: cast_target::CastTargeting,
     mut ladder: CastLadder,
 ) {

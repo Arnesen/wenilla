@@ -251,7 +251,7 @@ fn resolve_recipe(
     store: &ObjectStore,
     items: &Items,
     commands: &NetCommands,
-    cooldowns: &crate::cooldowns::Cooldowns,
+    cooldowns: &crate::spell::Cooldowns,
     now: Instant,
 ) -> Option<TradeSkillRecipe> {
     let d = spells.catalog.get(spell_id)?;
@@ -377,7 +377,7 @@ fn feed_trade_skill(
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     items: Res<Items>,
     commands: Res<NetCommands>,
-    cooldowns: Res<crate::cooldowns::Cooldowns>,
+    cooldowns: Res<crate::spell::Cooldowns>,
     mut last: Local<crate::ui_script::VmMemo<Option<TradeSkillState>>>,
 ) {
     let Some(mut script) = script else {

@@ -592,7 +592,7 @@ pub(super) struct RaidSelf {
     ///
     /// `NameCache::player_traits` is filled by `SMSG_NAME_QUERY_RESPONSE`, and **we never query
     /// ourselves**: the login seeds our own name with `traits: None` precisely so `"player"` needs
-    /// no round trip (`net::apply::session::connected`). So for our own row that lookup is `None`
+    /// no round trip (`net::session::connected`). So for our own row that lookup is `None`
     /// *forever*, which painted the local player's raid row with no class column and the plain
     /// font colour instead of their class's — caught in a live `/partytest raid` run, invisible to
     /// every unit test because the fixtures seed the traits by hand.
@@ -808,7 +808,7 @@ fn member_unit_state(
         Some(store) => crate::ui_unit::snapshot(store, Some(m.name.clone()), 0, classes),
         // Out of range: **the roster record** — which is not only the `PARTY_MEMBER_STATS` wire
         // any more (decision 1640). It is seeded from the member's own live descriptor at the
-        // instant their object leaves the manager (`0x5f0880`, `net::apply::group::
+        // instant their object leaves the manager (`0x5f0880`, `ui_party::net::
         // member_deactivated`), seated with the `1/1` placeholder when they join the roster
         // unseen (`0x4e82d0`), and patched by the wire afterwards — so this leg never reads the
         // `0/0` report B334 is about, and there is always a record to read.

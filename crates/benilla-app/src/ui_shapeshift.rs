@@ -63,9 +63,9 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{ShapeshiftFormView, UiScript};
 
-use crate::cooldowns::Cooldowns;
 use crate::items::Items;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, Reputations, SelfPlayer};
+use crate::spell::Cooldowns;
 use crate::target::Selection;
 use crate::ui_action::{cast_target, usable, CastCommit, CastLadder, PlayerActions, Spells};
 use crate::ui_script::UiInput;
@@ -239,7 +239,7 @@ fn feed_shapeshift_bar(
     items: Res<Items>,
     commands: Res<NetCommands>,
     clock: Res<crate::ui_script::UiClock>,
-    spell_mods: Res<crate::spell_mods::SpellModifiers>,
+    spell_mods: Res<crate::spell::SpellModifiers>,
     mut memory: Local<crate::ui_script::VmMemo<StanceMemory>>,
 ) {
     let Some(mut script) = script else {

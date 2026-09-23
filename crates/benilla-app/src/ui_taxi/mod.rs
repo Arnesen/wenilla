@@ -1,7 +1,7 @@
 //! The app-side **taxi feed/drain** (decision 0484 phases 1-2) — the two-way half of the taxi-map
 //! seam around [`benilla_ui::script`]'s `taxi` module ([`crate::ui_trainer`]'s feed/drain shape).
 //!
-//! **Phase 1** (unchanged): the net bridge (`crate::net::apply::npc`) fills [`TaxiState`] from the
+//! **Phase 1** (unchanged): the net bridge (`crate::ui_taxi::net`) fills [`TaxiState`] from the
 //! wire — `SMSG_SHOWTAXINODES` opens the map (flight master + nearest node + known-node bitmask),
 //! `SMSG_ACTIVATETAXIREPLY` stages the activate verdict, the first-visit "learn" pair stages the
 //! discovery flag — and the standardized NPC-session range guard client-side-closes the map when

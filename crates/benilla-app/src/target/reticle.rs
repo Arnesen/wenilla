@@ -19,7 +19,7 @@
 //! (slot 2 is never read), max with candidate-1 winning ties/NaN. **Out of range forces the
 //! radius to 0.0** — the decal shrinks to the 1.3888889 default *and* turns red. `r == 0` (no
 //! radius rows — a dest spell with no area) also draws at the default. Spell-mod op 6
-//! (SPELLMOD_RADIUS) is not folded in: the tables are live ([`crate::spell_mods`]), this consumer
+//! (SPELLMOD_RADIUS) is not folded in: the tables are live (`crate::spell::mods`), this consumer
 //! is not wired to them (the same residual as the range gate, 0792).
 //!
 //! **States**: in range → Acceptable at `r`; out of range → Unacceptable at the default size;

@@ -288,7 +288,7 @@ fn quitting_from_the_character_screen_does_not_blank_the_session_it_wrote() {
 ///
 /// This is the regression the latch design could most easily have caused, so it is pinned rather
 /// than argued. The obvious guard for the tail — "is there a player object?" — reads FALSE on a
-/// `/logout` by the time the tail runs: `net::apply::session::logged_out` despawns our avatar in
+/// `/logout` by the time the tail runs: `net::session::logged_out` despawns our avatar in
 /// the same drain that writes `LoggedOutMessage`, `back_on_logout` sets `NextState` off that same
 /// message, and `OnExit(InWorld)` does not run until the next frame's `StateTransition`. A
 /// predicate would have silenced the event on every logout to fix a quit on a loading screen.

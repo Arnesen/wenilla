@@ -171,7 +171,7 @@ fn buy_error_key(reason: u8) -> Option<&'static str> {
     Some(match reason {
         // One arm (`0x5dcdee`) for both: vmangos calls 1 ALREADY_SOLD and 7 SOLD_OUT, and the
         // reference tells them apart only by code 1 also zeroing the row
-        // ([`crate::net::apply::npc::vendor_buy_failed`]).
+        // ([`crate::ui_merchant::net::vendor_buy_failed`]).
         buy_result::ITEM_ALREADY_SOLD | buy_result::ITEM_SOLD_OUT => "ERR_VENDOR_SOLD_OUT", // 0x23
         buy_result::NOT_ENOUGH_MONEY => "ERR_NOT_ENOUGH_MONEY", // 0x25 — speaks, line 0x28
         buy_result::SELLER_DONT_LIKE_YOU => "ERR_VENDOR_HATES_YOU", // 0x22

@@ -21,7 +21,7 @@ struct TestCtx {
     text: Box<Filler>,
     /// Empty tables, which is the un-talented character every cell here is graded as: the cost
     /// cell's modifier hop must be the identity when nothing has been sent.
-    spell_mods: crate::spell_mods::SpellModifiers,
+    spell_mods: crate::spell::SpellModifiers,
 }
 
 /// The two lookup shapes, named so the harness's fields read.
@@ -39,7 +39,7 @@ impl TestCtx {
             commands: NetCommands(tx),
             _rx: rx,
             get: Box::new(move |key| benilla_ui::strings::global(for_get.lua(), key)),
-            spell_mods: crate::spell_mods::SpellModifiers::default(),
+            spell_mods: crate::spell::SpellModifiers::default(),
             text: Box::new(move |key, args: &[i64]| {
                 let template = benilla_ui::strings::global(for_text.lua(), key)?;
                 let args: Vec<_> = args

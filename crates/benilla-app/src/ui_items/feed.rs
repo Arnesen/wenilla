@@ -610,7 +610,7 @@ fn resolve_slot(
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
-    cooldowns: &crate::cooldowns::Cooldowns,
+    cooldowns: &crate::spell::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
     names: &crate::names::NameCache,
     // The petition record cache, for a charter slot's tooltip lines — a LAZY fill, so it is taken
@@ -857,7 +857,7 @@ pub(crate) fn feed_containers(
         Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
     ),
     commands: Res<NetCommands>,
-    cooldowns: Res<crate::cooldowns::Cooldowns>,
+    cooldowns: Res<crate::spell::Cooldowns>,
     spells: Option<Res<crate::ui_action::Spells>>,
     // The refusals and where they land, as one param (the 16-SystemParam ceiling this signature
     // already sits at): the queue, and `show_messages`' chat + sound sinks (1815).

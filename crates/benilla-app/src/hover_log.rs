@@ -28,13 +28,25 @@ use benilla_ui::script::UiScript;
 /// itself (decision 1174) — an instrument reads the fact, it does not define it.
 use crate::ui_script::{UiCostWanted, UiFrameCost};
 
-/// Where to write, from `$WOW_HOVER_LOG`: unset ⇒ off, `1` ⇒ the default path, anything else ⇒
-/// that path.
+/// Where to write, from `$WOW_HOVER_LOG`: unset ⇒ off, `1` ⇒
+/// `benilla-config/Diagnostics/hover-log.csv` (the one folder, 0954/1486 — never the cwd-relative
+/// `target/…` this once named, which is the install folder when the binary is launched from
+/// inside it), anything else ⇒ that path. A hermetic run has no folder: `1` is then off, and
+/// says so, the sound probe's rule.
 fn log_path() -> Option<String> {
     match std::env::var("WOW_HOVER_LOG") {
         Err(_) => None,
         Ok(v) if v.is_empty() || v == "0" => None,
-        Ok(v) if v == "1" => Some("target/hover-log.csv".to_string()),
+        Ok(v) if v == "1" => match crate::local_state::diagnostics_dir() {
+            Some(dir) => Some(dir.join("hover-log.csv").to_string_lossy().into_owned()),
+            None => {
+                warn!(
+                    "hover log: no benilla-config folder to write into (hermetic run) — set \
+                     WOW_HOVER_LOG=<path> to name one. Not recording."
+                );
+                None
+            }
+        },
         Ok(v) => Some(v),
     }
 }

@@ -217,7 +217,7 @@ impl MovementBlock {
                 // The dictated final facing, in vmangos's own angle → target → point order
                 // (`packet_builder.cpp:162-167`). Parsed for alignment only: a unit still riding a
                 // path faces its travel tangent every frame, exactly as `MonsterMove`'s facing snap is
-                // overwritten while a path runs (`net::apply::objects::monster_move`).
+                // overwritten while a path runs (`net::objects::monster_move`).
                 if spline_flags & SPLINE_FLAG_FINAL_ANGLE != 0 {
                     let _ = read_f32_le(r)?;
                 } else if spline_flags & SPLINE_FLAG_FINAL_TARGET != 0 {

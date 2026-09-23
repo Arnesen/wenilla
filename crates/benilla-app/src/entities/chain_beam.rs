@@ -124,7 +124,7 @@ const MAX_SUBDIVISIONS: usize = 256;
 /// (`{capacity, count, data, quantum}`; the guid list, in wire order, with the caster's own guid
 /// dropped as it fills, `0x6057bf`/`0x6057c9`).
 ///
-/// Two producers write it (`crate::net::apply::spells`: the `SMSG_SPELL_GO` hit list and
+/// Two producers write it (`crate::spell::net`: the `SMSG_SPELL_GO` hit list and
 /// `SMSG_SPELL_UPDATE_CHAIN_TARGETS`), each **clearing before it fills**; [`spawn_chain_beams`]
 /// consumes it **once** and removes it, exactly as `0x60db72` zeroes the count on every exit —
 /// including the paths that draw nothing. Targets not streamed to us drop out as they resolve: an

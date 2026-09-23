@@ -715,7 +715,7 @@ fn only_a_packet_that_opens_a_window_resets_the_filter() {
     assert!(open.fresh_list, "a first list opens the window: reset");
     open.fresh_list = false; // the feed consumes it
 
-    // The post-buy re-request (`net::apply::npc::trainer_buy_succeeded`) marks its own answer.
+    // The post-buy re-request (`ui_trainer::net::trainer_buy_succeeded`) marks its own answer.
     open.refresh_pending = true;
     open.open(TRAINER, 0, list(), "Greetings".into());
     assert!(

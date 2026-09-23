@@ -72,7 +72,7 @@ const GENERAL_TAB_ICON: &str = "Interface\\Icons\\Ability_Kick";
 /// `LEARNED_SPELL_IN_TAB` (event 510; decision 2252).
 ///
 /// Filled by the two net arms the reference reaches its announce block from
-/// (`crate::net::apply::spells`' learn and rank-up), never by the `SMSG_INITIAL_SPELLS` bulk load:
+/// (`crate::spell::net`'s learn and rank-up), never by the `SMSG_INITIAL_SPELLS` bulk load:
 /// the reference gates all of this on `0x4b25b0`'s live-mutation flag, which the login drain
 /// passes clear. Drained by [`feed_spellbook`].
 ///
@@ -154,7 +154,7 @@ fn feed_spellbook(
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
-    cooldowns: Res<crate::cooldowns::Cooldowns>,
+    cooldowns: Res<crate::spell::Cooldowns>,
     clock: Res<crate::ui_script::UiClock>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
     mut learned: ResMut<LearnedInTab>,

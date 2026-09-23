@@ -7,7 +7,7 @@
 //! `SMSG_LOOT_CLEAR_MONEY` → the coin row becomes the same kind of gap
 //! ([`LootState::clear_money`]); `SMSG_LOOT_RELEASE_RESPONSE` → the window closes
 //! ([`LootState::clear`]); the error shape → a red line by GlobalStrings key, raised straight from
-//! the bridge ([`crate::net::apply::loot::loot_error`] — it needs no queue on this side);
+//! the bridge ([`crate::ui_loot::net::loot_error`] — it needs no queue on this side);
 //! `SMSG_ITEM_PUSH_RESULT` → a queued "You receive loot" line ([`LootState::receives`]). A removal
 //! that empties the window arms the client-authoritative **auto-close**
 //! ([`LootState::auto_release`] — the real engine's close-on-last-slot), released by
@@ -516,7 +516,7 @@ impl Default for LootConfig {
 ///   vmangos replies `SendLoot(item guid, LOOT_CORPSE)`, i.e. wire type **1**, which a cold latch
 ///   refuses. 1477 read this arm as pose-only and left it out; the window stopped opening;
 /// - `CGPlayer_C::OnLootResponse 0x5eb900`, through its **admission gate** — see
-///   [`crate::net::apply::loot::loot_response`]. Not unconditional: a `loot_type == 1` response
+///   [`crate::ui_loot::net::loot_response`]. Not unconditional: a `loot_type == 1` response
 ///   against a cold latch is *refused and bounced*.
 ///
 /// Cleared on release/close (`0x48f2c9`/`0x5ec0d4`). Ours clears **guid-matched** (release
@@ -605,7 +605,7 @@ impl LootLatch {
 /// reference's guard `0x60e990`, which every player-initiated movement-START emitter calls first
 /// and whose tail (`arg2 == 0`) closes an open loot: forward/back, strafe, keyboard-turn and pitch
 /// START, pitch STOP, `SetPitch`, and Jump. Mouse-look `SetFacing` passes `arg2 = 1` and does not.
-/// Written by `player::control` beside the cast bar's [`crate::ui_cast::LocalMoveStart`] (a
+/// Written by `player::control` beside the cast bar's [`crate::spell::LocalMoveStart`] (a
 /// different mask — the cast's `0x10f0` excludes TURN, this one includes it), consumed and cleared
 /// by [`drain_loot`] the next frame, which runs `CloseInteraction 0x48f200(cl=1, dl=1, 0)`: the
 /// kneel latch clears, `CMSG_LOOT_RELEASE` goes out, the frame closes, and a dead corpse that is

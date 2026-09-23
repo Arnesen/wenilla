@@ -305,7 +305,18 @@ mod tests {
                     })
                     .map(|(_, l)| l)
                     .collect();
-                if !body.join("\n").contains(&format!("SessionEvent::{kind}")) {
+                // The whole variant name, not a prefix of one: `SessionEvent::Chat` is the head
+                // of `ChatPlayerNotFound` too, so a bare `contains` let a handler registered for
+                // `Chat` pass by matching a cousin (six kinds are prefixes of others).
+                let names_kind = {
+                    let body = body.join("\n");
+                    let needle = format!("SessionEvent::{kind}");
+                    body.match_indices(&needle).any(|(at, hit)| {
+                        !body[at + hit.len()..]
+                            .starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                    })
+                };
+                if !names_kind {
                     problems.push(format!(
                         "{}: `{handler}` is registered for {kind} and never names it",
                         path.display()

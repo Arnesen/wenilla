@@ -2272,7 +2272,7 @@ fn a_landed_swing_snaps_its_attacker_out_of_the_ranged_stance() {
         "the reconcile alone never leaves the ranged stance — this is the bug's shape"
     );
 
-    // The packet arm's snap (what `net::apply::combat::attacker_state` now writes beside the
+    // The packet arm's snap (what `creature_anim::net::attacker_state` now writes beside the
     // swing): the sword comes out on the first landed blow.
     app.world_mut().write_message(SheathRequest {
         entity: unit,

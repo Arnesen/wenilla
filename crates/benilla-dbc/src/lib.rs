@@ -285,11 +285,16 @@ impl<'a> DbcParser<'a> {
             }
         }
 
-        // `rc` comes straight from the header; a corrupt `record_size` of 0 would otherwise let it
-        // pass the size guard unbounded (0 * anything fits). Cap the reservation by what the record
-        // bytes could actually hold — a short body then fails at the bounds-checked read below, not
-        // in the allocator.
-        let mut records = Vec::with_capacity(capped(rc, rs, records_bytes.len()));
+        // `rc` comes straight from the header, and `record_size == 0` lets any `rc` pass the size
+        // guard (0 × anything fits) — while `rd_u32_at` zero-extends rather than fails, so nothing
+        // below would stop a loop over the header's count from pushing every one of those records
+        // as zeros. A zero-byte record holds no field: a header that claims records at that size
+        // is refused, and the loop runs over what the record bytes hold, never the header's count.
+        if rs == 0 && rc > 0 {
+            return Err(Error::Truncated("records claimed at record_size 0"));
+        }
+        let rc = capped(rc, rs, records_bytes.len());
+        let mut records = Vec::with_capacity(rc);
         for r in 0..rc {
             let base = r * rs;
             let mut values = Vec::with_capacity(fc);
@@ -616,5 +621,28 @@ mod tests {
              3,\"he said \"\"hi\"\"\"\n\
              4,\"line1\nline2\"\n";
         assert_eq!(csv, expected);
+    }
+
+    /// `record_size = 0` with a record count passes the size guard (0 × anything fits) and used
+    /// to run the record loop `record_count` times: `rd_u32_at` zero-extends rather than fails,
+    /// so a 20-byte file claiming `0xFFFFFFFF` records was 4 G pushes and an OOM kill — never
+    /// the error the old comment said the bounds-checked read would raise.
+    #[test]
+    fn zero_record_size_with_records_is_refused_not_iterated() {
+        let bytes = build_wdbc(u32::MAX, 2, 0, &[], &[]);
+        let parser = DbcParser::parse(&mut Cursor::new(bytes.as_slice()))
+            .expect("0 × anything fits the size guard")
+            .with_schema(id_name_schema())
+            .expect("schema matches");
+        assert!(matches!(parser.parse_records(), Err(Error::Truncated(_))));
+        // The honest empty file — no records, nothing to hold them — still decodes to nothing.
+        let bytes = build_wdbc(0, 2, 0, &[], &[]);
+        let rs = DbcParser::parse(&mut Cursor::new(bytes.as_slice()))
+            .unwrap()
+            .with_schema(id_name_schema())
+            .unwrap()
+            .parse_records()
+            .unwrap();
+        assert!(rs.records().is_empty());
     }
 }

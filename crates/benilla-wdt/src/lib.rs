@@ -151,9 +151,31 @@ impl<R: Read + Seek> WdtReader<R> {
         }
     }
 
+    /// One chunk's `size`-byte payload — refused before the buffer is sized when the stream
+    /// (ending at `stream_end`) cannot hold it, so a raw size never reaches the allocator
+    /// unchecked.
+    fn read_payload(&mut self, size: u64, stream_end: u64) -> std::io::Result<Vec<u8>> {
+        let remaining = stream_end.saturating_sub(self.reader.stream_position()?);
+        if size > remaining {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "WDT chunk runs past the end of the stream",
+            ));
+        }
+        let mut buf = vec![0u8; size as usize];
+        self.reader.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
     /// Parse the WDT, returning the tile grid and (on a WMO-only map) the global WMO placement.
     /// Walks chunks until EOF; everything but `MPHD`/`MAIN`/`MWMO`/`MODF` is skipped.
     pub fn read(&mut self) -> std::io::Result<WdtFile> {
+        // Chunk sizes are raw on-disk u32s: each payload buffer below is bounded by what the
+        // stream still holds (`read_payload`), so a corrupt size fails as the short read it is
+        // instead of asking the allocator for up to 4 GiB first.
+        let start = self.reader.stream_position()?;
+        let stream_end = self.reader.seek(SeekFrom::End(0))?;
+        self.reader.seek(SeekFrom::Start(start))?;
         let mut has_adt: Option<Vec<bool>> = None;
         let mut wmo_only = false;
         let mut wmo_path: Option<String> = None;
@@ -169,8 +191,7 @@ impl<R: Read + Seek> WdtReader<R> {
                 // MPHD — only dword0 bit 0 is ever read: "this map has no terrain, its world is
                 // the global WMO below" (the reference reads exactly this one bit, @0x694810).
                 b"DHPM" if size >= 4 => {
-                    let mut buf = vec![0u8; size as usize];
-                    self.reader.read_exact(&mut buf)?;
+                    let buf = self.read_payload(size, stream_end)?;
                     wmo_only = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) & 0x1 != 0;
                 }
                 b"NIAM" => {
@@ -194,8 +215,7 @@ impl<R: Read + Seek> WdtReader<R> {
                 // MWMO — one NUL-terminated path on a WMO-only map, and a zero-length stub on an
                 // ADT map (which is why the `wmo_only` flag, not this chunk, is the gate).
                 b"OMWM" if size > 0 => {
-                    let mut buf = vec![0u8; size as usize];
-                    self.reader.read_exact(&mut buf)?;
+                    let buf = self.read_payload(size, stream_end)?;
                     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
                     let path = String::from_utf8_lossy(&buf[..end]).into_owned();
                     if !path.is_empty() {
@@ -204,9 +224,7 @@ impl<R: Read + Seek> WdtReader<R> {
                 }
                 // MODF — exactly one 64-byte placement here (the ADT variant carries many).
                 b"FDOM" if size >= 64 => {
-                    let mut buf = vec![0u8; size as usize];
-                    self.reader.read_exact(&mut buf)?;
-                    modf = Some(buf);
+                    modf = Some(self.read_payload(size, stream_end)?);
                 }
                 _ => {
                     self.reader.seek(SeekFrom::Current(size as i64))?;
@@ -485,5 +503,22 @@ mod tests {
         // A stray 3-byte tail cannot form an 8-byte chunk header.
         let err = parse(vec![b'N', b'I', b'A']).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    /// A chunk claiming more bytes than the stream holds is refused before its buffer is sized:
+    /// the `MPHD`/`MWMO`/`MODF` reads used to `vec![0; size]` off the raw u32 first (a 4 GiB
+    /// commit a lazy allocator hides and Windows aborts on) and only then hit EOF. The message
+    /// pins that it is the guard, not the read after it, that refuses.
+    #[test]
+    fn a_chunk_size_past_the_end_of_stream_is_refused_before_allocating() {
+        for magic in [b"DHPM", b"OMWM", b"FDOM"] {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(magic);
+            bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 64]); // some payload, nowhere near the claim
+            let err = parse(bytes).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+            assert_eq!(err.to_string(), "WDT chunk runs past the end of the stream");
+        }
     }
 }

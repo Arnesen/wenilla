@@ -512,7 +512,19 @@ fn debug_panel_ui(
                             // room vanishes, click, and the exact seed evidence + per-portal verdicts land
                             // in a file.
                             if ui.button("dump WMO cull trace").clicked() {
-                                cull_probe.dump_requested = true;
+                                // Under the one folder (0954/1486), beside the crash reports and
+                                // the stall samples. The world crate is handed the path because
+                                // it has no `local_state` of its own; a hermetic run has no
+                                // folder, and the click says so instead of writing into the cwd.
+                                match crate::local_state::diagnostics_dir() {
+                                    Some(dir) => {
+                                        cull_probe.dump_to = Some(dir.join("wmo-cull-trace.txt"));
+                                    }
+                                    None => bevy::log::warn!(
+                                        "wmo cull trace: no benilla-config folder to write into \
+                                         (hermetic run) — set WOW_CULLDUMP=<path> to name one"
+                                    ),
+                                }
                             }
                         });
 

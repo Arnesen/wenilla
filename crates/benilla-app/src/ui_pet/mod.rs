@@ -41,8 +41,8 @@ use bevy::prelude::*;
 
 use benilla_protocol::messages::PetSpells;
 
-use crate::cooldowns::Cooldowns;
 use crate::net::{GuidIndex, ObjectStore};
+use crate::spell::Cooldowns;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 

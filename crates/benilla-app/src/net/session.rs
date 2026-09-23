@@ -90,7 +90,7 @@ pub(crate) struct Bridge<'w, 's> {
     status: ResMut<'w, NetStatus>,
     names: ResMut<'w, NameCache>,
     items: ResMut<'w, Items>,
-    cooldowns: ResMut<'w, crate::cooldowns::Cooldowns>,
+    cooldowns: ResMut<'w, crate::spell::Cooldowns>,
     reputations: ResMut<'w, Reputations>,
     server_time: ResMut<'w, ServerTime>,
     wall_clock: ResMut<'w, ServerWallClock>,
@@ -487,7 +487,7 @@ fn disconnected(
     status: &mut NetStatus,
     names: &mut NameCache,
     items: &mut Items,
-    cooldowns: &mut crate::cooldowns::Cooldowns,
+    cooldowns: &mut crate::spell::Cooldowns,
     pending_transfer: &mut PendingTransfer,
     disconnects: &mut MessageWriter<DisconnectedMessage>,
 ) {

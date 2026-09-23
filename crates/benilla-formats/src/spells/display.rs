@@ -1017,7 +1017,7 @@ impl SpellDisplay {
 
 /// A [`SpellDisplay::learn_announcement`] verdict — which of the three `ERR_LEARN_*` chat lines
 /// the client prints when the spell is learned. The key each one names, and whether the argText
-/// carries the rank, is the caller's to map (`benilla::net::apply::spells`): the ids live in the
+/// carries the rank, is the caller's to map (`benilla_app::spell::net`): the ids live in the
 /// message catalog, which is a UI-layer table, not a `Spell.dbc` fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LearnAnnouncement {

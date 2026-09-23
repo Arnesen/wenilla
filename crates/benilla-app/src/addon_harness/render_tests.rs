@@ -157,22 +157,6 @@ fn the_render_column_can_fail() {
     );
 }
 
-/// Where the corpus might be — the `ui_chat::ace_gate_tests` resolver, so a machine without the
-/// third-party corpus skips rather than reddens.
-fn corpus() -> Option<PathBuf> {
-    if let Some(over) = std::env::var_os("BENILLA_ADDON_CORPUS") {
-        let p = PathBuf::from(over);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    (2usize..=4)
-        .filter_map(|up| manifest.ancestors().nth(up))
-        .map(|root| root.join("wow-addons-vanilla"))
-        .find(|c| c.is_dir())
-}
-
 /// **The oracle: two real addons, opposite director-verified outcomes.**
 ///
 /// `!OmniCC` puts cooldown countdown numbers on the director's screen — it works, and it works by
@@ -187,10 +171,8 @@ fn corpus() -> Option<PathBuf> {
 /// If this test ever disagrees with the director's eyes, **the test is wrong**.
 #[test]
 fn the_directors_two_verified_addons_come_out_on_opposite_sides() {
-    let Some(corpus) = corpus() else {
-        eprintln!("skipping: no vanilla addon corpus (set $BENILLA_ADDON_CORPUS)");
-        return;
-    };
+    // The one resolver, and a skip the gate can refuse (`benilla_formats::install`).
+    let corpus = benilla_formats::addon_corpus_or_skip!();
     // A root holding just these four, SYMLINKED rather than copied. Surveying the whole corpus
     // here would put a minute onto `cargo test --workspace` for four rows — the full sweep is the
     // `addon_harness` example's job, not a unit test's.

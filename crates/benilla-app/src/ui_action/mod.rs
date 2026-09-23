@@ -136,31 +136,10 @@ pub(crate) struct PlayerActions {
     pub dirty: bool,
 }
 
-/// The live auto-repeat spell — the client's autorepeat key `0xceac30` (wow-re `wave-cast.md`:
-/// written at the local cast-send for `AttributesEx2 & 0x20` spells, cleared by
-/// `SMSG_CANCEL_AUTO_REPEAT`'s `0x6ea080` and by a matching cast-fail). Distinct from the sticky
-/// `creature_anim::AutoRepeatArmed` (the Load/Hold idle gate, never cleared): THIS one is what
-/// `IsAutoRepeatAction` and the button flash read, and it goes out when the shooting stops.
-#[derive(Resource, Default)]
-pub(crate) struct AutoRepeatActive(pub Option<u32>);
-
-/// **The `modalNextSpell` chain's queue** — spells the *client* casts on its own, one per
-/// `SMSG_CAST_RESULT` that names a spell with a non-zero `Spell.dbc` column 38
-/// ([`benilla_formats::SpellDisplay::modal_next_spell`]). Written by the net drain's
-/// `cast_result`, drained through the one cast path by [`drain::drain_chain_casts`].
-///
-/// It exists because the reference's chain runs *inside* `HandleCastResult 0x6e7330`
-/// (`0x6e74aa call 0x6e5a90` → `TryCast`) and ours cannot: the net-apply drain and
-/// [`CastLadder`] want the same half-dozen resources, so a direct call is a Bevy param conflict.
-/// A one-frame queue is the seam — and it keeps the rule that nothing sends a cast except the
-/// ladder.
-#[derive(Resource, Default)]
-pub(crate) struct ChainCasts(pub(crate) Vec<u32>);
-
 /// **The world right-click's GameObject-opener queue** — the lock chain's resolved action, carried
 /// one frame to the one cast path (decision 2199).
 ///
-/// It exists for exactly the reason [`ChainCasts`] does, and no other: the right-click system
+/// It exists for exactly the reason [`crate::spell::ChainCasts`] does, and no other: the right-click system
 /// ([`crate::target::click::act_on_right_click`]) and [`CastLadder`] want the same half-dozen
 /// resources, so the click cannot call the ladder in place — a resource reachable twice from one
 /// system is a `B0002` panic on the first live frame. A one-frame queue is the seam, and it keeps
@@ -221,7 +200,7 @@ impl Spells {
     /// row's minimum (row 1, the all-zero instant sentinel, resolves 0). The level term keys on
     /// the `SpellRec+0x70` column ([`SpellDisplay::base_level`]). Spell-mod op `0xa`
     /// (SPELLMOD_CASTING_TIME) is still unread here — the tables themselves are live
-    /// ([`crate::spell_mods`]), only this consumer is not wired to them, so a talent-shortened
+    /// (`crate::spell::mods`), only this consumer is not wired to them, so a talent-shortened
     /// cast still shows its untalented length.
     /// A missing row reads 0 (instant), like a failed catalog load everywhere else.
     pub(crate) fn cast_time_ms(
@@ -374,9 +353,6 @@ impl Plugin for UiActionPlugin {
             .init_resource::<PetTameFailures>()
             .init_resource::<UiErrorKeys>()
             .init_resource::<UiErrorTexts>()
-            .init_resource::<crate::cooldowns::Cooldowns>()
-            .init_resource::<AutoRepeatActive>()
-            .init_resource::<ChainCasts>()
             .init_resource::<GoOpenerCasts>()
             .init_resource::<cast_target::AutoSelfCast>()
             .init_resource::<targeting::SpellTargeting>()

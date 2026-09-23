@@ -174,13 +174,13 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(NetCommands(tx));
         world.init_resource::<crate::items::Items>();
-        world.init_resource::<crate::ui_cast::PendingCast>();
-        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
-        world.init_resource::<crate::cooldowns::Cooldowns>();
-        world.init_resource::<crate::spell_mods::SpellModifiers>();
+        world.init_resource::<crate::spell::PendingCast>();
+        world.init_resource::<crate::spell::QueuedMeleeSpell>();
+        world.init_resource::<crate::spell::Cooldowns>();
+        world.init_resource::<crate::spell::SpellModifiers>();
         world.init_resource::<crate::ui_action::CastErrors>();
         world.init_resource::<crate::ui_action::UiErrorKeys>();
-        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
         world.init_resource::<super::super::SpellTargeting>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();

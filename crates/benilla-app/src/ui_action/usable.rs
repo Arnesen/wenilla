@@ -26,10 +26,10 @@ use benilla_formats::{
     SPELL_EFFECT_TRADE_SKILL,
 };
 
-use crate::cooldowns::Cooldowns;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Reputations};
-use crate::spell_mods::{SpellModifiers, OP_COST};
+use crate::spell::Cooldowns;
+use crate::spell::{SpellModifiers, OP_COST};
 use crate::target::{can_attack, ring_reaction, Factions};
 
 use super::Spells;
@@ -466,7 +466,7 @@ pub(crate) fn spell_usable(
 /// 0948 chose per type (base mana for mana spells — the vmangos basis — max pool otherwise,
 /// health included for negative types) — and then the talent cost cut, `SPELLMOD_COST` (op 14),
 /// which `0x6e31b0` applies inside itself at `6e32e3` through the integer applier `0x6e6af0`
-/// ([`crate::spell_mods`]). One law, every consumer: the usable walk's leg 12, the press-path
+/// (`crate::spell::mods`). One law, every consumer: the usable walk's leg 12, the press-path
 /// power gate (0948), and the tooltip's cost cell (1074) — mirroring the byte fn's own caller
 /// set (`0x609657`/`0x60968d`/`0x4e5201`/`0x6e3fdb`/`0x52e8ad`/`0x507de3`). The reference's
 /// per-school unit mods are still not modeled — what remains of 0948's standing gap.

@@ -46,7 +46,7 @@ fn range_row(spells: Option<&Spells>, spell_id: u32) -> Option<&SpellRange> {
 /// only** (slot 2 is never read by the client), the max with candidate 1 winning ties/NaN,
 /// clamped to 20.0 (`0x4820f0`'s `[0x804478]` literal — `min`, NaN → 20). `0.0` = no radius
 /// rows; the reticle then draws at its literal default size. Spell-mod op 6 (SPELLMOD_RADIUS) is
-/// not read here — the tables are live ([`crate::spell_mods`]), this consumer is not wired to
+/// not read here — the tables are live (`crate::spell::mods`), this consumer is not wired to
 /// them (the 0792 residual, same as the range gate).
 pub(crate) fn ground_cast_radius(spells: Option<&Spells>, spell_id: u32, level: u32) -> f32 {
     let Some(spells) = spells else { return 0.0 };
@@ -126,7 +126,7 @@ pub(crate) fn drive_targeting_cursor(
         &Transform,
     )>,
     // Read-only here: the ask-once template request is made at object stream-in
-    // (`net::apply::objects`), never by this hover path, so a cold cache is a one-frame transient
+    // (`net::objects`), never by this hover path, so a cold cache is a one-frame transient
     // and not a permanent grey.
     lock_inputs: crate::target::lock::GoLockInputs,
     mut cursor: ResMut<WorldCursor>,

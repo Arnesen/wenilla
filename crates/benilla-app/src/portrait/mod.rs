@@ -1986,7 +1986,7 @@ fn sync_portraits(
             // A party member's slot bakes only while the member is streamed (in range). Out of
             // range there is no model to pose — and no descriptor either, so the stand-in's
             // race/sex come from the name cache's `SMSG_NAME_QUERY_RESPONSE` triple, warmed for
-            // every roster entry by `net::apply::group::list`.
+            // every roster entry by `ui_party::net::list`.
             tok => {
                 let member = tok
                     .strip_prefix("party")

@@ -49,8 +49,8 @@ use interior::{track_area_interior, track_current_interior, track_unit_interiors
 pub use interior::{
     CurrentAreaInterior, CurrentWmoInterior, PlayerWmoRoom, UnitWmoRoom, WmoInteriorKeys,
 };
+use probe::TraceLog;
 pub use probe::WmoCullProbe;
-use probe::{TraceLog, PROBE_DUMP_PATH};
 pub use room_vis::room_pvs_visible;
 use seed::dominant_axes;
 pub use seed::{down_ray_seeds, floor_z_at, DownRaySeeds};
@@ -389,16 +389,21 @@ fn compute_wmo_pvs(
     // The terrain leg of the seed's down-ray, sampled once for the camera's column: the client casts the
     // same segment at the ground and drops the WMO hit when the ground is nearer (`FUN_006821f0`).
     let terrain = terrain_height_under(&streamer, &adt_tiles, eye_world);
-    // `WOW_CULLDUMP=1` re-requests the dump every frame (last writer wins): a headless capture has
-    // no panel button, and the first frames race asset residency, so a one-shot request from
-    // startup would photograph an empty world.
-    static ENV_DUMP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let dump = std::mem::take(&mut probe.dump_requested)
-        || *ENV_DUMP.get_or_init(|| std::env::var_os("WOW_CULLDUMP").is_some());
+    // `WOW_CULLDUMP=<path>` re-requests the dump every frame (last writer wins): a headless
+    // capture has no panel button, and the first frames race asset residency, so a one-shot
+    // request from startup would photograph an empty world. A path, `WOW_MOVE_TRACE`'s shape —
+    // never a default this crate picks; [`WmoCullProbe::dump_to`] says why. (`WOW_CULLDUMP=1` is
+    // no longer a spelling: it wrote `target/wmo-cull-trace.txt` into whatever the cwd was.)
+    static ENV_DUMP: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let dump_to = probe.dump_to.take().or_else(|| {
+        ENV_DUMP
+            .get_or_init(|| std::env::var_os("WOW_CULLDUMP").map(std::path::PathBuf::from))
+            .clone()
+    });
     // The camera pose IN FULL: replaying a dump in the pin probe needs forward + fov + aspect, not
     // just the eye — B65's first dump recorded only the eye and the replay had to reconstruct the
     // look from the player's position.
-    let mut dump_text = dump.then(|| {
+    let mut dump_text = dump_to.is_some().then(|| {
         let fwd = cam_t.forward();
         let (fovy, aspect) = match proj {
             Projection::Perspective(p) => (p.fov, p.aspect_ratio),
@@ -596,15 +601,20 @@ fn compute_wmo_pvs(
     if *camera_windows != want_windows {
         *camera_windows = want_windows;
     }
-    if let Some(mut text) = dump_text {
+    if let Some((mut text, path)) = dump_text.zip(dump_to) {
         // The frame's published verdict, after every placement has had its say: which room claimed
         // the camera and what the open world is allowed to draw through. The per-placement traces
         // above say what each flood found; only this says what the scene actually got.
         text.push_str(&format!("CAMERA CLAIM: {:?}\n", camera_claim.0));
         text.push_str(&format!("EXTERIOR WINDOWS: {:?}\n", *camera_windows));
-        match std::fs::write(PROBE_DUMP_PATH, &text) {
-            Ok(()) => info!("wmo cull trace written to {PROBE_DUMP_PATH}"),
-            Err(e) => warn!("wmo cull trace: cannot write {PROBE_DUMP_PATH}: {e}"),
+        // The folder is made at the moment there is a trace to put in it (the stall sampler's
+        // rule for `Diagnostics/`): an instrument never advertises itself with an empty folder.
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&path, &text) {
+            Ok(()) => info!("wmo cull trace written to {}", path.display()),
+            Err(e) => warn!("wmo cull trace: cannot write {}: {e}", path.display()),
         }
     }
 }

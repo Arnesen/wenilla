@@ -35,11 +35,11 @@ and no bundled game assets.
 - **Networking:** SRP6 auth through world-session crypto, the object mirror into the ECS, and live
   wire coverage from movement and chat through spells, party, quests, mail, trade, vendors, bank,
   loot, the auction house and PvP honor.
-- **UI:** a from-scratch FrameXML + Lua engine driving the built-in interface, from the login and
-  character screens through the full HUD, the classic windows (guild, macros and key bindings
-  included), chat, nameplates, floating combat text and tooltips; third-party addons load from
-  a `benilla-config/AddOns/` folder beside the executable (partial: AtlasLoot and Bagnon run,
-  see below).
+- **UI:** a from-scratch FrameXML + Lua engine that runs the client's own stock interface off
+  your install's patch chain, from the login and character screens through the full HUD, the
+  classic windows (guild, macros and key bindings included), chat, nameplates, floating combat
+  text and tooltips; third-party addons load from a `benilla-config/AddOns/` folder beside the
+  executable (partial: AtlasLoot and Bagnon run).
 - **Combat:** melee on the faithful swing law, ranged and Auto Shot, casting with GCD and
   cooldowns, combo points, crowd control that really holds you, and the spell visual pipeline.
 - **Audio:** music, ambience and SFX under the client's own selection and crossfade rules, with
@@ -82,9 +82,11 @@ Early inspiration and file format guidance came from the
 
 benilla is an independent fan project, not affiliated with or endorsed by Blizzard Entertainment.
 It ships **no Blizzard content** — no art, models, sounds, maps, MPQ contents or FrameXML; you
-provide your own legally obtained 1.12.1 client. The interface code under
-`crates/benilla-app/assets/ui/` is ours, written to the client's own layout and API names so that
-the windows look right and 1.12.1 addons find the names they expect.
+provide your own legally obtained 1.12.1 client. The stock interface runs off your own install's
+FrameXML at runtime; the handful of files under `crates/benilla-app/assets/ui/` are our own
+adapters and developer frames, not copies of it.
 
 World of Warcraft is a trademark of Blizzard Entertainment, Inc. Our own code is licensed under
-[MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
+[MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option. The two vendored components
+under `third_party/` — the kira audio engine, and a Lua 5.1 patched to the 1.12 client's dialect —
+keep their own upstream licenses, alongside each.

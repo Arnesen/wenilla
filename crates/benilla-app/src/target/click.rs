@@ -2175,8 +2175,8 @@ mod tests {
             let mut world = World::new();
             world.insert_resource(NetCommands(tx));
             world.init_resource::<InspectMode>();
-            world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
-            world.init_resource::<crate::ui_action::AutoRepeatActive>();
+            world.init_resource::<crate::spell::QueuedMeleeSpell>();
+            world.init_resource::<crate::spell::AutoRepeatActive>();
             world.init_resource::<crate::ui_script::CursorPayloadHeld>();
             world.init_resource::<crate::ui_action::SpellTargeting>();
             world.init_resource::<ClickConfig>();
@@ -2261,8 +2261,8 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut world = World::new();
         world.insert_resource(NetCommands(tx));
-        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
-        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<crate::spell::QueuedMeleeSpell>();
+        world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<crate::ui_party::GroupState>();
         world.init_resource::<crate::net::GuidIndex>();
@@ -2352,8 +2352,8 @@ mod tests {
         world.init_resource::<Messages<WorldRightClick>>();
         world.init_resource::<PressPick>();
         world.init_resource::<Selection>();
-        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
-        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<crate::spell::QueuedMeleeSpell>();
+        world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<Messages<crate::player::StandStateRequest>>();
         world.init_resource::<crate::creature_anim::GestureQueue>();

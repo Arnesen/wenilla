@@ -57,7 +57,7 @@ sha1 = "0.10.6"
 #
 # The one entry below is not a fork of a WoW crate at all. `lua-src` compiles the Lua the client's
 # addon VM runs on, and benilla's Lua has to accept EXACTLY the grammar the 1.12.1 client's Lua
-# accepts — no more and no less. Six hunks, all byte-read out of the client's own parser and VM:
+# accepts — no more and no less. The hunks — `third_party/lua-src/BENILLA.md` lists them — all byte-read out of the client's own parser and VM:
 # three restore what 5.1 removed (the iterator-less generic-for `for k, v in someTable do`, which
 # 183 of 218 corpus addons are reached by; nesting long strings; the constructor's compat
 # semicolon), three delete what 5.1 added (`...` as an expression, `#`, `%`). Both directions are
@@ -105,11 +105,11 @@ lto = "fat"
 codegen-units = 1
 
 # The director's play loop (decision 1157): `release` plus incremental compilation. `benilla-app` is one crate of
-# ~243k lines, and release is non-incremental by cargo's default, so a one-line edit re-optimizes
+# hundreds of thousands of lines (243k when this was measured), and release is non-incremental by cargo's default, so a one-line edit re-optimizes
 # all of it — measured 2m47s (43s frontend, ~121s LLVM at opt-level 3) against a 1.8s stamp rebuild
 # and a 2.5s no-op. Incremental caches both halves per codegen unit, so an edit pays for what it
 # touched. Cargo applies `incremental` to workspace members ONLY (verified: `target/debug/incremental`
-# holds our 16 crates and zero registry deps), so the ~760 dependencies stay non-incremental and
+# holds the workspace members and zero registry deps), so the ~760 dependencies stay non-incremental and
 # sccache-cacheable — 0192's wrapper and the cold-slot build are untouched.
 #
 # Why a separate profile rather than flipping `release`: incremental raises the codegen-unit count

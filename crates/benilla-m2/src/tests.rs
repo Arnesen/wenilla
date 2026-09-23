@@ -312,6 +312,42 @@ fn hostile_vertex_count_errs_cleanly_not_oom() {
 }
 
 #[test]
+fn hostile_attachment_count_errs_cleanly_not_oom() {
+    // The vertex case's sibling one block later: the per-record index vector `emitted_at` was
+    // sized from the raw attachment count (u32::MAX → an 8 GiB non-zero fill that touches every
+    // page) while the reservation beside it was capped. The table is now refused up front when
+    // the file cannot hold it — the verdict the loop's bounds-checked read reached one line later.
+    let mut b = header();
+    set_arr(&mut b, OFS_ATTACHMENTS, u32::MAX, HEADER_LEN as u32);
+    assert!(matches!(parse(&b), Err(Error::Truncated)));
+}
+
+#[test]
+fn hostile_track_record_counts_walk_only_what_the_file_holds() {
+    // The colour (0x54), transparency (0x64) and texture-transform (0x74) readers are lenient by
+    // design — an out-of-range track is "no keys" — so a raw count of u32::MAX used to mean four
+    // billion empty tracks pushed one per iteration until the OS killed the process. The loop
+    // bound is now the number of whole records the file holds past the block's offset.
+    let mut b = header();
+    set_arr(&mut b, 0x54, u32::MAX, HEADER_LEN as u32);
+    set_arr(&mut b, 0x64, u32::MAX, HEADER_LEN as u32);
+    set_arr(&mut b, OFS_TEX_ANIM, u32::MAX, HEADER_LEN as u32);
+    let fmt = parse(&b).expect("lenient blocks never fail the parse");
+    let m = fmt.model();
+    assert!(m.color_alpha_tracks.is_empty());
+    assert!(m.color_rgb_tracks.is_empty());
+    assert!(m.transparency_tracks.is_empty());
+    assert!(m.texture_transforms.is_empty());
+    // A count that overshoots a partly-present block yields exactly the whole records in it.
+    let mut b = header();
+    let ofs = b.len() as u32;
+    b.extend(m2track(0, 0xffff, (0, 0), (0, 0))); // one whole 0x1c weight record …
+    b.extend(vec![0u8; 0x10]); // … and part of a second
+    set_arr(&mut b, 0x64, 5, ofs);
+    assert_eq!(parse(&b).unwrap().model().transparency_tracks.len(), 1);
+}
+
+#[test]
 fn truncated_vertex_record_errs_cleanly() {
     let mut b = header();
     set_arr(&mut b, OFS_VERTICES, 1, HEADER_LEN as u32);

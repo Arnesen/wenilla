@@ -4,7 +4,7 @@
 //! started-`Casting` half of the cancel's inflight union), then 2 s into the bar inject a real
 //! `W` press into `ButtonInput<KeyCode>` — the ACTUAL controller path, so the probe drives the
 //! same move-start edge a player's key does (controller → `LocalMoveStart` →
-//! `ui_cast::local_self_cancel` → `CMSG_CANCEL_CAST`).
+//! `spell::local_self_cancel` → `CMSG_CANCEL_CAST`).
 //!
 //! The verdict is read off the run log with `WOW_CAST_TRACE=1`: the `LOCAL self-cancel` line
 //! must land beside the `SEND move StartForward` line — frames, not a server round trip, after

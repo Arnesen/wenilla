@@ -187,7 +187,7 @@ pub(crate) struct AuctionListSlot {
 /// - a list result carrying **zero rows** changes nothing [`feed_auction`] can diff, so "the
 ///   auction house is empty" and "the query never came back" look identical from the snapshot;
 /// - a *successful* `SMSG_AUCTION_COMMAND_RESULT` is consumed straight into a re-query
-///   (`crate::net::apply::auction`) and leaves no record — only a *failed* one surfaces, and only
+///   (`crate::ui_auction::net`) and leaves no record — only a *failed* one surfaces, and only
 ///   as an error line;
 /// - a browse query the throttle refuses is dropped with **no event at all** (the §5-verified
 ///   silence this module's header describes), so "refused" and "sent" differ only in what went
@@ -207,7 +207,7 @@ pub(crate) struct AuctionWireLog {
     pub(crate) last_command: Option<(u32, u32, u32)>,
 }
 
-/// The open auctioneer session, filled by the net bridge ([`crate::net::apply::auction`]) and read
+/// The open auctioneer session, filled by the net bridge ([`crate::ui_auction::net`]) and read
 /// by [`feed_auction`]. Cleared on a client-side close, on walking away, and on disconnect.
 #[derive(Resource, Default)]
 pub(crate) struct AuctionOpen {

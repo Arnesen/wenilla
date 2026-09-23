@@ -14,8 +14,6 @@ use crate::net::ChatKind;
 /// The sendable chat types — `ChatTypeInfo`'s sendable keys, as the wire kind an addon's
 /// `SendChatMessage` token maps to. `Whisper`/`Channel` carry their target in the call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // RaidLeader/BgLeader have no slash of their own (server-promoted sends);
-                    // Channel is the P6 wiring's target — the enum is the full sendable law.
 pub(crate) enum SendType {
     Say,
     Yell,

@@ -36,7 +36,6 @@ benilla-wmo = { path = "../benilla-wmo" }
 bevy.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-libc = "0.2"
 
 # macOS: `bgwin` demotes the app to Accessory for a background run and orders the window out of
 # the way. Same pins as `benilla-app`'s — one objc2 in the graph.

@@ -135,10 +135,9 @@ fn arm_injectors(app: &mut App) {
             app.insert_resource(TeardownWedge(ms));
         }
     }
-    // The third injector lives with the instrument it exercises — `crash::arm_injector`, a
-    // deliberate main-thread panic — and is armed from here so all three standing injectors
-    // are named in one place.
-    crate::crash::arm_injector(app);
+    // The third standing injector — `crash::arm_injector`, a deliberate main-thread panic — is
+    // armed by `PerfPlugin` itself, beside this plugin's registration, not from here: this
+    // module is macOS-only and the crash injector is not (its doc has the crosscheck incident).
 }
 
 fn watchdog(dir: Option<std::path::PathBuf>) {

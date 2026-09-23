@@ -183,7 +183,7 @@ fn pet_spells(spells: PetSpells, catalog: Option<&Spells>, bar: &mut PetBar) {
             .join(" · ")
     );
     let now = Instant::now();
-    bar.cooldowns = crate::cooldowns::Cooldowns::default();
+    bar.cooldowns = crate::spell::Cooldowns::default();
     for cd in &spells.cooldowns {
         let display = catalog.and_then(|c| c.catalog.get(cd.spell_id));
         bar.cooldowns.seed_pet(cd, display, now);

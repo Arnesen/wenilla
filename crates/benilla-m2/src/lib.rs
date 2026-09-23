@@ -288,11 +288,18 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
     // record whose id/bone doesn't fit, or whose bone indexes past `bone_list` (now fully parsed
     // above), is dropped rather than kept malformed — real attachment ids run ≤ 36, so this never
     // drops legitimate data.
+    let att_count = attachments.0 as usize;
     let att_avail = b.len().saturating_sub(attachments.1 as usize);
-    let mut attachment_list = Vec::with_capacity(capped(attachments.0 as usize, 48, att_avail));
+    // The whole table must fit the file before it is walked — the loop's `get(..)?` reaches that
+    // verdict anyway, but the per-record index vector below is sized from the count, and a raw
+    // u32::MAX there was an 8 GiB non-zero fill before the first bounds-checked read.
+    if capped(att_count, 48, att_avail) < att_count {
+        return Err(Error::Truncated);
+    }
+    let mut attachment_list = Vec::with_capacity(att_count);
     // A dropped record shifts the emitted indices, and the AttachLookup below indexes the FILE's
     // records — so the translation is carried here rather than reconstructed later.
-    let mut emitted_at = vec![0xffffu16; attachments.0 as usize];
+    let mut emitted_at = vec![0xffffu16; att_count]; // proven to fit above
     for (i, emitted) in emitted_at.iter_mut().enumerate() {
         let a = get(attachments.1 as usize + i * 48, 48)?;
         let id = a.u32_at(0).ok_or(Error::Truncated)?;
@@ -397,20 +404,22 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
     // alpha/weight values gate batch visibility (a constant 0 hides the batch — wow-re
     // `m2-alpha-combine-cull`); the RGB is the per-batch tint multiplied into the vertex colour.
     // `track_fix16`/`track_vec3_timed` bounds-check internally and return an empty key list for
-    // an out-of-range track (kept exactly — real art relies on that "no keys" tolerance); the
-    // reservation for the *outer* per-record `Vec` is capped the same way as the arrays above.
+    // an out-of-range track (kept exactly — real art relies on that "no keys" tolerance). That
+    // same tolerance is why the *outer* loops run over the whole records the file holds past the
+    // block's offset, never the raw count: a reader that cannot fail would otherwise push one
+    // empty track per claimed record, and a corrupt count claims billions.
     let colors_avail = b.len().saturating_sub(colors_arr.1 as usize);
     let colors_cap = capped(colors_arr.0 as usize, 0x38, colors_avail);
     let mut color_alpha_tracks = Vec::with_capacity(colors_cap);
     let mut color_rgb_tracks = Vec::with_capacity(colors_cap);
-    for i in 0..colors_arr.0 as usize {
+    for i in 0..colors_cap {
         color_alpha_tracks.push(track_fix16(b, colors_arr.1 as usize + i * 0x38 + 0x1c));
         color_rgb_tracks.push(track_vec3_timed(b, colors_arr.1 as usize + i * 0x38));
     }
     let transparency_avail = b.len().saturating_sub(transparency_arr.1 as usize);
     let transparency_cap = capped(transparency_arr.0 as usize, 0x1c, transparency_avail);
     let mut transparency_tracks = Vec::with_capacity(transparency_cap);
-    for i in 0..transparency_arr.0 as usize {
+    for i in 0..transparency_cap {
         transparency_tracks.push(track_fix16(b, transparency_arr.1 as usize + i * 0x1c));
     }
     let tulookup_avail = b.len().saturating_sub(texture_unit_lookup_arr.1 as usize);
@@ -439,11 +448,12 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
 
     // Each M2TextureTransform (header 0x74, stride 0x54) is 3 back-to-back M2Tracks — translation
     // (C3Vector) @+0x00, rotation (quaternion) @+0x1c, scaling (C3Vector) @+0x38 (wow-re models.md
-    // element table). Same "no keys" tolerance as the colour/weight tracks above.
+    // element table). Same "no keys" tolerance as the colour/weight tracks above, and the same
+    // file-bounded loop for the same reason.
     let ttf_avail = b.len().saturating_sub(tex_anim_arr.1 as usize);
-    let mut texture_transforms =
-        Vec::with_capacity(capped(tex_anim_arr.0 as usize, 0x54, ttf_avail));
-    for i in 0..tex_anim_arr.0 as usize {
+    let ttf_cap = capped(tex_anim_arr.0 as usize, 0x54, ttf_avail);
+    let mut texture_transforms = Vec::with_capacity(ttf_cap);
+    for i in 0..ttf_cap {
         let base = tex_anim_arr.1 as usize + i * 0x54;
         texture_transforms.push(M2TextureTransform {
             translation: track_vec3_timed(b, base),

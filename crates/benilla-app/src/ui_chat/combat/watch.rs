@@ -27,7 +27,7 @@ use crate::ui_chat::{ChatEventKind, ChatLog};
 use crate::ui_party::GroupState;
 
 /// The classification inputs all three watchers share — the same six facts
-/// [`crate::net::apply::combat_chat::ChatCtx`] carries, as a `SystemParam` so a watcher's own
+/// [`crate::combat_log::chat::ChatCtx`] carries, as a `SystemParam` so a watcher's own
 /// parameter list stays about *its* diff.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct WatchCtx<'w> {
@@ -54,7 +54,7 @@ impl WatchCtx<'_> {
         )
     }
 
-    /// [`crate::net::apply::combat_chat::ChatCtx::spell_name`]'s law, shared: the per-spell gates
+    /// [`crate::combat_log::chat::ChatCtx::spell_name`]'s law, shared: the per-spell gates
     /// (`Attributes & 0x180`, an empty localized name) apply to every spell-driven line, and an
     /// aura line is one.
     fn spell_name(&self, spell_id: u32) -> Option<String> {

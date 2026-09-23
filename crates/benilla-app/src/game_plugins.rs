@@ -268,11 +268,6 @@ impl PluginGroup for GamePlugins {
             // `_CANT_ATTACK`): the latch the packets set, and the 4 s repeat that shows it while an
             // attack target stands and no swing lands.
             .add(crate::swing_refusal::SwingRefusalPlugin)
-            // The talent spell-modifier tables (`SMSG_SET_FLAT_/PCT_SPELL_MODIFIER`): the wire
-            // fills them, world-enter clears them, and `usable::power_cost` reads op 14 out of
-            // them. Beside the swing refusal because both are the same shape — a small wire-fed
-            // store with a world-entry reset — and neither has a feed of its own.
-            .add(crate::spell_mods::SpellModsPlugin)
             // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
             // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
             // server-asked question whose only wire answer is yes — and here for that reason.
@@ -322,7 +317,10 @@ impl PluginGroup for GamePlugins {
             // feed, whose shape it shares (intents in, a booth look out).
             .add(crate::ui_dressup::DressUpUiPlugin)
             .add(UiActionPlugin)
-            // The spell — the cast lifecycle's packet handlers (decision 2324; 2265 §A7's owner).
+            // The spell (2265 §A7's owner): the cast lifecycle's state — the pending cast, the queued
+            // strike, the running channel, the auto-repeat key, the chain outbox — its local cancel,
+            // the cooldown store, the talent modifier tables and the packet handlers (decisions 2324,
+            // 2328). After UiActionPlugin, whose feeds and cast ladder read the state through it.
             .add(crate::spell::SpellPlugin)
             // The aura feed (decisions 0255/0257): the player's insertion-ordered buff/debuff cache + the
             // self-only durations, pushed as the data the `UnitAura` bindings read; fires UNIT_AURA and

@@ -283,13 +283,17 @@ pub fn substitute(text: &str, spell: &SpellDisplay, ctx: &TokenContext) -> Strin
         };
         let letter = letter_b as char;
         if !letter.is_ascii_alphabetic() {
-            out.push_str(&text[start..i + 1]);
-            i += 1;
+            // Not a token: keep `$` and the char after it, raw. `i + 1` would cut a multi-byte
+            // char in half (`$é` in a localized or patched Spell.dbc), so step by its width.
+            let ch_len = utf8_len(letter_b);
+            out.push_str(&text[start..i + ch_len]);
+            i += ch_len;
             continue;
         }
         i += 1;
         let slot = if i < bytes.len() && bytes[i].is_ascii_digit() {
-            let s = (bytes[i] - b'1') as usize;
+            // `$s0` is a 1-based slot below 1: saturate to slot 0 rather than wrap.
+            let s = bytes[i].saturating_sub(b'1') as usize;
             i += 1;
             s.min(2)
         } else {
@@ -503,5 +507,25 @@ mod tests {
             substitute("Returns you to $z.", &d, &unbound),
             "Returns you to $z."
         );
+    }
+
+    /// `$` before a non-ASCII char is not a token, and the raw pass-through must cut on the
+    /// char's boundary: `&text[start..i + 1]` ended inside the `é` and panicked on every tooltip
+    /// of a localized or private-server Spell.dbc that carried one.
+    #[test]
+    fn a_dollar_before_a_multibyte_char_passes_through_on_the_char_boundary() {
+        let durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        let d = SpellDisplay {
+            effect_base_points: [13, 24, 0],
+            effect_base_dice: [1, 0, 0],
+            effect_die_sides: [9, 0, 0],
+            ..Default::default()
+        };
+        let c = ctx(&durations, &radii, &none_lookup);
+        assert_eq!(substitute("coûte $é or $…!", &d, &c), "coûte $é or $…!");
+        assert_eq!(substitute("$é", &d, &c), "$é");
+        // A slot digit below the 1-based range (`$s0`) reads as slot 0 rather than wrapping.
+        assert_eq!(substitute("$s0", &d, &c), "<14..22>");
     }
 }

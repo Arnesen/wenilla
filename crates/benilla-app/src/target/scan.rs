@@ -1243,8 +1243,8 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut world = World::new();
         world.insert_resource(NetCommands(tx));
-        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
-        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<crate::spell::QueuedMeleeSpell>();
+        world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<Messages<crate::player::StandStateRequest>>();
         world.init_resource::<Selection>();
@@ -1312,9 +1312,9 @@ mod tests {
         // engaged switch onto an attackable unit: the stop un-queues the strike, the re-swing
         // kills the repeat.
         world
-            .resource_mut::<crate::ui_cast::QueuedMeleeSpell>()
+            .resource_mut::<crate::spell::QueuedMeleeSpell>()
             .arm(78);
-        world.resource_mut::<crate::ui_action::AutoRepeatActive>().0 = Some(75);
+        world.resource_mut::<crate::spell::AutoRepeatActive>().0 = Some(75);
         let out = go(&mut world, 0xF, true, Some(1), true);
         assert!(out.changed && out.swung);
         assert_eq!(
@@ -1322,14 +1322,12 @@ mod tests {
             ["stop", "cancel-cast", "select", "swing", "cancel-repeat"]
         );
         assert_eq!(
-            world
-                .resource::<crate::ui_cast::QueuedMeleeSpell>()
-                .current(),
+            world.resource::<crate::spell::QueuedMeleeSpell>().current(),
             None,
             "the switch un-queued Heroic Strike"
         );
         assert_eq!(
-            world.resource::<crate::ui_action::AutoRepeatActive>().0,
+            world.resource::<crate::spell::AutoRepeatActive>().0,
             None,
             "and the re-swing killed Auto Shot"
         );

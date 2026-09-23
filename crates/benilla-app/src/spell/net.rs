@@ -1,9 +1,9 @@
 //! The spell's packet handlers (in the net handler table since 2324, moved out of the drain's
 //! spells arm file) — the spell book and the action bar, the cast lifecycle (the decision
 //! 0099/0107 precast → resolve pipeline), the cooldowns, the channels, the aura durations and the
-//! spell modifiers. The lifecycle *state* these fold into is still spread over `ui_action`,
-//! `ui_cast` and `cooldowns` (2265 §A7's remaining half); the handlers reach it through
-//! [`Lifecycle`] and [`Scene`].
+//! spell modifiers. The lifecycle *state* these fold into is this module's since decision
+//! 2328 ([`super::inflight`], [`super::cooldowns`], [`super::mods`]); the handlers reach it,
+//! and the windows' stores they also touch, through [`Lifecycle`] and [`Scene`].
 
 use std::time::{Duration, Instant};
 
@@ -11,11 +11,11 @@ use benilla_formats::LearnAnnouncement;
 use benilla_protocol::messages::{ActionButton, SpellCooldown};
 use bevy::prelude::*;
 
-use crate::cooldowns::Cooldowns;
+use super::{ActiveChannel, AutoRepeatActive, Cooldowns, PendingCast, QueuedMeleeSpell};
 use crate::creature_anim::{CastEvent, CastEventKind, Casting, SpellGoTargets};
-use crate::ui_action::{AutoRepeatActive, CastErrors, PlayerActions, Spells, UiError, UiErrorKeys};
+use crate::ui_action::{CastErrors, PlayerActions, Spells, UiError, UiErrorKeys};
 use crate::ui_aura::AuraDurations;
-use crate::ui_cast::{ActiveChannel, CastBarEdge, CastBarFeed, PendingCast, QueuedMeleeSpell};
+use crate::ui_cast::{CastBarEdge, CastBarFeed};
 use crate::ui_spellbook::LearnedInTab;
 
 use benilla_protocol::{SessionEvent, SessionEventKind};
@@ -50,8 +50,9 @@ pub(super) fn register(app: &mut App) {
 }
 
 /// The cast lifecycle's state and catalogs, as one parameter — what every handler here folds
-/// its packet into. Still owned by `ui_action`, `ui_cast`, `cooldowns`, `ui_aura`,
-/// `spell_mods` and the pet bar (2265 §A7).
+/// its packet into. The in-flight slot, the cooldowns and the modifiers are the spell's own
+/// (2328); the action store, the errors, the spellbook's learned-tab list, the aura durations
+/// and the pet bar are their windows', written here because the packet is the spell's.
 #[derive(SystemParam)]
 pub(crate) struct Lifecycle<'w> {
     self_guid: Res<'w, SelfGuid>,
@@ -60,7 +61,7 @@ pub(crate) struct Lifecycle<'w> {
     net: Res<'w, NetCommands>,
     actions: ResMut<'w, PlayerActions>,
     cast_errors: ResMut<'w, CastErrors>,
-    chain_casts: ResMut<'w, crate::ui_action::ChainCasts>,
+    chain_casts: ResMut<'w, crate::spell::ChainCasts>,
     learned_in_tab: ResMut<'w, LearnedInTab>,
     cast_bar: ResMut<'w, CastBarFeed>,
     pending: ResMut<'w, PendingCast>,
@@ -69,7 +70,7 @@ pub(crate) struct Lifecycle<'w> {
     auto_repeat: ResMut<'w, AutoRepeatActive>,
     channel: ResMut<'w, ActiveChannel>,
     aura_durations: ResMut<'w, AuraDurations>,
-    spell_mods: ResMut<'w, crate::spell_mods::SpellModifiers>,
+    spell_mods: ResMut<'w, crate::spell::SpellModifiers>,
     pet_bar: ResMut<'w, crate::ui_pet::PetBar>,
     /// The PlayAnimation call-order counter: every animation-bearing message stamps `next()`,
     /// in packet order.
@@ -417,9 +418,9 @@ fn on_spell_modifier(In(ev): In<SessionEvent>, mut l: Lifecycle) {
 fn addressed_store<'a>(
     caster: u64,
     self_guid: &SelfGuid,
-    player: &'a mut crate::cooldowns::Cooldowns,
+    player: &'a mut crate::spell::Cooldowns,
     pet: &'a mut crate::ui_pet::PetBar,
-) -> Option<&'a mut crate::cooldowns::Cooldowns> {
+) -> Option<&'a mut crate::spell::Cooldowns> {
     if self_guid.0 == Some(caster) {
         Some(player)
     } else if pet.has_bar() && pet.spells.pet_guid == caster {
@@ -611,7 +612,7 @@ fn cast_result(
     spells: Option<&Spells>,
     net: &crate::net::NetCommands,
     // The `modalNextSpell` chain's outbox (`0x6e74aa`) — filled here, sent by the one cast path.
-    chain: &mut crate::ui_action::ChainCasts,
+    chain: &mut crate::spell::ChainCasts,
     seq: u64,
 ) {
     debug!("net: cast result — spell {spell_id} success={success} reason={reason:?}");
@@ -897,7 +898,7 @@ fn spell_go(
     // The GO-deferred melee auto-attack start's write set (`0x6e83c0`, the arm below), plus the
     // attack lock it gates on: our server-echoed `Engaged`, the ref's `[player+0xc48]`.
     attack_ctx: (
-        &mut crate::ui_action::AutoRepeatActive,
+        &mut crate::spell::AutoRepeatActive,
         &mut MessageWriter<crate::creature_anim::SheathRequest>,
         bool,
     ),
@@ -1454,14 +1455,14 @@ fn aura_duration(slot: u8, remaining_ms: u32, durations: &mut AuraDurations, now
 /// single store: the server sends the absolute value of that `(family bit, op)` pair, never a
 /// delta, so there is nothing to accumulate and nothing to invalidate.
 ///
-/// The out-of-range refusal lives on the store ([`crate::spell_mods::SpellModifiers::set`], which
+/// The out-of-range refusal lives on the store ([`crate::spell::SpellModifiers::set`], which
 /// documents why it is ours and not the reference's).
 fn set_spell_modifier(
     flat: bool,
     mask_bit: u8,
     op: u8,
     value: i32,
-    mods: &mut crate::spell_mods::SpellModifiers,
+    mods: &mut crate::spell::SpellModifiers,
 ) {
     mods.set(flat, mask_bit, op, value);
 }
@@ -1785,7 +1786,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
-            .init_resource::<crate::spell_mods::SpellModifiers>()
+            .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
@@ -1864,7 +1865,7 @@ mod tests {
                                 &mut pet_bar,
                             ),
                             (
-                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
                                 false,
                             ),
@@ -2078,7 +2079,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
-                .init_resource::<crate::spell_mods::SpellModifiers>()
+                .init_resource::<crate::spell::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -2154,7 +2155,7 @@ mod tests {
                                 &mut pet_bar,
                             ),
                             (
-                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
                                 false,
                             ),
@@ -2247,7 +2248,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
-                .init_resource::<crate::spell_mods::SpellModifiers>()
+                .init_resource::<crate::spell::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -2316,7 +2317,7 @@ mod tests {
                                 &mut pet_bar,
                             ),
                             (
-                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
                                 false,
                             ),
@@ -2382,7 +2383,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
-            .init_resource::<crate::spell_mods::SpellModifiers>()
+            .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
@@ -2462,7 +2463,7 @@ mod tests {
                             &mut pet_bar,
                         ),
                         (
-                            &mut crate::ui_action::AutoRepeatActive::default(),
+                            &mut crate::spell::AutoRepeatActive::default(),
                             &mut sheath,
                             false,
                         ),
@@ -2513,7 +2514,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
-            .init_resource::<crate::spell_mods::SpellModifiers>()
+            .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<AutoRepeatActive>();
 
         let self_e = app
@@ -2567,7 +2568,7 @@ mod tests {
                             &mut auto_repeat,
                             None,
                             &net,
-                            &mut crate::ui_action::ChainCasts::default(),
+                            &mut crate::spell::ChainCasts::default(),
                             1,
                         );
                     },
@@ -2795,7 +2796,7 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
-                .init_resource::<crate::spell_mods::SpellModifiers>()
+                .init_resource::<crate::spell::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
                 .init_resource::<crate::items::Items>();
             let self_e = app
@@ -2872,7 +2873,7 @@ mod tests {
                                 &mut pet_bar,
                             ),
                             (
-                                &mut crate::ui_action::AutoRepeatActive::default(),
+                                &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
                                 engaged,
                             ),
@@ -2985,9 +2986,9 @@ mod tests {
                 .init_resource::<PendingCast>()
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
-                .init_resource::<crate::spell_mods::SpellModifiers>()
+                .init_resource::<crate::spell::SpellModifiers>()
                 .init_resource::<AutoRepeatActive>()
-                .init_resource::<crate::ui_action::ChainCasts>();
+                .init_resource::<crate::spell::ChainCasts>();
             let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();
             app.world_mut()
                 .resource_mut::<GuidIndex>()
@@ -3018,7 +3019,7 @@ mod tests {
                           mut queued_melee: ResMut<QueuedMeleeSpell>,
                           mut cooldowns: ResMut<Cooldowns>,
                           mut auto_repeat: ResMut<AutoRepeatActive>,
-                          mut chain: ResMut<crate::ui_action::ChainCasts>| {
+                          mut chain: ResMut<crate::spell::ChainCasts>| {
                         let net = crate::net::NetCommands(tx.clone());
                         cast_result(
                             spell_id,
@@ -3044,11 +3045,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-            let queued = app
-                .world()
-                .resource::<crate::ui_action::ChainCasts>()
-                .0
-                .clone();
+            let queued = app.world().resource::<crate::spell::ChainCasts>().0.clone();
             let still_armed = app
                 .world()
                 .resource::<PendingCast>()

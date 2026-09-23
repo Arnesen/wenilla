@@ -217,7 +217,7 @@ pub(crate) struct Engaged(pub(crate) u64);
 /// clear `0x6ea113`), reached from the cast-result fail of the cached spell, the button
 /// re-press toggle, melee attack-start, target death, the wand-only new-cast handoff, and
 /// `SMSG_CANCEL_AUTO_REPEAT` — which vmangos DOES send (corrected 2026-08-05; see
-/// [`crate::net::apply::spells::cancel_auto_repeat`]), so against a live server that packet, not
+/// `crate::spell::net`'s `cancel_auto_repeat`), so against a live server that packet, not
 /// a local death watcher, is what ends a volley whose target dies (wow-re
 /// `nocked-ammo-cancel.md`).
 #[derive(Component)]
@@ -310,7 +310,7 @@ pub(crate) fn drive_nock_latch(
 /// live callers.
 pub(crate) fn cancel_auto_repeat_local(
     entity: Option<Entity>,
-    auto_repeat: &mut crate::ui_action::AutoRepeatActive,
+    auto_repeat: &mut crate::spell::AutoRepeatActive,
     commands: &mut Commands,
     net: &crate::net::NetCommands,
 ) {
@@ -335,7 +335,7 @@ pub(crate) fn cancel_auto_repeat_local(
 /// `Attributes & 0x404` and hands it to `CancelCast 0x6e4940(dl=1, reason 0x1c)`, whose casting arm
 /// sends `CMSG_CANCEL_CAST 0x12f` naming it and then pops the slot through `0x6e4ad0`.
 ///
-/// This is the un-queue [`crate::ui_cast::QueuedMeleeSpell`] names as its real clear path, and it
+/// This is the un-queue [`crate::spell::QueuedMeleeSpell`] names as its real clear path, and it
 /// is why a Raptor Strike ring goes dark the moment Auto Shot starts (the auto-repeat arm inside
 /// the cast commit calls straight into here, `0x6e5976`, guarded by nothing but "the caster is the
 /// active player").
@@ -351,7 +351,7 @@ pub(crate) fn cancel_auto_repeat_local(
 /// not part of this seam.
 pub(crate) fn stop_attack_local(
     engaged: bool,
-    queued_melee: &mut crate::ui_cast::QueuedMeleeSpell,
+    queued_melee: &mut crate::spell::QueuedMeleeSpell,
     net: &crate::net::NetCommands,
 ) {
     if !engaged {
@@ -395,7 +395,7 @@ pub(crate) fn start_attack_local(
     target: u64,
     engaged: bool,
     stop_in_flight: bool,
-    auto_repeat: &mut crate::ui_action::AutoRepeatActive,
+    auto_repeat: &mut crate::spell::AutoRepeatActive,
     sheath: &mut MessageWriter<SheathRequest>,
     commands: &mut Commands,
     net: &crate::net::NetCommands,
@@ -447,8 +447,8 @@ pub(crate) fn toggle_attack_local(
     entity: Entity,
     target: u64,
     engaged: bool,
-    queued_melee: &mut crate::ui_cast::QueuedMeleeSpell,
-    auto_repeat: &mut crate::ui_action::AutoRepeatActive,
+    queued_melee: &mut crate::spell::QueuedMeleeSpell,
+    auto_repeat: &mut crate::spell::AutoRepeatActive,
     sheath: &mut MessageWriter<SheathRequest>,
     commands: &mut Commands,
     net: &crate::net::NetCommands,
@@ -481,8 +481,8 @@ pub(crate) fn toggle_attack_local(
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct AttackSeam<'w, 's> {
     pub(crate) net: Res<'w, crate::net::NetCommands>,
-    pub(crate) queued_melee: ResMut<'w, crate::ui_cast::QueuedMeleeSpell>,
-    pub(crate) auto_repeat: ResMut<'w, crate::ui_action::AutoRepeatActive>,
+    pub(crate) queued_melee: ResMut<'w, crate::spell::QueuedMeleeSpell>,
+    pub(crate) auto_repeat: ResMut<'w, crate::spell::AutoRepeatActive>,
     pub(crate) sheath: MessageWriter<'w, SheathRequest>,
     pub(crate) ecs: Commands<'w, 's>,
     /// Our own entity — the sheath snap's and the auto-repeat cancel's subject.
@@ -1358,13 +1358,13 @@ mod attack_stand_tests {
         // A dead-letter net channel: the send is `let _ = …` and no packet is under test here.
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(crate::net::NetCommands(tx));
-        app.insert_resource(crate::ui_action::AutoRepeatActive(None));
+        app.insert_resource(crate::spell::AutoRepeatActive(None));
 
         let me = app.world_mut().spawn_empty().id();
         app.add_systems(
             Update,
             move |mut commands: Commands,
-                  mut auto_repeat: ResMut<crate::ui_action::AutoRepeatActive>,
+                  mut auto_repeat: ResMut<crate::spell::AutoRepeatActive>,
                   mut sheath: MessageWriter<SheathRequest>,
                   net: Res<crate::net::NetCommands>| {
                 start_attack_local(

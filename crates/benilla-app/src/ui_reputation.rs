@@ -11,7 +11,7 @@
 //!    player** — the client's own membership gate at `0x4d5555`, where the add call sits inside the
 //!    accept block of the same loop that picks the base value. Whether the pane then *lists* it is
 //!    the single flag `VISIBLE`, off until the player first meets them — which is why
-//!    `SMSG_SET_FACTION_VISIBLE` has to be applied (`net::apply::session::reputation_visible`).
+//!    `SMSG_SET_FACTION_VISIBLE` has to be applied (`net::session::reputation_visible`).
 //!
 //!    **Unlisted factions are pushed anyway, carrying `visible: false`.** They are how the pane's
 //!    headers learn their names: all five header factions carry `HEADER` (`0x08`) and only one of

@@ -227,7 +227,7 @@ fn death_vocals(
 ///
 /// **That gate is now in.** 1401 recorded the opcode as one "benilla does not implement at all",
 /// which was wrong when it was written — benilla has parsed, decoded and played
-/// `SMSG_PLAY_OBJECT_SOUND` since well before it (`net::apply::world::play_object_sound` →
+/// `SMSG_PLAY_OBJECT_SOUND` since well before it (`sound::net::play_object_sound` →
 /// `ServerSoundKind::ObjectSound` → `sound::zone::server_sounds`, which even resolves the source
 /// entity to position the kit at it). What was missing was the **per-GUID registry** the gates
 /// consult (`0x4591f0`, tested by `0x623a40`'s gate (i) and by `0x623490`'s gate 3 for classes 0,

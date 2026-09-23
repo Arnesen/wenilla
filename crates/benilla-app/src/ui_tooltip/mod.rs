@@ -61,7 +61,7 @@ struct ViewCtx<'a> {
     sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
     /// The talent spell-modifier tables — the cost cell shows the RESOLVED cost, which since
     /// `SPELLMOD_COST` landed means the modified one (`crate::ui_action::usable::power_cost`).
-    spell_mods: &'a crate::spell_mods::SpellModifiers,
+    spell_mods: &'a crate::spell::SpellModifiers,
     /// The VM's own `GlobalStrings.lua` (decision 2045) — every cell this builder composes is a
     /// key, and this is where they resolve. `text` is the `%d`-filling twin the `$`-engine's
     /// keyed tokens take (`benilla_formats::TokenContext::text`).
@@ -444,7 +444,7 @@ fn feed_spell_tooltips(
     // spell-modifier tables the cost cell resolves through.
     lookups: (
         Option<Res<crate::ui_items::ItemSubClasses>>,
-        Res<crate::spell_mods::SpellModifiers>,
+        Res<crate::spell::SpellModifiers>,
     ),
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<SpellFeedMemory>>,

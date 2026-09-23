@@ -264,6 +264,14 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
     };
     let count = le_u32(bytes, HDR_COUNT) as usize;
     let base = le_u32(bytes, HDR_PTR) as usize;
+    // The particle twin's refusal (`particles.rs`), for the same reason: `count` is a raw header
+    // u32 that sizes the reservation below (~250 B per emitter — u32::MAX is a terabyte and an
+    // allocator abort), and the table must fit in the file. 256 is far past anything authored:
+    // the corpus scan cited below found 590 ribbons over 176 models, a handful per model. It is
+    // checked first so `count * STRIDE` cannot overflow.
+    if count == 0 || count > 256 || base + count * STRIDE > bytes.len() {
+        return Ok(Vec::new());
+    }
     let rf_count = le_u32(bytes, HDR_RENDER_FLAGS) as usize;
     let rf_base = le_u32(bytes, HDR_RENDER_FLAGS + 4) as usize;
     // The first sequence's absolute time band — the keyed look tracks rebase onto it
@@ -344,6 +352,21 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The header's ribbon count (0x134) sized the reservation straight off the file — at ~250 B
+    /// per `RibbonEmitterDef`, u32::MAX is a terabyte request and an allocator abort, where the
+    /// particle twin had refused the same shape all along. Refused the same way now.
+    #[test]
+    fn a_hostile_ribbon_count_yields_nothing_not_an_abort() {
+        let mut b = vec![0u8; HDR_PTR + 4];
+        b[0..4].copy_from_slice(b"MD20");
+        b[HDR_COUNT..HDR_COUNT + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_m2_ribbon_emitters(&b).unwrap().is_empty());
+        // And a table the file cannot hold, at a plausible count, is refused too.
+        b[HDR_COUNT..HDR_COUNT + 4].copy_from_slice(&3u32.to_le_bytes());
+        b[HDR_PTR..HDR_PTR + 4].copy_from_slice(&((HDR_PTR + 4) as u32).to_le_bytes());
+        assert!(parse_m2_ribbon_emitters(&b).unwrap().is_empty());
+    }
 
     /// [`RibbonVisibility::at`]'s sampling law, on a hand-built gate: STEP (nearest-previous, the
     /// track's own `interp == 0`), the band-opening entry answers before the first in-band key,

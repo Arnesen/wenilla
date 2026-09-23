@@ -1674,7 +1674,7 @@ pub(super) fn drain_addon_chat_sends(
 /// construction — it never reaches a chat frame, which is the entire point of `LANG_ADDON` — so
 /// without a line here a broadcast that went out and one that never happened look identical from
 /// our own logs, which is exactly how a silently-discarded wire body survives (method.md's rule
-/// that new wire bodies are proved, not assumed). `net::apply::chat` already writes inbound addon
+/// that new wire bodies are proved, not assumed). `ui_chat::net` already writes inbound addon
 /// traffic to the `addon` trace tag; this writes the outbound half to the same tag, so
 /// `WOW_MOVE_TRACE=<path> WOW_MOVE_TRACE_TAGS=addon` on a live run is the whole conversation in
 /// one file, in order.

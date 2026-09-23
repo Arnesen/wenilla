@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use anyhow::Result;
+use benilla_bytes::capped;
 use benilla_m2::parse_m2;
 
 use super::{le_f32, le_u16, le_u32};
@@ -771,7 +772,11 @@ pub fn parse_m2_animations(b: &[u8]) -> Vec<ModelAnimation> {
         position: [f32; 3],
         times: Vec<u32>,
     }
-    let mut model_events: Vec<EventRecord> = Vec::with_capacity(ev_count);
+    // The counts are raw header u32s and the loops below `break` on a short file — the
+    // reservations must not trust them either: u32::MAX events at ~48 B was a 200 GiB request,
+    // and the allocator aborts rather than unwinds.
+    let mut model_events: Vec<EventRecord> =
+        Vec::with_capacity(capped(ev_count, 44, b.len().saturating_sub(ev_ofs)));
     for e in 0..ev_count {
         let erec = ev_ofs + e * 44;
         if erec + 44 > b.len() {
@@ -785,7 +790,7 @@ pub fn parse_m2_animations(b: &[u8]) -> Vec<ModelAnimation> {
         let bone = le_u32(b, erec + 8) as u16;
         let position = vec3(b, erec + 12);
         let (nts, ots) = (le_u32(b, erec + 36) as usize, le_u32(b, erec + 40) as usize);
-        let mut times = Vec::with_capacity(nts);
+        let mut times = Vec::with_capacity(capped(nts, 4, b.len().saturating_sub(ots)));
         for t in 0..nts {
             let o = ots + t * 4;
             if o + 4 > b.len() {
@@ -934,7 +939,8 @@ fn read_global_channel<T>(
     if n <= 1 {
         return None; // a lone key is a constant channel, not a loop
     }
-    let mut keys = Vec::with_capacity(n);
+    // `n` is a raw count; the timestamp array alone bounds how many keys the file can hold.
+    let mut keys = Vec::with_capacity(capped(n, 4, b.len().saturating_sub(ts_o)));
     for k in 0..n {
         let (t_off, v_off) = (ts_o + k * 4, val_o + k * stride);
         if t_off + 4 > b.len() || v_off + stride > b.len() {
@@ -1003,6 +1009,34 @@ pub fn parse_m2_global_sequence_bones(b: &[u8]) -> Vec<GlobalSeqBone> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three reservations in this file that took a raw M2 count — the event table (header
+    /// 0x114), an event's timestamp count, and a global-sequence track's key count. Every loop
+    /// under them already `break`s on a short file, but the reservation was requested first:
+    /// u32::MAX events at ~48 B is a 200 GiB request, and the allocator aborts rather than unwinds.
+    #[test]
+    fn hostile_event_and_key_counts_reserve_only_what_the_file_holds() {
+        let mut b = vec![0u8; 0x11c];
+        b[0..4].copy_from_slice(b"MD20");
+        // u32::MAX events, of which exactly one is present …
+        b[0x114..0x118].copy_from_slice(&u32::MAX.to_le_bytes());
+        b[0x118..0x11c].copy_from_slice(&0x11cu32.to_le_bytes());
+        // … itself claiming u32::MAX timestamps at offset 0.
+        let mut ev = [0u8; 44];
+        ev[36..40].copy_from_slice(&u32::MAX.to_le_bytes());
+        b.extend_from_slice(&ev);
+        assert!(
+            parse_m2_animations(&b).is_empty(),
+            "no sequences ⇒ no clips, and no abort"
+        );
+
+        // A global-sequence track claiming u32::MAX keys walks the 7 that fit its own 28 bytes.
+        let mut track = [0u8; 0x1c];
+        track[0x0c..0x10].copy_from_slice(&u32::MAX.to_le_bytes());
+        let ch = read_global_channel(&track, 0, 4, &|_: u16| Some(1000u32), le_u32)
+            .expect("more than one key on a live global sequence is a channel");
+        assert_eq!(ch.keys.len(), 7);
+    }
 
     /// The character eye-blink, straight off the real `HumanMale.m2`: exactly one global-sequence bone
     /// (75, the eyelid), a **scale** channel on a real global sequence, whose keys hold `0` (lid gone,

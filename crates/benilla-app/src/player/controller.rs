@@ -60,7 +60,7 @@ pub(super) fn control(
         MessageWriter<crate::creature_anim::HardLanding>,
         // The cast bar's local self-cancel trigger (decision 0256 open item 2): the controller
         // reports the move edges the real client's movement machine hands `AbortCast 0x6e4940`.
-        ResMut<crate::ui_cast::LocalMoveStart>,
+        ResMut<crate::spell::LocalMoveStart>,
         // The mounted space-bar flourish (decision 0441 P2): our own MountSpecial(94) plays
         // locally at send time; the net drain self-suppresses any broadcast echo.
         MessageWriter<crate::creature_anim::MountFlourish>,
@@ -1126,7 +1126,7 @@ pub(super) fn control(
             &dynamics,
         );
 
-        // The cast bar's local self-cancel trigger (`ui_cast::local_self_cancel`): a fresh
+        // The cast bar's local self-cancel trigger (`spell::local_self_cancel`): a fresh
         // *directional* start (the same wire-axis edge the stream below turns into a
         // MSG_MOVE_START_*; diffed against the pre-stream `player.move_flags`) or a jump launch.
         // Turn-in-place and pitch deliberately absent — VERIFIED (wow-re `move-selfcancel.md`,

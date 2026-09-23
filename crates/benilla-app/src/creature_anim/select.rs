@@ -331,7 +331,7 @@ pub(crate) fn strafe_body_offset(flags: u32) -> f32 {
 /// One function rather than one per pose owner: the law has three consumers — our own avatar
 /// ([`crate::player::body_pose`]), an observed relay mover
 /// ([`crate::net::motion::extrapolate_remote_units`]), and the create-block seed
-/// ([`crate::net::apply::objects`]) — and TU-A is explicit that all of them present the *same*
+/// ([`crate::net::objects`]) — and TU-A is explicit that all of them present the *same*
 /// pitch. Held apart, they drift: the remote lane shipped in July 2026 with no test and no trace
 /// of its own, so "does an observed swimmer tilt?" had no answer short of the director's eye.
 pub(crate) fn swim_body_rotation(yaw: f32, flags: u32, pitch: f32) -> Quat {

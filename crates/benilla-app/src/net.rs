@@ -1872,13 +1872,12 @@ pub(crate) enum ClientCommand {
     //    several refusals (a zero bid/duration, an unaffordable bid, a cancel whose cut can't be
     //    paid, a list request while one is in flight) come back as NO packet at all. ──────────
     //
-    //    Each variant carries `#[allow(dead_code)]`: decision 1511 P0 is the WIRE, and the
-    //    auction window that will construct these is a later phase. The allow is per-variant
-    //    rather than on the enum so a genuinely dead command elsewhere still surfaces, and each
-    //    one comes off the moment its caller lands.
+    //    Every one of these is constructed by `crate::ui_auction`. 1511 P0 landed the wire
+    //    first, under a per-variant `#[allow(dead_code)]` that was to come off the moment its
+    //    caller landed; the window came and the allows stayed, so rustc could no longer judge
+    //    them. A stale allow is a lie the compiler cannot catch — none here, by design.
     /// Greet an auctioneer (`MSG_AUCTION_HELLO`, one guid) — the two-way opcode whose *reply*
     /// (an `AuctionHello` event, carrying the `AuctionHouse.dbc` house id) opens the window.
-    #[allow(dead_code)]
     AuctionHello {
         auctioneer: u64,
     },
@@ -1886,7 +1885,6 @@ pub(crate) enum ClientCommand {
     /// reads them, with `benilla_protocol::messages::auction_filter`'s sentinels for the unset
     /// ones. **No sort rides the wire** — sorting the page is ours. `list_from` pages by 50.
     /// Answered by `SMSG_AUCTION_LIST_RESULT` (an `AuctionListResult` event).
-    #[allow(dead_code)]
     AuctionListItems {
         auctioneer: u64,
         list_from: u32,
@@ -1900,7 +1898,6 @@ pub(crate) enum ClientCommand {
         usable: u8,
     },
     /// Ask the Auctions tab page (`CMSG_AUCTION_LIST_OWNER_ITEMS`) — our own listings.
-    #[allow(dead_code)]
     AuctionListOwnerItems {
         auctioneer: u64,
         list_from: u32,
@@ -1908,7 +1905,6 @@ pub(crate) enum ClientCommand {
     /// Ask the Bid tab page (`CMSG_AUCTION_LIST_BIDDER_ITEMS`). `auction_ids` is a **refresh
     /// set**, not a filter: those rows are emitted first, then every auction we currently hold the
     /// bid on. Empty for a plain page.
-    #[allow(dead_code)]
     AuctionListBidderItems {
         auctioneer: u64,
         list_from: u32,
@@ -1916,7 +1912,6 @@ pub(crate) enum ClientCommand {
     },
     /// List an item for auction (`CMSG_AUCTION_SELL_ITEM`) — the Create Auction pane.
     /// `etime_minutes` must be 120, 480 or 1440; the deposit leaves the purse immediately.
-    #[allow(dead_code)]
     AuctionSellItem {
         auctioneer: u64,
         item_guid: u64,
@@ -1926,7 +1921,6 @@ pub(crate) enum ClientCommand {
     },
     /// Bid on — or buy out — an auction (`CMSG_AUCTION_PLACE_BID`). One verb for both: a `price`
     /// at or above a nonzero buyout *is* the buyout, inferred server-side.
-    #[allow(dead_code)]
     AuctionPlaceBid {
         auctioneer: u64,
         auction_id: u32,
@@ -1934,7 +1928,6 @@ pub(crate) enum ClientCommand {
     },
     /// Cancel one of our own auctions (`CMSG_AUCTION_REMOVE_ITEM`). The deposit is forfeit, and a
     /// cancel on an auction that already has a bid costs the 5% cut out of pocket.
-    #[allow(dead_code)]
     AuctionRemoveItem {
         auctioneer: u64,
         auction_id: u32,
@@ -2193,7 +2186,7 @@ pub(crate) enum ClientCommand {
     ///
     /// **Sent from exactly two edges, both the reference's** (decision 1640, wow-re
     /// `ui/scratch/party-oor-stats-and-portrait-law.md` §2): the moment a member's object leaves
-    /// the object manager (`net::apply::group::member_deactivated`), and the GROUP_LIST seat of a
+    /// the object manager (`ui_party::net::member_deactivated`), and the GROUP_LIST seat of a
     /// member new to the roster whose object we do not hold (`seat_new_records`). There is no
     /// timer and no Lua binding — a periodic poll would be ours, not the client's.
     RequestPartyMemberStats {
@@ -2418,7 +2411,6 @@ pub(crate) enum ClientCommand {
     //    be treated as applied at the send.
     /// Ask a petitioner NPC for its charter list (`CMSG_PETITION_SHOWLIST`). The gossip row pushes
     /// the same answer unasked, so this is the direct re-open, not the only way in.
-    #[allow(dead_code)]
     PetitionShowList {
         npc: u64,
     },

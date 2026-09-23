@@ -26,7 +26,7 @@ pub use tga::tga_to_rgba;
 /// Where the WoW install is — the one resolver (decision 1175). Paired with [`Chain`]: this says
 /// *where*, that opens it.
 mod install;
-pub use install::{candidates, wow_data};
+pub use install::{addon_corpus, addon_corpus_candidates, candidates, skipped, wow_data};
 mod characters;
 pub use characters::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,

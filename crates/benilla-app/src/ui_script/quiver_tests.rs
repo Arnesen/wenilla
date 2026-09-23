@@ -37,27 +37,12 @@ use std::path::{Path, PathBuf};
 use benilla_ui::script::{ScriptValue, UiScript, UnitState};
 use benilla_ui::toc::Toc;
 
-/// Where the vanilla addon corpus might be — `$BENILLA_ADDON_CORPUS`, else a sibling checkout
-/// resolved from this crate's manifest (a pool worktree's cwd is not stable across tool calls).
-fn corpus_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(over) = std::env::var_os("BENILLA_ADDON_CORPUS") {
-        out.push(PathBuf::from(over));
-    }
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for up in [2usize, 3, 4] {
-        if let Some(root) = manifest.ancestors().nth(up) {
-            out.push(root.join("wow-addons-vanilla"));
-        }
-    }
-    out
-}
-
 /// The corpus root **and** a Quiver in it, or `None` — a skip, never a failure. Quiver is a live
 /// third-party addon (`github.com/SabineWren/Quiver`) whose shipped file is a generated bundle, so
-/// a machine that wants this test builds it into the corpus once.
+/// a machine that wants this test builds it into the corpus once. The corpus itself resolves
+/// through `benilla_formats::addon_corpus` — the one resolver, whose doc carries the incident.
 fn quiver_root() -> Option<PathBuf> {
-    corpus_candidates()
+    benilla_formats::addon_corpus_candidates()
         .into_iter()
         .find(|c| c.join("Quiver").join("Quiver.toc").is_file())
 }
@@ -67,10 +52,10 @@ macro_rules! quiver_or_skip {
         match quiver_root() {
             Some(root) => root,
             None => {
-                eprintln!(
-                    "skipping: no Quiver in the addon corpus — looked in {:?} \
-                     (set $BENILLA_ADDON_CORPUS; the folder needs Quiver.toc + Quiver.bundle.lua)",
-                    corpus_candidates()
+                benilla_formats::skipped(
+                    "no Quiver in the addon corpus (set $BENILLA_ADDON_CORPUS; the folder needs \
+                     Quiver.toc + Quiver.bundle.lua)",
+                    &benilla_formats::addon_corpus_candidates(),
                 );
                 return;
             }

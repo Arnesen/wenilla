@@ -521,7 +521,7 @@ pub(super) fn follow_requests(
     group: Res<crate::ui_party::GroupState>,
     index: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
-    cast: Res<crate::ui_cast::PendingCast>,
+    cast: Res<crate::spell::PendingCast>,
     mut errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut follow: ResMut<crate::player::FollowState>,
 ) {
