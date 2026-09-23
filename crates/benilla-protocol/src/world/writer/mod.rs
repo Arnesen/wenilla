@@ -1,53 +1,5 @@
-//! The world session's **write half** — [`WorldWriter`] and every outbound verb the client has: one
-//! method per thing the player can *do*, which is not quite one per opcode (the fifteen chat
-//! flavours all ride `CMSG_MESSAGECHAT`, and four cast shapes ride `CMSG_CAST_SPELL`).
-//!
-//! This file holds only the type, its state, and the one private [`WorldWriter::send`] every verb
-//! funnels through; the verbs themselves live in per-family sibling modules. The families **mirror
-//! [`crate::messages`]'s own decomposition**, so the module a body builder lives in names the module
-//! its send lives in (`messages::vendor::buy_item` ↔ `writer::vendor`'s `buy_item`) — the split rule
-//! is mechanical rather than a matter of judgment, which is what keeps it from silting back up
-//! (decision 0636; [`channel`]/[`group`]/[`mail`]/[`trade`]/[`duel`] were peeled off ahead of it,
-//! starting with decision 0288 phase 1).
-//!
-//! | module | the family |
-//! |---|---|
-//! | [`self_movement`] | our own mover: the `MSG_MOVE_*` stream + every mover ack |
-//! | [`lifecycle`] | being logged in: ping, logout, the cinematic ack |
-//! | [`selection`] | the two sends that set our target: select, inspect |
-//! | [`pvp`] | the honor system's one ask: another player's honor stats |
-//! | [`names`] | the ask-once name lookups: player, creature, pet |
-//! | [`chat`] | the chat frame's wire: every `MESSAGECHAT` flavour + `/played`, `/random`, `/wave` |
-//! | [`channel`] | channel administration: join/leave/list/moderation |
-//! | [`spells`] | casting, the four cancels, and the aura cancel |
-//! | [`attack`] | the auto-attack toggle: melee start/stop, ranged auto-repeat stop |
-//! | [`action_bar`] | the one client-authoritative slot write |
-//! | [`pet`] | the pet bar's four intents: press, autocast, call off, drag |
-//! | [`progression`] | the talent spend |
-//! | [`skills`] | the skills pane's abandon |
-//! | [`pose`] | the client-volunteered body state: sheath, stand, the mounted flourish |
-//! | [`items`] | bags and equipment: use, equip, swap/split/destroy, the template ask |
-//! | [`loot`] | the loot window: open, take, coin, close, roll |
-//! | [`death`] | the corpse run: release, corpse query, reclaim, spirit healer, res answer |
-//! | [`gm_ticket`] | the Help window: file, edit, ask, abandon, queue status |
-//! | [`gossip`] | the front door to every NPC service window |
-//! | [`vendor`] | buy, sell, buy back, repair |
-//! | [`bank`] | open, buy a slot, deposit, withdraw |
-//! | [`trainer`] | the service list refresh + the purchase |
-//! | [`stable`] | the hunter stable: the list refresh, stable/unstable/swap, buy a slot |
-//! | [`taxi`] | the flight master: status, map, the two flight verbs |
-//! | [`quest`] | the questgiver dialog walk + the two quest-log verbs |
-//! | [`gameobject`] | the one USE verb + the template ask |
-//! | [`group`] | party/raid: invite, kick, leader, loot method, icons, ready checks |
-//! | [`guild`] | the guild: the two cache asks, invitations, member verbs, rank administration |
-//! | [`instance`] | the one lockout verb: reset all instances |
-//! | [`trade`] | the player-trade dance |
-//! | [`duel`] | accept and cancel |
-//! | [`mail`] | the mailbox |
-//! | [`auction`] | the auction house: the hello, the three list pages, sell/bid/cancel |
-//! | [`player_flags`] | the empty-bodied `PLAYER_FLAGS` toggles: PvP, show-helm, show-cloak |
-//! | [`social`] | friends, ignores, and `/who` |
-//! | [`area_trigger`] | the one "I walked into trigger N" report |
+//! The world session's write half: [`WorldWriter`] and one method per thing the player can do.
+//! Each family module mirrors its namesake in `crate::messages`, which builds the bodies.
 
 use std::net::TcpStream;
 
@@ -101,39 +53,23 @@ mod trainer;
 mod tutorial;
 mod vendor;
 
-/// Write half of a split [`WorldSession`](super::WorldSession) — owns a cloned socket + the encrypter. Used to send our own
-/// movement (`MSG_MOVE_*`). The active player must already be the confirmed mover (see
-/// [`WorldSession::set_active_mover`](super::WorldSession::set_active_mover)). Coordinates are raw WoW yards; `orientation` is radians.
+/// Write half of a split [`WorldSession`](super::WorldSession): a cloned socket and the encrypter.
+/// Movement sends need the active player confirmed as mover first
+/// ([`WorldSession::set_active_mover`](super::WorldSession::set_active_mover)). Positions are raw
+/// WoW yards; `orientation` is radians.
 pub struct WorldWriter {
     pub(super) stream: TcpStream,
     pub(super) encrypter: EncrypterHalf,
-    /// Every packet that has actually reached the socket since the last drain, as
-    /// `(opcode, body length)` — armed by [`Self::watch_sends`], `None` (and free) otherwise.
-    ///
-    /// The **outbound twin of the app's inbound `in` trace**. Inbound, every packet is accounted
-    /// for by name the moment it arrives; outbound there was nothing of the kind — the mover's
-    /// `snd` lines record a *decision* taken before the command is even queued, and the `wire` tag
-    /// records only failures, so "did we actually send X?" could be answered only by inference
-    /// from a silence. That is a poor instrument for a client whose fidelity is partly *what it
-    /// puts on the wire*: decision 1872 landed a whole feature — the GameObject questgiver query —
-    /// whose entire observable effect is a send, and the only way to see it from inside was to add
-    /// state to a game resource.
-    ///
-    /// Recorded **after** a successful write, never before, so a line here means a transmission
-    /// and not an intention.
+    /// Every packet that reached the socket since the last drain, as `(opcode, body length)`;
+    /// `None` until [`Self::watch_sends`]. Pushed only after a successful write.
     pub(super) sent: Option<Vec<(u16, usize)>>,
-    /// The language every chat send carries — the logged-in character's faction tongue,
-    /// inherited from the session at split (set by `WorldSession::player_login` off the roster's
-    /// race). Load-bearing: vmangos drops the whole message (dot-commands included) when the
-    /// character doesn't know the language — a Horde character sending Common gets only an
-    /// `SMSG_NOTIFICATION` back, never the say / the command.
+    /// The character's faction language, set at login from its race; every chat send carries it.
+    /// vmangos drops the whole message, dot-commands included, when the character does not know it.
     pub(super) chat_language: u32,
 }
 
 impl WorldWriter {
-    /// Frame, encrypt, and write one packet. Private, and the sole write path — every verb in the
-    /// family modules goes through here, so there is exactly one place framing/encryption happens.
-    /// Visible to them because a private item is in scope throughout its module's descendants.
+    /// Frame, encrypt and write one packet: the sole write path every verb goes through.
     fn send(&mut self, opcode: u16, body: &[u8]) -> Result<()> {
         let sent = send_packet(&mut self.stream, Some(&mut self.encrypter), opcode, body);
         if sent.is_ok() {
@@ -144,14 +80,12 @@ impl WorldWriter {
         sent
     }
 
-    /// Start recording what reaches the socket — see [`Self::sent`]. Idempotent; a writer that is
-    /// already watching keeps whatever it has not yet handed over.
+    /// Start recording what reaches the socket; a second call keeps what is not yet drained.
     pub fn watch_sends(&mut self) {
         self.sent.get_or_insert_with(Vec::new);
     }
 
-    /// Hand over (and clear) everything recorded since the last call — `(opcode, body length)` per
-    /// packet, in send order. A no-op on a writer that is not watching.
+    /// Hand over and clear the recorded `(opcode, body length)` pairs, in send order.
     pub fn drain_sent(&mut self, mut each: impl FnMut(u16, usize)) {
         if let Some(log) = &mut self.sent {
             for (opcode, len) in log.drain(..) {

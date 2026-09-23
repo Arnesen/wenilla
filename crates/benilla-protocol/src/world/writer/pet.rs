@@ -1,25 +1,6 @@
-//! The pet's `WorldWriter` sends — mirroring [`crate::messages::pet`] (decisions 0982, 0988, 1066).
-//!
-//! Six verbs, and the thing to know about the bar's four is that **no reply packet answers any of
-//! them**. The first three are intents the client has already applied to its own state before sending
-//! (wow-re §10.1/§10.2: the reaction, command and autocast paths all write `[0xb71468]` or the
-//! slot word and fire `PET_BAR_UPDATE` *before* the packet leaves). The bar's contents change only
-//! when a fresh `SMSG_PET_SPELLS` arrives — a summon, a swap, a learned spell — never as a reply
-//! to one of these.
-//!
-//! [`WorldWriter::pet_cancel_aura`] is the exception worth naming: it too gets no reply, but it is
-//! the one verb the client does *not* pre-apply, because what it changes is the pet's own
-//! descriptor. The aura leaves in a `UNIT_FIELD_AURA` delta, and the slot's icon follows from
-//! that — so the round trip is visible, just not as an answer.
-//!
-//! The menu's two ([`WorldWriter::pet_abandon`], [`WorldWriter::pet_rename`]) invert that: neither
-//! is pre-applied, because what each asks for is not a UI state the server ignores but a change to
-//! the world that it may refuse — and the answer arrives as the pet leaving, or as a bumped name
-//! timestamp in its descriptor.
-//!
-//! Every one carries the pet's guid: the server re-checks ownership on each
-//! (`PetHandler.cpp`'s `GetCharmerOrOwnerGuid` gate) and silently drops anything naming a unit we
-//! don't control.
+//! The pet sends. No reply answers a bar send: the 1.12 client applies the press to its own state
+//! (`0xb71468`, `PET_BAR_UPDATE`) before sending, and the bar changes only on a fresh
+//! `SMSG_PET_SPELLS`. The server drops a send naming a pet we do not control (`PetHandler.cpp`).
 
 use anyhow::Result;
 
@@ -28,10 +9,8 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// Press one pet bar slot (`CMSG_PET_ACTION`, layout in [`messages::pet_action`]) — the one
-    /// verb behind all three slot classes, because the server dispatches on the **type byte inside
-    /// the word we echo**: a command token runs `HandlePetCommand`, a reaction token sets the react
-    /// state, a spell casts. `target` is the unit the action should aim at, or `0`.
+    /// `CMSG_PET_ACTION`: press a bar slot. The server dispatches on the type byte of the echoed
+    /// word (command, reaction or spell); `target_guid` is 0 for none.
     pub fn pet_action(&mut self, pet_guid: u64, packed: u32, target_guid: u64) -> Result<()> {
         self.send(
             opcode::CMSG_PET_ACTION,
@@ -39,8 +18,7 @@ impl WorldWriter {
         )
     }
 
-    /// Call the pet off its target (`CMSG_PET_STOP_ATTACK`, layout in
-    /// [`messages::pet_stop_attack`]) — the Attack button's second press.
+    /// `CMSG_PET_STOP_ATTACK`: the Attack button's second press.
     pub fn pet_stop_attack(&mut self, pet_guid: u64) -> Result<()> {
         self.send(
             opcode::CMSG_PET_STOP_ATTACK,
@@ -48,13 +26,9 @@ impl WorldWriter {
         )
     }
 
-    /// Cancel one of the **pet's** auras (`CMSG_PET_CANCEL_AURA`, layout in
-    /// [`messages::pet_cancel_aura`]) — a pet bar spell click that lands on a spell already running
-    /// on the pet (wow-re §10.1, `0x4bd25f`; the predicate is `0x4bcea0`).
-    ///
-    /// The click that sends this sends **nothing else**: the reference returns straight after,
-    /// so the ordinary `CMSG_PET_ACTION` never leaves. That "and return" is the whole behaviour —
-    /// clicking a lit pet buff takes it off rather than re-casting it.
+    /// `CMSG_PET_CANCEL_AURA`: a bar click on a spell already on the pet sends only this, not
+    /// `CMSG_PET_ACTION` (reference: `0x4bd25f`, predicate `0x4bcea0`). Not pre-applied: the aura
+    /// leaves by a `UNIT_FIELD_AURA` delta.
     pub fn pet_cancel_aura(&mut self, pet_guid: u64, spell_id: u32) -> Result<()> {
         self.send(
             opcode::CMSG_PET_CANCEL_AURA,
@@ -62,13 +36,8 @@ impl WorldWriter {
         )
     }
 
-    /// Write one or two pet bar slots (`CMSG_PET_SET_ACTION`, layout — and the reason this one
-    /// opcode carries two different verbs — in [`messages::pet_set_action`]).
-    ///
-    /// **The autocast toggle is this send**, with one entry: the pressed slot and its word with
-    /// bit 30 flipped. The drag is the same send with one or two. Unlike the player bar's
-    /// [`WorldWriter::set_action_button`], a swap here IS atomic — the server tells the forms
-    /// apart by body size and applies both entries together.
+    /// `CMSG_PET_SET_ACTION`: one entry toggles autocast (the slot's word with bit 30 flipped); a
+    /// drag sends one or two, and the server applies a two-entry swap atomically.
     pub fn pet_set_action(&mut self, pet_guid: u64, entries: &[(u32, u32)]) -> Result<()> {
         self.send(
             opcode::CMSG_PET_SET_ACTION,
@@ -76,14 +45,8 @@ impl WorldWriter {
         )
     }
 
-    /// Flip one pet **spellbook** entry's autocast (`CMSG_PET_SPELL_AUTOCAST`, layout in
-    /// [`messages::pet_spell_autocast`]) — `ToggleSpellAutocast`'s send (decision 1032).
-    ///
-    /// The fifth verb, and the one easy to mistake for the fourth: the pet BAR's autocast right
-    /// click is [`WorldWriter::pet_set_action`] with one entry (a slot and its word), while this
-    /// names a **spell id**, because the book it comes from has no slots. Same bit, same
-    /// server-side effect; different opcode, different body, different handler. Like the rest of
-    /// this file: no reply.
+    /// `CMSG_PET_SPELL_AUTOCAST`: `ToggleSpellAutocast` from the pet spellbook, by spell id. The
+    /// bar's autocast click is `pet_set_action` instead.
     pub fn pet_spell_autocast(
         &mut self,
         pet_guid: u64,
@@ -96,24 +59,14 @@ impl WorldWriter {
         )
     }
 
-    /// Give the pet up (`CMSG_PET_ABANDON`, layout in [`messages::pet_abandon`]) — the right-click
-    /// menu's Abandon **and** its Dismiss, which are one message (decision 1066).
-    ///
-    /// Unlike everything above it this one is not pre-applied and does not need to be: what answers
-    /// it is the pet leaving — `SMSG_PET_SPELLS` with a zero guid tears the bar down, and the
-    /// object's own removal takes the frame with it. Optimism would only race that.
+    /// `CMSG_PET_ABANDON`: both Abandon and Dismiss. Not pre-applied: the pet leaving answers it,
+    /// with `SMSG_PET_SPELLS` carrying a zero guid.
     pub fn pet_abandon(&mut self, pet_guid: u64) -> Result<()> {
         self.send(opcode::CMSG_PET_ABANDON, &messages::pet_abandon(pet_guid))
     }
 
-    /// Rename the pet (`CMSG_PET_RENAME`, layout in [`messages::pet_rename`]) — the `RENAME_PET` →
-    /// `PETRENAMECONFIRM` popup chain's payload.
-    ///
-    /// Also not pre-applied, and here that is load-bearing: the server validates the name
-    /// (`ObjectMgr::CheckPetName`, the reserved-name list) and may refuse it outright, so a client
-    /// that wrote the new name locally would show a name the world does not agree with. What
-    /// arrives on success is a bumped `UNIT_FIELD_PET_NAME_TIMESTAMP` in the pet's descriptor,
-    /// which is what makes the name cache re-ask.
+    /// `CMSG_PET_RENAME`: not pre-applied, as the server may refuse the name
+    /// (`ObjectMgr::CheckPetName`). Success bumps `UNIT_FIELD_PET_NAME_TIMESTAMP`.
     pub fn pet_rename(&mut self, pet_guid: u64, name: &str) -> Result<()> {
         self.send(
             opcode::CMSG_PET_RENAME,
@@ -121,8 +74,7 @@ impl WorldWriter {
         )
     }
 
-    /// Unlearn the pet's skills at its trainer (`CMSG_PET_UNLEARN`) — `ConfirmPetUnlearn()`'s
-    /// packet, carrying the latched trainer guid (decision 1963).
+    /// `CMSG_PET_UNLEARN`: `ConfirmPetUnlearn()`, carrying the latched trainer guid.
     pub fn pet_unlearn(&mut self, trainer: u64) -> Result<()> {
         self.send(opcode::CMSG_PET_UNLEARN, &messages::pet_unlearn(trainer))
     }
