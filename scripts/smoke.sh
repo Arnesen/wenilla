@@ -28,9 +28,12 @@ char="$PROBE_CHAR"
 inherited=""
 for v in $(env | sed -n 's/^\(WOW_[A-Za-z0-9_]*\)=.*/\1/p'); do
     case "$v" in WOW_DATA | WOW_HOST | WOW_BG | WOW_SMOKE_KEEP) continue ;; esac
+    unset "$v"
+    # The account is in $user/$pass/$char now and each leg passes what it needs by name (the realm
+    # leg refuses a WOW_CHAR), so it leaves the environment either way. It was only "ignored"
+    # when the checkout's declared identity took its place.
     [ -n "$PROBE_DECLARED" ] || case "$v" in WOW_USER | WOW_PASS | WOW_CHAR) continue ;; esac
     inherited="$inherited $v"
-    unset "$v"
 done
 [ -n "$inherited" ] &&
     echo "smoke: ignoring inherited env —$inherited (each leg names its own; a gate is not shell-dependent)"
