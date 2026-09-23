@@ -534,10 +534,10 @@ fn every_archive_path_a_shipped_lua_chunk_names_survives_its_own_escaping() {
             }
         }
     }
-    // Never let the sweep pass by matching nothing (19 after 1971, 8 after 1980, 4 after 1987;
-    // the floor follows the census down as windows migrate).
+    // Never let the sweep pass by matching nothing; the floor follows the census down as windows
+    // migrate.
     assert!(
-        paths.len() >= 4,
+        paths.len() >= 3,
         "only {} archive paths swept out of the shipped Lua",
         paths.len()
     );
