@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Generate docs/MAP.md — the "what's built" map — derived entirely from what's on disk so it cannot
-# drift (docs/METHOD.md / docs/METHOD.md: "the generated map … regenerated from the code, never
-# hand-written"). It is regenerated and committed whenever a change lands (decision 2049); run
-# it by hand only to LOOK, never commit its output yourself, and never edit it by hand.
-# Deterministic: identical tree → identical output (no timestamps), so a diff means the structure
+# Generate docs/MAP.md, the "what's built" map, derived entirely from what is on disk so it cannot
+# drift (docs/METHOD.md: the generated map is regenerated from the code, never hand-written). It is
+# regenerated and committed on every landing; run it by hand only to look, never edit its output.
+# Deterministic: identical tree, identical output (no timestamps), so a diff means the structure
 # actually changed.
 # No `pipefail`/`-e`: greps that legitimately find nothing (a single-file lib, a crate with no bins)
 # must not abort the generator.
