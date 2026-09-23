@@ -117,7 +117,7 @@ if printf '%s\n' "$plain" | grep -q "mover mode Root granted"; then
     printf '  %-24s %s\n' "rooted logout" "yes — the drivable check above is a real pass"
 else
     printf '  %-24s %s\n' "rooted logout" \
-        "no (instant logout: GM probe / resting) — the check above did not exercise B306"
+        "no (instant logout: GM probe / resting), so the check above did not run"
 fi
 
 errors="$(printf '%s\n' "$plain" | grep -cE ' ERROR ')"
@@ -129,12 +129,12 @@ panics="$(printf '%s\n' "$plain" | grep -cE 'panicked at')"
 # character screen's glue VM (the reference's `0x490bd0`/`0x48fbf0` pair), so per-VM markers count
 # twice per login; half that means an entry adopted the glue VM and its spent `VmMemo`s.
 sessions=2            # world entries in this walk
-vms=$((sessions * 2)) # …and the Lua states they cost: a glue VM and a world VM each (2226)
+vms=$((sessions * 2)) # …and the Lua states they cost: a glue VM and a world VM each
 for marker in "Fonts.xml loaded"; do
     n="$(printf '%s\n' "$plain" | grep -cF "$marker")"
     printf '  %-24s %s\n' "$marker" "$n"
     [ "$n" -eq "$vms" ] ||
-        fail "'$marker' happened $n time(s), expected $vms — one per VM built, two per login (2226); \
+        fail "'$marker' happened $n time(s), expected $vms — one per VM built, two per login; \
 $sessions would mean the entry adopted the character screen's VM and inherited its spent VmMemos"
 done
 # The in-game UI and the keybinding table (`seed_bindings_for_vm`, run on the world-entry edge)
@@ -143,7 +143,7 @@ for marker in "UIParent.xml loaded" "commands registered"; do
     n="$(printf '%s\n' "$plain" | grep -cF "$marker")"
     printf '  %-24s %s\n' "$marker" "$n"
     [ "$n" -eq "$sessions" ] ||
-        fail "'$marker' happened $n time(s), expected $sessions — once per login: the UI rebuilt per login (1290), the keybinding table seeded on the entry edge (2241)"
+        fail "'$marker' happened $n time(s), expected $sessions — once per login: the UI rebuilt per login and the keybinding table seeded on the entry edge"
 done
 
 # The shutdown tail runs once per session: at the /logout, and at the exit, which closes the window
@@ -170,9 +170,9 @@ if [ -n "$install_root" ]; then
             echo "  benilla wrote to the install, and it is not evidence that it did not."
             echo "  Close the reference client and re-run to get a real reading."
         else
-            echo "SMOKE FAILED: the run WROTE TO THE INSTALL — benilla never does (decision 1486)."
+            echo "SMOKE FAILED: the run WROTE TO THE INSTALL — benilla never does."
             echo "  Every file benilla persists goes through \`crate::local_state\` into"
-            echo "  \`benilla-config/\` beside the binary (decisions 0954/1175/1486)."
+            echo "  \`benilla-config/\` beside the binary."
         fi
         [ -n "$appeared" ] && { echo "  added:"; printf '%s\n' "$appeared" | sed 's/^/    /'; }
         [ -n "$vanished" ] && { echo "  removed:"; printf '%s\n' "$vanished" | sed 's/^/    /'; }

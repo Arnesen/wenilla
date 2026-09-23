@@ -62,7 +62,7 @@ awk -F'\t' -v ref="$REF" -v show_missing="$show_missing" -v show_beyond="$show_b
     surface = n_ref["engine"] + n_ref["lua"]
     missing = surface - have
     pct = surface ? sprintf("%.0f%%", 100 * have / surface) : "-"
-    printf "\nthe 1.12.1 surface — %s (%d names: the running client'\''s _G, plus what the\n                       shipped UI defines behind a LoadOnDemand window — decision 1200)\n", ref, \
+    printf "\nthe 1.12.1 surface — %s (%d names: the running client'\''s _G, plus what the\n                       shipped UI defines behind a LoadOnDemand window)\n", ref, \
       n_ref["engine"] + n_ref["framexml"] + n_ref["lua"]
     printf "  engine    %5d functions, %5d other   <- benilla implements these in Rust\n", \
       n_ref_fn["engine"], n_ref["engine"] - n_ref_fn["engine"]

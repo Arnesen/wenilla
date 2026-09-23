@@ -63,7 +63,7 @@ if [ "${GATES_FORCE:-}" != "1" ] && [ -n "$key_start" ] && [ -f "$stamp" ]; then
     if [ "$old_key" = "$key_start" ]; then
         memo="this exact tree already passed"
     elif [ "${old_key#*|}" = "${key_start#*|}" ] && docs_only_delta "${old_key%%|*}" "${key_start%%|*}"; then
-        memo="this tree differs from one that passed only in top-level *.md, which no gate reads (0979/2049)"
+        memo="this tree differs from one that passed only in top-level *.md, which no gate reads"
     fi
     if [ -n "$memo" ] && [ "${old##*|}" = "$(resolve_wow)" ]; then
         echo "ALL GATES GREEN (memoized — $memo; GATES_FORCE=1 re-runs)"

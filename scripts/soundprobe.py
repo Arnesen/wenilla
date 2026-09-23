@@ -219,7 +219,7 @@ def main():
         verdicts.append(
             f"over-scale sum, caught — the mix asked for {pre_peak:.2f}x full scale "
             f"({db(pre_peak):+.1f} dBFS) and the output stayed clean (peak {post_peak:.3f}). "
-            "1551's mechanism is present and is being handled."
+            "The limiter is engaging and holding the output."
         )
     if overruns:
         verdicts.append(

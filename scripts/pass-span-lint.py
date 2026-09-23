@@ -46,7 +46,7 @@ def lint(path: pathlib.Path) -> list[str]:
                     findings.append(
                         f"{path}:{lineno}: a second pass_span on `{pass_name}` while "
                         f"`{outer_guard}` (line {outer_line}) is still open — one "
-                        f"pipeline-statistics query at a time (2258, B390)"
+                        f"pipeline-statistics query at a time"
                     )
             if guard is not None:
                 open_spans.append((guard, pass_name, lineno))
