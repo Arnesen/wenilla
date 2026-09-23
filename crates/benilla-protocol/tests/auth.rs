@@ -1,22 +1,16 @@
-//! Oracle-free regression tests for the realmd login protocol — specifically **stream alignment**.
-//! Login packets are not length-framed, so each reader must consume its packet *exactly*; a reader
-//! that stops early leaves trailing bytes that desync the next read. These build a back-to-back
-//! challenge → proof → realm-list byte stream (the real logon sequence) and read all three from one
-//! cursor, which fails loudly if any reader under- or over-consumes.
+//! Login packets are not length-framed, so each realmd reader must consume its packet exactly:
+//! these read a back-to-back challenge, proof and realm-list stream from one cursor.
 
 use benilla_protocol::auth;
 
 const N: [u8; 32] = benilla_srp::LARGE_SAFE_PRIME_LITTLE_ENDIAN;
 
-/// The `crc_salt` a real mangos-family realmd sends (its fixed `VersionChallenge`). The fixture uses
-/// the live bytes rather than zeros, so the reader meets what it actually meets — and so the `got
-/// 0xba` in the proof-read comment below names a real byte of this array.
+/// The `crc_salt` a mangos-family realmd sends: its fixed `VersionChallenge` bytes.
 const CRC_SALT: [u8; 16] = [
     0xba, 0xa3, 0x1e, 0x99, 0xa0, 0x0b, 0x21, 0x57, 0xfc, 0x37, 0x3f, 0xb3, 0x69, 0xcd, 0xd2, 0xf1,
 ];
 
-/// A successful `CMD_AUTH_LOGON_CHALLENGE_Server` body, including the `crc_salt` + `security_flag`
-/// tail that must be consumed.
+/// A successful `CMD_AUTH_LOGON_CHALLENGE_Server` body, with its `crc_salt` + `security_flag` tail.
 fn challenge_packet(server_public_key: &[u8; 32], salt: &[u8; 32]) -> Vec<u8> {
     let mut p = vec![0x00, 0x00, 0x00]; // opcode, protocol_version, result=success
     p.extend_from_slice(server_public_key);
@@ -66,14 +60,13 @@ fn logon_read_sequence_stays_aligned() {
     let server_proof: [u8; 20] =
         std::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(4));
 
-    // Concatenate the three replies as the server would stream them back-to-back.
     let mut buf = challenge_packet(&server_public_key, &salt);
     buf.extend_from_slice(&proof_packet(&server_proof));
     buf.extend_from_slice(&realm_list_packet());
 
     let mut stream: &[u8] = &buf;
 
-    // 1. Challenge — must consume crc_salt + security_flag so the proof read lands on opcode 0x01.
+    // The challenge read must consume the `crc_salt` + `security_flag` tail to land on opcode 0x01.
     let reply = auth::read_challenge_reply(&mut stream).expect("challenge reply");
     assert_eq!(reply.server_public_key, server_public_key);
     assert_eq!(reply.generator, 7);
@@ -81,12 +74,10 @@ fn logon_read_sequence_stays_aligned() {
     assert_eq!(reply.salt, salt);
     assert_eq!(reply.crc_salt, CRC_SALT); // the proof's `crc_hash` is computed from this
 
-    // 2. Proof — this is exactly where a challenge-reply under-read used to surface (`got 0xba`).
     let proof =
         auth::read_proof_reply(&mut stream).expect("proof reply (stream desynced if this fails)");
     assert_eq!(proof, server_proof);
 
-    // 3. Realm list — confirms the proof reader also consumed its packet exactly.
     let realms =
         auth::read_realm_list(&mut stream).expect("realm list (stream desynced if this fails)");
     assert_eq!(realms.len(), 1);
@@ -94,7 +85,6 @@ fn logon_read_sequence_stays_aligned() {
     assert_eq!(realms[0].address, "127.0.0.1:8085");
     assert_eq!(realms[0].characters, 3);
 
-    // The whole stream should be consumed (no leftover bytes).
     assert!(
         stream.is_empty(),
         "{} trailing bytes — a reader over/under-consumed",

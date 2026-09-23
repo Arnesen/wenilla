@@ -1,9 +1,5 @@
-//! The honor-system wire route end to end (decision 1512), mirroring `src/messages/pvp.rs`: raw
-//! body → [`messages::parse_server`] → `ServerPacket` → [`decode`] → `SessionEvent`. The
-//! byte-exact field goldens live inline in `pvp.rs`; what this file adds is the part those cannot
-//! reach — that the opcode actually dispatches to the right reader, that the packet names itself
-//! correctly in the log, and that the event fan-out carries the payload through unchanged. See
-//! `tests/common` for the shared fixtures and methodology note.
+//! The honor wire end to end: an opcode dispatches to its reader, names itself, and reaches its
+//! event unchanged.
 
 mod common;
 
@@ -12,11 +8,8 @@ use benilla_protocol::messages;
 use benilla_protocol::ServerPacket;
 use common::hx;
 
-/// The 50-byte `MSG_INSPECT_HONOR_STATS` reply, in `InspectHonorStatsResponse::AppendBodyTo`
-/// order: guid `0x0000000100002AB3`, highestRank 11, sessionKills 17|2<<16, yesterdayHK 41,
-/// unknownOld1 0, lastWeekHK 420, unknownOld2 0, thisWeekHK 123, unknownOld3 0, lifetimeHK 3907,
-/// lifetimeDHK 12, yesterdayHonor 640, lastWeekHonor 8431, thisWeekHonor 1250, lastWeekRank 57,
-/// rankBar 191.
+/// The 50-byte `MSG_INSPECT_HONOR_STATS` reply, in vmangos
+/// `InspectHonorStatsResponse::AppendBodyTo` order.
 fn inspect_honor_body() -> Vec<u8> {
     hx(concat!(
         "b32a000001000000", // u64 playerGuid
@@ -38,9 +31,8 @@ fn inspect_honor_body() -> Vec<u8> {
     ))
 }
 
-/// The reply dispatches off opcode 0x2D6 and reaches the UI as one event with every field intact.
-/// The opcode is an `MSG_` — the same number carries our request — but `parse_server` only ever
-/// sees inbound bodies, so there is nothing to disambiguate here.
+/// `MSG_INSPECT_HONOR_STATS` (0x2D6) also carries our request, a bare guid; `parse_server` only
+/// sees the reply.
 #[test]
 fn inspect_honor_stats_wire() {
     let body = inspect_honor_body();
@@ -79,17 +71,14 @@ fn inspect_honor_stats_wire() {
         other => panic!("one inspect-honor event, got {other:?}"),
     }
 
-    // Our own request on the same opcode is the bare guid — a different shape entirely, which is
-    // exactly why direction and not content has to tell the two apart.
     assert_eq!(
         messages::inspect_honor_stats(0x0000_0001_0000_2AB3),
         hx("b32a000001000000")
     );
 }
 
-/// `SMSG_PVP_CREDIT` dispatches off 0x28C and carries honor / victim / rank through to the event.
-/// The victim rank is the **internal** rank (`SendPVPCredit` sends `GetRank().rank`, floored at 5
-/// for a player victim) — a direct `PVP_RANK_<rank>_<team>` key, not the visual badge number.
+/// `SMSG_PVP_CREDIT` (0x28C): honor, victim guid, and the victim's internal rank (vmangos
+/// `SendPVPCredit`, floored at 5 for a player), a `PVP_RANK_<rank>_<team>` key, not the badge.
 #[test]
 fn pvp_credit_wire() {
     // i32 honor = 143, u64 victimGuid = 0x0000000100002AB3, i32 victimRank = 11.
@@ -119,8 +108,6 @@ fn pvp_credit_wire() {
     assert_eq!(credit.honor, -5);
 }
 
-/// A truncated body must surface as a parse error, not a panic — both opcodes, at the wire edge
-/// rather than only at the reader.
 #[test]
 fn truncated_honor_bodies_error_at_the_dispatch() {
     let full = inspect_honor_body();
