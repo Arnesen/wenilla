@@ -1,33 +1,18 @@
 #!/usr/bin/env bash
-# PreToolUse(Edit|Write|NotebookEdit) guard (docs/METHOD.md hard rules; decision 1486): refuse to write
-# anything into the 1.12.1 install. Exit 2 blocks the call and hands stderr back to the agent.
+# PreToolUse(Edit|Write|NotebookEdit) guard: refuse to write anything into the 1.12.1 install.
+# Exit 2 blocks the call and hands stderr back to the agent.
 #
-# The rule is the director's, stated 2026-08-21 while B261 was being built: *benilla never changes
-# or adds anything in the WoW folder*. It has two halves and this file is the second one.
+# benilla reads a WoW install and never writes to one (docs/METHOD.md). The client persists
+# everything through `crate::local_state` into `benilla-config/` beside the binary, and
+# `scripts/smoke.sh` fails a run that leaves the install changed; this hook is the same rule for
+# the tools. The install is the player's own copy of somebody else's game, and "what here is
+# benilla's?" is only answerable while nothing of ours is anywhere else.
 #
-#   1 · the CLIENT never writes there — every persisted file resolves through
-#       `crate::local_state` into `benilla-config/` beside the binary (0954/1175), and
-#       `scripts/smoke.sh` now measures that a full run leaves the install byte-for-byte as it
-#       found it;
-#   2 · WE never write there either — which is this hook, because we already had. The install
-#       currently carries `apitrace-stderr.log`, `apitrace-stderr-ring.log` and
-#       `abbey-standing-frame1501.png`: three files a session dropped in the nearest folder to
-#       hand. Nobody decided to; that is exactly why prose was never going to be enough (0976's
-#       argument, one folder over).
-#
-# WHY IT MATTERS MORE HERE THAN IT LOOKS. The install is not ours to write to at all — it is the
-# player's own copy of somebody else's game, and the one thing the repo may never contain
-# (docs/METHOD.md). On THIS machine it is also a symlink into the sibling RE repo (`wow-5875-re/WoW`),
-# so a stray write lands in another repository's working tree and shows up in their `git status`.
-# And it makes "what here is benilla's?" unanswerable, which is the whole reason 0954 put our state
-# in one visible folder.
-#
-# Scoped by PHYSICAL path, not by name: the slot's `WoW` is a symlink, so a write can arrive
+# Scoped by physical path, not by name: a checkout's `WoW` may be a symlink, so a write can arrive
 # spelled either way and only `cd -P` collapses the two. `$WOW_DATA` is honoured because that is
-# the resolver's own first step — a machine that points the client elsewhere protects that instead.
+# the resolver's own first step.
 #
-# `BENILLA_ALLOW_INSTALL_WRITE=1` overrides, the `WT_ALLOW_PRIMARY` shape: structurally hard rather
-# than merely forbidden, and a deliberate exception names itself in the transcript.
+# `BENILLA_ALLOW_INSTALL_WRITE=1` overrides: a deliberate exception names itself in the transcript.
 input=$(cat)
 
 path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' 2>/dev/null)
@@ -60,20 +45,18 @@ for root in "${WOW_DATA:-}" "$primary/WoW" "$cwd/WoW"; do
   case "$real/" in
     "$root"/*)
       cat >&2 <<EOF
-BLOCKED — that write targets the 1.12.1 INSTALL ($root).
+BLOCKED: that write targets the 1.12.1 INSTALL ($root).
 
     the file: $path
 
-benilla READS a WoW install and never writes to one (docs/METHOD.md hard rules; decision 1486). It is
-the player's own copy of somebody else's game, the repo may never contain any of it, and on this
-machine that folder is a symlink into the sibling RE repo — a stray file lands in wow-5875-re's
-working tree.
+benilla reads a WoW install and never writes to one (docs/METHOD.md). It is the player's own copy
+of somebody else's game, and the repo may never contain any of it.
 
 Where the thing you are writing actually goes:
 
-  · anything the CLIENT persists  → \`crate::local_state\` (\`benilla-config/\`, 0954/1175)
+  · anything the client persists   → \`crate::local_state\` (\`benilla-config/\`)
   · a capture, log, or scratch file → the session scratchpad
-  · a decision, a doc              → the repo
+  · a doc                          → the repo
 
 A deliberate exception is \`BENILLA_ALLOW_INSTALL_WRITE=1\`.
 EOF

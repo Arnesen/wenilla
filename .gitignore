@@ -12,7 +12,7 @@
 # Real client files used as test fixtures (document expected paths, do not commit).
 **/tests/fixtures/
 
-# --- benilla's own local state (decision 0954, moved out of the install by 1175) ---
+# --- benilla's own local state ---
 # The one folder benilla persists into: config.toml, macros/, bindings/, saved-variables.lua,
 # camera/. A dev build resolves it to the main checkout (so linked worktrees share one); a
 # release build puts it beside the binary — which is why it is not called `benilla/`: that name
@@ -25,7 +25,7 @@
 /.probe-identity
 
 # Profiling output: `--features bevy/trace_chrome` drops a multi-GB flame chart in the cwd, which
-# otherwise leaves the checkout "dirty" (decision 0610).
+# otherwise leaves the checkout "dirty".
 trace-*.json
 
 # OS / editor cruft
@@ -43,6 +43,6 @@ trace-*.json
 # Python bytecode from the `scripts/` tooling.
 __pycache__/
 
-# The vanilla addon corpus the UI engine's real-addon tests read (third-party content, decision
-# 2329): a symlink beside `WoW`, or `BENILLA_ADDON_CORPUS`.
+# The vanilla addon corpus the UI engine's real-addon tests read (third-party content): a symlink
+# beside `WoW`, or `BENILLA_ADDON_CORPUS`.
 /wow-addons-vanilla
