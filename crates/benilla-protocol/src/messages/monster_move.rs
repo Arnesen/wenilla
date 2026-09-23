@@ -1,19 +1,7 @@
-//! `SMSG_MONSTER_MOVE` — the server-dictated creature movement path — and its transport twin.
-//!
-//! One packet: a mover, its `start`, a spline id, a `moveType`-switched final facing, then (unless it is
-//! a `Stop`) the spline block — a flag word, a duration, and the waypoints. Decodes into the full
-//! travel-order polyline [`ServerPacket::MonsterMove::path`] the app rides at constant (arc-length) speed
-//! (decision 0097). The wire packs the waypoints two ways, keyed by the `Flying`/`Mask_CatmullRom` flag —
-//! see [`read_monster_move_spline`].
-//!
-//! **`SMSG_MONSTER_MOVE_TRANSPORT` is the same packet with one field inserted**: a second packed guid,
-//! the transport's, immediately after the mover's — and every coordinate in the body is then an
-//! **offset in that transport's frame**, not world space (decision 1936). vmangos writes exactly that
-//! (`Movement::MoveSplineInit::Launch`, `spline/MoveSplineInit.cpp:138-170`: the same builder, the
-//! opcode swapped and the transport packed guid appended, after `CalculatePassengerOffset` has moved
-//! the start into deck space), and it computes such a path against the transport's **model** navmesh
-//! rather than the map's (`PathFinder::calculate`, `Maps/PathFinder.cpp:76-84`), so the waypoints are
-//! deck-local too. One reader serves both, keyed by [`read_monster_move`]'s `on_transport`.
+//! `SMSG_MONSTER_MOVE`: a mover, its start, a spline id, a `moveType` facing, then (unless a stop)
+//! spline flags, a duration and the waypoints. `SMSG_MONSTER_MOVE_TRANSPORT` inserts the
+//! transport's packed guid after the mover's, and every coordinate is then deck-local, waypoints
+//! included (vmangos `MoveSplineInit.cpp:138-170`, `PathFinder.cpp:76-84`).
 
 use std::io;
 
@@ -23,46 +11,26 @@ use crate::wire::{
     read_u64_le, read_u8, Vector3d,
 };
 
-/// `MonsterMoveType::Stop` (`SMSG_MONSTER_MOVE`).
 const MONSTER_MOVE_STOP: u8 = 0x1;
-/// `SplineFlags::Flying` in the `SMSG_MONSTER_MOVE` spline-flags word. When set, the unit follows the
-/// path's **own Z** (a 3-D flight path, points sent explicit); when clear, the path is a *ground* walk
-/// and the real client **discards the spline Z and re-derives it from the terrain** under the unit (the
-/// swept-collision down-probe — byte-verified in wow-5875-re: the grounded fork zeroes the spline's
-/// Z-delta at `0x616cb0` and the WALK resolver `0x634040 → 0x6367b0` reads Z off the world trace
-/// `0x6721b0`). benilla mirrors that split: a non-flying spline is terrain-clamped, a flying one keeps
-/// its Z. The client gates on this same bit (`0x6018f0: test ah,0x2`). It is also `Mask_CatmullRom` —
-/// flying paths interpolate (and wire-encode) as a curve, ground paths as straight segments.
+/// `SplineFlags::Flying`, also `Mask_CatmullRom` (tested at `0x6018f0`). Set, the unit keeps the
+/// path's own Z along a curve; clear, the 1.12 client drops the spline Z (`0x616cb0`) and takes Z
+/// from the terrain (`0x634040`), moving along straight segments.
 const SPLINE_FLAG_FLYING: u32 = 0x200;
-/// `SPLINEFLAG_RUNMODE` — the path is travelled at run speed. Its **absence** is what matters:
-/// the real client feeds this bit straight into `CMovement::SetRunMode 0x7c71c0`
-/// (`0x7c6ac2 and edi,0x100` → `0x7c6acb call 0x7c71c0`, inside the `SMSG_MONSTER_MOVE` commit
-/// `0x7c6a50`), and that setter's argument is *run* — so a spline **without** this bit **sets**
-/// `MOVEFLAG_WALK_MODE` on the unit it moves. The two `0x100`s are inverses of each other
-/// (wow-re `collision/scratch/walk-mode-law.md` §5.2; benilla decision 1758).
+/// `SPLINEFLAG_RUNMODE`: run speed. The 1.12 client passes it to `CMovement::SetRunMode`
+/// (`0x7c71c0`, from `0x7c6ac2`), so a spline without it sets `MOVEFLAG_WALK_MODE` on the unit.
 const SPLINE_FLAG_RUNMODE: u32 = 0x100;
 
-/// Parse an `SMSG_MONSTER_MOVE` body into [`ServerPacket::MonsterMove`]. The head (mover, `start`, spline
-/// id, `moveType` + its final facing) is always present; a **stop** (`moveType 1`) ends there (the client
-/// reads no flags/duration/points and implies `flags=0x100, count=1, duration=0` — wow-re RF-0049;
-/// reading a tail anyway over-ran the body, the `0x00dd: failed to fill whole buffer` skip that dropped
-/// every creature stop). Otherwise the spline block yields the full polyline `[start, …waypoints…,
-/// endpoint]`.
+/// A stop (`moveType` 1) ends after the head: the 1.12 client reads no spline block and implies
+/// `flags = 0x100, count = 1, duration = 0`. Otherwise the path runs `[start, …, endpoint]`.
 pub(super) fn read_monster_move(r: &mut &[u8], on_transport: bool) -> io::Result<ServerPacket> {
     let guid = read_packed_guid(r)?;
-    // `SMSG_MONSTER_MOVE_TRANSPORT` only: the deck the whole body is expressed on, packed like the
-    // mover's guid and read immediately after it. Everything below is unchanged — the two opcodes
-    // share the builder server-side and differ by this one field.
     let transport = on_transport.then(|| read_packed_guid(r)).transpose()?;
     let start = Vector3d::read(r)?;
-    // The server's per-move spline counter. Discarded for a creature (nothing acks its walk), but
-    // the client echoes it back in `CMSG_MOVE_SPLINE_DONE` when a spline drives its OWN player
-    // (Charge/knockback/taxi): the server validates the ack against the newest spline id.
+    // Echoed in `CMSG_MOVE_SPLINE_DONE` when the spline moves our own player (charge, knockback,
+    // taxi); the server checks it against its newest spline id.
     let spline_id = read_u32_le(r)?;
     let move_type = read_u8(r)?;
-    // The `moveType`-switched final facing (jumptable `0x602114`): 2 = spot, 3 = target guid, 4 = angle.
-    // The real client snaps the unit to it (`0x7c6f30`); benilla applies it in the net bridge. A plain
-    // move (0) / stop (1) dictates no facing.
+    // Final facing (jumptable `0x602114`); the 1.12 client snaps the unit to it (`0x7c6f30`).
     let facing = match move_type {
         2 => {
             let spot = Vector3d::read(r)?;
@@ -83,8 +51,7 @@ pub(super) fn read_monster_move(r: &mut &[u8], on_transport: bool) -> io::Result
             stop: true,
             duration_ms: 0,
             flying: false,
-            // The stop form carries no spline-flags dword at all, so there is no run/walk verdict
-            // in it — and it builds no path, so nothing downstream reads this.
+            // A stop carries no flags and builds no path; nothing reads this.
             run_mode: true,
         }
     } else {
@@ -92,9 +59,7 @@ pub(super) fn read_monster_move(r: &mut &[u8], on_transport: bool) -> io::Result
         let duration_ms = read_u32_le(r)?;
         let flying = spline_flags & SPLINE_FLAG_FLYING != 0;
         let run_mode = spline_flags & SPLINE_FLAG_RUNMODE != 0;
-        // The decoded waypoints *after* the start (see [`read_monster_move_spline`]) — both layouts
-        // ship only post-start points, so the wire `start` anchors the full travel-order polyline
-        // `[start, …waypoints…, endpoint]`.
+        // Both layouts ship only the points after the start, so the head's `start` leads the path.
         let tail = read_monster_move_spline(r, flying)?;
         let path = if tail.is_empty() {
             Vec::new()
@@ -116,54 +81,28 @@ pub(super) fn read_monster_move(r: &mut &[u8], on_transport: bool) -> io::Result
     })
 }
 
-/// `SMSG_MONSTER_MOVE` spline points → the reconstructed **absolute** waypoints the block carries, in
-/// travel order (the point *after* the start … the endpoint). Two wire layouts, keyed by `catmull_rom`
-/// (the `Mask_CatmullRom` = `Flying` spline flag), both from vmangos `PacketBuilder`:
-///
-/// - **Ground (linear, `WriteLinearPath`):** a `u32` count of the points **after** the start, then the
-///   endpoint as an absolute `Vector3d`, then `count − 1` packed `i32` offsets — `endpoint − waypoint`
-///   for each intermediate waypoint (see [`packed_to_vector3d`]), in travel order. We invert each
-///   (`waypoint = endpoint − offset`) and append the endpoint, so the returned list is
-///   `[waypoint₁, …, endpoint]`; the start is the packet head's.
-///   **The start is not among the offsets.** vmangos calls the builder with `firstPoint = 1`
-///   (`packet_builder.h:34`'s default, `MoveSplineInit.cpp:169`) over a spline laid out
-///   `[phantom, c₀ … cₙ₋₁, cₙ₋₁]` — the Catmull-Rom initializer even for a linear path
-///   (`spline.cpp:52`) — so `last_idx = n − 1`, the count is `n − 1`, and the offset loop runs
-///   `c₁ … cₙ₋₂`; the head's start is `getPoint(first())` = `c₀`. The reference decoder
-///   (`0x6018f0`, wow-re `net/scratch/rf49-inbound-wire-parses.md` rows 9–11) reads the same
-///   `count − 1` intermediates, and its curve is `[start, points…]` (`curvemath/…/rf52-curve-construction.md`).
-///   Until the sweep that found it, this read assumed `firstPoint = 0` (0097, 0708): it treated the
-///   first offset as a re-encoded start and dropped it — every ground path lost its first corner —
-///   and read none at `count == 2`, leaving the one real waypoint unread (the decode-length
-///   instrument's `SMSG_MONSTER_MOVE … left 4 trailing byte(s)` on a live run).
-/// - **Flying (Catmull-Rom, `WriteCatmullRomPath`):** a `u32` count, then `count` **absolute** `Vector3d`s
-///   (the control points from `getPoint(2)` on — the post-start waypoints through the endpoint). Returned
-///   verbatim. (Reading these as packed offsets — the old single-layout path — mis-sized the body and
-///   dropped every flight move.)
-///
-/// The client interpolates a ground path **piecewise-linearly, arc-length-parameterised** through all of
-/// these (wow-re curvemath RF-0048/RF-0052: the creature follow's point-at-t is `linear_pos_diff`, not the
-/// Catmull-Rom blend — only flying units take the curved family).
+/// The absolute waypoints after the start, endpoint last (vmangos `PacketBuilder`). Flying
+/// (`WriteCatmullRomPath`): a `u32` count, then that many absolute points. Ground
+/// (`WriteLinearPath`): a `u32` count, the absolute endpoint, then `count - 1` packed
+/// `endpoint - waypoint` offsets. The start is not among them: vmangos writes from
+/// `firstPoint = 1` (`MoveSplineInit.cpp:169`), and the reference decoder (`0x6018f0`) reads
+/// the same `count - 1`.
 fn read_monster_move_spline(r: &mut &[u8], catmull_rom: bool) -> io::Result<Vec<Vector3d>> {
     let count = read_u32_le(r)?;
-    // Cap the *pre-allocation* (not the read) at a sane bound — a corrupt `count` must not reserve GBs;
-    // the read itself still errors the instant the (bounded) body underruns.
+    // 0xFFFF bounds only the pre-allocation against a corrupt `count`.
     if catmull_rom {
-        // Absolute control points, verbatim.
         let mut points = Vec::with_capacity(capacity_hint(count, 0xFFFF));
         for _ in 0..count {
             points.push(Vector3d::read(r)?);
         }
         return Ok(points);
     }
-    // Endpoint (absolute) + packed offsets from it; invert to absolute, endpoint last.
     if count == 0 {
         return Ok(Vec::new());
     }
     let endpoint = Vector3d::read(r)?;
     let mut points = Vec::with_capacity(capacity_hint(count, 0xFFFF));
-    // `count == 1` ⇒ a straight hop: the producer's `last_idx > 1` guard skips the loop, and
-    // `count − 1` is already zero.
+    // `count == 1` is a straight hop: no offsets (vmangos: `if (last_idx > 1)`).
     for _ in 1..count {
         let off = packed_to_vector3d(read_i32_le(r)?);
         points.push(Vector3d {
@@ -182,7 +121,7 @@ mod tests {
     use crate::messages::{opcode, parse_server, parse_server_with_tail};
     use crate::wire::write_packed_guid;
 
-    /// The fixed head of a `SMSG_MONSTER_MOVE`: packed guid, start pos, splineId, moveType.
+    /// The fixed head: packed guid, start, splineId, moveType.
     fn head(guid: u64, start: [f32; 3], move_type: u8) -> Vec<u8> {
         let mut b = Vec::new();
         write_packed_guid(guid, &mut b).unwrap();
@@ -194,12 +133,8 @@ mod tests {
         b
     }
 
-    /// The producer's linear encoder, transcribed from vmangos `PacketBuilder::WriteLinearPath` as
-    /// `WriteMonsterMove` calls it (`firstPoint = 1`). `path` is the full `[c₀ = start, …, cₙ₋₁]`
-    /// (the head carries `c₀` separately); over the spline's `[phantom, c₀ … cₙ₋₁, cₙ₋₁]` layout
-    /// `last_idx = n − 1`, so it writes count `n − 1`, the **endpoint** absolute, then — under
-    /// `if (last_idx > 1)` — `c₁ … cₙ₋₂` as packed `endpoint − point` offsets. The start is never
-    /// among them.
+    /// vmangos `WriteLinearPath` from `firstPoint = 1` over `path = [c₀, …, cₙ₋₁]`: the count
+    /// `n - 1`, the endpoint, then `c₁ … cₙ₋₂` as packed `endpoint - point` offsets.
     fn append_linear_path(body: &mut Vec<u8>, path: &[[f32; 3]]) {
         let (&endpoint, leading) = path.split_last().expect("a path has an endpoint");
         let last_idx = path.len() - 1;
@@ -208,10 +143,9 @@ mod tests {
             body.extend_from_slice(&f.to_le_bytes());
         }
         if last_idx <= 1 {
-            return; // vmangos `packet_builder.cpp:92` — `if (last_idx > 1)`
+            return; // vmangos `packet_builder.cpp:92`: `if (last_idx > 1)`
         }
-        // `for (i = start; i < last_idx; ++i)` with `start = 1`: the intermediates, packed as
-        // endpoint − point (¼-yd quantized).
+        // `for (i = start; i < last_idx; ++i)` with `start = 1`, packed in ¼-yd units.
         for &p in &leading[1..] {
             let pack = |v: f32, shift: u32, mask: i32| ((v * 4.0).round() as i32 & mask) << shift;
             let off = [endpoint[0] - p[0], endpoint[1] - p[1], endpoint[2] - p[2]];
@@ -220,12 +154,7 @@ mod tests {
         }
     }
 
-    /// `SMSG_MONSTER_MOVE_TRANSPORT` is `SMSG_MONSTER_MOVE` with the transport's packed guid
-    /// inserted between the mover's guid and the start position — everything after it parses
-    /// identically, and every coordinate is then a deck-local offset. Reading the *plain* opcode's
-    /// layout for it would consume the transport guid as the start's X and Y and land the creature
-    /// somewhere near the map origin; reading the transport layout for a plain packet is the same
-    /// mistake in reverse. Both directions are pinned here (decision 1936).
+    /// Each opcode reads its own layout; the plain one must not find a transport guid.
     #[test]
     fn monster_move_transport_reads_the_deck_guid_first() {
         let mut body = Vec::new();
@@ -257,19 +186,16 @@ mod tests {
             _ => panic!("expected MonsterMove"),
         }
 
-        // The plain opcode over the SAME bytes must NOT come back with a transport — and it
-        // mis-reads the head, which is exactly why the two layouts cannot share one arm.
+        // The plain opcode over the same bytes must not come back with a transport.
         match parse_server(opcode::SMSG_MONSTER_MOVE, &body) {
             Ok(ServerPacket::MonsterMove { transport, .. }) => assert_eq!(transport, None),
             Ok(_) => panic!("expected MonsterMove"),
-            Err(_) => {} // an under-run is equally fine: the point is that it is not the same read
+            Err(_) => {} // an under-run is fine too: it is not the same read
         }
     }
 
     #[test]
     fn monster_move_stop_has_no_tail() {
-        // A STOP (moveType 1) is head-only: no flags/duration/points. Parsing the tail anyway
-        // over-ran the body and skipped the packet (`0x00dd: failed to fill whole buffer`).
         let body = head(0x1234, [1.0, 2.0, 3.0], MONSTER_MOVE_STOP);
         let p = parse_server(opcode::SMSG_MONSTER_MOVE, &body).expect("a stop parses head-only");
         match p {
@@ -283,7 +209,7 @@ mod tests {
 
     #[test]
     fn monster_move_facing_angle_is_captured() {
-        // A facing-angle move (moveType 4): head, angle, then flags/duration/count + one point.
+        // moveType 4 carries a facing angle.
         let mut body = head(0x55, [0.0, 0.0, 0.0], 4);
         body.extend_from_slice(&1.25f32.to_le_bytes()); // facing angle
         body.extend_from_slice(&0u32.to_le_bytes()); // spline flags (ground)
@@ -303,7 +229,6 @@ mod tests {
             } => {
                 assert!(!stop);
                 assert_eq!(duration_ms, 500);
-                // A count-1 (endpoint-only) move is the two-point straight hop `[start, endpoint]`.
                 assert_eq!(path.len(), 2, "start + endpoint");
                 assert!((path[0].x - 0.0).abs() < 1e-6, "anchored at the wire start");
                 assert!((path[1].x - 10.0).abs() < 1e-6, "endpoint verbatim");
@@ -316,8 +241,6 @@ mod tests {
         }
     }
 
-    /// The plain two-point hop — a `MoveTo` with no intermediate waypoints: `count = 1`, the
-    /// destination, no offsets. Encoded here by the transcribed producer above.
     #[test]
     fn monster_move_two_point_path_carries_no_offsets() {
         let mut body = head(0x77, [4.0, 8.0, 0.0], 0);
@@ -336,11 +259,8 @@ mod tests {
         }
     }
 
-    /// **The one-corner path, byte for byte as vmangos writes it** — hand-assembled, not through the
-    /// transcribed encoder, so the two cannot share a misreading. A pathfinder route `c₀ → c₁ → c₂`
-    /// is `count = 2`, the endpoint `c₂`, and ONE packed offset `c₂ − c₁`. The read this replaced
-    /// took `count == 2` for an offset-free hop: it read nothing, cut the corner (`[c₀, c₂]`) and
-    /// left four bytes unread — the live run's `SMSG_MONSTER_MOVE … left 4 trailing byte(s)`.
+    /// Hand-assembled rather than through `append_linear_path`: the route `c₀ → c₁ → c₂` is
+    /// `count = 2`, the endpoint `c₂` and one packed offset `c₂ - c₁`.
     #[test]
     fn monster_move_one_corner_path_keeps_its_corner() {
         let mut body = head(0x77, [0.0, 0.0, 0.0], 0); // c₀ in the head
@@ -369,9 +289,7 @@ mod tests {
 
     #[test]
     fn monster_move_ground_path_decodes_every_waypoint() {
-        // A four-waypoint ground patrol, encoded exactly as vmangos `WriteLinearPath` ships it, must
-        // round-trip to the full travel-order polyline — not collapse to `start → endpoint`, and not
-        // lose its first corner. Points are ¼-yd multiples so the packed quantization is exact.
+        // ¼-yd multiples, so the packed quantization is exact.
         let want = [
             [0.0f32, 0.0, 0.0], // start
             [10.0, 0.0, 0.0],   // corner east
@@ -408,9 +326,6 @@ mod tests {
 
     #[test]
     fn monster_move_flying_path_reads_absolute_points() {
-        // A flying (`Mask_CatmullRom`) move ships its waypoints ABSOLUTE (vmangos `WriteCatmullRomPath`),
-        // not as packed offsets. The parser must switch layouts on the flag — the old single-layout read
-        // mis-sized the body and dropped every flight. `count` = post-start points; the start prepends.
         let mids = [[3.0f32, 4.0, 50.0], [6.0, 8.0, 55.0]];
         let mut body = head(0x77, [0.0, 0.0, 40.0], 0);
         body.extend_from_slice(&SPLINE_FLAG_FLYING.to_le_bytes()); // flying ⇒ catmull-rom layout
