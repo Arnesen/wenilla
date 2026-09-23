@@ -11,7 +11,7 @@
 //! real atlas. So this probe drives the **whole live pipeline** from Lua and reads the result off
 //! the entities the renderer actually built.
 //!
-//! The measurement is numeric, not visual (method.md's rule: a capture can confirm an existence
+//! The measurement is numeric, not visual (docs/METHOD.md's rule: a capture can confirm an existence
 //! fact, it cannot measure one). Each leg projects three model-space probe points through the
 //! camera and the root the renderer placed this frame, and compares the resulting NDC against the
 //! baseline's:
@@ -38,7 +38,7 @@
 //! WOW_USER=probe5 WOW_PASS=pprobe5 WOW_CHAR=Probefive WOW_UNATTENDED=1 WOW_NOSOUND=1 \
 //!     WOW_PROBE_MODEL_CAMERA=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — method.md "The local vmangos server"). `WOW_TILE_TRACE=1`
+//! (the slot-keyed probe identity — docs/METHOD.md "The local vmangos server"). `WOW_TILE_TRACE=1`
 //! alongside it prints the leg, the record, the eye and the matrix per pane per frame.
 
 use bevy::camera::visibility::RenderLayers;
@@ -192,7 +192,7 @@ fn read_leg(
 
 fn shoot(commands: &mut Commands, name: &str) {
     // Every file we write goes through `local_state` — never into the WoW install, never a
-    // platform config dir (the contract's one-folder rule).
+    // platform config dir (docs/METHOD.md's one-folder rule).
     let Some(path) = crate::local_state::home().map(|d| d.join(format!("{name}.png"))) else {
         warn!("PROBE_MODEL_CAMERA: no local-state folder — skipping the {name} shot");
         return;

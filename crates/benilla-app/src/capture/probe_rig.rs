@@ -71,7 +71,7 @@
 //! character (give `WOW_RIG` a race+class) starts with empty bags and is the cheaper path.
 //!
 //! Non-combat throughout: the rig creates, configures, places and stops. It never fights, so the
-//! unattended-combat ban (method.md) is untouched.
+//! unattended-combat ban (docs/METHOD.md) is untouched.
 
 use benilla_protocol::{messages, CharAction, CharCreateReq};
 use bevy::prelude::*;

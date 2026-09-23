@@ -58,7 +58,7 @@
 //!     cargo run -p benilla
 //! ```
 //! (the slot-keyed probe identity — `pool-N` → `WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>`, method.md "The local vmangos server"; this worktree is `pool-5`).
+//! WOW_CHAR=Probe<N-spelled>`, docs/METHOD.md "The local vmangos server"; this worktree is `pool-5`).
 //! Non-combat. An outer grep on `PROBE_AUCTION:` is the whole harness; the probe self-exits (the
 //! [`super::probes::ProbeExitPlugin`] pattern) once DONE.
 

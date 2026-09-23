@@ -48,7 +48,7 @@
 //! WOW_DATA=WoW/Data WOW_USER=probe4 WOW_PASS=pprobe4 WOW_CHAR=Probefour \
 //!     WOW_UNATTENDED=1 WOW_PROBE_SERVICE=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — method.md "The local vmangos server"). Non-combat, GM mode
+//! (the slot-keyed probe identity — docs/METHOD.md "The local vmangos server"). Non-combat, GM mode
 //! left as found, nothing bought and nothing turned in: every leg opens a window and closes it
 //! client-side, which is what the reference's own close does (`ui_gossip`: there is no
 //! `CMSG_GOSSIP_CLOSE` in 1.12).
@@ -78,7 +78,7 @@ use crate::ui_trainer::TrainerOpen;
 /// This constant is the reason the questgiver leg first read as a client defect: its hop point was
 /// an invented Northshire "hub" ~29 yd from Deputy Willem, so the probe called a ladder the click
 /// would never have reached, the server dropped the packet on its own distance check, and the
-/// timeout printed a FAIL about the client (method.md §6 — prove the run before reading the
+/// timeout printed a FAIL about the client (docs/METHOD.md §6 — prove the run before reading the
 /// result). Every hop point is now an NPC's own spawn, and the scan re-checks the reach.
 const SCAN_RANGE_SQ: f32 = crate::target::SERVICE_RANGE_SQ;
 /// Let the hop land and the tile stream before the first scan.

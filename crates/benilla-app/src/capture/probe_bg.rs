@@ -94,7 +94,7 @@
 //!
 //! Non-combat — the probe never attacks and never stands anywhere contested; with one player in
 //! the instance there is nobody to fight. Pair with the SLOT-KEYED probe identity
-//! (`method.md`, "The local vmangos server").
+//! (`docs/METHOD.md`, "The local vmangos server").
 
 use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;

@@ -3,7 +3,7 @@
 //! decode against the server DB's `creature_template.faction`.
 //!
 //! Run: `cargo run -p benilla-protocol --example faction_probe -- probeN pprobeN [host]`
-//! — the slot-keyed probe account (method.md "The local vmangos server"). The account is a
+//! — the slot-keyed probe account (docs/METHOD.md "The local vmangos server"). The account is a
 //! REQUIRED arg with no default: a default was once `one`, the director's account, where a
 //! probe login kicks their live session (decision 0530).
 

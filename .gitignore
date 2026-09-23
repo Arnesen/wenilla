@@ -4,18 +4,47 @@
 # Cargo.lock IS committed (this workspace produces binaries).
 
 # --- Blizzard-owned content: NEVER commit ---
-# A legally-installed 1.12.1 client, read at runtime; not redistributed.
+# The user's legally-installed 1.12.1 client. Read at runtime; not redistributed.
 /WoW
-# Cached / extracted assets derived from an install.
+# The user's legally-installed Classic Era client (product wow_classic_era; the shared CASC Data
+# dir sits beside the product dir). Source of the Era UI exports for decision 0068; not redistributed.
+/WoW-era
+# Cached / extracted assets derived from the user's install.
 /extracted/
 /out/
 # Real client files used as test fixtures (document expected paths, do not commit).
 **/tests/fixtures/
 
-# Profiling output (`--features bevy/trace_chrome`).
+# --- benilla's own local state (decision 0954, moved out of the install by 1175) ---
+# The one folder benilla persists into: config.toml, macros/, bindings/, saved-variables.lua,
+# camera/. A dev build resolves it to the primary checkout (so the worktree pool shares one); a
+# release build puts it beside the binary — which is why it is not called `benilla/`: that name
+# collides with the binary of the same name. Machine-local by definition — `crate::local_state`
+# is the only thing in the tree that may write it.
+/benilla-config
+
+# Worktree-pool claim marker (scripts/wt.sh) — per-slot state, never content.
+/.wt-claimed
+
+# Profiling output: `--features bevy/trace_chrome` drops a multi-GB flame chart in the cwd, which
+# otherwise leaves the checkout "dirty" and blocks the worktree verbs (decision 0610).
 trace-*.json
 
 # OS / editor cruft
 .DS_Store
 *.swp
 /.idea/
+# Claude Code: share the project hooks + settings + slash commands + skills, ignore per-machine state.
+/.claude/*
+!/.claude/settings.json
+!/.claude/hooks/
+!/.claude/commands/
+!/.claude/skills/
+/.claude/settings.local.json
+
+# Python bytecode from the `scripts/` tooling.
+__pycache__/
+
+# The vanilla addon corpus the UI engine's real-addon tests read (third-party content, decision
+# 2329): a symlink `scripts/wt.sh` lays into every slot and the primary, beside `WoW`.
+/wow-addons-vanilla

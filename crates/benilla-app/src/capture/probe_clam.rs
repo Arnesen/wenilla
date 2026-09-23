@@ -34,7 +34,7 @@
 //! WOW_NOSOUND=1 WOW_USER=probe0 WOW_PASS=pprobe0 WOW_CHAR=Probezero \
 //!     WOW_PROBE_CLAM=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — `pool-N` → `probeN`/`pprobeN`/`Probe<N-spelled>`, `method.md`
+//! (the slot-keyed probe identity — `pool-N` → `probeN`/`pprobeN`/`Probe<N-spelled>`, `docs/METHOD.md`
 //! "The local vmangos server"). `WOW_PROBE_CLAM=<entry>` aims it at a different openable template;
 //! the default is a Small Barnacled Clam (7973 — `Flags` LOOTABLE with `LockID = 0`, so it is
 //! openable the moment it exists: no key, no lockpicking). The probe `.additem`s its own copy and

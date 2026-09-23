@@ -79,7 +79,7 @@ impl Probe for Death {
                 // is an `==`, so it stayed silent and the probe's corpse capture quietly stopped
                 // firing: the arc would have bailed "the corpse object never streamed" on a wire
                 // that was perfectly correct. An instrument that fails closed after a refactor is
-                // the expensive kind (the contract §5 — the instruments are part of the codebase).
+                // the expensive kind (docs/METHOD.md §5 — the instruments are part of the codebase).
                 let repop_sent = cx.world.death_arc.as_ref().is_some_and(|a| a.repop_sent);
                 if repop_sent && self.corpse_create.is_none() && *kind == EntityKind::Corpse {
                     self.corpse_create = Some((*guid, *position));

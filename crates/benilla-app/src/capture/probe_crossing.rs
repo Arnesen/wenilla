@@ -5,7 +5,7 @@
 //! the net layer) → still riding → arrived docked on the far continent. Every phase edge prints
 //! a `PROBE crossing:` line, so an outer `timeout`d run + grep is the whole harness. Non-combat.
 //! Pair with the SLOT-KEYED probe identity (`WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>` for a `pool-N` worktree — method.md "The local vmangos server";
+//! WOW_CHAR=Probe<N-spelled>` for a `pool-N` worktree — docs/METHOD.md "The local vmangos server";
 //! a shared account gets kicked by parallel sessions mid-ride).
 
 use bevy::prelude::*;

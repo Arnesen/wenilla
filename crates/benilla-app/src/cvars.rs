@@ -358,7 +358,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `cvar/scratch/graphics-cost-cvar-census.md` §8 lists `nearclip` among the eleven dead knobs
     // for exactly that). The camera does not read that global; it reads the record. So the ctor's
     // `0x3de38e39` = 1/9 is overwritten by the first frame's stamp and never reaches a picture —
-    // a verified-but-partial mechanism, which the contract §4 names as the classic trap.
+    // a verified-but-partial mechanism, which docs/METHOD.md §4 names as the classic trap.
     //
     // pfUI's `hdgraphic` writes it (`ConsoleExec("nearClip " .. arg*2/100)`, 0.06..0.30 across its
     // extended stops) — every value inside the reference's own `[0.01, 0.33]`, which is why that

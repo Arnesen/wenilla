@@ -94,7 +94,7 @@
 //!     WOW_PROBE_GMTICKET=1 cargo run -q -p benilla
 //! ```
 //! (the slot-keyed probe identity — this worktree is `pool-3` → `probe3`/`pprobe3`/`Probethree`;
-//! method.md "The local vmangos server"). Non-combat; the probe never drives the body and sends no
+//! docs/METHOD.md "The local vmangos server"). Non-combat; the probe never drives the body and sends no
 //! GM command, so GM mode and position are left exactly as found — but note that the body is not
 //! necessarily *still* when a run starts (see [`REST_EPS`]). An outer `timeout` + grep on
 //! `PROBE_GMTICKET:` is the whole harness; the probe self-exits once DONE. Nothing here is a

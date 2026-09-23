@@ -252,7 +252,7 @@ pub(crate) fn layout_character_path(realm: &str, character: &str) -> Option<Path
 ///
 /// The reference's residents are `WDB/namecache.wdb`, `creaturecache.wdb` and `petnamecache.wdb`
 /// — three files **inside the install**, which is exactly where benilla may not write (the install
-/// is read-only, the contract's hard rule), so ours lives here like every other thing we persist.
+/// is read-only, `docs/METHOD.md`'s hard rule), so ours lives here like every other thing we persist.
 /// One file rather than three because our three stores share a lifetime and a realm; the
 /// reference's split follows its `DBCache<T>` template instantiation, not a property of the data.
 ///

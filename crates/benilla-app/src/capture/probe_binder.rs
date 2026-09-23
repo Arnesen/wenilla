@@ -78,7 +78,7 @@
 //!     WOW_PROBE_BINDER=1 cargo run -q -p benilla
 //! ```
 //! (the slot-keyed probe identity — this worktree is `pool-1` → `probe1`/`pprobe1`/`Probeone`;
-//! method.md "The local vmangos server"). Non-combat, and GM mode is left exactly as found. An
+//! docs/METHOD.md "The local vmangos server"). Non-combat, and GM mode is left exactly as found. An
 //! outer `timeout` + grep on `PROBE_BINDER:` is the whole harness; the probe self-exits once DONE.
 //!
 //! Every step SKIPs with a note rather than FAILing for an environmental problem (the NPC never

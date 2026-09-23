@@ -63,7 +63,7 @@
 //! "Private"). The real `GlobalStrings.lua` is executed off the player's own install at boot, so
 //! those keys are already sitting on `_G` when `GetPVPRankInfo` runs, and reading them there is the
 //! only correct answer: a table of titles shipped in this repo would be Blizzard text we may not
-//! carry (the contract's install-content rule) *and* wrong in every non-enUS locale. There is **no
+//! carry (docs/METHOD.md's install-content rule) *and* wrong in every non-enUS locale. There is **no
 //! `PVP_RANK_0_*`** — internal rank 0 names nothing, and both reference panes lean on that nil to
 //! fall back to the `NONE` GlobalString, so a missing key answers nil here rather than an empty
 //! string or a raise.

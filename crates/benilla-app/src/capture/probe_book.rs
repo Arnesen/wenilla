@@ -4,7 +4,7 @@
 //! Goudy, 2026-08-09 (`#bugs` `1535810645956632686`): *"page text with html text absolutely
 //! annihilates performance"* — ~50% fps drop (62 → 36 fps, 16.0 → 28.0 ms) while the *Alliance
 //! Military Ranks* plaque's reader is up, recovering the moment it closes. That is a **frame-cost
-//! A/B**, and eyeballing an fps counter is exactly the way not to settle one (method.md's
+//! A/B**, and eyeballing an fps counter is exactly the way not to settle one (docs/METHOD.md's
 //! "timing and feel are measured, never eyeballed"). So this probe teleports to the plaque, samples
 //! the UI pass's own per-phase meter ([`crate::ui_script::UiFrameCost`]) with the reader CLOSED,
 //! opens it on the real route, samples again, and prints the two side by side — including how many
@@ -21,7 +21,7 @@
 //! WOW_NOSOUND=1 WOW_USER=probe0 WOW_PASS=pprobe0 WOW_CHAR=Probezero \
 //!     WOW_PROBE_BOOK=1 cargo run -q -p benilla --release
 //! ```
-//! (the slot-keyed probe identity — `pool-N` → `probeN`/`pprobeN`/`Probe<N-spelled>`, method.md
+//! (the slot-keyed probe identity — `pool-N` → `probeN`/`pprobeN`/`Probe<N-spelled>`, docs/METHOD.md
 //! "The local vmangos server"). An outer `timeout` + a grep on `PROBE_BOOK:` is the whole harness;
 //! the probe self-exits ([`super::probes::ProbeExitPlugin`]'s pattern) once DONE.
 

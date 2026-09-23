@@ -1242,7 +1242,7 @@ pub(super) const SCAR_LOOK: [f32; 3] = [-11792.7, -2647.1, 66.6];
 /// **Forgetting it did not fail.** The run brought up the world with no in-game UI, the fixture's
 /// seed hit a nil global (`ToggleQuestLog`), logged ONE `warn!` into ~100 lines of pipeline
 /// chatter, wrote a perfectly valid PNG of a UI-less world, and exited **0**. That is an
-/// instrument that manufactures a confident false negative — the shape `method.md` §6 spends a
+/// instrument that manufactures a confident false negative — the shape `docs/METHOD.md` §6 spends a
 /// paragraph on — and it cost a session a wasted build and nearly a wrong conclusion about a fix
 /// that was in fact working.
 ///

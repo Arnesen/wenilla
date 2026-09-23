@@ -12,10 +12,10 @@
 //! anything (the reap already emptied the `Casting` key it tests). The probe also logs every
 //! cast-bar phase transition ([`bar_timeline`]) so the red bar's hold/burst/fade durations are
 //! measured off the timestamps, not eyeballed. Non-combat, safe unattended
-//! (method.md's rule bans unattended *combat* probes); a hearth that completes because the
+//! (docs/METHOD.md's rule bans unattended *combat* probes); a hearth that completes because the
 //! cancel FAILED just ports the probe character home — visible in the log as the missing cancel line. Pair with
 //! the slot-keyed probe identity (`WOW_USER=probeN WOW_PASS=pprobeN WOW_CHAR=Probe<N-spelled>`,
-//! method.md) + `WOW_CAST_TRACE=1 WOW_PROBE_EXIT_AT=<s>`.
+//! docs/METHOD.md) + `WOW_CAST_TRACE=1 WOW_PROBE_EXIT_AT=<s>`.
 
 use bevy::prelude::*;
 

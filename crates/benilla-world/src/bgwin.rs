@@ -70,7 +70,7 @@ const BG_ENV_PREFIXES: &[&str] = &[
     "WOW_RIG",
     "WOW_SCHED_CENSUS",
     // The one that names the condition directly: `WOW_UNATTENDED` *is* "the chair is empty"
-    // (1769), and method.md tells every ad-hoc probe to set it. It was missing here for as long
+    // (1769), and docs/METHOD.md tells every ad-hoc probe to set it. It was missing here for as long
     // as this list has existed, so a probe launched exactly the way the method prescribes — but
     // under none of the named prefixes — opened focused and borderless-fullscreen over the
     // director's work. Reported 2026-09-01 while probing B346. This is the case the list's own

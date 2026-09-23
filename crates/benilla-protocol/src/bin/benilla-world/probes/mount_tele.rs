@@ -118,7 +118,7 @@ impl Probe for MountTele {
 
     fn poll(&mut self, cx: &mut Ctx) -> Result<()> {
         // Mount only once the staging teleport has actually landed us outdoors — proving the run's
-        // starting state from a packet rather than assuming it (`method.md` step 6).
+        // starting state from a packet rather than assuming it (`docs/METHOD.md` step 6).
         if !self.mount_requested && cx.world.self_map == OUTDOOR_MAP {
             self.mount_requested = true;
             cx.session.send_chat(&format!(".aura {MOUNT_SPELL}"))?;

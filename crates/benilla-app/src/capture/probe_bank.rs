@@ -23,7 +23,7 @@
 //!
 //! vmangos `Chat.cpp`'s `modifyCommandTable` pins `.modify money` at `SEC_BASIC_ADMIN` (4,
 //! `Common.h` `AccountTypes`) — one level ABOVE `SEC_GAMEMASTER` (3), the level every probe account
-//! is provisioned at (method.md). So `.modify money` is refused server-side for a probe login,
+//! is provisioned at (docs/METHOD.md). So `.modify money` is refused server-side for a probe login,
 //! exactly the same floor [`super::probe_taxi`]'s module doc already found for the taxi fare. This
 //! probe never sends it: step (e) reads the character's live `money` field instead (DB-verified
 //! this session: `Probeone` carries 100000 copper, `bank_bag_slots` 0 — comfortably funds the

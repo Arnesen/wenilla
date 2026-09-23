@@ -404,7 +404,7 @@ fn fire_shakes(
 /// Charge (1424). That is a read-before-write of a zero-initialised field, not a design — the
 /// value it wants is unambiguous, being the same one the sound leg uses a moment later — so we
 /// spawn at the kit play's real position and the authored data plays. benilla implements the
-/// mechanism, not the quirk (the contract §3, `method.md` step 3); the reference's own numbers are
+/// mechanism, not the quirk (`docs/METHOD.md` §3, `docs/METHOD.md` step 3); the reference's own numbers are
 /// in `decisions/1849`, and reverting to them would mean deliberately modelling an uninitialised
 /// field we do not have.
 fn fire_kit_shakes(

@@ -173,7 +173,7 @@ pub(crate) fn drag_yaw(delta_px: f32, window: Option<&Window>) -> f32 {
 
 /// The rotate buttons' **hold rate** — the ref's `CHARACTER_FACING_INCREMENT = 2`, applied per
 /// `OnUpdate` tick by both screens' `RotateLeft/Right_OnUpdate`. Ours is per *second* at the ref's
-/// 60 fps, so the arrow turns at one speed instead of at the frame rate (`method.md` step 3: the
+/// 60 fps, so the arrow turns at one speed instead of at the frame rate (`docs/METHOD.md` step 3: the
 /// mechanism, not the quirk).
 pub(crate) const ROTATE_RATE: f32 = 120.0 * std::f32::consts::PI / 180.0;
 

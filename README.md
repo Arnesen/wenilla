@@ -9,10 +9,10 @@
 </div>
 
 > [!IMPORTANT]
-> **Issues and pull requests are closed here.** benilla is a solo project developed in a private
-> tree; this repo is its export, published as squashed snapshots, so a PR here has nothing to land
-> on. The best way to contribute is to join the [Discord](https://discord.gg/wJSJx467G4) and report
-> the bugs you find. Questions and ideas are welcome in the same place.
+> **Issues are off, and pull requests are not open yet.** [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)
+> says what will get in when they are. Until then, the way to contribute is to join the
+> [Discord](https://discord.gg/wJSJx467G4) and report the bugs you find. Questions and ideas are
+> welcome in the same place.
 
 benilla speaks the original 1.12.1 protocol, so it connects to any server the real client could,
 and reads its game data at runtime from your own 1.12.1 install. Every file format and the network

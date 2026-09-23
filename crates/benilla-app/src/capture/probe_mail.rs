@@ -40,7 +40,7 @@
 //!     WOW_PROBE_MAIL=1 cargo run -q -p benilla
 //! ```
 //! (the slot-keyed probe identity — `pool-N` → `WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>`, method.md "The local vmangos server"; this worktree is `pool-2` →
+//! WOW_CHAR=Probe<N-spelled>`, docs/METHOD.md "The local vmangos server"; this worktree is `pool-2` →
 //! `probe2`/`pprobe2`/`Probetwo`). `WOW_CHAR` doubles as the probe's own mail-send target — read
 //! once at world-enter, never hardcoded. An outer `timeout` + grep on `PROBE_MAIL:` is the whole
 //! harness; the probe self-exits (the [`super::probes::ProbeExitPlugin`] pattern) once DONE.

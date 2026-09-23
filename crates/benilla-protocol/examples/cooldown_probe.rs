@@ -9,9 +9,9 @@
 //! second `SMSG_SPELL_GO`) timestamps the server's cooldown end relative to the first GO.
 //!
 //! Run: `cargo run -p benilla-protocol --example cooldown_probe -- probeN pprobeN [host]` — the
-//! slot-keyed probe account (method.md "The local vmangos server"; NEVER `one`, the director's
+//! slot-keyed probe account (docs/METHOD.md "The local vmangos server"; NEVER `one`, the director's
 //! account — a probe login there kicks their live session). Two caveats: this is a COMBAT probe,
-//! so it runs director-supervised (method.md: no unattended combat probes), and `.learn` is
+//! so it runs director-supervised (docs/METHOD.md: no unattended combat probes), and `.learn` is
 //! SEC_DEVELOPER (5); probe accounts are gmlevel 6 (SEC_ADMINISTRATOR), so it lands. The vmangos
 //! console for the run and restore it after.
 

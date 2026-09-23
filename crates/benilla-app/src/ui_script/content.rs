@@ -8,7 +8,7 @@
 //! machine's source tree. On a player's machine every one of those files resolves to nothing and
 //! the client boots with no interface at all: not a crash, just an empty screen and one log line
 //! per manifest entry that nobody sees.
-//! `assets/ui` is our own content (MIT/Apache, not Blizzard's — the contract's hard rule is
+//! `assets/ui` is our own content (MIT/Apache, not Blizzard's — `docs/METHOD.md`'s hard rule is
 //! untouched), so it can simply be part of the program.
 //!
 //! ## Resolution order — the same in every build

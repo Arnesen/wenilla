@@ -90,7 +90,7 @@ impl Probe for Spells {
         // the first streamed creature — the mask-2 + PACKED-guid target block. Ordered AFTER the
         // dest phase deliberately: `.learn` executes deferred and resolves the SELECTION, so a
         // creature selected here before the command ran turned the learn into "Player not
-        // found!" (observed live, 2026-07-30 — the `.cheat god` re-target trap, method.md).
+        // found!" (observed live, 2026-07-30 — the `.cheat god` re-target trap, docs/METHOD.md).
         if self.targeted_cast_sent.is_none() && cx.world.dest_verdict.is_some() {
             if let Some(spell) = self.cast_sent {
                 if let Some((&guid, _)) = cx

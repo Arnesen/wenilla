@@ -23,7 +23,7 @@
 //! it tops an account up to the full nine. Creating characters needs no GM level; the state flags do,
 //! and that is where this silently half-applies if the account is short: **`.character premade
 //! gear|spec` needs gmlevel 4 and `--level`'s two commands need 5**, and that level lives in
-//! `realmd.account_access`, *not* `account.gmlevel` (see method.md, "The local vmangos server").
+//! `realmd.account_access`, *not* `account.gmlevel` (see docs/METHOD.md, "The local vmangos server").
 //! Every server reply is echoed as `server says — …`, so a refusal is visible rather than silent.
 //!
 //! **`--wipe` deletes characters irreversibly, hand-made ones included.** It is deliberately not the

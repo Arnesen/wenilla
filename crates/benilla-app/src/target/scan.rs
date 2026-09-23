@@ -269,7 +269,7 @@ pub(super) fn load_creature_types(mut commands: Commands, world_assets: Option<R
 /// 0567 replaced the cone with screen-space priority. Under our scoring the player is at distance
 /// 0 and screen-centre *unconditionally*, so porting the byte-level rule would make `CTRL-TAB`
 /// self-target on **every** press rather than facing-dependently — faithful to the bytes,
-/// unfaithful to the behaviour, which is the trade `CLAUDE.md` §7 hands to the director rather
+/// unfaithful to the behaviour, which is the trade `docs/METHOD.md` §7 hands to the director rather
 /// than to this file. Recorded here so it is a known divergence and not a gap (decision 1745).
 #[derive(SystemParam)]
 #[allow(clippy::type_complexity)] // one bundled system param — the app's convention for big query sets

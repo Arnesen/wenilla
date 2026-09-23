@@ -108,7 +108,7 @@ const ABILITY_BLOCKERS: &[(u32, &str)] = &[
 ];
 
 /// Worth naming on entry: an unattended probe that logs in already fighting is the exact shape of
-/// the accident the unattended-combat ban exists for (method.md). The bit itself is declared once
+/// the accident the unattended-combat ban exists for (docs/METHOD.md). The bit itself is declared once
 /// ([`crate::player`]).
 use crate::player::UNIT_FLAG_IN_COMBAT;
 
@@ -170,7 +170,7 @@ fn offline_notice(net: Option<Res<crate::net::NetOffline>>) {
     warn!(
         "preflight: NET OFF — no IO thread this run, so the drain gets no packets and NOTHING on \
          the wire path executes (net::apply, the movement stream, every MSG_MOVE_*). Fine for a \
-         visual capture; NOT evidence for a change to any of it. method.md's gate is a clean run \
+         visual capture; NOT evidence for a change to any of it. docs/METHOD.md's gate is a clean run \
          of the AFFECTED path — for wire work that means a live server run."
     );
 }
@@ -478,7 +478,7 @@ fn findings(
     if unit_flags & UNIT_FLAG_IN_COMBAT != 0 {
         out.push(
             "IN COMBAT on arrival — something is already fighting this character. Do not leave it \
-             unattended (method.md's unattended-combat ban): break the fight or move it out."
+             unattended (docs/METHOD.md's unattended-combat ban): break the fight or move it out."
                 .into(),
         );
     }

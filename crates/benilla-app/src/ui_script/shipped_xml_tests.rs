@@ -2357,3 +2357,36 @@ fn the_stock_options_windows_load_and_save_are_reachable_for_addons() {
         "_Save should write the slider's 180 and its half; got yaw={yaw} pitch={pitch}"
     );
 }
+
+/// `assets/ui` does not grow. The interface is the stock 1.12 FrameXML executed off the player's
+/// own patch chain; what is left here is the glue and the shims, named below. A new file means a
+/// window was authored instead of migrated: point `benilla.toc` at
+/// `Interface\FrameXML\<Window>.xml`, delete ours, and build the engine verbs the stock file calls.
+#[test]
+fn assets_ui_does_not_grow() {
+    const SHIPPED: &[&str] = &[
+        "ContainerFrameAdapters.xml",
+        "GameMenuFrame.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "ScriptLogFrame.xml",
+        "ScrollTemplates.xml",
+        "SpellBookAdapters.xml",
+        "benilla.toc",
+    ];
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let mut found: Vec<String> = std::fs::read_dir(&dir)
+        .expect("assets/ui")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    found.sort();
+    let mut shipped: Vec<String> = SHIPPED.iter().map(|s| s.to_string()).collect();
+    shipped.sort();
+    assert_eq!(
+        found, shipped,
+        "assets/ui changed. It does not grow: a window is migrated, not authored (docs/METHOD.md). \
+         A file that retired comes off this list; a new one needs a reason this list can name."
+    );
+}

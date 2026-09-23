@@ -587,7 +587,7 @@ fn install(n: &mut AuraNodes, spell_id: u32, procs: &[AuraNode], now: f32) {
 /// the spell, the nodes it installed, and the target the ramp is now aiming at.
 ///
 /// This is how "stealth shows nothing" is *reproduced and then closed* without eyeballing a capture
-/// (`method.md` §5/§6): with the aura layer dead the trace is silent on `.cast 1784`; with it live
+/// (`docs/METHOD.md` §5/§6): with the aura layer dead the trace is silent on `.cast 1784`; with it live
 /// the same press prints `aur arm spell=1784 alpha=[0.3] -> base 1.00 target 0.30`, and the drop
 /// prints the ramp back to 1.00. It rides the shared move-trace sink so an aura edge interleaves on
 /// one timeline with the movement/anim lines — a "why did it not fade when I moved" question needs

@@ -97,7 +97,7 @@
 //!     WOW_PROBE_CHARTER=1 cargo run -q -p benilla
 //! ```
 //! (the slot-keyed probe identity — this worktree is `pool-0` → `probe0`/`pprobe0`/`Probezero`;
-//! method.md "The local vmangos server". **Never the default `one` account** — a login on it kicks
+//! docs/METHOD.md "The local vmangos server". **Never the default `one` account** — a login on it kicks
 //! the director's live session.) `WOW_NOSOUND=1` because an unattended probe must not play zone
 //! music into the director's room; `caffeinate -dis` is **not** needed for a run this short — the
 //! whole sequence is a handful of round trips and finishes in well under a minute.
@@ -162,7 +162,7 @@ const REQUIRED_SIGNATURES: i64 = 9;
 const FRESH_SIGNATURES: i64 = 0;
 /// Copper handed to the probe body up front so the buy can never fail for funds. `.modify money`
 /// is `SEC_BASIC_ADMIN` (4) in vmangos's `Chat.cpp` command table and every `probeN` account is
-/// gmlevel **6** (method.md, decision 0651), so it lands; with no selection it targets the sender
+/// gmlevel **6** (docs/METHOD.md, decision 0651), so it lands; with no selection it targets the sender
 /// (`ChatHandler::GetSelectedPlayer`, `Chat.cpp:2601-2612`), which is why it is sent before the
 /// probe touches an NPC.
 const FUND_COPPER: u32 = 100_000;

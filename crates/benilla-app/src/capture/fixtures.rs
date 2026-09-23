@@ -75,7 +75,7 @@ pub(super) fn seed_ui_fixture(
     // **A UI capture with no script VM is not a capture — refuse it.** Every seed below opens its
     // window by calling into the in-game UI, so with no VM they all fail the same way: a nil
     // global, one `warn!` in a log full of pipeline chatter, a valid-looking PNG of a UI-less
-    // world, and exit 0. That is the false-negative shape `method.md` §6 exists to prevent, and it
+    // world, and exit 0. That is the false-negative shape `docs/METHOD.md` §6 exists to prevent, and it
     // burned a session. `scenario_wants_ui` removed the cause (a `ui:` scenario no longer needs
     // `WOW_CAPTURE_UI=1`); this is the tripwire for whatever else could leave the VM absent, and
     // it exits non-zero the way the window-size refusal does (`video::warn_if_window_mismatch`).

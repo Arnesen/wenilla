@@ -559,7 +559,7 @@ impl Plugin for SoundPlugin {
         // (decision 1026 — `SoundConfig::muted` starts false), so the silence has to be opt-in by
         // the *automated* callers, both of which are unattended by construction:
         //   $WOW_NOSOUND — an agent opening the client to check something (the dispatch recipe in
-        //                  `method.md` sets it; nobody is listening, and a background window that
+        //                  `docs/METHOD.md` sets it; nobody is listening, and a background window that
         //                  starts playing zone music is pure noise in a shared room).
         //   $WOW_CAPTURE — the visual harness. A screenshot has no audio track; opening a device
         //                  per capture is cost and racket for nothing.

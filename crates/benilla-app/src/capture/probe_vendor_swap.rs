@@ -36,7 +36,7 @@
 //! WOW_USER=probe1 WOW_PASS=pprobe1 WOW_CHAR=Probeone WOW_UNATTENDED=1 WOW_NOSOUND=1 \
 //!     WOW_PROBE_VENDOR_SWAP=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — method.md "The local vmangos server").
+//! (the slot-keyed probe identity — docs/METHOD.md "The local vmangos server").
 
 use bevy::prelude::*;
 

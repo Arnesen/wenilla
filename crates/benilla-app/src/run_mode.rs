@@ -108,7 +108,7 @@ pub(crate) fn env_login() -> bool {
 /// `WOW_CAPTURE` and `WOW_RIG` are folded in because they *cannot* be a person: a capture authors
 /// the camera and a rig drives the body, so a run that sets either has already said what it is and
 /// cannot forget to. Everything else declares — `scripts/leg.sh`, `smoke.sh`, `cine.sh`,
-/// `summon-live.sh` and the ad-hoc probe recipe in `method.md` all pass `WOW_UNATTENDED=1`.
+/// `summon-live.sh` and the ad-hoc probe recipe in `docs/METHOD.md` all pass `WOW_UNATTENDED=1`.
 ///
 /// Read by whatever may act *instead of* a person: the lost-session verdict (decision 1262 — the
 /// session-loss readers never call this directly, [`crate::net::DisconnectedMessage::new`] asks
@@ -252,7 +252,7 @@ pub(crate) fn dev_source_dir() -> Option<&'static std::path::Path> {
 /// the fast path is about to authenticate as an account that belongs to somebody else — the
 /// director's `one` (a login KICKS their live session mid-play) or another slot's `probeN` (the
 /// kicked client's 0065 teardown despawns every net entity, so a parallel session's probe reads a
-/// unit-less world and prints garbage; it happened, method.md records it).
+/// unit-less world and prints garbage; it happened, docs/METHOD.md records it).
 ///
 /// Slot identity comes from the compiled-in manifest path, because that is what the pool guarantees
 /// is unique per session: every slot has its own checkout and its own `target/`. Outside a pool slot
@@ -308,7 +308,7 @@ fn guard_for(slot: Option<u32>, user: &str) -> Result<(), String> {
     Err(format!(
         "the env fast path is about to log in as `{user}` from pool-{slot}, and that is {whose}. \
          This slot's identity is WOW_USER=probe{slot} WOW_PASS=pprobe{slot} \
-         WOW_CHAR=Probe{spelled} (method.md \"The local vmangos server\").",
+         WOW_CHAR=Probe{spelled} (docs/METHOD.md \"The local vmangos server\").",
         spelled = spell_digit(slot)
     ))
 }

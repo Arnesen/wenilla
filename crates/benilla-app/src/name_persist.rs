@@ -34,7 +34,7 @@
 //! ## Where it lives, and the one place we deviate
 //!
 //! The reference writes `WDB/` **inside the install**, which is precisely where benilla may not
-//! write (the contract's read-only rule). Ours goes to `benilla-config/cache/<realm>.tsv` through
+//! write (`docs/METHOD.md`'s read-only rule). Ours goes to `benilla-config/cache/<realm>.tsv` through
 //! [`crate::local_state`], like every other thing we persist — and it is **realm-scoped**, which
 //! the reference's is not. That is a fix rather than a preference: every key is realm-local (a
 //! player guid, a creature entry, a pet number), so one shared file would serve another realm's

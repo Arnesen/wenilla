@@ -183,7 +183,7 @@ pub(crate) fn advance_fx_anim(
 /// the `kit spawn` / `kit expire` lines the instance lane already writes.
 ///
 /// This is how "the Ice Barrier shield is frozen" is *closed by measurement* rather than by eye
-/// (method.md §4/§5): with the lifecycle dead the trace shows `kit spawn` and nothing after; with it
+/// (docs/METHOD.md §4/§5): with the lifecycle dead the trace shows `kit spawn` and nothing after; with it
 /// live the same cast prints `fx leg hold e=… anim=158` one birth-span (0.70 s) later, and the aura
 /// drop prints `fx leg decay` followed by the `kit expire` a further 1.10 s on. A duration question
 /// is answered from timestamps, never from watching.

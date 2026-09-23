@@ -8,7 +8,7 @@
 //! DBC prediction `Σ path-segment length ÷ 32 yd/s` (`PLAYER_FLIGHT_SPEED`) — timing measured,
 //! never eyeballed (decision 0404). An outer `timeout`d run + grep is the whole harness.
 //! Non-combat. Pair with the SLOT-KEYED probe identity (`WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>`; method.md "The local vmangos server"). Uses `.taxicheat on` so
+//! WOW_CHAR=Probe<N-spelled>`; docs/METHOD.md "The local vmangos server"). Uses `.taxicheat on` so
 //! the fresh probe character can fly to an unvisited node (and so the SHOWTAXINODES mask
 //! exercises the full-network branch); the 110-copper fare is DB-seeded (see the Wait phase —
 //! `.modify money` outranks the probe account).

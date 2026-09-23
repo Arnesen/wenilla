@@ -1590,7 +1590,7 @@ pub(crate) fn fire_transitions(
     // `RefreshUnit`, which is event-driven, so a mob that becomes someone else's tap would stay
     // full-colour until something unrelated happened to refresh it. A passing unit test on the
     // predicates would have said nothing about that — the mechanism existing is not the mechanism
-    // applying (`method.md` step 5).
+    // applying (`docs/METHOD.md` step 5).
     //
     // Bit `0x8` deliberately has NO arm here: the reference's watcher has none for it either
     // (proven by enumerating all 122 instructions and 12 branches of `0x600440`). The pair is read
@@ -2447,7 +2447,7 @@ mod tests {
     /// `UnitIsTapped` answering correctly is only half of it. pfUI's grey-bar branch lives inside
     /// `RefreshUnit`, which is event-driven — so a mob that becomes someone else's tap would stay
     /// full-colour until something unrelated happened to repaint the frame. The predicate would be
-    /// right and the screen would be wrong, which no test of the predicate can see (`method.md`
+    /// right and the screen would be wrong, which no test of the predicate can see (`docs/METHOD.md`
     /// step 5: the mechanism existing is not the mechanism applying).
     ///
     /// The reference dispatches event id **29** — `UNIT_FACTION`, not a tapped-specific event —

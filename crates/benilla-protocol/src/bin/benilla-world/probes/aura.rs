@@ -126,7 +126,7 @@ impl Probe for Aura {
                  index is wrong, or the GM `.aura` command was refused — it needs gmlevel >= 4 \
                  (VERIFIED vmangos `Chat/Chat.cpp:1229`: SEC_BASIC_ADMIN, which is 4 in \
                  `shared/Common.h:142`), and the slot-keyed probe accounts are gmlevel 6, so this \
-                 probe cannot run as `probeN` without a temporary grant (method.md, decision 0450's \
+                 probe cannot run as `probeN` without a temporary grant (docs/METHOD.md, decision 0450's \
                  precedent for --worldstate).",
             )?;
         let debuff = auras

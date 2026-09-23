@@ -2,7 +2,7 @@
 //! HORDE character's say must echo back (the server accepted the tongue), a dot-command must
 //! answer (it survived the pre-parse `KnowsLanguage` gate), and the split-writer path must carry
 //! the tongue too. Run: `cargo run -p benilla-protocol --example horde_chat_probe -- probeN
-//! pprobeN [host]` — the slot-keyed probe account (method.md "The local vmangos server"; it
+//! pprobeN [host]` — the slot-keyed probe account (docs/METHOD.md "The local vmangos server"; it
 //! once hardcoded the retired shared `three` identity, decision 0530). Creates the orc
 //! `Orc<N-spelled>` on this account on first run (names are realm-unique, so the orc keys to
 //! the slot too). Exists because a hardcoded-Common send silently ate every Horde character's
@@ -32,8 +32,9 @@ fn main() -> Result<()> {
         .next()
         .context("usage: horde_chat_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
     let host = args.next().unwrap_or_else(|| "localhost".into());
-    let orc = orc_name(&user)
-        .context("account must be a slot-keyed probeN (method.md \"The local vmangos server\")")?;
+    let orc = orc_name(&user).context(
+        "account must be a slot-keyed probeN (docs/METHOD.md \"The local vmangos server\")",
+    )?;
 
     let logon = benilla_protocol::logon(&host, &user, &pass)?;
     let addr = logon

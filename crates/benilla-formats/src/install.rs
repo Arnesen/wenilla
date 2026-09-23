@@ -124,7 +124,7 @@ fn candidates_from(override_dir: Option<PathBuf>, exe_dir: Option<PathBuf>) -> V
 /// ```
 ///
 /// These tests read the **real** 1.12 install, which is gitignored and not on every machine
-/// (the contract: never commit Blizzard assets), so "no install" has always meant *pass without
+/// (`docs/METHOD.md`: never commit Blizzard assets), so "no install" has always meant *pass without
 /// asserting* rather than *fail*. That is deliberately unchanged; what changes is that the message
 /// now names every path that was tried, so a machine where the tests silently do nothing says why.
 ///

@@ -11,7 +11,7 @@
 //! on screen*, not merely that a packet arrived.
 //!
 //! Non-combat. Pair with the SLOT-KEYED probe identity (`WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>`; `method.md`, "The local vmangos server"), and `WOW_NOSOUND=1` when
+//! WOW_CHAR=Probe<N-spelled>`; `docs/METHOD.md`, "The local vmangos server"), and `WOW_NOSOUND=1` when
 //! it runs unattended. One `timeout`'d run plus a grep for `PROBE guardpoi:` is the whole harness.
 
 use bevy::prelude::*;
