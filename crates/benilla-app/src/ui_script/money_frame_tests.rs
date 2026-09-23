@@ -74,6 +74,7 @@ fn shown(s: &UiScript, frame: &str) -> (bool, bool, bool) {
 /// `MoneyFrame_SetType("PLAYER")`.
 #[test]
 fn a_money_frame_loads_as_the_player_purse_and_splits_the_denominations() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness(12_345); // 1g 23s 45c
     assert_eq!(
         s.eval::<String>("return TestPurse.moneyType").unwrap(),
@@ -103,6 +104,7 @@ fn a_money_frame_loads_as_the_player_purse_and_splits_the_denominations() {
 /// take the mouse (`canPickup`), and how they collapse.
 #[test]
 fn set_type_rewires_the_source_the_mouse_and_the_collapse() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness(12_345);
 
     // PLAYER: canPickup, so all three coins are mouse-enabled.
@@ -151,6 +153,7 @@ fn set_type_rewires_the_source_the_mouse_and_the_collapse() {
 /// STATIC does not, so the same amount is gold alone.
 #[test]
 fn showsmallercoins_is_what_keeps_the_zero_coins_visible() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness(50_000); // exactly 5g
 
     assert_eq!(coins(&s, "TestPurse"), ("5".into(), "0".into(), "0".into()));
@@ -182,6 +185,7 @@ fn showsmallercoins_is_what_keeps_the_zero_coins_visible() {
 /// frame's own width is recomputed from the coins that survived the collapse.
 #[test]
 fn update_paints_a_static_frame_by_name_and_resizes_it() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness(0);
     s.run("this = TestPurse MoneyFrame_SetType(\"STATIC\") this = nil")
         .unwrap();
@@ -222,6 +226,7 @@ fn update_paints_a_static_frame_by_name_and_resizes_it() {
 /// constants (`MONEY_ICON_WIDTH` / `MONEY_BUTTON_SPACING`), selected purely by `this.small`.
 #[test]
 fn the_large_template_measures_with_the_nineteen_pixel_icon() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness(20_304);
     // One 8px digit + the 19px icon — the same digit sum as the small template, over the other
     // icon constant. That the two differ ONLY by the icon is what this test is for.
@@ -249,6 +254,7 @@ fn the_large_template_measures_with_the_nineteen_pixel_icon() {
 /// it had.
 #[test]
 fn an_unknown_money_type_leaves_the_frame_on_the_one_it_had() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness(12_345);
     s.run("this = TestPurse MoneyFrame_SetType(\"NOT_A_TYPE\") this = nil")
         .unwrap();
@@ -269,6 +275,7 @@ fn an_unknown_money_type_leaves_the_frame_on_the_one_it_had() {
 /// and not the icons" is actually observable.
 #[test]
 fn set_money_frame_color_recolours_the_digits_and_not_the_icons() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(12_345); // 1g 23s 45c — three distinguishable digit strings
     s.run("SetMoneyFrameColor(\"TestPurse\", 1.0, 0.1, 0.1)")
         .unwrap();
@@ -327,6 +334,7 @@ fn set_money_frame_color_recolours_the_digits_and_not_the_icons() {
 /// their engine getters hold (`GetSendMailMoney`/`GetSendMailCOD`, built by 1962).
 #[test]
 fn the_money_type_table_carries_all_seven_reference_types() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness(12_345);
     for t in [
         "PLAYER",

@@ -81,6 +81,7 @@ pub(crate) fn push(s: &mut UiScript, rows: Vec<WorldStateUiView>) {
 /// The Eastern Plaguelands readout: two labelled tower counters, each with its faction icon.
 #[test]
 fn the_tower_counters_draw_with_their_icons() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
     assert!(
@@ -122,6 +123,7 @@ fn the_tower_counters_draw_with_their_icons() {
 /// are hidden rather than left painting a stale count.
 #[test]
 fn leaving_the_zone_clears_the_readout() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
     push(
@@ -154,6 +156,7 @@ fn leaving_the_zone_clears_the_readout() {
 /// never have moved; both halves of that are pinned here.
 #[test]
 fn the_dynamic_icon_is_a_second_slot_lit_only_by_the_taken_state() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
 
@@ -245,6 +248,7 @@ fn the_dynamic_icon_is_a_second_slot_lit_only_by_the_taken_state() {
 /// icon is optional, and the row must not collapse when the DBC column is empty.
 #[test]
 fn a_row_without_an_icon_still_shows_its_text() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
     push(
@@ -263,6 +267,7 @@ fn a_row_without_an_icon_still_shows_its_text() {
 /// Our transcription had shown the text; the reference's file draws the bar (1972).
 #[test]
 fn a_capture_point_row_is_a_bar_not_a_line_of_text() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
     push(
@@ -289,6 +294,7 @@ fn a_capture_point_row_is_a_bar_not_a_line_of_text() {
 /// value — the number `0`, not nil and not ten nils — and a non-number argument raises.
 #[test]
 fn the_bindings_answer_the_reference_shape() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.set_world_state_ui(vec![WorldStateUiView {
         ui_state: 7,

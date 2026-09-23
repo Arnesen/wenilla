@@ -28,6 +28,7 @@ fn setup() -> UiScript {
 /// the Repop intent, and PLAYER_ALIVE (the release landing) hides it.
 #[test]
 fn death_popup_counts_down_and_release_queues_repop() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_death(DeathUiState {
         release_remaining: Some(300.0),
@@ -80,6 +81,7 @@ fn death_popup_counts_down_and_release_queues_repop() {
 /// "Reincarnate" default, and clicking it queues `UseSoulstone` — while button1 still releases.
 #[test]
 fn death_popup_offers_the_self_resurrect_and_spends_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_death(DeathUiState {
         release_remaining: Some(300.0),
@@ -119,6 +121,7 @@ fn death_popup_offers_the_self_resurrect_and_spends_it() {
 /// `DisplayButton2` nor `OnShow` per tick).
 #[test]
 fn death_popup_button2_is_decided_at_show_time() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_death(DeathUiState {
         release_remaining: Some(300.0),
@@ -159,6 +162,7 @@ fn death_popup_button2_is_decided_at_show_time() {
 /// DEATH_RELEASE_NOTIMER text and never counts down.
 #[test]
 fn death_popup_no_timer_shows_the_static_text() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_death(DeathUiState {
         release_remaining: None,
@@ -180,6 +184,7 @@ fn death_popup_no_timer_shows_the_static_text() {
 /// name in, gates Accept behind the recovery delay, and Accept/Decline queue their intents.
 #[test]
 fn resurrect_request_picks_variant_and_answers() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     // No sickness + timer, delay already elapsed: RESURRECT_NO_SICKNESS with an armed Accept.
     s.set_death(DeathUiState {
@@ -251,6 +256,7 @@ fn resurrect_request_picks_variant_and_answers() {
 /// and keeps the dialog, the second queues AcceptXPLoss; walking out of range auto-hides.
 #[test]
 fn xp_loss_two_step_confirm_then_range_hide() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_death(DeathUiState {
         sickness_duration: Some("8 Minutes".into()),
@@ -320,6 +326,7 @@ fn xp_loss_two_step_confirm_then_range_hide() {
 /// instance.
 #[test]
 fn xp_loss_cancel_then_reconfirm_reshows_with_the_alert_dress() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_death(DeathUiState {
         sickness_duration: Some("8 Minutes".into()),
@@ -373,6 +380,7 @@ fn xp_loss_cancel_then_reconfirm_reshows_with_the_alert_dress() {
 /// false for it; decision 0308 §1).
 #[test]
 fn the_ghost_predicates() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_unit(
         "player",
@@ -405,6 +413,7 @@ fn the_ghost_predicates() {
 /// variant is the buttonless notice.
 #[test]
 fn corpse_range_events_drive_recover_corpse() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_death(DeathUiState {
         recovery_delay: 2.0,
@@ -465,6 +474,7 @@ fn corpse_range_events_drive_recover_corpse() {
 /// WorldMapFrame.lua:443-452 law the map's update block branches on.
 #[test]
 fn corpse_map_position_binding() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     let (x, y) = s
         .eval::<(f64, f64)>("return GetCorpseMapPosition()")

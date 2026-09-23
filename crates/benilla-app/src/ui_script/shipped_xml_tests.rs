@@ -49,6 +49,7 @@ fn every_shipped_ui_xml_parses() {
 /// window's entry is covered the moment it is added rather than when someone remembers to test it.
 #[test]
 fn the_whole_shipped_manifest_loads_without_errors() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -88,6 +89,7 @@ fn the_whole_shipped_manifest_loads_without_errors() {
 /// every single launch.
 #[test]
 fn loading_the_shipped_ui_queues_no_sounds() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -154,6 +156,7 @@ fn pet_bar_vm() -> benilla_ui::script::UiScript {
 /// catch a third template added with a borrowed number.
 #[test]
 fn the_autocast_brackets_reach_each_buttons_corners() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::framexml::{Element, TopLevel};
 
     /// The fraction of `UI-AutoCastableOverlay.blp` the bracket art actually covers, measured off
@@ -252,6 +255,7 @@ fn the_autocast_brackets_reach_each_buttons_corners() {
 /// drifting, or being "corrected" back to 1.22 by someone who only read the ref.
 #[test]
 fn the_shine_panes_ask_for_the_rims_we_meant() {
+    benilla_formats::wow_data_or_skip!();
     let mut found: Vec<(String, f32, f32)> = Vec::new();
     let mut s = super::spellbook_tests::spellbook_ui(1024.0, 768.0);
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
@@ -779,6 +783,7 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
 /// churn on every action-bar edit, and a noisy gate is a gate nobody reads.
 #[test]
 fn every_texture_frame_outranks_its_status_bars() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::order::unpack;
 
     let mut s = benilla_ui::script::UiScript::new().unwrap();
@@ -894,6 +899,7 @@ fn every_texture_frame_outranks_its_status_bars() {
 /// screen; this is the structural half of that fix.)
 #[test]
 fn the_boot_phase_materializes_no_frames() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The font registry is manifest entry 0 and comes off the chain since 1888, so this reads
@@ -922,6 +928,7 @@ fn the_boot_phase_materializes_no_frames() {
 /// rebakeable.
 #[test]
 fn the_font_registry_alone_covers_the_whole_bake_plan() {
+    benilla_formats::wow_data_or_skip!();
     let plan = |whole: bool| -> std::collections::BTreeSet<(String, String, String)> {
         let mut s = benilla_ui::script::UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
@@ -978,6 +985,7 @@ fn the_font_registry_alone_covers_the_whole_bake_plan() {
 /// handler that errors on the one event that runs before any window has been shown.
 #[test]
 fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1018,6 +1026,7 @@ fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
 /// `Tablet-2.0.lua:289` header-size probe, 268 read sites).
 #[test]
 fn every_shipped_font_object_is_published_as_a_lua_global() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1107,6 +1116,7 @@ fn every_shipped_font_object_is_published_as_a_lua_global() {
 /// geometry and the script the reference confers.
 #[test]
 fn the_inheritable_reference_templates_confer_their_shape() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1171,6 +1181,7 @@ fn the_inheritable_reference_templates_confer_their_shape() {
 /// it from its keyring fork.
 #[test]
 fn the_inspect_cursor_pair_takes_both_arms() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1247,6 +1258,7 @@ fn the_inspect_cursor_pair_takes_both_arms() {
 ///   stops exactly as the reference's does.)
 #[test]
 fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1352,6 +1364,7 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
 /// because of it.
 #[test]
 fn every_declared_parent_really_attaches() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the

@@ -84,6 +84,7 @@ fn show_bars(s: &UiScript, bars: &[u32]) {
 /// about what a bar looks like once the player has asked for it.
 #[test]
 fn shipped_multibars_drive_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -267,6 +268,7 @@ fn shipped_multibars_drive_end_to_end() {
 /// the whole frame again — the wow-re shapeshift-bar-api mechanism driven end to end.
 #[test]
 fn shipped_stance_bar_drives_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ShapeshiftFormView;
 
     let mut s = UiScript::new().unwrap();
@@ -461,6 +463,7 @@ fn shipped_stance_bar_drives_end_to_end() {
 /// past it, so nothing else showed the bug.
 #[test]
 fn multibar_hover_renders_the_buttons_own_action() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
@@ -581,6 +584,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
 /// Since 1500 "hidden" is where they START rather than where they stay — see the toggle tests.
 #[test]
 fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
+    benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_action_bar(&s);
     load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
@@ -642,6 +646,7 @@ fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
 /// hanging off a bar that is not on screen.
 #[test]
 fn every_extra_bar_stays_down_until_its_own_toggle_is_set() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -729,6 +734,7 @@ fn every_extra_bar_stays_down_until_its_own_toggle_is_set() {
 /// frames drawing straight through a bar the player just asked for (decision 1499's screenshot).
 #[test]
 fn raising_a_bottom_bar_moves_the_managed_bottom_stack() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -793,6 +799,7 @@ fn raising_a_bottom_bar_moves_the_managed_bottom_stack() {
 /// which was only ever right because visibility was static.
 #[test]
 fn viewable_action_bar_pages_follow_the_bar_toggles() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -859,6 +866,7 @@ fn viewable_action_bar_pages_follow_the_bar_toggles() {
 /// can ever nest" stopped being true the moment this switch existed.
 #[test]
 fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -964,6 +972,7 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
 /// payload, which is what the last two assertions here pin.
 #[test]
 fn a_held_payload_ghosts_the_empty_wells_it_opens() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -1107,6 +1116,7 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
 /// list and each step below checks the packet it just caused.
 #[test]
 fn a_bar_toggle_sends_the_byte_its_globals_pack_to() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -1194,6 +1204,7 @@ fn a_bar_toggle_sends_the_byte_its_globals_pack_to() {
 /// this file drives the real binding.
 #[test]
 fn the_shipped_setter_passes_exactly_four_arguments() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -1245,6 +1256,7 @@ fn the_shipped_setter_passes_exactly_four_arguments() {
 /// here rather than assumed.
 #[test]
 fn the_stance_bar_sits_where_the_pass_puts_it() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ShapeshiftFormView;
 
     let mut s = UiScript::new().unwrap();
@@ -1317,6 +1329,7 @@ fn the_stance_bar_sits_where_the_pass_puts_it() {
 /// set once at load.
 #[test]
 fn the_stance_shelf_follows_the_bottom_left_bar() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ShapeshiftFormView;
 
     let mut s = UiScript::new().unwrap();
@@ -1438,6 +1451,7 @@ fn the_stance_shelf_follows_the_bottom_left_bar() {
 /// exercised 2 and 3 forms and only ever read `IsShown()`, which is exactly why it shipped.
 #[test]
 fn the_stance_shelf_is_as_long_as_the_form_count() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ShapeshiftFormView;
 
     let mut s = UiScript::new().unwrap();
@@ -1554,6 +1568,7 @@ fn the_stance_shelf_is_as_long_as_the_form_count() {
 /// slot has an action.
 #[test]
 fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The real command set, so MULTIACTIONBAR1BUTTONn is bindable at all (it ships unbound —
@@ -1663,6 +1678,7 @@ fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
 /// the end caps (atlas crops of `ShapeshiftBarEnds`).
 #[test]
 fn the_middle_strip_tiles_along_its_length_only() {
+    benilla_formats::wow_data_or_skip!();
     use super::extract::tiling_axes;
     use crate::ui_pass::UvRect;
     use benilla_ui::script::{ShapeshiftFormView, TexCoords};
@@ -1745,6 +1761,7 @@ fn the_middle_strip_tiles_along_its_length_only() {
 /// one the switch really carries and reading the checked ring.
 #[test]
 fn a_forms_state_change_leaves_the_shelf_down_over_the_raised_bar() {
+    benilla_formats::wow_data_or_skip!();
     use crate::ui_shapeshift::{push_forms, FormsEdge, StanceMemory};
     use benilla_ui::script::ShapeshiftFormView;
 

@@ -127,6 +127,7 @@ pub(super) fn spellbook_ui(w: f32, h: f32) -> UiScript {
 /// AutoCast Model child) + 8 skill-line tabs + the 3 Spell/Pet toggle tabs + the tab flash frame.
 #[test]
 fn shipped_spellbook_loads_clean() {
+    benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
@@ -166,6 +167,7 @@ fn shipped_spellbook_loads_clean() {
 /// bar-to-bar drag uses — packing kind 0x00 (SPELL) with the spell id.
 #[test]
 fn shipped_spellbook_drives_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = spellbook_ui(1024.0, 768.0);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
 
@@ -256,6 +258,7 @@ fn shipped_spellbook_drives_end_to_end() {
 /// parked until SMSG_COOLDOWN_EVENT) keeps the widget hidden and dims the icon to 40% (l.361-365).
 #[test]
 fn shipped_spellbook_shows_the_cooldown_pie() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::QuadContent;
 
     let mut s = spellbook_ui(1024.0, 768.0);
@@ -331,6 +334,7 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
 /// finding, which stands). That is the half this still pins.
 #[test]
 fn shipped_spellbook_empty_slot_draws_its_background_and_socket_ring() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = spellbook_ui(640.0, 700.0);
     // A one-spell book: slot 5 takes the reference's `id > offset + numSpells` disable path. (A
     // book with NO spells is a state no character is ever in — the reference's own
@@ -371,6 +375,7 @@ fn shipped_spellbook_empty_slot_draws_its_background_and_socket_ring() {
 /// l.132/134/268/296-303/336): 1/"true"/true check; 0/"false"/nil/non-numeric strings uncheck.
 #[test]
 fn set_checked_uses_blizzard_bool_coercion() {
+    benilla_formats::wow_data_or_skip!();
     let s = spellbook_ui(1024.0, 768.0);
     for (arg, want) in [
         ("1", true),
@@ -438,6 +443,7 @@ fn pet_book() -> benilla_ui::script::PetBookState {
 /// the class token's label, and a right-click flips autocast instead of casting.
 #[test]
 fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = spellbook_ui(1024.0, 768.0);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.set_spellbook(book());
@@ -659,6 +665,7 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
 /// wrong, and the install says it is what 1.12.1 does.
 #[test]
 fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The macro window's own strings (the app runs the real `GlobalStrings.lua`; `macro_tests`'

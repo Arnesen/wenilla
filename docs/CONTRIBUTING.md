@@ -23,7 +23,8 @@ fork, and forks are welcome.
 
 ## How a change is judged
 
-1. `scripts/gates.sh` is green: fmt, clippy with warnings denied, the workspace tests, the
+1. `scripts/gates.sh` is green: fmt, clippy with warnings denied, the workspace tests (once
+   with the client data, once without, so a test that reads the install has to declare it), the
    doc-link and render-pass lints, the player build with its own tests, and the engine boot
    checks.
 2. The reference fact is stated: what 1.12.1 does, and where that is known from (the client's

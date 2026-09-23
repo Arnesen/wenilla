@@ -15,6 +15,7 @@ use super::test_ui::load_ui as load_xml;
 /// Same pair as gossip — questgiver and gossip are the same "list" surface to the client.
 #[test]
 fn questgiver_show_hide_plays_open_and_close_kits() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -86,6 +87,7 @@ fn questgiver_show_hide_plays_open_and_close_kits() {
 /// stays open is silent).
 #[test]
 fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -185,6 +187,7 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
 /// have and a split the ref's own function cannot be written against.
 #[test]
 fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -288,6 +291,7 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
 /// the highlight and arms `GetQuestReward`'s 1-based→0-based conversion.
 #[test]
 fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -368,6 +372,7 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
 /// v1 layout never carried) — a plain client-side close, no `DeclineQuest()` call (ref l.748-752).
 #[test]
 fn greeting_goodbye_button_closes_the_window() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -426,6 +431,7 @@ fn greeting_goodbye_button_closes_the_window() {
 /// The write-on arm is `write_on_still_fades_when_instant_text_is_off`'s subject.
 #[test]
 fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -555,6 +561,7 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
 /// objectives/rewards block FADES in over QUESTINFO_FADE_IN rather than snapping.
 #[test]
 fn write_on_still_fades_when_instant_text_is_off() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -633,6 +640,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
 /// update it too (the 0112-era capture showed a permanently blank bar).
 #[test]
 fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -713,6 +721,7 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
 /// 6 px/char × 14 px/line measure fake as the gossip row test.
 #[test]
 fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // Stock sizes each row at show time — `SetHeight(GetTextHeight() + 2)` right after SetText
@@ -818,6 +827,7 @@ fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
 /// it closes the giver window, exactly as it does in play.
 #[test]
 fn reward_rows_preview_and_post_without_selecting_the_choice() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");

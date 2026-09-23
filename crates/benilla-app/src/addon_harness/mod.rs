@@ -4406,6 +4406,7 @@ mod dependency_tests {
     /// was an `inherits=` in their own XML, none of which appeared in the `CreateFrame` ranking.
     #[test]
     fn the_inherits_census_counts_templates_and_not_fonts() {
+        benilla_formats::wow_data_or_skip!();
         let tmp =
             std::env::temp_dir().join(format!("benilla-harness-inherits-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -4573,6 +4574,7 @@ mod dependency_tests {
     /// which is exactly why the old table could not see any of it.
     #[test]
     fn the_per_kind_census_finds_a_verb_wired_to_the_wrong_kind() {
+        benilla_formats::wow_data_or_skip!();
         let tmp =
             std::env::temp_dir().join(format!("benilla-harness-perkind-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -4970,6 +4972,7 @@ mod dependency_tests {
     /// rather than a guess.
     #[test]
     fn a_published_name_carries_its_kind() {
+        benilla_formats::wow_data_or_skip!();
         let script = seated_vm();
         assert_eq!(script.widget_kind("UIErrorsFrame"), Some("MessageFrame"));
         assert_eq!(script.widget_kind("UIParent"), Some("Frame"));
@@ -5094,6 +5097,7 @@ mod dependency_tests {
     /// (see `drive_ui_probe`'s own comment), and a probe that cannot fail is not a probe.
     #[test]
     fn the_ui_probe_hovers_and_records_what_a_tooltip_hook_raises() {
+        benilla_formats::wow_data_or_skip!();
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
         seat_a_session(&mut script);

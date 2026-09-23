@@ -596,6 +596,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
 /// leaving resets it.
 #[test]
 fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::{MerchantState, ScriptValue, UiCursorMode};
 
     let mut s = UiScript::new().unwrap();
@@ -734,6 +735,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
 /// `this.readable → ShowInspectCursor()`); a plain item leaves the base cursor; leaving resets.
 #[test]
 fn readable_letter_hover_shows_the_inspect_magnifier() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::UiCursorMode;
 
     let mut s = UiScript::new().unwrap();

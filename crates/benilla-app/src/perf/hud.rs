@@ -352,6 +352,7 @@ mod tests {
     /// it drives stays the shipped one.
     #[test]
     fn the_readout_tells_the_dev_pill_how_much_of_the_top_it_uses() {
+        benilla_formats::wow_data_or_skip!();
         // NOT 768. The layout answers in WoW UI units — a screen that is always 768 units tall
         // whatever the window is (decision 0582) — and the pill draws in window px, so a probe that
         // subtracts one from the other is right only when the two happen to coincide. Feeding a

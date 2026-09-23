@@ -361,6 +361,7 @@ fn click(s: &mut UiScript, name: &str, button: &str) {
 /// director was on.
 #[test]
 fn bagnon_draws_a_slot_for_every_bag_slot() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = seat(&root, Seat::BeforeAddons);
 
@@ -410,6 +411,7 @@ fn bagnon_draws_a_slot_for_every_bag_slot() {
 /// drawing slots, the headline above has stopped testing the thing it was written for.
 #[test]
 fn without_a_player_at_addon_load_bagnon_draws_an_empty_window() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = seat(&root, Seat::AfterAddons);
     s.run("ToggleBackpack()").expect("ToggleBackpack");
@@ -449,6 +451,7 @@ fn without_a_player_at_addon_load_bagnon_draws_an_empty_window() {
 /// on screen at all — and it is what the identity fix alone would have produced.
 #[test]
 fn the_item_button_helpers_paint_a_slots_icon_and_count() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().expect("VM");
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -735,6 +738,7 @@ fn dragging_a_bagnon_slot_picks_the_item_up() {
 /// ```
 #[test]
 fn the_backpack_button_still_hovers_with_bagnon_holding_its_script() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon(&root);
 
@@ -767,6 +771,7 @@ fn the_backpack_button_still_hovers_with_bagnon_holding_its_script() {
 /// `widget-api-batch-benilla.md` Q8 lists it present, and `GetStringWidth` absent, on Button).
 #[test]
 fn a_button_reports_its_own_label_width() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon(&root);
 
@@ -829,6 +834,7 @@ fn a_button_reports_its_own_label_width() {
 /// we had never declared, so every one of the 36 buttons warned and the child came out bare.
 #[test]
 fn the_reference_cooldown_template_resolves() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let s = open_bagnon(&root);
     let occupied = bagnon_button_for_slot(&s, 0, 1);
@@ -857,6 +863,7 @@ fn the_reference_cooldown_template_resolves() {
 /// does.
 #[test]
 fn the_whole_bagnon_window_survives_being_used() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon(&root);
 
@@ -1047,6 +1054,7 @@ fn text_quad(s: &mut UiScript, owner: &str) -> QuadContent {
 /// asserted as such — a future "fix" that adds one would be a divergence, not an improvement.
 #[test]
 fn a_stack_count_wears_the_font_object_its_font_attr_names() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon_stacked(&root);
 
@@ -1101,6 +1109,7 @@ fn a_stack_count_wears_the_font_object_its_font_attr_names() {
 /// wow-re `texture-color-composition.md` §1-2).
 #[test]
 fn a_texture_gradient_tints_the_art_it_sits_on() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon_stacked(&root);
     s.run("BagnonDBUI_ShowCharacterList(Bagnon)")
@@ -1151,6 +1160,7 @@ fn a_texture_gradient_tints_the_art_it_sits_on() {
 /// The assertion is the FIRST open, which is the half that was broken.
 #[test]
 fn a_money_frame_is_the_right_width_on_the_first_open() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = seat(&root, Seat::BeforeAddons);
 
@@ -1215,6 +1225,7 @@ fn resolved_font(s: &UiScript, lua_expr: &str) -> (String, String) {
 /// zero against nine controls each returning one); it is a later-client idiom.
 #[test]
 fn a_button_state_font_takes_the_font_attribute_not_just_inherits() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon_stacked(&root);
     s.run("BagnonDBUI_ShowCharacterList(Bagnon)")
@@ -1248,6 +1259,7 @@ fn a_button_state_font_takes_the_font_attribute_not_just_inherits() {
 /// reference does not.
 #[test]
 fn a_fontheight_with_no_font_attr_beside_it_is_never_read() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let s = open_bagnon_stacked(&root);
     assert_eq!(
@@ -1288,6 +1300,7 @@ impl benilla_ui::script::TextMeasure for BlockFont {
 /// name plus the addon's own 40px of checkbox and padding.
 #[test]
 fn the_character_dropdown_is_as_wide_as_the_names_in_it() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon(&root);
     s.set_text_measurer(Box::new(BlockFont));
@@ -1342,6 +1355,7 @@ fn the_character_dropdown_is_as_wide_as_the_names_in_it() {
 /// (`ui_items::feed::tests::an_absent_self_player_is_no_source_never_an_empty_bag_burst`).
 #[test]
 fn bagnon_forevers_records_survive_the_logout_boundary() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = seat(&root, Seat::BeforeAddons);
 
@@ -1547,6 +1561,7 @@ fn a_bag_slot_click_toggles_bagnon_not_the_native_window() {
 /// a shim in `ContainerFrameAdapters.xml` carries the why.
 #[test]
 fn the_backpack_button_lit_state_with_bagnon_holding_the_bags() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon(&root);
 

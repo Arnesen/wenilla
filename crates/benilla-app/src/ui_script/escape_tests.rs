@@ -203,6 +203,7 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
 /// to eat, opens the menu (one eater per press, the 0449 law).
 #[test]
 fn escape_closes_the_options_window_before_opening_the_menu() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -526,6 +527,7 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
 /// `Hide`, never `HideUIPanel`, because these frames hold no panel slot.
 #[test]
 fn an_addon_frame_registered_in_uispecialframes_closes_on_escape() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");

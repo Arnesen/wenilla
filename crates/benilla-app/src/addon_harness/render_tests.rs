@@ -65,6 +65,7 @@ impl Drop for Fixtures {
 /// not — and "creates a frame" is not "paints".
 #[test]
 fn the_render_column_can_fail() {
+    benilla_formats::wow_data_or_skip!();
     let fx = Fixtures::new("cannotfail");
     // Paints: a texture on a window of its own.
     fx.addon(
@@ -171,6 +172,7 @@ fn the_render_column_can_fail() {
 /// If this test ever disagrees with the director's eyes, **the test is wrong**.
 #[test]
 fn the_directors_two_verified_addons_come_out_on_opposite_sides() {
+    benilla_formats::wow_data_or_skip!();
     // The one resolver, and a skip the gate can refuse (`benilla_formats::install`).
     let corpus = benilla_formats::addon_corpus_or_skip!();
     // A root holding just these four, SYMLINKED rather than copied. Surveying the whole corpus

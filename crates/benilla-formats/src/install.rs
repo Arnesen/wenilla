@@ -172,7 +172,9 @@ pub fn skipped(what: &str, looked_in: &[PathBuf]) {
             .append(true)
             .open(log)
         {
-            let _ = writeln!(f, "{what}");
+            // One write per line: parallel test threads append to the same file, and a
+            // formatted write is several syscalls that interleave.
+            let _ = f.write_all(format!("{what}\n").as_bytes());
         }
     }
 }

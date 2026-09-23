@@ -145,6 +145,12 @@ fi
 run test env ${require_data:+BENILLA_REQUIRE_DATA=1} BENILLA_SKIP_LOG="$skips" cargo test --workspace
 report_skips test
 
+# test-no-install: the same suite as a clone without client data runs it. A test that reads the
+# install without opening with `wow_data_or_skip!` passes where the data is and panics everywhere
+# else; `WOW_DATA=` (set, empty) is the resolver's "no install", so this run is that machine. No
+# build variable reads it, so the binaries are reused and only the run time is paid.
+run test-no-install env -u BENILLA_REQUIRE_DATA WOW_DATA= cargo test --workspace
+
 # **doc-links** (decision 1925) — the docs are the knowledge base, so a doc link pointing at a
 # DELETED item is rot, and nothing else here runs rustdoc. Deliberately narrow: it fails only on a
 # `crate::`/`super::`/`self::`/`Self::` path whose leaf exists nowhere in the workspace. The broad

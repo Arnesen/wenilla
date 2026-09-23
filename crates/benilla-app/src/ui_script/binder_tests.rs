@@ -30,6 +30,7 @@ fn setup() -> UiScript {
 /// this wiring the click produced no dialog and no packet at all (B249).
 #[test]
 fn the_confirm_shows_the_area_and_accept_queues_the_bind() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event(
         "CONFIRM_BINDER",
@@ -58,6 +59,7 @@ fn the_confirm_shows_the_area_and_accept_queues_the_bind() {
 /// no decline opcode), so the only observable is that no confirm was queued.
 #[test]
 fn declining_sends_nothing() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("CONFIRM_BINDER", vec![ScriptValue::Str("Goldshire".into())]);
     s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
@@ -77,6 +79,7 @@ fn declining_sends_nothing() {
 /// nothing; the frame it goes false, the dialog hides itself — with no packet either way.
 #[test]
 fn leaving_the_innkeepers_range_hides_the_confirm() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("CONFIRM_BINDER", vec![ScriptValue::Str("Kharanos".into())]);
     s.run("StaticPopup_OnUpdate(StaticPopup1, 0.1)").unwrap();

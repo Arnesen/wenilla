@@ -427,6 +427,7 @@ mod tests {
     /// divergence.
     #[test]
     fn a_defense_line_renders_with_the_references_bare_colon() {
+        benilla_formats::wow_data_or_skip!();
         let event = ChatEvent {
             kind: Some(ChatEventKind::Channel),
             text: "|cffffff00Sentinel Hill is under attack!|r".into(),

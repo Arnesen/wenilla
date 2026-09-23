@@ -78,6 +78,7 @@ fn menu() -> TaxiUiState {
 /// hides it again.
 #[test]
 fn shipped_taxi_frame_drives_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = taxi_script();
 
     assert!(!s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());
@@ -133,6 +134,7 @@ fn shipped_taxi_frame_drives_end_to_end() {
 /// refusal is visible through.
 #[test]
 fn no_single_hop_destination_posts_the_error_and_closes() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = taxi_script();
     s.set_taxi(Some(TaxiUiState {
         art: "Interface\\TaxiFrame\\TAXIMAP0".into(),
@@ -172,6 +174,7 @@ fn no_single_hop_destination_posts_the_error_and_closes() {
 /// the window hides immediately (no one-frame lag) — the Gossip/Trainer close-button precedent.
 #[test]
 fn close_button_queues_the_intent_and_hides() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = taxi_script();
     s.set_taxi(Some(menu()));
     seat_flight_master(&mut s, "Dungar Longdrink");

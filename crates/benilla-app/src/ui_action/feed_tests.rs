@@ -417,6 +417,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
 /// notice belongs here, red — and its `SMSG_AREA_TRIGGER_MESSAGE` sibling here, yellow.
 #[test]
 fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
+    benilla_formats::wow_data_or_skip!();
     let (mut app, _rx) = app_with_food_on_the_bar();
     {
         let mut script = app.world_mut().non_send_resource_mut::<UiScript>();

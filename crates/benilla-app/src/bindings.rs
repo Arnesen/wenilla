@@ -1312,6 +1312,7 @@ mod tests {
     /// tests carry no page — between them the join was never asserted.
     #[test]
     fn a_wheel_notch_binds_through_the_real_page_and_then_dispatches() {
+        benilla_formats::wow_data_or_skip!();
         let by_name =
             |n: &str| Cmd(SPECS.iter().position(|s| s.name == n).expect("registered") as u16);
         let mut s = crate::ui_script::keybindings_tests::harness();

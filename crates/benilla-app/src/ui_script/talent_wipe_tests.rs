@@ -32,6 +32,7 @@ fn setup() -> UiScript {
 /// parsed as an unknown opcode and dropped.
 #[test]
 fn the_confirm_shows_and_accept_queues_the_wipe() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("CONFIRM_TALENT_WIPE", vec![ScriptValue::Int(15_000)]);
     assert!(
@@ -58,6 +59,7 @@ fn the_confirm_shows_and_accept_queues_the_wipe() {
 /// raise one, and the engine's `hasMoneyFrame` leg is what shows it.
 #[test]
 fn the_cost_lands_in_the_money_frame() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     assert!(
         !s.eval::<bool>("return StaticPopup1MoneyFrame:IsVisible()")
@@ -100,6 +102,7 @@ fn the_cost_lands_in_the_money_frame() {
 /// other), so the only observable is that no confirm was queued.
 #[test]
 fn declining_sends_nothing() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("CONFIRM_TALENT_WIPE", vec![ScriptValue::Int(15_000)]);
     s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
@@ -120,6 +123,7 @@ fn declining_sends_nothing() {
 /// holds, ticking changes nothing; the frame it goes false, the dialog hides itself.
 #[test]
 fn leaving_the_trainers_range_hides_the_confirm() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("CONFIRM_TALENT_WIPE", vec![ScriptValue::Int(15_000)]);
     s.run("StaticPopup_OnUpdate(StaticPopup1, 0.1)").unwrap();

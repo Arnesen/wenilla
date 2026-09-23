@@ -74,6 +74,8 @@ comment naming the reference fact and why we differ. Anything else is a fork.
   `scripts/gates.sh`. It runs on the tree that lands, before it lands; it is memoized on the
   tree. The tests that read the install or the addon corpus skip where the data is absent, and
   the gate prints the count; where the data is, a skip is a failure (`BENILLA_REQUIRE_DATA=1`).
+  The workspace tests then run a second time with `WOW_DATA=` (no install), so a test that
+  reads the install without opening with `wow_data_or_skip!` fails here and not on a clone.
 - **Per round**: `scripts/check.sh`, scoped to the changed crates and their dependents. Run each
   gate once per round; `tee` the output to a file and grep the file.
 - **A clean run** is the fourth gate: `scripts/smoke.sh`, a live login and logout against the

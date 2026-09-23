@@ -92,6 +92,7 @@ fn gate_open(s: &UiScript) -> bool {
 /// end to end — not a hand-rolled `fire_event`.
 #[test]
 fn a_you_joined_notice_opens_ace2s_initialisation_gate() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = ace_vm(&root);
     let mut windows = ChatWindows::default();
@@ -150,6 +151,7 @@ fn a_you_joined_notice_opens_ace2s_initialisation_gate() {
 /// gate and the headline is measuring the wrong thing.
 #[test]
 fn without_the_notice_the_gate_stays_shut() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = ace_vm(&root);
     for _ in 0..40 {

@@ -1314,6 +1314,7 @@ mod bind_confirm_tests {
     /// that fed it, where the reference defers inside the call that consumed the cursor.
     #[test]
     fn placing_a_boe_on_the_doll_asks_and_survives_its_own_cursor_update() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_on_the_doll();
         assert!(
             rx.try_iter().next().is_none(),
@@ -1379,6 +1380,7 @@ mod bind_confirm_tests {
     /// would be unanswerable.
     #[test]
     fn accepting_re_issues_the_place_and_does_not_ask_again() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_on_the_doll();
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -1427,6 +1429,7 @@ mod bind_confirm_tests {
     /// the second call finds the element already free.
     #[test]
     fn cancelling_sends_nothing_and_the_doubled_cancel_is_harmless() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_on_the_doll();
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -1455,6 +1458,7 @@ mod bind_confirm_tests {
     /// `quality >= 2` across). Every other bonding value places straight through.
     #[test]
     fn only_bind_on_equip_defers_the_place() {
+        benilla_formats::wow_data_or_skip!();
         for (bonding, why) in [
             (0u32, "no bind"),
             (1, "bind on PICKUP is the loot arm's value, not this one"),
@@ -1480,6 +1484,7 @@ mod bind_confirm_tests {
     /// (The loot arm's `quality >= 2` would have silenced exactly this case.)
     #[test]
     fn a_white_bind_on_equip_item_still_asks() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_with(2, 1, false);
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -1495,6 +1500,7 @@ mod bind_confirm_tests {
     /// cursor and the tooltip's Soulbound override use (decisions 0928, 1562).
     #[test]
     fn an_already_bound_item_places_without_asking() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_with(2, 4, true);
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -1512,6 +1518,7 @@ mod bind_confirm_tests {
     /// this gate could exist in a single place.
     #[test]
     fn auto_equipping_a_boe_asks_and_the_accept_re_issues() {
+        benilla_formats::wow_data_or_skip!();
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.init_resource::<PendingItemOps>()
@@ -1600,6 +1607,7 @@ mod bind_confirm_tests {
     /// level above the player's, the gate's first leg.
     #[test]
     fn an_unusable_item_is_never_asked_about() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_with(2, 4, false);
         // Re-push the player's requirement state and a template the level leg refuses. (The
         // fixture's own push leaves `level == 0`, the "decline to judge" state, so this test has
@@ -1735,6 +1743,7 @@ mod bind_confirm_tests {
 
     #[test]
     fn right_clicking_a_bind_on_use_item_asks_before_using_it() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = right_click_a_bind_on_use_item(false);
         assert!(
             rx.try_iter().next().is_none(),
@@ -1773,6 +1782,7 @@ mod bind_confirm_tests {
     /// question. Under the first placement (inside the plain-cast route only) this asked nothing.
     #[test]
     fn a_bind_on_use_item_with_no_on_use_spell_still_asks() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = right_click_a_bind_on_use_item(true);
         app.world_mut()
             .non_send_resource_mut::<UiScript>()

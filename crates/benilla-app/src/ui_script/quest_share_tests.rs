@@ -42,6 +42,7 @@ fn confirm(s: &mut UiScript, who: &str, quest: &str) {
 /// right at a glance.
 #[test]
 fn the_confirm_names_the_player_first_and_the_quest_second() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     confirm(&mut s, "Thrall", "Escort Duty");
     assert!(
@@ -59,6 +60,7 @@ fn the_confirm_names_the_player_first_and_the_quest_second() {
 /// Yes queues exactly one `ConfirmAcceptQuest()` and closes the popup.
 #[test]
 fn yes_answers_once() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     confirm(&mut s, "Thrall", "Escort Duty");
     s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
@@ -75,6 +77,7 @@ fn yes_answers_once() {
 /// latch is cleared by the next thing that touches it. Same for ESC.
 #[test]
 fn no_and_escape_send_nothing() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     confirm(&mut s, "Thrall", "Escort Duty");
     s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
@@ -92,6 +95,7 @@ fn no_and_escape_send_nothing() {
 /// stale popup would send the wrong quest id.
 #[test]
 fn a_second_confirm_replaces_the_first() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     confirm(&mut s, "Thrall", "Escort Duty");
     confirm(&mut s, "Jaina", "Deeper Still");

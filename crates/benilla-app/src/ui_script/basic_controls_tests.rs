@@ -23,6 +23,7 @@ fn basic_controls() -> UiScript {
 /// reason the frame has to exist rather than the function being a stub that prints somewhere.
 #[test]
 fn message_shows_the_script_errors_dialog_carrying_its_text() {
+    benilla_formats::wow_data_or_skip!();
     let s = basic_controls();
     assert!(
         !s.eval::<bool>("return ScriptErrors:IsVisible()").unwrap(),
@@ -57,6 +58,7 @@ fn message_shows_the_script_errors_dialog_carrying_its_text() {
 /// is replaceable — which is the entire point for the two corpus addons that replace it.
 #[test]
 fn error_message_returns_its_argument_and_can_be_replaced() {
+    benilla_formats::wow_data_or_skip!();
     let s = basic_controls();
     assert_eq!(
         s.eval::<String>(r#"return _ERRORMESSAGE("boom")"#).unwrap(),
@@ -82,6 +84,7 @@ fn error_message_returns_its_argument_and_can_be_replaced() {
 /// test used to be).
 #[test]
 fn error_message_is_the_installed_handler_and_the_host_channel_stays_sighted() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = basic_controls();
     assert!(
         s.eval::<bool>("return geterrorhandler() == _ERRORMESSAGE")
@@ -120,6 +123,7 @@ fn error_message_is_the_installed_handler_and_the_host_channel_stays_sighted() {
 /// `TEXT` is the identity function, and 26 corpus addons call it because shipped FrameXML does.
 #[test]
 fn text_is_the_identity_function_the_corpus_expects() {
+    benilla_formats::wow_data_or_skip!();
     let s = basic_controls();
     assert_eq!(
         s.eval::<String>(r#"return TEXT("Level")"#).unwrap(),
@@ -133,6 +137,7 @@ fn text_is_the_identity_function_the_corpus_expects() {
 /// name — `MyDialogButton`, never `DialogBoxFrameButton`.
 #[test]
 fn a_dialog_box_from_the_template_names_and_closes_the_callers_frame() {
+    benilla_formats::wow_data_or_skip!();
     let s = basic_controls();
     s.run(
         r#"MyDialog = CreateFrame("Frame", "MyDialog", UIParent, "DialogBoxFrame")

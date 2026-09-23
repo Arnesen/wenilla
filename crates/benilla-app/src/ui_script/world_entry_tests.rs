@@ -449,6 +449,7 @@ fn logging_out_leaves_no_in_game_frames_behind() {
 /// the world.
 #[test]
 fn reload_ui_is_a_fresh_login_in_place() {
+    benilla_formats::wow_data_or_skip!();
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -615,6 +616,7 @@ fn reload_outside_the_world_is_dropped() {
 /// entirely off terminal WARN lines because the client showed nothing.
 #[test]
 fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads() {
+    benilla_formats::wow_data_or_skip!();
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -664,6 +666,7 @@ fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads()
 /// loads, and this test FINISHING is the claim — before 1306 it would hang here forever.
 #[test]
 fn a_looping_addon_cannot_freeze_world_entry() {
+    benilla_formats::wow_data_or_skip!();
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -943,6 +946,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
 /// and the player is **told to look**.
 #[test]
 fn an_addon_that_fails_to_load_without_raising_is_readable_in_the_error_log() {
+    benilla_formats::wow_data_or_skip!();
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1331,6 +1335,7 @@ fn a_placed_window_comes_back_after_a_reload() {
 /// file reddens this instead of scrolling past, and closing one means deleting a line here.
 #[test]
 fn a_clean_world_entry_raises_only_the_warnings_we_have_named() {
+    benilla_formats::wow_data_or_skip!();
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

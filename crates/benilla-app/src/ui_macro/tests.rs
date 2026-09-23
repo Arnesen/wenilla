@@ -101,6 +101,7 @@ fn ui() -> UiScript {
 /// queue, a roll in the roll queue — without the runner knowing any of them.
 #[test]
 fn running_a_macro_runs_its_lines_through_the_references_edit_box() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui();
     s.set_macros(MacroState {
         account: vec![macro_view("Greet", "/wave\n\n  /say pew  \n/roll 1 100")],
@@ -142,6 +143,7 @@ fn running_a_macro_runs_its_lines_through_the_references_edit_box() {
 /// case anywhere in the runner.
 #[test]
 fn a_character_macro_runs_by_its_own_index() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui();
     s.set_macros(MacroState {
         account: Vec::new(),
@@ -202,6 +204,7 @@ fn the_generation_moves_on_every_write_and_is_not_drained() {
 /// UI's use of it.
 #[test]
 fn a_registered_frame_sees_every_macro_line_as_an_event() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui();
     s.run(
         r#"MacroSpy = CreateFrame("Frame")
@@ -243,6 +246,7 @@ fn a_registered_frame_sees_every_macro_line_as_an_event() {
 /// file round-tripped through one) is therefore three lines, not one long one.
 #[test]
 fn either_line_ending_splits_a_body() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui();
     s.set_macros(MacroState {
         account: vec![macro_view("Mixed", "/say Charge\r/say a\r\n/say b")],

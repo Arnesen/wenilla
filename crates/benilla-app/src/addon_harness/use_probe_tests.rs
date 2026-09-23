@@ -262,6 +262,7 @@ fn the_use_column_can_fail() {
 ///   silently stops touching them is exactly how this instrument has been wrong four times.
 #[test]
 fn the_directors_two_verified_addons_are_reachable_and_omnicc_is_not_broken() {
+    benilla_formats::wow_data_or_skip!();
     // The one resolver, and a skip the gate can refuse (`benilla_formats::install`).
     let corpus = benilla_formats::addon_corpus_or_skip!();
     let fx = Fixtures::new("oracle");

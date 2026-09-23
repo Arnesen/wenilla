@@ -104,6 +104,7 @@ fn harness_on(mut s: UiScript) -> UiScript {
 /// igMainMenuOption kit.
 #[test]
 fn the_menu_options_button_swaps_the_menu_for_the_options_window() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run("ShowUIPanel(GameMenuFrame)").unwrap();
     let _ = s.take_sounds();
@@ -133,6 +134,7 @@ fn the_menu_options_button_swaps_the_menu_for_the_options_window() {
 /// label — including the one key whose label differs from it (ActionBars → "Action Bars").
 #[test]
 fn controls_is_the_default_category_and_the_title_reads_it() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
@@ -159,6 +161,7 @@ fn controls_is_the_default_category_and_the_title_reads_it() {
 /// survives a close/reopen (the OnShow re-applies the last seat, not the default).
 #[test]
 fn clicking_a_row_moves_the_selection_and_the_page_title() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
@@ -195,6 +198,7 @@ fn clicking_a_row_moves_the_selection_and_the_page_title() {
 /// the guard itself is pinned by `the_defaults_button_is_armed_by_rows_not_by_a_category` below.
 #[test]
 fn the_close_button_hides_the_window() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
 
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
@@ -223,6 +227,7 @@ fn the_close_button_hides_the_window() {
 /// (.196,.388,.8) while the locked gold stands — 1.14's LockHighlight guard.
 #[test]
 fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     // Pin the window at scale 1 so row rects and the pointer share coordinates (the fit
     // clamp stays out of the way at 1024x768: both ratios sit above 1).
@@ -336,6 +341,7 @@ fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
 /// would smear across the rope's inner half, which is exactly the mistake this pins.
 #[test]
 fn the_ground_dim_draws_over_the_tile_and_clear_of_the_rope() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run("ERA_WINDOW_SCALE = 1").unwrap();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
@@ -404,6 +410,7 @@ fn the_ground_dim_draws_over_the_tile_and_clear_of_the_rope() {
 /// (the one-layout-law pin) with the page view restored.
 #[test]
 fn search_reflows_live_rows_and_restores_the_page() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
@@ -499,6 +506,7 @@ fn search_reflows_live_rows_and_restores_the_page() {
 /// first within the group — "master volume" seats Master above the token-matched children.
 #[test]
 fn the_phrase_match_outranks_its_words() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameSearchBox:SetText(\"master volume\")")
@@ -524,6 +532,7 @@ fn the_phrase_match_outranks_its_words() {
 /// the box) and a no-match query (the section-header "no results" line, nothing chained).
 #[test]
 fn a_head_click_ends_the_search_and_a_miss_shows_no_results() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
@@ -584,6 +593,7 @@ fn a_head_click_ends_the_search_and_a_miss_shows_no_results() {
 /// dragging (0250 §5's capture began), and the stepper buttons no longer exist.
 #[test]
 fn a_track_press_seats_the_thumb_and_keeps_dragging() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.set_cvar_host("MasterVolume", "0.1");
     s.run("ERA_WINDOW_SCALE = 1").unwrap(); // pointer and rects share coordinates
@@ -660,6 +670,7 @@ fn a_track_press_seats_the_thumb_and_keeps_dragging() {
 /// window has: a label/value line, and the groove still riding 3 units high of the row.
 #[test]
 fn a_slider_rows_readout_sits_on_its_labels_line() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     for (page, rows) in [
@@ -918,6 +929,7 @@ fn actionbars_harness() -> UiScript {
 /// Leaving the page hides it and puts Defaults back to sleep.
 #[test]
 fn the_audio_page_reads_the_cvar_table_on_select() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("MusicVolume", "0.7");
     s.set_cvar_host("EnableMusic", "0");
@@ -973,6 +985,7 @@ fn the_audio_page_reads_the_cvar_table_on_select() {
 /// (the page reading the table) queues nothing.
 #[test]
 fn a_slider_move_snaps_and_writes_the_cvar() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
@@ -1009,6 +1022,7 @@ fn a_slider_move_snaps_and_writes_the_cvar() {
 /// 1.12 dependency holds: Enable All Sound off greys exactly the Enable Ambience row.
 #[test]
 fn the_checkbox_rows_write_flags_and_the_master_greys_ambience() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
@@ -1059,6 +1073,7 @@ fn the_checkbox_rows_write_flags_and_the_master_greys_ambience() {
 /// exactly two rows in `SoundOptionsFrame_UpdateDependencies` and never grew a third.
 #[test]
 fn the_background_sound_row_boots_off_and_writes_the_era_cvar() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
@@ -1098,6 +1113,7 @@ fn the_background_sound_row_boots_off_and_writes_the_era_cvar() {
 /// the era per-page reset, on the one page with rows.
 #[test]
 fn defaults_resets_the_audio_page_to_registered_defaults() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("MusicVolume", "0.9");
     s.set_cvar_host("EnableMusic", "0");
@@ -1141,6 +1157,7 @@ fn defaults_resets_the_audio_page_to_registered_defaults() {
 /// Audio's body takes over when clicked.
 #[test]
 fn the_graphics_page_reads_the_cvar_table_on_select() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("uiScale", "0.8");
     s.set_cvar_host("farclip", "297");
@@ -1218,6 +1235,7 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
 /// inverted by a later edit, and until this test there was no coverage of the row at all.
 #[test]
 fn the_display_mode_dropdown_maps_its_entries_to_the_gx_window_polarity() {
+    benilla_formats::wow_data_or_skip!();
     const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowDisplayMode";
     let mut s = audio_harness();
     s.set_cvar_host("gxWindow", "0");
@@ -1279,6 +1297,7 @@ fn the_display_mode_dropdown_maps_its_entries_to_the_gx_window_polarity() {
 /// and wgpu can — so the click commits, like every other checkbox here.
 #[test]
 fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("gxVSync", "0");
     let mut s = harness_on(s);
@@ -1342,6 +1361,7 @@ fn the_vertical_sync_row_reads_and_writes_the_present_mode_cvar() {
 /// never did was move the slider, which is the only thing a player does. So this one drags.
 #[test]
 fn the_brightness_slider_writes_through_its_engine_pair_and_survives_a_reopen() {
+    benilla_formats::wow_data_or_skip!();
     const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowBrightness";
     let s = audio_harness();
     let mut s = harness_on(s);
@@ -1407,6 +1427,7 @@ fn the_brightness_slider_writes_through_its_engine_pair_and_survives_a_reopen() 
 /// and writes nothing back (0959's out-of-range law).
 #[test]
 fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
+    benilla_formats::wow_data_or_skip!();
     const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowWorldDetail";
     let mut s = audio_harness();
     s.set_cvar_host("WorldDetail", "0");
@@ -1572,6 +1593,7 @@ fn a_world_entry_leaves_the_saved_nameplate_setting_alone() {
 
 #[test]
 fn the_nameplates_page_toggles_the_unit_name_cvars() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
@@ -1660,6 +1682,7 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
 /// committed value clears the pending without a commit (era's IsModified).
 #[test]
 fn the_ui_scale_slider_defers_to_the_apply_button() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
@@ -1749,6 +1772,7 @@ fn the_ui_scale_slider_defers_to_the_apply_button() {
 ///   could not tell what it did.
 #[test]
 fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("renderScale", "1");
     let mut s = harness_on(s);
@@ -1820,6 +1844,7 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
 /// only when the window hides — the reopened window reads the committed truth.
 #[test]
 fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
@@ -1873,6 +1898,7 @@ fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
 /// write is what moves the far-clip wall and the residency window together.
 #[test]
 fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_live() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
@@ -1913,6 +1939,7 @@ fn the_terrain_distance_slider_snaps_to_the_1_12_grid_and_writes_live() {
 /// dies with it (the default write supersedes what Apply would have committed).
 #[test]
 fn defaults_resets_the_graphics_page_to_registered_defaults() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("uiScale", "0.8");
     s.set_cvar_host("farclip", "297");
@@ -1973,6 +2000,7 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
 /// `deselectOnClick` is "0", the 1.12 interface panel's own arm), the plain flags direct.
 #[test]
 fn the_controls_page_reads_flags_with_the_sticky_inversion() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("deselectOnClick", "0");
     s.set_cvar_host("autoLootDefault", "1");
@@ -2017,6 +2045,7 @@ fn the_controls_page_reads_flags_with_the_sticky_inversion() {
 /// Sticky Targeting writes the CVar inverted both ways.
 #[test]
 fn the_controls_checkboxes_write_flags_with_the_interface_panel_kit() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     assert!(
@@ -2061,6 +2090,7 @@ fn the_controls_checkboxes_write_flags_with_the_interface_panel_kit() {
 /// autoLootDefault "0"), the rows follow, and only the moved values queue.
 #[test]
 fn defaults_resets_the_controls_page_to_registered_defaults() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("deselectOnClick", "0");
     s.set_cvar_host("autoLootDefault", "1");
@@ -2113,6 +2143,7 @@ fn settle(s: &mut UiScript) {
 /// rect until scrolled to.
 #[test]
 fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     // On NAMEPLATES, not the default Controls page: since 2180 seated the four camera toggles and
@@ -2259,6 +2290,7 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
 /// keybindings_tests, where the harness has a real binding registry to overflow the list with.)
 #[test]
 fn the_page_scroll_bar_wears_the_trough_with_its_arrows_in_the_sockets() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameSearchBox:SetText(\"e\")")
@@ -2390,6 +2422,7 @@ fn scroll_into_view(s: &mut UiScript, frame: &str) {
 /// property the 1.12 panel's own `getglobal("OPTION_TOOLTIP_"..key)` lookup buys.
 #[test]
 fn a_hovered_row_raises_its_1_12_description_on_the_era_seat() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     // The stock tooltip declares no size: it sizes from its lines through the font engine, as
     // the client's does (1968) — a harness that reads its rect needs one; the fixed-width
@@ -2466,6 +2499,7 @@ fn a_hovered_row_raises_its_1_12_description_on_the_era_seat() {
 /// hover driven without the outgoing row's OnLeave (1054) must still put the neighbour away.
 #[test]
 fn a_row_with_no_1_12_string_raises_no_plate() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("OPTION_TOOLTIP_GAMEFIELD_DESELECT = \"Sticky's own description.\"")
         .unwrap();
@@ -2650,6 +2684,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
 /// line instead of a plate, which no key-mapping check would ever see.
 #[test]
 fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     // Stand-in strings for every key the rows name (the real texts are the data test's job).
     s.run(
@@ -2749,6 +2784,7 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
 /// effect is the per-type `show` flag and the scroll function.
 #[test]
 fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = combat_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
@@ -2846,6 +2882,7 @@ fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
 /// wake is the master's own click rather than the load: the same rule, entered from the other end.
 #[test]
 fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = combat_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
@@ -2903,6 +2940,7 @@ fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
 /// Defaults lands a player back on a stock 1.12 combat-text family.
 #[test]
 fn defaults_resets_the_combat_page_to_the_shipped_assignments() {
+    benilla_formats::wow_data_or_skip!();
     let s = combat_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
@@ -2969,6 +3007,7 @@ fn defaults_resets_the_combat_page_to_the_shipped_assignments() {
 /// text comes up with the player's choice rather than CombatText.xml's shipped default.
 #[test]
 fn what_the_combat_page_writes_survives_a_restart() {
+    benilla_formats::wow_data_or_skip!();
     let s = combat_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
@@ -3043,6 +3082,7 @@ fn what_the_combat_page_writes_survives_a_restart() {
 /// (including the shift-click that deliberately still works); this owns the wire between them.
 #[test]
 fn the_action_bars_page_locks_the_real_bar() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = actionbars_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowActionBars:Click()")
@@ -3107,6 +3147,7 @@ fn the_action_bars_page_locks_the_real_bar() {
 /// questgiver's instant-text arm, live on the very next show.
 #[test]
 fn the_interface_page_writes_the_three_stock_globals() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = interface_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
@@ -3180,6 +3221,7 @@ fn the_interface_page_writes_the_three_stock_globals() {
 /// * the picker's five values are the reference's own strings, in its own order.
 #[test]
 fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = interface_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
@@ -3287,6 +3329,7 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
 /// a second click inside that round trip would otherwise compute the wrong direction.
 #[test]
 fn the_equipment_display_rows_read_and_write_through_the_api_not_a_store() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = interface_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
@@ -3365,6 +3408,7 @@ fn the_equipment_display_rows_read_and_write_through_the_api_not_a_store() {
 /// tutorial.
 #[test]
 fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = interface_harness();
     // A bank with unacknowledged bits: tutorials are enabled.
     s.set_tutorial_bank(Some(vec![0x00; 32]));
@@ -3423,6 +3467,7 @@ fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
 /// has dismissed — an option that silently undoes hours of play.
 #[test]
 fn a_no_op_write_does_not_re_arm_the_tutorials() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = interface_harness();
     s.set_tutorial_bank(Some(vec![0x00; 32])); // enabled
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
@@ -3447,6 +3492,7 @@ fn a_no_op_write_does_not_re_arm_the_tutorials() {
 /// no-op default must not queue a packet that would turn the preference on its head.
 #[test]
 fn defaults_sends_a_flip_only_for_the_row_that_moved() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = interface_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
@@ -3486,6 +3532,7 @@ fn defaults_sends_a_flip_only_for_the_row_that_moved() {
 /// property worth holding: the capture follows the definer wherever the definer stands.
 #[test]
 fn defaults_on_the_interface_page_restores_the_definers_own_assignment() {
+    benilla_formats::wow_data_or_skip!();
     let s = interface_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
@@ -3524,6 +3571,7 @@ fn defaults_on_the_interface_page_restores_the_definers_own_assignment() {
 /// player's choice instead of QuestLogFrame.xml's shipped one.
 #[test]
 fn what_the_interface_page_writes_survives_a_restart() {
+    benilla_formats::wow_data_or_skip!();
     let s = interface_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
@@ -3581,6 +3629,7 @@ fn what_the_interface_page_writes_survives_a_restart() {
 /// other one: the registrations were never armed at all, and only the walk can arm them.
 #[test]
 fn a_saved_switch_with_a_side_effect_is_applied_when_the_variables_land() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = combat_harness();
     // What the saved chunk does, verbatim: assign over the file-scope default, then the event.
     s.run("SHOW_COMBAT_TEXT = \"1\"").unwrap();
@@ -3618,6 +3667,7 @@ fn a_saved_switch_with_a_side_effect_is_applied_when_the_variables_land() {
 /// only which of them a fresh install opens on.
 #[test]
 fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
+    benilla_formats::wow_data_or_skip!();
     let gap = |s: &mut UiScript| -> f64 {
         s.resolve();
         s.eval::<f64>("return BuffButton0:GetBottom() - BuffButton8:GetTop()")
@@ -3689,6 +3739,7 @@ fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
 /// rather than through a stand-in page — there is no longer one to borrow.
 #[test]
 fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
@@ -3747,6 +3798,7 @@ fn the_defaults_button_is_armed_by_rows_not_by_a_category() {
 /// (l.337). So a fresh client shows the box **unchecked**, and ticking it turns the filter off.
 #[test]
 fn the_disable_spam_filter_row_is_inverted() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowChat:Click()")
@@ -3788,6 +3840,7 @@ fn the_disable_spam_filter_row_is_inverted() {
 /// column-C chain rather than joining the Chat page.
 #[test]
 fn the_profanity_filter_row_sits_on_the_interface_page_and_writes_its_cvar() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = interface_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
@@ -3814,6 +3867,7 @@ fn the_profanity_filter_row_sits_on_the_interface_page_and_writes_its_cvar() {
 
 #[test]
 fn the_chat_page_toggles_the_chat_bubble_cvars() {
+    benilla_formats::wow_data_or_skip!();
     // No host override: since 1804 the registered pair IS bubbles-on / party-off, so the page's
     // read below is of the shipped table rather than of a value this test planted.
     let mut s = harness_on(audio_harness());
@@ -3887,6 +3941,7 @@ fn the_chat_page_toggles_the_chat_bubble_cvars() {
 /// 1136's rule for when a row needs one, seen from both sides on one page).
 #[test]
 fn the_chat_page_writes_the_hover_delay_global_and_the_loot_spam_cvar() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowChat:Click()")
@@ -3970,6 +4025,7 @@ fn the_chat_page_writes_the_hover_delay_global_and_the_loot_spam_cvar() {
 /// fresh VM has re-run `ChatFrame.xml`'s file-scope `"0"`.
 #[test]
 fn a_saved_hover_delay_is_applied_when_the_variables_land() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_harness();
     // What the saved-variables chunk does: assign the global, then the window's VARIABLES_LOADED.
     s.run("REMOVE_CHAT_DELAY = \"1\"").unwrap();
@@ -4003,6 +4059,7 @@ fn a_saved_hover_delay_is_applied_when_the_variables_land() {
 /// here is the uppercase display name and not the CVar's own spelling.
 #[test]
 fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = interface_harness();
     // The bar needs a real span before it decides anything about its numerals (its update bails
     // on valueMax == 0 and hides the strip instead).
@@ -4060,6 +4117,7 @@ fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
 /// `LookConfig::sensitivity`.
 #[test]
 fn the_mouse_sensitivity_slider_snaps_to_the_reference_step() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = audio_harness();
     s.set_cvar_host("mousespeed", "1.25");
     let mut s = harness_on(s);
@@ -4118,6 +4176,7 @@ fn the_mouse_sensitivity_slider_snaps_to_the_reference_step() {
 /// rather than down it.
 #[test]
 fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
@@ -4196,6 +4255,7 @@ fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
 /// nearest "Always", and the plate follows the SELECTION the way that dropdown's own does.
 #[test]
 fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
@@ -4325,6 +4385,7 @@ fn the_camera_following_style_dropdown_carries_the_engine_enum_and_plate() {
 /// `MultiActionBar_Update`, which reaches `UIParent_ManageFramePositions`.
 #[test]
 fn the_action_bars_page_toggles_the_real_bars() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = actionbars_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowActionBars:Click()")
@@ -4503,6 +4564,7 @@ impl benilla_ui::script::TextMeasure for SteppedFont {
 /// (64 and 76 here); on the show, behind the window's own OnShow, they measure at the drawn 0.78.
 #[test]
 fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_text_measurer(Box::new(SteppedFont(6.0)));
     let mut s = harness_on(s);
@@ -4573,6 +4635,7 @@ fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
 /// seated `AtlasMeasurer` for certain, whatever order the boot took.
 #[test]
 fn without_a_seated_measurer_the_same_fit_reads_zero() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(UiScript::new().unwrap());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.resolve();
@@ -4649,6 +4712,7 @@ const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
 /// us and shipping one was somebody re-reading a decision record from months ago.
 #[test]
 fn every_cvar_the_reference_table_names_is_registered_or_listed_with_its_blocker() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     // The table as the file declares it: `name` (the display key) -> its `cvar`, if it has one.
     // **BOTH of the reference's option tables** (2115). The checkbuttons were the whole census
@@ -4733,6 +4797,7 @@ fn every_cvar_the_reference_table_names_is_registered_or_listed_with_its_blocker
 /// player change and benilla does not, and it costs a stated reason at the row.
 #[test]
 fn every_registered_reference_cvar_has_a_row_on_our_own_window() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
 
     // Both of the reference's own option tables, exactly as the registration census reads them.
@@ -4839,6 +4904,7 @@ const UNREACHABLE_REFERENCE_CVARS: &[(&str, &str)] = &[];
 /// `cameraWaterCollision` a player who wants them OFF had no way to say so at all.
 #[test]
 fn the_four_camera_toggles_read_their_shipped_defaults_and_write_on_the_click() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowControls:Click()")
@@ -4887,6 +4953,7 @@ fn the_four_camera_toggles_read_their_shipped_defaults_and_write_on_the_click() 
 /// kept floating.
 #[test]
 fn the_pet_damage_box_and_the_look_slider_each_write_their_unnamed_twin() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = combat_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
@@ -4939,6 +5006,7 @@ fn the_pet_damage_box_and_the_look_slider_each_write_their_unnamed_twin() {
 /// combat text also turns off damage numbers, which is the opposite of what `CombatDamage` does.
 #[test]
 fn show_target_damage_greys_its_own_pair_and_the_floating_text_master_leaves_it_alone() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = combat_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowCombat:Click()")
@@ -4990,6 +5058,7 @@ fn show_target_damage_greys_its_own_pair_and_the_floating_text_master_leaves_it_
 /// (l.715-719 — there is no follow to set a speed for).
 #[test]
 fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 

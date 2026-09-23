@@ -2219,6 +2219,7 @@ mod tests {
     /// here as the witness for it.
     #[test]
     fn the_global_scanner_sees_both_kinds_of_definition() {
+        benilla_formats::wow_data_or_skip!();
         let defined = lua_globals_defined();
         for host in ["TargetUnit", "UseAction", "SetBinding"] {
             assert!(

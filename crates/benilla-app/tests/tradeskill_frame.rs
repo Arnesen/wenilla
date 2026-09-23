@@ -117,6 +117,7 @@ fn pump(script: &mut UiScript) {
 
 #[test]
 fn collapse_all_tab_and_filter_dropdowns_work_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
 
@@ -208,6 +209,7 @@ fn collapse_all_tab_and_filter_dropdowns_work_end_to_end() {
 /// deviation note); this pins the load + the text attribute + the hidden-in-practice state.
 #[test]
 fn craft_collapse_tab_loads_with_text_and_stays_hidden_for_a_flat_list() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
 
@@ -243,6 +245,7 @@ fn craft_collapse_tab_loads_with_text_and_stays_hidden_for_a_flat_list() {
 /// test going red.
 #[test]
 fn reagent_slots_carry_the_questitemtemplate_shape_in_both_windows() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
 
@@ -386,6 +389,7 @@ fn reagent_slots_carry_the_questitemtemplate_shape_in_both_windows() {
 /// the tooltip it opens happens to be empty in a headless VM.
 #[test]
 fn a_row_click_shows_the_selection_glow_and_a_row_hover_shows_nothing() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_trade_skill(Some(state()));
@@ -481,6 +485,7 @@ fn a_row_click_shows_the_selection_glow_and_a_row_hover_shows_nothing() {
 /// colour off the extracted text quad, not off any Lua state, so it fails if either half regresses.
 #[test]
 fn a_hovered_or_selected_recipe_row_paints_its_label_white() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_screen_size(1024.0, 768.0);
@@ -593,6 +598,7 @@ fn a_hovered_or_selected_recipe_row_paints_its_label_white() {
 /// (decision 1605).
 #[test]
 fn a_hovered_or_selected_craft_row_paints_its_label_white() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
     s.set_screen_size(1024.0, 768.0);
