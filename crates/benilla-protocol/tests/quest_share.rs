@@ -55,18 +55,30 @@ fn push_result_decodes_member_and_verdict() {
     }
 }
 
-/// An unmapped verdict byte reaches the app as data rather than failing the parse.
+/// Every verdict byte survives encode, parse and decode; an unmapped one is data, not an error.
 #[test]
 fn every_verdict_byte_round_trips() {
-    for raw in [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0xFF] {
+    for raw in 0..=u8::MAX {
         let mut body = 1u64.to_le_bytes().to_vec();
         body.push(raw);
-        match messages::parse_server(opcode::MSG_QUEST_PUSH_RESULT, &body).unwrap() {
+        assert_eq!(
+            messages::quest_push_result(1, QuestShareMsg(raw)),
+            body,
+            "verdict {raw} encodes"
+        );
+        let p = messages::parse_server(opcode::MSG_QUEST_PUSH_RESULT, &body).unwrap();
+        match &p {
             ServerPacket::QuestPushResult(r) => {
                 assert_eq!(r.msg, QuestShareMsg(raw), "verdict {raw}");
                 assert_eq!(r.member, 1);
             }
             other => panic!("verdict {raw} parsed as {}", other.name()),
+        }
+        match decode(p).as_slice() {
+            [SessionEvent::QuestPushResult { member: 1, msg }] => {
+                assert_eq!(*msg, QuestShareMsg(raw), "verdict {raw} decodes");
+            }
+            other => panic!("verdict {raw} decoded to {other:?}"),
         }
     }
 }

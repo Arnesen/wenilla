@@ -131,7 +131,7 @@ fn spell_and_action_wire() {
     assert_eq!(
         messages::set_actionbar_toggles(0x0f),
         hx("0f"),
-        "all four — the largest value the reference binding can ever accumulate (§2)"
+        "all four — the largest value the reference binding can ever accumulate"
     );
 
     assert_eq!(
@@ -1103,9 +1103,9 @@ fn spell_chain_targets_wire() {
     );
 }
 
-/// Eight more combat-log bodies, each checked against the vmangos writer cited at it.
+/// Eight combat-log opcodes, each parsed against the vmangos writer cited at it.
 #[test]
-fn combat_log_completeness_wire() {
+fn kill_outcome_dispel_enchantment_and_execute_logs_parse() {
     use benilla_protocol::messages::{
         DispelFailed, EnchantmentLog, ExecuteLog, PartyKillLog, SpellDispelLog, SpellInstaKillLog,
         SpellLogExecute, SpellOutcomeLog,

@@ -249,6 +249,7 @@ pub fn battlefield_port(map_id: u32, accept: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// Status 2, 3 and 1 each read their own tail and no further; a zero map ends the packet.
     #[test]
     fn status_reads_the_conditional_tails() {
         let mut body = vec![
@@ -260,6 +261,34 @@ mod tests {
             (1, 30, 5, 7, 2)
         );
         assert_eq!(s.time_ms, Some(100));
+        assert_eq!((s.in_progress, s.queued), (None, None));
+
+        // The same slot, map, bracket and instance under status 3, then status 1.
+        let header = body[..13].to_vec();
+        let mut b = header.clone();
+        for v in [3u32, 120_000, 45_000] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.push(0xEE); // a byte past the tail
+        let mut r = b.as_slice();
+        let s = read_battlefield_status(&mut r).unwrap();
+        assert_eq!(s.status, 3);
+        assert_eq!(s.in_progress, Some((120_000, 45_000)));
+        assert_eq!((s.time_ms, s.queued), (None, None));
+        assert_eq!(r, [0xEE], "the status-3 tail is two u32s");
+
+        let mut b = header;
+        for v in [1u32, 30_000, 5_000] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.push(0xEE);
+        let mut r = b.as_slice();
+        let s = read_battlefield_status(&mut r).unwrap();
+        assert_eq!(s.status, 1);
+        assert_eq!(s.queued, Some((30_000, 5_000)));
+        assert_eq!((s.time_ms, s.in_progress), (None, None));
+        assert_eq!(r, [0xEE], "the status-1 tail is two u32s");
+
         body = vec![0u8, 0, 0, 0, 0, 0, 0, 0];
         let s = read_battlefield_status(&mut body.as_slice()).unwrap();
         assert_eq!(

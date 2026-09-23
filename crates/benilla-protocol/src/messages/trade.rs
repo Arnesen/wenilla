@@ -293,12 +293,42 @@ mod tests {
 
     // ── SMSG_TRADE_STATUS parse goldens ──
 
+    /// Every code without a tail reads as its variant and leaves the byte after the code unread.
     #[test]
     fn trade_status_bare_code_has_no_tail() {
-        let buf = 2u32.to_le_bytes(); // OPEN_WINDOW
-        let mut r = &buf[..];
-        assert_eq!(read_trade_status(&mut r).unwrap(), TradeStatus::OpenWindow);
-        assert!(r.is_empty(), "no tail should be consumed for a bare status");
+        for (code, want) in [
+            (0, TradeStatus::Busy),
+            (2, TradeStatus::OpenWindow),
+            (3, TradeStatus::Canceled),
+            (4, TradeStatus::Accept),
+            (5, TradeStatus::Busy2),
+            (6, TradeStatus::NoTarget),
+            (7, TradeStatus::BackToTrade),
+            (8, TradeStatus::Complete),
+            (9, TradeStatus::Rejected),
+            (10, TradeStatus::TargetTooFar),
+            (11, TradeStatus::WrongFaction),
+            (13, TradeStatus::Unknown13),
+            (14, TradeStatus::IgnoreYou),
+            (15, TradeStatus::YouStunned),
+            (16, TradeStatus::TargetStunned),
+            (17, TradeStatus::YouDead),
+            (18, TradeStatus::TargetDead),
+            (19, TradeStatus::YouLogout),
+            (20, TradeStatus::TargetLogout),
+            (21, TradeStatus::TrialAccount),
+        ] {
+            let mut buf = u32::to_le_bytes(code).to_vec();
+            buf.push(0xEE); // the next byte, which a bare status leaves unread
+            let mut r = &buf[..];
+            assert_eq!(read_trade_status(&mut r).unwrap(), want, "code {code}");
+            assert_eq!(
+                r,
+                [0xEE],
+                "no tail should be consumed for bare status {code}"
+            );
+            assert_eq!(want.code(), code);
+        }
     }
 
     #[test]
@@ -394,12 +424,30 @@ mod tests {
         b
     }
 
+    /// The parser reads exactly 444 bytes, whether the slots are empty, full or mixed.
     #[test]
     fn extended_snapshot_is_always_444_bytes() {
         // A 17-byte header (u8 and four u32), then 7 records of u8 index and a 60-byte block.
-        let wire = extended_wire(0, 0, 0, [None; TRADE_SLOT_COUNT]);
-        assert_eq!(wire.len(), 17 + TRADE_SLOT_COUNT * 61);
-        assert_eq!(wire.len(), 444);
+        let mut mixed = [None; TRADE_SLOT_COUNT];
+        mixed[0] = Some(0xABCD);
+        mixed[TRADE_SLOT_NONTRADED] = Some(0x1111);
+        for entries in [
+            [None; TRADE_SLOT_COUNT],
+            [Some(0xABCD); TRADE_SLOT_COUNT],
+            mixed,
+        ] {
+            let mut wire = extended_wire(0, 0, 0, entries);
+            assert_eq!(wire.len(), 17 + TRADE_SLOT_COUNT * 61);
+            assert_eq!(wire.len(), 444);
+            assert!(
+                read_trade_status_extended(&mut &wire[..443]).is_err(),
+                "443 bytes is a short read"
+            );
+            wire.push(0xEE); // a byte past the snapshot
+            let mut r = &wire[..];
+            read_trade_status_extended(&mut r).unwrap();
+            assert_eq!(r, [0xEE], "the parser stops at byte 444");
+        }
     }
 
     #[test]

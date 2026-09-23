@@ -173,7 +173,7 @@ mod tests {
     /// Every `with_capacity` under `messages/` whose argument is a bare variable goes through
     /// [`capacity_hint`], carries a `.min(`, or is listed in [`EXEMPT`].
     #[test]
-    fn wire_count_capacity_hints_are_capped() {
+    fn bare_variable_capacity_hints_under_messages_are_capped() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/messages");
         let mut offenders = Vec::new();
         for file in rust_files(&root) {
@@ -195,7 +195,7 @@ mod tests {
              process instead of skipping the packet. Bound each with \
              `crate::wire::capacity_hint(count, CAP)` (CAP = the protocol's own bound, cited at \
              the site, or a generous sane one), or add it to `EXEMPT` in `wire.rs` with the reason \
-             it is not a wire count (decision 2265 §B1):\n  {}",
+             it is not a wire count:\n  {}",
             offenders.join("\n  ")
         );
     }

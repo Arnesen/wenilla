@@ -149,9 +149,9 @@ fn an_empty_list_still_carries_the_purchased_slot_count() {
     assert!(pets.is_empty());
 }
 
-/// `SUCCESS_UNSTABLE` answers both an unstable and a swap, so the reply never names the verb.
+/// Each result byte parses as itself, and the codes are vmangos's `StableResultCode` values.
 #[test]
-fn stable_result_codes_round_trip() {
+fn stable_result_codes_parse_as_their_vmangos_bytes() {
     for code in [
         stable_result::ERR_MONEY,
         stable_result::ERR_STABLE,

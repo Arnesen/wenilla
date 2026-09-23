@@ -49,7 +49,7 @@ fn simple_server_bodies_parse() {
 
 /// The response is one u32 of unix-epoch seconds (vmangos `Handlers/QueryHandler.cpp:418-423`).
 #[test]
-fn query_time_round_trips_the_server_wall_clock() {
+fn query_time_asks_empty_and_decodes_the_server_wall_clock() {
     assert!(
         messages::query_time().is_empty(),
         "CMSG_QUERY_TIME is a NullClientPacket"
@@ -77,7 +77,8 @@ fn query_time_round_trips_the_server_wall_clock() {
     );
 }
 
-/// `SMSG_TRIGGER_CINEMATIC` is one u32 `CinematicSequences.dbc` id; `SMSG_CHAR_DELETE` one byte.
+/// `SMSG_TRIGGER_CINEMATIC` is one u32 `CinematicSequences.dbc` id; `SMSG_CHAR_DELETE` one byte,
+/// which the handshake consumes, so it decodes to no event.
 #[test]
 fn cinematic_and_char_delete_parse_and_decode() {
     // 41 = the dwarf intro.
@@ -95,6 +96,7 @@ fn cinematic_and_char_delete_parse_and_decode() {
     // 0x39 = CHAR_DELETE_SUCCESS.
     let p = messages::parse_server(messages::opcode::SMSG_CHAR_DELETE, &[0x39]).unwrap();
     assert!(matches!(p, ServerPacket::CharDelete { result: 0x39 }));
+    assert!(decode(p).is_empty());
 }
 
 #[test]

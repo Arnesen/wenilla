@@ -115,10 +115,8 @@ impl Probe for Aura {
             .context(
                 "--aura: spell 1126 never appeared in UNIT_FIELD_AURA. Either the descriptor field \
                  index is wrong, or the GM `.aura` command was refused — it needs gmlevel >= 4 \
-                 (VERIFIED vmangos `Chat/Chat.cpp:1229`: SEC_BASIC_ADMIN, which is 4 in \
-                 `shared/Common.h:142`), and the probe accounts are gmlevel 6, so this \
-                 probe cannot run as `probeN` without a temporary grant (docs/METHOD.md, decision 0450's \
-                 precedent for --worldstate).",
+                 (vmangos `Chat/Chat.cpp:1229`: SEC_BASIC_ADMIN, which is 4 in \
+                 `shared/Common.h:142`).",
             )?;
         let debuff = auras
             .iter()
@@ -192,7 +190,7 @@ impl Probe for Aura {
         ensure!(
             d < v,
             "SMSG_UPDATE_AURA_DURATION arrived AFTER the descriptor delta (seq {d} vs {v}) — \
-             decision 0255's slot-keyed buffering is built on the opposite order"
+             the app's slot-keyed buffering is built on the opposite order"
         );
         println!("✅ duration packet precedes the descriptor delta (event {d} before {v})");
 
@@ -203,7 +201,7 @@ impl Probe for Aura {
         {
             bail!(
                 "--aura: slot {slot} reported a duration without being (re)applied — durations are \
-                 not the apply/refresh edges decision 0255's client-side countdown assumes"
+                 not the apply/refresh edges the client-side countdown assumes"
             );
         }
         println!(

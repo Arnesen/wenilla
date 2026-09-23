@@ -36,12 +36,13 @@ pub(super) fn movement_info(pos: [f32; 3], orientation: f32, flags: u32) -> Move
 mod tests {
     use super::*;
 
+    /// Never 0, and a stamp taken right after is not smaller; it wraps at `u32::MAX` ms.
     #[test]
-    fn client_uptime_ms_is_nonzero_and_monotonic() {
+    fn client_uptime_ms_is_nonzero_and_back_to_back_calls_do_not_decrease() {
         let a = client_uptime_ms();
         let b = client_uptime_ms();
         assert!(a >= 1, "stamp is non-zero: {a}");
-        assert!(b >= a, "stamp is monotonic non-decreasing: {a} -> {b}");
+        assert!(b >= a, "the next stamp is not smaller: {a} -> {b}");
     }
 
     #[test]

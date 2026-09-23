@@ -529,6 +529,13 @@ fn name_and_creature_query_roundtrip() {
         "CMSG_CREATURE_QUERY body"
     );
 
+    // CMSG_NAME_QUERY: the full guid (vmangos `QueryPlayerName`), built by `full_guid`.
+    assert_eq!(
+        messages::full_guid(7),
+        hx("0700000000000000"),
+        "CMSG_NAME_QUERY body"
+    );
+
     // SMSG_NAME_QUERY_RESPONSE (vmangos `NameQueryResponse::AppendBodyTo`): guid, name, an empty
     // realm cstring, then race, gender and class as `u32`.
     let body = hx("070000000000000042656e696c6c610000010000000000000001000000");

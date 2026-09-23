@@ -249,6 +249,16 @@ fn npc_text_update_greeting_extraction() {
         SessionEvent::NpcGreeting { text_id, blocks } => {
             assert_eq!(text_id, 321);
             assert_eq!(blocks.len(), messages::NPC_TEXT_BLOCKS);
+
+            // A near-zero threshold draws the first block with text in the gender's column, the
+            // full sum the last; the male column skips block 6, the female column block 0.
+            const NEAR: f32 = 1.999_999_9;
+            const FAR: f32 = 1.0;
+            let pick = |gender, roll| messages::select_greeting(&blocks, gender, roll);
+            assert_eq!(pick(0, NEAR), Some("Low probability greeting"));
+            assert_eq!(pick(0, FAR), Some("Welcome, $N!"));
+            assert_eq!(pick(1, NEAR), Some("Welcome, traveler!"));
+            assert_eq!(pick(1, FAR), Some("Female-only greeting"));
         }
         other => panic!("npc greeting event, got {other:?}"),
     }

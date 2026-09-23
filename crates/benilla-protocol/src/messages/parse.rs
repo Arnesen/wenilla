@@ -1636,8 +1636,9 @@ mod tests {
         assert_eq!(tail, 0);
     }
 
+    /// A count past the body ends in `UnexpectedEof` at the first missing row, in both opcodes.
     #[test]
-    fn a_lying_faction_count_is_a_short_read_not_an_allocation() {
+    fn a_lying_faction_count_is_a_short_read() {
         let mut body = 0xFFFF_FFFFu32.to_le_bytes().to_vec();
         body.push(0x01); // flags
         body.extend_from_slice(&3000i32.to_le_bytes()); // standing

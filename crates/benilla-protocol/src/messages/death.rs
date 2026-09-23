@@ -186,6 +186,7 @@ mod tests {
         );
     }
 
+    /// A spirit healer's offer as `Spell::SendResurrectRequest` builds it: named, with sickness.
     #[test]
     fn resurrect_request_npc_caster_golden() {
         let name = b"Spirit Healer";
@@ -195,12 +196,19 @@ mod tests {
         body.extend_from_slice(name);
         body.push(0);
         body.push(1); // sickness = true
-        body.push(1);
+        body.push(1); // hasResTimer = true
         let mut r = body.as_slice();
         let req = read_resurrect_request(&mut r).unwrap();
         assert!(r.is_empty());
-        assert_eq!(req.name, "Spirit Healer");
-        assert!(req.sickness);
+        assert_eq!(
+            req,
+            ResurrectRequestBody {
+                caster: 0xF130_0FBE_0000_2AB3,
+                name: "Spirit Healer".into(),
+                sickness: true,
+                has_timer: true,
+            }
+        );
     }
 
     /// `SMSG_SPIRIT_HEALER_CONFIRM` is one full guid (`SpellEffects.cpp:825-829`).
@@ -231,6 +239,10 @@ mod tests {
         let mut expect = 0x2Au64.to_le_bytes().to_vec();
         expect.push(0);
         assert_eq!(resurrect_response(0x2A, false), expect);
+        assert_eq!(
+            area_spirit_healer(0xF130_0033_3C00_0010),
+            0xF130_0033_3C00_0010u64.to_le_bytes().to_vec()
+        );
     }
 }
 

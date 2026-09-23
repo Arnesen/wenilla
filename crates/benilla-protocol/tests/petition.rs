@@ -282,7 +282,7 @@ fn the_two_results_packets_share_an_enum_but_not_a_layout() {
 /// `MSG_PETITION_DECLINE` sends the charter's item guid but receives the decliner's player guid,
 /// both eight bytes; `MSG_PETITION_RENAME` is `u64` item and cstring name both ways.
 #[test]
-fn msg_petition_opcodes_read_a_different_body_than_they_write() {
+fn msg_petition_decline_differs_by_direction_and_rename_does_not() {
     assert_eq!(
         messages::petition_decline(0x0001_0203),
         hx("0302010000000000"),

@@ -39,7 +39,7 @@ fn probe_char_name(user: &str) -> Option<String> {
 }
 
 fn login(host: &str, user: &str, pass: &str) -> Result<(WorldSession, String)> {
-    let name = probe_char_name(user).context("account must be a probeN (decision 0530)")?;
+    let name = probe_char_name(user).context("account must be a probeN")?;
     let logon = benilla_protocol::logon(host, user, pass)?;
     let addr = logon
         .realms

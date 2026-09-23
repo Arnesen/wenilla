@@ -248,17 +248,17 @@ impl Probe for QuestLog {
             bail!(
                 "--questlog: slot {slot}'s PLAYER_QUEST_LOG id field never cleared to 0 within \
                  8s after CMSG_QUESTLOG_REMOVE_QUEST (no ack SMSG exists on this wire — the field \
-                 clear IS the confirmation, decision 0109)"
+                 clear IS the confirmation)"
             );
         }
         println!(
             "✅ abandon: slot {slot}'s PLAYER_QUEST_LOG id field cleared to 0 (no ack SMSG on \
-             this wire — the field update is the confirmation, decision 0109)."
+             this wire — the field update is the confirmation)."
         );
 
         println!(
             "\n✅ --questlog PASS: template parsed, slot {slot} tracked → COMPLETE → abandoned \
-             (id field cleared) — the quest-log wire verified end to end (decision 0109)."
+             (id field cleared) — the quest-log wire verified end to end."
         );
         Ok(())
     }

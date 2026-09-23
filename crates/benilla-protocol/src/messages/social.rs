@@ -475,8 +475,9 @@ mod tests {
         assert_eq!(who(&request), want);
     }
 
+    /// A bare `/who` as bytes: levels 0 to 100, both names empty, every race and class, no lists.
     #[test]
-    fn the_default_who_query_is_the_clients_unset_shape() {
+    fn the_default_who_query_encodes_levels_0_to_100_with_every_filter_open() {
         let body = who(&WhoRequest::default());
         assert_eq!(&body[0..4], &0u32.to_le_bytes(), "levelMin");
         assert_eq!(&body[4..8], &100u32.to_le_bytes(), "levelMax — not 255");

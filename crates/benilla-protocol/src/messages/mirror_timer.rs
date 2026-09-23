@@ -122,6 +122,12 @@ mod tests {
         );
         assert!(start.paused);
         assert_eq!(start.spell_id, 5697);
+
+        // The draining rate, -1 on the wire, reads back negative.
+        body[12..16].copy_from_slice(&(-1i32).to_le_bytes());
+        let start = read_start_mirror_timer(&mut &body[..]).unwrap();
+        assert_eq!(start.scale, -1, "draining");
+        assert_eq!(start.spell_id, 5697);
     }
 
     #[test]

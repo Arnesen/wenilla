@@ -60,8 +60,9 @@ mod tests {
         }
     }
 
+    /// A last page's zero `nextPageId` reads as 0, the value that ends the chain.
     #[test]
-    fn last_page_terminates_the_chain() {
+    fn the_last_page_reads_a_zero_next_page_id() {
         let mut body = 9u32.to_le_bytes().to_vec();
         body.extend_from_slice(b"The end.\0");
         body.extend_from_slice(&0u32.to_le_bytes());

@@ -337,6 +337,12 @@ fn group_list_raid_with_assistant_flag() {
 fn group_list_empty_you_left_shape_is_14_bytes() {
     let body = vec![0u8; 14];
     assert_eq!(body.len(), 14);
+    let (_, tail) = messages::parse_server_with_tail(opcode::SMSG_GROUP_LIST, &body).unwrap();
+    assert_eq!(tail, 0, "the parser reads all 14 bytes");
+    assert!(
+        messages::parse_server(opcode::SMSG_GROUP_LIST, &body[..13]).is_err(),
+        "13 bytes is a short read"
+    );
 
     let p = messages::parse_server(opcode::SMSG_GROUP_LIST, &body).unwrap();
     match &p {

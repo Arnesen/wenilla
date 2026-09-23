@@ -158,7 +158,7 @@ impl Probe for QuestItem {
         )
         .context(
             "--quest-item: the re-query got no DETAILS — this server DOES gate the query by \
-             quest status, so the panel would not re-open (decision 0669 expects vmangos' \
+             quest status, so the panel would not re-open (the probe expects vmangos's \
              ungated handler)",
         )?;
         println!("✅ the panel legitimately re-opens: DETAILS {reopened}");

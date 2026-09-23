@@ -162,8 +162,8 @@ impl Probe for MountTele {
         ensure!(
             (create_run - mounted).abs() < 0.01,
             "--mount-tele: the destination's create block should still carry the MOUNTED run \
-             speed ({mounted}), got {create_run} — the strip would then precede the create and \
-             B213's ordering would not be this one"
+             speed ({mounted}), got {create_run} — the strip would then precede the create, \
+             the opposite of the order this probe expects"
         );
         ensure!(
             (strip_run - BASE_RUN).abs() < 0.01,
@@ -174,8 +174,7 @@ impl Probe for MountTele {
             "\n--mount-tele PASS: arrived on map {map}; create block carried the mount's \
              {create_run} yd/s, the dismount's SMSG_FORCE_RUN_SPEED_CHANGE followed {} µs later \
              at {strip_run} yd/s.\n  Both packets are written by one HandleMoveWorldportAckOpcode \
-             call, so a client that drains its socket once a frame sees them in ONE drain — which \
-             is what B213 (decision 1478) turns on.",
+             call, so a client that drains its socket once a frame sees them in ONE drain.",
             gap.as_micros()
         );
         Ok(())

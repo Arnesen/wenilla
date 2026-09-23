@@ -98,8 +98,9 @@ pub fn addon_tail(addons: &[SecureAddon]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// The block has retail's 342-byte length and parses as twelve sorted, stock-signed records.
     #[test]
-    fn stock_block_matches_the_retail_capture() {
+    fn stock_block_has_the_retail_size_and_twelve_sorted_stock_records() {
         let plain = addon_block(&STOCK_SECURE_ADDONS);
         assert_eq!(plain.len(), 342, "retail sent 342 uncompressed bytes");
 

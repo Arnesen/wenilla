@@ -517,9 +517,9 @@ mod tests {
         assert_eq!(d.reward_spell, 42);
     }
 
+    /// The pairs are read and discarded, so the check is that the fields after the run align.
     #[test]
-    fn offer_reward_emotes_are_delay_first() {
-        // Both emote values are discarded; this checks that the fields after them align.
+    fn offer_reward_skips_its_counted_emote_pairs() {
         let mut b = Vec::new();
         push_u64(&mut b, 0x42);
         push_u32(&mut b, 100);

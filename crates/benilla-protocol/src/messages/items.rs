@@ -657,6 +657,8 @@ mod tests {
     fn wrap_item_body_paper_first() {
         // 467: giftbag, giftslot, itembag, itemslot (Item.cpp:121-127).
         assert_eq!(wrap_item(255, 23, 255, 24), vec![255, 23, 255, 24]);
+        // Paper in the first bag's slot 3, the target in backpack slot 24: four distinct bytes.
+        assert_eq!(wrap_item(19, 3, 255, 24), vec![19, 3, 255, 24]);
     }
 
     #[test]

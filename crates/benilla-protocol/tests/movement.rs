@@ -524,14 +524,21 @@ fn compressed_moves_unwraps_to_the_same_events_as_loose_relays() {
         ),
     }
 
-    let loose = decode(
-        messages::parse_server(
+    // The batch's two records, relayed loose under their own opcodes.
+    let loose: Vec<SessionEvent> = [
+        (
             messages::opcode::MSG_MOVE_START_FORWARD,
-            &hx("01aa0100000004030201cdd70bc6357e04c3f90fa7420000a03f00000000"),
-        )
-        .unwrap(),
-    );
-    assert_eq!(format!("{:?}", events[0]), format!("{:?}", loose[0]));
+            "01aa0100000004030201cdd70bc6357e04c3f90fa7420000a03f00000000",
+        ),
+        (
+            messages::opcode::MSG_MOVE_SET_FACING,
+            "01aa0000000004030201cdd70bc6357e04c3f90fa7420000c03f00000000",
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(opcode, body)| decode(messages::parse_server(opcode, &hx(body)).unwrap()))
+    .collect();
+    assert_eq!(format!("{events:?}"), format!("{loose:?}"));
 }
 
 /// A misframed batch is a parse error, never a silent drop of the moves it carries.
