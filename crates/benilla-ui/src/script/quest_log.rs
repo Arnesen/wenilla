@@ -163,22 +163,36 @@ pub type QuestLogQuestItem = QuestItemView;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QuestLogState {
     /// The list rows, in quest-log (descriptor slot) order. 1-based indexing on the Lua side.
-    /// A collapsed header's quests are OMITTED here (the app filters) — indexes are visible rows.
+    /// A collapsed header's quests are OMITTED here (the app filters) — indexes are visible rows;
+    /// their ids ride [`Self::hidden_quest_ids`].
     pub entries: Vec<QuestLogEntryView>,
     /// The total quest count INCLUDING quests hidden under collapsed headers — the "Quests: N/20"
     /// pill must not shrink when a header collapses (`GetNumQuestLogEntries` return 2).
     pub num_quests: u32,
+    /// The ids of the quests folded under a collapsed header — in the log, absent from
+    /// [`Self::entries`]. No getter indexes them; they exist for the **watch prune** alone, which
+    /// in the reference scans the whole row array, hidden rows included (`0x4de7a7`–`0x4de80f`;
+    /// a collapsed-group quest is still a row there, sorted past the visible window — wow-re
+    /// `system/ui/scratch/questlog-list-rebuild.md` §7). Without them a collapse would read as the
+    /// quest leaving the log and silently drop its watch.
+    pub hidden_quest_ids: Vec<u32>,
 }
 
 impl super::UiScript {
     /// Push the quest-log snapshot (the app calls this whenever slots/templates/selection change).
     /// Also prunes the watch set: a watched quest that left the log (abandon/turn-in) drops its
-    /// watch, exactly as the real client's RemoveQuestWatch-on-removal does.
+    /// watch — the rebuild's prune `0x4de7a7`–`0x4de80f`, which keeps a watch while ANY non-header
+    /// row carries its id, visible or [hidden](QuestLogState::hidden_quest_ids). A collapse is
+    /// not a removal: the reference's `0x4ded30` re-sorts and recounts and never prunes.
     pub fn set_quest_log(&mut self, state: QuestLogState) {
         let mut model = self.model_mut();
-        model
-            .quest_log_watched
-            .retain(|id| state.entries.iter().any(|e| e.quest_id == *id));
+        model.quest_log_watched.retain(|id| {
+            state
+                .entries
+                .iter()
+                .any(|e| !e.is_header && e.quest_id == *id)
+                || state.hidden_quest_ids.contains(id)
+        });
         model.quest_log = state;
     }
 
@@ -850,6 +864,7 @@ mod tests {
     fn two_quests() -> QuestLogState {
         QuestLogState {
             num_quests: 2,
+            hidden_quest_ids: Vec::new(),
             entries: vec![
                 QuestLogEntryView {
                     quest_id: 783,
@@ -1263,6 +1278,53 @@ mod tests {
         assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 0);
         s.run("AddQuestWatch(1)").unwrap();
         s.set_quest_log(QuestLogState::default());
+        assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 0);
+    }
+
+    /// A header's collapse folds its quests out of the visible list but NOT out of the log, and
+    /// the watch prune counts them — the reference's prune (`0x4de7a7`–`0x4de80f`) scans the whole
+    /// row array for a non-header row with the watched id, and a collapsed-group quest is still a
+    /// row there, just sorted past the visible window; the collapse itself (`0x4ded30`) re-sorts
+    /// and recounts only (wow-re `system/ui/scratch/questlog-list-rebuild.md` §7/§8). So watch →
+    /// collapse → expand keeps the watch, and a quest that genuinely LEFT the log still drops it.
+    #[test]
+    fn a_collapsed_header_keeps_its_quests_watched() {
+        let header = |collapsed| QuestLogEntryView {
+            title: "Elwynn Forest".into(),
+            is_header: true,
+            collapsed,
+            ..Default::default()
+        };
+        let expanded = || {
+            let mut state = two_quests();
+            state.entries.insert(0, header(false));
+            state
+        };
+        let mut s = UiScript::new().unwrap();
+        s.set_quest_log(expanded());
+        s.run("AddQuestWatch(3)").unwrap(); // quest 7
+        assert_eq!(s.quest_log_watched(), vec![7]);
+
+        // The app's collapsed push: the header alone is visible, both quests are hidden under it.
+        s.set_quest_log(QuestLogState {
+            entries: vec![header(true)],
+            num_quests: 2,
+            hidden_quest_ids: vec![783, 7],
+        });
+        assert_eq!(
+            s.eval::<i64>("return GetNumQuestWatches()").unwrap(),
+            1,
+            "a collapse must not prune the watch of a quest still in the log"
+        );
+        s.set_quest_log(expanded());
+        assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 1);
+        assert_eq!(s.eval::<i64>("return GetQuestIndexForWatch(1)").unwrap(), 3);
+
+        // Quest 7 leaves the log (turn-in) — neither visible nor hidden — and its watch goes.
+        let mut gone = expanded();
+        gone.entries.retain(|e| e.quest_id != 7);
+        gone.num_quests = 1;
+        s.set_quest_log(gone);
         assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 0);
     }
 

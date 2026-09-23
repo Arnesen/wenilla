@@ -39,8 +39,8 @@ fn on_trade_status_extended(In(ev): In<SessionEvent>, mut trade: ResMut<TradeSes
 }
 
 /// An open trade dies with the socket (decision 0592) — the reconnect starts with no trade. A
-/// listener on the session end, which the drain's dispatch match still owns
-/// (a second handler on the kind, after the bridge's own teardown).
+/// listener on the session end (a second handler on `Disconnected`, after the bridge's own
+/// teardown, `net::session::on_disconnected`).
 fn on_session_end(In(_): In<SessionEvent>, mut trade: ResMut<TradeSession>) {
     trade.clear_session();
 }

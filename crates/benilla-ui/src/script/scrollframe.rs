@@ -403,8 +403,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             ) {
                 lua.app_data_mut::<Model>()
                     .expect("model app_data")
-                    .errors
-                    .push(e.to_string());
+                    .record_script_error(e.to_string());
             }
             Ok(())
         })?,
@@ -428,8 +427,7 @@ fn fire_scroll(lua: &Lua, this: &Table, script: &str, value: f32) -> mlua::Resul
     {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
-            .errors
-            .push(e.to_string());
+            .record_script_error(e.to_string());
     }
     Ok(())
 }

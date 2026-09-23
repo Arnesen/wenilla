@@ -1353,8 +1353,7 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
     {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
-            .errors
-            .push(e.to_string());
+            .record_script_error(e.to_string());
     }
     // **A nameplate's click is the engine's too** (decision 2148): the reference's plate overrides
     // the button click slot (`0x7cb910`) *and* chains the base, so its unit is selected whether the

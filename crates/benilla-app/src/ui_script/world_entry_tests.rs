@@ -1722,3 +1722,63 @@ fn the_entry_load_seeds_a_record_the_feed_cannot_take_away() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ─────────────────── The production load is silent (the UI-load sound bracket) ───────────────────
+
+/// Every kit name the live VM has queued since the last drain.
+fn taken_kit_names(world: &mut World) -> Vec<String> {
+    world
+        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .expect("in-world VM")
+        .take_sounds()
+        .into_iter()
+        .filter_map(|r| match r {
+            benilla_ui::script::SoundRequest::KitName(n) => Some(n),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A login and a `/reload` load without a sound** — `0x48fbf0` brackets itself in the counted
+/// suppression scope (`0x48fbfa` → `0x49016d`) across the TOC walk, the addons, the saved
+/// variables and the login cascade, and both of its callers (login `0x48f681`, `/reloadui`
+/// `0x495669`) go through it (wow-re `system/ui/scratch/framexml-load-sound-suppression.md`).
+///
+/// Stock `TargetFrame_OnLoad` → `TargetFrame_Update` → `Hide()` → `TargetFrame_OnHide` really does
+/// call `PlaySound("INTERFACESOUND_LOSTTARGETUNIT")` at load; the engine drops it. Before the
+/// production edge carried the bracket only the tests' whole-manifest load did, and every
+/// `/reload` played the lost-target click.
+#[test]
+fn a_login_and_a_reload_load_without_the_lost_target_sound() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("load-silent");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert!(
+        frame_exists(&world, "TargetFrame"),
+        "the stock target frame loaded"
+    );
+    let at_login = taken_kit_names(&mut world);
+    assert!(
+        !at_login
+            .iter()
+            .any(|n| n == "INTERFACESOUND_LOSTTARGETUNIT"),
+        "the login load must be silent — the lost-target click was queued: {at_login:?}"
+    );
+
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+    let at_reload = taken_kit_names(&mut world);
+    assert!(
+        !at_reload
+            .iter()
+            .any(|n| n == "INTERFACESOUND_LOSTTARGETUNIT"),
+        "the /reload load must be silent — the lost-target click was queued: {at_reload:?}"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

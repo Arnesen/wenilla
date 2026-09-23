@@ -327,13 +327,22 @@ pub(crate) fn fps_journal_path() -> Option<PathBuf> {
     diagnostics_dir().map(|d| d.join("fps-journal.csv"))
 }
 
-/// Make an arbitrary realm/character name safe as one path component: anything outside
-/// `[A-Za-z0-9_]` becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
+/// Make an arbitrary realm/character name safe as one path component: anything that is not a
+/// letter or digit becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
 /// escape the folder or collide with the path separator.
+///
+/// **Letters are any script's, kept as they are** — the reference names its per-character folder
+/// with the raw name (`WTF/Account/<ACC>/<REALM>/<CHAR>/`). This was ASCII-only, which folded every
+/// other letter to `_`: vmangos accepts extended-Latin, Cyrillic and East-Asian names by default
+/// (`StrictPlayerNames = 0`), so `Zoë` and `Zoé` — or any two Cyrillic names of one length — shared
+/// one set of macros, bindings, addon state and SavedVariables, and each login saved over the
+/// other's. A character name is letters only (vmangos `isValidString`), so keeping every letter
+/// makes the token one-to-one for them; an ASCII name maps exactly as before, so no existing file
+/// moves.
 fn file_token(s: &str) -> String {
     let t: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
     if t.is_empty() {
         "unknown".into()
@@ -346,13 +355,19 @@ fn file_token(s: &str) -> String {
 /// a crash mid-write leaves the old file intact, never a truncated one. The one write path for
 /// every resident of the folder.
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    write_atomic_bytes(path, contents.as_bytes())
+}
+
+/// [`write_atomic`] for a resident that is bytes, not text — the saved-variables files, which
+/// carry a Lua byte string's bytes as they are.
+pub(crate) fn write_atomic_bytes(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("tmp");
     {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
+        f.write_all(contents)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)
@@ -393,6 +408,28 @@ pub(crate) mod test_env {
 mod tests {
     use super::test_env::{EnvGuard, ENV_LOCK};
     use super::*;
+
+    /// **Two characters never share a file.** Every per-character resident keys on this token, so
+    /// a collision is one character's macros, bindings and SavedVariables loaded and then saved
+    /// over by another. ASCII names — every file already on disk — keep their exact paths.
+    #[test]
+    fn distinct_names_never_share_a_token() {
+        assert_ne!(file_token("Вася"), file_token("Петя"));
+        assert_ne!(file_token("Zoë"), file_token("Zoé"));
+        assert_eq!(file_token("Zoë"), "Zoë");
+        assert_eq!(file_token("Onehunter"), "Onehunter");
+        assert_eq!(file_token("Hydraxian Waterlords"), "Hydraxian_Waterlords");
+        assert_eq!(
+            file_token("a/b\\c:d"),
+            "a_b_c_d",
+            "separators never survive"
+        );
+        assert_eq!(
+            file_token("realm-name"),
+            "realm_name",
+            "the key's own `-` stays unforgeable"
+        );
+    }
 
     /// The residents' layout, exercised through the override — which is the *only* step of
     /// [`home`] whose answer a test can state, since the other two are the machine's project

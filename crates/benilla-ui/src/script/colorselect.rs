@@ -325,8 +325,7 @@ fn fire_color_select(lua: &Lua, this: &Table, r: f64, g: f64, b: f64) -> mlua::R
     ) {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
-            .errors
-            .push(e.to_string());
+            .record_script_error(e.to_string());
     }
     Ok(())
 }

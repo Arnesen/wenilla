@@ -42,7 +42,7 @@
 //! on the confirmed switch back to general — the reference's own semantics.
 
 use bevy::input::keyboard::KeyboardInput;
-use bevy::input::mouse::AccumulatedMouseScroll;
+use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
@@ -434,6 +434,51 @@ fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<Bind
     script.fire_event("UPDATE_BINDINGS", vec![]);
 }
 
+/// A wheel delta in **lines** — notches — whatever unit the OS reported it in. A mouse wheel
+/// arrives as `Line`; a macOS trackpad or Magic Mouse arrives as `Pixel`, many small deltas a
+/// frame apart for one gesture, and Bevy's own conversion factor is the one normalisation.
+/// Shared by every wheel reader so none of them keeps its own copy of the constant.
+pub(crate) fn wheel_lines(unit: MouseScrollUnit, dy: f32) -> f32 {
+    match unit {
+        MouseScrollUnit::Line => dy,
+        MouseScrollUnit::Pixel => dy / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR,
+    }
+}
+
+/// **Whole notches out of a stream of line deltas**, carrying the fraction between frames.
+///
+/// For the consumers that act per NOTCH rather than per unit of travel — the UI's
+/// `OnMouseWheel` (stock `ScrollFrameTemplate_OnMouseWheel` moves half a pane per call and
+/// `ChatFrame_OnMouseWheel` a line, both off the sign alone) and the realm list's row step. Fed a
+/// trackpad's per-frame pixel trickle raw, each of those fired once per frame, so a gentle swipe
+/// slammed a pane to its end; through this, ten frames of a tenth of a line are one notch.
+///
+/// A reversal drops the carried fraction: travel the other way is a new gesture, and it should
+/// not first have to undo the remainder of the last one.
+///
+/// A `Resource` for the UI's feed (a fact about the input device's gesture, which outlives any one
+/// VM), a `Local` for the realm list's.
+#[derive(Default, Resource)]
+pub(crate) struct WheelNotches {
+    carry: f32,
+}
+
+impl WheelNotches {
+    /// Add `lines` of travel; returns the signed whole notches it completes (usually 0 or ±1).
+    pub(crate) fn feed(&mut self, lines: f32) -> i32 {
+        if lines == 0.0 || !lines.is_finite() {
+            return 0;
+        }
+        if self.carry != 0.0 && self.carry.signum() != lines.signum() {
+            self.carry = 0.0;
+        }
+        self.carry += lines;
+        let whole = self.carry.trunc();
+        self.carry -= whole;
+        whole as i32
+    }
+}
+
 /// The dispatch pass — see the module doc. Runs right after the UI key feed (same frame's
 /// capture gate), before `WorldStage::Input` (a bound key must act this frame, once).
 fn latch_and_dispatch(
@@ -686,14 +731,9 @@ fn latch_and_dispatch(
     // `RunCommand 0x4b7b50` no-op: `UP + !runOnUp` returns without running anything). Before this
     // the notch was a press with no release, which quietly made every press+release command a
     // dead wheel binding. Over UI the wheel belongs to the hovered frame.
-    // Trackpads report pixel deltas — normalized to line-equivalents so the zoom consumer's
-    // feel is unchanged from when it read the scroll itself.
-    let wheel = match scroll.unit {
-        bevy::input::mouse::MouseScrollUnit::Line => scroll.delta.y,
-        bevy::input::mouse::MouseScrollUnit::Pixel => {
-            scroll.delta.y / bevy::input::mouse::MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR
-        }
-    };
+    // Trackpads report pixel deltas — normalized to line-equivalents ([`wheel_lines`]) so the
+    // zoom consumer's feel is unchanged from when it read the scroll itself.
+    let wheel = wheel_lines(scroll.unit, scroll.delta.y);
     // **Over CHROME**, not over any UI at all: the wheel still zooms with the cursor on a
     // nameplate, which is a mouse-enabled widget and not a panel (`PointerOverUiPanel`). Plates sit
     // over exactly the things you look at, so the raw flag silently killed scroll-zoom wherever one

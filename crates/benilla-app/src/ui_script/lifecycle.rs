@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use benilla_assets::LockRecover;
 use benilla_ui::script::UiScript;
 
+use super::manifest::silenced_ui_load;
 use super::{
     load_font_registry, load_ingame_ui, CursorPayloadHeld, PlayerUiHover, UiClock,
     UiKeyboardCapture,
@@ -584,43 +585,54 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // through its whole load edge and only converged a frame later off whatever poll the caller
     // had written to survive it.
     seat_raster_seam_for_load(world, &mut script);
-    let _ = load_ingame_ui(&mut script, identity.as_ref(), &roster, version_check);
-    // The Minimap widget was born a moment ago with `MinimapState::default()`; seed its two live
-    // zoom indices from the persisted CVars now, before anything reads them — the reference's own
-    // minimap reset path copying each CVar object's int into its live index (decision 1131). Once
-    // only: from here the widget's index is the live truth and `Minimap:SetZoom` writes the CVar
-    // back. Startup always precedes this state edge (1038), so the knob is already loaded.
-    let zoom = world.resource::<crate::minimap::MinimapZoom>();
-    script.set_minimap_zoom(zoom.outdoor, zoom.inside);
-    // The saved-variables chunk runs HERE — after the XML assigned its file-scope defaults, before
-    // any consumer reads them — then `VARIABLES_LOADED`. That is the reference's own load order
-    // (`AddOn_Load 0x51f240` steps 2 → 4 → 6, decision 1128); reversing it means the defaults
-    // always win and nothing can ever be remembered.
-    //
-    // **And the chat cache restores inside it, between `VARIABLES_LOADED` and `PLAYER_LOGIN`** —
-    // the reference's own slot for the reader's `UPDATE_CHAT_WINDOWS` + `UPDATE_CHAT_COLOR` burst
-    // (`0x4900d6`, after `0x4900b2` and before `0x490959`; decisions 2119 and 2125). It is the
-    // sole firer of `UPDATE_CHAT_WINDOWS`, which is the only thing that registers a chat frame for
-    // any `CHAT_MSG_*` (ref `ChatFrame.lua` l.1261-1273) — as an `Update` system it landed after
-    // the session's first chat had already been routed, and the login MOTD went to a window
-    // registered for nothing.
-    // The plate pair is read out of the world FIRST: the second closure borrows `world` for the
-    // chat-cache restore, and a `Copy` of two bools costs nothing next to fighting that borrow.
-    // Absent in a bare test world, where "both off" is also the resource's own default.
+    // The minimap zoom pair and the plate pair are read out of the world FIRST: the bracket's body
+    // borrows `world` for the chat-cache restore, and two `Copy` pairs cost nothing next to
+    // fighting that borrow. The plates are absent in a bare test world, where "both off" is also
+    // the resource's own default.
+    let zoom = {
+        let z = world.resource::<crate::minimap::MinimapZoom>();
+        (z.outdoor, z.inside)
+    };
     let plates = world
         .get_resource::<crate::vplates::VPlateMode>()
         .copied()
         .unwrap_or_default();
-    finish_ui_load_with(
-        &mut script,
-        // `NAMEPLATES_ON` / `FRIENDNAMEPLATES_ON` (2132). This seat, and not the `Update` feed
-        // beside it, is what fixes the bug: `UIParent_OnEvent`'s first `UpdateNameplates()` runs
-        // inside the `VARIABLES_LOADED` fired at the end of this very call.
-        |script| crate::vplates::push_plate_globals(script, plates),
-        |script| {
-            crate::ui_chat::restore_chat_looks(world, script);
-        },
-    );
+    // **The whole load edge is silent** — the TOC walk, every addon, the saved variables and
+    // `PLAYER_LOGIN`, the span `0x48fbf0` brackets itself across (`0x48fbfa` → `0x49016d`). Both
+    // login and `ReloadUI` come through here; see [`silenced_ui_load`].
+    silenced_ui_load(&mut script, |script| {
+        let _ = load_ingame_ui(script, identity.as_ref(), &roster, version_check);
+        // The Minimap widget was born a moment ago with `MinimapState::default()`; seed its two
+        // live zoom indices from the persisted CVars now, before anything reads them — the
+        // reference's own minimap reset path copying each CVar object's int into its live index
+        // (decision 1131). Once only: from here the widget's index is the live truth and
+        // `Minimap:SetZoom` writes the CVar back. Startup always precedes this state edge (1038),
+        // so the knob is already loaded.
+        script.set_minimap_zoom(zoom.0, zoom.1);
+        // The saved-variables chunk runs HERE — after the XML assigned its file-scope defaults,
+        // before any consumer reads them — then `VARIABLES_LOADED`. That is the reference's own
+        // load order (`AddOn_Load 0x51f240` steps 2 → 4 → 6, decision 1128); reversing it means the
+        // defaults always win and nothing can ever be remembered.
+        //
+        // **And the chat cache restores inside it, between `VARIABLES_LOADED` and `PLAYER_LOGIN`**
+        // — the reference's own slot for the reader's `UPDATE_CHAT_WINDOWS` + `UPDATE_CHAT_COLOR`
+        // burst (`0x4900d6`, after `0x4900b2` and before `0x490959`; decisions 2119 and 2125). It
+        // is the sole firer of `UPDATE_CHAT_WINDOWS`, which is the only thing that registers a chat
+        // frame for any `CHAT_MSG_*` (ref `ChatFrame.lua` l.1261-1273) — as an `Update` system it
+        // landed after the session's first chat had already been routed, and the login MOTD went to
+        // a window registered for nothing.
+        finish_ui_load_with(
+            script,
+            // `NAMEPLATES_ON` / `FRIENDNAMEPLATES_ON` (2132). This seat, and not the `Update`
+            // feed beside it, is what fixes the bug: `UIParent_OnEvent`'s first
+            // `UpdateNameplates()` runs inside the `VARIABLES_LOADED` fired at the end of this
+            // very call.
+            |script| crate::vplates::push_plate_globals(script, plates),
+            |script| {
+                crate::ui_chat::restore_chat_looks(world, script);
+            },
+        );
+    });
     // **Say it out loud when an addon didn't load** (decision 1495). Every failure the walk found
     // is retained now, but a log nobody knows to open does not fix silence — and silence is the
     // actual defect B293 reports: *"there are a lot of addons that still doesn't work"*, with
@@ -961,7 +973,7 @@ pub(crate) fn end_ui_session(world: &mut World) {
     // that lands in an engine-side store that survives), before the VM is replaced. The next
     // VM's registration seeds from what this writes ([`crate::cvars`]'s saved base).
     crate::cvars::fold_dying_vm_cvars(world);
-    // The chat cache, on the same terms and for the same reason (decision NNNN): it composes the
+    // The chat cache, on the same terms and for the same reason (decision 2184): it composes the
     // player's file out of the DYING VM, and `/reload` never crosses the `OnExit(InWorld)` edge
     // its flush used to hang on — so a window moved in the last second before a reload was
     // written nowhere and re-read stale from disk.

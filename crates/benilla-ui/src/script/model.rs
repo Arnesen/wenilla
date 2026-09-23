@@ -839,6 +839,10 @@ pub(crate) struct Model {
     /// The globals `RegisterForSave` declared, in registration order — the saved-variables set the
     /// host writes out at logout/exit and re-executes at load (decision 1128, [`super::saved`]).
     pub(crate) saved_names: Vec<String>,
+    /// The saved-variables files that failed to load this session ([`super::saved`]'s
+    /// `hold_saved_file`) — the shutdown write leaves each one on disk rather than replacing a
+    /// settings file it never read with the defaults it ran on instead.
+    pub(crate) held_saved_files: Vec<std::path::PathBuf>,
 
     /// The key-binding table (decision 0997, [`super::keybind`]) — the chord→command store the
     /// Key Bindings window edits, plus its stored account/character sets. The CVar table's twin:
@@ -1077,7 +1081,9 @@ pub(crate) struct Model {
     ///
     /// The **pet** payload arm is excluded (decision 1010): `PlaceAction` refuses it, so lighting
     /// the action bar's empty slots for a payload that cannot land there would be an invitation to
-    /// a no-op. It drives [`Self::pet_grid_shown`] instead.
+    /// a no-op. It drives [`Self::pet_grid_shown`] instead. So is the **vendor row** (mode 5): its
+    /// grab setter `0x4950f0` fires `ACTIONBAR_SHOWGRID` for mode 7 alone (wow-re
+    /// `merchant-cursor-law.md` §5).
     pub(crate) cursor_grid_shown: bool,
     /// The same mirror for the PET bar's grid — `PET_BAR_SHOWGRID`/`PET_BAR_HIDEGRID`, which the
     /// reference fires from inside the pet-action pickup builder itself (`0x494f28`) rather than
@@ -2038,6 +2044,7 @@ impl Model {
             video_caps: super::cvars::VideoCaps::default(),
             restart_gx_asks: 0,
             saved_names: Vec::new(),
+            held_saved_files: Vec::new(),
             keybinds: super::keybind::KeybindState::default(),
             actions: HashMap::new(),
             action_states: HashMap::new(),

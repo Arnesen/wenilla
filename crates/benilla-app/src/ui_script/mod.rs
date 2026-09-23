@@ -457,6 +457,7 @@ impl Plugin for UiScriptPlugin {
             // the hover recorder is armed; the producer owns the resource so any minimal app that
             // runs the UI pass (the extract tests) has it.
             .init_resource::<UiFrameCost>()
+            .init_resource::<crate::bindings::WheelNotches>()
             .init_resource::<UiCostWanted>()
             .init_resource::<PointerOverUi>()
             .init_resource::<SyntheticPointer>()

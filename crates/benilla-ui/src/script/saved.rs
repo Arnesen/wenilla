@@ -30,7 +30,6 @@
 
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::fmt::Write as _;
 
 use mlua::{Lua, Table, Value};
 
@@ -42,6 +41,27 @@ use super::Model;
 const MAX_DEPTH: usize = 32;
 
 impl super::UiScript {
+    /// **Hold a saved-variables file that did not load** — the shutdown write must leave it alone.
+    ///
+    /// A file that fails as a chunk (a hand edit with a typo; a database past Lua's 262,143
+    /// constants per chunk) leaves its globals at the defaults the code assigned, and the write at
+    /// logout would then replace the player's whole file with those defaults. The reference does
+    /// exactly that — it discards an unparseable file and writes whole from live values (wow-re
+    /// `system/ui/scratch/savedvariables-protocol.md`) — and both load sites here already promised
+    /// otherwise ("left on disk untouched"); this is what makes the promise true. The cost is this
+    /// session's changes to that one file, which is the trade the promise named.
+    pub fn hold_saved_file(&self, path: &std::path::Path) {
+        let mut model = self.model_mut();
+        if !model.held_saved_files.iter().any(|p| p == path) {
+            model.held_saved_files.push(path.to_path_buf());
+        }
+    }
+
+    /// Did this session's load fail on `path`? ([`Self::hold_saved_file`].)
+    pub fn saved_file_held(&self, path: &std::path::Path) -> bool {
+        self.model_ref().held_saved_files.iter().any(|p| p == path)
+    }
+
     /// The registered names, in registration order — what the host writes out (the reference's
     /// own emission order, and stable across runs because the load order is).
     pub fn saved_variable_names(&self) -> Vec<String> {
@@ -55,16 +75,22 @@ impl super::UiScript {
     /// rather than written as something that would fail to load; the reference loses the same set,
     /// silently. `nil` IS written (`NAME = nil`), which is how the reference records a toggle that
     /// has never been touched.
-    pub fn saved_variables_text(&self) -> String {
-        self.saved_variables_text_for(&self.saved_variable_names())
+    ///
+    /// **Bytes, not text**: a Lua string is a byte string, and the file is executed as a chunk
+    /// that reads bytes (1193), so the writer is the one place that could change a value — and it
+    /// did. Values and keys went through `to_string_lossy`, so a string an addon cut mid-codepoint
+    /// or packed with high bytes (a compression library's output) came back from the next login as
+    /// U+FFFD, and two such keys could fold into one entry. The reference writes the bytes raw.
+    pub fn saved_variables_bytes(&self) -> Vec<u8> {
+        self.saved_variables_bytes_for(&self.saved_variable_names())
     }
 
-    /// [`UiScript::saved_variables_text`] over an explicit name list — an addon's own
+    /// [`UiScript::saved_variables_bytes`] over an explicit name list — an addon's own
     /// `## SavedVariables` set (1188 phase 3), which is declared in its manifest rather than
     /// through `RegisterForSave`. Same grammar, same skip rules; only the source of the names
     /// differs, which is exactly the difference between the reference's two mechanisms.
-    pub fn saved_variables_text_for(&self, names: &[String]) -> String {
-        let mut out = String::new();
+    pub fn saved_variables_bytes_for(&self, names: &[String]) -> Vec<u8> {
+        let mut out = Vec::new();
         let mut unwritable = Vec::new();
         for name in names {
             let value: Value = match self.lua().globals().get(name.as_str()) {
@@ -77,7 +103,10 @@ impl super::UiScript {
             let mut seen = HashSet::new();
             match serialize(&value, 1, &mut seen) {
                 Some(text) => {
-                    let _ = writeln!(out, "{name} = {text}");
+                    out.extend_from_slice(name.as_bytes());
+                    out.extend_from_slice(b" = ");
+                    out.extend_from_slice(&text);
+                    out.push(b'\n');
                 }
                 None => unwritable.push(name.clone()),
             }
@@ -98,13 +127,13 @@ impl super::UiScript {
 /// starts at 1); `seen` carries the table identities on the current path — a repeat is a cycle and
 /// drops that entry. Note it is the *path*, not every table ever visited: a shared subtable is
 /// legitimately written twice (as it must be, since the file has no way to express aliasing).
-fn serialize(v: &Value, depth: usize, seen: &mut HashSet<*const c_void>) -> Option<String> {
+fn serialize(v: &Value, depth: usize, seen: &mut HashSet<*const c_void>) -> Option<Vec<u8>> {
     match v {
-        Value::Nil => Some("nil".to_string()),
-        Value::Boolean(b) => Some(b.to_string()),
-        Value::Integer(i) => Some(i.to_string()),
-        Value::Number(n) => number(*n),
-        Value::String(s) => Some(quote(&s.to_string_lossy())),
+        Value::Nil => Some(b"nil".to_vec()),
+        Value::Boolean(b) => Some(b.to_string().into_bytes()),
+        Value::Integer(i) => Some(i.to_string().into_bytes()),
+        Value::Number(n) => number(*n).map(String::into_bytes),
+        Value::String(s) => Some(quote(&s.as_bytes())),
         Value::Table(t) => table(t, depth, seen),
         // Functions, threads, userdata (every widget reference is one — a frame's Lua value is a
         // table whose `[0]` is a lightuserdata handle, RF-0023) cannot be written as a literal.
@@ -127,21 +156,22 @@ fn number(n: f64) -> Option<String> {
 
 /// A quoted Lua string. The reference escapes exactly four characters (`\000`, `\n`, `\"`, `\\`)
 /// and writes CR and every high byte raw; we add `\r` (raw CR in a quoted string is not something
-/// its own loader could read back) and keep high bytes raw, so localized text stays legible.
-fn quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\0' => out.push_str("\\000"),
-            c => out.push(c),
+/// its own loader could read back) and keep every other byte raw, so localized text stays legible
+/// and a byte string that is not UTF-8 round-trips unchanged.
+fn quote(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len() + 2);
+    out.push(b'"');
+    for &b in s {
+        match b {
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            0 => out.extend_from_slice(b"\\000"),
+            b => out.push(b),
         }
     }
-    out.push('"');
+    out.push(b'"');
     out
 }
 
@@ -158,12 +188,12 @@ fn quote(s: &str) -> String {
 /// part that `next` walks ascending. Our vendored parser was restored to that placement in decision
 /// 2111 — before it, this exact file shape came back keyed 1..n in the *hash* part and Bagnon's
 /// keyring drew first.
-fn table(t: &Table, depth: usize, seen: &mut HashSet<*const c_void>) -> Option<String> {
+fn table(t: &Table, depth: usize, seen: &mut HashSet<*const c_void>) -> Option<Vec<u8>> {
     if depth > MAX_DEPTH || !seen.insert(t.to_pointer()) {
         return None;
     }
-    let mut ints: Vec<(i64, String)> = Vec::new();
-    let mut strs: Vec<(String, String)> = Vec::new();
+    let mut ints: Vec<(i64, Vec<u8>)> = Vec::new();
+    let mut strs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for pair in t.pairs::<Value, Value>() {
         let Ok((k, v)) = pair else { continue };
         let Some(value) = serialize(&v, depth + 1, seen) else {
@@ -173,25 +203,34 @@ fn table(t: &Table, depth: usize, seen: &mut HashSet<*const c_void>) -> Option<S
             Value::Integer(i) => ints.push((i, value)),
             // A float key that is integral is the same slot as the integer in Lua 5.1.
             Value::Number(n) if n.fract() == 0.0 => ints.push((n as i64, value)),
-            Value::String(s) => strs.push((s.to_string_lossy(), value)),
+            Value::String(s) => strs.push((s.as_bytes().to_vec(), value)),
             _ => continue, // a table/bool/function key cannot be written as a literal
         }
     }
     seen.remove(&t.to_pointer());
     ints.sort_by_key(|(k, _)| *k);
+    // Byte order — the same order `str`'s `Ord` gave every UTF-8 key before.
     strs.sort_by(|a, b| a.0.cmp(&b.0));
 
     let indent = "\t".repeat(depth);
     let close = "\t".repeat(depth.saturating_sub(1));
-    let mut out = String::from("{\n");
+    let mut out = b"{\n".to_vec();
+    let mut entry = |key: &[u8], value: &[u8]| {
+        out.extend_from_slice(indent.as_bytes());
+        out.push(b'[');
+        out.extend_from_slice(key);
+        out.extend_from_slice(b"] = ");
+        out.extend_from_slice(value);
+        out.extend_from_slice(b",\n");
+    };
     for (k, v) in ints {
-        let _ = writeln!(out, "{indent}[{k}] = {v},");
+        entry(k.to_string().as_bytes(), &v);
     }
     for (k, v) in strs {
-        let _ = writeln!(out, "{indent}[{}] = {v},", quote(&k));
+        entry(&quote(&k), &v);
     }
-    out.push_str(&close);
-    out.push('}');
+    out.extend_from_slice(close.as_bytes());
+    out.push(b'}');
     Some(out)
 }
 
@@ -254,13 +293,14 @@ mod tests {
         };
         assert_eq!(walk(&s), "0,1,2,3,4,-2,", "the live table, before any save");
 
-        let text = s.saved_variables_text();
+        let text = s.saved_variables_bytes();
         let fresh = UiScript::new().unwrap();
-        fresh.run(&text).unwrap();
+        fresh.run_chunk(&text).unwrap();
         assert_eq!(
             walk(&fresh),
             "0,1,2,3,4,-2,",
-            "the restart must walk the same order the live session did; wrote:\n{text}"
+            "the restart must walk the same order the live session did; wrote:\n{}",
+            String::from_utf8_lossy(&text)
         );
     }
 
@@ -299,7 +339,8 @@ mod tests {
             ],
             "registration order, and a re-register is not a second entry"
         );
-        let text = s.saved_variables_text();
+        let bytes = s.saved_variables_bytes();
+        let text = String::from_utf8(bytes).expect("every value here is UTF-8");
         // The grammar: one statement per line, `nil` written out, integral numbers bare, keys
         // bracketed and SORTED (integers ascending, then strings), tab-indented, trailing comma.
         assert_eq!(
@@ -365,13 +406,42 @@ mod tests {
         "#,
         )
         .unwrap();
-        let text = s.saved_variables_text();
+        let text = s.saved_variables_bytes();
         // The cycle's own entry drops; the table itself still writes (empty here).
-        assert_eq!(text, "KEPT = 7\nCYCLE = {\n}\n", "got:\n{text}");
+        assert_eq!(text, b"KEPT = 7\nCYCLE = {\n}\n");
         let warns = s.take_warnings();
         assert_eq!(warns.len(), 1, "one line, not one per name: {warns:?}");
         assert!(warns[0].contains("A_FUNCTION") && warns[0].contains("NOT_A_NUMBER"));
         // And what it wrote is loadable.
-        UiScript::new().unwrap().run(&text).unwrap();
+        UiScript::new().unwrap().run_chunk(&text).unwrap();
+    }
+
+    /// **A byte string comes back as the same bytes.** A Lua string is bytes; an addon that cuts
+    /// a UTF-8 name mid-codepoint with `string.sub`, or packs data with `string.char(≥128)` (a
+    /// compression library's output), stores something that is not UTF-8. The writer used to
+    /// decode lossily, so the next login read U+FFFD — and two such keys folded into one entry.
+    #[test]
+    fn a_byte_string_that_is_not_utf8_round_trips_unchanged() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            PACKED = string.char(65, 200, 255, 0, 66)
+            KEYS = { [string.char(200)] = 1, [string.char(201)] = 2 }
+            RegisterForSave("PACKED")
+            RegisterForSave("KEYS")
+        "#,
+        )
+        .unwrap();
+        let fresh = UiScript::new().unwrap();
+        fresh.run_chunk(&s.saved_variables_bytes()).unwrap();
+        assert!(fresh
+            .eval::<bool>(
+                "return string.len(PACKED) == 5 and string.byte(PACKED, 2) == 200 \
+                 and string.byte(PACKED, 3) == 255 and string.byte(PACKED, 4) == 0"
+            )
+            .unwrap());
+        assert!(fresh
+            .eval::<bool>("return KEYS[string.char(200)] == 1 and KEYS[string.char(201)] == 2")
+            .unwrap());
     }
 }

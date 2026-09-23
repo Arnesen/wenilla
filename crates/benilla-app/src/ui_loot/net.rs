@@ -10,6 +10,7 @@ use bevy::prelude::*;
 
 use super::{LootLatch, LootState};
 use crate::net::{ClientCommand, NetCommands, NetHandlerApp, SelfGuid};
+use crate::pending_item_ops::{LockTransitions, PendingItemOps};
 use crate::ui_action::{UiError, UiErrorKeys};
 
 /// Register the loot handlers — called from [`super::UiLootPlugin`]. One per kind, plus the
@@ -52,9 +53,15 @@ fn on_error(
     In(ev): In<SessionEvent>,
     mut errors: ResMut<UiErrorKeys>,
     mut latch: ResMut<LootLatch>,
+    mut pending: ResMut<PendingItemOps>,
+    mut lock_cleared: ResMut<LockTransitions>,
 ) {
     if let SessionEvent::LootError { guid, error } = ev {
-        loot_error(guid, error, &mut errors, &mut latch);
+        let unlock = ItemUnlock {
+            pending: &mut pending,
+            lock_cleared: &mut lock_cleared,
+        };
+        loot_error(guid, error, &mut errors, &mut latch, unlock);
     }
 }
 
@@ -80,9 +87,30 @@ fn on_release_response(
     In(ev): In<SessionEvent>,
     mut loot: ResMut<LootState>,
     mut latch: ResMut<LootLatch>,
+    mut pending: ResMut<PendingItemOps>,
+    mut lock_cleared: ResMut<LockTransitions>,
 ) {
     if let SessionEvent::LootReleaseResponse { guid } = ev {
-        loot_release_response(guid, &mut loot, &mut latch);
+        let unlock = ItemUnlock {
+            pending: &mut pending,
+            lock_cleared: &mut lock_cleared,
+        };
+        loot_release_response(guid, &mut loot, &mut latch, unlock);
+    }
+}
+
+/// **`UnlockItem 0x495420`** as the loot closes call it — on the loot guid, which unlocks
+/// something only when that guid is an item we locked (a lockbox, clam or loot bag, locked at its
+/// `CMSG_OPEN_ITEM` send — decision 0916). The unlocked slots queue in [`LockTransitions`] for the
+/// container feed to fire `ITEM_LOCK_CHANGED`, like the inventory failure's clear.
+struct ItemUnlock<'a> {
+    pending: &'a mut PendingItemOps,
+    lock_cleared: &'a mut LockTransitions,
+}
+
+impl ItemUnlock<'_> {
+    fn unlock(self, guid: u64) {
+        self.lock_cleared.0.extend(self.pending.clear_by_guid(guid));
     }
 }
 
@@ -306,7 +334,12 @@ fn loot_refusal(reason: u8) -> LootRefusal {
 /// localization. Before this, benilla composed its own eight sentences here and six of them said
 /// something the client never says.
 ///
-/// **Two gaps this deliberately does not close** (surfaced by the wow-re §5, named here rather
+/// The arms that release run the reference's release tail `0x5ebac2`, which also calls
+/// `UnlockItem 0x495420` on the packet's guid (wow-re `loot-anim-leg.md` §7.1): a refused lockbox
+/// open drops the item's pending lock. For a corpse or chest guid there is no item, and nothing
+/// unlocks.
+///
+/// **A gap this deliberately does not close** (surfaced by the wow-re §5, named here rather
 /// than left to a later bug report):
 ///
 /// 1. **A guid-MISMATCHED error takes a different arm in the reference.** The error leg is
@@ -315,11 +348,13 @@ fn loot_refusal(reason: u8) -> LootRefusal {
 ///    unconditionally, shows **nothing**, and (because `lootType == 0`) sends nothing. benilla has
 ///    no admission gate on the error shape — it displays the line and keeps the latch. Reachable
 ///    only under the corpse-switch race, and it belongs with the gate (1477), not with the text.
-/// 2. **`UnlockItem` fires `ITEM_LOCK_CHANGED` (188)** on the way through the tail, clearing
-///    `[item+0x314]` bit 0. That matters only when the loot source is an ITEM guid — a lockbox —
-///    where a refused open should drop the item's pending lock; for a corpse or chest guid there
-///    is no item to unlock. benilla does not touch [`LockTransitions`] here.
-fn loot_error(guid: u64, error: u8, errors: &mut UiErrorKeys, latch: &mut LootLatch) {
+fn loot_error(
+    guid: u64,
+    error: u8,
+    errors: &mut UiErrorKeys,
+    latch: &mut LootLatch,
+    unlock: ItemUnlock,
+) {
     let LootRefusal { key, releases } = loot_refusal(error);
     debug!("net: loot error {error} on {guid:#x} → {key} (releases: {releases})");
     errors.0.push(UiError::key(key));
@@ -327,6 +362,7 @@ fn loot_error(guid: u64, error: u8, errors: &mut UiErrorKeys, latch: &mut LootLa
         // The latch armed at the `CMSG_LOOT` send drops (guid-matched — see [`LootLatch`]), or the
         // character would kneel forever at a corpse whose window never opened (decision 0515).
         latch.clear_for(guid);
+        unlock.unlock(guid);
     }
 }
 
@@ -355,10 +391,22 @@ fn loot_clear_money(loot: &mut LootState) {
 /// Idempotent — a client-side close already cleared. The latch clear is **guid-matched**: under
 /// the corpse-switch race (loot B requested while A was open) the old window's release response
 /// must not drop the latch the new request just armed (decision 0515).
-fn loot_release_response(guid: u64, loot: &mut LootState, latch: &mut LootLatch) {
+///
+/// **An item loot unlocks here.** The handler (`0x5ec090`) ends in `0x48f200(cl=0, dl=0)`, whose
+/// `48f299` leg calls `UnlockItem 0x495420` when the loot object is an ITEM (wow-re
+/// `ui/ledger.tsv` `0x48f200`). It is the only clear an opened lockbox closed with loot left
+/// ever gets: vmangos' `DoLootRelease` destroys the item only once it is fully looted, so its
+/// slot never changes and [`PendingItemOps::resolve`] has nothing to see.
+fn loot_release_response(
+    guid: u64,
+    loot: &mut LootState,
+    latch: &mut LootLatch,
+    unlock: ItemUnlock,
+) {
     debug!("net: loot released {guid:#x}");
     loot.clear();
     latch.clear_for(guid);
+    unlock.unlock(guid);
 }
 
 /// The master-loot candidate list (`SMSG_LOOT_MASTER_LIST`, decision 1675) — who the master looter
@@ -416,6 +464,19 @@ fn item_push_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    use crate::pending_item_ops::{LockTransitions, PendingItemOps};
+
+    /// An [`ItemUnlock`] over an empty lock set — for the tests whose loot source is no item.
+    macro_rules! no_item {
+        () => {
+            ItemUnlock {
+                pending: &mut PendingItemOps::default(),
+                lock_cleared: &mut LockTransitions::default(),
+            }
+        };
+    }
 
     /// Both fish-verdict keys queue as **yellow** (type-1 / `UI_INFO_MESSAGE`) entries — the
     /// byte-verified arm, wow-re `fish-msg-handlers.md` — and both resolve to the exact 1.12
@@ -564,14 +625,14 @@ mod tests {
         for code in [4u8, 5, 6, 7, 8, 9, 11, 0, 1, 2, 3, 15, 16, 200, 255] {
             let mut errors = UiErrorKeys::default();
             let mut latch = LootLatch(Some(CORPSE));
-            loot_error(CORPSE, code, &mut errors, &mut latch);
+            loot_error(CORPSE, code, &mut errors, &mut latch, no_item!());
             assert_eq!(latch.0, None, "code {code} should release");
             assert_eq!(errors.0.len(), 1, "code {code} shows exactly one line");
         }
         for code in [10u8, 12, 13, 14] {
             let mut errors = UiErrorKeys::default();
             let mut latch = LootLatch(Some(CORPSE));
-            loot_error(CORPSE, code, &mut errors, &mut latch);
+            loot_error(CORPSE, code, &mut errors, &mut latch, no_item!());
             assert_eq!(
                 latch.0,
                 Some(CORPSE),
@@ -598,7 +659,7 @@ mod tests {
     fn the_error_legs_clear_is_guid_matched() {
         let mut errors = UiErrorKeys::default();
         let mut latch = LootLatch(Some(CHEST));
-        loot_error(CORPSE, 8, &mut errors, &mut latch);
+        loot_error(CORPSE, 8, &mut errors, &mut latch, no_item!());
         assert_eq!(latch.0, Some(CHEST));
     }
 
@@ -637,7 +698,7 @@ mod tests {
 
         // The ordinary close path still ends it — the latch is guid-matched, and a chest guid is
         // no different from a corpse one there.
-        loot_release_response(CHEST, &mut loot, &mut latch);
+        loot_release_response(CHEST, &mut loot, &mut latch, no_item!());
         assert_eq!(latch.0, None, "the release ends the session");
     }
 
@@ -690,6 +751,93 @@ mod tests {
             matches!(rx.try_recv(), Ok(ClientCommand::LootRelease { guid }) if guid == CHEST),
             "…and it is B that gets released"
         );
+    }
+
+    /// A lockbox's item guid (HIGHGUID_ITEM is 0x4000 in the high word).
+    const LOCKBOX: u64 = 0x4000_0000_0000_0007;
+
+    /// A World with what the release / error handlers write, and the lockbox's open-item lock
+    /// already armed at bag 0 slot 3 — `ui_items::drain`'s `CMSG_OPEN_ITEM` arm (0916).
+    fn opened_lockbox_world() -> World {
+        let mut world = World::new();
+        world.init_resource::<LootState>();
+        world.insert_resource(LootLatch(Some(LOCKBOX)));
+        world.init_resource::<UiErrorKeys>();
+        world.init_resource::<LockTransitions>();
+        let mut pending = PendingItemOps::default();
+        pending.add([(0, 3, LOCKBOX, 1)]);
+        world.insert_resource(pending);
+        world
+    }
+
+    /// **The release unlocks an opened lockbox.** `SMSG_LOOT_RELEASE_RESPONSE` → `0x5ec090` →
+    /// `0x48f200(cl=0, dl=0)`, whose `48f299` leg calls `UnlockItem 0x495420` when the loot
+    /// object is an ITEM (wow-re `ui/ledger.tsv` `0x48f200`). Closing a lockbox's window with
+    /// loot left destroys nothing server-side (vmangos `DoLootRelease` destroys only a fully
+    /// looted item), so no field update ever resolves the lock — the release is the clear.
+    #[test]
+    fn a_release_for_the_opened_item_unlocks_its_slot() {
+        let mut world = opened_lockbox_world();
+        world
+            .run_system_once_with(
+                on_release_response,
+                SessionEvent::LootReleaseResponse { guid: LOCKBOX },
+            )
+            .expect("the handler runs as a one-shot system");
+        assert!(
+            !world.resource::<PendingItemOps>().contains(0, 3),
+            "the lockbox is no longer grey and locked"
+        );
+        assert_eq!(
+            world.resource::<LockTransitions>().0,
+            vec![(0, 3)],
+            "…and the container feed fires ITEM_LOCK_CHANGED for it"
+        );
+    }
+
+    /// The control: a release naming some other object (a corpse closing) leaves the lockbox's
+    /// lock exactly where it was.
+    #[test]
+    fn a_release_for_another_guid_leaves_the_lock() {
+        let mut world = opened_lockbox_world();
+        world
+            .run_system_once_with(
+                on_release_response,
+                SessionEvent::LootReleaseResponse { guid: CORPSE },
+            )
+            .expect("the handler runs as a one-shot system");
+        assert!(world.resource::<PendingItemOps>().contains(0, 3));
+        assert!(world.resource::<LockTransitions>().0.is_empty());
+    }
+
+    /// The error leg's release tail `0x5ebac2` calls the same `UnlockItem 0x495420` on the
+    /// packet's guid (wow-re `loot-anim-leg.md` §7.1) — on the arms that release, and only those.
+    #[test]
+    fn a_releasing_loot_error_on_the_opened_item_unlocks_it() {
+        let mut world = opened_lockbox_world();
+        // PLAYER_NOT_FOUND (10) does not reach the tail: nothing unlocks.
+        world
+            .run_system_once_with(
+                on_error,
+                SessionEvent::LootError {
+                    guid: LOCKBOX,
+                    error: 10,
+                },
+            )
+            .expect("the handler runs as a one-shot system");
+        assert!(world.resource::<PendingItemOps>().contains(0, 3));
+        // TOO_FAR (4) does.
+        world
+            .run_system_once_with(
+                on_error,
+                SessionEvent::LootError {
+                    guid: LOCKBOX,
+                    error: 4,
+                },
+            )
+            .expect("the handler runs as a one-shot system");
+        assert!(!world.resource::<PendingItemOps>().contains(0, 3));
+        assert_eq!(world.resource::<LockTransitions>().0, vec![(0, 3)]);
     }
 
     const ME: u64 = 0x0000_0000_0000_002A;

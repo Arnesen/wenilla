@@ -1045,8 +1045,10 @@ fn feed_unit_reach(
 pub(crate) struct UnitStores<'w, 's> {
     /// Every streamed object's descriptor, read by guid → entity.
     all: Query<'w, 's, &'static ObjectStore>,
-    /// Whose descriptor moved this frame — the feed's dirty gate.
-    changed: Query<'w, 's, (), Changed<ObjectStore>>,
+    /// Whose descriptor moved this frame — the feed's dirty gate. Not an item's: items carry an
+    /// `ObjectStore` since 2334, and a durability tick or a stack count naming no unit token
+    /// would open the gate for nothing (2343).
+    changed: Query<'w, 's, (), (Changed<ObjectStore>, Without<crate::items::ItemObject>)>,
     /// Whose object left the manager — the other half of that gate, and cleared every run.
     removed: RemovedComponents<'w, 's, ObjectStore>,
     /// The per-field edges this run (decision 2297) — [`fire_transitions`]' three mirror-diff

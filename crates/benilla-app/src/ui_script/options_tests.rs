@@ -2981,7 +2981,7 @@ fn what_the_combat_page_writes_survives_a_restart() {
     s.run("BenillaOptionsFrameContainerBodyCombatRowHonorGainedCheck:Click()")
         .unwrap();
 
-    let saved = s.saved_variables_text();
+    let saved = String::from_utf8(s.saved_variables_bytes()).unwrap();
     assert!(
         saved.contains("COMBAT_TEXT_SHOW_HONOR_GAINED = \"0\""),
         "the toggle is in the saved text:\n{saved}"
@@ -3531,7 +3531,7 @@ fn what_the_interface_page_writes_survives_a_restart() {
     s.run("BenillaOptionsFrameContainerBodyInterfaceRowAutoQuestWatchCheck:Click()")
         .unwrap();
 
-    let saved = s.saved_variables_text();
+    let saved = String::from_utf8(s.saved_variables_bytes()).unwrap();
     assert!(
         saved.contains("AUTO_QUEST_WATCH = \"0\""),
         "the toggle is in the saved text under the reference's name:\n{saved}"
@@ -3653,7 +3653,7 @@ fn the_buff_durations_row_repitches_the_bar_and_the_pitch_survives_a_restart() {
 
     // Restart: the fresh tree comes up on the shipped geometry, the chunk replaces the value, and
     // VARIABLES_LOADED is what puts the bar where the value says.
-    let saved = s.saved_variables_text();
+    let saved = String::from_utf8(s.saved_variables_bytes()).unwrap();
     assert!(
         saved.contains("SHOW_BUFF_DURATIONS = \"1\""),
         "the switch is in the saved text:\n{saved}"

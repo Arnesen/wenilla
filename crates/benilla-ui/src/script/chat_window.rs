@@ -450,11 +450,6 @@ impl super::UiScript {
             .register_window_channel(window, name.to_string(), id)
     }
 
-    /// Host-side [`Model::strip_window_channel`] — the cascade's leave arm.
-    pub fn strip_chat_window_channel(&mut self, key: &str) -> bool {
-        self.model_mut().strip_window_channel(key)
-    }
-
     /// Seed the per-window looks from the host's persisted store — the load path, so it queues no
     /// change (an echo would re-dirty the file it was just read from; [`Self::set_cvar_host`]'s
     /// reason, one store over).

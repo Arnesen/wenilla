@@ -736,6 +736,11 @@ fn feed_quest_log(
     let mut entries: Vec<QuestLogEntryView> = Vec::new();
     let mut entry_slots: Vec<Option<u8>> = Vec::new();
     let mut header_keys: Vec<Option<String>> = Vec::new();
+    // The quests folded under a collapsed header: out of the visible list, still in the log. The
+    // engine's watch prune counts them, as the reference's does (`0x4de7a7`–`0x4de80f` scans the
+    // whole row array, hidden rows included — wow-re `questlog-list-rebuild.md` §7/§8); leaving
+    // them out made every collapse drop its quests' watches for good.
+    let mut hidden_quest_ids: Vec<u32> = Vec::new();
     for (_, name, row_idxs) in &groups {
         let collapsed = quest_log.collapsed.contains(name);
         entries.push(QuestLogEntryView {
@@ -756,7 +761,9 @@ fn feed_quest_log(
         for &ri in row_idxs {
             let r = &rows[ri];
             if collapsed {
-                continue; // folded: the quest stays in the log, just not in the visible list
+                // Folded: the quest stays in the log, just not in the visible list.
+                hidden_quest_ids.push(r.quest_id);
+                continue;
             }
             let (title, level, tag, pushable, objectives, detail) =
                 match quest_log.template(r.quest_id, &commands) {
@@ -846,6 +853,7 @@ fn feed_quest_log(
     let fresh = QuestLogState {
         entries,
         num_quests: rows.len() as u32,
+        hidden_quest_ids,
     };
     if fresh == *last {
         return;
@@ -1725,6 +1733,7 @@ mod tests {
         QuestLogState {
             num_quests: entries.iter().filter(|e| !e.is_header).count() as u32,
             entries,
+            hidden_quest_ids: Vec::new(),
         }
     }
 

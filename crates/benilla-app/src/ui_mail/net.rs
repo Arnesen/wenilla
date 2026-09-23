@@ -82,8 +82,8 @@ fn on_next_mail_time(In(ev): In<SessionEvent>, mut pending: ResMut<MailPending>)
 
 /// An open mailbox dies with the socket, and the arrival countdown is login-scoped (decision
 /// 0544 P3): a fresh login re-queries `MSG_QUERY_NEXT_MAIL_TIME` at world-enter, so nothing
-/// carries over across a reconnect. A listener on the session end, which the drain's dispatch
-/// match still owns (a second handler on the kind, after the bridge's own teardown).
+/// carries over across a reconnect. A listener on the session end (a second handler on
+/// `Disconnected`, after the bridge's own teardown, `net::session::on_disconnected`).
 fn on_session_end(
     In(_): In<SessionEvent>,
     mut mail: ResMut<MailOpen>,

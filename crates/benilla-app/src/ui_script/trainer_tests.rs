@@ -810,7 +810,7 @@ fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
         0,
         "the click must write the SAVED global, not just the engine mask"
     );
-    let text = s.saved_variables_text_for(&info().saved_variables);
+    let text = String::from_utf8(s.saved_variables_bytes_for(&info().saved_variables)).unwrap();
     assert!(
         text.contains("TRAINER_FILTER_UNAVAILABLE = 0"),
         "the file carries the toggle: {text}"

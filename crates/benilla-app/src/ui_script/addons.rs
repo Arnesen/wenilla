@@ -1051,9 +1051,19 @@ pub(super) fn save_addon_variables(script: &mut UiScript, identity: Option<&(Str
                 continue;
             }
             let Some(dir) = dir else { continue };
-            let body = script.saved_variables_text_for(names);
             let path = dir.join(format!("{name}.lua"));
-            match crate::local_state::write_atomic(&path, &format!("{SAVED_HEADER}{body}")) {
+            if script.saved_file_held(&path) {
+                // It failed to load this session: its globals are the addon's defaults, and
+                // writing them would replace the player's file with them.
+                warn!(
+                    "ui_script: {} did not load this session — left as it is",
+                    path.display()
+                );
+                continue;
+            }
+            let mut body = SAVED_HEADER.as_bytes().to_vec();
+            body.extend(script.saved_variables_bytes_for(names));
+            match crate::local_state::write_atomic_bytes(&path, &body) {
                 Ok(()) => info!("ui_script: wrote {}", path.display()),
                 Err(e) => warn!("ui_script: cannot write {}: {e}", path.display()),
             }

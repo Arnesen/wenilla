@@ -989,12 +989,13 @@ pub(super) fn drain_chat_input(
                         // `LeaveChannelByName` (`0x4a0000` → `0x49ee70`): the VM composed a
                         // shortcut or passed a custom name; a number names a confirmed slot here
                         // or the call is a no-op. The mask clear is this path's and no other's
-                        // (decisions 2120, 2144).
+                        // (decisions 2120, 2144), and so is the custom re-join list's.
                         let Some(name) = channels.leave_target(&name) else {
                             continue;
                         };
                         manual_join_or_leave(&channels, &mut script, &name);
                         channels.note_zone_channel_left(&name);
+                        channels.note_custom_channel_left(&name);
                         ClientCommand::LeaveChannel { name }
                     }
                     C::List { name } => ClientCommand::ChannelList { name },

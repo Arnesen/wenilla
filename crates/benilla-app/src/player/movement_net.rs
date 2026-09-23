@@ -580,6 +580,64 @@ pub(super) fn park_mover(sender: &Sender<ClientCommand>, player: &mut Player) {
     player.last_facing = facing;
 }
 
+/// The rider's boat-local pose for the wire's `ON_TRANSPORT` tail, or `None` off a deck.
+/// `bevy_to_wow` is a pure basis rotation, so the boat-local Bevy vector converts directly, and the
+/// local orientation is `face_yaw − boat_yaw` (the GetAbsoluteFacing law in reverse), normalized
+/// like any wire orientation.
+pub(super) fn wire_transport(player: &Player) -> Option<TransportPose> {
+    player.ride.as_ref().map(|r| {
+        let local = bevy_to_wow(r.local_pos);
+        TransportPose {
+            guid: r.guid,
+            pos: benilla_protocol::wire::Vector3d {
+                x: local[0],
+                y: local[1],
+                z: local[2],
+            },
+            orientation: (player.face_yaw - r.boat_yaw).rem_euclid(std::f32::consts::TAU),
+        }
+    })
+}
+
+/// **The forced-speed acks owed on a frame the controller does not drive** — a server spline
+/// (`server_riding`), a fear (`control_lost`) or a mover hand-off (`reseat`). Those frames return
+/// before [`stream_self_movement`], which is where a controlled frame's acks go out, so until this
+/// the change was applied locally and never answered: vmangos holds an unacked change for
+/// `PendingAckResponseTime` (4 s) before enforcing it, counts it in `OnFailedToAckChange` (a kick
+/// under the default anticheat penalty) and blocks the graveyard repop while one is pending. The
+/// reference acks from its per-mover drain whoever is driving (`0x616142`/`0x61812d`).
+///
+/// The payload is the honest state we last reported: our streamed flags (a ride's deliberate
+/// FORWARD included) with the transport tail when we are on a deck, minus the airborne pair — no
+/// arc is being integrated on these frames, so there is no jump tail to send with them.
+pub(super) fn ack_speeds_undriven(
+    sender: &Sender<ClientCommand>,
+    player: &Player,
+    acks: &[crate::net::SpeedChangeMessage],
+) {
+    let transport = wire_transport(player);
+    let mut flags =
+        player.move_flags & OUTBOUND_FLAG_MASK & !(move_flags::FALLING | move_flags::FALLING_FAR);
+    if transport.is_none() {
+        flags &= !move_flags::ON_TRANSPORT; // flag and tail travel together
+    }
+    for ack in acks {
+        let _ = sender.send(ClientCommand::ForceSpeedAck {
+            kind: ack.kind,
+            guid: ack.guid,
+            counter: ack.counter,
+            speed: ack.speed,
+            flags,
+            pos: bevy_to_wow(player.pos),
+            orientation: player.face_yaw.rem_euclid(std::f32::consts::TAU),
+            pitch: 0.0,
+            fall_time: 0,
+            jump: None,
+            transport: transport.filter(|_| flags & move_flags::ON_TRANSPORT != 0),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// A frame that integrated everything it was given — the skipped-time report's no-op input,
@@ -1438,6 +1496,73 @@ mod tests {
             "the parked facing is normalized into [0, 2π), got {orientation}"
         );
         assert_eq!(player.move_flags, 0, "bookkeeping is zeroed after parking");
+    }
+
+    /// **A forced speed change is acked on a frame nobody is driving** — a fear, a server spline,
+    /// a mover hand-off. Those frames return before the stream, which is where a controlled
+    /// frame's acks go out, so the change was applied and never answered (vmangos enforces it 4 s
+    /// late, counts the miss toward its anticheat kick, and blocks the graveyard repop meanwhile).
+    /// The payload is the honest reported word: the ride's FORWARD kept, the airborne pair dropped
+    /// (no arc tail exists here), and `ON_TRANSPORT` only with the tail that must travel with it.
+    #[test]
+    fn a_speed_change_is_acked_while_not_driving() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let ack = crate::net::SpeedChangeMessage {
+            guid: 7,
+            kind: benilla_protocol::SpeedKind::Run,
+            counter: 3,
+            speed: 3.5,
+        };
+
+        // A spline ride reporting FORWARD, off any deck, with a stale ON_TRANSPORT bit.
+        let player = Player {
+            move_flags: move_flags::FORWARD | move_flags::FALLING | move_flags::ON_TRANSPORT,
+            face_yaw: -1.0,
+            ..Default::default()
+        };
+        ack_speeds_undriven(&tx, &player, &[ack]);
+        let Ok(ClientCommand::ForceSpeedAck {
+            counter,
+            speed,
+            flags,
+            orientation,
+            transport,
+            jump,
+            ..
+        }) = rx.try_recv()
+        else {
+            panic!("the change is acked");
+        };
+        assert_eq!((counter, speed), (3, 3.5), "the ack echoes the change");
+        assert_eq!(
+            flags,
+            move_flags::FORWARD,
+            "FORWARD kept; FALLING and a tailless ON_TRANSPORT dropped"
+        );
+        assert!(transport.is_none() && jump.is_none());
+        assert!((0.0..TAU).contains(&orientation));
+        assert!(rx.try_recv().is_err(), "one ack per change");
+
+        // On a deck: the transport bit rides with its tail.
+        let player = Player {
+            move_flags: move_flags::ON_TRANSPORT,
+            ride: Some(super::super::state::PlayerRide {
+                entity: bevy::ecs::entity::Entity::PLACEHOLDER,
+                guid: 0x1F,
+                local_pos: bevy::math::Vec3::ZERO,
+                boat_yaw: 0.0,
+            }),
+            ..Default::default()
+        };
+        ack_speeds_undriven(&tx, &player, &[ack]);
+        let Ok(ClientCommand::ForceSpeedAck {
+            flags, transport, ..
+        }) = rx.try_recv()
+        else {
+            panic!("the change is acked");
+        };
+        assert_eq!(flags, move_flags::ON_TRANSPORT);
+        assert_eq!(transport.map(|t| t.guid), Some(0x1F));
     }
 
     /// **A knockback launch acks, and sends no `MSG_MOVE_JUMP`** (decision 1702).

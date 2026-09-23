@@ -883,13 +883,10 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     // format record and can veto the write outright; the handler validates that record, applies it
     // with `DeviceSetFormat`, and then COMMITS the fourteen latched CVars so `GetCVar` catches up.
     //
-    // **benilla has no such latch and no such device rebuild.** Its video settings apply as they
-    // are written — the departure `benilla_app::video`'s module doc already states for `gxVSync`
-    // ("wgpu reconfigures the surface on the next frame") and for the display mode ("ours takes
-    // effect on the click"). So the verb's postcondition is already true when it is called, which
-    // is not the same as the verb having nothing to do: the caller is asking for the settings to be
-    // in effect *now*, and the honest answer is to make the host re-assert them against the window
-    // rather than wait for its change detection to notice something it may already have seen.
+    // **benilla's latch is the host's** (decision 2303): a gx write stages in the host's CVar
+    // registry, and this verb is the host's cue to commit the gx stages (the fourteen-record
+    // commit, `Cvars::commit_latched`) and re-assert them against the window. The one difference
+    // left is when a change callback runs — the reference's at `SetCVar`, ours at the commit.
     //
     // A counted request the host drains (`take_restart_gx_asks`), the shape `Screenshot()` uses and
     // for the same reason: no payload, and two calls in a frame are two requests. **It is not a

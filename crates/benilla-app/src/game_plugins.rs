@@ -754,13 +754,13 @@ pub(crate) mod schedule_tests {
     ///   writers commute, and a drain's order against a writer is one frame of latency, never
     ///   a loss. (2283's ten pairs were all this shape: a new verb drain against its siblings
     ///   over the chat and error sinks.)
-    /// - **An exclusive edge** — a pair bevy reports with NO component list: one side is a
-    ///   build-inserted `ApplyDeferred` sync point or an exclusive system, which conflicts on
-    ///   `World` itself. Its order against a system it shares nothing with is immaterial by
-    ///   construction (the build already placed the barrier after the commands it flushes and
-    ///   before their dependents), and there is nothing to declare it against. Until 2304 an
-    ///   empty list read as "VM only" vacuously, so that class rose and fell with the barrier
-    ///   count; now it is named.
+    /// - **Not an exclusive edge.** A pair bevy reports with NO component list has an exclusive
+    ///   system on one side (`bevy_ecs` `node.rs:625`: it reports every unordered pair with an
+    ///   exclusive system and never reads its access). 2304 explained that class as the
+    ///   build's barriers; the ratchet reads the declared graph since 2337, which has none, so
+    ///   what it held was only the hand-written exclusive systems — the net drain, whose 143
+    ///   unordered partners read this frame's packets or the last frame's by coin, and
+    ///   `finish_colliders`. Those are undeclared orders like any other: actionable (2343).
     /// - **A random stream** — `SoundKits`, which every sound system holds to play a kit: a
     ///   decode cache, a per-kit last-variation memory and one xorshift stream. Any
     ///   interleaving of draws is a valid draw, and that is the reference's own contract for
@@ -855,8 +855,10 @@ pub(crate) mod schedule_tests {
 
         /// Which class explains this pair — `None` if it is actionable.
         pub fn class_of(&self, what: &[ComponentId]) -> Option<&'static str> {
+            // An exclusive system on one side: bevy cannot see its access, so nothing here can
+            // argue the pair away (see the doc above: not an exclusive edge).
             if what.is_empty() {
-                return Some("exclusive");
+                return None;
             }
             if !what.iter().all(|id| self.explains(*id)) {
                 return None;
@@ -1013,7 +1015,11 @@ pub(crate) mod schedule_tests {
     /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
     /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
     /// about a resource that commutes by construction, the claim belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_063;
+    /// **5,608 (decision 2343)** — not a raise: a re-measurement. The 556 pairs with an
+    /// exclusive system on one side were read as "explained" by a class argued for the build's
+    /// barriers, which the declared graph (2337) no longer has; 413 are `finish_colliders`', 143
+    /// the net drain's. Same tree, the class dropped, nothing else moved: 5,052 + 556.
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_608;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

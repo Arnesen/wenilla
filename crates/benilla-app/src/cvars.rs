@@ -29,9 +29,9 @@
 //!   written workaround). The registry never applies anything itself: it has no knob, and no arm.
 //!
 //! - **The latch** ([`Row::pending`]): a write to a latched row is staged, `GetCVar` keeps
-//!   answering the applied value, and nothing fires until [`Cvars::commit_latched`] — which is
-//!   the reference's `CVar::Update 0x63e060`, called for the `gx*` rows from inside `RestartGx`
-//!   (the video window's Okay). A staged value that is never committed is dropped at exit, as
+//!   answering the applied value, and nothing fires until [`Cvars::commit_latched`] — the
+//!   reference's `0x639ec0`, `CVar::Commit 0x63e060` on the fourteen gx records, called from
+//!   inside `RestartGx` (the video window's Okay). A staged value that is never committed is dropped at exit, as
 //!   the reference's is (`SaveConfig` writes `rec+0x20`, the applied value).
 //!
 //! - **Boot**: read `benilla-config/config.toml` ([`crate::local_state`]) into the registry and
@@ -1433,14 +1433,26 @@ impl Cvars {
         true
     }
 
-    /// **The latch boundary** — the reference's `CVar::Update 0x63e060`: every staged value
-    /// becomes the applied one, fires, persists, and reaches the mirror. Returns how many moved.
-    /// Called for the `gx*` rows from `RestartGx` ([`crate::video`]); a row nothing ever commits
-    /// (`SoundBufferSize`, `gxApi`) holds its stage until exit, and loses it there, as the
-    /// reference does.
+    /// **The latch boundary `RestartGx` crosses** — the reference's `0x639ec0`, fourteen
+    /// `CVar::Commit 0x63e060` calls on fourteen gx records (`[0xc4ea90]` … `[0xc4eab4]`,
+    /// `0x639ec0..0x639f5a`): each of THOSE staged values becomes the applied one, fires,
+    /// persists, and reaches the mirror. Returns how many moved.
+    ///
+    /// **Only the `gx*` rows.** A latched row outside the video set is not on that list and
+    /// nothing else commits it: `SoundBufferSize`'s register site (`0x4571ca`) discards the
+    /// record pointer `0x63db90` returns, so no global holds it for any commit to name. It
+    /// holds its stage until exit and loses it there, as the reference's does. Until 2343 this
+    /// walked every row, and a console `SoundBufferSize` rode the next video Okay into the file.
+    ///
+    /// The reference runs a gx CVar's change callback at `SetCVar` time (`0x63df50`), and the
+    /// commit fires nothing; our observers fire here instead. Nothing reads the difference
+    /// today — the appliers are the device rebuild's, and that runs after this boundary.
     pub(crate) fn commit_latched(&mut self) -> usize {
         let mut moved = 0;
         for row in &mut self.rows {
+            if !row.name.starts_with("gx") {
+                continue;
+            }
             let Some(staged) = row.pending.take() else {
                 continue;
             };
@@ -3283,6 +3295,15 @@ mod tests {
         assert_eq!(cvars.set("gxVSync", "0"), SetOutcome::Unchanged);
         assert_eq!(cvars.row("gxVSync").unwrap().pending, None);
         assert_eq!(cvars.commit_latched(), 0);
+        // A latched row outside the gx set is not the video restart's to commit (2343).
+        assert_eq!(cvars.set("SoundBufferSize", "200"), SetOutcome::Staged);
+        assert_eq!(cvars.commit_latched(), 0);
+        assert_eq!(cvars.get("SoundBufferSize"), Some("100"));
+        assert_eq!(
+            cvars.row("SoundBufferSize").unwrap().pending.as_deref(),
+            Some("200")
+        );
+        assert!(!cvars.compose().contains_key("SoundBufferSize"));
         // An unlatched row applies at once, fires, and dirties.
         assert_eq!(cvars.set("MusicVolume", "0.7"), SetOutcome::Changed);
         assert_eq!(cvars.get("MusicVolume"), Some("0.7"));

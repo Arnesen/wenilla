@@ -168,8 +168,7 @@ fn fire_add_money(lua: &Lua, h: crate::widget::FrameHandle, copper: u64) {
     ) {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
-            .errors
-            .push(e.to_string());
+            .record_script_error(e.to_string());
     }
 }
 

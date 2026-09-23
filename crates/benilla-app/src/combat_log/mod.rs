@@ -2,8 +2,8 @@
 //! handler table since 2323, moved out of the drain's `combat_chat` and `combat_log` arm files).
 //! Every combat packet has two consumers, and the reference emits both from one handler: the
 //! **chat line** ([`chat`], the `0x629b60` display dispatcher's text) and the **floating
-//! number** with the portrait's `UNIT_COMBAT` flash ([`text`], the `0x625010` world-anchored
-//! spawn). They are gated by different CVars and classify by different laws, which is why the
+//! number** with the portrait's `UNIT_COMBAT` flash ([`text`], `0x629d30` →
+//! `COMBAT_TEXT_UPDATE`; `0x625010` is the melee blood spurt, not this). They are gated by different CVars and classify by different laws, which is why the
 //! legs are two files; they answer one packet, which is why the handler is one — the line first,
 //! the number second, as the drain's match ran them.
 //!

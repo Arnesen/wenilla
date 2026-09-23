@@ -3,7 +3,7 @@
 //!
 //! The split is the reference's own. `0x629b60` is the display dispatcher: one classification of
 //! both endpoints, then a branch per outcome into a formatter that emits *text*. The floating
-//! number comes off a different path entirely (`0x625010`, the world-anchored spawn), gated by
+//! number comes off a different path entirely (`0x629d30`, which fires `COMBAT_TEXT_UPDATE`), gated by
 //! different CVars, with a different source law — which is why our two live in different files
 //! rather than in one arm with two tails. Everything here composes; the law it composes with is
 //! [`crate::ui_chat::combat`].

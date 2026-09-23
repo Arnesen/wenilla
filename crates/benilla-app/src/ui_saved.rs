@@ -46,8 +46,9 @@ impl Plugin for UiSavedPlugin {
 ///
 /// Called from the in-game UI load ([`crate::ui_script`]) at the reference's own seam — after the
 /// XML, before anything consumes it. A missing file is the normal first-run case (defaults stand);
-/// a malformed one warns and is left on disk untouched, so a hand edit that fails to parse costs
-/// this session's settings and not the file.
+/// a malformed or unreadable one warns and is **held** ([`UiScript::hold_saved_file`]), so a hand
+/// edit that fails to parse costs this session's settings and not the file. Read as **bytes**
+/// (1193): the writer keeps a Lua byte string's bytes, so the file need not be UTF-8.
 ///
 /// **`host_settings` is the third store's turn** (decision 2132). A handful of the reference's
 /// `RegisterForSave` globals are settings benilla persists in `config.toml` instead — the
@@ -62,19 +63,24 @@ pub(crate) fn load_saved_variables(
 ) {
     // `None` = hermetic capture, or no install — session-only state, and the event below still fires.
     if let Some(path) = crate::local_state::saved_variables_path() {
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                if let Err(e) = script.run(&text) {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                if let Err(e) = script.run_chunk(&bytes) {
                     warn!(
-                        "saved variables: {} did not load ({e}) — running on defaults",
+                        "saved variables: {} did not load ({e}) — running on defaults, and \
+                         leaving the file as it is",
                         path.display()
                     );
+                    script.hold_saved_file(&path);
                 } else {
                     info!("saved variables: loaded {}", path.display());
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => warn!("saved variables: cannot read {}: {e}", path.display()),
+            Err(e) => {
+                warn!("saved variables: cannot read {}: {e}", path.display());
+                script.hold_saved_file(&path);
+            }
         }
     }
     host_settings(script);
@@ -98,11 +104,19 @@ pub(crate) fn save(script: &mut UiScript) {
     let Some(path) = crate::local_state::saved_variables_path() else {
         return;
     };
-    let body = script.saved_variables_text();
+    if script.saved_file_held(&path) {
+        warn!(
+            "saved variables: {} did not load this session — left as it is",
+            path.display()
+        );
+        return;
+    }
+    let mut body = HEADER.as_bytes().to_vec();
+    body.extend(script.saved_variables_bytes());
     for w in script.take_warnings() {
         warn!("saved variables: {w}");
     }
-    match crate::local_state::write_atomic(&path, &format!("{HEADER}{body}")) {
+    match crate::local_state::write_atomic_bytes(&path, &body) {
         Ok(()) => info!(
             "saved variables: wrote {} ({} names)",
             path.display(),
@@ -173,6 +187,40 @@ mod tests {
         load_saved_variables(&mut broken, |_| {});
         assert_eq!(broken.eval::<i64>("return KEPT").unwrap(), 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "KEPT = = 3\n");
+        // …and the shutdown write leaves it alone too. This is the half that used to fail: the
+        // load kept its promise, and the save then wrote this session's default over the file.
+        save(&mut broken);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "KEPT = = 3\n",
+            "a file that did not load is not replaced by the defaults the session ran on"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// **The bytes survive the folder.** A value that is not UTF-8 is written raw and read back
+    /// raw — the load reads bytes, so the file it now writes is one it can always read (a
+    /// `read_to_string` here would call it unreadable and the next save would replace it).
+    #[test]
+    fn a_byte_string_survives_the_file() {
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-svbytes-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+
+        let mut s = script("string.char(65, 233, 255)");
+        save(&mut s);
+        let mut fresh = script("'x'");
+        load_saved_variables(&mut fresh, |_| {});
+        assert!(fresh
+            .eval::<bool>(
+                "return string.len(KEPT) == 3 and string.byte(KEPT, 2) == 233 \
+                 and string.byte(KEPT, 3) == 255"
+            )
+            .unwrap());
         std::fs::remove_dir_all(&tmp).ok();
     }
 

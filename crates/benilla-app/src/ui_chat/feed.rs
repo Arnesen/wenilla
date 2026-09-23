@@ -704,6 +704,9 @@ pub(super) fn deliver(
         // (decision 2120). Outside the slot claim below because it is not about slots — a
         // re-confirmation of a channel we already number still owns the bit.
         channels.note_zone_channel_joined(&event.channel);
+        // …and a custom channel's confirmed join is what enters the durable re-join list the
+        // chat cache writes (`ChannelState::custom`), the same "server agreed" edge.
+        channels.note_custom_channel_joined(&event.channel);
         // …and the slot the walk RENAMED is already numbered, so the claim below skips it — but
         // its state still has to come back to `Joined`, or the next notice on that row reads as
         // another rename. A no-op for a channel we hold no slot for, which is the claim's case.

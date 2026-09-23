@@ -337,8 +337,7 @@ fn insert(lua: &Lua, h: FrameHandle, ins: &str, fire_space: bool) {
     if let Err(e) = on_char {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
-            .errors
-            .push(e.to_string());
+            .record_script_error(e.to_string());
     }
     mark_text_changed(lua, h);
     if fire_space {
@@ -606,8 +605,7 @@ fn fire_script(lua: &Lua, id: u32, name: &str) {
     if let Err(e) = event::fire_widget_handler(lua, id, name, Vec::new()) {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
-            .errors
-            .push(e.to_string());
+            .record_script_error(e.to_string());
     }
 }
 

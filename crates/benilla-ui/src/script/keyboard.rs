@@ -197,16 +197,14 @@ fn fire(lua: &Lua, id: u32, script: &str, arg: &str) {
         Err(e) => {
             lua.app_data_mut::<Model>()
                 .expect("model app_data")
-                .errors
-                .push(e.to_string());
+                .record_script_error(e.to_string());
             return;
         }
     });
     if let Err(e) = event::fire_widget_handler(lua, id, script, vec![val]) {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
-            .errors
-            .push(e.to_string());
+            .record_script_error(e.to_string());
     }
 }
 

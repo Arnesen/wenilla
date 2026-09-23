@@ -101,8 +101,8 @@ fn on_removed_notification(In(ev): In<SessionEvent>, mut auction: ResMut<Auction
 
 /// An open auction house dies with the socket (decision 1511): every auction command
 /// re-validates the auctioneer server-side, so a session that survived a reconnect would be a
-/// window whose every button silently failed. A listener on the session end, which the drain's
-/// dispatch match still owns (a second handler on the kind, after the bridge's own teardown).
+/// window whose every button silently failed. A listener on the session end (a second handler
+/// on `Disconnected`, after the bridge's own teardown, `net::session::on_disconnected`).
 fn on_session_end(In(_): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
     auction.clear_session();
 }

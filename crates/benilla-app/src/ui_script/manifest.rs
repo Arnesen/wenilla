@@ -150,6 +150,69 @@ pub(super) fn apply_buff_durations(script: &UiScript) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// **What a screen-size change re-runs** — called from `extract::tick_script`'s resize arm, the
+/// frame [`UiScript::set_screen_size`] reports a change on. Anchors follow the new screen rect by
+/// themselves; what does not is a size or seat somebody COMPUTED from the old one.
+///
+/// The bottom-stack manage pass (decision 1499): the open-bag stack starts a fresh column when
+/// the current one would run off the top, and that decision is made from `GetScreenHeight()` at
+/// layout time. Without this, dragging the window smaller leaves the bag columns wrapped for the
+/// old height until the next bag opens. Existence-guarded: the pass is defined by `UIParent.xml`,
+/// which is in-game UI, and the resize arm also runs on the glue screens.
+///
+/// **And the three full-screen quads the stock files size once** — a stated repair of a reference
+/// gap, in the same posture as [`install_durability_reseat`]: nothing of Blizzard's is edited.
+/// `WorldMapFrame_OnLoad` sizes `BlackoutWorld` and `CinematicFrame_OnLoad` sizes
+/// `UpperBlackBar`/`LowerBlackBar` from `GetScreenWidth()`/`GetScreenHeight()` at load, and no
+/// stock handler touches them again (no `DISPLAY_SIZE_CHANGED` listener) — the reference could
+/// afford that because its screen changed only across a restart. 2242 fixed the load edge; this
+/// is the other edge: after a window resize or a `uiScale` change the blackout stopped short of
+/// the new screen and the world showed through beside the map. [`FULLSCREEN_QUADS_RESEAT`] is the
+/// two OnLoads' own arithmetic re-run, so a quad after a resize is exactly what a fresh load at
+/// the new size would have made. A stateless chunk rather than an installed hook, so a `ReloadUI`
+/// has nothing to re-install and nothing can stack.
+pub(super) fn on_screen_resized(script: &UiScript) {
+    let _ = script.run("if UIParent_ManageFramePositions then UIParent_ManageFramePositions() end");
+    if let Err(e) = script.run(FULLSCREEN_QUADS_RESEAT) {
+        error!("ui_script: full-screen quad re-seat: {e}");
+    }
+}
+
+/// `WorldMapFrame.lua` `WorldMapFrame_OnLoad` l.19-28 and `CinematicFrame.lua`
+/// `CinematicFrame_OnLoad` l.5-19, verbatim in their arithmetic, each existence-guarded (the
+/// glue screens have neither). One addition to the letterbox: the stock OnLoad does nothing below
+/// 4:3, which leaves the bars at `CinematicFrame.xml`'s declared `1024 x 128` — so a resize to
+/// below 4:3 puts that declared size back, rather than keeping a wide screen's recompute.
+const FULLSCREEN_QUADS_RESEAT: &str = r#"
+if BlackoutWorld then
+    local width = GetScreenWidth()
+    local height = GetScreenHeight()
+    if ( width / height < 4 / 3 ) then
+        width = width * 1.25
+        height = height * 1.25
+    end
+    BlackoutWorld:SetWidth( width )
+    BlackoutWorld:SetHeight( height )
+end
+if UpperBlackBar and LowerBlackBar then
+    local width = GetScreenWidth()
+    local height = GetScreenHeight()
+    local barWidth, blackBarHeight = 1024, 128
+    if ( width / height > 4 / 3 ) then
+        local desiredHeight = width / 2
+        if ( desiredHeight > height ) then
+            desiredHeight = height
+        end
+        barWidth = width
+        blackBarHeight = ( height - desiredHeight ) / 2
+    end
+    UpperBlackBar:SetHeight( blackBarHeight )
+    UpperBlackBar:SetWidth( barWidth )
+    LowerBlackBar:SetHeight( blackBarHeight )
+    LowerBlackBar:SetWidth( barWidth )
+end
+"#;
+
 /// **A stated divergence from the reference, installed rather than edited in** (1751 window 4).
 ///
 /// The reference seats `DurabilityFrame` 20 further in when one of its three side glyphs is up
@@ -186,6 +249,35 @@ if DurabilityFrame and not DurabilityFrame.benillaReseat then
 end
 "#;
 
+/// **The UI load's sound-suppression bracket — the one site both load paths go through.**
+///
+/// `CGGameUI::Initialize 0x48fbf0` brackets ITSELF in the counted suppression scope —
+/// `0x48fbfa call 0x458f50` on entry, `0x49016d call 0x458f60` on exit — across the TOC walk,
+/// Bindings.xml, the AddOns, the saved variables and the world-enter cascade it calls at
+/// `0x490168` (`PLAYER_LOGIN`), so both of its callers (login `0x48f681` and `/reloadui`
+/// `0x495669`) load without a sound. The only reader of that depth is `PlaySoundByName
+/// 0x458030`, which drops the call outright (wow-re
+/// `system/ui/scratch/framexml-load-sound-suppression.md`).
+///
+/// This is the mechanism, not a workaround for one noisy handler: stock `TargetFrame_OnHide`
+/// really does fire at load (the frame ships shown and its OnLoad hides it) and really does call
+/// `PlaySound("INTERFACESOUND_LOSTTARGETUNIT")`. The engine throws it away. Decision 1033 reached
+/// the right rule from the director's ear; this is the binary agreeing.
+///
+/// One function rather than a push/pop pair at each caller because the production edge
+/// ([`super::load_ingame_ui_on_world_entry`]) spent its life unbracketed while the tests' whole-
+/// manifest load was — every `/reload` played the lost-target click. Generic over the borrow so
+/// the `&UiScript` test loader and the owning production edge share it.
+pub(super) fn silenced_ui_load<S: std::borrow::Borrow<UiScript>, R>(
+    script: &mut S,
+    body: impl FnOnce(&mut S) -> R,
+) -> R {
+    script.borrow().push_sound_suppression();
+    let out = body(script);
+    script.borrow().pop_sound_suppression();
+    out
+}
+
 /// Load benilla's own default UI — every file [`MANIFEST`] names — through the engine-free loader.
 /// This is our content (MIT/Apache), committed and **compiled into the binary**
 /// ([`super::content`], decision 1175); a dev build still prefers the copy on disk, so editing a
@@ -219,20 +311,12 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
     // have been registered here with real consumers since 1493/1502; the probes simply never had
     // them, and 218 tests found that out the hour this row went on the manifest.
     script.register_cvars(crate::cvars::registered_pairs());
-    // **Silent, the way the client's own load is.** `0x48fbf0` brackets ITSELF in the counted
-    // sound-suppression scope — `0x48fbfa call 0x458f50` on entry, `0x49016d call 0x458f60` on
-    // exit — across the TOC walk, Bindings.xml and the AddOns, so both of its callers (login
-    // `0x48f681` and `/reloadui` `0x495669`) load without a sound. The only reader of that depth
-    // is `PlaySoundByName 0x458030`, which drops the call outright.
-    //
-    // This is the mechanism, not a workaround for one noisy handler: stock `TargetFrame_OnHide`
-    // really does fire at load (the frame ships shown and its OnLoad hides it) and really does
-    // call `PlaySound("INTERFACESOUND_LOSTTARGETUNIT")`. The engine throws it away. Decision 1033
-    // reached the right rule from the director's ear; this is the binary agreeing.
-    script.push_sound_suppression();
-    let mut failures = load_manifest(script, &Addon::builtin().toc.files);
-    failures.extend(bootstrap_positions(script));
-    script.pop_sound_suppression();
+    // Silent, the way the client's own load is — see [`silenced_ui_load`].
+    let mut failures = silenced_ui_load(&mut &*script, |script| {
+        let mut failures = load_manifest(script, &Addon::builtin().toc.files);
+        failures.extend(bootstrap_positions(script));
+        failures
+    });
     // **A handler that raised DURING the walk is a load failure.** The loader's own report holds
     // the raises it dispatched itself (a `<Script file=>` chunk, an OnLoad); a raise one call
     // deeper — an OnLoad that `Show()`s a frame whose OnShow indexes a global its file has not

@@ -650,16 +650,10 @@ pub(super) fn tick_script(
     {
         let _span = bevy::log::info_span!("ui_script: tick").entered();
         let resized = script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
-        // A resize re-runs the bottom-stack manage pass (decision 1499). Anchors follow the new
-        // screen rect by themselves; what does not is a seat somebody COMPUTED from the old
-        // height — the open-bag stack starts a fresh column when the current one would run off
-        // the top, and that decision is made from `GetScreenHeight()` at layout time. Without
-        // this, dragging the window smaller leaves the bag columns wrapped for the old height
-        // until the next bag opens. Existence-guarded: the pass is defined by `UIParent.xml`,
-        // which is in-game UI, and this system also runs on the glue screens.
+        // A resize re-runs everything the interface COMPUTED from the old screen size — see
+        // [`super::manifest::on_screen_resized`].
         if resized {
-            let _ = script
-                .run("if UIParent_ManageFramePositions then UIParent_ManageFramePositions() end");
+            super::manifest::on_screen_resized(&script);
         }
         script.tick(time.delta_secs());
     }

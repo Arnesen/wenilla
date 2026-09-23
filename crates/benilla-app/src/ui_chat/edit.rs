@@ -176,6 +176,24 @@ pub(crate) struct ChannelState {
     /// drift from it; the saver refuses to compose a file from `None` for the same reason
     /// (writing `ZONECHANNELS 0` is the damage 2120 repaired).
     pub zone_mask: Option<u32>,
+    /// **The custom channels the character is in** — the chat cache header's `CHANNELS` list, the
+    /// names the next login re-joins. Durable state, for exactly [`Self::zone_mask`]'s reason: the
+    /// reference writes that list from its live slot array (`0x499b90`-`0x499bb1`: every slot
+    /// with a number, state 0 and no DBC id) at the chat teardown, when its slots are still
+    /// there — ours are cleared by the session end *before* the flush (the
+    /// `Disconnected{LoggedOut}` twin runs in `Update`, a frame ahead of `OnExit(InWorld)`), so a
+    /// list read off [`Self::joined`] at write time was empty on every logout and no custom
+    /// channel was ever re-joined (2184 §6).
+    ///
+    /// So it moves where the slot array's custom half moves, minus the session end: seated from
+    /// the file by `restore_chat_looks` (an overwrite, like the mask), grown on a
+    /// server-confirmed join of a channel with no DBC id ([`Self::note_custom_channel_joined`]),
+    /// shrunk on an explicit leave ([`Self::note_custom_channel_left`]), and nothing else.
+    ///
+    /// **Named divergence:** a channel whose re-join the server refuses (a ban, a changed
+    /// password) or that the player is kicked from never takes a confirmed slot in the reference
+    /// and so drops out of its file; here it stays listed until the player `/leave`s it.
+    pub custom: Vec<String>,
 }
 
 /// One joined-channel record — the reference's `[0xb4fe04] + n*0xa0` slot, in the fields this
@@ -273,6 +291,25 @@ impl ChannelState {
         if let Some(mask) = &mut self.zone_mask {
             *mask &= !zone_bit(self.channels.zone_channel_id(name));
         }
+    }
+
+    /// A server-confirmed join of a **custom** channel (no `ChatChannels.dbc` id) enters the
+    /// durable re-join list ([`Self::custom`]) — the slot the reference's writer would list at
+    /// teardown. A zone channel is a no-op here; it travels as its mask bit instead.
+    pub(crate) fn note_custom_channel_joined(&mut self, name: &str) {
+        if self.channels.zone_channel_id(name) != 0
+            || self.custom.iter().any(|c| c.eq_ignore_ascii_case(name))
+        {
+            return;
+        }
+        self.custom.push(name.to_string());
+    }
+
+    /// An **explicit** leave drops a custom channel from the re-join list — the one thing
+    /// besides the file that shrinks it ([`Self::custom`]). Case-insensitive, as the server's
+    /// channel names are.
+    pub(crate) fn note_custom_channel_left(&mut self, name: &str) {
+        self.custom.retain(|c| !c.eq_ignore_ascii_case(name));
     }
 
     /// Does the mask carry `id`'s bit — is this `ChatChannels.dbc` row one the walk joins? The

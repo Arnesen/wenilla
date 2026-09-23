@@ -717,8 +717,18 @@ fn load_saved_variables(lua: &Lua, i: usize) {
         }
         let Some(dir) = dir else { continue };
         let path = dir.join(format!("{name}.lua"));
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue; // absent is the first-run case
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue, // the first-run case
+            Err(e) => {
+                // Present but unreadable is not "absent": hold it, like a file that will not run.
+                log_error(lua, &format!("{}: {e}", path.display()));
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                if !model.held_saved_files.contains(&path) {
+                    model.held_saved_files.push(path);
+                }
+                continue;
+            }
         };
         if let Err(e) = run_chunk(
             lua,
@@ -726,8 +736,14 @@ fn load_saved_variables(lua: &Lua, i: usize) {
             &crate::script::addon_chunk_name(&name.to_string(), &format!("{name}.lua")),
         ) {
             // The reference fails this silently. We do not: a settings file that stopped parsing
-            // is exactly the thing a player needs told, and the file is left on disk untouched.
+            // is exactly the thing a player needs told, and the file is left on disk untouched —
+            // held, so the shutdown write does not replace it with the defaults this session is
+            // running on (`UiScript::hold_saved_file`).
             log_error(lua, &format!("{}: {e}", path.display()));
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            if !model.held_saved_files.contains(&path) {
+                model.held_saved_files.push(path);
+            }
         }
     }
 }
@@ -839,13 +855,17 @@ fn run_chunk(lua: &Lua, bytes: &[u8], name: &str) -> mlua::Result<()> {
         .exec()
 }
 
-/// Record a load error where the host drains it — the same channel a handler error uses, so a
-/// demand-load failure surfaces the way every other script error does rather than vanishing.
+/// Record a demand-load failure the way the startup walk records its own
+/// ([`super::UiScript::report_script_error`]): retained as a Load row, and dispatched to the
+/// player's error handler — plus the host drain the instruments read. It went to that drain alone
+/// until now, so a `LoadAddOn` whose file raised surfaced as a terminal line and nothing a player
+/// could see.
 fn log_error(lua: &Lua, msg: &str) {
-    lua.app_data_mut::<Model>()
-        .expect("model")
-        .errors
-        .push(format!("LoadAddOn: {msg}"));
+    let msg = format!("LoadAddOn: {msg}");
+    super::diagnostics::record_load_failure(lua, &msg);
+    let mut model = lua.app_data_mut::<Model>().expect("model");
+    model.pending_error_dispatch.push(msg.clone());
+    model.errors.push(msg);
 }
 
 /// The host's push: the discovered registry and the root its files live under.

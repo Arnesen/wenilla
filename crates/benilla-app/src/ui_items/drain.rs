@@ -563,9 +563,10 @@ pub(super) fn drain_container_uses(
             // the lock setter `0x4953e0` at `0x5edcd9` and only then ships `CMSG_OPEN_ITEM`
             // (wow-re `inventory-change-failure-display.md` §8, decision 0916). So a clam,
             // lockbox or loot bag greys the instant you right-click it and stays grey until the
-            // server answers — the loot landing (a resolving field update) or a refusal
-            // (`EQUIP_ERR_ITEM_LOCKED` on a still-locked junkbox), both of which
-            // `PendingItemOps` already clears on.
+            // open resolves — the emptied item vanishing (a resolving field update), a refusal
+            // (`EQUIP_ERR_ITEM_LOCKED` on a still-locked junkbox), or the window closed with loot
+            // left, whose `SMSG_LOOT_RELEASE_RESPONSE` unlocks it by guid (`ui_loot::net`'s
+            // `loot_release_response`, the reference's `UnlockItem` at `48f299`).
             //
             // Deliberately NOT armed on the gift-unwrap arm above, which sends the same opcode:
             // its emitter `0x5edd60` contains neither call — no lock setter and no latch write.

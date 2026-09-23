@@ -259,7 +259,7 @@ pub struct CursorMacro {
 /// Also derives `ACTIONBAR_SHOWGRID`/`ACTIONBAR_HIDEGRID` (decision 0216 §7) off
 /// [`Model::cursor_grid_shown`]'s mirror against the CURRENT `model.cursor` (already the
 /// post-transition state at every call site — every caller mutates `model.cursor` before calling
-/// this): a None→Some edge (any payload arm, any surface — bags/doll/actions alike) shows the
+/// this): a None→Some edge (any bar-droppable arm, any surface — bags/doll/actions alike) shows the
 /// bar's drop grid, Some→None hides it, Some→Some (the action hop) touches neither, so one
 /// gesture never churns HIDE+SHOW. This is the one seam every pickup/place/clear already routes
 /// through, so no call site needs to know about grid events at all.
@@ -271,13 +271,17 @@ pub(crate) fn queue_cursor_update(model: &mut Model) {
     // different places and the payload spaces do not overlap (decision 1010):
     //
     // - the ACTION bar's grid follows "is anything held that could land there" — every arm except
-    //   the pet one, which `PlaceAction` refuses outright;
+    //   the pet one, which `PlaceAction` refuses outright, and the vendor row (mode 5): its grab
+    //   goes through the shared setter `0x4950f0`, whose `ACTIONBAR_SHOWGRID` branch is taken for
+    //   mode 7 alone (`0x495106`/`0x49513a`, wow-re `merchant-cursor-law.md` §5);
     // - the PET bar's grid follows the pet payload alone. The reference fires `PET_BAR_SHOWGRID`
     //   from inside the pet-action pickup builder itself (`0x494f28`), not from a shared cursor
     //   transition — so a spell on the cursor lights the action bar's empty slots and leaves the
     //   pet bar alone, which is also the only honest answer: you cannot drop it there.
     let pet_held = matches!(model.cursor, Some(CursorPayload::PetAction(_)));
-    let bar_held = model.cursor.is_some() && !pet_held;
+    let bar_held = model.cursor.is_some()
+        && !pet_held
+        && !matches!(model.cursor, Some(CursorPayload::Merchant(_)));
     if bar_held != model.cursor_grid_shown {
         model.cursor_grid_shown = bar_held;
         let event = if bar_held {

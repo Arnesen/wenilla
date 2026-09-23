@@ -327,8 +327,9 @@ fn send_spell_cast(
         ground.clear();
     }
     // The cast classes at this seam. A ranged/auto-repeat shot (Auto Shot, wand Shoot, Throw) is
-    // not a cast-bar cast — it runs the ranged-stance / `AutoRepeatArmed` path, outside the
-    // in-flight guard. An on-next-swing spell (`Attributes & 0x404` — Heroic Strike, Cleave)
+    // not a cast-bar cast — it runs the ranged-stance / `AutoRepeatArmed` path, and its own
+    // record does not guard (1601), though it is refused like any press while a guarding cast
+    // holds. An on-next-swing spell (`Attributes & 0x404` — Heroic Strike, Cleave)
     // queues on the server's melee slot: it arms [`crate::spell::QueuedMeleeSpell`], never the
     // in-flight guard, so a queued strike cannot block the next cast (the ref's `6e4d97`
     // exemption on the inflight rec's 0x404 bits — wow-re `wave-cast.md`).
@@ -340,11 +341,15 @@ fn send_spell_cast(
         debug!("ui_action: cast {spell_id} suppressed — already queued on next swing");
         return;
     }
-    if (normal_cast || on_next_swing) && pending.in_flight(now) {
+    if pending.in_flight(now) {
         // The ref's already-casting refusal: the same spell bails silently (`6e4d43`); a
         // different one errors reason 0x61 "Another action is in progress" (`6e4d97` →
-        // `HandleCastFailed`) — the inflight rec here is always an ordinary cast, so even an
-        // on-next-swing press is refused while it holds.
+        // `HandleCastFailed`). The gate tests the **inflight** rec's `Attributes & 0x404`, never
+        // the pressed spell's (wow-re `combat-feel-law.md` §B1, VERIFIED byte-exact), and a
+        // guarding record here is always an ordinary cast or an item use — so EVERY press class
+        // is refused while it holds: an on-next-swing strike, and a ranged/auto-repeat shot too.
+        // Exempting the shot let it commit and its non-guarding arm overwrite the running cast's
+        // record, leaving that cast unguarded once the server refused the shot.
         if pending.current(now) != Some(spell_id) {
             cast_errors.push_local(spell_id, 0x61);
         }
@@ -1069,6 +1074,43 @@ mod tests {
             world.resource::<AutoRepeatActive>().0,
             Some(AUTO_SHOT),
             "...and the commit arms the repeat, which is the whole observable"
+        );
+    }
+
+    /// **A shot pressed mid-cast is refused, and the cast keeps its guard.** The reference's
+    /// already-casting gate (`6e4d97`, wow-re `combat-feel-law.md` §B1, VERIFIED byte-exact)
+    /// tests the **inflight** rec's `Attributes & 0x404`, never the pressed spell's — so a wand
+    /// Shoot / Auto Shot pressed during a Frostbolt meets the same `0x61` as any other press.
+    /// Ours exempted the ranged class at the gate, so the shot went out, its non-guarding arm
+    /// overwrote the Frostbolt's record, vmangos refused the shot `SPELL_IN_PROGRESS`, and the
+    /// still-running Frostbolt was left unguarded for the next mashed key.
+    #[test]
+    fn a_shot_pressed_mid_cast_is_refused_and_the_cast_keeps_its_guard() {
+        const FROSTBOLT: u32 = 116;
+        let (mut world, rx) = combat_world(false);
+        world
+            .resource_mut::<crate::spell::PendingCast>()
+            .arm(FROSTBOLT, Instant::now(), true);
+
+        send_at(&mut world, AUTO_SHOT, MOB);
+
+        assert!(rx.try_recv().is_err(), "nothing goes out on the wire");
+        assert_eq!(
+            world.resource::<CastErrors>().0,
+            vec![CastFail::local(AUTO_SHOT, 0x61)],
+            "a different spell mid-cast is \"Another action is in progress\", whatever its class"
+        );
+        assert_eq!(
+            world
+                .resource::<crate::spell::PendingCast>()
+                .current(Instant::now()),
+            Some(FROSTBOLT),
+            "the Frostbolt still holds the guard"
+        );
+        assert_eq!(
+            world.resource::<AutoRepeatActive>().0,
+            None,
+            "and the refused shot armed no repeat"
         );
     }
 

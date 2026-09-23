@@ -299,23 +299,7 @@ pub(super) fn apply_server_moves(
     // Same-map teleport (the bridge only emits ours). Snap + echo the ack — without it the server
     // freezes our movement until relog.
     for t in teleports.read() {
-        player.pos = wow_to_bevy(t.position);
-        player.face_yaw = t.orientation;
-        cam.yaw = t.orientation;
-        // Stop any in-progress walk — server now sees us at the new spot.
-        player.move_flags = 0;
-        player.airborne_since = None; // a snap ends any in-progress jump arc (no phantom FALL_LAND)
-        player.settling = true; // hold (gravity off) until the destination's ground/buildings load
-        player.settle_since = time.elapsed_secs();
-        player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
-        // A far same-map teleport relocates us over ground that has not streamed either — the
-        // tiles we were standing on are still the resident ones. See [`Player::world_stale`].
-        player.world_stale = true;
-        // The relocation voids any in-progress self server-ride (the taxi flight-end teleport
-        // beats our own spline end by ~latency): `drive_self_ride` takes this flag next frame
-        // and drops the ride instead of mirroring the stale flight pose back over this snap
-        // (decision 0501 — the 4-yd hover + full-6s settle at every taxi landing).
-        player.ride_abort = true;
+        snap_near_teleport(player, &mut cam.yaw, t, time.elapsed_secs());
         // The echo goes now, and it is the WHOLE near-teleport handshake (decision 1340). The
         // real client echoes on the very next movement tick (wow-re: the 0xC7 drain applies the
         // snap, then `0x60e0a0` sends guid+counter+time) and sends nothing else — no
@@ -521,6 +505,34 @@ pub(super) fn apply_server_moves(
         }
     }
     speed_acks
+}
+
+/// **Apply one same-map teleport's snap** (`MSG_MOVE_TELEPORT_ACK` inbound) — everything but the
+/// echo, which the caller sends. `cam_yaw` is the fly-cam's yaw, carried to the new facing.
+fn snap_near_teleport(player: &mut Player, cam_yaw: &mut f32, t: &TeleportMessage, now: f32) {
+    // A near teleport always arrives detached: vmangos takes this path only with no `m_transport`
+    // (`Player::TeleportTo`, after `RemovePassenger`), and the reference's apply (`0x6186b0`)
+    // re-parents to the packet's transport guid — zero here. A ride left standing let this same
+    // frame's `ride::carry` compose the old deck pose back over the snap, and the airborne settle
+    // kept it attached, so a hearth from a zeppelin or a lift landed us back on the deck.
+    player.ride = None;
+    player.pos = wow_to_bevy(t.position);
+    player.face_yaw = t.orientation;
+    *cam_yaw = t.orientation;
+    // Stop any in-progress walk — server now sees us at the new spot.
+    player.move_flags = 0;
+    player.airborne_since = None; // a snap ends any in-progress jump arc (no phantom FALL_LAND)
+    player.settling = true; // hold (gravity off) until the destination's ground/buildings load
+    player.settle_since = now;
+    player.settle_deadline = now + SETTLE_TIMEOUT;
+    // A far same-map teleport relocates us over ground that has not streamed either — the tiles we
+    // were standing on are still the resident ones. See [`Player::world_stale`].
+    player.world_stale = true;
+    // The relocation voids any in-progress self server-ride (the taxi flight-end teleport beats our
+    // own spline end by ~latency): `drive_self_ride` takes this flag next frame and drops the ride
+    // instead of mirroring the stale flight pose back over this snap (decision 0501 — the 4-yd
+    // hover + full-6s settle at every taxi landing).
+    player.ride_abort = true;
 }
 
 /// Merge a server-authored packet's `MOVEMENTFLAGS` into our own — the reference's masked merge
@@ -981,5 +993,40 @@ mod control_tests {
             "with no self guid this is somebody else's unit, not our body being frozen"
         );
         assert_eq!(control_verdict(ME, true, None), ControlVerdict::Granted(ME));
+    }
+}
+
+#[cfg(test)]
+mod teleport_tests {
+    use super::*;
+
+    /// **A near teleport lands us where the server says, not back on the deck.** Hearthing off a
+    /// zeppelin or a lift is a same-map teleport, and vmangos removes the passenger before it
+    /// takes that path; the snap has to drop the ride too, or the same frame's platform carry
+    /// recomposes the old deck pose over it.
+    #[test]
+    fn a_near_teleport_leaves_the_transport() {
+        let mut player = Player {
+            active: true,
+            ride: Some(super::super::state::PlayerRide {
+                entity: Entity::PLACEHOLDER,
+                guid: 0x1F,
+                local_pos: Vec3::new(1.0, 0.0, 2.0),
+                boat_yaw: 0.5,
+            }),
+            ..Default::default()
+        };
+        let mut cam_yaw = 0.0;
+        let t = TeleportMessage {
+            guid: 0x45,
+            counter: 1,
+            position: [-8_913.0, -136.0, 81.0],
+            orientation: 1.25,
+        };
+        snap_near_teleport(&mut player, &mut cam_yaw, &t, 10.0);
+        assert!(player.ride.is_none(), "the snap deboards");
+        assert_eq!(player.pos, wow_to_bevy(t.position));
+        assert_eq!((player.face_yaw, cam_yaw), (1.25, 1.25));
+        assert!(player.settling && player.ride_abort && player.world_stale);
     }
 }

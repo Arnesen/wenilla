@@ -13,6 +13,7 @@ use bevy::window::PrimaryWindow;
 use benilla_ui::script::UiScript;
 
 use super::{CursorPayloadHeld, PlayerUiClickConsumed, PlayerUiHover, UiKeyboardCapture};
+use crate::bindings::WheelNotches;
 use crate::textinput::{self, keymap, HostClipboard};
 
 /// The pointer-side state [`feed_ui_input`] reads and writes, as one
@@ -58,6 +59,28 @@ impl PointerFeed<'_> {
     }
 }
 
+/// The frame's wheel travel into the pane under the cursor's `OnMouseWheel` — **one call per whole
+/// notch**, `arg1 = ±1`.
+///
+/// The travel is normalised to lines first ([`crate::bindings::wheel_lines`]) and the fraction
+/// carried in `notches`: a trackpad reports a gesture as a `Pixel` trickle across many frames, and
+/// passing each frame's raw delta fired the handler once per frame — the stock handlers act on
+/// the sign alone (`ScrollFrameTemplate_OnMouseWheel` scrolls half a pane per call), so a gentle
+/// swipe slammed the pane to its end. A mouse wheel's `Line` notch still fires once, as before.
+fn feed_wheel(
+    script: &mut UiScript,
+    notches: &mut WheelNotches,
+    x: f32,
+    y: f32,
+    scroll: &AccumulatedMouseScroll,
+) {
+    let whole = notches.feed(crate::bindings::wheel_lines(scroll.unit, scroll.delta.y));
+    let step = whole.signum() as f32;
+    for _ in 0..whole.unsigned_abs() {
+        script.mouse_wheel(x, y, step);
+    }
+}
+
 /// Feed the window's cursor + buttons + wheel + keyboard into the UI engine (after
 /// [`super::extract::tick_script`] has resolved this frame's rects), firing
 /// OnEnter/OnLeave/OnClick/OnMouseWheel and the EditBox
@@ -73,7 +96,9 @@ pub(super) fn feed_ui_input(
     // winit has actually created the surface.
     window: Query<(&Window, Option<&bevy::window::RawHandleWrapper>), With<PrimaryWindow>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    scroll: Res<AccumulatedMouseScroll>,
+    // The frame's wheel travel, and the fraction of a notch carried between frames
+    // ([`feed_wheel`]) — one param for clippy's argument ceiling.
+    (scroll, mut notches): (Res<AccumulatedMouseScroll>, ResMut<WheelNotches>),
     // One [`PointerFeed`] (clippy's argument ceiling): the hover + click-consumed outputs this
     // pass writes, the world pick that routes the world-click payload legs (decision 0571), and
     // the payload-held mirror written for the Send-side world-click consumers.
@@ -219,9 +244,7 @@ pub(super) fn feed_ui_input(
                 script.mouse_button(x, y, name, false);
             }
         }
-        if scroll.delta.y != 0.0 {
-            script.mouse_wheel(x, y, scroll.delta.y);
-        }
+        feed_wheel(&mut script, &mut notches, x, y, &scroll);
     } else if !synthetic {
         // The OS pointer left the window: leave whatever frame was hovered (once, on the
         // Some→None transition) and — every frame it stays outside — clear any armed press/drag
@@ -417,3 +440,93 @@ pub(super) fn feed_ui_input(
 // bare-key window toggles — moved into the command registry (`crate::bindings::commands`,
 // decision 0997): one chord→command table, rebindable, with 0585's modifier law enforced once
 // in the dispatch instead of per branch here.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::input::mouse::MouseScrollUnit;
+
+    /// A bare VM with one wheel-enabled pane at the screen's centre whose `OnMouseWheel` counts
+    /// its calls and sums its `arg1`s.
+    fn wheel_pane() -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(1024.0, 768.0);
+        s.run(
+            r#"
+            local f = CreateFrame("Frame", "WheelProbe")
+            f:SetWidth(200) f:SetHeight(200) f:SetPoint("CENTER", nil, "CENTER", 0, 0)
+            f:EnableMouseWheel(true)
+            f:SetScript("OnMouseWheel", function()
+                WheelCalls = (WheelCalls or 0) + 1
+                WheelSum = (WheelSum or 0) + arg1
+            end)
+            f:Show()
+            "#,
+        )
+        .unwrap();
+        s.resolve();
+        s
+    }
+
+    fn calls(s: &UiScript) -> (i64, f64) {
+        s.eval::<(Option<i64>, Option<f64>)>("return WheelCalls, WheelSum")
+            .map(|(c, v)| (c.unwrap_or(0), v.unwrap_or(0.0)))
+            .unwrap()
+    }
+
+    fn frame_of(unit: MouseScrollUnit, dy: f32) -> AccumulatedMouseScroll {
+        AccumulatedMouseScroll {
+            unit,
+            delta: Vec2::new(0.0, dy),
+        }
+    }
+
+    /// **A gentle trackpad swipe is not a notch a frame.** Ten frames of a small `Pixel` delta —
+    /// a tenth of a line apiece at Bevy's factor, one line in total — must fire the pane's
+    /// `OnMouseWheel` at most the ONE notch they add up to. Fed raw, it fired ten times, and a
+    /// stock `ScrollFrameTemplate_OnMouseWheel` moves half a pane per call off the sign alone.
+    #[test]
+    fn a_trackpad_trickle_fires_only_the_notches_it_adds_up_to() {
+        let mut s = wheel_pane();
+        let mut notches = WheelNotches::default();
+        let step = MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR / 10.0;
+        for _ in 0..10 {
+            feed_wheel(
+                &mut s,
+                &mut notches,
+                512.0,
+                384.0,
+                &frame_of(MouseScrollUnit::Pixel, step),
+            );
+        }
+        let (n, sum) = calls(&s);
+        assert!(
+            n <= 1,
+            "ten frames adding up to one line fired {n} wheel calls (sum {sum})"
+        );
+        assert!(sum <= 1.0, "…and they may move at most one notch: {sum}");
+    }
+
+    /// A mouse wheel's notch arrives as one `Line` delta and fires exactly once, `arg1 = 1`.
+    #[test]
+    fn a_line_notch_fires_once() {
+        let mut s = wheel_pane();
+        let mut notches = WheelNotches::default();
+        feed_wheel(
+            &mut s,
+            &mut notches,
+            512.0,
+            384.0,
+            &frame_of(MouseScrollUnit::Line, 1.0),
+        );
+        assert_eq!(calls(&s), (1, 1.0));
+        feed_wheel(
+            &mut s,
+            &mut notches,
+            512.0,
+            384.0,
+            &frame_of(MouseScrollUnit::Line, -1.0),
+        );
+        assert_eq!(calls(&s), (2, 0.0), "and the other way is a notch down");
+    }
+}

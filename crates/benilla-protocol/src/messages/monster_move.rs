@@ -92,18 +92,14 @@ pub(super) fn read_monster_move(r: &mut &[u8], on_transport: bool) -> io::Result
         let duration_ms = read_u32_le(r)?;
         let flying = spline_flags & SPLINE_FLAG_FLYING != 0;
         let run_mode = spline_flags & SPLINE_FLAG_RUNMODE != 0;
-        // The decoded waypoints *after* the start (see [`read_monster_move_spline`]): a ground path's
-        // first packed point re-encodes `start` (quantized), so drop it and anchor the path with the
-        // exact wire `start`; a flying path sends only post-start points, kept whole. The result is the
-        // full travel-order polyline `[start, …waypoints…, endpoint]`.
+        // The decoded waypoints *after* the start (see [`read_monster_move_spline`]) — both layouts
+        // ship only post-start points, so the wire `start` anchors the full travel-order polyline
+        // `[start, …waypoints…, endpoint]`.
         let tail = read_monster_move_spline(r, flying)?;
         let path = if tail.is_empty() {
             Vec::new()
         } else {
-            let skip = usize::from(!flying && tail.len() >= 2);
-            std::iter::once(start)
-                .chain(tail.into_iter().skip(skip))
-                .collect()
+            std::iter::once(start).chain(tail).collect()
         };
         ServerPacket::MonsterMove {
             guid,
@@ -124,18 +120,22 @@ pub(super) fn read_monster_move(r: &mut &[u8], on_transport: bool) -> io::Result
 /// travel order (the point *after* the start … the endpoint). Two wire layouts, keyed by `catmull_rom`
 /// (the `Mask_CatmullRom` = `Flying` spline flag), both from vmangos `PacketBuilder`:
 ///
-/// - **Ground (linear, `WriteLinearPath`):** a `u32` count, then the endpoint as an absolute `Vector3d`,
-///   then `count − 1` packed `i32` offsets — `endpoint − waypoint` per point (see [`packed_to_vector3d`]),
-///   in travel order. We invert each (`waypoint = endpoint − offset`) and append the endpoint, so the
-///   returned list is `[waypoint₀ ≈ start, waypoint₁, …, endpoint]`. `waypoint₀` re-encodes the packet's
-///   `start` (¼-yd quantized); the caller drops it in favour of the exact `start`.
-///   **`count == 2` carries no offsets at all**: vmangos guards the offset loop with `last_idx > 1`
-///   (`packet_builder.cpp:92`) while still writing `last_idx + 1` as the count, so a plain two-point
-///   `MoveTo` announces 2 points and ships only the destination. Reading the phantom offset anyway
-///   over-runs the body and the whole packet is skipped — i.e. that creature stops dead until its next
-///   move, the same freeze decision 0708 is about. Never observed on this deploy (its pathfinder emits
-///   3+ point paths, verified over four live runs: no `nodes=2` in any `csp`/`mmv` trace), but a map
-///   without mmaps would hit it on every step.
+/// - **Ground (linear, `WriteLinearPath`):** a `u32` count of the points **after** the start, then the
+///   endpoint as an absolute `Vector3d`, then `count − 1` packed `i32` offsets — `endpoint − waypoint`
+///   for each intermediate waypoint (see [`packed_to_vector3d`]), in travel order. We invert each
+///   (`waypoint = endpoint − offset`) and append the endpoint, so the returned list is
+///   `[waypoint₁, …, endpoint]`; the start is the packet head's.
+///   **The start is not among the offsets.** vmangos calls the builder with `firstPoint = 1`
+///   (`packet_builder.h:34`'s default, `MoveSplineInit.cpp:169`) over a spline laid out
+///   `[phantom, c₀ … cₙ₋₁, cₙ₋₁]` — the Catmull-Rom initializer even for a linear path
+///   (`spline.cpp:52`) — so `last_idx = n − 1`, the count is `n − 1`, and the offset loop runs
+///   `c₁ … cₙ₋₂`; the head's start is `getPoint(first())` = `c₀`. The reference decoder
+///   (`0x6018f0`, wow-re `net/scratch/rf49-inbound-wire-parses.md` rows 9–11) reads the same
+///   `count − 1` intermediates, and its curve is `[start, points…]` (`curvemath/…/rf52-curve-construction.md`).
+///   Until the sweep that found it, this read assumed `firstPoint = 0` (0097, 0708): it treated the
+///   first offset as a re-encoded start and dropped it — every ground path lost its first corner —
+///   and read none at `count == 2`, leaving the one real waypoint unread (the decode-length
+///   instrument's `SMSG_MONSTER_MOVE … left 4 trailing byte(s)` on a live run).
 /// - **Flying (Catmull-Rom, `WriteCatmullRomPath`):** a `u32` count, then `count` **absolute** `Vector3d`s
 ///   (the control points from `getPoint(2)` on — the post-start waypoints through the endpoint). Returned
 ///   verbatim. (Reading these as packed offsets — the old single-layout path — mis-sized the body and
@@ -162,10 +162,9 @@ fn read_monster_move_spline(r: &mut &[u8], catmull_rom: bool) -> io::Result<Vec<
     }
     let endpoint = Vector3d::read(r)?;
     let mut points = Vec::with_capacity(capacity_hint(count, 0xFFFF));
-    // `count == 2` ⇒ the producer skipped its offset loop entirely (`last_idx > 1`); the destination is
-    // the whole payload, and the caller pairs it with the packet's exact `start`.
-    let offsets = if count > 2 { count - 1 } else { 0 };
-    for _ in 0..offsets {
+    // `count == 1` ⇒ a straight hop: the producer's `last_idx > 1` guard skips the loop, and
+    // `count − 1` is already zero.
+    for _ in 1..count {
         let off = packed_to_vector3d(read_i32_le(r)?);
         points.push(Vector3d {
             x: endpoint.x - off.x,
@@ -180,7 +179,7 @@ fn read_monster_move_spline(r: &mut &[u8], catmull_rom: bool) -> io::Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::messages::{opcode, parse_server};
+    use crate::messages::{opcode, parse_server, parse_server_with_tail};
     use crate::wire::write_packed_guid;
 
     /// The fixed head of a `SMSG_MONSTER_MOVE`: packed guid, start pos, splineId, moveType.
@@ -195,22 +194,25 @@ mod tests {
         b
     }
 
-    /// The producer's linear encoder, transcribed from vmangos `PacketBuilder::WriteLinearPath`:
-    /// count = number of points, the **endpoint** written absolute, then each earlier point as a packed
-    /// `endpoint − point` offset in travel order. `path` is the full `[start, …mids…, endpoint]`.
-    /// The `last_idx > 1` guard is transcribed too: a **two**-point path writes the count and the
-    /// destination and stops — no offsets at all, not even for the start.
+    /// The producer's linear encoder, transcribed from vmangos `PacketBuilder::WriteLinearPath` as
+    /// `WriteMonsterMove` calls it (`firstPoint = 1`). `path` is the full `[c₀ = start, …, cₙ₋₁]`
+    /// (the head carries `c₀` separately); over the spline's `[phantom, c₀ … cₙ₋₁, cₙ₋₁]` layout
+    /// `last_idx = n − 1`, so it writes count `n − 1`, the **endpoint** absolute, then — under
+    /// `if (last_idx > 1)` — `c₁ … cₙ₋₂` as packed `endpoint − point` offsets. The start is never
+    /// among them.
     fn append_linear_path(body: &mut Vec<u8>, path: &[[f32; 3]]) {
         let (&endpoint, leading) = path.split_last().expect("a path has an endpoint");
-        body.extend_from_slice(&(path.len() as u32).to_le_bytes());
+        let last_idx = path.len() - 1;
+        body.extend_from_slice(&(last_idx as u32).to_le_bytes()); // last_idx − start + 1
         for f in endpoint {
             body.extend_from_slice(&f.to_le_bytes());
         }
-        if path.len() <= 2 {
+        if last_idx <= 1 {
             return; // vmangos `packet_builder.cpp:92` — `if (last_idx > 1)`
         }
-        // `leading` = [start, …mids…]; each packed as endpoint − point (¼-yd quantized).
-        for &p in leading {
+        // `for (i = start; i < last_idx; ++i)` with `start = 1`: the intermediates, packed as
+        // endpoint − point (¼-yd quantized).
+        for &p in &leading[1..] {
             let pack = |v: f32, shift: u32, mask: i32| ((v * 4.0).round() as i32 & mask) << shift;
             let off = [endpoint[0] - p[0], endpoint[1] - p[1], endpoint[2] - p[2]];
             let packed = pack(off[0], 0, 0x7FF) | pack(off[1], 11, 0x7FF) | pack(off[2], 22, 0x3FF);
@@ -314,17 +316,17 @@ mod tests {
         }
     }
 
-    /// The plain two-point hop — a `MoveTo` with no intermediate waypoints. vmangos announces `count = 2`
-    /// but ships **only** the destination (its offset loop is guarded by `last_idx > 1`), so a decoder
-    /// that trusts the count and reads `count − 1` offsets over-runs the body and the packet is skipped
-    /// entirely — the creature freezes where it stands. Encoded here by the transcribed producer above.
+    /// The plain two-point hop — a `MoveTo` with no intermediate waypoints: `count = 1`, the
+    /// destination, no offsets. Encoded here by the transcribed producer above.
     #[test]
     fn monster_move_two_point_path_carries_no_offsets() {
         let mut body = head(0x77, [4.0, 8.0, 0.0], 0);
         body.extend_from_slice(&0u32.to_le_bytes()); // spline flags: ground
         body.extend_from_slice(&1_000u32.to_le_bytes()); // duration
         append_linear_path(&mut body, &[[4.0, 8.0, 0.0], [12.0, 8.0, 0.0]]);
-        let p = parse_server(opcode::SMSG_MONSTER_MOVE, &body).expect("a two-point hop parses");
+        let (p, tail) = parse_server_with_tail(opcode::SMSG_MONSTER_MOVE, &body)
+            .expect("a two-point hop parses");
+        assert_eq!(tail, 0, "the body is exactly the count and the destination");
         match p {
             ServerPacket::MonsterMove { path, .. } => {
                 assert_eq!(path.len(), 2, "start + destination, got {path:?}");
@@ -334,12 +336,42 @@ mod tests {
         }
     }
 
+    /// **The one-corner path, byte for byte as vmangos writes it** — hand-assembled, not through the
+    /// transcribed encoder, so the two cannot share a misreading. A pathfinder route `c₀ → c₁ → c₂`
+    /// is `count = 2`, the endpoint `c₂`, and ONE packed offset `c₂ − c₁`. The read this replaced
+    /// took `count == 2` for an offset-free hop: it read nothing, cut the corner (`[c₀, c₂]`) and
+    /// left four bytes unread — the live run's `SMSG_MONSTER_MOVE … left 4 trailing byte(s)`.
+    #[test]
+    fn monster_move_one_corner_path_keeps_its_corner() {
+        let mut body = head(0x77, [0.0, 0.0, 0.0], 0); // c₀ in the head
+        body.extend_from_slice(&0u32.to_le_bytes()); // spline flags: ground
+        body.extend_from_slice(&2_000u32.to_le_bytes()); // duration
+        body.extend_from_slice(&2u32.to_le_bytes()); // count = last_idx − start + 1 = 2
+        for f in [10.0f32, 10.0, 0.0] {
+            body.extend_from_slice(&f.to_le_bytes()); // endpoint c₂
+        }
+        // c₂ − c₁ = (0, 10, 0): x 0, y 10·4 = 40 at bit 11, z 0 (`appendPackXYZ`'s ¼-yd fields).
+        body.extend_from_slice(&(40i32 << 11).to_le_bytes());
+        let (p, tail) =
+            parse_server_with_tail(opcode::SMSG_MONSTER_MOVE, &body).expect("a corner path parses");
+        assert_eq!(tail, 0, "the one offset is read, not left behind");
+        match p {
+            ServerPacket::MonsterMove { path, .. } => {
+                let got: Vec<[f32; 3]> = path.iter().map(|v| [v.x, v.y, v.z]).collect();
+                assert_eq!(
+                    got,
+                    vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]]
+                );
+            }
+            _ => panic!("expected MonsterMove"),
+        }
+    }
+
     #[test]
     fn monster_move_ground_path_decodes_every_waypoint() {
         // A four-waypoint ground patrol, encoded exactly as vmangos `WriteLinearPath` ships it, must
-        // round-trip to the full travel-order polyline — not collapse to `start → endpoint`. Points are
-        // ¼-yd multiples so the packed quantization is exact. The start is anchored from the wire `start`
-        // (the redundant quantized first packed point is dropped).
+        // round-trip to the full travel-order polyline — not collapse to `start → endpoint`, and not
+        // lose its first corner. Points are ¼-yd multiples so the packed quantization is exact.
         let want = [
             [0.0f32, 0.0, 0.0], // start
             [10.0, 0.0, 0.0],   // corner east

@@ -560,6 +560,8 @@ pub(super) fn control(
             if !player.server_riding {
                 movement_net::park_mover(&net.0 .0, &mut player);
             }
+            // After the park, so a fear's ack carries the stopped word the park just reported.
+            movement_net::ack_speeds_undriven(&net.0 .0, &player, &speed_acks);
             return;
         }
         // This frame's netted movement axes, the mouselook/turn modes they imply, and the autorun
@@ -1182,22 +1184,8 @@ pub(super) fn control(
         // jump/fall lifecycle, and a ~500 ms heartbeat, each carrying the live `MovementInfo` (decisions
         // 0052 + 0053). vmangos relays it to nearby players, who extrapolate from the flags. See the
         // [`movement_net`] module (the outbound mirror of `net::motion`'s remote integration).
-        // The rider's local pose for the wire's ON_TRANSPORT tail: `bevy_to_wow` is a pure basis
-        // rotation, so the boat-local Bevy vector converts directly, and the local orientation is
-        // `face_yaw − boat_yaw` (the GetAbsoluteFacing law in reverse), normalized like any wire
-        // orientation.
-        let wire_transport = player.ride.as_ref().map(|r| {
-            let local = benilla_assets::coords::bevy_to_wow(r.local_pos);
-            benilla_protocol::TransportPose {
-                guid: r.guid,
-                pos: benilla_protocol::wire::Vector3d {
-                    x: local[0],
-                    y: local[1],
-                    z: local[2],
-                },
-                orientation: (player.face_yaw - r.boat_yaw).rem_euclid(std::f32::consts::TAU),
-            }
-        });
+        // The rider's local pose for the wire's ON_TRANSPORT tail.
+        let wire_transport = movement_net::wire_transport(&player);
         // The skipped-time clock (decision 1935): a held frame is a frame of movement simulation
         // we advanced through without integrating, and the mover we name is the one we are
         // actually driving — a possessed unit while we hold its reins. Read out before the call

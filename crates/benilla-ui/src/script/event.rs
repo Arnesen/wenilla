@@ -27,27 +27,13 @@ use crate::widget::{ButtonState, FrameHandle};
 
 /// Fire `event` at every frame registered for it (the engine-internal twin of
 /// `UiScript::fire_event`, for engine code holding only the Lua context — the compare drive's
-/// `SHOW_COMPARE_TOOLTIP`), in registration order with per-step live re-reads (the FIFO law —
-/// see `fire_event`'s doc). Handler errors land in [`Model::errors`].
+/// `SHOW_COMPARE_TOOLTIP`), in registration order. **The same walk, not a second one**: this was
+/// an index walk over the live list, so a handler that unregistered *itself* (the hook-once idiom
+/// on `ADDON_LOADED`) shifted its successor into the slot the walk had just left, and that
+/// listener never heard the event — the 1324 bug, fixed in [`super::tick::fire_event_into`] and
+/// left standing here.
 pub(super) fn fire_global(lua: &Lua, event: &str, args: &[ScriptValue]) {
-    let mut i = 0;
-    loop {
-        let id = {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let Some(&h) = model.event_to_frames.get(event).and_then(|l| l.get(i)) else {
-                break;
-            };
-            model.frame_id(h)
-        };
-        if let Err(e) = fire_event_handler(lua, id, event, args) {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .errors
-                .push(e.to_string());
-        }
-        i += 1;
-    }
-    fire_all_event_listeners(lua, event, args);
+    super::tick::fire_event_into(lua, event, args.to_vec());
 }
 
 /// The `RegisterAllEvents()` half of one dispatch: every frame that asked for the whole stream,
@@ -81,8 +67,7 @@ pub(super) fn fire_all_event_listeners(lua: &Lua, event: &str, args: &[ScriptVal
             if let Err(e) = fire_event_handler(lua, id, event, args) {
                 lua.app_data_mut::<Model>()
                     .expect("model app_data")
-                    .errors
-                    .push(e.to_string());
+                    .record_script_error(e.to_string());
             }
         }
         at = next;
@@ -161,8 +146,7 @@ pub(super) fn fire_size_changes(lua: &Lua) {
         ) {
             lua.app_data_mut::<Model>()
                 .expect("model")
-                .errors
-                .push(e.to_string());
+                .record_script_error(e.to_string());
         }
     }
 }
