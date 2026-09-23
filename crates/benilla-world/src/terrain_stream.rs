@@ -750,7 +750,6 @@ fn stream_terrain(
     // wall moves this with it.
     let center = focus.resolve(camera.single().ok().map(|c| c.translation));
     let window = StreamWindow::at(view.farclip, center[0], center[1]);
-    let tiling = cfg.as_ref().map(|c| c.tex_tiles).unwrap_or(8.0);
     let (cx, cy) = window.focus_tile();
     let same_window = state.focus == (cx, cy) && state.reach == Some((window.inner, window.outer));
     // Never while a load is in flight: `paced` is false from a snap until the body settles, and
@@ -960,7 +959,7 @@ fn stream_terrain(
                 layer_array: adt.layer_array.clone(),
                 alpha_array: adt.alpha_array.clone(),
                 shadow_array: adt.shadow_array.clone(),
-                params: Vec4::new(tiling, 0.0, 0.0, 0.0),
+                params: Vec4::new(benilla_formats::TERRAIN_LAYER_TILES, 0.0, 0.0, 0.0),
                 light_buf: shared_light.0.clone(),
             },
         });

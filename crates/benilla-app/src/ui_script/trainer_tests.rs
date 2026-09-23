@@ -1085,12 +1085,11 @@ fn learning_a_spell_keeps_the_filter_and_the_collapse_a_re_open_still_resets() {
     s.run("CollapseTrainerSkillLine(1)").unwrap();
     assert_eq!(rows(&mut s), 3, "the folded group keeps its header only");
 
-    // He trains. The app re-asks for the list (`trainer_buy_succeeded`) and marks its own answer as
-    // the repaint it is; the bought service comes back gray.
+    // He trains. The spell lands (`SMSG_LEARNED_SPELL`) and the state re-evaluator (2333, the
+    // reference's `0x4d7d40`) repaints the bought row gray IN PLACE — no second list, so nothing
+    // that a list packet resets.
     let mut learned = menu();
     learned.services[0].category = TrainerServiceCategory::Used;
-    open.refresh_pending = true;
-    open.open(DAZALAR, 0, vec![], "Hello, hunter!".into());
     feed(&mut s, &mut open, learned, "TRAINER_UPDATE");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
@@ -1214,13 +1213,12 @@ fn learning_a_spell_takes_the_detail_pane_with_it_instead_of_stranding_the_last_
         "the Train button bought the selected row"
     );
 
-    // The app re-asks for the list and marks its answer the repaint it is (B256); the bought
-    // service comes back gray and, with "already known" off, leaves the list. Cleave slides up into
-    // row 2 under where the selection used to be.
+    // The spell lands and the re-evaluator (2333) repaints the bought row gray in place; with
+    // "already known" off it leaves the list, and Cleave slides up into row 2 under where the
+    // selection used to be. (Until 2333 this was a second list packet marked as a refresh —
+    // B256.)
     let mut learned = menu();
     learned.services[0].category = TrainerServiceCategory::Used;
-    open.refresh_pending = true;
-    open.open(DAZALAR, 0, vec![], "Hello, warrior!".into());
     feed(&mut s, &mut open, learned, "TRAINER_UPDATE");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 

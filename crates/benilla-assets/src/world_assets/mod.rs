@@ -792,7 +792,7 @@ impl WorldAssets {
 }
 
 /// World/render configuration read once at startup from the environment, shared by the subsystems
-/// that need it: terrain reads `tex_tiles` (splat tiling) + `unload_budget` (the release lane).
+/// that need it: terrain reads `unload_budget` (the release lane).
 /// Inserted by [`AssetPlugin`] alongside [`WorldAssets`]; its *presence* is also the "there is a
 /// client install" gate the world-side setups key on.
 ///
@@ -801,8 +801,6 @@ impl WorldAssets {
 /// Distance setting), as the reference derives it (decision 1513).
 #[derive(Resource, Clone, Copy)]
 pub struct RenderConfig {
-    /// Ground-texture repeats per chunk (`$WOW_TEX_TILES`, default 8).
-    pub tex_tiles: f32,
     /// Stale tiles released per frame on a within-map window shift (`$WOW_TILE_UNLOAD`,
     /// default 1; `0` = unbudgeted — the whole trailing row in one frame, the pre-B181
     /// behaviour, kept as the controlled A/B leg on one build).

@@ -61,8 +61,9 @@
 //!   non-rectangular-region case even after real scissor lands.
 //! - **Text.** `FontString`s render through `cosmic-text` per 0068 §2; nothing here rasterizes glyphs.
 //! - **Extraction from a widget arena.** Nothing yet *produces* [`UiQuad`]s from frames/anchors/strata —
-//!   that's the widget-arena milestone this pass is built ahead of. The `dev`-gated demo feeder below
-//!   fills [`UiQuads`] directly to prove the pass in isolation.
+//!   that's the widget-arena milestone this pass is built ahead of. (A `WOW_UI_DEMO` feeder once
+//!   filled [`UiQuads`] with synthetic strata to prove the pass in isolation; the widget engine has
+//!   been the producer since, and the feeder retired — 2335.)
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
@@ -78,8 +79,6 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{Material2d, Material2dKey, Material2dPlugin};
 use bevy::window::PrimaryWindow;
-
-use benilla_assets::{AssetSet, WorldAssets};
 
 /// Per-corner UVs for a quad: one explicit `(u,v)` sample per **screen** corner, in the
 /// [`Run::push_quad`] winding — `[top-left, top-right, bottom-right, bottom-left]`. Deliberately four
@@ -287,9 +286,8 @@ impl Default for UiQuad {
 
 /// The pass's one input resource, two lanes with distinct change protocols:
 ///
-/// - [`Self::quads`] — the BASE lane, owned by a wholesale producer (the widget arena's extract;
-///   the dev demo feeder): replaced in full, and the producer sets [`Self::dirty`] only when the
-///   new content differs.
+/// - [`Self::quads`] — the BASE lane, owned by a wholesale producer (the widget arena's extract):
+///   replaced in full, and the producer sets [`Self::dirty`] only when the new content differs.
 /// - [`Self::overlays`] — the APPEND lane ([`UiQuadAppend`]: the minimap fill, V-plates, combat
 ///   text): cleared at the top of the append window ([`clear_ui_overlays`]) and re-emitted every
 ///   frame; [`rebuild_ui_mesh`] itself diffs it against last frame's. Appenders never touch
@@ -623,25 +621,7 @@ impl Plugin for PlayerUiPlugin {
             .add_systems(Update, clear_ui_overlays.before(UiQuadAppend))
             .add_systems(Update, rebuild_ui_mesh.after(UiQuadAppend))
             .add_systems(Last, count_material_events);
-
-        // Dev-only demo feeder (mirrors the repo's env-var dev-instrument gating — e.g. `$WOW_CAPTURE`,
-        // `$WOW_TILE_RADIUS` — since the compile-time `dev` cargo feature decision 0026 sets as the
-        // eventual seam isn't built yet; see `demo_enabled`'s doc comment). Runs once at Startup, after
-        // the asset chain opens so it can load a real BLP through `WorldAssets::sprite_texture`.
-        if demo_enabled() {
-            app.add_systems(Startup, seed_demo_quads.after(AssetSet::Open));
-        }
     }
-}
-
-/// `$WOW_UI_DEMO=1` fills [`UiQuads`] once at startup with synthetic content proving the sort, the
-/// texture-batching/ordering story, and the CPU clip. Same env-var-gated-instrument idiom as
-/// `capture.rs`'s `$WOW_CAPTURE` and `assets::open_world_assets`'s `$WOW_TILE_RADIUS`/`$WOW_TEX_TILES`
-/// — decision 0026 phase 1 (a compile-time `dev` cargo feature) is recorded as the target seam but not
-/// yet built (0026 §4: "phased, not built now"), so today's instrument-gating convention across the
-/// codebase is a runtime env-var check, not `#[cfg(feature = "dev")]`.
-fn demo_enabled() -> bool {
-    std::env::var("WOW_UI_DEMO").as_deref() == Ok("1")
 }
 
 /// A full-window overlay camera that composites the player-UI quad pass above the 3D world and below
@@ -1609,89 +1589,6 @@ fn rebuild_ui_mesh(
             rewrites: n_rewrites,
         };
     }
-}
-
-/// Deliberately-overlapping synthetic content proving the sort: 5 z strata × 40 quads each, offset both
-/// within a stratum (neighbours overlap 35px) and across strata (each stratum offset 20px from the
-/// last, so a later, higher-`z_key` stratum's field visibly paints over the previous one's — the actual
-/// thing this pass exists to get right). Plus one real-BLP-textured quad and one CPU-clipped quad,
-/// both given the highest z_keys — see the module doc: this ordering is what makes the shared "white"
-/// texture identity get split into two separate runs (the icon quad sits between them in z_key).
-const STRATA: usize = 5;
-const PER_STRATUM: usize = 40;
-const QUAD_SIZE: f32 = 80.0;
-const COLS: usize = 10;
-
-fn strata_color(s: usize) -> [f32; 4] {
-    // Red → orange → yellow → green → blue, alpha < 1 so the overlaps are visibly additive-ish
-    // (provable by eye: a later stratum's quad should read as a *blend* over the earlier one where
-    // clipped by nothing else, and fully opaque-looking where nothing underlies it).
-    const COLORS: [[f32; 3]; STRATA] = [
-        [0.85, 0.15, 0.15],
-        [0.90, 0.55, 0.10],
-        [0.85, 0.80, 0.10],
-        [0.15, 0.75, 0.25],
-        [0.15, 0.45, 0.90],
-    ];
-    let c = COLORS[s % STRATA];
-    [c[0], c[1], c[2], 0.85]
-}
-
-fn seed_demo_quads(
-    mut quads: ResMut<UiQuads>,
-    world_assets: Option<ResMut<WorldAssets>>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    let mut out = Vec::with_capacity(STRATA * PER_STRATUM + 2);
-
-    for s in 0..STRATA {
-        let stratum_offset = s as f32 * 20.0;
-        for i in 0..PER_STRATUM {
-            let (col, row) = (i % COLS, i / COLS);
-            let x = 40.0 + stratum_offset + col as f32 * 45.0;
-            let y = 40.0 + stratum_offset + row as f32 * 45.0;
-            out.push(UiQuad {
-                rect: Rect::new(x, y, x + QUAD_SIZE, y + QUAD_SIZE),
-                z_key: (s as u64) * 1000 + i as u64,
-                color: strata_color(s),
-                ..default()
-            });
-        }
-    }
-
-    // Real BLP through the same UI-art path the loading screen uses (`sprite_texture`: sRGB, clamp,
-    // no mip chain — one texture mapped to one quad, not tiling world art).
-    if let Some(mut assets) = world_assets {
-        if let Some(icon) =
-            assets.sprite_texture("Interface\\Icons\\INV_Misc_QuestionMark.blp", &mut images)
-        {
-            out.push(UiQuad {
-                rect: Rect::new(560.0, 40.0, 560.0 + 64.0, 40.0 + 64.0),
-                z_key: (STRATA as u64) * 1000 + 500,
-                texture: Some(icon),
-                ..default()
-            });
-        }
-    }
-
-    // CPU-clip demo: a 160×160 quad clipped to its left half — proves the intersect + UV-reprojection
-    // path (not just a quad that already happened to fit).
-    let clip_rect = Rect::new(700.0, 40.0, 700.0 + 160.0, 40.0 + 160.0);
-    out.push(UiQuad {
-        rect: clip_rect,
-        z_key: (STRATA as u64) * 1000 + 600,
-        color: [0.2, 0.8, 1.0, 1.0],
-        clip: Some(Rect::new(
-            clip_rect.min.x,
-            clip_rect.min.y,
-            clip_rect.min.x + 80.0,
-            clip_rect.max.y,
-        )),
-        ..default()
-    });
-
-    quads.quads = out;
-    quads.dirty = true;
 }
 
 #[cfg(test)]

@@ -82,21 +82,13 @@ fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
     // How much terrain is resident is NOT a knob here: the streamer derives its window from the
     // live `farclip` (`view::ViewDistance`, the player's Terrain Distance setting) the way the
     // reference does — `terrain_stream::window`, decision 1513. `$WOW_TILE_RADIUS` is retired.
-    // Ground-texture repeats per chunk; tunable live in the panel afterward.
-    let tex_tiles = std::env::var("WOW_TEX_TILES")
-        .ok()
-        .and_then(|s| s.parse::<f32>().ok())
-        .unwrap_or(8.0);
     // See the field doc: the tile-unload budget (B181). Default 1 — even the fastest focus
     // (boosted free-fly, ~1 stale row/s) produces stale tiles far slower than 60/s drains them.
     let unload_budget = std::env::var("WOW_TILE_UNLOAD")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
-    commands.insert_resource(RenderConfig {
-        tex_tiles,
-        unload_budget,
-    });
+    commands.insert_resource(RenderConfig { unload_budget });
 
     match open_chain(&data) {
         Ok(chain) => commands.insert_resource(WorldAssets::open(chain, light_buf)),

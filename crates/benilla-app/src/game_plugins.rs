@@ -960,10 +960,24 @@ pub(crate) mod schedule_tests {
     /// as a one-shot outside the schedule. The three targeting systems the same record moved
     /// from `UiActionPlugin` to `SpellPlugin` kept their orders and their sets.
     ///
+    /// **2,888 (decision 2333)** — the trainer feed became the state re-evaluator's host and
+    /// reads the pet bar, the player's descriptor and its field edges. Read off the dump on the
+    /// tree that lands: undeclared, the feed met six systems; `.after(UnitFeed)` (the shape the
+    /// demo unit feed already takes) declares five of them, and the one it keeps —
+    /// `entities::evict_display_caches` — is the pair every feed that reads `ItemDisplays` has
+    /// (42 on this tree). So the feed's own count went 6 → 1, and the total went 2,887 → 2,888:
+    /// diffing the two dumps, the edge **re-partitioned** the census — five pairs among unrelated
+    /// systems (`cinematic::*` against `ui_logout::drain_logout`, `arm_loot_fx` against the
+    /// party/social drains, …) left the actionable list and six others (`resolve_equipment`
+    /// against `drain_guild`, `emit_minimap` against `drain_quest`, …) entered it, none of them
+    /// touching anything this record touched. That is the instrument moving under an edge, not
+    /// a new undeclared order; 2333 hands it to this ratchet's owner (2287) as a finding. The
+    /// number is the dump's, not a sum.
+    ///
     /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
     /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
     /// about a resource that commutes by construction, the claim belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 2_886;
+    const UPDATE_ACTIONABLE_CEILING: usize = 2_888;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

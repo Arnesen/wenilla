@@ -298,6 +298,24 @@ const COL_EFFECT_TRIGGER_1: usize = 109;
 /// `SpellEffects` value `36` — `SPELL_EFFECT_LEARN_SPELL`: a trainer's learn wrapper carries it, and
 /// its `EffectTriggerSpell` is the ability the player ends up with (decision 0247's taught spell).
 pub const SPELL_EFFECT_LEARN_SPELL: u32 = 36;
+
+/// One of a spell's three effect slots, as the trainer's state re-evaluator reads them
+/// (`0x4d7d40`, wow-re `trainer-service-suppression.md` §5; decision 2333): the three effect
+/// types that decide whether a service is already "known". Any other effect type is not a learn
+/// effect and is skipped. Slot order is kept — the reference walks `+0xf4/+0xf8/+0xfc` in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LearnEffect {
+    /// `SPELL_EFFECT_LEARN_SPELL` — teaches `EffectTriggerSpell`.
+    Spell(u32),
+    /// `SPELL_EFFECT_SKILL_STEP` — raises skill line `skill` (`EffectMiscValue`) to `step`. The
+    /// step is the effect's value, `EffectBasePoints + EffectDieSides`: on the real build-5875
+    /// file every profession opener carries `die = 1` and `base = step − 1` (Apprentice `0+1`,
+    /// Journeyman `1+1`, Expert `2+1`, Artisan `3+1` — pinned by
+    /// `the_openers_skill_steps_read_off_the_real_file`).
+    SkillStep { skill: u32, step: u32 },
+    /// `SPELL_EFFECT_LEARN_PET_SPELL` — teaches the player's pet `EffectTriggerSpell`.
+    PetSpell(u32),
+}
 /// `SpellEffects` value `57` — `SPELL_EFFECT_LEARN_PET_SPELL`, the learn wrapper's pet twin. The
 /// trainer's **icon** law accepts either in its three-slot wrapper scan (byte-verified: the paired
 /// `cmp ecx,0x24` / `cmp ecx,0x39` at `0x4d8ff5`/`0x4d8ffa`, wow-re
@@ -609,6 +627,9 @@ pub const SPELL_EFFECT_PROSPECTING: u32 = 127;
 pub struct SpellCatalog {
     spells: HashMap<u32, SpellDisplay>,
     learned_spell: HashMap<u32, u32>,
+    /// Spell id → its learn effects in slot order ([`SpellCatalog::learn_effects`]); only spells
+    /// that carry at least one have an entry.
+    learn_effects: HashMap<u32, Vec<LearnEffect>>,
     /// Spell id → the `Languages.dbc` id its `Effect_1` declares
     /// ([`SpellCatalog::declared_language`]).
     declared_language: HashMap<u32, u32>,
@@ -620,12 +641,37 @@ impl SpellCatalog {
     /// path is [`load_spell_catalog`]. Carries no learn-spell map (synthetic ids teach nothing) and
     /// no dispel table, so [`Self::dispel_name`] answers `None` for everything.
     pub fn from_displays(spells: HashMap<u32, SpellDisplay>) -> Self {
+        Self::from_displays_and_effects(spells, HashMap::new())
+    }
+
+    /// [`Self::from_displays`] with an explicit learn-effect table — for the trainer tests, whose
+    /// synthetic wrappers need to teach something.
+    pub fn from_displays_and_effects(
+        spells: HashMap<u32, SpellDisplay>,
+        learn_effects: HashMap<u32, Vec<LearnEffect>>,
+    ) -> Self {
+        let learned_spell = learn_effects
+            .iter()
+            .filter_map(|(id, effects)| {
+                effects.iter().find_map(|e| match e {
+                    LearnEffect::Spell(taught) => Some((*id, *taught)),
+                    _ => None,
+                })
+            })
+            .collect();
         Self {
             spells,
-            learned_spell: HashMap::new(),
+            learned_spell,
+            learn_effects,
             declared_language: HashMap::new(),
             dispel_types: SpellDispelTypes::default(),
         }
+    }
+
+    /// A spell's learn effects in slot order — empty for a plain ability. What the trainer's
+    /// state re-evaluator walks (decision 2333).
+    pub fn learn_effects(&self, id: u32) -> &[LearnEffect] {
+        self.learn_effects.get(&id).map_or(&[], Vec::as_slice)
     }
 
     pub fn get(&self, id: u32) -> Option<&SpellDisplay> {
@@ -770,6 +816,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
     let spells_set = parse(&spell_bytes, spell_schema(), "Spell.dbc")?;
     let mut spells: HashMap<u32, SpellDisplay> = HashMap::new();
     let mut learned_spell: HashMap<u32, u32> = HashMap::new();
+    let mut learn_effects: HashMap<u32, Vec<LearnEffect>> = HashMap::new();
     let mut declared_language: HashMap<u32, u32> = HashMap::new();
     for r in spells_set.records() {
         let Some(id) = u32_at(r, 0) else { continue };
@@ -783,6 +830,30 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                     break;
                 }
             }
+        }
+        // The learn effects in slot order, for the trainer's state re-evaluator (2333). A
+        // SKILL_STEP's step is the effect's value: base points + die sides (see `LearnEffect`).
+        let effects: Vec<LearnEffect> = (0..3)
+            .filter_map(|i| {
+                let trigger = || u32_at(r, COL_EFFECT_TRIGGER_1 + i).filter(|&t| t != 0);
+                match u32_at(r, COL_EFFECT_1 + i)? {
+                    SPELL_EFFECT_LEARN_SPELL => trigger().map(LearnEffect::Spell),
+                    SPELL_EFFECT_LEARN_PET_SPELL => trigger().map(LearnEffect::PetSpell),
+                    SPELL_EFFECT_SKILL_STEP => {
+                        let skill = i32_at(r, COL_EFFECT_MISC_1 + i).filter(|&m| m > 0)? as u32;
+                        let value = i32_at(r, COL_EFFECT_BASE_POINTS_1 + i).unwrap_or(0)
+                            + i32_at(r, COL_EFFECT_DIE_SIDES_1 + i).unwrap_or(0);
+                        Some(LearnEffect::SkillStep {
+                            skill,
+                            step: value.max(0) as u32,
+                        })
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        if !effects.is_empty() {
+            learn_effects.insert(id, effects);
         }
         // The language declaration (wow-re `chat-language-scramble.md` §8). **Effect slot 0 only**
         // — the reference dispatches on `Effect_1` alone (`[SpellRec+0xf4]`) and reads
@@ -949,6 +1020,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
     Ok(SpellCatalog {
         spells,
         learned_spell,
+        learn_effects,
         declared_language,
         dispel_types,
     })
@@ -957,3 +1029,50 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
 #[cfg(test)]
 #[path = "catalog_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod learn_effect_tests {
+    use super::*;
+
+    /// The profession openers on the real build-5875 file: the WIRE spell (the wrapper a trainer
+    /// lists) carries both the learn effect and the skill step, and the step is base points + die
+    /// sides. What `0x4d7d40` compares the player's step word against (2333).
+    #[test]
+    fn the_openers_skill_steps_read_off_the_real_file() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_spell_catalog(&mut chain).expect("Spell.dbc");
+        let blacksmithing = 164;
+        for (wrapper, taught, step) in [
+            (2020, 2018, 1),
+            (2021, 3100, 2),
+            (3539, 3538, 3),
+            (9786, 9785, 4),
+        ] {
+            assert_eq!(
+                cat.learn_effects(wrapper),
+                &[
+                    LearnEffect::Spell(taught),
+                    LearnEffect::SkillStep {
+                        skill: blacksmithing,
+                        step
+                    }
+                ],
+                "wrapper {wrapper}"
+            );
+        }
+        // Mining's opener: base −1 + die 1 on the LEARN slot is not a step; the SKILL_STEP slot is.
+        assert_eq!(
+            cat.learn_effects(2581),
+            &[
+                LearnEffect::Spell(2575),
+                LearnEffect::SkillStep {
+                    skill: 186,
+                    step: 1
+                }
+            ]
+        );
+        // A plain ability teaches nothing.
+        assert!(cat.learn_effects(2383).is_empty(), "Find Herbs");
+    }
+}

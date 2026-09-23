@@ -197,14 +197,14 @@ pub use spells::{
     cc_exemption, grants_immunity, load_shapeshift_forms, load_spell_cast_times,
     load_spell_catalog, load_spell_dispel_types, load_spell_durations, load_spell_radii,
     load_spell_ranges, min_max_range, substitute, CcExemption, FormRefusal, LearnAnnouncement,
-    OpenLock, ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
-    SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
-    SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT,
-    ATTR_ONLY_STEALTHED, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR, ON_NEXT_SWING_RANGE,
-    SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM,
-    SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_PET_SPELL, SPELL_EFFECT_LEARN_SPELL,
-    SPELL_EFFECT_PROSPECTING, SPELL_EFFECT_SKILL_STEP, SPELL_EFFECT_SKINNING,
-    SPELL_EFFECT_TRADE_SKILL,
+    LearnEffect, OpenLock, ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog,
+    SpellDispelTypes, SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius,
+    SpellRadiusCatalog, SpellRange, SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD,
+    ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR,
+    ON_NEXT_SWING_RANGE, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM,
+    SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_PET_SPELL,
+    SPELL_EFFECT_LEARN_SPELL, SPELL_EFFECT_PROSPECTING, SPELL_EFFECT_SKILL_STEP,
+    SPELL_EFFECT_SKINNING, SPELL_EFFECT_TRADE_SKILL,
 };
 mod skill_lines;
 pub use skill_lines::{
@@ -266,7 +266,7 @@ pub use terrain::{
     adt_to_tile_mesh, area_id_at, find_tile_near, ground_effect_at, impassable_at, load_tile_mesh,
     load_tiles_around, mcsh_shadowed_at, terrain_height_at, triangle_z_at, ChunkMesh, Doodad,
     MapTiles, TileMesh, WmoInstance, ALPHA_MAP_SIZE, CHUNK_SIZE, SHADOW_MAP_SIZE, STORMWIND_XY,
-    TILE_SIZE,
+    TERRAIN_LAYER_TILES, TILE_SIZE,
 };
 mod wdl;
 /// World (x, y) ↔ ADT tile `(col, row)` — the same mapping the streamer uses to pick tiles

@@ -1538,12 +1538,12 @@ fn a_bag_slot_click_toggles_bagnon_not_the_native_window() {
 /// divergence went with it, unrecorded — and this suite, skipping at every land from 08-30
 /// (2329), never said so.
 ///
-/// What this pins now is the client as it is, which is the reference: the bare
-/// `ToggleBackpack()` path (the `B` binding's body) ends lit, because nothing runs after OnShow
-/// there; a real click ends **unlit** on open as well as on close, because the stock tail is the
-/// last word. Whether to reinstate Bug 7's divergence as an adapter shim is the director's call
-/// (1751 §2 reserves shims for engine differences, and this is a look); if they say lit, the
-/// second assertion below flips back and the shim carries the why.
+/// What this pins is the client as it is, which is the reference: the bare `ToggleBackpack()`
+/// path (the `B` binding's body) ends lit, because nothing runs after OnShow there; a real click
+/// ends **unlit** on open as well as on close, because the stock tail is the last word. Decision
+/// 2332 retired Bug 7's divergence on record (1751 §2 reserves shims for engine differences, and
+/// this is a look); if the director ever wants it lit, the second assertion below flips back and
+/// a shim in `ContainerFrameAdapters.xml` carries the why.
 #[test]
 fn the_backpack_button_lit_state_with_bagnon_holding_the_bags() {
     let root = corpus_or_skip!();

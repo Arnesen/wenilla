@@ -351,6 +351,46 @@ impl SkillLineCatalog {
         head
     }
 
+    /// **Is a higher rank of `spell_id` known?** — the reference's `KnownHigherRank`
+    /// (`0x60c8d0`, wow-re `trainer-requirement.md`): walk the `forward_spellid` chain forward
+    /// from `spell_id` (exclusive) and answer on the first known rank. The trainer's requirement
+    /// colouring and its state re-evaluator both OR this with plain known-ness (2333).
+    pub fn higher_rank_known(
+        &self,
+        spell_id: u32,
+        known: &std::collections::BTreeSet<u32>,
+    ) -> bool {
+        let mut cur = spell_id;
+        for _ in 0..MAX_RANK_CHAIN {
+            let Some(next) = self.rank_successor(cur) else {
+                return false;
+            };
+            if known.contains(&next) {
+                return true;
+            }
+            cur = next;
+        }
+        false
+    }
+
+    /// A catalog holding only ability rows — for tests that need a rank chain or a skill
+    /// requirement without the DBCs ([`Self::from_spell_lines`]'s fuller sibling).
+    pub fn from_abilities(abilities: impl IntoIterator<Item = (u32, SlaInfo)>) -> Self {
+        let abilities: HashMap<u32, SlaInfo> = abilities.into_iter().collect();
+        let rank_prev = abilities
+            .iter()
+            .filter(|(_, a)| a.forward_spell_id != 0)
+            .map(|(id, a)| (a.forward_spell_id, *id))
+            .collect();
+        Self {
+            abilities,
+            lines: HashMap::new(),
+            categories: HashMap::new(),
+            race_class: HashMap::new(),
+            rank_prev,
+        }
+    }
+
     /// The **highest rank of `spell_id`'s ability that `known` contains** — the rank an action-bar
     /// slot pointing at `spell_id` must actually hold. `None` when no rank of the chain is known
     /// (an empty book, or an ability the character never learned): the caller leaves the slot
