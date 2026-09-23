@@ -5,11 +5,12 @@
         header at TOP +12 with the title 14px down it, the reference's click sounds, and the stock
         `GameMenuButtonTemplate`, which the era's MainMenuFrameButtonTemplate matches in art,
         size and label fonts.
-        Deviation: the ladder is the 1.15 era client's ESC menu (GameMenuFrame.lua l.62-162) at
-        its layout numbers, padding 32 top and 28 elsewhere (MainMenuFrameTemplates.xml l.18-33)
-        and a 20-unit gap between groups (MainMenuFrameTemplates.lua l.61-71). It drops the era's
-        AddOns rung, because the character-select AddOns screen is the only addon UI; Key
-        Bindings is in the options window, as in the era.
+        Deviation: the ladder is the 1.15 era client's ESC menu (GameMenuFrame.lua l.62-162),
+        because its settings screens replace 1.12's, which are much worse to use. It keeps the
+        era's layout numbers, padding 32 top and 28 elsewhere (MainMenuFrameTemplates.xml
+        l.18-33) and a 20-unit gap between groups (MainMenuFrameTemplates.lua l.61-71), and drops
+        the era's AddOns rung, because the character-select AddOns screen is the only addon UI;
+        Key Bindings is in the options window, as in the era.
         Names are the reference's, unprefixed: addons address `GameMenuFrame` by name.
     -->
     <Script><![CDATA[

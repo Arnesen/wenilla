@@ -5,8 +5,9 @@
         rows are children of the Keybindings body in OptionsFrame.xml, which loads after it. Only
         commands the engine dispatches are registered, so only they and their categories appear.
         Deviation: the page is the era Settings panel's Keybindings page (Keybindings.lua,
-        KeybindingsOverrides.lua): one list of collapsible category sections, the Character
-        Specific Keybindings checkbox as its first row, and search results that open this page.
+        KeybindingsOverrides.lua), because 1.12's settings screens are much worse to use. It is
+        one list of collapsible category sections, the Character Specific Keybindings checkbox as
+        its first row, and search results that open this page.
         Capture and set follow 1.12's Blizzard_BindingUI where the two differ: a capsule click
         arms, the next key or mouse 3/4/5 press binds at once, left and right clicks only select,
         the wheel binds like any key, and ESC while armed binds Escape (1.12's OnKeyDown has no

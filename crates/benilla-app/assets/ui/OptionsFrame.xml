@@ -1,7 +1,8 @@
 <Ui>
     <!--
         The Options window, opened from the game menu. Deviation: the 1.15 era client's single
-        settings window replaces the 1.12 four-panel family, whose frames load hidden for addons.
+        settings window replaces the 1.12 four-panel family, which is much worse to use; the 1.12
+        frames still load, hidden, for addons.
         Structure follows the era UI source (1.15.9), surfaces the 1.14 System window
         (OptionsFrameTemplates.xml); every art byte is 1.12-native or a colour fill, so era atlas
         names below cite geometry only. Cut from the era window: the corner close X, live tabs,
