@@ -742,6 +742,14 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // The unlit path takes the body tint: with GL_LIGHTING off, gx SetState(1) is a plain
     // `glColor` modulate.
     var rgb = select(lit_rgb, albedo * inst_tint, is_emissive);
+    // An M2 Mod or Mod2x batch draws the bare texel: the reference zeroes its tint·M2Color term and
+    // forces the primary colour to the blend identity (`0x70c507`/`0x70c5b8`), so neither the
+    // animated M2Color nor the body tint reaches it. Its alpha still does, through the lerp below.
+    let is_mod = (u32(m.clutter_fade.z) & 128u) != 0u;
+    let is_mod2x = (u32(m.clutter_fade.z) & 256u) != 0u;
+    if ((is_mod || is_mod2x) && !is_wmo) {
+        rgb = base.rgb;
+    }
 
     // Linear fog by planar eye depth, as in terrain.wgsl. Per-batch colour policy (`clutter_fade.z`
     // bits 4-6, the M2 state setter `0x70baf0`): 0 scene, 1 black (additive), 2 white (Mod),
@@ -783,8 +791,6 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // reference: texenv preset 5, `mix(prev.rgb, tex.rgb, prev.a)`, with the primary colour forced
     // to the blend identity (white, or 0.5 grey for Mod2x) and prev.a the instance alpha. The fog
     // above commutes with this because its white and grey are that identity.
-    let is_mod = (u32(m.clutter_fade.z) & 128u) != 0u;
-    let is_mod2x = (u32(m.clutter_fade.z) & 256u) != 0u;
     if (is_mod || is_mod2x) {
         let identity = select(vec3<f32>(1.0), vec3<f32>(0.5), is_mod2x);
         out_rgb = mix(identity, out_rgb, obj_fade);

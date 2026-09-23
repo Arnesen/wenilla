@@ -656,6 +656,9 @@ pub fn parse_m2_render_submeshes(
         // fade, so folding the (possibly animated) M2Color alpha in here too would double-count.
         let color_tint: Option<[f32; 4]> = match &rgb_anim {
             Some(_) => None,
+            // Mod and Mod2x discard the M2Color RGB (`0x70c507`/`0x70c5b8` zero the tint·M2Color
+            // term), so their vertex colours stay untinted.
+            None if matches!(blend, ModelBlend::Mod | ModelBlend::Mod2x) => None,
             None => model
                 .color_rgb_tracks
                 .get(batch.color_index as usize)
