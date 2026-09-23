@@ -210,6 +210,13 @@ pub(crate) fn registered_pairs() -> impl Iterator<Item = (&'static str, &'static
 /// The host-backed CVars. Grows one row per knob a settings page actually wires — never ahead of
 /// the knob (see the module doc) — and every row states where its default stands against the
 /// reference's ([`Registered`]).
+///
+/// Unregistered for want of a reader, though pfUI's `hdgraphic` writes them through `ConsoleExec`:
+/// `lodDist` (`0x688524`, "100.0", read at `0x6afb1d` for the doodad LOD swap), `footstepBias`
+/// (`0x6888b4`, "0.125", read at `0x68fcb6`), `mapObjLightLOD` (`0x6886ec`, "0") and `SkyCloudLOD`
+/// (`0x6d1d33`, "0"). `DistCull` (`0x688570`) and `texLodBias` (`0x6885e2`, whose sink `0x672640`
+/// is `ret 4`) have no reader in the reference either. `maxLOD` is no CVar: none of the 214
+/// `CVar::Register` (`0x63db90`) sites names it.
 pub(crate) const REGISTERED: &[Registered] = &[
     // The realm the session is on — a REAL 1.12 CVar (`0x83f2d0`, persisted, wow-re
     // `savedvariables-protocol.md`: the client builds its SavedVariables path from it), and a live
