@@ -270,7 +270,7 @@ pub(crate) mod net {
     /// A pending challenge, a running duel, and its countdown all die with the socket (decision
     /// 0633) — the server drops the duel too (`Player::DuelComplete(DUEL_FLED)` on logout), and a
     /// stale arbiter guid would make the next AcceptDuel echo a dead object. A listener on the
-    /// session end ([`crate::net::handlers::BROADCAST`]).
+    /// session end (a second handler on the kind, after the bridge's own teardown).
     fn on_session_end(In(_): In<SessionEvent>, mut duel: ResMut<DuelState>) {
         *duel = DuelState::default();
     }

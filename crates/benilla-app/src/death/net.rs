@@ -1,17 +1,107 @@
-//! Death-arc arm bodies for [`super::apply_net_updates`]'s dispatch match (decision 0308) — the
-//! wire-fed [`DeathNet`] stores (the corpse marker and its guid latch, the reclaim clock, the
-//! resurrect offer, the spirit-healer confirm, the death durability notice) plus the granted
-//! movement-mode forward the server addresses to our own mover. Each `pub(super)` fn here is
-//! exactly one arm's body — except the two corpse-guid latches, which ride the object-lifecycle
-//! arms; the match at the call site stays the dispatcher, one call per arm.
+//! The death arc's packet handlers (decision 0308; in the net handler table since 2322, moved out
+//! of the drain's death arm file) — the wire-fed [`DeathNet`] stores (the corpse marker and its
+//! guid latch, the reclaim clock, the resurrect offer, the spirit-healer confirm, the death
+//! durability notice) plus the granted movement-mode forward the server addresses to our own
+//! mover. Three bodies here are not packet handlers but the corpse-guid latch's hooks on the
+//! object lifecycle ([`note_corpse`], [`recheck_corpse`], [`forget_corpse`]); the drain's object
+//! arms still call them, and they become listeners on the object kinds once those are peeled.
 
-use benilla_protocol::{EntityKind, MoveMode, ObjectFields};
+use benilla_protocol::{EntityKind, MoveMode, ObjectFields, SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
-use crate::death::{CorpsePoint, DeathNet, ResurrectOffer};
-use crate::net::MoveModeMessage;
+use super::{CorpsePoint, DeathNet, ResurrectOffer};
+use crate::net::{MoveModeMessage, NetHandlerApp, SelfGuid};
 
-use super::super::SelfGuid;
+/// Register the death handlers — called from [`super::DeathPlugin`]. One per kind, plus the
+/// session-end listener.
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::CorpseQuery, on_corpse_query)
+        .net_handler(K::CorpseReclaimDelay, on_corpse_reclaim_delay)
+        .net_handler(K::ResurrectRequest, on_resurrect_request)
+        .net_handler(K::SpiritHealerConfirm, on_spirit_healer_confirm)
+        .net_handler(K::DurabilityDamageDeath, on_durability_damage_death)
+        .net_handler(K::MoveMode, on_move_mode)
+        .net_handler(K::Disconnected, on_session_end);
+}
+
+fn on_corpse_query(In(ev): In<SessionEvent>, mut death_net: ResMut<DeathNet>) {
+    if let SessionEvent::CorpseQuery {
+        found,
+        display_map,
+        position,
+        corpse_map,
+    } = ev
+    {
+        corpse_query(found, display_map, position, corpse_map, &mut death_net);
+    }
+}
+
+fn on_corpse_reclaim_delay(
+    In(ev): In<SessionEvent>,
+    mut death_net: ResMut<DeathNet>,
+    real_clock: Res<Time<Real>>,
+) {
+    if let SessionEvent::CorpseReclaimDelay { delay_ms } = ev {
+        corpse_reclaim_delay(delay_ms, real_clock.elapsed_secs_f64(), &mut death_net);
+    }
+}
+
+fn on_resurrect_request(In(ev): In<SessionEvent>, mut death_net: ResMut<DeathNet>) {
+    if let SessionEvent::ResurrectRequest {
+        caster,
+        name,
+        sickness,
+        has_timer,
+    } = ev
+    {
+        resurrect_request(caster, name, sickness, has_timer, &mut death_net);
+    }
+}
+
+fn on_spirit_healer_confirm(In(ev): In<SessionEvent>, mut death_net: ResMut<DeathNet>) {
+    if let SessionEvent::SpiritHealerConfirm { npc } = ev {
+        spirit_healer_confirm(npc, &mut death_net);
+    }
+}
+
+fn on_durability_damage_death(In(ev): In<SessionEvent>, mut log: ResMut<crate::ui_chat::ChatLog>) {
+    if let SessionEvent::DurabilityDamageDeath = ev {
+        durability_damage_death(&mut log);
+    }
+}
+
+fn on_move_mode(
+    In(ev): In<SessionEvent>,
+    self_guid: Res<SelfGuid>,
+    mut death_net: ResMut<DeathNet>,
+    mut out: MessageWriter<MoveModeMessage>,
+) {
+    if let SessionEvent::MoveMode {
+        guid,
+        counter,
+        mode,
+        apply,
+    } = ev
+    {
+        move_mode(
+            guid,
+            counter,
+            mode,
+            apply,
+            &self_guid,
+            &mut death_net,
+            &mut out,
+        );
+    }
+}
+
+/// The death stores are session-scoped: a reclaim expiry, resurrect offer, or corpse marker must
+/// not survive the socket (the reconnect re-sends the reclaim delay when dead). A listener on
+/// the session end (a second handler on the kind, after the bridge's own teardown).
+fn on_session_end(In(_): In<SessionEvent>, mut death_net: ResMut<DeathNet>) {
+    *death_net = DeathNet::default();
+}
 
 /// OUR corpse streaming into range (a `TYPEID_CORPSE` create whose owner is us): remember its guid
 /// for the reclaim send (decision 0308 §5). The kind is exact ([`EntityKind::Corpse`] since 1706 —
@@ -26,7 +116,7 @@ use super::super::SelfGuid;
 /// bones never arms it. That matters because `RetrieveCorpse` itself carries **no guard of any
 /// kind** — whatever is in the latch is what goes out on `CMSG_RECLAIM_CORPSE`. The bones gate is
 /// the only thing standing between a converted corpse and a reclaim send naming it.
-pub(super) fn note_corpse(
+pub(crate) fn note_corpse(
     guid: u64,
     kind: EntityKind,
     fields: &ObjectFields,
@@ -49,7 +139,7 @@ pub(super) fn note_corpse(
 /// construction: its three latch writers include the `FLAGS` mirror handler `0x5d6d60`, so the
 /// gate is re-asked on every change of the very field that carries the bones bit. Ours asks it
 /// here, on the same edge. Rides the `ObjectValues` arm.
-pub(super) fn recheck_corpse(
+pub(crate) fn recheck_corpse(
     guid: u64,
     fields: &ObjectFields,
     self_guid: &SelfGuid,
@@ -77,7 +167,7 @@ pub(super) fn recheck_corpse(
 
 /// The corpse-to-bones swap destroys the corpse object under its guid (0308 §1); a stale guid must
 /// not ride a later reclaim. Rides the `ObjectDestroyed` arm.
-pub(super) fn forget_corpse(guid: u64, death_net: &mut DeathNet) {
+pub(crate) fn forget_corpse(guid: u64, death_net: &mut DeathNet) {
     if death_net.corpse_guid == Some(guid) {
         death_net.corpse_guid = None;
     }
@@ -85,7 +175,7 @@ pub(super) fn forget_corpse(guid: u64, death_net: &mut DeathNet) {
 
 /// `MSG_CORPSE_QUERY`'s answer — where the corpse marker goes. A not-found (reactive, or the
 /// server's unprompted bones-conversion push) drops the marker.
-pub(super) fn corpse_query(
+fn corpse_query(
     found: bool,
     display_map: i32,
     position: [f32; 3],
@@ -103,13 +193,13 @@ pub(super) fn corpse_query(
 /// `Time::elapsed_secs_f64` the feed reads back). The client's `0x269` handler re-fires the
 /// corpse-range events through its latch (wow-re death-ui.md §4), so the feed re-announces on the
 /// generation bump.
-pub(super) fn corpse_reclaim_delay(delay_ms: u32, now_secs: f64, death_net: &mut DeathNet) {
+fn corpse_reclaim_delay(delay_ms: u32, now_secs: f64, death_net: &mut DeathNet) {
     death_net.reclaim_at = Some(now_secs + f64::from(delay_ms) / 1000.0);
     death_net.reclaim_generation = death_net.reclaim_generation.wrapping_add(1);
 }
 
 /// `SMSG_RESURRECT_REQUEST` — the RESURRECT popup's data.
-pub(super) fn resurrect_request(
+fn resurrect_request(
     caster: u64,
     name: String,
     sickness: bool,
@@ -128,7 +218,7 @@ pub(super) fn resurrect_request(
 /// IS the announce (decision 1068): the healer's gossip re-sends it on every ask, and the
 /// reference fires `CONFIRM_XP_LOSS` per arrival — so the generation bump is what re-shows a
 /// cancelled confirm, exactly the `SMSG_CORPSE_RECLAIM_DELAY` re-fire pattern above.
-pub(super) fn spirit_healer_confirm(npc: u64, death_net: &mut DeathNet) {
+fn spirit_healer_confirm(npc: u64, death_net: &mut DeathNet) {
     // Through [`DeathNet::ask_spirit_healer`], which the right-click's own bit-5 arm also calls —
     // the reference raises this dialog client-side and vmangos also pushes it, and one entry
     // point is what keeps the two roads saying the same thing (decision 1861).
@@ -143,7 +233,7 @@ pub(super) fn spirit_healer_confirm(npc: u64, death_net: &mut DeathNet) {
 /// fields are ignored. Routing it to `UIErrorsFrame` put it in the wrong frame and, worse, meant
 /// hard-coding Blizzard's English sentence in our source; as a combat-log family it resolves
 /// `DURABILITYDAMAGE_DEATH` out of the player's own `GlobalStrings.lua` like every other line.
-pub(super) fn durability_damage_death(log: &mut crate::ui_chat::ChatLog) {
+fn durability_damage_death(log: &mut crate::ui_chat::ChatLog) {
     log.push_combat(crate::ui_chat::combat::PendingCombat {
         kind: crate::ui_chat::ChatEventKind::CombatMiscInfo,
         family: crate::ui_chat::combat::DURABILITYDAMAGE_DEATH,
@@ -161,7 +251,7 @@ pub(super) fn durability_damage_death(log: &mut crate::ui_chat::ChatLog) {
 /// harmless. Water-walk is additionally mirrored into [`DeathNet`], which reads it as a ghost-form
 /// cue — but the *mover* effect of every mode, this one included, is the controller's
 /// ([`crate::player::wire_in`]).
-pub(super) fn move_mode(
+fn move_mode(
     guid: u64,
     counter: u32,
     mode: MoveMode,

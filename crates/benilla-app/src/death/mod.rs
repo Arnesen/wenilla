@@ -18,6 +18,8 @@ use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfGuid, S
 use crate::ui_action::Spells;
 use crate::ui_script::{UiFeed, UiInput};
 
+pub(crate) mod net;
+
 /// Where our corpse is — the `MSG_CORPSE_QUERY` answer (decision 0308 §5). Raw WoW coords.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct CorpsePoint {
@@ -713,6 +715,7 @@ pub(crate) struct DeathPlugin;
 
 impl Plugin for DeathPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<DeathNet>()
             .init_resource::<DeathFeedState>()
             .add_systems(

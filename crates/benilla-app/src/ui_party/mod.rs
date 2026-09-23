@@ -35,6 +35,7 @@ use bevy::prelude::*;
 use crate::ui_script::{UiFeed, UiInput};
 
 mod feed;
+pub(crate) mod net;
 pub(crate) use feed::{
     raid_row_guid, synthetic_raid, synthetic_roster, GROUPTYPE_RAID, GROUP_MEMBER_SUBGROUP,
     PARTY_TOKENS, RAID_TOKENS,
@@ -44,6 +45,7 @@ pub(crate) struct UiPartyPlugin;
 
 impl Plugin for UiPartyPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<GroupState>().add_systems(
             Update,
             (

@@ -1,9 +1,11 @@
-//! The pet bar's wire arms (decisions 0982, 0988) — `SMSG_PET_SPELLS`, `SMSG_PET_MODE`,
-//! `SMSG_PET_ACTION_FEEDBACK`, `SMSG_PET_CAST_FAILED` folded into [`crate::ui_pet::PetBar`].
+//! The pet's packet handlers (decisions 0982, 0988, 2039; in the net handler table since 2321,
+//! moved out of the drain's pet arm file) — `SMSG_PET_SPELLS`, `SMSG_PET_MODE`,
+//! `SMSG_PET_ACTION_FEEDBACK`, `SMSG_PET_CAST_FAILED` folded into [`PetBar`], the three
+//! pet-feedback packets and the pet's voice.
 //!
 //! The whole file is short because `SMSG_PET_SPELLS` is not a delta — it **is** the bar, so
 //! applying it is a replace. These four arms own the bar's CONTENTS; its lit state is
-//! [`crate::ui_pet`]'s, latched on the press because the server never answers one (that file's
+//! [`super`]'s, latched on the press because the server never answers one (that file's
 //! module doc has the why). The only state this file writes is what actually arrives on the wire.
 //!
 //! The two refusal arms share the player's red-line **queues** — one drain, one sink, one
@@ -21,12 +23,83 @@ use std::time::Instant;
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{PetMode, PetSpells};
+use benilla_protocol::{SessionEvent, SessionEventKind};
 
 use benilla_assets::coords::wow_to_bevy;
 
-use super::super::{GuidIndex, PetDismissSoundMessage, PetTalkMessage};
+use super::PetBar;
+use crate::net::{GuidIndex, NetHandlerApp, PetDismissSoundMessage, PetTalkMessage};
 use crate::ui_action::{CastErrors, PetTameFailures, Spells, UiError, UiErrorKeys};
-use crate::ui_pet::PetBar;
+
+/// Register the pet's handlers — called from [`super::UiPetPlugin`].
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::PetSpells, on_spells)
+        .net_handler(K::PetMode, on_mode)
+        .net_handler(K::PetActionFeedback, on_action_feedback)
+        .net_handler(K::PetCastFailed, on_cast_failed)
+        .net_handler(K::PetTameFailure, on_tame_failure)
+        .net_handler(K::PetNameInvalid, on_refusal_line)
+        .net_handler(K::PetBroken, on_refusal_line)
+        .net_handler(K::PetActionSound, on_action_sound)
+        .net_handler(K::PetDismissSound, on_dismiss_sound);
+}
+
+/// The pet action bar (decision 0982) — server-authoritative, so PET_SPELLS is a wholesale
+/// replace and its zero-guid form is the teardown.
+fn on_spells(In(ev): In<SessionEvent>, catalog: Option<Res<Spells>>, mut bar: ResMut<PetBar>) {
+    if let SessionEvent::PetSpells(spells) = ev {
+        pet_spells(*spells, catalog.as_deref(), &mut bar);
+    }
+}
+
+fn on_mode(In(ev): In<SessionEvent>, mut bar: ResMut<PetBar>) {
+    if let SessionEvent::PetMode(mode) = ev {
+        pet_mode(mode, &mut bar);
+    }
+}
+
+fn on_action_feedback(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorKeys>) {
+    if let SessionEvent::PetActionFeedback { reason } = ev {
+        pet_action_feedback(reason, &mut errors);
+    }
+}
+
+fn on_cast_failed(In(ev): In<SessionEvent>, mut errors: ResMut<CastErrors>) {
+    if let SessionEvent::PetCastFailed { spell_id, reason } = ev {
+        pet_cast_failed(spell_id, reason, &mut errors);
+    }
+}
+
+fn on_tame_failure(In(ev): In<SessionEvent>, mut failures: ResMut<PetTameFailures>) {
+    if let SessionEvent::PetTameFailure { reason } = ev {
+        pet_tame_failure(reason, &mut failures);
+    }
+}
+
+fn on_refusal_line(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorKeys>) {
+    match ev {
+        SessionEvent::PetNameInvalid => pet_name_invalid(&mut errors),
+        SessionEvent::PetBroken => pet_broken(&mut errors),
+        _ => {}
+    }
+}
+
+fn on_action_sound(
+    In(ev): In<SessionEvent>,
+    index: Res<GuidIndex>,
+    mut talks: MessageWriter<PetTalkMessage>,
+) {
+    if let SessionEvent::PetActionSound { pet_guid, talk } = ev {
+        pet_action_sound(pet_guid, talk, &index, &mut talks);
+    }
+}
+
+fn on_dismiss_sound(In(ev): In<SessionEvent>, mut sounds: MessageWriter<PetDismissSoundMessage>) {
+    if let SessionEvent::PetDismissSound { model_id, position } = ev {
+        pet_dismiss_sound(model_id, position, &mut sounds);
+    }
+}
 
 /// `SMSG_PET_SPELLS` — replace the whole bar, and reseed the pet's own cooldown store from the
 /// packet's tail.
@@ -35,7 +108,7 @@ use crate::ui_pet::PetBar;
 /// cooldown store goes with it, because the next pet is a different unit with different timers.
 /// Everything else is a wholesale replace — including a re-send from the same pet, which is how a
 /// learned spell, a mode change or an autocast toggle actually reaches the bar.
-pub(super) fn pet_spells(spells: PetSpells, catalog: Option<&Spells>, bar: &mut PetBar) {
+fn pet_spells(spells: PetSpells, catalog: Option<&Spells>, bar: &mut PetBar) {
     if spells.pet_guid == 0 {
         if bar.spells.pet_guid != 0 {
             debug!("net: pet bar torn down");
@@ -121,7 +194,7 @@ pub(super) fn pet_spells(spells: PetSpells, catalog: Option<&Spells>, bar: &mut 
 /// `SMSG_PET_MODE` — the react/command state alone. Applied only when it names the pet whose bar
 /// we actually hold: a mode packet for a unit we have no bar for has nothing to write into, and
 /// taking its state anyway would light a reaction button on the wrong pet's bar.
-pub(super) fn pet_mode(mode: PetMode, bar: &mut PetBar) {
+fn pet_mode(mode: PetMode, bar: &mut PetBar) {
     if bar.spells.pet_guid == 0 || bar.spells.pet_guid != mode.pet_guid {
         return;
     }
@@ -134,7 +207,7 @@ pub(super) fn pet_mode(mode: PetMode, bar: &mut PetBar) {
 /// `SMSG_PET_ACTION_FEEDBACK` — one reason byte for a refused order, queued onto the red line by
 /// GlobalStrings key ([`UiErrorKeys`], the `DisplayError` route). An unrecognised code queues
 /// nothing, exactly as an absent key shows nothing.
-pub(super) fn pet_action_feedback(reason: u8, errors: &mut UiErrorKeys) {
+fn pet_action_feedback(reason: u8, errors: &mut UiErrorKeys) {
     debug!("net: pet action feedback {reason}");
     if let Some(key) = pet_feedback_key(reason) {
         errors.0.push(UiError::key(key));
@@ -188,7 +261,7 @@ fn pet_feedback_key(reason: u8) -> Option<&'static str> {
 /// No local state moves: the refusal is the server's last word on a spell that never took, and
 /// the client's own cast bookkeeping was already unwound by the `SMSG_CAST_RESULT` that came with
 /// it.
-pub(super) fn pet_tame_failure(reason: u8, failures: &mut PetTameFailures) {
+fn pet_tame_failure(reason: u8, failures: &mut PetTameFailures) {
     debug!(
         "net: pet tame failure {reason} ({})",
         benilla_protocol::messages::pet_tame_failure_key(reason)
@@ -205,7 +278,7 @@ pub(super) fn pet_tame_failure(reason: u8, failures: &mut PetTameFailures) {
 ///
 /// Nothing else moves: the rename was optimistic-free by design (1066), so there is no local name
 /// to roll back, and the popup has already closed.
-pub(super) fn pet_name_invalid(errors: &mut UiErrorKeys) {
+fn pet_name_invalid(errors: &mut UiErrorKeys) {
     debug!("net: pet name refused");
     errors.0.push(UiError::key("ERR_INVALID_PETNAME"));
 }
@@ -218,7 +291,7 @@ pub(super) fn pet_name_invalid(errors: &mut UiErrorKeys) {
 /// `Unsummon(PET_SAVE_AS_DELETED)` (`Pet.cpp:822`), so the zero-guid `SMSG_PET_SPELLS` that
 /// actually clears the bar arrives on its own heels — which is why touching the bar here would be
 /// a second, racing teardown rather than a fix.
-pub(super) fn pet_broken(errors: &mut UiErrorKeys) {
+fn pet_broken(errors: &mut UiErrorKeys) {
     debug!("net: pet ran away");
     errors.0.push(UiError::key("ERR_PET_BROKEN"));
 }
@@ -232,7 +305,7 @@ pub(super) fn pet_broken(errors: &mut UiErrorKeys) {
 ///
 /// The selector is not validated here — [`crate::sound::creature`]'s reader is where the
 /// two-armed `cmp` lives, because that is where the reference has it too (`0x604106`/`0x60411c`).
-pub(super) fn pet_action_sound(
+fn pet_action_sound(
     pet_guid: u64,
     talk: u32,
     index: &GuidIndex,
@@ -250,7 +323,7 @@ pub(super) fn pet_action_sound(
 /// The `+1.0` on `z` is the reference's own (`0x6041d0 fadd [0x7ff9d8]`), applied **before** the
 /// basis change because it is a WoW-space offset: the point on the wire is where the pet stood,
 /// and the kit sounds a yard above it.
-pub(super) fn pet_dismiss_sound(
+fn pet_dismiss_sound(
     model_id: u32,
     position: [f32; 3],
     sounds: &mut MessageWriter<PetDismissSoundMessage>,
@@ -282,7 +355,7 @@ pub(super) fn pet_dismiss_sound(
 ///   set is the two packet readers, `0x496720`, and the string plumbing behind it. So a pet's
 ///   refusal never prints "You fail to cast Growl: ..." in the log, and the drain's combat twin
 ///   skips it.
-pub(super) fn pet_cast_failed(spell_id: u32, reason: Option<u8>, errors: &mut CastErrors) {
+fn pet_cast_failed(spell_id: u32, reason: Option<u8>, errors: &mut CastErrors) {
     debug!("net: pet cast failed — spell {spell_id} reason {reason:?}");
     if let Some(reason) = reason {
         errors.push_pet(spell_id, reason);

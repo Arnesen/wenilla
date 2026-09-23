@@ -60,7 +60,7 @@ fn on_sell_failed(In(ev): In<SessionEvent>, mut errors: ResMut<MerchantErrors>) 
 }
 
 /// An open vendor window dies with the socket. A listener on the session end
-/// ([`crate::net::handlers::BROADCAST`]).
+/// (a second handler on the kind, after the bridge's own teardown).
 fn on_session_end(In(_): In<SessionEvent>, mut merchant: ResMut<MerchantOpen>) {
     merchant.clear_session();
 }

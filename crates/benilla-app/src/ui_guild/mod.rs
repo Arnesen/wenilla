@@ -750,7 +750,7 @@ pub(crate) mod net {
     /// survive correctly, but the reference's own is backed by `guildcache.wdb` and re-primed
     /// lazily, and keeping a cache alive across a socket only to save one query is not worth the
     /// one wrong name a renamed guild would show. A listener on the session end
-    /// ([`crate::net::handlers::BROADCAST`]).
+    /// (a second handler on the kind, after the bridge's own teardown).
     fn on_session_end(In(_): In<SessionEvent>, mut guild: ResMut<GuildState>) {
         *guild = GuildState::default();
     }

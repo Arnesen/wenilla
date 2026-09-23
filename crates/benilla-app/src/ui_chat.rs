@@ -40,6 +40,7 @@ mod input;
 mod language;
 /// `LoggingChat`/`LoggingCombat` — the two log files `/chatlog` and `/combatlog` toggle.
 mod logging;
+mod net;
 /// The `AUTO_JOIN_GUILD_CHANNEL` cascade (decision 2144) — the one place the client joins or
 /// leaves `GuildRecruitment - City` on its own.
 mod recruitment;
@@ -75,6 +76,7 @@ pub(crate) struct UiChatPlugin;
 
 impl Plugin for UiChatPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.add_observer(combat::on_cvar);
         app.init_resource::<ChatLog>()
             .init_resource::<away::AfkMirror>()

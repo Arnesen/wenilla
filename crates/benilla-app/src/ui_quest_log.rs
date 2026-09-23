@@ -154,7 +154,7 @@ mod net {
     }
 
     /// The log's session state dies with the socket. A listener on the session end
-    /// ([`crate::net::handlers::BROADCAST`]).
+    /// (a second handler on the kind, after the bridge's own teardown).
     fn on_session_end(In(_): In<SessionEvent>, mut quest_log: ResMut<QuestLog>) {
         quest_log.clear_session();
     }

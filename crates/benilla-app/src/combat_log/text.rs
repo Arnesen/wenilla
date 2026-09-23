@@ -1,6 +1,6 @@
-//! Combat-log SMSG arm bodies for [`super::apply_net_updates`]'s dispatch match — the floating
-//! combat-text **spawn table** (decision 0137 phase 2; wow-re `worldtext-spawn-and-law.md`). One
-//! `pub(super)` fn per arm, mirroring the client's handler → emitter structure: each classifies
+//! The combat log's **floating number** leg — the combat-text **spawn table** (decision 0137
+//! phase 2; wow-re `worldtext-spawn-and-law.md`). One fn per packet, mirroring the client's
+//! handler → emitter structure; [`super`]'s handlers call it after the chat line: each classifies
 //! the damage **source** (the color law's `K` — self / owned-by-me / anything else SUPPRESSED),
 //! resolves the outcome **recipient**, applies Gate A (self-anchored damage text is
 //! unconditionally suppressed — outgoing damage floats over the victim, incoming never floats
@@ -28,7 +28,7 @@ use crate::names::NameCache;
 use crate::ui_chat::ChatLog;
 use crate::ui_unit::{CombatTextEvent, UnitCombatFeedback};
 
-use super::super::{GuidIndex, NetCommands, ObjectStore, SelfGuid};
+use crate::net::{GuidIndex, NetCommands, ObjectStore, SelfGuid};
 
 /// Gate A + anchor resolution: the recipient's entity, unless the recipient is us (`0x607140`/
 /// `0x6128b0` compare the anchor guid to the active-player cache and return before submitting).
@@ -43,7 +43,7 @@ fn gated_anchor(guid: u64, index: &GuidIndex, self_guid: &SelfGuid) -> Option<En
 /// against the active player — `Player` (me), `Pet` (a unit whose Summoned/CreatedBy guid is me:
 /// pet, guardian, totem), or `None` = every other class, which SUPPRESSES the emit entirely
 /// (another unit's damage is never drawn; the real emitter returns before submitting).
-pub(super) fn classify_source(
+pub(crate) fn classify_source(
     guid: u64,
     index: &GuidIndex,
     self_guid: &SelfGuid,
@@ -120,7 +120,7 @@ fn spell_center_text(
 /// event). Helper-B partials CONFIRMED: a landed hit with a partial block/absorb/resist fires
 /// the word type with `(damage, partial)` — the addon renders `"25 (10 blocked)"`. The
 /// partial-vs-crit precedence when both apply is unpinned — partials win here, flagged in 0580.
-pub(super) fn melee_center_text(
+pub(crate) fn melee_center_text(
     hit_info: u32,
     victim_state: u32,
     damage: u32,
@@ -623,7 +623,7 @@ pub(super) fn exploration_xp(
     index: &GuidIndex,
     self_guid: &SelfGuid,
     stores: &Query<&mut ObjectStore>,
-    sound_out: &mut MessageWriter<super::super::ServerSoundMessage>,
+    sound_out: &mut MessageWriter<crate::net::ServerSoundMessage>,
     chat_log: &mut ChatLog,
 ) {
     let race = self_guid
@@ -634,8 +634,8 @@ pub(super) fn exploration_xp(
         .and_then(|s| s.0.unit_race());
     let kit = race.and_then(|r| sounds.and_then(|s| s.0.kit(u32::from(r))));
     if let Some(kit) = kit {
-        sound_out.write(super::super::ServerSoundMessage {
-            kind: super::super::ServerSoundKind::Sound2d,
+        sound_out.write(crate::net::ServerSoundMessage {
+            kind: crate::net::ServerSoundKind::Sound2d,
             sound_id: kit,
             source: None,
         });

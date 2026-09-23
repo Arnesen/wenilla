@@ -44,6 +44,7 @@ mod errors;
 mod feed;
 #[cfg(test)]
 mod feed_tests;
+mod net;
 mod ranks;
 mod state;
 pub(crate) mod targeting;
@@ -364,6 +365,7 @@ pub(crate) struct UiActionPlugin;
 
 impl Plugin for UiActionPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.add_observer(on_cvar);
         app.init_resource::<PlayerActions>()
             .init_resource::<LearnedAbilities>()

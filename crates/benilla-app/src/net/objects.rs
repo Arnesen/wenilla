@@ -1,15 +1,17 @@
-//! Object-stream arm bodies for [`super::apply_net_updates`]'s dispatch match — the streamed
-//! world's lifecycle (create / values-merge / destroy / stream-out), the relayed player movement,
-//! and the creature path packet. Each `pub(super)` fn here is exactly one arm's body; the match at
-//! the call site stays the dispatcher, one call per arm.
-
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-
+//! The bridge's own object layer (in the net handler table since 2327 — the last family out of
+//! the drain's dispatch match, which went with it): the streamed world's creates, deltas, moves
+//! and destroys, the movers' speeds and granted modes, the GameObject templates and anims, and
+//! the item store's three kinds. Each packet is one handler over [`Scene`]; a handler's commands
+//! are applied before the next packet's handler runs (decision 2306), which is why the three
+//! intra-drain staging maps the match kept (0061's `pending`, 1478's `SpeedStage`, 1780's
+//! `StagedModes`) are gone: a create inserts its store and speeds at spawn, and the next packet
+//! reads the live component. Registered from [`super::NetPlugin`].
 use benilla_assets::coords::bevy_to_wow;
 use benilla_protocol::{
     guid, EntityKind, MonsterMoveFacing, MoveSpeeds, ObjectFields, SpeedKind, SplineMode,
 };
+use benilla_protocol::{SessionEvent, SessionEventKind};
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::go_templates::GameObjectTemplates;
@@ -18,20 +20,20 @@ use crate::names::NameCache;
 use benilla_world::model_fade::DespawnFade;
 use benilla_world::vis_chain::VisChainOnly;
 
-use super::super::motion::{
+use super::motion::{
     create_spline, gameobject_rotation, monster_move_spline, pose_transform, resolve_facing,
     trace_create_spline, trace_move_snap, wire_yaw, write_pose, SplineStopped, ROOT_APPLY_WIPE,
 };
-use super::super::{
-    merge_store_fields, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity, ObjectStore,
-    RemoteMotion, SelfGuid, SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
+use super::{
+    merge_store_fields, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity, NetHandlerApp,
+    ObjectStore, RemoteMotion, SelfGuid, SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
 };
 
 /// A GameObject plays its one-shot **Custom** animation (`SMSG_GAMEOBJECT_CUSTOM_ANIM`, decision
 /// 1086) — bridged to the GO animation machine ([`crate::go_anim`]), which owns the reject
 /// (`anim_id >= 4`), the id mapping (153..156) and the model-ownership gate. The load-bearing
 /// sender: the fishing bobber's bite splash (`anim_id 0`).
-pub(super) fn gameobject_custom_anim(
+fn gameobject_custom_anim(
     guid: u64,
     anim_id: u32,
     plays: &mut MessageWriter<crate::go_anim::GoCustomAnim>,
@@ -52,7 +54,7 @@ pub(super) fn gameobject_custom_anim(
 /// Commands apply in the order they were queued, so an insert queued here is visible to the
 /// closure the destroy queues below. The arm itself, and the model-ownership gate, are
 /// [`crate::go_anim`]'s.
-pub(super) fn gameobject_despawn_anim(guid: u64, commands: &mut Commands, index: &GuidIndex) {
+fn gameobject_despawn_anim(guid: u64, commands: &mut Commands, index: &GuidIndex) {
     debug!("net: gameobject {guid:#x} despawn anim");
     if let Some(&e) = index.0.get(&guid) {
         commands
@@ -61,9 +63,360 @@ pub(super) fn gameobject_despawn_anim(guid: u64, commands: &mut Commands, index:
     }
 }
 
+/// Register the object layer's handlers — called from [`super::NetPlugin`].
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::ObjectCreate, on_object_create)
+        .net_handler(K::ItemCreate, on_item)
+        .net_handler(K::ItemTemplate, on_item)
+        .net_handler(K::ItemTime, on_item)
+        .net_handler(K::ItemEnchantTime, on_item)
+        .net_handler(K::ObjectMove, on_object_move)
+        .net_handler(K::MoveTimeSkipped, on_move_time_skipped)
+        .net_handler(K::UnitMove, on_unit_move)
+        .net_handler(K::ObjectValues, on_object_values)
+        .net_handler(K::ObjectDestroyed, on_object_destroyed)
+        .net_handler(K::ObjectsRemoved, on_objects_removed)
+        .net_handler(K::MonsterMove, on_monster_move)
+        .net_handler(K::GameObjectInfo, on_gameobject_info)
+        .net_handler(K::GameObjectCustomAnim, on_gameobject_anim)
+        .net_handler(K::GameObjectDespawnAnim, on_gameobject_anim)
+        .net_handler(K::SplineMoveMode, on_spline_move_mode)
+        .net_handler(K::ForceSpeedChange, on_speed)
+        .net_handler(K::SpeedChanged, on_speed);
+}
+
+/// The streamed world as one parameter: the entities and their components the packets write,
+/// the caches they warm, the hooks other subsystems keep on the object lifecycle (the reclaim
+/// latch's, the roster's), and the edges they publish.
+#[derive(SystemParam)]
+pub(crate) struct Scene<'w, 's> {
+    commands: Commands<'w, 's>,
+    net: Res<'w, NetCommands>,
+    index: ResMut<'w, GuidIndex>,
+    self_guid: Res<'w, SelfGuid>,
+    real: Res<'w, Time<Real>>,
+    transforms: Query<'w, 's, &'static mut Transform>,
+    stores: Query<'w, 's, &'static mut ObjectStore>,
+    remote: Query<'w, 's, &'static mut RemoteMotion>,
+    modes: Query<'w, 's, &'static mut UnitMoveModes>,
+    riders: Query<'w, 's, &'static mut crate::transport::TransportRider>,
+    speeds: Query<'w, 's, &'static mut UnitSpeeds>,
+    field_changes: MessageWriter<'w, FieldChanged>,
+    speed_changes: MessageWriter<'w, SpeedChangeMessage>,
+    self_moves: MessageWriter<'w, super::SelfMoveMessage>,
+    hard_landings: MessageWriter<'w, crate::creature_anim::HardLanding>,
+    go_custom_anims: MessageWriter<'w, crate::go_anim::GoCustomAnim>,
+    names: Res<'w, NameCache>,
+    items: ResMut<'w, Items>,
+    go_templates: ResMut<'w, GameObjectTemplates>,
+    death_net: ResMut<'w, crate::death::DeathNet>,
+    group: ResMut<'w, crate::ui_party::GroupState>,
+}
+
+fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene) {
+    if let SessionEvent::ObjectCreate {
+        guid,
+        kind,
+        display_id,
+        position,
+        orientation,
+        scale,
+        speeds,
+        mover,
+        transport_progress,
+        transport,
+        spline,
+        fields,
+    } = ev
+    {
+        crate::death::net::note_corpse(guid, kind, &fields, &sc.self_guid, &mut sc.death_net);
+        object_create(
+            guid,
+            kind,
+            display_id,
+            position,
+            orientation,
+            scale,
+            speeds,
+            mover,
+            transport_progress,
+            transport,
+            spline,
+            fields,
+            &mut sc.commands,
+            &mut sc.index,
+            &mut sc.transforms,
+            &mut sc.stores,
+            &mut sc.field_changes,
+            &sc.names,
+            &sc.go_templates,
+            &sc.net,
+        );
+    }
+}
+
+/// The item store's kinds: a descriptor-only create, the template's display head
+/// (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`, answering our `CMSG_ITEM_QUERY_SINGLE` — the ask-once
+/// cache, decisions 0068/0072; a server miss records `None` so the entry is never re-asked), the
+/// item-lifetime countdown's only feed (decision 1933) and the temporary-enchant countdown's
+/// (decision 0920) — both parked on the item store, which every tooltip surface reads back.
+fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
+    match ev {
+        SessionEvent::ItemCreate {
+            guid,
+            container,
+            fields,
+        } => item_create(guid, container, fields, &mut sc.items),
+        SessionEvent::ItemTemplate { entry, info } => {
+            let info = info.map(|b| *b);
+            debug!("net: item template {entry} → {info:?}");
+            sc.items.insert_template(entry, info);
+        }
+        SessionEvent::ItemTime { item_guid, seconds } => {
+            sc.items.set_item_duration(item_guid, seconds)
+        }
+        SessionEvent::ItemEnchantTime {
+            item_guid,
+            slot,
+            seconds,
+        } => sc.items.set_enchant_deadline(item_guid, slot, seconds),
+        _ => {}
+    }
+}
+
+fn on_object_move(In(ev): In<SessionEvent>, mut sc: Scene) {
+    if let SessionEvent::ObjectMove {
+        guid,
+        position,
+        orientation,
+    } = ev
+    {
+        object_move(
+            guid,
+            position,
+            orientation,
+            &mut sc.commands,
+            &sc.index,
+            &mut sc.transforms,
+        );
+    }
+}
+
+/// **An observed mover skipped time** (decision 1935). No pose moved — only that unit's clock
+/// ran on — so this touches its relay chain and nothing else, which is the whole of what the
+/// reference's handler does (`0x603b40` → `0x61ab90`: `[CMovement+0xac] += lag`). A guid we do
+/// not hold is dropped, faithfully: the reference resolves under `TYPEMASK_UNIT` and returns on
+/// a miss.
+fn on_move_time_skipped(In(ev): In<SessionEvent>, mut sc: Scene) {
+    if let SessionEvent::MoveTimeSkipped { guid, lag_ms } = ev {
+        if let Some(mut m) = sc
+            .index
+            .0
+            .get(&guid)
+            .and_then(|&e| sc.remote.get_mut(e).ok())
+        {
+            m.relay.skip_time(lag_ms);
+        }
+    }
+}
+
+/// The scheduled-replay law (decisions 0601/0615): `unit_move` runs the mover's own replay chain
+/// over this packet's wire stamp to get its client fire-time, then applies it now if due, else
+/// queues it on the unit for `drain_pending_moves`.
+fn on_unit_move(In(ev): In<SessionEvent>, mut sc: Scene) {
+    if let SessionEvent::UnitMove {
+        guid,
+        position,
+        orientation,
+        flags,
+        pitch,
+        time,
+        verb,
+        fall_time,
+        jump,
+        transport,
+    } = ev
+    {
+        let now_ms = sc.real.elapsed_secs_f64() * 1000.0;
+        unit_move(
+            guid,
+            crate::net::motion::RelayMove {
+                wire_ms: time,
+                position,
+                orientation,
+                flags,
+                pitch,
+                fall_time,
+                jump,
+                transport,
+                verb,
+            },
+            now_ms,
+            &mut sc.commands,
+            &sc.index,
+            &sc.self_guid,
+            &mut sc.remote,
+            &mut sc.transforms,
+            &mut sc.hard_landings,
+            &mut sc.self_moves,
+        );
+    }
+}
+
+/// Our corpse's own `CORPSE_FIELD_FLAGS` can flip to BONES under a live guid; the reclaim latch
+/// is re-asked on that edge, as the reference's `FLAGS` mirror handler `0x5d6d60` does (1729).
+fn on_object_values(In(ev): In<SessionEvent>, mut sc: Scene) {
+    if let SessionEvent::ObjectValues { guid, fields } = ev {
+        crate::death::net::recheck_corpse(guid, &fields, &sc.self_guid, &mut sc.death_net);
+        object_values(
+            guid,
+            fields,
+            &mut sc.commands,
+            &sc.index,
+            &mut sc.stores,
+            &mut sc.field_changes,
+            &mut sc.items,
+        );
+    }
+}
+
+/// The party hook runs FIRST and on the same edge the reference takes it: the deactivate
+/// virtual reads the descriptor that is about to go (decision 1640).
+fn on_object_destroyed(In(ev): In<SessionEvent>, mut sc: Scene) {
+    if let SessionEvent::ObjectDestroyed(guid) = ev {
+        crate::death::net::forget_corpse(guid, &mut sc.death_net);
+        let store = sc.index.0.get(&guid).and_then(|e| sc.stores.get(*e).ok());
+        crate::ui_party::net::member_deactivated(guid, &mut sc.group, store, &sc.net);
+        object_destroyed(guid, &mut sc.commands, &mut sc.index, &mut sc.items);
+    }
+}
+
+/// OUT_OF_RANGE and DESTROY take the same virtual in the reference — so the snapshot +
+/// `CMSG_REQUEST_PARTY_MEMBER_STATS` fire here too, which is the edge report B334 is actually
+/// about: a member walking over the hill.
+fn on_objects_removed(In(ev): In<SessionEvent>, mut sc: Scene) {
+    if let SessionEvent::ObjectsRemoved(guids) = ev {
+        for guid in &guids {
+            let store = sc.index.0.get(guid).and_then(|e| sc.stores.get(*e).ok());
+            crate::ui_party::net::member_deactivated(*guid, &mut sc.group, store, &sc.net);
+        }
+        objects_removed(guids, &mut sc.commands, &mut sc.index);
+    }
+}
+
+fn on_monster_move(In(ev): In<SessionEvent>, mut sc: Scene) {
+    if let SessionEvent::MonsterMove {
+        guid,
+        transport,
+        start,
+        spline_id,
+        path,
+        facing,
+        stop,
+        duration_ms,
+        flying,
+        run_mode,
+    } = ev
+    {
+        let rooted = modes_of(guid, &sc.index, &sc.modes).rooted();
+        monster_move(
+            guid,
+            transport,
+            start,
+            spline_id,
+            path,
+            facing,
+            stop,
+            duration_ms,
+            flying,
+            run_mode,
+            rooted,
+            &mut sc.commands,
+            &sc.index,
+            &mut sc.transforms,
+            &mut sc.riders,
+        );
+    }
+}
+
+fn on_gameobject_info(In(ev): In<SessionEvent>, mut sc: Scene) {
+    if let SessionEvent::GameObjectInfo {
+        entry,
+        type_id,
+        display_id,
+        name,
+        data,
+    } = ev
+    {
+        gameobject_info(
+            entry,
+            type_id,
+            display_id,
+            name,
+            &data,
+            &mut sc.go_templates,
+        );
+    }
+}
+
+fn on_gameobject_anim(In(ev): In<SessionEvent>, mut sc: Scene) {
+    match ev {
+        SessionEvent::GameObjectCustomAnim { guid, anim_id } => {
+            gameobject_custom_anim(guid, anim_id, &mut sc.go_custom_anims)
+        }
+        SessionEvent::GameObjectDespawnAnim { guid } => {
+            gameobject_despawn_anim(guid, &mut sc.commands, &sc.index)
+        }
+        _ => {}
+    }
+}
+
+/// The observer movement-mode family (decision 1780) — the same modes, on a body somebody else
+/// is driving. No ack, so the handler ends the packet.
+fn on_spline_move_mode(In(ev): In<SessionEvent>, mut sc: Scene) {
+    if let SessionEvent::SplineMoveMode { guid, mode, apply } = ev {
+        spline_move_mode(
+            guid,
+            mode,
+            apply,
+            &mut sc.commands,
+            &sc.index,
+            &mut sc.modes,
+            &mut sc.remote,
+        );
+    }
+}
+
+fn on_speed(In(ev): In<SessionEvent>, mut sc: Scene) {
+    match ev {
+        SessionEvent::ForceSpeedChange {
+            guid,
+            kind,
+            counter,
+            speed,
+        } => force_speed_change(
+            guid,
+            kind,
+            counter,
+            speed,
+            &sc.index,
+            &mut sc.speeds,
+            &sc.self_guid,
+            &mut sc.speed_changes,
+        ),
+        SessionEvent::SpeedChanged { guid, kind, speed } => {
+            speed_changed(guid, kind, speed, &sc.index, &mut sc.speeds)
+        }
+        _ => {}
+    }
+}
+
 /// An object entered range / was created (`SMSG_UPDATE_OBJECT` create block): spawn or refresh the
-/// entity, warm the ask-once caches, and seed its descriptor store via the per-drain `pending` map.
-pub(super) fn object_create(
+/// entity, warm the ask-once caches, and seed its descriptor store. A handler's commands are
+/// applied before the next packet's handler runs (decision 2306), so the store and the speeds
+/// are components at spawn and the next packet reads them live.
+fn object_create(
     guid: u64,
     kind: EntityKind,
     display_id: Option<u32>,
@@ -80,9 +433,7 @@ pub(super) fn object_create(
     index: &mut GuidIndex,
     transforms: &mut Query<&mut Transform>,
     stores: &mut Query<&mut ObjectStore>,
-    pending: &mut HashMap<u64, ObjectFields>,
     edges: &mut MessageWriter<FieldChanged>,
-    speed_stage: &mut SpeedStage,
     names: &NameCache,
     go_templates: &GameObjectTemplates,
     net_commands: &NetCommands,
@@ -214,7 +565,9 @@ pub(super) fn object_create(
         // `SMSG_FORCE_*_SPEED_CHANGE` riding the same tick as this create has to be able to land
         // on top of it (decision 1478, B213).
         if let Some(s) = speeds {
-            speed_stage.seed(guid, s);
+            // A create is the server's newest snapshot of the mover: it replaces the set whole
+            // (decision 1478), and lands before the next packet's handler reads it.
+            commands.entity(e).insert(UnitSpeeds(s));
         }
         if let Some(anchor) = transport_anchor {
             commands.entity(e).insert(anchor);
@@ -245,7 +598,7 @@ pub(super) fn object_create(
         write_pose(commands, transforms, e, position, placement);
         // Overlay the fresh snapshot's descriptor fields onto the existing store — the reference's
         // in-place refresh of a live guid, which notifies its field watchers like any delta.
-        merge_fields(stores, pending, edges, e, guid, fields);
+        merge_fields(commands, stores, edges, e, guid, fields);
     } else {
         // A transport spawns hidden: its create pose is the *stationary* spawn point (or worse,
         // the origin), not where the boat is in its cycle — the transport tick unhides it at the
@@ -266,7 +619,7 @@ pub(super) fn object_create(
         // root's `Visibility` through `Mut` writes, which don't re-add the sweep row.
         entity.vis_chain_only();
         if let Some(s) = speeds {
-            speed_stage.seed(guid, s); // staged, like the re-create arm above (1478)
+            entity.insert(UnitSpeeds(s));
         }
         if let Some(anchor) = transport_anchor {
             entity.insert(anchor);
@@ -280,22 +633,23 @@ pub(super) fn object_create(
         if let Some(s) = walk {
             entity.insert(s);
         }
+        // The seed itself is never merged, which is the reference's create-time notify-suppress
+        // (decision 2297).
+        entity.insert(ObjectStore(fields));
         index.0.insert(guid, entity.id());
-        // Seed the store via the pending flush — the entity isn't spawned until the sync point.
-        pending.insert(guid, fields);
     }
 }
 
 /// An item or container entered our view (`SMSG_UPDATE_OBJECT` descriptor-only create) — no scene
 /// entity; the item store owns it.
-pub(super) fn item_create(guid: u64, container: bool, fields: ObjectFields, items: &mut Items) {
+fn item_create(guid: u64, container: bool, fields: ObjectFields, items: &mut Items) {
     debug!("net: item create {guid:#x} (container: {container})");
     items.insert_object(guid, fields);
 }
 
 /// An existing object moved to a new authoritative pose (an `SMSG_UPDATE_OBJECT` movement block) —
 /// a one-off correction/relocation that supersedes any active path.
-pub(super) fn object_move(
+fn object_move(
     guid: u64,
     position: [f32; 3],
     orientation: f32,
@@ -318,7 +672,7 @@ pub(super) fn object_move(
 /// applies now, a future one queues on the unit and fires in `drain_pending_moves` — the dead-reckon
 /// covering the mover's own timeline in between, which is what kills the arrival-jitter snap.
 /// `WOW_REMOTE_SNAP=1` restores raw apply-at-arrival for an A/B.
-pub(super) fn unit_move(
+fn unit_move(
     guid: u64,
     mv: crate::net::motion::RelayMove,
     now_ms: f64,
@@ -434,31 +788,26 @@ pub(super) fn unit_move(
 }
 
 /// A descriptor delta (`SMSG_UPDATE_OBJECT` values block): merge into the object's store — a scene
-/// object's in place (or into the pending seed), an item's into the item store. An unknown guid —
+/// object's in place, an item's into the item store. An unknown guid —
 /// a `Values` with no create seen — is dropped, as before.
-pub(super) fn object_values(
+fn object_values(
     guid: u64,
     fields: ObjectFields,
+    commands: &mut Commands,
     index: &GuidIndex,
     stores: &mut Query<&mut ObjectStore>,
-    pending: &mut HashMap<u64, ObjectFields>,
     edges: &mut MessageWriter<FieldChanged>,
     items: &mut Items,
 ) {
     if let Some(&e) = index.0.get(&guid) {
-        merge_fields(stores, pending, edges, e, guid, fields);
+        merge_fields(commands, stores, edges, e, guid, fields);
     } else if guid::is_item(guid) {
         items.merge_object(guid, fields);
     }
 }
 
 /// The object ceased to exist (`SMSG_DESTROY_OBJECT` — corpse decay ahead of respawn, a despawn).
-pub(super) fn object_destroyed(
-    guid: u64,
-    commands: &mut Commands,
-    index: &mut GuidIndex,
-    items: &mut Items,
-) {
+fn object_destroyed(guid: u64, commands: &mut Commands, index: &mut GuidIndex, items: &mut Items) {
     // **The object goes away by the same fade its stream-out takes** — `DespawnFade`, not a raw
     // despawn (decision 2198). The reference's object-manager destroy hands the object's *model*
     // to the `SWModelFadeout` scheduler on the way out: the base OnDeactivate `0x6145e0` (vtable
@@ -504,7 +853,7 @@ pub(super) fn object_destroyed(
 
 /// Stream-out (out-of-range, the update-object `OutOfRange` block): the unit still exists, we just
 /// left its range.
-pub(super) fn objects_removed(guids: Vec<u64>, commands: &mut Commands, index: &mut GuidIndex) {
+fn objects_removed(guids: Vec<u64>, commands: &mut Commands, index: &mut GuidIndex) {
     // Don't pop the entity, fade it out, then despawn (`apply_despawn_fade` drives the ramp; an
     // entity with no fadeable geometry pops straight out there). Director-verified look: on the
     // reference, distant mobs fade out, never blink out (0067's open question, settled by their
@@ -529,7 +878,7 @@ pub(super) fn objects_removed(guids: Vec<u64>, commands: &mut Commands, index: &
 /// rider's local pose for `transport::compose_riders` to carry out to the world. When it is `None`
 /// on a unit we had riding, the unit has *left* the deck — vmangos drops it from the transport on
 /// exactly this edge (`MoveSplineInit::Launch`, `spline/MoveSplineInit.cpp:156-159`).
-pub(super) fn monster_move(
+fn monster_move(
     guid: u64,
     transport: Option<u64>,
     start: [f32; 3],
@@ -719,26 +1068,15 @@ pub(super) fn monster_move(
     }
 }
 
-/// **Per-drain staging for [`UnitMoveModes`]** — the same shape (and the same reason) as
-/// [`merge_fields`]' `pending`: a component this drain inserted through `Commands` is not queryable
-/// until the sync point, so a grant and the packet it changes the meaning of can arrive in one drain
-/// and the second must see the first. Seeded lazily from the live component; never read after the
-/// drain.
-pub(super) type StagedModes = HashMap<u64, UnitMoveModes>;
-
-/// This unit's granted modes as of *now within the drain* — the staged word if it was granted this
-/// drain, else the live component, else none. The reference's word lives as long as the `CGUnit`, so
-/// "no component" and "all bits clear" are the same answer and both are [`UnitMoveModes::default`].
-pub(super) fn modes_of(
-    guid: u64,
-    index: &GuidIndex,
-    modes: &Query<&mut UnitMoveModes>,
-    staged: &StagedModes,
-) -> UnitMoveModes {
-    staged
+/// This unit's granted modes as of now — the live component, else none. A grant lands before
+/// the next packet's handler reads it (decision 2306). The reference's word lives as long as the
+/// `CGUnit`, so "no component" and "all bits clear" are the same answer and both are
+/// [`UnitMoveModes::default`].
+fn modes_of(guid: u64, index: &GuidIndex, modes: &Query<&mut UnitMoveModes>) -> UnitMoveModes {
+    index
+        .0
         .get(&guid)
-        .copied()
-        .or_else(|| index.0.get(&guid).and_then(|&e| modes.get(e).ok().copied()))
+        .and_then(|&e| modes.get(e).ok().copied())
         .unwrap_or_default()
 }
 
@@ -754,7 +1092,7 @@ pub(super) fn modes_of(
 /// the reference applies to whatever it finds — so we do too. It is inert on the avatar either way:
 /// the animation selector's `unify` gives the controller's own `MovementState` precedence, and our
 /// mover's modes are the handshake family's ([`crate::player::state::MoveModes`]).
-pub(super) fn spline_move_mode(
+fn spline_move_mode(
     guid: u64,
     mode: SplineMode,
     apply: bool,
@@ -762,14 +1100,12 @@ pub(super) fn spline_move_mode(
     index: &GuidIndex,
     modes: &mut Query<&mut UnitMoveModes>,
     remote: &mut Query<&mut RemoteMotion>,
-    staged: &mut StagedModes,
 ) {
     let Some(&e) = index.0.get(&guid) else {
         return; // no such unit — the reference drops it too
     };
-    let mut word = modes_of(guid, index, modes, staged);
+    let mut word = modes_of(guid, index, modes);
     word.set(mode, apply);
-    staged.insert(guid, word);
     if let Ok(mut live) = modes.get_mut(e) {
         *live = word;
     } else {
@@ -801,7 +1137,7 @@ pub(super) fn spline_move_mode(
 /// The ask-once GameObject template (`SMSG_GAMEOBJECT_QUERY_RESPONSE`, decision 0239): cache it and
 /// resolve the lockId from the type-specific `data[]` slot — the interact routing reads it to choose
 /// use-vs-cast; the hover tooltip reads the name (decision 0276's GO law).
-pub(super) fn gameobject_info(
+fn gameobject_info(
     entry: u32,
     type_id: u32,
     display_id: u32,
@@ -813,115 +1149,63 @@ pub(super) fn gameobject_info(
     go_templates.insert(entry, type_id, name, data);
 }
 
-/// Merge a descriptor delta into an object's store: into the per-drain `pending` seed when the entity was
-/// created earlier this same drain (its spawn `Command` hasn't run, so it isn't queryable yet), else in
-/// place on the live component. The final `else` — in the index but neither live nor pending — should not
-/// happen (a create always seeds `pending` first), but seeds defensively rather than drop the delta.
+/// Merge a descriptor delta into an object's live store. The `else` — in the index but with no
+/// store — should not happen (a create inserts the store at spawn, and lands before the next
+/// packet's handler), but seeds defensively rather than drop the delta.
 ///
-/// Every merge reports its field edges ([`FieldChanged`], decision 2297) — into the pending seed
-/// too: a create and a values delta for the same guid in one drain are two wire blocks, and the
-/// reference notifies on the second. The seed itself is never merged, which is the reference's
-/// create-time notify-suppress.
+/// Every merge reports its field edges ([`FieldChanged`], decision 2297): a create and a values
+/// delta for the same guid are two wire blocks, and the reference notifies on the second.
 fn merge_fields(
+    commands: &mut Commands,
     stores: &mut Query<&mut ObjectStore>,
-    pending: &mut HashMap<u64, ObjectFields>,
     edges: &mut MessageWriter<FieldChanged>,
     entity: Entity,
     guid: u64,
     delta: ObjectFields,
 ) {
-    if let Some(f) = pending.get_mut(&guid) {
-        merge_store_fields(f, delta, entity, guid, |e| {
-            edges.write(e);
-        });
-    } else if let Ok(mut s) = stores.get_mut(entity) {
+    if let Ok(mut s) = stores.get_mut(entity) {
         merge_store_fields(&mut s.0, delta, entity, guid, |e| {
             edges.write(e);
         });
     } else {
-        pending.insert(guid, delta);
+        warn!(
+            "net: values delta for {guid:#x} found no store on its entity — seeding from the delta"
+        );
+        commands.entity(entity).insert(ObjectStore(delta));
     }
 }
 
-/// Per-drain staging for every mover's [`UnitSpeeds`] — the drain's single speed writer
-/// (decision 1478).
+/// Write one speed-kind slot of a mover's live [`UnitSpeeds`]. `false` means there is nowhere to
+/// write — an untracked guid, or a mover whose create carried no movement block — and the change
+/// is reported unapplied rather than silently dropped.
 ///
-/// The two speed sources used to disagree about *when* they land. [`object_create`] inserts a whole
-/// speed set through `Commands`, which is deferred to the drain's sync point; a
-/// `SMSG_FORCE_*_SPEED_CHANGE` edited one slot of the live component immediately. Mixed in one
-/// drain, the **later packet loses** either way: on an entity born this drain the component isn't
-/// there yet so the query miss was silent, and on one that already existed the create's deferred
-/// insert landed afterwards and overwrote it.
-///
-/// vmangos puts exactly those two packets back to back on purpose. `HandleMoveWorldportAckOpcode`
-/// sends the self create block inside `Map::Add` → `SendInitSelf` (carrying the speeds the player
-/// still has) and then, three statements later, strips the mount on a map that forbids one
-/// (`if (!mEntry->IsMountAllowed()) RemoveSpellsCausingAura(SPELL_AURA_MOUNTED)`) — whose
-/// `SMSG_FORCE_RUN_SPEED_CHANGE` therefore rides the same tick, and so the same drain. That is
-/// B213: `.tele` into BWL/LBRS on a mount auto-dismounted you and left the mount's run speed on
-/// foot, because the create's 11.2 yd/s landed last.
-///
-/// So both sources stage here instead, **in packet order**, and the drain flushes once at the end —
-/// the `pending: HashMap<u64, ObjectFields>` pattern (decision 0061) applied to speeds. Nothing
-/// writes the component directly any more, which is what makes the order the wire's order.
-#[derive(Default)]
-pub(super) struct SpeedStage(HashMap<u64, MoveSpeeds>);
-
-impl SpeedStage {
-    /// A create block's whole speed set. A create is the server's newest snapshot of the mover, so
-    /// it **replaces** anything staged for that guid rather than merging into it.
-    fn seed(&mut self, guid: u64, speeds: MoveSpeeds) {
-        self.0.insert(guid, speeds);
+/// The two speed sources used to disagree about *when* they land (decision 1478, B213): a
+/// create's whole set was inserted through `Commands`, deferred to the drain's sync point, while
+/// a `SMSG_FORCE_*_SPEED_CHANGE` edited the live component at once — so the later packet lost
+/// either way when vmangos put the two back to back (`HandleMoveWorldportAckOpcode`'s self create
+/// and the mount strip three statements later). Under a handler per packet the create's insert
+/// lands before the change's handler runs (decision 2306), so both write the component and the
+/// wire's order is the order.
+fn set_speed(
+    guid: u64,
+    kind: SpeedKind,
+    speed: f32,
+    index: &GuidIndex,
+    speeds: &mut Query<&mut UnitSpeeds>,
+) -> bool {
+    let Some(mut s) = index.0.get(&guid).and_then(|&e| speeds.get_mut(e).ok()) else {
+        return false;
+    };
+    let s = &mut s.0;
+    match kind {
+        SpeedKind::Walk => s.walk = speed,
+        SpeedKind::Run => s.run = speed,
+        SpeedKind::RunBack => s.run_back = speed,
+        SpeedKind::Swim => s.swim = speed,
+        SpeedKind::SwimBack => s.swim_back = speed,
+        SpeedKind::TurnRate => s.turn_rate = speed,
     }
-
-    /// Write one speed-kind slot, seeding the staged set from the live component on first touch.
-    /// `live` is only called when nothing is staged yet; `None` from it means there is nowhere to
-    /// write — an untracked guid, or a mover whose create carried no movement block — and the
-    /// change is reported unapplied rather than silently dropped.
-    fn set(
-        &mut self,
-        guid: u64,
-        kind: SpeedKind,
-        speed: f32,
-        live: impl FnOnce() -> Option<MoveSpeeds>,
-    ) -> bool {
-        let s = match self.0.entry(guid) {
-            Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => match live() {
-                Some(s) => v.insert(s),
-                None => return false,
-            },
-        };
-        match kind {
-            SpeedKind::Walk => s.walk = speed,
-            SpeedKind::Run => s.run = speed,
-            SpeedKind::RunBack => s.run_back = speed,
-            SpeedKind::Swim => s.swim = speed,
-            SpeedKind::SwimBack => s.swim_back = speed,
-            SpeedKind::TurnRate => s.turn_rate = speed,
-        }
-        true
-    }
-
-    /// Land every staged set on its entity, now that this drain's spawn `Command`s have run.
-    /// `try_insert`: the same drain may have queued a despawn for it (a stream-out, the worldport
-    /// purge), and a guid the purge dropped from the index resolves to nothing at all.
-    pub(super) fn flush(self, commands: &mut Commands, index: &GuidIndex) {
-        for (guid, speeds) in self.0 {
-            if let Some(&e) = index.0.get(&guid) {
-                commands.entity(e).try_insert(UnitSpeeds(speeds));
-            }
-        }
-    }
-}
-
-/// Read a mover's live speed set — [`SpeedStage::set`]'s seed for a mover that already exists.
-fn live_speeds(index: &GuidIndex, speeds: &Query<&UnitSpeeds>, guid: u64) -> Option<MoveSpeeds> {
-    index
-        .0
-        .get(&guid)
-        .and_then(|&e| speeds.get(e).ok())
-        .map(|s| s.0)
+    true
 }
 
 /// A forced speed change on a mover (aura/mount/GM `.modify speed`): stage the new value onto the
@@ -929,18 +1213,17 @@ fn live_speeds(index: &GuidIndex, speeds: &Query<&UnitSpeeds>, guid: u64) -> Opt
 /// answers the mandatory ack with its live pose (the TeleportMessage pattern). An unknown guid
 /// still acks if it's ours-by-guid; a foreign mover (we never control others) is only applied,
 /// never acked — acking a unit we don't control is the server's error path.
-pub(super) fn force_speed_change(
+fn force_speed_change(
     guid: u64,
     kind: SpeedKind,
     counter: u32,
     speed: f32,
     index: &GuidIndex,
-    speeds: &Query<&UnitSpeeds>,
-    stage: &mut SpeedStage,
+    speeds: &mut Query<&mut UnitSpeeds>,
     self_guid: &SelfGuid,
     speed_changes: &mut MessageWriter<SpeedChangeMessage>,
 ) {
-    let applied = stage.set(guid, kind, speed, || live_speeds(index, speeds, guid));
+    let applied = set_speed(guid, kind, speed, index, speeds);
     if self_guid.0 == Some(guid) {
         info!("net: force {kind:?} speed change -> {speed} yd/s (counter {counter})");
         // Our own mover having no speed set to write is B213's failure shape, and it was silent
@@ -949,7 +1232,7 @@ pub(super) fn force_speed_change(
         if !applied {
             warn!(
                 "net: force {kind:?} speed change for OUR mover {guid:#x} landed nowhere \
-                 (no speed set staged or live) — we still ack, so the server and we now disagree"
+                 (no live speed set) — we still ack, so the server and we now disagree"
             );
         }
         speed_changes.write(SpeedChangeMessage {
@@ -966,15 +1249,14 @@ pub(super) fn force_speed_change(
 /// An observed unit's speed changed (the SPLINE_SET / MOVE_SET families — another player
 /// mounting up, a hastened creature): stage it onto that unit's speed set, nothing to ack
 /// (decision 0441). The MOVE_SET flavour's pose already arrived as its own UnitMove.
-pub(super) fn speed_changed(
+fn speed_changed(
     guid: u64,
     kind: SpeedKind,
     speed: f32,
     index: &GuidIndex,
-    speeds: &Query<&UnitSpeeds>,
-    stage: &mut SpeedStage,
+    speeds: &mut Query<&mut UnitSpeeds>,
 ) {
-    if !stage.set(guid, kind, speed, || live_speeds(index, speeds, guid)) {
+    if !set_speed(guid, kind, speed, index, speeds) {
         // Ordinary: a unit's speed broadcast can outrun its create block. Nothing to ack and the
         // create that follows carries the same set, so this self-heals.
         debug!("net: {kind:?} speed change for untracked mover {guid:#x} — nothing to write");
@@ -984,8 +1266,6 @@ pub(super) fn speed_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const ME: u64 = 0x0000_0000_0000_002A;
 
     /// The observer movement-mode family's own harness (decision 1780): one indexed unit, and a
     /// `World` small enough that the only thing that can move it is the code under test.
@@ -1034,7 +1314,6 @@ mod tests {
                       index: Res<GuidIndex>,
                       mut modes: Query<&mut UnitMoveModes>,
                       mut remote: Query<&mut RemoteMotion>| {
-                    let mut staged = StagedModes::new();
                     spline_move_mode(
                         MOB,
                         mode,
@@ -1043,7 +1322,6 @@ mod tests {
                         &index,
                         &mut modes,
                         &mut remote,
-                        &mut staged,
                     );
                 },
             )
@@ -1147,7 +1425,6 @@ mod tests {
                  index: Res<GuidIndex>,
                  mut modes: Query<&mut UnitMoveModes>,
                  mut remote: Query<&mut RemoteMotion>| {
-                    let mut staged = StagedModes::new();
                     spline_move_mode(
                         0xDEAD_BEEF,
                         SplineMode::Root,
@@ -1156,11 +1433,6 @@ mod tests {
                         &index,
                         &mut modes,
                         &mut remote,
-                        &mut staged,
-                    );
-                    assert!(
-                        staged.is_empty(),
-                        "nothing staged for a unit we do not have"
                     );
                 },
             )
@@ -1336,117 +1608,6 @@ mod tests {
                 "a plain path takes the unit off the deck"
             );
             assert_eq!(w.entity(e).get::<Spline>().expect("a path").deck, None);
-        }
-    }
-
-    /// A dismounted human's set — 1.12.1's base run 7.0 (the `--speed` probe's own golden).
-    fn on_foot() -> MoveSpeeds {
-        MoveSpeeds {
-            walk: 2.5,
-            run: 7.0,
-            run_back: 4.5,
-            swim: 4.722_222,
-            swim_back: 2.5,
-            turn_rate: std::f32::consts::PI,
-        }
-    }
-
-    /// The same set with a 60% mount's run speed on it — what `SendInitSelf` puts in the create
-    /// block of a worldport that is *about* to strip the mount.
-    fn mounted() -> MoveSpeeds {
-        MoveSpeeds {
-            run: 11.2,
-            ..on_foot()
-        }
-    }
-
-    /// **B213, pinned.** vmangos's `HandleMoveWorldportAckOpcode` sends the self create block
-    /// (`Map::Add` → `SendInitSelf`, still carrying the mount's 11.2 yd/s) and then, three
-    /// statements later, strips the mount because the destination map forbids one — so
-    /// `SMSG_FORCE_RUN_SPEED_CHANGE` 7.0 rides the same tick and lands in the same drain.
-    /// Staged in packet order the change wins; before 1478 the create's *deferred* `UnitSpeeds`
-    /// insert landed last and `.tele` into BWL left the avatar running at mount speed on foot.
-    #[test]
-    fn a_force_change_beats_a_create_from_the_same_drain() {
-        let mut stage = SpeedStage::default();
-        stage.seed(ME, mounted());
-        assert!(stage.set(ME, SpeedKind::Run, 7.0, || panic!(
-            "the create staged a set this drain — the live component must not be consulted"
-        )));
-        stage.flush_into(|guid, s| {
-            assert_eq!(guid, ME);
-            assert_eq!(s.run, 7.0, "the dismount is the newer packet");
-            assert_eq!(
-                s.walk, 2.5,
-                "the other slots still come from the create block"
-            );
-        });
-    }
-
-    /// The reverse order is just as much the wire's order: a create block is the server's newest
-    /// snapshot of the mover, so one arriving *after* a change replaces it whole rather than
-    /// merging under it.
-    #[test]
-    fn a_create_after_a_change_replaces_it() {
-        let mut stage = SpeedStage::default();
-        assert!(stage.set(ME, SpeedKind::Run, 7.0, || Some(mounted())));
-        stage.seed(ME, mounted());
-        stage.flush_into(|_, s| assert_eq!(s.run, 11.2));
-    }
-
-    /// Nothing staged yet (an entity that has existed since an earlier drain): the live component
-    /// seeds the cell, so a one-slot change keeps every other slot it isn't addressing.
-    #[test]
-    fn a_change_on_a_live_mover_seeds_from_the_component() {
-        let mut stage = SpeedStage::default();
-        assert!(stage.set(ME, SpeedKind::Run, 11.2, || Some(on_foot())));
-        stage.flush_into(|_, s| {
-            assert_eq!(s.run, 11.2);
-            assert_eq!(s.run_back, on_foot().run_back);
-            assert_eq!(s.turn_rate, on_foot().turn_rate);
-        });
-    }
-
-    /// A change with nowhere to land — an untracked guid, or a mover whose create carried no
-    /// movement block — reports itself unapplied rather than vanishing. It stages nothing, so a
-    /// later create can't inherit a slot invented for a set that never existed.
-    #[test]
-    fn a_change_with_no_speed_set_is_reported_not_swallowed() {
-        let mut stage = SpeedStage::default();
-        assert!(!stage.set(ME, SpeedKind::Run, 7.0, || None));
-        let mut flushed = 0;
-        stage.flush_into(|_, _| flushed += 1);
-        assert_eq!(flushed, 0);
-    }
-
-    /// The trap itself, machine-checked rather than asserted in prose: a component inserted
-    /// through this drain's `Commands` is **not** visible to a query in the same drain — the spawn
-    /// only runs at the sync point. That is why staging is the fix and why a live-component write
-    /// could never have been the fix: the force-change arm had nothing to write onto.
-    #[test]
-    fn a_component_this_drain_queued_is_invisible_until_the_sync_point() {
-        use bevy::ecs::system::RunSystemOnce;
-        let mut world = World::new();
-        let missed = world
-            .run_system_once(|mut commands: Commands, live: Query<&UnitSpeeds>| {
-                let e = commands.spawn(UnitSpeeds(mounted())).id();
-                live.get(e).is_err()
-            })
-            .expect("the probe system runs");
-        assert!(
-            missed,
-            "a create's UnitSpeeds must be unreadable later in the same drain — if this ever \
-             passes, `Commands` stopped being deferred and 1478's staging can be reconsidered"
-        );
-    }
-
-    impl SpeedStage {
-        /// [`SpeedStage::flush`] without the ECS half — the staged sets in the shape the flush
-        /// would insert them, so the ordering rules above are testable as the pure thing they are.
-        fn flush_into(self, mut f: impl FnMut(u64, MoveSpeeds)) {
-            for (guid, speeds) in self.0 {
-                f(guid, speeds);
-            }
         }
     }
 }

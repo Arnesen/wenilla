@@ -251,22 +251,6 @@ impl Default for LogPeriodicSpells {
 /// `CombatLogPeriodicSpells`' registered name.
 pub(crate) const LOG_PERIODIC_CVAR: &str = "CombatLogPeriodicSpells";
 
-/// **The combat-feedback CVars, as one system parameter** — what a packet handler needs to know
-/// about the player's settings before it emits a line or a floating number.
-///
-/// Bundled because they are one concern — the reference reads all three inside the same
-/// combat-log/world-text translation unit — and read by the net drain as the combat-feedback
-/// member of its catalogs (`net::apply::params::Catalogs`).
-#[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct CombatFeedbackCvars<'w> {
-    /// The eight display ranges.
-    pub ranges: Res<'w, CombatLogRanges>,
-    /// `CombatLogPeriodicSpells`.
-    pub periodic: Res<'w, LogPeriodicSpells>,
-    /// `CombatDamage` + the two `Pet*` sub-gates.
-    pub damage_text: Res<'w, crate::combat_text::DamageTextGates>,
-}
-
 /// `CombatDeathLogRange`'s registered name and default — `0x626d5f`, default string `"60"`
 /// (`0x862e14`).
 pub(crate) const DEATH_LOG_RANGE_CVAR: &str = "CombatDeathLogRange";

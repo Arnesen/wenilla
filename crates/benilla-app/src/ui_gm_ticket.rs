@@ -454,7 +454,7 @@ pub(crate) mod net {
     /// ticket belongs to the CHARACTER, and the next login may be a different one. Its answer
     /// counters go with it, so the first `SMSG_GMTICKET_GETTICKET` of the new session re-fires
     /// `UPDATE_TICKET` rather than being diffed away against the old character's answer count.
-    /// A listener on the session end ([`crate::net::handlers::BROADCAST`]).
+    /// A listener on the session end (a second handler on the kind, after the bridge's own teardown).
     fn on_session_end(In(_): In<SessionEvent>, mut ticket: ResMut<GmTicketState>) {
         ticket.clear_session();
     }

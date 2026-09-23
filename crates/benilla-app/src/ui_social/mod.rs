@@ -339,7 +339,7 @@ pub(crate) mod net {
     /// wrong guids after a reconnect renumbers nothing but re-streams everything. The `/who`
     /// sort chain is the one thing that survives — it is per-PROCESS in the reference, not
     /// per-login (decision 2030), which is why this is a `clear_session` and not a `default()`.
-    /// A listener on the session end ([`crate::net::handlers::BROADCAST`]).
+    /// A listener on the session end (a second handler on the kind, after the bridge's own teardown).
     fn on_session_end(In(_): In<SessionEvent>, mut social: ResMut<SocialState>) {
         social.clear_session();
     }

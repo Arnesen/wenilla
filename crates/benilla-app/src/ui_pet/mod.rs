@@ -49,6 +49,7 @@ use crate::ui_unit::UnitFeed;
 mod bar;
 mod drain;
 mod menu;
+mod net;
 mod unit;
 
 use bar::feed_pet_bar;
@@ -139,6 +140,7 @@ pub(crate) struct UiPetPlugin;
 
 impl Plugin for UiPetPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<PetBar>().add_systems(
             Update,
             (

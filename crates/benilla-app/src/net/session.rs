@@ -1,8 +1,10 @@
-//! Session-lifecycle arm bodies for [`super::apply_net_updates`]'s dispatch match — the connection
-//! edges (the login stages, character select, entering the world, logout, the disconnect
-//! teardown), our own teleport/worldport snaps, the server clock, and the login reputation store.
-//! Each `pub(super)` fn here is exactly one arm's body; the match at the call site stays the
-//! dispatcher, one call per arm.
+//! The bridge's own session handlers (in the net handler table since 2326, moved out of the
+//! drain's session arm file) — the connection edges (the login stages, character select,
+//! entering the world, logout, the disconnect teardown), our own teleport/worldport snaps and
+//! control edges, the server clock, the login reputation store, and the player's login-scoped
+//! stores the bridge defines (the home bind, the proficiencies). Registered from
+//! [`super::NetPlugin`], ahead of every window plugin, so the teardown runs before the windows'
+//! session-end listeners — each a second handler on `Disconnected`.
 
 use benilla_protocol::messages::Character;
 use benilla_protocol::JumpInfo;
@@ -10,28 +12,345 @@ use bevy::prelude::*;
 
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::ui_chat::ChatLog;
 use crate::ui_quest::QuestGiver;
 
-use super::super::{
+use benilla_protocol::{SessionEvent, SessionEventKind};
+use bevy::ecs::system::SystemParam;
+
+use super::{
     CharActionResultMessage, CharListMessage, CharacterLoginFailedMessage,
-    CinematicTriggeredMessage, DisconnectedMessage, DroppedOpcodes, EnteredWorldMessage, GameTime,
-    GuidIndex, KnockBackMessage, LoggedOutMessage, LoginFailedMessage, LoginStageMessage,
-    NetStatus, PendingTransfer, Reputations, SelfGuid, ServerTime, ServerWallClock,
-    TeleportMessage, WorldportMessage,
+    CinematicTriggeredMessage, ClientControlMessage, DisconnectedMessage, DroppedOpcodes,
+    EnteredWorldMessage, GameTime, GuidIndex, HomeBind, KnockBackMessage, LoggedOutMessage,
+    LoginFailedMessage, LoginQueuedMessage, LoginStageMessage, NetCommands, NetHandlerApp,
+    NetStatus, ObjectStore, PendingTransfer, Proficiencies, RealmListMessage, Reputations,
+    SelfGuid, ServerTime, ServerWallClock, TeleportMessage, WorldportMessage,
 };
 
-/// The pre-logon handshake reached a new stage (decision 0539) — the login screen's dialog reads it.
-pub(super) fn login_stage(
-    stage: benilla_protocol::LoginStage,
-    out: &mut MessageWriter<LoginStageMessage>,
+/// Register the session handlers — called from [`super::NetPlugin`].
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::LoginStage, on_login_edge)
+        .net_handler(K::LoginQueued, on_login_edge)
+        .net_handler(K::LoginFailed, on_login_edge)
+        .net_handler(K::RealmList, on_login_edge)
+        .net_handler(K::CharacterList, on_character_list)
+        .net_handler(K::CharActionResult, on_login_edge)
+        .net_handler(K::CharacterLoginFailed, on_login_edge)
+        .net_handler(K::CinematicTriggered, on_login_edge)
+        .net_handler(K::Connected, on_connected)
+        .net_handler(K::LoggedOut, on_logged_out)
+        .net_handler(K::Disconnected, on_disconnected)
+        .net_handler(K::Teleport, on_mover_edge)
+        .net_handler(K::KnockBack, on_mover_edge)
+        .net_handler(K::ClientControl, on_mover_edge)
+        .net_handler(K::Worldport, on_worldport)
+        .net_handler(K::TransferPending, on_transfer)
+        .net_handler(K::TransferAborted, on_transfer)
+        .net_handler(K::TimeSpeed, on_clock)
+        .net_handler(K::ServerUnixTime, on_clock)
+        .net_handler(K::Reputations, on_reputations)
+        .net_handler(K::ReputationDelta, on_reputation_delta)
+        .net_handler(K::ReputationVisible, on_reputations)
+        .net_handler(K::BindPoint, on_player_store)
+        .net_handler(K::Proficiency, on_player_store)
+        .net_handler(K::PacketDropped, on_packet_dropped)
+        .net_handler(K::Pong, on_pong);
+}
+
+/// The edges the bridge publishes as messages — the login screen's, the character screen's,
+/// the controller's — and the two resources they park in.
+#[derive(SystemParam)]
+pub(crate) struct Edges<'w> {
+    teleports: MessageWriter<'w, TeleportMessage>,
+    worldports: MessageWriter<'w, WorldportMessage>,
+    char_lists: MessageWriter<'w, CharListMessage>,
+    realm_lists: MessageWriter<'w, RealmListMessage>,
+    char_actions: MessageWriter<'w, CharActionResultMessage>,
+    char_login_failures: MessageWriter<'w, CharacterLoginFailedMessage>,
+    entered_world: MessageWriter<'w, EnteredWorldMessage>,
+    addon_reply: ResMut<'w, super::AddonInfoReply>,
+    logged_out: MessageWriter<'w, LoggedOutMessage>,
+    knockbacks: MessageWriter<'w, KnockBackMessage>,
+    login_stages: MessageWriter<'w, LoginStageMessage>,
+    login_queued: MessageWriter<'w, LoginQueuedMessage>,
+    login_failures: MessageWriter<'w, LoginFailedMessage>,
+    disconnects: MessageWriter<'w, DisconnectedMessage>,
+    client_control: MessageWriter<'w, ClientControlMessage>,
+    cinematics: MessageWriter<'w, CinematicTriggeredMessage>,
+    transfer: ResMut<'w, PendingTransfer>,
+}
+
+/// The bridge's own state the session edges write: the guid index and our guid, the status,
+/// the ask-once caches the teardown clears, the clocks, the reputations and the player's stores.
+#[derive(SystemParam)]
+pub(crate) struct Bridge<'w, 's> {
+    commands: Commands<'w, 's>,
+    index: ResMut<'w, GuidIndex>,
+    self_guid: ResMut<'w, SelfGuid>,
+    status: ResMut<'w, NetStatus>,
+    names: ResMut<'w, NameCache>,
+    items: ResMut<'w, Items>,
+    cooldowns: ResMut<'w, crate::cooldowns::Cooldowns>,
+    reputations: ResMut<'w, Reputations>,
+    server_time: ResMut<'w, ServerTime>,
+    wall_clock: ResMut<'w, ServerWallClock>,
+    home_bind: ResMut<'w, HomeBind>,
+    proficiencies: ResMut<'w, Proficiencies>,
+    dropped: ResMut<'w, DroppedOpcodes>,
+    net: Res<'w, NetCommands>,
+    stores: Query<'w, 's, &'static mut ObjectStore>,
+    transports: Query<'w, 's, &'static crate::transport::Transport>,
+}
+
+fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
+    match ev {
+        SessionEvent::LoginStage { stage } => login_stage(stage, &mut e.login_stages),
+        SessionEvent::LoginQueued { position, realm } => {
+            e.login_queued.write(LoginQueuedMessage { position, realm });
+        }
+        SessionEvent::LoginFailed {
+            refusal,
+            reason,
+            terminal,
+            dial,
+        } => login_failed(refusal, reason, terminal, dial, &mut e.login_failures),
+        SessionEvent::RealmList { realms } => {
+            e.realm_lists.write(RealmListMessage { realms });
+        }
+        SessionEvent::CharActionResult { action, code } => {
+            char_action_result(action, code, &mut e.char_actions)
+        }
+        SessionEvent::CharacterLoginFailed { result } => {
+            character_login_failed(result, &mut e.char_login_failures)
+        }
+        SessionEvent::CinematicTriggered { cinematic_id } => {
+            cinematic_triggered(cinematic_id, &mut e.cinematics)
+        }
+        _ => {}
+    }
+}
+
+fn on_character_list(In(ev): In<SessionEvent>, mut e: Edges, mut b: Bridge) {
+    if let SessionEvent::CharacterList { characters, realm } = ev {
+        character_list(characters, realm, &mut b.status, &mut e.char_lists);
+    }
+}
+
+fn on_connected(In(ev): In<SessionEvent>, mut e: Edges, mut b: Bridge) {
+    if let SessionEvent::Connected {
+        self_guid: guid,
+        name,
+        billing_time_rested,
+        tutorial_flags,
+        addon_info,
+    } = ev
+    {
+        connected(
+            guid,
+            name,
+            billing_time_rested,
+            tutorial_flags,
+            addon_info,
+            &mut e.addon_reply,
+            &mut b.self_guid,
+            &mut b.status,
+            &mut b.names,
+            &mut e.entered_world,
+        );
+    }
+}
+
+fn on_logged_out(In(ev): In<SessionEvent>, mut e: Edges, mut b: Bridge) {
+    if let SessionEvent::LoggedOut = ev {
+        logged_out(
+            &mut b.commands,
+            &mut b.index,
+            &mut b.self_guid,
+            &mut e.logged_out,
+        );
+    }
+}
+
+/// The teardown — the bridge's own half of the session end. Every window that dies with the
+/// socket has its own listener on this kind, registered after this one and so run after it.
+fn on_disconnected(In(ev): In<SessionEvent>, mut e: Edges, mut b: Bridge) {
+    if let SessionEvent::Disconnected { reason, end } = ev {
+        disconnected(
+            reason,
+            end,
+            &mut b.commands,
+            &mut b.index,
+            &mut b.self_guid,
+            &mut b.status,
+            &mut b.names,
+            &mut b.items,
+            &mut b.cooldowns,
+            &mut e.transfer,
+            &mut e.disconnects,
+        );
+    }
+}
+
+/// The three server-authored mover edges the controller both *applies* and *answers*: a
+/// teleport snap, a knockback launch (decision 1702) and possession's control half (B211),
+/// forwarded whole and unjudged — only the controller can act on them.
+fn on_mover_edge(In(ev): In<SessionEvent>, mut e: Edges, b: Bridge) {
+    match ev {
+        SessionEvent::Teleport {
+            guid,
+            counter,
+            position,
+            orientation,
+        } => teleport(
+            guid,
+            counter,
+            position,
+            orientation,
+            &b.self_guid,
+            &mut e.teleports,
+        ),
+        SessionEvent::KnockBack {
+            guid,
+            counter,
+            launch,
+        } => knock_back(guid, counter, launch, &b.self_guid, &mut e.knockbacks),
+        SessionEvent::ClientControl { mover, allow_move } => {
+            e.client_control
+                .write(ClientControlMessage { mover, allow_move });
+        }
+        _ => {}
+    }
+}
+
+fn on_worldport(
+    In(ev): In<SessionEvent>,
+    mut e: Edges,
+    mut b: Bridge,
+    mut group: ResMut<crate::ui_party::GroupState>,
 ) {
+    if let SessionEvent::Worldport {
+        map_id,
+        position,
+        orientation,
+        needs_ack,
+    } = ev
+    {
+        // Every streamed roster member's object is about to be purged — the same deactivation
+        // the reference runs one object at a time (decision 1640).
+        crate::ui_party::net::roster_deactivated(&mut group, &b.index, &b.stores, &b.net);
+        worldport(
+            map_id,
+            position,
+            orientation,
+            needs_ack,
+            &mut b.commands,
+            &mut b.index,
+            &mut e.transfer,
+            &b.transports,
+            &mut e.worldports,
+        );
+    }
+}
+
+fn on_transfer(In(ev): In<SessionEvent>, mut e: Edges) {
+    match ev {
+        SessionEvent::TransferPending {
+            map_id,
+            transport_entry,
+        } => transfer_pending(map_id, transport_entry, &mut e.transfer),
+        SessionEvent::TransferAborted { reason } => transfer_aborted(reason, &mut e.transfer),
+        _ => {}
+    }
+}
+
+fn on_clock(In(ev): In<SessionEvent>, mut b: Bridge) {
+    match ev {
+        SessionEvent::TimeSpeed {
+            hours,
+            minutes,
+            day_serial,
+            timescale,
+        } => time_speed(hours, minutes, day_serial, timescale, &mut b.server_time),
+        SessionEvent::ServerUnixTime { unix_time } => {
+            server_unix_time(unix_time, &mut b.wall_clock)
+        }
+        _ => {}
+    }
+}
+
+fn on_reputations(In(ev): In<SessionEvent>, mut b: Bridge) {
+    match ev {
+        SessionEvent::Reputations { standings } => reputations(standings, &mut b.reputations),
+        SessionEvent::ReputationVisible { list_id } => {
+            reputation_visible(list_id, &mut b.reputations)
+        }
+        _ => {}
+    }
+}
+
+/// The chat line reads the deltas against the store, so it runs BEFORE the overwrite — after
+/// it, every delta is zero. One handler for both legs, for that order.
+fn on_reputation_delta(
+    In(ev): In<SessionEvent>,
+    mut b: Bridge,
+    factions: Option<Res<crate::target::ring::Factions>>,
+    mut chat_log: ResMut<crate::ui_chat::ChatLog>,
+    mut quest: ResMut<QuestGiver>,
+) {
+    if let SessionEvent::ReputationDelta { standings } = ev {
+        crate::combat_log::chat::faction_standing(
+            &standings,
+            &b.reputations,
+            factions.as_deref(),
+            &mut chat_log,
+        );
+        reputation_delta(standings, &mut b.reputations, &mut quest);
+    }
+}
+
+/// The player's login-scoped stores the bridge defines.
+fn on_player_store(In(ev): In<SessionEvent>, mut b: Bridge) {
+    match ev {
+        SessionEvent::BindPoint { area } => b.home_bind.0 = Some(area),
+        SessionEvent::Proficiency {
+            item_class,
+            subclass_mask,
+        } => {
+            b.proficiencies.0.insert(item_class, subclass_mask);
+        }
+        _ => {}
+    }
+}
+
+fn on_packet_dropped(In(ev): In<SessionEvent>, mut b: Bridge) {
+    if let SessionEvent::PacketDropped {
+        opcode,
+        unparseable,
+    } = ev
+    {
+        packet_dropped(opcode, unparseable, &mut b.dropped);
+    }
+}
+
+/// **The pong never gets here** — the read thread measures it against the ping clock the
+/// instant it lands and stops it, the way the reference's `OnData 0x537b10` hands `SMSG_PONG`
+/// to `HandlePong 0x537d60` inline instead of queueing it (`net::io`). Reaching this handler
+/// means that bypass was undone and every latency reading is a client frame too slow again,
+/// which is B346 exactly — so it says so out loud rather than measuring here and hiding it.
+fn on_pong(In(ev): In<SessionEvent>) {
+    if let SessionEvent::Pong { sequence } = ev {
+        warn!("net: pong seq={sequence} reached the drain — the read thread's RTT bypass is gone (B346)");
+    }
+}
+
+/// The pre-logon handshake reached a new stage (decision 0539) — the login screen's dialog reads it.
+fn login_stage(stage: benilla_protocol::LoginStage, out: &mut MessageWriter<LoginStageMessage>) {
     out.write(LoginStageMessage { stage });
 }
 
 /// A login attempt failed before the roster (decision 0539): the IO thread is back at its pre-logon
 /// park, and [`crate::login`]'s policy decides what happens next.
-pub(super) fn login_failed(
+fn login_failed(
     refusal: Option<benilla_protocol::LoginRefusal>,
     reason: String,
     terminal: bool,
@@ -48,7 +367,7 @@ pub(super) fn login_failed(
 
 /// The verdict on a character create/delete (`SMSG_CHAR_CREATE`/`SMSG_CHAR_DELETE`) — the glue
 /// screen turns the code into its own refusal string.
-pub(super) fn char_action_result(
+fn char_action_result(
     action: benilla_protocol::CharAction,
     code: u8,
     out: &mut MessageWriter<CharActionResultMessage>,
@@ -58,7 +377,7 @@ pub(super) fn char_action_result(
 
 /// The account's character roster (`SMSG_CHAR_ENUM`): the world socket is authenticated and parked
 /// at character select — surface the list (+ the connected realm's identity) to the glue screen.
-pub(super) fn character_list(
+fn character_list(
     characters: Vec<Character>,
     realm: Option<benilla_protocol::RealmInfo>,
     status: &mut NetStatus,
@@ -78,10 +397,7 @@ pub(super) fn character_list(
 
 /// The server refused the character we picked (`SMSG_CHARACTER_LOGIN_FAILED`) — the entry
 /// announced a moment ago is void. `crate::char_select` takes the screen back and says why.
-pub(super) fn character_login_failed(
-    result: u8,
-    out: &mut MessageWriter<CharacterLoginFailedMessage>,
-) {
+fn character_login_failed(result: u8, out: &mut MessageWriter<CharacterLoginFailedMessage>) {
     warn!("net: character login refused (result {result:#04x})");
     out.write(CharacterLoginFailedMessage { result });
 }
@@ -95,7 +411,7 @@ pub(super) fn character_login_failed(
 /// — so the ack must still happen, at the *end* of playback rather than instantly. The cinematic
 /// plugin sends it on a natural end, on an ESC skip, and immediately for a trigger it cannot
 /// resolve to a shot, so no path drops it.
-pub(super) fn cinematic_triggered(
+fn cinematic_triggered(
     cinematic_id: u32,
     triggered: &mut MessageWriter<CinematicTriggeredMessage>,
 ) {
@@ -105,7 +421,7 @@ pub(super) fn cinematic_triggered(
 
 /// We are in the world (the IO thread's first in-world event): record our guid, flip the status,
 /// and seed the name cache with our own name.
-pub(super) fn connected(
+fn connected(
     guid: u64,
     name: String,
     billing_time_rested: u32,
@@ -140,7 +456,7 @@ pub(super) fn connected(
 }
 
 /// The server confirmed our logout (`SMSG_LOGOUT_COMPLETE`) — back to character select.
-pub(super) fn logged_out(
+fn logged_out(
     commands: &mut Commands,
     index: &mut GuidIndex,
     self_guid: &mut SelfGuid,
@@ -162,7 +478,7 @@ pub(super) fn logged_out(
 
 /// The session ended (socket closed / handshake failure): tear down the streamed world and clear
 /// every session-scoped cache.
-pub(super) fn disconnected(
+fn disconnected(
     reason: String,
     end: benilla_protocol::SessionEnd,
     commands: &mut Commands,
@@ -171,9 +487,6 @@ pub(super) fn disconnected(
     status: &mut NetStatus,
     names: &mut NameCache,
     items: &mut Items,
-    chat_log: &mut ChatLog,
-    death_net: &mut crate::death::DeathNet,
-    group: &mut crate::ui_party::GroupState,
     cooldowns: &mut crate::cooldowns::Cooldowns,
     pending_transfer: &mut PendingTransfer,
     disconnects: &mut MessageWriter<DisconnectedMessage>,
@@ -219,8 +532,6 @@ pub(super) fn disconnected(
     // In-flight name queries died with the socket; let the next resolve re-ask.
     names.clear_pending();
     items.clear_session();
-    chat_log.clear_session();
-    group.clear_session();
     // The cooldown list is session-scoped — the next login may be a different character — and
     // had been missing from this sweep since it was built (decision 2116). `SMSG_INITIAL_SPELLS` carries every cooldown
     // still running at every world entry and `seed_initial` APPENDS, so a list that outlives the
@@ -228,14 +539,11 @@ pub(super) fn disconnected(
     // own stale copy over the wire's fresh remainder, and a login on a different character
     // inherits cooldowns that were never theirs.
     cooldowns.clear_session();
-    // The death stores are session-scoped too: a reclaim expiry, resurrect offer, or corpse
-    // marker must not survive the socket (the reconnect re-sends the reclaim delay when dead).
-    *death_net = crate::death::DeathNet::default();
 }
 
 /// A teleport ack request (`MSG_MOVE_TELEPORT_ACK`) — only our own matters (the ack resumes our
 /// movement); the controller consumes the message.
-pub(super) fn teleport(
+fn teleport(
     guid: u64,
     counter: u32,
     position: [f32; 3],
@@ -263,7 +571,7 @@ pub(super) fn teleport(
 /// different opcode with a different handler (`MSG_MOVE_KNOCK_BACK`, wow-re
 /// `system/collision/scratch/knockback-law.md`), so a knockback naming somebody else is not ours to
 /// fly.
-pub(super) fn knock_back(
+fn knock_back(
     guid: u64,
     counter: u32,
     launch: JumpInfo,
@@ -281,11 +589,7 @@ pub(super) fn knock_back(
 
 /// The far-teleport preamble (`SMSG_TRANSFER_PENDING`): latch it for the coming worldport —
 /// its transport block decides whether NEW_WORLD's coordinates are boat-local (decision 0455).
-pub(super) fn transfer_pending(
-    map_id: u32,
-    transport_entry: Option<u32>,
-    pending: &mut PendingTransfer,
-) {
+fn transfer_pending(map_id: u32, transport_entry: Option<u32>, pending: &mut PendingTransfer) {
     match transport_entry {
         Some(entry) => info!("net: transfer pending → map {map_id} riding transport {entry}"),
         None => info!("net: transfer pending → map {map_id}"),
@@ -297,7 +601,7 @@ pub(super) fn transfer_pending(
 }
 
 /// `SMSG_TRANSFER_ABORTED`: the announced transfer won't happen — clear the latch.
-pub(super) fn transfer_aborted(reason: u8, pending: &mut PendingTransfer) {
+fn transfer_aborted(reason: u8, pending: &mut PendingTransfer) {
     warn!("net: transfer aborted (reason {reason})");
     pending.0 = None;
 }
@@ -311,7 +615,7 @@ pub(super) fn transfer_aborted(reason: u8, pending: &mut PendingTransfer) {
 /// the seam (the `CurrentMap` flip itself flips which legs render), keeping the ride attachment
 /// and the deck collider valid the whole way; the server's post-ack re-create then refreshes its
 /// anchor in place. Boats whose paths never reach the new map despawn like everything else.
-pub(super) fn worldport(
+fn worldport(
     map_id: u32,
     position: [f32; 3],
     orientation: f32,
@@ -354,7 +658,7 @@ pub(super) fn worldport(
 }
 
 /// The server game clock (`SMSG_LOGIN_SETTIMESPEED`) — drives the day/night lighting.
-pub(super) fn time_speed(
+fn time_speed(
     hours: u8,
     minutes: u8,
     day_serial: u32,
@@ -374,7 +678,7 @@ pub(super) fn time_speed(
 ///
 /// Logged once per session at info, with the skew against our own clock: that number is exactly
 /// what a "the countdown is wrong by a constant" report would be about, and it costs one line.
-pub(super) fn server_unix_time(unix_time: u32, clock: &mut ServerWallClock) {
+fn server_unix_time(unix_time: u32, clock: &mut ServerWallClock) {
     if clock.0.is_none() {
         let local = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -389,7 +693,7 @@ pub(super) fn server_unix_time(unix_time: u32, clock: &mut ServerWallClock) {
 }
 
 /// The login reputation store (`SMSG_INITIALIZE_FACTIONS`).
-pub(super) fn reputations(standings: Vec<(u8, i32)>, reputations: &mut Reputations) {
+fn reputations(standings: Vec<(u8, i32)>, reputations: &mut Reputations) {
     info!("net: reputation store ({} slots)", standings.len());
     reputations.0 = standings;
 }
@@ -404,7 +708,7 @@ pub(super) fn reputations(standings: Vec<(u8, i32)>, reputations: &mut Reputatio
 /// `SMSG_SET_FACTION_VISIBLE` for the same slot in most cases (vmangos `SetOneFactionReputation`
 /// calls `SetVisible`), so this is usually belt to that braces; it matters when the reveal and the
 /// standing arrive in the other order, and it is what the client does regardless.
-pub(super) fn reputation_delta(
+fn reputation_delta(
     standings: Vec<(u32, i32)>,
     reputations: &mut Reputations,
     quest: &mut QuestGiver,
@@ -434,7 +738,7 @@ pub(super) fn reputation_delta(
 /// standing** — the slot's standing was already correct and stays untouched. Dropping it is the
 /// silent failure it exists to prevent: the pane keys row membership off this bit, so a faction met
 /// mid-session would keep accruing reputation the player could never see.
-pub(super) fn reputation_visible(list_id: u32, reputations: &mut Reputations) {
+fn reputation_visible(list_id: u32, reputations: &mut Reputations) {
     let Some(i) = reputation_slot(list_id, "SMSG_SET_FACTION_VISIBLE") else {
         return;
     };
@@ -464,7 +768,7 @@ fn reputation_slot(list_id: u32, opcode: &str) -> Option<usize> {
 /// The dropped-packet tally (the wire-coverage instrument): count it, and announce each opcode's
 /// FIRST drop at info — visible in any log without the panel open, and one line per opcode per
 /// run, so it can never flood.
-pub(super) fn packet_dropped(opcode: u16, unparseable: bool, dropped: &mut DroppedOpcodes) {
+fn packet_dropped(opcode: u16, unparseable: bool, dropped: &mut DroppedOpcodes) {
     let tally = dropped.0.entry(opcode).or_default();
     if tally.unknown + tally.unparseable == 0 {
         info!(

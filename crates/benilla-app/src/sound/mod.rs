@@ -37,6 +37,7 @@ mod mix_tap;
 mod mixer;
 mod money;
 mod mount;
+mod net;
 // Crate-visible for one reader: the dev-only stall watchdog asks `output::device_open` before
 // it suspends the process (decision 1857). Dev may see anything; nothing here knows dev exists.
 pub(crate) mod output;
@@ -551,6 +552,7 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<Sound
 
 impl Plugin for SoundPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.add_observer(on_cvar);
         // Who gets sound: a run a human launched, and only that. The default posture is audible
         // (decision 1026 — `SoundConfig::muted` starts false), so the silence has to be opt-in by

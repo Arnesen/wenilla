@@ -50,7 +50,7 @@ fn on_new_path(In(ev): In<SessionEvent>, mut taxi: ResMut<TaxiState>) {
 }
 
 /// An open taxi map dies with the socket. A listener on the session end
-/// ([`crate::net::handlers::BROADCAST`]).
+/// (a second handler on the kind, after the bridge's own teardown).
 fn on_session_end(In(_): In<SessionEvent>, mut taxi: ResMut<TaxiState>) {
     taxi.clear_session();
 }

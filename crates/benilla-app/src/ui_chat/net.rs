@@ -1,23 +1,137 @@
-//! Chat-window arm bodies for [`super::apply_net_updates`]'s dispatch match — the spoken line
-//! itself, plus the server notices and query answers that render as chat lines (the channel
-//! roster, whisper refusals, `/played`). Each `pub(super)` fn here is exactly one arm's body; the
-//! match at the call site stays the dispatcher, one call per arm.
+//! The chat window's packet handlers (in the net handler table since 2323, moved out of the
+//! drain's chat arm file) — the spoken line itself, plus the server notices and query answers
+//! that render as chat lines (the channel roster, whisper refusals, `/played`).
 //!
-//! Two arms here do NOT render as chat: `SMSG_NOTIFICATION` and `SMSG_AREA_TRIGGER_MESSAGE` are
-//! the reference's UIErrorsFrame toasts, and queue onto [`UiErrorTexts`]. They live in this file
-//! because they are text-carrying server notices, not because they share a sink.
+//! Two handlers here do NOT render as chat: `SMSG_NOTIFICATION` and `SMSG_AREA_TRIGGER_MESSAGE`
+//! are the reference's UIErrorsFrame toasts, and queue onto [`UiErrorTexts`]. They live in this
+//! file because they are text-carrying server notices, not because they share a sink.
 
 use benilla_protocol::messages::{ChatMessage, CHAT_MSG_WHISPER};
+use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
-use crate::ui_action::UiErrorTexts;
-use crate::ui_chat::{Broadcast, ChatEvent, ChatEventKind, ChatLog};
+use super::{Broadcast, ChatEvent, ChatEventKind, ChatLog};
+use crate::net::{ClientCommand, NetCommands, NetHandlerApp, PlayedTimeAnswer, ServerSaidMessage};
+use crate::ui_action::{UiErrorKeys, UiErrorTexts};
 use crate::ui_social::SocialState;
 
-use super::super::{ClientCommand, NetCommands, ServerSaidMessage};
+/// Register the chat window's handlers — called from [`super::UiChatPlugin`]. One per kind
+/// (the four world broadcasts share one), plus the session-end listener.
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::Chat, on_chat)
+        .net_handler(K::ChannelList, on_channel_list)
+        .net_handler(K::ChatPlayerNotFound, on_whisper_refusal)
+        .net_handler(K::ChatWrongFaction, on_whisper_refusal)
+        .net_handler(K::ZoneUnderAttack, on_broadcast)
+        .net_handler(K::DefenseMessage, on_broadcast)
+        .net_handler(K::ServerMessage, on_broadcast)
+        .net_handler(K::ChatRestricted, on_broadcast)
+        .net_handler(K::Notification, on_toast)
+        .net_handler(K::AreaTriggerMessage, on_toast)
+        .net_handler(K::PlayedTime, on_played_time)
+        .net_handler(K::ChannelNotify, on_channel_notify)
+        .net_handler(K::RandomRoll, on_random_roll)
+        .net_handler(K::Disconnected, on_session_end);
+}
+
+fn on_chat(
+    In(ev): In<SessionEvent>,
+    mut chat_log: ResMut<ChatLog>,
+    social: Res<SocialState>,
+    commands: Res<NetCommands>,
+    mut server_said: MessageWriter<ServerSaidMessage>,
+) {
+    if let SessionEvent::Chat(m) = ev {
+        chat(m, &mut chat_log, &social, &commands, &mut server_said);
+    }
+}
+
+fn on_channel_list(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
+    if let SessionEvent::ChannelList {
+        channel, members, ..
+    } = ev
+    {
+        channel_list(channel, &members, &mut chat_log);
+    }
+}
+
+fn on_whisper_refusal(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorKeys>) {
+    match ev {
+        SessionEvent::ChatPlayerNotFound { name } => chat_player_not_found(&name, &mut errors),
+        SessionEvent::ChatWrongFaction => chat_wrong_faction(&mut errors),
+        _ => {}
+    }
+}
+
+/// The four world broadcasts — parked for [`super::broadcast`]'s resolve pass, which owns the
+/// AreaTable/ServerMessages lookups and the joined-defense-channel walk.
+fn on_broadcast(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
+    let b = match ev {
+        SessionEvent::ZoneUnderAttack { area_id } => Broadcast::ZoneUnderAttack { area_id },
+        SessionEvent::DefenseMessage { zone_id, text } => Broadcast::Defense { zone_id, text },
+        SessionEvent::ServerMessage { message_type, text } => {
+            Broadcast::Server { message_type, text }
+        }
+        SessionEvent::ChatRestricted => Broadcast::ChatRestricted,
+        _ => return,
+    };
+    broadcast(b, &mut chat_log);
+}
+
+fn on_toast(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorTexts>) {
+    match ev {
+        SessionEvent::Notification { text } => notification(text, &mut errors),
+        SessionEvent::AreaTriggerMessage { text } => area_trigger_message(text, &mut errors),
+        _ => {}
+    }
+}
+
+/// BOTH halves, and they are not redundant. The chat breakdown is our stand-in for the
+/// reference's `ChatFrame_DisplayTimePlayed`, which we do not ship; the mailbox is what becomes
+/// `TIME_PLAYED_MSG(total, level)` for an addon that asked.
+fn on_played_time(
+    In(ev): In<SessionEvent>,
+    mut answer: ResMut<PlayedTimeAnswer>,
+    mut chat_log: ResMut<ChatLog>,
+) {
+    if let SessionEvent::PlayedTime { total, level } = ev {
+        answer.0 = Some((total, level));
+        played_time(total, level, &mut chat_log);
+    }
+}
+
+fn on_channel_notify(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
+    if let SessionEvent::ChannelNotify {
+        notice,
+        channel,
+        tail,
+    } = ev
+    {
+        chat_log.push_channel_notice(notice, channel, &tail);
+    }
+}
+
+fn on_random_roll(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
+    if let SessionEvent::RandomRoll {
+        min,
+        max,
+        roll,
+        guid,
+    } = ev
+    {
+        chat_log.push_roll(min, max, roll, guid);
+    }
+}
+
+/// The chat log's session state dies with the socket. A listener on the session end
+/// (a second handler on the kind, after the bridge's own teardown).
+fn on_session_end(In(_): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
+    chat_log.clear_session();
+}
 
 /// A spoken line (`SMSG_MESSAGECHAT`) — the chat window's own feed (decision 0084):
-/// [`crate::ui_chat`] formats + colors per type, resolves the sender name ask-once, and
+/// [`super`] formats + colors per type, resolves the sender name ask-once, and
 /// AddMessages it into ChatFrame1.
 ///
 /// System lines (`CHAT_MSG_SYSTEM` 0x0A, vmangos `SharedDefines.h`) are the SERVER'S ANSWER to a GM
@@ -27,7 +141,7 @@ use super::super::{ClientCommand, NetCommands, ServerSaidMessage};
 /// invisible at the default level, and a refused command read exactly like an applied one
 /// (decision 0651 — the rig's whole batch silently no-op'd on a too-low GM level and nothing said
 /// so). Ordinary chat stays at `debug!`: conversation, not diagnosis, and high volume.
-pub(super) fn chat(
+fn chat(
     m: ChatMessage,
     chat_log: &mut ChatLog,
     social: &SocialState,
@@ -152,7 +266,7 @@ pub(super) fn chat(
 /// The `/chatlist` roster (`SMSG_CHANNEL_LIST`) — CHAT_CHANNEL_LIST_GET "[%s] " + the roster.
 /// Names arrive as guids; v1 renders the count (the per-member resolve fan-out lands with the
 /// P6 channel wiring — /chatlist is rare enough that a count is honest, never wrong).
-pub(super) fn channel_list(channel: String, members: &[(u64, u8)], chat_log: &mut ChatLog) {
+fn channel_list(channel: String, members: &[(u64, u8)], chat_log: &mut ChatLog) {
     let mut ev = ChatEvent::text_only(
         ChatEventKind::ChannelList,
         format!("{} member(s)", members.len()),
@@ -168,7 +282,7 @@ pub(super) fn channel_list(channel: String, members: &[(u64, u8)], chat_log: &mu
 /// there is no VM here, so `ui_action`'s drain is what resolves it against the player's own
 /// `GlobalStrings.lua` — and the row, not this call site, is what says the line goes to chat
 /// (`kind 0`) and makes no sound.
-pub(super) fn chat_player_not_found(name: &str, errors: &mut crate::ui_action::UiErrorKeys) {
+fn chat_player_not_found(name: &str, errors: &mut crate::ui_action::UiErrorKeys) {
     errors.0.push(crate::ui_action::UiError::s(
         "ERR_CHAT_PLAYER_NOT_FOUND_S",
         name,
@@ -177,7 +291,7 @@ pub(super) fn chat_player_not_found(name: &str, errors: &mut crate::ui_action::U
 
 /// A cross-faction whisper was refused — `ERR_CHAT_WRONG_FACTION`, catalog row 240. Same route and
 /// the same reason as [`chat_player_not_found`], with no argument to fill.
-pub(super) fn chat_wrong_faction(errors: &mut crate::ui_action::UiErrorKeys) {
+fn chat_wrong_faction(errors: &mut crate::ui_action::UiErrorKeys) {
     errors
         .0
         .push(crate::ui_action::UiError::key("ERR_CHAT_WRONG_FACTION"));
@@ -198,7 +312,7 @@ pub(super) fn chat_wrong_faction(errors: &mut crate::ui_action::UiErrorKeys) {
 /// `Player::SetGameMaster` answers `.gm on|off` with **both** `SendSysMessage` and
 /// `SendNotification` (`Objects/Player.cpp:2676-2677`/`2701-2702`), so a client that sinks the
 /// notification into chat prints "GM mode is ON" **twice** where the reference prints it once.
-pub(super) fn notification(text: String, errors: &mut UiErrorTexts) {
+fn notification(text: String, errors: &mut UiErrorTexts) {
     // The handler's own console leg, and the same reason 0651 logs the dot-command answers: a
     // toast that flashed for five seconds and one that never arrived look identical afterwards.
     info!("net: notification — {text}");
@@ -212,7 +326,7 @@ pub(super) fn notification(text: String, errors: &mut UiErrorTexts) {
 /// comment here called it the same sink as the notification and left it at that; the sink is the
 /// same, the arm is not.) Without it, a refused portal is silent, which reads exactly like a
 /// portal that is still broken.
-pub(super) fn area_trigger_message(text: String, errors: &mut UiErrorTexts) {
+fn area_trigger_message(text: String, errors: &mut UiErrorTexts) {
     // Logged for the same reason 0651 logs the server's dot-command answers: a trigger that
     // refused and a trigger the client never noticed look identical from outside.
     info!("net: area-trigger message — {text}");
@@ -220,7 +334,7 @@ pub(super) fn area_trigger_message(text: String, errors: &mut UiErrorTexts) {
 }
 
 /// The four **world broadcasts** — parked on [`ChatLog`]'s broadcast queue for
-/// [`crate::ui_chat`]'s resolve pass, which holds the AreaTable/ServerMessages catalogs and the
+/// [`super`]'s resolve pass, which holds the AreaTable/ServerMessages catalogs and the
 /// joined-channel walk this site does not (`ui_chat::broadcast` carries the whole mechanism).
 ///
 /// Only the parking happens here, deliberately: half-resolving at the packet — naming the area
@@ -231,7 +345,7 @@ pub(super) fn area_trigger_message(text: String, errors: &mut UiErrorTexts) {
 /// arrived" have to be distinguishable in a log afterwards. A defense broadcast that reaches a
 /// character in neither defense channel prints nothing on screen and is faithful in doing so — the
 /// log line is the only trace it happened at all.
-pub(super) fn broadcast(b: Broadcast, chat_log: &mut ChatLog) {
+fn broadcast(b: Broadcast, chat_log: &mut ChatLog) {
     info!("net: world broadcast — {b:?}");
     chat_log.push_broadcast(b);
 }
@@ -239,7 +353,7 @@ pub(super) fn broadcast(b: Broadcast, chat_log: &mut ChatLog) {
 /// The `/played` answer (`SMSG_PLAYED_TIME`) — TIME_PLAYED_TOTAL/LEVEL over
 /// TIME_DAYHOURMINUTESECOND (GlobalStrings:4243-4247; the ref's
 /// ChatFrame_DisplayTimePlayed breakdown).
-pub(super) fn played_time(total: u32, level: u32, chat_log: &mut ChatLog) {
+fn played_time(total: u32, level: u32, chat_log: &mut ChatLog) {
     for (label, secs) in [
         ("Total time played", total),
         ("Time played this level", level),

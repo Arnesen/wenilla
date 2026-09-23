@@ -166,7 +166,7 @@ mod net {
 
     /// A verdict on a share nobody is listening for any more, and a confirm whose server-side
     /// latch died with the socket (decision 1733). A listener on the session end
-    /// ([`crate::net::handlers::BROADCAST`]).
+    /// (a second handler on the kind, after the bridge's own teardown).
     fn on_session_end(In(_): In<SessionEvent>, mut share: ResMut<QuestShare>) {
         share.clear_session();
     }

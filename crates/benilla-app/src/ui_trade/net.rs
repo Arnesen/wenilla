@@ -40,7 +40,7 @@ fn on_trade_status_extended(In(ev): In<SessionEvent>, mut trade: ResMut<TradeSes
 
 /// An open trade dies with the socket (decision 0592) — the reconnect starts with no trade. A
 /// listener on the session end, which the drain's dispatch match still owns
-/// ([`crate::net::handlers::BROADCAST`]).
+/// (a second handler on the kind, after the bridge's own teardown).
 fn on_session_end(In(_): In<SessionEvent>, mut trade: ResMut<TradeSession>) {
     trade.clear_session();
 }
@@ -339,7 +339,7 @@ mod tests {
     }
 
     /// End to end through the real registration: a status opens the window, and the session
-    /// end — a broadcast the match still owns — takes the trade with it.
+    /// end — the bridge's own teardown beside this listener — takes the trade with it.
     #[test]
     fn the_table_routes_the_status_and_the_session_end_to_the_trade() {
         let (_, commands, _rx) = sink();
@@ -355,20 +355,16 @@ mod tests {
             vec![SessionEvent::TradeStatus {
                 status: TradeStatus::OpenWindow,
             }],
-            |_, _| panic!("a claimed kind never reaches the match"),
         );
         assert!(app.world().resource::<TradeSession>().is_open());
 
-        let mut through_the_match = Vec::new();
         crate::net::handlers::dispatch(
             app.world_mut(),
             vec![SessionEvent::Disconnected {
                 reason: "socket".into(),
                 end: benilla_protocol::SessionEnd::Lost,
             }],
-            |_, unclaimed| through_the_match.extend(unclaimed.iter().map(SessionEventKind::from)),
         );
-        assert_eq!(through_the_match, vec![SessionEventKind::Disconnected]);
         assert!(!app.world().resource::<TradeSession>().is_open());
     }
 

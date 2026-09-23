@@ -321,7 +321,7 @@ mod net {
     }
 
     /// Open group rolls die with the socket (decision 0591). A listener on the session end
-    /// ([`crate::net::handlers::BROADCAST`]).
+    /// (a second handler on the kind, after the bridge's own teardown).
     fn on_session_end(In(_): In<SessionEvent>, mut rolls: ResMut<LootRolls>) {
         rolls.clear();
     }

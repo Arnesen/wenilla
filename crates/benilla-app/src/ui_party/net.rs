@@ -1,8 +1,10 @@
-//! The group/party arm bodies (decision 0434 §D2, superseded by 0440) for
-//! [`super::apply_net_updates`]'s dispatch match. [`GroupState`] mirrors the wire and names the
-//! **messages** its roster diff implies; these are the drain-side shims that put them on the
-//! shared by-key queue. Each `pub(super)` fn here is exactly one arm's body; the match at the call
-//! site stays the dispatcher, one call per arm.
+//! The group/party packet handlers (decision 0434 §D2, superseded by 0440; in the net handler
+//! table since 2321, moved out of the drain's group arm file). [`GroupState`] mirrors the wire and
+//! names the **messages** its roster diff implies; these are the shims that put them on the
+//! shared by-key queue. Two bodies here are not packet handlers but the object layer's hook on a
+//! roster member's stream-out ([`member_deactivated`], [`roster_deactivated`]); the drain's
+//! object arms still call them, and they become listeners on the object kinds once those are
+//! peeled.
 //!
 //! **They are message ids, not sentences** (decisions 2045/2054). The reference reaches all twelve
 //! through one `CGGameUI::DisplayError(msgId)`, and the catalog row that id names answers three
@@ -15,12 +17,184 @@ use benilla_protocol::messages::{
 };
 use bevy::prelude::*;
 
+use benilla_protocol::{SessionEvent, SessionEventKind};
+
+use super::GroupState;
 use crate::names::NameCache;
+use crate::net::{ClientCommand, GuidIndex, NetCommands, NetHandlerApp, ObjectStore, SelfGuid};
 use crate::ui_action::{UiError, UiErrorKeys};
-use crate::ui_party::GroupState;
 use crate::ui_quest::QuestGiver;
 
-use super::super::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfGuid};
+/// Register the group handlers — called from [`super::UiPartyPlugin`]. One per kind, plus the
+/// session-end listener.
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::GroupInvite, on_invite)
+        .net_handler(K::GroupDecline, on_decline)
+        .net_handler(K::GroupUninvited, on_uninvited)
+        .net_handler(K::GroupLeaderChanged, on_leader_changed)
+        .net_handler(K::GroupDestroyed, on_destroyed)
+        .net_handler(K::GroupList, on_list)
+        .net_handler(K::PartyCommandResult, on_command_result)
+        .net_handler(K::PartyMemberStats, on_member_stats)
+        .net_handler(K::RaidTargetSet, on_raid_target)
+        .net_handler(K::RaidTargetList, on_raid_target)
+        .net_handler(K::ReadyCheckRequest, on_ready_check_request)
+        .net_handler(K::ReadyCheckAnswer, on_ready_check_answer)
+        .net_handler(K::RaidInstanceInfo, on_raid_instance_info)
+        .net_handler(K::Disconnected, on_session_end);
+}
+
+fn on_invite(
+    In(ev): In<SessionEvent>,
+    mut group: ResMut<GroupState>,
+    mut errors: ResMut<UiErrorKeys>,
+) {
+    if let SessionEvent::GroupInvite { inviter } = ev {
+        invited(&mut group, &mut errors, &inviter);
+    }
+}
+
+fn on_decline(
+    In(ev): In<SessionEvent>,
+    mut group: ResMut<GroupState>,
+    mut errors: ResMut<UiErrorKeys>,
+) {
+    if let SessionEvent::GroupDecline { name } = ev {
+        declined(&mut group, &mut errors, &name);
+    }
+}
+
+fn on_uninvited(
+    In(ev): In<SessionEvent>,
+    mut group: ResMut<GroupState>,
+    mut errors: ResMut<UiErrorKeys>,
+) {
+    if let SessionEvent::GroupUninvited = ev {
+        uninvited(&mut group, &mut errors);
+    }
+}
+
+fn on_leader_changed(
+    In(ev): In<SessionEvent>,
+    mut group: ResMut<GroupState>,
+    mut errors: ResMut<UiErrorKeys>,
+    self_guid: Res<SelfGuid>,
+    names: Res<NameCache>,
+    commands: Res<NetCommands>,
+) {
+    if let SessionEvent::GroupLeaderChanged { name } = ev {
+        leader_changed(
+            &mut group,
+            &mut errors,
+            &name,
+            &self_guid,
+            &names,
+            &commands,
+        );
+    }
+}
+
+fn on_destroyed(
+    In(ev): In<SessionEvent>,
+    mut group: ResMut<GroupState>,
+    mut errors: ResMut<UiErrorKeys>,
+) {
+    if let SessionEvent::GroupDestroyed = ev {
+        destroyed(&mut group, &mut errors);
+    }
+}
+
+fn on_list(
+    In(ev): In<SessionEvent>,
+    mut group: ResMut<GroupState>,
+    mut errors: ResMut<UiErrorKeys>,
+    mut quest: ResMut<QuestGiver>,
+    names: Res<NameCache>,
+    index: Res<GuidIndex>,
+    commands: Res<NetCommands>,
+) {
+    if let SessionEvent::GroupList {
+        group_type,
+        own_flags,
+        members,
+        leader,
+        loot,
+    } = ev
+    {
+        list(
+            &mut group,
+            &mut errors,
+            &mut quest,
+            group_type,
+            own_flags,
+            members,
+            leader,
+            loot,
+            &names,
+            &index,
+            &commands,
+        );
+    }
+}
+
+fn on_command_result(
+    In(ev): In<SessionEvent>,
+    mut group: ResMut<GroupState>,
+    mut errors: ResMut<UiErrorKeys>,
+) {
+    if let SessionEvent::PartyCommandResult {
+        operation,
+        member,
+        result,
+    } = ev
+    {
+        command_result(&mut group, &mut errors, operation, &member, result);
+    }
+}
+
+fn on_member_stats(In(ev): In<SessionEvent>, mut group: ResMut<GroupState>) {
+    if let SessionEvent::PartyMemberStats { guid, full, info } = ev {
+        group.apply_stats(guid, full, *info);
+    }
+}
+
+fn on_raid_target(In(ev): In<SessionEvent>, mut group: ResMut<GroupState>) {
+    match ev {
+        SessionEvent::RaidTargetSet { icon, guid } => group.apply_raid_target(icon, guid),
+        SessionEvent::RaidTargetList { entries } => group.apply_raid_target_list(&entries),
+        _ => {}
+    }
+}
+
+fn on_ready_check_request(
+    In(ev): In<SessionEvent>,
+    mut group: ResMut<GroupState>,
+    mut errors: ResMut<UiErrorKeys>,
+    self_guid: Res<SelfGuid>,
+) {
+    if let SessionEvent::ReadyCheckRequest = ev {
+        ready_check_request(&mut group, &mut errors, &self_guid);
+    }
+}
+
+fn on_ready_check_answer(In(ev): In<SessionEvent>, mut group: ResMut<GroupState>) {
+    if let SessionEvent::ReadyCheckAnswer { guid, ready } = ev {
+        group.apply_ready_check_answer(guid, ready != 0);
+    }
+}
+
+fn on_raid_instance_info(In(ev): In<SessionEvent>, mut group: ResMut<GroupState>) {
+    if let SessionEvent::RaidInstanceInfo { entries } = ev {
+        group.apply_raid_instance_info(entries);
+    }
+}
+
+/// The group dies with the socket. A listener on the session end
+/// (a second handler on the kind, after the bridge's own teardown).
+fn on_session_end(In(_): In<SessionEvent>, mut group: ResMut<GroupState>) {
+    group.clear_session();
+}
 
 /// Queue the messages a `GroupState::apply_*` named. `ui_action::feed_actions` resolves each key
 /// against the VM's own `GlobalStrings.lua` and puts the line on the surface its catalog row
@@ -32,38 +206,34 @@ fn push_group_lines(errors: &mut UiErrorKeys, lines: Vec<UiError>) {
 /// `MSG_RAID_READY_CHECK`, the open form (decision 1989): our own echo as leader takes the
 /// response-collection arm and prints nothing; as anyone else we print the leader's line and take
 /// the popup ticket. The leader test is the reference's guid compare (`0x4ba3a0`).
-pub(super) fn ready_check_request(
-    group: &mut GroupState,
-    errors: &mut UiErrorKeys,
-    self_guid: &SelfGuid,
-) {
+fn ready_check_request(group: &mut GroupState, errors: &mut UiErrorKeys, self_guid: &SelfGuid) {
     let we_lead = self_guid.0 == Some(group.leader);
     push_group_lines(errors, group.apply_ready_check_request(we_lead));
 }
 
 /// `SMSG_GROUP_INVITE` — someone asked us into their group.
-pub(super) fn invited(group: &mut GroupState, errors: &mut UiErrorKeys, inviter: &str) {
+fn invited(group: &mut GroupState, errors: &mut UiErrorKeys, inviter: &str) {
     push_group_lines(errors, group.apply_invited(inviter));
 }
 
 /// `SMSG_GROUP_DECLINE` — our invitee said no (sent to the inviter only).
-pub(super) fn declined(group: &mut GroupState, errors: &mut UiErrorKeys, name: &str) {
+fn declined(group: &mut GroupState, errors: &mut UiErrorKeys, name: &str) {
     push_group_lines(errors, group.apply_declined(name));
 }
 
 /// `SMSG_GROUP_UNINVITE` — we were kicked.
-pub(super) fn uninvited(group: &mut GroupState, errors: &mut UiErrorKeys) {
+fn uninvited(group: &mut GroupState, errors: &mut UiErrorKeys) {
     push_group_lines(errors, group.apply_uninvited());
 }
 
 /// `SMSG_GROUP_DESTROYED` — the group is gone outright.
-pub(super) fn destroyed(group: &mut GroupState, errors: &mut UiErrorKeys) {
+fn destroyed(group: &mut GroupState, errors: &mut UiErrorKeys) {
     push_group_lines(errors, group.apply_destroyed());
 }
 
 /// `SMSG_GROUP_SET_LEADER` — the line reads differently when the new leader is us, so the composer
 /// needs our own name. It is cache-seeded at login (`session::connected`), so this never asks.
-pub(super) fn leader_changed(
+fn leader_changed(
     group: &mut GroupState,
     errors: &mut UiErrorKeys,
     name: &str,
@@ -88,7 +258,7 @@ pub(super) fn leader_changed(
 /// read them and both were empty for an out-of-area member before this — the raid grid's class
 /// column (`ui_party::feed::raid_roster`, whose own-row twin of this hole 1549 §7 found live), and
 /// the party frame's 2D portrait stand-in (`portrait::temporary_portrait`, report B315).
-pub(super) fn list(
+fn list(
     group: &mut GroupState,
     errors: &mut UiErrorKeys,
     quest: &mut QuestGiver,
@@ -170,7 +340,7 @@ fn seat_new_records(
 /// on the roster falls straight through; and a guid we hold **no object for** falls through too —
 /// the hook is a *virtual on the object*, so no object means it never ran, and a server that
 /// re-announces a stream-out we have already applied must not cost a packet.
-pub(super) fn member_deactivated(
+pub(crate) fn member_deactivated(
     guid: u64,
     group: &mut GroupState,
     store: Option<&ObjectStore>,
@@ -195,7 +365,7 @@ pub(super) fn member_deactivated(
 /// [`member_deactivated`] for **every** streamed roster member at once — the bulk teardown a
 /// cross-map transfer performs, where the reference destroys the same objects one at a time and
 /// runs the same hook on each.
-pub(super) fn roster_deactivated(
+pub(crate) fn roster_deactivated(
     group: &mut GroupState,
     index: &GuidIndex,
     stores: &Query<&mut ObjectStore>,
@@ -214,7 +384,7 @@ pub(super) fn roster_deactivated(
 }
 
 /// `SMSG_PARTY_COMMAND_RESULT` — the verdict on an invite/kick/leave we asked for.
-pub(super) fn command_result(
+fn command_result(
     group: &mut GroupState,
     errors: &mut crate::ui_action::UiErrorKeys,
     operation: u32,

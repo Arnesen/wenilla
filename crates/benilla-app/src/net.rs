@@ -30,6 +30,9 @@ mod apply;
 pub(crate) mod handlers;
 pub(crate) mod io;
 mod motion;
+mod objects;
+mod session;
+mod world;
 
 pub(crate) use apply::apply_net_updates;
 use apply::tag_self_player;
@@ -95,6 +98,12 @@ impl Plugin for NetPlugin {
             Update,
             publish_world_time.in_set(benilla_world::schedule::WorldStage::Net),
         );
+        // The bridge's own handlers (decision 2325): the world feed it forwards, the name cache it
+        // initialises.
+        world::register(app);
+        session::register(app);
+        objects::register(app);
+        crate::names::net::register(app);
         app.insert_resource(NetEvents(handles.events))
             .insert_resource(NetCommands(handles.commands))
             .insert_resource(CharPick(handles.pick))

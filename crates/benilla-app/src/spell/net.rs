@@ -1,7 +1,9 @@
-//! Spell-book/action-bar + cast-lifecycle arm bodies for [`super::apply_net_updates`]'s dispatch
-//! match — one of the largest arm families, split out on its own (the decision 0099/0107 precast →
-//! resolve pipeline). Each `pub(super)` fn here is exactly one arm's body; the match at the call
-//! site stays the dispatcher, one call per arm.
+//! The spell's packet handlers (in the net handler table since 2324, moved out of the drain's
+//! spells arm file) — the spell book and the action bar, the cast lifecycle (the decision
+//! 0099/0107 precast → resolve pipeline), the cooldowns, the channels, the aura durations and the
+//! spell modifiers. The lifecycle *state* these fold into is still spread over `ui_action`,
+//! `ui_cast` and `cooldowns` (2265 §A7's remaining half); the handlers reach it through
+//! [`Lifecycle`] and [`Scene`].
 
 use std::time::{Duration, Instant};
 
@@ -16,12 +18,421 @@ use crate::ui_aura::AuraDurations;
 use crate::ui_cast::{ActiveChannel, CastBarEdge, CastBarFeed, PendingCast, QueuedMeleeSpell};
 use crate::ui_spellbook::LearnedInTab;
 
-use super::super::{GuidIndex, ObjectStore, SelfGuid};
+use benilla_protocol::{SessionEvent, SessionEventKind};
+use bevy::ecs::system::SystemParam;
+
+use crate::net::{GuidIndex, NetCommands, NetHandlerApp, ObjectStore, SelfGuid, SelfPlayer};
+
+/// Register the spell's handlers — called from [`super::SpellPlugin`].
+pub(super) fn register(app: &mut App) {
+    use SessionEventKind as K;
+    app.net_handler(K::SpellBook, on_spell_book)
+        .net_handler(K::ActionButtons, on_action_buttons)
+        .net_handler(K::SpellLearned, on_spell_learned)
+        .net_handler(K::SpellRemoved, on_spell_removed)
+        .net_handler(K::SpellSuperceded, on_spell_superceded)
+        .net_handler(K::CastResult, on_cast_result)
+        .net_handler(K::SpellStart, on_spell_start)
+        .net_handler(K::SpellGo, on_spell_go)
+        .net_handler(K::SpellChainTargets, on_spell_chain_targets)
+        .net_handler(K::SpellFailedOther, on_spell_failed_other)
+        .net_handler(K::SpellDelayed, on_spell_delayed)
+        .net_handler(K::CancelAutoRepeat, on_cancel_auto_repeat)
+        .net_handler(K::SpellCooldowns, on_cooldown_packet)
+        .net_handler(K::CooldownEvent, on_cooldown_packet)
+        .net_handler(K::ClearCooldown, on_cooldown_packet)
+        .net_handler(K::CooldownCheat, on_cooldown_packet)
+        .net_handler(K::ItemCooldown, on_item_cooldown)
+        .net_handler(K::ChannelStart, on_channel)
+        .net_handler(K::ChannelUpdate, on_channel)
+        .net_handler(K::AuraDuration, on_aura_duration)
+        .net_handler(K::SpellModifier, on_spell_modifier);
+}
+
+/// The cast lifecycle's state and catalogs, as one parameter — what every handler here folds
+/// its packet into. Still owned by `ui_action`, `ui_cast`, `cooldowns`, `ui_aura`,
+/// `spell_mods` and the pet bar (2265 §A7).
+#[derive(SystemParam)]
+pub(crate) struct Lifecycle<'w> {
+    self_guid: Res<'w, SelfGuid>,
+    index: Res<'w, GuidIndex>,
+    spells: Option<Res<'w, Spells>>,
+    net: Res<'w, NetCommands>,
+    actions: ResMut<'w, PlayerActions>,
+    cast_errors: ResMut<'w, CastErrors>,
+    chain_casts: ResMut<'w, crate::ui_action::ChainCasts>,
+    learned_in_tab: ResMut<'w, LearnedInTab>,
+    cast_bar: ResMut<'w, CastBarFeed>,
+    pending: ResMut<'w, PendingCast>,
+    queued_melee: ResMut<'w, QueuedMeleeSpell>,
+    cooldowns: ResMut<'w, Cooldowns>,
+    auto_repeat: ResMut<'w, AutoRepeatActive>,
+    channel: ResMut<'w, ActiveChannel>,
+    aura_durations: ResMut<'w, AuraDurations>,
+    spell_mods: ResMut<'w, crate::spell_mods::SpellModifiers>,
+    pet_bar: ResMut<'w, crate::ui_pet::PetBar>,
+    /// The PlayAnimation call-order counter: every animation-bearing message stamps `next()`,
+    /// in packet order.
+    play_seq: ResMut<'w, crate::creature_anim::PlaySeq>,
+}
+
+/// The scene a cast lands in — the streamed units, the item store, and the animation, text and
+/// loot sinks a resolve writes.
+#[derive(SystemParam)]
+pub(crate) struct Scene<'w, 's> {
+    commands: Commands<'w, 's>,
+    casting: Query<'w, 's, &'static Casting>,
+    engaged_self: Query<'w, 's, (), (With<crate::creature_anim::Engaged>, With<SelfPlayer>)>,
+    stores: Query<'w, 's, &'static mut ObjectStore>,
+    items: ResMut<'w, crate::items::Items>,
+    loot_latch: ResMut<'w, crate::ui_loot::LootLatch>,
+    damage_text: Res<'w, crate::combat_text::DamageTextGates>,
+    cast_events: MessageWriter<'w, CastEvent>,
+    go_targets: MessageWriter<'w, SpellGoTargets>,
+    text: MessageWriter<'w, crate::combat_text::CombatTextSpawn>,
+    go_lid: MessageWriter<'w, crate::go_anim::GoLidOpen>,
+    sheaths: MessageWriter<'w, crate::creature_anim::SheathRequest>,
+}
+
+/// The spell-book/action-bar pair → the action store the UI feed reads (`crate::ui_action`),
+/// sent once at login (and the bar again on server-side edits).
+fn on_spell_book(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    if let SessionEvent::SpellBook {
+        spell_ids,
+        cooldowns,
+    } = ev
+    {
+        spell_book(spell_ids, cooldowns, &mut l.actions, &mut l.cooldowns);
+    }
+}
+
+fn on_action_buttons(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    if let SessionEvent::ActionButtons { buttons } = ev {
+        action_buttons(buttons, &mut l.actions);
+    }
+}
+
+fn on_spell_learned(In(ev): In<SessionEvent>, mut l: Lifecycle, mut errors: ResMut<UiErrorKeys>) {
+    if let SessionEvent::SpellLearned { spell_id } = ev {
+        learned_spell(
+            spell_id,
+            &mut l.actions,
+            l.spells.as_deref(),
+            &mut errors,
+            &mut l.learned_in_tab,
+        );
+    }
+}
+
+fn on_spell_removed(In(ev): In<SessionEvent>, mut l: Lifecycle, mut errors: ResMut<UiErrorKeys>) {
+    if let SessionEvent::SpellRemoved { spell_id } = ev {
+        removed_spell(spell_id, &mut l.actions, l.spells.as_deref(), &mut errors);
+    }
+}
+
+fn on_spell_superceded(
+    In(ev): In<SessionEvent>,
+    mut l: Lifecycle,
+    mut errors: ResMut<UiErrorKeys>,
+) {
+    if let SessionEvent::SpellSuperceded {
+        old_spell_id,
+        new_spell_id,
+    } = ev
+    {
+        superceded_spell(
+            old_spell_id,
+            new_spell_id,
+            &mut l.actions,
+            l.spells.as_deref(),
+            &mut errors,
+            &mut l.learned_in_tab,
+        );
+    }
+}
+
+fn on_cast_result(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::CastResult {
+        spell_id,
+        success,
+        reason,
+        arg,
+    } = ev
+    {
+        cast_result(
+            spell_id,
+            success,
+            reason,
+            arg,
+            &mut sc.commands,
+            &l.self_guid,
+            &l.index,
+            &mut l.cast_errors,
+            &sc.casting,
+            &mut sc.cast_events,
+            &mut l.cast_bar,
+            &mut l.pending,
+            &mut l.queued_melee,
+            &mut l.cooldowns,
+            &mut l.auto_repeat,
+            l.spells.as_deref(),
+            &l.net,
+            &mut l.chain_casts,
+            l.play_seq.next(),
+        );
+    }
+}
+
+fn on_spell_start(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::SpellStart {
+        caster,
+        spell_id,
+        cast_flags,
+        cast_time_ms,
+        target,
+        ammo_display_id,
+    } = ev
+    {
+        spell_start(
+            caster,
+            spell_id,
+            cast_flags,
+            cast_time_ms,
+            target,
+            ammo_display_id,
+            &mut sc.commands,
+            &l.index,
+            &mut sc.cast_events,
+            &l.self_guid,
+            &mut l.cast_bar,
+            &mut l.pending,
+            l.spells.as_deref(),
+            l.play_seq.next(),
+        );
+    }
+}
+
+fn on_spell_go(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::SpellGo {
+        caster,
+        spell_id,
+        cast_flags,
+        hits,
+        misses,
+        target,
+        go_target,
+        dest,
+        ammo_display_id,
+        item_caster,
+    } = ev
+    {
+        let engaged = !sc.engaged_self.is_empty();
+        spell_go(
+            caster,
+            spell_id,
+            cast_flags,
+            hits,
+            misses,
+            target,
+            go_target,
+            dest,
+            ammo_display_id,
+            item_caster,
+            &mut sc.commands,
+            &l.index,
+            &sc.casting,
+            &mut sc.cast_events,
+            &mut sc.go_targets,
+            &l.self_guid,
+            &sc.stores,
+            &mut l.cast_bar,
+            &mut l.pending,
+            &mut l.queued_melee,
+            &mut sc.text,
+            *sc.damage_text,
+            &mut sc.go_lid,
+            &mut sc.loot_latch,
+            (
+                &mut l.cooldowns,
+                l.spells.as_deref(),
+                &mut sc.items,
+                &l.net,
+                &mut l.pet_bar,
+            ),
+            (&mut l.auto_repeat, &mut sc.sheaths, engaged),
+            l.play_seq.next(),
+        );
+    }
+}
+
+fn on_spell_chain_targets(In(ev): In<SessionEvent>, l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::SpellChainTargets {
+        caster,
+        spell_id,
+        targets,
+    } = ev
+    {
+        spell_chain_targets(caster, spell_id, targets, &mut sc.commands, &l.index);
+    }
+}
+
+fn on_spell_failed_other(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::SpellFailedOther { caster, spell_id } = ev {
+        spell_failed_other(
+            caster,
+            spell_id,
+            &mut sc.commands,
+            &l.index,
+            &sc.casting,
+            &mut sc.cast_events,
+            &l.self_guid,
+            &mut l.cast_bar,
+            &mut l.pending,
+            &mut l.queued_melee,
+            l.play_seq.next(),
+        );
+    }
+}
+
+fn on_spell_delayed(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    if let SessionEvent::SpellDelayed { caster, delay_ms } = ev {
+        spell_delayed(
+            caster,
+            delay_ms,
+            &l.self_guid,
+            &mut l.cast_bar,
+            &mut l.pending,
+        );
+    }
+}
+
+fn on_cancel_auto_repeat(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::CancelAutoRepeat = ev {
+        cancel_auto_repeat(
+            &mut l.auto_repeat,
+            &l.self_guid,
+            &l.index,
+            &mut sc.commands,
+            &l.net,
+        );
+    }
+}
+
+/// The four cooldown packets, each resolved once through [`addressed_store`] — ours or the
+/// pet's, by the caster guid.
+fn on_cooldown_packet(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    let Lifecycle {
+        self_guid,
+        spells,
+        cooldowns,
+        pet_bar,
+        ..
+    } = &mut l;
+    match ev {
+        SessionEvent::SpellCooldowns {
+            caster,
+            cooldowns: pairs,
+        } => {
+            if let Some(store) = addressed_store(caster, self_guid, cooldowns, pet_bar) {
+                spell_cooldowns(caster, pairs, spells.as_deref(), store);
+            }
+        }
+        SessionEvent::CooldownEvent { spell_id, caster } => {
+            if let Some(store) = addressed_store(caster, self_guid, cooldowns, pet_bar) {
+                cooldown_event(spell_id, caster, store);
+            }
+        }
+        SessionEvent::ClearCooldown { spell_id, caster } => {
+            if let Some(store) = addressed_store(caster, self_guid, cooldowns, pet_bar) {
+                clear_cooldown(spell_id, caster, store);
+            }
+        }
+        SessionEvent::CooldownCheat { caster } => {
+            if let Some(store) = addressed_store(caster, self_guid, cooldowns, pet_bar) {
+                cooldown_cheat(caster, store);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn on_item_cooldown(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) {
+    if let SessionEvent::ItemCooldown {
+        item_guid,
+        spell_id,
+    } = ev
+    {
+        item_cooldown(item_guid, spell_id, &sc.items, &mut l.cooldowns);
+    }
+}
+
+fn on_channel(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    match ev {
+        SessionEvent::ChannelStart {
+            spell_id,
+            duration_ms,
+        } => channel_start(spell_id, duration_ms, &mut l.channel, &mut l.cast_bar),
+        SessionEvent::ChannelUpdate { remaining_ms } => {
+            channel_update(remaining_ms, &mut l.channel, &mut l.cast_bar)
+        }
+        _ => {}
+    }
+}
+
+fn on_aura_duration(In(ev): In<SessionEvent>, mut l: Lifecycle, real_clock: Res<Time<Real>>) {
+    if let SessionEvent::AuraDuration { slot, remaining_ms } = ev {
+        aura_duration(
+            slot,
+            remaining_ms,
+            &mut l.aura_durations,
+            real_clock.elapsed_secs_f64(),
+        );
+    }
+}
+
+fn on_spell_modifier(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    if let SessionEvent::SpellModifier {
+        flat,
+        mask_bit,
+        op,
+        value,
+    } = ev
+    {
+        set_spell_modifier(flat, mask_bit, op, value, &mut l.spell_mods);
+    }
+}
+
+/// Which unit's cooldown store a wire cooldown packet addresses (decision 0982).
+///
+/// All four of them (`SMSG_SPELL_COOLDOWN`, `_COOLDOWN_EVENT`, `_CLEAR_COOLDOWN`,
+/// `_COOLDOWN_CHEAT`) carry a caster guid, and until the pet bar existed all four answered it the
+/// same way: "is it us? then apply, else drop" — four copies of a self-only assumption, each
+/// inside its own arm. Since the server sends a pet's cooldowns on the pet's guid, that
+/// assumption silently discarded every one of them. Resolving the guid ONCE, here, is what let the
+/// pet bar sweep for real without a second copy of any arm; it also matches the reference, whose
+/// `SMSG_COOLDOWN_CHEAT` handler wipes "the self/pet cooldown list" off exactly this test.
+///
+/// `None` = a guid we hold no store for (another player's pet, a stale packet): dropped, as the
+/// client drops an unknown guid.
+fn addressed_store<'a>(
+    caster: u64,
+    self_guid: &SelfGuid,
+    player: &'a mut crate::cooldowns::Cooldowns,
+    pet: &'a mut crate::ui_pet::PetBar,
+) -> Option<&'a mut crate::cooldowns::Cooldowns> {
+    if self_guid.0 == Some(caster) {
+        Some(player)
+    } else if pet.has_bar() && pet.spells.pet_guid == caster {
+        Some(&mut pet.cooldowns)
+    } else {
+        None
+    }
+}
 
 /// The player's spell book (`SMSG_INITIAL_SPELLS`, once at login) → the action store the UI feed
 /// reads (`crate::ui_action`), plus the active-cooldown list → the cooldown store (the wire
 /// carries *remaining* ms — [`Cooldowns::seed_initial`]'s law).
-pub(super) fn spell_book(
+fn spell_book(
     spell_ids: Vec<u32>,
     initial_cooldowns: Vec<SpellCooldown>,
     actions: &mut PlayerActions,
@@ -42,7 +453,7 @@ pub(super) fn spell_book(
 
 /// The player's saved action bar (`SMSG_ACTION_BUTTONS`, once at login, and again on server-side
 /// edits) → the action store the UI feed reads.
-pub(super) fn action_buttons(buttons: Vec<ActionButton>, actions: &mut PlayerActions) {
+fn action_buttons(buttons: Vec<ActionButton>, actions: &mut PlayerActions) {
     debug!("net: action bar — {} occupied slots", buttons.len());
     actions.buttons = buttons.into_iter().map(|b| (b.slot, b)).collect();
     actions.dirty = true;
@@ -56,7 +467,7 @@ pub(super) fn action_buttons(buttons: Vec<ActionButton>, actions: &mut PlayerAct
 /// It also **announces the learn in chat**, which is the reference's own tail on this packet and
 /// not a nicety: `0x5e61c0` -> `AddSpell(id, slot, 1, 1)` -> the registrar `0x4b25b0` with its
 /// announce flag set (decision 2243, [`announce_learn`]).
-pub(super) fn learned_spell(
+fn learned_spell(
     spell_id: u32,
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
@@ -120,7 +531,7 @@ fn announce_learn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKe
 /// [`crate::ui_action::LearnedAbilities`] re-derives off the same change (the reference's own
 /// unlearn write site, `0x4b2c50`). What happens to a **bar button** still pointing at the removed
 /// spell is a separate law this arm deliberately does not invent — see 1584's scope note.
-pub(super) fn removed_spell(
+fn removed_spell(
     spell_id: u32,
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
@@ -159,7 +570,7 @@ fn announce_unlearn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiError
 /// *here* as well would be a second, weaker copy of that law — weaker because this packet doesn't
 /// arrive at all when the rank was gained while the character was loading (vmangos suppresses it
 /// with `IsInWorld()`), which is exactly the case that shipped a dead rank-1 button.
-pub(super) fn superceded_spell(
+fn superceded_spell(
     old_spell_id: u32,
     new_spell_id: u32,
     actions: &mut PlayerActions,
@@ -181,7 +592,7 @@ pub(super) fn superceded_spell(
 }
 
 /// The server's verdict on our cast (`SMSG_CAST_RESULT`).
-pub(super) fn cast_result(
+fn cast_result(
     spell_id: u32,
     success: bool,
     reason: Option<u8>,
@@ -335,7 +746,7 @@ pub(super) fn cast_result(
 
 /// A unit began a non-triggered cast (`SMSG_SPELL_START`), instants included (`cast_time_ms == 0`)
 /// — the precast trigger the phase-2 casting animation loop builds on (decision 0099 phase 1).
-pub(super) fn spell_start(
+fn spell_start(
     caster: u64,
     spell_id: u32,
     cast_flags: u16,
@@ -445,7 +856,7 @@ const GO_TYPE_CHEST: i32 = 3;
 /// nothing about missile travel rides this packet; the client (and we) rebuild the flight
 /// visually from the same Speed column (decision 0099 phase 4: the target lists go out as
 /// [`SpellGoTargets`] for the router's instant-impact/missile branch).
-pub(super) fn spell_go(
+fn spell_go(
     caster: u64,
     spell_id: u32,
     cast_flags: u16,
@@ -718,15 +1129,16 @@ pub(super) fn spell_go(
     // is spell-GOLD. The three CVar gates come with it — they are read inside `0x607140`, which
     // every word path calls, so `CombatDamage 0` silences these words too.
     if !misses.is_empty() && display.is_none_or(|d| d.speed == 0.0) {
-        if let Some(color) = super::combat_log::classify_source(caster, index, self_guid, stores)
-            .and_then(|source| {
-                crate::combat_text::damage_color(
-                    text_gates,
-                    source,
-                    crate::combat_text::melee_styled(display),
-                )
-            })
-        {
+        if let Some(color) = crate::combat_log::text::classify_source(
+            caster, index, self_guid, stores,
+        )
+        .and_then(|source| {
+            crate::combat_text::damage_color(
+                text_gates,
+                source,
+                crate::combat_text::melee_styled(display),
+            )
+        }) {
             for &(guid, code) in &misses {
                 let anchor_guid = if code == 11 { caster } else { guid };
                 if self_guid.0 == Some(anchor_guid) {
@@ -799,7 +1211,7 @@ pub(super) fn spell_go(
 
 /// An observed cast was interrupted/cancelled (`SMSG_SPELL_FAILED_OTHER`) — ends the caster's
 /// `Casting` state seam the same as [`spell_go`].
-pub(super) fn spell_failed_other(
+fn spell_failed_other(
     caster: u64,
     spell_id: u32,
     commands: &mut Commands,
@@ -851,7 +1263,7 @@ pub(super) fn spell_failed_other(
 /// `startTime`/`maxValue` shift — the spark jumps back and the bar keeps running), so a hit no
 /// longer lets the bar finish early while the real cast runs on (decision 0256). Self-only on the
 /// wire, but the caster guid is on the packet — gate on it like every other own-cast edge.
-pub(super) fn spell_delayed(
+fn spell_delayed(
     caster: u64,
     delay_ms: u32,
     self_guid: &SelfGuid,
@@ -891,7 +1303,7 @@ pub(super) fn spell_delayed(
 /// `InterruptSpell(CURRENT_AUTOREPEAT_SPELL)` → `SendAutoRepeatCancel`). Movement does NOT
 /// (`_UpdateAutoRepeatSpell` interrupts only Category 351, the wand, when moving) — Auto Shot
 /// stays armed across a run, exactly like vanilla.
-pub(super) fn cancel_auto_repeat(
+fn cancel_auto_repeat(
     auto_repeat: &mut AutoRepeatActive,
     self_guid: &SelfGuid,
     index: &GuidIndex,
@@ -957,7 +1369,7 @@ fn pet_go_cooldown(
 /// own list). **Which unit's store** it lands in is the caller's decision
 /// ([`super::addressed_store`]): the four cooldown packets all carry a caster guid, and resolving
 /// it in one place is what let the pet bar have real cooldowns without a second copy of this arm.
-pub(super) fn spell_cooldowns(
+fn spell_cooldowns(
     caster: u64,
     pairs: Vec<(u32, u32)>,
     spells: Option<&Spells>,
@@ -976,7 +1388,7 @@ pub(super) fn spell_cooldowns(
 
 /// `SMSG_ITEM_COOLDOWN` (`0x6e95d0`) — the fixed 30 s use cooldown, keyed on the item instance's
 /// template entry (the client resolves the guid to its item record the same way).
-pub(super) fn item_cooldown(
+fn item_cooldown(
     item_guid: u64,
     spell_id: u32,
     items: &crate::items::Items,
@@ -990,13 +1402,13 @@ pub(super) fn item_cooldown(
 
 /// `SMSG_COOLDOWN_EVENT` (`0x6e9670` → `0x6e3050(force=0)`) — start an on-hold cooldown's parked
 /// timers now (Stealth ends, Feign Death drops). Store chosen by [`super::addressed_store`].
-pub(super) fn cooldown_event(spell_id: u32, caster: u64, cooldowns: &mut Cooldowns) {
+fn cooldown_event(spell_id: u32, caster: u64, cooldowns: &mut Cooldowns) {
     debug!("net: cooldown event — spell {spell_id} on {caster:#x}");
     cooldowns.cooldown_event(spell_id, Instant::now());
 }
 
 /// `SMSG_CLEAR_COOLDOWN` (`0x6e9670` → `0x6e3050(force=1)`) — remove the spell's record outright.
-pub(super) fn clear_cooldown(spell_id: u32, caster: u64, cooldowns: &mut Cooldowns) {
+fn clear_cooldown(spell_id: u32, caster: u64, cooldowns: &mut Cooldowns) {
     debug!("net: clear cooldown — spell {spell_id} on {caster:#x}");
     cooldowns.clear_spell(spell_id);
 }
@@ -1004,14 +1416,14 @@ pub(super) fn clear_cooldown(spell_id: u32, caster: u64, cooldowns: &mut Cooldow
 /// `SMSG_COOLDOWN_CHEAT` (`0x6e9730` → `0x6e9700`) — the GM reset wipes the whole list. The
 /// reference's own handler wipes "the self/pet cooldown list" on a guid match, which is exactly
 /// what routing through [`super::addressed_store`] now reproduces.
-pub(super) fn cooldown_cheat(caster: u64, cooldowns: &mut Cooldowns) {
+fn cooldown_cheat(caster: u64, cooldowns: &mut Cooldowns) {
     debug!("net: cooldown cheat (wipe) for {caster:#x}");
     cooldowns.wipe();
 }
 
 /// `MSG_CHANNEL_START` — self-only on the wire (no guid), so it goes straight to the cast bar; the
 /// channel *animation* state rides the unit-field pair instead (decision 0137).
-pub(super) fn channel_start(
+fn channel_start(
     spell_id: u32,
     duration_ms: u32,
     channel: &mut ActiveChannel,
@@ -1025,11 +1437,7 @@ pub(super) fn channel_start(
 }
 
 /// `MSG_CHANNEL_UPDATE` — the running channel's remaining time (`0` is its stop edge).
-pub(super) fn channel_update(
-    remaining_ms: u32,
-    channel: &mut ActiveChannel,
-    feed: &mut CastBarFeed,
-) {
+fn channel_update(remaining_ms: u32, channel: &mut ActiveChannel, feed: &mut CastBarFeed) {
     channel.update(remaining_ms, Instant::now());
     feed.0.push(CastBarEdge::ChannelUpdate { remaining_ms });
 }
@@ -1037,12 +1445,7 @@ pub(super) fn channel_update(
 /// `SMSG_UPDATE_AURA_DURATION` — one of our own auras' remaining time (decisions 0255/0257), keyed
 /// by raw slot and stamped with the receive time. The `ui_aura` feed joins it to the aura in that
 /// slot by arrival order; it arrives *before* the descriptor delta that names the slot.
-pub(super) fn aura_duration(
-    slot: u8,
-    remaining_ms: u32,
-    durations: &mut AuraDurations,
-    now_secs: f64,
-) {
+fn aura_duration(slot: u8, remaining_ms: u32, durations: &mut AuraDurations, now_secs: f64) {
     durations.set(slot, remaining_ms, now_secs);
 }
 
@@ -1053,7 +1456,7 @@ pub(super) fn aura_duration(
 ///
 /// The out-of-range refusal lives on the store ([`crate::spell_mods::SpellModifiers::set`], which
 /// documents why it is ours and not the reference's).
-pub(super) fn set_spell_modifier(
+fn set_spell_modifier(
     flat: bool,
     mask_bit: u8,
     op: u8,
@@ -1097,7 +1500,7 @@ fn fill_chain_hops(
 /// its GO handler), which is how a non-channeled chain spell draws at all. vmangos sends this one
 /// only for channelled spells (`Spell::SendChannelStart`), so on this server it is the drains'
 /// and Mind Flay's producer, and the GO leg is every other chain spell's.
-pub(super) fn spell_chain_targets(
+fn spell_chain_targets(
     caster: u64,
     spell_id: u32,
     targets: Vec<u64>,

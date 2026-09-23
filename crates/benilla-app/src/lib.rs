@@ -57,6 +57,7 @@ mod char_select;
 mod chat_bubble;
 mod chr_classes;
 mod cinematic;
+mod combat_log;
 mod combat_text;
 mod console;
 mod cooldowns;
@@ -122,6 +123,7 @@ mod smart_rect;
 mod sound;
 /// The two talent spell-modifier tables (`SMSG_SET_FLAT_/PCT_SPELL_MODIFIER`) and the read that
 /// puts them on a number.
+mod spell;
 mod spell_mods;
 /// The melee swing refusal's latch + 4 s repeat (`SMSG_ATTACKSWING_*`).
 mod swing_refusal;

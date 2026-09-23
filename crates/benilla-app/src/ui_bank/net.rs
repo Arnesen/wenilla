@@ -37,7 +37,7 @@ fn on_buy_slot_result(In(ev): In<SessionEvent>, mut errors: ResMut<BankErrors>) 
 }
 
 /// The bank window dies with the socket (decision 0604) — a reconnect re-opens via the banker.
-/// A listener on the session end ([`crate::net::handlers::BROADCAST`]).
+/// A listener on the session end (a second handler on the kind, after the bridge's own teardown).
 fn on_session_end(In(_): In<SessionEvent>, mut bank: ResMut<BankOpen>) {
     bank.clear_session();
 }

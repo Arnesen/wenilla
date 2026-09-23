@@ -69,7 +69,7 @@ fn on_gossip_complete(
 }
 
 /// An open gossip menu dies with the socket. A listener on the session end
-/// ([`crate::net::handlers::BROADCAST`]).
+/// (a second handler on the kind, after the bridge's own teardown).
 fn on_session_end(In(_): In<SessionEvent>, mut gossip: ResMut<GossipState>) {
     gossip.clear_session();
 }

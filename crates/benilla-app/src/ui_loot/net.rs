@@ -112,7 +112,7 @@ fn on_item_push_result(
 }
 
 /// An open loot window and the kneel latch die with the socket (unconditionally). A listener on
-/// the session end ([`crate::net::handlers::BROADCAST`]).
+/// the session end (a second handler on the kind, after the bridge's own teardown).
 fn on_session_end(
     In(_): In<SessionEvent>,
     mut loot: ResMut<LootState>,

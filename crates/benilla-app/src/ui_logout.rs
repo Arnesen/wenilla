@@ -261,6 +261,7 @@ pub struct UiLogoutPlugin;
 
 impl Plugin for UiLogoutPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<LogoutState>().add_systems(
             Update,
             (
@@ -269,6 +270,33 @@ impl Plugin for UiLogoutPlugin {
                 exit_on_logout_complete.after(UiInput),
             ),
         );
+    }
+}
+
+/// The logout arc's two narration packets (decision 0674; in the net handler table since 2326)
+/// — this module owns the decision table; the handler is only the hand-off.
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::LogoutState;
+    use crate::net::NetHandlerApp;
+
+    /// Register the pair — called from [`super::UiLogoutPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::LogoutResponse, on_narration)
+            .net_handler(K::LogoutCancelled, on_narration);
+    }
+
+    fn on_narration(In(ev): In<SessionEvent>, mut logout: ResMut<LogoutState>) {
+        match ev {
+            SessionEvent::LogoutResponse { reason, instant } => {
+                logout.apply_response(reason, instant)
+            }
+            SessionEvent::LogoutCancelled => logout.apply_cancelled(),
+            _ => {}
+        }
     }
 }
 

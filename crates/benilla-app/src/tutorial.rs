@@ -570,6 +570,7 @@ pub(crate) struct TutorialPlugin;
 
 impl Plugin for TutorialPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<Tutorials>()
             .init_resource::<WorldEnterCascade>()
             .add_message::<TutorialEvent>()
@@ -605,6 +606,26 @@ impl Plugin for TutorialPlugin {
                 ),
             )
             .add_systems(OnExit(ClientState::InWorld), on_world_leave);
+    }
+}
+
+/// The tutorial flags' packet handler (in the net handler table since 2326).
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::Tutorials;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handler — called from [`super::TutorialPlugin`].
+    pub(super) fn register(app: &mut App) {
+        app.net_handler(SessionEventKind::TutorialFlags, on_flags);
+    }
+
+    fn on_flags(In(ev): In<SessionEvent>, mut tutorials: ResMut<Tutorials>) {
+        if let SessionEvent::TutorialFlags(bytes) = ev {
+            tutorials.apply_flags(&bytes);
+        }
     }
 }
 

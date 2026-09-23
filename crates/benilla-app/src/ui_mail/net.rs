@@ -83,7 +83,7 @@ fn on_next_mail_time(In(ev): In<SessionEvent>, mut pending: ResMut<MailPending>)
 /// An open mailbox dies with the socket, and the arrival countdown is login-scoped (decision
 /// 0544 P3): a fresh login re-queries `MSG_QUERY_NEXT_MAIL_TIME` at world-enter, so nothing
 /// carries over across a reconnect. A listener on the session end, which the drain's dispatch
-/// match still owns ([`crate::net::handlers::BROADCAST`]).
+/// match still owns (a second handler on the kind, after the bridge's own teardown).
 fn on_session_end(
     In(_): In<SessionEvent>,
     mut mail: ResMut<MailOpen>,
@@ -262,8 +262,8 @@ mod tests {
     use super::*;
 
     /// End to end through the real registration: the wire's "mail is waiting" reaches the
-    /// countdown, a mailbox click survives until the session ends, and the session end — a
-    /// broadcast the match still owns — resets both.
+    /// countdown, a mailbox click survives until the session ends, and the session end — the
+    /// bridge's own teardown beside this listener — resets both.
     #[test]
     fn the_table_routes_the_arrival_and_the_session_end_to_the_mailbox() {
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -279,20 +279,16 @@ mod tests {
         crate::net::handlers::dispatch(
             app.world_mut(),
             vec![SessionEvent::NextMailTime { seconds: 0.0 }],
-            |_, _| panic!("a claimed kind never reaches the match"),
         );
         assert!(app.world().resource::<MailPending>().has_new_mail());
 
-        let mut through_the_match = Vec::new();
         crate::net::handlers::dispatch(
             app.world_mut(),
             vec![SessionEvent::Disconnected {
                 reason: "socket".into(),
                 end: benilla_protocol::SessionEnd::Lost,
             }],
-            |_, unclaimed| through_the_match.extend(unclaimed.iter().map(SessionEventKind::from)),
         );
-        assert_eq!(through_the_match, vec![SessionEventKind::Disconnected]);
         assert!(!app.world().resource::<MailPending>().has_new_mail());
         assert_eq!(app.world().resource::<MailOpen>().mailbox, None);
     }

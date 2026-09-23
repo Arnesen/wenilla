@@ -102,7 +102,7 @@ fn on_removed_notification(In(ev): In<SessionEvent>, mut auction: ResMut<Auction
 /// An open auction house dies with the socket (decision 1511): every auction command
 /// re-validates the auctioneer server-side, so a session that survived a reconnect would be a
 /// window whose every button silently failed. A listener on the session end, which the drain's
-/// dispatch match still owns ([`crate::net::handlers::BROADCAST`]).
+/// dispatch match still owns (a second handler on the kind, after the bridge's own teardown).
 fn on_session_end(In(_): In<SessionEvent>, mut auction: ResMut<AuctionOpen>) {
     auction.clear_session();
 }
@@ -330,22 +330,12 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .init_resource::<AuctionOpen>();
         register(&mut app);
-        let through_the_match = |_: &mut World, unclaimed: Vec<SessionEvent>| {
-            let kinds: Vec<SessionEventKind> =
-                unclaimed.iter().map(SessionEventKind::from).collect();
-            assert_eq!(
-                kinds,
-                vec![SessionEventKind::Disconnected],
-                "the broadcast reaches the match too"
-            );
-        };
         crate::net::handlers::dispatch(
             app.world_mut(),
             vec![SessionEvent::AuctionHello {
                 auctioneer: 0x10,
                 house_id: 1,
             }],
-            |_, unclaimed| assert!(unclaimed.is_empty()),
         );
         assert_eq!(app.world().resource::<AuctionOpen>().auctioneer, Some(0x10));
         crate::net::handlers::dispatch(
@@ -354,7 +344,6 @@ mod tests {
                 reason: "socket".into(),
                 end: benilla_protocol::SessionEnd::Lost,
             }],
-            through_the_match,
         );
         assert_eq!(app.world().resource::<AuctionOpen>().auctioneer, None);
     }

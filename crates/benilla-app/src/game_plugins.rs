@@ -130,6 +130,9 @@ impl PluginGroup for GamePlugins {
             // Streamed world entities: cube assets + display catalogs at startup, sync each frame.
             .add(EntitiesPlugin)
             // Creature animation: pick Stand/Walk/Run from each creature's movement state each frame (Milestone C).
+            // The combat log — every combat packet's chat line and floating number, one handler each
+            // (decision 2323); ahead of the animation layer, whose two shared kinds run second.
+            .add(crate::combat_log::CombatLogPlugin)
             .add(CreatureAnimPlugin)
             // The unit blob shadow: the dark ground oval under every unit, sized from the playing
             // animation's box (the byte-verified law — wow-re unit-blob-shadow RE), on the same
@@ -319,6 +322,8 @@ impl PluginGroup for GamePlugins {
             // feed, whose shape it shares (intents in, a booth look out).
             .add(crate::ui_dressup::DressUpUiPlugin)
             .add(UiActionPlugin)
+            // The spell — the cast lifecycle's packet handlers (decision 2324; 2265 §A7's owner).
+            .add(crate::spell::SpellPlugin)
             // The aura feed (decisions 0255/0257): the player's insertion-ordered buff/debuff cache + the
             // self-only durations, pushed as the data the `UnitAura` bindings read; fires UNIT_AURA and
             // drains the right-click cancels. After UiActionPlugin (shares its `Spells` catalog).
@@ -1381,7 +1386,7 @@ pub(crate) mod schedule_tests {
          "`seen_generation` is a `VmMemo`: a new VM reads `None`, rebuilds and re-fires UPDATE_BINDINGS"),
         ("capture/probe_bg.rs", "bg_probe", Because::SelfHealing,
          "the battleground probe: dev-only (`WOW_PROBE_BG`, `cfg(feature = \"dev\")`) so it is not in a player build at all, and its `mem::take` is of its OWN pending-events string, not a queue anything else fills. Its one real VM dependency is the Lua event tap, which self-heals: `EVENT_DRAIN` returns a `<tap-gone>` sentinel when the tap's globals are missing — the case this window causes, since a tap installed in the boot VM is discarded when `mint_entry_vm` builds the interface — and the probe re-installs on the next frame"),
-        ("death.rs", "feed_death", Because::MemoLatched,
+        ("death/mod.rs", "feed_death", Because::MemoLatched,
          "`feed.vm: VmMemo<DeathAnnounced>`: a fresh memo makes the first snapshot an edge and re-announces a held offer, confirm and corpse range"),
         ("screenshot.rs", "ask_for_captures", Because::FilledByVm,
          "`pending` holds only the VM's own `Screenshot()` asks, and the take spawns a capture, publishing nothing"),

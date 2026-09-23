@@ -847,6 +847,7 @@ pub(crate) use impact::{DefenseAnim, PendingImpacts, SwingFlush, SwingImpact, Sw
 /// one-shots ([`EmoteAnim`]) and kit sounds ([`spell_visual::SpellKitSound`]).
 mod blood;
 mod env_damage;
+pub(crate) mod net;
 pub(crate) mod spell_visual;
 use blood::{blood_spurts, load_blood_tables};
 use env_damage::{hard_landing_dust, load_env_damage_table};
@@ -1165,6 +1166,7 @@ pub(crate) struct CreatureAnimPlugin;
 
 impl Plugin for CreatureAnimPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         twist::plugin(app);
         lod::plugin(app);
         breath::register(app);

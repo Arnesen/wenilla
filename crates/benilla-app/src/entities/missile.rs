@@ -436,7 +436,7 @@ fn miss_defense_state(code: u8) -> Option<u32> {
 /// Bevy's 16-`SystemParam` ceiling, and these three are one concern anyway: everything a
 /// projectile emits at the moment it lands — the router's impact/ground event, the victim's
 /// defense clip, and the deferred outcome word. Bundled for the same reason
-/// [`crate::ui_chat::combat::CombatFeedbackCvars`] is, so the call sites read `out.words` rather
+/// the combat log's CVar context ([`crate::combat_log::Ctx`]) is, so the call sites read `out.words` rather
 /// than a positional tuple field.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct ArrivalOut<'w> {

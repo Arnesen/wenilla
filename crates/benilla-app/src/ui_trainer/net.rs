@@ -48,7 +48,7 @@ fn on_buy_failed(In(ev): In<SessionEvent>, mut errors: ResMut<TrainerErrors>) {
 }
 
 /// An open trainer window dies with the socket. A listener on the session end
-/// ([`crate::net::handlers::BROADCAST`]).
+/// (a second handler on the kind, after the bridge's own teardown).
 fn on_session_end(In(_): In<SessionEvent>, mut trainer_open: ResMut<TrainerOpen>) {
     trainer_open.clear_session();
 }

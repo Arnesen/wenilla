@@ -16,17 +16,9 @@
 //! that arrived in one drain would swap. The table keeps the one property 2265 said must survive
 //! any split: one frame, packet order, before anything else runs.
 //!
-//! **The migration.** The dispatch `match` in `apply.rs` still owns every kind no subsystem has
-//! claimed, and one drain still runs in **wire order across the seam** (decision 2306): the frame's
-//! events are walked once, a run of consecutive unclaimed events goes through the match as one
-//! batch, and a claimed event runs its handlers in place — after the run before it has landed,
-//! before the run after it starts. A run boundary is a command flush, which is safe because every
-//! intra-drain accumulator the match keeps (`pending`, `StagedModes`, `SpeedStage`) is *staged,
-//! else live*: what a flush lands, the next run reads off the component. A kind is owned by
-//! exactly one of the two, checked on the built app by `every_session_event_kind_has_one_owner`;
-//! the one exception is [`BROADCAST`], a session-end the match still handles and peeled windows
-//! also listen to, which reaches both — the match first. When the last family leaves the match,
-//! the match, the runs and the broadcast list go with it.
+//! **The table is the whole dispatch** (since 2327). Every kind has at least one handler, read
+//! off the built client by `every_session_event_kind_has_one_owner`; the drain's own match, the
+//! runs it took across the seam and the broadcast list (2305, 2306, 2326) are gone.
 
 use std::collections::HashMap;
 
@@ -43,17 +35,7 @@ pub(crate) struct NetHandlers {
     by_kind: HashMap<SessionEventKind, Vec<Handler>>,
 }
 
-/// The kinds the dispatch match still owns **and** peeled subsystems listen to — a session end,
-/// which every window that dies with the socket answers for itself. It closes the match's run and
-/// then runs its listeners, in place. Empty once the session family itself is peeled.
-pub(crate) const BROADCAST: &[SessionEventKind] = &[SessionEventKind::Disconnected];
-
 impl NetHandlers {
-    /// Is there at least one handler for this kind?
-    pub(crate) fn handles(&self, kind: SessionEventKind) -> bool {
-        self.by_kind.contains_key(&kind)
-    }
-
     /// Every kind with a handler, with the handlers' names in registration order — the owner
     /// test's view of the table.
     #[cfg(test)]
@@ -136,33 +118,12 @@ impl NetHandlerApp for App {
     }
 }
 
-/// One drain's dispatch, **in wire order**: a run of consecutive events the table does not own
-/// goes through `unclaimed` — the dispatch match — as one batch; an owned event first lands the
-/// run before it, then runs its handlers. A [`BROADCAST`] kind is the last event of the match's
-/// run *and* a table event. `unclaimed` is never called with nothing.
-pub(crate) fn dispatch(
-    world: &mut World,
-    events: Vec<SessionEvent>,
-    mut unclaimed: impl FnMut(&mut World, Vec<SessionEvent>),
-) {
+/// One drain's dispatch, **in wire order**: every event runs its handlers in place, each
+/// handler's commands applied before the next event's.
+pub(crate) fn dispatch(world: &mut World, events: Vec<SessionEvent>) {
     let handlers = world.remove_resource::<NetHandlers>().unwrap_or_default();
-    let mut run = Vec::new();
     for ev in events {
-        let kind = SessionEventKind::from(&ev);
-        if !handlers.handles(kind) {
-            run.push(ev);
-            continue;
-        }
-        if BROADCAST.contains(&kind) {
-            run.push(ev.clone());
-        }
-        if !run.is_empty() {
-            unclaimed(world, std::mem::take(&mut run));
-        }
         handlers.run(world, ev);
-    }
-    if !run.is_empty() {
-        unclaimed(world, run);
     }
     world.insert_resource(handlers);
 }
@@ -191,13 +152,6 @@ mod tests {
         log.0.push("logged_out_too".into());
     }
 
-    fn on_disconnected(In(ev): In<SessionEvent>, mut log: ResMut<Log>) {
-        let SessionEvent::Disconnected { reason, .. } = ev else {
-            panic!("the table routes by kind");
-        };
-        log.0.push(format!("disconnected:{reason}"));
-    }
-
     fn app() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).init_resource::<Log>();
@@ -212,18 +166,12 @@ mod tests {
     }
 
     fn run(app: &mut App, events: Vec<SessionEvent>) -> Vec<String> {
-        dispatch(app.world_mut(), events, |world, unclaimed| {
-            let mut log = world.resource_mut::<Log>();
-            for ev in unclaimed {
-                log.0
-                    .push(format!("match:{:?}", SessionEventKind::from(&ev)));
-            }
-        });
+        dispatch(app.world_mut(), events);
         std::mem::take(&mut app.world_mut().resource_mut::<Log>().0)
     }
 
     #[test]
-    fn the_match_and_the_table_interleave_in_wire_order() {
+    fn events_run_in_wire_order_and_an_unhandled_kind_is_skipped() {
         let mut app = app();
         app.net_handler(SessionEventKind::LoginQueued, on_queued)
             .net_handler(SessionEventKind::LoggedOut, on_logged_out);
@@ -235,51 +183,12 @@ mod tests {
             vec![
                 queued(1),
                 stage(),
-                stage(),
                 SessionEvent::LoggedOut,
                 queued(2),
                 stage(),
             ],
         );
-        assert_eq!(
-            log,
-            vec![
-                "queued:1",
-                "match:LoginStage",
-                "match:LoginStage",
-                "logged_out",
-                "queued:2",
-                "match:LoginStage"
-            ]
-        );
-    }
-
-    /// Consecutive unclaimed events are one batch — one run of the match, one command flush —
-    /// and an empty frame never runs the match at all.
-    #[test]
-    fn a_run_of_unclaimed_events_is_one_batch_and_nothing_is_no_batch() {
-        let mut app = app();
-        app.net_handler(SessionEventKind::LoggedOut, on_logged_out);
-        let stage = || SessionEvent::LoginStage {
-            stage: benilla_protocol::LoginStage::Connecting,
-        };
-        let mut batches = Vec::new();
-        dispatch(
-            app.world_mut(),
-            vec![stage(), stage(), SessionEvent::LoggedOut, stage()],
-            |_, batch| batches.push(batch.len()),
-        );
-        assert_eq!(batches, vec![2, 1]);
-        batches.clear();
-        dispatch(app.world_mut(), vec![], |_, batch| {
-            batches.push(batch.len())
-        });
-        dispatch(
-            app.world_mut(),
-            vec![SessionEvent::LoggedOut],
-            |_, batch| batches.push(batch.len()),
-        );
-        assert!(batches.is_empty());
+        assert_eq!(log, vec!["queued:1", "logged_out", "queued:2"]);
     }
 
     #[test]
@@ -295,86 +204,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_broadcast_kind_reaches_the_match_and_the_table() {
-        let mut app = app();
-        app.net_handler(SessionEventKind::Disconnected, on_disconnected);
-        let log = run(
-            &mut app,
-            vec![SessionEvent::Disconnected {
-                reason: "socket".into(),
-                end: benilla_protocol::SessionEnd::Lost,
-            }],
-        );
-        assert_eq!(log, vec!["match:Disconnected", "disconnected:socket"]);
-    }
-
-    #[test]
-    fn with_no_table_at_all_everything_goes_to_the_match() {
-        let mut app = app();
-        let log = run(&mut app, vec![SessionEvent::LoggedOut, queued(0)]);
-        assert_eq!(log, vec!["match:LoggedOut", "match:LoginQueued"]);
-        assert!(app.world().resource::<NetHandlers>().census().is_empty());
-    }
-
-    /// **Every kind has exactly one owner** — the dispatch match in `net/apply.rs` or the table,
-    /// read off the built client — and the [`BROADCAST`] rows are the only kinds in both. A kind
-    /// neither owns is a packet the client decodes and then drops on the floor.
+    /// **Every kind has a handler**, read off the built client. A kind with none is a packet the
+    /// client decodes and then drops on the floor — the reference discards an unregistered
+    /// opcode in silence; this says so at test time.
     #[test]
     fn every_session_event_kind_has_one_owner() {
-        use std::collections::BTreeSet;
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/net/apply.rs"),
-        )
-        .expect("the drain's source");
-        let stripped = regex_lite_strip_comments(&source);
-        let by_name: HashMap<String, SessionEventKind> = SessionEventKind::all()
-            .map(|k| (format!("{k:?}"), k))
-            .collect();
-        let mut in_match: BTreeSet<SessionEventKind> = BTreeSet::new();
-        for token in stripped.split("SessionEvent::").skip(1) {
-            let name: String = token
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if let Some(k) = by_name.get(&name) {
-                in_match.insert(*k);
-            }
-        }
         let mut app = crate::game_plugins::schedule_tests::headless_client();
         let table = app.world_mut().resource::<NetHandlers>().census();
-        let in_table: BTreeSet<SessionEventKind> = table.keys().copied().collect();
-        let mut problems = Vec::new();
-        for kind in SessionEventKind::all() {
-            let m = in_match.contains(&kind);
-            let t = in_table.contains(&kind);
-            let b = BROADCAST.contains(&kind);
-            match (m, t, b) {
-                (true, true, true) | (true, false, false) | (false, true, false) => {}
-                (true, true, false) => problems.push(format!(
-                    "{kind:?}: owned by the match AND handled by {:?} — a peeled kind leaves the match (or is a BROADCAST row)",
-                    table[&kind]
-                )),
-                (true, false, true) => problems.push(format!(
-                    "{kind:?}: a BROADCAST row nobody listens to — drop the row"
-                )),
-                (false, true, true) => problems.push(format!(
-                    "{kind:?}: a BROADCAST row the match no longer owns — drop the row"
-                )),
-                (false, false, _) => problems.push(format!(
-                    "{kind:?}: decoded and dropped — no arm in the match, no handler in the table"
-                )),
-            }
-        }
+        let unowned: Vec<String> = SessionEventKind::all()
+            .filter(|k| !table.contains_key(k))
+            .map(|k| format!("{k:?}: decoded and dropped — no handler in the table"))
+            .collect();
         eprintln!(
-            "session event kinds: {} — {} in the dispatch match, {} in the handler table ({} handlers), {} broadcast",
+            "session event kinds: {} — {} in the handler table ({} handlers)",
             SessionEventKind::all().count(),
-            in_match.len(),
-            in_table.len(),
+            table.len(),
             table.values().map(Vec::len).sum::<usize>(),
-            BROADCAST.len()
         );
-        assert!(problems.is_empty(), "{}", problems.join("\n"));
+        assert!(unowned.is_empty(), "{}", unowned.join("\n"));
     }
 
     /// **Every registered handler can run on the built client.** The dispatch match's parameters

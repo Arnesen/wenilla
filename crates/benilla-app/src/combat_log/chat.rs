@@ -1,5 +1,5 @@
-//! The combat-log **chat** arms (B297) — the second consumer of the packets
-//! [`super::combat_log`] and [`super::combat`] already read for the floating numbers.
+//! The combat log's **chat line** leg (B297) — one of the two consumers of every combat packet;
+//! the floating number is [`super::text`]'s, and [`super`]'s handlers call this leg first.
 //!
 //! The split is the reference's own. `0x629b60` is the display dispatcher: one classification of
 //! both endpoints, then a branch per outcome into a formatter that emits *text*. The floating
@@ -25,11 +25,11 @@ use benilla_protocol::messages::{
 use crate::ui_chat::combat::{self, Family, Fills, UnitClass};
 use crate::ui_chat::ChatLog;
 
-use super::super::{GuidIndex, ObjectStore, Reputations, SelfGuid};
+use crate::net::{GuidIndex, ObjectStore, Reputations, SelfGuid};
 
-/// The classification inputs every line needs, bundled so seven arms do not each grow six
-/// parameters. Assembled once per drain in [`super::apply_net_updates`].
-pub(super) struct ChatCtx<'a> {
+/// The classification inputs every line needs, bundled so seven legs do not each grow six
+/// parameters. Assembled per packet by [`super`]'s handlers from [`super::Log`].
+pub(crate) struct ChatCtx<'a> {
     pub self_guid: &'a SelfGuid,
     pub group: Option<&'a crate::ui_party::GroupState>,
     pub index: &'a GuidIndex,
@@ -1355,7 +1355,7 @@ pub(super) fn environmental_damage_log(
 ///
 /// The wire's `reputationListId` is `Faction.dbc`'s `rep_index`, not a faction id; the name comes
 /// off the row that carries that index.
-pub(super) fn faction_standing(
+pub(crate) fn faction_standing(
     deltas: &[(u32, i32)],
     reputations: &Reputations,
     factions: Option<&crate::target::ring::Factions>,
