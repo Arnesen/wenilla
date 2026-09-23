@@ -1,13 +1,5 @@
-//! The death/corpse-run family's `WorldWriter` sends — release the spirit, find the corpse,
-//! reclaim it, self-resurrect off a soulstone, or take the spirit healer's res; plus the answer
-//! to someone else's res offer.
-//! Bodies in [`crate::messages`]'s `reclaim_corpse`/`spirit_healer_activate`/`resurrect_response`
-//! builders (`repop_request`, `corpse_query` and `self_res` are bodyless). Split out of
-//! `writer/mod.rs` (decision 0636), mirroring [`crate::messages::death`].
-//!
-//! Every one of these is server-gated on a death state the client only *believes* it is in
-//! (ghost/unreleased/delay-elapsed/in-range), so a refusal is normal and is not always a packet —
-//! the confirmations arrive as ordinary descriptor deltas.
+//! The death and corpse-run sends. Each is server-gated on a death state the client only believes
+//! it is in, so refusals are normal and not always a packet; success arrives as descriptor deltas.
 
 use anyhow::Result;
 
@@ -16,32 +8,23 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// Release the spirit (`CMSG_REPOP_REQUEST`, empty body — decision 0308 slice 1): valid only
-    /// while dead and unreleased (the server refuses it alive or already-ghost). The server
-    /// answers with the ghost form (aura 8326 → the ghost flags), the corpse object, unroot,
-    /// water-walk, `SMSG_CORPSE_RECLAIM_DELAY`, and the graveyard teleport.
+    /// Release the spirit while dead and unreleased; the server answers with ghost aura 8326, the
+    /// corpse, `SMSG_CORPSE_RECLAIM_DELAY` and the graveyard teleport.
     pub fn repop_request(&mut self) -> Result<()> {
         self.send(opcode::CMSG_REPOP_REQUEST, &[])
     }
 
-    /// Ask where our corpse is (`MSG_CORPSE_QUERY`, empty request): answered by the same opcode
-    /// (the [`SessionEvent::CorpseQuery`](crate::SessionEvent::CorpseQuery) feed for the map
-    /// markers + the corpse-run range gate).
+    /// Ask where our corpse is (`MSG_CORPSE_QUERY`, empty body), answered on the same opcode.
     pub fn corpse_query(&mut self) -> Result<()> {
         self.send(opcode::MSG_CORPSE_QUERY, &[])
     }
 
-    /// Self-resurrect (`CMSG_SELF_RES`, empty body — decision 1746): the DEATH popup's second
-    /// button, offered only while `PLAYER_SELF_RES_SPELL` is non-zero. The server casts that
-    /// spell on us and zeroes the field; like the reclaim, the success is ordinary descriptor
-    /// deltas (alive, health/mana per the spell) with no answer packet of its own.
+    /// Self-resurrect while `PLAYER_SELF_RES_SPELL` is set; the server casts it, with no reply.
     pub fn self_res(&mut self) -> Result<()> {
         self.send(opcode::CMSG_SELF_RES, &[])
     }
 
-    /// Reclaim our corpse (`CMSG_RECLAIM_CORPSE` — the RECOVER_CORPSE popup's Accept): the corpse's
-    /// guid. Server gates: ghost, the reclaim delay elapsed, within 39 yd. Success comes back as
-    /// ordinary descriptor deltas (alive, ghost flags clear) + the corpse-to-bones swap.
+    /// Reclaim our corpse as a ghost, past the reclaim delay, within 39 yd.
     pub fn reclaim_corpse(&mut self, corpse_guid: u64) -> Result<()> {
         self.send(
             opcode::CMSG_RECLAIM_CORPSE,
@@ -49,9 +32,7 @@ impl WorldWriter {
         )
     }
 
-    /// Take the spirit healer's resurrection (`CMSG_SPIRIT_HEALER_ACTIVATE` — the XP_LOSS
-    /// confirm's final Accept): res at 50%, 25% durability loss, resurrection sickness at
-    /// level ≥ 11. `npc` is the spirit healer's guid (from `SMSG_SPIRIT_HEALER_CONFIRM`).
+    /// Take the spirit healer's res: 50% health, 25% durability loss, sickness from level 11.
     pub fn spirit_healer_activate(&mut self, npc: u64) -> Result<()> {
         self.send(
             opcode::CMSG_SPIRIT_HEALER_ACTIVATE,
@@ -59,8 +40,7 @@ impl WorldWriter {
         )
     }
 
-    /// Answer a resurrection offer (`CMSG_RESURRECT_RESPONSE` — the RESURRECT popup's
-    /// Accept/Decline): the offerer's guid + the accept byte.
+    /// Accept or decline a resurrection offer (`CMSG_RESURRECT_RESPONSE`).
     pub fn resurrect_response(&mut self, caster: u64, accept: bool) -> Result<()> {
         self.send(
             opcode::CMSG_RESURRECT_RESPONSE,
@@ -68,9 +48,7 @@ impl WorldWriter {
         )
     }
 
-    /// Ask a battleground spirit healer for its clock (`CMSG_AREA_SPIRIT_HEALER_QUERY`) — sent
-    /// when the client adopts a new healer; answered by `SMSG_AREA_SPIRIT_HEALER_TIME`
-    /// (decision 1963).
+    /// Ask a new battleground spirit healer's clock, answered by `SMSG_AREA_SPIRIT_HEALER_TIME`.
     pub fn area_spirit_healer_query(&mut self, healer: u64) -> Result<()> {
         self.send(
             opcode::CMSG_AREA_SPIRIT_HEALER_QUERY,
@@ -78,8 +56,7 @@ impl WorldWriter {
         )
     }
 
-    /// Queue for the healer's next wave (`CMSG_AREA_SPIRIT_HEALER_QUEUE`) —
-    /// `AcceptAreaSpiritHeal()`'s packet, carrying the cached healer (decision 1963).
+    /// Queue for the healer's next wave, as `AcceptAreaSpiritHeal` sends.
     pub fn area_spirit_healer_queue(&mut self, healer: u64) -> Result<()> {
         self.send(
             opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE,

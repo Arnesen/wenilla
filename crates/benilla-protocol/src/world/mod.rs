@@ -1,18 +1,8 @@
-//! Phase 4: world server (`mangosd`) connection.
+//! The world server (`mangosd`) connection, opened with the realm logon's SRP6 session key.
 //!
-//! After the realmd logon ([`crate::logon`]) hands us the SRP6 session key, we connect to the world
-//! server, prove we know that key, then stream object updates. The handshake:
-//!
-//! 1. Read `SMSG_AUTH_CHALLENGE` (unencrypted) → server seed.
-//! 2. Send `CMSG_AUTH_SESSION` (unencrypted): build, uppercased account name, a client seed, and a
-//!    SHA1 digest binding the session key to both seeds (computed by `benilla-srp`).
-//! 3. **1.12 header obfuscation turns on right after** `CMSG_AUTH_SESSION` — every subsequent packet
-//!    header (4-byte server / 6-byte client) is encrypted; bodies stay plaintext. The first encrypted
-//!    packet we read is `SMSG_AUTH_RESPONSE`.
-//! 4. `CMSG_CHAR_ENUM` → `SMSG_CHAR_ENUM`, then `CMSG_PLAYER_LOGIN(guid)`, then the world streams
-//!    `SMSG_UPDATE_OBJECT`.
-//!
-//! Headers are (de)crypted by [`benilla_srp::vanilla_header`]; bodies by [`crate::messages`].
+//! `SMSG_AUTH_CHALLENGE` (server seed) and `CMSG_AUTH_SESSION` (build, uppercased account, client
+//! seed, SHA1 over key and seeds) travel plain; every header after them is encrypted (4-byte
+//! server, 6-byte client), bodies never, starting with `SMSG_AUTH_RESPONSE`.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -31,14 +21,10 @@ pub use reader::WorldReader;
 pub use session::{WardenRequired, WorldAuthReject, WorldSession};
 pub use writer::WorldWriter;
 
-/// Default `mangosd` world-server port — the stock one, which our vmangos deploy maps straight
-/// through. Normally the realm list reply carries the port (the deploy's
-/// `VMANGOS_REALMLIST_PORT=8085` matches); this constant is the fallback for probes/examples that
-/// dial the world server directly.
+/// The stock `mangosd` port, for probes that dial the world server without a realm list.
 pub const WORLD_PORT: u16 = 8085;
 
-/// Read one server packet from `stream`: decrypt the 4-byte header, read the body, parse by opcode.
-/// `decrypter` is `None` for the (single) unencrypted `SMSG_AUTH_CHALLENGE`.
+/// Read, decrypt and parse one packet; `decrypter` is `None` only for `SMSG_AUTH_CHALLENGE`.
 pub(super) fn recv_packet(
     stream: &mut TcpStream,
     decrypter: Option<&mut DecrypterHalf>,
@@ -61,8 +47,7 @@ pub(super) fn recv_packet(
     messages::parse_server(opcode, &body).map_err(|e| anyhow!("parsing opcode {opcode:#x}: {e}"))
 }
 
-/// Write one client packet: an (optionally encrypted) 6-byte header + plaintext body. The header size
-/// field counts the 4-byte opcode plus the body, but not the size field itself.
+/// Write one client packet: a 6-byte header, its size counting opcode and body, then the body.
 pub(super) fn send_packet(
     stream: &mut TcpStream,
     encrypter: Option<&mut EncrypterHalf>,
@@ -79,12 +64,7 @@ pub(super) fn send_packet(
     if let Some(e) = encrypter {
         e.encrypt(&mut header);
     }
-    // **One write, not two** (decision 0617). Header-then-body was a self-inflicted Nagle stall: the
-    // 6-byte header goes out as its own segment, and the body — small, and now behind unacknowledged
-    // data — is held by the kernel until the server ACKs it. With Nagle now off (see
-    // [`WorldSession::connect`]) that stall is gone either way, but two segments per packet is still
-    // two syscalls and two headers for a ≤40-byte message, and the server cannot parse the packet
-    // until both land. Joined here so one movement report is one segment.
+    // One write, not two: header and body leave as one segment.
     let mut packet = Vec::with_capacity(header.len() + body.len());
     packet.extend_from_slice(&header);
     packet.extend_from_slice(body);

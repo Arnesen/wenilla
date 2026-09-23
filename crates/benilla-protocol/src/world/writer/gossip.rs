@@ -1,11 +1,5 @@
-//! The gossip family's `WorldWriter` sends — open a menu, choose an option, and fetch a menu's
-//! greeting text. Bodies in [`crate::messages::gossip`], whose scope this mirrors. Split out of
-//! `writer/mod.rs` (decision 0636).
-//!
-//! `CMSG_GOSSIP_HELLO` is the front door to every other NPC service window — vendor, trainer,
-//! bank, taxi, quest — because the server passes `UNIT_NPC_FLAG_NONE` for this opcode (vmangos
-//! `CanInteractWithNPC`, `Player.cpp:347`), so it works on any interactable creature, not only
-//! gossip-flagged ones.
+//! The gossip sends. `CMSG_GOSSIP_HELLO` opens every NPC service window: vmangos accepts it for any
+//! interactable creature (`CanInteractWithNPC` with `UNIT_NPC_FLAG_NONE`, `Player.cpp:347`).
 
 use anyhow::Result;
 
@@ -14,18 +8,12 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// Open a gossip menu on an NPC (`CMSG_GOSSIP_HELLO`, layout in [`messages::gossip_hello`]) —
-    /// works on any interactable creature, not only gossip-flagged ones (vmangos
-    /// `CanInteractWithNPC`, `Player.cpp:347`, passes `UNIT_NPC_FLAG_NONE` for this opcode).
-    /// Answered by `SMSG_GOSSIP_MESSAGE` (a `GossipMenu` event).
+    /// Open a gossip menu on an NPC (`CMSG_GOSSIP_HELLO`), answered by `SMSG_GOSSIP_MESSAGE`.
     pub fn gossip_hello(&mut self, npc_guid: u64) -> Result<()> {
         self.send(opcode::CMSG_GOSSIP_HELLO, &messages::gossip_hello(npc_guid))
     }
 
-    /// Choose a gossip option (`CMSG_GOSSIP_SELECT_OPTION`, layout in
-    /// [`messages::gossip_select_option`]): `gossip_list_id` is the option's echoed `index`; `code`
-    /// carries a password only for a `coded` option, omitted entirely otherwise. The server answers
-    /// either a fresh `SMSG_GOSSIP_MESSAGE` (a sub-menu) or `SMSG_GOSSIP_COMPLETE`.
+    /// Choose a gossip option by its echoed `index`; `code` is sent only for a coded option.
     pub fn gossip_select_option(
         &mut self,
         npc_guid: u64,
@@ -38,9 +26,7 @@ impl WorldWriter {
         )
     }
 
-    /// Ask for a gossip menu's greeting text (`CMSG_NPC_TEXT_QUERY`, layout in
-    /// [`messages::npc_text_query`]) — sent on receiving a gossip menu's `text_id`. Answered by
-    /// `SMSG_NPC_TEXT_UPDATE` (an `NpcGreeting` event); ask-once cacheable like an item template.
+    /// Ask a gossip menu's greeting text (`CMSG_NPC_TEXT_QUERY`); ask once and cache.
     pub fn npc_text_query(&mut self, text_id: u32, guid: u64) -> Result<()> {
         self.send(
             opcode::CMSG_NPC_TEXT_QUERY,
