@@ -3,7 +3,7 @@ name = "benilla-wmo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "WMO (root + group) reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021"
+description = "WMO (root and group) reader for WoW 1.12.1 (build 5875)"
 
 [lints]
 workspace = true

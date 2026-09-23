@@ -3,7 +3,7 @@ name = "benilla-visual"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Perceptual image diff for the Phase-5 visual A/B render harness (decision 0008)"
+description = "Perceptual image diff for the visual A/B render harness"
 
 [lints]
 workspace = true

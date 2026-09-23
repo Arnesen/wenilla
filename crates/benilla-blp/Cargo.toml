@@ -3,7 +3,7 @@ name = "benilla-blp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "BLP2 texture decoder for WoW 1.12.1 (build 5875) — in-repo, decision 0021"
+description = "BLP2 texture decoder for WoW 1.12.1 (build 5875)"
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@ name = "benilla-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Engine-free WoW UI engine core: TOC/FrameXML parsing, templates, anchors, z-order — decision 0068"
+description = "Engine-free WoW UI engine core: TOC and FrameXML parsing, templates, anchors, z-order"
 
 [lints]
 workspace = true

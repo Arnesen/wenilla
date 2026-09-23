@@ -3,7 +3,7 @@ name = "benilla-worldview"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The world viewer: the engine with no game attached — and the wall that keeps the split honest (decision 1160)"
+description = "The world viewer: the engine with no game attached, which keeps the engine and game split honest"
 
 [lints]
 workspace = true

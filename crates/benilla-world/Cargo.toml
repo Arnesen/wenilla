@@ -3,7 +3,7 @@ name = "benilla-world"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The world renderer: terrain, water, sky, weather, models, lighting, collision and the frame ladder — everything needed to put something in a world and ask the world about itself, with no game attached (decision 1160)"
+description = "The world renderer: terrain, water, sky, weather, models, lighting, collision and the frame ladder; everything needed to put something in a world and ask the world about itself, with no game attached"
 
 [lints]
 workspace = true

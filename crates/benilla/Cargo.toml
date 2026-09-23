@@ -3,7 +3,7 @@ name = "benilla"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The launcher: build.rs stamps the git build id, main() hands it to benilla-app. A shim, so the stamp's every-commit rebuild dirties this package and not the app crate (decision 0993)"
+description = "The launcher: build.rs stamps the git build id and main() hands it to benilla-app, so a new commit rebuilds this package and not the app crate"
 
 [lints]
 workspace = true

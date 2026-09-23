@@ -3,7 +3,7 @@ name = "benilla-buildstamp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The git build-id stamp emitter shared by the launcher shims' build scripts (decision 0993/1160)"
+description = "The git build-id stamp shared by the launchers' build scripts"
 
 [lints]
 workspace = true

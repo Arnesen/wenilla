@@ -3,7 +3,7 @@ name = "benilla-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The Bevy app as a library: everything but the build-id stamp, which lives in the `benilla` launcher shim so a commit dirties ~30 lines instead of this crate (decision 0993)"
+description = "The Bevy app as a library: everything but the build-id stamp, which lives in the `benilla` launcher so a new commit does not rebuild this crate"
 
 [lints]
 workspace = true
