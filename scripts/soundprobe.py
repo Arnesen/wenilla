@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
-"""soundprobe.py — read back a `$WOW_SOUND_PROBE` capture and name the mechanism.
+"""Read back a `$WOW_SOUND_PROBE` capture and name the mechanism behind a speaker-breaking sound.
 
-A measuring run (decision 1556) leaves three files: `pre.wav` (the mix as the game asked for it),
-`post.wav` (what was heard), and `timeline.jsonl` (levels, voices, deadline misses, kit starts, and
-the director's F9 marks — all keyed to the sample offset in `pre.wav`).
-
-This reads them together and answers the question the capture was taken for: **of the mechanisms
-that sound like a speaker breaking, which one is actually present?** They are distinguishable, but
-only by comparing the two WAVs against each other and against the timeline — no single file
-separates them:
+A measuring run leaves `pre.wav` (the mix as the game asked for it), `post.wav` (what was heard)
+and `timeline.jsonl` (levels, voices, deadline misses, kit starts and F9 marks, keyed to the
+sample offset in `pre.wav`). Only comparing the two WAVs with each other and with the timeline
+tells the mechanisms apart:
 
     over-scale sum ............ pre past 1.0, post clean, gain well under 1
-    limiter not engaging ...... pre past 1.0 AND post past 1.0
+    limiter not engaging ...... pre and post both past 1.0
     underrun / missed deadline  both clean; `load>=1`, overruns, block-aligned steps in post
     starved stream decoder .... both clean; hard steps to zero in post
-    non-finite samples ........ NaN/inf anywhere — invisible to every level meter
+    non-finite samples ........ NaN/inf anywhere, invisible to every level meter
     voice refusal ............. `refused` climbing near the mark
-    the limiter's own pumping . post clean but gain diving repeatedly (1551 made it worse)
+    the limiter's own pumping . post clean but gain diving repeatedly
 
 Usage:
     scripts/soundprobe.py                       # the default benilla-config/sound-probe
@@ -24,9 +20,8 @@ Usage:
     scripts/soundprobe.py <dir> --around 2.0    # widen the window read around each mark
     scripts/soundprobe.py <dir> --json
 
-Pure stdlib on purpose (no numpy on this machine — an instrument that needs an install is an
-instrument nobody runs). Windowed reductions go through `max`/`min` on array slices so the hot
-loop stays in C; the per-sample passes run only near the marks, where they are affordable.
+Pure stdlib, so it runs without installing anything. Windowed reductions use `max`/`min` on array
+slices so the hot loop stays in C; the per-sample passes run only near the marks.
 """
 
 import argparse
@@ -37,20 +32,16 @@ import struct
 import sys
 from array import array
 
-# A sample this close to full scale was clipped, or was pushed there by a limiter that had to
-# choose. Below the renderer's own clamp of 1.0 so a limiter riding its 0.99 ceiling reads as
-# "held", not as "clipped".
+# A sample this close to full scale was clipped: below the renderer's 1.0 clamp, above the
+# limiter's 0.99 ceiling, so a limiter riding its ceiling reads as held, not clipped.
 CLIPPED = 0.999
-# Envelope resolution. 10 ms is finer than any transient we care to place and keeps a ten-minute
-# capture to ~60 000 windows.
+# Envelope resolution: 10 ms keeps a ten-minute capture to ~60 000 windows.
 WINDOW = 0.010
-# A sample-to-sample jump this large is not music. Real 44.1 kHz content moves slowly between
-# adjacent samples; a hard step is a zero-fill, a cut, or a stepped parameter — the waveform
-# signature the level meters cannot see.
+# A sample-to-sample jump this large is not music: a zero-fill, a cut or a stepped parameter,
+# which no level meter sees.
 STEP = 0.30
-# kira's internal block. A discontinuity landing on a multiple of this is a *block-level* failure
-# (a starved decoder zero-filling a whole chunk), not a one-off click — the distinction between
-# decision 1109's mechanism and a de-click bug.
+# kira's internal block: a step on a multiple of it is a block-level failure (a starved decoder
+# zero-filling a whole chunk), not a one-off click.
 BLOCK = 128
 
 
@@ -80,10 +71,8 @@ def envelope(samples, rate, window=WINDOW):
         seg = samples[i : i + step]
         if not seg:
             break
-        # NaN/inf first, and via a SUM rather than a comparison: `max`/`min` compare with `>`,
-        # which is false for every NaN, so a NaN in the window can be silently skipped depending on
-        # where it sits. A sum propagates it unconditionally — the same trap this whole capture
-        # exists because of (`f32::max` discards NaN; see sound::meter).
+        # Finiteness via a sum, not `max`/`min`: a comparison with NaN is false, so `max` can skip
+        # a NaN depending on where it sits, while a sum always propagates it.
         if not math.isfinite(sum(seg)):
             nf = sum(1 for v in seg if not math.isfinite(v))
             finite = [v for v in seg if math.isfinite(v)]
@@ -99,12 +88,8 @@ def envelope(samples, rate, window=WINDOW):
 def brightness(samples, rate, lo, hi):
     """A crude high-frequency energy ratio for [lo,hi): `sum((x[n]-x[n-1])^2) / sum(x[n]^2)`.
 
-    NOT a spectrum — it is a one-tap difference filter, which is all that is affordable in stdlib.
-    But it is enough for the question a mark actually poses: **was that moment harsher, or just
-    louder?** Distortion of any origin — a clipped waveform, aliasing from a pitch-varied playback
-    rate, a stepped parameter — puts energy high in the band, and this number rises with it while
-    staying flat for content that merely got loud. Meaningful only against the same capture's own
-    baseline, so it is always reported next to one.
+    A one-tap difference filter, not a spectrum: it rises with distortion of any origin and stays
+    flat for content that only got louder. Meaningful only against the same capture's baseline.
     """
     a, b = max(0, int(lo * rate)) * 2, min(len(samples), int(hi * rate) * 2)
     num = den = 0.0
@@ -206,8 +191,7 @@ def main():
     min_gain = min((r.get("gain", 1.0) for r in ticks), default=1.0)
     marks = [r for r in rows if r.get("ev") == "mark"]
 
-    # A brightness baseline from windows spread across the capture, so "harsher than usual" is a
-    # statement about this session rather than about audio in general.
+    # The brightness baseline: the median of windows spread across this capture.
     base = []
     if dur > 1.0:
         for k in range(1, 12):

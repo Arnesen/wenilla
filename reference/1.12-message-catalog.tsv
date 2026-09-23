@@ -1,7 +1,7 @@
 # build 5875 CGGameUI message catalog (the 0xb4b498 table indexed by 0x496720)
 # 465 rows, ids 0x0..0x1d0; consumer bound `cmp id,0x1d1; jge` at 0x49672c
 # kind 0 -> 0x49a870(text, chan); 1 -> UI_INFO_MESSAGE 0xe1; 2 -> UI_ERROR_MESSAGE 0xe0; 3 -> console 0x63cd00
-# regenerate (in wow-5875-re): python3 re/ui/extract-message-catalog.py <WoW.exe> > re/ui/message-catalog.tsv
+# Vendored from the maintainer's analysis (`WOW_RE`); messages/catalog.rs is generated from it.
 id_hex	id_dec	row_va	key	kind	sound	type_tag	chan
 0x0	0	0xb4b498	ERR_INV_FULL	2	NONE	0x0	10
 0x1	1	0xb4b4ac	ERR_BANK_FULL	2	NONE	0x44	10

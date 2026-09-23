@@ -1,76 +1,51 @@
 #!/usr/bin/env python3
-"""Regenerate `reference/1.12-events.tsv` — every FrameScript event the 1.12.1 client can
-dispatch, with the ARGUMENTS its producers push.
+"""Regenerate `reference/1.12-events.tsv`: each 1.12 FrameScript event and the arguments it carries.
 
     scripts/gen-reference-events.py [--catalog FILE] [--firesites FILE] [--out FILE]
 
-**Why this exists** (decision 2140). benilla already gates two halves of the event seam: a stock
-chain file listening for an event nothing fires
-(`reference_ui::every_event_a_chain_file_registers_has_a_producer`, 1889) and an event we fire that
-1.12 does not have (`every_event_we_fire_is_an_event_the_reference_has`, 1883). Both compare
-NAMES. Nothing compared the *arguments*, and an event name is a plain string at both ends — so a
-fire with the wrong argument count is silent on both sides, exactly as a binding with the wrong
-return arity was before 1842. It is the same class of bug one API over, and it had three live
-instances: `PLAYERBANKSLOTS_CHANGED`, `UNIT_PET_EXPERIENCE` and `UNIT_PET_TRAINING_POINTS`, the
-last of which routes through `PetPaperDollFrame_OnEvent`'s `elseif ( arg1 == "pet" )` catch-all and
-so reached nobody at all.
-
-**The oracle is wow-5875-re's own two censuses**, vendored under `reference/` the way
-`1.12-shapes.tsv` is:
+The inputs are vendored under `reference/`, so this runs from any clone and reproduces the
+committed table byte for byte:
 
   - `1.12-event-catalog.tsv`   eventId -> name, off the name-pointer array at `.data 0xbe1198`
-  - `1.12-event-firesites.tsv` every `call` AND tail-`jmp` to `FrameScript_SignalEvent`
+  - `1.12-event-firesites.tsv` every `call` and tail-`jmp` to `FrameScript_SignalEvent`
                                (`0x703e50`, no varargs) and `SignalEvent2` (`0x703f50`,
-                               printf-style), with the FORMAT STRING each site pushes
+                               printf-style), with the format string each site pushes
 
-**Three producer families, because a literal fire site is not the whole picture.** The firesites
-census is over the two signal helpers' own call sites, and its own header says in capitals that an
-event with no row there is not an event with no producer:
+A literal fire site is not every producer; the families are:
 
-  signal              a `0x703e50` site — `__fastcall(ecx = id)`, a plain `ret`, ZERO Lua values.
-  signal2             a `0x703f50` site — the pushed format string is the argument shape.
+  signal              a `0x703e50` site: `__fastcall(ecx = id)`, a plain `ret`, zero Lua values.
+  signal2             a `0x703f50` site: the pushed format string is the argument shape.
   unit-field-bridge   the generic UpdateField -> event bridge (`0x51bbb0` registers one watch per
                       named unit-window field; `0x51bd50` -> `0x515e50` fans out over the unit
-                      tokens and calls `0x703f50(id, "%s", token)`). Every event id below `0xb6`
-                      that HAS a name is produced there and appears in no firesites row.
-                      Cross-check: the 54 catalog ids under `0xb6` are exactly the id set
-                      wow-re read out of the registration loop by hand
-                      (`system/ui/scratch/unit-field-event-bridge.md` §2.1) — two independent
-                      derivations, no difference.
-  token-fanout        the same `0x515e50` fan-out reached with a LITERAL id in `edx` rather than a
-                      computed one, so also `%s` and also absent from the firesites census. The
-                      fourteen ids are wow-re's own list, in that file's header.
+                      tokens and calls `0x703f50(id, "%s", token)`). Every named event id below
+                      `0xb6` is produced there and has no fire-site row.
+  token-fanout        the same `0x515e50` fan-out reached with a literal id in `edx`: also `%s`,
+                      also absent from the fire sites.
 
-**Confidence, and what a consumer may gate on:**
+Confidence, and what a consumer may gate on:
 
   exact      every contributing producer's shape is known. Gate on this.
-  advisory   a contributing site is one of the three whose pushed format DECLARES more varargs than
-             its caller pushes (`re/audit/signalevent2-fmt-args.py` audits all 149 and finds
-             exactly these): `0x496230 TRADE_REPLACE_ENCHANT`, `0x5e4527`/`0x5e7960 UPDATE_TICKET`.
-             Faithful clients must not copy a bug that hands Lua undefined values.
-  none       the name is in the catalog and NO producer family reaches it here. **This is not a
-             claim that it has none** — see the census caveat above. Never gate on it.
+  advisory   a contributing site's format declares more varargs than its caller pushes
+             (`0x496230` TRADE_REPLACE_ENCHANT, `0x5e4527`/`0x5e7960` UPDATE_TICKET), which hands
+             Lua undefined values; do not copy it.
+  none       no producer family reaches the name here, which does not mean it has none. Never
+             gate on it.
 
-Glue-space rows are dropped: `0x703d90` is called twice with different name populations, so the
-same integer names a different event on the glue screen than in the world. wow-re blanks those
-rows' names; this drops them by fire-site address as well, from the four TU ranges its header
-names, so a future re-derivation that fills a name in cannot leak one through.
-
-Both inputs are in the repo, so this runs from any clone and reproduces the committed table byte
-for byte; only the two inputs themselves are regenerated in the RE repo.
+Glue-space sites are dropped by address: `0x703d90` loads a separate name table for the glue
+screen, so the same id names a different event there. Their names are blank in the input, and
+dropping by address keeps a name filled in later from leaking through.
 """
 import argparse
 import os
 import sys
 
-# The `Source\Glue\` TU ranges whose event ids belong to the GLUE name space, from
-# `re/events/event-firesites.tsv`'s own header.
+# The `Source\Glue\` fire-site ranges (`1.12-event-firesites.tsv`'s header): glue-space ids.
 GLUE_SITES = [(0x46AA34, 0x46AA34), (0x46BC9D, 0x46C52E), (0x46E73D, 0x46E73D), (0x47461E, 0x47461E)]
 # The three sites whose format string declares more varargs than the caller pushes.
 DECLARES_MORE_THAN_IT_PUSHES = {0x496230: "TRADE_REPLACE_ENCHANT", 0x5E4527: "UPDATE_TICKET", 0x5E7960: "UPDATE_TICKET"}
-# `0x515e50` callers carrying a LITERAL id — the token fan-out reached outside the generic bridge.
+# `0x515e50` callers with a literal id: the token fan-out reached outside the generic bridge.
 TOKEN_FANOUT_IDS = [0x10, 0x16, 0x1C, 0x1D, 0x1E, 0x29, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0x159, 0x197, 0x20A]
-# `0x51bbb0`'s walk bound: `cmp esi,0xb6`. Every NAMED unit-window field below it is watched.
+# `0x51bbb0`'s walk bound (`cmp esi,0xb6`): every named unit-window field below it is watched.
 UNIT_WINDOW_FIELDS = 0xB6
 # The zero-argument format, spelled so the column is never empty.
 NONE = "()"
@@ -140,8 +115,7 @@ def main():
         if eid in catalog:
             add(catalog[eid], eid, "token-fanout", "%s")
 
-    # Every remaining catalog name, so the table is the whole surface and a consumer can tell
-    # "no producer found" from "not an event".
+    # Every remaining catalog name too, so "no producer found" differs from "not an event".
     for eid, name in catalog.items():
         if name not in ev:
             ev.setdefault(name, {"ids": set(), "producers": set(), "formats": set(), "notes": []})["ids"].add(eid)
@@ -149,17 +123,17 @@ def main():
     out = os.path.normpath(a.out)
     with open(out, "w", encoding="utf-8") as fh:
         fh.write(
-            "# The 1.12.1 client's FrameScript events and the ARGUMENTS their producers push.\n"
-            "# GENERATED — scripts/gen-reference-events.py. Source: wow-5875-re's\n"
-            "# re/events/event-catalog.tsv + event-firesites.tsv. Decision 2140.\n"
+            "# The 1.12.1 client's FrameScript events and the arguments their producers push.\n"
+            "# Generated by scripts/gen-reference-events.py from reference/1.12-event-catalog.tsv\n"
+            "# and reference/1.12-event-firesites.tsv.\n"
             "#\n"
             "# arg_formats  `|`-separated, one per distinct producer shape. `()` = zero Lua values.\n"
             "#              Directives: %s string, %d/%u number, %f number. An event with two\n"
-            "#              producers of different shapes carries both, and which one a given\n"
-            "#              transition takes is a question about the transition, not the name.\n"
+            "#              producers of different shapes carries both; which one fires depends\n"
+            "#              on the transition, not the name.\n"
             "# conf         exact = gate on it. advisory = a contributing site declares more\n"
-            "#              varargs than it pushes. none = no producer family reaches it HERE,\n"
-            "#              which is not a claim that it has none; never gate on it.\n"
+            "#              varargs than it pushes. none = no producer family reaches it here,\n"
+            "#              which does not mean it has none; never gate on it.\n"
             "# producers    signal (0x703e50, no varargs) | signal2 (0x703f50, format-driven) |\n"
             "#              unit-field-bridge (0x51bbb0/0x51bd50 -> 0x515e50, always %s) |\n"
             "#              token-fanout (0x515e50 with a literal id, also %s).\n"

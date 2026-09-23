@@ -1,50 +1,39 @@
-# C->Lua event fire sites — every call AND TAIL-JMP to FrameScript_SignalEvent (0x703e50, ecx=eventId)
-# (the 85 `jmp 0x703e50` sites were absent until 2026-08-21 — the census had been written over `call`
-#  alone, so a tail-jmp fire read as "this event has no fire site here"; see re/audit/re-sweep-status.md)
-# and SignalEvent2 (0x703f50, [esp]=eventId + printf-style arg_format). eventId resolved via event-catalog.tsv.
-# eventId "dyn" = computed (e.g. a UnitField update loop); blank name = eventId has no entry in the name table.
+# C->Lua event fire sites of the 1.12.1 client (build 5875): every call and tail-jmp to
+# FrameScript_SignalEvent (0x703e50, ecx=eventId) and SignalEvent2 (0x703f50, [esp]=eventId +
+# printf-style arg_format). eventId is resolved via 1.12-event-catalog.tsv; "dyn" = computed
+# (e.g. a UnitField update loop); a blank name = the id has no entry in the name table.
 #
-# CAVEAT (2026-09-04, staticpopup round): the `arg_format` column is the FORMAT STRING the site pushes,
-# which is a declaration, NOT a census of what the caller actually pushed. The marshaller 0x704f10
-# consumes one vararg per directive (%f eight bytes, everything else four), so a site whose format
-# declares more than its caller pushed hands Lua undefined values. `re/audit/signalevent2-fmt-args.py`
-# audits all 149 sites (0 unadjudicated) and finds exactly THREE such sites -- read that column with
-# these in mind: 0x496230 TRADE_REPLACE_ENCHANT "%s%s%d" declares 3 and pushes 2; 0x5e4527 and
-# 0x5e7960 UPDATE_TICKET "%d%s%f%f%f%d%d" declare 10 dwords and push 7 (their sibling 0x5e45e2 pushes
-# the full 12). Every other site's format matches its caller. See method.md §6.
+# arg_format is the format string the site pushes: a declaration, not a census of what the
+# caller pushed. The marshaller 0x704f10 consumes one vararg per directive (%f eight bytes,
+# everything else four), so a format that declares more than its caller pushed hands Lua
+# undefined values. Of the 149 SignalEvent2 sites exactly three do: 0x496230
+# TRADE_REPLACE_ENCHANT "%s%s%d" declares 3 and pushes 2; 0x5e4527 and 0x5e7960 UPDATE_TICKET
+# "%d%s%f%f%f%d%d" declare 10 dwords and push 7 (their sibling 0x5e45e2 pushes the full 12).
+# Every other site's format matches its caller.
 #
-# CAVEAT (2026-09-03, found while carving `UpdateSpells` for benilla; the answer was already on `main`
-# in system/glue/): the `name` column resolves every id through event-catalog.tsv, which is the
-# IN-GAME table (0xbe1198, 549 entries). 0x703d90 is called TWICE with different populations --
-# 0x46a88f with (0xb41e70, 26) for the GLUE phase and 0x48feab with (0xbe1198, 549) for the world --
-# and it rebuilds [0xceef68] wholesale from whichever it is handed, so THE SAME INTEGER NAMES A
-# DIFFERENT EVENT IN THE TWO PHASES and 0x703e50 bounds-checks nothing. 22 rows here sit in a
-# `Source\Glue\` TU (0x46aa34; 0x46bc9d-0x46c52e inside 0x46b930; 0x46e73d; 0x47461e) and their ids
-# belong to the GLUE space: name them from system/glue/scratch/glue-event-name-map.md, never from
-# event-catalog.tsv. 0x46aa34 was the one row where that produced a WRONG name (id 22 read as
-# UNIT_MAXHEALTH; it is FRAMES_LOADED -- glue-event-name-map.md's own control, with GlueParent.lua:94
-# as the independent oracle); it is blanked below. The other 21 were already blank, because those ids
-# are NULL slots in the in-game table. Owed: the glue node names them in its own artifact.
+# The name column resolves every id through the in-game table (0xbe1198, 549 entries). 0x703d90
+# is called twice with different populations, 0x46a88f with (0xb41e70, 26) for the glue phase
+# and 0x48feab with (0xbe1198, 549) for the world, and rebuilds [0xceef68] wholesale from
+# whichever it is handed, so the same integer names a different event in the two phases, and
+# 0x703e50 bounds-checks nothing. 22 rows here sit in a `Source\Glue\` TU (0x46aa34;
+# 0x46bc9d-0x46c52e inside 0x46b930; 0x46e73d; 0x47461e): their ids belong to the glue space and
+# are never named from 1.12-event-catalog.tsv; their names are blank here. 0x46aa34 fires id 22,
+# which is FRAMES_LOADED in the glue table (GlueParent.lua:94), not the in-game UNIT_MAXHEALTH.
 #
-# CAVEAT 2 (2026-09-03, carving UNIT_FLAGS for benilla): AN EVENT WITH NO ROW HERE IS NOT AN EVENT
-# WITH NO PRODUCER. This census is over the two signal helpers' own call/jmp sites, and the whole
-# per-field UNIT_* family reaches them through a WRAPPER: 0x515e50(&guid, id) fans out over the unit
-# tokens and fires 0x703f50(id, "%s", token) at 0x515e7a -- the "?" row below. Its 38 callers carry
-# the id in edx, and one of them, 0x51bd5b in the UpdateField watch callback 0x51bd50, computes it as
-# (registered field byte offset >> 2). So ids 0x00-0xb5 -- every named unit descriptor field,
-# UNIT_FLAGS 40 included -- are produced there and appear nowhere in this file.
-# SCOPE WIDENED 2026-09-07 (PLAYER_FLAGS round, benilla dispatch): "0x00-0xb5" is the COMPUTED-id
-# subset only, and reading it as the whole absent set is a trap -- most 0x515e50 sites carry a
-# LITERAL id in edx, and those are absent from this file too, at any magnitude. The literal set is
-# {0x10 0x16 0x1c 0x1d 0x1e 0x29 0xb7 0xb8 0xb9 0xba 0xbb 0x159 0x197 0x20a}. Notably 0x197 = 407
-# PLAYER_FLAGS_CHANGED (0x5eea35 mov edx,0x197 / 0x5eea3d call 0x515e50, inside the PLAYER_FLAGS
-# delta handler 0x5ee990) sits OUTSIDE 0x00-0xb5, so a reader checking 407 against the range above
-# would wrongly conclude it has no producer. It has one; it is simply not a SignalEvent call site.
-# See system/object-layer/scratch/player-flags-delta-arms.md. Mechanism, the
-# bounded four-way census that makes 0x51bd50 the SOLE producer of 40, and the fire condition
-# (a repe cmpsb of the watched span against the object's shadow, at 0x4655bb) are in
-# system/ui/scratch/unit-field-event-bridge.md. Same shape for 0x5de4b0 (id = its userdata,
-# arg1 hardcoded "player") and 0x49b199 (id from the table at 0x8062e0).
+# An event with no row here is not an event with no producer. This covers the two signal
+# helpers' own call/jmp sites, and the per-field UNIT_* family reaches them through a wrapper:
+# 0x515e50(&guid, id) fans out over the unit tokens and fires 0x703f50(id, "%s", token) at
+# 0x515e7a, the "?" row below. Its 38 callers carry the id in edx; one of them, 0x51bd5b in the
+# UpdateField watch callback 0x51bd50, computes it as (registered field byte offset >> 2), so
+# ids 0x00-0xb5 (every named unit descriptor field, UNIT_FLAGS 40 included) are produced there
+# and appear nowhere in this file. 0x51bd50 is the sole producer of 40; its fire condition is a
+# repe cmpsb of the watched span against the object's shadow, at 0x4655bb. Most other
+# 0x515e50 sites carry a literal id in edx, absent here too at any magnitude: {0x10 0x16 0x1c
+# 0x1d 0x1e 0x29 0xb7 0xb8 0xb9 0xba 0xbb 0x159 0x197 0x20a}. So 0x197 = 407
+# PLAYER_FLAGS_CHANGED (0x5eea35 mov edx,0x197 / 0x5eea3d call 0x515e50, inside the
+# PLAYER_FLAGS delta handler 0x5ee990) lies outside 0x00-0xb5 and still has a producer. Same
+# shape for 0x5de4b0 (id = its userdata, arg1 hardcoded "player") and 0x49b199 (id from the
+# table at 0x8062e0).
 fire_site_va	dispatcher	eventId	name	arg_format
 0x4018df	SignalEvent2	259	TIME_PLAYED_MSG	%d%d
 0x46aa34	SignalEvent	22		

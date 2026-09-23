@@ -1,49 +1,31 @@
 #!/usr/bin/env python3
-"""Regenerate `reference/1.12-globals.tsv` — the 1.12.1 client's global namespace, with each name
-attributed to whoever provides it.
+"""Regenerate `reference/1.12-globals.tsv`: the 1.12.1 client's global namespace, by origin.
 
-    WOW_RE=<the RE repo> scripts/gen-reference-globals.py [--wow-re DIR] [--out FILE]
+    WOW_RE=DIR scripts/gen-reference-globals.py [--wow-re DIR] [--out FILE]
 
-**Why this exists** (decision 1189): every wrong number in the addon arc came from remembering a
-list of WoW functions instead of asking the client. wow-5875-re already ships an addon
-(`W5875Capture`) that dumps the in-world `_G` of the *running* reference client, and its output is
-committed there as a fixture. This vendors that capture, attributes every name, and writes the
-result as the one artifact benilla measures its API surface against.
+Each name in a capture of the running reference client's in-world `_G` gets one origin:
 
-**Three origins**, because "is this in 1.12?" and "whose job is it to provide?" are different
-questions:
+  lua       Lua 5.0's own runtime, which mlua provides.
+  engine    the C client provides it; benilla implements these in Rust.
+  framexml  the shipped UI defines it (its Lua, its XML, or a `$parent`-composed child of one);
+            it runs off the player's own patch chain, never hardcoded in Rust.
 
-  lua       Lua 5.0's own runtime. We get these from mlua; neither we nor FrameXML write them.
-  engine    The C client provides it. **This is the list benilla implements in Rust.**
-  framexml  Defined by the shipped UI itself — its Lua, its XML, or a `$parent`-composed child of
-            one. Runs off the player's own patch chain at runtime (1751), never hardcoded in Rust.
+Attribution is by definition site in the complete 1.12 shipped-UI corpus:
 
-Attribution is by *definition site*, computed from a complete 1.12 shipped-UI corpus:
+  - a name assigned or `function`-declared in shipped Lua, including Lua inside a FrameXML
+    document, is FrameXML's; indented assignments count, because FrameXML leaks globals out of
+    function bodies (`button = getglobal(...)`);
+  - a `name="..."` on any shipped XML element is FrameXML's, `virtual="true"` included: a virtual
+    `<Font>` is a real font object, and 1.12 registers named virtual frames too;
+  - `<a shipped name><a $parent suffix>` is a composed child (`ContainerFrame1Item16IconTexture`);
+  - LUA_5_0 wins over all of these: FrameXML's `string = getglobal(...)` would otherwise claim
+    the stdlib table.
 
-  - a name assigned or `function`-declared in shipped Lua (including a `<Script>` body inside a
-    FrameXML document) is FrameXML's. Indented assignments count: vanilla FrameXML leaks globals
-    out of function bodies (`button = getglobal(...)`) and those names really are in `_G`;
-  - a `name="..."` on any shipped XML element is FrameXML's — including `virtual="true"`, because
-    a virtual `<Font>` is a real font object and 1.12 registers named virtual frames too;
-  - a name formed as `<a shipped name><a $parent suffix>` is a composed child object
-    (`ContainerFrame1Item16IconTexture`), so also FrameXML's;
-  - LUA_5_0 below wins over all of the above: FrameXML *clobbers* `string` in three files
-    (`string = getglobal(...)`), which overwrites the stdlib table rather than defining it.
-
-**Inputs live outside the repo** — a 1.12 install and the RE repo's runtime capture (`--wow-re`,
-or `$WOW_RE`) — so this is a manual regeneration, like `genmap.sh`; the committed table is the
-surface benilla tracks. It needs:
-
-  - `<wow-re>/WoW/_w5875_fixtures/item13/W5875Capture.lua`  the captured in-world `_G`
-  - `<wow-re>/WoW/_extracted_framexml/`                     FrameXML, already extracted there
-  - `<wow-re>/WoW/Data/*.MPQ`                               for the twelve `Blizzard_*` addons
-
-**The corpus is the part that is easy to get wrong** (decision 1188 §4 — three attempts were
-needed, and the first two produce confidently wrong answers). FrameXML alone is not the shipped
-UI: the twelve `Blizzard_*` addons live in the MPQs, and their `.lua` is *not* listed in their
-`.toc` — it is pulled in by `<Script file=>` inside their XML. A corpus that misses either half
-misattributes real FrameXML functions as the engine's. A complete one is 233 files, and this
-script prints the count so a short one is visible rather than silent.
+The inputs are the maintainer's analysis (`--wow-re` or `$WOW_RE`), not in this repo: the
+capture, the extracted FrameXML, and the install's MPQs. FrameXML alone is not the shipped UI:
+the twelve `Blizzard_*` addons live in the MPQs, and their `.lua` is reached through
+`<Script file=>` in their XML, not their `.toc`. A complete corpus is 233 files; the count is
+printed.
 """
 import argparse
 import os
@@ -53,8 +35,7 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# The twelve addons that ship inside the MPQs. Their folders exist in a real install carrying only
-# a `.pub` signature file, so the install cannot be the source — the archives are.
+# The twelve addons shipped inside the MPQs; an install's folder for each holds only a `.pub`.
 BLIZZARD_ADDONS = [
     "Blizzard_AuctionUI", "Blizzard_BattlefieldMinimap", "Blizzard_BindingUI",
     "Blizzard_CombatText", "Blizzard_CraftUI", "Blizzard_GMSurveyUI",
@@ -62,10 +43,8 @@ BLIZZARD_ADDONS = [
     "Blizzard_TalentUI", "Blizzard_TradeSkillUI", "Blizzard_TrainerUI",
 ]
 
-# Lua 5.0's own globals, as the 1.12 client actually exposes them. Note what is NOT here and is
-# absent from the capture: `_G`, `print`, `require`, `dofile`, `loadfile`, and the `io`/`os`/
-# `debug`/`coroutine` tables — the client sandboxes them away, which is a fidelity fact about the
-# VM we present to addons, not an accident of the capture.
+# Lua 5.0's globals as the 1.12 client exposes them: it removes `_G`, `print`, `require`,
+# `dofile`, `loadfile` and the `io`/`os`/`debug`/`coroutine` tables.
 LUA_5_0 = {
     "assert", "collectgarbage", "error", "gcinfo", "getfenv", "getmetatable", "ipairs",
     "loadstring", "math", "next", "pairs", "pcall", "rawequal", "rawget", "rawset",
@@ -73,15 +52,9 @@ LUA_5_0 = {
     "unpack", "xpcall",
 }
 
-# The capture addon's own footprint, each verified against its source rather than guessed at.
-# `W5875CaptureHolder` is its `CreateFrame(..., "W5875CaptureHolder", ...)`, `W5875CaptureDB` its
-# `## SavedVariables`, `SLASH_W5875CAP1` its slash token. It ran inside the client to produce the
-# fixture, so its globals are in the table it dumped; they are the instrument, not the client.
-#
-# `__framescript_meta` is deliberately NOT here despite looking like tooling: it is the *client's*
-# own shared frame metatable, published to `_G` (wow-5875-re RF-0023, `system/ui/ui.md`), and
-# benilla mirrors it at `script/object.rs`. Excluding it on the strength of its underscores made
-# our own faithful global read as a superset.
+# The capture addon's own globals (its holder frame, SavedVariables and slash token): the
+# instrument, not the client. `__framescript_meta` stays in: it is the client's own shared frame
+# metatable.
 CAPTURE_OWN = {"W5875CaptureDB", "W5875CaptureHolder", "SLASH_W5875CAP1"}
 
 LUA_ASSIGN = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)\s*=[^=]", re.M)
@@ -92,13 +65,9 @@ LUA_MULTI = re.compile(
 XML_ELEM = re.compile(r"<(\w+)([^>]*?)/?>", re.S)
 XML_NAME = re.compile(r'\bname\s*=\s*"([^"]*)"')
 PARENT_SUFFIX = re.compile(r'\bname\s*=\s*"\$parent([A-Za-z0-9_]*)"')
-# Lua embedded in a FrameXML document, which only this pass will ever see. Two shapes, and
-# missing either misattributes real FrameXML names to the engine: an inline `<Script>…</Script>`
-# body (Fonts.xml defines CHAT_FONT_HEIGHTS that way), and every handler element under
-# `<Scripts>` — `<OnLoad>`, `<OnEvent>`, `<PreClick>` and kin, which is where MainMenuBar.xml
-# assigns SHOW_KEYRING and PERFORMANCEBAR_LOW_LATENCY. Matched by shape rather than by a list of
-# handler names so a rarely-used one cannot be forgotten. `<Script file=>` is skipped: it
-# references a file already in the corpus.
+# Lua inside a FrameXML document: an inline `<Script>` body (Fonts.xml's CHAT_FONT_HEIGHTS) and
+# every `<Scripts>` handler element (`<OnLoad>`, `<PreClick>`, ...), matched by shape so no handler
+# name is missed. `<Script file=>` is skipped: its file is already in the corpus.
 XML_SCRIPT = re.compile(
     r"<((?:On|Pre|Post)\w+|Script)\b(?![^>]*\bfile\s*=)[^>]*>(.*?)</\1>", re.S
 )
@@ -127,7 +96,7 @@ def captured_globals(fixture):
 
 
 def join_ref(base, ref):
-    """Resolve a reference against the including file's directory — `loader::join_ref`'s rule."""
+    """Resolve a reference against the including file's directory, as `loader::join_ref` does."""
     ref = ref.replace("\\", "/").strip()
     parts = ref[1:].split("/") if ref.startswith("/") else (base.split("/") if base else []) + ref.split("/")
     out = []
@@ -189,8 +158,7 @@ def build_corpus(wowre):
                 print(f"  !! {addon}: missing {rel}", file=sys.stderr)
                 continue
             files[rel] = data
-            # The `.lua` is reached from inside the XML, never from the `.toc` — follow it, or
-            # every Lua-side API in these twelve addons misattributes to the engine.
+            # The addons' `.lua` is reached only from their XML, never from the `.toc`.
             if rel.lower().endswith(".xml"):
                 base = rel.rsplit("/", 1)[0] if "/" in rel else ""
                 for m in XML_REF.finditer(data):
@@ -217,12 +185,7 @@ def shipped_names(corpus):
                 lua_defs(body, names)
             suffixes.update(s for s in PARENT_SUFFIX.findall(text) if s)
             for tag, attrs in XML_ELEM.findall(text):
-                # `<Binding name="ACTIONBUTTON1">` is a KEY-BINDING command name, not a global —
-                # it never reaches `_G`. It shares the `name=` attribute with every frame element,
-                # so a shape-blind harvest pulls all 228 of `Bindings.xml`'s commands in. Harmless
-                # while this set was only used for *attribution* (none of them is in the capture,
-                # so none could be misattributed); wrong now that the set also contributes rows
-                # (decision 1200).
+                # `<Binding name="ACTIONBUTTON1">` is a key-binding command, not a global.
                 if tag.lower() == "binding":
                     continue
                 m = XML_NAME.search(attrs)
@@ -285,24 +248,10 @@ def main():
         rows.append((name, t, origin))
         tally[(origin, t)] = tally.get((origin, t), 0) + 1
 
-    # ── The LoadOnDemand half the capture could not see (decision 1200) ──────────────────────
-    #
-    # The fixture is the in-world `_G` of a *running* client, and the twelve `Blizzard_*` addons
-    # are LoadOnDemand: unless the player had opened the talent window, the trade-skill window and
-    # the rest before the dump, their globals are not in it. `TalentFrame`, `MacroFrame`,
-    # `TradeSkillFrame`, `CraftFrame`, `TrainerFrame`, `InspectFrame` and ~350 of their children
-    # are real 1.12 names that the capture alone reports as absent — which made benilla's own
-    # transcriptions of those windows look like they were inventing names.
-    #
-    # So the table is the capture UNION every global the shipped UI *defines*. That is the honest
-    # membership test for the question we actually ask it — "is this a 1.12 name?" — and it is
-    # strictly better than the capture alone, which answers "was this name live at one moment in
-    # one session". The two halves stay distinguishable: a name only the corpus knows gets type
-    # `lod`, so a consumer that cares can tell.
-    #
-    # Type inference is deliberately coarse: a `function X(` declaration is a `function`, an XML
-    # `name=` is a frame (`table`), and a bare assignment could be anything, so it says `lod`
-    # rather than guessing. Nothing downstream keys on the type of these rows.
+    # ── The LoadOnDemand names ─────────────────────────────────────────────────────────────────
+    # The twelve `Blizzard_*` addons are LoadOnDemand, so a live capture holds their globals only
+    # if their windows were opened first. Every name the shipped UI defines that the capture lacks
+    # joins with type `lod`: the table answers "is this a 1.12 name?", and the halves stay apart.
     lod = 0
     for name in sorted(defined - captured):
         rows.append((name, "lod", "framexml"))
@@ -312,12 +261,12 @@ def main():
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w") as f:
-        f.write("# The 1.12.1 client's global namespace. GENERATED — scripts/gen-reference-globals.py.\n")
-        f.write("# Source: wow-5875-re's W5875Capture fixture (the running client's in-world _G),\n")
-        f.write("# attributed against the complete 1.12 shipped-UI corpus. Decision 1189.\n")
-        f.write("# UNION every name that corpus defines but the capture did not contain (type\n")
-        f.write("# `lod`): the twelve Blizzard_* addons are LoadOnDemand, so a live dump misses\n")
-        f.write("# them unless the player had opened those windows. Decision 1200.\n")
+        f.write("# The 1.12.1 client's global namespace. Generated by scripts/gen-reference-globals.py.\n")
+        f.write("# Source: a capture of the running client's in-world _G (the maintainer's analysis,\n")
+        f.write("# `WOW_RE`), attributed against the complete 1.12 shipped-UI corpus.\n")
+        f.write("# Also every name that corpus defines but the capture lacks, as type `lod`: the\n")
+        f.write("# twelve Blizzard_* addons are LoadOnDemand, so a live dump misses them unless\n")
+        f.write("# their windows were opened.\n")
         f.write("# name\ttype\torigin(lua|engine|framexml)\n")
         for row in sorted(rows):
             f.write("\t".join(row) + "\n")

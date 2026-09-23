@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read a `vpl`/`bub` overlay trace and say WHERE the overlay's motion came from — projection, solve, or snap.
+"""Read a `vpl`/`bub` overlay trace and say where the motion came from: projection, solve or snap.
 
     # walk a town with friendly plates on, tracing one line per plate per frame
     WOW_WIN=1440x810 WOW_NOSOUND=1 WOW_GM=off \
@@ -10,35 +10,28 @@
       WOW_PROBE_EXIT_AT=34 cargo run -q -p benilla
     python3 scripts/vplsum.py /tmp/vpl.trace --from 24 --to 32     # the walk leg only
 
-Why it exists (decision 1341): "the plates are jittery when moving" is four different bugs wearing
-one coat — a noisy camera, a stale anchor, the anti-overlap solve relocating a plate, or the pixel
-snap quantizing its glide — and the eye cannot tell them apart. Every `vpl` line carries the world
-anchor, the camera pose, the RAW projected point, the SOLVED rect and the SNAPPED rect, so the
-question is arithmetic instead of judgement. It found phantom plates (30% of everything drawn was a
-unit off screen, dragged to the border by the seat's clamp) in one run.
+Jitter in a moving overlay has four causes the eye cannot tell apart: a noisy camera, a stale
+anchor, the anti-overlap solve relocating a plate, or the pixel snap quantizing its glide. Every
+`vpl` line carries the world anchor, the camera pose, the raw projected point, the solved rect and
+the snapped rect, so telling them apart is arithmetic.
 
 Read it in this order:
 
-* **projection smoothness** — the frame-to-frame acceleration of the raw projected point, per unit.
-  Small (~0.05 px at 60 fps) means the camera and the anchor are innocent and the cause is
-  downstream. Large means stop reading and go look at the camera or the anchor.
-* **off-screen** — plates drawn for a unit that is not on screen. Must be 0.
-* **solve jumps** — a plate moving further than its own projection did. Some is the reference's own
-  anti-overlap bounce (a plate re-solving when a blocker moves); a lot, or hundreds of pixels in a
-  frame, is a defect.
-* **snap** — the extra per-frame displacement the pixel snap adds to a plate's glide. It is bounded
-  by half a device pixel by construction; anything larger means the snap is on the wrong grid.
+* projection smoothness: the raw projected point's frame-to-frame acceleration, per unit; small
+  (~0.05 px at 60 fps) clears the camera and the anchor.
+* off-screen: plates drawn for a unit that is not on screen. Must be 0.
+* solve jumps: a plate moving further than its own projection did; some is the reference's own
+  anti-overlap bounce, hundreds of pixels in a frame is a defect.
+* snap: the pixel snap's extra per-frame displacement, at most half a device pixel; more means
+  the snap is on the wrong grid.
 
-The `--from`/`--to` window matters as much as it does for `tracesum.py`: a run is a login, a
-teleport, a stand and a walk glued together, and their average describes none of them.
+Pick one leg with `--from`/`--to`: a run is a login, a teleport, a stand and a walk, and their
+average describes none of them.
 
-**It reads the CHAT BUBBLE's `bub` lines too** (1398), auto-detected from the file — the bubble is
-the plate's sibling overlay (same `plate_basis`/`gx_px`/`device_snap` family, same projector, same
-`overhead_anchor`), so "the bubble is jittery when running" is the same four-way question and
-deserves the same arithmetic rather than a second script that drifts from this one. The bubble has
-no anti-overlap solver, so its lines carry no `solved=` stage and the SOLVE section is skipped; the
-ANCHOR section below is the one that matters for it, because the bubble's height rides the *posed*
-head attachment and therefore bobs with the run cycle:
+It reads the chat bubble's `bub` lines too, detected from the file: same projector and
+`overhead_anchor` as the plate but no anti-overlap solver, so there is no `solved=` stage and the
+SOLVE section is skipped. The ANCHOR section matters most for it, because the bubble rides the
+posed head attachment, which bobs with the run cycle:
 
     WOW_MOVE_TRACE=/tmp/bub.trace WOW_MOVE_TRACE_TAGS=bub \
       WOW_PROBE_CHAT="hello" WOW_PROBE_CHAT_AT=20 WOW_PROBE_KEY="W@20:6" ... cargo run -q -p benilla
@@ -50,19 +43,18 @@ import re
 import sys
 from collections import defaultdict
 
-# One regex for both overlays: the `solved=` stage is the plate's anti-overlap solver, which the
-# bubble has no counterpart to, so it is optional and the final rect is `plate=` or `frame=`.
+# One regex for both overlays: `solved=` (the plate's anti-overlap solve) is optional, and the
+# final rect is `plate=` or `frame=`.
 LINE = re.compile(
     r"t=\s*([\d.]+) (vpl|bub)\s+e=(\d+) vp=\((\d+),(\d+)\) anchor=\[([-\d.,e]+)\] "
     r"cam=\[([-\d.,e]+)\] fwd=\[([-\d.,e]+)\] scr=\(([-\d.e]+),([-\d.e]+)\) "
     r"(?:solved=\(([-\d.e]+),([-\d.e]+)\) )?(?:plate|frame)=\(([-\d.e]+),([-\d.e]+)\)"
 )
 
-# A step this far past the plate's own projected motion is a JUMP, not a glide: about a quarter of
-# the plate's height, i.e. the smallest relocation a viewer reads as the plate moving by itself.
+# A step this far past the plate's own projected motion is a jump, not a glide: about a quarter of
+# the plate's height, the smallest relocation a viewer reads as the plate moving by itself.
 JUMP_PX = 4.0
-# Frames further apart than this are not consecutive — the plate blinked out and came back, and
-# differencing across the gap would invent a jump.
+# Frames further apart than this are a gap (the plate blinked out), never differenced.
 GAP_S = 0.1
 
 
@@ -73,8 +65,7 @@ def vec3(s):
 def load(path, lo, hi):
     """-> (tag, viewport, {entity: [(t, anchor, cam, scr, solved, rect)]}, {t: overlay count})
 
-    A bubble line has no solver stage; its `solved` slot mirrors the raw point, which makes the
-    SOLVE arithmetic below identically zero rather than special-cased (the section is skipped).
+    A bubble line has no solver stage, so its `solved` slot mirrors the raw point.
     """
     rows, frames, vp, tag = defaultdict(list), defaultdict(int), None, None
     for line in open(path):
@@ -173,10 +164,8 @@ def main():
             f"scr ({j[5][0]:8.1f},{j[5][1]:7.1f}) -> ({j[6][0]:8.1f},{j[6][1]:7.1f})"
         )
 
-    # The world anchor's own motion, split by axis. The HORIZONTAL term is the unit gliding; the
-    # VERTICAL term is what the run cycle does to the posed head attachment (plus terrain). A
-    # standing unit reads 0.0000 in both — which is exactly why 1341 cleared the anchor for the
-    # plate and why that clearance says nothing about a unit that is RUNNING (1398).
+    # The world anchor's own motion by axis: horizontal is the unit gliding, vertical is the run
+    # cycle moving the posed head attachment (plus terrain). A standing unit reads 0 in both.
     print("\nANCHOR motion — the world point's own Δ per frame, yd (med p90 max):")
     for e, s in sorted(rows.items(), key=lambda kv: -len(kv[1]))[:8]:
         pairs = [(a_, b) for a_, b in zip(s, s[1:]) if b[0] - a_[0] < GAP_S]

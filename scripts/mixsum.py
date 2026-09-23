@@ -1,28 +1,19 @@
 #!/usr/bin/env python3
-"""mixsum.py — read a `$WOW_MIX_TAP` capture and say, in numbers, what the mix was doing when.
+"""Read a `$WOW_MIX_TAP` capture and say, in numbers, what the mix was doing when.
 
-The tap (decision 1112) records the final mix to a stereo float-32 WAV. Until now the only way to
-read one back was to listen to it — which is exactly the loop `docs/METHOD.md` step 4 forbids for a
-timing question ("timing and feel are measured, never eyeballed"), and which cannot answer the two
-questions a capture is usually taken for:
-
-  * **Was there a HOLE, and how long?** — "the login theme dies 2 s into a 6 s loading screen"
-    (decision 1550) is a silent span with a start and an end, not an impression.
-  * **Did the level do what the transition says it does?** — a 4.0 s linear fade-to-zero is a
-    straight line in dBFS; a cut is a cliff; a crossfade has an overlap. All three read off the
-    envelope.
-
-So: a windowed RMS/peak envelope with a bar, plus a `spans` report that names every silent stretch
-and every onset/offset edge. `--json` for a machine, the default for a session log.
+The tap records the final mix to a stereo float-32 WAV. This prints a windowed RMS/peak envelope
+with a bar, and a `spans` report naming every silent stretch and every onset/offset edge: a hole
+is a silent span with a start and an end, and a linear fade-to-zero is a straight line in dBFS, a
+cut a cliff, a crossfade an overlap. `--json` for a machine, the default for a session log.
 
     scripts/mixsum.py entry.wav                  # 250 ms windows, the envelope + the spans
     scripts/mixsum.py entry.wav --window 0.1     # finer, for a click or a declick ramp
     scripts/mixsum.py entry.wav --from 2 --to 12 # just the covered window
     scripts/mixsum.py entry.wav --quiet          # the spans only, no per-window rows
 
-Pure stdlib on purpose (no numpy on this machine, and an instrument that needs an install is an
-instrument nobody runs). Python's `wave` module refuses format 3 (IEEE float), so the 44-byte
-header the tap writes is parsed here directly — it is a frozen fact of `sound::mix_tap::wav_header`.
+Pure stdlib, so it runs without installing anything. Python's `wave` module refuses format 3
+(IEEE float), so the tap's 44-byte header is parsed directly; it must match
+`sound::mix_tap::wav_header`.
 """
 
 import argparse
@@ -32,9 +23,8 @@ import struct
 import sys
 from array import array
 
-# Below this a window is "silence" for span purposes. The tap is pre-clamp and dither-free, so true
-# digital silence reads as -inf; -80 dBFS leaves room for a fade's last samples without calling an
-# audible tail silent.
+# Below this a window is silence: the tap is pre-clamp and dither-free, so true silence reads
+# -inf, and -80 dBFS still counts an audible fade tail as sound.
 SILENCE_DBFS = -80.0
 
 
@@ -52,8 +42,8 @@ def read_tap(path):
         if head[36:40] != b"data":
             sys.exit("mixsum: no `data` chunk where the tap header puts it")
         raw = f.read()
-    # The declared size is patched per flush; a hard kill can leave the file shorter. Trust the
-    # bytes actually present, floored to whole frames.
+    # The declared size is patched per flush and a hard kill can leave the file shorter: trust the
+    # bytes present, floored to whole frames.
     usable = len(raw) - (len(raw) % 8)
     samples = array("f")
     samples.frombytes(raw[:usable])

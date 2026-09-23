@@ -1,36 +1,16 @@
 #!/usr/bin/env python3
-"""doc-links — fail on a doc link whose target does not exist ANYWHERE in the workspace.
+"""Fail on a doc link whose target is declared nowhere in the workspace.
 
-WHY THIS IS NARROW, AND WHY THE OBVIOUS VERSION IS WRONG (decision 1925). The docs are this
-project's knowledge base, so a doc link that goes nowhere is real rot — decision 1903 found a
-`UNIT_FLAG_STUNNED` comment still pointing at a `MovementState::stunned` that a later decision had
-deleted, and nothing caught it because nothing runs rustdoc.
-
-The obvious fix is `-D rustdoc::broken_intra_doc_links`. Measured, it does not survive contact with
-this codebase: **941 warnings, 264 of them unambiguous `crate::`/`super::`/`self::` paths** — and
-almost none of that is rot.
-
-  * **195** name a target that IS declared in its crate. They do not resolve because the target is
-    a *private* module named through its parent (`crate::net::apply`, where `mod apply;` is private
-    to `net`) — not a rustdoc quirk but Rust's own name resolution, so the link never worked.
-    Making them resolve means widening visibility for a documentation reason, trading encapsulation
-    for navigation.
-  * **~50** are one crate naming another's module with `crate::` — `benilla-world` writing
-    `crate::entities`, which is benilla-app's and which benilla-world cannot depend on. Those can
-    never resolve; the only "fix" is de-linking prose that reads fine as prose.
-
-Both are conventions this codebase writes on purpose. A gate on them would be 249 edits of churn
-that improve nothing, and would then have to stay green forever.
-
-What IS unambiguous rot is the residue: a link whose **leaf is declared nowhere in the workspace**
-— the item is gone, so no reading of the link can be right. That was 15 sites when this was
-written (1925 fixed them); this script keeps it at zero.
+It reads rustdoc's unresolved-link warnings and fails on a `crate::`, `super::`, `self::` or
+`Self::` path whose leaf name is declared nowhere: the item is gone. Every other warning is a
+convention here, not rot (a private module named through its parent, another crate's module
+named with `crate::`, a bare name for an unimported bevy type).
 
     scripts/doc-links.py            # the gate: exit 1 on any dead-target link
-    scripts/doc-links.py --report   # + the benign counts, for anyone re-opening the question
+    scripts/doc-links.py --report   # + the benign counts
 
-The leaf test is a declaration grep, deliberately loose: a name declared anywhere counts, because
-the failure this catches is "the thing was deleted", not "the path is spelled right".
+The leaf test is a loose declaration grep: a name declared anywhere counts, since what it catches
+is a deleted item, not a misspelled path.
 """
 
 from __future__ import annotations
@@ -54,15 +34,10 @@ def run_rustdoc() -> str:
 
 
 def declared_names() -> set[str]:
-    """Every name the workspace declares, in ONE pass.
-
-    A grep per link is what the first version did, and at ~900 links over a 19-crate tree it does
-    not finish inside a gate's patience. One scan, then set lookups.
-    """
+    """Every name the workspace declares, in one scan: a grep per link is too slow for a gate."""
     names: set[str] = set()
-    # `fn` gets its own pattern: a single alternation swallows the `const` of `const fn foo` and
-    # captures "fn" as the name, so `foo` is never indexed and the gate reports a live item as
-    # deleted. That bug shipped for one run of this script and is the reason the two passes exist.
+    # `fn` gets its own pattern: in one alternation, `const fn foo` captures "fn" and never
+    # indexes `foo`.
     pats = [
         re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)"),
         re.compile(r"\b(?:struct|enum|trait|type|const|static|union|mod)\s+([A-Za-z_][A-Za-z0-9_]*)"),
@@ -87,11 +62,8 @@ def main() -> int:
     names = declared_names()
     dead, benign = [], 0
     for target, path, line in found:
-        # ONLY paths the author asserted are in THIS crate. A bare `[`SystemParam`]` or
-        # `[`KeyboardInput`]` names a bevy type that is simply not imported for linking — real,
-        # not rot — and there is no honest way to tell those from a deleted local name. A
-        # `crate::`/`super::`/`self::`/`Self::` path carries the assertion, so its absence is
-        # unambiguous.
+        # Only a `crate::`/`super::`/`self::`/`Self::` path asserts a local item; a bare name may
+        # be a bevy type not imported for linking (`SystemParam`), which is not rot.
         if not re.match(r"^(crate|super|self|Self)::", target):
             benign += 1
             continue

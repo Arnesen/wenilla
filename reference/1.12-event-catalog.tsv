@@ -1,12 +1,11 @@
-# FrameScript C->Lua event catalog — eventId -> name, extracted from WoW.exe 1.12.1.5875
-# source: the event-name pointer array at .data 0xbe1198 (stride 4, 0x225=549 slots), RE 2026-06-21,
-#   BASE CORRECTED 2026-07-21 (was 0xbe11d8 -> every id was 16 too low; see
-#   system/object-layer/scratch/lootroll-chat-and-lifecycle.md §3). The base is VERIFIED at
-#   0x48fea1-0x48feab: `mov edx,0x225; mov ecx,0xbe1198; call 0x703d90`, and 0x703d90 builds the
+# FrameScript C->Lua event catalog of the 1.12.1 client (WoW.exe build 5875): eventId -> name.
+# Source: the event-name pointer array at .data 0xbe1198 (stride 4, 0x225 = 549 slots), passed
+#   at 0x48fea1-0x48feab (`mov edx,0x225; mov ecx,0xbe1198; call 0x703d90`). 0x703d90 builds the
 #   runtime 16-byte-stride dispatch table [0xceef68] as table[i].name = strdup(nameArray[i])
-#   (0x703e06-0x703e2e), so the id passed to FrameScript_SignalEvent 0x703e50 / 0x703f50 IS this index.
-# NB slots 0..15 carry no `mov imm32` name write in this scan (they are set from a register at
-#   0x51acbf and neighbours); coverage is unchanged from the pre-correction extraction (383 rows).
+#   (0x703e06-0x703e2e), so the id passed to FrameScript_SignalEvent 0x703e50 / 0x703f50 is
+#   this index.
+# Slots 0..15 carry no `mov imm32` name write in this scan (they are set from a register at
+#   0x51acbf and neighbours).
 0	UNIT_PET
 2	UNIT_PET
 16	UNIT_HEALTH

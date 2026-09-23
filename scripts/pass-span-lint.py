@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-"""pass-span-lint — one `pass_span` per render pass at a time (decision 2258, bug B390).
+"""Refuse a second open `pass_span` on the same render pass (a wgpu validation error on Vulkan).
 
-bevy's `DiagnosticsRecorder::pass_span` is a timestamp pair PLUS a pipeline-statistics query, and
-wgpu allows exactly one statistics query active at a time: a second `pass_span` opened on a pass
-whose own span is still open is a validation error — on the backends that expose
-`PIPELINE_STATISTICS_QUERY`, which in wgpu 27 is Vulkan alone (Metal never had it; wgpu-hal's
-DX12 arm has the line commented out). So the gates on this machine (Metal) and the lab laptop
-(pinned to DX12) run the nesting as a silent no-op, and the 09-15 sync shipped one: every Linux
-player, and every Windows player wgpu had put on Vulkan, aborted on the first world frame (B390).
-No compile, no test and no macOS run can see that shape. This check can, in a tenth of a second.
+bevy's `DiagnosticsRecorder::pass_span` is a timestamp pair plus a pipeline-statistics query, and
+wgpu allows one statistics query active at a time: a second `pass_span` on a pass whose span is
+still open is a validation error on backends with `PIPELINE_STATISTICS_QUERY`, which in wgpu 27 is
+Vulkan alone (Metal lacks it; wgpu-hal's DX12 arm has the line commented out). On Metal and DX12
+the nesting is a silent no-op, so no macOS build, test or run sees it.
 
 The shape it refuses, per function: `let g = <recorder>.pass_span(&mut P, …)` followed by another
 `.pass_span(&mut P, …)` before `g.end(&mut P)`. Timestamp-only spans (`time_span`) nest fine and
-are not looked at. Lexical, per file, reset at every `fn` — a span never outlives its function.
+are not looked at. Lexical, per file, reset at every `fn`: a span never outlives its function.
 
 Usage:  scripts/pass-span-lint.py [path …]      (default: every crates/**/*.rs)
 Exit:   0 clean, 1 findings.
