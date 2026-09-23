@@ -14,11 +14,10 @@ clap.workspace = true
 benilla-srp = { path = "../benilla-srp" }
 flate2 = "1.0"
 sha1.workspace = true
-# `SessionEventKind` — the fieldless twin of `SessionEvent`, the key the app's packet-handler
-# table dispatches on (decision 2305). A derive, so the two can never drift apart.
+# Derives `SessionEventKind`, `SessionEvent`'s fieldless twin that the handler table keys on.
 strum = { version = "0.26", features = ["derive"] }
 
 [dev-dependencies]
-# The SRP probes re-derive the handshake by hand (to vary what `benilla-srp` fixes) — examples only.
+# The SRP probe example re-derives the handshake by hand, to vary what `benilla-srp` fixes.
 num-bigint = "0.4.6"
 rand = "0.8.6"

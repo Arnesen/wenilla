@@ -9,6 +9,5 @@ description = "The git build-id stamp emitter shared by the launcher shims' buil
 workspace = true
 
 [lib]
-# A build-dependency only. No tests, no bevy, no app deps — it runs inside cargo's build-script
-# pass and must stay trivially cheap to compile.
+# A build-dependency only: it runs in cargo's build-script pass, so it must stay cheap to compile.
 path = "src/lib.rs"

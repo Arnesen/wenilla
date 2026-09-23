@@ -10,6 +10,5 @@ workspace = true
 
 [dependencies]
 benilla-bytes = { path = "../benilla-bytes" }
-# S3TC/DXT block decompression — the same fixed-point codec wow-blp uses, so DXT output is
-# byte-identical. Decompression is a deterministic algorithm (no quantization), unlike encode.
+# S3TC/DXT block decompression, a deterministic fixed-point decode.
 texpresso = "2"

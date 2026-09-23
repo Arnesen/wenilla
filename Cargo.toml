@@ -8,33 +8,18 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["sam <samuv.eth@gmail.com>"]
 
-# Shared pins live here; promote a dep the moment two crates pin the same version (the policy
-# since day one, enacted at the 0530 debt sweep). Per-crate feature additions stay in the crate.
-# `image` deliberately stays per-crate: its default-features/feature sets differ per consumer,
-# and a workspace default-features choice can't be subtracted from downstream.
-# **Lint policy** (decision 2266 §C4). `too_many_arguments` is a readability lint for plain
-# functions; on a Bevy system the parameter list IS the scheduler's dependency declaration, and
-# a system that reads eight resources has eight parameters by construction. The lint had fired
-# 364 times in this workspace and been allowed 364 times, 281 of them on systems — a lint whose
-# every verdict is overridden is not a gate, it is a tax on adding a system. Allowed once here;
-# the per-site attributes are gone. `type_complexity` stays on: it fires on shapes a type alias
-# or a `SystemParam` bundle genuinely fixes.
+# A version two crates share is pinned in `[workspace.dependencies]`; feature additions stay per
+# crate. `image` stays per-crate: its consumers differ on default features, and a member cannot
+# turn off default features that a workspace entry enables.
+# `too_many_arguments` is off: a Bevy system's parameter list is its dependency declaration.
 [workspace.lints.clippy]
 too_many_arguments = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.102"
-# bevy's `default` is `["2d", "3d", "ui"]`, and every one of those three pulls `audio`
-# (= `bevy_audio` + `vorbis`) — so a default bevy compiles rodio, a second cpal, a second ALSA
-# binding and an ogg/vorbis decoder into a client that mixes through kira and has had bevy's
-# `AudioPlugin` disabled at boot since 0530. This spells the same `default` out with `audio`
-# taken away: `2d`/`3d`/`ui` decomposed into the parts they are made of, which is the whole
-# union of the three minus that one entry (decision 1932 has the expansion, verified against a
-# before/after feature tree). Nothing else in the graph asks for it — avian3d, bevy_egui and
-# bevy_transform_interpolation all take bevy with `default-features = false`.
-#
-# If a future bevy needs another member, add it here by name; do not reach back for `2d`/`3d`/
-# `ui`, which would quietly bring the audio stack with it.
+# bevy's default features spelled out without `audio`: `2d`, `3d` and `ui` each pull `bevy_audio`
+# and `vorbis`, and the client mixes through kira. Add a feature by name, never `2d`/`3d`/`ui`; a
+# plugin that takes bevy with its default features brings the audio stack back too.
 bevy = { version = "0.18.1", default-features = false, features = [
     "default_app",
     "default_platform",
@@ -45,88 +30,44 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "scene",
     "picking",
 ] }
-# The render app's raw GPU handles (the WOW_GPU_MS meter's query set): bevy 0.18 does not wrap
-# wgpu's QuerySet family, so the meter reaches for the same wgpu the workspace already builds.
+# For the `WOW_GPU_MS` meter's query set, which bevy 0.18 does not wrap; must match bevy's wgpu.
 wgpu = "27"
 clap = { version = "4.6.1", features = ["derive"] }
 sha1 = "0.10.6"
 
-# The WoW format + protocol stack is fully in-repo (decision 0021), so there are no warcraft-rs /
-# wow_messages crates (or forks of them) anywhere in the tree. That is still true and is why this
-# section stood empty for the project's whole life.
-#
-# The one entry below is not a fork of a WoW crate at all. `lua-src` compiles the Lua the client's
-# addon VM runs on, and benilla's Lua has to accept EXACTLY the grammar the 1.12.1 client's Lua
-# accepts — no more and no less. The hunks — `third_party/lua-src/BENILLA.md` lists them — all byte-read out of the client's own parser and VM:
-# they restore what 5.1 removed (the iterator-less generic-for `for k, v in someTable do`, which
-# 183 of 218 corpus addons are reached by; nesting long strings; the constructor's compat
-# semicolon) and delete what 5.1 added (`...` as an expression, `#`, `%`). Both directions are
-# below the reach of any layer above the VM — an opcode and a grammar are not a library function,
-# a global, or a metamethod — and the corpus ASKS about the second direction directly: 170
-# `loadstring` sites compile a vararg expression purely to find out which interpreter they are on.
-#
-# The fork landed BYTE-IDENTICAL to upstream's 5.1.5 sources on purpose: the pipeline was proven
-# transparent before any behavioural payload went into it, so when the suite moved, the patch was
-# the only thing that could have moved it. `third_party/lua-src/BENILLA.md` has the current state,
-# the per-hunk byte evidence and the verifying command (decisions 1215, 1315, 2101).
+# lua-src builds the addon VM's Lua 5.1.5, patched to accept exactly the 1.12 client's grammar;
+# the hunks and the command that checks them: `third_party/lua-src/BENILLA.md`.
 [patch.crates-io]
 lua-src = { path = "third_party/lua-src" }
-# kira 0.12.1 with one patch: spatial gains and the volume tween evaluated per CHUNK and
-# interpolated, not per frame (decision 1945; `third_party/kira/BENILLA.md`).
+# kira 0.12.1, patched to compute spatial gains and the volume tween per output chunk and
+# interpolate them, not per sample frame (`third_party/kira/BENILLA.md`).
 kira = { path = "third_party/kira" }
 
-# Optimize *dependencies* even in dev builds. avian/parry collision math (and wgpu/bevy render) is
-# unusably slow at opt-level 0 — a plain `cargo run` crawls to <1 fps once physics is doing real work.
-# opt-level 3 on deps (the standard Bevy fix) makes debug builds playable while our own crates stay
-# lightly optimized for fast incremental rebuilds. One-time cost: deps recompile optimized the first time.
+# Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]
 opt-level = 3
 
-# Our own crates at opt-level 1, not 0: Bevy's generic hot paths (material specialization scans,
-# query par_for_each closures) monomorphize INTO our crate, so at opt 0 they run at debug codegen
-# speed over every resident entity — measured at Stormwind as the difference between ~45 fps and a
-# pinned 60 (decision 0362). Warm incremental rebuild cost measured at ~zero. NB: FPS probe numbers
-# in decisions ≤ 0361 were taken at opt 0 and are not comparable with post-0362 probes.
+# Our crates at opt-level 1: Bevy's generic hot paths monomorphize into them, and at opt-level 0
+# Stormwind drops from a pinned 60 fps to ~45; the warm incremental rebuild cost is ~0.
 [profile.dev]
 opt-level = 1
 
-# No debuginfo trimming: `debug = "line-tables-only"` was A/B-measured (decision 0192) at zero
-# recurring win on this stack (macOS unpacked split-debuginfo; sccache; fast ld) — not worth
-# invalidating every warm target and the sccache cache for.
+# No debuginfo trimming: `debug = "line-tables-only"` measures no recurring win on macOS + sccache.
 
-# Shipping-grade optimization, A/B-graded at the pin (decision 0736): −1.0 cpu_ms (−5 %) vs
-# default release, flat at the empty-map and bare-Bevy floors. The campaign keeps grading on
-# default `release` — same-day A/B is the law, and fat LTO's link time would tax every
-# iteration for a constant offset. Build with `--profile ship` for actual releases (add
-# `RUSTFLAGS=-Ctarget-cpu=native` for a machine-local binary; not set here — it isn't portable).
+# The shipping build (`--profile ship`): fat LTO measures -1.0 cpu_ms (-5 %) against `release`,
+# which stays the measured profile because fat LTO's link time would tax every iteration.
+# `-Ctarget-cpu=native` is not set: it is not portable.
 [profile.ship]
 inherits = "release"
 lto = "fat"
 codegen-units = 1
 
-# The director's play loop (decision 1157): `release` plus incremental compilation. `benilla-app` is one crate of
-# hundreds of thousands of lines (243k when this was measured), and release is non-incremental by cargo's default, so a one-line edit re-optimizes
-# all of it — measured 2m47s (43s frontend, ~121s LLVM at opt-level 3) against a 1.8s stamp rebuild
-# and a 2.5s no-op. Incremental caches both halves per codegen unit, so an edit pays for what it
-# touched. Cargo applies `incremental` to workspace members ONLY (verified: `target/debug/incremental`
-# holds the workspace members and zero registry deps), so the ~760 dependencies stay non-incremental and
-# sccache-cacheable — 0192's wrapper and the cold-slot build are untouched.
-#
-# Why a separate profile rather than flipping `release`: incremental raises the codegen-unit count
-# and drops cross-unit inlining, which is a real codegen difference. The FPS campaign grades on
-# default `release` (0736) and same-day A/B is the law, so the graded profile must not quietly
-# change under it. Run it as `cargo play` (the alias in `.cargo/config.toml`).
+# `release` plus incremental, run as `cargo play`: under `release` a one-line edit to
+# `benilla-app` costs 2m47s. Incremental applies to workspace members only, so dependencies stay
+# sccache-cacheable; it changes codegen, so it lives here and not in the measured `release`.
 [profile.play]
 inherits = "release"
 incremental = true
-# ThinLTO OFF, and it is not a performance choice -- it is the fix for rustc #86049. `release`
-# implies thin-LOCAL LTO (ThinLTO across a crate's own codegen units), which promotes each CGU's
-# internal anonymous constants to external symbols named `anon.<hash>.N.llvm.<moduleid>`. Under
-# `incremental` some CGUs come back from the cache carrying names minted in an earlier compile,
-# so a promoted reference finds no definition and `cc` fails with "symbol(s) not found for
-# architecture arm64" -- an intermittent link failure with no source-level cause, cleared only by
-# a full rebuild. Measured on the 2026-08-29 occurrence: 7 poisoned CGUs in `benilla-formats`, 48
-# unresolved symbols. `lto = "off"` disables the promotion step entirely (verified: the play rlib
-# goes from 381 undefined `anon.*.llvm.*` symbols to 0). `release` and `ship` are UNTOUCHED -- they
-# are non-incremental, cannot hit this, and stay the graded profiles (0736). Decision 1698.
+# Not for speed: under `incremental`, thin-local LTO leaves promoted `anon.*.llvm.*` symbols
+# unresolved and the link fails intermittently (rustc #86049).
 lto = "off"
