@@ -6,25 +6,25 @@
 
 ## Crates
 
-- **benilla-adt** (no Bevy) — ADT terrain-tile reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021
-- **benilla-app** (Bevy) — The Bevy app as a library: everything but the build-id stamp, which lives in the `benilla` launcher shim so a commit dirties ~30 lines instead of this crate (decision 0993)
+- **benilla-adt** (no Bevy) — ADT terrain-tile reader for WoW 1.12.1 (build 5875)
+- **benilla-app** (Bevy) — The Bevy app as a library: everything but the build-id stamp, which lives in the `benilla` launcher so a new commit does not rebuild this crate
 - **benilla-assets** (Bevy) — Bevy AssetSource + AssetLoaders over the WoW 1.12.1 MPQ patch chain
-- **benilla-blp** (no Bevy) — BLP2 texture decoder for WoW 1.12.1 (build 5875) — in-repo, decision 0021
-- **benilla-buildstamp** (no Bevy) — The git build-id stamp emitter shared by the launcher shims' build scripts (decision 0993/1160)
-- **benilla-bytes** (no Bevy) — Bounds-checked byte readers + IFF chunk iteration shared by the format parsers — decision 0064
-- **benilla-dbc** (no Bevy) — WDBC (client DBC) reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021
+- **benilla-blp** (no Bevy) — BLP2 texture decoder for WoW 1.12.1 (build 5875)
+- **benilla-buildstamp** (no Bevy) — The git build-id stamp shared by the launchers' build scripts
+- **benilla-bytes** (no Bevy) — Bounds-checked byte readers and IFF chunk iteration shared by the format parsers
+- **benilla-dbc** (no Bevy) — WDBC (client DBC) reader for WoW 1.12.1 (build 5875)
 - **benilla-formats** (no Bevy) — WoW 1.12.1 asset-format adapters (MPQ/BLP/DBC/ADT/WDT) and the benilla-extract CLI
-- **benilla-m2** (no Bevy) — M2 (MD20) model reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021
-- **benilla-mpq** (no Bevy) — Read-only MPQ archive reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021
+- **benilla-m2** (no Bevy) — M2 (MD20) model reader for WoW 1.12.1 (build 5875)
+- **benilla-mpq** (no Bevy) — Read-only MPQ archive reader for WoW 1.12.1 (build 5875)
 - **benilla-protocol** (no Bevy) — WoW 1.12.1 auth (SRP6) + world wire protocol and the benilla-auth CLI
-- **benilla-srp** (no Bevy) — WoW 1.12.1 (build 5875) SRP6 client + vanilla world-header crypto — in-repo, decision 0021
-- **benilla-ui** (no Bevy) — Engine-free WoW UI engine core: TOC/FrameXML parsing, templates, anchors, z-order — decision 0068
-- **benilla-visual** (no Bevy) — Perceptual image diff for the Phase-5 visual A/B render harness (decision 0008)
-- **benilla-wdt** (no Bevy) — WDT map tile-table reader + tile/world coords for WoW 1.12.1 (build 5875) — in-repo, decision 0021
-- **benilla-wmo** (no Bevy) — WMO (root + group) reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021
-- **benilla-world** (Bevy) — The world renderer: terrain, water, sky, weather, models, lighting, collision and the frame ladder — everything needed to put something in a world and ask the world about itself, with no game attached (decision 1160)
-- **benilla-worldview** (no Bevy) — The world viewer: the engine with no game attached — and the wall that keeps the split honest (decision 1160)
-- **benilla** (no Bevy) — The launcher: build.rs stamps the git build id, main() hands it to benilla-app. A shim, so the stamp's every-commit rebuild dirties this package and not the app crate (decision 0993)
+- **benilla-srp** (no Bevy) — WoW 1.12.1 (build 5875) SRP6 client and world-header crypto
+- **benilla-ui** (no Bevy) — Engine-free WoW UI engine core: TOC and FrameXML parsing, templates, anchors, z-order
+- **benilla-visual** (no Bevy) — Perceptual image diff for the visual A/B render harness
+- **benilla-wdt** (no Bevy) — WDT map tile-table reader and tile/world coordinates for WoW 1.12.1 (build 5875)
+- **benilla-wmo** (no Bevy) — WMO (root and group) reader for WoW 1.12.1 (build 5875)
+- **benilla-world** (Bevy) — The world renderer: terrain, water, sky, weather, models, lighting, collision and the frame ladder; everything needed to put something in a world and ask the world about itself, with no game attached
+- **benilla-worldview** (no Bevy) — The world viewer: the engine with no game attached, which keeps the engine and game split honest
+- **benilla** (no Bevy) — The launcher: build.rs stamps the git build id and main() hands it to benilla-app, so a new commit rebuilds this package and not the app crate
 
 ## App subsystems — Bevy plugins in load order (`crates/benilla-app/src/lib.rs`)
 
@@ -526,23 +526,23 @@
 
 ## Scripts (`scripts/`)
 
-- `doc-links.py` — fail on a doc link whose target does not exist ANYWHERE in the workspace.
+- `doc-links.py` — Fail on a doc link whose target is declared nowhere in the workspace.
 - `gen-message-catalog.py` — Generate `crates/benilla-ui/src/messages/catalog.rs` from `reference/1.12-message-catalog.tsv`.
-- `gen-reference-events.py` — Regenerate `reference/1.12-events.tsv` — every FrameScript event the 1.12.1 client can dispatch, with the ARGUMENTS its producers push.
-- `gen-reference-globals.py` — Regenerate `reference/1.12-globals.tsv` — the 1.12.1 client's global namespace, with each name attributed to whoever provides it.
-- `gen-reference-verb-events.py` — Regenerate `reference/1.12-verb-events.tsv` — every FrameScript event the 1.12.1 client fires FROM INSIDE A LUA VERB, keyed by the verb.
-- `mixsum.py` — read a `$WOW_MIX_TAP` capture and say, in numbers, what the mix was doing when.
-- `pass-span-lint.py` — one `pass_span` per render pass at a time (decision 2258, bug B390).
-- `soundprobe.py` — read back a `$WOW_SOUND_PROBE` capture and name the mechanism.
-- `vplsum.py` — Read a `vpl`/`bub` overlay trace and say WHERE the overlay's motion came from — projection, solve, or snap.
-- `api-coverage.sh` — The addon-API coverage instrument (decisions 1178 §, 1188 phase 0, 1189) — how much of the 1.12.1 client's global surface benilla presents, measured o…
-- `check.sh` — the ROUND's verify (decision 1822): fmt everywhere (cheap), clippy + test scoped to the crates this round's changes can actually affect — the changed …
-- `cine.sh` — play one cinematic on the probe and print what happened, as a timeline.
-- `gates.sh` — The commit gates (docs/METHOD.md "Gates"), one vetted runner: fmt-check → clippy -D warnings → workspace tests (skips refused where the data is) → doc…
-- `genmap.sh` — Generate docs/MAP.md — the "what's built" map — derived entirely from what's on disk so it cannot drift (docs/METHOD.md / docs/METHOD.md: "the generat…
-- `probe-identity.sh` — who a scripted run logs in as.
-- `smoke.sh` — The fourth gate, as a command.
-- `soundprobe.sh` — start the client in MEASURING MODE (decision 1556).
-- `summon-live.sh` — The two-client live summon probe (decision 1747) — the instrument that closes the loop on being summoned, because nothing smaller can.
-- `visual.sh` — Phase-5 visual A/B render harness driver (decisions 0008 + 0010).
+- `gen-reference-events.py` — Regenerate `reference/1.12-events.tsv`: each 1.12 FrameScript event and the arguments it carries.
+- `gen-reference-globals.py` — Regenerate `reference/1.12-globals.tsv`: the 1.12.1 client's global namespace, by origin.
+- `gen-reference-verb-events.py` — Regenerate `reference/1.12-verb-events.tsv`: the events 1.12 Lua verbs fire, keyed by verb.
+- `mixsum.py` — Read a `$WOW_MIX_TAP` capture and say, in numbers, what the mix was doing when.
+- `pass-span-lint.py` — Refuse a second open `pass_span` on the same render pass (a wgpu validation error on Vulkan).
+- `soundprobe.py` — Read back a `$WOW_SOUND_PROBE` capture and name the mechanism behind a speaker-breaking sound.
+- `vplsum.py` — Read a `vpl`/`bub` overlay trace and say where the motion came from: projection, solve or snap.
+- `api-coverage.sh` — Addon-API coverage: how much of the 1.12.1 client's global surface benilla's UI VM presents.
+- `check.sh` — The in-loop verify: fmt everywhere, clippy and test on the changed crates and their dependents.
+- `cine.sh` — Play one cinematic on the probe and print what happened, as a timeline.
+- `gates.sh` — The land gate chain: every gate in order, stopping at the first failure.
+- `genmap.sh` — Generate docs/MAP.md, the map of what is built, from what is on disk.
+- `probe-identity.sh` — Who a scripted run logs in as; sourced by smoke.sh, cine.sh and summon-live.sh, never run alone.
+- `smoke.sh` — The clean-run gate: boot the real client, log out, re-enter, walk the realm list, check the log.
+- `soundprobe.sh` — Start the client in sound measuring mode: record the mix before and after the output limiter.
+- `summon-live.sh` — Two-client live summon probe: a second account summons this checkout's character, which accepts.
+- `visual.sh` — Visual A/B harness: capture deterministic screenshots and diff them against a baseline.
 
