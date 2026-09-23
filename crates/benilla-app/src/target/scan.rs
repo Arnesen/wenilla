@@ -283,7 +283,6 @@ pub(crate) struct TargetScan<'w, 's> {
             &'static Guid,
             &'static Transform,
             Option<&'static ObjectStore>,
-            Option<&'static Visibility>,
         ),
         Without<SelfPlayer>,
     >,
@@ -410,8 +409,8 @@ impl TargetScan<'_, '_> {
         let self_store = self.self_store();
         self.units
             .iter()
-            .find(|(_, _, g, _, _, _)| g.0 == guid)
-            .is_some_and(|(_, _, _, _, store, _)| {
+            .find(|(_, _, g, _, _)| g.0 == guid)
+            .is_some_and(|(_, _, _, _, store)| {
                 reaction_from_player(
                     self.factions.as_deref(),
                     &self.reputations,
@@ -425,8 +424,8 @@ impl TargetScan<'_, '_> {
     fn unit_by_guid(&self, guid: u64) -> Option<(Entity, Option<&ObjectStore>)> {
         self.units
             .iter()
-            .find(|(_, _, g, _, _, _)| g.0 == guid)
-            .map(|(e, _, _, _, store, _)| (e, store))
+            .find(|(_, _, g, _, _)| g.0 == guid)
+            .map(|(e, _, _, _, store)| (e, store))
     }
 
     /// The full build: walk every known unit, filter (the kept 1.12 legality laws), project
@@ -478,7 +477,7 @@ impl TargetScan<'_, '_> {
             );
         };
         let mut out = Vec::new();
-        for (entity, net, guid_c, tf, store, vis) in &self.units {
+        for (entity, net, guid_c, tf, store) in &self.units {
             if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
                 continue;
             }
@@ -507,11 +506,12 @@ impl TargetScan<'_, '_> {
                     }
                 }
             }
-            // The scene-attach/hide notion (kept): an explicitly hidden root is out.
-            if vis == Some(&Visibility::Hidden) {
-                trace_unit(guid_c.0, tf, "REJECT hidden");
-                continue;
-            }
+            // **No scene-attach gate.** The reference rejects a not-currently-rendered object
+            // here (`0x6704c0`), and this scan kept that while nothing hid a unit root. Since the
+            // outdoor draw election (1270/1475) hides every body outside the frustum, reading its
+            // `Visibility` would be the frustum by another name — and would empty the off-screen
+            // tier the Classic design (0567) keeps as the fallback. Tiering by the camera is the
+            // `project` step below; stealth and the like leave through the server's out-of-range.
             let dist = (tf.translation - self_tf.translation).length();
             if dist > TAB_RANGE {
                 trace_unit(guid_c.0, tf, "REJECT range (41 yd)");
@@ -1697,6 +1697,53 @@ mod tests {
         // camera in the world nothing projects, so the order is pure distance (ALLY at 10 yd
         // before ALLY_FEIGN at 20).
         assert_eq!(pool(&mut world, ScanSide::Friend), [ALLY, ALLY_FEIGN]);
+    }
+
+    /// **A unit the draw election culled is still a TAB candidate.** The outdoor election
+    /// (decisions 1270/1475) writes `Visibility::Hidden` on every body root outside the camera
+    /// frustum, every frame — so a scan gate on `Hidden` emptied the off-screen tier 0567 keeps
+    /// as the fallback, and TAB / attack-with-no-target / pet Attack could never reach a mob
+    /// hitting you from behind while nothing was on screen.
+    #[test]
+    fn a_body_the_draw_election_culled_is_still_a_candidate() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        const MOB: u64 = 0xBEEF;
+        let mut world = World::new();
+        world.init_resource::<Reputations>();
+        world.init_resource::<NameCache>();
+        world.spawn((
+            SelfPlayer,
+            Transform::default(),
+            Guid(1),
+            store(&[
+                (F_TYPE, TYPE_PLAYER),
+                (F_FLAGS, CONTROLLED),
+                (F_HEALTH, 100),
+                (F_MAXHEALTH, 100),
+            ]),
+        ));
+        world.spawn((
+            NetEntity {
+                kind: EntityKind::Unit,
+                display_id: None,
+                scale: 1.0,
+            },
+            Guid(MOB),
+            Transform::from_xyz(0.0, 0.0, 5.0),
+            store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)]),
+            // The election's out-of-view verdict (`exterior_cull`'s body leg).
+            Visibility::Hidden,
+        ));
+        let pool = world
+            .run_system_once(|scan: TargetScan| {
+                scan.build(ScanSide::Enemy)
+                    .iter()
+                    .map(|c| c.guid)
+                    .collect::<Vec<_>>()
+            })
+            .expect("the scan runs as a one-shot system");
+        assert_eq!(pool, [MOB]);
     }
 
     /// [`LastEnemy`] tracks the last **attackable** selection and nothing else — `TargetLastEnemy`'s

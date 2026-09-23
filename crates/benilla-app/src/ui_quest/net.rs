@@ -33,7 +33,29 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::QuestLogFull, on_log_full)
         .net_handler(K::QuestGiverInvalid, on_giver_invalid)
         .net_handler(K::QuestGiverFailed, on_giver_failed)
-        .net_handler(K::Disconnected, on_session_end);
+        .net_handler(K::Disconnected, on_session_end)
+        .net_handler(K::Connected, on_login)
+        .net_handler(K::Worldport, on_worldport);
+}
+
+/// The world-enter reset `0x500af0` (sole caller `0x49099c`, inside the enter-world cascade
+/// `0x4908c0` that runs on a fresh login and on every worldport) zeroes the `0xbe0824` latch —
+/// its only clear (wow-re ledger `0x500af0`). A second listener on each kind, after the bridge's.
+fn on_login(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::Connected { .. } = ev {
+        world_enter_reset(&mut quest);
+    }
+}
+
+/// [`on_login`]'s twin for the other entry into the cascade, the worldport.
+fn on_worldport(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+    if let SessionEvent::Worldport { .. } = ev {
+        world_enter_reset(&mut quest);
+    }
+}
+
+fn world_enter_reset(quest: &mut QuestGiver) {
+    quest.close_on_cancel = 0;
 }
 
 fn on_giver_status(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
@@ -202,8 +224,8 @@ fn quest_detail(d: QuestDetails, quest: &mut QuestGiver, commands: &NetCommands)
         });
         return;
     }
-    // The trailing flag is a latch, not a field of the view (see `QuestGiver::detail_flag`).
-    quest.detail_flag = d.auto_finish;
+    // The trailing flag is a latch, not a field of the view (see `QuestGiver::close_on_cancel`).
+    quest.close_on_cancel = d.auto_finish;
     quest.open(d.npc, crate::ui_quest::QuestView::Detail(d));
 }
 
@@ -214,6 +236,8 @@ fn quest_progress(p: QuestRequestItems, quest: &mut QuestGiver) {
         "net: quest progress — quest {} on {:#x} (complete: {})",
         p.quest_id, p.npc, p.is_complete
     );
+    // The progress publisher `0x501070` writes `closeOnCancel` into the same latch (`0x50111a`).
+    quest.close_on_cancel = p.close_on_cancel;
     quest.open(p.npc, crate::ui_quest::QuestView::Progress(p));
 }
 
@@ -223,6 +247,9 @@ fn quest_offer(o: QuestOfferReward, quest: &mut QuestGiver) {
         "net: quest reward offer — quest {} on {:#x}",
         o.quest_id, o.npc
     );
+    // The `u32` after the reward text lands in the same latch as DETAILS' trailing one — one
+    // publisher, `0x500ef0` (`0x50101a`).
+    quest.close_on_cancel = o.auto_finish;
     quest.open(o.npc, crate::ui_quest::QuestView::Reward(o));
 }
 
@@ -583,17 +610,79 @@ mod tests {
         assert!(rx.try_iter().next().is_none(), "no verdict, no refusal");
     }
 
-    /// The DETAILS trailing flag is LATCHED on the packet, not read off the open view — the
-    /// reference's `0xbe0824`, whose one reader runs whichever panel is up.
+    /// The `0xbe0824` latch is written by all THREE panel packets — DETAILS' trailing `u32`,
+    /// OFFER_REWARD's `u32` after the reward text (both through `0x500ef0`, `0x50101a`) and
+    /// REQUEST_ITEMS' `closeOnCancel` (`0x501070`, `0x50111a`) — and zeroed by the world-enter
+    /// reset `0x500af0`. It is a latch, not a field of the open view: its one reader runs
+    /// whichever panel is up. benilla used to write it from DETAILS alone and never clear it, so
+    /// a single-quest auto-open's progress panel (`closeOnCancel` = 1) re-opened the NPC on
+    /// Cancel, which answers with the same panel again.
     #[test]
-    fn the_detail_flag_latches_from_the_packet() {
+    fn the_latch_is_written_by_every_panel_packet_and_cleared_on_world_enter() {
+        const NPC: u64 = 0xF130_0000_0000_0007;
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let mut quest = QuestGiver::default();
 
-        let mut d = detail(0xF130_0000_0000_0007, 100);
+        let mut d = detail(NPC, 100);
         d.auto_finish = 3;
         quest_detail(d, &mut quest, &commands);
-        assert_eq!(quest.detail_flag, 3);
+        assert_eq!(quest.close_on_cancel, 3, "DETAILS writes it");
+
+        quest_progress(progress(NPC, 100, 1), &mut quest);
+        assert_eq!(
+            quest.close_on_cancel, 1,
+            "REQUEST_ITEMS' closeOnCancel writes it"
+        );
+        quest_progress(progress(NPC, 100, 0), &mut quest);
+        assert_eq!(quest.close_on_cancel, 0, "…including a zero");
+
+        quest_offer(offer(NPC, 100, 1), &mut quest);
+        assert_eq!(quest.close_on_cancel, 1, "OFFER_REWARD writes it");
+
+        world_enter_reset(&mut quest);
+        assert_eq!(quest.close_on_cancel, 0, "the world-enter reset zeroes it");
+    }
+
+    /// Every panel publish clears the already-acted latch (`0x500bd0`, `0x500d91`).
+    #[test]
+    fn a_panel_packet_clears_the_acted_latch() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut quest = QuestGiver {
+            acted: true,
+            ..Default::default()
+        };
+        quest_detail(detail(0xF130_0000_0000_0007, 100), &mut quest, &commands);
+        assert!(!quest.acted);
+    }
+
+    fn progress(npc: u64, quest_id: u32, close_on_cancel: u32) -> QuestRequestItems {
+        QuestRequestItems {
+            npc,
+            quest_id,
+            title: "A Threat Within".into(),
+            request_text: String::new(),
+            emote: 0,
+            close_on_cancel,
+            required_money: 0,
+            required_items: Vec::new(),
+            is_complete: false,
+        }
+    }
+
+    fn offer(npc: u64, quest_id: u32, auto_finish: u32) -> QuestOfferReward {
+        QuestOfferReward {
+            npc,
+            quest_id,
+            title: "A Threat Within".into(),
+            offer_text: String::new(),
+            auto_finish,
+            choices: Vec::new(),
+            rewards: Vec::new(),
+            money: 0,
+            quest_flags: 0,
+            reward_spell: 0,
+        }
     }
 }

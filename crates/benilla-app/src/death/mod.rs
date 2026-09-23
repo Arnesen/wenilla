@@ -65,6 +65,12 @@ pub(crate) struct DeathNet {
     pub(crate) corpse: Option<CorpsePoint>,
     /// A pending resurrection offer; cleared when answered or when the popup times out.
     pub(crate) resurrect: Option<ResurrectOffer>,
+    /// Bumped on every `SMSG_RESURRECT_REQUEST` — the offer announces per MESSAGE (wow-re
+    /// death-ui.md §8: handler `0x5e7bc0` signals per arrival through `0x5ded50`), not per
+    /// `Some`-edge. `resurrect` is only cleared by an Accept/Decline, and the stock UI can hide
+    /// the popup without either (PLAYER_UNGHOST's `StaticPopup_Hide` runs no `OnCancel`), so an
+    /// edge latch there swallowed every later offer for the session.
+    pub(crate) resurrect_generation: u32,
     /// Our streamed corpse OBJECT's guid (a TYPEID_CORPSE create whose `CORPSE_FIELD_OWNER` is
     /// us) — what `CMSG_RECLAIM_CORPSE` carries, like the real client. `None` until the corpse
     /// streams into range (vmangos ignores the guid's content, so a 0 send still reclaims —
@@ -141,9 +147,9 @@ struct DeathAnnounced {
     /// range events through the latch (the client's own re-announce, death-ui.md §4), so the
     /// RECOVER_CORPSE popup re-shows with the new delay.
     reclaim_generation: u32,
-    /// The pending resurrect offer has been announced to the UI (`RESURRECT_REQUEST` fired) —
-    /// held back while a player-caster's name is still resolving through the name cache.
-    offer_announced: bool,
+    /// The [`DeathNet::resurrect_generation`] this VM was last told about (`RESURRECT_REQUEST`
+    /// fired) — held back while a player-caster's name is still resolving through the name cache.
+    offer_generation: u32,
     /// The [`DeathNet::confirm_generation`] this latch last announced — a fresh
     /// `SMSG_SPIRIT_HEALER_CONFIRM` re-fires `CONFIRM_XP_LOSS` through the latch (decision 1068;
     /// the reclaim-latch pattern above). The old Some-edge latch here was B80's deadlock: it
@@ -324,22 +330,16 @@ fn feed_death(
     }
 
     // ── The offer/confirm announcements (edge-fired, name-gated) ───────────────────────────────
-    match &death_net.resurrect {
-        Some(offer) if !memo.offer_announced => {
-            // A player caster's wire name is empty — resolve through the ask-once name cache and
-            // hold the popup until it lands (the ref popup formats "%s wants to resurrect you").
-            let name = if offer.name.is_empty() {
-                names.resolve(offer.caster, &net).map(str::to_owned)
-            } else {
-                Some(offer.name.clone())
-            };
-            if let Some(name) = name {
-                memo.offer_announced = true;
-                script.fire_event("RESURRECT_REQUEST", vec![ScriptValue::Str(name)]);
-            }
+    if let Some(name) = offer_announcement(memo, &death_net, dead || ghost, |offer| {
+        // A player caster's wire name is empty — resolve through the ask-once name cache and
+        // hold the popup until it lands (the ref popup formats "%s wants to resurrect you").
+        if offer.name.is_empty() {
+            names.resolve(offer.caster, &net).map(str::to_owned)
+        } else {
+            Some(offer.name.clone())
         }
-        None => memo.offer_announced = false,
-        _ => {}
+    }) {
+        script.fire_event("RESURRECT_REQUEST", vec![ScriptValue::Str(name)]);
     }
     // The confirm is message-fired, not state-edged (decision 1068): each SMSG bumps the
     // generation, so asking the healer again after a Cancel brings the dialog back.
@@ -738,10 +738,85 @@ impl Plugin for DeathPlugin {
     }
 }
 
+/// The name `RESURRECT_REQUEST` should fire with this frame, if it should — and the latch
+/// advanced when it does.
+///
+/// Per message, gated on the dead predicate: `0x5ded50` fires only while `0x605f30` holds (health
+/// ≤ 0 or the ghost flag — `dead_or_ghost`), so a stale offer never reaches a living player's UI,
+/// even through a fresh VM after a `/reload`. A caster whose name is still resolving holds the
+/// announcement without consuming it.
+fn offer_announcement(
+    memo: &mut DeathAnnounced,
+    death_net: &DeathNet,
+    dead_or_ghost: bool,
+    name_of: impl FnOnce(&ResurrectOffer) -> Option<String>,
+) -> Option<String> {
+    if !dead_or_ghost || memo.offer_generation == death_net.resurrect_generation {
+        return None;
+    }
+    let name = name_of(death_net.resurrect.as_ref()?)?;
+    memo.offer_generation = death_net.resurrect_generation;
+    Some(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    fn offer(caster: u64, name: &str) -> ResurrectOffer {
+        ResurrectOffer {
+            caster,
+            name: name.into(),
+            sickness: false,
+            has_timer: true,
+        }
+    }
+
+    /// **An offer the UI hid without answering must not swallow the next one.** PLAYER_UNGHOST
+    /// hides the RESURRECT popups with `StaticPopup_Hide`, which runs no `OnCancel`, so no
+    /// Decline clears `resurrect`; the next death's `SMSG_RESURRECT_REQUEST` must still announce.
+    /// And a stale offer must never reach the UI of a living player (a `/reload` after the res).
+    #[test]
+    fn every_resurrect_message_announces_while_dead_and_never_while_alive() {
+        let mut net = DeathNet::default();
+        let mut memo = DeathAnnounced::default();
+        let name = |o: &ResurrectOffer| Some(o.name.clone());
+
+        net.resurrect = Some(offer(1, "Pone"));
+        net.resurrect_generation += 1;
+        assert_eq!(
+            offer_announcement(&mut memo, &net, true, name).as_deref(),
+            Some("Pone")
+        );
+        assert_eq!(
+            offer_announcement(&mut memo, &net, true, name),
+            None,
+            "once per message"
+        );
+
+        // Ran back instead: alive, the popup hidden, the offer never answered. A /reload now
+        // (a fresh VM memo) must not show "Pone wants to resurrect you" to a living player.
+        let mut reloaded = DeathAnnounced::default();
+        assert_eq!(offer_announcement(&mut reloaded, &net, false, name), None);
+
+        // Dead again, a new priest offers.
+        net.resurrect = Some(offer(2, "Ptwo"));
+        net.resurrect_generation += 1;
+        assert_eq!(
+            offer_announcement(&mut memo, &net, true, name).as_deref(),
+            Some("Ptwo"),
+            "the second offer announces"
+        );
+
+        // A name still resolving holds the announcement without consuming it.
+        net.resurrect_generation += 1;
+        assert_eq!(offer_announcement(&mut memo, &net, true, |_| None), None);
+        assert_eq!(
+            offer_announcement(&mut memo, &net, true, name).as_deref(),
+            Some("Ptwo")
+        );
+    }
 
     /// **The world scope dies with the session, and only with the session** (decision 1732).
     ///

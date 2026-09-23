@@ -32,6 +32,7 @@ pub(crate) mod handlers;
 pub(crate) mod io;
 mod motion;
 mod objects;
+pub(crate) use objects::tear_down;
 mod session;
 mod world;
 

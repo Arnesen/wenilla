@@ -24,11 +24,12 @@ use benilla_formats::{
     SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_SPELL,
 };
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
+use benilla_protocol::{SessionEvent, SessionEventKind};
 use benilla_ui::script::{CraftReagent, CraftRecipe, CraftState, CraftTooltip, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
+use crate::net::{NetCommands, NetHandlerApp, ObjectStore, Objects, SelfPlayer};
 use crate::spell::{cast_target, CastCommit, CastLadder};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_items::{count_of, item_icon, InventoryScope};
@@ -47,7 +48,9 @@ use crate::ui_unit::UnitFeed;
 /// type** that opened it. Routed here by the opener's `EffectMiscValue[0] != 0` (byte-VERIFIED —
 /// wow-re `tradeskill` TU-A); that same misc value *is* the craft type (1 Beast Training ·
 /// 3 Enchanting), which the client keeps at `ds:0xbdcfb8` and reads for both the window's admission
-/// filter and its row comparator (decision 1124). Client-local state, no wire.
+/// filter and its row comparator (decision 1124). Client-local state, no wire. Cleared by the Lua
+/// close and by the session end ([`on_session_end`]) — a logout's fresh VM never runs the old one's
+/// `OnHide`, so the close alone would carry the window into the next login.
 #[derive(Resource, Default)]
 pub(crate) struct CraftOpen {
     pub(crate) line: Option<u32>,
@@ -58,11 +61,18 @@ pub(crate) struct UiCraftPlugin;
 
 impl Plugin for UiCraftPlugin {
     fn build(&self, app: &mut App) {
+        app.net_handler(SessionEventKind::Disconnected, on_session_end);
         app.init_resource::<CraftOpen>().add_systems(
             Update,
             (feed_craft.in_set(UnitFeed), drain_craft.after(UiInput)),
         );
     }
+}
+
+/// The Craft window dies with the session — a listener on the session end (a second handler on
+/// the kind, after the bridge's own teardown).
+fn on_session_end(In(_): In<SessionEvent>, mut open: ResMut<CraftOpen>) {
+    *open = CraftOpen::default();
 }
 
 /// The line's `(rank, max, bonus)` off the skill block — the Craft window bands difficulty on
@@ -401,5 +411,30 @@ mod tests {
         teacher.effects[1] = SPELL_EFFECT_LEARN_SPELL;
         teacher.effect_trigger_spell[1] = 999_999;
         assert_eq!(craft_tooltip(5149, &teacher), CraftTooltip::Spell(999_999));
+    }
+
+    /// **The Craft window dies with the session** — the TradeSkill book's twin: only `CloseCraft`
+    /// cleared it, and a logout's fresh VM never runs the old one's `OnHide`, so the next login
+    /// fired `CRAFT_SHOW` into the new character's UI.
+    #[test]
+    fn the_session_end_closes_the_craft_window() {
+        let mut app = App::new();
+        app.add_plugins(UiCraftPlugin);
+        {
+            let mut open = app.world_mut().resource_mut::<CraftOpen>();
+            open.line = Some(333);
+            open.craft_type = 3;
+        }
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+        );
+
+        let open = app.world().resource::<CraftOpen>();
+        assert_eq!((open.line, open.craft_type), (None, 0));
     }
 }

@@ -42,7 +42,7 @@ use benilla_formats::{load_faction_catalog, reputation_rank, FactionCatalog, Rea
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
-use crate::net::{NetEntity, ObjectStore, Reputations, SelfPlayer};
+use crate::net::{Guid, NetEntity, ObjectStore, Reputations, SelfPlayer};
 use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::decal::{DecalFrame, WorldDecal};
 use benilla_world::particles::buffer::EffectVertex;
@@ -256,8 +256,9 @@ pub(super) fn load_factions(mut commands: Commands, world_assets: Option<Res<Wor
 /// (`OBJECT_FIELD_SCALE_X`). Colour = the target's
 /// reaction rank ([`ring_reaction`]), re-resolved each frame (faction can change live — the store
 /// merges `Values` deltas), the handle swapped only on change. No pulse — the reference's unit ring
-/// is steady. If the target's entity is gone (destroyed / streamed out) the selection clears and the
-/// server is told — the reference's teardown clear sends `CMSG_SET_SELECTION 0` on both paths.
+/// is steady. If the target is no longer an object (destroyed / streamed out — torn down, even while
+/// its model fades) the selection clears and the server is told — the reference's teardown clear
+/// sends `CMSG_SET_SELECTION 0` on both paths.
 #[allow(clippy::type_complexity)]
 pub(super) fn update_ring(
     mut selection: ResMut<Selection>,
@@ -287,14 +288,22 @@ pub(super) fn update_ring(
     // box, `0x60ce70` tail → `0x60aee0`; the scale law is B3 —
     // `SCALE_X × CreatureDisplayInfo.creatureModelScale`, and the child's `NetEntity.scale`
     // carries exactly the CDI column).
+    //
+    // `.0` is filtered on [`Guid`] — **a live object**, not merely a drawn model: a torn-down
+    // unit keeps its model (and its `Transform`) for the two-second fadeout, but sheds its guid
+    // at the teardown ([`crate::net::tear_down`]), so it lands in the gone-object branch below on
+    // the teardown's own frame rather than when the fade despawns it.
     targets: (
-        Query<(
-            &Transform,
-            Option<&SelectionRadius>,
-            Option<&ObjectStore>,
-            Option<&NetEntity>,
-            Option<&crate::entities::mount::MountChild>,
-        )>,
+        Query<
+            (
+                &Transform,
+                Option<&SelectionRadius>,
+                Option<&ObjectStore>,
+                Option<&NetEntity>,
+                Option<&crate::entities::mount::MountChild>,
+            ),
+            With<Guid>,
+        >,
         Query<(&NetEntity, Option<&SelectionRadius>), With<crate::entities::mount::MountBody>>,
         // The party roster — the selector's 4-slot guid table (the party ring colours).
         Res<crate::ui_party::GroupState>,
@@ -414,9 +423,10 @@ pub(super) fn update_ring(
                 // own no-ground gate (`0x6d74b5`: the whole draw is skipped).
                 !projected
             }
-            // The target entity no longer exists (destroyed or streamed out): clear, informing the
-            // server — the reference's teardown does exactly this for both removal paths (object
-            // deactivate → the selection clear + `CMSG_SET_SELECTION 0`, byte-verified — wow-re
+            // The target is no longer an object (destroyed or streamed out — torn down, its model
+            // perhaps still fading; or despawned outright): clear, informing the server — the
+            // reference's teardown does exactly this for both removal paths (object deactivate →
+            // the selection clear + `CMSG_SET_SELECTION 0`, byte-verified — wow-re
             // selection-death-clear RE; this is also what drops a selected corpse at respawn, when
             // the server destroys it ahead of the fresh create).
             Err(_) => {
@@ -1344,5 +1354,187 @@ mod tests {
             Some(&me),
             false
         ));
+    }
+
+    /// **A torn-down object stops being an object at the teardown, not when its model is done
+    /// fading.** The reference's two teardown routes (`SMSG_DESTROY_OBJECT`, the OUT_OF_RANGE
+    /// block) both reach `0x464920` → OnDeactivate `0x5fbb60` → `0x493910`, which clears a
+    /// matching selection and sends `CMSG_SET_SELECTION 0` on the spot; only the detached model
+    /// survives into the `SWModelFadeout` scheduler (wow-re `selection-death-clear.md` Q2,
+    /// decision 2198). Driven through the real handler table on the built client, then the real
+    /// ring and the real nearest-enemy scan, one pass each — no fade time elapses.
+    mod teardown {
+        use benilla_protocol::field::{
+            FIELD_UNIT_FLAGS, FIELD_UNIT_HEALTH, FIELD_UNIT_LEVEL, FIELD_UNIT_MAXHEALTH,
+        };
+        use benilla_protocol::messages::ObjectType;
+        use benilla_protocol::{EntityKind, ObjectFields, SessionEvent};
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::prelude::*;
+        use crossbeam_channel::Receiver;
+
+        use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+        use crate::target::{attack_order_target, Selection, TargetScan};
+        use benilla_world::model_fade::DespawnFade;
+
+        const ME: u64 = 0x0000_0000_0000_0007;
+        const MOB: u64 = 0xF130_0000_1234_0001;
+
+        fn create(guid: u64) -> SessionEvent {
+            SessionEvent::ObjectCreate {
+                guid,
+                kind: EntityKind::Unit,
+                display_id: None,
+                position: [3.0, 0.0, 0.0],
+                orientation: 0.0,
+                scale: 1.0,
+                speeds: None,
+                mover: None,
+                transport_progress: None,
+                transport: None,
+                spline: None,
+                fields: ObjectFields::from_pairs(&[
+                    (FIELD_UNIT_HEALTH, 100),
+                    (FIELD_UNIT_MAXHEALTH, 100),
+                    (FIELD_UNIT_LEVEL, 9),
+                ])
+                .into_created(ObjectType::Unit),
+            }
+        }
+
+        /// The built client with our own avatar and one live mob in the index, the mob
+        /// selected, and the write channel captured.
+        fn client_with_selected_mob() -> (App, Entity, Receiver<ClientCommand>) {
+            let mut app = crate::game_plugins::schedule_tests::headless_client();
+            let (tx, rx) = crossbeam_channel::unbounded();
+            app.insert_resource(NetCommands(tx));
+            let world = app.world_mut();
+            // Inserted by a Startup system on a real boot; no schedule runs here.
+            world.init_resource::<super::super::RingState>();
+            let me = world
+                .spawn((
+                    SelfPlayer,
+                    Guid(ME),
+                    Transform::default(),
+                    ObjectStore(
+                        // Player-controlled (`UNIT_FLAG_PVP_ATTACKABLE`), so a neutral mob is
+                        // attackable with no faction catalog loaded — the scan's control half.
+                        ObjectFields::from_pairs(&[
+                            (FIELD_UNIT_HEALTH, 100),
+                            (FIELD_UNIT_MAXHEALTH, 100),
+                            (FIELD_UNIT_FLAGS, 0x8),
+                        ])
+                        .into_created(ObjectType::Player),
+                    ),
+                ))
+                .id();
+            world.resource_mut::<GuidIndex>().0.insert(ME, me);
+            crate::net::handlers::dispatch(world, vec![create(MOB)]);
+            let mob = world.resource::<GuidIndex>().0[&MOB];
+            *world.resource_mut::<Selection>() = Selection {
+                target: Some(mob),
+                guid: Some(MOB),
+            };
+            // The control: a live selected unit keeps its selection through a ring pass.
+            world
+                .run_system_once(super::super::update_ring)
+                .expect("the ring runs on the built client");
+            assert_eq!(world.resource::<Selection>().guid, Some(MOB));
+            // (The create's own name query is on the channel; only a selection send matters.)
+            assert!(
+                !rx.try_iter()
+                    .any(|c| matches!(c, ClientCommand::SetSelection { .. })),
+                "a live target is not deselected"
+            );
+            (app, mob, rx)
+        }
+
+        fn selection_cleared_at(teardown: SessionEvent) {
+            let (mut app, mob, rx) = client_with_selected_mob();
+            let world = app.world_mut();
+            crate::net::handlers::dispatch(world, vec![teardown]);
+            // The model is still there, fading — the scheduler's half of the teardown.
+            assert!(
+                world.get_entity(mob).is_ok(),
+                "the model outlives the object"
+            );
+            assert!(world.get::<DespawnFade>(mob).is_some(), "…and fades");
+            world
+                .run_system_once(super::super::update_ring)
+                .expect("the ring runs on the built client");
+            let sel = world.resource::<Selection>();
+            assert_eq!(
+                (sel.target, sel.guid),
+                (None, None),
+                "the selection ends with the object, not 2 s later with its model"
+            );
+            let sent: Vec<_> = rx.try_iter().collect();
+            assert!(
+                sent.iter()
+                    .any(|c| matches!(c, ClientCommand::SetSelection { guid: 0 })),
+                "the server is told at the teardown: {sent:?}"
+            );
+        }
+
+        #[test]
+        fn a_destroyed_target_clears_the_selection_at_the_destroy() {
+            selection_cleared_at(SessionEvent::ObjectDestroyed(MOB));
+        }
+
+        #[test]
+        fn a_streamed_out_target_clears_the_selection_at_the_stream_out() {
+            selection_cleared_at(SessionEvent::ObjectsRemoved(vec![MOB]));
+        }
+
+        /// The nearest-enemy acquire (the TAB core) cannot pick a fading model: it is not an
+        /// object any more. The control half proves the scan does find the mob while it lives.
+        #[test]
+        fn the_nearest_enemy_scan_never_picks_a_torn_down_object() {
+            let (mut app, _mob, _rx) = client_with_selected_mob();
+            let world = app.world_mut();
+            let acquire = |world: &mut World| {
+                *world.resource_mut::<Selection>() = Selection::default();
+                world
+                    .run_system_once(
+                        |scan: TargetScan,
+                         mut sel: ResMut<Selection>,
+                         mut seam: crate::creature_anim::AttackSeam,
+                         mut errors: ResMut<crate::ui_action::UiErrorKeys>| {
+                            attack_order_target(&scan, &mut sel, &mut seam, &mut errors)
+                        },
+                    )
+                    .expect("the scan runs on the built client")
+            };
+            assert_eq!(
+                acquire(world),
+                Some(MOB),
+                "control: the live mob is acquired"
+            );
+            crate::net::handlers::dispatch(world, vec![SessionEvent::ObjectsRemoved(vec![MOB])]);
+            assert_eq!(acquire(world), None, "the fading model is not a candidate");
+        }
+
+        /// The corpse → respawn shape: the server destroys the old object and creates the same
+        /// guid again in one tick. The fresh create is a new live object, and the old model
+        /// fading beside it no longer answers to the guid.
+        #[test]
+        fn a_same_tick_recreate_is_a_fresh_object_and_the_old_model_is_nobody() {
+            let (mut app, old, _rx) = client_with_selected_mob();
+            let world = app.world_mut();
+            crate::net::handlers::dispatch(
+                world,
+                vec![SessionEvent::ObjectDestroyed(MOB), create(MOB)],
+            );
+            let fresh = world.resource::<GuidIndex>().0[&MOB];
+            assert_ne!(fresh, old, "a fresh entity for the fresh object");
+            assert!(world.get::<DespawnFade>(fresh).is_none());
+            let answering: Vec<Entity> = world
+                .query::<(Entity, &Guid)>()
+                .iter(world)
+                .filter(|(_, g)| g.0 == MOB)
+                .map(|(e, _)| e)
+                .collect();
+            assert_eq!(answering, [fresh], "one object answers to the guid");
+        }
     }
 }

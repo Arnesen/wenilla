@@ -72,6 +72,9 @@ enum ControlVerdict {
 ///
 /// Skipped while a server-authored spline owns the body: the reference returns early on that edge
 /// (`0x619d50`), and vmangos would discard it anyway (`HasPendingSplineDone`).
+/// The pitch a login opens at when no saved camera pose names one.
+const LOGIN_PITCH: f32 = -0.45;
+
 fn yield_own_body(net_cmds: &NetCommands, player: &mut Player, self_guid: Option<u64>) {
     movement_net::park_mover(&net_cmds.0, player);
     let Some(me) = self_guid else { return };
@@ -452,7 +455,7 @@ pub(super) fn apply_server_moves(
                                            // orientation on a fresh login) — adopt it whole, camera seated behind, like
                                            // the reference. Zeroing here made every login face due north regardless.
                 cam.yaw = yaw;
-                cam.pitch = -0.45;
+                cam.pitch = player.login_pitch.unwrap_or(LOGIN_PITCH);
             }
             // The camera is deliberately NOT re-seated on a mover change: it is already on the new
             // body (Mind Control sets `PLAYER_FARSIGHT` to the victim alongside the handoff, so

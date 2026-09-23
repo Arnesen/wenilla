@@ -876,6 +876,11 @@ pub(crate) struct Player {
     /// judgement and pushes [`Player::settle_deadline`] forward, so the timeout budget measures
     /// time waiting for the *destination's* world (decisions 0710 + 0737).
     pub(crate) world_stale: bool,
+    /// The pitch the login seize seats the camera at — the saved pose's `cameraPitch` when
+    /// [`super::camera_saved`] restored one for this session, else the shipped opening pitch. Set
+    /// by the pose load, read once by the seize: the seize used to seat its own constant over the
+    /// restored value, so the pitch half of the remembered pose never survived a login.
+    pub(super) login_pitch: Option<f32>,
     /// A same-map teleport landed: the server relocated the mover, so any in-progress self
     /// server-ride (charge/taxi) is **void** — vmangos teleports at ITS flight end (its own spline
     /// finishes ~latency before ours) and its spline-done handler ignores acks while the teleport
@@ -1323,8 +1328,9 @@ impl Player {
     }
 
     /// A server-authored spline currently owns the avatar (Charge/knockback/taxi — the
-    /// [`super::server_ride`] state). For instruments (the taxi probe watches the flight run) and
-    /// the UI's `UnitOnTaxi` feed.
+    /// [`super::server_ride`] state). For instruments (the taxi probe watches the flight run).
+    /// **Not** `UnitOnTaxi` — a fear or a charge is a server ride too; that verb reads
+    /// [`crate::player::UNIT_FLAG_TAXI_FLIGHT`] off the descriptor (`0x517a86`).
     pub(crate) fn server_riding(&self) -> bool {
         self.server_riding
     }

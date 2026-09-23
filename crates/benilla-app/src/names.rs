@@ -1,11 +1,13 @@
 //! Unit-name resolution — the query-cache seam of decision 0068 §3.
 //!
 //! The 1.12 wire carries **no names in descriptors**: a player's name answers `CMSG_NAME_QUERY`
-//! (keyed by guid), a creature's answers `CMSG_CREATURE_QUERY` (keyed by the template *entry*
-//! embedded in its guid, shared by every spawn of that template — exactly how the real client
-//! recovers it). This module owns the cache and the **ask-once** discipline: a consumer calls
-//! [`NameCache::resolve`], which returns the name when known and otherwise issues the query (deduped
-//! while in flight) and reports "not yet". The net bridge ([`crate::net`]) fills the cache from the
+//! (keyed by guid), a creature's answers `CMSG_CREATURE_QUERY` (keyed by the template *entry*,
+//! shared by every spawn of that template), a pet's or charm's answers `CMSG_PET_NAME_QUERY`
+//! (keyed by its pet number). Which of the three names a streamed unit is read off its
+//! **descriptor**, as the reference's `GetUnitName` (`0x609210`) reads it — see [`NameKey`]. This
+//! module owns the cache and the **ask-once** discipline: a consumer calls
+//! [`NameCache::resolve_unit`] (or [`NameCache::resolve`] with only a guid), which returns the name
+//! when known and otherwise issues the query (deduped while in flight) and reports "not yet". The net bridge ([`crate::net`]) fills the cache from the
 //! decoded `PlayerName`/`CreatureName` events and clears the in-flight sets on disconnect (a query
 //! dropped by a dead writer must be re-askable after reconnect).
 //!
@@ -171,29 +173,96 @@ pub(crate) fn gated_rank(rec: Option<&CreatureRecord>, store: Option<&ObjectStor
     }
 }
 
-impl NameCache {
-    /// The name for `guid`, if known. On a miss, sends the right query (once per guid/entry per
-    /// connection) and returns `None` — call again after the answer lands. A guid family that has no
-    /// name on the 1.12 wire (GameObjects resolve via their own query, not modeled yet) is `None`
-    /// without a query.
-    pub(crate) fn resolve(&self, guid_val: u64, commands: &NetCommands) -> Option<&str> {
+/// Which of the three caches names a unit, and under which key — the branch of the reference's
+/// `CGUnit_C::GetUnitName` (`0x609210`), which is also what the combat log's `GetObjectName`
+/// (`0x6264e0`) calls for any streamed unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NameKey {
+    /// A player — the `OBJECT_FIELD_TYPE` player bit (`0x609232 shr ecx,4; test cl,1`): the
+    /// name cache by guid.
+    Player(u64),
+    /// `UNIT_FIELD_PETNUMBER` non-zero (`0x609295`): the pet-name cache under that number.
+    Pet(u32),
+    /// `UNIT_FIELD_PETNUMBER` zero (`0x60929d je 0x60934b`): the creature record at `[unit+0xb30]`,
+    /// which is registered under the descriptor's `OBJECT_FIELD_ENTRY` (`0x60b160`).
+    Creature(u32),
+}
+
+impl NameKey {
+    /// The key for `guid`, read off its descriptor when one is in hand.
+    ///
+    /// **With a descriptor this is `0x609210` exactly**: the pet number and the template entry are
+    /// the unit's *fields*, never the guid's bits. The two disagree more often than they agree
+    /// outside a hunter's or warlock's own pet — vmangos gives a companion pet a `HIGHGUID_PET`
+    /// guid around a fresh pet number but never files it in the charm info (so `PETNUMBER` is 0 and
+    /// the server would ignore a pet-name query for it); a guardian's `SetPetNumber(n, false)`
+    /// writes 0; a mind-controlled creature keeps a `HIGHGUID_UNIT` guid and gains a non-zero
+    /// number.
+    ///
+    /// **Without one it is the best the guid can say**, and says less: a `HIGHGUID_PET` guid's
+    /// entry slot is taken as the pet number, which is right for a permanent pet (`Pet::Create`
+    /// feeds the same number to both — `SetPetNumber(n, IsPermanentPetFor(owner))`) and cannot name
+    /// a companion or a guardian. A caller that holds the unit's store must pass it.
+    fn of(guid_val: u64, unit: Option<&ObjectStore>) -> Option<Self> {
         if guid::is_player(guid_val) {
-            self.players
+            return Some(Self::Player(guid_val));
+        }
+        if !guid::is_creature_or_pet(guid_val) {
+            return None;
+        }
+        match unit {
+            Some(unit) => match unit.0.unit_pet_number() {
+                0 => unit
+                    .0
+                    .object_entry()
+                    .filter(|&e| e != 0)
+                    .or_else(|| guid::entry(guid_val))
+                    .map(Self::Creature),
+                n => Some(Self::Pet(n)),
+            },
+            None => guid::pet_number(guid_val)
+                .map(Self::Pet)
+                .or_else(|| guid::entry(guid_val).map(Self::Creature)),
+        }
+    }
+}
+
+impl NameCache {
+    /// The name for `guid` **when no descriptor for it is in hand**, if known — a roster member, a
+    /// mail sender, a chat speaker, a unit that has left. On a miss, sends the right query (once
+    /// per key per connection) and returns `None` — call again after the answer lands. A guid
+    /// family that has no name on the 1.12 wire (GameObjects resolve via their own query, not
+    /// modeled yet) is `None` without a query.
+    ///
+    /// **A caller holding the unit's [`ObjectStore`] uses [`Self::resolve_unit`]** — the guid
+    /// alone cannot name a companion pet or a guardian ([`NameKey::of`]).
+    pub(crate) fn resolve(&self, guid_val: u64, commands: &NetCommands) -> Option<&str> {
+        self.resolve_unit(guid_val, None, commands)
+    }
+
+    /// The name for a unit, keyed off its descriptor — the reference's `GetUnitName`
+    /// (`0x609210`, see [`NameKey`]). `unit: None` degrades to [`Self::resolve`]'s guid-only key.
+    /// Same ask-once discipline on every branch.
+    pub(crate) fn resolve_unit(
+        &self,
+        guid_val: u64,
+        unit: Option<&ObjectStore>,
+        commands: &NetCommands,
+    ) -> Option<&str> {
+        match NameKey::of(guid_val, unit)? {
+            NameKey::Player(guid_val) => self
+                .players
                 .get_or_ask(guid_val, || {
                     debug!("names: asking player name (guid {guid_val})");
                     let _ = commands.0.send(ClientCommand::NameQuery { guid: guid_val });
                 })
-                .map(String::as_str)
-        } else if let Some(pet_number) = guid::pet_number(guid_val) {
-            // A pet is a `TYPEID_UNIT` like any creature, but it carries a pet number where a
-            // creature carries its template entry, so it has its own query. Asking the creature
-            // query for that number is what left every summoned pet nameless.
-            self.resolve_pet(pet_number, guid_val, commands)
-        } else if guid::is_creature_or_pet(guid_val) {
-            let entry = guid::entry(guid_val)?;
-            self.resolve_creature(entry, guid_val, commands)
-        } else {
-            None
+                .map(String::as_str),
+            // A pet is a `TYPEID_UNIT` like any creature, but one with a pet number is named
+            // through its own query. Asking the creature query for the number is what left every
+            // summoned pet nameless; asking the pet query for a number the server never filed is
+            // what left every companion pet nameless.
+            NameKey::Pet(pet_number) => self.resolve_pet(pet_number, guid_val, commands),
+            NameKey::Creature(entry) => self.resolve_creature(entry, guid_val, commands),
         }
     }
 
@@ -237,18 +306,19 @@ impl NameCache {
     }
 
     /// The cached name for `guid`, read-only — no query on a miss (the trace/diagnostic twin of
-    /// [`Self::resolve`], for callers that must not mutate the ask-once state).
+    /// [`Self::resolve`], for callers that must not mutate the ask-once state). Guid-only, with
+    /// [`Self::resolve`]'s limits; [`Self::peek_unit`] is the descriptor-keyed twin.
     pub(crate) fn peek(&self, guid_val: u64) -> Option<&str> {
-        if guid::is_player(guid_val) {
-            self.players.get(guid_val).map(String::as_str)
-        } else if let Some(pet_number) = guid::pet_number(guid_val) {
-            self.pets.get(pet_number).map(String::as_str)
-        } else if guid::is_creature_or_pet(guid_val) {
-            self.creatures
-                .get(guid::entry(guid_val)?)
-                .map(|r| r.name.as_str())
-        } else {
-            None
+        self.peek_unit(guid_val, None)
+    }
+
+    /// The cached name for a unit keyed off its descriptor, read-only — [`Self::resolve_unit`]'s
+    /// no-query twin.
+    pub(crate) fn peek_unit(&self, guid_val: u64, unit: Option<&ObjectStore>) -> Option<&str> {
+        match NameKey::of(guid_val, unit)? {
+            NameKey::Player(guid_val) => self.players.get(guid_val).map(String::as_str),
+            NameKey::Pet(pet_number) => self.pets.get(pet_number).map(String::as_str),
+            NameKey::Creature(entry) => self.creatures.get(entry).map(|r| r.name.as_str()),
         }
     }
 
@@ -1098,6 +1168,110 @@ mod tests {
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::CreatureQuery { entry: 100, .. })
+        ));
+    }
+
+    /// `OBJECT_FIELD_ENTRY` and `UNIT_FIELD_PETNUMBER`, absolute descriptor indices.
+    const ENTRY: u16 = 3;
+    const PETNUMBER: u16 = 139;
+
+    fn unit(fields: &[(u16, u32)]) -> ObjectStore {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(fields))
+    }
+
+    fn record(name: &str) -> CreatureRecord {
+        CreatureRecord {
+            name: name.into(),
+            subname: None,
+            creature_type: 0,
+            pet_family: 0,
+            rank: 0,
+            type_flags: 0,
+            civilian: false,
+            racial_leader: false,
+            display_id: 0,
+        }
+    }
+
+    /// **A companion pet is named by its template, not by the pet number in its guid** —
+    /// `0x609210`'s `UNIT_FIELD_PETNUMBER == 0` leg. vmangos builds a mini-pet as a
+    /// `HIGHGUID_PET` guid around a fresh pet number but never files that number in its charm
+    /// info, so a `CMSG_PET_NAME_QUERY` for it is never answered (`PetHandler.cpp:190-192`) — the
+    /// guid-keyed resolve left every Mechanical Squirrel "Unknown" forever. Its descriptor says
+    /// PETNUMBER 0, and the reference reads the creature record under `OBJECT_FIELD_ENTRY`.
+    #[test]
+    fn a_companion_pet_is_named_by_its_descriptor_entry() {
+        let (cmds, rx) = commands();
+        let mut cache = NameCache::default();
+        let squirrel = compose(guid::HIGH_PET, 5_021, 3);
+        let store = unit(&[(ENTRY, 2_671), (PETNUMBER, 0)]);
+        cache.insert_creature(2_671, Some(record("Mechanical Squirrel")));
+
+        assert_eq!(
+            cache.resolve_unit(squirrel, Some(&store), &cmds),
+            Some("Mechanical Squirrel")
+        );
+        assert_eq!(
+            cache.peek_unit(squirrel, Some(&store)),
+            Some("Mechanical Squirrel")
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "no pet-name query for a unit whose PETNUMBER is 0"
+        );
+    }
+
+    /// The cold companion asks the CREATURE query for its descriptor entry — once.
+    #[test]
+    fn a_cold_companion_pet_asks_the_creature_query_for_its_entry() {
+        let (cmds, rx) = commands();
+        let cache = NameCache::default();
+        let squirrel = compose(guid::HIGH_PET, 5_021, 3);
+        let store = unit(&[(ENTRY, 2_671)]);
+
+        assert_eq!(cache.resolve_unit(squirrel, Some(&store), &cmds), None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CreatureQuery { entry: 2_671, guid }) if guid == squirrel
+        ));
+        assert_eq!(cache.resolve_unit(squirrel, Some(&store), &cmds), None);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    /// A hunter/warlock pet carries its pet number in the descriptor (`SetPetNumber(n, true)`),
+    /// and that is the key the pet-name query goes out under — not the creature template.
+    #[test]
+    fn a_permanent_pet_asks_the_pet_query_for_its_descriptor_number() {
+        let (cmds, rx) = commands();
+        let mut cache = NameCache::default();
+        let rex = compose(guid::HIGH_PET, 7, 42);
+        let store = unit(&[(ENTRY, 3_122), (PETNUMBER, 7)]);
+        cache.insert_creature(3_122, Some(record("Bloodtalon Taillasher")));
+
+        assert_eq!(cache.resolve_unit(rex, Some(&store), &cmds), None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::PetNameQuery { pet_number: 7, guid }) if guid == rex
+        ));
+        cache.insert_pet(7, "Rex".into());
+        assert_eq!(cache.resolve_unit(rex, Some(&store), &cmds), Some("Rex"));
+        assert_eq!(cache.peek_unit(rex, Some(&store)), Some("Rex"));
+    }
+
+    /// A mind-controlled creature (`HIGHGUID_UNIT` guid) carries a pet number too
+    /// (`SpellAuras.cpp:3248`, `SetPetNumber(GeneratePetNumber(), true)`), and the reference names
+    /// it through the pet-name cache under that number for as long as the charm holds.
+    #[test]
+    fn a_charmed_creature_is_named_by_its_pet_number() {
+        let (cmds, rx) = commands();
+        let cache = NameCache::default();
+        let ogre = compose(guid::HIGH_UNIT, 1_000, 9);
+        let store = unit(&[(ENTRY, 1_000), (PETNUMBER, 55)]);
+
+        assert_eq!(cache.resolve_unit(ogre, Some(&store), &cmds), None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::PetNameQuery { pet_number: 55, .. })
         ));
     }
 }

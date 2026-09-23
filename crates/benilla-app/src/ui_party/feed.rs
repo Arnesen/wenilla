@@ -1126,9 +1126,10 @@ fn test_apply_local(
 ) -> bool {
     match req {
         PartyRequest::Leave => {
-            // A local disband: the real path's all-zero list resets everything, sandbox
-            // flag included — `/partytest` starts a fresh one.
-            *group = GroupState::default();
+            // A local disband: exactly what the real path's all-zero list resets — the group
+            // facts, sandbox flag included (`/partytest` starts a fresh one), and not the
+            // session's tickets.
+            group.leave_group();
             true
         }
         PartyRequest::UninviteUnit(token) => {

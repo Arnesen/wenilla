@@ -106,7 +106,9 @@ pub(super) fn feed_pet_unit(
         .then(|| pet.store(pet_guid))
         .flatten()
         .map(|store| {
-            let name = names.resolve(pet_guid, &commands).map(str::to_string);
+            let name = names
+                .resolve_unit(pet_guid, Some(store), &commands)
+                .map(str::to_string);
             // No `ChrClasses.dbc` here, and none needed: a pet is a UNIT, so the reference's
             // own TYPEMASK_PLAYER gate refuses it before the class byte is ever read. Passing
             // the table could not change the answer.

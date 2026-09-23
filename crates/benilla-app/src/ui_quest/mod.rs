@@ -55,12 +55,24 @@ pub(crate) struct QuestGiver {
     pub(crate) npc: Option<u64>,
     /// The open panel's wire view.
     pub(crate) view: Option<QuestView>,
-    /// The trailing `u32` of the last `SMSG_QUESTGIVER_QUEST_DETAILS`
-    /// ([`benilla_protocol::messages::QuestDetails::auto_finish`]) — the reference's `0xbe0824`,
-    /// a **latch** written by the DETAILS handler rather than a field of the open view, because
-    /// that is the shape the binary has and because its one reader ([`end_quest_session`]) runs
-    /// whichever panel is up. Non-zero suppresses the giver re-open on close (decision 1738).
-    pub(crate) detail_flag: u32,
+    /// The reference's `0xbe0824` — a **latch** written by THREE panel packets, not a field of
+    /// the open view: `SMSG_QUESTGIVER_QUEST_DETAILS`' trailing `u32` (publisher `0x500ef0`,
+    /// `0x50101a`), `SMSG_QUESTGIVER_OFFER_REWARD`'s `u32` after the reward text (the same
+    /// publisher), and `SMSG_QUESTGIVER_REQUEST_ITEMS`' `closeOnCancel` (`0x501070`, `0x50111a`);
+    /// zeroed only by the world-enter reset `0x500af0` (wow-re `quest-share-flow.md` §5,
+    /// `quest-material-reward-spell-bindings.md` §3.2). The greeting packet leaves it alone. Its
+    /// one reader is `DeclineQuest`'s fork ([`decline_leg`]), where non-zero diverts a plain
+    /// unit's decline from the giver re-open to the silent teardown — how the server says "this
+    /// panel was not reached through a menu, there is nothing to go back to" (vmangos sends 1 on
+    /// every DETAILS and OFFER_REWARD, and `closeOnCancel` = 1 on a single-quest auto-open,
+    /// 0 on the `COMPLETE_QUEST` path, `QuestHandler.cpp:390-395`).
+    pub(crate) close_on_cancel: u32,
+    /// The reference's "already acted" latch `0xbe0844`: set by every acting leg of
+    /// `AcceptQuest` (`0x5013c9`) and `DeclineQuest` (`0x50147a`/`0x5014d5`/`0x501549`), refusing
+    /// both verbs while set (`0x5013a8`, `0x5013fe`); cleared by each panel publish (`0x500bd0`,
+    /// `0x500d91` — our [`Self::open`]). It matters because a re-opening decline does not tear
+    /// the window down: the panel stays up until the server's answer replaces it.
+    pub(crate) acted: bool,
     /// Per-guid dialog status (`SMSG_QUESTGIVER_STATUS`) — the `!`/`?` marker's value, stored for a
     /// later world-marker slice.
     statuses: HashMap<u64, u32>,
@@ -94,6 +106,8 @@ impl QuestGiver {
     pub(crate) fn open(&mut self, npc: u64, view: QuestView) {
         self.npc = Some(npc);
         self.view = Some(view);
+        // `0x500bd0` clears the already-acted latch on every panel publish (`0x500d91`).
+        self.acted = false;
     }
 
     /// Whether a quest window is currently open (a predicate for callers + the module tests).
@@ -212,6 +226,8 @@ impl QuestGiver {
         self.clear();
         self.statuses.clear();
         self.messages.clear();
+        self.close_on_cancel = 0;
+        self.acted = false;
     }
 }
 
@@ -616,60 +632,84 @@ fn feed_quest(
     *last_npc = giver.npc;
 }
 
-/// Drain the Lua intents: the greeting-row selects (map to the row's quest id → QUERY_QUEST for an
-/// available quest, COMPLETE_QUEST for an active one) and the button actions (Accept/Continue/Reward
-/// → the matching CMSG; Close → a local clear, no packet).
-/// **The quest session's one end** — the reference's `0x501130`, which every way out of the
-/// questgiver window funnels through: `DeclineQuest()`, `CloseQuest()` (ESC, the window's own
-/// OnHide), the walk-away watchdog and the leave-world teardown are four of its eleven callers, and
-/// they all do the same thing. That is why benilla models one [`QuestAction::Close`] and not the
-/// `Decline`/`Close` pair 1733 briefly split it into: two Lua verbs, one routine (decision 1738,
-/// VERIFIED by the wow-re §5 dispatched for 1733).
+/// `CloseQuest()` — the teardown `0x501130(0,1)` its binding `0x501a10` calls and nothing else
+/// (wow-re `system/ui/scratch/quest-share-flow.md` §4.1): a PLAYER source — a party member whose
+/// shared quest we are walking away from — is answered `MSG_QUEST_PUSH_RESULT{DECLINE_QUEST}`;
+/// every other source is closed **network-silently**. There is no giver re-open here: that lives
+/// only in `DeclineQuest`'s fork ([`decline_leg`]). 1738 put the two verbs on one routine and so
+/// re-opened an NPC's list on ESC, which is the reason a multi-quest greeting could not be closed.
 ///
-/// It sends, and what it sends depends on **the giver's object type**, not on which button was
-/// pressed:
-///
-/// - **A player** — a party member whose shared quest we are turning down. The answer they are
-///   waiting on: `MSG_QUEST_PUSH_RESULT{sharerGuid, DECLINE_QUEST}`. This is the only verdict the
-///   client ever originates besides `BUSY`.
-/// - **A unit** — an ordinary questgiver, and the reference **re-opens its list**:
-///   `CMSG_GOSSIP_HELLO` for a gossip-flagged NPC, `CMSG_QUESTGIVER_HELLO` otherwise. Declining a
-///   quest putting you back in the NPC's menu is not a courtesy the server does; it is this send.
-///   benilla asserted the opposite in `QuestFrame.xml` ("vanilla's client-side decline sends no
-///   packet") from 0088 until 1738 refuted it at the bytes.
-///
-/// `detail_flag` suppresses the unit re-open when non-zero — the trailing `u32` of
-/// `SMSG_QUESTGIVER_QUEST_DETAILS` ([`QuestDetails::auto_finish`]), whose only reader in the whole
-/// image is this routine. `npc_flags` is `None` when the giver is not a streamed unit, which is
-/// also how an item giver (0664) and a player fall out of the unit branch.
-fn end_quest_session(npc: u64, detail_flag: u32, npc_flags: Option<u32>, commands: &NetCommands) {
+/// The PLAYER test is the guid's shape, as in [`QuestGiver::walk_away_send`]; the reference's
+/// `0x468460(typemask 0x10)` also requires the sharer to resolve, which a sharer out of view does
+/// not — a case the range guard closes on its own first.
+fn close_quest(npc: u64, commands: &NetCommands) {
     if benilla_protocol::guid::is_player(npc) {
-        debug!("ui_quest: declining {npc:#x}'s shared quest");
+        debug!("ui_quest: closing {npc:#x}'s shared quest — declining it");
         let _ = commands.0.send(ClientCommand::QuestPushResult {
             sharer: npc,
             msg: QuestShareMsg::DECLINE_QUEST,
         });
-        return;
-    }
-    let Some(flags) = npc_flags else {
-        // Not a streamed unit: an item giver, or an NPC that left view under the open window.
-        // Nothing to re-open and nobody to answer.
-        debug!("ui_quest: close on non-unit giver {npc:#x} (no packet)");
-        return;
-    };
-    if detail_flag != 0 {
-        debug!("ui_quest: close on {npc:#x} — detail flag {detail_flag} suppresses the re-open");
-        return;
-    }
-    if flags & crate::target::cursor_mode::npc_flags::GOSSIP != 0 {
-        debug!("ui_quest: close on {npc:#x} — re-opening the gossip menu");
-        let _ = commands.0.send(ClientCommand::GossipHello { guid: npc });
-    } else {
-        debug!("ui_quest: close on {npc:#x} — re-opening the quest list");
-        let _ = commands.0.send(ClientCommand::QuestgiverHello { npc });
     }
 }
 
+/// What `DeclineQuest()` does — the leg of its core `0x5013f0` a source takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeclineLeg {
+    /// The already-acted latch is set (`0x5013fe`), or the source does not resolve (`0x50142c`):
+    /// nothing at all — no send, no teardown.
+    Nothing,
+    /// The teardown `0x501130(0,1)` (`0x5014aa`): answers a PLAYER sharer, closes the window.
+    Teardown,
+    /// A gossip-flagged unit (`0x50143b`-`0x501474`): `CMSG_GOSSIP_HELLO`; the window stays.
+    GossipHello,
+    /// A plain unit (`0x5014e4`-`0x501526`): `CMSG_QUESTGIVER_HELLO`; the window stays.
+    QuestgiverHello,
+}
+
+/// **`DeclineQuest`'s fork** — its binding `0x501d30` calls `0x5013f0`, the one routine that
+/// re-opens a giver (wow-re `quest-share-flow.md` §6, read at the bytes `0x5013f0`-`0x501553`),
+/// tested in this order:
+///
+/// 1. the already-acted latch `0xbe0844` set, or the source unresolvable → nothing;
+/// 2. a UNIT whose `UNIT_NPC_FLAGS` carries GOSSIP → `CMSG_GOSSIP_HELLO` — **before** the
+///    `0xbe0824` test, so a gossip NPC is re-opened whatever the latch says;
+/// 3. an ITEM, a PLAYER, or `0xbe0824 != 0` → the teardown `0x501130(0,1)`, which answers a
+///    sharer and is silent otherwise;
+/// 4. a GAMEOBJECT → its interact virtual `[vtbl+0x60]` (`0x5014d0`);
+/// 5. any other unit → `CMSG_QUESTGIVER_HELLO`, which re-opens the quest list.
+///
+/// Legs 2, 4 and 5 set `0xbe0844` and do NOT tear the window down: the server's answer replaces
+/// the panel. **Leg 4 is modelled as the teardown**: wow-re pinned the call site as the generic
+/// interact virtual but not `CGGameObject_C`'s override (its §9), so what goes on the wire is
+/// unknown; a silent close is the one outcome that cannot leave a dead window up.
+///
+/// `npc_flags` is the giver's live `UNIT_NPC_FLAGS`, `None` when it does not resolve to a streamed
+/// object. An item giver (0664) is taken by its guid's shape: it lives in our bags, where the
+/// reference always resolves it. A player is taken by shape too, as in [`close_quest`].
+fn decline_leg(npc: u64, acted: bool, close_on_cancel: u32, npc_flags: Option<u32>) -> DeclineLeg {
+    use benilla_protocol::guid;
+    if acted {
+        return DeclineLeg::Nothing;
+    }
+    if guid::is_player(npc) || guid::is_item(npc) {
+        return DeclineLeg::Teardown;
+    }
+    let Some(flags) = npc_flags else {
+        return DeclineLeg::Nothing;
+    };
+    let unit = guid::is_creature_or_pet(npc);
+    if unit && flags & crate::target::cursor_mode::npc_flags::GOSSIP != 0 {
+        return DeclineLeg::GossipHello;
+    }
+    if close_on_cancel != 0 || !unit {
+        return DeclineLeg::Teardown;
+    }
+    DeclineLeg::QuestgiverHello
+}
+
+/// Drain the Lua intents: the greeting-row selects (map to the row's quest id → QUERY_QUEST for an
+/// available quest, COMPLETE_QUEST for an active one) and the button actions (Accept/Continue/Reward
+/// → the matching CMSG; Decline → [`decline_leg`]; Close → [`close_quest`]).
 fn drain_quest(
     script: Option<NonSendMut<UiScript>>,
     mut giver: ResMut<QuestGiver>,
@@ -687,7 +727,7 @@ fn drain_quest(
         script.take_quest_actions();
         return;
     };
-    // The giver's live `UNIT_NPC_FLAGS`, for [`end_quest_session`]'s gossip/quest-list fork.
+    // The giver's live `UNIT_NPC_FLAGS`, for [`decline_leg`]'s gossip/quest-list fork.
     // `None` for anything that is not a streamed unit — an item giver, a player, a despawn.
     let npc_flags = index
         .0
@@ -736,11 +776,35 @@ fn drain_quest(
     for action in script.take_quest_actions() {
         match action {
             QuestAction::Close => {
-                end_quest_session(npc, giver.detail_flag, npc_flags, &commands);
+                close_quest(npc, &commands);
                 giver.clear();
             }
+            QuestAction::Decline => {
+                let leg = decline_leg(npc, giver.acted, giver.close_on_cancel, npc_flags);
+                debug!("ui_quest: decline on {npc:#x} — {leg:?}");
+                match leg {
+                    DeclineLeg::Nothing => {}
+                    DeclineLeg::Teardown => {
+                        close_quest(npc, &commands);
+                        giver.clear();
+                    }
+                    DeclineLeg::GossipHello => {
+                        let _ = commands.0.send(ClientCommand::GossipHello { guid: npc });
+                        giver.acted = true;
+                    }
+                    DeclineLeg::QuestgiverHello => {
+                        let _ = commands.0.send(ClientCommand::QuestgiverHello { npc });
+                        giver.acted = true;
+                    }
+                }
+            }
             QuestAction::Accept => {
+                // `0x501380` refuses while the already-acted latch is set (`0x5013a8`).
+                if giver.acted {
+                    continue;
+                }
                 if let Some(quest) = view_quest {
+                    giver.acted = true;
                     let _ = commands
                         .0
                         .send(ClientCommand::QuestgiverAccept { npc, quest });
@@ -1083,15 +1147,26 @@ mod tests {
 
     // ── The party share's one client-originated verdict (decision 1733) ──────────────────────────
 
-    /// Run `lua` against a quest window open on `giver`, and return what the drain sent.
+    /// Run `lua` against a quest window open on `giver` with the `0xbe0824` latch at
+    /// `close_on_cancel`, and return what the drain sent.
     /// `npc_flags` seats the giver as a streamed unit with those `UNIT_NPC_FLAGS`; `None` leaves it
     /// unstreamed (an item giver, or an NPC that left view).
     fn drain_after(
         giver: u64,
         npc_flags: Option<u32>,
-        detail_flag: u32,
+        close_on_cancel: u32,
         lua: &str,
     ) -> Vec<ClientCommand> {
+        drain_world(giver, npc_flags, close_on_cancel, lua).1
+    }
+
+    /// [`drain_after`], keeping the world so a test can read the [`QuestGiver`] afterwards.
+    fn drain_world(
+        giver: u64,
+        npc_flags: Option<u32>,
+        close_on_cancel: u32,
+        lua: &str,
+    ) -> (App, Vec<ClientCommand>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.insert_resource(NetCommands(tx));
@@ -1105,10 +1180,7 @@ mod tests {
                 .0
                 .insert(giver, e);
         }
-        let mut quest = QuestGiver {
-            detail_flag,
-            ..Default::default()
-        };
+        let mut quest = QuestGiver::default();
         quest.open(
             giver,
             QuestView::Detail(QuestDetails {
@@ -1117,29 +1189,32 @@ mod tests {
                 title: "A Threat Within".into(),
                 details: String::new(),
                 objectives: String::new(),
-                auto_finish: detail_flag,
+                auto_finish: close_on_cancel,
                 choices: Vec::new(),
                 rewards: Vec::new(),
                 money: 0,
                 reward_spell: 0,
             }),
         );
+        // The latch is written by the packet, after the open (as `net::quest_detail` does).
+        quest.close_on_cancel = close_on_cancel;
         app.insert_resource(quest);
         let script = UiScript::new().unwrap();
         script.run(lua).unwrap();
         app.insert_non_send_resource(script);
         app.add_systems(Update, drain_quest);
         app.update();
-        rx.try_iter().collect()
+        let sent = rx.try_iter().collect();
+        (app, sent)
     }
 
     const SHARER: u64 = 0x0000_0000_0000_002A; // HIGHGUID_PLAYER: a zero high word
     const NPC: u64 = 0xF130_0000_0000_0007; // HIGHGUID_UNIT
 
     /// **Ending the session on a SHARED quest answers the sharer — and `CloseQuest` does it too.**
-    /// 1733 shipped these as two actions on the assumption that only `DeclineQuest` answered; the
-    /// §5 found both Lua verbs calling one routine (`0x501130`), so ESC-ing a share panel reports
-    /// the decline exactly as the button does. This test is the corrected form of 1733's
+    /// 1733 shipped these as two actions on the assumption that only `DeclineQuest` answered; both
+    /// Lua verbs reach the teardown `0x501130(0,1)` (`CloseQuest` directly, `DeclineQuest` through
+    /// its PLAYER leg), so ESC-ing a share panel reports the decline exactly as the button does. This test is the corrected form of 1733's
     /// `closing_a_shared_quest_panel_is_not_a_decline`, which asserted the opposite.
     #[test]
     fn every_way_out_of_a_shared_quest_answers_the_sharer() {
@@ -1158,8 +1233,8 @@ mod tests {
         }
     }
 
-    /// **Ending it on an NPC RE-OPENS the giver**, which benilla asserted for years that it did not
-    /// ("vanilla's client-side decline sends no packet"). The fork is on the NPC's own gossip flag:
+    /// **`DeclineQuest` on an NPC RE-OPENS the giver**, which benilla asserted for years that it did
+    /// not ("vanilla's client-side decline sends no packet"). The fork is on the NPC's own gossip flag:
     /// `CMSG_GOSSIP_HELLO` for a gossip-flagged NPC, `CMSG_QUESTGIVER_HELLO` otherwise. This is the
     /// mechanism behind the reference putting you back in the questgiver's menu after a decline.
     #[test]
@@ -1182,20 +1257,103 @@ mod tests {
         );
     }
 
-    /// The DETAILS packet's trailing `u32` **suppresses** that re-open when non-zero — the field
+    /// The `0xbe0824` latch **suppresses** a plain unit's re-open when non-zero — the field
     /// benilla parsed and ignored until the §5 found its one reader. Ignoring it meant a
     /// suppressed giver was re-opened anyway.
     #[test]
-    fn a_non_zero_detail_flag_suppresses_the_reopen() {
+    fn a_non_zero_latch_suppresses_a_plain_units_reopen() {
         let sent = drain_after(NPC, Some(0), 1, "DeclineQuest()");
         assert!(sent.is_empty(), "flag 1 suppresses the re-open: {sent:?}");
     }
 
-    /// A giver that is not a streamed unit sends nothing at all: an item giver (0664) has no list
-    /// to re-open, and neither does an NPC that walked out of view under the open window.
+    /// A giver that does not resolve sends nothing at all. `CloseQuest` still tears the window
+    /// down; `DeclineQuest` bails before its fork (`0x50142c`) and leaves it — the range guard
+    /// closes a window whose giver has gone.
     #[test]
     fn an_unstreamed_giver_ends_the_session_silently() {
-        let sent = drain_after(NPC, None, 0, "CloseQuest()");
+        let (app, sent) = drain_world(NPC, None, 0, "CloseQuest()");
         assert!(sent.is_empty(), "no unit, no re-open: {sent:?}");
+        assert!(!app.world().resource::<QuestGiver>().is_open());
+
+        let (app, sent) = drain_world(NPC, None, 0, "DeclineQuest()");
+        assert!(sent.is_empty(), "{sent:?}");
+        assert!(app.world().resource::<QuestGiver>().is_open());
+    }
+
+    /// An item giver (0664) takes the teardown leg: silent, and the window closes.
+    #[test]
+    fn declining_an_item_quest_closes_silently() {
+        const ITEM: u64 = 0x4000_0000_0000_0099; // HIGHGUID_ITEM
+        let (app, sent) = drain_world(ITEM, None, 0, "DeclineQuest()");
+        assert!(sent.is_empty(), "{sent:?}");
+        assert!(!app.world().resource::<QuestGiver>().is_open());
+    }
+
+    /// **`CloseQuest()` is network-silent on an NPC** — ESC, the X, the greeting's Goodbye
+    /// (`HideUIPanel` → `QuestFrame_OnHide` → `CloseQuest`). Its binding `0x501a10` calls the
+    /// teardown `0x501130(0,1)` and nothing else, whose one send is the PLAYER-filtered push
+    /// result. It used to share `DeclineQuest`'s action and so re-open the list the player was
+    /// trying to close (a multi-quest NPC's greeting could not be dismissed).
+    #[test]
+    fn close_quest_on_an_npc_is_network_silent() {
+        use crate::target::cursor_mode::npc_flags;
+        for flags in [0, npc_flags::GOSSIP] {
+            for latch in [0, 1] {
+                let (app, sent) = drain_world(NPC, Some(flags), latch, "CloseQuest()");
+                assert!(
+                    sent.is_empty(),
+                    "CloseQuest on an NPC (flags {flags:#x}, latch {latch}) sends nothing: {sent:?}"
+                );
+                assert!(
+                    !app.world().resource::<QuestGiver>().is_open(),
+                    "…and tears the window down"
+                );
+            }
+        }
+    }
+
+    /// `DeclineQuest`'s gossip leg (`0x50143b`-`0x501474`) is tested BEFORE the `0xbe0824` latch
+    /// (`0x5014a2`), so a gossip-flagged NPC is re-opened whatever the latch says.
+    #[test]
+    fn the_gossip_leg_precedes_the_latch() {
+        use crate::target::cursor_mode::npc_flags;
+        let sent = drain_after(NPC, Some(npc_flags::GOSSIP), 1, "DeclineQuest()");
+        assert!(
+            matches!(sent.as_slice(), [ClientCommand::GossipHello { guid: NPC }]),
+            "a latched gossip NPC still gets GOSSIP_HELLO: {sent:?}"
+        );
+    }
+
+    /// The re-open legs do NOT tear the window down (no `0x501130` on them) — the server's answer
+    /// replaces the panel — and they set the already-acted latch `0xbe0844`, which refuses a
+    /// second `DeclineQuest` and an `AcceptQuest` until the next panel arrives.
+    #[test]
+    fn a_reopening_decline_keeps_the_window_and_latches_acted() {
+        let (app, sent) = drain_world(
+            NPC,
+            Some(0),
+            0,
+            "DeclineQuest() DeclineQuest() AcceptQuest()",
+        );
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ClientCommand::QuestgiverHello { npc: NPC }]
+            ),
+            "one re-open, and nothing after it: {sent:?}"
+        );
+        let giver = app.world().resource::<QuestGiver>();
+        assert!(
+            giver.is_open(),
+            "the window stays up for the server's answer"
+        );
+    }
+
+    /// The latch-diverted leg (`0x5014aa` → `0x501130(0,1)`) DOES tear the window down.
+    #[test]
+    fn a_latched_decline_closes_the_window() {
+        let (app, sent) = drain_world(NPC, Some(0), 1, "DeclineQuest()");
+        assert!(sent.is_empty(), "{sent:?}");
+        assert!(!app.world().resource::<QuestGiver>().is_open());
     }
 }

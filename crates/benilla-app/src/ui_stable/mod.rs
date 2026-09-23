@@ -527,4 +527,32 @@ mod tests {
             "the template ships no display"
         );
     }
+
+    /// **The stable window dies with the session.** The walk-away guard does not cover it: it
+    /// needs a self player to measure from, and between the socket dying and the next world
+    /// entry there is none — so a stable open at the drop rode into the next login's fresh VM.
+    #[test]
+    fn the_session_end_closes_the_stable() {
+        let mut app = App::new();
+        app.init_resource::<StableOpen>()
+            .init_resource::<StableErrors>()
+            .init_resource::<crate::names::NameCache>();
+        net::register(&mut app);
+        {
+            let mut open = app.world_mut().resource_mut::<StableOpen>();
+            open.npc = Some(0xF130_0000_0000_0042);
+            open.num_stable_slots = 2;
+        }
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+        );
+
+        let open = app.world().resource::<StableOpen>();
+        assert_eq!((open.npc, open.num_stable_slots), (None, 0));
+    }
 }

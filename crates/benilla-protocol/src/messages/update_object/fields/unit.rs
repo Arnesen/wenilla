@@ -158,7 +158,16 @@ impl ObjectFields {
     /// carry a non-zero number, while **guardians and totems carry 0** and therefore keep whatever
     /// rank their template gives them.
     pub fn unit_is_pet_or_charm(&self) -> bool {
-        self.get_u32(FIELD_UNIT_PETNUMBER).unwrap_or(0) != 0
+        self.unit_pet_number() != 0
+    }
+    /// `UNIT_FIELD_PETNUMBER` as a value — `0` when absent (a create omits zeros). Besides the
+    /// boolean read above, the reference **keys a unit's name on it**: `CGUnit_C::GetUnitName`
+    /// (`0x609210`) reads `[[unit+0x110]+0x214]` and, when non-zero, looks the name up in the
+    /// pet-name cache under *this value*; zero means the creature template's name. The number in a
+    /// `HIGHGUID_PET` guid is not a substitute — a companion pet's guid carries a pet number the
+    /// server never files in its charm info, so it answers no pet-name query for it.
+    pub fn unit_pet_number(&self) -> u32 {
+        self.get_u32(FIELD_UNIT_PETNUMBER).unwrap_or(0)
     }
     /// `UNIT_FIELD_PET_NAME_TIMESTAMP` — when this pet's name was last set. `None` when the field
     /// has never been sent (a create omits zeros), which reads the same as "never renamed".

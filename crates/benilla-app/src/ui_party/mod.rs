@@ -95,7 +95,8 @@ pub struct GroupState {
     /// A lockout is per-CHARACTER, not per-group, so this is the one field here that is not a
     /// group fact. It lives here anyway for the reason that matters: it is per-SESSION state that
     /// must die with the socket, and [`Self::clear_session`] is that guarantee — a second
-    /// resource would be a second thing to remember to clear.
+    /// resource would be a second thing to remember to clear. Leaving the group does NOT clear it
+    /// ([`Self::leave_group`]); nor the four ticket fields below.
     pub saved_instances: Vec<benilla_protocol::messages::RaidInstanceEntry>,
     /// **How many times the server has answered** — one per `SMSG_RAID_INSTANCE_INFO`. A TICKET,
     /// not a flag (the [`Self::ready_check`] shape), and the difference is load-bearing: the
@@ -164,7 +165,7 @@ impl GroupState {
             }
         }
         if leaving {
-            *self = GroupState::default();
+            self.leave_group();
             return lines;
         }
         // Our own party→raid conversion (or joining straight into a raid). INTERIM like the
@@ -179,8 +180,8 @@ impl GroupState {
         // stale marks on screen: the icons are drawn from this board, and nothing else clears it
         // short of a `0x321` for each slot, which the server does not send.
         //
-        // A full disband needs no arm here — `leaving` above replaces the whole state, and
-        // `[u64; 8]::default()` is already the empty board. 1820 recorded this as "stale icons
+        // A full disband needs no arm here — `leaving` above resets every group fact
+        // ([`Self::leave_group`]), and the board is one. 1820 recorded this as "stale icons
         // after a disband", which was wider than the truth; the conversion is the real gap.
         if group_type != 1 && self.group_type == 1 {
             self.raid_targets = [0; 8];
@@ -395,6 +396,54 @@ impl GroupState {
             .map_or(0, |i| i as u8 + 1)
     }
 
+    /// The all-zero `SMSG_GROUP_LIST` — we are no longer in a group. Resets the **group facts**
+    /// and nothing else.
+    ///
+    /// This used to be `*self = GroupState::default()`, which is [`Self::clear_session`]'s job,
+    /// and it took the per-SESSION tickets down with the roster: the feed fires on edges of those
+    /// tickets, so every leave, kick or disband fired a `READY_CHECK` (a popup naming no leader,
+    /// and a 30 s request armed for a check nobody started) and an `UPDATE_INSTANCE_INFO` over an
+    /// emptied lockout list. In the reference `READY_CHECK` has one fire site, the
+    /// `MSG_RAID_READY_CHECK` open handler (decision 1989), and a lockout belongs to the character.
+    ///
+    /// **The destructure is exhaustive on purpose** — no `..`: a field added to [`GroupState`]
+    /// does not compile until someone decides here which side of that line it is on. The defaulted
+    /// reset that caused this bug classified every new field silently.
+    pub(super) fn leave_group(&mut self) {
+        let GroupState {
+            // Group facts: the roster, its side-state, the sandbox (the wire always wins).
+            in_group,
+            group_type,
+            own_flags,
+            members,
+            leader,
+            loot,
+            stats,
+            raid_targets,
+            test,
+            // An invite is an offer into a group we are not in yet; it is cleared with the group
+            // as it always was here (UNVERIFIED either way — vmangos sends invitees nothing on a
+            // disband, so the case needs a leave to race an invite popup).
+            pending_invite,
+            // Session tickets — the feed's edges. Kept; `clear_session` is where they die.
+            saved_instances: _,
+            saved_instances_answers: _,
+            ready_check: _,
+            ready_check_requests: _,
+            ready_check_answers: _,
+        } = self;
+        *in_group = false;
+        *group_type = 0;
+        *own_flags = 0;
+        members.clear();
+        *leader = 0;
+        *loot = None;
+        stats.clear();
+        *raid_targets = [0; 8];
+        *test = false;
+        *pending_invite = None;
+    }
+
     /// Session teardown (decision 0065's lifecycle): everything resets with the socket.
     pub fn clear_session(&mut self) {
         *self = GroupState::default();
@@ -488,6 +537,59 @@ mod tests {
         // The socket dies, the ticket dies with it — a fresh session has not been answered.
         g.clear_session();
         assert_eq!(g.saved_instances_answers, 0);
+        assert!(g.saved_instances.is_empty());
+    }
+
+    /// **Leaving the group is not the socket dying.** The all-zero `SMSG_GROUP_LIST` clears the
+    /// roster — and ONLY the roster. The ready-check and saved-instance fields are per-session
+    /// tickets the feed fires events on edges of: resetting them here made every leave, kick or
+    /// disband look like a new `READY_CHECK` (a popup with no leader, and a stale 30 s request
+    /// armed) and a fresh `UPDATE_INSTANCE_INFO` carrying an emptied lockout list — a blank Raid
+    /// Info panel. In the reference `READY_CHECK` has one fire site, the `MSG_RAID_READY_CHECK`
+    /// open handler (decision 1989); a lockout is the character's, not the group's.
+    #[test]
+    fn leaving_the_group_keeps_the_session_tickets() {
+        let lockout = benilla_protocol::messages::RaidInstanceEntry {
+            map: 409,
+            reset: 86_400,
+            instance: 7,
+        };
+        let mut g = GroupState {
+            in_group: true,
+            leader: 0xA11CE,
+            members: vec![member("Alice", 0xA11CE)],
+            ..Default::default()
+        };
+        g.raid_targets[0] = 0xA11CE;
+        g.apply_ready_check_request(false);
+        g.apply_raid_instance_info(Vec::new());
+        g.apply_raid_instance_info(vec![lockout]);
+        assert_eq!((g.ready_check, g.ready_check_requests), (1, 1));
+        assert_eq!(g.saved_instances_answers, 2);
+
+        g.apply_list(0, 0, vec![], 0, None);
+
+        // The group facts are gone …
+        assert!(!g.in_group);
+        assert!(g.members.is_empty());
+        assert_eq!(g.leader, 0);
+        assert_eq!(g.raid_targets, [0; 8]);
+        // … the session's tickets are not: no edge for the feed to fire on.
+        assert_eq!(
+            (g.ready_check, g.ready_check_requests),
+            (1, 1),
+            "no READY_CHECK edge"
+        );
+        assert_eq!(g.saved_instances_answers, 2, "no UPDATE_INSTANCE_INFO edge");
+        assert_eq!(
+            g.saved_instances,
+            vec![lockout],
+            "the lockouts are the character's"
+        );
+
+        // The socket's end is still the one place they die.
+        g.clear_session();
+        assert_eq!((g.ready_check, g.saved_instances_answers), (0, 0));
         assert!(g.saved_instances.is_empty());
     }
 

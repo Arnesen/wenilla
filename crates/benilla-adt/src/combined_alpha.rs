@@ -1,7 +1,7 @@
 //! MCAL → one 64×64 RGBA alpha map (R/G/B = the opacity of texture layers 1/2/3; A = 255). Ported
-//! from wow-adt's `CombinedAlphaMap` so the output is byte-identical: layers are ingested in MCLY
-//! order (skipping the opaque base), each decoded into the next channel; encodings are 4-bit packed
-//! (×16), 8-bit raw, or Blizzard RLE (token bit 7 = fill, else copy; low 7 bits = count). `fix_alpha`
+//! from wow-adt's `CombinedAlphaMap`: layers are ingested in MCLY order (skipping the opaque base),
+//! each decoded into the next channel; encodings are 4-bit packed (×17 — `n / 15`, what the
+//! reference's RGBA4444 texel reads as; wow-adt's ×16 topped out at 240), 8-bit raw, or Blizzard RLE (token bit 7 = fill, else copy; low 7 bits = count). `fix_alpha`
 //! reconstructs a 64×64 plane from 63×63 source by duplicating the previous pixel at the last row/col.
 
 use crate::McnkChunk;
@@ -76,10 +76,10 @@ impl CombinedAlphaMap {
         const PACKED: usize = W * W / 2;
         if offset + PACKED <= raw.len() {
             for &p in &raw[offset..offset + PACKED] {
-                if !self.set_next((p & 0x0F) * 16) {
+                if !self.set_next((p & 0x0F) * 17) {
                     break;
                 }
-                if !self.set_next(((p >> 4) & 0x0F) * 16) {
+                if !self.set_next(((p >> 4) & 0x0F) * 17) {
                     break;
                 }
             }
@@ -169,5 +169,37 @@ impl CombinedAlphaMap {
         self.layer += 1;
         self.x = 0;
         self.y = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blank() -> CombinedAlphaMap {
+        CombinedAlphaMap {
+            map: vec![0; W * W * 4],
+            x: 0,
+            y: 0,
+            layer: 0,
+            has_big_alpha: false,
+            fix_alpha: true,
+        }
+    }
+
+    /// The reference packs a 4-bit layer weight into an RGBA4444 texel (wow-re `terrain.md`,
+    /// the `alpha_texel_*` packers), and a 4-bit unorm channel reads as `n / 15` — so a fully
+    /// painted nibble is full coverage. `n × 16` stopped at 240: every "fully painted" road or rock
+    /// let 6% of the layer beneath show through.
+    #[test]
+    fn four_bit_alpha_reads_as_n_over_15() {
+        let mut m = blank();
+        // Low nibble first: texel 0 = 0xF, texel 1 = 0x8.
+        m.ingest_small(&[0x8F; W * W / 2], 0);
+        assert_eq!(m.get(0, 0, 0), 255, "nibble 15 is full coverage");
+        assert_eq!(m.get(1, 0, 0), 136, "nibble 8 is 8/15");
+        let mut z = blank();
+        z.ingest_small(&[0x00; W * W / 2], 0);
+        assert_eq!(z.get(0, 0, 0), 0);
     }
 }

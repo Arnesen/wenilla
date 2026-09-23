@@ -1049,8 +1049,11 @@ pub(crate) struct UnitStores<'w, 's> {
     /// `ObjectStore` since 2334, and a durability tick or a stack count naming no unit token
     /// would open the gate for nothing (2343).
     changed: Query<'w, 's, (), (Changed<ObjectStore>, Without<crate::items::ItemObject>)>,
-    /// Whose object left the manager — the other half of that gate, and cleared every run.
-    removed: RemovedComponents<'w, 's, ObjectStore>,
+    /// Whose object left the manager — the other half of that gate, and cleared every run. The
+    /// [`Guid`], not the store: a torn-down object sheds its guid at the teardown while its
+    /// fading model keeps the store another two seconds ([`crate::net::tear_down`]), and a
+    /// despawn removes both.
+    removed: RemovedComponents<'w, 's, Guid>,
     /// The per-field edges this run (decision 2297) — [`fire_transitions`]' three mirror-diff
     /// arms fire off these, per token naming the moved unit.
     edges: MessageReader<'w, 's, FieldChanged>,
@@ -1712,7 +1715,9 @@ fn feed_units(
     // resolve through the cache — a miss queries the server once and lands on a later frame.
     let self_pair = self_q.iter().next();
     let player = self_pair.map(|(store, guid)| {
-        let name = names.resolve(guid.0, &commands).map(str::to_string);
+        let name = names
+            .resolve_unit(guid.0, Some(store), &commands)
+            .map(str::to_string);
         let mut s = snapshot(store, name, 0, chr);
         s.is_player = true;
         // The stated `is_connected` gap, closed for every token this feed pushes — the field's own
@@ -1768,7 +1773,9 @@ fn feed_units(
     // stays server memory outside it, which the disjoint field borrows above preserve.)
     let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
         let store = stores.all.get(e).ok()?;
-        let name = names.resolve(guid, &commands).map(str::to_string);
+        let name = names
+            .resolve_unit(guid, Some(store), &commands)
+            .map(str::to_string);
         // The target's reaction toward us, on the `UnitReaction` 1..8 scale — the same decode the
         // selection ring runs (reputation-first, else the faction-template comparator). `ring_reaction`
         // returns the raw 0..7 rank (neutral its no-data fallback), which is `UnitReaction − 1`; +1
@@ -1826,7 +1833,9 @@ fn feed_units(
         .and_then(|guid| Some((*index.as_ref()?.0.get(&guid)?, guid)))
         .and_then(|(entity, guid)| {
             let store = stores.all.get(entity).ok()?;
-            let name = names.resolve(guid, &commands).map(str::to_string);
+            let name = names
+                .resolve_unit(guid, Some(store), &commands)
+                .map(str::to_string);
             let reaction = ring_reaction(
                 factions.as_deref(),
                 &reputations,
@@ -1914,7 +1923,9 @@ fn feed_units(
         .and_then(|i| Some((i.0?, i.1?)))
         .and_then(|(entity, guid)| {
             let store = stores.all.get(entity).ok()?;
-            let name = names.resolve(guid, &commands).map(str::to_string);
+            let name = names
+                .resolve_unit(guid, Some(store), &commands)
+                .map(str::to_string);
             let reaction = ring_reaction(
                 factions.as_deref(),
                 &reputations,

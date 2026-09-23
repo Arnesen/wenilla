@@ -1072,13 +1072,22 @@ pub(crate) fn power_word(script: &benilla_ui::script::UiScript, power: u32) -> O
 /// same ask-once name cache every other client-composed chat line waits on. `None` = not yet
 /// answered; the caller re-tries next frame, exactly as the reference's deferred-name queue
 /// (`DAT_00c4e208`, drained by the name-ready callback `0x6294b0`) replays its message.
-pub(crate) fn object_name(guid: u64, names: &NameCache, commands: &NetCommands) -> Option<String> {
+///
+/// `unit` is the endpoint's descriptor when it is streamed: `0x6264e0` looks the guid up in the
+/// object manager first and, for a unit, calls `GetUnitName` (`0x609210`) — which keys a pet's or a
+/// companion's name off its descriptor, not its guid ([`NameCache::resolve_unit`]).
+pub(crate) fn object_name(
+    guid: u64,
+    unit: Option<&ObjectStore>,
+    names: &NameCache,
+    commands: &NetCommands,
+) -> Option<String> {
     // Guid 0 = "the name is already in the fills" — no wire endpoint is ever guid 0, so the
     // sentinel costs nothing and is what lets `/chattest` drive the real drain with literal names.
     if guid == 0 {
         return None;
     }
-    names.resolve(guid, commands).map(str::to_owned)
+    names.resolve_unit(guid, unit, commands).map(str::to_owned)
 }
 
 // ────────────────────────────────── the families ──────────────────────────────────────

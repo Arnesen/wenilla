@@ -556,10 +556,10 @@ pub(crate) fn drive_nameplates(
         // resolve's `&mut`-tied return across the subname read below is a borrow conflict, and the
         // `str::to_owned` that used to break it was a per-unit-per-frame allocation made just to
         // compare against the cache (the steady arm below no longer builds anything).
-        if names.resolve(guid.0, &net_commands).is_none() {
+        if names.resolve_unit(guid.0, store, &net_commands).is_none() {
             continue;
         }
-        let Some(name) = names.peek(guid.0) else {
+        let Some(name) = names.peek_unit(guid.0, store) else {
             continue;
         };
         // The player flag decorations (a1–a3): glued straight onto the name line, no space.

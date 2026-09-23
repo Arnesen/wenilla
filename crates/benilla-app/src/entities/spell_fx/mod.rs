@@ -972,6 +972,8 @@ pub(super) fn attach_spell_fx(
         // pose (`RigPose::anchor_for`, decision 1355).
         Option<&mut benilla_world::rig_anim::RigPose>,
         &GlobalTransform,
+        // The body is built (model or fallback cube) — see the wait below.
+        Has<crate::entities::VisualAttached>,
     )>,
     fx: Option<ResMut<SpellFx>>,
     asset_server: Res<AssetServer>,
@@ -989,7 +991,7 @@ pub(super) fn attach_spell_fx(
         return;
     };
     let now = time.elapsed_secs();
-    for (unit, mut att, bones, mut pose, unit_gt) in &mut units {
+    for (unit, mut att, bones, mut pose, unit_gt, body_built) in &mut units {
         att.instances.retain_mut(|inst| {
             // Self-termination (the cast-release flash ran its span).
             if let Some(expires) = inst.expires {
@@ -1070,6 +1072,18 @@ pub(super) fn attach_spell_fx(
             // A root-aura spell's plant additionally re-plants on owner displacement
             // ([`tend_world_plants`] — the client's 0x4000 flag leg).
             let planted = inst.tag == benilla_formats::WORLD_EFFECT_TAG;
+            // **A bone-riding effect waits for the body.** The cascade below reads the unit's
+            // attach points, and before the body is built (a display swap still loading the new
+            // model, a player still settling its equipment) there are none — so it fell through
+            // to the unit root, ground-anchored, and a persistent instance is never re-seated
+            // after that: an Ice Barrier or a Power Word: Shield sat decaled at the feet for the
+            // aura's whole life. The reference re-arms the persistent kits after the rebuild has
+            // set the new model (`0x60abe0` → `0x5ff130`, wow-re `shapeshift-morph-cloud.md`);
+            // `VisualAttached` is that "the model is set" — the cube fallback carries it too, so
+            // a unit whose model never loads still gets its effect at the root.
+            if !planted && !body_built {
+                return true;
+            }
             // Ground-anchored: a world plant sits at the feet by construction; otherwise the
             // cascade landed on the model's BASE point (`0x13`) or fell through to the unit
             // root — the feet-level anchors. A hand/head/chest-anchored instance keeps its flat
@@ -1324,6 +1338,38 @@ mod tests {
             instances_of(&app, unit),
             vec![(true, None)],
             "the aura's instance re-arms for the spawn pass; the one-shot drains",
+        );
+    }
+
+    /// **The re-create waits for the new body.** A display swap tears the visual down and the
+    /// new model may still be loading when the effect model is already cached: re-arming then
+    /// found no attach points and parked a chest shield at the feet, ground-decaled, for the
+    /// aura's whole life (nothing re-seats a live root). It waits until the body is built.
+    #[test]
+    fn a_re_armed_instance_waits_for_the_body_before_it_spawns() {
+        let (mut app, unit, roots) = standing(&[true]);
+        app.world_mut().entity_mut(roots[0]).despawn();
+        app.world_mut().resource_mut::<SpellFx>().models.insert(
+            "Spells\\IceShield_State.mdx".into(),
+            DisplayModel {
+                parts: Some(Vec::new()),
+                ..crate::entities::display::empty_shell()
+            },
+        );
+        app.update();
+        app.update();
+        assert_eq!(
+            instances_of(&app, unit),
+            vec![(true, None)],
+            "no body yet: the instance holds, it does not spawn at the root"
+        );
+        app.world_mut()
+            .entity_mut(unit)
+            .insert(crate::entities::VisualAttached);
+        app.update();
+        assert!(
+            matches!(instances_of(&app, unit)[..], [(true, Some(_))]),
+            "the body is built: the instance spawns"
         );
     }
 

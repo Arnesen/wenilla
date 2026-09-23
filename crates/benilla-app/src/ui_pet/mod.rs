@@ -65,6 +65,8 @@ mod tests;
 ///
 /// `spells.pet_guid == 0` is "there is no pet bar", and it is the single test: the teardown packet
 /// carries exactly that and nothing else.
+///
+/// The session end resets it the same way (`net::on_session_end`): a dropped socket sends no teardown.
 #[derive(Resource, Default)]
 pub(crate) struct PetBar {
     /// The last `SMSG_PET_SPELLS` in full, with `SMSG_PET_MODE`'s state edits folded in.

@@ -36,6 +36,9 @@ pub struct ItemSubClassInfo {
     /// prerequisite is −1.
     pub prerequisite_proficiency: i32,
     pub postrequisite_proficiency: i32,
+    /// `Flags@4` (`[row+0x10]`), raw. Its consumers each own the bit they read — e.g. `0x200`,
+    /// the auction house's "offers the inventory-slot rows" gate (`0x4cfb63`).
+    pub flags: u32,
     /// Bit 0 = never print the type name on the slot|type line.
     pub display_flags: u32,
     /// `WeaponSwingSize@9` — the swinging weight, 0 light · 1 medium · 2 heavy, and the sole
@@ -170,6 +173,11 @@ impl ItemSubClassCatalog {
             .is_some_and(|r| r.display_flags & 1 != 0)
     }
 
+    /// This subclass's raw `Flags@4` (`0` for an unknown key) — see [`ItemSubClassInfo::flags`].
+    pub fn flags(&self, class: u32, subclass: u32) -> u32 {
+        self.rows.get(&(class, subclass)).map_or(0, |r| r.flags)
+    }
+
     /// This subclass's raw `DisplayFlags` (`0` for an unknown key). Bit 0 is [`Self::hides_name`];
     /// bit 1 marks a subclass the auction house's category filter does not offer; **bit 2 (`0x4`)
     /// is the "this bag counts what is inside it" gate** — `GetInventoryItemCount` (`0x4c881a`–
@@ -183,18 +191,16 @@ impl ItemSubClassCatalog {
             .map_or(0, |r| r.display_flags)
     }
 
-    /// Every subclass id defined for `class`, ascending. The shipped table is small (72 rows
-    /// total), so the scan costs nothing and the alternative — assuming subclass ids are dense
-    /// from 0 — is false for several classes.
+    /// Every subclass id defined for `class`, in **file order** — the order the reference's own
+    /// linear scans walk (the auction house's `0x4cf9c0`/`0x4ce980` count the Nth matching row).
+    /// The shipped table is small (72 rows total), so the scan costs nothing and the alternative —
+    /// assuming subclass ids are dense from 0 — is false for several classes.
     pub fn subclasses_of(&self, class: u32) -> Vec<u32> {
-        let mut ids: Vec<u32> = self
-            .rows
-            .keys()
+        self.order
+            .iter()
             .filter(|(c, _)| *c == class)
-            .map(|(_, s)| *s)
-            .collect();
-        ids.sort_unstable();
-        ids
+            .map(|&(_, s)| s)
+            .collect()
     }
 
     /// Number of rows (for logging/diagnostics).
@@ -293,6 +299,7 @@ pub fn load_item_sub_classes(chain: &mut Chain) -> Result<ItemSubClassCatalog> {
             ItemSubClassInfo {
                 prerequisite_proficiency: i32_at(r, 2).unwrap_or(-1),
                 postrequisite_proficiency: i32_at(r, 3).unwrap_or(-1),
+                flags: u32_at(r, 4).unwrap_or(0),
                 display_flags: u32_at(r, 5).unwrap_or(0),
                 weapon_swing_size: u32_at(r, 9).unwrap_or(0),
             },

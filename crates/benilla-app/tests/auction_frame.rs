@@ -61,6 +61,7 @@ fn load_ui_with_classes(s: &mut UiScript) {
     s.set_auction_item_classes(vec![AuctionCategory {
         class_id: 4,
         name: "Armor".into(),
+        has_subclass_filter: true,
         subclasses: vec![AuctionSubCategory {
             sub_id: 1,
             name: "Cloth".into(),
@@ -717,7 +718,12 @@ fn search_reads_the_filters_and_nothing_queries_before_it() {
     assert_eq!(query.name, "linen");
     assert_eq!(query.min_level, 10);
     assert_eq!(query.max_level, 20);
-    assert_eq!(query.class, Some(1), "the selected class row, 1-based");
+    // The stock Lua hands over the class row's POSITION (1); the wire carries its item class id.
+    assert_eq!(
+        query.class,
+        Some(4),
+        "Armor is item class 4, not menu row 1"
+    );
     assert!(query.usable_only);
     assert_eq!(query.page, 0);
     assert!(s.errors().is_empty(), "clean search: {:?}", s.errors());

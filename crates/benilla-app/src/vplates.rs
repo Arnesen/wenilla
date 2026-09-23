@@ -814,7 +814,7 @@ fn drive_vplates(
                 .max(1) as f32,
             bar_colour: [tint[0], tint[1], tint[2]],
             name: names
-                .resolve(guid.0, &net_commands)
+                .resolve_unit(guid.0, store, &net_commands)
                 .map(str::to_owned)
                 .unwrap_or_default(),
             // The skull's two legs (`0x7cbb40`, §7-VERIFIED): a WORLD BOSS — creature-
@@ -830,7 +830,9 @@ fn drive_vplates(
             level: store.and_then(|s| s.0.unit_level()),
             skull: store.and_then(|s| s.0.unit_level()).is_some_and(|level| {
                 crate::names::gated_rank(
-                    benilla_protocol::guid::entry(guid.0).and_then(|e| names.creature_record(e)),
+                    store
+                        .and_then(|s| s.0.object_entry())
+                        .and_then(|e| names.creature_record(e)),
                     store,
                 ) == 3
                     || (rank <= 1 && level >= my_level + 10 && !unit_is_grey(my_level, level))

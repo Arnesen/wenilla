@@ -14,7 +14,15 @@ use crate::net::{ClientCommand, NetCommands, NetHandlerApp};
 pub(super) fn register(app: &mut App) {
     use SessionEventKind as K;
     app.net_handler(K::ListStabledPets, on_list)
-        .net_handler(K::StableResult, on_result);
+        .net_handler(K::StableResult, on_result)
+        .net_handler(K::Disconnected, on_session_end);
+}
+
+/// The stable window dies with the socket — a listener on the session end (a second handler on the
+/// kind, after the bridge's own teardown). The walk-away guard cannot stand in: it measures from a
+/// self player, and there is none between the drop and the next world entry.
+fn on_session_end(In(_): In<SessionEvent>, mut stable_open: ResMut<StableOpen>) {
+    stable_open.clear();
 }
 
 fn on_list(

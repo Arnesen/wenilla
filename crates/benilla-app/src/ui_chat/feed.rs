@@ -1260,7 +1260,12 @@ pub(super) fn feed_chat(
                     if guid == 0 {
                         continue;
                     }
-                    match super::combat::object_name(guid, &names, &commands) {
+                    match super::combat::object_name(
+                        guid,
+                        guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
+                        &names,
+                        &commands,
+                    ) {
                         Some(name) if slot == 0 => line.fills.attacker = name,
                         Some(name) => line.fills.victim = name,
                         None => wait = true,
@@ -1281,7 +1286,12 @@ pub(super) fn feed_chat(
                         }
                     }
                     super::combat::Named::Unit(guid) => {
-                        match super::combat::object_name(guid, &names, &commands) {
+                        match super::combat::object_name(
+                            guid,
+                            guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
+                            &names,
+                            &commands,
+                        ) {
                             Some(name) => line.fills.named = name,
                             None => wait = true,
                         }

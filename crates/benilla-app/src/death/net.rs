@@ -212,6 +212,7 @@ fn resurrect_request(
         sickness,
         has_timer,
     });
+    death_net.resurrect_generation = death_net.resurrect_generation.wrapping_add(1);
 }
 
 /// `SMSG_SPIRIT_HEALER_CONFIRM` — the healer awaiting the XP-loss two-step's Accept. The message

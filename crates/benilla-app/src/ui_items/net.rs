@@ -14,7 +14,20 @@ use crate::ui_loot::LootLatch;
 /// Register the handlers — called from [`super::UiItemsPlugin`].
 pub(super) fn register(app: &mut App) {
     app.net_handler(SessionEventKind::InventoryFailure, on_inventory_failure)
-        .net_handler(SessionEventKind::OpenContainer, on_open_container);
+        .net_handler(SessionEventKind::OpenContainer, on_open_container)
+        .net_handler(SessionEventKind::Disconnected, on_session_end);
+}
+
+/// The pending item locks die with the socket — a listener on the session end (a second handler on
+/// the kind, after the bridge's own teardown). The unlock transitions still queued for the feed go
+/// too: they name the old session's slots, and the next session's VM starts with nothing locked.
+fn on_session_end(
+    In(_): In<SessionEvent>,
+    mut pending: ResMut<PendingItemOps>,
+    mut lock_cleared: ResMut<LockTransitions>,
+) {
+    pending.clear_session();
+    lock_cleared.0.clear();
 }
 
 /// The containers the server told us to open (`SMSG_OPEN_CONTAINER`), by container id, waiting
@@ -164,6 +177,46 @@ mod tests {
             &mut latch,
         );
         assert_eq!(latch.0, None);
+    }
+    /// **The item locks die with the session.** The lock is item-object state in the reference
+    /// (`item+0x314`), and the objects are rebuilt at every world entry — but ours is a resource,
+    /// and only a resolving field update, a failure or the loot close cleared it. A lockbox opened
+    /// in the frame the socket died never saw any of those, so it stayed greyed and locked for
+    /// the whole next session. Driven through the real registration.
+    #[test]
+    fn the_session_end_drops_every_item_lock() {
+        let mut app = App::new();
+        app.init_resource::<EquipErrors>()
+            .init_resource::<PendingItemOps>()
+            .init_resource::<LockTransitions>()
+            .init_resource::<BagOpens>()
+            .init_resource::<LootLatch>()
+            .init_resource::<SelfGuid>();
+        register(&mut app);
+        app.world_mut()
+            .resource_mut::<PendingItemOps>()
+            .add([(0, 3, 0x4000_0000_0000_0007, 1)]);
+        app.world_mut()
+            .resource_mut::<LockTransitions>()
+            .0
+            .push((0, 5));
+        let epoch = app.world().resource::<PendingItemOps>().epoch();
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+        );
+
+        let pending = app.world().resource::<PendingItemOps>();
+        assert!(pending.is_empty() && !pending.contains(0, 3));
+        assert_ne!(pending.epoch(), epoch, "the feed's gate sees the set move");
+        assert!(
+            app.world().resource::<LockTransitions>().0.is_empty(),
+            "no ITEM_LOCK_CHANGED for the old session's slots"
+        );
     }
 }
 

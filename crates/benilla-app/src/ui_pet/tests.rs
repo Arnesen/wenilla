@@ -959,3 +959,79 @@ fn a_cooldown_alone_fires_the_cooldown_event_and_not_the_bar_update() {
     );
     assert_eq!(enable, 1);
 }
+
+/// **A bar toggle reaches the spellbook** (wow-re `pet-action-bar-api.md` §10.2): after the
+/// local write-back, `0x4bcc19` calls `0x4bd190(&bar[slot])`, which scans the raw pet-spell
+/// array backwards for the entry equal to the slot under `& 0x3FFFFFFF` and copies the slot's
+/// FULL word into it. The book renders from that array, so without the copy the Pet tab kept
+/// the old autocast ring until the next `SMSG_PET_SPELLS`. The book→bar direction is
+/// `ui_pet_book::flip_autocast` (decision 1032); this is its twin.
+#[test]
+fn a_bar_autocast_toggle_reaches_the_pet_spellbook() {
+    const CLAW: u32 = 16827;
+    const GROWL: u32 = 2649;
+    let mut bar = PetBar {
+        spells: PetSpells {
+            pet_guid: 0x2A,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    bar.spells.bar[3] = packed(CLAW, PET_ACT_ENABLED); // autocast allowed + on
+    bar.spells.spells = vec![
+        packed(GROWL, PET_ACT_ENABLED),
+        packed(CLAW, PET_ACT_ENABLED),
+    ];
+
+    let flipped = toggle_slot_autocast(&mut bar, 4).expect("an autocastable slot toggles");
+    assert!(!flipped.autocast_on());
+    assert!(!bar.spells.bar[3].autocast_on(), "the bar slot flipped");
+    assert!(
+        !bar.spells.spells[1].autocast_on(),
+        "…and the book's CLAW entry got the slot's whole word"
+    );
+    assert_eq!(bar.spells.spells[1].packed, flipped.packed);
+    assert!(
+        bar.spells.spells[0].autocast_on(),
+        "a different spell's book entry is untouched"
+    );
+
+    // And back on: the copy is the full word, both directions.
+    toggle_slot_autocast(&mut bar, 4);
+    assert!(bar.spells.spells[1].autocast_on());
+
+    // `0x4bcbf1`: a word without bit 31 aborts before anything is written, book included.
+    bar.spells.bar[5] = packed(3025, PET_ACT_PASSIVE);
+    bar.spells.spells.push(packed(3025, PET_ACT_PASSIVE));
+    assert!(toggle_slot_autocast(&mut bar, 6).is_none());
+    assert_eq!(bar.spells.spells[2], packed(3025, PET_ACT_PASSIVE));
+}
+
+/// **The pet bar dies with the session.** Only the zero-guid `SMSG_PET_SPELLS` cleared it, and a
+/// dropped socket never sends one — so the next session kept the old pet's bar: presses went out
+/// as `CMSG_PET_ACTION` to a guid that no longer exists, and the stable read `has_live_pet`.
+#[test]
+fn the_session_end_tears_the_pet_bar_down() {
+    let mut app = bevy::prelude::App::new();
+    app.add_plugins(UiPetPlugin);
+    {
+        let mut bar = app.world_mut().resource_mut::<PetBar>();
+        bar.spells.pet_guid = 0x2A;
+        bar.spells.bar[3] = packed(16827, PET_ACT_ENABLED);
+    }
+
+    crate::net::handlers::dispatch(
+        app.world_mut(),
+        vec![benilla_protocol::SessionEvent::Disconnected {
+            reason: "socket".into(),
+            end: benilla_protocol::SessionEnd::Lost,
+        }],
+    );
+
+    let bar = app.world().resource::<PetBar>();
+    assert_eq!(
+        bar.spells.pet_guid, 0,
+        "no pet bar carried into the next session"
+    );
+    assert!(bar.spells.bar[3].is_empty());
+}

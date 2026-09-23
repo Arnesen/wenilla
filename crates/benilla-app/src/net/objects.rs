@@ -891,17 +891,20 @@ fn object_destroyed(guid: u64, commands: &mut Commands, index: &mut GuidIndex) {
     // fade is not the animation; it is what every teardown does underneath it.
     //
     // The guid leaves the index either way — to the server it no longer exists, and a respawn
-    // streams in as a fresh entity that fades in over the top. If it was the target, the ring's
-    // gone-entity branch clears the selection next frame, the same as the reference's teardown
-    // (which sends the same `CMSG_SET_SELECTION 0`).
+    // streams in as a fresh entity that fades in over the top. **The object ends here, not when
+    // its model finishes fading** ([`tear_down`]): the entity sheds its [`Guid`] in this same
+    // handler's command flush, so every consumer that means "a live object" stops seeing it at
+    // once — and if it was the target, the ring's gone-object branch clears the selection and
+    // sends `CMSG_SET_SELECTION 0` on its next pass, this frame, as the reference's OnDeactivate
+    // does at the teardown itself (`0x5fbb60` → `0x493910`, wow-re `selection-death-clear.md` Q2).
     //
     // …*unless the object is pinned* — `0x464920` on a still-pinned object only sets the
     // pending-destroy bit and returns, and the real free waits for the last pin to drop (wow-re
     // `go-display-sound-events.md` §6d). The one pin benilla takes is the despawn animation
     // announced a moment earlier by `SMSG_GAMEOBJECT_DESPAWN_ANIM`, which is the whole of how an
     // object gets to play its own despawn after the server says it is gone (decision 1404); the
-    // fade then follows the animation, where the deferred destroy runs
-    // ([`crate::go_anim::release_despawn_pin`]).
+    // fade then follows the animation, where the deferred destroy — and so the teardown — runs
+    // ([`crate::go_anim::release_despawn_pin`]). A pinned object is still an object until then.
     if let Some(e) = index.0.remove(&guid) {
         // An item has no model to hand the fadeout, so it goes now (decision 2334) — what the
         // scheduler does with a modelless entity anyway, one frame later — and its countdown
@@ -918,8 +921,8 @@ fn object_destroyed(guid: u64, commands: &mut Commands, index: &mut GuidIndex) {
                 if let Ok(mut ent) = world.get_entity_mut(e) {
                     ent.insert(crate::go_anim::PendingDestroy);
                 }
-            } else if let Ok(mut ent) = world.get_entity_mut(e) {
-                ent.insert(DespawnFade::default());
+            } else if let Ok(ent) = world.get_entity_mut(e) {
+                tear_down(ent);
             }
         });
     }
@@ -934,12 +937,39 @@ fn objects_removed(guids: Vec<u64>, commands: &mut Commands, index: &mut GuidInd
     // eyes). The mechanism behind it is the same one [`object_destroyed`] above now takes — the
     // OUT_OF_RANGE block and DESTROY reach `0x464920` alike, and its OnDeactivate hands the model
     // to the `SWModelFadeout` scheduler either way ([`DespawnFade`], decision 2198). That the two
-    // routes agree is not a convenience here; it is the reference's own shape.
+    // routes agree is not a convenience here; it is the reference's own shape — and so is the
+    // object ending at the stream-out rather than when the fade does ([`tear_down`]): a unit that
+    // walks out of range, vanishes or stealths stops being targetable, TAB-able and hoverable now.
     for g in guids {
         if let Some(e) = index.0.remove(&g) {
-            commands.entity(e).insert(DespawnFade::default());
+            commands.entity(e).queue(tear_down);
         }
     }
+}
+
+/// **An object's teardown** — the reference's `0x464920`, which both `SMSG_DESTROY_OBJECT` and
+/// the OUT_OF_RANGE block reach: the OBJECT is freed on the spot, and only its detached MODEL
+/// survives, handed to the `SWModelFadeout` scheduler to ramp out ([`DespawnFade`], decision
+/// 2198). The OnDeactivate on the way (`0x5fbb60` → `0x493910`) clears the selection if it was
+/// this unit and sends `CMSG_SET_SELECTION 0` — at the teardown, not two seconds later (wow-re
+/// `object-layer/scratch/selection-death-clear.md` Q2).
+///
+/// benilla keeps the model on the same entity rather than re-parenting it onto a fresh one, so
+/// "the object is gone" is said by taking away the one component that makes an entity an object:
+/// its [`Guid`], the server identity every object consumer keys on — the TAB scan, `/target`,
+/// the mouseover pick, the name and nameplate walks, the minimap blips, the quest markers, the
+/// chat bubbles, the selection ring's gone-object branch, the unit feed's "left the manager"
+/// gate. What the model needs to finish drawing stays: the [`NetEntity`] the renderer reads, and
+/// the [`ObjectStore`] the animation driver reads — a corpse that decays keeps lying dead while
+/// it fades instead of reading as alive and standing up. The guid has already left the
+/// [`GuidIndex`] (the caller's job), so a same-tick re-create of it (corpse → respawn) spawns a
+/// fresh object beside the fading model, and nothing ever sees two objects with one guid.
+///
+/// Every teardown goes through here: both wire routes, and a pinned object's deferred destroy
+/// ([`crate::go_anim::release_despawn_pin`]).
+pub(crate) fn tear_down(mut ent: EntityWorldMut) {
+    ent.remove::<Guid>();
+    ent.insert(DespawnFade::default());
 }
 
 /// A creature path packet (`SMSG_MONSTER_MOVE`, or its deck twin `SMSG_MONSTER_MOVE_TRANSPORT`):

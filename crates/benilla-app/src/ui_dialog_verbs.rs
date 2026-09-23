@@ -243,7 +243,9 @@ impl AreaSpiritHealer {
 }
 
 /// The three battleground queue slots (`0xb6e9d0`, stride `0x20`), each with the moment its
-/// status landed — the clock every stamp in the slot is relative to.
+/// status landed — the clock every stamp in the slot is relative to. Kept across an in-session
+/// world enter (§8, `0x4a9db0`); zeroed whole at the session end, as the reference's module init
+/// zeroes it at every login (`net::on_session_end`).
 #[derive(Resource, Default)]
 pub(crate) struct BattlefieldQueue {
     slots: [Option<(BattlefieldStatus, Instant)>; 3],
@@ -1095,7 +1097,18 @@ mod net {
             .net_handler(K::AreaSpiritHealerTime, on_area_spirit_healer_time)
             .net_handler(K::BattlefieldStatus, on_battlefield_status)
             .net_handler(K::MeetingStoneSetQueue, on_meeting_stone)
-            .net_handler(K::MeetingStoneNotice, on_meeting_stone);
+            .net_handler(K::MeetingStoneNotice, on_meeting_stone)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    /// The battleground queue is zeroed at every login (wow-re `battlefield-verb-family.md` §8:
+    /// module init `0x4a9c40`, from `InitializeGame` — the three slots, `[0x8457cc] = -1`, the
+    /// scalars), and vmangos never sends a clear for the queue of a player who logged out. A
+    /// listener on the session end (a second handler on the kind, after the bridge's own
+    /// teardown). The in-session world enter (`0x4a9db0`) is a different edge that KEEPS the slots,
+    /// and it does not come through here.
+    fn on_session_end(In(_): In<SessionEvent>, mut queue: ResMut<BattlefieldQueue>) {
+        *queue = BattlefieldQueue::default();
     }
 
     /// The pet trainer's question (decision 1963) — the talent wipe's twin
@@ -2059,5 +2072,66 @@ mod tests {
         pet.close();
         assert_eq!(pet.pending(), None);
         assert_eq!(pet.cost, 0);
+    }
+
+    /// **The queue is zeroed at every login, not kept across it** (wow-re
+    /// `battlefield-verb-family.md` §8): module init `0x4a9c40`, run from `InitializeGame`,
+    /// zeroes the three slots, the active index (`[0x8457cc] = -1`) and the scalars, and vmangos
+    /// never sends a clear for a queue whose player logged out. So a slot, the active map and the
+    /// instance clocks from the last session must not reach the next — only an in-session world
+    /// enter (`0x4a9db0`) keeps the slots, and that is `ui_battlefield`'s, untouched here.
+    #[test]
+    fn the_session_end_zeroes_the_battlefield_queue() {
+        let mut app = App::new();
+        app.init_resource::<BattlefieldQueue>();
+        net::register(&mut app);
+        let now = Instant::now();
+        {
+            let mut q = app.world_mut().resource_mut::<BattlefieldQueue>();
+            q.apply_at(
+                BattlefieldStatus {
+                    slot: 0,
+                    map_id: 489,
+                    bracket: 0,
+                    instance_id: 3,
+                    status: 3,
+                    time_ms: None,
+                    in_progress: Some((90_000, 30_000)),
+                    queued: None,
+                },
+                now,
+            );
+            q.apply_at(
+                BattlefieldStatus {
+                    slot: 1,
+                    map_id: 30,
+                    bracket: 0,
+                    instance_id: 0,
+                    status: 1,
+                    time_ms: Some(0),
+                    in_progress: None,
+                    queued: None,
+                },
+                now,
+            );
+        }
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "logged out".into(),
+                end: benilla_protocol::SessionEnd::LoggedOut,
+            }],
+        );
+
+        let mut q = app.world_mut().resource_mut::<BattlefieldQueue>();
+        assert!(
+            q.slots().iter().all(Option::is_none),
+            "all three slots empty"
+        );
+        assert_eq!(q.active_map(), None);
+        assert_eq!(q.run_time_ms(now), 0);
+        assert_eq!(q.instance_expiration_ms(now), 0);
+        assert!(!q.take_score_dirty());
     }
 }

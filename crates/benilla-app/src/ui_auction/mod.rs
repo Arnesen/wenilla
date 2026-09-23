@@ -104,18 +104,26 @@ const SUBCLASS_HIDDEN_FROM_AUCTIONS: u32 = 0x2;
 /// real `ItemClass.dbc` row. **Every string the filter displays comes from the player's own DBC**,
 /// which is what keeps this feature clear of decisions 1234/1260 — we ship the structure, the
 /// install supplies the words.
-const AUCTION_CLASSES: [u32; 10] = [
-    2,  // Weapon
-    4,  // Armor
-    1,  // Container
-    0,  // Consumable
-    7,  // Trade Goods
-    6,  // Projectile
-    11, // Quiver
-    9,  // Recipe
-    5,  // Reagent
-    15, // Miscellaneous
+///
+/// Each entry is the reference's `0x807060` row `{itemClassId, hasSubclassFilter}` (wow-re
+/// auction-house §9.1): a class whose flag is 0 offers no subclass rows and no inventory-slot rows.
+const AUCTION_CLASSES: [(u32, bool); 10] = [
+    (2, true),   // Weapon
+    (4, true),   // Armor
+    (1, true),   // Container
+    (0, false),  // Consumable
+    (7, false),  // Trade Goods
+    (6, true),   // Projectile
+    (11, true),  // Quiver
+    (9, true),   // Recipe
+    (5, false),  // Reagent
+    (15, false), // Miscellaneous
 ];
+
+/// `ItemSubClass.Flags` bit `0x200`: the subclass offers the fourteen inventory-slot rows beneath
+/// it (`GetAuctionInvTypes`, `0x4cfb63 test ah,2`). In the shipped file it is set on exactly Armor
+/// 0..4 (Miscellaneous, Cloth, Leather, Mail, Plate) — not on Shield, Libram, Idol or Totem.
+const SUBCLASS_OFFERS_INV_TYPES: u32 = 0x200;
 
 /// The `AuctionHouse.dbc` catalog, loaded with the other item DBCs ([`crate::ui_items`]). Optional
 /// resource — absent, the sell pane shows no deposit rather than inventing one.
@@ -514,7 +522,7 @@ pub(crate) fn categories(
     };
     AUCTION_CLASSES
         .iter()
-        .filter_map(|&class_id| {
+        .filter_map(|&(class_id, has_subclass_filter)| {
             let name = classes.0.name(class_id)?.to_string();
             let subs = subclasses
                 .0
@@ -527,18 +535,16 @@ pub(crate) fn categories(
                     Some(AuctionSubCategory {
                         sub_id: sub,
                         name: subclasses.0.name(class_id, sub)?.to_string(),
-                        // INTERIM (decision 1511, §5 TU-4): which class/subclass pairs offer the
-                        // fourteen inventory-slot rows is not yet derived from the binary. Armor
-                        // is the one the reference visibly offers them under, and it is the only
-                        // class where an equip slot narrows anything. Data, not logic — a
-                        // correction is this line.
-                        has_inv_types: class_id == 4,
+                        has_inv_types: subclasses.0.flags(class_id, sub)
+                            & SUBCLASS_OFFERS_INV_TYPES
+                            != 0,
                     })
                 })
                 .collect();
             Some(AuctionCategory {
                 class_id,
                 name,
+                has_subclass_filter,
                 subclasses: subs,
             })
         })
@@ -820,6 +826,7 @@ fn drain_auction(
                 level_min: u8::try_from(q.min_level).unwrap_or(u8::MAX),
                 level_max: u8::try_from(q.max_level).unwrap_or(u8::MAX),
                 slot_id: q.inv_type.unwrap_or(auction_filter::ANY),
+                // Already ids — the binding maps menu positions the way `0x4ce980` does.
                 main_category: q.class.unwrap_or(auction_filter::ANY),
                 sub_category: q.sub_class.unwrap_or(auction_filter::ANY),
                 quality: q.quality.unwrap_or(auction_filter::ANY),
@@ -943,6 +950,54 @@ fn drain_auction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tree off the player's own DBCs carries the reference's two gates (wow-re
+    /// auction-house §9.1/§9.2): the `0x807060` class flag, and `ItemSubClass.Flags & 0x200` for
+    /// the inventory-slot rows — which Shield does NOT carry, though it is Armor.
+    #[test]
+    fn the_tree_carries_the_reference_gates() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).unwrap();
+        let classes =
+            crate::ui_items::ItemClasses(benilla_formats::load_item_classes(&mut chain).unwrap());
+        let subclasses = crate::ui_items::ItemSubClasses(
+            benilla_formats::load_item_sub_classes(&mut chain).unwrap(),
+        );
+        let tree = categories(Some(&classes), Some(&subclasses));
+        let ids: Vec<(u32, bool)> = tree
+            .iter()
+            .map(|c| (c.class_id, c.has_subclass_filter))
+            .collect();
+        assert_eq!(ids, AUCTION_CLASSES.to_vec());
+
+        let weapon = &tree[0];
+        assert_eq!(weapon.subclasses[0].sub_id, 0, "Axe leads, in file order");
+        assert!(
+            !weapon
+                .subclasses
+                .iter()
+                .any(|s| [9, 11, 12, 17].contains(&s.sub_id)),
+            "the excluded weapon rows are not offered"
+        );
+        assert!(weapon.subclasses.iter().all(|s| !s.has_inv_types));
+
+        let armor = &tree[1];
+        let offering: Vec<u32> = armor
+            .subclasses
+            .iter()
+            .filter(|s| s.has_inv_types)
+            .map(|s| s.sub_id)
+            .collect();
+        assert_eq!(
+            offering,
+            vec![0, 1, 2, 3, 4],
+            "not Shield, Libram, Idol, Totem"
+        );
+
+        // Consumable's flag is 0, yet its subclass list stays for the query's own scan.
+        assert!(!tree[3].has_subclass_filter);
+        assert!(!tree[3].subclasses.is_empty());
+    }
 
     /// The four buckets, and the one that matters: an expired auction the server has not swept yet
     /// arrives as an underflowed u32 and must read as Short, never as "Very Long".

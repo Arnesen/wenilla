@@ -74,7 +74,6 @@ use std::time::Duration;
 
 use crate::creature_anim::{advance_track, scan_events, AnimSoundEvent};
 use crate::net::{GuidIndex, ObjectStore};
-use benilla_world::model_fade::DespawnFade;
 use benilla_world::schedule::WorldStage;
 
 /// `GO_STATE_ACTIVE` (vmangos `GOState`) — the **open** state (door swung, chest lid up). Passable.
@@ -597,8 +596,11 @@ fn arm_despawn_anim(mut gos: Query<&mut GoAnim, Changed<DespawnAnimAnnounced>>) 
 /// scheduler `0x672df0` on its way out — so the object stops existing while its model keeps
 /// drawing and ramps to zero. A looted chest whose static model authors no `Despawn` sequence is
 /// exactly this path with no animation in front of it, and popping it was the report that found
-/// the missing hop. [`DespawnFade`] is that hand-off; it arms once and drives itself, so the pin
-/// comes off with it and this query stops matching.
+/// the missing hop. [`DespawnFade`](benilla_world::model_fade::DespawnFade) is that hand-off; it
+/// arms once and drives itself, so the pin comes off with it and this query stops matching. The
+/// hand-off is [`crate::net::tear_down`], the same one both wire routes take, so the object's
+/// identity ends here too — a pinned object is still an object while it plays, and stops being
+/// one when the pin drops.
 fn release_despawn_pin(
     mut commands: Commands,
     pinned: Query<(Entity, Option<&GoAnim>), With<PendingDestroy>>,
@@ -610,7 +612,7 @@ fn release_despawn_pin(
         commands
             .entity(e)
             .try_remove::<PendingDestroy>()
-            .try_insert(DespawnFade::default());
+            .queue_silenced(crate::net::tear_down);
     }
 }
 
@@ -1132,6 +1134,7 @@ pub(crate) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_world::model_fade::DespawnFade;
 
     /// **A ghost's mover drops DOOR GameObjects — and nothing else** (decision 1767).
     ///
@@ -1677,9 +1680,11 @@ mod tests {
         assert_eq!(armed(&app, go), Some((0x93, RepeatAnimation::Never)));
 
         // The wire pair, in the order vmangos sends it and Commands apply it.
-        app.world_mut()
-            .entity_mut(go)
-            .insert((DespawnAnimAnnounced, PendingDestroy));
+        app.world_mut().entity_mut(go).insert((
+            crate::net::Guid(0xF110_0000_0000_0E66),
+            DespawnAnimAnnounced,
+            PendingDestroy,
+        ));
         app.update();
         assert_eq!(
             armed(&app, go),
@@ -1687,8 +1692,8 @@ mod tests {
             "the announcement arms 157 Despawn for ONE window"
         );
         assert!(
-            app.world().get_entity(go).is_ok(),
-            "the pin holds the object alive across its own destroy"
+            app.world().get::<crate::net::Guid>(go).is_some(),
+            "the pin holds the OBJECT alive across its own destroy, not just its model"
         );
 
         advance(&mut app, 2700);
@@ -1696,6 +1701,10 @@ mod tests {
         assert!(
             app.world().get::<DespawnFade>(go).is_some(),
             "the window ended — the pin drops and the deferred destroy hands the model to the fade"
+        );
+        assert!(
+            app.world().get::<crate::net::Guid>(go).is_none(),
+            "…and the deferred destroy is the teardown: the object ends as the fade begins"
         );
         assert!(
             app.world().get::<PendingDestroy>(go).is_none(),

@@ -760,7 +760,9 @@ fn drive_mouseover_tooltip(
     // The hovered UNIT's snapshot (a hovered non-unit resolves no store here).
     let unit = hovered.target.zip(hovered.guid).and_then(|(entity, guid)| {
         let store = stores.get(entity).ok()?;
-        let name = names.resolve(guid, &commands).map(str::to_string);
+        let name = names
+            .resolve_unit(guid, Some(store), &commands)
+            .map(str::to_string);
         let reaction = ring_reaction(
             rx.factions.as_deref(),
             &rx.reputations,

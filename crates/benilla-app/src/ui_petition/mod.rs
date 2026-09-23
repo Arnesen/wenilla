@@ -402,6 +402,16 @@ impl PetitionState {
         self.open = None;
     }
 
+    /// The session end: the open charter, the in-flight sign and the undrained lines are the old
+    /// session's and go with it — silently, with **no** decline (the socket is gone, and a
+    /// decline is the close verb's, not the teardown's). The record cache stays: it is keyed by
+    /// the server's petition id, and the world-enter release already re-arms its asks.
+    fn clear_session(&mut self) {
+        self.open = None;
+        self.signing = false;
+        self.lines.clear();
+    }
+
     /// The open charter's item guid — what `SignPetition` / `OfferPetition` / `RenamePetition`
     /// address. `None` = nothing open, and the verb is dropped rather than sent against a guess.
     fn open_item(&self) -> Option<u64> {
@@ -456,7 +466,22 @@ pub(crate) mod net {
             .net_handler(K::PetitionSignResults, on_sign_results)
             .net_handler(K::TurnInPetitionResults, on_turn_in_results)
             .net_handler(K::PetitionDeclined, on_declined)
-            .net_handler(K::PetitionRenamed, on_renamed);
+            .net_handler(K::PetitionRenamed, on_renamed)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    /// The charter window and the registrar die with the socket — a listener on the session end
+    /// (a second handler on the kind, after the bridge's own teardown). Without it the next
+    /// login's fresh VM saw `None → Some` and fired `PETITION_SHOW` for the old session's charter,
+    /// and closing that ghost declined it on the wire. The registrar's walk-away guard cannot
+    /// stand in: it measures from a self player, and there is none until the next world entry.
+    fn on_session_end(
+        In(_): In<SessionEvent>,
+        mut petition: ResMut<PetitionState>,
+        mut registrar: ResMut<GuildRegistrarState>,
+    ) {
+        petition.clear_session();
+        registrar.close();
     }
 
     /// The registrar's two `UNIT_NPC_FLAGS` gates are on LIVE NPC state rather than on the
@@ -846,5 +871,45 @@ mod tests {
             },
         );
         assert_eq!(open_title(&petition), Some("Second"));
+    }
+
+    /// **The charter window and the in-flight sign die with the session.** Only the Lua close,
+    /// a sign result or a turn-in cleared `open`, and a logout's fresh VM never runs the old
+    /// one's `OnHide` — so the next login's feed saw `None → Some` and fired `PETITION_SHOW` into
+    /// the new character's UI, and closing that ghost put `MSG_PETITION_DECLINE` on the wire for
+    /// the old session's charter. Driven through the real registration.
+    #[test]
+    fn the_session_end_closes_the_charter_and_forgets_the_sign() {
+        let (commands, _rx) = commands();
+        let mut app = App::new();
+        app.add_plugins(UiPetitionPlugin);
+        {
+            let mut petition = app.world_mut().resource_mut::<PetitionState>();
+            petition.show(signatures(0x99, 0xaa, 7, &[0xbb]), &commands);
+            petition.signing = true;
+        }
+        app.world_mut()
+            .resource_mut::<GuildRegistrarState>()
+            .open(&show_list(0x2a1f, &[(1000, 1)]), Some(REGISTRAR_NPC_FLAGS));
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+        );
+
+        assert_eq!(app.world().resource::<GuildRegistrarState>().npc(), None);
+        let petition = app.world().resource::<PetitionState>();
+        assert_eq!(
+            petition.open_item(),
+            None,
+            "no charter carried into the next login"
+        );
+        assert!(
+            !petition.signing,
+            "no sign of the old session still in flight"
+        );
     }
 }

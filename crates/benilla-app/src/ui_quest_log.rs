@@ -23,9 +23,8 @@
 //! divergence note at the fire site / decision 0340) — diffed against a `Local`, exactly like
 //! every other feed in this crate.
 //!
-//! [`drain_quest_log_abandons`] maps the confirmed abandon's 1-based Lua entry index back to its
-//! descriptor slot (this frame's push order, kept on [`QuestLog`]) and sends
-//! `CMSG_QUESTLOG_REMOVE_QUEST`.
+//! [`drain_quest_log_abandons`] maps the confirmed abandon's quest id to its descriptor slot (this
+//! frame's rows, kept on [`QuestLog`]) and sends `CMSG_QUESTLOG_REMOVE_QUEST`.
 //!
 //! This module used to also answer the questgiver greeting's active/available split, via a
 //! `contains` membership test over the live descriptor slots. **It doesn't any more, and must not
@@ -76,20 +75,20 @@ struct Row {
 ///
 /// - `templates` — the `SMSG_QUEST_QUERY_RESPONSE` cache, ask-once by quest id through
 ///   [`QueryCache`] (the exact twin of [`Items`]'s item-template cache).
-/// - `entry_slots` — this frame's pushed entry order → descriptor slot, so
-///   [`drain_quest_log_abandons`] can turn a confirmed abandon's 1-based Lua index back into the
-///   `CMSG_QUESTLOG_REMOVE_QUEST` slot it came from (slots aren't contiguous — an abandoned/turned-in
-///   quest leaves a gap).
+/// - `row_slots` — this frame's quest rows as `(quest id, descriptor slot)`, folded ones included:
+///   the reference's row table `0xbb71c0`, which [`drain_quest_log_abandons`] searches by the
+///   confirmed abandon's quest id for the `CMSG_QUESTLOG_REMOVE_QUEST` slot (slots aren't
+///   contiguous — an abandoned/turned-in quest leaves a gap).
 #[derive(Resource, Default)]
 pub(crate) struct QuestLog {
     templates: QueryCache<u32, QuestTemplate>,
-    entry_slots: Vec<Option<u8>>,
+    row_slots: Vec<(u32, u8)>,
     /// Collapsed section headers, keyed by header TITLE (two zones sharing a name share a header
     /// row, so the fold state naturally shares too). Owned here — the engine only reports the
     /// flag and drains toggle intents ([`drain_quest_log_collapses`]).
     collapsed: HashSet<String>,
     /// This frame's pushed entry order → the header title for header rows (`None` for quests) —
-    /// the collapse drain's index→identity map, the fold twin of `entry_slots`.
+    /// the collapse drain's index→identity map.
     header_keys: Vec<Option<String>>,
 }
 
@@ -123,7 +122,7 @@ impl QuestLog {
     /// to re-ask that there's no reason to risk it.
     pub(crate) fn clear_session(&mut self) {
         self.templates.clear();
-        self.entry_slots.clear();
+        self.row_slots.clear();
         self.collapsed.clear();
         self.header_keys.clear();
     }
@@ -461,15 +460,15 @@ fn build_detail(
     }
 }
 
-/// Map a 1-based Lua entry index to its descriptor slot via this frame's push order (`entry_slots`)
-/// — the abandon drain's half of the flow; `None` for a header row (no slot to remove). Pure, so
-/// it's testable without a live [`QuestLog`]/ECS.
-fn abandon_slot(entry: u32, entry_slots: &[Option<u8>]) -> Option<u8> {
-    (entry as usize)
-        .checked_sub(1)
-        .and_then(|i| entry_slots.get(i))
-        .copied()
-        .flatten()
+/// The descriptor slot of the row carrying `quest_id` — `AbandonQuest`'s search (`0x4df070`: walk
+/// the 40-row table `0xbb71c0`, skip headers, match the row's quest id, send its slot `+0x4`);
+/// `None` when no row carries it, which the reference answers by doing nothing. Pure, so it's
+/// testable without a live [`QuestLog`]/ECS.
+fn abandon_slot(quest_id: u32, row_slots: &[(u32, u8)]) -> Option<u8> {
+    row_slots
+        .iter()
+        .find(|&&(id, _)| id == quest_id)
+        .map(|&(_, slot)| slot)
 }
 
 /// Re-point the engine's quest-log selection (a 1-based entry INDEX) across a snapshot rebuild —
@@ -576,8 +575,7 @@ fn order_groups(rows: &[GroupRow]) -> Vec<(i32, String, Vec<usize>)> {
 
 /// Read the self player's `PLAYER_QUEST_LOG` descriptor slots each frame, resolve entries/detail,
 /// and push a [`QuestLogState`] snapshot on change (diffed against a `Local`, the crate's standard
-/// feed shape). Also refreshes [`QuestLog::active_quest_ids`]/`entry_slots` for the greeting split
-/// and the abandon drain.
+/// feed shape). Also refreshes [`QuestLog`]'s `row_slots` for the abandon drain.
 fn feed_quest_log(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
@@ -734,7 +732,6 @@ fn feed_quest_log(
     };
 
     let mut entries: Vec<QuestLogEntryView> = Vec::new();
-    let mut entry_slots: Vec<Option<u8>> = Vec::new();
     let mut header_keys: Vec<Option<String>> = Vec::new();
     // The quests folded under a collapsed header: out of the visible list, still in the log. The
     // engine's watch prune counts them, as the reference's does (`0x4de7a7`–`0x4de80f` scans the
@@ -756,7 +753,6 @@ fn feed_quest_log(
             objectives: Vec::new(),
             detail: None, // a header names a zone/sort; there is no quest to describe
         });
-        entry_slots.push(None);
         header_keys.push(Some(name.clone()));
         for &ri in row_idxs {
             let r = &rows[ri];
@@ -836,7 +832,6 @@ fn feed_quest_log(
                 objectives,
                 detail,
             });
-            entry_slots.push(Some(r.slot));
             header_keys.push(None);
         }
     }
@@ -847,7 +842,8 @@ fn feed_quest_log(
     if new_sel != sel {
         script.set_quest_log_selection(new_sel);
     }
-    quest_log.entry_slots = entry_slots;
+    // Every cached row, folded or not — the table `AbandonQuest` searches by quest id.
+    quest_log.row_slots = rows.iter().map(|r| (r.quest_id, r.slot)).collect();
     quest_log.header_keys = header_keys;
 
     let fresh = QuestLogState {
@@ -1004,9 +1000,9 @@ fn quests_with_progressed_objectives(
         .collect()
 }
 
-/// Drain the confirmed abandons (1-based Lua entry index, pinned at click time — see
+/// Drain the confirmed abandons (the quest id marked at click time — see
 /// `benilla_ui::script::quest_log`'s module doc) and map each to `CMSG_QUESTLOG_REMOVE_QUEST` via
-/// this frame's `entry_slots`.
+/// this frame's `row_slots`.
 /// The `ZoneOrSort → header name` lookup ([`benilla_formats::QuestHeaderNames`]), loaded once at
 /// startup. Absent when the client data didn't load — the feed then buckets everything under
 /// "Quests".
@@ -1102,13 +1098,13 @@ fn drain_quest_log_abandons(
     let Some(mut script) = script else {
         return;
     };
-    for entry in script.take_quest_log_abandons() {
-        match abandon_slot(entry, &quest_log.entry_slots) {
+    for quest in script.take_quest_log_abandons() {
+        match abandon_slot(quest, &quest_log.row_slots) {
             Some(slot) => {
-                debug!("ui_quest_log: abandon entry {entry} → slot {slot}");
+                debug!("ui_quest_log: abandon quest {quest} → slot {slot}");
                 let _ = commands.0.send(ClientCommand::QuestlogRemove { slot });
             }
-            None => debug!("ui_quest_log: abandon entry {entry} out of range — ignored"),
+            None => debug!("ui_quest_log: abandon quest {quest} is not in the log — ignored"),
         }
     }
 }
@@ -1690,18 +1686,103 @@ mod tests {
         assert_eq!(money_split(0), (0, 0));
     }
 
-    // ── abandon_slot: entry → descriptor slot across gaps ──────────────────────────────────────────
+    // ── abandon_slot: quest id → descriptor slot across gaps ───────────────────────────────────────
 
     #[test]
-    fn abandon_maps_entry_to_slot_across_a_gap_and_skips_headers() {
-        // A header row (None), then slots 0 and 2 (slot 1 empty in the descriptor array) — the
-        // push order skips the gap; entry 1 is the header, which maps to NO slot.
-        let entry_slots = vec![None, Some(0u8), Some(2u8)];
-        assert_eq!(abandon_slot(1, &entry_slots), None); // header row: nothing to remove
-        assert_eq!(abandon_slot(2, &entry_slots), Some(0));
-        assert_eq!(abandon_slot(3, &entry_slots), Some(2));
-        assert_eq!(abandon_slot(4, &entry_slots), None);
-        assert_eq!(abandon_slot(0, &entry_slots), None); // 1-based; 0 is never a valid entry
+    fn abandon_maps_quest_id_to_slot_across_a_gap() {
+        // Slots 0 and 2 (slot 1 empty in the descriptor array) — the id finds its own slot.
+        let row_slots = vec![(783u32, 0u8), (7, 2)];
+        assert_eq!(abandon_slot(783, &row_slots), Some(0));
+        assert_eq!(abandon_slot(7, &row_slots), Some(2));
+        assert_eq!(abandon_slot(8, &row_slots), None); // not in the log: nothing to remove
+        assert_eq!(abandon_slot(0, &row_slots), None); // 0 is never a quest
+    }
+
+    // ── The abandon mark is a QUEST ID (0x4dfb50 / 0x4df070) ─────────────────────────────────────
+
+    /// **An abandon names a quest, not a row.** `SetAbandonQuest` (`0x4dfb50`) copies the
+    /// selection `0xbb7480` — which holds the selected row's QUEST ID (`0x4def30`, `0x4def5d`) —
+    /// into the mark `0xbb7484`; `AbandonQuest` (`0x4dfe00` → `0x4df070`) searches the row table
+    /// `0xbb71c0` for that id and removes that row's slot. So a log that re-indexes while the
+    /// confirm popup is up — a fold, a quest arriving or leaving — cannot move the abandon onto a
+    /// neighbour. Ours pinned the 1-based row index and resolved it against the rows current at
+    /// confirm time: fold the group above and the popup's Yes abandoned the quest below.
+    #[test]
+    fn a_fold_between_mark_and_confirm_does_not_retarget_the_abandon() {
+        use benilla_protocol::messages::field::FIELD_PLAYER_QUEST_LOG_1_1;
+
+        // Z1 = zone 0 ("Missing header!", forced first) holding A; Z2 = zone 7 holding B and C.
+        // Entries: [Z1, A, Z2, B, C] — B is row 4.
+        const A: u32 = 101;
+        const B: u32 = 201;
+        const C: u32 = 202;
+        let quests = [(0u8, A, 0i32, "A"), (1, B, 7, "B"), (2, C, 7, "C")];
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx));
+        app.init_resource::<crate::net::GuidIndex>()
+            .init_resource::<NameCache>()
+            .init_resource::<Items>()
+            .init_resource::<crate::world_state::WorldStates>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>();
+        let mut log = QuestLog::default();
+        let mut pairs = Vec::new();
+        for (slot, id, zos, title) in quests {
+            let mut t = quest_template(std::array::from_fn(|_| obj(0, 0, 0, 0, "")));
+            t.quest_id = id;
+            t.zone_or_sort = zos;
+            t.title = title.into();
+            log.insert_template(t);
+            pairs.push((FIELD_PLAYER_QUEST_LOG_1_1 + 3 * u16::from(slot), id));
+        }
+        app.insert_resource(log);
+        app.world_mut().spawn((
+            ObjectStore(ObjectFields::from_pairs(&pairs)),
+            Guid(0x2A),
+            SelfPlayer,
+        ));
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.add_systems(
+            Update,
+            (
+                drain_quest_log_collapses,
+                feed_quest_log,
+                drain_quest_log_abandons,
+            )
+                .chain(),
+        );
+        let run = |app: &mut App, lua: &str| {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .run(lua)
+                .unwrap();
+        };
+
+        app.update();
+        run(&mut app, "SelectQuestLogEntry(4); SetAbandonQuest()");
+        assert_eq!(
+            app.world()
+                .non_send_resource::<UiScript>()
+                .eval::<String>("return GetAbandonQuestName()")
+                .unwrap(),
+            "B"
+        );
+        // The popup is up; the player folds Z1 — B moves from row 4 to row 3, C takes row 4.
+        run(&mut app, "CollapseQuestHeader(1)");
+        app.update();
+        run(&mut app, "AbandonQuest()");
+        app.update();
+
+        let sent: Vec<_> = rx
+            .try_iter()
+            .filter(|c| matches!(c, ClientCommand::QuestlogRemove { .. }))
+            .collect();
+        assert!(
+            matches!(sent.as_slice(), [ClientCommand::QuestlogRemove { slot: 1 }]),
+            "the abandon removes B's slot (1), never C's (2): {sent:?}"
+        );
     }
 
     // ── quests_with_progressed_objectives: the QUEST_WATCH_UPDATE per-quest trigger ─────────────────

@@ -18,8 +18,10 @@
 //!   one detail per push instead made a whole log walk answer with a single row's text.
 //! - **The abandon mark** (`SetAbandonQuest`/`GetAbandonQuestName`/`AbandonQuest`) — the ref's
 //!   two-step confirm (mark on button click, act on the popup's Yes — ref `QuestLogFrame.xml:463-472`,
-//!   `StaticPopup.lua:749-761`). The mark pins the *entry index at click time* so a log shuffle
-//!   between click and confirm can't retarget the abandon.
+//!   `StaticPopup.lua:749-761`). The mark is the selected **quest id** at click time, as the
+//!   reference's is (`0x4dfb50` copies the selection `0xbb7480`, which holds a quest id, into
+//!   `0xbb7484`), so a log that re-indexes between click and confirm — a fold, a quest arriving
+//!   or leaving — can't retarget the abandon.
 //!
 //! A third engine-owned bit joined later: the **watch set** (`IsQuestWatched`/`AddQuestWatch`/
 //! `RemoveQuestWatch`/`GetNumQuestWatches`/`GetQuestIndexForWatch`) — keyed by the entries' stable
@@ -208,9 +210,9 @@ impl super::UiScript {
         self.model_ref().quest_log_selection
     }
 
-    /// Drain the abandon intents: the 1-based entry index pinned by `SetAbandonQuest` at
-    /// click time, confirmed by the popup's `AbandonQuest()`. The app maps index → descriptor
-    /// slot → `CMSG_QUESTLOG_REMOVE_QUEST`.
+    /// Drain the abandon intents: the QUEST ID `SetAbandonQuest` marked at click time, confirmed
+    /// by the popup's `AbandonQuest()`. The app maps id → descriptor slot →
+    /// `CMSG_QUESTLOG_REMOVE_QUEST`.
     pub fn take_quest_log_abandons(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.model_mut().quest_log_abandons)
     }
@@ -593,25 +595,38 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetAbandonQuest() — pin the current selection as the abandon target (ref
-    // QuestLogFrame.xml:464).
+    // SetAbandonQuest() — mark the selected QUEST as the abandon target (ref
+    // QuestLogFrame.xml:464). The reference's `0x4dfb50` is `mov eax,[0xbb7480]; mov [0xbb7484],eax`:
+    // it copies the selection, and the selection is a quest id (`0x4def30` stores the row's +0x0
+    // at `0x4def5d`). Ours holds the selection as a row index, so the id is resolved here, at the
+    // click — never at the confirm, when the rows may have moved.
     g.set(
         "SetAbandonQuest",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.quest_log_abandon_mark = model.quest_log_selection;
+            let sel = model.quest_log_selection as usize;
+            model.quest_log_abandon_mark = sel
+                .checked_sub(1)
+                .and_then(|n| model.quest_log.entries.get(n))
+                .filter(|e| !e.is_header)
+                .map_or(0, |e| e.quest_id);
             Ok(())
         })?,
     )?;
-    // GetAbandonQuestName() → the pinned target's title ("" when none — the popup shows it).
+    // GetAbandonQuestName() → the marked quest's title ("" when none — the popup shows it). The
+    // reference (`0x4dfb60`) peeks its quest cache by the marked id; the rows carry the same
+    // cached title.
     g.set(
         "GetAbandonQuestName",
         lua.create_function(|lua, ()| {
             let title = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                (model.quest_log_abandon_mark as usize)
-                    .checked_sub(1)
-                    .and_then(|n| model.quest_log.entries.get(n))
+                let mark = model.quest_log_abandon_mark;
+                model
+                    .quest_log
+                    .entries
+                    .iter()
+                    .find(|e| mark != 0 && !e.is_header && e.quest_id == mark)
                     .map(|e| e.title.clone())
                     .unwrap_or_default()
             };
@@ -624,13 +639,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetAbandonQuestItems",
         lua.create_function(|_, ()| Ok(Value::Nil))?,
     )?;
-    // AbandonQuest() — queue the pinned target as an outbound intent (the popup's Yes).
+    // AbandonQuest() — the popup's Yes (`0x4dfe00` → `0x4df070`). The reference searches its
+    // whole row table `0xbb71c0` (folded quests included) for a quest row carrying the marked id;
+    // a hit sends that row's slot and clears the mark, a miss does nothing and KEEPS the mark.
+    // Ours checks the same membership — a visible quest row, or one folded under a collapsed
+    // header — and queues the id; the app resolves it to the slot.
     g.set(
         "AbandonQuest",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let mark = std::mem::take(&mut model.quest_log_abandon_mark);
-            if mark != 0 {
+            let mark = model.quest_log_abandon_mark;
+            let in_log = mark != 0
+                && (model
+                    .quest_log
+                    .entries
+                    .iter()
+                    .any(|e| !e.is_header && e.quest_id == mark)
+                    || model.quest_log.hidden_quest_ids.contains(&mark));
+            if in_log {
+                model.quest_log_abandon_mark = 0;
                 model.quest_log_abandons.push(mark);
             }
             Ok(())
@@ -1228,9 +1255,10 @@ mod tests {
             s.eval::<String>("return GetAbandonQuestName()").unwrap(),
             "Kobold Camp Cleanup"
         );
-        // Selection moves before the confirm — the mark must not follow it.
+        // Selection moves before the confirm — the mark must not follow it. What queues is the
+        // marked QUEST ID (entry 2 is quest 7), never a row index (0x4dfb50).
         s.run("SelectQuestLogEntry(1); AbandonQuest()").unwrap();
-        assert_eq!(s.take_quest_log_abandons(), vec![2]);
+        assert_eq!(s.take_quest_log_abandons(), vec![7]);
         assert!(s.take_quest_log_abandons().is_empty(), "drained");
         // A bare AbandonQuest with no mark queues nothing.
         s.run("AbandonQuest()").unwrap();
@@ -1463,10 +1491,56 @@ mod tests {
         );
     }
 
+    /// The abandon mark follows its QUEST across a re-index, and a mark whose quest has left the
+    /// log is a no-op that is KEPT, as `0x4df070`'s miss path is (`ret` before the clear at
+    /// `0x4df0cf`). A quest folded under a collapsed header is still in the log.
+    #[test]
+    fn abandon_mark_is_a_quest_id_that_survives_a_reindex() {
+        let mut s = UiScript::new().unwrap();
+        s.set_quest_log(two_quests());
+        s.run("SelectQuestLogEntry(2); SetAbandonQuest()").unwrap(); // quest 7
+
+        // The log re-indexes under the popup: quest 7 is now row 1, and a stranger takes row 2.
+        let mut moved = two_quests();
+        moved.entries.swap(0, 1);
+        moved.entries[1].quest_id = 999;
+        s.set_quest_log(moved.clone());
+        assert_eq!(
+            s.eval::<String>("return GetAbandonQuestName()").unwrap(),
+            "Kobold Camp Cleanup"
+        );
+        s.run("AbandonQuest()").unwrap();
+        assert_eq!(s.take_quest_log_abandons(), vec![7]);
+
+        // Folded away: still abandonable.
+        s.run("SelectQuestLogEntry(1); SetAbandonQuest()").unwrap();
+        let mut folded = moved.clone();
+        folded.entries.remove(0);
+        folded.hidden_quest_ids = vec![7];
+        s.set_quest_log(folded);
+        s.run("AbandonQuest()").unwrap();
+        assert_eq!(s.take_quest_log_abandons(), vec![7]);
+
+        // Gone from the log: nothing queues, and the mark stays for the quest's return.
+        s.set_quest_log(moved.clone());
+        s.run("SelectQuestLogEntry(1); SetAbandonQuest()").unwrap();
+        let mut gone = moved.clone();
+        gone.entries.remove(0);
+        s.set_quest_log(gone);
+        s.run("AbandonQuest()").unwrap();
+        assert!(s.take_quest_log_abandons().is_empty());
+        s.set_quest_log(moved);
+        s.run("AbandonQuest()").unwrap();
+        assert_eq!(
+            s.take_quest_log_abandons(),
+            vec![7],
+            "the kept mark still names 7"
+        );
+    }
+
     /// `QuestLogPushQuest` queues the selected entry's **quest id**, resolved at click time — not
     /// its index, so a log that reshuffles between the click and the app's drain cannot retarget
-    /// the push. (Contrast the abandon mark, which pins an index on purpose: its two-step confirm
-    /// is what makes the index the right thing to hold.)
+    /// the push — the same keying as the abandon mark.
     /// A party of one other, so the C verb's own party check (below) passes.
     fn in_a_party(s: &mut UiScript) {
         s.set_party(crate::script::PartyState {

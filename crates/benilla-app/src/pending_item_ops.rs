@@ -148,6 +148,16 @@ impl PendingItemOps {
         unlocked
     }
 
+    /// The session end: drop every outstanding entry and report nothing. The lock is item-object
+    /// state in the reference (`item+0x314`), and those objects do not outlive the session; an op
+    /// still in flight when the socket died never gets the field update or failure that would
+    /// settle it, so without this its slots stayed locked for the whole next session. The epoch
+    /// steps so a feed that pushed `locked: true` runs once more to correct it.
+    pub(crate) fn clear_session(&mut self) {
+        self.entries.clear();
+        self.epoch += 1;
+    }
+
     /// Drop every outstanding entry, unconditionally — [`Self::clear_by_failure`]'s
     /// unmatched/zero fallback.
     fn clear_all(&mut self) -> Vec<(i64, u32)> {

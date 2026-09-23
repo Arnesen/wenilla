@@ -353,7 +353,7 @@ pub(super) fn inspect_ui(
     // (the same ask-once path the unit frames use).
     let name_line = net_entity
         .and_then(|p| guids.get(p).ok())
-        .and_then(|g| names.resolve(g.0, &net_commands))
+        .and_then(|g| names.resolve_unit(g.0, store, &net_commands))
         .map(str::to_string);
     // Line gates go by the entity's KIND, not field presence: a create-seeded store answers every
     // field (absent = 0, the descriptor truth), so "is the health field there" stopped meaning

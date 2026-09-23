@@ -403,6 +403,19 @@ fn live_rights(model: &Model, rank_one_based: u32) -> u32 {
         .unwrap_or(0)
 }
 
+/// The rank-name gate `GuildControlSaveRank` (`0x4d20d0`) and `GuildControlAddRank` (`0x4d2210`)
+/// both run before any packet, byte-for-byte the same: the C string (so up to the first NUL) must
+/// be non-empty and `0x65b250(name) - 1` — its UTF-16 code-unit count — must lie in `1..=16`.
+/// Nothing else: no trim, so a whitespace name passes. The name the gate measured is the name
+/// sent. vmangos's own cap is 15 code points and it kicks over it; that server-side limit is the
+/// app's to enforce at the send (`ui_guild::feed::capped_rank_name`), not the binding's.
+fn gated_rank_name(name: &str) -> Option<&str> {
+    let c_name = name.split('\0').next().unwrap_or_default();
+    (1..=16)
+        .contains(&c_name.encode_utf16().count())
+        .then_some(c_name)
+}
+
 /// Register the guild globals against the snapshot store.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
@@ -852,7 +865,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GuildControlSaveRank(name) (`0x4d20d0`) — flush the staged edits as one CMSG_GUILD_RANK.
     // The argument is the rank's (possibly renamed) NAME, taken from the popup's edit box
     // (`FriendsFrame.lua:839`); the rank it applies to is whichever GuildControlSetRank loaded.
-    // Converted to the wire's 0-based rank id here, once.
+    // Converted to the wire's 0-based rank id here, once. A name that fails
+    // [`gated_rank_name`] — empty above all, which vmangos would otherwise persist as the rank's
+    // name guild-wide — is a silent no-op, before any packet.
     //
     // **The fold is a masked set-or-clear over a freshly re-read LIVE baseline** — verified: the
     // binding does `or mask[k]` / `and ~mask[k]` per flag against the current rights, never a
@@ -865,9 +880,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GuildControlSaveRank",
         lua.create_function(|lua, name: String| {
+            let Some(name) = gated_rank_name(&name).map(str::to_string) else {
+                return Ok(());
+            };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let edit = model.guild_control.clone();
-            if edit.rank >= 1 {
+            // `[0x84966c] >= [0xb73120]`: no rank loaded (the reference's -1, our 0) or one at or
+            // past the rank count.
+            if edit.rank >= 1 && (edit.rank as usize) <= model.guild.ranks.len() {
                 let mut rights = live_rights(&model, edit.rank);
                 for (i, bit) in RANK_RIGHT_BITS.iter().enumerate() {
                     if edit.staged[i] {
@@ -886,14 +906,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GuildControlAddRank(name) (`0x4d2210`) — append a rank. The client refuses at
+    // GuildControlAddRank(name) (`0x4d2210`) — append a rank, behind the same silent name gate
+    // as SaveRank ([`gated_rank_name`]). The client refuses at
     // `numRanks >= MAX_RANKS` **silently**, before any packet, which is why the reference's Add
     // button greys itself at ten (`FriendsFrame.lua:887`) rather than relying on a refusal.
     g.set(
         "GuildControlAddRank",
         lua.create_function(|lua, name: String| {
+            let Some(name) = gated_rank_name(&name).map(str::to_string) else {
+                return Ok(());
+            };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if !name.trim().is_empty() && model.guild.ranks.len() < MAX_RANKS {
+            if model.guild.ranks.len() < MAX_RANKS {
                 model.guild_requests.push(GuildRequest::AddRank(name));
             }
             Ok(())
@@ -1018,6 +1042,78 @@ mod tests {
             0,
             "unticked Set MOTD must actually clear — a plain OR could never do this"
         );
+    }
+
+    /// A guild with `n` named ranks.
+    fn guild_with_ranks(n: usize) -> crate::script::UiScript {
+        let mut s = crate::script::UiScript::new().unwrap();
+        s.set_guild(GuildState {
+            in_guild: true,
+            ranks: (0..n)
+                .map(|i| GuildRankInfo {
+                    name: format!("Rank{i}"),
+                    rights: 0,
+                })
+                .collect(),
+            ..Default::default()
+        });
+        s
+    }
+
+    /// **`0x4d20d0` refuses a bad name silently, before any packet** — NULL, empty, or a length
+    /// outside 1..16 UTF-16 code units (`0x65b250` counts units plus the terminator), and a rank
+    /// index at or past the rank count. vmangos persists whatever name arrives — an empty one
+    /// blanks the rank guild-wide — so this gate is the only thing standing in the way.
+    #[test]
+    fn saving_a_rank_refuses_what_the_reference_refuses() {
+        let mut s = guild_with_ranks(5);
+        let saves = |s: &mut crate::script::UiScript| {
+            s.take_guild_requests()
+                .into_iter()
+                .filter(|r| matches!(r, GuildRequest::SaveRank { .. }))
+                .count()
+        };
+
+        s.run(r#"GuildControlSetRank(2); GuildControlSaveRank("")"#)
+            .unwrap();
+        assert_eq!(saves(&mut s), 0, "an empty name is a silent no-op");
+
+        // Sixteen UTF-16 units is the ceiling; seventeen is refused.
+        s.run(r#"GuildControlSetRank(2); GuildControlSaveRank(string.rep("a", 16))"#)
+            .unwrap();
+        assert_eq!(saves(&mut s), 1);
+        s.run(r#"GuildControlSetRank(2); GuildControlSaveRank(string.rep("a", 17))"#)
+            .unwrap();
+        assert_eq!(saves(&mut s), 0, "seventeen units");
+        // Units, not bytes: sixteen two-byte letters are sixteen units.
+        s.run(r#"GuildControlSetRank(2); GuildControlSaveRank(string.rep("é", 16))"#)
+            .unwrap();
+        assert_eq!(saves(&mut s), 1, "32 bytes, 16 units");
+        // Whitespace is not empty to the reference.
+        s.run(r#"GuildControlSetRank(2); GuildControlSaveRank(" ")"#)
+            .unwrap();
+        assert_eq!(saves(&mut s), 1);
+
+        // No rank loaded (a fresh popup — the selection persists across saves, as
+        // `[0x84966c]` does), or one past the ladder.
+        let mut fresh = guild_with_ranks(5);
+        fresh.run(r#"GuildControlSaveRank("Officer")"#).unwrap();
+        assert_eq!(saves(&mut fresh), 0, "nothing selected");
+        s.run(r#"GuildControlSetRank(6); GuildControlSaveRank("Officer")"#)
+            .unwrap();
+        assert_eq!(saves(&mut s), 0, "rank index 5 >= 5 ranks");
+    }
+
+    /// `0x4d2210` runs the same name gate as `SaveRank` — and nothing more: a whitespace name is
+    /// not empty to it.
+    #[test]
+    fn adding_a_rank_runs_the_same_name_gate() {
+        let mut s = guild_with_ranks(5);
+        s.run(r#"GuildControlAddRank(""); GuildControlAddRank(string.rep("a", 17))"#)
+            .unwrap();
+        assert!(s.take_guild_requests().is_empty());
+        s.run(r#"GuildControlAddRank(" ")"#).unwrap();
+        assert_eq!(s.take_guild_requests().len(), 1);
     }
 
     /// A 1-based index past the end, and the 0 the reference passes on every `GuildStatus_Update`

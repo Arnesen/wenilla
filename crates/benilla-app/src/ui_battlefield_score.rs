@@ -32,7 +32,8 @@ use crate::world_state_ui::WorldStateUiRes;
 /// `RequestBattlefieldScoreData`'s throttle — `0x4aa170`: `now + 0x1388`.
 const REQUEST_THROTTLE: Duration = Duration::from_millis(5000);
 
-/// The last `MSG_PVP_LOG_DATA`, and the request stamp.
+/// The last `MSG_PVP_LOG_DATA`, and the request stamp. Both die with the session
+/// (`net::on_session_end`).
 #[derive(Resource, Default)]
 pub(crate) struct BattlefieldScoreboard {
     log: Option<PvpLogData>,
@@ -181,7 +182,15 @@ mod net {
 
     /// Register the handler — called from [`super::BattlefieldScorePlugin`].
     pub(super) fn register(app: &mut App) {
-        app.net_handler(SessionEventKind::PvpLogData, on_pvp_log_data);
+        app.net_handler(SessionEventKind::PvpLogData, on_pvp_log_data)
+            .net_handler(SessionEventKind::Disconnected, on_session_end);
+    }
+
+    /// The board and the request stamp are zeroed at every login (wow-re
+    /// `battlefield-verb-family.md` §8: module init `0x4a9c40` zeroes the score scalars) — a
+    /// listener on the session end (a second handler on the kind, after the bridge's own teardown).
+    fn on_session_end(In(_): In<SessionEvent>, mut board: ResMut<BattlefieldScoreboard>) {
+        *board = BattlefieldScoreboard::default();
     }
 
     fn on_pvp_log_data(In(ev): In<SessionEvent>, mut board: ResMut<BattlefieldScoreboard>) {
@@ -254,5 +263,37 @@ mod tests {
             .map(|c| c.text)
             .collect();
         assert_eq!(cols, ["Flags Returned"]);
+    }
+
+    /// **The board is zeroed at every login** (wow-re `battlefield-verb-family.md` §8: module
+    /// init `0x4a9c40`, from `InitializeGame`, zeroes the score scalars) — the last session's
+    /// `MSG_PVP_LOG_DATA` must not come back as the next character's scoreboard, and its request
+    /// stamp must not throttle that character's first ask.
+    #[test]
+    fn the_session_end_zeroes_the_scoreboard() {
+        let mut app = App::new();
+        app.init_resource::<BattlefieldScoreboard>();
+        net::register(&mut app);
+        {
+            let mut board = app.world_mut().resource_mut::<BattlefieldScoreboard>();
+            board.apply(PvpLogData {
+                ended: true,
+                winner: Some(1),
+                rows: Vec::new(),
+            });
+            board.last_request = Some(Instant::now());
+        }
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+        );
+
+        let board = app.world().resource::<BattlefieldScoreboard>();
+        assert!(board.log.is_none());
+        assert!(board.last_request.is_none());
     }
 }

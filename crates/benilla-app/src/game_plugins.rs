@@ -1019,7 +1019,9 @@ pub(crate) mod schedule_tests {
     /// exclusive system on one side were read as "explained" by a class argued for the build's
     /// barriers, which the declared graph (2337) no longer has; 413 are `finish_colliders`', 143
     /// the net drain's. Same tree, the class dropped, nothing else moved: 5,052 + 556.
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_608;
+    /// **5,554 (decision 2345)** — lowered: the TAB scan stopped reading `Visibility` (the draw
+    /// election's verdict), which ended its pairs with every `Visibility` writer.
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_554;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

@@ -42,7 +42,17 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::PetNameInvalid, on_refusal_line)
         .net_handler(K::PetBroken, on_refusal_line)
         .net_handler(K::PetActionSound, on_action_sound)
-        .net_handler(K::PetDismissSound, on_dismiss_sound);
+        .net_handler(K::PetDismissSound, on_dismiss_sound)
+        .net_handler(K::Disconnected, on_session_end);
+}
+
+/// The pet bar dies with the socket — a listener on the session end (a second handler on the kind,
+/// after the bridge's own teardown). The zero-guid `SMSG_PET_SPELLS` is the only in-session
+/// teardown, and a dropped socket never sends one: without this the next session kept the old
+/// pet's bar, pressed `CMSG_PET_ACTION` at a guid that no longer exists, and the stable read a live
+/// pet. The same reset as the zero guid's, cooldown store included.
+fn on_session_end(In(_): In<SessionEvent>, mut bar: ResMut<PetBar>) {
+    *bar = PetBar::default();
 }
 
 /// The pet action bar (decision 0982) — server-authoritative, so PET_SPELLS is a wholesale

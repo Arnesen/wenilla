@@ -239,8 +239,9 @@ pub(crate) fn subject_for_guid(
     if guid == 0 {
         return None;
     }
-    let name = names.resolve(guid, commands)?.to_string();
-    if let Some(store) = index.0.get(&guid).and_then(|e| stores.get(*e).ok()) {
+    let store = index.0.get(&guid).and_then(|e| stores.get(*e).ok());
+    let name = names.resolve_unit(guid, store, commands)?.to_string();
+    if let Some(store) = store {
         return Some(Subject {
             name,
             race: store.0.unit_race().unwrap_or(0),
