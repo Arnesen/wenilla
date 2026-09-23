@@ -2,8 +2,8 @@
 # The in-loop verify: fmt everywhere, clippy and test on the changed crates and their dependents.
 #
 # The change set is the fork point against main plus staged, unstaged and untracked files. A path
-# under crates/<dir>/ scopes that package, assets/ui/ scopes benilla-app, docs/ and *.md scope
-# nothing, and any other path runs scripts/gates.sh, the workspace-wide chain run at land.
+# under crates/<dir>/ scopes that package, docs/ and *.md scope nothing, and any other path runs
+# scripts/gates.sh, the workspace-wide chain run at land.
 # CHECK_FULL=1 goes straight to gates.sh.
 #
 #   scripts/check.sh
@@ -36,7 +36,6 @@ full_reason=""
 while IFS= read -r f; do
     case "$f" in
     docs/* | *.md) ;;                                 # provably gate-inert (gates.sh's docs-only rule)
-    assets/ui/*) dirs="$dirs benilla-app-DIR:crates/benilla-app" ;;
     crates/*/*) d="${f#crates/}"; dirs="$dirs DIR:crates/${d%%/*}" ;;
     *) full_reason="$f" ;;
     esac
