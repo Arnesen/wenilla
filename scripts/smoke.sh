@@ -5,22 +5,24 @@
 # paragraph concludes it *cannot* run the client, says so to the director, and ships a change whose
 # whole subject is a live session boundary without ever having crossed one. That happened (2277).
 #
-# What it does: boots the real client against the local vmangos on THIS SLOT's probe account, seats
-# a body in the world, `/logout`s to character select, **re-enters**, and exits — then reads the log
-# back. It is the smallest run that crosses every session edge, which is exactly the set of edges
+# What it does: boots the real client against the server (WOW_HOST, default localhost) as the
+# account this checkout declares — or as the WOW_USER/WOW_PASS/WOW_CHAR of the shell — seats a
+# body in the world, `/logout`s to character select, **re-enters**, and exits — then reads
+# the log back. It is the smallest run that crosses every session edge, which is exactly the set of edges
 # the unit tests can only model.
 #
 # It is deliberately NOT wired into `gates.sh`: it wants a server, opens a window, and costs ~45 s,
 # so paying it on every commit is the director's call, not this script's. Run it when a change
 # touches a session boundary — and the gates print a pointer at you either way.
 #
-#   scripts/smoke.sh                 # this slot's probe account
-#   WOW_SMOKE_KEEP=1 scripts/smoke.sh   # keep the log and print its path
+#   scripts/smoke.sh                                   # the checkout's .probe-identity
+#   WOW_USER=u WOW_PASS=p WOW_CHAR=Name scripts/smoke.sh  # or your test account
+#   WOW_SMOKE_KEEP=1 scripts/smoke.sh                  # keep the log and print its path
 set -uo pipefail
 
-# The tree we are standing in, `gates.sh`'s rule verbatim: a session works in its own worktree and
-# reaches for scripts by absolute path, so `$0`'s directory is the PRIMARY checkout and gating (or
-# running) that instead is the bug that made the old gate chain lie.
+# The tree we are standing in, `gates.sh`'s rule verbatim: the git toplevel of $PWD when it is a
+# checkout of this repo, else this file's — a script reached by absolute path from another
+# checkout must not run that one.
 root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -z "$root" ] || [ ! -f "$root/scripts/smoke.sh" ]; then
     root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -41,52 +43,37 @@ echo "smoke: $root"
 # 120 s, no cause, and nothing in the log that looks wrong.
 #
 # So the scrub is per-VARIABLE and up front, not per-leg: a gate whose result depends on the shell
-# it was typed in is not a gate. Kept: `WOW_DATA` (where the install IS — a location, not a dial),
-# `WOW_BG` (the director's "let me watch this one", which changes window stacking and nothing else),
-# and `WOW_SMOKE_KEEP` (this script's own). Loud, because a session that meant to pass something
-# should see it go rather than wonder why it did nothing.
+# it was typed in is not a gate. Kept: `WOW_DATA` and `WOW_HOST` (where the install and the server
+# ARE — locations, not dials), `WOW_BG` (the maintainer's "let me watch this one", which changes
+# window stacking and nothing else), and `WOW_SMOKE_KEEP` (this script's own). Loud, because a
+# session that meant to pass something should see it go rather than wonder why it did nothing.
+#
+# **Who the run logs in as** is decided first, by `scripts/probe-identity.sh`: the account this
+# checkout declares in `.probe-identity` (a login kicks whoever holds the account, so a checkout
+# never logs in as anyone else's), else the WOW_USER/WOW_PASS/WOW_CHAR of the shell — taken before
+# the scrub, and the one thing the scrub does not throw away.
+. "$root/scripts/probe-identity.sh"
+probe_identity smoke "$root" || exit 1
+user="$PROBE_USER"
+pass="$PROBE_PASS"
+char="$PROBE_CHAR"
 inherited=""
 for v in $(env | sed -n 's/^\(WOW_[A-Za-z0-9_]*\)=.*/\1/p'); do
-    case "$v" in WOW_DATA | WOW_BG | WOW_SMOKE_KEEP) continue ;; esac
+    case "$v" in WOW_DATA | WOW_HOST | WOW_BG | WOW_SMOKE_KEEP) continue ;; esac
+    [ -n "$PROBE_DECLARED" ] || case "$v" in WOW_USER | WOW_PASS | WOW_CHAR) continue ;; esac
     inherited="$inherited $v"
     unset "$v"
 done
 [ -n "$inherited" ] &&
     echo "smoke: ignoring inherited env —$inherited (each leg names its own; a gate is not shell-dependent)"
 
-# **The probe identity is keyed to the worktree slot** (docs/METHOD.md, "The local vmangos server"): a
-# vmangos login KICKS whoever holds the account, so `one` is the director's live session and every
-# other `probeN` is another session's. The slot claim is already the session mutex, so deriving the
-# account from it makes probe exclusivity automatic. Refuse rather than guess.
-slot="$(basename "$root" | sed -n 's/^pool-\([0-9]\)$/\1/p')"
-if [ -z "$slot" ]; then
-    echo "smoke: REFUSING — not in a pool worktree (\`$root\`)."
-    echo "       The probe account is keyed to the slot; logging in as the default account would"
-    echo "       kick the director's live session. Claim one: scripts/wt.sh claim <name>"
-    exit 1
-fi
-# Spelled out literally, in docs/METHOD.md's own casing (`pool-0 → Probezero`) rather than derived: BSD
-# sed has no `\U`, and deriving it cost a whole run to discover — the client dutifully reported
-# `ProbeUzero` was not on the account, and then sat on the roster until the timeout.
-names=(zero one two three four five six seven eight nine)
-user="probe$slot"
-pass="pprobe$slot"
-char="Probe${names[$slot]}"
-echo "smoke: slot $slot → $user / $char"
-
 # The server, before the client: a refused connection reads as a client bug in the log and costs a
 # full build to discover. Loud skip, never a silent pass — `gates.sh`'s posture for the install.
-for port in 3724 8085; do
-    if ! (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
-        echo "smoke: SKIPPED — nothing listening on 127.0.0.1:$port (realmd 3724 / mangosd 8085)."
-        echo "       The local vmangos lives at /Users/sam/dev/vmangos-deploy — \`docker compose up -d\`."
-        exit 0
-    fi
-done
+probe_server_or_skip smoke || exit 0
 
-log="$(mktemp -t benilla-smoke)"
-stamp="$(mktemp -t benilla-smoke-stamp)"
-before="$(mktemp -t benilla-smoke-before)"
+log="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke.XXXXXX")"
+stamp="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke-stamp.XXXXXX")"
+before="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke-before.XXXXXX")"
 # The stamp and the file list always go; the LOG is the one a session may want to keep. Both in one
 # trap so the early `fail` exits below cannot strand a temp file.
 trap 'rm -f "$stamp" "$before"; [ -n "${WOW_SMOKE_KEEP:-}" ] || rm -f "$log"' EXIT
@@ -108,8 +95,8 @@ if [ -n "${WOW_DATA:-}" ]; then
 elif [ -d "$root/WoW" ]; then
     install_root="$root/WoW"
 fi
-# Who ELSE might write in there. The install is shared — every pool slot symlinks the same tree,
-# and the director runs the real 1.12 client against it constantly for RE comparison. That client
+# Who ELSE might write in there. The install may be shared with the reference client, which the
+# maintainer runs against the same tree constantly for RE comparison. That client
 # writes its own WTF (Config.wtf, SavedVariables.lua, the per-character caches) while it runs, so a
 # whole-tree mtime diff cannot tell "benilla wrote to the install" from "the reference client was
 # open at the same time". Record it up front so the report below can name the right cause instead of
@@ -250,7 +237,7 @@ saving (1528: the quit root must be observed in \`Last\`, after PostUpdate's exi
 # The read-only verdict (decision 1486). Reported by name: "something wrote to the install" is a
 # rule violation somebody has to go and find, and the file that appeared is the whole lead.
 if [ -n "$install_root" ]; then
-    after="$(mktemp -t benilla-smoke-after)"
+    after="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke-after.XXXXXX")"
     find -L "$install_root" -type f 2>/dev/null | sort >"$after"
     appeared="$(comm -13 "$before" "$after")"
     vanished="$(comm -23 "$before" "$after")"
@@ -274,6 +261,8 @@ if [ -n "$install_root" ]; then
         exit 1
     fi
     echo "  install untouched         $(wc -l <"$before" | tr -d ' ') files"
+else
+    echo "  install                   not watched (no WoW link and no WOW_DATA — the read-only rule went unmeasured)"
 fi
 
 # ── The realm-list leg (2069) ────────────────────────────────────────────────────────────────
@@ -286,7 +275,7 @@ fi
 # that hung on "Connecting" with nothing in the log at all. This drives Change Realm → Okay →
 # Change Realm → Cancel → Okay against the real server and refuses anything but a completed walk.
 echo "smoke: running the realm-list boundary walk (~12 s, opens a window)…"
-rlog="$(mktemp -t benilla-smoke-realm)"
+rlog="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke-realm.XXXXXX")"
 # **No `WOW_CHAR` here, deliberately** — an absent variable is invisible, so it is named instead.
 # The walk drives character select; the fast path would seat a body and there would be no roster
 # screen left to drive. The scrub at the top of this script is what makes the absence real, and
@@ -312,6 +301,6 @@ rp="$(printf '%s\n' "$rplain" | grep -cE 'panicked at')"
 printf '  %-24s %s\n' "realm walk" \
     "$(printf '%s\n' "$rplain" | sed -n 's/.*realm-smoke: done — //p' | tail -1)"
 
-echo "SMOKE GREEN — ${sessions} logins + the realm walk, 0 errors, 0 panics, install untouched"
+echo "SMOKE GREEN — ${sessions} logins + the realm walk, 0 errors, 0 panics$([ -n "$install_root" ] && echo ', install untouched')"
 [ -n "${WOW_SMOKE_KEEP:-}" ] && echo "log: $log"
 exit 0

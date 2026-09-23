@@ -2,7 +2,7 @@
 """Regenerate `reference/1.12-globals.tsv` — the 1.12.1 client's global namespace, with each name
 attributed to whoever provides it.
 
-    scripts/gen-reference-globals.py [--wow-re DIR] [--out FILE]
+    WOW_RE=<the RE repo> scripts/gen-reference-globals.py [--wow-re DIR] [--out FILE]
 
 **Why this exists** (decision 1189): every wrong number in the addon arc came from remembering a
 list of WoW functions instead of asking the client. wow-5875-re already ships an addon
@@ -30,8 +30,9 @@ Attribution is by *definition site*, computed from a complete 1.12 shipped-UI co
   - LUA_5_0 below wins over all of the above: FrameXML *clobbers* `string` in three files
     (`string = getglobal(...)`), which overwrites the stdlib table rather than defining it.
 
-**Inputs live outside the repo** — the director's 1.12 install and the sibling RE repo — so this
-is a manual regeneration, like `genmap.sh`, not something CI can run. It needs:
+**Inputs live outside the repo** — a 1.12 install and the RE repo's runtime capture (`--wow-re`,
+or `$WOW_RE`) — so this is a manual regeneration, like `genmap.sh`; the committed table is the
+surface benilla tracks. It needs:
 
   - `<wow-re>/WoW/_w5875_fixtures/item13/W5875Capture.lua`  the captured in-world `_G`
   - `<wow-re>/WoW/_extracted_framexml/`                     FrameXML, already extracted there
@@ -50,7 +51,6 @@ import re
 import subprocess
 import sys
 
-WOWRE_DEFAULT = "/Users/sam/dev/wow-5875-re"
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The twelve addons that ship inside the MPQs. Their folders exist in a real install carrying only
@@ -249,9 +249,15 @@ def composed(name, roots, suffixes, depth=0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--wow-re", default=WOWRE_DEFAULT)
+    ap.add_argument("--wow-re", default=os.environ.get("WOW_RE"))
     ap.add_argument("--out", default=os.path.join(REPO, "reference", "1.12-globals.tsv"))
     args = ap.parse_args()
+    if not args.wow_re:
+        sys.exit(
+            "this table is derived from the RE repo's runtime capture of the reference client's "
+            "_G: pass --wow-re or set WOW_RE. The committed reference/1.12-globals.tsv is the "
+            "surface benilla tracks."
+        )
 
     fixture = os.path.join(args.wow_re, "WoW", "_w5875_fixtures", "item13", "W5875Capture.lua")
     if not os.path.exists(fixture):

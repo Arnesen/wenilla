@@ -62,8 +62,10 @@ Not planned: other expansions or client versions, Warden (anticheat).
 ## Running it
 
 You need a **1.12.1 (build 5875) client install** for game data, a vanilla server to connect to,
-and stable Rust. Any 1.12.1 core works; [vmangos](https://github.com/vmangos/core) is what
-development runs against, and cMaNGOS and the rest speak the same protocol.
+stable Rust and a C compiler (the Lua is built from source; on macOS the Xcode command line
+tools, on Linux the ALSA and udev development packages). Any 1.12.1 core works;
+[vmangos](https://github.com/vmangos/core) is what development runs against, and cMaNGOS and
+the rest speak the same protocol.
 
 ```sh
 WOW_DATA=/path/to/WoW/Data cargo run --release -p benilla

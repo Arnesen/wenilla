@@ -14,8 +14,7 @@
 //! measured off the timestamps, not eyeballed. Non-combat, safe unattended
 //! (docs/METHOD.md's rule bans unattended *combat* probes); a hearth that completes because the
 //! cancel FAILED just ports the probe character home — visible in the log as the missing cancel line. Pair with
-//! the slot-keyed probe identity (`WOW_USER=probeN WOW_PASS=pprobeN WOW_CHAR=Probe<N-spelled>`,
-//! docs/METHOD.md) + `WOW_CAST_TRACE=1 WOW_PROBE_EXIT_AT=<s>`.
+//! the checkout's probe identity (`.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR — the `probe` skill) + `WOW_CAST_TRACE=1 WOW_PROBE_EXIT_AT=<s>`.
 
 use bevy::prelude::*;
 

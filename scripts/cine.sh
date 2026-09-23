@@ -28,8 +28,8 @@
 #   scripts/cine.sh 81 --at "-8913,554,94,0"
 #   scripts/cine.sh 81 --keep       # keep the raw log and trace paths, printed at the end
 #
-# The probe identity is SLOT-KEYED off this worktree's path (`docs/METHOD.md`): pool-N logs in as
-# probeN. Never the director's account.
+# The probe identity is the checkout's `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR
+# (scripts/probe-identity.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -47,15 +47,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Slot-keyed probe identity (docs/METHOD.md, "The local vmangos server").
-slot="$(basename "$PWD")"
-n="${slot#pool-}"
-case "$n" in
-    0) word=zero ;; 1) word=one ;; 2) word=two ;; 3) word=three ;; 4) word=four ;;
-    5) word=five ;; 6) word=six ;; 7) word=seven ;; 8) word=eight ;; 9) word=nine ;;
-    *) echo "cine.sh: not in a wt.sh pool slot ($slot) — claim one first (docs/METHOD.md)" >&2; exit 2 ;;
-esac
-char="Probe$word"
+. "$PWD/scripts/probe-identity.sh"
+probe_identity cine.sh "$PWD" || exit 2
+char="$PROBE_CHAR"
 
 work="$(mktemp -d)"
 cfg="$work/cfg"
@@ -79,7 +73,7 @@ echo "cine.sh: cinematic $id as $char, parked at $px $py $pz (map $pmap)"
 echo "cine.sh: this takes about $((exit_at + 20)) s — the shot is played in full so the END is measured too"
 
 env BENILLA_HOME="$cfg" WOW_UNATTENDED=1 \
-    WOW_USER="probe$n" WOW_PASS="pprobe$n" WOW_CHAR="$char" \
+    WOW_USER="$PROBE_USER" WOW_PASS="$PROBE_PASS" WOW_CHAR="$char" \
     WOW_PROBE_CHAT=".go xyz $px $py $pz $pmap;.debug play cinematic $id" \
     WOW_PROBE_CHAT_AT="$park_at" WOW_PROBE_CHAT_EVERY="$((play_at - park_at))" \
     ${key:+WOW_PROBE_KEY="$key@$key_at:3"} \

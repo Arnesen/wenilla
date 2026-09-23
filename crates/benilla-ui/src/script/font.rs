@@ -4,9 +4,9 @@
 //!
 //! ## Why this exists
 //!
-//! 1.12's own FrameXML never touches the API — `grep -c FontObject` over
-//! `wow-5875-re/WoW/_extracted_framexml/*.lua` is **0** — so the whole surface is addon-facing, and
-//! the corpus (`/Users/sam/dev/wow-addons-vanilla`, 218 addons) is where the demand is:
+//! 1.12's own FrameXML never touches the API — `grep -c FontObject` over the reference
+//! FrameXML's own `.lua` is **0** — so the whole surface is addon-facing, and
+//! the addon corpus (`benilla_formats::addon_corpus`, 218 addons) is where the demand is:
 //!
 //! | call shape | sites | note |
 //! |---|---|---|

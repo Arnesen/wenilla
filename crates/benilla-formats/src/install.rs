@@ -163,6 +163,18 @@ pub fn skipped(what: &str, looked_in: &[PathBuf]) {
         what,
         looked_in,
     );
+    // `$BENILLA_SKIP_LOG`: libtest swallows the line above, so a gate hands in a file and counts
+    // the skips after the run — a clone without the data sees how hollow its green is.
+    if let Some(log) = std::env::var_os("BENILLA_SKIP_LOG").filter(|p| !p.is_empty()) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+        {
+            let _ = writeln!(f, "{what}");
+        }
+    }
 }
 
 /// [`skipped`] with the switch passed in, so the refusal is testable without touching the
@@ -183,15 +195,14 @@ fn skipped_under(required: bool, what: &str, looked_in: &[PathBuf]) {
 ///
 /// Two rungs, the install's own shape: **`$BENILLA_ADDON_CORPUS`**, then
 /// **`<project folder>/wow-addons-vanilla`** — `dev` only, the same `CARGO_MANIFEST_DIR` hop as
-/// the install's rung 2. That folder is a gitignored symlink `scripts/wt.sh` lays into every pool
-/// slot and the primary (`link_wow`), exactly as it lays `WoW`; the corpus itself lives beside the
-/// primary checkout.
+/// the install's rung 2. That folder is a gitignored symlink beside `WoW`, laid by whoever set the
+/// checkout up; the corpus itself lives outside the tree.
 ///
 /// **Why one rung and a link, not a walk up the tree.** Five test files carried their own copy of
 /// this resolver, and every copy looked for a *sibling* of the checkout — the manifest's ancestors
 /// two to four, joined with the folder name. That found the corpus from the primary and from the
 /// old pool root beside it, and nothing once the pool moved to the external drive (2026-08-30):
-/// from `/Volumes/SanDisk/benilla-wt/pool-N` the three hops name three folders that do not exist.
+/// from a worktree on another volume the three hops name three folders that do not exist.
 /// Every land gates in a slot, so thirty tests — a ratchet among them — skipped at every land for
 /// three weeks. A resolver that looks *outside* the checkout answers according to where the
 /// checkout happens to sit; the install learned this in 1175, and this is the same rule for the

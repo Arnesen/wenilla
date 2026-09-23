@@ -26,7 +26,7 @@
 //! 1. **`$BENILLA_HOME`** — explicit override (tests point it at a tempdir; a shared-config setup
 //!    points it wherever it likes).
 //! 2. **`<project folder>/benilla-config/`** — `#[cfg(feature = "dev")]` only, so dev runs across the
-//!    worktree pool keep one predictable place. Gated for the same reason the install resolver's
+//!    worktrees of the repo keep one predictable place. Gated for the same reason the install resolver's
 //!    project-folder probe is: a shipped binary must not carry the build machine's source tree.
 //!    (`.gitignore` carries `/benilla-config` for it.)
 //! 3. **`<exe dir>/benilla-config/`** — the release answer: your settings sit next to the program that
@@ -80,11 +80,12 @@ pub(crate) fn home() -> Option<PathBuf> {
 /// this binary was actually built in.
 ///
 /// This is the one place 1175's §4 needed a correction on contact with how we work. `benilla/` used
-/// to hang off `$WOW_DATA`, and every pool slot symlinks `WoW` to the same install — so there has
-/// always been exactly ONE settings folder no matter which of the eight slots built the binary.
-/// Resolving to `CARGO_MANIFEST_DIR` instead would give eight, and the director's keybinds, macros
-/// and camera pose would appear to reset whenever a session happened to claim a different slot.
-/// That is a silent, recurring surprise, and it is not what "one predictable place" meant.
+/// to hang off `$WOW_DATA`, and every worktree of the repo points `WoW` at the same install — so
+/// there has always been exactly ONE settings folder no matter which worktree built the binary.
+/// Resolving to `CARGO_MANIFEST_DIR` instead would give one per worktree, and the player's
+/// keybinds, macros and camera pose would appear to reset whenever a session happened to build
+/// in a different one. That is a silent, recurring surprise, and it is not what "one predictable
+/// place" meant.
 ///
 /// A linked worktree's `.git` is a **file** reading `gitdir: <primary>/.git/worktrees/<slot>`, so
 /// the primary is derivable with no git binary and no build script: walk up to the common dir and
@@ -556,7 +557,7 @@ mod tests {
     /// One test rather than a `#[cfg]`-ed pair, because the seam is `run_mode::dev_source_dir()`'s
     /// to know and nothing else's (1179): a player build has no source dir, so the state folder
     /// must sit beside the binary; a dev build has one, and must resolve to the PRIMARY checkout
-    /// so the eight pool slots keep sharing a single settings folder — exactly as they did when it
+    /// so every worktree keeps sharing a single settings folder — exactly as they did when it
     /// hung off the shared install. The dev half is asserted structurally (a `.git` *file* means a
     /// linked worktree, and then the answer must be somewhere else), so it says the same thing
     /// whether it runs in the primary or in a slot.
@@ -586,7 +587,7 @@ mod tests {
             assert_ne!(
                 h,
                 here.join(STATE_DIR),
-                "a linked worktree must not get its own settings folder — the pool shares one"
+                "a linked worktree must not get its own settings folder — the worktrees share one"
             );
             assert!(
                 h.parent().unwrap().join(".git").is_dir(),

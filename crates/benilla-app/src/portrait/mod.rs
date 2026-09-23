@@ -1161,7 +1161,7 @@ fn feed_gx_aspect(
 /// 1607.** 1444 shipped it on; 1559 turned it off on the director's look-call (a full-rate doll
 /// reads as smoother); the 08-25 weak-GPU perf reports (B329) then measured what that costs — a
 /// body-pane booth's off-screen pass every frame, ~1.6 ms at 1600×900 and **7.6 ms at 4K**
-/// (`sess/perfregress` A/B), paid on exactly the weak GPUs that reported. The director retested
+/// (an A/B leg), paid on exactly the weak GPUs that reported. The director retested
 /// the 30 fps doll and it reads fine, so the cheaper default is back. Full-rate is one
 /// `/script SetCVar("boothHalfRate", 0)` away for anyone who wants the smoother cadence.
 ///

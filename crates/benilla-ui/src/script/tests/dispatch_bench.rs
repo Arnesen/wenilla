@@ -47,7 +47,7 @@ fn dispatch_bench() {
     // A plain Lua table with a table `__index` — the floor this path could reach, and what the
     // reference client's flat `{name, lua_CFunction}` probe costs in C.
     // **The MINIMUM of [`ROUNDS`] runs, never the mean.** This machine builds while it measures —
-    // a neighbouring worktree's `cargo` saturates ten cores — and a mean of a contended loop reads
+    // another build on the same machine saturates ten cores — and a mean of a contended loop reads
     // whatever else was running. The minimum is the closest thing to the uncontended cost that a
     // shared machine can report, and it is what makes two rows of one run comparable at all.
     let floor = |what: &str, chunk: &str| {

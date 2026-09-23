@@ -314,8 +314,8 @@ fn the_reported_html_page_draws_as_blocks_not_as_its_own_markup() {
     );
 }
 
-/// **B342, on the reported page, through the real archives.** Goudy, 2026-08-27 (`#bugs`
-/// `1542371921486811236`): *"html images in books are not scaled correctly"* — the Alliance crest
+/// **B342, on the reported page, through the real archives.** Reported on Discord,
+/// 2026-08-27: *"html images in books are not scaled correctly"* — the Alliance crest
 /// on *A Treatise on Military Ranks* drawn several times the reference's size with the page's own
 /// text over it, beside a 1.12.1 shot of the same page for comparison.
 ///

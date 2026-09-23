@@ -2,7 +2,7 @@
 """Regenerate `reference/1.12-events.tsv` — every FrameScript event the 1.12.1 client can
 dispatch, with the ARGUMENTS its producers push.
 
-    scripts/gen-reference-events.py [--wow-re DIR] [--out FILE]
+    scripts/gen-reference-events.py [--catalog FILE] [--firesites FILE] [--out FILE]
 
 **Why this exists** (decision 2140). benilla already gates two halves of the event seam: a stock
 chain file listening for an event nothing fires
@@ -15,12 +15,13 @@ instances: `PLAYERBANKSLOTS_CHANGED`, `UNIT_PET_EXPERIENCE` and `UNIT_PET_TRAINI
 last of which routes through `PetPaperDollFrame_OnEvent`'s `elseif ( arg1 == "pet" )` catch-all and
 so reached nobody at all.
 
-**The oracle is wow-5875-re's own two censuses**, vendored the way `1.12-shapes.tsv` is:
+**The oracle is wow-5875-re's own two censuses**, vendored under `reference/` the way
+`1.12-shapes.tsv` is:
 
-  - `re/events/event-catalog.tsv`   eventId -> name, off the name-pointer array at `.data 0xbe1198`
-  - `re/events/event-firesites.tsv` every `call` AND tail-`jmp` to `FrameScript_SignalEvent`
-                                    (`0x703e50`, no varargs) and `SignalEvent2` (`0x703f50`,
-                                    printf-style), with the FORMAT STRING each site pushes
+  - `1.12-event-catalog.tsv`   eventId -> name, off the name-pointer array at `.data 0xbe1198`
+  - `1.12-event-firesites.tsv` every `call` AND tail-`jmp` to `FrameScript_SignalEvent`
+                               (`0x703e50`, no varargs) and `SignalEvent2` (`0x703f50`,
+                               printf-style), with the FORMAT STRING each site pushes
 
 **Three producer families, because a literal fire site is not the whole picture.** The firesites
 census is over the two signal helpers' own call sites, and its own header says in capitals that an
@@ -55,8 +56,8 @@ same integer names a different event on the glue screen than in the world. wow-r
 rows' names; this drops them by fire-site address as well, from the four TU ranges its header
 names, so a future re-derivation that fills a name in cannot leak one through.
 
-**The input lives outside the repo** (the sibling RE repo), so this is a manual regeneration, like
-`gen-reference-globals.py` — not something CI can run.
+Both inputs are in the repo, so this runs from any clone and reproduces the committed table byte
+for byte; only the two inputs themselves are regenerated in the RE repo.
 """
 import argparse
 import os
@@ -75,7 +76,12 @@ UNIT_WINDOW_FIELDS = 0xB6
 NONE = "()"
 
 
+REFERENCE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "reference"))
+
+
 def rows(path):
+    if not os.path.exists(path):
+        sys.exit(f"no table at {path}")
     for line in open(path, encoding="utf-8"):
         if line.startswith("#"):
             continue
@@ -87,12 +93,13 @@ def rows(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--wow-re", default=os.path.expanduser("~/dev/wow-5875-re"))
-    ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "..", "reference", "1.12-events.tsv"))
+    ap.add_argument("--catalog", default=os.path.join(REFERENCE, "1.12-event-catalog.tsv"))
+    ap.add_argument("--firesites", default=os.path.join(REFERENCE, "1.12-event-firesites.tsv"))
+    ap.add_argument("--out", default=os.path.join(REFERENCE, "1.12-events.tsv"))
     a = ap.parse_args()
 
     catalog = {}
-    for f in rows(os.path.join(a.wow_re, "re/events/event-catalog.tsv")):
+    for f in rows(a.catalog):
         if len(f) >= 2 and f[1]:
             catalog.setdefault(int(f[0]), f[1])
     if len(catalog) < 300:
@@ -110,7 +117,7 @@ def main():
             e["notes"].append(note)
 
     dropped_glue = 0
-    for f in rows(os.path.join(a.wow_re, "re/events/event-firesites.tsv")):
+    for f in rows(a.firesites):
         if len(f) < 4:
             continue
         va = int(f[0], 16)

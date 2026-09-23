@@ -5,7 +5,10 @@ against them on any day without a re-derivation. Not documentation, not state: d
 generator beside it in `scripts/`.
 
 Nothing here is Blizzard content. A catalogue of *names* is not the thing named — the same reason
-`decisions/` may quote a byte address and `MAP.md` may name a file.
+a comment may quote a byte address and `docs/MAP.md` may name a file. The `1.12-*.tsv` files are
+the surface benilla's gates read; the three `1.12-event-*.tsv` / `1.12-message-catalog.tsv`
+tables are the inputs two of the generators run from, vendored from wow-5875-re so that
+regeneration needs no sibling checkout.
 
 ## `1.12-globals.tsv`
 
@@ -34,7 +37,7 @@ corpus:
 | origin | count | meaning |
 |---|---|---|
 | `engine` | 1,104 | the C client provides it. **benilla implements these in Rust.** |
-| `framexml` | 20,427 | the shipped UI defines it. **benilla transcribes these into `assets/ui/`.** |
+| `framexml` | 20,427 | the shipped UI defines it. **The stock files run off the player's own install** (`ui_script::reference_ui`). |
 | `lua` | 24 | Lua 5.0's own runtime. mlua gives us these. |
 
 Of the `framexml` rows, **1,986 carry type `lod`**: defined by the shipped UI but absent from the
@@ -48,9 +51,9 @@ wholesale: a name defined in shipped Lua is FrameXML's, and hardcoding it in Rus
 error even when it works.
 
 **Regenerating** — `scripts/gen-reference-globals.py`, whose header carries the full method and
-the traps. It needs the director's 1.12 install and the sibling RE repo, so it is a manual
-regeneration like `genmap.sh`, not something CI can run. The artifact is stable: it describes a
-client that shipped in 2006.
+the traps. It needs a 1.12 install and the RE repo's runtime capture of the reference client's
+`_G` (`WOW_RE=<the RE repo>`), so it is a manual regeneration like `genmap.sh`, not something
+CI can run. The artifact is stable: it describes a client that shipped in 2006.
 
 **Reading it** — `scripts/api-coverage.sh` is the instrument. It asks a real `UiScript::new()`
 what benilla exposes and reports `have / missing / beyond-1.12`, always with 1178's split.
@@ -61,8 +64,20 @@ global that 1.12 does not have and nobody wrote down why.
 
 wow-5875-re's binding-shape table (what each Lua verb takes and returns; decision 1842, gated by
 `ui_script/shape_gate.rs`) and the event table with the arguments each producer pushes
-(decision 2140, `scripts/gen-reference-events.py`, gated by `ui_script/event_shape_gate.rs`).
-Each file's header carries its column contract.
+(decision 2140, gated by `ui_script/event_shape_gate.rs`). Each file's header carries its column
+contract.
+
+**Regenerating** — `1.12-shapes.tsv` is vendored as wow-5875-re writes it.
+`scripts/gen-reference-events.py` derives `1.12-events.tsv` from two more vendored tables,
+`1.12-event-catalog.tsv` (event id → name, off the client's name-pointer array) and
+`1.12-event-firesites.tsv` (every fire site with the format string it pushes), so it runs from
+any clone and reproduces the committed file byte for byte.
+
+## `1.12-message-catalog.tsv`
+
+The client's message registry (`0xb4b498`: id, key, kind, sound, chat type), vendored from
+wow-5875-re; `scripts/gen-message-catalog.py` re-shapes it into
+`crates/benilla-ui/src/messages/catalog.rs`, the table `CGGameUI::DisplayError` indexes.
 
 ## `1.12-verb-events.tsv`
 
@@ -79,7 +94,9 @@ getter's fire is a cache-miss re-query, a state event benilla's feeds fire off t
 site is attributed to a function against wow-re's verified extents (the ledgers' `size=`) plus the
 disassembly's padding boundaries, and a site past its candidate's extent is left out rather than
 mis-filed (decision 2257: four of the first table's rows were callbacks reached by pointer, or a
-site past an extent). It reads the sibling RE repo's disassembly, so it is manual, like the others.
+site past an extent). The fire sites and the shapes are the vendored tables above; the function
+names, the ledgers and the disassembly are the RE repo's (`WOW_RE=<the RE repo>`), so this one
+is a manual regeneration there.
 
 **Reading it** — `crates/benilla-app/src/ui_script/verb_event_gate.rs` is the gate: for every
 pair whose verb benilla registers, the module that registers the verb fires the event, or the

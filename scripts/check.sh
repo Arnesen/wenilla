@@ -12,7 +12,7 @@
 # Scope rule — conservative by construction, unknown means FULL, never "probably fine":
 #   crates/<dir>/**            → that crate (owner read off cargo metadata, not the dir name)
 #   assets/ui/**               → benilla-app (ui_script's shipped-UI tests read it at runtime)
-#   *.md                       → no gate can change (same rule as wt.sh docs_only)
+#   *.md                       → no gate can change (gates.sh's docs-only rule)
 #   anything else              → escalate: exec scripts/gates.sh (workspace manifests, .cargo/,
 #                                rust-toolchain, scripts/, shaders outside crates, …)
 # Change set = fork point vs main + staged + unstaged + untracked — the round's work, not the last
@@ -48,7 +48,7 @@ dirs=""
 full_reason=""
 while IFS= read -r f; do
     case "$f" in
-    docs/* | *.md) ;;                                 # provably gate-inert (wt.sh docs_only)
+    docs/* | *.md) ;;                                 # provably gate-inert (gates.sh's docs-only rule)
     assets/ui/*) dirs="$dirs benilla-app-DIR:crates/benilla-app" ;;
     crates/*/*) d="${f#crates/}"; dirs="$dirs DIR:crates/${d%%/*}" ;;
     *) full_reason="$f" ;;
@@ -109,8 +109,9 @@ for p in $pkgs; do pflags="$pflags -p $p"; done
 echo "check: scope = $pkgs"
 echo "check:   (changed crates + everything that depends on them; full chain still runs at sync→land)"
 
-log="$(mktemp -t benilla-check)"
-trap 'rm -f "$log"' EXIT
+log="$(mktemp "${TMPDIR:-/tmp}/benilla-check.XXXXXX")"
+skips="$(mktemp "${TMPDIR:-/tmp}/benilla-check-skips.XXXXXX")"
+trap 'rm -f "$log" "$skips"' EXIT
 run() {
     local name="$1"; shift
     if ! "$@" >"$log" 2>&1; then
@@ -123,7 +124,14 @@ run() {
 
 run fmt cargo fmt --all -- --check
 run clippy cargo clippy $pflags --all-targets -- -D warnings
-run test cargo test $pflags
+run test env BENILLA_SKIP_LOG="$skips" cargo test $pflags
+# The data-gated tests skip without the install or the addon corpus, and libtest swallows the
+# line; the resolver logs each skip to $BENILLA_SKIP_LOG and this counts them (gates.sh says why).
+if [ -s "$skips" ]; then
+    echo "  test: $(wc -l <"$skips" | tr -d ' ') data-gated tests SKIPPED on this machine —"
+    sort "$skips" | uniq -c | sort -rn | sed 's/^ *\([0-9]*\) \(.*\)/    \1 × \2/'
+    echo "    (they run where the data is: docs/CONTRIBUTING.md, \"Setting up\")"
+fi
 
 echo "CHECK GREEN (scoped: $pkgs)"
 echo "  (land still pays the full chain once: scripts/gates.sh — memoized, so an already-gated tree is free)"

@@ -10,7 +10,7 @@
 /// (`getrusage(RUSAGE_SELF)`).
 ///
 /// The perf probes report wall-clock frame time, which on this machine is not a usable regression
-/// instrument: parallel session worktrees build on the same 14 cores, and two identical probe runs
+/// instrument: parallel builds share the same cores, and two identical probe runs
 /// of the same pin came back 49.6 ms and 28.6 ms apart purely on machine load. CPU-per-frame moves
 /// with the work we actually do, not with who else is compiling — and it is the metric the Mac
 /// report is written in ("250 % CPU at 59 fps" against 1.12.1's "100 % at 160"), so a probe that

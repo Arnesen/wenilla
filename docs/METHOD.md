@@ -36,8 +36,8 @@ comment naming the reference fact and why we differ. Anything else is a fork.
 
 - **Never commit anything from the install.** Art, models, sounds, maps, data: the install is
   read at runtime from a gitignored path, and everyone provides their own. The one exception is
-  interface code: FrameXML and GlueXML run off the player's own patch chain, and the copies
-  already under `assets/ui` stay until they retire.
+  interface code: FrameXML and GlueXML run off the player's own patch chain, and our own
+  counterparts under `assets/ui` stay until they retire.
 - **The install is read-only.** benilla never writes into the WoW folder: no screenshot, log,
   cache or scratch file. A hook blocks such a write at the tool call, and `scripts/smoke.sh`
   fails a run that leaves the install changed.
@@ -69,45 +69,31 @@ comment naming the reference fact and why we differ. Anything else is a fork.
 ## Gates
 
 - **The land gates**: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
-  -- -D warnings`, `cargo test --workspace`, the player build without the `dev` feature and the
-  engine boot checks, as `scripts/gates.sh`. `wt.sh land` runs it on the tree that lands; it is
-  memoized on the tree.
+  -- -D warnings`, `cargo test --workspace`, the doc-link and render-pass lints, the player
+  build without the `dev` feature with its own tests, and the engine boot checks, as
+  `scripts/gates.sh`. It runs on the tree that lands, before it lands; it is memoized on the
+  tree. The tests that read the install or the addon corpus skip where the data is absent, and
+  the gate prints the count; where the data is, a skip is a failure (`BENILLA_REQUIRE_DATA=1`).
 - **Per round**: `scripts/check.sh`, scoped to the changed crates and their dependents. Run each
   gate once per round; `tee` the output to a file and grep the file.
 - **A clean run** is the fourth gate: `scripts/smoke.sh`, a live login and logout against the
   local server. For wire work the gate is a live run with a trace (`WOW_MOVE_TRACE=<path>`,
   tags filtered), never a capture: capture mode has no network.
 - **Platform seams**: a `cfg(target_os)`, a `[target.'cfg(…)']` dependency, a `#[link]` or an
-  `extern "system"` is invisible to the macOS gates. `scripts/crosscheck.sh` compiles Linux and
-  Windows, and the land worker runs it when the diff touches a seam.
-- **Vulkan**: `scripts/vkleg.sh` runs the client on Vulkan in a container before a release,
-  because Metal cannot ask what Vulkan validation refuses.
-- Hooks enforce only two things: no writes into the install, and the worktree rule on a machine
-  with a pool. Everything else is a gate or discipline.
-
-## Worktrees
-
-On a machine with a pool, every session works in its own slot and `scripts/wt.sh` is the only
-way to get one. `claim <name>` at the start; `land <name>` at the end, which rebases,
-regenerates the map, runs the full gate chain, fast-forwards and pushes main and releases the
-slot, one land at a time; `release` to abandon; `status` to see the pool. Never the primary
-checkout, which belongs to no session and stays clean, and never the harness worktree tool or a
-hand-rolled `git worktree add`. Work against the slot by path: prefix Bash calls with
-`cd <slot> &&` and give edits absolute paths under it. No free slot means stop and ask which
-one to take over, never fall back to the primary. Hooks enforce all of this.
-
-Sessions share the machine, so a kill is scoped to a PID, never to a command pattern:
-`pkill -f "cargo test"` takes out every neighbour's gates along with yours.
-
-On a plain clone there is no pool: work on a branch and open a pull request.
+  `extern "system"` is invisible to the gates of the platform you are on. Say in the commit
+  which platforms you built.
+- One hook: no writes into the install. Everything else is a gate or discipline.
 
 ## The local server
 
-benilla talks to a local vmangos (build 5875); `WOW_HOST`, `WOW_USER`, `WOW_PASS` and `WOW_CHAR`
-override the defaults. These bind every session and every agent:
+benilla talks to any 1.12.1 server: `WOW_HOST` names it (default `localhost`), `WOW_USER` and
+`WOW_PASS` together log in without typing, `WOW_CHAR` picks the character. There is no default
+account. These bind every session and every agent:
 
-- A probe logs in as its own probe account (`probeN` for `pool-N`), never as a player's: a login
-  kicks whoever holds the account.
+- A scripted run logs in as the account its checkout declares in `.probe-identity` (the three
+  variables, one per line, never committed), or as the three variables name; never as a
+  player's, because a login kicks whoever holds the account, and the client refuses a scripted
+  login from a checkout on any account but the declared one.
 - Every unattended run says so: `WOW_UNATTENDED=1`. An agent's run is silent: `WOW_NOSOUND=1`.
 - No unattended combat probes.
 - Anything about hostility, reaction colour, nameplates, threat, damage or breath runs with
@@ -115,9 +101,3 @@ override the defaults. These bind every session and every agent:
 - Read the preflight banner before debugging anything else.
 
 The mechanics are the `probe` skill.
-
-## Agents in a shared tree
-
-Parallel agents share one working tree: whole-tree git ops (`stash`, `reset --hard`,
-`clean -f`, a pathless `checkout`) are forbidden, diagnostics use path-scoped commands, and an
-agent never gets a tree of its own.

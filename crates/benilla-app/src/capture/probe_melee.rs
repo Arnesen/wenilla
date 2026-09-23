@@ -2,7 +2,7 @@
 //! once in-world, periodically fire the attack-nearest core ([`AttackNearestRequest`] — the
 //! action-bar attack's own no-selection path), so the probe character fights whatever is closest
 //! while the `benilla_assets::trace` sink (`WOW_MOVE_TRACE=<path>`) records the swing→impact→spawn combat-text
-//! timeline for pair-birth analysis. Pair with the slot-keyed probe identity (docs/METHOD.md) + an outer
+//! timeline for pair-birth analysis. Pair with the checkout's probe identity (the `probe` skill) + an outer
 //! `timeout`.
 //!
 //! **Do NOT run this unattended** (director's rule, 2026-07-14, `docs/METHOD.md` "The local vmangos

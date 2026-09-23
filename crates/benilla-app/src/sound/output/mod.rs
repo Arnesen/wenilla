@@ -801,7 +801,7 @@ mod tests {
     /// and nothing above it is, so a failure names the platform file and nothing else.
     ///
     /// It is the whole verification story off macOS, where the gates never compile this code at
-    /// all: `scripts/crosscheck.sh` type-checks Linux and Windows, and this runs the result.
+    /// all: a cross-platform compile type-checks Linux and Windows, and this runs the result.
     ///
     ///     WOW_AUDIO_LIVE=1 cargo test -p benilla-app --lib sound::output:: -- --nocapture
     ///

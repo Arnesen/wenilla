@@ -69,7 +69,7 @@ const HUD_REFRESH_SECS: f32 = 0.25;
 /// records the open gap: every campaign anchor was measured on a binary that draws this overlay,
 /// at a cost booked as "est 0.4–1.2 ms CPU + unquantified GPU" — an estimate, never a measurement,
 /// because nothing could turn the fixture off without also changing the binary. One env var makes
-/// it an interleaved A/B on *one* binary instead (`scripts/leg.sh`), so the constant baked into
+/// it an interleaved A/B on *one* binary instead (a leg runner), so the constant baked into
 /// every anchor becomes a number. The meters keep sampling either way: only the drawing stops,
 /// which is the half being priced — and with the default flipped, the *unmeasured* leg is now the
 /// one nobody is running.

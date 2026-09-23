@@ -2,8 +2,8 @@
 //! HORDE character's say must echo back (the server accepted the tongue), a dot-command must
 //! answer (it survived the pre-parse `KnowsLanguage` gate), and the split-writer path must carry
 //! the tongue too. Run: `cargo run -p benilla-protocol --example horde_chat_probe -- probeN
-//! pprobeN [host]` — the slot-keyed probe account (docs/METHOD.md "The local vmangos server"; it
-//! once hardcoded the retired shared `three` identity, decision 0530). Creates the orc
+//! pprobeN [host]` — a probe account (the `probe` skill; it once hardcoded a shared identity,
+//! decision 0530). Creates the orc
 //! `Orc<N-spelled>` on this account on first run (names are realm-unique, so the orc keys to
 //! the slot too). Exists because a hardcoded-Common send silently ate every Horde character's
 //! chat and commands (decision 0392) — this is the one-shot regression check for that whole path.
@@ -27,14 +27,12 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let user = args
         .next()
-        .context("usage: horde_chat_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
+        .context("usage: horde_chat_probe -- <probeN> <pprobeN> [host] (a probe account)")?;
     let pass = args
         .next()
-        .context("usage: horde_chat_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
+        .context("usage: horde_chat_probe -- <probeN> <pprobeN> [host] (a probe account)")?;
     let host = args.next().unwrap_or_else(|| "localhost".into());
-    let orc = orc_name(&user).context(
-        "account must be a slot-keyed probeN (docs/METHOD.md \"The local vmangos server\")",
-    )?;
+    let orc = orc_name(&user).context("account must be a probeN (the `probe` skill)")?;
 
     let logon = benilla_protocol::logon(&host, &user, &pass)?;
     let addr = logon

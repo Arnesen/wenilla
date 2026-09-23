@@ -9,7 +9,7 @@
 //! window is first-party, no Lua click surface to drive); the live Lua VM is only touched for the
 //! bonus refusal step's `UI_ERROR_MESSAGE` observation, the mail probe's own idiom.
 //!
-//! ## The banker (live-DB verified this session, `/Users/sam/dev/vmangos-deploy` → `characters`/
+//! ## The banker (live-DB verified against the local vmangos, `characters`/
 //! `mangos` DBs)
 //!
 //! Soleil Stonemantle, creature entry 5099, spawn guid 12629, map 0 (Ironforge, The Vault), pos
@@ -36,7 +36,8 @@
 //! WOW_DATA=WoW/Data WOW_USER=probe1 WOW_PASS=pprobe1 WOW_CHAR=Probeone \
 //!     WOW_PROBE_BANK=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — this worktree is `pool-1` → `probe1`/`pprobe1`/`Probeone`).
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill).
 //! Non-combat; GM mode is left exactly as found. An outer `timeout` + grep on `PROBE_BANK:` is the
 //! whole harness; the probe self-exits ([`super::probes::ProbeExitPlugin`]'s pattern) once DONE.
 

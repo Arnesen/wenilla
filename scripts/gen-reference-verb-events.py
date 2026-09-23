@@ -2,7 +2,7 @@
 """Regenerate `reference/1.12-verb-events.tsv` — every FrameScript event the 1.12.1 client fires
 FROM INSIDE A LUA VERB, keyed by the verb.
 
-    scripts/gen-reference-verb-events.py [--wow-re DIR] [--out FILE]
+    WOW_RE=<the RE repo> scripts/gen-reference-verb-events.py [--wow-re DIR] [--out FILE]
 
 **Why this exists.** `reference/1.12-events.tsv` (2140) says what arguments an event carries and
 `reference_ui`'s two name gates (1883/1889) say whether *something* fires what a stock file listens
@@ -45,8 +45,10 @@ and the unit-field bridge / token fan-out ids below 0xb6, which are state events
 fire-site census is over the two signal helpers' literal call sites (its header says so in
 capitals), and `shape=helper` stops one call deep on purpose. Gate on what IS here.
 
-The input lives outside the repo (the sibling RE repo), so this is a manual regeneration, like
-`gen-reference-events.py` — not something CI can run.
+The fire sites and the binding shapes are the vendored `reference/` tables; the function names,
+the ledgers' extents and the disassembly are the RE repo's (`--wow-re`, or `$WOW_RE`), and the
+disassembly is the client's own binary, so this is a manual regeneration there. The committed
+table is the surface benilla tracks.
 """
 import argparse
 import bisect
@@ -69,7 +71,12 @@ BRANCH = re.compile(r"^(call|jmp)\s+0x([0-9a-f]+)\s*$")
 SIZE = re.compile(r"\bsize=(\d+)")
 
 
+REFERENCE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "reference"))
+
+
 def rows(path):
+    if not os.path.exists(path):
+        sys.exit(f"no table at {path}")
     for line in open(path, encoding="utf-8"):
         if line.startswith("#"):
             continue
@@ -81,12 +88,15 @@ def rows(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--wow-re", default=os.path.expanduser("~/dev/wow-5875-re"))
-    ap.add_argument(
-        "--out",
-        default=os.path.join(os.path.dirname(__file__), "..", "reference", "1.12-verb-events.tsv"),
-    )
+    ap.add_argument("--wow-re", default=os.environ.get("WOW_RE"))
+    ap.add_argument("--out", default=os.path.join(REFERENCE, "1.12-verb-events.tsv"))
     a = ap.parse_args()
+    if not a.wow_re:
+        sys.exit(
+            "this table is derived from the RE repo's function names, ledgers and disassembly: "
+            "pass --wow-re or set WOW_RE. The committed reference/1.12-verb-events.tsv is the "
+            "surface benilla tracks."
+        )
 
     starts = set()
     for f in rows(os.path.join(a.wow_re, "re/names/out/names-5875.tsv")):
@@ -111,7 +121,7 @@ def main():
     starts |= set(extent)
 
     verbs = {}  # fn address -> name
-    for f in rows(os.path.join(a.wow_re, "re/audit/binding-shapes.tsv")):
+    for f in rows(os.path.join(REFERENCE, "1.12-shapes.tsv")):
         if len(f) < 2:
             continue
         fn = int(f[1], 16)
@@ -127,7 +137,7 @@ def main():
     starts |= set(verbs)
 
     sites = []  # (site va, event name)
-    for f in rows(os.path.join(a.wow_re, "re/events/event-firesites.tsv")):
+    for f in rows(os.path.join(REFERENCE, "1.12-event-firesites.tsv")):
         if len(f) < 4 or not f[0].startswith("0x") or not f[3] or f[2] == "dyn":
             continue
         va, eid = int(f[0], 16), int(f[2])
@@ -145,7 +155,10 @@ def main():
     after_pad = False
     ended = False  # the previous real instruction was a `ret`
     n_lines = 0
-    for line in open(os.path.join(a.wow_re, "system/ui/scratch/disasm-full.txt"), encoding="utf-8", errors="replace"):
+    disasm = os.path.join(a.wow_re, "system/ui/scratch/disasm-full.txt")
+    if not os.path.exists(disasm):
+        sys.exit(f"no disassembly at {disasm} — is --wow-re right?")
+    for line in open(disasm, encoding="utf-8", errors="replace"):
         m = LINE.match(line)
         if not m:
             continue

@@ -15,7 +15,7 @@
 //! visible against a real server sending real bytes, which is what this probe puts in front of
 //! them.
 //!
-//! ## The innkeeper (live-DB verified this session, `/Users/sam/dev/vmangos-deploy` → `mangos` DB)
+//! ## The innkeeper (live-DB verified against the local vmangos, `mangos` DB)
 //!
 //! Innkeeper Keldamyr — `creature_template.entry = 6736`, spawn `creature.guid = 46343`, **map 1**
 //! (Teldrassil, Dolanaar), position `(9802.21, 982.608, 1313.98)`,
@@ -77,8 +77,8 @@
 //! WOW_DATA=WoW/Data WOW_USER=probe1 WOW_PASS=pprobe1 WOW_CHAR=Probeone \
 //!     WOW_PROBE_BINDER=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — this worktree is `pool-1` → `probe1`/`pprobe1`/`Probeone`;
-//! docs/METHOD.md "The local vmangos server"). Non-combat, and GM mode is left exactly as found. An
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill). Non-combat, and GM mode is left exactly as found. An
 //! outer `timeout` + grep on `PROBE_BINDER:` is the whole harness; the probe self-exits once DONE.
 //!
 //! Every step SKIPs with a note rather than FAILing for an environmental problem (the NPC never

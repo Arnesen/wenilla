@@ -3,7 +3,7 @@
 //! catalog ([`EmoteSounds`], promoted from `crate::sound`, decision 0070 slice 4) and hand off —
 //! after the **receive-side posture gate** ([`receive_eligible`]).
 //!
-//! **Verified against vmangos** (`/Users/sam/wre/vmangos-src/src/game/Handlers/ChatHandler.cpp`
+//! **Verified against vmangos** (vmangos `src/game/Handlers/ChatHandler.cpp`
 //! `HandleTextEmoteOpcode` + `src/game/Unit.cpp` `Unit::HandleEmote`/`HandleEmoteCommand`,
 //! 2026-07-03): a one-shot text emote (`/wave`, `Emotes.dbc EmoteType == 0`) sends **both**
 //! `SMSG_TEXT_EMOTE` (the chat line + voice — `EmoteKind::Text`) and `SMSG_EMOTE`

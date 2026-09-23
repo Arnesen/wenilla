@@ -48,8 +48,8 @@
 //! establish — which is precisely the player build. The banner now registers beside the stamp
 //! itself, in `lib::run`, where it is always compiled.
 //!
-//! The other half of decision 0649 — the pre-connect **account guard**, which keeps a session
-//! running inside a worktree pool slot from logging in as somebody else's account — lives in
+//! The other half of decision 0649 — the pre-connect **account guard**, which keeps a scripted
+//! run from logging in as an account its checkout did not declare — lives in
 //! [`crate::run_mode`] now, not here: it is consulted by the login policy, and 1174's seam does not
 //! let gameplay call an instrument. Its reasoning went with it.
 
@@ -435,7 +435,7 @@ fn findings(
                 ShieldReport::Arming | ShieldReport::Armed =>
                     "This is the default. Re-run with WOW_GM=off for those readings — safe, \
                      because the probe shield (decision 0677) keeps the body alive without it.",
-                // Not a probe body — the director's own account, or a bystander. `WOW_GM` would be
+                // Not a probe body — a player's account, or a plain test account. `WOW_GM` would be
                 // inert here (the shield only ever commands `probe<N>`, 0677), and saying otherwise
                 // sends the reader after a switch that does nothing. The state is also PERSISTED:
                 // vmangos saves it in `characters.extra_flags` bit 0 and `GM.LoginState = 2`

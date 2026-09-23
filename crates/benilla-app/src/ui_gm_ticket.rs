@@ -34,7 +34,7 @@
 //!
 //! ## What vmangos actually does, and what that costs us
 //!
-//! Verified against `/Users/sam/wre/vmangos-src` (`Handlers/GMTicketHandler.cpp`, `GMTicketMgr.cpp`,
+//! Verified against the vmangos source (`Handlers/GMTicketHandler.cpp`, `GMTicketMgr.cpp`,
 //! `Commands/TicketCommands.cpp`) — four behaviours a client author has to design around:
 //!
 //! 1. **Silence is a legal answer.** Create returns with no packet at all when the queue is off,

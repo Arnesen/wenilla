@@ -14,7 +14,7 @@
 //! is the step this probe exists for. The house id is checked to be in `1..=7` because it keys the
 //! deposit rate the sell pane quotes, and a zero would silently quote a free listing.
 //!
-//! ## The auctioneer (live-DB verified this session, `/Users/sam/dev/vmangos-deploy` → `mangos`)
+//! ## The auctioneer (live-DB verified against the local vmangos, `mangos`)
 //!
 //! Auctioneer Fitch, creature entry 8719, spawn guid 12696, map 0 (Stormwind, Trade District),
 //! pos `(-8821.53, 659.886, 97.4645)`. Her `creature_template.npc_flags` is **4096** exactly —
@@ -57,8 +57,8 @@
 //! WOW_PROBE_AUCTION=1 WOW_NOSOUND=1 WOW_USER=probe5 WOW_PASS=pprobe5 WOW_CHAR=Probefive \
 //!     cargo run -p benilla
 //! ```
-//! (the slot-keyed probe identity — `pool-N` → `WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>`, docs/METHOD.md "The local vmangos server"; this worktree is `pool-5`).
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill).
 //! Non-combat. An outer grep on `PROBE_AUCTION:` is the whole harness; the probe self-exits (the
 //! [`super::probes::ProbeExitPlugin`] pattern) once DONE.
 

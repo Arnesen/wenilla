@@ -38,7 +38,7 @@
 //! WOW_USER=probe5 WOW_PASS=pprobe5 WOW_CHAR=Probefive WOW_UNATTENDED=1 WOW_NOSOUND=1 \
 //!     WOW_PROBE_MODEL_CAMERA=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — docs/METHOD.md "The local vmangos server"). `WOW_TILE_TRACE=1`
+//! (the checkout's probe identity (`.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR — the `probe` skill)). `WOW_TILE_TRACE=1`
 //! alongside it prints the leg, the record, the eye and the matrix per pane per frame.
 
 use bevy::camera::visibility::RenderLayers;

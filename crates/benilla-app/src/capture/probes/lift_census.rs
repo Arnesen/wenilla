@@ -31,7 +31,7 @@
 //! - **`meshes`** counts render descendants (the whole subtree, not just direct children — a GO
 //!   model hangs its submeshes under an anim host).
 //!
-//! Pair it with the slot-keyed probe identity and a `.go` to the reported spot:
+//! Pair it with the checkout's probe identity (the `probe` skill) and a `.go` to the reported spot:
 //!
 //! ```text
 //! WOW_USER=probeN WOW_PASS=pprobeN WOW_CHAR=Probe<n> WOW_NOSOUND=1 \

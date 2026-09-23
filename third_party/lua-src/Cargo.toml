@@ -7,11 +7,8 @@
 # error for 60 of 218 addons at session start, three quarters of everything that breaks in a running
 # session. It is not reachable from inside Lua: not a library function, not a global, an OPCODE.
 #
-# WHAT IS AND IS NOT CHANGED. **Right now: nothing.** The `lua-5.1.5/` tree here is byte-identical
-# to upstream's, and this fork was landed inert on purpose — the pipeline is proven transparent
-# BEFORE any behavioural payload goes into it, so that when the suite moves, the patch is the only
-# thing that could have moved it. `BENILLA.md` carries the current state and the one command that
-# verifies the sources against upstream.
+# WHAT IS AND IS NOT CHANGED: `BENILLA.md` lists every hunk against upstream's `lua-5.1.5/` tree
+# (eight, in three files) and the one command that verifies the sources against the registry copy.
 #
 # When the payload does land we are still NOT adopting Lua 5.0: we stay on 5.1.5 and restore the
 # behaviour of one opcode Lua itself shipped and labelled "for compatibility only", so every other

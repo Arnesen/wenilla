@@ -9,9 +9,9 @@
 //! second `SMSG_SPELL_GO`) timestamps the server's cooldown end relative to the first GO.
 //!
 //! Run: `cargo run -p benilla-protocol --example cooldown_probe -- probeN pprobeN [host]` — the
-//! slot-keyed probe account (docs/METHOD.md "The local vmangos server"; NEVER `one`, the director's
-//! account — a probe login there kicks their live session). Two caveats: this is a COMBAT probe,
-//! so it runs director-supervised (docs/METHOD.md: no unattended combat probes), and `.learn` is
+//! probe account (the `probe` skill; never a player's account — a probe login there kicks their
+//! live session). Two caveats: this is a COMBAT probe, so it runs supervised (docs/METHOD.md: no
+//! unattended combat probes), and `.learn` is
 //! SEC_DEVELOPER (5); probe accounts are gmlevel 6 (SEC_ADMINISTRATOR), so it lands. The vmangos
 //! console for the run and restore it after.
 
@@ -43,10 +43,10 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let user = args
         .next()
-        .context("usage: cooldown_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
+        .context("usage: cooldown_probe -- <probeN> <pprobeN> [host] (a probe account)")?;
     let pass = args
         .next()
-        .context("usage: cooldown_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
+        .context("usage: cooldown_probe -- <probeN> <pprobeN> [host] (a probe account)")?;
     let host = args.next().unwrap_or_else(|| "localhost".into());
 
     let logon = benilla_protocol::logon(&host, &user, &pass)?;

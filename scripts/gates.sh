@@ -9,10 +9,10 @@
 # the social arc, then again at the 6a land). Run this instead of composing pipelines.
 set -uo pipefail
 
-# Gate the tree you are STANDING IN, not the one this file happens to live in. Every session works
-# in its own worktree (docs/METHOD.md) and reaches for the gates by absolute path — `scripts/gates.sh`
-# resolved from `$0`, which is the primary checkout. That silently gated the PRIMARY: fmt-red work
-# in a worktree reported ALL GATES GREEN, because the primary is always clean.
+# Gate the tree you are STANDING IN, not the one this file happens to live in. A machine with
+# several checkouts reaches for the gates by absolute path — `scripts/gates.sh` resolved from
+# `$0`, which is another checkout. That silently gated the wrong one: fmt-red work in one
+# worktree reported ALL GATES GREEN, because the other was clean.
 #
 # So: the git toplevel of $PWD, as long as it is a checkout of THIS repo (it has this script) — a
 # stray invocation from a sibling repo like wow-5875-re falls back rather than gating that repo with
@@ -26,7 +26,7 @@ echo "gating: $root"
 # ── Green-stamp memoization (decision 1822) ──────────────────────────────────────────────────────
 # A green chain stamps target/.gates-green with a key of exactly what determined the verdict: the
 # WORKING TREE's true content hash (untracked files included — hashed through a throwaway index, the
-# real one untouched, so `target/`, `WoW` and `.wt-claimed` stay excluded by the ignore rules), the
+# real one untouched, so `target/` and `WoW` stay excluded by the ignore rules), the
 # toolchain, this script itself, and where the install resolver points. Re-running on an unchanged
 # tree is then instant instead of ~5–8 min — which is what a land after an already-gated sync, or a
 # "once more to be sure", actually costs the machine. GATES_FORCE=1 runs the chain regardless.
@@ -35,7 +35,7 @@ echo "gating: $root"
 stamp="target/.gates-green"
 tree_key() {
     local tmpidx t
-    tmpidx="$(mktemp -t benilla-gates-idx)" && rm -f "$tmpidx" || return 1
+    tmpidx="$(mktemp "${TMPDIR:-/tmp}/benilla-gates-idx.XXXXXX")" && rm -f "$tmpidx" || return 1
     t="$( (export GIT_INDEX_FILE="$tmpidx"
            git read-tree HEAD && git add -A . && git write-tree) 2>/dev/null )"
     rm -f "$tmpidx"
@@ -46,11 +46,10 @@ tree_key() {
 resolve_wow() { cargo run -q -p benilla-formats --example where 2>/dev/null || true; }
 # **A docs-only delta keeps the verdict** (decision 2049). The stamped tree and the current one are
 # both real tree objects (write-tree puts them in the object store), so git can say exactly what
-# differs. If every differing path is a top-level `*.md` — wt.sh's
-# `docs_only` rule (0979): nothing compiles, tests, formats or `include_str!`s those, checked — then
-# the chain's outcome on this tree IS the stamped one, by construction rather than by optimism. This
-# is what lets `wt.sh land`'s worker land a tree the session already gated after a rebase brought in
-# after its own map regeneration, without paying the chain again.
+# differs. If every differing path is under `docs/` or a top-level `*.md` — nothing compiles,
+# tests, formats or `include_str!`s those, checked — then the chain's outcome on this tree IS the
+# stamped one, by construction rather than by optimism. This is what lets a landing that only
+# regenerated the map after a rebase go through without paying the chain again.
 # A stamped tree that the object store has since pruned simply fails the check, and the chain runs.
 docs_only_delta() { # $1 = stamped tree, $2 = current tree
     git cat-file -e "$1^{tree}" 2>/dev/null && git cat-file -e "$2^{tree}" 2>/dev/null || return 1
@@ -75,8 +74,23 @@ if [ "${GATES_FORCE:-}" != "1" ] && [ -n "$key_start" ] && [ -f "$stamp" ]; then
     fi
 fi
 
-log="$(mktemp -t benilla-gates)"
-trap 'rm -f "$log"' EXIT
+log="$(mktemp "${TMPDIR:-/tmp}/benilla-gates.XXXXXX")"
+skips="$(mktemp "${TMPDIR:-/tmp}/benilla-gates-skips.XXXXXX")"
+trap 'rm -f "$log" "$skips"' EXIT
+
+# **How hollow was that green?** The data-gated tests pass without asserting on a machine that
+# lacks the install or the addon corpus, and libtest swallows the skip line — so `install.rs`'s
+# `skipped` appends one to `$BENILLA_SKIP_LOG` instead, and this reads the file back after each
+# test rung. A clone without the data sees the number rather than a green it cannot weigh
+# (docs/CONTRIBUTING.md, "Setting up"). Where the data is, `BENILLA_REQUIRE_DATA` has already
+# made every skip a failure and the file stays empty.
+report_skips() { # $1 = rung name
+    [ -s "$skips" ] || return 0
+    echo "  $1: $(wc -l <"$skips" | tr -d ' ') data-gated tests SKIPPED on this machine —"
+    sort "$skips" | uniq -c | sort -rn | sed 's/^ *\([0-9]*\) \(.*\)/    \1 × \2/'
+    echo "    (they run where the data is: docs/CONTRIBUTING.md, \"Setting up\")"
+    : >"$skips"
+}
 
 # ── Timing (decision 2265 §C1) ──────────────────────────────────────────────────────────────────
 # Every gate's wall seconds, printed beside its verdict and appended to `target/.gates-timing`
@@ -118,7 +132,7 @@ run clippy cargo clippy --workspace --all-targets -- -D warnings
 # after the pool moved drives. Where both resolve, `BENILLA_REQUIRE_DATA=1` turns a skip into the
 # failure it is. Both, not either: with the install alone every corpus test would fail for the
 # honest reason. Ask the resolver for the install (the same `where` the player-tests rung and the
-# enforcer use); the corpus is the symlink `wt.sh link_wow` lays at the tree's root.
+# enforcer use); the corpus is the `wow-addons-vanilla` link at the tree's root.
 wow_data="$(resolve_wow)"
 require_data=""
 if [ -n "$wow_data" ] && [ -d "$root/wow-addons-vanilla" ]; then
@@ -128,7 +142,8 @@ else
          "corpus=$([ -d "$root/wow-addons-vanilla" ] && echo yes || echo no)):" \
          "data-gated tests skip silently on this machine"
 fi
-run test env ${require_data:+BENILLA_REQUIRE_DATA=1} cargo test --workspace
+run test env ${require_data:+BENILLA_REQUIRE_DATA=1} BENILLA_SKIP_LOG="$skips" cargo test --workspace
+report_skips test
 
 # **doc-links** (decision 1925) — the docs are the knowledge base, so a doc link pointing at a
 # DELETED item is rot, and nothing else here runs rustdoc. Deliberately narrow: it fails only on a
@@ -185,8 +200,9 @@ run player-build cargo build -p benilla --no-default-features
 # and let the client-data tests say so themselves (`BENILLA_REQUIRE_DATA` is deliberately NOT
 # handed down: rung 2 is compiled out here, and what this rung falsifies is the player ladder,
 # not the resolver — a skip here would be the honest one).
-run player-tests env ${wow_data:+WOW_DATA="$wow_data"} \
+run player-tests env ${wow_data:+WOW_DATA="$wow_data"} BENILLA_SKIP_LOG="$skips" \
     cargo test -p benilla-formats -p benilla-app --no-default-features --lib
+report_skips player-tests
 
 # **The enforcer** (decision 1160's second binary, made into a gate by 1164). `benilla-worldview`
 # boots the engine plugin set with no server, no login, no UI and no player, and any system whose

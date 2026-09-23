@@ -44,8 +44,8 @@
 //! WOW_NOSOUND=1 WOW_UNATTENDED=1 WOW_USER=probe3 WOW_PASS=pprobe3 WOW_CHAR=Probethree \
 //!     WOW_PROBE_STONE=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — `pool-N` → `probeN`/`pprobeN`/`Probe<N-spelled>`, `docs/METHOD.md`
-//! "The local vmangos server"). `WOW_PROBE_STONE=<x>,<y>,<z>[,<map>]` aims it elsewhere.
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill). `WOW_PROBE_STONE=<x>,<y>,<z>[,<map>]` aims it elsewhere.
 //!
 //! **It leaves the probe body at the stone's minimum level**, deliberately and without putting it
 //! back: the level is the probe's own instrument (leg 2 needs one side of the band and leg 3 the

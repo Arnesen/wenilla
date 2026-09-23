@@ -21,9 +21,7 @@ use std::process::Command;
 /// Why it exists: people run benilla from a clone of the public snapshot repo, and a report ("this
 /// looks wrong", "it crashed here") is only actionable if we know *which* code they ran. A git sha
 /// is the only id that can't drift — the crate version is a permanent `0.1.0` and there are no
-/// releases to number. For a public clone the stamp is the **snapshot** sha, which maps back to the
-/// private commit exactly (`pubsync` tags it `pub/<public-short-sha>`); for our own worktrees it is
-/// the private commit itself.
+/// releases to number. The stamp is the commit the binary was built from, on any checkout.
 ///
 /// It emits four `rustc-env` vars. The three git ones come back **empty** when git can't answer (a
 /// source zip with no `.git`, or no `git` on PATH), which the runtime side reports as an unknown
@@ -45,8 +43,8 @@ use std::process::Command;
 /// A stamp is worthless if it can report a commit the binary isn't. The rerun triggers below are
 /// therefore exactly the files that change when HEAD moves: `HEAD` itself (checkout, rebase,
 /// detach) and the ref it names (a commit rewrites `refs/heads/<branch>`, not `HEAD`). Both are
-/// resolved with `git rev-parse --git-path`, which applies the worktree rules — in a `wt.sh` pool
-/// slot `.git` is a *file*, `HEAD` lives in `<primary>/.git/worktrees/<slot>/`, and `refs/heads/*`
+/// resolved with `git rev-parse --git-path`, which applies the worktree rules — in a linked
+/// worktree `.git` is a *file*, `HEAD` lives in `<main>/.git/worktrees/<name>/`, and `refs/heads/*`
 /// stay in the common dir. Only paths that exist are emitted: cargo reruns a build script whose
 /// watched path is *missing* on every build, and every one of those reruns relinks the app crate.
 ///

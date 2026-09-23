@@ -49,7 +49,7 @@ pub(crate) fn install(build: BuildId) {
 // The standing test affordance — `WOW_CRASH_INJECT=<at_secs>`, one deliberate main-thread panic
 // mid-run — is `perf::crash_inject`, a dev root: this module ships to players and knows nothing
 // of the `dev` seam (run_mode's one-door rule, 1176), and an instrument's home is with the
-// instruments. Its module doc carries the crosscheck incident that moved it there.
+// instruments. Its module doc carries the cross-platform incident that moved it there.
 
 /// Re-entrancy latch: a panic *inside* the hook (a poisoned lock, a failed write) must not
 /// recurse into it. Never cleared on purpose — after one report the process is on its way out,

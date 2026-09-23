@@ -581,7 +581,7 @@ fn apply_roster_policy(
                     warn!("char select: WOW_CHAR={name} not on this account — showing roster");
                     // A driverless run can never pick a different row itself — parked here it
                     // burns its whole wall-clock. Same home as the login arm's verdict, so the
-                    // marker leg.sh greps for is written in exactly one place (1371, 1769).
+                    // marker a leg runner greps for is written in exactly one place (1371, 1769).
                     if std::env::var_os("WOW_LOGIN_SMOKE").is_none()
                         && crate::run_mode::fatal_when_driverless(&format!(
                             "WOW_CHAR={name} is not on this account"

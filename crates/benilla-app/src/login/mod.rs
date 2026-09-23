@@ -4,7 +4,7 @@
 //! Cinematics/TOS side of the reference screen is deliberately cut (the director's call).
 //!
 //! This module owns the **credential policy** — the 0193 §3 mirror for the IO thread's pre-logon
-//! park: the env fast path (any of `WOW_USER`/`WOW_PASS`/`WOW_CHAR` explicitly set auto-submits
+//! park: the env fast path (`WOW_USER` and `WOW_PASS` both set auto-submits
 //! with the old `one`/`pone` defaults, so every probe/smoke invocation keeps working), the
 //! pending-credentials resubmit (paced at the flat 3 s, app-side — the IO thread never sleeps),
 //! and the director's typed submit. A *refused* code (bad password) clears the intent and shows
@@ -470,7 +470,7 @@ fn drive_policy(
     // nobody at the keyboard: a login failure no resubmit can change would leave it parked on a
     // dialog for its whole wall-clock, and every retry a runner grants it is spent the same way.
     // Those failures exit non-zero instead, on one greppable marker — "login: FATAL" — that
-    // leg.sh keys on (decision 1371).
+    // a leg runner keys on (decision 1371).
     //
     // **Nobody is here only if the run says so** (decision 1769). Whether the client may end the
     // run itself is [`crate::run_mode::fatal_when_driverless`]'s to answer; the two facts this
@@ -479,20 +479,20 @@ fn drive_policy(
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
 
-    // The env fast path, once (decision 0539 §3): any of WOW_USER/WOW_PASS/WOW_CHAR explicitly
-    // set → auto-submit env-with-defaults, so every probe/smoke/harness invocation keeps working.
+    // The env fast path, once (decision 0539 §3): WOW_USER and WOW_PASS both set → auto-submit
+    // them, so every probe/smoke/harness invocation keeps working. There is no default account.
     // The login smoke drives its own credentials instead.
     if !attempt.intent.env_read {
         attempt.intent.env_read = true;
         // Purely "are the credentials in the environment?" (decision 1769) — whether anybody is
         // here to *react* is a different fact with a different home, `run_mode::unattended`.
         if crate::run_mode::env_login() && std::env::var_os("WOW_LOGIN_SMOKE").is_none() {
-            let user = std::env::var("WOW_USER").unwrap_or_else(|_| "one".into());
-            let pass = std::env::var("WOW_PASS").unwrap_or_else(|_| "pone".into());
+            let user = std::env::var("WOW_USER").unwrap_or_default();
+            let pass = std::env::var("WOW_PASS").unwrap_or_default();
             // The account guard (decision 0649): a vmangos login KICKS whoever holds the account,
-            // so an unattended run from a pool slot must not authenticate as the director's `one`
-            // or a neighbouring slot's probe. Only the *automated* path is gated — a typed login
-            // is the director's own and is never second-guessed.
+            // so an unattended run authenticates as the account its checkout declares
+            // (`.probe-identity`) and nothing else. Only the *automated* path is gated — a typed
+            // login is the player's own and is never second-guessed.
             match crate::run_mode::account_guard(&user) {
                 Ok(()) => {
                     info!("login: env fast path — auto-submitting as {user}");

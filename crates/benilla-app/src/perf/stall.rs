@@ -137,7 +137,7 @@ fn arm_injectors(app: &mut App) {
     }
     // The third standing injector — `crash::arm_injector`, a deliberate main-thread panic — is
     // armed by `PerfPlugin` itself, beside this plugin's registration, not from here: this
-    // module is macOS-only and the crash injector is not (its doc has the crosscheck incident).
+    // module is macOS-only and the crash injector is not (its doc has the cross-platform incident).
 }
 
 fn watchdog(dir: Option<std::path::PathBuf>) {

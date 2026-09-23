@@ -21,7 +21,7 @@
 //! | *any pure questgiver with an offer* | `0x02`, GOSSIP clear | Questgiver | quest frame |
 //! | Alma Jainrose (812) | `0x10` TRAINER only | Trainer | trainer frame |
 //!
-//! The flag column is live-DB verified this session (`vmangos-deploy` → `mangos`,
+//! The flag column is live-DB verified against the local vmangos (`mangos`,
 //! `SELECT entry, name, npc_flags FROM creature_template`), and reported again from the wire on
 //! every run — a template edit shows up as a note beside the reading rather than as a mystery FAIL.
 //!
@@ -48,7 +48,7 @@
 //! WOW_DATA=WoW/Data WOW_USER=probe4 WOW_PASS=pprobe4 WOW_CHAR=Probefour \
 //!     WOW_UNATTENDED=1 WOW_PROBE_SERVICE=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — docs/METHOD.md "The local vmangos server"). Non-combat, GM mode
+//! (the checkout's probe identity (`.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR — the `probe` skill)). Non-combat, GM mode
 //! left as found, nothing bought and nothing turned in: every leg opens a window and closes it
 //! client-side, which is what the reference's own close does (`ui_gossip`: there is no
 //! `CMSG_GOSSIP_CLOSE` in 1.12).
@@ -215,7 +215,7 @@ struct ServiceProbe {
     /// NPC look identical in a SKIP line otherwise — and on a loaded machine the first is far more
     /// likely: at load 61 this probe logged `frame hitch: ~1010 ms` on repeat (the ~1 fps regime
     /// decisions 0713/0777/1355 name) and its 20-second scan window bought about twenty samples.
-    /// `leg.sh` answers the same problem with a load guard (1157); a probe that does one thing and
+    /// A leg runner answers the same problem with a load guard (1157); a probe that does one thing and
     /// exits is better served by reporting what it actually got.
     polls: u32,
     /// Latched once [`Phase::Done`] has fired its exit (never re-fire on a later frame).
@@ -426,7 +426,7 @@ fn service_probe(
                             // frames a second this leg never really looked (0713/0777/1355).
                             true =>
                                 " — THE OBSERVER WAS STARVED, so this SKIP says nothing about \
-                                     the NPC. Re-run on an idle machine (`uptime`; leg.sh's guard \
+                                     the NPC. Re-run on an idle machine (`uptime`; a leg runner's guard \
                                      is load < 3).",
                             false =>
                                 " — the machine was keeping up, so the `.go` was refused, the \

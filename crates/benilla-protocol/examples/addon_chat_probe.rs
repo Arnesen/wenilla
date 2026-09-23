@@ -24,9 +24,8 @@
 //! pprobeM] [host]`. With one account it runs the CHANNEL case alone (the server echoes a channel
 //! line back to its own sender, so one session is a complete round trip). With two it also runs
 //! the PARTY case, which needs a real group: the first account invites the second, the second
-//! accepts, and the addon line goes out over `/p`. **Use `probe8`/`probe9` for the second
-//! identity** — those two accounts sit above `WT_MAX_SLOTS`, so no live session's slot owns them
-//! (decision 0530's slot-keyed rule).
+//! accepts, and the addon line goes out over `/p`. **The second identity is a probe account no
+//! checkout declares** — a login kicks whoever holds the account (decision 0530).
 //!
 //! Server prerequisites, both checked by the probe's own output rather than assumed:
 //! `AddonChannel = 1` (off ⇒ the server silently drops every addon send) and
@@ -63,8 +62,7 @@ fn probe_char_name(user: &str) -> Option<String> {
 }
 
 fn login(host: &str, user: &str, pass: &str) -> Result<(WorldSession, String)> {
-    let name =
-        probe_char_name(user).context("account must be a slot-keyed probeN (decision 0530)")?;
+    let name = probe_char_name(user).context("account must be a probeN (decision 0530)")?;
     let logon = benilla_protocol::logon(host, user, pass)?;
     let addr = logon
         .realms

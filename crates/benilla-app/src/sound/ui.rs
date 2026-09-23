@@ -1,5 +1,5 @@
 //! UI sounds — the app side of the Lua `PlaySound` seam (decision 0070 §4, the one deliberate
-//! UI-crate overlap cut from the sound worktree), plus the **per-item item-gesture sounds**
+//! UI-crate overlap cut when the sound crate was split), plus the **per-item item-gesture sounds**
 //! (decision 0091): the bag-drag pickup/put-down, and the loot-window pickup.
 //!
 //! Three triggers, all 2D SFX plays, all after the UI input pass so a click's sound plays the

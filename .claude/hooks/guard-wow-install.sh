@@ -51,7 +51,7 @@ while [ ! -d "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "." ]; do dir=$(dirnam
 real=$(cd -P "$dir" 2>/dev/null && pwd) || exit 0
 
 # The roots to protect. `$WOW_DATA` first (the resolver's own order), then the `WoW` link every
-# checkout and pool slot carries. Both physicalised, so the symlink and its target are one root.
+# checkout carries. Both physicalised, so the symlink and its target are one root.
 own=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
 primary=$(cd "${own:-.}/.." 2>/dev/null && pwd)
 for root in "${WOW_DATA:-}" "$primary/WoW" "$cwd/WoW"; do

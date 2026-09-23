@@ -93,8 +93,7 @@
 //! assignment reads off it (0649, 0679).
 //!
 //! Non-combat — the probe never attacks and never stands anywhere contested; with one player in
-//! the instance there is nobody to fight. Pair with the SLOT-KEYED probe identity
-//! (`docs/METHOD.md`, "The local vmangos server").
+//! the instance there is nobody to fight. Pair with the checkout's probe identity (`.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR — the `probe` skill).
 
 use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;

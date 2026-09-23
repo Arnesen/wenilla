@@ -18,7 +18,7 @@
 # demand. The real-addon half of the question belongs to the vanilla addon harness (1188 phase 6).
 #
 # **The addon corpora are not 1.12 codebases, and that shapes what a grep over them means.**
-# `~/dev/wow-addons-top20` and `~/dev/wow-addons-vanilla` hold addons that RUN on 1.12 — which is
+# The vanilla addon corpus (`benilla_formats::addon_corpus`) holds addons that RUN on 1.12 — which is
 # not the same as addons written for 1.12 and nothing else. Most of the big ones ship one codebase
 # for several clients and pick a path at load: pfUI registers every module with a version list
 # (`RegisterModule("loot", "vanilla:tbc", …)`, matched against `pfUI.expansion`), pfQuest keeps a

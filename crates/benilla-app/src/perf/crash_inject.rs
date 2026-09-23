@@ -8,7 +8,7 @@
 //! players and knows nothing of the `dev` seam, so its injector cannot sit beside it under a
 //! `cfg`. And it was first armed from inside the stall sampler, which is macOS-only
 //! (`/usr/bin/sample`) — so on Linux and Windows the injector was dead code, `-D warnings` made
-//! that a red `scripts/crosscheck.sh` on both, and the macOS gates stayed green for six days. An
+//! that a red cross-platform compile on both, and the macOS gates stayed green for six days. An
 //! instrument's cfg is `dev`, never a platform's; `PerfPlugin` arms this on every platform.
 
 use bevy::prelude::*;

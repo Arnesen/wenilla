@@ -43,8 +43,8 @@
 //! WOW_NOSOUND=1 WOW_USER=probe4 WOW_PASS=pprobe4 WOW_CHAR=Probefour \
 //!     WOW_PROBE_GOQUEST=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — `pool-N` → `probeN`/`pprobeN`/`Probe<N-spelled>`, `docs/METHOD.md`
-//! "The local vmangos server"). `WOW_PROBE_GOQUEST=<x>,<y>,<z>[,<map>]` aims it elsewhere; the
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill). `WOW_PROBE_GOQUEST=<x>,<y>,<z>[,<map>]` aims it elsewhere; the
 //! default is the **Goldshire wanted poster** — `gameobject.guid` 26843, template 68
 //! `Wanted Poster`, `type` 2 `GAMEOBJECT_TYPE_QUESTGIVER`, `flags` 4 `INTERACT_COND`, offering
 //! quest 176 `Wanted: "Hogger"` (`MinLevel` 5, `QuestLevel` 11). It is a single **unpooled** spawn

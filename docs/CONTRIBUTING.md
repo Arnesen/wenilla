@@ -24,7 +24,8 @@ fork, and forks are welcome.
 ## How a change is judged
 
 1. `scripts/gates.sh` is green: fmt, clippy with warnings denied, the workspace tests, the
-   player build.
+   doc-link and render-pass lints, the player build with its own tests, and the engine boot
+   checks.
 2. The reference fact is stated: what 1.12.1 does, and where that is known from (the client's
    behaviour you observed, a DBC field, a FrameXML line, a packet capture). The names and shapes
    under `reference/` are the surface benilla tracks.
@@ -34,12 +35,30 @@ fork, and forks are welcome.
 
 ## Setting up
 
-- A 1.12.1 install of your own: `WOW_DATA=<path>`, or a `WoW` link at the repo root. benilla
-  reads it and never writes into it.
-- A server to test against: any 1.12.1 server. The project runs against a local vmangos
-  (`WOW_HOST`, `WOW_USER`, `WOW_PASS`).
-- `cargo play` builds and runs the play profile. `scripts/check.sh` verifies a round of work;
-  `scripts/gates.sh` is what a pull request must pass.
-- Bugs, questions and ideas go to the Discord linked from the README. Issues are off on purpose.
+- **The toolchain.** Stable Rust (`rust-toolchain.toml` adds clippy and rustfmt) and a C
+  compiler, because the client's Lua is vendored and built from source. On macOS the Xcode
+  command line tools, which also supply libclang for the audio bindings; on Linux the ALSA and
+  udev development packages and pkg-config. `python3` runs two of the gates, and `jq` the hooks.
+- **A 1.12.1 install of your own.** `WOW_DATA=<its Data folder>`, or a `WoW` link at the repo
+  root, which only a dev build sees: the player build looks for `Data/` or `WoW/Data/` beside
+  the binary. benilla reads the install and never writes into it. `WOW_DATA=` (set, empty)
+  means "no install", which is how the no-install boot is tested on a machine that has one.
+- **Without the install, green is hollow.** About a thousand tests read the install and skip
+  when it is absent; six more read a corpus of vanilla addons (`BENILLA_ADDON_CORPUS=<a folder
+  of addons>`, or a `wow-addons-vanilla` link at the root), third-party content that is not in
+  this repo. `scripts/gates.sh` and `scripts/check.sh` print how many tests skipped and why.
+  Where the data is, `BENILLA_REQUIRE_DATA=1` turns a skip into a failure, and the gates set it
+  themselves when the install and the corpus both resolve.
+- **A server to test against.** Any 1.12.1 server; `WOW_HOST` names it (default
+  `localhost:3724`). A scripted run has no default account: `WOW_USER`, `WOW_PASS` and
+  `WOW_CHAR` name a test account on your server whose login kicks nobody, all three, either in
+  the environment or in a `.probe-identity` file at the repo root (one per line, never
+  committed), and `scripts/smoke.sh` (the live login gate) refuses without them. The probes
+  drive the body with GM commands, so give that account the top GM level.
+- **The loop.** `cargo play` builds and runs the play profile. `scripts/check.sh` verifies a
+  round of work; `scripts/gates.sh` is the full chain, and it opens a window for the engine boot
+  checks, so it needs a display. Work on a branch.
+- Bugs, questions and ideas go to the Discord linked from the README. Issues are off on purpose,
+  and pull requests are not open yet.
 
 Working with an AI agent is expected. The agent reads `AGENTS.md`, and the same rules bind it.

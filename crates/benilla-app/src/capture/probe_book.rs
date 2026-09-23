@@ -1,7 +1,7 @@
 //! The world-book live probe (`WOW_PROBE_BOOK=1`) — B240's instrument: what does having the item-
 //! text reader open actually cost per frame, on the real object the report names?
 //!
-//! Goudy, 2026-08-09 (`#bugs` `1535810645956632686`): *"page text with html text absolutely
+//! Reported on Discord, 2026-08-09: *"page text with html text absolutely
 //! annihilates performance"* — ~50% fps drop (62 → 36 fps, 16.0 → 28.0 ms) while the *Alliance
 //! Military Ranks* plaque's reader is up, recovering the moment it closes. That is a **frame-cost
 //! A/B**, and eyeballing an fps counter is exactly the way not to settle one (docs/METHOD.md's
@@ -21,8 +21,8 @@
 //! WOW_NOSOUND=1 WOW_USER=probe0 WOW_PASS=pprobe0 WOW_CHAR=Probezero \
 //!     WOW_PROBE_BOOK=1 cargo run -q -p benilla --release
 //! ```
-//! (the slot-keyed probe identity — `pool-N` → `probeN`/`pprobeN`/`Probe<N-spelled>`, docs/METHOD.md
-//! "The local vmangos server"). An outer `timeout` + a grep on `PROBE_BOOK:` is the whole harness;
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill). An outer `timeout` + a grep on `PROBE_BOOK:` is the whole harness;
 //! the probe self-exits ([`super::probes::ProbeExitPlugin`]'s pattern) once DONE.
 
 use bevy::prelude::*;
@@ -36,8 +36,8 @@ use crate::player::Player;
 use crate::ui_item_text::ItemTextOpen;
 use crate::ui_script::{UiCostWanted, UiFrameCost};
 
-/// Goudy's own reported standing position beside the plaque (his debug panel, screenshot
-/// `1535810480424222760-1`).
+/// The reporter's own standing position beside the plaque (their debug panel, in the report's
+/// screenshot).
 const PLAQUE_AT: [f32; 3] = [-8760.2, 402.3, 103.9];
 /// `GAMEOBJECT_TYPE_TEXT` — the strategy type a book/plaque carries (decision 1105).
 const GO_TYPE_TEXT: i32 = 9;

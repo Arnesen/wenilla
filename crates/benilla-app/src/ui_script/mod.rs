@@ -1179,10 +1179,6 @@ mod duel_tests;
 #[cfg(test)]
 mod enchant_confirm_tests;
 
-/// The shared reference-geometry diff (decision 0675) every transcribed window's test calls.
-#[cfg(test)]
-mod framexml_diff;
-
 /// Its FLAG twin (decision 1739): the whole-tree sweep for `toplevel`/mouse/`id` against the
 /// reference, read off the loaded engine rather than off our XML.
 #[cfg(test)]

@@ -213,7 +213,7 @@ fn decodes_a_blp_icon_to_png() {
         .read_file("Interface/Icons/Spell_Holy_ArcaneIntellect.blp")
         .expect("read spell icon BLP");
 
-    // Keyed by pid, like every other temp path in the workspace: eight pool slots run
+    // Keyed by pid, like every other temp path in the workspace: several worktrees run
     // `cargo test --workspace` concurrently, and a FIXED shared name means one run's
     // cleanup deletes the file another is about to read. That is not hypothetical — the
     // taxi twin below reddened a land gate exactly that way (decision 1918).

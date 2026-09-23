@@ -219,8 +219,8 @@ struct Cli {
     /// `SMSG_UPDATE_WORLD_STATE` — what the NPC-text `$<n>w`/`$<n>e` tokens read): teleport to
     /// Elwynn, hop to Stormwind to force a zone-change init, and `.debug send worldstate` one
     /// synthetic pair to require back. Prints every state received. Needs a **SEC_DEVELOPER**
-    /// account: `.debug send worldstate` is gmlevel 5, under the 6 the slot-keyed probe
-    /// accounts carry (decision 0450), so the update leg needs a temporary grant.
+    /// account: `.debug send worldstate` is gmlevel 5, under the 6 the probe accounts
+    /// carry (decision 0450), so the update leg needs a temporary grant.
     #[arg(long)]
     worldstate: bool,
 
@@ -231,7 +231,7 @@ struct Cli {
     /// the same server spline machinery as any creature (not a teleport / not a knockback). Prints
     /// the self spline in full (facing kind, duration, waypoints, flying bit) so the ride + the
     /// `CMSG_MOVE_SPLINE_DONE` ack it obliges can be built from the real numbers. Needs a GM warrior
-    /// (any slot-keyed probe account, gmlevel 6).
+    /// (any probe account, gmlevel 6).
     #[arg(long)]
     charge: bool,
 

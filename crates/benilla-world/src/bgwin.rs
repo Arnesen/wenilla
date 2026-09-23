@@ -105,7 +105,7 @@ pub fn background_run() -> bool {
 /// `WOW_PROBE…`-named env that captures pixels has to be excluded by name here, since the bare
 /// `WOW_PROBE` prefix would otherwise sweep it in.
 const NO_PIXEL_ENV_PREFIXES: &[&str] = &[
-    // Paired with its entry above, and it has to be BOTH or neither: `leg.sh`, `cine.sh` and
+    // Paired with its entry above, and it has to be BOTH or neither: `cine.sh` and
     // `summon-live.sh` all set `WOW_UNATTENDED` beside a `WOW_PROBE*`/`WOW_RIG` that IS no-pixel,
     // so listing it only as a background env would make it the one non-no-pixel member of every
     // such run and the all-of rule would grow all three back to the full 1600x900 that decision

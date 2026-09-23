@@ -2,7 +2,7 @@
 //! **WoW coordinates throughout** (the Bevy transform is the consumer's job).
 //!
 //! This transcribes the structural skeleton of vmangos's own transport-path builder and mover:
-//! - `TransportMgr::GenerateWaypoints` (`/Users/sam/wre/vmangos-src/src/game/Transports/
+//! - `TransportMgr::GenerateWaypoints` (vmangos `src/game/Transports/
 //!   TransportMgr.cpp:105-334`) — the keyframe list, the map-change/teleport skip dance, the
 //!   per-leg Catmull-Rom splines, the `DistSinceStop`/`DistUntilStop` modular walks, the
 //!   four-regime `TimeTo` trapezoid, and the `ArriveTime`/`DepartureTime` accumulation.

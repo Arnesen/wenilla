@@ -34,7 +34,7 @@ use anyhow::{anyhow, Context, Result};
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge, SESSION_KEY_LENGTH};
 
 /// The realmd (auth/login) server port — the stock one a vmangos `realmd` listens on, which our
-/// deploy maps straight through (`3724:3724` in the compose file at `vmangos-deploy`).
+/// deploy maps straight through (`3724:3724` in a docker deploy's compose file).
 pub const AUTH_PORT: u16 = 3724;
 /// The 1.12.1 client build we present to the server.
 pub const CLIENT_BUILD: u16 = 5875;

@@ -34,7 +34,7 @@
 //! reference's `0xbc6040` insertion-ordered cache (`benilla::ui_aura`), a cache position is simply a
 //! 0-based index into `model.auras["player"]`. No second structure exists, and none is needed.
 //!
-//! # Byte-verified signatures (`~/dev/wow-5875-re/WoW/WoW.exe`, `system/ui/ledger.tsv`)
+//! # Byte-verified signatures (the 1.12.1 binary, wow-5875-re `system/ui/ledger.tsv`)
 //!
 //! Read off the disassembly, not off a wiki — a later client changed every one of these shapes, and a
 //! wrong shape fails *silently*.
