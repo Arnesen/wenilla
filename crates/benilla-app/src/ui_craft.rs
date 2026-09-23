@@ -28,7 +28,7 @@ use benilla_ui::script::{CraftReagent, CraftRecipe, CraftState, CraftTooltip, Ui
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::spell::{cast_target, CastCommit, CastLadder};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_items::{count_of, item_icon, InventoryScope};
@@ -138,6 +138,7 @@ fn feed_craft(
     focus: Option<Res<SpellFocus>>,
     icons: Option<Res<ItemDisplays>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    objects: Objects,
     items: Res<Items>,
     commands: Res<NetCommands>,
     mut last: Local<crate::ui_script::VmMemo<Option<CraftState>>>,
@@ -192,7 +193,7 @@ fn feed_craft(
                 let mut reagents = Vec::new();
                 let mut num_available = u32::MAX;
                 for &(entry, need) in d.reagents.iter().filter(|&&(e, n)| e != 0 && n != 0) {
-                    let have = count_of(&store.0, &items, entry, InventoryScope::CARRIED);
+                    let have = count_of(&store.0, &objects, entry, InventoryScope::CARRIED);
                     // A reagent is an ITEM row, so it terminates in the one genuinely shared chain
                     // (wow-re §5): ItemTemplate → ItemDisplayInfo → icon. Unlike the *recipe* icon
                     // above, there is nothing per-binding about this one.
@@ -230,7 +231,7 @@ fn feed_craft(
                     }
                 }
                 for &t in d.totems.iter().filter(|&&t| t != 0) {
-                    let have = count_of(&store.0, &items, t, InventoryScope::CARRIED) > 0;
+                    let have = count_of(&store.0, &objects, t, InventoryScope::CARRIED) > 0;
                     if let Some(info) = items.template(t, 0, &commands) {
                         tools.push((info.name.clone(), have));
                     }

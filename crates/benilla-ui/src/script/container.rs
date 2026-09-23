@@ -108,7 +108,7 @@ pub struct ContainerSlot {
     /// **The instance's remaining LIFETIME in milliseconds** — a duration-limited item counting
     /// down to its own destruction (a conjured stone, a holiday gift, a timed quest item). Its
     /// only feed is `SMSG_ITEM_TIME_UPDATE`, parked as an absolute deadline and recomputed on
-    /// read ([`crate::items::Items::duration_remaining_display_ms`] in benilla-app), floored to
+    /// read ([`crate::items::Countdowns::lifetime_remaining_display_ms`] in benilla-app), floored to
     /// the whole second so the snapshot moves once a second rather than every frame.
     /// `None` = no timer, which is nearly every item. Decision 1933.
     pub duration_ms: Option<u64>,

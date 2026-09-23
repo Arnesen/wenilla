@@ -174,6 +174,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(NetCommands(tx));
         world.init_resource::<crate::items::Items>();
+        world.init_resource::<crate::net::GuidIndex>();
         world.init_resource::<crate::spell::PendingCast>();
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
         world.init_resource::<crate::spell::Cooldowns>();

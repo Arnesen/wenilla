@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_ui::script::{DeathAction, DeathUiState, ScriptValue, UiScript};
 
-use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfGuid, SelfPlayer};
 use crate::ui_action::Spells;
 use crate::ui_script::{UiFeed, UiInput};
 
@@ -191,7 +191,9 @@ fn feed_death(
     mut feed: ResMut<DeathFeedState>,
     names: Res<crate::names::NameCache>,
     net: Res<NetCommands>,
-    index: Res<GuidIndex>,
+    // The object lookup (2334) — the spirit healer's entity, and the bag walk the self-res
+    // item leg takes.
+    objects: Objects,
     transforms: Query<&Transform>,
     map: Option<Res<benilla_world::world_map::CurrentMap>>,
     status: Res<crate::net::NetStatus>,
@@ -233,10 +235,9 @@ fn feed_death(
         .reclaim_at
         .map_or(0.0, |at| (at - now).max(0.0) as f32);
     let spirit_healer_in_range = death_net.spirit_healer.is_some_and(|npc| {
-        index
-            .0
-            .get(&npc)
-            .and_then(|&e| transforms.get(e).ok())
+        objects
+            .entity(npc)
+            .and_then(|e| transforms.get(e).ok())
             .is_some_and(|t| {
                 t.translation.distance_squared(self_t.translation) <= SPIRIT_HEALER_RANGE_SQ
             })
@@ -261,7 +262,7 @@ fn feed_death(
         // `HasSoulstone()` — see [`resolve_self_res`] for the three gates and their order. Not a
         // per-frame inventory walk in general: the dead gate is first, so while alive this is one
         // health read, and while dead-unreleased the walk only runs on a zero field.
-        self_res_label: resolve_self_res(&store.0, &items, spells.as_deref(), &net)
+        self_res_label: resolve_self_res(&store.0, &objects, &items, spells.as_deref(), &net)
             .map(|r| r.label().to_owned()),
     });
 
@@ -472,6 +473,7 @@ impl SelfRes {
 /// the lookup fires answers within a frame or two and the next resolve sees it.
 fn resolve_self_res(
     store: &benilla_protocol::ObjectFields,
+    objects: &Objects,
     items: &crate::items::Items,
     spells: Option<&Spells>,
     commands: &NetCommands,
@@ -485,12 +487,15 @@ fn resolve_self_res(
             .map_or_else(|| "UNKNOWN".to_owned(), |d| d.name.clone());
         return Some(SelfRes::Spell { spell, label });
     }
-    // Collected first, then judged: the template lookup needs `items` mutably (it is ask-once,
-    // so a miss fires the query) while the walk holds it immutably — `has_key`'s own idiom.
-    let slots =
-        crate::ui_items::collect_inventory(store, items, crate::ui_items::InventoryScope::DEFAULT);
+    // Collected first, then judged — `has_key`'s own idiom: the walk reads the object index,
+    // the judging reads the ask-once template cache beside it.
+    let slots = crate::ui_items::collect_inventory(
+        store,
+        objects,
+        crate::ui_items::InventoryScope::DEFAULT,
+    );
     slots.into_iter().find_map(|(bag_index, slot, guid)| {
-        let entry = items.object(guid)?.object_entry()?;
+        let entry = objects.object(guid)?.object_entry()?;
         let t = items.template(entry, guid, commands)?;
         let self_res = t.spells.iter().any(|sp| {
             sp.trigger == 0
@@ -630,6 +635,7 @@ fn drain_death(
                 match store.as_ref().and_then(|store| {
                     resolve_self_res(
                         store,
+                        &ladder.objects,
                         &ladder.items,
                         ladder.spells.as_deref(),
                         &ladder.commands,
@@ -841,6 +847,9 @@ mod self_res_tests {
     fn the_dead_gate_precedes_the_field() {
         let (net, _rx) = commands();
         let items = Items::default();
+        // Nothing streamed: the spell leg answers before the inventory walk is reached (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let spells = catalog([(REINCARNATION, named("Reincarnation", [94, 0, 0]))]);
 
         let alive = ObjectFields::from_pairs(&[
@@ -849,7 +858,7 @@ mod self_res_tests {
             (F_SELF_RES, REINCARNATION),
         ]);
         assert_eq!(
-            resolve_self_res(&alive, &items, Some(&spells), &net),
+            resolve_self_res(&alive, &objects, &items, Some(&spells), &net),
             None,
             "alive with a self-res owed: nil"
         );
@@ -862,7 +871,7 @@ mod self_res_tests {
             (F_SELF_RES, REINCARNATION),
         ]);
         assert_eq!(
-            resolve_self_res(&ghost, &items, Some(&spells), &net),
+            resolve_self_res(&ghost, &objects, &items, Some(&spells), &net),
             None,
             "a released ghost still holds the field, and still answers nil"
         );
@@ -873,7 +882,7 @@ mod self_res_tests {
             (F_SELF_RES, REINCARNATION),
         ]);
         assert_eq!(
-            resolve_self_res(&dead, &items, Some(&spells), &net),
+            resolve_self_res(&dead, &objects, &items, Some(&spells), &net),
             Some(SelfRes::Spell {
                 spell: REINCARNATION,
                 label: "Reincarnation".into(),
@@ -887,11 +896,13 @@ mod self_res_tests {
     fn an_unresolvable_spell_id_reads_unknown_not_nil() {
         let (net, _rx) = commands();
         let items = Items::default();
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let dead =
             ObjectFields::from_pairs(&[(F_MAXHEALTH, 4000), (F_HEALTH, 0), (F_SELF_RES, 999_999)]);
         for spells in [None, Some(catalog([]))] {
             assert_eq!(
-                resolve_self_res(&dead, &items, spells.as_ref(), &net),
+                resolve_self_res(&dead, &objects, &items, spells.as_ref(), &net),
                 Some(SelfRes::Spell {
                     spell: 999_999,
                     label: "UNKNOWN".into(),
@@ -910,6 +921,7 @@ mod self_res_tests {
     fn a_zero_field_falls_through_to_a_carried_item() {
         let (net, _rx) = commands();
         let mut items = Items::default();
+        let mut objs = crate::ui_items::TestObjects::new();
 
         let item = |name: &str, spells: Vec<ItemSpellEntry>| ItemInfo {
             spells,
@@ -932,8 +944,9 @@ mod self_res_tests {
             Some(item("Ankh of Reincarnation", vec![block(3026, 0)])),
         );
         for (guid, entry) in [(0xA0_u64, 10_u32), (0xA1, 11), (0xA2, 12)] {
-            items.insert_object(guid, ObjectFields::from_pairs(&[(3, entry)]));
+            objs.spawn(guid, ObjectFields::from_pairs(&[(3, entry)]));
         }
+        let objects = objs.get();
         let spells = catalog([
             (
                 3026,
@@ -951,7 +964,7 @@ mod self_res_tests {
         }
         let dead = ObjectFields::from_pairs(&pairs);
 
-        match resolve_self_res(&dead, &items, Some(&spells), &net) {
+        match resolve_self_res(&dead, &objects, &items, Some(&spells), &net) {
             Some(SelfRes::Item { entry, label, .. }) => {
                 assert_eq!(
                     entry, 12,
@@ -964,6 +977,9 @@ mod self_res_tests {
 
         // Take it away and the answer is nil again — not "UNKNOWN", which is the spell leg's.
         let bare = ObjectFields::from_pairs(&[(F_MAXHEALTH, 4000), (F_HEALTH, 0)]);
-        assert_eq!(resolve_self_res(&bare, &items, Some(&spells), &net), None);
+        assert_eq!(
+            resolve_self_res(&bare, &objects, &items, Some(&spells), &net),
+            None
+        );
     }
 }

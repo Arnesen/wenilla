@@ -53,7 +53,9 @@ use benilla_ui::script::{MailInboxRow, MailState, ScriptValue, StationeryView, U
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{
+    ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, Objects, SelfPlayer,
+};
 use crate::query_cache::QueryCache;
 use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
@@ -450,6 +452,7 @@ fn resolve_row(
 fn stationeries(
     catalog: &Stationery,
     self_q: &Query<(&ObjectStore, &crate::net::Guid), With<SelfPlayer>>,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
@@ -463,7 +466,7 @@ fn stationeries(
         let carried = store.is_some_and(|s| {
             crate::ui_items::count_of(
                 &s.0,
-                items,
+                objects,
                 row.item,
                 crate::ui_items::InventoryScope::CARRIED,
             ) > 0
@@ -537,6 +540,7 @@ struct MailFeedExtras<'w, 's> {
 fn feed_mail(
     script: Option<NonSendMut<UiScript>>,
     mut mail: ResMut<MailOpen>,
+    objects: Objects,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     stationery: Option<Res<Stationery>>,
@@ -651,7 +655,16 @@ fn feed_mail(
     let usable = stationery
         .as_deref()
         .filter(|_| !self_q.is_empty())
-        .map(|catalog| stationeries(catalog, &self_q, &items, icons.as_deref(), &commands))
+        .map(|catalog| {
+            stationeries(
+                catalog,
+                &self_q,
+                &objects,
+                &items,
+                icons.as_deref(),
+                &commands,
+            )
+        })
         .unwrap_or_default();
     let memo = last_stationeries.get(&script);
     if *memo != usable {
@@ -723,7 +736,7 @@ fn drain_mail(
     mut mail: ResMut<MailOpen>,
     commands: Res<NetCommands>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    items: Res<Items>,
+    objects: Objects,
     time: Res<Time>,
     mut pending: ResMut<MailPending>,
 ) {
@@ -826,7 +839,7 @@ fn drain_mail(
     if let Some(req) = script.take_mail_send() {
         let item_guid = req.item.and_then(|(bag, slot)| {
             self_q.iter().next().and_then(|s| {
-                crate::ui_items::slot_guid(&s.0, bag, (slot.max(1) - 1) as u8, &items)
+                crate::ui_items::slot_guid(&s.0, bag, (slot.max(1) - 1) as u8, &objects)
             })
         });
         if req.item.is_some() && item_guid.is_none() {

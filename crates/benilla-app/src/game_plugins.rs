@@ -544,14 +544,37 @@ pub(crate) mod schedule_tests {
         }
     }
 
+    /// Which graph a census reads (decision 2337).
+    ///
+    /// Bevy's build inserts an `ApplyDeferred` barrier between a system with commands and its
+    /// dependents, and it **shares one barrier per "distance"** (the number of barriers between
+    /// a node and the schedule's start — `auto_insert_apply_deferred.rs`, `get_sync_point`).
+    /// Two systems that share a barrier are ordered *through* it, so a pair the graph never
+    /// declared reads as ordered — and one edge added anywhere upstream re-homes whole groups
+    /// onto a different barrier and moves pairs among systems the edit never touched (2333's
+    /// five-out-six-in). Measured on this tree the day it was named: 2,888 actionable pairs
+    /// with the barriers, 5,063 without — the barriers were hiding 43% of the undeclared
+    /// orders behind their accidental placement.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum SyncPoints {
+        /// The schedule as it actually runs, barriers included — what an executor census
+        /// wants, since a barrier really is a wave boundary.
+        Built,
+        /// The **declared** graph only: no auto-inserted barriers, so "no path between two
+        /// systems" means exactly "nobody declared an order", and the count is a function of
+        /// the edges alone. What a ratchet on undeclared orders must read.
+        Declared,
+    }
+
     /// Take the census of one schedule. Initializing it runs every system's param setup, and
     /// at least one of those inserts `Schedules` itself, so this goes through bevy's own
     /// take-out-initialize-put-back rather than a `resource_scope` on that resource.
-    pub(crate) fn census(app: &mut App, label: impl ScheduleLabel) -> Census {
+    pub(crate) fn census(app: &mut App, label: impl ScheduleLabel, sync: SyncPoints) -> Census {
         let label = label.intern();
         app.world_mut().schedule_scope(label, |world, schedule| {
             schedule.set_build_settings(ScheduleBuildSettings {
                 ambiguity_detection: LogLevel::Warn,
+                auto_insert_apply_deferred: sync == SyncPoints::Built,
                 ..default()
             });
             // The systems' access is filled by `initialize`, which the build below would run
@@ -869,7 +892,9 @@ pub(crate) mod schedule_tests {
     }
 
     /// `PostUpdate`, 181 systems: `GlobalTransform` and the particle `EffectQuads` are most of it.
-    const POST_UPDATE_CEILING: usize = 351;
+    /// **371 (decision 2337)** — the declared-graph count, re-measured beside `Update`'s when
+    /// the census stopped reading bevy's barriers as orders (see the ledger below).
+    const POST_UPDATE_CEILING: usize = 371;
     const POST_UPDATE_SLACK: usize = 20;
     /// The **actionable** pairs in `Update` — two systems with conflicting access and no
     /// declared order, where [`Classes`] explains none of what they share, so the executor
@@ -974,10 +999,21 @@ pub(crate) mod schedule_tests {
     /// a new undeclared order; 2333 hands it to this ratchet's owner (2287) as a finding. The
     /// number is the dump's, not a sum.
     ///
+    /// **5,063 (decision 2337)** — not a raise: a re-measurement. Until here the census read
+    /// the *built* schedule, barriers included, and bevy shares one `ApplyDeferred` barrier per
+    /// distance from the schedule's start — so 2,175 pairs (43%) were "ordered" only through a
+    /// barrier the build happened to place between them, and moved whenever an edge anywhere
+    /// upstream re-homed a group onto another barrier: that is 2333's five-out-six-in, and it is
+    /// the one build step that can make a pair *enter* when an edge is added. The ratchet reads
+    /// the declared graph now ([`SyncPoints::Declared`]); this is the same tree's count with the
+    /// barriers gone, checked by removing one declared edge and watching exactly its five pairs
+    /// return and nothing else move. The dump prints each pair in canonical order since the same
+    /// record, so two dumps diff by text. The number is the dump's, not a sum.
+    ///
     /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
     /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
     /// about a resource that commutes by construction, the claim belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 2_888;
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_063;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1002,8 +1038,10 @@ pub(crate) mod schedule_tests {
     #[test]
     fn the_schedules_have_no_more_undeclared_orders_than_the_ceilings_say() {
         let mut app = headless_client();
-        let update = census(&mut app, Update);
-        let post = census(&mut app, PostUpdate);
+        // The declared graph, not the built one: a barrier bevy placed is not an order anyone
+        // declared, and it moves under unrelated edits (2337; see [`SyncPoints`]).
+        let update = census(&mut app, Update, SyncPoints::Declared);
+        let post = census(&mut app, PostUpdate, SyncPoints::Declared);
         let mut explained: BTreeMap<&str, usize> = BTreeMap::new();
         let mut actionable = Vec::new();
         for (a, b, what) in &update.conflicts {
@@ -1032,10 +1070,17 @@ pub(crate) mod schedule_tests {
             let mut rows: Vec<String> = actionable
                 .iter()
                 .map(|(a, b, what)| {
+                    // Canonical order within the pair: bevy reports (a, b) in whichever order
+                    // its walk met them, and a diff of two dumps must not see that as movement.
+                    let (x, y) = if update.name(*a) <= update.name(*b) {
+                        (*a, *b)
+                    } else {
+                        (*b, *a)
+                    };
                     format!(
                         "  {}  <->  {}\n      on {}",
-                        update.name(*a),
-                        update.name(*b),
+                        update.name(x),
+                        update.name(y),
                         what.iter()
                             .map(|id| update.component(*id))
                             .collect::<Vec<_>>()
@@ -1175,7 +1220,7 @@ pub(crate) mod schedule_tests {
     #[ignore = "instrument: run by hand (2265 §A3's executor census) — cargo test -p benilla-app --lib concurrency_census -- --ignored --nocapture"]
     fn concurrency_census() {
         let mut app = headless_client();
-        let c = census(&mut app, Update);
+        let c = census(&mut app, Update, SyncPoints::Built);
         let holds = |k: SystemKey, pick: &dyn Fn(ComponentId) -> bool| {
             c.conflicts
                 .iter()
@@ -1266,7 +1311,7 @@ pub(crate) mod schedule_tests {
     #[test]
     fn every_vm_holder_in_update_declares_its_side_of_the_tick() {
         let mut app = headless_client();
-        let c = census(&mut app, Update);
+        let c = census(&mut app, Update, SyncPoints::Built);
         if !type_names_available(&c) {
             eprintln!(
                 "skipped: this build carries no type names (bevy/debug rides with dev, 1451)"
@@ -1536,14 +1581,14 @@ pub(crate) mod schedule_tests {
             }
         }
         let mut app = headless_client();
-        let update = census(&mut app, Update);
+        let update = census(&mut app, Update, SyncPoints::Built);
         if !type_names_available(&update) {
             eprintln!(
                 "skipped: this build carries no type names (bevy/debug rides with dev, 1451)"
             );
             return;
         }
-        let post = census(&mut app, PostUpdate);
+        let post = census(&mut app, PostUpdate, SyncPoints::Built);
         let by_name: HashMap<&str, &SystemInfo> = update
             .systems
             .values()

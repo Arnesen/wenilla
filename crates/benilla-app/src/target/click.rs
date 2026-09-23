@@ -910,7 +910,7 @@ pub(super) fn act_on_right_click(
                 .and_then(|item| {
                     let slot0 = u8::try_from(item.slot.saturating_sub(1)).unwrap_or(0);
                     self_store.and_then(|s| {
-                        crate::ui_items::slot_guid(&s.0, item.bag, slot0, &go_inputs.items)
+                        crate::ui_items::slot_guid(&s.0, item.bag, slot0, &go_inputs.objects)
                     })
                 });
             let Some(arm) = service_arm(npc_flags, service.quest.status(guid)) else {
@@ -1067,7 +1067,7 @@ pub(crate) fn resolve_go_action(
         inputs.spells.as_deref(),
         inputs.skill_lines.as_ref().map(|s| &s.catalog),
         me_store,
-        &inputs.items,
+        &inputs.objects,
         facts,
         &mut matched,
     );
@@ -1118,7 +1118,7 @@ pub(crate) fn resolve_go_action(
     };
     let Some((bag_index, slot, key_guid)) = crate::ui_items::find_item(
         &store.0,
-        &inputs.items,
+        &inputs.objects,
         key_entry,
         crate::ui_items::ItemSearch::default(),
     ) else {
@@ -2359,6 +2359,7 @@ mod tests {
         world.init_resource::<crate::creature_anim::GestureQueue>();
         world.init_resource::<crate::go_templates::GameObjectTemplates>();
         world.init_resource::<crate::items::Items>();
+        world.init_resource::<crate::net::GuidIndex>();
         world.init_resource::<crate::ui_action::PlayerActions>();
         world.init_resource::<crate::ui_action::LearnedAbilities>();
         world.init_resource::<crate::ui_quest::QuestGiver>();

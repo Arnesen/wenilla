@@ -64,7 +64,7 @@ use bevy::prelude::*;
 use benilla_ui::script::{ShapeshiftFormView, UiScript};
 
 use crate::items::Items;
-use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, Reputations, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, Reputations, SelfPlayer};
 use crate::spell::Cooldowns;
 use crate::spell::{cast_target, usable, CastCommit, CastLadder};
 use crate::target::Selection;
@@ -233,7 +233,9 @@ fn feed_shapeshift_bar(
     cooldowns: Res<Cooldowns>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     selection: Res<Selection>,
-    index: Res<GuidIndex>,
+    // The object lookup (2334) — the guid index the selection resolves through, plus the bag
+    // walk behind each form's reagent leg. One param, not two.
+    objects: Objects,
     units: Query<&ObjectStore, Without<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     reputations: Res<Reputations>,
@@ -260,8 +262,8 @@ fn feed_shapeshift_bar(
     // action feed's own ctx.
     let target_store = selection
         .guid
-        .and_then(|g| index.0.get(&g))
-        .and_then(|&e| units.get(e).ok());
+        .and_then(|g| objects.entity(g))
+        .and_then(|e| units.get(e).ok());
 
     // Admission + order (module docs).
     let mut rows: Vec<(u32, &benilla_formats::SpellDisplay)> = actions
@@ -286,7 +288,7 @@ fn feed_shapeshift_bar(
 
     // The bags walked once for every form's reagent leg (see `feed_action_state`).
     let carried = store
-        .map(|s| crate::ui_items::carried_counts(&s.0, &items))
+        .map(|s| crate::ui_items::carried_counts(&s.0, &objects))
         .unwrap_or_default();
     let fresh: Vec<ShapeshiftFormView> = rows
         .into_iter()
@@ -305,7 +307,7 @@ fn feed_shapeshift_bar(
                         carried: &carried,
                         spell_mods: &spell_mods,
                     };
-                    usable::spell_usable(id, d, &spells, &ctx, &items, &commands).0
+                    usable::spell_usable(id, d, &spells, &ctx, &objects, &items, &commands).0
                 });
             let texture = form_texture(d, active);
             let cooldown = cooldowns

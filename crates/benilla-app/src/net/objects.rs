@@ -98,6 +98,7 @@ pub(crate) struct Scene<'w, 's> {
     real: Res<'w, Time<Real>>,
     transforms: Query<'w, 's, &'static mut Transform>,
     stores: Query<'w, 's, &'static mut ObjectStore>,
+    countdowns: Query<'w, 's, &'static mut crate::items::Countdowns>,
     remote: Query<'w, 's, &'static mut RemoteMotion>,
     modes: Query<'w, 's, &'static mut UnitMoveModes>,
     riders: Query<'w, 's, &'static mut crate::transport::TransportRider>,
@@ -160,27 +161,70 @@ fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene) {
 /// (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`, answering our `CMSG_ITEM_QUERY_SINGLE` — the ask-once
 /// cache, decisions 0068/0072; a server miss records `None` so the entry is never re-asked), the
 /// item-lifetime countdown's only feed (decision 1933) and the temporary-enchant countdown's
-/// (decision 0920) — both parked on the item store, which every tooltip surface reads back.
+/// (decision 0920) — both written into the item's own [`crate::items::Countdowns`] (decision
+/// 2340), which every tooltip surface reads back.
 fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
     match ev {
         SessionEvent::ItemCreate {
             guid,
             container,
             fields,
-        } => item_create(guid, container, fields, &mut sc.items),
+        } => item_create(
+            guid,
+            container,
+            fields,
+            &mut sc.commands,
+            &mut sc.index,
+            &mut sc.stores,
+            &mut sc.field_changes,
+            &mut sc.items,
+        ),
         SessionEvent::ItemTemplate { entry, info } => {
             let info = info.map(|b| *b);
             debug!("net: item template {entry} → {info:?}");
             sc.items.insert_template(entry, info);
         }
+        // `0x5e4f30`'s two arms share the item lookup (`0x468460`, `TYPEMASK_ITEM`) — here the
+        // index plus the item's own cells — and part company on a miss.
         SessionEvent::ItemTime { item_guid, seconds } => {
-            sc.items.set_item_duration(item_guid, seconds)
+            // **An item we do not hold drops the update — no queue, no retry** (`0x1EA`'s arm
+            // returns on the miss). The login re-send (`Player::SendItemDurations`) goes out the
+            // moment the player is added to the map, so an item whose create has not landed yet
+            // shows no lifetime until the server's next update, as in the reference.
+            match sc.index.0.get(&item_guid).copied() {
+                Some(e) if sc.countdowns.contains(e) => {
+                    if let Ok(mut c) = sc.countdowns.get_mut(e) {
+                        c.set_lifetime(seconds);
+                    }
+                    debug!("item duration: item {item_guid:#x} → {seconds}s");
+                }
+                _ => debug!("item duration: {item_guid:#x} names an item we do not hold — dropped"),
+            }
         }
         SessionEvent::ItemEnchantTime {
             item_guid,
             slot,
             seconds,
-        } => sc.items.set_enchant_deadline(item_guid, slot, seconds),
+        } => match sc.index.0.get(&item_guid).copied() {
+            Some(e) if sc.countdowns.contains(e) => {
+                if let Ok(mut c) = sc.countdowns.get_mut(e) {
+                    if c.set_enchant(slot, seconds) {
+                        debug!("enchant timer: item {item_guid:#x} slot {slot} → {seconds}s");
+                    } else {
+                        debug!("enchant timer: item {item_guid:#x} slot {slot} is past the seventh — refused");
+                    }
+                }
+            }
+            // `0x1EB`'s miss arm: the record goes onto a resolving player's pending list
+            // (`0x5ebd40`) — the packet's own player guid first, the active player second — and
+            // only the active player's list is ever replayed (`0x5d8440` → `0x5ebde0`). vmangos
+            // names the owner, which is us (`SendItemEnchantTimeUpdate(GetObjectGuid(), ..)`,
+            // `Player.cpp:11807`/`:12001`), so both lookups land on the active player.
+            _ if sc.self_guid.0.is_some_and(|g| sc.index.0.contains_key(&g)) => {
+                sc.items.queue_enchant_time(item_guid, slot, seconds)
+            }
+            _ => debug!("enchant timer: {item_guid:#x} unheld and no player to queue on — dropped"),
+        },
         _ => {}
     }
 }
@@ -276,7 +320,6 @@ fn on_object_values(In(ev): In<SessionEvent>, mut sc: Scene) {
             &sc.index,
             &mut sc.stores,
             &mut sc.field_changes,
-            &mut sc.items,
         );
     }
 }
@@ -288,7 +331,7 @@ fn on_object_destroyed(In(ev): In<SessionEvent>, mut sc: Scene) {
         crate::death::net::forget_corpse(guid, &mut sc.death_net);
         let store = sc.index.0.get(&guid).and_then(|e| sc.stores.get(*e).ok());
         crate::ui_party::net::member_deactivated(guid, &mut sc.group, store, &sc.net);
-        object_destroyed(guid, &mut sc.commands, &mut sc.index, &mut sc.items);
+        object_destroyed(guid, &mut sc.commands, &mut sc.index);
     }
 }
 
@@ -642,11 +685,38 @@ fn object_create(
     }
 }
 
-/// An item or container entered our view (`SMSG_UPDATE_OBJECT` descriptor-only create) — no scene
-/// entity; the item store owns it.
-fn item_create(guid: u64, container: bool, fields: ObjectFields, items: &mut Items) {
+/// An item or container entered our view (`SMSG_UPDATE_OBJECT` descriptor-only create): an
+/// object like any other (decision 2334) — an entity in the index carrying its store, with no
+/// pose and no model. A re-create of a live guid overlays the snapshot through the values path,
+/// which notifies the field watchers like any delta (the scene create's own rule).
+fn item_create(
+    guid: u64,
+    container: bool,
+    fields: ObjectFields,
+    commands: &mut Commands,
+    index: &mut GuidIndex,
+    stores: &mut Query<&mut ObjectStore>,
+    edges: &mut MessageWriter<FieldChanged>,
+    items: &mut Items,
+) {
     debug!("net: item create {guid:#x} (container: {container})");
-    items.insert_object(guid, fields);
+    if let Some(&e) = index.0.get(&guid) {
+        merge_fields(commands, stores, edges, e, guid, fields);
+    } else {
+        let e = crate::items::spawn_item(commands, index, guid, fields, container);
+        // The item arrived: replay the enchant times queued for it while it was not held
+        // (`0x5ebde0`, decision 2340), each through the setter as of now.
+        let queued = items.take_enchant_times(guid);
+        if !queued.is_empty() {
+            let mut countdowns = crate::items::Countdowns::default();
+            for (slot, seconds) in queued {
+                if !countdowns.set_enchant(slot, seconds) {
+                    debug!("enchant timer: queued slot {slot} for {guid:#x} is past the seventh — refused");
+                }
+            }
+            commands.entity(e).insert(countdowns);
+        }
+    }
 }
 
 /// An existing object moved to a new authoritative pose (an `SMSG_UPDATE_OBJECT` movement block) —
@@ -789,9 +859,9 @@ fn unit_move(
     }
 }
 
-/// A descriptor delta (`SMSG_UPDATE_OBJECT` values block): merge into the object's store — a scene
-/// object's in place, an item's into the item store. An unknown guid —
-/// a `Values` with no create seen — is dropped, as before.
+/// A descriptor delta (`SMSG_UPDATE_OBJECT` values block): merge into the object's store in place
+/// — a unit's, a GameObject's, an item's (decision 2334), one path. An unknown guid — a `Values`
+/// with no create seen — is dropped, as before.
 fn object_values(
     guid: u64,
     fields: ObjectFields,
@@ -799,17 +869,14 @@ fn object_values(
     index: &GuidIndex,
     stores: &mut Query<&mut ObjectStore>,
     edges: &mut MessageWriter<FieldChanged>,
-    items: &mut Items,
 ) {
     if let Some(&e) = index.0.get(&guid) {
         merge_fields(commands, stores, edges, e, guid, fields);
-    } else if guid::is_item(guid) {
-        items.merge_object(guid, fields);
     }
 }
 
 /// The object ceased to exist (`SMSG_DESTROY_OBJECT` — corpse decay ahead of respawn, a despawn).
-fn object_destroyed(guid: u64, commands: &mut Commands, index: &mut GuidIndex, items: &mut Items) {
+fn object_destroyed(guid: u64, commands: &mut Commands, index: &mut GuidIndex) {
     // **The object goes away by the same fade its stream-out takes** — `DespawnFade`, not a raw
     // despawn (decision 2198). The reference's object-manager destroy hands the object's *model*
     // to the `SWModelFadeout` scheduler on the way out: the base OnDeactivate `0x6145e0` (vtable
@@ -836,6 +903,13 @@ fn object_destroyed(guid: u64, commands: &mut Commands, index: &mut GuidIndex, i
     // fade then follows the animation, where the deferred destroy runs
     // ([`crate::go_anim::release_despawn_pin`]).
     if let Some(e) = index.0.remove(&guid) {
+        // An item has no model to hand the fadeout, so it goes now (decision 2334) — what the
+        // scheduler does with a modelless entity anyway, one frame later — and its countdown
+        // cells go with it (2340).
+        if guid::is_item(guid) {
+            commands.entity(e).despawn();
+            return;
+        }
         commands.queue(move |world: &mut bevy::ecs::world::World| {
             if world
                 .get::<crate::go_anim::DespawnAnimAnnounced>(e)
@@ -849,8 +923,6 @@ fn object_destroyed(guid: u64, commands: &mut Commands, index: &mut GuidIndex, i
             }
         });
     }
-    // An item destroy (consumed, sold) never had a scene entity — clear the item store.
-    items.remove_object(guid);
 }
 
 /// Stream-out (out-of-range, the update-object `OutOfRange` block): the unit still exists, we just
@@ -1268,6 +1340,105 @@ fn speed_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An item's countdowns are its own cells** (decision 2340), end to end through the real
+    /// registration on the built client: `0x1EB` for an item not yet held waits on the active
+    /// player and is replayed into the item's cells when its create lands, `0x1EA` for one not
+    /// held is dropped for good, a refused slot writes nothing, and the destroy takes the cells
+    /// with the object. Without an active player to queue on, the enchant update is dropped too.
+    #[test]
+    fn item_countdowns_live_on_the_item_and_a_queued_enchant_waits_for_it() {
+        use crate::items::Countdowns;
+        const ME: u64 = 0x0000_0000_0000_0007;
+        const SWORD: u64 = 0x4000_0000_0000_0042;
+        const STONE: u64 = 0x4000_0000_0000_0043;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        let create = |guid| SessionEvent::ItemCreate {
+            guid,
+            container: false,
+            fields: ObjectFields::from_pairs(&[(3, 117)]),
+        };
+        let cells = |world: &World, guid: u64| -> Option<Countdowns> {
+            let e = *world.resource::<GuidIndex>().0.get(&guid)?;
+            world.get::<Countdowns>(e).cloned()
+        };
+
+        // No active player: the enchant update has nowhere to wait.
+        super::super::handlers::dispatch(
+            world,
+            vec![
+                SessionEvent::ItemEnchantTime {
+                    item_guid: STONE,
+                    slot: 1,
+                    seconds: 60,
+                },
+                create(STONE),
+            ],
+        );
+        assert_eq!(
+            cells(world, STONE),
+            Some(Countdowns::default()),
+            "dropped, not queued"
+        );
+
+        // With the active player resolving, it waits for the item — and the lifetime does not.
+        let me = world.spawn_empty().id();
+        world.resource_mut::<GuidIndex>().0.insert(ME, me);
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        super::super::handlers::dispatch(
+            world,
+            vec![
+                SessionEvent::ItemEnchantTime {
+                    item_guid: SWORD,
+                    slot: 1,
+                    seconds: 90,
+                },
+                SessionEvent::ItemTime {
+                    item_guid: SWORD,
+                    seconds: 600,
+                },
+            ],
+        );
+        assert_eq!(cells(world, SWORD), None, "nothing held yet");
+        super::super::handlers::dispatch(world, vec![create(SWORD)]);
+        let c = cells(world, SWORD).expect("the create spawned the item with its cells");
+        assert!(
+            c.enchant_remaining_ms(1)
+                .is_some_and(|ms| (89_000..=90_000).contains(&ms)),
+            "the queued enchant replayed as of the create"
+        );
+        assert_eq!(
+            c.lifetime_remaining_ms(),
+            None,
+            "`0x1EA` for an unheld item has no queue"
+        );
+
+        // Held now: both arms write the cells directly; a slot past the array writes nothing.
+        super::super::handlers::dispatch(
+            world,
+            vec![
+                SessionEvent::ItemTime {
+                    item_guid: SWORD,
+                    seconds: 600,
+                },
+                SessionEvent::ItemEnchantTime {
+                    item_guid: SWORD,
+                    slot: 9,
+                    seconds: 30,
+                },
+            ],
+        );
+        let c = cells(world, SWORD).unwrap();
+        assert!(c.lifetime_remaining_ms().is_some());
+        assert!(c.enchant_remaining_ms(1).is_some());
+
+        // The destroy takes the object and its cells with it.
+        let e = world.resource::<GuidIndex>().0[&SWORD];
+        super::super::handlers::dispatch(world, vec![SessionEvent::ObjectDestroyed(SWORD)]);
+        assert!(!world.resource::<GuidIndex>().0.contains_key(&SWORD));
+        assert!(world.get_entity(e).is_err(), "the cells died with the item");
+    }
 
     /// The observer movement-mode family's own harness (decision 1780): one indexed unit, and a
     /// `World` small enough that the only thing that can move it is the code under test.

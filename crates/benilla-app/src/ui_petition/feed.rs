@@ -34,9 +34,8 @@ use benilla_ui::script::{
 };
 use bevy::prelude::*;
 
-use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfGuid, SelfPlayer};
 use crate::ui_items::{find_item, ItemSearch};
 use crate::ui_session::{npc_switched, NpcSession};
 
@@ -223,7 +222,7 @@ pub(super) fn drain_petition(
     mut registrar: ResMut<GuildRegistrarState>,
     mut petition: ResMut<PetitionState>,
     names: Res<NameCache>,
-    items: Res<Items>,
+    objects: Objects,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     self_guid: Res<SelfGuid>,
     selection: Res<crate::target::Selection>,
@@ -256,7 +255,7 @@ pub(super) fn drain_petition(
                 let charter = self_q.iter().next().and_then(|store| {
                     find_item(
                         &store.0,
-                        &items,
+                        &objects,
                         benilla_protocol::messages::CHARTER_ITEM_ENTRY,
                         ItemSearch::default(),
                     )

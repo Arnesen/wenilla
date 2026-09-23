@@ -22,7 +22,7 @@
 //! | `*Charges` | a number (the enchantment triple's third dword) | the number **0**, never nil (`mov DWORD PTR [ebp-0x4],0x0; fild`, `0x4c985a`) |
 //!
 //! Milliseconds, not seconds: `ref-BuffFrame.lua:189`/`:212` divide by 1000 before displaying, and
-//! `0x5d9d00` is the same live remaining-time reader `benilla::items::Items::enchant_remaining_ms`
+//! `0x5d9d00` is the same live remaining-time reader `benilla::items::Countdowns::enchant_remaining_ms`
 //! mirrors (decision 0920). It is *remaining* time, recomputed per call against a deadline — never
 //! an absolute stamp.
 //!
@@ -56,8 +56,8 @@
 //! `SMSG_ITEM_ENCHANT_TIME_UPDATE` as `now_ms + seconds*1000`, and read back as
 //! `max(0, deadline − now)` (`0x5d9d00`: `0x5d9d15` clock, `0x5d9d2a sub`). **The wire carries
 //! seconds; this API returns milliseconds.** So a host stores a deadline and subtracts on read — it
-//! never ticks a countdown. `benilla::items::Items` does exactly that, and
-//! `Items::enchant_deadline_ms` is the read that keeps an *elapsed* timer as the number `0` rather
+//! never ticks a countdown. `benilla::items::Countdowns` does exactly that, and
+//! `Countdowns::enchant_deadline_ms` is the read that keeps an *elapsed* timer as the number `0` rather
 //! than collapsing it to "no timer", which is the distinction `BuffFrame_Enchant_OnUpdate` draws
 //! "0 s" from.
 //!

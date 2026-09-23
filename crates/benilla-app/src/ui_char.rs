@@ -51,7 +51,7 @@ use benilla_ui::strings::Arg;
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::pending_item_ops::PendingItemOps;
 use crate::portrait::PaperDollBooth;
 use crate::ui_items::{find_equip_slot, item_link};
@@ -99,12 +99,14 @@ struct CharFeedMemo {
     /// (decision 2140).
     last_bank_bag_guids: [u64; BANK_BAG_SLOT_COUNT],
     /// The gate's counter memories (1439) — the stores whose lazy resolves poison `is_changed`
-    /// for this feed (the equipment templates' ask-once, the enchant-name creator lookups).
-    items_objects: gate::Watch,
+    /// for this feed (the equipment templates' ask-once, the enchant-name creator lookups). The
+    /// item OBJECTS are not among them since 2334: an instance is an entity, so its edges arrive
+    /// on the ordinary `Changed`/removal watch ([`crate::items::ItemChanges`]).
     items_templates: gate::Watch,
     names_generation: gate::Watch,
-    /// `Items::countdown_display_epoch` — one step per displayable countdown change (the slot
-    /// views read second-floored countdowns), including the last elapse's collapsing push.
+    /// `ItemChanges::countdown_steps` — one step per displayable countdown change (the slot
+    /// views read second-floored countdowns), including the last elapse's collapsing push; a
+    /// landing is the item's own change tick (decision 2340).
     enchant_deadlines: gate::Watch,
     /// `PendingItemOps::epoch` — one step per change to the in-flight lock set. Watched BESIDE
     /// `!is_empty()` and not instead of it: `is_empty()` holds the gate open *while* an op is in
@@ -433,15 +435,21 @@ fn drain_skill_abandons(script: Option<NonSendMut<UiScript>>, commands: Res<NetC
 
 /// Resolve one equipped slot's item template entry (`None` = empty slot, or the item object /
 /// template hasn't streamed yet).
-fn slot_entry(store: &ObjectStore, items: &Items, slot0: u8) -> Option<u32> {
+fn slot_entry(store: &ObjectStore, objects: &Objects, slot0: u8) -> Option<u32> {
     let guid = store.0.player_inv_slot(slot0)?;
-    items.object(guid)?.object_entry()
+    objects.object(guid)?.object_entry()
 }
 
 /// The equipped item's weapon-skill line id: the vmangos `Item.cpp` subclass table for a class-2
 /// item, unarmed (162) for an empty hand or a non-weapon / unmapped subclass.
-fn weapon_skill_id(store: &ObjectStore, items: &Items, commands: &NetCommands, slot0: u8) -> u32 {
-    let Some(entry) = slot_entry(store, items, slot0) else {
+fn weapon_skill_id(
+    store: &ObjectStore,
+    objects: &Objects,
+    items: &Items,
+    commands: &NetCommands,
+    slot0: u8,
+) -> u32 {
+    let Some(entry) = slot_entry(store, objects, slot0) else {
         return SKILL_UNARMED;
     };
     let Some(t) = items.template(entry, 0, commands) else {
@@ -584,20 +592,25 @@ pub(crate) fn unit_combat_stats(store: &ObjectStore) -> UnitCombatStats {
 
 /// The player's snapshot: [`unit_combat_stats`] plus the half only *we* have — the two values that
 /// need the equipped items' templates, and the three `PLAYER_SKILL_INFO` pairs.
-fn combat_stats(store: &ObjectStore, items: &Items, commands: &NetCommands) -> UnitCombatStats {
+fn combat_stats(
+    store: &ObjectStore,
+    objects: &Objects,
+    items: &Items,
+    commands: &NetCommands,
+) -> UnitCombatStats {
     // The offhand-speed gate is an offhand *weapon* (a shield doesn't swing); the wand check is
     // the ranged item's subclass. Both read the equipped item's template (ask-once in flight →
     // false this frame, refined when it lands).
-    let has_offhand = slot_entry(store, items, SLOT_OFF_HAND)
+    let has_offhand = slot_entry(store, objects, SLOT_OFF_HAND)
         .and_then(|e| items.template(e, 0, commands))
         .is_some_and(|t| t.class == ITEM_CLASS_WEAPON);
-    let has_wand = slot_entry(store, items, SLOT_RANGED)
+    let has_wand = slot_entry(store, objects, SLOT_RANGED)
         .and_then(|e| items.template(e, 0, commands))
         .is_some_and(|t| t.class == ITEM_CLASS_WEAPON && t.subclass == SUBCLASS_WAND);
 
-    let main_skill = weapon_skill_id(store, items, commands, SLOT_MAIN_HAND);
-    let offhand_skill = weapon_skill_id(store, items, commands, SLOT_OFF_HAND);
-    let ranged_skill_id = slot_entry(store, items, SLOT_RANGED)
+    let main_skill = weapon_skill_id(store, objects, items, commands, SLOT_MAIN_HAND);
+    let offhand_skill = weapon_skill_id(store, objects, items, commands, SLOT_OFF_HAND);
+    let ranged_skill_id = slot_entry(store, objects, SLOT_RANGED)
         .and_then(|e| items.template(e, 0, commands))
         .filter(|t| t.class == ITEM_CLASS_WEAPON)
         .and_then(|t| weapon_subclass_skill(t.subclass));
@@ -638,6 +651,7 @@ fn combat_stats(store: &ObjectStore, items: &Items, commands: &NetCommands) -> U
 /// 64..=69). Everything past the guid — template, enchants, durability, the pending lock — is
 /// identical for both, which is the whole reason there is one function here and not two.
 fn slot_view(
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
@@ -653,13 +667,12 @@ fn slot_view(
     guid: u64,
     live_id: u32,
 ) -> Option<InvSlotView> {
-    // The temp-enchant countdowns, read before the object borrow (both live on `Items`) — the bag
-    // feed's twin.
-    let enchant_ms: [Option<u64>; 7] =
-        std::array::from_fn(|s| items.enchant_remaining_display_ms(guid, s as u32));
-    // The item's own expiry countdown — the bag feed's twin (decision 1933).
-    let duration_ms = items.duration_remaining_display_ms(guid);
-    let obj = items.object(guid)?;
+    // The item's own countdown cells — the bag feed's twin (decisions 1933, 2340).
+    let countdowns = objects.countdowns(guid);
+    let enchant_ms: [Option<u64>; crate::items::ENCHANT_SLOTS] =
+        std::array::from_fn(|s| countdowns.and_then(|c| c.enchant_remaining_display_ms(s as u32)));
+    let duration_ms = countdowns.and_then(|c| c.lifetime_remaining_display_ms());
+    let obj = objects.object(guid)?;
     let entry = obj.object_entry()?;
     let count = obj.item_stack_count().unwrap_or(1).max(1);
     // `OBJECT_FIELD_TYPE & TYPEMASK_CONTAINER` — the fork `GetInventoryItemCount` takes first
@@ -739,7 +752,7 @@ fn slot_view(
         if counts_contents {
             content_guids
                 .iter()
-                .filter_map(|&g| items.object(g))
+                .filter_map(|&g| objects.object(g))
                 .map(|o| o.item_stack_count().unwrap_or(1).max(1))
                 .sum()
         } else {
@@ -772,10 +785,10 @@ fn slot_view(
 /// Total carried ammo matching `ammo_id`: the backpack's 16 slots + the four equipped bags'
 /// contents (`GetInventoryItemCount("player", ammo)` counts what you can actually shoot — bank
 /// and buyback never join).
-fn ammo_count(store: &ObjectStore, items: &Items, ammo_id: u32) -> u32 {
+fn ammo_count(store: &ObjectStore, objects: &Objects, ammo_id: u32) -> u32 {
     let mut n = 0;
     let mut add = |guid: Option<u64>| {
-        if let Some(o) = guid.and_then(|g| items.object(g)) {
+        if let Some(o) = guid.and_then(|g| objects.object(g)) {
             if o.object_entry() == Some(ammo_id) {
                 n += o.item_stack_count().unwrap_or(1);
             }
@@ -785,10 +798,10 @@ fn ammo_count(store: &ObjectStore, items: &Items, ammo_id: u32) -> u32 {
         add(store.0.player_pack_slot(i));
     }
     for b in 19..23u8 {
-        if let Some(bag) = store.0.player_inv_slot(b).and_then(|g| items.object(g)) {
+        if let Some(bag) = store.0.player_inv_slot(b).and_then(|g| objects.object(g)) {
             let slots = bag.container_num_slots().unwrap_or(0).min(36) as u8;
             for s in 0..slots {
-                if let Some(o) = bag.container_slot(s).and_then(|g| items.object(g)) {
+                if let Some(o) = bag.container_slot(s).and_then(|g| objects.object(g)) {
                     if o.object_entry() == Some(ammo_id) {
                         n += o.item_stack_count().unwrap_or(1);
                     }
@@ -805,6 +818,7 @@ fn ammo_count(store: &ObjectStore, items: &Items, ammo_id: u32) -> u32 {
 /// 0-based inv-slot array.
 fn inventory_slots(
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
@@ -844,7 +858,7 @@ fn inventory_slots(
             already_bound: false,
             item_id: ammo_id,
             icon,
-            count: ammo_count(store, items, ammo_id),
+            count: ammo_count(store, objects, ammo_id),
             // Ammo is not a container — slot 0 is `GetInventoryItemCount`'s own `PLAYER_AMMO_ID`
             // leg, which never reaches the TYPEMASK fork.
             contents_count: None,
@@ -875,6 +889,7 @@ fn inventory_slots(
             continue;
         };
         inv[live as usize] = slot_view(
+            objects,
             items,
             icons,
             rolls,
@@ -900,6 +915,7 @@ fn inventory_slots(
 /// doll snapshot, rather than the `BankState` the bank window pushes.
 fn bank_bag_slots(
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
@@ -914,6 +930,7 @@ fn bank_bag_slots(
             continue;
         };
         *bag = slot_view(
+            objects,
             items,
             icons,
             rolls,
@@ -1044,8 +1061,9 @@ pub(crate) fn feed_char(
     // (1803). Absent client data reads every class as an ordinary ranged wielder.
     classes: Option<Res<crate::chr_classes::ChrClassTable>>,
     script: Option<NonSendMut<UiScript>>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
+    // The inventory read (2334): the self store, its change tick, the object lookup and the item
+    // entities' change watch.
+    mut inv: crate::items::Inventory,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     // `SpellItemEnchantment`'s name column — the equipped tooltip's enchant lines (decision 0915).
@@ -1078,7 +1096,7 @@ pub(crate) fn feed_char(
     // snapshots below re-push and their events re-fire for it.
     let (memo, vm_reset) = feed.vm.get_reset(&script);
 
-    let Some(store) = self_q.iter().next() else {
+    let Some(store) = inv.self_store.iter().next() else {
         // The self store's absence is NO DATA, never "the player has nothing equipped". The one
         // window this branch runs with a previously-fed VM is the logout despawn frames —
         // `SMSG_LOGOUT_COMPLETE` despawns the entity a full Update before `OnExit(InWorld)` runs
@@ -1099,16 +1117,18 @@ pub(crate) fn feed_char(
     // `UNIT_INVENTORY_CHANGED` on every tick. The reference recomputes it per call for exactly
     // the same reason (`0x5d9d00`). Hoisted above the gate (it used to sit last): the push is
     // order-free of the two snapshots, and a handler they fire reads the fresher value this way.
+    // Bound before the snapshot build below shadows `inv` with the pushed slot array.
+    let objects = &inv.objects;
     script.set_weapon_enchants(
-        weapon_enchant(store, &items, EQUIPMENT_SLOT_MAINHAND),
-        weapon_enchant(store, &items, EQUIPMENT_SLOT_OFFHAND),
+        weapon_enchant(store, objects, EQUIPMENT_SLOT_MAINHAND),
+        weapon_enchant(store, objects, EQUIPMENT_SLOT_OFFHAND),
     );
 
     // The gate (1439), around the two snapshot builds only: the self descriptor (equipment
     // slots, every stat field), the item stores behind the equipped templates and enchant
     // names, the two catalogs, and the pending-op locks (held open while in flight; the
     // resolving frame's own field update moves the object epoch).
-    let objects_moved = memo.items_objects.moved(items.object_epoch());
+    let objects_moved = inv.changes.moved();
     let templates_moved = memo.items_templates.moved(items.template_epoch());
     let names_moved = memo.names_generation.moved(names.generation());
     // The DISPLAY epoch, not a per-frame hold-open: the snapshot reads second-floored countdowns
@@ -1116,10 +1136,8 @@ pub(crate) fn feed_char(
     // second per ticking enchant, plus one final step at the elapse. Holding the gate open on
     // `live_enchant_deadlines() > 0` (the first 1439 shape) rebuilt both snapshots and fired
     // `UNIT_INVENTORY_CHANGED` at frame rate for the whole life of a poison.
-    let deadlines_moved = memo
-        .enchant_deadlines
-        .moved(items.countdown_display_epoch());
-    let self_changed = !changed_self.is_empty();
+    let deadlines_moved = memo.enchant_deadlines.moved(inv.changes.countdown_steps());
+    let self_changed = !inv.self_changed.is_empty();
     // `is_added` for the icon catalog: the feeds read only its load-once icon column;
     // its model-cache half churns every frame (the containers gate's own note).
     let icons_added = icons.as_ref().is_some_and(|r| r.is_added());
@@ -1159,7 +1177,7 @@ pub(crate) fn feed_char(
         return;
     }
 
-    let stats = combat_stats(store, &items, &commands);
+    let stats = combat_stats(store, objects, &items, &commands);
     if memo.last_stats.as_ref() != Some(&stats) {
         gate.audit("feed_char", "the combat-stats snapshot");
         // PUSH before firing: event dispatch runs the Lua handlers synchronously, so the snapshot
@@ -1173,6 +1191,7 @@ pub(crate) fn feed_char(
 
     let inv = inventory_slots(
         store,
+        objects,
         &items,
         icons.as_deref(),
         crate::items::RollCatalogs {
@@ -1187,6 +1206,7 @@ pub(crate) fn feed_char(
     );
     let bank_bags = bank_bag_slots(
         store,
+        objects,
         &items,
         icons.as_deref(),
         crate::items::RollCatalogs {
@@ -1301,14 +1321,15 @@ const TEMP_ENCHANTMENT_SLOT: u8 = 1;
 /// else, and `item_enchant` already answers `None` for a zero id.
 fn weapon_enchant(
     store: &ObjectStore,
-    items: &Items,
+    objects: &Objects,
     slot0: u8,
 ) -> Option<benilla_ui::script::WeaponEnchant> {
     let guid = store.0.player_inv_slot(slot0)?;
-    // Before the object borrow — the deadlines and the objects both live on `Items`. The
-    // *deadline* read, not the tooltip's: an elapsed timer must answer 0, not "no timer".
-    let remaining_ms = items.enchant_deadline_ms(guid, u32::from(TEMP_ENCHANTMENT_SLOT));
-    let obj = items.object(guid)?;
+    // The *deadline* read, not the tooltip's: an elapsed timer must answer 0, not "no timer".
+    let remaining_ms = objects
+        .countdowns(guid)
+        .and_then(|c| c.enchant_deadline_ms(u32::from(TEMP_ENCHANTMENT_SLOT)));
+    let obj = objects.object(guid)?;
     obj.item_enchant(TEMP_ENCHANTMENT_SLOT)?;
     Some(benilla_ui::script::WeaponEnchant {
         remaining_ms,
@@ -1383,6 +1404,20 @@ mod tests {
     const BAG_ENTRY: u32 = 4500;
     const BAG: u64 = 0x4000_0000_0000_0abc;
 
+    /// Re-stream one live item object's fields — the wire's values delta, which is what moves
+    /// the item entity's own change tick (2334); the create-time spawn is
+    /// [`crate::items::test_spawn_item`].
+    fn restream(app: &mut App, guid: u64, fields: ObjectFields) {
+        let entity = app
+            .world()
+            .resource::<crate::net::GuidIndex>()
+            .0
+            .get(&guid)
+            .copied()
+            .expect("the item was streamed");
+        *app.world_mut().get_mut::<ObjectStore>(entity).unwrap() = ObjectStore(fields);
+    }
+
     /// A world with the player carrying `bag` (or nothing) in the FIRST bank bag slot, and a
     /// recorder frame registered for the two events the reference's bank bag buttons repaint on.
     fn world_with_bank_bag(bag: Option<u64>) -> App {
@@ -1392,6 +1427,7 @@ mod tests {
             .init_resource::<PaperDollBooth>()
             .init_resource::<PendingItemOps>()
             .init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
             .init_resource::<crate::names::NameCache>()
             .insert_resource(NetCommands(tx));
         let fields = match bag {
@@ -1403,9 +1439,14 @@ mod tests {
         };
         app.world_mut().spawn((SelfPlayer, ObjectStore(fields)));
         if let Some(g) = bag {
-            let mut items = app.world_mut().resource_mut::<Items>();
-            items.insert_object(g, ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, BAG_ENTRY)]));
-            items.insert_template(
+            // The bag is an object in the one index (2334), its template still on `Items`.
+            crate::items::test_spawn_item(
+                app.world_mut(),
+                g,
+                ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, BAG_ENTRY)]),
+                true,
+            );
+            app.world_mut().resource_mut::<Items>().insert_template(
                 BAG_ENTRY,
                 Some(crate::items::test_template("Traveler's Backpack")),
             );
@@ -1467,8 +1508,10 @@ mod tests {
         app.world_mut().run_system_once(feed_char).unwrap();
         assert!(seen(&mut app).contains(&"PLAYERBANKSLOTS_CHANGED nil".to_string()));
 
-        // The SAME bag guid, restacked. Only the item object moved.
-        app.world_mut().resource_mut::<Items>().insert_object(
+        // The SAME bag guid, restacked. Only the item object moved — a values update on the
+        // live item entity, which is what the wire's own delta is (2334).
+        restream(
+            &mut app,
             BAG,
             ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, BAG_ENTRY), (F_ITEM_STACK_COUNT, 3)]),
         );
@@ -1504,9 +1547,11 @@ mod tests {
             ]));
         };
         set_slots(&mut app, BAG, BAG2);
-        app.world_mut().resource_mut::<Items>().insert_object(
+        crate::items::test_spawn_item(
+            app.world_mut(),
             BAG2,
             ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, BAG_ENTRY)]),
+            true,
         );
         app.world_mut().run_system_once(feed_char).unwrap();
         let _ = seen(&mut app);

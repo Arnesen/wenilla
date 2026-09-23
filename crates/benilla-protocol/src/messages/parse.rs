@@ -14,7 +14,7 @@ use super::{
     action_bar, area_trigger, attack, auction, bank, battlefield, binder, broadcast, channel, chat,
     combat_log, death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot,
     mail, meeting_stone, mirror_timer, monster_move, movement, opcode, page_text, pet, petition,
-    progression, pvp, quest, social, spellbook, spells, stable, summon, tabard, taxi, trade,
+    pose, progression, pvp, quest, social, spellbook, spells, stable, summon, tabard, taxi, trade,
     trainer, tutorial, update_object, vendor, world_state, AttackSwingError, Character,
     CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind, SplineMode,
 };
@@ -1322,6 +1322,16 @@ fn parse_server_body(
             let guid = gameobject::read_gameobject_despawn_anim(&mut r)?;
             ServerPacket::GameObjectDespawnAnim { guid }
         }
+        // Decision 2339's three — the ones vmangos sends that the reference answers.
+        opcode::SMSG_OPEN_CONTAINER => ServerPacket::OpenContainer {
+            item: items::read_open_container(&mut r)?,
+        },
+        opcode::SMSG_INSPECT => ServerPacket::Inspect {
+            guid: items::read_inspect(&mut r)?,
+        },
+        opcode::SMSG_STANDSTATE_UPDATE => ServerPacket::StandStateUpdate {
+            state: pose::read_stand_state_update(&mut r)?,
+        },
         // Both fishing verdicts are empty-bodied (the opcode IS the message).
         opcode::SMSG_FISH_NOT_HOOKED => ServerPacket::FishNotHooked,
         opcode::SMSG_FISH_ESCAPED => ServerPacket::FishEscaped,

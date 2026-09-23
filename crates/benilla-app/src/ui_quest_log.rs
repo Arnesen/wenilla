@@ -376,6 +376,7 @@ fn build_objectives(
     template: &QuestTemplate,
     log_slot: &QuestLogSlot,
     store: &ObjectFields,
+    objects: &crate::net::Objects,
     items: &Items,
     names: &NameCache,
     commands: &NetCommands,
@@ -408,7 +409,7 @@ fn build_objectives(
         let item_name = items
             .template(obj.item_id, 0, commands)
             .map(|t| t.name.clone());
-        let bag_count = count_of(store, items, obj.item_id, InventoryScope::QUEST_ITEMS);
+        let bag_count = count_of(store, objects, obj.item_id, InventoryScope::QUEST_ITEMS);
         if let Some(line) = item_line(
             obj,
             template.src_item_id,
@@ -582,6 +583,8 @@ fn feed_quest_log(
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     mut quest_log: ResMut<QuestLog>,
     names: Res<NameCache>,
+    // The bag walk behind an item objective's carried count (2334).
+    objects: crate::net::Objects,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
@@ -775,7 +778,16 @@ fn feed_quest_log(
                         // button we wrongly enabled would push, and the party would get a detail panel
                         // for a quest the server then refuses (decision 1733).
                         t.flags & quest_flags::SHARABLE != 0,
-                        build_objectives(t, &r.log_slot, &store.0, &items, &names, &commands, &get),
+                        build_objectives(
+                            t,
+                            &r.log_slot,
+                            &store.0,
+                            &objects,
+                            &items,
+                            &names,
+                            &commands,
+                            &get,
+                        ),
                         // Every row, not just the selection (decision 2247) — the detail bindings
                         // resolve the live selection against these at call time, the way the
                         // reference peeks its quest cache inside the call.
@@ -1454,6 +1466,9 @@ mod tests {
         };
         let store = ObjectFields::default(); // empty bags — the item objective reads 0/5
         let items = Items::default();
+        // Empty bags — every item objective here reads 0 owned (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let names = NameCache::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
@@ -1462,6 +1477,7 @@ mod tests {
             &template,
             &log_slot,
             &store,
+            &objects,
             &items,
             &names,
             &commands,
@@ -1504,6 +1520,9 @@ mod tests {
         };
         let store = ObjectFields::default();
         let items = Items::default();
+        // Empty bags — every item objective here reads 0 owned (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let names = NameCache::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
@@ -1512,6 +1531,7 @@ mod tests {
             &template,
             &log_slot,
             &store,
+            &objects,
             &items,
             &names,
             &commands,
@@ -1546,6 +1566,9 @@ mod tests {
         };
         let store = ObjectFields::default();
         let items = Items::default();
+        // Empty bags — every item objective here reads 0 owned (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let names = NameCache::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
@@ -1554,6 +1577,7 @@ mod tests {
             &template,
             &log_slot,
             &store,
+            &objects,
             &items,
             &names,
             &commands,
@@ -1585,6 +1609,9 @@ mod tests {
         };
         let store = ObjectFields::default();
         let items = Items::default();
+        // Empty bags — every item objective here reads 0 owned (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let names = NameCache::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
@@ -1593,6 +1620,7 @@ mod tests {
             &template,
             &log_slot,
             &store,
+            &objects,
             &items,
             &names,
             &commands,
@@ -1620,6 +1648,9 @@ mod tests {
         };
         let store = ObjectFields::default();
         let items = Items::default();
+        // Empty bags — every item objective here reads 0 owned (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let names = NameCache::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
@@ -1628,6 +1659,7 @@ mod tests {
             &template,
             &log_slot,
             &store,
+            &objects,
             &items,
             &names,
             &commands,

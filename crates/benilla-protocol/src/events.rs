@@ -643,6 +643,14 @@ pub enum SessionEvent {
     /// hatch on this packet; a totem's death and a DynamicObject's expiry send it too, and those
     /// carry nothing armable, so the consumer falls back to the ordinary instant destroy.
     GameObjectDespawnAnim { guid: u64 },
+    /// The server opened a container for us (`SMSG_OPEN_CONTAINER`, one `u64` item guid) — a bag
+    /// was equipped into a bag slot. The reference fires `BAG_OPEN(containerId)`: 0 for our own
+    /// guid (the backpack), 1..10 for the slot in its bag cache, nothing for a miss (2339).
+    OpenContainer { item: u64 },
+    /// The server changed OUR stand state (`SMSG_STANDSTATE_UPDATE`, one `u8`): the eat/drink sit,
+    /// the stand on damage. Applied to the local player ungated, through the same setter the
+    /// volunteered change uses — the reference's `0x603e50` → `0x6127b0` (2339).
+    StandStateUpdate { state: u8 },
     /// The fishing channel ended with nothing hooked (`SMSG_FISH_NOT_HOOKED`, empty body):
     /// the red `ERR_FISH_NOT_HOOKED` toast (decision 1086).
     FishNotHooked,

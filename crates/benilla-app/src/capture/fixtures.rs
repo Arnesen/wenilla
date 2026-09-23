@@ -42,7 +42,9 @@ pub(super) fn seed_ui_fixture(
     mut quest: ResMut<crate::ui_quest::QuestGiver>,
     mut quest_log: ResMut<crate::ui_quest_log::QuestLog>,
     mut loot: ResMut<crate::ui_loot::LootState>,
-    mut items: ResMut<crate::items::Items>,
+    // The item store and the object index as one param (the 16-SystemParam ceiling): the item
+    // objects are entities in the index (2334), and the fixture spawns them like the wire does.
+    store: (ResMut<crate::items::Items>, ResMut<crate::net::GuidIndex>),
     mut names: ResMut<crate::names::NameCache>,
     icons: Option<Res<crate::entities::ItemDisplays>>,
     mut script: Option<NonSendMut<benilla_ui::script::UiScript>>,
@@ -57,6 +59,7 @@ pub(super) fn seed_ui_fixture(
         ResMut<crate::loading_screen::LoadingScreen>,
     ),
 ) {
+    let (mut items, mut index) = store;
     // A glue-screen capture has no world scenario, and no glue screen opens a UI fixture.
     let Some(scenario) = ctx.scenario else {
         return;
@@ -326,7 +329,7 @@ pub(super) fn seed_ui_fixture(
                 (G_STONE, 94_004, 1, "Hearthstone", DISP_STONE, 1),
                 (G_BANKBAG, 94_005, 1, "Small Brown Pouch", DISP_STONE, 1),
             ] {
-                items.insert_object(guid, obj(entry, stack));
+                crate::items::spawn_item(&mut commands, &mut index, guid, obj(entry, stack), false);
                 let mut t = template(name, quality);
                 t.display_info_id = disp;
                 if guid == G_BANKBAG {
@@ -338,7 +341,9 @@ pub(super) fn seed_ui_fixture(
             // The held bank bag is a real CONTAINER object (its contents stream on the bag item —
             // decision 0604): 6 slots, one occupied, so the POPOUT window (container 5) is in the
             // shot too — its snug-fit stitch, lit bag button, and own-icon portrait.
-            items.insert_object(
+            crate::items::spawn_item(
+                &mut commands,
+                &mut index,
                 G_BANKBAG,
                 ObjectFields::from_pairs(&[
                     (3, 94_005),
@@ -346,6 +351,7 @@ pub(super) fn seed_ui_fixture(
                     (48, 6),              // CONTAINER_NUM_SLOTS
                     (50, G_JERKY as u32), // CONTAINER_SLOT_1
                 ]),
+                true,
             );
             // The self player: 4 occupied vault slots, the bank bag, TWO bought bag slots
             // (`PLAYER_BYTES_2` byte 2 — bag button 1 owned, 2 bought-but-empty, 3–6 the red
@@ -911,10 +917,10 @@ pub(super) fn seed_ui_fixture(
             let obj = |entry: u32, stack: u32| {
                 ObjectFields::from_pairs(&[(3, entry), (14, stack)]) // OBJECT_ENTRY, STACK_COUNT
             };
-            items.insert_object(G_CHEST, obj(93_010, 1));
-            items.insert_object(G_SWORD, obj(93_011, 1));
-            items.insert_object(G_BOW, obj(93_013, 1));
-            items.insert_object(G_ARROWS, obj(93_012, 200));
+            crate::items::spawn_item(&mut commands, &mut index, G_CHEST, obj(93_010, 1), false);
+            crate::items::spawn_item(&mut commands, &mut index, G_SWORD, obj(93_011, 1), false);
+            crate::items::spawn_item(&mut commands, &mut index, G_BOW, obj(93_013, 1), false);
+            crate::items::spawn_item(&mut commands, &mut index, G_ARROWS, obj(93_012, 200), false);
             let mut chest = template("Tarnished Chainmail", 1);
             chest.display_info_id = DISP_SHIELD;
             chest.inventory_type = 5;
@@ -1171,7 +1177,13 @@ pub(super) fn seed_ui_fixture(
                 crate::net::Guid(PLAYER_GUID),
             ));
             // The equipped main-hand weapon — the auto-attack borrows its icon (decision 0230).
-            items.insert_object(G_SWORD, ObjectFields::from_pairs(&[(3, 93_011), (14, 1)]));
+            crate::items::spawn_item(
+                &mut commands,
+                &mut index,
+                G_SWORD,
+                ObjectFields::from_pairs(&[(3, 93_011), (14, 1)]),
+                false,
+            );
             let mut sword = template("Militia Shortsword", 2);
             sword.display_info_id = DISP_SWORD;
             items.insert_template(93_011, Some(sword));

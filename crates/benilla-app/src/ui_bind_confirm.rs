@@ -59,6 +59,7 @@ use bevy::prelude::*;
 use benilla_ui::script::{ScriptValue, UiScript};
 
 use crate::items::{Enchants, Items};
+use crate::net::Objects;
 
 /// `item_template.bonding` — the values the three arms compare against (vmangos
 /// `ItemPrototype.h`'s `ItemBondingType`; the client reads the same field at `+0x194`).
@@ -169,17 +170,18 @@ impl BindGate<'_> {
     pub(crate) fn equip_binds(
         &self,
         script: &UiScript,
+        objects: &Objects,
         items: &Items,
         commands: &crate::net::NetCommands,
         item_guid: u64,
     ) -> bool {
-        let Some(fields) = items.object(item_guid) else {
+        let Some(fields) = objects.object(item_guid) else {
             return false;
         };
         if crate::items::already_bound(fields, self.enchants.as_deref()) {
             return false;
         }
-        let Some(entry) = items.object(item_guid).and_then(|o| o.object_entry()) else {
+        let Some(entry) = objects.object(item_guid).and_then(|o| o.object_entry()) else {
             return false;
         };
         let Some(t) = items.template(entry, item_guid, commands) else {
@@ -198,17 +200,18 @@ impl BindGate<'_> {
     /// the fire site is reached the item has already passed it.
     pub(crate) fn use_binds(
         &self,
+        objects: &Objects,
         items: &Items,
         commands: &crate::net::NetCommands,
         item_guid: u64,
     ) -> bool {
-        let Some(fields) = items.object(item_guid) else {
+        let Some(fields) = objects.object(item_guid) else {
             return false;
         };
         if crate::items::already_bound(fields, self.enchants.as_deref()) {
             return false;
         }
-        let Some(entry) = items.object(item_guid).and_then(|o| o.object_entry()) else {
+        let Some(entry) = objects.object(item_guid).and_then(|o| o.object_entry()) else {
             return false;
         };
         items

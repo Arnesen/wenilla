@@ -110,10 +110,15 @@ pub(super) fn feed_actions(
     mut cast_errors: ResMut<CastErrors>,
     mut mount_errors: ResMut<MountErrors>,
     mut pet_tame_failures: ResMut<PetTameFailures>,
-    mut ui_error_keys: ResMut<UiErrorKeys>,
-    mut ui_error_texts: ResMut<UiErrorTexts>,
+    // The two client-local refusal queues as one param (the 16-SystemParam ceiling this
+    // signature already sits at): the by-KEY route (`DisplayError`) and the already-resolved
+    // TEXT route, both drained onto the same red line below.
+    ui_errors: (ResMut<UiErrorKeys>, ResMut<UiErrorTexts>),
     spells: Option<Res<Spells>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    // The inventory read (2334): every count, reagent and totem question below walks the bags
+    // through it, and the weapon-icon arms resolve the equipped instance here.
+    objects: crate::net::Objects,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
@@ -127,6 +132,7 @@ pub(super) fn feed_actions(
     let Some(mut script) = script else {
         return;
     };
+    let (mut ui_error_keys, mut ui_error_texts) = ui_errors;
     let memory = memory.get(&script);
 
     // Rejected casts surface as the client's red error line (UI_ERROR_MESSAGE → the errors
@@ -230,12 +236,12 @@ pub(super) fn feed_actions(
                     let d = d?;
                     let failing = if reason == 0x78 {
                         self_store
-                            .and_then(|s| first_missing_totem(d, s, &items))
+                            .and_then(|s| first_missing_totem(d, s, &objects))
                             // No store to test against (a race): name the first tool at all.
                             .or_else(|| d.totems.iter().copied().find(|&t| t != 0))
                     } else {
                         self_store
-                            .and_then(|s| first_short_reagent(d, s, &items))
+                            .and_then(|s| first_short_reagent(d, s, &objects))
                             .or_else(|| d.reagents.iter().map(|&(id, _)| id).find(|&id| id != 0))
                     }?;
                     let cached = items
@@ -490,6 +496,7 @@ pub(super) fn feed_actions(
                             d,
                             sp,
                             store,
+                            &objects,
                             &items,
                             icons.as_deref(),
                             &commands,
@@ -512,7 +519,7 @@ pub(super) fn feed_actions(
                         .and_then(|t| icons.as_ref()?.catalog.get(t.display_info_id)?.icon.clone())
                         .unwrap_or_else(|| MISSING_ITEM_ICON.to_string());
                     let count = store
-                        .map(|s| count_of(&s.0, &items, button.action, InventoryScope::CARRIED))
+                        .map(|s| count_of(&s.0, &objects, button.action, InventoryScope::CARRIED))
                         .unwrap_or(0);
                     // The Count fontstring's gate — `IsConsumableAction 0x4e5250`: ammo/thrown by
                     // InventoryType, or an ON_USE block with NEGATIVE charges
@@ -593,7 +600,7 @@ pub(super) fn feed_actions(
         for (&action, slot) in memory.pushed.iter_mut() {
             let changed = match slot.kind {
                 ACTION_KIND_ITEM => {
-                    let fresh = count_of(&store.0, &items, slot.action, InventoryScope::CARRIED);
+                    let fresh = count_of(&store.0, &objects, slot.action, InventoryScope::CARRIED);
                     let changed = fresh != slot.count;
                     if changed {
                         slot.count = fresh;
@@ -618,6 +625,7 @@ pub(super) fn feed_actions(
                                 d,
                                 sp,
                                 Some(store),
+                                &objects,
                                 &items,
                                 icons.as_deref(),
                                 &commands,
@@ -668,11 +676,12 @@ fn spell_action_icon(
     d: &benilla_formats::SpellDisplay,
     spells: &super::Spells,
     store: Option<&crate::net::ObjectStore>,
+    objects: &crate::net::Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<String> {
-    auto_attack_icon(d, store, &spells.forms, items, icons, commands)
+    auto_attack_icon(d, store, &spells.forms, objects, items, icons, commands)
         .or_else(|| {
             store
                 .filter(|s| super::toggle::active_action_toggle(spell_id, d, s))

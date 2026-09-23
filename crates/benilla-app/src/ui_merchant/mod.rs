@@ -28,7 +28,7 @@ use benilla_ui::script::{ItemStatsHead, MerchantItem, MerchantState, ScriptValue
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::ui_items::{item_link, slot_guid, wire_pos};
 use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
@@ -278,12 +278,13 @@ fn buyback_order(store: &benilla_protocol::ObjectFields) -> Vec<u8> {
 fn resolve_buyback(
     idx: u8,
     store: &benilla_protocol::ObjectFields,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> MerchantItem {
     let guid = store.player_buyback_slot(idx).unwrap_or(0);
-    let obj = items.object(guid);
+    let obj = objects.object(guid);
     let entry = obj.and_then(|o| o.object_entry()).unwrap_or(0);
     let quantity = obj.and_then(|o| o.item_stack_count()).unwrap_or(1).max(1);
     let template = items.template(entry, guid, commands);
@@ -329,11 +330,12 @@ fn resolve_buyback(
 /// No reputation model yet → discount 0.
 fn item_repair_cost(
     guid: u64,
+    objects: &Objects,
     items: &Items,
     tables: &RepairTables,
     commands: &NetCommands,
 ) -> u32 {
-    let Some(obj) = items.object(guid) else {
+    let Some(obj) = objects.object(guid) else {
         return 0;
     };
     let cur = obj.item_durability().unwrap_or(0);
@@ -357,6 +359,7 @@ fn item_repair_cost(
 /// buyback).
 fn repair_all_cost(
     store: &benilla_protocol::ObjectFields,
+    objects: &Objects,
     items: &Items,
     tables: &RepairTables,
     commands: &NetCommands,
@@ -364,7 +367,7 @@ fn repair_all_cost(
     let mut total: u64 = 0;
     let mut add = |guid: u64, items: &Items| {
         if guid != 0 {
-            total += u64::from(item_repair_cost(guid, items, tables, commands));
+            total += u64::from(item_repair_cost(guid, objects, items, tables, commands));
         }
     };
     for i in 0..19u8 {
@@ -378,7 +381,7 @@ fn repair_all_cost(
         if bag_guid == 0 {
             continue;
         }
-        let slots: Vec<u64> = items
+        let slots: Vec<u64> = objects
             .object(bag_guid)
             .map(|b| {
                 let n = b.container_num_slots().unwrap_or(0).min(36) as u8;
@@ -396,6 +399,7 @@ fn repair_all_cost(
 /// when no vendor is open.
 fn snapshot(
     open: &MerchantOpen,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
@@ -408,13 +412,13 @@ fn snapshot(
         .map(|store| {
             buyback_order(store)
                 .into_iter()
-                .map(|idx| resolve_buyback(idx, store, items, icons, commands))
+                .map(|idx| resolve_buyback(idx, store, objects, items, icons, commands))
                 .collect()
         })
         .unwrap_or_default();
     let can_repair = vendor_npc_flags & NPC_FLAG_REPAIR != 0;
     let repair_cost = match (can_repair, player, tables) {
-        (true, Some(store), Some(t)) => repair_all_cost(store, items, t, commands),
+        (true, Some(store), Some(t)) => repair_all_cost(store, objects, items, t, commands),
         _ => 0,
     };
     Some(MerchantState {
@@ -436,6 +440,7 @@ fn snapshot(
 fn feed_merchant(
     script: Option<NonSendMut<UiScript>>,
     open: Res<MerchantOpen>,
+    objects: Objects,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
@@ -496,6 +501,7 @@ fn feed_merchant(
     let player = self_q.iter().next().map(|s| &s.0);
     let fresh = snapshot(
         &open,
+        &objects,
         &items,
         icons.as_deref(),
         &commands,
@@ -565,7 +571,7 @@ fn drain_merchant(
     mut open: ResMut<MerchantOpen>,
     commands: Res<NetCommands>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
-    items: Res<Items>,
+    objects: Objects,
 ) {
     let Some(mut script) = script else {
         return;
@@ -627,7 +633,7 @@ fn drain_merchant(
     for (bag, slot) in script.take_merchant_cursor_sells() {
         let Some(vendor) = open.vendor else { continue };
         let slot0 = u8::try_from(slot.saturating_sub(1)).unwrap_or(0);
-        match self_store.and_then(|s| slot_guid(&s.0, bag, slot0, &items)) {
+        match self_store.and_then(|s| slot_guid(&s.0, bag, slot0, &objects)) {
             Some(item_guid) => {
                 debug!("ui_merchant: cursor sell bag {bag} slot {slot} (item {item_guid:#x})");
                 let _ = commands.0.send(ClientCommand::SellItem {

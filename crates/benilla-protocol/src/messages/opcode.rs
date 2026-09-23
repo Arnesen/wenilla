@@ -134,6 +134,14 @@ pub const CMSG_SWAP_INV_ITEM: u16 = 0x010D; // 269
 pub const CMSG_SPLIT_ITEM: u16 = 0x010E; // 270
 pub const CMSG_DESTROYITEM: u16 = 0x0111; // 273 — the popup-confirmed world-drop delete (0216 §3)
 pub const SMSG_INVENTORY_CHANGE_FAILURE: u16 = 0x0112; // 274
+/// VERIFIED vmangos `Opcodes_1_12_1.h`: 275. Body: one raw `u64` item guid
+/// (`WorldPackets::Item::OpenContainer::AppendBodyTo`). The one sender is `Player::SendOpenContainer`
+/// from `HandleAutoEquipItemOpcode` (`ItemHandler.cpp:227`) when the destination is a bag slot — a
+/// bag got equipped. The reference's handler is the object-layer dispatcher `0x5e38c0`'s arm
+/// `0x5e3b35` → `0x4f9410(guid)`, the `BAG_OPEN` raiser: our own guid → container 0 (the backpack),
+/// else the 10-entry bag cache → 1..10, no match → no fire (wow-re
+/// `object-layer/scratch/open-container-inspect-standstate-handlers.md`; decision 2339).
+pub const SMSG_OPEN_CONTAINER: u16 = 0x0113; // 275
 
 // The player-to-player trade family (VERIFIED vmangos `Opcodes_1_12_1.h:278-289`,
 // `Handlers/TradeHandler.cpp`, `Server/Packets/Trade.{h,cpp}`; bodies/parses in [`trade`],
@@ -690,6 +698,14 @@ pub const MSG_RANDOM_ROLL: u16 = 0x01FB; // 507
 
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 257. Body in [`super::stand_state_change`].
 pub const CMSG_STANDSTATECHANGE: u16 = 0x0101; // 257
+/// VERIFIED vmangos `Opcodes_1_12_1.h`: 669. Body: one `u8` stand state
+/// (`WorldPackets::Misc::StandStateUpdate`), sent to the player by `Unit::SetStandState` on every
+/// server-side change (`Objects/Unit.cpp:9541` — the eat/drink sit, the stand on damage) and, with the
+/// CURRENT state, as vmangos's camera re-acquire for a Mac client on a transport
+/// (`MiscHandler.cpp:388`). The reference's `0x603e50` reads the one byte, no guid, and applies it to
+/// the LOCAL player through the stand-state setter `0x6127b0`, ungated (wow-re `object-layer.md`
+/// "Three server handlers at the bytes"; decision 2339).
+pub const SMSG_STANDSTATE_UPDATE: u16 = 0x029D; // 669
 pub const CMSG_CAST_SPELL: u16 = 0x012E; // 302
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 310. Body in [`super::spells::cancel_aura`] — a lone `u32`
 /// spell id (`Server/Packets/Spell.h:55-62`): the server cancels **by spell, never by slot**, and
@@ -714,6 +730,14 @@ pub const CMSG_CANCEL_CHANNELLING: u16 = 0x013B; // 315
 /// streamed PUBLIC `PLAYER_VISIBLE_ITEM_*` fields without waiting on it, and no FrameXML handler
 /// registers an inspect event. Decision 0631.
 pub const CMSG_INSPECT: u16 = 0x0114; // 276
+/// VERIFIED vmangos `Opcodes_1_12_1.h`: 277. Body: one raw `u64`, the echoed target guid
+/// (`WorldPackets::Misc::InspectResponse`), sent once `HandleInspectOpcode`'s distance and hostility
+/// gates pass. The reference's handler `0x5e7d70` (29 bytes) reads the guid into a stack local and
+/// **discards it** — no global, no field, no Lua event, nothing sent (wow-re
+/// `object-layer/scratch/open-container-inspect-standstate-handlers.md`, byte-read 2026-09-23).
+/// Parsed so the wire stays in step, and dropped in `decode()` on purpose: 0631's call, confirmed
+/// at the bytes by decision 2339.
+pub const SMSG_INSPECT: u16 = 0x0115; // 277
 /// 726 (VERIFIED vmangos `Opcodes_1_12_1.h`) — the inspect window's **Honor tab**, and an `MSG_`:
 /// the one opcode number carries both directions. Our request is a raw 8-byte guid
 /// ([`super::inspect_honor_stats`]); the server's reply, on the same number, is the 50-byte

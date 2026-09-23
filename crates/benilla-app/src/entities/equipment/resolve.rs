@@ -203,11 +203,14 @@ pub(in crate::entities) fn resolve_equipment(
     // The enchant column rides its own resource (decision 0915) — shared with the tooltip lane.
     glows: Option<ResMut<ItemGlows>>,
     enchants: Option<Res<crate::items::Enchants>>,
-    // The [`Items`] epochs as of the last run — the skip gate's global half. Deliberately the
-    // explicit counters and never resource change ticks: `templates` is `ResMut` in this very
-    // system (ask-once misses write it), so a tick gate would read its own writes and never
-    // close.
-    mut last_epochs: Local<Option<(u64, u64, u64)>>,
+    // The [`Items`] template epoch as of the last run — the skip gate's global half. Deliberately
+    // the explicit counter and never the resource's change tick: `templates` is `ResMut` in this
+    // very system (ask-once misses write it), so a tick gate would read its own writes and never
+    // close. The item *objects* are entities since 2334, watched through `item_changes`.
+    mut last_epochs: Local<Option<(u64, u64)>>,
+    // The object lookup the equipped guids resolve through and the item entities' change watch,
+    // as one param (the 16-SystemParam ceiling).
+    item_objects: (crate::net::Objects, crate::items::ItemChanges),
     // The guild identity cache (decision 1257) — `ResMut` because it is LAZY: the miss below is
     // what sends the `CMSG_GUILD_QUERY` whose answer paints the tabard. `Option` for the same
     // reason `creatures` is: a harness without the UI plugins still resolves equipment.
@@ -222,11 +225,14 @@ pub(in crate::entities) fn resolve_equipment(
     // a `CMSG_GUILD_QUERY` answered three frames after a player spawned changes what that player's
     // tabard paints, and nothing about their descriptor or the item cache moves to say so.
     let epochs = (
-        templates.object_epoch(),
         templates.template_epoch(),
         guilds.as_ref().map_or(0, |g| g.identity_generation()),
     );
+    // The watch is drained whether or not the gate is read (`moved` reads the removals).
+    let (objects, mut item_changes) = item_objects;
+    let items_moved = item_changes.moved();
     let caches_moved = last_epochs.replace(epochs) != Some(epochs)
+        || items_moved
         || creatures.as_ref().is_some_and(|c| c.is_changed())
         || enchants.as_ref().is_some_and(|e| e.is_changed())
         || tabard_design.as_ref().is_some_and(|d| d.is_changed());
@@ -607,7 +613,7 @@ pub(in crate::entities) fn resolve_equipment(
             for bag in 19u8..23 {
                 let entry = s
                     .player_inv_slot(bag)
-                    .and_then(|g| templates.object(g))
+                    .and_then(|g| objects.object(g))
                     .and_then(|o| o.object_entry());
                 let Some(t) = entry.and_then(|e| templates.held(e, &net)) else {
                     continue;
@@ -1039,6 +1045,8 @@ mod tests {
         items.insert_template(300, Some(worn(700, 5))); // INVTYPE_CHEST
         let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
         app.insert_resource(items);
+        // The one object index `Objects` reads (2334); empty, like the map these tests never seeded.
+        app.init_resource::<crate::net::GuidIndex>();
         app.insert_resource(NetCommands(tx));
         app.insert_resource(ItemDisplays::icons_for_tests(
             benilla_formats::ItemDisplayCatalog::from_displays(std::collections::HashMap::new()),
@@ -1119,6 +1127,8 @@ mod tests {
         items.insert_template(101, Some(worn(901, 1))); // the swap target
         let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
         app.insert_resource(items);
+        // The one object index `Objects` reads (2334); empty, like the map these tests never seeded.
+        app.init_resource::<crate::net::GuidIndex>();
         app.insert_resource(NetCommands(tx));
         app.insert_resource(ItemDisplays::icons_for_tests(
             benilla_formats::ItemDisplayCatalog::from_displays(std::collections::HashMap::new()),
@@ -1216,6 +1226,8 @@ mod tests {
             );
             let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
             app.insert_resource(items);
+            // The one object index `Objects` reads (2334); empty, like the map these tests never seeded.
+            app.init_resource::<crate::net::GuidIndex>();
             app.insert_resource(NetCommands(tx));
             app.insert_resource(ItemDisplays::icons_for_tests(
                 benilla_formats::ItemDisplayCatalog::from_displays(
@@ -1333,6 +1345,8 @@ mod tests {
         );
         let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
         app.insert_resource(items);
+        // The one object index `Objects` reads (2334); empty, like the map these tests never seeded.
+        app.init_resource::<crate::net::GuidIndex>();
         app.insert_resource(NetCommands(tx));
         app.insert_resource(ItemDisplays::icons_for_tests(
             benilla_formats::ItemDisplayCatalog::from_displays(std::collections::HashMap::new()),

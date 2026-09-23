@@ -591,16 +591,16 @@ pub(crate) fn reagent_totem_refusal(
     spell_id: u32,
     def: Option<&benilla_formats::SpellDisplay>,
     self_store: Option<&ObjectStore>,
-    items: &crate::items::Items,
+    objects: &crate::net::Objects,
     errors: &mut CastErrors,
 ) -> bool {
     let (Some(d), Some(store)) = (def, self_store) else {
         return false;
     };
     // Totems before reagents — the ref's in-function loop order.
-    let reason = if first_missing_totem(d, store, items).is_some() {
+    let reason = if first_missing_totem(d, store, objects).is_some() {
         0x78
-    } else if first_short_reagent(d, store, items).is_some() {
+    } else if first_short_reagent(d, store, objects).is_some() {
         0x5c
     } else {
         return false;
@@ -615,13 +615,13 @@ pub(crate) fn reagent_totem_refusal(
 pub(super) fn first_missing_totem(
     d: &benilla_formats::SpellDisplay,
     store: &ObjectStore,
-    items: &crate::items::Items,
+    objects: &crate::net::Objects,
 ) -> Option<u32> {
     d.totems
         .iter()
         .copied()
         .filter(|&t| t != 0)
-        .find(|&t| count_of(&store.0, items, t, InventoryScope::CARRIED) == 0)
+        .find(|&t| count_of(&store.0, objects, t, InventoryScope::CARRIED) == 0)
 }
 
 /// The first reagent slot whose owned count falls short — the `0x6e4000` reagent loop's failing
@@ -629,13 +629,13 @@ pub(super) fn first_missing_totem(
 pub(super) fn first_short_reagent(
     d: &benilla_formats::SpellDisplay,
     store: &ObjectStore,
-    items: &crate::items::Items,
+    objects: &crate::net::Objects,
 ) -> Option<u32> {
     d.reagents
         .iter()
         .copied()
         .filter(|&(id, _)| id != 0)
-        .find(|&(id, n)| count_of(&store.0, items, id, InventoryScope::CARRIED) < n)
+        .find(|&(id, n)| count_of(&store.0, objects, id, InventoryScope::CARRIED) < n)
         .map(|(id, _)| id)
 }
 
@@ -1010,6 +1010,12 @@ mod totem_reagent_tests {
         ObjectStore(ObjectFields::default())
     }
 
+    /// The object index the count walks read — nothing streamed, which is the empty-bags pole
+    /// every case here is graded at (2334).
+    fn objects() -> crate::ui_items::TestObjects {
+        crate::ui_items::TestObjects::new()
+    }
+
     fn spell(totems: [u32; 2], reagents: [(u32, u32); 8]) -> SpellDisplay {
         SpellDisplay {
             totems,
@@ -1024,7 +1030,7 @@ mod totem_reagent_tests {
     /// `IsActivePlayer` gate) — the cast then goes out for the server to judge.
     #[test]
     fn missing_materials_refuse_with_the_refs_reasons() {
-        let items = crate::items::Items::default();
+        let mut objs = objects();
         let st = store();
         let mining = spell([2901, 0], [(0, 0); 8]);
         let mut errors = CastErrors::default();
@@ -1032,7 +1038,7 @@ mod totem_reagent_tests {
             2575,
             Some(&mining),
             Some(&st),
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert_eq!(errors.0.as_slice(), &[CastFail::local(2575, 0x78)]);
@@ -1045,7 +1051,7 @@ mod totem_reagent_tests {
             130,
             Some(&slow_fall),
             Some(&st),
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert_eq!(errors.0.as_slice(), &[CastFail::local(130, 0x5c)]);
@@ -1056,7 +1062,7 @@ mod totem_reagent_tests {
             1,
             Some(&both),
             Some(&st),
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert_eq!(errors.0.as_slice(), &[CastFail::local(1, 0x78)]);
@@ -1067,21 +1073,21 @@ mod totem_reagent_tests {
             133,
             Some(&plain),
             Some(&st),
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert!(!reagent_totem_refusal(
             2575,
             None,
             Some(&st),
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert!(!reagent_totem_refusal(
             2575,
             Some(&mining),
             None,
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert!(errors.0.is_empty());
@@ -1091,15 +1097,15 @@ mod totem_reagent_tests {
     /// reagent (against empty bags, the first nonzero of each).
     #[test]
     fn first_failing_slot_is_named() {
-        let items = crate::items::Items::default();
+        let mut objs = objects();
         let st = store();
         let mut reagents = [(0, 0); 8];
         reagents[1] = (17056, 1);
         let d = spell([0, 7005], reagents);
-        assert_eq!(first_missing_totem(&d, &st, &items), Some(7005));
-        assert_eq!(first_short_reagent(&d, &st, &items), Some(17056));
+        assert_eq!(first_missing_totem(&d, &st, &objs.get()), Some(7005));
+        assert_eq!(first_short_reagent(&d, &st, &objs.get()), Some(17056));
         let none = spell([0, 0], [(0, 0); 8]);
-        assert_eq!(first_missing_totem(&none, &st, &items), None);
-        assert_eq!(first_short_reagent(&none, &st, &items), None);
+        assert_eq!(first_missing_totem(&none, &st, &objs.get()), None);
+        assert_eq!(first_short_reagent(&none, &st, &objs.get()), None);
     }
 }

@@ -52,7 +52,7 @@ use benilla_ui::script::UiScript;
 
 use super::probes::ProbeClock;
 use crate::items::Items;
-use crate::net::{ChatKind, ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{ChatKind, ClientCommand, NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::pending_item_ops::PendingItemOps;
 use crate::ui_loot::{LootConfig, LootLatch, LootState};
 
@@ -184,6 +184,7 @@ fn window_open(script: &UiScript, loot: &LootState) -> bool {
 fn find_in_backpack(
     store: &ObjectStore,
     entry: u32,
+    objects: &Objects,
     items: &Items,
     net: &NetCommands,
 ) -> Option<(u64, u32)> {
@@ -195,7 +196,7 @@ fn find_in_backpack(
                 .filter(|g| *g != 0)
                 .map(|g| (i, g))
         })
-        .find(|(_, guid)| items.object(*guid).and_then(|f| f.object_entry()) == Some(entry))?;
+        .find(|(_, guid)| objects.object(*guid).and_then(|f| f.object_entry()) == Some(entry))?;
     // `template` asks the server once on a miss and answers `None` until the reply lands, which is
     // exactly the "not stocked yet" state this returns.
     items
@@ -209,6 +210,7 @@ fn clam_probe(
     mut probe: ResMut<ClamProbe>,
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    objects: Objects,
     items: Res<Items>,
     mut cfg: ResMut<LootConfig>,
     loot: Res<LootState>,
@@ -240,7 +242,7 @@ fn clam_probe(
             probe.phase = Phase::Stocking { sent_at: now };
         }
         Phase::Stocking { sent_at } => {
-            if let Some((guid, slot)) = find_in_backpack(store, entry, &items, &net) {
+            if let Some((guid, slot)) = find_in_backpack(store, entry, &objects, &items, &net) {
                 info!(
                     "PROBE_CLAM: item {entry} is guid {guid:#x} in backpack slot {slot} — \
                      sampling {CONTROL_FRAMES} control frames with it UNCLICKED"

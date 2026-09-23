@@ -479,13 +479,14 @@ fn load_materials(mut commands: Commands, assets: Option<Res<benilla_assets::Wor
 /// object not streamed, and a template still in flight (asked once, answered next frame).
 pub(super) fn worn_chest_material(
     store: Option<&crate::net::ObjectStore>,
+    objects: &crate::net::Objects,
     items: &crate::items::Items,
     net: &crate::net::NetCommands,
 ) -> Option<u32> {
     /// Index 4 of the inv-slot array — `0x62fa50`/`0x62fb86` read the fifth 8-byte guid.
     const EQUIPMENT_SLOT_CHEST: u8 = 4;
     let guid = store?.0.player_inv_slot(EQUIPMENT_SLOT_CHEST)?;
-    let entry = items.object(guid)?.object_entry()?;
+    let entry = objects.object(guid)?.object_entry()?;
     Some(items.held(entry, net)?.material)
 }
 

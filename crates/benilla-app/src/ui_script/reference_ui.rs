@@ -2341,7 +2341,6 @@ mod tests {
                 "UIParent.lua — the enchant-replacement confirm inside a trade; benilla's trade \
                  feed does not derive it",
             ),
-            ("BAG_OPEN", "ContainerFrame.lua"),
             (
                 "CLOSE_WORLD_MAP",
                 "WorldMapFrame.lua — the engine-side close the reference fires when the map is \

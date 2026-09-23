@@ -13,7 +13,7 @@ use benilla_formats::SpellDisplay;
 use crate::creature_anim::UNIT_FLAG_DISARMED;
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore};
+use crate::net::{NetCommands, ObjectStore, Objects};
 
 /// Equipment slot 15 = `EQUIPMENT_SLOT_MAINHAND` (vmangos `EquipmentSlots`).
 const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
@@ -43,12 +43,13 @@ const ITEM_CLASS_WEAPON: u32 = 2;
 /// item whose icon would otherwise be shown.
 fn main_hand_item(
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<(u32, Option<String>)> {
     let guid = store.0.player_inv_slot(EQUIPMENT_SLOT_MAINHAND)?;
-    let entry = items.object(guid)?.object_entry()?;
+    let entry = objects.object(guid)?.object_entry()?;
     let template = items.template(entry, guid, commands)?;
     let (class, display) = (template.class, template.display_info_id);
     let icon = icons
@@ -73,6 +74,7 @@ fn main_hand_item(
 pub(crate) fn melee_auto_attack_icon(
     store: &ObjectStore,
     forms: &std::collections::HashMap<u32, benilla_formats::ShapeshiftForm>,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
@@ -86,7 +88,7 @@ pub(crate) fn melee_auto_attack_icon(
             return icon;
         }
     }
-    let main = main_hand_item(store, items, icons, commands);
+    let main = main_hand_item(store, objects, items, icons, commands);
     // Precedence step 2 — the **disarmed guard** (`0x4e68df`: `test dword ptr [ecx+0xa0],
     // 0x200000`, then `GetWeapon(0, 1)` and a `== 2` on the returned class byte): while the
     // character is disarmed, a weapon in the main hand shows `Spell-Reset` exactly as an empty
@@ -111,12 +113,13 @@ pub(crate) fn melee_auto_attack_icon(
 /// return hands over to the normal SpellIconID path).
 pub(crate) fn ranged_weapon_icon(
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<String> {
     let guid = store.0.player_inv_slot(EQUIPMENT_SLOT_RANGED)?;
-    let entry = items.object(guid)?.object_entry()?;
+    let entry = objects.object(guid)?.object_entry()?;
     let template = items.template(entry, guid, commands)?;
     if template.subclass == ITEM_SUBCLASS_THROWN {
         return None;
@@ -143,16 +146,19 @@ pub(super) fn auto_attack_icon(
     spell: &SpellDisplay,
     store: Option<&ObjectStore>,
     forms: &std::collections::HashMap<u32, benilla_formats::ShapeshiftForm>,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<String> {
     let store = store?;
     if spell.is_melee_auto_attack() {
-        return Some(melee_auto_attack_icon(store, forms, items, icons, commands));
+        return Some(melee_auto_attack_icon(
+            store, forms, objects, items, icons, commands,
+        ));
     }
     if spell.ranged_icon_substitution() {
-        return ranged_weapon_icon(store, items, icons, commands);
+        return ranged_weapon_icon(store, objects, items, icons, commands);
     }
     None
 }
@@ -187,8 +193,7 @@ mod tests {
         let mut pairs = vec![(UNIT_FLAGS, flags), (UNIT_BYTES_1, u32::from(form) << 16)];
         if let Some(class) = hand {
             pairs.push((INV_SLOT_MAINHAND, 0x2a));
-            deps.items
-                .insert_object(0x2a, ObjectFields::from_pairs(&[(3, 500)]));
+            deps.spawn_item(0x2a, ObjectFields::from_pairs(&[(3, 500)]));
             deps.items.insert_template(
                 500,
                 Some(ItemInfo {
@@ -216,7 +221,9 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        melee_auto_attack_icon(&store, &forms, &deps.items, Some(&icons), &deps.commands)
+        deps.with_objects(|objects, items, commands| {
+            melee_auto_attack_icon(&store, &forms, objects, items, Some(&icons), commands)
+        })
     }
 
     /// **The disarmed guard on the Attack button** (`0x4e68df`, decision 1863 closing 0231's

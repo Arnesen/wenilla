@@ -36,7 +36,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::items::Items;
-use crate::net::{ClientCommand, NetCommands, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, Objects, SelfPlayer};
 
 use super::{cast_target, validator, AutoRepeatActive};
 use crate::ui_action::{reagent_totem_refusal, CastErrors, Spells};
@@ -95,9 +95,11 @@ pub(crate) struct CastLadder<'w, 's> {
     pub(crate) self_player:
         Query<'w, 's, (Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
     pub(crate) spells: Option<Res<'w, Spells>>,
-    /// The item cache — the pre-send totem/reagent check reads it (decision 0552), and the item
-    /// arms resolve templates through it.
+    /// The item cache — the item arms resolve templates through it.
     pub(crate) items: Res<'w, Items>,
+    /// The one object index (decision 2334) — the pre-send totem/reagent check walks the bags
+    /// through it, and the item arms resolve an instance guid to its fields here.
+    pub(crate) objects: Objects<'w, 's>,
     pub(crate) sheath: MessageWriter<'w, crate::creature_anim::SheathRequest>,
     pub(crate) ecs: Commands<'w, 's>,
     pub(crate) pending: ResMut<'w, crate::spell::PendingCast>,
@@ -240,6 +242,7 @@ impl CastLadder<'_, '_> {
             &self.commands,
             &self.self_player,
             self.spells.as_deref(),
+            &self.objects,
             &self.items,
             &mut self.sheath,
             &mut self.ecs,
@@ -281,6 +284,7 @@ fn send_spell_cast(
     commands: &NetCommands,
     self_player: &Query<(Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
     spells: Option<&Spells>,
+    objects: &Objects,
     items: &Items,
     sheath: &mut MessageWriter<crate::creature_anim::SheathRequest>,
     ecs: &mut Commands,
@@ -354,7 +358,7 @@ fn send_spell_cast(
     // it the real message can't appear. Position pinned by the 0948 §5: TryCast runs it BEFORE
     // the validator (`0x6e4ded` precedes the `0x6e4f3b` call), so an on-cooldown press with
     // missing reagents shows the reagent error, never "not ready".
-    if reagent_totem_refusal(spell_id, def, ctx.rel.self_store, items, cast_errors) {
+    if reagent_totem_refusal(spell_id, def, ctx.rel.self_store, objects, cast_errors) {
         return;
     }
     // **TryCast rung 7** (`0x6e4e03`, decision 1925) — the equipped-item requirement, which the
@@ -367,7 +371,7 @@ fn send_spell_cast(
     // player who is both stunned and missing the required weapon is told about **the weapon**.
     if let Some(d) = def {
         if let Some(store) = ctx.rel.self_store {
-            if !super::usable::equipped_item_fits_cached(d, store, items) {
+            if !super::usable::equipped_item_fits_cached(d, store, objects, items) {
                 let reason = super::usable::equipped_item_reason(d);
                 debug!("ui_action: cast {spell_id} refused locally — equipped item ({reason:#x})");
                 cast_errors.push_local(spell_id, reason);
@@ -392,12 +396,12 @@ fn send_spell_cast(
         selection: ctx.selection_guid,
         caster: ctx.self_guid,
         // The ref resolves its candidate guid through `0x468460(typemask 1)` (`6e53bc`) before
-        // handing it to the binder: a guid naming no live object binds nothing. Ours is the item
-        // cache — an equipped item whose object has not streamed yet is exactly that miss, and
-        // falls to the cursor rather than shipping a guid the server would reject.
+        // handing it to the binder: a guid naming no live object binds nothing. Ours is the one
+        // object index — an equipped item whose object has not streamed yet is exactly that miss,
+        // and falls to the cursor rather than shipping a guid the server would reject.
         main_hand_item: ctx
             .main_hand_item
-            .filter(|guid| items.object(*guid).is_some()),
+            .filter(|guid| objects.object(*guid).is_some()),
     };
     let target = match explicit_object {
         Some(_) => None,
@@ -863,6 +867,8 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(NetCommands(tx));
         world.init_resource::<Items>();
+        // The one object index the ladder's item arms resolve an instance guid through (2334).
+        world.init_resource::<crate::net::GuidIndex>();
         world.init_resource::<crate::spell::PendingCast>();
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
         world.init_resource::<crate::spell::Cooldowns>();

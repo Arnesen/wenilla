@@ -127,7 +127,7 @@ pub(crate) fn drop_item_on_unit(
         };
         let slot0 = u8::try_from(held.slot.saturating_sub(1)).unwrap_or(0);
         let Some(item_guid) =
-            crate::ui_items::slot_guid(&self_store.0, held.bag, slot0, &ladder.items)
+            crate::ui_items::slot_guid(&self_store.0, held.bag, slot0, &ladder.objects)
         else {
             continue; // the slot emptied under us — silent, as every refusal here is
         };

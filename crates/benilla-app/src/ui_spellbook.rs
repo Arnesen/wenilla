@@ -40,7 +40,7 @@ use benilla_ui::script::{ScriptValue, SpellBookState, SpellSlotView, SpellTabVie
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, SelfPlayer};
+use crate::net::NetCommands;
 use crate::spell::{cast_target, CastCommit, CastLadder};
 use crate::ui_action::{melee_auto_attack_icon, ranged_weapon_icon, PlayerActions, Spells};
 use crate::ui_script::{gate, UiInput};
@@ -135,8 +135,8 @@ struct FeedMemory {
     pushed: SpellBookState,
     /// The gate's counter memories (1439) — the stores whose lazy resolves poison `is_changed`
     /// (the weapon-icon template asks, the cooldown store's per-frame prune), plus the self
-    /// store's PRESENCE: the book's weapon icons flip on a despawn no `Changed` filter sees.
-    items_objects: gate::Watch,
+    /// store's PRESENCE: the book's weapon icons flip on a despawn no `Changed` filter sees. The
+    /// item OBJECTS are an entity watch since 2334 ([`crate::items::ItemChanges`]), not a counter.
     items_templates: gate::Watch,
     cooldown_epoch: gate::Watch,
     self_present: gate::Watch,
@@ -147,8 +147,10 @@ fn feed_spellbook(
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
     skill_lines: Option<Res<SkillLines>>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    changed_self: Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
+    // The inventory read (2334): the self store (race/class, the form byte, the two weapon
+    // slots), its change tick, the object lookup the weapon icons resolve through, and the
+    // item entities' change watch.
+    mut inv: crate::items::Inventory,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
@@ -166,14 +168,16 @@ fn feed_spellbook(
     // see the memory struct), the item stores behind the weapon icons, and the cooldown
     // store. `UiClock` is deliberately NOT an input: `ui_triple` is frame-stable per arm and
     // natural expiry rides the store's `feed_epoch`.
-    let objects_moved = memory.items_objects.moved(items.object_epoch());
+    let objects_moved = inv.changes.moved();
     let templates_moved = memory.items_templates.moved(items.template_epoch());
     let cooldowns_moved = memory.cooldown_epoch.moved(cooldowns.feed_epoch());
-    let presence_moved = memory.self_present.moved(u64::from(!self_q.is_empty()));
+    let presence_moved = memory
+        .self_present
+        .moved(u64::from(!inv.self_store.is_empty()));
     // The frame a timer crosses zero, BEFORE the per-frame prune has moved the epoch
     // (`sweep_pending`'s own doc) — the triple flips to None right then.
     let sweep = cooldowns.sweep_pending(clock.anchor);
-    let self_changed = !changed_self.is_empty();
+    let self_changed = !inv.self_changed.is_empty();
     let actions_changed = actions.is_changed();
     let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
     let lines_changed = skill_lines.as_ref().is_some_and(|r| r.is_changed());
@@ -226,21 +230,29 @@ fn feed_spellbook(
     };
     // The player's race/class drive the General collapse (module doc). Absent (no self player
     // yet), 0/0 skips the collapse — each line keeps its own tab until the descriptor arrives.
-    let store = self_q.single().ok();
+    let store = inv.self_store.single().ok();
     let (race, class) = store
         .map(|s| (s.0.unit_race().unwrap_or(0), s.0.unit_class().unwrap_or(0)))
         .unwrap_or((0, 0));
     // The melee auto-attack's icon is the equipped main-hand weapon (or Spell-Reset when unarmed),
     // not spell 6603's `Temp` placeholder (decision 0230) — resolved here where the self player +
     // item stores are in hand, once for the whole page (it's the same for any auto-attack spell).
-    let attack_icon = store
-        .map(|s| melee_auto_attack_icon(s, &spells.forms, &items, icons.as_deref(), &commands));
+    let attack_icon = store.map(|s| {
+        melee_auto_attack_icon(
+            s,
+            &spells.forms,
+            &inv.objects,
+            &items,
+            icons.as_deref(),
+            &commands,
+        )
+    });
     // The ranged auto-repeat shots (Auto Shot, wand Shoot) borrow the equipped ranged weapon's
     // icon the same way (decision 0231's ranged case; `None` — unarmed/thrown — keeps the
     // spell's own icon, never Spell-Reset). Character-level like the melee icon: one resolve
     // serves the page.
-    let ranged_icon =
-        store.and_then(|s| ranged_weapon_icon(s, &items, icons.as_deref(), &commands));
+    let ranged_icon = store
+        .and_then(|s| ranged_weapon_icon(s, &inv.objects, &items, icons.as_deref(), &commands));
     let (mut fresh, tab_lines) = build_book(
         &actions.spells,
         &spells.catalog,

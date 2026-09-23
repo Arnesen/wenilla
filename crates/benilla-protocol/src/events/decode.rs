@@ -951,6 +951,15 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::GameObjectDespawnAnim { guid } => {
             vec![SessionEvent::GameObjectDespawnAnim { guid }]
         }
+        ServerPacket::OpenContainer { item } => vec![SessionEvent::OpenContainer { item }],
+        ServerPacket::StandStateUpdate { state } => {
+            vec![SessionEvent::StandStateUpdate { state }]
+        }
+        // Deliberately nothing: the reference's `0x5e7d70` reads the echoed guid into a stack local
+        // and discards it — no global, no field, no event — and the inspect window paints off the
+        // target's `PLAYER_VISIBLE_ITEM_*` fields without waiting (decision 0631; byte-confirmed by
+        // wow-re's round for 2339). Parsed so the wire stays in step and no tally calls it dropped.
+        ServerPacket::Inspect { .. } => Vec::new(),
         ServerPacket::FishNotHooked => vec![SessionEvent::FishNotHooked],
         ServerPacket::FishEscaped => vec![SessionEvent::FishEscaped],
         // The keepalive echo: the io layer matches the sequence against its ping clock to compute

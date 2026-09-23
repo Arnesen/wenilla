@@ -355,7 +355,7 @@ fn service_probe(
     // the guid the wire addresses.
     mut merchant: ResMut<MerchantOpen>,
     script: Option<NonSendMut<UiScript>>,
-    items: Res<crate::items::Items>,
+    objects: crate::net::Objects,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     self_player: Query<(), With<SelfPlayer>>,
     player: Res<Player>,
@@ -759,7 +759,7 @@ fn service_probe(
             let Some(item_guid) = self_store
                 .single()
                 .ok()
-                .and_then(|s| crate::ui_items::slot_guid(&s.0, held.bag, slot0, &items))
+                .and_then(|s| crate::ui_items::slot_guid(&s.0, held.bag, slot0, &objects))
             else {
                 error!(
                     "PROBE_SERVICE: FAIL (vendor fork, held cursor) — bag {} slot {} is on the \

@@ -836,9 +836,11 @@ pub(crate) struct Player {
     /// right-drag — into a mid-cast "you moved". Decision 0907; the reconcile lives in
     /// [`super::movement_net::stream_self_movement`].
     pub(super) last_pos: [f32; 3],
-    /// The stand state we last volunteered (`CMSG_STANDSTATECHANGE`) whose echo into our
-    /// `UNIT_FIELD_BYTES_1` hasn't landed yet — the local commit (the client's `SetStandState`
-    /// `0x6127b0` applies immediately *and* sends; decision 0080c). `None` = at the echoed value.
+    /// The stand state we last committed locally — volunteered (`CMSG_STANDSTATECHANGE`) or the
+    /// server's own (`SMSG_STANDSTATE_UPDATE`, 2339) — whose echo into our `UNIT_FIELD_BYTES_1`
+    /// hasn't landed yet: the reference's predicted cache `[player+0x1d68]`, written by the
+    /// setter's local half `0x6127b0`, which sends nothing itself (the volunteer path `0x5ed430`
+    /// sends first, then calls it; decisions 0080c, 2339). `None` = at the echoed value.
     pub(super) stand_pending: Option<u8>,
     /// **Settling after a teleport/summon/login**: the streamed world (terrain *and* its WMO
     /// buildings + colliders) arrives over several frames, so the collision under the destination

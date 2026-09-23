@@ -550,6 +550,7 @@ fn spending_an_arrow_starts_quivers_reload_through_the_real_item_feed() {
         quiver(200),
         Default::default(),
         Vec::new(),
+        Vec::new(),
     );
 
     s.fire_event("START_AUTOREPEAT_SPELL", Vec::new());
@@ -564,6 +565,7 @@ fn spending_an_arrow_starts_quivers_reload_through_the_real_item_feed() {
         &mut memory,
         quiver(199),
         Default::default(),
+        Vec::new(),
         Vec::new(),
     );
     s.tick(0.1);

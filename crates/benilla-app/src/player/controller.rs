@@ -83,6 +83,9 @@ pub(super) fn control(
         // The loot window's move-start close (decision 2097): the reference's movement-START
         // guard `0x60e990`, reported here beside the cast bar's edge and consumed by `ui_loot`.
         ResMut<crate::ui_loot::LootMoveStart>,
+        // The server's own stand state for our body (decision 2339): `SMSG_STANDSTATE_UPDATE`,
+        // applied through the posture setter's local half — ungated, nothing sent back.
+        MessageReader<super::ServerStandState>,
     ),
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit (see `mouse`).
     speed_capsule: (
@@ -699,6 +702,7 @@ pub(super) fn control(
             &net.0,
             &mut net.3,
             &mut net.10,
+            &mut net.15,
             moving,
             turned,
         );

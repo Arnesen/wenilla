@@ -58,6 +58,7 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
 
     app.insert_resource(actions)
         .init_resource::<Items>()
+        .init_resource::<crate::net::GuidIndex>()
         .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
         .init_resource::<PetTameFailures>()
@@ -310,6 +311,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     actions.dirty = true;
     app.insert_resource(actions)
         .init_resource::<Items>()
+        .init_resource::<crate::net::GuidIndex>()
         .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
         .init_resource::<PetTameFailures>()
@@ -523,6 +525,7 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
             ..Spells::empty_for_tests()
         })
         .init_resource::<Items>()
+        .init_resource::<crate::net::GuidIndex>()
         .init_resource::<MountErrors>()
         .init_resource::<PetTameFailures>()
         .init_resource::<UiErrorKeys>()

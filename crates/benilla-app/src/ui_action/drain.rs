@@ -363,7 +363,7 @@ pub(super) fn drain_action_uses(
                     continue;
                 };
                 let route = item_action_route(&template, |s| {
-                    crate::ui_items::find_item(&store.0, &ladder.items, b.action, s)
+                    crate::ui_items::find_item(&store.0, &ladder.objects, b.action, s)
                 });
                 let ((bag_index, slot0, guid), equip) = match route {
                     ItemRoute::Use(pos) => (pos, false),
@@ -389,6 +389,7 @@ pub(super) fn drain_action_uses(
                     crate::ui_items::send_auto_equip(
                         &mut script,
                         &mut gate,
+                        &ladder.objects,
                         &ladder.items,
                         &ladder.commands,
                         bag_index,

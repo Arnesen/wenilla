@@ -115,11 +115,12 @@ fn footstep_sounds(
     parents: Query<&ChildOf>,
     root_state: Query<(Option<&ObjectStore>, Option<&MovementState>)>,
     footsteps: Option<Res<Footsteps>>,
-    // The foley half: the material table, the creature catalog that answers a unit's material,
-    // and the item store that answers a player's (a chest template ask rides the same
-    // once-per-entry discipline every other consumer uses).
-    materials: Option<Res<super::Materials>>,
-    creatures: Option<Res<Creatures>>,
+    // The foley half: the material table and the creature catalog that answers a unit's
+    // material, as ONE param (the 16-SystemParam ceiling this signature sits at), plus the item
+    // store that answers a player's (a chest template ask rides the same once-per-entry
+    // discipline every other consumer uses) and the object index its guid resolves through.
+    foley: (Option<Res<super::Materials>>, Option<Res<Creatures>>),
+    objects: crate::net::Objects,
     mut items: Option<ResMut<Items>>,
     net_commands: Res<NetCommands>,
     voices: Option<Res<CreatureVoices>>,
@@ -133,6 +134,7 @@ fn footstep_sounds(
     if events.is_empty() {
         return;
     }
+    let (materials, creatures) = foley;
     let (Some(footsteps), Some(voices), Some(mut kits), Some(assets)) =
         (footsteps, voices, kits, assets)
     else {
@@ -168,7 +170,9 @@ fn footstep_sounds(
                 // The player override (`0x62fa30`) reads the chest through the *private*
                 // inv-slot array, so this resolves for you and no one else — the reference's
                 // own reach, not a restriction added here.
-                EntityKind::Player => super::worn_chest_material(store, it, &net_commands),
+                EntityKind::Player => {
+                    super::worn_chest_material(store, &objects, it, &net_commands)
+                }
                 _ => net
                     .display_id
                     .and_then(|d| creatures.as_deref()?.foley_material(d)),

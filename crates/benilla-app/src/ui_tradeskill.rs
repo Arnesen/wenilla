@@ -38,7 +38,7 @@ use benilla_ui::script::{
 use crate::creature_anim::{CastEvent, CastEventKind};
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::spell::{cast_target, CastCommit, CastLadder};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_items::{count_of, item_icon, InventoryScope};
@@ -250,6 +250,7 @@ fn resolve_recipe(
     icons: Option<&ItemDisplays>,
     subclasses: Option<&crate::ui_items::ItemSubClasses>,
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
     cooldowns: &crate::spell::Cooldowns,
@@ -262,7 +263,7 @@ fn resolve_recipe(
     let mut reagents = Vec::new();
     let mut num_available = u32::MAX;
     for &(entry, need) in d.reagents.iter().filter(|&&(e, n)| e != 0 && n != 0) {
-        let have = count_of(&store.0, items, entry, InventoryScope::CARRIED);
+        let have = count_of(&store.0, objects, entry, InventoryScope::CARRIED);
         let (name, icon) = match items.template(entry, 0, commands) {
             Some(t) => (Some(t.name.clone()), item_icon(icons, t.display_info_id)),
             None => (None, None),
@@ -337,7 +338,7 @@ fn resolve_recipe(
         }
     }
     for &t in d.totems.iter().filter(|&&t| t != 0) {
-        let have = count_of(&store.0, items, t, InventoryScope::CARRIED) > 0;
+        let have = count_of(&store.0, objects, t, InventoryScope::CARRIED) > 0;
         if let Some(info) = items.template(t, 0, commands) {
             tools.push((info.name.clone(), have));
         }
@@ -376,6 +377,7 @@ fn feed_trade_skill(
     subclasses: Option<Res<crate::ui_items::ItemSubClasses>>,
     repeat: Res<TradeSkillRepeat>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    objects: Objects,
     items: Res<Items>,
     commands: Res<NetCommands>,
     cooldowns: Res<crate::spell::Cooldowns>,
@@ -417,6 +419,7 @@ fn feed_trade_skill(
                     icons.as_deref(),
                     subclasses.as_deref(),
                     store,
+                    &objects,
                     &items,
                     &commands,
                     &cooldowns,

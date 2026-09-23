@@ -460,6 +460,24 @@ pub enum ServerPacket {
         guid: u64,
         anim_id: u32,
     },
+    /// `SMSG_OPEN_CONTAINER` — the server opened a container for us: one raw `u64` item guid
+    /// (VERIFIED vmangos `Player::SendOpenContainer`), sent when a bag is equipped into a bag slot.
+    /// The reference fires `BAG_OPEN(containerId)` and nothing else (decision 2339).
+    OpenContainer {
+        item: u64,
+    },
+    /// `SMSG_INSPECT` — the inspect request's echo: one raw `u64`, the target's guid (VERIFIED
+    /// vmangos `Misc::InspectResponse`). Parsed and **deliberately dropped**: the reference's
+    /// handler discards it too, and the window paints off the visible-item fields (0631, 2339).
+    Inspect {
+        guid: u64,
+    },
+    /// `SMSG_STANDSTATE_UPDATE` — the server changed OUR stand state: one `u8` (VERIFIED vmangos
+    /// `Unit::SetStandState`). Applied to the local player, ungated, through the same setter the
+    /// volunteered change goes through (decision 2339).
+    StandStateUpdate {
+        state: u8,
+    },
     /// `SMSG_GAMEOBJECT_DESPAWN_ANIM` — an object plays its one-shot **Despawn** animation and
     /// then goes away. Payload VERIFIED vmangos `WorldObject::SendObjectDeSpawnAnim`: a bare
     /// `u64` guid. The client arms substate 12 (AnimationData **157 Despawn**) and PINS the
@@ -1709,6 +1727,9 @@ impl ServerPacket {
             ServerPacket::PageTextQueryResponse { .. } => "SMSG_PAGE_TEXT_QUERY_RESPONSE".into(),
             ServerPacket::GameObjectCustomAnim { .. } => "SMSG_GAMEOBJECT_CUSTOM_ANIM".into(),
             ServerPacket::GameObjectDespawnAnim { .. } => "SMSG_GAMEOBJECT_DESPAWN_ANIM".into(),
+            ServerPacket::OpenContainer { .. } => "SMSG_OPEN_CONTAINER".into(),
+            ServerPacket::Inspect { .. } => "SMSG_INSPECT".into(),
+            ServerPacket::StandStateUpdate { .. } => "SMSG_STANDSTATE_UPDATE".into(),
             ServerPacket::FishNotHooked => "SMSG_FISH_NOT_HOOKED".into(),
             ServerPacket::FishEscaped => "SMSG_FISH_ESCAPED".into(),
             ServerPacket::PlaySound { .. } => "SMSG_PLAY_SOUND".into(),

@@ -504,6 +504,7 @@ fn panel_event(panel: QuestPanel) -> &'static str {
 fn feed_quest(
     script: Option<NonSendMut<UiScript>>,
     mut giver: ResMut<QuestGiver>,
+    objects: crate::net::Objects,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
@@ -562,6 +563,7 @@ fn feed_quest(
         st.background_material = giver.npc.and_then(|source| {
             crate::ui_item_text::object_material(
                 source,
+                &objects,
                 &items,
                 &go_templates,
                 materials.as_deref(),

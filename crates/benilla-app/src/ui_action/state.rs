@@ -34,7 +34,7 @@ use benilla_ui::script::{ActionState, UiScript};
 
 use crate::creature_anim::{Casting, Engaged};
 use crate::items::Items;
-use crate::net::{GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use crate::spell::Cooldowns;
 use crate::target::Selection;
 
@@ -124,7 +124,10 @@ pub(super) fn feed_action_state(
     ),
     self_q: Query<(&ObjectStore, &Transform, Has<Engaged>, Option<&Casting>), With<SelfPlayer>>,
     selection: Res<Selection>,
-    index: Res<GuidIndex>,
+    // The object lookup (2334) — the guid index this system already resolved its selection
+    // through, plus the item-store read the ITEM arms need. One param, not two: this signature
+    // sits at Bevy's 16-SystemParam ceiling.
+    objects: crate::net::Objects,
     units: Query<(&ObjectStore, &Transform), Without<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     reputations: Res<crate::net::Reputations>,
@@ -159,7 +162,7 @@ pub(super) fn feed_action_state(
     // reads this table. It used to be one whole walk per question — per reagent per spell slot,
     // per item slot — for the same bags each time (1697 item 13).
     let carried = me
-        .map(|(s, _, _, _)| carried_counts(&s.0, &items))
+        .map(|(s, _, _, _)| carried_counts(&s.0, &objects))
         .unwrap_or_default();
     let engaged = me.is_some_and(|(_, _, e, _)| e);
     let form_byte = me
@@ -172,8 +175,8 @@ pub(super) fn feed_action_state(
     // The current target's reach + squared distance (the client tests dx²+dy²+dz² — 0x6e47b0).
     let target = selection
         .guid
-        .and_then(|g| index.0.get(&g))
-        .and_then(|&e| units.get(e).ok());
+        .and_then(|g| objects.entity(g))
+        .and_then(|e| units.get(e).ok());
     let target_reach = target.map(|(s, _)| s.0.unit_combat_reach());
     let dist_sq = match (self_pos, target) {
         (Some(a), Some((_, t))) => Some(a.distance_squared(t.translation)),
@@ -252,8 +255,15 @@ pub(super) fn feed_action_state(
                         carried: &carried,
                         spell_mods,
                     };
-                    let (u, oom) =
-                        usable::spell_usable(button.action, d, sp, &ctx, &items, &commands);
+                    let (u, oom) = usable::spell_usable(
+                        button.action,
+                        d,
+                        sp,
+                        &ctx,
+                        &objects,
+                        &items,
+                        &commands,
+                    );
                     st.usable = u;
                     st.not_enough_mana = oom;
                 } else {
@@ -298,7 +308,7 @@ pub(super) fn feed_action_state(
                 st.equipped = me.is_some_and(|(s, _, _, _)| {
                     (0..19).any(|i| {
                         s.0.player_inv_slot(i)
-                            .and_then(|g| items.object(g))
+                            .and_then(|g| objects.object(g))
                             .and_then(|o| o.object_entry())
                             == Some(button.action)
                     })
@@ -324,6 +334,7 @@ pub(super) fn feed_action_state(
                         count > 0 || st.equipped,
                         &ctx,
                         spells.as_deref(),
+                        &objects,
                         &items,
                         &commands,
                     );
@@ -511,7 +522,7 @@ mod tests {
             .init_resource::<crate::spell::ActiveChannel>()
             .init_resource::<crate::spell::SpellTargeting>()
             .init_resource::<Selection>()
-            .init_resource::<GuidIndex>()
+            .init_resource::<crate::net::GuidIndex>()
             .init_resource::<crate::net::Reputations>()
             .init_resource::<Items>()
             .insert_resource(NetCommands(tx));
@@ -575,10 +586,6 @@ mod tests {
                 },
             );
             let mut items = Items::default();
-            items.insert_object(
-                0xF0,
-                ObjectFields::from_pairs(&[(3, FOOD_ITEM), (STACK, 10)]),
-            );
             items.insert_template(
                 FOOD_ITEM,
                 Some(benilla_protocol::messages::ItemInfo {
@@ -616,10 +623,17 @@ mod tests {
                 .init_resource::<crate::spell::ActiveChannel>()
                 .init_resource::<crate::spell::SpellTargeting>()
                 .init_resource::<Selection>()
-                .init_resource::<GuidIndex>()
+                .init_resource::<crate::net::GuidIndex>()
                 .init_resource::<crate::net::Reputations>()
                 .insert_resource(items)
                 .insert_resource(NetCommands(tx));
+            // The ten muffins, as the one index's own item entity (2334).
+            crate::items::test_spawn_item(
+                app.world_mut(),
+                0xF0,
+                ObjectFields::from_pairs(&[(3, FOOD_ITEM), (STACK, 10)]),
+                false,
+            );
             // The player: alive, with the ten muffins in backpack slot 1.
             let flags = (1u32 << 3)
                 | if in_combat {

@@ -41,6 +41,7 @@ use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
 use benilla_world::schedule::WorldStage;
 
 mod arc;
+mod net;
 // Writing the frame onto the body we drive — pose, MovementState, the counter-twist gap.
 mod body_pose;
 pub(crate) mod camera;
@@ -230,6 +231,15 @@ pub(crate) struct StandStateRequest {
     pub(crate) state: u8,
 }
 
+/// The server's own stand state for OUR body (`SMSG_STANDSTATE_UPDATE` — the eat/drink sit, the
+/// stand on damage; decision 2339). Applied by [`posture`] through the same local setter the
+/// volunteered change uses, with no refusal gate and no packet back — the reference's `0x603e50`
+/// → `0x6127b0`. Written by [`net`], read in `control`.
+#[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
+pub(crate) struct ServerStandState {
+    pub(crate) state: u8,
+}
+
 /// **The body in our hands** — normally our own streamed avatar, and a possessed creature while we
 /// hold its reins (decision 1277). The controller reads its server pose to take control, then
 /// drives its transform (feet position + facing) and feeds its movement to the animation selector
@@ -301,6 +311,7 @@ pub(crate) struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         follow::plugin(app);
         camera_saved::plugin(app);
         camera_view::plugin(app);
@@ -379,6 +390,8 @@ impl Plugin for PlayerPlugin {
         // The posture setter's queue (the `/sit` family — decision 0881; `control` is the sole
         // executor, like the sheath queue).
         .add_message::<StandStateRequest>()
+        // The server's own stand state for our body (decision 2339), written by [`net`].
+        .add_message::<ServerStandState>()
         // Land-here ([`land`]): the ask, and the re-attach when the server's teleport lands.
         // Before `control` so the frame that applies the teleport is the frame that takes
         // third-person control back — `control` reads `detached` after this has cleared it.

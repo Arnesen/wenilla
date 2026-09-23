@@ -35,7 +35,7 @@ use benilla_ui::script::{ItemTextState, UiScript};
 use crate::go_templates::GameObjectTemplates;
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, NetCommands};
+use crate::net::{ClientCommand, NetCommands, Objects};
 use crate::query_cache::QueryCache;
 use crate::ui_mail::MailOpen;
 use crate::ui_script::{UiFeed, UiInput};
@@ -245,6 +245,7 @@ struct Readable {
 /// is FrameXML's "Parchment". A GameObject whose template is not cached yet is asked for.
 pub(crate) fn object_material(
     guid: u64,
+    objects: &Objects,
     items: &Items,
     go_templates: &GameObjectTemplates,
     materials: Option<&PageMaterials>,
@@ -260,7 +261,7 @@ pub(crate) fn object_material(
             }
         };
     }
-    let entry = items.object(guid)?.object_entry()?;
+    let entry = objects.object(guid)?.object_entry()?;
     let t = items.template(entry, guid, commands)?;
     name(t.page_material)
 }
@@ -270,6 +271,7 @@ pub(crate) fn object_material(
 /// single resolve serves both sources.
 fn readable(
     guid: u64,
+    objects: &Objects,
     items: &Items,
     go_templates: &GameObjectTemplates,
     materials: Option<&PageMaterials>,
@@ -283,7 +285,7 @@ fn readable(
             page_head: go.text_page.map_or(0, |p| p.page_id),
         });
     }
-    let entry = items.object(guid)?.object_entry()?;
+    let entry = objects.object(guid)?.object_entry()?;
     let t = items.template(entry, guid, commands)?;
     Some(Readable {
         title: t.name.clone(),
@@ -303,6 +305,7 @@ fn feed_item_text(
     mut open: ResMut<ItemTextOpen>,
     mail: Res<MailOpen>,
     pages: Res<PageTexts>,
+    objects: Objects,
     items: Res<Items>,
     names: Res<NameCache>,
     go_templates: Res<GameObjectTemplates>,
@@ -329,6 +332,7 @@ fn feed_item_text(
     }
     let Some(readable) = readable(
         sess.object_guid,
+        &objects,
         &items,
         &go_templates,
         materials.as_deref(),
@@ -365,7 +369,7 @@ fn feed_item_text(
         ReadSource::Letter { text_id } => {
             // The creator line: `ITEM_FIELD_CREATOR` → name cache (ask-once). `None` guid =
             // authorless.
-            let creator_guid = items
+            let creator_guid = objects
                 .object(sess.object_guid)
                 .and_then(|o| o.item_creator());
             let creator = match creator_guid {
@@ -572,6 +576,9 @@ mod quest_material_tests {
     #[test]
     fn a_quest_sourced_from_an_object_paints_the_objects_material() {
         let items = Items::default();
+        // No item source in this case — every one of these is a GameObject or a creature (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let mut gos = GameObjectTemplates::default();
         let (tx, rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
@@ -586,24 +593,47 @@ mod quest_material_tests {
         gos.insert(100, 2, "Wanted Poster".into(), &data);
         gos.insert(102, 10, "Chest".into(), &data);
         assert_eq!(
-            object_material(go_guid(100), &items, &gos, Some(&catalog), &commands).as_deref(),
+            object_material(
+                go_guid(100),
+                &objects,
+                &items,
+                &gos,
+                Some(&catalog),
+                &commands
+            )
+            .as_deref(),
             Some("Stone")
         );
         assert_eq!(
-            object_material(go_guid(102), &items, &gos, Some(&catalog), &commands).as_deref(),
+            object_material(
+                go_guid(102),
+                &objects,
+                &items,
+                &gos,
+                Some(&catalog),
+                &commands
+            )
+            .as_deref(),
             Some("Marble"),
             "a chest reads data[9]"
         );
         // A creature quest-giver: neither template, nothing asked.
         let creature = (u64::from(benilla_protocol::guid::HIGH_UNIT) << 48) | (6 << 24) | 1;
         assert_eq!(
-            object_material(creature, &items, &gos, Some(&catalog), &commands),
+            object_material(creature, &objects, &items, &gos, Some(&catalog), &commands),
             None
         );
         assert!(rx.try_recv().is_err(), "a creature source asks for nothing");
         // An uncached object: nothing yet, and the template is asked for.
         assert_eq!(
-            object_material(go_guid(777), &items, &gos, Some(&catalog), &commands),
+            object_material(
+                go_guid(777),
+                &objects,
+                &items,
+                &gos,
+                Some(&catalog),
+                &commands
+            ),
             None
         );
         assert!(

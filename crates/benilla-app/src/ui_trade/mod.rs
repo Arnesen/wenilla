@@ -55,7 +55,7 @@ use benilla_ui::script::{ScriptValue, TradeSideState, TradeSlotItem, TradeState,
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::target::Selection;
 use crate::ui_party::GroupState;
 use crate::ui_script::{UiFeed, UiInput};
@@ -766,14 +766,15 @@ fn own_item_at(
     bag: i64,
     slot: u32,
     store: Option<&ObjectStore>,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
 ) -> Option<TradeItem> {
-    let (guid, count) = crate::ui_items::slot_guid_count(store, bag, slot, items);
+    let (guid, count) = crate::ui_items::slot_guid_count(store, bag, slot, objects);
     if guid == 0 {
         return None;
     }
-    let entry = items.object(guid).and_then(|f| f.object_entry())?;
+    let entry = objects.object(guid).and_then(|f| f.object_entry())?;
     let display_id = items
         .template(entry, guid, commands)
         .map(|t| t.display_info_id)
@@ -994,6 +995,7 @@ fn drain_trade(
     commands: Res<NetCommands>,
     selection: Res<Selection>,
     group: Res<GroupState>,
+    objects: Objects,
     items: Res<Items>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
 ) {
@@ -1051,7 +1053,7 @@ fn drain_trade(
         if let Some(trade_slot) = id.checked_sub(1).and_then(|n| u8::try_from(n).ok()) {
             // Optimistic own display: vmangos echoes the placement only to the partner, so resolve the
             // bag item and fill our own column client-side (decision 0592 P2).
-            if let Some(item) = own_item_at(bag, slot, store, &items, &commands) {
+            if let Some(item) = own_item_at(bag, slot, store, &objects, &items, &commands) {
                 trade.place_own_item(id, item);
             }
             info!(target: "trade", "set item: slot {id} <- bag {bag}/{slot} (wire {wire_bag}/{wire_slot}); sending CMSG_SET_TRADE_ITEM");
@@ -1346,6 +1348,7 @@ mod tests {
         app.init_resource::<TradeSession>()
             .init_resource::<GroupState>()
             .init_resource::<Items>()
+            .init_resource::<GuidIndex>()
             .insert_resource(NetCommands(tx))
             .insert_resource(Selection {
                 target: None,
@@ -1844,6 +1847,7 @@ mod tests {
         app.init_resource::<TradeSession>()
             .init_resource::<GroupState>()
             .init_resource::<Items>()
+            .init_resource::<GuidIndex>()
             .insert_resource(NetCommands(tx))
             .insert_resource(Selection::default());
         let mut vm = UiScript::new().unwrap();
@@ -1891,6 +1895,7 @@ mod tests {
         app.init_resource::<TradeSession>()
             .init_resource::<GroupState>()
             .init_resource::<Items>()
+            .init_resource::<GuidIndex>()
             .insert_resource(NetCommands(tx))
             .insert_resource(Selection::default());
         app.insert_non_send_resource(UiScript::new().unwrap());

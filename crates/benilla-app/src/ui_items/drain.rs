@@ -9,7 +9,7 @@ use benilla_protocol::messages::BAG_PLAYER_INVENTORY;
 use benilla_ui::script::{UiScript, EQUIPMENT_BAG};
 
 use crate::items::Items;
-use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::pending_item_ops::PendingItemOps;
 
 use super::{slot_guid, slot_guid_count, wire_pos, INVTYPE_AMMO};
@@ -33,6 +33,7 @@ use super::{slot_guid, slot_guid_count, wire_pos, INVTYPE_AMMO};
 pub(crate) fn send_auto_equip(
     script: &mut UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
     bag_index: u8,
@@ -42,7 +43,7 @@ pub(crate) fn send_auto_equip(
 ) -> bool {
     if !suppress {
         if let Some(guid) = guid {
-            if gate.equip_binds(script, items, commands, guid) {
+            if gate.equip_binds(script, objects, items, commands, guid) {
                 gate.defer_equip(
                     script,
                     crate::ui_bind_confirm::PendingEquip::AutoEquip {
@@ -56,7 +57,7 @@ pub(crate) fn send_auto_equip(
         }
     }
     let ammo_entry = guid.and_then(|guid| {
-        let entry = items.object(guid)?.object_entry()?;
+        let entry = objects.object(guid)?.object_entry()?;
         let t = items.template(entry, guid, commands)?;
         (t.inventory_type == INVTYPE_AMMO).then_some(entry)
     });
@@ -90,6 +91,7 @@ pub(crate) fn send_auto_equip(
 pub(super) fn drain_container_autoequips(
     script: Option<NonSendMut<UiScript>>,
     items: Res<Items>,
+    objects: Objects,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut gate: crate::ui_bind_confirm::BindGate,
@@ -109,10 +111,11 @@ pub(super) fn drain_container_autoequips(
         let guid = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, bag, slot0, &items));
+            .and_then(|store| slot_guid(&store.0, bag, slot0, &objects));
         send_auto_equip(
             &mut script,
             &mut gate,
+            &objects,
             &items,
             &commands,
             bag_index,
@@ -216,9 +219,9 @@ pub(super) fn drain_inventory_uses(
         let (guid, start_quest, spell_index, use_spell, entry, is_charter) = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, EQUIPMENT_BAG, slot, &ladder.items))
+            .and_then(|store| slot_guid(&store.0, EQUIPMENT_BAG, slot, &ladder.objects))
             .and_then(|guid| {
-                let entry = ladder.items.object(guid)?.object_entry()?;
+                let entry = ladder.objects.object(guid)?.object_entry()?;
                 let t = ladder.items.template(entry, guid, &ladder.commands)?;
                 // The wire's spell byte is a template BLOCK ordinal (decision 0666) — the
                 // template is already in hand here for `start_quest`, so name the real one.
@@ -286,7 +289,7 @@ pub(super) fn drain_container_uses(
         let item_guid = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, bag, slot0, &ladder.items));
+            .and_then(|store| slot_guid(&store.0, bag, slot0, &ladder.objects));
         match item_guid {
             Some(guid) => {
                 debug!("ui_items: repair lua bag {bag} slot {slot} (item {guid:#x})");
@@ -320,7 +323,7 @@ pub(super) fn drain_container_uses(
             let item_guid = self_q
                 .iter()
                 .next()
-                .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &ladder.items));
+                .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &ladder.objects));
             match item_guid {
                 Some(guid) => {
                     debug!("ui_items: sell lua bag {bag} slot {slot} (item {guid:#x})");
@@ -370,9 +373,9 @@ pub(super) fn drain_container_uses(
         let clicked = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &ladder.items))
+            .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &ladder.objects))
             .and_then(|guid| {
-                let obj = ladder.items.object(guid)?;
+                let obj = ladder.objects.object(guid)?;
                 let inst_flags = obj.item_flags().unwrap_or(0);
                 let item_text_id = obj.item_text_id().unwrap_or(0);
                 let entry = obj.object_entry()?;
@@ -417,6 +420,7 @@ pub(super) fn drain_container_uses(
             if send_auto_equip(
                 &mut script,
                 &mut gate,
+                &ladder.objects,
                 &ladder.items,
                 &ladder.commands,
                 bag_index,
@@ -569,7 +573,7 @@ pub(super) fn drain_container_uses(
             let (guid, count) = self_q
                 .iter()
                 .next()
-                .map(|store| slot_guid_count(Some(store), bag, slot, &ladder.items))
+                .map(|store| slot_guid_count(Some(store), bag, slot, &ladder.objects))
                 .unwrap_or((0, 0));
             pending_items.add([(bag, slot, guid, count)]);
             script.fire_event("ITEM_LOCK_CHANGED", Vec::new());
@@ -662,6 +666,7 @@ pub(super) fn drain_container_moves(
     script: Option<NonSendMut<UiScript>>,
     commands: Res<NetCommands>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    objects: Objects,
     items: Res<Items>,
     mut pending: ResMut<PendingItemOps>,
     mut gate: crate::ui_bind_confirm::BindGate,
@@ -699,6 +704,7 @@ pub(super) fn drain_container_moves(
         send_container_move(
             &mut script,
             &mut gate,
+            &objects,
             &items,
             &commands,
             store,
@@ -727,6 +733,7 @@ fn is_equip_position(bag_index: u8, slot: u8) -> bool {
 pub(crate) fn send_container_move(
     script: &mut UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
     store: Option<&ObjectStore>,
@@ -758,9 +765,9 @@ pub(crate) fn send_container_move(
                 (mv.dst_bag, mv.dst_slot)
             };
             let slot0 = u8::try_from(item_slot.saturating_sub(1)).unwrap_or(0);
-            let guid = store.and_then(|s| slot_guid(&s.0, item_bag, slot0, items));
+            let guid = store.and_then(|s| slot_guid(&s.0, item_bag, slot0, objects));
             if let Some(guid) = guid {
-                if gate.equip_binds(script, items, commands, guid) {
+                if gate.equip_binds(script, objects, items, commands, guid) {
                     gate.defer_equip(
                         script,
                         crate::ui_bind_confirm::PendingEquip::Swap {
@@ -819,8 +826,8 @@ pub(crate) fn send_container_move(
         // The pending lock: both ends, baselined on their CURRENT (guid, count) — the resolving
         // clear then watches for either to move (an empty destination baselines (0, 0) and watches
         // for an item to land there).
-        let (src_guid, src_count) = slot_guid_count(store, mv.src_bag, mv.src_slot, items);
-        let (dst_guid, dst_count) = slot_guid_count(store, mv.dst_bag, mv.dst_slot, items);
+        let (src_guid, src_count) = slot_guid_count(store, mv.src_bag, mv.src_slot, objects);
+        let (dst_guid, dst_count) = slot_guid_count(store, mv.dst_bag, mv.dst_slot, objects);
         pending.add([
             (mv.src_bag, mv.src_slot, src_guid, src_count),
             (mv.dst_bag, mv.dst_slot, dst_guid, dst_count),
@@ -845,7 +852,7 @@ pub(super) fn drain_container_destroys(
     script: Option<NonSendMut<UiScript>>,
     commands: Res<NetCommands>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    items: Res<Items>,
+    objects: Objects,
     mut pending: ResMut<PendingItemOps>,
 ) {
     let Some(mut script) = script else {
@@ -864,7 +871,7 @@ pub(super) fn drain_container_destroys(
             slot: wire_slot,
             count,
         });
-        let (guid, stack) = slot_guid_count(store, bag, slot, &items);
+        let (guid, stack) = slot_guid_count(store, bag, slot, &objects);
         pending.add([(bag, slot, guid, stack)]);
         script.fire_event("ITEM_LOCK_CHANGED", Vec::new());
     }
@@ -913,6 +920,7 @@ mod tests {
             .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
             .init_resource::<crate::spell::targeting::SpellTargeting>()
             .init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
             .insert_resource(NetCommands(tx));
 
         // The player, holding the clam in backpack slot 1.
@@ -923,13 +931,15 @@ mod tests {
                 (F_PACK_SLOT_1 + 1, (CLAM >> 32) as u32),
             ])),
         ));
-        // The item object and its landed template — LOOTABLE, so the dispatcher's open arm claims
-        // the click (`ItemInfo::opens_loot`).
-        let mut items = app.world_mut().resource_mut::<Items>();
-        items.insert_object(
+        // The item object (an entity in the one index, 2334) and its landed template —
+        // LOOTABLE, so the dispatcher's open arm claims the click (`ItemInfo::opens_loot`).
+        crate::items::test_spawn_item(
+            app.world_mut(),
             CLAM,
             ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, CLAM_ENTRY)]),
+            false,
         );
+        let mut items = app.world_mut().resource_mut::<Items>();
         items.insert_template(
             CLAM_ENTRY,
             Some(ItemInfo {
@@ -1041,6 +1051,7 @@ pub(super) fn drain_bind_confirm_answers(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut pending: ResMut<PendingItemOps>,
+    objects: Objects,
     items: Res<Items>,
     commands: Res<NetCommands>,
     mut gate: crate::ui_bind_confirm::BindGate,
@@ -1073,6 +1084,7 @@ pub(super) fn drain_bind_confirm_answers(
                 send_container_move(
                     &mut script,
                     &mut gate,
+                    &objects,
                     &items,
                     &commands,
                     store,
@@ -1095,6 +1107,7 @@ pub(super) fn drain_bind_confirm_answers(
                 send_auto_equip(
                     &mut script,
                     &mut gate,
+                    &objects,
                     &items,
                     &commands,
                     bag_index,
@@ -1235,6 +1248,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::ui_bind_confirm::PendingEquips>()
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
             .init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
             .insert_resource(NetCommands(tx));
 
         app.world_mut().spawn((
@@ -1244,14 +1258,16 @@ mod bind_confirm_tests {
                 (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
             ])),
         ));
-        let mut items = app.world_mut().resource_mut::<Items>();
-        items.insert_object(
+        crate::items::test_spawn_item(
+            app.world_mut(),
             AXE_GUID,
             ObjectFields::from_pairs(&[
                 (F_OBJECT_ENTRY, FLURRY_AXE),
                 (F_ITEM_FLAGS, u32::from(already_bound)),
             ]),
+            false,
         );
+        let mut items = app.world_mut().resource_mut::<Items>();
         items.insert_template(
             FLURRY_AXE,
             Some(ItemInfo {
@@ -1501,6 +1517,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::ui_bind_confirm::PendingEquips>()
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
             .init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
             .insert_resource(NetCommands(tx));
         app.world_mut().spawn((
             SelfPlayer,
@@ -1509,11 +1526,13 @@ mod bind_confirm_tests {
                 (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
             ])),
         ));
-        let mut items = app.world_mut().resource_mut::<Items>();
-        items.insert_object(
+        crate::items::test_spawn_item(
+            app.world_mut(),
             AXE_GUID,
             ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, FLURRY_AXE)]),
+            false,
         );
+        let mut items = app.world_mut().resource_mut::<Items>();
         items.insert_template(
             FLURRY_AXE,
             Some(ItemInfo {
@@ -1662,6 +1681,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
             .init_resource::<crate::spell::targeting::SpellTargeting>()
             .init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
             .insert_resource(NetCommands(tx));
         app.world_mut().spawn((
             SelfPlayer,
@@ -1670,11 +1690,13 @@ mod bind_confirm_tests {
                 (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
             ])),
         ));
-        let mut items = app.world_mut().resource_mut::<Items>();
-        items.insert_object(
+        crate::items::test_spawn_item(
+            app.world_mut(),
             AXE_GUID,
             ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, FLURRY_AXE)]),
+            false,
         );
+        let mut items = app.world_mut().resource_mut::<Items>();
         let mut template = crate::items::test_template("A Bind-On-Use Thing");
         template.bonding = 3;
         template.quality = 3;

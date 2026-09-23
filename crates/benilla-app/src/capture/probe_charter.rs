@@ -117,7 +117,9 @@ use benilla_ui::script::UiScript;
 
 use super::probes::ProbeClock;
 use crate::items::Items;
-use crate::net::{ChatKind, ClientCommand, Guid, NetCommands, NetEntity, ObjectStore, SelfPlayer};
+use crate::net::{
+    ChatKind, ClientCommand, Guid, NetCommands, NetEntity, ObjectStore, Objects, SelfPlayer,
+};
 use crate::player::Player;
 use crate::target::cursor_mode::npc_flags;
 use crate::ui_gossip::GossipState;
@@ -458,6 +460,7 @@ fn charter_probe(
     mut probe: ResMut<CharterProbe>,
     gossip: Res<GossipState>,
     registrar: Res<GuildRegistrarState>,
+    objects: Objects,
     items: Res<Items>,
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -797,7 +800,12 @@ fn charter_probe(
                 };
                 return;
             }
-            let found = find_item(&store.0, &items, CHARTER_ITEM_ENTRY, ItemSearch::default());
+            let found = find_item(
+                &store.0,
+                &objects,
+                CHARTER_ITEM_ENTRY,
+                ItemSearch::default(),
+            );
             // The template has to have landed too, and it is folded into the SAME `Option` as the
             // item rather than short-circuiting on its own: the click dispatcher's charter arm is
             // a **template flag** test (`ITEM_FLAG_CHARTER`), so a click made before the answer
@@ -1168,9 +1176,12 @@ fn charter_probe(
                 // destroys whatever whole stack sits at the addressed position, so a stale pair
                 // would destroy the wrong item; nothing is expected to move a charter, and that is
                 // exactly the kind of expectation a destructive send must not rest on.
-                let Some((bag_index, slot, _)) =
-                    find_item(&store.0, &items, CHARTER_ITEM_ENTRY, ItemSearch::default())
-                else {
+                let Some((bag_index, slot, _)) = find_item(
+                    &store.0,
+                    &objects,
+                    CHARTER_ITEM_ENTRY,
+                    ItemSearch::default(),
+                ) else {
                     probe.pass(
                         9,
                         "cleanup",
@@ -1197,8 +1208,12 @@ fn charter_probe(
                 };
                 return;
             }
-            let still_there =
-                find_item(&store.0, &items, CHARTER_ITEM_ENTRY, ItemSearch::default());
+            let still_there = find_item(
+                &store.0,
+                &objects,
+                CHARTER_ITEM_ENTRY,
+                ItemSearch::default(),
+            );
             if still_there.is_none() {
                 probe.pass(
                     9,

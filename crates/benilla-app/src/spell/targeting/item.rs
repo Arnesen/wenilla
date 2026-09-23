@@ -179,7 +179,7 @@ pub(crate) fn commit_item_cast_on_pick(
         match self_q
             .iter()
             .next()
-            .and_then(|store| crate::ui_items::slot_guid(&store.0, bag, slot0, &ladder.items))
+            .and_then(|store| crate::ui_items::slot_guid(&store.0, bag, slot0, &ladder.objects))
         {
             Some(guid) => asks.push((guid, false)),
             None => {
@@ -203,7 +203,7 @@ pub(crate) fn commit_item_cast_on_pick(
         // the bag needed it for the icon) binds ungated and lets the server judge, the same
         // permissive shape the rest of the click law uses.
         let entry = ladder
-            .items
+            .objects
             .object(item_guid)
             .and_then(|o| o.object_entry());
         let clicked = match entry {
@@ -227,7 +227,7 @@ pub(crate) fn commit_item_cast_on_pick(
             continue;
         };
         let cat = enchants.as_deref();
-        let fields = ladder.items.object(item_guid);
+        let fields = ladder.objects.object(item_guid);
         let item = ClickedItem {
             class,
             subclass,

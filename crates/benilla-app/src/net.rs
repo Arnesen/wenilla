@@ -21,6 +21,7 @@ use benilla_protocol::{
     messages::WhoRequest, EntityKind, JumpInfo, MoveMode, MoveSpeeds, ObjectFields, SessionEvent,
     SpeedKind, TransportPose,
 };
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender};
 
@@ -548,11 +549,48 @@ pub(crate) struct LoginSubmit(pub(crate) Sender<io::LoginRequest>);
 #[derive(Resource)]
 pub(crate) struct LoginAbandon(pub(crate) std::sync::Arc<std::sync::atomic::AtomicU64>);
 
-/// guid → spawned ECS entity, for O(1) lookup on move/remove. Maintained solely by
-/// [`apply_net_updates`]; read-only to everyone else (the merchant range-close resolves its vendor
-/// through it).
+/// guid → spawned ECS entity, for O(1) lookup on move/remove — every kind, items and containers
+/// included since decision 2334 (the reference's one `ClntObjMgr` index). Maintained solely by
+/// the object layer's handlers (`net::objects`); read-only to everyone else, through [`Objects`]
+/// or directly.
 #[derive(Resource, Default)]
 pub(crate) struct GuidIndex(pub(crate) HashMap<u64, Entity>);
+
+/// **The object manager's guid lookup** — `ClntObjMgrObjectPtr 0x468460`'s shape: a guid to its
+/// descriptor store, whatever the kind. The one read-only parameter a helper that resolves guids
+/// takes (the inventory walkers resolve item guids off the player's slot arrays through it,
+/// decision 2334), and an item's countdown cells beside its fields (2340); the handlers write
+/// both through their own mutable queries.
+#[derive(SystemParam)]
+pub(crate) struct Objects<'w, 's> {
+    index: Res<'w, GuidIndex>,
+    stores: Query<'w, 's, &'static ObjectStore>,
+    countdowns: Query<'w, 's, &'static crate::items::Countdowns>,
+}
+
+impl Objects<'_, '_> {
+    /// The entity behind a guid, if streamed.
+    pub(crate) fn entity(&self, guid: u64) -> Option<Entity> {
+        self.index.0.get(&guid).copied()
+    }
+
+    /// A streamed object's merged descriptor fields.
+    pub(crate) fn object(&self, guid: u64) -> Option<&ObjectFields> {
+        self.index
+            .0
+            .get(&guid)
+            .and_then(|&e| self.stores.get(e).ok())
+            .map(|s| &s.0)
+    }
+
+    /// An item object's countdown cells — `None` for a guid that is not a held item.
+    pub(crate) fn countdowns(&self, guid: u64) -> Option<&crate::items::Countdowns> {
+        self.index
+            .0
+            .get(&guid)
+            .and_then(|&e| self.countdowns.get(e).ok())
+    }
+}
 
 /// Our own player's guid, once the IO thread reports we're in the world. Used to tag
 /// [`SelfPlayer`], and read by the combat-text emitters' source-ownership classifier

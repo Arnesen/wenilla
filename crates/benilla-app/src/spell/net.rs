@@ -400,7 +400,7 @@ fn on_item_cooldown(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) {
         spell_id,
     } = ev
     {
-        item_cooldown(item_guid, spell_id, &sc.items, &mut l.cooldowns);
+        item_cooldown(item_guid, spell_id, &l.index, &sc.stores, &mut l.cooldowns);
     }
 }
 
@@ -1095,7 +1095,8 @@ fn spell_go(
                 stores.get(*e).ok()?.0.unit_ranged_attack_time()
             })
             .unwrap_or(0);
-        match item_caster.and_then(|g| items.object(g)?.object_entry()) {
+        // The item's entry off its own store — an item is an object in the index (2334).
+        match item_caster.and_then(|g| stores.get(*index.0.get(&g)?).ok()?.0.object_entry()) {
             Some(entry) => {
                 let use_spell = items
                     .template(entry, 0, net_commands)
@@ -1432,11 +1433,17 @@ fn spell_cooldowns(
 fn item_cooldown(
     item_guid: u64,
     spell_id: u32,
-    items: &crate::items::Items,
+    index: &GuidIndex,
+    stores: &Query<&mut ObjectStore>,
     cooldowns: &mut Cooldowns,
 ) {
     debug!("net: item cooldown — item {item_guid:#x} spell {spell_id}");
-    if let Some(entry) = items.object(item_guid).and_then(|o| o.object_entry()) {
+    let entry = index
+        .0
+        .get(&item_guid)
+        .and_then(|&e| stores.get(e).ok())
+        .and_then(|s| s.0.object_entry());
+    if let Some(entry) = entry {
         cooldowns.apply_wire_item_cooldown(entry, spell_id, Instant::now());
     }
 }

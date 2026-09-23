@@ -829,6 +829,21 @@ pub(super) fn read_item_time(r: &mut &[u8]) -> io::Result<(u64, u32)> {
 ///
 /// `seconds == 0` means expired, and the reference stores that as **no timer** (`0x5d9cc0` writes
 /// a `0` deadline whenever `seconds <= 0`), not as "0 seconds left".
+/// Read `SMSG_OPEN_CONTAINER` → the item guid. VERIFIED vmangos `Player::SendOpenContainer`
+/// (`Objects/Player.cpp:11707`) → `WorldPackets::Item::OpenContainer`, whose whole body is the item
+/// guid; the one sender is `HandleAutoEquipItemOpcode` (`ItemHandler.cpp:227`) when the destination
+/// is a bag slot. The reference fires `BAG_OPEN(containerId)` from it and nothing else (2339).
+pub(super) fn read_open_container(r: &mut &[u8]) -> io::Result<u64> {
+    read_u64_le(r)
+}
+
+/// Read `SMSG_INSPECT` → the echoed target guid. VERIFIED vmangos `HandleInspectOpcode`
+/// (`MiscHandler.cpp:957`) → `WorldPackets::Misc::InspectResponse`, one `u64`. The reference's
+/// handler `0x5e7d70` reads it and does nothing with it (2339; decision 0631's call).
+pub(super) fn read_inspect(r: &mut &[u8]) -> io::Result<u64> {
+    read_u64_le(r)
+}
+
 pub(super) fn read_item_enchant_time(r: &mut &[u8]) -> io::Result<(u64, u32, u32)> {
     let item_guid = read_u64_le(r)?;
     let slot = read_u32_le(r)?;
@@ -845,6 +860,35 @@ mod tests {
 
     // Byte-exact encode goldens — the item-move CMSG bodies (VERIFIED field order + widths against
     // vmangos `Server/Packets/Item.cpp` `ReadFromWorldPacket`s; every field is a `uint8`).
+
+    #[test]
+    fn open_container_decodes() {
+        // The whole body is the bag's guid (VERIFIED vmangos `Player::SendOpenContainer` →
+        // `WorldPackets::Item::OpenContainer::AppendBodyTo` writes only `itemGuid`); decision 2339.
+        let body = 0x4000_0000_0012_3456u64.to_le_bytes();
+        match crate::messages::parse_server(crate::messages::opcode::SMSG_OPEN_CONTAINER, &body)
+            .unwrap()
+        {
+            crate::messages::ServerPacket::OpenContainer { item } => {
+                assert_eq!(item, 0x4000_0000_0012_3456);
+            }
+            other => panic!("expected OpenContainer, got {}", other.name()),
+        }
+    }
+
+    #[test]
+    fn inspect_decodes_and_is_ignored() {
+        // One u64, the echoed target (VERIFIED vmangos `Misc::InspectResponse::AppendBodyTo`), and
+        // `decode()` turns it into nothing — the reference's handler discards it too (2339, 0631).
+        let body = 0x0000_0000_0000_0007u64.to_le_bytes();
+        let packet =
+            crate::messages::parse_server(crate::messages::opcode::SMSG_INSPECT, &body).unwrap();
+        assert!(matches!(
+            packet,
+            crate::messages::ServerPacket::Inspect { guid: 7 }
+        ));
+        assert!(crate::events::decode(packet).is_empty());
+    }
 
     #[test]
     fn auto_equip_item_body() {

@@ -18,7 +18,7 @@ use benilla_protocol::EntityKind;
 
 use crate::aura_visual::AuraProc;
 use crate::entities::ItemDisplays;
-use crate::items::Items;
+use crate::items::{ItemObject, Items};
 use crate::net::{FieldChanged, NetCommands, NetEntity, ObjectStore};
 use benilla_assets::{LockRecover, WorldAssets};
 
@@ -336,7 +336,9 @@ pub(super) struct WeaponVisualSrc<'w, 's> {
     displays: Option<Res<'w, ItemDisplays>>,
     items: Option<Res<'w, Items>>,
     net: Option<Res<'w, NetCommands>>,
-    units: Query<'w, 's, (Option<&'static NetEntity>, &'static ObjectStore)>,
+    // `Without<ItemObject>`: an item is an object in the index too (2334), and its block's
+    // dwords overlap the unit's indices — a unit read of an item store answers item fields.
+    units: Query<'w, 's, (Option<&'static NetEntity>, &'static ObjectStore), Without<ItemObject>>,
 }
 
 impl WeaponVisualSrc<'_, '_> {
@@ -779,7 +781,7 @@ pub(super) fn route_cast_visuals(
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut weapon_src: WeaponVisualSrc,
-    units: Query<(Entity, &ObjectStore)>,
+    units: Query<(Entity, &ObjectStore), Without<ItemObject>>,
     holds: Query<&CastHold>,
     mut channel_cache: Local<EntityHashMap<u32>>,
 ) {
@@ -1337,8 +1339,8 @@ pub(crate) fn arm_aura_state_fx(
     // sight, because a standing aura is a STATE the streamed-in unit wears, not an edge. The
     // unfiltered twin runs exactly once per DBC-resource arrival: a unit that streamed in before
     // `SpellVisuals`/`Spells` landed carries standing auras no edge will re-announce.
-    units: Query<(Entity, &ObjectStore)>,
-    arrived: Query<Entity, Added<ObjectStore>>,
+    units: Query<(Entity, &ObjectStore), Without<ItemObject>>,
+    arrived: Query<Entity, (Added<ObjectStore>, Without<ItemObject>)>,
     mut edges: MessageReader<FieldChanged>,
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
@@ -1481,7 +1483,7 @@ pub(super) fn arm_loot_fx(
     // `CORPSE_FIELD_DYNAMIC_FLAGS` bit 0 (decision 1723) — different fields at different indices,
     // and a corpse descriptor has no UNIT block to ask at all; the edge's `kind` keeps them apart.
     units: Query<(Entity, &ObjectStore, &crate::net::NetEntity)>,
-    arrived: Query<Entity, Added<ObjectStore>>,
+    arrived: Query<Entity, (Added<ObjectStore>, Without<ItemObject>)>,
     mut edges: MessageReader<FieldChanged>,
     visuals: Option<Res<SpellVisuals>>,
     mut fx: MessageWriter<SpellKitFx>,

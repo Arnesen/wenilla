@@ -54,7 +54,7 @@ use benilla_ui::script::{
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, UiError};
 use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
@@ -775,6 +775,7 @@ fn drain_auction(
     mut auction: ResMut<AuctionOpen>,
     commands: Res<NetCommands>,
     time: Res<Time>,
+    objects: Objects,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     names: Res<NameCache>,
@@ -910,7 +911,7 @@ fn drain_auction(
             .auction_sell_item()
             .and_then(|(bag, slot)| {
                 self_q.iter().next().and_then(|(store, _)| {
-                    crate::ui_items::slot_guid(&store.0, bag, (slot.max(1) - 1) as u8, &items)
+                    crate::ui_items::slot_guid(&store.0, bag, (slot.max(1) - 1) as u8, &objects)
                 })
             })
             .unwrap_or(0);

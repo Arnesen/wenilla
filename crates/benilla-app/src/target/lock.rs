@@ -44,7 +44,7 @@ use crate::net::ObjectStore;
 /// item-template cache (key-item names for the "Requires \<key\>" toast, and the key's own ON_USE
 /// spell). The `Option` members are absent without client data.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct GoLockInputs<'w> {
+pub(crate) struct GoLockInputs<'w, 's> {
     // Shared: the tooltip arm's ask-once template request on a miss marks itself through
     // `&self` (decision 2288), so neither arm needs the store exclusively.
     pub(crate) templates: Res<'w, crate::go_templates::GameObjectTemplates>,
@@ -55,6 +55,8 @@ pub(crate) struct GoLockInputs<'w> {
     /// ([`spell_skill_value`]). Absent without client data, which reads as skill 0 (fail-closed).
     pub(crate) skill_lines: Option<Res<'w, crate::ui_spellbook::SkillLines>>,
     pub(crate) items: Res<'w, crate::items::Items>,
+    /// The one object index (2334) — the key-item scan walks the player's bags through it.
+    pub(crate) objects: crate::net::Objects<'w, 's>,
 }
 
 /// The GameObject facts the Action gate and the requirement fallback read off the wire — gathered
@@ -154,7 +156,7 @@ pub(crate) fn resolve_lock(
     spells: Option<&crate::ui_action::Spells>,
     skill_lines: Option<&benilla_formats::SkillLineCatalog>,
     me: Option<&ObjectStore>,
-    items: &crate::items::Items,
+    objects: &crate::net::Objects,
     go: GoFacts,
     matched_spell: &mut Option<u32>,
 ) -> LockOutcome {
@@ -189,7 +191,7 @@ pub(crate) fn resolve_lock(
                 if !slot.available(go.state, go.flag_locked) {
                     continue;
                 }
-                if me.is_some_and(|s| holds_item(&s.0, items, slot.index)) {
+                if me.is_some_and(|s| holds_item(&s.0, objects, slot.index)) {
                     return LockOutcome::OpenByKey(slot.index);
                 }
             }
@@ -306,11 +308,16 @@ pub(crate) fn required_skill(slot: &LockSlot, go_level: u32) -> i32 {
 /// `CMSG_USE_ITEM` (decision 0769).
 fn holds_item(
     store: &benilla_protocol::messages::ObjectFields,
-    items: &crate::items::Items,
+    objects: &crate::net::Objects,
     entry: u32,
 ) -> bool {
-    crate::ui_items::find_item(store, items, entry, crate::ui_items::ItemSearch::default())
-        .is_some()
+    crate::ui_items::find_item(
+        store,
+        objects,
+        entry,
+        crate::ui_items::ItemSearch::default(),
+    )
+    .is_some()
 }
 
 #[cfg(test)]
@@ -445,7 +452,10 @@ mod tests {
         // Spell → line: Mining is SkillLine 186.
         let lines = SkillLineCatalog::from_spell_lines([(2575, 186)]);
         let known = BTreeSet::from([2575]);
-        let items = crate::items::Items::default();
+        // Nothing streamed: no case here holds a key, and the key branch is only reached
+        // with a store, which these pass as `None` (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         // A 250-skill vein, available (Action 0, READY, not flagged).
         let mut vein = [LockSlot::default(); 8];
         vein[0] = skill_slot(3, 250, 0);
@@ -471,7 +481,7 @@ mod tests {
                 Some(&spells),
                 lines,
                 store,
-                &items,
+                &objects,
                 facts,
                 &mut None,
             )
@@ -509,7 +519,10 @@ mod tests {
             skill_slot(10, 0, 0), // Quick Open — Action 0, gated out on a flagged-locked door
             LockSlot::default(),
         ];
-        let items = crate::items::Items::default();
+        // Nothing streamed: no case here holds a key, and the key branch is only reached
+        // with a store, which these pass as `None` (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let mut matched = None;
         let out = resolve_lock(
             &slots,
@@ -517,7 +530,7 @@ mod tests {
             None,
             None,
             None,
-            &items,
+            &objects,
             GoFacts {
                 state: GO_STATE_READY,
                 flag_locked: true,
@@ -588,7 +601,10 @@ mod tests {
             ),
             ..crate::ui_action::Spells::empty_for_tests()
         };
-        let items = crate::items::Items::default();
+        // Nothing streamed: no case here holds a key, and the key branch is only reached
+        // with a store, which these pass as `None` (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let locked_shut = GoFacts {
             state: GO_STATE_READY,
             flag_locked: true,
@@ -604,7 +620,7 @@ mod tests {
                 Some(&spells),
                 None,
                 None,
-                &items,
+                &objects,
                 locked_shut,
                 &mut matched,
             ),
@@ -624,7 +640,7 @@ mod tests {
                 Some(&spells),
                 None,
                 None,
-                &items,
+                &objects,
                 GoFacts {
                     flag_locked: false,
                     ..locked_shut
@@ -647,7 +663,7 @@ mod tests {
                 Some(&spells),
                 None,
                 None,
-                &items,
+                &objects,
                 locked_shut,
                 &mut matched,
             ),
@@ -676,7 +692,7 @@ mod tests {
                 Some(&spells),
                 None,
                 None,
-                &items,
+                &objects,
                 locked_shut,
                 &mut None,
             ),
@@ -708,7 +724,7 @@ mod tests {
                 Some(&with_mining),
                 None,
                 None,
-                &items,
+                &objects,
                 GoFacts {
                     state: GO_STATE_READY,
                     flag_locked: false,
@@ -758,7 +774,10 @@ mod tests {
             ),
             ..crate::ui_action::Spells::empty_for_tests()
         };
-        let items = crate::items::Items::default();
+        // Nothing streamed: no case here holds a key, and the key branch is only reached
+        // with a store, which these pass as `None` (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let unlocked = GoFacts {
             state: GO_STATE_READY,
             flag_locked: false,
@@ -773,7 +792,7 @@ mod tests {
                 Some(&spells),
                 None,
                 None,
-                &items,
+                &objects,
                 unlocked,
                 &mut matched,
             ),
@@ -791,7 +810,7 @@ mod tests {
                 Some(&spells),
                 None,
                 None,
-                &items,
+                &objects,
                 unlocked,
                 &mut matched,
             ),
@@ -803,7 +822,10 @@ mod tests {
     #[test]
     fn an_empty_row_is_unlocked() {
         let slots = [LockSlot::default(); 8];
-        let items = crate::items::Items::default();
+        // Nothing streamed: no case here holds a key, and the key branch is only reached
+        // with a store, which these pass as `None` (2334).
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
         let mut matched = None;
         assert_eq!(
             resolve_lock(
@@ -812,7 +834,7 @@ mod tests {
                 None,
                 None,
                 None,
-                &items,
+                &objects,
                 GoFacts {
                     state: GO_STATE_ACTIVE,
                     flag_locked: false,

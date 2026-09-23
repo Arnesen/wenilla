@@ -78,7 +78,7 @@ impl ObjectFields {
     ///
     /// The triple's MIDDLE field (the duration) is deliberately not exposed: the reference's
     /// tooltip never reads it. A temporary enchant's countdown comes from
-    /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` instead (`items::Items::enchant_remaining_ms`).
+    /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` instead (`items::Countdowns::enchant_remaining_ms`).
     pub fn item_enchant_charges(&self, slot: u8) -> u32 {
         (slot < 7)
             .then(|| self.get_u32(FIELD_ITEM_ENCHANTMENT + 3 * u16::from(slot) + 2))

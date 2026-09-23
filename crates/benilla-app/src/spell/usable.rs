@@ -27,7 +27,7 @@ use benilla_formats::{
 };
 
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, Reputations};
+use crate::net::{NetCommands, ObjectStore, Objects, Reputations};
 use crate::spell::Cooldowns;
 use crate::spell::{SpellModifiers, OP_COST};
 use crate::target::{can_attack, ring_reaction, Factions};
@@ -99,6 +99,7 @@ fn hand_mask(d: &SpellDisplay) -> u32 {
 pub(crate) fn equipped_item_fits_cached(
     d: &SpellDisplay,
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
 ) -> bool {
     if d.equipped_item_class < 0
@@ -108,7 +109,7 @@ pub(crate) fn equipped_item_fits_cached(
         return true;
     }
     let mut mask = hand_mask(d);
-    if let Some(hidden) = crate::items::disarmed_equipment_slot_cached(store, items) {
+    if let Some(hidden) = crate::items::disarmed_equipment_slot_cached(store, objects, items) {
         mask &= !(1u32 << hidden);
     }
     equipped_slots_match(
@@ -117,7 +118,7 @@ pub(crate) fn equipped_item_fits_cached(
         d.equipped_item_class as u32,
         d.equipped_item_subclass_mask,
         |guid| {
-            let obj = items.object(guid)?;
+            let obj = objects.object(guid)?;
             let t = items.template_cached(obj.object_entry()?)?;
             Some(WornItem {
                 class: t.class,
@@ -161,6 +162,7 @@ pub(crate) fn equipped_item_reason(d: &SpellDisplay) -> u8 {
 pub(crate) fn equipped_item_fits(
     d: &SpellDisplay,
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
 ) -> bool {
@@ -194,11 +196,11 @@ pub(crate) fn equipped_item_fits(
     // probes and a mask edit, NOT by `GetWeapon` returning NULL — same ladder, same outcome, one
     // hand only). A disarmed warrior's Heroic Strike greys out and its tooltip requirement line
     // turns red; a disarmed dual-wielder's off-hand weapon still satisfies a hand-agnostic one.
-    if let Some(hidden) = crate::items::disarmed_equipment_slot(store, items, commands) {
+    if let Some(hidden) = crate::items::disarmed_equipment_slot(store, objects, items, commands) {
         mask &= !(1u32 << hidden);
     }
     equipped_slots_match(store, mask, class, d.equipped_item_subclass_mask, |guid| {
-        let (entry, durability, max_durability) = items.object(guid).and_then(|o| {
+        let (entry, durability, max_durability) = objects.object(guid).and_then(|o| {
             Some((
                 o.object_entry()?,
                 o.item_durability(),
@@ -312,6 +314,7 @@ pub(crate) fn item_usable(
     held: bool,
     ctx: &UsableCtx,
     spells: Option<&Spells>,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
 ) -> (bool, bool) {
@@ -336,7 +339,7 @@ pub(crate) fn item_usable(
     let (Some(d), Some(spells)) = (d, spells) else {
         return (false, false);
     };
-    spell_usable(spell_id, d, spells, ctx, items, commands)
+    spell_usable(spell_id, d, spells, ctx, objects, items, commands)
 }
 
 /// The walk. Returns `(usable, not_enough_mana)` — the `IsUsableAction` pair.
@@ -345,6 +348,7 @@ pub(crate) fn spell_usable(
     d: &SpellDisplay,
     spells: &Spells,
     ctx: &UsableCtx,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
 ) -> (bool, bool) {
@@ -369,7 +373,7 @@ pub(crate) fn spell_usable(
         }
     }
     // Leg 4 (`0x6e40e0`): some worn item must match the class + subclass mask.
-    if !equipped_item_fits(d, ctx.store, items, commands) {
+    if !equipped_item_fits(d, ctx.store, objects, items, commands) {
         return (false, false);
     }
     // Leg 5 (`0x6e3e7a`–`0x6e3eb2`): the combo-point gate, §5-VERIFIED end to end (0879). A
@@ -559,8 +563,7 @@ mod tests {
             for (i, (field, guid)) in hands.iter().enumerate() {
                 pairs.push((*field, *guid as u32));
                 let entry = 500 + i as u32;
-                deps.items
-                    .insert_object(*guid, ObjectFields::from_pairs(&[(3, entry)]));
+                deps.spawn_item(*guid, ObjectFields::from_pairs(&[(3, entry)]));
                 deps.items.insert_template(
                     entry,
                     Some(benilla_protocol::messages::ItemInfo {
@@ -571,7 +574,9 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            equipped_item_fits(&needs_a_weapon, &store, &deps.items, &deps.commands)
+            deps.with_objects(|objects, items, commands| {
+                equipped_item_fits(&needs_a_weapon, &store, objects, items, commands)
+            })
         };
 
         // CONTROL — armed, the sword satisfies it.
@@ -615,7 +620,7 @@ mod tests {
             for (i, (field, guid, flags, max_dur, dur)) in hands.iter().enumerate() {
                 pairs.push((*field, *guid as u32));
                 let entry = 500 + i as u32;
-                deps.items.insert_object(
+                deps.spawn_item(
                     *guid,
                     ObjectFields::from_pairs(&[
                         (3, entry),
@@ -634,7 +639,9 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            equipped_item_fits(d, &store, &deps.items, &deps.commands)
+            deps.with_objects(|objects, items, commands| {
+                equipped_item_fits(d, &store, objects, items, commands)
+            })
         };
 
         let sound = |field| (field, 0x2au64, 0u32, 0u32, 0u32);
@@ -687,8 +694,7 @@ mod tests {
                 let guid = 0x2a + i as u64;
                 pairs.push((*field, guid as u32));
                 let entry = 500 + i as u32;
-                deps.items
-                    .insert_object(guid, ObjectFields::from_pairs(&[(3, entry)]));
+                deps.spawn_item(guid, ObjectFields::from_pairs(&[(3, entry)]));
                 deps.items.insert_template(
                     entry,
                     Some(benilla_protocol::messages::ItemInfo {
@@ -699,17 +705,20 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            equipped_item_fits(
-                &SpellDisplay {
-                    equipped_item_class: 2,
-                    equipped_item_subclass_mask: 1 << 7, // Sword1H
-                    attributes_ex3: ex3,
-                    ..Default::default()
-                },
-                &store,
-                &deps.items,
-                &deps.commands,
-            )
+            deps.with_objects(|objects, items, commands| {
+                equipped_item_fits(
+                    &SpellDisplay {
+                        equipped_item_class: 2,
+                        equipped_item_subclass_mask: 1 << 7, // Sword1H
+                        attributes_ex3: ex3,
+                        ..Default::default()
+                    },
+                    &store,
+                    objects,
+                    items,
+                    commands,
+                )
+            })
         };
 
         // Dual-wielding, armed: both abilities are usable.
@@ -748,13 +757,16 @@ mod tests {
         let items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
-        let carried = crate::ui_items::carried_counts(&store.0, &items);
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
+        let carried = crate::ui_items::carried_counts(&store.0, &objects);
         let spell_mods = SpellModifiers::default();
         spell_usable(
             1,
             d,
             &spells,
             &ctx(store, &cooldowns, &reputations, &carried, &spell_mods),
+            &objects,
             &items,
             &commands,
         )
@@ -933,7 +945,9 @@ mod tests {
 
         let healthy = ObjectStore(ObjectFields::from_pairs(&[(22, 100), (125, 0)]));
         let low = ObjectStore(ObjectFields::from_pairs(&[(22, 10), (125, 0x2)]));
-        let carried = crate::ui_items::carried_counts(&me.0, &items);
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
+        let carried = crate::ui_items::carried_counts(&me.0, &objects);
         for (target, expect) in [(&healthy, false), (&low, true)] {
             let ctx = UsableCtx {
                 store: &me,
@@ -945,7 +959,7 @@ mod tests {
                 spell_mods: &SpellModifiers::default(),
             };
             assert_eq!(
-                spell_usable(5308, &execute, &spells, &ctx, &items, &commands),
+                spell_usable(5308, &execute, &spells, &ctx, &objects, &items, &commands),
                 (expect, false)
             );
         }
