@@ -59,7 +59,11 @@ fork, and forks are welcome.
 - **The loop.** `cargo play` builds and runs the play profile. `scripts/check.sh` verifies a
   round of work; `scripts/gates.sh` is the full chain, and it opens a window for the engine boot
   checks, so it needs a display. Work on a branch.
-- Bugs, questions and ideas go to the Discord linked from the README. Issues are off on purpose,
-  and pull requests are not open yet.
+
+## Reporting a bug
+
+Open an issue: what you did, what you saw and what 1.12.1 does instead, with the server and the
+platform you ran on. Questions and ideas are welcome there or on the Discord linked from the
+README.
 
 Working with an AI agent is expected. The agent reads `AGENTS.md`, and the same rules bind it.
