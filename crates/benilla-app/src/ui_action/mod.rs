@@ -12,15 +12,16 @@
 //!   checked/flash — the per-frame half, fed after the identity half so a fresh slot's first state
 //!   push lands the same frame.
 //! - **Outward — use** ([`drain::drain_action_uses`]): a queued `UseAction(n)` becomes wire — a
-//!   spell through the one cast-send path ([`cast_send`]), the auto-attack through
+//!   spell through the one cast-send path ([`crate::spell::CastLadder`]), the auto-attack through
 //!   `CMSG_ATTACKSWING`, an item through the two-stage equip-vs-use law ([`drain::item_action_route`],
 //!   decision 0666).
 //! - **Outward — set** ([`drain::drain_action_sets`]): the cursor seam's `PickupAction`/
 //!   `PlaceAction` mutations become `CMSG_SET_ACTION_BUTTON` sends, one per queued entry.
 //!
-//! The supporting law sits alongside: [`cast_target`] (which unit a cast binds), [`cast_fail`] +
-//! [`errors`] (the red error line's two layers), [`usable`] (the castability walk the stance bar
-//! shares), [`weapon_icon`] (the auto-attack's borrowed weapon icon).
+//! The supporting law sits alongside: [`cast_fail`] + [`errors`] (the red error line's two
+//! layers) and [`weapon_icon`] (the auto-attack's borrowed weapon icon). The cast ladder itself —
+//! the target bind, the validator's rungs, the usable walk, the targeting cursor — is the spell's
+//! ([`crate::spell`], decision 2330); this module is one of its callers.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -34,8 +35,6 @@ use crate::ui_unit::UnitFeed;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
 mod cast_fail;
-mod cast_send;
-pub(crate) mod cast_target;
 mod drain;
 #[cfg(test)]
 mod drain_tests;
@@ -47,7 +46,6 @@ mod feed_tests;
 mod net;
 mod ranks;
 mod state;
-pub(crate) mod targeting;
 pub(crate) mod toggle;
 mod weapon_icon;
 
@@ -61,43 +59,14 @@ mod weapon_icon;
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CooldownEvents;
 
-// The one cast path, and the only way in: every caster surface takes [`CastLadder`] as a single
-// SystemParam and commits through [`CastCommit`] — `send_spell_cast` itself is private to
-// `cast_send`, so a second send path cannot be written by accident (decision 0914).
-pub(crate) use cast_send::{CastCommit, CastLadder};
-pub(crate) use cast_target::AutoSelfCast;
-
-/// `autoSelfCast`'s change callback (decision 2303): a flag.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut auto: ResMut<AutoSelfCast>) {
-    if ev.is("autoSelfCast") {
-        auto.0 = ev.flag();
-    }
-}
 pub(crate) use errors::{
     attack_actor_blocked, attack_actor_refusal, keyed_line, keyed_line_s, reagent_totem_refusal,
     show_messages, ui_error_text, CastErrors, CastFail, Caster, FillArg, MessageSink, MountErrors,
     PetTameFailures, Shown, UiError, UiErrorKeys, UiErrorTexts,
 };
-// `pub(crate)`: the requirement validator's mounted block is ONE gate in the reference
-// (`0x6094f0` @ `0x609c6c`) sitting under the ONE cast entry `TryCast 0x6e4b60` — but benilla still
-// has cast sends outside [`CastLadder`]: the world click's skin cast, the corpse insignia cast and
-// the GameObject opener (decisions 0552/0914). Each of them reaches TryCast in the reference
-// (`0x5f05e0 → 0x6e5a90 → 0x6e4b60`; `0x5f35c0 → 0x6e5a90 → 0x6e4b60`), so each of them must ask
-// this question — the same reason `reagent_totem_refusal` above is already exported. Exporting the
-// predicate is the honest interim; the ladder refactor that would retire it is 0914's, not 1851's.
-pub(crate) use state::cast_mounted_refusal;
-// `pub(crate)`: the target chain registers the cursor pre-empt + the click commit, and the
-// spellbook/stance/craft drains thread the mode through the one cast-send path (decision 0792).
-// `TargetingWants` travels with it because the chain also holds a *seam-specific* consumer — the
-// ground reticle, which draws for the location word alone (decision 0943).
-pub(crate) use targeting::{ground_cast_radius, SpellTargeting, TargetingWants};
 // `pub(crate)`: the spellbook shows the same borrowed weapon icon its bar buttons do, pre-resolved
 // once per page (decisions 0230/0231).
 pub(crate) use weapon_icon::{melee_auto_attack_icon, ranged_weapon_icon};
-// `pub(crate)`: the stance bar's `isCastable` IS this walk (`GetShapeshiftFormInfo`'s fourth
-// return runs `0x6e3d60`, wow-re shapeshift-bar-api.md) — `crate::ui_shapeshift` calls it with
-// the same ctx shape the state feed builds.
-pub(crate) mod usable;
 
 /// The auto-attack pseudo-spell (`Attack`, every character's slot-1 default): not a cast — it
 /// toggles melee via the attack-swing pair. The USE path (`CMSG_ATTACKSWING`) keys on this id; the
@@ -139,8 +108,8 @@ pub(crate) struct PlayerActions {
 /// **The world right-click's GameObject-opener queue** — the lock chain's resolved action, carried
 /// one frame to the one cast path (decision 2199).
 ///
-/// It exists for exactly the reason [`crate::spell::ChainCasts`] does, and no other: the right-click system
-/// ([`crate::target::click::act_on_right_click`]) and [`CastLadder`] want the same half-dozen
+/// It exists because the right-click system ([`crate::target::click::act_on_right_click`]) and
+/// [`crate::spell::CastLadder`] want the same half-dozen
 /// resources, so the click cannot call the ladder in place — a resource reachable twice from one
 /// system is a `B0002` panic on the first live frame. A one-frame queue is the seam, and it keeps
 /// the rule that **nothing sends a cast except the ladder**.
@@ -345,7 +314,6 @@ pub(crate) struct UiActionPlugin;
 impl Plugin for UiActionPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.add_observer(on_cvar);
         app.init_resource::<PlayerActions>()
             .init_resource::<LearnedAbilities>()
             .init_resource::<CastErrors>()
@@ -354,9 +322,6 @@ impl Plugin for UiActionPlugin {
             .init_resource::<UiErrorKeys>()
             .init_resource::<UiErrorTexts>()
             .init_resource::<GoOpenerCasts>()
-            .init_resource::<cast_target::AutoSelfCast>()
-            .init_resource::<targeting::SpellTargeting>()
-            .init_resource::<targeting::EnchantConfirmItem>()
             .add_systems(Startup, load_spells.after(AssetSet::Open))
             .add_systems(Startup, load_spell_mechanics.after(AssetSet::Open))
             .add_systems(
@@ -385,11 +350,6 @@ impl Plugin for UiActionPlugin {
                     // The T binding (0997): the attack arm's twin door, after the dispatch wrote
                     // this frame's fires.
                     drain::attack_target_binding.after(UiInput),
-                    // The `modalNextSpell` chain (1597): a hunter shot's CAST_RESULT queues
-                    // Auto Shot, and it goes out through the same ladder every other caster
-                    // takes. After the input pass like the other drains — the queue is filled by
-                    // the net drain, which runs earlier in the frame.
-                    drain::drain_chain_casts.after(UiInput),
                     // The world right-click's opener (2199), beside the chain cast and for the
                     // same reason: the click resolved it, the ladder sends it. After the input
                     // pass like the other drains — the queue is filled by the target chain,
@@ -401,19 +361,6 @@ impl Plugin for UiActionPlugin {
                     track_learned_abilities
                         .in_set(UnitFeed)
                         .after(feed::feed_actions),
-                    // The targeting mode's ESC-chain halves (decision 0792): the state push
-                    // rides the feeds (before the input pass runs `ToggleGameMenu`), the
-                    // trigger drain follows it — same frame, so an ESC's cancel lands before
-                    // the next frame's cursor drive reads the mode. The cursor pre-empt, the
-                    // right-press cancel, and the click commit register in the TARGET chain
-                    // (ordering against the classifier and the select click is theirs to own).
-                    targeting::feed_targeting_to_vm.in_set(UnitFeed),
-                    targeting::drain_stop_targeting.after(UiInput),
-                    // The item half's commit (decision 0923) — the bag / paper-doll click seam's
-                    // `0x495d60`. A UI drain like the others: after the input pass, so a click
-                    // this frame binds this frame. It is deliberately NOT in the target chain —
-                    // the clicks it consumes never reach the world.
-                    targeting::commit_item_cast_on_pick.after(UiInput),
                 ),
             );
     }

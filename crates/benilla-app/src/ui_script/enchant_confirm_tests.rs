@@ -1,5 +1,5 @@
 //! The two enchant-apply confirms (decision 0928, EnchantConfirm.xml): the Lua wiring between the
-//! events `ui_action::targeting`'s item-bind gate fires and the shared StaticPopup engine, driven
+//! events `spell::targeting`'s item-bind gate fires and the shared StaticPopup engine, driven
 //! exactly as that gate drives it.
 //!
 //! What these pin is the seam, not the gate: that `BIND_ENCHANT` and `REPLACE_ENCHANT` reach a

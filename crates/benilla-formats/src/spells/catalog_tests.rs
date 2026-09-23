@@ -1195,7 +1195,7 @@ fn real_item_target_family_and_its_gate_columns() {
         assert!(
             is_enchant(effects[0]) || !(is_enchant(effects[1]) || is_enchant(effects[2])),
             "spell {} hides its enchant effect outside slot 0 ({effects:?}) — the one-slot read \
-             in `ui_action::targeting::item_target_refusal` would miss it",
+             in `spell::targeting::item_bind_verdict` would miss it",
             u32_at(r, 0).unwrap_or(0)
         );
     }

@@ -789,7 +789,7 @@ pub(crate) fn item_use_route(
 /// IsCasting check, and `6e4f33` forwards the item to the requirement validator `0x6094f0`. The
 /// commit `SendCast 0x6e54f0` then picks the opcode from it (`0x6e57d8 push 0xab`). So an item
 /// use takes the whole ladder — cooldown, GCD, in-flight, mounted, moving, form, reagents, target
-/// bind, range — and [`crate::ui_action::CastLadder::send`] is where all of that lives (decision
+/// bind, range — and [`crate::spell::CastLadder::send`] is where all of that lives (decision
 /// 0914; verified at the bytes in wow-re's `system/ui/scratch/disasm-full.txt`, corroborated by
 /// its `action-item-slot.md` §8 and `cursor-system.md` §8.4a).
 ///
@@ -823,8 +823,8 @@ pub(crate) fn item_use_route(
 /// Returns whether anything left for the server — `false` for the reference's silent no-op.
 pub(crate) fn send_item_use(
     it: ItemUse,
-    ctx: &crate::ui_action::cast_target::CastContext,
-    ladder: &mut crate::ui_action::CastLadder,
+    ctx: &crate::spell::cast_target::CastContext,
+    ladder: &mut crate::spell::CastLadder,
     script: &mut benilla_ui::script::UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,
     suppress: bool,
@@ -911,7 +911,7 @@ pub(crate) fn send_item_use(
             ladder.send(
                 spell,
                 ctx,
-                crate::ui_action::CastCommit::Item {
+                crate::spell::CastCommit::Item {
                     bag_index: it.bag_index,
                     slot: it.slot,
                     entry: it.entry,

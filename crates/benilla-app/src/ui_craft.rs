@@ -9,7 +9,7 @@
 //! item-targeted cast (`SPELL_EFFECT_ENCHANT_ITEM`/`_TEMPORARY`, `Targets = 0x10`). Since
 //! decision 0923 this window owns none of that machinery — `DoCraft` goes down the ONE cast
 //! ladder like every other caster surface, and the resolver's item arm raises the ONE targeting
-//! cursor, which the bag and paper-doll click seams complete ([`crate::ui_action::targeting`]).
+//! cursor, which the bag and paper-doll click seams complete ([`crate::spell::targeting`]).
 //! The private `PendingItemCast` this file used to carry — a second targeting state with its own
 //! arm, its own bag-click completion and its own cursor overlay, bypassing every ladder rung
 //! including the reagent check an enchant most needs — is gone.
@@ -29,7 +29,8 @@ use benilla_ui::script::{CraftReagent, CraftRecipe, CraftState, CraftTooltip, Ui
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{cast_target, CastCommit, CastLadder, PlayerActions, Spells};
+use crate::spell::{cast_target, CastCommit, CastLadder};
+use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_items::{count_of, item_icon, InventoryScope};
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
@@ -309,7 +310,7 @@ fn feed_craft(
 
 /// Drain the Lua intents: every `DoCraft` goes down the ONE cast ladder, and the resolver decides
 /// what happens next — an enchant's `Targets = 0x10` word arms the targeting cursor's item half
-/// (decision 0923; the bag / paper-doll click completes it, in `ui_action::targeting`), a rod
+/// (decision 0923; the bag / paper-doll click completes it, in `spell::targeting`), a rod
 /// craft's zero word commits immediately. `CloseCraft` closes the window; a pick armed by it is
 /// the one targeting word, cancelled the ordinary ways (ESC, right-click, a new cast).
 ///

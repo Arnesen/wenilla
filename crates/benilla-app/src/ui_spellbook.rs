@@ -41,10 +41,8 @@ use benilla_ui::script::{ScriptValue, SpellBookState, SpellSlotView, SpellTabVie
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{
-    cast_target, melee_auto_attack_icon, ranged_weapon_icon, CastCommit, CastLadder, PlayerActions,
-    Spells,
-};
+use crate::spell::{cast_target, CastCommit, CastLadder};
+use crate::ui_action::{melee_auto_attack_icon, ranged_weapon_icon, PlayerActions, Spells};
 use crate::ui_script::{gate, UiInput};
 use crate::ui_unit::UnitFeed;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};

@@ -11,7 +11,11 @@ use benilla_formats::LearnAnnouncement;
 use benilla_protocol::messages::{ActionButton, SpellCooldown};
 use bevy::prelude::*;
 
-use super::{ActiveChannel, AutoRepeatActive, Cooldowns, PendingCast, QueuedMeleeSpell};
+use super::cast_target::CastTargeting;
+use super::{
+    ActiveChannel, AutoRepeatActive, CastCommit, CastLadder, Cooldowns, PendingCast,
+    QueuedMeleeSpell,
+};
 use crate::creature_anim::{CastEvent, CastEventKind, Casting, SpellGoTargets};
 use crate::ui_action::{CastErrors, PlayerActions, Spells, UiError, UiErrorKeys};
 use crate::ui_aura::AuraDurations;
@@ -51,8 +55,9 @@ pub(super) fn register(app: &mut App) {
 
 /// The cast lifecycle's state and catalogs, as one parameter — what every handler here folds
 /// its packet into. The in-flight slot, the cooldowns and the modifiers are the spell's own
-/// (2328); the action store, the errors, the spellbook's learned-tab list, the aura durations
-/// and the pet bar are their windows', written here because the packet is the spell's.
+/// (2328); the action store, the spellbook's learned-tab list, the aura durations and the pet
+/// bar are their windows', written here because the packet is the spell's. The cast reply's
+/// handler is the exception — it casts, so it takes the ladder instead ([`on_cast_result`]).
 #[derive(SystemParam)]
 pub(crate) struct Lifecycle<'w> {
     self_guid: Res<'w, SelfGuid>,
@@ -60,8 +65,6 @@ pub(crate) struct Lifecycle<'w> {
     spells: Option<Res<'w, Spells>>,
     net: Res<'w, NetCommands>,
     actions: ResMut<'w, PlayerActions>,
-    cast_errors: ResMut<'w, CastErrors>,
-    chain_casts: ResMut<'w, crate::spell::ChainCasts>,
     learned_in_tab: ResMut<'w, LearnedInTab>,
     cast_bar: ResMut<'w, CastBarFeed>,
     pending: ResMut<'w, PendingCast>,
@@ -152,7 +155,38 @@ fn on_spell_superceded(
     }
 }
 
-fn on_cast_result(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+/// What `HandleCastResult` reaches beyond the ladder — the reply's own scene.
+#[derive(SystemParam)]
+pub(crate) struct Reply<'w, 's> {
+    self_guid: Res<'w, SelfGuid>,
+    index: Res<'w, GuidIndex>,
+    cast_bar: ResMut<'w, CastBarFeed>,
+    casting: Query<'w, 's, &'static Casting>,
+    cast_events: MessageWriter<'w, CastEvent>,
+    play_seq: ResMut<'w, crate::creature_anim::PlaySeq>,
+}
+
+/// `HandleCastResult 0x6e7330` — the one handler that *casts*. A reply whose spell names a
+/// `modalNextSpell` (column 38) chains it through the ladder in the same call, the reference's
+/// `0x6e74aa call 0x6e5a90` → `TryCast` (decision 2330): so this handler takes [`CastLadder`]
+/// and [`CastTargeting`] where the others take [`Lifecycle`] — the five spell-state fields the
+/// two would share are the ladder's — and reaches the rest through [`Reply`]. Before 2330 the
+/// chain was an outbox a `ui_action` drain emptied after the input pass; now the chained cast
+/// arms the in-flight slot before the next packet is handled, as in the reference.
+///
+/// The chained cast goes out at the **null target guid** — `0x6e74a6 push ebx; push ebx` with
+/// `ebx = 0` — so it binds through the ordinary target walk (`ArmCast 0x6e5250`: main-hand item
+/// bit, then the explicit guid, then the current selection), which is what
+/// [`CastTargeting::context`] hands the ladder when no guid is passed. And it takes **every
+/// rung**: the reference chains through `0x6e5a90` → `TryCast 0x6e4b60`, the same entry a button
+/// press uses, so a chained Auto Shot is range-checked, form-checked and GCD-checked exactly like
+/// a pressed one, and refuses with the same red line.
+fn on_cast_result(
+    In(ev): In<SessionEvent>,
+    mut ladder: CastLadder,
+    targeting: CastTargeting,
+    mut r: Reply,
+) {
     if let SessionEvent::CastResult {
         spell_id,
         success,
@@ -160,27 +194,30 @@ fn on_cast_result(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
         arg,
     } = ev
     {
-        cast_result(
+        let chained = cast_result(
             spell_id,
             success,
             reason,
             arg,
-            &mut sc.commands,
-            &l.self_guid,
-            &l.index,
-            &mut l.cast_errors,
-            &sc.casting,
-            &mut sc.cast_events,
-            &mut l.cast_bar,
-            &mut l.pending,
-            &mut l.queued_melee,
-            &mut l.cooldowns,
-            &mut l.auto_repeat,
-            l.spells.as_deref(),
-            &l.net,
-            &mut l.chain_casts,
-            l.play_seq.next(),
+            &mut ladder.ecs,
+            &r.self_guid,
+            &r.index,
+            &mut ladder.cast_errors,
+            &r.casting,
+            &mut r.cast_events,
+            &mut r.cast_bar,
+            &mut ladder.pending,
+            &mut ladder.queued_melee,
+            &mut ladder.cooldowns,
+            &mut ladder.auto_repeat,
+            ladder.spells.as_deref(),
+            &ladder.commands,
+            r.play_seq.next(),
         );
+        if let Some(next) = chained {
+            let ctx = targeting.context();
+            ladder.send(next, &ctx, CastCommit::Spell);
+        }
     }
 }
 
@@ -611,10 +648,8 @@ fn cast_result(
     auto_repeat: &mut AutoRepeatActive,
     spells: Option<&Spells>,
     net: &crate::net::NetCommands,
-    // The `modalNextSpell` chain's outbox (`0x6e74aa`) — filled here, sent by the one cast path.
-    chain: &mut crate::spell::ChainCasts,
     seq: u64,
-) {
+) -> Option<u32> {
     debug!("net: cast result — spell {spell_id} success={success} reason={reason:?}");
     // **Is this the reply to the cast we have outstanding?** (`0x6e7408 cmp ecx,[0xceca88]`.) Read
     // BEFORE either arm touches the guard, because both the failure arm's clear below and the
@@ -732,6 +767,10 @@ fn cast_result(
     //   sting while Auto Shot is already running must NOT re-cast it, or every special shot would
     //   restart the repeat and reset its swing timer. We have no pending-record to refresh, so the
     //   equal branch is simply "send nothing" — the same observable.
+    //
+    // The chained spell is this function's **return**: `on_cast_result` hands it to the ladder
+    // in the same call (`0x6e74aa call 0x6e5a90`), so the chained cast takes every rung a press
+    // takes and arms the in-flight slot before the next packet is handled (decision 2330).
     if in_flight {
         pending.clear_if(spell_id);
         if let Some(next) = spells
@@ -740,9 +779,10 @@ fn cast_result(
             .filter(|&next| next != 0 && Some(next) != auto_repeat.0)
         {
             debug!("net: cast result {spell_id} chains modalNextSpell {next}");
-            chain.0.push(next);
+            return Some(next);
         }
     }
+    None
 }
 
 /// A unit began a non-triggered cast (`SMSG_SPELL_START`), instants included (`cast_time_ms == 0`)
@@ -998,7 +1038,7 @@ fn spell_go(
 
         // **The GO-deferred melee auto-attack start** (`HandleSpellGo 0x6e7a70` @ `0x6e83c0`,
         // wow-re `combat-feel-law.md` §A3; bytes re-read for decision 1593). This is the exact
-        // complement of the send-time tail in [`crate::ui_action::cast_send`]: a spell carrying
+        // complement of the send-time tail in [`crate::spell::cast_send`]: a spell carrying
         // `AttributesEx2 & 0x100000` has its optimistic start *suppressed* there and armed here
         // instead, so the swing begins only once the server confirms the strike landed. That is
         // the whole 5875 stealth-opener class — Backstab, Garrote, Ambush, Cheap Shot, Shred,
@@ -2568,7 +2608,6 @@ mod tests {
                             &mut auto_repeat,
                             None,
                             &net,
-                            &mut crate::spell::ChainCasts::default(),
                             1,
                         );
                     },
@@ -2973,7 +3012,8 @@ mod tests {
         };
 
         // One CAST_RESULT for `spell_id`, with `in_flight` armed as the outstanding cast and
-        // `running` as the live auto-repeat. Returns (what got queued, is the guard still armed).
+        // `running` as the live auto-repeat. Returns (what the reply chains, is the guard still
+        // armed).
         let fire = |spell_id: u32, success: bool, in_flight: Option<u32>, running: Option<u32>| {
             let mut app = App::new();
             app.add_message::<CastEvent>()
@@ -2987,8 +3027,7 @@ mod tests {
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
                 .init_resource::<crate::spell::SpellModifiers>()
-                .init_resource::<AutoRepeatActive>()
-                .init_resource::<crate::spell::ChainCasts>();
+                .init_resource::<AutoRepeatActive>();
             let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();
             app.world_mut()
                 .resource_mut::<GuidIndex>()
@@ -3006,7 +3045,8 @@ mod tests {
             }
             let (tx, _rx) = crossbeam_channel::unbounded();
             let cat = spells();
-            app.world_mut()
+            let chained = app
+                .world_mut()
                 .run_system_once(
                     move |mut commands: Commands,
                           self_guid: Res<SelfGuid>,
@@ -3018,8 +3058,7 @@ mod tests {
                           mut pending: ResMut<PendingCast>,
                           mut queued_melee: ResMut<QueuedMeleeSpell>,
                           mut cooldowns: ResMut<Cooldowns>,
-                          mut auto_repeat: ResMut<AutoRepeatActive>,
-                          mut chain: ResMut<crate::spell::ChainCasts>| {
+                          mut auto_repeat: ResMut<AutoRepeatActive>| {
                         let net = crate::net::NetCommands(tx.clone());
                         cast_result(
                             spell_id,
@@ -3039,48 +3078,46 @@ mod tests {
                             &mut auto_repeat,
                             Some(&cat),
                             &net,
-                            &mut chain,
                             1,
-                        );
+                        )
                     },
                 )
                 .unwrap();
-            let queued = app.world().resource::<crate::spell::ChainCasts>().0.clone();
             let still_armed = app
                 .world()
                 .resource::<PendingCast>()
                 .in_flight(Instant::now());
-            (queued, still_armed)
+            (chained, still_armed)
         };
 
         // The ordinary case: the sting lands, and Auto Shot follows by itself.
         assert_eq!(
             fire(SERPENT_STING, true, Some(SERPENT_STING), None),
-            (vec![AUTO_SHOT], false),
+            (Some(AUTO_SHOT), false),
             "a successful sting chains Auto Shot, and clears the in-flight guard first"
         );
         // And a failed one does too — both results converge on the same block.
         assert_eq!(
             fire(SERPENT_STING, false, Some(SERPENT_STING), None).0,
-            vec![AUTO_SHOT],
+            Some(AUTO_SHOT),
             "a FAILED sting chains it as well (`0x6e735a jne` → the same `0x6e73eb`)"
         );
         // Already shooting: re-arm, never re-cast.
         assert_eq!(
             fire(SERPENT_STING, true, Some(SERPENT_STING), Some(AUTO_SHOT)).0,
-            Vec::<u32>::new(),
+            None,
             "Auto Shot already running: the equal branch sends nothing"
         );
         // Auto Shot's own replies terminate the chain.
         assert_eq!(
             fire(AUTO_SHOT, true, Some(AUTO_SHOT), Some(AUTO_SHOT)).0,
-            Vec::<u32>::new(),
+            None,
             "Auto Shot's own column 38 is 0 — no second hop"
         );
         // Not our in-flight cast (a proc's result, a stale reply): not ours to chain from.
         assert_eq!(
             fire(SERPENT_STING, true, Some(133), None).0,
-            Vec::<u32>::new(),
+            None,
             "a reply for a spell we do not have in flight chains nothing"
         );
     }

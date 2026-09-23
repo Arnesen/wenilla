@@ -60,7 +60,7 @@ struct ViewCtx<'a> {
     commands: &'a NetCommands,
     sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
     /// The talent spell-modifier tables — the cost cell shows the RESOLVED cost, which since
-    /// `SPELLMOD_COST` landed means the modified one (`crate::ui_action::usable::power_cost`).
+    /// `SPELLMOD_COST` landed means the modified one (`crate::spell::usable::power_cost`).
     spell_mods: &'a crate::spell::SpellModifiers,
     /// The VM's own `GlobalStrings.lua` (decision 2045) — every cell this builder composes is a
     /// key, and this is where they resolve. `text` is the `%d`-filling twin the `$`-engine's
@@ -121,7 +121,7 @@ fn spell_tooltip_view(
     // HAPPINESS_COST has no GlobalStrings entry and no 5875 player spell reaches powerType 4;
     // the unit word is a dead arm kept for the array's shape.
     let resolved_cost = vctx.store.map_or(d.mana_cost, |s| {
-        crate::ui_action::usable::power_cost(d, s, vctx.spell_mods)
+        crate::spell::usable::power_cost(d, s, vctx.spell_mods)
     });
     let cost = {
         // The one `0x6e7130` table, not a local `if power_type == 1` — decision 2117 found three
@@ -302,9 +302,9 @@ fn spell_tooltip_view(
     // avoidance/crit percentages to print, and — except for ATTACK, which bypasses the gate — the
     // spell must be passive. The percentages are already percents on the wire.
     let chance = chance_line(d, vctx.store);
-    let item_met = vctx.store.is_none_or(|s| {
-        crate::ui_action::usable::equipped_item_fits(d, s, vctx.items, vctx.commands)
-    });
+    let item_met = vctx
+        .store
+        .is_none_or(|s| crate::spell::usable::equipped_item_fits(d, s, vctx.items, vctx.commands));
     // Reagents (law §3.8): the named slots, `count > 1` suffixed, a slot the player is short of
     // wrapped in the builder's inline red. A reagent whose item template hasn't streamed yet is
     // simply absent from this snapshot — `feed_spell_tooltips` re-pushes when it lands, which is

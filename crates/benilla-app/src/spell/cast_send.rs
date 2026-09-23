@@ -38,8 +38,8 @@ use bevy::prelude::*;
 use crate::items::Items;
 use crate::net::{ClientCommand, NetCommands, SelfPlayer};
 
-use super::{cast_target, reagent_totem_refusal, state, CastErrors, Spells};
-use crate::spell::AutoRepeatActive;
+use super::{cast_target, validator, AutoRepeatActive};
+use crate::ui_action::{reagent_totem_refusal, CastErrors, Spells};
 
 /// **What the commit writes** — `SendCast 0x6e54f0`'s one branch on item-present. The sender
 /// discriminates on whether the pending-cast block's guid (`0xceac48`, filled at `6e4f8d`–`6e4fa6`
@@ -260,7 +260,7 @@ impl CastLadder<'_, '_> {
 /// (`0x6e5930`'s `SetSheatheState(2,1,1)` — the echo START re-requests it, idempotent), an
 /// auto-repeat spell sets the sticky armed state (`0x6e593b`'s `|= 0x200`, the standing Load/Hold
 /// idle's gate — decision 0099 phase 5), and the resolved `CMSG_CAST_SPELL` goes out. Shared by
-/// [`super::drain::drain_action_uses`] (a SPELL-kind action button) and
+/// `ui_action`'s `drain_action_uses` (a SPELL-kind action button) and
 /// `ui_spellbook::drain_spell_casts` (a spellbook cast, decision 0216 §8) — ONE cast-send path, so
 /// the follow-through can't drift between the two spell sources (the root-cause rule: never
 /// duplicate a send path).
@@ -461,7 +461,7 @@ fn send_spell_cast(
                 .self_pos
                 .zip(ctx.range.target_pos)
                 .map(|(a, b)| a.distance_squared(b));
-            if let Some(reason) = state::cast_range_refusal(
+            if let Some(reason) = validator::cast_range_refusal(
                 d,
                 row,
                 ctx.range.self_reach,
@@ -537,7 +537,7 @@ fn send_spell_cast(
     // three arms to the reference's six by 1925), which sits ABOVE its mounted block below — so a
     // stunned mounted caster reads the stun.
     let self_fields = ctx.rel.self_store.map(|s| &s.0);
-    if let Some(reason) = state::cast_cc_refusal(
+    if let Some(reason) = validator::cast_cc_refusal(
         self_fields.map_or(0, |f| f.unit_flags()),
         self_fields.and_then(|f| f.unit_health()),
         // The charm arm asks whether somebody ELSE holds the reins (`60994d`'s active-player
@@ -586,7 +586,7 @@ fn send_spell_cast(
     // caster instead of erroring, so without this check the message can never appear. (0948
     // resolved 0481's named micro-divergence: the range gate now runs before this one, the
     // ref's own order — mounted∧out-of-range reads "Out of range." on both.)
-    if state::cast_mounted_refusal(
+    if validator::cast_mounted_refusal(
         ctx.rel
             .self_store
             .is_some_and(|s| s.0.unit_mount_display_id() > 0),
@@ -602,8 +602,8 @@ fn send_spell_cast(
     // while swimming" for the mount/Travel-Form/food set, 0x58 "Can only use while swimming" for
     // Aquatic Form. The gate must be local: vmangos's CheckCast has no shapeshift or food water
     // arm at all, so without this the server grants a druid aquatic form standing on dry land
-    // (ledger B176) and lets you eat mid-swim (B155's eating half). The condition is [`state`]'s.
-    if let Some(reason) = state::cast_water_refusal(ctx.self_move_flags, def) {
+    // (ledger B176) and lets you eat mid-swim (B155's eating half). The condition is [`validator`]'s.
+    if let Some(reason) = validator::cast_water_refusal(ctx.self_move_flags, def) {
         debug!("ui_action: cast {spell_id} refused locally — water side ({reason:#x})");
         cast_errors.push_local(spell_id, reason);
         return;
@@ -614,7 +614,7 @@ fn send_spell_cast(
     // client's own reason 0x2e "Can't do that while moving" and NEVER sends. The gate must be
     // local: vmangos accepts the sent cast (its CheckCast moving-reject covers only
     // autorepeat/sit-still spells) and then its movement interrupt cancels it mid-bar — the
-    // start-then-die cast bar this gate removes. The full condition is [`state`]'s.
+    // start-then-die cast bar this gate removes. The full condition is [`validator`]'s.
     if let Some(d) = def {
         let caster_level = ctx
             .rel
@@ -622,7 +622,7 @@ fn send_spell_cast(
             .and_then(|s| s.0.unit_level())
             .unwrap_or(0);
         let cast_time_ms = spells.map_or(0, |s| s.cast_time_ms(d, caster_level));
-        if state::cast_moving_refusal(ctx.self_move_flags, cast_time_ms, def) {
+        if validator::cast_moving_refusal(ctx.self_move_flags, cast_time_ms, def) {
             debug!("ui_action: cast {spell_id} refused locally — moving (0x2e)");
             cast_errors.push_local(spell_id, 0x2e);
             return;
@@ -773,7 +773,7 @@ fn send_spell_cast(
     // the cast's bound unit target, unless one is already running (`0x60ecb0` over
     // `[player+0xc48]`; our mirror is the wire-echoed `Engaged`). The start is the attack path's
     // own pair (`0x6131a0` → `0x5ecb70`): melee-sheath SNAP + `CMSG_ATTACKSWING` — the same two
-    // edges as the Attack button's arm in [`super::drain::drain_action_uses`]. Path-independent
+    // edges as the Attack button's arm in `ui_action`'s `drain_action_uses`. Path-independent
     // in the ref (button/spellbook/CastSpellByName share the one tail) — matching our one send
     // seam.
     if let (Some(d), Some(guid)) = (def, target) {
@@ -870,7 +870,7 @@ mod tests {
         world.init_resource::<CastErrors>();
         world.init_resource::<AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
-        world.init_resource::<super::super::targeting::SpellTargeting>();
+        world.init_resource::<crate::spell::SpellTargeting>();
         // The sheath request the commit tail writes for a ranged spell — a bare World has no
         // message storage until it is asked for.
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
@@ -1053,7 +1053,7 @@ mod tests {
             matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == SERPENT_STING),
             "the sting goes out first"
         );
-        // What `cast_result` would queue, handed to the one send path the drain uses.
+        // What `cast_result` returns, and `on_cast_result` hands to the ladder (2330).
         send_at(&mut world, AUTO_SHOT, MOB);
         assert!(
             matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == AUTO_SHOT),
@@ -1361,7 +1361,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut spells = super::super::Spells::empty_for_tests();
+        let mut spells = crate::ui_action::Spells::empty_for_tests();
         spells.catalog = benilla_formats::SpellCatalog::from_displays(displays);
         world.insert_resource(spells);
         // A caster holding 100 mana (field 23 = UNIT_FIELD_POWER1). Leaked: the one-shot
@@ -1460,7 +1460,7 @@ mod tests {
         let commit = |world: &mut World, commit: CastCommit, bound: TargetedBind| {
             world.insert_resource(crate::spell::PendingCast::default());
             world
-                .resource_mut::<super::super::targeting::SpellTargeting>()
+                .resource_mut::<crate::spell::SpellTargeting>()
                 // The lock word — the one that answers both the bag and the world seam.
                 .enter(HEARTHSTONE, commit, 0x4800);
             world
@@ -1476,9 +1476,7 @@ mod tests {
             Ok(ClientCommand::CastSpellAtDest { dest: DEST, .. })
         ));
         assert!(
-            !world
-                .resource::<super::super::targeting::SpellTargeting>()
-                .active(),
+            !world.resource::<crate::spell::SpellTargeting>().active(),
             "the commit clears the one word"
         );
         assert!(

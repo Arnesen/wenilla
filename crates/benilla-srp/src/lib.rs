@@ -324,6 +324,30 @@ impl SrpClientChallenge {
         server_public_key: PublicKey,
         salt: [u8; 32],
     ) -> SrpClientChallenge {
+        Self::new_with_rng(
+            &mut thread_rng(),
+            username,
+            password,
+            generator,
+            large_safe_prime,
+            server_public_key,
+            salt,
+        )
+    }
+
+    /// [`Self::new`] with the ephemeral's draw source injected. `new` hands it `thread_rng`; the
+    /// tests hand it a scripted one, so each guard in the loop below is exercised on purpose —
+    /// a draw known to trip it, then a clean one — rather than by the ~1-in-137 chance a random
+    /// sweep gives each (decision 2331).
+    fn new_with_rng<R: RngCore>(
+        rng: &mut R,
+        username: NormalizedString,
+        password: NormalizedString,
+        generator: u8,
+        large_safe_prime: [u8; 32],
+        server_public_key: PublicKey,
+        salt: [u8; 32],
+    ) -> SrpClientChallenge {
         let n = from_le(&large_safe_prime);
         let g = BigInt::from(generator);
         let k = BigInt::from(K_VALUE);
@@ -338,7 +362,7 @@ impl SrpClientChallenge {
             let last = draw == MAX_EPHEMERAL_DRAWS;
 
             let mut private_key = [0u8; 32];
-            thread_rng().fill_bytes(&mut private_key);
+            rng.fill_bytes(&mut private_key);
             let a = from_le(&private_key);
 
             // A = g^a mod N
@@ -600,21 +624,25 @@ mod tests {
         assert!(!is_width_stable(&[]));
     }
 
-    /// The crate's guarantee: every handshake we hand out is one both serialization conventions read
-    /// identically, so no value carries a high-order zero byte. `A` lands ambiguous ~1 draw in 137
-    /// and `K`/`M1` ~1 in 256 each, so over this many draws a regression that dropped any one guard
-    /// is caught with ~97% probability. (The live gate is `benilla-protocol`'s `srp_encoding_probe`,
-    /// which forces each case against a real realmd.)
+    /// The crate's guarantee as a property: every handshake we hand out is one both serialization
+    /// conventions read identically, so no value carries a high-order zero byte. Seeded (2331), so
+    /// the 128 server keys and every ephemeral drawn against them are the same on every machine —
+    /// a red run reproduces. The per-guard proof is `each_encoding_guard_rejects_the_draw_it_exists_for`;
+    /// the live gate is `benilla-protocol`'s `srp_encoding_probe`, which forces each case against
+    /// a real realmd.
     #[test]
     fn every_drawn_handshake_is_encoding_unambiguous() {
+        use rand::{rngs::StdRng, SeedableRng};
         let user = NormalizedString::new("alice").unwrap();
         let pass = NormalizedString::new("password1").unwrap();
+        let mut rng = StdRng::seed_from_u64(0x5875);
         for i in 0..128u32 {
             let mut b = [0u8; 32];
-            thread_rng().fill_bytes(&mut b);
+            rng.fill_bytes(&mut b);
             b[31] |= 0x80; // the shape of server key `logon` keeps
             let salt = std::array::from_fn(|j| (j as u8).wrapping_mul(11).wrapping_add(i as u8));
-            let c = SrpClientChallenge::new(
+            let c = SrpClientChallenge::new_with_rng(
+                &mut rng,
                 user.clone(),
                 pass.clone(),
                 GENERATOR,
@@ -633,6 +661,135 @@ mod tests {
             );
             assert!(c.verify_server_proof(m2).is_ok(), "M2, draw {i}");
         }
+    }
+
+    /// A draw source that hands out exactly the private keys it was given, in order.
+    struct Scripted(std::collections::VecDeque<[u8; 32]>);
+
+    impl RngCore for Scripted {
+        fn next_u32(&mut self) -> u32 {
+            unreachable!("the ephemeral is drawn with fill_bytes")
+        }
+        fn next_u64(&mut self) -> u64 {
+            unreachable!("the ephemeral is drawn with fill_bytes")
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            let key = self
+                .0
+                .pop_front()
+                .expect("a scripted draw was left for this");
+            dest.copy_from_slice(&key);
+        }
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    /// The server side of the fixture the guard vectors were found against: a fixed `B` (with the
+    /// high bit `logon` keeps) and a fixed salt. Change either and the vectors below stop meaning
+    /// anything — the test says so.
+    const FIXTURE_B: [u8; 32] = [
+        5, 42, 79, 116, 153, 190, 227, 8, 45, 82, 119, 156, 193, 230, 11, 48, 85, 122, 159, 196,
+        233, 14, 51, 88, 125, 162, 199, 236, 17, 54, 91, 128,
+    ];
+    const FIXTURE_SALT: [u8; 32] = [
+        3, 14, 25, 36, 47, 58, 69, 80, 91, 102, 113, 124, 135, 146, 157, 168, 179, 190, 201, 212,
+        223, 234, 245, 0, 11, 22, 33, 44, 55, 66, 77, 88,
+    ];
+    /// Private keys that, against [`FIXTURE_B`]/[`FIXTURE_SALT`], trip exactly one guard each —
+    /// found once by a seeded search (`StdRng::seed_from_u64(2331)`, first hit per guard) and
+    /// pinned. `TRIPS_A`: `A` gets a high-order zero byte. `TRIPS_S`: `S` gets a low-order zero
+    /// byte. `TRIPS_K`: the interleaved key gets a high-order zero. `TRIPS_M1`: the proof does.
+    /// `CLEAN` passes all four.
+    const TRIPS_A: [u8; 32] = [
+        237, 250, 2, 239, 106, 197, 124, 117, 132, 5, 226, 189, 212, 217, 169, 146, 39, 212, 214,
+        11, 198, 57, 225, 84, 17, 219, 168, 107, 118, 105, 11, 95,
+    ];
+    const TRIPS_S: [u8; 32] = [
+        205, 28, 249, 67, 94, 223, 246, 194, 118, 47, 78, 155, 220, 133, 163, 151, 42, 72, 65, 90,
+        37, 9, 156, 83, 38, 132, 96, 6, 129, 245, 202, 203,
+    ];
+    const TRIPS_K: [u8; 32] = [
+        2, 176, 65, 251, 162, 142, 23, 37, 53, 25, 44, 220, 201, 39, 234, 48, 141, 207, 127, 19, 0,
+        93, 140, 154, 16, 181, 118, 225, 147, 237, 174, 28,
+    ];
+    const TRIPS_M1: [u8; 32] = [
+        143, 237, 243, 79, 25, 151, 163, 98, 11, 221, 191, 202, 69, 148, 140, 221, 123, 95, 152,
+        146, 230, 232, 181, 86, 18, 72, 78, 135, 95, 129, 234, 248,
+    ];
+    const CLEAN: [u8; 32] = [
+        52, 226, 21, 16, 93, 106, 129, 125, 56, 197, 129, 14, 149, 1, 254, 105, 63, 23, 9, 190, 46,
+        113, 240, 125, 128, 130, 150, 46, 174, 240, 93, 249,
+    ];
+
+    /// `A = g^a mod N` for a private key, as the constructor computes it.
+    fn public_key_of(private_key: &[u8; 32]) -> [u8; 32] {
+        let n = from_le(&LARGE_SAFE_PRIME_LITTLE_ENDIAN);
+        to_padded_32_le(&BigInt::from(GENERATOR).modpow(&from_le(private_key), &n))
+    }
+
+    /// The crate's guarantee, exercised on purpose (decision 2331): each guard in the draw loop is
+    /// handed a private key KNOWN to trip it, then a clean one, and the handshake that comes back
+    /// must be the clean draw's. A dropped guard fails its case outright — the old random sweep
+    /// caught a dropped guard with "~97 %" probability, which is a 3 % escape by design.
+    #[test]
+    fn each_encoding_guard_rejects_the_draw_it_exists_for() {
+        let user = NormalizedString::new("alice").unwrap();
+        let pass = NormalizedString::new("password1").unwrap();
+        let server = PublicKey::from_le_bytes(FIXTURE_B).unwrap();
+        let clean_a = public_key_of(&CLEAN);
+
+        // The fixture still means what the vectors say: each trips its guard, CLEAN trips none.
+        assert!(
+            !is_width_stable(&public_key_of(&TRIPS_A)),
+            "TRIPS_A no longer trips A"
+        );
+        assert!(is_width_stable(&clean_a), "CLEAN no longer passes A");
+
+        for (guard, bad) in [
+            ("A", TRIPS_A),
+            ("S", TRIPS_S),
+            ("K", TRIPS_K),
+            ("M1", TRIPS_M1),
+        ] {
+            let mut rng = Scripted([bad, CLEAN].into_iter().collect());
+            let c = SrpClientChallenge::new_with_rng(
+                &mut rng,
+                user.clone(),
+                pass.clone(),
+                GENERATOR,
+                LARGE_SAFE_PRIME_LITTLE_ENDIAN,
+                server,
+                FIXTURE_SALT,
+            );
+            assert_eq!(
+                c.client_public_key(),
+                &clean_a,
+                "guard {guard}: the tripping draw was accepted instead of the clean one"
+            );
+            assert!(
+                rng.0.is_empty(),
+                "guard {guard}: the clean draw was never reached"
+            );
+            assert!(is_width_stable(c.client_public_key()));
+            assert!(is_width_stable(&c.session_key));
+            assert!(is_width_stable(c.client_proof()));
+        }
+
+        // And a draw that trips nothing is taken first time.
+        let mut rng = Scripted([CLEAN, TRIPS_A].into_iter().collect());
+        let c = SrpClientChallenge::new_with_rng(
+            &mut rng,
+            user,
+            pass,
+            GENERATOR,
+            LARGE_SAFE_PRIME_LITTLE_ENDIAN,
+            server,
+            FIXTURE_SALT,
+        );
+        assert_eq!(c.client_public_key(), &clean_a);
+        assert_eq!(rng.0.len(), 1, "a clean first draw is the handshake");
     }
 
     /// A salt is fixed for the life of an account rather than redrawn per handshake, so an ambiguous

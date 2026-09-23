@@ -351,7 +351,7 @@ mod tests {
             world.spawn((SelfPlayer, Transform::default()));
             world.resource_mut::<SpellTargeting>().enter(
                 2120,
-                crate::ui_action::CastCommit::Spell,
+                crate::spell::CastCommit::Spell,
                 word,
             );
             world

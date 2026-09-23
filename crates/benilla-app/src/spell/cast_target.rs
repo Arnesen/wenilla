@@ -240,7 +240,11 @@ pub(crate) struct CastTargeting<'w, 's> {
     reputations: Res<'w, Reputations>,
     self_transform: Query<'w, 's, &'static Transform, With<SelfPlayer>>,
     transforms: Query<'w, 's, &'static Transform>,
-    player: Res<'w, crate::player::Player>,
+    /// `Option`: the body exists only in world, and `HandleCastResult` is a one-shot handler
+    /// that must fetch its parameters on any built client (decision 2330 — the reply casts the
+    /// `modalNextSpell` chain through the ladder). No body, no movement: the moving gate passes
+    /// and the server stays the net, as for every other untestable input.
+    player: Option<Res<'w, crate::player::Player>>,
 }
 
 impl CastTargeting<'_, '_> {
@@ -277,7 +281,7 @@ impl CastTargeting<'_, '_> {
                 .next()
                 .and_then(|s| s.0.player_inv_slot(EQUIPMENT_SLOT_MAINHAND))
                 .filter(|&g| g != 0),
-            self_move_flags: self.player.move_flags(),
+            self_move_flags: self.player.as_deref().map_or(0, |p| p.move_flags()),
         }
     }
 }
@@ -292,6 +296,13 @@ const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
 /// ref's when spell targeting-cursor mode lands.
 #[derive(bevy::prelude::Resource)]
 pub(crate) struct AutoSelfCast(pub(crate) bool);
+
+/// `autoSelfCast`'s change callback (decision 2303): a flag.
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut auto: ResMut<AutoSelfCast>) {
+    if ev.is("autoSelfCast") {
+        auto.0 = ev.flag();
+    }
+}
 
 impl Default for AutoSelfCast {
     fn default() -> Self {

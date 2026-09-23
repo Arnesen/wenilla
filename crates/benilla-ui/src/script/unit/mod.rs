@@ -442,7 +442,7 @@ pub struct UnitState {
     /// two of those six are hardcoded *local-player* readers taking no token at all. `"player"`
     /// takes a fast path to the cached local-player GUID inside `0x515970` and then reads the
     /// identical bit. One wire flag answers this for every token, which is what this one field
-    /// is; `benilla::ui_action::usable` already reads the same bit off the same descriptor.
+    /// is; `benilla::spell::usable` already reads the same bit off the same descriptor.
     pub in_combat: bool,
 }
 

@@ -2881,7 +2881,7 @@ mod tests {
             .init_resource::<PaneRate>()
             .init_resource::<crate::ui_guild::GuildMemberNotify>()
             .init_resource::<crate::ui_trade::BlockTrades>()
-            .init_resource::<crate::ui_action::AutoSelfCast>()
+            .init_resource::<crate::spell::AutoSelfCast>()
             .init_resource::<crate::perf::FpsJournalSetting>()
             .init_resource::<crate::text_filter::TextFilterSwitches>()
             .init_resource::<crate::game_tip::GameTipSetting>()
@@ -2916,7 +2916,7 @@ mod tests {
             app.add_observer(crate::target::on_cvar);
         },
         |app| {
-            app.add_observer(crate::ui_action::on_cvar);
+            app.add_observer(crate::spell::cast_target::on_cvar);
         },
         |app| {
             app.add_observer(crate::combat_text::on_cvar);

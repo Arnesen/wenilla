@@ -582,8 +582,8 @@ fn drain_death(
     script: Option<NonSendMut<UiScript>>,
     mut death_net: ResMut<DeathNet>,
     net: Res<NetCommands>,
-    targeting: crate::ui_action::cast_target::CastTargeting,
-    mut ladder: crate::ui_action::CastLadder,
+    targeting: crate::spell::cast_target::CastTargeting,
+    mut ladder: crate::spell::CastLadder,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     // The soulstone leg is a real arm-290 caller in the reference's own census (wow-re
     // `bind-confirm-law.md`: 290 ← UseSoulstone · UseInventoryItem · UseAction · UseContainerItem),

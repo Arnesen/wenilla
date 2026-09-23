@@ -32,7 +32,7 @@ use crate::spell::Cooldowns;
 use crate::spell::{SpellModifiers, OP_COST};
 use crate::target::{can_attack, ring_reaction, Factions};
 
-use super::Spells;
+use crate::ui_action::Spells;
 
 /// Leg 8's caster unit-flag test — the shared bit, declared once ([`crate::player`]).
 use crate::player::UNIT_FLAG_IN_COMBAT;

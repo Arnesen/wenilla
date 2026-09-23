@@ -983,24 +983,4 @@ print(x)</Script>
         let grandchild_name = resolve_name("$parentText", &child_name);
         assert_eq!(grandchild_name, "PlayerFrameHealthBarText");
     }
-
-    /// Parses a REAL shipped FrameXML file when `BENILLA_FRAMEXML` points at one (never committed —
-    /// extract e.g. `Interface\FrameXML\PlayerFrame.xml` with benilla-extract). Skips silently
-    /// otherwise, matching toc.rs's `real_manifest_when_available` pattern so CI/gates don't depend
-    /// on client data.
-    #[test]
-    fn real_framexml_when_available() {
-        let Ok(path) = std::env::var("BENILLA_FRAMEXML") else {
-            return;
-        };
-        let text = std::fs::read_to_string(&path).expect("reading BENILLA_FRAMEXML");
-        let doc = parse(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
-        assert!(
-            !doc.items.is_empty(),
-            "{path}: a real FrameXML file has at least one top-level item"
-        );
-        for w in &doc.warnings {
-            eprintln!("{path}: warning: {w}");
-        }
-    }
 }

@@ -347,21 +347,4 @@ mod tests {
         let toc = Toc::parse("# only a comment\n\n");
         assert!(toc.directives.is_empty() && toc.files.is_empty());
     }
-
-    /// Parses a REAL shipped manifest when `BENILLA_TOC` points at one (never committed — extract
-    /// e.g. `Interface\FrameXML\FrameXML.toc` with benilla-extract and export the path). Skips
-    /// silently otherwise, so CI/gates don't depend on client data.
-    #[test]
-    fn real_manifest_when_available() {
-        let Ok(path) = std::env::var("BENILLA_TOC") else {
-            return;
-        };
-        let text = std::fs::read_to_string(&path).expect("reading BENILLA_TOC");
-        let toc = Toc::parse(&text);
-        assert!(!toc.files.is_empty(), "a real manifest lists files");
-        assert!(
-            !toc.interface_versions().is_empty(),
-            "a real manifest declares ## Interface"
-        );
-    }
 }

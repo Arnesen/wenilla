@@ -33,7 +33,9 @@ tracy = ["bevy/trace_tracy"]
 # Opt-in Chrome-trace profiling: `cargo run --features trace_chrome` writes a `trace-<ts>.json` of
 # every system's per-run span next to the working dir. Tracy's offline twin — it needs no GUI and no
 # live capture, so a per-system cost question is answerable from a terminal (and from a run someone
-# else recorded). Aggregate it with `scripts/tracesum.py`.
+# else recorded). Its readers: `scripts/tracesum.py` (per-span totals), `scripts/framecost.py`
+# (the per-frame cost ledger, 0718) and `scripts/tracebands.py` (a window band-mapped into
+# replaceable units, 1413/1414).
 trace_chrome = ["bevy/trace_chrome"]
 
 [dependencies]

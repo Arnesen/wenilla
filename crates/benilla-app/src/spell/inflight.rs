@@ -2,12 +2,12 @@
 //! cast request (`SPELLCAST` @`0xceac48` + the inflight id `0xceca88` → [`PendingCast`]), the
 //! queued on-next-swing strike ([`QueuedMeleeSpell`], our second slot for what the reference
 //! keeps in the one id — [`Inflight`] re-joins them), the running channel (`0xceac58` →
-//! [`ActiveChannel`]), the auto-repeat key (`0xceac30` → [`AutoRepeatActive`]), the
-//! `modalNextSpell` outbox ([`ChainCasts`]) — and the local abort that ends a cast the same
-//! tick a move, a jump or Esc lands (`AbortCast 0x6e4940` → [`local_self_cancel`]).
+//! [`ActiveChannel`]), the auto-repeat key (`0xceac30` → [`AutoRepeatActive`]) — and the local
+//! abort that ends a cast the same tick a move, a jump or Esc lands (`AbortCast 0x6e4940` →
+//! [`local_self_cancel`]).
 //!
 //! Written by the spell's packet handlers ([`super::net`]), the one cast path
-//! (`crate::ui_action::CastLadder`) and the attack seams; read by the feeds — the cast bar
+//! ([`super::CastLadder`]) and the attack seams; read by the feeds — the cast bar
 //! (`crate::ui_cast`), the action state, the target chain. Until decision 2328 this lived in
 //! `ui_cast` and `ui_action`; it is the state 2265 §A7 named as having no owner.
 
@@ -202,7 +202,7 @@ impl PendingCast {
 /// `CMSG_ATTACKSTOP` + `CMSG_CANCEL_CAST`), reached by /stopattack, the Attack-button toggle,
 /// **an auto-repeat press** (`0x6e5976`), target change/death, mount, interact — never movement.
 /// That chain is [`crate::creature_anim::stop_attack_local`], and the auto-repeat arm inside
-/// [`crate::ui_action::cast_send`]'s commit runs it whole: starting Auto Shot un-queues the
+/// [`crate::spell::cast_send`]'s commit runs it whole: starting Auto Shot un-queues the
 /// strike, which is what darkens its checked ring. Every attack edge reaches that seam since
 /// 1044 — the Attack toggle, a target switch, a click-off, the ring's death teardown.
 ///
@@ -341,19 +341,6 @@ impl ActiveChannel {
 /// `IsAutoRepeatAction` and the button flash read, and it goes out when the shooting stops.
 #[derive(Resource, Default)]
 pub(crate) struct AutoRepeatActive(pub Option<u32>);
-
-/// **The `modalNextSpell` chain's queue** — spells the *client* casts on its own, one per
-/// `SMSG_CAST_RESULT` that names a spell with a non-zero `Spell.dbc` column 38
-/// ([`benilla_formats::SpellDisplay::modal_next_spell`]). Written by [`super::net`]'s
-/// `cast_result`, drained through the one cast path by `ui_action`'s `drain_chain_casts`.
-///
-/// It exists because the reference's chain runs *inside* `HandleCastResult 0x6e7330`
-/// (`0x6e74aa call 0x6e5a90` → `TryCast`) and ours cannot: the net drain and
-/// [`crate::ui_action::CastLadder`] want the same half-dozen resources, so a direct call is a Bevy param conflict.
-/// A one-frame queue is the seam — and it keeps the rule that nothing sends a cast except the
-/// ladder.
-#[derive(Resource, Default)]
-pub(crate) struct ChainCasts(pub(crate) Vec<u32>);
 
 /// ── The local self-cancel (decisions 0256 open item 2 / 0444 / 0445): move/jump/Esc mid-cast
 /// ends the cast **locally**, the same client tick — the app-side mirror of `AbortCast

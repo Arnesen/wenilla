@@ -346,7 +346,7 @@ pub(crate) fn cancel_auto_repeat_local(
 /// are deliberately unmodelled, neither with a benilla reader: `[+0xc50]` ("locally initiated, not
 /// server-confirmed") and `[+0xc54]` ("stop sent, awaiting the echo") — the latter's sole reader
 /// image-wide is `0x5eccda`, inside `Attack 0x5ecb70`, which no benilla cast path enters while
-/// engaged (see [`crate::ui_action::cast_send`]'s tail). The two ratio legs `0x5ecac0` runs before
+/// engaged (see [`crate::spell::cast_send`]'s tail). The two ratio legs `0x5ecac0` runs before
 /// the stop are `TriggerTutorial(0xa)` / `(0xb)` — the low-health / low-mana popups, not audio and
 /// not part of this seam.
 pub(crate) fn stop_attack_local(
@@ -476,7 +476,7 @@ pub(crate) fn toggle_attack_local(
 /// The targeting side needs exactly this: `target::scan`'s `commit` runs the reference's
 /// stop → select → re-swing law (`SetSelection 0x493540`'s own `0x493a08 call 0x5ecac0` and
 /// `0x4938c8 call 0x5ecb70`), so every selection writer that can fire it has to carry both seams'
-/// inputs. [`crate::ui_action::cast_send::CastLadder`] already carries them field by field for the
+/// inputs. [`crate::spell::cast_send::CastLadder`] already carries them field by field for the
 /// cast path and calls the free functions directly.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct AttackSeam<'w, 's> {

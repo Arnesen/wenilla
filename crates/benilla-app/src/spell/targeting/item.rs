@@ -117,14 +117,14 @@ pub(crate) fn item_bind_verdict(
         let sub_ok =
             item.subclass < 32 && def.equipped_item_subclass_mask & (1u32 << item.subclass) != 0;
         if !(class_ok && sub_ok) {
-            return ItemBind::Refuse(crate::ui_action::cast_target::ERR_INVALID_TARGET);
+            return ItemBind::Refuse(crate::spell::cast_target::ERR_INVALID_TARGET);
         }
     }
     if def.equipped_item_inventory_type_mask != 0
         && !(item.inventory_type < 32
             && def.equipped_item_inventory_type_mask & (1u32 << item.inventory_type) != 0)
     {
-        return ItemBind::Refuse(crate::ui_action::cast_target::ERR_INVALID_TARGET);
+        return ItemBind::Refuse(crate::spell::cast_target::ERR_INVALID_TARGET);
     }
     if let Some(new) = new {
         if new.binds && !item.already_bound && !confirmed && item.inventory_type != 0 {
@@ -164,7 +164,7 @@ pub(crate) fn commit_item_cast_on_pick(
     self_q: Query<&crate::net::ObjectStore, With<SelfPlayer>>,
     enchants: Option<Res<crate::items::Enchants>>,
     mut parked: ResMut<EnchantConfirmItem>,
-    mut ladder: crate::ui_action::CastLadder,
+    mut ladder: crate::spell::CastLadder,
 ) {
     let Some(mut script) = script else {
         return;
@@ -222,7 +222,7 @@ pub(crate) fn commit_item_cast_on_pick(
             ladder.commit_targeted(
                 spell_id,
                 commit,
-                crate::ui_action::cast_send::TargetedBind::Item(item_guid),
+                crate::spell::cast_send::TargetedBind::Item(item_guid),
             );
             continue;
         };
@@ -284,7 +284,7 @@ pub(crate) fn commit_item_cast_on_pick(
                 ladder.commit_targeted(
                     spell_id,
                     commit,
-                    crate::ui_action::cast_send::TargetedBind::Item(item_guid),
+                    crate::spell::cast_send::TargetedBind::Item(item_guid),
                 );
             }
         }
@@ -300,7 +300,7 @@ pub(crate) fn commit_item_cast_on_pick(
         ladder.commit_targeted(
             spell_id,
             commit,
-            crate::ui_action::cast_send::TargetedBind::Item(item_guid),
+            crate::spell::cast_send::TargetedBind::Item(item_guid),
         );
     }
 }
@@ -354,12 +354,12 @@ mod tests {
         );
         assert_eq!(
             item_target_refusal(&bracer, CLASS_ARMOR, 1, INVTYPE_CHEST),
-            Some(crate::ui_action::cast_target::ERR_INVALID_TARGET),
+            Some(crate::spell::cast_target::ERR_INVALID_TARGET),
             "the inventory-type leg (495e4d) refuses a chestpiece"
         );
         assert_eq!(
             item_target_refusal(&bracer, CLASS_WEAPON, 1, INVTYPE_WRIST),
-            Some(crate::ui_action::cast_target::ERR_INVALID_TARGET),
+            Some(crate::spell::cast_target::ERR_INVALID_TARGET),
             "the class leg (495e10) refuses a weapon"
         );
 
@@ -383,7 +383,7 @@ mod tests {
         );
         assert_eq!(
             item_target_refusal(&poison, CLASS_ARMOR, SUB_SHIELD, 14),
-            Some(crate::ui_action::cast_target::ERR_INVALID_TARGET),
+            Some(crate::spell::cast_target::ERR_INVALID_TARGET),
             "a shield is armor — the class leg alone stops it"
         );
 
@@ -408,7 +408,7 @@ mod tests {
         // nonsense, so the gate refuses instead of wrapping.
         assert_eq!(
             item_target_refusal(&poison, CLASS_WEAPON, 40, 13),
-            Some(crate::ui_action::cast_target::ERR_INVALID_TARGET)
+            Some(crate::spell::cast_target::ERR_INVALID_TARGET)
         );
     }
 
@@ -549,7 +549,7 @@ mod tests {
         };
         assert_eq!(
             item_bind_verdict(&bracer_only, &enchanted, binder, false),
-            ItemBind::Refuse(crate::ui_action::cast_target::ERR_INVALID_TARGET)
+            ItemBind::Refuse(crate::spell::cast_target::ERR_INVALID_TARGET)
         );
     }
 }

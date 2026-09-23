@@ -21,10 +21,10 @@ use bevy::prelude::*;
 
 use benilla_assets::coords::bevy_to_wow;
 
+use crate::spell::cast_send::TargetedBind;
 use crate::target::go_is_nearest;
 #[cfg(test)]
 use crate::target::{Hovered, HoveredObject};
-use crate::ui_action::cast_send::TargetedBind;
 use benilla_world::interact::WorldClick;
 
 use super::TargetingWants;
@@ -46,7 +46,7 @@ pub(crate) fn commit_ground_cast_on_click(
     // The point the PRESS ray hit, not this frame's — the reference's `+0x360`, written by the one
     // down-edge pick and read unchanged at the release (decision 1122).
     press: Res<crate::target::PressPick>,
-    mut ladder: crate::ui_action::CastLadder,
+    mut ladder: crate::spell::CastLadder,
 ) {
     let occlusion = press.occlusion;
     if !ladder.ground.active() {
@@ -122,7 +122,7 @@ pub(crate) fn commit_object_cast_on_click(
     // The press's pick, as in the terrain leg — the object a gesture binds is the one it started
     // on, whatever the mouse did after (decision 1122).
     press: Res<crate::target::PressPick>,
-    mut ladder: crate::ui_action::CastLadder,
+    mut ladder: crate::spell::CastLadder,
 ) {
     let (hovered, hovered_object) = (press.hovered, press.object);
     if !ladder.ground.active() {
@@ -220,7 +220,7 @@ mod tests {
     fn the_terrain_click_binds_source_or_dest_by_the_standing_word() {
         const BLIZZARD: u32 = 10;
         const AREA_DEATH: u32 = 265;
-        let commit = crate::ui_action::cast_send::CastCommit::Spell;
+        let commit = crate::spell::cast_send::CastCommit::Spell;
 
         let ground = |world: &mut World| {
             world.resource_mut::<crate::target::PressPick>().occlusion =
@@ -299,7 +299,7 @@ mod tests {
         let (mut world, rx, id) = fixture();
         world.resource_mut::<super::super::SpellTargeting>().enter(
             OPENING,
-            crate::ui_action::cast_send::CastCommit::Spell,
+            crate::spell::cast_send::CastCommit::Spell,
             LOCK_WORD,
         );
         hover_go(&mut world, 5.0);
@@ -322,7 +322,7 @@ mod tests {
     /// difference between a dead click and a wrong packet.
     #[test]
     fn the_object_commit_holds_its_fire() {
-        let commit = crate::ui_action::cast_send::CastCommit::Spell;
+        let commit = crate::spell::cast_send::CastCommit::Spell;
 
         // (a) Nothing armed: the click is not ours at all, and the reader is drained so it cannot
         // replay as a commit the frame the mode turns on.

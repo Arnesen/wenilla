@@ -350,7 +350,7 @@ impl PluginGroup for GamePlugins {
             // The stance/shapeshift bar feed (wow-re shapeshift-bar-api.md): builds the form list from
             // PlayerActions.spells per the byte-verified admission/order, drives the stock shapeshift bar through
             // the engine's shapeshift seam, and drains its clicks (cancel-if-active else cast). After
-            // UiActionPlugin (shares `Spells`, the `usable` walk, and the cast tail).
+            // UiActionPlugin (shares `Spells`) and SpellPlugin (the `usable` walk, the cast tail).
             .add(UiShapeshiftPlugin)
             // The pet action bar (decision 0982) — the stance bar's mirror image: server-authoritative,
             // so this renders the ten packed words the last `SMSG_PET_SPELLS` delivered and sends
@@ -953,10 +953,17 @@ pub(crate) mod schedule_tests {
     /// the row behind it is, and it is written by whoever owns it. A scene is also built **once**,
     /// the frame its model asset lands, against a reaper that fires only when a tile dies.
     ///
+    /// **2,886 (decision 2330)** — read off the dump on the tree that lands, after the
+    /// `modalNextSpell` outbox's drain retired: `drain_chain_casts` held the whole cast ladder
+    /// (`CastLadder`'s fourteen parameters and `CastTargeting`'s ten) with no declared order
+    /// against anything but `UiInput`, and the cast reply's handler now casts the chain itself,
+    /// as a one-shot outside the schedule. The three targeting systems the same record moved
+    /// from `UiActionPlugin` to `SpellPlugin` kept their orders and their sets.
+    ///
     /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
     /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
     /// about a resource that commutes by construction, the claim belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 2_975;
+    const UPDATE_ACTIONABLE_CEILING: usize = 2_886;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1146,7 +1153,12 @@ pub(crate) mod schedule_tests {
     /// The structural half of 2265 §A3's executor question — is the prize of collapsing the VM
     /// (and the audio layer) to one `Send` owner correctness only, or correctness plus
     /// parallelism? Prints the serial depth of `Update` today and under each collapse.
+    ///
+    /// An instrument, not a gate: it asserts nothing, so it can only fail by panicking inside the
+    /// census, and it boots a headless client to print four numbers. Ignored for the same reason
+    /// `reference_ui`'s chain reports are (2331); run it by hand when the A3 question is live.
     #[test]
+    #[ignore = "instrument: run by hand (2265 §A3's executor census) — cargo test -p benilla-app --lib concurrency_census -- --ignored --nocapture"]
     fn concurrency_census() {
         let mut app = headless_client();
         let c = census(&mut app, Update);

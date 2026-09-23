@@ -33,7 +33,7 @@
 //!   ([`EnchantConfirmItem`], the ref's `0xb4e3c0`) and return with the word still standing; their
 //!   Yes re-enters that same drain.
 //!
-//! All three end in **one commit tail** ([`crate::ui_action::CastLadder::commit_targeted`]): the
+//! All three end in **one commit tail** ([`crate::spell::CastLadder::commit_targeted`]): the
 //! packet (`SendCast 0x6e54f0`'s same block, two opcodes), the pending arm, the GCD, and the word
 //! cleared.
 //!
@@ -44,7 +44,7 @@
 //! mode clears the word and sends **nothing**.
 //!
 //! Entry and the two press-cancel shapes live in the cast path itself: the resolver yields
-//! [`crate::ui_action::cast_target::CastWireTarget::Targeting`] carrying the word, the one
+//! [`crate::spell::cast_target::CastWireTarget::Targeting`] carrying the word, the one
 //! cast-send path enters the mode here, a NEW spell's press aborts-and-proceeds (`TryCast
 //! 6e4d62`), and the action bar's re-press of the SAME spell toggles the mode off (`UseAction
 //! 0x4e5ee0`'s `GetTargetingSpellId`+`StopTargeting` — [`crate::ui_action::drain`]).

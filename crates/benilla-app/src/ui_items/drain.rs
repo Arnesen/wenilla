@@ -197,8 +197,8 @@ pub(super) fn drain_bag_autostores(
 pub(super) fn drain_inventory_uses(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    targeting: crate::ui_action::cast_target::CastTargeting,
-    mut ladder: crate::ui_action::CastLadder,
+    targeting: crate::spell::cast_target::CastTargeting,
+    mut ladder: crate::spell::CastLadder,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
@@ -262,13 +262,13 @@ pub(super) fn drain_container_uses(
     bank: Res<crate::ui_bank::BankOpen>,
     mut equip_sound: MessageWriter<crate::sound::AutoEquipSound>,
     mut item_text: ResMut<crate::ui_item_text::ItemTextOpen>,
-    targeting: crate::ui_action::cast_target::CastTargeting,
+    targeting: crate::spell::cast_target::CastTargeting,
     // The client-side pending ("gray") lock — the right-click-open arm arms it (decision 0916).
     mut pending_items: ResMut<PendingItemOps>,
     // The loot-target latch — the right-click-open arm is one of its five arm sites, and the one
     // that lets `SMSG_LOOT_RESPONSE`'s admission gate recognise an item loot (decision 1531).
     mut loot_latch: ResMut<crate::ui_loot::LootLatch>,
-    mut ladder: crate::ui_action::CastLadder,
+    mut ladder: crate::spell::CastLadder,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
@@ -900,7 +900,7 @@ mod tests {
             .init_resource::<crate::ui_loot::LootLatch>()
             .init_resource::<crate::target::Selection>()
             .init_resource::<crate::net::SelfGuid>()
-            .init_resource::<crate::ui_action::cast_target::AutoSelfCast>()
+            .init_resource::<crate::spell::cast_target::AutoSelfCast>()
             .init_resource::<crate::net::Reputations>()
             .init_resource::<crate::player::Player>()
             .init_resource::<crate::spell::PendingCast>()
@@ -911,7 +911,7 @@ mod tests {
             .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<crate::spell::AutoRepeatActive>()
             .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
-            .init_resource::<crate::ui_action::targeting::SpellTargeting>()
+            .init_resource::<crate::spell::targeting::SpellTargeting>()
             .init_resource::<Items>()
             .insert_resource(NetCommands(tx));
 
@@ -1114,8 +1114,8 @@ pub(super) fn drain_bind_confirm_answers(
 /// taken on the first, so a doubled accept re-uses nothing.
 pub(super) fn drain_bind_on_use_confirms(
     script: Option<NonSendMut<UiScript>>,
-    targeting: crate::ui_action::cast_target::CastTargeting,
-    mut ladder: crate::ui_action::CastLadder,
+    targeting: crate::spell::cast_target::CastTargeting,
+    mut ladder: crate::spell::CastLadder,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
@@ -1649,7 +1649,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::ui_loot::LootLatch>()
             .init_resource::<crate::target::Selection>()
             .init_resource::<crate::net::SelfGuid>()
-            .init_resource::<crate::ui_action::cast_target::AutoSelfCast>()
+            .init_resource::<crate::spell::cast_target::AutoSelfCast>()
             .init_resource::<crate::net::Reputations>()
             .init_resource::<crate::player::Player>()
             .init_resource::<crate::spell::PendingCast>()
@@ -1660,7 +1660,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<crate::spell::AutoRepeatActive>()
             .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
-            .init_resource::<crate::ui_action::targeting::SpellTargeting>()
+            .init_resource::<crate::spell::targeting::SpellTargeting>()
             .init_resource::<Items>()
             .insert_resource(NetCommands(tx));
         app.world_mut().spawn((

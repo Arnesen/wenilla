@@ -1,5 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// Markup — ported verbatim from probes/text-glyph/src/markup.rs
+// Markup — ported verbatim from decision 0068's text-glyph probe (`probes/text-glyph`, retired
+// from the tree by 2331; git history keeps it)
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// A `|H<link>|h<text>|h` hyperlink a run sits inside: the link payload (`item:2000:0:0:0`,

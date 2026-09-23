@@ -35,8 +35,9 @@
 use bevy::prelude::*;
 
 use crate::net::{ObjectStore, SelfPlayer};
+use crate::spell::{ground_cast_radius, SpellTargeting, TargetingWants};
 use crate::target::{PickOcclusion, WorldCursor};
-use crate::ui_action::{ground_cast_radius, SpellTargeting, Spells, TargetingWants};
+use crate::ui_action::Spells;
 use benilla_world::decal::{DecalFrame, WorldDecal};
 use benilla_world::particles::buffer::EffectVertex;
 use benilla_world::view::WorldCamera;
@@ -211,7 +212,7 @@ pub(super) fn push_reticle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui_action::CastCommit;
+    use crate::spell::CastCommit;
     use avian3d::prelude::Collider;
     use benilla_world::collision::GroundDecalSurface;
     use bevy::ecs::system::RunSystemOnce;

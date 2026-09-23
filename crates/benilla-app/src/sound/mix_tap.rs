@@ -21,6 +21,9 @@
 //! The audio-thread half never allocates or blocks (a fixed ring push per sample; overflow is
 //! counted, not waited on). The ring holds [`RING_SECONDS`] of stereo audio — the writer wakes
 //! every [`FLUSH_EVERY`] and would have to stall ~50× past its cadence before a sample drops.
+//!
+//! Read a capture back with `scripts/mixsum.py <path.wav>`: what the mix was doing, when, in
+//! numbers (clipping, level, silence, steps).
 
 use bevy::prelude::*;
 use kira::effect::{Effect, EffectBuilder};

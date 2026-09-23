@@ -197,7 +197,7 @@ pub(crate) struct DisplayedCursor(pub(crate) crate::target::WorldCursor);
 fn drive_displayed_cursor(
     world: Res<crate::target::WorldCursor>,
     over_ui: Res<crate::ui_script::PointerOverUi>,
-    targeting: Res<crate::ui_action::targeting::SpellTargeting>,
+    targeting: Res<crate::spell::targeting::SpellTargeting>,
     script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
     // The base last applied by the UI-entry restore below — `None` while the pointer is over the
     // world, so re-entering the UI always restores once.
@@ -773,10 +773,10 @@ mod tests {
         app.insert_resource(world);
         app.insert_resource(crate::ui_script::PointerOverUi(over_ui));
         app.insert_resource(DisplayedCursor(standing));
-        let mut targeting = crate::ui_action::SpellTargeting::default();
+        let mut targeting = crate::spell::SpellTargeting::default();
         if armed {
             // Feed Pet's own bare ITEM word.
-            targeting.enter(6991, crate::ui_action::CastCommit::Spell, 0x0010);
+            targeting.enter(6991, crate::spell::CastCommit::Spell, 0x0010);
         }
         app.insert_resource(targeting);
         app.world_mut()
@@ -913,8 +913,8 @@ mod tests {
         app.insert_resource(CAST_GREY);
         app.insert_resource(crate::ui_script::PointerOverUi(true));
         app.insert_resource(DisplayedCursor(CAST_GREY));
-        let mut targeting = crate::ui_action::SpellTargeting::default();
-        targeting.enter(6991, crate::ui_action::CastCommit::Spell, 0x0010);
+        let mut targeting = crate::spell::SpellTargeting::default();
+        targeting.enter(6991, crate::spell::CastCommit::Spell, 0x0010);
         app.insert_resource(targeting);
         app.world_mut()
             .run_system_once(drive_displayed_cursor)

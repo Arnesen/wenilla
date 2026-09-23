@@ -21,7 +21,7 @@
 //!   MOD_SHAPESHIFT spell, the 48-slot aura scan for a force-admitted one ([`form_active`]).
 //! - **isCastable**: the active form reads hardcoded-castable; otherwise the usability predicate
 //!   `0x6e3d60` — the SAME full walk the action bar's `IsUsableAction` runs
-//!   ([`crate::ui_action::usable`], decision 0269's fold-back: reagents, forms, stealth, aura
+//!   ([`crate::spell::usable`], decision 0269's fold-back: reagents, forms, stealth, aura
 //!   states, the power gate).
 //! - **cooldown**: the form spell's own spell/category read ([`Cooldowns::info`]).
 //! - **Click** (`CastShapeshiftForm`): the ACTIVE form CANCELS (`CMSG_CANCEL_AURA`) — unless
@@ -66,8 +66,9 @@ use benilla_ui::script::{ShapeshiftFormView, UiScript};
 use crate::items::Items;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, Reputations, SelfPlayer};
 use crate::spell::Cooldowns;
+use crate::spell::{cast_target, usable, CastCommit, CastLadder};
 use crate::target::Selection;
-use crate::ui_action::{cast_target, usable, CastCommit, CastLadder, PlayerActions, Spells};
+use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 

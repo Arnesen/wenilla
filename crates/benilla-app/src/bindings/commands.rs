@@ -2252,6 +2252,38 @@ mod tests {
         );
     }
 
+    /// The parser's own header, read against the file it describes. `benilla_ui::bindings_xml`
+    /// quotes the shape of `Interface\FrameXML\Bindings.xml` — 228 live bindings, 94 `runOnUp`,
+    /// 13 `header`, 12 `hidden`, the commented-out `MOVEVIEW*` family that a text search counts and
+    /// a parser must not — and until 2331 the test that pinned those numbers lived beside the
+    /// parser, keyed on a `BENILLA_BINDINGS_XML` path nothing ever set, so it had never run. It
+    /// lives here because here is where the install is (`install_bindings`, off the player's own
+    /// chain); a wrong count is either a wrong file or a header that drifted from the client.
+    #[test]
+    fn the_installs_bindings_xml_reads_as_the_parsers_header_says() {
+        let Some(binds) = install_bindings() else {
+            return;
+        };
+        assert_eq!(
+            binds.len(),
+            228,
+            "1.12.1 ships 228 live bindings — the other six are inside a comment"
+        );
+        assert!(binds.iter().all(|b| !b.name.is_empty()));
+        assert!(
+            !binds.iter().any(|b| b.name.starts_with("MOVEVIEW")),
+            "the commented-out family must not register"
+        );
+        assert_eq!(binds.iter().filter(|b| b.run_on_up).count(), 94);
+        assert_eq!(binds.iter().filter(|b| b.header.is_some()).count(), 13);
+        assert_eq!(binds.iter().filter(|b| b.hidden).count(), 12);
+        assert_eq!(
+            binds[0].header.as_deref(),
+            Some("MOVEMENT"),
+            "the file opens on the MOVEMENT section"
+        );
+    }
+
     /// The install's own `Bindings.xml`, parsed — `None` (and a skipped test) without a client.
     fn install_bindings() -> Option<Vec<benilla_ui::bindings_xml::AddonBinding>> {
         let data = benilla_formats::wow_data_or_skip!(None);

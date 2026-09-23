@@ -1511,7 +1511,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // DropItemOnUnit(unit) — drop the cursor's held item onto a unit (`0x48d960`). Two legs in the
     // reference: the PET leg feeds the pet, the PLAYER leg opens a trade. Queues the raw token and
     // nothing else — every gate reads state this VM does not hold, so the app owns all of them
-    // (`ui_action::targeting::drop_item_on_unit`).
+    // (`ui_action::drop_item`).
     //
     // This binding **existed in our shipped `PetFrame_OnClick` before it existed here**: the
     // handler transcribed the reference's three legs faithfully, and the middle one called a nil

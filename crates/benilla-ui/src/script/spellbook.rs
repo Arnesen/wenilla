@@ -843,7 +843,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // no packet). The 1/nil return is load-bearing exactly like SpellStopCasting's above: the
     // ESC chain's rung (`UIParent.lua:1490`, `elseif ( SpellStopTargeting() ) then`) must fall
     // through to the game menu when nothing was targeting. The host drains the trigger
-    // (`benilla::ui_action::targeting`) and clears its mode.
+    // (`benilla::spell::targeting`) and clears its mode.
     g.set(
         "SpellStopTargeting",
         lua.create_function(|lua, ()| {

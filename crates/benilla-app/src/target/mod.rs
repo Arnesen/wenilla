@@ -450,11 +450,11 @@ impl Plugin for TargetPlugin {
                     // The right button's down-edge cancel first (the ref's OnMouseDown hook,
                     // 0792): the frame the press lands, the cursor drive below already reads
                     // the mode cleared and the classifier's verdict stands.
-                    crate::ui_action::targeting::cancel_targeting_on_right_press,
+                    crate::spell::targeting::cancel_targeting_on_right_press,
                     // The ground-targeting pre-empt (decision 0792): overwrites the classifier's
                     // verdict while the targeting cursor is up — the ref's dispatcher runs this
                     // branch before the object classifier; last-writer-wins reads the same.
-                    crate::ui_action::targeting::drive_targeting_cursor,
+                    crate::spell::targeting::drive_targeting_cursor,
                     // The AoE reticle reads that verdict (`WorldCursor.unable` IS the frame's
                     // range state — the ref's one CheckGroundPointInRange caller feeds both).
                     reticle::update_reticle,
@@ -467,8 +467,8 @@ impl Plugin for TargetPlugin {
                     // world legs are siblings, not a fallback chain — the pending spell's word
                     // decides which of them a click can even feed (decision 0939), so their order
                     // relative to each other never matters.
-                    crate::ui_action::targeting::commit_ground_cast_on_click,
-                    crate::ui_action::targeting::commit_object_cast_on_click,
+                    crate::spell::targeting::commit_ground_cast_on_click,
+                    crate::spell::targeting::commit_object_cast_on_click,
                     click::act_on_right_click,
                     click::clear_target_requests,
                     // The two unit-token drains, grouped as one element (the outer chain is at

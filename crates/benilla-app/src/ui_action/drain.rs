@@ -1,7 +1,7 @@
 //! **Outward** — the two action-bar drains, and the law that decides what a click *does*.
 //!
 //! - **Use** ([`drain_action_uses`]): a queued `UseAction(n)` becomes wire. A SPELL action goes
-//!   through the one cast-send path ([`super::cast_send::send_spell_cast`]); the auto-attack action
+//!   through the one cast-send path ([`crate::spell::CastLadder::send`]); the auto-attack action
 //!   (6603) sends `CMSG_ATTACKSWING` at the selection, or acquires the nearest enemy when there is
 //!   none; an ITEM action names an *entry*, not a position, so it must first find a copy and then
 //!   decide equip-vs-use — [`item_action_route`], the byte-verified two-stage law of decision 0666.
@@ -23,8 +23,9 @@ use benilla_ui::script::UiScript;
 
 use crate::net::{ClientCommand, NetCommands};
 
-use super::cast_send::{CastCommit, CastLadder};
-use super::{attack_actor_refusal, cast_target, PlayerActions, UiErrorKeys, SPELL_ATTACK};
+use crate::spell::{cast_target, CastCommit, CastLadder};
+
+use super::{attack_actor_refusal, PlayerActions, UiErrorKeys, SPELL_ATTACK};
 
 /// What clicking an ITEM action does, and to which copy — [`item_action_route`]'s verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,34 +133,6 @@ pub(super) fn attack_target_binding(
             debug!("bindings: ATTACKTARGET with no target — acquiring nearest");
             acquire.write(crate::target::AttackNearestRequest);
         }
-    }
-}
-
-/// **The `modalNextSpell` chain** — `HandleCastResult 0x6e7330`'s tail (`0x6e7447`–`0x6e74aa`),
-/// the client casting a spell at itself with no user input. `cast_result` decides *whether*
-/// (the column read, the in-flight test, the already-running test — all of it is the packet
-/// handler's, so it stays there); this only carries the decision to the one send path.
-///
-/// The cast goes out at the **null target guid** — `0x6e74a6 push ebx; push ebx` with `ebx = 0`
-/// — so the chained Auto Shot binds through the ordinary target walk (`ArmCast 0x6e5250`:
-/// main-hand item bit, then the explicit guid, then the current selection), which is what
-/// [`cast_target::CastTargeting::context`] hands the ladder when no guid is passed.
-///
-/// And it takes **every rung**: the reference chains through `0x6e5a90` → `TryCast 0x6e4b60`, the
-/// same entry a button press uses, so a chained Auto Shot is range-checked, form-checked and
-/// GCD-checked exactly like a pressed one, and refuses with the same red line.
-pub(super) fn drain_chain_casts(
-    mut queue: ResMut<crate::spell::ChainCasts>,
-    targeting: cast_target::CastTargeting,
-    mut ladder: CastLadder,
-) {
-    if queue.0.is_empty() {
-        return;
-    }
-    let ctx = targeting.context();
-    for spell_id in std::mem::take(&mut queue.0) {
-        debug!("ui_action: modalNextSpell chain casts {spell_id}");
-        ladder.send(spell_id, &ctx, CastCommit::Spell);
     }
 }
 

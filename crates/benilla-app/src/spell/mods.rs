@@ -68,7 +68,7 @@
 //! | 11 | COOLDOWN | — |
 //! | 12 | SPEED | — |
 //! | 13 | *(no enumerator)* | never read |
-//! | **14** | **COST** | [`OP_COST`] — `ui_action::usable::power_cost` |
+//! | **14** | **COST** | [`OP_COST`] — `spell::usable::power_cost` |
 //! | 15 | CRIT_DAMAGE_BONUS | never read |
 //! | 16 | RESIST_MISS_CHANCE | never read |
 //! | 17 | JUMP_TARGETS | — |
@@ -114,7 +114,7 @@ const BITS: usize = 64;
 /// discriminators that settle the index's factor roles.
 const CELLS: usize = BITS * OPS;
 
-/// `SPELLMOD_COST` — the one op benilla reads today ([`crate::ui_action::usable::power_cost`], the
+/// `SPELLMOD_COST` — the one op benilla reads today ([`crate::spell::usable::power_cost`], the
 /// reference's `GetPowerCost 0x6e31b0` @ `6e32e3`). The module header's table names the other 28.
 pub(crate) const OP_COST: u8 = 14;
 

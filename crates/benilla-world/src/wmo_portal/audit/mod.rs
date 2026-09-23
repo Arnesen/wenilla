@@ -1,4 +1,4 @@
-//! The WMO portal-cull **audit harness** (test-only, `#[ignore]`d — needs the game data): load a real
+//! The WMO portal-cull **audit harness** (test-only; data-gated, not ignored — see below): load a real
 //! building *at its real placement*, with the real ADT terrain under it, and sweep the two invariants
 //! the client upholds by construction. Every violation prints as a deterministic repro (exact
 //! model-space coordinates + a per-portal hop trace), so a director-found "it vanishes here" becomes a
@@ -16,7 +16,18 @@
 //!   test asserts the race does not over-fire and seal the mine: a standing point on a tunnel floor,
 //!   under the hill, still reads INSIDE.
 //!
-//! Run: `cargo test -p benilla wmo_ -- --ignored --nocapture`
+//! **In the gate since 2331.** The seven audits that assert an invariant (this file's four, and
+//! `pin`'s three site regressions) are ordinary data-gated tests: `wow_data_or_skip!` skips them
+//! where there is no install and `BENILLA_REQUIRE_DATA` refuses that skip where the gate found
+//! one (2329). They were `#[ignore]`d for "needs the game data" from before 1175 put an install
+//! beside every slot, and nothing ever ran them — the `--ignored` line below was the only runner,
+//! and it named a crate this module had left. Cost, measured 2026-09-22: six under a second each,
+//! `wmo_pvs_audit` ~14 s (the standing-point × camera sweep). What stays `#[ignore]`d is the
+//! instruments — `pin`'s census and probe (aimed by `WOW_PIN_*`) and `light_probe`'s four — run by
+//! hand, `--nocapture`, from the command each attribute carries.
+//!
+//! Run the whole harness, instruments included:
+//! `cargo test -p benilla-world --lib wmo_portal::audit -- --include-ignored --nocapture`
 //!
 //! [`light_probe`] (sibling module) reuses this harness's placed subjects for the entity-LIGHT
 //! down-ray probes — per-point verdict/lane maps of the inn corridor and the forge floor.
@@ -552,8 +563,9 @@ const OUTSIDE_HEIGHTS: [f32; 4] = [0.5, 1.7, 4.0, 9.0];
 /// on a tunnel floor is below the hill's surface, so the terrain is not on their down-segment at all,
 /// and the WMO must still win the column.
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
 fn wmo_outside_audit() {
+    // The data gate (2331): a skip where no install is, a failure where the gate says one is.
+    let _data = benilla_formats::wow_data_or_skip!();
     let subject = load_subject(FARGODEEP.wmo, Some(&FARGODEEP));
     let model = &subject.model;
     let placed = subject.placed.as_ref().expect("placed");
@@ -732,8 +744,9 @@ fn interior_standing_eye(model: &WmoModel, gi: usize) -> Option<[f32; 3]> {
 }
 
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
 fn wmo_pvs_audit() {
+    // The data gate (2331): a skip where no install is, a failure where the gate says one is.
+    let _data = benilla_formats::wow_data_or_skip!();
     // The env override names a subject with no known placement — then there is no terrain leg.
     let over = std::env::var("WOW_AUDIT_WMO").ok();
     let internal = over.clone().unwrap_or_else(|| GOLDSHIRE.wmo.to_string());
@@ -891,8 +904,9 @@ fn wmo_pvs_audit() {
 /// own camera. Leg C must name the pocket's room; the terrain race must still own the columns where
 /// its answer is right (the hilltop lid ~272 yd above the tunnel).
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
 fn wmo_camera_void_audit() {
+    // The data gate (2331): a skip where no install is, a failure where the gate says one is.
+    let _data = benilla_formats::wow_data_or_skip!();
     let subject = load_subject(DEADMINES.wmo, Some(&DEADMINES));
     // The zone-in head: areatrigger 78's destination (-14.5732, -385.475, 62.4561) + head height,
     // mapped through the MODF placement (uid 170633) into B-local space.
@@ -941,8 +955,9 @@ fn wmo_camera_void_audit() {
 /// claiming the tunnel group, and the selector resolving record 2 over the record-0 seed — on a
 /// **global (WDT `MODF`) WMO**, the placement shape the rest of this module's sites never exercise.
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
 fn deeprun_tram_undersea_claims_its_own_mfog() {
+    // The data gate (2331): a skip where no install is, a failure where the gate says one is.
+    let _data = benilla_formats::wow_data_or_skip!();
     let subject = load_subject(r"World\wmo\Dungeon\AZ_Subway\Subway.wmo", None);
     let model = &subject.model;
     // The undersea tunnel group, by its authored fog list rather than a hardcoded index.

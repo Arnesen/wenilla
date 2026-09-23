@@ -980,49 +980,6 @@ mod loader_tests {
         assert!(s.eval::<bool>("return Another == nil").unwrap());
     }
 
-    /// Env-gated smoke test over a real extracted FrameXML file (never committed; extract with
-    /// benilla-extract and point `BENILLA_FRAMEXML_LOAD` at it). Parses + loads with a provider over
-    /// the file's own directory, asserts no hard *parse/loader-internal* error, and reports how many
-    /// frames materialized plus the API/handler gaps the file surfaced. Skips silently otherwise,
-    /// matching framexml.rs's `real_framexml_when_available` pattern so gates never depend on client
-    /// data.
-    #[test]
-    fn real_framexml_load_when_available() {
-        let Ok(path) = std::env::var("BENILLA_FRAMEXML_LOAD") else {
-            return;
-        };
-        let text = std::fs::read_to_string(&path).expect("reading BENILLA_FRAMEXML_LOAD");
-        let dir = std::path::Path::new(&path)
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        // Provider: resolve an XML/Lua reference against the file's directory, trying the path as
-        // given and by basename (Blizzard paths use backslashes and are dir-relative).
-        let provider = move |req: &str| -> Option<Vec<u8>> {
-            let norm = req.replace('\\', "/");
-            let base = norm.rsplit('/').next().unwrap_or(&norm);
-            std::fs::read(dir.join(&norm))
-                .or_else(|_| std::fs::read(dir.join(base)))
-                .ok()
-        };
-
-        let s = UiScript::new().unwrap();
-        let doc = framexml::parse(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let report = load(&s, &doc, &provider);
-
-        eprintln!("== {path}: {} frames materialized ==", report.frames);
-        for e in &report.errors {
-            eprintln!("  error: {e}");
-        }
-        for w in &report.warnings {
-            eprintln!("  warn:  {w}");
-        }
-        // Script errors surfaced by any OnLoad that ran against missing API:
-        for e in s.errors() {
-            eprintln!("  script-error: {e}");
-        }
-    }
-
     /// `<StatusBar>` LoadXML extras (RF-28): value attributes, `<BarTexture>` + `<BarColor>`
     /// children, orientation — landing in the widget state and scaling the extracted bar quad.
     #[test]

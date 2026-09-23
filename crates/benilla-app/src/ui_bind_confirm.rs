@@ -147,7 +147,7 @@ pub(crate) struct PendingBindOnUse(pub(crate) Option<PendingUse>);
 pub(crate) type PendingUse = crate::ui_items::ItemUse;
 
 /// The three resources the deferral needs, bundled so a drain can take them in one parameter
-/// (the shape `crate::ui_action::CastLadder` established). [`Items`] is deliberately NOT in here:
+/// (the shape `crate::spell::CastLadder` established). [`Items`] is deliberately NOT in here:
 /// every caller already holds it, and a second `ResMut<Items>` in one system is a conflict.
 #[derive(SystemParam)]
 pub(crate) struct BindGate<'w> {

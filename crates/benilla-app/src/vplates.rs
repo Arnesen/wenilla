@@ -432,7 +432,7 @@ struct PlateWorld<'w, 's> {
     // The cursor, for the plate-rect hover (OnEnter — the yellow name, this frame's rects).
     window: Query<'w, 's, &'static Window, With<bevy::window::PrimaryWindow>>,
     // The pending ground-target cast — the plate's `+0x3c` hit-test veto (`0x7cba30`).
-    targeting: Res<'w, crate::ui_action::SpellTargeting>,
+    targeting: Res<'w, crate::spell::SpellTargeting>,
 }
 
 /// Gate + draw, every frame: decide which units carry a plate (into [`VPlates`], the
@@ -532,7 +532,7 @@ fn drive_vplates(
     script.set_nameplate_hit_test_veto(
         world
             .targeting
-            .wants(crate::ui_action::targeting::TargetingWants::Location),
+            .wants(crate::spell::targeting::TargetingWants::Location),
     );
     let hovered_key = script.hovered_nameplate();
     let clicked = script.take_nameplate_clicks();
@@ -695,7 +695,8 @@ fn drive_vplates(
         // (the plate's logical size) are hoisted above the loop — the border resample keys off them.
         // Geometry trace for the vplates capture (`WOW_VPLATE_TRACE=1`): the exact plate rects
         // this frame, in logical px — the machine-side check the capture PNG can't give
-        // (fill/border/text hues overlap under zoom).
+        // (fill/border/text hues overlap under zoom). The `vpl` lines of the shared trace below
+        // are read back by `scripts/vplsum.py`.
         static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let trace = *TRACE.get_or_init(|| std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1"));
         // The full seat (`0x509ec0`): the desired rect TOP-anchored on the raw projected point

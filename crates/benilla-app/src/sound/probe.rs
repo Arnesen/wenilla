@@ -1,4 +1,6 @@
 //! **Measuring mode** — `$WOW_SOUND_PROBE`: record a session so a sound report becomes evidence.
+//! `scripts/soundprobe.sh` starts the client in it (the `play` profile, with the banner that says
+//! when to press the mark key); `scripts/soundprobe.py` reads the capture back.
 //!
 //! ## Why this exists
 //!
