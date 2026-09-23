@@ -527,7 +527,7 @@
 ## Scripts (`scripts/`)
 
 - `doc-links.py` — fail on a doc link whose target does not exist ANYWHERE in the workspace.
-- `gen-message-catalog.py` — Generate `crates/benilla-ui/src/messages/catalog.rs` from wow-5875-re's message-catalog.tsv.
+- `gen-message-catalog.py` — Generate `crates/benilla-ui/src/messages/catalog.rs` from `reference/1.12-message-catalog.tsv`.
 - `gen-reference-events.py` — Regenerate `reference/1.12-events.tsv` — every FrameScript event the 1.12.1 client can dispatch, with the ARGUMENTS its producers push.
 - `gen-reference-globals.py` — Regenerate `reference/1.12-globals.tsv` — the 1.12.1 client's global namespace, with each name attributed to whoever provides it.
 - `gen-reference-verb-events.py` — Regenerate `reference/1.12-verb-events.tsv` — every FrameScript event the 1.12.1 client fires FROM INSIDE A LUA VERB, keyed by the verb.
@@ -538,14 +538,11 @@
 - `api-coverage.sh` — The addon-API coverage instrument (decisions 1178 §, 1188 phase 0, 1189) — how much of the 1.12.1 client's global surface benilla presents, measured o…
 - `check.sh` — the ROUND's verify (decision 1822): fmt everywhere (cheap), clippy + test scoped to the crates this round's changes can actually affect — the changed …
 - `cine.sh` — play one cinematic on the probe and print what happened, as a timeline.
-- `crosscheck.sh` — compile benilla for the platforms the gates cannot see.
 - `gates.sh` — The commit gates (docs/METHOD.md "Gates"), one vetted runner: fmt-check → clippy -D warnings → workspace tests (skips refused where the data is) → doc…
 - `genmap.sh` — Generate docs/MAP.md — the "what's built" map — derived entirely from what's on disk so it cannot drift (docs/METHOD.md / docs/METHOD.md: "the generat…
-- `leg.sh` — the interleaved A/B leg runner (1353 law 1, mechanized).
+- `probe-identity.sh` — who a scripted run logs in as.
 - `smoke.sh` — The fourth gate, as a command.
 - `soundprobe.sh` — start the client in MEASURING MODE (decision 1556).
 - `summon-live.sh` — The two-client live summon probe (decision 1747) — the instrument that closes the loop on being summoned, because nothing smaller can.
 - `visual.sh` — Phase-5 visual A/B render harness driver (decisions 0008 + 0010).
-- `vkleg.sh` — run the client on VULKAN before it ships: a Linux container, Mesa's software Vulkan driver (lavapipe), a virtual display, and a handful of capture sce…
-- `wt.sh` — the session-worktree pool (decisions 0192 + 0433).
 
