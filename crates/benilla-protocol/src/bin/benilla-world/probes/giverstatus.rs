@@ -1,5 +1,5 @@
-//! `--giverstatus`: the questgiver STATUS wire (the overhead `!`/`?` markers' data). Teleport onto
-//! Marshal McBride, `CMSG_QUESTGIVER_STATUS_QUERY` him, require an `SMSG_QUESTGIVER_STATUS` answer.
+//! `--giverstatus`: the questgiver status wire behind the overhead `!`/`?` markers.
+//! `CMSG_QUESTGIVER_STATUS_QUERY` on Marshal McBride must draw an `SMSG_QUESTGIVER_STATUS`.
 
 use std::time::{Duration, Instant};
 
@@ -12,10 +12,7 @@ pub(crate) struct GiverStatus;
 
 impl Probe for GiverStatus {
     fn stage(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Same cleanup-then-teleport pattern as --quest (idempotent across re-runs); McBride is
-        // both giver and ender for quest 7, so one teleport (already onto him) suffices. Shared with
-        // --questlog: the `mcbride_staged` flag makes the two GM lines go out exactly once for a
-        // co-run, matching today's single `cli.questlog || cli.giverstatus` staging block.
+        // Shared with --questlog: `mcbride_staged` sends the cleanup and teleport once.
         if !cx.world.mcbride_staged {
             cx.session
                 .send_chat(&format!(".quest remove {QUESTLOG_ID}"))?;
@@ -32,10 +29,8 @@ impl Probe for GiverStatus {
         let world = &mut *cx.world;
         let session = &mut *cx.session;
 
-        // --giverstatus: live-verify the questgiver STATUS wire — the overhead `!`/`?` markers'
-        // data plane (CMSG_QUESTGIVER_STATUS_QUERY → SMSG_QUESTGIVER_STATUS, vmangos
-        // QuestHandler.cpp:36-77). Quest 7 was `.quest remove`d in the preamble, so McBride should
-        // answer AVAILABLE(5) for a fresh log.
+        // Quest 7 was removed in staging, so McBride answers AVAILABLE, 5
+        // (`QuestHandler.cpp:36-77`).
         let mcbride = world
             .tracked
             .iter()

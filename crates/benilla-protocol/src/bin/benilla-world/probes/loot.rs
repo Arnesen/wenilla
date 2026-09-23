@@ -1,6 +1,6 @@
-//! `--loot`: the solo-loot wire (decision 0084 §1). Select a target, GM-kill it, wait for the
-//! lootable dynamic flag, teleport onto the corpse, `CMSG_LOOT`, AUTOSTORE every row, LOOT_MONEY if
-//! it carried gold, then LOOT_RELEASE — printing every loot-related packet decoded.
+//! `--loot`: the solo-loot wire. GM-kills a target, waits for it to turn lootable, teleports onto
+//! the corpse, then `CMSG_LOOT`, stores every row, takes the money and releases, printing every
+//! loot packet.
 
 use std::time::{Duration, Instant};
 
@@ -16,9 +16,7 @@ pub(crate) struct Loot {
 
 impl Probe for Loot {
     fn stage(&mut self, cx: &mut Ctx) -> Result<()> {
-        // --loot reuses the --attack teleport spot to guarantee a killable creature in range when no
-        // explicit --loot-guid was given; avoid sending it twice if both flags are set (the shared
-        // `attack_tp_staged` flag — attack/loot/DeathArc all key off it).
+        // Without --loot-guid, use the --attack teleport for a creature in range; sent once.
         if self.loot_guid.is_none() && !cx.world.attack_tp_staged {
             cx.session.send_chat(ATTACK_TP)?;
             cx.world.attack_tp_staged = true;
@@ -32,20 +30,8 @@ impl Probe for Loot {
         let session = &mut *cx.session;
         let self_guid = world.self_guid;
 
-        // --loot: kill + loot a creature end-to-end (decision 0084 §1). Select the target (explicit
-        // --loot-guid, or the nearest streamed creature to the --attack teleport spot), GM-kill it
-        // (a GM `.damage` acts on the selected unit regardless of range), wait for the corpse's
-        // lootable dynamic flag, GM-teleport directly onto the (now-stationary) corpse — `--attack`'s
-        // ~20yd melee-swing search is far looser than the actual loot-range check
-        // (`Player::GetMaxLootDistance`, VERIFIED vmangos `Player.cpp:15472-15476`, a tight
-        // combat-reach distance), and Northshire's mobs wander enough that "nearest at landing" is
-        // routinely just outside it by the time the kill lands — then CMSG_LOOT it, decode the
-        // response, AUTOSTORE every row, LOOT_MONEY if it carried gold, then LOOT_RELEASE. Prints
-        // every loot-related packet decoded.
-        // Candidate targets: the explicit --loot-guid, or the nearest few streamed creatures. A
-        // list, not one — the nearest creature can be a corpse a previous run already looted
-        // (dead until respawn, so `.damage` does nothing and it never goes lootable); trying the
-        // next-nearest instead makes back-to-back probe runs reliable.
+        // `.damage` hits the selected unit at any range. The nearest three creatures are tried,
+        // since the nearest may be a corpse an earlier run already looted.
         let candidates: Vec<u64> = if let Some(g) = self.loot_guid {
             vec![g]
         } else {
@@ -69,8 +55,7 @@ impl Probe for Loot {
             bail!("--loot: no creature streamed in (try --loot-guid)");
         }
 
-        // Kill candidates until one shows the corpse's lootable dynamic flag (UNIT_DYNFLAG_LOOTABLE,
-        // bit 0x1 — VERIFIED vmangos `SharedDefines.h:1153`).
+        // Kill until one turns lootable: `UNIT_DYNFLAG_LOOTABLE` 0x1 (`SharedDefines.h:1153`).
         let mut target = 0u64;
         let mut lootable = false;
         for &candidate in &candidates {
@@ -108,12 +93,9 @@ impl Probe for Loot {
         }
         println!("✅ {target:#x} is lootable (UNIT_DYNFLAG_LOOTABLE set)");
 
-        // Reposition directly onto the (now-stationary) corpse before looting — see the block
-        // comment above for why "nearest at landing" isn't reliably in loot range. The tracked
-        // position itself can lag where the creature actually died (a mid-spline kill reports the
-        // spline's last waypoint, not the death spot), and `GetMaxLootDistance` is combat-reach
-        // tight — so on a TOO_FAR refusal, drain (refreshing tracked positions) and retry with the
-        // updated spot instead of failing the run on instrument flakiness.
+        // Teleport onto the corpse: loot range is combat reach (`Player.cpp:15472-15476`), and a
+        // mid-spline kill leaves the tracked position at the spline's last waypoint, so a TOO_FAR
+        // refusal retries from the refreshed spot.
         let mut response: Option<(u8, u32, Vec<benilla_protocol::messages::LootItem>)> = None;
         let mut loot_refusal: Option<u8> = None;
         for attempt in 1..=3 {
@@ -149,8 +131,7 @@ impl Probe for Loot {
             loot_refusal = None;
             session.loot(target)?;
 
-            // Drain for SMSG_LOOT_RESPONSE (either shape), keeping tracked positions fresh so a
-            // retry teleports to the corpse's *corrected* spot.
+            // Drain for either `SMSG_LOOT_RESPONSE` shape, refreshing positions for a retry.
             let drain_until = Instant::now() + Duration::from_secs(5);
             while Instant::now() < drain_until && response.is_none() && loot_refusal.is_none() {
                 let Ok(msg) = session.recv() else { continue };
@@ -179,10 +160,8 @@ impl Probe for Loot {
                             }
                             response = Some((loot_type, gold, items));
                         }
-                        // The master-loot candidate list rides the window OPEN, ahead of the
-                        // response it belongs to, and it is the one part of the master-loot arc
-                        // that cannot be staged from a single probe account (decision 1675). It
-                        // is printed unconditionally — it carries no loot guid to match on.
+                        // The master-loot list arrives ahead of its response and carries no loot
+                        // guid, so it is printed unconditionally.
                         SessionEvent::LootMasterList { candidates } => {
                             println!(
                                 "SMSG_LOOT_MASTER_LIST: {} eligible looter(s)",
@@ -225,8 +204,7 @@ impl Probe for Loot {
         let (loot_type, gold, items) =
             response.context("--loot: no SMSG_LOOT_RESPONSE arrived within 5s")?;
 
-        // AUTOSTORE every row, watching for the LOOT_REMOVED + ITEM_PUSH_RESULT + bag ItemCreate
-        // each one drives.
+        // Store every row; each drives LOOT_REMOVED, ITEM_PUSH_RESULT and a bag ItemCreate.
         let mut removed_slots: Vec<u8> = Vec::new();
         let mut pushes: Vec<benilla_protocol::messages::ItemPushResult> = Vec::new();
         let mut items_created: Vec<u64> = Vec::new();
@@ -286,25 +264,9 @@ impl Probe for Loot {
             items_created.len()
         );
 
-        // LOOT_MONEY, only if the response actually carried gold.
-        //
-        // Live-verified departure from the pin: this vmangos build never sends
-        // SMSG_LOOT_MONEY_NOTIFY for a solo (ungrouped) looter — `LootHandler.cpp`'s
-        // `HandleLootMoneyOpcode` comments out `player->SendLootMoneyNotify(pLoot->gold)` for the
-        // non-group branch ("in wotlk and after this should be sent for solo looting too") and
-        // applies the money silently via `Player::LootMoney` (a `PLAYER_FIELD_COINAGE` delta)
-        // instead. Only `SMSG_LOOT_CLEAR_MONEY` fires. So the pass criterion here is CLEAR_MONEY +
-        // a coinage delta on our own guid, with the notify event accepted too (group loot, or a
-        // future server that un-comments it).
-        //
-        // `NotifyMoneyRemoved` (CLEAR_MONEY) sends immediately; `LootMoney`'s
-        // `PLAYER_FIELD_COINAGE` write reaches us on the ordinary dirty-field broadcast tick, not
-        // synchronously with CLEAR_MONEY. NOTE the loot flow guarantees *unrelated* self values
-        // updates in the same window (the server toggles `UNIT_FLAG_LOOTING` on us at
-        // `SendLoot`/release) — so "a self values update arrived" is NOT "the coinage delta
-        // arrived"; only an actual change of `player_money()` counts (the original drain exited on
-        // the flags-only update, read an unchanged purse, and mis-reported the money as lost —
-        // the DB was always correct).
+        // vmangos sends no `SMSG_LOOT_MONEY_NOTIFY` to a solo looter (commented out in
+        // `HandleLootMoneyOpcode`): `SMSG_LOOT_CLEAR_MONEY` comes at once and the money as a later
+        // `PLAYER_FIELD_COINAGE` delta. The notify still counts, for group loot.
         if gold > 0 {
             let money_before = world.self_fields.as_ref().and_then(|sf| sf.player_money());
             println!(
@@ -332,9 +294,8 @@ impl Probe for Loot {
                         SessionEvent::ObjectValues { guid: g, fields } if g == self_guid => {
                             if let Some(sf) = &mut world.self_fields {
                                 sf.merge(fields);
-                                // Only a *changed* purse is the coinage delta — the loot flow also
-                                // pushes flags-only self updates (UNIT_FLAG_LOOTING), and treating
-                                // those as "the money arrived" mis-reads an unchanged purse as lost.
+                                // Only a changed purse counts: the loot flow also pushes
+                                // flags-only self updates (`UNIT_FLAG_LOOTING`).
                                 if sf.player_money() != money_before {
                                     money_after = sf.player_money();
                                 }
@@ -371,7 +332,6 @@ impl Probe for Loot {
             println!("(no gold on this corpse — skipping CMSG_LOOT_MONEY)");
         }
 
-        // RELEASE.
         println!("sending CMSG_LOOT_RELEASE");
         session.loot_release(target)?;
         let mut released = false;

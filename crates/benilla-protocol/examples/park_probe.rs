@@ -1,12 +1,8 @@
-//! Live probe (decision 0193): the character-select park behaviors benilla's glue layer rests on.
+//! Live probe: the character-select park behaviours the glue screens rely on. A logout ends in
+//! `SMSG_LOGOUT_COMPLETE` and a reconnect re-serves the roster; a socket parked at character
+//! select for 130 s still logs in, since vmangos does not kick a quiet authenticated socket.
 //!
-//! 1) the logout round-trip — login, logout, confirm `SMSG_LOGOUT_COMPLETE`, reconnect, confirm
-//!    the roster re-serves (the app's drop-and-reconnect relist);
-//! 2) idle tolerance — park an authenticated socket at character select for 130 s, then log in
-//!    (verified 2026-07-07: vmangos does NOT kick a quiet parked socket, so the glue screen needs
-//!    no keep-alive ping).
-//!
-//! Needs the local vmangos up; account `two`/`ptwo` (the account-X/password-pX convention).
+//! Needs the local vmangos and account `two`/`ptwo`.
 
 use std::time::Duration;
 
@@ -42,7 +38,7 @@ fn main() -> anyhow::Result<()> {
     println!("PASS: SMSG_LOGOUT_COMPLETE received");
     drop(s);
 
-    // Fresh cycle re-serves the roster (the app's drop-and-reconnect relist).
+    // A fresh connection re-serves the roster, as the app's relist does.
     let mut s = connect(user, pass)?;
     let n = s.char_enum()?.len();
     println!("PASS: post-logout reconnect roster has {n} chars");
@@ -55,7 +51,7 @@ fn main() -> anyhow::Result<()> {
     std::thread::sleep(Duration::from_secs(130));
     match s.player_login(chars[0].guid).and_then(|()| {
         s.set_active_mover(chars[0].guid)?;
-        // Prove the world actually streams: wait for any post-login packet.
+        // Any post-login packet shows the world streams.
         s.set_read_timeout(Some(Duration::from_secs(5)))?;
         s.recv().map(|p| p.name())
     }) {

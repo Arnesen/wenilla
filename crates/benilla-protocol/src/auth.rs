@@ -1,9 +1,6 @@
-//! The realmd (login) wire protocol — 1.12.1 uses **login protocol version 3**. In-repo replacement
-//! for `wow_login_messages` (decision 0021), scoped to the three exchanges [`crate::logon`] performs:
-//! logon challenge, logon proof, and realm list. Login packets are *not* header-encrypted (unlike the
-//! world protocol) and each is self-delimiting, so we read them in request/response order.
-//!
-//! Opcodes: `CMD_AUTH_LOGON_CHALLENGE = 0x00`, `CMD_AUTH_LOGON_PROOF = 0x01`, `CMD_REALM_LIST = 0x10`.
+//! The realmd (login) wire protocol, version 3 in 1.12.1: logon challenge, logon proof and realm
+//! list, the three exchanges [`crate::logon`] performs. Login packets are not header-encrypted and
+//! each is self-delimiting, so they are read in request/response order.
 
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
@@ -21,18 +18,15 @@ const CMD_REALM_LIST: u8 = 0x10;
 const PROTOCOL_VERSION_THREE: u8 = 3;
 const GAME_NAME_WOW: u32 = 0x0057_6f57; // "WoW\0" little-endian
 const PLATFORM_X86: u32 = 0x0078_3836; // "x86\0"
-                                       // The OS/platform tags ride the wire *reversed*: the real client stores them as little-endian u32s,
-                                       // so `0x0057696e` writes the bytes `n i W \0`, and realmd reverses them back (`AuthSocket.cpp`:
-                                       // `std::reverse(m_os.begin(), m_os.end())`). vmangos accepts exactly "Win" and "OSX"
-                                       // (`WorldSocket::HandleAuthSession`) and fails the session on anything else.
+                                       // Tags are little-endian u32s, so they reach the
+                                       // wire reversed (`0x0057696e` is `n i W \0`) and
+                                       // realmd reverses them back. vmangos fails a session
+                                       // on anything but "Win" or "OSX".
 const OS_WINDOWS: u32 = 0x0057_696e; // "Win\0"
 const OS_MACOS: u32 = 0x004F_5358; // "OSX\0"
 
-/// The OS tag for the host we are actually running on. We hardcoded Windows on every platform,
-/// which is plainly false on a Mac — and servers act on this field: vmangos picks `WardenWin` vs
-/// `WardenMac` from it, and realmd validates the build against it (`FindBuildInfo(build, os,
-/// platform)`). There was never a 1.12 Linux client, so every non-Mac host keeps saying Windows —
-/// the closest true thing we can say.
+/// The host's OS tag: `OSX` on macOS, else `Win`, as there was no 1.12 Linux client. Servers act
+/// on it: vmangos picks `WardenWin` or `WardenMac`, and realmd checks the build (`FindBuildInfo`).
 const fn client_os() -> u32 {
     if cfg!(target_os = "macos") {
         OS_MACOS
@@ -42,11 +36,9 @@ const fn client_os() -> u32 {
 }
 const LOCALE_EN_US: u32 = 0x656e_5553; // "enUS"
 
-/// A non-success auth result byte from the server (challenge or proof stage), typed so the app can
-/// map the code to the client's own `AUTH_*` glue string (decision 0539). Rides [`crate::logon`]'s
-/// `anyhow` chain — `err.downcast_ref::<AuthReject>()` recovers the code through the contexts.
-/// vmangos note (its `AuthCodes.h`, verified): unknown account AND wrong password both arrive as
-/// 0x04 (`WOW_FAIL_UNKNOWN_ACCOUNT`) — the client locks out after an 0x05, so the server avoids it.
+/// A non-success auth result byte, typed so the app can map it to its `AUTH_*` glue string; it
+/// survives [`crate::logon`]'s `anyhow` contexts via `downcast_ref`. vmangos answers an unknown
+/// account and a wrong password alike with 0x04 (`WOW_FAIL_UNKNOWN_ACCOUNT`, `AuthCodes.h`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthReject {
     /// The grunt result byte (`WOW_FAIL_*`).
@@ -67,13 +59,12 @@ pub struct ChallengeReply {
     pub generator: u8,
     pub large_safe_prime: [u8; 32],
     pub salt: [u8; 32],
-    /// The 16-byte version challenge the client answers with `crc_hash` — see [`version_proof`].
-    /// Not an SRP6 input; it seeds the client's binary-integrity digest.
+    /// The version challenge answered by `crc_hash` ([`version_proof`]); not an SRP6 input.
     pub crc_salt: [u8; 16],
 }
 
-/// Send `CMD_AUTH_LOGON_CHALLENGE_Client`. `account_name` must already be uppercased (it is what the
-/// SRP6 hashes use). `build` is the client build (5875).
+/// Send `CMD_AUTH_LOGON_CHALLENGE_Client`. `account_name` must be uppercased, as the SRP6 hashes
+/// use it; `build` is 5875.
 pub fn write_logon_challenge(
     w: &mut impl Write,
     account_name: &str,
@@ -102,7 +93,7 @@ pub fn write_logon_challenge(
     w.write_all(&packet)
 }
 
-/// Read the challenge reply, returning the SRP6 inputs (or erroring on a non-success result).
+/// Read the challenge reply; a non-success result is an [`AuthReject`].
 pub fn read_challenge_reply(r: &mut impl Read) -> Result<ChallengeReply> {
     let opcode = read_u8(r)?;
     if opcode != CMD_AUTH_LOGON_CHALLENGE {
@@ -129,14 +120,12 @@ pub fn read_challenge_reply(r: &mut impl Read) -> Result<ChallengeReply> {
         .try_into()
         .map_err(|_| anyhow::anyhow!("large safe prime was {prime_len} bytes, expected 32"))?;
     let salt = read_array::<32>(r)?;
-    // Consume the rest of the packet so the stream stays aligned for the next message — login packets
-    // are NOT length-framed, so leftover bytes desync the very next read. crc_salt[16] feeds the
-    // integrity proof (not SRP6); security_flag (+ the PIN block if set) is unused but must still be
-    // read off.
+    // Read to the end: login packets are not length-framed, so leftover bytes desync the next
+    // read. `security_flag` and the PIN block are unused but must be consumed.
     let crc_salt = read_array::<16>(r)?;
     let security_flag = read_u8(r)?;
     if security_flag & 0x01 != 0 {
-        // PIN: pin_grid_seed (u32) + pin_salt[16]. (vmangos sends security_flag = 0; handled anyway.)
+        // PIN: pin_grid_seed (u32) + pin_salt[16]; vmangos always sends security_flag 0.
         let _pin_grid_seed = read_u32_le(r)?;
         let _pin_salt = read_array::<16>(r)?;
     }
@@ -149,50 +138,34 @@ pub fn read_challenge_reply(r: &mut impl Read) -> Result<ChallengeReply> {
     })
 }
 
-// --- the version (client-integrity) proof ---------------------------------------------------------
+// --- the version (client-integrity) proof --------------------------------------------------------
 //
-// The proof packet's `crc_hash` answers the challenge's `crc_salt`: the real client scans its own
-// binaries under that salt into a 20-byte digest `H`, and sends `SHA1(A ‖ H)`. realmd recomputes the
-// same expression from a stored `H` and rejects a mismatch as a *modified client*
-// (vmangos `AuthSocket::VerifyVersion`, cmangos ditto — byte-identical implementations). We sent
-// twenty zeros here for the project's whole life, which is invisible until a server turns the check
-// on: `StrictVersionCheck = 1` then answers a correct password with `WOW_FAIL_VERSION_INVALID` (0x09,
-// our login screen's "Wrong client version") — B241. Note vmangos's own shipped
-// `realmd.conf.example` sets 1, so this is a *default* on a fresh repack, not exotic hardening.
+// The proof's `crc_hash` answers the challenge's `crc_salt`: the 1.12 client hashes its own
+// binaries under that salt into a 20-byte digest `H` and sends `SHA1(A ‖ H)`. realmd recomputes it
+// from a stored `H` (`AuthSocket::VerifyVersion`) and, under `StrictVersionCheck = 1` (the shipped
+// `realmd.conf.example` value), refuses a mismatch with `WOW_FAIL_VERSION_INVALID` (0x09).
 
-/// The 16-byte `crc_salt` every mangos-family realmd sends — a **constant, not a nonce** (vmangos
-/// `realmd/AuthSocket.cpp:65` and cmangos `realmd/AuthSocket.cpp:187`, two independent copies of the
-/// same bytes). The whole scheme rests on that: because every server issues the same challenge, the
-/// client's answer is a per-build constant a server can store without owning the client.
+/// The `crc_salt` every mangos-family realmd sends: a constant, not a nonce (vmangos
+/// `AuthSocket.cpp:65`, cmangos `AuthSocket.cpp:187`), so the answer is a per-build constant.
 const MANGOS_VERSION_CHALLENGE: [u8; 16] = [
     0xba, 0xa3, 0x1e, 0x99, 0xa0, 0x0b, 0x21, 0x57, 0xfc, 0x37, 0x3f, 0xb3, 0x69, 0xcd, 0xd2, 0xf1,
 ];
 
-/// `H` for build 5875 under [`MANGOS_VERSION_CHALLENGE`], Windows client. Cross-checked between two
-/// independent emulator lineages: vmangos ships it as DB data (`sql/migrations/20221117065844_logon.sql`,
-/// `allowed_clients` row `1,12,1,'',5875,'Win','x86'`), cmangos as a hardcoded table
-/// (`realmd/RealmList.cpp`, `ExpectedRealmdClientBuilds`) — byte-identical.
+/// `H` for the build 5875 Windows client under [`MANGOS_VERSION_CHALLENGE`]: vmangos's
+/// `allowed_clients` row (`20221117065844_logon.sql`), identical to cmangos's `RealmList.cpp`.
 const INTEGRITY_HASH_5875_WINDOWS: [u8; 20] = [
     0x95, 0xed, 0xb2, 0x7c, 0x78, 0x23, 0xb3, 0x63, 0xcb, 0xdd, 0xab, 0x56, 0xa3, 0x92, 0xe7, 0xcb,
     0x73, 0xfc, 0xca, 0x20,
 ];
 
-/// `H` for build 5875 under [`MANGOS_VERSION_CHALLENGE`], Mac client — same two sources, and the one
-/// we must answer with on macOS, where [`client_os`] says `OSX` (vmangos keys its lookup on the os
-/// field, cmangos picks `MacHash` off the same field).
+/// The same for the Mac client, sent on macOS because servers pick `H` by the OS tag.
 const INTEGRITY_HASH_5875_MACOS: [u8; 20] = [
     0x8d, 0x17, 0x3c, 0xc3, 0x81, 0x96, 0x1e, 0xeb, 0xab, 0xf3, 0x36, 0xf5, 0xe6, 0x67, 0x5b, 0x10,
     0x1b, 0xb5, 0x13, 0xe5,
 ];
 
-/// The 20-byte integrity digest to answer `crc_salt` with, or `None` when we have no answer for that
-/// salt.
-///
-/// We hold `H` only for the one salt above, so a server that issues a *different* one gets zeros
-/// rather than a stale constant. That is not defensive padding: replaying a constant computed for
-/// another challenge is exactly the tell a randomised challenge would be looking for, and it cannot
-/// pass anyway. (No server in the mangos family randomises it — a per-connection salt would make
-/// their own stored hashes useless — so this branch is the honest answer to a hypothetical, and free.)
+/// The integrity digest `H` for `crc_salt`, known only for [`MANGOS_VERSION_CHALLENGE`].
+/// Deviation: a stored constant, not a hash of the install, which may lack the five binaries.
 fn integrity_hash(crc_salt: &[u8; 16]) -> Option<[u8; 20]> {
     if *crc_salt != MANGOS_VERSION_CHALLENGE {
         return None;
@@ -204,9 +177,8 @@ fn integrity_hash(crc_salt: &[u8; 16]) -> Option<[u8; 20]> {
     })
 }
 
-/// The proof packet's `crc_hash`: `SHA1(A ‖ H)` over the wire bytes of `A` (realmd hashes `lp->A`
-/// as received, so this is the same 32 bytes we put in the packet). Twenty zeros when we have no
-/// `H` for this salt — the pre-B241 behaviour, which a non-strict server ignores.
+/// The proof's `crc_hash`: `SHA1(A ‖ H)` over `A`'s wire bytes (realmd hashes `lp->A` as
+/// received), or twenty zeros for an unknown salt, which only a strict server refuses.
 pub fn version_proof(crc_salt: &[u8; 16], client_public_key: &[u8; 32]) -> [u8; 20] {
     match integrity_hash(crc_salt) {
         Some(h) => {
@@ -219,9 +191,7 @@ pub fn version_proof(crc_salt: &[u8; 16], client_public_key: &[u8; 32]) -> [u8; 
     }
 }
 
-/// Send `CMD_AUTH_LOGON_PROOF_Client`. `crc_salt` is the challenge's — the packet's `crc_hash` is
-/// computed here ([`version_proof`]) rather than passed in, so no caller can forget it. No telemetry
-/// keys, no security flag.
+/// Send `CMD_AUTH_LOGON_PROOF_Client`, computing `crc_hash` from the challenge's `crc_salt`.
 pub fn write_logon_proof(
     w: &mut impl Write,
     client_public_key: &[u8; 32],
@@ -238,7 +208,7 @@ pub fn write_logon_proof(
     w.write_all(&packet)
 }
 
-/// Read the proof reply, returning the server's proof `M2` (or erroring on a non-success result).
+/// Read the proof reply: the server's `M2`, or an [`AuthReject`].
 pub fn read_proof_reply(r: &mut impl Read) -> Result<[u8; 20]> {
     let opcode = read_u8(r)?;
     if opcode != CMD_AUTH_LOGON_PROOF {
@@ -246,7 +216,7 @@ pub fn read_proof_reply(r: &mut impl Read) -> Result<[u8; 20]> {
     }
     let result = read_u8(r)?;
     if result != 0 {
-        // A wrong password fails HERE (the server can't verify M1): vmangos answers 0x04.
+        // A wrong password fails here, where `M1` does not verify: vmangos answers 0x04.
         return Err(AuthReject { code: result }.into());
     }
     let server_proof = read_array::<20>(r)?;
@@ -261,32 +231,18 @@ pub fn write_realm_list_request(w: &mut impl Write) -> std::io::Result<()> {
     w.write_all(&packet)
 }
 
-/// The three **magic populations** the reference's realm-list parser rewrites, and the flag bit
-/// each one stands in for: `(population as sent, population rewritten to, flag OR'd)`.
-///
-/// Only bits `0x01`/`0x02`(/`0x04`) are real server flags on the wire. Recommended, New and Full
-/// travel as *populations* — the parser recognises the exact float, replaces it, and ORs in the bit
-/// the load band later reads. Compared by bit pattern because that is what the binary compares, and
-/// because it says plainly that these are sentinels rather than a numeric range.
-///
-/// VERIFIED, wow-re `system/glue/scratch/realm-list-bindings.md` §5 (the parser is `0x5b2230`).
+/// The magic populations the 1.12 realm-list parser (`0x5b2230`) rewrites, as `(population sent,
+/// population rewritten, flag OR'd)`: Recommended, New and Full travel as these exact float bit
+/// patterns, not as wire flags.
 pub(crate) const MAGIC_POPULATIONS: [(u32, u32, u8); 3] = [
-    (0x4416_0000, 0x0000_0000, 0x20), // 600.0 → 0.0    — Recommended
-    (0x4348_0000, 0x3a83_126f, 0x40), // 200.0 → 0.001  — New
-    (0x43c8_0000, 0x4100_0000, 0x80), // 400.0 → 8.0    — Full
+    (0x4416_0000, 0x0000_0000, 0x20), // 600.0 → 0.0,   Recommended
+    (0x4348_0000, 0x3a83_126f, 0x40), // 200.0 → 0.001, New
+    (0x43c8_0000, 0x4100_0000, 0x80), // 400.0 → 8.0,   Full
 ];
 
-/// Read `CMD_REALM_LIST_Server` into the advertised realms.
-///
-/// **Every per-realm field is kept.** The flags byte, the category byte and the realm id were
-/// read-and-dropped for as long as benilla connected to `realms.first()` without ever drawing a
-/// list; the realm-list screen displays or groups on all three, and the population is the input to
-/// the load band rather than a string to print.
-///
-/// **And the population is rewritten on the way in** — see [`MAGIC_POPULATIONS`]. This has to
-/// happen *here*, in the parser, exactly as the reference does it: the realm-list screen computes a
-/// mean over every realm's population, and a realm advertised as Recommended arrives carrying
-/// `600.0`, which would drag that mean far enough to mislabel every other row on the list.
+/// Read `CMD_REALM_LIST_Server` into the advertised realms, rewriting [`MAGIC_POPULATIONS`] here
+/// as the reference parser does: the realm-list screen averages every realm's population, and an
+/// unswapped Recommended `600.0` would skew that mean for every row.
 pub fn read_realm_list(r: &mut impl Read) -> Result<Vec<RealmInfo>> {
     let opcode = read_u8(r)?;
     if opcode != CMD_REALM_LIST {
@@ -324,7 +280,7 @@ pub fn read_realm_list(r: &mut impl Read) -> Result<Vec<RealmInfo>> {
             id,
         });
     }
-    let _footer_padding = read_u16_le(r)?; // consume so the stream stays aligned (see challenge reply)
+    let _footer_padding = read_u16_le(r)?; // consume so the stream stays aligned
     Ok(realms)
 }
 
@@ -332,9 +288,6 @@ pub fn read_realm_list(r: &mut impl Read) -> Result<Vec<RealmInfo>> {
 mod tests {
     use super::*;
 
-    /// The OS/platform tags are reversed on the wire (the real client's little-endian u32s), and a
-    /// server that reads anything but "Win"/"OSX" fails the session — so pin the byte order, not
-    /// just the constant. Reversing the wire bytes must spell the tag.
     #[test]
     fn os_tags_reverse_to_the_names_servers_match_on() {
         let spelled = |tag: u32| {
@@ -347,7 +300,6 @@ mod tests {
         assert_eq!(spelled(PLATFORM_X86), "x86");
     }
 
-    /// We advertise the host we actually run on — Windows everywhere except macOS.
     #[test]
     fn client_os_follows_the_host() {
         if cfg!(target_os = "macos") {
@@ -362,10 +314,7 @@ mod tests {
         std::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(9))
     }
 
-    /// Known answers, computed *outside* this crate (Python `hashlib`) from realmd's own expression
-    /// `SHA1(A ‖ H)` and the emulator-sourced `H`. A regression here means either constant moved or
-    /// the hash grew an extra input — both of which read as "modified client" to a strict server and
-    /// are otherwise invisible until someone tries to log in.
+    /// Expected digests computed outside this crate (Python `hashlib`) as `SHA1(A ‖ H)`.
     #[test]
     fn version_proof_matches_the_realmd_expression() {
         let expected = if cfg!(target_os = "macos") {
@@ -380,7 +329,6 @@ mod tests {
         );
     }
 
-    /// A salt we hold no `H` for is answered with zeros, not with the constant for another salt.
     #[test]
     fn an_unknown_version_challenge_is_answered_with_zeros() {
         let mut salt = MANGOS_VERSION_CHALLENGE;
@@ -388,8 +336,7 @@ mod tests {
         assert_eq!(version_proof(&salt, &test_public_key()), [0u8; 20]);
     }
 
-    /// The proof packet carries the answer at the offset realmd reads it from: `opcode · A[32] ·
-    /// M1[20] · crc_hash[20] · num_keys · security_flag`, 75 bytes total.
+    /// `opcode · A[32] · M1[20] · crc_hash[20] · num_keys · security_flag`, 75 bytes.
     #[test]
     fn the_proof_packet_carries_the_version_proof() {
         let a = test_public_key();
@@ -408,12 +355,6 @@ mod tests {
         assert_eq!(&packet[73..], &[0, 0]);
     }
 
-    /// Every per-realm field the wire carries survives the read.
-    ///
-    /// The flags byte, the category byte and the realm id were read into `_`-prefixed locals and
-    /// dropped for as long as nothing drew a realm list; the population was stringified on the way
-    /// in. All four are load-bearing for the realm-list screen, so pin the byte layout *and* the
-    /// capture — a field silently going back to `_` is the failure this catches.
     #[test]
     fn the_realm_list_keeps_every_field_the_wire_carries() {
         let mut body = Vec::new();
@@ -446,13 +387,7 @@ mod tests {
         assert_eq!(r.id, 9);
     }
 
-    /// **Recommended / New / Full arrive as populations, not as flags**, and the parser swaps them
-    /// before anyone can average the number.
-    ///
-    /// This is the one place it can be done. The realm list's load band is computed from a mean
-    /// over every realm's population, so a single realm advertised as Recommended (600.0) sitting
-    /// unswapped in a list of realms at ~1.0 drags the mean past every other row and relabels the
-    /// whole screen. The rewritten values are the reference's own, bit for bit.
+    /// The rewritten values are the reference parser's own, bit for bit.
     #[test]
     fn the_three_magic_populations_become_flags_and_are_rewritten() {
         let one = |pop: f32| {

@@ -1,28 +1,16 @@
-//! `version_check_probe` — the B241 instrument (decision 1263): does this realmd enforce
-//! `StrictVersionCheck`, and does our logon proof satisfy it?
+//! `version_check_probe`: whether a realmd enforces `StrictVersionCheck`, and whether our logon
+//! proof satisfies it. It runs the handshake twice, differing only in the proof's `crc_hash`:
+//! twenty zeros, which a strict realmd refuses with `WOW_FAIL_VERSION_INVALID` (0x09, shown as
+//! `AUTH_VERSION_MISMATCH`, "Wrong client version"), and the computed `SHA1(A ‖ H)`
+//! ([`auth::version_proof`]). A non-strict server accepts both.
 //!
-//! Runs the same handshake **twice against the same server**, differing only in the proof packet's
-//! `crc_hash`:
+//! With an install directory it also derives that install's own digest the way the 1.12 client
+//! does, HMAC-SHA1 keyed by the challenge over five binaries, and says whether it is the stock
+//! one. Deviation: benilla always sends the published constant instead, since an install without
+//! those binaries could never answer for itself.
 //!
-//! - **zeros** — what benilla sent for its whole life before 1263. A strict realmd answers this with
-//!   `WOW_FAIL_VERSION_INVALID` (0x09) and logs *"tried to login with modified client!"*; 0x09 is the
-//!   code our login screen renders as `AUTH_VERSION_MISMATCH` / "Wrong client version", which is
-//!   exactly how B241 was reported.
-//! - **computed** — `SHA1(A ‖ H)` with the integrity digest for our build and OS
-//!   ([`auth::version_proof`]).
-//!
-//! A non-strict server accepts both arms (it never looks), so the probe reports *what the server
-//! enforces* as much as what we send. That is the point: it is the A/B that closes B241 and the one
-//! to run against any server a strict-mode rejection is reported from.
-//!
-//! Give it an **install directory** as a fourth argument and it also derives that install's own
-//! integrity digest the way the real client does — HMAC-SHA1 keyed by the challenge over five
-//! binaries (decision 1265, mechanism in wow-re `system/net/scratch/logon-integrity-hash.md`) — and
-//! says whether it is the stock one. Diagnostic only: benilla always sends the published constant,
-//! so a patched `WoW.exe` shows up here without changing a single login.
-//!
-//! Usage: `cargo run -p benilla-protocol --example version_check_probe -- <host[:port]> <user> <pass> [install-dir]`
-//! (the local strict-mode realmd of decision 1263 is `127.0.0.1:3725`; the ordinary one is 3724.)
+//! Usage: `cargo run -p benilla-protocol --example version_check_probe -- <host[:port]> <user>
+//! <pass> [install-dir]`. The local strict-mode realmd is `127.0.0.1:3725`, the ordinary one 3724.
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -36,10 +24,9 @@ use sha1::{Digest, Sha1};
 /// Which `crc_hash` the arm puts in the proof packet.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Arm {
-    /// Twenty zeros — pre-1263 benilla. Forced by handing the writer a `crc_salt` we hold no digest
-    /// for, which is precisely the "no answer" path.
+    /// Twenty zeros, forced by handing the writer a `crc_salt` we hold no digest for.
     Zeros,
-    /// `SHA1(A ‖ H)` for the salt the server actually sent.
+    /// `SHA1(A ‖ H)` for the salt the server sent.
     Computed,
 }
 
@@ -52,14 +39,13 @@ impl Arm {
     }
 }
 
-/// One full handshake, sending `arm`'s `crc_hash`. `Ok(None)` = accepted, `Ok(Some(code))` = the
-/// server's `WOW_FAIL_*` byte.
+/// One full handshake with `arm`'s `crc_hash`: `None` when accepted, else the `WOW_FAIL_*` byte.
 fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Option<u8>> {
     let user_n = NormalizedString::new(user).map_err(|e| anyhow!("invalid username: {e}"))?;
     let pass_n = NormalizedString::new(pass).map_err(|e| anyhow!("invalid password: {e}"))?;
 
-    // Redial past an ambiguously-serialized `B` exactly as `logon` does, so a 0x04 here means a bad
-    // password and never an encoding coin-flip (see `benilla-srp`, "Encoding-unambiguous handshakes").
+    // Redial past a width-unstable `B`, as `logon` does, so a 0x04 here is a bad password and
+    // never the SHA-1 encoding disagreement.
     for _ in 0..8 {
         let mut stream = TcpStream::connect((host, port))
             .with_context(|| format!("connecting to {host}:{port}"))?;
@@ -104,9 +90,8 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
     Err(anyhow!("eight dials, every `B` ambiguous — try again"))
 }
 
-/// The five files the real client hashes, **in this order** — `ChecksumExecutables` at `0x5b1170`,
-/// walking the `char*` table at `0x85def0` (wow-re `system/net/scratch/logon-integrity-hash.md`).
-/// Order is load-bearing: exactly 1 of the 120 permutations reproduces the published digest.
+/// The five files the 1.12 client hashes, in this order (`ChecksumExecutables` at `0x5b1170`, the
+/// table at `0x85def0`); no other of the 120 orders gives the published digest.
 const SCANNED: [&str; 5] = [
     "WoW.exe",
     "fmod.dll",
@@ -115,9 +100,8 @@ const SCANNED: [&str; 5] = [
     "unicows.dll",
 ];
 
-/// HMAC-SHA1 with the 16-byte `crc_salt` as the key — the framing the client uses (`rep stos` of
-/// 64×`0x36` / 64×`0x5c`, salt XORed into both, `0x5b117e`–`0x5b11b6`). No long-key shortening,
-/// because the key is always the 16-byte salt; the client has no such step either.
+/// HMAC-SHA1 keyed by the 16-byte `crc_salt`, framed as the client does (`0x5b117e`–`0x5b11b6`);
+/// the key is always 16 bytes, so there is no long-key step, as in the client.
 fn hmac_sha1(key: &[u8; 16], msg: &[u8]) -> [u8; 20] {
     let mut ipad = [0x36u8; 64];
     let mut opad = [0x5cu8; 64];
@@ -134,11 +118,8 @@ fn hmac_sha1(key: &[u8; 16], msg: &[u8]) -> [u8; 20] {
     outer.finalize().into()
 }
 
-/// Derive `H` from a 1.12.1 install the way the real client does, and say what it means. Purely a
-/// diagnostic: benilla sends the published constant for its build and OS (decision 1265), never this.
-/// A file that cannot be read is **skipped**, contributing no bytes — the client's own behaviour
-/// (four early-outs at `0x5b11eb`/`0x5b1212`/`0x5b121f`/`0x5b1246`), and the reason a Data-only
-/// install could never answer this challenge for itself.
+/// Derive `H` from an install the way the 1.12 client does. An unreadable file contributes no
+/// bytes, as in the client (`0x5b11eb`, `0x5b1212`, `0x5b121f`, `0x5b1246`).
 fn report_install(install_dir: &Path, crc_salt: &[u8; 16]) {
     println!("\n  install {}", install_dir.display());
     let mut msg = Vec::new();
@@ -158,8 +139,7 @@ fn report_install(install_dir: &Path, crc_salt: &[u8; 16]) {
     let h = hmac_sha1(crc_salt, &msg);
     let hex: String = h.iter().map(|b| format!("{b:02X}")).collect();
     println!("    H = {hex}");
-    // What we actually send is `SHA1(A ‖ H)`, so compare the digests through that: equal proofs for
-    // one `A` means equal `H`.
+    // Compare through `SHA1(A ‖ H)`, what we send: equal proofs for one `A` mean equal `H`.
     let a = [0u8; 32];
     let matches = {
         let mut sha = Sha1::new();
@@ -196,8 +176,8 @@ fn main() -> Result<()> {
     };
     let (host, port) = host_port(&host_arg, AUTH_PORT);
 
-    // Report the challenge itself first: our digest is only valid for the one salt every mangos-family
-    // realmd sends, so a server issuing anything else explains a `zeros` result on the computed arm.
+    // Our digest holds only for the one salt every mangos-family realmd sends; under any other,
+    // the computed arm sends zeros too.
     let mut stream =
         TcpStream::connect((host, port)).with_context(|| format!("connecting to {host}:{port}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;

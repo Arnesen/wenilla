@@ -1,22 +1,16 @@
-//! Probe: **how does realmd feed the SRP6 big numbers to SHA-1** — fixed width, or minimal length?
-//!
-//! The 1.12.1 client hashes `A`, `B`, `K`, the salt, the `H(N)⊕H(g)` constant and `M1` at their
-//! *declared* widths, zero-padded in the high bytes (`wow-5875-re` `srp6_client_session`, byte-exact
-//! from `WoW.exe` `0x5d3650`). vmangos feeds the same values as `BigNumber`s
-//! (`SHA1::Generator::UpdateData(BigNumber const&)` → `AsByteArray()` with `minSize = 0`), which
-//! **drops high-order zero bytes**. The two agree only while no value happens to have one — and
-//! disagree, silently, when one does. cmangos is identical (`Sha1Hash::UpdateBigNumbers`).
-//!
-//! This probe forces each case against a live realmd so the disagreement is observed, not argued:
+//! Probe: whether realmd feeds the SRP6 big numbers to SHA-1 at fixed width or minimal length.
+//! The 1.12 client hashes `A`, `B`, `K`, the salt, `H(N)⊕H(g)` and `M1` at their declared
+//! widths, zero-padded in the high bytes (`0x5d3650`). vmangos hashes them as `BigNumber`s
+//! (`AsByteArray()` with `minSize = 0`), dropping high-order zero bytes, so the two disagree
+//! whenever a value has one; cmangos does the same (`Sha1Hash::UpdateBigNumbers`).
 //!
 //! ```text
 //! cargo run --release -p benilla-protocol --example srp_encoding_probe -- --user one --pass pone
 //! ```
 //!
-//! `--stress N` instead runs N ordinary handshakes at the client-faithful (fixed-width) encoding and
-//! reports the observed failure rate. realmd locks an IP out for 60 s after `WrongPass.MaxAttempts`
-//! (default 10) failures inside that window and then answers `0x08 WOW_FAIL_DB_BUSY`; the probe
-//! drains the window rather than counting the lockout as a proof failure.
+//! `--stress N` runs N ordinary fixed-width handshakes and reports the failure rate, waiting out
+//! realmd's lockout: 60 s after `WrongPass.MaxAttempts` (default 10) failures, during which it
+//! answers `0x08 WOW_FAIL_DB_BUSY`.
 
 use std::net::TcpStream;
 use std::time::Duration;
@@ -35,9 +29,9 @@ const THROTTLE_MAX: u32 = 10;
 /// How a big number is serialized into the SHA-1 stream.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Enc {
-    /// The client's law: the value's full declared width, zero-padded in the high bytes.
+    /// The 1.12 client: the full declared width, zero-padded in the high bytes.
     Fixed,
-    /// vmangos' law: `BigNumber::AsByteArray()` — high-order zero bytes dropped.
+    /// vmangos: `BigNumber::AsByteArray()`, high-order zero bytes dropped.
     Minimal,
 }
 
@@ -73,9 +67,8 @@ fn to_fixed_le_32(v: &BigUint) -> [u8; 32] {
     out
 }
 
-/// WoW's `SHA1_Interleave` **as vmangos computes it** — all 32 bytes of `S`, no trimming
-/// (`SRP6::HashSessionKey`, `S.AsByteArray(32)`). benilla matches this today; the real client instead
-/// strips low-order zero bytes of `S` first, which is its own (separately recorded) divergence.
+/// `SHA1_Interleave` as vmangos computes it, over all 32 bytes of `S` (`SRP6::HashSessionKey`);
+/// the 1.12 client strips the low-order zero bytes of `S` first.
 fn interleave(s: &[u8; 32]) -> [u8; 40] {
     let mut even = [0u8; 16];
     let mut odd = [0u8; 16];
@@ -102,7 +95,7 @@ struct Attempt {
 }
 
 impl Attempt {
-    /// Which hashed values carry a high-order zero byte — i.e. where the two encodings differ.
+    /// The hashed values with a high-order zero byte, where the two encodings differ.
     fn short_values(&self) -> Vec<&'static str> {
         let mut v = Vec::new();
         if self.a_pub[31] == 0 {
@@ -130,7 +123,7 @@ impl Attempt {
     }
 }
 
-/// What realmd said, and — when it accepted — whose `M2` encoding its reply matches.
+/// What realmd said and, on acceptance, which encoding its `M2` matches.
 enum Outcome {
     Accepted { m2_fixed: bool, m2_minimal: bool },
     Refused(u8),
@@ -161,24 +154,22 @@ impl Outcome {
 /// What the ephemeral search is aiming for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Want {
-    /// Whatever the first draw gives — an ordinary handshake.
+    /// Whatever the first draw gives: an ordinary handshake.
     Any,
-    /// Nothing short — the case both encodings agree on.
+    /// Nothing short: the case both encodings agree on.
     Clean,
     /// `A` with a zero high byte.
     ShortA,
     /// `K` with a zero high byte.
     ShortK,
-    /// `M1` with a zero high byte — realmd accepts, but hashes a 19-byte `M1` into its `M2`.
+    /// `M1` with a zero high byte: realmd accepts, but hashes a 19-byte `M1` into its `M2`.
     ShortM1,
-    /// `B` with a zero high byte. Not searchable: `B` is the server's, so the caller redials until
-    /// one turns up, and the ephemeral is then drawn clean so `B` is the only short value.
+    /// `B` with a zero high byte: the server's draw, so the caller redials; the rest draw clean.
     ShortB,
 }
 
 impl Want {
-    /// Does a draw of this shape satisfy the search? Every case wants exactly its own value short
-    /// and the others long, so each verdict isolates one divergence.
+    /// Each case wants exactly its own value short, so each verdict isolates one divergence.
     fn accepts(self, a_short: bool, k_short: bool, m1_short: bool) -> bool {
         match self {
             Want::Any => true,
@@ -219,7 +210,7 @@ fn compute(
         let a = BigUint::from_bytes_le(&priv_key) + BigUint::from(n.bits());
         let a_pub = to_fixed_le_32(&g.modpow(&a, &n));
 
-        // Reject on the A-shape we are not after before paying for the second modpow.
+        // Reject a wrong `A` shape before paying for the second modpow.
         let a_short = a_pub[31] == 0;
         if want != Want::Any && a_short != (want == Want::ShortA) {
             continue;
@@ -250,7 +241,7 @@ fn compute(
     None
 }
 
-/// `H( SHA1(N) XOR SHA1(g) )`, little endian — a constant for WoW's fixed `N`/`g`.
+/// `SHA1(N) XOR SHA1(g)`, little endian: a constant for the fixed `N` and `g`.
 fn xor_hash(generator: u8, large_safe_prime: &[u8; 32]) -> [u8; 20] {
     let hn = sha1(&[large_safe_prime]);
     let hg = sha1(&[&[generator]]);
@@ -261,7 +252,6 @@ fn xor_hash(generator: u8, large_safe_prime: &[u8; 32]) -> [u8; 20] {
     out
 }
 
-/// One full realmd exchange.
 fn handshake(
     host: &str,
     user: &str,
@@ -276,8 +266,7 @@ fn handshake(
     auth::write_logon_challenge(&mut s, user, BUILD).context("sending logon challenge")?;
     let reply = auth::read_challenge_reply(&mut s).context("reading logon challenge reply")?;
 
-    // `B` is not ours to choose: drop the connection — sending no proof, so realmd records nothing —
-    // and let the caller redial until the server hands one of the shape we want.
+    // A wrong-shape `B` drops the connection before any proof, so realmd records no failure.
     if want != Want::Any && (reply.server_public_key[31] == 0) != (want == Want::ShortB) {
         return Err(anyhow!("this connection's B is not the wanted shape"));
     }
@@ -300,7 +289,7 @@ fn handshake(
     Ok((attempt, outcome))
 }
 
-/// Redial until the search finds the wanted shape (`B` is the server's draw, so `ShortB` needs many).
+/// Redial until the wanted shape turns up; `ShortB` needs many, `B` being the server's draw.
 fn until(
     host: &str,
     user: &str,
@@ -369,8 +358,8 @@ fn main() -> Result<()> {
         }
     }
 
-    // The end-to-end gate: run the shipped `logon` — the code the client actually uses — and count
-    // what comes back. Anything but a clean sweep means the ephemeral guarantee is not holding.
+    // `--logon N` runs the shipped `logon` N times; every handshake must succeed, or its
+    // ephemeral guarantee is not holding.
     if logons > 0 {
         println!("logon: {logons} full handshakes through benilla_protocol::logon\n");
         let (mut ok, mut failed) = (0u32, 0u32);
@@ -380,7 +369,7 @@ fn main() -> Result<()> {
                 Err(e) => {
                     failed += 1;
                     println!("  #{i}: {e:#}");
-                    // Do not walk into realmd's lockout while reporting a real regression.
+                    // Stay clear of realmd's lockout.
                     std::thread::sleep(Duration::from_secs(7));
                 }
             }
@@ -402,8 +391,7 @@ fn main() -> Result<()> {
                 std::thread::sleep(Duration::from_secs(61)); // drain realmd's lockout window
                 window_failures = 0;
             }
-            // `Want::Any` with one try: the first ephemeral is used whatever its shape, and whatever
-            // `B` the server sends is kept — an ordinary handshake.
+            // `Want::Any` with one try: an ordinary handshake, whatever the shapes of `A` and `B`.
             match handshake(&host, &user, &pass, Enc::Fixed, Want::Any, 1) {
                 Ok((a, v)) => {
                     let short = a.short_values();
@@ -443,8 +431,8 @@ fn main() -> Result<()> {
     }
 
     println!("realmd at {host}:{AUTH_PORT}, account {user}");
-    // The `H(N)⊕H(g)` constant is hashed as a BigNumber too. It is fixed for WoW's N/g — if its high
-    // byte were zero, *every* fixed-width login would fail, not one in sixty.
+    // `H(N)⊕H(g)` is hashed as a BigNumber too; it is constant, so a zero high byte would fail
+    // every fixed-width login.
     let xh = xor_hash(7, &benilla_srp::LARGE_SAFE_PRIME_LITTLE_ENDIAN);
     println!(
         "H(N)^H(g) high byte = {:#04x} (non-zero, so the constant is unambiguous)",

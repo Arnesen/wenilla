@@ -1,11 +1,8 @@
-//! Diagnostic probe: stream object creates and print each unit's decoded
-//! `UNIT_FIELD_FACTIONTEMPLATE` (+ level/display id as sanity anchors), to check the descriptor
-//! decode against the server DB's `creature_template.faction`.
+//! Diagnostic probe: prints each streamed unit's `UNIT_FIELD_FACTIONTEMPLATE`, with level and
+//! display id, to check the descriptor decode against `creature_template.faction`.
 //!
-//! Run: `cargo run -p benilla-protocol --example faction_probe -- probeN pprobeN [host]`
-//! — a probe account (the `probe` skill). The account is a REQUIRED arg with no default: a
-//! default is somebody's account, and a probe login there kicks their live session (decision
-//! 0530).
+//! Run: `cargo run -p benilla-protocol --example faction_probe -- probeN pprobeN [host]`. The
+//! account has no default, because a login kicks whoever is on the account.
 
 use std::time::{Duration, Instant};
 

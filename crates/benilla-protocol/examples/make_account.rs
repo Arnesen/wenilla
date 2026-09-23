@@ -1,6 +1,5 @@
-//! Dev helper: print SQL to create a vmangos account, computing the SRP6 verifier/salt with
-//! `benilla-srp`. vmangos stores `v`/`s` as big-endian hex, while we compute
-//! little-endian, so we reverse. Usage:
+//! Dev helper: prints the SQL that creates a vmangos account, with the SRP6 verifier and salt
+//! from `benilla-srp`. vmangos stores `v` and `s` as big-endian hex; we compute little-endian.
 //!
 //! ```text
 //! cargo run -p benilla-protocol --example make_account -- <user> <pass> \

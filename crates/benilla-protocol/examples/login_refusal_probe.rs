@@ -1,30 +1,17 @@
-//! Live probe: what a **refused character login** actually looks like on the wire, and what it
-//! leaves behind.
+//! Live probe: what a refused character login looks like on the wire, and what it leaves. It
+//! checks that `SMSG_CHARACTER_LOGIN_FAILED` (0x41) arrives with result `1`
+//! (`HandlePlayerLoginOpcode`), which the 1.12 client reads as `CHAR_LOGIN_NO_WORLD` ("World
+//! server is down"); that the session stays `STATUS_AUTHED` and still serves `CMSG_CHAR_ENUM`;
+//! and that a valid pick then works on the same socket.
 //!
-//! benilla used to send `CMSG_PLAYER_LOGIN` and declare itself in the world in the same breath, so
-//! `SMSG_CHARACTER_LOGIN_FAILED` (0x41) reached nothing — a refusal left the client on a loading
-//! screen that could never clear. The fix rests on three facts about the server, and this pins all
-//! three against the local vmangos:
-//!
-//! 1. the refusal **arrives**, with its result byte — vmangos sends a bare `1`
-//!    (`WorldSession::HandlePlayerLoginOpcode`'s `loginFailedPacket->result = 1`), which the
-//!    reference's table reads as `CHAR_LOGIN_NO_WORLD`, "World server is down";
-//! 2. the **session survives** it — still `STATUS_AUTHED`, still able to serve `CMSG_CHAR_ENUM`;
-//! 3. a **second, valid pick still works** on the same socket, so a refusal costs the player a
-//!    click and not a reconnect.
-//!
-//! The refusal is provoked by the one guard that needs no server state: `!packet.guid.IsPlayer()`.
-//! A creature-typed guid is refused immediately and touches nothing else.
-//!
-//! Needs the local vmangos up; account `two`/`ptwo` (the account-X/password-pX convention).
+//! A creature guid trips the stateless `!packet.guid.IsPlayer()` guard. Needs the local vmangos
+//! and account `two`/`ptwo`.
 
 use std::time::Duration;
 
 use benilla_protocol::{logon, messages::ServerPacket, WorldSession, WORLD_PORT};
 
-/// A guid the server cannot read as a player: vmangos's `ObjectGuid::IsPlayer()` tests the high
-/// type nibble, and `0xF130…` is `HIGHGUID_UNIT`. Nothing on the server is looked up by it — the
-/// guard rejects before any lookup — so the probe cannot disturb a real character.
+/// A `HIGHGUID_UNIT` guid (`0xF130…`): `ObjectGuid::IsPlayer()` rejects it before any lookup.
 const NOT_A_PLAYER: u64 = 0xF130_0000_0000_0001;
 
 fn connect(user: &str, pass: &str) -> anyhow::Result<WorldSession> {

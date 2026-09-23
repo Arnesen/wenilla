@@ -1,11 +1,10 @@
-//! `benilla-world` — Phase 4 CLI: log in to realmd, connect to the world server (`mangosd`), enter the
-//! world as a character, and stream/tally the object updates the server pushes.
+//! `benilla-world`: logs in to realmd, enters the world server as a character, and tallies the
+//! updates it pushes; the `--<probe>` flags live-verify one wire each.
 //!
 //! Example: `cargo run -p benilla-protocol --bin benilla-world -- one pone localhost`
 //!
-//! If the account has no character yet, one is created (`--create <name>`, Human Warrior) so
-//! `CMSG_PLAYER_LOGIN` has something to log in. The realmd host is a positional arg; the world server
-//! address defaults to whatever the realm list advertises (override with `--world`).
+//! An account with no character gets a Human Warrior (`--create <name>`). The world address
+//! defaults to the realm list's (`--world` overrides).
 
 mod probes;
 mod world;
@@ -48,228 +47,135 @@ struct Cli {
     /// How many seconds to stream packets after entering the world.
     #[arg(long, default_value_t = 10)]
     seconds: u64,
-    /// After streaming, walk this many yards forward, then log out and re-enum to confirm the server
-    /// persisted the new position. Omit to just observe (read-only).
+    /// After streaming, walk this many yards forward, log out, and check the server saved the move.
     #[arg(long)]
     walk: Option<f32>,
-    /// Live-verify the name-query pair: ask our own name (`CMSG_NAME_QUERY`) and the first streamed
-    /// creature's template name (`CMSG_CREATURE_QUERY`, entry from its guid), and require both answers
-    /// to arrive and parse.
+    /// Live-verify `CMSG_NAME_QUERY` (our own name) and `CMSG_CREATURE_QUERY` (the first creature).
     #[arg(long)]
     query_names: bool,
-    /// Live-verify the spell/action wire: require `SMSG_INITIAL_SPELLS` + `SMSG_ACTION_BUTTONS` to
-    /// arrive and parse at login, then send one `CMSG_CAST_SPELL` (Battle Shout 6673 if known, else
-    /// the first known spell) and require an `SMSG_CAST_RESULT` verdict (ok *or* a failure reason —
-    /// either proves the round trip).
+    /// Live-verify `SMSG_INITIAL_SPELLS` and `SMSG_ACTION_BUTTONS` at login, then require an
+    /// `SMSG_CAST_RESULT` for a self cast, a ground cast and a targeted cast.
     #[arg(long)]
     spells: bool,
-    /// Capture the dest-anchored effect wire for a ground cast of this spell id (the B132
-    /// follow-up instrument): GM-learn it + GM-fill mana, cast at own feet (mask 0x40), and dump
-    /// every DynamicObject create raw (labeled `DYNAMICOBJECT_*` fields), the SPELL_GO, and the
-    /// removal edge with its lifetime. Pair with `--seconds 25`+ so a channel + its object's whole
-    /// life fits the window. Needs a GM account (the deploy's probes are gmlevel 6).
+    /// Capture a ground cast of this spell id at our feet (target mask 0x40): every DynamicObject
+    /// create, the SPELL_GO and the removal. Needs GM; pair with `--seconds 25`.
     #[arg(long)]
     groundfx: Option<u32>,
-    /// Live-verify the melee-swing wire (decision 0073): GM-teleport (`.go xyz`) onto a Northshire
-    /// Kobold Vermin spawn, `CMSG_ATTACKSWING` the nearest streamed creature, and require ≥1
-    /// `SMSG_ATTACKERSTATEUPDATE` to arrive and decode (attacker/victim/hitInfo/damage). Needs a GM
-    /// account (the deploy's probes are gmlevel 6).
+    /// Live-verify melee: teleport to the Northshire kobolds, `CMSG_ATTACKSWING` the nearest
+    /// creature and require an `SMSG_ATTACKERSTATEUPDATE`. Needs GM.
     #[arg(long)]
     attack: bool,
-    /// Live-verify `CMSG_USE_ITEM`: use the item in this 1-based backpack slot (the wire's bag
-    /// 255 with player-array slot 23…) and require the server to react — a stack-count values
-    /// delta or a destroy on that item's guid (consumed), or an explicit cast-result refusal.
+    /// Live-verify `CMSG_USE_ITEM` on this 1-based backpack slot (wire bag 255, slot 22 + n):
+    /// require a stack delta, a destroy, or a cast-result refusal.
     #[arg(long)]
     use_pack_slot: Option<u8>,
-    /// Live-verify `CMSG_OPEN_ITEM`: `.additem` a Small Barnacled Clam (entry 7973 — LOOTABLE,
-    /// LockID 0, the director's own case), find it in the backpack, and run the fork a bag
-    /// right-click makes for an *openable* item — `CMSG_OPEN_ITEM(bagIndex, slot)`, never
-    /// `CMSG_USE_ITEM` (a clam has no on-use spell, so the use goes nowhere) — requiring
-    /// `SMSG_LOOT_RESPONSE` on the **item's own guid**. Releases the window and subtracts the copy
-    /// afterwards. Needs a GM account (the deploy's probes are gmlevel 6).
+    /// Live-verify `CMSG_OPEN_ITEM` on an added Small Barnacled Clam (7973, lootable, no lock),
+    /// requiring `SMSG_LOOT_RESPONSE` on the item's own guid. A bag right-click on an openable
+    /// item sends this, never `CMSG_USE_ITEM`. Needs GM.
     #[arg(long)]
     open_item: bool,
-    /// Send a `/say` line right after entering the world — the GM dot-command channel
-    /// (`.additem 3732`, `.repairitems`, …) for setting up probe scenarios. Repeatable; the lines go
-    /// out in order (e.g. `--say ".modify money 5000000" --say ".go creature 1"`).
+    /// Say this line after entering the world, e.g. a GM dot-command; repeatable, sent in order.
     #[arg(long)]
     say: Vec<String>,
-    /// Live-verify `CMSG_AUTOEQUIP_ITEM`: equip the item in this 1-based backpack slot and
-    /// require the server to react — a self values delta landing that item's guid in an
-    /// equipment INV slot, or a decoded `SMSG_INVENTORY_CHANGE_FAILURE` refusal.
+    /// Live-verify `CMSG_AUTOEQUIP_ITEM` on this 1-based backpack slot: require the item in an
+    /// equipment slot or an `SMSG_INVENTORY_CHANGE_FAILURE`.
     #[arg(long)]
     equip_pack_slot: Option<u8>,
-    /// Live-verify `CMSG_SWAP_INV_ITEM` (the backpack pick/place/swap wire): swap the two 1-based
-    /// backpack slots `A:B` (the wire's bag 255, player-array slots 23+A-1 / 23+B-1), await the
-    /// self values delta, and assert the two slots' item guids exchanged — then swap back and assert
-    /// the original layout is restored (leaves the character exactly as found). Slot A must be
-    /// occupied; B may be empty (an empty destination is a move on this wire).
+    /// Live-verify `CMSG_SWAP_INV_ITEM` on 1-based backpack slots `A:B`, then swap back. A must be
+    /// occupied; an empty B makes it a move.
     #[arg(long, value_parser = parse_slot_pair)]
     swap_pack_slots: Option<(u8, u8)>,
-    /// Live-verify the vendor wire (decision 0081 phase 4): auto-find the nearest streamed
-    /// vendor NPC (`UNIT_NPC_FLAG_VENDOR`), `CMSG_LIST_INVENTORY` it and require an
-    /// `SMSG_LIST_INVENTORY` to arrive and parse (N rows), then `CMSG_BUY_ITEM` the cheapest row and
-    /// require a reaction — the purchased item arriving (`ItemCreate`/values), the vendor stock
-    /// updating (`SMSG_BUY_ITEM`), *or* a decoded `SMSG_BUY_FAILED` (all prove the round trip). Also
-    /// reads our `PLAYER_FIELD_COINAGE` (the money accessor) at login and confirms any coinage delta
-    /// lands on that field. No GM needed — it uses whatever vendor streams in range.
+    /// Live-verify the vendor wire on the nearest vendor: `CMSG_LIST_INVENTORY`, then buy the
+    /// cheapest row and require the item, a stock update or `SMSG_BUY_FAILED`. No GM needed.
     #[arg(long)]
     vendor: bool,
-    /// Live-verify the solo-loot wire (decision 0084 §1): select a target (nearest streamed
-    /// creature within range of the `--attack` teleport spot, or `--loot-guid` if given),
-    /// GM-kill it (`.damage 10000`), wait for `UNIT_DYNFLAG_LOOTABLE`, then `CMSG_LOOT` it,
-    /// require `SMSG_LOOT_RESPONSE` to arrive and parse, `CMSG_AUTOSTORE_LOOT_ITEM` every row,
-    /// `CMSG_LOOT_MONEY` if it carried gold, and `CMSG_LOOT_RELEASE` — requiring
-    /// `SMSG_LOOT_RELEASE_RESPONSE` to close it. Prints every loot-related packet decoded. Needs a
-    /// GM account (the deploy's probes are gmlevel 6).
+    /// Live-verify solo loot: GM-kill the nearest creature (or `--loot-guid`), loot every row and
+    /// the money, and require `SMSG_LOOT_RELEASE_RESPONSE`. Needs GM.
     #[arg(long)]
     loot: bool,
-    /// Skip the nearest-creature search for `--loot` and loot this guid directly (decimal or
-    /// `0x`-prefixed hex).
+    /// Loot this guid for `--loot` (decimal or `0x` hex) instead of the nearest creature.
     #[arg(long, value_parser = parse_guid)]
     loot_guid: Option<u64>,
-    /// Live-verify the questgiver wire (decision 0088): GM-teleport onto Marshal McBride (Northshire,
-    /// entry 197), `CMSG_GOSSIP_HELLO` him, `CMSG_QUESTGIVER_QUERY_QUEST` the target quest and require
-    /// `SMSG_QUESTGIVER_QUEST_DETAILS` to parse, `CMSG_QUESTGIVER_ACCEPT_QUEST` it and confirm the
-    /// quest id lands in the player descriptor's `PLAYER_QUEST_LOG` fields, GM-complete it
-    /// (`.quest complete`), then `CMSG_QUESTGIVER_COMPLETE_QUEST` → `_REQUEST_REWARD` → `_CHOOSE_REWARD`
-    /// requiring `SMSG_QUESTGIVER_QUEST_COMPLETE` (XP/money) + a `PLAYER_FIELD_COINAGE` delta. Uses
-    /// quest 7 "Kobold Camp Cleanup" (McBride gives + takes it; XP 170, money 25c). Needs a GM
-    /// account (the deploy's probes are gmlevel 6).
+    /// Live-verify the questgiver wire with quest 783, from Deputy Willem (823) to Marshal McBride
+    /// (197): details, accept, GM-complete, reward, requiring `SMSG_QUESTGIVER_QUEST_COMPLETE` and
+    /// an XP delta. Needs GM.
     #[arg(long)]
     quest: bool,
-    /// Live-verify the quest-LOG wire (decision 0109 — the questgiver wire's deferred second
-    /// slice): GM-teleport onto Marshal McBride (entry 197 — gives *and* takes quest 7 "Kobold
-    /// Camp Cleanup", VERIFIED live against `mangos.creature_questrelation` /
-    /// `creature_involvedrelation`, both rows pointing at 197; objective is 10× creature entry 6,
-    /// `quest_template.ReqCreatureOrGOId1/Count1`), accept quest 7, `CMSG_QUEST_QUERY` it and
-    /// require `SMSG_QUEST_QUERY_RESPONSE` to parse into the title plus a real
-    /// (`required_count > 0`) objective — the fat template parser's live golden, distinct from the
-    /// giver-panel `SMSG_QUESTGIVER_QUEST_DETAILS` [`Self::quest`] already exercises. Then poll the
-    /// player descriptor for the `PLAYER_QUEST_LOG` slot the accept landed in, GM-complete it
-    /// (`.quest complete 7`) and require the slot's count-state field to gain the `COMPLETE` state
-    /// byte, then `CMSG_QUESTLOG_REMOVE_QUEST` that slot and require its id field to clear to `0`
-    /// (no ack SMSG on this wire — the field clear *is* the confirmation). Needs a GM account (the
-    /// deploy's probes are gmlevel 6).
+    /// Live-verify the quest log with quest 7 (10 kills of entry 6, from Marshal McBride):
+    /// `CMSG_QUEST_QUERY` must parse a real objective, `.quest complete 7` must set the slot's
+    /// `COMPLETE` byte, and `CMSG_QUESTLOG_REMOVE_QUEST` must clear the slot, which has no ack.
+    /// Needs GM.
     #[arg(long)]
     questlog: bool,
-    /// Live-verify the timed-quest COUNTDOWN chain (decision 1150, B234): GM-add a quest with a
-    /// `LimitTime`, read its `PLAYER_QUEST_LOG` slot's raw timer field (an absolute unix stamp,
-    /// not a duration), ask `CMSG_QUERY_TIME` for the server's own clock, and require the
-    /// subtraction to land inside the template's own `limit_time` window. The one leg no offline
-    /// test can cover: two independent packets whose epochs must agree. Needs a GM account (the
-    /// deploy's probes are gmlevel 6).
+    /// Live-verify a timed quest: its `PLAYER_QUEST_LOG` timer is an absolute unix stamp, and
+    /// minus `CMSG_QUERY_TIME`'s server clock it must fall inside the template's `limit_time`.
+    /// Needs GM.
     #[arg(long)]
     questtimer: bool,
-    /// Live-verify the quest-STARTER item wire (decision 0664): `.additem` the Northshire Gift
-    /// Voucher (entry 14646, starts quest 5805 "Welcome!"), find it in the backpack, and run the
-    /// fork a bag right-click makes for an item whose template carries a non-zero `StartQuest` —
-    /// `CMSG_QUESTGIVER_QUERY_QUEST` addressed to the **item's own guid** (never `CMSG_USE_ITEM`,
-    /// which the server refuses with `EQUIP_ERR_ITEM_NOT_FOUND`, the red "The item was not found."
-    /// line) — requiring `SMSG_QUESTGIVER_QUEST_DETAILS`, then `CMSG_QUESTGIVER_ACCEPT_QUEST` on
-    /// the same guid, requiring BOTH the quest id landing in `PLAYER_QUEST_LOG` and the starter
-    /// item being destroyed. Cleans up after itself (`.quest remove`). Needs a GM account (the
-    /// deploy's probes are gmlevel 6).
+    /// Live-verify a quest-starter item, the Northshire Gift Voucher (14646, quest 5805): a bag
+    /// right-click sends `CMSG_QUESTGIVER_QUERY_QUEST` to the item's guid, never `CMSG_USE_ITEM`
+    /// (refused with `EQUIP_ERR_ITEM_NOT_FOUND`); accepting must log the quest and keep the item,
+    /// which 5805 requires. Needs GM.
     #[arg(long)]
     quest_item: bool,
-    /// Live-verify the force-speed-change wire: GM `.modify speed 1.5` (self-targeted), require
-    /// `SMSG_FORCE_RUN_SPEED_CHANGE` to arrive and parse (flat speed 10.5 = 1.5 × the 7.0 base),
-    /// ack it (`CMSG_FORCE_RUN_SPEED_CHANGE_ACK` echoing counter + exact speed with our live pose),
-    /// then `.modify speed 1` and require a SECOND change (counter incremented, speed 7.0) on a
-    /// still-live stream. A malformed ack body throws in the server's parser and drops the session
-    /// (the `--charge` precedent), so survival through both round trips is the wire proof. Needs a
-    /// GM account (the deploy's probes are gmlevel 6).
+    /// Live-verify `SMSG_FORCE_RUN_SPEED_CHANGE` via `.modify speed 1.5` (10.5 = 1.5 × 7.0) and
+    /// back to 1, acking each. A malformed ack drops the session, so surviving both is the proof.
+    /// Needs GM.
     #[arg(long)]
     speed: bool,
 
-    /// Live-verify what the server sends when a teleport DISMOUNTS you (B213, decision 1478):
-    /// `.aura 458` (Brown Horse — a real `SPELL_AURA_MOUNTED` holder, unlike `.modify mount`),
-    /// require the mounted `SMSG_FORCE_RUN_SPEED_CHANGE`, then `.go xyz` into Ragefire Chasm
-    /// (map 389 — a dungeon, so `MapEntry::IsMountAllowed()` is false) and require, in this order:
-    /// `SMSG_NEW_WORLD`, our own create block on the new map **still carrying the mount's** run
-    /// speed (vmangos sends it from `Map::Add` → `SendInitSelf`), and then the strip's
-    /// `SMSG_FORCE_RUN_SPEED_CHANGE` back at 7.0 — printing the gap between the two. Both are
-    /// written by one `HandleMoveWorldportAckOpcode` call, which is why a client draining its
-    /// socket once a frame sees them in a single drain. Leaves the character unmounted and back on
-    /// map 0. Needs a GM account (the deploy's probes are gmlevel 6); pair with `--seconds 30`+.
+    /// Live-verify a dismounting teleport: `.aura 458` (Brown Horse, a real mount aura, unlike
+    /// `.modify mount`), then `.go xyz` into Ragefire Chasm (map 389, no mounts). Requires
+    /// `SMSG_NEW_WORLD`, our create block still at mounted speed, then
+    /// `SMSG_FORCE_RUN_SPEED_CHANGE` back to 7.0, both written by one
+    /// `HandleMoveWorldportAckOpcode`. Needs GM; pair with `--seconds 30`.
     #[arg(long)]
     mount_tele: bool,
 
-    /// Live-verify the aura wire (decision 0255 phase 1): GM-apply Mark of the Wild (1126, a
-    /// cancelable buff) and Shadow Word: Pain (589, a periodic-damage DoT, unambiguously negative)
-    /// to ourselves with explicit durations via `.aura`, then require — from the *live* descriptor
-    /// — that both land in `UNIT_FIELD_AURA` (proving the field index), in the correct half (buffs
-    /// 0–31, debuffs 32–47), with the `AURAFLAGS` cancelable nibble bit set only on the buff, the
-    /// `AURALEVELS` byte equal to our own level, and a stack of 1 (the `count - 1` wire bias). Also
-    /// requires an `SMSG_UPDATE_AURA_DURATION` for each aura's own slot carrying the duration we
-    /// asked for, and asserts it arrived **before** the descriptor delta that names the slot (the
-    /// ordering the aura model depends on). Leaves the character as found (`.unaura` both). Needs a
-    /// GM account (the deploy's probes are gmlevel 6).
+    /// Live-verify auras: `.aura` Mark of the Wild (1126) and Shadow Word: Pain (589), requiring
+    /// each in `UNIT_FIELD_AURA` (buffs 0–31, debuffs 32–47) with the cancelable flag on the buff
+    /// only, our level, a stack of 1 (wire `count - 1`), and its `SMSG_UPDATE_AURA_DURATION`
+    /// before the descriptor delta. Needs GM.
     #[arg(long)]
     aura: bool,
 
-    /// Live-verify the questgiver STATUS wire (the overhead `!`/`?` markers' data):
-    /// teleport onto Marshal McBride, `CMSG_QUESTGIVER_STATUS_QUERY` his guid, and require an
-    /// `SMSG_QUESTGIVER_STATUS` answer for him — printing the dialog status BEFORE and AFTER a
-    /// `.quest remove 7` (unaccepted quest 7 should read AVAILABLE=5). Needs a GM account.
+    /// Live-verify `SMSG_QUESTGIVER_STATUS` for Marshal McBride after `.quest remove 7`, so an
+    /// unaccepted quest 7 reads AVAILABLE (5). Needs GM.
     #[arg(long)]
     giverstatus: bool,
 
-    /// Live-verify the world-state table's two wires (`SMSG_INIT_WORLD_STATES` /
-    /// `SMSG_UPDATE_WORLD_STATE` — what the NPC-text `$<n>w`/`$<n>e` tokens read): teleport to
-    /// Elwynn, hop to Stormwind to force a zone-change init, and `.debug send worldstate` one
-    /// synthetic pair to require back. Prints every state received. Needs a **SEC_DEVELOPER**
-    /// account: `.debug send worldstate` is gmlevel 5, under the 6 the probe accounts
-    /// carry (decision 0450), so the update leg needs a temporary grant.
+    /// Live-verify `SMSG_INIT_WORLD_STATES` (a zone change into Stormwind) and
+    /// `SMSG_UPDATE_WORLD_STATE` (`.debug send worldstate`, which needs gmlevel 5).
     #[arg(long)]
     worldstate: bool,
 
-    /// Live-verify the Charge wire (warrior Charge rank 1, spell 100): GM `.learn 100`, teleport to
-    /// open ground near the Northshire kobold camp ([`CHARGE_TP`]), pick a creature at charge range
-    /// (8–25 yd), `CMSG_SET_SELECTION` + `CMSG_CAST_SPELL` 100 at it — then require an
-    /// `SMSG_MONSTER_MOVE` addressed to **our own guid**, proving Charge drives the caster through
-    /// the same server spline machinery as any creature (not a teleport / not a knockback). Prints
-    /// the self spline in full (facing kind, duration, waypoints, flying bit) so the ride + the
-    /// `CMSG_MOVE_SPLINE_DONE` ack it obliges can be built from the real numbers. Needs a GM warrior
-    /// (any probe account, gmlevel 6).
+    /// Live-verify Charge (spell 100): charge a creature 8–25 yd away and require an
+    /// `SMSG_MONSTER_MOVE` for our own guid, the same server spline as any creature's; prints it
+    /// in full. Needs a GM warrior.
     #[arg(long)]
     charge: bool,
 
-    /// Live-verify the death-arc slice-1 wire (decision 0308): GM-kill self (`.die`), require the
-    /// death signals (health force-flushed to 0, the death root), release
-    /// (`CMSG_REPOP_REQUEST`), require the full ghost transition — unroot, the water-walk grant,
-    /// `SMSG_CORPSE_RECLAIM_DELAY`, `PLAYER_FLAGS_GHOST`, the corpse object streaming in, the
-    /// graveyard teleport — query the corpse (`MSG_CORPSE_QUERY`), then GM-revive (`.revive`) to
-    /// leave the character alive. Recommend `--seconds 45`: the `.die`→repop→revive round trip
-    /// itself completes in ~10s, but the reclaim delay is only ever observed as a packet value
-    /// (never awaited), and the slack keeps a slow local server from truncating the ghost phase.
-    /// Needs a GM account (the deploy's probes are gmlevel 6).
+    /// Live-verify death: `.die`, release, then the ghost transition (unroot, water walk,
+    /// `SMSG_CORPSE_RECLAIM_DELAY`, `PLAYER_FLAGS_GHOST`, the corpse, the graveyard teleport),
+    /// `MSG_CORPSE_QUERY` and `.revive`. Pair with `--seconds 45`. Needs GM.
     #[arg(long)]
     death: bool,
 
-    /// Live-verify the self-resurrect wire (decision 1746): arm a shaman's Reincarnation with GM
-    /// commands (`.cooldown`, `.learn 20608`, `.additem 17030` — vmangos's gate asks no class
-    /// question), die and **stay dead-unreleased** (the DEATH dialog's state, where the soulstone
-    /// button lives), require `PLAYER_SELF_RES_SPELL` to arrive carrying the effect spell 21169,
-    /// send `CMSG_SELF_RES`, and require both that the field clears and that we stand back up
-    /// without ever having been a ghost. Recommend `--seconds 30`. Needs a GM account; leaves the
-    /// character alive. Mutually exclusive with `--death`/`--spirit`, which release the spirit.
+    /// Live-verify `CMSG_SELF_RES`: arm Reincarnation (`.learn 20608`, `.additem 17030`; vmangos
+    /// checks no class), die unreleased, require `PLAYER_SELF_RES_SPELL` 21169, then stand up
+    /// without becoming a ghost. Pair with `--seconds 30`. Needs GM; excludes `--death` and
+    /// `--spirit`, which release.
     #[arg(long)]
     self_res: bool,
 
-    /// Live-verify the spirit-healer res + the 25% durability loss's wire (director-reported:
-    /// "durability still 100% after spirit-healer rez"): GM-repair to a full baseline, die and
-    /// release (the --death staging), teleport onto the graveyard's Spirit Healer, send
-    /// `CMSG_SPIRIT_HEALER_ACTIVATE`, and require BOTH the res (the ghost flag clears) and the
-    /// post-activate `ITEM_FIELD_DURABILITY` values-deltas the loss must push — the exact packets
-    /// the app's tooltip line feeds from. Recommend `--seconds 45`. Needs a GM account; leaves the
-    /// character alive and re-repaired.
+    /// Live-verify the spirit-healer res: die, release, `CMSG_SPIRIT_HEALER_ACTIVATE`, requiring
+    /// the ghost flag to clear and the 25% durability loss as `ITEM_FIELD_DURABILITY` deltas.
+    /// Pair with `--seconds 45`. Needs GM.
     #[arg(long)]
     spirit: bool,
 }
 
-/// Parse a `--loot-guid` value: decimal, or `0x`-prefixed hex (as `benilla-world`'s own `guid
-/// {:#x}` printouts read out).
+/// Parse a `--loot-guid` value: decimal, or `0x`-prefixed hex.
 fn parse_guid(s: &str) -> Result<u64, String> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).map_err(|e| e.to_string())
@@ -294,12 +200,11 @@ fn parse_slot_pair(s: &str) -> Result<(u8, u8), String> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // 1. realmd logon → session key + realm list (Phase 3).
+    // 1. realmd logon: session key and realm list.
     let logon = benilla_protocol::logon(&cli.host, &cli.username, &cli.password)?;
     println!("authenticated as '{}'", cli.username);
 
-    // 2. Resolve the world address: explicit override, else the first advertised realm, else fall
-    //    back to the auth host on the default world port.
+    // 2. The world address: the override, else the first realm's, else the auth host's.
     let world_addr = match (&cli.world, logon.realms.first()) {
         (Some(addr), _) => addr.clone(),
         (None, Some(realm)) => {
@@ -345,29 +250,26 @@ fn main() -> Result<()> {
         character.name, character.guid, character.level, character.map,
     );
 
-    // 5. Enter the world, then claim movement control (vmangos ignores MSG_MOVE_* until we're the
-    //    confirmed mover — the real client sends CMSG_SET_ACTIVE_MOVER on login).
+    // 5. Enter the world and claim the mover: vmangos ignores `MSG_MOVE_*` until then, and the
+    //    1.12 client sends `CMSG_SET_ACTIVE_MOVER` on login.
     session.player_login(character.guid)?;
     session.set_active_mover(character.guid)?;
 
-    // 6. Stream packets, tallying opcodes and folding the decoded `SessionEvent`s into a local entity
-    //    map so we can read nearby entities' positions out of the stream.
+    // 6. Stream packets, tallying opcodes and tracking entity positions.
     session.set_read_timeout(Some(Duration::from_secs(2)))?;
     let deadline = Instant::now() + Duration::from_secs(cli.seconds);
 
-    // The shared world state every probe reads (identity, entity tracker, item/vendor stores, the
-    // session-keeping acks); the DeathArc scenario machinery is staged when --death/--spirit is set.
+    // The world state every probe reads; the death arc is staged for the three death probes.
     let mut world = World::new(character);
     if cli.death || cli.spirit || cli.self_res {
         world.death_arc = Some(DeathArc {
-            // --self-res tests the dead-UNRELEASED state, so the arc must not repop on its own.
+            // --self-res needs the dead, unreleased state, so the arc must not repop.
             hold_release: cli.self_res,
             ..DeathArc::default()
         });
     }
 
-    // The probe registry: one entry per flag, in today's stream-loop/verify block order (so poll,
-    // on_event, verify, and output order are preserved). Adding a probe is one push here.
+    // One probe per flag; registry order is the poll, on_event, verify and output order.
     let mut probes: Vec<Box<dyn Probe>> = Vec::new();
     if cli.attack {
         probes.push(Box::new(Attack::default()));
@@ -441,8 +343,8 @@ fn main() -> Result<()> {
         probes.push(Box::new(WorldState::default()));
     }
 
-    // Pre-stream staging: the DeathArc first (its `.revive` + teleport lead --spirit's `.repairitems`),
-    // then every probe's stage in registry order, then the `--say` lines (after all staging, as today).
+    // Staging order: the death arc (its `.revive` and teleport precede --spirit's `.repairitems`),
+    // each probe in registry order, then the `--say` lines.
     world.stage(&mut session)?;
     for probe in probes.iter_mut() {
         let mut cx = Ctx {
@@ -494,10 +396,7 @@ fn main() -> Result<()> {
     // Report the entities we decoded, with raw WoW coordinates.
     let self_guid = world.self_guid;
     println!("\n--- tracked {} entit(ies) ---", world.tracked.len());
-    // Every `EntityKind`, or the dump silently drops a whole class of streamed object. `Corpse`
-    // was missing from here since 1706 gave TYPEID_CORPSE its own variant: a hardcoded list is not
-    // a `match`, so nothing warned, and a streamed body simply never appeared in the census (found
-    // by 1723, alongside the same omission in the --death corpse capture).
+    // Every `EntityKind`: this list is not a `match`, so a new variant must be added by hand.
     for kind in [
         EntityKind::Player,
         EntityKind::Unit,
@@ -553,9 +452,8 @@ fn main() -> Result<()> {
         probe.verify(&mut cx)?;
     }
 
-    // 7. Optional: prove we can drive our own movement server-side. Walk forward, log out (which
-    //    saves the character), then re-enum and compare the persisted position. Terminal — it ends
-    //    the session, so it runs last.
+    // 7. Optional walk, then log out (which saves the character) and compare the saved position.
+    //    It ends the session, so it runs last.
     if let Some(yards) = cli.walk {
         let self_entity = world.tracked.get(&self_guid);
         let start = self_entity.map(|t| t.position).unwrap_or(world.spawn_pos);
@@ -609,9 +507,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Walk the active player `yards` forward along `orientation`, sending a realistic
-/// start→heartbeat→stop sequence at run speed, and return the destination. WoW orientation 0 faces
-/// +X; forward is `(cos o, sin o, 0)`. Coordinates are raw WoW yards.
+/// Walk `yards` forward as start, heartbeats and stop at run speed, returning the destination.
+/// Orientation 0 faces +X, so forward is `(cos o, sin o, 0)`, in raw WoW yards.
 fn walk_forward(
     session: &mut WorldSession,
     start: [f32; 3],
