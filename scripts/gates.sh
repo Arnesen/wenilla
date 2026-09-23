@@ -20,10 +20,13 @@ echo "gating: $root"
 
 # ── Green-stamp memoization ──────────────────────────────────────────────────────────────────────
 # A green run stamps target/.gates-green with the working tree's hash (untracked files included,
-# through a throwaway index that leaves the real one alone), rustc's version, this script's hash
-# and the install path, since the data-gated tests and the enforcer run only where one resolves.
+# through a throwaway index that leaves the real one alone), rustc's version, this script's hash,
+# the install path and whether the addon corpus link is there: the data-gated tests and the
+# enforcer run only where the data resolves, and the link is gitignored, so the hash misses it.
 # The install is compared last: resolving it is a `cargo run`.
 stamp="target/.gates-green"
+corpus=""
+[ -d "$root/wow-addons-vanilla" ] && corpus="+corpus"
 tree_key() {
     local tmpidx t
     tmpidx="$(mktemp "${TMPDIR:-/tmp}/benilla-gates-idx.XXXXXX")" && rm -f "$tmpidx" || return 1
@@ -49,9 +52,9 @@ if [ "${GATES_FORCE:-}" != "1" ] && [ -n "$key_start" ] && [ -f "$stamp" ]; then
     if [ "$old_key" = "$key_start" ]; then
         memo="this exact tree already passed"
     elif [ "${old_key#*|}" = "${key_start#*|}" ] && docs_only_delta "${old_key%%|*}" "${key_start%%|*}"; then
-        memo="this tree differs from one that passed only in top-level *.md, which no gate reads"
+        memo="this tree differs from one that passed only under docs/ or in top-level *.md, which no gate reads"
     fi
-    if [ -n "$memo" ] && [ "${old##*|}" = "$(resolve_wow)" ]; then
+    if [ -n "$memo" ] && [ "${old##*|}" = "$(resolve_wow)$corpus" ]; then
         echo "ALL GATES GREEN (memoized — $memo; GATES_FORCE=1 re-runs)"
         [ -d target ] && printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" \
             "$(git rev-parse --short HEAD 2>/dev/null || echo '-')" chain 0 memo >>target/.gates-timing 2>/dev/null
@@ -107,7 +110,7 @@ run clippy cargo clippy --workspace --all-targets -- -D warnings
 # fail every corpus test. `$wow_data` is resolved once, for player-tests and the stamp too.
 wow_data="$(resolve_wow)"
 require_data=""
-if [ -n "$wow_data" ] && [ -d "$root/wow-addons-vanilla" ]; then
+if [ -n "$wow_data" ] && [ -n "$corpus" ]; then
     require_data=1
 else
     echo "gates: NOTE — install or addon corpus not found here (install='${wow_data:-none}'," \
@@ -165,7 +168,7 @@ note_timing chain "$((SECONDS - chain_t0))" ok
 # otherwise memoize a green for a tree the chain never saw.
 key_end="$(tree_key || true)"
 if [ -n "$key_end" ] && [ "$key_end" = "$key_start" ] && [ -d target ]; then
-    printf '%s|%s\n' "$key_end" "$wow_data" > "$stamp" 2>/dev/null || true
+    printf '%s|%s%s\n' "$key_end" "$wow_data" "$corpus" > "$stamp" 2>/dev/null || true
 fi
 
 # The clean-run gate, scripts/smoke.sh, needs a server and a window: named here, not run.
