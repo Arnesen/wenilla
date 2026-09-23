@@ -1,26 +1,5 @@
 #!/usr/bin/env bash
-# cine.sh — play one cinematic on the probe and print what happened, as a timeline.
-#
-# Every cinematic question is the same shape — "what did the client do to the world while the
-# camera was away?" — and answering it by hand costs four environment variables, a GM command, a
-# move trace and a fistful of greps. Assembled by hand three times in one session (decisions
-# 1701/1707/1708), it produced two WORTHLESS runs before a usable one:
-#
-#   * the first parked the body wherever the character was saved, which was inside Thunder Bluff's
-#     geometry — the body was wedged, sent nothing, and the trace said "held" for reasons that had
-#     nothing to do with the cinematic;
-#   * the second read "no movement packet" as proof that input was suppressed, when the body was
-#     simply in free fall and had no movement to send.
-#
-# Both are avoidable by construction, so this parks the body on known-flat ground first and always
-# prints the control facts (did it fall? did it move?) beside the thing under test.
-#
-# THE SILENT-BUT-LIVE TRICK, which is the other half of why this exists: `$WOW_NOSOUND` opens no
-# audio device, so `zone::start_music_stream` returns before it logs and a silent run can tell you
-# NOTHING about music. Instead this points `$BENILLA_HOME` at a throwaway config with
-# `MasterVolume = "0"` — the device opens, every stream starts and logs its file, and the room
-# stays quiet. That is what made "the Stormwind city-intro stinger is what plays under the human
-# narration" a readable fact rather than a guess.
+# Play one cinematic on the probe and print what happened, as a timeline.
 #
 #   scripts/cine.sh                 # the human intro (81), parked in Stormwind
 #   scripts/cine.sh 41              # the dwarf intro
@@ -28,8 +7,10 @@
 #   scripts/cine.sh 81 --at "-8913,554,94,0"
 #   scripts/cine.sh 81 --keep       # keep the raw log and trace paths, printed at the end
 #
-# The probe identity is the checkout's `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR
-# (scripts/probe-identity.sh).
+# Logs in as `.probe-identity`, else WOW_USER/WOW_PASS/WOW_CHAR. The body parks on flat ground
+# first, and did-it-fall/did-it-move print beside the timeline: a wedged or falling body sends no
+# movement. Sound is live but muted through a BENILLA_HOME config (`MasterVolume = "0"`), because
+# under WOW_NOSOUND `zone::start_music_stream` returns before it logs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -60,8 +41,7 @@ trace="$work/move.trace"
 
 IFS=, read -r px py pz pmap <<< "$park"
 
-# The schedule, in probe-clock seconds. Generous rather than tight: a cold slot streams a city
-# slowly, and a measurement taken before the world arrived is the wedged-body run all over again.
+# The schedule, in probe-clock seconds; generous, because a cold start streams a city slowly.
 park_at=8
 play_at=20
 key_at=$((play_at + 8))

@@ -1,22 +1,14 @@
 #!/usr/bin/env bash
-# probe-identity.sh — who a scripted run logs in as. Sourced by smoke.sh, cine.sh and
-# summon-live.sh; never run on its own.
+# Who a scripted run logs in as; sourced by smoke.sh, cine.sh and summon-live.sh, never run alone.
 #
-# A scripted run has no default account: a login kicks whoever holds the account, so the run
-# logs in as the account this checkout DECLARES, or as the one the shell names, or not at all.
+# A login kicks whoever holds the account, so there is no default: the checkout's `.probe-identity`
+# (tree root, uncommitted; `WOW_USER=…`, `WOW_PASS=…`, `WOW_CHAR=…`, one per line), else the
+# shell's WOW_USER, WOW_PASS and WOW_CHAR. The client refuses a scripted login on any account but
+# the declared one (`run_mode::account_guard`).
 #
-#   `.probe-identity` at the tree root  — `WOW_USER=…`, `WOW_PASS=…`, `WOW_CHAR=…`, one per line,
-#                                          never committed. A machine that runs several checkouts
-#                                          against one server gives each its own account this way,
-#                                          and the client refuses a scripted login from that
-#                                          checkout on any other account (run_mode::account_guard).
-#   WOW_USER, WOW_PASS, WOW_CHAR          — the shell's, all three, when nothing is declared.
-#
-#   probe_identity <tag> <tree root>
-#
-# sets PROBE_USER, PROBE_PASS, PROBE_CHAR, PROBE_DECLARED (non-empty when the file supplied them)
-# and PROBE_HOST with PROBE_AUTH_PORT from WOW_HOST (default localhost:3724). Prints one line
-# naming the identity; a refusal prints why, with the caller's tag, and returns 1.
+# `probe_identity <tag> <tree root>` sets PROBE_USER, PROBE_PASS, PROBE_CHAR, PROBE_DECLARED
+# (non-empty when the file supplied them) and PROBE_HOST, PROBE_AUTH_PORT from WOW_HOST (default
+# localhost:3724), and prints the identity it chose; a refusal prints why and returns 1.
 probe_identity() {
     local tag="$1" root="$2" file="$2/.probe-identity" v ignored=""
     PROBE_DECLARED=""
@@ -55,10 +47,8 @@ probe_identity() {
     return 0
 }
 
-# Is a server listening? `probe_server_or_skip <tag>` prints a skip and returns 1 when the auth
-# port does not answer — and, for a local server, when the stock world port (8085) does not
-# either, because a refused world connection reads as a client bug in the log and costs a full
-# build to discover. A remote server's world port comes from its realm list and is not guessed.
+# `probe_server_or_skip <tag>` prints a skip and returns 1 when the auth port does not answer, or,
+# for a local server, the stock world port 8085; a remote world port comes from its realm list.
 probe_server_or_skip() {
     local tag="$1" port ports="$PROBE_AUTH_PORT"
     case "$PROBE_HOST" in localhost | 127.0.0.1) ports="$ports 8085" ;; esac

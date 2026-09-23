@@ -1,28 +1,15 @@
 #!/usr/bin/env bash
-# check.sh — the ROUND's verify (decision 1822): fmt everywhere (cheap), clippy + test scoped to
-# the crates this round's changes can actually affect — the changed crates plus everything that
-# depends on them. The workspace-wide chain is `scripts/gates.sh`'s job, paid at sync→land.
+# The in-loop verify: fmt everywhere, clippy and test on the changed crates and their dependents.
 #
-# Why this verb exists: the fleet was paying the FULL chain per round — measured over the fortnight
-# to 2026-09-01 at 3,028 `cargo test --workspace` runs (72 h of wall time) and 1,572 workspace-wide
-# clippys (33 h) against only 393 actual gate moments, one session hitting the whole suite 161
-# times in a day while editing a single leaf crate. 59 % of edits land in `benilla-app`, which
-# nothing but the `benilla` bin depends on: the honest scope of a round is 1–3 crates, not 19.
+# The change set is the fork point against main plus staged, unstaged and untracked files. A path
+# under crates/<dir>/ scopes that package, assets/ui/ scopes benilla-app, docs/ and *.md scope
+# nothing, and any other path runs scripts/gates.sh, the workspace-wide chain run at land.
+# CHECK_FULL=1 goes straight to gates.sh.
 #
-# Scope rule — conservative by construction, unknown means FULL, never "probably fine":
-#   crates/<dir>/**            → that crate (owner read off cargo metadata, not the dir name)
-#   assets/ui/**               → benilla-app (ui_script's shipped-UI tests read it at runtime)
-#   *.md                       → no gate can change (gates.sh's docs-only rule)
-#   anything else              → escalate: exec scripts/gates.sh (workspace manifests, .cargo/,
-#                                rust-toolchain, scripts/, shaders outside crates, …)
-# Change set = fork point vs main + staged + unstaged + untracked — the round's work, not the last
-# edit. CHECK_FULL=1 skips straight to gates.sh.
-#
-# Same fail-fast discipline as gates.sh: never compose `cargo … | tail` pipelines by hand — the
-# pipe's exit code masks the gate's (that bug bit twice before gates.sh existed).
+#   scripts/check.sh
 set -uo pipefail
 
-# Gate the tree you are STANDING IN (gates.sh learned this; same rule here).
+# Check the checkout you stand in when it is one of this repo, else this file's (as gates.sh does).
 here="$(cd "$(dirname "$0")/.." && pwd)"
 root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$root" ] && [ -f "$root/scripts/check.sh" ] || root="$here"
@@ -71,8 +58,7 @@ if [ -z "$dirlist" ]; then
     exit 0
 fi
 
-# ── Changed crates → reverse-dependency closure, off cargo metadata (dir names are not package
-#    names here: crates/mpq is benilla-mpq) ──────────────────────────────────────────────────────
+# ── Changed crates → reverse-dependency closure, off cargo metadata ──────────────────────────────
 pkgs="$(python3 - "$root" $dirlist <<'PY'
 import json, subprocess, sys, os
 root, dirs = sys.argv[1], set(sys.argv[2:])
@@ -112,6 +98,7 @@ echo "check:   (changed crates + everything that depends on them; full chain sti
 log="$(mktemp "${TMPDIR:-/tmp}/benilla-check.XXXXXX")"
 skips="$(mktemp "${TMPDIR:-/tmp}/benilla-check-skips.XXXXXX")"
 trap 'rm -f "$log" "$skips"' EXIT
+# Each gate logs to a file tailed afterwards: piping through `tail` would mask its exit code.
 run() {
     local name="$1"; shift
     if ! "$@" >"$log" 2>&1; then
@@ -125,8 +112,8 @@ run() {
 run fmt cargo fmt --all -- --check
 run clippy cargo clippy $pflags --all-targets -- -D warnings
 run test env BENILLA_SKIP_LOG="$skips" cargo test $pflags
-# The data-gated tests skip without the install or the addon corpus, and libtest swallows the
-# line; the resolver logs each skip to $BENILLA_SKIP_LOG and this counts them (gates.sh says why).
+# Data-gated tests skip without the install or the addon corpus and libtest swallows their line,
+# so each skip is also logged to $BENILLA_SKIP_LOG and counted here.
 if [ -s "$skips" ]; then
     echo "  test: $(wc -l <"$skips" | tr -d ' ') data-gated tests SKIPPED on this machine —"
     sort "$skips" | uniq -c | sort -rn | sed 's/^ *\([0-9]*\) \(.*\)/    \1 × \2/'

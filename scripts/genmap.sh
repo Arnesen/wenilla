@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Generate docs/MAP.md, the "what's built" map, derived entirely from what is on disk so it cannot
-# drift (docs/METHOD.md: the generated map is regenerated from the code, never hand-written). It is
-# regenerated and committed on every landing; run it by hand only to look, never edit its output.
-# Deterministic: identical tree, identical output (no timestamps), so a diff means the structure
-# actually changed.
-# No `pipefail`/`-e`: greps that legitimately find nothing (a single-file lib, a crate with no bins)
-# must not abort the generator.
+# Generate docs/MAP.md, the map of what is built, from what is on disk.
+#
+# Regenerated and committed at every land; run it by hand only to look, never edit the output. No
+# timestamps, so an identical tree gives an identical map. No `pipefail`/`-e`: a grep that finds
+# nothing (a single-file lib, a crate with no bins) must not abort the generator.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -25,14 +23,8 @@ field() { grep -m1 "^$2" "$1" 2>/dev/null | sed -E "s/^$2[[:space:]]*=[[:space:]
   for ct in crates/*/Cargo.toml; do
     name=$(field "$ct" name)
     desc=$(field "$ct" description)
-    # `bevy.workspace = true` is the form every crate here actually uses, and the old pattern
-    # (`^bevy[[:space:]]*=`) matched only `bevy =` — so workspace-inherited deps read "no Bevy".
-    # benilla-assets shipped mislabelled long enough to say "(no Bevy) — Bevy AssetSource +
-    # AssetLoaders" in one line. The trailing class accepts `.`, whitespace and `=`, which covers
-    # `bevy.workspace =`, `bevy = { … }` and `bevy="…"`, while still rejecting a `bevyfoo` crate.
-    # Load-bearing beyond tidiness: "does this crate need Bevy" is the seam question 0068 cut
-    # `benilla-ui` on and 1160 cuts `benilla-world` on, so a map that lies about it misleads
-    # exactly the work that reads it.
+    # Crates here write `bevy.workspace = true`: the trailing class accepts `.`, whitespace and `=`
+    # (`bevy = { … }`, `bevy="…"` too) and still rejects a `bevyfoo` crate.
     if grep -qE '^(bevy|bevy_egui|avian3d)[.[:space:]=]' "$ct"; then bevy="Bevy"; else bevy="no Bevy"; fi
     echo "- **$name** ($bevy) — ${desc:-—}"
   done
@@ -46,10 +38,7 @@ field() { grep -m1 "^$2" "$1" 2>/dev/null | sed -E "s/^$2[[:space:]]*=[[:space:]
     | sed -E 's/add_plugins\(//; s/([a-z_]+::)+//' | awk '!seen[$0]++ {print "- " $0}'
   echo
 
-  # The two dev groups are one `add_plugins` line each in `lib.rs` (decisions 1173/1174), so the
-  # list above names the group and not what is in it. Read their members out of `dev.rs` — a map
-  # that stops naming the instruments the moment they move behind the `dev` feature is exactly the
-  # drift this file exists to prevent.
+  # `lib.rs` adds each dev group in one line, so their members are read out of `dev.rs`.
   echo "### Behind the \`dev\` feature (\`crates/benilla-app/src/dev.rs\` — compiled out by \`--no-default-features\`)"
   echo
   grep -oE 'add_plugins\(([a-z_]+::)*[A-Za-z_]+Plugins?' crates/benilla-app/src/dev.rs \
@@ -69,8 +58,7 @@ field() { grep -m1 "^$2" "$1" 2>/dev/null | sed -E "s/^$2[[:space:]]*=[[:space:]
 
   echo "## CLI binaries"
   echo
-  # Both spellings cargo accepts: `src/bin/<name>.rs` and the directory form `src/bin/<name>/main.rs`
-  # (benilla-extract, benilla-world) — the file-only glob listed three of five for months.
+  # Both forms cargo accepts: `src/bin/<name>.rs` and `src/bin/<name>/main.rs`.
   for b in crates/*/src/bin/*.rs crates/*/src/bin/*/main.rs; do
     [ -f "$b" ] || continue
     crate=$(echo "$b" | sed -E 's@crates/([^/]+)/.*@\1@')
@@ -82,8 +70,7 @@ field() { grep -m1 "^$2" "$1" 2>/dev/null | sed -E "s/^$2[[:space:]]*=[[:space:]
   done | LC_ALL=C sort
   echo
 
-  # Every shader in the tree is compiled into the binary and addressed by the crate that owns it
-  # (decision 1175), so the crate is part of the shader's name now — list them all, per crate.
+  # Shaders are embedded and addressed by their owning crate, so the crate is part of the name.
   echo "## WGSL shaders (\`crates/*/src/shaders/\`, embedded)"
   echo
   for s in crates/*/src/shaders/*.wgsl; do
@@ -97,17 +84,13 @@ field() { grep -m1 "^$2" "$1" 2>/dev/null | sed -E "s/^$2[[:space:]]*=[[:space:]
   echo
   echo "> The headless/dev instrument fleet, discovered from the code: every \`WOW_*\` env var"
   echo "> some \`.rs\` reads, and where it's read — the doc comment at the read site is the"
-  # Don't name individual dev keys here — this line has gone stale twice (it still said 'P perf'
-  # after 0585 moved P onto the chord, and 'backtick panel' after 1043 moved the last two). The
-  # keys live in one place, \`debug_panel::DEV_CHORD\` and the panel footer; name the plane only.
+  # Name no dev keys here: they are listed once, in the debug panel's footer.
   echo "> semantics. (The in-window surfaces — the Ctrl+Shift dev-chord overlays — are plugins"
   echo "> above; this indexes the switches that don't announce themselves.)"
   echo
-  # Any quoted "WOW_*" literal in code — reads go through env::var but also through helpers
-  # (`knob("WOW_FX_AGE", …)`), so match the literal, not the call. Doc comments write the
-  # backticked/`$`-prefixed form, so they don't false-positive.
-  # The probe registry (`capture/probe_env.rs`, 2266 §A5) names every WOW_PROBE* variable as a
-  # quoted literal too; it is the table, not a read site, so it is not a place a switch is used.
+  # Match any quoted "WOW_*" literal: reads also go through helpers (`knob("WOW_FX_AGE", …)`), and
+  # doc comments write the unquoted form. The probe registry `capture/probe_env.rs` is a table,
+  # not a read site, so it is left out.
   grep -rHoE '"WOW_[A-Z0-9_]+"' crates --include='*.rs' 2>/dev/null \
     | grep -v '^crates/benilla-app/src/capture/probe_env\.rs:' \
     | sed -E 's@^crates/@@; s/:"/\t/; s/"$//' \
@@ -117,11 +100,7 @@ field() { grep -m1 "^$2" "$1" 2>/dev/null | sed -E "s/^$2[[:space:]]*=[[:space:]
                   END { if (v) print line }'
   echo
 
-  # Every script, with the first sentence of its own header (2331). The scripts are the
-  # instruments the WOW_* switches are read WITH — a trace reader, a two-client probe, a corpus
-  # census — and a 2026-09-22 sweep found eight of them referenced by nothing but the record that
-  # built them: findable only by someone who remembered the name. This is the index; the header
-  # is the source, so it cannot drift. (`winlab/` is the Windows lab laptop's, 2205/2211.)
+  # Every script, with the first sentence of its own header.
   echo "## Scripts (\`scripts/\`)"
   echo
   for f in scripts/*.py scripts/*.sh; do

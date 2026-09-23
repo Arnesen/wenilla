@@ -1,43 +1,14 @@
 #!/usr/bin/env bash
-# The addon-API coverage instrument (decisions 1178 §, 1188 phase 0, 1189) — how much of the
-# 1.12.1 client's global surface benilla presents, measured on any day.
+# Addon-API coverage: how much of the 1.12.1 client's global surface benilla's UI VM presents.
 #
 #   scripts/api-coverage.sh              # the report
 #   scripts/api-coverage.sh --missing    # + every engine global we do not have
 #   scripts/api-coverage.sh --beyond     # + every global we have that 1.12 does not
 #
-# **Both sides are asked, not remembered.** The 1.12 side is `reference/1.12-globals.tsv`, the
-# running reference client's own in-world `_G` (regenerate: scripts/gen-reference-globals.py). Our
-# side is a real `UiScript::new()` dumped through `pairs(_G)`. The previous version of this script
-# inferred both by pattern-matching source — that is how the arc got "54 C_Container references"
-# (a grep over Rust, not API surface) and the 124-then-41 corpus estimates, all wrong. When the
-# question is what a running system exposes, ask the running system.
-#
-# It also no longer measures Bagnon/Questie/WeakAuras out of the Era install: 1188 settled the
-# target as 1.12.1 and the vanilla ecosystem, so an Era addon's call sites are the wrong client's
-# demand. The real-addon half of the question belongs to the vanilla addon harness (1188 phase 6).
-#
-# **The addon corpora are not 1.12 codebases, and that shapes what a grep over them means.**
-# The vanilla addon corpus (`benilla_formats::addon_corpus`) holds addons that RUN on 1.12 — which is
-# not the same as addons written for 1.12 and nothing else. Most of the big ones ship one codebase
-# for several clients and pick a path at load: pfUI registers every module with a version list
-# (`RegisterModule("loot", "vanilla:tbc", …)`, matched against `pfUI.expansion`), pfQuest keeps a
-# whole `compat/client.lua` off `GetBuildInfo`, and `libs/` directories carry vendored libraries
-# with their own client targets. Addons also come in several versions of themselves — a corpus is one snapshot of each.
-#
-# So a call site found by grep may be TBC-era code that a 1.12 client reaches and raises on, an
-# addon calling a name it defines itself under its own namespace, or genuinely 1.12 demand. The
-# three read very differently and look identical to `grep -rn`. Decision 2146 is the case that
-# made the point: six 2.0 globals were kept here for years on the strength of call sites that
-# turned out to be all of the first two kinds.
-#
-# **Never quote the percentage undifferentiated** (1178's rule, and 1188 restates it). A missing
-# global is one of three different things, and only reading the list tells you which:
-#   · a verb for a feature benilla has not built at all      → not a gap, a backlog item
-#   · a verb missing from a feature benilla ships            → a real hole, fix it
-#   · a name we have that 1.12 does not                      → a superset, and not free
-# The last one is the one this script insists on printing in full: an addon that feature-detects
-# (`if strmatch then`) takes a path we cannot honour, and the failure surfaces far from the cause.
+# The 1.12 side is `reference/1.12-globals.tsv`, the reference client's in-world `_G`
+# (scripts/gen-reference-globals.py); ours is a real `UiScript::new()` dumped through `pairs(_G)`.
+# Never quote the percentage alone: a missing global is an unbuilt feature or a hole in a shipped
+# one, and a global beyond 1.12 sends a feature-detecting addon down a path we cannot honour.
 set -u
 cd "$(dirname "$0")/.."
 

@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
 # PreToolUse(Edit|Write|NotebookEdit) guard: refuse to write anything into the 1.12.1 install.
-# Exit 2 blocks the call and hands stderr back to the agent.
 #
-# benilla reads a WoW install and never writes to one (docs/METHOD.md). The client persists
-# everything through `crate::local_state` into `benilla-config/` beside the binary, and
-# `scripts/smoke.sh` fails a run that leaves the install changed; this hook is the same rule for
-# the tools. The install is the player's own copy of somebody else's game, and "what here is
-# benilla's?" is only answerable while nothing of ours is anywhere else.
-#
-# Scoped by physical path, not by name: a checkout's `WoW` may be a symlink, so a write can arrive
-# spelled either way and only `cd -P` collapses the two. `$WOW_DATA` is honoured because that is
-# the resolver's own first step.
-#
-# `BENILLA_ALLOW_INSTALL_WRITE=1` overrides: a deliberate exception names itself in the transcript.
+# Reads the hook JSON on stdin; exit 2 blocks the call, with stderr as the reason. The protected
+# roots are WOW_DATA and the `WoW` link of the primary checkout and of the cwd.
+# BENILLA_ALLOW_INSTALL_WRITE=1 lets a write through.
 input=$(cat)
 
 path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' 2>/dev/null)
@@ -28,15 +19,13 @@ esac
 
 [ -n "${BENILLA_ALLOW_INSTALL_WRITE:-}" ] && exit 0
 
-# Resolve the target against its nearest EXISTING ancestor — a Write names a file, and may name
-# directories, that do not exist yet.
+# Resolve the target through its nearest existing ancestor: a Write may name new directories too.
 dir=$(dirname "$path")
 while [ ! -d "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "." ]; do dir=$(dirname "$dir"); done
 [ -d "$dir" ] || exit 0
 real=$(cd -P "$dir" 2>/dev/null && pwd) || exit 0
 
-# The roots to protect. `$WOW_DATA` first (the resolver's own order), then the `WoW` link every
-# checkout carries. Both physicalised, so the symlink and its target are one root.
+# Compare physical paths (`cd -P`): `WoW` may be a symlink, and a write can name either spelling.
 own=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
 primary=$(cd "${own:-.}/.." 2>/dev/null && pwd)
 for root in "${WOW_DATA:-}" "$primary/WoW" "$cwd/WoW"; do

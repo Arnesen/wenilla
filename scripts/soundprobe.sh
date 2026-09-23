@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
-# soundprobe.sh — start the client in MEASURING MODE (decision 1556).
+# Start the client in sound measuring mode: record the mix before and after the output limiter.
 #
-# The output limiter (1551) was proven offline and shipped on, and the director then played a real
-# session and heard no change. That gap is not settled by another fix; it is settled by a capture
-# from the machine and the encounter in question. This starts a run that records one.
+#   scripts/soundprobe.sh [client args…]   # play normally, press F9 when you hear it
+#   scripts/soundprobe.py                  # …then read the capture back
 #
-# Builds with the `play` profile on purpose — the same profile the director actually plays in
-# (decision 1157). A debug build stutters, a stutter is a missed mix deadline, and a missed
-# deadline is one of the mechanisms under investigation: measuring on the wrong profile would
-# manufacture the very artifact the capture is meant to attribute.
-#
-#   scripts/soundprobe.sh              # play normally, press F9 when you hear it
-#   scripts/soundprobe.py              # …then read the capture back
-#
-# Any extra arguments are passed through to the client.
+# Builds the `play` profile: a debug build stutters, and a stutter is a missed mix deadline, one of
+# the mechanisms the capture has to tell apart.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

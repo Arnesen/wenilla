@@ -1,28 +1,16 @@
 #!/usr/bin/env bash
-# **The fourth gate, as a command.** docs/METHOD.md asks for `fmt` · `clippy` · `test` · **a clean run**,
-# and until this existed only the first three had a runner. The fourth was a paragraph in
-# `docs/METHOD.md`, which is a different thing from a verb: a session that does not happen to read that
-# paragraph concludes it *cannot* run the client, says so to the director, and ships a change whose
-# whole subject is a live session boundary without ever having crossed one. That happened (2277).
+# The clean-run gate: boot the real client, log out, re-enter, walk the realm list, check the log.
 #
-# What it does: boots the real client against the server (WOW_HOST, default localhost) as the
-# account this checkout declares — or as the WOW_USER/WOW_PASS/WOW_CHAR of the shell — seats a
-# body in the world, `/logout`s to character select, **re-enters**, and exits — then reads
-# the log back. It is the smallest run that crosses every session edge, which is exactly the set of edges
-# the unit tests can only model.
+# Needs a server and opens a window for about a minute; gates.sh points at it but does not run it.
+# Logs in as the checkout's `.probe-identity`, else the shell's WOW_USER/WOW_PASS/WOW_CHAR
+# (scripts/probe-identity.sh). WOW_HOST is the server (default localhost), WOW_DATA the install
+# watched for writes (default the tree's WoW link), WOW_BG passes through to the client, and
+# WOW_SMOKE_KEEP=1 keeps the logs.
 #
-# It is deliberately NOT wired into `gates.sh`: it wants a server, opens a window, and costs ~45 s,
-# so paying it on every commit is the director's call, not this script's. Run it when a change
-# touches a session boundary — and the gates print a pointer at you either way.
-#
-#   scripts/smoke.sh                                   # the checkout's .probe-identity
-#   WOW_USER=u WOW_PASS=p WOW_CHAR=Name scripts/smoke.sh  # or your test account
-#   WOW_SMOKE_KEEP=1 scripts/smoke.sh                  # keep the log and print its path
+#   scripts/smoke.sh
 set -uo pipefail
 
-# The tree we are standing in, `gates.sh`'s rule verbatim: the git toplevel of $PWD when it is a
-# checkout of this repo, else this file's — a script reached by absolute path from another
-# checkout must not run that one.
+# Test $PWD's checkout when it is one of this repo, else this file's (the same rule as gates.sh).
 root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -z "$root" ] || [ ! -f "$root/scripts/smoke.sh" ]; then
     root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,28 +18,8 @@ fi
 cd "$root" || exit 1
 echo "smoke: $root"
 
-# **The smoke declares its whole environment; it does not inherit one.**
-#
-# Every leg below is a *run definition* — this account, this character or deliberately none, this
-# smoke switch — and every one of them was previously composed against whatever `WOW_*` the calling
-# shell happened to carry. The realm leg is where that stopped being theoretical: it names
-# `WOW_USER`/`WOW_PASS` and pointedly NOT `WOW_CHAR`, because the walk drives *character select* and
-# a seated body means there is no roster screen to drive. A session that had exported `WOW_CHAR` for
-# its last probe — which is how every probe in `docs/METHOD.md` is launched — handed the leg the one
-# thing it must not have, and the client dutifully entered the world while the walk waited for a
-# screen that was never coming. The report was `the realm walk did not finish within the timeout`:
-# 120 s, no cause, and nothing in the log that looks wrong.
-#
-# So the scrub is per-VARIABLE and up front, not per-leg: a gate whose result depends on the shell
-# it was typed in is not a gate. Kept: `WOW_DATA` and `WOW_HOST` (where the install and the server
-# ARE — locations, not dials), `WOW_BG` (the maintainer's "let me watch this one", which changes
-# window stacking and nothing else), and `WOW_SMOKE_KEEP` (this script's own). Loud, because a
-# session that meant to pass something should see it go rather than wonder why it did nothing.
-#
-# **Who the run logs in as** is decided first, by `scripts/probe-identity.sh`: the account this
-# checkout declares in `.probe-identity` (a login kicks whoever holds the account, so a checkout
-# never logs in as anyone else's), else the WOW_USER/WOW_PASS/WOW_CHAR of the shell — taken before
-# the scrub, and the one thing the scrub does not throw away.
+# Resolve the account first, then unset every inherited WOW_* the case below does not keep, so
+# each leg runs on the switches it names; WOW_BG is kept because it only changes window stacking.
 . "$root/scripts/probe-identity.sh"
 probe_identity smoke "$root" || exit 1
 user="$PROBE_USER"
@@ -67,40 +35,26 @@ done
 [ -n "$inherited" ] &&
     echo "smoke: ignoring inherited env —$inherited (each leg names its own; a gate is not shell-dependent)"
 
-# The server, before the client: a refused connection reads as a client bug in the log and costs a
-# full build to discover. Loud skip, never a silent pass — `gates.sh`'s posture for the install.
+# Check the server before the build: a refused connection would read as a client bug in the log.
 probe_server_or_skip smoke || exit 0
 
 log="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke.XXXXXX")"
 stamp="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke-stamp.XXXXXX")"
 before="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke-before.XXXXXX")"
-# The stamp and the file list always go; the LOG is the one a session may want to keep. Both in one
-# trap so the early `fail` exits below cannot strand a temp file.
+# One EXIT trap, so an early `fail` strands no temp file; WOW_SMOKE_KEEP spares the log.
 trap 'rm -f "$stamp" "$before"; [ -n "${WOW_SMOKE_KEEP:-}" ] || rm -f "$log"' EXIT
 
-# **The install is READ-ONLY, and this is where that is measured** (decision 1486). benilla reads a
-# WoW install; it never writes to one. The rule is easy to state and impossible to keep by memory —
-# one `create_dir_all` under a path derived from `wow_data()` and a player's install has benilla's
-# litter in it, on a folder that on this machine is SHARED with the sibling RE repo. So the fourth
-# gate measures it: a full run of the real client, across a logout and a re-login, must leave the
-# install byte-for-byte as it found it.
-#
-# Pure POSIX `find` on purpose — `stat`'s format flag is `-f` on BSD and `-c` on GNU, and a check
-# that silently no-ops on the other platform is worse than none. The name list catches additions
-# and deletions; `-newer` against a stamp touched just before the run catches modifications in
-# place. ~7 ms over the 927-file tree.
+# The install is read-only: the run must add, remove and modify nothing in it. The sorted file
+# list catches additions and removals, `-newer` against the stamp catches edits in place; plain
+# POSIX `find` because `stat`'s format flag differs between BSD (-f) and GNU (-c).
 install_root=""
 if [ -n "${WOW_DATA:-}" ]; then
     install_root="$WOW_DATA"
 elif [ -d "$root/WoW" ]; then
     install_root="$root/WoW"
 fi
-# Who ELSE might write in there. The install may be shared with the reference client, which the
-# maintainer runs against the same tree constantly for RE comparison. That client
-# writes its own WTF (Config.wtf, SavedVariables.lua, the per-character caches) while it runs, so a
-# whole-tree mtime diff cannot tell "benilla wrote to the install" from "the reference client was
-# open at the same time". Record it up front so the report below can name the right cause instead of
-# blaming benilla for someone else's writes.
+# A running reference client (wow.exe) writes its own WTF files into a shared install, and this
+# watch cannot tell those from benilla's; note it so the verdict can say so.
 reference_client_before=""
 if pgrep -f '[w]ow\.exe' >/dev/null 2>&1; then
     reference_client_before=1
@@ -112,10 +66,7 @@ if [ -n "$install_root" ]; then
         echo "smoke: NOTE — the reference client (wow.exe) is running; the install watch cannot attribute"
 fi
 
-# **Build first, THEN time the run.** The timeout below bounds the *client*, and a cold slot's
-# build is minutes — folding the two together fails the gate with "the client did not exit", which
-# names the wrong thing and sends the next session hunting a hang that is a compile. Build errors
-# still fail here, loudly and as themselves.
+# Build before the timed run: the timeout bounds the client, and a cold build takes minutes.
 if ! cargo build -q -p benilla >"$log" 2>&1; then
     echo "SMOKE FAILED: the client did not build"
     sed -E 's/\x1b\[[0-9;]*m//g' "$log" | tail -30
@@ -123,14 +74,12 @@ if ! cargo build -q -p benilla >"$log" 2>&1; then
 fi
 
 echo "smoke: running the logout/re-login round trip (~45 s, opens a window)…"
-# WOW_NOSOUND: the smoke is an agent's run, and `sound/mod.rs` opens no device under it — without
-# it every smoke of every session played the login zone's music into the room for 45 s (2006).
+# WOW_NOSOUND: the client opens no audio device (`sound/mod.rs`), so the run is silent.
 WOW_UNATTENDED=1 WOW_NOSOUND=1 WOW_USER="$user" WOW_PASS="$pass" WOW_CHAR="$char" WOW_LOGOUT_SMOKE=1 \
     timeout 180 cargo run -q -p benilla >"$log" 2>&1
 code=$?
 
-# Strip ANSI once: the tracing level is a coloured field, and matching `ERROR` against the raw line
-# also matches `ErrorsFrame.xml` — a false positive that would train everyone to ignore the check.
+# Strip ANSI once: the tracing level is colour-wrapped, and the checks below match plain text.
 plain="$(sed -E 's/\x1b\[[0-9;]*m//g' "$log")"
 
 fail() {
@@ -140,8 +89,8 @@ fail() {
     exit 1
 }
 
-# Named before the timeout, because it IS the timeout's usual cause: an unseatable `WOW_CHAR` parks
-# the client on the roster screen forever, and "did not exit" is the least useful way to say so.
+# Before the timeout check, which it usually explains: a WOW_CHAR not on the account leaves the
+# client waiting at the roster.
 printf '%s' "$plain" | grep -q "not on this account" &&
     fail "$char is not on $user — the client sat at the roster (make it, or rig it: WOW_RIG=…)"
 [ $code -eq 124 ] && fail "the client did not exit within the timeout"
@@ -150,27 +99,17 @@ printf '%s' "$plain" | grep -q "logout-smoke: empty roster" &&
 printf '%s' "$plain" | grep -q "logout-smoke: done" ||
     fail "the round trip never completed (no 'logout-smoke: done')"
 
-# **The second entry has to be DRIVABLE, not merely reached** (B306, decision 1542). The round trip
-# crossed this boundary on every run since 2277 and only ever checked that it happened — so the
-# report that arrived was a character who re-entered the world and could not move at all: vmangos
-# roots you for the `/logout` countdown, we acked the grant, and the state outlived the session that
-# was granted it. Nothing here could see that. Now the re-entry leg names whatever would kill WASD
-# and this refuses anything but `none`.
+# The re-entered character must be drivable: the leg lists what would block movement (a /logout
+# root must end with its session), and anything but `none` fails.
 sup="$(printf '%s\n' "$plain" | sed -n 's/.*logout-smoke: re-entered.*suppressors: \(.*\), done.*/\1/p' | tail -1)"
 printf '  %-24s %s\n' "re-entry suppressors" "${sup:-<unreported>}"
 [ "$sup" = "none" ] ||
     fail "the re-entered character could not be driven — suppressors: ${sup:-<unreported>} \
 (1542: everything the ended session granted its mover dies with it)"
 
-# **Did this run actually cross the ROOTED logout?** It did not, and it cannot: the probe accounts
-# are `gmlevel 6` (decision 0530 — probes need GM for `.go`/`.cheat`) and the deploy sets
-# `InstantLogout = 1`, so vmangos takes the instant branch of `CMSG_LOGOUT_REQUEST`
-# (`MiscHandler.cpp`: resting OR taxi OR security >= the config) and returns without ever calling
-# `SetRooted(true)`. B306's precondition is on the OTHER side of that `return`. So the drivable
-# check above, for B306 specifically, passes without exercising it — and a check that can pass
-# vacuously has to say so out loud, or a green run reads as coverage it does not have. That is the
-# same blind spot as the bug: not a wrong answer, an unasked question. B306's own regression lives
-# where it can be forced — the unit test at `player::wire_in::session_end_tests`.
+# vmangos skips the logout root when resting, on a taxi or at account security >= `InstantLogout`
+# (`MiscHandler.cpp`, `CMSG_LOGOUT_REQUEST`); probe accounts are GM, so report whether the check
+# above met a real root. `player::wire_in::session_end_tests` forces the rooted case.
 if printf '%s\n' "$plain" | grep -q "mover mode Root granted"; then
     printf '  %-24s %s\n' "rooted logout" "yes — the drivable check above is a real pass"
 else
@@ -183,21 +122,9 @@ panics="$(printf '%s\n' "$plain" | grep -cE 'panicked at')"
 [ "$panics" -ne 0 ] && fail "$panics panic(s)"
 [ "$errors" -ne 0 ] && fail "$errors ERROR line(s)"
 
-# **The session invariant** (1290): the UI is built per login, so a two-login run must show every
-# per-login step exactly twice. One occurrence means the second login re-entered the first login's
-# frame tree — the "always Onewarrior" failure, which is invisible in a screenshot and silent in
-# every log unless something counts.
-#
-# **Two counts, not one, since 2226.** This walk builds FOUR Lua states, not two: the client sits
-# at the character screen on a boot VM, and the world entry now BUILDS its own rather than adopting
-# that one (the reference's `0x490bd0` ↔ `0x48fbf0` pair). So a marker's expected count depends on
-# which of the two things it tracks — every VM ever built, or only the VMs that loaded the in-game
-# UI. Conflating them is what this loop used to do, and it was right only for as long as the entry
-# adopted the glue VM.
-#
-# Which makes the first group a 2226 regression detector in its own right: **2 there rather than 4
-# means a login inherited the character screen's session** — and with it every `VmMemo` that
-# session had already spent, which is the login one-shot class (1348, B376) straight back.
+# A marker counts once per edge it fires on. Each world entry builds a world VM beside the
+# character screen's glue VM (the reference's `0x490bd0`/`0x48fbf0` pair), so per-VM markers count
+# twice per login; half that means an entry adopted the glue VM and its spent `VmMemo`s.
 sessions=2            # world entries in this walk
 vms=$((sessions * 2)) # …and the Lua states they cost: a glue VM and a world VM each (2226)
 for marker in "Fonts.xml loaded"; do
@@ -207,12 +134,8 @@ for marker in "Fonts.xml loaded"; do
         fail "'$marker' happened $n time(s), expected $vms — one per VM built, two per login (2226); \
 $sessions would mean the entry adopted the character screen's VM and inherited its spent VmMemos"
 done
-# **The keybinding table is an entry-edge seed since 2241**: `seed_bindings_for_vm` runs inside
-# `load_ingame_ui_on_world_entry`, beside the zone channels and the default language, so its
-# marker counts once per LOGIN, not once per VM. This loop read it against `$vms` for one day —
-# 2226 wrote the count on 09-14, 2241 moved the seed on 09-15 — and every smoke after that landing
-# failed here on a tree whose VM count above was exactly right; found bisecting a render change
-# that could not have touched it (2258's session). A marker's group is the *edge it fires on*.
+# The in-game UI and the keybinding table (`seed_bindings_for_vm`, run on the world-entry edge)
+# build once per login; one count for two logins means the second reused the first's frame tree.
 for marker in "UIParent.xml loaded" "commands registered"; do
     n="$(printf '%s\n' "$plain" | grep -cF "$marker")"
     printf '  %-24s %s\n' "$marker" "$n"
@@ -220,22 +143,15 @@ for marker in "UIParent.xml loaded" "commands registered"; do
         fail "'$marker' happened $n time(s), expected $sessions — once per login: the UI rebuilt per login (1290), the keybinding table seeded on the entry edge (2241)"
 done
 
-# **The shutdown tail ran on BOTH roots** (decision 1528). One write is the `/logout`; the second is
-# the exit, and the smoke now exits the way a player does — by closing the window. That is the only
-# exit that tests whether the tail is reachable at all: the close button's `AppExit` is written in
-# `PostUpdate`, so for as long as the shutdown systems read it in `Update` this count was 1 and
-# every saved variable, every addon's file and the camera pose died with the process. Counted off
-# the flat file's own line: it is only written when the UI really loaded, which is the property the
-# sentinel needs. (It is no longer the tail's FIRST write — 2029 put the layout cache ahead of it,
-# in the reference's own slot — but it is still the first that says the session had a UI.)
+# The shutdown tail runs once per session: at the /logout, and at the exit, which closes the window
+# as a player does. Counted off the saved-variables line, written only when the UI loaded.
 writes="$(printf '%s\n' "$plain" | grep -cF "saved variables: wrote")"
 printf '  %-24s %s\n' "shutdown writes" "$writes"
 [ "$writes" -eq "$sessions" ] ||
     fail "the shutdown tail wrote $writes time(s), expected $sessions — a session ended without \
 saving (1528: the quit root must be observed in \`Last\`, after PostUpdate's exit_on_all_closed)"
 
-# The read-only verdict (decision 1486). Reported by name: "something wrote to the install" is a
-# rule violation somebody has to go and find, and the file that appeared is the whole lead.
+# The read-only verdict names each changed file, the whole lead to whatever wrote it.
 if [ -n "$install_root" ]; then
     after="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke-after.XXXXXX")"
     find -L "$install_root" -type f 2>/dev/null | sort >"$after"
@@ -265,21 +181,13 @@ else
     echo "  install                   not watched (no WoW link and no WOW_DATA — the read-only rule went unmeasured)"
 fi
 
-# ── The realm-list leg (2069) ────────────────────────────────────────────────────────────────
-#
-# A second, short run, because it crosses a boundary the round trip above never touches: the realm
-# list is a dialog raised **over** character select, and the IO thread has to keep serving it from
-# the character park it is already sitting in. The version that ended the cycle there shipped, and
-# the failure was invisible to every unit test in the workspace — the app was stranded on one
-# screen while the thread walked two parks ahead, and the symptom the director saw was a client
-# that hung on "Connecting" with nothing in the log at all. This drives Change Realm → Okay →
-# Change Realm → Cancel → Okay against the real server and refuses anything but a completed walk.
+# ── The realm-list leg ───────────────────────────────────────────────────────────────────────
+# The realm list is a dialog over character select that the IO thread serves from the character
+# park; this drives Change Realm, Okay, Change Realm, Cancel, Okay against the real server and
+# fails anything but a completed walk.
 echo "smoke: running the realm-list boundary walk (~12 s, opens a window)…"
 rlog="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke-realm.XXXXXX")"
-# **No `WOW_CHAR` here, deliberately** — an absent variable is invisible, so it is named instead.
-# The walk drives character select; the fast path would seat a body and there would be no roster
-# screen left to drive. The scrub at the top of this script is what makes the absence real, and
-# `realm_select::smoke` refuses on its own if one reaches it anyway.
+# No WOW_CHAR: the walk drives character select, and `realm_select::smoke` refuses a seated body.
 WOW_UNATTENDED=1 WOW_NOSOUND=1 WOW_USER="$user" WOW_PASS="$pass" WOW_REALM_SMOKE=1 \
     timeout 120 cargo run -q -p benilla >"$rlog" 2>&1
 rcode=$?
