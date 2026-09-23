@@ -278,10 +278,4 @@
         </Layers>
     </Frame>
 
-    <Script><![CDATA[
-        -- Placeholder icon for an item or spell whose texture has not arrived; a benilla global
-        -- that the reference does not declare, so no stock file reads it.
-        BENILLA_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
-    ]]></Script>
-
 </Ui>
