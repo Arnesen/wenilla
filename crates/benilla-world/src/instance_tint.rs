@@ -17,9 +17,9 @@
 //! the device-init `GL_COLOR_MATERIAL` / `GL_AMBIENT_AND_DIFFUSE` current-colour path. So the tint
 //! is the **material ambient+diffuse colour**: it multiplies the light sum *inside* the [0,1] clamp
 //! and NOT the emission terms — structurally identical to what a WMO batch's MOCV already does in
-//! `wow_model.wgsl`, which is where the shader multiplies it. With lighting off (an UNLIT batch) the
-//! same state is a plain `glColor` modulate on the texture, so the fullbright path takes it too —
-//! unlike the highlight, whose GL_EMISSION is dead there.
+//! `wow_model.wgsl`, which is where the shader multiplies it. An UNLIT batch's program adds the
+//! tint·M2Color term and the highlight inside one clamp (`c28 + c29`), so the fullbright path takes
+//! the tint and the highlight both.
 //!
 //! (wow-re's `ghost-death-visuals.md` §4 still flags this combine as its one INFERRED hop and asks
 //! for a models-node follow-up; `models.md` is that follow-up, and it is VERIFIED — two independent

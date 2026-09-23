@@ -676,9 +676,9 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let lit = select(select(lit_exterior, lit_interior, is_interior), lit_m2_interior, is_rig);
     // Gamma-space albedo: lighting runs on the authored byte values. `m.tint` plus its mat-anim
     // delta is the animated M2Color tint.
-    let albedo = base.rgb * (m.tint.rgb + wow_light.matanim[u32(m.anim_slots.y)].xyz);
-    // Unlit fullbright replaces the lit path and takes no emission: with lighting off, GL_EMISSION
-    // is dead.
+    let anim_tint = m.tint.rgb + wow_light.matanim[u32(m.anim_slots.y)].xyz;
+    let albedo = base.rgb * anim_tint;
+    // An unlit batch replaces the lit path: fullbright, with only the highlight added (below).
     let is_emissive = m.model_flags.w > 0.5;
     // SIDN night glow: the emissive × the night fraction (ramping 20:30→21:30, 06:00→07:00), a
     // GL_EMISSION term inside the clamped lit sum, on lit lanes only.
@@ -693,9 +693,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let sidn_e = m.sidn.rgb * (wow_light.grade.x * sidn_w);
     let point_diffuse = in.point_lit;
 
-    // The hover/target highlight (tag bit 31): `glMaterialfv(GL_EMISSION)` of 64/255 per channel
-    // (config default 0xff404040), inside the lighting clamp; the unlit path never gets it.
-    let highlight = select(0.0, 0.2509804, highlighted);
+    // The hover/target highlight (tag bit 31): the scene's committed ambient
+    // (`0x614576`-`0x6145bd`), added to the batch colour inside the final clamp, lit or unlit
+    // (`c29`). Deviation: sampled live, where the reference holds the value sampled when the
+    // highlight began; a unit's tag has no slot to hold a colour, and the ambient moves slowly.
+    let highlight = select(vec3<f32>(0.0), wow_light.light_ambient.rgb, highlighted);
     // The FFP combine: the light sum (lit, point lights, emission) clamps first and the texture
     // modulates it, `tex × clamp(C·sum + emission)`, with C the GL_COLOR_MATERIAL colour (MOCV on
     // WMO, the body tint on M2). The WMO branch divides Bevy's MOCV fold back out, guarded; a dim
@@ -705,7 +707,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     if (is_wmo) {
         let vc = in.color.rgb;
         let primary = clamp(
-            vc * (lit + point_diffuse) + sidn_e + vec3<f32>(highlight),
+            vc * (lit + point_diffuse) + sidn_e + highlight,
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
@@ -724,7 +726,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         // An M2: the body tint multiplies the light terms as MOCV does above. A WMO surface has
         // no tint slot, so the WMO branch leaves it out.
         let primary = clamp(
-            inst_tint * (lit + point_diffuse) + sidn_e + vec3<f32>(highlight),
+            inst_tint * (lit + point_diffuse) + sidn_e + highlight,
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
@@ -733,15 +735,29 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 #else
     // A WMO batch without MOCV lands here too; its tint slot is the identity slot 0.
     let primary = clamp(
-        inst_tint * (lit + point_diffuse) + sidn_e + vec3<f32>(highlight),
+        inst_tint * (lit + point_diffuse) + sidn_e + highlight,
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
     lit_rgb = albedo * primary;
 #endif
-    // The unlit path takes the body tint: with GL_LIGHTING off, gx SetState(1) is a plain
-    // `glColor` modulate.
-    var rgb = select(lit_rgb, albedo * inst_tint, is_emissive);
+    // The unlit path: an M2's unlit program outputs `c28 + c29` (`0x70c663`-`0x70c693` fold the
+    // tint·M2Color term into `c29` beside the highlight), so the texel modulates
+    // `clamp(C·tint + highlight)`, C the M2Color. A WMO keeps the plain modulate.
+    var unlit_rgb = albedo * inst_tint;
+    if (!is_wmo) {
+#ifdef VERTEX_COLORS
+        // The constant M2Color rides the vertex colour, which Bevy folded into `base`.
+        let unlit_c = in.color.rgb * anim_tint;
+        let unlit_tex = base.rgb / max(in.color.rgb, vec3<f32>(1.0 / 255.0));
+#else
+        let unlit_c = anim_tint;
+        let unlit_tex = base.rgb;
+#endif
+        let unlit_sum = unlit_c * inst_tint + highlight;
+        unlit_rgb = unlit_tex * clamp(unlit_sum, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    var rgb = select(lit_rgb, unlit_rgb, is_emissive);
     // An M2 Mod or Mod2x batch draws the bare texel: the reference zeroes its tint·M2Color term and
     // forces the primary colour to the blend identity (`0x70c507`/`0x70c5b8`), so neither the
     // animated M2Color nor the body tint reaches it. Its alpha still does, through the lerp below.
