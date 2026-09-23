@@ -1,8 +1,4 @@
-//! `SMSG_UPDATE_OBJECT` / `SMSG_DESTROY_OBJECT` wire tests (mirrors `src/messages/update_object.rs`):
-//! object creates (unit/gameobject/item/container), out-of-range removal, destroy, and the sparse
-//! `ObjectFields` Values-update decode (unit state/power/customization, virtual items + sheath,
-//! inventory slots). Split out of the former `tests/messages.rs` — see `tests/common` for the shared
-//! fixtures and methodology note.
+//! `SMSG_UPDATE_OBJECT` and `SMSG_DESTROY_OBJECT` wire tests (`src/messages/update_object.rs`).
 
 mod common;
 
@@ -13,9 +9,7 @@ use common::hx;
 
 #[test]
 fn update_object_fixture_decodes() {
-    // A real serialized SMSG_UPDATE_OBJECT body: Unit create (guid 0xAA, displayid 50, scale 1.5, a
-    // living position) + GameObject create (guid 0xBB, displayid 99, scale 2.0, pos 100/200/300) +
-    // out-of-range [0x10, 0x20].
+    // A unit create (0xAA), a gameobject create (0xBB) and an out-of-range block [0x10, 0x20].
     let body = hx("03000000000301aa03200000000000000000cdd70bc6357e04c3f90fa74200000040000000000000803f0000e040000090400000000000000000db0f4940051700000000000000000000000000000008000000aa00000000000000090000000000c03f320000000301bb05000117810700bb000000000000002100000000000040630000000000c84200004843000096430000803f040200000001100120");
     let packet = messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap();
     let events = decode(packet);
@@ -74,9 +68,7 @@ fn update_object_fixture_decodes() {
 
 #[test]
 fn destroy_object_decodes_to_object_destroyed() {
-    // SMSG_DESTROY_OBJECT: a plain u64 guid (vmangos `DestroyObject::AppendBodyTo` streams the raw
-    // ObjectGuid) — the corpse-decay / despawn teardown. Its own event, distinct from the OutOfRange
-    // update block: destroyed objects pop instantly, out-of-range ones fade.
+    // SMSG_DESTROY_OBJECT: a raw u64 guid (vmangos `DestroyObject::AppendBodyTo`).
     let body = hx("efbeadde01000000");
     let packet = messages::parse_server(messages::opcode::SMSG_DESTROY_OBJECT, &body).unwrap();
     assert_eq!(packet.name(), "SMSG_DESTROY_OBJECT");
@@ -92,10 +84,8 @@ fn destroy_object_decodes_to_object_destroyed() {
 
 #[test]
 fn values_update_decodes_unit_state() {
-    // A hand-built Values-only update (update_type 0) for guid 0xAA carrying the unit descriptor
-    // fields HEALTH=22 (=100), MAXHEALTH=28 (=120), LEVEL=34 (=5), BYTES_0=36 (race 1/class 1/gender 0)
-    // — bits in 2 mask blocks, values in ascending field order. Verifies the `Object::Values` path
-    // (previously dropped) emits an ObjectValues delta whose fields decode via the named accessors.
+    // Values update for 0xAA: fields 22 HEALTH 100, 28 MAXHEALTH 120, 34 LEVEL 5 and 36 BYTES_0
+    // (race 1, class 1, gender 0), in 2 mask blocks with values in ascending field order.
     let body = hx("01000000000001aa02000040101400000064000000780000000500000001010001");
     let packet = messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap();
     let fields = decode(packet)
@@ -116,17 +106,14 @@ fn values_update_decodes_unit_state() {
         ),
         (Some(100), Some(120), Some(5), Some(1), Some(1), Some(0))
     );
-    // A non-player unit carries no PLAYER block, so the customization accessors stay `None`.
     assert_eq!(fields.player_skin(), None);
     assert_eq!(fields.player_facial_hair(), None);
 }
 
 #[test]
 fn values_update_decodes_player_customization() {
-    // A Values-only update for player guid 0xBB carrying PLAYER_BYTES=193 (skin 0x10 / face 0x11 /
-    // hairStyle 0x12 / hairColor 0x13, packed b0..b3) and PLAYER_BYTES_2=194 (facialHair 0x14, b0).
-    // Field 193 lives in mask block 6 (bit 1), 194 in block 6 (bit 2) → 7 blocks, the first six empty.
-    // Pins the RF-0056 field indices + byte order against the decode.
+    // Player 0xBB: PLAYER_BYTES (193) = skin, face, hairStyle, hairColor in b0..b3; PLAYER_BYTES_2
+    // (194) b0 = facialHair. Both sit in mask block 6 (bits 1, 2), after six empty blocks.
     let body = hx(
         "01000000000001bb07000000000000000000000000000000000000000000000000060000001011121314000000",
     );
@@ -152,9 +139,8 @@ fn values_update_decodes_player_customization() {
 
 #[test]
 fn values_update_decodes_unit_power() {
-    // A Values-only update for guid 0xAA carrying POWER1=23 (40), MAXPOWER1=29 (60), BYTES_0=36
-    // (race 1 / class 1 / gender 0 / power type 0 = mana). Pins the 1.12.1 power field indices
-    // (vmangos UpdateFields_1_12_1.h) + the bytes_0 power-type byte against the decode.
+    // Fields 23 POWER1 = 40, 29 MAXPOWER1 = 60, 36 BYTES_0 with power type 0 (mana) in b3 (vmangos
+    // `UpdateFields_1_12_1.h`).
     let body = hx("01000000000001aa020000802010000000280000003c00000001010000");
     let packet = messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap();
     let fields = decode(packet)
@@ -167,19 +153,15 @@ fn values_update_decodes_unit_power() {
     assert_eq!(fields.unit_power_type(), 0);
     assert_eq!(fields.unit_power(0), Some(40));
     assert_eq!(fields.unit_max_power(0), Some(60));
-    // Other slots are absent; out-of-range slots are None by contract.
     assert_eq!(fields.unit_power(1), None);
     assert_eq!(fields.unit_max_power(5), None);
 }
 
 #[test]
 fn values_update_decodes_unit_virtual_items_and_sheath() {
-    // A Values-only update for creature guid 0xCC carrying UNIT_VIRTUAL_ITEM_SLOT_DISPLAY slot 0
-    // (field 37) = 1234, UNIT_VIRTUAL_ITEM_INFO slot 0's pair (fields 40/41): dword0 packs
-    // class=2/subclass=7/material=1/invType=21, dword1 byte0 = sheath 3; and UNIT_FIELD_BYTES_2
-    // (field 164) byte0 = sheath state 1 (melee drawn). Field -> (block, bit): 37 -> (1,5),
-    // 40 -> (1,8), 41 -> (1,9), 164 -> (5,4) -- 6 mask blocks.
-    let mut body = hx("01000000000001cc06"); // count 1, no transport, VALUES, packed guid 0xCC, 6 blocks
+    // Fields 37 (virtual item display 0), 40/41 (its info pair, sheath 3 in 41's b0) and 164
+    // (UNIT_FIELD_BYTES_2, b0 = sheath state 1, melee drawn).
+    let mut body = hx("01000000000001cc06"); // count 1, no transport, VALUES, guid 0xCC, 6 blocks
     let mut masks = [0u32; 6];
     masks[1] = (1 << 5) | (1 << 8) | (1 << 9);
     masks[5] = 1 << 4;
@@ -219,12 +201,9 @@ fn values_update_decodes_unit_virtual_items_and_sheath() {
 
 #[test]
 fn values_update_decodes_inventory_slots() {
-    // A Values-only update for guid 1 carrying PLAYER_FIELD_INV_SLOT 16 (the offhand, fields
-    // 518/519 — live-verified: One's shield guid landed exactly there) = guid 0xAB and
-    // PLAYER_FIELD_PACK_SLOT 0 (fields 532/533, live-verified) = guid 0xCD. Pins the CORRECTED
-    // 1.12.1 bases (vmangos enum arithmetic, NOT its stale hex comments: INV_SLOT_HEAD 486,
-    // PACK 532). 17 mask blocks; block 16 = bits 6,7 (518,519) + 20,21 (532,533).
-    let mut body = hx("010000000000010111"); // count 1, no transport, VALUES, packed guid 1, 17 blocks
+    // INV_SLOT 16, the offhand (fields 518/519) = 0xAB; PACK_SLOT 0 (532/533) = 0xCD. The bases
+    // (INV_SLOT_HEAD 486, PACK 532) follow vmangos's enum arithmetic, not its stale hex comments.
+    let mut body = hx("010000000000010111"); // count 1, no transport, VALUES, guid 1, 17 blocks
     for block in 0..17u32 {
         let mask: u32 = if block == 16 { 0x0030_00C0 } else { 0 };
         body.extend_from_slice(&mask.to_le_bytes());
@@ -249,19 +228,15 @@ fn values_update_decodes_inventory_slots() {
 
 #[test]
 fn item_and_container_creates_decode() {
-    // Two position-less creates in one packet — an item and a bag — exactly as vmangos streams our
-    // inventory at login: CREATE_OBJECT, packed guid, TypeId 1/2, movement block = UPDATEFLAG_ALL
-    // (0x10) + its constant u32 1 (wire-verified `Object::BuildMovementUpdate`), then the mask.
-    // These used to be dropped whole by the create placement gate; now they're ItemCreate events.
-    // Container fields pin the CORRECTED bases (enum arithmetic, not the stale hex comments —
-    // the same 6-low drift as the PLAYER block): NUM_SLOTS = ITEM_END = 48, SLOT_1 = 50.
+    // Item and bag creates as vmangos streams them at login (movement block 0x10 + u32 1). Bases
+    // follow vmangos's enum arithmetic, not its stale hex comments: NUM_SLOTS 48, SLOT_1 50.
     let mut body = hx("0200000000");
     // Item guid 0x42, entry 4660 (field 3), stack count 5 (field 14): 1 mask block, bits 3+14.
     body.extend_from_slice(&hx("0201420110010000000108400000"));
     body.extend_from_slice(&4660u32.to_le_bytes());
     body.extend_from_slice(&5u32.to_le_bytes());
     // Container guid 0x43, entry 828 (field 3), num-slots 6 (field 48), slot-0 guid 0x42
-    // (fields 50/51): 2 mask blocks — block0 bit 3, block1 bits 16/18/19.
+    // (fields 50/51): 2 mask blocks, block0 bit 3, block1 bits 16/18/19.
     body.extend_from_slice(&hx("020143021001000000020800000000000d00"));
     for v in [828u32, 6, 0x42, 0] {
         body.extend_from_slice(&v.to_le_bytes());
@@ -295,17 +270,12 @@ fn item_and_container_creates_decode() {
     }
 }
 
-/// A transport GameObject's create (decision 0438 "the wire"): `UPDATE_FLAG_HAS_POSITION` (0x40) +
-/// `UPDATE_FLAG_TRANSPORT` (0x02), the latter's tail being the server's pathProgress ms anchor
-/// (vmangos `Object.cpp:590-605`). The mask carries `GAMEOBJECT_DISPLAYID` only — **no**
-/// `GAMEOBJECT_POS_*` fields, exactly what vmangos sends for a boat/zeppelin (it puts the stationary
-/// spawn point in the movement block's `HAS_POSITION` slot instead) — pinning both the new
-/// `transport_progress` surfacing AND the create-placement fallback to the movement block's position
-/// (`create_placement`, `events/decode.rs`) in one fixture.
+/// A boat's create: `HAS_POSITION` (0x40) + `TRANSPORT` (0x02), whose u32 tail is pathProgress ms
+/// (vmangos `Object.cpp:590-605`); vmangos sends no `GAMEOBJECT_POS_*`, only the movement pose.
 #[test]
 fn gameobject_create_surfaces_transport_progress_and_position_fallback() {
-    // HIGH_MO_TRANSPORT (0x1FC0) with the Menethil-Theramore ferry's real template entry (176495)
-    // riding the full low 32 bits (guid.rs `entry()` — MO_TRANSPORT has no 24-bit entry slot).
+    // HIGH_MO_TRANSPORT (0x1FC0) guids hold the entry in the full low 32 bits; 176495 is the
+    // Grom'Gol-Undercity zeppelin.
     let guid: u64 = 176_495 | (0x1FC0u64 << 48);
 
     let mut body = 1u32.to_le_bytes().to_vec(); // amount_of_objects
@@ -314,13 +284,12 @@ fn gameobject_create_surfaces_transport_progress_and_position_fallback() {
     write_packed_guid(guid, &mut body).unwrap();
     body.push(5); // TypeId::GameObject
 
-    // Movement block: HAS_POSITION | TRANSPORT.
     body.push(0x40 | 0x02);
     body.extend_from_slice(&5000.0f32.to_le_bytes()); // stationary pos.x
     body.extend_from_slice(&6000.0f32.to_le_bytes()); // stationary pos.y
     body.extend_from_slice(&15.0f32.to_le_bytes()); // stationary pos.z
     body.extend_from_slice(&2.0f32.to_le_bytes()); // orientation
-    body.extend_from_slice(&123_456u32.to_le_bytes()); // UPDATE_FLAG_TRANSPORT tail: pathProgress ms
+    body.extend_from_slice(&123_456u32.to_le_bytes()); // TRANSPORT tail: pathProgress ms
 
     // Mask: 1 block, GAMEOBJECT_DISPLAYID (field 8) only.
     body.push(1);
@@ -368,15 +337,11 @@ fn gameobject_create_surfaces_transport_progress_and_position_fallback() {
     }
 }
 
-/// A unit's `LIVING` block with `MOVEFLAG_ON_TRANSPORT` (0x0200_0000): the rider pose tail
-/// `[u64 transport guid][local x,y,z][local o]` (`update_object/movement.rs`'s `MovementBlock::read`,
-/// mirroring `read_movement_info`'s relay parse). VERIFIES the tail lands in `ObjectCreate::transport`
-/// and the 6 movement speeds that follow still parse from the right offset (the alignment the old
-/// discard-to-stay-aligned code depended on, now proven by consuming the values instead of dropping
-/// them).
+/// `MOVEFLAG_ON_TRANSPORT` (0x0200_0000) adds a rider tail to the `LIVING` block: u64 transport
+/// guid, then local x, y, z and orientation.
 #[test]
 fn unit_living_block_surfaces_on_transport_rider_pose() {
-    // The Org-UC zeppelin's template entry (176244), same MO_TRANSPORT composition as the ferry above.
+    // 176244 is the Moonspray, the Auberdine-Rut'theran boat.
     let transport_guid: u64 = 176_244 | (0x1FC0u64 << 48);
 
     let mut body = 1u32.to_le_bytes().to_vec();
@@ -389,18 +354,18 @@ fn unit_living_block_surfaces_on_transport_rider_pose() {
     let flags: u32 = 0x0200_0000; // MOVEFLAG_ON_TRANSPORT (1.12 bit 25, vmangos MovementInfo.h)
     body.extend_from_slice(&flags.to_le_bytes());
     body.extend_from_slice(&0u32.to_le_bytes()); // timestamp
-    body.extend_from_slice(&100.0f32.to_le_bytes()); // living pos.x (world, NOT local)
+    body.extend_from_slice(&100.0f32.to_le_bytes()); // living pos.x (world, not local)
     body.extend_from_slice(&200.0f32.to_le_bytes()); // living pos.y
     body.extend_from_slice(&5.0f32.to_le_bytes()); // living pos.z
     body.extend_from_slice(&1.0f32.to_le_bytes()); // living orientation
-    body.extend_from_slice(&transport_guid.to_le_bytes()); // ON_TRANSPORT tail: FULL u64 guid
+    body.extend_from_slice(&transport_guid.to_le_bytes()); // ON_TRANSPORT tail: full u64 guid
     body.extend_from_slice(&2.0f32.to_le_bytes()); // local x
     body.extend_from_slice(&3.0f32.to_le_bytes()); // local y
     body.extend_from_slice(&0.5f32.to_le_bytes()); // local z
     body.extend_from_slice(&0.25f32.to_le_bytes()); // local o
-    body.extend_from_slice(&0.0f32.to_le_bytes()); // fall_time (not swimming/jumping, no other tails)
+    body.extend_from_slice(&0.0f32.to_le_bytes()); // fall_time (no swim or jump tails)
     for v in [2.5f32, 7.0, 4.5, 4.722_222_3, 2.5, std::f32::consts::PI] {
-        body.extend_from_slice(&v.to_le_bytes()); // the 6 speeds — must still land right after the tail
+        body.extend_from_slice(&v.to_le_bytes()); // the 6 speeds, right after the tail
     }
 
     body.push(0); // mask: 0 blocks (nothing to interpret beyond the pose)
@@ -447,17 +412,8 @@ fn unit_living_block_surfaces_on_transport_rider_pose() {
     }
 }
 
-/// A player who streams in **already swimming**: the `LIVING` block's `MOVEFLAG_SWIMMING` word and
-/// the swim-pitch float that rides it both reach [`SessionEvent::ObjectCreate::mover`], and the six
-/// speeds after the tail still parse from the right offset.
-///
-/// This is the byte the client threw away for as long as observed swimming has existed
-/// (`let _pitch = read_f32_le(r)?;`). Its cost was the whole body-pitch render law being
-/// unreachable at create: the app's only source of a mover's flags + pitch was a relayed
-/// `MSG_MOVE_*`, so a player who swam into view rendered LEVEL until their next packet — and an
-/// idle floater, who sends none while unmoving, stayed level for as long as they floated. The
-/// reference re-authors `CMovement`'s live flags word from this same block (wow-5875-re
-/// `system/collision/collision.md`, the create-block apply's `0x75a07dff` merge).
+/// A swimming create's flags word and swim pitch both reach [`SessionEvent::ObjectCreate::mover`];
+/// the reference re-authors the mover's live flags from this block (the `0x75a07dff` merge).
 #[test]
 fn unit_living_block_surfaces_the_swim_it_is_already_in() {
     let mut body = 1u32.to_le_bytes().to_vec();
@@ -474,11 +430,10 @@ fn unit_living_block_surfaces_the_swim_it_is_already_in() {
     body.extend_from_slice(&(-566.0f32).to_le_bytes()); // living pos.y
     body.extend_from_slice(&(-3.25f32).to_le_bytes()); // living pos.z (under the surface)
     body.extend_from_slice(&2.0f32.to_le_bytes()); // living orientation
-                                                   // The SWIMMING tail: one f32, no ON_TRANSPORT pose before it, `fall_time` right after.
-    body.extend_from_slice(&(-0.4f32).to_le_bytes()); // swim pitch — nose DOWN
+    body.extend_from_slice(&(-0.4f32).to_le_bytes()); // the SWIMMING tail: pitch, nose down
     body.extend_from_slice(&0.0f32.to_le_bytes()); // fall_time
     for v in [2.5f32, 7.0, 4.5, 4.722_222_3, 2.5, std::f32::consts::PI] {
-        body.extend_from_slice(&v.to_le_bytes()); // the 6 speeds — must land right after the tail
+        body.extend_from_slice(&v.to_le_bytes()); // the 6 speeds, right after the tail
     }
 
     body.push(0); // mask: 0 blocks
@@ -509,10 +464,7 @@ fn unit_living_block_surfaces_the_swim_it_is_already_in() {
     }
 }
 
-/// A **dry** create carries no pitch tail at all — the four bytes are absent, so a parse that read
-/// one unconditionally would swallow `fall_time` and misalign every speed after it. The mover state
-/// still surfaces (the flags word is not conditional); its pitch is a level `0.0`, which is what the
-/// render law's own SWIMMING gate then reads.
+/// Without SWIMMING there is no pitch tail; the mover still surfaces, with a level 0.0 pitch.
 #[test]
 fn a_dry_living_block_has_no_pitch_tail_and_reads_level() {
     let mut body = 1u32.to_le_bytes().to_vec();
@@ -528,7 +480,7 @@ fn a_dry_living_block_has_no_pitch_tail_and_reads_level() {
     for v in [10.0f32, 20.0, 30.0, 0.5] {
         body.extend_from_slice(&v.to_le_bytes()); // pos + orientation
     }
-    body.extend_from_slice(&0.0f32.to_le_bytes()); // fall_time — NO pitch tail before it
+    body.extend_from_slice(&0.0f32.to_le_bytes()); // fall_time, no pitch tail before it
     for v in [2.5f32, 7.0, 4.5, 4.722_222_3, 2.5, std::f32::consts::PI] {
         body.extend_from_slice(&v.to_le_bytes());
     }
@@ -552,22 +504,11 @@ fn a_dry_living_block_has_no_pitch_tail_and_reads_level() {
     }
 }
 
-/// A unit that is **already walking** when it streams in: the `LIVING` block's
-/// `MOVEFLAG_SPLINE_ENABLED` (0x0040_0000) tail, byte-shaped exactly as vmangos writes it
-/// (`PacketBuilder::WriteCreate`, `packet_builder.cpp:152`). Two things are verified, and both are
-/// what decision 0708 turns on:
-///
-/// 1. The node array is the server's **internal** control array — `[phantom, p₀…pₙ, tail]`, since
-///    vmangos builds even a linear spline through `InitCatmullRom` (`spline.cpp:52`) — so the decoded
-///    `path` must be that array with its two virtual points trimmed, not the raw nodes.
-/// 2. The descriptor mask *after* the spline still parses: a mis-sized spline read (a missed node, a
-///    forgotten final destination) silently shifts every field that follows, which is precisely how a
-///    parse-and-discard block hides its own bugs.
+/// `MOVEFLAG_SPLINE_ENABLED` (0x0040_0000) adds a spline tail (vmangos `packet_builder.cpp:152`).
+/// Its nodes are the internal control array `[phantom, p₀…pₙ, tail]`, since vmangos builds even a
+/// linear spline through `InitCatmullRom` (`spline.cpp:52`); the decoded path drops the two ends.
 #[test]
 fn unit_living_block_surfaces_the_walk_it_is_already_on() {
-    // The real path: an L, 10 yd east then 20 yd north. What the server actually serializes is that
-    // path wrapped in its two virtual points: a phantom head at `p₀.lerp(p₁, -1)` = 2p₀ − p₁ (one
-    // segment *behind* the start) and a tail duplicating the destination.
     let path = [
         [10.0f32, 20.0, 30.0],
         [20.0, 20.0, 30.0],
@@ -591,10 +532,8 @@ fn unit_living_block_surfaces_the_walk_it_is_already_on() {
     let flags: u32 = 0x0040_0000; // MOVEFLAG_SPLINE_ENABLED (vmangos MovementInfo.h:53)
     body.extend_from_slice(&flags.to_le_bytes());
     body.extend_from_slice(&0u32.to_le_bytes()); // timestamp
-                                                 // The unit's stored pose — vmangos re-syncs it to the spline only every 400 ms, so it trails the
-                                                 // true position; the spline below is what actually places the unit.
     for v in [14.0f32, 20.0, 30.0, 0.0] {
-        body.extend_from_slice(&v.to_le_bytes()); // living pos + orientation
+        body.extend_from_slice(&v.to_le_bytes()); // stored pose, synced to the spline every 400 ms
     }
     body.extend_from_slice(&0.0f32.to_le_bytes()); // fall_time
     for v in [2.5f32, 7.0, 4.5, 4.722_222_3, 2.5, std::f32::consts::PI] {
@@ -658,8 +597,6 @@ fn unit_living_block_surfaces_the_walk_it_is_already_on() {
     }
 }
 
-/// A unit standing still carries no spline tail at all — the flag gates it, so `spline` is `None` and
-/// nothing downstream tries to walk it.
 #[test]
 fn unit_living_block_without_the_spline_flag_carries_no_walk() {
     let mut body = 1u32.to_le_bytes().to_vec();
@@ -686,15 +623,8 @@ fn unit_living_block_without_the_spline_flag_carries_no_walk() {
     }
 }
 
-/// `PLAYER_VISIBLE_ITEM_<n>_0` across the slot range — the PUBLIC entry the inspect window's whole
-/// paper doll is built from (decision 0631) and the same field equipment rendering resolves other
-/// players' gear through. Untested until now, and an off-by-one in its `258 + 2 + 12i` stride would
-/// put an inspected player's rings on their feet: the stride is exercised at both ends and in the
-/// middle, not just at slot 0 (which any wrong-but-anchored formula would also get right).
-///
-/// Field index = `PLAYER_VISIBLE_ITEM_1_CREATOR` (258, a 2-field guid) + 2 + 12·slot, so
-/// slot 0 → 260 (block 8 bit 4), slot 1 → 272 (block 8 bit 16), slot 14 → 428 (block 13 bit 12),
-/// slot 18 → 476 (block 14 bit 28). 15 mask blocks cover it.
+/// `PLAYER_VISIBLE_ITEM_<n>_0`, the public entry other players' gear renders from, sits at field
+/// 258 (`PLAYER_VISIBLE_ITEM_1_CREATOR`, a 2-field guid) + 2 + 12·slot: 260, 272, 428, 476 here.
 #[test]
 fn values_update_decodes_player_visible_item_entries() {
     let mut body: Vec<u8> = Vec::new();
@@ -710,7 +640,6 @@ fn values_update_decodes_player_visible_item_entries() {
     for m in masks {
         body.extend_from_slice(&m.to_le_bytes());
     }
-    // Ascending field order: 260, 272, 428, 476.
     for v in [7365u32, 2196u32, 15406u32, 2504u32] {
         body.extend_from_slice(&v.to_le_bytes());
     }
@@ -727,8 +656,7 @@ fn values_update_decodes_player_visible_item_entries() {
     assert_eq!(fields.player_visible_item_entry(1), Some(2196), "NECK");
     assert_eq!(fields.player_visible_item_entry(14), Some(15406), "BACK");
     assert_eq!(fields.player_visible_item_entry(18), Some(2504), "TABARD");
-    // An unsent slot and the sentinel are both None — an empty equipment slot must not read as
-    // "item 0" (the feed keys "is there gear here" on exactly this).
+    // An unsent slot and an out-of-range one both read None, never item 0.
     assert_eq!(fields.player_visible_item_entry(2), None, "slot 2 unsent");
     assert_eq!(
         fields.player_visible_item_entry(19),

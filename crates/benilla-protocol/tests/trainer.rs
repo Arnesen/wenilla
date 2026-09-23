@@ -1,10 +1,4 @@
-//! Oracle-free golden tests for the training arc's protocol layer (decision 0237): the
-//! `CMSG_TRAINER_LIST`/`CMSG_TRAINER_BUY_SPELL` send verbs, the `SMSG_TRAINER_LIST` service list and
-//! the buy succeeded/failed results, and the incremental spell-learn pair
-//! (`SMSG_LEARNED_SPELL`/`SMSG_SUPERCEDED_SPELL`). Same idioms as `gossip_vendor.rs` — `hx(...)`
-//! golden CMSG bodies, hand-built SMSG bodies round-tripped through `parse_server`. The learn pair
-//! also asserts its `decode()` bridge (phase 2 wired those events); the trainer list/buy variants
-//! stay consumer-free until phases 3–4 wire the `TrainerState` events + `ClassTrainerFrame`.
+//! Trainer wire: the list and buy send verbs, the service list, buy results and spell learning.
 
 use benilla_protocol::events::{decode, SessionEvent};
 use benilla_protocol::messages::{self, train_fail, trainer_spell_state, TrainerSpell};
@@ -19,15 +13,14 @@ fn hx(s: &str) -> Vec<u8> {
 
 #[test]
 fn trainer_send_bodies_golden() {
-    // CMSG_TRAINER_LIST (vmangos Npc.cpp, TrainerList::Read): one full trainer guid — same shape as
-    // CMSG_GOSSIP_HELLO / CMSG_LIST_INVENTORY.
+    // CMSG_TRAINER_LIST: one full trainer guid (vmangos `Npc.cpp` `TrainerList::Read`).
     assert_eq!(
         messages::trainer_list(0x1234_5678_9abc_def0),
         hx("f0debc9a78563412"),
         "CMSG_TRAINER_LIST body"
     );
 
-    // CMSG_TRAINER_BUY_SPELL (vmangos Npc.cpp, TrainerBuySpell::Read): u64 trainerGuid, u32 spellId.
+    // CMSG_TRAINER_BUY_SPELL: u64 trainerGuid + u32 spellId (vmangos `TrainerBuySpell::Read`).
     assert_eq!(
         messages::trainer_buy_spell(0x1234_5678_9abc_def0, 78),
         hx(concat!("f0debc9a78563412", "4e000000")),
@@ -35,9 +28,7 @@ fn trainer_send_bodies_golden() {
     );
 }
 
-/// Append one 38-byte service record (vmangos SendTrainerSpellHelper, NPCHandler.cpp:97-139) to a
-/// SMSG_TRAINER_LIST body: spell u32, state u8, cost u32, canLearnPrimaryProf u32, isPrimaryProfFirstRank
-/// u32, reqLevel u8, reqSkill u32, reqSkillValue u32, then three prerequisite-spell u32s.
+/// Appends one 38-byte service record in wire order (vmangos `NPCHandler.cpp:97-139`).
 fn push_service(
     body: &mut Vec<u8>,
     spell: u32,
@@ -65,10 +56,7 @@ fn push_service(
 
 #[test]
 fn trainer_list_wire() {
-    // SMSG_TRAINER_LIST (vmangos SendTrainerList, NPCHandler.cpp:141-241): u64 trainerGuid, u32
-    // trainerType, u32 count, count x 38-byte service, cstr title. Two services: a green (learnable)
-    // class spell with a level gate, and a gray (already-known) primary-profession first rank with a
-    // skill gate + one prerequisite spell — exercising both prof flag fields and the req_spells array.
+    // SMSG_TRAINER_LIST, per vmangos `SendTrainerList` (`NPCHandler.cpp:141-241`).
     let mut body = 0xCCu64.to_le_bytes().to_vec();
     body.extend_from_slice(&0u32.to_le_bytes()); // trainerType 0 = class
     body.extend_from_slice(&2u32.to_le_bytes()); // count
@@ -116,7 +104,6 @@ fn trainer_list_wire() {
         other => panic!("trainer list, got {}", other.name()),
     }
 
-    // Empty trainer (count 0): the title still follows immediately — no service records to read.
     let mut empty = 0xDDu64.to_le_bytes().to_vec();
     empty.extend_from_slice(&2u32.to_le_bytes()); // trainerType 2 = tradeskill
     empty.extend_from_slice(&0u32.to_le_bytes()); // count
@@ -135,7 +122,6 @@ fn trainer_list_wire() {
         other => panic!("empty trainer list, got {}", other.name()),
     }
 
-    // The decode() bridge maps title → greeting and carries the wire services through (phase 3).
     let packet = messages::parse_server(messages::opcode::SMSG_TRAINER_LIST, &body).unwrap();
     match decode(packet).pop().unwrap() {
         SessionEvent::TrainerList {
@@ -153,7 +139,7 @@ fn trainer_list_wire() {
 
 #[test]
 fn trainer_buy_result_wire() {
-    // SMSG_TRAINER_BUY_SUCCEEDED (vmangos TrainerBuySucceeded::AppendBodyTo): u64 trainerGuid, u32 spellId.
+    // SMSG_TRAINER_BUY_SUCCEEDED (vmangos `TrainerBuySucceeded`): u64 trainerGuid, u32 spellId.
     let mut ok = 0xCCu64.to_le_bytes().to_vec();
     ok.extend_from_slice(&78u32.to_le_bytes());
     match messages::parse_server(messages::opcode::SMSG_TRAINER_BUY_SUCCEEDED, &ok).unwrap() {
@@ -163,8 +149,7 @@ fn trainer_buy_result_wire() {
         other => panic!("trainer buy succeeded, got {}", other.name()),
     }
 
-    // SMSG_TRAINER_BUY_FAILED (vmangos TrainerBuyFailed::AppendBodyTo): u64 trainerGuid, u32 serviceId,
-    // u32 errorCode.
+    // SMSG_TRAINER_BUY_FAILED (vmangos `TrainerBuyFailed`): u64 guid, u32 serviceId, u32 error.
     let mut failed = 0xCCu64.to_le_bytes().to_vec();
     failed.extend_from_slice(&78u32.to_le_bytes());
     failed.extend_from_slice(&train_fail::NOT_ENOUGH_MONEY.to_le_bytes());
@@ -182,8 +167,7 @@ fn trainer_buy_result_wire() {
         other => panic!("trainer buy failed, got {}", other.name()),
     }
 
-    // Wire enum values pinned so a future edit can't drift them (vmangos Player.h:119-122,
-    // SharedDefines.h:1120-1122).
+    // vmangos values (`Player.h:119-122`, `SharedDefines.h:1120-1122`).
     assert_eq!(
         (
             trainer_spell_state::GREEN,
@@ -204,14 +188,12 @@ fn trainer_buy_result_wire() {
 
 #[test]
 fn learned_and_superceded_spell_wire() {
-    // SMSG_LEARNED_SPELL (vmangos LearnedSpell::AppendBodyTo, Spell.cpp:175-179): u16 spellId, u16
-    // actionBarSlot. The slot is unused on the client and dropped — a nonzero slot here must not leak
-    // into spell_id (proving it's read as two u16s, not one u32).
+    // SMSG_LEARNED_SPELL: u16 spellId + u16 actionBarSlot, the slot unused by the client and
+    // dropped (vmangos `Spell.cpp:175-179`).
     match messages::parse_server(messages::opcode::SMSG_LEARNED_SPELL, &hx("cb19aaaa")).unwrap() {
         ServerPacket::LearnedSpell { spell_id } => assert_eq!(spell_id, 6603),
         other => panic!("learned spell, got {}", other.name()),
     }
-    // The bridge widens the wire u16 to the store's u32 (phase 2).
     let packet =
         messages::parse_server(messages::opcode::SMSG_LEARNED_SPELL, &hx("cb19aaaa")).unwrap();
     match decode(packet).pop().unwrap() {
@@ -219,8 +201,7 @@ fn learned_and_superceded_spell_wire() {
         other => panic!("spell learned event, got {other:?}"),
     }
 
-    // SMSG_SUPERCEDED_SPELL (vmangos SupercededSpell::AppendBodyTo, Spell.cpp:169-173): u16 oldSpellId,
-    // u16 newSpellId.
+    // SMSG_SUPERCEDED_SPELL: u16 oldSpellId + u16 newSpellId (vmangos `Spell.cpp:169-173`).
     match messages::parse_server(messages::opcode::SMSG_SUPERCEDED_SPELL, &hx("cb19cc19")).unwrap()
     {
         ServerPacket::SupercededSpell {
