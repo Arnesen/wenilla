@@ -1,8 +1,9 @@
 # Syncing upstream benilla
 
-Upstream is [samwhosung/benilla](https://github.com/samwhosung/benilla). It is developed in a
-private tree and published as squashed snapshots; issues and pull requests there are closed; it
-runs no CI and never builds the wasm target. This fork tracks it: `main` is upstream's head plus
+Upstream is [samwhosung/benilla](https://github.com/samwhosung/benilla). Since September 2026 it
+takes issues and pull requests (`docs/CONTRIBUTING.md`, `docs/METHOD.md`) and moves `main` only by
+squash-merged pull requests; it still never builds the wasm target, so a wasm-only fix is still
+ours to carry. A small, wasm-neutral fix is now worth offering upstream instead of carrying. This fork tracks it: `main` is upstream's head plus
 our carries, and the intent is to stay current while our own work keeps living alongside.
 
 ## The model
@@ -56,6 +57,11 @@ sweep costs nothing and finds most of them:
 git diff --stat main..HEAD --name-only -- '*.rs' | xargs grep -ln 'use std::time::.*Instant\|std::time::\(Instant\|SystemTime\)::now'
 ```
 
+Upstream also moves code between files, and a moved `Instant` comes back as std's: the
+2026-09-24 sync found the cast state carried out of `ui_cast.rs` (ours) into `spell/inflight.rs`
+(std again). So also diff the hits against `origin/main` and read every *new* line, not only the
+files the merge conflicted on.
+
 `Duration` is fine — it is arithmetic, not a clock. `Instant` and `SystemTime` are not; they take
 `bevy::platform::time::Instant` and `web_time::SystemTime`. Watch for the brace form
 (`use std::time::{Duration, Instant}`), which a grep for the plain import misses.
@@ -89,6 +95,10 @@ The recurring ones and the rule for each:
 | `benilla-app/src/cvars.rs` | `apply_query_overrides` (wasm-only) | follow upstream's `REGISTERED` shape |
 | `benilla-app/src/bindings.rs` | `BindKey::Synth`, the bridge's synthetic latch | keep ours |
 | `benilla-app/src/lib.rs`, `benilla-app/Cargo.toml` | plugin registration, wasm-only deps | keep ours plus upstream's additions |
+| `benilla-app/src/ui_script/lifecycle.rs` | the entry load sliced across frames (`run_pending_entry_load`, `entry_prepare`/`entry_finish`) | keep the split; lift upstream's one-shot body into `entry_finish`, and thread any new load input (the roster, the sound-suppression bracket) through the sliced path too |
+| `benilla-app/src/local_state.rs`, `ui_saved.rs`, `ui_script/addons.rs`, `login/mod.rs` | state files through `local_state::read*`/`write_atomic*` (localStorage on the page) | keep ours; a new `std::fs` read of a state file takes the `local_state` twin |
+| `benilla-protocol/src/{auth,lib}.rs`, `world/{mod,reader,session,writer/mod}.rs`, `tests/auth.rs` | the awaited readers over `transport::Conn` | keep ours; upstream's edits there have been comment-only so far |
+| `AGENTS.md`, `README.md`, `.gitignore` | the fork's map and front page | keep ours; upstream's own map is `docs/METHOD.md` and `docs/MAP.md` |
 
 ## Why a real merge matters
 

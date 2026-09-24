@@ -1,7 +1,5 @@
-//! Client-body + query wire tests (mirrors `src/messages/client.rs`): the golden client-encoded
-//! bodies (auth/char-create/chat/emote/stand-state/movement/teleport-ack) and the creature/name
-//! query request+response roundtrip. Split out of the former `tests/messages.rs` (decision-adjacent
-//! mechanical split — see `tests/common` for the shared fixtures and methodology note).
+//! The client-built bodies (auth, char create, chat, emotes, channels, movement, ping) and the
+//! name and creature query replies.
 
 mod common;
 
@@ -11,10 +9,8 @@ use benilla_protocol::wire::Vector3d;
 use benilla_protocol::ServerPacket;
 use common::hx;
 
-/// The faction tongue every chat send must speak ([`messages::faction_language`]): race → tongue
-/// VERIFIED against the live world DB (`playercreateinfo_spell` — Alliance races 1/3/4/7 learn
-/// spell 668 Language Common, Horde races 2/5/6/8 learn 669 Language Orcish); wire ids VERIFIED
-/// vmangos `SharedDefines.h:256-261` (`LANG_ORCISH = 1`, `LANG_COMMON = 7`).
+/// Alliance races learn Common (spell 668), Horde races Orcish (669) in `playercreateinfo_spell`;
+/// `LANG_COMMON = 7`, `LANG_ORCISH = 1` (vmangos `SharedDefines.h:256-261`).
 #[test]
 fn faction_language_per_race() {
     for race in [1u8, 3, 4, 7] {
@@ -36,9 +32,8 @@ fn faction_language_per_race() {
 #[test]
 fn client_bodies_golden() {
     let proof: [u8; 20] = std::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(7));
-    // The tail is the addon-info block: `342` uncompressed + the zlib stream of the stock twelve
-    // (decision 1497). Byte-identical to a real 1.12.1.5875 client's — the same 130 compressed
-    // bytes as the 2006 retail capture wow-5875-re verified this against.
+    // The tail is the addon block: `u32` 342 uncompressed, then the zlib stream of the stock
+    // twelve, the same 130 bytes a retail 1.12.1 client sends.
     assert_eq!(
         messages::auth_session(
             5875,
@@ -57,13 +52,14 @@ fn client_bodies_golden() {
         )),
         "CMSG_AUTH_SESSION body"
     );
-    // No secure addons: the tail is *absent*, never a zero size (which no real client emits).
+    // No secure addons: the tail is absent, never a zero size, which no real client sends.
     assert_eq!(
         messages::auth_session(5875, "TESTUSER", 0x1122_3344, &proof, &[]),
         hx("f31600000000000054455354555345520044332211070a0d101316191c1f2225282b2e3134373a3d40"),
         "CMSG_AUTH_SESSION body with no secure addons"
     );
-    // Zero-appearance body (the create-if-empty starter): name + [race,class,gender] + 5 zeros + 0.
+    // CMSG_CHAR_CREATE in vmangos's read order (`Packets/Character.cpp:4-19`): name, race, class,
+    // gender, skin, face, hairStyle, hairColor, facialHair, outfit.
     assert_eq!(
         messages::char_create(&messages::CharCreateReq {
             name: "Benilla".into(),
@@ -79,9 +75,6 @@ fn client_bodies_golden() {
         hx("42656e696c6c6100010100000000000000"),
         "CMSG_CHAR_CREATE body (zero appearance)"
     );
-    // Distinct appearance dials (3/4/5/6/7) — a misplaced byte can't pass. Body is name + nul +
-    // race(01) class(01) gender(00) skin(03) face(04) hairStyle(05) hairColor(06) facialHair(07)
-    // outfit(00), matching vmangos's read order (`Packets/Character.cpp:4-19`).
     assert_eq!(
         messages::char_create(&messages::CharCreateReq {
             name: "Benilla".into(),
@@ -102,9 +95,8 @@ fn client_bodies_golden() {
         hx("00000000070000002e74656c65205765737466616c6c00"),
         "CMSG_MESSAGECHAT body"
     );
-    // The three-field vmangos shape (`Misc.cpp:60-65`): textEmote, emoteNum(0), full target
-    // guid. The original two-field body was silently discarded server-side (the guid read ran
-    // off the packet) — /wave did nothing on any client until the director caught it on the ref.
+    // CMSG_TEXT_EMOTE (vmangos `Misc.cpp:60-65`): textEmote, emoteNum (0) and the full target
+    // guid; the server silently drops a body without the guid.
     assert_eq!(
         messages::text_emote(101, 0x2A),
         hx("65000000000000002a00000000000000"),
@@ -115,8 +107,7 @@ fn client_bodies_golden() {
         hx("01000000"),
         "CMSG_STANDSTATECHANGE body: one u32 animState (Misc.cpp:35-38)"
     );
-    // The chat-type consts feeding CMSG_MESSAGECHAT's type field (VERIFIED vmangos
-    // `SharedDefines.h:1194..1202`, the 5875 band).
+    // The CMSG_MESSAGECHAT type values (vmangos `SharedDefines.h:1194..1202`).
     assert_eq!(messages::CHAT_TYPE_SAY, 0x0, "ChatMsg::CHAT_MSG_SAY");
     assert_eq!(messages::CHAT_TYPE_YELL, 0x5, "ChatMsg::CHAT_MSG_YELL");
     assert_eq!(
@@ -125,7 +116,6 @@ fn client_bodies_golden() {
         "ChatMsg::CHAT_MSG_WHISPER"
     );
     assert_eq!(messages::CHAT_TYPE_EMOTE, 0x8, "ChatMsg::CHAT_MSG_EMOTE");
-    // /yell and /emote share `messagechat`'s body shape, only the type field differs.
     assert_eq!(
         messages::messagechat(messages::CHAT_TYPE_YELL, 7, "for the horde"),
         hx("0500000007000000666f722074686520686f72646500"),
@@ -136,9 +126,8 @@ fn client_bodies_golden() {
         hx("080000000700000064616e63657300"),
         "CMSG_MESSAGECHAT (emote) body"
     );
-    // A Horde say speaks Orcish (0x1) in the language field — hardcoded Common here once made
-    // vmangos drop every Horde character's sends at the `KnowsLanguage` gate, dot-commands
-    // included (only an SMSG_NOTIFICATION came back).
+    // A Horde say speaks Orcish (1): vmangos drops a send in an unknown language at its
+    // `KnowsLanguage` gate, dot-commands included, and answers only with SMSG_NOTIFICATION.
     assert_eq!(
         messages::messagechat(
             messages::CHAT_TYPE_SAY,
@@ -148,29 +137,27 @@ fn client_bodies_golden() {
         hx("0000000001000000666f722074686520686f72646500"),
         "CMSG_MESSAGECHAT (say, Orcish) body"
     );
-    // CMSG_MESSAGECHAT (whisper): type + language, then the target name, then the message — both
-    // NUL-terminated C-strings, target *before* message (VERIFIED vmangos
-    // `Server/Packets/Chat.cpp:3-12`, `ChatMessage::ReadFromWorldPacket`).
+    // Whisper: type, language, then the target and the message cstrings, target first (vmangos
+    // `Server/Packets/Chat.cpp:3-12`).
     assert_eq!(
         messages::messagechat_whisper(7, "Bob", "hi there"),
         hx("0600000007000000426f6200686920746865726500"),
         "CMSG_MESSAGECHAT (whisper) body"
     );
-    // The full 8-byte LE guid body, shared by CMSG_PLAYER_LOGIN / CMSG_SET_ACTIVE_MOVER /
-    // CMSG_SET_SELECTION (all read `recv_data >> guid` server-side — a raw uint64, not a packed guid).
+    // CMSG_PLAYER_LOGIN, CMSG_SET_ACTIVE_MOVER and CMSG_SET_SELECTION all read a raw `u64` guid,
+    // not a packed one.
     assert_eq!(
         messages::full_guid(0x1234_5678_9abc_def0),
         hx("f0debc9a78563412"),
         "full guid body"
     );
-    // CMSG_SET_SELECTION opcode value (317 / 0x013D) — verified vmangos `Opcodes_1_12_1.h`.
+    // CMSG_SET_SELECTION is opcode 317 (vmangos `Opcodes_1_12_1.h`).
     assert_eq!(
         messages::opcode::CMSG_SET_SELECTION,
         0x013D,
         "CMSG_SET_SELECTION opcode"
     );
-    // CMSG_INSPECT (276 / 0x0114) — verified vmangos `Opcodes_1_12_1.h`; body is the same raw
-    // 8-byte guid (`WorldPackets::Misc::Inspect`), NOT a packed guid. Decision 0631.
+    // CMSG_INSPECT is opcode 276 (vmangos `Opcodes_1_12_1.h`), its body a raw guid, not packed.
     assert_eq!(
         messages::opcode::CMSG_INSPECT,
         0x0114,
@@ -207,12 +194,9 @@ fn client_bodies_golden() {
     );
 }
 
-/// The full sendable `CMSG_MESSAGECHAT` type set beyond the original four (decision 0288 phase 1) —
-/// every one VERIFIED against vmangos `Handlers/ChatHandler.cpp`'s `HandleChatMessageOpcode` switch
-/// (253-655): PARTY/RAID/GUILD/OFFICER/RAID_LEADER/RAID_WARNING/BATTLEGROUND(+LEADER)/AFK/DND all
-/// share [`messages::messagechat`]'s plain shape (no target field); CHANNEL carries the channel name
-/// the same way WHISPER carries its target (`messages::messagechat_channel`). Bytes hand-computed
-/// from the vmangos layout (`Server/Packets/Chat.cpp:3-12`), independent of the Rust builder.
+/// The other sendable `CMSG_MESSAGECHAT` types (vmangos `Handlers/ChatHandler.cpp:253-655`) use
+/// the plain shape, except CHANNEL, which carries its channel name where WHISPER carries its
+/// target (`Server/Packets/Chat.cpp:3-12`).
 #[test]
 fn messagechat_sendable_types_golden() {
     assert_eq!(messages::CHAT_TYPE_PARTY, 0x1, "ChatMsg::CHAT_MSG_PARTY");
@@ -307,15 +291,11 @@ fn messagechat_sendable_types_golden() {
         hx("1500000007000000646f206e6f74206469737475726200"),
         "CMSG_MESSAGECHAT (dnd) body"
     );
-    // CHANNEL: type + language, then the channel name, then the message — the same
-    // target-before-message shape as whisper (vmangos's `whisperTargetOrChannel` union).
     assert_eq!(
         messages::messagechat_channel(0, "General", "wtb boar livers"),
         hx("0e0000000000000047656e6572616c0077746220626f6172206c697665727300"),
         "CMSG_MESSAGECHAT (channel) body"
     );
-    // The generic builder both named wrappers are thin shells over: `target: None` matches
-    // `messagechat`, `target: Some(_)` matches `messagechat_whisper`/`messagechat_channel`.
     assert_eq!(
         messages::messagechat_kind(messages::CHAT_TYPE_SAY, 7, None, "hi"),
         messages::messagechat(messages::CHAT_TYPE_SAY, 7, "hi"),
@@ -328,38 +308,18 @@ fn messagechat_sendable_types_golden() {
     );
 }
 
-/// **The addon broadcast body** (`SendAddonMessage`, decision 1235) — `CMSG_MESSAGECHAT` on one of
-/// four ordinary lanes with the `LANG_ADDON` sentinel in the language field. Bytes hand-computed
-/// from the layout, independent of the Rust builder.
-///
-/// VERIFIED in `WoW.exe` (5875) — wow-re `system/ui/scratch/addon-chat-law.md` §5, the binding
-/// `0x49f920`: opcode `0x95` (`0x49facf`), u32 chat type (`0x49fad8`), u32 language from
-/// `or ebx,-0x1` (`0x49fab9`) written at `0x49fae1`, then the message CString (`0x49faf0`). There
-/// is **no prefix field and no target field on the wire** — the prefix is glued to the message
-/// with a literal TAB (`_snprintf(dst, 0x800, "%s\t%s", …)` at `0x49f9b3`, format `0x844b5c`, raw
-/// `25 73 09 25 73 00`) and the pair rides as one C-string. The far client splits on the FIRST tab
-/// (`0x49a8d0`).
-///
-/// Corroborated end-to-end against a live vmangos by `examples/addon_chat_probe` (decision 1029):
-/// the sentinel comes back intact and the `0x09` survives (addon chat skips `SanitizeChatMessage`,
-/// `Handlers/ChatHandler.cpp:49`).
+/// `SendAddonMessage` (reference `0x49f920`) sends `CMSG_MESSAGECHAT` on one of four lanes: `u32`
+/// type, `u32` language `LANG_ADDON`, then one cstring of prefix, TAB and message (`0x49f9b3`);
+/// there is no prefix or target field. The receiver splits on the first TAB (`0x49a8d0`).
 #[test]
 fn addon_message_bodies_golden() {
-    // `LANG_ADDON` — the whole discriminator. Not a tongue, and never rewritten by the server.
     assert_eq!(
         messages::LANGUAGE_ADDON,
         0xFFFF_FFFF,
         "LANG_ADDON (vmangos SharedDefines.h:270)"
     );
 
-    // oRA2 `Core.lua:563`, verbatim: SendAddonMessage("CTRA", msg, "RAID") — the corpus's one
-    // live caller of this verb.
-    //   02 00 00 00                          CHAT_MSG_RAID
-    //   ff ff ff ff                          LANG_ADDON
-    //   43 54 52 41                          "CTRA"
-    //   09                                   TAB — the prefix/message separator
-    //   73 74 61 74 75 73                    "status"
-    //   00                                   the message C-string's NUL
+    // oRA2's `SendAddonMessage("CTRA", msg, "RAID")` (`Core.lua:563`).
     assert_eq!(
         messages::messagechat(
             messages::CHAT_TYPE_RAID,
@@ -370,8 +330,7 @@ fn addon_message_bodies_golden() {
         "CMSG_MESSAGECHAT (addon, RAID) body"
     );
 
-    // The other three lanes of the client's four-value whitelist (`0x49fa3f`-`0x49fa4e`). Only the
-    // type byte moves; the sentinel and the tab-composed payload are identical.
+    // The other lanes of the reference's four-lane whitelist (`0x49fa3f`-`0x49fa4e`).
     assert_eq!(
         messages::messagechat(
             messages::CHAT_TYPE_PARTY,
@@ -400,12 +359,8 @@ fn addon_message_bodies_golden() {
         "CMSG_MESSAGECHAT (addon, BATTLEGROUND) body"
     );
 
-    // AceEvent-2.0.lua's own line — `SendAddonMessage("LOOT_OPENED", "", "RAID")`, the call
-    // replicated in 24 of the 218 corpus addons. **The empty message still carries its tab**: the
-    // composition is unconditional, so the payload is `"LOOT_OPENED\t"` and the body ends TAB, NUL.
-    // A builder that "helpfully" dropped a trailing separator would make the far client read
-    // prefix `"LOOT_OPENED"` with no message at all — which is the same thing, but only by
-    // accident of the receiver's no-tab rule; the bytes must still match the reference's.
+    // An empty message still carries its TAB: the reference composes `"%s\t%s"` unconditionally,
+    // so AceEvent-2.0's `SendAddonMessage("LOOT_OPENED", "", "RAID")` ends TAB, NUL.
     assert_eq!(
         messages::messagechat(
             messages::CHAT_TYPE_RAID,
@@ -416,9 +371,6 @@ fn addon_message_bodies_golden() {
         "CMSG_MESSAGECHAT (addon, empty message keeps its TAB) body"
     );
 
-    // An addon line is byte-identical to ordinary speech on the same lane EXCEPT the language
-    // field — the property the receive-side gate rests on, pinned so a future refactor cannot
-    // quietly reintroduce a tongue here.
     let addon = messages::messagechat(messages::CHAT_TYPE_PARTY, messages::LANGUAGE_ADDON, "x\ty");
     let speech =
         messages::messagechat(messages::CHAT_TYPE_PARTY, messages::LANGUAGE_COMMON, "x\ty");
@@ -429,10 +381,8 @@ fn addon_message_bodies_golden() {
     assert_eq!(&speech[4..8], &[0x07, 0x00, 0x00, 0x00], "LANG_COMMON");
 }
 
-/// The channel wire family's CMSG bodies (decision 0288 phase 1) — join/leave/list + the full
-/// moderation set, ALL verified vmangos `Server/Packets/Channel.cpp` (every `ReadFromWorldPacket`
-/// there is a channel-name cstring, optionally followed by a second cstring: a password or a target
-/// player name). Bytes hand-computed from that layout, independent of the Rust builder.
+/// The channel CMSG bodies: a channel-name cstring, then optionally a password or target-name
+/// cstring (vmangos `Server/Packets/Channel.cpp`).
 #[test]
 fn channel_client_bodies_golden() {
     assert_eq!(
@@ -521,8 +471,7 @@ fn channel_client_bodies_golden() {
         "CMSG_CHANNEL_MODERATE body"
     );
 
-    // Every opcode in the family (VERIFIED vmangos `Server/Protocol/Opcodes_1_12_1.h:154-171`,
-    // decimal 151-168).
+    // The family's opcodes, 151 to 168 (vmangos `Server/Protocol/Opcodes_1_12_1.h:154-171`).
     assert_eq!(messages::opcode::CMSG_JOIN_CHANNEL, 0x0097);
     assert_eq!(messages::opcode::CMSG_LEAVE_CHANNEL, 0x0098);
     assert_eq!(messages::opcode::SMSG_CHANNEL_NOTIFY, 0x0099);
@@ -543,11 +492,9 @@ fn channel_client_bodies_golden() {
     assert_eq!(messages::opcode::CMSG_CHANNEL_MODERATE, 0x00A8);
 }
 
-/// The remaining decision-0288 phase-1 small bodies: `CMSG_CHAT_IGNORED` (reuses
-/// [`messages::full_guid`] — VERIFIED vmangos `WorldPackets::Misc::ChatIgnored::
-/// ReadFromWorldPacket`, `Server/Packets/Misc.cpp:127-130`, a raw un-packed guid), `CMSG_PLAYED_TIME`
-/// (empty), and `MSG_RANDOM_ROLL`'s client→server request shape (VERIFIED vmangos
-/// `WorldPackets::Group::RandomRoll::ReadFromWorldPacket`, `Server/Packets/Group.cpp:39-43`).
+/// `CMSG_CHAT_IGNORED` is a raw guid (vmangos `Server/Packets/Misc.cpp:127-130`),
+/// `CMSG_PLAYED_TIME` is empty, and the `MSG_RANDOM_ROLL` request is `u32` min and max
+/// (`Server/Packets/Group.cpp:39-43`).
 #[test]
 fn chat_ignored_played_time_random_roll_golden() {
     assert_eq!(
@@ -575,15 +522,22 @@ fn chat_ignored_played_time_random_roll_golden() {
 
 #[test]
 fn name_and_creature_query_roundtrip() {
-    // CMSG_CREATURE_QUERY body: entry u32 + full 8-byte guid (vmangos QueryCreature::ReadFromWorldPacket).
+    // CMSG_CREATURE_QUERY: `u32` entry and the full guid (vmangos `QueryCreature`).
     assert_eq!(
         messages::creature_query(69, 0x1234_5678_9abc_def0),
         hx("45000000f0debc9a78563412"),
         "CMSG_CREATURE_QUERY body"
     );
 
-    // SMSG_NAME_QUERY_RESPONSE: guid, name, realm (empty), race/gender/class u32s (vmangos
-    // NameQueryResponse::AppendBodyTo, 1.12.1 includes the realm string).
+    // CMSG_NAME_QUERY: the full guid (vmangos `QueryPlayerName`), built by `full_guid`.
+    assert_eq!(
+        messages::full_guid(7),
+        hx("0700000000000000"),
+        "CMSG_NAME_QUERY body"
+    );
+
+    // SMSG_NAME_QUERY_RESPONSE (vmangos `NameQueryResponse::AppendBodyTo`): guid, name, an empty
+    // realm cstring, then race, gender and class as `u32`.
     let body = hx("070000000000000042656e696c6c610000010000000000000001000000");
     match messages::parse_server(messages::opcode::SMSG_NAME_QUERY_RESPONSE, &body).unwrap() {
         ServerPacket::NameQueryResponse {
@@ -600,14 +554,8 @@ fn name_and_creature_query_roundtrip() {
         _ => panic!("name query response"),
     }
 
-    // SMSG_CREATURE_QUERY_RESPONSE hit: entry, name, 3 empty names, subname, the 7-u32 tail
-    // (type_flags, TYPE — the TAB critter filter's input — FAMILY, RANK, unk, pet_spell_id,
-    // display_id), 2 u8 tail. Family and rank are given DIFFERENT non-zero values on purpose:
-    // they are adjacent dwords, so a one-column slip between them reads as plausible data and
-    // shows up only as a pet whose level line names the wrong beast (decision 1062). `display_id`
-    // is non-zero for the same reason (decision 1676): it sits behind two alignment-only dwords
-    // that were zeros here, so a slip into either read 0 — indistinguishable from "no model" —
-    // and the stable window would have drawn an empty booth for every pet.
+    // A hit. Family, rank and display id get distinct non-zero values so a one-dword slip between
+    // adjacent fields cannot read as plausible data.
     let body = hx(concat!(
         "45000000",
         "596f756e6720576f6c6600", // "Young Wolf"
@@ -618,7 +566,7 @@ fn name_and_creature_query_roundtrip() {
         "01000000",               // pet_family = 1 (Wolf)
         "02000000",               // rank = 2 (rare elite)
         "0000000000000000",       // unk, pet_spell_list_id
-        "15020000",               // display_id = 533 — the model a stabled pet is drawn from
+        "15020000",               // display_id = 533, the model a stabled pet is drawn from
         "0101"                    // civilian, racial_leader
     ));
     match messages::parse_server(messages::opcode::SMSG_CREATURE_QUERY_RESPONSE, &body).unwrap() {
@@ -653,10 +601,8 @@ fn name_and_creature_query_roundtrip() {
     }
 }
 
-/// The event layer's subname law: an EMPTY wire subname is NO subname (vmangos sends "" for
-/// creatures without one; the real client renders no line for it — the nameplate builder's
-/// verified shape, `0x608f50`). `Some("")` reaching a consumer painted an empty tooltip line
-/// whose zero-extent chain slot spilled every later line below the plate.
+/// An empty wire subname is no subname: vmangos sends "" for a creature without one, and the
+/// reference renders no line for it (`0x608f50`).
 #[test]
 fn creature_query_empty_subname_decodes_to_none() {
     let body = |subname_hex: &str| {
@@ -684,7 +630,6 @@ fn creature_query_empty_subname_decodes_to_none() {
         }
         other => panic!("expected one CreatureName event, got {other:?}"),
     }
-    // Control: a real subname survives verbatim.
     match decode(parse(&body("5465737400"))).as_slice() {
         [SessionEvent::CreatureName { subname, .. }] => {
             assert_eq!(subname.as_deref(), Some("Test"));
@@ -693,10 +638,8 @@ fn creature_query_empty_subname_decodes_to_none() {
     }
 }
 
-/// The keepalive pair, byte-exact both ways: the `CMSG_PING` body is `{u32 sequence, u32 lastRtt}`
-/// LE (VERIFIED wow-re net W1 `SendPing 0x537e10` + vmangos `_HandlePing`'s read order), and the
-/// `SMSG_PONG` echo (`{u32 sequence}`) parses and decodes to the event the io layer times against
-/// its ping clock. A new wire body never lands without a golden (method).
+/// `CMSG_PING` is `u32` sequence then `u32` last RTT (reference `0x537e10`, vmangos
+/// `_HandlePing`); `SMSG_PONG` echoes the sequence.
 #[test]
 fn ping_body_golden_and_pong_roundtrip() {
     assert_eq!(
@@ -724,13 +667,9 @@ fn ping_body_golden_and_pong_roundtrip() {
     }
 }
 
-/// **`SMSG_ADDON_INFO`, against the retail capture's own bytes** (decision 2175).
-///
-/// The reply carries no count and no names: the client re-walks the `## Secure:` list it sent and
-/// reads one record per addon. The 2006 capture is the minimal form — 96 bytes, 12 x
-/// `{status = 2, infoProvided = 1, keyProvided = 0, revision = 0u32, urlProvided = 0}` — and
-/// `status = 2` is what sets `[rec+0x29] = 1` (`0x51db84`) and drops the addon from the Lua index
-/// space (wow-re `system/net/scratch/cmsg-auth-session-addon-block.md` §6).
+/// `SMSG_ADDON_INFO` has no count or names: the client reads one record per addon it sent. A
+/// retail capture is 12 records of `{status 2, info 1, key 0, u32 revision 0, url 0}`; status 2
+/// hides the addon from the Lua index (reference `0x51db84`).
 #[test]
 fn the_addon_info_reply_pairs_its_statuses_back_against_what_we_sent() {
     let capture: Vec<u8> = std::iter::repeat_n(hx("0201000000000000"), 12)
@@ -743,8 +682,7 @@ fn the_addon_info_reply_pairs_its_statuses_back_against_what_we_sent() {
     };
     assert_eq!(statuses, vec![2u8; 12]);
 
-    // Paired back against the block we send, every stock addon is hidden from the index space —
-    // which is why the reference's AddOns list shows the player's addons and none of Blizzard's.
+    // Every stock addon comes back hidden, so the reference's AddOns list shows none of Blizzard's.
     let hidden = messages::hidden_from_reply(&statuses, &messages::STOCK_SECURE_ADDONS);
     assert_eq!(hidden.len(), 12);
     assert!(
@@ -752,8 +690,8 @@ fn the_addon_info_reply_pairs_its_statuses_back_against_what_we_sent() {
         "{hidden:?}"
     );
 
-    // A record that says it carries a key and a url is 8 + 256 + 256 bytes, and `status = 1`
-    // leaves the addon VISIBLE — the exclusion is `2` alone, not "the server said something".
+    // A record with a key and a url is 8 + 256 + 256 bytes; status 1 leaves the addon visible,
+    // only status 2 hides it.
     let mut fat = vec![1u8, 1, 1];
     fat.extend(std::iter::repeat_n(0xABu8, 256)); // modulus
     fat.extend([0u8; 4]); // revision
@@ -766,8 +704,6 @@ fn the_addon_info_reply_pairs_its_statuses_back_against_what_we_sent() {
     assert_eq!(statuses, vec![1u8], "the fat record parsed whole");
     assert!(messages::hidden_from_reply(&statuses, &messages::STOCK_SECURE_ADDONS).is_empty());
 
-    // A truncated record contributes nothing, and the whole ones before it survive — the pairing
-    // against what we sent cannot slip.
     let mut short = hx("0201000000000000").to_vec();
     short.extend([2u8, 1]); // a second record that stops mid-way
     let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &short).unwrap();

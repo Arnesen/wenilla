@@ -272,7 +272,7 @@ fn drive_live_fps(
                 // settle window on top — a run still worldless this far past it is stranded on a
                 // glue screen (dead server, refused login the marker arms didn't catch) and every
                 // second more is the 1371 sitting's dead wall-clock again. `FATAL` is the marker
-                // leg.sh keys on.
+                // a leg runner keys on.
                 if time.elapsed_secs() > probe.at + BOOT_DEADLINE_SECS {
                     error!(
                         "live-fps: FATAL — still not in world {:.0}s past the probe delay; a measurement run with no world is dead. exiting",

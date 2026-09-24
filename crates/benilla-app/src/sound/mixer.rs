@@ -2,7 +2,7 @@
 //!
 //! The real client delegates the entire audible mix to FMOD 3.x — spatialization/pan, min/max
 //! distance rolloff, doppler, reverb, decode, streaming — and owns only the parameters it feeds
-//! (wow-re `system/sound`, T3, pinned by the import-table byte-fact: no `FSOUND_SetPan`, no
+//! (pinned by the import-table byte-fact: no `FSOUND_SetPan`, no
 //! `FSOUND_PlaySound`). This module is that delegation seam in benilla: everything above it (the
 //! kit player, the schedulers) computes WoW's owned parameter math; everything below is the
 //! backend's. Keep this surface shaped like the FMOD import contract — play/stop, per-channel
@@ -101,7 +101,7 @@ pub(crate) struct StreamingSoundHandle<Error>(StaticSoundHandle, std::marker::Ph
 
 #[cfg(target_arch = "wasm32")]
 impl<Error> StreamingSoundHandle<Error> {
-    /// The four [`StaticSoundHandle`] methods this module and its callers actually use — the
+    /// The [`StaticSoundHandle`] methods this module and its callers actually use — the
     /// full control surface (`pause`/`seek_to`/`set_loop_region`/…) is identical between kira's
     /// static and streaming handles (both expand the same `handle_param_setters!` macro), so
     /// forwarding grows here the moment a caller needs more.
@@ -117,12 +117,18 @@ impl<Error> StreamingSoundHandle<Error> {
     pub(crate) fn stop(&mut self, tween: Tween) {
         self.0.stop(tween);
     }
+    pub(crate) fn pause(&mut self, tween: Tween) {
+        self.0.pause(tween);
+    }
+    pub(crate) fn resume(&mut self, tween: Tween) {
+        self.0.resume(tween);
+    }
 }
 
 /// An immediate (zero-duration) parameter change. kira requires a tween on every setter; the
 /// WoW-side ramps (volume rates, crossfades) are our own math updated per frame, so the backend
 /// must not add smoothing of its own on top. Use this for a change that is genuinely a *step* —
-/// a reverb preset switch (verified instant, `benilla-pins.md` A2), an initial value. For the
+/// a reverb preset switch (instant, `0x45a720`), an initial value. For the
 /// **per-frame volume feed** use [`glide`]: a step there is an audible click, not fidelity.
 pub(crate) fn snap() -> Tween {
     Tween {
@@ -183,7 +189,7 @@ pub(crate) fn fade(ms: u64) -> Tween {
 }
 
 /// Linear amplitude `[0,1]` → the backend's decibel volume. WoW's owned pipeline produces linear
-/// amplitudes (the category mix `cat·v·atten`, wow-re `0x7a5dc0`); FMOD consumed them as 0..255
+/// amplitudes (the category mix `cat·v·atten`, `0x7a5dc0`); FMOD consumed them as 0..255
 /// levels. kira consumes dB, so the seam converts: `20·log10(amp)`, with kira's `SILENCE` floor
 /// (−60 dB) for amp ≤ 10⁻³ (which is below one 1/255 FMOD step anyway).
 pub(crate) fn amp_to_db(amp: f32) -> Decibels {
@@ -196,8 +202,8 @@ pub(crate) fn amp_to_db(amp: f32) -> Decibels {
 
 /// The one open audio device + its listener. `Mixer` methods are the only place kira's manager is
 /// touched; everything above computes parameters. There is deliberately **no master filter**:
-/// the real client applies no DSP beyond FMOD's reverb (53 FSOUND imports, zero `FSOUND_FX_*` —
-/// wow-re `benilla-pins.md` B6); underwater is the reverb preset + the ambience swap, both
+/// the real client applies no DSP beyond FMOD's reverb (53 FSOUND imports, zero `FSOUND_FX_*` in
+/// the import table); underwater is the reverb preset + the ambience swap, both
 /// upstream of this seam.
 pub(crate) struct Mixer {
     manager: AudioManager<MixBackend>,
@@ -322,9 +328,9 @@ impl Mixer {
 
     /// Apply a zone reverb preset — the seam mirror of `FSOUND_Reverb_SetProperties` (the real
     /// client marshals the `SoundProviderPreferences` row into EAX listener properties and hands
-    /// them to FMOD; wow-re `0x45a790`/`0x7a5fa0`). `None` = no preset → wet to silence (the
-    /// client's silenced-GENERIC default, `0x45a830`). The switch is **instant** — verified, the
-    /// client applies the new properties with no ramp (`benilla-pins.md` A2).
+    /// them to FMOD; `0x45a790`/`0x7a5fa0`). `None` = no preset → wet to silence (the
+    /// client's silenced-GENERIC default, `0x45a830`). The switch is **instant** — the
+    /// client applies the new properties with no ramp (`0x45a720`).
     ///
     /// The EAX→Freeverb projection is this backend's own lossy mapping (decision 0078):
     /// - `feedback = 10^(−0.108 / DecayTime)`, from Freeverb's RT60 relation at its ~36 ms mean

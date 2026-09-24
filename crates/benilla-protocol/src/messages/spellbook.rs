@@ -1,28 +1,12 @@
-//! Spell-book and cooldown messages — what the character knows, and when they may use it again.
-//! Split out of `messages/spells.rs` (decision 0640).
-//!
-//! Book and cooldowns share a file because they share a **packet**: `SMSG_INITIAL_SPELLS` delivers
-//! the known-spell list and the active-cooldown list in one body, so [`read_initial_spells`] cannot
-//! be separated from [`SpellCooldown`] at the wire. The book then grows through
-//! `SMSG_LEARNED_SPELL` / `SMSG_SUPERCEDED_SPELL` (a trainer purchase, a quest reward, a level-up
-//! rank gain — decision 0237), and the four cooldown packets adjust it from the server side.
-//!
-//! Worth knowing before reaching for these: a **normal cast's cooldown is CLIENT-tracked**. The
-//! server only sends cooldowns for school lockouts, pets, item procs and GM resets — so these
-//! packets are the exceptions, not the mechanism. Layouts VERIFIED against vmangos and, for the four
-//! cooldown packets, against the real client's own handlers (wow-re `wave-handlers.md`).
-//!
-//! This family is inbound only; the outbound half of "what I know" is
-//! `world::writer::{skills, progression}`.
+//! Spell-book and cooldown messages, all inbound. A normal cast's cooldown is tracked by the
+//! client; the server sends cooldowns only for school lockouts, pets, item procs and GM resets.
 
 use std::io::{self, Read};
 
 use crate::wire::{capacity_hint, read_u16_le, read_u32_le, read_u64_le, read_u8};
 
-/// One active cooldown from `SMSG_INITIAL_SPELLS`' second list (vmangos `SendInitialSpells`):
-/// `u16 spell, u16 castItem, u16 category, u32 spellCdMs, u32 categoryCdMs`. A *permanent*
-/// cooldown (a one-per-fight ability the server re-arms) is `spell_cd_ms == 1` with the category
-/// word's top bit set.
+/// One active cooldown from `SMSG_INITIAL_SPELLS` (vmangos `SendInitialSpells`). A permanent one,
+/// re-armed by the server, is `spell_cd_ms == 1` with the category word's top bit set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpellCooldown {
     pub spell_id: u16,
@@ -32,14 +16,12 @@ pub struct SpellCooldown {
     pub category_cd_ms: u32,
 }
 
-/// Read `SMSG_INITIAL_SPELLS` (vmangos `Player::SendInitialSpells`): `u8 0; u16 n; n×(u16 spellId,
-/// u16 0); u16 m; m×`[`SpellCooldown`]. The per-spell second word is "not slot id" (vmangos's own
-/// note) and always 0 — skipped.
+/// Read `SMSG_INITIAL_SPELLS` (vmangos `Player::SendInitialSpells`): `u8 0`, a `u16` count of
+/// `{u16 spellId, u16 0}`, then a `u16` count of [`SpellCooldown`]s.
 pub(super) fn read_initial_spells(r: &mut impl Read) -> io::Result<(Vec<u16>, Vec<SpellCooldown>)> {
     let _ = read_u8(r)?;
     let n = read_u16_le(r)?;
-    // No protocol bound on either list (`Player::SendInitialSpells` walks the spell map); a
-    // 1.12 spellbook is a few hundred entries, so 1024 is generous.
+    // No protocol bound on either list; a 1.12 spellbook holds a few hundred spells.
     let mut spells = Vec::with_capacity(capacity_hint(n, 1024));
     for _ in 0..n {
         spells.push(read_u16_le(r)?);
@@ -59,40 +41,28 @@ pub(super) fn read_initial_spells(r: &mut impl Read) -> io::Result<(Vec<u16>, Ve
     Ok((spells, cooldowns))
 }
 
-/// Read `SMSG_LEARNED_SPELL` (vmangos `WorldPackets::Spell::LearnedSpell::AppendBodyTo`,
-/// `Server/Packets/Spell.cpp:175-179`): `u16 spellId, u16 actionBarSlot`. The slot is "not used on
-/// client" (vmangos's own note) and dropped. This is the one wire that grows the spell book *after*
-/// login — a trainer purchase, a quest reward, a level-up rank gain (decision 0237); benilla's book
-/// was otherwise login-only ([`read_initial_spells`]).
+/// Read `SMSG_LEARNED_SPELL` (vmangos `Spell.cpp:175-179`): `u16 spellId`, then an action-bar slot
+/// the client does not use. The one message that adds to the book after login.
 pub(super) fn read_learned_spell(r: &mut impl Read) -> io::Result<u16> {
     let spell_id = read_u16_le(r)?;
     let _action_bar_slot = read_u16_le(r)?;
     Ok(spell_id)
 }
 
-/// Read `SMSG_REMOVED_SPELL` (vmangos `RemovedSpell::AppendBodyTo`, `Server/Packets/Spell.cpp:181`):
-/// a bare `u16 spellId`, and **no action-bar slot** — unlike its `SMSG_LEARNED_SPELL` sibling above,
-/// which pads one on. The spell is gone from the book; what happens to a bar button still pointing
-/// at it is a separate law (decision 1584).
+/// Read `SMSG_REMOVED_SPELL` (vmangos `Spell.cpp:181`): a bare `u16 spellId`, no action-bar slot.
 pub(super) fn read_removed_spell(r: &mut impl Read) -> io::Result<u16> {
     read_u16_le(r)
 }
 
-/// Read `SMSG_SUPERCEDED_SPELL` (vmangos `SupercededSpell::AppendBodyTo`, `Spell.cpp:169-173`): `u16
-/// oldSpellId, u16 newSpellId` — a rank-up replaces the old spell with the new one in both the book
-/// and the action bar (decision 0237).
+/// Read `SMSG_SUPERCEDED_SPELL` (vmangos `Spell.cpp:169-173`): `(oldSpellId, newSpellId)`; a
+/// rank-up replaces the old spell in both the book and the action bar.
 pub(super) fn read_superceded_spell(r: &mut impl Read) -> io::Result<(u16, u16)> {
     Ok((read_u16_le(r)?, read_u16_le(r)?))
 }
 
-/// Read `SMSG_SPELL_COOLDOWN` → `(caster, Vec<(spell_id, cooldown_ms)>)` (VERIFIED both sides:
-/// vmangos `WorldPackets::Spell::SpellCooldown::AppendBodyTo`, `Server/Packets/Spell.cpp:142-151` —
-/// a raw `u64` guid then pairs to end-of-body, NO flags byte in 1.12 (vmangos's own commented-out
-/// `uint8`); the client handler `0x6e9460` reads exactly guid + `(GetInt32, GetUInt32)*` until the
-/// stream runs dry, wow-re `wave-handlers.md`). `cooldown_ms == 0` means "use the spell's own
-/// `Spell.dbc` RecoveryTime/CategoryRecoveryTime" (the handler's `cooldownMs!=0` fork); nonzero is
-/// a server-set duration (the school-lockout path sends these). vmangos sends this for lockouts
-/// (`Player::LockOutSpells`) and pet cooldowns — a normal cast's cooldown is CLIENT-tracked.
+/// Read `SMSG_SPELL_COOLDOWN` (vmangos `Spell.cpp:142-151`, client `0x6e9460`): a `u64` caster,
+/// then `(spell, ms)` pairs to the end, with no flags byte in 1.12. `ms == 0` means the spell's own
+/// `Spell.dbc` recovery times. Sent for school lockouts and pet cooldowns.
 pub(super) fn read_spell_cooldown(r: &mut &[u8]) -> io::Result<(u64, Vec<(u32, u32)>)> {
     let caster = read_u64_le(r)?;
     let mut cooldowns = Vec::new();
@@ -104,29 +74,21 @@ pub(super) fn read_spell_cooldown(r: &mut &[u8]) -> io::Result<(u64, Vec<(u32, u
     Ok((caster, cooldowns))
 }
 
-/// Read `SMSG_ITEM_COOLDOWN` → `(item_guid, spell_id)` (VERIFIED both sides: vmangos
-/// `WorldPackets::Item::ItemCooldown::AppendBodyTo`, `Server/Packets/Item.cpp:229-233` — raw `u64`
-/// item guid + `u32` spell id; the client handler `0x6e95d0` resolves the item object and inserts a
-/// **fixed 30 000 ms** cooldown on it, wow-re `wave-handlers.md` — the 30 s is the client's
-/// hardcode, nothing more rides the wire). Sent when a proc puts an equipped on-use item on its
-/// shared 30 s use-cooldown (vmangos `Player.cpp:19370-19383`).
+/// Read `SMSG_ITEM_COOLDOWN` (vmangos `Item.cpp:229-233`): `(item_guid, spell_id)`. The client
+/// (`0x6e95d0`) gives the item a hardcoded 30 s cooldown; no duration is on the wire.
 pub(super) fn read_item_cooldown(r: &mut impl Read) -> io::Result<(u64, u32)> {
     Ok((read_u64_le(r)?, read_u32_le(r)?))
 }
 
-/// Read `SMSG_COOLDOWN_EVENT` / `SMSG_CLEAR_COOLDOWN` → `(spell_id, caster)` — the two share one
-/// body shape (VERIFIED both sides: vmangos `CooldownEvent`/`ClearCooldown::AppendBodyTo`,
-/// `Server/Packets/Spell.cpp:152-167` — `u32` spell id THEN raw `u64` guid; the client handler
-/// `0x6e9670` reads GetInt32 then GetGuid, wow-re `wave-handlers.md`). EVENT **starts** an on-hold
-/// (`SPELL_ATTR_COOLDOWN_ON_EVENT`) record's parked timers now; CLEAR removes the record outright.
+/// Read `SMSG_COOLDOWN_EVENT` or `SMSG_CLEAR_COOLDOWN` (vmangos `Spell.cpp:152-167`, client
+/// `0x6e9670`): the `u32` spell id first, then the `u64` caster. EVENT starts the timers of an
+/// on-hold (`SPELL_ATTR_COOLDOWN_ON_EVENT`) cooldown; CLEAR removes the cooldown.
 pub(super) fn read_cooldown_event(r: &mut impl Read) -> io::Result<(u32, u64)> {
     Ok((read_u32_le(r)?, read_u64_le(r)?))
 }
 
-/// Read `SMSG_COOLDOWN_CHEAT` → the target guid (VERIFIED both sides: vmangos
-/// `CooldownCheat::AppendBodyTo` — one raw `u64`; the client handler `0x6e9730` wipes the whole
-/// self/pet cooldown list when the guid matches, wow-re `wave-handlers.md`). The GM `.cooldown`
-/// reset.
+/// Read `SMSG_COOLDOWN_CHEAT`, the GM `.cooldown` reset. The client (`0x6e9730`) clears every
+/// cooldown of the self or pet the guid names.
 pub(super) fn read_cooldown_cheat(r: &mut impl Read) -> io::Result<u64> {
     read_u64_le(r)
 }
@@ -135,10 +97,6 @@ pub(super) fn read_cooldown_cheat(r: &mut impl Read) -> io::Result<u64> {
 mod tests {
     use super::*;
 
-    /// The three incremental book packets, side by side, because their bodies differ in exactly the
-    /// way that bites: LEARNED pads an unused action-bar slot after the id, REMOVED does not pad
-    /// anything, and SUPERCEDED carries a pair. Reading REMOVED with LEARNED's reader would work by
-    /// accident on a 4-byte body and starve on the real 2-byte one.
     #[test]
     fn the_three_book_deltas_have_three_different_bodies() {
         // SMSG_LEARNED_SPELL: u16 spell + u16 slot (dropped).
@@ -158,10 +116,7 @@ mod tests {
 
     #[test]
     fn cooldown_bodies_golden() {
-        // SMSG_SPELL_COOLDOWN: raw u64 guid, then (u32 spell, u32 ms) pairs to end-of-body — NO
-        // flags byte in 1.12 (vmangos's own commented-out uint8; the client handler reads the
-        // pairs straight after the guid). Guid 0x10, then {133, 0} ("use Spell.dbc") and
-        // {5384, 30000}.
+        // SMSG_SPELL_COOLDOWN: guid, then (spell, ms) pairs, no flags byte; {133, 0} = Spell.dbc.
         let body: Vec<u8> = [
             0x10u64.to_le_bytes().to_vec(),
             133u32.to_le_bytes().to_vec(),
@@ -177,8 +132,7 @@ mod tests {
         );
         assert!(r.is_empty());
 
-        // SMSG_ITEM_COOLDOWN: raw u64 item guid + u32 spell id — nothing else (the 30 s is the
-        // client's hardcode).
+        // SMSG_ITEM_COOLDOWN: item guid + spell id, nothing else.
         let body: Vec<u8> = [
             0x40u64.to_le_bytes().to_vec(),
             439u32.to_le_bytes().to_vec(),
@@ -187,8 +141,7 @@ mod tests {
         let mut r = &body[..];
         assert_eq!(read_item_cooldown(&mut r).unwrap(), (0x40, 439));
 
-        // SMSG_COOLDOWN_EVENT / SMSG_CLEAR_COOLDOWN: u32 spell id FIRST, then the raw u64 guid
-        // (vmangos `CooldownEvent::AppendBodyTo`; the client reads GetInt32 then GetGuid).
+        // SMSG_COOLDOWN_EVENT / SMSG_CLEAR_COOLDOWN: spell id first, then the guid.
         let body: Vec<u8> = [
             1784u32.to_le_bytes().to_vec(),
             0x22u64.to_le_bytes().to_vec(),

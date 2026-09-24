@@ -114,7 +114,7 @@ pub(super) fn drain_pet_actions(
         )
         .collect();
     for (slot, entry) in presses {
-        // The spell arm's early exit (wow-re §10.1, `0x4bd240`–`0x4bd2ad`): a press on a spell the
+        // The spell arm's early exit (`0x4bd240`–`0x4bd2ad`): a press on a spell the
         // pet is already running takes the aura OFF and **returns** — `CMSG_PET_ACTION` never
         // leaves, so it is a cancel, not a re-cast. Nothing is latched locally either: the icon
         // goes back when the pet's `UNIT_FIELD_AURA` says the aura is gone, which is the honest
@@ -172,17 +172,13 @@ pub(super) fn drain_pet_actions(
         });
     }
     for slot in toggles {
-        let Some(entry) = slot_entry(&bar, slot).filter(|e| e.autocast_allowed()) else {
+        let Some(flipped) = toggle_slot_autocast(&mut bar, slot) else {
             continue;
         };
-        // The client flips bit 30 in the slot word IN PLACE and sends the whole new word — it is
-        // not a "set autocast to X for spell Y" verb (wow-re §10.2, `0x4bcbff`/`0x4bcc17`). The
-        // server reads the direction back out of the type byte it arrives in.
-        let flipped = entry.with_autocast(!entry.autocast_on());
         debug!(
             "ui_pet: autocast {} for spell {} (slot {slot})",
             flipped.autocast_on(),
-            entry.action()
+            flipped.action()
         );
         let _ = commands.0.send(ClientCommand::PetSetAction {
             pet_guid,
@@ -191,9 +187,6 @@ pub(super) fn drain_pet_actions(
             // `slot_entry` already rejected 0.
             entries: vec![(slot - 1, flipped.packed)],
         });
-        if let Some(e) = slot_entry_mut(&mut bar, slot) {
-            *e = flipped;
-        }
     }
     for _ in 0..stops {
         if stop_pet_attack(&mut bar, &commands) {
@@ -216,6 +209,38 @@ pub(super) fn drain_pet_actions(
             .0
             .send(ClientCommand::PetSetAction { pet_guid, entries });
     }
+}
+
+/// `TogglePetAutocast`'s local half, `0x4bcbb0` — flip the slot's autocast bit and write it back,
+/// returning the new word for the send, or `None` when the reference no-ops silently (a slot out
+/// of range, or a word that is not autocast-ALLOWED, bit 31 — `0x4bcbf1`).
+///
+/// The client flips bit 30 in the slot word IN PLACE and sends the whole new word — it is not a
+/// "set autocast to X for spell Y" verb (`0x4bcbff`/`0x4bcc17`). The server reads the
+/// direction back out of the type byte it arrives in.
+///
+/// Then `0x4bcc19` calls `0x4bd190(&bar[slot])` — the propagation into the **spellbook**: for a
+/// spell-type slot (type 1), scan the raw pet-spell array **backwards** for the entry equal to the
+/// slot under `& 0x3FFFFFFF` and copy the slot's FULL word into it. The pet book renders from that
+/// array, so without the copy a bar toggle left the Pet tab's ring stale until the next
+/// `SMSG_PET_SPELLS`. The book→bar direction is `ui_pet_book::flip_autocast` (decision 1032).
+pub(super) fn toggle_slot_autocast(bar: &mut PetBar, slot: u32) -> Option<PetActionEntry> {
+    let entry = slot_entry(bar, slot).filter(|e| e.autocast_allowed())?;
+    let flipped = entry.with_autocast(!entry.autocast_on());
+    *slot_entry_mut(bar, slot)? = flipped;
+    if flipped.kind() == 1 {
+        let key = flipped.packed & 0x3FFF_FFFF;
+        if let Some(book) = bar
+            .spells
+            .spells
+            .iter_mut()
+            .rev()
+            .find(|w| w.packed & 0x3FFF_FFFF == key)
+        {
+            *book = flipped;
+        }
+    }
+    Some(flipped)
 }
 
 /// `PetStopAttack`'s **core**, `0x4bd650` — call the pet off, and the only thing besides a new pet
@@ -384,7 +409,7 @@ pub(super) fn commit_press(
 ///   command, which is also the proof that bit 27 is server-owned: no client path writes it.
 ///
 /// **Only STAY and FOLLOW reach the command write.** The binary's type-7 arm gates it on
-/// `action <= 1` (§10.1): DISMISS (3) falls straight through, and ATTACK (2) leaves down the
+/// `action <= 1` (`0x4bd3b1`): DISMISS (3) falls straight through, and ATTACK (2) leaves down the
 /// validation chain that ends at `[0xb714b0] = 1` (`0x4bd42e`) — the attack latch, never the
 /// command byte. The distinction is the difference between a mode and an order: Stay and Follow
 /// are what the pet is *doing until told otherwise*, and they stay lit because `isActive`'s state

@@ -57,6 +57,7 @@ fn wolf() -> UnitState {
 /// resolves, and its rect IS the screen.
 #[test]
 fn uiparent_is_a_real_full_screen_frame() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[]);
     s.resolve();
     let ok: bool = s
@@ -77,6 +78,7 @@ fn uiparent_is_a_real_full_screen_frame() {
 /// kept its load-time position instead.
 #[test]
 fn world_hover_seats_the_default_corner() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[]);
     s.set_unit("mouseover", Some(wolf()));
     assert!(s.world_tooltip_unit("mouseover"), "the hover shows");
@@ -99,6 +101,7 @@ fn world_hover_seats_the_default_corner() {
 /// world mouseover keeps the ramp; this is the unit *frame*.
 #[test]
 fn unit_frame_hover_takes_the_default_corner_and_drops_on_leave() {
+    benilla_formats::wow_data_or_skip!();
     // The kit + popups precede the unit frames (their DropDown children's OnLoad), app order.
     let mut s = harness(&[
         // The stock unit frames resolve GlobalStrings at LOAD (`CombatFeedback.lua` l.7-17,
@@ -214,6 +217,7 @@ fn a_pending_name_hover_titles_the_chains_unknownobject() {
 /// (the sibling test above).
 #[test]
 fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[
         // The stock unit frames resolve GlobalStrings at LOAD (`CombatFeedback.lua` l.7-17,
         // `UnitFrame.lua` l.1-6) and `UnitFrame_OnEnter` passes `PARTY_OPTIONS_LABEL` /
@@ -287,6 +291,7 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
 /// table so the pass means what it says.
 #[test]
 fn action_button_hover_takes_the_default_corner() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness(&[
         "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
@@ -328,6 +333,7 @@ fn action_button_hover_takes_the_default_corner() {
 /// (`script/tooltip/verbs.rs`).
 #[test]
 fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[
         "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
@@ -408,6 +414,7 @@ fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
 /// un-collapsed with it.
 #[test]
 fn ubertooltips_off_seats_stance_plates_beside_the_button() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[
         "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
@@ -461,6 +468,7 @@ fn ubertooltips_off_seats_stance_plates_beside_the_button() {
 /// BOTTOMLEFT.
 #[test]
 fn buff_hover_hangs_below_left_of_the_button() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[
         "Interface\\FrameXML\\Cooldown.xml",
         "Interface\\FrameXML\\ActionButtonTemplate.xml",
@@ -498,7 +506,7 @@ fn buff_hover_hangs_below_left_of_the_button() {
     s.resolve();
     // Through the template's real `<OnEnter>` — the reference keeps the SetOwner/SetPlayerBuff pair
     // inline there rather than in a named function, so the handler body itself is what this drives.
-    // `this` is set by hand because the engine sets it only when it *fires* a handler (RF-0025);
+    // `this` is set by hand because the engine sets it only when it *fires* a handler (`0x704d50`);
     // calling the compiled function directly does not, and the body reads `this`, not its argument.
     s.run("this = BuffButton0; BuffButton0:GetScript(\"OnEnter\")(BuffButton0)")
         .unwrap();
@@ -527,6 +535,7 @@ fn buff_hover_hangs_below_left_of_the_button() {
 /// cost.
 #[test]
 fn a_cursor_seated_gameobject_plate_is_owned() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[]);
     assert!(s.world_tooltip_gameobject("Brill", &[], Some((512.0, 384.0))));
     let owned: bool = s.eval("return GameTooltip:IsOwned(UIParent)").unwrap();
@@ -551,6 +560,7 @@ fn a_cursor_seated_gameobject_plate_is_owned() {
 /// plate is ever shown. With the owner written, so do we.
 #[test]
 fn a_cursor_seated_gameobject_plate_survives_an_addons_on_show_hook() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[]);
     // Questie's hook, in one line: the plate's own show event calls Show() again.
     s.run(r#"GameTooltip:SetScript("OnShow", function() GameTooltip:Show() end)"#)
@@ -579,6 +589,7 @@ fn a_cursor_seated_gameobject_plate_survives_an_addons_on_show_hook() {
 /// the failure 2255 had just fixed on the cursor arm.
 #[test]
 fn a_corner_seated_gameobject_plate_is_owned_and_shown() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[]);
     assert!(s.world_tooltip_gameobject("Ironforge Main Gate", &[], None));
     let owned: bool = s.eval("return GameTooltip:IsOwned(UIParent)").unwrap();
@@ -593,6 +604,7 @@ fn a_corner_seated_gameobject_plate_is_owned_and_shown() {
 /// `GameTooltip:Show()`, and `:Show()` is the existence gate `0x530a80`.
 #[test]
 fn a_corner_seated_gameobject_plate_survives_an_addons_on_show_hook() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[]);
     s.run(r#"GameTooltip:SetScript("OnShow", function() GameTooltip:Show() end)"#)
         .unwrap();

@@ -1,93 +1,75 @@
-//! The player-to-player trade arc's wire layer (decision 0592 phase P0): the request verbs the
-//! trade window sends and the two status packets the server pushes back. Layout VERIFIED against
-//! vmangos `Handlers/TradeHandler.cpp`, `Server/Packets/Trade.{h,cpp}`, `Objects/TradeData.{h,cpp}`
-//! and `SharedDefines.h` (read directly at decision time). Trade renders nothing derived from
-//! WoW.exe, so vmangos is the whole wire authority: its `ReadFromWorldPacket` pins every CMSG body
-//! below, its `AppendBodyTo`/`SendUpdateTrade` pin both SMSG parses — no wow-re dispatch is
-//! load-bearing (decision 0592, "No wow-re dispatch").
+//! Player-to-player trade wire: the trade window's request verbs and the two status packets the
+//! server pushes back (vmangos `TradeHandler.cpp`, `Server/Packets/Trade.cpp`).
 
 use std::io;
 
 use crate::wire::{read_i32_le, read_u32_le, read_u64_le, read_u8};
 
-/// `TRADE_SLOT_COUNT` (`TradeData.h`): seven slots per side — six tradeable (0..6) plus the
-/// seventh **non-traded / enchant** slot ([`TRADE_SLOT_NONTRADED`]), whose item is not exchanged
-/// but is the target an enchant/lockpick spell is applied to through the window.
+/// Slots per side (`TradeData.h`): six traded plus the non-traded enchant slot.
 pub const TRADE_SLOT_COUNT: usize = 7;
-/// `TRADE_SLOT_TRADED_COUNT` — the six slots (0..6) whose items actually change hands.
+/// Slots 0..6, whose items change hands.
 pub const TRADE_SLOT_TRADED_COUNT: usize = 6;
-/// `TRADE_SLOT_NONTRADED` — the 7th slot (index 6, UI id 7): an item parked here stays with its
-/// owner; it is the enchant/spell target, not part of the exchange.
+/// UI slot 7: its item stays with its owner as the target of an enchant or lockpick spell.
 pub const TRADE_SLOT_NONTRADED: usize = 6;
 
-/// The trade state machine's status codes (`SharedDefines.h` `enum TradeStatus`, 0..=22). The
-/// tail-carrying members hold their `SMSG_TRADE_STATUS` payload inline (VERIFIED vmangos
-/// `WorldPackets::Trade::TradeStatus::AppendBodyTo`): only `BEGIN_TRADE`, `CLOSE_WINDOW` and
-/// `ONLY_CONJURED` ride a tail; every other status is the bare `u32`. [`TradeStatus::Unknown`]
-/// keeps an out-of-range code (never emitted by vmangos on 5875) parseable rather than fatal.
+/// `SMSG_TRADE_STATUS` codes (`SharedDefines.h` `enum TradeStatus`), each with its tail inline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TradeStatus {
-    /// `0` — the target is already trading / busy (also the initiator's own "already trading").
+    /// The target is busy, or the initiator is already trading.
     Busy,
-    /// `1` — sent to the *target* of a fresh `CMSG_INITIATE_TRADE`; `partner` is the initiator's
-    /// guid. The client answers `CMSG_BEGIN_TRADE`, which makes the server emit `OpenWindow` to
-    /// both sides.
+    /// To the target of `CMSG_INITIATE_TRADE`; its `CMSG_BEGIN_TRADE` opens both windows.
     BeginTrade { partner: u64 },
-    /// `2` — open the trade window (fires the client's `TRADE_SHOW`). Sent to both sides once the
-    /// target's `CMSG_BEGIN_TRADE` arrives.
+    /// Opens the window on both sides (the client's `TRADE_SHOW`).
     OpenWindow,
-    /// `3` — the trade was cancelled; close both windows.
+    /// The trade was cancelled; both windows close.
     Canceled,
-    /// `4` — the *partner* pressed Trade (drives the accept-glow on their column).
+    /// The partner pressed Trade (the accept highlight on their column).
     Accept,
-    /// `5` — a second "busy" code, handled as busy.
+    /// A second busy code, handled as `Busy`.
     Busy2,
-    /// `6` — no such target for `CMSG_INITIATE_TRADE`.
+    /// No such target for `CMSG_INITIATE_TRADE`.
     NoTarget,
-    /// `7` — a change happened after an accept (or the 200 ms scam-delay bounced an accept):
-    /// drop the accept and go back to editing.
+    /// An offer changed after an accept, or the 200 ms scam delay bounced one: the accept drops.
     BackToTrade,
-    /// `8` — both sides accepted and the swap completed; close both windows.
+    /// Both sides accepted and the swap completed; both windows close.
     Complete,
-    /// `9` — the trade was rejected.
+    /// The trade was rejected.
     Rejected,
-    /// `10` — the partner is out of `TRADE_DISTANCE` (also the flying/no-map initiate refusal).
+    /// Out of `TRADE_DISTANCE`; also the refusal to initiate while flying or off-map.
     TargetTooFar,
-    /// `11` — cross-faction trade refused (unless the server allows two-side interaction).
+    /// Cross-faction, unless the server allows two-side interaction.
     WrongFaction,
-    /// `12` — close the window; `result`/`item_limit_category` are the vanilla tail (usually 0;
-    /// the middle `u8` vmangos writes is consumed but carries nothing for player trade).
+    /// The tail is usually zero; the `u8` vmangos writes between the two fields is dropped.
     CloseWindow {
         result: u32,
         item_limit_category: u32,
     },
-    /// `13` — vmangos comments it is "handled with TRADE_STATUS_TRADE_CANCELED"; kept distinct so
-    /// the wire round-trips.
+    /// Per a vmangos note, handled as `Canceled`; kept distinct so the code round-trips.
     Unknown13,
-    /// `14` — the target has you on ignore.
+    /// The target has you on ignore.
     IgnoreYou,
-    /// `15` — you are stunned.
+    /// You are stunned.
     YouStunned,
-    /// `16` — the target is stunned.
+    /// The target is stunned.
     TargetStunned,
-    /// `17` — you are dead.
+    /// You are dead.
     YouDead,
-    /// `18` — the target is dead.
+    /// The target is dead.
     TargetDead,
-    /// `19` — you are logging out.
+    /// You are logging out.
     YouLogout,
-    /// `20` — the target is logging out.
+    /// The target is logging out.
     TargetLogout,
-    /// `21` — a trial account restriction.
+    /// A trial account restriction.
     TrialAccount,
-    /// `22` — "you can only trade conjured items…"; `slot` names the offending trade slot.
+    /// "You can only trade conjured items"; `slot` is the offending trade slot.
     OnlyConjured { slot: u8 },
-    /// A code outside 0..=22 (vmangos never sends one on 5875) — kept parseable, no tail read.
+    /// A code outside 0..=22, which vmangos never sends; read with no tail.
     Unknown(u32),
 }
 
 impl TradeStatus {
-    /// The raw `u32` code this status serializes as (the enum discriminant on the wire).
+    /// The `u32` status code on the wire.
     pub fn code(self) -> u32 {
         match self {
             TradeStatus::Busy => 0,
@@ -118,13 +100,10 @@ impl TradeStatus {
     }
 }
 
-/// One item shown in a trade slot, as it rides `SMSG_TRADE_STATUS_EXTENDED`'s fixed 60-byte
-/// (15×u32) per-slot block (VERIFIED vmangos `WorldSession::SendUpdateTrade`). An empty slot is
-/// all-zero on the wire and folds to `None` rather than a zeroed `Some` (the `entry == 0` signal,
-/// same convention as [`super::MailAttachment`]).
+/// One trade slot's 60-byte item block; an all-zero block is an empty slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TradeItem {
-    /// `Item.dbc` entry (`OBJECT_FIELD_ENTRY`) — the key to name/icon via `ITEM_QUERY_SINGLE`.
+    /// `Item.dbc` entry (`OBJECT_FIELD_ENTRY`), the key for name and icon via `ITEM_QUERY_SINGLE`.
     pub entry: u32,
     pub display_id: u32,
     pub count: u32,
@@ -133,7 +112,7 @@ pub struct TradeItem {
     pub gift_creator: u64,
     pub perm_enchant: u32,
     pub creator: u64,
-    /// Spell charges — signed (a negative count means "N uses left" on some items).
+    /// Signed: a negative count means N uses left on some items.
     pub charges: i32,
     pub suffix_factor: u32,
     pub random_prop_id: u32,
@@ -142,62 +121,51 @@ pub struct TradeItem {
     pub durability: u32,
 }
 
-/// A decoded `SMSG_TRADE_STATUS_EXTENDED` — the full item/gold snapshot for **one** window side.
-/// The server pushes one of these per side whenever that side's offer changes.
+/// `SMSG_TRADE_STATUS_EXTENDED`: one side's snapshot, sent whenever that side's offer changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TradeStatusExtended {
-    /// `true` = the *partner's* (recipient / right) column, `false` = our own (left) column
-    /// (vmangos's `trader_state`: `1` for the trader's data, `0` for ours).
+    /// The partner's (right) column when the wire byte is 1, ours (left) when 0.
     pub their_window: bool,
-    /// Gold offered on this side, in copper.
+    /// In copper.
     pub gold: u32,
-    /// The spell applied to this side's non-traded slot item (`0` = none) — the enchant slot.
+    /// The spell cast on this side's non-traded slot item, 0 for none.
     pub enchant_spell_id: u32,
-    /// The seven slots (0..[`TRADE_SLOT_COUNT`]); `None` = empty.
     pub slots: [Option<TradeItem>; TRADE_SLOT_COUNT],
 }
 
-// ── Client → server bodies (what vmangos `ReadFromWorldPacket` consumes) ─────────────────────
+// ── Client → server bodies ──
 
-/// Body of `CMSG_INITIATE_TRADE` (vmangos `InitiateTrade::ReadFromWorldPacket`): one full 8-byte
-/// target-player guid. The server answers the initiator on any refusal (`SMSG_TRADE_STATUS`) and,
-/// on success, sends the *target* `BeginTrade`.
+/// `CMSG_INITIATE_TRADE`: a refusal is a status back to us; success sends the target `BeginTrade`.
 pub fn initiate_trade(target: u64) -> Vec<u8> {
     target.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_ACCEPT_TRADE` (vmangos `AcceptTrade::ReadFromWorldPacket`): one `u32` the server
-/// **read-skips**. The real client sends `1` once it has seen `OPEN_WINDOW`; we send `1` too (the
-/// value is discarded either way).
+/// `CMSG_ACCEPT_TRADE`: a `u32` the server skips; the 1.12 client sends 1.
 pub fn accept_trade() -> Vec<u8> {
     1u32.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_SET_TRADE_ITEM` (vmangos `SetTradeItem::ReadFromWorldPacket`): `u8 tradeSlot,
-/// u8 bag, u8 slot` — put the item at inventory (`bag`, `slot`) into trade slot `tradeSlot`.
+/// `CMSG_SET_TRADE_ITEM`: puts the item at (`bag`, `slot`) into `trade_slot`.
 pub fn set_trade_item(trade_slot: u8, bag: u8, slot: u8) -> Vec<u8> {
     vec![trade_slot, bag, slot]
 }
 
-/// Body of `CMSG_CLEAR_TRADE_ITEM` (vmangos `ClearTradeItem::ReadFromWorldPacket`): `u8 tradeSlot`.
+/// `CMSG_CLEAR_TRADE_ITEM` body.
 pub fn clear_trade_item(trade_slot: u8) -> Vec<u8> {
     vec![trade_slot]
 }
 
-/// Body of `CMSG_SET_TRADE_GOLD` (vmangos `SetTradeGold::ReadFromWorldPacket`): `u32 copper`.
+/// `CMSG_SET_TRADE_GOLD` body, in copper.
 pub fn set_trade_gold(copper: u32) -> Vec<u8> {
     copper.to_le_bytes().to_vec()
 }
 
 // `CMSG_BEGIN_TRADE`, `CMSG_BUSY_TRADE`, `CMSG_IGNORE_TRADE`, `CMSG_UNACCEPT_TRADE` and
-// `CMSG_CANCEL_TRADE` carry **empty** bodies (vmangos reads them as `NullClientPacket`); the
-// writer sends `&[]` directly, so they need no builder here.
+// `CMSG_CANCEL_TRADE` have empty bodies (vmangos `NullClientPacket`), so they need no builder.
 
-// ── Server → client parses (what vmangos `AppendBodyTo` / `SendUpdateTrade` emit) ─────────────
+// ── Server → client parses ──
 
-/// Read `SMSG_TRADE_STATUS` (VERIFIED vmangos `TradeStatus::AppendBodyTo`): `u32 status`, then a
-/// per-status tail — `BEGIN_TRADE → u64 partnerGuid`; `CLOSE_WINDOW → u32 result, u8 unk, u32
-/// itemLimitCategory`; `ONLY_CONJURED → u8 slot`; every other status has none.
+/// `SMSG_TRADE_STATUS` (vmangos `TradeStatus::AppendBodyTo`): a `u32` code, then its tail.
 pub(super) fn read_trade_status(r: &mut &[u8]) -> io::Result<TradeStatus> {
     let code = read_u32_le(r)?;
     Ok(match code {
@@ -238,12 +206,8 @@ pub(super) fn read_trade_status(r: &mut &[u8]) -> io::Result<TradeStatus> {
     })
 }
 
-/// Read `SMSG_TRADE_STATUS_EXTENDED` (VERIFIED vmangos `WorldSession::SendUpdateTrade`):
-/// `u8 which`, `u32 slotCount`, `u32 slotCount` (again — the two counts match), `u32 gold`,
-/// `u32 enchantSpellId`, then [`TRADE_SLOT_COUNT`] records of `u8 slotIndex` + a fixed 60-byte
-/// (15×u32) item block (all-zero → the slot is empty). The `slotIndex` byte places the block, so
-/// a block is stored at `slots[slotIndex]` (defensive against reordering; vmangos writes 0..7 in
-/// order).
+/// `SMSG_TRADE_STATUS_EXTENDED` (vmangos `WorldSession::SendUpdateTrade`): `u8 which`, the slot
+/// count twice, gold, enchant spell, then seven records of `u8 index` and a 60-byte item block.
 pub(super) fn read_trade_status_extended(r: &mut &[u8]) -> io::Result<TradeStatusExtended> {
     let which = read_u8(r)?;
     let _slot_count_a = read_u32_le(r)?;
@@ -297,7 +261,7 @@ pub(super) fn read_trade_status_extended(r: &mut &[u8]) -> io::Result<TradeStatu
 mod tests {
     use super::*;
 
-    // ── CMSG body goldens (byte-exact against vmangos's ReadFromWorldPacket layout) ──
+    // ── CMSG body goldens ──
 
     #[test]
     fn initiate_trade_is_the_target_guid_le() {
@@ -314,7 +278,6 @@ mod tests {
 
     #[test]
     fn set_trade_item_is_three_u8s() {
-        // Put bag 0 / slot 23 into trade slot 2.
         assert_eq!(set_trade_item(2, 0, 23), vec![2, 0, 23]);
     }
 
@@ -330,12 +293,42 @@ mod tests {
 
     // ── SMSG_TRADE_STATUS parse goldens ──
 
+    /// Every code without a tail reads as its variant and leaves the byte after the code unread.
     #[test]
     fn trade_status_bare_code_has_no_tail() {
-        let buf = 2u32.to_le_bytes(); // OPEN_WINDOW
-        let mut r = &buf[..];
-        assert_eq!(read_trade_status(&mut r).unwrap(), TradeStatus::OpenWindow);
-        assert!(r.is_empty(), "no tail should be consumed for a bare status");
+        for (code, want) in [
+            (0, TradeStatus::Busy),
+            (2, TradeStatus::OpenWindow),
+            (3, TradeStatus::Canceled),
+            (4, TradeStatus::Accept),
+            (5, TradeStatus::Busy2),
+            (6, TradeStatus::NoTarget),
+            (7, TradeStatus::BackToTrade),
+            (8, TradeStatus::Complete),
+            (9, TradeStatus::Rejected),
+            (10, TradeStatus::TargetTooFar),
+            (11, TradeStatus::WrongFaction),
+            (13, TradeStatus::Unknown13),
+            (14, TradeStatus::IgnoreYou),
+            (15, TradeStatus::YouStunned),
+            (16, TradeStatus::TargetStunned),
+            (17, TradeStatus::YouDead),
+            (18, TradeStatus::TargetDead),
+            (19, TradeStatus::YouLogout),
+            (20, TradeStatus::TargetLogout),
+            (21, TradeStatus::TrialAccount),
+        ] {
+            let mut buf = u32::to_le_bytes(code).to_vec();
+            buf.push(0xEE); // the next byte, which a bare status leaves unread
+            let mut r = &buf[..];
+            assert_eq!(read_trade_status(&mut r).unwrap(), want, "code {code}");
+            assert_eq!(
+                r,
+                [0xEE],
+                "no tail should be consumed for bare status {code}"
+            );
+            assert_eq!(want.code(), code);
+        }
     }
 
     #[test]
@@ -394,8 +387,7 @@ mod tests {
 
     // ── SMSG_TRADE_STATUS_EXTENDED parse golden ──
 
-    /// Build a full 444-byte snapshot the way vmangos does: a 17-byte header, then 7 slot records
-    /// (each a `u8 index` + 60-byte block). `items[i] = Some(entry)` fills slot `i`; `None` zeroes it.
+    /// A 444-byte snapshot as vmangos builds it; `Some(entry)` fills a slot, `None` zeroes it.
     fn extended_wire(
         which: u8,
         gold: u32,
@@ -432,12 +424,30 @@ mod tests {
         b
     }
 
+    /// The parser reads exactly 444 bytes, whether the slots are empty, full or mixed.
     #[test]
     fn extended_snapshot_is_always_444_bytes() {
-        // 17-byte header (u8 which + 4×u32) + 7 slot records of (u8 index + 60-byte block).
-        let wire = extended_wire(0, 0, 0, [None; TRADE_SLOT_COUNT]);
-        assert_eq!(wire.len(), 17 + TRADE_SLOT_COUNT * 61);
-        assert_eq!(wire.len(), 444);
+        // A 17-byte header (u8 and four u32), then 7 records of u8 index and a 60-byte block.
+        let mut mixed = [None; TRADE_SLOT_COUNT];
+        mixed[0] = Some(0xABCD);
+        mixed[TRADE_SLOT_NONTRADED] = Some(0x1111);
+        for entries in [
+            [None; TRADE_SLOT_COUNT],
+            [Some(0xABCD); TRADE_SLOT_COUNT],
+            mixed,
+        ] {
+            let mut wire = extended_wire(0, 0, 0, entries);
+            assert_eq!(wire.len(), 17 + TRADE_SLOT_COUNT * 61);
+            assert_eq!(wire.len(), 444);
+            assert!(
+                read_trade_status_extended(&mut &wire[..443]).is_err(),
+                "443 bytes is a short read"
+            );
+            wire.push(0xEE); // a byte past the snapshot
+            let mut r = &wire[..];
+            read_trade_status_extended(&mut r).unwrap();
+            assert_eq!(r, [0xEE], "the parser stops at byte 444");
+        }
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //!
 //! [`SocialState`] mirrors the wire the way [`crate::ui_party`]'s `GroupState` does: the three
 //! server packets replace it wholesale or patch one row, and the feed turns it into the VM
-//! snapshot the FriendsFrame reads. Two client-side laws from wow-re's `FriendList.cpp` findings
-//! (`system/net/scratch/w2b.md`, the 0x728-byte object at `DAT_00c28168`) shape everything here:
+//! snapshot the FriendsFrame reads. Two client-side laws of the reference's `FriendList.cpp` (the
+//! 0x728-byte object at `DAT_00c28168`) shape everything here:
 //!
 //! - **The lists are guids.** A friend slot holds `{status, note*, guid, area, level, class}` —
 //!   no name — and the display name comes from the ObjectMgr name cache (`0x55f080`) at format
@@ -28,13 +28,12 @@
 //!
 //! Which result maps to which GlobalStrings key is *inferred by name* (the `ERR_FRIEND_*` /
 //! `ERR_IGNORE_*` set is one-to-one with vmangos's `FriendsResult` enum, and 18 results collapse
-//! to the 17 ids because both ADDED codes share `ERR_FRIEND_ADDED_S`) — the open dispatch item in
-//! the record.
+//! to the 17 ids because both ADDED codes share `ERR_FRIEND_ADDED_S`) — still open.
 //!
 //! ## What the ignore list is *for*
 //!
 //! Not the window — the silence. `FriendList::IsIgnored 0x5ae5a0` gates inbound chat and text
-//! emotes (wow-re `system/ui/scratch/text-emote-composition.md`: ignored performer ⇒ dropped
+//! emotes (the `SMSG_TEXT_EMOTE` handler `0x49dbe0`: ignored performer ⇒ dropped
 //! silently, no line at all) and the duel handler's auto-decline (`0x4d4a33`). [`is_ignored`] is
 //! that predicate; its callers are the chat apply arm and the duel one, which is how decision
 //! 0633's stated "no ignore list yet" deviation closes.
@@ -97,9 +96,9 @@ impl SocialState {
     /// Only [`Self::who_sort`] survives, and it survives because the reference's chain is
     /// per-process: its initialiser `0x5adc50` is reached once from the process-start run at
     /// `0x401666`, never from a login, so a player who left the who list sorted by level
-    /// descending finds it that way after a relog (wow-re `who-list-sort-law.md` §3). Everything
-    /// else is login-scoped for the reasons decision 0668 gives — the server re-pushes both lists
-    /// at the next login, and a stale ignore list would silence the wrong guids.
+    /// descending finds it that way after a relog. Everything else is login-scoped for the reasons
+    /// decision 0668 gives — the server re-pushes both lists at the next login, and a stale ignore
+    /// list would silence the wrong guids.
     pub(crate) fn clear_session(&mut self) {
         *self = Self {
             who_sort: std::mem::take(&mut self.who_sort),
@@ -115,7 +114,7 @@ impl SocialState {
 
     /// Is `guid` on the FRIEND list? The reference's `FriendList::FindFriendSlot 0x5ae810` —
     /// base `this+8`, stride `0x20`, bound `0x32`, the same triple `GetNumFriends 0x5ae490`
-    /// counts over (§5, wow-re `system/object-layer/scratch/guild-signon-cvar-gate.md`).
+    /// counts over.
     ///
     /// Its one consumer is the guild sign-on/sign-off line's fourth conjunct, and its purpose is
     /// **de-duplication, not suppression**: `SMSG_FRIEND_STATUS` emits the same two chat ids with
@@ -288,10 +287,61 @@ fn status_flag_key(status: u8) -> Option<&'static str> {
     })
 }
 
-/// The net drain's `SessionEvent::Friend*`/`Who*` arms, factored here so the wire laws live
-/// beside the state they drive ([`crate::ui_duel::apply`]'s shape).
-pub(crate) mod apply {
+/// The social family's packet handlers (decision 0668; in the net handler table since 2312),
+/// beside the state they drive ([`crate::ui_duel::net`]'s shape): the friend/ignore lists, the
+/// `/who` answer, and the result codes that print their own chat lines. The lines and the Era
+/// events fire off the mirror in [`feed_social`] — every one of them needs a NAME, which the
+/// feed resolves.
+pub(crate) mod net {
     use super::*;
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+
+    use crate::net::NetHandlerApp;
+
+    /// Register the family's handlers — called from [`UiSocialPlugin`]. One per kind, plus the
+    /// session-end listener.
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::FriendList, on_friend_list)
+            .net_handler(K::IgnoreList, on_ignore_list)
+            .net_handler(K::FriendStatus, on_friend_status)
+            .net_handler(K::WhoResults, on_who)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    fn on_friend_list(In(ev): In<SessionEvent>, mut social: ResMut<SocialState>) {
+        if let SessionEvent::FriendList { friends } = ev {
+            friend_list(&mut social, friends);
+        }
+    }
+
+    fn on_ignore_list(In(ev): In<SessionEvent>, mut social: ResMut<SocialState>) {
+        if let SessionEvent::IgnoreList { guids } = ev {
+            ignore_list(&mut social, guids);
+        }
+    }
+
+    fn on_friend_status(In(ev): In<SessionEvent>, mut social: ResMut<SocialState>) {
+        if let SessionEvent::FriendStatus(update) = ev {
+            friend_status(&mut social, update);
+        }
+    }
+
+    fn on_who(In(ev): In<SessionEvent>, mut social: ResMut<SocialState>) {
+        if let SessionEvent::WhoResults(results) = ev {
+            who(&mut social, results);
+        }
+    }
+
+    /// The friend/ignore lists and the last `/who` are session state (decision 0668): the
+    /// server re-pushes both lists at the next login, and a stale ignore list would silence the
+    /// wrong guids after a reconnect renumbers nothing but re-streams everything. The `/who`
+    /// sort chain is the one thing that survives — it is per-PROCESS in the reference, not
+    /// per-login (decision 2030), which is why this is a `clear_session` and not a `default()`.
+    /// A listener on the session end (a second handler on the kind, after the bridge's own teardown).
+    fn on_session_end(In(_): In<SessionEvent>, mut social: ResMut<SocialState>) {
+        social.clear_session();
+    }
 
     /// `SMSG_FRIEND_LIST`.
     pub(crate) fn friend_list(social: &mut SocialState, friends: Vec<FriendEntry>) {
@@ -319,6 +369,7 @@ pub(crate) struct UiSocialPlugin;
 
 impl Plugin for UiSocialPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<SocialState>().add_systems(
             Update,
             (

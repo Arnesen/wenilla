@@ -1,11 +1,5 @@
-//! The session-lifecycle `WorldWriter` sends — the three the client makes about *being logged in*
-//! rather than about anything in the world: the keepalive, the leave-the-world request, and the
-//! cinematic ack that gates the world stream on entering it. Split out of `writer/mod.rs`
-//! (decision 0636).
-//!
-//! All three are effectively bodyless (`ping` carries only its two counters), and all three are
-//! **cadence/obligation** sends rather than player intents: skip the ping and the socket dies,
-//! skip the cinematic ack and the world around the body despawns.
+//! The sends about being logged in rather than about the world: the keepalive, logout, the server
+//! clock and the cinematic acks.
 
 use anyhow::Result;
 
@@ -14,70 +8,45 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// Send the ~30 s keepalive (`CMSG_PING`): `sequence` is the ++counter the server echoes back
-    /// as `SMSG_PONG`, `last_rtt_ms` the previous round-trip measurement (the real client's
-    /// lastRtt; the server stores it as our reported latency). Cadence discipline is the caller's:
-    /// vmangos kicks a socket whose pings repeat faster than 27 s apart (`_HandlePing`'s
-    /// overspeed count), so this is a timer send, never a retry.
+    /// `CMSG_PING`, every ~30 s: the server echoes `sequence` in `SMSG_PONG` and stores
+    /// `last_rtt_ms` as our latency. vmangos kicks pings under 27 s apart, so never retry one.
     pub fn ping(&mut self, sequence: u32, last_rtt_ms: u32) -> Result<()> {
         self.send(opcode::CMSG_PING, &messages::ping(sequence, last_rtt_ms))
     }
 
-    /// Ask to leave the world back to character select (`CMSG_LOGOUT_REQUEST`, empty body). The
-    /// server answers `SMSG_LOGOUT_RESPONSE` (a refusal while in combat) and, once the logout
-    /// completes (instant for a resting/GM character), `SMSG_LOGOUT_COMPLETE` — which the stream
-    /// surfaces as [`SessionEvent::LoggedOut`](crate::SessionEvent::LoggedOut).
+    /// `CMSG_LOGOUT_REQUEST`, empty: answered by `SMSG_LOGOUT_RESPONSE`, then
+    /// `SMSG_LOGOUT_COMPLETE` when the logout ends (at once for a resting or GM character).
     pub fn logout_request(&mut self) -> Result<()> {
         self.send(opcode::CMSG_LOGOUT_REQUEST, &[])
     }
 
-    /// The FORCED logout (`CMSG_PLAYER_LOGOUT`, empty) — `ForceLogout()`'s packet, the same
-    /// dispatcher as [`Self::logout_request`] with the pending-logout latch bypassed
-    /// (decision 1963).
+    /// `CMSG_PLAYER_LOGOUT`, empty: the forced logout the 1.12 client's `ForceLogout()` sends.
     pub fn player_logout(&mut self) -> Result<()> {
         self.send(opcode::CMSG_PLAYER_LOGOUT, &[])
     }
 
-    /// Call off a pending logout (`CMSG_LOGOUT_CANCEL`, empty body) — the CAMP/QUIT dialog's Cancel
-    /// (decision 0674). Only meaningful while the server's 20-second timer is running (a non-instant
-    /// [`logout_request`](Self::logout_request)); the server drops the timer, unroots the character
+    /// `CMSG_LOGOUT_CANCEL`, empty: the server stops its 20 s logout timer, unroots the character
     /// and answers `SMSG_LOGOUT_CANCEL_ACK`.
     pub fn logout_cancel(&mut self) -> Result<()> {
         self.send(opcode::CMSG_LOGOUT_CANCEL, &[])
     }
 
-    /// Ask the server for its wall clock (`CMSG_QUERY_TIME`, empty body); answered with
-    /// `SMSG_QUERY_TIME_RESPONSE`, one `u32` of unix-epoch seconds.
-    ///
-    /// A cadence/obligation send like [`ping`](Self::ping), not a player intent: the server writes
-    /// *absolute* stamps in its own epoch into descriptor fields — a timed quest's deadline is
-    /// `time(nullptr) + limitTime` — and nothing on the wire ever restates them as a duration. So
-    /// every countdown the client draws is only as right as its last sample of this clock; benilla
-    /// takes one on entering the world (decision 1150).
+    /// `CMSG_QUERY_TIME`, empty: answered with the server's unix time as one `u32`. Descriptor
+    /// deadlines, such as a timed quest's, are absolute server time, so countdowns need this clock.
     pub fn query_time(&mut self) -> Result<()> {
         self.send(opcode::CMSG_QUERY_TIME, &messages::query_time())
     }
 
-    /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`, empty body) — the
-    /// packet the real client sends when the cinematic ends or the player ESCs out. Must answer
-    /// every `SMSG_TRIGGER_CINEMATIC` ([`SessionEvent::CinematicTriggered`]
-    /// (crate::SessionEvent::CinematicTriggered)): while one runs unacked, vmangos anchors object
-    /// visibility to the flying cinematic camera and the world around the body despawns.
+    /// `CMSG_COMPLETE_CINEMATIC`, empty: sent when a cinematic ends or is escaped, and owed for
+    /// every `SMSG_TRIGGER_CINEMATIC`; until then vmangos anchors visibility to the cinematic
+    /// camera and the world around the body despawns.
     pub fn complete_cinematic(&mut self) -> Result<()> {
         self.send(opcode::CMSG_COMPLETE_CINEMATIC, &[])
     }
 
-    /// Announce the cinematic shot being armed (`CMSG_NEXT_CINEMATIC_CAMERA`, empty body) — see
-    /// the opcode's own note. Sent once per shot, **including the first**, so a stock single-camera
-    /// race intro sends exactly one; the run still ends with exactly one
-    /// [`complete_cinematic`](Self::complete_cinematic).
-    ///
-    /// The reference's send is inside the shot arm `0x48edf0` (`0x48ef11 push 0xfb` → the
-    /// `0x418190` builder → `0x5ab630` flush), immediately before that shot's narration starts —
-    /// *not* inside the shot advance `0x48efe0`, where benilla first placed it. That misreading
-    /// mattered on the shipped path rather than only on a private server's: every 1.12
-    /// `CinematicSequences` row carries exactly one camera, so "between cameras" meant benilla
-    /// sent this packet **never**.
+    /// `CMSG_NEXT_CINEMATIC_CAMERA`, empty: sent as each shot is armed, the first included, just
+    /// before its narration (reference: shot arm `0x48edf0`, not the advance `0x48efe0`). Every
+    /// 1.12 `CinematicSequences` row has one camera, so a race intro sends exactly one.
     pub fn next_cinematic_camera(&mut self) -> Result<()> {
         self.send(opcode::CMSG_NEXT_CINEMATIC_CAMERA, &[])
     }

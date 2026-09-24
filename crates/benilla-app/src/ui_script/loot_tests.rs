@@ -90,6 +90,7 @@ fn coin_and_two_items() -> LootState {
 /// close button releases through OnHide → CloseLoot.
 #[test]
 fn shipped_loot_frame_drives_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
@@ -283,6 +284,7 @@ fn shipped_loot_frame_drives_end_to_end() {
 /// rare — but the branch must exist, and this proves it fires the right kit and only then.
 #[test]
 fn loot_empty_roll_plays_the_empty_open_kit() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
@@ -324,6 +326,7 @@ fn loot_empty_roll_plays_the_empty_open_kit() {
 /// the next ordinary open resets the skull (the ref re-stamps TargetDead at every show, l.133).
 #[test]
 fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
@@ -375,6 +378,7 @@ fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
 /// pager on page 2 — the real shipped XML driving the render, not just the arithmetic.
 #[test]
 fn shipped_loot_frame_pages_five_items() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
@@ -472,6 +476,7 @@ fn shipped_loot_frame_pages_five_items() {
 /// the synthetic stand-in the merchant panel test uses.
 #[test]
 fn shipped_loot_pushed_to_center_by_merchant() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
@@ -549,6 +554,7 @@ fn shipped_loot_pushed_to_center_by_merchant() {
 /// frames (`SetFrameStrata 0x76a470` is a whole-subtree cascade).
 #[test]
 fn the_loot_window_draws_over_the_party_frames() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
@@ -602,6 +608,7 @@ fn the_loot_window_draws_over_the_party_frames() {
 /// unmodified click still loots — the regression that would otherwise ship silently.
 #[test]
 fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
+    benilla_formats::wow_data_or_skip!();
     const WOOL_LINK: &str = "|cffffffff|Hitem:2589:0:0:0|h[Wool Cloth]|h|r";
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -750,6 +757,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
 /// out and an epic asks. The misspelling is the reference's own (`LootFrame.lua:3`).
 #[test]
 fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
@@ -881,7 +889,7 @@ fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
     );
 }
 
-/// **The raid arm of the master-loot menu** (decision 1675) — the half the wow-re §5 corrected.
+/// **The raid arm of the master-loot menu** (decision 1675).
 ///
 /// In a raid the candidate array is not the wire order: the client files each candidate into its
 /// own subgroup's five-slot block, leaving holes. `GroupLootDropDown_Initialize` reads those holes
@@ -890,6 +898,7 @@ fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
 /// the menu that comes out, which a densely-packed list could not produce.
 #[test]
 fn the_master_loot_menu_groups_raid_candidates_by_subgroup() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::{PartyState, RaidMemberInfo};
 
     let mut s = UiScript::new().unwrap();
@@ -973,6 +982,7 @@ fn the_master_loot_menu_groups_raid_candidates_by_subgroup() {
 /// take. Cancel sends nothing at all, and `LOOT_CLOSED` takes the dialog down with the window.
 #[test]
 fn the_loot_bind_confirm_raises_the_dialog_and_okay_calls_loot_slot() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
@@ -1060,6 +1070,7 @@ fn the_loot_bind_confirm_raises_the_dialog_and_okay_calls_loot_slot() {
 /// would sit there doing nothing (decision 1744).
 #[test]
 fn a_row_click_takes_rather_than_continues() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
@@ -1098,6 +1109,7 @@ fn a_row_click_takes_rather_than_continues() {
 /// `ITEM_QUALITY_COLORS[-1]`, the row `UIParent.lua`'s `for i = -1, 6` exists to provide.
 #[test]
 fn loot_row_awaiting_its_template_opens_clean() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
@@ -1173,7 +1185,7 @@ fn loot_row_awaiting_its_template_opens_clean() {
     // It is a REOPEN and not a repaint on purpose. The app fires `LOOT_UPDATE` when an open
     // window's content changes, and `LOOT_UPDATE` is not a 1.12 event — it appears nowhere in the
     // reference's FrameXML and `LootFrame_OnLoad` does not register it — so nothing in the stock
-    // file listens. What the real client does when a template arrives mid-window is out at wow-re
+    // file listens. What the real client does when a template arrives mid-window is still open
     // (the arrival callback `0x4c2ac0` is recorded as clearing the pending flag and nothing else);
     // this test deliberately asserts only what is settled.
     s.fire_event("LOOT_CLOSED", vec![]);
@@ -1209,13 +1221,13 @@ fn loot_row_awaiting_its_template_opens_clean() {
 /// `<PushedTexture>` and no `<HighlightTexture>` at all: no Quickslot border on the icons, and
 /// nothing to light under the mouse. The gate is wrong about the reference: `CLootButton`'s
 /// geometry vtable differs from `CSimpleButton`'s in exactly one slot — the destructor thunk — and
-/// `LoadXML` is not it, so `0x7788c0` parses a `<LootButton>` element verbatim (wow-re
-/// `ui/scratch/lootbutton-widget-type.md` §4).
+/// `LoadXML` is not it, so `0x7788c0` parses a `<LootButton>` element verbatim.
 ///
 /// Asserted through the ENGINE's hover path rather than off the state: what a player sees is the
 /// emitted quad, and the quad is what was missing.
 #[test]
 fn stock_loot_rows_wear_the_item_button_art_and_light_under_the_cursor() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {

@@ -30,6 +30,13 @@ mod web_budget;
 /// just-streamed static geometry going solid a few frames late is not yet reachable.
 const ATTACH_BUDGET: Duration = Duration::from_millis(2);
 
+/// The attach budget as a resource, so a test can hold it still (2331). Absent — always, in the
+/// client — [`finish_colliders`] spends [`ATTACH_BUDGET`] of wall clock; present, it spends this.
+/// `Duration::ZERO` is the fully deterministic setting: exactly one attach per call, because the
+/// deadline is checked *after* each attach and a zero budget is already past.
+#[derive(Resource)]
+pub(super) struct AttachBudget(pub(super) Duration);
+
 /// A static collider being built on the async compute pool (see [`build_collider_task`]); once the
 /// parry shape is ready, [`finish_colliders`] inserts it (with `layers`, for the WMO walk/camera
 /// audiences) onto this entity. Building off-thread keeps a big-WMO / terrain stream-in from hitching
@@ -58,6 +65,18 @@ impl PendingCollider {
         Self {
             task: Some(task),
             built: None,
+            layers,
+            static_body,
+        }
+    }
+
+    /// A collider that is already built — the state a completed task leaves behind — so a test
+    /// can stage a whole burst as ready without a thread pool or a sleep (2331).
+    #[cfg(test)]
+    fn ready(collider: Collider, layers: Option<CollisionLayers>, static_body: bool) -> Self {
+        Self {
+            task: None,
+            built: Some(collider),
             layers,
             static_body,
         }
@@ -132,7 +151,10 @@ pub(super) fn finish_colliders(
     // collider still makes progress rather than stalling the queue forever (the rule
     // `stream_terrain` already applies to its tile spawns).
     let mut attached = 0u32;
-    let deadline = Instant::now() + ATTACH_BUDGET;
+    let budget = world
+        .get_resource::<AttachBudget>()
+        .map_or(ATTACH_BUDGET, |b| b.0);
+    let deadline = Instant::now() + budget;
     for entity in ready {
         // The entity may have streamed out (despawned) while its collider was building, or had its
         // slot reused — a no-op rather than a panic.
@@ -247,8 +269,7 @@ pub(super) fn terrain_collider_data(
 }
 
 /// How far an impassable chunk's fence rises above the chunk's own floor — the reference's literal
-/// `u = (0, 0, 32000.0)` (immediate `0x46fa0000` at `0x6ab599`), VERIFIED by wow-re's §5 on
-/// `0x6ab530` (`system/terrain/scratch/impassable-chunk-walls.md`).
+/// `u = (0, 0, 32000.0)` (immediate `0x46fa0000` at `0x6ab599`, the emitter `0x6ab530`).
 ///
 /// It is a *reach*, not a height: the quad is based at `chunk+0x4c`, the chunk AABB's **min z**, so
 /// the fence stands on the chunk's lowest ground and rises 32 km. Nothing extends below — a mover
@@ -259,7 +280,7 @@ const FENCE_REACH: f32 = 32000.0;
 /// The `(vertices, triangles)` for a tile's **impassable-chunk fences** — the ADT-level invisible
 /// wall of report B129, in the same world space as the terrain collider.
 ///
-/// The mechanism is the reference's, VERIFIED (wow-re §5 on the emitter `0x6ab530`, reached from
+/// The mechanism is the reference's (the emitter `0x6ab530`, reached from
 /// the movement box gather `0x6721b0 → 0x6aa8b0 → 0x6aadc0`; the flag is `CMapChunk+0xc & 0x40`,
 /// written word-wide at `0x6af5f0` from MCNK header bit 1, and `0x6aae2a` is its only reader in the
 /// image):
@@ -489,14 +510,14 @@ mod tests {
     }
 
     /// B129 end to end, on the shipped bytes and through the real cast: a body walking east from
-    /// Goudy's pin (`.go xyz -6601.98 -531.87 335.60 0`) is stopped where 1.12.1 stops it, at the
+    /// the pin (`.go xyz -6601.98 -531.87 335.60 0`) is stopped where 1.12.1 stops it, at the
     /// chunk boundary 1.46 yd away — and the SAME world built without the walls carries it straight
     /// through, which is the report. Both halves matter: the second is the symptom reproduced, the
     /// first is it gone, and a wall built at the wrong offset would satisfy neither. Skips without
     /// client data.
     #[test]
     fn a_body_walking_east_from_the_b129_pin_is_stopped_at_the_wall() {
-        /// Goudy's pin, and the MCNK boundary the flagged chunk starts at (WoW y; east is −y).
+        /// The reported pin, and the MCNK boundary the flagged chunk starts at (WoW y; east is −y).
         const PIN: [f32; 3] = [-6601.98, -531.87, 335.60];
         const WALL_Y: f32 = 32.0 * benilla_formats::TILE_SIZE - 528.0 * CHUNK_SIZE;
         const R: f32 = 0.5;
@@ -633,26 +654,62 @@ mod tests {
         app
     }
 
+    /// The other half of the queue — pass 1: a task the pool has finished hands its shape to
+    /// `built` on the poll and attaches on the same call. Polled until done rather than slept for:
+    /// the outcome is the pool's, the timing is not asserted.
+    #[test]
+    fn a_finished_task_hands_its_shape_over_and_attaches() {
+        let mut app = test_app();
+        let (verts, tris) = grid(4);
+        let task = build_collider_task(verts, tris);
+        let e = app
+            .world_mut()
+            .spawn((Transform::default(), PendingCollider::new(task, None, true)))
+            .id();
+        for _ in 0..100_000 {
+            app.world_mut().run_system_once(finish_colliders).unwrap();
+            if app.world().entity(e).contains::<Collider>() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            app.world().entity(e).contains::<Collider>(),
+            "the pool finished the build (or never did — a hung pool, not a budget)"
+        );
+        assert!(
+            app.world().entity(e).contains::<RigidBody>(),
+            "a static body rides the attach"
+        );
+        assert!(app.world().get::<PendingCollider>(e).is_none());
+    }
+
     /// The budget must both bite (a burst is spread over frames) and never lose a finished build.
     /// The second half is the subtle one: a completed `Task` cannot be polled twice, so a deferred
     /// attach has to park its shape rather than leave it in the task.
+    ///
+    /// Deterministic since 2331: the burst is staged already-built (`PendingCollider::ready`) and
+    /// the budget is held at zero through [`AttachBudget`], so one call attaches exactly one. The
+    /// earlier shape slept 500 ms for a real pool and then asserted that forty `grid(16)` attaches
+    /// outran a 2 ms wall clock — true on the machine it was written on, false on a faster one,
+    /// and false the other way on a starved pool.
     #[test]
     fn attach_budget_spreads_a_burst_without_losing_colliders() {
         const N: usize = 40;
         let mut app = test_app();
+        app.insert_resource(AttachBudget(std::time::Duration::ZERO));
         let (verts, tris) = grid(16);
         let entities: Vec<Entity> = (0..N)
             .map(|_| {
-                let task = build_collider_task(verts.clone(), tris.clone());
+                let collider = Collider::trimesh(verts.clone(), tris.clone());
                 app.world_mut()
-                    .spawn((Transform::default(), PendingCollider::new(task, None, true)))
+                    .spawn((
+                        Transform::default(),
+                        PendingCollider::ready(collider, None, true),
+                    ))
                     .id()
             })
             .collect();
-
-        // Let the pool finish every build, so the whole burst is ready at once — the tile-boundary
-        // case the budget exists for.
-        std::thread::sleep(std::time::Duration::from_millis(500));
 
         let attached = |app: &mut App| {
             entities
@@ -662,11 +719,10 @@ mod tests {
         };
 
         app.world_mut().run_system_once(finish_colliders).unwrap();
-        let after_one = attached(&mut app);
-        assert!(after_one > 0, "budget starved the queue: nothing attached");
-        assert!(
-            after_one < N,
-            "budget never bit: all {N} attached in one frame ({after_one})"
+        assert_eq!(
+            attached(&mut app),
+            1,
+            "a zero budget is past after the first attach: exactly one lands per call"
         );
 
         // Drain: every remaining build must still land, none lost to the deferral.

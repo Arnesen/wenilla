@@ -41,8 +41,7 @@
 //! > A **hit** (non-zero return) calls `0x61b430`, which fires `START_LOOT_ROLL (0x1f9, "%d%d")`.
 //! > A **miss** issues the query and leaves the callback `0x61b460` armed — a trampoline whose
 //! > worker is that same `0x61b430` — so on a cold cache the event fires from the cache *arrival*,
-//! > not from the packet. (wow-re `system/object-layer/scratch/lootroll-chat-and-lifecycle.md` §5
-//! > and `scratch/w2e-decomp.c`'s `FUN_0061b310`/`FUN_0061b430`.)
+//! > not from the packet. (The reference's `FUN_0061b310`/`FUN_0061b430`, decompiled.)
 //!
 //! So `GetLootRollItemInfo`'s cache-miss tail is nearly unreachable in the real client, and was our
 //! common case. There is no repaint to fall back on — the same finding 1805 landed for
@@ -289,10 +288,85 @@ impl LootRolls {
     }
 }
 
+/// The group rolls' packet handlers (decision 0591; in the net handler table since 2319, moved out
+/// of the drain's loot arm file).
+mod net {
+    use benilla_protocol::messages::{LootAllPassed, LootRoll, LootRollWon, LootStartRoll};
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::LootRolls;
+    use crate::net::NetHandlerApp;
+
+    /// Register the roll handlers — called from [`super::UiLootRollPlugin`]. One for the four
+    /// kinds, plus the session-end listener.
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::LootStartRoll, on_packet)
+            .net_handler(K::LootRoll, on_packet)
+            .net_handler(K::LootRollWon, on_packet)
+            .net_handler(K::LootAllPassed, on_packet)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    fn on_packet(In(ev): In<SessionEvent>, mut rolls: ResMut<LootRolls>) {
+        match ev {
+            SessionEvent::LootStartRoll(p) => loot_start_roll(p, &mut rolls),
+            SessionEvent::LootRoll(p) => loot_roll(p, &mut rolls),
+            SessionEvent::LootRollWon(p) => loot_roll_won(p, &mut rolls),
+            SessionEvent::LootAllPassed(p) => loot_all_passed(p, &mut rolls),
+            _ => {}
+        }
+    }
+
+    /// Open group rolls die with the socket (decision 0591). A listener on the session end
+    /// (a second handler on the kind, after the bridge's own teardown).
+    fn on_session_end(In(_): In<SessionEvent>, mut rolls: ResMut<LootRolls>) {
+        rolls.clear();
+    }
+
+    /// A group roll opened on one drop (`SMSG_LOOT_START_ROLL`) — a `GroupLootFrame` goes up with
+    /// Need/Greed/Pass and the countdown bar (decision 0591).
+    fn loot_start_roll(p: LootStartRoll, rolls: &mut LootRolls) {
+        debug!(
+            "net: loot roll opened on item {} ({:#x} slot {}), {} ms",
+            p.item_id, p.looted_target, p.item_slot, p.countdown_ms
+        );
+        rolls.start(p);
+    }
+
+    /// One roller's vote or dice result (`SMSG_LOOT_ROLL`) — the chat announcement line. The
+    /// `(roll_number, roll_type)` pair is overloaded; `LootRoll::is_dice`/`vote` disentangle it.
+    fn loot_roll(p: LootRoll, rolls: &mut LootRolls) {
+        debug!(
+            "net: loot roll announce — roller {:#x} number {} type {}",
+            p.roller, p.roll_number, p.roll_type
+        );
+        rolls.announce(p);
+    }
+
+    /// A group roll resolved (`SMSG_LOOT_ROLL_WON`) — the "won" line, and that roll's frame closes.
+    fn loot_roll_won(p: LootRollWon, rolls: &mut LootRolls) {
+        debug!(
+            "net: loot roll won by {:#x} with {} (type {})",
+            p.winner, p.roll_number, p.roll_type
+        );
+        rolls.won(p);
+    }
+
+    /// Everyone passed (`SMSG_LOOT_ALL_PASSED`) — the frame closes and the item returns to the corpse
+    /// as an ordinary lootable row.
+    fn loot_all_passed(p: LootAllPassed, rolls: &mut LootRolls) {
+        debug!("net: loot roll — everyone passed on item {}", p.item_id);
+        rolls.all_passed(p);
+    }
+}
+
 pub(crate) struct UiLootRollPlugin;
 
 impl Plugin for UiLootRollPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<LootRolls>().add_systems(
             Update,
             (
@@ -329,8 +403,8 @@ impl Plugin for UiLootRollPlugin {
 ///
 /// **The `NO_SPAM` variants are the `showLootSpam == 0` branch**, and since decision 1589 (B246's
 /// Chat options page) that CVar has a row, so `detailed` is a real argument rather than a constant
-/// `true`. 0594 §3 recorded the whole gated flow waiting for exactly this; wow-re's
-/// `lootroll-chat-and-lifecycle.md` §4 is the byte census behind it:
+/// `true`. 0594 §3 recorded the whole gated flow waiting for exactly this; a byte census of the
+/// CVar `0xb4e2bc` is behind it:
 ///
 /// | `showLootSpam` | the per-vote / per-dice line (`0x61c0b0`) | the WON line (`0x61b9e0`) |
 /// |---|---|---|
@@ -895,8 +969,8 @@ mod tests {
         );
     }
 
-    /// `showLootSpam == 0` — the whole gated flow 0594 §3 recorded and 1589 finally wired, all
-    /// three of its claims in one place (wow-re `lootroll-chat-and-lifecycle.md` §4).
+    /// `showLootSpam == 0` (the CVar `0xb4e2bc`) — the whole gated flow 0594 §3 recorded and
+    /// 1589 finally wired, all three of its claims in one place.
     #[test]
     fn detail_off_suppresses_the_roll_lines_and_reshapes_the_winner() {
         // 1 · every vote and every dice line is dropped outright.

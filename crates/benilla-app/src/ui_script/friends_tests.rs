@@ -124,7 +124,7 @@ fn the_window_opens_on_friends_with_the_guild_tab_disabled() {
 /// `FriendsFrameTab1..4` inherit `FriendsFrameTabTemplate`, which inherits
 /// `CharacterFrameTabButtonTemplate` (the reference's own file, on the chain since 1993). The
 /// middle template declares an `<OnClick>` and nothing else, and handler replacement is **per
-/// handler name** (wow-re `template-onload-replacement-law.md`) — so the base template's
+/// handler name** (`0x76a0d0`) — so the base template's
 /// `<OnShow>` fit still runs, two hops down. That is the arrangement this pins: a row of tabs
 /// still wearing the base template's authored 115 would mean the OnShow was lost on the way.
 #[test]
@@ -784,8 +784,8 @@ fn selecting_a_row_reads_back_in_the_same_tick() {
         .contains(&SocialRequest::SelectFriend(2)));
 }
 
-/// **B363 — the who list reaches its last rows.** Liho's `/who` found 49, showed 17, and the knob
-/// travelled while the rows stayed. On the stock window the mechanism is a one-row loss:
+/// **B363 — the who list reaches its last rows.** The symptom: a `/who` of 49 shows 17, and the
+/// knob travels while the rows stay. On the stock window the mechanism is a one-row loss:
 /// `WhoListScrollFrame` is 287 tall (stock `FriendsFrame.xml` l.1661) against seventeen rows of
 /// sixteen, so the child's overflow past the frame, `n × 16 − 287`, sits fifteen pixels under the
 /// bar's `(n − 17) × 16`, and an engine that clamped `SetVerticalScroll` into that overflow

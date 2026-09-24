@@ -10,8 +10,7 @@
 //! — distance, view radius, and which of the two draws it takes — so the run says *what would be
 //! on screen*, not merely that a packet arrived.
 //!
-//! Non-combat. Pair with the SLOT-KEYED probe identity (`WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>`; `method.md`, "The local vmangos server"), and `WOW_NOSOUND=1` when
+//! Non-combat. Pair with the checkout's probe identity (`.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR — the `probe` skill), and `WOW_NOSOUND=1` when
 //! it runs unattended. One `timeout`'d run plus a grep for `PROBE guardpoi:` is the whole harness.
 
 use bevy::prelude::*;

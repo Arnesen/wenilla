@@ -26,11 +26,11 @@ pub use tga::tga_to_rgba;
 /// Where the WoW install is — the one resolver (decision 1175). Paired with [`Chain`]: this says
 /// *where*, that opens it.
 mod install;
-pub use install::{candidates, wow_data};
 /// Web-target chain plumbing (HTTP in place of a filesystem) — see the module header for the Data
 /// URL scheme it implements against. Always compiled (`encode_name` is plain Rust and tested
 /// natively); the browser-only pieces are gated to `wasm32` inside the module itself.
 pub mod web;
+pub use install::{addon_corpus, addon_corpus_candidates, candidates, skipped, wow_data};
 mod characters;
 pub use characters::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
@@ -201,14 +201,14 @@ pub use spells::{
     cc_exemption, grants_immunity, load_shapeshift_forms, load_spell_cast_times,
     load_spell_catalog, load_spell_dispel_types, load_spell_durations, load_spell_radii,
     load_spell_ranges, min_max_range, substitute, CcExemption, FormRefusal, LearnAnnouncement,
-    OpenLock, ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
-    SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
-    SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT,
-    ATTR_ONLY_STEALTHED, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR, ON_NEXT_SWING_RANGE,
-    SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM,
-    SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_PET_SPELL, SPELL_EFFECT_LEARN_SPELL,
-    SPELL_EFFECT_PROSPECTING, SPELL_EFFECT_SKILL_STEP, SPELL_EFFECT_SKINNING,
-    SPELL_EFFECT_TRADE_SKILL,
+    LearnEffect, OpenLock, ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog,
+    SpellDispelTypes, SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius,
+    SpellRadiusCatalog, SpellRange, SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD,
+    ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR,
+    ON_NEXT_SWING_RANGE, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM,
+    SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_PET_SPELL,
+    SPELL_EFFECT_LEARN_SPELL, SPELL_EFFECT_PROSPECTING, SPELL_EFFECT_SKILL_STEP,
+    SPELL_EFFECT_SKINNING, SPELL_EFFECT_TRADE_SKILL,
 };
 mod skill_lines;
 pub use skill_lines::{
@@ -270,7 +270,7 @@ pub use terrain::{
     adt_to_tile_mesh, area_id_at, find_tile_near, ground_effect_at, impassable_at, load_tile_mesh,
     load_tiles_around, mcsh_shadowed_at, terrain_height_at, triangle_z_at, ChunkMesh, Doodad,
     MapTiles, TileMesh, WmoInstance, ALPHA_MAP_SIZE, CHUNK_SIZE, SHADOW_MAP_SIZE, STORMWIND_XY,
-    TILE_SIZE,
+    TERRAIN_LAYER_TILES, TILE_SIZE,
 };
 mod wdl;
 /// World (x, y) ↔ ADT tile `(col, row)` — the same mapping the streamer uses to pick tiles
@@ -339,13 +339,13 @@ mod taxi_path;
 pub use taxi_path::{load_taxi_paths, TaxiPath, TaxiPaths};
 
 /// The ten vanilla base content archives, **lowest priority first** — the reference mounter's
-/// table (`0x82e12c`) at its carved fixed priorities (`dbc.MPQ` = 0x36 … `model.MPQ` = 0x3f),
+/// table (`0x82e12c`) at its fixed priorities (`dbc.MPQ` = 0x36 … `model.MPQ` = 0x3f),
 /// reversed so [`Chain`]'s later-wins order reproduces them (decision 1300).
 ///
 /// This is only the *base* set: `patch.MPQ`, the `patch-?.MPQ` archives, and the optional
 /// `speech2.MPQ` are **discovered**, not listed — the whole mount law lives in [`Chain::open`].
 /// `base.MPQ` is deliberately absent: the reference opens it once for `telemetry.dat` and closes
-/// it before the mounter runs, so its contents are unreachable as assets (wow-re, VERIFIED).
+/// it before the mounter runs, so its contents are unreachable as assets (`0x5aa2d0`).
 ///
 /// The base archives hold the bulk of the data but carry **no `(listfile)`**; the master
 /// `(listfile)` (and most overrides) live in the patch archives, which is why the chain — not a
@@ -612,7 +612,7 @@ pub fn blp_bytes_to_mip_chain(bytes: &[u8]) -> Result<BlpMipChain> {
 }
 
 /// Every authored mip level of an in-memory BLP **with its DXTC blocks kept verbatim** — the form
-/// the reference client uploads (`glCompressedTexImage2DARB`; wow-re `system/image/image.md`).
+/// the reference client uploads (`glCompressedTexImage2DARB`, the OpenGL arm `0x59f5b0`).
 ///
 /// Raw1/Raw3 BLPs have no block form and come back decoded, reporting
 /// [`BlpTexels::Rgba8Unorm`] — so a caller switches on [`BlpMipChain::texels`] rather than

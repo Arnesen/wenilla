@@ -9,20 +9,19 @@
 //! **disabled** (`0x554cd0`'s three `push 0x0`, against `'WNPC'`/`'WIDB'`'s `push 0x1; push 0x1`)
 //! and are cleared at world-session start instead; a real 1.12 install's `WDB/` holds
 //! `creaturecache.wdb`, `npccache.wdb`, `itemcache.wdb` … and no `namecache.wdb`. 1689 read the
-//! carve as "all three" and wrote player and pet names to disk too, which is what answered a wiped
-//! server's brand-new character with a deleted one's name (B386); **decision 2223** took them back
-//! out and put the wipe in ([`NameCache::clear_world_session`]).
+//! reference as "all three" and wrote player and pet names to disk too, which is what answered a
+//! wiped server's brand-new character with a deleted one's name (B386); **decision 2223** took them
+//! back out and put the wipe in ([`NameCache::clear_world_session`]).
 //!
 //! What survives is the half that carried the value anyway: a city's worth of creature-template
 //! queries on zone-in, answered from disk instead of the wire. The **key** is the whole argument —
 //! a template entry means the same creature on every realm forever, while a player guid means one
 //! character and a pet number one live spawn.
 //!
-//! ## The law, from the carve
+//! ## The law, from the reference
 //!
-//! wow-re carved the whole `DBCache.cpp` machine (`system/dbcache/dbcache.md`, T3 — all 12 record
-//! decoders diffed bit-exact). Two of its contracts are the ones a re-implementation must honour,
-//! and both are about what the cache does *not* do:
+//! Two contracts of the reference's `DBCache.cpp` machine (`0x554b00`–`0x5738c0`) are the ones a
+//! re-implementation must honour, and both are about what the cache does *not* do:
 //!
 //! - **The header is compared by equality, and carries no checksum, no timestamp and no TTL.** Its
 //!   20 bytes are `[FourCC | build 0x16f3 | locale | recordSize | version 1]`. A mismatch discards
@@ -34,7 +33,7 @@
 //! ## Where it lives, and the one place we deviate
 //!
 //! The reference writes `WDB/` **inside the install**, which is precisely where benilla may not
-//! write (the contract's read-only rule). Ours goes to `benilla-config/cache/<realm>.tsv` through
+//! write (`docs/METHOD.md`'s read-only rule). Ours goes to `benilla-config/cache/<realm>.tsv` through
 //! [`crate::local_state`], like every other thing we persist — and it is **realm-scoped**, which
 //! the reference's is not. That is a fix rather than a preference: every key is realm-local (a
 //! player guid, a creature entry, a pet number), so one shared file would serve another realm's
@@ -259,7 +258,7 @@ mod tests {
         std::fs::write(&path, on_disk.to_tsv("Realm")).expect("write the realm cache");
 
         // The live session: the login has already seeded our own name (and a pet's), exactly as
-        // `net::apply::session::connected` does a moment after the pick goes out.
+        // `net::session::connected` does a moment after the pick goes out.
         let mut names = NameCache::default();
         names.insert_player(me, "Nelprifour".into(), None);
         names.insert_pet(PET_NUMBER, "Fluffy".into());

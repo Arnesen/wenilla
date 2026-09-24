@@ -41,14 +41,15 @@ use bevy::prelude::*;
 
 use benilla_protocol::messages::PetSpells;
 
-use crate::cooldowns::Cooldowns;
 use crate::net::{GuidIndex, ObjectStore};
+use crate::spell::Cooldowns;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 mod bar;
 mod drain;
 mod menu;
+mod net;
 mod unit;
 
 use bar::feed_pet_bar;
@@ -64,6 +65,8 @@ mod tests;
 ///
 /// `spells.pet_guid == 0` is "there is no pet bar", and it is the single test: the teardown packet
 /// carries exactly that and nothing else.
+///
+/// The session end resets it the same way (`net::on_session_end`): a dropped socket sends no teardown.
 #[derive(Resource, Default)]
 pub(crate) struct PetBar {
     /// The last `SMSG_PET_SPELLS` in full, with `SMSG_PET_MODE`'s state edits folded in.
@@ -75,7 +78,7 @@ pub(crate) struct PetBar {
     /// the pet's guid.
     pub(crate) cooldowns: Cooldowns,
     /// **"The possessed unit is attacking"** — the client's own `[0xb714b0]`, a purely local latch
-    /// with no field behind it anywhere (wow-re §1), and **the possess bar's, not the pet bar's**.
+    /// with no field behind it anywhere, and **the possess bar's, not the pet bar's**.
     ///
     /// It is `IsPetAttackActive` entire, and `GetPetActionInfo`'s COMMAND branch ORs it into
     /// `isActive` for action 2 (`0x4bdf16`–`0x4bdf22`), so it is also the only thing that can ever
@@ -90,7 +93,7 @@ pub(crate) struct PetBar {
     /// the **old-target clear `0x493910` at `0x493a18`** ([`pet_stop_on_old_target_clear`]), which
     /// every selection writer runs.
     ///
-    /// benilla read this off the pet's streamed `UNIT_FIELD_TARGET` until the RE landed. That is a
+    /// benilla once read this off the pet's streamed `UNIT_FIELD_TARGET`. That is a
     /// different question with a different answer: a defensive pet that retaliates on its own has
     /// a target the player never ordered, and the reference does not light the Attack button for
     /// it either.
@@ -129,7 +132,7 @@ pub(crate) struct PetBar {
 
 impl PetBar {
     /// `PetHasActionBar()` — is there a bar at all. The client's own gate is exactly this, a
-    /// nonzero cached pet guid: no alive check, no control check (wow-re §3).
+    /// nonzero cached pet guid: no alive check, no control check (`0x4bdc20`).
     pub(crate) fn has_bar(&self) -> bool {
         self.spells.pet_guid != 0
     }
@@ -139,6 +142,7 @@ pub(crate) struct UiPetPlugin;
 
 impl Plugin for UiPetPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<PetBar>().add_systems(
             Update,
             (

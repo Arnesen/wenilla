@@ -1,7 +1,4 @@
-//! The shared world state every probe reads: the entity tracker, the merged self descriptor, the
-//! item/vendor stores, the opcode tally — plus the session-keeping acks (teleport, force-speed, the
-//! granted movement-mode family) that keep *any* session alive regardless of probe mix, and the shared
-//! [`DeathArc`] scenario machinery (`--death`/`--spirit` both read it, so neither owns it).
+//! The state every probe shares, the acks that keep any session alive, and the [`DeathArc`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
@@ -12,9 +9,8 @@ use benilla_protocol::{
     SpeedKind, WorldSession,
 };
 
-/// A Kobold Vermin spawn in Northshire (mangos `creature` guid 79992) — the `--attack` teleport
-/// target: hostile, level 1, melee-reach the moment we land on it. Lives here (not in a probe)
-/// because attack staging, loot staging, and the [`DeathArc`] staging all teleport to it.
+/// A Kobold Vermin spawn in Northshire (`creature` guid 79992): hostile, level 1, in melee reach
+/// on landing. Attack, loot and death staging all teleport here.
 pub(crate) const ATTACK_TP: &str = ".go xyz -8780.71 -164.568 81.94";
 
 /// One entity decoded from the stream, as `benilla-world` reports it (raw WoW coords).
@@ -24,10 +20,7 @@ pub(crate) struct Tracked {
     pub(crate) orientation: f32,
 }
 
-/// The shared die→release→ghost→corpse scenario machinery (decision 0308 slice 1). Created when
-/// `--death` or `--spirit` is set; both probes read it, so neither owns it. The staging is in
-/// [`World::stage`]; the die/release pumps in [`World::poll`]; the ghost/graveyard/reclaim evidence
-/// in [`World::on_event`].
+/// The shared die, release, ghost and corpse sequence the death probes read.
 #[derive(Default)]
 pub(crate) struct DeathArc {
     pub(crate) die_sent: bool,
@@ -40,13 +33,10 @@ pub(crate) struct DeathArc {
     pub(crate) ghost_seen: bool,
     pub(crate) graveyard_pos: Option<[f32; 3]>,
     pub(crate) reclaim_delay_ms: Option<u32>,
-    /// Set when the death probe sends `.revive` OR the spirit probe sends the healer activate — the
-    /// ghost-clear check keys off this instead of either probe's own flag, so the two are decoupled.
+    /// Set by `.revive` (death) or the healer activate (spirit); the ghost-clear check needs it.
     pub(crate) revive_initiated: bool,
     pub(crate) revived_seen: bool,
-    /// **Stop at dead-unreleased** — `--self-res` sets it, and nothing else does (decision 1746).
-    /// The soulstone button lives on the DEATH dialog, which only exists *before* the release; an
-    /// arc that repops on its own would walk straight past the state under test.
+    /// Stop dead and unreleased for `--self-res`: the DEATH dialog exists only until release.
     pub(crate) hold_release: bool,
 }
 
@@ -56,18 +46,16 @@ pub(crate) struct World {
     pub(crate) self_name: String,
     pub(crate) self_level: u8,
     pub(crate) self_map: u32,
-    /// The `SMSG_CHAR_ENUM` spawn pose, the [`Self::self_pose`] fallback before our own create streams.
+    /// The `SMSG_CHAR_ENUM` spawn pose, used until our own create streams.
     pub(crate) spawn_pos: [f32; 3],
     pub(crate) tracked: HashMap<u64, Tracked>,
-    /// Our own descriptor fields (equipment/pack slots are PRIVATE-flagged — sent only for our own
-    /// player) merged across the create + every values delta.
+    /// Our merged descriptor; its private equipment and pack slots are sent only to us.
     pub(crate) self_fields: Option<ObjectFields>,
     pub(crate) item_entries: HashMap<u64, u32>,
     pub(crate) item_stacks: HashMap<u64, u32>,
     pub(crate) item_names: HashMap<u32, String>,
-    /// Streamed NPCs that advertise UNIT_NPC_FLAG_VENDOR, by guid → position.
     pub(crate) vendors: HashMap<u64, [f32; 3]>,
-    /// The last same-map teleport landing point (the `--attack`/`--charge`/`--loot`/`--death` spot).
+    /// The last same-map teleport landing point, whichever probe's staging sent it.
     pub(crate) attack_pos: Option<[f32; 3]>,
     /// Every self force-speed change seen (kind, counter, flat speed).
     pub(crate) speed_changes_seen: Vec<(SpeedKind, u32, f32)>,
@@ -79,21 +67,17 @@ pub(crate) struct World {
     pub(crate) item_answer: Option<(u32, Option<String>)>,
     pub(crate) cast_verdict: Option<(u32, bool, Option<u8>)>,
     pub(crate) targeted_verdict: Option<(u32, bool, Option<u8>)>,
-    /// The `--spells` dest-cast phase's spell (decision 0792): a `SMSG_CAST_RESULT` naming it
-    /// routes to [`Self::dest_verdict`] instead of the positional pair above — the dest phase
-    /// runs concurrently with the targeted phase, so position alone can't route it.
+    /// The `--spells` ground-cast spell, whose `SMSG_CAST_RESULT` goes to [`Self::dest_verdict`].
     pub(crate) dest_spell: Option<u32>,
     pub(crate) dest_verdict: Option<(u32, bool, Option<u8>)>,
     pub(crate) swings_seen: u32,
-    /// The refusals the server answered a swing with, by arm — `--attack`'s phase 2 verdict. The
-    /// wire has no reason byte, so the arm IS the reason.
+    /// Swing refusals: the wire has no reason byte, the opcode is the reason.
     pub(crate) swing_refusals: Vec<AttackSwingError>,
     pub(crate) self_moves: u32,
     pub(crate) tally: BTreeMap<String, u32>,
     pub(crate) total: u32,
     pub(crate) death_arc: Option<DeathArc>,
-    /// Shared staging flags: the ATTACK_TP (attack/loot/DeathArc all want it) and the McBride
-    /// teleport (questlog/giverstatus both want it) each go out once, set by whichever stages first.
+    /// Shared teleports go out once: whichever probe stages first sets the flag.
     pub(crate) attack_tp_staged: bool,
     pub(crate) mcbride_staged: bool,
 }
@@ -139,10 +123,7 @@ impl World {
         }
     }
 
-    /// Our tracked pose, for the movement acks the server expects while dead/ghost (root,
-    /// water-walk): the probe holds still throughout the arc, so any recent `tracked` position is
-    /// truthful — fall back to the SMSG_CHAR_ENUM spawn pose for the sliver of time before our own
-    /// ObjectCreate has streamed.
+    /// Our pose for movement acks: the probe holds still, so the tracked position is current.
     pub(crate) fn self_pose(&self) -> ([f32; 3], f32) {
         match self.tracked.get(&self.self_guid) {
             Some(t) => (t.position, t.orientation),
@@ -150,26 +131,19 @@ impl World {
         }
     }
 
-    /// Count a received packet: one per `recv`, before decode (the opcode tally + total).
+    /// Count a received packet, once per `recv` and before decode.
     pub(crate) fn tally_packet(&mut self, msg: &ServerPacket) {
         self.total += 1;
         *self.tally.entry(msg.name()).or_default() += 1;
     }
 
-    /// One-time pre-stream staging for the [`DeathArc`]. Called BEFORE the probes' stage loop, so
-    /// for `--spirit` the order is preserved: the arc's `.revive` + teleport, then spirit's
-    /// `.repairitems`.
+    /// The [`DeathArc`]'s staging. It runs before the probes' own, so the arc's `.revive` and
+    /// teleport precede `--spirit`'s `.repairitems`.
     pub(crate) fn stage(&mut self, session: &mut WorldSession) -> Result<()> {
         if self.death_arc.is_some() {
-            // Stage AWAY from any graveyard first (the kobold spot the other probes use): dying AT a
-            // graveyard makes the release teleport a 0-yd no-op and the >20-yd graveyard assertion
-            // reads it as a missing port (live-observed: a cleanup `.revive` leaves the character at
-            // the graveyard, and the next `.die` there re-pops in place). The `.die` itself goes out
-            // in-loop, once this staging teleport has landed. The `.revive` first is defensive: a
-            // prior aborted run can leave the character a ghost (live-observed), and the arc under
-            // test must start from alive (it's a no-op on a living character).
+            // Die away from any graveyard: a death at one re-pops in place, and the graveyard
+            // check reads that as a missing port. `.revive` first: a prior run may leave a ghost.
             session.send_chat(".revive")?;
-            // The ATTACK_TP is the shared teleport — mark it staged so attack/loot don't re-send it.
             session.send_chat(ATTACK_TP)?;
             self.attack_tp_staged = true;
             println!("sent GM: .revive (defensive); teleport (death staging): {ATTACK_TP}");
@@ -180,16 +154,13 @@ impl World {
     /// Every pump iteration, before recv: the [`DeathArc`] die/release steps.
     pub(crate) fn poll(&mut self, session: &mut WorldSession) -> Result<()> {
         if let Some(arc) = &mut self.death_arc {
-            // --death/--spirit: kill ourselves once the staging teleport has landed (`.die` with
-            // nothing selected targets the caster).
+            // `.die` with nothing selected kills the caster; sent once the staging teleport lands.
             if !arc.die_sent && self.attack_pos.is_some() {
                 session.send_chat(".die")?;
                 println!("sent GM: .die (self-kill)");
                 arc.die_sent = true;
             }
-            // --death: once we've hit 0 health AND the server has force-rooted us (the wire doesn't
-            // guarantee which arrives first — see the MoveRoot/ObjectValues arms below), release the
-            // spirit: the RELEASE SPIRIT button's `CMSG_REPOP_REQUEST` (decision 0308 §1).
+            // Release spirit (`CMSG_REPOP_REQUEST`) once dead and rooted, in whichever order.
             if !arc.hold_release && !arc.repop_sent && arc.died_at.is_some() && arc.rooted_seen {
                 session.repop_request()?;
                 println!("sent CMSG_REPOP_REQUEST (release spirit)");
@@ -199,8 +170,7 @@ impl World {
         Ok(())
     }
 
-    /// Every decoded event, before the probes' `on_event`: the ungated narration/evidence + the
-    /// unconditional session-keeping acks + the [`DeathArc`] evidence.
+    /// Each decoded event, before the probes' `on_event`: logging, session acks, death evidence.
     pub(crate) fn on_event(&mut self, ev: &SessionEvent, session: &mut WorldSession) -> Result<()> {
         match ev {
             SessionEvent::ObjectCreate {
@@ -214,8 +184,7 @@ impl World {
                 if *guid == self.self_guid {
                     self.self_fields = Some(fields.clone());
                 }
-                // A vendor advertises UNIT_NPC_FLAG_VENDOR (0x4 — NOT 0x80, which is
-                // INNKEEPER in 1.12; VERIFIED vmangos `UnitDefines.h:659`) in NPC_FLAGS.
+                // `UNIT_NPC_FLAG_VENDOR` is 0x4; in 1.12 0x80 is innkeeper (`UnitDefines.h:659`).
                 if *kind == EntityKind::Unit && fields.unit_npc_flags() & 0x4 != 0 {
                     self.vendors.insert(*guid, *position);
                 }
@@ -237,10 +206,8 @@ impl World {
                     .insert(*guid, fields.item_stack_count().unwrap_or(1));
             }
             SessionEvent::ObjectValues { guid, fields } if *guid == self.self_guid => {
-                // --death: the server force-flushes UNIT_FIELD_HEALTH the instant we
-                // die — a values delta carrying an EXPLICIT 0 (not merely absent) is
-                // the death instant itself. Must be read off `fields` (this delta)
-                // before the merge below moves it.
+                // The server flushes an explicit UNIT_FIELD_HEALTH 0 at the instant of death; read
+                // it off this delta, before the merge below.
                 let pose = self.self_pose();
                 if let Some(arc) = &mut self.death_arc {
                     if arc.died_at.is_none() && fields.unit_health() == Some(0) {
@@ -255,10 +222,8 @@ impl World {
                 }
                 if let Some(sf) = &mut self.self_fields {
                     sf.merge(fields.clone());
-                    // PLAYER_FLAGS_GHOST (bit 0x10, field 190) sets at release and
-                    // clears at revive — read off the MERGED store, not this delta
-                    // alone: a delta that doesn't touch PLAYER_FLAGS reads as an
-                    // absent field on `fields`, not "still whatever it last was".
+                    // PLAYER_FLAGS_GHOST (0x10, field 190) sets at release and clears at revive.
+                    // Read the merged store: a delta without PLAYER_FLAGS reads as absent.
                     if let Some(arc) = &mut self.death_arc {
                         if !arc.ghost_seen && sf.player_is_ghost() {
                             arc.ghost_seen = true;
@@ -326,7 +291,6 @@ impl World {
                         b.slot, b.action, b.kind
                     );
                 }
-                // Item-query the first item-kind button (T2 wire groundwork), once.
                 if self.item_asked.is_none() {
                     if let Some(b) = buttons.iter().find(|b| b.kind == 0x80) {
                         session.item_query(b.action, 0)?;
@@ -372,9 +336,8 @@ impl World {
                 counter,
                 speed,
             } if *guid == self.self_guid => {
-                // Ack with our live (streamed) pose — a zeroed fallback would ask the
-                // server to relocate us to (0,0,0), so no known pose means no ack (the
-                // post-stream ensure then fails loudly instead).
+                // The ack carries our pose and a zeroed one would move us to (0,0,0), so with no
+                // streamed pose there is no ack.
                 let Some(t) = self.tracked.get(guid) else {
                     println!(
                         "force {kind:?} speed change before our own create streamed — cannot ack"
@@ -394,12 +357,8 @@ impl World {
                 );
                 self.speed_changes_seen.push((*kind, *counter, *speed));
             }
-            // A cross-map port. Unacked, `HandleMoveWorldportAckOpcode` never runs, so the
-            // destination map streams NOTHING — no self create, and none of the arrival's own
-            // side effects (`--mount-tele`'s subject: the mount strip a map that forbids mounting
-            // performs right there). The tracked set is deliberately NOT purged here: the ack for
-            // whatever the arrival sends needs a pose, and ours is the landing point the packet
-            // just gave us.
+            // Until acked, `HandleMoveWorldportAckOpcode` never runs and the new map streams
+            // nothing. Keep the tracked set: acks after arrival need our pose, the landing point.
             SessionEvent::Worldport {
                 map_id,
                 position,
@@ -428,11 +387,9 @@ impl World {
                 position,
                 ..
             } if *guid == self.self_guid => {
-                // Ack the same-map port (the server freezes our movement otherwise).
+                // Ack the same-map port; the server freezes our movement until we do.
                 session.teleport_ack(*guid, *counter)?;
                 self.attack_pos = Some(*position);
-                // Move our tracked self to the landing point so range-based picks (the
-                // --vendor nearest-vendor search) measure from where we actually are.
                 if let Some(t) = self.tracked.get_mut(guid) {
                     t.position = *position;
                 }
@@ -440,11 +397,7 @@ impl World {
                     "teleported to ({:.1}, {:.1}, {:.1}) — ack sent",
                     position[0], position[1], position[2]
                 );
-                // --death: the graveyard port after release rides this same event —
-                // record it without duplicating the ack above. The spirit probe's
-                // healer_tp_landed capture (the old else-if branch) now lives in its own
-                // on_event: `healer_tp_sent` can only become true after `graveyard_pos` is
-                // Some (the healer-TP poll requires it), so the two are temporally disjoint.
+                // The graveyard port after release is this same event, already acked above.
                 if let Some(arc) = &mut self.death_arc {
                     if arc.repop_sent && arc.graveyard_pos.is_none() {
                         arc.graveyard_pos = Some(*position);
@@ -526,11 +479,8 @@ impl World {
                     }
                 }
             }
-            // **A granted mover mode** (root / water-walk / feather-fall / hover — decision 0866)
-            // must be acked with the echoed counter + our current pose, or the server never applies
-            // the change and observers never see it. Unconditional session-keeping (like
-            // teleport/force-speed): a mode granted outside the death arc would otherwise go
-            // un-acked, and the real client always acks.
+            // Root, water walk, feather fall and hover need an ack echoing the counter with our
+            // pose, or the server never applies them; the 1.12 client always acks.
             SessionEvent::MoveMode {
                 guid,
                 counter,
@@ -538,12 +488,9 @@ impl World {
                 apply,
             } if *guid == self.self_guid => {
                 let pose = self.self_pose();
-                // The ack's MovementInfo must carry the applied mode's own bit: for root the server
-                // KICKS one without it (vmangos `HandleMoveRootAck:715-723`; live-verified — the
-                // flags-0 ack drew "movement info does not have rooted movement flag" in
-                // Movement.log and the root never confirmed, so release sent no unroot), and for the
-                // other three the word IS the mover's new flags. This probe holds no mover state of
-                // its own, so the applied bit alone is the honest word.
+                // The ack's MovementInfo must carry the mode's own bit: vmangos kicks a player
+                // whose root ack lacks it (`HandleMoveRootAck`, MovementHandler.cpp:722-729). For
+                // the other modes the word becomes the mover's flags; the probe keeps no others.
                 let flags = if *apply { mode.flag() } else { 0 };
                 session.move_mode_ack(*guid, *counter, *mode, *apply, flags, pose)?;
                 if let Some(arc) = &mut self.death_arc {

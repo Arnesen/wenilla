@@ -3,13 +3,13 @@
 //!
 //! The mailbox window is entirely client-side (there is no `SMSG_SHOW_MAILBOX` on 5875): a
 //! right-click on a MAILBOX GameObject ([`crate::target`]) opens the session here — it stores the
-//! mailbox guid and requests the window's show; it sends **no** packet (the wow-re §5 confirms the
-//! MAILBOX use handler overrides the shared use-sender to a local open — never `CMSG_GAMEOBJ_USE`).
+//! mailbox guid and requests the window's show; it sends **no** packet (the MAILBOX use handler
+//! `0x5f6820` overrides the shared use-sender to a local open — never `CMSG_GAMEOBJ_USE`).
 //! The window's own `MAIL_SHOW` handler then calls `CheckInbox()`, whose intent this module drains
 //! into the first `CMSG_GET_MAIL_LIST` — one request, Lua-driven, exactly the reference flow
 //! (MailFrame.lua l.42).
 //!
-//! The net bridge ([`crate::net::apply::mail`]) fills [`MailOpen`] from the wire
+//! The mailbox's packet handlers ([`net`]) fill [`MailOpen`] from the wire
 //! (`SMSG_MAIL_LIST_RESULT` → the inbox rows; `SMSG_ITEM_TEXT_QUERY_RESPONSE` → the body cache;
 //! `SMSG_SEND_MAIL_RESULT` → the send/take result queues). Each frame [`feed_mail`] resolves each
 //! wire [`MailListEntry`] to a Lua-facing [`MailInboxRow`] (sender via the ask-once name cache, item
@@ -19,16 +19,16 @@
 //! `MAIL_SHOW` on open, `MAIL_INBOX_UPDATE` on a list/body change, `MAIL_CLOSED` on clear, and the
 //! send-result trio (see [`feed_mail`]). [`drain_mail`] pulls the Lua intents back out into the mail
 //! `CMSG`s. The standardized NPC-session range guard ([`crate::ui_session`]) client-side-closes the
-//! window when the player leaves the mailbox's interaction range (wow-re §5: the client's generic
-//! interaction-target range gate — past it every mail `CMSG` silently fails its `CheckMailBox`).
+//! window when the player leaves the mailbox's interaction range (the client's generic
+//! interaction-target range gate `0x493230` — past it every mail `CMSG` silently fails its
+//! `CheckMailBox`, `MailHandler.cpp:65`).
 //!
-//! **The arrival layer ([`MailPending`], decisions 0544 P3 / 0904 / 0913, wow-re
-//! `ui/scratch/mail-pending-countdown.md`).** `HasNewMail()` mirrors the real client's own model: a
-//! countdown float (`0x845eac`) read as **`|countdown| < ε`** — *near zero*, not `<= 0` (the sign
-//! matters, decision 0904: vmangos's "no mail" reply is `-86400.0`, which a `<= 0` predicate reads
-//! as "you have mail" at every login). vmangos only ever sends `0.0` ("waiting now") or `-86400.0`
-//! ("none") — never a positive value — but the countdown is implemented in full since that's the
-//! client's real model, not a two-value special case.
+//! **The arrival layer ([`MailPending`], decisions 0544 P3 / 0904 / 0913).** `HasNewMail()` mirrors
+//! the real client's own model: a countdown float (`0x845eac`) read as **`|countdown| < ε`** —
+//! *near zero*, not `<= 0` (the sign matters, decision 0904: vmangos's "no mail" reply is
+//! `-86400.0`, which a `<= 0` predicate reads as "you have mail" at every login). vmangos only ever
+//! sends `0.0` ("waiting now") or `-86400.0` ("none") — never a positive value — but the countdown
+//! is implemented in full since that's the client's real model, not a two-value special case.
 //!
 //! **The icon's whole life is that float**, because `MiniMapMailFrame` is the *only* listener of
 //! `UPDATE_PENDING_MAIL` in all of 1.12 FrameXML and its handler is a bare idempotent
@@ -53,11 +53,14 @@ use benilla_ui::script::{MailInboxRow, MailState, ScriptValue, StationeryView, U
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
-use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{
+    ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, Objects, SelfPlayer,
+};
 use crate::query_cache::QueryCache;
 use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
+mod net;
 mod pending;
 
 pub(crate) use pending::MailPending;
@@ -71,8 +74,8 @@ const CHECKED_COPIED: u32 = 0x4;
 /// l.108: a GM row shows its stationery icon even when it carries a package).
 const STATIONERY_GM: u32 = 61;
 
-/// The `CheckInbox` → `CMSG_GET_MAIL_LIST` client-side rate limit, in seconds (wow-re §5
-/// `ui/scratch/mail-interaction.md`: the real client drops repeat inbox queries inside this window).
+/// The `CheckInbox` → `CMSG_GET_MAIL_LIST` client-side rate limit, in seconds (`0x4aeab0`: the
+/// real client drops repeat inbox queries inside this window).
 const CHECK_INBOX_THROTTLE_SECS: f64 = 60.0;
 
 /// The letter-row icon by kind (the wire carries only a stationery id; the reference derives the
@@ -92,15 +95,15 @@ pub(crate) struct Stationery(pub(crate) benilla_formats::StationeryCatalog);
 /// One `SMSG_SEND_MAIL_RESULT` for `action == SEND`, queued by the net bridge for [`feed_mail`] to
 /// fire (the feed owns the `UiScript`, the apply site doesn't). `MAIL_FAILED` fires on **every**
 /// SEND result — success included — because the real client overloads it as "send resolved, unblock
-/// the UI" (wow-re §5, byte-verified; MailFrame.lua's `MAIL_FAILED` handler only re-enables the
-/// button). `MAIL_SEND_SUCCESS` fires additionally when `error == OK`.
+/// the UI" (`0x4ad15f`; MailFrame.lua's `MAIL_FAILED` handler only re-enables the button).
+/// `MAIL_SEND_SUCCESS` fires additionally when `error == OK`.
 pub(crate) struct MailSendAck {
     pub(crate) ok: bool,
     /// The message key for a non-OK, non-equip send failure (else `None`).
     pub(crate) refusal: Option<&'static str>,
 }
 
-/// The open mailbox, filled by the net bridge ([`crate::net::apply::mail`]) and read by
+/// The open mailbox, filled by the packet handlers ([`net`]) and read by
 /// [`feed_mail`]. Holds the mailbox guid and the inbox rows exactly as the wire delivered them
 /// (`SMSG_MAIL_LIST_RESULT`), the ask-once letter-body cache, and the send-result queues; the feed
 /// resolves each row to a display row and the drain maps a clicked 1-based row to its wire mail id.
@@ -114,14 +117,14 @@ pub(crate) struct MailOpen {
     /// Ask-once letter-body cache: `item_text_id` → body text, through [`QueryCache`] (2288).
     pub(crate) bodies: QueryCache<u32, String>,
     /// Fire `MAIL_SHOW` next feed — set on every mailbox click (the reference opens the window per
-    /// use; wow-re §5). Consumed by [`feed_mail`].
+    /// use, `0x4acd10`). Consumed by [`feed_mail`].
     show_requested: bool,
     /// Session-scoped throttle: the `Time::elapsed_secs_f64` of the last `CMSG_GET_MAIL_LIST`, or
     /// `None` when never queried this session (a fresh open queries immediately).
     last_list_query: Option<f64>,
     /// SEND-action results the net bridge queued for the feed to fire ([`MailSendAck`]).
     pub(crate) send_acks: Vec<MailSendAck>,
-    /// 1-based inbox rows a take just emptied and purged (`net::apply::mail`) — the feed fires
+    /// 1-based inbox rows a take just emptied and purged ([`net`]) — the feed fires
     /// `CLOSE_INBOX_ITEM(index)` for each, ahead of the `MAIL_INBOX_UPDATE` the purge causes.
     pub(crate) close_inbox: Vec<u32>,
     /// Refusals (a take/return/delete failure) the feed shows, as message keys — resolved at the
@@ -189,8 +192,9 @@ impl MailOpen {
 
 /// The mailbox window is an NPC-less interaction session: the standardized range guard
 /// ([`crate::ui_session`]) client-side-closes it — the exact `CloseMail` clear — when the player
-/// leaves the mailbox's interaction range (wow-re §5: the client's generic interaction-target range
-/// gate, the same one the mail `CMSG`s' server-side `CheckMailBox` enforces at 5 yd).
+/// leaves the mailbox's interaction range (the client's generic interaction-target range gate
+/// `0x493230`, the same one the mail `CMSG`s' server-side `CheckMailBox` (`MailHandler.cpp:65`)
+/// enforces at 5 yd).
 impl NpcSession for MailOpen {
     fn npc(&self) -> Option<u64> {
         self.mailbox
@@ -206,6 +210,7 @@ pub(crate) struct UiMailPlugin;
 impl Plugin for UiMailPlugin {
     fn build(&self, app: &mut App) {
         crate::query_cache::register::<MailOpen>(app);
+        net::register(app);
         app.init_resource::<MailOpen>()
             .init_resource::<MailPending>()
             .add_systems(
@@ -309,7 +314,7 @@ fn resolve_row(
     // carries attachments (item or money) from a not-yet-returned player sender — that is the
     // server's own expiry behavior (vmangos `ReturnOrDeleteOldMails`). Everything else — plain
     // letters, system mail, already-returned mail — deletes. The exact client predicate behind
-    // `InboxItemCanDelete` is un-RE'd; this mirrors the observable law.
+    // `InboxItemCanDelete` is not read from the reference; this mirrors the observable law.
     let can_delete =
         returned || entry.sender_guid.is_none() || (entry.item.is_none() && entry.money == 0);
 
@@ -352,7 +357,7 @@ fn resolve_row(
         .then(|| bodies.get(entry.item_text_id))
         .flatten();
 
-    // ── The auction house's mail (`ui_mail::invoice`, wow-re §11.1a) ─────────────────────────
+    // ── The auction house's mail (`ui_mail::invoice`, `0x4ace70`/`0x4af360`) ─────────────────
     // Two independent resolves off one subject: the DISPLAYED subject, which every auction notice
     // gets, and the INVOICE, which only a won/sold notice can answer and only once its body has
     // been fetched.
@@ -439,7 +444,7 @@ fn resolve_row(
 }
 
 /// Build the Lua-facing snapshot from [`MailOpen`] — `None` when no mailbox is open.
-/// The usable stationery list (wow-re `stationery-bindings.md` §`0x4ad970`, 1970): every
+/// The usable stationery list (`0x4ad970`, 1970): every
 /// `Stationery.dbc` row that is always available (`Flags & 1`) or whose item the player carries
 /// (bags, not the bank — the client's `0x622270`), and whose item template is cached — the name,
 /// icon and price come off the template — sorted by BuyPrice ascending, the client's comparator
@@ -448,6 +453,7 @@ fn resolve_row(
 fn stationeries(
     catalog: &Stationery,
     self_q: &Query<(&ObjectStore, &crate::net::Guid), With<SelfPlayer>>,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
@@ -461,7 +467,7 @@ fn stationeries(
         let carried = store.is_some_and(|s| {
             crate::ui_items::count_of(
                 &s.0,
-                items,
+                objects,
                 row.item,
                 crate::ui_items::InventoryScope::CARRIED,
             ) > 0
@@ -535,6 +541,7 @@ struct MailFeedExtras<'w, 's> {
 fn feed_mail(
     script: Option<NonSendMut<UiScript>>,
     mut mail: ResMut<MailOpen>,
+    objects: Objects,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     stationery: Option<Res<Stationery>>,
@@ -574,20 +581,20 @@ fn feed_mail(
         .filter_map(|key| crate::ui_action::keyed_line(&script, key))
         .collect();
     crate::ui_action::show_messages(&mut script, &mut sink, "ui_mail", refusals);
-    // SEND acks: MAIL_FAILED on EVERY send result (unblocks the button — wow-re §5), plus
+    // SEND acks: MAIL_FAILED on EVERY send result (unblocks the button — `0x4ad15f`), plus
     // MAIL_SEND_SUCCESS on OK (resets the form) or the refusal's own line on a failure. The
     // success also SAYS so — `ERR_MAIL_SENT`, the yellow info line `0x4ad0b1` shows before it
     // resets the form (decision 1821).
     // A take emptied and purged a row: `CLOSE_INBOX_ITEM(index)` — the stock handler hides the
     // open letter when it is that row — ahead of the `MAIL_INBOX_UPDATE` the changed list fires
-    // below, the client's own order (wow-re `stationery-bindings.md` §8, 1970).
+    // below, the client's own order (`0x4ad772` before `0x4ad7a3`, 1970).
     for index in std::mem::take(&mut mail.close_inbox) {
         script.fire_event("CLOSE_INBOX_ITEM", vec![ScriptValue::Int(i64::from(index))]);
     }
-    // `SMSG_SEND_MAIL_RESULT 0x4ad050`, in its own order (wow-re `mail-interaction.md` §4): the
-    // GlobalString toast, then — on `action 0 / reason 0` only — the compose-tab reset `0x4acdc0(1)`
-    // with its three events, and **last, on every path, `MAIL_FAILED`** (`0x4ad15f`, unconditional:
-    // a successful send fires it too, as the generic "the send resolved, unblock the form" signal).
+    // `SMSG_SEND_MAIL_RESULT 0x4ad050`, in its own order: the GlobalString toast, then — on
+    // `action 0 / reason 0` only — the compose-tab reset `0x4acdc0(1)` with its three events, and
+    // **last, on every path, `MAIL_FAILED`** (`0x4ad15f`, unconditional: a successful send fires it
+    // too, as the generic "the send resolved, unblock the form" signal).
     for ack in std::mem::take(&mut mail.send_acks) {
         let key = if ack.ok {
             Some(MAIL_SENT_KEY)
@@ -649,7 +656,16 @@ fn feed_mail(
     let usable = stationery
         .as_deref()
         .filter(|_| !self_q.is_empty())
-        .map(|catalog| stationeries(catalog, &self_q, &items, icons.as_deref(), &commands))
+        .map(|catalog| {
+            stationeries(
+                catalog,
+                &self_q,
+                &objects,
+                &items,
+                icons.as_deref(),
+                &commands,
+            )
+        })
         .unwrap_or_default();
     let memo = last_stationeries.get(&script);
     if *memo != usable {
@@ -660,7 +676,7 @@ fn feed_mail(
         // The selection is cleared on open AND close (`0x4ace07`, 1970); the stock tab's reset
         // on MAIL_SHOW re-selects row 1.
         script.clear_stationery();
-        // The open core's own order (wow-re `mail-interaction.md` §1): store the mailbox, register
+        // The open core's own order (`0x4acd10`): store the mailbox, register
         // the interaction target, **reset the compose tab** — a fresh window carries no stale
         // attachment or money — and only THEN `MAIL_SHOW`. The reset's `MAIL_SEND_SUCCESS` is the
         // byte-verified open side-effect, so the page-turn sound on open is faithful, not a bug.
@@ -669,7 +685,7 @@ fn feed_mail(
     } else if closed {
         script.clear_stationery();
         script.fire_event("MAIL_CLOSED", vec![]);
-        // The close core's tail (wow-re `0x4acdad`/`0x4acdb1`, decision 0913): a session where a
+        // The close core's tail (`0x4acdad`/`0x4acdb1`, decision 0913): a session where a
         // mail was read — or one arrived while the window was open — re-asks the server, and the
         // sender stamps the countdown to "no mail" on the way out. This is the whole mechanism by
         // which checking your mail clears the minimap icon; nothing on the inbox path touches it.
@@ -721,7 +737,7 @@ fn drain_mail(
     mut mail: ResMut<MailOpen>,
     commands: Res<NetCommands>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    items: Res<Items>,
+    objects: Objects,
     time: Res<Time>,
     mut pending: ResMut<MailPending>,
 ) {
@@ -739,7 +755,7 @@ fn drain_mail(
         return;
     };
 
-    // CheckInbox → a session-scoped, 60s-throttled inbox query (wow-re §5).
+    // CheckInbox → a session-scoped, 60s-throttled inbox query (`0x4aeab0`).
     if script.take_mail_check_inbox() {
         let now = time.elapsed_secs_f64();
         if mail
@@ -751,7 +767,7 @@ fn drain_mail(
         }
     }
 
-    // Opened mails: mark read (once) then ask-once the body (wow-re §5: read FIRST, body second).
+    // Opened mails: mark read (once) then ask-once the body (`0x4af110`: read FIRST, body second).
     for index in script.take_mail_opens() {
         let Some((mail_id, text_id, read)) = index
             .checked_sub(1)
@@ -824,7 +840,7 @@ fn drain_mail(
     if let Some(req) = script.take_mail_send() {
         let item_guid = req.item.and_then(|(bag, slot)| {
             self_q.iter().next().and_then(|s| {
-                crate::ui_items::slot_guid(&s.0, bag, (slot.max(1) - 1) as u8, &items)
+                crate::ui_items::slot_guid(&s.0, bag, (slot.max(1) - 1) as u8, &objects)
             })
         });
         if req.item.is_some() && item_guid.is_none() {

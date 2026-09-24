@@ -1,6 +1,6 @@
-//! `--charge`: warrior Charge (spell 100). GM `.learn 100`, teleport near the kobold camp, cast
-//! Charge at a creature 8–25 yd out, and require an `SMSG_MONSTER_MOVE` for our OWN guid (Charge is
-//! a self spline) — then ack the spline (`CMSG_MOVE_SPLINE_DONE`) and prove the stream survives.
+//! `--charge`: warrior Charge (spell 100) at a creature 8–25 yd out must bring an
+//! `SMSG_MONSTER_MOVE` for our own guid (a self spline), and the session must survive our
+//! `CMSG_MOVE_SPLINE_DONE` ack.
 
 use std::time::{Duration, Instant};
 
@@ -9,22 +9,17 @@ use benilla_protocol::{guid, EntityKind, SessionEvent};
 
 use crate::probes::{Ctx, Probe};
 
-/// The `--charge` probe spot: open ground ~18 yd west of the kobold camp ([`crate::world::ATTACK_TP`]),
-/// so the camp's kobolds stream in at charge range (8–25 yd) while we land *outside* the immediate
-/// aggro cluster — Charge refuses to fire while the caster is in combat, so we must cast before a
-/// kobold closes and engages us.
+/// Open ground about 18 yd west of the kobold camp: kobolds in charge range but outside aggro,
+/// since Charge refuses to fire while the caster is in combat.
 const CHARGE_TP: &str = ".go xyz -8798.71 -164.568 81.94";
 
 #[derive(Default)]
 pub(crate) struct Charge {
     charge_target: Option<u64>,
-    /// The pending self-spline ack: (endpoint, splineId, when-to-send). Captured from the self
-    /// `SMSG_MONSTER_MOVE`, sent after the ride's duration elapses — the round-trip that proves our
-    /// `CMSG_MOVE_SPLINE_DONE` wire is right (a malformed body drops the session).
+    /// The pending self-spline ack: (endpoint, splineId, when to send).
     charge_ack: Option<([f32; 3], u32, Instant)>,
     charge_acked: bool,
-    /// `World::total` snapshotted when the ack went out; `verify` reads `total - total_at_ack` as the
-    /// "packets after the ack" count (the old per-packet `msgs_after_ack` tally, exactly).
+    /// `World::total` when the ack went out, so `verify` can count the packets after it.
     total_at_ack: Option<u32>,
 }
 
@@ -37,10 +32,8 @@ impl Probe for Charge {
     }
 
     fn poll(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Fire Charge at a creature in range once we've landed. Charge needs the target 8–25 yd out,
-        // so pick the *farthest* streamed creature inside that band (maximises the odds of a valid
-        // range, and keeps clear of a kobold already on top of us). One shot — the first packet the
-        // server sends back for our own guid is the whole proof.
+        // Once landed, charge the farthest creature inside Charge's 8–25 yd band, clear of any
+        // kobold already on us. One shot.
         if self.charge_target.is_none() {
             if let Some(pos) = cx.world.attack_pos {
                 let pick = cx
@@ -58,9 +51,8 @@ impl Probe for Charge {
                     .filter(|(_, _, d)| (8.0..=25.0).contains(d))
                     .max_by(|a, b| a.2.total_cmp(&b.2));
                 if let Some((guid, tpos, dist)) = pick {
-                    // Face the target first — Charge refuses a target that isn't in front (reason 124,
-                    // SPELL_FAILED_UNIT_NOT_INFRONT). Report our facing with a Stop at the landing spot
-                    // (WoW orientation = atan2(Δy, Δx)), then select + cast.
+                    // Face it first: Charge refuses a target not in front (124,
+                    // `SPELL_FAILED_UNIT_NOT_INFRONT`). Orientation is `atan2(Δy, Δx)`.
                     let orientation = (tpos[1] - pos[1]).atan2(tpos[0] - pos[0]);
                     cx.session.stop(pos, orientation)?;
                     cx.session.set_selection(guid)?;
@@ -72,9 +64,8 @@ impl Probe for Charge {
                 }
             }
         }
-        // Ack the self-spline once its ride would have finished (`CMSG_MOVE_SPLINE_DONE` at the
-        // endpoint). The server holds a player mover as spline-pending until this arrives; a surviving
-        // stream afterward is the live proof the ack wire parses.
+        // Ack at the endpoint once the ride is over: the server holds a player mover
+        // spline-pending until `CMSG_MOVE_SPLINE_DONE` arrives.
         if let Some((endpoint, spline_id, at)) = self.charge_ack {
             if !self.charge_acked && Instant::now() >= at {
                 cx.session.move_spline_done(endpoint, 0.0, spline_id)?;
@@ -99,9 +90,7 @@ impl Probe for Charge {
             ..
         } = ev
         {
-            // Queue the SPLINE_DONE ack for once the ride would have finished:
-            // the endpoint is the last waypoint; send after `duration_ms` (+ a
-            // margin) so we don't ack a spline the server still thinks is running.
+            // Ack at the last waypoint after `duration_ms` plus a margin, never mid-spline.
             if *guid == cx.world.self_guid && self.charge_ack.is_none() && !*stop {
                 if let Some(&endpoint) = path.last() {
                     let at = Instant::now() + Duration::from_millis(u64::from(*duration_ms) + 200);
@@ -113,8 +102,6 @@ impl Probe for Charge {
     }
 
     fn verify(&mut self, cx: &mut Ctx) -> Result<()> {
-        // --charge verdict: the port must have landed, a target been found in range and Charge cast, and
-        // — the whole point — the server must have driven us with an SMSG_MONSTER_MOVE for our OWN guid.
         if cx.world.attack_pos.is_none() {
             bail!("--charge: the GM teleport never arrived (is the account gmlevel ≥ 2?)");
         }
@@ -126,8 +113,7 @@ impl Probe for Charge {
             bail!("--charge: cast Charge at {target:#x} but the server sent NO SMSG_MONSTER_MOVE for our guid (check the CAST_RESULT reason above — combat / range / stance)");
         }
         println!("✅ charge: {self_moves} self SMSG_MONSTER_MOVE — Charge drives the caster via a server spline (target {target:#x}).");
-        // The ack half: we sent CMSG_MOVE_SPLINE_DONE at the endpoint; a malformed body throws in the
-        // server's parser and drops us, so a stream that keeps flowing afterward is the live proof.
+        // A malformed ack body drops the session, so traffic after the ack proves it parsed.
         if self.charge_acked {
             let msgs_after_ack = cx.world.total
                 - self

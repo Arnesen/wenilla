@@ -34,7 +34,7 @@
 //!
 //! - **Over-reports**: any quad from a new widget counts, including one drawn off-screen or under
 //!   another window. "Something reached the render list" is not "the player can see it"; the
-//!   director's eye is still the judge of that (the contract §7). Over-reporting is the deliberate
+//!   director's eye is still the judge of that (`docs/METHOD.md` §7). Over-reporting is the deliberate
 //!   direction — a silent under-report is the failure mode this whole column exists to end.
 //! - **Under-reports** in one known shape: an addon that changes an *existing* widget in place —
 //!   `SetTexture` on one of our regions, `SetBackdrop` on one of our frames — creates no new

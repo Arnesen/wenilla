@@ -1,7 +1,7 @@
 //! **Outward** — the two action-bar drains, and the law that decides what a click *does*.
 //!
 //! - **Use** ([`drain_action_uses`]): a queued `UseAction(n)` becomes wire. A SPELL action goes
-//!   through the one cast-send path ([`super::cast_send::send_spell_cast`]); the auto-attack action
+//!   through the one cast-send path ([`crate::spell::CastLadder::send`]); the auto-attack action
 //!   (6603) sends `CMSG_ATTACKSWING` at the selection, or acquires the nearest enemy when there is
 //!   none; an ITEM action names an *entry*, not a position, so it must first find a copy and then
 //!   decide equip-vs-use — [`item_action_route`], the byte-verified two-stage law of decision 0666.
@@ -23,8 +23,9 @@ use benilla_ui::script::UiScript;
 
 use crate::net::{ClientCommand, NetCommands};
 
-use super::cast_send::{CastCommit, CastLadder};
-use super::{attack_actor_refusal, cast_target, PlayerActions, UiErrorKeys, SPELL_ATTACK};
+use crate::spell::{cast_target, CastCommit, CastLadder};
+
+use super::{attack_actor_refusal, PlayerActions, UiErrorKeys, SPELL_ATTACK};
 
 /// What clicking an ITEM action does, and to which copy — [`item_action_route`]'s verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,9 +39,8 @@ pub(super) enum ItemRoute {
     Nowhere,
 }
 
-/// The reference's **two-stage** equip-vs-use decision for an ITEM action, byte-verified (wow-re
-/// `action-item-slot.md` §8.1, `0x4e5fdd`–`0x4e5ff7`; decision 0666, which supersedes 0216 §7's
-/// guessed one):
+/// The reference's **two-stage** equip-vs-use decision for an ITEM action (`0x4e5fdd`–`0x4e5ff7`;
+/// decision 0666, which supersedes 0216 §7's guessed one):
 ///
 /// ```text
 /// InventoryType == 0            → USE          (a consumable is never equipped)
@@ -135,39 +135,11 @@ pub(super) fn attack_target_binding(
     }
 }
 
-/// **The `modalNextSpell` chain** — `HandleCastResult 0x6e7330`'s tail (`0x6e7447`–`0x6e74aa`),
-/// the client casting a spell at itself with no user input. `cast_result` decides *whether*
-/// (the column read, the in-flight test, the already-running test — all of it is the packet
-/// handler's, so it stays there); this only carries the decision to the one send path.
-///
-/// The cast goes out at the **null target guid** — `0x6e74a6 push ebx; push ebx` with `ebx = 0`
-/// — so the chained Auto Shot binds through the ordinary target walk (`ArmCast 0x6e5250`:
-/// main-hand item bit, then the explicit guid, then the current selection), which is what
-/// [`cast_target::CastTargeting::context`] hands the ladder when no guid is passed.
-///
-/// And it takes **every rung**: the reference chains through `0x6e5a90` → `TryCast 0x6e4b60`, the
-/// same entry a button press uses, so a chained Auto Shot is range-checked, form-checked and
-/// GCD-checked exactly like a pressed one, and refuses with the same red line.
-pub(super) fn drain_chain_casts(
-    mut queue: ResMut<crate::ui_action::ChainCasts>,
-    targeting: cast_target::CastTargeting,
-    mut ladder: CastLadder,
-) {
-    if queue.0.is_empty() {
-        return;
-    }
-    let ctx = targeting.context();
-    for spell_id in std::mem::take(&mut queue.0) {
-        debug!("ui_action: modalNextSpell chain casts {spell_id}");
-        ladder.send(spell_id, &ctx, CastCommit::Spell);
-    }
-}
-
 /// **The world right-click's GameObject opener**, run through the one cast path (decision 2199) —
 /// the seam [`crate::ui_action::GoOpenerCasts`] exists for.
 ///
 /// The reference reaches TryCast from the GameObject strategy's use-sender exactly as it does from
-/// a button press (`0x5f35c0 → 0x6e5a90 → 0x6e4b60`, wow-re `cursor-system.md` §8.4), so an opener
+/// a button press (`0x5f35c0 → 0x6e5a90 → 0x6e4b60`), so an opener
 /// takes **every rung** — in-flight, cooldown/GCD, power, crowd control, mounted, water, moving,
 /// form, reagents — and not the two the click used to check on its own. The rung that matters for
 /// the report this closes is the in-flight one: the second right-click on a chest whose Opening
@@ -275,7 +247,7 @@ pub(super) fn drain_action_uses(
                 // The attack-start validator's Phase A ([`attack_actor_refusal`]) — for a melee
                 // swing the actor is US. It refuses BEFORE the with-target swing and before the
                 // nearest-enemy scan (every Phase A gate precedes `0x6130b5`), so both arms gate
-                // here. Widened from mounted-only when wow-re carved the rest of `0x612df0`:
+                // here. Widened from mounted-only to the rest of `0x612df0`:
                 // stunned, pacified, fleeing, confused, charmed by somebody else, and dead now
                 // refuse the swing too, each with its own red line.
                 if attack_actor_refusal(
@@ -291,7 +263,7 @@ pub(super) fn drain_action_uses(
                         // pseudo-spell reaches through `TryCast`'s effect-0x4e short-circuit
                         // (`0x6e4c7a`), forks on `0x60ecb0`: already attacking →
                         // `0x6131d9 call 0x5ecac0` **StopAttack**, else `0x6131ee call 0x5ecb70`
-                        // **StartAttack** (wow-re `melee-autorepeat-exclusion.md` §5f).
+                        // **StartAttack**.
                         //
                         // Both halves were wrong here. There was no toggle-off at all, and the
                         // press cancelled a running auto-repeat *unconditionally* — but only the
@@ -338,9 +310,9 @@ pub(super) fn drain_action_uses(
                     ladder.ground.clear();
                     continue;
                 }
-                // The active-action toggle (`0x4e55f0` → the `0x4e60c1` cancel; wow-re
-                // `shapeshift-plaincast-toggle.md`): a live ActiveIconID spell re-pressed on
-                // its button cancels its own aura — Ghost Wolf, the druid forms, Stealth. The
+                // The active-action toggle (`0x4e55f0` → the `0x4e60c1` cancel): a live
+                // ActiveIconID spell re-pressed on its button cancels its own aura — Ghost Wolf,
+                // the druid forms, Stealth. The
                 // form-match toggle is deliberately NOT here (the ref's `UseAction` has no such
                 // leg — the `CastSpell` dispatcher alone carries it; keep the asymmetry).
                 if let Some(d) = ladder.spells.as_ref().and_then(|s| s.catalog.get(b.action)) {
@@ -390,7 +362,7 @@ pub(super) fn drain_action_uses(
                     continue;
                 };
                 let route = item_action_route(&template, |s| {
-                    crate::ui_items::find_item(&store.0, &ladder.items, b.action, s)
+                    crate::ui_items::find_item(&store.0, &ladder.objects, b.action, s)
                 });
                 let ((bag_index, slot0, guid), equip) = match route {
                     ItemRoute::Use(pos) => (pos, false),
@@ -416,6 +388,7 @@ pub(super) fn drain_action_uses(
                     crate::ui_items::send_auto_equip(
                         &mut script,
                         &mut gate,
+                        &ladder.objects,
                         &ladder.items,
                         &ladder.commands,
                         bag_index,
@@ -459,11 +432,10 @@ pub(super) fn drain_action_uses(
                     );
                 }
             }
-            // The MACRO arm (`0x4e5ee0`'s `and ecx,0xbfffffff; call 0x4f1460` fork, wow-re
-            // `action-item-slot.md` §8): run the macro's body. Every line goes onto the chat-input
-            // queue — the door a typed line comes through — so `/cast`, `/target`, `/script`, the
-            // chat types and the 225 emotes all work in a macro by construction
-            // (`crate::ui_macro::run`'s module doc).
+            // The MACRO arm (`0x4e5ee0`'s `and ecx,0xbfffffff; call 0x4f1460` fork): run the
+            // macro's body. Every line goes onto the chat-input queue — the door a typed line
+            // comes through — so `/cast`, `/target`, `/script`, the chat types and the 225 emotes
+            // all work in a macro by construction (`crate::ui_macro::run`'s module doc).
             Some(b) if b.kind == ACTION_KIND_MACRO => {
                 if !crate::ui_macro::run_macro(&mut script, b.action) {
                     debug!(

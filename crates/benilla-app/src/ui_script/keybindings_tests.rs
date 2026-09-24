@@ -96,6 +96,7 @@ const ROW: &str = "BenillaOptionsFrameContainerBodyKeybindingsRow";
 
 #[test]
 fn the_page_is_an_options_category_with_the_collapsed_honest_tree() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     on_page(&mut s);
     assert!(s
@@ -191,6 +192,7 @@ fn the_page_is_an_options_category_with_the_collapsed_honest_tree() {
 
 #[test]
 fn the_capture_flow_binds_steals_and_refuses_like_112() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     on_page(&mut s);
     s.run(&format!("{ROW}1Header:Click()")).unwrap(); // expand Movement
@@ -300,6 +302,7 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
 
 #[test]
 fn unbind_reset_and_the_live_commit_replace_okay_cancel() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     on_page(&mut s);
     s.run(&format!("{ROW}1Header:Click()")).unwrap(); // expand Movement
@@ -348,6 +351,7 @@ fn unbind_reset_and_the_live_commit_replace_okay_cancel() {
 
 #[test]
 fn the_esc_ladder_closes_the_window_and_the_checkbox_switches_sets() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     on_page(&mut s);
     // The ladder (the ESC binding's own body): the options rung hides the window — since 1008
@@ -400,6 +404,7 @@ fn the_esc_ladder_closes_the_window_and_the_checkbox_switches_sets() {
 
 #[test]
 fn search_surfaces_bindings_as_live_rows_under_the_redirect_head() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run(r#"BINDING_NAME_JUMP = "Jump""#).unwrap();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
@@ -463,6 +468,7 @@ fn search_surfaces_bindings_as_live_rows_under_the_redirect_head() {
 
 #[test]
 fn the_action_bar_abbreviation_is_the_refs_own_getbindingtext() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     // ref UIParent.lua:1819 transcribed (UIParent.xml): one modifier abbreviates…
     assert_eq!(
@@ -519,6 +525,7 @@ fn the_action_bar_abbreviation_is_the_refs_own_getbindingtext() {
 /// own -32 — anchoring it to body-right hung the bar on the window border.
 #[test]
 fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     on_page(&mut s);
     // Every section open: 100+ flat rows — the list overflows its 19 slots and the bar shows.
@@ -543,8 +550,8 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
     // `FauxScrollFrameTemplate` carries a real `<ScrollChild>` which `FauxScrollFrame_Update` sizes
     // to `numItems * valueStep` (~5275px with every section open), our old template had none, and
     // the range is measured by unioning the scroll child's whole SUBTREE — the reference's own
-    // `0x786f80` recursion, which "re-enters itself for each shown child frame" with no clip or
-    // ScrollFrame exception (wow-re `system/ui/ui.md`, decision 1338). The reference would measure
+    // `0x786f80` recursion, which re-enters itself for each shown child frame with no clip or
+    // ScrollFrame exception (decision 1338). The reference would measure
     // the same; it simply never nests a faux list inside a real-scroll page, which our options
     // window is alone in doing.
     //
@@ -694,6 +701,7 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
 /// path a player actually finds a binding by — paints the row live with that key on its capsule.
 #[test]
 fn the_pet_lane_is_registered_under_the_action_bar_header() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     on_page(&mut s);
 

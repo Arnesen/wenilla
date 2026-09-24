@@ -46,38 +46,10 @@ pub(crate) fn install(build: BuildId) {
     }));
 }
 
-/// `WOW_CRASH_INJECT=<at_secs>` — one deliberate main-thread panic, mid-run: the standing test
-/// affordance for this module, in the shape of `perf::stall`'s injectors and armed beside them.
-/// The end-to-end falsifier is a run with it set: the process must die with a
-/// `crash-<unix>.txt` whose log tail ends in the `crash-inject` line below.
-pub(crate) fn arm_injector(app: &mut bevy::prelude::App) {
-    use bevy::prelude::*;
-    if let Some(at) = std::env::var("WOW_CRASH_INJECT")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-    {
-        app.insert_resource(CrashInject { at });
-        app.add_systems(Update, crash_inject);
-    }
-}
-
-#[derive(bevy::prelude::Resource)]
-struct CrashInject {
-    at: f32,
-}
-
-fn crash_inject(
-    inject: bevy::prelude::Res<CrashInject>,
-    time: bevy::prelude::Res<bevy::prelude::Time<bevy::time::Real>>,
-) {
-    if time.elapsed_secs() >= inject.at {
-        bevy::log::warn!(
-            "crash-inject: panicking the main thread at {:.1} s",
-            inject.at
-        );
-        panic!("crash-inject: deliberate panic (WOW_CRASH_INJECT)");
-    }
-}
+// The standing test affordance — `WOW_CRASH_INJECT=<at_secs>`, one deliberate main-thread panic
+// mid-run — is `perf::crash_inject`, a dev root: this module ships to players and knows nothing
+// of the `dev` seam (run_mode's one-door rule, 1176), and an instrument's home is with the
+// instruments. Its module doc carries the cross-platform incident that moved it there.
 
 /// Re-entrancy latch: a panic *inside* the hook (a poisoned lock, a failed write) must not
 /// recurse into it. Never cleared on purpose — after one report the process is on its way out,

@@ -574,9 +574,9 @@ pub(super) fn tick_script(
     };
     let (w, h) = (window.width(), window.height());
     // The 768-virtual UI space (decision 0582 — byte law: the client's FrameXML space is ALWAYS
-    // 768 units tall, every aspect, mapped to the window; wow-re ui.md's converter identity
-    // `f(screenH) = 768` + the caret `H_px/192` law), times the uiScale dial (decision 0584 —
-    // the VM's screen is `768/uiScale` units tall, so a dial below 1 shrinks everything). The VM
+    // 768 units tall, every aspect, mapped to the window; the converter identity `f(screenH) = 768`
+    // (`0x41ad10`) + the caret `H_px/192` law (`0x77b8c0`)), times the uiScale dial (decision 0584
+    // — the VM's screen is `768/uiScale` units tall, so a dial below 1 shrinks everything). The VM
     // lives entirely in that space: this seam scales quads ×s on the way out, mouse ÷s on the
     // way in (input.rs), and measures ÷s on the way back. At a 768-tall window with the dial at
     // 1 the whole pipeline is bit-identical to the pre-virtual behavior.
@@ -650,16 +650,10 @@ pub(super) fn tick_script(
     {
         let _span = bevy::log::info_span!("ui_script: tick").entered();
         let resized = script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
-        // A resize re-runs the bottom-stack manage pass (decision 1499). Anchors follow the new
-        // screen rect by themselves; what does not is a seat somebody COMPUTED from the old
-        // height — the open-bag stack starts a fresh column when the current one would run off
-        // the top, and that decision is made from `GetScreenHeight()` at layout time. Without
-        // this, dragging the window smaller leaves the bag columns wrapped for the old height
-        // until the next bag opens. Existence-guarded: the pass is defined by `UIParent.xml`,
-        // which is in-game UI, and this system also runs on the glue screens.
+        // A resize re-runs everything the interface COMPUTED from the old screen size — see
+        // [`super::manifest::on_screen_resized`].
         if resized {
-            let _ = script
-                .run("if UIParent_ManageFramePositions then UIParent_ManageFramePositions() end");
+            super::manifest::on_screen_resized(&script);
         }
         script.tick(time.delta_secs());
     }
@@ -934,7 +928,7 @@ pub(super) fn paint_script(
             script.set_editbox_advances(req.id, req.key, cum, rows, cell_h / s);
         }
     }
-    // The focused edit box's text-UI geometry (RF-0082 leaves caret/highlight geometry to the
+    // The focused edit box's text-UI geometry (the engine leaves caret/highlight geometry to the
     // host): which Text quad is the box's, the scroll window to draw, and the caret/selection
     // x-spans within it — advance-derived engine-side (the blink phase too, `0x77a790`'s 0.5 s
     // law in the engine tick), matched in the Text arm below.
@@ -1466,7 +1460,7 @@ fn convert_entry(
         } => {
             use crate::portrait::PortraitSource;
             // A FILE pane (decision 2008): publish what the tile renderer needs — the pane's
-            // device-pixel size, the render law's unit ladder off it, and where the composite
+            // device-pixel size, the reference's unit ladder off it, and where the composite
             // goes (its rect, paint key, alpha and clip). The request is idempotent, so the
             // memoized conversion may re-publish it freely; which panes draw is the engine's
             // paint list, and the quad itself is the renderer's per-frame output
@@ -1487,18 +1481,19 @@ fn convert_entry(
                     crate::ui_models::TileRequest {
                         path: path.to_string(),
                         size_px,
-                        // `1 model unit = 1280 · modelScale · layoutScale` FrameXML units (§3).
+                        // `1 model unit = 1280 · modelScale · layoutScale` FrameXML units
+                        // (`0x76d1a0`).
                         px_per_unit: 1280.0 * model_scale * layout * s * dpi,
                         // `SetPosition` is in layout units: `768 · √(a²+1)` FrameXML per unit.
                         pos_px_per_unit: 768.0 * diag * layout * s * dpi,
-                        // A particle's half-extent: eye space, neither scale (§6).
+                        // A particle's half-extent: eye space, neither scale (`0x7b2a50`).
                         star_px_per_unit: 768.0 * diag * s * dpi,
                         facing,
                         position: Vec3::new(position.0, position.1, position.2),
                         // The PERSPECTIVE leg's root (decision 2027), which is in model units,
                         // not pixels: `T(pos · layoutScale) · R(facing) · S(s)` with
                         // `s = G48·(5/3)·modelScale·layoutScale` — and `G48·(5/3)` is exactly
-                        // `√((4/3)²+1)/√(a²+1)`, the 4:3 renormalizer (camera-law §11.2). The
+                        // `√((4/3)²+1)/√(a²+1)`, the 4:3 renormalizer (`0x80655c`). The
                         // camera is carried through the same matrix, so both terms cancel for
                         // framing; they are here because the record's near/far are NOT scaled
                         // with them, and because the geometry has to be drawn somewhere.
@@ -1510,7 +1505,7 @@ fn convert_entry(
                         icon: icon.clone(),
                         rect,
                         z_key: eq.z,
-                        // The instance draws at the widget's OWN alpha (render law §4.4).
+                        // The instance draws at the widget's OWN alpha (`0x76d120`).
                         alpha: own_alpha,
                         clip,
                     },
@@ -1658,7 +1653,7 @@ fn convert_entry(
             // used to fall through to `color.unwrap_or(WHITE)` with a `None` texture, which
             // `ui_pass` renders as the shared 1×1 white image tinted white: an opaque white
             // rectangle at the region's rect, which is how B221's macro icons reached the
-            // director's screen. wow-re settles what the reference does: `TextureCreate` does
+            // director's screen. What the reference does: `TextureCreate` does
             // build an 8×8 placeholder, but `CSimpleTexture::SetTexture` (`0x770200`) checks the
             // status severity and at ≥2 releases it and returns **without touching the widget's
             // texture** — the widget keeps what it had, and Lua gets `nil`. Nothing goes white.
@@ -2590,7 +2585,7 @@ mod extract_gate_tests {
     /// half that can silently rot: the shader's `select(a, k, premultiplied)` is only correct if
     /// exactly the render-target quads carry the flag. Drop it and every additive effect the pane
     /// draws over EMPTY space is multiplied by its own zero alpha again — the R14 pauldrons' fire
-    /// gone, a weapon glow chopped at the model's silhouette (Goudy, `#bugs` 2026-07-27).
+    /// gone, a weapon glow chopped at the model's silhouette.
     #[test]
     fn a_booth_bake_quad_is_flagged_premultiplied_and_a_plain_one_is_not() {
         let mut app = app_with_marker();
@@ -2702,7 +2697,7 @@ mod extract_gate_tests {
             before - 1,
             "the cleared marker's quad is gone from the stitched list"
         );
-        // The follow-up (0 → 1 quads) splices against the RE-DERIVED spans.
+        // The follow-up (0 → 1 quads) splices against the re-derived spans.
         app.world_mut().resource_mut::<UiQuads>().dirty = false;
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -2788,7 +2783,7 @@ mod extract_gate_tests {
         );
         // The reference must share the app's HISTORY, not just its end state: `Show()` on a
         // hidden frame re-stacks it to the tail of its draw bucket — the client's own
-        // `effective_visible_show 0x76ae10` re-adding it to the level's intrusive list — so B
+        // effective-visibility show `0x76ae10` re-adding it to the level's intrusive list — so B
         // draws above C afterwards. (The splice got that right on its own; this reference did
         // not, which is how the difference surfaced.)
         let mut reference = app_from_script(&format!("{BUILD}\nhidden:Hide()\nhidden:Show()"));

@@ -1,11 +1,5 @@
-//! Chat + channel wire decode tests (mirrors `src/messages/chat.rs` + `src/messages/channel.rs`,
-//! decision 0288 phase 1): one golden per `SMSG_MESSAGECHAT` per-type wire shape (the reader was
-//! byte-correct before this decision but had zero golden coverage), `SMSG_TEXT_EMOTE`/`SMSG_EMOTE`,
-//! every `SMSG_CHANNEL_NOTIFY` tail shape, `SMSG_CHANNEL_LIST`, `SMSG_CHAT_PLAYER_NOT_FOUND`,
-//! `SMSG_CHAT_WRONG_FACTION`, `SMSG_NOTIFICATION`, `SMSG_PLAYED_TIME`, and `MSG_RANDOM_ROLL`'s
-//! broadcast shape. Bytes
-//! hand-computed from the vmangos layout (citations inline), independent of the Rust decoder — see
-//! `tests/common` for the shared `hx` fixture helper.
+//! The chat and channel wire: every `SMSG_MESSAGECHAT` shape, the emotes, the channel notices and
+//! list, and the small chat replies, bytes built from the vmangos layout.
 
 mod common;
 
@@ -14,17 +8,13 @@ use benilla_protocol::messages::{self, ChannelNoticeTail};
 use benilla_protocol::ServerPacket;
 use common::hx;
 
-/// `SMSG_MESSAGECHAT`'s five distinct wire shapes (VERIFIED vmangos `ChatHandler::BuildChatPacket`,
-/// `Chat/Chat.cpp:2542-2599`): SAY/PARTY/YELL (sender guid **twice**), MONSTER_SAY/MONSTER_YELL
-/// (guid + length-prefixed name + target guid), CHANNEL (cstring channel + `u32` rank + guid),
-/// MONSTER_WHISPER/RAID_BOSS_WHISPER/RAID_BOSS_EMOTE/MONSTER_EMOTE (length-prefixed name + target
-/// guid, no leading sender guid), and the `default:` shape (one sender guid) — SYSTEM, WHISPER,
-/// EMOTE, RAID, GUILD, OFFICER, AFK, DND, IGNORED, RAID_LEADER/WARNING, BATTLEGROUND(+LEADER) all
-/// fall here. Every shape ends `u32 len (incl NUL) + text + NUL`, then the trailing `u8 chatTag`
-/// (`Chat/Chat.h:86-92`) this decision surfaces on [`messages::ChatMessage::chat_tag`].
+/// The five `SMSG_MESSAGECHAT` shapes (vmangos `Chat/Chat.cpp:2542-2599`): SAY/PARTY/YELL send
+/// the sender guid twice; MONSTER_SAY/YELL a guid, a length-prefixed name and a target guid;
+/// CHANNEL a cstring channel, a `u32` rank and a guid; MONSTER_WHISPER, the raid-boss types and
+/// MONSTER_EMOTE the name and target guid only; every other type one sender guid. Each ends with a
+/// `u32` length (NUL included), the text and a `u8` chat tag (`Chat/Chat.h:86-92`).
 #[test]
 fn message_chat_decodes_every_wire_shape() {
-    // SAY: guid twice, chat_tag = AFK (1) — proves the tag rides through on the "two guid" shape.
     let body = hx("0007000000887766554433221188776655443322110900000068692074686572650001");
     match messages::parse_server(messages::opcode::SMSG_MESSAGECHAT, &body).unwrap() {
         ServerPacket::MessageChat(m) => {
@@ -39,17 +29,12 @@ fn message_chat_decodes_every_wire_shape() {
         _ => panic!("expected MessageChat"),
     }
 
-    // MONSTER_SAY: guid + length-prefixed name + target guid, chat_tag = none. Body: type(0b) +
-    // language(00000000) + sender guid(ddccbbaa…) + namelen(0f000000) + "Timmy the Wolf\0" +
-    // target guid(66778899…) + msglen(05000000) + "Grr!\0" + chatTag(00).
     let body = hx("0b00000000ddccbbaa000000000f00000054696d6d792074686520576f6c6600667788990000000005000000477272210000");
     match messages::parse_server(messages::opcode::SMSG_MESSAGECHAT, &body).unwrap() {
         ServerPacket::MessageChat(m) => {
             assert_eq!(m.chat_type, messages::CHAT_MSG_MONSTER_SAY);
             assert_eq!(m.sender_guid, 0xAABB_CCDD);
-            // The addressee — the guid slot between the name and the message. It is the subject
-            // the real client's `$`-macro expander resolves this line against (decision 0754), so
-            // it has to survive the parse instead of being read and dropped.
+            // The target guid is what the reference's `$`-macro expander resolves the line against.
             assert_eq!(m.target_guid, 0x9988_7766);
             assert_eq!(m.sender_name.as_deref(), Some("Timmy the Wolf"));
             assert_eq!(m.channel, None);
@@ -59,9 +44,6 @@ fn message_chat_decodes_every_wire_shape() {
         _ => panic!("expected MessageChat"),
     }
 
-    // CHANNEL: cstring channel + u32 rank + guid. Body: type(0e) + language(00000000) +
-    // "General\0" + playerRank(00000000) + sender guid(3412…) + msglen(10000000) +
-    // "wtb boar livers\0" + chatTag(00).
     let body = hx("0e0000000047656e6572616c000000000034120000000000001000000077746220626f6172206c69766572730000");
     match messages::parse_server(messages::opcode::SMSG_MESSAGECHAT, &body).unwrap() {
         ServerPacket::MessageChat(m) => {
@@ -74,9 +56,6 @@ fn message_chat_decodes_every_wire_shape() {
         _ => panic!("expected MessageChat"),
     }
 
-    // MONSTER_WHISPER: length-prefixed name + target guid (no leading sender guid at all). Body:
-    // type(1a) + language(00000000) + namelen(0e000000) + "Innkeeper Bob\0" + target guid(55…) +
-    // msglen(19000000) + "Welcome, weary traveler!\0".
     let body = hx("1a000000000e000000496e6e6b656570657220426f620055000000000000001900000057656c636f6d652c2077656172792074726176656c6572210000");
     match messages::parse_server(messages::opcode::SMSG_MESSAGECHAT, &body).unwrap() {
         ServerPacket::MessageChat(m) => {
@@ -89,9 +68,6 @@ fn message_chat_decodes_every_wire_shape() {
         _ => panic!("expected MessageChat"),
     }
 
-    // default shape (SYSTEM): one sender guid (0), chat_tag = GM (3). Body: type(0a) +
-    // language(00000000) + sender guid(0000000000000000) + msglen(1a000000) +
-    // "This is a system message.\0" + chatTag(03).
     let body = hx(
         "0a0000000000000000000000001a0000005468697320697320612073797374656d206d6573736167652e0003",
     );
@@ -106,17 +82,14 @@ fn message_chat_decodes_every_wire_shape() {
     }
 }
 
-/// `SMSG_TEXT_EMOTE` (VERIFIED vmangos `MaNGOS::EmoteChatBuilder::operator()`,
-/// `Handlers/ChatHandler.cpp:681-702`): `u64` performer guid (an `ObjectGuid` write, unpacked) + `u32`
-/// textEmote + `u32` emoteNum + `u32 namelen` + `namelen` bytes (the target's name + NUL, or a lone
-/// NUL when untargeted) — and `SMSG_EMOTE` (VERIFIED vmangos `EmoteNotify::AppendBodyTo`,
-/// `Server/Packets/Misc.cpp:670-674`): `u32` emoteId + `u64` guid.
+/// `SMSG_TEXT_EMOTE` (vmangos `Handlers/ChatHandler.cpp:681-702`): unpacked `u64` guid, `u32`
+/// textEmote, `u32` emoteNum, `u32` namelen and the target name with its NUL; `SMSG_EMOTE`
+/// (`Server/Packets/Misc.cpp:670-674`): `u32` emoteId and `u64` guid.
 #[test]
 fn text_emote_and_emote_decode() {
     let body = hx("7700000000000000650000000000000004000000426f6200");
     let p = messages::parse_server(messages::opcode::SMSG_TEXT_EMOTE, &body).unwrap();
-    // The target name is KEPT, not skipped past: it is the sentence-form selector (decision 1274).
-    // The NUL inside `namelen` is trimmed, so the string is exactly the display name.
+    // The target name picks the sentence form; the NUL counted in `namelen` is trimmed.
     assert!(matches!(
         &p,
         ServerPacket::TextEmote {
@@ -134,8 +107,7 @@ fn text_emote_and_emote_decode() {
         }] if target_name == "Bob"
     ));
 
-    // Untargeted: vmangos writes `namelen == 1` and a lone NUL, which must read as the EMPTY
-    // string — the "untargeted" bit — and not as a one-byte name.
+    // Untargeted, vmangos sends `namelen == 1` and a lone NUL: an empty name, not a one-byte one.
     let body = hx("770000000000000065000000000000000100000000");
     assert!(matches!(
         messages::parse_server(messages::opcode::SMSG_TEXT_EMOTE, &body).unwrap(),
@@ -160,12 +132,9 @@ fn text_emote_and_emote_decode() {
     ));
 }
 
-/// Every `SMSG_CHANNEL_NOTIFY` tail shape (VERIFIED vmangos `Channel::Make*`,
-/// `Chat/Channel.cpp:804-1008`), one representative per [`ChannelNoticeTail`] variant, plus the
-/// unrecognized-notice error path.
+/// One `SMSG_CHANNEL_NOTIFY` per tail shape (vmangos `Chat/Channel.cpp:804-1008`).
 #[test]
 fn channel_notify_decodes_each_tail_shape() {
-    // 0x00 JOINED: guid.
     let body = hx("0047656e6572616c00aa00000000000000");
     match messages::parse_server(messages::opcode::SMSG_CHANNEL_NOTIFY, &body).unwrap() {
         ServerPacket::ChannelNotify(n) => {
@@ -186,8 +155,7 @@ fn channel_notify_decodes_each_tail_shape() {
         _ => panic!("expected ChannelNotify"),
     }
 
-    // 0x05 NOT_MEMBER: empty tail — both the instance (`MakeNotMember`) and static
-    // (`MakeNotOnPacket`) vmangos producers write this exact shape; no special-casing needed.
+    // 0x05 NOT_MEMBER: empty tail; `MakeNotMember` and `MakeNotOnPacket` both send it.
     let body = hx("0553656372657400");
     match messages::parse_server(messages::opcode::SMSG_CHANNEL_NOTIFY, &body).unwrap() {
         ServerPacket::ChannelNotify(n) => {
@@ -198,7 +166,6 @@ fn channel_notify_decodes_each_tail_shape() {
         _ => panic!("expected ChannelNotify"),
     }
 
-    // 0x18 INVITE: a lone actor guid.
     let body = hx("1847656e6572616c00bb00000000000000");
     match messages::parse_server(messages::opcode::SMSG_CHANNEL_NOTIFY, &body).unwrap() {
         ServerPacket::ChannelNotify(n) => {
@@ -208,7 +175,6 @@ fn channel_notify_decodes_each_tail_shape() {
         _ => panic!("expected ChannelNotify"),
     }
 
-    // 0x09 PLAYER_NOT_FOUND: a bare name.
     let body = hx("0947656e6572616c0047686f737400");
     match messages::parse_server(messages::opcode::SMSG_CHANNEL_NOTIFY, &body).unwrap() {
         ServerPacket::ChannelNotify(n) => {
@@ -228,7 +194,6 @@ fn channel_notify_decodes_each_tail_shape() {
         _ => panic!("expected ChannelNotify"),
     }
 
-    // 0x0C MODE_CHANGE: guid + old flags + new flags.
     let body = hx("0c47656e6572616c00cc000000000000000002");
     match messages::parse_server(messages::opcode::SMSG_CHANNEL_NOTIFY, &body).unwrap() {
         ServerPacket::ChannelNotify(n) => {
@@ -245,7 +210,6 @@ fn channel_notify_decodes_each_tail_shape() {
         _ => panic!("expected ChannelNotify"),
     }
 
-    // 0x12 PLAYER_KICKED: target guid + source (actor) guid.
     let body = hx("1247656e6572616c00dd00000000000000ee00000000000000");
     match messages::parse_server(messages::opcode::SMSG_CHANNEL_NOTIFY, &body).unwrap() {
         ServerPacket::ChannelNotify(n) => {
@@ -261,8 +225,6 @@ fn channel_notify_decodes_each_tail_shape() {
         _ => panic!("expected ChannelNotify"),
     }
 
-    // Round-trip the decoded ChannelNotify through the event layer once (the mapping is a flat
-    // passthrough, but it must actually be wired).
     let body = hx("0047656e6572616c00aa00000000000000");
     let p = messages::parse_server(messages::opcode::SMSG_CHANNEL_NOTIFY, &body).unwrap();
     match &decode(p)[..] {
@@ -278,14 +240,13 @@ fn channel_notify_decodes_each_tail_shape() {
         other => panic!("channel notify decode: {} events", other.len()),
     }
 
-    // An unrecognized notice byte (outside vmangos's defined 0x00..=0x1F) errors rather than
-    // guessing a tail shape.
+    // A notice byte past vmangos's 0x00..=0x1F errors rather than guessing a tail.
     let body = hx("2047656e6572616c00");
     assert!(messages::parse_server(messages::opcode::SMSG_CHANNEL_NOTIFY, &body).is_err());
 }
 
-/// `SMSG_CHANNEL_LIST` (VERIFIED vmangos `Channel::List`, `Chat/Channel.cpp:513-556`): cstring
-/// channel + `u8` flags + `u32` count + that many `(u64 guid, u8 memberFlags)` rows.
+/// `SMSG_CHANNEL_LIST` (vmangos `Chat/Channel.cpp:513-556`): cstring channel, `u8` flags, `u32`
+/// count, then `(u64 guid, u8 memberFlags)` rows.
 #[test]
 fn channel_list_decodes_roster() {
     let body = hx("47656e6572616c001802000000011000000000000001021000000000000000");
@@ -303,7 +264,7 @@ fn channel_list_decodes_roster() {
     }
 }
 
-/// `SMSG_CHAT_PLAYER_NOT_FOUND` (cstring name, VERIFIED vmangos `Server/Packets/Chat.cpp:26-29`) and
+/// `SMSG_CHAT_PLAYER_NOT_FOUND` (cstring name, vmangos `Server/Packets/Chat.cpp:26-29`) and
 /// `SMSG_CHAT_WRONG_FACTION` (empty body, `Server/Packets/Chat.cpp:16-18`).
 #[test]
 fn chat_player_not_found_and_wrong_faction_decode() {
@@ -324,10 +285,8 @@ fn chat_player_not_found_and_wrong_faction_decode() {
     assert!(matches!(decode(p)[..], [SessionEvent::ChatWrongFaction]));
 }
 
-/// `SMSG_NOTIFICATION` (VERIFIED vmangos `WorldSession::SendNotification`,
-/// `Server/WorldSession.cpp:900-915`: `data << szStr`): one cstring, pre-formatted server-side —
-/// the "You do not know that language" reply is how a wrong-tongue send fails (silently, until
-/// this packet was rendered).
+/// `SMSG_NOTIFICATION` (vmangos `Server/WorldSession.cpp:900-915`): one cstring, formatted by the
+/// server; a send in a language the sender does not know fails with this reply.
 #[test]
 fn notification_decodes() {
     let body = hx("596f7520646f206e6f74206b6e6f772074686174206c616e677561676500");
@@ -343,8 +302,7 @@ fn notification_decodes() {
     }
 }
 
-/// `SMSG_PLAYED_TIME` (VERIFIED vmangos `WorldPackets::Misc::PlayedTime::AppendBodyTo`,
-/// `Server/Packets/Misc.cpp:278-282`): `u32` total + `u32` level, both seconds.
+/// `SMSG_PLAYED_TIME` (vmangos `Server/Packets/Misc.cpp:278-282`): total and level, `u32` seconds.
 #[test]
 fn played_time_decodes() {
     let body = hx("40e20100100e0000"); // total = 123456, level = 3600
@@ -365,9 +323,8 @@ fn played_time_decodes() {
     ));
 }
 
-/// `MSG_RANDOM_ROLL`'s server→client broadcast shape (VERIFIED vmangos
-/// `WorldSession::HandleRandomRollOpcode`, `Handlers/GroupHandler.cpp:394-422`): `u32` min + `u32`
-/// max + `u32` roll + a **raw** `u64` guid.
+/// `MSG_RANDOM_ROLL`'s broadcast (vmangos `Handlers/GroupHandler.cpp:394-422`): `u32` min, max
+/// and roll, then an unpacked `u64` guid.
 #[test]
 fn random_roll_broadcast_decodes() {
     let body = hx("01000000640000002a0000009999000000000000");
@@ -392,25 +349,16 @@ fn random_roll_broadcast_decodes() {
     ));
 }
 
-/// The `$`-macro gate is a byte-level fact, not a design choice — pin it.
-///
-/// **The reference has TWO gates, and we want the WIRE one** (decision 0759 corrects 0754). The
-/// `SMSG_MESSAGECHAT` parser `0x49d560` routes `0x0B 0x0C 0x0D 0x1A 0x5A` into the expanding branch
-/// at `0x49da3d` (`0x49d5e4-0x49d606`) and `0x52 0x53 0x54` into the one at `0x49d961` — **eight**.
-/// The seven-value chain at `0x49cf36-0x49cf5d` is the *pending-chat re-expansion* gate and omits
-/// `0x5A`; 0754 cited that one by mistake, leaving boss emotes unexpanded.
-///
-/// Three plausible-and-wrong edits this guards against: dropping `RAID_BOSS_EMOTE` (0x5A) because
-/// the other gate omits it, adding `RAID_BOSS_WHISPER` (0x59) because it looks like its sibling, and
-/// dropping the BG_SYSTEM trio (0x52-0x54) because they look like plain system lines. Player chat is
-/// never expanded.
+/// The `$`-macro types are the reference's wire gate: parser `0x49d560` sends 0x0B, 0x0C, 0x0D,
+/// 0x1A and 0x5A to the expander at `0x49da3d`, and 0x52 to 0x54 to the one at `0x49d961`. The
+/// chain at `0x49cf36-0x49cf5d` is the pending-chat gate, which omits 0x5A; it is not this one.
 #[test]
 fn the_macro_expanded_chat_types_are_the_reference_wire_gate() {
     let mut got = messages::MACRO_EXPANDED_TYPES;
     got.sort_unstable();
     assert_eq!(got, [0x0B, 0x0C, 0x0D, 0x1A, 0x52, 0x53, 0x54, 0x5A]);
-    // 0x59 RAID_BOSS_WHISPER takes its own branch (`0x49d610`), never expands, and is remapped to a
-    // plain whisper — it must never creep in alongside 0x5A.
+    // 0x59 RAID_BOSS_WHISPER takes its own branch (`0x49d610`): never expanded, remapped to a
+    // plain whisper.
     for t in [
         messages::CHAT_MSG_SAY,
         messages::CHAT_MSG_YELL,
@@ -427,20 +375,11 @@ fn the_macro_expanded_chat_types_are_the_reference_wire_gate() {
     }
 }
 
-/// **Addon chat is ordinary chat with a sentinel language** (decision 1029, B215). 1.12.1 has no
-/// addon opcode and no addon `ChatMsg` type: a hunter addon's version ping reaches the client as a
-/// `CHAT_MSG_PARTY` like any other, and only `language == LANG_ADDON` (`0xFFFFFFFF`) separates it
-/// from someone talking. Miss that field and it renders — which is exactly what printed
-/// `[Party] [Soreen]: Quiver VERSION:3.1.4` in a mixed-client party.
-///
-/// The bytes below are the shape `addon_chat_probe` observed coming back off the **live** vmangos
-/// on both lanes it tested (`cargo run -p benilla-protocol --example addon_chat_probe`): the
-/// reported PARTY lane and the CHANNEL lane. Note what the payload is — `prefix`, a TAB, then the
-/// addon's own encoding — and that the server passes it through untouched (addon chat skips
-/// `SanitizeChatMessage` entirely, vmangos `Handlers/ChatHandler.cpp:49`).
+/// 1.12.1 has no addon opcode or chat type: addon chat is ordinary chat in language `LANG_ADDON`
+/// (`0xFFFFFFFF`), its payload `prefix`, a TAB and the message, which vmangos passes through
+/// unsanitized (`Handlers/ChatHandler.cpp:49`). The bytes are what `addon_chat_probe` reads back.
 #[test]
 fn addon_chat_is_an_ordinary_type_with_the_sentinel_language() {
-    // PARTY (the reported case): the two-guid shape, language 0xFFFFFFFF, "Quiver\tVERSION:3.1.4".
     let body = hx("01ffffffff21000000000000002100000000000000150000005175697665720956455253494f4e3a332e312e340000");
     match messages::parse_server(messages::opcode::SMSG_MESSAGECHAT, &body).unwrap() {
         ServerPacket::MessageChat(m) => {
@@ -455,10 +394,8 @@ fn addon_chat_is_an_ordinary_type_with_the_sentinel_language() {
         }
         _ => panic!("expected MessageChat"),
     }
-    // The control, same lane, same shape: speech must not be caught by a language-keyed gate. The
-    // live server hands party speech back as LANG_UNIVERSAL (0) — `HandleChatMessageOpcode`
-    // rewrites the tongue for GMs and for two-side-enabled lanes, and the one language it never
-    // rewrites is LANG_ADDON (the whole normalisation block sits in that `if`'s `else`).
+    // Party speech as vmangos sends it back: `HandleChatMessageOpcode` rewrites the language to
+    // LANG_UNIVERSAL (0) for GMs and two-side-enabled lanes, and never rewrites LANG_ADDON.
     let body = hx("01000000002100000000000000210000000000000013000000706172747920636f6e74726f6c206c696e650000");
     match messages::parse_server(messages::opcode::SMSG_MESSAGECHAT, &body).unwrap() {
         ServerPacket::MessageChat(m) => {
@@ -468,8 +405,7 @@ fn addon_chat_is_an_ordinary_type_with_the_sentinel_language() {
         }
         _ => panic!("expected MessageChat"),
     }
-    // Every tongue a character can actually speak is speech, sentinel or not — the gate is an
-    // equality test against 0xFFFFFFFF, never a range or a "not a known language" test.
+    // Every speakable language is speech: the gate is equality with 0xFFFFFFFF, not a range.
     for lang in [0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 33] {
         let m = messages::ChatMessage {
             chat_type: messages::CHAT_MSG_PARTY,

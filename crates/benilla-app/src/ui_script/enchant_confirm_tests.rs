@@ -1,5 +1,5 @@
 //! The two enchant-apply confirms (decision 0928, EnchantConfirm.xml): the Lua wiring between the
-//! events `ui_action::targeting`'s item-bind gate fires and the shared StaticPopup engine, driven
+//! events `spell::targeting`'s item-bind gate fires and the shared StaticPopup engine, driven
 //! exactly as that gate drives it.
 //!
 //! What these pin is the seam, not the gate: that `BIND_ENCHANT` and `REPLACE_ENCHANT` reach a
@@ -32,6 +32,7 @@ fn setup() -> UiScript {
 /// — which on the app side re-enters `0x495d60` with the confirmed flag, not a send.
 #[test]
 fn the_bind_confirm_shows_and_its_okay_queues_bind_enchant() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("BIND_ENCHANT", vec![]);
     assert!(
@@ -52,6 +53,7 @@ fn the_bind_confirm_shows_and_its_okay_queues_bind_enchant() {
 /// — the fire site pushes the enchant already on the item first, then the one about to land.
 #[test]
 fn the_replace_confirm_names_the_old_enchant_first() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event(
         "REPLACE_ENCHANT",
@@ -73,6 +75,7 @@ fn the_replace_confirm_names_the_old_enchant_first() {
 /// returned before `BindTarget` and the targeting word is still standing.
 #[test]
 fn declining_either_confirm_queues_nothing() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("BIND_ENCHANT", vec![]);
     s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
@@ -92,6 +95,7 @@ fn declining_either_confirm_queues_nothing() {
 /// anything, so a cancelled or replaced cast must not leave a live Yes button behind.
 #[test]
 fn a_changed_pending_cast_dismisses_both() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("BIND_ENCHANT", vec![]);
     s.fire_event("CURRENT_SPELL_CAST_CHANGED", vec![]);

@@ -288,7 +288,7 @@ fn quitting_from_the_character_screen_does_not_blank_the_session_it_wrote() {
 ///
 /// This is the regression the latch design could most easily have caused, so it is pinned rather
 /// than argued. The obvious guard for the tail — "is there a player object?" — reads FALSE on a
-/// `/logout` by the time the tail runs: `net::apply::session::logged_out` despawns our avatar in
+/// `/logout` by the time the tail runs: `net::session::logged_out` despawns our avatar in
 /// the same drain that writes `LoggedOutMessage`, `back_on_logout` sets `NextState` off that same
 /// message, and `OnExit(InWorld)` does not run until the next frame's `StateTransition`. A
 /// predicate would have silenced the event on every logout to fix a quit on a loading screen.
@@ -449,6 +449,7 @@ fn logging_out_leaves_no_in_game_frames_behind() {
 /// the world.
 #[test]
 fn reload_ui_is_a_fresh_login_in_place() {
+    benilla_formats::wow_data_or_skip!();
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -615,6 +616,7 @@ fn reload_outside_the_world_is_dropped() {
 /// entirely off terminal WARN lines because the client showed nothing.
 #[test]
 fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads() {
+    benilla_formats::wow_data_or_skip!();
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -664,6 +666,7 @@ fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads()
 /// loads, and this test FINISHING is the claim — before 1306 it would hang here forever.
 #[test]
 fn a_looping_addon_cannot_freeze_world_entry() {
+    benilla_formats::wow_data_or_skip!();
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -967,14 +970,14 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
 /// ship — used to `warn!` to the terminal and vanish. Nothing raised, so 1305's dialog could not
 /// fire; the walk's failure list was dropped on the floor at `load_ingame_ui_on_world_entry`; and
 /// the per-frame drain kept no history. From the player's chair the addon simply was not there and
-/// the client said nothing, which is the literal content of *"there are a lot of addons that still
-/// doesn't work"*.
+/// the client said nothing.
 ///
 /// Three claims, and the third is the one that makes the first two reachable: the failure is
 /// **retained**, it is **readable from Lua** (so the window is a view of it, not a second copy),
 /// and the player is **told to look**.
 #[test]
 fn an_addon_that_fails_to_load_without_raising_is_readable_in_the_error_log() {
+    benilla_formats::wow_data_or_skip!();
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1149,9 +1152,9 @@ fn a_repeating_error_is_one_row_with_a_count_not_a_flood() {
 
 // ── B353 · the layout cache is a resident of the shutdown tail ───────────────────────────────
 //
-// st1rk, 2026-09-01: *"Unlock a chat window (right-click tab → Unlock Window), resize or drag it,
-// `/logout` or `/reload`, log back in. It's back at the original size. `benilla-config/layout/`
-// isnt created."* The engine seam and the file round trip were already proven by
+// The symptom: an unlocked chat window, resized or dragged, comes back at its original size after
+// a `/reload` or a relog, and `benilla-config/layout/` is never created. The engine seam and the
+// file round trip were already proven by
 // [`crate::ui_script::chat_resize_tests::the_geometry_round_trips_through_the_save_file`]; what
 // was wrong is which edge writes. [`crate::ui_layout`] hung its saver off `OnExit(InWorld)`, and a
 // `/reload` never leaves `InWorld` — [`super::run_pending_reload`] calls the shutdown and the
@@ -1306,7 +1309,7 @@ fn window_geometry(world: &World) -> (f32, f32, String, f32, f32) {
         .expect("read the probe window back")
 }
 
-/// **The whole loop, on the root that reported it** — st1rk's retest, in one test: place a window,
+/// **The whole loop, on the root that reported it**, in one test: place a window,
 /// `/reload`, meet a fresh tree that has it on its authored anchors, and let the loader seat the
 /// saved geometry back over the top.
 ///
@@ -1363,6 +1366,7 @@ fn a_placed_window_comes_back_after_a_reload() {
 /// file reddens this instead of scrolling past, and closing one means deleting a line here.
 #[test]
 fn a_clean_world_entry_raises_only_the_warnings_we_have_named() {
+    benilla_formats::wow_data_or_skip!();
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1752,5 +1756,65 @@ fn the_entry_load_seeds_a_record_the_feed_cannot_take_away() {
         Some("Nelprifour")
     );
 
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ─────────────────── The production load is silent (the UI-load sound bracket) ───────────────────
+
+/// Every kit name the live VM has queued since the last drain.
+fn taken_kit_names(world: &mut World) -> Vec<String> {
+    world
+        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .expect("in-world VM")
+        .take_sounds()
+        .into_iter()
+        .filter_map(|r| match r {
+            benilla_ui::script::SoundRequest::KitName(n) => Some(n),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A login and a `/reload` load without a sound** — `0x48fbf0` brackets itself in the counted
+/// suppression scope (`0x48fbfa` → `0x49016d`) across the TOC walk, the addons, the saved
+/// variables and the login cascade, and both of its callers (login `0x48f681`, `/reloadui`
+/// `0x495669`) go through it.
+///
+/// Stock `TargetFrame_OnLoad` → `TargetFrame_Update` → `Hide()` → `TargetFrame_OnHide` really does
+/// call `PlaySound("INTERFACESOUND_LOSTTARGETUNIT")` at load; the engine drops it. Before the
+/// production edge carried the bracket only the tests' whole-manifest load did, and every
+/// `/reload` played the lost-target click.
+#[test]
+fn a_login_and_a_reload_load_without_the_lost_target_sound() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("load-silent");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert!(
+        frame_exists(&world, "TargetFrame"),
+        "the stock target frame loaded"
+    );
+    let at_login = taken_kit_names(&mut world);
+    assert!(
+        !at_login
+            .iter()
+            .any(|n| n == "INTERFACESOUND_LOSTTARGETUNIT"),
+        "the login load must be silent — the lost-target click was queued: {at_login:?}"
+    );
+
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+    let at_reload = taken_kit_names(&mut world);
+    assert!(
+        !at_reload
+            .iter()
+            .any(|n| n == "INTERFACESOUND_LOSTTARGETUNIT"),
+        "the /reload load must be silent — the lost-target click was queued: {at_reload:?}"
+    );
+
+    drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
 }

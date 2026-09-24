@@ -2,7 +2,7 @@
 //! `PetFrame` over synthetic `"pet"` snapshots and the events the app's feed fires.
 //!
 //! The frame's whole job is to be right about **which unit an event names**, and that is what most
-//! of these test: `UNIT_PET` names the OWNER (`arg1 == "player"`, wow-re §9), every other `UNIT_*`
+//! of these test: `UNIT_PET` names the OWNER (`arg1 == "player"`, `0x4bc84f`), every other `UNIT_*`
 //! names the pet itself, and a frame that mixes the two repaints off the player's health.
 
 use benilla_ui::script::{
@@ -132,6 +132,7 @@ fn pet_buff(spell_id: u32, name: &str, count: u8) -> AuraState {
 /// `UNIT_PET` is the only wire either edge has, which is why it carries them both.
 #[test]
 fn the_pet_frame_appears_on_a_summon_and_leaves_on_a_dismiss() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_frame();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
@@ -169,6 +170,7 @@ fn the_pet_frame_appears_on_a_summon_and_leaves_on_a_dismiss() {
 /// this drives each event with the WRONG token and asserts nothing moved.
 #[test]
 fn the_frame_answers_only_the_events_that_name_its_own_unit() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_frame();
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
@@ -226,6 +228,7 @@ fn the_frame_answers_only_the_events_that_name_its_own_unit() {
 /// because it means the bar comes back only through a value change, never through `PetFrame.lua`.
 #[test]
 fn a_powerless_pet_wears_the_no_mana_plate() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_frame();
 
     const PLAIN: &str = "Interface\\TargetingFrame\\UI-SmallTargetingFrame";
@@ -262,6 +265,7 @@ fn a_powerless_pet_wears_the_no_mana_plate() {
 /// repaints the rest of the frame (they are the ref's own early returns).
 #[test]
 fn the_attack_overlay_follows_its_own_two_events() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_frame();
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
@@ -318,6 +322,7 @@ fn the_attack_overlay_follows_its_own_two_events() {
 ///    house at all; the old assertion was reading a FontString our transcription invented.
 #[test]
 fn the_debuff_row_fills_from_the_pets_own_auras() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_frame();
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
@@ -366,6 +371,7 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
 /// the app answers in `target::click::target_unit_requests`' `"pet"` arm.
 #[test]
 fn left_clicking_the_pet_frame_targets_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_frame();
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
@@ -395,6 +401,7 @@ fn left_clicking_the_pet_frame_targets_it() {
 /// a queued token and no error.
 #[test]
 fn every_leg_of_the_pet_frame_click_reaches_a_live_binding() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_frame();
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
@@ -489,6 +496,7 @@ fn stats(
 /// branch ran** — `PET_HAPPINESS2` can only come from the `happiness == 2` arm.
 #[test]
 fn the_happiness_icon_shows_per_bucket_and_hides_for_a_non_hunter_pet() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_frame();
     declare_happiness_strings(&s);
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 2)));
@@ -533,9 +541,10 @@ fn the_happiness_icon_shows_per_bucket_and_hides_for_a_non_hunter_pet() {
 
 /// **Bucket 0 keeps the icon up.** The reference hides on `not happiness`, and `0` is truthy in
 /// Lua — so a client that folded bucket 0 into nil would hide a frame the reference shows. This is
-/// the trap wow-re calls out by name, tested where it would actually bite: in the frame.
+/// the `GetPetHappiness 0x4be900` trap, tested where it would actually bite: in the frame.
 #[test]
 fn happiness_bucket_zero_keeps_the_icon_showing() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_frame();
     declare_happiness_strings(&s);
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 2)));
@@ -560,6 +569,7 @@ fn happiness_bucket_zero_keeps_the_icon_showing() {
 /// frame-wide update, so a happiness tick must not be a full repaint.
 #[test]
 fn unit_happiness_repaints_only_the_icon() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_pet_frame();
     declare_happiness_strings(&s);
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 2)));
@@ -600,6 +610,7 @@ fn unit_happiness_repaints_only_the_icon() {
 /// the mana bar and simply covers the rail.
 #[test]
 fn the_pet_art_paints_over_the_bars() {
+    benilla_formats::wow_data_or_skip!();
     let s = load_pet_frame();
     let level: (i64, i64, i64) = s
         .eval(

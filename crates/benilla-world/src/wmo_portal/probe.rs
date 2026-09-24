@@ -16,17 +16,19 @@ use super::{
 /// + per-portal verdicts land in a file the audit harness can replay as a fixture.
 #[derive(Resource, Default)]
 pub struct WmoCullProbe {
-    /// Set by the panel's dump button; the next compute writes the trace file and clears it.
-    pub dump_requested: bool,
+    /// Set by the panel's dump button: the file the next compute writes the trace to, then
+    /// clears. **A path handed in, never one this crate builds.** `benilla-world` has no
+    /// `local_state`, and the cwd-relative `target/wmo-cull-trace.txt` this used to write is the
+    /// install folder the moment a player launches the binary from inside it — the one write in
+    /// this crate, and the one 1486 forbids. The panel resolves the path under
+    /// `benilla-config/Diagnostics/`; `WOW_CULLDUMP=<path>` is the headless spelling.
+    pub dump_to: Option<std::path::PathBuf>,
     /// **The eye the PVS, the interior claim and the exterior windows were computed from** —
     /// the visibility authority's own pose, recorded so an instrument can compare it against the
     /// pose the frame actually draws from. Ordinary movement makes the two identical to within a
     /// centimetre; a snap is where they can disagree by the whole teleport.
     pub eye: Vec3,
 }
-
-/// Where the dump button writes its trace — under `target/` so it never lands in the repo.
-pub(super) const PROBE_DUMP_PATH: &str = "target/wmo-cull-trace.txt";
 
 /// The probe dump's recorder: the seed's evidence (floor faces + portal crossings under the eye's
 /// column) plus every hop verdict, as text.

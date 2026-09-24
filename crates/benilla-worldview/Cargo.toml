@@ -3,14 +3,13 @@ name = "benilla-worldview"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The world viewer: the engine with no game attached — and the wall that keeps the split honest (decision 1160)"
+description = "The world viewer: the engine with no game attached, which keeps the engine and game split honest"
 
 [lints]
 workspace = true
 
 [dependencies]
-# **Only the engine.** This is the edge the binary exists to hold: if a world concept
-# ever needs the game, this line is what refuses to let it.
+# Only the engine, never a game crate: a world concept that needs the game fails to build here.
 benilla-world = { path = "../benilla-world" }
 
 [build-dependencies]
@@ -19,6 +18,5 @@ benilla-buildstamp = { path = "../benilla-buildstamp" }
 [[bin]]
 name = "benilla-worldview"
 path = "src/main.rs"
-# Same reason as the `benilla` shim: test-building this bin would relink the app in the test
-# profile on every sha change, which is the tax the shims exist to kill (decision 0993).
+# Test-building this bin would relink it on every commit, since the build stamp changes.
 test = false

@@ -18,39 +18,62 @@
 //! Same shape as `world_api_wall.rs`: `CEILING` is the standing count, `SLACK` keeps a single
 //! closure from failing the gate while making it impossible to bank a whole stage of work without
 //! writing the new number down. `WOW_UISCRIPT_DUMP=1` prints the files.
+//!
+//! **Four families, one gated** (decision 2338). The `ui_*` window feeds are 1177's feed layer
+//! in a hundred modules (2265 §A3 makes them one); `capture/` probes read the stock binding on
+//! purpose; test modules test. None of those is what 1177 meant, so they are reported, and only
+//! the remaining gameplay files — the ones that can reach zero — are ratcheted.
 
 use std::path::{Path, PathBuf};
 
-/// The standing count. **2026-09-16, 164** — measured the day the instrument was built, against
-/// 1177's 141 five weeks earlier. It moved twice on that one day, for two different files, and
-/// both reasons are kept because each is a different kind of legitimate:
+/// Where a file that names the VM stands under 1177 (decision 2338).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Family {
+    /// Gameplay code that knows the FrameXML VM exists — the camera, targeting, the minimap,
+    /// the sound layer, bindings, the glue screens. **1177's number**: the one this wall
+    /// gates, and the one that can reach zero.
+    Game,
+    /// `ui_*` — a window's feed. 1177 makes the feeds THE legitimate caller; that they are a
+    /// hundred modules and not one is 2265 §A3's refactor, not a leak. Reported, never gated.
+    Feed,
+    /// `capture/` — a live probe that asks the STOCK binding on purpose (2283, 2290): fed a
+    /// model value it would prove nothing. Reported.
+    Probe,
+    /// A test module beside the code it tests. Reported.
+    Test,
+}
+
+fn family(rel: &str) -> Family {
+    let file = rel.rsplit('/').next().unwrap_or(rel);
+    if rel.starts_with("capture/") {
+        Family::Probe
+    } else if file == "tests.rs" || file.ends_with("_tests.rs") || rel.contains("/tests/") {
+        Family::Test
+    } else if rel.starts_with("ui_") {
+        Family::Feed
+    } else {
+        Family::Game
+    }
+}
+
+/// The standing count of **`Game`** files — gameplay code outside the feeds that names the VM.
 ///
-/// - **165 (decision 2279)** — `game_plugins.rs`, the structural test for the VM's one-shot
-///   consumers, which has to name the identifier it scans for. A test *about* the wall, not a file
-///   that learned the VM exists.
-/// - **166 (decision 2283)** — `capture/probe_stone.rs`, the meeting-stone live probe, joining the
-///   fifteen sibling probes that read the VM *on purpose*. A probe's whole value is that it asks
-///   the **stock** binding (`IsInMeetingStoneQueue()`, `MiniMapMeetingStoneFrame:IsShown()`)
-///   rather than our own mirror of it, so feeding it a model value would make it prove nothing.
-////// - **167 (decision 2290)** — `capture/probe_bg.rs`, the inside-a-battleground live probe, the
-///   same class again and for the same reason, sharpened: it takes the port through the stock
-///   `AcceptBattlefieldPort(slot, 1)` and reads the battleground back through
-///   `GetNumWorldStateUI()`, `GetBattlefieldStatus()` and a Lua event tap. A probe that asked our
-///   own model instead could not have found what this one did — that the battleground's
-///   `CHAT_MSG_BG_SYSTEM_NEUTRAL` lines reach the interface, which no app-side reading shows.
-///
-/// The ratchet is for *production* feed code. Both numbers still went up, and both are written
-/// down — which is the whole point of it, and why two sessions raising it the same day collided
-/// here instead of quietly passing each other.
-const CEILING: usize = 167;
+/// **2026-09-16, 164** was the whole outside-`ui_script/` count the day the instrument was
+/// built, against 1177's 141 five weeks earlier; it moved to 167 the same day (2279's
+/// structural test, 2283's and 2290's probes — each legitimate, each written down here, and
+/// two sessions colliding on this line instead of quietly passing each other). **Decision 2338
+/// split the count**: of those 167, 96 were the window feeds, 18 the probes, 8 tests — none of
+/// them what 1177 meant — and **45** were gameplay files that know the VM. The wall gates the
+/// 45 and reports the rest, so the number here is one that can actually reach 1177's zero.
+const CEILING: usize = 45;
 
 /// How far under [`CEILING`] the count may sit before the test asks for the ceiling to follow it.
-const SLACK: usize = 8;
+const SLACK: usize = 4;
 
 #[test]
 fn the_vm_is_named_by_no_more_files_than_the_ceiling_says() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files: Vec<String> = rs_files(&src)
+    let mut files: Vec<(Family, String)> = rs_files(&src)
         .into_iter()
         .filter_map(|p| {
             let rel = p
@@ -62,28 +85,39 @@ fn the_vm_is_named_by_no_more_files_than_the_ceiling_says() {
                 return None;
             }
             let text = std::fs::read_to_string(&p).ok()?;
-            names_ident(&text, "UiScript").then_some(rel)
+            names_ident(&text, "UiScript").then(|| (family(&rel), rel))
         })
         .collect();
     files.sort();
-    let n = files.len();
-    eprintln!("files outside ui_script/ naming UiScript: {n} (ceiling {CEILING}, slack {SLACK})");
+    let count = |f: Family| files.iter().filter(|(fam, _)| *fam == f).count();
+    let n = count(Family::Game);
+    eprintln!(
+        "files outside ui_script/ naming UiScript: {} — {n} game (ceiling {CEILING}, slack \
+         {SLACK}), {} feeds, {} probes, {} tests",
+        files.len(),
+        count(Family::Feed),
+        count(Family::Probe),
+        count(Family::Test),
+    );
     if std::env::var("WOW_UISCRIPT_DUMP").is_ok() {
-        eprintln!("{}", files.join("\n"));
+        for (fam, rel) in &files {
+            eprintln!("  {fam:?}\t{rel}");
+        }
     }
     assert!(
         n <= CEILING,
-        "{n} files outside ui_script/ name UiScript; the ceiling is {CEILING}.\n\
-         A new file learned that the FrameXML VM exists. Decision 1177's line is that only the \
-         feed layer may know; either feed a model value instead, or — if this file genuinely is \
-         feed code — raise CEILING here with the reason, the way world_api_wall.rs requires.\n\
-         WOW_UISCRIPT_DUMP=1 lists the files."
+        "{n} gameplay files outside ui_script/ and the feeds name UiScript; the ceiling is \
+         {CEILING}.\nA new file learned that the FrameXML VM exists. Decision 1177's line is that \
+         only the feed layer may know: feed a model value instead, or — if this file genuinely is \
+         feed code — it belongs under a `ui_*` module, and a probe under `capture/`. Raise CEILING \
+         here only with the reason, the way world_api_wall.rs requires.\nWOW_UISCRIPT_DUMP=1 lists \
+         the files by family."
     );
     assert!(
         n + SLACK >= CEILING,
-        "only {n} files name UiScript and the ceiling still says {CEILING}. Lower CEILING to {n} \
-         in this file so the next coupling has to earn its place — the ratchet only holds if the \
-         number follows the work down."
+        "only {n} gameplay files name UiScript and the ceiling still says {CEILING}. Lower CEILING \
+         to {n} in this file so the next coupling has to earn its place — the ratchet only holds \
+         if the number follows the work down."
     );
 }
 

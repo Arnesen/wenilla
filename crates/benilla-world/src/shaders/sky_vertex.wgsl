@@ -1,24 +1,12 @@
-// The sky pass's shared VERTEX stage — bevy 0.18.1's `mesh.wgsl` vertex verbatim (VERTEX_*
-// attributes; morph targets and skinning omitted — no sky mesh authors them) plus ONE line: the
-// clip-space z is pinned to the far plane. Every sky element — the gradient dome (`sky.wgsl`),
-// the cloud dome (`cloud.wgsl`), the star patches (`star.wgsl`), the celestial discs and glares
-// (`celestial.wgsl`) — draws through this stage; their fragments write colour only.
+// The shared vertex stage of every sky draw (`sky.wgsl`, `cloud.wgsl`, `star.wgsl`,
+// `celestial.wgsl`): bevy 0.18.1's `mesh.wgsl` vertex verbatim, without morph targets and skinning
+// (no sky mesh has them), plus one line pinning clip z to the far plane. A `MaterialExtension`
+// swaps the whole stage, so this mirror must track bevy's on upgrades.
 //
-// THE DEPTH LAW, moved up a stage (`sky_order.rs`, "The depth law"; decision 2016). The reference
-// draws its whole sky first, in a squashed back depth slice, and the opaque world paints over it;
-// we draw the sky after the world, so the depth TEST does that job, and it only does it if the
-// sky's depth is behind everything. Until 2016 each sky fragment shader wrote
-// `@builtin(frag_depth) = 0.0` (reverse-Z "infinitely far"). That is the same number this stage
-// produces — clip z = 0 interpolates to NDC z = 0 for every fragment, exactly, whatever w is — but
-// a fragment-stage depth write costs the whole pipeline its early-Z: the hardware cannot reject a
-// fragment before the shader that decides its depth has run, so every sky fragment under a hill,
-// a wall or a leaf was shaded in full and then thrown away. A dome is a full-screen draw and its
-// gradient is not cheap; on an immediate-mode GPU (the Steam Deck's RDNA2, every Windows part)
-// that was the whole covered fraction of the screen shaded for nothing, twice a frame at night.
-// With the depth known at the vertex, the rasterizer's early test rejects those fragments
-// before the shader runs. Same pixels, less work — the change is invisible by construction.
-//
-// A `MaterialExtension` swaps the whole stage, so the mirror below must track bevy's on upgrades.
+// The reference draws its sky first, in a squashed back depth slice, and the world paints over it;
+// here the sky draws after the world and the depth test does that job. The pin sits in this stage
+// because a fragment depth write disables early-Z, so an immediate-mode GPU would shade every sky
+// fragment the world covers; the fragment stages write colour only.
 
 #import bevy_pbr::{
     mesh_functions,
@@ -26,9 +14,8 @@
     view_transformations::position_world_to_clip,
 }
 
-/// Reverse-Z "infinitely far" — clip-space z = 0 ⇒ NDC depth 0.0 for every fragment, whatever w.
-/// Under bevy's `GreaterEqual` test a sky fragment then passes only where the depth buffer still
-/// holds its clear value (0.0): exactly the pixels no world geometry claimed.
+/// Reverse-Z "infinitely far": clip z = 0 gives NDC depth exactly 0.0 whatever w, so under bevy's
+/// `GreaterEqual` test a sky fragment passes only where the depth buffer still holds its clear 0.0.
 const SKY_FAR_CLIP_Z: f32 = 0.0;
 
 @vertex
@@ -55,8 +42,7 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
 #ifdef VERTEX_POSITIONS
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
     out.position = position_world_to_clip(out.world_position.xyz);
-    // The one line that is ours (the header): the sky's depth is the far plane, decided here so
-    // the fragment stage writes none and keeps its early-Z.
+    // The one line not from bevy: the far-plane pin.
     out.position.z = SKY_FAR_CLIP_Z;
 #endif
 

@@ -1,38 +1,31 @@
-//! The battleground queue's wire (decision 1963; wow-re `staticpopup-dialog-bindings.md` §7):
-//! the server's per-slot status and the port answer `AcceptBattlefieldPort` sends. Three queue
-//! slots exist in the client (`0xb6e9d0`, stride `0x20`), addressed 1-based from Lua.
+//! Battleground messages: queue status, the port answer, the scoreboard, the instance list and
+//! teammate positions. The client keeps three queue slots (`0xb6e9d0`, stride `0x20`).
 
 use std::io::{self, Read};
 
 use crate::wire::{capacity_hint, read_u32_le, read_u8};
 
-/// `SMSG_BATTLEFIELD_STATUS`, one slot's update (VERIFIED at the bytes, handler `0x4aa850`).
+/// `SMSG_BATTLEFIELD_STATUS`, one slot's update (handler `0x4aa850`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BattlefieldStatus {
-    /// Which of the three slots, 0-based on the wire.
+    /// Which of the three slots, 0-based on the wire (1-based in Lua).
     pub slot: u32,
     /// The battleground's Map.dbc row id; zero clears the slot.
     pub map_id: u32,
     pub bracket: u8,
-    /// `+0x10` — the instance id, `GetBattlefieldStatus`'s third value (1963 parked this dword
-    /// as reader-less; `battlefield-verb-family.md` §2.2 found the reader, 1974).
+    /// The instance id (`+0x10`), `GetBattlefieldStatus`'s third value.
     pub instance_id: u32,
     pub status: u32,
-    /// Status 2: the port deadline's delta, in ms (`+0x14 = now + Δ`, `GetBattlefieldPortExpiration`).
+    /// Status 2: the port deadline in ms from now (`+0x14`, `GetBattlefieldPortExpiration`).
     pub time_ms: Option<u32>,
-    /// Status 3 (`battlefield-verb-family.md` §4.2, 1972): `(Δ₁, Δ₂)` — the instance's expiration
-    /// delta (`[0xb6ebb8] = now + Δ₁`, `GetBattlefieldInstanceExpiration`) and its elapsed run time
-    /// (`[0xb6ebbc] = now − Δ₂`, `GetBattlefieldInstanceRunTime`).
+    /// Status 3: the expiry delta (`[0xb6ebb8] = now + Δ₁`, `GetBattlefieldInstanceExpiration`)
+    /// and the run time (`[0xb6ebbc] = now − Δ₂`, `GetBattlefieldInstanceRunTime`).
     pub in_progress: Option<(u32, u32)>,
-    /// Status 1 (§4.2): `(estimated wait ms, raw; Δ waited)` — `[slot+0x18]` and
-    /// `[slot+0x1c] = now − Δ`, the `GetBattlefieldEstimatedWaitTime`/`GetBattlefieldTimeWaited` pair.
-    /// 1963's reader dropped this tail; the reference reads it (1972).
+    /// Status 1: the estimated wait in ms (`[slot+0x18]`, `GetBattlefieldEstimatedWaitTime`)
+    /// and the time waited (`[slot+0x1c] = now − Δ`, `GetBattlefieldTimeWaited`).
     pub queued: Option<(u32, u32)>,
 }
 
-/// Parse `SMSG_BATTLEFIELD_STATUS`: `u32 slot`, `u32 mapId`, and — only for a non-zero map —
-/// `u8 bracket`, `u32 instanceId`, `u32 status`, then the status-conditional tail: two `u32` for
-/// status 1, one for status 2, two for status 3.
 pub(super) fn read_battlefield_status(r: &mut impl Read) -> io::Result<BattlefieldStatus> {
     let slot = read_u32_le(r)?;
     let map_id = read_u32_le(r)?;
@@ -78,35 +71,31 @@ pub(super) fn read_battlefield_status(r: &mut impl Read) -> io::Result<Battlefie
     })
 }
 
-/// One scoreboard row of `MSG_PVP_LOG_DATA` (VERIFIED at the bytes, handler `0x4aab30`; wow-re
-/// `battlefield-verb-family.md` §2.3/§4.3, 1972). The client's 0x40-byte block, wire order.
+/// One `MSG_PVP_LOG_DATA` scoreboard row (handler `0x4aab30`), a 0x40-byte block in the client.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PvpLogRow {
     pub guid: u64,
-    /// Wire field 2 — read before the kills, stored at `+0x1c`.
+    /// Wire field 2, before the kills; stored at `+0x1c`.
     pub rank: u32,
     pub killing_blows: u32,
     pub honorable_kills: u32,
     pub deaths: u32,
     pub honor_gained: u32,
-    /// The extra-stat dwords, at most eight stored — the client consumes and discards the rest.
+    /// The extra-stat dwords; the client keeps eight and reads past the rest.
     pub stats: Vec<u32>,
 }
 
-/// `MSG_PVP_LOG_DATA` inbound: the whole scoreboard, rows in wire order (nothing here sorts).
+/// `MSG_PVP_LOG_DATA` inbound: the whole scoreboard, rows in wire order.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PvpLogData {
-    /// `u8 != 0` — the battleground has ended; `LeaveBattlefield` sends nothing until this is set.
+    /// The battleground has ended; `LeaveBattlefield` sends nothing until it has.
     pub ended: bool,
-    /// Read only when `ended`: `0` = Horde, `1` = Alliance (`GetBattlefieldWinner`).
+    /// Present only when ended: 0 Horde, 1 Alliance (`GetBattlefieldWinner`).
     pub winner: Option<u8>,
     pub rows: Vec<PvpLogRow>,
 }
 
-/// Parse `MSG_PVP_LOG_DATA` (§4.3): `u8 ended`, `u8 winner` iff ended, `u32 count`, `count` rows of
-/// `u64 guid, u32 rank, u32 kb, u32 hk, u32 deaths, u32 honor, u32 statCount, statCount × u32`.
-/// The client stores no more than eight stats per row and clamps nothing else — a count past its
-/// 80 blocks is its own anomaly (§10); ours keeps every row the wire carries.
+/// Deviation: every row is kept; the reference has 80 row blocks and does not clamp the count.
 pub(super) fn read_pvp_log_data(r: &mut impl Read) -> io::Result<PvpLogData> {
     let ended = read_u8(r)? != 0;
     let winner = if ended { Some(read_u8(r)?) } else { None };
@@ -144,30 +133,23 @@ pub(super) fn read_pvp_log_data(r: &mut impl Read) -> io::Result<PvpLogData> {
     })
 }
 
-/// Body of `CMSG_LEAVE_BATTLEFIELD` (VERIFIED, `0x4abe60`): `u32 mapId` — the active slot's map,
-/// or the literal 0 when no slot is active.
+/// `CMSG_LEAVE_BATTLEFIELD` (`0x4abe60`): the active slot's map id, or 0 with none active.
 pub fn leave_battlefield(map_id: u32) -> Vec<u8> {
     map_id.to_le_bytes().to_vec()
 }
 
-/// `SMSG_BATTLEFIELD_LIST` (VERIFIED at the bytes, handler `0x4aa6c0`; wow-re
-/// `battlefield-verb-family.md` §4.1, 1974): the instance list a battlemaster (or
-/// `ShowBattlefieldList`) opens.
+/// `SMSG_BATTLEFIELD_LIST` (handler `0x4aa6c0`): the instance list a battlemaster opens.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct BattlefieldList {
-    /// The battlemaster's guid — `0` when the list was opened without an NPC. Cached by the
-    /// client and read by `JoinBattlefield` to choose between the two join opcodes.
+    /// 0 when opened without an NPC; `JoinBattlefield` picks the join opcode by it.
     pub battlemaster: u64,
-    /// The battleground's Map.dbc row id.
     pub map_id: u32,
     /// The level-bracket index; the client derives the bracket's min/max from it and the map row.
     pub bracket: u8,
-    /// The instance ids, wire order — nothing sorts them; index 0 on the wire is instance 1 in Lua.
+    /// The instance ids in wire order; wire index 0 is instance 1 in Lua.
     pub instances: Vec<u32>,
 }
 
-/// Parse `SMSG_BATTLEFIELD_LIST` (§4.1): `u64 battlemaster`, `u32 mapId`, `u8 bracket`,
-/// `u32 count`, `count × u32 instanceId`.
 pub(super) fn read_battlefield_list(r: &mut impl Read) -> io::Result<BattlefieldList> {
     let battlemaster = crate::wire::read_u64_le(r)?;
     let map_id = read_u32_le(r)?;
@@ -185,9 +167,8 @@ pub(super) fn read_battlefield_list(r: &mut impl Read) -> io::Result<Battlefield
     })
 }
 
-/// One teammate's map position off `MSG_BATTLEGROUND_PLAYER_POSITIONS` (1980): raw world
-/// floats — the client prefers the live object's position when it has one, and normalizes
-/// either through the world-map projection under the active battleground's map.
+/// One teammate's position from `MSG_BATTLEGROUND_PLAYER_POSITIONS`, in raw world coordinates;
+/// the client prefers a live object's own position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BattlefieldPosition {
     pub guid: u64,
@@ -195,21 +176,18 @@ pub struct BattlefieldPosition {
     pub y: f32,
 }
 
-/// `MSG_BATTLEGROUND_PLAYER_POSITIONS` inbound (VERIFIED at the bytes, handler `0x4aad40`; wow-re
-/// `worldmap-arrow-and-positions.md` §3.1): the teammates not in the requester's group, then the
-/// friendly flag carrier when there is one.
+/// `MSG_BATTLEGROUND_PLAYER_POSITIONS` (handler `0x4aad40`): teammates outside our group, then
+/// the friendly flag carrier if any.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct BattlefieldPositions {
     pub players: Vec<BattlefieldPosition>,
     pub carrier: Option<BattlefieldPosition>,
 }
 
-/// The client's store holds 40 entries and its handler writes past them for a larger count
-/// (§3.2, an overrun the reference has); ours keeps the first 40.
+/// The client's 40-entry store. Deviation: a larger count keeps the first 40, where the
+/// reference's handler writes past the store.
 pub const BATTLEFIELD_POSITIONS_MAX: usize = 40;
 
-/// Parse it (§3.1): `u32 count`, `count × (u64, f32, f32)`, `u8 hasCarrier`, and the carrier
-/// triple only when that byte is non-zero.
 pub(super) fn read_battlefield_positions(r: &mut impl Read) -> io::Result<BattlefieldPositions> {
     let count = read_u32_le(r)?;
     let mut players = Vec::with_capacity(capacity_hint(count, BATTLEFIELD_POSITIONS_MAX));
@@ -233,13 +211,12 @@ pub(super) fn read_battlefield_positions(r: &mut impl Read) -> io::Result<Battle
     Ok(BattlefieldPositions { players, carrier })
 }
 
-/// Body of `CMSG_BATTLEFIELD_LIST` (VERIFIED, `0x4ab8c0`): `u32 mapId` of the queued slot.
+/// `CMSG_BATTLEFIELD_LIST` (`0x4ab8c0`): the queued slot's map id.
 pub fn battlefield_list(map_id: u32) -> Vec<u8> {
     map_id.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_BATTLEMASTER_JOIN` (VERIFIED, `0x4a9f60`'s GUID arm): `u64 battlemaster`,
-/// `u32 mapId`, `u32 instanceId` (`0` = first available), `u8 asGroup`.
+/// `CMSG_BATTLEMASTER_JOIN` (`0x4a9f60`, with a battlemaster); instance 0 means first available.
 pub fn battlemaster_join(
     battlemaster: u64,
     map_id: u32,
@@ -253,8 +230,7 @@ pub fn battlemaster_join(
     body
 }
 
-/// Body of `CMSG_BATTLEFIELD_JOIN` (VERIFIED, `0x4a9f60`'s no-GUID arm): `u32 mapId`,
-/// `u32 instanceId` (`0` = first available), `u8 asGroup`.
+/// `CMSG_BATTLEFIELD_JOIN` (`0x4a9f60`, no battlemaster); instance 0 means first available.
 pub fn battlefield_join(map_id: u32, instance_id: u32, as_group: bool) -> Vec<u8> {
     let mut body = map_id.to_le_bytes().to_vec();
     body.extend_from_slice(&instance_id.to_le_bytes());
@@ -262,8 +238,7 @@ pub fn battlefield_join(map_id: u32, instance_id: u32, as_group: bool) -> Vec<u8
     body
 }
 
-/// Body of `CMSG_BATTLEFIELD_PORT` (VERIFIED, `0x4ab3b0`): `u32 mapId` then a genuinely
-/// one-byte `accept`, normalised to 0/1 before it reaches the wire.
+/// `CMSG_BATTLEFIELD_PORT` (`0x4ab3b0`): the map id, then a one-byte accept, 0 or 1.
 pub fn battlefield_port(map_id: u32, accept: bool) -> Vec<u8> {
     let mut body = map_id.to_le_bytes().to_vec();
     body.push(u8::from(accept));
@@ -274,6 +249,7 @@ pub fn battlefield_port(map_id: u32, accept: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// Status 2, 3 and 1 each read their own tail and no further; a zero map ends the packet.
     #[test]
     fn status_reads_the_conditional_tails() {
         let mut body = vec![
@@ -285,6 +261,34 @@ mod tests {
             (1, 30, 5, 7, 2)
         );
         assert_eq!(s.time_ms, Some(100));
+        assert_eq!((s.in_progress, s.queued), (None, None));
+
+        // The same slot, map, bracket and instance under status 3, then status 1.
+        let header = body[..13].to_vec();
+        let mut b = header.clone();
+        for v in [3u32, 120_000, 45_000] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.push(0xEE); // a byte past the tail
+        let mut r = b.as_slice();
+        let s = read_battlefield_status(&mut r).unwrap();
+        assert_eq!(s.status, 3);
+        assert_eq!(s.in_progress, Some((120_000, 45_000)));
+        assert_eq!((s.time_ms, s.queued), (None, None));
+        assert_eq!(r, [0xEE], "the status-3 tail is two u32s");
+
+        let mut b = header;
+        for v in [1u32, 30_000, 5_000] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.push(0xEE);
+        let mut r = b.as_slice();
+        let s = read_battlefield_status(&mut r).unwrap();
+        assert_eq!(s.status, 1);
+        assert_eq!(s.queued, Some((30_000, 5_000)));
+        assert_eq!((s.time_ms, s.in_progress), (None, None));
+        assert_eq!(r, [0xEE], "the status-1 tail is two u32s");
+
         body = vec![0u8, 0, 0, 0, 0, 0, 0, 0];
         let s = read_battlefield_status(&mut body.as_slice()).unwrap();
         assert_eq!(
@@ -304,8 +308,6 @@ mod tests {
 mod pvp_log_tests {
     use super::*;
 
-    /// The scoreboard reader: the winner byte only when ended, the rank BEFORE the kills, and no
-    /// more than eight stats kept while every one is consumed.
     #[test]
     fn the_scoreboard_reads_its_conditional_winner_and_keeps_eight_stats() {
         let mut body = vec![1u8, 0u8, 1, 0, 0, 0];
@@ -340,7 +342,6 @@ mod pvp_log_tests {
         assert_eq!(leave_battlefield(489), vec![0xE9, 1, 0, 0]);
     }
 
-    /// The instance list: the guid, the map, the bracket byte and the ids in wire order.
     #[test]
     fn the_list_reads_its_guid_bracket_and_instances() {
         let mut body = 0x1234_5678_9abc_def0u64.to_le_bytes().to_vec();
@@ -366,7 +367,6 @@ mod pvp_log_tests {
         assert!(l.instances.is_empty());
     }
 
-    /// The positions reply: the count-led list, the carrier byte, and the 40-entry cap.
     #[test]
     fn the_positions_reply_reads_the_list_and_the_carrier() {
         let mut body = 2u32.to_le_bytes().to_vec();
@@ -414,7 +414,6 @@ mod pvp_log_tests {
         );
     }
 
-    /// The two join bodies differ only by the leading guid; the list request is the map alone.
     #[test]
     fn the_join_bodies_and_the_list_request() {
         assert_eq!(
@@ -428,7 +427,6 @@ mod pvp_log_tests {
         assert_eq!(battlefield_list(529), vec![0x11, 2, 0, 0]);
     }
 
-    /// Status 1 carries the two wait dwords 1963's reader dropped.
     #[test]
     fn a_queued_status_carries_its_wait_pair() {
         let mut body = vec![0u8, 0, 0, 0];

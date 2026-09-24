@@ -1,75 +1,19 @@
-//! The **addon-info block** at the tail of `CMSG_AUTH_SESSION` — what the client tells the world
-//! server about its *secure* addons (decision 1497).
+//! The addon-info block ending `CMSG_AUTH_SESSION`, written by `0x51d910` after the 20-byte
+//! proof: a `u32` uncompressed size, then a zlib (RFC1950) stream to the end of the packet.
+//! Uncompressed, it is one record per addon whose `.toc` sets `## Secure:` non-zero, enabled or
+//! not, with no count or trailer: `CString` name, `u8` flags (`.pub` byte 0), `u32` CRC-32 of the
+//! 256 modulus bytes (`.pub` bytes 1..=256), `u32` CRC-32 of the `.url` string (0 if none).
 //!
-//! Every 1.12.1 logon carries one of these. It is not optional decoration: it is the last field of
-//! the auth packet, and a server reads it before the session exists. benilla used to send a
-//! `decompressed_size = 0` + zlib-of-nothing stub, which **no real client can produce** — and
-//! cmangos-classic kicks the session for it (B277). See [`addon_block`] for the shape and
-//! [`STOCK_SECURE_ADDONS`] for what a stock install actually sends.
-//!
-//! ## Where the shape comes from
-//!
-//! VERIFIED in `WoW.exe` (5875) — wow-5875-re `system/net/scratch/cmsg-auth-session-addon-block.md`.
-//! The writer is `0x51d910`, called once, from `HandleAuthChallenge` (`0x5b4143`) straight after the
-//! 20-byte SHA-1 proof. It appends:
-//!
-//! ```text
-//! u32   uncompressed_size    ; byte length of the buffer below
-//! u8[]  zlib stream          ; RFC1950 framing (deflateInit_ windowBits +15), runs to end of packet
-//! ```
-//!
-//! and the uncompressed buffer is a **bare concatenation** — no leading count, no trailer —
-//! of one record per secure addon:
-//!
-//! ```text
-//! CString name          ; NUL-terminated
-//! u8      flags         ; byte 0 of the addon's own .pub signature file
-//! u32     modulus_crc   ; CRC-32 of the 256 modulus bytes (.pub bytes 1..=256)
-//! u32     url_crc       ; CRC-32 of the addon's .url string; 0 when it has none
-//! ```
-//!
-//! **Which** addons: exactly those whose `.toc` declares `## Secure:` non-zero — enable/disable
-//! state is not consulted. On a stock install that is precisely the twelve `Blizzard_*` built-ins
-//! and nothing else, because no third-party 1.12 addon declares `## Secure`. A client with *zero*
-//! secure addons appends **nothing at all** (not a zero dword) — the writer returns before the
-//! local store exists.
-//!
-//! ## Why the emulators disagree about it, and why it matters
-//!
-//! Both vmangos and cmangos reject `size == 0` with the same comment ("empty addon packet … can't
-//! be received from real client") — that judgement is *correct*, and matched the binary all along.
-//! What differs is the consequence:
-//!
-//! - vmangos `WorldSocket.cpp:447` — `if (BuildAddonPacket(...)) SendPacket(addonPacket);`. A
-//!   rejection just means no `SMSG_ADDON_INFO` goes back; the session lives. That is the only
-//!   reason benilla's stub ever worked.
-//! - cmangos-classic `WorldSocket.cpp:562` — `if (!ReadAddonInfo(...)) { … "sent bad addon info.
-//!   Kicking."; return false; }`. Same rejection, session killed. Not config-gated: the check is in
-//!   the anticheat module *and* in `NullSessionAnticheat`, so it runs with the anticheat off.
-//!
-//! cmangos's two readers also disagree with each other on field order — its anticheat module reads
-//! `name, u8, u32, u32` (right, matching the binary) and its `NullSessionAnticheat` reads
-//! `name, u32, u32, u8` (wrong, but the same nine bytes, so it parses without throwing).
+//! With no secure addons the client appends nothing. Both emulators refuse a zero size: vmangos
+//! then skips `SMSG_ADDON_INFO` (`WorldSocket.cpp:447`), cmangos-classic kicks the session
+//! (`WorldSocket.cpp:562`).
 
-/// CRC-32 of the stock Blizzard public-key modulus — what a stock, unmodified addon's `.pub`
-/// hashes to, and the value every emulator calls the "standard addon CRC". A server that sees it
-/// knows it need not push the 256-byte modulus back in `SMSG_ADDON_INFO`.
-///
-/// VERIFIED: `zlib.crc32` of the 256 modulus bytes in this install's `Blizzard_*.pub` files, which
-/// are byte-identical to the `modulus`/`tdata` array carried in vmangos and cmangos alike.
+/// CRC-32 of the stock Blizzard public-key modulus, the emulators' "standard addon CRC"; a server
+/// seeing it does not send the 256-byte modulus back in `SMSG_ADDON_INFO`.
 pub const STANDARD_MODULUS_CRC: u32 = 0x4C1C_776D;
 
-/// **Which addons `SMSG_ADDON_INFO` hid** — the reply's `status` bytes paired back against the
-/// records we sent (decision 2175).
-///
-/// The reply carries no names: the client re-walks its own `## Secure:` list in the same order it
-/// sent it, so record *i* is `sent[i]`. A `status` of **2** is what makes the reference set
-/// `[rec+0x29] = 1` (`0x51db84`) and drop the addon from the Lua index space — on a stock install
-/// that is all twelve, which is why the AddOns list shows only the player's own addons.
-///
-/// A reply with **more** records than we sent is truncated to what we sent, and one with fewer
-/// simply says nothing about the rest: both are the server disagreeing with us about the block,
-/// and neither is worth failing a login over.
+/// The addons `SMSG_ADDON_INFO` hides: record i answers `sent[i]` (the reply carries no names),
+/// and status 2 makes the reference set `[rec+0x29] = 1` (`0x51db84`), dropping it from Lua.
 pub fn hidden_from_reply(statuses: &[u8], sent: &[SecureAddon]) -> Vec<String> {
     statuses
         .iter()
@@ -79,26 +23,22 @@ pub fn hidden_from_reply(statuses: &[u8], sent: &[SecureAddon]) -> Vec<String> {
         .collect()
 }
 
-/// One record in the addon block — a secure addon as the client describes it to the server.
+/// One record of the addon block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SecureAddon<'a> {
     /// The addon's folder name (`Blizzard_AuctionUI`), sent as a `CString`.
     pub name: &'a str,
-    /// Byte 0 of the addon's `.pub` file — `1` for a stock signature, `0` when the client found no
-    /// usable `.pub`. A server may write a different byte back (`SMSG_ADDON_INFO`), which the real
-    /// client persists into the `.pub` and echoes next logon; cmangos's anticheat uses exactly that
-    /// channel to stamp a per-install fingerprint across four of the twelve.
+    /// Byte 0 of the `.pub`: 1 for a stock signature, 0 for none usable. A server may write another
+    /// back in `SMSG_ADDON_INFO`, which the reference saves to the `.pub` and echoes next logon.
     pub flags: u8,
-    /// CRC-32 of the `.pub`'s 256 modulus bytes — [`STANDARD_MODULUS_CRC`] for a stock signature,
-    /// `0` when `flags` is `0`.
+    /// CRC-32 of the `.pub`'s 256 modulus bytes; 0 when `flags` is 0.
     pub modulus_crc: u32,
     /// CRC-32 of the addon's `.url` string. `0` for every stock addon (none ship one).
     pub url_crc: u32,
 }
 
 impl SecureAddon<'_> {
-    /// A stock, signed Blizzard built-in: enabled signature, standard modulus, no URL. The shape
-    /// all twelve take on an unmodified install.
+    /// A stock signed built-in, the shape all twelve take on an unmodified install.
     const fn stock(name: &str) -> SecureAddon<'_> {
         SecureAddon {
             name,
@@ -109,20 +49,9 @@ impl SecureAddon<'_> {
     }
 }
 
-/// The twelve `Blizzard_*` built-ins a stock 1.12.1 install reports, in the order the client sends
-/// them (ascending ASCII of the folder name).
-///
-/// VERIFIED against a real 1.12.1.5875 client's `CMSG_AUTH_SESSION` captured against a live
-/// Blizzard server in 2006 (wow-5875-re `system/net/scratch/cmsg-auth-session-addon-block.md`):
-/// 342 uncompressed bytes, twelve records, every one `flags = 1`, `modulus_crc =`
-/// [`STANDARD_MODULUS_CRC`], `url_crc = 0`, and nothing left over — the arithmetic proof that the
-/// buffer carries no count and no trailer.
-///
-/// benilla sends this list rather than one derived from the install's own `Interface/AddOns`
-/// folder, and the two agree on every stock install: the client's rule is "`## Secure:` non-zero",
-/// which no third-party 1.12 addon sets, and benilla's own addons (loaded from
-/// `benilla-config/AddOns`) are third-party by construction. Reading each `.pub` off the player's
-/// chain would only differ on an install whose signature files have been altered — see 1497.
+/// The twelve `Blizzard_*` built-ins a stock 1.12.1 install reports, in the client's order
+/// (ascending ASCII). Deviation: a fixed list, not read off the install, because no third-party
+/// addon sets `## Secure:`, so the two differ only where the `.pub` files were altered.
 pub const STOCK_SECURE_ADDONS: [SecureAddon<'static>; 12] = [
     SecureAddon::stock("Blizzard_AuctionUI"),
     SecureAddon::stock("Blizzard_BattlefieldMinimap"),
@@ -138,7 +67,7 @@ pub const STOCK_SECURE_ADDONS: [SecureAddon<'static>; 12] = [
     SecureAddon::stock("Blizzard_TrainerUI"),
 ];
 
-/// The **uncompressed** addon buffer: one record per addon, concatenated, nothing else.
+/// The uncompressed addon buffer: the records concatenated, nothing else.
 pub fn addon_block(addons: &[SecureAddon]) -> Vec<u8> {
     let mut out = Vec::with_capacity(addons.iter().map(|a| a.name.len() + 10).sum());
     for addon in addons {
@@ -151,8 +80,7 @@ pub fn addon_block(addons: &[SecureAddon]) -> Vec<u8> {
     out
 }
 
-/// The block as it rides the wire: `u32` uncompressed size + the zlib stream, or **nothing at all**
-/// when there are no secure addons (what the real client does — it never emits a zero size).
+/// The block on the wire: `u32` size and the zlib stream, or nothing when there are no addons.
 pub fn addon_tail(addons: &[SecureAddon]) -> Vec<u8> {
     if addons.is_empty() {
         return Vec::new();
@@ -170,14 +98,13 @@ pub fn addon_tail(addons: &[SecureAddon]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// The retail ground truth: 342 uncompressed bytes, consumed exactly by twelve records.
+    /// The block has retail's 342-byte length and parses as twelve sorted, stock-signed records.
     #[test]
-    fn stock_block_matches_the_retail_capture() {
+    fn stock_block_has_the_retail_size_and_twelve_sorted_stock_records() {
         let plain = addon_block(&STOCK_SECURE_ADDONS);
         assert_eq!(plain.len(), 342, "retail sent 342 uncompressed bytes");
 
-        // Walk it back the way a server does — name, flags, modulus crc, url crc — and require it
-        // to land exactly on the end. That is what proves there is no count and no trailer.
+        // Parse it as a server does; landing exactly on the end proves no count and no trailer.
         let mut rest = &plain[..];
         let mut seen = Vec::new();
         while !rest.is_empty() {
@@ -206,9 +133,7 @@ mod tests {
         );
     }
 
-    /// The wire tail: size prefix, zlib framing, and the retail compressed length. `flate2` at its
-    /// default level reproduces the 2006 client's 130 bytes byte-for-byte — the real client used
-    /// `Z_DEFAULT_COMPRESSION` through the same zlib deflate.
+    /// `flate2`'s default is the reference's `Z_DEFAULT_COMPRESSION`, hence the retail 130 bytes.
     #[test]
     fn stock_tail_is_size_plus_zlib() {
         let tail = addon_tail(&STOCK_SECURE_ADDONS);
@@ -221,8 +146,6 @@ mod tests {
         assert_eq!(tail.len(), 4 + 130, "retail compressed to 130 bytes");
     }
 
-    /// Zero secure addons appends *nothing* — never a zero size, which no real client can emit and
-    /// which cmangos-classic kicks for.
     #[test]
     fn no_secure_addons_appends_nothing() {
         assert!(addon_tail(&[]).is_empty());

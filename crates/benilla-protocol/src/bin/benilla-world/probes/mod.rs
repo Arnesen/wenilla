@@ -1,20 +1,17 @@
-//! The probe registry: one file per `--flag` scenario, each a self-contained [`Probe`] with a
-//! uniform lifecycle. Registration order (in `main`) = today's stream-loop/verify block order, so
-//! output and execution order are preserved.
+//! The probes: one file per `--flag` scenario, each a [`Probe`] run in registration order.
 
 use anyhow::Result;
 use benilla_protocol::{SessionEvent, WorldSession};
 
 use crate::world::World;
 
-/// What a [`Probe`]'s lifecycle methods borrow: the live session (to send) + the shared [`World`].
+/// What a [`Probe`]'s lifecycle methods borrow: the live session and the shared [`World`].
 pub(crate) struct Ctx<'a> {
     pub session: &'a mut WorldSession,
     pub world: &'a mut World,
 }
 
-/// One scripted wire-verification scenario. Registered from a `--flag`; the pump drives every
-/// registered probe through this lifecycle in registration order.
+/// One scripted wire-verification scenario, driven through this lifecycle in registration order.
 pub(crate) trait Probe {
     /// One-time pre-stream staging (GM teleports, cleanup commands).
     fn stage(&mut self, cx: &mut Ctx) -> Result<()> {
@@ -26,37 +23,30 @@ pub(crate) trait Probe {
         let _ = cx;
         Ok(())
     }
-    /// Every decoded event, AFTER [`World::on_event`] has processed it.
+    /// Every decoded event, after [`World::on_event`] has processed it.
     fn on_event(&mut self, ev: &SessionEvent, cx: &mut Ctx) -> Result<()> {
         let _ = (ev, cx);
         Ok(())
     }
-    /// Post-stream: assertions + follow-up round trips (each block's bespoke drains move verbatim).
+    /// Post-stream: assertions and follow-up round trips.
     fn verify(&mut self, cx: &mut Ctx) -> Result<()> {
         let _ = cx;
         Ok(())
     }
 }
 
-// Quest consts shared by more than one probe (put here rather than `pub(super)` in quest.rs
-// because giverstatus/questlog re-use them and neither is quest.rs's child).
+// Quest constants shared by several probes.
 
-/// Marshal McBride's teleport spot — the `--quest` turn-in NPC, and the `--questlog`/`--giverstatus`
-/// stage target (McBride is quest 7's giver *and* ender).
+/// Onto Marshal McBride, the `--quest` turn-in NPC and quest 7's giver and ender.
 pub(crate) const QUEST_TURNIN_TP: &str = ".go xyz -8902.59 -162.606 82.0223"; // onto Marshal McBride
-pub(crate) const QUEST_TURNIN_ENTRY: u32 = 197; // Marshal McBride — takes 783
-/// `PLAYER_QUEST_LOG_1_1` UpdateField index for 1.12.1 (UNIT_END 188 + 0xA), 3 fields per slot ×
-/// 20 slots (vmangos `UpdateFields_1_12_1.h:128`).
+pub(crate) const QUEST_TURNIN_ENTRY: u32 = 197; // Marshal McBride, who takes 783
+/// `PLAYER_QUEST_LOG_1_1`: `UNIT_END` (188) + 0xA, 3 fields per slot for 20 slots
+/// (`UpdateFields_1_12_1.h:128`).
 pub(crate) const FIELD_PLAYER_QUEST_LOG_1_1: u16 = 198;
 
-/// The `--questlog` probe target: quest 7 "Kobold Camp Cleanup" — Marshal McBride (entry 197, the
-/// same NPC [`QUEST_TURNIN_TP`]/[`QUEST_TURNIN_ENTRY`] already land on) is *both* giver and ender
-/// (VERIFIED live against the running vmangos: `mangos.creature_questrelation` and
-/// `creature_involvedrelation` each carry exactly one row for quest 7, both `197`). Its one
-/// objective — kill 10 of creature entry 6 (Kobold) — is a real `required_count > 0` slot, unlike
-/// 783's report-only "A Threat Within" the `--quest` probe turns in; a GM `.quest complete`
-/// substitutes for the grind, same as `--quest`. Shared with `--giverstatus`, which `.quest remove`s
-/// it in staging so McBride reads AVAILABLE for a fresh log.
+/// Quest 7 "Kobold Camp Cleanup": Marshal McBride (197) gives and takes it
+/// (`creature_questrelation`, `creature_involvedrelation`), and its objective, 10 kills of entry
+/// 6, is a real counted slot, unlike 783's report-only "A Threat Within".
 pub(crate) const QUESTLOG_ID: u32 = 7;
 
 mod attack;

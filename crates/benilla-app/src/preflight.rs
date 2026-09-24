@@ -48,8 +48,8 @@
 //! establish — which is precisely the player build. The banner now registers beside the stamp
 //! itself, in `lib::run`, where it is always compiled.
 //!
-//! The other half of decision 0649 — the pre-connect **account guard**, which keeps a session
-//! running inside a worktree pool slot from logging in as somebody else's account — lives in
+//! The other half of decision 0649 — the pre-connect **account guard**, which keeps a scripted
+//! run from logging in as an account its checkout did not declare — lives in
 //! [`crate::run_mode`] now, not here: it is consulted by the login policy, and 1174's seam does not
 //! let gameplay call an instrument. Its reasoning went with it.
 
@@ -76,13 +76,11 @@ const PLAYER_FLAGS_GM: u32 = 0x0000_0008;
 /// **PACIFIED and DISARMED used to sit in here and do not belong** (decision 1903): neither
 /// touches movement, and a banner telling a session "movement is server-blocked" because the
 /// character is disarmed sends someone hunting a mover bug that is not there. They moved to
-/// [`ABILITY_BLOCKERS`]. What is left is movement, and wow-re's
-/// `object-layer/scratch/unit-flags-movement-gates.md` is where each row's mechanism lives —
-/// note they are **not one gate**: STUNNED is the only bit that reaches the local input tick
-/// (`0x5145b0` → `0x514755`, killing the turn and pitch emitters), CONFUSED and FLEEING act
-/// through the `IsSelfControlled` predicate `0x5fa550` (mask `0xc00004`, which STUNNED is *not*
-/// in), POSSESSED does not refuse at all but redirects to the charmer, and the taxi bit shares
-/// no gate with any of them.
+/// [`ABILITY_BLOCKERS`]. What is left is movement — and note they are **not one gate**: STUNNED
+/// is the only bit that reaches the local input tick (`0x5145b0` → `0x514755`, killing the turn
+/// and pitch emitters), CONFUSED and FLEEING act through the `IsSelfControlled` predicate
+/// `0x5fa550` (mask `0xc00004`, which STUNNED is *not* in), POSSESSED does not refuse at all but
+/// redirects to the charmer (`0x5fa582`), and the taxi bit shares no gate with any of them.
 const MOVE_BLOCKERS: &[(u32, &str)] = &[
     (0x0004_0000, "STUNNED (no turning, no pitch)"),
     (
@@ -108,7 +106,7 @@ const ABILITY_BLOCKERS: &[(u32, &str)] = &[
 ];
 
 /// Worth naming on entry: an unattended probe that logs in already fighting is the exact shape of
-/// the accident the unattended-combat ban exists for (method.md). The bit itself is declared once
+/// the accident the unattended-combat ban exists for (docs/METHOD.md). The bit itself is declared once
 /// ([`crate::player`]).
 use crate::player::UNIT_FLAG_IN_COMBAT;
 
@@ -170,7 +168,7 @@ fn offline_notice(net: Option<Res<crate::net::NetOffline>>) {
     warn!(
         "preflight: NET OFF — no IO thread this run, so the drain gets no packets and NOTHING on \
          the wire path executes (net::apply, the movement stream, every MSG_MOVE_*). Fine for a \
-         visual capture; NOT evidence for a change to any of it. method.md's gate is a clean run \
+         visual capture; NOT evidence for a change to any of it. docs/METHOD.md's gate is a clean run \
          of the AFFECTED path — for wire work that means a live server run."
     );
 }
@@ -435,7 +433,7 @@ fn findings(
                 ShieldReport::Arming | ShieldReport::Armed =>
                     "This is the default. Re-run with WOW_GM=off for those readings — safe, \
                      because the probe shield (decision 0677) keeps the body alive without it.",
-                // Not a probe body — the director's own account, or a bystander. `WOW_GM` would be
+                // Not a probe body — a player's account, or a plain test account. `WOW_GM` would be
                 // inert here (the shield only ever commands `probe<N>`, 0677), and saying otherwise
                 // sends the reader after a switch that does nothing. The state is also PERSISTED:
                 // vmangos saves it in `characters.extra_flags` bit 0 and `GM.LoginState = 2`
@@ -478,7 +476,7 @@ fn findings(
     if unit_flags & UNIT_FLAG_IN_COMBAT != 0 {
         out.push(
             "IN COMBAT on arrival — something is already fighting this character. Do not leave it \
-             unattended (method.md's unattended-combat ban): break the fight or move it out."
+             unattended (docs/METHOD.md's unattended-combat ban): break the fight or move it out."
                 .into(),
         );
     }

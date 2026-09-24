@@ -7,8 +7,7 @@
 //! arrival distance to the destination node's DBC position, and measured flight duration vs the
 //! DBC prediction `Σ path-segment length ÷ 32 yd/s` (`PLAYER_FLIGHT_SPEED`) — timing measured,
 //! never eyeballed (decision 0404). An outer `timeout`d run + grep is the whole harness.
-//! Non-combat. Pair with the SLOT-KEYED probe identity (`WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>`; method.md "The local vmangos server"). Uses `.taxicheat on` so
+//! Non-combat. Pair with the checkout's probe identity (`.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR — the `probe` skill). Uses `.taxicheat on` so
 //! the fresh probe character can fly to an unvisited node (and so the SHOWTAXINODES mask
 //! exercises the full-network branch); the 110-copper fare is DB-seeded (see the Wait phase —
 //! `.modify money` outranks the probe account).
@@ -95,7 +94,7 @@ enum Phase {
         started_at: f64,
         last_report: f64,
         /// Latched true the first in-flight frame the anim pair reads right — rider base
-        /// Mount(91), mount child base Fly(135) (RF-0057 `0x5fd19c` + the 0441 mount pin).
+        /// Mount(91), mount child base Fly(135) (`0x5fd19c` + the 0441 mount pin).
         gait_ok: bool,
         /// The largest |flying pitch| (radians) seen on the SELF transform mid-flight — the
         /// `sample_splines` tangent-climb attitude (decisions 0501/0516). The route climbs
@@ -308,7 +307,7 @@ fn taxi_probe(
         } => {
             let wow = bevy_to_wow(player.pos);
             if player.server_riding() {
-                // The anim pair the flight must show (RF-0057 `0x5fd19c` + the 0441 mount pin):
+                // The anim pair the flight must show (`0x5fd19c` + the 0441 mount pin):
                 // rider base Mount(91), mount child base Fly(135). Latched — the first frames
                 // legitimately lag (mount attach, first selection).
                 let rider = drivers.get(self_entity).ok().map(|d| d.playing().0);

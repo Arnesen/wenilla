@@ -1,13 +1,7 @@
-//! `--open-item`: the openable-item wire — the fork a bag right-click makes when the clicked
-//! item's template carries the LOOTABLE bit (`ItemInfo::openable`). The client does NOT send
-//! `CMSG_USE_ITEM` for such an item (a clam has no on-use spell at all, so the use goes nowhere —
-//! the director's "there is no way to open clams"): it sends `CMSG_OPEN_ITEM(bagIndex, slot)`, and
-//! the server answers `SMSG_LOOT_RESPONSE` **on the item's own guid**, i.e. a loot window over a
-//! thing in your bag rather than a corpse in the world.
-//!
-//! This probe proves the whole round trip against the live server: add a clam, open it by bag
-//! position, require a loot response carrying rows on that guid, then release the window and
-//! subtract the copy so the character is left as found.
+//! `--open-item`: the openable-item wire. A bag right-click on an item whose template carries
+//! LOOTABLE (`ItemInfo::openable`) sends `CMSG_OPEN_ITEM(bagIndex, slot)`, never `CMSG_USE_ITEM`,
+//! and the server answers `SMSG_LOOT_RESPONSE` on the item's own guid. Adds a clam, opens it,
+//! releases the window and removes the clam.
 
 use std::time::{Duration, Instant};
 
@@ -16,9 +10,7 @@ use benilla_protocol::{decode, SessionEvent};
 
 use crate::probes::{Ctx, Probe};
 
-/// The probe target: "Small Barnacled Clam" (entry 7973) — the director's own case. Template
-/// `Flags` carries LOOTABLE (`0x4`) with `LockID = 0`, so it is openable the moment it exists: no
-/// key, no lockpicking, no rigging. Its `item_loot_template` rows are what come back.
+/// Small Barnacled Clam: `Flags` has LOOTABLE (0x4) and `LockID` is 0, so it opens as is.
 const ITEM_ENTRY: u32 = 7973;
 
 pub(crate) struct OpenItem;
@@ -34,8 +26,7 @@ impl Probe for OpenItem {
         let world = &mut *cx.world;
         let session = &mut *cx.session;
 
-        // 1) Find the clam in the backpack, and remember WHICH slot — the wire addresses the item
-        // by position (bag 255 + the absolute player-array slot), never by guid.
+        // 1) Find the clam: the wire addresses it by position (bag 255, player slot), not guid.
         let sf = world
             .self_fields
             .as_ref()
@@ -56,8 +47,7 @@ impl Probe for OpenItem {
             slot0 + 1
         );
 
-        // 2) The fork's own packet. A loot response on the ITEM's guid is the proof: nothing else
-        // in the protocol opens a loot window over a bag position.
+        // 2) Open it: nothing else opens a loot window on a bag item's own guid.
         session.open_item(255, wire_slot)?;
         let drain_until = Instant::now() + Duration::from_secs(5);
         let mut verdict: Option<Result<String, String>> = None;
@@ -100,7 +90,7 @@ impl Probe for OpenItem {
             .map_err(|e| anyhow::anyhow!("--open-item: {e}"))?;
         println!("✅ open item: {v}");
 
-        // 3) Close the window again — an abandoned loot session would follow the character.
+        // 3) Close the window, or the loot session stays with the character.
         session.loot_release(item_guid)?;
         let until = Instant::now() + Duration::from_secs(2);
         while Instant::now() < until {
@@ -114,7 +104,7 @@ impl Probe for OpenItem {
             }
         }
 
-        // Leave the probe character as found (the clam survives an un-emptied open).
+        // Remove the clam, which survives an open that is not emptied.
         session.send_chat(&format!(".additem {ITEM_ENTRY} -1"))?;
         println!("cleanup: .additem {ITEM_ENTRY} -1");
         Ok(())

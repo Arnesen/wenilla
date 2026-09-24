@@ -1,19 +1,11 @@
-//! `--mount-tele`: **what the server actually sends when a teleport dismounts you** — B213's wire.
+//! `--mount-tele`: what the server sends when a teleport dismounts you. vmangos strips the mount
+//! in `HandleMoveWorldportAckOpcode` right after the destination's own create block
+//! (`Map::Add` → `SendInitSelf`, then `RemoveSpellsCausingAura(SPELL_AURA_MOUNTED)` unless
+//! `IsMountAllowed`), so the two arrive back to back in one tick.
 //!
-//! The report: mount up, teleport somewhere that forbids mounting, and the auto-dismount leaves the
-//! mount's run speed on your feet. vmangos does that strip inside the worldport ack handler, three
-//! statements after the destination map's own create block goes out
-//! (`MovementHandler.cpp` `HandleMoveWorldportAckOpcode`: `Map::Add` → `SendInitSelf`, then
-//! `if (!mEntry->IsMountAllowed()) RemoveSpellsCausingAura(SPELL_AURA_MOUNTED)`), so the two land
-//! back to back in one tick. Reading the source says they *should*; this probe measures that they
-//! *do*, on the running deploy, and prints the gap.
-//!
-//! The scenario: `.aura` a real mount spell on open ground (a genuine `SPELL_AURA_MOUNTED` holder —
-//! `.modify mount` sets a display id with no aura and would never be stripped), require the mounted
-//! `SMSG_FORCE_RUN_SPEED_CHANGE`, then `.go xyz` into a dungeon map and require, in order: the
-//! `SMSG_NEW_WORLD`, a self create block still carrying the **mounted** run speed, and the
-//! dismount's `SMSG_FORCE_RUN_SPEED_CHANGE` back at base. Needs a GM account (the deploy's probes
-//! are gmlevel 6).
+//! Mounts with `.aura` on open ground, then `.go xyz` into a dungeon, and requires in order
+//! `SMSG_NEW_WORLD`, a self create block still at the mounted run speed, and the dismount's
+//! `SMSG_FORCE_RUN_SPEED_CHANGE` back to base, printing the gap. Needs GM.
 
 use std::time::Instant;
 
@@ -23,24 +15,21 @@ use benilla_protocol::{SessionEvent, SpeedKind};
 use crate::probes::{Ctx, Probe};
 use crate::world::ATTACK_TP;
 
-/// Brown Horse (the 60% apprentice mount): `SPELL_AURA_MOUNTED` + `SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED`,
-/// so `.aura` on it produces the same holder a real mount cast would — the one
-/// `RemoveSpellsCausingAura(SPELL_AURA_MOUNTED)` goes looking for.
+/// Brown Horse (60%): `SPELL_AURA_MOUNTED` + `SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED`, so `.aura`
+/// makes the holder a real mount cast would; `.modify mount` sets only a display id.
 const MOUNT_SPELL: u32 = 458;
 
 /// Ragefire Chasm. A dungeon, and not one of `MapEntry::IsMountAllowed`'s four exceptions
 /// (Zul'Gurub, Zul'Farrak, AQ Ruins, Caverns of Time), so arriving there strips the mount.
 const DUNGEON_MAP: u32 = 389;
 
-/// Inside Ragefire Chasm's entrance. The landing spot does not matter — the packets we want are
-/// sent by the arrival itself — but a real one keeps the character somewhere sane if a run is
-/// interrupted before the exit teleport in `verify`.
+/// Inside Ragefire Chasm's entrance, a sane place to be stranded if a run is interrupted.
 const DUNGEON_TP: &str = ".go xyz 3.0 -14.0 -18.0 389";
 
-/// 1.12.1's base run speed (yd/s) — the value the strip must come back to.
+/// The 1.12 base run speed (yd/s), which the strip restores.
 const BASE_RUN: f32 = 7.0;
 
-/// The map the scenario has to start on — open ground where a mount is allowed.
+/// The starting map: open ground where a mount is allowed.
 const OUTDOOR_MAP: u32 = 0;
 
 #[derive(Default)]
@@ -60,11 +49,9 @@ pub(crate) struct MountTele {
 
 impl Probe for MountTele {
     fn stage(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Get onto open ground and clean of any leftover holder FIRST — an interrupted earlier run
-        // can leave the character mounted inside the dungeon, and from there the scenario's own
-        // teleport is a same-map port that sends no `SMSG_NEW_WORLD` at all. The map id is
-        // explicit for the same reason `verify`'s exit is (`.go xyz`'s map argument defaults to
-        // the map you are standing on). Mounting waits for the arrival, in `poll`.
+        // Unmount and go outdoors first: from inside the dungeon the scenario's teleport would be
+        // a same-map port, which sends no `SMSG_NEW_WORLD`. `.go xyz` defaults to the current map,
+        // so the map id is explicit.
         cx.session.send_chat(&format!(".unaura {MOUNT_SPELL}"))?;
         cx.session
             .send_chat(&format!("{ATTACK_TP} {OUTDOOR_MAP}"))?;
@@ -74,9 +61,8 @@ impl Probe for MountTele {
 
     fn on_event(&mut self, ev: &SessionEvent, cx: &mut Ctx) -> Result<()> {
         match ev {
-            // The mount landed: its speed change is our cue to teleport. Gate on the *tracked*
-            // self like `--speed` does — World only acks once our pose is known, and an unacked
-            // change is one vmangos has not applied yet.
+            // The mounted speed change cues the teleport, gated on a tracked self: `World` acks
+            // only once our pose is known, and vmangos applies no change before its ack.
             SessionEvent::ForceSpeedChange {
                 guid, kind, speed, ..
             } if *guid == cx.world.self_guid && *kind == SpeedKind::Run => {
@@ -84,8 +70,7 @@ impl Probe for MountTele {
                     return Ok(());
                 }
                 if self.ported {
-                    // Post-arrival: the first Run change after the destination's create block is
-                    // the dismount we came for.
+                    // After arrival, the first Run change after the create block is the dismount.
                     if self.create_after.is_some() && self.strip_after.is_none() {
                         self.strip_after = Some((*speed, Instant::now()));
                     }
@@ -94,15 +79,13 @@ impl Probe for MountTele {
                     println!("mounted: run {speed} yd/s — teleporting into map {DUNGEON_MAP}");
                 }
             }
-            // `SMSG_LOGIN_VERIFY_WORLD` decodes to this too, so login itself announces map 0 —
-            // gate on having actually sent the teleport, or the whole scenario latches onto the
-            // login and every later check reads the wrong packets.
+            // `SMSG_LOGIN_VERIFY_WORLD` also decodes to this: gate on the teleport being sent.
             SessionEvent::Worldport { map_id, .. } if self.ported && self.arrived.is_none() => {
                 self.arrived = Some((*map_id, Instant::now()));
                 println!("SMSG_NEW_WORLD: map {map_id}");
             }
-            // Our own create on the destination map — sent by `Map::Add` → `SendInitSelf`, before
-            // the strip. Its LIVING block is the speed set the client seeds a fresh entity with.
+            // Our create on the new map, from `SendInitSelf` before the strip; its LIVING block
+            // seeds a fresh entity's speeds.
             SessionEvent::ObjectCreate { guid, speeds, .. }
                 if *guid == cx.world.self_guid && self.ported && self.arrived.is_some() =>
             {
@@ -117,8 +100,7 @@ impl Probe for MountTele {
     }
 
     fn poll(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Mount only once the staging teleport has actually landed us outdoors — proving the run's
-        // starting state from a packet rather than assuming it (`method.md` step 6).
+        // Mount only once the staging teleport has landed us outdoors.
         if !self.mount_requested && cx.world.self_map == OUTDOOR_MAP {
             self.mount_requested = true;
             cx.session.send_chat(&format!(".aura {MOUNT_SPELL}"))?;
@@ -135,17 +117,13 @@ impl Probe for MountTele {
     }
 
     fn verify(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Leave the character as found before asserting: a failed run must not strand it in a
-        // dungeon on a mount. The exit names map 0 explicitly — `.go xyz`'s map argument is
-        // OPTIONAL and defaults to the map you are standing on, so the bare [`ATTACK_TP`] would
-        // port us to Northshire's coordinates *inside Ragefire Chasm*.
+        // Restore before asserting. The exit names map 0: `.go xyz` defaults to the current map,
+        // so a bare `ATTACK_TP` would land on Northshire's coordinates inside Ragefire Chasm.
         cx.session.send_chat(&format!(".unaura {MOUNT_SPELL}"))?;
         cx.session
             .send_chat(&format!("{ATTACK_TP} {OUTDOOR_MAP}"))?;
-        // …and stay on the wire long enough to ACK that exit port. A far teleport the client never
-        // acks does not happen: dropping the session here would leave the probe character standing
-        // in a dungeon for the next run to find. Bounded, and only advisory — `stage` recovers from
-        // a stranded character anyway, so a quiet stream here is not a failure.
+        // Stay to ack the exit port: a far teleport the client never acks does not happen.
+        // Advisory only, since `stage` recovers a stranded character.
         let until = Instant::now() + std::time::Duration::from_secs(5);
         while Instant::now() < until && cx.world.self_map != OUTDOOR_MAP {
             match cx.session.recv() {
@@ -184,8 +162,8 @@ impl Probe for MountTele {
         ensure!(
             (create_run - mounted).abs() < 0.01,
             "--mount-tele: the destination's create block should still carry the MOUNTED run \
-             speed ({mounted}), got {create_run} — the strip would then precede the create and \
-             B213's ordering would not be this one"
+             speed ({mounted}), got {create_run} — the strip would then precede the create, \
+             the opposite of the order this probe expects"
         );
         ensure!(
             (strip_run - BASE_RUN).abs() < 0.01,
@@ -196,15 +174,14 @@ impl Probe for MountTele {
             "\n--mount-tele PASS: arrived on map {map}; create block carried the mount's \
              {create_run} yd/s, the dismount's SMSG_FORCE_RUN_SPEED_CHANGE followed {} µs later \
              at {strip_run} yd/s.\n  Both packets are written by one HandleMoveWorldportAckOpcode \
-             call, so a client that drains its socket once a frame sees them in ONE drain — which \
-             is what B213 (decision 1478) turns on.",
+             call, so a client that drains its socket once a frame sees them in ONE drain.",
             gap.as_micros()
         );
         Ok(())
     }
 }
 
-/// `Option::ok_or_else` with the probe's message shape, so each `verify` line reads as one claim.
+/// `Option::ok_or_else` with a message, so each `verify` line reads as one claim.
 trait EnsureSome<T> {
     fn ensure_some(&self, msg: &str) -> Result<T>;
 }

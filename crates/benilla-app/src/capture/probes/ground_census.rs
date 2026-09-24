@@ -22,7 +22,7 @@
 //! - **`terrain`** is the MCNK height under it, which is what the clamp finds when a building's own
 //!   collider has not attached yet.
 //!
-//! Pair it with the slot-keyed probe identity and a `.go` to the reported spot:
+//! Pair it with the checkout's probe identity (the `probe` skill) and a `.go` to the reported spot:
 //!
 //! ```text
 //! WOW_USER=probeN WOW_PASS=pprobeN WOW_CHAR=Probe<n> WOW_NOSOUND=1 \

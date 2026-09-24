@@ -1,10 +1,5 @@
-//! `benilla-protocol` — WoW 1.12.1 (build 5875) auth + world wire protocol.
-//!
-//! Auth/SRP6 and the world header crypto come from `benilla-srp`; message (de)serialization is
-//! in-repo ([`auth`] for the realmd login protocol, [`world`]/[`events`] for the world protocol) —
-//! decision 0021. 1.12.1 uses **login protocol version 3**. This crate owns the session logic; the
-//! async↔ECS bridge lives in `benilla`. Phase 3: SRP6 logon + realm
-//! list.
+//! The WoW 1.12.1 (build 5875) wire protocol: [`auth`] for realmd (login protocol version 3),
+//! [`world`] and [`events`] for the world server. SRP6 and the header crypto are `benilla-srp`'s.
 
 pub mod auth;
 pub mod events;
@@ -39,14 +34,11 @@ use crate::transport::Conn;
 pub const AUTH_PORT: u16 = 3724;
 /// The 1.12.1 client build we present to the server.
 pub const CLIENT_BUILD: u16 = 5875;
-/// How many logon challenges [`logon`] will ask for while looking for a `B` both serialization
-/// conventions read the same way (see the redial comment there). One dial in ~137 comes back
-/// ambiguous, so eight is already a probability of about 10⁻¹⁷ of running out.
+/// Challenges [`logon`] draws for an unambiguous `B`; one in ~137 is not, so all 8 fail ~10⁻¹⁷.
 const MAX_CHALLENGE_DIALS: u32 = 8;
 
-/// Split an optional `:port` off a host string (`play.example.com:3724`). A bare host — or one
-/// whose suffix isn't a port, e.g. a raw IPv6 address like `::1` — comes back intact with
-/// `default`.
+/// Splits an optional `:port` off a host; one without a numeric port, a raw IPv6 address
+/// included, comes back whole with `default`.
 pub fn host_port(host: &str, default: u16) -> (&str, u16) {
     match host.rsplit_once(':') {
         Some((h, p)) if !h.contains(':') => match p.parse::<u16>() {
@@ -57,17 +49,8 @@ pub fn host_port(host: &str, default: u16) -> (&str, u16) {
     }
 }
 
-/// The dial never got a socket — **and which of the two reasons it was**.
-///
-/// This distinction only started mattering when the realmlist became something a player types
-/// (decision 1667). Before that the address was a constant and "Unable to connect" could only mean
-/// one thing; afterwards it means either *you typed a name that does not exist* or *the address is
-/// fine and nothing is answering on it*, and a player with no way to tell them apart edits a
-/// correct address over and over. That is exactly what the first live use of the editor produced.
-///
-/// The split is drawn where it is honest — resolution and connection are two separate operations,
-/// so we do them separately rather than reading tea leaves out of one `io::Error` (a DNS failure
-/// surfaces as `ErrorKind::Uncategorized` on macOS, so the kind cannot carry this).
+/// A dial that got no socket, split by step: the name did not resolve, or nothing answered (one
+/// `io::Error` cannot tell them apart; macOS reports a failed lookup as `Uncategorized`).
 #[derive(Debug, Clone)]
 pub struct DialFailure {
     /// What we tried to reach, as the player would recognise it (`host:port`).
@@ -129,56 +112,32 @@ async fn dial(host: &str, port: u16) -> Result<Conn> {
     })
 }
 
-/// A realm as advertised by the auth server's realm list — **every** field the wire carries.
-///
-/// Three of them used to be dropped on the floor (`_flag`, `_category`, `_realm_id`) and
-/// `population` was stringified on arrival, which was survivable only while benilla connected to
-/// `realms.first()` and never drew a list. The realm-list screen needs all of them, and it needs
-/// the population as the float it is.
+/// A realm from realmd's realm list, with every field the wire carries.
 #[derive(Debug, Clone)]
 pub struct RealmInfo {
     pub name: String,
     /// `host:port` of the world server, as the client would connect to it.
     pub address: String,
-    /// The population float — **not** what the realm list displays. The displayed word
-    /// (`Low`/`Medium`/`High`/`Full`/…) is a *band* computed against the mean and standard
-    /// deviation of **every** realm; see `realm_select::load` on the app side.
-    ///
-    /// Already **rewritten** if the server sent one of the three sentinel values — see
-    /// [`auth::MAGIC_POPULATIONS`]. What is stored here is what the reference's own parser would
-    /// hold, which is the only value it is safe to average.
+    /// The population, sentinels already rewritten as the reference parser does
+    /// ([`auth::MAGIC_POPULATIONS`]); the list shows a band against all realms' mean and deviation.
     pub population: f32,
-    /// How many characters this account has on that realm — a genuine count, printed by the list as
-    /// `"(3)"`. (The client's realm record keeps it at `[realm+0x130]`; wow-re's earlier band sweep
-    /// had read that offset as the realm type, which is really the dword at `[+0x04]` below.)
+    /// This account's character count there, shown as `"(3)"` (client realm record `+0x130`).
     pub characters: u8,
-    /// The realm **type** — the join key for the game-type columns, *not* an enumeration to match
-    /// on directly. `GetRealmInfo` resolves `(pvp, rp)` by scanning `Cfg_Configs.dbc` for the row
-    /// whose `RealmType` equals this; `realm_select::load::pvp_rp` is that table.
+    /// The realm type (record `+0x04`), a join key, not an enum: `GetRealmInfo` takes `(pvp, rp)`
+    /// from the `Cfg_Configs.dbc` row whose `RealmType` equals it.
     pub realm_type: u32,
-    /// The realm-flags byte — the client's realm record `[realm+0x08]`.
-    ///
-    /// **Only `0x01` (invalid) and `0x02` (offline) — plus `0x04` — actually travel on the wire.**
-    /// The `0x20`/`0x40`/`0x80` sentinels that mean Recommended / New / Full are *synthesized on
-    /// arrival* from the magic populations the server sends instead, exactly as the reference's
-    /// parser does it ([`auth::MAGIC_POPULATIONS`]) — so this byte is the client's view of the
-    /// flags, not the server's.
+    /// The realm flags as the client holds them (record `+0x08`): the wire carries only `0x01`
+    /// invalid, `0x02` offline and `0x04`; `0x20`/`0x40`/`0x80` (Recommended, New, Full) are
+    /// synthesized from the magic populations ([`auth::MAGIC_POPULATIONS`]).
     pub flags: u8,
-    /// The wire's category (timezone) byte — the realm list's category tabs group on it. Matched
-    /// against a category id by **equality**; it is not an index into anything.
+    /// The category (timezone) byte the list's tabs group on, matched by equality, not an index.
     pub category: u8,
     /// The wire's realm id.
     pub id: u8,
 }
 
-/// Result of a successful logon: the SRP6 session key (carried into the world server), the realms,
-/// and the **still-open realmd socket** the list was read from.
-///
-/// The socket is kept because the realm list is not a one-shot: the reference's `RealmList.lua`
-/// re-requests it every `REALM_LIST_REFRESH_TIME` (5 s) for as long as its window is open, which
-/// is how a realm going offline or filling up shows up without a re-login. [`Logon::refresh_realms`]
-/// is that request. It is private so the only thing anyone can do with the connection is ask it
-/// the one question it still answers.
+/// A successful logon: the SRP6 session key, the realms, and the realmd socket, kept open because
+/// the reference's `RealmList.lua` re-requests the list every `REALM_LIST_REFRESH_TIME` (5 s).
 pub struct Logon {
     pub session_key: [u8; SESSION_KEY_LENGTH],
     pub realms: Vec<RealmInfo>,
@@ -225,8 +184,7 @@ impl Logon {
         }
     }
 
-    /// Whether the realmd connection is still up, i.e. whether [`Self::refresh_realms`] can do
-    /// anything. Lets a caller stop scheduling refreshes rather than calling into a no-op.
+    /// Whether the realmd socket is still up, so [`Self::refresh_realms`] can do anything.
     pub fn realmd_live(&self) -> bool {
         self.stream.is_some()
     }
@@ -253,14 +211,9 @@ pub async fn logon_async(host: &str, username: &str, password: &str) -> Result<L
     let password_n =
         NormalizedString::new(password).map_err(|e| anyhow!("invalid password: {e}"))?;
 
-    // 1-2. Logon challenge → the server's SRP6 inputs. The account name is sent uppercased (matching
-    // the SRP6 calculation).
-    //
-    // `B` is the one hashed value benilla does not draw, and ~1 in 137 of them is one the client and
-    // the mangos family serialize differently — a correct password answered with 0x04 (see
-    // `benilla-srp`, "Encoding-unambiguous handshakes"). Redial for a fresh `B` when that lands: the
-    // challenge is abandoned before any proof goes out, and realmd counts nothing at this stage for a
-    // known account (`AuthSocket::_HandleLogonChallenge`), so a redial is free and invisible.
+    // The account name goes uppercased, as SRP6 hashes it. About one `B` in 137 serializes
+    // differently in the client and mangos (a right password gets 0x04), so redial for a fresh
+    // one; realmd counts nothing before the proof (`AuthSocket::_HandleLogonChallenge`).
     let (mut stream, reply, server_public_key) = {
         let mut dialed = None;
         for _ in 0..MAX_CHALLENGE_DIALS {
@@ -278,12 +231,10 @@ pub async fn logon_async(host: &str, username: &str, password: &str) -> Result<L
                 break;
             }
         }
-        // Every dial ran out ambiguous (p ≈ 10⁻¹⁷): send the last anyway rather than inventing a
-        // failure the server never gave us.
+        // All ambiguous: go on with the last, since only the server can say it fails.
         dialed.expect("MAX_CHALLENGE_DIALS is non-zero")
     };
 
-    // 3. SRP6 (WoW flavor) — compute A, M1, and the session key.
     let challenge = SrpClientChallenge::new(
         username_n,
         password_n,
@@ -293,7 +244,6 @@ pub async fn logon_async(host: &str, username: &str, password: &str) -> Result<L
         reply.salt,
     );
 
-    // 4. Logon proof.
     auth::write_logon_proof(
         &mut stream,
         challenge.client_public_key(),
@@ -311,7 +261,6 @@ pub async fn logon_async(host: &str, username: &str, password: &str) -> Result<L
         .map_err(|e| anyhow!("server proof mismatch (wrong password?): {e}"))?;
     let session_key = *client.session_key();
 
-    // 6. Realm list.
     auth::write_realm_list_request(&mut stream).context("requesting realm list")?;
     let realms = auth::read_realm_list(&mut stream)
         .await
@@ -330,7 +279,6 @@ mod host_port_tests {
 
     #[test]
     fn explicit_port_splits() {
-        // Explicit port beats the default — they differ so the assert can tell them apart.
         assert_eq!(
             host_port("play.example.com:5000", AUTH_PORT),
             ("play.example.com", 5000)

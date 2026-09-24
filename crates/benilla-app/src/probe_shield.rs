@@ -159,9 +159,9 @@ impl ProbeShield {
     }
 }
 
-/// Whether `user` is a probe account — `probe` followed by digits, the slot-keyed identity every
-/// unattended session logs in with (method.md "The local vmangos server"). Nothing else is ours to
-/// modify: `one` is the director's, and a bystander test account is not a probe.
+/// Whether `user` is a probe account — `probe` followed by digits, the identity every unattended
+/// run logs in with (the `probe` skill). Nothing else is ours to
+/// modify: a player's account is theirs, and a plain test account is not a probe.
 fn is_probe_account(user: &str) -> bool {
     // Byte-wise (a &str slice at 5 would panic mid-char on non-ASCII input; bytes can't).
     let Some((prefix, digits)) = user.as_bytes().split_at_checked(5) else {
@@ -405,7 +405,7 @@ mod tests {
         for user in ["probe0", "probe7", "PROBE12"] {
             assert!(is_probe_account(user), "{user} is a probe account");
         }
-        // The director's account, and bystanders: never touched.
+        // A player's account, and plain test accounts: never touched.
         for user in ["one", "two", "probe", "probeone", "aprobe1", "probe1x"] {
             assert!(!is_probe_account(user), "{user} is NOT a probe account");
         }

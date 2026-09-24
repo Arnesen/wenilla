@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use super::ProbeClock;
 
 /// Keep a probe run's window **un-occludable, and out of the director's way** — the one defence
-/// against macOS's ~1 fps throttle for a fully covered window (decisions 0713/0777, method.md's
+/// against macOS's ~1 fps throttle for a fully covered window (decisions 0713/0777, docs/METHOD.md's
 /// `caffeinate` note), at the smallest footprint that still buys it.
 ///
 /// The on-top half used to live inside the FPS probe alone, which reads as "a frame-rate concern".

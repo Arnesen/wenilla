@@ -184,10 +184,96 @@ fn owed_text(line: &OwedLine, get: &dyn Fn(&str) -> Option<String>) -> Option<St
     (!text.is_empty()).then_some(text)
 }
 
-/// The net drain's `SessionEvent::Duel*` arms, factored here so the wire laws live beside the
-/// state they drive. `own` is our own guid.
-pub(crate) mod apply {
+/// The duel's packet handlers (decision 0633; in the net handler table since 2312), beside the
+/// state they drive: the session mirror + the two `DisplayError` lines the handlers emit inline;
+/// the Era events fire off the mirror's edges in [`feed_duel`], and the countdown ticks in its own
+/// system. `own` is our own guid.
+pub(crate) mod net {
     use super::*;
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+
+    use crate::net::NetHandlerApp;
+
+    /// Register the duel's handlers — called from [`UiDuelPlugin`]. One per kind, plus the
+    /// session-end listener.
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::DuelRequested, on_requested)
+            .net_handler(K::DuelOutOfBounds, on_bounds)
+            .net_handler(K::DuelInBounds, on_bounds)
+            .net_handler(K::DuelComplete, on_complete)
+            .net_handler(K::DuelWinner, on_winner)
+            .net_handler(K::DuelCountdown, on_countdown)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    fn on_requested(
+        In(ev): In<SessionEvent>,
+        mut duel: ResMut<DuelState>,
+        mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+        commands: Res<NetCommands>,
+        self_guid: Res<crate::net::SelfGuid>,
+        social: Res<crate::ui_social::SocialState>,
+    ) {
+        if let SessionEvent::DuelRequested {
+            arbiter,
+            challenger,
+        } = ev
+        {
+            requested(
+                &mut duel,
+                &mut errors,
+                &commands,
+                arbiter,
+                challenger,
+                self_guid.0,
+                social.is_ignored(challenger),
+            );
+        }
+    }
+
+    fn on_bounds(In(ev): In<SessionEvent>, mut duel: ResMut<DuelState>) {
+        match ev {
+            SessionEvent::DuelOutOfBounds => bounds(&mut duel, true),
+            SessionEvent::DuelInBounds => bounds(&mut duel, false),
+            _ => {}
+        }
+    }
+
+    fn on_complete(
+        In(ev): In<SessionEvent>,
+        mut duel: ResMut<DuelState>,
+        mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+    ) {
+        if let SessionEvent::DuelComplete { started } = ev {
+            complete(&mut duel, &mut errors, started);
+        }
+    }
+
+    fn on_winner(In(ev): In<SessionEvent>, mut duel: ResMut<DuelState>) {
+        if let SessionEvent::DuelWinner {
+            fled,
+            winner: won,
+            loser,
+        } = ev
+        {
+            winner(&mut duel, fled, &won, &loser);
+        }
+    }
+
+    fn on_countdown(In(ev): In<SessionEvent>, mut duel: ResMut<DuelState>) {
+        if let SessionEvent::DuelCountdown { seconds } = ev {
+            countdown(&mut duel, seconds);
+        }
+    }
+
+    /// A pending challenge, a running duel, and its countdown all die with the socket (decision
+    /// 0633) — the server drops the duel too (`Player::DuelComplete(DUEL_FLED)` on logout), and a
+    /// stale arbiter guid would make the next AcceptDuel echo a dead object. A listener on the
+    /// session end (a second handler on the kind, after the bridge's own teardown).
+    fn on_session_end(In(_): In<SessionEvent>, mut duel: ResMut<DuelState>) {
+        *duel = DuelState::default();
+    }
 
     /// `SMSG_DUEL_REQUESTED` — store the arbiter, and either own the challenge (error line +
     /// immediate accept) or hand the popup to the feed.
@@ -461,6 +547,7 @@ pub(crate) struct UiDuelPlugin;
 
 impl Plugin for UiDuelPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<DuelState>().add_systems(
             Update,
             (

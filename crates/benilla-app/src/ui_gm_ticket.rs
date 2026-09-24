@@ -34,7 +34,7 @@
 //!
 //! ## What vmangos actually does, and what that costs us
 //!
-//! Verified against `/Users/sam/wre/vmangos-src` (`Handlers/GMTicketHandler.cpp`, `GMTicketMgr.cpp`,
+//! Verified against the vmangos source (`Handlers/GMTicketHandler.cpp`, `GMTicketMgr.cpp`,
 //! `Commands/TicketCommands.cpp`) — four behaviours a client author has to design around:
 //!
 //! 1. **Silence is a legal answer.** Create returns with no packet at all when the queue is off,
@@ -97,8 +97,8 @@ pub(crate) struct GmTicketState {
     /// The last queue status the server reported, and its own answer counter — same idiom, because
     /// `GetGMStatus()` is asked on every window open and the answer is usually unchanged.
     ///
-    /// **`i32`, not `u32`, and that is byte-verified rather than a preference** (wow-re §5, this
-    /// session): the reference copies the field off the wire verbatim at `0x418e95` with no
+    /// **`i32`, not `u32`, and that is byte-exact rather than a preference**: the reference
+    /// copies the field off the wire verbatim at `0x418e95` with no
     /// extension, pushes it unmodified at `0x5e467b`, and hands it to Lua through
     /// `0x704fa6 fild dword` — a **signed** load, with no `cmp`, `test`, clamp or mapping anywhere
     /// between the wire and the event. So `HelpFrame`'s `arg1 == -1` arm is reachable exactly when
@@ -120,11 +120,11 @@ impl GmTicketState {
     /// **The client re-asks for its own ticket whenever a write lands** — the mechanism that makes
     /// the shipped UI's total silence on the three response opcodes correct rather than a gap.
     ///
-    /// Byte-verified in wow-re (§5, this session): `CMSG_GMTICKET_GETTICKET` (`0x211`) has three
-    /// callers, and two of them are *engine* legs reacting to a server push — the `0x206`/`0x208`
-    /// arm on response codes 2 (create-ok) and 4 (update-ok) at `0x5e4479`, and the `0x328` handler
-    /// on body value 1 at `0x5e7932`. **Neither carries an idempotence guard**, so it is one resend
-    /// per qualifying push, which is what this counter models.
+    /// `CMSG_GMTICKET_GETTICKET` (`0x211`) has three callers, and two of them are *engine* legs
+    /// reacting to a server push — the `0x206`/`0x208` arm on response codes 2 (create-ok) and 4
+    /// (update-ok) at `0x5e4479`, and the `0x328` handler on body value 1 at `0x5e7932`. **Neither
+    /// carries an idempotence guard**, so it is one resend per qualifying push, which is what this
+    /// counter models.
     ///
     /// Without it the window would not learn its own ticket exists until the 10-minute poll came
     /// round: file a ticket, and the toast stays dark and the form stays a form for up to ten
@@ -377,9 +377,87 @@ fn load_gm_ticket_dbc(
     }
 }
 
-/// The net drain's arms, beside the state they drive.
-pub(crate) mod apply {
+/// The GM ticket's packet handlers (decision 1673; in the net handler table since 2312), beside
+/// the state they drive.
+pub(crate) mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
     use bevy::prelude::*;
+
+    use crate::net::NetHandlerApp;
+
+    use super::GmTicketState;
+
+    /// Register the ticket's handlers — called from [`super::UiGmTicketPlugin`]. One per kind,
+    /// plus the session-end listener.
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::GmTicket, on_ticket)
+            .net_handler(K::GmTicketSystemStatus, on_system_status)
+            .net_handler(K::GmTicketStatusUpdate, on_status_update)
+            .net_handler(K::GmTicketCreated, on_written)
+            .net_handler(K::GmTicketUpdated, on_written)
+            .net_handler(K::GmTicketDeleted, on_deleted)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    /// The GETTICKET answer — EVERY one, including `None` ("you have no ticket") and including
+    /// an unsolicited one pushed by a GM's `.ticket view`/`escalate`/`complete`: they are
+    /// indistinguishable on the wire and want identical handling.
+    fn on_ticket(In(ev): In<SessionEvent>, mut ticket: ResMut<GmTicketState>) {
+        if let SessionEvent::GmTicket { ticket: answer } = ev {
+            ticket.answer(answer);
+        }
+    }
+
+    fn on_system_status(In(ev): In<SessionEvent>, mut ticket: ResMut<GmTicketState>) {
+        if let SessionEvent::GmTicketSystemStatus { status } = ev {
+            ticket.answer_queue(status);
+        }
+    }
+
+    /// A GM touched the ticket. Value 1 makes the reference re-ask (`0x5e7932`), the same leg
+    /// the create/update success codes take; 2 (closed) and 3 (survey offered) are recorded and
+    /// not acted on — 3 is the survey trigger and that window is deferred. vmangos never sends
+    /// this packet at all, so on our server the handler is dead; cmangos makes it the whole
+    /// notification model, which is why it is parsed rather than dropped.
+    fn on_status_update(In(ev): In<SessionEvent>, mut ticket: ResMut<GmTicketState>) {
+        if let SessionEvent::GmTicketStatusUpdate { status } = ev {
+            status_update(status, &mut ticket);
+        }
+    }
+
+    /// The three response codes have no consumer in the shipped 1.12 UI — no event, no handler.
+    /// Logged so a refusal is visible in a session log rather than silent; the `ERR_TICKET_*`
+    /// display path is still unpinned. Create-ok (2) and update-ok (4) make the ENGINE re-ask
+    /// for the ticket — the reference's own `0x5e4479` arm, and the reason the shipped UI needs
+    /// no handler for either opcode. Without it a filed ticket goes unseen until the 10-minute
+    /// poll.
+    fn on_written(In(ev): In<SessionEvent>, mut ticket: ResMut<GmTicketState>) {
+        match ev {
+            SessionEvent::GmTicketCreated { response } => {
+                write_response("create", response, 2, &mut ticket)
+            }
+            SessionEvent::GmTicketUpdated { response } => {
+                write_response("update", response, 4, &mut ticket)
+            }
+            _ => {}
+        }
+    }
+
+    fn on_deleted(In(ev): In<SessionEvent>) {
+        if let SessionEvent::GmTicketDeleted { response: code } = ev {
+            response("delete", code);
+        }
+    }
+
+    /// The GM ticket is login-scoped (decision 1673), and for a sharper reason than most: the
+    /// ticket belongs to the CHARACTER, and the next login may be a different one. Its answer
+    /// counters go with it, so the first `SMSG_GMTICKET_GETTICKET` of the new session re-fires
+    /// `UPDATE_TICKET` rather than being diffed away against the old character's answer count.
+    /// A listener on the session end (a second handler on the kind, after the bridge's own teardown).
+    fn on_session_end(In(_): In<SessionEvent>, mut ticket: ResMut<GmTicketState>) {
+        ticket.clear_session();
+    }
 
     /// `SMSG_GMTICKET_CREATE` (2 = created) and `SMSG_GMTICKET_UPDATETEXT` (4 = saved) — the two
     /// codes the reference engine answers by **re-asking for the ticket**, at `0x5e4479`.
@@ -440,6 +518,7 @@ pub(crate) struct UiGmTicketPlugin;
 
 impl Plugin for UiGmTicketPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<GmTicketState>()
             .init_resource::<GmTicketFeedState>()
             .add_systems(
@@ -535,13 +614,13 @@ mod tests {
     #[test]
     fn a_landed_write_makes_the_engine_reask_and_a_refused_one_does_not() {
         let mut state = GmTicketState::default();
-        apply::write_response("create", 2, 2, &mut state);
-        apply::write_response("update", 4, 4, &mut state);
+        net::write_response("create", 2, 2, &mut state);
+        net::write_response("update", 4, 4, &mut state);
         assert_eq!(state.take_reasks(), 2, "one re-ask per landed write");
         assert_eq!(state.take_reasks(), 0, "drained means drained");
 
-        apply::write_response("create", 3, 2, &mut state); // CREATE_ERROR
-        apply::write_response("update", 5, 4, &mut state); // UPDATE_ERROR
+        net::write_response("create", 3, 2, &mut state); // CREATE_ERROR
+        net::write_response("update", 5, 4, &mut state); // UPDATE_ERROR
         assert_eq!(state.take_reasks(), 0, "a refusal has nothing to fetch");
     }
 

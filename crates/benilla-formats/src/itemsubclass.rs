@@ -1,5 +1,5 @@
 //! ItemSubClass.dbc — per `(class, subclass)`: the alternate-proficiency fields and the
-//! display gate the item tooltip's slot|type line reads (wow-re builder `0x52b650`, the
+//! display gate the item tooltip's slot|type line reads (the builder `0x52b650`, the
 //! `0xc0db90` row cache).
 //!
 //! The builder consumes exactly three fields beyond the key: **prerequisiteProficiency@2 /
@@ -36,6 +36,9 @@ pub struct ItemSubClassInfo {
     /// prerequisite is −1.
     pub prerequisite_proficiency: i32,
     pub postrequisite_proficiency: i32,
+    /// `Flags@4` (`[row+0x10]`), raw. Its consumers each own the bit they read — e.g. `0x200`,
+    /// the auction house's "offers the inventory-slot rows" gate (`0x4cfb63`).
+    pub flags: u32,
     /// Bit 0 = never print the type name on the slot|type line.
     pub display_flags: u32,
     /// `WeaponSwingSize@9` — the swinging weight, 0 light · 1 medium · 2 heavy, and the sole
@@ -48,10 +51,10 @@ pub struct ItemSubClassInfo {
 /// ItemSubClass.dbc keyed by `(class, subclass)`.
 pub struct ItemSubClassCatalog {
     rows: HashMap<(u32, u32), ItemSubClassInfo>,
-    /// The crafting book's header vocabulary (0437's TU-B fold-back): the resolved display name,
-    /// by the client's own byte law — **VerboseName** (`row + locale·4 + 0x4c`, enUS column 19)
-    /// when non-empty, else **DisplayName** (`+0x28`, column 10). "One-Handed Swords" over
-    /// "Sword"; plain "Cloth" where no verbose form exists.
+    /// The crafting book's header vocabulary (decision 0437): the resolved display name, by the
+    /// client's own byte law in the recipe-list build `0x4fca20` — **VerboseName**
+    /// (`row + locale·4 + 0x4c`, enUS column 19) when non-empty, else **DisplayName** (`+0x28`,
+    /// column 10). "One-Handed Swords" over "Sword"; plain "Cloth" where no verbose form exists.
     names: HashMap<(u32, u32), String>,
     /// **DisplayName** alone (column 10) — the SINGULAR spelling. The two are not
     /// interchangeable, and the reference picks between them by call site: the cast-fail line
@@ -90,7 +93,7 @@ impl ItemSubClassCatalog {
         Some(self.rows.get(&(class, subclass))?.weapon_swing_size)
     }
 
-    /// The subclass display name (verbose-first, the wow-re `tradeskill` node's byte law) — the
+    /// The subclass display name (verbose-first, `0x4fca20`'s byte law) — the
     /// crafting book's group header text; `None` for an unknown key.
     pub fn name(&self, class: u32, subclass: u32) -> Option<&str> {
         self.names.get(&(class, subclass)).map(String::as_str)
@@ -108,8 +111,8 @@ impl ItemSubClassCatalog {
     /// **plural/verbose** spelling the spell tooltip prints ("Requires Wands", "Requires Melee
     /// Weapon"). `None` when nothing names it.
     ///
-    /// The reference's law is two-stage (wow-re `tooltip-content-law.md` §3-EQUIPITEM, carved from
-    /// `0x6e2380` and its two call sites), and both stages matter for a mask with several bits set:
+    /// The reference's law is two-stage (`0x6e2380` and its two call sites), and both stages
+    /// matter for a mask with several bits set:
     ///
     /// 1. `ItemSubClassMask.dbc` on **exact whole-mask equality** — not "any bit", the entire mask.
     ///    Three rows ship: `{2, 0x2a5f3, "Melee Weapon"}`, `{4, 0x60, "Shield"}`,
@@ -170,6 +173,11 @@ impl ItemSubClassCatalog {
             .is_some_and(|r| r.display_flags & 1 != 0)
     }
 
+    /// This subclass's raw `Flags@4` (`0` for an unknown key) — see [`ItemSubClassInfo::flags`].
+    pub fn flags(&self, class: u32, subclass: u32) -> u32 {
+        self.rows.get(&(class, subclass)).map_or(0, |r| r.flags)
+    }
+
     /// This subclass's raw `DisplayFlags` (`0` for an unknown key). Bit 0 is [`Self::hides_name`];
     /// bit 1 marks a subclass the auction house's category filter does not offer; **bit 2 (`0x4`)
     /// is the "this bag counts what is inside it" gate** — `GetInventoryItemCount` (`0x4c881a`–
@@ -183,18 +191,16 @@ impl ItemSubClassCatalog {
             .map_or(0, |r| r.display_flags)
     }
 
-    /// Every subclass id defined for `class`, ascending. The shipped table is small (72 rows
-    /// total), so the scan costs nothing and the alternative — assuming subclass ids are dense
-    /// from 0 — is false for several classes.
+    /// Every subclass id defined for `class`, in **file order** — the order the reference's own
+    /// linear scans walk (the auction house's `0x4cf9c0`/`0x4ce980` count the Nth matching row).
+    /// The shipped table is small (72 rows total), so the scan costs nothing and the alternative —
+    /// assuming subclass ids are dense from 0 — is false for several classes.
     pub fn subclasses_of(&self, class: u32) -> Vec<u32> {
-        let mut ids: Vec<u32> = self
-            .rows
-            .keys()
+        self.order
+            .iter()
             .filter(|(c, _)| *c == class)
-            .map(|(_, s)| *s)
-            .collect();
-        ids.sort_unstable();
-        ids
+            .map(|&(_, s)| s)
+            .collect()
     }
 
     /// Number of rows (for logging/diagnostics).
@@ -293,6 +299,7 @@ pub fn load_item_sub_classes(chain: &mut Chain) -> Result<ItemSubClassCatalog> {
             ItemSubClassInfo {
                 prerequisite_proficiency: i32_at(r, 2).unwrap_or(-1),
                 postrequisite_proficiency: i32_at(r, 3).unwrap_or(-1),
+                flags: u32_at(r, 4).unwrap_or(0),
                 display_flags: u32_at(r, 5).unwrap_or(0),
                 weapon_swing_size: u32_at(r, 9).unwrap_or(0),
             },
@@ -323,7 +330,7 @@ pub fn load_item_sub_classes(chain: &mut Chain) -> Result<ItemSubClassCatalog> {
 mod tests {
     use super::*;
 
-    /// The header-name law on the real 5875 file (0446's TU-B fold-back): verbose-first,
+    /// The header-name law of `0x4fca20` on the real 5875 file (decision 0446): verbose-first,
     /// display fallback. Skips without client data.
     #[test]
     fn real_subclass_names_resolve_verbose_first() {
@@ -341,7 +348,8 @@ mod tests {
         assert_eq!(cat.name(99, 0), None);
     }
 
-    /// The two-stage equipped-item requirement law (§3-EQUIPITEM) against the real 5875 DBCs —
+    /// The two-stage equipped-item requirement law (`0x52eea7`–`0x52f10a`) against the real 5875
+    /// DBCs —
     /// including the multi-bit case we used to give up on. Skips without client data.
     #[test]
     fn real_requirement_names_take_the_group_before_the_join() {

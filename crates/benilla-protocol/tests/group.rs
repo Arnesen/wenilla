@@ -1,9 +1,5 @@
-//! Golden tests for the group/party opcode family — invite/accept/decline/kick/leader/disband, the
-//! loot method, the roster push (`SMSG_GROUP_LIST`), party command feedback, live member stats for
-//! the party/raid frame, minimap pings, raid subgroup management, raid-target icons, and ready
-//! checks. CMSG bodies are asserted byte-exact against the builder output; SMSG bodies are hand-built
-//! per the vmangos layouts (cited inline) and round-tripped through `parse_server` + `decode`. See
-//! `tests/common` for the shared `hx()` fixture helper and methodology note.
+//! The group wire: invites, leadership, loot method, the roster, member stats, minimap pings, raid
+//! subgroups, target icons, ready checks and raid info, laid out per vmangos.
 
 mod common;
 
@@ -15,8 +11,6 @@ use benilla_protocol::messages::{
 use benilla_protocol::ServerPacket;
 use common::hx;
 
-/// Every CMSG builder in the family, byte-exact — including the empty-body ones (asserting an
-/// empty `Vec`) and the `raid_target_set` vs `raid_target_request` distinction.
 #[test]
 fn cmsg_bodies_golden() {
     let guid = 0x1234_5678_9abc_def0u64;
@@ -34,8 +28,7 @@ fn cmsg_bodies_golden() {
         "CMSG_GROUP_UNINVITE body"
     );
 
-    // CMSG_GROUP_ACCEPT / DECLINE / DISBAND / RAID_CONVERT (vmangos Opcodes.cpp: NullClientPacket):
-    // all empty.
+    // ACCEPT, DECLINE, DISBAND and RAID_CONVERT are empty (vmangos Opcodes.cpp: NullClientPacket).
     assert_eq!(
         messages::group_accept(),
         Vec::<u8>::new(),
@@ -57,7 +50,7 @@ fn cmsg_bodies_golden() {
         "CMSG_GROUP_RAID_CONVERT body"
     );
 
-    // CMSG_GROUP_UNINVITE_GUID / CMSG_GROUP_SET_LEADER / CMSG_REQUEST_PARTY_MEMBER_STATS: a full guid.
+    // UNINVITE_GUID, SET_LEADER and REQUEST_PARTY_MEMBER_STATS: a full guid.
     assert_eq!(
         messages::group_uninvite_guid(guid),
         hx(guid_hex),
@@ -107,15 +100,15 @@ fn cmsg_bodies_golden() {
         "CMSG_GROUP_ASSISTANT_LEADER body, revoke"
     );
 
-    // MSG_MINIMAP_PING, outbound (Group.cpp:33-37): f32 x, f32 y — no guid.
+    // MSG_MINIMAP_PING, outbound (Group.cpp:33-37): f32 x, f32 y, no guid.
     assert_eq!(
         messages::minimap_ping(1.0, 2.0),
         hx("0000803f00000040"),
         "MSG_MINIMAP_PING outbound body"
     );
 
-    // MSG_RAID_TARGET_UPDATE, client bodies (Group.cpp:77-82): icon+guid to set/clear one icon, a
-    // lone 0xFF to ask for the current set — the two builders are never interchangeable byte-shapes.
+    // MSG_RAID_TARGET_UPDATE (Group.cpp:77-82): icon and guid set or clear one icon; a lone 0xFF
+    // requests the current set.
     assert_eq!(
         messages::raid_target_set(3, guid),
         hx(concat!("03", "f0debc9a78563412")),
@@ -150,8 +143,6 @@ fn cmsg_bodies_golden() {
     );
 }
 
-/// The name/notice trio (`SMSG_GROUP_INVITE`/`_DECLINE`/`_SET_LEADER`, one cstring each) plus the
-/// two empty-body notices (`SMSG_GROUP_UNINVITE`/`_DESTROYED`).
 #[test]
 fn group_notification_smsg_wire() {
     // SMSG_GROUP_INVITE (Group.cpp:107-110): one cstring, the inviter's name.
@@ -187,7 +178,7 @@ fn group_notification_smsg_wire() {
         other => panic!("group leader changed decode: {other:?}"),
     }
 
-    // SMSG_GROUP_UNINVITE (Group.cpp:117-119): empty body — we were kicked/left.
+    // SMSG_GROUP_UNINVITE (Group.cpp:117-119): empty; we were removed or left.
     let p = messages::parse_server(opcode::SMSG_GROUP_UNINVITE, &[]).unwrap();
     assert!(matches!(p, ServerPacket::GroupUninvited));
     assert!(matches!(
@@ -195,7 +186,7 @@ fn group_notification_smsg_wire() {
         [SessionEvent::GroupUninvited]
     ));
 
-    // SMSG_GROUP_DESTROYED (Group.cpp:121-123): empty body — the group disbanded outright.
+    // SMSG_GROUP_DESTROYED (Group.cpp:121-123): empty; the group disbanded.
     let p = messages::parse_server(opcode::SMSG_GROUP_DESTROYED, &[]).unwrap();
     assert!(matches!(p, ServerPacket::GroupDestroyed));
     assert!(matches!(
@@ -204,12 +195,11 @@ fn group_notification_smsg_wire() {
     ));
 }
 
-/// `SMSG_GROUP_LIST`, party shape: 2 other members + the full loot tail (master loot, so
-/// `looterGuid` carries the master's guid).
+/// `SMSG_GROUP_LIST`, party shape, master loot: `looterGuid` carries the master looter.
 #[test]
 fn group_list_party_two_members_master_loot() {
-    // Group.cpp:155-180 (GroupList::AppendBodyTo): groupType, ownGroupAndAssistantFlag,
-    // memberCount, memberCount x member rows, leaderGuid, then (memberCount > 0) the loot tail.
+    // Group.cpp:155-180: groupType, own flags, memberCount, the member rows, leaderGuid, then the
+    // loot tail only when memberCount > 0.
     let mut body = vec![0u8]; // groupType: party
     body.push(0x00); // ownGroupAndAssistantFlag: subgroup 0, not assistant
     body.extend_from_slice(&2u32.to_le_bytes()); // memberCount
@@ -287,8 +277,8 @@ fn group_list_party_two_members_master_loot() {
     }
 }
 
-/// `SMSG_GROUP_LIST`, raid shape: `groupType == 1`, one member carrying the raid-assistant bit
-/// (`0x80`), round-robin loot (so `looterGuid` is `0` — vmangos only fills it for master loot).
+/// `SMSG_GROUP_LIST`, raid shape (`groupType == 1`), with the assistant bit (`0x80`) and
+/// round-robin loot, whose `looterGuid` is 0: vmangos fills it only for master loot.
 #[test]
 fn group_list_raid_with_assistant_flag() {
     let mut body = vec![1u8]; // groupType: raid
@@ -342,12 +332,17 @@ fn group_list_raid_with_assistant_flag() {
     }
 }
 
-/// The degenerate "you left the group" shape (`Group.cpp:155-180` with an empty member list):
-/// exactly 14 bytes (`groupType, ownFlags, u32 memberCount=0, u64 leaderGuid=0`), no loot tail.
+/// The "you left the group" shape (`Group.cpp:155-180`, no members): 14 bytes, no loot tail.
 #[test]
 fn group_list_empty_you_left_shape_is_14_bytes() {
     let body = vec![0u8; 14];
     assert_eq!(body.len(), 14);
+    let (_, tail) = messages::parse_server_with_tail(opcode::SMSG_GROUP_LIST, &body).unwrap();
+    assert_eq!(tail, 0, "the parser reads all 14 bytes");
+    assert!(
+        messages::parse_server(opcode::SMSG_GROUP_LIST, &body[..13]).is_err(),
+        "13 bytes is a short read"
+    );
 
     let p = messages::parse_server(opcode::SMSG_GROUP_LIST, &body).unwrap();
     match &p {
@@ -377,8 +372,8 @@ fn group_list_empty_you_left_shape_is_14_bytes() {
     }
 }
 
-/// `SMSG_PARTY_COMMAND_RESULT` (Group.cpp:100-105): a named refusal, and the ignoring-you refusal
-/// which names no one (`Handlers/GroupHandler.cpp:466`: `SendPartyResult(PARTY_OP_INVITE, "", ...)`).
+/// `SMSG_PARTY_COMMAND_RESULT` (Group.cpp:100-105): a named refusal, and the ignoring-you refusal,
+/// which names no one (`Handlers/GroupHandler.cpp:466`).
 #[test]
 fn party_command_result_wire() {
     let mut body = party_operation::INVITE.to_le_bytes().to_vec();
@@ -420,8 +415,7 @@ fn party_command_result_wire() {
     }
 }
 
-/// `SMSG_PARTY_MEMBER_STATS` (delta form): mask `0x000000FF` — every bit from `STATUS` through
-/// `ZONE` — hand-computed body, the plain (non-`_FULL`) opcode.
+/// `SMSG_PARTY_MEMBER_STATS` (delta) with mask `0xFF`: every field from `STATUS` to `ZONE`.
 #[test]
 fn party_member_stats_delta_status_through_zone() {
     let body = hx(concat!(
@@ -468,9 +462,8 @@ fn party_member_stats_delta_status_through_zone() {
     }
 }
 
-/// `SMSG_PARTY_MEMBER_STATS_FULL`: `POSITION` + `AURAS` (2 bits set) + `AURAS_NEGATIVE` (1 bit) +
-/// the whole pet block (`PET_GUID`..`PET_AURAS_NEGATIVE`, including `PET_AURAS`) — every remaining
-/// field family the delta test above didn't touch.
+/// `SMSG_PARTY_MEMBER_STATS_FULL` with position, auras and the whole pet block: every field the
+/// delta test does not cover.
 #[test]
 fn party_member_stats_full_position_auras_and_pet_block() {
     let mask = party_member_mask::POSITION
@@ -501,9 +494,7 @@ fn party_member_stats_full_position_auras_and_pet_block() {
     // AURAS_NEGATIVE: u16 negMask, bit 2 set -> spell id 8050.
     body.extend_from_slice(&0x0004u16.to_le_bytes());
     body.extend_from_slice(&8050u16.to_le_bytes());
-    // PET_GUID.
     body.extend_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
-    // PET_NAME.
     body.extend_from_slice(b"Fido\0");
     // PET_MODEL_ID, PET_CUR_HP, PET_MAX_HP.
     body.extend_from_slice(&618u16.to_le_bytes());
@@ -539,7 +530,6 @@ fn party_member_stats_full_position_auras_and_pet_block() {
             assert_eq!(info.pet_max_power, Some(100));
             assert_eq!(info.pet_auras, Some(vec![1126]));
             assert_eq!(info.pet_auras_negative, Some(vec![770]));
-            // Bits not in the mask stay None.
             assert_eq!(info.status, None);
             assert_eq!(info.level, None);
         }
@@ -556,8 +546,8 @@ fn party_member_stats_full_position_auras_and_pet_block() {
     }
 }
 
-/// The offline-miss reply (`Handlers/GroupHandler.cpp:763-774`, the not-in-raid-with-us branch):
-/// `SMSG_PARTY_MEMBER_STATS_FULL`, mask `STATUS` only, status `MEMBER_STATUS_OFFLINE` (`0`).
+/// The reply for a member not in our group (`Handlers/GroupHandler.cpp:763-774`):
+/// `SMSG_PARTY_MEMBER_STATS_FULL` with only `STATUS`, set to offline (0).
 #[test]
 fn party_member_stats_offline_miss_is_status_only() {
     let body = hx(concat!(
@@ -577,8 +567,8 @@ fn party_member_stats_offline_miss_is_status_only() {
     }
 }
 
-/// `MSG_MINIMAP_PING` inbound (`Handlers/GroupHandler.cpp:382-391`): full guid + f32 x + f32 y —
-/// the server-stamped rebroadcast shape (outbound, guid-less, is covered in [`cmsg_bodies_golden`]).
+/// `MSG_MINIMAP_PING` inbound (`Handlers/GroupHandler.cpp:382-391`): the server prefixes the
+/// sender's full guid to the `f32` x and y.
 #[test]
 fn minimap_ping_inbound_wire() {
     let mut body = 0x77u64.to_le_bytes().to_vec();
@@ -599,8 +589,8 @@ fn minimap_ping_inbound_wire() {
     }
 }
 
-/// `MSG_RAID_TARGET_UPDATE`, all three server shapes (Group.cpp:132-147): mode 0 (delta), mode 1
-/// with 2 entries, and mode 1 empty (no icons currently set — a raid with a clean target board).
+/// `MSG_RAID_TARGET_UPDATE` from the server (Group.cpp:132-147): mode 0 carries one icon, mode 1
+/// the full list, possibly empty.
 #[test]
 fn raid_target_update_smsg_shapes() {
     let mut body = vec![0u8, 3]; // mode 0 (delta), icon 3
@@ -638,7 +628,6 @@ fn raid_target_update_smsg_shapes() {
         other => panic!("raid target list decode: {other:?}"),
     }
 
-    // mode 1, empty: no icons currently marked.
     let p = messages::parse_server(opcode::MSG_RAID_TARGET_UPDATE, &[1u8]).unwrap();
     match &p {
         ServerPacket::RaidTargetList { entries } => assert!(entries.is_empty()),
@@ -646,8 +635,8 @@ fn raid_target_update_smsg_shapes() {
     }
 }
 
-/// `MSG_RAID_READY_CHECK`, both server shapes (Group.cpp:94-96 empty / 126-130 answer): the empty
-/// "a check just started" body, and a member's forwarded answer (full guid + state).
+/// `MSG_RAID_READY_CHECK` from the server: empty when a check starts (Group.cpp:94-96), a full
+/// guid and state for a member's answer (126-130).
 #[test]
 fn ready_check_smsg_shapes() {
     let p = messages::parse_server(opcode::MSG_RAID_READY_CHECK, &[]).unwrap();
@@ -676,11 +665,9 @@ fn ready_check_smsg_shapes() {
     }
 }
 
-/// `CMSG_REQUEST_RAID_INFO` / `SMSG_RAID_INSTANCE_INFO` (decision 1549's Raid Info panel;
-/// vmangos `Player::SendRaidInfo`): an empty request, and a `u32 count` + `count` × 12-byte rows
-/// answer. The zero-count body is the ordinary answer for a character bound to nothing, and it
-/// must decode to an EMPTY list rather than to nothing at all — the UI reads the arrival as "the
-/// server has spoken", which is what disables the Raid Info button.
+/// `CMSG_REQUEST_RAID_INFO` is empty; `SMSG_RAID_INSTANCE_INFO` (vmangos `Player::SendRaidInfo`)
+/// is a `u32` count of 12-byte rows. A zero count still decodes to an event: its arrival is what
+/// disables the Raid Info button.
 #[test]
 fn raid_instance_info_wire() {
     assert_eq!(
@@ -699,8 +686,6 @@ fn raid_instance_info_wire() {
         other => panic!("empty raid info decode: {other:?}"),
     }
 
-    // Two rows: Molten Core (map 409) resetting in 0x00015180 = 86400 s, instance 1234; and
-    // Onyxia's Lair (map 249) in 3600 s, instance 77.
     let body = hx(concat!(
         "02000000", // count
         "99010000", "80510100", "d2040000", // map 409, 86400 s, instance 1234

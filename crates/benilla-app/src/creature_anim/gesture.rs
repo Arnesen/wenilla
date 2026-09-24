@@ -11,8 +11,6 @@
 //!
 //! The same dispatcher has a second caller — the **NPC-interact** path, always with code 0 (talk) —
 //! which is why [`crate::target::click`] pushes through here too instead of writing a raw AnimID.
-//!
-//! Byte-exact spec: wow-re `object-layer/scratch/chat-talk-gesture.md`.
 
 use bevy::prelude::*;
 
@@ -165,7 +163,7 @@ mod tests {
     use benilla_protocol::messages as m;
 
     /// A stand-in `LAUGH_WORDn` list. The words are **invented on purpose**: the shipped ones are
-    /// the install's own `GlobalStrings.lua` content, which never enters this repo (the contract), and
+    /// the install's own `GlobalStrings.lua` content, which never enters this repo (docs/METHOD.md), and
     /// the mechanism under test is the enumeration, not the vocabulary. A test that passes with
     /// nonsense words is a test that proves the list is not baked into the code.
     fn words(n: u32) -> Option<String> {

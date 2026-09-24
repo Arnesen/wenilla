@@ -293,7 +293,7 @@ fn real_mono_value_split_class_lines_yes_weapons_no() {
 }
 
 /// `SkillRaceClassInfo.flags & 0x2` on the real build-5875 file — the bit that keeps a line
-/// off the Skills tab entirely (decision 1091; wow-re `0x4d2cb0`'s `4d2d9f test dl,0x2`), plus
+/// off the Skills tab entirely (decision 1091; `0x4d2cb0`'s `4d2d9f test dl,0x2`), plus
 /// the `reqLevel` column the untrained gate reads. A night-elf hunter, race 4 / class 3.
 /// Skips without client data.
 #[test]
@@ -384,4 +384,35 @@ fn real_rank_chains_resolve_the_highest_known_rank() {
     let attack: std::collections::BTreeSet<u32> = [6603].into_iter().collect();
     assert_eq!(cat.rank_successor(6603), None);
     assert_eq!(cat.highest_known_rank(6603, &attack), Some(6603));
+}
+
+/// `KnownHigherRank` (`0x60c8d0`): walk the `forward_spellid` chain forward from the spell and
+/// answer on the first known rank — the spell itself is not a "higher" rank of itself.
+#[test]
+fn a_higher_rank_is_known_only_forward_along_the_chain() {
+    use std::collections::BTreeSet;
+    let row = |forward| SlaInfo {
+        skill_id: 1,
+        req_skill_value: 0,
+        forward_spell_id: forward,
+        trivial_low: 0,
+        trivial_high: 0,
+    };
+    // 10 → 11 → 12.
+    let cat = SkillLineCatalog::from_abilities([(10, row(11)), (11, row(12)), (12, row(0))]);
+    let known = |ids: &[u32]| ids.iter().copied().collect::<BTreeSet<u32>>();
+    assert!(cat.higher_rank_known(10, &known(&[12])));
+    assert!(cat.higher_rank_known(10, &known(&[11])));
+    assert!(
+        !cat.higher_rank_known(10, &known(&[10])),
+        "the spell itself is not a higher rank"
+    );
+    assert!(
+        !cat.higher_rank_known(12, &known(&[10, 11])),
+        "nothing is forward of the top rank"
+    );
+    assert!(
+        !cat.higher_rank_known(99, &known(&[10, 11, 12])),
+        "an unchained spell has no chain"
+    );
 }

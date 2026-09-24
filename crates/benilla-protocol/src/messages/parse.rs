@@ -1,7 +1,4 @@
-//! The opcode→[`ServerPacket`] dispatch: [`parse_server`] decodes one server packet body (already
-//! decrypted + sized) into its variant, delegating per-domain payloads to the domain children
-//! (`spells`, `quest`, `loot`, …). One match arm per opcode — which opcode carries what stays
-//! readable in one place.
+//! The opcode to [`ServerPacket`] dispatch, one match arm per opcode.
 
 use std::io::{self, Read};
 
@@ -14,14 +11,13 @@ use super::{
     action_bar, area_trigger, attack, auction, bank, battlefield, binder, broadcast, channel, chat,
     combat_log, death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot,
     mail, meeting_stone, mirror_timer, monster_move, movement, opcode, page_text, pet, petition,
-    progression, pvp, quest, social, spellbook, spells, stable, summon, tabard, taxi, trade,
+    pose, progression, pvp, quest, social, spellbook, spells, stable, summon, tabard, taxi, trade,
     trainer, tutorial, update_object, vendor, world_state, AttackSwingError, Character,
     CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind, SplineMode,
 };
 
-/// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
-/// identical across all six kinds (VERIFIED vmangos `SendSpeedChangeToController`, the 5875
-/// `> 1_9_4` branch). The kind is the opcode's; the caller's arm names it.
+/// Read a `SMSG_FORCE_*_SPEED_CHANGE` body: `[packed guid][u32 counter][f32 speed]` for all six
+/// kinds (vmangos `SendSpeedChangeToController`, the `> 1_9_4` branch).
 fn read_force_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPacket> {
     Ok(ServerPacket::ForceSpeedChange {
         guid: read_packed_guid(r)?,
@@ -31,28 +27,21 @@ fn read_force_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPack
     })
 }
 
-/// Read an `SMSG_COMPRESSED_MOVES` body: `[u32 uncompressed size][deflate stream]`, the stream a
-/// run of `[u8 size][u16 opcode][body]` records where `size` counts the opcode's own two bytes
-/// (VERIFIED vmangos `MovementData::AddPacket`/`BuildPacket`). Each record is a whole movement
-/// packet, so it goes straight back through [`parse_server`] — the batch is a *transport*, not a
-/// message shape, and nothing downstream needs to know a move arrived batched.
-///
-/// A record that fails to parse fails the **whole** batch (surfacing as one `Poll::Skipped` naming
-/// the inner opcode) rather than being dropped quietly. Losing a batch is worse than losing a
-/// packet, but silence here is what cost days: an unhandled inner opcode has to be loud. Only the
-/// `MSG_MOVE_*` relays vmangos routes through `ObjectViewersMovementDeliverer` can appear, and we
-/// model all of them (`the_batch_carries_every_relayed_move_opcode`).
-fn read_compressed_moves(r: &mut impl Read) -> io::Result<Vec<ServerPacket>> {
+/// Read an `SMSG_COMPRESSED_MOVES` body: `u32` uncompressed size, then deflated
+/// `[u8 size][u16 opcode][body]` records, `size` counting the opcode (`MovementData::AddPacket`).
+/// Each record goes back through [`parse_server`], and one bad record fails the whole batch; only
+/// the `MSG_MOVE_*` relays can appear (vmangos `ObjectViewersMovementDeliverer`).
+fn read_compressed_moves(r: &mut &[u8]) -> io::Result<Vec<ServerPacket>> {
     let uncompressed = read_u32_le(r)? as usize;
     let mut buf = Vec::with_capacity(uncompressed.min(64 * 1024));
-    flate2::read::ZlibDecoder::new(r).read_to_end(&mut buf)?;
+    // `bufread`, not `read`: the cursor must stop at the stream's end for the tail to be seen.
+    flate2::bufread::ZlibDecoder::new(r).read_to_end(&mut buf)?;
     let mut rest = buf.as_slice();
     let mut packets = Vec::new();
     while !rest.is_empty() {
         let size = read_u8(&mut rest)? as usize;
         let opcode = read_u16_le(&mut rest)?;
-        // `size` spans opcode + body; anything under two bytes cannot even hold the opcode we
-        // just read, so the stream is misframed and every later record would be garbage.
+        // `size` spans opcode and body, so under 2 means the stream is misframed.
         let body_len = size.checked_sub(2).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -90,9 +79,8 @@ fn read_compressed_moves(r: &mut impl Read) -> io::Result<Vec<ServerPacket>> {
     Ok(packets)
 }
 
-/// Read one `SMSG_SPLINE_SET_*_SPEED` body — `[packed guid][f32 speed]` (VERIFIED vmangos
-/// `MovementPacketSender::SendSpeedChangeToAll` + the mid-spline observer branch, the 5875
-/// `> 1_8_4` layout). Observer-only: no counter, no ack (decision 0441).
+/// Read a `SMSG_SPLINE_SET_*_SPEED` body: `[packed guid][f32 speed]`, no counter, no ack
+/// (vmangos `SendSpeedChangeToAll`, the `> 1_8_4` layout).
 fn read_spline_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPacket> {
     Ok(ServerPacket::SplineSpeedChange {
         guid: read_packed_guid(r)?,
@@ -101,9 +89,8 @@ fn read_spline_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPac
     })
 }
 
-/// Read one `MSG_MOVE_SET_*_SPEED` body — `[packed guid][MovementInfo][f32 speed]` (VERIFIED
-/// vmangos `SendSpeedChangeToObservers`, the finalized-spline branch): a freely-moving player's
-/// speed change, carrying a fresh pose alongside (decision 0441). No ack.
+/// Read a `MSG_MOVE_SET_*_SPEED` body: `[packed guid][MovementInfo][f32 speed]`, no ack
+/// (vmangos `SendSpeedChangeToObservers`).
 fn read_move_set_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPacket> {
     let guid = read_packed_guid(r)?;
     let info = movement::read_movement_info(r)?;
@@ -122,21 +109,10 @@ fn read_move_set_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerP
     })
 }
 
-/// True for a relayed movement opcode — one the server rebroadcasts as `[packed guid][MovementInfo]`.
-/// Two groups, one wire shape and one client handler (`0x603bb0`, wow-re `re/net/opcode-handlers.tsv`
-/// — 30 rows pointing at it, of which these are 23):
-///
-/// - the **echoed input stream**, every opcode bound to vmangos `HandleMovementOpcodes` (VERIFIED
-///   `Opcodes.cpp`): another player's walking, turning, jumping, swimming, facing;
-/// - the **observer leg of the movement-mode family** (decision 2061): root/unroot, hover,
-///   feather-fall, water-walk and the near-teleport, broadcast by
-///   `MovementPacketSender::Send{MovementFlagChange,Teleport}ToObservers` once the mover's own
-///   client has acked. Same body, no ack, and the apply/unapply direction rides the `MovementInfo`
-///   flags word rather than the opcode (see [`super::opcode`]'s block).
-///
-/// Excludes `MSG_MOVE_TELEPORT_ACK` / `MSG_MOVE_WORLDPORT_ACK`, which share the family but carry
-/// different bodies and are decoded by their own arms — note `MSG_MOVE_TELEPORT` (197) is the
-/// observer's teleport and is NOT `MSG_MOVE_TELEPORT_ACK` (199): no counter dword, so it parses here.
+/// True for an opcode the server relays as `[packed guid][MovementInfo]`, one client handler
+/// (`0x603bb0`): the echoed input stream (vmangos `HandleMovementOpcodes`), and the observer leg
+/// of root, hover, feather-fall, water-walk and teleport, with no ack and its direction in the
+/// flags word. `MSG_MOVE_TELEPORT` (197) has no counter, unlike `MSG_MOVE_TELEPORT_ACK` (199).
 const fn is_movement_relay(o: u16) -> bool {
     matches!(
         o,
@@ -161,15 +137,10 @@ const fn is_movement_relay(o: u16) -> bool {
             | opcode::MSG_MOVE_SET_FACING
             | opcode::MSG_MOVE_SET_PITCH
             | opcode::MSG_MOVE_HEARTBEAT
-            // Somebody else was knocked back (decision 1702). It carries four extra floats after the
-            // `MovementInfo` — the launch quad — which this reader simply doesn't reach, and doesn't
-            // need to: the server built that `MovementInfo` from the victim's own ack, so its jump
-            // tail already IS the quad, and the arc replays from it like any other relayed jump.
+            // Another unit's knockback: the four trailing launch floats go unread, since the
+            // `MovementInfo` comes from the victim's ack and its jump tail already is that quad.
             | opcode::MSG_MOVE_KNOCK_BACK
-            // The observer leg of the movement-mode family (decision 2061): somebody else was
-            // rooted, levitated (hover + feather fall + water walk), or blinked. The mode lands in
-            // the `MovementInfo` flags word this body already carries, so no arm of its own is
-            // needed — only the opcode's admission to the family.
+            // Another unit's mode change: the mode rides the `MovementInfo` flags word.
             | opcode::MSG_MOVE_ROOT
             | opcode::MSG_MOVE_UNROOT
             | opcode::MSG_MOVE_HOVER
@@ -179,11 +150,7 @@ const fn is_movement_relay(o: u16) -> bool {
     )
 }
 
-/// Parse a server packet body (already decrypted + sized) by opcode.
-/// `SMSG_ADDON_INFO`'s record stream — **no count, no names, no trailer** (decision 2175).
-///
-/// The grammar is the one `AddOn_ReadAddonInfoReply 0x51da70` reads, per record (wow-re
-/// `system/net/scratch/cmsg-auth-session-addon-block.md` §6):
+/// `SMSG_ADDON_INFO`'s records, with no count, names or trailer, as `0x51da70` reads each:
 ///
 /// ```text
 /// u8  status              ; 2 -> [rec+0x29] = 1 (hidden from the Lua index space)
@@ -198,13 +165,8 @@ const fn is_movement_relay(o: u16) -> bool {
 /// if urlProvided: u8[256] url
 /// ```
 ///
-/// The retail capture is the minimal form — 12 x 8 bytes of `{2, 1, 0, 0u32, 0}`.
-///
-/// **A truncated record ends the walk and keeps the records before it**, rather than failing the
-/// packet. Only a record that parsed whole contributes a status, so `statuses[i]` is always
-/// record *i*'s and the pairing against what we sent cannot slip. The stream is self-delimiting only if every field is read exactly right, so a grammar
-/// error here would otherwise turn a working login into an unparseable packet; the statuses we did
-/// read are still true, and a short read is visible as a count that does not match what we sent.
+/// Retail sends the minimal form, 12 records of `{2, 1, 0, 0u32, 0}`. A truncated record ends the
+/// walk and keeps the whole records before it, so `statuses[i]` is always record i's.
 fn read_addon_info(r: &mut &[u8]) -> Vec<u8> {
     let mut statuses = Vec::new();
     while !r.is_empty() {
@@ -228,31 +190,21 @@ fn read_addon_info(r: &mut &[u8]) -> Vec<u8> {
     statuses
 }
 
-/// Advance `r` by `n` bytes, or `None` when it holds fewer.
 fn skip(r: &mut &[u8], n: usize) -> Option<()> {
     (r.len() >= n).then(|| *r = &r[n..])
 }
 
-/// Decode one server packet body into its [`ServerPacket`]. The body is the whole length-framed
-/// packet, so a decoder that reads fewer bytes than the server wrote succeeds all the same; that
-/// gap is what [`parse_server_with_tail`] reports, and this is its `(packet, _)` projection.
+/// Decode one server packet body into its [`ServerPacket`], ignoring any unread tail that
+/// [`parse_server_with_tail`] would report.
 pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
     parse_server_with_tail(opcode, body).map(|(packet, _)| packet)
 }
 
-/// [`parse_server`], also reporting the **tail**: how many of `body`'s bytes the decoder left
-/// unconsumed. A body is length-framed, so a decoder shorter than the server's layout does not
-/// fail — it silently reads a prefix, and the next field the server added is invisible from
-/// outside. A non-zero tail is the instrument for that drift (decision 2265 §B1): the reader
-/// surfaces it on [`crate::Poll::Events`], the app announces it once per opcode. It is a count,
-/// never a failure — a working decoder with a trailing field it has no use for stays working.
-/// An unknown opcode ([`ServerPacket::Other`]) consumes nothing by definition and reports `0`,
-/// so the tally does not double-count what the dropped-packet tally already names.
+/// [`parse_server`], plus how many body bytes the decoder left unread: a count, never a failure,
+/// that exposes a decoder shorter than the server's layout. [`ServerPacket::Other`] reports `0`.
 pub fn parse_server_with_tail(opcode: u16, body: &[u8]) -> io::Result<(ServerPacket, usize)> {
     let mut r = body;
-    // `inner_tail` is the one arm that decodes through a second stream (the compressed update
-    // object): the outer cursor ends at the zlib stream's end, and what the INFLATED bytes left
-    // unread is that packet's tail.
+    // The inflated leftover of the compressed update object, the one arm with a second stream.
     let mut inner_tail = 0;
     let packet = parse_server_body(opcode, &mut r, &mut inner_tail)?;
     let tail = match packet {
@@ -262,9 +214,7 @@ pub fn parse_server_with_tail(opcode: u16, body: &[u8]) -> io::Result<(ServerPac
     Ok((packet, tail))
 }
 
-/// The opcode → variant dispatch over a slice cursor. `cursor` is advanced past what the arm read
-/// **only on success** (an error's partial read is nobody's business); the arms themselves keep
-/// the plain `&[u8]` local every helper is typed over.
+/// The opcode dispatch; `cursor` advances past what the arm read only on success.
 fn parse_server_body(
     opcode: u16,
     cursor: &mut &[u8],
@@ -276,40 +226,18 @@ fn parse_server_body(
             server_seed: read_u32_le(&mut r)?,
         },
         opcode::SMSG_AUTH_RESPONSE => {
-            // **The client's own grammar** (VERIFIED, handler `0x5b41b0`; wow-re
-            // `system/glue/scratch/login-failure-dialogs.md`):
-            //
-            //   u8 code
-            //   if (code == AUTH_OK || code == AUTH_WAIT_QUEUE) && remaining >= 5:
-            //       u32 billingTimeRemaining, u8 billingPlanFlags, u32 billingTimeRested
-            //   if code == AUTH_WAIT_QUEUE:
-            //       u32 position
-            //
-            // The client **branches on the remaining length**, which is what makes both shapes the
-            // mangos family sends parse correctly: the short `{u8, u32}` leaves 4 bytes (`4 < 5`,
-            // billing skipped, position at body offset 1) and the long
-            // `{u8, u32, u8, u32, u32}` leaves 13 (billing read, position at offset 10).
-            //
-            // The threshold is **5 guarding a 9-byte group** — not a size check, just "is there
-            // more here than a bare position?". Copied rather than tidied: a body of 6..=9 bytes
-            // hits it and mis-parses, and matching the client's mistakes is the point of a
-            // faithful parser.
-            //
-            // ONE DELIBERATE DIVERGENCE: where a truncated body leaves the client's position
-            // *unwritten* — silently redisplaying the previous queue position from an
-            // uninitialised process-lifetime global — ours reports `None`. Rendering a stale
-            // position as current is a bug we decline to reproduce.
+            // The client's grammar (`0x5b41b0`): `u8 code`; then, for OK or WAIT_QUEUE with 5+
+            // bytes left, `u32 billingTimeRemaining, u8 billingPlanFlags, u32 billingTimeRested`;
+            // then, for WAIT_QUEUE, `u32 position`. The 5 guarding a 9-byte group is the client's
+            // and mis-parses a 6..=9 byte body; matched on purpose. Deviation: a body too short
+            // for the position gives `None`, because the client redisplays a stale position.
             let result = read_u8(&mut r)?;
             let queued = result == super::AUTH_WAIT_QUEUE;
             let mut billing_time_rested = None;
             if (result == super::AUTH_OK || queued) && r.len() >= 5 {
                 let _billing_time_remaining = read_u32_le(&mut r)?;
                 let _billing_plan_flags = read_u8(&mut r)?;
-                // Kept rather than dropped since 1820: this is the only place the value ever
-                // arrives, and `GetBillingTimeRested()` is a plain read of it. The client parks it
-                // in a process-lifetime global (`[ClientServices+0x1af8]`, sole writer `0x5b421a`);
-                // ours rides the session, which has the same lifetime and cannot go stale across a
-                // reconnect the way that global does.
+                // The only source of `GetBillingTimeRested()` (the client's writer is `0x5b421a`).
                 billing_time_rested = Some(read_u32_le(&mut r)?);
             }
             ServerPacket::AuthResponse {
@@ -320,8 +248,7 @@ fn parse_server_body(
         }
         opcode::SMSG_CHAR_ENUM => {
             let count = read_u8(&mut r)?;
-            // Hint bounded by the realm's character cap: vmangos clamps `CharactersPerRealm` to
-            // 10 (`World.cpp:629`, `setConfigMinMax(…, 10, 1, 10)`).
+            // vmangos clamps `CharactersPerRealm` to 10 (`World.cpp:629`).
             let mut characters = Vec::with_capacity(capacity_hint(count, 10));
             for _ in 0..count {
                 characters.push(Character::read(&mut r)?);
@@ -348,12 +275,9 @@ fn parse_server_body(
         },
         opcode::SMSG_COMPRESSED_UPDATE_OBJECT => {
             let _decompressed_size = read_u32_le(&mut r)?;
-            // Through `&mut r`, so the cursor advances over the compressed bytes. Handed `r` by
-            // value the decoder reads a COPY of the slice, and the whole zlib body then reads
-            // as unconsumed — 803 bytes on the decode-length instrument's first live login
-            // (2266 §B1). The tail that means drift here is the inflated stream's, reported
-            // through `inner_tail`.
-            let mut decoder = flate2::read::ZlibDecoder::new(&mut r);
+            // `&mut r` so the cursor advances over the zlib bytes (by value it reads a copy), and
+            // `bufread`, not `read`, whose 32 KiB buffer would swallow bytes after the stream.
+            let mut decoder = flate2::bufread::ZlibDecoder::new(&mut r);
             let mut decompressed = Vec::new();
             decoder.read_to_end(&mut decompressed)?;
             drop(decoder);
@@ -403,10 +327,8 @@ fn parse_server_body(
             }
         }
         opcode::SMSG_TRANSFER_PENDING => {
-            // `u32 newMapId` +, iff the player rides a transport through the transfer,
-            // `{u32 transportEntry, u32 oldMapId}` (VERIFIED vmangos `Misc.cpp:493-501`). The
-            // block's PRESENCE is load-bearing: it decides whether the follow-up NEW_WORLD's
-            // coordinates are boat-local or world (decision 0455).
+            // `u32 newMapId`, then `{u32 transportEntry, u32 oldMapId}` only when riding a
+            // transport (`Misc.cpp:493-501`), which makes the following NEW_WORLD boat-local.
             let map = read_u32_le(&mut r)?;
             let transport = if r.is_empty() {
                 None
@@ -421,10 +343,8 @@ fn parse_server_body(
             reason: read_u8(&mut r)?,
         },
         opcode::SMSG_LOGIN_SETTIMESPEED => {
-            // The vanilla packed DateTime bit layout (LSB up): minute:6, hour:5, weekday:3,
-            // day-of-month:6, month:4, year:5. The day serial flattens it with the packed
-            // convention's fixed 31-day months / 372-day years — monotonic across the dates a
-            // server actually serves, which is all the celestial moon-phase precession needs.
+            // Packed DateTime, LSB up: minute:6, hour:5, weekday:3, day:6, month:4, year:5. The
+            // day serial assumes 31-day months and 372-day years, monotonic but not calendar-true.
             let datetime = read_u32_le(&mut r)?;
             let timescale = read_f32_le(&mut r)?;
             let (day, month, year) = (
@@ -439,12 +359,7 @@ fn parse_server_body(
                 timescale,
             }
         }
-        // The OTHER clock (decision 1150) — kept beside SETTIMESPEED precisely because they are
-        // easy to confuse: this one is wall-clock UNIX seconds (vmangos
-        // `WorldSession::SendQueryTimeResponse`, `Handlers/QueryHandler.cpp:418-423` — a bare
-        // `(uint32)time(nullptr)`), the epoch every absolute stamp the server writes into a
-        // descriptor field is expressed in. SETTIMESPEED above is the in-game day/night clock and
-        // says nothing about it.
+        // Wall-clock unix seconds (`QueryHandler.cpp:418-423`), not the game clock above.
         opcode::SMSG_QUERY_TIME_RESPONSE => ServerPacket::QueryTimeResponse {
             unix_time: read_u32_le(&mut r)?,
         },
@@ -459,8 +374,7 @@ fn parse_server_body(
                 area,
             }
         }
-        // The GM trouble-ticket answers (decision 1673). The three response opcodes share one
-        // 4-byte body and therefore one reader; only the opcode says which verb was answered.
+        // The ticket response opcodes share one 4-byte body; only the opcode names the verb.
         opcode::SMSG_GMTICKET_GETTICKET => ServerPacket::GmTicketAnswer {
             ticket: gm_ticket::read_gm_ticket(&mut r)?.map(Box::new),
         },
@@ -482,8 +396,7 @@ fn parse_server_body(
         opcode::SMSG_BINDER_CONFIRM => ServerPacket::BinderConfirm {
             binder: binder::read_binder_confirm(&mut r)?,
         },
-        // The summon question (decision 1747). Three fields, and the client's whole answer is
-        // the guid back — see `super::summon` for the byte pin on both bodies.
+        // The summon question; the client's whole answer is the guid back.
         opcode::SMSG_SUMMON_REQUEST => {
             let ask = summon::read_summon_request(&mut r)?;
             ServerPacket::SummonRequest {
@@ -492,8 +405,7 @@ fn parse_server_body(
                 delay_ms: ask.delay_ms,
             }
         }
-        // The talent twin of the confirm above, on a two-way `MSG_` opcode: this direction is the
-        // question (guid + cost); the answer we send back carries the guid alone (decision 1580).
+        // Two-way `MSG_`: inbound is the question (guid, cost); our answer is the guid alone.
         opcode::MSG_TALENT_WIPE_CONFIRM => {
             let ask = progression::read_talent_wipe_confirm(&mut r)?;
             ServerPacket::TalentWipeConfirm {
@@ -608,13 +520,10 @@ fn parse_server_body(
         opcode::SMSG_TEXT_EMOTE => {
             let guid = read_u64_le(&mut r)?;
             let text_emote = read_u32_le(&mut r)?;
-            // Read and dropped on purpose — `emoteNum` selects neither the sentence nor the voice
-            // kit on the receive side (wow-re `ui/scratch/text-emote-composition.md` §3).
+            // `emoteNum` picks neither sentence nor voice kit on the reference's receive side.
             let _emote_num = read_u32_le(&mut r)?;
-            // The target's name, length-prefixed **including its NUL** (vmangos writes a lone
-            // `0x00` and `namelen == 1` when there was no target). Trimmed at the first NUL, so an
-            // untargeted emote arrives as the empty string — which is precisely the "untargeted"
-            // bit of the sentence-form selector, not a missing value.
+            // The target's name, length-prefixed including its NUL (a lone `0x00` for no
+            // target); trimmed at the first NUL, so no target reads as "", the untargeted form.
             let namelen = read_u32_le(&mut r)? as usize;
             let mut name = Vec::with_capacity(capacity_hint(namelen, 64));
             for _ in 0..namelen {
@@ -736,8 +645,7 @@ fn parse_server_body(
         opcode::SMSG_PET_TAME_FAILURE => ServerPacket::PetTameFailure {
             reason: pet::read_pet_tame_failure(&mut r)?,
         },
-        // Both bodies really are empty — the opcode is the whole message on either (vmangos's
-        // `AppendBodyTo` writes nothing, and the reference's handlers read nothing).
+        // Empty bodies on both sides: vmangos writes nothing and the reference reads nothing.
         opcode::SMSG_PET_NAME_INVALID => ServerPacket::PetNameInvalid,
         opcode::SMSG_PET_BROKEN => ServerPacket::PetBroken,
         opcode::SMSG_PET_ACTION_SOUND => {
@@ -759,9 +667,8 @@ fn parse_server_body(
         opcode::SMSG_ATTACKERSTATEUPDATE => {
             ServerPacket::AttackerState(attack::read_attacker_state(&mut r)?)
         }
-        // The swing refusals — empty bodies, nothing read. `SMSG_ATTACKSWING_NOTSTANDING` (`0x147`)
-        // is deliberately absent: the reference never registers it and vmangos never sends it, so
-        // it falls to the unknown-opcode arm exactly as it does in the real client's dispatcher.
+        // The empty swing refusals. `SMSG_ATTACKSWING_NOTSTANDING` (`0x147`) is absent on purpose:
+        // the reference never registers it and vmangos never sends it.
         opcode::SMSG_ATTACKSWING_NOTINRANGE => {
             ServerPacket::AttackSwingError(AttackSwingError::NotInRange)
         }
@@ -771,7 +678,7 @@ fn parse_server_body(
         opcode::SMSG_ATTACKSWING_DEADTARGET | opcode::SMSG_ATTACKSWING_CANT_ATTACK => {
             ServerPacket::AttackSwingError(AttackSwingError::DeadOrUnattackable)
         }
-        // The family's fourth arm, from the spell TU's registration — same empty body, same act.
+        // The family's fourth arm, registered with the spell handlers: same empty body, same act.
         opcode::SMSG_CANCEL_COMBAT => ServerPacket::CancelCombat,
         opcode::SMSG_FEIGN_DEATH_RESISTED => ServerPacket::FeignDeathResisted,
         opcode::SMSG_AI_REACTION => {
@@ -815,7 +722,7 @@ fn parse_server_body(
                 seconds,
             }
         }
-        // One body, two tables — the opcode picks, exactly as `0x6e9950`'s `cmp edi,0x267` does.
+        // One body, two tables: the opcode picks, as `0x6e9950`'s `cmp edi,0x267` does.
         opcode::SMSG_SET_FLAT_SPELL_MODIFIER | opcode::SMSG_SET_PCT_SPELL_MODIFIER => {
             let (mask_bit, op, value) = spells::read_set_spell_modifier(&mut r)?;
             ServerPacket::SpellModifier {
@@ -881,7 +788,7 @@ fn parse_server_body(
         opcode::SMSG_SPELLINSTAKILLLOG => {
             ServerPacket::SpellInstaKillLog(combat_log::read_spell_insta_kill_log(&mut r)?)
         }
-        // One body, two sentences — the arm is the only thing that tells them apart.
+        // One body, two sentences: only the opcode tells them apart.
         opcode::SMSG_PROCRESIST => {
             ServerPacket::ProcResist(combat_log::read_spell_outcome_log(&mut r)?)
         }
@@ -1109,11 +1016,8 @@ fn parse_server_body(
         opcode::SMSG_SPIRIT_HEALER_CONFIRM => ServerPacket::SpiritHealerConfirm {
             npc: death::read_spirit_healer_confirm(&mut r)?,
         },
-        // **The ack'd movement-mode family** (decision 0866) — root, water-walk, feather-fall and
-        // hover, granted to the controlling client. ONE wire shape for all eight opcodes:
-        // `packed guid + u32 counter` (VERIFIED vmangos `MovementPacketSender.cpp:342-366`, the
-        // `> CLIENT_BUILD_1_9_4` branch). The app must ack with the echoed counter, or the server
-        // never applies the change and observers never see it.
+        // The acked mode family, all eight `packed guid, u32 counter`
+        // (`MovementPacketSender.cpp:342-366`); unacked, the server never applies the change.
         opcode::SMSG_FORCE_MOVE_ROOT
         | opcode::SMSG_FORCE_MOVE_UNROOT
         | opcode::SMSG_MOVE_WATER_WALK
@@ -1141,11 +1045,8 @@ fn parse_server_body(
                 apply,
             }
         }
-        // **The observer movement-mode family** (decision 1780) — the spline-move twelve. Body is a
-        // BARE packed guid: no counter, no `MovementInfo`, and nothing to ack (VERIFIED vmangos
-        // `MovementPacketSender::SendMovementFlagChangeToAll`/`SendToggleRunWalkToAll`, and the
-        // reference's single handler `0x603c80`, which reads one packed guid and dispatches).
-        // `guid` is any unit, not our mover — the constants block in `opcode` carries the arm map.
+        // The observer mode family: twelve bare packed guids for any unit, nothing to ack
+        // (vmangos `SendMovementFlagChangeToAll`; the reference's one handler `0x603c80`).
         opcode::SMSG_SPLINE_MOVE_ROOT
         | opcode::SMSG_SPLINE_MOVE_UNROOT
         | opcode::SMSG_SPLINE_MOVE_WATER_WALK
@@ -1169,7 +1070,7 @@ fn parse_server_body(
                 opcode::SMSG_SPLINE_MOVE_UNSET_HOVER => (SplineMode::Hover, false),
                 opcode::SMSG_SPLINE_MOVE_START_SWIM => (SplineMode::Swimming, true),
                 opcode::SMSG_SPLINE_MOVE_STOP_SWIM => (SplineMode::Swimming, false),
-                // The one inverted pair: RUN_MODE *clears* `MOVEFLAG_WALK_MODE`, because the
+                // The one inverted pair: RUN_MODE clears `MOVEFLAG_WALK_MODE`, because the
                 // reference's `0x617e80` feeds the opcode's bool to `SetRunMode 0x7c71c0`.
                 opcode::SMSG_SPLINE_MOVE_SET_WALK_MODE => (SplineMode::WalkMode, true),
                 _ => (SplineMode::WalkMode, false),
@@ -1180,12 +1081,9 @@ fn parse_server_body(
                 apply,
             }
         }
-        // **The knockback the server aims at our mover** (decision 1702): `packed guid + u32
-        // counter`, then the launch quad `vcos, vsin, speedXY, speedZ` (VERIFIED vmangos
-        // `MovementPacketSender.cpp:261-277`, the `> CLIENT_BUILD_1_9_4` branch). The quad reads
-        // straight into a [`JumpInfo`] — it *is* the jump tail the ack must echo — but the wire
-        // order here is direction-first, where `JumpInfo`'s own serialization is `zspeed` first, so
-        // the four reads are named rather than delegated.
+        // `packed guid, u32 counter`, then `vcos, vsin, speedXY, speedZ`
+        // (`MovementPacketSender.cpp:261-277`): the jump tail the ack echoes, but direction-first
+        // where `JumpInfo` serializes `zspeed` first, so the reads are spelled out.
         opcode::SMSG_MOVE_KNOCK_BACK => {
             let guid = read_packed_guid(&mut r)?;
             let counter = read_u32_le(&mut r)?;
@@ -1245,7 +1143,7 @@ fn parse_server_body(
         }
         opcode::SMSG_CREATURE_QUERY_RESPONSE => {
             let entry = read_u32_le(&mut r)?;
-            // A miss is the lone entry echoed with its top bit set — nothing follows.
+            // A miss is the lone entry echoed with its top bit set; nothing follows.
             if entry & 0x8000_0000 != 0 {
                 ServerPacket::CreatureQueryResponse {
                     entry: entry & 0x7FFF_FFFF,
@@ -1257,17 +1155,8 @@ fn parse_server_body(
                     let _ = read_cstring(&mut r)?; // name2..name4, always empty in 5875
                 }
                 let subname = read_cstring(&mut r)?;
-                // The tail (VERIFIED vmangos `HandleCreatureQueryOpcode`, 5875 = every build
-                // guard included): type_flags, type, pet_family, RANK, unk, pet_spell_list_id,
-                // display_id (u32 ×7), then civilian + racial_leader (u8 ×2). We keep `type`
-                // (the `CreatureType.dbc` id — the TAB-target filter's input), `pet_family` (the
-                // `CreatureFamily.dbc` id behind `UnitCreatureFamily` and the diet tooltip,
-                // decision 1062), `rank` (the unit tooltip's Elite/Boss word, decision 0276's
-                // level-line law), `type_flags` (bit 0x10 hides its faction line), the
-                // `civilian`/`racial_leader` pair (its green CIVILIAN / white LEADER lines), and
-                // `display_id` — the template's model, which is the ONLY way to draw a creature
-                // that has no world object to read `UNIT_FIELD_DISPLAYID` off: a stabled pet
-                // (decision 1676). The `unk`/`pet_spell_list_id` pair stays alignment-only.
+                // `HandleCreatureQueryOpcode`: seven `u32`s (type_flags, type, pet_family, rank,
+                // unk, pet_spell_list_id, display_id), then civilian and racial_leader as `u8`s.
                 let type_flags = read_u32_le(&mut r)?;
                 let creature_type = read_u32_le(&mut r)?;
                 let pet_family = read_u32_le(&mut r)?;
@@ -1293,9 +1182,8 @@ fn parse_server_body(
                 }
             }
         }
-        // `u32 petNumber`, cstring name, `u32 nameTimestamp` (VERIFIED vmangos
-        // `PetNameQueryResponse::AppendBodyTo`, `Server/Packets/Pet.cpp:79-84`). The timestamp ages
-        // out the reference's on-disk pet-name cache; we keep none, so it is alignment-only.
+        // `u32 petNumber, cstring name, u32 nameTimestamp` (`Pet.cpp:79-84`); the timestamp only
+        // ages the reference's on-disk pet-name cache.
         opcode::SMSG_PET_NAME_QUERY_RESPONSE => {
             let pet_number = read_u32_le(&mut r)?;
             let name = read_cstring(&mut r)?;
@@ -1322,31 +1210,32 @@ fn parse_server_body(
             let guid = gameobject::read_gameobject_despawn_anim(&mut r)?;
             ServerPacket::GameObjectDespawnAnim { guid }
         }
-        // Both fishing verdicts are empty-bodied (the opcode IS the message).
+        opcode::SMSG_OPEN_CONTAINER => ServerPacket::OpenContainer {
+            item: items::read_open_container(&mut r)?,
+        },
+        opcode::SMSG_INSPECT => ServerPacket::Inspect {
+            guid: items::read_inspect(&mut r)?,
+        },
+        opcode::SMSG_STANDSTATE_UPDATE => ServerPacket::StandStateUpdate {
+            state: pose::read_stand_state_update(&mut r)?,
+        },
         opcode::SMSG_FISH_NOT_HOOKED => ServerPacket::FishNotHooked,
         opcode::SMSG_FISH_ESCAPED => ServerPacket::FishEscaped,
         opcode::SMSG_LOGOUT_COMPLETE => ServerPacket::LogoutComplete,
-        // `{u32 reason, u8 instant}` — the `instant` byte is what the CAMP/QUIT countdown hangs
-        // on (see the variant's own doc); it used to be dropped on the floor here.
         opcode::SMSG_LOGOUT_RESPONSE => ServerPacket::LogoutResponse {
             reason: read_u32_le(&mut r)?,
             instant: read_u8(&mut r)? != 0,
         },
         opcode::SMSG_LOGOUT_CANCEL_ACK => ServerPacket::LogoutCancelAck,
-        // The keepalive echo: our CMSG_PING's sequence number back (vmangos `_HandlePing` — the
-        // body is the one u32 it read from us).
         opcode::SMSG_PONG => ServerPacket::Pong {
             sequence: read_u32_le(&mut r)?,
         },
-        // The force-speed-change family — one arm per kind, one shared body reader (the wire shape
-        // and the mandatory ack protocol are documented on the opcode block).
         opcode::SMSG_FORCE_WALK_SPEED_CHANGE => read_force_speed(SpeedKind::Walk, &mut r)?,
         opcode::SMSG_FORCE_RUN_SPEED_CHANGE => read_force_speed(SpeedKind::Run, &mut r)?,
         opcode::SMSG_FORCE_RUN_BACK_SPEED_CHANGE => read_force_speed(SpeedKind::RunBack, &mut r)?,
         opcode::SMSG_FORCE_SWIM_SPEED_CHANGE => read_force_speed(SpeedKind::Swim, &mut r)?,
         opcode::SMSG_FORCE_SWIM_BACK_SPEED_CHANGE => read_force_speed(SpeedKind::SwimBack, &mut r)?,
         opcode::SMSG_FORCE_TURN_RATE_CHANGE => read_force_speed(SpeedKind::TurnRate, &mut r)?,
-        // The group/party family (see the opcode block's note; bodies in `group`).
         opcode::SMSG_GROUP_INVITE => ServerPacket::GroupInvite {
             inviter: group::read_group_invite(&mut r)?,
         },
@@ -1403,8 +1292,7 @@ fn parse_server_body(
                 ServerPacket::ReadyCheckAnswer { guid, ready }
             }
         },
-        // The instance/raid lockout family (decision 1748; bodies in `instance`). Every one of
-        // these is read here in the client's own field order.
+        // The lockout family, read in the client's own field order.
         opcode::SMSG_RAID_INSTANCE_MESSAGE => ServerPacket::RaidInstanceMessage {
             message: instance::read_raid_instance_message(&mut r)?,
         },
@@ -1423,8 +1311,6 @@ fn parse_server_body(
         opcode::SMSG_UPDATE_INSTANCE_OWNERSHIP => ServerPacket::UpdateInstanceOwnership {
             owns: instance::read_u32_body(&mut r)?,
         },
-        // The duel family (decision 0633; bodies in `duel`). Both empty-body arms carry their
-        // whole meaning in the opcode.
         opcode::SMSG_DUEL_REQUESTED => {
             let req = duel::read_duel_requested(&mut r)?;
             ServerPacket::DuelRequested {
@@ -1448,18 +1334,11 @@ fn parse_server_body(
         opcode::SMSG_DUEL_COUNTDOWN => ServerPacket::DuelCountdown {
             seconds: duel::read_duel_countdown(&mut r)?,
         },
-        // The honor pair (decision 1512; bodies in `pvp`). MSG_INSPECT_HONOR_STATS is an `MSG_`:
-        // opcode 0x2D6 carries our 8-byte request AND the server's 50-byte reply. There is no
-        // ambiguity to resolve here — `parse_server` is fed only by the world *reader*, so an
-        // 0x2D6 body arriving at this function is always the reply. The request shape is built by
-        // `pvp::inspect_honor_stats` and goes straight out through `world::writer::pvp`; it never
-        // reaches this match.
+        // `0x2D6` carries our 8-byte request and the 50-byte reply; only the reply reaches here.
         opcode::MSG_INSPECT_HONOR_STATS => {
             ServerPacket::InspectHonorStats(pvp::read_inspect_honor_stats(&mut r)?)
         }
         opcode::SMSG_PVP_CREDIT => ServerPacket::PvpCredit(pvp::read_pvp_credit(&mut r)?),
-        // The mirror timers (decision 0874; bodies in `mirror_timer`). START carries the timer's
-        // whole state and is re-sent on every change — there is no update opcode in the family.
         opcode::SMSG_START_MIRROR_TIMER => {
             ServerPacket::MirrorTimerStart(mirror_timer::read_start_mirror_timer(&mut r)?)
         }
@@ -1470,8 +1349,6 @@ fn parse_server_body(
         opcode::SMSG_STOP_MIRROR_TIMER => ServerPacket::MirrorTimerStop {
             kind: mirror_timer::read_stop_mirror_timer(&mut r)?,
         },
-        // The social family (decision 0668; bodies in `social`). Both list packets are
-        // replace-everything snapshots; the status packet is one result about one player.
         opcode::SMSG_FRIEND_LIST => ServerPacket::FriendList {
             friends: social::read_friend_list(&mut r)?,
         },
@@ -1482,10 +1359,6 @@ fn parse_server_body(
             ServerPacket::FriendStatus(social::read_friend_status(&mut r)?)
         }
         opcode::SMSG_WHO => ServerPacket::WhoResults(social::read_who(&mut r)?),
-        // The guild family (bodies in `guild`). The two big ones are caches — a query response
-        // fills the guild-id→identity cache, the roster replaces the whole membership — and the
-        // three small ones are notifications. `SMSG_GUILD_ROSTER`'s member loop carries the
-        // family's one conditional field; see `guild::read_guild_roster`.
         opcode::SMSG_GUILD_QUERY_RESPONSE => {
             ServerPacket::GuildQueryResponse(guild::read_guild_query_response(&mut r)?)
         }
@@ -1502,10 +1375,7 @@ fn parse_server_body(
             name: guild::read_guild_decline(&mut r)?,
         },
         opcode::SMSG_GUILD_INFO => ServerPacket::GuildInfo(guild::read_guild_info(&mut r)?),
-        // The petition family (bodies in `petition`) — founding a guild, which at 1.12 is an
-        // entirely different wire from the guild family above. Note `SMSG_PETITION_SHOW_SIGNATURES`
-        // answers two different asks, and the two `MSG_` opcodes read a *different* body from the
-        // one they write (see `petition`'s own docs).
+        // Guild founding; the two `MSG_` opcodes read a different body from the one they write.
         opcode::SMSG_PETITION_SHOWLIST => {
             ServerPacket::PetitionShowList(petition::read_petition_show_list(&mut r)?)
         }
@@ -1527,9 +1397,6 @@ fn parse_server_body(
         opcode::MSG_PETITION_RENAME => {
             ServerPacket::PetitionRenamed(petition::read_petition_rename(&mut r)?)
         }
-        // The observer speed legs (decision 0441): a unit we don't control changed speed — a
-        // creature or mid-spline player (SPLINE family), or a freely-moving player (MOVE_SET
-        // family, which carries a fresh pose too). No ack on either.
         opcode::SMSG_SPLINE_SET_WALK_SPEED => read_spline_speed(SpeedKind::Walk, &mut r)?,
         opcode::SMSG_SPLINE_SET_RUN_SPEED => read_spline_speed(SpeedKind::Run, &mut r)?,
         opcode::SMSG_SPLINE_SET_RUN_BACK_SPEED => read_spline_speed(SpeedKind::RunBack, &mut r)?,
@@ -1542,8 +1409,6 @@ fn parse_server_body(
         opcode::MSG_MOVE_SET_SWIM_SPEED => read_move_set_speed(SpeedKind::Swim, &mut r)?,
         opcode::MSG_MOVE_SET_SWIM_BACK_SPEED => read_move_set_speed(SpeedKind::SwimBack, &mut r)?,
         opcode::MSG_MOVE_SET_TURN_RATE => read_move_set_speed(SpeedKind::TurnRate, &mut r)?,
-        // Mount feedback (decision 0441): one u32 result code per attempt; error lines are a P2
-        // trimming — decoded so the wire is modelled, surfaced for the debug log.
         opcode::SMSG_MOUNTRESULT => ServerPacket::MountResult {
             mount: true,
             code: read_u32_le(&mut r)?,
@@ -1552,20 +1417,15 @@ fn parse_server_body(
             mount: false,
             code: read_u32_le(&mut r)?,
         },
-        // A nearby rider's flourish: one raw u64 guid (VERIFIED vmangos
-        // `HandleMountSpecialAnimOpcode` — `data << GetObjectGuid()`, full 8 bytes, not packed).
+        // A full 8-byte guid, not packed (vmangos `HandleMountSpecialAnimOpcode`).
         opcode::SMSG_MOUNTSPECIAL_ANIM => ServerPacket::MountSpecialAnim {
             guid: read_u64_le(&mut r)?,
         },
-        // The control handoff: PACKED guid (unlike the flourish above) + one byte (VERIFIED
-        // vmangos `Server/Packets/Misc.cpp:677-682` — `WriteAsPacked()`, then `uint8 allowMove`).
+        // A packed guid, unlike the flourish, then `u8 allowMove` (`Misc.cpp:677-682`).
         opcode::SMSG_CLIENT_CONTROL_UPDATE => ServerPacket::ClientControlUpdate {
             mover: read_packed_guid(&mut r)?,
             allow_move: read_u8(&mut r)? != 0,
         },
-        // The taxi/flight-master family (decision 0484): the map (SHOWTAXINODES), a status
-        // answer/first-visit learn (TAXINODE_STATUS), the activate verdict, and the multi-hop
-        // path ack (NEW_TAXI_PATH, empty body).
         opcode::SMSG_SHOWTAXINODES => {
             let (window, flightmaster, nearest_node, known) = taxi::read_show_taxi_nodes(&mut r)?;
             ServerPacket::ShowTaxiNodes {
@@ -1586,9 +1446,6 @@ fn parse_server_body(
             code: taxi::read_activate_taxi_reply(&mut r)?,
         },
         opcode::SMSG_NEW_TAXI_PATH => ServerPacket::NewTaxiPath,
-        // The mail arc (decision 0544 P0): the inbox list, the send/take/return/delete verdict,
-        // the letter-body ask-once fetch, and the arrival pair (RECEIVED_MAIL + the
-        // QUERY_NEXT_MAIL_TIME reply — same opcode as our empty-body request).
         opcode::SMSG_MAIL_LIST_RESULT => ServerPacket::MailList {
             mails: mail::read_mail_list_result(&mut r)?,
         },
@@ -1612,11 +1469,8 @@ fn parse_server_body(
         opcode::MSG_QUERY_NEXT_MAIL_TIME => ServerPacket::NextMailTime {
             seconds: mail::read_query_next_mail_time(&mut r)?,
         },
-        // The auction house arc (decision 1511 P0). MSG_AUCTION_HELLO is two-way — this is the
-        // REPLY (our request is the same opcode with just the guid), and it is what opens the
-        // window. The three list results share one frame and one 64-byte record; their reader is
-        // bounded by the buffer as well as by the wire `count`, because vmangos's browse fast path
-        // can count a record it then fails to write.
+        // The three list results share one frame and a 64-byte record; the reader is bounded by
+        // the buffer too, since vmangos's browse fast path can count a record it never writes.
         opcode::MSG_AUCTION_HELLO => {
             let (auctioneer, house_id) = auction::read_auction_hello(&mut r)?;
             ServerPacket::AuctionHello {
@@ -1654,8 +1508,7 @@ fn parse_server_body(
                 total_count,
             }
         }
-        // The two notifications carry different field orders and the owner one has no house id —
-        // two readers, never one.
+        // Different field orders, and no house id on the owner's: two readers, never one.
         opcode::SMSG_AUCTION_BIDDER_NOTIFICATION => ServerPacket::AuctionBidderNotification(
             auction::read_auction_bidder_notification(&mut r)?,
         ),
@@ -1671,16 +1524,13 @@ fn parse_server_body(
                 random_property_id,
             }
         }
-        // The player-trade arc (decision 0592 P0): the state-machine status pulse and the
-        // item/gold snapshot for one window side.
         opcode::SMSG_TRADE_STATUS => ServerPacket::TradeStatus {
             status: trade::read_trade_status(&mut r)?,
         },
         opcode::SMSG_TRADE_STATUS_EXTENDED => ServerPacket::TradeStatusExtended {
             state: Box::new(trade::read_trade_status_extended(&mut r)?),
         },
-        // The world-state table — the `$<n>w`/`$<n>e` NPC-text tokens' source (and a battleground
-        // scoreboard's, later). Both opcodes write the one table; see [`super::world_state`].
+        // The world-state table, source of the `$<n>w`/`$<n>e` NPC-text tokens.
         opcode::SMSG_INIT_WORLD_STATES => {
             ServerPacket::InitWorldStates(world_state::read_init_world_states(&mut r)?)
         }
@@ -1688,9 +1538,7 @@ fn parse_server_body(
             let (id, value) = world_state::read_update_world_state(&mut r)?;
             ServerPacket::UpdateWorldState { id, value }
         }
-        // A relayed player movement packet: `[packed mover guid][MovementInfo]`, same opcode the mover
-        // sent. This is how other players' walking/turning/strafing reaches us (creatures use
-        // SMSG_MONSTER_MOVE instead). Surface the pose + live move-flags; the app extrapolates between.
+        // Another player's move, relayed under the mover's opcode (creatures use monster moves).
         o if is_movement_relay(o) => {
             let guid = read_packed_guid(&mut r)?;
             let info = movement::read_movement_info(&mut r)?;
@@ -1720,8 +1568,6 @@ fn parse_server_body(
 mod tests {
     use super::*;
 
-    /// The tail is the decoder's unconsumed remainder: a known-good body reports 0, the same body
-    /// with one byte appended reports 1, and neither is an error.
     #[test]
     fn a_trailing_byte_is_reported_as_tail_one_and_never_as_a_failure() {
         // `SMSG_SET_FACTION_VISIBLE`: exactly one `u32 repListId`.
@@ -1743,14 +1589,9 @@ mod tests {
             ServerPacket::SetFactionVisible { list_id: 21 }
         ));
         assert_eq!(tail, 1);
-        // …and the projection every existing caller uses is unchanged by it.
         assert!(parse_server(opcode::SMSG_SET_FACTION_VISIBLE, &longer).is_ok());
     }
 
-    /// The compressed update object decodes through a second stream. Its zlib bytes are consumed
-    /// through the cursor (a copy of the slice read the whole body as a tail — 803 bytes on the
-    /// instrument's first live login), and the tail it reports is what the INFLATED stream left
-    /// unread — the one leftover that means the inner layout drifted.
     #[test]
     fn the_compressed_update_object_reports_the_inflated_streams_tail_not_its_zlib_bytes() {
         use std::io::Write;
@@ -1775,10 +1616,18 @@ mod tests {
             parse_server_with_tail(opcode::SMSG_COMPRESSED_UPDATE_OBJECT, &body(&longer))
                 .expect("a trailing inflated byte is not a failure");
         assert_eq!(tail, 1, "the inflated stream's leftover is the tail");
+
+        // Bytes after the zlib stream, still in the packet body, are the outer tail.
+        let mut outer = body(&empty);
+        outer.extend([0xAB, 0xCD]);
+        let (_, tail) = parse_server_with_tail(opcode::SMSG_COMPRESSED_UPDATE_OBJECT, &outer)
+            .expect("bytes after the stream are not a failure");
+        assert_eq!(
+            tail, 2,
+            "the body's bytes after the zlib stream are the tail"
+        );
     }
 
-    /// An unknown opcode consumes nothing by definition; reporting its whole body as a tail would
-    /// double-count what the dropped-packet tally already names.
     #[test]
     fn an_unknown_opcode_reports_no_tail() {
         let (packet, tail) =
@@ -1787,10 +1636,9 @@ mod tests {
         assert_eq!(tail, 0);
     }
 
-    /// **The falsifier for decision 2265 §B1**: a wire count of `0xFFFF_FFFF` followed by one
-    /// valid row must come back as a short-read `Err` — never reserve the count, never abort.
+    /// A count past the body ends in `UnexpectedEof` at the first missing row, in both opcodes.
     #[test]
-    fn a_lying_faction_count_is_a_short_read_not_an_allocation() {
+    fn a_lying_faction_count_is_a_short_read() {
         let mut body = 0xFFFF_FFFFu32.to_le_bytes().to_vec();
         body.push(0x01); // flags
         body.extend_from_slice(&3000i32.to_le_bytes()); // standing

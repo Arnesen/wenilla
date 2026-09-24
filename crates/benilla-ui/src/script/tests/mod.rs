@@ -1,6 +1,6 @@
 //! Rust-driven tests of the Lua host: the object model, layout+size reads, show/hide + event + tick
-//! firing (both RF-0025 conventions), the WoW stdlib (positional `format`, the aliases,
-//! `getglobal`), the sandbox holes, and an end-to-end extract in ZKey order.
+//! firing (both `0x704d50`/`0x704f10` conventions), the WoW stdlib (positional `format`, the
+//! aliases, `getglobal`), the sandbox holes, and an end-to-end extract in ZKey order.
 //!
 //! Split by subject; the shared `script()` fixture lives in [`common`].
 
@@ -13,6 +13,7 @@ mod channel;
 mod common;
 mod cooldown;
 mod create_frame_template;
+mod dispatch_bench;
 mod end_to_end;
 mod events;
 mod font_object;
@@ -223,6 +224,54 @@ fn a_chosen_error_handler_hears_engine_caught_errors_and_the_default_does_not_du
         1,
         "and the host channel recorded it too"
     );
+}
+
+/// **Every handler path reaches the chosen handler, not only `OnEvent`.** The widget scripts —
+/// `OnClick`, `OnValueChanged`, the edit box's and keyboard's, the tooltip's — pushed their errors
+/// onto the host channel alone, so an addon's broken click handler was a terminal line and never
+/// the dialog, while the same error from `OnEnter` did pop it (decision 1305's "every
+/// engine-caught script error", which these paths had never joined).
+#[test]
+fn a_widget_handler_error_reaches_the_chosen_error_handler() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        "caught = {} seterrorhandler(function(m) table.insert(caught, m) end) \
+         local b = CreateFrame('Button') \
+         b:SetScript('OnClick', function() error('click boom') end) \
+         b:Click() \
+         local sl = CreateFrame('Slider') \
+         sl:SetMinMaxValues(0, 10) \
+         sl:SetScript('OnValueChanged', function() error('slide boom') end) \
+         sl:SetValue(5)",
+    )
+    .unwrap();
+    s.dispatch_script_errors_to_handler();
+    let caught = s
+        .eval::<String>("return table.concat(caught, ' | ')")
+        .unwrap();
+    assert!(caught.contains("click boom"), "OnClick: {caught}");
+    assert!(caught.contains("slide boom"), "OnValueChanged: {caught}");
+}
+
+/// **A listener that unregisters itself does not rob the next one** — on the engine-internal
+/// dispatch too (`fire_global`: `ADDON_LOADED` for a `LoadAddOn`, `UPDATE_FACTION` from the
+/// faction-header verbs). That walk stepped an index over the live list, so the hook-once idiom
+/// (`this:UnregisterEvent(event)` inside the handler) shifted the successor into the slot just
+/// visited and it never heard the event — the 1324 bug, fixed in `fire_event` and not here.
+#[test]
+fn a_self_unregistering_listener_does_not_rob_its_successor_on_the_internal_dispatch() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.run(
+        r#"log = ""
+        local a = CreateFrame("Frame") a:RegisterEvent("UPDATE_FACTION")
+        a:SetScript("OnEvent", function() log = log .. "a" this:UnregisterEvent("UPDATE_FACTION") end)
+        local b = CreateFrame("Frame") b:RegisterEvent("UPDATE_FACTION")
+        b:SetScript("OnEvent", function() log = log .. "b" end)
+        ExpandFactionHeader(0)"#,
+    )
+    .unwrap();
+    assert_eq!(s.eval::<String>("return log").unwrap(), "ab");
 }
 
 /// **A handler that itself raises cannot recurse the error path** — its failure is recorded on

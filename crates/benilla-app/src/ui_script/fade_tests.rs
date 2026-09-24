@@ -11,6 +11,7 @@ use super::test_ui::load_ui as load_xml;
 
 #[test]
 fn a_started_fade_ramps_off_uiparents_tick_and_completes() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
@@ -67,6 +68,7 @@ fn a_started_fade_ramps_off_uiparents_tick_and_completes() {
 /// twelve faux lists shipped unable to scroll (1868), so this runs a real flash to completion.
 #[test]
 fn a_flash_alternates_then_stops() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");

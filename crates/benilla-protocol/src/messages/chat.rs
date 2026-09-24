@@ -1,35 +1,13 @@
-//! Inbound chat — `SMSG_MESSAGECHAT` (VERIFIED vmangos `ChatHandler::BuildChatPacket`,
-//! `Chat/Chat.cpp:2542-2599`, all `SUPPORTED_CLIENT_BUILD` bands included for 5875): `u8 type`, `u32
-//! language`, a **per-type sender prefix**, then `u32 len` (includes the NUL) + the text + `u8
-//! chatTag`. This is how everything textual reaches the client — player say/yell/whisper, NPC
-//! lines, channels, and the **system messages** GM dot-commands answer with (type `0x0A`), which
-//! is what makes command feedback visible to the probe and the chat UI.
-//!
-//! Also owns the handful of small chat-adjacent SMSG bodies that aren't their own subsystem:
-//! `SMSG_CHAT_PLAYER_NOT_FOUND`, `SMSG_CHAT_WRONG_FACTION`, `SMSG_PLAYED_TIME`, and `MSG_RANDOM_ROLL`'s
-//! server→client broadcast shape. The channel subsystem (join/leave/list/moderation +
-//! `SMSG_CHANNEL_NOTIFY`/`_LIST`) is big enough to own its own module: [`super::channel`].
+//! Inbound chat. `SMSG_MESSAGECHAT` (vmangos `Chat/Chat.cpp:2542-2599`) is `u8 type`,
+//! `u32 language`, a per-type sender prefix, `u32 len` (NUL included), the text, `u8 chatTag`.
+//! Also the small chat-adjacent bodies: player not found, notification, played time, random roll.
 
 use std::io;
 
 use crate::wire::{read_cstring, read_u32_le, read_u64_le, read_u8};
 
-// ChatMsg values (VERIFIED vmangos `SharedDefines.h:1191-1301`, the 5875 band — every
-// `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_11_2`-or-earlier guard is compile-time true for build
-// 5875). vmangos's enum runs the full `0x00..=0x5D`; the combat-log/spell/skill/loot/money block
-// (0x09, 0x0F-0x13, 0x17-0x50, 0x52-0x56) is **never** `SMSG_MESSAGECHAT` wire in 1.12 — canned
-// emotes ride `SMSG_TEXT_EMOTE`, channel feedback rides `SMSG_CHANNEL_NOTIFY`/`_LIST`, and
-// skill/loot/money/xp lines are client-composed from their own opcodes (decision 0288) — so those
-// values have no named constant here. What's below is every type benilla either receives (as a
-// distinct wire shape or a renderable line) or sends.
-//
-// **`0x5B` was in that list until decision 2077 and it did not belong there.** It is
-// `CHAT_MSG_FILTERED`, and it is a real server→client line: 1.12's `ChatFrame.lua` puts it in
-// `ChatTypeGroup["SYSTEM"]` (l.128) and renders it at l.1405 as `format(CHAT_FILTERED, arg2)` —
-// "Unable to send chat to %s because your message contained reserved words." The client's own chat
-// chokepoint carves it out of the spam filter **by name** (`0x49aac9 cmp edi,0x5b`) precisely
-// because it is a line that arrives, and one the filter itself produces. vmangos declares the
-// constant and never sends it, which is what the wrong claim was really observing.
+// ChatMsg values (vmangos `SharedDefines.h:1191-1301`), only those benilla receives or sends.
+// Text emotes, channel notices and combat, skill, loot and money lines come from other opcodes.
 pub const CHAT_MSG_SAY: u8 = 0x00;
 pub const CHAT_MSG_PARTY: u8 = 0x01;
 pub const CHAT_MSG_RAID: u8 = 0x02;
@@ -37,12 +15,10 @@ pub const CHAT_MSG_GUILD: u8 = 0x03;
 pub const CHAT_MSG_OFFICER: u8 = 0x04;
 pub const CHAT_MSG_YELL: u8 = 0x05;
 pub const CHAT_MSG_WHISPER: u8 = 0x06;
-/// Server→client only ("You whisper to Name: …" self-echo, vmangos `MasterPlayerChat.cpp:54`) —
-/// never a `CMSG_MESSAGECHAT` type a client sends.
+/// Server-to-client only: the "You whisper to Name" self-echo (vmangos `MasterPlayerChat.cpp:54`).
 pub const CHAT_MSG_WHISPER_INFORM: u8 = 0x07;
 pub const CHAT_MSG_EMOTE: u8 = 0x08;
-/// GM dot-command feedback and other server-authored lines; always the single-sender-guid shape
-/// (the guid is usually 0).
+/// GM dot-command feedback and other server-authored lines; one sender guid, usually 0.
 pub const CHAT_MSG_SYSTEM: u8 = 0x0A;
 pub const CHAT_MSG_MONSTER_SAY: u8 = 0x0B;
 pub const CHAT_MSG_MONSTER_YELL: u8 = 0x0C;
@@ -50,47 +26,22 @@ pub const CHAT_MSG_MONSTER_EMOTE: u8 = 0x0D;
 pub const CHAT_MSG_CHANNEL: u8 = 0x0E;
 pub const CHAT_MSG_AFK: u8 = 0x14;
 pub const CHAT_MSG_DND: u8 = 0x15;
-/// The "so-and-so is ignoring you" self-notice (`WorldSession::HandleChatIgnoredOpcode`,
-/// `Handlers/ChatHandler.cpp:755-763`) — single-sender-guid shape, sender is the ignoring player.
+/// "Name is ignoring you": one sender guid, the ignoring player (`ChatHandler.cpp:755-763`).
 pub const CHAT_MSG_IGNORED: u8 = 0x16;
 pub const CHAT_MSG_MONSTER_WHISPER: u8 = 0x1A;
-/// `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_10_2` — active for 5875.
 pub const CHAT_MSG_RAID_LEADER: u8 = 0x57;
 pub const CHAT_MSG_RAID_WARNING: u8 = 0x58;
-/// `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_11_2` — active for 5875 (pre-1.11.3 this value
-/// aliased `CHAT_MSG_MONSTER_WHISPER` instead; irrelevant here since 5875 always takes this branch).
 pub const CHAT_MSG_RAID_BOSS_WHISPER: u8 = 0x59;
 pub const CHAT_MSG_RAID_BOSS_EMOTE: u8 = 0x5A;
-/// **The server's "your message was filtered" notice** — not a filtered incoming line. The stock
-/// chat frame formats it as `CHAT_FILTERED` over `arg2` (the addressee), so the wire text carries
-/// the name rather than a sentence. It is the one chat type the client's own spam filter is
-/// *disarmed* for (`0x49aacc`), it is absent from the profanity arm's 14-type table, and it is
-/// delivered whatever both CVars say. wow-re `system/ui/scratch/text-filter-law.md`.
+/// The server's "your message was filtered" notice, which the chat frame formats as
+/// `CHAT_FILTERED`; the client's spam and profanity filters exempt it (`0x49aacc`).
 pub const CHAT_MSG_FILTERED: u8 = 0x5B;
 pub const CHAT_MSG_BATTLEGROUND: u8 = 0x5C;
 pub const CHAT_MSG_BATTLEGROUND_LEADER: u8 = 0x5D;
 
-/// The chat types the real client runs its `$`-macro expander over, and the **only** ones — every
-/// other type, player chat included, reaches the frame verbatim.
-///
-/// **There are two gates in the reference, and this is the WIRE one** (decision 0759 corrects 0754,
-/// which shipped the other). VERIFIED in `WoW.exe` (5875):
-///
-/// - the **wire** path — `0x49d5e4-0x49d606` in the `SMSG_MESSAGECHAT` parser `0x49d560` — routes
-///   `0x0B 0x0C 0x0D 0x1A` **and `0x5A`** into the expanding branch at `0x49da3d`, plus
-///   `0x52 0x53 0x54` into the one at `0x49d961`. **Eight types.**
-/// - the **pending-chat** path — `0x49cf36-0x49cf5d`, guarding `0x49cf70` — is the *re*-expansion
-///   after a name query answers, and its chain is seven: it omits `0x5A`.
-///
-/// benilla decodes the wire, so the wire set is the one that applies. 0754 cited the pending gate
-/// and so dropped `RAID_BOSS_EMOTE` (`0x5A`) — a boss emote's `$n` would have stayed literal.
-///
-/// Note what the set is and isn't: the four monster shapes and `RAID_BOSS_EMOTE`, plus the three
-/// **battleground system** lines (`BG_SYSTEM_NEUTRAL`/`_ALLIANCE`/`_HORDE`, vmangos
-/// `SharedDefines.h:1279-1281`) — which is where "$n has taken the flag!" comes from, and why
-/// "the monster/boss family" is the wrong name for it. `RAID_BOSS_WHISPER` (`0x59`) is **not** in
-/// either gate: it takes its own branch at `0x49d610`, never expands, and is remapped to a plain
-/// whisper (`mov byte [ebp+0xf],0x6` @ `0x49d67e`).
+/// The only chat types the 1.12 client runs its `$`-macro expander over; the rest reach the frame
+/// verbatim. This is the wire gate (`0x49d5e4-0x49d606`); the re-expansion after a name query
+/// (`0x49cf36`) omits `0x5A`.
 pub const MACRO_EXPANDED_TYPES: [u8; 8] = [
     CHAT_MSG_MONSTER_SAY,        // 0x0B
     CHAT_MSG_MONSTER_YELL,       // 0x0C
@@ -99,18 +50,15 @@ pub const MACRO_EXPANDED_TYPES: [u8; 8] = [
     CHAT_MSG_BG_SYSTEM_NEUTRAL,  // 0x52
     CHAT_MSG_BG_SYSTEM_ALLIANCE, // 0x53
     CHAT_MSG_BG_SYSTEM_HORDE,    // 0x54
-    CHAT_MSG_RAID_BOSS_EMOTE,    // 0x5A — wire gate only; absent from the pending-chat gate
+    CHAT_MSG_RAID_BOSS_EMOTE,    // 0x5A, wire gate only
 ];
 
-/// `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_6_1` — active for 5875. The battleground system
-/// lines; they take `BuildChatPacket`'s `default:` branch, so their single guid slot IS the macro
-/// subject.
+/// The battleground system lines: one guid, the macro subject (`BuildChatPacket`'s `default:`).
 pub const CHAT_MSG_BG_SYSTEM_NEUTRAL: u8 = 0x52;
 pub const CHAT_MSG_BG_SYSTEM_ALLIANCE: u8 = 0x53;
 pub const CHAT_MSG_BG_SYSTEM_HORDE: u8 = 0x54;
 
-/// `PlayerChatTag` (VERIFIED vmangos `Chat/Chat.h:86-92`) — [`ChatMessage::chat_tag`]'s values.
-/// `Player::GetChatTag` (`Objects/Player.cpp:1757-1767`) picks GM over DND over AFK over none.
+/// vmangos `PlayerChatTag`; the server picks GM over DND over AFK (`Player.cpp:1757-1767`).
 pub mod chat_tag {
     pub const NONE: u8 = 0;
     pub const AFK: u8 = 1;
@@ -127,39 +75,22 @@ pub struct ChatMessage {
     pub language: u32,
     /// The speaker, when the type carries a guid (0 for system messages / name-only shapes).
     pub sender_guid: u64,
-    /// The **addressee** — the trailing guid slot the monster shapes carry (`0` for the shapes that
-    /// have none). Not display state: this is the subject the real client's `$`-macro expander
-    /// resolves monster chat against, which is why it is kept rather than dropped. See
-    /// [`MACRO_EXPANDED_TYPES`].
+    /// The trailing addressee guid, 0 when the shape has none; the `$`-macro subject.
     pub target_guid: u64,
-    /// The speaker's name, for the monster shapes that carry it inline (`None` elsewhere —
-    /// player names resolve via the name query, exactly like the real client).
+    /// The inline speaker name of the monster shapes; player names come from the name query.
     pub sender_name: Option<String>,
     /// The channel name, on `CHAT_MSG_CHANNEL` only.
     pub channel: Option<String>,
     pub text: String,
-    /// The trailing tag byte ([`chat_tag`]) — 0 none, 1 AFK, 2 DND, 3 GM. Drives the
-    /// `<AFK>`/`<DND>`/`<GM>` prefix the real chat frame prepends to the sender's name.
+    /// The [`chat_tag`] byte, shown as the `<AFK>`/`<DND>`/`<GM>` prefix on the sender's name.
     pub chat_tag: u8,
 }
 
 impl ChatMessage {
-    /// Is this line addon traffic rather than speech? (`language == LANG_ADDON`, decision 1029.)
+    /// Whether this is addon traffic, which the chat frame never prints: 1.12 has no addon opcode
+    /// or chat type, so `LANG_ADDON` on any lane is the only mark.
     ///
-    /// The `language` field is the **whole** discriminator: 1.12.1 has no addon opcode and no addon
-    /// `ChatMsg` type, so an addon broadcast is an ordinary `SMSG_MESSAGECHAT` on whichever lane it
-    /// was sent over — `CHAT_MSG_PARTY` for a hunter addon's version ping, `CHAT_MSG_CHANNEL` for a
-    /// hidden-channel protocol — and only the sentinel language tells it apart. The chat frame must
-    /// drop it; rendering it is what printed `[Party] [Soreen]: Quiver VERSION:3.1.4` (B215).
-    ///
-    /// The `text` of such a line is an addon payload, not a sentence: `prefix`, a TAB, then the
-    /// addon's own encoding. It is deliberately **not** split here — nothing consumes it until
-    /// benilla runs third-party addons, and the split rule belongs with the `CHAT_MSG_ADDON` fire
-    /// that would need it. When that lands, the rule is byte-verified and slightly
-    /// counter-intuitive (wow-re `system/ui/scratch/addon-chat-law.md`): the copy **starts** in the
-    /// prefix buffer and the **first** tab switches it to the message buffer, so text with no tab
-    /// at all yields `prefix = <the whole text>`, `message = ""` — not the reverse — and the event
-    /// still fires. Later tabs are literal payload bytes.
+    /// Its text is `prefix`, a TAB, the payload; with no tab, the 1.12 client reads all as prefix.
     pub fn is_addon(&self) -> bool {
         self.language == super::LANGUAGE_ADDON
     }
@@ -186,9 +117,7 @@ pub(super) fn read_message_chat(r: &mut &[u8]) -> io::Result<ChatMessage> {
     let chat_type = read_u8(r)?;
     let language = read_u32_le(r)?;
     let mut sender_guid = 0u64;
-    // The trailing "addressee" slot. Only the monster shapes carry one; it stays 0 elsewhere, and
-    // the macro expander then falls back to `sender_guid` (which is all the `default:` shapes — the
-    // BG system lines included — have).
+    // 0 unless the shape carries an addressee; the macro expander then uses `sender_guid`.
     let mut target_guid = 0u64;
     let mut sender_name = None;
     let mut channel = None;
@@ -215,9 +144,7 @@ pub(super) fn read_message_chat(r: &mut &[u8]) -> io::Result<ChatMessage> {
             let _player_rank = read_u32_le(r)?;
             sender_guid = read_u64_le(r)?;
         }
-        // Everything else (RAID/GUILD/OFFICER/WHISPER/WHISPER_INFORM/EMOTE/SYSTEM/AFK/DND/IGNORED/
-        // RAID_LEADER/RAID_WARNING/BATTLEGROUND(+LEADER)/BG_SYSTEM_*/…): one sender guid
-        // (vmangos `BuildChatPacket`'s own `default:` branch).
+        // Every other type is `BuildChatPacket`'s `default:` shape: one sender guid.
         _ => {
             sender_guid = read_u64_le(r)?;
         }
@@ -236,40 +163,28 @@ pub(super) fn read_message_chat(r: &mut &[u8]) -> io::Result<ChatMessage> {
     })
 }
 
-/// Read `SMSG_CHAT_PLAYER_NOT_FOUND` (VERIFIED vmangos `WorldPackets::Chat::ChatPlayerNotFound::
-/// AppendBodyTo`, `Server/Packets/Chat.cpp:26-29`): one cstring, the (un-normalized) name the
-/// player tried to whisper. Sent by `WorldSession::SendPlayerNotFoundNotice`
-/// (`Handlers/ChatHandler.cpp:766-771`) — a bad whisper target, offline or misspelled.
+/// Read `SMSG_CHAT_PLAYER_NOT_FOUND`: one cstring, the unnormalized name of an offline or
+/// misspelled whisper target (vmangos `Server/Packets/Chat.cpp:26-29`).
 pub(super) fn read_chat_player_not_found(r: &mut &[u8]) -> io::Result<String> {
     read_cstring(r)
 }
 
-/// Read `SMSG_NOTIFICATION` (VERIFIED vmangos `WorldSession::SendNotification`,
-/// `Server/WorldSession.cpp:900-915`: `data << szStr`): one cstring — the notice text, already
-/// formatted server-side ("You do not know that language", trade refusals, and kin). The real
-/// client flashes it in the red UIErrorsFrame.
+/// Read `SMSG_NOTIFICATION`: one cstring of server-formatted notice text, which the 1.12 client
+/// shows in the red UIErrorsFrame (vmangos `Server/WorldSession.cpp:900-915`).
 pub(super) fn read_notification(r: &mut &[u8]) -> io::Result<String> {
     read_cstring(r)
 }
 
-/// Read `SMSG_PLAYED_TIME` (VERIFIED vmangos `WorldPackets::Misc::PlayedTime::AppendBodyTo`,
-/// `Server/Packets/Misc.cpp:278-282`; handler `WorldSession::HandlePlayedTime`,
-/// `Handlers/MiscHandler.cpp:935-941`): `u32 totalPlayedTime` (seconds since character creation) +
-/// `u32 levelPlayedTime` (seconds since the last level-up) — answers `CMSG_PLAYED_TIME` (empty
-/// body, the `/played` command).
+/// Read `SMSG_PLAYED_TIME`, the `/played` answer: total then this-level played time, both `u32`
+/// seconds (vmangos `Server/Packets/Misc.cpp:278-282`).
 pub(super) fn read_played_time(r: &mut &[u8]) -> io::Result<(u32, u32)> {
     let total = read_u32_le(r)?;
     let level = read_u32_le(r)?;
     Ok((total, level))
 }
 
-/// Read `MSG_RANDOM_ROLL`'s server→client **broadcast** shape (VERIFIED vmangos
-/// `WorldSession::HandleRandomRollOpcode`, `Handlers/GroupHandler.cpp:394-422`): `u32 minimum, u32
-/// maximum, u32 roll` (the server's own `urand(minimum, maximum)`), then a **raw** `u64` guid — the
-/// roller (`data << GetPlayer()->GetObjectGuid()`, an `ObjectGuid` stream write, so unpacked).
-/// Same opcode as the client→server request shape (`u32 minimum, u32 maximum`,
-/// [`super::client::random_roll`]) — a client only ever *receives* this broadcast shape, never its
-/// own request echoed back.
+/// Read the `MSG_RANDOM_ROLL` broadcast (`GroupHandler.cpp:394-422`): `u32` minimum, maximum and
+/// roll, then the roller's unpacked `u64` guid; the request on this opcode is only min and max.
 pub(super) fn read_random_roll(r: &mut &[u8]) -> io::Result<(u32, u32, u32, u64)> {
     let min = read_u32_le(r)?;
     let max = read_u32_le(r)?;

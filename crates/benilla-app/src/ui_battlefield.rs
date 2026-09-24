@@ -1,28 +1,28 @@
-//! The battleground **list window**'s app half (decision 1974; wow-re
-//! `system/ui/scratch/battlefield-verb-family.md` §2.1, §4.1, §4.4, §4.5, §5.2, §7.1, §8): what
+//! The battleground **list window**'s app half (decision 1974): what
 //! the stock `BattlefieldFrame.lua` and the minimap's queue icon need from the wire, the clock and
 //! the Map.dbc rows. The verbs themselves are `benilla_ui::script::battlefield_queue`'s; the
 //! queue slots live in [`BattlefieldQueue`]; the scoreboard is [`crate::ui_battlefield_score`]'s.
 //!
-//! - **The list** (`SMSG_BATTLEFIELD_LIST`, §4.1) is the battlemaster's guid, the map, the bracket
-//!   index and the instance ids. The handler derives the bracket's level pair off the map row
-//!   (`bracket · span + minLevel`, max clamped at 60), fires `BATTLEFIELDS_SHOW`, and only THEN
+//! - **The list** (`SMSG_BATTLEFIELD_LIST`, `0x4aa6c0`) is the battlemaster's guid, the map, the
+//!   bracket index and the instance ids. The handler derives the bracket's level pair off the map
+//!   row (`bracket · span + minLevel`, max clamped at 60), fires `BATTLEFIELDS_SHOW`, and only THEN
 //!   anchors the player's position — the leash below measures from it.
-//! - **The leash** (§7.1): a world tick fires `BATTLEFIELDS_CLOSED` once the player is strictly
-//!   more than 5.5556 yd from where the list was opened, and zeroes the anchor first. The stock
-//!   window hides itself on the event; there is no other closer.
+//! - **The leash** (`0x4aa090`): a world tick fires `BATTLEFIELDS_CLOSED` once the player is
+//!   strictly more than 5.5556 yd from where the list was opened, and zeroes the anchor first. The
+//!   stock window hides itself on the event; there is no other closer.
 //! - **The queue view**: every frame the three slots go to the VM with their clock-shaped fields
 //!   reduced — the port deadline, the raw estimated wait, the time waited — and the map names
 //!   resolved (map 0 included: the reference looks a cleared slot's id up like any other).
-//! - **The join** (§5.2): `JoinBattlefield`'s instance and group flag come back from the VM; the
-//!   group leg is refused client-side with message 442 when the map's `MaxPlayers` is below
+//! - **The join** (`0x4a9f60`): `JoinBattlefield`'s instance and group flag come back from the VM;
+//!   the group leg is refused client-side with message 442 when the map's `MaxPlayers` is below
 //!   either the party count or the raid count, and the opcode is chosen by the cached
 //!   battlemaster guid — `CMSG_BATTLEMASTER_JOIN` with it, `CMSG_BATTLEFIELD_JOIN` without.
-//! - **The three speaking handlers** (§4.4/§4.5) print and store nothing: the group verdict
-//!   (deserters / joined `%s` / failed) and the joined-or-left player lines, the latter once the
-//!   name cache answers — the reference's fallback callback, in the shape this app already uses.
-//! - **World enter** (§8) clears the list scalars and the selection (not the queue slots) and
-//!   sends the bodyless `CMSG_BATTLEFIELD_STATUS`, which the server answers slot by slot.
+//! - **The three speaking handlers** (`0x4aacc0`/`0x4aae10`) print and store nothing: the group
+//!   verdict (deserters / joined `%s` / failed) and the joined-or-left player lines, the latter
+//!   once the name cache answers — the reference's fallback callback, in the shape this app
+//!   already uses.
+//! - **World enter** (`0x4a9db0`) clears the list scalars and the selection (not the queue slots)
+//!   and sends the bodyless `CMSG_BATTLEFIELD_STATUS`, which the server answers slot by slot.
 
 // `std::time::Instant` has no monotonic clock behind it in a browser and panics there;
 // bevy's re-export is std's natively and `web_time`'s on wasm32.
@@ -43,14 +43,14 @@ use crate::ui_party::GroupState;
 use crate::ui_script::{UiFeed, UiInput};
 
 /// The leash radius, squared: the CRT initialiser's `fld [0x806574]; fmul` of the `.rdata` f32
-/// `5.55555534362793` (§7.1).
+/// `5.55555534362793`.
 const LEASH_RADIUS_YD: f32 = 5.555_555_3;
 
 /// The leash's degenerate-anchor refusal (`fcomp [0x8029d4]`, `2.384185791015625e-07`): an
 /// anchor this close to the origin is "no list open", never a place to measure from.
 const DEGENERATE_ANCHOR: f32 = 2.384_185_8e-7;
 
-/// `SMSG_GROUP_JOINED_BATTLEGROUND`'s deserters sentinel (`cmp eax,-2`, §4.4).
+/// `SMSG_GROUP_JOINED_BATTLEGROUND`'s deserters sentinel (`cmp eax,-2` in `0x4aacc0`).
 const GROUP_JOIN_DESERTERS: u32 = 0xFFFF_FFFE;
 
 /// The list window's state: the last list, the leash anchor, and what the speaking handlers
@@ -90,7 +90,8 @@ impl Battlefield {
         self.players.push((guid, joined));
     }
 
-    /// The world-enter reset (§8): the list scalars and the anchor go; the queue slots do not.
+    /// The world-enter reset (`0x4a9db0`): the list scalars and the anchor go; the queue slots do
+    /// not.
     fn clear_session(&mut self) {
         self.list = None;
         self.show = false;
@@ -133,7 +134,7 @@ fn list_view(
         .zip(row)
         .map(|(name, r)| BattlefieldMapInfo {
             name: name.to_string(),
-            // The faction-group index (§3.4): 0 for the mask-bit-4 side, 1 for bit 2 — Horde
+            // The faction-group index (`0x5efe00`): 0 for the mask-bit-4 side, 1 for bit 2 — Horde
             // and Alliance in the emulator's naming; the shipped rows carry one text in both.
             description: match faction {
                 Some("Horde") => Some(r.descriptions[0].clone()),
@@ -158,8 +159,8 @@ fn list_view(
     }
 }
 
-/// One slot's VM view at `now`: the three clock-shaped getters reduced (§3.3), the map name
-/// resolved, the bracket pair derived (§4.2).
+/// One slot's VM view at `now`: the three clock-shaped getters reduced (`0x4ab620`, `0x4ab790`,
+/// `0x4ab820`), the map name resolved, the bracket pair derived (`0x4aa850`).
 fn slot_view(
     slot: Option<&(BattlefieldStatus, Instant)>,
     catalog: Option<&MapCatalog>,
@@ -194,7 +195,7 @@ fn slot_view(
     view
 }
 
-/// The as-group refusal (§5.2): the map's `MaxPlayers` must be at least the party count (the
+/// The as-group refusal (`0x4a9f60`): the map's `MaxPlayers` must be at least the party count (the
 /// populated party slots, 0..4 — the members besides us) and the raid roster count. Which
 /// members the reference's raid roster counts is INFERRED here as the wire list's members in a
 /// raid and none in a party; the party count is VERIFIED.
@@ -234,7 +235,7 @@ fn feed_battlefield(
     let now = Instant::now();
 
     if std::mem::take(&mut state.dirty) {
-        // The description's side is the local player's faction group (`0x5efe00(player)`, §3.4)
+        // The description's side is the local player's faction group (`0x5efe00(player)`)
         // — the same answer `UnitFactionGroup("player")` gives, read where it already lives.
         let faction = script
             .eval::<Option<String>>(r#"return (UnitFactionGroup("player"))"#)
@@ -253,11 +254,12 @@ fn feed_battlefield(
 
     if std::mem::take(&mut state.show) {
         script.fire_event("BATTLEFIELDS_SHOW", vec![]);
-        // §4.1 step 7: the anchor is written AFTER the event, from the live player position.
+        // `0x4aa6c0` writes the anchor AFTER the event, from the live player position.
         state.anchor = Some(player.pos);
     }
 
-    // §7.1: strictly farther than the leash from where the list opened → the event, anchor first.
+    // `0x4aa090`: strictly farther than the leash from where the list opened → the event, anchor
+    // first.
     if let Some(anchor) = state.anchor {
         if anchor.length_squared() > DEGENERATE_ANCHOR
             && player.pos.distance_squared(anchor) > LEASH_RADIUS_YD * LEASH_RADIUS_YD
@@ -342,7 +344,7 @@ fn drain_battlefield(
     }
 }
 
-/// The world-enter reset (§8): the list scalars, the selection and the anchor cleared, the
+/// The world-enter reset (`0x4a9db0`): the list scalars, the selection and the anchor cleared, the
 /// queue slots kept, and the bodyless status request sent.
 fn reset_on_world_enter(
     mut entered: MessageReader<EnteredWorldMessage>,
@@ -360,10 +362,40 @@ fn reset_on_world_enter(
     let _ = commands.0.send(ClientCommand::BattlefieldStatusRequest);
 }
 
+/// The battlemaster window's packet handlers (in the net handler table since 2313).
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::Battlefield;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handlers — called from [`super::BattlefieldPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::BattlefieldList, on_packet)
+            .net_handler(K::GroupJoinedBattleground, on_packet)
+            .net_handler(K::BattlegroundPlayer, on_packet);
+    }
+
+    /// One handler for the three: each is a one-line fold into the same state.
+    fn on_packet(In(ev): In<SessionEvent>, mut battlefield: ResMut<Battlefield>) {
+        match ev {
+            SessionEvent::BattlefieldList(list) => battlefield.apply_list(list),
+            SessionEvent::GroupJoinedBattleground { result } => battlefield.apply_verdict(result),
+            SessionEvent::BattlegroundPlayer { guid, joined } => {
+                battlefield.apply_player(guid, joined)
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) struct BattlefieldPlugin;
 
 impl Plugin for BattlefieldPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<Battlefield>().add_systems(
             Update,
             (

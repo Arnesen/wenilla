@@ -1,7 +1,5 @@
-//! Player-movement relay + teleport-ack wire tests: the `[packed guid][MovementInfo]` relay shape
-//! that rebroadcasts other players' `MSG_MOVE_*` locomotion (including the jump ballistic tail), and
-//! `MSG_MOVE_TELEPORT_ACK`'s server-form pose. Split out of the former `tests/messages.rs` — see
-//! `tests/common` for the shared fixtures and methodology note.
+//! The movement wire: the `[packed guid][MovementInfo]` relay of other units' moves, teleport
+//! acks, speed changes, knockbacks, compressed batches and the movement-mode opcodes.
 
 mod common;
 
@@ -13,10 +11,8 @@ use common::hx;
 
 #[test]
 fn movement_relay_decodes_to_unit_move() {
-    // A relayed player move: [packed mover guid][MovementInfo]. Packed guid 0xAA = mask 0x01 + byte
-    // 0xAA; the MovementInfo body is the same 28-byte FORWARD info pinned in `client_bodies_golden`
-    // (flags 0x1, time, pos, orientation 1.25, fall_time). The server rebroadcasts with the mover's
-    // opcode — here MSG_MOVE_START_FORWARD — which is how another player's walking reaches us.
+    // Packed guid 0xAA, then the 28-byte FORWARD MovementInfo of `client_bodies_golden`; the
+    // server relays another player's move under the mover's own opcode.
     let body = hx("01aa0100000004030201cdd70bc6357e04c3f90fa7420000a03f00000000");
     match messages::parse_server(messages::opcode::MSG_MOVE_START_FORWARD, &body).unwrap() {
         ServerPacket::PlayerMove {
@@ -40,8 +36,7 @@ fn movement_relay_decodes_to_unit_move() {
         }
         p => panic!("expected PlayerMove, got {}", p.name()),
     }
-    // The whole relay family routes through the same body shape — spot-check a couple more opcodes and
-    // the fan-out into a SessionEvent the ECS consumes.
+    // Every relay opcode shares the body shape.
     for op in [
         messages::opcode::MSG_MOVE_HEARTBEAT,
         messages::opcode::MSG_MOVE_SET_FACING,
@@ -65,9 +60,8 @@ fn movement_relay_decodes_to_unit_move() {
 
 #[test]
 fn jump_relay_round_trips_the_ballistic_tail() {
-    // A jumping MovementInfo (JUMPING 0x2000 | FORWARD) carries the ballistic launch tail. Round-trip it
-    // through write → parse to pin the wire layout: `fall_time` is a u32 (ms), and the jump tail order is
-    // `zspeed, cosAngle, sinAngle, xyspeed` — cos *before* sin (VERIFIED vmangos `MovementInfo::Read`).
+    // JUMPING (0x2000) adds the launch tail after the `u32` fall_time (ms): zspeed, cosAngle,
+    // sinAngle, xyspeed, cos before sin (vmangos `MovementInfo::Read`).
     let mi = MovementInfo {
         flags: 0x2000 | 0x1,
         timestamp: 0x0102_0304,
@@ -77,8 +71,8 @@ fn jump_relay_round_trips_the_ballistic_tail() {
             z: 3.0,
         },
         orientation: 0.5,
-        transport: None, // not on a transport — no transport tail is written
-        pitch: 0.0,      // not swimming — no pitch tail is written
+        transport: None, // not on a transport: no transport tail
+        pitch: 0.0,      // not swimming: no pitch tail
         fall_time: 250,
         jump: Some(messages::JumpInfo {
             zspeed: 7.955_547,
@@ -87,7 +81,7 @@ fn jump_relay_round_trips_the_ballistic_tail() {
             xy_speed: 7.0,
         }),
     };
-    let mut body = hx("01aa"); // [packed guid 0xAA][MovementInfo] — the relay shape.
+    let mut body = hx("01aa"); // [packed guid 0xAA][MovementInfo], the relay shape.
     body.extend_from_slice(&messages::movement(&mi));
     match messages::parse_server(messages::opcode::MSG_MOVE_JUMP, &body).unwrap() {
         ServerPacket::PlayerMove {
@@ -111,35 +105,29 @@ fn jump_relay_round_trips_the_ballistic_tail() {
     }
 }
 
-/// A relayed rider on a transport: `MOVEFLAG_ON_TRANSPORT | MOVEFLAG_SWIMMING | MOVEFLAG_JUMPING` all
-/// set, so the transport pose, swim pitch, `fall_time`, and jump tail all ride the same packet — the
-/// exact regression the old discard comment warned about (`messages/movement.rs`'s prior "the
-/// transport ... tail is parsed to stay aligned but discarded"): a wrong transport-tail length would
-/// misalign every tail after it. `write()` never serializes a transport tail (benilla doesn't set the
-/// flag outbound — riding is decision 0438 phase 2), so this fixture is hand-built to the exact byte
-/// order `read_movement_info` implements.
+/// A rider with ON_TRANSPORT, SWIMMING and JUMPING set: the transport pose, pitch, fall_time and
+/// jump tail share one packet, so a wrong transport-tail length misaligns everything after it.
 #[test]
 fn movement_relay_surfaces_transport_pose_and_keeps_the_rest_aligned() {
-    // An elevator (HIGH_TRANSPORT, 0xF120): template entry 900, DB spawn low guid 4242 — the standard
-    // entry layout (guid.rs `entry()`).
+    // An elevator guid (HIGH_TRANSPORT 0xF120): entry 900, low guid 4242.
     let transport_guid: u64 = 4242 | (900u64 << 24) | (0xF120u64 << 48);
 
     let mut body = Vec::new();
     write_packed_guid(0xAA, &mut body).unwrap(); // mover guid
-    let flags: u32 = 0x0200_0000 | 0x20_0000 | 0x2000 | 0x1; // ON_TRANSPORT | SWIMMING | JUMPING | FORWARD
+    let flags: u32 = 0x0200_0000 | 0x20_0000 | 0x2000 | 0x1; // transport, swim, jump, forward
     body.extend_from_slice(&flags.to_le_bytes());
     body.extend_from_slice(&0x1122_3344u32.to_le_bytes()); // timestamp
     body.extend_from_slice(&10.0f32.to_le_bytes()); // position.x
     body.extend_from_slice(&20.0f32.to_le_bytes()); // position.y
     body.extend_from_slice(&30.0f32.to_le_bytes()); // position.z
     body.extend_from_slice(&0.75f32.to_le_bytes()); // orientation
-    body.extend_from_slice(&transport_guid.to_le_bytes()); // ON_TRANSPORT tail: FULL u64 guid
+    body.extend_from_slice(&transport_guid.to_le_bytes()); // ON_TRANSPORT tail: full u64 guid
     body.extend_from_slice(&1.0f32.to_le_bytes()); // local x
     body.extend_from_slice(&2.0f32.to_le_bytes()); // local y
     body.extend_from_slice(&3.0f32.to_le_bytes()); // local z
     body.extend_from_slice(&0.5f32.to_le_bytes()); // local o
     body.extend_from_slice(&(-0.3f32).to_le_bytes()); // SWIMMING tail: pitch
-    body.extend_from_slice(&999u32.to_le_bytes()); // fall_time (u32 — must land right after pitch)
+    body.extend_from_slice(&999u32.to_le_bytes()); // fall_time (u32, right after pitch)
     body.extend_from_slice(&7.9f32.to_le_bytes()); // JUMPING tail: zspeed
     body.extend_from_slice(&0.6f32.to_le_bytes()); // cos_angle
     body.extend_from_slice(&0.8f32.to_le_bytes()); // sin_angle
@@ -186,8 +174,6 @@ fn movement_relay_surfaces_transport_pose_and_keeps_the_rest_aligned() {
         p => panic!("expected PlayerMove, got {}", p.name()),
     }
 
-    // The same fixture through the SessionEvent fan-out: UnitMove carries the same transport pose and
-    // the same post-tail fields.
     let events =
         decode(messages::parse_server(messages::opcode::MSG_MOVE_HEARTBEAT, &body).unwrap());
     match events.as_slice() {
@@ -207,8 +193,7 @@ fn movement_relay_surfaces_transport_pose_and_keeps_the_rest_aligned() {
 
 #[test]
 fn teleport_ack_parses_pose() {
-    // MSG_MOVE_TELEPORT_ACK (server→client form): [packed guid][counter u32][MovementInfo]. Exercises
-    // the refactored read_movement_info (non-transport path) end to end.
+    // MSG_MOVE_TELEPORT_ACK from the server: [packed guid][u32 counter][MovementInfo].
     let body = hx("01aa070000000100000004030201cdd70bc6357e04c3f90fa7420000a03f00000000");
     match messages::parse_server(messages::opcode::MSG_MOVE_TELEPORT_ACK, &body).unwrap() {
         ServerPacket::Teleport {
@@ -229,11 +214,9 @@ fn teleport_ack_parses_pose() {
     }
 }
 
-/// The force-speed-change family, byte-exact both directions (a new wire body never lands without
-/// a golden — method): the SMSG body is `[packed guid][u32 counter][f32 speed]` (vmangos
-/// `SendSpeedChangeToController`, 5875 branch), and the ACK body is `[u64 FULL guid][u32 counter]
-/// [MovementInfo][f32 speed]` (`MoveSpeedAck::ReadFromWorldPacket` — a plain `ObjectGuid`
-/// extraction is a raw u64, `ObjectGuid.cpp:180`, NOT packed like the SMSG's).
+/// `SMSG_FORCE_*_SPEED_CHANGE` is `[packed guid][u32 counter][f32 speed]` (vmangos
+/// `SendSpeedChangeToController`); the ack is `[u64 guid][u32 counter][MovementInfo][f32 speed]`
+/// with the guid unpacked (`MoveSpeedAck::ReadFromWorldPacket`).
 #[test]
 fn force_speed_change_parses_and_ack_body_golden() {
     use benilla_protocol::messages::SpeedKind;
@@ -260,8 +243,7 @@ fn force_speed_change_parses_and_ack_body_golden() {
         }] => assert_eq!(*speed, 14.0),
         other => panic!("expected one ForceSpeedChange event, got {other:?}"),
     }
-    // Every kind maps to its own SMSG opcode (the walk/swim-back/turn-rate trio lives in the
-    // 730-735 block, not the 226-231 run).
+    // Each kind has its own opcode; walk, swim-back and turn rate sit at 730-735, not 226-231.
     for (op, kind) in [
         (
             messages::opcode::SMSG_FORCE_WALK_SPEED_CHANGE,
@@ -282,8 +264,6 @@ fn force_speed_change_parses_and_ack_body_golden() {
         }
     }
 
-    // The ACK body golden: full 8-byte guid, counter, a stationary MovementInfo (flags 0 => no
-    // conditional tails), then the echoed speed.
     let info = MovementInfo {
         flags: 0,
         timestamp: 12345,
@@ -303,28 +283,18 @@ fn force_speed_change_parses_and_ack_body_golden() {
         hx("08000000000000000700000000000000393000000000803f00000040000040400000003f2a00000000006041"),
         "CMSG_FORCE_*_SPEED_CHANGE_ACK body"
     );
-    // The ack opcode per kind — the run ack is 227, the walk ack lives in the high block (731).
     assert_eq!(SpeedKind::Run.ack_opcode(), 0x00E3);
     assert_eq!(SpeedKind::Walk.ack_opcode(), 0x02DB);
     assert_eq!(SpeedKind::TurnRate.ack_opcode(), 0x02DF);
 }
 
-/// **The knockback handshake, byte-exact both ways** (decision 1702).
-///
-/// The two halves are one test because the second is only correct *relative to* the first: the ack's
-/// jump tail has to be the arriving quad, and the two packets order those same four floats
-/// differently. `SMSG_MOVE_KNOCK_BACK` is direction-first (`vcos, vsin, speedXY, speedZ`); the
-/// `MovementInfo` jump tail is `zspeed, cos, sin, xyspeed`. Read one in the other's order and every
-/// field is still a plausible float, the arc flies off at a wrong angle, and
-/// `FindPendingMovementKnockbackChange` rejects the ack — so this is exactly the transposition a
-/// type alone cannot catch.
-///
-/// `speedZ` is negative here because it is **down-positive**: this is a knockback that throws the
-/// body *upward* at 12 yd/s (wow-re: `0x7c61f0` stores the wire value verbatim into the same
-/// `CMovement+0xa0` a land jump seeds with `0xc0fe93d8` = −7.955547).
+/// The knockback and its ack: `SMSG_MOVE_KNOCK_BACK` orders the launch vcos, vsin, speedXY,
+/// speedZ; the ack's jump tail orders it zspeed, cos, sin, xyspeed, and vmangos rejects a
+/// mismatched ack. speedZ is down-positive: the reference stores it as-is (`0x7c61f0`) where a
+/// jump stores -7.955547, so -12 throws the body up.
 #[test]
 fn knock_back_parses_and_ack_body_golden() {
-    // packed guid 8 (mask 0x01, one byte), counter 7, then vcos 0.6, vsin 0.8, speedXY 25, speedZ −12.
+    // Packed guid 8, counter 7, then vcos 0.6, vsin 0.8, speedXY 25, speedZ -12.
     let body = hx("0108070000009a99193fcdcc4c3f0000c841000040c1");
     let packet = messages::parse_server(messages::opcode::SMSG_MOVE_KNOCK_BACK, &body).unwrap();
     let launch = match &packet {
@@ -354,9 +324,8 @@ fn knock_back_parses_and_ack_body_golden() {
         other => panic!("expected one KnockBack event, got {other:?}"),
     }
 
-    // The ACK body golden: a **full** 8-byte guid (packed on the way in, never on the way out), the
-    // echoed counter, and a `MovementInfo` carrying `MOVEFLAG_JUMPING` (0x2000) — without which the
-    // jump tail is not serialized at all and the server has nothing to match against.
+    // The ack: the full guid (packed only inbound), the counter, and a MovementInfo with
+    // MOVEFLAG_JUMPING (0x2000), without which no jump tail is written for the server to match.
     let info = MovementInfo {
         flags: 0x2000,
         timestamp: 12345,
@@ -380,17 +349,12 @@ fn knock_back_parses_and_ack_body_golden() {
     assert_eq!(messages::opcode::CMSG_MOVE_KNOCK_BACK_ACK, 0x00F0);
 }
 
-/// **Somebody else's knockback reaches us, and replays as an arc** (decision 1702, correcting
-/// decision 0277's "no observer-side knockback signal exists in 1.12 at all").
-///
-/// `MSG_MOVE_KNOCK_BACK` is an ordinary `[packed guid][MovementInfo]` relay with the launch quad
-/// appended — and the appendix is redundant by construction, because the server builds that
-/// `MovementInfo` from the victim's own ack, whose jump tail already carries the quad. So the
-/// trailing four floats go unread and the arc still replays: this test's assertion is that the tail
-/// the reader *does* reach is the launch, not that the packet was consumed to the last byte.
+/// `MSG_MOVE_KNOCK_BACK` relays another unit's knockback: `[packed guid][MovementInfo]` and the
+/// launch again. The MovementInfo is built from the victim's ack, whose jump tail already holds
+/// the launch, so the appended quad goes unread.
 #[test]
 fn an_observed_knockback_relays_the_arc() {
-    // packed guid 0xAA, a JUMPING MovementInfo whose tail is (zspeed −12, cos 0.6, sin 0.8, xy 25),
+    // packed guid 0xAA, a JUMPING MovementInfo whose tail is (zspeed -12, cos 0.6, sin 0.8, xy 25),
     // then the same quad again in the SMSG's own direction-first order.
     let body = hx("01aa00200000393000000000803f00000040000040400000003f00000000000040c19a99193fcdcc4c3f0000c8419a99193fcdcc4c3f0000c841000040c1");
     let packet = messages::parse_server(messages::opcode::MSG_MOVE_KNOCK_BACK, &body).unwrap();
@@ -413,12 +377,9 @@ fn an_observed_knockback_relays_the_arc() {
     assert_eq!(messages::opcode::MSG_MOVE_KNOCK_BACK, 0x00F1);
 }
 
-/// The OBSERVER speed legs, byte-exact (decision 0441 — how an observed unit's mounted speed
-/// reaches us; no counter, no ack on either): `SMSG_SPLINE_SET_*_SPEED` is `[packed guid]
-/// [f32 speed]` (vmangos `SendSpeedChangeToAll` + the mid-spline observer branch), and
-/// `MSG_MOVE_SET_*_SPEED` is `[packed guid][MovementInfo][f32 speed]`
-/// (`SendSpeedChangeToObservers`, finalized branch) — a speed change AND a fresh pose, decoding
-/// to a `UnitMove` + `SpeedChanged` pair.
+/// An observed unit's speed changes, with no counter or ack: `SMSG_SPLINE_SET_*_SPEED` is
+/// `[packed guid][f32 speed]` (vmangos `SendSpeedChangeToAll`), `MSG_MOVE_SET_*_SPEED` is
+/// `[packed guid][MovementInfo][f32 speed]` (`SendSpeedChangeToObservers`), a pose and a speed.
 #[test]
 fn observer_speed_legs_parse_golden() {
     use benilla_protocol::messages::SpeedKind;
@@ -446,8 +407,7 @@ fn observer_speed_legs_parse_golden() {
         }] => assert_eq!(*speed, 14.0),
         other => panic!("expected one SpeedChanged event, got {other:?}"),
     }
-    // Each kind maps to its own opcode — spot-check the walk (769) and swim-back (770) slots,
-    // whose order differs from the FORCE family's.
+    // Walk (769) and swim-back (770) sit in a different order from the FORCE family's.
     for (op, kind) in [
         (
             messages::opcode::SMSG_SPLINE_SET_WALK_SPEED,
@@ -464,8 +424,7 @@ fn observer_speed_legs_parse_golden() {
         }
     }
 
-    // MSG_MOVE_SET_RUN_SPEED: [packed guid 0xAA][the shared 28-byte FORWARD MovementInfo golden]
-    // [speed 14.0] — decodes to the pose + the speed, in one drain.
+    // MSG_MOVE_SET_RUN_SPEED: packed guid 0xAA, the shared FORWARD MovementInfo, speed 14.0.
     let body = hx("01aa0100000004030201cdd70bc6357e04c3f90fa7420000a03f0000000000006041");
     let packet = messages::parse_server(messages::opcode::MSG_MOVE_SET_RUN_SPEED, &body).unwrap();
     match &packet {
@@ -523,8 +482,7 @@ fn observer_speed_legs_parse_golden() {
         other => panic!("expected MountResult(dismount, 3), got {other:?}"),
     }
 
-    // SMSG_MOUNTSPECIAL_ANIM: one raw u64 guid, NOT packed (vmangos
-    // `HandleMountSpecialAnimOpcode` writes `data << GetObjectGuid()` — full 8 bytes).
+    // SMSG_MOUNTSPECIAL_ANIM: one unpacked `u64` guid (vmangos `HandleMountSpecialAnimOpcode`).
     match decode(
         messages::parse_server(
             messages::opcode::SMSG_MOUNTSPECIAL_ANIM,
@@ -541,20 +499,16 @@ fn observer_speed_legs_parse_golden() {
     }
 }
 
-/// `SMSG_COMPRESSED_MOVES` — the batch carrier vmangos switches a session onto once it has been
-/// sent 300 movement packets in ten seconds (decision 0624). The fixture is built exactly as
-/// `MovementData::AddPacket` + `BuildPacket` do: `[u32 uncompressed size][zlib(records)]`, each
-/// record `[u8 size][u16 opcode][body]` with `size` counting the opcode's two bytes. The two
-/// records carry the same relay bodies pinned by `movement_relay_decodes_to_unit_move` above, so
-/// what this adds is the *framing* — that a batched move decodes identically to a loose one.
+/// `SMSG_COMPRESSED_MOVES`, which vmangos switches a session to after 300 movement packets in ten
+/// seconds: `[u32 size][zlib(records)]`, each record `[u8 size][u16 opcode][body]` with the size
+/// counting the opcode (vmangos `MovementData::BuildPacket`).
 #[test]
 fn compressed_moves_unwraps_to_the_same_events_as_loose_relays() {
     let body = hx("42000000780153d8cac0b88a91818181859989f1ec75ee63a6752c877ff22f77626058600f146650b805540062602a38005600002f2610d9");
     let events =
         decode(messages::parse_server(messages::opcode::SMSG_COMPRESSED_MOVES, &body).unwrap());
 
-    // Both records, in wire order, as ordinary moves — order is load-bearing: the remote-replay
-    // queue reconstructs a mover's arc from it (decision 0618).
+    // Both records, in wire order: the remote-replay queue rebuilds a mover's arc from that order.
     match events.as_slice() {
         [SessionEvent::UnitMove {
             guid: 0xAA,
@@ -570,50 +524,42 @@ fn compressed_moves_unwraps_to_the_same_events_as_loose_relays() {
         ),
     }
 
-    // A batched move must be byte-identical to the same move arriving loose.
-    let loose = decode(
-        messages::parse_server(
+    // The batch's two records, relayed loose under their own opcodes.
+    let loose: Vec<SessionEvent> = [
+        (
             messages::opcode::MSG_MOVE_START_FORWARD,
-            &hx("01aa0100000004030201cdd70bc6357e04c3f90fa7420000a03f00000000"),
-        )
-        .unwrap(),
-    );
-    assert_eq!(format!("{:?}", events[0]), format!("{:?}", loose[0]));
+            "01aa0100000004030201cdd70bc6357e04c3f90fa7420000a03f00000000",
+        ),
+        (
+            messages::opcode::MSG_MOVE_SET_FACING,
+            "01aa0000000004030201cdd70bc6357e04c3f90fa7420000c03f00000000",
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(opcode, body)| decode(messages::parse_server(opcode, &hx(body)).unwrap()))
+    .collect();
+    assert_eq!(format!("{events:?}"), format!("{loose:?}"));
 }
 
-/// A misframed batch must fail **loudly** (one `Poll::Skipped` naming the inner opcode), never
-/// silently drop the moves it carries — the exact silence that made the runaway unattributable for
-/// three rounds of fixes (decision 0624).
+/// A misframed batch is a parse error, never a silent drop of the moves it carries.
 #[test]
 fn a_misframed_batch_errors_rather_than_dropping_moves() {
     // A HEARTBEAT record claiming a 40-byte body with only 4 bytes left in the stream.
     let truncated = hx("070000007801d37ac700020006c10119");
     assert!(messages::parse_server(messages::opcode::SMSG_COMPRESSED_MOVES, &truncated).is_err());
 
-    // A record whose size (1) cannot even hold the opcode that follows it — misframing, not an
-    // empty-body packet, and it must not underflow into a huge body length.
+    // A record whose size (1) cannot hold its opcode: misframed, and it must not underflow.
     let undersized = hx("030000007801637cc7000001e200f0");
     assert!(messages::parse_server(messages::opcode::SMSG_COMPRESSED_MOVES, &undersized).is_err());
 }
 
-/// **The observer movement-mode family, byte-exact** (decision 1780) — the `SMSG_SPLINE_MOVE_*`
-/// twelve. Three things are asserted because all three are how this family differs from the ack'd
-/// `SMSG_FORCE_*` one it is otherwise a twin of:
-///
-/// 1. **The body is a bare packed guid** — parsing a *four-byte-shorter* body than the FORCE family's
-///    must succeed, so a trailing counter is not being read. Reading one would desync every
-///    subsequent packet in the same TCP read.
-/// 2. **All twelve opcodes are handled**, including `SMSG_SPLINE_MOVE_ROOT`'s out-of-band `0x31A`
-///    (the reference's dispatcher range is `0x304..=0x31A`, root deliberately at the top).
-/// 3. **The run/walk pair is inverted** — `SET_RUN_MODE` *clears* `MOVEFLAG_WALK_MODE`, because the
-///    reference's `0x617e80` hands the opcode's bool to `SetRunMode 0x7c71c0`, whose argument is
-///    *run*. Getting this backwards would walk every running creature in view.
+/// The twelve `SMSG_SPLINE_MOVE_*` opcodes (reference dispatch `0x304..=0x31A`, root at `0x31A`):
+/// the body is a bare packed guid with no counter, and `SET_RUN_MODE` clears
+/// `MOVEFLAG_WALK_MODE`, because the reference (`0x617e80`) passes its bool to `SetRunMode`.
 #[test]
 fn spline_move_mode_family_parses_golden() {
     use benilla_protocol::messages::SplineMode;
 
-    // Packed guid 0xAA (mask 0x01, one byte) and NOTHING else — four bytes shorter than the
-    // FORCE family's `[packed guid][u32 counter]`.
     let body = hx("01aa");
     assert_eq!(body.len(), 2, "the whole body is one packed guid");
 
@@ -707,7 +653,6 @@ fn spline_move_mode_family_parses_golden() {
         }
     }
 
-    // The flag bits are the same word the ack'd family writes — the two families are one state.
     assert_eq!(SplineMode::Root.flag(), messages::MoveMode::Root.flag());
     assert_eq!(
         SplineMode::WaterWalk.flag(),
@@ -720,32 +665,14 @@ fn spline_move_mode_family_parses_golden() {
     assert_eq!(SplineMode::Hover.flag(), messages::MoveMode::Hover.flag());
 }
 
-/// **The observer leg of the movement-mode family, byte-exact** (decision 2061) — the six opcodes
-/// that tell everyone *else* a player was rooted, levitated or blinked. Until this landed they hit
-/// [`ServerPacket::Other`] and were dropped, so a watched player kept sliding through a root and
-/// stood in the wrong place after a Blink until their next ordinary pose packet.
-///
-/// Four things are asserted, because each is how this leg differs from a sibling it is otherwise a
-/// twin of:
-///
-/// 1. **The body is the ordinary relay shape** — `[packed guid][MovementInfo]`, no counter. That is
-///    the whole difference from the ack'd `SMSG_FORCE_MOVE_ROOT` leg (`[packed guid][u32 counter]`)
-///    and from `MSG_MOVE_TELEPORT_ACK` (`[packed guid][u32 counter][MovementInfo]`); reading a
-///    counter that isn't there would shift the pose by four bytes and desync the rest of the read.
-/// 2. **Apply/unapply rides the flags word, not the opcode.** Only root splits in two; hover,
-///    feather-fall and water-walk use ONE opcode for both directions, because vmangos runs
-///    `SetHoverReal` &co. *before* the broadcast (`MovementHandler.cpp:626-638`, `:743-744`) so the
-///    `m_movementInfo` it sends already carries the bit's new state.
-/// 3. **The whole word reaches the app**, which is what makes (2) work: `UnitMove.flags` is the
-///    wire word verbatim, and Levitate — feather fall + hover + water walk at once (decision 1706)
-///    — arrives as three packets whose flags words accumulate server-side.
-/// 4. **`MSG_MOVE_TELEPORT` is tagged as a teleport and nothing else is.** The pose is a
-///    discontinuity; the app's pre-fire reconcile has to know not to glide the mover into it.
+/// The movement-mode opcodes relayed to observers (root, hover, feather fall, water walk,
+/// teleport) use the plain relay shape, no counter. Only root has a separate off opcode: vmangos
+/// updates the others' flag before broadcasting (`MovementHandler.cpp:626-638`, `:743-744`), so
+/// the flags word carries the state. Only `MSG_MOVE_TELEPORT` is tagged as a teleport.
 #[test]
 fn observer_move_mode_family_parses_golden() {
-    // Packed guid 0xAA (mask 0x01, one byte) + a 28-byte MovementInfo with no conditional tails:
-    // flags, time 12345, pos (1, 2, 3), orientation 0.5, fall_time 0. 30 bytes total — FOUR SHORT
-    // of `MSG_MOVE_TELEPORT_ACK`'s same-content body, which is the point of the length assertion.
+    // Packed guid 0xAA and a 28-byte MovementInfo with no tails: time 12345, pos (1, 2, 3),
+    // orientation 0.5, fall_time 0; 30 bytes, four fewer than `MSG_MOVE_TELEPORT_ACK`'s.
     let info = |flags: u32| {
         let mut b = hx("01aa");
         b.extend_from_slice(&flags.to_le_bytes());
@@ -758,7 +685,7 @@ fn observer_move_mode_family_parses_golden() {
     const FEATHER_FALL: u32 = 0x2000_0000;
     const HOVER: u32 = 0x4000_0000;
 
-    // (opcode, the flags word the server would have written into it, the opcode's own verb)
+    // (opcode, the flags word the server writes into it, the opcode's verb)
     let expected = [
         (messages::opcode::MSG_MOVE_ROOT, ROOT, RelayVerb::Root(true)),
         (messages::opcode::MSG_MOVE_UNROOT, 0, RelayVerb::Root(false)),
@@ -767,8 +694,7 @@ fn observer_move_mode_family_parses_golden() {
             WATER_WALK,
             RelayVerb::Pose,
         ),
-        // The same opcode, the other direction — the bit is simply absent, and the verb is still
-        // `Pose`: for these three the word is the whole message.
+        // The same opcode, the other direction: the bit is absent and the verb is still `Pose`.
         (messages::opcode::MSG_MOVE_WATER_WALK, 0, RelayVerb::Pose),
         (
             messages::opcode::MSG_MOVE_FEATHER_FALL,
@@ -776,7 +702,7 @@ fn observer_move_mode_family_parses_golden() {
             RelayVerb::Pose,
         ),
         (messages::opcode::MSG_MOVE_HOVER, HOVER, RelayVerb::Pose),
-        // Levitate grants all three at once (decision 1706) — one word, three bits.
+        // Levitate grants all three at once: one word, three bits.
         (
             messages::opcode::MSG_MOVE_HOVER,
             HOVER | FEATHER_FALL | WATER_WALK,
@@ -800,7 +726,6 @@ fn observer_move_mode_family_parses_golden() {
             } => {
                 assert_eq!(*opcode, op);
                 assert_eq!(*f, flags, "the whole flags word survives for {op:#06x}");
-                // Four bytes off and this would read (2.0, 3.0, 0.5) — the counter-eating bug.
                 assert_eq!(
                     (position.x, position.y, position.z),
                     (1.0, 2.0, 3.0),
@@ -829,9 +754,7 @@ fn observer_move_mode_family_parses_golden() {
         }
     }
 
-    // The numbers themselves (vmangos `Opcodes_1_12_1.h`; cross-checked against the client's own
-    // name table). `MSG_MOVE_TELEPORT` (197) is NOT `MSG_MOVE_TELEPORT_ACK` (199) — the pair this
-    // family is easiest to get wrong on, and the reason (1)'s length assertion exists.
+    // Opcode numbers (vmangos `Opcodes_1_12_1.h`).
     assert_eq!(messages::opcode::MSG_MOVE_TELEPORT, 197);
     assert_eq!(messages::opcode::MSG_MOVE_TELEPORT_ACK, 199);
     assert_eq!(messages::opcode::MSG_MOVE_ROOT, 236);

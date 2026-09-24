@@ -1,6 +1,5 @@
-//! `--spells`: the spell/action wire. Require `SMSG_INITIAL_SPELLS` + `SMSG_ACTION_BUTTONS` at
-//! login, cast one spell (self, then packed-guid targeted), require a `SMSG_CAST_RESULT` verdict,
-//! and read our inventory back out of the descriptor as the round-trip evidence.
+//! `--spells`: require `SMSG_INITIAL_SPELLS` and `SMSG_ACTION_BUTTONS` at login, then a
+//! `SMSG_CAST_RESULT` for a self cast, a ground cast and a packed-guid targeted cast.
 
 use std::time::{Duration, Instant};
 
@@ -9,9 +8,8 @@ use benilla_protocol::{decode, guid, EntityKind, SessionEvent};
 
 use crate::probes::{Ctx, Probe};
 
-/// The dest-cast phase's spell: 4054 "Rough Dynamite" — dest-targeted (`Targets = 0x40`), zero
-/// mana, no reagents/totems, no equipped-item requirement, no aura state (live `spell_template`
-/// sweep, decision 0792) — castable by ANY class the probe character happens to be, once GM-learnt.
+/// "Rough Dynamite": dest-targeted (`Targets = 0x40`), no mana, reagent, equipment or aura state,
+/// so any class can cast it once GM-learnt.
 const DEST_SPELL: u32 = 4054;
 
 #[derive(Default)]
@@ -20,21 +18,15 @@ pub(crate) struct Spells {
     targeted_cast_sent: Option<(u32, u64)>,
     dest_cast_sent: Option<[f32; 3]>,
     dest_learn_sent: bool,
-    /// Set by `SMSG_LEARNED_SPELL` naming [`DEST_SPELL`] — the gate the dest cast waits behind.
-    /// The `.learn` chat command executes DEFERRED on the server (past the session's opcode
-    /// batch), so a cast sent in the same batch beats it and is silently dropped as unknown
-    /// ("casts spell 4054 which he shouldn't have" — observed live, 2026-07-30).
+    /// Set by `SMSG_LEARNED_SPELL` for [`DEST_SPELL`]. The server runs `.learn` after the
+    /// session's opcode batch, so a cast in the same batch is dropped as unknown.
     dest_spell_known: bool,
 }
 
 impl Probe for Spells {
     fn poll(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Cast once both the book and the bar are known. The pick must be an *active* spell —
-        // vmangos silently drops a cast of a passive (HandleCastSpellOpcode returns before any
-        // CAST_RESULT), and the book mixes proficiencies/passives in. A spell the player slotted
-        // on the action bar is active by construction (6603 auto-attack excluded: it's the
-        // attack toggle, not a cast); Battle Shout 6673 is the fallback. Either verdict (ok or a
-        // failure reason like no-rage/bad-target) proves the round trip.
+        // `HandleCastSpellOpcode` drops a passive with no CAST_RESULT, so pick a bar spell,
+        // skipping auto-attack 6603 (a toggle, not a cast), else Battle Shout 6673.
         if self.cast_sent.is_none() {
             if let (Some(book), Some(bar)) = (&cx.world.spell_book, &cx.world.bar_spells) {
                 let spell = bar
@@ -51,16 +43,10 @@ impl Probe for Spells {
                 }
             }
         }
-        // Phase 3 (decision 0792): the GROUND cast — mask 0x40 + three f32 WoW coords, the body
-        // the targeting cursor's world-click commit sends. GM-learn the classless DEST_SPELL,
-        // wait for the server's own `SMSG_LEARNED_SPELL` ack (the chat command executes deferred
-        // — a cast in the same batch is dropped as unknown), then cast at our own feet
-        // (`self_pose` — distance 0, always in range, always LOS). Routed to `dest_verdict` by
-        // spell id, so it can't collide with phase 2's positional slot. Gated like phase 2 on
-        // the phase-1 verdict (the book/bar round trip is proven).
+        // Phase 3, the ground cast: mask 0x40 and three f32 coords, the targeting cursor's world
+        // click body, cast at our own feet so it is always in range and line of sight.
         if self.dest_cast_sent.is_none() && cx.world.cast_verdict.is_some() {
-            // A prior run's deferred .learn may already have stuck — the login book then
-            // carries the spell and no fresh SMSG_LEARNED_SPELL will ever fire.
+            // A prior run's learn is already in the login book; no SMSG_LEARNED_SPELL will come.
             if !self.dest_spell_known
                 && cx
                     .world
@@ -86,11 +72,8 @@ impl Probe for Spells {
                 self.dest_cast_sent = Some(pos);
             }
         }
-        // Phase 2: once the self-cast AND the ground cast are answered, cast the bar spell AT
-        // the first streamed creature — the mask-2 + PACKED-guid target block. Ordered AFTER the
-        // dest phase deliberately: `.learn` executes deferred and resolves the SELECTION, so a
-        // creature selected here before the command ran turned the learn into "Player not
-        // found!" (observed live, 2026-07-30 — the `.cheat god` re-target trap, method.md).
+        // Phase 2, mask 2 with a packed guid. It runs after the ground cast: the deferred `.learn`
+        // acts on the selection and fails with "Player not found!" on a creature.
         if self.targeted_cast_sent.is_none() && cx.world.dest_verdict.is_some() {
             if let Some(spell) = self.cast_sent {
                 if let Some((&guid, _)) = cx
@@ -110,9 +93,7 @@ impl Probe for Spells {
     }
 
     fn on_event(&mut self, ev: &SessionEvent, _cx: &mut Ctx) -> Result<()> {
-        // The dest phase's learn ack: the book already carrying the spell (a prior probe run's
-        // leftover) counts the same — `SMSG_INITIAL_SPELLS` is handled at the gate below instead,
-        // since the book arrives before the learn is ever sent.
+        // The dest phase's learn ack; `poll` checks a login book that already has the spell.
         if let SessionEvent::SpellLearned { spell_id } = ev {
             if *spell_id == DEST_SPELL {
                 self.dest_spell_known = true;
@@ -125,7 +106,7 @@ impl Probe for Spells {
         let world = &mut *cx.world;
         let session = &mut *cx.session;
 
-        // --spells inventory readout: what the server says One is actually holding.
+        // Inventory readout: what the server says the character holds.
         if let Some(sf) = &world.self_fields {
             let slot_entry = |guid: Option<u64>| {
                 guid.filter(|g| *g != 0)
@@ -188,8 +169,7 @@ impl Probe for Spells {
                 };
                 println!("  {label:<10} {text}");
             };
-            // Equipment names resolve through the PUBLIC visible-item entries (item objects
-            // have no decode path yet — a named gap; the private INV guids prove presence).
+            // Names come from the public visible-item entries; private INV guids show presence.
             for slot in [15u8, 16, 17] {
                 if let Some(e) = sf.player_visible_item_entry(slot) {
                     if !world.item_names.contains_key(&e) {
@@ -213,7 +193,6 @@ impl Probe for Spells {
             println!("(no self descriptor captured — inventory readout skipped)");
         }
 
-        // --spells verdict: book + bar must have arrived and parsed; the cast must have been answered.
         let book = world
             .spell_book
             .clone()
@@ -243,9 +222,8 @@ impl Probe for Spells {
             (Some(e), _) => bail!("no SMSG_ITEM_QUERY_SINGLE_RESPONSE for entry {e}"),
             (None, _) => println!("(no item-kind button on the bar to item-query)"),
         }
-        // --spells dest-cast verdict (decision 0792): the wire shape must not merely parse — the
-        // cast must be ACCEPTED. A missing verdict means the body desynced the server's reader
-        // (the CMSG was dropped or the session died); a refusal names the CheckCast reason.
+        // The ground cast must be accepted: no verdict means the body desynced the server's
+        // reader, and a refusal carries the `CheckCast` reason.
         match (self.dest_cast_sent, &world.dest_verdict) {
             (Some(pos), Some((_, true, _))) => {
                 println!(

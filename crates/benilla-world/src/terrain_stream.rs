@@ -751,7 +751,6 @@ fn stream_terrain(
     // wall moves this with it.
     let center = focus.resolve(camera.single().ok().map(|c| c.translation));
     let window = StreamWindow::at(view.farclip, center[0], center[1]);
-    let tiling = cfg.as_ref().map(|c| c.tex_tiles).unwrap_or(8.0);
     let (cx, cy) = window.focus_tile();
     let same_window = state.focus == (cx, cy) && state.reach == Some((window.inner, window.outer));
     // Never while a load is in flight: `paced` is false from a snap until the body settles, and
@@ -961,7 +960,7 @@ fn stream_terrain(
                 layer_array: adt.layer_array.clone(),
                 alpha_array: adt.alpha_array.clone(),
                 shadow_array: adt.shadow_array.clone(),
-                params: Vec4::new(tiling, 0.0, 0.0, 0.0),
+                params: Vec4::new(benilla_formats::TERRAIN_LAYER_TILES, 0.0, 0.0, 0.0),
                 light_buf: shared_light.0.clone(),
             },
         });
@@ -1290,7 +1289,7 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
 /// One body, two triggers, because they are the same event seen from different sides: a cross-map
 /// teleport ends the world you were in, and so does leaving for character select. The material
 /// dedup goes with the placements it deduped for — its strong handles are what kept every
-/// previous map's materials (and their textures) resident forever (the #bugs teleport leak), so it
+/// previous map's materials (and their textures) resident forever (the teleport leak), so it
 /// is cleared *here*, sharing the exact trigger of the teardown it belongs to, rather than hanging
 /// off `world_map::MapChange`.
 fn drop_streamed_world(
@@ -1407,7 +1406,7 @@ fn despawn_tile_owned(commands: &mut Commands, t: &TileState) {
 }
 
 /// The `WorldDetail` re-scatter (0992): 1.12's own setter law — writing the density CVar
-/// tail-calls the chunk-rebuild walk (`0x6725a0` → `0x6b1d20`, wow-re terrain.md), so a change
+/// tail-calls the chunk-rebuild walk (`0x6725a0` → `0x6b1d20`), so a change
 /// re-scatters the LOADED tiles too, not just future streams. The fresh `ClutterChunk`s spawn
 /// unbuilt and the lazy builder re-meshes the ~70 yd bubble over the next frames. Watches the
 /// VALUE, not `is_changed()`, because the predicate is "the density moved" and not "the resource
@@ -1609,7 +1608,7 @@ fn release_placement(
 /// real client renders it (decision 0960; B193: testers see through 1.12.1's terrain from below, the
 /// way a WMO exterior reads from inside a cave; we drew it solid). The reference never sets
 /// `EGxRs 0x14` (`GL_CULL_FACE`) in its terrain-chunk pass `0x684510`/`0x6beb50`, so terrain inherits
-/// the device baseline `0x14 = 1` written by `0x593bf0` — culling ON, and wow-re's census of all 39
+/// the device baseline `0x14 = 1` written by `0x593bf0` — culling ON, and a census of all 39
 /// `0x14` setters proves none leaks in unbracketed ahead of the terrain drain. Only the passes that
 /// *want* two sides clear it inside their own `Push`/`PopRenderState` bracket: the four liquid
 /// passes, and the WDL mesh `0x6bd780` (cull 0 at `0x6bd79d`) — which is why `wdl.rs` stays

@@ -1,71 +1,44 @@
-//! Dev helper: put an account into the standard **full class set** — one character of every vanilla
-//! class, optionally levelled, geared, specced and parked in its own capital. Headless: a bare
-//! `WorldSession`, no Bevy app and no window, so one process dresses a whole nine-body account.
+//! Dev helper: gives an account one character of every class, optionally levelled, geared,
+//! specced and parked in its capital, over a headless `WorldSession`.
 //!
 //! ```text
 //! cargo run -p benilla-protocol --example seed_classes -- <user> <pass> <Prefix> [flags]
-//!   --wipe            delete EVERY existing character on the account first (see the warning below)
+//!   --wipe            delete every character on the account first, irreversibly
 //!   --level <n>       `.character level n` + `.learn all_myclass` (all class spells + talents)
 //!   --tier <t>        `.character premade gear <role>-<t>` + `.character premade spec <spec>`;
 //!                     `<t>` is `phase6-bis` (Naxx BiS), `preraid-bis`, or `r14` (rank-14 PvP
-//!                     kit, custom templates 901–909 — decision 0825), role is per class below
+//!                     kit, custom templates 901–909), role is per class below
 //!   --home            `.tele` each body to its own race's capital
 //!   --spread <a|b>    which race spread to use (default `a`)
-//!   --reload-templates  make the server re-read the premade tables before dressing (see below)
+//!   --reload-templates  make the server re-read the premade tables before dressing
 //!   --host <h>        default `localhost`
 //!
-//! # the director's two accounts, rebuilt as geared 60s:
 //! … -- one pone One --wipe --level 60 --tier phase6-bis --home --spread a
-//! … -- two ptwo Two --wipe --level 60 --tier phase6-bis --home --spread b
 //! ```
 //!
-//! Without `--wipe` it is idempotent **by class** — classes the account already has are skipped — so
-//! it tops an account up to the full nine. Creating characters needs no GM level; the state flags do,
-//! and that is where this silently half-applies if the account is short: **`.character premade
-//! gear|spec` needs gmlevel 4 and `--level`'s two commands need 5**, and that level lives in
-//! `realmd.account_access`, *not* `account.gmlevel` (see method.md, "The local vmangos server").
-//! Every server reply is echoed as `server says — …`, so a refusal is visible rather than silent.
+//! Without `--wipe` it skips classes the account already has. Creating needs no GM level;
+//! `.character premade gear|spec` needs 4 and `--level` needs 5, read from
+//! `realmd.account_access`, not `account.gmlevel`. Both factions on one account need
+//! `AllowTwoSide.Accounts = 1`, or a Horde create fails `CHAR_CREATE_PVP_TEAMS_VIOLATION` (0x33).
 //!
-//! **`--wipe` deletes characters irreversibly, hand-made ones included.** It is deliberately not the
-//! default, and it names each body and its level as it goes. Both factions on one account needs
-//! `AllowTwoSide.Accounts = 1` in mangosd.conf — otherwise the Horde creates (shaman is Horde-only)
-//! come back `CHAR_CREATE_PVP_TEAMS_VIOLATION` (0x33).
+//! Dressing is not idempotent: `.character premade gear` adds a fresh copy of the set on every
+//! run, so re-dress only behind `--wipe`. `.learn all_myclass` also grants a Horde mage the
+//! ungated Alliance city teleports, so a Horde mage ends on 74 spells and an Alliance one on 68.
 //!
-//! Spell counts do **not** match across two accounts' same-class bodies, and that is not a
-//! half-applied `.learn all_myclass`: an Alliance mage ends on 68 spells and a Horde one on 74,
-//! because the command grants every spell the class *can* learn and the Alliance city
-//! teleports/portals carry no gate that stops a Horde mage — so the Horde body collects all twelve
-//! while the Alliance body gets only its own six. Each still has its own faction's full set.
-//!
-//! **Creating is idempotent; dressing is NOT.** `.character premade gear` *adds* a fresh copy of the
-//! set every time it runs — it does not diff against what is worn. Dress an already-dressed body and
-//! the second set lands in its bags, and any slot whose first-pass item is still equipped keeps the
-//! duplicate in the backpack instead: observed as a warrior left with an empty finger2 and ten spare
-//! epics, because both rings wanted finger1. So re-dress only behind `--wipe`; to fix a body that was
-//! dressed twice, wipe and rebuild it rather than unpicking the bags.
-//!
-//! **`--reload-templates`:** the world server caches the premade tables at startup and has no
-//! reload command, so a template edited in the DB is invisible to `.character premade gear` until
-//! the next restart. `.character premade savegear <name>` re-reads them all as a side effect
-//! (`CharacterCommands.cpp` → `LoadPlayerPremadeTemplates`; decision 0818's in-band trick), so this
-//! flag sends `.character premade savegear zz-seed-reload` as the first command of the first body
-//! dressed. The junk template it saves (the naked just-created body) is inert — no role a bot would
-//! pick, self-naming, safe to leave or delete from `player_premade_item_template` later.
+//! The server caches the premade tables at startup with no reload command, but
+//! `.character premade savegear <name>` re-reads them (`LoadPlayerPremadeTemplates`), so
+//! `--reload-templates` saves an inert `zz-seed-reload` template before the first dressing.
 
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use benilla_protocol::{logon, messages, ServerPacket, WorldSession, WORLD_PORT};
 
-/// `CHAT_MSG_SYSTEM` on the inbound `SMSG_MESSAGECHAT` type byte — every dot-command's
-/// success/refusal text arrives as one of these.
+/// The inbound `SMSG_MESSAGECHAT` type byte every dot-command reply arrives on.
 const CHAT_MSG_SYSTEM: u8 = 0x0a;
 
-/// Per class: the premade templates that make a level-60 body of that class make sense. `role` joins
-/// the `--tier` (`dps` + `phase6-bis` → `dps-phase6-bis`, a `player_premade_item_template.name`);
-/// `spec` is a verbatim `player_premade_spell_template.name` (specs carry no tier suffix — there is
-/// one per role at 60). Every name here was read off this deploy's world DB, and the roles spread
-/// plate/mail/cloth and tank/heal/dps across the nine rather than making nine damage dealers.
+/// Per class: the gear role, joined to `--tier` into a `player_premade_item_template.name`
+/// (`dps-phase6-bis`), and a verbatim `player_premade_spell_template.name`, which has no tier.
 const CLASSES: [(u8, &str, &str, &str); 9] = [
     // class, name, gear role, spec template
     (1, "warrior", "dps", "fury-dw-pve"),
@@ -79,10 +52,8 @@ const CLASSES: [(u8, &str, &str, &str); 9] = [
     (11, "druid", "tank", "feral-bear-pve"),
 ];
 
-/// `(race, gender)` per class, indexed to match [`CLASSES`]. Two spreads exist so two accounts can
-/// hold **eighteen distinct** race/class/gender bodies instead of the same nine twice; each spread on
-/// its own still covers all eight races, and every pair is a legal 1.12 combination (paladin is
-/// Human/Dwarf only, shaman Orc/Tauren/Troll, druid Night Elf/Tauren).
+/// `(race, gender)` per class, indexed like [`CLASSES`]; each spread covers all eight races in
+/// legal 1.12 pairs (paladin Human/Dwarf, shaman Orc/Tauren/Troll, druid Night Elf/Tauren).
 const SPREAD_A: [(u8, u8); 9] = [
     (1, 0), // human warrior
     (3, 0), // dwarf paladin
@@ -95,7 +66,7 @@ const SPREAD_A: [(u8, u8); 9] = [
     (6, 0), // tauren druid
 ];
 
-/// The second spread — no race/class pair shared with [`SPREAD_A`].
+/// The second spread, sharing no race/class pair with [`SPREAD_A`].
 const SPREAD_B: [(u8, u8); 9] = [
     (3, 0), // dwarf warrior
     (1, 0), // human paladin
@@ -108,8 +79,7 @@ const SPREAD_B: [(u8, u8); 9] = [
     (4, 1), // night elf druid
 ];
 
-/// Race id → (display name, the `game_tele` name of its capital). Gnomes ride with the dwarves:
-/// Gnomeregan is a dungeon, and `game_tele` has no gnome capital row.
+/// Race id → (display name, `game_tele` capital); gnomes have no capital row and use Ironforge.
 fn race_info(id: u8) -> Option<(&'static str, &'static str)> {
     Some(match id {
         1 => ("Human", "Stormwind"),
@@ -191,11 +161,7 @@ fn connect(o: &Opts) -> Result<WorldSession> {
     WorldSession::connect(&addr, &o.user, l.session_key)
 }
 
-/// Read inbound packets for `window`, echoing every system-chat line — the server's own
-/// success/refusal text for a dot-command, and the only thing separating a command that worked from
-/// one that was silently refused. A read-timeout tick is the expected quiet case rather than an
-/// error (the convention [`WorldSession::logout`]'s own poll loop uses), so draining runs to the
-/// deadline either way.
+/// Read for `window`, printing every system-chat line, the server's reply to a dot-command.
 fn drain(s: &mut WorldSession, window: Duration) {
     let deadline = Instant::now() + window;
     while Instant::now() < deadline {
@@ -212,8 +178,7 @@ fn main() -> Result<()> {
     let mut s = connect(&o)?;
 
     // ── 1 · wipe ──
-    // Blocking reads for the whole character-select phase: char_enum/create/delete each loop on
-    // `recv` until their own reply lands, so a read timeout here surfaces as a hard error.
+    // Blocking reads: enum, create and delete loop on `recv`, where a read timeout is an error.
     s.set_read_timeout(None)?;
     let have = s.char_enum()?;
     println!("account {}: {} existing character(s)", o.user, have.len());
@@ -266,10 +231,8 @@ fn main() -> Result<()> {
     }
 
     // ── 3 · dress each body ──
-    // The re-enum is load-bearing, not a formality: `player_login` takes each character's chat
-    // tongue from the roster it last saw, and vmangos DROPS chat — dot-commands included — spoken in
-    // a language the character doesn't know. Skip it and every Horde body's commands vanish
-    // silently (decision 0392).
+    // Re-enum first: `player_login` takes the chat language from the last roster, and vmangos
+    // drops chat, dot-commands included, in a language the character does not know.
     let roster = s.char_enum()?;
     let mut dressed = 0usize;
     if o.level.is_some() || o.tier.is_some() || o.home {
@@ -281,14 +244,12 @@ fn main() -> Result<()> {
             let (_, capital) = race_info(o.spread[i].0).context("spread holds a known race")?;
             let mut steps = Vec::new();
             if o.reload && dressed == 0 {
-                // Must run before the first `.character premade gear` — the server's template
-                // cache predates any DB edit this seeding is meant to pick up (see module doc).
+                // Before the first `.character premade gear`, which reads the cached templates.
                 steps.push(".character premade savegear zz-seed-reload".into());
             }
             if let Some(l) = o.level {
-                // Level before gear (a premade template only levels *up*), spells after the level
-                // they belong to, and the premade spec after `all_myclass` so a real talent tree
-                // wins over its every-talent state — the order the rig established (decision 0651).
+                // Order matters: level before gear (a premade only levels up), spells after the
+                // level, and the premade spec after `all_myclass` so its talent tree wins.
                 steps.push(format!(".character level {l}"));
                 steps.push(".learn all_myclass".into());
             }

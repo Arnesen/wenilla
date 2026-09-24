@@ -1,7 +1,5 @@
-//! Item wire tests (mirrors `src/messages/items.rs`): the query request/response roundtrip,
-//! inventory-change-failure (level refusal vs. plain), the GM-command system chat shape, and the
-//! full `SMSG_ITEM_QUERY_SINGLE_RESPONSE` field walk (hit + undiscovered miss). Split out of the
-//! former `tests/messages.rs` — see `tests/common` for the shared fixtures and methodology note.
+//! The item wire: the query request and its full template reply, `CMSG_USE_ITEM`'s target forms,
+//! equip and open, and the inventory-change refusals.
 
 mod common;
 
@@ -12,29 +10,20 @@ use common::hx;
 
 #[test]
 fn item_query_wire() {
-    // CMSG_ITEM_QUERY_SINGLE: entry u32 + full item guid (vmangos QueryItem::ReadFromWorldPacket).
+    // CMSG_ITEM_QUERY_SINGLE: `u32` entry and the full item guid (vmangos `QueryItem`).
     assert_eq!(messages::item_query(117, 0), hx("750000000000000000000000"));
 
     // CMSG_USE_ITEM (vmangos UseItem::ReadFromWorldPacket): bagIndex, slot, spellSlot, then a
-    // self-shaped target block (u16 mask 0). Backpack slot 1 = bag 255 + player-array slot 23.
+    // target block, here self (`u16` mask 0). Backpack slot 1 is bag 255, player slot 23.
     assert_eq!(
         messages::use_item(255, 23, 0, messages::UseItemTarget::SelfImplicit),
         hx("ff17000000")
     );
 
-    // The KEY-IN-A-LOCK form (decision 0769): the same three bytes, then a SpellCastTargets with
-    // mask TARGET_FLAG_GAMEOBJECT (0x0800) and the object's PACKED guid. This is the packet the
-    // real client sends for a key (wow-re cursor-system.md §8.4: sender 0x6e54f0's item arm ->
-    // 0x6e57d8 push 0xab) and the only one vmangos will open a KEY-slot lock for
-    // (Spell::CanOpenLock requires m_CastItem, Spell.cpp:7892).
-    //
-    // `TARGET_FLAG_LOCKED` (0x4000) is deliberately NOT here (decision 0939, correcting 0769): it
-    // is a bit of the *targeting word* `0xcecac0` that `BindTarget 0x6e5b40`'s GameObject arm reads
-    // and clears (`6e5f60`/`6e5f70`) while writing only `0x800` to the outgoing mask (`6e5f69`).
-    // A whole-image census of writes to `0xceac5c` finds no `0x4000` anywhere.
-    //
-    // Keyring slot 1 = bag 255 + player-array slot 81 (0x51). The guid 0xF110000C1F00A3B2 has two
-    // zero bytes (indices 2 and 5), so it packs to mask 0xDB + the other six, low byte first.
+    // A key in a lock: TARGET_FLAG_GAMEOBJECT (0x0800) and the object's packed guid, as the
+    // reference sends it (`0x6e57d8`); vmangos opens a key lock only for a cast item
+    // (Spell.cpp:7892). TARGET_FLAG_LOCKED (0x4000) never reaches the wire mask (`0x6e5f69`).
+    // Keyring slot 1 is bag 255, player slot 81; the guid's two zero bytes pack to mask 0xDB.
     assert_eq!(
         messages::use_item(
             255,
@@ -45,45 +34,36 @@ fn item_query_wire() {
         hx("ff51000008dbb2a31f0c10f1"),
     );
 
-    // The packed form really does drop zero bytes: guid 1 is mask 0x01 + a single byte, and the
-    // spellSlot ordinal rides in the third byte.
+    // Packed guid 1 is mask 0x01 and one byte; the spellSlot ordinal is the third byte.
     assert_eq!(
         messages::use_item(255, 81, 2, messages::UseItemTarget::Object(1)),
         hx("ff510200080101")
     );
 
-    // The UNIT form (decision 0914): an item whose spell binds a unit the way a spell's does — a
-    // bandage, a soulstone — writes TARGET_FLAG_UNIT (0x0002) + the packed guid, the SAME block a
-    // CMSG_CAST_SPELL writes. In the real client one builder serves both opcodes: SendCast
-    // 0x6e54f0 picks 0xab-vs-0x12e from its item discriminator and then writes ArmCast's block.
+    // A unit target (a bandage, a soulstone): TARGET_FLAG_UNIT (0x0002) and the packed guid, the
+    // block CMSG_CAST_SPELL writes; the reference builds both in one sender (`0x6e54f0`).
     assert_eq!(
         messages::use_item(255, 24, 0, messages::UseItemTarget::Unit(1)),
         hx("ff180002000101")
     );
 
-    // The DEST form (decision 0914): the targeting-cursor commit for a THROWN item — dynamite, a
-    // grenade, the Goblin Mortar. TARGET_FLAG_DEST_LOCATION (0x0040) + three f32 WoW coords, the
-    // same tail cast_spell_at_dest writes. 1.0f32 = 0x3f800000, 2.0 = 0x40000000, 3.0 = 0x40400000.
+    // A thrown item (dynamite, a grenade): TARGET_FLAG_DEST_LOCATION (0x0040) and three `f32`
+    // coords, the tail `cast_spell_at_dest` writes.
     assert_eq!(
         messages::use_item(19, 3, 1, messages::UseItemTarget::Dest([1.0, 2.0, 3.0])),
         hx("13030140000000803f0000004000004040")
     );
 
-    // The SOURCE form (decision 2218): the same terrain click one bit over — the three shipped
-    // items carrying spell 265 "Area Death (TEST)" (Martin Fury 17, plus 192 and 5417), whose
-    // `Targets` is a bare 0x20. `BindLocation 0x6e60f0` writes SPELLCAST+0x30 and ORs 0x0020
-    // where its dest arm writes +0x3c and ORs 0x0040; vmangos reads this triple first. Martin
-    // Fury is worn, so the wire position is the player array (255) + EQUIPMENT_SLOT_BODY (3).
+    // The source form (0x0020), as for spell 265 on Martin Fury: the reference (`0x6e60f0`) sets
+    // 0x0020 where a dest sets 0x0040. Martin Fury is worn, so bag 255, slot 3 (body).
     assert_eq!(
         messages::use_item(255, 3, 0, messages::UseItemTarget::Source([1.0, 2.0, 3.0])),
         hx("ff030020000000803f0000004000004040")
     );
 
-    // The ITEM form (decision 0923): the targeting cursor's item commit — a poison / sharpening
-    // stone / weapon oil applied to the weapon you clicked. TARGET_FLAG_ITEM (0x0010) + the packed
-    // guid, the same block cast_spell_on_item writes; the reference reaches both through the one
-    // BindTarget 0x6e5b40 (0x495d60 @ 496056). Packed guid 0xF1500000_0000ABCD = mask 0xc3 (bytes
-    // 0, 1, 6, 7 nonzero) then those four bytes.
+    // An item target (a poison or oil on a weapon): TARGET_FLAG_ITEM (0x0010) and the packed
+    // guid, as `cast_spell_on_item` writes (reference `0x6e5b40`); 0xF150_0000_0000_ABCD packs to
+    // mask 0xC3 and four bytes.
     assert_eq!(
         messages::use_item(255, 24, 0, messages::UseItemTarget::Item(1)),
         hx("ff180010000101")
@@ -101,12 +81,9 @@ fn item_query_wire() {
     // CMSG_AUTOEQUIP_ITEM (vmangos AutoEquipItem::ReadFromWorldPacket): bagIndex, slot.
     assert_eq!(messages::auto_equip_item(255, 25), hx("ff19"));
 
-    // CMSG_OPEN_ITEM (vmangos OpenItem::ReadFromWorldPacket, Server/Packets/Spell.cpp:19-23):
-    // bagIndex, slot — and NOTHING else (no spell ordinal, no targets block; opening is not a
-    // cast). The same two bytes as auto-equip under a different opcode: this is the fork a
-    // clam/lockbox/gift takes instead of USE_ITEM, and the only one the server answers with
-    // SendLoot on the item's own guid. Backpack slot 3 = bag 255 + player-array slot 25; an item
-    // inside an equipped bag addresses that bag's own player-array slot (19..22) + inner slot.
+    // CMSG_OPEN_ITEM (vmangos Server/Packets/Spell.cpp:19-23): bagIndex and slot only, no cast
+    // block. A clam, lockbox or gift uses it; the server answers with loot on the item's guid.
+    // An item in an equipped bag addresses that bag's player slot (19..22) and its inner slot.
     assert_eq!(messages::open_item(255, 25), hx("ff19"));
     assert_eq!(messages::open_item(19, 0), hx("1300"));
 
@@ -126,7 +103,7 @@ fn item_query_wire() {
         } => {
             assert_eq!((reason, required_level), (1, Some(10)));
             assert_eq!(item_guid, 0x4000_0000_0000_0042);
-            // The trailing byte is the destination BAG's absolute player slot, not a subslot.
+            // The trailing byte is the destination bag's absolute player slot, not a subslot.
             assert_eq!(bag_slot, 0);
         }
         other => panic!("level refusal, got {}", other.name()),
@@ -145,8 +122,8 @@ fn item_query_wire() {
         other => panic!("plain refusal, got {}", other.name()),
     }
 
-    // SMSG_MESSAGECHAT, the system shape (type 0x0A: guid, len-prefixed text incl. NUL, tag) —
-    // the GM-command feedback channel (live-verified: '.additem' answers exactly this shape).
+    // SMSG_MESSAGECHAT's system shape (type 0x0A: guid, length-prefixed text, tag), the shape
+    // GM commands such as `.additem` answer with.
     let sys = messages::parse_server(
         messages::opcode::SMSG_MESSAGECHAT,
         &hx("0a0000000000000000000000000600000068656c6c6f0000"),
@@ -161,13 +138,8 @@ fn item_query_wire() {
     }
 }
 
-/// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, hit: the full 1.12.1 item template, byte-exact (VERIFIED
-/// field order vmangos `HandleItemQuerySingleOpcode`, `ItemHandler.cpp:269-415`; every
-/// `SUPPORTED_CLIENT_BUILD` conditional there is included for build 5875) — decision 0274 P1's
-/// tooltip builder needs every line. A main-hand sword exercising every filtered/mirrored shape at
-/// once: 2 of 5 damage blocks, 3 of 10 stats, 2 of 6 resistances, 2 of 5 spells (one ON_USE trigger
-/// 0, one ON_EQUIP trigger 1), a nonempty description, and real requirement/durability values.
-/// Every field carries a distinct value so a transposed or misaligned read fails the assert below.
+/// `SMSG_ITEM_QUERY_SINGLE_RESPONSE` in vmangos order (`ItemHandler.cpp:269-415`, build 5875
+/// branches), for a sword whose fields all differ so a misaligned read fails.
 #[test]
 fn item_query_response_full_weapon_golden() {
     use benilla_protocol::messages::{ItemDamage, ItemInfo, ItemSpellEntry, ItemUseSpell};
@@ -198,8 +170,7 @@ fn item_query_response_full_weapon_golden() {
     body.extend_from_slice(&1u32.to_le_bytes()); // Stackable
     body.extend_from_slice(&0u32.to_le_bytes()); // ContainerSlots
 
-    // 10x ItemStat { type, value } — 3 nonzero (one negative value proves signed reads), 7 empty
-    // (dropped by the nonzero filter).
+    // 10 ItemStat { type, value }: empty ones are dropped; the negative one checks signed reads.
     let stat_slots: [(u32, i32); 10] = [
         (4, 15), // STRENGTH +15
         (7, 20), // STAMINA +20
@@ -217,8 +188,8 @@ fn item_query_response_full_weapon_golden() {
         body.extend_from_slice(&stat_value.to_le_bytes());
     }
 
-    // 5x Damage { min f32, max f32, type u32 } — 2 real blocks (physical + a secondary Fire line),
-    // 3 empty (dropped by the `max > 0` filter). Block 0 also mirrors into dmg_min/dmg_max/dmg_type.
+    // 5 Damage { f32 min, f32 max, u32 type }: blocks with `max > 0` are kept, and block 0 also
+    // fills dmg_min/dmg_max/dmg_type.
     let dmg_slots: [(f32, f32, u32); 5] = [
         (12.0, 22.0, 0), // physical
         (3.0, 7.0, 2),   // Fire
@@ -233,7 +204,7 @@ fn item_query_response_full_weapon_golden() {
     }
 
     body.extend_from_slice(&15u32.to_le_bytes()); // Armor
-                                                  // Resistances: Holy/Fire/Nature/Frost/Shadow/Arcane — 2 of 6 nonzero.
+                                                  // Holy, Fire, Nature, Frost, Shadow, Arcane.
     for r in [0i32, 8, 0, 0, 12, 0] {
         body.extend_from_slice(&r.to_le_bytes());
     }
@@ -241,10 +212,9 @@ fn item_query_response_full_weapon_golden() {
     body.extend_from_slice(&2u32.to_le_bytes()); // AmmoType
     body.extend_from_slice(&1.5f32.to_le_bytes()); // RangedModRange
 
-    // 5x Spell block { SpellId, SpellTrigger, SpellCharges, Cooldown, Category, CategoryCooldown }
-    // — slot 0 ON_USE (a lone -1 use-cooldown next to a resolved category pair, the mixed shape
-    // vmangos can send), slot 1 ON_EQUIP (a plain passive, no cooldown), slots 2-4 the server's own
-    // unresolved-slot sentinel (0,0,0,-1,0,-1).
+    // 5 spell blocks { id, trigger, charges, cooldown, category, categoryCooldown }: ON_USE with
+    // a -1 cooldown beside a real category (a mix vmangos sends), ON_EQUIP, then the server's
+    // empty-slot sentinel (0, 0, 0, -1, 0, -1).
     let spell_slots: [(u32, u32, i32, i32, u32, i32); 5] = [
         (17_251, 0, 0, -1, 4, 60_000),
         (671, 1, 0, 0, 0, 0),
@@ -379,14 +349,9 @@ fn item_query_response_full_weapon_golden() {
     }
 }
 
-/// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, hit: a minimal consumable (a potion). The server zeroes
-/// `subclass` for every `ITEM_CLASS_CONSUMABLE` row regardless of the DB value (VERIFIED vmangos
-/// `ItemHandler.cpp:300`) — that's a server-side rule, so this fixture just carries the
-/// already-zeroed wire byte; the parser itself has no class-conditional logic. What this exercises
-/// instead is the "everything empty" path the weapon golden above only partly covers: `stats`,
-/// `damages`, and 4 of 5 `spells` slots all read as real zeroed wire data that must land as **empty
-/// `Vec`s**, not get pushed as garbage entries — while the one real ON_USE slot still resolves both
-/// into `spells` and into the legacy `use_spell` accessor.
+/// A potion: zeroed stats, damages and spell slots land as empty `Vec`s while the ON_USE slot
+/// fills both `spells` and `use_spell`. The server zeroes a consumable's subclass (vmangos
+/// `ItemHandler.cpp:300`).
 #[test]
 fn item_query_response_consumable_all_zero_slots_are_empty_not_garbage() {
     use benilla_protocol::messages::{ItemInfo, ItemSpellEntry, ItemUseSpell};
@@ -428,7 +393,7 @@ fn item_query_response_consumable_all_zero_slots_are_empty_not_garbage() {
     body.extend_from_slice(&0u32.to_le_bytes()); // Delay
     body.extend_from_slice(&0u32.to_le_bytes()); // AmmoType
     body.extend_from_slice(&0f32.to_le_bytes()); // RangedModRange
-                                                 // Spell slot 0: the ON_USE heal; slots 1-4 the server's unresolved-slot sentinel.
+                                                 // Slot 0: the ON_USE heal; 1-4: empty sentinels.
     body.extend_from_slice(&2024u32.to_le_bytes()); // SpellId
     body.extend_from_slice(&0u32.to_le_bytes()); // SpellTrigger: ON_USE
     body.extend_from_slice(&0u32.to_le_bytes()); // SpellCharges
@@ -536,8 +501,7 @@ fn item_query_response_consumable_all_zero_slots_are_empty_not_garbage() {
     }
 }
 
-/// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, miss: the lone entry with the top bit set (vmangos
-/// undiscovered/unknown-entry branch) — the same shape as the creature miss.
+/// A miss is the lone entry with the top bit set (vmangos's unknown-entry branch).
 #[test]
 fn item_query_response_miss() {
     let fail = messages::parse_server(

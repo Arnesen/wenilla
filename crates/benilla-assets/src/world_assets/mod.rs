@@ -177,8 +177,8 @@ pub fn sprite_candidates(path: &str) -> [String; 2] {
 
 /// The **texel dimensions** of a UI sprite reference, or `None` when nothing resolves — the number
 /// the client's `CSimpleTexture` size getters read out of `[tex+0x144]`/`[tex+0x148]` when a region
-/// authored no size on an axis (wow-re `region-size-fallback.md` §2, decision 1349: one texel is one
-/// FrameXML unit).
+/// authored no size on an axis (`0x770720`/`0x770790`, decision 1349: one texel is one FrameXML
+/// unit).
 ///
 /// It goes through [`decode_sprite`] rather than sniffing a header, so the size layout uses is the
 /// size the screen shows: the same candidate order, the same BLP-vs-TGA content sniff, and the same
@@ -292,6 +292,30 @@ fn decode_sprite_bytes(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
 /// it is not an `Interface\AddOns\` path or nothing is there.
 ///
 /// **Not sprite-specific, and named for that** (decision 2103): 1322 built this for addon-shipped
+/// Read one file from the **two stores the client's file layer has**: the patch chain, then — for
+/// an `Interface\AddOns\` path — the loose addon folder ([`loose_addon_file`]).
+///
+/// The rule shared by every by-path asset an addon can ship: art (the sprite decoder), fonts (the
+/// face loader) and **audio** (`PlayMusic`/`PlaySoundFile`) all reach a file the same way, and
+/// three copies of that would be three things to keep in step — the font leg was already a
+/// hand-rolled second copy of the sprite leg's order when audio became the third caller.
+///
+/// The reference asks the install tree *before* the archive (`0x647e60`'s attempt #4 is the MPQ);
+/// the order is flipped here for the same reason [`decode_sprite`] flips it, and it is
+/// unobservable: the chain carries no `AddOns\` path, so every non-addon read stays on exactly the
+/// code it always ran.
+pub fn read_chain_or_loose(
+    chain: &Mutex<Chain>,
+    loose_root: Option<&Path>,
+    path: &str,
+) -> Option<Vec<u8>> {
+    if let Ok(bytes) = chain.lock_recover().read(path) {
+        return Some(bytes);
+    }
+    let file = loose_addon_file(loose_root?, &normalize_path(path))?;
+    std::fs::read(file).ok()
+}
+
 /// BLP/TGA art, and an addon's own TTFs reach the client by exactly the same route — a loose file
 /// under the one AddOns root, named by a virtual `Interface\AddOns\…` path no MPQ carries. One
 /// resolver, one prefix rule, one sandbox.
@@ -409,6 +433,12 @@ impl WorldAssets {
     /// [`Self::loose_root`] field doc. Called by the app once it knows the AddOns folder; evicts
     /// cached **misses** so a path asked before the root existed gets a second look (a cached hit
     /// can only have come from the chain and stays right).
+    /// [`read_chain_or_loose`] over this store's own two halves — the by-path read for an asset
+    /// class with no decoder of its own here (audio: `PlayMusic`, `PlaySoundFile`).
+    pub fn read_file_or_loose(&self, path: &str) -> Option<Vec<u8>> {
+        read_chain_or_loose(&self.chain, self.loose_root.as_deref(), path)
+    }
+
     pub fn set_loose_addon_root(&mut self, root: Option<PathBuf>) {
         if self.loose_root == root {
             return;
@@ -509,7 +539,7 @@ impl WorldAssets {
     }
 
     /// A UI sprite decoded with **repeat** (wrap) addressing on both axes — the frame `Backdrop`
-    /// tiled pieces (`backdrop-mechanism.md`): a border edge strip samples UVs `[0..N]` and a tiled
+    /// tiled pieces (`0x77f0c0`): a border edge strip samples UVs `[0..N]` and a tiled
     /// bg `[0..w/period]`, so the texture must wrap, not clamp. [`Self::sprite_texture_wrapped`]
     /// with both axes on; see there for the cache and the decode.
     pub fn sprite_texture_tiled(
@@ -728,7 +758,7 @@ impl WorldAssets {
                 ..default()
             },
             // No resolved texture → untextured WHITE draw (stage disabled in the reference —
-            // wow-re m2-runtime-texture-null-bind.md; see model_render.rs for the full note).
+            // `0x59d020`; see model_render.rs for the full note).
             None => StandardMaterial {
                 base_color: Color::WHITE,
                 ..default()
@@ -762,7 +792,7 @@ impl WorldAssets {
 }
 
 /// World/render configuration read once at startup from the environment, shared by the subsystems
-/// that need it: terrain reads `tex_tiles` (splat tiling) + `unload_budget` (the release lane).
+/// that need it: terrain reads `unload_budget` (the release lane).
 /// Inserted by [`AssetPlugin`] alongside [`WorldAssets`]; its *presence* is also the "there is a
 /// client install" gate the world-side setups key on.
 ///
@@ -771,8 +801,6 @@ impl WorldAssets {
 /// Distance setting), as the reference derives it (decision 1513).
 #[derive(Resource, Clone, Copy)]
 pub struct RenderConfig {
-    /// Ground-texture repeats per chunk (`$WOW_TEX_TILES`, default 8).
-    pub tex_tiles: f32,
     /// Stale tiles released per frame on a within-map window shift (`$WOW_TILE_UNLOAD`,
     /// default 1; `0` = unbudgeted — the whole trailing row in one frame, the pre-B181
     /// behaviour, kept as the controlled A/B leg on one build).
@@ -827,6 +855,52 @@ mod tests {
             None
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **The by-path read every addon-shipped asset resolves by** — chain first, then the one
+    /// loose folder ([`read_chain_or_loose`]). Audio is that rule's third caller, after art and
+    /// fonts, and an addon's own track is exactly the file no MPQ can hold: this leg is the whole
+    /// reason `PlayMusic("Interface\\AddOns\\…")` can make a sound at all.
+    ///
+    /// Against the **real** chain, because both legs matter — a client file must still come from
+    /// the archive, and only a real chain can show the loose folder is a *fallback* rather than a
+    /// shadow over it.
+    #[test]
+    fn read_chain_or_loose_asks_the_chain_then_an_addons_own_file_on_disk() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let root =
+            std::env::temp_dir().join(format!("benilla-loose-audio-test-{}", std::process::id()));
+        let addons = root.join("AddOns");
+        std::fs::create_dir_all(addons.join("Jukebox")).unwrap();
+        std::fs::write(addons.join("Jukebox").join("Track.mp3"), b"ID3!").unwrap();
+
+        // The archive leg: a client track the chain does carry.
+        let theme = read_chain_or_loose(
+            &chain,
+            Some(&addons),
+            "Sound\\Music\\GlueScreenMusic\\wow_main_theme.mp3",
+        )
+        .expect("the glue theme lives in sound.MPQ");
+        assert!(theme.len() > 1_000_000, "the theme is a ~3 MB stored MP3");
+
+        // The loose leg: an addon's own track, named by the virtual path, spelt in its own case.
+        assert_eq!(
+            read_chain_or_loose(
+                &chain,
+                Some(&addons),
+                "Interface\\AddOns\\Jukebox\\Track.mp3"
+            )
+            .as_deref(),
+            Some(&b"ID3!"[..])
+        );
+        // In neither store: a plain miss, which every caller renders as silence.
+        assert!(read_chain_or_loose(&chain, Some(&addons), "Sound\\Music\\nope.mp3").is_none());
+        // No folder configured (a capture run — `local_state` is hermetic there): chain only.
+        assert!(
+            read_chain_or_loose(&chain, None, "Interface\\AddOns\\Jukebox\\Track.mp3").is_none()
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }

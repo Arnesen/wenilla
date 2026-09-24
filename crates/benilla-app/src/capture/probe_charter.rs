@@ -16,7 +16,7 @@
 //! fork arm whose whole evidence is "no other arm accepts a charter". Those are only visible
 //! against real bytes.
 //!
-//! ## The registrar (live-DB verified this session, `/Users/sam/dev/vmangos-deploy` → `mangos` DB)
+//! ## The registrar (live-DB verified against the local vmangos, `mangos` DB)
 //!
 //! Aldwin Laughlin, the Stormwind guild registrar — `creature_template.entry = 4974`, spawn
 //! `creature.guid = 79681`, **map 0**, position `(-8885.25, 614.395, 95.2576)`,
@@ -85,10 +85,9 @@
 //! account to sign, and #5 (`ERR_GUILD_FOUNDER_S` on a successful turn-in) needs nine of them —
 //! neither is reachable from one client, so the whole sign/offer/turn-in half of the family
 //! (`SignPetition`, `OfferPetition`, `TurnInGuildCharter`, `MSG_PETITION_DECLINE`) still has no
-//! live coverage after this probe. #3 (the two closes send nothing) is *superseded*: the wow-re
-//! carve that landed alongside this file finds that closing a charter you do NOT own can send
-//! `MSG_PETITION_DECLINE`, so this probe deliberately asserts nothing about either close rather
-//! than pinning a claim that is being rewritten.
+//! live coverage after this probe. #3 (the two closes send nothing) is *superseded*: closing a
+//! charter you do NOT own can send `MSG_PETITION_DECLINE` (`0x4f3f60`), so this probe deliberately
+//! asserts nothing about either close rather than pinning a claim that is being rewritten.
 //!
 //! ## The run recipe
 //!
@@ -96,8 +95,7 @@
 //! WOW_NOSOUND=1 WOW_USER=probe0 WOW_PASS=pprobe0 WOW_CHAR=Probezero \
 //!     WOW_PROBE_CHARTER=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — this worktree is `pool-0` → `probe0`/`pprobe0`/`Probezero`;
-//! method.md "The local vmangos server". **Never the default `one` account** — a login on it kicks
+//! (the checkout's probe identity, the `probe` skill. **Never a player's account** — a login on it kicks
 //! the director's live session.) `WOW_NOSOUND=1` because an unattended probe must not play zone
 //! music into the director's room; `caffeinate -dis` is **not** needed for a run this short — the
 //! whole sequence is a handful of round trips and finishes in well under a minute.
@@ -117,7 +115,9 @@ use benilla_ui::script::UiScript;
 
 use super::probes::ProbeClock;
 use crate::items::Items;
-use crate::net::{ChatKind, ClientCommand, Guid, NetCommands, NetEntity, ObjectStore, SelfPlayer};
+use crate::net::{
+    ChatKind, ClientCommand, Guid, NetCommands, NetEntity, ObjectStore, Objects, SelfPlayer,
+};
 use crate::player::Player;
 use crate::target::cursor_mode::npc_flags;
 use crate::ui_gossip::GossipState;
@@ -160,7 +160,7 @@ const REQUIRED_SIGNATURES: i64 = 9;
 const FRESH_SIGNATURES: i64 = 0;
 /// Copper handed to the probe body up front so the buy can never fail for funds. `.modify money`
 /// is `SEC_BASIC_ADMIN` (4) in vmangos's `Chat.cpp` command table and every `probeN` account is
-/// gmlevel **6** (method.md, decision 0651), so it lands; with no selection it targets the sender
+/// gmlevel **6** (docs/METHOD.md, decision 0651), so it lands; with no selection it targets the sender
 /// (`ChatHandler::GetSelectedPlayer`, `Chat.cpp:2601-2612`), which is why it is sent before the
 /// probe touches an NPC.
 const FUND_COPPER: u32 = 100_000;
@@ -458,6 +458,7 @@ fn charter_probe(
     mut probe: ResMut<CharterProbe>,
     gossip: Res<GossipState>,
     registrar: Res<GuildRegistrarState>,
+    objects: Objects,
     items: Res<Items>,
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -797,7 +798,12 @@ fn charter_probe(
                 };
                 return;
             }
-            let found = find_item(&store.0, &items, CHARTER_ITEM_ENTRY, ItemSearch::default());
+            let found = find_item(
+                &store.0,
+                &objects,
+                CHARTER_ITEM_ENTRY,
+                ItemSearch::default(),
+            );
             // The template has to have landed too, and it is folded into the SAME `Option` as the
             // item rather than short-circuiting on its own: the click dispatcher's charter arm is
             // a **template flag** test (`ITEM_FLAG_CHARTER`), so a click made before the answer
@@ -1168,9 +1174,12 @@ fn charter_probe(
                 // destroys whatever whole stack sits at the addressed position, so a stale pair
                 // would destroy the wrong item; nothing is expected to move a charter, and that is
                 // exactly the kind of expectation a destructive send must not rest on.
-                let Some((bag_index, slot, _)) =
-                    find_item(&store.0, &items, CHARTER_ITEM_ENTRY, ItemSearch::default())
-                else {
+                let Some((bag_index, slot, _)) = find_item(
+                    &store.0,
+                    &objects,
+                    CHARTER_ITEM_ENTRY,
+                    ItemSearch::default(),
+                ) else {
                     probe.pass(
                         9,
                         "cleanup",
@@ -1197,8 +1206,12 @@ fn charter_probe(
                 };
                 return;
             }
-            let still_there =
-                find_item(&store.0, &items, CHARTER_ITEM_ENTRY, ItemSearch::default());
+            let still_there = find_item(
+                &store.0,
+                &objects,
+                CHARTER_ITEM_ENTRY,
+                ItemSearch::default(),
+            );
             if still_there.is_none() {
                 probe.pass(
                     9,

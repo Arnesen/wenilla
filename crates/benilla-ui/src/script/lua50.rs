@@ -58,12 +58,23 @@
 //! answers 2 in this VM. That matters for 1751: a stock file using 5.0 varargs needs nothing from
 //! this module, and the rewrite was a precaution against a problem we did not have.
 //!
+//! **And the other half of that, which costs an hour to rediscover: `...` is a DECLARATION token
+//! here and nothing else.** This VM parses `function(x, ...)`, and then rejects every *use* of
+//! `...` as an expression — `return ...`, `f(x, ...)`, and `local a = ...` at chunk level — with
+//! `unexpected symbol near '...'`. `arg` and `unpack(arg)` are the only forwarding forms
+//! ([`vararg_is_a_declaration_only`] pins all six). That is 5.0's own shape and exactly right for
+//! the content we run, but it also binds anything WE write in Lua: an engine-side helper cannot
+//! forward an unknown argument list without a table, so a verb whose arity matters (`GetPoint()`
+//! vs `GetPoint(nil)`, `SetAllPoints()` vs `SetAllPoints(nil)`) has to stay on the Rust side.
+//! Decision 2310 is where that bit — a Lua dispatcher for the Region method map would have been
+//! ~4x cheaper than the Rust one and cannot be written in this dialect.
+//!
 //! ## The one known divergence, stated rather than hidden
 //!
 //! `table.insert`/`table.remove` stay on 5.1's `#t` border rather than consulting `getn`. **This
-//! is byte-confirmed as a real divergence, not a suspicion**: the RE dispatch found that 1.12's
-//! whole table library is `n`-based — `luaL_getn` is called by `insert`/`remove`/`concat`/`sort`/
-//! `foreachi` *and* base `unpack`, and `insert`/`remove` **update** the stored size. So
+//! is byte-confirmed as a real divergence, not a suspicion**: 1.12's whole table library is
+//! `n`-based — `luaL_getn 0x6f5050` is called by `insert`/`remove`/`concat`/`sort`/`foreachi` *and*
+//! base `unpack`, and `insert`/`remove` **update** the stored size (`luaL_setn 0x6f4ea0`). So
 //! `setn(t, 0)` on a non-empty table makes the next `insert` land at index 1 there and at
 //! `#t + 1` here.
 //!
@@ -79,9 +90,8 @@
 //! ## Ground truth (decision 1196 — verified, no longer derived)
 //!
 //! This module first shipped with its member lists taken from Lua 5.0's published library
-//! registrations and cross-checked against two artifacts we hold. An RE dispatch into
-//! wow-5875-re then read the binary (`system/ui/scratch/lua-dialect.md`), and every list here is
-//! now the array in the image:
+//! registrations and cross-checked against two artifacts we hold. Every list here is now read
+//! straight off the array in the image:
 //!
 //! - **Lua 5.0**, on five independent discriminators — not just the `$Lua: Lua 5.0 …` blob at
 //!   `0x811b30` but `LUA_REGISTRYINDEX = -10000` (5.1 uses −10002), a `luaT_eventname[]` pool with
@@ -180,11 +190,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     //
     // `luaopen_string 0x7fd810` is six instructions, `[0x7fd810, 0x7fd827)` — `push 0;
     // push 0x822d88; mov edx,0x871938; call luaL_openlib; mov eax,1; ret` — with no
-    // `createmetatable` step, and `luaL_openlib` does not reach `0x6f4020` either. (wow-re
-    // `system/ui/scratch/string-metatable-closure.md`, whose §5 cross-check produced all of the
-    // above and retired `lua-dialect.md` §3's INFERRED flag on it. Two of ours came from that
-    // note before it was re-read: it said "four instructions" while quoting six, and it stopped at
-    // "no `lua_setmetatable` call" where the reader-side argument was available.)
+    // `createmetatable` step, and `luaL_openlib` does not reach `0x6f4020` either.
     //
     // So this is not a policy choice about a superset — it is the type system. Note the reference
     // also *raises* rather than no-ops if an addon tries it itself: base `setmetatable 0x702a40`'s
@@ -212,10 +218,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set("getn", table.get::<Value>("getn")?)?;
 
     // ── 4 · what the binary said and nobody had asked (decision 1196) ─────────────────────────
-    // `print` and `_VERSION` are **not in 1.12's `_G`** — the captured table says so and the RE
-    // dispatch found why: the base library is a 36-entry array looped into `_G`, and neither is in
-    // it (`_VERSION`'s literal is not even in the image). Both were on `reference_surface`'s
-    // exception list as "inherited rather than chosen"; nothing of ours uses either.
+    // `print` and `_VERSION` are **not in 1.12's `_G`** — the captured table says so, and the base
+    // library's 36-entry array at `0x811e28` confirms why: neither is in it (`_VERSION`'s literal
+    // is not even in the image). Both were on `reference_surface`'s exception list as "inherited
+    // rather than chosen"; nothing of ours uses either.
     g.set("print", Value::Nil)?;
     g.set("_VERSION", Value::Nil)?;
 
@@ -306,9 +312,8 @@ fn install_bit(lua: &Lua) -> mlua::Result<()> {
 /// The **garbage-collector pair** — `gcinfo` answers TWO numbers and `collectgarbage` answers
 /// NONE and takes a *number* (decision 2136).
 ///
-/// Both are 5.0-shaped, and 5.1 changed both in ways that are observable from Lua. Read off the
-/// image by wow-5875-re (`system/ui/scratch/lua-dialect.md` §12), and already carried in
-/// `reference/1.12-shapes.tsv` as `gcinfo … 2 exact (number,number) agree` and
+/// Both are 5.0-shaped, and 5.1 changed both in ways that are observable from Lua — already
+/// carried in `reference/1.12-shapes.tsv` as `gcinfo … 2 exact (number,number) agree` and
 /// `collectgarbage … 0 exact () agree` — rows the return-shape gate never checked, because it
 /// filters to `table_kind = global` and these two are `baselib`.
 ///
@@ -780,6 +785,28 @@ mod tests {
         assert_eq!(s.eval::<f64>("return floor(2.7)").unwrap(), 2.0);
     }
 
+    /// **`...` declares a vararg function here and can never be read.** The six forms, together,
+    /// because the split between them is the whole surprise: the declaration parses, every use
+    /// does not, and `arg` carries what `...` cannot (the module header's second vararg note).
+    #[test]
+    fn vararg_is_a_declaration_only() {
+        let s = UiScript::new().unwrap();
+        let parses = |src: &str| s.run(src).is_ok();
+        // Declaration, and the 5.0 way to read what it captured.
+        assert!(parses("return function(x, ...) return x end"));
+        assert!(parses("return function(x, ...) return arg.n end"));
+        assert!(parses(
+            "local f = tostring return function(x, ...) return f(x, unpack(arg)) end"
+        ));
+        // Every use of `...` as an expression — including at chunk level, where 5.1 proper allows
+        // it and this build does not.
+        assert!(!parses("return function(x, ...) return ... end"));
+        assert!(!parses(
+            "local f = tostring return function(x, ...) return f(x, ...) end"
+        ));
+        assert!(!parses("local a = ... return a"));
+    }
+
     /// The three compat globals the reference has and we did not.
     #[test]
     fn sort_foreach_and_foreachi_are_bare_globals_like_the_reference() {
@@ -914,8 +941,7 @@ mod tests {
     /// `OPR_NOUNOPR` is 2 — a three-member enum, 5.0's, not 5.1's four-member one with
     /// `OPR_LEN`. `getbinopr` (`0x6fe0c0`) bases its switch at `'*'` (0x2A); `%` is 0x25, below
     /// the range, and reaches `OPR_NOBINOPR` = 14 — a fifteen-member `BinOpr`, again 5.0's. The
-    /// metamethod-name pool at `0x871896` has neither `__len` nor `__mod`, which is where
-    /// wow-5875-re saw it first (`system/ui/scratch/lua-dialect.md` §1).
+    /// metamethod-name pool at `0x871896` has neither `__len` nor `__mod`.
     #[test]
     fn the_length_and_modulo_operators_are_not_in_the_grammar() {
         let s = UiScript::new().unwrap();
@@ -970,10 +996,11 @@ mod tests {
     /// **The six `debug*` stubs are the REFERENCE's no-ops, not ours** — and that distinction is
     /// the whole reason they are allowed to exist under real 1.12 names.
     ///
-    /// wow-re carved all eight (2026-08-11): `debuginfo`, `debugload`, `debugprint`, `debugdump`,
-    /// `debugbreak` and `debugtimestamp` are byte-identical `xor eax,eax; ret` — three bytes, no
-    /// call, no memory write, **zero Lua return values**. Only `debugprofilestart`/`stop` are real.
-    /// A no-op we invented would be the "capability absent without a failure" class 1203 named;
+    /// Six of the eight, `[0x7027e0, 0x702840)` — `debuginfo`, `debugload`, `debugprint`,
+    /// `debugdump`, `debugbreak` and `debugtimestamp` — are byte-identical `xor eax,eax; ret` —
+    /// three bytes, no call, no memory write, **zero Lua return values**. Only
+    /// `debugprofilestart`/`stop` are real. A no-op we invented would be the "capability absent
+    /// without a failure" class 1203 named;
     /// a no-op the client itself ships is a transcription.
     #[test]
     fn the_debug_family_is_six_stubs_and_two_real_ones() {
@@ -1029,10 +1056,10 @@ mod tests {
     /// Stock 5.1 moved that `cc->nh++` out of the arm, pre-sized a node vector big enough that no
     /// rehash ever fires, and left all n keys in the hash — where `next` is slot order.
     ///
-    /// wow-5875-re `system/ui/scratch/lua-table-storage-and-next-order.md` — **executed** on
-    /// `WoW.exe`'s own bytes (`lua_open` → `luaL_loadbuffer` → `lua_pcall` → `lua_next`), not
-    /// derived, including the exact `Bagnon_Core.lua` below; ascending holds for n = 1..24 and
-    /// regardless of the order the fields are written in.
+    /// This was measured by executing `WoW.exe`'s own bytes (`lua_open` → `luaL_loadbuffer` →
+    /// `lua_pcall` → `lua_next`), not merely derived from the disassembly — including the exact
+    /// `Bagnon_Core.lua` below; ascending holds for n = 1..24 and regardless of the order the
+    /// fields are written in.
     ///
     /// It matters because every saved-variables file we write is that constructor (decision 1128's
     /// grammar, and the reference's own writer's — it never emits a bare positional entry), so
@@ -1108,8 +1135,8 @@ mod error_quoting_tests {
     /// out of `debugstack()` with `string.find(debugstack(), "`argCheck'.-([`<].-['>])")`, whose
     /// two patterns both require the backquote; the nil it gets is then handed to a `%s`, so an
     /// argument-check *diagnostic* raises inside the error path. Closing that means rendering the
-    /// traceback ourselves in the reference's own shape, which is dispatched into wow-re
-    /// (`debugstack 0x703760`) rather than copied from stock 5.0's `ldblib.c`.
+    /// traceback ourselves in the reference's own shape (`debugstack 0x703760`) rather than
+    /// copied from stock 5.0's `ldblib.c`.
     #[test]
     fn errors_quote_program_elements_the_way_lua_5_0_does() {
         let s = UiScript::new().unwrap();
@@ -1206,7 +1233,7 @@ mod error_quoting_tests {
     /// `mov [edx+8], esi` because 5.0 puts `metatable` at offset 8 of both structs — and returns 0
     /// without writing for every other tag. 5.0 has no `G(L)->mt[]` array for a string to have a
     /// slot in, so the type *cannot* carry one; `luaopen_string 0x7fd810`'s four instructions
-    /// (wow-re `lua-dialect.md` §4) are the same fact from the other end.
+    /// are the same fact from the other end.
     ///
     /// The **wording** is asserted, not just the raise: it is what a player sees in a script
     /// error, and 5.0's quoting convention is already load-bearing one file over — `sandbox`'s

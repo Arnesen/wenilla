@@ -1,11 +1,8 @@
-//! Low-level wire read/write helpers shared by the auth ([`crate::auth`]) and world
-//! ([`crate::world`]) protocols. Everything is little endian unless noted; these mirror the exact
-//! field encodings the 1.12 client uses.
+//! Wire read/write helpers shared by the auth and world protocols; little endian unless noted.
 
 use std::io::{self, Read, Write};
 
-/// WoW packs an 8-byte GUID as a one-byte mask (which of the 8 bytes are non-zero) followed by only
-/// those non-zero bytes, low to high — used throughout the world protocol for object references.
+/// Read a packed GUID: a mask byte naming the non-zero bytes, then only those bytes, low to high.
 pub fn read_packed_guid(r: &mut impl Read) -> io::Result<u64> {
     let mask = read_u8(r)?;
     let mut guid = 0u64;
@@ -92,19 +89,8 @@ pub fn read_cstring(r: &mut impl Read) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Bound a wire-derived element count before it becomes a `Vec::with_capacity` hint.
-///
-/// A count read off the wire is server- (and so bug- and attacker-) controlled, and
-/// `Vec::with_capacity(count as usize)` on a raw `u32` is the one failure the decoders' `io::Result`
-/// totality does not cover: an allocation that cannot be satisfied is `handle_alloc_error` →
-/// `abort()` — no unwind, no [`crate::Poll::Skipped`], no tally (decision 2265 §B1). The returned
-/// hint bounds only the **up-front** allocation: the `Vec` still grows past it when the body really
-/// carries more rows, and a lying count still fails on the short read of the body, which is
-/// `u16`-bounded and read whole before parse. `cap` is the protocol's own bound where one exists
-/// (cited at the call site), or a generous sane one where none does.
-///
-/// Every `with_capacity` under `messages/` whose argument is a wire count goes through this; the
-/// source-scan test beside it (`wire_count_capacity_hints_are_capped`) keeps that true.
+/// Bound a wire-derived count before it becomes a `Vec::with_capacity` hint: a failed allocation
+/// aborts rather than erroring. `cap` is the protocol's own bound where one exists.
 pub fn capacity_hint(count: impl TryInto<u64>, cap: usize) -> usize {
     count
         .try_into()
@@ -137,11 +123,8 @@ impl Vector3d {
     }
 }
 
-/// Decode a movement-spline packed point (`SMSG_MONSTER_MOVE` packs every point after the first this
-/// way): **signed** two's-complement fields — 11 bits x, 11 bits y, 10 bits z — in quarter-yard
-/// units (the server packs `round(v * 4)` per axis; vmangos `ByteBuffer::appendPackXYZ`). The
-/// decoded vector is the offset from the spline's **destination** back to this waypoint
-/// (`destination - waypoint`; vmangos `PacketBuilder::WriteLinearPath`), not an absolute position.
+/// Decode a `SMSG_MONSTER_MOVE` packed point: signed 11-bit x, 11-bit y, 10-bit z in quarter yards
+/// (`ByteBuffer::appendPackXYZ`), the offset `destination - waypoint`, not a position.
 pub fn packed_to_vector3d(p: i32) -> Vector3d {
     // Sign-extend each field: shift it to the top of the i32, then arithmetic-shift back down.
     Vector3d {
@@ -155,8 +138,7 @@ pub fn packed_to_vector3d(p: i32) -> Vector3d {
 mod tests {
     use super::*;
 
-    /// The producer's encoder, transcribed from vmangos `ByteBuffer::appendPackXYZ`:
-    /// `packed |= ((int)lroundf(v * 4.0f) & mask) << shift` with masks 0x7FF/0x7FF/0x3FF.
+    /// vmangos's encoder, `ByteBuffer::appendPackXYZ`.
     fn pack_xyz(x: f32, y: f32, z: f32) -> i32 {
         let mut packed = 0u32;
         packed |= ((x * 4.0).round() as i32 & 0x7FF) as u32;
@@ -167,9 +149,7 @@ mod tests {
 
     #[test]
     fn packed_point_roundtrips_signed_quarter_yards() {
-        // Field ranges: x/y are 11-bit signed (−256 .. 255.75 yd), z 10-bit signed (−128 .. 127.75 yd).
-        // Quarter-yard multiples are exact in f32, so the round-trip must be exact — including the
-        // negative offsets the old unsigned decode destroyed.
+        // x and y span −256..255.75 yd, z −128..127.75 yd; quarter yards are exact in f32.
         for &(x, y, z) in &[
             (0.0f32, 0.0f32, 0.0f32),
             (1.25, -2.5, 3.75),
@@ -190,16 +170,10 @@ mod tests {
         assert_eq!(capacity_hint(u64::MAX, 1024), 1024);
     }
 
-    /// **The rule, enforced instead of remembered** (decision 2265 §B1).
-    ///
-    /// A `Vec::with_capacity` whose argument is a raw wire count aborts the process — not the
-    /// packet — the day a server (or a decoder bug) puts a huge number there: an allocation
-    /// failure never unwinds, so it never becomes `Poll::Skipped`. There is no runtime signal to
-    /// test for, which is exactly why the check is structural: every `with_capacity(` under
-    /// `messages/` whose argument is a bare variable (cast or not) must go through
-    /// [`capacity_hint`] or carry a `.min(`, or be named in [`EXEMPT`] with the reason.
+    /// Every `with_capacity` under `messages/` whose argument is a bare variable goes through
+    /// [`capacity_hint`], carries a `.min(`, or is listed in [`EXEMPT`].
     #[test]
-    fn wire_count_capacity_hints_are_capped() {
+    fn bare_variable_capacity_hints_under_messages_are_capped() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/messages");
         let mut offenders = Vec::new();
         for file in rust_files(&root) {
@@ -221,20 +195,16 @@ mod tests {
              process instead of skipping the packet. Bound each with \
              `crate::wire::capacity_hint(count, CAP)` (CAP = the protocol's own bound, cited at \
              the site, or a generous sane one), or add it to `EXEMPT` in `wire.rs` with the reason \
-             it is not a wire count (decision 2265 §B1):\n  {}",
+             it is not a wire count:\n  {}",
             offenders.join("\n  ")
         );
     }
 
-    /// `with_capacity` arguments under `messages/` that look like bare variables but are **not**
-    /// wire counts, each with the reason. Keyed `(path under src/messages/, argument text)`.
+    /// Bare-variable arguments that are not wire counts, as `(path under src/messages/, argument)`.
     const EXEMPT: &[(&str, &str)] = &[];
 
-    /// The classifier, pinned on synthetic arguments so a regression in it cannot pass silently
-    /// as "nothing to flag".
     #[test]
     fn the_scan_flags_a_bare_wire_count_and_passes_a_bounded_one() {
-        // Flagged: a bare variable, with or without the cast, however it is wrapped.
         for arg in [
             "count as usize",
             "count",
@@ -245,7 +215,6 @@ mod tests {
         ] {
             assert!(uncapped_wire_count(arg), "should flag `{arg}`");
         }
-        // Passes: literals, length arithmetic, a constant, and the two bounded forms.
         for arg in [
             "12",
             "name.len() + 1",
@@ -259,7 +228,6 @@ mod tests {
         ] {
             assert!(!uncapped_wire_count(arg), "should pass `{arg}`");
         }
-        // The extractor: the balanced argument of every call on the line, with its line number.
         let src = "let a = Vec::with_capacity(count as usize);\nlet b = Vec::with_capacity((n as usize).min(4));\n";
         assert_eq!(
             capacity_arguments(src),
@@ -270,9 +238,7 @@ mod tests {
         );
     }
 
-    /// Is this `with_capacity` argument a raw wire count? A bare identifier (optionally cast
-    /// `as usize`, optionally parenthesised, optionally `usize::from(...)`-wrapped) that is not a
-    /// `const` (all caps) and carries neither `.min(` nor `capacity_hint(`.
+    /// A lowercase identifier, however cast or wrapped, with no `.min(` or `capacity_hint(`.
     fn uncapped_wire_count(arg: &str) -> bool {
         if arg.contains(".min(") || arg.contains("capacity_hint(") {
             return false;
@@ -330,7 +296,6 @@ mod tests {
         out
     }
 
-    /// Every `.rs` file under `root`, recursively.
     fn rust_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         let mut out = Vec::new();
         let mut stack = vec![root.to_path_buf()];

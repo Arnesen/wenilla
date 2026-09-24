@@ -4,14 +4,14 @@
 //!
 //! ## What it asks, and why it is a probe rather than a test
 //!
-//! The unit tests in `crate::ui_models` pin the leg's arithmetic — the client's diagonal-FOV
-//! matrix against wow-re's worked numbers, and the three cancellations. What they cannot reach is
+//! The unit tests in `crate::ui_models` pin the leg's arithmetic — the client's diagonal-FOV matrix
+//! (`0x5c3cc0`) against its worked numbers, and the three cancellations. What they cannot reach is
 //! the half that only exists at run time: does the engine resolve the camera at all, does the
 //! renderer find the record, does a camera get spawned, aimed, and pointed at a real cell of a
 //! real atlas. So this probe drives the **whole live pipeline** from Lua and reads the result off
 //! the entities the renderer actually built.
 //!
-//! The measurement is numeric, not visual (method.md's rule: a capture can confirm an existence
+//! The measurement is numeric, not visual (docs/METHOD.md's rule: a capture can confirm an existence
 //! fact, it cannot measure one). Each leg projects three model-space probe points through the
 //! camera and the root the renderer placed this frame, and compares the resulting NDC against the
 //! baseline's:
@@ -19,11 +19,10 @@
 //! - `scale` — `SetModelScale(3)` must not move a pixel. The authored eye is carried through the
 //!   model's root transform, so the camera scales with the model.
 //! - `position` — `SetPosition(0.4, −0.3, 0.9)` must not move a pixel, for the same reason.
-//! - `facing` — `SetFacing(1.0)` must not move a pixel **either**. That one is the finding this
-//!   work commissioned (wow-re `modelframe-facing-cancels.md`): the up vector `0x7ac640` builds is
-//!   model-space `+Z` at `roll = 0`, which is the axis the facing turns about, so eye, target,
-//!   geometry and up all turn together. `modelframe-render-law.md` §2's "only `SetFacing` shows"
-//!   is scoped to `<PlayerModel>`'s frozen camera.
+//! - `facing` — `SetFacing(1.0)` must not move a pixel **either**: the up vector `0x7ac640` builds
+//!   is model-space `+Z` at `roll = 0`, which is the axis the facing turns about, so eye, target,
+//!   geometry and up all turn together. The rule that only `SetFacing` shows is scoped to
+//!   `<PlayerModel>`'s frozen camera (`0x7acf10`).
 //! - `ortho` — the control that must NOT hold: `SetCamera(9)` is past the file's camera count, so
 //!   the widget installs the NULL camera and falls to the orthographic leg, where a facing is a
 //!   plain roll in the screen plane. A probe whose "identical" legs all passed because nothing was
@@ -38,7 +37,7 @@
 //! WOW_USER=probe5 WOW_PASS=pprobe5 WOW_CHAR=Probefive WOW_UNATTENDED=1 WOW_NOSOUND=1 \
 //!     WOW_PROBE_MODEL_CAMERA=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — method.md "The local vmangos server"). `WOW_TILE_TRACE=1`
+//! (the checkout's probe identity (`.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR — the `probe` skill)). `WOW_TILE_TRACE=1`
 //! alongside it prints the leg, the record, the eye and the matrix per pane per frame.
 
 use bevy::camera::visibility::RenderLayers;
@@ -56,8 +55,8 @@ use crate::ui_models::{TilePerspectiveCamera, TileRoot, UiModelTiles};
 /// index 1 type 1 at eye `(5.5556, 0, 1.8056)` fov `0.67620`), so it exercises the raw-index
 /// selection AND has an index past the count for the orthographic control.
 const FILE: &str = r"Creature\\Wolf\\Wolf.mdx";
-/// The pane's size in FrameXML units — the pet pane's own `318×224`, whose aspect is wow-re's
-/// worked example (`camera-law.md` §12.1: `θ = 0.287938 · fov`).
+/// The pane's size in FrameXML units — the pet pane's own `318×224`, whose aspect is a worked
+/// example of the projection `0x5c3cc0` (`θ = 0.287938 · fov`).
 const PANE_W: f32 = 318.0;
 const PANE_H: f32 = 224.0;
 /// Frames to let a change settle before the numbers are read: the extract republishes the request
@@ -192,7 +191,7 @@ fn read_leg(
 
 fn shoot(commands: &mut Commands, name: &str) {
     // Every file we write goes through `local_state` — never into the WoW install, never a
-    // platform config dir (the contract's one-folder rule).
+    // platform config dir (docs/METHOD.md's one-folder rule).
     let Some(path) = crate::local_state::home().map(|d| d.join(format!("{name}.png"))) else {
         warn!("PROBE_MODEL_CAMERA: no local-state folder — skipping the {name} shot");
         return;

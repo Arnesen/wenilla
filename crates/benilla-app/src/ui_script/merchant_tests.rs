@@ -48,6 +48,7 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
 /// intent, and MERCHANT_CLOSED hiding it through HideUIPanel, vacating the left slot.
 #[test]
 fn shipped_merchant_frame_drives_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The named virtual Font objects the re-skinned rows/title inherit through — loaded first at
@@ -338,6 +339,7 @@ fn shipped_merchant_frame_drives_end_to_end() {
 /// → Hide() fires OnHide. Nothing queues at load (the frame is authored hidden="true").
 #[test]
 fn merchant_show_hide_plays_open_and_close_kits() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::MERCHANT_UI {
@@ -528,6 +530,7 @@ fn vendor_opens_and_closes_all_equipped_bags() {
 /// doesn't clear the vendor it just re-opened to.
 #[test]
 fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::MERCHANT_UI {
@@ -571,6 +574,7 @@ fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
 /// with no buy-price line (the price is on the row). Leaving the row hides it all.
 #[test]
 fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The stock tooltip declares no size: it sizes from its lines through the font engine, as
@@ -824,6 +828,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
 /// queue the BuybackItem/RepairAllItems intents the app drains.
 #[test]
 fn merchant_tabs_drive_buyback_page_and_repair_pair() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::MERCHANT_UI {
@@ -954,6 +959,7 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
 /// configuration the app does not have.
 #[test]
 fn merchant_tabs_fit_their_labels() {
+    benilla_formats::wow_data_or_skip!();
     /// `2 * $parentLeft:GetWidth()` — the template's two 20-unit end slices.
     const SIDES: f64 = 40.0;
     let mut s = UiScript::new().unwrap();
@@ -992,6 +998,7 @@ fn merchant_tabs_fit_their_labels() {
 /// the frame's `OnUpdate` (a `tick`) exactly as the app does, since the coin is re-armed per frame.
 #[test]
 fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::UiCursorMode;
 
     let mut s = UiScript::new().unwrap();
@@ -1088,6 +1095,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
 /// ellipsis. If this FAILS, the bug is structural and reproduced here; if it PASSES, it is live-only.
 #[test]
 fn trade_recipient_money_renders_the_digit_not_ellipsis() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::MERCHANT_UI {
@@ -1146,6 +1154,7 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
 /// right-button guard, l.332-333) a CTRL-held right-click buys nothing at all.
 #[test]
 fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
+    benilla_formats::wow_data_or_skip!();
     const WATER_LINK: &str = "|cffffffff|Hitem:159:0:0:0|h[Refreshing Spring Water]|h|r";
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -1179,7 +1188,7 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
             num_available: -1,
             item_id: 159,
             stats: None,
-            // Fed exactly as `ui_merchant.rs` builds it off the row's template answer.
+            // Fed exactly as `ui_merchant` builds it off the row's template answer.
             link: Some(WATER_LINK.into()),
             max_stack: Some(1),
         }],

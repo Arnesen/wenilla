@@ -8,7 +8,8 @@
 //! the `SMSG_CHAR_CREATE` result byte, and — unless `WOW_PROBE_CHARCREATE_KEEP=1` — deletes the
 //! character it just made ([`CharRequest::Delete`]) so the account isn't littered, logging that
 //! result too. Run it **without** `WOW_CHAR` (which would auto-enter the world and leave select),
-//! against the slot-keyed probe account (`WOW_USER=probeN WOW_PASS=pprobeN`, N = your pool slot — method.md "The local vmangos server"); creating/deleting characters is a
+//! against the checkout's own probe account (`.probe-identity`, or `WOW_USER`/`WOW_PASS` — the
+//! `probe` skill); creating/deleting characters is a
 //! non-combat operation, safe to run headlessly.
 
 use benilla_protocol::{messages, CharAction, CharCreateReq};

@@ -1,19 +1,5 @@
-//! The world (`mangosd`) message layer — in-repo replacement for `wow_world_messages` (decision
-//! 0021), scoped to the opcodes benilla sends and receives.
-//!
-//! World packets are framed by a header-encrypted size+opcode (see [`crate::world`]); this module owns
-//! only the *bodies*: parsing the server packets benilla decodes into [`ServerPacket`], and building
-//! the client packet bodies benilla sends. The one genuinely complex packet is `SMSG_UPDATE_OBJECT`
-//! (and its zlib twin) — an object list where each entry carries a [`MovementBlock`]-shaped position
-//! and a sparse [`ObjectFields`] of descriptor fields; its decode lives in [`update_object`], and
-//! [`crate::events`] pulls out the handful of fields the renderer uses.
-//! The [`ServerPacket`] enum itself lives in `packet`; the opcode→variant dispatch
-//! ([`parse_server`]) in `parse`.
-//!
-//! Proven byte-for-byte against `wow_world_messages` during the decision-0021 migration (oracle test
-//! in git history); ongoing coverage is the oracle-free golden/fixture tests in `tests/*.rs` (split by
-//! domain — client, movement, items, spells, update_object, simple_packets — sharing fixtures via
-//! `tests/common`).
+//! World (`mangosd`) packet bodies: server packets decode into [`ServerPacket`] via
+//! [`parse_server`], client bodies are built here; the header framing lives in [`crate::world`].
 
 mod action_bar;
 pub mod addons;
@@ -273,18 +259,9 @@ pub use vendor::{
 };
 pub use world_state::InitWorldStates;
 
-/// The **world server's** `SMSG_AUTH_RESPONSE` result codes — a **different enum** from the
-/// realmd logon-proof's `AuthLogonResult` (`crate::AuthReject`, 0x00..=0x12), which is the trap
-/// this block exists to close: both are "the auth result byte", they overlap numerically, and they
-/// mean unrelated things. 0x0C is `AUTH_OK` here and `AUTH_LOGON_FAILED_SUSPENDED` there.
-///
-/// VERIFIED two ways. The client's own dispatch over exactly this enum is decompiled in wow-re
-/// `system/net/scratch/w2b-pack.c` — case 0x0c → `AUTH_OK`, 0x0d → `AUTH_FAILED`, 0x0e →
-/// `AUTH_REJECT`, … 0x15 → `AUTH_UNKNOWN_ACCOUNT`, 0x16 → `AUTH_INCORRECT_PASSWORD`, 0x1b →
-/// `AUTH_WAIT_QUEUE`, 0x22..=0x26 → the `REALM_LIST_*` strings — and the same numbering is
-/// `AuthResponseCodes` in cmangos `src/game/Globals/SharedDefines.h:1721+`. Each constant's name
-/// is the `GlueStrings` key the client shows for it, which is what makes the mapping in
-/// `crate::login`'s `world_refusal_text` a transcription rather than a judgement call.
+/// World `SMSG_AUTH_RESPONSE` result codes, not realmd's `AuthLogonResult` (`crate::AuthReject`):
+/// the ranges overlap, and 0x0C is `AUTH_OK` here but `AUTH_LOGON_FAILED_SUSPENDED` there. Each
+/// name is the `GlueStrings` key the client shows (cmangos `SharedDefines.h:1721`).
 pub const AUTH_OK: u8 = 0x0C;
 pub const AUTH_FAILED: u8 = 0x0D;
 pub const AUTH_REJECT: u8 = 0x0E;
@@ -300,11 +277,10 @@ pub const AUTH_SESSION_EXPIRED: u8 = 0x17;
 pub const AUTH_SERVER_SHUTTING_DOWN: u8 = 0x18;
 pub const AUTH_ALREADY_LOGGING_IN: u8 = 0x19;
 pub const AUTH_LOGIN_SERVER_NOT_FOUND: u8 = 0x1A;
-/// The realm is full and we are **queued**, not refused — the one code here that is not an ending.
+/// The realm is full and we are queued, not refused: the one code here that is not an ending.
 pub const AUTH_WAIT_QUEUE: u8 = 0x1B;
-// The tail past the queue. These five are exactly the codes the client's `OKAY_WITH_URL` table
-// (`0x803740`, 5 records, stride 0x24) keys on — banned/no-time/db-busy/suspended/parental — which
-// is why the URL dialog is reachable ONLY from this enum and never from realmd.
+// The 1.12 client's `OKAY_WITH_URL` table (`0x803740`) keys on banned, no-time, db-busy,
+// suspended and parental, so the URL dialog is reachable only from this enum, never from realmd.
 pub const AUTH_BANNED: u8 = 0x1C;
 pub const AUTH_ALREADY_ONLINE: u8 = 0x1D;
 pub const AUTH_NO_TIME: u8 = 0x1E;
@@ -313,54 +289,30 @@ pub const AUTH_SUSPENDED: u8 = 0x20;
 pub const AUTH_PARENTAL_CONTROL: u8 = 0x21;
 /// `LogoutResult::Success` (`SMSG_LOGOUT_RESPONSE`).
 pub const LOGOUT_SUCCESS: u32 = 0x0;
-/// Chat `Language` wire ids (VERIFIED vmangos `SharedDefines.h:256-261`): the faction tongues.
-/// `Universal` (0) is server-reserved — vmangos rejects it from clients for ordinary chat.
+/// Faction-tongue `Language` ids (vmangos `SharedDefines.h:256-261`); vmangos rejects
+/// `Universal` (0) from clients in ordinary chat.
 pub const LANGUAGE_COMMON: u32 = 0x7;
 pub const LANGUAGE_ORCISH: u32 = 0x1;
 
-/// `LANG_ADDON` (VERIFIED vmangos `SharedDefines.h:270`) — **not a tongue**. 1.12.1 has no addon
-/// opcode: `SendAddonMessage` rides the ordinary chat lanes and this sentinel in the `language`
-/// field is the *only* thing that marks the line as addon-to-addon data rather than speech
-/// (decision 1029). The real client routes it to the `CHAT_MSG_ADDON` event; it never reaches the
-/// chat frame.
-///
-/// The server treats it as its own class throughout: exempt from the `KnowsLanguage` gate, from
-/// flood control, and from message sanitizing (`SanitizeChatMessage` returns early,
-/// `Handlers/ChatHandler.cpp:49`); gated instead by the `AddonChannel` config
-/// (`ChatHandler.cpp:165`); and restricted by `WorldSession::IsLanguageAllowedForChatType`
-/// (`ChatHandler.cpp:84`) to the group/guild/channel lanes — PARTY, RAID, RAID_LEADER,
-/// RAID_WARNING, GUILD, OFFICER, BATTLEGROUND, BATTLEGROUND_LEADER, CHANNEL. Never
-/// SAY/YELL/EMOTE/WHISPER, which is why addon traffic can never reach a chat bubble or a
-/// `/r` target. It is also the one language the server never rewrites: the whole
-/// GM/two-side/`SPELL_AURA_MOD_LANGUAGE` normalisation block lives in that check's `else`
-/// (`ChatHandler.cpp:176-218`), so on the party lane a line's language is either a tongue (often
-/// normalised to `Universal`) or exactly this.
-///
-/// **The client's own send set is narrower than the server's permission list.** VERIFIED in
-/// `WoW.exe` (5875) — wow-re `system/ui/scratch/addon-chat-law.md`: `SendAddonMessage`
-/// (`0x49f920`) hard-whitelists **four** types at `0x49fa3f`-`0x49fa4e` — PARTY, RAID, GUILD,
-/// BATTLEGROUND — and the receive side's `distribution` argument uses the same four (remap table
-/// `0x49aff4`), reporting every other type as the literal `"UNKNOWN"`. So a real client accepts
-/// addon traffic on lanes it will never itself send on.
+/// `LANG_ADDON` (vmangos `SharedDefines.h:270`): marks a chat line as addon data, not speech;
+/// 1.12 has no addon opcode, and the client routes such a line to `CHAT_MSG_ADDON`. The server
+/// skips language, flood and sanitize checks for it, never rewrites it, and allows it only on the
+/// group, guild and channel lanes (`ChatHandler.cpp:49,84,176-218`). The 1.12 `SendAddonMessage`
+/// (`0x49f920`) sends only PARTY, RAID, GUILD and BATTLEGROUND, and the receive side names any
+/// other lane "UNKNOWN" (`0x49aff4`).
 pub const LANGUAGE_ADDON: u32 = 0xFFFF_FFFF;
 
-/// The language a character speaks by default — its faction tongue. Every send must carry a
-/// language the character *knows*: vmangos drops the whole message (including a `.command`
-/// payload, which is intercepted downstream of the check) with a "not learned" notification
-/// otherwise (`HandleChatMessageOpcode`'s `KnowsLanguage` gate, `Handlers/ChatHandler.cpp`).
-/// Race → tongue VERIFIED against the live world DB (`playercreateinfo_spell`): races 1/3/4/7
-/// (Alliance) learn spell 668 Language Common, races 2/5/6/8 (Horde) learn 669 Language Orcish.
+/// A race's faction tongue. vmangos drops a chat line, `.command`s included, in a language the
+/// speaker does not know (`KnowsLanguage`, `Handlers/ChatHandler.cpp`); races 2/5/6/8 learn 669
+/// Language Orcish, the rest 668 Language Common (`playercreateinfo_spell`).
 pub fn faction_language(race: u8) -> u32 {
     match race {
         2 | 5 | 6 | 8 => LANGUAGE_ORCISH, // orc, undead, tauren, troll
         _ => LANGUAGE_COMMON,             // human, dwarf, night elf, gnome
     }
 }
-/// `ChatMsg` wire values benilla sends, widened to `u32` (VERIFIED vmangos `SharedDefines.h:
-/// 1191-1301`) — `CMSG_MESSAGECHAT`'s `type` field is a `u32` on the wire
-/// (`WorldPackets::Chat::ChatMessage::type`, `Server/Packets/Chat.h:12`), unlike the inbound
-/// `SMSG_MESSAGECHAT` decode's `u8` (hence the separate, narrower [`CHAT_MSG_SAY`] etc. set there):
-/// two constant sets for the same enum because the two wire fields are different widths.
+/// `ChatMsg` values (vmangos `SharedDefines.h:1191-1301`) as `CMSG_MESSAGECHAT`'s `u32` `type`
+/// (`Server/Packets/Chat.h:12`). The inbound `u8` field has its own set, [`CHAT_MSG_SAY`] etc.
 pub const CHAT_TYPE_SAY: u32 = 0x0;
 pub const CHAT_TYPE_PARTY: u32 = 0x1;
 pub const CHAT_TYPE_RAID: u32 = 0x2;
@@ -372,9 +324,9 @@ pub const CHAT_TYPE_EMOTE: u32 = 0x8;
 pub const CHAT_TYPE_CHANNEL: u32 = 0xE;
 pub const CHAT_TYPE_AFK: u32 = 0x14;
 pub const CHAT_TYPE_DND: u32 = 0x15;
-/// `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_10_2` — active for 5875.
+/// `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_10_2`: active for 5875.
 pub const CHAT_TYPE_RAID_LEADER: u32 = 0x57;
 pub const CHAT_TYPE_RAID_WARNING: u32 = 0x58;
-/// `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_11_2` — active for 5875.
+/// `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_11_2`: active for 5875.
 pub const CHAT_TYPE_BATTLEGROUND: u32 = 0x5C;
 pub const CHAT_TYPE_BATTLEGROUND_LEADER: u32 = 0x5D;

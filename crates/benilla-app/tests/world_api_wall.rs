@@ -21,6 +21,16 @@
 //! not an API consumer), doc comments (a `[`crate::x::Y`]` link is prose), and the composition
 //! root's plugin registrations are counted like anything else — 1164's plugin-group collapse has
 //! to actually happen for them to stop counting.
+//!
+//! **Since decision 2338 the number that gates is the LEAKS, not the surface.** For five weeks
+//! the one number went up twenty-seven times, every raise a paragraph saying "a PUBLISH", and
+//! never once down: the falsifier 1163 set at forty had fired, and the ratchet had become a
+//! diary. So the sort is data now. [`PUBLISHED`] is the designed API, each row with the record
+//! that published it; [`SORTED_LEAKS`] is what 1164 filed to close and how; anything else that
+//! crosses is an unsorted leak. The surface and the published count are reported; only the leak
+//! count is ratcheted, and it ratchets toward zero. Adding a `PUBLISHED` row is the act that
+//! raising the ceiling used to be — a claim made in review, with its record — and a row nothing
+//! names any more fails the test until it is deleted, so the tables cannot rot.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -110,7 +120,13 @@ const INSTRUMENT_ROOTS: &[&str] = &["art_scope", "debug_panel", "perf", "pipe_wa
 /// the engine's `LogPlugin` because that is where the layer has to be installed. An API shaped
 /// by what a crash report wanted to attach is 1163's failure exactly, so it is counted here, not
 /// in the doorway.
-const INSTRUMENT_CONSUMERS: &[&str] = &["crash", "debug_panel", "perf", "pipe_warm"];
+///
+/// `capture` (decision 2338) is the fifth, and the oldest ruling of the five: 1164 §Measured
+/// already counted `capture/*` among the instruments outside the doorway (its "21 named only by
+/// instruments"), but this list never said so, and a probe's reach — `static_gx::StaticGx`,
+/// `liquid::FoamPatch`, `ride_frame::ride_matrix`, the water-effect fixtures — was gated as if
+/// the game had asked for it. A probe that reads the engine's own state is what a probe is for.
+const INSTRUMENT_CONSUMERS: &[&str] = &["capture", "crash", "debug_panel", "perf", "pipe_warm"];
 
 /// Is this file one of the app-side instruments?
 fn is_instrument_consumer(rel: &str) -> bool {
@@ -118,8 +134,223 @@ fn is_instrument_consumer(rel: &str) -> bool {
     INSTRUMENT_CONSUMERS.contains(&root)
 }
 
-/// The gate. 1163 sets it at forty; this is the current standing count, ratcheted down by each
-/// commit that lands a DOWN or a CLOSE from 1164's sort.
+/// **The designed API** — every engine item game code may name, and the record that published
+/// it (decision 2338). `1164` is the sort's own PUBLISH bucket and its facades; a four-digit
+/// number is the record whose paragraph in the raise log below said "a PUBLISH"; `wall` is a
+/// raise-log paragraph that published the item without naming a record (grep the name below);
+/// `1167` published the facades the crate move landed; `2338` is the boot seam — the process-level
+/// entries a binary needs to run the engine at all (`worldview::run`, `tuned_default_plugins`,
+/// `BuildId`, the background-window and thread-QoS helpers), the same class as the three plugins
+/// the log already published. **Adding a row is a claim made in review, with its record.** A row
+/// no game file names any more fails the test until it is deleted.
+const PUBLISHED: &[(&str, &str)] = &[
+    ("bgwin::BgWinPlugin", "wall"),
+    ("bgwin::background_run", "2338"),
+    ("bgwin::no_pixel_run", "2338"),
+    ("billboard::BillboardCard", "1164"),
+    ("boot::tuned_default_plugins", "2338"),
+    ("build_id::BuildId", "2338"),
+    ("build_id::banner", "1179"),
+    ("collision::ColliderEpoch", "1384"),
+    ("collision::MoverTraceExclusions", "1767"),
+    ("collision::WorldCollision", "1164"),
+    ("decal::WorldDecal", "1164"),
+    ("dev_state::STILL_INPUTS_CHANGED", "1979"),
+    ("doodad_anim::AnimMatPart", "2295"),
+    ("doodad_anim::DoodadAnimHost", "1365"),
+    ("doodad_anim::MatAnim", "1164"),
+    ("doodad_anim::TintLoop", "2295"),
+    ("doodad_anim::UvLoops", "2282"),
+    ("doodad_anim::register_entity_uv", "2295"),
+    ("doodad_anim::register_fx_uv", "2282"),
+    ("doodad_anim::register_tint", "2295"),
+    ("doodad_anim::spawn_anim_host", "1164"),
+    ("ffx_glow::FfxBackdrop", "2234"),
+    ("ffx_glow::FfxGlow", "1164"),
+    ("ffx_glow::GlueFfx", "1731"),
+    ("final_pass::FinalPassTarget", "2206"),
+    ("instance_tint::InstanceTintMirrors", "1731"),
+    ("instance_tint::InstanceTints", "1164"),
+    ("interact::PickMesh", "1164"),
+    ("interact::WorldObject", "1164"),
+    ("interact::WorldPick", "1164"),
+    ("interact::cast_pick_ray", "1164"),
+    ("interior::NodeAmbient", "2079"),
+    ("lighting::LightBlob", "1164"),
+    ("lighting::WorldTime", "1167"),
+    ("lighting::WowLighting", "1164"),
+    ("mac_quit::MacQuitPlugin", "1528"),
+    ("mat_anim_table::MatAnimMirrors", "2023"),
+    ("mat_anim_table::MatAnimTable", "1381"),
+    ("mat_anim_table::affine_row", "2019"),
+    ("mesh_tag::HIGHLIGHT_BIT", "1164"),
+    ("model_fade::ModelFade", "1164"),
+    ("model_fade::ParentModel", "1164"),
+    ("model_fade::RenderFade", "1164"),
+    ("model_fade::UnitRenderAlpha", "wall"),
+    ("model_forms::ModelForms", "1167"),
+    ("model_render::BatchVariants", "1164"),
+    ("model_render::EntityUvLane", "2295"),
+    ("model_render::M2BatchMaterials", "1164"),
+    ("model_render::ModelKind", "1164"),
+    ("model_render::ModelPart", "1164"),
+    ("model_render::lazy::realize", "1940"),
+    ("modkeys::SyntheticHold", "wall"),
+    ("particles::ViewThrottled", "1559"),
+    ("particles::render::EFFECT_DRAW_STATS", "1955"),
+    ("particles::spawn_emitter", "1164"),
+    ("ride_frame::RideFrame", "1661"),
+    ("rig_anim::AnimParked", "wall"),
+    ("rig_anim::GlobalSeqDrive", "wall"),
+    ("rig_anim::PosePost", "wall"),
+    ("rig_anim::RigAnchor", "wall"),
+    ("rig_anim::RigFrame", "wall"),
+    ("rig_anim::RigPose", "wall"),
+    ("rig_palette::RigPalettes", "1164"),
+    ("rig_palette::RigSkin", "1164"),
+    ("rig_rider::RigRider", "1609"),
+    ("schedule::WorldLive", "1160"),
+    ("schedule::WorldStage", "1164"),
+    ("sky_order::Rung", "wall"),
+    ("terrain_stream::SPAWN_XY", "wall"),
+    ("terrain_stream::ViewFocus", "1160"),
+    ("terrain_stream::WorldLoadProgress", "wall"),
+    ("thread_qos::QosClass", "2338"),
+    ("thread_qos::ThreadQosPlugin", "wall"),
+    ("thread_qos::promote_current_thread", "2338"),
+    ("view::MsaaFormats", "1632"),
+    ("view::MsaaSetting", "1629"),
+    ("view::ViewDistance", "1164"),
+    ("view::Viewer", "wall"),
+    ("view::WorldCamera", "1164"),
+    ("vis_chain::VisChainOnly", "1441"),
+    ("weather::WeatherMessage", "1164"),
+    ("weather::WeatherState", "2181"),
+    ("wmo_portal::room_pvs_visible", "1475"),
+    ("world_census::CensusReport", "1164"),
+    ("world_census::WorldCensus", "1164"),
+    ("world_map::CurrentMap", "1164"),
+    ("world_map::MapChange", "1164"),
+    ("world_plugins::WorldPlugins", "1164"),
+    ("world_point::Subject", "1164"),
+    ("world_point::WorldPoint", "1164"),
+    ("world_unit::ViewerUnit", "wall"),
+    ("world_unit::WorldUnit", "wall"),
+    ("worldview::run", "2338"),
+];
+
+/// **The sorted leaks** — items 1164 filed to close, still crossing today, with the bucket it
+/// filed them under (decision 2338 moved the sort here from prose). `CLOSE/absorb` means a facade
+/// takes the call, `CLOSE/invert` the engine publishes the fact instead of the game reaching in,
+/// `CLOSE/move-engine` mis-filed engine code moving engine-side (the twelve `terrain_stream::*`
+/// items are `entities/wmo_props.rs`, 1164's fourth candidate, invisible until 2338's scanner
+/// fix), `CLOSE/move-game` gameplay moving out of the engine. A leak that is in neither table is
+/// unsorted: it crossed after 1164 and no record has said what happens to it. A row no game
+/// file names any more fails the test until it is deleted — closing a leak is deleting its row.
+const SORTED_LEAKS: &[(&str, &str)] = &[
+    ("billboard::BillboardJointRig", "CLOSE/absorb"),
+    ("billboard::BillboardPlace", "CLOSE/absorb"),
+    ("billboard::billboard_basis", "CLOSE/move-engine"),
+    ("billboard::billboard_joint_palette", "CLOSE/absorb"),
+    ("clutter::ClutterConfig", "CLOSE/absorb"),
+    ("collision::PickOccluder", "CLOSE/absorb"),
+    ("decal::DecalFrame", "CLOSE/absorb"),
+    ("doodad_anim::DoodadAnimTier", "CLOSE/absorb"),
+    ("doodad_anim::TintAnimMaterials", "CLOSE/move-engine"),
+    ("doodad_anim::UvAnimMaterials", "CLOSE/move-engine"),
+    ("doodad_anim::classify", "CLOSE/absorb"),
+    ("doodad_anim::sample_mat_anim", "CLOSE/invert"),
+    ("doodad_anim::wants_rig", "CLOSE/move-engine"),
+    ("entity_shade::GroundShade", "CLOSE/absorb"),
+    ("ffx_glow::FfxDeathFade", "CLOSE/absorb"),
+    ("instance_tint::IDENTITY", "CLOSE/absorb"),
+    ("instance_tint::pack", "CLOSE/absorb"),
+    ("interact::PickBox", "CLOSE/absorb"),
+    ("interact::WorldClick", "CLOSE/move-game"),
+    ("interact::WorldRightClick", "CLOSE/move-game"),
+    ("interact::WorldRightPress", "CLOSE/move-game"),
+    ("interact::cast_pick_ray_inflated", "CLOSE/absorb"),
+    ("interior::BodyBakeCenter", "CLOSE/absorb"),
+    ("interior::ContainmentAttach", "CLOSE/absorb"),
+    ("interior::InteriorLit", "CLOSE/invert"),
+    ("interior::InteriorReauthor", "CLOSE/invert"),
+    ("interior::classify_entity_interior", "CLOSE/absorb"),
+    ("interior::part_interior_lit", "CLOSE/absorb"),
+    ("lighting::GameClock", "CLOSE/absorb"),
+    ("lighting::PropProbeSlot", "CLOSE/move-engine"),
+    ("lighting::PropProbes", "CLOSE/move-engine"),
+    ("liquid::WaterChunkInfo", "CLOSE/absorb"),
+    ("map_proj::WorldProj", "CLOSE/move-game"),
+    ("map_proj::ZoneRect", "CLOSE/move-game"),
+    ("mesh_tag::describe", "CLOSE/absorb"),
+    ("mesh_tag::with_alpha", "CLOSE/invert"),
+    ("model_fade::DespawnFade", "CLOSE/move-game"),
+    ("model_fade::FadeMaterials", "CLOSE/absorb"),
+    ("model_fade::FadeSet", "CLOSE/absorb"),
+    ("model_fade::JoinedFade", "CLOSE/absorb"),
+    ("model_fade::MAX_MODEL_CHAIN", "CLOSE/invert"),
+    ("model_fade::PartFade", "CLOSE/absorb"),
+    ("model_fade::PendingAppearFade", "CLOSE/invert"),
+    ("model_fade::UnitAppearFade", "CLOSE/move-game"),
+    ("model_fade::apply_render_fade", "CLOSE/absorb"),
+    ("model_fade::fade_alpha", "CLOSE/absorb"),
+    ("model_fade::join_unit_appear_fade", "CLOSE/absorb"),
+    ("model_render::FarSideOfWater", "CLOSE/invert"),
+    ("model_render::FarSideTwins", "CLOSE/invert"),
+    ("model_render::ModelVisSet", "CLOSE/absorb"),
+    ("model_render::ShadeSel", "CLOSE/absorb"),
+    ("model_render::far_resolved", "CLOSE/invert"),
+    ("model_render::replace_fog_policy", "CLOSE/absorb"),
+    ("modkeys::DEV_CHORD", "CLOSE/move-engine"),
+    ("modkeys::dev_chord", "CLOSE/move-engine"),
+    ("particles::EmitClock", "CLOSE/absorb"),
+    ("particles::EmitterFade", "CLOSE/invert"),
+    ("particles::EmitterFrames", "CLOSE/absorb"),
+    ("particles::OwnerLoss", "CLOSE/absorb"),
+    ("particles::ParticleEmitter", "CLOSE/invert"),
+    ("particles::buffer::EffectLightOverride", "CLOSE/invert"),
+    ("particles::buffer::EffectQuads", "CLOSE/invert"),
+    ("particles::buffer::EffectVertex", "CLOSE/absorb"),
+    ("particles::buffer::WorldEffectDraw", "CLOSE/absorb"),
+    ("particles::buffer::begin_effect_frame", "CLOSE/absorb"),
+    ("ribbons::RibbonSeq", "CLOSE/absorb"),
+    ("ribbons::RibbonTrail", "CLOSE/invert"),
+    ("ribbons::spawn_ribbon", "CLOSE/absorb"),
+    ("rig_palette::RigPaletteMirrors", "CLOSE/absorb"),
+    ("rig_palette::RigPart", "CLOSE/absorb"),
+    ("rig_palette::RigStarved", "CLOSE/invert"),
+    ("rig_palette::rig_cost_enabled", "CLOSE/absorb"),
+    ("terrain_stream::AreaAuthoritySet", "CLOSE/absorb"),
+    ("terrain_stream::CurrentArea", "CLOSE/absorb"),
+    ("terrain_stream::PendingCollider", "CLOSE/move-engine"),
+    ("terrain_stream::PropLobeLight", "CLOSE/move-engine"),
+    ("terrain_stream::ShadeResolve", "CLOSE/move-engine"),
+    ("terrain_stream::SpawnedModel", "CLOSE/move-engine"),
+    ("terrain_stream::TerrainStreamer", "CLOSE/absorb"),
+    ("terrain_stream::build_collider_task", "CLOSE/move-engine"),
+    ("terrain_stream::doodad_ground_shade", "CLOSE/move-engine"),
+    ("terrain_stream::fold_interior_probe", "CLOSE/move-engine"),
+    ("terrain_stream::hex_word", "CLOSE/move-engine"),
+    ("terrain_stream::m2_anim_bound", "CLOSE/move-engine"),
+    ("terrain_stream::m2_fade", "CLOSE/move-engine"),
+    (
+        "terrain_stream::placement_collider_data",
+        "CLOSE/move-engine",
+    ),
+    ("terrain_stream::point_light", "CLOSE/absorb"),
+    ("terrain_stream::spawn_model_entities", "CLOSE/move-engine"),
+    ("view::CAM_FOVY", "CLOSE/absorb"),
+    ("view::FARCLIP_RANGE", "CLOSE/absorb"),
+    ("view::NEARCLIP_DEFAULT", "CLOSE/absorb"),
+    ("wmo_portal::UnitWmoRoom", "CLOSE/absorb"),
+    ("wmo_portal::WmoPortalInstance", "CLOSE/absorb"),
+    ("wmo_portal::WmoPvsSet", "CLOSE/absorb"),
+];
+
+/// The gate — on the **leaks**. 1163 set the surface at forty; 1164 sorted it; 2338 made the
+/// sort data and pointed the ratchet at what is left to close. The raise log below is the
+/// history of the surface count this constant gated until then, and the source of every
+/// `PUBLISHED` row that names a record or `wall`.
 ///
 /// **Lower it when you close something.** The lower bound below exists so that a session which
 /// closes twenty leaks cannot leave the ceiling standing at the old number, which would silently
@@ -308,7 +539,7 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// that region out of whichever buffer the draw binds. Uploading a region to the buffers that
 /// carry it is machinery. *Which* off-world buffers carry it is policy, and it has to be: a
 /// portrait bake must NOT (the reference builds a fresh CM2 with colour `(1,1,1)`, so a ghost's
-/// portrait shows the living face — wow-re `ghost-death-visuals.md` §6, report B49, decision 1481)
+/// portrait shows the living face — `0x524f60`, report B49, decision 1481)
 /// while the glue scene MUST (it is the screen itself, and its character component is the very
 /// instance the reference tints). The engine cannot tell those two render targets apart — both are
 /// a camera writing to an image — and encoding "a bake standing in for a UI model widget" inside
@@ -496,61 +727,127 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// area id is what told this instrument that the port lands at Silverwing Hold and that the
 /// release lands at the graveyard. The alternative was to re-derive the leaf in the probe from
 /// tiles the engine already resolved, which is the copy-the-rule drift this wall exists to stop.
-const CEILING: usize = 190;
+///
+/// **190 → the leaks (decision 2338).** The surface stood at 190 published-and-leaked items
+/// together; the tables above split it, `capture` joined the instruments as 1164 always counted
+/// it, and the scanner learned to read a `use` group that spans lines (nine imports, twenty-one
+/// items counted nowhere until then — see [`logical_lines`]). What this constant gates from here
+/// is the leak count alone, measured on the tree that lands.
+const LEAK_CEILING: usize = 107;
 
-/// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
-/// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it
-/// impossible to bank a whole stage of work without writing the new number down.
-const SLACK: usize = 10;
+/// How far under [`LEAK_CEILING`] the real count may sit before this test asks for the ceiling
+/// to be lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while
+/// making it impossible to bank a whole stage of work without writing the new number down.
+const LEAK_SLACK: usize = 10;
 
 #[test]
 fn the_world_api_doorway_stays_shut() {
     let all = measure();
-    // Partition: an item only an instrument names is the instruments' surcharge, not the designed
-    // doorway (see `INSTRUMENT_CONSUMERS`). One a game module *also* names is the doorway's.
+    // Partition one: an item only an instrument names is the instruments' surcharge, not the
+    // designed doorway (see `INSTRUMENT_CONSUMERS`). One a game module *also* names is the doorway's.
     let (probes, surface): (BTreeMap<_, _>, BTreeMap<_, _>) = all
         .into_iter()
         .partition(|(_, files)| files.iter().all(|f| is_instrument_consumer(f)));
-    let n = surface.len();
-    // Always say the number: `cargo test -p benilla-app --test world_api_wall -- --nocapture` is
-    // the one-command answer to "where is the wall now", which is asked on every unit of 1164's
-    // sort and used to need a deliberately-failing ceiling to get.
+    // Partition two (decision 2338): the doorway is the published API plus the leaks, and only
+    // the leaks gate.
+    let published_by: BTreeMap<&str, &str> = PUBLISHED.iter().copied().collect();
+    let sorted_by: BTreeMap<&str, &str> = SORTED_LEAKS.iter().copied().collect();
+    let both: Vec<&str> = published_by
+        .keys()
+        .filter(|k| sorted_by.contains_key(*k))
+        .copied()
+        .collect();
+    assert!(
+        both.is_empty(),
+        "an item cannot be both published and a sorted leak: {both:?}"
+    );
+    let (published, leaks): (BTreeMap<_, _>, BTreeMap<_, _>) = surface
+        .into_iter()
+        .partition(|(k, _)| published_by.contains_key(k.as_str()));
+    let n = leaks.len();
+    let sorted = leaks
+        .keys()
+        .filter(|k| sorted_by.contains_key(k.as_str()))
+        .count();
+    // Always say the numbers: `cargo test -p benilla-app --test world_api_wall -- --nocapture`
+    // is the one-command answer to "where is the wall now".
     eprintln!(
-        "world API surface: {n} items (ceiling {CEILING}, slack {SLACK})  \
-         + {} named only by the instruments",
+        "world API surface: {} items — {n} leaks (ceiling {LEAK_CEILING}, slack {LEAK_SLACK}; \
+         {sorted} sorted by 1164, {} unsorted), {} published; + {} named only by the instruments",
+        published.len() + n,
+        n - sorted,
+        published.len(),
         probes.len()
     );
 
-    // `WOW_API_DUMP=1` prints the surface itself, most-named first. The count alone answers "is
-    // the wall holding"; it cannot answer "which item did that unit actually retire", and a unit
-    // that reads as net-zero is exactly when you need the list (a second scanner disagreeing by
-    // one is how this got added).
+    // The tables are the sort. A row no game file names any more is a row to delete — a stale
+    // published row would let the item cross again for free, and a stale leak row is a closure
+    // nobody wrote down.
+    let stale: Vec<&str> = PUBLISHED
+        .iter()
+        .map(|(k, _)| *k)
+        .filter(|k| !published.contains_key(*k) && !probes.contains_key(*k))
+        .chain(
+            SORTED_LEAKS
+                .iter()
+                .map(|(k, _)| *k)
+                .filter(|k| !leaks.contains_key(*k) && !probes.contains_key(*k)),
+        )
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "rows in PUBLISHED / SORTED_LEAKS that no game file names any more — delete them (a \
+         closed leak is a deleted row; a published item nobody uses is not API):\n  {}",
+        stale.join("\n  ")
+    );
+
+    // `WOW_API_DUMP=1` prints the surface itself, most-named first, each item with what the
+    // tables say about it. The count alone answers "is the wall holding"; it cannot answer
+    // "which item did that unit actually retire", and a unit that reads as net-zero is exactly
+    // when you need the list.
     if std::env::var("WOW_API_DUMP").is_ok() {
-        let mut rows: Vec<_> = surface.iter().map(|(k, v)| (v.len(), k)).collect();
-        rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
-        eprintln!("{}", render(&rows));
-        let mut probe_rows: Vec<_> = probes.iter().map(|(k, v)| (v.len(), k)).collect();
-        probe_rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+        let tagged = |m: &BTreeMap<String, BTreeSet<String>>, tag: &dyn Fn(&str) -> String| {
+            let mut rows: Vec<_> = m
+                .iter()
+                .map(|(k, v)| (v.len(), format!("{k}  [{}]", tag(k))))
+                .collect();
+            rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            rows.iter()
+                .map(|(n, k)| format!("  {n:3} file(s)  {k}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         eprintln!(
-            "--- named only by the instruments ---\n{}",
-            render(&probe_rows)
+            "--- leaks ---\n{}\n--- published ---\n{}\n--- named only by the instruments ---\n{}",
+            tagged(&leaks, &|k| sorted_by
+                .get(k)
+                .map_or_else(|| "unsorted".to_string(), |b| b.to_string())),
+            tagged(&published, &|k| published_by[k].to_string()),
+            tagged(&probes, &|k| published_by.get(k).map_or_else(
+                || "instrument".to_string(),
+                |b| format!("published {b}")
+            )),
         );
     }
 
-    if n > CEILING {
-        let fresh: Vec<_> = surface.iter().map(|(k, v)| (v.len(), k)).collect();
+    if n > LEAK_CEILING {
+        let fresh: Vec<_> = leaks
+            .iter()
+            .filter(|(k, _)| !sorted_by.contains_key(k.as_str()))
+            .map(|(k, v)| (v.len(), k))
+            .collect();
         panic!(
-            "world API surface is {n} items, ceiling is {CEILING}.\n\
-             Something new crossed the line. Either close it, or — if it is genuine engine API — \
-             raise the ceiling in this file WITH the justification, the way decision 1164 requires \
-             for every item in the PUBLISH bucket.\n\n{}",
+            "world API leaks: {n}, ceiling {LEAK_CEILING}.\n\
+             Something new crossed the line and no record publishes it. Either close it, or — if \
+             it is genuine engine API — add it to PUBLISHED with the record that says so (decision \
+             2338); never a bare number. The unsorted leaks on this tree:\n\n{}",
             render(&fresh)
         );
     }
     assert!(
-        n + SLACK >= CEILING,
-        "world API surface is down to {n} items and the ceiling still says {CEILING}. \
-         Lower CEILING to {n} in this file so the next leak has to earn its place — the ratchet \
+        n + LEAK_SLACK >= LEAK_CEILING,
+        "world API leaks are down to {n} and the ceiling still says {LEAK_CEILING}. Lower \
+         LEAK_CEILING to {n} in this file so the next leak has to earn its place — the ratchet \
          only holds if the number follows the work down."
     );
 }
@@ -758,7 +1055,7 @@ fn paths_in(text: &str, split: bool, want_engine: bool) -> Vec<(String, usize)> 
     // `#[cfg(test)] pub(crate) use …;`) it ends at that statement's semicolon.
     let mut test_at: Option<i32> = None;
     let mut test_open = false;
-    for (n, line) in text.lines().enumerate() {
+    for (n, line) in logical_lines(text).iter().map(|(n, l)| (*n, l.as_str())) {
         let t = line.trim_start();
         if t.starts_with("#[cfg(test)]") {
             test_at = Some(depth);
@@ -849,6 +1146,46 @@ fn paths_in(text: &str, split: bool, want_engine: bool) -> Vec<(String, usize)> 
         }
     }
     found
+}
+
+/// The file's lines, with a `use` statement whose brace group spans several physical lines
+/// joined into one. The scan is line-based, and [`expand`] given a `{` with nothing after it
+/// yielded nothing — so every member of such a group was invisible to both walls: nine imports
+/// in game files, twenty-one items counted nowhere, among them a 1164 CLOSE row and the twelve
+/// `terrain_stream::*` names `entities/wmo_props.rs` reaches for (decision 2338). Each joined
+/// line keeps its first physical line's number; a `//` comment inside the group is cut at the
+/// comment (a `use` statement has no string literal a `//` could sit in).
+fn logical_lines(text: &str) -> Vec<(usize, String)> {
+    fn open(s: &str) -> i32 {
+        s.matches('{').count() as i32 - s.matches('}').count() as i32
+    }
+    fn strip_comment(s: &str) -> &str {
+        s.find("//").map_or(s, |i| &s[..i])
+    }
+    let mut out = Vec::new();
+    let mut lines = text.lines().enumerate();
+    while let Some((n, line)) = lines.next() {
+        let t = line.trim_start();
+        let is_use = t.starts_with("use ")
+            || (t.starts_with("pub") && t.contains(" use ") && !t.contains('='));
+        if is_use && open(strip_comment(line)) > 0 {
+            let mut joined = strip_comment(line).trim_end().to_string();
+            let mut depth = open(&joined);
+            for (_, next) in lines.by_ref() {
+                let next = strip_comment(next);
+                joined.push(' ');
+                joined.push_str(next.trim());
+                depth += open(next);
+                if depth <= 0 {
+                    break;
+                }
+            }
+            out.push((n, joined));
+        } else {
+            out.push((n, line.to_string()));
+        }
+    }
+    out
 }
 
 fn is_ident(c: char) -> bool {
@@ -983,4 +1320,26 @@ fn render(items: &[(usize, &String)]) -> String {
         .map(|(n, k)| format!("  {n:3} file(s)  {k}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A `use` group that spans lines counts every member — the blind spot 2338 closed. The
+/// comment inside the group is cut, and the closing line's `};` ends the statement.
+#[test]
+fn a_use_group_spanning_lines_counts_every_member() {
+    let text =
+        "use benilla_world::interact::{\n    PickParts,\n    ray_mesh_bounds, // a lead\n    \
+                ray_posed_mesh,\n};\nfn f() {}\n";
+    let mut found: Vec<String> = paths_in(text, true, true)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "interact::PickParts",
+            "interact::ray_mesh_bounds",
+            "interact::ray_posed_mesh"
+        ]
+    );
 }

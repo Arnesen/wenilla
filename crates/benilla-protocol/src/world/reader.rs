@@ -59,9 +59,6 @@ impl WorldReader {
                 events: crate::decode(packet),
                 tail,
             }),
-            // Include the raw body (capped) so an unparseable packet can be decoded by hand — a parse
-            // bug is otherwise invisible past "failed to fill whole buffer". The opcode rides
-            // separately so the net thread can feed the app's dropped-packet tally.
             Err(e) => Ok(crate::Poll::Skipped {
                 opcode,
                 reason: format!(
@@ -74,8 +71,7 @@ impl WorldReader {
     }
 }
 
-/// Space-separated hex of the first `max` bytes of `body` (with a `…` when truncated) — the diagnostic
-/// tail on a [`crate::Poll::Skipped`] reason so an unparseable packet's layout can be decoded by hand.
+/// Hex of the first `max` bytes of `body`, `…` when truncated, for decoding a packet by hand.
 fn hex_preview(body: &[u8], max: usize) -> String {
     use std::fmt::Write;
     let mut s = String::new();

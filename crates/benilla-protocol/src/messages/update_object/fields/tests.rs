@@ -1,16 +1,13 @@
 use super::*;
 
-/// The 0208 combat/stat indices re-derived from vmangos's own enum arithmetic (`OBJECT_END` =
-/// 6, `UNIT_END` = 188) and chain-locked to the file's two live-tested anchors:
-/// `FIELD_PLAYER_INV_SLOT_HEAD` (486, descriptor-dump verified) and
-/// `FIELD_PLAYER_BUYBACK_PRICE_1` (1226, wow-re byte anchor, decision 0138). If any constant
-/// drifts, this is the tripwire.
+/// The indices re-derived from vmangos's enum arithmetic and chained to two anchors known
+/// independently: `FIELD_PLAYER_INV_SLOT_HEAD` (486, a live descriptor dump) and
+/// `FIELD_PLAYER_BUYBACK_PRICE_1` (1226, the client binary).
 #[test]
 fn combat_stat_indices_chain_to_the_tested_anchors() {
     const OBJECT_END: u16 = 6;
     const UNIT_END: u16 = OBJECT_END + 0xB6; // UpdateFields_1_12_1.h
     assert_eq!(UNIT_END, 188);
-    // The two tested anchors re-derive from the same arithmetic — the chain is sound.
     assert_eq!(FIELD_PLAYER_INV_SLOT_HEAD, UNIT_END + 0x12A);
     assert_eq!(FIELD_PLAYER_BUYBACK_PRICE_1, UNIT_END + 0x40E);
     // UNIT combat block.
@@ -30,8 +27,6 @@ fn combat_stat_indices_chain_to_the_tested_anchors() {
     assert_eq!(FIELD_UNIT_RANGED_ATTACK_POWER_MULTIPLIER, OBJECT_END + 0xA4);
     assert_eq!(FIELD_UNIT_MINRANGEDDAMAGE, OBJECT_END + 0xA5);
     assert_eq!(FIELD_UNIT_MAXRANGEDDAMAGE, OBJECT_END + 0xA6);
-    // The rested-XP pool sits exactly one below the tested COINAGE anchor, and exactly one past
-    // the explored-zones bitset's 64 slots (decision 1082).
     assert_eq!(FIELD_PLAYER_REST_STATE_EXPERIENCE, UNIT_END + 0x3DB);
     assert_eq!(
         FIELD_PLAYER_REST_STATE_EXPERIENCE + 1,
@@ -41,9 +36,7 @@ fn combat_stat_indices_chain_to_the_tested_anchors() {
         FIELD_PLAYER_EXPLORED_ZONES_1 + PLAYER_EXPLORED_ZONES_SLOTS,
         FIELD_PLAYER_REST_STATE_EXPERIENCE
     );
-    // PLAYER stat block: POSSTAT0 sits one past the tested COINAGE, and the run through
-    // AMMO_ID lands three shy of the tested BUYBACK_PRICE_1 (BYTES 1222, SELF_RES 1224,
-    // PVP_MEDALS 1225 between).
+    // The stat block runs past COINAGE to AMMO_ID 1223; SELF_RES and PVP_MEDALS fill 1224-1225.
     assert_eq!(FIELD_PLAYER_POSSTAT0, FIELD_PLAYER_FIELD_COINAGE + 1);
     assert_eq!(FIELD_PLAYER_POSSTAT0, UNIT_END + 0x3DD);
     assert_eq!(FIELD_PLAYER_NEGSTAT0, UNIT_END + 0x3E2);
@@ -56,18 +49,14 @@ fn combat_stat_indices_chain_to_the_tested_anchors() {
     assert_eq!(FIELD_PLAYER_AMMO_ID + 3, FIELD_PLAYER_BUYBACK_PRICE_1);
     assert_eq!(FIELD_PLAYER_FIELD_BYTES, UNIT_END + 0x40A);
     assert_eq!(FIELD_PLAYER_FIELD_BYTES + 1, FIELD_PLAYER_AMMO_ID);
-    // The watched reputation slot, anchored off the tested COINAGE the same way everything in the
-    // PLAYER block is: 0x431 − 0x3DC = 85 dwords above it.
+    // The watched-faction slot is 0x431 - 0x3DC = 85 dwords above COINAGE.
     assert_eq!(FIELD_PLAYER_WATCHED_FACTION_INDEX, UNIT_END + 0x431);
     assert_eq!(
         FIELD_PLAYER_WATCHED_FACTION_INDEX,
         FIELD_PLAYER_FIELD_COINAGE + 85
     );
-    // Far sight is the guid pair immediately before the combo-target pair, which is itself the two
-    // dwords before the live-tested XP pair — so it is chain-locked from BOTH ends against tested
-    // anchors and needs none of its own: keyring 648 +64 = 712, +2 combo 714, +2 XP 716. Worth
-    // asserting because vmangos's hex comment for this field reads 0x2C2 = 706, six low (the same
-    // drift as COINAGE/XP); its enum arithmetic, which is what the server compiles, agrees with us.
+    // Keyring 648 + 64 = far sight 712, + 2 combo target 714, + 2 XP 716. vmangos's hex comment
+    // for far sight says 0x2C2 = 706, six low; its enum arithmetic is what compiles.
     assert_eq!(FIELD_PLAYER_FARSIGHT, UNIT_END + 0x20C);
     assert_eq!(
         FIELD_PLAYER_FARSIGHT,
@@ -75,31 +64,24 @@ fn combat_stat_indices_chain_to_the_tested_anchors() {
         "far sight closes the 32-slot keyring array"
     );
     assert_eq!(FIELD_PLAYER_FARSIGHT + 2, FIELD_PLAYER_FIELD_COMBO_TARGET);
-    // The combo-target GUID is the two dwords immediately BEFORE the live-tested XP pair, so it
-    // needs no anchor of its own. The binary agrees from the other side: `GetComboPoints 0x51a190`
-    // reads it at `[player+0xe68]+0x838`, and 0x838/4 = 0x20E (decision 0875).
+    // `GetComboPoints` (`0x51a190`) reads the combo target at `[player+0xe68]+0x838`, and
+    // 0x838 / 4 = 0x20E.
     assert_eq!(FIELD_PLAYER_FIELD_COMBO_TARGET, UNIT_END + 0x20E);
     assert_eq!(FIELD_PLAYER_FIELD_COMBO_TARGET + 2, FIELD_PLAYER_XP);
-    // The skill array: one past the tested XP pair, 384 dwords ending at CHARACTER_POINTS1.
+    // The skill array is 128 slots of 3 dwords.
     assert_eq!(FIELD_PLAYER_SKILL_INFO_1_1, FIELD_PLAYER_NEXT_LEVEL_XP + 1);
     assert_eq!(FIELD_PLAYER_SKILL_INFO_1_1, UNIT_END + 0x212);
     assert_eq!(FIELD_PLAYER_SKILL_INFO_1_1 + 384, UNIT_END + 0x392);
-    // The character-points pair sits exactly there (UNIT_END + 0x392/0x393; decision 0304).
     assert_eq!(
         FIELD_PLAYER_CHARACTER_POINTS1,
         FIELD_PLAYER_SKILL_INFO_1_1 + 384
     );
     assert_eq!(FIELD_PLAYER_CHARACTER_POINTS2, UNIT_END + 0x393);
-    // The tracking-mask pair sits contiguously past it (UNIT_END + 0x394/0x395).
     assert_eq!(
         FIELD_PLAYER_TRACK_CREATURES,
         FIELD_PLAYER_CHARACTER_POINTS2 + 1
     );
     assert_eq!(FIELD_PLAYER_TRACK_RESOURCES, UNIT_END + 0x395);
-    // The honor block (decision 1512) is eleven contiguous fields filling EXACTLY the gap between
-    // two already-anchored neighbours — the 12-slot buyback-timestamp array below it and the
-    // watched-faction slot above it — so it needs no anchor of its own. If any of the three ever
-    // drifts, one of these two closures breaks.
     assert_eq!(
         FIELD_PLAYER_BUYBACK_TIMESTAMP_1 + 12,
         FIELD_PLAYER_FIELD_SESSION_KILLS,
@@ -127,8 +109,7 @@ fn combat_stat_indices_chain_to_the_tested_anchors() {
     assert_eq!(FIELD_PLAYER_FIELD_LAST_WEEK_CONTRIBUTION, UNIT_END + 0x42E);
     assert_eq!(FIELD_PLAYER_FIELD_LAST_WEEK_RANK, UNIT_END + 0x42F);
     assert_eq!(FIELD_PLAYER_FIELD_BYTES2, UNIT_END + 0x430);
-    // The CURRENT rank rides the appearance dword instead, nowhere near that block — which is the
-    // whole point: PLAYER_BYTES_3 is PUBLIC, so it is the one honor value a foreign player streams.
+    // The current rank rides the public PLAYER_BYTES_3, outside the honor block.
     assert_eq!(FIELD_PLAYER_BYTES_3, UNIT_END + 0x7);
 }
 
@@ -153,8 +134,8 @@ fn unit_stats_and_resistances_read_indexed_and_gate_range() {
 
 #[test]
 fn attack_power_mods_split_signed_halves() {
-    // vmangos SetInt16Value(index_mod, 0, pos) / (index_mod, 1, neg): lo = positive,
-    // hi = negative (already negative-or-zero). pos 30, neg −10.
+    // vmangos `SetInt16Value(index_mod, 0, pos)` and `(index_mod, 1, neg)`: low positive, high
+    // negative. pos 30, neg -10.
     let packed = u32::from(30u16) | (u32::from((-10i16) as u16) << 16);
     let f = ObjectFields::from_pairs(&[
         (165, 78),                              // ATTACK_POWER
@@ -170,7 +151,6 @@ fn attack_power_mods_split_signed_halves() {
     assert_eq!(f.unit_ranged_attack_power(), Some(52));
     assert_eq!(f.unit_ranged_attack_power_mods(), (0, -3));
     assert_eq!(f.unit_ranged_attack_power_multiplier(), Some(0.0));
-    // Absent mods read (0, 0) — the descriptor's zero-initialized default.
     assert_eq!(ObjectFields::default().unit_attack_power_mods(), (0, 0));
 }
 
@@ -199,10 +179,8 @@ fn damage_and_attack_time_fields_read_their_slots() {
     assert_eq!(f.unit_max_ranged_damage(), Some(47.0));
 }
 
-/// The four stat/resistance buff-split arrays are **INT** on the wire (decision 1397), not the
-/// f32 the server keeps internally — `BuildValuesUpdate` narrows them on the way out. The words
-/// below are the ones a real 5875 server sends; the `-4` case is the x86 host's two's-complement
-/// word (an arm64 host saturates the same debuff to a flat `0` — both decode correctly as `i32`).
+/// The buff-split arrays are ints on the wire, narrowed from the server's floats by
+/// `BuildValuesUpdate`; `-4` is an x86 server's word, where arm64 would send 0.
 #[test]
 fn player_stat_buff_arrays_read_signed_ints() {
     let f = ObjectFields::from_pairs(&[
@@ -219,8 +197,7 @@ fn player_stat_buff_arrays_read_signed_ints() {
     assert_eq!(f.player_resistance_buff_neg(2), Some(-20));
     assert_eq!(f.player_resistance_buff_pos(7), None, "out of range");
     assert_eq!(f.player_resistance_buff_neg(7), None, "out of range");
-    // The regression this decode is: a `105` POSSTAT read as f32 rounds to 0, which is what made
-    // every gear-boosted stat on the character sheet render plain white (B165/B251).
+    // A live value: 105 read as an f32 bit pattern would be near 0.
     let live = ObjectFields::from_pairs(&[(1177, 105)]);
     assert_eq!(live.player_posstat(0), Some(105));
 }
@@ -231,7 +208,7 @@ fn player_mod_damage_done_reads_int_pos_neg_and_float_pct() {
         (1201, 25),                   // MOD_DAMAGE_DONE_POS[0] physical
         (1203, 40),                   // MOD_DAMAGE_DONE_POS[2] fire
         (1208, 15u32.wrapping_neg()), // MOD_DAMAGE_DONE_NEG[0] = −15
-        (1215, 1.1f32.to_bits()),     // MOD_DAMAGE_DONE_PCT[0] — a true float
+        (1215, 1.1f32.to_bits()),     // MOD_DAMAGE_DONE_PCT[0], a true float
     ]);
     assert_eq!(f.player_mod_damage_done_pos(0), Some(25));
     assert_eq!(f.player_mod_damage_done_pos(2), Some(40));
@@ -245,8 +222,8 @@ fn player_mod_damage_done_reads_int_pos_neg_and_float_pct() {
 
 #[test]
 fn player_skill_unpacks_the_three_dword_triplet() {
-    // Slot 1 (base 718 + 3 = 721): Swords (43) step 0, 25/300, temp −3 / perm +5 —
-    // MAKE_PAIR32 lo|hi packing throughout, bonuses signed (Player.cpp:94-100).
+    // Slot 1 (718 + 3 = 721): Swords (43) step 0, 25/300, temp -3, perm +5; lo|hi pairs,
+    // bonuses signed (`Player.cpp:94-100`).
     let f = ObjectFields::from_pairs(&[
         (721, 43),
         (722, 25 | (300 << 16)),
@@ -263,8 +240,6 @@ fn player_skill_unpacks_the_three_dword_triplet() {
             perm_bonus: 5,
         })
     );
-    // A never-streamed slot → None; a zeroed (server-cleared) slot → Some with id 0;
-    // out of range → None.
     assert_eq!(f.player_skill(0), None);
     assert_eq!(
         ObjectFields::from_pairs(&[(718, 0)])
@@ -284,9 +259,8 @@ fn player_ammo_id_reads_the_field() {
 
 #[test]
 fn player_self_res_spell_collapses_absent_and_zero() {
-    // 1224 sits one past PLAYER_AMMO_ID(1223), which is one past PLAYER_FIELD_BYTES(1222) — the
-    // run this test pins by neighbour so a mis-derived index shows up as a wrong reading, not a
-    // silent None. A rank-1 soulstone's effect spell is 3026 (decision 1746).
+    // 1224 follows AMMO_ID 1223 and FIELD_BYTES 1222, all set so a wrong index reads a
+    // neighbour. 3026 is the rank-1 soulstone's effect spell.
     let f = ObjectFields::from_pairs(&[(1222, 0), (1223, 0), (1224, 3026)]);
     assert_eq!(f.player_self_res_spell(), Some(3026));
     assert_eq!(
@@ -294,8 +268,6 @@ fn player_self_res_spell_collapses_absent_and_zero() {
         Some(0),
         "the neighbour is not disturbed"
     );
-    // "No self-res" reaches us two ways — the field never streamed, or the server zeroed it on a
-    // resurrection by another means — and they are the same fact, so both read None.
     assert_eq!(ObjectFields::default().player_self_res_spell(), None);
     assert_eq!(
         ObjectFields::from_pairs(&[(1224, 0)]).player_self_res_spell(),
@@ -305,10 +277,8 @@ fn player_self_res_spell_collapses_absent_and_zero() {
 
 #[test]
 fn player_field_bytes_splits_into_combo_points_toggles_and_honor_rank() {
-    // flags=0x01 / combo=0x02 / actionBars=0x03 / highestHonorRank=5 packed little-endian: the
-    // dword's three live readers take bytes 1, 2 and 3 without bleeding into each other. The
-    // offsets are the binary's own — the reads sit at `[[player+0xe68]+0x1029/0x102a/0x102b]`
-    // (wow-re `action-bar-toggles.md` §4), i.e. bytes 1/2/3 of field 1222.
+    // Bytes 0-3: flags 0x01, combo 2, action bars 3, highest rank 5; the client reads bytes 1-3
+    // of field 1222 at `[[player+0xe68]+0x1029..0x102b]`.
     let f = ObjectFields::from_pairs(&[(1222, 0x05_03_02_01)]);
     assert_eq!(f.player_honor_rank(), Some(5));
     assert_eq!(f.player_action_bar_toggles(), Some(3));
@@ -318,8 +288,7 @@ fn player_field_bytes_splits_into_combo_points_toggles_and_honor_rank() {
     assert_eq!(capped.player_combo_points(), Some(5));
     assert_eq!(capped.player_action_bar_toggles(), Some(0));
     assert_eq!(capped.player_honor_rank(), Some(0));
-    // The server may legally hold a high nibble here (it stores the whole byte); the accessor is
-    // the raw byte and does not mask — the four-bit law is the Lua binding's, not the field's.
+    // The accessor returns the raw byte, high nibble included; only the binding masks to 4 bits.
     let high = ObjectFields::from_pairs(&[(1222, 0x00_f5_00_00)]);
     assert_eq!(high.player_action_bar_toggles(), Some(0xf5));
     assert_eq!(ObjectFields::default().player_honor_rank(), None);
@@ -327,13 +296,8 @@ fn player_field_bytes_splits_into_combo_points_toggles_and_honor_rank() {
     assert_eq!(ObjectFields::default().player_combo_points(), None);
 }
 
-/// `PLAYER_BYTES_3` byte 3 is the **current** honor rank, and it shares its dword with the
-/// gender+inebriation low u16 — so the fixture carries a non-zero drunk byte on purpose: a wrong
-/// shift would read `0xA0` (160) as the rank and pass a byte-3-is-zero test.
-///
-/// The pairing with `PLAYER_FIELD_BYTES`' byte 3 is the confusable one and the reason both are
-/// asserted here: current rank (PUBLIC, field 195) vs highest lifetime rank (PRIVATE, field 1222).
-/// A fixture carrying only 195 must answer `None` for the highest rank, not `0`.
+/// The nonzero drunk byte catches a wrong shift; the current rank (field 195) and the highest
+/// rank (field 1222) are separate fields.
 #[test]
 fn player_bytes_3_byte_3_is_the_current_pvp_rank_not_the_highest() {
     // byte 0 = 0x01 gender, byte 1 = 0xA0 drunk, byte 2 = 0x04 city-protector title,
@@ -346,22 +310,19 @@ fn player_bytes_3_byte_3_is_the_current_pvp_rank_not_the_highest() {
         None,
         "the HIGHEST rank is a different field (1222) — absent means absent"
     );
-    // The two really do diverge: a demoted player keeps the higher lifetime rank.
+    // A demoted player keeps the higher lifetime rank.
     let demoted = ObjectFields::from_pairs(&[(195, 0x03_00_00_00), (1222, 0x0B_00_00_00)]);
     assert_eq!(demoted.player_pvp_rank(), Some(3));
     assert_eq!(demoted.player_honor_rank(), Some(11));
     assert_eq!(ObjectFields::default().player_pvp_rank(), None);
 }
 
-/// The four TWO_SHORT kill counters split low = honorable / high = dishonorable
-/// (`MAKE_PAIR32`; vmangos writes SESSION_KILLS as two `SetUInt16Value` halves). The other three
-/// come off vmangos as a whole dword, so their high half is 0 — asserted, because "DK reads 0" is
-/// a property of *this server*, not of the field, and a future capture that shows otherwise is a
-/// finding rather than a regression.
+/// vmangos writes only SESSION_KILLS as two halves; it writes the other three as a whole dword,
+/// so their dishonorable half is 0.
 #[test]
 fn honor_kill_counters_split_into_honorable_and_dishonorable_halves() {
     let f = ObjectFields::from_pairs(&[
-        (1250, 0x0003_0011), // SESSION: 17 HK, 3 DK — both halves live
+        (1250, 0x0003_0011), // SESSION: 17 HK, 3 DK, both halves live
         (1251, 0x0000_0029), // YESTERDAY: 41 HK, whole-dword write ⇒ DK half 0
         (1252, 0x0000_01A4), // LAST_WEEK: 420 HK
         (1253, 0x0000_007B), // THIS_WEEK: 123 HK
@@ -370,11 +331,9 @@ fn honor_kill_counters_split_into_honorable_and_dishonorable_halves() {
     assert_eq!(f.player_yesterday_kills(), Some((41, 0)));
     assert_eq!(f.player_last_week_kills(), Some((420, 0)));
     assert_eq!(f.player_this_week_kills(), Some((123, 0)));
-    // A value that fills the high half of one of the dword-written fields still decodes as a
-    // pair — we carry the descriptor's shape, not vmangos's habit.
+    // A filled high half still decodes: the shape is the descriptor's, not vmangos's habit.
     let both = ObjectFields::from_pairs(&[(1251, 0x0007_0029)]);
     assert_eq!(both.player_yesterday_kills(), Some((41, 7)));
-    // Absent stays absent for every one of the four.
     let empty = ObjectFields::default();
     assert_eq!(empty.player_session_kills(), None);
     assert_eq!(empty.player_yesterday_kills(), None);
@@ -382,8 +341,6 @@ fn honor_kill_counters_split_into_honorable_and_dishonorable_halves() {
     assert_eq!(empty.player_this_week_kills(), None);
 }
 
-/// The INT half of the honor block — three contribution totals, the weekly standing, and the two
-/// lifetime counters — each reading its own index (a swapped constant shows up here).
 #[test]
 fn honor_contributions_standing_and_lifetime_read_their_own_fields() {
     let f = ObjectFields::from_pairs(&[
@@ -392,7 +349,7 @@ fn honor_contributions_standing_and_lifetime_read_their_own_fields() {
         (1256, 12),    // LIFETIME_DISHONORABLE_KILLS
         (1257, 640),   // YESTERDAY_CONTRIBUTION
         (1258, 8_431), // LAST_WEEK_CONTRIBUTION
-        (1259, 57),    // LAST_WEEK_RANK — the STANDING, not an honor rank
+        (1259, 57),    // LAST_WEEK_RANK: the standing, not an honor rank
     ]);
     assert_eq!(f.player_this_week_contribution(), Some(1_250));
     assert_eq!(f.player_lifetime_honorable_kills(), Some(3_907));
@@ -409,14 +366,12 @@ fn honor_contributions_standing_and_lifetime_read_their_own_fields() {
     assert_eq!(empty.player_lifetime_dishonorable_kills(), None);
 }
 
-/// `PLAYER_FIELD_BYTES2` byte 0 is the rank progress bar; bytes 1..3 are a flags byte and two
-/// unknowns, so the fixture sets them to catch a wrong shift.
+/// Bytes 1-3 are a flags byte and two unknowns; the fixture fills them to catch a wrong shift.
 #[test]
 fn player_honor_rank_bar_is_byte_zero_of_player_field_bytes2() {
     let f = ObjectFields::from_pairs(&[(1260, 0xDE_AD_BE_7F)]);
     assert_eq!(f.player_honor_rank_bar(), Some(0x7F));
-    // A negative rank's `uint8(fraction * -255)` wraps rather than clamping — we carry the byte
-    // the wire sent and leave the interpretation to the display edge.
+    // A negative rank's wrapped `uint8(fraction * -255)` is carried as sent.
     assert_eq!(
         ObjectFields::from_pairs(&[(1260, 0x0000_009C)]).player_honor_rank_bar(),
         Some(0x9C)
@@ -424,21 +379,16 @@ fn player_honor_rank_bar_is_byte_zero_of_player_field_bytes2() {
     assert_eq!(ObjectFields::default().player_honor_rank_bar(), None);
 }
 
-/// `PLAYER_FIELD_COMBO_TARGET` reads as one GUID out of its two dwords — the unit the points are
-/// banked on, which the display gate compares against the current target (decision 0875).
 #[test]
 fn player_combo_target_reads_the_guid_pair() {
     let f = ObjectFields::from_pairs(&[(714, 0x1234_5678), (715, 0xF000_0001)]);
     assert_eq!(f.player_combo_target(), 0xF000_0001_1234_5678);
-    // Nothing banked reads as 0 — the same value the current-target global holds with no target,
-    // which is exactly why the binary's plain equality compare needs no null special case.
+    // Nothing banked reads 0, as the current-target global does with no target.
     assert_eq!(ObjectFields::default().player_combo_target(), 0);
 }
 
-/// The four aura arrays tile exactly, and the block lands on `BASEATTACKTIME` — an index this
-/// file already chain-locks to two live-verified anchors. So this pins all four aura indices
-/// without a new anchor of its own: 48 spell-id dwords, then 48 nibbles (6 dwords), then 48
-/// bytes (12 dwords) twice, then `AURASTATE` (+0x77), then `BASEATTACKTIME` (+0x78).
+/// 48 spell-id dwords, 48 nibbles (6 dwords), 48 bytes (12 dwords) twice, `AURASTATE` (+0x77),
+/// then `BASEATTACKTIME` (+0x78), which the first test chains to the anchors.
 #[test]
 fn aura_arrays_tile_from_object_end_onto_the_tested_anchor() {
     const OBJECT_END: u16 = 6;
@@ -469,9 +419,8 @@ fn aura_arrays_tile_from_object_end_onto_the_tested_anchor() {
     );
 }
 
-/// The packing goldens: nibble-per-slot flags (8/dword), byte-per-slot levels and applications
-/// (4/dword, holding `stack - 1`). Slot 32 deliberately omits its applications word — an absent
-/// field must read as the descriptor's zero, i.e. a stack of 1, not a stack of 0.
+/// Flags are a nibble per slot, levels and applications a byte (`stack - 1`); slot 32 has no
+/// applications word, so it reads a stack of 1.
 #[test]
 fn aura_slots_unpack_nibbles_bytes_and_the_stack_bias() {
     let f = ObjectFields::from_pairs(&[
@@ -544,21 +493,16 @@ fn aura_slots_unpack_nibbles_bytes_and_the_stack_bias() {
     assert_eq!(ObjectFields::default().unit_auras().count(), 0);
 }
 
-/// A slot whose flags nibble the server cleared (`& 0x0E == 0`) is **empty**, even if a stale
-/// spell id lingers in `UNIT_FIELD_AURA` — the client's own `flags & 0x0E` liveness test. Gating
-/// on the spell id alone (as an earlier cut did) surfaced the husk as a phantom buff the real
-/// client hides. The cancelable bit `0x1` on its own does not resurrect it (it is not an effect
-/// bit), so this covers both a fully-zeroed nibble and a `0x1`-only one.
+/// The cancelable bit `0x1` alone is no effect bit: a `0x1`-only nibble is as empty as a zero one.
 #[test]
 fn a_stale_spell_id_with_a_cleared_flags_nibble_is_not_a_live_aura() {
     let f = ObjectFields::from_pairs(&[
-        // slot 0: a live buff — spell id + effect bit 0x8.
+        // slot 0: a live buff, spell id and effect bit 0x8.
         (47, 1126),
         (95, 0x0000_0018), // slot 0 nibble 0x8 (eff0), slot 1 nibble 0x1 (cancelable only)
-        // slot 1: a HUSK — the server left the spell id but cleared every effect bit, keeping
-        // only the cancelable bit. `flags & 0x0E == 0`, so it is not live.
+        // slot 1: a stale id with only the cancelable bit.
         (48, 5000),
-        // slot 2: a HUSK — spell id present, flags nibble fully zero.
+        // slot 2: a stale id with a zero nibble.
         (49, 6000),
     ]);
 
@@ -580,10 +524,8 @@ fn a_stale_spell_id_with_a_cleared_flags_nibble_is_not_a_live_aura() {
     );
 }
 
-/// The create-block absent-field semantics (director-caught: fully broken gear read as 100%). A
-/// CREATE omits zero-valued fields (vmangos `_SetCreateBits`: mask bit iff `value != 0`), so a
-/// create-seeded store must answer `Some(0)` for an absent field — the real client's
-/// zero-initialized descriptor — while a bare `Values` delta keeps absent = `None` ("untouched").
+/// A create omits zero fields (vmangos `_SetCreateBits`), so a created store reads absent as 0,
+/// like the client's zeroed descriptor; a bare delta reads it as untouched.
 #[test]
 fn created_store_reads_absent_fields_as_zero_a_delta_as_none() {
     // A broken item's create: MAXDURABILITY present (40), DURABILITY omitted (it is 0).
@@ -595,15 +537,10 @@ fn created_store_reads_absent_fields_as_zero_a_delta_as_none() {
     let delta = ObjectFields::from_pairs(&[(47, 40)]);
     assert_eq!(delta.item_durability(), None, "delta absent = untouched");
 
-    // A guid slot keeps present-iff-low-half semantics even on a created store (consumers
-    // already treat a sent-empty `Some(0)` as no-guid; the fallback would only blur the two).
+    // A guid slot is present only if its low half was sent, even on a created store.
     assert_eq!(create.corpse_owner(), None);
 }
 
-/// The `TYPEID_CORPSE` descriptor's field indices and its two packed words (decision 1706). Every
-/// number here is a *position*, and a position is exactly what a doc comment cannot check: an
-/// off-by-one on `CORPSE_FIELD_ITEM`'s base would read the display id as a shoulder and dress a
-/// body in a helm's row, silently.
 #[test]
 fn corpse_descriptor_indices_and_packing() {
     // `OBJECT_END + 0x6 = 12` display · `+0x7 = 13` item[0] · `+0x1A/0x1B = 32/33` bytes ·
@@ -648,8 +585,7 @@ fn corpse_descriptor_indices_and_packing() {
         "the seven bytes the reference loads at [descr+0x69..+0x6f], in that order"
     );
 
-    // The flags are three independent bits on one field — and BONES is the model fork, so a
-    // mis-read here swaps a dressed body for a skeleton.
+    // Three independent bits; BONES picks the skeleton model.
     assert!(!corpse.corpse_is_bones(), "0x01 clear");
     assert!(corpse.corpse_hides_helm(), "0x08 set");
     assert!(!corpse.corpse_hides_cloak(), "0x10 clear");
@@ -658,7 +594,7 @@ fn corpse_descriptor_indices_and_packing() {
         "DYNAMIC_FLAGS bit 0 — a different field"
     );
 
-    // …and CORPSE_END = 38, so a created corpse answers 0 (not None) for every field below it.
+    // CORPSE_END is 38, so a created corpse reads 0, not None, for every field below it.
     let bare = ObjectFields::from_pairs(&[(12, 49)]).into_created(ObjectType::Corpse);
     assert_eq!(bare.corpse_flags(), 0);
     assert!(
@@ -668,19 +604,13 @@ fn corpse_descriptor_indices_and_packing() {
     assert!(!bare.corpse_lootable());
 }
 
-/// …and "absent = 0" stops at the end of the object's OWN descriptor (decision 1081). A creature
-/// has no PLAYER block to be absent from, so a PLAYER-block read off one is `None` — a question it
-/// cannot answer — not a confident `0`.
-///
-/// The live bug: `unit_combat_stats` reads `PLAYER_FIELD_MOD_DAMAGE_DONE_PCT` for any unit and
-/// defaults an absent answer to the divide-safe `1.0`. With a created pet answering `Some(0.0)`,
-/// the default never fired and the ref's `damage / percent` produced the pet sheet's
-/// `inf - inf` / `nan` tooltip and its red damage line (director, 2026-08-07).
+/// Absent reads 0 only inside the object's own descriptor: a creature has no player block, so a
+/// player-block read off one is `None`.
 #[test]
 fn a_creature_has_no_player_block_to_be_absent_from() {
-    // PLAYER_FIELD_MOD_DAMAGE_DONE_PCT[0] = UNIT_END(188) + 0x403 — past a UNIT's descriptor end.
+    // PLAYER_FIELD_MOD_DAMAGE_DONE_PCT[0] = UNIT_END(188) + 0x403, past a unit's descriptor.
     const MOD_DAMAGE_DONE_PCT: u16 = 1215;
-    // UNIT_FIELD_BASEATTACKTIME — well inside it.
+    // UNIT_FIELD_BASEATTACKTIME, well inside it.
     const BASEATTACKTIME: u16 = 126;
 
     let pet = ObjectFields::from_pairs(&[(2, 0x09), (150, 33)]).into_created(ObjectType::Unit);
@@ -696,28 +626,25 @@ fn a_creature_has_no_player_block_to_be_absent_from() {
     );
     assert_eq!(pet.unit_stat(0), Some(33), "and a present field is itself");
 
-    // The same index on a real player: inside the descriptor, so absent is the honest 0 the
-    // client's own zero-initialized buffer holds.
+    // On a player the same index is inside the descriptor, so absent reads 0.
     let player = ObjectFields::from_pairs(&[(2, 0x19), (BASEATTACKTIME, 1800)])
         .into_created(ObjectType::Player);
     assert_eq!(player.player_mod_damage_done_pct(0), Some(0.0));
     assert_eq!(player.unit_base_attack_time(0), Some(1800));
 
-    // A bare delta answers nothing either way — it never claimed to be complete.
+    // A bare delta reads absent as None either way.
     let delta = ObjectFields::from_pairs(&[(MOD_DAMAGE_DONE_PCT, 1.0f32.to_bits())]);
     assert_eq!(delta.player_mod_damage_done_pct(0), Some(1.0));
     assert_eq!(delta.unit_base_attack_time(0), None);
 }
 
-/// Merging keeps the semantics straight: a delta overlays a created store without unsetting the
-/// created mark, and a re-CREATE *replaces* the store — stale non-zero values for fields the
-/// fresh snapshot omits (they dropped to zero out of view) must die with it.
+/// A re-create replaces the store, so a field that dropped to 0 out of view does not survive.
 #[test]
 fn merge_overlays_deltas_and_replaces_on_recreate() {
     let mut store =
         ObjectFields::from_pairs(&[(3, 2264), (46, 40), (47, 40)]).into_created(ObjectType::Item);
 
-    // A durability-damage delta overlays; the store stays a complete (created) descriptor.
+    // A durability delta overlays; the store stays created.
     store.merge(ObjectFields::from_pairs(&[(46, 30)]));
     assert_eq!(store.item_durability(), Some(30));
     assert_eq!(
@@ -735,10 +662,8 @@ fn merge_overlays_deltas_and_replaces_on_recreate() {
     );
 }
 
-/// The field edges a merge reports (decision 2297) — the reference's per-field notifier, whose
-/// callback fires on a memcmp DIFFERENCE and receives the old value: only the dwords that moved,
-/// ascending, absent reading as `0` on either side, and a value re-sent unchanged reporting
-/// nothing at all.
+/// Like the reference's per-field notifier, which fires on a memcmp difference with the old
+/// value: moved dwords only, ascending, absent as 0, an unchanged resend silent.
 #[test]
 fn merge_diff_reports_each_moved_dword_once_with_its_old_value() {
     let mut store =
@@ -758,9 +683,8 @@ fn merge_diff_reports_each_moved_dword_once_with_its_old_value() {
     assert_eq!(store.unit_flags(), 8);
 }
 
-/// A re-CREATE is the reference's in-place refresh of a live guid — it notifies too, and here it
-/// notifies over BOTH masks: a field the fresh snapshot omits dropped to zero, and that is an edge
-/// the store's replace makes visible (`merge_overlays_deltas_and_replaces_on_recreate` above).
+/// A re-create refreshes a live guid in place and notifies over both masks: an omitted field is
+/// an edge to 0.
 #[test]
 fn merge_diff_on_a_recreate_reports_the_replace_on_both_masks() {
     let mut store =
@@ -778,9 +702,6 @@ fn merge_diff_on_a_recreate_reports_the_replace_on_both_masks() {
     assert_eq!(store.item_durability(), Some(0));
 }
 
-/// The class a store was created as reads back off its length — every class round-trips, and a
-/// bare delta (no create seen) answers nothing, which is what keeps a field edge honest about
-/// which block its index belongs to.
 #[test]
 fn created_as_reads_back_off_the_created_length() {
     for t in [
@@ -801,14 +722,13 @@ fn created_as_reads_back_off_the_created_length() {
     assert_eq!(ObjectFields::from_pairs(&[(22, 1)]).created_as(), None);
 }
 
-/// The `DYNAMICOBJECT_*` accessors against the exact live capture (vmangos, 2026-07-30, the
-/// B132 follow-up's `--groundfx 10` run): Blizzard's dynobj create — caster guid 26, BYTES 1
-/// (area spell), SPELLID 10, RADIUS 8.0, the cast point in POS, FACING never sent.
+/// A live vmangos capture of a Blizzard (spell 10) dynamic-object create: caster guid 26, area
+/// spell, radius 8.0, the cast point in POS, FACING never sent.
 #[test]
 fn dynamicobject_fields_read_the_live_blizzard_capture() {
     let f = ObjectFields::from_pairs(&[
         (0, 6),                        // OBJECT_FIELD_GUID lo
-        (1, 0xf100_0000),              // guid hi — HIGHGUID dynobj
+        (1, 0xf100_0000),              // guid hi, HIGHGUID dynobj
         (2, 0x41),                     // TYPE: OBJECT | DYNAMICOBJECT
         (3, 10),                       // ENTRY = the spell id
         (4, 1.0f32.to_bits()),         // SCALE_X
@@ -835,12 +755,8 @@ fn dynamicobject_fields_read_the_live_blizzard_capture() {
     );
 }
 
-/// **Feign death is one bit, and the client reads it everywhere it reads health** (decision 1022).
-/// `UNIT_DYNFLAG_DEAD` leaves `UNIT_FIELD_HEALTH` alone — vmangos `Unit::SetFeignDeath` only sets
-/// the flag — so every predicate that keys on the raw field must stay FALSE while every one that
-/// keys on how the unit *reads* must flip. The byte law being transcribed: `UnitHealth 0x5174d0`
-/// and `UnitMana 0x517670` answer 0 under the flag, their `*Max` siblings (`0x5175b0`/`0x5177e0`)
-/// have no such gate, and `0x605f90` is the shared reads-dead triple.
+/// `Unit::SetFeignDeath` sets only `UNIT_DYNFLAG_DEAD`: the raw predicates stay false, the
+/// reads-dead ones (`0x605f90`, `UnitHealth`, `UnitMana`) flip, and the maxima stay.
 #[test]
 fn feign_death_reads_dead_without_touching_the_raw_health_field() {
     const MANA: u8 = 0;
@@ -860,14 +776,13 @@ fn feign_death_reads_dead_without_touching_the_raw_health_field() {
     ]);
     let corpse = unit(&[(FIELD_UNIT_HEALTH, 0), (FIELD_UNIT_MAXHEALTH, 1500)]);
 
-    // The raw field predicate is untouched by the flag — the death arc, loot and the corpse never
-    // fire for a feign.
+    // The raw predicate ignores the flag.
     assert!(!alive.unit_is_dead());
     assert!(!feigning.unit_is_dead(), "feign leaves HEALTH alone");
     assert!(corpse.unit_is_dead());
     assert_eq!(feigning.unit_health(), Some(1200), "the raw field survives");
 
-    // …and the reads-dead predicate flips for both, plus the stand-state leg.
+    // The reads-dead predicate flips for both, plus the stand-state leg.
     assert!(!alive.unit_reads_dead());
     assert!(feigning.unit_reads_dead(), "0x605f9d — the dynflag leg");
     assert!(corpse.unit_reads_dead());
@@ -881,26 +796,22 @@ fn feign_death_reads_dead_without_touching_the_raw_health_field() {
         "0x605faa — stand state 7 (inert against vmangos, kept as the reference has it)"
     );
 
-    // The UI getters: current goes to zero, the maxima do not — that is what makes the bar render
-    // 0/max (empty) instead of vanishing.
+    // Current values go to 0 and the maxima stay, so the bar shows empty.
     assert_eq!(alive.unit_shown_health(), Some(1200));
     assert_eq!(feigning.unit_shown_health(), Some(0));
     assert_eq!(feigning.unit_max_health(), Some(1500));
     assert_eq!(alive.unit_shown_power(MANA), Some(300));
     assert_eq!(feigning.unit_shown_power(MANA), Some(0));
     assert_eq!(feigning.unit_max_power(MANA), Some(900));
-    // Out-of-range power slots stay nil under the flag, exactly as the ungated reader has them.
+    // Out-of-range power slots stay None under the flag, as the ungated reader has them.
     assert_eq!(feigning.unit_shown_power(5), None);
-    // An empty store is not a feigning one: no flag, no zeroing, and no invented health.
+    // An empty store has no flag and no health.
     assert!(!ObjectFields::default().unit_reads_dead());
     assert_eq!(ObjectFields::default().unit_shown_health(), None);
 }
 
-/// **The raw→display power divide** (decision 1034, wow-re `feign-death-dyndead.md` §3): the
-/// reference's `UnitMana`/`UnitManaMax` divide by `0x6e7130`'s table at `0x86f978` —
-/// `{1, 10, 1, 1, 1000}`. vmangos ships rage max **1000** and pet happiness max **1050000**
-/// (`GetCreatePowers`), which through that divide are the 100 and 1050 a real client shows. The
-/// RAW accessors must stay raw: the pet happiness bucket thresholds compare on the wire scale.
+/// vmangos sends rage max 1000 and happiness max 1050000 (`GetCreatePowers`); the table at
+/// `0x86f978` divides them to the 100 and 1050 the reference shows.
 #[test]
 fn rage_and_happiness_divide_for_display_but_not_for_the_raw_readers() {
     const RAGE: u8 = 1;
@@ -930,7 +841,7 @@ fn rage_and_happiness_divide_for_display_but_not_for_the_raw_readers() {
     assert_eq!(pet.unit_shown_power(HAPPINESS), Some(1020));
     assert_eq!(pet.unit_shown_max_power(HAPPINESS), Some(1050));
 
-    // Mana/focus/energy divide by 1 — the shown and raw readers agree.
+    // Mana, focus and energy divide by 1.
     let caster = ObjectFields::from_pairs(&[
         (FIELD_UNIT_POWER1 + u16::from(MANA), 4200),
         (FIELD_UNIT_MAXPOWER1 + u16::from(MANA), 8000),
@@ -940,7 +851,6 @@ fn rage_and_happiness_divide_for_display_but_not_for_the_raw_readers() {
         caster.unit_shown_max_power(MANA),
         caster.unit_max_power(MANA)
     );
-    // Absent stays nil rather than becoming a divided zero.
     assert_eq!(caster.unit_shown_power(RAGE), None);
     assert_eq!(caster.unit_shown_max_power(RAGE), None);
     // The dead gate still wins over the divide, and only for the current value.

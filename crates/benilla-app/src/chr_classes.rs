@@ -3,7 +3,7 @@
 //!
 //! Three consumers today and they are unrelated to each other — [`crate::ui_pet_book`] wants field
 //! 4's pet name token, `UnitHasRelicSlot` wants field 16's relic flag, and
-//! [`crate::spell_mods`] wants field 15's class spell-family — which is exactly why the
+//! `crate::spell::mods` wants field 15's class spell-family — which is exactly why the
 //! table does not live inside any of them. It used to live in the pet book, back when the pet
 //! token was the only column anyone read.
 //!

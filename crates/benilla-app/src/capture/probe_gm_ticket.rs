@@ -93,8 +93,8 @@
 //! WOW_NOSOUND=1 WOW_USER=probe3 WOW_PASS=pprobe3 WOW_CHAR=Probethree \
 //!     WOW_PROBE_GMTICKET=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — this worktree is `pool-3` → `probe3`/`pprobe3`/`Probethree`;
-//! method.md "The local vmangos server"). Non-combat; the probe never drives the body and sends no
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill). Non-combat; the probe never drives the body and sends no
 //! GM command, so GM mode and position are left exactly as found — but note that the body is not
 //! necessarily *still* when a run starts (see [`REST_EPS`]). An outer `timeout` + grep on
 //! `PROBE_GMTICKET:` is the whole harness; the probe self-exits once DONE. Nothing here is a
@@ -163,11 +163,11 @@ const REST_TIMEOUT_SECS: f64 = 20.0;
 /// the packet, before the db-expect line stops being trustworthy (yd, WoW space).
 const STAMP_DRIFT_EPS: f32 = 0.05;
 
-/// The operator's half of step 4, printed verbatim so it can be pasted.
-const DB_QUERY: &str = "cd /Users/sam/dev/vmangos-deploy && docker compose exec -T database \
-                        mariadb -umangos -pmangos characters -e \"SELECT ticket_id, name, \
-                        ticket_type, map, position_x, position_y, position_z, closed_by, message \
-                        FROM gm_tickets ORDER BY ticket_id DESC LIMIT 1;\"";
+/// The operator's half of step 4: the row to read back off the server's `characters` database,
+/// printed verbatim so it can be pasted into whatever reaches that database.
+const DB_QUERY: &str = "SELECT ticket_id, name, ticket_type, map, position_x, position_y, \
+                        position_z, closed_by, message FROM gm_tickets ORDER BY ticket_id DESC \
+                        LIMIT 1;";
 
 pub(crate) struct ProbeGmTicketPlugin;
 
@@ -563,7 +563,8 @@ fn gm_ticket_probe(
                 warn!(
                     "PROBE_GMTICKET: SKIP (4 db) — operator step, by design: the client never \
                      reads map/position back, so only the server's own row proves they landed. \
-                     After the run: {DB_QUERY} — and compare against the db-expect line(s)."
+                     After the run, against the server's `characters` database: {DB_QUERY} — \
+                     and compare against the db-expect line(s)."
                 );
                 let text = unique_text(" edited");
                 if !run_or_skip(

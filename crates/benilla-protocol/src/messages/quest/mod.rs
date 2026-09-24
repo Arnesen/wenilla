@@ -1,15 +1,5 @@
-//! Questgiver + quest-log messages, split along the two decision-scoped slices: [`giver`] — the
-//! "accept/turn-in a quest at an NPC" family (opcodes 386-402, vmangos `Opcodes_1_12_1.h`,
-//! VERIFIED; decision 0088) — and [`log`] — the quest-log wire: `CMSG_QUEST_QUERY`/
-//! `SMSG_QUEST_QUERY_RESPONSE` (92/93), `CMSG_QUESTLOG_SWAP_QUEST`/`CMSG_QUESTLOG_REMOVE_QUEST`/
-//! `SMSG_QUESTLOG_FULL` (403-405), and the `SMSG_QUESTUPDATE_*` progress pushes (406-410). CMSG
-//! bodies from vmangos `Server/Packets/Quest.cpp:6-78`; SMSG layouts from the same file's
-//! `AppendBodyTo` writers (line citations inline in each submodule). The third slice — `share`,
-//! `CMSG_QUEST_CONFIRM_ACCEPT` / `SMSG_QUEST_CONFIRM_ACCEPT` / `CMSG_PUSHQUESTTOPARTY` /
-//! `MSG_QUEST_PUSH_RESULT` (411-413 + 630) — is the party quest-share flow (decision 1733). It is
-//! its own file and not `giver`'s, even though a shared quest lands on the giver's own DETAILS
-//! panel: what is new here is the *verdict* wire between sharer and receiver, and `giver` never
-//! learns that a share exists — it only ever sees a giver guid that happens to be a player.
+//! Quest messages: [`giver`] for accepting and turning in at an NPC (386-402), [`log`] for the
+//! quest log (92/93, 403-410), and `share` for the party quest share (411-413, 630).
 
 mod giver;
 mod log;

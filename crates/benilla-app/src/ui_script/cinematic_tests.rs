@@ -2,9 +2,9 @@
 //!
 //! `CinematicFrame` is fullscreen, keyboard-enabled, and carries an `OnKeyDown` that answers
 //! ESCAPE. In the reference that is enough to swallow **every** key while it is up, because the
-//! key-down walk's gate is EXISTENCE, not handling (wow-re `ui/scratch/frame-key-script-delivery.md`
-//! §3, VERIFIED): a shown keyboard frame with the slot set consumes the key whatever its script
-//! does with it, and a 1.12 handler has no way to signal "not handled" (§3.1).
+//! key-down walk's gate is EXISTENCE, not handling (`0x76b7d0`): a shown keyboard frame with the
+//! slot set consumes the key whatever its script does with it, and a 1.12 handler has no way to
+//! signal "not handled" (`0x76ba25`).
 //!
 //! The reference's own Lua is the proof, and it is why these tests exist: that same `OnKeyDown` has
 //! to call `RunBinding("SCREENSHOT")` **by hand** to get one key back. It would not need to if
@@ -51,6 +51,7 @@ fn start_cinematic(s: &mut UiScript) {
 /// cannot walk during a cinematic.
 #[test]
 fn a_playing_cinematic_swallows_the_movement_keys() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui_with_the_cinematic_frame();
 
     // Before it starts, the frame is hidden and declines: the world keeps its keys.
@@ -84,6 +85,7 @@ fn a_playing_cinematic_swallows_the_movement_keys() {
 /// never that they fall through.
 #[test]
 fn escape_is_consumed_and_acted_on_rather_than_falling_through() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui_with_the_cinematic_frame();
     start_cinematic(&mut s);
 
@@ -132,6 +134,7 @@ fn the_host_has_a_reference_name_for_the_keys_it_now_delivers() {
 /// ever asked about keys the frame *swallows*.
 #[test]
 fn the_screenshot_key_is_handed_back_to_its_binding() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui_with_the_cinematic_frame();
     // The binding table the passthrough reads: `GetBindingKey("SCREENSHOT")` has to answer, or the
     // arm is skipped and the test proves nothing.
@@ -183,6 +186,7 @@ fn the_screenshot_key_is_handed_back_to_its_binding() {
 /// `IsVisible` the honest question again, so the check is an assertion instead of a log.
 #[test]
 fn a_cinematic_hides_the_hud_through_uiparent_and_spares_the_cinematic_frame() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui_with_the_cinematic_frame();
     let visible = |s: &UiScript, f: &str| {
         s.eval::<i64>(&format!("return {f}:IsVisible() and 1 or 0"))
@@ -235,6 +239,7 @@ fn a_cinematic_hides_the_hud_through_uiparent_and_spares_the_cinematic_frame() {
 /// silent about the hide.
 #[test]
 fn the_screenshot_confirmation_shows_during_a_cinematic() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the

@@ -9,12 +9,9 @@ description = "WoW 1.12.1 asset-format adapters (MPQ/BLP/DBC/ADT/WDT) and the be
 workspace = true
 
 [features]
-# The dev/player seam (0026, built by 1173/1174). Default-on, so every normal build keeps the
-# instruments; `--no-default-features` is the player build. Here it gates exactly one thing:
-# `install::candidates`' project-folder probe, which bakes THIS source tree's absolute path
-# (decision 1175). EVERY dependent must take this crate with `default-features = false` and
-# re-export `dev`, or feature unification puts `/Users/…` back into a player binary —
-# `scripts/gates.sh`'s `--no-default-features` line is what catches getting that wrong.
+# `dev` gates one thing, `install::candidates`' project-folder probe, which bakes this source
+# tree's path into the binary. Every dependent takes this crate without default features and
+# forwards `dev`, or unification puts the path back into a player build.
 default = ["dev"]
 dev = []
 
@@ -27,15 +24,7 @@ benilla-dbc = { path = "../benilla-dbc" }
 benilla-m2 = { path = "../benilla-m2" }
 benilla-mpq = { path = "../benilla-mpq" }
 benilla-blp = { path = "../benilla-blp" }
-# PNG only, matching every sibling crate. `image`'s DEFAULT features enable `avif`, which drags
-# in ravif -> rav1e -> av-scenechange: a complete AV1 video ENCODER, monomorphized into this
-# crate, for the two calls below that both write a PNG. Cutting it takes this crate's graph from
-# 112 to 48 dependencies and the workspace's from 499 to 466.
-#
-# It is NOT why `cargo play` used to fail to link -- that was rustc #86049, fixed by `lto = "off"`
-# in `[profile.play]` (decision 1698). The tempting story is that rav1e's monomorphized bulk is
-# what tripped it; the evidence says otherwise, since 2 of the 7 poisoned codegen units held only
-# our own DBC catalog loaders. Two independent wins, and this is the smaller one. Decision 1698.
+# PNG only: the default `avif` feature would pull in rav1e, a whole AV1 encoder, to write PNGs.
 image = { version = "0.25", default-features = false, features = ["png"] }
 benilla-wdt = { path = "../benilla-wdt" }
 benilla-wmo = { path = "../benilla-wmo" }

@@ -1,46 +1,13 @@
-// WoW model lighting — paired with terrain.wgsl. Step 7 (matte) restores the faithful gamma-space
-// combine for M2/WMO/creature meshes; trees, doodads, and buildings stop being black. **Step 8d:**
-// ground clutter (grass/flowers) is lit by the **terrain ground normal under each tuft** (baked onto
-// its vertices in clutter.rs), not the grass-quad's own normal — VERIFIED faithful: WoW writes the
-// terrain quadrant-plane normal onto the clutter vertex normal channel and lights per-vertex with it
-// (ground-effects.md), so a tuft darkens with the dirt it stands on as slope / shade / sun change.
-// MCSH grey from q12 still rides on `ATTRIBUTE_COLOR → pbr_input.material.base_color` so per-doodad
-// shadowing remains.
-//
-//   color = clamp(A + D·I·f(N·u)) × tex × tint          // M2 doodads: the Model2.bls order-2 lobe (0803)
-//   color = clamp(ambient + diffuse·max(N·L,0)) × …      // clutter / WMO: FFP directional matte (sun-scale 1)
-//   color = mix(fog_color, color, fog_factor)                                // Step 5 fog
-//   out   = color                            // raw gamma — the frame's ONE decode is in FFXGlow (0161)
-//
-// For trees / WMOs / creatures, `material_tint` is the StandardMaterial base_color (white by default
-// — vertex colour attribute absent → VERTEX_COLORS shader-def not set → no per-vertex factor). For
-// detail clutter, the merged mesh ships `ATTRIBUTE_COLOR = (mcsh_tint, mcsh_tint, mcsh_tint, 1)`,
-// which Bevy folds into base_color → the lit factor is multiplied by the MCSH grey per-doodad.
-//
-// **Two different lighting laws live in this file, and confusing them has cost us three decisions.**
-// Terrain, clutter and WMO genuinely ARE fixed-function (GL_LIGHTING + GL_LIGHT0 + GL_COLOR_MATERIAL,
-// byte-verified off WoW.exe 5875 — and all five FFP light-commit call sites are terrain's), so they take
-// `clamp(ambient + diffuse·max(N·L,0))`. The exterior M2 lane is NOT fixed-function: the reference loads
-// `Shaders\Vertex\Model2.bls` out of misc.MPQ (gated on the VERTEX cvar `M2UseShaders`, which defaults to
-// "1") and that program is an order-2 irradiance lobe, running on every exterior M2 it draws — doodad,
-// GameObject, creature and player alike. So M2 doodads take that lobe, `E = A + D·I·(4/17)(0.375 + 2μ +
-// 1.875μ²)` with μ = N·u toward-light, clamp01 on the SUM (0803, and the lane comment at step 7).
-// Per-instance `I` is the terrain-shade family sampled at the doodad's base (2.5 lit / 0.5 MCSH-shadowed,
-// `[def+0xa4]`) — see step 7 for the one part of that still open.
-//
-// Two retracted claims are recorded rather than deleted, because each stood long enough to seed a
-// decision record and the next reader should know they were retired, not that they were never made:
-// (a) "there is NO M2 irradiance lobe … no such program runs — M2UsePixelShaders defaults off" — wrong
-// twice, wrong cvar and the program does run; (b) "on the exterior M2 lane that matte is OUR choice"
-// (0796's framing) — true while 0410's cutoff stood, retired by 0803, which put the lane back on the
-// reference's own curve.
-//
-// Specular (row 9 separate-specular, local viewer) is verified by q4/q5/Q13 but kept OUT of this
-// step — M2 per-material shininess (q4 §6 INFERRED) is its own A/B and lives in Step 7b. WMO
-// per-group authored colour (q4 §5) is also deferred.
-//
-// The clutter distance-fade alpha ramp (~52.5→70 yd) still applies on top — that's a draw-distance
-// concern, not a lighting one (ground-effects.md Q4/Q10).
+// The model pass for M2, WMO and ground-clutter meshes, lit and fogged in gamma space:
+//   M2:           color = clamp01(A + D·I·(4/17)(0.375 + 2μ + 1.875μ²)) × tex × tint, μ = N·L
+//   clutter, WMO: color = clamp(ambient + diffuse·max(N·L, 0)) × tex × tint
+//   fog:          color = mix(fog_color, color, fog_factor); out = color, raw gamma
+// The M2 law is the order-2 SH lobe of `Shaders\Vertex\Model2.bls` (cvar `M2UseShaders`, default
+// 1); M2's one FFP light site (`70bdf6`) runs only with that cvar off. Clutter and WMO are the FFP
+// light (GL_LIGHTING, GL_LIGHT0, GL_COLOR_MATERIAL); clutter's normal is the terrain normal under
+// the tuft, which the reference writes onto the clutter vertex.
+// Deviation: no specular term (the M2 per-material shininess is only inferred) and no WMO
+// per-group authored colour.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -51,167 +18,94 @@
     mesh_functions,
 }
 
-// Our own fragment output — bevy's `forward_io::FragmentOutput` verbatim (`@location(0) color` and
-// nothing else, bevy_pbr 0.18.1 `forward_io.wgsl`), kept as a named struct so the lane's output
-// has one place to grow. The WMO-skybox lane's forced far depth (`WOW_SKY_DEPTH`) used to add a
-// fragment-depth builtin here; it is a VERTEX-stage pin now (below, decision 2016) — a fragment
-// depth write costs the pipeline its early-Z, and even on the one camera-anchored model that lane
-// draws, the same number decided one stage earlier is free.
+// bevy_pbr 0.18.1's `forward_io::FragmentOutput`. No depth output: a fragment depth write costs
+// the pipeline early-Z, so the sky lane pins its depth in the vertex stage.
 struct WowFragOut {
     @location(0) color: vec4<f32>,
 }
 
-// Per-material model uniforms packed at binding 100 (see `WowModelExt` in terrain.rs). Light + fog + the
-// SH coeffs moved OUT to the shared global-light storage buffer (below); only the per-material draw flags
-// remain. Field order MUST match the Rust struct.
-//   clutter_fade — x = plateau-end VIEW DEPTH (yd, = 0.75·far); y = ramp-zero view depth (yd, the
-//                  ~70 yd detail-doodad horizon `[0x867958]`); w = enabled (>0.5). The client draws
-//                  clutter only within that horizon, with the reference's quantised 64-texel ramp
-//                  over the last quarter, addressed by VIEW-SPACE DEPTH — see the fragment note
-//                  (2004). 0 = off.
-//   model_flags  — x = is_wmo (>0.5 ⇒ the WMO surface lanes); y = fade-blend twin;
-//                  z = interior (>0.5): a WMO interior group (with is_wmo ⇒ the INT/TRANS batch-class
-//                      lanes below) OR an interior M2 doodad prop (without is_wmo ⇒ lit by its folded
-//                      SH probe, slot per-instance in MeshTag — day/night-independent);
-//                  w = unlit fullbright (>0.5 ⇒ bypass lighting): M2 UNLIT (0x01), or WMO UNLIT on an
-//                      exterior-group batch (the interior drawer ignores the flag — section law).
+// Per-material uniforms at binding 100, in `WowModelExt`'s field order (materials.rs).
+//   clutter_fade: x = plateau-end view depth (yd, 0.75·far), y = ramp-zero view depth (the ~70 yd
+//     detail-doodad horizon `[0x867958]`), z = the batch marker bits, w = clutter
+//   model_flags: x = WMO, y = fade blend twin, z = interior (a WMO interior group, or an interior
+//     M2 lit by its SH probe), w = unlit fullbright (M2 UNLIT 0x01 or Mod/Mod2x, or WMO UNLIT on
+//     an exterior-group batch; the interior drawer ignores it)
 struct ModelParams {
     clutter_fade: vec4<f32>,
     model_flags: vec4<f32>,
-    // x = per-material MCSH terrain-shade SELECTOR (≥0.5 ⇒ lit ground, <0.5 ⇒ MCSH-shadowed); the shader
-    // thresholds it into the lit/shaded doodad sun INTENSITY family below. yzw reserved.
+    // x = the terrain-shade selector (see the doodad sun), y = the WMO batch order, zw = the
+    // UV-scroll seed.
     sun_scale: vec4<f32>,
-    // xyz = the M2Color RGB tint for batches whose colour track ANIMATES (the static vertex bake is
-    // skipped for those — WowModelExt::tint): folded into the albedo exactly where the vertex tint
-    // folds. (1,1,1) — identity — for everything else. w = the WMO interior BATCH-CLASS lane
-    // (wow-re trace-forensics-abbey-interior-d3d §2): 0 = exterior law, 1 = interior INT (unlit
-    // tex × MOCV), 2 = interior TRANS (per-vertex MOCV-alpha lit↔bake lerp).
+    // xyz = the animated M2Color tint (identity when static); w = the WMO interior batch class:
+    // 0 exterior law, 1 INT, 2 TRANS.
     tint: vec4<f32>,
-    // The WMO window/glass law (wow-re wmo-lit-selector / wmo-interior-night-light; 0 for all M2):
-    // xyz = the MOMT SIDN (0x10) authored emissive colour (gamma bytes /255) — multiplied by the live
-    // night fraction (wow_light.grade.x) and added INSIDE the lit sum on lit lanes, like the
-    // reference's glMaterialfv(GL_EMISSION): tex × (lit + sidn·night). Windows glow warm at night,
-    // nothing by day; dead on the unlit INT lane and under UNLIT, exactly like the FFP.
-    // w = the MOMT WINDOW (0x20) flag (>0.5): an interior-group batch swaps GL_LIGHT0 to the brighter
-    // midpoint pair — ambient AND diffuse = (Direct + Ambient)/2, ambient +16/255 — the warm pane
-    // seen from inside a building (derivation 0x6d37e0, byte-verified).
+    // WMO glass, 0 on M2: xyz = the MOMT SIDN (0x10) emissive (gamma /255), w = MOMT WINDOW (0x20).
     sidn: vec4<f32>,
-    // The shared mat-anim TABLE slots (decision 1381): x = the UV-scroll slot, y = the animated-
-    // tint slot — 0 (the pinned-zero identity row) for every static material, so the folds below
-    // add the row unconditionally, branch-free. The rows are DELTAS from the built seeds
-    // (sun_scale.zw / tint.xyz), which stay exactly as built; zw free.
+    // Rows of `wow_light.matanim`, 0 = identity: x = UV scroll, y = tint, z = texture-transform
+    // affine, w = the UI tile's cell clip.
     anim_slots: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> m: ModelParams;
 
-// The shared global light (lighting::global_light): ONE storage buffer every material reads, updated
-// once/frame in place — replaces the per-material light/fog uniforms the old apply_wow_lighting re-pushed
-// each frame. The model reads rows 0-2 (ambient/diffuse/sun) + fog, plus rows 6-12: the disassembled
-// `Model2.bls` probe of the day/night scene light at intensity 1 — the reference's own exterior M2
-// response, and since 0803 the live law on the doodad/entity lane.
-// Shared with terrain.wgsl — a tree and the dirt under it fade into the same haze.
-// (light_spec is part of the prefix layout but the model path never reads it.)
+// The shared light buffer (`lighting::global_light`, rows as packed there), updated once per
+// frame; terrain.wgsl mirrors the prefix, so a tree and the ground under it fog alike.
 struct WowLight {
     light_ambient: vec4<f32>, // rgb ambient; w = Mod2x scale
     light_diffuse: vec4<f32>, // rgb sun diffuse; w = clamp-light flag (>0.5 ⇒ saturate)
-    light_sun: vec4<f32>,     // xyz sun TRAVEL dir (to-light = −xyz); w = directional-light enable (>0.5)
-    light_spec: vec4<f32>,    // rgb spec color; w = shininess (terrain's — unused by the matte model path)
+    light_sun: vec4<f32>,     // xyz sun travel dir (to-light = −xyz); w = directional enable
+    light_spec: vec4<f32>,    // terrain's specular (w = its shininess); unread here
     fog_color: vec4<f32>,     // rgb row-7 fog (gamma); w = enable (>0.5)
-    fog_params: vec4<f32>,    // x=start y=end z=linear-lighting A/B flag w=farclip wall
-    // The global Model2.bls SH rows (6-12): the scene day/night light as an order-2 probe at
-    // intensity 1 — DC (ambient, `.w` of c10) + the sun's linear/quad bands in c10.xyz / c13 /
-    // c16.xyz, the disassembled closed form (wow-re model2-bls-vertex-sh.md). Every sun band is
-    // linear in the committed colour, so a consumer scales them ALL by the per-instance intensity
-    // (never I²); the sun's DC redistribution rides `grade.yzw` (× intensity).
-    //
-    // **LIVE — the exterior doodad/entity response (0803).** History worth knowing before you touch
-    // it: 0410 took this lane OFF the curve onto a hard-cutoff FFP matte on the director's look call,
-    // and the block then sat packed-but-unread for months. 0796 refuted the fidelity premise behind
-    // that retirement (the reference's M2 lane IS this SH shader, not an FFP light slot — the FFP
-    // commits in a world frame are terrain's), which reopened the call as a pure look question;
-    // 0799 restored the eval behind an A/B so it could be seen; 0803 is the director calling it,
-    // and the cutoff branch came out with the flag.
+    fog_params: vec4<f32>,    // x = start, y = end, w = farclip wall; z unused
+    // Rows 6-12: the reference's `Model2.bls` order-2 SH probe of the scene light at intensity 1:
+    // ambient DC in the c10 `.w` lanes, the sun's bands in c10.xyz, c13 and c16.xyz. Every sun band
+    // is linear in the committed colour, so all scale by the intensity (never I²).
     sh_c10_r: vec4<f32>,
     sh_c10_g: vec4<f32>,
     sh_c10_b: vec4<f32>,
     sh_c13_r: vec4<f32>,
     sh_c13_g: vec4<f32>,
     sh_c13_b: vec4<f32>,
-    // xyz = the true c16 quad band (x²−y², per channel), live with the block above. w = FREE — it
-    // carried the 0273 point gain, then the 0750/0751 sun dial, then 0799's response A/B, and every
-    // one of those is retired. Nothing writes it and nothing reads it; claim it if you need a lane.
+    // xyz = the c16 quadratic band (x²−y²) per channel; w unused.
     sh_c16: vec4<f32>,
-    _water: array<vec4<f32>, 4>, // rows 13-16: the liquid swatches — unread by models.
-    // x = SIDN night fraction (1 overnight, 0 by day — scales m.sidn.rgb).
-    // yzw = the sun's SH DC redistribution per channel, at intensity 1 (× the per-instance I).
+    _water: array<vec4<f32>, 4>, // rows 13-16: the liquid swatches, unread here
+    // x = the SIDN night fraction (1 overnight, 0 by day); yzw = the sun's SH DC at intensity 1.
     grade: vec4<f32>,
-    // Rows 18-19: the INTERIOR fog triple — the 4 s camera-in-WMO MFOG crossfade (== the scene fog
-    // outdoors). Consumed by the interior lanes only (round-6 Q-I): interior WMO-group surfaces
-    // and that group's doodads (`0x6b5190` / `0x6b62e0`) — selected below by `m.model_flags.z`.
+    // Rows 18-19: the interior fog, the 4 s camera-in-WMO MFOG crossfade (the scene fog outdoors).
     wmo_fog_color: vec4<f32>,    // rgb interior fog (gamma); w = enable (mirrors fog_color.w)
-    wmo_fog_params: vec4<f32>,   // x = start yd; y = end yd; zw = free lanes (retired A/B dials)
-    // The dynamic point-light table (decision 0278), packed by `global_light::build_light_data`:
-    // row 20 `.x` = live entry count; then TWO rows per light — `[pos.xyz, range]`, `[rgb, 0]`.
-    // Rides this buffer (not bevy's clusterables) because the view layout exposes those to the
-    // fragment stage only, and the Gouraud term is evaluated in the VERTEX stage.
+    wmo_fog_params: vec4<f32>,   // x = start yd, y = end yd; zw unused
+    // Row 20 `.x` = the point-light count, then per light `[pos.xyz, range]`, `[rgb, 0]`. Here, not
+    // in Bevy's clusterables, which the view layout gives the fragment stage only.
     point_count: vec4<f32>,
     points: array<vec4<f32>, 512>,
-    // The interior-prop SH probe table (lighting::prop_probes — 7 rows per slot, 8192 slots; keep in
-    // sync with MAX_PROP_PROBES): the folded committed light of each lit interior MODD prop. The
-    // prop's MeshTag payload is its slot; the interior-prop lane below evaluates rows
-    // [7·slot .. 7·slot+7) over the fragment normal. Only this shader declares the region — the
-    // other shaders mirror the buffer PREFIX and bind the same (larger) buffer.
+    // The interior-prop SH probes, 7 rows per slot (`MAX_PROP_PROBES` = 8192 slots). Only this
+    // shader declares this tail; the other shaders bind the same buffer by its prefix.
     prop_probes: array<vec4<f32>, 57344>,
-    // The owned skin palette (decision 0720; rig_palette.rs mirrors both sizes). `rig_table`:
-    // one base bone index per rig slot (2048 = mesh_tag's 11-bit rig field; the instance's slot
-    // rides its MeshTag bits 19-29). `palettes`: 3 vec4 rows per bone — the rows of
-    // `rig_from_joint × inverse_bindpose`, the same matrix Bevy's skin lane would feed
-    // `skin_model` except measured from the RIG's own origin rather than the map's (decision
-    // 0974) — blended in the vertex stage below (WOW_RIG_SKIN).
+    // Per rig slot (sizes mirrored in rig_palette.rs): the base bone index into `palettes`, whose
+    // 3 rows per bone are `rig_from_joint × inverse_bindpose` from the rig's own origin.
     rig_table: array<u32, 2048>,
-    // The per-instance body TINT, on the SAME slot index as `rig_table` (instance_tint.rs, decision
-    // 0812): the CM2 `model+0x184/188/18c` modulate colour, packed `0xFFRRGGBB` exactly as the
-    // reference packs its node value (`0x60d840`: `param | 0xff000000`). A word of **0 is identity**
-    // — so slot 0 (every unskinned instance in the world), a zeroed studio buffer and an untinted
-    // frame all cost nothing, while a genuine authored BLACK tint still reads as 0xFF000000.
+    // Per rig slot: the CM2 body tint (`model+0x184/188/18c`) packed `0xFFRRGGBB` like the
+    // reference's node value (`0x60d840`: `param | 0xff000000`); 0 is identity.
     rig_tint: array<u32, 2048>,
-    // The rig ORIGIN table (decision 0974), on the SAME slot index again: `xyz` = the world
-    // position that rig's palette rows are measured from (`w` unused). The vertex stage adds it
-    // back as `origin − camera`, so a skinned vertex is never expressed as an absolute world
-    // coordinate in f32 — which is what the ~1 mm/frame character shimmer was.
+    // Per rig slot: the world origin its palette rows are measured from.
     rig_origin: array<vec4<f32>, 2048>,
-    // The mat-anim delta table (decision 1381; mat_anim_table.rs mirrors the size): row 0 is the
-    // pinned-zero identity every static material's anim_slots = 0 reads; a live row is the drawn
-    // batch's sampled UV-scroll delta (xy, added to sun_scale.zw), tint delta (xyz, added to
-    // tint.rgb), or texture-transform affine (decision 2019: [cos − 1, sin, sx − 1, sy − 1]).
-    // Zero region = every batch at its built seed — the studio buffers and deterministic
-    // captures ride that exactly like the tint table's zero-identity.
+    // The mat-anim rows (size mirrored in mat_anim_table.rs), row 0 zero: a UV-scroll delta (xy),
+    // a tint delta (xyz), a texture-transform affine `[cos − 1, sin, sx − 1, sy − 1]` or a UI cell.
     matanim: array<vec4<f32>, 2048>,
-    // The straddle split's waterline (decision 2188; benilla-world straddle.rs mirrors the size),
-    // on the SAME slot index again: `x` = the plane's world height (Bevy Y), `y` = the side the
-    // instance's NEAR copy keeps (+1 above, −1 below). `y == 0` is "not straddling" — slot 0,
-    // every slot nothing wrote, every zeroed studio buffer — so a dry world pays one compare.
+    // Per rig slot, the straddle waterline (size mirrored in straddle.rs): x = its world height
+    // (Bevy Y), y = the side the near copy keeps (+1 above, −1 below, 0 not straddling).
     water_clip: array<vec2<f32>, 2048>,
     palettes: array<vec4<f32>>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
 
-// Vanilla M2 cutout alpha-test reference (224/255 on ≤ WotLK) — kept in sync with
-// `debug_panel::VANILLA_ALPHA_KEY_REF`. Used to re-apply the hard cutout on the distance-fade blend
-// twin so its silhouette matches the steady cutout exactly.
+// The M2 cutout alpha-test reference, 224/255; in sync with `materials::VANILLA_ALPHA_KEY_REF`.
 const VANILLA_ALPHA_KEY: f32 = 0.8784314;
 
-// The detail-doodad (ground clutter) texture LOD bias — the reference sets
-// `D3DSAMP_MIPMAPLODBIAS = +0.25` on stage 0 for its detail-doodad pass alone (`0x6813f4`,
-// capture-confirmed on all 29 doodad batches). It is what makes the distance cut resolve per pixel
-// rather than per leaf; the full derivation is at the use site in `fragment`, and in wow-re
-// `terrain/scratch/doodad-fade-pixel-granularity.md`.
+// The detail-doodad pass's stage-0 `D3DSAMP_MIPMAPLODBIAS = +0.25` (`0x6813f4`).
 const DETAIL_DOODAD_LOD_BIAS: f32 = 0.25;
 
-// bevy's `VertexOutput` (same fields, same locations, same defs) + the per-vertex dynamic
-// point-light term at a free location. One extra interpolant is why this can't BE `VertexOutput`;
-// the fragment rebuilds one for `pbr_input_from_standard_material`. (Our meshes never carry
-// tangents / morphs / visibility ranges, so those defs stay unset and unmirrored.)
+// Bevy's `VertexOutput` (same fields, locations and defs; no tangents, morphs or visibility
+// ranges) plus our interpolants; the fragment rebuilds a `VertexOutput` from it.
 struct WowVsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
@@ -228,14 +122,10 @@ struct WowVsOut {
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     @location(6) @interpolate(flat) instance_index: u32,
 #endif
-    // The Gouraud-interpolated point-light sum (decision 0278): `Σ att·sat(N·L)·colour` evaluated at
-    // the VERTEX, like the reference FFP — the tessellation-scale smoothing IS the authored look
-    // (wide floor pools, dim hoods). The fragment folds in the live gain and the saturating clamp.
+    // The point-light sum `Σ att·sat(N·L)·colour`, per vertex like the reference FFP.
     @location(8) point_lit: vec3<f32>,
 #ifdef WOW_MERGED_FADE
-    // The merged fader blob's per-placement fade alpha (decision 1418), computed in the vertex
-    // stage from the baked fade sphere. Constant across a placement's vertices, so plain
-    // interpolation reproduces it exactly.
+    // A merged blob's per-placement fade alpha, constant over the placement.
     @location(9) merged_fade: f32,
 #endif
 #ifdef WOW_MERGED_SLOT
@@ -243,43 +133,19 @@ struct WowVsOut {
 #endif
 }
 
-// The dynamic point-light term at a world-space point (decisions 0016/0273/0278, selection 0285) —
-// the reference commits AT MOST THREE point lights per draw, the nearest to the RECEIVING UNIT'S OWN
-// position (byte law: the gather `0x71bf90` keeps the nearest by squared distance from the
-// caller-supplied unit position — never the camera, never the vertex — and the commit `0x71c730`
-// seats slots 1-3, dropping the 4th; wow-re `wmo-surface-dynamic-light` §4/§6). Summing the whole
-// table instead lit every candelabra pole in the abbey from a dozen sideways fixtures the real
-// client never commits for it — the director's "stands must not light up with the point gain".
-//
-// So: pass 1 picks the ≤3 nearest table entries to `anchor` (the unit position — a light's packed
-// range bounds candidacy); pass 2 evaluates ONLY those at the vertex — the byte-verified falloff
-// `1/(0.7·d + 0.03·d²)`, diffuse-only (committed ambient/specular are zero), on the SUBMITTED normal
-// (the FFP never enables GL_LIGHT_MODEL_TWO_SIDE — no per-face flip). A selected light reaches every
-// vertex of its unit with no distance cutoff, exactly like a committed GL light — selection pops at
-// unit granularity (the authored vanilla behaviour), never mid-surface. Mirrored in terrain.wgsl.
-// **Zero-normal-safe normalize — the M2 corpus authors `(0,0,0)` vertex normals and the reference
-// draws them lit** (decision 1268). `Creature\QuirajProphet` (the AQ40 Qiraji Brainwasher)
-// authors them on 28 of its sleeve batch's 40 vertices; `Creature\TitanFemale` (Uldaman's Ironaya)
-// on 82. A plain `normalize()` turns that legal, shipped datum into NaN, and NaN poisons the whole
-// lighting chain: every SH dot is NaN, `clamp(NaN, 0, 1)` floors to 0, and the batch renders PURE
-// BLACK over its correct texture — the reported symptom, which only "came back" while the unit was
-// targeted because the highlight's `+64/255` emissive rides OUTSIDE the poisoned factor.
-//
-// The reference lands on the zero vector instead: its `Model2.bls` lit permutations normalize with
-// the era's `RSQ`/`MUL` pair (wow-re `models/scratch/model2-bls-vertex-sh.md` §2), where the
-// `0 × INF` product resolves to 0, so the order-2 SH quadratic form is evaluated at `N = 0` and
-// collapses to its **DC term** — the flat, direction-independent ambient the reference's own
-// screenshots show on exactly these surfaces. Passing the zero vector through reproduces that
-// through every lane here: the SH lobe keeps `c10.w + sun_dc`, `lit_nl` keeps its ambient, and
-// `point_light_sum`'s `max(N·L, 0)` is 0.
-// Guarded around the SAME `normalize` rather than an open-coded `v · inverseSqrt(l2)`: every
-// non-degenerate normal — i.e. the whole corpus outside these few batches — keeps its existing bits,
-// so the visual baselines cannot drift by a rounding step on account of this fix.
+// Zero-safe normalize. M2s author `(0,0,0)` normals (`Creature\QuirajProphet`) and the reference
+// lights them: `Model2.bls` normalizes with `RSQ`/`MUL`, where `0 × INF` is 0, leaving the SH DC
+// term. `normalize(0)` is NaN, which clamps to 0 and blacks the batch. Wrapping `normalize`
+// rather than `v · inverseSqrt(l2)` keeps every nonzero normal's bits.
 fn wow_normalize(v: vec3<f32>) -> vec3<f32> {
     let l2 = dot(v, v);
     return select(vec3<f32>(0.0), normalize(v), l2 > 1e-12);
 }
 
+// The point lights at P: the reference commits at most three per draw, the nearest to the
+// receiving unit's own position `anchor` (`0x71bf90` gathers by squared distance, `0x71c730` seats
+// slots 1-3). Range bounds candidacy only; a selected light falls off as `1/(0.7·d + 0.03·d²)`,
+// diffuse only, on the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE). Mirrored in terrain.wgsl.
 fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
     let count = u32(wow_light.point_count.x);
     var sel = array<u32, 3>(0u, 0u, 0u);
@@ -317,12 +183,10 @@ fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
     return sum;
 }
 
-// The MCNK chunk cell center under a world point — the light-selection anchor for geometry merged in
-// WORLD space (clutter; terrain.wgsl mirrors this): the reference draws terrain per 33.33-yd MCNK
-// chunk and gathers that unit's lights like any other. Grid constants per the ADT format (chunk =
-// 533.3333/16 yd, world half-extent 32 tiles); WoW x/y are Bevy −z/−x, and the grid is symmetric, so
-// snapping Bevy x/z directly lands on the same cells. Height keeps the vertex's own y (the ref anchors
-// at the chunk record's position; lights sit near the surface, so the horizontal snap is what matters).
+// The centre of the MCNK chunk under P, the light anchor for world-merged clutter, since the
+// reference gathers lights per terrain chunk (mirrored in terrain.wgsl). WoW x/y are Bevy −z/−x
+// and the grid is symmetric, so snapping Bevy x/z lands on the same cells. Deviation: the height
+// is the vertex's own, not the chunk record's, because lights sit near the surface.
 fn mcnk_cell_anchor(P: vec3<f32>) -> vec3<f32> {
     let cell = 533.33333 / 16.0;
     let half = 32.0 * 533.33333;
@@ -331,18 +195,9 @@ fn mcnk_cell_anchor(P: vec3<f32>) -> vec3<f32> {
     return vec3<f32>((ix + 0.5) * cell - half, P.y, (iz + 0.5) * cell - half);
 }
 
-// The vertex input — bevy 0.18's `forward_io::Vertex` fields at bevy's shader locations (the
-// VERTEX_* defs come from the base mesh-pipeline specialize, driven by what the mesh authors;
-// tangents / morphs never — no model mesh has them), PLUS the owned-palette joint attributes at
-// locations 10/11 under WOW_RIG_SKIN (`WowModelExt::specialize` sets the def and appends the
-// attributes to the buffer layout when the mesh carries `ATTRIBUTE_WOW_JOINT_INDEX` — decision
-// 0720; Bevy's `forward_io::Vertex` only declares joints under its own SKINNED path, which no
-// benilla mesh triggers anymore).
 #ifdef WOW_MERGED_FADE
-// The faithful per-object doodad fade curve (`model_fade::doodad_fade_alpha`, exact
-// `FUN_00683f80` constants): horizontal-plane distance, `d = dist − radius`, size-bucketed
-// band, `1 − (d − start)/range` clamped. `radius > 7` never fades (never-fade members of a
-// merged blob bake their true radius and land here).
+// The doodad fade curve (`FUN_00683f80`, in sync with `model_fade::doodad_fade_alpha`): alpha =
+// 1 − (d − start)/range, d = horizontal distance − radius, over a size-bucketed band.
 fn merged_fade_alpha(radius: f32, horiz_dist: f32) -> f32 {
     if (radius > 7.0) {
         return 1.0;
@@ -361,6 +216,9 @@ fn merged_fade_alpha(radius: f32, horiz_dist: f32) -> f32 {
 }
 #endif
 
+// Bevy 0.18's `forward_io::Vertex` at Bevy's locations, plus the palette joints at 10/11 (appended
+// by `WowModelExt::specialize` for a mesh with `ATTRIBUTE_WOW_JOINT_INDEX`) and the merged-blob
+// attributes at 12/13.
 struct WowVertex {
     @builtin(instance_index) instance_index: u32,
 #ifdef VERTEX_POSITIONS
@@ -383,28 +241,22 @@ struct WowVertex {
     @location(11) joint_weights: vec4<f32>,
 #endif
 #ifdef WOW_MERGED_FADE
-    // The baked placement fade sphere (decision 1418): `xyz` world center, `w` fade radius.
+    // The placement fade sphere: xyz = world centre, w = fade radius.
     @location(12) fade_sphere: vec4<f32>,
 #endif
 #ifdef WOW_MERGED_SLOT
-    // The baked interior-prop SH-probe slot (1418 lane 3) — replaces the MeshTag payload the
-    // per-entity lane carries.
+    // The interior-prop SH-probe slot, in place of the per-entity MeshTag payload.
     @location(13) merged_slot: u32,
 #endif
 }
 
 #ifdef WOW_RIG_SKIN
-// The instance's rig slot — the shared index into `rig_table`, `rig_tint` and `rig_origin`.
 fn wow_rig_slot(instance_index: u32) -> u32 {
     return (mesh_functions::get_tag(instance_index) >> 19u) & 0x7ffu;
 }
 
-// The owned-palette skin model (decision 0720): the instance's rig slot from its MeshTag rig
-// field (bits 19-29) → the rig's base bone index → the four indexed bones' palette rows blended
-// by the vertex weights. Returns `rig_from_local` — structurally what Bevy's `skin_model` returns
-// (and it REPLACES the mesh's world matrix, never composes with it), except the translation is
-// measured from the rig's own origin rather than the map's (decision 0974). `rig_origin[slot]`
-// carries the missing piece; the vertex stage applies it camera-relative.
+// Blends the four weighted bones' palette rows into `rig_from_local`, which replaces the mesh's
+// world matrix like Bevy's `skin_model`; its translation is relative to `rig_origin[slot]`.
 fn wow_skin_model(instance_index: u32, indices: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
     let base = wow_light.rig_table[wow_rig_slot(instance_index)];
     let b0 = 3u * (base + indices.x);
@@ -423,7 +275,7 @@ fn wow_skin_model(instance_index: u32, indices: vec4<u32>, weights: vec4<f32>) -
         + weights.y * wow_light.palettes[b1 + 2u]
         + weights.z * wow_light.palettes[b2 + 2u]
         + weights.w * wow_light.palettes[b3 + 2u];
-    // r0/r1/r2 are the affine's ROWS; a wgsl matrix is column-major.
+    // r0/r1/r2 are the affine's rows; a WGSL matrix is column-major.
     return mat4x4<f32>(
         vec4<f32>(r0.x, r1.x, r2.x, 0.0),
         vec4<f32>(r0.y, r1.y, r2.y, 0.0),
@@ -432,7 +284,7 @@ fn wow_skin_model(instance_index: u32, indices: vec4<u32>, weights: vec4<f32>) -
     );
 }
 
-// bevy_pbr::skinning's normal math verbatim (inverse-transpose via the adjugate), on our matrix.
+// bevy_pbr::skinning's inverse-transpose via the adjugate, verbatim.
 fn inverse_transpose_3x3m(in: mat3x3<f32>) -> mat3x3<f32> {
     let x = cross(in[1], in[2]);
     let y = cross(in[2], in[0]);
@@ -441,8 +293,6 @@ fn inverse_transpose_3x3m(in: mat3x3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(x / det, y / det, z / det);
 }
 
-// (Translation-free by construction — so the rig-relative frame of decision 0974 feeds it
-// unchanged: a normal never cared where the rig stands.)
 fn wow_skin_normals(frame_from_local: mat4x4<f32>, normal: vec3<f32>) -> vec3<f32> {
     return wow_normalize(
         inverse_transpose_3x3m(mat3x3<f32>(
@@ -454,23 +304,15 @@ fn wow_skin_normals(frame_from_local: mat4x4<f32>, normal: vec3<f32>) -> vec3<f3
 }
 #endif
 
-// Custom vertex stage — bevy 0.18's `mesh.wgsl` vertex verbatim (VERTEX_* attributes; morph
-// targets omitted — no model mesh authors them) with the owned-palette skinning in place of
-// Bevy's SKINNED path (decision 0720), plus the per-vertex point-light evaluation on the
-// post-skin world position/normal. A `MaterialExtension` swaps the whole stage, so the mirror
-// must track bevy's on upgrades.
+// Bevy 0.18's `mesh.wgsl` vertex stage plus our skinning and point lights. A `MaterialExtension`
+// replaces the whole stage, so this must track Bevy's on upgrades.
 @vertex
 fn vertex(vertex: WowVertex) -> WowVsOut {
     var out: WowVsOut;
 
     let mesh_world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
-    // **Split the instance placement into (frame, origin)** — decision 0974. `frame_from_local`
-    // carries the orientation and a SMALL translation; `frame_origin` carries the ~9 k-yard world
-    // position. Skinned: the palette rows are already rig-relative and `rig_origin` is the rig's
-    // world position. Unskinned: the mesh matrix's own translation column moves over. Either way
-    // the world position is `frame_from_local · v + frame_origin`, and the point is that neither
-    // factor is a big-times-small product — that product is where a ~1 mm f32 ULP was landing on
-    // every animated vertex, freshly every frame.
+    // Precision: `frame_from_local` holds the orientation and a small translation, `frame_origin`
+    // the ~9 k yd world position, so no f32 product mixes the two (an f32 ULP at 9 k is ~1 mm).
 #ifdef WOW_RIG_SKIN
     var frame_from_local = wow_skin_model(
         vertex.instance_index,
@@ -496,12 +338,9 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 #endif
 
 #ifdef VERTEX_POSITIONS
-    // Camera-relative all the way to clip space. `p_cam` is built from two small quantities, so
-    // it keeps ~1e-7 yd of precision where the absolute route kept ~1e-3 — and `clip_from_view ×
-    // (R_view · p_cam)` has none of the catastrophic cancellation `clip_from_world × p_world`
-    // suffers when camera and geometry both sit at ~9 k (0733 §2 fixed the same defect on the
-    // effect lane; this is the model lane's). `world_position` goes back to absolute for the
-    // lighting/fog/shadow consumers downstream, which are not precision consumers.
+    // Precision: camera-relative to clip space; `clip_from_world × p_world` cancels
+    // catastrophically with camera and geometry near 9 k yd. `world_position` is absolute again:
+    // lighting and fog need no such precision.
     let p_cam = (frame_from_local * vec4<f32>(vertex.position, 1.0)).xyz
         + (frame_origin - view.world_position);
     out.world_position = vec4<f32>(p_cam + view.world_position, 1.0);
@@ -511,29 +350,18 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
         view.view_from_world[2].xyz,
     );
     out.position = view.clip_from_view * vec4<f32>(view_rot * p_cam, 1.0);
-    // WMO authored batch order (`m.sun_scale.y`; 0 = non-WMO ⇒ exact no-op): the client resolves
-    // coplanar batches (wall + decal/trim) by strict MOBA draw order under depth-write + LEQUAL
-    // (wow-5875-re `wmo-batch-blend-depth-state.md`, byte-verified); Bevy orders draws for
-    // batching, so a later batch must instead WIN the reverse-Z GreaterEqual test. Scaling clip z
-    // by (1 + n·2⁻²³) raises the interpolated depth z/w by exactly n ULP-steps per fragment —
-    // the same one-unit-per-index nudge the old fixed-function `DepthBiasState` constant applied,
-    // but as uniform DATA: as pipeline state it made every batch index its own pipeline, and a
-    // first city sight synchronously compiled ~3000 of them on the render thread (decision 0837).
+    // WMO batch order (`sun_scale.y`, 0 off WMO): the reference layers coplanar batches by MOBA
+    // draw order under depth-write + LEQUAL; Bevy reorders draws, so a later batch must win the
+    // reverse-Z GreaterEqual test. Scaling clip z by (1 + n·2⁻²³) raises z/w by n ULPs. Uniform
+    // data, not a `DepthBiasState`, which would make every batch index its own pipeline.
     out.position.z *= 1.0 + m.sun_scale.y * 1.1920929e-7;
 #ifdef WOW_SKY_DEPTH
-    // The WMO-skybox lane (`clutter_fade.z` bit 13, `model_render::SKY_DEPTH_MARKER`): clip z
-    // pinned to 0 — reverse-Z "infinitely far" for every fragment, whatever w — under bevy's
-    // `GreaterEqual` test: the sky depth law (`benilla_world::sky_order`, "The depth law"). The
-    // world paints over the painted sky whatever the shell's radius, and the sky can never land
-    // in front of world geometry. A pipeline-key branch, never unconditional: every other model
-    // draw keeps its real depth.
+    // The WMO-skybox lane (`clutter_fade.z` bit 13): clip z = 0 is reverse-Z infinitely far, so
+    // the world always draws over the sky shell (`benilla_world::sky_order`).
     out.position.z = 0.0;
 #endif
 #ifdef WOW_MERGED_FADE
-    // The merged fader lane (decision 1418). Alpha channel: the faithful curve, per vertex.
-    // Hidden channel: a fully-faded placement collapses its clip position past the far plane —
-    // its triangles never rasterize, the shader-side equivalent of `Visibility::Hidden` at
-    // fade 0 (the CPU authority never sees inside a blob).
+    // A fully faded placement leaves the clip volume, so its triangles never rasterize.
     let fade_d = distance(view.world_position.xz, vertex.fade_sphere.xz);
     out.merged_fade = merged_fade_alpha(vertex.fade_sphere.w, fade_d);
     if (out.merged_fade <= 0.0) {
@@ -547,29 +375,10 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 
 #ifdef VERTEX_UVS_A
     out.uv = vertex.uv;
-    // **Environment-mapped batches GENERATE their texcoord — here, in the VERTEX stage, because
-    // that is where the reference generates it.** `Shaders\Vertex\Model2.bls` writes it as a
-    // vertex-program output and lets the rasteriser interpolate:
-    //
-    //     DP3 R0.x, R1.xyz, R2.xyz          ; dot(P, N)      P = view-space skinned position
-    //     MUL R0.x, c0.w, R0.x              ; ×2             N = normalize(view-space normal)
-    //     MAD R0.yzw, -R0.x, R2.xxyz, R1.xxyz   ; R = P − 2(P·N)N
-    //     DP3/RSQ/MUL                       ; normalize(R)
-    //     MAD result.texcoord[3].xy, R0.xyxx, c1.x, c1.x   ; ·0.5 + 0.5   (c0.w = 2, c1.x = 0.5)
-    //
-    // — the `(0.5,0,0,0.5 / 0,0.5,0,0.5)` remap wow-re byte-derived at `0x70b8d0` (models.md §944),
-    // reached whenever `texture_unit_lookup[texCoordSet] > 2` (`0x70b8bd`). Its space is pinned by
-    // the same program: `c2` (projection alone) × `c31` × vertex = clip, so `c31` — and therefore
-    // P and N — are **view space**, and wow-re's `lookat_v1` (`0x5c3e70`) stores row0 = side,
-    // row1 = up, row2 = forward, so `R.xy` is (camera-right, camera-up). Bevy's view basis is
-    // −Z-forward, which is exactly `F = diag(1,1,−1)`: `P'·N' = P·N`, hence `R' = F·R` and `R'.xy`
-    // is **identical**. No handedness fixup is needed or wanted.
-    //
-    // `view_rot * p_cam` is the view-space position already built for clip space above, so this
-    // costs one normalize and reuses the camera-relative precision (0974) instead of round-tripping
-    // an absolute world coordinate. Decision 0971 evaluated this per FRAGMENT instead; measured on
-    // `GnomeSubwayGlass` the two differ by ≤0.004 UV across a whole ring (the sphere-map disk has
-    // radius 0.5), so the deviation bought nothing and cost fidelity — see decision 0980.
+    // Env-mapped batches (`clutter_fade.z` bit 12; `texture_unit_lookup[texCoordSet] > 2` at
+    // `0x70b8bd`) generate their texcoord per vertex as `Model2.bls` does: in view space
+    // R = normalize(P − 2(P·N)N), uv = R.xy·0.5 + 0.5 (`0x70b8d0`). The reference view basis
+    // (`0x5c3e70`) and Bevy's −Z-forward one differ only in z, so R.xy needs no fixup.
 #ifdef VERTEX_POSITIONS
 #ifdef VERTEX_NORMALS
     if ((u32(m.clutter_fade.z) & 4096u) != 0u) {
@@ -593,14 +402,8 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
     out.instance_index = vertex.instance_index;
 #endif
 
-    // Dynamic point lights, by receiver class (wow-re trace-forensics-abbey-interior-d3d §2/§4):
-    // WMO surfaces take NONE (zero point lights on every observed WMO surface batch — the earlier
-    // "point-lit abbey wall" was a mis-identified unit draw), and interior M2 props take none HERE
-    // (their group-MOLR point lobes are folded into the per-instance SH probe). Everything else —
-    // exterior doodads, entities, clutter — keeps the FFP ≤3-nearest selection: clutter (merged in
-    // world space) anchors at its MCNK chunk cell (the terrain draw unit it belongs to), every M2
-    // at its INSTANCE origin (wow-re wmo-surface-dynamic-light §6 — the receiving unit's own
-    // position, deliberately not the skinned per-vertex matrix).
+    // Point lights: none on WMO surfaces, none here on interior M2 props (their group's MOLR lights
+    // are in the SH probe), else the ≤3 nearest to the instance origin (clutter: its MCNK chunk).
     if (m.model_flags.x > 0.5 || m.model_flags.z > 0.5) {
         out.point_lit = vec3<f32>(0.0);
     } else {
@@ -615,15 +418,9 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 
 @fragment
 fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
-    // **The UI model tile's cell clip** (decision 2093). A `<Model>` pane's batches render into
-    // that pane's cell of ONE shared atlas, and a model may draw outside its widget rect —
-    // `ForcedBackpackItem.mdx`'s card is authored 45..83 layout units above an origin that sits
-    // at the rect's bottom-left. The reference cannot leak: it draws each pane straight into the
-    // back buffer with the widget's rect as the VIEWPORT (`modelframe-render-law.md` §6). One
-    // shared atlas camera cannot carry a viewport per pane, so the tile hands its cell down as a
-    // mat-anim row (`anim_slots.w`, the row's `[min.x, min.y, max.x, max.y]` in ATLAS TEXELS —
-    // which is what `@builtin(position)` is here) and the fragment is the scissor. `w == 0` is
-    // the pinned-zero row: every world material, no clip, one comparison.
+    // The UI model tile's cell clip: the reference gives each `<Model>` pane its widget rect as the
+    // viewport; our panes share an atlas, so the tile passes its cell as a mat-anim row
+    // (`anim_slots.w`, `[min.x, min.y, max.x, max.y]` in atlas texels) and this is the scissor.
     if (m.anim_slots.w > 0.5) {
         let r = wow_light.matanim[u32(m.anim_slots.w)];
         if (in.position.x < r.x || in.position.y < r.y
@@ -631,9 +428,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
             discard;
         }
     }
-    // HARD FAR-CLIP WALL (faithful `farclip` ~777 yd) — see terrain.wgsl. Per-pixel discard beyond the
-    // projection far plane (planar eye-Z), so distant buildings/trees reveal closest-part-first and the
-    // sky/WDL shows behind. `wow_light.fog_params.w` = farclip (0 ⇒ disabled). Clutter (≤70 yd) never hits it.
+    // The far-clip wall: discard past `farclip` (`fog_params.w`, 0 = off) by planar eye depth, as
+    // terrain.wgsl does.
     if (wow_light.fog_params.w > 0.0) {
         let clip_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
         if (clip_z > wow_light.fog_params.w) {
@@ -641,11 +437,9 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         }
     }
 #ifdef WOW_WATER_CLIP
-    // THE STRADDLE SPLIT (decision 2188, straddle.rs; wow-re water-frame-straddle.md §2): a
-    // translucent model crossing its water plane draws on BOTH sides of the water pass — this
-    // batch on the eye's (near) list, its far twin (FAR_SIDE_MARKER, `clutter_fade.z` bit 11)
-    // before the water — and each copy keeps only its own half: the reference's `M2UseClipPlanes`
-    // hardware clip plane at the waterline. `straddle::keeps` is this block's Rust twin.
+    // The straddle split: a translucent model crossing its water plane draws on each side of the
+    // water pass (the far copy has `clutter_fade.z` bit 11) and each copy keeps its half, the
+    // reference's `M2UseClipPlanes` plane at the waterline. In sync with `straddle::keeps`.
     let water_clip = wow_light.water_clip[(mesh_functions::get_tag(in.instance_index) >> 19u) & 0x7ffu];
     if (water_clip.y != 0.0) {
         let far_copy = (u32(m.clutter_fade.z) & 2048u) != 0u;
@@ -655,32 +449,16 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         }
     }
 #endif
-    // Rebuild bevy's `VertexOutput` from our extended interstage struct (WowVsOut carries one extra
-    // interpolant — the per-vertex point term — which the pbr entry point doesn't know about).
-    // M2 UV animation folds in here (decision 0130 phase 3, wow-re m2-texanim-uv; the full law
-    // since decision 2019, wow-re modelframe-texanim-and-sequence-law §3.4):
-    //     uv' = R((uv + t − p) ⊙ s) + p,  p = (½, ½)
-    // — the batch's live texture-transform TRANSLATION is added to the stage UVs (`sun_scale.zw`
-    // is the built seed, the mat-anim row its delta), then the scale is applied about the pivot,
-    // then the rotation about the pivot. The affine row (`anim_slots.z`) carries `[cos − 1, sin,
-    // sx − 1, sy − 1]`; row 0 is all zeros, so a static batch and every translation-only doodad
-    // read `uv + t` exactly as before. `benilla_formats::uv_transform` is this fold's twin.
+    // Rebuild Bevy's `VertexOutput` with the M2 texture transform (in sync with
+    // `tex_anim::uv_transform`): uv' = R((uv + t − p) ⊙ s) + p, p = (½, ½), t = `sun_scale.zw`
+    // plus its mat-anim delta, R and s from the affine row `[cos − 1, sin, sx − 1, sy − 1]`.
     var vo: VertexOutput;
     vo.position = in.position;
     vo.world_position = in.world_position;
     vo.world_normal = in.world_normal;
 #ifdef VERTEX_UVS_A
-    // **Environment-mapped batches GENERATE their texture coordinates** (`clutter_fade.z` bit 12,
-    // model_render's `ENV_MAP_MARKER`; the asset's `texture_unit_lookup[texCoordSet] > 2`). Such a
-    // batch authors NO usable UVs — GnomeSubwayGlass's 330 vertices all sit at exactly (0,0),
-    // because the runtime is meant to supply them — so reading the raw vertex UV paints the whole
-    // surface in one corner texel of a reflection sheet (the Deeprun Tram tube's flat yellow).
-    //
-    // The coordinate itself is generated in the VERTEX stage, where the reference generates it
-    // (see the derivation there); `in.uv` already carries it, interpolated. All that is left here
-    // is to keep the UV **animation** off it: the reference's gate excludes an env stage from
-    // `textureTransform` by construction (`m2-texanim-uv` §2), so adding the live translation
-    // would drift a reflection that must stay pinned to the view.
+    // An env-mapped coordinate takes no UV animation: the reference excludes an env stage from
+    // `textureTransform`.
     if ((u32(m.clutter_fade.z) & 4096u) != 0u) {
         vo.uv = in.uv;
     } else {
@@ -701,20 +479,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     vo.instance_index = in.instance_index;
 #endif
     var pbr_input = pbr_input_from_standard_material(vo, is_front);
-    // Ground-clutter distance fade: multiply the cutout alpha by the camera-distance ramp BEFORE the
-    // alpha test, so distant detail doodads erode out by `clutter_fade.y` yd (the client's ~70-yd
-    // horizon). Disabled (no-op) for normal models where `clutter_fade.w == 0`. This is a draw-distance
-    // concern, not lighting, so it survives the Phase-0 strip.
     var base_color = pbr_input.material.base_color;
-    // WMO batches carry LIGHTING data in the MOCV ALPHA — TRANS (tint.w == 2) the lit↔bake lerp
-    // factor, INT (tint.w == 1) the ×4 self-illumination mask. Bevy pre-folds ATTRIBUTE_COLOR
-    // (rgba) into base_color, but coverage must stay the texel alpha, exactly the reference's
-    // WMO pixel path (its output alpha is tex.a; MOCV.a never reaches coverage —
-    // wow-re models.md). Re-sampling the texture here (same UV, same implicit derivatives — the
-    // texture cache makes it free) replaces the old divide-the-fold-back-out reconstruction,
-    // which was numerically annihilated where MOCV.a ≈ 0: `tex.a × ε ÷ max(ε, 1/255)` collapses
-    // to 0 at ε = 0 and to 4-bit rubble near it — B65's Great Forge chasm deck, whose
-    // self-illumination mask is authored 0, alpha-eroded into "missing floor" exactly there.
+    // WMO MOCV alpha is lighting data (the TRANS lerp, the INT glow mask), and the reference's WMO
+    // output alpha is tex.a alone. Bevy folds the vertex alpha into base_color, so re-sample the
+    // texel alpha: dividing the fold back out loses everything where MOCV.a ≈ 0.
 #ifdef VERTEX_COLORS
     if (m.model_flags.x > 0.5) {
 #ifdef VERTEX_UVS_A
@@ -722,9 +490,8 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
             pbr_bindings::base_color_texture,
             pbr_bindings::base_color_sampler,
             vo.uv,
-            // The same LOD `pbr_input_from_standard_material` just sampled the colour at — it
-            // applies `view.mip_bias` itself (1639), and coverage read from a different mip than
-            // the colour is a cutout that erodes out of step with the art it masks.
+            // The colour's LOD: `pbr_input_from_standard_material` applies `view.mip_bias`, and
+            // coverage from another mip erodes out of step with the art.
             view.mip_bias,
         ).a;
 #else
@@ -732,31 +499,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 #endif
     }
 #endif
-    // **The detail-doodad LOD BIAS** — the state that decides whether the fade cuts a leaf pixel by
-    // pixel or takes it whole (wow-re `terrain/scratch/doodad-fade-pixel-granularity.md`, 2021).
-    // `0x6813d0` sets `D3DSAMP_MIPMAPLODBIAS = +0.25` on stage 0 at `0x6813f4`, once per frame,
-    // immediately before the pass dispatches `0x6c02d0` — outside `[0x6b1000, 0x6b3200)`, which is
-    // why 2004's state census missed it. Capture-confirmed: all 29 doodad batches bind a sampler
-    // with `GL_TEXTURE_LOD_BIAS = 0.25` where the draws just before them bind an otherwise
-    // byte-identical sampler with bias 0.
-    //
-    // Why a quarter-mip is worth a re-sample: three of the shipped detail atlases (Elwynn's among
-    // them) carry a **binary** alpha pyramid — mip 0 has DXT3's 16 levels, every level below it has
-    // two. A fragment can only reach `a ≈ 1.0`, and so share the terminal death depth, inside a 2×2
-    // all-opaque texel neighbourhood; those neighbourhoods run out between mip 2 and mip 3. Biasing
-    // a quarter-mip blurrier lands the reference past that cliff, so no fragment holds full alpha
-    // and the tuft erodes continuously instead of every leaf crossing together. Measured on the
-    // dominant Elwynn cell, the share of a tuft's pixels leaving in the last half-yard: **2.2 %**
-    // with this bias, **11.6 %** without it.
-    //
-    // wgpu has no sampler LOD bias (WebGPU dropped it), so it goes on the sample. Re-sampling here
-    // rather than pre-biasing the sampler is what keeps it *this lane's* bias: the sampler is shared
-    // with every other model batch, which must keep the reference's 0. Same UV, same implicit
-    // derivatives, so the texture cache makes the second tap nearly free.
-    // `pbr_input_from_standard_material` folds ATTRIBUTE_COLOR and the material tint into what it
-    // sampled; for clutter the material tint is white and the vertex colour is the MCSH lit/shadow
-    // grey, so re-applying `vo.color` reproduces the fold exactly — no divide-back-out, which is the
-    // trap the WMO branch above documents.
+    // The detail-doodad LOD bias (`0x6813f4`): on the atlases whose alpha pyramid is binary below
+    // mip 0 it keeps every fragment below full alpha, so the fade erodes per pixel, not per leaf.
+    // wgpu has no sampler LOD bias and the sampler is shared with unbiased batches, so it goes on
+    // this sample. Clutter's tint is white and its vertex colour the MCSH grey, so `* vo.color`
+    // reproduces Bevy's fold.
     if (m.clutter_fade.w > 0.5) {
 #ifdef VERTEX_UVS_A
         var biased = textureSampleBias(
@@ -771,26 +518,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         base_color = biased;
 #endif
     }
-    // Ground-clutter distance fade — the reference's stage-1 ramp, byte-exact and capture-confirmed
-    // (wow-re `terrain/scratch/detail-doodad-distance-fade.md`, 2004). Three facts shape this:
-    //
-    //  * **The coordinate is VIEW-SPACE DEPTH, not radial distance.** `0x6b2b80` texgens
-    //    `D3DTSS_TCI_CAMERASPACEPOSITION` (`EGxRs 0x30 = 3`, `TEXCOORDINDEX = stage | 0x20000`)
-    //    through `T(0,0,−52.5)·Ry(π/2)·S(1/17.5)`, giving `u = (z_eye − 52.5) / 17.5`. The fade
-    //    boundary is therefore a PLANE across the view, not a sphere around the camera — which is
-    //    what a radial `distance()` drew here until 2004, and a sphere reads as a hard ring on the
-    //    ground that sweeps as the player moves.
-    //  * **The ramp is a quantised 64-texel table, not a clean 1→0 line.** `0x6b2320` fills a 64×8
-    //    CLAMP/LINEAR texture, RGB white, `alpha = 4·(63 − col)`; a bilinear read across texel
-    //    centres is `alpha = (254 − 256·u)/255`, capped at texel 0's `252/255`. So the plateau ends
-    //    at `near + 0.0078·band` and the ramp reaches zero at `far − 0.0078·band`, never quite at
-    //    the two named radii, and near clutter tops out at 98.8 % opaque, never 100 %.
-    //  * **It multiplies into the alpha the CUTOUT reads.** Both stages take texenv preset 1
-    //    (`MODULATE` on colour AND alpha) and `ALPHAREF` is `detailDoodadAlpha` = 128, so the test
-    //    sees `tex0.a × ramp`: survivors blend at 0.502..0.988 (the visible opacity fade) and the
-    //    tuft erodes out entirely at ramp 128/255, i.e. 61.11 yd of the 70 yd horizon. That erosion
-    //    is the reference's own behaviour, not our artefact — the blend is what makes it read as a
-    //    fade rather than a cut, so what matters is that the survivors are genuinely translucent.
+    // The clutter distance fade, the reference's stage-1 ramp: u = (z_eye − 52.5)/17.5 by a
+    // camera-space texgen (`0x6b2b80`), so the boundary is a view plane, not a sphere; the ramp is
+    // a bilinear read of the 64-texel table `4·(63 − col)` (`0x6b2320`). It multiplies the alpha
+    // the cutout tests (ALPHAREF `detailDoodadAlpha` = 128).
     if (m.clutter_fade.w > 0.5) {
         let z_eye = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
         let u = (z_eye - m.clutter_fade.x) / max(m.clutter_fade.y - m.clutter_fade.x, 0.001);
@@ -798,57 +529,23 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         base_color.a = base_color.a * ramp;
     }
 
-    // Faithful per-object WORLD-DOODAD distance fade (`FUN_00683f80`/`model_fade.rs`): the fade alpha
-    // (1.0 = opaque) rides in the per-instance `MeshTag`; tag 0 (clutter/WMO) ⇒ 1.0 no-op.
-    // VERIFIED reference behaviour (`RECONCILE-fade-render-state.md`): a fading doodad is the SAME draw
-    // as the steady cutout — the alpha-test ref scales WITH the fade so the effective cutoff stays a
-    // constant `tex0.a < 224/255` (STABLE silhouette, never grows/snaps) — with blend on and source
-    // alpha = `tex0.a × fade`. On the blend twin `AlphaMode::Blend` does no discard, so we re-apply
-    // that hard cutout here on the UNFADED alpha — but ONLY for a twin whose SOURCE batch alpha-tests
-    // (clutter_fade.z bit 10, model_render's TWIN_CUTOUT_MARKER): the reference keys ALPHAREF on the
-    // STORED blend mode (m2-blend-promotion-zfill.md §2), so a fading/stealthed OPAQUE batch blends
-    // with no alpha test at all. Keying the discard on the twin bit itself cut every texel under
-    // 224/255 out of promoted Opaque batches — Gressil's blade body erased to its rune pattern under
-    // stealth (decision 0842). `specialize` keeps depth-write ON for every twin (`model_flags.y`).
-    // The payload is TYPED (mesh_tag.rs, decisions 0173/0720): bits 0-5 = the fade alpha (6-bit
-    // fraction; a whole payload of 0 = the untagged ⇒ opaque sentinel), bits 19-29 = the skin
-    // rig slot (vertex-stage concern — the fragment never reads it, but it rides every payload,
-    // so the 0-sentinel test uses the WHOLE masked payload as before). Between them the exterior
-    // payload carries the per-instance ground-shade byte in bits 6-13 (0 lit → 255 MCSH-shadowed
-    // — decoded at the doodad sun below; entities ramp it, statics leave 0). On an interior-mode
-    // material (interior z, not WMO x) bits 6-18 carry the SH-probe SLOT instead — static MODD
-    // props at spawn, and every indoor entity on the footprint-bake law (decision 0354: units
-    // keep the probe lane indoors; the day/night state is the exterior material at the
-    // intensity-1.0 shade byte, not a mode of its own).
-    // Tag bits 31/30 are standalone flags (mesh_tag.rs), split off before the payload decode so the
-    // 0-sentinel and both payload modes read the masked value: bit 31 = hover/target HIGHLIGHT,
-    // bit 30 = INTERIOR FOG — the instance's model stands in a WMO interior, so it fogs with the
-    // interior triple below (the reference stages unit fog by the unit's own classification,
-    // wow-re m2-unit-interior-fog.md).
+    // The MeshTag (mesh_tag.rs): bit 31 = highlight, bit 30 = interior fog; payload bits 0-5 = the
+    // fade alpha (a zero payload is untagged, opaque), 19-29 = the rig slot, 6-13 = the ground
+    // shade (0 lit, 255 MCSH-shadowed) or, on an interior-prop material, 6-18 = the SH-probe slot.
     let interior_prop = m.model_flags.z > 0.5 && m.model_flags.x < 0.5;
     let raw_tag = mesh_functions::get_tag(in.instance_index);
     let highlighted = (raw_tag & 0x80000000u) != 0u;
     let interior_fogged = (raw_tag & 0x40000000u) != 0u;
-    // Bits 0-5 are the fade alpha in BOTH payload modes, so a feathering indoor entity keeps its
-    // probe AND its alpha ramp — and a skinned part keeps its rig slot through either.
     let fade_tag = raw_tag & 0x3fffffffu;
     let alpha6 = f32(fade_tag & 0x3fu) / 63.0;
     var obj_fade = select(alpha6, 1.0, fade_tag == 0u);
 #ifdef WOW_MERGED_FADE
-    // The merged per-vertex fade composes exactly where the per-entity tag fade did (1420):
-    // every downstream consumer — `faded_alpha`, the multiply-lerp, the additive scale, and
-    // the bit-10 re-discard on UNFADED texel alpha — sees the same algebra an individual
-    // fading doodad produced, so a fader blob on its blend twin feathers exactly like the
-    // reference (and a steady member at fade 1.0 is pixel-identical to the cutout it left).
+    // A merged blob's per-vertex fade composes where the tag fade does, so it feathers the same.
     obj_fade = obj_fade * in.merged_fade;
 #endif
-    // The per-instance body TINT (instance_tint.rs, decision 0812) — the aura state kit's CharProc 1:
-    // an aura painting the whole model one colour (ghost pale blue, poison green, Frostbolt blue).
-    // Indexed by the SAME rig slot the vertex stage skins from (bits 19-29), so it needs no tag bits
-    // of its own; a `0` word is identity, which is every unskinned instance (slot 0) and every
-    // untinted unit. It is the material's ambient+diffuse colour (gx SetState(1) →
-    // GL_COLOR_MATERIAL), so it multiplies the light sum INSIDE the clamp below and never the
-    // emission terms — the same placement the WMO branch already gives MOCV.
+    // The body tint (an aura colouring the whole model), by rig slot, 0 = identity: the material
+    // ambient+diffuse colour (gx SetState(1), GL_COLOR_MATERIAL), so it multiplies the light sum
+    // inside the clamp, never the emission.
     let tint_word = wow_light.rig_tint[(fade_tag >> 19u) & 0x7ffu];
     let inst_tint = select(
         vec3<f32>(
@@ -859,143 +556,49 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         vec3<f32>(1.0),
         tint_word == 0u,
     );
+    // The blend twin re-applies its source's cutout: the reference scales ALPHAREF with the fade,
+    // so the cutoff stays tex.a < 224/255 on the unfaded alpha. Only for a source batch that
+    // alpha-tests (bit 10): ALPHAREF keys on the stored blend mode.
     if ((u32(m.clutter_fade.z) & 1024u) != 0u && base_color.a < VANILLA_ALPHA_KEY) {
         discard;
     }
-    // DEPTH-PRIME TWIN (the zfill pipeline variant — terrain.rs `specialize`, the reference's
-    // M2UseZFill clone command, wow-re m2-blend-promotion-zfill.md §4): colour writes are masked
-    // off at the pipeline, so on that variant only the discards above (farclip wall, the
-    // bit-10 twin cutout) shape what depth gets written; the lighting/fog below is computed and
-    // thrown away. (A shader-def early return here would be the natural spelling, but naga's MSL
-    // backend miscompiles the dead tail — "redefinition of '_tmp'" — so the twin pays the colour
-    // math instead. Episodes are transient; the cost is bounded.)
-    // Blend source alpha = texel alpha × fade (translucent fade of the fixed cutout shape). For steady
-    // cutout/opaque draws blend is off so this is ignored; for the fade twin it drives the feather.
+    // The depth-prime twin (`M2UseZFill`) masks colour writes, so only the discards above shape its
+    // depth. No early return: naga's MSL backend miscompiles the dead tail ("redefinition of
+    // '_tmp'").
     let faded_alpha = base_color.a * obj_fade;
-    // Steady cutout (Mask) / opaque discard per the StandardMaterial alpha mode (no-op for the blend twin).
     let base = alpha_discard(pbr_input.material, base_color);
 
-    // --- STEPS 7+8d: matte lighting, split on clutter ---------------------------------------------
-    // M2/WMO meshes get the same directional matte lighting as terrain — `lit = clamp(ambient +
-    // diffuse·max(N·L,0))`, where N is the model's authored vertex normal and L is the Bevy-space
-    // sun travel dir (to-light = `−light_sun`).
-    //
-    // **Clutter is lit by the GROUND normal under each tuft** (Step 8d). VERIFIED faithful: WoW's
-    // CreateDetailDoodads computes the terrain quadrant-plane normal under the tuft and writes it onto
-    // the clutter vertex's normal channel (docs/knowledge/ground-effects.md), and the reference's
-    // clutter draw (apitrace WoW.5, prog 186 / alpha-ref 128/255) lights per-vertex with
-    // `dot(L, that normal)` × a per-vertex colour, MODULATE × texture — so a tuft darkens with the
-    // ground it stands on (shaded/sloped tufts go darker, like the dirt beneath). We bake that normal
-    // in clutter.rs (`terrain_normal_at`). World-up was an earlier flat-ground approximation, removed.
-    // **Exterior M2 doodads take the verified `Model2.bls` sun curve** (0747, below) with the
-    // diffuse/sun term scaled by the terrain-shade at the doodad's base (lit vs MCSH-shadowed ground);
-    // clutter and WMO keep the plain FFP `ambient + diffuse·max(N·L,0)` — clutter lit by the ground
-    // normal, WMO by its own (both genuinely fixed-function reference programs).
+    // --- Lighting --------------------------------------------------------------------------------
     let is_clutter = m.clutter_fade.w > 0.5;
     let L = -normalize(wow_light.light_sun.xyz);
-    // `wow_normalize`, not `normalize`: the unskinned lane carries an authored `(0,0,0)` normal
-    // through to here unchanged, and a NaN out of this line blacks the whole batch (see the helper).
+    // `wow_normalize`: an authored zero normal reaches here on the unskinned lane.
     let n_m2 = wow_normalize(pbr_input.world_normal);
-    // Bevy negates `world_normal` on the back faces of any DOUBLE-SIDED material — two-sided foliage
-    // cross-quads (grass tufts, leaf cards) AND every WMO group face (our WMO loader marks all WMO
-    // submeshes two-sided, models.rs). The reference has NO such per-face negation: WoW sets the GL
-    // lighting model once (`FUN_0059ce30`) and NEVER enables `GL_LIGHT_MODEL_TWO_SIDE`, so BOTH faces of
-    // every polygon — clutter, M2 doodad, WMO group — are lit from the SAME submitted normal. So we
-    // un-flip Bevy's negation here and light EVERY path below from `n_lit`; the raw `n_m2` is never used
-    // for lighting directly. For single-sided materials back faces are culled ⇒ `is_front` always true
-    // ⇒ `n_lit == n_m2` (no-op). Universal "two-side-off" fix → no view-dependent lit/unlit seam, on
-    // M2 foliage (doodad matte path) OR WMO group geometry (the FFP N·L path below) (foliage.md).
+    // Bevy negates `world_normal` on back faces of double-sided materials (foliage, every WMO
+    // face); the reference never enables GL_LIGHT_MODEL_TWO_SIDE (`FUN_0059ce30`), so undo it.
     let n_lit = select(-n_m2, n_m2, is_front);
     let ndotl = max(dot(n_lit, L), 0.0);
     let lit_nl = clamp(wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl, vec3<f32>(0.0), vec3<f32>(1.0));
-    // The order-2 SH basis products over the fragment normal — shared by the global exterior eval
-    // below and the interior-prop probe lane further down.
+    // The order-2 SH basis, shared by the exterior lobe and the interior probes.
     let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
     let n1 = vec4<f32>(n_lit, 1.0);
     let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
-    // Exterior world doodad/entity: **the reference's own response** —
-    // `clamp01(A + C·I·(4/17)(0.375 + 2μ + 1.875μ²))`, μ = N·u toward-light, the order-2
-    // `Model2.bls` lobe evaluated over the SH rows above (0803; read that record and 0796 before
-    // touching this lane).
-    //
-    // The long way round, because the scar tissue matters: 0410 replaced this curve with a
-    // hard-cutoff FFP matte on the director's look call — a sunlit character's shadow side must read
-    // the SAME as the same skin standing in shade, and the lobe's authored wrap (0.059·C on the
-    // anti-sun side, dipping −0.037·C mid-back) tinted it warm and lifted it. 0753 then read the
-    // reference's own apitrace as CORROBORATING the cutoff (an FFP light slot, "no SH constants
-    // anywhere in the trace"). **0796 refuted that**: wow-re's §5 cross-check shows the reference's
-    // M2 lane — ADT doodad, GameObject, creature, player alike — is its own authored `Model2.bls`
-    // vertex shader running order-2 SH, and the FFP light commits visible in a world frame belong to
-    // TERRAIN (`0x71c730`'s five `0x68xxxx` call sites) and the WMO path. M2's single FFP call site
-    // (`70bdf6`) is reachable only with `M2UseShaders` off. "No SH constants" was a measurement
-    // artifact — constants upload as dirty-range deltas whose start register varies. That left 0410
-    // standing as a look preference against a verified curve, so 0799 put the two behind an A/B and
-    // 0803 is the director choosing the curve. The cutoff branch left with the flag.
-    //
-    // The CPU light animator targets the per-instance intensity `[node+0xa4]` — 2.5 on lit ground
-    // / 0.5 on MCSH-shadowed ground / 1.0 on the interior/WMO-prop leg (`0x69e4ad`, `0x69e280`;
-    // the force-1.0 leg is `0x69e36b`). Lane history: `Model2.bls` SH lobe (0354/0358) → FFP
-    // matte, hard cutoff (0410, director's call) → unclamped source (0706) → verified curve
-    // (0747) → peak-norm (0750) → calibration dial (0751) → the 0753 trace law → 0796 (kept the
-    // pixels, demoted the justification) → 0799 (the A/B) → 0803, back on the curve for good.
-    //
-    // The per-material `sun_scale.x` selector has THREE states (model_render::ShadeSel): ≥0.85 =
-    // the lit-ground family — **entity M2s only** since 2050 (animator target 2.5, mixed toward
-    // 0.5 by the per-instance tag shade byte, which units/players/GameObjects ramp CPU-side like
-    // the binary's `0x69e770`); 0.5..0.85 = fixed intensity 1.0, which is **both doodad classes**
-    // (an ADT map doodad and an exterior WMO MODD prop are one C++ class and neither can reach the
-    // 2.5 site); <0.5 = statically MCSH-shadowed (0.5). Statics leave the tag byte 0. The ramp
-    // runs in animator units and the COMMIT clamps.
-    //
-    // **`min(I, 1)` is OURS, and it is the one unfaithful term in this lane (0803 §3, 0814, 0821).**
-    // The reference does not cap the gain. On the VS/SH lane — the default config, and the lane this
-    // shader IS — `0x71c4e0` bakes `[node+0xa4]` straight into the SH moments with no clamp; on the
-    // FFP lane `0x71c730`→`0x71ca80` clamps the **product** `D × I` (by max-channel, preserving hue),
-    // never the multiplier. So the cap below is a benilla choice, and it costs us twice:
-    //
-    //   1. **Brightness.** A lit ENTITY — unit, player, GameObject — commits ×1.0 where the
-    //      reference gives ×2.5, so characters in sun read dimmer than the reference. Still open —
-    //      lifting it pushes a sun-facing surface well past 1.0 (with an over-gamut sun, into green
-    //      as well), which is a world-wide look change and the director's call, not one to
-    //      self-grade. (Doodads were in this sentence until 2050; see below.)
-    //
-    //      **Doodads are NOT in that sentence any more (2050).** wow-re settled it at the bytes
-    //      and in the capture: a `CMapDoodadDef` — ADT MDDF and WMO MODD alike — commits 1.0 lit /
-    //      0.5 shadowed and never ramps; it has no ramp target field (`+0xf8` is `m[2][3]` of its
-    //      world matrix), and the 2.5 belongs to the WENTITY node an entity hangs off `[obj+0xe0]`.
-    //      §6's attribution of 2.5 to ADT doodads was the error. So this cap is a **no-op on the
-    //      faithful doodad input** and never dimmed a tree; what it dims is units, players and
-    //      GameObjects, which is what item 1 above is now about.
-    //
-    //      The trap that leaves behind, and why 2050 moved the selector rather than waiting for
-    //      the cap: feeding every M2 a lit 2.5 and then capping emits the right number for a lit
-    //      doodad **for the wrong reason**. Lifting the cap without giving doodads their own 1.0
-    //      would have taken every tree in Elwynn to 2.5×, and a uniformly too-bright world is the
-    //      kind of wrong nobody files. The scale is per-class now, so that is no longer coupled.
-    //   2. **Timing — fixed CPU-side (0821).** Because the cap sits on the multiplier, every target
-    //      from 2.5 down to 1.0 renders identically, so a unit ramping 2.5 → 0.5 spent its first
-    //      0.45 s (75 % of the chase) invisibly pinned at 1.0 and then dropped in 0.15 s. It read as a
-    //      dead pause then a snap — what the director reported walking sun → shade.
-    //      `entity_shade::LIT_T` now aims the LIT target at the value this cap can actually show
-    //      (1.0), so the chase moves only through visible range, at the reference's own
-    //      3.3333 intensity-units/s. The cap is a backstop here, not the thing the ramp fights.
-    //
-    // Two faces of one bug, and they unwind together: **cut `min(I, 1)` and `LIT_T` goes back to 0.0**
-    // so the full 2.5 → 0.5 sweep becomes visible on its own. Do not cut one alone — and note that
-    // the pair is now an ENTITY-only concern: since 2050 no doodad rides this band, so lifting the
-    // cap changes units, players and GameObjects and leaves the world's trees and props where they
-    // are. That decoupling was the prerequisite, and it is done. (Units are on this
-    // chain again — 0809's flat ×1.0 pin was wrong and 0814 reverted it; the null fallback that
-    // motivated it is real, but it is a lifecycle state we do not model.)
+    // Exterior doodads and entities: the header's `Model2.bls` lobe at the per-instance intensity
+    // I, `[node+0xa4]` (animator targets 2.5 lit and 0.5 shadowed, `0x69e4ad`/`0x69e280`; 1.0
+    // indoors, `0x69e36b`). `sun_scale.x` picks the family:
+    //   ≥ 0.85: an entity M2, 2.5 mixed toward 0.5 by the tag's shade byte (ramped like `0x69e770`)
+    //   0.5..0.85: a doodad (ADT MDDF or WMO MODD, both `CMapDoodadDef`): 1.0, never 2.5
+    //   < 0.5: a doodad on MCSH-shadowed ground: 0.5
+    // Deviation: `min(I, 1)`. The reference bakes I into the SH unclamped (`0x71c4e0`), so a lit
+    // entity commits ×2.5 there and ×1.0 here; lifting the cap takes sun-facing surfaces past 1.0.
+    // `entity_shade::LIT_T` aims the lit ramp at 1.0 because of it: lift the cap and set `LIT_T`
+    // back to 0.0 together.
     let inst_shade = select(f32((fade_tag >> 6u) & 0xffu) / 255.0, 0.0, interior_prop);
     let mat_shade = select(0.0, 1.0, m.sun_scale.x < 0.5);
     let shade_t = max(mat_shade, inst_shade);
     let mid_band = m.sun_scale.x >= 0.5 && m.sun_scale.x < 0.85;
     let intensity = min(select(mix(2.5, 0.5, shade_t), 1.0, mid_band), 1.0);
-    // The lobe. Same closed form the interior-prop lane below runs and the same one
-    // `pack_model_core_rows` folds. Every sun band is linear in the committed colour, so ONE
-    // `intensity` multiply covers the whole lobe (never I²); ambient rides the c10 `.w` lanes and
-    // does NOT scale with it, and the sun's DC redistribution rides `grade.yzw`.
+    // One `intensity` multiply covers every sun band (never I²); the c10 `.w` ambient does not
+    // scale. `pack_model_core_rows` packs the same closed form.
     let sun_dc = wow_light.grade.yzw * intensity;
     let sun_lobe = vec3<f32>(
         wow_light.sh_c10_r.w + sun_dc.x
@@ -1011,36 +614,19 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
                 * (dot(wow_light.sh_c10_b.xyz, n_lit) + dot(wow_light.sh_c13_b, quad)
                     + wow_light.sh_c16.z * x2y2),
     );
-    // clamp01 the SUM, never per term — the lobe dips to −0.037·C around μ≈−0.53 (low-order-SH
-    // ringing, the reference's own authored response), and clamping the sun term alone would floor
-    // that away and erase the mid-back dip. That dip is part of the response 0803 chose, not noise
-    // to tidy up.
+    // Clamp the sum, never a term: the lobe's own ringing dips to −0.037·C near μ ≈ −0.53, and a
+    // per-term clamp would erase it.
     let lit_doodad = clamp(sun_lobe, vec3<f32>(0.0), vec3<f32>(1.0));
-    // WMO buildings (model_flags.x) use the FFP directional N·L at sun-scale 1.0 — the reference lights them
-    // with `ambient + sun·max(N·L,0)` and does NOT apply the exterior doodad terrain-shade (verified: prog
-    // 198/VS 151). Their per-vertex MOCV shade rides in `base_color` (ATTRIBUTE_COLOR) → folds into `albedo`,
-    // giving tex × MOCV × lit. Exterior world doodads (not clutter, not WMO) take the terrain-shaded matte;
-    // clutter uses its own ground-normal matte. `light_sun.w` is the directional-enable flag (on outdoors).
+    // WMO and clutter take the FFP N·L light with no terrain shade; the lobe needs the directional
+    // light on (`light_sun.w`).
     let is_wmo = m.model_flags.x > 0.5;
     let is_interior = m.model_flags.z > 0.5;
     let use_doodad_shade = (wow_light.light_sun.w > 0.5) && !is_clutter && !is_wmo;
     let lit_exterior = select(lit_nl, lit_doodad, use_doodad_shade);
-    // WMO INTERIOR surfaces (model_flags.z; groupFlags & 0x48 == 0) — by BATCH CLASS (tint.w; wow-re
-    // trace-forensics-abbey-interior-d3d §2, observed on the abbey at close range):
-    //   INT (tint.w = 1): UNLIT — the draw is pure `tex × MOCV`; the baked vertex colours (the
-    //     artists' lamp/forge/hearth/candle warmth) ARE the room's light, constant day and night.
-    //     No exterior light, no point lights (the reference commits zero to any WMO surface).
-    //   TRANS (tint.w = 2): the per-vertex MOCV-ALPHA LERP between the day/night-lit surface and
-    //     that unlit bake — the reference's two-pass (lit × SRC_ALPHA + unlit × (1−SRC_ALPHA))
-    //     collapsed to one pass: `mix(1, extLit, MOCV.a)` as the lit factor.
-    //   EXT (tint.w = 0): an interior group's exterior-law batches — plain `lit_nl`.
-    //
-    // WINDOW (MOMT 0x20, m.sidn.w) — interior drawer only: the batch's lit lanes swap GL_LIGHT0 to
-    // the brighter interior pair, ambient AND diffuse = the MIDPOINT of the Direct (sun diffuse) and
-    // Ambient bands, ambient +16/255 saturating (wow-re wmo-interior-night-light §2, 0x6d37e0). It
-    // folds the warm Direct band in at full weight, so an interior pane reads bright and warm in
-    // daylight instead of taking the flat exterior ambient — and still tracks time of day. The
-    // exterior drawer has no WINDOW machinery, so exterior-group batches keep plain lit_nl.
+    // WMO interior groups (`groupFlags & 0x48 == 0`) by batch class (`tint.w`): INT (1) is unlit
+    // `tex × MOCV`; TRANS (2) is the reference's two passes, lit × MOCV.a + unlit × (1 − MOCV.a),
+    // as one lerp; EXT (0) is `lit_nl`. A WINDOW batch (MOMT 0x20) on the interior drawer lights
+    // with ambient = diffuse = the Direct/Ambient midpoint, ambient +16/255 (`0x6d37e0`).
     var trans_a = 1.0;
 #ifdef VERTEX_COLORS
     trans_a = in.color.a;
@@ -1058,19 +644,12 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     } else if (m.tint.w < 0.5) {
         lit_wmo_interior = lit_int_base;
     }
-    // INTERIOR M2 PROPS — WMO MODD doodads only (inn kegs/tables/candelabra; is_interior but NOT
-    // is_wmo). The real client fills the prop's base ONCE at create from the MODD entry's own baked
-    // colour (never a footprint sample — that chain is the ADT-MDDF path) and commits it with the
-    // fixed-axis diffuse lobe + the owning group's MOLR point lobes as an order-2 SH probe the
-    // vertex shader evaluates (wow-re trace-forensics-abbey-interior-d3d §1, decoded live off the
-    // abbey stands to ~1e-7). benilla folds the identical closed form at spawn
-    // (`lighting::prop_probe_coeffs`) into the per-instance probe table; the MeshTag payload is the
-    // slot. Evaluated here per fragment over the same basis — note the SH lobe's soft wrap (side-on
-    // ≈ 0.088·C) is the reference's authored response, deliberately NOT a hard max(N·L,0).
-    // Units/GameObjects never reach this lane (base CGLight — plain day/night ×1.0, §8/§9).
+    // Interior M2 props (WMO MODD doodads): the reference commits the prop's MODD colour through a
+    // fixed-axis diffuse lobe plus its group's MOLR lights as an order-2 SH probe, folded at spawn
+    // by `lighting::prop_probe_coeffs` and evaluated here per fragment (the reference: per vertex).
+    // Its soft wrap (≈ 0.088·C side-on) is the reference's response, not a max(N·L, 0).
 #ifdef WOW_MERGED_SLOT
-    // A merged interior-prop blob (1418 lane 3): the slot is baked per vertex — the tag's
-    // payload bits belong to the whole blob and carry only fog/alpha.
+    // A merged blob bakes the slot per vertex; its tag carries only fog and alpha.
     let probe = 7u * in.merged_slot;
 #else
     let probe = 7u * ((fade_tag >> 6u) & 0x1fffu);
@@ -1091,87 +670,52 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         vec3<f32>(1.0),
     );
     let lit_interior = select(lit_m2_interior, lit_wmo_interior, is_wmo);
-    // AUTHORED-RIG lane (`ShadeSel::Rig`, sun_scale.x = 2.0 — the glue create booth, decision
-    // 0429): the lit value is the probe-slot SH eval — the scene M2's ambient + directional
-    // lights, folded into slot 0 of the material's OWN buffer (booth instances carry tag 0, so
-    // `lit_m2_interior` above already evaluated exactly that probe). No sun, no intensity family,
-    // no day/night — a glue scene's light is entirely its authored rig. Rig materials are neither
-    // WMO nor interior, so the per-vertex point term (the rig's authored point lights) flows in
-    // through `point_diffuse` below like any exterior entity.
+    // The authored-rig lane (`ShadeSel::Rig`, glue scenes): the scene's lights are folded into
+    // probe slot 0 of the material's own buffer, which `lit_m2_interior` already evaluated (tag 0).
     let is_rig = m.sun_scale.x >= 1.5;
     let lit = select(select(lit_exterior, lit_interior, is_interior), lit_m2_interior, is_rig);
-    // Gamma-space albedo — the lane (0161): the buffer holds bytes, lighting math runs on the
-    // authored values. (The old fog_params.z linear-space A/B is dead — settled by the lane.)
-    // `m.tint` is the animated M2Color RGB (identity 1 for static batches) — the same per-batch
-    // tint the vertex colours carry for constant tracks, so it folds at the same point.
-    let albedo = base.rgb * (m.tint.rgb + wow_light.matanim[u32(m.anim_slots.y)].xyz);
-    // Unlit fullbright (model_flags.w): M2 UNLIT (0x01) glass/glow cards, or WMO UNLIT on an
-    // exterior-group batch (`tex × white` — the inn's always-lit outside panes). Wins over the lit
-    // path; faithfully receives NO emission terms (lighting is off, so GL_EMISSION is dead there).
+    // Gamma-space albedo: lighting runs on the authored byte values. `m.tint` plus its mat-anim
+    // delta is the animated M2Color tint.
+    let anim_tint = m.tint.rgb + wow_light.matanim[u32(m.anim_slots.y)].xyz;
+    let albedo = base.rgb * anim_tint;
+    // An unlit batch replaces the lit path: fullbright, with only the highlight added (below).
     let is_emissive = m.model_flags.w > 0.5;
-    // SIDN night glow (MOMT 0x10, m.sidn.rgb): the authored emissive × the live night fraction
-    // (grade.x — 1 overnight, 0 all day, ramps 20:30→21:30 / 06:00→07:00). A GL material EMISSION
-    // term, so it adds INSIDE the clamped lit sum (tex × (lit + sidn·night)) and reaches LIT lanes
-    // only: exterior-drawer lit batches and an interior group's EXT lane at full weight, TRANS by
-    // its lit-pass weight (MOCV.a), and never the unlit INT lane (wow-re wmo-interior-night-light
-    // §4, wmo-lit-selector §1.3). Zero for every M2 batch.
+    // SIDN night glow: the emissive × the night fraction (ramping 20:30→21:30, 06:00→07:00), a
+    // GL_EMISSION term inside the clamped lit sum, on lit lanes only.
     var sidn_w = 1.0;
     if (is_interior && is_wmo) {
         if (m.tint.w > 1.5) {
-            sidn_w = trans_a; // TRANS: emission rides the lit pass A, weighted by the lerp
+            sidn_w = trans_a; // TRANS: weighted by its lit pass
         } else if (m.tint.w > 0.5) {
-            sidn_w = 0.0; // INT: lighting off — the emissive write is dead, like the FFP
+            sidn_w = 0.0; // INT: unlit, so no emission
         }
     }
     let sidn_e = m.sidn.rgb * (wow_light.grade.x * sidn_w);
-    // WoW dynamic point lights (decisions 0016/0273/0278, selection 0285) — exterior doodads,
-    // entities, clutter, and terrain receive their unit's committed lights: the ≤3 NEAREST to the
-    // receiving unit's own position, never the whole scene (`point_light_sum`). WMO surfaces take
-    // ZERO (observed on every WMO surface batch in the abbey capture) and interior props fold their
-    // group-MOLR lobes into the SH probe instead — both zeroed in the VERTEX stage. The term
-    // arrives GOURAUD-INTERPOLATED — per-vertex like the reference FFP, whose tessellation-scale
-    // smoothing is the authored look. Diffuse-only (committed ambient/specular are zero).
     let point_diffuse = in.point_lit;
 
-    // Hover/target model brighten (tag bit 31): the client's per-model highlight emissive —
-    // `glMaterialfv(GL_EMISSION, +64/255)` per channel (shipped config default 0xff404040), verified
-    // wow-re selection-circle PART 2. GL_EMISSION adds INSIDE the lighting sum, which is clamped [0,1]
-    // BEFORE the texture modulate — darks lift toward fully-lit, already-bright spots saturate. It
-    // rides the lighting equation, so the fullbright/UNLIT path below faithfully never receives it.
-    let highlight = select(0.0, 0.2509804, highlighted);
-    // FFP combine (byte + trace verified, decision 0273): the LIGHT SUM — matte base + point lights +
-    // the highlight emission — saturates per fragment FIRST, and the texture modulates the clamped
-    // result, so a surface never exceeds its own fully-lit texture (a fixture light at zero distance
-    // drives the prop to tex×1, not past it — the old `clamp(albedo·sum)` order blew emitter props to
-    // saturated gold). WMO surfaces fold their vertex colour INSIDE the clamp (GL_COLOR_MATERIAL:
-    // MOCV is the material ambient+diffuse — `tex × clamp(MOCV·sum + emission)`), so a strong fixture
-    // light overdrives a dim bake toward the full texture exactly like the reference. Bevy pre-folds
-    // ATTRIBUTE_COLOR into `base`, so un-fold it with a guarded divide (a dim channel's product is ~0
-    // either way). At zero point contribution every factor is ≤1 and both forms collapse to the old
-    // product — the approved interior/exterior base looks are preserved bit-for-bit.
+    // The hover/target highlight (tag bit 31): the scene's committed ambient
+    // (`0x614576`-`0x6145bd`), added to the batch colour inside the final clamp, lit or unlit
+    // (`c29`). Deviation: sampled live, where the reference holds the value sampled when the
+    // highlight began; a unit's tag has no slot to hold a colour, and the ambient moves slowly.
+    let highlight = select(vec3<f32>(0.0), wow_light.light_ambient.rgb, highlighted);
+    // The FFP combine: the light sum (lit, point lights, emission) clamps first and the texture
+    // modulates it, `tex × clamp(C·sum + emission)`, with C the GL_COLOR_MATERIAL colour (MOCV on
+    // WMO, the body tint on M2). The WMO branch divides Bevy's MOCV fold back out, guarded; a dim
+    // channel's product is ~0 either way.
     var lit_rgb: vec3<f32>;
 #ifdef VERTEX_COLORS
     if (is_wmo) {
         let vc = in.color.rgb;
-        // MOCV multiplies the lit terms (GL_COLOR_MATERIAL) but NOT the emission terms — SIDN and
-        // the highlight add alongside, exactly the FFP's material-emission placement.
         let primary = clamp(
-            vc * (lit + point_diffuse) + sidn_e + vec3<f32>(highlight),
+            vc * (lit + point_diffuse) + sidn_e + highlight,
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
         let tex_rgb = base.rgb / max(vc, vec3<f32>(1.0 / 255.0));
         lit_rgb = tex_rgb * m.tint.rgb * primary;
         if (is_interior && m.tint.w > 0.5 && m.tint.w < 1.5) {
-            // INT: the MOCV-ALPHA SELF-ILLUMINATION term. The reference's interior pixel shader is
-            // `tex·MOCV.rgb·(1 + 4·MOCV.a)` with only the framebuffer's final [0,1] clamp — read
-            // off the client's own D3D pixel shader in the Goldshire-inn trace (literal 4.0 in the
-            // source, no lights referenced), so the glow multiplies the FULL product and may
-            // overdrive it to white, never pre-clamped like the FFP light sum above. The alpha
-            // channel is an authored emissive mask: the inn fireplace surround bakes α≈100 (×2.6),
-            // hearths glow, and the FixColorVertexAlpha 255 at interior↔exterior portal seams
-            // lifts doorways to full brightness. Near-zero everywhere unpainted (the abbey rooms),
-            // where this collapses to the plain tex×MOCV it replaces.
+            // INT: the reference's interior pixel shader, `tex·MOCV.rgb·(1 + 4·MOCV.a)` with only
+            // the framebuffer's final clamp.
             lit_rgb = clamp(
                 tex_rgb * m.tint.rgb * vc * (1.0 + 4.0 * trans_a),
                 vec3<f32>(0.0),
@@ -1179,55 +723,55 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
             );
         }
     } else {
-        // An M2 instance: `inst_tint` is its CM2 modulate colour, multiplying the light terms inside
-        // the clamp exactly where the WMO branch above multiplies MOCV — both are the material's
-        // ambient+diffuse under GL_COLOR_MATERIAL — and never the emission terms beside them. It is
-        // identity for everything untinted, so this is the old product bit-for-bit until an aura
-        // writes a colour. (Left off the `is_wmo` branch on purpose: a WMO surface is not a CM2
-        // instance and has no tint slot of its own.)
+        // An M2: the body tint multiplies the light terms as MOCV does above. A WMO surface has
+        // no tint slot, so the WMO branch leaves it out.
         let primary = clamp(
-            inst_tint * (lit + point_diffuse) + sidn_e + vec3<f32>(highlight),
+            inst_tint * (lit + point_diffuse) + sidn_e + highlight,
             vec3<f32>(0.0),
             vec3<f32>(1.0),
         );
         lit_rgb = albedo * primary;
     }
 #else
-    // (`sidn_e` is zero for every M2 batch; a WMO batch without MOCV lands here too and keeps it —
-    // harmlessly, since a WMO instance's tint slot is the identity slot 0.)
+    // A WMO batch without MOCV lands here too; its tint slot is the identity slot 0.
     let primary = clamp(
-        inst_tint * (lit + point_diffuse) + sidn_e + vec3<f32>(highlight),
+        inst_tint * (lit + point_diffuse) + sidn_e + highlight,
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
     lit_rgb = albedo * primary;
 #endif
-    // The fullbright/UNLIT path takes the tint too, unlike the highlight: with GL_LIGHTING off the
-    // same gx state (SetState(1)) is a plain `glColor` modulate on the texture, while GL_EMISSION is
-    // dead. So a ghost's glow cards tint with its body.
-    var rgb = select(lit_rgb, albedo * inst_tint, is_emissive);
+    // The unlit path: an M2's unlit program outputs `c28 + c29` (`0x70c663`-`0x70c693` fold the
+    // tint·M2Color term into `c29` beside the highlight), so the texel modulates
+    // `clamp(C·tint + highlight)`, C the M2Color. A WMO keeps the plain modulate.
+    var unlit_rgb = albedo * inst_tint;
+    if (!is_wmo) {
+#ifdef VERTEX_COLORS
+        // The constant M2Color rides the vertex colour, which Bevy folded into `base`.
+        let unlit_c = in.color.rgb * anim_tint;
+        let unlit_tex = base.rgb / max(in.color.rgb, vec3<f32>(1.0 / 255.0));
+#else
+        let unlit_c = anim_tint;
+        let unlit_tex = base.rgb;
+#endif
+        let unlit_sum = unlit_c * inst_tint + highlight;
+        unlit_rgb = unlit_tex * clamp(unlit_sum, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    var rgb = select(lit_rgb, unlit_rgb, is_emissive);
+    // An M2 Mod or Mod2x batch draws the bare texel: the reference zeroes its tint·M2Color term and
+    // forces the primary colour to the blend identity (`0x70c507`/`0x70c5b8`), so neither the
+    // animated M2Color nor the body tint reaches it. Its alpha still does, through the lerp below.
+    let is_mod = (u32(m.clutter_fade.z) & 128u) != 0u;
+    let is_mod2x = (u32(m.clutter_fade.z) & 256u) != 0u;
+    if ((is_mod || is_mod2x) && !is_wmo) {
+        rgb = base.rgb;
+    }
 
-    // Step 5 fog — same gamma-space linear fog as terrain.wgsl. Same DBC values are pushed onto
-    // both materials by `apply_wow_lighting`, so a tree and the dirt under it land on the same
-    // haze byte at the same distance. Fog coordinate is PLANAR eye-Z (view-space depth), NOT radial
-    // distance — see terrain.wgsl for the apitrace-verified rationale (radial over-fogs the edges).
-    // The fog COLOUR is per-batch policy (M2 state setter 0x70baf0, wow-re ROUND 4): scene for
-    // opaque/alpha, BLACK for additive (the batch fades under the storm veil instead of adding grey
-    // — the level-up fix), WHITE for Mod, GREY for Mod2x; policy 4 (render flag 0x02) = unfogged.
-    // Encoded in clutter_fade.z bits 4-6.
-    // Interior lanes fog with the INTERIOR triple — the room keeps its warm MFOG haze while the
-    // storm's veil stays on everything seen through the door. ONE route in, the per-INSTANCE tag
-    // bit 30, written by two disjoint owners for the two mechanisms the reference has:
-    //   * room-bound WMO content (group geometry, its doodad props) takes the client's per-group
-    //     `[0xca7f00]` gate on the two interior-fog pushes `0x6b5190`/`0x6b62e0` (round-6 Q-I),
-    //     resolved per frame by the portal flood (`wmo_portal::GroupPvs::interior_fog`);
-    //   * an entity M2 takes its OWN light-node classification (`0x71c110`/`[node+0xc]`, wow-re
-    //     m2-unit-interior-fog.md), which is a different gate on the same triple.
-    // The material's own `model_flags.z` is NOT that test: it is static per batch, so before
-    // decision 1787 every true-interior group in a building wore the building's MFOG the moment
-    // the camera stood anywhere inside it — B335, where the Shadowfang room two exterior-lit
-    // courtyards away read as a flat teal wash at 70 yd. At camera-out the two triples are equal,
-    // so the bit only ever diverges inside a fogged WMO. Every other lane inherits the scene fog.
+    // Linear fog by planar eye depth, as in terrain.wgsl. Per-batch colour policy (`clutter_fade.z`
+    // bits 4-6, the M2 state setter `0x70baf0`): 0 scene, 1 black (additive), 2 white (Mod),
+    // 3 grey (Mod2x), 4 unfogged (render flag 0x02). Tag bit 30, not the static `model_flags.z`,
+    // selects the interior triple: WMO content by the per-group `[0xca7f00]` gate on the pushes
+    // `0x6b5190`/`0x6b62e0`, an entity M2 by its node's classification (`0x71c110`, `[node+0xc]`).
     var fog_color = wow_light.fog_color;
     var fog_span = wow_light.fog_params.xy;
     if (interior_fogged) {
@@ -1248,52 +792,27 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
 
 
     var out: WowFragOut;
-    // Raw gamma out (GAMMA LANE, 0161 — the frame's one decode is the FFXGlow combine). Alpha = the
-    // faded cutout alpha (tex × fade) for the blend twin; ignored (blend off) on steady/opaque draws.
-    // OPAQUE-INTENT alpha pin (clutter_fade.z bit 3, set in model_render for steady opaque/alpha-key
-    // batches): their output alpha is spec-meaningless — opaque/mask pipelines ignore it; only a blend
-    // pipeline would read it, and none should ever be bound for them. Pinning it to 1.0 is therefore a
-    // no-op under correct pipeline state, and armor under the observed multi-view pipeline mixup
-    // (macOS/Metal: with an extra camera, some opaque WMO/M2 draws intermittently bind a blending
-    // pipeline and bleed the BLP's garbage alpha — the "pale film on buildings"). Fade twins, genuine
-    // Blend batches (glass), and additive glow cards keep their real alpha.
+    // Output alpha is tex × fade. Opaque intent (`clutter_fade.z` bit 3) pins it to 1: a no-op
+    // under correct pipeline state, and a guard for macOS/Metal with an extra camera, where an
+    // opaque draw can bind a blending pipeline and show the BLP's garbage alpha.
     let opaque_intent = (u32(m.clutter_fade.z) & 8u) != 0u;
-    // ADDITIVE batches (glow cards — model_flags.w == 2.0): fold the alpha weight into the colour
-    // HERE, in gamma space, exactly as the reference's byte pipeline weights its source term
-    // (src_g·α added in bytes). The old hardware `SrcAlpha` blend multiplied AFTER the linear
-    // conversion — α^(1/2.2) inflation that fattened every soft halo into a hard disc (the
-    // director's brazier, decision 0160). The pipeline blend state is now a pure (ONE, ONE) add.
-    // The additive marker is clutter_fade.z BIT 2 (the same word specialize keys on — NOT
-    // model_flags.w, whose stale "== 2.0" comment caused the flat-square regression the director
-    // caught: the gate never fired while the blend state had already become a pure add).
+    // Additive (`clutter_fade.z` bit 2, the bit `specialize` keys the (ONE, ONE) blend on): the
+    // alpha weight folds into the colour here, in gamma, as the reference weights its source.
     let is_additive = (u32(m.clutter_fade.z) & 4u) != 0u;
     var out_rgb = rgb;
     if (is_additive) {
         out_rgb = out_rgb * faded_alpha;
     }
-    // MULTIPLY batches (Mod bit 7 / Mod2x bit 8 — the ARMORREFLECT sheen family, 0528): their
-    // blend equation reads no source alpha, so the instance fade cannot ride the alpha channel.
-    // It rides the SOURCE COLOUR instead, and that is the reference's own mechanism, not a
-    // deviation: texenv preset 5 (`INTERPOLATE, TEXTURE·PREVIOUS·PREVIOUS`) computes
-    // `mix(prev.rgb, tex.rgb, prev.a)`, the mode-5/6 arms force the primary colour to the blend
-    // IDENTITY — V_A=0, V_B = white (Mod: src·dst = dst) / 0.5 grey (Mod2x: 2·0.5·dst = dst),
-    // discarding tint AND the M2Color track — and prev.a is the combined instance alpha, so a
-    // fading Mod batch converges continuously onto "framebuffer unchanged", the same endpoint
-    // as the A<=0 cull (wow-re `m2-mod-fade-source-colour.md`, byte-verified; decision 1489,
-    // re-lawing 0865's identical mechanism from deliberate deviation to byte-faithful; 0528's
-    // "holds full strength and pops" and its non-white-M2Color residual both fall with it).
-    // The lerp factor is `obj_fade` (never the texture alpha) and it commutes with the White/
-    // Grey fog above exactly because the fog target IS the identity colour. At obj_fade 1 the
-    // mix degenerates to the texture colour — the steady look — for any identity value.
-    let is_mod = (u32(m.clutter_fade.z) & 128u) != 0u;
-    let is_mod2x = (u32(m.clutter_fade.z) & 256u) != 0u;
+    // Mod (bit 7) and Mod2x (bit 8) read no source alpha, so the fade rides the colour as in the
+    // reference: texenv preset 5, `mix(prev.rgb, tex.rgb, prev.a)`, with the primary colour forced
+    // to the blend identity (white, or 0.5 grey for Mod2x) and prev.a the instance alpha. The fog
+    // above commutes with this because its white and grey are that identity.
     if (is_mod || is_mod2x) {
         let identity = select(vec3<f32>(1.0), vec3<f32>(0.5), is_mod2x);
         out_rgb = mix(identity, out_rgb, obj_fade);
     }
-    // GAMMA LANE (0161): raw gamma out — blending (alpha AND additive) happens in gamma like
-    // the reference's byte framebuffer; the frame decodes once in the FFXGlow combine. (The old
-    // `lin` A/B emitted linear for the sRGB encode — subsumed by the lane.)
+    // Raw gamma out: blending happens in gamma like the reference's byte framebuffer; the frame
+    // decodes once, in the FFXGlow combine.
     out.color = vec4<f32>(out_rgb, select(faded_alpha, 1.0, opaque_intent));
     return out;
 }

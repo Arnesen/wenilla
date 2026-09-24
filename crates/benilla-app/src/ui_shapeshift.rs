@@ -1,7 +1,7 @@
 //! The stance/shapeshift bar feed + drain — the app side of `benilla_ui::script::shapeshift`'s
-//! seam, from the wow-re-verified mechanism (`system/ui/scratch/shapeshift-bar-api.md`, the §5
-//! cross-check behind `GetNumShapeshiftForms 0x4b4590` / `GetShapeshiftFormInfo 0x4b45c0` /
-//! `CastShapeshiftForm 0x4b4810` / `GetShapeshiftFormCooldown 0x4b49a0`):
+//! seam, from the reference's mechanism (`GetNumShapeshiftForms 0x4b4590` /
+//! `GetShapeshiftFormInfo 0x4b45c0` / `CastShapeshiftForm 0x4b4810` /
+//! `GetShapeshiftFormCooldown 0x4b49a0`):
 //!
 //! - **Admission** (the list build `0x4b25b0`): a KNOWN spell joins the bar when
 //!   `AttributesEx2 & 0x2 == 0` AND (it carries a `SPELL_AURA_MOD_SHAPESHIFT` apply-aura effect
@@ -21,7 +21,7 @@
 //!   MOD_SHAPESHIFT spell, the 48-slot aura scan for a force-admitted one ([`form_active`]).
 //! - **isCastable**: the active form reads hardcoded-castable; otherwise the usability predicate
 //!   `0x6e3d60` — the SAME full walk the action bar's `IsUsableAction` runs
-//!   ([`crate::ui_action::usable`], decision 0269's fold-back: reagents, forms, stealth, aura
+//!   ([`crate::spell::usable`], decision 0269's fold-back: reagents, forms, stealth, aura
 //!   states, the power gate).
 //! - **cooldown**: the form spell's own spell/category read ([`Cooldowns::info`]).
 //! - **Click** (`CastShapeshiftForm`): the ACTIVE form CANCELS (`CMSG_CANCEL_AURA`) — unless
@@ -33,13 +33,13 @@
 //!
 //! - **The list** — which spells sit on the bar, in what order — fires `UPDATE_SHAPESHIFT_FORMS`,
 //!   the real client's learn/unlearn/rank edge (`0x5e9c20`/`0x5e9fe0`/`0x4b2f50` → event `0x183`
-//!   at `0x4b28ff`/`0x4b2e43`, VERIFIED in wow-re's `shapeshift-bar-api.md`) and the ONLY thing
-//!   that fires it there. The stock `ShapeshiftBar_Update` treats every fire as a list rebuild: it
-//!   re-seats the shelf, shows the middle strip past two forms unconditionally, and `Show()`s a
-//!   frame that is already shown — no `OnShow`, no `UIParent_ManageFramePositions`, and nothing
-//!   takes the strip back down over a raised bottom-left bar. Firing it on a state change painted
-//!   exactly that plate (the one-event model this file carried until 2009: our own `StanceBar.xml`
-//!   had documented the collapse as a deliberate divergence, and 1938's stock bar inherited it).
+//!   at `0x4b28ff`/`0x4b2e43`) and the ONLY thing that fires it there. The stock
+//!   `ShapeshiftBar_Update` treats every fire as a list rebuild: it re-seats the shelf, shows the
+//!   middle strip past two forms unconditionally, and `Show()`s a frame that is already shown — no
+//!   `OnShow`, no `UIParent_ManageFramePositions`, and nothing takes the strip back down over a
+//!   raised bottom-left bar. Firing it on a state change painted exactly that plate (the one-event
+//!   model this file carried until 2009: our own `StanceBar.xml` had documented the collapse as a
+//!   deliberate divergence, and 1938's stock bar inherited it).
 //! - **A form's state** — active, texture, cooldown — is pushed silently; the stock bar repaints
 //!   state on the reference's own state events, which the feeds that own those transitions fire:
 //!   `PLAYER_AURAS_CHANGED` for the form byte (a MOD_SHAPESHIFT aura holds an aura slot — the
@@ -64,11 +64,12 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{ShapeshiftFormView, UiScript};
 
-use crate::cooldowns::Cooldowns;
 use crate::items::Items;
-use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, Reputations, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, Reputations, SelfPlayer};
+use crate::spell::Cooldowns;
+use crate::spell::{cast_target, usable, CastCommit, CastLadder};
 use crate::target::Selection;
-use crate::ui_action::{cast_target, usable, CastCommit, CastLadder, PlayerActions, Spells};
+use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
@@ -82,9 +83,9 @@ const ATTR_EX2_STANCE_BAR_EXCLUDE: u32 = 0x2;
 /// Ironweave Battlesuit 27733 and a band of `zzOLD*` rows. Decision 1302 corrects 0270 here.
 const ATTR_EX2_STANCE_BAR_FORCE: u32 = 0x10;
 
-/// `GetShapeshiftFormInfo 0x4b45c0`'s **isActive**, both arms (wow-re `shapeshift-bar-api.md`,
-/// VERIFIED). The reference forks on the spell's own `formId` — its first `MOD_SHAPESHIFT`
-/// effect's `EffectMiscValue`, or 0 when it has no such effect at all:
+/// `GetShapeshiftFormInfo 0x4b45c0`'s **isActive**, both arms. The reference forks on the spell's
+/// own `formId` — its first `MOD_SHAPESHIFT` effect's `EffectMiscValue`, or 0 when it has no such
+/// effect at all:
 ///
 /// - `formId != 0` → active ⇔ the caster's form byte matches it (`4b46a0`–`4b46af`).
 /// - `formId == 0` (a **force-admitted** row, `AttributesEx2 & 0x10`) **and `ActiveIconID != 0`**
@@ -92,7 +93,7 @@ const ATTR_EX2_STANCE_BAR_FORCE: u32 = 0x10;
 ///   array with **nibble bit 0** of `UNIT_FIELD_AURAFLAGS` set (`4b4739 test al,1` — the
 ///   *cancelable* bit). That is exactly [`crate::ui_action::toggle::active_action_toggle`], the
 ///   byte-twin `0x4e55f0` the main action bar's own toggle runs, which is why it is reused rather
-///   than open-coded: the §5 confirmed the two scans test the same bit.
+///   than open-coded: the two scans test the same bit.
 ///
 /// Both arms converge on **one** shared block at `4b4754` — the form-byte match *jumps* there, the
 /// aura-scan hit *falls through* into it — and that block is the sole writer of `isActive = 1`.
@@ -126,10 +127,10 @@ fn form_active(
 /// arm, reasoning that the icon is picked at a *lower address* than the aura scan and so could
 /// not depend on it. That inference was wrong, and instructively so: **MSVC laid
 /// the deciding block at a higher address than the scan that feeds it**, so ordering the citations
-/// by address yields the opposite control flow. The wow-re §5 on `0x4b45c0` carved it and
-/// corrected us — a scan hit at `4b473e` falls *through* `4b4751` into the very block the form-byte
-/// match jumps to, and the `mov ebx,[ebp-0xc]` at `4b4751` exists for no reason but to restore the
-/// lua_State across that fall-through. So a lit paladin aura **does** wear `ActiveIconID` 122.
+/// by address yields the opposite control flow. In `0x4b45c0` a scan hit at `4b473e` falls
+/// *through* `4b4751` into the very block the form-byte match jumps to, and the `mov ebx,[ebp-0xc]`
+/// at `4b4751` exists for no reason but to restore the lua_State across that fall-through. So a lit
+/// paladin aura **does** wear `ActiveIconID` 122.
 ///
 /// `active_icon` is `None` exactly when the column is 0, so the `or_else` is the reference's own
 /// `4b4763 je` — a MOD_SHAPESHIFT row can report active while still painting `SpellIconID`
@@ -233,14 +234,16 @@ fn feed_shapeshift_bar(
     cooldowns: Res<Cooldowns>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     selection: Res<Selection>,
-    index: Res<GuidIndex>,
+    // The object lookup (2334) — the guid index the selection resolves through, plus the bag
+    // walk behind each form's reagent leg. One param, not two.
+    objects: Objects,
     units: Query<&ObjectStore, Without<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     reputations: Res<Reputations>,
     items: Res<Items>,
     commands: Res<NetCommands>,
     clock: Res<crate::ui_script::UiClock>,
-    spell_mods: Res<crate::spell_mods::SpellModifiers>,
+    spell_mods: Res<crate::spell::SpellModifiers>,
     mut memory: Local<crate::ui_script::VmMemo<StanceMemory>>,
 ) {
     let Some(mut script) = script else {
@@ -260,8 +263,8 @@ fn feed_shapeshift_bar(
     // action feed's own ctx.
     let target_store = selection
         .guid
-        .and_then(|g| index.0.get(&g))
-        .and_then(|&e| units.get(e).ok());
+        .and_then(|g| objects.entity(g))
+        .and_then(|e| units.get(e).ok());
 
     // Admission + order (module docs).
     let mut rows: Vec<(u32, &benilla_formats::SpellDisplay)> = actions
@@ -286,7 +289,7 @@ fn feed_shapeshift_bar(
 
     // The bags walked once for every form's reagent leg (see `feed_action_state`).
     let carried = store
-        .map(|s| crate::ui_items::carried_counts(&s.0, &items))
+        .map(|s| crate::ui_items::carried_counts(&s.0, &objects))
         .unwrap_or_default();
     let fresh: Vec<ShapeshiftFormView> = rows
         .into_iter()
@@ -305,7 +308,7 @@ fn feed_shapeshift_bar(
                         carried: &carried,
                         spell_mods: &spell_mods,
                     };
-                    usable::spell_usable(id, d, &spells, &ctx, &items, &commands).0
+                    usable::spell_usable(id, d, &spells, &ctx, &objects, &items, &commands).0
                 });
             let texture = form_texture(d, active);
             let cooldown = cooldowns
@@ -449,7 +452,7 @@ mod tests {
         assert!(!form_active(465, &iconless, 0, Some(&up)));
     }
 
-    /// The `ActiveIconID` election, both arms (1302 §5, carved by the wow-re §5 on `0x4b45c0`).
+    /// The `ActiveIconID` election, both arms (1302 §5; `0x4b45c0`).
     /// Both determinations converge on the one block that elects it, so a lit aura wears the swirl
     /// exactly as a shifted druid wears the paw — and the `ActiveIconID == 0` fallback is the
     /// reference's own `4b4763 je`, reachable only on the MOD_SHAPESHIFT arm.

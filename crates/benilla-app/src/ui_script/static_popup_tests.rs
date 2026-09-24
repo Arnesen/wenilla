@@ -27,6 +27,7 @@ fn setup() -> UiScript {
 /// (ref StaticPopup_OnUpdate l.1713-1726).
 #[test]
 fn timeout_expires_into_a_timeout_cancel() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run(
         r#"reason = "unset"
@@ -62,6 +63,7 @@ fn timeout_expires_into_a_timeout_cancel() {
 /// itself is exercised too.
 #[test]
 fn start_delay_gates_button1_then_swaps_the_text_in() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run(
         r#"StaticPopupDialogs["RECOVER_CORPSE"] = {
@@ -105,6 +107,7 @@ fn start_delay_gates_button1_then_swaps_the_text_in() {
 /// the death arc's RESURRECT-cancels-DEATH chain.
 #[test]
 fn showing_a_dialog_cancels_its_named_victim_with_override() {
+    benilla_formats::wow_data_or_skip!();
     let s = setup();
     s.run(
         r#"victim_reason = "unset"
@@ -137,6 +140,7 @@ fn showing_a_dialog_cancels_its_named_victim_with_override() {
 /// non-escapable entry — the DEATH release popup's law — survives ToggleGameMenu.
 #[test]
 fn escape_skips_dialogs_without_hide_on_escape() {
+    benilla_formats::wow_data_or_skip!();
     let s = setup();
     s.run(
         r#"StaticPopupDialogs["TEST_STICKY"] = {
@@ -169,6 +173,7 @@ fn escape_skips_dialogs_without_hide_on_escape() {
 /// `timeleft` re-renders "%d %s until release" every tick, minutes above 60 s.
 #[test]
 fn the_death_countdown_text_rerenders_each_tick() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run(
         r#"StaticPopupDialogs["DEATH"] = {
@@ -212,6 +217,7 @@ fn the_death_countdown_text_rerenders_each_tick() {
 /// kind has at most one, so its data is never consulted.
 #[test]
 fn hide_and_find_address_one_instance_by_data_only_for_a_multiple_dialog() {
+    benilla_formats::wow_data_or_skip!();
     let s = setup();
     s.run(
         r#"
@@ -269,6 +275,7 @@ fn hide_and_find_address_one_instance_by_data_only_for_a_multiple_dialog() {
 /// binding this engine answers.
 #[test]
 fn the_verb_dialogs_open_from_their_events_and_call_their_verbs() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ScriptValue;
     let mut s = setup();
     load_xml(&s, r"Interface\FrameXML\UIParent.xml"); // the arms

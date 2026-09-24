@@ -74,7 +74,7 @@ pub struct QuestItemView {
 /// the name and icon `GetRewardSpell` / `GetQuestLogRewardSpell` answer (stock
 /// `QuestFrameItems_Update` counts it as one more reward slot, `rewardType = "spell"`, and the
 /// slot's hover is `GameTooltip:SetQuestRewardSpell()`). `tradeskill` is the third return the
-/// reference derives from the spell itself (1944 — the derivation is wow-re's to pin).
+/// reference derives from the spell itself (1944 — the derivation is not yet pinned).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QuestRewardSpell {
     pub spell_id: u32,
@@ -114,7 +114,7 @@ pub struct QuestState {
     pub reward_spell: Option<QuestRewardSpell>,
     /// The panel's background material (`GetQuestBackgroundMaterial` — nil is the reference's own
     /// "Parchment" fallback in `QuestFrame_GetMaterial`). What fills it on the wire is 1944's
-    /// wow-re question; until the binary says, nothing does, and the verb answers nil honestly.
+    /// open question; until the binary says, nothing does, and the verb answers nil honestly.
     pub background_material: Option<String>,
 }
 
@@ -160,18 +160,25 @@ pub enum QuestAction {
     /// Reward panel Complete → `CMSG_QUESTGIVER_CHOOSE_REWARD` with the chosen choice index (0 when
     /// the quest has no choice rewards).
     Reward(u32),
-    /// **The quest session's end**, however it was reached: `DeclineQuest()` (the detail panel's
-    /// Decline, the progress/reward panels' Cancel, the greeting's Goodbye) and `CloseQuest()`
-    /// (the window's own OnHide — ESC, a UIPanel eviction) alike.
+    /// `DeclineQuest()` — the detail panel's Decline and the progress/reward panels' Cancel
+    /// (stock `QuestFrame.lua`: `QuestDetailDeclineButton_OnClick`, `QuestGoodbyeButton_OnClick`,
+    /// `QuestRewardCancelButton_OnClick`). Its binding `0x501d30` calls `0x5013f0`, the ONLY
+    /// routine that re-opens the giver: a four-way fork on the source's object type — a
+    /// gossip-flagged unit → `CMSG_GOSSIP_HELLO`, a plain unit → `CMSG_QUESTGIVER_HELLO`, an
+    /// item/player (or the `0xbe0824` latch set) → the teardown `0x501130(0,1)`, a GameObject →
+    /// its interact virtual. The app owns the fork, because only it knows the giver.
+    Decline,
+    /// `CloseQuest()` — the window's own `QuestFrame_OnHide`: ESC, the close button, the
+    /// greeting's Goodbye (`HideUIPanel(QuestFrame)`), a UIPanel eviction. Its binding `0x501a10`
+    /// calls the teardown `0x501130(0,1)` and **nothing else**; that routine's one send is
+    /// `MSG_QUEST_PUSH_RESULT{DECLINE}` for a PLAYER source, so closing an NPC's window is
+    /// network-silent.
     ///
-    /// **One action, because the reference has one routine.** 1733 briefly split this into
-    /// `Decline` and `Close` on the assumption that only the first was an answer on the wire; the
-    /// §5 that landed after it found both Lua verbs calling `0x501130`, along with the walk-away
-    /// watchdog and the leave-world teardown, and that routine both answers a share
-    /// (`MSG_QUEST_PUSH_RESULT{DECLINE_QUEST}`) and re-opens an NPC's list
-    /// (`CMSG_QUESTGIVER_HELLO`/`CMSG_GOSSIP_HELLO`). Which of the two it does is decided by the
-    /// GIVER, never by the button — so the app owns that fork and the engine reports one intent
-    /// (decision 1738).
+    /// **Two actions, because the reference has two routines.** 1738 merged this into
+    /// `DeclineQuest`'s action on the reading that both verbs are one routine; the reference's
+    /// callers show they share only the teardown, and the HELLO re-open lives in `DeclineQuest`'s
+    /// fork alone. The merge made ESC on an NPC re-open its list — a multi-quest greeting could
+    /// not be closed.
     Close,
 }
 
@@ -409,10 +416,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             })?,
         )
     }
-    // AcceptQuest → Accept; DeclineQuest / CloseQuest → Close (the ONE session-end routine, see
-    // `QuestAction::Close`); CompleteQuest (the progress panel's Continue) → Continue.
+    // AcceptQuest → Accept; DeclineQuest → Decline (the re-opening fork `0x5013f0`); CloseQuest →
+    // Close (the teardown `0x501130` alone — see `QuestAction::Close`); CompleteQuest (the
+    // progress panel's Continue) → Continue.
     install_action(lua, "AcceptQuest", super::QuestAction::Accept)?;
-    install_action(lua, "DeclineQuest", super::QuestAction::Close)?;
+    install_action(lua, "DeclineQuest", super::QuestAction::Decline)?;
     install_action(lua, "CloseQuest", super::QuestAction::Close)?;
     install_action(lua, "CompleteQuest", super::QuestAction::Continue)?;
 
@@ -440,7 +448,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // QuestChooseRewardError() — 0x5021a0, 0 args, 0 returns: the Complete button pressed with
     // choices on offer and none picked (stock `QuestRewardCompleteButton_OnClick`,
     // QuestFrame.lua:96-100). Sixteen bytes — `push 0x98; call 0x496720` — the game-error row
-    // `ERR_QUEST_MUST_CHOOSE` (wow-re quest-material-reward-spell-bindings.md §2): the row's sound
+    // `ERR_QUEST_MUST_CHOOSE`: the row's sound
     // cue `igQuestFailed` plays first, then kind 2 routes the GlobalStrings text through
     // `UI_ERROR_MESSAGE` — synchronously, as SignalEvent is — and UIErrorsFrame prints it. The
     // text is read from the same global the FrameXML shows, so a localised chain shows its own
@@ -731,7 +739,7 @@ mod tests {
                 QuestAction::Continue,
                 QuestAction::Reward(1),
                 QuestAction::Reward(0),
-                QuestAction::Close,
+                QuestAction::Decline,
             ]
         );
         assert!(s.take_quest_actions().is_empty(), "drained");
@@ -747,19 +755,18 @@ mod tests {
         assert!(s.eval::<bool>("return GetRewardSpell() == nil").unwrap());
     }
 
-    /// `DeclineQuest` and `CloseQuest` are the SAME intent — one reference routine, `0x501130`
-    /// (decision 1738, correcting 1733's split). What differs between a decline and a close is
-    /// nothing; what differs between an NPC's quest and a shared one is everything, and that fork
-    /// belongs to the app, which knows the giver.
+    /// `DeclineQuest` and `CloseQuest` are TWO intents — two reference routines (`0x5013f0` and
+    /// `0x501a10`) that share only the teardown `0x501130`; the giver re-open is `DeclineQuest`'s
+    /// alone.
     #[test]
-    fn decline_and_close_are_one_intent() {
+    fn decline_and_close_are_two_intents() {
         let mut s = UiScript::new().unwrap();
         s.set_quest(Some(detail()));
         s.run("DeclineQuest()").unwrap();
         s.run("CloseQuest()").unwrap();
         assert_eq!(
             s.take_quest_actions(),
-            vec![QuestAction::Close, QuestAction::Close]
+            vec![QuestAction::Decline, QuestAction::Close]
         );
     }
 

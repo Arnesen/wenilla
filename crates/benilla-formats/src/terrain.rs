@@ -40,6 +40,12 @@ pub(crate) const UNIT_SIZE: f32 = CHUNK_SIZE / 8.0;
 /// World (x, y) of Stormwind, from `TaxiNodes.dbc` — a handy anchor for "Elwynn".
 pub const STORMWIND_XY: (f32, f32) = (-8840.56, 489.7);
 
+/// Ground-texture repeats per chunk — how many times a layer texture tiles across one MCNK. The
+/// binary's own value is 8 (each of the chunk's 8×8 cells carries one repeat), and it is not a
+/// setting: a `$WOW_TEX_TILES` knob once let a capture try other values and was retired (2335)
+/// because nothing in the reference tunes it.
+pub const TERRAIN_LAYER_TILES: f32 = 8.0;
+
 /// One MCNK chunk as an indexed triangle mesh in **raw WoW coords**, plus texturing data.
 ///
 /// Vertex arrays (`positions`, `normals`, `uvs`) hold **145 entries** in MCVT's stride-17 order:
@@ -56,8 +62,8 @@ pub struct ChunkMesh {
     /// removes the lighting seams at MCNK boundaries. Empty if the chunk had no MCNR data.
     pub normals: Vec<[f32; 3]>,
     /// Per-vertex texture coordinates (0..1 across the chunk; outer at `(c/8, r/8)`, inner at
-    /// `((c+½)/8, (r+½)/8)`). Renderers scale `× tex_tiles` (=8 per the binary) for layer
-    /// sampling and use the raw 0..1 for alpha/shadow.
+    /// `((c+½)/8, (r+½)/8)`). Renderers scale `× `[`TERRAIN_LAYER_TILES`] for layer sampling and
+    /// use the raw 0..1 for alpha/shadow.
     pub uvs: Vec<[f32; 2]>,
     /// Triangle-list indices into `positions` (4-tri center-fan/cell, holed blocks omitted).
     pub indices: Vec<u32>,
@@ -307,9 +313,9 @@ fn chunk_at(chunks: &[ChunkMesh], wow: [f32; 3]) -> Option<&ChunkMesh> {
 /// different tile. Returning `None` rather than defaulting to lit is load-bearing: an MDDF doodad that
 /// straddles a tile edge is listed in *every* tile it touches, but only the tile that CONTAINS its origin
 /// can answer; the caller must take the `Some` from that tile and never let a straddle-tile miss
-/// masquerade as "lit". (The real client sidesteps this with a global world→chunk MCSH lookup, `0x69b350`
-/// — `models/scratch/m2-interior-doodad-base-light.md §6`.) Feeds the model lobe's `sun_scale` (the
-/// faithful per-instance terrain-shade, 2.5 sunlit / 0.5 shaded — wow-re byte-verified).
+/// masquerade as "lit". (The real client sidesteps this with a global world→chunk MCSH lookup,
+/// `0x69b350`.) Feeds the model lobe's `sun_scale` (the faithful per-instance terrain-shade, 2.5
+/// sunlit / 0.5 shaded, per the reference).
 pub fn mcsh_shadowed_at(chunks: &[ChunkMesh], wow: [f32; 3]) -> Option<bool> {
     match chunk_at(chunks, wow) {
         Some(c) => c.mcsh_shadowed_at(wow),

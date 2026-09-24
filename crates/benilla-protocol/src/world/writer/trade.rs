@@ -1,8 +1,4 @@
-//! The player-trade arc's `WorldWriter` sends (decision 0592 P0): initiate, the auto-`BEGIN_TRADE`
-//! reply, the decline pair (busy/ignore), set/clear an item, set gold, and accept/unaccept/cancel.
-//! Bodies in [`crate::messages`]'s `trade` builders (layout VERIFIED against vmangos
-//! `Handlers/TradeHandler.cpp` + `Server/Packets/Trade.cpp`). Split out of `writer/mod.rs` the same
-//! way `channel`/`group`/`mail` are — one clearly separable concern among the writer's domains.
+//! The player trade sends.
 
 use anyhow::Result;
 
@@ -11,9 +7,7 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// Open a trade with another player (`CMSG_INITIATE_TRADE`, layout in
-    /// [`messages::initiate_trade`]): the target's guid. The server answers us on any refusal
-    /// (`SMSG_TRADE_STATUS`) and, on success, sends the *target* a `BEGIN_TRADE`.
+    /// `CMSG_INITIATE_TRADE`: the target gets `BEGIN_TRADE`; we hear back only on a refusal.
     pub fn initiate_trade(&mut self, target: u64) -> Result<()> {
         self.send(
             opcode::CMSG_INITIATE_TRADE,
@@ -21,27 +15,23 @@ impl WorldWriter {
         )
     }
 
-    /// Acknowledge a received `BEGIN_TRADE` (`CMSG_BEGIN_TRADE`, EMPTY body) — the client's
-    /// automatic reply that makes the server emit `OPEN_WINDOW` to both sides.
+    /// `CMSG_BEGIN_TRADE`, empty: the automatic reply to `BEGIN_TRADE`, after which the server
+    /// sends both sides `OPEN_WINDOW`.
     pub fn begin_trade(&mut self) -> Result<()> {
         self.send(opcode::CMSG_BEGIN_TRADE, &[])
     }
 
-    /// Decline a trade request as busy (`CMSG_BUSY_TRADE`, EMPTY body) — the server cancels it with
-    /// `TRADE_STATUS_BUSY` to the initiator.
+    /// `CMSG_BUSY_TRADE`, empty: the initiator gets `TRADE_STATUS_BUSY`.
     pub fn busy_trade(&mut self) -> Result<()> {
         self.send(opcode::CMSG_BUSY_TRADE, &[])
     }
 
-    /// Decline a trade request as ignored (`CMSG_IGNORE_TRADE`, EMPTY body) — the server cancels it
-    /// with `TRADE_STATUS_IGNORE_YOU` to the initiator.
+    /// `CMSG_IGNORE_TRADE`, empty: the initiator gets `TRADE_STATUS_IGNORE_YOU`.
     pub fn ignore_trade(&mut self) -> Result<()> {
         self.send(opcode::CMSG_IGNORE_TRADE, &[])
     }
 
-    /// Put a bag item into a trade slot (`CMSG_SET_TRADE_ITEM`, layout in
-    /// [`messages::set_trade_item`]): the trade slot, and the item's inventory `bag`/`slot`.
-    /// Clears the partner's accept and re-arms the 200 ms scam-prevention delay server-side.
+    /// `CMSG_SET_TRADE_ITEM`: clears the partner's accept and re-arms the server's 200 ms delay.
     pub fn set_trade_item(&mut self, trade_slot: u8, bag: u8, slot: u8) -> Result<()> {
         self.send(
             opcode::CMSG_SET_TRADE_ITEM,
@@ -49,8 +39,7 @@ impl WorldWriter {
         )
     }
 
-    /// Remove an item from a trade slot (`CMSG_CLEAR_TRADE_ITEM`, layout in
-    /// [`messages::clear_trade_item`]): the trade slot.
+    /// `CMSG_CLEAR_TRADE_ITEM`: empty one trade slot.
     pub fn clear_trade_item(&mut self, trade_slot: u8) -> Result<()> {
         self.send(
             opcode::CMSG_CLEAR_TRADE_ITEM,
@@ -58,8 +47,7 @@ impl WorldWriter {
         )
     }
 
-    /// Set the gold we are offering (`CMSG_SET_TRADE_GOLD`, layout in [`messages::set_trade_gold`]):
-    /// copper. Clears the partner's accept and re-arms the scam-prevention delay server-side.
+    /// `CMSG_SET_TRADE_GOLD`, in copper: clears the partner's accept and re-arms the 200 ms delay.
     pub fn set_trade_gold(&mut self, copper: u32) -> Result<()> {
         self.send(
             opcode::CMSG_SET_TRADE_GOLD,
@@ -67,20 +55,18 @@ impl WorldWriter {
         )
     }
 
-    /// Press Trade (`CMSG_ACCEPT_TRADE`, layout in [`messages::accept_trade`]) — accepting within
-    /// 200 ms of the last change is bounced by the server as `TRADE_STATUS_BACK_TO_TRADE`; when
-    /// both sides have accepted and the checks pass, the server swaps and sends both `COMPLETE`.
+    /// `CMSG_ACCEPT_TRADE`: bounced (`TRADE_STATUS_BACK_TO_TRADE`) within 200 ms of a change; once
+    /// both sides accept, the server swaps and sends both `COMPLETE`.
     pub fn accept_trade(&mut self) -> Result<()> {
         self.send(opcode::CMSG_ACCEPT_TRADE, &messages::accept_trade())
     }
 
-    /// Un-press Trade (`CMSG_UNACCEPT_TRADE`, EMPTY body) — drops our accept back to editing.
+    /// `CMSG_UNACCEPT_TRADE`, empty: withdraws our accept.
     pub fn unaccept_trade(&mut self) -> Result<()> {
         self.send(opcode::CMSG_UNACCEPT_TRADE, &[])
     }
 
-    /// Cancel the trade (`CMSG_CANCEL_TRADE`, EMPTY body) — the Close/Cancel path; the server
-    /// unwinds both sides with `TRADE_STATUS_TRADE_CANCELED`.
+    /// `CMSG_CANCEL_TRADE`, empty: both sides get `TRADE_STATUS_TRADE_CANCELED`.
     pub fn cancel_trade(&mut self) -> Result<()> {
         self.send(opcode::CMSG_CANCEL_TRADE, &[])
     }

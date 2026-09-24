@@ -12,6 +12,7 @@ fn action_ids(s: &mut UiScript) -> Vec<u32> {
 /// slots drawing no icon, and a physical click queuing the right UseAction id.
 #[test]
 fn shipped_action_bar_drives_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
@@ -226,6 +227,7 @@ fn load_action_bar(s: &UiScript) {
 /// `ACTIONBAR_UPDATE_STATE` checks the ring, and `IsUsableAction`'s OOM pair blue-tints the icon.
 #[test]
 fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ActionState;
 
     let mut s = UiScript::new().unwrap();
@@ -355,6 +357,7 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
 /// start behind the new epoch.
 #[test]
 fn a_start_behind_the_clocks_epoch_hides_the_stock_sweep() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ActionState;
 
     let mut s = UiScript::new().unwrap();
@@ -424,6 +427,7 @@ fn a_start_behind_the_clocks_epoch_hides_the_stock_sweep() {
 /// under the icon), which is exactly why the order is pinned end-to-end through the real XML.
 #[test]
 fn the_cooldown_sweep_paints_over_the_buttons_icon_and_ring() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ActionState;
 
     let mut s = UiScript::new().unwrap();
@@ -496,6 +500,7 @@ fn the_cooldown_sweep_paints_over_the_buttons_icon_and_ring() {
 /// `ui_models`' own tests.)
 #[test]
 fn a_cooldown_count_addons_hook_leaves_the_sweep_running() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ActionState;
 
     let mut s = UiScript::new().unwrap();
@@ -612,6 +617,7 @@ const COOLDOWN_COUNT_HOOK: &str = r#"
 /// cooldown came out at `button + 3` — over the count text the hook hangs at `button + 2`.
 #[test]
 fn a_cooldown_count_draws_over_the_bonus_bars_sweep() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ActionState;
 
     let mut s = UiScript::new().unwrap();
@@ -688,6 +694,7 @@ fn a_cooldown_count_draws_over_the_bonus_bars_sweep() {
 /// registration set is consulted.
 #[test]
 fn a_right_click_on_an_action_button_uses_the_action() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -740,6 +747,7 @@ fn a_right_click_on_an_action_button_uses_the_action() {
 /// unit tests directly — the modifier-key mirror gating `PickupAction` vs `UseAction`, end to end.
 #[test]
 fn shift_click_picks_up_not_uses() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -799,6 +807,7 @@ fn shift_click_picks_up_not_uses() {
 /// way to rearrange it at all.
 #[test]
 fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -873,6 +882,7 @@ fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
 /// the one gesture (0218 §4: "a drag-swap is two sends, never atomic").
 #[test]
 fn drag_drop_onto_another_button_hops_the_displaced_action() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -945,6 +955,7 @@ fn drag_drop_onto_another_button_hops_the_displaced_action() {
 /// the only order the runtime can produce.
 #[test]
 fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -1046,6 +1057,7 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
 /// macro on the bar was nameless.
 #[test]
 fn macro_name_line_follows_get_action_text_through_the_xml() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::{MacroState, MacroView};
 
     let mut s = UiScript::new().unwrap();
@@ -1319,6 +1331,7 @@ fn shipped_bag_frame_drives_end_to_end() {
 /// a usable/cooldown event with empties on the bar — and asserts no empty well gains a solid.
 #[test]
 fn state_events_leave_empty_wells_untinted() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ActionState;
 
     let mut s = UiScript::new().unwrap();
@@ -1389,6 +1402,7 @@ fn state_events_leave_empty_wells_untinted() {
 /// never the colour).
 #[test]
 fn an_occupied_slot_going_empty_leaves_no_white_plate() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ActionState;
 
     let mut s = UiScript::new().unwrap();
@@ -1461,6 +1475,7 @@ fn an_occupied_slot_going_empty_leaves_no_white_plate() {
 /// the visible bar shows.
 #[test]
 fn the_bonus_action_bar_exists_hidden_and_takes_layout_calls() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -1523,6 +1538,7 @@ fn the_bonus_action_bar_exists_hidden_and_takes_layout_calls() {
 /// forever, where nil fails loudly. Pinned so a later "completeness" pass cannot quietly add it.
 #[test]
 fn the_reference_action_bar_constants_are_defined() {
+    benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_action_bar(&s);
 
@@ -1578,6 +1594,7 @@ fn the_reference_action_bar_constants_are_defined() {
 /// full thing, or 48 `inherits=` sites across four files silently lose their handlers.
 #[test]
 fn both_reference_action_button_templates_are_inheritable() {
+    benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_action_bar(&s);
 
@@ -1662,6 +1679,7 @@ fn both_reference_action_button_templates_are_inheritable() {
 /// every extra bar ships off and nothing has claimed a page yet.
 #[test]
 fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
@@ -1837,6 +1855,7 @@ fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
 /// pressed the instant you enter stealth already drives the stealth page.
 #[test]
 fn bonus_bar_slides_up_with_sound_and_down_without() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
@@ -2059,6 +2078,7 @@ fn bonus_bar_slides_up_with_sound_and_down_without() {
 /// quirk (1524).
 #[test]
 fn bonus_bar_turnaround_continues_from_position() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");
@@ -2141,6 +2161,7 @@ fn bonus_bar_turnaround_continues_from_position() {
 /// actually draws, which separates them — the insets are behaviour here, not decoration.
 #[test]
 fn the_page_arrows_do_not_steal_each_other_s_clicks() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Cooldown.xml");

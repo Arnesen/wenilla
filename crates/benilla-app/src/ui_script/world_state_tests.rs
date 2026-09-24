@@ -81,6 +81,7 @@ pub(crate) fn push(s: &mut UiScript, rows: Vec<WorldStateUiView>) {
 /// The Eastern Plaguelands readout: two labelled tower counters, each with its faction icon.
 #[test]
 fn the_tower_counters_draw_with_their_icons() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
     assert!(
@@ -122,6 +123,7 @@ fn the_tower_counters_draw_with_their_icons() {
 /// are hidden rather than left painting a stale count.
 #[test]
 fn leaving_the_zone_clears_the_readout() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
     push(
@@ -146,7 +148,7 @@ fn leaving_the_zone_clears_the_readout() {
     );
 }
 
-/// The dynamic icon is a SECOND slot, not a swap (wow-re `worldstate-ui-law.md` §12; decision
+/// The dynamic icon is a SECOND slot, not a swap (`GetWorldStateUIInfo 0x4c5a70`; decision
 /// 1604). The `Icon` column and the `DynamicIcon` column feed two different regions — a 42x42
 /// static slot and a 32x32 button off the row's right edge — and only `uiState == 2`, the
 /// flag-taken value, lights the second one. The first pass replaced the static art whenever the
@@ -154,6 +156,7 @@ fn leaving_the_zone_clears_the_readout() {
 /// never have moved; both halves of that are pinned here.
 #[test]
 fn the_dynamic_icon_is_a_second_slot_lit_only_by_the_taken_state() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
 
@@ -245,6 +248,7 @@ fn the_dynamic_icon_is_a_second_slot_lit_only_by_the_taken_state() {
 /// icon is optional, and the row must not collapse when the DBC column is empty.
 #[test]
 fn a_row_without_an_icon_still_shows_its_text() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
     push(
@@ -263,6 +267,7 @@ fn a_row_without_an_icon_still_shows_its_text() {
 /// Our transcription had shown the text; the reference's file draws the bar (1972).
 #[test]
 fn a_capture_point_row_is_a_bar_not_a_line_of_text() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
     push(
@@ -289,6 +294,7 @@ fn a_capture_point_row_is_a_bar_not_a_line_of_text() {
 /// value — the number `0`, not nil and not ten nils — and a non-number argument raises.
 #[test]
 fn the_bindings_answer_the_reference_shape() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.set_world_state_ui(vec![WorldStateUiView {
         ui_state: 7,
@@ -363,11 +369,11 @@ fn ink_box(chain: &mut benilla_formats::Chain, path: &str) -> (f32, f32, f32, f3
 /// have. Every icon the readout names is a sprite authored into the UPPER-LEFT corner of a
 /// power-of-two canvas (`AllianceTower` fills 16x16 of 32x32; `UI-PVP-Alliance` ~40x40 of 64x64),
 /// nothing is cropped, and the reference compensates *geometrically* — a 42x42 slot hung 6 units
-/// off the row's left edge with the label seated 10 above its centreline (wow-re
-/// `worldstate-ui-law.md` §12). Pin the OUTCOME rather than the constants: whatever the numbers,
-/// the visible art must sit beside its label and share its line. A snug icon box — the obvious
-/// thing to write, and what we shipped — puts the ink up and to the left of its own slot, which is
-/// exactly what the director saw. Skips without client data.
+/// off the row's left edge with the label seated 10 above its centreline (`WorldStateFrame.xml`).
+/// Pin the OUTCOME rather than the constants: whatever the numbers, the visible art must sit beside
+/// its label and share its line. A snug icon box — the obvious thing to write, and what we shipped
+/// — puts the ink up and to the left of its own slot, which is exactly what the director saw.
+/// Skips without client data.
 #[test]
 fn the_visible_ink_sits_beside_its_label_not_adrift_of_it() {
     let data = benilla_formats::wow_data_or_skip!();

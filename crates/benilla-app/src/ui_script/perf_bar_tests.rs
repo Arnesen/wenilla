@@ -61,6 +61,7 @@ fn bar_quad(s: &mut UiScript) -> (usize, [f32; 4], Option<[f32; 4]>) {
 /// grey column into the slot rather than floating it above.
 #[test]
 fn the_meter_sits_in_the_bar_recess_the_reference_leaves_for_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[]);
     s.resolve();
 
@@ -90,6 +91,7 @@ fn the_meter_sits_in_the_bar_recess_the_reference_leaves_for_it() {
 /// would paint over the metal surround that frames the 10-wide slot.
 #[test]
 fn the_meter_paints_under_the_bar_art_it_shows_through() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[]);
     let (meter, _, _) = bar_quad(&mut s);
 
@@ -128,6 +130,7 @@ fn the_meter_paints_under_the_bar_art_it_shows_through() {
 /// — color is the entire readout, which is why this test asserts the tint and the rect separately.
 #[test]
 fn the_meter_tints_by_latency_on_the_reference_thresholds() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[]);
 
     // The first tick polls immediately (updateInterval starts at 0), so an unmeasured connection
@@ -197,6 +200,7 @@ fn poll_beat(s: &mut UiScript) {
 /// arithmetic on them can't error.
 #[test]
 fn get_net_stats_reports_the_pushed_latency() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[]);
     assert_eq!(
         s.eval::<(f64, f64, f64)>("return GetNetStats()").unwrap(),
@@ -229,6 +233,7 @@ fn get_net_stats_reports_the_pushed_latency() {
 /// tooltip that is quietly one line short.
 #[test]
 fn hovering_the_meter_shows_the_live_latency() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness(&[r"Interface\FrameXML\UIParent.xml"]);
     s.set_latency_ms(Some(42));
     // 1.12 ships detailed tips ON — `SHOW_NEWBIE_TIPS = "1"` is UIOptionsFrame_Init's (ref
@@ -309,6 +314,7 @@ fn hovering_the_meter_shows_the_live_latency() {
 /// the bar's end-to-end test pins, kept here so the two move together.
 #[test]
 fn the_meter_adds_its_two_frames_to_the_bar() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness(&[]);
     for name in [
         "MainMenuBarPerformanceBarFrame",

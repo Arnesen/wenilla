@@ -1,8 +1,4 @@
-//! Spell/action/attack + spell-visual wire tests (mirrors `src/messages/spells.rs`): initial spells,
-//! action buttons, cast/attack swing, cast result, attacker state, plus the spell-visual pipeline
-//! (`SMSG_SPELL_START`/`GO`, `SMSG_SPELL_FAILED_OTHER`, `SMSG_CANCEL_AUTO_REPEAT`,
-//! `SMSG_PLAY_SPELL_VISUAL`, decision 0099 phase 1). Split out of the former `tests/messages.rs` —
-//! see `tests/common` for the shared fixtures and methodology note.
+//! Wire tests for spells, action buttons, melee and the combat log (`src/messages/spells.rs`).
 
 mod common;
 
@@ -15,7 +11,7 @@ use common::hx;
 fn spell_and_action_wire() {
     use benilla_protocol::messages::{ActionButton, CastOutcome, ACTION_KIND_ITEM};
 
-    // SMSG_INITIAL_SPELLS (vmangos Player::SendInitialSpells): u8 0; u16 n; n x (u16 id, u16 0);
+    // SMSG_INITIAL_SPELLS (vmangos `Player::SendInitialSpells`): u8 0; u16 n; n x (u16 id, u16 0);
     // u16 m; m x (u16 spell, u16 item, u16 category, u32 spellCdMs, u32 catCdMs).
     let body = hx(concat!(
         "00", "0300", "4e000000", // 78 Heroic Strike
@@ -40,7 +36,7 @@ fn spell_and_action_wire() {
         _ => panic!("initial spells"),
     }
 
-    // SMSG_ACTION_BUTTONS: 120 packed u32s — action bits 0-23, kind bits 24-31, 0 = empty.
+    // SMSG_ACTION_BUTTONS: 120 packed u32s, action bits 0-23, kind bits 24-31, 0 = empty.
     let mut body = vec![0u8; 120 * 4];
     body[0..4].copy_from_slice(&0x0000_1A11u32.to_le_bytes()); // slot 0: spell 6673
     body[4..8].copy_from_slice(&0x8000_0075u32.to_le_bytes()); // slot 1: item 117
@@ -70,14 +66,12 @@ fn spell_and_action_wire() {
             },
         ]
     );
-    // ...and the decode passes them through as the ActionButtons event.
     match decode(packet).pop().unwrap() {
         SessionEvent::ActionButtons { buttons: b } => assert_eq!(b, buttons),
         _ => panic!("action buttons event"),
     }
 
-    // CMSG_CAST_SPELL golden bytes (vmangos SpellCastTargets::read): self cast = mask 0, nothing
-    // follows; unit cast = mask 2 + PACKED guid (build > 1.8.4 reads targets packed).
+    // CMSG_CAST_SPELL targets per vmangos `SpellCastTargets::read`: packed guids after 1.8.4.
     assert_eq!(
         messages::cast_spell(6673, None),
         hx("111a00000000"),
@@ -90,8 +84,7 @@ fn spell_and_action_wire() {
         "unit cast: u32 id + u16 mask 2 + packed guid (mask 0xC9)"
     );
 
-    // CMSG_CAST_SPELL at an ITEM (0437 phase 3 — the enchant pick): mask 0x0010 + packed guid.
-    // Item guid 0x4700_0000_0000_0951: present bytes 0 (0x51), 1 (0x09), 7 (0x47) → mask 0x83.
+    // Guid 0x4700_0000_0000_0951 has non-zero bytes 0 (0x51), 1 (0x09), 7 (0x47) → mask 0x83.
     let enchant_target = 0x4700_0000_0000_0951u64;
     assert_eq!(
         messages::cast_spell_item(7418, enchant_target),
@@ -99,11 +92,10 @@ fn spell_and_action_wire() {
         "item cast: u32 id + u16 mask 0x10 + packed item guid"
     );
 
-    // CMSG_ATTACKSWING: one full 8-byte guid.
+    // CMSG_ATTACKSWING: one full 8-byte guid, not packed.
     assert_eq!(messages::attack_swing(victim), hx("2a000045000030f1"));
 
-    // CMSG_SET_ACTION_BUTTON opcode (296 / 0x0128 — vmangos Opcodes_1_12_1.h) + body: button u8 +
-    // packed u32 (WorldPackets::Misc::SetActionButton::ReadFromWorldPacket, Misc.cpp:87-90).
+    // CMSG_SET_ACTION_BUTTON: u8 button + packed u32 action (vmangos `Misc.cpp:87-90`).
     assert_eq!(
         messages::opcode::CMSG_SET_ACTION_BUTTON,
         0x0128,
@@ -120,10 +112,7 @@ fn spell_and_action_wire() {
         "packed 0 clears the slot"
     );
 
-    // CMSG_SET_ACTIONBAR_TOGGLES opcode (703 / 0x02BF) + body: ONE u8 and nothing else — VERIFIED
-    // at the bytes, wow-re `system/ui/scratch/action-bar-toggles.md` §3 (`0x4e771d push 0x2bf`,
-    // the one emitter image-wide; PutUInt32 opcode + PutUInt8 byte; NetClient::Send computes the
-    // payload as 5 = 4 + 1). vmangos corroborates: `Misc.cpp:150-153` reads a single uint8.
+    // CMSG_SET_ACTIONBAR_TOGGLES: one u8 (reference `0x4e771d`, vmangos `Misc.cpp:150-153`).
     assert_eq!(
         messages::opcode::CMSG_SET_ACTIONBAR_TOGGLES,
         0x02BF,
@@ -142,10 +131,9 @@ fn spell_and_action_wire() {
     assert_eq!(
         messages::set_actionbar_toggles(0x0f),
         hx("0f"),
-        "all four — the largest value the reference binding can ever accumulate (§2)"
+        "all four — the largest value the reference binding can ever accumulate"
     );
 
-    // CMSG_SETSHEATHED opcode (480 / 0x01E0 — vmangos Opcodes_1_12_1.h) + body: one u32 state.
     assert_eq!(
         messages::opcode::CMSG_SETSHEATHED,
         0x01E0,
@@ -175,11 +163,8 @@ fn spell_and_action_wire() {
         ),
         _ => panic!("cast fail event"),
     }
-    // The reason-specific argument words (`CastResult::AppendBodyTo`) are POSITIONAL — read by
-    // what is left in the body, never keyed off the reason. One word for 0x5e
-    // REQUIRES_SPELL_FOCUS (the `SpellFocusObject.dbc` id: 12 = "Starbreeze Village Moonwell",
-    // the `%s` of "Requires %s"); two for the 0x19 EQUIPPED_ITEM_CLASS family (class + subclass
-    // mask), whose second is read and dropped.
+    // Argument words are read by body length, not by reason (vmangos `CastResult::AppendBodyTo`).
+    // 12 = Starbreeze Village Moonwell (`SpellFocusObject.dbc`); 0x19's subclass mask is dropped.
     let focus = messages::parse_server(
         messages::opcode::SMSG_CAST_RESULT,
         &hx("111a0000025e0c000000"),
@@ -229,10 +214,7 @@ fn spell_and_action_wire() {
         _ => panic!("attack stop"),
     }
 
-    // SMSG_ATTACKERSTATEUPDATE (vmangos Unit::SendAttackStateUpdate, Unit.cpp:4572-4605 — decision
-    // 0073): HitInfo, attacker PackGUID **first**, victim PackGUID, TotalDamage, *two* sub-damage
-    // blocks (absorb summed across both — decision 0137 phase 2's floating combat text feed),
-    // VictimState, two u32s (zero + spell id), blocked. The offhand bit (0x4) rides HitInfo.
+    // SMSG_ATTACKERSTATEUPDATE, per vmangos `Unit.cpp:4572-4605`; the attacker guid comes first.
     let mut body = 0x6u32.to_le_bytes().to_vec(); // HitInfo: 0x2 | 0x4 (offhand)
     body.extend_from_slice(&hx("0101")); // attacker packed guid = 1
     body.extend_from_slice(&hx("c92a4530f1")); // victim packed guid
@@ -272,8 +254,7 @@ fn spell_and_action_wire() {
         _ => panic!("attacker state"),
     }
 
-    // SMSG_AI_REACTION (vmangos Creature::SendAIReaction → Misc.cpp:445-449): raw (unpacked)
-    // guid + reaction u32 — 2 HOSTILE (aggro), 0 ALERT (stealth pre-aggro).
+    // SMSG_AI_REACTION: raw guid + u32 reaction, 2 = HOSTILE (vmangos `Misc.cpp:445-449`).
     let body = hx(concat!("3412000000000000", "02000000"));
     let packet = messages::parse_server(messages::opcode::SMSG_AI_REACTION, &body).unwrap();
     match &packet {
@@ -288,19 +269,8 @@ fn spell_and_action_wire() {
     }
 }
 
-/// The melee swing family's SIX opcodes and FOUR arms — plus the one that must stay unparsed.
-///
-/// Every body is empty (vmangos `Server/Packets/Combat.cpp`: `AttackSwingNotInRange`,
-/// `AttackSwingBadFacing`, `AttackSwingDeadTarget`, `AttackSwingCantAttack` all have a no-op
-/// `AppendBodyTo`), so there are no bytes to pin — what needs pinning is the **arm map**, which is
-/// the reference's and not the wire's:
-///
-/// - `0x148` DEADTARGET and `0x149` CANT_ATTACK both reach arm 4 (`0x625ab8`) verbatim, so the
-///   client cannot tell them apart and neither can we;
-/// - `0x147` NOTSTANDING is **never registered** (`0x6255b0`'s table `0x625aec` has it on the
-///   default arm `0x625ade`) and vmangos never sends it
-///   (`Player::SendAttackSwingNotStanding` has zero callers), so it must stay an unknown opcode
-///   here. A future session adding it "for completeness" fails this test, which is the point.
+/// Every swing refusal has an empty body (vmangos `Server/Packets/Combat.cpp`). DEADTARGET (0x148)
+/// and CANT_ATTACK (0x149) share the reference's arm `0x625ab8`, so they decode alike.
 #[test]
 fn attack_swing_refusal_wire() {
     use benilla_protocol::messages::AttackSwingError;
@@ -334,7 +304,7 @@ fn attack_swing_refusal_wire() {
         }
     }
 
-    // The family's fourth arm — a different opcode family, the same empty body and the same act.
+    // SMSG_CANCEL_COMBAT is the fourth arm: another opcode family, same empty body and effect.
     assert!(
         matches!(
             messages::parse_server(messages::opcode::SMSG_CANCEL_COMBAT, &[]).unwrap(),
@@ -347,8 +317,7 @@ fn attack_swing_refusal_wire() {
         SessionEvent::CancelCombat
     ));
 
-    // The family's other empty-bodied sibling, sent from the same vmangos site as CANCEL_COMBAT —
-    // but a bare `DisplayError(421)` in the reference (`0x6e9800`), with no latch behind it.
+    // SMSG_FEIGN_DEATH_RESISTED: in the reference only a `DisplayError(421)` (`0x6e9800`).
     assert!(matches!(
         messages::parse_server(messages::opcode::SMSG_FEIGN_DEATH_RESISTED, &[]).unwrap(),
         ServerPacket::FeignDeathResisted
@@ -358,9 +327,8 @@ fn attack_swing_refusal_wire() {
         SessionEvent::FeignDeathResisted
     ));
 
-    // 0x147 SMSG_ATTACKSWING_NOTSTANDING — unregistered in the reference, unsent by vmangos, and
-    // therefore an UNKNOWN opcode here: it falls to the `Other` arm, which is exactly what
-    // `0x6255b0`'s default arm `0x625ade` does with it.
+    // 0x147 SMSG_ATTACKSWING_NOTSTANDING stays unknown: the reference never registers it (default
+    // arm `0x625ade`) and vmangos never sends it.
     assert!(
         matches!(
             messages::parse_server(0x0147, &[]).unwrap(),
@@ -370,20 +338,16 @@ fn attack_swing_refusal_wire() {
     );
 }
 
-/// The spell-visual pipeline wire (decision 0099 phase 1): `SMSG_SPELL_START`/`GO`,
-/// `SMSG_SPELL_FAILED_OTHER`, `SMSG_CANCEL_AUTO_REPEAT`, `SMSG_PLAY_SPELL_VISUAL`. Golden bytes are
-/// hand-built from the vmangos writers (`Spell.cpp:4468-4659`, `SpellCastTargetsInfo.cpp:180-234`,
-/// `Spell.cpp:4780-4789`, `Server/Packets/Misc.cpp:548-550`, `Server/Packets/Spell.cpp:54-58`) —
-/// there is no existing oracle for these opcodes.
+/// Spell-visual bodies per vmangos `Spell.cpp:4468-4659` and `4780-4789`,
+/// `SpellCastTargetsInfo.cpp:180-234`, `Server/Packets/Misc.cpp:548-550` and
+/// `Server/Packets/Spell.cpp:54-58`.
 #[test]
 fn spell_visual_wire_golden() {
     use benilla_protocol::messages::{SpellCastTargets, SpellGo, SpellStart};
 
-    let creature = 0xF130_0000_4500_002Au64; // packs mask 0xC9 (same fixture guid as elsewhere)
+    let creature = 0xF130_0000_4500_002Au64; // packs with mask 0xC9
 
-    // SMSG_SPELL_START, a Fireball-style cast: item_or_caster pguid (no cast item, guid 1) + caster
-    // pguid (the creature) + spellId + castFlags (CAST_FLAG_UNKNOWN2 only) + remaining cast-time ms
-    // + a unit-target SpellCastTargets block. No ammo (castFlags doesn't carry CAST_FLAG_AMMO).
+    // SMSG_SPELL_START, a Fireball-style cast at a unit. The ammo block rides only CAST_FLAG_AMMO.
     let body = hx(concat!(
         "0101",       // item_or_caster pguid: mask 1, guid 1
         "c92a4530f1", // caster pguid: the creature guid, mask 0xC9
@@ -438,16 +402,13 @@ fn spell_visual_wire_golden() {
         other => panic!("spell start event, got {other:?}"),
     }
 
-    // SMSG_SPELL_START, an instant self-cast: cast time 0 (never gets a `Casting` component — the
-    // net bridge's insert gate is `cast_time_ms > 0`), target mask 0 (TARGET_FLAG_SELF) — nothing
-    // follows the mask.
     let body = hx(concat!(
-        "0109",     // item_or_caster pguid: mask 1, guid 9 (no cast item — this is the caster itself)
+        "0109",     // item_or_caster pguid: mask 1, guid 9 (no cast item: the caster itself)
         "0109",     // caster pguid: same object, guid 9
         "11000000", // spellId 17
         "0200",     // castFlags 0x2
         "00000000", // remaining cast time: 0 (instant)
-        "0000",     // SpellCastTargets mask: 0 (SELF) — nothing follows
+        "0000",     // SpellCastTargets mask: 0 (SELF), nothing follows
     ));
     let packet = messages::parse_server(messages::opcode::SMSG_SPELL_START, &body).unwrap();
     match decode(packet).pop().unwrap() {
@@ -461,10 +422,7 @@ fn spell_visual_wire_golden() {
         other => panic!("instant spell start event, got {other:?}"),
     }
 
-    // SMSG_SPELL_GO, a ranged Auto Shot: the same guid pair + spellId + castFlags (UNKNOWN9 |
-    // AMMO) + a 2-hit/2-miss target list (one plain miss, one SPELL_MISS_REFLECT with its trailing
-    // reflectResult byte) + a unit-target SpellCastTargets block + the ammo block (displayId
-    // 5996, inventoryType dropped).
+    // SMSG_SPELL_GO: only a SPELL_MISS_REFLECT miss carries the extra reflectResult byte.
     let body = hx(concat!(
         "0101",             // item_or_caster pguid: guid 1
         "c92a4530f1",       // caster pguid: the creature
@@ -530,18 +488,13 @@ fn spell_visual_wire_golden() {
             assert_eq!(go_target, None); // a unit-targeted cast leaves the GO target empty
             assert_eq!(dest, None); // …and the ground point empty (mask 0x2, no 0x40)
             assert_eq!(ammo_display_id, Some(5996));
-            // The packet's first guid (1) differs from the caster — an item cast, surfaced for
-            // the item-use cooldown key.
+            // A first guid that differs from the caster marks an item cast.
             assert_eq!(item_caster, Some(1));
         }
         other => panic!("spell go event, got {other:?}"),
     }
 
-    // SMSG_SPELL_GO for a GROUND cast (the B132 follow-up): empty hit/miss lists, mask 0x0040 +
-    // the dest Vector3d — the exact shape the live vmangos Blizzard capture produced
-    // (2026-07-30; the f32 bit patterns below are the captured DYNAMICOBJECT_POS values). The
-    // event layer must surface the point — it is the only launch-side record of where the
-    // spell went.
+    // A ground cast (Blizzard): mask 0x0040 + dest, a real cast's DYNAMICOBJECT_POS.
     let body = hx(concat!(
         "011a",     // item_or_caster pguid: guid 0x1a (== caster: a plain spell, no item)
         "011a",     // caster pguid
@@ -582,18 +535,12 @@ fn spell_visual_wire_golden() {
         other => panic!("ground spell go event, got {other:?}"),
     }
 
-    // SMSG_SPELL_GO for a **GameObject caster** — the Priest's Lightwell (GO entry 181102) casting
-    // spell 7001 "Lightwell Renew" on the player who clicked it. `GameObject::Use` keeps
-    // `spellCaster = this` for `GAMEOBJECT_TYPE_SPELLCASTER` (22) and builds the GameObject
-    // overload, whose ctor leaves `Unit* const m_casterUnit = nullptr` standing (`Spell.cpp:102`,
-    // `Spell.h:368`) — so `SendSpellGo`'s slot-2 write `WriteGuidHelper(data, m_casterUnit)`
-    // (`Spell.cpp:4513`) emits `ObjectGuid().WriteAsPacked()`: a lone zero mask byte, guid 0.
-    // Slot 1 still carries the object (no cast item → `m_caster`). The event layer must resolve the
-    // pair, or the cast has no caster the world index can ever hold and loses its whole visual body.
-    const LIGHTWELL: u64 = 0xF110_02C3_6E00_0123; // HIGHGUID_GAMEOBJECT | entry 181102 << 24 | 0x123
+    // A GameObject caster (Lightwell 181102, spell 7001): vmangos writes the null `m_casterUnit`
+    // as a lone zero mask byte (`Spell.cpp:4513`), so the object rides only slot 1.
+    const LIGHTWELL: u64 = 0xF110_02C3_6E00_0123; // GO high guid, entry 181102 << 24, counter 0x123
     let body = hx(concat!(
-        "fb23016ec30210f1", // item_or_caster pguid: the GameObject (mask 0xfb — byte 2 is zero)
-        "00",               // caster pguid: EMPTY — vmangos wrote a null `m_casterUnit`
+        "fb23016ec30210f1", // item_or_caster pguid: the GameObject (mask 0xfb: byte 2 is zero)
+        "00",               // caster pguid: empty, vmangos writes a null `m_casterUnit`
         "591b0000",         // spellId 7001 (Lightwell Renew)
         "0001",             // castFlags 0x100 (CAST_FLAG_UNKNOWN9)
         "01",               // hit count 1
@@ -605,7 +552,6 @@ fn spell_visual_wire_golden() {
     let packet = messages::parse_server(messages::opcode::SMSG_SPELL_GO, &body).unwrap();
     match &packet {
         ServerPacket::SpellGo(g) => {
-            // The message layer stays a faithful decode: slot 2 really is empty on the wire.
             assert_eq!((g.item_or_caster, g.caster), (LIGHTWELL, 0));
         }
         other => panic!("lightwell spell go, got {}", other.name()),
@@ -648,8 +594,7 @@ fn spell_visual_wire_golden() {
         other => panic!("spell failed other event, got {other:?}"),
     }
 
-    // SMSG_SPELL_DELAYED: raw (unpacked) guid + pushback ms (vmangos `Spell::Delayed` — `data <<
-    // ObjectGuid` is a raw u64, then `u32` delaytime). 500ms = 0x1F4.
+    // SMSG_SPELL_DELAYED: raw guid + u32 pushback ms (vmangos `Spell::Delayed`).
     let body = hx(concat!("4200000000000000", "f4010000"));
     let packet = messages::parse_server(messages::opcode::SMSG_SPELL_DELAYED, &body).unwrap();
     match &packet {
@@ -665,7 +610,7 @@ fn spell_visual_wire_golden() {
         other => panic!("spell delayed event, got {other:?}"),
     }
 
-    // SMSG_CANCEL_AUTO_REPEAT: empty body (vmangos `CancelAutoRepeat::AppendBodyTo` writes nothing).
+    // SMSG_CANCEL_AUTO_REPEAT: empty body (vmangos `CancelAutoRepeat::AppendBodyTo`).
     let packet = messages::parse_server(messages::opcode::SMSG_CANCEL_AUTO_REPEAT, &[]).unwrap();
     assert!(matches!(packet, ServerPacket::CancelAutoRepeat));
     assert!(matches!(
@@ -687,8 +632,8 @@ fn spell_visual_wire_golden() {
         other => panic!("play spell visual event, got {other:?}"),
     }
 
-    // MSG_CHANNEL_START: spellId + duration, both u32 — self-only, no guid on the wire (vmangos
-    // `Spell::SendChannelStart`, `Spell.cpp:4951-4954`; decision 0137). 10797 Starshards, 6s.
+    // MSG_CHANNEL_START: u32 spellId + u32 duration, no guid since only the caster gets it
+    // (vmangos `Spell.cpp:4951-4954`). 10797 is Starshards.
     let body = hx(concat!("2d2a0000", "70170000"));
     let packet = messages::parse_server(messages::opcode::MSG_CHANNEL_START, &body).unwrap();
     match &packet {
@@ -706,8 +651,7 @@ fn spell_visual_wire_golden() {
         other => panic!("channel start event, got {other:?}"),
     }
 
-    // MSG_CHANNEL_UPDATE: one u32 time-left (vmangos `Player::SendChannelUpdate`,
-    // `Player.cpp:21106-21110`); 0 = the channel is over.
+    // MSG_CHANNEL_UPDATE: u32 ms left, 0 = over (vmangos `Player.cpp:21106-21110`).
     let body = hx("b80b0000");
     let packet = messages::parse_server(messages::opcode::MSG_CHANNEL_UPDATE, &body).unwrap();
     match &packet {
@@ -719,8 +663,6 @@ fn spell_visual_wire_golden() {
         other => panic!("channel update event, got {other:?}"),
     }
 
-    // Truncated buffers fail cleanly rather than silently short-reading (the codec's usual
-    // contract — every reader is `Read::read_exact`-backed, which errors on a short buffer).
     let body = hx(concat!(
         "0101",
         "c92a4530f1",
@@ -739,10 +681,7 @@ fn spell_visual_wire_golden() {
     assert!(messages::parse_server(messages::opcode::SMSG_SPELL_GO, &body).is_err());
 }
 
-/// An open-lock cast on a chest / locked door: `SMSG_SPELL_GO` whose `SpellCastTargets` names a
-/// GameObject (`TARGET_FLAG_GAMEOBJECT`, no unit target). The decoder must surface the GO guid so the
-/// lid/door animation can open it (decision 2271) — the guid the older decode read for alignment and
-/// dropped.
+/// An open-lock cast names its chest or door as a `TARGET_FLAG_GAMEOBJECT` target, not a unit.
 #[test]
 fn spell_go_surfaces_the_gameobject_target() {
     let body = hx(concat!(
@@ -778,12 +717,8 @@ fn spell_go_surfaces_the_gameobject_target() {
     }
 }
 
-/// The combat-log wire (decision 0137 phase 2's floating-combat-text data feed):
-/// `SMSG_SPELLNONMELEEDAMAGELOG`, `SMSG_PERIODICAURALOG`, `SMSG_SPELLDAMAGESHIELD`,
-/// `SMSG_SPELLLOGMISS`, `SMSG_LOG_XPGAIN`, `SMSG_LEVELUP_INFO`. Golden bytes are hand-built from
-/// the vmangos writers (`Server/Packets/Spell.cpp:68-86,124-140`, `Unit.cpp:4395-4443`,
-/// `Server/Packets/Combat.cpp:73-79`, `Server/Packets/Misc.cpp:512-532`) — there is no existing
-/// oracle for these opcodes.
+/// Combat-log bodies per vmangos `Server/Packets/Spell.cpp:68-86,124-140`, `Unit.cpp:4395-4443`,
+/// `Server/Packets/Combat.cpp:73-79` and `Server/Packets/Misc.cpp:512-532`.
 #[test]
 fn combat_log_wire_golden() {
     use benilla_protocol::messages::{
@@ -791,11 +726,8 @@ fn combat_log_wire_golden() {
         PeriodicTick, SpellDamageLog, SpellLogMiss, XpGain,
     };
 
-    let creature = 0xF130_0000_4500_002Au64; // packs mask 0xC9 (same fixture guid as elsewhere)
+    let creature = 0xF130_0000_4500_002Au64; // packs with mask 0xC9
 
-    // SMSG_SPELLNONMELEEDAMAGELOG: target PackedGuid, attacker PackedGuid, spellId, damage, school
-    // u8, absorbed, resist i32, periodicLog u8 (bool), unused u8, blocked, hitInfo, extendedData u8
-    // (always 0, dropped). hitInfo 0x2 = SPELL_HIT_TYPE_CRIT.
     let body = hx(concat!(
         "c92a4530f1", // target pguid: the creature
         "0101",       // attacker pguid: guid 1
@@ -807,7 +739,7 @@ fn combat_log_wire_golden() {
         "00",         // periodicLog: false (direct, not a DoT tick)
         "00",         // unused
         "0a000000",   // blocked 10
-        "02000000",   // hitInfo 0x2 (crit)
+        "02000000",   // hitInfo 0x2 (SPELL_HIT_TYPE_CRIT)
         "00",         // extendedData (always 0, dropped)
     ));
     let packet =
@@ -837,8 +769,7 @@ fn combat_log_wire_golden() {
         other => panic!("spell damage log event, got {other:?}"),
     }
 
-    // SMSG_PERIODICAURALOG: target PackedGuid, caster PackedGuid, spellId, count, then `count` x
-    // {auraType u32, payload}. First vector: one PERIODIC_DAMAGE (3) tick.
+    // SMSG_PERIODICAURALOG: target, caster, spellId, then count x {u32 auraType, payload}.
     let body = hx(concat!(
         "c92a4530f1", // target pguid: the creature
         "0101",       // caster pguid: guid 1
@@ -875,7 +806,6 @@ fn combat_log_wire_golden() {
         other => panic!("periodic aura log event, got {other:?}"),
     }
 
-    // Second vector: one PERIODIC_HEAL (8) tick — a self-heal (target == caster).
     let body = hx(concat!(
         "0101",     // target pguid: guid 1
         "0101",     // caster pguid: guid 1 (self)
@@ -900,8 +830,7 @@ fn combat_log_wire_golden() {
         other => panic!("periodic aura log (heal), got {}", other.name()),
     }
 
-    // Third vector: an unrecognized auraType (4) cannot be skipped without desyncing the stream —
-    // decode must fail rather than guess a payload width.
+    // An unhandled auraType has no known payload width, so the decode fails rather than desync.
     let body = hx(concat!(
         "0101",     // target
         "0101",     // caster
@@ -911,8 +840,7 @@ fn combat_log_wire_golden() {
     ));
     assert!(messages::parse_server(messages::opcode::SMSG_PERIODICAURALOG, &body).is_err());
 
-    // SMSG_SPELLDAMAGESHIELD: victim raw guid, attacker raw guid, damage, school — all four fields
-    // distinct. `victim` is the shield's bearer; `attacker` receives the damage back.
+    // SMSG_SPELLDAMAGESHIELD: `victim` bears the shield; `attacker` takes the damage back.
     let body = hx(concat!(
         "1111000000000000", // victim raw guid 0x1111
         "2222000000000000", // attacker raw guid 0x2222
@@ -939,9 +867,8 @@ fn combat_log_wire_golden() {
         other => panic!("damage shield event, got {other:?}"),
     }
 
-    // SMSG_ENVIRONMENTALDAMAGELOG: victim raw guid (vmangos `ObjectGuid.cpp:174` streams the raw
-    // u64, NOT a PackedGuid), damageType u8, damage, absorbed, resist i32 (the > 1.6.1 tail,
-    // `Server/Packets/Combat.cpp:58-67`). Type 2 = fall.
+    // SMSG_ENVIRONMENTALDAMAGELOG: a raw victim guid (vmangos `ObjectGuid.cpp:174`); absorbed and
+    // resist are the post-1.6.1 tail (`Server/Packets/Combat.cpp:58-67`).
     let body = hx(concat!(
         "0300000000000000", // victim raw guid 3
         "02",               // damageType 2 (DAMAGE_FALL)
@@ -973,9 +900,8 @@ fn combat_log_wire_golden() {
         other => panic!("environmental damage log event, got {other:?}"),
     }
 
-    // SMSG_SPELLLOGMISS: spellId, caster raw guid, useExtended u8 (0 here — no trailing 2xf32 per
-    // entry), count, then `count` x {target raw guid, missInfo u8}. Two entries: DODGE (3) and
-    // REFLECT (11) — the reflect trailing byte only rides SMSG_SPELL_GO's miss list, not this one.
+    // SMSG_SPELLLOGMISS: count x {raw target guid, u8 missInfo}; useExtended 1 adds 2 x f32 per
+    // entry. REFLECT's extra byte rides only SMSG_SPELL_GO's miss list, not this one.
     let body = hx(concat!(
         "85000000",         // spellId 133
         "4200000000000000", // caster raw guid 0x42
@@ -1005,9 +931,6 @@ fn combat_log_wire_golden() {
         other => panic!("spell log miss event, got {other:?}"),
     }
 
-    // SMSG_LOG_XPGAIN: victim raw guid (0 for non-kill) + total + xpType (0 kill, carries trailing
-    // base+bonus; 1 non-kill, nothing trailing). Both vectors consume exactly their own body — a
-    // kill's trailing base/bonus is present, a non-kill's is absent.
     let mut body = 0xCCu64.to_le_bytes().to_vec(); // victim
     body.extend_from_slice(&250u32.to_le_bytes()); // total
     body.push(0); // xpType: kill
@@ -1035,7 +958,7 @@ fn combat_log_wire_golden() {
 
     let mut body = 0u64.to_le_bytes().to_vec(); // victim: 0 (non-kill xp has no victim)
     body.extend_from_slice(&50u32.to_le_bytes()); // total
-    body.push(1); // xpType: non-kill — nothing trails
+    body.push(1); // xpType: non-kill, nothing trails
     let packet = messages::parse_server(messages::opcode::SMSG_LOG_XPGAIN, &body).unwrap();
     match &packet {
         ServerPacket::XpGain(x) => {
@@ -1056,9 +979,8 @@ fn combat_log_wire_golden() {
         other => panic!("xp gain event, got {other:?}"),
     }
 
-    // SMSG_EXPLORATION_EXPERIENCE: areaId u32 (an AreaTable.dbc row id) + xp u32 — exactly
-    // 8 bytes (VERIFIED vmangos Misc.cpp:552-556; sent even when xp is 0). The vector is
-    // Westfall (area 40) worth 85 xp.
+    // SMSG_EXPLORATION_EXPERIENCE: u32 AreaTable.dbc id (40 = Westfall) + u32 xp, sent even when
+    // xp is 0 (vmangos `Misc.cpp:552-556`).
     let mut body = 40u32.to_le_bytes().to_vec();
     body.extend_from_slice(&85u32.to_le_bytes());
     assert_eq!(body.len(), 8);
@@ -1081,9 +1003,8 @@ fn combat_log_wire_golden() {
         other => panic!("exploration xp event, got {other:?}"),
     }
 
-    // SMSG_LEVELUP_INFO: twelve u32 — level, healthGain, powerGains[5] (mana..happiness),
-    // statGains[5] (str..spirit). VERIFIED vmangos Misc.cpp:524-532; exactly 48 bytes, no guid
-    // (self-addressed). The vector is a caster-flavored ding: mana + int/spirit heavy.
+    // SMSG_LEVELUP_INFO: twelve u32, level, healthGain, powerGains[5] (mana..happiness) and
+    // statGains[5] (str..spirit), no guid (vmangos `Misc.cpp:524-532`).
     let mut body = Vec::new();
     for v in [7u32, 22, 15, 0, 0, 0, 0, 1, 0, 1, 2, 1] {
         body.extend_from_slice(&v.to_le_bytes());
@@ -1110,25 +1031,18 @@ fn combat_log_wire_golden() {
     }
 }
 
-/// `SMSG_SPELL_UPDATE_CHAIN_TARGETS` — the beam's hop list (decision 0955). Byte-exact against
-/// vmangos `Spell::SendChannelStart` (`Spell.cpp:4970-4997`), which writes an `ObjectGuid` (raw
-/// `u64`, never packed), then `u32 spellId`, then a `u32` count, then that many raw guids. The
-/// client's handler `0x6e9820` decodes exactly that shape.
-///
-/// This is the packet the whole beam system hangs off: it is the **only** producer of the client's
-/// chain-target array (`unit+0xd44`), so a decode slip here reads as "the beams came back wrong"
-/// rather than as a parse error.
+/// Raw caster guid, u32 spellId, u32 count, raw guids (vmangos `Spell.cpp:4970-4997`); in the
+/// reference (`0x6e9820`) the only writer of the beams' chain-target array (`unit+0xd44`).
 #[test]
 fn spell_chain_targets_wire() {
     use benilla_protocol::messages::SpellChainTargets;
 
     const CASTER: u64 = 0x0000_01f1_3045_2ac9;
 
-    // Drain Life (689) channelled from a creature onto one target — the common case, count 1.
     let body = hx(concat!(
-        "c92a4530f1010000", // caster guid, RAW u64 (not packed)
+        "c92a4530f1010000", // caster guid, raw u64 (not packed)
         "b1020000",         // spellId 689 (Drain Life)
-        "01000000",         // count 1 — a u32, not the u8 the GO lists use
+        "01000000",         // count 1: a u32, not the u8 the GO lists use
         "aa00000000000000", // target guid 0xAA, raw
     ));
     let packet =
@@ -1153,7 +1067,6 @@ fn spell_chain_targets_wire() {
         other => panic!("chain targets event, got {other:?}"),
     }
 
-    // A three-hop chain, hop order preserved: the beam runs caster -> t1 -> t2 -> t3.
     let body = hx(concat!(
         "0100000000000000",
         "a5010000", // spellId 421 (Chain Lightning)
@@ -1170,8 +1083,7 @@ fn spell_chain_targets_wire() {
         other => panic!("chain targets, got {}", other.name()),
     }
 
-    // An empty list is legal on the wire (the server only *sends* when it has hits, but the shape
-    // is a count) and must decode rather than error.
+    // An empty list is legal on the wire, though the server only sends the packet with hits.
     let body = hx(concat!("0100000000000000", "a5010000", "00000000"));
     match messages::parse_server(messages::opcode::SMSG_SPELL_UPDATE_CHAIN_TARGETS, &body).unwrap()
     {
@@ -1179,7 +1091,7 @@ fn spell_chain_targets_wire() {
         other => panic!("chain targets, got {}", other.name()),
     }
 
-    // A truncated body is an error, not a silent short list — the count says 2, one guid follows.
+    // Count 2 with one guid following is an error, not a short list.
     let body = hx(concat!(
         "0100000000000000",
         "a5010000",
@@ -1191,19 +1103,15 @@ fn spell_chain_targets_wire() {
     );
 }
 
-/// **The combat-log completeness wire** (decision 1703) — the eight bodies 1571 §5 named as
-/// "deliberately out because their wire sources are undecoded". Byte-exact against vmangos's own
-/// writers, cited per packet, because a wrong field order here is a wrong *sentence* in the chat
-/// log and no gate downstream can see it.
+/// Eight combat-log opcodes, each parsed against the vmangos writer cited at it.
 #[test]
-fn combat_log_completeness_wire() {
+fn kill_outcome_dispel_enchantment_and_execute_logs_parse() {
     use benilla_protocol::messages::{
         DispelFailed, EnchantmentLog, ExecuteLog, PartyKillLog, SpellDispelLog, SpellInstaKillLog,
         SpellLogExecute, SpellOutcomeLog,
     };
 
-    // SMSG_PARTYKILLLOG: killer raw guid, victim raw guid
-    // (`WorldPackets::Combat::PartyKillLog::AppendBodyTo`, Combat.cpp:52-56).
+    // SMSG_PARTYKILLLOG: raw killer + raw victim guid (vmangos `Server/Packets/Combat.cpp:52-56`).
     let body = hx(concat!(
         "0700000000000000", // killer 7
         "2a00000000000000", // victim 42
@@ -1219,8 +1127,7 @@ fn combat_log_completeness_wire() {
         other => panic!("party kill log, got {}", other.name()),
     }
 
-    // SMSG_SPELLINSTAKILLLOG: victim raw guid, spellId (`Spell::EffectInstaKill`,
-    // SpellEffects.cpp:274-279).
+    // SMSG_SPELLINSTAKILLLOG: raw victim guid, u32 spellId (vmangos `SpellEffects.cpp:274-279`).
     let body = hx(concat!("0900000000000000", "0d270000"));
     match messages::parse_server(messages::opcode::SMSG_SPELLINSTAKILLLOG, &body).unwrap() {
         ServerPacket::SpellInstaKillLog(p) => assert_eq!(
@@ -1233,8 +1140,7 @@ fn combat_log_completeness_wire() {
         other => panic!("instakill log, got {}", other.name()),
     }
 
-    // SMSG_PROCRESIST / SMSG_SPELLORDAMAGE_IMMUNE: one body, two opcodes
-    // (`WorldPackets::Spell::ProcResist`/`SpellOrDamageImmune`, Spell.cpp:88-102).
+    // One body, two opcodes (vmangos `Server/Packets/Spell.cpp:88-102`).
     let body = hx(concat!(
         "0100000000000000", // caster 1
         "0200000000000000", // target 2
@@ -1256,8 +1162,7 @@ fn combat_log_completeness_wire() {
         other => panic!("spell-or-damage immune, got {}", other.name()),
     }
 
-    // SMSG_SPELLDISPELLOG: victim PACKED guid, caster PACKED guid, count, count x spellId
-    // (`Spell::EffectDispel`, SpellEffects.cpp:2524-2539 — the >= 1.12.1 branch, which is ours).
+    // SMSG_SPELLDISPELLOG, per vmangos `SpellEffects.cpp:2524-2539` (its 1.12.1 branch).
     let body = hx(concat!(
         "0105",     // packed victim: mask 0x01, byte 0x05 -> 5
         "0206",     // packed caster: mask 0x02, byte 0x06 -> 0x600
@@ -1277,8 +1182,8 @@ fn combat_log_completeness_wire() {
         other => panic!("spell dispel log, got {}", other.name()),
     }
 
-    // SMSG_DISPEL_FAILED: caster raw guid, victim raw guid, then spell ids TO THE END OF THE BODY —
-    // vmangos writes no count (`Spell::EffectDispel`, SpellEffects.cpp:2549-2555).
+    // SMSG_DISPEL_FAILED: raw caster, raw victim, then spell ids to the end of the body, with no
+    // count (vmangos `SpellEffects.cpp:2549-2555`).
     let body = hx(concat!(
         "0300000000000000",
         "0400000000000000",
@@ -1296,18 +1201,15 @@ fn combat_log_completeness_wire() {
         ),
         other => panic!("dispel failed, got {}", other.name()),
     }
-    // The same packet with no failures at all is a legal two-guid body, not a parse error.
     let body = hx(concat!("0300000000000000", "0400000000000000"));
     match messages::parse_server(messages::opcode::SMSG_DISPEL_FAILED, &body).unwrap() {
         ServerPacket::DispelFailed(p) => assert!(p.spell_ids.is_empty()),
         other => panic!("dispel failed, got {}", other.name()),
     }
 
-    // SMSG_ENCHANTMENTLOG: caster raw guid, owner raw guid, itemEntry, spellId, showAffiliation
-    // (`WorldPackets::Item::EnchantmentLog::AppendBodyTo`, Item.cpp:235-242). An EMPTY caster is
-    // how the server says the enchant FADED (`Player::SendEnchantmentLog`'s own comment).
+    // SMSG_ENCHANTMENTLOG, per vmangos `Server/Packets/Item.cpp:235-242`.
     let body = hx(concat!(
-        "0000000000000000", // caster 0 -> a fade
+        "0000000000000000", // caster 0: the enchant faded
         "0b00000000000000", // owner 11
         "d2040000",         // itemEntry 1234
         "39050000",         // spellId 1337
@@ -1327,11 +1229,7 @@ fn combat_log_completeness_wire() {
         other => panic!("enchantment log, got {}", other.name()),
     }
 
-    // SMSG_SPELLLOGEXECUTE: caster PACKED guid, spellId, groupCount, then per group
-    // {effect, rowCount, rows} (`Spell::SendLogExecute`, Spell.cpp:4662-4778). Three groups here
-    // cover the three payload shapes that are not a bare guid, including POWER_DRAIN's
-    // (amount, power, multiplier) — the order verified at the client's own bytes, not only at
-    // vmangos's (see `ExecuteLog::PowerDrain`).
+    // SMSG_SPELLLOGEXECUTE (vmangos `Spell.cpp:4662-4778`): row shape varies by effect.
     let body = hx(concat!(
         "0107",     // packed caster 7
         "e8030000", // spellId 1000
@@ -1343,11 +1241,11 @@ fn combat_log_completeness_wire() {
         "2c010000",         // amount 300
         "00000000",         // power 0 (mana)
         "0000803f",         // multiplier 1.0
-        // group 2: effect 24 CREATE_ITEM, one row — an item entry and nothing else
+        // group 2: effect 24 CREATE_ITEM, one row of just an item entry
         "18000000",
         "01000000",
         "b80b0000", // itemEntry 3000
-        // group 3: effect 102 DISMISS_PET, one row — the guid-only tail of the switch
+        // group 3: effect 102 DISMISS_PET, one row of just a guid
         "66000000",
         "01000000",
         "1e00000000000000", // target 30
@@ -1376,30 +1274,25 @@ fn combat_log_completeness_wire() {
         other => panic!("spell log execute, got {}", other.name()),
     }
 
-    // An effect id vmangos has no case for cannot be skipped — its row width is not on the wire —
-    // so the body errors rather than desyncing. vmangos never sends one: its own switch returns
-    // before `SendMessageToSet`, so an unlisted effect means no packet, never a truncated one.
+    // An effect vmangos has no case for has no known row width, so the body errors; vmangos never
+    // sends one, since its switch returns before `SendMessageToSet`.
     let body = hx(concat!(
         "0107", "e8030000", "01000000", "77000000", "01000000"
     ));
     assert!(messages::parse_server(messages::opcode::SMSG_SPELLLOGEXECUTE, &body).is_err());
 }
 
-/// The talent spell-modifier pair, end to end: both opcodes through `parse_server` and on into a
-/// [`SessionEvent`]. One handler, one body, and the opcode as the only discriminant — so the two
-/// bodies here are byte-identical and only the `flat` flag differs.
+/// The flat and pct spell-modifier opcodes share one body; only the opcode sets `flat`.
 #[test]
 fn spell_modifier_wire() {
-    // mask_bit 35 · op 14 (SPELLMOD_COST) · value -30. Bit 35 is deliberately past the low dword:
-    // it is a real shipped value (Cure Poison 526's only bit) and it is the half a 32-bit mask
-    // would quietly drop.
+    // u8 mask_bit 35, u8 op 14 (SPELLMOD_COST), i32 value -30. Bit 35, Cure Poison 526's only
+    // bit, sits past the low dword that a 32-bit mask would keep.
     let body = hx("230ee2ffffff");
     for (wire_op, is_flat) in [
         (messages::opcode::SMSG_SET_FLAT_SPELL_MODIFIER, true),
         (messages::opcode::SMSG_SET_PCT_SPELL_MODIFIER, false),
     ] {
         let packet = messages::parse_server(wire_op, &body).unwrap();
-        // The name recovers the opcode, which the collapsed-arm families cannot.
         assert_eq!(
             packet.name(),
             if is_flat {
@@ -1428,8 +1321,6 @@ fn spell_modifier_wire() {
         }
     }
 
-    // Five bytes is not a body: the value is a dword, not the three bytes a "u8 u8 u8 i16" misread
-    // would take.
     assert!(messages::parse_server(
         messages::opcode::SMSG_SET_FLAT_SPELL_MODIFIER,
         &hx("230ee2ffff")

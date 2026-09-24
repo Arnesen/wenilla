@@ -9,7 +9,7 @@ use benilla_protocol::messages::BAG_PLAYER_INVENTORY;
 use benilla_ui::script::{UiScript, EQUIPMENT_BAG};
 
 use crate::items::Items;
-use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::pending_item_ops::PendingItemOps;
 
 use super::{slot_guid, slot_guid_count, wire_pos, INVTYPE_AMMO};
@@ -22,7 +22,7 @@ use super::{slot_guid, slot_guid_count, wire_pos, INVTYPE_AMMO};
 /// Takes the WIRE position and the item's guid, and answers whether the send happened. The two
 /// forks it owns:
 ///
-/// - **ammo** (`cursor-dragdrop-slots.md`): an ammo-class item loads by entry with `CMSG_SET_AMMO`
+/// - **ammo**: an ammo-class item loads by entry with `CMSG_SET_AMMO`
 ///   rather than the equip wire — the stack stays in the bag and `PLAYER_AMMO_ID` references it
 ///   (decision 0526). A missing template falls back to `CMSG_AUTOEQUIP_ITEM`, whose refusal is at
 ///   least visible.
@@ -33,6 +33,7 @@ use super::{slot_guid, slot_guid_count, wire_pos, INVTYPE_AMMO};
 pub(crate) fn send_auto_equip(
     script: &mut UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
     bag_index: u8,
@@ -42,7 +43,7 @@ pub(crate) fn send_auto_equip(
 ) -> bool {
     if !suppress {
         if let Some(guid) = guid {
-            if gate.equip_binds(script, items, commands, guid) {
+            if gate.equip_binds(script, objects, items, commands, guid) {
                 gate.defer_equip(
                     script,
                     crate::ui_bind_confirm::PendingEquip::AutoEquip {
@@ -56,7 +57,7 @@ pub(crate) fn send_auto_equip(
         }
     }
     let ammo_entry = guid.and_then(|guid| {
-        let entry = items.object(guid)?.object_entry()?;
+        let entry = objects.object(guid)?.object_entry()?;
         let t = items.template(entry, guid, commands)?;
         (t.inventory_type == INVTYPE_AMMO).then_some(entry)
     });
@@ -77,8 +78,8 @@ pub(crate) fn send_auto_equip(
 /// contract (`cursor::doll::auto_equip_cursor_item`) already guarantees only a whole-stack,
 /// CONTAINER-sourced Item payload (`bag >= 0`) ever reaches this queue.
 ///
-/// The same ammo sub-fork as [`drain_container_uses`] (wow-re `cursor-dragdrop-slots.md`: the one
-/// auto-equip sender forks ammo-class → `CMSG_SET_AMMO`): a dropped ammo-class item loads by entry
+/// The same ammo sub-fork as [`drain_container_uses`] (the one auto-equip sender `0x5e1480`
+/// forks ammo-class → `CMSG_SET_AMMO`): a dropped ammo-class item loads by entry
 /// instead, which is also the wire for the ammo slot's own drop (the XML routes it here via
 /// `AutoEquipCursorItem` — decision 0526).
 ///
@@ -90,6 +91,7 @@ pub(crate) fn send_auto_equip(
 pub(super) fn drain_container_autoequips(
     script: Option<NonSendMut<UiScript>>,
     items: Res<Items>,
+    objects: Objects,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut gate: crate::ui_bind_confirm::BindGate,
@@ -109,10 +111,11 @@ pub(super) fn drain_container_autoequips(
         let guid = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, bag, slot0, &items));
+            .and_then(|store| slot_guid(&store.0, bag, slot0, &objects));
         send_auto_equip(
             &mut script,
             &mut gate,
+            &objects,
             &items,
             &commands,
             bag_index,
@@ -127,7 +130,7 @@ pub(super) fn drain_container_autoequips(
 /// `cursor::bag_verbs`) and send them on the wire.
 ///
 /// **The destination is a BAG, not a slot** — that is the finding this drain exists to carry
-/// (wow-re `bag-verbs-law.md`): `CMSG_AUTOSTORE_BAG_ITEM` names `(srcbag, srcslot, dstbag)` and
+/// (`0x4c7c00` → `0x5e12e0`): `CMSG_AUTOSTORE_BAG_ITEM` names `(srcbag, srcslot, dstbag)` and
 /// the server picks where inside it the item lands, which is why an ordinary item dropped on a
 /// bag BUTTON goes in the bag rather than swapping with it. The destination bag byte is
 /// [`wire_pos`]'s own answer for that container's first slot (255 for the backpack, the bag's
@@ -197,8 +200,8 @@ pub(super) fn drain_bag_autostores(
 pub(super) fn drain_inventory_uses(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    targeting: crate::ui_action::cast_target::CastTargeting,
-    mut ladder: crate::ui_action::CastLadder,
+    targeting: crate::spell::cast_target::CastTargeting,
+    mut ladder: crate::spell::CastLadder,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
@@ -216,9 +219,9 @@ pub(super) fn drain_inventory_uses(
         let (guid, start_quest, spell_index, use_spell, entry, is_charter) = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, EQUIPMENT_BAG, slot, &ladder.items))
+            .and_then(|store| slot_guid(&store.0, EQUIPMENT_BAG, slot, &ladder.objects))
             .and_then(|guid| {
-                let entry = ladder.items.object(guid)?.object_entry()?;
+                let entry = ladder.objects.object(guid)?.object_entry()?;
                 let t = ladder.items.template(entry, guid, &ladder.commands)?;
                 // The wire's spell byte is a template BLOCK ordinal (decision 0666) — the
                 // template is already in hand here for `start_quest`, so name the real one.
@@ -262,13 +265,13 @@ pub(super) fn drain_container_uses(
     bank: Res<crate::ui_bank::BankOpen>,
     mut equip_sound: MessageWriter<crate::sound::AutoEquipSound>,
     mut item_text: ResMut<crate::ui_item_text::ItemTextOpen>,
-    targeting: crate::ui_action::cast_target::CastTargeting,
+    targeting: crate::spell::cast_target::CastTargeting,
     // The client-side pending ("gray") lock — the right-click-open arm arms it (decision 0916).
     mut pending_items: ResMut<PendingItemOps>,
     // The loot-target latch — the right-click-open arm is one of its five arm sites, and the one
     // that lets `SMSG_LOOT_RESPONSE`'s admission gate recognise an item loot (decision 1531).
     mut loot_latch: ResMut<crate::ui_loot::LootLatch>,
-    mut ladder: crate::ui_action::CastLadder,
+    mut ladder: crate::spell::CastLadder,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
@@ -286,7 +289,7 @@ pub(super) fn drain_container_uses(
         let item_guid = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, bag, slot0, &ladder.items));
+            .and_then(|store| slot_guid(&store.0, bag, slot0, &ladder.objects));
         match item_guid {
             Some(guid) => {
                 debug!("ui_items: repair lua bag {bag} slot {slot} (item {guid:#x})");
@@ -320,7 +323,7 @@ pub(super) fn drain_container_uses(
             let item_guid = self_q
                 .iter()
                 .next()
-                .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &ladder.items));
+                .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &ladder.objects));
             match item_guid {
                 Some(guid) => {
                     debug!("ui_items: sell lua bag {bag} slot {slot} (item {guid:#x})");
@@ -370,9 +373,9 @@ pub(super) fn drain_container_uses(
         let clicked = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &ladder.items))
+            .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &ladder.objects))
             .and_then(|guid| {
-                let obj = ladder.items.object(guid)?;
+                let obj = ladder.objects.object(guid)?;
                 let inst_flags = obj.item_flags().unwrap_or(0);
                 let item_text_id = obj.item_text_id().unwrap_or(0);
                 let entry = obj.object_entry()?;
@@ -396,20 +399,20 @@ pub(super) fn drain_container_uses(
                 })
             });
 
-        // The reference's equip-vs-use fork (`0x4fa3b9`/`0x4fa3bd`, wow-re `right-click-open.md`
-        // §2), with the ammo sub-fork `cursor-dragdrop-slots.md` pins: the auto-equip sender
-        // `0x5e1480` sends `CMSG_SET_AMMO` (the item entry) for an ammo-class item,
-        // `CMSG_AUTOEQUIP_ITEM` for any other equippable (inventoryType != 0 — weapons, armor,
-        // bags). display_id feeds the synthetic pickup→place auto-equip sound (this path never
-        // moves the cursor; a drag already gets that pair via the cursor-payload transitions).
+        // The reference's equip-vs-use fork (`0x4fa3b9`/`0x4fa3bd`), with the ammo sub-fork: the
+        // auto-equip sender `0x5e1480` sends `CMSG_SET_AMMO` (the item entry) for an ammo-class
+        // item, `CMSG_AUTOEQUIP_ITEM` for any other equippable (inventoryType != 0 — weapons,
+        // armor, bags). display_id feeds the synthetic pickup→place auto-equip sound (this path
+        // never moves the cursor; a drag already gets that pair via the cursor-payload
+        // transitions).
         //
         // The arm carries the reference's own **quest guard** (`0x4fa3bd`–`0x4fa3cc`, decision
         // 0664): it equips only when `StartQuest` (`[rec+0x1a8]`) is 0, so a quest-starter falls
         // through *whatever* its inventoryType — the five equippable ones (Pendant of Myzrael,
         // Arena Master, …) offer their quest on a right-click, they don't put themselves on.
         //
-        // **Everything below this fork is `0x5d8d00`, the USE dispatcher, in ITS OWN order**
-        // (wow-re `right-click-open.md` §3) — an equippable item never reaches any of it.
+        // **Everything below this fork is `0x5d8d00`, the USE dispatcher, in ITS OWN order** — an
+        // equippable item never reaches any of it.
         if let Some(c) = clicked.filter(|c| c.start_quest == 0 && c.inventory_type != 0) {
             // Through the one sender (decision 1750): it owns the ammo fork AND the soulbind
             // deferral. A deferred equip plays no sound — the reference's own equip kit rides the
@@ -417,6 +420,7 @@ pub(super) fn drain_container_uses(
             if send_auto_equip(
                 &mut script,
                 &mut gate,
+                &ladder.objects,
                 &ladder.items,
                 &ladder.commands,
                 bag_index,
@@ -544,7 +548,7 @@ pub(super) fn drain_container_uses(
             );
             // **The loot latch, armed before the send** — arm site four of five (`0x5edcc0`, in
             // this same emitter `0x5edc80`, immediately ahead of the lock setter and the
-            // `0x5edce5 push 0xac`; wow-re `loot-anim-leg.md` §5, byte-verified). The latch is
+            // `0x5edce5 push 0xac`). The latch is
             // the **item's own guid** (`[[edi+8]+0]`) because that is what the answer names:
             // vmangos' `HandleOpenItemOpcode` ends in `SendLoot(pItem->GetObjectGuid(),
             // LOOT_CORPSE)`, so `SMSG_LOOT_RESPONSE` comes back on the item guid with wire type
@@ -557,11 +561,12 @@ pub(super) fn drain_container_uses(
             loot_latch.0 = Some(c.guid);
             // **The gray lock, armed before the send** — the reference's emitter `0x5edc80` calls
             // the lock setter `0x4953e0` at `0x5edcd9` and only then ships `CMSG_OPEN_ITEM`
-            // (wow-re `inventory-change-failure-display.md` §8, decision 0916). So a clam,
+            // (decision 0916). So a clam,
             // lockbox or loot bag greys the instant you right-click it and stays grey until the
-            // server answers — the loot landing (a resolving field update) or a refusal
-            // (`EQUIP_ERR_ITEM_LOCKED` on a still-locked junkbox), both of which
-            // `PendingItemOps` already clears on.
+            // open resolves — the emptied item vanishing (a resolving field update), a refusal
+            // (`EQUIP_ERR_ITEM_LOCKED` on a still-locked junkbox), or the window closed with loot
+            // left, whose `SMSG_LOOT_RELEASE_RESPONSE` unlocks it by guid (`ui_loot::net`'s
+            // `loot_release_response`, the reference's `UnlockItem` at `48f299`).
             //
             // Deliberately NOT armed on the gift-unwrap arm above, which sends the same opcode:
             // its emitter `0x5edd60` contains neither call — no lock setter and no latch write.
@@ -569,7 +574,7 @@ pub(super) fn drain_container_uses(
             let (guid, count) = self_q
                 .iter()
                 .next()
-                .map(|store| slot_guid_count(Some(store), bag, slot, &ladder.items))
+                .map(|store| slot_guid_count(Some(store), bag, slot, &ladder.objects))
                 .unwrap_or((0, 0));
             pending_items.add([(bag, slot, guid, count)]);
             script.fire_event("ITEM_LOCK_CHANGED", Vec::new());
@@ -662,6 +667,7 @@ pub(super) fn drain_container_moves(
     script: Option<NonSendMut<UiScript>>,
     commands: Res<NetCommands>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    objects: Objects,
     items: Res<Items>,
     mut pending: ResMut<PendingItemOps>,
     mut gate: crate::ui_bind_confirm::BindGate,
@@ -699,6 +705,7 @@ pub(super) fn drain_container_moves(
         send_container_move(
             &mut script,
             &mut gate,
+            &objects,
             &items,
             &commands,
             store,
@@ -727,6 +734,7 @@ fn is_equip_position(bag_index: u8, slot: u8) -> bool {
 pub(crate) fn send_container_move(
     script: &mut UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
     store: Option<&ObjectStore>,
@@ -758,9 +766,9 @@ pub(crate) fn send_container_move(
                 (mv.dst_bag, mv.dst_slot)
             };
             let slot0 = u8::try_from(item_slot.saturating_sub(1)).unwrap_or(0);
-            let guid = store.and_then(|s| slot_guid(&s.0, item_bag, slot0, items));
+            let guid = store.and_then(|s| slot_guid(&s.0, item_bag, slot0, objects));
             if let Some(guid) = guid {
-                if gate.equip_binds(script, items, commands, guid) {
+                if gate.equip_binds(script, objects, items, commands, guid) {
                     gate.defer_equip(
                         script,
                         crate::ui_bind_confirm::PendingEquip::Swap {
@@ -819,8 +827,8 @@ pub(crate) fn send_container_move(
         // The pending lock: both ends, baselined on their CURRENT (guid, count) — the resolving
         // clear then watches for either to move (an empty destination baselines (0, 0) and watches
         // for an item to land there).
-        let (src_guid, src_count) = slot_guid_count(store, mv.src_bag, mv.src_slot, items);
-        let (dst_guid, dst_count) = slot_guid_count(store, mv.dst_bag, mv.dst_slot, items);
+        let (src_guid, src_count) = slot_guid_count(store, mv.src_bag, mv.src_slot, objects);
+        let (dst_guid, dst_count) = slot_guid_count(store, mv.dst_bag, mv.dst_slot, objects);
         pending.add([
             (mv.src_bag, mv.src_slot, src_guid, src_count),
             (mv.dst_bag, mv.dst_slot, dst_guid, dst_count),
@@ -845,7 +853,7 @@ pub(super) fn drain_container_destroys(
     script: Option<NonSendMut<UiScript>>,
     commands: Res<NetCommands>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    items: Res<Items>,
+    objects: Objects,
     mut pending: ResMut<PendingItemOps>,
 ) {
     let Some(mut script) = script else {
@@ -864,7 +872,7 @@ pub(super) fn drain_container_destroys(
             slot: wire_slot,
             count,
         });
-        let (guid, stack) = slot_guid_count(store, bag, slot, &items);
+        let (guid, stack) = slot_guid_count(store, bag, slot, &objects);
         pending.add([(bag, slot, guid, stack)]);
         script.fire_event("ITEM_LOCK_CHANGED", Vec::new());
     }
@@ -900,19 +908,20 @@ mod tests {
             .init_resource::<crate::ui_loot::LootLatch>()
             .init_resource::<crate::target::Selection>()
             .init_resource::<crate::net::SelfGuid>()
-            .init_resource::<crate::ui_action::cast_target::AutoSelfCast>()
+            .init_resource::<crate::spell::cast_target::AutoSelfCast>()
             .init_resource::<crate::net::Reputations>()
             .init_resource::<crate::player::Player>()
-            .init_resource::<crate::ui_cast::PendingCast>()
-            .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
-            .init_resource::<crate::cooldowns::Cooldowns>()
-            .init_resource::<crate::spell_mods::SpellModifiers>()
+            .init_resource::<crate::spell::PendingCast>()
+            .init_resource::<crate::spell::QueuedMeleeSpell>()
+            .init_resource::<crate::spell::Cooldowns>()
+            .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_action::CastErrors>()
             .init_resource::<crate::ui_action::UiErrorKeys>()
-            .init_resource::<crate::ui_action::AutoRepeatActive>()
+            .init_resource::<crate::spell::AutoRepeatActive>()
             .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
-            .init_resource::<crate::ui_action::targeting::SpellTargeting>()
+            .init_resource::<crate::spell::targeting::SpellTargeting>()
             .init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
             .insert_resource(NetCommands(tx));
 
         // The player, holding the clam in backpack slot 1.
@@ -923,13 +932,15 @@ mod tests {
                 (F_PACK_SLOT_1 + 1, (CLAM >> 32) as u32),
             ])),
         ));
-        // The item object and its landed template — LOOTABLE, so the dispatcher's open arm claims
-        // the click (`ItemInfo::opens_loot`).
-        let mut items = app.world_mut().resource_mut::<Items>();
-        items.insert_object(
+        // The item object (an entity in the one index, 2334) and its landed template —
+        // LOOTABLE, so the dispatcher's open arm claims the click (`ItemInfo::opens_loot`).
+        crate::items::test_spawn_item(
+            app.world_mut(),
             CLAM,
             ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, CLAM_ENTRY)]),
+            false,
         );
+        let mut items = app.world_mut().resource_mut::<Items>();
         items.insert_template(
             CLAM_ENTRY,
             Some(ItemInfo {
@@ -948,7 +959,7 @@ mod tests {
     }
 
     /// **The clam regression (decision 1531).** Arm site four of five: the `CMSG_OPEN_ITEM` send
-    /// latches the ITEM's own guid (`0x5edcc0`, wow-re `loot-anim-leg.md` §5). It is not cosmetic
+    /// latches the ITEM's own guid (`0x5edcc0`). It is not cosmetic
     /// and it is not about the pose — vmangos answers this opcode with `SendLoot(item guid,
     /// LOOT_CORPSE)`, i.e. `SMSG_LOOT_RESPONSE` type **1** on that same guid (live-verified by
     /// `benilla-world --open-item`), and 1477's admission gate *refuses* a type-1 answer against a
@@ -980,8 +991,8 @@ mod tests {
     }
 
     /// **Right-clicking wrapping paper arms the wrap and sends NOTHING** (decision 1934) — the
-    /// same dispatcher arm the wrapped-gift unwrap takes, on its other side. This is the bug the
-    /// carve found: benilla fell through to `CMSG_USE_ITEM`, which casts a spell the paper does
+    /// same dispatcher arm the wrapped-gift unwrap takes, on its other side. This is the bug:
+    /// benilla fell through to `CMSG_USE_ITEM`, which casts a spell the paper does
     /// not have.
     #[test]
     fn a_wrapper_right_click_arms_the_cursor_and_ships_no_packet() {
@@ -1041,6 +1052,7 @@ pub(super) fn drain_bind_confirm_answers(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut pending: ResMut<PendingItemOps>,
+    objects: Objects,
     items: Res<Items>,
     commands: Res<NetCommands>,
     mut gate: crate::ui_bind_confirm::BindGate,
@@ -1073,6 +1085,7 @@ pub(super) fn drain_bind_confirm_answers(
                 send_container_move(
                     &mut script,
                     &mut gate,
+                    &objects,
                     &items,
                     &commands,
                     store,
@@ -1095,6 +1108,7 @@ pub(super) fn drain_bind_confirm_answers(
                 send_auto_equip(
                     &mut script,
                     &mut gate,
+                    &objects,
                     &items,
                     &commands,
                     bag_index,
@@ -1114,8 +1128,8 @@ pub(super) fn drain_bind_confirm_answers(
 /// taken on the first, so a doubled accept re-uses nothing.
 pub(super) fn drain_bind_on_use_confirms(
     script: Option<NonSendMut<UiScript>>,
-    targeting: crate::ui_action::cast_target::CastTargeting,
-    mut ladder: crate::ui_action::CastLadder,
+    targeting: crate::spell::cast_target::CastTargeting,
+    mut ladder: crate::spell::CastLadder,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut gate: crate::ui_bind_confirm::BindGate,
 ) {
@@ -1235,6 +1249,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::ui_bind_confirm::PendingEquips>()
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
             .init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
             .insert_resource(NetCommands(tx));
 
         app.world_mut().spawn((
@@ -1244,14 +1259,16 @@ mod bind_confirm_tests {
                 (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
             ])),
         ));
-        let mut items = app.world_mut().resource_mut::<Items>();
-        items.insert_object(
+        crate::items::test_spawn_item(
+            app.world_mut(),
             AXE_GUID,
             ObjectFields::from_pairs(&[
                 (F_OBJECT_ENTRY, FLURRY_AXE),
                 (F_ITEM_FLAGS, u32::from(already_bound)),
             ]),
+            false,
         );
+        let mut items = app.world_mut().resource_mut::<Items>();
         items.insert_template(
             FLURRY_AXE,
             Some(ItemInfo {
@@ -1297,6 +1314,7 @@ mod bind_confirm_tests {
     /// that fed it, where the reference defers inside the call that consumed the cursor.
     #[test]
     fn placing_a_boe_on_the_doll_asks_and_survives_its_own_cursor_update() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_on_the_doll();
         assert!(
             rx.try_iter().next().is_none(),
@@ -1362,6 +1380,7 @@ mod bind_confirm_tests {
     /// would be unanswerable.
     #[test]
     fn accepting_re_issues_the_place_and_does_not_ask_again() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_on_the_doll();
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -1410,6 +1429,7 @@ mod bind_confirm_tests {
     /// the second call finds the element already free.
     #[test]
     fn cancelling_sends_nothing_and_the_doubled_cancel_is_harmless() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_on_the_doll();
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -1434,10 +1454,11 @@ mod bind_confirm_tests {
     }
 
     /// The equip predicate is `bonding == 2` and **nothing else about the item** — no quality leg
-    /// at all, which is the half wow-re refuted (benilla was about to carry the loot arm's
+    /// at all (`0x5e0e54`; benilla was about to carry the loot arm's
     /// `quality >= 2` across). Every other bonding value places straight through.
     #[test]
     fn only_bind_on_equip_defers_the_place() {
+        benilla_formats::wow_data_or_skip!();
         for (bonding, why) in [
             (0u32, "no bind"),
             (1, "bind on PICKUP is the loot arm's value, not this one"),
@@ -1463,6 +1484,7 @@ mod bind_confirm_tests {
     /// (The loot arm's `quality >= 2` would have silenced exactly this case.)
     #[test]
     fn a_white_bind_on_equip_item_still_asks() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_with(2, 1, false);
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -1478,6 +1500,7 @@ mod bind_confirm_tests {
     /// cursor and the tooltip's Soulbound override use (decisions 0928, 1562).
     #[test]
     fn an_already_bound_item_places_without_asking() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_with(2, 4, true);
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -1495,12 +1518,14 @@ mod bind_confirm_tests {
     /// this gate could exist in a single place.
     #[test]
     fn auto_equipping_a_boe_asks_and_the_accept_re_issues() {
+        benilla_formats::wow_data_or_skip!();
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.init_resource::<PendingItemOps>()
             .init_resource::<crate::ui_bind_confirm::PendingEquips>()
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
             .init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
             .insert_resource(NetCommands(tx));
         app.world_mut().spawn((
             SelfPlayer,
@@ -1509,11 +1534,13 @@ mod bind_confirm_tests {
                 (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
             ])),
         ));
-        let mut items = app.world_mut().resource_mut::<Items>();
-        items.insert_object(
+        crate::items::test_spawn_item(
+            app.world_mut(),
             AXE_GUID,
             ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, FLURRY_AXE)]),
+            false,
         );
+        let mut items = app.world_mut().resource_mut::<Items>();
         items.insert_template(
             FLURRY_AXE,
             Some(ItemInfo {
@@ -1580,6 +1607,7 @@ mod bind_confirm_tests {
     /// level above the player's, the gate's first leg.
     #[test]
     fn an_unusable_item_is_never_asked_about() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_with(2, 4, false);
         // Re-push the player's requirement state and a template the level leg refuses. (The
         // fixture's own push leaves `level == 0`, the "decline to judge" state, so this test has
@@ -1625,7 +1653,7 @@ mod bind_confirm_tests {
         );
     }
 
-    /// **The USE arm** (`0x5d8d00`, event 290) end to end, and the correction wow-re's follow-up
+    /// **The USE arm** (`0x5d8d00`, event 290) end to end, and the correction the reference
     /// forced. Right-clicking a bind-on-**use** item in a bag raises `USE_BIND` and sends nothing;
     /// `ConfirmBindOnUse()` re-issues the use with `suppress` set.
     ///
@@ -1649,19 +1677,20 @@ mod bind_confirm_tests {
             .init_resource::<crate::ui_loot::LootLatch>()
             .init_resource::<crate::target::Selection>()
             .init_resource::<crate::net::SelfGuid>()
-            .init_resource::<crate::ui_action::cast_target::AutoSelfCast>()
+            .init_resource::<crate::spell::cast_target::AutoSelfCast>()
             .init_resource::<crate::net::Reputations>()
             .init_resource::<crate::player::Player>()
-            .init_resource::<crate::ui_cast::PendingCast>()
-            .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
-            .init_resource::<crate::cooldowns::Cooldowns>()
-            .init_resource::<crate::spell_mods::SpellModifiers>()
+            .init_resource::<crate::spell::PendingCast>()
+            .init_resource::<crate::spell::QueuedMeleeSpell>()
+            .init_resource::<crate::spell::Cooldowns>()
+            .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_action::CastErrors>()
             .init_resource::<crate::ui_action::UiErrorKeys>()
-            .init_resource::<crate::ui_action::AutoRepeatActive>()
+            .init_resource::<crate::spell::AutoRepeatActive>()
             .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
-            .init_resource::<crate::ui_action::targeting::SpellTargeting>()
+            .init_resource::<crate::spell::targeting::SpellTargeting>()
             .init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
             .insert_resource(NetCommands(tx));
         app.world_mut().spawn((
             SelfPlayer,
@@ -1670,11 +1699,13 @@ mod bind_confirm_tests {
                 (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
             ])),
         ));
-        let mut items = app.world_mut().resource_mut::<Items>();
-        items.insert_object(
+        crate::items::test_spawn_item(
+            app.world_mut(),
             AXE_GUID,
             ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, FLURRY_AXE)]),
+            false,
         );
+        let mut items = app.world_mut().resource_mut::<Items>();
         let mut template = crate::items::test_template("A Bind-On-Use Thing");
         template.bonding = 3;
         template.quality = 3;
@@ -1712,6 +1743,7 @@ mod bind_confirm_tests {
 
     #[test]
     fn right_clicking_a_bind_on_use_item_asks_before_using_it() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = right_click_a_bind_on_use_item(false);
         assert!(
             rx.try_iter().next().is_none(),
@@ -1746,10 +1778,12 @@ mod bind_confirm_tests {
         );
     }
 
-    /// The RE's correction, pinned: an item with **no usable on-use spell** still raises the bind
-    /// question. Under the first placement (inside the plain-cast route only) this asked nothing.
+    /// The correction, pinned (`0x5d91d3`): an item with **no usable on-use spell** still raises
+    /// the bind question. Under the first placement (inside the plain-cast route only) this asked
+    /// nothing.
     #[test]
     fn a_bind_on_use_item_with_no_on_use_spell_still_asks() {
+        benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = right_click_a_bind_on_use_item(true);
         app.world_mut()
             .non_send_resource_mut::<UiScript>()

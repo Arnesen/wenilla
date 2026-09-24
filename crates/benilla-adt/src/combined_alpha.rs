@@ -1,13 +1,11 @@
-//! MCAL → one 64×64 RGBA alpha map (R/G/B = the opacity of texture layers 1/2/3; A = 255). Ported
-//! from wow-adt's `CombinedAlphaMap` so the output is byte-identical: layers are ingested in MCLY
-//! order (skipping the opaque base), each decoded into the next channel; encodings are 4-bit packed
-//! (×16), 8-bit raw, or Blizzard RLE (token bit 7 = fill, else copy; low 7 bits = count). `fix_alpha`
-//! reconstructs a 64×64 plane from 63×63 source by duplicating the previous pixel at the last row/col.
+//! MCAL to one 64×64 RGBA alpha map, ported from wow-adt's `CombinedAlphaMap`: R, G, B are the
+//! opacity of texture layers 1, 2, 3 and A is 255. Layers go in MCLY order after the opaque base. A
+//! layer is 4-bit packed (×17: the reference packs it into an RGBA4444 texel, read as `n / 15`),
+//! 8-bit raw, or RLE (token bit 7 fill, else copy; the low 7 bits are the count).
 
 use crate::McnkChunk;
 
-/// Assembles the per-layer MCAL alpha maps into one 64×64 RGBA buffer (`y`-major, then `x`, then
-/// channel R,G,B,A).
+/// The combined 64×64 RGBA alpha map, `y`-major.
 pub struct CombinedAlphaMap {
     map: Vec<u8>, // 64*64*4, [y][x][rgba]
     x: usize,
@@ -20,12 +18,13 @@ pub struct CombinedAlphaMap {
 const W: usize = 64;
 
 impl CombinedAlphaMap {
-    /// Construct and ingest `chunk`'s alpha layers. `has_big_alpha`/`fix_alpha` select the uncompressed
-    /// encoding width and the 63→64 edge fix (vanilla: `false`, `true`).
+    /// Decode `chunk`'s alpha layers. `has_big_alpha` makes uncompressed layers 8-bit, and
+    /// `fix_alpha` fills the last row and column from their neighbours (a 63×63 source); vanilla
+    /// is `false`, `true`.
     pub fn new(chunk: &McnkChunk, has_big_alpha: bool, fix_alpha: bool) -> Self {
         let mut map = vec![0u8; W * W * 4];
         for px in map.as_chunks_mut::<4>().0 {
-            px[3] = 255; // A unused, set opaque for tool visibility (matches wow-adt)
+            px[3] = 255; // A is unused; opaque, so a dump shows the channels
         }
         let mut s = Self {
             map,
@@ -76,10 +75,10 @@ impl CombinedAlphaMap {
         const PACKED: usize = W * W / 2;
         if offset + PACKED <= raw.len() {
             for &p in &raw[offset..offset + PACKED] {
-                if !self.set_next((p & 0x0F) * 16) {
+                if !self.set_next((p & 0x0F) * 17) {
                     break;
                 }
-                if !self.set_next(((p >> 4) & 0x0F) * 16) {
+                if !self.set_next(((p >> 4) & 0x0F) * 17) {
                     break;
                 }
             }
@@ -169,5 +168,35 @@ impl CombinedAlphaMap {
         self.layer += 1;
         self.x = 0;
         self.y = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blank() -> CombinedAlphaMap {
+        CombinedAlphaMap {
+            map: vec![0; W * W * 4],
+            x: 0,
+            y: 0,
+            layer: 0,
+            has_big_alpha: false,
+            fix_alpha: true,
+        }
+    }
+
+    /// The reference packs a 4-bit weight into an RGBA4444 texel (64×64 `0x6b03d0`, 32×32
+    /// `0x6b08d0`), read as `n / 15`, so nibble 15 is full coverage.
+    #[test]
+    fn four_bit_alpha_reads_as_n_over_15() {
+        let mut m = blank();
+        // Low nibble first: texel 0 = 0xF, texel 1 = 0x8.
+        m.ingest_small(&[0x8F; W * W / 2], 0);
+        assert_eq!(m.get(0, 0, 0), 255, "nibble 15 is full coverage");
+        assert_eq!(m.get(1, 0, 0), 136, "nibble 8 is 8/15");
+        let mut z = blank();
+        z.ingest_small(&[0x00; W * W / 2], 0);
+        assert_eq!(z.get(0, 0, 0), 0);
     }
 }

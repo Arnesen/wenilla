@@ -170,6 +170,7 @@ fn raid(n: usize) -> PartyState {
 /// frame, so this is the switch alone.
 #[test]
 fn the_frame_ships_off_and_the_switch_is_what_shows_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
@@ -191,6 +192,7 @@ fn the_frame_ships_off_and_the_switch_is_what_shows_it() {
 /// target, a target OF it, a target that is not you, and a target that is alive.
 #[test]
 fn the_four_unit_gates_each_take_the_frame_down() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     switch_on(&mut s);
     assert!(shown(&mut s));
@@ -240,6 +242,7 @@ fn the_four_unit_gates_each_take_the_frame_down() {
 /// [`the_solo_mode_keeps_the_frame_when_a_raid_forms`], which shows the frame first.
 #[test]
 fn the_five_modes_answer_solo_party_and_raid() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     switch_on(&mut s);
 
@@ -290,6 +293,7 @@ fn the_five_modes_answer_solo_party_and_raid() {
 /// sixty times a second and still never takes the frame down.
 #[test]
 fn the_solo_mode_keeps_the_frame_when_a_raid_forms() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     switch_on(&mut s);
     s.run(r#"SHOW_TARGET_OF_TARGET_STATE = "3" this = TargetofTargetFrame TargetofTarget_Update() this = nil"#)
@@ -325,6 +329,7 @@ fn the_solo_mode_keeps_the_frame_when_a_raid_forms() {
 /// answer one with if it did (ref TargetFrame.xml l.612-625).
 #[test]
 fn the_frame_paints_its_unit() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     switch_on(&mut s);
     s.tick(0.016);
@@ -379,6 +384,7 @@ fn the_frame_paints_its_unit() {
 /// only thing that ever calls `TargetofTarget_CheckDead`.
 #[test]
 fn the_dead_word_needs_a_connected_corpse() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     switch_on(&mut s);
     s.tick(0.016);
@@ -420,6 +426,7 @@ fn the_dead_word_needs_a_connected_corpse() {
 /// reached from the frame's OnUpdate and nowhere else.
 #[test]
 fn the_portrait_tints_with_a_players_state_and_never_a_creatures() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     switch_on(&mut s);
     s.tick(0.016);
@@ -456,6 +463,7 @@ fn the_portrait_tints_with_a_players_state_and_never_a_creatures() {
 /// reason the frame is clickable.
 #[test]
 fn the_left_click_targets_the_unit() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     switch_on(&mut s);
     s.run(r#"TargetofTarget_OnClick("LeftButton")"#).unwrap();
@@ -481,6 +489,7 @@ fn the_left_click_targets_the_unit() {
 /// it appear.
 #[test]
 fn the_debuff_row_draws_what_the_unit_carries() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     switch_on(&mut s);
     s.set_auras(
@@ -520,6 +529,7 @@ fn the_debuff_row_draws_what_the_unit_carries() {
 /// wrapped short behind it.
 #[test]
 fn the_target_rows_wrap_short_while_the_frame_stands_beside_them() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     // A hostile target, so the debuffs lead and the buffs hang off them.
     s.set_auras("target", Some(vec![debuff(2000, "Sunder", None)]));
@@ -571,6 +581,7 @@ fn the_target_rows_wrap_short_while_the_frame_stands_beside_them() {
 /// runs only while you have a target.
 #[test]
 fn the_reconcile_takes_the_frame_down_when_the_token_goes_silent() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = load_tot();
     switch_on(&mut s);
     assert!(shown(&mut s));

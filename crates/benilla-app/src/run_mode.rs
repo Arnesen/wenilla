@@ -69,24 +69,22 @@ pub(crate) fn capture_ui_opted_in() -> bool {
     false
 }
 
-/// **Do the credentials come from the environment?** (`$WOW_USER` / `$WOW_PASS` / `$WOW_CHAR` —
-/// the login screen's env fast path.)
+/// **Do the credentials come from the environment?** (`$WOW_USER` and `$WOW_PASS`, both — the
+/// login screen's env fast path.)
 ///
-/// The player answer is `false`, and it is the default: with none of these set the client opens at
-/// the login screen and waits for somebody to type. Setting any of them says *"log in without
-/// waiting for me to type"* — and **that is the only thing it says.** It is not a claim about who
-/// is in the room; [`unattended`] is the fact for that, and keeping the two apart is decision 1769.
-///
-/// One environment fact, several readers, no shared symbol — the module doc's pattern, same as
-/// [`scenario_active`], and the reason the roster's `WOW_CHAR` fast path asks here instead of
-/// re-reading the three names.
+/// The player answer is `false`, and it is the default: with neither set the client opens at the
+/// login screen and waits for somebody to type. Setting both says *"log in without waiting for me
+/// to type"* — and **that is the only thing it says.** It is not a claim about who is in the room;
+/// [`unattended`] is the fact for that, and keeping the two apart is decision 1769. There is no
+/// default account: one credential without the other is a typed login, and `$WOW_CHAR` alone is
+/// the roster's fast path after one (`char_select`), not a login.
 pub(crate) fn env_login() -> bool {
     // Through `webenv`, not `std::env`: in a browser these arrive as the page's env object or
-    // query string (`?user=…&pass=…&char=…`), and this answer decides the start screen before
-    // any plugin runs.
-    ["WOW_USER", "WOW_PASS", "WOW_CHAR"]
+    // query string (`?user=…&pass=…`), and this answer decides the start screen before any
+    // plugin runs.
+    ["WOW_USER", "WOW_PASS"]
         .iter()
-        .any(|k| crate::webenv::var(k).is_some())
+        .all(|k| crate::webenv::var(k).is_some())
 }
 
 /// **Is there nobody here?** (`$WOW_UNATTENDED`, or the two runs that are automated by
@@ -110,8 +108,8 @@ pub(crate) fn env_login() -> bool {
 ///
 /// `WOW_CAPTURE` and `WOW_RIG` are folded in because they *cannot* be a person: a capture authors
 /// the camera and a rig drives the body, so a run that sets either has already said what it is and
-/// cannot forget to. Everything else declares — `scripts/leg.sh`, `smoke.sh`, `cine.sh`,
-/// `summon-live.sh` and the ad-hoc probe recipe in `method.md` all pass `WOW_UNATTENDED=1`.
+/// cannot forget to. Everything else declares — `scripts/smoke.sh`, `cine.sh`, `summon-live.sh`
+/// and the ad-hoc probe recipe in the `probe` skill all pass `WOW_UNATTENDED=1`.
 ///
 /// Read by whatever may act *instead of* a person: the lost-session verdict (decision 1262 — the
 /// session-loss readers never call this directly, [`crate::net::DisconnectedMessage::new`] asks
@@ -127,14 +125,14 @@ pub(crate) fn unattended() -> bool {
 /// (decision 1371's `FATAL` marker, resting on 1769's fact.)
 ///
 /// `true` only for a run that has declared itself [`unattended`]: it exits non-zero on the one
-/// greppable marker `scripts/leg.sh` keys on, rather than parking a driverless run on a dialog for
+/// greppable marker a leg runner keys on, rather than parking a driverless run on a dialog for
 /// its whole wall-clock. Otherwise the dialog stays up for whoever is there.
 ///
 /// The `false` arm still speaks, when the credentials came from the environment: a probe that
 /// quietly parks for 300 s instead of failing in 5 is precisely what 1769's default trades away,
 /// so the log names the declaration that buys the old behaviour back. Both arms live here because
 /// three call sites — two in [`crate::login`], one in [`crate::char_select`] — must not drift
-/// apart on either the verdict or the marker `leg.sh` greps for.
+/// apart on either the verdict or the marker a leg runner greps for.
 pub(crate) fn fatal_when_driverless(why: &str) -> bool {
     if unattended() {
         error!("login: FATAL — {why}; exiting");
@@ -251,108 +249,101 @@ pub(crate) fn dev_source_dir() -> Option<&'static std::path::Path> {
 }
 
 /// The pre-connect **account guard**, consulted by the login policy's env fast path
-/// ([`crate::login`]). Returns `Err(explanation)` when this build lives in a worktree pool slot and
-/// the fast path is about to authenticate as an account that belongs to somebody else — the
-/// director's `one` (a login KICKS their live session mid-play) or another slot's `probeN` (the
-/// kicked client's 0065 teardown despawns every net entity, so a parallel session's probe reads a
-/// unit-less world and prints garbage; it happened, method.md records it).
+/// ([`crate::login`]). Returns `Err(explanation)` when this checkout declares the account its
+/// scripted runs log in as ([`declared_identity`]) and the fast path is about to authenticate as
+/// anything else: a login KICKS whoever holds the account — a player mid-session, or another
+/// checkout's probe, whose kicked client (the 0065 teardown) despawns every net entity, so that
+/// run's next sample reads a unit-less world and prints garbage.
 ///
-/// Slot identity comes from the compiled-in manifest path, because that is what the pool guarantees
-/// is unique per session: every slot has its own checkout and its own `target/`. Outside a pool slot
-/// (the primary checkout, which is the director's) the guard is inert — it has no business having an
-/// opinion about a login it cannot attribute. That is why this lives here and not in `preflight`
+/// The declaration is a file, never the build directory: a path is nobody's identity. Without
+/// one (a plain clone, a player build) the guard is inert — it has no business having an opinion
+/// about a login it cannot attribute. That is why this lives here and not in `preflight`
 /// (decision 0649's home for it, until 1174 made `preflight` dev-only): gameplay's login policy
 /// calls it, and gameplay may not call an instrument.
 ///
 /// `WOW_ALLOW_ACCOUNT=1` is the escape hatch for the rare deliberate cross-account run; it turns the
 /// refusal into a warning rather than silence, because the kick still happens.
 pub(crate) fn account_guard(user: &str) -> Result<(), String> {
-    guard_for(compiled_slot(), user)
+    guard_for(declared_identity().as_ref(), user)
 }
 
-/// The pool slot this binary was *compiled* in, or `None`.
-///
-/// A player build is never in a pool slot, so 1174 read `env!("CARGO_MANIFEST_DIR")`
-/// unconditionally on the grounds that the ladder collapses to `Ok(())` anyway. It does — but the
-/// path is still a **string in the shipped binary**, naming the build machine's home directory,
-/// which is the one thing decision 1175 exists to end (its falsifier is literally
-/// `strings <player binary> | grep -c '/Users/…'`). It costs one `cfg` to not ship it, and it is
-/// what makes that falsifier readable: after this, the only source-tree paths left in a player
-/// binary are debuginfo and panic metadata, never data the program acts on.
+/// What `.probe-identity` at the project root declares: the account a scripted run from this
+/// checkout logs in as (`WOW_USER=`, `WOW_PASS=`, `WOW_CHAR=`, one per line; never committed —
+/// `.gitignore` carries it). A machine that runs several checkouts against one server gives each
+/// its own account this way, and `scripts/probe-identity.sh` reads the same file.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DeclaredIdentity {
+    pub(crate) user: String,
+    pub(crate) character: String,
+}
+
+/// The declaration, read off the project folder — `dev` only, the install resolver's own
+/// project-folder rung: a player build has no source tree to name (decision 1175), and no
+/// declared identity to keep.
 #[cfg(feature = "dev")]
-fn compiled_slot() -> Option<u32> {
-    pool_slot(env!("CARGO_MANIFEST_DIR"))
+pub(crate) fn declared_identity() -> Option<DeclaredIdentity> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)?;
+    parse_identity(&std::fs::read_to_string(root.join(".probe-identity")).ok()?)
 }
 
 #[cfg(not(feature = "dev"))]
-fn compiled_slot() -> Option<u32> {
+pub(crate) fn declared_identity() -> Option<DeclaredIdentity> {
     None
 }
 
-/// [`account_guard`]'s decision, with the slot passed in so the ladder is testable from any
-/// checkout (the real one reads a compile-time path that differs per worktree).
-fn guard_for(slot: Option<u32>, user: &str) -> Result<(), String> {
-    let Some(slot) = slot else {
+/// The file's three lines, as an identity — `None` unless the account and the character are
+/// both there (the password is the scripts' business, never this crate's).
+#[cfg_attr(not(feature = "dev"), allow(dead_code))]
+fn parse_identity(text: &str) -> Option<DeclaredIdentity> {
+    let field = |key: &str| {
+        text.lines()
+            .filter_map(|l| l.trim().strip_prefix(key)?.strip_prefix('='))
+            .map(|v| v.trim().trim_matches('"').to_string())
+            .find(|v| !v.is_empty())
+    };
+    Some(DeclaredIdentity {
+        user: field("WOW_USER")?,
+        character: field("WOW_CHAR")?,
+    })
+}
+
+/// [`account_guard`]'s decision, with the declaration passed in so it is testable without a file.
+fn guard_for(declared: Option<&DeclaredIdentity>, user: &str) -> Result<(), String> {
+    let Some(id) = declared else {
         return Ok(());
     };
-    let mine = format!("probe{slot}");
-    let user_lc = user.to_ascii_lowercase();
-    if user_lc == mine {
+    if user.eq_ignore_ascii_case(&id.user) {
         return Ok(());
     }
-    let whose = if user_lc == "one" {
-        "the DIRECTOR's account — logging in on it kicks them out of their live session mid-play"
-    } else if user_lc.starts_with("probe") && user_lc[5..].chars().all(|c| c.is_ascii_digit()) {
-        "ANOTHER worktree slot's probe account — logging in on it kicks that session's probe out \
-         of the world, and its next sample reads a unit-less world"
-    } else {
-        return Ok(()); // a bystander account (`two`, a fresh test account): not ours to police
-    };
     Err(format!(
-        "the env fast path is about to log in as `{user}` from pool-{slot}, and that is {whose}. \
-         This slot's identity is WOW_USER=probe{slot} WOW_PASS=pprobe{slot} \
-         WOW_CHAR=Probe{spelled} (method.md \"The local vmangos server\").",
-        spelled = spell_digit(slot)
+        "the env fast path is about to log in as `{user}`, and this checkout's .probe-identity \
+         declares `{}` (WOW_CHAR={}). A login kicks whoever holds `{user}` — a player mid-session, \
+         or another checkout's probe.",
+        id.user, id.character
     ))
 }
 
-/// This slot's index as the word the probe identity spells it with (`pool-4` → `"four"`), or `None`
-/// outside a pool slot. The one place anything else should ask "which session am I?" — the rig keys
-/// its derived character names off it, and the preflight banner names it.
-pub(crate) fn slot_word() -> Option<&'static str> {
-    compiled_slot().map(spell_digit)
+/// The word a rig appends to the bodies it mints for this checkout (`<Race3><Class3><word>[f]`),
+/// so that several checkouts against one server never collide on a character name: the declared
+/// character, lowercased, without a leading `probe` — a probe fleet names its bodies
+/// `Probe<word>`, and the word is the identity. `None` without a declaration; the rig then
+/// configures the body it logged in as.
+pub(crate) fn rig_suffix() -> Option<String> {
+    Some(suffix_of(&declared_identity()?.character))
 }
 
-/// The pool slot index in a `…/benilla-wt/pool-<N>/…` manifest path; `None` for the primary
-/// checkout and any non-pool worktree. Dev-only, because [`compiled_slot`] is its only caller and
-/// a player build must not name a manifest path at all (1175).
-#[cfg(any(feature = "dev", test))]
-fn pool_slot(manifest_dir: &str) -> Option<u32> {
-    let mut parts = manifest_dir.split('/');
-    while let Some(part) = parts.next() {
-        if part == "benilla-wt" {
-            return parts.next()?.strip_prefix("pool-")?.parse().ok();
-        }
-    }
-    None
-}
-
-/// The probe character's name suffix for slot `n` — vmangos names carry no digits, so the pool
-/// index is spelled (`pool-4` → `Probefour`).
-fn spell_digit(n: u32) -> &'static str {
-    match n {
-        0 => "zero",
-        1 => "one",
-        2 => "two",
-        3 => "three",
-        4 => "four",
-        5 => "five",
-        6 => "six",
-        7 => "seven",
-        8 => "eight",
-        9 => "nine",
-        _ => "<n>",
-    }
+fn suffix_of(character: &str) -> String {
+    let name = character.to_ascii_lowercase();
+    let word = name
+        .strip_prefix("probe")
+        .filter(|w| !w.is_empty())
+        .unwrap_or(&name);
+    word.chars()
+        .filter(char::is_ascii_alphabetic)
+        .take(6)
+        .collect()
 }
 
 #[cfg(test)]
@@ -482,44 +473,45 @@ mod tests {
     }
 
     #[test]
-    fn the_guard_only_polices_accounts_that_belong_to_someone() {
-        // Our own slot's probe: the whole point of the identity.
-        assert!(guard_for(Some(4), "probe4").is_ok());
-        assert!(guard_for(Some(4), "PROBE4").is_ok()); // vmangos accounts are case-insensitive
-                                                       // The director's account, and a neighbouring slot's probe: both kick a live session.
-        let director = guard_for(Some(4), "one").unwrap_err();
-        assert!(director.contains("DIRECTOR") && director.contains("WOW_USER=probe4"));
+    fn the_fast_path_is_the_declared_account_or_refused() {
+        let id = parse_identity("WOW_USER=probe4\nWOW_PASS=pprobe4\nWOW_CHAR=Probefour\n").unwrap();
+        // Our own account: the whole point of the declaration.
+        assert!(guard_for(Some(&id), "probe4").is_ok());
+        assert!(guard_for(Some(&id), "PROBE4").is_ok()); // vmangos accounts are case-insensitive
+
+        // Anyone else's account — a player's, another checkout's probe — kicks a live session.
+        let player = guard_for(Some(&id), "one").unwrap_err();
+        assert!(player.contains("probe4") && player.contains("kicks"));
         // The override hint belongs to the caller that can act on it, not to the reason.
-        assert!(!director.contains("WOW_ALLOW_ACCOUNT"));
-        assert!(guard_for(Some(4), "probe7")
-            .unwrap_err()
-            .contains("ANOTHER worktree slot"));
-        // A bystander account is nobody's to police, and outside a pool slot we have no standing.
-        assert!(guard_for(Some(4), "two").is_ok());
+        assert!(!player.contains("WOW_ALLOW_ACCOUNT"));
+        assert!(guard_for(Some(&id), "probe7").is_err());
+        // No declaration, no standing.
         assert!(guard_for(None, "one").is_ok());
     }
 
     #[test]
-    fn the_probe_character_name_spells_the_slot() {
-        // vmangos player names carry no digits, so `Probe4` cannot exist — the pool index is spelled.
-        assert!(guard_for(Some(0), "one")
-            .unwrap_err()
-            .contains("WOW_CHAR=Probezero"));
-        assert!(guard_for(Some(9), "one")
-            .unwrap_err()
-            .contains("WOW_CHAR=Probenine"));
+    fn the_declaration_needs_the_account_and_the_character() {
+        assert_eq!(
+            parse_identity("WOW_USER=probe4\nWOW_PASS=x\nWOW_CHAR=\"Probefour\"\n"),
+            Some(DeclaredIdentity {
+                user: "probe4".into(),
+                character: "Probefour".into()
+            })
+        );
+        assert!(parse_identity("WOW_USER=probe4\nWOW_PASS=x\n").is_none());
+        assert!(parse_identity("WOW_USER=\nWOW_CHAR=Probefour\n").is_none());
+        assert!(parse_identity("").is_none());
     }
 
     #[test]
-    fn the_slot_is_read_off_the_manifest_path() {
-        assert_eq!(
-            pool_slot("/Users/sam/dev/benilla-wt/pool-7/crates/benilla"),
-            Some(7)
-        );
-        assert_eq!(pool_slot("/Users/sam/dev/benilla-wow/crates/benilla"), None);
-        assert_eq!(
-            pool_slot("/Users/sam/dev/benilla-wow/.claude/worktrees/x/crates/benilla"),
-            None
-        );
+    fn the_rig_word_is_the_declared_character_without_its_probe_prefix() {
+        // vmangos player names carry no digits, so a probe fleet spells its index: the word is
+        // what follows `Probe`, and the rig's `Taudru<word>` keeps one body per checkout.
+        assert_eq!(suffix_of("Probefour"), "four");
+        assert_eq!(suffix_of("Probezero"), "zero");
+        // Any other name is its own word, cut to what a 12-character name has room for.
+        assert_eq!(suffix_of("Tester"), "tester");
+        assert_eq!(suffix_of("Longcharname"), "longch");
+        assert_eq!(suffix_of("Probe"), "probe");
     }
 }

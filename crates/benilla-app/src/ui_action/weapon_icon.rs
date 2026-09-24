@@ -1,5 +1,5 @@
 //! **Weapon-icon substitution** — the handful of spells that show an *equipped weapon's* icon
-//! instead of their own (decisions 0230 + 0231; wow-re `attack-icon-substitution.md`).
+//! instead of their own (decisions 0230 + 0231; `0x4e6870` melee, `0x4e6990` ranged).
 //!
 //! Two spells' worth of law, but it is character-level rather than spell-level: the melee
 //! auto-attack borrows the main hand's icon (or `Spell-Reset` when unarmed), a ranged auto-repeat
@@ -13,22 +13,22 @@ use benilla_formats::SpellDisplay;
 use crate::creature_anim::UNIT_FLAG_DISARMED;
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore};
+use crate::net::{NetCommands, ObjectStore, Objects};
 
 /// Equipment slot 15 = `EQUIPMENT_SLOT_MAINHAND` (vmangos `EquipmentSlots`).
 const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
 
 /// Equipment slot 17 = `EQUIPMENT_SLOT_RANGED` — the ranged helper `0x4e6990`'s read
-/// (`[ecx+0x88]`, `0x88 = 17×8`; wow-re `attack-icon-substitution.md` §5).
+/// (`[ecx+0x88]`, `0x88 = 17×8`).
 const EQUIPMENT_SLOT_RANGED: u8 = 17;
 
 /// Weapon subclass 16 = thrown — the ranged icon helper's skip (`0x4e6990`'s `0x5d9f90 == 0x10`
 /// test): a thrown weapon never substitutes its icon, so Throw keeps the spell's own face.
 const ITEM_SUBCLASS_THROWN: u32 = 16;
 
-/// The client's unarmed/disarmed auto-attack icon (wow-re `attack-icon-substitution.md`, the
-/// hardcoded string at `0x84bf58`) — what the melee auto-attack shows when there is no main-hand
-/// weapon to borrow from, instead of spell 6603's `Temp` placeholder (decision 0231).
+/// The client's unarmed/disarmed auto-attack icon (the hardcoded string at `0x84bf58`) — what the
+/// melee auto-attack shows when there is no main-hand weapon to borrow from, instead of spell
+/// 6603's `Temp` placeholder (decision 0231).
 const SPELL_RESET_ICON: &str = "Interface\\Buttons\\Spell-Reset";
 
 /// `ItemClass` 2 — **WEAPON**: what the disarmed guard tests on the hand it just fetched
@@ -43,12 +43,13 @@ const ITEM_CLASS_WEAPON: u32 = 2;
 /// item whose icon would otherwise be shown.
 fn main_hand_item(
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<(u32, Option<String>)> {
     let guid = store.0.player_inv_slot(EQUIPMENT_SLOT_MAINHAND)?;
-    let entry = items.object(guid)?.object_entry()?;
+    let entry = objects.object(guid)?.object_entry()?;
     let template = items.template(entry, guid, commands)?;
     let (class, display) = (template.class, template.display_info_id);
     let icon = icons
@@ -58,11 +59,11 @@ fn main_hand_item(
 }
 
 /// The character's melee auto-attack icon (decision 0231; the client's melee helper `0x4e6870`).
-/// The helper's four steps, in order (wow-re `attack-icon-substitution.md` §7):
+/// The helper's four steps, in order:
 ///
 /// 1. the **current shapeshift form's own attack face** when its `SpellShapeshiftForm` row carries
 ///    one (the `+0x34` AttackIconID read, `0x4e68af`–`0x4e68da` — a cat's paw, a bear's swipe;
-///    wow-re `action-spell-icon-apis.md` §3.3, closing decision 0231's deferred form case);
+///    closing decision 0231's deferred form case);
 /// 2. the **disarmed guard** (`0x4e68df`) → [`SPELL_RESET_ICON`], weapon equipped or not
 ///    (decision 1863, closing 0231's other deferred case);
 /// 3. the equipped main-hand weapon's icon;
@@ -73,6 +74,7 @@ fn main_hand_item(
 pub(crate) fn melee_auto_attack_icon(
     store: &ObjectStore,
     forms: &std::collections::HashMap<u32, benilla_formats::ShapeshiftForm>,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
@@ -86,7 +88,7 @@ pub(crate) fn melee_auto_attack_icon(
             return icon;
         }
     }
-    let main = main_hand_item(store, items, icons, commands);
+    let main = main_hand_item(store, objects, items, icons, commands);
     // Precedence step 2 — the **disarmed guard** (`0x4e68df`: `test dword ptr [ecx+0xa0],
     // 0x200000`, then `GetWeapon(0, 1)` and a `== 2` on the returned class byte): while the
     // character is disarmed, a weapon in the main hand shows `Spell-Reset` exactly as an empty
@@ -104,19 +106,19 @@ pub(crate) fn melee_auto_attack_icon(
 }
 
 /// The equipped ranged weapon's inventory icon (slot 17 → `ItemDisplayInfo`), for the ranged
-/// icon substitution (`0x4e6990`, decision 0231's deferred case — wow-re
-/// `attack-icon-substitution.md` §5): a **thrown** weapon is skipped (the helper's
-/// `0x5d9f90 == 0x10` test), and `None` — missing weapon, thrown, or an unstreamed item — falls
-/// back to the spell's OWN icon at the caller, never `Spell-Reset` (the helper's `0x4e6a44` null
-/// return hands over to the normal SpellIconID path).
+/// icon substitution (`0x4e6990`, decision 0231's deferred case): a **thrown** weapon is skipped
+/// (the helper's `0x5d9f90 == 0x10` test), and `None` — missing weapon, thrown, or an unstreamed
+/// item — falls back to the spell's OWN icon at the caller, never `Spell-Reset` (the helper's
+/// `0x4e6a44` null return hands over to the normal SpellIconID path).
 pub(crate) fn ranged_weapon_icon(
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<String> {
     let guid = store.0.player_inv_slot(EQUIPMENT_SLOT_RANGED)?;
-    let entry = items.object(guid)?.object_entry()?;
+    let entry = objects.object(guid)?.object_entry()?;
     let template = items.template(entry, guid, commands)?;
     if template.subclass == ITEM_SUBCLASS_THROWN {
         return None;
@@ -143,16 +145,19 @@ pub(super) fn auto_attack_icon(
     spell: &SpellDisplay,
     store: Option<&ObjectStore>,
     forms: &std::collections::HashMap<u32, benilla_formats::ShapeshiftForm>,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<String> {
     let store = store?;
     if spell.is_melee_auto_attack() {
-        return Some(melee_auto_attack_icon(store, forms, items, icons, commands));
+        return Some(melee_auto_attack_icon(
+            store, forms, objects, items, icons, commands,
+        ));
     }
     if spell.ranged_icon_substitution() {
-        return ranged_weapon_icon(store, items, icons, commands);
+        return ranged_weapon_icon(store, objects, items, icons, commands);
     }
     None
 }
@@ -187,8 +192,7 @@ mod tests {
         let mut pairs = vec![(UNIT_FLAGS, flags), (UNIT_BYTES_1, u32::from(form) << 16)];
         if let Some(class) = hand {
             pairs.push((INV_SLOT_MAINHAND, 0x2a));
-            deps.items
-                .insert_object(0x2a, ObjectFields::from_pairs(&[(3, 500)]));
+            deps.spawn_item(0x2a, ObjectFields::from_pairs(&[(3, 500)]));
             deps.items.insert_template(
                 500,
                 Some(ItemInfo {
@@ -216,7 +220,9 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        melee_auto_attack_icon(&store, &forms, &deps.items, Some(&icons), &deps.commands)
+        deps.with_objects(|objects, items, commands| {
+            melee_auto_attack_icon(&store, &forms, objects, items, Some(&icons), commands)
+        })
     }
 
     /// **The disarmed guard on the Attack button** (`0x4e68df`, decision 1863 closing 0231's
@@ -238,8 +244,8 @@ mod tests {
         assert_eq!(icon(DISARMED, None, 0), SPELL_RESET_ICON);
     }
 
-    /// The precedence the helper reads in (§7 of the wow-re note): the **form** override is step
-    /// 1 and the disarmed guard step 2, so a disarmed bear still swipes with its own paw.
+    /// The precedence the helper `0x4e6870` reads in: the **form** override is step 1 and the
+    /// disarmed guard step 2, so a disarmed bear still swipes with its own paw.
     #[test]
     fn the_form_icon_outranks_the_disarmed_guard() {
         assert_eq!(icon(DISARMED, Some(2), 1), BEAR_ICON);

@@ -4,8 +4,9 @@
 //! Each frame, the player's own descriptor names the bag layout (the PRIVATE `PACK_SLOT` array =
 //! the backpack; `INV_SLOT` 19–22 = the equipped bags, each a container object with its own
 //! `CONTAINER_FIELD_SLOT` array; `KEYRING_SLOT` 81.. = the keyring, decision 0765 — a container
-//! with no container *object*, exactly like the bank), the item store ([`crate::items::Items`]) resolves slot guids to
-//! instances (entry, stack count), the template cache resolves entries to name/quality (ask-once
+//! with no container *object*, exactly like the bank), the object index ([`crate::net::Objects`])
+//! resolves slot guids to instances (entry, stack count), the template cache resolves entries to
+//! name/quality (ask-once
 //! `ITEM_QUERY_SINGLE` — a slot whose answer is in flight shows as an unresolved occupied slot and
 //! fills in when it lands), and `ItemDisplayInfo.dbc` turns the template's display id into the
 //! icon. The assembled per-bag [`ContainerState`](benilla_ui::script::ContainerState)s are diffed
@@ -42,7 +43,7 @@ use benilla_ui::script::EQUIPMENT_BAG;
 use bevy::prelude::*;
 
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore};
+use crate::net::{NetCommands, ObjectStore, Objects};
 use crate::pending_item_ops::{LockTransitions, PendingItemOps};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
@@ -50,6 +51,7 @@ use crate::ui_unit::UnitFeed;
 mod drain;
 mod equip_error;
 pub(crate) mod feed;
+mod net;
 
 pub(crate) use drain::send_auto_equip;
 use drain::{
@@ -63,7 +65,7 @@ use feed::{
 /// The backpack's fixed capacity (`PLAYER_FIELD_PACK_SLOT_1..` — 16 slots on the 1.12 wire).
 pub(super) const PACK_SLOTS: u8 = 16;
 /// The worn-equipment slots (`INV_SLOT` 0..18 — head through tabard, vmangos `PlayerSlots`), the
-/// first region of the reference's inventory walk (wow-re `action-item-slot.md` §8.2).
+/// first region of the reference's inventory walk (the walker `0x622420`).
 pub(super) const EQUIPMENT_SLOTS: u8 = 19;
 /// The first equipped-bag inventory slot (`INV_SLOT` 19..22 hold bags 1..4).
 pub(super) const BAG_SLOT_FIRST: u8 = 19;
@@ -190,14 +192,19 @@ pub(crate) struct EquipErrors(pub Vec<EquipError>);
 /// object's own slot array, or — [`EQUIPMENT_BAG`], decision 0208 phase 1b — the player
 /// descriptor's own `INV_SLOT` array directly (`slot0` is already the wire `EQUIPMENT_SLOT_*`
 /// id, [`wire_pos`]'s own convention). The same resolution the feed does.
-pub(crate) fn slot_guid(store: &ObjectFields, bag: i64, slot0: u8, items: &Items) -> Option<u64> {
+pub(crate) fn slot_guid(
+    store: &ObjectFields,
+    bag: i64,
+    slot0: u8,
+    objects: &Objects,
+) -> Option<u64> {
     match bag {
         0 => store.player_pack_slot(slot0).filter(|g| *g != 0),
         1..=4 => {
             let bag_guid = store
                 .player_inv_slot(BAG_SLOT_FIRST + bag as u8 - 1)
                 .filter(|g| *g != 0)?;
-            items
+            objects
                 .object(bag_guid)?
                 .container_slot(slot0)
                 .filter(|g| *g != 0)
@@ -208,7 +215,7 @@ pub(crate) fn slot_guid(store: &ObjectFields, bag: i64, slot0: u8, items: &Items
             let bag_guid = store
                 .player_bank_bag_slot((bag - BANK_BAG_ID_FIRST) as u8)
                 .filter(|g| *g != 0)?;
-            items
+            objects
                 .object(bag_guid)?
                 .container_slot(slot0)
                 .filter(|g| *g != 0)
@@ -235,15 +242,15 @@ pub(crate) fn slot_guid_count(
     store: Option<&ObjectStore>,
     bag: i64,
     slot1: u32,
-    items: &Items,
+    objects: &Objects,
 ) -> (u64, u32) {
     let Some(store) = store else {
         return (0, 0);
     };
     let slot0 = slot1.saturating_sub(1) as u8;
-    match slot_guid(&store.0, bag, slot0, items) {
+    match slot_guid(&store.0, bag, slot0, objects) {
         Some(guid) => {
-            let count = items
+            let count = objects
                 .object(guid)
                 .and_then(|f| f.item_stack_count())
                 .unwrap_or(1);
@@ -257,11 +264,10 @@ pub(crate) fn slot_guid_count(
 /// [`ItemDisplays`] catalog the equipment feed already loads).
 ///
 /// This is the **one** thing the client's spell-icon surfaces genuinely share. The *laws* do not:
-/// wow-re's `system/ui/scratch/spell-icon-substitution-law.md` settled that there is no shared
-/// spell-icon resolver at all — six Lua getters, six laws inlined per binding, disagreeing even
-/// between the TradeSkill and Craft windows. But every arm that ends at an item ends *here*, at the
-/// same `ItemTemplate+0x18 → 0x5d88b0 → rec+0x14` chain (§5 of that note). So the join lives once,
-/// and each window keeps its own law above it.
+/// the reference has no shared spell-icon resolver at all — six Lua getters, six laws inlined per
+/// binding, disagreeing even between the TradeSkill and Craft windows. But every arm that ends at
+/// an item ends *here*, at the same `ItemTemplate+0x18 → 0x5d88b0 → rec+0x14` chain. So the join
+/// lives once, and each window keeps its own law above it.
 pub(crate) fn item_icon(
     icons: Option<&crate::entities::ItemDisplays>,
     display_info_id: u32,
@@ -272,11 +278,10 @@ pub(crate) fn item_icon(
 }
 
 /// Which sections of the player's flat slot array a walk visits — the reference walker's own
-/// **section mask** (`0x622420`'s `ebx`; wow-re `ui/scratch/quest-leaderboard-law.md` §3.1 and
-/// `action-item-slot.md` §8.2). The reference has ONE walker over one contiguous 113-guid slot
-/// space (`PLAYER_FIELD_INV_SLOT_HEAD` through the end of the keyring) and parameterises it here;
-/// benilla had grown two hand-rolled walks that had already drifted apart, which is what decision
-/// 1158 collapsed back into [`walk_inventory`].
+/// **section mask** (`0x622420`'s `ebx`). The reference has ONE walker over one contiguous 113-guid
+/// slot space (`PLAYER_FIELD_INV_SLOT_HEAD` through the end of the keyring) and parameterises it
+/// here; benilla had grown two hand-rolled walks that had already drifted apart, which is what
+/// decision 1158 collapsed back into [`walk_inventory`].
 ///
 /// A container met in an ENABLED section is always recursed into — the reference gates sections
 /// only at the player's own root descriptor ("inside a recursed container every slot is visited
@@ -318,11 +323,10 @@ impl InventoryScope {
         keyring: false,
     };
     /// `0x4F` — [`Self::DEFAULT`] **plus the bank**, the mask the quest surfaces pass (`8`, which
-    /// the rewrite turns into `0x4F`). wow-re's call-site census of `0x622130` finds six such
-    /// sites and every one is a quest surface: `GetQuestLogLeaderBoard` (`0x4e0579`/`0x4e0592`),
-    /// the ADD_ITEM toast (`0x5dd0f5`), the whole-quest turn-in predicate (`0x4df778`), and
-    /// `GetAbandonQuestItems` (`0x4dfc8a`). **Quest item objectives count banked copies; nothing
-    /// else does.**
+    /// the rewrite turns into `0x4F`). `0x622130` has six such call sites and every one is a quest
+    /// surface: `GetQuestLogLeaderBoard` (`0x4e0579`/`0x4e0592`), the ADD_ITEM toast (`0x5dd0f5`),
+    /// the whole-quest turn-in predicate (`0x4df778`), and `GetAbandonQuestItems` (`0x4dfc8a`).
+    /// **Quest item objectives count banked copies; nothing else does.**
     pub(crate) const QUEST_ITEMS: Self = Self {
         bank: true,
         ..Self::DEFAULT
@@ -354,7 +358,7 @@ impl InventoryScope {
 /// come before the backpack.
 fn walk_inventory<T>(
     store: &ObjectFields,
-    items: &Items,
+    objects: &Objects,
     scope: InventoryScope,
     mut visit: impl FnMut(u8, u8, u64) -> Option<T>,
 ) -> Option<T> {
@@ -362,7 +366,7 @@ fn walk_inventory<T>(
     // (true for equipped bags and bank bags alike — `BANK_BAG_SLOT_FIRST`'s note).
     let contents =
         |bag_slot: u8, bag_guid: u64, visit: &mut dyn FnMut(u8, u8, u64) -> Option<T>| {
-            let bag_fields = items.object(bag_guid)?;
+            let bag_fields = objects.object(bag_guid)?;
             let num_slots = bag_fields.container_num_slots().unwrap_or(0).min(36) as u8;
             (0..num_slots).find_map(|j| {
                 let guid = bag_fields.container_slot(j).unwrap_or(0);
@@ -457,13 +461,13 @@ fn walk_inventory<T>(
 /// and the feed reruns.
 pub(crate) fn count_of(
     store: &ObjectFields,
-    items: &Items,
+    objects: &Objects,
     entry: u32,
     scope: InventoryScope,
 ) -> u32 {
     let mut total = 0u32;
-    walk_inventory::<()>(store, items, scope, |_, _, guid| {
-        if let Some(fields) = items.object(guid) {
+    walk_inventory::<()>(store, objects, scope, |_, _, guid| {
+        if let Some(fields) = objects.object(guid) {
             if fields.object_entry() == Some(entry) {
                 total += fields.item_stack_count().unwrap_or(1);
             }
@@ -479,11 +483,11 @@ pub(crate) fn count_of(
 /// the per-entry question becomes a lookup. Same scope, same per-copy stack sum.
 pub(crate) fn carried_counts(
     store: &ObjectFields,
-    items: &Items,
+    objects: &Objects,
 ) -> std::collections::HashMap<u32, u32> {
     let mut counts = std::collections::HashMap::new();
-    walk_inventory::<()>(store, items, InventoryScope::CARRIED, |_, _, guid| {
-        if let Some(fields) = items.object(guid) {
+    walk_inventory::<()>(store, objects, InventoryScope::CARRIED, |_, _, guid| {
+        if let Some(fields) = objects.object(guid) {
             if let Some(entry) = fields.object_entry() {
                 *counts.entry(entry).or_insert(0) += fields.item_stack_count().unwrap_or(1);
             }
@@ -494,7 +498,7 @@ pub(crate) fn carried_counts(
 }
 
 /// How far [`find_item`] looks, and which copies count — the two mode bits the reference's own
-/// callers pass into the inventory walker `0x622420` (wow-re `action-item-slot.md` §8.2).
+/// callers pass into the inventory walker `0x622420`.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ItemSearch {
     /// Mode `1` alone: the **equipment slots only** (0–18), no expansion. The equip-vs-use fork's
@@ -508,13 +512,13 @@ pub(crate) struct ItemSearch {
 
 /// Where a copy of item `entry` is: the wire `(bag_index, 0-based slot)` pair ([`wire_pos`]'s own
 /// output shape) plus the **instance guid** that occupies it, since the use fork needs it
-/// ([`item_use_command`]). This is the reference's inventory search, byte-verified (wow-re
-/// `action-item-slot.md` §8.2: the walker `0x622420` over `PLAYER_FIELD_INV_SLOT_HEAD`, predicate
-/// `OBJECT_FIELD_ENTRY` equality) — the first hit of [`walk_inventory`], whose doc carries the
-/// order and why it is load-bearing (decision 0666; bank and buyback are not in this scope).
+/// ([`item_use_command`]). This is the reference's inventory search (the walker `0x622420` over
+/// `PLAYER_FIELD_INV_SLOT_HEAD`, predicate `OBJECT_FIELD_ENTRY` equality) — the first hit of
+/// [`walk_inventory`], whose doc carries the order and why it is load-bearing (decision 0666; bank
+/// and buyback are not in this scope).
 pub(crate) fn find_item(
     store: &ObjectFields,
-    items: &Items,
+    objects: &Objects,
     entry: u32,
     search: ItemSearch,
 ) -> Option<(u8, u8, u64)> {
@@ -523,8 +527,8 @@ pub(crate) fn find_item(
     } else {
         InventoryScope::DEFAULT
     };
-    walk_inventory(store, items, scope, |bag, slot, guid| {
-        let f = items.object(guid)?;
+    walk_inventory(store, objects, scope, |bag, slot, guid| {
+        let f = objects.object(guid)?;
         if f.object_entry() != Some(entry) {
             return None;
         }
@@ -549,12 +553,12 @@ pub(crate) fn find_item(
 /// its load-bearing order (decisions 0666/1158) and just defers the judging by one step.
 pub(crate) fn collect_inventory(
     store: &ObjectFields,
-    items: &Items,
+    objects: &Objects,
     scope: InventoryScope,
 ) -> Vec<(u8, u8, u64)> {
     let mut out = Vec::new();
     // `None` throughout — the walk is never stopped, so every slot in scope lands in `out`.
-    walk_inventory(store, items, scope, |bag, slot, guid| {
+    walk_inventory(store, objects, scope, |bag, slot, guid| {
         out.push((bag, slot, guid));
         None::<()>
     });
@@ -575,12 +579,17 @@ pub(crate) fn collect_inventory(
 ///
 /// A slot whose item template is still in flight can't be judged and reads as "not a key"; the
 /// answer lands within a frame or two and the feed re-pushes.
-pub(crate) fn has_key(store: &ObjectFields, items: &Items, commands: &NetCommands) -> bool {
+pub(crate) fn has_key(
+    store: &ObjectFields,
+    objects: &Objects,
+    items: &Items,
+    commands: &NetCommands,
+) -> bool {
     // Every guid mode 0x4f reaches, in the walker's own order — a container is recursed into as it
     // is passed (the depth-first rule), which is why each bag's contents follow its own slot.
     // Collected first, then judged: the template lookup needs `items` mutably (the ask-once query).
-    fn contents(bag_guid: u64, items: &Items, out: &mut Vec<u64>) {
-        let Some(f) = items.object(bag_guid) else {
+    fn contents(bag_guid: u64, objects: &Objects, out: &mut Vec<u64>) {
+        let Some(f) = objects.object(bag_guid) else {
             return;
         };
         let n = f.container_num_slots().unwrap_or(0).min(36) as u8;
@@ -593,7 +602,7 @@ pub(crate) fn has_key(store: &ObjectFields, items: &Items, commands: &NetCommand
     for bag in 0..BAGS {
         let bag_guid = store.player_inv_slot(BAG_SLOT_FIRST + bag).unwrap_or(0);
         guids.push(bag_guid);
-        contents(bag_guid, items, &mut guids);
+        contents(bag_guid, objects, &mut guids);
     }
     for i in 0..PACK_SLOTS {
         guids.push(store.player_pack_slot(i).unwrap_or(0));
@@ -604,7 +613,7 @@ pub(crate) fn has_key(store: &ObjectFields, items: &Items, commands: &NetCommand
     for bag in 0..BANK_BAGS {
         let bag_guid = store.player_bank_bag_slot(bag).unwrap_or(0);
         guids.push(bag_guid);
-        contents(bag_guid, items, &mut guids);
+        contents(bag_guid, objects, &mut guids);
     }
     for i in 0..KEYRING_SLOTS {
         guids.push(store.player_keyring_slot(i).unwrap_or(0));
@@ -613,7 +622,7 @@ pub(crate) fn has_key(store: &ObjectFields, items: &Items, commands: &NetCommand
         if guid == 0 {
             return false;
         }
-        let Some(entry) = items.object(guid).and_then(|f| f.object_entry()) else {
+        let Some(entry) = objects.object(guid).and_then(|f| f.object_entry()) else {
             return false;
         };
         items
@@ -621,6 +630,44 @@ pub(crate) fn has_key(store: &ObjectFields, items: &Items, commands: &NetCommand
             .is_some_and(|t| t.bag_family == BAG_FAMILY_KEYS)
     })
 }
+/// **The object index a test resolves item guids through** (decision 2334) — the half of the
+/// seam [`crate::items::TestDeps`] does not cover, for a test that holds no `TestDeps`: a world to
+/// seed with item entities, and the [`Objects`] lookup over it. The two live together because the
+/// lookup borrows the world it reads, so a test cannot hold one without the other.
+///
+/// Seed first, then read: `objects.get()` borrows the world for as long as its answer lives, so
+/// the idiom at a call site is `&objs.get()` inline.
+#[cfg(test)]
+pub(crate) struct TestObjects {
+    world: World,
+    state: bevy::ecs::system::SystemState<Objects<'static, 'static>>,
+}
+
+#[cfg(test)]
+impl TestObjects {
+    pub(crate) fn new() -> Self {
+        let mut world = World::new();
+        world.init_resource::<crate::net::GuidIndex>();
+        let state = bevy::ecs::system::SystemState::new(&mut world);
+        Self { world, state }
+    }
+
+    /// One item instance in the index — the wire's `ItemCreate`.
+    pub(crate) fn spawn(&mut self, guid: u64, fields: ObjectFields) {
+        crate::items::test_spawn_item(&mut self.world, guid, fields, false);
+    }
+
+    /// The same for a CONTAINER instance (`TYPEMASK_CONTAINER`).
+    pub(crate) fn spawn_container(&mut self, guid: u64, fields: ObjectFields) {
+        crate::items::test_spawn_item(&mut self.world, guid, fields, true);
+    }
+
+    /// The lookup itself.
+    pub(crate) fn get(&mut self) -> Objects<'_, '_> {
+        self.state.get(&self.world)
+    }
+}
+
 /// The wire's "player array" bag index — `INVENTORY_SLOT_BAG_0`. With it, [`ItemUse::slot`] IS the
 /// equipment index (0–18 worn, 19–22 the equipped bags).
 pub(crate) const PLAYER_ARRAY: u8 = 255;
@@ -700,12 +747,12 @@ pub(crate) enum ItemUseRoute {
     /// `CMSG_PETITION_SHOW_SIGNATURES` for the instance, not `CMSG_USE_ITEM`.
     ///
     /// **VERIFIED** (2026-09-03, correcting 1672's INFERRED reading — which reasoned it out and
-    /// got the opcode, the payload and the gate right, but placed the arm wrongly). wow-re HAD
-    /// carved this branch; the note simply was not found. Two records carry it:
+    /// got the opcode, the payload and the gate right, but placed the arm wrongly). Two addresses
+    /// carry it:
     ///
-    /// - `ui/scratch/right-click-open.md` §3 row **#9**: gate `0x5d8f95 test ah,0x20` on the
+    /// - `CGItem::Use`'s rung **#9**: gate `0x5d8f95 test ah,0x20` on the
     ///   template's `Flags & 0x2000` (SIGNABLE / petition) → `0x5eef40`.
-    /// - `object-layer/ledger.tsv`'s row for `0x5eef40`: the **`CMSG_PETITION_SHOW_SIGNATURES`
+    /// - `0x5eef40`: the **`CMSG_PETITION_SHOW_SIGNATURES`
     ///   (`0x1BE`)** sender, `ret 8` — `Put32(0x1BE)` @ `0x5eef79`, `Put64(guid)` @ `0x5eef83`,
     ///   send @ `0x5eef8e`, and **that is the whole packet: one uint64**. It returns immediately
     ///   if both guid dwords are zero, and its **sole caller image-wide is `0x5d8fa6`** — this
@@ -719,11 +766,11 @@ pub(crate) enum ItemUseRoute {
     /// what changes is that this is now read rather than reasoned, and a reader is not sent
     /// looking for a byte read that already exists.
     ShowPetition { item: u64 },
-    /// **The disarmed refusal** — `CGItem::Use`'s rung **15 of 20** (decision 1903; wow-re
-    /// `disarm-followups-law.md` §2, byte-verified): using the very weapon a disarm has taken
-    /// raises `ERR_CANT_USE_DISARMED` (`0x16b` = 363) at `0x5d926d call 0x496720` and sends
-    /// **nothing**. This is the client refusing on its own — unlike `ERR_NOT_WHILE_DISARMED`
-    /// (61), which is a server `SMSG_INVENTORY_CHANGE_FAILURE` reason we only render.
+    /// **The disarmed refusal** — `CGItem::Use`'s rung **15 of 20** (decision 1903): using the very
+    /// weapon a disarm has taken raises `ERR_CANT_USE_DISARMED` (`0x16b` = 363) at
+    /// `0x5d926d call 0x496720` and sends **nothing**. This is the client refusing on its own —
+    /// unlike `ERR_NOT_WHILE_DISARMED` (61), which is a server `SMSG_INVENTORY_CHANGE_FAILURE`
+    /// reason we only render.
     ///
     /// The condition is narrow, and none of it is about the clicked item's own class: the item
     /// must be **worn in equipment slot 15 or 16**, the flag must be up, and *that hand* must be
@@ -788,9 +835,8 @@ pub(crate) fn item_use_route(
 /// IsCasting check, and `6e4f33` forwards the item to the requirement validator `0x6094f0`. The
 /// commit `SendCast 0x6e54f0` then picks the opcode from it (`0x6e57d8 push 0xab`). So an item
 /// use takes the whole ladder — cooldown, GCD, in-flight, mounted, moving, form, reagents, target
-/// bind, range — and [`crate::ui_action::CastLadder::send`] is where all of that lives (decision
-/// 0914; verified at the bytes in wow-re's `system/ui/scratch/disasm-full.txt`, corroborated by
-/// its `action-item-slot.md` §8 and `cursor-system.md` §8.4a).
+/// bind, range — and [`crate::spell::CastLadder::send`] is where all of that lives (decision
+/// 0914).
 ///
 /// Decision 0908 put only the in-flight rung here — the fix for the director's B200, where
 /// double-clicking a mount shipped a second `CMSG_USE_ITEM`, vmangos answered it
@@ -816,14 +862,14 @@ pub(crate) fn item_use_route(
 ///
 /// It is the identical predicate to `0x4e55f0` — [`crate::ui_action::toggle::active_action_toggle`]
 /// — just reached with the *item's* spell instead of the slot's, so the one predicate serves both
-/// (wow-re `shapeshift-plaincast-toggle.md`'s own `0x6e7040` call-site census lists `0x5d9237`
-/// under `0x5d8d00` as "action button, container-**item** branch").
+/// (`0x6e7040`'s call site `0x5d9237` sits under `0x5d8d00`, on the action button's
+/// container-**item** branch).
 ///
 /// Returns whether anything left for the server — `false` for the reference's silent no-op.
 pub(crate) fn send_item_use(
     it: ItemUse,
-    ctx: &crate::ui_action::cast_target::CastContext,
-    ladder: &mut crate::ui_action::CastLadder,
+    ctx: &crate::spell::cast_target::CastContext,
+    ladder: &mut crate::spell::CastLadder,
     script: &mut benilla_ui::script::UiScript,
     gate: &mut crate::ui_bind_confirm::BindGate,
     suppress: bool,
@@ -843,7 +889,12 @@ pub(crate) fn send_item_use(
     };
     // The disarm ladder, asked of the caster's own inventory (decision 1903).
     let disarmed_hand = ctx.rel.self_store.and_then(|store| {
-        crate::items::disarmed_equipment_slot(store, &ladder.items, &ladder.commands)
+        crate::items::disarmed_equipment_slot(
+            store,
+            &ladder.objects,
+            &ladder.items,
+            &ladder.commands,
+        )
     });
     match item_use_route(it, aura_cancels, disarmed_hand) {
         ItemUseRoute::CantUseDisarmed => {
@@ -889,12 +940,12 @@ pub(crate) fn send_item_use(
         // id < 0, `5d916e` id past the table, `5d917a` no Spell.dbc row, `5d9184` no ActiveIconID);
         // the reference asks the bind question even when the item has no usable on-use spell at
         // all. Gating this on `Cast(spell)` alone — which is where it was first written — would be
-        // narrower than the reference, and wow-re said so in as many words.
+        // narrower than the reference.
         ItemUseRoute::Nothing | ItemUseRoute::Cast(_)
             if !suppress
-                && it
-                    .guid
-                    .is_some_and(|g| gate.use_binds(&ladder.items, &ladder.commands, g)) =>
+                && it.guid.is_some_and(|g| {
+                    gate.use_binds(&ladder.objects, &ladder.items, &ladder.commands, g)
+                }) =>
         {
             gate.defer_use(script, it);
             false
@@ -910,7 +961,7 @@ pub(crate) fn send_item_use(
             ladder.send(
                 spell,
                 ctx,
-                crate::ui_action::CastCommit::Item {
+                crate::spell::CastCommit::Item {
                     bag_index: it.bag_index,
                     slot: it.slot,
                     entry: it.entry,
@@ -1143,6 +1194,7 @@ pub(crate) struct UiItemsPlugin;
 
 impl Plugin for UiItemsPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         // The icon source — `ItemDisplayInfo.dbc` — is the `ItemDisplays` resource the equipment
         // renderer already loads (one parse serves the world and the bags).
         app.init_resource::<EquipErrors>()
@@ -1152,6 +1204,7 @@ impl Plugin for UiItemsPlugin {
             .init_resource::<crate::ui_bind_confirm::PendingEquips>()
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
             .init_resource::<LockTransitions>()
+            .init_resource::<net::BagOpens>()
             // AFTER the chain opens — a bare Startup slot raced AssetSet::Open and, when it
             // won, silently skipped every item DBC (no ItemSets/ItemSubClasses resource for the
             // whole session: set tooltips lost their SET block, the crafting book its headers).
@@ -1577,8 +1630,7 @@ mod tests {
 /// at all (an equipped trinket's action button was inert) and put the backpack ahead of the bags.
 #[cfg(test)]
 mod find_item_tests {
-    use super::{find_item, ItemSearch};
-    use crate::items::Items;
+    use super::{find_item, ItemSearch, TestObjects};
     use benilla_protocol::ObjectFields;
 
     // Descriptor indices, raw (the module's own consts are private; the codebase's test idiom).
@@ -1613,23 +1665,23 @@ mod find_item_tests {
         ObjectFields::from_pairs(&pairs)
     }
 
-    /// A plain item instance of `entry` (optionally with live charges).
-    fn item(store: &mut Items, guid: u64, entry: u32, charges: Option<i32>) {
+    /// A plain item instance of `entry` (optionally with live charges), in the one index (2334).
+    fn item(objects: &mut TestObjects, guid: u64, entry: u32, charges: Option<i32>) {
         let mut pairs = vec![(ENTRY, entry)];
         if let Some(c) = charges {
             pairs.push((CHARGES, c as u32));
         }
-        store.insert_object(guid, ObjectFields::from_pairs(&pairs));
+        objects.spawn(guid, ObjectFields::from_pairs(&pairs));
     }
 
     /// A container instance holding `contents` at its own inner slots.
-    fn bag(store: &mut Items, guid: u64, entry: u32, contents: &[(u8, u64)]) {
+    fn bag(objects: &mut TestObjects, guid: u64, entry: u32, contents: &[(u8, u64)]) {
         let mut pairs = vec![(ENTRY, entry), (NUM_SLOTS, 16)];
         for &(i, item_guid) in contents {
             pairs.push((SLOT_1 + 2 * u16::from(i), item_guid as u32));
             pairs.push((SLOT_1 + 2 * u16::from(i) + 1, (item_guid >> 32) as u32));
         }
-        store.insert_object(guid, ObjectFields::from_pairs(&pairs));
+        objects.spawn_container(guid, ObjectFields::from_pairs(&pairs));
     }
 
     const ALL: ItemSearch = ItemSearch {
@@ -1649,12 +1701,12 @@ mod find_item_tests {
     /// identical copy sitting in the backpack, and the wire pair is the doll's `(255, 13)`.
     #[test]
     fn equipment_is_searched_before_everything_else() {
-        let mut items = Items::default();
-        item(&mut items, 0xE1, TRINKET, None);
-        item(&mut items, 0xB1, TRINKET, None);
+        let mut objs = TestObjects::new();
+        item(&mut objs, 0xE1, TRINKET, None);
+        item(&mut objs, 0xB1, TRINKET, None);
         let store = player(&[(13, 0xE1), (23, 0xB1)]);
         assert_eq!(
-            find_item(&store, &items, TRINKET, ALL),
+            find_item(&store, &objs.get(), TRINKET, ALL),
             Some((255, 13, 0xE1))
         );
     }
@@ -1663,12 +1715,12 @@ mod find_item_tests {
     /// This is the stage that decides USE-in-place vs EQUIP.
     #[test]
     fn the_equipment_only_stage_ignores_the_bags() {
-        let mut items = Items::default();
-        item(&mut items, 0xB1, TRINKET, None);
+        let mut objs = TestObjects::new();
+        item(&mut objs, 0xB1, TRINKET, None);
         let store = player(&[(23, 0xB1)]);
-        assert_eq!(find_item(&store, &items, TRINKET, WORN), None);
+        assert_eq!(find_item(&store, &objs.get(), TRINKET, WORN), None);
         assert_eq!(
-            find_item(&store, &items, TRINKET, ALL),
+            find_item(&store, &objs.get(), TRINKET, ALL),
             Some((255, 23, 0xB1))
         );
     }
@@ -1677,13 +1729,13 @@ mod find_item_tests {
     /// container) — the leg the old backpack-first walk had backwards.
     #[test]
     fn bag_contents_precede_the_backpack() {
-        let mut items = Items::default();
-        item(&mut items, 0xC1, TRINKET, None);
-        item(&mut items, 0xB1, TRINKET, None);
-        bag(&mut items, 0xBA, BAG, &[(2, 0xC1)]);
+        let mut objs = TestObjects::new();
+        item(&mut objs, 0xC1, TRINKET, None);
+        item(&mut objs, 0xB1, TRINKET, None);
+        bag(&mut objs, 0xBA, BAG, &[(2, 0xC1)]);
         let store = player(&[(19, 0xBA), (23, 0xB1)]);
         assert_eq!(
-            find_item(&store, &items, TRINKET, ALL),
+            find_item(&store, &objs.get(), TRINKET, ALL),
             Some((19, 2, 0xC1)),
             "bag 1's inner slot 2, addressed by the bag's own player-array index"
         );
@@ -1693,27 +1745,30 @@ mod find_item_tests {
     /// bar is a real, placeable action (`InventoryType` 18 passes PlaceAction's filter).
     #[test]
     fn an_equipped_bag_is_found_as_itself() {
-        let mut items = Items::default();
-        bag(&mut items, 0xBA, BAG, &[]);
+        let mut objs = TestObjects::new();
+        bag(&mut objs, 0xBA, BAG, &[]);
         let store = player(&[(19, 0xBA)]);
-        assert_eq!(find_item(&store, &items, BAG, ALL), Some((255, 19, 0xBA)));
+        assert_eq!(
+            find_item(&store, &objs.get(), BAG, ALL),
+            Some((255, 19, 0xBA))
+        );
     }
 
     /// The mode-`0x20` charge filter skips a SPENT copy and returns one with uses left — so a
     /// click on a charged item reaches a copy that still works.
     #[test]
     fn the_charge_filter_skips_a_spent_copy() {
-        let mut items = Items::default();
-        item(&mut items, 0xB1, TRINKET, Some(0));
-        item(&mut items, 0xB2, TRINKET, Some(3));
+        let mut objs = TestObjects::new();
+        item(&mut objs, 0xB1, TRINKET, Some(0));
+        item(&mut objs, 0xB2, TRINKET, Some(3));
         let store = player(&[(23, 0xB1), (24, 0xB2)]);
         assert_eq!(
-            find_item(&store, &items, TRINKET, ALL),
+            find_item(&store, &objs.get(), TRINKET, ALL),
             Some((255, 23, 0xB1)),
             "without the filter the first copy wins, spent or not"
         );
         assert_eq!(
-            find_item(&store, &items, TRINKET, CHARGED),
+            find_item(&store, &objs.get(), TRINKET, CHARGED),
             Some((255, 24, 0xB2)),
             "with it, the spent copy is skipped"
         );
@@ -1725,16 +1780,19 @@ mod find_item_tests {
     #[test]
     fn a_key_in_the_keyring_is_found_last() {
         const KEY: u32 = 7_146; // The Scarlet Key
-        let mut items = Items::default();
-        item(&mut items, 0xE1, KEY, None);
+        let mut objs = TestObjects::new();
+        item(&mut objs, 0xE1, KEY, None);
         let store = player(&[(81, 0xE1)]);
-        assert_eq!(find_item(&store, &items, KEY, ALL), Some((255, 81, 0xE1)));
+        assert_eq!(
+            find_item(&store, &objs.get(), KEY, ALL),
+            Some((255, 81, 0xE1))
+        );
 
         // ...and a copy anywhere earlier still wins: the keyring really is last, not first.
-        item(&mut items, 0xE2, KEY, None);
+        item(&mut objs, 0xE2, KEY, None);
         let store = player(&[(81, 0xE1), (23, 0xE2)]);
         assert_eq!(
-            find_item(&store, &items, KEY, ALL),
+            find_item(&store, &objs.get(), KEY, ALL),
             Some((255, 23, 0xE2)),
             "the backpack copy precedes the keyring one"
         );
@@ -1756,22 +1814,38 @@ mod find_item_tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
 
+        let mut objs = TestObjects::new();
         let mut items = Items::default();
         let mut key_tpl = test_template("The Scarlet Key");
         key_tpl.bag_family = BAG_FAMILY_KEYS;
         items.insert_template(KEY, Some(key_tpl));
         items.insert_template(BREAD, Some(test_template("Tough Hunk of Bread")));
-        item(&mut items, 0xF1, KEY, None);
-        item(&mut items, 0xF2, BREAD, None);
+        item(&mut objs, 0xF1, KEY, None);
+        item(&mut objs, 0xF2, BREAD, None);
 
         // Nothing at all.
-        assert!(!has_key(&player(&[]), &items, &commands));
+        assert!(!has_key(&player(&[]), &objs.get(), &items, &commands));
         // A non-key in the backpack is not a key.
-        assert!(!has_key(&player(&[(23, 0xF2)]), &items, &commands));
+        assert!(!has_key(
+            &player(&[(23, 0xF2)]),
+            &objs.get(),
+            &items,
+            &commands
+        ));
         // The director's own case: the key sitting in keyring slot 1.
-        assert!(has_key(&player(&[(81, 0xF1)]), &items, &commands));
+        assert!(has_key(
+            &player(&[(81, 0xF1)]),
+            &objs.get(),
+            &items,
+            &commands
+        ));
         // And in the backpack, before it has been filed.
-        assert!(has_key(&player(&[(23, 0xF1)]), &items, &commands));
+        assert!(has_key(
+            &player(&[(23, 0xF1)]),
+            &objs.get(),
+            &items,
+            &commands
+        ));
 
         // The BANK — reachable only because HasKey passes 0x4f rather than the walker's default
         // 0x47. `find_item` must NOT see the same copy (its mode omits 0x08).
@@ -1779,11 +1853,11 @@ mod find_item_tests {
         banked.insert(39u16, 0xF1u64);
         let store = bank_player(&banked);
         assert!(
-            has_key(&store, &items, &commands),
+            has_key(&store, &objs.get(), &items, &commands),
             "a key in the bank still gives you a keyring"
         );
         assert_eq!(
-            find_item(&store, &items, KEY, ALL),
+            find_item(&store, &objs.get(), KEY, ALL),
             None,
             "...while the ordinary item search never reaches the bank"
         );
@@ -1809,8 +1883,7 @@ mod find_item_tests {
 /// `0x47`) and does not. Every case here is a slot band that separates the two scopes.
 #[cfg(test)]
 mod count_of_tests {
-    use super::{count_of, InventoryScope};
-    use crate::items::Items;
+    use super::{count_of, InventoryScope, TestObjects};
     use benilla_protocol::ObjectFields;
 
     // Descriptor indices, raw (the module's own consts are private; the codebase's test idiom).
@@ -1845,41 +1918,41 @@ mod count_of_tests {
         ObjectFields::from_pairs(&pairs)
     }
 
-    /// An item instance of `entry` holding `stack` copies.
-    fn stack(items: &mut Items, guid: u64, entry: u32, stack: u32) {
-        items.insert_object(
+    /// An item instance of `entry` holding `stack` copies, in the one index (2334).
+    fn stack(objects: &mut TestObjects, guid: u64, entry: u32, stack: u32) {
+        objects.spawn(
             guid,
             ObjectFields::from_pairs(&[(ENTRY, entry), (STACK, stack)]),
         );
     }
 
     /// A container instance holding `contents` at its own inner slots.
-    fn bag(items: &mut Items, guid: u64, contents: &[(u8, u64)]) {
+    fn bag(objects: &mut TestObjects, guid: u64, contents: &[(u8, u64)]) {
         let mut pairs = vec![(ENTRY, 4_500), (NUM_SLOTS, 16)];
         for &(slot, held) in contents {
             pairs.push((SLOT_1 + 2 * u16::from(slot), held as u32));
             pairs.push((SLOT_1 + 2 * u16::from(slot) + 1, (held >> 32) as u32));
         }
-        items.insert_object(guid, ObjectFields::from_pairs(&pairs));
+        objects.spawn_container(guid, ObjectFields::from_pairs(&pairs));
     }
 
     /// The headline: bank the quest's items and a quest objective still counts them. This is the
-    /// whole of the mask-`8` finding (wow-re `ui/scratch/quest-leaderboard-law.md` §3.1 — `8` is
+    /// whole of the mask-`8` finding (`0x622420` — `8` is
     /// exactly the bit that *adds the bank*, and every one of the six mask-`8` call sites in the
     /// reference is a quest surface).
     #[test]
     fn a_quest_objective_counts_banked_copies_and_nothing_else_does() {
         let store = player(&[(23, 0xA1), (39, 0xB1)]); // one stack in the backpack, one in the bank
-        let mut items = Items::default();
-        stack(&mut items, 0xA1, AMMO, 3);
-        stack(&mut items, 0xB1, AMMO, 5);
+        let mut objs = TestObjects::new();
+        stack(&mut objs, 0xA1, AMMO, 3);
+        stack(&mut objs, 0xB1, AMMO, 5);
         assert_eq!(
-            count_of(&store, &items, AMMO, InventoryScope::QUEST_ITEMS),
+            count_of(&store, &objs.get(), AMMO, InventoryScope::QUEST_ITEMS),
             8,
             "mask 0x4F sees the bank"
         );
         assert_eq!(
-            count_of(&store, &items, AMMO, InventoryScope::CARRIED),
+            count_of(&store, &objs.get(), AMMO, InventoryScope::CARRIED),
             3,
             "an action-bar/reagent count must NOT see the bank"
         );
@@ -1891,15 +1964,18 @@ mod count_of_tests {
     #[test]
     fn a_quest_objective_counts_the_contents_of_bank_bags() {
         let store = player(&[(63, 0xBB)]); // a bag in bank-bag slot 1
-        let mut items = Items::default();
-        bag(&mut items, 0xBB, &[(0, 0xC1), (4, 0xC2)]);
-        stack(&mut items, 0xC1, AMMO, 2);
-        stack(&mut items, 0xC2, AMMO, 6);
+        let mut objs = TestObjects::new();
+        bag(&mut objs, 0xBB, &[(0, 0xC1), (4, 0xC2)]);
+        stack(&mut objs, 0xC1, AMMO, 2);
+        stack(&mut objs, 0xC2, AMMO, 6);
         assert_eq!(
-            count_of(&store, &items, AMMO, InventoryScope::QUEST_ITEMS),
+            count_of(&store, &objs.get(), AMMO, InventoryScope::QUEST_ITEMS),
             8
         );
-        assert_eq!(count_of(&store, &items, AMMO, InventoryScope::CARRIED), 0);
+        assert_eq!(
+            count_of(&store, &objs.get(), AMMO, InventoryScope::CARRIED),
+            0
+        );
     }
 
     /// The other two bands `0x47` carries that benilla's own [`InventoryScope::CARRIED`] does not:
@@ -1907,15 +1983,15 @@ mod count_of_tests {
     #[test]
     fn the_quest_scope_also_reaches_worn_gear_and_the_keyring() {
         let store = player(&[(5, 0xE1), (81, 0xF1)]); // a worn copy and one in the keyring
-        let mut items = Items::default();
-        stack(&mut items, 0xE1, AMMO, 1);
-        stack(&mut items, 0xF1, AMMO, 1);
+        let mut objs = TestObjects::new();
+        stack(&mut objs, 0xE1, AMMO, 1);
+        stack(&mut objs, 0xF1, AMMO, 1);
         assert_eq!(
-            count_of(&store, &items, AMMO, InventoryScope::QUEST_ITEMS),
+            count_of(&store, &objs.get(), AMMO, InventoryScope::QUEST_ITEMS),
             2
         );
         assert_eq!(
-            count_of(&store, &items, AMMO, InventoryScope::CARRIED),
+            count_of(&store, &objs.get(), AMMO, InventoryScope::CARRIED),
             0,
             "benilla's pre-1158 count reached neither band — the named narrowing"
         );
@@ -1926,15 +2002,18 @@ mod count_of_tests {
     #[test]
     fn carried_bags_are_unchanged_in_both_scopes() {
         let store = player(&[(19, 0xBA), (25, 0xA2)]);
-        let mut items = Items::default();
-        bag(&mut items, 0xBA, &[(2, 0xC1)]);
-        stack(&mut items, 0xC1, AMMO, 4);
-        stack(&mut items, 0xA2, AMMO, 1);
+        let mut objs = TestObjects::new();
+        bag(&mut objs, 0xBA, &[(2, 0xC1)]);
+        stack(&mut objs, 0xC1, AMMO, 4);
+        stack(&mut objs, 0xA2, AMMO, 1);
         assert_eq!(
-            count_of(&store, &items, AMMO, InventoryScope::QUEST_ITEMS),
+            count_of(&store, &objs.get(), AMMO, InventoryScope::QUEST_ITEMS),
             5
         );
-        assert_eq!(count_of(&store, &items, AMMO, InventoryScope::CARRIED), 5);
+        assert_eq!(
+            count_of(&store, &objs.get(), AMMO, InventoryScope::CARRIED),
+            5
+        );
     }
 
     /// Buyback (slots 69–80) has no mask bit at all and is unreachable at every scope — an item
@@ -1944,12 +2023,12 @@ mod count_of_tests {
         // The buyback band has no accessor in the walk by construction; assert the neighbouring
         // bands still resolve so this is a real coverage statement, not a vacuous one.
         let store = player(&[(38, 0xA1), (68, 0xBB)]);
-        let mut items = Items::default();
-        stack(&mut items, 0xA1, AMMO, 1);
-        bag(&mut items, 0xBB, &[(0, 0xC1)]);
-        stack(&mut items, 0xC1, AMMO, 1);
+        let mut objs = TestObjects::new();
+        stack(&mut objs, 0xA1, AMMO, 1);
+        bag(&mut objs, 0xBB, &[(0, 0xC1)]);
+        stack(&mut objs, 0xC1, AMMO, 1);
         assert_eq!(
-            count_of(&store, &items, AMMO, InventoryScope::QUEST_ITEMS),
+            count_of(&store, &objs.get(), AMMO, InventoryScope::QUEST_ITEMS),
             2,
             "last backpack slot + last bank bag, with buyback between them untouched"
         );

@@ -34,9 +34,11 @@
 //! back (1138). benilla has no UI reload, so there is no edge here to miss; when one lands it joins
 //! this list.
 //!
-//! **Read once**, when the roster names the character we are entering the world as — the macro/
-//! binding load's own seam ([`crate::ui_macro::identity`]). Absent file = the shipped defaults, which
-//! is the normal first run.
+//! **Read once per session**, when the roster names the character we are entering the world as —
+//! the macro/binding load's own seam ([`crate::ui_macro::identity`]). Absent file = the shipped
+//! defaults, which is the normal first run: the rig is re-seated at them first, so a fresh alt does
+//! not open at the zoom of whoever played last. The pitch reaches the camera through the login
+//! seize ([`super::Player::login_pitch`]), which is the one place the opening pitch is seated.
 
 use std::path::PathBuf;
 
@@ -44,7 +46,10 @@ use bevy::prelude::*;
 
 use crate::char_select::{ClientState, InWorldGated};
 
-use super::camera::{CameraControl, FlyCam, CAM_DIST_MAX, CAM_DIST_MIN, CAM_PITCH_LIMIT};
+use super::camera::{
+    CameraControl, FlyCam, CAM_DIST_DEFAULT, CAM_DIST_MAX, CAM_DIST_MIN, CAM_PITCH_LIMIT,
+};
+use super::Player;
 use benilla_world::view::WorldCamera;
 
 /// The persisted pose's file keys — the reference's own spellings, in the reference's own order.
@@ -144,6 +149,7 @@ fn load_camera_pose(
     mut file: ResMut<CameraPoseFile>,
     mut rig: ResMut<CameraControl>,
     mut cam: Query<&mut FlyCam, With<WorldCamera>>,
+    mut player: ResMut<Player>,
 ) {
     let Some(id) = crate::ui_macro::identity(&roster) else {
         return;
@@ -156,6 +162,11 @@ fn load_camera_pose(
     };
     file.path = crate::local_state::camera_character_path(&id.0, &id.1);
     file.identity = Some(id);
+    // This character's pose starts from the shipped defaults, not from the last one's.
+    rig.distance = CAM_DIST_DEFAULT;
+    rig.target_distance = CAM_DIST_DEFAULT;
+    rig.collision_distance = CAM_DIST_DEFAULT;
+    player.login_pitch = None;
 
     let Some(path) = file.path.clone() else {
         return; // hermetic capture, or no install — session-only, defaults stand
@@ -177,6 +188,7 @@ fn load_camera_pose(
     }
     if let Some(p) = pitch {
         cam.pitch = p;
+        player.login_pitch = Some(p);
     }
     info!("camera pose: restored from {}", path.display());
 }
@@ -198,13 +210,19 @@ fn save(file: &CameraPoseFile, rig: &CameraControl, pitch: f32) {
 
 /// `OnExit(InWorld)`: `/logout` back to the glue, or a disconnect.
 fn save_on_session_end(
-    file: Res<CameraPoseFile>,
+    mut file: ResMut<CameraPoseFile>,
     rig: Res<CameraControl>,
     cam: Query<&FlyCam, With<WorldCamera>>,
 ) {
     if let Ok(cam) = cam.single() {
         save(&file, &rig, cam.pitch);
     }
+    // The next login reads the file again, whoever it is — a reconnect or a relog of this same
+    // character included, whose seize would otherwise open at the shipped pitch. The path goes
+    // too: a quit from the character screen after this has no character's pose to write, and
+    // would otherwise save the glue camera's pitch over this one's.
+    file.identity = None;
+    file.path = None;
 }
 
 /// `AppExit`: quitting the client. Reads the message rather than a state edge because a quit from
@@ -245,8 +263,8 @@ mod tests {
     use super::*;
 
     /// The file we write is byte-for-byte the reference's shape: its two keys, its order, its six
-    /// decimals, LF, trailing newline — checked against a real `camera-settings.txt` from the RE
-    /// tree (`Account/ONE/VMaNGOS/One`, `16.068569` / `13.449968`).
+    /// decimals, LF, trailing newline — checked against a real `camera-settings.txt` the reference
+    /// client wrote (`16.068569` / `13.449968`).
     #[test]
     fn the_rendered_file_matches_the_references_shape() {
         let text = render(16.068_57, pitch_from_file(13.449_968));
@@ -294,5 +312,99 @@ mod tests {
         let (d, p) = parse("CAMERADISTANCE 12.5\r\ncamerapitch 10.0\r\n");
         assert_eq!(d, Some(12.5));
         assert!((p.unwrap() - pitch_from_file(10.0)).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    use bevy::ecs::system::RunSystemOnce;
+
+    use super::*;
+    use crate::char_select::Roster;
+    use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+
+    fn roster(name: &str, guid: u64) -> Roster {
+        Roster::with_pending_pick(
+            vec![benilla_protocol::Character {
+                guid,
+                name: name.into(),
+                race: 1,
+                class: 1,
+                gender: 0,
+                skin: 0,
+                face: 0,
+                hair_style: 0,
+                hair_color: 0,
+                facial_hair: 0,
+                level: 1,
+                zone: 0,
+                map: 0,
+                position: benilla_protocol::wire::Vector3d {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                flags: 0,
+                equipment: [benilla_protocol::CharEnumItem::default(); 19],
+                pet_display_id: 0,
+                pet_level: 0,
+                pet_family: 0,
+            }],
+            guid,
+        )
+    }
+
+    /// **The restored pitch reaches the login seize, and an alt starts from the defaults.** The
+    /// seize seated its own constant over the pitch this load had just restored, so only the
+    /// distance half of the remembered pose ever survived a login; and a character with no file
+    /// kept whatever zoom the previous one had left in the rig.
+    #[test]
+    fn the_saved_pitch_is_the_login_pitch_and_a_fresh_alt_gets_the_defaults() {
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-cam-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+        let path = crate::local_state::camera_character_path("Realm", "Tank").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, render(8.0, -0.3)).unwrap();
+
+        let mut app = App::new();
+        app.init_resource::<CameraPoseFile>()
+            .init_resource::<CameraControl>()
+            .init_resource::<Player>()
+            .insert_resource(roster("Tank", 7));
+        app.world_mut().spawn((
+            FlyCam {
+                yaw: 0.0,
+                pitch: 0.0,
+                speed: 1.0,
+            },
+            WorldCamera,
+        ));
+        app.world_mut().run_system_once(load_camera_pose).unwrap();
+        let restored = app.world().resource::<Player>().login_pitch;
+        assert!(
+            restored.is_some_and(|p| (p + 0.3).abs() < 1e-3),
+            "the file's pitch is what the seize will seat: {restored:?}"
+        );
+        assert_eq!(app.world().resource::<CameraControl>().target_distance, 8.0);
+
+        // The session ends; an alt with no file logs in.
+        app.world_mut()
+            .run_system_once(save_on_session_end)
+            .unwrap();
+        *app.world_mut().resource_mut::<Player>() = Player::default();
+        app.insert_resource(roster("Healer", 8));
+        app.world_mut().run_system_once(load_camera_pose).unwrap();
+        assert_eq!(app.world().resource::<Player>().login_pitch, None);
+        assert_eq!(
+            app.world().resource::<CameraControl>().target_distance,
+            CAM_DIST_DEFAULT,
+            "a fresh alt opens at the shipped zoom, not the tank's"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

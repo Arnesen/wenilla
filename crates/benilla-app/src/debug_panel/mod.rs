@@ -482,8 +482,8 @@ fn debug_panel_ui(
                             // UVs (phase 3 — waterfalls).
                             let ticking = anim_hosts.iter().filter(|h| h.active).count();
                             // Of the material samplers, how many resolve to **0 right now** — the
-                            // batches the reference culls this frame (`A <= 0`, wow-re
-                            // `m2-alpha-combine-cull`). Non-zero as soon as a voidwalker/banshee/
+                            // batches the reference culls this frame (`A <= 0`,
+                            // `0x707b3a`–`0x707b5c`). Non-zero as soon as a voidwalker/banshee/
                             // slime/infernal is in view: those models author geometry that only
                             // appears on death, and this counter is what says we are hiding it
                             // rather than drawing it. `dim` counts the partial factors — a batch
@@ -512,7 +512,19 @@ fn debug_panel_ui(
                             // room vanishes, click, and the exact seed evidence + per-portal verdicts land
                             // in a file.
                             if ui.button("dump WMO cull trace").clicked() {
-                                cull_probe.dump_requested = true;
+                                // Under the one folder (0954/1486), beside the crash reports and
+                                // the stall samples. The world crate is handed the path because
+                                // it has no `local_state` of its own; a hermetic run has no
+                                // folder, and the click says so instead of writing into the cwd.
+                                match crate::local_state::diagnostics_dir() {
+                                    Some(dir) => {
+                                        cull_probe.dump_to = Some(dir.join("wmo-cull-trace.txt"));
+                                    }
+                                    None => bevy::log::warn!(
+                                        "wmo cull trace: no benilla-config folder to write into \
+                                         (hermetic run) — set WOW_CULLDUMP=<path> to name one"
+                                    ),
+                                }
                             }
                         });
 

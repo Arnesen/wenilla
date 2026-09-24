@@ -31,10 +31,9 @@
 //! `WOW_TEARDOWN_INJECT=<ms>` wedges World drop via a resource whose `Drop` sleeps — the
 //! director's beachball, synthetically.
 
-use bevy::platform::time::Instant;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::time::Real;
@@ -86,14 +85,7 @@ fn beat(mut exits: MessageReader<AppExit>) {
     HEARTBEAT_MS.store(since_start_ms().max(1), Ordering::SeqCst);
 }
 
-#[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
 pub(super) fn plugin(app: &mut App) {
-    // No watchdog thread on wasm32 (single-threaded there without COOP/COEP + SharedArrayBuffer,
-    // and there is no `sample`/`_exit` to shell out to on a browser tab anyway) — a hung main
-    // thread on web just freezes the tab, which needs no separate diagnosis. The injectors below
-    // are standing test affordances for exercising the native watchdog, so they stay off too.
-    #[cfg(target_arch = "wasm32")]
-    return;
     // The injectors are armed FIRST, deliberately: they are how the wedge is reproduced, and the
     // one A/B this instrument exists to support is "same wedge, watchdog off — does the process
     // still hang?". Registered after the `WOW_STALL_SAMPLE=0` gate, as they were until 1637, that
@@ -143,11 +135,9 @@ fn arm_injectors(app: &mut App) {
             app.insert_resource(TeardownWedge(ms));
         }
     }
-    // The third injector lives with the instrument it exercises — `crash::arm_injector`, a
-    // deliberate main-thread panic — and is armed from here so all three standing injectors
-    // are named in one place.
-    #[cfg(not(target_arch = "wasm32"))]
-    crate::crash::arm_injector(app);
+    // The third standing injector — `crash::arm_injector`, a deliberate main-thread panic — is
+    // armed by `PerfPlugin` itself, beside this plugin's registration, not from here: this
+    // module is macOS-only and the crash injector is not (its doc has the cross-platform incident).
 }
 
 fn watchdog(dir: Option<std::path::PathBuf>) {

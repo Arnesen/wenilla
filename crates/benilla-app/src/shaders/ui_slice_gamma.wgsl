@@ -1,11 +1,6 @@
-// The glue screens' Bevy-UI nine-patch / tiled shader, on the UI **gamma composite lane**
-// (decision 0254) — the sibling of `ui_node_gamma.wgsl`, which carries the same rationale.
-//
-// VENDORED from `bevy_ui_render` 0.18.1 `src/ui_texture_slice.wgsl`, verbatim except the fragment's
-// final colour (marked THE ONE CHANGE). This is the pipeline every glue `Backdrop` draws through —
-// the `Glue-Tooltip-Border` edge nine-patch and the tiled `UI-Tooltip-Background` fill — so it is
-// exactly where the edit boxes' washed-out fill and their bevel's vanished dark ramp came from.
-// Re-diff against upstream on every Bevy upgrade.
+// The glue screens' Bevy UI nine-patch and tiled shader on the UI gamma composite lane: every glue
+// `Backdrop` draws through it. Vendored from `bevy_ui_render` 0.18.1 `src/ui_texture_slice.wgsl`,
+// verbatim except `linear_to_srgb` and the final colour; re-diff on every Bevy upgrade.
 
 #import bevy_render::view::View;
 #import bevy_render::globals::Globals;
@@ -18,8 +13,7 @@ var<uniform> globals: Globals;
 @group(1) @binding(0) var sprite_texture: texture_2d<f32>;
 @group(1) @binding(1) var sprite_sampler: sampler;
 
-// Linear → sRGB (IEC 61966-2-1) — the exact inverse of the sampler's decode. See
-// `ui_node_gamma.wgsl` for why each factor is encoded before the multiply.
+// Linear to sRGB (IEC 61966-2-1), the exact inverse of the sampler's decode.
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     let higher = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
     let lower = c * 12.92;
@@ -140,10 +134,9 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     // map the slice coords to texture coords
     let atlas_uv = in.atlas_rect.xy + uv * (in.atlas_rect.zw - in.atlas_rect.xy);
 
-    // ── THE ONE CHANGE from the vendored original ────────────────────────────────────────────────
-    // Upstream returns `in.color * textureSample(...)` — a linear product for a linear blend. Both
-    // factors return to the client's byte space before the multiply, so the tint IS the reference's
-    // gamma-space `SetBackdropColor` multiply and the blend that follows is byte arithmetic.
+    // ── Changed from upstream ──
+    // Upstream returns `in.color * textureSample(...)`. Both factors go back to gamma bytes before
+    // the multiply, the reference's gamma-space `SetBackdropColor` tint, so the blend is byte math.
     let texel = textureSample(sprite_texture, sprite_sampler, atlas_uv);
     return vec4<f32>(
         linear_to_srgb(in.color.rgb) * linear_to_srgb(texel.rgb),

@@ -1,6 +1,5 @@
-//! The character-select roster family: the `SMSG_CHAR_ENUM` [`Character`] entry (vmangos
-//! `Player::BuildEnumData` field order, byte-goldened in `tests/char_enum.rs`) + the
-//! create/delete result codes and the race/class/gender ids the create path sends.
+//! Character select: the `SMSG_CHAR_ENUM` [`Character`] entry (vmangos `Player::BuildEnumData`
+//! order), the create/delete result codes and the create request.
 
 use std::io::{self, Read};
 
@@ -9,26 +8,19 @@ use crate::wire::{read_cstring, read_u32_le, read_u64_le, read_u8, Vector3d};
 /// `WorldResult::CharCreateSuccess` / `CharCreateNameInUse` (`SMSG_CHAR_CREATE`).
 pub const CHAR_CREATE_SUCCESS: u8 = 0x2E;
 pub const CHAR_CREATE_NAME_IN_USE: u8 = 0x31;
-/// `WorldResult::CharCreateServerLimit` — the account already holds `CharactersPerRealm` characters
-/// (vmangos `HandleCharCreateOpcode`, checked against the last char-enum's count). Counted from the
-/// `CHAR_CREATE_SUCCESS = 0x2E` anchor through the `SharedDefines.h` ResponseCodes order
-/// (SUCCESS, ERROR, FAILED, NAME_IN_USE, DISABLED, PVP_TEAMS_VIOLATION, SERVER_LIMIT).
+/// `WorldResult::CharCreateServerLimit`: the account already holds `CharactersPerRealm`
+/// characters (vmangos `HandleCharCreateOpcode`; 0x2E + 6 in `SharedDefines.h` ResponseCodes).
 pub const CHAR_CREATE_SERVER_LIMIT: u8 = 0x34;
-/// `WorldResult::CharDeleteSuccess` (`SMSG_CHAR_DELETE`; vmangos `SharedDefines.h` ResponseCodes,
-/// counted from the verified `CHAR_CREATE_SUCCESS = 0x2E` anchor).
+/// `WorldResult::CharDeleteSuccess` (`SMSG_CHAR_DELETE`; vmangos `SharedDefines.h` ResponseCodes).
 pub const CHAR_DELETE_SUCCESS: u8 = 0x39;
 /// Race/Class/Gender values benilla's char-create sends.
 pub const RACE_HUMAN: u8 = 0x1;
 pub const CLASS_WARRIOR: u8 = 0x1;
 pub const GENDER_MALE: u8 = 0x0;
 
-/// A character-creation request: the identity + the five appearance dials the create screen picked.
-/// Consumed by the [`super::char_create`] body builder (`CMSG_CHAR_CREATE`) and carried to the
-/// parked IO thread over the pick channel (decision 0423). `outfit_id` isn't here — it's always 0 on
-/// the wire (the server reads and ignores it, then recomputes start gear; verified vmangos
-/// `CharacterHandler.cpp:310`). The five appearance bytes are `ChrRaces`/`CharSections`-valid indices
-/// the create UI derives from the DBCs, so every request the UI can build passes the server's
-/// `Player::ValidateAppearance`.
+/// A `CMSG_CHAR_CREATE` request for [`super::char_create`]. The outfit id is always 0 on the wire:
+/// the server ignores it and picks the start gear (vmangos `CharacterHandler.cpp:310`). The
+/// appearance bytes must be valid `CharSections` indices or `Player::ValidateAppearance` refuses.
 #[derive(Debug, Clone)]
 pub struct CharCreateReq {
     pub name: String,
@@ -45,28 +37,21 @@ pub struct CharCreateReq {
     pub facial_hair: u8,
 }
 
-/// The enum entry's `flags` bits the select screen renders (vmangos `CHARACTER_FLAG_*`,
-/// `Player::BuildEnumData`): the at-login helm/cloak hide toggles, the dead-as-ghost marker, and
-/// the server-ordered rename.
+/// The vmangos `CHARACTER_FLAG_*` bits of [`Character::flags`] that the select screen renders.
 pub const CHARACTER_FLAG_HIDE_HELM: u32 = 0x0400;
 pub const CHARACTER_FLAG_HIDE_CLOAK: u32 = 0x0800;
 pub const CHARACTER_FLAG_GHOST: u32 = 0x2000;
 pub const CHARACTER_FLAG_RENAME: u32 = 0x4000;
 
-/// One visible-equipment entry of the enum record: the `ItemDisplayInfo.dbc` id (NOT an item id —
-/// the server already resolved the template hop) and the item's `InventoryType`. `display_id == 0`
-/// is an empty slot. 19 slots in the vanilla equipment order (head 0 … tabard 18).
+/// One visible-equipment slot: an `ItemDisplayInfo.dbc` id (not an item id, 0 for empty) and the
+/// item's `InventoryType`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CharEnumItem {
     pub display_id: u32,
     pub inventory_type: u8,
 }
 
-/// A character from `SMSG_CHAR_ENUM` — the full roster entry the character-select screen renders
-/// (decision 0465): identity, the five appearance bytes, zone/map/position, the display flags, the
-/// visible equipment display ids, and the **pet triple** (the hunter/warlock companion standing
-/// beside the selected character). Only the guild id, first-login byte and first-bag pair are
-/// parsed for alignment and discarded (nothing at select renders them).
+/// One `SMSG_CHAR_ENUM` roster entry.
 #[derive(Debug, Clone)]
 pub struct Character {
     pub guid: u64,
@@ -77,30 +62,26 @@ pub struct Character {
     pub class: u8,
     /// 0 male, 1 female.
     pub gender: u8,
-    /// The five appearance dials, `CharSections` indices (the create screen's tuple, echoed back).
+    /// First of the five appearance bytes, all `CharSections` indices.
     pub skin: u8,
     pub face: u8,
     pub hair_style: u8,
     pub hair_color: u8,
     pub facial_hair: u8,
     pub level: u8,
-    /// `AreaTable.dbc` id of the character's zone (the roster row's location line).
+    /// `AreaTable.dbc` id of the character's zone.
     pub zone: u32,
     pub map: u32,
     pub position: Vector3d,
-    /// `CHARACTER_FLAG_*` bits (hide-helm/hide-cloak/ghost/rename are the rendered ones).
+    /// `CHARACTER_FLAG_*` bits.
     pub flags: u32,
-    /// The 19 visible equipment slots (vanilla order: head, neck, shoulders, shirt, chest, waist,
-    /// legs, feet, wrists, hands, finger×2, trinket×2, back, main hand, off hand, ranged, tabard).
+    /// Equipment order: head, neck, shoulders, shirt, chest, waist, legs, feet, wrists, hands,
+    /// finger x2, trinket x2, back, main hand, off hand, ranged, tabard.
     pub equipment: [CharEnumItem; 19],
-    /// The pet's `CreatureDisplayInfo.dbc` id — the companion the select screen stands beside the
-    /// character. **0 = no pet**, and that one test is the whole client-side gate: the server
-    /// already suppresses the triple for anything but a living hunter/warlock (vmangos
-    /// `Player::BuildEnumData` — `!GHOST && (CLASS_WARLOCK || CLASS_HUNTER)`), so no class or
-    /// ghost check belongs here.
+    /// The pet's `CreatureDisplayInfo.dbc` id, 0 for none. The server already zeroes it for all but
+    /// a living hunter or warlock (`Player::BuildEnumData`), so the client needs no class check.
     pub pet_display_id: u32,
-    /// The pet's level, and its `CreatureFamily.dbc` id. Carried because they are the record's own
-    /// fields; **nothing renders them today** — the select screen's pet is display-id-driven.
+    /// The pet's level; `pet_family` is its `CreatureFamily.dbc` id.
     pub pet_level: u32,
     pub pet_family: u32,
 }

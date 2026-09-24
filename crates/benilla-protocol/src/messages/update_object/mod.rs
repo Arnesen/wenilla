@@ -1,9 +1,5 @@
-//! `SMSG_UPDATE_OBJECT` body decode: the object list, each entry's [`MovementBlock`] pose and sparse
-//! [`ObjectFields`] of descriptor fields. The complex, *growing* core of the message layer (decision
-//! 0021) — split out because the descriptor-field decode expands as the object layer does. The parent
-//! module ([`super`]) owns packet framing/dispatch and the client builders, and the shared
-//! `MOVEMENT_FLAG_*` constants (also used by its movement-info parse), which this module reaches via
-//! `super::`.
+//! `SMSG_UPDATE_OBJECT` body decode: the object list, each entry's [`MovementBlock`] and its
+//! sparse [`ObjectFields`].
 
 use std::io::{self, Read};
 
@@ -31,7 +27,7 @@ pub enum Object {
         guid: u64,
         movement: MovementBlock,
     },
-    /// `CREATE_OBJECT` / `CREATE_OBJECT2` (identical wire shape; the distinction is irrelevant here).
+    /// `CREATE_OBJECT` or `CREATE_OBJECT2`, which share one wire shape.
     Create {
         guid: u64,
         object_type: ObjectType,
@@ -62,11 +58,8 @@ impl Object {
                 let guid = read_packed_guid(r)?;
                 let object_type = ObjectType::from_u8(read_u8(r)?);
                 let movement = MovementBlock::read(r)?;
-                // A create's mask is the COMPLETE descriptor — the server omits zero-valued
-                // fields (vmangos `_SetCreateBits`), so absent must read 0, not unknown
-                // (`ObjectFields`'s created semantics). The TYPE rides along because "absent = 0"
-                // holds only inside this object's OWN descriptor: a creature has no PLAYER block
-                // to be absent from (decision 1081).
+                // A create omits zero fields (vmangos `_SetCreateBits`), so absent reads 0, but
+                // only inside this type's own descriptor.
                 let mask = ObjectFields::read(r)?.into_created(object_type);
                 Object::Create {
                     guid,
@@ -100,7 +93,7 @@ fn read_guid_list(r: &mut impl Read) -> io::Result<Vec<u64>> {
     Ok(guids)
 }
 
-/// Parse an `SMSG_UPDATE_OBJECT` body's object list (the count + has-transport byte + each `Object`).
+/// Parse an `SMSG_UPDATE_OBJECT` body: the count, the has-transport byte, then each `Object`.
 pub(super) fn read_update_object(r: &mut impl Read) -> io::Result<Vec<Object>> {
     let amount_of_objects = read_u32_le(r)?;
     let _has_transport = read_u8(r)?;
@@ -117,8 +110,8 @@ mod tests {
 
     #[test]
     fn quest_log_slot_unpacks_counters_and_state() {
-        // Slot 2 (base 198 + 6 = 204): counters 5/10/63/0 packed at 6-bit strides, state byte
-        // COMPLETE, a timer value. Counter packing per vmangos Player.h:1100-1106.
+        // Slot 2 (198 + 6 = 204): counters 5/10/63/0 at 6-bit strides, state COMPLETE, a timer
+        // (`Player.h:1100-1106`).
         let count_state =
             5u32 | (10 << 6) | (63 << 12) | ((quest_slot_state::COMPLETE as u32) << 24);
         let f = ObjectFields::from_pairs(&[(204, 783), (205, count_state), (206, 4242)]);
@@ -131,7 +124,6 @@ mod tests {
                 timer: 4242,
             })
         );
-        // The neighbouring slots never streamed → None; out of range → None.
         assert_eq!(f.player_quest_log(1), None);
         assert_eq!(f.player_quest_log(3), None);
         assert_eq!(f.player_quest_log(PLAYER_QUEST_LOG_SLOTS), None);
@@ -139,7 +131,7 @@ mod tests {
 
     #[test]
     fn quest_log_cleared_slot_reads_zero_id() {
-        // An abandoned slot: the server zeroes the id (and pair) — still `Some`, id 0.
+        // An abandoned slot: the server zeroes the id and the pair.
         let f = ObjectFields::from_pairs(&[(198, 0), (199, 0), (200, 0)]);
         assert_eq!(f.player_quest_log(0).map(|s| s.quest_id), Some(0));
     }

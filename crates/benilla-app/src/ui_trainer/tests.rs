@@ -86,7 +86,7 @@ fn snap(open: &TrainerOpen, spells: &SpellCatalog) -> Option<TrainerState> {
     )
 }
 
-/// The icon law's fixture (wow-re `spell-icon-substitution-law.md` §1's shape, synthetic so
+/// The icon law's fixture (`GetTrainerServiceIcon 0x4d8f50`'s shape, synthetic so
 /// every gate is reachable): wrapper 100 teaches 200 via a slot-0 `LEARN_SPELL`; 200 creates
 /// item 777; item 777's display 5 carries the "real" art. Each spell has a DISTINCT icon so a
 /// wrong arm is named by the assertion, not merely unequal.
@@ -255,7 +255,7 @@ fn trainer_icon_is_nil_until_the_product_template_lands_and_asks_once() {
     );
 }
 
-/// The director's exact case on the real shipped `Spell.dbc` — the check wow-re's §7 pins:
+/// The director's exact case on the real shipped `Spell.dbc` (`GetTrainerServiceIcon 0x4d8f50`):
 /// spell 2756 is the wrapper a Blacksmithing trainer sends, 2739 the recipe it teaches, 2847 the
 /// sword. At a tradeskill trainer the law must reach for item 2847; at a class trainer it must
 /// serve 2756's own icon. Skips without client data.
@@ -455,7 +455,7 @@ fn resolve_reads_cost_state_and_gates_with_no_catalog() {
 }
 
 /// A prerequisite ability's met/unmet is per-gate — whether the player KNOWS that spell — and is
-/// decoupled from the service's overall category (wow-re `system/ui/scratch/trainer-requirement.md`).
+/// decoupled from the service's overall category (`GetTrainerServiceAbilityReq 0x4d96e0`).
 /// The director's exact case: an UNAVAILABLE spell (gated by level) whose already-learned prev-rank
 /// prerequisite must still read met (white), not red. Deterministic (no client data needed).
 #[test]
@@ -695,18 +695,15 @@ fn tooltip_falls_back_to_the_wire_spell() {
     );
 }
 
-/// **B256 — the state filter died on every purchase.** The reset the reference's list builder does
-/// per packet (`0x4d75d9`, decision 1128) is only ever observable there at a window *opening*: the
-/// reference never receives a list packet with the window already up, because it repaints a purchase
-/// from a client-side state re-derivation (`0x4d7d40`). benilla has no such re-derivation and asks
-/// the server for a fresh list after every buy — so our synthetic packet was dragging a reset along
-/// that the reference cannot produce, and the player's "Available only" came back as
-/// available+unavailable the moment they learned a spell (their collapsed groups went with it).
-///
-/// So [`TrainerOpen::fresh_list`] means *this packet begins a window session*, and the post-buy
-/// re-request marks its own answer as the repaint it is. The four cases below are the whole law.
+/// **Every list packet begins a window session.** The reset the reference's list builder does
+/// per packet (`0x4d75d9`, decision 1128) is only ever observable at a window *opening*, because
+/// the reference never receives a list packet with the window already up: a purchase, a level, a
+/// skill point repaint the open window through the state re-evaluator (`0x4d7d40`,
+/// [`super::reeval`], decision 2333), never through a second list. Since 2333 benilla is the
+/// same — the post-buy re-request that B256's "refresh" mark existed to tell apart is gone — so
+/// the law is one line: a list packet opens, and opening resets.
 #[test]
-fn only_a_packet_that_opens_a_window_resets_the_filter() {
+fn every_list_packet_begins_a_window_session() {
     const TRAINER: u64 = 0xabc;
     let list = || vec![wire(1, trainer_spell_state::GREEN, 10, 1, 0)];
     let mut open = TrainerOpen::default();
@@ -715,37 +712,410 @@ fn only_a_packet_that_opens_a_window_resets_the_filter() {
     assert!(open.fresh_list, "a first list opens the window: reset");
     open.fresh_list = false; // the feed consumes it
 
-    // The post-buy re-request (`net::apply::npc::trainer_buy_succeeded`) marks its own answer.
-    open.refresh_pending = true;
-    open.open(TRAINER, 0, list(), "Greetings".into());
-    assert!(
-        !open.fresh_list,
-        "our own re-list repaints the open window — the player's filter and collapse stand"
-    );
-    assert!(
-        !open.refresh_pending,
-        "and the mark is spent, so the NEXT packet is a real open again"
-    );
-
     open.open(TRAINER, 0, list(), "Greetings".into());
     assert!(
         open.fresh_list,
-        "an unmarked packet is always a session start"
+        "the same trainer's list again is a session start again"
     );
 
-    // A refresh that never came back must not eat a later open's reset: the close spends it.
-    open.refresh_pending = true;
+    // A pending re-derivation never survives a list: the packet carries the server's own states.
+    open.fresh_list = false;
+    open.trigger_re_derive();
+    assert!(open.re_derive);
+    open.open(TRAINER, 0, list(), "Greetings".into());
+    assert!(
+        !open.re_derive,
+        "a fresh list is the server's states — nothing pending against it"
+    );
+
+    // And a trigger with no window open is nothing at all (`0x4d7d46`'s early-out).
     open.clear();
-    open.open(TRAINER, 0, list(), "Greetings".into());
-    assert!(open.fresh_list, "a close drops any in-flight refresh mark");
+    open.trigger_re_derive();
+    assert!(!open.re_derive);
+}
 
-    // Nor may a mark meant for one trainer be spent by another's list.
-    open.refresh_pending = true;
-    open.open(TRAINER + 1, 0, list(), "Greetings".into());
-    assert!(
-        open.fresh_list,
-        "a different trainer is a new window whatever is in flight"
-    );
+mod re_derive {
+    //! The state re-evaluator's clauses ([`super::super::reeval`]), one test per leg of
+    //! `0x4d7d40`, on synthetic catalogs.
+    use super::super::reeval::{re_derive, PetView, PlayerView, SkillSlot};
+    use super::*;
+    use benilla_formats::{LearnEffect, SlaInfo, SpellDisplay};
+    use std::collections::HashMap;
+
+    const BLACKSMITHING: u32 = 164;
+    /// Wrapper 2020 teaches 2018 and steps Blacksmithing to 1 — the real openers' shape.
+    const OPENER: u32 = 2020;
+    const TAUGHT: u32 = 2018;
+    /// A class ability wrapper: rank 1 teaches 100, rank 2 teaches 101 (100 → 101 by
+    /// `forward_spellid`), no skill step.
+    const RANK1_WRAPPER: u32 = 500;
+    const RANK1: u32 = 100;
+    const RANK2: u32 = 101;
+    /// A pet wrapper: teaches the pet 300.
+    const PET_WRAPPER: u32 = 700;
+    const PET_SPELL: u32 = 300;
+
+    /// A rank-2 wrapper: teaches RANK2 (whose previous rank is RANK1).
+    const RANK2_WRAPPER: u32 = 501;
+
+    fn catalog() -> SpellCatalog {
+        // Every wrapper has a record — the admission gate (`0x4d7dcd`) skips a row without one.
+        let displays = [OPENER, RANK1_WRAPPER, RANK2_WRAPPER, PET_WRAPPER]
+            .into_iter()
+            .map(|id| (id, SpellDisplay::default()))
+            .collect();
+        SpellCatalog::from_displays_and_effects(
+            displays,
+            HashMap::from([
+                (
+                    OPENER,
+                    vec![
+                        LearnEffect::Spell(TAUGHT),
+                        LearnEffect::SkillStep {
+                            skill: BLACKSMITHING,
+                            step: 1,
+                        },
+                    ],
+                ),
+                (RANK1_WRAPPER, vec![LearnEffect::Spell(RANK1)]),
+                (RANK2_WRAPPER, vec![LearnEffect::Spell(RANK2)]),
+                (PET_WRAPPER, vec![LearnEffect::PetSpell(PET_SPELL)]),
+            ]),
+        )
+    }
+
+    fn skill_lines() -> SkillLineCatalog {
+        let row = |skill_id, forward| SlaInfo {
+            skill_id,
+            req_skill_value: 0,
+            forward_spell_id: forward,
+            trivial_low: 0,
+            trivial_high: 0,
+        };
+        SkillLineCatalog::from_abilities([(RANK1, row(1, RANK2)), (RANK2, row(1, 0))])
+    }
+
+    fn service(spell: u32) -> TrainerSpell {
+        // The WIRE state is RED on purpose: every case below must ignore it (`0x4d7dec`).
+        let mut w = wire(spell, trainer_spell_state::RED, 10, 1, 0);
+        w.req_skill_value = 0;
+        w
+    }
+
+    fn player() -> PlayerView {
+        PlayerView {
+            known: BTreeSet::new(),
+            level: 10,
+            skills: Vec::new(),
+            pet: None,
+        }
+    }
+
+    fn state(wire: &TrainerSpell, trainer_type: u32, player: &PlayerView) -> u8 {
+        re_derive(wire, trainer_type, &catalog(), &skill_lines(), player)
+    }
+
+    #[test]
+    fn the_wire_state_is_discarded_and_a_met_service_reads_green() {
+        assert_eq!(
+            state(&service(RANK1_WRAPPER), 0, &player()),
+            trainer_spell_state::GREEN
+        );
+    }
+
+    #[test]
+    fn every_learn_effect_known_reads_gray() {
+        let mut p = player();
+        p.known.insert(RANK1);
+        assert_eq!(
+            state(&service(RANK1_WRAPPER), 0, &p),
+            trainer_spell_state::GRAY
+        );
+    }
+
+    #[test]
+    fn a_higher_known_rank_counts_as_known() {
+        // Rank 2 in the book, rank 1 offered: `KnownHigherRank` (0x60c8d0) says known.
+        let mut p = player();
+        p.known.insert(RANK2);
+        assert_eq!(
+            state(&service(RANK1_WRAPPER), 0, &p),
+            trainer_spell_state::GRAY
+        );
+    }
+
+    #[test]
+    fn a_skill_step_the_player_already_holds_reads_gray() {
+        let mut p = player();
+        p.skills.push(SkillSlot {
+            skill_id: BLACKSMITHING,
+            step: 1,
+            value_plus_perm: 1,
+        });
+        assert_eq!(state(&service(OPENER), 0, &p), trainer_spell_state::GRAY);
+    }
+
+    #[test]
+    fn a_skill_line_below_the_requirement_reads_red() {
+        // A recipe-shaped service: a plain learn wrapper with a skill requirement. (An OPENER
+        // would read gray here — the player already holds the step it teaches.)
+        let mut w = service(RANK1_WRAPPER);
+        w.req_skill = BLACKSMITHING;
+        w.req_skill_value = 75;
+        let mut p = player();
+        p.skills.push(SkillSlot {
+            skill_id: BLACKSMITHING,
+            step: 1,
+            value_plus_perm: 40,
+        });
+        assert_eq!(state(&w, 0, &p), trainer_spell_state::RED);
+        // Met (value + permanent bonus reaches it): the leg leaves the state alone.
+        p.skills[0].value_plus_perm = 75;
+        assert_eq!(state(&w, 0, &p), trainer_spell_state::GREEN);
+    }
+
+    /// The reference's own wart (`0x4d8082`): the skill scan's not-found exit jumps past the
+    /// compare, so a line the player lacks entirely writes nothing — green, where the server sends
+    /// red.
+    #[test]
+    fn a_skill_line_the_player_lacks_entirely_reads_green() {
+        let mut w = service(RANK1_WRAPPER);
+        w.req_skill = BLACKSMITHING;
+        w.req_skill_value = 75;
+        assert_eq!(state(&w, 0, &player()), trainer_spell_state::GREEN);
+    }
+
+    #[test]
+    fn an_unknown_required_ability_reads_red_or_hidden_at_type_one() {
+        // The opener (its taught spell unknown, no skill slot held) with a prerequisite ability.
+        let mut w = service(OPENER);
+        w.req_spells = [RANK1, 0, 0];
+        assert_eq!(state(&w, 0, &player()), trainer_spell_state::RED);
+        assert_eq!(state(&w, 2, &player()), trainer_spell_state::RED);
+        // Trainer type 1 too: RANK1 is not the rank before TAUGHT, so this is a plain miss, not
+        // the hidden state (`0x4d83a4`'s extra conjunct — `a_missing_previous_rank_…` pins it).
+        assert_eq!(state(&w, 1, &player()), trainer_spell_state::RED);
+        // Known — or known at a higher rank — satisfies it.
+        let mut p = player();
+        p.known.insert(RANK2);
+        assert_eq!(state(&w, 0, &p), trainer_spell_state::GREEN);
+        let mut p = player();
+        p.known.insert(RANK1);
+        assert_eq!(state(&w, 1, &p), trainer_spell_state::GREEN);
+    }
+
+    #[test]
+    fn a_level_requirement_above_one_gates_on_the_players_level() {
+        let mut w = service(RANK1_WRAPPER);
+        w.req_level = 20;
+        assert_eq!(state(&w, 0, &player()), trainer_spell_state::RED);
+        let mut p = player();
+        p.level = 20;
+        assert_eq!(state(&w, 0, &p), trainer_spell_state::GREEN);
+        // `req_level <= 1` is not a gate at all (`row[+0x14] > 1`).
+        w.req_level = 1;
+        let mut p = player();
+        p.level = 0;
+        assert_eq!(state(&w, 0, &p), trainer_spell_state::GREEN);
+    }
+
+    #[test]
+    fn a_pet_spell_needs_a_pet_of_the_rows_level_and_reads_off_the_pets_book() {
+        let mut w = service(PET_WRAPPER);
+        w.req_level = 12;
+        // The row's level binds the player too (`0x4d8239`); keep the player clear of it so the
+        // pet legs are what decides.
+        let player = || PlayerView {
+            level: 20,
+            ..player()
+        };
+        assert_eq!(state(&w, 3, &player()), trainer_spell_state::RED, "no pet");
+        let mut p = player();
+        p.pet = Some(PetView {
+            level: 11,
+            known: BTreeSet::new(),
+        });
+        assert_eq!(
+            state(&w, 3, &p),
+            trainer_spell_state::RED,
+            "pet below the row's level"
+        );
+        p.pet = Some(PetView {
+            level: 12,
+            known: BTreeSet::new(),
+        });
+        assert_eq!(state(&w, 3, &p), trainer_spell_state::GREEN);
+        // Known by the PET, not the player: gray.
+        p.pet = Some(PetView {
+            level: 12,
+            known: BTreeSet::from([PET_SPELL]),
+        });
+        assert_eq!(state(&w, 3, &p), trainer_spell_state::GRAY);
+        p.known.insert(PET_SPELL);
+        p.pet = Some(PetView {
+            level: 12,
+            known: BTreeSet::new(),
+        });
+        assert_eq!(
+            state(&w, 3, &p),
+            trainer_spell_state::GREEN,
+            "the player's own book is not the pet's"
+        );
+    }
+
+    #[test]
+    fn the_legs_run_in_the_references_order() {
+        // A known service with an unmet skill line and an unmet level is GRAY: legs 4 and 5 run
+        // only while the state is still 0.
+        let mut w = service(OPENER);
+        w.req_skill = BLACKSMITHING;
+        w.req_skill_value = 300;
+        w.req_level = 60;
+        let mut p = player();
+        p.known.insert(TAUGHT);
+        p.skills.push(SkillSlot {
+            skill_id: BLACKSMITHING,
+            step: 1,
+            value_plus_perm: 1,
+        });
+        assert_eq!(state(&w, 2, &p), trainer_spell_state::GRAY);
+    }
+
+    /// The admission gate (`0x4d7dcd`): a wire spell with no `Spell.dbc` record is skipped
+    /// whole — its wire state stands, whatever the player has.
+    #[test]
+    fn a_row_without_a_spell_record_keeps_its_wire_state() {
+        let w = wire(999_999, trainer_spell_state::RED, 10, 1, 0);
+        assert_eq!(state(&w, 0, &player()), trainer_spell_state::RED);
+        let w = wire(999_999, trainer_spell_state::GRAY, 10, 1, 0);
+        assert_eq!(state(&w, 0, &player()), trainer_spell_state::GRAY);
+    }
+
+    /// `0x4d7e3e`: at a type-1 trainer, a rank the player has already passed is hidden — and it
+    /// is counted as a learn effect but never as a known one, so it cannot come back as gray.
+    #[test]
+    fn a_higher_rank_known_at_a_type_one_trainer_hides_the_row() {
+        let mut p = player();
+        p.known.insert(RANK2);
+        assert_eq!(state(&service(RANK1_WRAPPER), 1, &p), 3);
+        assert_eq!(
+            state(&service(RANK1_WRAPPER), 0, &p),
+            trainer_spell_state::GRAY
+        );
+        // Knowing exactly the taught rank is not "higher": gray at every type.
+        let mut p = player();
+        p.known.insert(RANK1);
+        assert_eq!(
+            state(&service(RANK1_WRAPPER), 1, &p),
+            trainer_spell_state::GRAY
+        );
+    }
+
+    /// `0x4d83a4`: the type-1 hidden state on the required-ability leg needs the missing ability
+    /// to be exactly the rank before what the row teaches; any other missing ability is plain
+    /// unavailable, and so is every miss at every other type.
+    #[test]
+    fn a_missing_previous_rank_at_a_type_one_trainer_hides_the_row() {
+        let mut w = service(RANK2_WRAPPER);
+        w.req_spells = [RANK1, 0, 0];
+        assert_eq!(
+            state(&w, 1, &player()),
+            3,
+            "the missing ability is the previous rank"
+        );
+        assert_eq!(state(&w, 0, &player()), trainer_spell_state::RED);
+        let mut w = service(RANK2_WRAPPER);
+        w.req_spells = [RANK1 + 500, 0, 0];
+        assert_eq!(
+            state(&w, 1, &player()),
+            trainer_spell_state::RED,
+            "an unrelated ability"
+        );
+    }
+
+    /// The pet-spell legs are early exits: nothing after a missing or under-level pet is
+    /// visited (`0x4d803c`/`0x4d7fac` leave the loop), and a pet that KNOWS the spell is never
+    /// level-tested at all.
+    #[test]
+    fn the_pet_legs_leave_the_loop_and_a_knowing_pet_skips_the_level_test() {
+        let spells = SpellCatalog::from_displays_and_effects(
+            HashMap::from([(PET_WRAPPER, SpellDisplay::default())]),
+            HashMap::from([(
+                PET_WRAPPER,
+                vec![
+                    LearnEffect::PetSpell(PET_SPELL),
+                    LearnEffect::SkillStep {
+                        skill: BLACKSMITHING,
+                        step: 1,
+                    },
+                ],
+            )]),
+        );
+        let mut w = service(PET_WRAPPER);
+        w.req_level = 12;
+        let mut p = player();
+        p.level = 20;
+        p.skills.push(SkillSlot {
+            skill_id: BLACKSMITHING,
+            step: 1,
+            value_plus_perm: 1,
+        });
+        // No pet: the step effect after it is never reached, so the row stays unavailable.
+        assert_eq!(
+            re_derive(&w, 3, &spells, &skill_lines(), &p),
+            trainer_spell_state::RED
+        );
+        // A pet that knows the spell, below the row's level: known, not level-tested.
+        p.pet = Some(PetView {
+            level: 5,
+            known: BTreeSet::from([PET_SPELL]),
+        });
+        assert_eq!(
+            re_derive(&w, 3, &spells, &skill_lines(), &p),
+            trainer_spell_state::GRAY
+        );
+    }
+
+    /// The required-ability leg runs on the PET's book when the row resolved a pet, and its
+    /// failure is unavailable at every trainer type — the type-1 hidden state is the player
+    /// variant's alone.
+    #[test]
+    fn a_pet_rows_required_abilities_are_the_pets_and_never_hide() {
+        let mut w = service(PET_WRAPPER);
+        w.req_spells = [RANK1, 0, 0];
+        let mut p = player();
+        p.level = 20;
+        p.known.insert(RANK1); // the PLAYER knows it — irrelevant for a pet row
+        p.pet = Some(PetView {
+            level: 20,
+            known: BTreeSet::new(),
+        });
+        assert_eq!(state(&w, 3, &p), trainer_spell_state::RED);
+        assert_eq!(
+            state(&w, 1, &p),
+            trainer_spell_state::RED,
+            "no hidden state on the pet path"
+        );
+        p.pet = Some(PetView {
+            level: 20,
+            known: BTreeSet::from([RANK2]),
+        });
+        assert_eq!(
+            state(&w, 3, &p),
+            trainer_spell_state::GREEN,
+            "the pet knows a higher rank"
+        );
+    }
+
+    #[test]
+    fn re_derive_all_rewrites_every_row_in_place() {
+        let mut list = vec![service(RANK1_WRAPPER), service(OPENER)];
+        let mut p = player();
+        p.known.insert(RANK1);
+        super::super::reeval::re_derive_all(&mut list, 0, &catalog(), &skill_lines(), &p);
+        assert_eq!(list[0].state, trainer_spell_state::GRAY);
+        assert_eq!(list[1].state, trainer_spell_state::GREEN);
+    }
 }
 
 /// The three group-header keys against the player's REAL `GlobalStrings.lua` — the guard the

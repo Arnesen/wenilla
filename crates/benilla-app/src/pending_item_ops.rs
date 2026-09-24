@@ -118,7 +118,21 @@ impl PendingItemOps {
         if !matched {
             return self.clear_all();
         }
+        self.clear_by_guid(item_guid)
+    }
+
+    /// **`UnlockItem 0x495420`** — clear every entry naming `item_guid`, and nothing else: a guid
+    /// no entry recorded (a corpse, a chest, 0) unlocks nothing, exactly as the reference's
+    /// resolve-as-ITEM (typemask 2) finds nothing to clear for a non-item. The loot close is the
+    /// caller that needs it: an opened lockbox/clam is locked at the `CMSG_OPEN_ITEM` send (0916)
+    /// and, closed with loot left, never changes its slot — so neither [`Self::resolve`] nor a
+    /// failure ever clears it (`0x48f200` @ `48f299`). Returns the
+    /// deduplicated `(bag, slot)` pairs that unlocked.
+    pub(crate) fn clear_by_guid(&mut self, item_guid: u64) -> Vec<(i64, u32)> {
         let mut unlocked = Vec::new();
+        if item_guid == 0 {
+            return unlocked;
+        }
         self.entries.retain(|entry| {
             let hit = entry.iter().any(|&(_, (guid, _))| guid == item_guid);
             if hit {
@@ -132,6 +146,16 @@ impl PendingItemOps {
             self.epoch += 1;
         }
         unlocked
+    }
+
+    /// The session end: drop every outstanding entry and report nothing. The lock is item-object
+    /// state in the reference (`item+0x314`), and those objects do not outlive the session; an op
+    /// still in flight when the socket died never gets the field update or failure that would
+    /// settle it, so without this its slots stayed locked for the whole next session. The epoch
+    /// steps so a feed that pushed `locked: true` runs once more to correct it.
+    pub(crate) fn clear_session(&mut self) {
+        self.entries.clear();
+        self.epoch += 1;
     }
 
     /// Drop every outstanding entry, unconditionally — [`Self::clear_by_failure`]'s
@@ -151,9 +175,10 @@ impl PendingItemOps {
     }
 }
 
-/// `(bag, slot)` pairs whose app-lock cleared this frame, from EITHER clear: the server failure
-/// (`net/apply/loot.rs::inventory_failure`, which owns the wire event but has no `UiScript` to
-/// fire `ITEM_LOCK_CHANGED` through) and the resolving field-update watch
+/// `(bag, slot)` pairs whose app-lock cleared this frame, from ANY clear: the server failure
+/// (`ui_items::net::inventory_failure`, which owns the wire event but has no `UiScript` to
+/// fire `ITEM_LOCK_CHANGED` through), the loot close's item unlock (`ui_loot::net`, the same
+/// shape) and the resolving field-update watch
 /// (`ui_items::feed::resolve_item_locks`, which runs ahead of every feed so that no feed can push
 /// a `locked` the clear has already invalidated). `feed_containers` drains this and fires — the
 /// exact shape `ui_items::EquipErrors` already uses for the same reason.
@@ -251,6 +276,24 @@ mod tests {
         assert_eq!(unlocked, vec![(0, 1), (0, 5)]);
         assert!(!p.contains(0, 1) && !p.contains(0, 5), "op A cleared");
         assert!(p.contains(1, 3), "op B untouched — a different guid");
+    }
+
+    /// Unlike the failure clear, the guid clear has no clear-all fallback: an unmatched or zero
+    /// guid (a corpse's release) must leave every other lock standing.
+    #[test]
+    fn clear_by_guid_clears_only_the_named_item() {
+        let mut p = PendingItemOps::default();
+        p.add([(0, 3, 100, 1)]); // the opened lockbox
+        p.add([(1, 2, 200, 1)]); // an unrelated move
+
+        assert!(p.clear_by_guid(999).is_empty(), "an unrecorded guid");
+        assert!(p.clear_by_guid(0).is_empty(), "the zero guid fires nothing");
+        assert!(p.contains(0, 3) && p.contains(1, 2));
+
+        let epoch = p.epoch();
+        assert_eq!(p.clear_by_guid(100), vec![(0, 3)]);
+        assert!(!p.contains(0, 3) && p.contains(1, 2));
+        assert!(p.epoch() > epoch, "the feed's gate sees the lock set move");
     }
 
     #[test]

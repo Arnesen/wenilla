@@ -1,19 +1,16 @@
-//! Live probe: verify the faction-language mechanism end-to-end against the local vmangos — a
-//! HORDE character's say must echo back (the server accepted the tongue), a dot-command must
-//! answer (it survived the pre-parse `KnowsLanguage` gate), and the split-writer path must carry
-//! the tongue too. Run: `cargo run -p benilla-protocol --example horde_chat_probe -- probeN
-//! pprobeN [host]` — the slot-keyed probe account (method.md "The local vmangos server"; it
-//! once hardcoded the retired shared `three` identity, decision 0530). Creates the orc
-//! `Orc<N-spelled>` on this account on first run (names are realm-unique, so the orc keys to
-//! the slot too). Exists because a hardcoded-Common send silently ate every Horde character's
-//! chat and commands (decision 0392) — this is the one-shot regression check for that whole path.
+//! Live probe: a Horde character's chat reaches vmangos in its own language. A say must echo
+//! back, a dot-command must answer (it passes the pre-parse `KnowsLanguage` gate), and the split
+//! writer must carry the language too. The server drops a say in a language the character does
+//! not know, answering only `SMSG_NOTIFICATION`.
+//!
+//! Run: `cargo run -p benilla-protocol --example horde_chat_probe -- probeN pprobeN [host]`.
+//! Creates the orc `Orc<N-spelled>` on the account on first run.
 
 use anyhow::{bail, Context, Result};
 use benilla_protocol::messages::{CharCreateReq, CHAR_CREATE_NAME_IN_USE, CHAR_CREATE_SUCCESS};
 use benilla_protocol::{ServerPacket, WorldSession, WORLD_PORT};
 
-/// The slot's Horde character name: `probe4` → `Orcfour` (letters only — digits are not legal
-/// in character names, and realm-wide name uniqueness means each slot needs its own orc).
+/// The account's orc: `probe4` plays `Orcfour`. Names are letters only and realm-unique.
 fn orc_name(user: &str) -> Option<String> {
     let n: usize = user.strip_prefix("probe")?.parse().ok()?;
     let spelled = [
@@ -27,13 +24,12 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let user = args
         .next()
-        .context("usage: horde_chat_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
+        .context("usage: horde_chat_probe -- <probeN> <pprobeN> [host] (a probe account)")?;
     let pass = args
         .next()
-        .context("usage: horde_chat_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
+        .context("usage: horde_chat_probe -- <probeN> <pprobeN> [host] (a probe account)")?;
     let host = args.next().unwrap_or_else(|| "localhost".into());
-    let orc = orc_name(&user)
-        .context("account must be a slot-keyed probeN (method.md \"The local vmangos server\")")?;
+    let orc = orc_name(&user).context("account must be a probeN (the `probe` skill)")?;
 
     let logon = benilla_protocol::logon(&host, &user, &pass)?;
     let addr = logon
@@ -45,7 +41,7 @@ fn main() -> Result<()> {
 
     let mut characters = session.char_enum()?;
     if !characters.iter().any(|c| c.name == orc) {
-        // Orc (race 2) warrior male — the Horde case under test.
+        // Race 2 orc, class 1 warrior, gender 0 male.
         let req = CharCreateReq {
             name: orc.clone(),
             race: 2,
@@ -71,11 +67,9 @@ fn main() -> Result<()> {
     session.player_login(orc.guid)?;
     session.set_active_mover(orc.guid)?;
 
-    // 1. A plain say must be ACCEPTED: the server echoes our own say back (own sends are never
-    //    locally echoed in vanilla). Pre-fix, a Horde say sent Common and the server dropped it
-    //    with only an SMSG_NOTIFICATION.
+    // 1. An accepted say comes back from the server; the 1.12 client never echoes it locally.
     session.send_chat("orcish probe line")?;
-    // 2. A dot-command must survive the language gate: `.gps` answers with system messages.
+    // 2. A dot-command passes the language gate: `.gps` answers with system messages.
     session.send_chat(".gps")?;
 
     let mut say_echoed = false;
@@ -93,8 +87,7 @@ fn main() -> Result<()> {
                     say_echoed = true;
                     println!("probe: SAY ECHOED (language {})", m.language);
                 }
-                // CHAT_MSG_SYSTEM = 0x0a on the inbound u8 field. Only the `.gps` answer counts
-                // (the login MOTD is also SYSTEM — it must not satisfy the command check).
+                // `CHAT_MSG_SYSTEM` is 0x0a; the text check skips the login MOTD, also SYSTEM.
                 if m.chat_type == 0x0a && m.text.contains("Map:") {
                     system_reply = true;
                     println!("probe: .gps REPLY: {:?}", m.text);
@@ -109,8 +102,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // 3. The same through the SPLIT writer — the path the benilla app actually sends on
-    //    (`into_split` must carry the tongue across).
+    // 3. The same through the split writer the app sends on; `into_split` keeps the language.
     let (mut reader, mut writer) = session.into_split()?;
     writer.send_chat("orcish writer line")?;
     let mut writer_echoed = false;

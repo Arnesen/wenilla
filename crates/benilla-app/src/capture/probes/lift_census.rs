@@ -31,7 +31,7 @@
 //! - **`meshes`** counts render descendants (the whole subtree, not just direct children — a GO
 //!   model hangs its submeshes under an anim host).
 //!
-//! Pair it with the slot-keyed probe identity and a `.go` to the reported spot:
+//! Pair it with the checkout's probe identity (the `probe` skill) and a `.go` to the reported spot:
 //!
 //! ```text
 //! WOW_USER=probeN WOW_PASS=pprobeN WOW_CHAR=Probe<n> WOW_NOSOUND=1 \
@@ -125,9 +125,9 @@ fn fire_lift_census(
     for (guid, net, t, store, transport, anchor, seed, vis, inherited, kids, attached) in &entities
     {
         let go_type = store.0.gameobject_type_id();
-        // Every ticking GO type (the reference's own RF-0051 pair) plus anything already wearing
-        // a transport component — so a type field we misread still shows up rather than vanishing
-        // from the instrument that exists to find it.
+        // Every ticking GO type (the pair the reference's per-frame tick `0x630970` fires) plus
+        // anything already wearing a transport component — so a type field we misread still shows
+        // up rather than vanishing from the instrument that exists to find it.
         if !(net.kind == EntityKind::GameObject && matches!(go_type, 11 | 15)
             || transport.is_some()
             || anchor.is_some()

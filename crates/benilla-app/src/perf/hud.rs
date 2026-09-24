@@ -69,7 +69,7 @@ const HUD_REFRESH_SECS: f32 = 0.25;
 /// records the open gap: every campaign anchor was measured on a binary that draws this overlay,
 /// at a cost booked as "est 0.4–1.2 ms CPU + unquantified GPU" — an estimate, never a measurement,
 /// because nothing could turn the fixture off without also changing the binary. One env var makes
-/// it an interleaved A/B on *one* binary instead (`scripts/leg.sh`), so the constant baked into
+/// it an interleaved A/B on *one* binary instead (a leg runner), so the constant baked into
 /// every anchor becomes a number. The meters keep sampling either way: only the drawing stops,
 /// which is the half being priced — and with the default flipped, the *unmeasured* leg is now the
 /// one nobody is running.
@@ -352,6 +352,7 @@ mod tests {
     /// it drives stays the shipped one.
     #[test]
     fn the_readout_tells_the_dev_pill_how_much_of_the_top_it_uses() {
+        benilla_formats::wow_data_or_skip!();
         // NOT 768. The layout answers in WoW UI units — a screen that is always 768 units tall
         // whatever the window is (decision 0582) — and the pill draws in window px, so a probe that
         // subtracts one from the other is right only when the two happen to coincide. Feeding a

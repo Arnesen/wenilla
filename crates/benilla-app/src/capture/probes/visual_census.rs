@@ -38,7 +38,7 @@
 //!   never to be confused with one that built nothing, which is the distinction the census exists
 //!   to keep.
 //!
-//! Pair it with the slot-keyed probe identity and a `.go` to the reported spot:
+//! Pair it with the checkout's probe identity (the `probe` skill) and a `.go` to the reported spot:
 //!
 //! ```text
 //! WOW_USER=probeN WOW_PASS=pprobeN WOW_CHAR=Probe<n> WOW_NOSOUND=1 \

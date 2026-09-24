@@ -3,8 +3,8 @@
 //! Opens the vanilla patch chain from wherever the install is (`$WOW_DATA`, the project folder on a
 //! dev build, else beside the binary — decision 1175) and streams the world around the
 //! player through Bevy's `AssetServer` (the `benilla-assets` `mpq://` pipeline): ADT terrain tiles within
-//! `$WOW_TILE_RADIUS` — their splat-blended ground (tiling `$WOW_TEX_TILES`), doodads/WMOs, water, and
-//! ground clutter — plus the avian colliders the character controller walks on. Lit by a time-of-day WoW
+//! the live Terrain Distance window (decision 1513) — their splat-blended ground, doodads/WMOs, water,
+//! and ground clutter — plus the avian colliders the character controller walks on. Lit by a time-of-day WoW
 //! lighting model (`Light.dbc` sampled against the server clock) with a sky dome, sun/moon discs, and
 //! distance fog; a faithful `EffectGlow` bloom on top.
 //!
@@ -57,9 +57,9 @@ mod char_select;
 mod chat_bubble;
 mod chr_classes;
 mod cinematic;
+mod combat_log;
 mod combat_text;
 mod console;
-mod cooldowns;
 #[cfg(not(target_arch = "wasm32"))]
 mod crash;
 mod creature_anim;
@@ -123,7 +123,7 @@ mod smart_rect;
 mod sound;
 /// The two talent spell-modifier tables (`SMSG_SET_FLAT_/PCT_SPELL_MODIFIER`) and the read that
 /// puts them on a number.
-mod spell_mods;
+mod spell;
 /// The melee swing refusal's latch + 4 s repeat (`SMSG_ATTACKSWING_*`).
 mod swing_refusal;
 mod target;

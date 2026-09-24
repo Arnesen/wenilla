@@ -69,8 +69,8 @@ pub struct Chain {
 }
 
 /// `patch-?.MPQ` with the reference's FindFirstFileW semantics: `?` matches **exactly one**
-/// character, case-insensitively — `patch-3.MPQ` mounts, `patch-10.MPQ` does not (VERIFIED at the
-/// glob template `0x82edbc` and its wrapper `0x42ad10`; wow-re `patch-mount-order.md`).
+/// character, case-insensitively — `patch-3.MPQ` mounts, `patch-10.MPQ` does not (the glob
+/// template `0x82edbc` and its wrapper `0x42ad10`).
 #[cfg(not(target_arch = "wasm32"))]
 fn is_patch_glob_match(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -84,7 +84,7 @@ fn is_patch_glob_match(name: &str) -> bool {
 }
 
 /// The vanilla mount law over a `Data` directory listing, **ascending priority** (decision 1300;
-/// the mounter `0x403740`, carved in wow-re `system/mpq/scratch/patch-mount-order.md`): the ten
+/// the mounter `0x403740`): the ten
 /// [`VANILLA_BASE_ORDER`] archives at their fixed priorities, then `patch.MPQ`, then every
 /// `patch-?.MPQ` sorted ascending by case-folded name — the binary sorts its glob matches
 /// *descending* (`strnicmp`) and walks the array backwards, so the order is deterministic, never

@@ -1,10 +1,5 @@
-//! Oracle-free golden tests for the mail arc's protocol layer (decision 0544 phase P0): the
-//! `CMSG_GET_MAIL_LIST`/`CMSG_SEND_MAIL`/take-money/take-item/mark-read/return/delete/
-//! `CMSG_ITEM_TEXT_QUERY` send verbs, the `SMSG_MAIL_LIST_RESULT` inbox page (all three sender
-//! shapes + the always-present item block), `SMSG_SEND_MAIL_RESULT`'s three tail shapes, the
-//! letter-body fetch reply, and the arrival pair (`SMSG_RECEIVED_MAIL` / `MSG_QUERY_NEXT_MAIL_TIME`).
-//! Same idioms as `tests/trainer.rs` — `hx(...)` golden CMSG bodies, hand-built SMSG bodies
-//! round-tripped through `parse_server`, and a `decode()` bridge assertion.
+//! The mail wire: the send verbs, the inbox page with its three sender shapes, the send result's
+//! tails, the letter-body fetch, and the arrival notices.
 
 use benilla_protocol::events::{decode, SessionEvent};
 use benilla_protocol::messages::{
@@ -30,8 +25,6 @@ fn mail_send_bodies_golden() {
         "CMSG_GET_MAIL_LIST body"
     );
 
-    // CMSG_SEND_MAIL: u64 mailbox, cstr receiver, cstr subject, cstr body, u32 stationery, u32
-    // package, u64 itemGuid, u32 money, u32 COD, then the 9-byte zero tail (u64 0 + u8 0).
     assert_eq!(
         messages::send_mail(
             MAILBOX,
@@ -68,7 +61,7 @@ fn mail_send_bodies_golden() {
     assert_eq!(messages::mail_return_to_sender(MAILBOX, 77), golden);
     assert_eq!(messages::mail_delete(MAILBOX, 77), golden);
 
-    // CMSG_MAIL_CREATE_TEXT_ITEM: the shared shape + u32 mailTemplateId(0) (vmangos
+    // CMSG_MAIL_CREATE_TEXT_ITEM: the shared shape, then `u32` mailTemplateId 0 (vmangos
     // `MailCreateTextItem::ReadFromWorldPacket`).
     assert_eq!(
         messages::mail_create_text_item(MAILBOX, 77),
@@ -84,9 +77,8 @@ fn mail_send_bodies_golden() {
     );
 }
 
-/// Append one 8-byte-fixed item block (the tail every `SMSG_MAIL_LIST_RESULT` row always carries,
-/// zeroed when the mail has no attachment): entry, permEnchant, randomPropId, suffixFactor u32 ×4,
-/// stackCount u8, spellCharges/durabilityMax/durabilityCur u32 ×3.
+/// Append the item block every `SMSG_MAIL_LIST_RESULT` row carries, zeroed without an attachment:
+/// four `u32`, a `u8` stack count, then three `u32`.
 fn push_item_block(
     body: &mut Vec<u8>,
     entry: u32,
@@ -110,14 +102,11 @@ fn push_item_block(
 
 #[test]
 fn mail_list_result_wire() {
-    // SMSG_MAIL_LIST_RESULT: u8 count, then per row: u32 messageId, u8 messageType, the sender
-    // branch keyed by messageType, cstr subject, u32 itemTextId, u32 package(dropped), u32
-    // stationery, the item block (ALWAYS present), u32 money, u32 COD, u32 checked, f32
-    // expireDays, u32 mailTemplateId. Three rows exercise all three sender shapes.
+    // SMSG_MAIL_LIST_RESULT: `u8` count, then rows whose sender field depends on the message type
+    // and whose item block is always present.
     let mut body = vec![3u8]; // count
 
-    // Row 1 — MAIL_NORMAL: a player sender (guid), an attached item, money + COD + checked flags,
-    // a fractional expire_days.
+    // MAIL_NORMAL: the sender is a player guid.
     body.extend_from_slice(&1u32.to_le_bytes()); // messageId
     body.push(mail_message_type::NORMAL);
     body.extend_from_slice(&0x0000_0001_0000_00AAu64.to_le_bytes()); // sender guid
@@ -132,7 +121,7 @@ fn mail_list_result_wire() {
     body.extend_from_slice(&2.5f32.to_le_bytes()); // expire_days
     body.extend_from_slice(&0u32.to_le_bytes()); // mailTemplateId
 
-    // Row 2 — MAIL_AUCTION: a u32 sender id, no item (all-zero item block).
+    // MAIL_AUCTION: the sender is a `u32` id; no item, so an all-zero item block.
     body.extend_from_slice(&2u32.to_le_bytes());
     body.push(mail_message_type::AUCTION);
     body.extend_from_slice(&42u32.to_le_bytes()); // sender id (auction id)
@@ -147,7 +136,7 @@ fn mail_list_result_wire() {
     body.extend_from_slice(&1.0f32.to_le_bytes()); // expire_days
     body.extend_from_slice(&0u32.to_le_bytes());
 
-    // Row 3 — MAIL_ITEM: NO sender bytes at all.
+    // MAIL_ITEM: no sender bytes at all.
     body.extend_from_slice(&3u32.to_le_bytes());
     body.push(mail_message_type::ITEM);
     body.extend_from_slice(b"Welcome\0");
@@ -216,7 +205,6 @@ fn mail_list_result_wire() {
         other => panic!("mail list, got {}", other.name()),
     }
 
-    // The decode() bridge carries the wire rows through unchanged.
     match decode(packet).pop().unwrap() {
         SessionEvent::MailList { mails } => assert_eq!(mails.len(), 3),
         other => panic!("mail list event, got {other:?}"),
@@ -225,7 +213,7 @@ fn mail_list_result_wire() {
 
 #[test]
 fn send_mail_result_wire() {
-    // Plain shape: action SEND, error OK — neither conditional tail rides.
+    // Action SEND, error OK: no tail.
     let mut plain = 1u32.to_le_bytes().to_vec();
     plain.extend_from_slice(&mail_action::SEND.to_le_bytes());
     plain.extend_from_slice(&mail_error::OK.to_le_bytes());
@@ -246,7 +234,6 @@ fn send_mail_result_wire() {
         }
         other => panic!("send mail result (plain), got {}", other.name()),
     }
-    // The decode() bridge, asserted on this shape.
     let packet = messages::parse_server(messages::opcode::SMSG_SEND_MAIL_RESULT, &plain).unwrap();
     match decode(packet).pop().unwrap() {
         SessionEvent::SendMailResult {
@@ -335,15 +322,13 @@ fn item_text_query_response_wire() {
 
 #[test]
 fn received_mail_wire() {
-    // SMSG_RECEIVED_MAIL: one f32 delay, the same countdown units as MSG_QUERY_NEXT_MAIL_TIME's
-    // reply (decision 0913 — the real client reads these four bytes as a float). vmangos writes
-    // them as `uint32(0)`, and 0x00000000 *is* 0.0f, so its only value decodes as "waiting now".
+    // SMSG_RECEIVED_MAIL: one `f32` delay, which the reference reads as a float; vmangos writes
+    // `uint32(0)`, the same bits as 0.0.
     let vmangos_body = 0u32.to_le_bytes();
     match messages::parse_server(messages::opcode::SMSG_RECEIVED_MAIL, &vmangos_body).unwrap() {
         ServerPacket::ReceivedMail { seconds } => assert_eq!(seconds, 0.0),
         other => panic!("received mail, got {}", other.name()),
     }
-    // A server that sends a real delay round-trips it.
     for seconds in [0.0f32, 120.0f32] {
         let body = seconds.to_le_bytes();
         let packet = messages::parse_server(messages::opcode::SMSG_RECEIVED_MAIL, &body).unwrap();
@@ -356,7 +341,7 @@ fn received_mail_wire() {
 
 #[test]
 fn query_next_mail_time_wire() {
-    // MSG_QUERY_NEXT_MAIL_TIME's reply: one f32 — 0.0 unread waiting, -86400.0 none.
+    // MSG_QUERY_NEXT_MAIL_TIME's reply: one `f32`, 0.0 for unread mail waiting, -86400.0 for none.
     for seconds in [0.0f32, -86400.0f32] {
         let body = seconds.to_le_bytes();
         match messages::parse_server(messages::opcode::MSG_QUERY_NEXT_MAIL_TIME, &body).unwrap() {

@@ -78,6 +78,7 @@ fn harness() -> UiScript {
 /// wear instead of a `Benilla*` one.)
 #[test]
 fn a_fresh_faux_frame_loads_at_the_top_with_no_range() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     assert_eq!(s.eval::<i64>("return TestScroll.offset").unwrap(), 0);
     let (lo, hi) = s
@@ -98,6 +99,7 @@ fn a_fresh_faux_frame_loads_at_the_top_with_no_range() {
 /// row, and `FauxScrollFrame_Update` returns the reference's `showScrollBar`.
 #[test]
 fn more_rows_than_fit_raise_the_bar_over_the_overflow_range() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     let shown = s
         .eval::<i64>("return FauxScrollFrame_Update(TestScroll, 12, 5, 16)")
@@ -139,6 +141,7 @@ fn more_rows_than_fit_raise_the_bar_over_the_overflow_range() {
 /// in five slots shows nothing, and there is no off-by-one that leaves a dead bar up.
 #[test]
 fn a_list_that_exactly_fits_shows_no_bar() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     let shown = s
         .eval::<Option<i64>>("return FauxScrollFrame_Update(TestScroll, 5, 5, 16)")
@@ -176,6 +179,7 @@ fn a_list_that_exactly_fits_shows_no_bar() {
 /// this test used to read a clamped offset immediately.
 #[test]
 fn a_shrinking_list_clamps_the_offset_back_into_range() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run("FauxScrollFrame_Update(TestScroll, 20, 5, 16)")
         .unwrap();
@@ -238,6 +242,7 @@ fn a_shrinking_list_clamps_the_offset_back_into_range() {
 /// it leaves (ref UIPanelTemplates.lua l.205-223).
 #[test]
 fn the_shrink_widen_tail_resizes_the_rows_and_the_highlight() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run(
         "FauxScrollFrame_Update(TestScroll, 12, 5, 16, \"TestRow\", 280, 300, TestHighlight, 276, 296)",
@@ -280,6 +285,7 @@ fn the_shrink_widen_tail_resizes_the_rows_and_the_highlight() {
 /// value model in one test (pixels on the bar, rows in the offset, `floor(v/step + 0.5)` between).
 #[test]
 fn dragging_the_bar_steps_the_offset_by_rows_and_repaints() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.run("TestRepaints = 0 function TestUpdate() TestRepaints = TestRepaints + 1 end")
         .unwrap();
@@ -354,6 +360,7 @@ fn dragging_the_bar_steps_the_offset_by_rows_and_repaints() {
 /// → `FauxScrollFrame_OnVerticalScroll`'s `floor(v / step + 0.5)`, the reference's path end to end.
 #[test]
 fn the_reference_on_vertical_scroll_path_runs_once_a_scroll_child_exists() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     load_inline(
         &s,
@@ -416,6 +423,7 @@ fn the_reference_on_vertical_scroll_path_runs_once_a_scroll_child_exists() {
 /// on that fallback, so the no-argument path is what this test drives.
 #[test]
 fn scrolling_edit_helpers_answer_bare_calls_from_a_handler() {
+    benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
     load_xml(&s, "ScrollTemplates.xml");

@@ -278,6 +278,7 @@ fn shift_click_posts_the_link_with_chat_open_and_splits_with_it_closed() {
 /// is what the message frame's `OnHyperlinkClick` calls with the full markup.
 #[test]
 fn ctrl_clicking_a_chat_link_previews_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_room(&s);
@@ -412,6 +413,7 @@ fn shift_clicking_an_unresolved_slot_posts_nothing_and_never_raises() {
 /// BOTH mouse edges, so one tap is 0.06 (decision 0638 §3).
 #[test]
 fn reset_re_dresses_close_empties_and_the_arrows_spin_the_pane() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_room(&s);

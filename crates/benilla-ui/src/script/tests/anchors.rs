@@ -52,8 +52,8 @@ fn setpoint_resolve_size_and_rect() {
     assert_eq!(w, 200.0);
     assert_eq!(h, 50.0);
 
-    // Hand-computed (layout.md oracle): TOPLEFT anchored to screen [0,0,600,800] at (10,-5), size
-    // 200×50 → Rect(bottom 545, left 10, top 595, right 210).
+    // Hand-computed against the reference rect assembly (`0x767a20`): TOPLEFT anchored to screen
+    // [0,0,600,800] at (10,-5), size 200×50 → Rect(bottom 545, left 10, top 595, right 210).
     let quads = s.extract();
     let frame_rect = quads
         .iter()
@@ -302,7 +302,7 @@ fn a_region_resolves_even_when_its_owner_frame_has_no_rect() {
 /// a wrong position — and a template whose textures chain off each other turns it into real,
 /// visible geometry a few links down.
 ///
-/// Reported as B264 (carni, 2026-08-13): opening the social pane drew a stray dropdown capsule at
+/// The symptom: opening the social pane draws a stray dropdown capsule at
 /// the bottom of the screen next to the action bar. `FriendsDropDown` carries no anchors —
 /// *exactly* as the reference's own `FriendsDropDown` does (`FriendsFrame.xml` l.598), and the
 /// reference draws nothing — so every texture of `UIDropDownMenuTemplate` hung off a phantom rect

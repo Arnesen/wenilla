@@ -53,6 +53,7 @@ fn setup() -> UiScript {
 /// per-tick branch at all rather than `StaticPopup_Show`'s arguments.
 #[test]
 fn the_confirm_names_the_summoner_and_accept_queues_the_response() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("CONFIRM_SUMMON", Vec::new());
     assert!(
@@ -86,6 +87,7 @@ fn the_confirm_names_the_summoner_and_accept_queues_the_response() {
 /// engine's shared `StaticPopupTimeUnit`, reached through this dialog's own four-argument format.
 #[test]
 fn the_countdown_line_switches_to_seconds_and_singularises() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_summon_confirm(SummonConfirmUiState {
         summoner: "Twomage".into(),
@@ -117,6 +119,7 @@ fn the_countdown_line_switches_to_seconds_and_singularises() {
 /// countdown branch re-reads the getters rather than caching `StaticPopup_Show`'s arguments.
 #[test]
 fn a_summoner_whose_name_is_still_resolving_fills_in_on_a_later_tick() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_summon_confirm(SummonConfirmUiState {
         summoner: String::new(),
@@ -151,6 +154,7 @@ fn a_summoner_whose_name_is_still_resolving_fills_in_on_a_later_tick() {
 /// confirm in the folder. Cancel is never touched.
 #[test]
 fn combat_locks_accept_without_taking_the_dialog_down() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.set_unit("player", Some(player(false)));
     s.fire_event("CONFIRM_SUMMON", Vec::new());
@@ -198,6 +202,7 @@ fn combat_locks_accept_without_taking_the_dialog_down() {
 /// expiry.
 #[test]
 fn declining_and_expiring_both_send_nothing() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("CONFIRM_SUMMON", Vec::new());
     s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();

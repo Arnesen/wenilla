@@ -1,4 +1,4 @@
-//! The tabard designer's senders (decision 1977; bodies in [`crate::messages::tabard`]).
+//! The tabard designer's sends, and the battlemaster greeting.
 
 use anyhow::Result;
 
@@ -7,7 +7,7 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// `MSG_TABARDVENDOR_ACTIVATE` out — the NPC-click ladder's TABARDDESIGNER arm.
+    /// `MSG_TABARDVENDOR_ACTIVATE`: the NPC-click ladder's `TABARDDESIGNER` arm.
     pub fn tabard_vendor_activate(&mut self, npc: u64) -> Result<()> {
         self.send(
             opcode::MSG_TABARDVENDOR_ACTIVATE,
@@ -15,7 +15,7 @@ impl WorldWriter {
         )
     }
 
-    /// `MSG_SAVE_GUILD_EMBLEM` out — `TabardModel:Save()` past its fourteen pre-flight checks.
+    /// `MSG_SAVE_GUILD_EMBLEM`: `TabardModel:Save()`, once its fourteen client-side checks pass.
     pub fn save_guild_emblem(&mut self, vendor: u64, design: [u32; 5]) -> Result<()> {
         self.send(
             opcode::MSG_SAVE_GUILD_EMBLEM,
@@ -23,7 +23,7 @@ impl WorldWriter {
         )
     }
 
-    /// `CMSG_BATTLEMASTER_HELLO` — the ladder's BATTLEMASTER arm.
+    /// `CMSG_BATTLEMASTER_HELLO`: the NPC-click ladder's `BATTLEMASTER` arm.
     pub fn battlemaster_hello(&mut self, npc: u64) -> Result<()> {
         self.send(
             opcode::CMSG_BATTLEMASTER_HELLO,

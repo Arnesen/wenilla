@@ -60,7 +60,7 @@ pub(crate) const PROBE_VARS: &[ProbeVar] = &[
         name: "WOW_PROBE_EXIT_AT",
         purpose: "<secs> — exit the app after N wall seconds; bounds any scripted live probe's lifetime",
         // Fires on `ProbeClock` at `<secs>`, and it is the one probe variable a trace-only run
-        // sets on its own (`WOW_MOVE_TRACE`/`WOW_STREAM_TRACE` legs, method.md) — 0794's
+        // sets on its own (`WOW_MOVE_TRACE`/`WOW_STREAM_TRACE` legs, docs/METHOD.md) — 0794's
         // throttled camera leg was exactly such a run.
         wall_clock: true,
     },

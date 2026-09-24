@@ -1,209 +1,137 @@
-//! Item messages — the T2 container groundwork (decision 0068's tier ladder: Bagnon needs item
-//! identity), widened to the **full** 1.12.1 item template (decision 0274 P1: the tooltip builder
-//! needs every line the real client can render). The 1.12 wire carries no item *templates* in
-//! descriptors — like unit names, they answer a query pair: `CMSG_ITEM_QUERY_SINGLE` (entry + guid)
-//! → `SMSG_ITEM_QUERY_SINGLE_RESPONSE` (VERIFIED vmangos `HandleItemQuerySingleOpcode`; opcodes
-//! 86/88 `Opcodes_1_12_1.h`).
-//!
-//! [`ItemInfo`] now carries the response whole: identity (class/subclass/name — 4 name slots, the
-//! server sends 1 + 3 empties — displayInfoID, quality, inventoryType, sheath), the buy/sell
-//! economy, every requirement gate (level/skill/spell/honor rank/city rank/reputation,
-//! allowable class/race), stacking (maxCount/stackable/containerSlots), the full 10-slot stat
-//! block, all 5 damage blocks (block 0 also mirrors into the legacy `dmg_min`/`dmg_max`/`dmg_type`
-//! fields existing consumers already key on), armor plus the 6-wide resistance run, ranged data,
-//! all 5 spell-trigger slots (the first ON_USE slot still surfaces separately as `use_spell` — the
-//! client's own cooldown-scan key), bonding, description, page/lock/material/random-property/set,
-//! durability, and the area/map/bagFamily tail (VERIFIED field order vmangos
-//! `HandleItemQuerySingleOpcode`, `ItemHandler.cpp:269-415`; every `SUPPORTED_CLIENT_BUILD`
-//! conditional in that function evaluates *included* for build 5875). A **miss** (undiscovered/
-//! unknown entry) is the lone `u32` of `entry | 0x8000_0000`, the same shape as the creature miss.
+//! Item messages. Item templates are not in descriptors: `CMSG_ITEM_QUERY_SINGLE` (opcode 86,
+//! entry and guid) asks, and `SMSG_ITEM_QUERY_SINGLE_RESPONSE` (88) answers in the field order of
+//! vmangos `ItemHandler.cpp:269-415`, every build conditional included at 5875. A miss is the lone
+//! `u32` `entry | 0x8000_0000`.
 
 use std::io;
 
 use crate::wire::{read_cstring, read_f32_le, read_i32_le, read_u32_le, read_u64_le, read_u8};
 
-/// A full item-template answer (decision 0274 P1: the tooltip builder's source of truth; every
-/// field the wire carries, none discarded). (`PartialEq` only: several fields are wire floats —
-/// the damage bounds and `ranged_mod_range`.)
+/// One item template, as `SMSG_ITEM_QUERY_SINGLE_RESPONSE` carries it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemInfo {
     pub class: u32,
     pub subclass: u32,
     pub name: String,
-    /// `ItemDisplayInfo.dbc` key — the icon/model resolve.
+    /// `ItemDisplayInfo.dbc` id, for the icon and model.
     pub display_info_id: u32,
-    /// 0 poor … 6 artifact (the RF-55 quality-color table's index).
+    /// 0 poor to 6 artifact; indexes the quality colour table.
     pub quality: u32,
-    /// `ItemPrototypeFlags` bitmask (conjured, lootable, indestructible, wrapper, no-equip-cooldown,
-    /// …) — the tooltip's "Unique"/no-sell/no-disenchant lines key on bits here.
+    /// `ItemPrototypeFlags` bits (conjured, lootable, wrapper, …); tooltip lines key on them.
     pub flags: u32,
-    /// `BuyPrice` — what a vendor charges per [`crate::messages::VendorItem::buy_count`]-sized
-    /// stack, in copper.
+    /// Copper a vendor charges per [`crate::messages::VendorItem::buy_count`] stack.
     pub buy_price: u32,
-    /// `SellPrice` — what a vendor pays per unit, in copper (the bag tooltip's money row while a
-    /// merchant is open; 0 = unsellable → the "No sell price" line).
+    /// Copper a vendor pays per unit; 0 is unsellable, the tooltip's "No sell price" line.
     pub sell_price: u32,
-    /// `InventoryType` — the equip-slot family (1 head, 21/22 main/off-hand weapon, …); drives
-    /// which paperdoll slot an item can go in and which visual-item field it feeds.
+    /// `InventoryType`, the equip-slot family (1 head, 21/22 main/off-hand weapon, …).
     pub inventory_type: u32,
-    /// `AllowableClass` — a class bitmask; the all-bits-set sentinel (`-1`) means no class
-    /// restriction, so this stays signed rather than reading as the unsigned `0xFFFF_FFFF`.
+    /// Class bitmask; `-1`, all bits, means no restriction.
     pub allowable_class: i32,
-    /// `AllowableRace` — the same bitmask shape as [`Self::allowable_class`], races instead.
+    /// Race bitmask; `-1` means no restriction.
     pub allowable_race: i32,
-    /// `ItemLevel` — the repair-cost formula's `DurabilityCosts.dbc` row key (also a tooltip line).
+    /// Item level, the `DurabilityCosts.dbc` row for the repair cost.
     pub item_level: u32,
-    /// `RequiredLevel` — the tooltip's "Requires Level N" line; 0 = no level requirement.
+    /// The "Requires Level N" line; 0 means none.
     pub required_level: u32,
-    /// `RequiredSkill` — id from `SkillLine.dbc`; 0 = no skill requirement.
+    /// `SkillLine.dbc` id; 0 means none.
     pub required_skill: u32,
-    /// `RequiredSkillRank` — the skill value [`Self::required_skill`] must meet or exceed.
+    /// The minimum [`Self::required_skill`] value.
     pub required_skill_rank: u32,
-    /// `RequiredSpell` — id from `Spell.dbc`; the item is unusable without knowing this spell.
+    /// A `Spell.dbc` id the player must know to use the item.
     pub required_spell: u32,
-    /// `RequiredHonorRank`/`RequiredCityRank` — two more requirement gates the wire carries; the
-    /// tooltip's requirement-line law for these two is unverified (folds in with decision 0274's
-    /// §5 line-order dispatch).
     pub required_honor_rank: u32,
     pub required_city_rank: u32,
-    /// `RequiredReputationFaction` — id from `Faction.dbc`; 0 = no reputation requirement.
+    /// `Faction.dbc` id; 0 means none.
     pub required_rep_faction: u32,
-    /// `RequiredReputationRank` — the wire's own gate: the server sends 0 whenever
-    /// [`Self::required_rep_faction`] is 0, even if the row has a nonzero rank (VERIFIED vmangos
-    /// `ItemHandler.cpp:321-322`).
+    /// Sent as 0 whenever [`Self::required_rep_faction`] is 0 (`ItemHandler.cpp:321-322`).
     pub required_rep_rank: u32,
-    /// `MaxCount` — the account-wide cap this item enforces (0 = uncapped); the tooltip's "Unique"
-    /// family of lines derive from this and [`Self::flags`].
+    /// `MaxCount`, 0 uncapped; the tooltip's "Unique" lines derive from it and [`Self::flags`].
     pub max_count: u32,
-    /// `Stackable` — the max stack size a single slot can hold (1 = doesn't stack).
+    /// Maximum stack size; 1 does not stack.
     pub stackable: u32,
-    /// `ContainerSlots` — nonzero only for bag items (the number of slots the bag itself grants).
+    /// Slots a bag grants; 0 for anything else.
     pub container_slots: u32,
-    /// The 10-slot `ItemStat` block, `(type, value)`, **filtered to nonzero entries** (type or
-    /// value nonzero) in wire order — the tooltip's "+N Stat" lines (`ItemModType` at this build:
-    /// 0 mana, 1 health, 3 agility, 4 strength, 5 intellect, 6 spirit, 7 stamina).
+    /// The 10-slot `ItemStat` block as `(type, value)`, all-zero slots dropped, in wire order
+    /// (`ItemModType`: 0 mana, 1 health, 3 agility, 4 strength, 5 intellect, 6 spirit, 7 stamina).
     pub stats: Vec<(u32, i32)>,
-    /// The 5-slot `Damage` block, **filtered to entries with `max > 0`**, in wire order —
-    /// secondary damage lines (e.g. a Fiery weapon's bonus Fire line) beyond the primary
-    /// [`Self::dmg_min`]/[`Self::dmg_max`]/[`Self::dmg_type`], which always mirror block 0 whether
-    /// or not it clears this filter.
+    /// The 5-slot `Damage` block, entries with `max > 0` only, in wire order.
     pub damages: Vec<ItemDamage>,
-    /// Damage block 0's per-hit minimum (the tooltip's "X - Y Damage" line; 0 for non-weapons) —
-    /// kept mirrored from `damages` block 0 for existing consumers.
+    /// Damage block 0's minimum, whether or not block 0 is in [`Self::damages`].
     pub dmg_min: f32,
     /// Damage block 0's per-hit maximum.
     pub dmg_max: f32,
-    /// Damage block 0's school (0 physical, 1 Holy … 6 Arcane — the tooltip's school suffix).
+    /// Damage block 0's school (0 physical, 1 Holy … 6 Arcane).
     pub dmg_type: u32,
-    /// `Armor` — the first slot of the wire's 7-wide resistance run.
+    /// The first slot of the wire's 7-wide resistance run.
     pub armor: u32,
-    /// The remaining 6 slots of the resistance run, in wire order: `[holy, fire, nature, frost,
-    /// shadow, arcane]` (`int32` on the wire in vmangos's own `ItemPrototype` — a template's
-    /// resistance can't go negative in practice, but the sign rides along).
+    /// The other six resistances: holy, fire, nature, frost, shadow, arcane (`int32` in vmangos).
     pub resistances: [i32; 6],
     /// Attack delay in milliseconds (the tooltip's "Speed" = delay / 1000).
     pub delay_ms: u32,
-    /// `AmmoType` — the projectile family a ranged weapon consumes (0 none, 2 arrow, 3 bullet).
+    /// The projectile a ranged weapon consumes (0 none, 2 arrow, 3 bullet).
     pub ammo_type: u32,
-    /// `RangedModRange` — a ranged weapon's range multiplier; the tooltip never shows this raw, it
-    /// feeds the range formula.
+    /// A ranged weapon's range multiplier.
     pub ranged_mod_range: f32,
-    /// The 5-slot `ItemSpell` block, **filtered to entries with `spell_id != 0`**, in wire order —
-    /// every "Use:"/"Equip:"/"Chance on hit:" trigger line the tooltip can render. Each entry
-    /// carries its own [`ItemSpellEntry::index`], since this vector's positions are not the
-    /// template's block ordinals.
+    /// The 5-slot `ItemSpell` block, `spell_id != 0` only, in wire order; positions here are not
+    /// block ordinals, [`ItemSpellEntry::index`] is.
     pub spells: Vec<ItemSpellEntry>,
-    /// Spell **block 0**'s `SpellCharges` word, raw and unfiltered — the reference's
-    /// `template+0x144`, and the sole input to [`Self::has_finite_charges`].
+    /// Block 0's `SpellCharges`, unfiltered: the reference's `template+0x144`.
     pub spell_charges_0: i32,
-    /// The first ON_USE (`SpellTrigger == 0`) spell block — what a right-click/action-bar use
-    /// casts, and the key the item's cooldown tracks (the client's own 5-slot scan: spell id > 0,
-    /// trigger == 0 — wow-re `wave-cooldown.md` `GetItemCooldown 0x6e2ed0`). `None` for items with
-    /// no use effect. A stored view onto [`Self::spells`] (rather than a derived accessor) so
-    /// existing cooldown/tooltip consumers reading `.use_spell` are untouched.
+    /// The first ON_USE (trigger 0) spell block: what a use casts, and the item's cooldown key
+    /// (the reference's `GetItemCooldown` scan, `0x6e2ed0`).
     pub use_spell: Option<ItemUseSpell>,
-    /// `Bonding` — `ItemBondingType` (0 none … 4 quest-bind); the tooltip's "Binds when picked
-    /// up"/"equipped"/"used" line.
+    /// `ItemBondingType` (0 none … 4 quest-bind).
     pub bonding: u32,
-    /// The item's flavor text (the tooltip's italic line under the stat block); empty = none.
+    /// Flavor text, the tooltip's italic line; empty for none.
     pub description: String,
-    /// `PageText` — a readable item's `PageText.wdb` id (0 = not a book/readable).
+    /// A readable item's `PageText.wdb` id; 0 for none.
     pub page_text: u32,
-    /// `LanguageID` — id from `Languages.dbc`; which in-game language a readable's text renders in.
+    /// `Languages.dbc` id a readable's text is written in.
     pub language_id: u32,
-    /// `PageMaterial` — id from `PageTextMaterial.dbc`; the book-frame background/texture.
+    /// `PageTextMaterial.dbc` id, the book frame's background.
     pub page_material: u32,
-    /// `StartQuest` — a quest-starter item's quest id (0 = doesn't start a quest).
+    /// The quest this item starts; 0 for none.
     pub start_quest: u32,
-    /// `LockID` — id from `Lock.dbc`; nonzero means the item (a chest/junkbox) needs picking/keying
-    /// open.
+    /// `Lock.dbc` id; nonzero means the item must be picked or keyed open.
     pub lock_id: u32,
-    /// `Material` — id from `Material.dbc`; drives the item's equip/drop/footstep sound set.
+    /// `Material.dbc` id, for the item's sounds.
     pub material: u32,
-    /// `Sheath` — the holster style a drawn weapon of this type renders with (vmangos
-    /// `ItemPrototype::Sheath`; the same vocabulary as [`super::update_object::ObjectFields`]'s
-    /// virtual-item sheath byte).
+    /// Sheath style, in the values of the descriptor's virtual-item sheath byte.
     pub sheath: u32,
-    /// `RandomProperty` — id from `ItemRandomProperties.dbc`; a "of the Whale"-style suffix roll
-    /// (the concrete roll lives on the item *instance*, not the template — this is just which
-    /// property table applies).
+    /// `ItemRandomProperties.dbc` id for an "of the Whale" suffix, rolled per instance.
     pub random_property: u32,
-    /// `Block` — a shield's block value (two `u32`s past `Sheath`, after `RandomProperty`).
+    /// A shield's block value.
     pub block: u32,
-    /// `ItemSet` — id from `ItemSet.dbc`; 0 = not part of a set.
+    /// `ItemSet.dbc` id; 0 for none.
     pub item_set: u32,
-    /// `MaxDurability` — 0 for items without durability (never repairable).
+    /// 0 for items without durability.
     pub max_durability: u32,
-    /// `Area` — id from `AreaTable.dbc`; a zone-bound item's required zone (0 = anywhere).
+    /// `AreaTable.dbc` zone the item is bound to; 0 for anywhere.
     pub area: u32,
-    /// `Map` — id from `Map.dbc`; a map-bound item's required map (0 = anywhere).
+    /// `Map.dbc` map the item is bound to; 0 for anywhere.
     pub map: u32,
-    /// `BagFamily` — which specialised container an item belongs in (quiver 1, ammo pouch 2, soul
-    /// bag 3, herb 6, enchanting 7, engineering 8, **keys 9**; 0 = an ordinary item / ordinary bag).
-    /// An **enum, not a bitmask**, on this wire: 1.12 tests it for equality (vmangos
-    /// `ItemPrototype.h`'s `enum BagFamily`, and the reference's own `HasKey` `0x48ae90` compares
-    /// `template+0x1d0 == 9`) — it only became a mask in 2.x. `9` is what routes an item into the
-    /// keyring, and what [`crate::ObjectFields::player_keyring_slot`]'s slots hold.
+    /// The specialised container an item belongs in (1 quiver, 2 ammo pouch, 3 soul bag, 6 herb,
+    /// 7 enchanting, 8 engineering, 9 keyring; 0 none). An enum, not a mask, in 1.12: the
+    /// reference's `HasKey` (`0x48ae90`) tests `== 9`.
     pub bag_family: u32,
 }
 
 impl ItemInfo {
-    /// Does this item carry **finite charges**? The reference's
-    /// `template+0x144 != 0 && template+0x144 != -1` (wow-re `action-item-slot.md` §8.2) — the
-    /// gate on the use path's mode-`0x20` inventory search, which skips spent copies so a click
-    /// reaches one that still works. `-1` is the "unlimited" sentinel, `0` "no charges at all".
+    /// The reference's `template+0x144 != 0 && != -1` (`-1` unlimited, `0` none), which gates the
+    /// use path's mode-`0x20` search for a copy with charges left.
     pub fn has_finite_charges(&self) -> bool {
         self.spell_charges_0 != 0 && self.spell_charges_0 != -1
     }
 
-    /// The **block ordinal** (0..4) of the first ON_USE spell — the third byte of `CMSG_USE_ITEM`
-    /// (wow-re `action-item-slot.md` §8.3). `None` for an item with no on-use spell. Almost
-    /// always 0, but an item whose block 0 is an ON_EQUIP proc and whose on-use sits in block 1
-    /// needs the real index or the server casts the wrong block.
+    /// The first ON_USE spell's block ordinal, the third byte of `CMSG_USE_ITEM`; usually 0, but
+    /// an item with an ON_EQUIP block 0 has its on-use in a later block.
     pub fn use_spell_index(&self) -> Option<u8> {
         self.spells.iter().find(|s| s.trigger == 0).map(|s| s.index)
     }
 
-    /// Is this item **consumable** in the sense the action bar's Count fontstring means?
-    /// `IsConsumableAction 0x4e5250`, byte-read (`4e52b9`–`4e52ea`), after it has resolved the
-    /// slot's item template:
-    ///
-    /// ```text
-    /// [rec+0x2c] InventoryType == 0x18 (AMMO) or 0x19 (THROWN)          -> true   (4e52b9-4e52c4)
-    /// OR  ∃ i∈[0,5):  SpellId[i]      [rec+0x11c+4i] != 0                        (4e52d0)
-    ///              ∧  SpellTrigger[i] [rec+0x130+4i] == 0   (ON_USE)             (4e52d7)
-    ///              ∧  SpellCharges[i] [rec+0x144+4i] <  0   (destroy-on-use)     (4e52dc)
-    /// otherwise                                                         -> false
-    /// ```
-    ///
-    /// **Negative** charges — not merely finite ones — are the test: the sign is vmangos's own
-    /// "the ITEM is consumed once the charges run out" convention, so a potion (`-1`) counts and a
-    /// wand-like item with positive charges does not. Nothing here looks at `Class`: a mount
-    /// (`Class` 15 Miscellaneous, `InventoryType` 0, on-use spell with `SpellCharges` 0) is **not**
-    /// consumable, which is why the reference shows no stack number under a mount on the bar.
-    ///
-    /// [`Self::spells`] already drops the `SpellId == 0` blocks, so iterating it is the `4e52d5`
-    /// skip.
+    /// Consumable as the action bar's count means it (reference `IsConsumableAction`,
+    /// `0x4e5250`): ammo or thrown, or an ON_USE spell with negative charges, which use the item
+    /// up. Neither positive charges nor `Class` count: a mount, with charges 0, shows no count.
     pub fn is_consumable(&self) -> bool {
         const INVTYPE_AMMO: u32 = 0x18;
         const INVTYPE_THROWN: u32 = 0x19;
@@ -211,93 +139,53 @@ impl ItemInfo {
             || self.spells.iter().any(|s| s.trigger == 0 && s.charges < 0)
     }
 
-    /// Can this item be placed on an action-bar slot? `PlaceAction`'s only item filter, byte-read
-    /// (wow-re `action-item-slot.md` §5, `4e6571`–`4e6598`): **an on-use spell OR equippable**.
-    /// No quality, bind, class/subclass, container or level test exists anywhere on that path — a
-    /// bag (`InventoryType` 18) IS placeable; a grey trade good with neither is silently refused.
+    /// The reference `PlaceAction`'s only item filter (`0x4e6571`): an on-use spell or anything
+    /// equippable, bags included; anything else is refused silently.
     pub fn placeable_on_action_bar(&self) -> bool {
         self.use_spell.is_some() || self.inventory_type != 0
     }
 
-    /// Does the tooltip put the green `<Right Click to Open>` line on this instance?
-    /// `instance_flags` is the item object's `ITEM_FIELD_FLAGS`; a template-only view (a
-    /// hyperlink, a merchant row) passes 0 and, being object-less, gets no line at all — the
-    /// reference's own gate 1 at `0x52e2e0`.
-    ///
-    /// VERIFIED wow-re `right-click-open.md` §1.4 (`0x52e2f8`–`0x52e321`), re-derived by a §5 pair
-    /// 2026-08-02: the template LOOTABLE bit [`ITEM_FLAG_LOOTABLE`] behind its **lock sub-gate** —
-    /// a [`ItemInfo::lock_id`] item earns the line only once the instance carries
-    /// [`ITEM_DYNFLAG_UNLOCKED`] — **or** a wrapped gift ([`ITEM_FLAG_WRAPPER`] on the template
-    /// plus [`ITEM_DYNFLAG_WRAPPED`] on the instance).
-    ///
-    /// **This is deliberately NOT the send condition** ([`Self::opens_loot`]). The line is a
-    /// promise, and the reference only makes it when opening will actually work; the *click*
-    /// tests the bare template bit and lets the server refuse a still-locked box with its own
-    /// error line. Decision 0896 — an earlier reading of ours collapsed the two, which would have
-    /// silently swallowed the click on every locked junkbox.
+    /// Whether the tooltip shows the green `<Right Click to Open>` line (`0x52e2f8`), given the
+    /// instance's `ITEM_FIELD_FLAGS`: lootable and, if locked, unlocked; or a wrapped gift. An
+    /// object-less view (a hyperlink, a merchant row) gets no line at all (`0x52e2e0`). Stricter
+    /// than [`Self::opens_loot`] on purpose: the click still sends for a locked box.
     pub fn shows_open_line(&self, instance_flags: u32) -> bool {
         let lootable = self.flags & ITEM_FLAG_LOOTABLE != 0
             && (self.lock_id == 0 || instance_flags & ITEM_DYNFLAG_UNLOCKED != 0);
         lootable || self.unwraps_gift(instance_flags)
     }
 
-    /// Does a right-click on this instance send `CMSG_OPEN_ITEM` to **unwrap a gift**? The first
-    /// arm of the reference's use dispatcher (`0x5d8d00` #2, `0x5d8d92`/`0x5d8d9d` → the `0x5edd60`
-    /// emitter): template [`ITEM_FLAG_WRAPPER`] **and** instance [`ITEM_DYNFLAG_WRAPPED`].
-    ///
-    /// It is a separate predicate from [`Self::opens_loot`] because it sits at a different point
-    /// in the dispatcher's order — *before* the quest-starter and readable arms, where the loot
-    /// arm sits after them. A wrapper template whose instance is *not* wrapped takes the
-    /// begin-wrap cursor path instead ([`Self::begins_gift_wrap`]) — local, no packet.
+    /// Whether a right-click sends `CMSG_OPEN_ITEM` to unwrap a gift (`0x5d8d92`). The reference
+    /// tests it before the quest-starter and readable arms; the loot arm comes after them.
     pub fn unwraps_gift(&self, instance_flags: u32) -> bool {
         self.flags & ITEM_FLAG_WRAPPER != 0 && instance_flags & ITEM_DYNFLAG_WRAPPED != 0
     }
 
-    /// Does a right-click on this instance **arm the gift-wrap cursor**? The *other* side of the
-    /// same fork [`Self::unwraps_gift`] tests (`0x5d8d00` arm 2): template [`ITEM_FLAG_WRAPPER`]
-    /// with the instance's [`ITEM_DYNFLAG_WRAPPED`] **clear** — a piece of wrapping paper rather
-    /// than a wrapped present.
-    ///
-    /// **Nothing is sent on this click.** `0x5d8dba` calls `0x5edea0`, whose only three acts are
-    /// `LockItem 0x4953e0` on the paper, `SetCursorBaseMode(2)` and `CursorSetMode(2)` — a purely
-    /// local arm (wow-re `object-layer/scratch/gift-wrap-law.md`, §5-carved). What completes it is
-    /// the next **left**-click on a container slot, which sends [`wrap_item`]. Decision 1934.
+    /// Whether a right-click arms the gift-wrap cursor: wrapping paper, not a wrapped present.
+    /// Nothing is sent (`0x5edea0` locks the paper and sets cursor mode 2); the next left-click on
+    /// a container slot sends [`wrap_item`].
     pub fn begins_gift_wrap(&self, instance_flags: u32) -> bool {
         self.flags & ITEM_FLAG_WRAPPER != 0 && instance_flags & ITEM_DYNFLAG_WRAPPED == 0
     }
 
-    /// Does a right-click on this template send `CMSG_OPEN_ITEM` to **loot it open**? The
-    /// reference's arm #8 (`0x5d8f7c: test al,4` → the `0x5edc80` emitter): a **bare** template
-    /// [`ITEM_FLAG_LOOTABLE`] test.
-    ///
-    /// VERIFIED wow-re `right-click-open.md` §3, positively *and* negatively — no `LockID`
-    /// (`[rec+0x1ac]`) operand exists anywhere on the send path, checked against a positive
-    /// control. So a **still-locked junkbox does send the packet**, and the server answers
-    /// `EQUIP_ERR_ITEM_LOCKED`, which is where the player's "Item is locked" line comes from.
-    /// Refusing locally instead would eat the click in silence.
+    /// Whether a right-click sends `CMSG_OPEN_ITEM` to loot the item (`0x5d8f7c`): the bare
+    /// template bit with no lock test, so a locked box still sends and the server answers
+    /// `EQUIP_ERR_ITEM_LOCKED`.
     pub fn opens_loot(&self) -> bool {
         self.flags & ITEM_FLAG_LOOTABLE != 0
     }
 }
 
-/// `ITEM_FLAG_LOOTABLE` — the **template** bit that makes an item right-clickable into a loot
-/// window (a clam, a lockbox, a Gnomish Mind Control Cap's box). vmangos
-/// `ItemPrototype.h:66`, whose own comment names the client behaviour this drives: "It or lockid
-/// set enable for client show 'Right click to open'".
+/// Template bit: right-click opens a loot window, as on a clam or lockbox (`ItemPrototype.h:66`).
 pub const ITEM_FLAG_LOOTABLE: u32 = 0x0000_0004;
-/// `ITEM_FLAG_WRAPPER` — the template bit for gift wrapping (vmangos `ItemPrototype.h:73`); paired
-/// with [`ITEM_DYNFLAG_WRAPPED`] on the instance it makes the wrapped present openable.
+/// Template bit for gift wrapping (`ItemPrototype.h:73`).
 pub const ITEM_FLAG_WRAPPER: u32 = 0x0000_0200;
-/// `ITEM_DYNFLAG_UNLOCKED` — the **instance** (`ITEM_FIELD_FLAGS`) bit a lockbox gains once it has
-/// been picked/keyed open; until then a `LockID` item refuses to open (vmangos
-/// `HandleOpenItemOpcode`'s `EQUIP_ERR_ITEM_LOCKED`).
+/// Instance (`ITEM_FIELD_FLAGS`) bit a lockbox gains once picked or keyed open.
 pub const ITEM_DYNFLAG_UNLOCKED: u32 = 0x0000_0004;
-/// `ITEM_DYNFLAG_WRAPPED` — the instance bit on a gift-wrapped item; opening it unwraps to the
-/// present (vmangos swaps the entry from `character_gifts` rather than sending loot).
+/// Instance bit on a wrapped gift; opening it swaps the entry back from `character_gifts`.
 pub const ITEM_DYNFLAG_WRAPPED: u32 = 0x0000_0008;
 
-/// One `Damage` block ([`ItemInfo::damages`] — block 0 is also mirrored into
-/// [`ItemInfo::dmg_min`]/[`ItemInfo::dmg_max`]/[`ItemInfo::dmg_type`]).
+/// One `Damage` block of [`ItemInfo::damages`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ItemDamage {
     pub min: f32,
@@ -306,18 +194,11 @@ pub struct ItemDamage {
     pub school: u32,
 }
 
-/// One item-template spell block ([`ItemInfo::spells`]) — the full 6-word wire shape, not just the
-/// resolved ON_USE cooldown pair ([`ItemUseSpell`]). `charges`: positive = consumed only while
-/// charges last, negative = the item itself is consumed once charges run out (vmangos
-/// `ItemPrototype::_ItemSpell::SpellCharges`). The cooldown pair is **server-resolved** the same way
-/// as [`ItemUseSpell`]'s (VERIFIED vmangos `ItemHandler.cpp:354-391`).
+/// One template spell block of [`ItemInfo::spells`]. Negative `charges` use the item up when they
+/// run out, positive ones leave it (`ItemPrototype::_ItemSpell::SpellCharges`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemSpellEntry {
-    /// Which of the template's **five** spell blocks this is (0..4). Not the index in
-    /// [`ItemInfo::spells`] — that vector drops empty blocks, and the wire's own
-    /// `CMSG_USE_ITEM` spell byte is this block ordinal (wow-re `action-item-slot.md` §8.3: the
-    /// reference scans `SpellId[5]`/`SpellTrigger[5]` for the block it is casting and sends its
-    /// position).
+    /// The template block ordinal (0..4), which `CMSG_USE_ITEM`'s spell byte carries.
     pub index: u8,
     pub spell_id: u32,
     /// `ItemSpelltriggerType`: 0 ON_USE, 1 ON_EQUIP, 2 CHANCE_ON_HIT.
@@ -331,13 +212,9 @@ pub struct ItemSpellEntry {
     pub category_cooldown_ms: i32,
 }
 
-/// The first ON_USE spell block ([`ItemInfo::use_spell`]) — a resolved-cooldown view of whichever
-/// [`ItemSpellEntry`] has `trigger == 0`. The cooldown pair is **server-resolved** (VERIFIED vmangos
-/// `ItemHandler.cpp:354-380`: the `item_template` override when its value is `>= 0`, else the
-/// spell's own `RecoveryTime`/`Category`/`CategoryRecoveryTime`) — but a lone `-1` can still ride
-/// next to a set override, so the fields stay signed and a negative means "use the spell's own
-/// Spell.dbc value" (the client's `>= 0` pick in `StartCooldown 0x6e2c60`, wow-re
-/// `wave-cooldown.md`).
+/// An item's first ON_USE spell block. The server substitutes the spell's own cooldowns for unset
+/// ones (`ItemHandler.cpp:354-380`), but a `-1` can still arrive; negative means the spell's
+/// `Spell.dbc` value, as the reference's `StartCooldown` (`0x6e2c60`) reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemUseSpell {
     pub spell_id: u32,
@@ -349,8 +226,7 @@ pub struct ItemUseSpell {
     pub category_cooldown_ms: i32,
 }
 
-/// Read `SMSG_ITEM_QUERY_SINGLE_RESPONSE` → `(entry, Some(head))`, or `(entry, None)` on a miss
-/// (VERIFIED field order vmangos `HandleItemQuerySingleOpcode`, `ItemHandler.cpp:269-415`).
+/// Read `SMSG_ITEM_QUERY_SINGLE_RESPONSE` in the field order of `ItemHandler.cpp:269-415`.
 pub(super) fn read_item_query_response(r: &mut &[u8]) -> io::Result<(u32, Option<ItemInfo>)> {
     let entry = read_u32_le(r)?;
     if entry & 0x8000_0000 != 0 {
@@ -360,7 +236,7 @@ pub(super) fn read_item_query_response(r: &mut &[u8]) -> io::Result<(u32, Option
     let subclass = read_u32_le(r)?;
     let name = read_cstring(r)?;
     for _ in 0..3 {
-        let _ = read_cstring(r)?; // name2..name4 — the server sends empties
+        let _ = read_cstring(r)?; // name2..name4, always sent empty
     }
     let display_info_id = read_u32_le(r)?;
     let quality = read_u32_le(r)?;
@@ -383,8 +259,7 @@ pub(super) fn read_item_query_response(r: &mut &[u8]) -> io::Result<(u32, Option
     let stackable = read_u32_le(r)?;
     let container_slots = read_u32_le(r)?;
 
-    // 10x ItemStat { type, value } — kept only where either half is nonzero (an all-zero slot is a
-    // genuinely unused one), wire order preserved.
+    // 10 ItemStat { type, value }; an all-zero slot is unused.
     let mut stats = Vec::new();
     for _ in 0..10 {
         let stat_type = read_u32_le(r)?;
@@ -394,10 +269,7 @@ pub(super) fn read_item_query_response(r: &mut &[u8]) -> io::Result<(u32, Option
         }
     }
 
-    // 5x Damage { min f32, max f32, type u32 }, wire order. Block 0 is the tooltip's primary
-    // damage line — always mirrored into the legacy dmg_min/dmg_max/dmg_type fields for existing
-    // consumers, whether or not it clears the `max > 0` filter below (a non-weapon's block 0 is a
-    // real 0/0/0, not a missing value).
+    // 5 Damage { min f32, max f32, type u32 }; block 0 also fills dmg_* unfiltered.
     let dmg_min = read_f32_le(r)?;
     let dmg_max = read_f32_le(r)?;
     let dmg_type = read_u32_le(r)?;
@@ -418,8 +290,6 @@ pub(super) fn read_item_query_response(r: &mut &[u8]) -> io::Result<(u32, Option
         }
     }
 
-    // Armor is its own field; the remaining 6-wide resistance run (Holy/Fire/Nature/Frost/
-    // Shadow/Arcane) lands in `resistances` in wire order.
     let armor = read_u32_le(r)?;
     let holy_res = read_i32_le(r)?;
     let fire_res = read_i32_le(r)?;
@@ -435,17 +305,10 @@ pub(super) fn read_item_query_response(r: &mut &[u8]) -> io::Result<(u32, Option
     let ammo_type = read_u32_le(r)?;
     let ranged_mod_range = read_f32_le(r)?;
 
-    // 5x Spell block { SpellId, SpellTrigger, SpellCharges, Cooldown, Category, CategoryCooldown }
-    // (VERIFIED vmangos `ItemHandler.cpp:354-391`) — the server always writes all six words; a slot
-    // with no resolvable spell sends the sentinel 0,0,0,-1,0,-1. Kept in `spells` wherever
-    // `spell_id != 0`; the first ON_USE (trigger 0) slot also surfaces as `use_spell` — the
-    // client's own 5-slot scan.
+    // 5 spell blocks of six words (`ItemHandler.cpp:354-391`); an empty block is 0,0,0,-1,0,-1.
     let mut spells = Vec::new();
     let mut use_spell = None;
-    // Block 0's charges, kept RAW — whether the item has finite charges is the reference's
-    // `template+0x144 != 0 && != -1` test on exactly this word ([`ItemInfo::has_finite_charges`],
-    // wow-re `action-item-slot.md` §8.2), which reads block 0 even when block 0 carries no spell
-    // and so never reaches `spells` below.
+    // Kept even when block 0 has no spell: the reference's charge test reads it regardless.
     let mut spell_charges_0 = 0;
     for block in 0..5u8 {
         let spell_id = read_u32_le(r)?;
@@ -554,9 +417,7 @@ pub(super) fn read_item_query_response(r: &mut &[u8]) -> io::Result<(u32, Option
     ))
 }
 
-/// Body of `CMSG_ITEM_QUERY_SINGLE` (vmangos `QueryItem::ReadFromWorldPacket`): the template
-/// `entry` + a full 8-byte item guid (0 when asking about a template with no instance in hand) —
-/// the exact shape of the creature query.
+/// Body of `CMSG_ITEM_QUERY_SINGLE`: entry, then a full item guid (0 with no instance in hand).
 pub fn item_query(entry: u32, guid: u64) -> Vec<u8> {
     let mut body = Vec::with_capacity(12);
     body.extend_from_slice(&entry.to_le_bytes());
@@ -564,82 +425,46 @@ pub fn item_query(entry: u32, guid: u64) -> Vec<u8> {
     body
 }
 
-/// The wire's "the player's own inventory" bag index (`INVENTORY_SLOT_BAG_0`): with it, `slot`
-/// addresses the player descriptor's item array directly — equipment 0–18, bag slots 19–22, the
-/// backpack 23–38 (VERIFIED vmangos `Player.h` slot enums; the same 23-slot base the descriptor's
-/// `PACK_SLOT_1` offset encodes).
+/// The player's own bag index (`INVENTORY_SLOT_BAG_0`): `slot` then indexes the player's item
+/// array, equipment 0-18, bags 19-22, backpack 23-38 (vmangos `Player.h`).
 pub const BAG_PLAYER_INVENTORY: u8 = 255;
 /// The backpack's first player-array slot (`INVENTORY_SLOT_ITEM_START`).
 pub const SLOT_PACK_FIRST: u8 = 23;
-/// The first equipped-bag player-array slot (`INVENTORY_SLOT_BAG_START`; bags occupy 19–22).
+/// The first equipped-bag player-array slot (`INVENTORY_SLOT_BAG_START`; bags occupy 19-22).
 pub const SLOT_BAG_FIRST: u8 = 19;
 
-/// `TARGET_FLAG_GAMEOBJECT` — the cast-target bit that carries a GO guid (vmangos
-/// `SpellDefines.h`; its `SpellCastTargets::read` is the only bit here that consumes bytes).
+/// `SpellCastTargets` mask bits, vmangos `SpellDefines.h`.
 const TARGET_FLAG_GAMEOBJECT: u16 = 0x0800;
 
-/// `TARGET_FLAG_UNIT` — a bound unit target: the same bit, and the same packed guid, a
-/// `CMSG_CAST_SPELL` writes. In the real client ONE block builder serves both opcodes, so one bit
-/// table serves both here.
 const TARGET_FLAG_UNIT: u16 = 0x0002;
-/// `TARGET_FLAG_DEST_LOCATION` — a ground point, the same bit and the same three `f32` WoW coords
-/// a ground-targeted `CMSG_CAST_SPELL` writes ([`super::spells::cast_spell_at_dest`]).
 const TARGET_FLAG_DEST_LOCATION: u16 = 0x0040;
-/// `TARGET_FLAG_SOURCE_LOCATION` — the dest bit's twin one place down, and the same three `f32`
-/// ([`super::spells::cast_spell_at_source`]). Both come out of the one binder `BindLocation
-/// 0x6e60f0` (decision 2218).
 const TARGET_FLAG_SOURCE_LOCATION: u16 = 0x0020;
-/// `TARGET_FLAG_ITEM` — a bound *item* target, the same bit and the same packed guid an
-/// item-targeted `CMSG_CAST_SPELL` writes (`super::spells::cast_spell_on_item`). One block
-/// builder, two opcodes (decision 0923).
 const TARGET_FLAG_ITEM: u16 = 0x0010;
 
-/// The `SpellCastTargets` block a `CMSG_USE_ITEM` carries — built by the *same* code as a
-/// `CMSG_CAST_SPELL`'s. `SendCast 0x6e54f0` picks the opcode from its item-vs-caster discriminator
-/// (`0x6e57d8 push 0xab` when the pending-cast block's guid is the item's, `push 0x12e` when it is
-/// the caster's) and then writes the one targets block `ArmCast 0x6e5250` bound — item or not
-/// (wow-re `action-item-slot.md` §8: "body `{u8 bagIndex, u8 slot, u8 spell_index}` + the
-/// cast-targets block"; `cursor-system.md` §8.4a for the split).
+/// The `SpellCastTargets` block of a `CMSG_USE_ITEM`, the same block a `CMSG_CAST_SPELL` carries:
+/// the reference's `SendCast` (`0x6e54f0`) only picks the opcode (`0x6e57d8`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum UseItemTarget {
-    /// Mask 0 (`TARGET_FLAG_SELF`) — the implicit self-cast an ordinary consumable sends, whose
-    /// target the server resolves itself. What 81% of the 1.12 on-use items bind to.
+    /// Mask 0 (`TARGET_FLAG_SELF`): an ordinary consumable; the server resolves the target.
     #[default]
     SelfImplicit,
-    /// `TARGET_FLAG_UNIT` + the packed guid — an item whose spell binds a unit exactly as a
-    /// spell's does: a bandage, a soulstone, an offensive trinket.
+    /// `TARGET_FLAG_UNIT` and a packed guid: a bandage, a soulstone, an offensive trinket.
     Unit(u64),
-    /// `TARGET_FLAG_GAMEOBJECT` + the packed guid — the **key-in-a-lock** case (decision 0769):
-    /// opening a locked door or chest with a key is not a spell cast, it is *using the key at the
-    /// object*. It matters that this is USE_ITEM and not a bare cast: `Spell::CanOpenLock` honours
-    /// a `Lock.dbc` KEY slot **only** when `m_CastItem` is set (`Spell.cpp:7892`), which only this
-    /// packet supplies. The mask is `0x0800` alone — `TARGET_FLAG_LOCKED` is a *targeting-word*
-    /// bit that `BindTarget 0x6e5b40` consumes and never writes to the wire (decision 0939,
-    /// correcting 0769; see [`super::spells::cast_spell_gameobject`] for the census).
+    /// `TARGET_FLAG_GAMEOBJECT` and a packed guid: a key used on a lock, which the server honours
+    /// only from an item cast (`Spell.cpp:7892`). The mask is `0x0800` alone; the reference's
+    /// `BindTarget` (`0x6e5b40`) never writes `TARGET_FLAG_LOCKED`.
     Object(u64),
-    /// `TARGET_FLAG_DEST_LOCATION` + three `f32` WoW coords — the targeting-cursor commit for a
-    /// **thrown** item: dynamite, grenades, bombs, the Goblin Mortar (46 of the 1.12 on-use item
-    /// spells, decision 0914). Same block a ground-targeted spell writes; only the opcode differs.
+    /// `TARGET_FLAG_DEST_LOCATION` and three `f32` coords: a thrown item, dynamite or a grenade.
     Dest([f32; 3]),
-    /// `TARGET_FLAG_ITEM` + the packed guid — the targeting cursor's **item** commit: a poison, a
-    /// sharpening stone, a weapon oil, an enchanting scroll applied to the item you clicked in a
-    /// bag or on the paper doll (decision 0923). The reference reaches it through the very same
-    /// `BindTarget 0x6e5b40` a unit goes through (`0x495d60` @ `496056`), so the block is the same
-    /// block; only which bit is set differs.
+    /// `TARGET_FLAG_ITEM` and a packed guid: a poison, oil or stone applied to a clicked item.
     Item(u64),
-    /// `TARGET_FLAG_SOURCE_LOCATION` + three `f32` WoW coords — [`Self::Dest`]'s twin, one bit
-    /// over: `BindLocation 0x6e60f0`'s bit-5 arm writes the clicked point to `SPELLCAST+0x30` and
-    /// ORs `0x0020` into the wire mask, where its bit-6 arm writes `+0x3c` and ORs `0x0040`. Three
-    /// shipped items reach it — Martin Fury (17), 192 and 5417, all carrying spell 265 "Area Death
-    /// (TEST)" (decision 2218). vmangos reads this triple **before** the dest one.
+    /// `TARGET_FLAG_SOURCE_LOCATION` and three `f32` coords (`BindLocation`, `0x6e60f0`); only
+    /// items carrying spell 265, such as Martin Fury, use it. vmangos reads it before the dest.
     Source([f32; 3]),
 }
 
-/// Body of `CMSG_USE_ITEM` (VERIFIED vmangos `UseItem::ReadFromWorldPacket` + opcode 171
-/// `Opcodes_1_12_1.h`): `bagIndex` (a bag's player-array slot 19–22, or [`BAG_PLAYER_INVENTORY`]
-/// with an absolute `slot`), `slot` (0-based within the bag), `spellSlot` (which of the template's
-/// 5 spell effects — 0, the "use" effect, for a plain use), then a `SpellCastTargets` block
-/// ([`UseItemTarget`]).
+/// Body of `CMSG_USE_ITEM` (opcode 171): bag index (a bag's player-array slot 19-22, or
+/// [`BAG_PLAYER_INVENTORY`]), slot within it, the spell block ordinal, then the targets block.
 pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) -> Vec<u8> {
     let mut body = Vec::with_capacity(5);
     body.push(bag_index);
@@ -681,112 +506,66 @@ pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) 
     body
 }
 
-/// Body of `CMSG_OPEN_ITEM` (VERIFIED vmangos `OpenItem::ReadFromWorldPacket`,
-/// `Server/Packets/Spell.cpp` + `.h:36-45`; opcode 172 `Opcodes_1_12_1.h:175`): `bagIndex`, `slot`
-/// — the same two bytes and the same bag addressing as [`use_item`], and nothing else (no spell
-/// ordinal, no targets block: opening is not a cast).
-///
-/// The right-click fork for an [`ItemInfo::openable`] item. The server answers on the **item's own
-/// guid**: `SendLoot(item, LOOT_CORPSE)` for a lootable, or — for a wrapped gift — an entry swap
-/// and no window at all.
+/// Body of `CMSG_OPEN_ITEM` (opcode 172, `Server/Packets/Spell.h:36-45`): bag index and slot, as
+/// in [`use_item`]. The server loots the item on its own guid, or unwraps a gift in place.
 pub fn open_item(bag_index: u8, slot: u8) -> Vec<u8> {
     vec![bag_index, slot]
 }
 
-/// Body of `CMSG_WRAP_ITEM` (VERIFIED vmangos `WrapItem::ReadFromWorldPacket`,
-/// `Server/Packets/Item.cpp:121-127` + `.h:191-201`; opcode 467 `Opcodes_1_12_1.h:468`):
-/// `giftBag`, `giftSlot`, `itemBag`, `itemSlot` — all `uint8`, the **paper's** position first and
-/// the target's second, the same bag addressing as [`use_item`].
-///
-/// The server refuses every ineligible target with an `EQUIP_ERR_*` of its own
-/// (`HandleWrapItemOpcode`: equipped, a bag, soulbound, stackable, unique, already wrapped, or
-/// mid-cast) — so a refusal reaches the player as an `SMSG_INVENTORY_CHANGE_FAILURE` line, not as
-/// a silently eaten click. On success the *target* item keeps its guid and takes the paper's
-/// `WrappedGift` entry, gains `ITEM_FIELD_GIFTCREATOR` and `ITEM_DYNFLAG_WRAPPED`, and one paper
-/// is destroyed — all as ordinary field updates, no answering packet of its own.
+/// Body of `CMSG_WRAP_ITEM` (opcode 467, `Server/Packets/Item.cpp:121-127`): the paper's bag and
+/// slot, then the target's. The server refuses with `SMSG_INVENTORY_CHANGE_FAILURE`; success is
+/// only field updates, the target taking the paper's gift entry and `ITEM_DYNFLAG_WRAPPED`.
 pub fn wrap_item(gift_bag: u8, gift_slot: u8, item_bag: u8, item_slot: u8) -> Vec<u8> {
     vec![gift_bag, gift_slot, item_bag, item_slot]
 }
 
-/// Body of `CMSG_AUTOEQUIP_ITEM` (VERIFIED vmangos `AutoEquipItem::ReadFromWorldPacket`,
-/// `Server/Packets/Item.cpp:17-21` + `.h:31-39`; opcode 266 `Opcodes_1_12_1.h:269`): source
-/// `srcbag`/`srcslot` (both `uint8`), the same bag addressing as [`use_item`]. The real client
-/// sends this — not USE_ITEM — when the clicked bag item is *equippable* (the equip-vs-use fork is
-/// client-side); the server picks the destination slot itself. Refusals answer
-/// `SMSG_INVENTORY_CHANGE_FAILURE`.
+/// Body of `CMSG_AUTOEQUIP_ITEM` (opcode 266, `Server/Packets/Item.cpp:17-21`): source bag and
+/// slot. The reference sends it instead of `CMSG_USE_ITEM` for an equippable item; the server
+/// picks the slot.
 pub fn auto_equip_item(bag_index: u8, slot: u8) -> Vec<u8> {
     vec![bag_index, slot]
 }
 
-/// Body of `CMSG_AUTOSTORE_BAG_ITEM` (VERIFIED vmangos `AutoStoreBagItem::ReadFromWorldPacket`,
-/// `Server/Packets/Item.cpp:23-28` + `.h:41-49`; opcode 267 `Opcodes_1_12_1.h:270`): `srcbag`,
-/// `srcslot`, `dstbag` — all `uint8`. "Auto-store this item into that bag, server picks the slot."
-/// Builder only tonight (backpack-internal moves take [`swap_inv_item`]); no UI path yet.
+/// Body of `CMSG_AUTOSTORE_BAG_ITEM` (opcode 267, `Server/Packets/Item.cpp:23-28`): source bag
+/// and slot, then the bag to store into; the server picks the slot.
 pub fn auto_store_bag_item(src_bag: u8, src_slot: u8, dst_bag: u8) -> Vec<u8> {
     vec![src_bag, src_slot, dst_bag]
 }
 
-/// Body of `CMSG_SWAP_ITEM` (VERIFIED vmangos `SwapItem::ReadFromWorldPacket`,
-/// `Server/Packets/Item.cpp:30-36` + `.h:51-61`; opcode 268 `Opcodes_1_12_1.h:271`): `dstbag`,
-/// `dstslot`, `srcbag`, `srcslot` — all `uint8`, **destination FIRST**. The general bag↔bag move
-/// (either endpoint an equipped bag). Builder only tonight; the windowed backpack's internal moves
-/// go out as [`swap_inv_item`].
+/// Body of `CMSG_SWAP_ITEM` (opcode 268, `Server/Packets/Item.cpp:30-36`): destination bag and
+/// slot first, then the source; a move with an equipped bag at either end.
 pub fn swap_item(dst_bag: u8, dst_slot: u8, src_bag: u8, src_slot: u8) -> Vec<u8> {
     vec![dst_bag, dst_slot, src_bag, src_slot]
 }
 
-/// Body of `CMSG_SWAP_INV_ITEM` (VERIFIED vmangos `SwapInvItem::ReadFromWorldPacket`,
-/// `Server/Packets/Item.cpp:38-42` + `.h:63-72`; opcode 269 `Opcodes_1_12_1.h:272`): `srcslot`,
-/// `dstslot` — two `uint8` player-array slots, both implicitly on the player itself
-/// (`INVENTORY_SLOT_BAG_0`). This is the wire for a backpack-internal pick/place/swap: both slots
-/// are `INVENTORY_SLOT_ITEM_START`+i (see [`SLOT_PACK_FIRST`]). An empty destination is still a
-/// swap on this wire — the server treats it as a move.
+/// Body of `CMSG_SWAP_INV_ITEM` (opcode 269, `Server/Packets/Item.cpp:38-42`): source then
+/// destination slot in the player's own array; an empty destination makes it a move.
 pub fn swap_inv_item(src_slot: u8, dst_slot: u8) -> Vec<u8> {
     vec![src_slot, dst_slot]
 }
 
-/// Body of `CMSG_SPLIT_ITEM` (VERIFIED vmangos `SplitItem::ReadFromWorldPacket`,
-/// `Server/Packets/Item.cpp:44-51` + `.h:74-85`; opcode 270 `Opcodes_1_12_1.h:273`): `srcbag`,
-/// `srcslot`, `dstbag`, `dstslot`, `count` — all `uint8`. Builder only: the UI split dialog is out
-/// of scope, but the wire is pinned so a later stack-split slice has a byte-exact starting point.
+/// Body of `CMSG_SPLIT_ITEM` (opcode 270, `Server/Packets/Item.cpp:44-51`): source bag and slot,
+/// destination bag and slot, count.
 pub fn split_item(src_bag: u8, src_slot: u8, dst_bag: u8, dst_slot: u8, count: u8) -> Vec<u8> {
     vec![src_bag, src_slot, dst_bag, dst_slot, count]
 }
 
-/// Body of `CMSG_DESTROYITEM` (VERIFIED vmangos `Packets/Item.cpp:59-68`; opcode 273
-/// `Opcodes_1_12_1.h`): `bag`, `slot`, `count` (0 = the whole stack — matches [`split_item`]'s
-/// count and the app's `container_destroys` triple), then THREE more `uint8`s the server reads
-/// off the wire and discards — the real client sends them, so the body stays 6 bytes rather than
-/// a shorter, non-matching one. Decision 0216 §3: the delete-confirm popup's `OnAccept`
-/// (`DeleteCursorItem`).
+/// Body of `CMSG_DESTROYITEM` (opcode 273, `Packets/Item.cpp:59-68`): bag, slot, count (0 for the
+/// whole stack), then three bytes the reference sends and the server discards.
 pub fn destroy_item(bag: u8, slot: u8, count: u8) -> Vec<u8> {
     vec![bag, slot, count, 0, 0, 0]
 }
 
-/// Body of `CMSG_SET_AMMO` (VERIFIED wow-re `cursor-dragdrop-slots.md`: the client's auto-equip
-/// sender `0x5e1480` forks ammo-class → opcode `0x268`, body `{itemEntry}` (a single `u32`); the
-/// vmangos handler `HandleSetAmmoOpcode` reads the same lone `uint32` entry). Unlike every other
-/// item CMSG this is NOT a `(bag, slot)` address — ammo is loaded by item *entry*, and the stack
-/// stays put in the bag (`PLAYER_AMMO_ID` just references it). The server refuses a mismatch
-/// (`EQUIP_ERR_ONLY_AMMO_CAN_GO_HERE` &c.) via `SMSG_INVENTORY_CHANGE_FAILURE`. Decision 0526.
+/// Body of `CMSG_SET_AMMO` (opcode `0x268`): the ammo's item entry, not a bag and slot; the
+/// reference's auto-equip sender (`0x5e1480`) sends it for ammo, and the stack stays in its bag.
 pub fn set_ammo(entry: u32) -> Vec<u8> {
     entry.to_le_bytes().to_vec()
 }
 
-/// Read `SMSG_INVENTORY_CHANGE_FAILURE` (VERIFIED vmangos `InventoryChangeFailure::AppendBodyTo`):
-/// `u8 reason` (`InventoryResult`; 0 = OK, no tail), then — only when failed — a `u32` required
-/// level *iff* `reason == 1` (`CANT_EQUIP_LEVEL_I`), the two full item guids, and the bag slot.
-///
-/// The trailing `u8` is **the destination bag's absolute player slot**, not a subslot: vmangos
-/// declares it *"slot of target bag that has storing condition (can be InventorySlots or
-/// BankBagSlots)"* and fills it with `bagSlot = bag` at each `CanStoreItem` refusal
-/// (`Player.cpp:8899`ff), where `bag` is `INVENTORY_SLOT_BAG_0` (255, the player's own array) or
-/// an equipped bag's slot. The reference reads it the same way — its reason-16 helper
-/// `0x5ede00` bails on `slot == 0xFF` and otherwise indexes the player's slot array by it (wow-re
-/// `inventory-change-failure-display.md` §6). It is the `%s` source of *"Only Arrows can be
-/// placed in that."*; see `benilla::ui_items::feed`.
-///
-/// Returns `(reason, required_level, item_guid, bag_slot)`.
+/// Read `SMSG_INVENTORY_CHANGE_FAILURE` into `(reason, required_level, item_guid, bag_slot)`: a
+/// `u8` reason and, unless it is 0, a `u32` level for reason 1 only, two item guids and a bag
+/// slot. That slot is the target bag's player-array slot, 255 for the player's own
+/// (`Player.cpp:8899`); the reference names that bag in reason 16's message (`0x5ede00`).
 pub(super) fn read_inventory_change_failure(
     r: &mut &[u8],
 ) -> io::Result<(u8, Option<u32>, u64, u8)> {
@@ -805,30 +584,29 @@ pub(super) fn read_inventory_change_failure(
     Ok((reason, required_level, item_guid, bag_slot))
 }
 
-/// Read `SMSG_ITEM_TIME_UPDATE` (VERIFIED vmangos `Item::SendTimeUpdate`,
-/// `Objects/Item.cpp:1096-1106`): the item guid, then the remaining **seconds**
-/// (`ITEM_FIELD_DURATION`, which vmangos counts down in seconds — `Item::UpdateDuration`,
-/// `Item.cpp:243-257`). No trailing player guid on this one, unlike its enchant sibling: the
-/// packet is `(8 + 4)` bytes and vmangos sizes it exactly so.
-///
-/// Sent on world enter for every carried duration item (`Player::SendItemDurations`,
-/// `Player.cpp:12007`) and again whenever one is created or its duration changes
-/// (`Player.cpp:19782-19785`).
+/// Read `SMSG_ITEM_TIME_UPDATE` (`Objects/Item.cpp:1096-1106`): item guid, then seconds left, and
+/// no player guid after. Sent for every duration item on world enter and on each change.
 pub(super) fn read_item_time(r: &mut &[u8]) -> io::Result<(u64, u32)> {
     let item_guid = read_u64_le(r)?;
     let seconds = read_u32_le(r)?;
     Ok((item_guid, seconds))
 }
 
-/// Read `SMSG_ITEM_ENCHANT_TIME_UPDATE` (VERIFIED vmangos
-/// `WorldPackets::Item::ItemEnchantTimeUpdate::AppendBodyTo`, `Server/Packets/Item.cpp:161-169`):
-/// item guid, enchant **slot**, remaining **seconds**, then the owning player's guid (present from
-/// build 1.10.2 up, so always in 1.12). Returns `(item_guid, slot, seconds)`; the trailing player
-/// guid is dropped — the packet only ever concerns our own items and the item guid already names
-/// which one.
-///
-/// `seconds == 0` means expired, and the reference stores that as **no timer** (`0x5d9cc0` writes
-/// a `0` deadline whenever `seconds <= 0`), not as "0 seconds left".
+/// Read `SMSG_OPEN_CONTAINER`, the bag's guid, sent when an auto-equip lands in a bag slot
+/// (`ItemHandler.cpp:227`); the reference fires only `BAG_OPEN` from it.
+pub(super) fn read_open_container(r: &mut &[u8]) -> io::Result<u64> {
+    read_u64_le(r)
+}
+
+/// Read `SMSG_INSPECT`, the echoed target guid (`MiscHandler.cpp:957`); the reference's handler
+/// (`0x5e7d70`) ignores it.
+pub(super) fn read_inspect(r: &mut &[u8]) -> io::Result<u64> {
+    read_u64_le(r)
+}
+
+/// Read `SMSG_ITEM_ENCHANT_TIME_UPDATE` (`Server/Packets/Item.cpp:161-169`): item guid, slot,
+/// seconds, then our own guid, left unread. The reference stores 0 seconds as no timer
+/// (`0x5d9cc0`), not as a timer at zero.
 pub(super) fn read_item_enchant_time(r: &mut &[u8]) -> io::Result<(u64, u32, u32)> {
     let item_guid = read_u64_le(r)?;
     let slot = read_u32_le(r)?;
@@ -840,11 +618,34 @@ pub(super) fn read_item_enchant_time(r: &mut &[u8]) -> io::Result<(u64, u32, u32
 mod tests {
     use super::*;
 
-    // The `SMSG_ITEM_QUERY_SINGLE_RESPONSE` parse goldens (hit + miss, byte-exact against the
-    // vmangos field order) live in `tests/items.rs` — one home, no drifting twins.
+    // The query-response parse goldens are in `tests/items.rs`; do not duplicate them here.
 
-    // Byte-exact encode goldens — the item-move CMSG bodies (VERIFIED field order + widths against
-    // vmangos `Server/Packets/Item.cpp` `ReadFromWorldPacket`s; every field is a `uint8`).
+    // Item-move body goldens follow vmangos `Server/Packets/Item.cpp`; every field is a `u8`.
+
+    #[test]
+    fn open_container_decodes() {
+        let body = 0x4000_0000_0012_3456u64.to_le_bytes();
+        match crate::messages::parse_server(crate::messages::opcode::SMSG_OPEN_CONTAINER, &body)
+            .unwrap()
+        {
+            crate::messages::ServerPacket::OpenContainer { item } => {
+                assert_eq!(item, 0x4000_0000_0012_3456);
+            }
+            other => panic!("expected OpenContainer, got {}", other.name()),
+        }
+    }
+
+    #[test]
+    fn inspect_decodes_and_is_ignored() {
+        let body = 0x0000_0000_0000_0007u64.to_le_bytes();
+        let packet =
+            crate::messages::parse_server(crate::messages::opcode::SMSG_INSPECT, &body).unwrap();
+        assert!(matches!(
+            packet,
+            crate::messages::ServerPacket::Inspect { guid: 7 }
+        ));
+        assert!(crate::events::decode(packet).is_empty());
+    }
 
     #[test]
     fn auto_equip_item_body() {
@@ -854,8 +655,10 @@ mod tests {
 
     #[test]
     fn wrap_item_body_paper_first() {
-        // 467: giftbag, giftslot, itembag, itemslot (Item.cpp:121-127) — the PAPER's pair leads.
+        // 467: giftbag, giftslot, itembag, itemslot (Item.cpp:121-127).
         assert_eq!(wrap_item(255, 23, 255, 24), vec![255, 23, 255, 24]);
+        // Paper in the first bag's slot 3, the target in backpack slot 24: four distinct bytes.
+        assert_eq!(wrap_item(19, 3, 255, 24), vec![19, 3, 255, 24]);
     }
 
     #[test]
@@ -866,19 +669,19 @@ mod tests {
 
     #[test]
     fn swap_item_body_destination_first() {
-        // 268: dstbag, dstslot, srcbag, srcslot — destination pair FIRST (Item.cpp:30-36).
+        // 268: dstbag, dstslot, srcbag, srcslot (Item.cpp:30-36).
         assert_eq!(swap_item(19, 3, 255, 30), vec![19, 3, 255, 30]);
     }
 
     #[test]
     fn swap_inv_item_body() {
-        // 269: srcslot, dstslot (Item.cpp:38-42). Backpack slot 1↔2 = player-array 23↔24.
+        // 269: srcslot, dstslot (Item.cpp:38-42); backpack slots 1 and 2 are 23 and 24.
         assert_eq!(swap_inv_item(23, 24), vec![23, 24]);
     }
 
     #[test]
     fn set_ammo_body() {
-        // 616 (0x268): a lone little-endian u32 item entry (wow-re cursor-dragdrop-slots.md).
+        // 616 (0x268): a lone little-endian u32 item entry.
         assert_eq!(set_ammo(0x0001_6b74), vec![0x74, 0x6b, 0x01, 0x00]);
     }
 
@@ -894,13 +697,10 @@ mod tests {
         assert_eq!(destroy_item(255, 23, 0), vec![255, 23, 0, 0, 0, 0]);
     }
 
-    // SMSG_INVENTORY_CHANGE_FAILURE parse — both branches of the conditional `requiredLevel u32`
-    // (VERIFIED vmangos `InventoryChangeFailure::AppendBodyTo`, `Item.cpp:198-209`;
-    // EQUIP_ERR_CANT_EQUIP_LEVEL_I = 1, `Objects/ItemDefines.h`).
+    // Reason 1 is `EQUIP_ERR_CANT_EQUIP_LEVEL_I` (`Objects/ItemDefines.h`, `Item.cpp:198-209`).
 
     #[test]
     fn inventory_failure_ok_reason_is_bare() {
-        // reason 0 (EQUIP_ERR_OK) ships no tail.
         let buf = [0u8];
         let mut r = &buf[..];
         assert_eq!(
@@ -911,7 +711,6 @@ mod tests {
 
     #[test]
     fn inventory_failure_level_branch_reads_the_u32() {
-        // reason 1 (CANT_EQUIP_LEVEL_I): requiredLevel u32, item1Guid u64, item2Guid u64, bagSlot u8.
         let mut buf = Vec::new();
         buf.push(1u8); // reason
         buf.extend_from_slice(&40u32.to_le_bytes()); // requiredLevel
@@ -925,9 +724,6 @@ mod tests {
         );
     }
 
-    /// `SMSG_ITEM_ENCHANT_TIME_UPDATE`'s body, byte-exact against vmangos's writer: guid, slot,
-    /// seconds, then the player guid we drop. Pinned because a wrong width here would silently
-    /// park a garbage deadline (decision 0920).
     #[test]
     fn item_enchant_time_reads_guid_slot_seconds() {
         let mut buf = Vec::new();
@@ -940,13 +736,10 @@ mod tests {
             read_item_enchant_time(&mut r).unwrap(),
             (0x4000_0000_0000_00f7, 1, 600)
         );
-        // The trailing player guid stays unread — the reader consumes exactly its three fields.
+        // The trailing player guid stays unread.
         assert_eq!(r.len(), 8);
     }
 
-    /// `SMSG_ITEM_TIME_UPDATE`'s body: guid then seconds, and **nothing after** — the enchant
-    /// twin's trailing player guid is not on this packet (vmangos sizes it `8 + 4`). Pinned
-    /// because the two share a handler and it would be easy to copy the wrong tail.
     #[test]
     fn item_time_reads_guid_then_seconds() {
         let mut buf = Vec::new();
@@ -962,9 +755,8 @@ mod tests {
 
     #[test]
     fn inventory_failure_nonlevel_branch_has_no_u32() {
-        // Any failed reason != 1 skips requiredLevel: item1Guid u64, item2Guid u64, bagSlot u8.
         let mut buf = Vec::new();
-        buf.push(3u8); // reason (ITEM_DOESNT_GO_TO_SLOT) — no requiredLevel
+        buf.push(3u8); // reason (ITEM_DOESNT_GO_TO_SLOT)
         buf.extend_from_slice(&0xDEAD_BEEF_0000_0001u64.to_le_bytes()); // item1
         buf.extend_from_slice(&0u64.to_le_bytes()); // item2
         buf.push(0); // bagSlot

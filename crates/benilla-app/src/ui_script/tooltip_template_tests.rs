@@ -99,6 +99,7 @@ fn drawn_textures(s: &mut UiScript) -> Vec<String> {
 /// itself never publishes a line region.
 #[test]
 fn an_addon_tooltip_from_the_template_names_its_lines_after_the_caller() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     // AtlasLoot/Core/AtlasLoot.xml l.576's declaration, renamed.
     let report = load_addon_xml(
@@ -168,6 +169,7 @@ fn an_addon_tooltip_from_the_template_names_its_lines_after_the_caller() {
 /// Strip `<Backdrop>` out of `GameTooltipTemplate` and this is the assertion that goes red.
 #[test]
 fn an_addon_tooltip_from_the_template_gets_the_plate() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     load_addon_xml(
         &s,
@@ -214,6 +216,7 @@ fn an_addon_tooltip_from_the_template_gets_the_plate() {
 /// Asserted from both sides: no error, and the tint actually landed.
 #[test]
 fn an_addon_may_call_gametooltip_onload_the_reference_way_with_no_argument() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     let report = load_addon_xml(
         &s,
@@ -240,7 +243,7 @@ fn an_addon_may_call_gametooltip_onload_the_reference_way_with_no_argument() {
 
     // The tint the bare call was there to apply (ref-GameTooltip.lua l.79-82's two colours),
     // QUANTIZED: the reference's backdrop colour field is a packed `0xAARRGGBB` byte quad and the
-    // setter converts `×255 + 0.5` through `__ftol` (wow-re `numeric-arg-coercion-law.md` Q4), so
+    // setter converts `×255 + 0.5` through `__ftol` (`SetBackdropColor 0x777d30`), so
     // `0.09` stores as 23 and reads back as `23/255`. This used to compare against `0.09` exactly,
     // which was our lossless `[f32; 4]` showing through a store the client cannot make.
     let q = |x: f32| f32::from((x * 255.0 + 0.5) as u8) / 255.0;
@@ -266,6 +269,7 @@ fn an_addon_may_call_gametooltip_onload_the_reference_way_with_no_argument() {
 /// owns the children, and the plate came along.
 #[test]
 fn createframe_with_the_template_is_the_same_tooltip() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     // BetterCharacterStats/helper.lua l.3, verbatim in shape (its `getglobal(...) or` guard and
     // the WorldFrame owner both collapse to this in a fresh VM).
@@ -305,6 +309,7 @@ fn createframe_with_the_template_is_the_same_tooltip() {
 /// an explicit `Hide()` between passes (l.1832). Both read `TextRight` as well as `TextLeft`.
 #[test]
 fn the_scanner_shape_reads_both_columns_and_hides_again() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     load_addon_xml(
         &s,
@@ -368,6 +373,7 @@ fn the_scanner_shape_reads_both_columns_and_hides_again() {
 /// instance, which is where it lived while it was inlined.
 #[test]
 fn the_status_bar_is_the_templates_because_tipbuddy_anchors_to_it() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     let report = load_addon_xml(
         &s,
@@ -423,6 +429,7 @@ fn the_status_bar_is_the_templates_because_tipbuddy_anchors_to_it() {
 /// would notice.
 #[test]
 fn an_instance_attribute_beats_the_templates() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     load_addon_xml(
         &s,
@@ -461,6 +468,7 @@ fn an_instance_attribute_beats_the_templates() {
 /// so 30 hidden pairs add no height and no width.
 #[test]
 fn the_tooltip_line_globals_exist_cold_and_do_not_count_as_lines() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
 
     for name in [

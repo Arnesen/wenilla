@@ -1,7 +1,4 @@
-//! Simple bare-scalar server packets — bodies too trivial to need golden hex from a validated
-//! implementation: auth challenge/new-world/login-timespeed, the server-pushed sound trio, and
-//! weather. Split out of the former `tests/messages.rs` — see `tests/common` for the shared
-//! fixtures and methodology note.
+//! Server packets with small fixed bodies, parsed and decoded against hand-built bytes.
 
 mod common;
 
@@ -12,12 +9,11 @@ use common::hx;
 
 #[test]
 fn simple_server_bodies_parse() {
-    // SMSG_AUTH_CHALLENGE: just a u32 seed.
     match messages::parse_server(messages::opcode::SMSG_AUTH_CHALLENGE, &hx("efbeadde")).unwrap() {
         ServerPacket::AuthChallenge { server_seed } => assert_eq!(server_seed, 0xDEAD_BEEF),
         _ => panic!("auth challenge"),
     }
-    // SMSG_NEW_WORLD: map u32=1, position (1,2,3), orientation 0.5.
+    // SMSG_NEW_WORLD: u32 map, f32 x/y/z, f32 orientation.
     let nw = hx("010000000000803f0000004000004040000000bf");
     match messages::parse_server(messages::opcode::SMSG_NEW_WORLD, &nw).unwrap() {
         ServerPacket::NewWorld {
@@ -31,9 +27,8 @@ fn simple_server_bodies_parse() {
         }
         _ => panic!("new world"),
     }
-    // SMSG_LOGIN_SETTIMESPEED: packed DateTime (LSB up: minute:6, hour:5, weekday:3, day:6,
-    // month:4, year:5) with 14:30 on year 26 / month 6 / day 17; timescale. The day serial
-    // flattens the date with the packed convention's 31-day months: 26·372 + 6·31 + 17 = 9875.
+    // SMSG_LOGIN_SETTIMESPEED: packed date (LSB up: minute:6, hour:5, weekday:3, day:6, month:4,
+    // year:5) then f32 timescale. The day serial counts 31-day months: year·372 + month·31 + day.
     let datetime: u32 = (26 << 24) | (6 << 20) | (17 << 14) | (14 << 6) | 30;
     let mut ts = datetime.to_le_bytes().to_vec();
     ts.extend_from_slice(&0.0166_6667f32.to_le_bytes());
@@ -52,22 +47,15 @@ fn simple_server_bodies_parse() {
     }
 }
 
-/// The server wall clock (`CMSG_QUERY_TIME` 462 / `SMSG_QUERY_TIME_RESPONSE` 463, decision 1150):
-/// an empty request body, and a response of one LE `u32` of unix-epoch seconds — the epoch a timed
-/// quest's descriptor deadline is written in.
-///
-/// Byte-exact against the vmangos sender (`WorldSession::SendQueryTimeResponse`,
-/// `Handlers/QueryHandler.cpp:418-423` — `packet->time = (uint32)time(nullptr)`, that field and
-/// nothing else). The sample is a real present-day stamp with all four bytes distinct, so a byte
-/// order or width slip reads as a wildly wrong date rather than a plausible one.
+/// The response is one u32 of unix-epoch seconds (vmangos `Handlers/QueryHandler.cpp:418-423`).
 #[test]
-fn query_time_round_trips_the_server_wall_clock() {
+fn query_time_asks_empty_and_decodes_the_server_wall_clock() {
     assert!(
         messages::query_time().is_empty(),
         "CMSG_QUERY_TIME is a NullClientPacket"
     );
 
-    // 2026-08-13T12:00:00Z = 1_786_622_400 = 0x6a7db1c0.
+    // 2026-08-13T12:00:00Z = 1_786_622_400 = 0x6a7db1c0: four distinct bytes.
     assert_eq!(u32::from_le_bytes([0xc0, 0xb1, 0x7d, 0x6a]), 1_786_622_400);
     let p = messages::parse_server(messages::opcode::SMSG_QUERY_TIME_RESPONSE, &hx("c0b17d6a"))
         .unwrap();
@@ -84,19 +72,16 @@ fn query_time_round_trips_the_server_wall_clock() {
         }]
     ));
 
-    // A short body is an error, not a silent zero: every countdown drawn from this clock would
-    // otherwise be wrong rather than absent.
     assert!(
         messages::parse_server(messages::opcode::SMSG_QUERY_TIME_RESPONSE, &hx("c0b17d")).is_err()
     );
 }
 
-/// The cinematic trigger (opcode 250, body a bare `CinematicSequences.dbc` id u32 per the vmangos
-/// `SendCinematicStart` sender) parses and decodes to the event the Net drain must ack — and the
-/// char-delete result (opcode 60, one result byte) parses.
+/// `SMSG_TRIGGER_CINEMATIC` is one u32 `CinematicSequences.dbc` id; `SMSG_CHAR_DELETE` one byte,
+/// which the handshake consumes, so it decodes to no event.
 #[test]
 fn cinematic_and_char_delete_parse_and_decode() {
-    // SMSG_TRIGGER_CINEMATIC: u32 cinematic id (41 = the dwarf intro, live-captured 2026-07-07).
+    // 41 = the dwarf intro.
     let body = 41u32.to_le_bytes();
     let p = messages::parse_server(messages::opcode::SMSG_TRIGGER_CINEMATIC, &body).unwrap();
     assert!(matches!(
@@ -108,16 +93,14 @@ fn cinematic_and_char_delete_parse_and_decode() {
         [SessionEvent::CinematicTriggered { cinematic_id: 41 }]
     ));
 
-    // SMSG_CHAR_DELETE: one result byte (0x39 = success, live-verified).
+    // 0x39 = CHAR_DELETE_SUCCESS.
     let p = messages::parse_server(messages::opcode::SMSG_CHAR_DELETE, &[0x39]).unwrap();
     assert!(matches!(p, ServerPacket::CharDelete { result: 0x39 }));
+    assert!(decode(p).is_empty());
 }
 
-/// The server-pushed sound trio (opcodes vmangos `Opcodes_1_12_1.h` 631/632/722; bodies are bare
-/// LE scalars per the vmangos senders): each parses to its packet and decodes to one event.
 #[test]
 fn server_sound_trio_parse_and_decode() {
-    // SMSG_PLAY_SOUND: u32 soundId.
     let body = 8595u32.to_le_bytes();
     let p = messages::parse_server(messages::opcode::SMSG_PLAY_SOUND, &body).unwrap();
     assert!(matches!(p, ServerPacket::PlaySound { sound_id: 8595 }));
@@ -126,7 +109,6 @@ fn server_sound_trio_parse_and_decode() {
         [SessionEvent::PlaySound { sound_id: 8595 }]
     ));
 
-    // SMSG_PLAY_MUSIC: u32 musicId.
     let body = 2523u32.to_le_bytes();
     let p = messages::parse_server(messages::opcode::SMSG_PLAY_MUSIC, &body).unwrap();
     assert!(matches!(
@@ -134,8 +116,7 @@ fn server_sound_trio_parse_and_decode() {
         [SessionEvent::PlayMusic { music_id: 2523 }]
     ));
 
-    // SMSG_PLAY_OBJECT_SOUND: u32 soundId + u64 guid (the fishing-bobber splash, vmangos
-    // GameObject.cpp:373 sends exactly soundId 3355).
+    // 3355: the fishing-bobber splash (vmangos `GameObject.cpp:373`).
     let mut body = 3355u32.to_le_bytes().to_vec();
     body.extend_from_slice(&0xF110_0000_0000_002Au64.to_le_bytes());
     let p = messages::parse_server(messages::opcode::SMSG_PLAY_OBJECT_SOUND, &body).unwrap();
@@ -148,9 +129,7 @@ fn server_sound_trio_parse_and_decode() {
     ));
 }
 
-/// SMSG_WEATHER (opcode vmangos 756; body `u32 type, f32 grade, u32 soundId, u8 instant` per
-/// `Weather::SendWeatherForPlayersInZone`, 1.12 branch): parses and decodes to one event, with
-/// the soundId being a real SoundEntries loop kit (8534 = RainMedium).
+/// Body per vmangos `Weather::SendWeatherForPlayersInZone`; 8534 is the RainMedium sound loop.
 #[test]
 fn weather_parses_and_decodes() {
     let mut body = 1u32.to_le_bytes().to_vec(); // WEATHER_TYPE_RAIN
@@ -172,13 +151,11 @@ fn weather_parses_and_decodes() {
     }
 }
 
-/// `SMSG_SET_PROFICIENCY` (295): u8 itemClass + u32 subclass bitmask (vmangos `Skill.h` /
-/// `Skill.cpp AppendBodyTo`) — parses and decodes to the proficiency event the item tooltip's
-/// slot-line red reads.
+/// u8 itemClass + u32 subclass bitmask, per vmangos `Skill.cpp` `AppendBodyTo`.
 #[test]
 fn set_proficiency_parses_and_decodes() {
     assert_eq!(messages::opcode::SMSG_SET_PROFICIENCY, 295);
-    // Weapons (class 2), mask 0x2408F: the fresh-warrior shape.
+    // Weapons (class 2), mask 0x2408F: what a fresh warrior gets.
     let body = hx("028f400200");
     let p = messages::parse_server(messages::opcode::SMSG_SET_PROFICIENCY, &body).unwrap();
     match p {
@@ -201,13 +178,11 @@ fn set_proficiency_parses_and_decodes() {
     ));
 }
 
-/// `SMSG_SET_FACTION_STANDING` (292): u32 count + count x (u32 reputationListId, i32 standing)
-/// (vmangos `ReputationMgr::SendState` / `SetFactionStanding::AppendBodyTo`) — the mid-session
-/// standing delta the reputation red re-ranks from.
+/// u32 count + count x (u32 reputationListId, i32 standing), per vmangos `SetFactionStanding`.
 #[test]
 fn set_faction_standing_parses_and_decodes() {
     assert_eq!(messages::opcode::SMSG_SET_FACTION_STANDING, 292);
-    // Two slots: list 46 -> 3000, list 89 -> -6000 (a standing can go down).
+    // Two slots: list 46 -> 3000, list 89 -> -6000 (standing is signed).
     let body = hx("020000002e000000b80b00005900000090e8ffff");
     let p = messages::parse_server(messages::opcode::SMSG_SET_FACTION_STANDING, &body).unwrap();
     match p {
@@ -223,17 +198,10 @@ fn set_faction_standing_parses_and_decodes() {
     ));
 }
 
-/// The dropped-packet tally feed (the wire-coverage instrument): an opcode with no parse arm falls
-/// through to `ServerPacket::Other` and MUST decode to a `PacketDropped` event (not silence) so the
-/// app can tally the gap — and the generated 1.12.1 name table resolves both known and unassigned
-/// opcode numbers.
+/// An opcode with no parse arm decodes to `PacketDropped`, not silence, so the app can tally it.
 #[test]
 fn unknown_opcode_decodes_to_packet_dropped() {
-    // 0x021E = SMSG_SET_REST_START — assigned in 1.12.1 but deliberately unparsed by benilla.
-    // (The sentinel used to be 0x0319 `MSG_MOVE_TIME_SKIPPED`, which decision 1935 gave a parse
-    // arm; then 0x0324 `SMSG_PET_ACTION_SOUND`, which decision 2039 gave one — the pet's voice
-    // turned out to drive two real `CreatureSoundData` columns. A sentinel earning a parse arm is
-    // this test working, not this test breaking.)
+    // Sentinel: SMSG_SET_REST_START (0x021E) has no parse arm; swap in another if it gains one.
     let packet = messages::parse_server(0x021E, &hx("0102030405")).unwrap();
     assert!(matches!(packet, ServerPacket::Other { opcode: 0x021E }));
     match decode(packet).as_slice() {
@@ -243,7 +211,6 @@ fn unknown_opcode_decodes_to_packet_dropped() {
         }] => {}
         other => panic!("expected one PacketDropped event, got {other:?}"),
     }
-    // The generated name table: a known opcode resolves, an unassigned number doesn't.
     assert_eq!(messages::opcode_name(0x021E), Some("SMSG_SET_REST_START"));
     assert_eq!(
         messages::opcode_name(messages::opcode::SMSG_UPDATE_OBJECT),
@@ -252,16 +219,11 @@ fn unknown_opcode_decodes_to_packet_dropped() {
     assert_eq!(messages::opcode_name(0xFFFF), None);
 }
 
-/// The death arc's wire family (decision 0308): the corpse query answer (both shapes + the
-/// dungeon-entrance map split), the reclaim delay, a resurrect request, the spirit-healer
-/// confirm, and the ack'd movement-flag family with its PACKED mover guid — all through
-/// `parse_server` and the event decode.
 #[test]
 fn death_arc_family_parses_and_decodes() {
     use benilla_protocol::messages::opcode;
 
-    // MSG_CORPSE_QUERY, found: u8(1), i32 map 0, xyz, u32 corpsemap 36 (a dungeon corpse whose
-    // display coords were entrance-rewritten — the two maps deliberately differ).
+    // Found: a dungeon corpse reports its entrance's map and coords, so the two maps differ.
     let mut body = vec![1u8];
     body.extend_from_slice(&0i32.to_le_bytes());
     body.extend_from_slice(&(-11209.6f32).to_le_bytes());
@@ -283,14 +245,13 @@ fn death_arc_family_parses_and_decodes() {
         }
         other => panic!("corpse query decode: {other:?}"),
     }
-    // The unprompted not-found shape (bones conversion): the lone u8(0).
+    // Not found, also sent unprompted when the corpse turns to bones: a lone u8 0.
     let pkt = messages::parse_server(opcode::MSG_CORPSE_QUERY, &[0u8]).unwrap();
     match decode(pkt).as_slice() {
         [SessionEvent::CorpseQuery { found: false, .. }] => {}
         other => panic!("corpse query not-found decode: {other:?}"),
     }
 
-    // SMSG_CORPSE_RECLAIM_DELAY: u32 ms.
     let pkt = messages::parse_server(opcode::SMSG_CORPSE_RECLAIM_DELAY, &30_000u32.to_le_bytes())
         .unwrap();
     match decode(pkt).as_slice() {
@@ -313,7 +274,6 @@ fn death_arc_family_parses_and_decodes() {
         other => panic!("resurrect request decode: {other:?}"),
     }
 
-    // SMSG_SPIRIT_HEALER_CONFIRM: one full guid.
     let pkt = messages::parse_server(
         opcode::SMSG_SPIRIT_HEALER_CONFIRM,
         &0xF130_0000_0000_2AB3u64.to_le_bytes(),
@@ -326,10 +286,6 @@ fn death_arc_family_parses_and_decodes() {
         other => panic!("spirit healer confirm decode: {other:?}"),
     }
 
-    // **The whole ack'd movement-mode family, all eight opcodes** (decision 0866): one wire shape,
-    // PACKED guid + u32 counter. Guid 0x2A packs as mask 0x01 + one byte. Every pair is exercised,
-    // because the family's whole point is that adding a mode must not need a new lane — and because
-    // the four that were missing (feather-fall, hover) were missing *silently*.
     let body = hx("012a07000000"); // packed(0x2A) + counter 7
     for (op, mode, apply) in [
         (opcode::SMSG_FORCE_MOVE_ROOT, MoveMode::Root, true),
@@ -353,16 +309,13 @@ fn death_arc_family_parses_and_decodes() {
         }
     }
 
-    // The mode→bit map, VERIFIED vmangos `Objects/MovementInfo.h:25-62`. These are the bits the
-    // mover reads and the ack echoes, so a transcription slip here is silent everywhere else.
+    // The movement-flag bits (vmangos `Objects/MovementInfo.h:25-62`).
     assert_eq!(MoveMode::Root.flag(), 0x0000_1000);
     assert_eq!(MoveMode::WaterWalk.flag(), 0x1000_0000);
     assert_eq!(MoveMode::FeatherFall.flag(), 0x2000_0000);
     assert_eq!(MoveMode::Hover.flag(), 0x4000_0000);
 
-    // Root is the ONLY mode whose ack opcode differs by direction, and the only one whose ack body
-    // carries no trailing apply dword — vmangos routes it to `HandleMoveRootAck`, the other three to
-    // `HandleMovementFlagChangeToggleAck` (`Server/Protocol/Opcodes.cpp:314-816`).
+    // Root alone acks per direction, with no apply dword (vmangos `HandleMoveRootAck`).
     assert_eq!(
         MoveMode::Root.ack_opcode(true),
         opcode::CMSG_FORCE_MOVE_ROOT_ACK
@@ -382,10 +335,7 @@ fn death_arc_family_parses_and_decodes() {
     }
 }
 
-/// The movement-mode ack bodies (client side): full guid + echoed counter + MovementInfo, with the
-/// trailing `u32 apply` on every mode EXCEPT root (vmangos `Movement.cpp:38-59` — `MoveRootAck` has
-/// no apply dword). The root ack must be exactly 4 bytes shorter than the others for the same
-/// inputs.
+/// Root's ack lacks the trailing u32 apply the other modes carry (vmangos `Movement.cpp:38-59`).
 #[test]
 fn move_flag_ack_bodies_differ_by_the_apply_tail() {
     use benilla_protocol::messages::{move_flag_ack, MovementInfo};
@@ -410,13 +360,12 @@ fn move_flag_ack_bodies_differ_by_the_apply_tail() {
     assert_eq!(root.len() + 4, walk.len());
     assert_eq!(&walk[..root.len()], root.as_slice());
     assert_eq!(&walk[root.len()..], 1u32.to_le_bytes());
-    // The full (unpacked) guid + counter head.
+    // The ack's guid is full, not packed.
     assert_eq!(&root[..8], &0x2Au64.to_le_bytes());
     assert_eq!(&root[8..12], &7u32.to_le_bytes());
 }
 
-/// `SMSG_DURABILITY_DAMAGE_DEATH` (0x2BD): an EMPTY body (vmangos `DurabilityDamageDeath::
-/// AppendBodyTo` writes nothing) parsing to its cue event — the red 10%-loss error line.
+/// `SMSG_DURABILITY_DAMAGE_DEATH` (0x2BD): empty body; the cue for the 10% durability-loss line.
 #[test]
 fn durability_damage_death_is_an_empty_body_cue() {
     let pkt = messages::parse_server(messages::opcode::SMSG_DURABILITY_DAMAGE_DEATH, &[]).unwrap();
@@ -427,14 +376,10 @@ fn durability_damage_death_is_an_empty_body_cue() {
     ));
 }
 
-/// `SMSG_TRANSFER_PENDING` (0x3F): `u32 mapId` alone for an ordinary far teleport; `+ u32
-/// transportEntry + u32 oldMapId` when the player rides a transport through the transfer
-/// (VERIFIED vmangos `Misc.cpp:493-501`). The block's presence routes how NEW_WORLD's
-/// coordinates are read (decision 0455), so both shapes are pinned — and the abort
-/// (`SMSG_TRANSFER_ABORTED`, one reason byte) clears the latch.
+/// u32 mapId, then u32 transportEntry + u32 oldMapId when the player rides a transport through
+/// (vmangos `Misc.cpp:493-501`).
 #[test]
 fn transfer_pending_both_shapes_and_abort_parse_and_decode() {
-    // Plain: mapId 1 (Kalimdor), no transport block.
     let plain =
         messages::parse_server(messages::opcode::SMSG_TRANSFER_PENDING, &hx("01000000")).unwrap();
     assert!(matches!(
@@ -451,7 +396,7 @@ fn transfer_pending_both_shapes_and_abort_parse_and_decode() {
             transport_entry: None
         }]
     ));
-    // Riding: mapId 0 (EK), transportEntry 176310 (0x2B0B6 — the Menethil boat), oldMapId 1.
+    // Riding: 176310 is the Menethil boat, arriving in EK (0) from Kalimdor (1).
     let mut riding = 0u32.to_le_bytes().to_vec();
     riding.extend_from_slice(&176310u32.to_le_bytes());
     riding.extend_from_slice(&1u32.to_le_bytes());
@@ -470,7 +415,6 @@ fn transfer_pending_both_shapes_and_abort_parse_and_decode() {
             transport_entry: Some(176310)
         }]
     ));
-    // Abort: one reason byte.
     let abort = messages::parse_server(messages::opcode::SMSG_TRANSFER_ABORTED, &[2]).unwrap();
     assert!(matches!(abort, ServerPacket::TransferAborted { reason: 2 }));
     assert!(matches!(
@@ -479,19 +423,11 @@ fn transfer_pending_both_shapes_and_abort_parse_and_decode() {
     ));
 }
 
-/// `SMSG_CLIENT_CONTROL_UPDATE` — the possession handoff. Golden hex is hand-derived from
-/// vmangos's builder (`Server/Packets/Misc.cpp:677-682`): `moverGuid.WriteAsPacked()` then
-/// `uint8 allowMove`. The packed form is a mask byte whose bit *i* marks a non-zero byte *i* of
-/// the little-endian u64, followed by exactly those bytes — so the same guid costs a different
-/// number of bytes depending on its value, and getting the mask wrong desynchronises everything
-/// after it in the stream.
-///
-/// **The two cases below are the two the app must tell apart**, and they differ only in a guid:
-/// the server grants control by naming somebody *else* and revokes it by naming *us*.
+/// Packed mover guid then u8 allowMove (vmangos `Server/Packets/Misc.cpp:677-682`).
 #[test]
 fn client_control_update_reads_a_packed_mover_and_the_allow_byte() {
-    // Grant: a creature guid 0xF130000C1A00A2B4 with allowMove = 1. Non-zero LE bytes are
-    // b4 a2 00 1a 0c 00 30 f1 → indices 0,1,3,4,6,7 → mask 0b1101_1011 = 0xdb.
+    // Grant: creature 0xF130000C1A00A2B4, allowMove 1. Mask 0xdb marks its non-zero LE bytes
+    // (b4 a2 00 1a 0c 00 30 f1 → indices 0,1,3,4,6,7), which follow in order.
     let grant = hx("dbb4a21a0c30f101");
     match messages::parse_server(messages::opcode::SMSG_CLIENT_CONTROL_UPDATE, &grant).unwrap() {
         ServerPacket::ClientControlUpdate { mover, allow_move } => {
@@ -500,9 +436,7 @@ fn client_control_update_reads_a_packed_mover_and_the_allow_byte() {
         }
         other => panic!("client control update, got {}", other.name()),
     }
-    // Revoke: our own player guid 0x45 (one non-zero byte, index 0 → mask 0x01) with
-    // allowMove = 0. This is the shape a mind-controlled player receives about themselves, and
-    // the whole of what stops them walking away — vmangos never roots them.
+    // Revoke: our own guid 0x45, allowMove 0; vmangos never roots a mind-controlled player.
     let revoke = hx("014500");
     let revoke = messages::parse_server(messages::opcode::SMSG_CLIENT_CONTROL_UPDATE, &revoke)
         .expect("revoke parses");
@@ -520,8 +454,7 @@ fn client_control_update_reads_a_packed_mover_and_the_allow_byte() {
             allow_move: false
         }]
     ));
-    // A zero guid packs to a lone zero mask byte and no guid bytes at all — the degenerate case
-    // that would read the allow byte AS the guid if the mask were mishandled.
+    // A zero guid packs to a lone zero mask byte, so the very next byte is allowMove.
     let empty = messages::parse_server(messages::opcode::SMSG_CLIENT_CONTROL_UPDATE, &hx("0001"))
         .expect("empty guid parses");
     assert!(matches!(
@@ -533,40 +466,30 @@ fn client_control_update_reads_a_packed_mover_and_the_allow_byte() {
     ));
 }
 
-/// The hunter pet-feedback family (decision 2039) — the three arms that were name-table-only, on
-/// their real bodies.
-///
-/// The two **empty** bodies are the point of half this test: `SMSG_PET_NAME_INVALID` and
-/// `SMSG_PET_BROKEN` carry nothing at all (vmangos's `AppendBodyTo` writes nothing; the
-/// reference's handlers read nothing), so "parses" here means "the opcode alone produced the
-/// event" — and a body that arrives with junk on it must not change that.
 #[test]
 fn pet_feedback_family_parses_and_decodes() {
     use benilla_protocol::messages::opcode;
 
-    // SMSG_PET_TAME_FAILURE: one reason byte. 9 = PETTAME_TOOHIGHLEVEL.
+    // 9 = PETTAME_TOOHIGHLEVEL.
     let p = messages::parse_server(opcode::SMSG_PET_TAME_FAILURE, &hx("09")).unwrap();
     assert!(matches!(p, ServerPacket::PetTameFailure { reason: 9 }));
     assert!(matches!(
         decode(p)[..],
         [SessionEvent::PetTameFailure { reason: 9 }]
     ));
-    // The reason -> GlobalStrings key table, at both ends of the reference's bounds check
-    // (`0x6e6a20`: `reason - 1` bounded at `0xa`) and in the middle.
+    // Reason to GlobalStrings key: the reference bounds `reason - 1` at 0xa (`0x6e6a20`).
     assert_eq!(messages::pet_tame_failure_key(1), "PETTAME_INVALIDCREATURE");
     assert_eq!(
         messages::pet_tame_failure_key(5),
         "PETTAME_ANOTHERSUMMONACTIVE"
     );
     assert_eq!(messages::pet_tame_failure_key(11), "PETTAME_NOTDEAD");
-    // Out of range on BOTH sides falls to the default arm — including vmangos's own 12th value,
-    // which is `PETTAME_UNKNOWNERROR` in the enum and reaches the same string by the other road.
+    // Out of range on either side, vmangos's 12th value included, falls to the default arm.
     assert_eq!(messages::pet_tame_failure_key(0), "PETTAME_UNKNOWNERROR");
     assert_eq!(messages::pet_tame_failure_key(12), "PETTAME_UNKNOWNERROR");
     assert_eq!(messages::pet_tame_failure_key(200), "PETTAME_UNKNOWNERROR");
 
-    // SMSG_PET_NAME_INVALID / SMSG_PET_BROKEN: empty bodies, and unread ones — a body with bytes
-    // on it still decodes to the bare event, because neither handler reads one.
+    // The reference reads no body here (vmangos writes none), so stray bytes change nothing.
     for body in ["", "deadbeef"] {
         let p = messages::parse_server(opcode::SMSG_PET_NAME_INVALID, &hx(body)).unwrap();
         assert!(matches!(p, ServerPacket::PetNameInvalid), "body {body:?}");
@@ -595,10 +518,8 @@ fn pet_feedback_family_parses_and_decodes() {
         }]
     ));
 
-    // SMSG_PET_DISMISS_SOUND: a CreatureModelData id then a raw WoW x/y/z. Model 726, at
-    // (-8949.95, -132.493, 83.5312) — the human starting point, chosen because its bytes are
-    // recognisable if the field order ever slips. The handler's `+1.0` on z is a PLAY detail and
-    // must NOT appear here.
+    // SMSG_PET_DISMISS_SOUND: u32 CreatureModelData id then raw WoW x/y/z (the human start).
+    // The reference handler's +1.0 on z belongs to playback, not to the decode.
     let mut body = hx("d6020000"); // model 726
     for f in [-8949.95_f32, -132.493, 83.5312] {
         body.extend_from_slice(&f.to_le_bytes());

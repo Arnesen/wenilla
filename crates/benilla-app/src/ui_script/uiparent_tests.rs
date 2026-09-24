@@ -37,6 +37,7 @@ fn ui_parent() -> UiScript {
 /// bounds are strict, so a cursor exactly on an edge is outside.
 #[test]
 fn mouse_is_over_is_the_references_own_box_test() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui_parent();
     // The box is x 200..300, y 300..350.
     s.mouse_move(250.0, 325.0);
@@ -100,6 +101,7 @@ fn mouse_is_over_is_the_references_own_box_test() {
 /// so repeated calls accumulate.
 #[test]
 fn raise_and_lower_frame_level_step_the_frames_own_level() {
+    benilla_formats::wow_data_or_skip!();
     let s = ui_parent();
     let base: i64 = s.eval("return Box:GetFrameLevel()").unwrap();
 
@@ -121,6 +123,7 @@ fn raise_and_lower_frame_level_step_the_frames_own_level() {
 /// `IgniteStatus` calls it at file scope and dies on `attempt to call global`.
 #[test]
 fn randomseed_is_a_bare_global_like_random() {
+    benilla_formats::wow_data_or_skip!();
     let s = ui_parent();
     // Seeding twice with the same value must produce the same first draw; that is the whole
     // contract an addon wants from it.
@@ -138,6 +141,7 @@ fn randomseed_is_a_bare_global_like_random() {
 /// laid out answers nil from `GetLeft()`, and `MouseIsOver` must return nil rather than raise.
 #[test]
 fn mouse_is_over_survives_a_frame_with_no_resolved_rect() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui_parent();
     s.mouse_move(250.0, 325.0);
     s.run(r#"Floating = CreateFrame("Frame", "Floating", UIParent)"#)
@@ -162,6 +166,7 @@ fn mouse_is_over_survives_a_frame_with_no_resolved_rect() {
 /// that rather than reading one key.
 #[test]
 fn raid_class_colors_is_the_references_own_nine() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     // RAID_CLASS_COLORS comes off the chain with the font registry since 1888.
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -216,6 +221,7 @@ fn raid_class_colors_is_the_references_own_nine() {
 /// found rather than the block those four came out of. It now enumerates the block.
 #[test]
 fn the_font_path_globals_are_the_references_own_four() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     // The four font-path globals come off the chain with the registry since 1888.
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -294,6 +300,7 @@ fn the_font_path_globals_are_the_references_own_four() {
 /// answered nil under the very cursor that had just entered it (decision 1985).
 #[test]
 fn mouse_is_over_reads_a_scaled_frame_in_its_own_units() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui_parent();
     s.run(
         r#"Scaled = CreateFrame("Frame", "Scaled", UIParent) Scaled:SetWidth(200) Scaled:SetHeight(100)

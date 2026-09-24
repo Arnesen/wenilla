@@ -1,6 +1,4 @@
-//! The [`ServerPacket`]→[`SessionEvent`] mapping: [`decode`]'s per-packet fan-out plus the
-//! object-list interpretation ([`decode_objects`] and the spawn-identity readers). Pure functions
-//! of the packet — no I/O, no state; the running world model stays the app's.
+//! The [`ServerPacket`] to [`SessionEvent`] mapping: pure functions of the packet, no state.
 
 use crate::messages::{CastOutcome, MovementBlock, Object, ObjectFields, ObjectType, ServerPacket};
 use crate::wire::Vector3d;
@@ -11,32 +9,10 @@ fn v3(v: Vector3d) -> [f32; 3] {
     [v.x, v.y, v.z]
 }
 
-/// **Who cast it** — the caster slot of `SMSG_SPELL_START`/`SMSG_SPELL_GO`, corrected for the one
-/// case where vmangos leaves that slot EMPTY.
-///
-/// Both packets carry a guid pair: slot 1 is *the cast item's guid when one is in play, else the
-/// caster's own* (`WriteGuidHelper(data, m_CastItem)` / `else … m_caster`, `Spell.cpp:4475-4477` and
-/// `4509-4511`), slot 2 is the caster. But slot 2 is written from **`m_casterUnit`**
-/// (`Spell.cpp:4479`, `Spell.cpp:4513`) — and `m_casterUnit` is a `Unit*` that the GameObject
-/// constructor never sets: `Spell::Spell(GameObject*, …)` initialises `m_caster(caster),
-/// m_casterGo(caster)` and leaves the default `Unit* const m_casterUnit = nullptr` (`Spell.cpp:102`,
-/// `Spell.h:368`) standing. `WriteGuidHelper(data, nullptr)` writes `ObjectGuid().WriteAsPacked()`
-/// (`Spell.cpp:4441-4453`) — a lone zero mask byte — so **every spell a GameObject casts arrives
-/// with caster guid 0**.
-///
-/// That is not a rare shape. `GameObject::Use` keeps `WorldObject* spellCaster = this` for a
-/// `GAMEOBJECT_TYPE_SPELLCASTER` (22) and casts through the GameObject overload
-/// (`GameObject.cpp`, `spellCaster->ToGameObject()` → `new Spell(pGo, …)`): the Priest's
-/// **Lightwell** (GO 181102, spell 7001 "Lightwell Renew" on the clicker) is the canonical one, and
-/// a guid the index can never hold cost that cast its whole visual body — the impact kit, its sound
-/// and its effect model — because [`crate::events::SessionEvent::SpellGo`]'s consumer resolves the
-/// caster before it plays anything. Slot 1 already carries the answer whenever slot 2 is empty:
-/// with no cast item it IS `m_caster`, GameObject included. So an empty caster slot falls back to
-/// it, which also stops the object being mistaken for a **cast item** by the `item_caster`
-/// derivation below (they are equal, so nothing is derived).
-///
-/// A Unit caster can never reach this: `Spell::Spell(Unit*, …)` sets `m_casterUnit(caster)`
-/// (`Spell.cpp:60`) and a live `Unit*` has a non-zero guid.
+/// The caster of `SMSG_SPELL_START`/`SMSG_SPELL_GO`. vmangos writes the caster slot from
+/// `m_casterUnit`, null for a GameObject caster (`Spell.cpp:102`, `Spell.cpp:4479`), so a
+/// GameObject's spell (Lightwell, GO 181102) arrives as 0; the first slot then holds the caster
+/// itself, as it does whenever no item is cast (`Spell.cpp:4475-4477`).
 fn spell_caster(item_or_caster: u64, caster_slot: u64) -> u64 {
     if caster_slot == 0 {
         item_or_caster
@@ -45,14 +21,12 @@ fn spell_caster(item_or_caster: u64, caster_slot: u64) -> u64 {
     }
 }
 
-/// Decode one server packet into zero or more [`SessionEvent`]s. Pure: no I/O, no state. Packets the
-/// client doesn't model yield an empty list.
+/// Decode one server packet into zero or more [`SessionEvent`]s. No wildcard arm: a new
+/// `ServerPacket` variant must be a compile error here, never a silent no-op.
 pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
     match packet {
         ServerPacket::UpdateObject { objects } => decode_objects(objects),
-        // A batch is only a transport: unwrap it in order and decode each move exactly as if it had
-        // arrived on its own (decision 0624). Order matters — the replay queue in
-        // `net::motion` reconstructs a mover's arc from packet order.
+        // In order, each move as if alone: the app rebuilds a mover's arc from packet order.
         ServerPacket::CompressedMoves { packets } => packets.into_iter().flat_map(decode).collect(),
         ServerPacket::CharEnum { characters } => vec![SessionEvent::CharacterList {
             characters,
@@ -214,6 +188,8 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 bag_slot,
             }]
         }
+        // Reason 0 is `EQUIP_ERR_OK`, which vmangos sends too (`Player.cpp:11688`): no failure.
+        ServerPacket::InventoryChangeFailure { .. } => Vec::new(),
         ServerPacket::AttackStart { attacker, victim } => {
             vec![SessionEvent::AttackStart { attacker, victim }]
         }
@@ -247,9 +223,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 go_target: s.targets.go_target,
                 dest: s.targets.dest.map(|d| [d.x, d.y, d.z]),
                 ammo_display_id: s.ammo_display_id,
-                // Against the RESOLVED caster, not the raw slot: a GameObject's cast puts its own
-                // guid in slot 1, and comparing that with the empty slot 2 would label the object
-                // an item and route the cast down the item-use lane.
+                // Against the resolved caster: a GameObject's own guid in slot 1 is not an item.
                 item_caster: (s.item_or_caster != caster).then_some(s.item_or_caster),
             }]
         }
@@ -367,7 +341,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             entry,
             count,
             required,
-            guid: _, // the killed unit's guid — no consumer (the toast keys on the entry)
+            guid: _, // the killed unit; the toast keys on the entry
         } => vec![SessionEvent::QuestObjectiveKill {
             quest_id,
             entry,
@@ -600,8 +574,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             arbiter,
             challenger,
         }],
-        // The instance/raid lockout family (decision 1748) — straight relays; the ownership flag
-        // is narrowed to a bool here because the reference's own reader is a `test eax,eax`.
+        // Lockouts; ownership narrows to a bool: the reference reads it with `test eax,eax`.
         ServerPacket::RaidInstanceMessage { message } => {
             vec![SessionEvent::RaidInstanceMessage { message }]
         }
@@ -878,16 +851,10 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             ) = match info {
                 Some(i) => (
                     Some(i.name),
-                    // An EMPTY wire subname is NO subname (vmangos sends "" for creatures
-                    // without one; the client renders no line for it — the nameplate
-                    // builder's verified shape, 0x608f50). Mapped here, once, so no consumer
-                    // ever sees a present-but-empty tooltip/nameplate line.
+                    // An empty subname is none: the reference draws no line for it (`0x608f50`).
                     Some(i.subname).filter(|s| !s.is_empty()),
                     Some(i.creature_type),
-                    // NOT wrapped in an `Option` like the type beside it: family `0` already
-                    // means "this template has no family", which is exactly what a miss means
-                    // too, so both answer the same `0` rather than two shapes for one state
-                    // (`CreatureFamily.dbc` has no row 0 — decision 1062).
+                    // Not an `Option`: `CreatureFamily.dbc` has no row 0, so 0 means none.
                     i.pet_family,
                     i.rank,
                     i.type_flags,
@@ -944,10 +911,15 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::GameObjectDespawnAnim { guid } => {
             vec![SessionEvent::GameObjectDespawnAnim { guid }]
         }
+        ServerPacket::OpenContainer { item } => vec![SessionEvent::OpenContainer { item }],
+        ServerPacket::StandStateUpdate { state } => {
+            vec![SessionEvent::StandStateUpdate { state }]
+        }
+        // Nothing: the reference's `0x5e7d70` discards the echoed guid, and the inspect window
+        // reads the target's `PLAYER_VISIBLE_ITEM_*` fields. Parsed so no tally calls it dropped.
+        ServerPacket::Inspect { .. } => Vec::new(),
         ServerPacket::FishNotHooked => vec![SessionEvent::FishNotHooked],
         ServerPacket::FishEscaped => vec![SessionEvent::FishEscaped],
-        // The keepalive echo: the io layer matches the sequence against its ping clock to compute
-        // the round-trip time (the codec is stateless, so the timing lives with the sender).
         ServerPacket::Pong { sequence } => vec![SessionEvent::Pong { sequence }],
         ServerPacket::ForceSpeedChange {
             guid,
@@ -963,9 +935,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::SplineSpeedChange { guid, kind, speed } => {
             vec![SessionEvent::SpeedChanged { guid, kind, speed }]
         }
-        // The MOVE_SET flavour is a speed change AND a fresh authoritative pose in one packet
-        // (decision 0441) — surface both; they land in the same drain, so extrapolation resumes
-        // from the new pose at the new speed either way.
+        // `MSG_MOVE_SET_*_SPEED` is a speed and a fresh pose: emit both, for the same drain.
         ServerPacket::MoveSetSpeed {
             guid,
             kind,
@@ -986,8 +956,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 flags,
                 pitch,
                 time,
-                // A speed change carries a fresh pose, and nothing more: the opcode's meaning is
-                // the speed, which rides its own event beside this one.
+                // The opcode's meaning is the speed, carried by its own event: the pose is plain.
                 verb: crate::messages::RelayVerb::Pose,
                 fall_time,
                 jump,
@@ -1010,8 +979,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             nearest_node,
             known,
         } => {
-            // The leading word is the client parser's own conditional gate (0496 §claim-1): a
-            // zero-gated body carries no menu — no event. vmangos always sends 1.
+            // The reference parser gates on this word: zero carries no menu; vmangos sends 1.
             if window == 0 {
                 vec![]
             } else {
@@ -1116,20 +1084,21 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             scope: None,
             states: vec![(id, value)],
         }],
-        // An opcode with NO parse arm at all — surface it so the app can tally the coverage gap
-        // (the debug panel's dropped-opcode instrument); the silent fall-through hid whole wire
-        // families. Parsed-but-unmodelled packets (the `_` below) stay deliberate no-ops.
+        // No parse arm at all: surfaced for the app's dropped-opcode tally.
         ServerPacket::Other { opcode } => vec![SessionEvent::PacketDropped {
             opcode,
             unparseable: false,
         }],
-        _ => Vec::new(),
+        // Handshake-only: `world::session` consumes these before the world loop reaches here.
+        ServerPacket::AuthChallenge { .. }
+        | ServerPacket::AuthResponse { .. }
+        | ServerPacket::CharCreate { .. }
+        | ServerPacket::CharDelete { .. }
+        | ServerPacket::AddonInfo { .. } => Vec::new(),
     }
 }
 
-/// Fan one object-update packet's object list out into create/move/remove/values events. Consumes the
-/// list so each object's descriptor `mask` moves into its event as the ECS store seed/delta (decision
-/// 0061) — no clone.
+/// Fan an object-update list out into create/move/remove/values events, moving each mask.
 fn decode_objects(objects: Vec<Object>) -> Vec<SessionEvent> {
     let mut out = Vec::new();
     for object in objects {
@@ -1140,9 +1109,7 @@ fn decode_objects(objects: Vec<Object>) -> Vec<SessionEvent> {
                 movement,
                 mask,
             } => {
-                // Items/containers are descriptor-only creates — no pose to interpret, no scene
-                // presence. Route them whole into the item event before the placement gate below
-                // (which would otherwise silently drop a position-less create, fields and all).
+                // Items have no pose: route them before the placement gate, which would drop them.
                 if matches!(object_type, ObjectType::Item | ObjectType::Container) {
                     out.push(SessionEvent::ItemCreate {
                         guid,
@@ -1151,8 +1118,6 @@ fn decode_objects(objects: Vec<Object>) -> Vec<SessionEvent> {
                     });
                     continue;
                 }
-                // Interpret the spawn identity + placement from the mask (borrow), then move the whole
-                // mask into the create event as the object's initial descriptor store.
                 if let Some((position, orientation)) =
                     create_placement(object_type, &mask, &movement)
                 {
@@ -1187,9 +1152,7 @@ fn decode_objects(objects: Vec<Object>) -> Vec<SessionEvent> {
             Object::OutOfRange { guids } => {
                 out.push(SessionEvent::ObjectsRemoved(guids));
             }
-            // `Values` carries UpdateFields-only changes (no position) — descriptor deltas (health on a
-            // hit, an appearance byte, a door's state). Emit the whole non-empty delta for the ECS to
-            // merge into the object's store; interpretation is the consumer's, per named accessor.
+            // `Values`: a descriptor delta with no position.
             Object::Values { guid, mask } => {
                 if !mask.is_empty() {
                     out.push(SessionEvent::ObjectValues { guid, fields: mask });
@@ -1202,7 +1165,6 @@ fn decode_objects(objects: Vec<Object>) -> Vec<SessionEvent> {
     out
 }
 
-/// Coarse classification of a decoded object from its `TypeId`.
 fn entity_kind(t: ObjectType) -> EntityKind {
     match t {
         ObjectType::Player => EntityKind::Player,
@@ -1214,21 +1176,10 @@ fn entity_kind(t: ObjectType) -> EntityKind {
     }
 }
 
-/// The display id from a create packet — units, **players**, GameObjects **and corpses** all carry
-/// one. A player's body model resolves through the same CreatureDisplayInfo→CreatureModelData chain
-/// as a creature's: the 1.12 client has no race/sex→path resolver, CGPlayer inherits CGUnit's
-/// displayId model-build (decision 0041), so we route `Player` alongside `Unit`. A corpse's
-/// `CORPSE_FIELD_DISPLAY_ID` is the dead player's own body display (vmangos writes
-/// `GetNativeDisplayId()` straight in), so it resolves down that identical chain — the reference's
-/// `0x5d6700` does exactly this lookup (decision 1706).
-///
-/// **A bone pile's display id is deliberately still reported here.** The client ignores it (it
-/// builds `<Race><Sex>DeathSkeleton` from the BYTES instead), but that is a *model-resolution* law,
-/// not a wire fact — the field is present and it is what it is, and the fork lives where models are
-/// resolved (`entities::corpse`). Reporting `None` here would also blind the live-display differ to
-/// a flesh→bones flag flip, which the reference reacts to with a full model reload.
-///
-/// Cast from the wire `i32`; `0`/absent → `None`.
+/// A create's display id. A player resolves like a unit (the 1.12 client's `CGPlayer` inherits
+/// `CGUnit`'s display build); a corpse's is the player's native display (reference: `0x5d6700`).
+/// A bone pile's id is still reported: `entities::corpse` swaps in `<Race><Sex>DeathSkeleton`,
+/// and `None` would hide the flesh-to-bones flip the reference reloads the model on.
 fn display_id(t: ObjectType, mask: &ObjectFields) -> Option<u32> {
     match t {
         ObjectType::Unit | ObjectType::Player => {
@@ -1243,17 +1194,11 @@ fn display_id(t: ObjectType, mask: &ObjectFields) -> Option<u32> {
     }
 }
 
-/// The per-object scale (`OBJECT_FIELD_SCALE_X`) units/players/GameObjects carry — the *complete*
-/// render scale that multiplies the raw model's native size. The real client sizes any object by this
-/// field alone (verified `world_model_scale` `0x613ef0`); for a unit the server has already folded the
-/// CreatureDisplayInfo/CreatureModelData scale into it (vmangos `Unit::GetScaleForDisplayId`), so it is
-/// *not* multiplied again client-side. Defaults to `1.0` when absent or non-positive (the server always
-/// sends a positive value on create).
+/// `OBJECT_FIELD_SCALE_X`, the complete render scale: the reference sizes by it alone (`0x613ef0`),
+/// and vmangos already folds the display scale in (`Unit::GetScaleForDisplayId`).
 fn object_scale(t: ObjectType, mask: &ObjectFields) -> f32 {
     let raw = match t {
-        // A corpse joins them: `OBJECT_FIELD_SCALE_X` is an OBJECT-block field and vmangos sets it
-        // (`Corpse::Create` → `SetObjectScale(DEFAULT_OBJECT_SCALE)`), so the same one-field law
-        // sizes it (decision 1706).
+        // vmangos sets a corpse's scale too (`Corpse::Create` → `SetObjectScale`).
         ObjectType::Unit | ObjectType::Player | ObjectType::GameObject | ObjectType::Corpse => {
             mask.object_scale_x()
         }
@@ -1262,17 +1207,9 @@ fn object_scale(t: ObjectType, mask: &ObjectFields) -> f32 {
     raw.filter(|s| *s > 0.0).unwrap_or(1.0)
 }
 
-/// Where a freshly-created object sits: GameObjects from UpdateFields (`GAMEOBJECT_POS_*`) — falling
-/// back to the movement block's `HAS_POSITION` pose when those fields were never sent at all — everything
-/// else straight from the movement block.
-///
-/// The fallback exists for transports: vmangos never sets `GAMEOBJECT_POS_*` on a boat/zeppelin/elevator
-/// (it sends the stationary spawn point in the movement block's `HAS_POSITION` slot instead — decision
-/// 0438 "the wire"). Gated on [`ObjectFields::gameobject_pos_sent`] rather than
-/// `gameobject_position().or(..)`: a create block's absent-is-zero fold
-/// (`ObjectFields`'s "created" semantics) means `gameobject_position()` reads `Some((0,0,0), 0)` even
-/// when nothing was sent, so a plain `.or` never falls through. An ordinary GameObject sends at least
-/// one non-zero `GAMEOBJECT_POS_*` axis virtually always, so this never changes its placement.
+/// A create's pose: a GameObject's `GAMEOBJECT_POS_*` when sent, else the movement block, since
+/// vmangos never sets those fields on a transport. Gate on `gameobject_pos_sent`, not `.or`: a
+/// create reads absent fields as zero, so `gameobject_position()` is `Some` even when unsent.
 fn create_placement(
     object_type: ObjectType,
     mask: &ObjectFields,

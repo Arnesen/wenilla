@@ -1149,10 +1149,10 @@ const TABLE: &[Spec] = &[
     // shot's confirmation, then ask the engine.
     //
     // `PRINTSCREEN` comes from the SHIPPED default, not a player's cache: `DefaultBindings.wtf`
-    // lives inside `patch.MPQ` and its line 128 is `bind PRINTSCREEN SCREENSHOT` (wow-re's
-    // dispatch on this feature; the install's account-ONE `bindings-cache.wtf` agrees). `Edge`,
-    // not `EdgeUpDown`, is also byte-real: the `<Binding>` carries no `runOnUp`, and the
-    // reference's dispatcher returns on key-up unless that flag is set (`0x4b7bea`).
+    // lives inside `patch.MPQ` and its line 128 is `bind PRINTSCREEN SCREENSHOT` (the install's
+    // account-ONE `bindings-cache.wtf` agrees). `Edge`, not `EdgeUpDown`, is also byte-real: the
+    // `<Binding>` carries no `runOnUp`, and the reference's dispatcher returns on key-up unless
+    // that flag is set (`0x4b7bea`).
     //
     // On a Mac keyboard the token arrives as F13, which is the reference's own Mac mapping rather
     // than an accommodation (`KEY_PRINTSCREEN_MAC = "F13"`); `super::chord` does the translation.
@@ -2219,6 +2219,7 @@ mod tests {
     /// here as the witness for it.
     #[test]
     fn the_global_scanner_sees_both_kinds_of_definition() {
+        benilla_formats::wow_data_or_skip!();
         let defined = lua_globals_defined();
         for host in ["TargetUnit", "UseAction", "SetBinding"] {
             assert!(
@@ -2249,6 +2250,38 @@ mod tests {
         assert!(
             !defined.contains("BenillaNoSuchGlobalExists"),
             "the scanner claims to define a name nobody wrote"
+        );
+    }
+
+    /// The parser's own header, read against the file it describes. `benilla_ui::bindings_xml`
+    /// quotes the shape of `Interface\FrameXML\Bindings.xml` — 228 live bindings, 94 `runOnUp`,
+    /// 13 `header`, 12 `hidden`, the commented-out `MOVEVIEW*` family that a text search counts and
+    /// a parser must not — and until 2331 the test that pinned those numbers lived beside the
+    /// parser, keyed on a `BENILLA_BINDINGS_XML` path nothing ever set, so it had never run. It
+    /// lives here because here is where the install is (`install_bindings`, off the player's own
+    /// chain); a wrong count is either a wrong file or a header that drifted from the client.
+    #[test]
+    fn the_installs_bindings_xml_reads_as_the_parsers_header_says() {
+        let Some(binds) = install_bindings() else {
+            return;
+        };
+        assert_eq!(
+            binds.len(),
+            228,
+            "1.12.1 ships 228 live bindings — the other six are inside a comment"
+        );
+        assert!(binds.iter().all(|b| !b.name.is_empty()));
+        assert!(
+            !binds.iter().any(|b| b.name.starts_with("MOVEVIEW")),
+            "the commented-out family must not register"
+        );
+        assert_eq!(binds.iter().filter(|b| b.run_on_up).count(), 94);
+        assert_eq!(binds.iter().filter(|b| b.header.is_some()).count(), 13);
+        assert_eq!(binds.iter().filter(|b| b.hidden).count(), 12);
+        assert_eq!(
+            binds[0].header.as_deref(),
+            Some("MOVEMENT"),
+            "the file opens on the MOVEMENT section"
         );
     }
 

@@ -1,5 +1,5 @@
-//! `--attack`: melee-swing wire (decision 0073). GM-teleport onto a Northshire Kobold Vermin, swing
-//! the nearest creature, require ≥1 `SMSG_ATTACKERSTATEUPDATE`.
+//! `--attack`: the melee-swing wire. Teleports onto a Northshire Kobold Vermin, swings at the
+//! nearest creature and requires an `SMSG_ATTACKERSTATEUPDATE`.
 
 use anyhow::{bail, Context, Result};
 use benilla_protocol::{guid, EntityKind};
@@ -14,9 +14,7 @@ pub(crate) struct Attack {
 
 impl Probe for Attack {
     fn stage(&mut self, cx: &mut Ctx) -> Result<()> {
-        // --loot reuses this teleport spot to guarantee a killable creature in range when no
-        // explicit --loot-guid was given; avoid sending it twice if both flags are set (the shared
-        // `attack_tp_staged` flag — attack/loot/DeathArc all key off it).
+        // --loot and the death arc share this teleport; `attack_tp_staged` sends it once.
         if !cx.world.attack_tp_staged {
             cx.session.send_chat(ATTACK_TP)?;
             cx.world.attack_tp_staged = true;
@@ -26,9 +24,7 @@ impl Probe for Attack {
     }
 
     fn poll(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Swing at the nearest creature once we've landed (the port repopulates `tracked` around the
-        // kobold spawn; anything within 20 yd of the landing point is a candidate — the nearest is
-        // the kobold we landed on, in melee reach).
+        // Once landed, swing at the nearest creature within 20 yd: the kobold we stand on.
         if self.attack_target.is_none() {
             if let Some(pos) = cx.world.attack_pos {
                 let nearest = cx
@@ -54,8 +50,6 @@ impl Probe for Attack {
     }
 
     fn verify(&mut self, cx: &mut Ctx) -> Result<()> {
-        // --attack verdict: the port must have landed, the swing gone out, and at least one completed
-        // swing decoded — the full decision-0073 trigger chain against the live server.
         if cx.world.attack_pos.is_none() {
             bail!("--attack: the GM teleport never arrived (is the account gmlevel ≥ 2?)");
         }
@@ -67,11 +61,8 @@ impl Probe for Attack {
             bail!("--attack: swung at {target:#x} but no SMSG_ATTACKERSTATEUPDATE decoded");
         }
         println!("✅ attack: {swings_seen} SMSG_ATTACKERSTATEUPDATE swing(s) decoded (target {target:#x}).");
-        // The refusals are REPORTED, never required: this probe lands on top of its kobold, so the
-        // server has no reason to send one. They are surfaced because before decision 2037 they
-        // were dropped silently, and a run that does provoke one should say so rather than swallow
-        // it again. Eliciting one on purpose needs a target out of melee reach whose hostility we
-        // can be sure of, which a live server does not hand us (2037's remainder 4).
+        // Refusals are reported, never required: the probe stands on its kobold, so the server has
+        // no cause to send one.
         let refusals = &cx.world.swing_refusals;
         if refusals.is_empty() {
             println!(

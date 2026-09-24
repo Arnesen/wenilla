@@ -30,7 +30,7 @@
 //! anything. [`super::UiScript::take_auction_sorts`] hands the click to the app, which owns the
 //! stacks and pushes both the reordered rows and the stack back. The selection rides through all
 //! of it untouched, because it is stored as an auction **id** and only resolved to a row position
-//! when something asks (wow-re §5 TU-5).
+//! when something asks (`0x4cfda0`/`0x4cfec0`).
 //!
 //! ## The deposit is computed here, and it is the *client's* arithmetic
 //!
@@ -53,7 +53,8 @@ pub const BIDDER: usize = 1;
 pub const OWNER: usize = 2;
 
 /// The eight sort keys the reference's headers pass. Order here is the API's, not the comparator's
-/// (decision 1511's INTERIM: the comparator's own mode order is pinned to the in-flight wow-re §5).
+/// (decision 1511's INTERIM: the comparator's own mode order is pinned to an in-flight
+/// investigation).
 pub const SORT_KEYS: [&str; 8] = [
     "level", "quality", "bid", "duration", "buyout", "status", "name", "seller",
 ];
@@ -149,7 +150,13 @@ pub struct AuctionCategory {
     /// The wire's `mainCategory` — an item class id, **not** the menu position.
     pub class_id: u32,
     pub name: String,
-    /// `(subclass id, name, offers inventory-slot filters)`.
+    /// The `0x807060` table's second column: whether the class offers subclass rows at all.
+    /// `false` (Consumable, Trade Goods, Reagent, Miscellaneous) makes `GetAuctionItemSubClasses`
+    /// and `GetAuctionInvTypes` answer nothing — but `QueryAuctionItems` never reads it, so
+    /// [`Self::subclasses`] is still the class's full non-excluded list either way.
+    pub has_subclass_filter: bool,
+    /// The class's `ItemSubClass.dbc` rows whose `DisplayFlags & 2` is clear, in file order —
+    /// the list both the menu and the query's index scan walk.
     pub subclasses: Vec<AuctionSubCategory>,
 }
 
@@ -159,9 +166,8 @@ pub struct AuctionSubCategory {
     pub sub_id: u32,
     pub name: String,
     /// Whether selecting this subclass offers the 14 inventory-slot rows beneath it
-    /// (`GetAuctionInvTypes`). INTERIM (decision 1511): the exact predicate is pinned to the
-    /// in-flight §5's TU-4, and lives here as *data* precisely so correcting it is a one-line
-    /// change app-side rather than an engine change.
+    /// (`GetAuctionInvTypes`) — the row's `ItemSubClass.Flags & 0x200` (`0x4cfb63`), read
+    /// app-side off the player's own DBC.
     pub has_inv_types: bool,
 }
 
@@ -176,15 +182,17 @@ pub struct AuctionState {
     pub deposit_percent: u32,
 }
 
-/// A drained `QueryAuctionItems` — the Browse search, exactly as the reference builds it. The app
-/// maps this to `CMSG_AUCTION_LIST_ITEMS` (decision 1511 P1).
+/// A drained `QueryAuctionItems` — the Browse search, exactly as the reference builds it: every
+/// filter is already the wire's item-template id (the binding maps the Lua's menu positions, as
+/// `0x4ce980` does). The app copies this into `CMSG_AUCTION_LIST_ITEMS` (decision 1511 P1).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AuctionQuery {
     pub name: String,
     /// `0` = no filter, for both.
     pub min_level: u32,
     pub max_level: u32,
-    /// `None` = no filter (the wire's `0xFFFFFFFF` sentinel).
+    /// `None` = no filter (the wire's `0xFFFFFFFF` sentinel). Ids, never menu positions: an
+    /// `InventoryType`, an item class, a subclass of that class.
     pub inv_type: Option<u32>,
     pub class: Option<u32>,
     pub sub_class: Option<u32>,
@@ -232,7 +240,7 @@ impl super::UiScript {
         let mut model = self.model_mut();
         // Only opening or closing the session drops the selection. A new PAGE does not, and
         // neither does a re-sort: the selection is an auction **id**, so it survives the row
-        // moving and simply stops resolving if the auction leaves the page (wow-re §5 TU-5).
+        // moving and simply stops resolving if the auction leaves the page (`0x4cfda0`/`0x4cfec0`).
         if model.auction.is_none() || state.is_none() {
             model.auction_selected = [0; 3];
         }
@@ -383,7 +391,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(r) = row else {
                 // The null tail is TWELVE values, not a lone nil — an unknown type string, an
                 // out-of-range index and an item-cache miss all share it, with a hard `count = 1`
-                // and `quality = -1` (wow-re §5 TU-3, one shared exit at `0x4cf1ec`). Callers
+                // and `quality = -1` (one shared exit at `0x4cf1ec`). Callers
                 // destructure all twelve unguarded, so a short return throws.
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,         // name
@@ -454,7 +462,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row_at(&model, &kind, index).and_then(|r| r.link)
             };
-            // A miss returns NO values at all — not nil (wow-re §5 TU-3). `DressUpItemLink(nil)`
+            // A miss returns NO values at all — not nil (`0x4cf45b`). `DressUpItemLink(nil)`
             // and `nil` reaching a chat insert behave differently from an empty argument list.
             Ok(match link {
                 Some(l) => MultiValue::from_vec(vec![Value::String(lua.create_string(&l)?)]),
@@ -465,7 +473,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // GetSelectedAuctionItem(type) → the 1-based selected row, or 0 for none.
     //
-    // Stored as the **auction id**, resolved to a row position on the way out (wow-re §5 TU-5).
+    // Stored as the **auction id**, resolved to a row position on the way out
+    // (`0x4cfda0`/`0x4cfec0`).
     // That indirection is the whole reason a re-sort cannot silently move the selection onto a
     // different auction: the id follows the row wherever the comparator puts it, and an auction
     // that has left the page simply stops resolving instead of pointing at its neighbour.
@@ -578,7 +587,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetAuctionItemSubClasses(classIndex) → the subclass names under a 1-based menu class. An
-    // out-of-range index returns nothing, which is the reference's own bound-with-no-error.
+    // out-of-range index, or a class whose `0x807060` flag is 0, returns nothing — the
+    // reference's own bound-with-no-error (`0x4cfa00`, `0x4cfa0e`).
     g.set(
         "GetAuctionItemSubClasses",
         lua.create_function(|lua, class_index: usize| {
@@ -587,6 +597,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 class_index
                     .checked_sub(1)
                     .and_then(|i| model.auction_item_classes.get(i))
+                    .filter(|c| c.has_subclass_filter)
                     .map_or_else(Vec::new, |c| {
                         c.subclasses.iter().map(|s| s.name.clone()).collect()
                     })
@@ -600,9 +611,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetAuctionInvTypes(classIndex, subclassIndex) → the 14 inventory-slot GlobalString KEYS, or
-    // nothing. The pair only decides WHETHER the list is offered — the list itself is fixed. Which
-    // pairs offer it is pushed as data (`has_inv_types`), so decision 1511's INTERIM on that
-    // predicate is corrected app-side, not here.
+    // nothing. The pair only decides WHETHER the list is offered — the list itself is fixed.
+    // `0x4cfab0`: no class (index out of range, or its `0x807060` flag 0) → nothing; a FOUND
+    // subclass offers the list only with `ItemSubClass.Flags & 0x200` (pushed as
+    // `has_inv_types`); and a subclass index the scan runs off the end of skips that gate and
+    // offers all fourteen (the exhaust edge at `0x4cfb61` lands past the gate at `0x4cfb63`).
     g.set(
         "GetAuctionInvTypes",
         lua.create_function(|lua, (class_index, sub_index): (usize, usize)| {
@@ -611,14 +624,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 class_index
                     .checked_sub(1)
                     .and_then(|i| model.auction_item_classes.get(i))
-                    .and_then(|c| sub_index.checked_sub(1).and_then(|i| c.subclasses.get(i)))
-                    .is_some_and(|s| s.has_inv_types)
+                    .filter(|c| c.has_subclass_filter)
+                    .is_some_and(|c| {
+                        sub_index
+                            .checked_sub(1)
+                            .and_then(|i| c.subclasses.get(i))
+                            .is_none_or(|s| s.has_inv_types)
+                    })
             };
             if !offers {
                 return Ok(MultiValue::new());
             }
             let mut out = Vec::with_capacity(AUCTION_INV_TYPES.len());
-            for key in AUCTION_INV_TYPES {
+            for (_, key) in AUCTION_INV_TYPES {
                 out.push(Value::String(lua.create_string(key)?));
             }
             Ok(MultiValue::from_vec(out))
@@ -627,8 +645,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // QueryAuctionItems(name, minLevel, maxLevel, invTypeIndex, classIndex, subclassIndex, page,
     // isUsable, qualityIndex) — nine arguments (TBC's tenth, exactMatch, does not exist on 5875).
-    // The level boxes hand us strings, and every filter index is 1-based into the pushed tables;
-    // the app turns those into the wire's class/subclass ids and its 0xFFFFFFFF sentinels.
+    // The level boxes hand us strings. Every filter argument is a 1-based MENU POSITION, and —
+    // exactly as the reference's `0x4ce980` does — it is turned into the wire's item-template id
+    // here, before anything is queued: invType through the `0x8070b0` rows, class through the
+    // `0x807060` table, subclass as the Nth non-excluded subclass row of that class (a scan that
+    // never reads the class's filter flag). Anything that does not resolve is the wire's "any".
     g.set(
         "QueryAuctionItems",
         lua.create_function(|lua, args: MultiValue| {
@@ -658,14 +679,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(Value::Number(n)) if *n >= 0.0 => Some(*n as u32),
                 _ => None,
             };
+            // A 1-based position into a table, `None` for a missing, zero or negative argument.
+            let position = |i: usize| num(i).and_then(|n| (n as usize).checked_sub(1));
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let inv_type = position(3)
+                .and_then(|i| AUCTION_INV_TYPES.get(i))
+                .map(|&(id, _)| id);
+            let category = position(4).and_then(|i| model.auction_item_classes.get(i));
+            let class = category.map(|c| c.class_id);
+            let sub_class = category.and_then(|c| {
+                position(5)
+                    .and_then(|i| c.subclasses.get(i))
+                    .map(|s| s.sub_id)
+            });
             model.auction_query = Some(AuctionQuery {
                 name,
                 min_level: num(1).unwrap_or(0),
                 max_level: num(2).unwrap_or(0),
-                inv_type: num(3).filter(|n| *n > 0),
-                class: num(4).filter(|n| *n > 0),
-                sub_class: num(5).filter(|n| *n > 0),
+                inv_type,
+                class,
+                sub_class,
                 quality,
                 page: num(6).unwrap_or(0),
                 usable_only: truthy(7),
@@ -823,24 +856,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// The fourteen inventory-slot rows the reference offers, as GlobalString **keys** — the Lua
-/// resolves each through the player's own strings, so no English ships here. Inventory ids 1..12
-/// plus CLOAK(16) and HOLDABLE(23); the order is the reference's own.
-const AUCTION_INV_TYPES: [&str; 14] = [
-    "INVTYPE_HEAD",
-    "INVTYPE_NECK",
-    "INVTYPE_SHOULDER",
-    "INVTYPE_BODY",
-    "INVTYPE_CHEST",
-    "INVTYPE_WAIST",
-    "INVTYPE_LEGS",
-    "INVTYPE_FEET",
-    "INVTYPE_WRIST",
-    "INVTYPE_HAND",
-    "INVTYPE_FINGER",
-    "INVTYPE_TRINKET",
-    "INVTYPE_CLOAK",
-    "INVTYPE_HOLDABLE",
+/// The fourteen inventory-slot rows the reference offers — the `0x8070b0` table's
+/// `{u32 invTypeId; char name[0x20]}` rows, in its own order. The name is a GlobalString **key**
+/// the Lua resolves through the player's own strings, so no English ships here; the id is what
+/// `QueryAuctionItems` puts on the wire for the row's 1-based position.
+const AUCTION_INV_TYPES: [(u32, &str); 14] = [
+    (1, "INVTYPE_HEAD"),
+    (2, "INVTYPE_NECK"),
+    (3, "INVTYPE_SHOULDER"),
+    (4, "INVTYPE_BODY"),
+    (5, "INVTYPE_CHEST"),
+    (6, "INVTYPE_WAIST"),
+    (7, "INVTYPE_LEGS"),
+    (8, "INVTYPE_FEET"),
+    (9, "INVTYPE_WRIST"),
+    (10, "INVTYPE_HAND"),
+    (11, "INVTYPE_FINGER"),
+    (12, "INVTYPE_TRINKET"),
+    (16, "INVTYPE_CLOAK"),
+    (23, "INVTYPE_HOLDABLE"),
 ];
 
 /// Attach the cursor's held item to the sell slot, or — with an empty cursor — pick the attached
@@ -1026,6 +1060,106 @@ mod tests {
         // A duration under the two-hour unit floors the whole thing away — the reference refuses
         // to send such a duration at all, so this is a shape check, not a reachable state.
         assert_eq!(deposit_for(5, 10_000, 60), 0);
+    }
+
+    /// The browse tree as the reference's `0x807060` table shapes it: Weapon (filterable) first,
+    /// then Armor, then Consumable (flag 0 — no subclass rows offered, but its subclasses still
+    /// exist for the query's own scan).
+    fn tree() -> Vec<AuctionCategory> {
+        let sub = |sub_id: u32, name: &str, has_inv_types: bool| AuctionSubCategory {
+            sub_id,
+            name: name.into(),
+            has_inv_types,
+        };
+        vec![
+            AuctionCategory {
+                class_id: 2,
+                name: "Weapon".into(),
+                has_subclass_filter: true,
+                subclasses: vec![sub(0, "Axe", false), sub(1, "Axe", false)],
+            },
+            AuctionCategory {
+                class_id: 4,
+                name: "Armor".into(),
+                has_subclass_filter: true,
+                subclasses: vec![sub(1, "Cloth", true), sub(6, "Shield", false)],
+            },
+            AuctionCategory {
+                class_id: 0,
+                name: "Consumable".into(),
+                has_subclass_filter: false,
+                subclasses: vec![sub(0, "Consumable", false)],
+            },
+        ]
+    }
+
+    /// `QueryAuctionItems` takes menu POSITIONS and puts item-template IDS on the wire — the
+    /// reference does the mapping itself (`0x4ce980`: invType through `0x8070b0`, class through
+    /// `0x807060`, subclass as the Nth non-excluded `ItemSubClass.dbc` row of that class). Sending
+    /// the position instead asked vmangos for class 1 (Container) when the player picked Weapon.
+    #[test]
+    fn query_sends_ids_not_menu_positions() {
+        let mut s = UiScript::new().unwrap();
+        s.set_auction_item_classes(tree());
+
+        // Weapon / its first subclass / Back (the 13th inventory row).
+        s.run(r#"QueryAuctionItems("", "", "", 13, 1, 1, 0, nil, -1)"#)
+            .unwrap();
+        let q = s.take_auction_query().expect("queued");
+        assert_eq!(q.inv_type, Some(16), "INVTYPE_CLOAK is inventory type 16");
+        assert_eq!(q.class, Some(2), "Weapon is item class 2, not position 1");
+        assert_eq!(q.sub_class, Some(0), "the first weapon subclass is id 0");
+
+        // Armor / its SECOND subclass skips the id gap: Shield is 6, not 2.
+        s.run(r#"QueryAuctionItems("", "", "", 14, 2, 2, 0, nil, -1)"#)
+            .unwrap();
+        let q = s.take_auction_query().expect("queued");
+        assert_eq!(
+            (q.inv_type, q.class, q.sub_class),
+            (Some(23), Some(4), Some(6))
+        );
+
+        // The query's scan ignores the class's filter flag: Consumable offers no subclass rows,
+        // yet an index still resolves against its (non-excluded) subclasses.
+        s.run(r#"QueryAuctionItems("", "", "", 0, 3, 1, 0, nil, -1)"#)
+            .unwrap();
+        let q = s.take_auction_query().expect("queued");
+        assert_eq!((q.inv_type, q.class, q.sub_class), (None, Some(0), Some(0)));
+
+        // Out of range, or no class to scan under: the wire's "any".
+        s.run(r#"QueryAuctionItems("", "", "", 15, 11, 1, 0, nil, -1)"#)
+            .unwrap();
+        let q = s.take_auction_query().expect("queued");
+        assert_eq!((q.inv_type, q.class, q.sub_class), (None, None, None));
+        s.run(r#"QueryAuctionItems("", "", "", nil, 1, 3, 0, nil, -1)"#)
+            .unwrap();
+        let q = s.take_auction_query().expect("queued");
+        assert_eq!((q.inv_type, q.class, q.sub_class), (None, Some(2), None));
+    }
+
+    /// `0x4cf9c0` / `0x4cfab0` return nothing for a class whose `0x807060` flag is 0, and
+    /// `0x4cfab0` gates a FOUND subclass on `ItemSubClass.Flags & 0x200` but pushes all fourteen
+    /// when the scan runs off the end (the exhaust edge at `0x4cfb61` lands past the gate at
+    /// `0x4cfb63`).
+    #[test]
+    fn subclass_and_inv_type_menus_follow_the_reference_gates() {
+        let mut s = UiScript::new().unwrap();
+        s.set_auction_item_classes(tree());
+        assert_eq!(s.arity("GetAuctionItemSubClasses(1)").unwrap(), 2);
+        assert_eq!(
+            s.arity("GetAuctionItemSubClasses(3)").unwrap(),
+            0,
+            "Consumable's flag is 0: no subclass rows"
+        );
+        assert_eq!(s.arity("GetAuctionInvTypes(2, 1)").unwrap(), 14, "Cloth");
+        assert_eq!(s.arity("GetAuctionInvTypes(2, 2)").unwrap(), 0, "Shield");
+        assert_eq!(s.arity("GetAuctionInvTypes(3, 1)").unwrap(), 0, "flag 0");
+        assert_eq!(s.arity("GetAuctionInvTypes(11, 1)").unwrap(), 0, "no class");
+        assert_eq!(
+            s.arity("GetAuctionInvTypes(1, 9)").unwrap(),
+            14,
+            "an exhausted scan skips the gate"
+        );
     }
 
     /// The sort stack answers for any key it remembers, not just the primary — the reason a

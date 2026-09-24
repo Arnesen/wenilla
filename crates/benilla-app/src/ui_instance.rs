@@ -97,7 +97,7 @@
 //! maps it ever names are raids, and a raid is `InstanceType == 2`, which `0x495d33`'s
 //! `cmp [rec+8],1` rejects. (1) is the only live writer here, which is why it is also the one
 //! that answers term 1. (1) is [`track_instance_state`]'s `CurrentMap` flip; (2) is
-//! [`apply::update_last_instance`]'s queue, drained through the same helper so the two cannot
+//! [`net::update_last_instance`]'s queue, drained through the same helper so the two cannot
 //! drift — [`LatchWriter`] is which of them is speaking.
 //!
 //! **(2) is therefore unreachable on our server by construction, and no live probe can cover it**
@@ -382,11 +382,48 @@ fn raid_instance_line(message: &RaidInstanceMessage) -> Option<LockoutLine> {
     })
 }
 
-/// The net drain's six arms, factored here so the wire law lives beside the state it drives.
-pub(crate) mod apply {
+/// The instance/raid lockout family's six packet handlers (decision 1748; in the net handler
+/// table since 2312), beside the state they drive: four lines the client composes itself out of
+/// GlobalStrings, and the two-packet latch behind the SELF menu's reset row. The lines are
+/// QUEUED — resolving them needs the VM, which a packet handler leaves to the feed (decision
+/// 0669's split).
+pub(crate) mod net {
     use super::*;
 
     use benilla_protocol::messages::InstanceResetFailed;
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+
+    use crate::net::NetHandlerApp;
+
+    /// Register the six handlers — called from [`UiInstancePlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::RaidInstanceMessage, on_packet)
+            .net_handler(K::InstanceSaveCreated, on_packet)
+            .net_handler(K::InstanceReset, on_packet)
+            .net_handler(K::InstanceResetFailed, on_packet)
+            .net_handler(K::UpdateLastInstance, on_packet)
+            .net_handler(K::UpdateInstanceOwnership, on_packet);
+    }
+
+    /// One handler for the six: each is a one-line fold into the same state.
+    fn on_packet(In(ev): In<SessionEvent>, mut state: ResMut<InstanceState>) {
+        match ev {
+            SessionEvent::RaidInstanceMessage { message } => {
+                raid_instance_message(&mut state, message)
+            }
+            SessionEvent::InstanceSaveCreated { flag } => instance_save_created(&mut state, flag),
+            SessionEvent::InstanceReset { map } => instance_reset(&mut state, map),
+            SessionEvent::InstanceResetFailed { failure } => {
+                instance_reset_failed(&mut state, failure)
+            }
+            SessionEvent::UpdateLastInstance { map } => update_last_instance(&mut state, map),
+            SessionEvent::UpdateInstanceOwnership { owns } => {
+                update_instance_ownership(&mut state, owns)
+            }
+            _ => {}
+        }
+    }
 
     /// `SMSG_RAID_INSTANCE_MESSAGE` — one of four `RAID_INSTANCE_*` lines (`0x49e1c0`).
     pub(crate) fn raid_instance_message(state: &mut InstanceState, message: RaidInstanceMessage) {
@@ -583,6 +620,7 @@ pub(crate) struct UiInstancePlugin;
 
 impl Plugin for UiInstancePlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<InstanceState>().add_systems(
             Update,
             (
@@ -723,7 +761,7 @@ mod tests {
     #[test]
     fn reset_lines_fill_the_map_name() {
         let mut state = InstanceState::default();
-        apply::instance_reset(&mut state, 36);
+        net::instance_reset(&mut state, 36);
         let lines = state.take_lines();
         assert_eq!(lines.len(), 1);
         assert_eq!(
@@ -747,7 +785,7 @@ mod tests {
             ),
         ] {
             let mut state = InstanceState::default();
-            apply::instance_reset_failed(
+            net::instance_reset_failed(
                 &mut state,
                 benilla_protocol::messages::InstanceResetFailed { reason, map: 36 },
             );
@@ -762,7 +800,7 @@ mod tests {
         // INSTANCERESET_FAIL_SILENTLY and above: no line, rather than the reference's
         // uninitialized-buffer print.
         let mut state = InstanceState::default();
-        apply::instance_reset_failed(
+        net::instance_reset_failed(
             &mut state,
             benilla_protocol::messages::InstanceResetFailed { reason: 3, map: 36 },
         );
@@ -774,21 +812,21 @@ mod tests {
     #[test]
     fn save_created_has_three_arms() {
         let mut state = InstanceState::default();
-        apply::instance_save_created(&mut state, 0);
+        net::instance_save_created(&mut state, 0);
         let lines = state.take_lines();
         assert_eq!(
             line_text(&lines[0], None).as_deref(),
             Some("You are now saved to this instance")
         );
 
-        apply::instance_save_created(&mut state, 1);
+        net::instance_save_created(&mut state, 1);
         let lines = state.take_lines();
         assert_eq!(
             line_text(&lines[0], None).as_deref(),
             Some("(Debug-Only Lock Notice) You are now saved to this instance")
         );
 
-        apply::instance_save_created(&mut state, 2);
+        net::instance_save_created(&mut state, 2);
         assert!(state.take_lines().is_empty());
     }
 
@@ -976,7 +1014,7 @@ mod tests {
             (s.last_dungeon, s.saw_own_dungeon)
         };
         let queue = |app: &mut App, map: u32| {
-            apply::update_last_instance(&mut app.world_mut().resource_mut::<InstanceState>(), map);
+            net::update_last_instance(&mut app.world_mut().resource_mut::<InstanceState>(), map);
         };
 
         // Writer 1 — we walk out of the Deadmines ourselves. The first tick only OBSERVES map 36
@@ -1131,7 +1169,7 @@ mod tests {
             Some("Welcome to Molten Core. This raid instance is scheduled to reset in 3d 2h 5m.")
         );
         let mut state = InstanceState::default();
-        apply::instance_reset_failed(
+        net::instance_reset_failed(
             &mut state,
             benilla_protocol::messages::InstanceResetFailed { reason: 0, map: 36 },
         );

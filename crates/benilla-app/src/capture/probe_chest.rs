@@ -1,14 +1,14 @@
 //! The chest live probe (`WOW_PROBE_CHEST=1`) — **B84's instrument**: does the player kneel at an
 //! open chest?
 //!
-//! Goudy, 2026-07-26 (`#bugs` `1530708187173359646`): *"No looting/opening animation when using a
-//! chest"*, with a benilla/reference pair at the same Mirror Lake Orchard chest — the reference
+//! The symptom: no looting animation when opening a chest. At the same Mirror Lake Orchard chest,
+//! benilla and the reference side by side show the reference
 //! gnome kneeling over the open loot window, ours standing bolt upright. Decision 0515 had shipped
 //! the kneel keyed to the `CMSG_LOOT` send alone and recorded a chest's silence as *correct*; 1471
 //! is the correction (the real client also arms the latch in `OnLootResponse 0x5eb900`, and a chest
 //! never sends `CMSG_LOOT` at all).
 //!
-//! **A kneel is a number here, not a picture** (`method.md` step 4: timing and pose questions are
+//! **A kneel is a number here, not a picture** (`docs/METHOD.md` step 4: timing and pose questions are
 //! settled with instruments). The probe reads the self unit's own
 //! [`AnimDriver::active_anim`][crate::creature_anim::AnimDriver::active_anim] — the id the base
 //! selector actually landed on — so the verdict is `50` (`Loot`) or it is not, with no screenshot
@@ -38,8 +38,8 @@
 //! WOW_NOSOUND=1 WOW_USER=probe0 WOW_PASS=pprobe0 WOW_CHAR=Probezero \
 //!     WOW_PROBE_CHEST=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — `pool-N` → `probeN`/`pprobeN`/`Probe<N-spelled>`, `method.md`
-//! "The local vmangos server"). `WOW_PROBE_CHEST=<x>,<y>,<z>[,<map>]` aims it at a different
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill). `WOW_PROBE_CHEST=<x>,<y>,<z>[,<map>]` aims it at a different
 //! object; the default is a live `Battered Chest` spawn (`gameobject.guid` 26756, template 2843) in
 //! the Mirror Lake stretch of Elwynn, the same corner of the world the report came from. A chest is
 //! a respawning spawn point: if someone emptied that one it will be missing for its respawn timer,

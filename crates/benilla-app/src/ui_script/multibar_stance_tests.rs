@@ -84,6 +84,7 @@ fn show_bars(s: &UiScript, bars: &[u32]) {
 /// about what a bar looks like once the player has asked for it.
 #[test]
 fn shipped_multibars_drive_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -264,9 +265,11 @@ fn shipped_multibars_drive_end_to_end() {
 /// The stance bar (StanceBar.xml) through the REAL shipped XML: hidden at zero forms, sized to
 /// the pushed list (buttons past numForms hide), the checked ring on the active form, the 0.4
 /// grey on a not-castable one, a click queuing the form's spell id, and an emptied push hiding
-/// the whole frame again — the wow-re shapeshift-bar-api mechanism driven end to end.
+/// the whole frame again — the reference's form list (`0xb71100`) and its four bindings driven
+/// end to end.
 #[test]
 fn shipped_stance_bar_drives_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ShapeshiftFormView;
 
     let mut s = UiScript::new().unwrap();
@@ -461,6 +464,7 @@ fn shipped_stance_bar_drives_end_to_end() {
 /// past it, so nothing else showed the bug.
 #[test]
 fn multibar_hover_renders_the_buttons_own_action() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for file in [
@@ -581,6 +585,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
 /// Since 1500 "hidden" is where they START rather than where they stay — see the toggle tests.
 #[test]
 fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
+    benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_action_bar(&s);
     load_xml(&s, "Interface\\FrameXML\\Cooldown.xml");
@@ -632,7 +637,7 @@ fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
 /// **Every extra bar is down until its own toggle says otherwise, and `MultiBarLeft` needs two.**
 ///
 /// The four bits of `PLAYER_FIELD_BYTES` byte 2 map to bars 1-4 at the FrameXML layer (the binary
-/// is bar-agnostic — wow-5875-re `system/ui/scratch/action-bar-toggles.md`), and a fresh
+/// is bar-agnostic — `SetActionBarToggles 0x4e76e0` packs four unnamed bits), and a fresh
 /// character's byte is 0, which is the whole of "off by default": nothing here fakes a default,
 /// the bars simply have nothing telling them to show.
 ///
@@ -642,6 +647,7 @@ fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
 /// hanging off a bar that is not on screen.
 #[test]
 fn every_extra_bar_stays_down_until_its_own_toggle_is_set() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -729,6 +735,7 @@ fn every_extra_bar_stays_down_until_its_own_toggle_is_set() {
 /// frames drawing straight through a bar the player just asked for (decision 1499's screenshot).
 #[test]
 fn raising_a_bottom_bar_moves_the_managed_bottom_stack() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -793,6 +800,7 @@ fn raising_a_bottom_bar_moves_the_managed_bottom_stack() {
 /// which was only ever right because visibility was static.
 #[test]
 fn viewable_action_bar_pages_follow_the_bar_toggles() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -859,6 +867,7 @@ fn viewable_action_bar_pages_follow_the_bar_toggles() {
 /// can ever nest" stopped being true the moment this switch existed.
 #[test]
 fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -958,12 +967,13 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
 /// DIVERGENCES, chosen in 1782. In stock 1.12.1 the dim is fanned to every button and then never
 /// cleared by anything: `SetNormalTexture(path)` reuses the region and writes only its texture
 /// handle, and a 3-argument `SetVertexColor` is `SetVertexColor(r, g, b, currentAlpha)` — so the
-/// first spell anyone picks up leaves every border at alpha 0x80 for the session (wow-re
-/// `button-state-texture-path-setter.md` §2/§7, byte-verified). That is a stuck state keyed to
+/// first spell anyone picks up leaves every border at alpha 0x80 for the session (the reuse leg
+/// `0x778f10`, the alpha-keeping `SetVertexColor` `0x79abd0`). That is a stuck state keyed to
 /// nothing the player can see. We take the look the dim was written for and let go of it with the
 /// payload, which is what the last two assertions here pin.
 #[test]
 fn a_held_payload_ghosts_the_empty_wells_it_opens() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -1088,10 +1098,10 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
     );
     // What happens to that ring NEXT is decision 1782's open question, deliberately not asserted:
     // the reference's `SetVertexColor(1, 1, 1)` in `ActionButton_UpdateUsable` keeps the alpha
-    // already on the region (byte-pinned, wow-re button-state-texture-path-setter.md §7 — the
-    // "stuck dim" a 1.12 player sees after a drag), while this engine's three-argument call still
-    // resets it to 1.0 until the director calls 1782. A test that pinned either outcome would be
-    // enshrining a divergence as fidelity.
+    // already on the region (`SetVertexColor` `0x79abd0` — the "stuck dim" a 1.12 player sees
+    // after a drag), while this engine's three-argument call still resets it to 1.0 until the
+    // director calls 1782. A test that pinned either outcome would be enshrining a divergence as
+    // fidelity.
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -1099,14 +1109,15 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
 ///
 /// The whole round trip, over the REAL bindings (`benilla_ui::script::action_bar_toggles`): the
 /// row's setter writes a global, re-derives the bars and posts `CMSG_SET_ACTIONBAR_TOGGLES` with
-/// the WHOLE byte — bits `0x01/0x02/0x04/0x08`, verified against the 1.12.1 binary (wow-5875-re
-/// `417c2d31`). Coming back, the server's descriptor push is the only thing that moves the getter,
-/// and `UIParent.xml`'s `PLAYER_ENTERING_WORLD` arm reads it exactly once as the seed.
+/// the WHOLE byte — bits `0x01/0x02/0x04/0x08` (`SetActionBarToggles 0x4e76e0`). Coming back,
+/// the server's descriptor push is the only thing that moves the getter, and `UIParent.xml`'s
+/// `PLAYER_ENTERING_WORLD` arm reads it exactly once as the seed.
 ///
 /// Every `Set` is one packet, deliberately (the binding gates nothing), which is why the drain is a
 /// list and each step below checks the packet it just caused.
 #[test]
 fn a_bar_toggle_sends_the_byte_its_globals_pack_to() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -1194,6 +1205,7 @@ fn a_bar_toggle_sends_the_byte_its_globals_pack_to() {
 /// this file drives the real binding.
 #[test]
 fn the_shipped_setter_passes_exactly_four_arguments() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -1245,6 +1257,7 @@ fn the_shipped_setter_passes_exactly_four_arguments() {
 /// here rather than assumed.
 #[test]
 fn the_stance_bar_sits_where_the_pass_puts_it() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ShapeshiftFormView;
 
     let mut s = UiScript::new().unwrap();
@@ -1317,6 +1330,7 @@ fn the_stance_bar_sits_where_the_pass_puts_it() {
 /// set once at load.
 #[test]
 fn the_stance_shelf_follows_the_bottom_left_bar() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ShapeshiftFormView;
 
     let mut s = UiScript::new().unwrap();
@@ -1438,6 +1452,7 @@ fn the_stance_shelf_follows_the_bottom_left_bar() {
 /// exercised 2 and 3 forms and only ever read `IsShown()`, which is exactly why it shipped.
 #[test]
 fn the_stance_shelf_is_as_long_as_the_form_count() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::ShapeshiftFormView;
 
     let mut s = UiScript::new().unwrap();
@@ -1554,6 +1569,7 @@ fn the_stance_shelf_is_as_long_as_the_form_count() {
 /// slot has an action.
 #[test]
 fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The real command set, so MULTIACTIONBAR1BUTTONn is bindable at all (it ships unbound —
@@ -1663,6 +1679,7 @@ fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
 /// the end caps (atlas crops of `ShapeshiftBarEnds`).
 #[test]
 fn the_middle_strip_tiles_along_its_length_only() {
+    benilla_formats::wow_data_or_skip!();
     use super::extract::tiling_axes;
     use crate::ui_pass::UvRect;
     use benilla_ui::script::{ShapeshiftFormView, TexCoords};
@@ -1729,7 +1746,7 @@ fn the_middle_strip_tiles_along_its_length_only() {
 /// alone, both end caps down.
 ///
 /// The reference fires `UPDATE_SHAPESHIFT_FORMS` for exactly one thing: the form LIST changed
-/// (learn / unlearn / rank — wow-re `shapeshift-bar-api.md`, the fires at `0x4b28ff`/`0x4b2e43`).
+/// (learn / unlearn / rank — the fires at `0x4b28ff`/`0x4b2e43`).
 /// Our feed fired it for any change in the pushed view — a stance switch, a castable flip, the
 /// shared 1 s category cooldown arming and then EXPIRING. Every fire runs the stock
 /// `ShapeshiftBar_Update` (BonusActionBarFrame.lua l.170): `ShapeshiftBarMiddle:Show()`
@@ -1745,6 +1762,7 @@ fn the_middle_strip_tiles_along_its_length_only() {
 /// one the switch really carries and reading the checked ring.
 #[test]
 fn a_forms_state_change_leaves_the_shelf_down_over_the_raised_bar() {
+    benilla_formats::wow_data_or_skip!();
     use crate::ui_shapeshift::{push_forms, FormsEdge, StanceMemory};
     use benilla_ui::script::ShapeshiftFormView;
 

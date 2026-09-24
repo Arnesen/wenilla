@@ -139,9 +139,8 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     );
     // **ESC does NOT drop the cursor's item.** Our retired ladder opened with
     // `if CursorHasItem() then ClearCursor() end`; the reference's `ToggleGameMenu`
-    // (`UIParent.lua:1465-1497`) has no such arm, and wow-re's cursor carve places the
-    // ESC→ClearCursor wiring in FrameXML rather than the engine
-    // (`ui/scratch/cursor-dragdrop-payload.md`) — so in 1.12 the held item survives the key
+    // (`UIParent.lua:1465-1497`) has no such arm, and the ESC→ClearCursor wiring is inferred to
+    // live in FrameXML rather than the engine — so in 1.12 the held item survives the key
     // (1988).
     assert!(
         s.cursor_item().is_some(),
@@ -203,6 +202,7 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
 /// to eat, opens the menu (one eater per press, the 0449 law).
 #[test]
 fn escape_closes_the_options_window_before_opening_the_menu() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -526,6 +526,7 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
 /// `Hide`, never `HideUIPanel`, because these frames hold no panel slot.
 #[test]
 fn an_addon_frame_registered_in_uispecialframes_closes_on_escape() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");

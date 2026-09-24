@@ -1,16 +1,5 @@
-//! The **combat log** wire — the inbound "what just happened to whom" packets: spell damage,
-//! periodic aura ticks, heals, power gains, damage shields, environmental damage, and a cast's
-//! per-target miss list. Split out of `messages/spells.rs` (decision 0640), where these already sat
-//! behind a hand-drawn `--- the combat-log wire ---` banner; the banner was the concern boundary the
-//! file couldn't express.
-//!
-//! Every layout here is VERIFIED against vmangos source (cited per item). This family is **inbound
-//! only** — nothing in it has an outbound counterpart, so unlike its siblings it has no
-//! `world::writer` twin. Its consumer is the floating/center combat text (decisions 0137 phase 2,
-//! 0578, 0580) plus the fall-damage dust puff (`EnvironmentalDamageLog`).
-//!
-//! The melee half of the same story is [`super::attack`]'s `SMSG_ATTACKERSTATEUPDATE`: a *swing*
-//! reports itself there, a *spell* reports itself here.
+//! The combat log wire, inbound only: spell damage, periodic ticks, heals, power gains, damage
+//! shields, environmental damage, misses, kills, dispels, enchants and spell effect logs.
 
 use std::io::{self, Read};
 
@@ -18,9 +7,8 @@ use crate::wire::{
     capacity_hint, read_f32_le, read_i32_le, read_packed_guid, read_u32_le, read_u64_le, read_u8,
 };
 
-/// One decoded `SMSG_SPELLNONMELEEDAMAGELOG` — non-melee (spell) damage dealt (vmangos
-/// `WorldPackets::Spell::SpellNonMeleeDamageLog::AppendBodyTo`, `Server/Packets/Spell.cpp:124-140` +
-/// `Spell.h:178-198`). `hit_info` bit `0x2` is `SPELL_HIT_TYPE_CRIT` (vmangos `SpellDefines.h:179`).
+/// `SMSG_SPELLNONMELEEDAMAGELOG`, spell damage dealt (`Server/Packets/Spell.cpp:124-140`);
+/// `hit_info` bit `0x2` is a crit (`SpellDefines.h:179`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpellDamageLog {
     pub target: u64,
@@ -35,9 +23,6 @@ pub struct SpellDamageLog {
     pub hit_info: u32,
 }
 
-/// Read `SMSG_SPELLNONMELEEDAMAGELOG`: target PackedGuid · attacker PackedGuid · spellId u32 ·
-/// damage u32 · school u8 · absorbed u32 · resist i32 · periodicLog u8 (bool) · unused u8 · blocked
-/// u32 · hitInfo u32 · extendedData u8 (always 0 — read and dropped).
 pub(super) fn read_spell_damage_log(r: &mut impl Read) -> io::Result<SpellDamageLog> {
     let target = read_packed_guid(r)?;
     let attacker = read_packed_guid(r)?;
@@ -65,11 +50,7 @@ pub(super) fn read_spell_damage_log(r: &mut impl Read) -> io::Result<SpellDamage
     })
 }
 
-/// One tick of `SMSG_PERIODICAURALOG` — the payload shape depends on the tick's `AuraType` (vmangos
-/// `SpellAuraDefines.h`): `PERIODIC_DAMAGE` (3) / `PERIODIC_DAMAGE_PERCENT` (89) carry a damage
-/// breakdown; `PERIODIC_HEAL` (8) / `OBS_MOD_HEALTH` (20) a plain heal amount; `OBS_MOD_MANA` (21) /
-/// `PERIODIC_ENERGIZE` (24) a power+amount pair; `PERIODIC_MANA_LEECH` (64) a power+amount+multiplier
-/// triple.
+/// One `SMSG_PERIODICAURALOG` tick, shaped by its aura type (vmangos `SpellAuraDefines.h`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PeriodicTick {
     Damage {
@@ -92,9 +73,7 @@ pub enum PeriodicTick {
     },
 }
 
-/// One decoded `SMSG_PERIODICAURALOG` — periodic (DoT/HoT/regen) aura ticks (vmangos
-/// `Unit::SendPeriodicAuraLog`, `Unit.cpp:4395-4443`). vmangos always writes `count == 1`; the loop
-/// is decoded faithfully regardless.
+/// `SMSG_PERIODICAURALOG`, periodic aura ticks (vmangos `Unit.cpp:4395-4443`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeriodicAuraLog {
     pub target: u64,
@@ -111,9 +90,7 @@ const AURA_PERIODIC_ENERGIZE: u32 = 24;
 const AURA_PERIODIC_MANA_LEECH: u32 = 64;
 const AURA_PERIODIC_DAMAGE_PERCENT: u32 = 89;
 
-/// Read `SMSG_PERIODICAURALOG`: target PackedGuid · caster PackedGuid · spellId u32 · count u32 ·
-/// `count` entries of `{auraType u32, payload}` — see [`PeriodicTick`] for the payload shapes. An
-/// aura type outside that set cannot be skipped without desyncing the stream, so it errors instead.
+/// Read `SMSG_PERIODICAURALOG`; an unknown aura type errors, as its payload width is unknown.
 pub(super) fn read_periodic_aura_log(r: &mut impl Read) -> io::Result<PeriodicAuraLog> {
     let target = read_packed_guid(r)?;
     let caster = read_packed_guid(r)?;
@@ -159,9 +136,7 @@ pub(super) fn read_periodic_aura_log(r: &mut impl Read) -> io::Result<PeriodicAu
     })
 }
 
-/// One decoded `SMSG_SPELLHEALLOG` — a direct heal landing (vmangos
-/// `WorldPackets::Spell::SpellHealLog::AppendBodyTo`, `Server/Packets/Spell.cpp:105-112` +
-/// `Spell.h:151-163`) — the center combat text's HEAL/HEAL_CRIT feed (decision 0578).
+/// `SMSG_SPELLHEALLOG`, a direct heal landing (`Server/Packets/Spell.cpp:105-112`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpellHealLog {
     pub target: u64,
@@ -171,8 +146,6 @@ pub struct SpellHealLog {
     pub critical: bool,
 }
 
-/// Read `SMSG_SPELLHEALLOG`: target PackedGuid · healer PackedGuid · spellId u32 · amount u32 ·
-/// critical u8 (bool).
 pub(super) fn read_spell_heal_log(r: &mut impl Read) -> io::Result<SpellHealLog> {
     Ok(SpellHealLog {
         target: read_packed_guid(r)?,
@@ -183,10 +156,8 @@ pub(super) fn read_spell_heal_log(r: &mut impl Read) -> io::Result<SpellHealLog>
     })
 }
 
-/// One decoded `SMSG_SPELLENERGIZELOG` — an instant power gain (vmangos
-/// `WorldPackets::Spell::SpellEnergizeLog::AppendBodyTo`, `Server/Packets/Spell.cpp:114-121` +
-/// `Spell.h:165-176`). `power` is the vmangos `Powers` enum (0 mana · 1 rage · 2 focus ·
-/// 3 energy · 4 happiness) — the center combat text's MANA/RAGE/FOCUS/ENERGY feed.
+/// `SMSG_SPELLENERGIZELOG`, an instant power gain (`Server/Packets/Spell.cpp:114-121`); `power` is
+/// 0 mana, 1 rage, 2 focus, 3 energy, 4 happiness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpellEnergizeLog {
     pub target: u64,
@@ -196,8 +167,6 @@ pub struct SpellEnergizeLog {
     pub amount: u32,
 }
 
-/// Read `SMSG_SPELLENERGIZELOG`: target PackedGuid · caster PackedGuid · spellId u32 ·
-/// powerType u32 · amount u32.
 pub(super) fn read_spell_energize_log(r: &mut impl Read) -> io::Result<SpellEnergizeLog> {
     Ok(SpellEnergizeLog {
         target: read_packed_guid(r)?,
@@ -208,10 +177,8 @@ pub(super) fn read_spell_energize_log(r: &mut impl Read) -> io::Result<SpellEner
     })
 }
 
-/// One decoded `SMSG_SPELLDAMAGESHIELD` — a damage-shield (Thorns-style) return hit (vmangos
-/// `WorldPackets::Combat::SpellDamageShield::AppendBodyTo`, `Server/Packets/Combat.cpp:73-79` +
-/// `Combat.h:124-134`). `victim` is the shield's bearer; `attacker` is the unit that struck them and
-/// now **receives** this damage back.
+/// `SMSG_SPELLDAMAGESHIELD`, a Thorns-style return hit (`Server/Packets/Combat.cpp:73-79`):
+/// `victim` bears the shield, `attacker` struck it and takes this damage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DamageShield {
     pub victim: u64,
@@ -220,8 +187,6 @@ pub struct DamageShield {
     pub school: u32,
 }
 
-/// Read `SMSG_SPELLDAMAGESHIELD`: victim raw `u64` guid · attacker raw `u64` guid · damage u32 ·
-/// school u32.
 pub(super) fn read_damage_shield(r: &mut impl Read) -> io::Result<DamageShield> {
     Ok(DamageShield {
         victim: read_u64_le(r)?,
@@ -231,13 +196,9 @@ pub(super) fn read_damage_shield(r: &mut impl Read) -> io::Result<DamageShield> 
     })
 }
 
-/// One decoded `SMSG_ENVIRONMENTALDAMAGELOG` — environmental damage taken: fall, drowning,
-/// fatigue, lava, slime, fire (vmangos `Unit::SendEnvironmentalDamageLog`, `Objects/Unit.cpp:5392`
-/// → `WorldPackets::Combat::EnvironmentalDamageLog::AppendBodyTo`, `Server/Packets/Combat.cpp:58-67`;
-/// the absorb/resist tail is the `> 1.6.1` layout our 5875 wire carries). `damage_type` is
-/// vmangos `EnvironmentalDamageType` (`Objects/Player.h:590`): 0 exhausted · 1 drowning ·
-/// 2 **fall** · 3 lava · 4 slime · 5 fire — the index into the client's `EnvironmentalDamage.dbc`
-/// 6-slot damage-type → SpellVisualKit table (its fall row is the landing dust puff).
+/// `SMSG_ENVIRONMENTALDAMAGELOG`, environmental damage taken (`Server/Packets/Combat.cpp:58-67`).
+/// `damage_type` is 0 exhausted, 1 drowning, 2 fall, 3 lava, 4 slime, 5 fire (`Player.h:590`), the
+/// row of `EnvironmentalDamage.dbc` whose visual kit plays (fall's is the landing dust puff).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnvironmentalDamageLog {
     pub victim: u64,
@@ -247,9 +208,7 @@ pub struct EnvironmentalDamageLog {
     pub resist: i32,
 }
 
-/// Read `SMSG_ENVIRONMENTALDAMAGELOG`: victim raw `u64` guid (vmangos `ObjectGuid.cpp:174`
-/// streams the raw value; the client reads it with its plain 8-byte guid reader `0x4190b0`) ·
-/// damageType u8 · damage u32 · absorbed u32 · resist i32.
+/// Read `SMSG_ENVIRONMENTALDAMAGELOG`; the victim guid is raw on both ends (client `0x4190b0`).
 pub(super) fn read_environmental_damage_log(
     r: &mut impl Read,
 ) -> io::Result<EnvironmentalDamageLog> {
@@ -262,12 +221,9 @@ pub(super) fn read_environmental_damage_log(
     })
 }
 
-/// One decoded `SMSG_SPELLLOGMISS` — a spell cast's per-target miss list (vmangos
-/// `WorldPackets::Spell::SpellLogMiss::AppendBodyTo`, `Server/Packets/Spell.cpp:68-86` +
-/// `Spell.h:109-124`). Each entry's `u8` is a `SpellMissInfo` (vmangos `SpellDefines.h:160-174`,
-/// the same vocabulary [`SpellGo`](crate::messages::SpellGo)'s own miss list carries): 1 MISS ·
-/// 2 RESIST · 3 DODGE · 4 PARRY ·
-/// 5 BLOCK · 6 EVADE · 7/8 IMMUNE · 9 DEFLECT · 10 ABSORB · 11 REFLECT.
+/// `SMSG_SPELLLOGMISS`, a cast's per-target miss list (`Server/Packets/Spell.cpp:68-86`). Each
+/// `u8` is a `SpellMissInfo` (`SpellDefines.h:160-174`): 1 miss, 2 resist, 3 dodge, 4 parry,
+/// 5 block, 6 evade, 7 and 8 immune, 9 deflect, 10 absorb, 11 reflect.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpellLogMiss {
     pub spell_id: u32,
@@ -275,17 +231,12 @@ pub struct SpellLogMiss {
     pub misses: Vec<(u64, u8)>,
 }
 
-/// Read `SMSG_SPELLLOGMISS`: spellId u32 · caster raw `u64` · useExtended u8 (vmangos always 0) ·
-/// count u32 · `count` entries of `{target raw u64, missInfo u8}`. When `useExtended != 0`, each
-/// entry additionally carries a trailing `2×f32` — read and dropped to keep the cursor aligned; no
-/// consumer needs it.
 pub(super) fn read_spell_log_miss(r: &mut impl Read) -> io::Result<SpellLogMiss> {
     let spell_id = read_u32_le(r)?;
     let caster = read_u64_le(r)?;
     let use_extended = read_u8(r)?;
     let count = read_u32_le(r)?;
-    // No server bound: vmangos never sends this opcode at all (its miss list rides
-    // `SMSG_SPELL_GO`), so 64 is a generous sane one.
+    // vmangos never sends this opcode (misses ride `SMSG_SPELL_GO`), so 64 is an arbitrary cap.
     let mut misses = Vec::with_capacity(capacity_hint(count, 64));
     for _ in 0..count {
         let target = read_u64_le(r)?;
@@ -303,18 +254,14 @@ pub(super) fn read_spell_log_miss(r: &mut impl Read) -> io::Result<SpellLogMiss>
     })
 }
 
-/// One decoded `SMSG_PARTYKILLLOG` — the killing blow, sent to the killer's party (vmangos
-/// `WorldPackets::Combat::PartyKillLog::AppendBodyTo`, `Server/Packets/Combat.cpp:52-56`).
-///
-/// It is the **only** source of the "You have slain %s!" / "%s is slain by %s!" pair; the plain
-/// "%s dies." line is not a packet at all — it rides the client's own unit-death reflex.
+/// `SMSG_PARTYKILLLOG`, the killing blow, sent to the killer's party (`Combat.cpp:52-56`): the
+/// only source of "You have slain %s!"; "%s dies." comes from the client's own death handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PartyKillLog {
     pub killer: u64,
     pub victim: u64,
 }
 
-/// Read `SMSG_PARTYKILLLOG`: killer raw `u64` guid · victim raw `u64` guid.
 pub(super) fn read_party_kill_log(r: &mut impl Read) -> io::Result<PartyKillLog> {
     Ok(PartyKillLog {
         killer: read_u64_le(r)?,
@@ -322,15 +269,13 @@ pub(super) fn read_party_kill_log(r: &mut impl Read) -> io::Result<PartyKillLog>
     })
 }
 
-/// One decoded `SMSG_SPELLINSTAKILLLOG` — an instant kill (vmangos `Spell::EffectInstaKill`,
-/// `Spells/SpellEffects.cpp:274-279`; the packet exists only for `> 1.11.2` clients, which 5875 is).
+/// `SMSG_SPELLINSTAKILLLOG`, an instant kill (vmangos `Spells/SpellEffects.cpp:274-279`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpellInstaKillLog {
     pub victim: u64,
     pub spell_id: u32,
 }
 
-/// Read `SMSG_SPELLINSTAKILLLOG`: victim raw `u64` guid · spellId u32.
 pub(super) fn read_spell_insta_kill_log(r: &mut impl Read) -> io::Result<SpellInstaKillLog> {
     Ok(SpellInstaKillLog {
         victim: read_u64_le(r)?,
@@ -338,12 +283,9 @@ pub(super) fn read_spell_insta_kill_log(r: &mut impl Read) -> io::Result<SpellIn
     })
 }
 
-/// One decoded `SMSG_PROCRESIST` **or** `SMSG_SPELLORDAMAGE_IMMUNE` — the two share a body byte for
-/// byte (vmangos `WorldPackets::Spell::ProcResist` / `SpellOrDamageImmune`,
-/// `Server/Packets/Spell.cpp:88-102`) and differ only in which sentence they word.
-///
-/// `log_format` is vmangos's `logFormat` (`0` default, `1` debug); the reference reads it as the
-/// "is periodic" flag that decides whether `CombatLogPeriodicSpells` gates the line.
+/// `SMSG_PROCRESIST` or `SMSG_SPELLORDAMAGE_IMMUNE`, which share one body
+/// (`Server/Packets/Spell.cpp:88-102`). The 1.12 client reads `log_format` as the "is periodic"
+/// flag that lets `CombatLogPeriodicSpells` gate the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpellOutcomeLog {
     pub caster: u64,
@@ -352,8 +294,6 @@ pub struct SpellOutcomeLog {
     pub log_format: u8,
 }
 
-/// Read `SMSG_PROCRESIST` / `SMSG_SPELLORDAMAGE_IMMUNE`: caster raw `u64` · target raw `u64` ·
-/// spellId u32 · logFormat u8.
 pub(super) fn read_spell_outcome_log(r: &mut impl Read) -> io::Result<SpellOutcomeLog> {
     Ok(SpellOutcomeLog {
         caster: read_u64_le(r)?,
@@ -363,19 +303,16 @@ pub(super) fn read_spell_outcome_log(r: &mut impl Read) -> io::Result<SpellOutco
     })
 }
 
-/// One decoded `SMSG_SPELLDISPELLOG` — auras a dispel actually removed (vmangos
-/// `Spell::EffectDispel`, `Spells/SpellEffects.cpp:2524-2539`; the guid pair is **packed** on the
-/// `>= 1.12.1` branch our build takes).
+/// `SMSG_SPELLDISPELLOG`, the auras a dispel removed (vmangos `SpellEffects.cpp:2524-2539`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpellDispelLog {
     /// The unit the auras were on.
     pub victim: u64,
-    /// The dispeller. The sentence never names them — `AURADISPEL*` words the bearer and the aura.
+    /// The dispeller; the `AURADISPEL*` line never names them.
     pub caster: u64,
     pub spell_ids: Vec<u32>,
 }
 
-/// Read `SMSG_SPELLDISPELLOG`: victim PackedGuid · caster PackedGuid · count u32 · `count` × u32.
 pub(super) fn read_spell_dispel_log(r: &mut impl Read) -> io::Result<SpellDispelLog> {
     let victim = read_packed_guid(r)?;
     let caster = read_packed_guid(r)?;
@@ -391,11 +328,8 @@ pub(super) fn read_spell_dispel_log(r: &mut impl Read) -> io::Result<SpellDispel
     })
 }
 
-/// One decoded `SMSG_DISPEL_FAILED` — auras a dispel tried and failed to remove (vmangos
-/// `Spell::EffectDispel`, `Spells/SpellEffects.cpp:2549-2555`).
-///
-/// **The list runs to the end of the packet** — vmangos writes no count, so the body's own length
-/// is the terminator. The reference reads it the same way (`0x628c20` loops to end of buffer).
+/// `SMSG_DISPEL_FAILED`, the auras a dispel failed to remove (`SpellEffects.cpp:2549-2555`). No
+/// count: the spell ids run to the end of the body, as the 1.12 client reads them (`0x628c20`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispelFailed {
     pub caster: u64,
@@ -403,7 +337,6 @@ pub struct DispelFailed {
     pub spell_ids: Vec<u32>,
 }
 
-/// Read `SMSG_DISPEL_FAILED`: caster raw `u64` · victim raw `u64` · u32 spell ids to end of body.
 pub(super) fn read_dispel_failed(r: &mut impl Read) -> io::Result<DispelFailed> {
     let caster = read_u64_le(r)?;
     let victim = read_u64_le(r)?;
@@ -412,7 +345,7 @@ pub(super) fn read_dispel_failed(r: &mut impl Read) -> io::Result<DispelFailed> 
         let mut b = [0u8; 4];
         match r.read_exact(&mut b) {
             Ok(()) => spell_ids.push(u32::from_le_bytes(b)),
-            // The body ended — the only terminator this packet has.
+            // The end of the body is the list's only terminator.
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e),
         }
@@ -424,25 +357,19 @@ pub(super) fn read_dispel_failed(r: &mut impl Read) -> io::Result<DispelFailed> 
     })
 }
 
-/// One decoded `SMSG_ENCHANTMENTLOG` — an enchant landing on, or fading from, an item (vmangos
-/// `WorldPackets::Item::EnchantmentLog::AppendBodyTo`, `Server/Packets/Item.cpp:235-242`;
-/// filled by `Player::SendEnchantmentLog`, `Objects/Player.cpp:12049-12072`).
-///
-/// **An empty `caster` means the enchant FADED**, not that the server forgot who cast it — that is
-/// vmangos's own comment on the field, and it is the two-way the reference switches on.
+/// `SMSG_ENCHANTMENTLOG`, an enchant landing on or fading from an item
+/// (`Server/Packets/Item.cpp:235-242`); a zero `caster` means it faded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnchantmentLog {
     pub caster: u64,
     pub owner: u64,
     pub item_entry: u32,
     pub spell_id: u32,
-    /// vmangos `showAffiliation`: false on the copy sent to the item's owner, true on the broadcast
-    /// to everyone else. The reference lets it pick the msg-id selector on the ADD leg.
+    /// False on the owner's copy, true on everyone else's; the 1.12 client picks the
+    /// enchant-added message by it.
     pub show_affiliation: bool,
 }
 
-/// Read `SMSG_ENCHANTMENTLOG`: caster raw `u64` · owner raw `u64` · itemEntry u32 · spellId u32 ·
-/// showAffiliation u8.
 pub(super) fn read_enchantment_log(r: &mut impl Read) -> io::Result<EnchantmentLog> {
     Ok(EnchantmentLog {
         caster: read_u64_le(r)?,
@@ -453,17 +380,11 @@ pub(super) fn read_enchantment_log(r: &mut impl Read) -> io::Result<EnchantmentL
     })
 }
 
-/// One `SMSG_SPELLLOGEXECUTE` entry — a single (effect, target) row. The payload shape is decided
-/// by the **effect id**, exactly as vmangos's `Spell::SendLogExecute` switch writes it
-/// (`Spells/Spell.cpp:4694-4771`) and as the reference's own per-effect jump table reads it
-/// (`0x5e8074 jmp [edx*4+0x5e8430]`, byte remap `0x5e845c`).
+/// One `SMSG_SPELLLOGEXECUTE` row, shaped by its effect id as vmangos writes it
+/// (`Spells/Spell.cpp:4694-4771`) and the 1.12 client reads it (`0x5e8074`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ExecuteLog {
-    /// Effect 8 `POWER_DRAIN`. **Field order VERIFIED at the client's bytes, not just the server's**:
-    /// the arm at `0x5e807b` reads guid → u32 → u32 → f32 and hands them to `0x62dbf0` →
-    /// `0x627930(…, spellId, powerType, amount, multiplier)` — where `0x62793c cmp edi,4` and
-    /// `0x62795d call 0x6278f0` (GetPowerTypeNoun) identify the SECOND u32 as the power type. So
-    /// the wire is (amount, power), which is what vmangos writes, and the two agree.
+    /// Effect 8 `POWER_DRAIN`: amount, then power (the 1.12 client, `0x5e807b` and `0x62793c`).
     PowerDrain {
         target: u64,
         amount: u32,
@@ -482,35 +403,27 @@ pub enum ExecuteLog {
         amount: u32,
         power: u32,
     },
-    /// Effect 19 `ADD_EXTRA_ATTACKS` — "You gain %d extra attacks through %s."
+    /// Effect 19 `ADD_EXTRA_ATTACKS`: "You gain %d extra attacks through %s."
     ExtraAttacks { target: u64, count: u32 },
-    /// Effect 24 `CREATE_ITEM` — the tradeskill line. **No target guid**: the item entry is the
-    /// whole payload.
+    /// Effect 24 `CREATE_ITEM`, the tradeskill line: no target guid, only the item entry.
     CreateItem { item_entry: u32 },
-    /// Effect 68 `INTERRUPT_CAST` — the interrupted target and the spell that was interrupted.
+    /// Effect 68 `INTERRUPT_CAST`: the interrupted target and spell.
     InterruptCast { target: u64, spell_id: u32 },
-    /// Effect 101 `FEED_PET` — like [`Self::CreateItem`], an item entry alone.
+    /// Effect 101 `FEED_PET`: an item entry alone.
     FeedPet { item_entry: u32 },
-    /// Effect 111 `DURABILITY_DAMAGE`. Both fields are **signed**: `-1`/`-1` is the "all items"
-    /// form, which the reference words with its own `SPELLDURABILITYDAMAGEALL*` family. vmangos
-    /// calls the second field `unk`; the reference calls it the item SLOT and tests it with the
-    /// entry for exactly that `-1` pair.
+    /// Effect 111 `DURABILITY_DAMAGE`, both fields signed; `-1`, `-1` is the all-items form
+    /// (`SPELLDURABILITYDAMAGEALL*`). The 1.12 client reads vmangos's `unk` as the item slot.
     DurabilityDamage {
         target: u64,
         item_entry: i32,
         slot: i32,
     },
-    /// Every other effect vmangos logs — a bare target guid. The effect id is kept because it is
-    /// what the reference's formatter switch keys on (open lock, dismiss pet, summon, dispel …).
+    /// Every other effect vmangos logs: a bare target guid.
     Target { target: u64 },
 }
 
-/// One decoded `SMSG_SPELLLOGEXECUTE` — "this cast's effects did these things" (vmangos
-/// `Spell::SendLogExecute`, `Spells/Spell.cpp:4662-4778`).
-///
-/// The packet is a *list of lists*: one group per spell effect that logged anything, each group a
-/// run of per-target rows. Groups keep their effect id because the whole formatter choice hangs off
-/// it — one packet can carry a tradeskill create, an interrupt and a power drain at once.
+/// `SMSG_SPELLLOGEXECUTE`, what a cast's effects did (`Spells/Spell.cpp:4662-4778`): one group of
+/// rows per logging effect, keyed by the effect id that picks the combat-log line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpellLogExecute {
     pub caster: u64,
@@ -530,13 +443,7 @@ const EFFECT_INTERRUPT_CAST: u32 = 68;
 const EFFECT_FEED_PET: u32 = 101;
 const EFFECT_DURABILITY_DAMAGE: u32 = 111;
 
-/// Read `SMSG_SPELLLOGEXECUTE`: caster PackedGuid · spellId u32 · effectCount u32 · per group
-/// `{effect u32, count u32, count × payload}` — the payload per [`ExecuteLog`].
-///
-/// An effect id outside the set vmangos logs cannot be skipped without desyncing the body (the row
-/// width is not on the wire), so it errors rather than guessing. vmangos never sends one: its own
-/// switch `return`s before `SendMessageToSet` for anything it has no case for, so an unlisted
-/// effect means no packet at all rather than a truncated one.
+/// Read `SMSG_SPELLLOGEXECUTE`; an unknown effect errors, as its row width is not on the wire.
 pub(super) fn read_spell_log_execute(r: &mut impl Read) -> io::Result<SpellLogExecute> {
     let caster = read_packed_guid(r)?;
     let spell_id = read_u32_le(r)?;
@@ -583,8 +490,6 @@ pub(super) fn read_spell_log_execute(r: &mut impl Read) -> io::Result<SpellLogEx
                     item_entry: read_i32_le(r)?,
                     slot: read_i32_le(r)?,
                 },
-                // The long tail of vmangos's switch: instakill, dispel, threat, summon, open lock,
-                // dismiss pet … all one guid wide.
                 _ if rows_are_guid_only(effect) => ExecuteLog::Target {
                     target: read_u64_le(r)?,
                 },
@@ -605,9 +510,7 @@ pub(super) fn read_spell_log_execute(r: &mut impl Read) -> io::Result<SpellLogEx
     })
 }
 
-/// The effects vmangos logs as a bare target guid — its `SendLogExecute` switch's long
-/// fall-through case list (`Spells/Spell.cpp:4735-4770`), each name resolved against
-/// `Spells/SpellDefines.h`'s `SpellEffects` enum rather than transcribed from memory.
+/// The effects vmangos logs as a bare target guid (`Spells/Spell.cpp:4735-4770`).
 fn rows_are_guid_only(effect: u32) -> bool {
     matches!(
         effect,

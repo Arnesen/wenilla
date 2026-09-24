@@ -38,9 +38,12 @@
 //!
 //! At character select no addon has been *loaded* — `load_third_party` is a world-entry step
 //! (1191 §2) — so `GetNumAddOns()` would answer 0. The screen asks
-//! [`crate::ui_script::addons::installed`] instead: the same discovery, the same manifest parser,
-//! the same enable files. Two views of one folder, never two folders. With the dropdown that read
-//! happens **once per roster character at open** ([`AddonsPanel::open_for`]).
+//! [`crate::ui_script::addons::installed_rows`] instead, and resolves the enable bits through
+//! [`crate::ui_script::addons::EnableStore`] exactly as the world-entry walk does: the same
+//! discovery, the same manifest parser, the same store. Two views of one folder, never two
+//! folders. Both reads happen **once at open** ([`AddonsPanel::open_for`]) — the folder walk used
+//! to run once per roster character, which decision 2311 retired along with the per-character
+//! `installed()` it was there to feed.
 
 use bevy::prelude::*;
 use bevy::ui_render::ui_material::MaterialNode;
@@ -224,41 +227,34 @@ impl Default for AddonsPanel {
 }
 
 impl AddonsPanel {
-    /// Open for this realm's roster, reading the folder fresh — once per character, so each
-    /// staged column is that character's own enable file applied to one shared list. The
-    /// reference's `AddonList_OnShow` also re-reads (`AddonList_Update`), so a folder that
-    /// changed under us is picked up.
+    /// Open for this realm's roster: the folder read **once** into one metadata list, and one
+    /// staged column per character off the enable store. The reference's `AddonList_OnShow` also
+    /// re-reads (`AddonList_Update`), so a folder that changed under us is picked up.
+    ///
+    /// **The store is loaded for the whole roster, not per character** (decision 2311). A column
+    /// is not "that character's file, everything else enabled": an addon the character has no row
+    /// for takes what the realm's *other* characters agree on, and only falls to the manifest's
+    /// `## DefaultState` when they disagree or nobody has said anything. Reading it the other way
+    /// is what made a newly created character re-enable every addon in the All view — its
+    /// all-enabled column turned every disabled row Mixed, and Mixed reads as on.
     pub(super) fn open_for(&mut self, realm: String, chars: Vec<String>) {
-        self.list.clear();
+        self.list = addons::installed_rows();
         self.staged.clear();
-        if chars.is_empty() {
-            // A fresh account: no character means no enable file to key. `None` is the "nobody's
-            // file" read (everything enabled), staged into one anonymous column so the boxes
-            // still toggle; Okay has no file to write ([`Self::save_staged`] walks `chars`).
-            self.list = addons::installed(None);
-            self.staged
-                .push(self.list.iter().map(|a| a.enabled).collect());
+        let store = addons::EnableStore::load(&realm, &chars);
+        // A fresh account stages one anonymous column: no character means no file to key, and
+        // Okay has none to write ([`Self::save_staged`] walks `chars`).
+        let columns: Vec<Option<&str>> = if chars.is_empty() {
+            vec![None]
         } else {
-            for (c, name) in chars.iter().enumerate() {
-                let id = (realm.clone(), name.clone());
-                let rows = addons::installed(Some(&id));
-                if c == 0 {
-                    self.staged.push(rows.iter().map(|a| a.enabled).collect());
-                    self.list = rows;
-                } else {
-                    // Same folder, same deterministic discovery order, read back-to-back:
-                    // every call answers the same rows in the same order, only the `enabled` bits
-                    // differ. That is what lets ONE metadata list carry N columns. The order is
-                    // `addons::sort_by_directory_order` — NTFS's, the reference's own listing
-                    // order — and the point here is only that it is a pure function of the names.
-                    debug_assert_eq!(
-                        rows.len(),
-                        self.list.len(),
-                        "installed() must be deterministic across per-character reads"
-                    );
-                    self.staged.push(rows.iter().map(|a| a.enabled).collect());
-                }
-            }
+            chars.iter().map(|c| Some(c.as_str())).collect()
+        };
+        for character in columns {
+            self.staged.push(
+                self.list
+                    .iter()
+                    .map(|a| store.enabled_for(&a.name, a.default_state, character))
+                    .collect(),
+            );
         }
         self.baseline = self.staged.clone();
         self.realm = realm;
@@ -316,7 +312,7 @@ impl AddonsPanel {
     /// actually matters.
     pub(super) fn any_installed() -> bool {
         static ANY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ANY.get_or_init(|| !addons::installed(None).is_empty())
+        *ANY.get_or_init(|| !addons::installed_rows().is_empty())
     }
 
     /// The rows currently visible, as `(index, addon)` — enable state is the view's to answer
@@ -392,10 +388,12 @@ impl AddonsPanel {
     }
 
     /// Is this addon enabled *for the current view* — the bit the gate is fed? A single character
-    /// reads their own column. The All view answers **"any staged character has it on"** — OURS
-    /// (1293): the reference feeds `AddOn_CanLoad` a NULL character there and that read's exact
-    /// semantics are un-carved, so we state the natural reading rather than guess at bytes nobody
-    /// has verified.
+    /// reads their own column. The All view answers **"any staged character has it on"**, which
+    /// 1293 stated as the natural reading of an untraced mechanism and which the bytes have
+    /// since confirmed: `AddonList_Update` computes `enabled = (checkboxState > 0)` off
+    /// `GetAddOnEnableState(nil, i)`, whose `1` (enabled for some) therefore counts as on
+    /// (`0x51e470`). What 1293 got wrong was not this fold but what each column holds — see
+    /// [`Self::open_for`] and decision 2311.
     fn effective_enabled(&self, i: usize) -> bool {
         self.box_state(i) != BoxState::Off
     }
@@ -606,7 +604,7 @@ pub(super) fn drive_addons_panel(
     for (entity, action, interaction) in &hovers {
         // **The scroll bar warps on the PRESS**, and only it: the reference's `CSimpleSlider`
         // OnMouseDown (`0x789ca0`, 45 bytes, zero branches) warps the value from any press inside
-        // the hit rect — there is no thumb hit-test in the class (wow-re `ui.md`). Every *button*
+        // the hit rect — there is no thumb hit-test in the class. Every *button*
         // in this panel fires on the RELEASE, over the button that took the press (1533).
         let click = if *action == AddonsAction::ScrollBar {
             interaction.is_changed() && *interaction == Interaction::Pressed
@@ -694,7 +692,7 @@ pub(super) fn drive_addons_panel(
         }
     }
 
-    // The live `checkAddonVersion` mirror (1293 §5): read per frame like the gate's own per-query
+    // The live `checkAddonVersion` mirror (1293): read per frame like the gate's own per-query
     // read (1292 §2.2), so the ForceLoad click above — or any other writer — repaints the
     // statuses this same frame with nothing rescanned. Absent VM or table = the registrar
     // default: check ON.
@@ -1712,7 +1710,7 @@ mod tests {
             dependencies: deps.iter().map(|d| (*d).to_string()).collect(),
             interface: iface,
             load_on_demand: false,
-            enabled: true,
+            default_state: true,
         }
     }
 
@@ -1721,7 +1719,7 @@ mod tests {
     /// `p.view = Some(c)` themselves.
     fn panel_for(chars: usize, list: Vec<InstalledAddOn>) -> AddonsPanel {
         let staged: Vec<Vec<bool>> = (0..chars.max(1))
-            .map(|_| list.iter().map(|a| a.enabled).collect())
+            .map(|_| list.iter().map(|a| a.default_state).collect())
             .collect();
         AddonsPanel {
             open: true,
@@ -1848,7 +1846,7 @@ mod tests {
         );
     }
 
-    /// The All view's gate input is OUR carve (1293): "enabled = any staged character has it on".
+    /// The All view's gate input is OUR reading (1293): "enabled = any staged character has it on".
     #[test]
     fn the_all_view_feeds_the_gate_any_character_on() {
         let mut p = panel_for(
@@ -1934,7 +1932,7 @@ mod tests {
         assert_eq!(p.staged, vec![vec![true, true]]);
         p.staged[0][0] = false;
         assert!(
-            p.list[0].enabled,
+            p.list[0].default_state,
             "the read-in list is never mutated — only `staged` is, which is what makes Cancel free"
         );
         p.close();
@@ -1982,26 +1980,150 @@ mod tests {
         p.staged[1][1] = false;
         p.save_staged();
 
-        // Read back through the same folder view the world-entry walk uses — the two views of
-        // one folder that 1197 §3 demands can never disagree.
-        let alice = ("TestRealm".to_string(), "Alice".to_string());
-        let bob = ("TestRealm".to_string(), "Bob".to_string());
-        let carol = ("TestRealm".to_string(), "Carol".to_string());
-        let read = |id: &(String, String)| -> Vec<bool> {
-            addons::installed(Some(id))
-                .iter()
-                .map(|a| a.enabled)
+        // Read back through the same store the world-entry walk resolves against — the two views
+        // of one folder that 1197 §3 demands can never disagree.
+        let roster = ["Alice".to_string(), "Bob".to_string(), "Carol".to_string()];
+        let store = addons::EnableStore::load("TestRealm", &roster);
+        let rows = addons::installed_rows();
+        let read = |who: &str| -> Vec<bool> {
+            rows.iter()
+                .map(|a| store.enabled_for(&a.name, a.default_state, Some(who)))
                 .collect()
         };
         assert_eq!(
-            read(&alice),
+            read("Alice"),
             vec![false, true],
             "Alice's file carries HER edit"
         );
-        assert_eq!(read(&bob), vec![true, false], "Bob's carries HIS");
+        assert_eq!(read("Bob"), vec![true, false], "Bob's carries HIS");
+        let carol = ("TestRealm".to_string(), "Carol".to_string());
         assert!(
             !addons::enable_state_path(Some(&carol)).unwrap().exists(),
             "an unchanged column writes no file — only the diffs against the open-time baseline"
+        );
+        // And Carol, who has no file at all, is NOT "everything enabled": she takes what the
+        // others agree on, which here is nothing — Alpha and Beta are each on for one and off
+        // for the other — so both fall to their manifests' `## DefaultState` (2311).
+        assert_eq!(read("Carol"), vec![true, true]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// **Creating a character does not re-enable everything** — the director's report,
+    /// 2026-09-17: *"after creating a new char all addons are enabled again, even after disabling
+    /// all of them just before"*.
+    ///
+    /// The walk is theirs, verbatim: Disable All in the All view, Okay, create a character, open
+    /// the list again. What used to happen is the whole bug in one line — the new character had
+    /// no `AddOns.txt`, benilla read an absent row as **enabled**, and that all-true column turned
+    /// every row in the All view from Off to Mixed, which paints a check and reads as on
+    /// (`effective_enabled`). One click there would then have written the all-enabled state back
+    /// onto every other character's file: a one-way ratchet.
+    ///
+    /// The reference does not do this: its enable query `0x51e470` counts only nodes with an
+    /// **explicit** entry, so a character with no file contributes no opinion and inherits the
+    /// aggregate — here, the unanimous `disabled` the player just saved. Decision 2311.
+    #[test]
+    fn a_new_character_inherits_the_disable_it_did_not_ask_for() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp =
+            std::env::temp_dir().join(format!("benilla-charsel-newchar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("benilla-config");
+        for name in ["Alpha", "Beta"] {
+            let dir = home.join("AddOns").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{name}.toc")), "## Interface: 11200\n").unwrap();
+        }
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let _h =
+            crate::local_state::test_env::EnvGuard::set("BENILLA_HOME", home.to_str().unwrap());
+
+        // The roster before the create, and the player's Disable All + Okay over it.
+        let mut p = AddonsPanel::default();
+        p.open_for(
+            "TestRealm".into(),
+            vec!["Onemage".into(), "Onerogue".into()],
+        );
+        p.set_all(false);
+        p.save_staged();
+        p.close();
+
+        // …then a character is created, so the roster the panel opens over has one more name and
+        // that name has no enable file at all.
+        p.open_for(
+            "TestRealm".into(),
+            vec!["Onemage".into(), "Onerogue".into(), "Freshling".into()],
+        );
+        assert!(p.view.is_none(), "reopens on All, the reference's default");
+        assert_eq!(p.staged.len(), 3);
+        assert_eq!(
+            p.staged[2],
+            vec![false, false],
+            "the new character inherits the unanimous disable, not a blank slate"
+        );
+        for i in 0..p.list.len() {
+            assert_eq!(
+                p.box_state(i),
+                BoxState::Off,
+                "row {i} reads OFF in the All view — Mixed here is the bug, and it paints a check"
+            );
+            assert!(!p.effective_enabled(i), "…so nothing is loadable either");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The other side of the same law: a new character does **not** inherit a disable the roster
+    /// never agreed on. One character off, one on, and the newcomer takes the manifest's
+    /// `## DefaultState` — so this is not "new characters copy whoever is strictest".
+    #[test]
+    fn a_new_character_inherits_nothing_when_the_roster_disagrees() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp =
+            std::env::temp_dir().join(format!("benilla-charsel-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("benilla-config");
+        for name in ["Alpha", "Beta"] {
+            let dir = home.join("AddOns").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{name}.toc")),
+                // Beta ships `## DefaultState: disabled`, so the tie-break is visible.
+                if name == "Beta" {
+                    "## Interface: 11200\n## DefaultState: disabled\n"
+                } else {
+                    "## Interface: 11200\n"
+                },
+            )
+            .unwrap();
+        }
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let _h =
+            crate::local_state::test_env::EnvGuard::set("BENILLA_HOME", home.to_str().unwrap());
+
+        let mut p = AddonsPanel::default();
+        p.open_for(
+            "TestRealm".into(),
+            vec!["Onemage".into(), "Onerogue".into()],
+        );
+        p.view = Some(0);
+        p.set_all(false); // the mage turns both off; the rogue keeps the defaults
+        p.view = Some(1);
+        p.set_all(true);
+        p.save_staged();
+        p.close();
+
+        p.open_for(
+            "TestRealm".into(),
+            vec!["Onemage".into(), "Onerogue".into(), "Freshling".into()],
+        );
+        assert_eq!(
+            p.staged[2],
+            vec![true, false],
+            "split roster → each row falls to its own `## DefaultState`"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -2089,8 +2211,8 @@ mod tests {
     }
 
     /// A press on the TRACK — off the knob — warps the knob's centre under the cursor and drags
-    /// on from there, one gesture. Byte-verified 1.12 (wow-re `slider-mouse-law.md` §1, and the
-    /// director's own requirement in 0989); the glue bar runs the same law as every in-game one.
+    /// on from there, one gesture. 1.12 does this (`0x789ca0`, and the director's own requirement
+    /// in 0989); the glue bar runs the same law as every in-game one.
     #[test]
     fn a_press_on_the_bare_track_warps_the_knob_under_the_cursor() {
         let thumb_n = KNOB / BAR_H;

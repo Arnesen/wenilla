@@ -1,5 +1,5 @@
-//! The full 1.12.1 world-opcode name table — **generated** from vmangos
-//! `Server/Protocol/Opcodes_1_12_1.h` (825 entries, deduped by number, sorted):
+//! Every 1.12.1 world opcode's name, generated from vmangos `Server/Protocol/Opcodes_1_12_1.h`
+//! (825 entries, deduped by number, sorted):
 //!
 //! ```sh
 //! sed -nE 's/^[[:space:]]+([A-Z_0-9]+)[[:space:]]*=[[:space:]]*([0-9]+),.*/\2 \1/p' \
@@ -7,13 +7,9 @@
 //!   | awk '!seen[$1]++ {printf "    (0x%04X, \"%s\"),\n", $1, $2}'
 //! ```
 //!
-//! The 1.12.1 wire is frozen, so this table can never go stale. It exists for the
-//! *instruments* — naming an opcode in the dropped-packet tally (the debug panel's
-//! wire-coverage gap detector) and in skip logs — never for dispatch (that's
-//! [`super::opcode`]'s explicitly-verified constants).
+//! For diagnostics only (the dropped-packet tally, skip logs); dispatch uses [`super::opcode`].
 
-/// Look up the canonical 1.12.1 name of a world opcode (either direction), if the number is
-/// assigned at all. O(log n) over the sorted table.
+/// The 1.12.1 name of a world opcode in either direction, by binary search of the sorted table.
 pub fn opcode_name(opcode: u16) -> Option<&'static str> {
     NAMES
         .binary_search_by_key(&opcode, |&(n, _)| n)

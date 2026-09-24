@@ -58,6 +58,7 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
 
     app.insert_resource(actions)
         .init_resource::<Items>()
+        .init_resource::<crate::net::GuidIndex>()
         .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
         .init_resource::<PetTameFailures>()
@@ -283,9 +284,9 @@ fn an_unknown_entry_answers_once_and_settles() {
 /// A MACRO slot serves **the macro's own icon**, and follows an EDIT of that macro without any
 /// bar-table change at all (decision 0983).
 ///
-/// Two things are pinned. The icon rule is byte-verified: `GetActionTexture`'s macro arm
-/// (`0x4e6bf9`) builds the macro record's own icon path and never touches the bound spell
-/// (`action-spell-icon-apis.md` §3.7). And the *trigger* is the macro-table generation — the third
+/// Two things are pinned. The icon rule: `GetActionTexture`'s macro arm (`0x4e6bf9`) builds the
+/// macro record's own icon path and never touches the bound spell. And the *trigger* is the
+/// macro-table generation — the third
 /// input beside `dirty` and the item-template epoch — because renaming or re-iconing a macro moves
 /// neither of those, and gating on them alone leaves a stale icon on the bar until some unrelated
 /// edit happens to re-dirty the feed (exactly decision 0660's bug, one seam over).
@@ -310,6 +311,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     actions.dirty = true;
     app.insert_resource(actions)
         .init_resource::<Items>()
+        .init_resource::<crate::net::GuidIndex>()
         .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
         .init_resource::<PetTameFailures>()
@@ -415,6 +417,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
 /// notice belongs here, red — and its `SMSG_AREA_TRIGGER_MESSAGE` sibling here, yellow.
 #[test]
 fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
+    benilla_formats::wow_data_or_skip!();
     let (mut app, _rx) = app_with_food_on_the_bar();
     {
         let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
@@ -523,6 +526,7 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
             ..Spells::empty_for_tests()
         })
         .init_resource::<Items>()
+        .init_resource::<crate::net::GuidIndex>()
         .init_resource::<MountErrors>()
         .init_resource::<PetTameFailures>()
         .init_resource::<UiErrorKeys>()

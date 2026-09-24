@@ -11,7 +11,7 @@ use benilla_ui::script::{ContainerSlot, ContainerState, ScriptValue, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::pending_item_ops::{LockTransitions, PendingItemOps};
 use crate::ui_script::gate;
 
@@ -31,9 +31,10 @@ pub(crate) struct FeedMemory {
     /// every frame. It is the gate the entire keyring UI hangs off, and "the keyring never
     /// appeared" is otherwise indistinguishable from "the button is mis-anchored".
     had_key: bool,
-    /// The gate's counter memories (1439) — the four stores whose lazy `&mut` resolves poison
-    /// `is_changed` for this feed, watched by their explicit counters instead.
-    items_objects: gate::Watch,
+    /// The gate's counter memories (1439) — the stores whose lazy `&mut` resolves poison
+    /// `is_changed` for this feed, watched by their explicit counters instead. The item OBJECTS
+    /// left this list with 2334: an instance is an entity, so its edges come off the ordinary
+    /// `Changed`/removal watch ([`crate::items::ItemChanges`]).
     items_templates: gate::Watch,
     cooldown_epoch: gate::Watch,
     names_generation: gate::Watch,
@@ -41,8 +42,9 @@ pub(crate) struct FeedMemory {
     /// what a charter slot's tooltip lines are built from. Lazy, so its arrival moves nothing else
     /// here (the same reason `names_generation` exists one line up).
     petition_records: gate::Watch,
-    /// `Items::countdown_display_epoch` — one step per displayable countdown change (the slot
-    /// views read second-floored countdowns), including the last elapse's collapsing push.
+    /// `ItemChanges::countdown_steps` — one step per displayable countdown change (the slot
+    /// views read second-floored countdowns), including the last elapse's collapsing push; a
+    /// landing is the item's own change tick (decision 2340).
     enchant_deadlines: gate::Watch,
     /// The item guid **of the bag itself** in each of the ten bag slots — container ids 1..=10
     /// (the four equipped, then the six bank bags), indexed `id − 1`. Diffed frame to frame for
@@ -137,7 +139,7 @@ fn charges_count(spells: &[benilla_protocol::messages::ItemSpellEntry]) -> i32 {
 ///
 /// Keys rather than an eight-string table (decision 2045): the bare tokens, not the `_FEMALE`
 /// twins, which is the spelling the reference itself uses wherever it builds a standing label
-/// (`FACTION_STANDING_LABEL%d` `0x84b5dc`, wow-re `ui/scratch/quest-leaderboard-law.md` §5).
+/// (`FACTION_STANDING_LABEL%d` `0x84b5dc`).
 /// `None` for an install that does not carry the row — the line then names no standing.
 fn standing_label(rank: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     get(&format!("FACTION_STANDING_LABEL{}", rank.min(7) + 1))
@@ -228,8 +230,7 @@ fn template_view(
         required_honor_rank: t.required_honor_rank,
         required_city_rank: t.required_city_rank,
         // `ITEM_REQ_REPUTATION` ("%s - %s" after its own "Requires ") — `0x854b8c`, the key the
-        // reference's own item tooltip builds this line with (wow-re
-        // `ui/scratch/tooltip-content-law.md` §"required-spell / honor-rank"). Both holes are
+        // reference's own item tooltip builds this line with. Both holes are
         // filled in the template's order; an install missing either key shows no line.
         required_rep_line: (t.required_rep_faction != 0)
             .then(|| {
@@ -262,7 +263,7 @@ fn template_view(
     }
 }
 
-/// The §22 SET-block feed: answer the engine's ask-once set ids from ItemSet.dbc, joining
+/// The item SET-block feed: answer the engine's ask-once set ids from ItemSet.dbc, joining
 /// member NAMES from the template cache (each miss fires its own `CMSG_ITEM_QUERY` through
 /// [`Items::template`], like the real client querying set members) and bonus TEXT from the
 /// spell catalog's `$`-engine. A set with members still in flight stays pending and re-pushes
@@ -606,11 +607,12 @@ pub(super) fn feed_player_req(
 /// exists before its query answers.
 fn resolve_slot(
     guid: u64,
+    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
     commands: &NetCommands,
-    cooldowns: &crate::cooldowns::Cooldowns,
+    cooldowns: &crate::spell::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
     names: &crate::names::NameCache,
     // The petition record cache, for a charter slot's tooltip lines — a LAZY fill, so it is taken
@@ -629,15 +631,15 @@ fn resolve_slot(
     if guid == 0 {
         return None;
     }
-    // The temporary-enchant countdowns, read off the deadline store BEFORE the object borrow below
-    // (both live on `Items`): one `Option<ms>` per enchant slot.
-    let enchant_ms: [Option<u64>; 7] =
-        std::array::from_fn(|s| items.enchant_remaining_display_ms(guid, s as u32));
-    // The item's own expiry countdown, read off the same deadline store and floored the same way
-    // — `SMSG_ITEM_TIME_UPDATE`'s only surface (decision 1933).
-    let duration_ms = items.duration_remaining_display_ms(guid);
+    // The item's own countdown cells (decision 2340): one `Option<ms>` per temporary-enchant
+    // slot, and its lifetime — `SMSG_ITEM_TIME_UPDATE`'s only surface (decision 1933) — both
+    // second-floored for the snapshot.
+    let countdowns = objects.countdowns(guid);
+    let enchant_ms: [Option<u64>; crate::items::ENCHANT_SLOTS] =
+        std::array::from_fn(|s| countdowns.and_then(|c| c.enchant_remaining_display_ms(s as u32)));
+    let duration_ms = countdowns.and_then(|c| c.lifetime_remaining_display_ms());
     let (entry, count, durability, readable, creator, flags, already_bound, roll, enchant_lines) =
-        match items.object(guid) {
+        match objects.object(guid) {
             Some(fields) => (
                 fields.object_entry().unwrap_or(0),
                 fields.item_stack_count().unwrap_or(1),
@@ -660,7 +662,7 @@ fn resolve_slot(
                     .and_then(|g| names.resolve(g, commands).map(str::to_string)),
                 // `ITEM_FIELD_FLAGS` — the tooltip's UNLOCKED (0x4) / WRAPPED (0x8) sub-gates.
                 fields.item_flags().unwrap_or(0),
-                // `0x5da2c0` — soulbound, or carrying a binding enchant: the §6 Soulbound
+                // `0x5da2c0` — soulbound, or carrying a binding enchant: the Soulbound
                 // override (B310). Read off the raw descriptor, not off the enchant LINES below.
                 crate::items::already_bound(fields, rolls.enchants),
                 // `ITEM_FIELD_RANDOM_PROPERTIES_ID` — the roll behind the NAME's "of the Bear"
@@ -719,7 +721,7 @@ fn resolve_slot(
         // rule.
         petition: (t.flags & benilla_protocol::messages::ITEM_FLAG_CHARTER != 0)
             .then(|| {
-                let id = items
+                let id = objects
                     .object(guid)
                     .and_then(|f| f.item_enchant(0))
                     .unwrap_or(0);
@@ -778,13 +780,14 @@ fn resolve_slot(
 /// than naming the quiver's own type (`benilla_formats::itembagfamily`, and the DBC read there).
 ///
 /// The bank-bag leg (63..=68) is ours by symmetry rather than byte-pinned: the reference bounds
-/// this on `[player+0x1d38]`, whose value wow-re did not resolve, so whether a bank bag reaches
+/// this on `[player+0x1d38]`, whose value is unresolved, so whether a bank bag reaches
 /// the substitution or falls to the generic line is unverified. Both outcomes are ordinary
 /// sentences; resolving it is the strictly more useful one, and it is flagged here rather than
 /// silently assumed.
 fn bag_family_name(
     player: Option<&ObjectStore>,
     bag_slot: u8,
+    objects: &Objects,
     items: &Items,
     families: Option<&benilla_formats::ItemBagFamilyCatalog>,
     commands: &NetCommands,
@@ -802,7 +805,7 @@ fn bag_family_name(
         _ => None,
     }
     .filter(|&g| g != 0)?;
-    let entry = items.object(guid)?.object_entry().filter(|&e| e != 0)?;
+    let entry = objects.object(guid)?.object_entry().filter(|&e| e != 0)?;
     let family = items.template(entry, guid, commands)?.bag_family;
     families.name(family).map(str::to_string)
 }
@@ -823,7 +826,7 @@ fn bag_family_name(
 /// feeds because neither of them owns the clear any more.
 pub(crate) fn resolve_item_locks(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    items: Res<Items>,
+    objects: Objects,
     mut pending: ResMut<PendingItemOps>,
     mut transitions: ResMut<LockTransitions>,
 ) {
@@ -836,7 +839,7 @@ pub(crate) fn resolve_item_locks(
     }
     transitions
         .0
-        .extend(pending.resolve(|bag, slot1| slot_guid_count(player, bag, slot1, &items)));
+        .extend(pending.resolve(|bag, slot1| slot_guid_count(player, bag, slot1, &objects)));
 }
 
 #[allow(clippy::type_complexity)] // the param list IS the input set
@@ -853,14 +856,12 @@ pub(crate) fn feed_containers(
         Option<Res<crate::items::Enchants>>,
         Option<Res<crate::items::RandomProperties>>,
     ),
-    // The two self-descriptor legs in one param (the 16-SystemParam ceiling): the store the
-    // slot arrays read, and its change tick — the gate's cheapest input (1439).
-    self_q: (
-        Query<&ObjectStore, With<SelfPlayer>>,
-        Query<(), (With<SelfPlayer>, Changed<ObjectStore>)>,
-    ),
+    // The inventory read (2334): the self store the slot arrays come off and its change tick —
+    // the gate's cheapest input (1439) — the object lookup the guids resolve through, and the
+    // item entities' own change watch.
+    mut inv: crate::items::Inventory,
     commands: Res<NetCommands>,
-    cooldowns: Res<crate::cooldowns::Cooldowns>,
+    cooldowns: Res<crate::spell::Cooldowns>,
     spells: Option<Res<crate::ui_action::Spells>>,
     // The refusals and where they land, as one param (the 16-SystemParam ceiling this signature
     // already sits at): the queue, and `show_messages`' chat + sound sinks (1815).
@@ -868,7 +869,9 @@ pub(crate) fn feed_containers(
     // Reason 16's `%s` source (decision 0916); absent = every 16 keeps the generic line.
     bag_families: Option<Res<crate::ui_items::ItemBagFamilies>>,
     pending: Res<PendingItemOps>,
-    mut lock_cleared: ResMut<LockTransitions>,
+    // The two handler-fed queues this feed fires for (the 16-SystemParam ceiling): the lock
+    // transitions (`ITEM_LOCK_CHANGED`) and the server-opened containers (`BAG_OPEN`, 2339).
+    queues: (ResMut<LockTransitions>, ResMut<super::net::BagOpens>),
     names: Res<crate::names::NameCache>,
     // Paired into one param (the 16-SystemParam ceiling this signature already sits at): the UI
     // clock, and the petition record cache a charter slot's tooltip lines read — `ResMut` because
@@ -884,6 +887,7 @@ pub(crate) fn feed_containers(
     };
     let (clock, mut petitions) = clock_and_petitions;
     let (mut equip_errors, mut sink) = equip;
+    let (mut lock_cleared, mut opens) = queues;
     let (memory, vm_reset) = memory.get_reset(&script);
     // The gate (1439): the snapshot below is a function of the self descriptor's slot arrays,
     // the item stores (both epochs — `is_changed` on `Items`/`NameCache`/`Cooldowns` is
@@ -893,7 +897,7 @@ pub(crate) fn feed_containers(
     // is deliberately NOT an input: the pushed cooldown triple carries the ABSOLUTE start
     // (frame-stable, the memory struct's own doc), and natural expiry moves the store's
     // `feed_epoch` through the prune.
-    let objects_moved = memory.items_objects.moved(items.object_epoch());
+    let objects_moved = inv.changes.moved();
     let templates_moved = memory.items_templates.moved(items.template_epoch());
     let cooldowns_moved = memory.cooldown_epoch.moved(cooldowns.feed_epoch());
     let names_moved = memory.names_generation.moved(names.generation());
@@ -903,10 +907,10 @@ pub(crate) fn feed_containers(
     // that rebuilt every bag snapshot for the whole life of a ticking enchant.
     let deadlines_moved = memory
         .enchant_deadlines
-        .moved(items.countdown_display_epoch());
+        .moved(inv.changes.countdown_steps());
     // Bound as `let`s (not a bare OR-chain) so the gate trace below can name each input.
     let sweep = cooldowns.sweep_pending(clock.anchor);
-    let self_changed = !self_q.1.is_empty();
+    let self_changed = !inv.self_changed.is_empty();
     // `is_added`, NOT `is_changed`: the feeds read only the load-once icon CATALOG off this
     // resource (its struct doc says so verbatim); the world's held-model cache half is
     // get-or-insert every frame, so `is_changed` reads true forever — 1439's gate-trace found
@@ -918,7 +922,7 @@ pub(crate) fn feed_containers(
     let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
     let families_changed = bag_families.as_ref().is_some_and(|r| r.is_changed());
     let errors_held = !equip_errors.0.is_empty();
-    let locks_held = !lock_cleared.0.is_empty() || !pending.is_empty();
+    let locks_held = !lock_cleared.0.is_empty() || !pending.is_empty() || !opens.0.is_empty();
     gate::trace(
         "feed_containers",
         &[
@@ -989,7 +993,7 @@ pub(crate) fn feed_containers(
     // `ui_action::cast_fail` already runs. No hex debug line on the player's screen: a code we
     // failed to map can't reach here (the table is total), and a key we typo'd is caught by
     // `equip_error`'s resolution test against the real `GlobalStrings.lua`, not at runtime.
-    let player = self_q.0.iter().next();
+    let player = inv.self_store.iter().next();
     let mut refusals = Vec::new();
     for e in equip_errors.0.drain(..) {
         // Reason 16's substitution — the ONE reason whose text is chosen by the app rather than
@@ -1003,6 +1007,7 @@ pub(crate) fn feed_containers(
                 bag_family_name(
                     player,
                     e.bag_slot,
+                    &inv.objects,
                     &items,
                     bag_families.as_deref().map(|c| &c.0),
                     &commands,
@@ -1048,6 +1053,9 @@ pub(crate) fn feed_containers(
     // sees the unlocked slot, not stale data — and after `feed_char`'s own push, for the same
     // reason on the doll and bank-bag bands (1771).
     let transitioned: Vec<(i64, u32)> = std::mem::take(&mut lock_cleared.0);
+    // The containers the server opened this frame (`SMSG_OPEN_CONTAINER`, decision 2339) — the
+    // packet handler queued them; they fire as `BAG_OPEN(id)` after the push below, like the locks.
+    let opened: Vec<i64> = std::mem::take(&mut opens.0);
 
     let mut fresh: HashMap<i64, ContainerState> = HashMap::new();
     // The player's own relic flag, resolved once. `find_equip_slot` reads it for INVSLOT 17 and
@@ -1067,6 +1075,7 @@ pub(crate) fn feed_containers(
             let guid = store.0.player_pack_slot(i).unwrap_or(0);
             if let Some(mut slot) = resolve_slot(
                 guid,
+                &inv.objects,
                 &items,
                 icons.as_deref(),
                 rolls,
@@ -1101,7 +1110,7 @@ pub(crate) fn feed_containers(
             if bag_guid == 0 {
                 continue; // no bag equipped → absent → GetContainerNumSlots = 0
             }
-            let (entry, num_slots, slot_guids) = match items.object(bag_guid) {
+            let (entry, num_slots, slot_guids) = match inv.objects.object(bag_guid) {
                 Some(f) => {
                     let n = f.container_num_slots().unwrap_or(0);
                     let guids: Vec<u64> = (0..n.min(36) as u8)
@@ -1122,6 +1131,7 @@ pub(crate) fn feed_containers(
             for (j, &guid) in slot_guids.iter().enumerate() {
                 if let Some(mut slot) = resolve_slot(
                     guid,
+                    &inv.objects,
                     &items,
                     icons.as_deref(),
                     rolls,
@@ -1157,6 +1167,7 @@ pub(crate) fn feed_containers(
             let guid = store.0.player_bank_slot(i).unwrap_or(0);
             if let Some(mut slot) = resolve_slot(
                 guid,
+                &inv.objects,
                 &items,
                 icons.as_deref(),
                 rolls,
@@ -1187,7 +1198,7 @@ pub(crate) fn feed_containers(
             if bag_guid == 0 {
                 continue; // no bag in the slot → absent → GetContainerNumSlots = 0
             }
-            let (entry, num_slots, slot_guids) = match items.object(bag_guid) {
+            let (entry, num_slots, slot_guids) = match inv.objects.object(bag_guid) {
                 Some(f) => {
                     let n = f.container_num_slots().unwrap_or(0);
                     let guids: Vec<u64> = (0..n.min(36) as u8)
@@ -1208,6 +1219,7 @@ pub(crate) fn feed_containers(
             for (j, &guid) in slot_guids.iter().enumerate() {
                 if let Some(mut slot) = resolve_slot(
                     guid,
+                    &inv.objects,
                     &items,
                     icons.as_deref(),
                     rolls,
@@ -1247,6 +1259,7 @@ pub(crate) fn feed_containers(
             let guid = store.0.player_keyring_slot(i).unwrap_or(0);
             if let Some(mut slot) = resolve_slot(
                 guid,
+                &inv.objects,
                 &items,
                 icons.as_deref(),
                 rolls,
@@ -1275,7 +1288,7 @@ pub(crate) fn feed_containers(
         // `HasKey()` — the gate that decides whether the keyring exists in the UI at all. Pushed
         // beside the containers because it is the same knowledge (item templates) read over the
         // same slot arrays, and it must be fresh on exactly the frames a BAG_UPDATE fires.
-        let key = has_key(&store.0, &items, &commands);
+        let key = has_key(&store.0, &inv.objects, &items, &commands);
         if key != memory.had_key {
             gate.audit("feed_containers", "the HasKey() flip");
             debug!(
@@ -1311,8 +1324,12 @@ pub(crate) fn feed_containers(
             vault: std::array::from_fn(|i| player.map_or(0, |s| vault_slot_guid(s, i as u8))),
         },
         transitioned,
+        opened,
     ) {
-        gate.audit("feed_containers", "a bag diff or a lock event");
+        gate.audit(
+            "feed_containers",
+            "a bag diff, a lock event or a server-opened bag",
+        );
     }
 }
 
@@ -1345,6 +1362,7 @@ pub(crate) fn apply_container_source(
     // is the logout despawn window — see this function's own note).
     guids: SlotGuids,
     transitioned: Vec<(i64, u32)>,
+    opened: Vec<i64>,
 ) -> bool {
     // Diff whole bags; push + fire BAG_UPDATE per transition, one BAG_UPDATE_DELAYED per batch. A
     // pending-lock transition always flips a slot's `.locked` (part of `ContainerSlot`'s equality),
@@ -1366,6 +1384,14 @@ pub(crate) fn apply_container_source(
     // pair benilla pushed is the LATER clients' shape, invented here.
     for _ in transitioned {
         script.fire_event("ITEM_LOCK_CHANGED", Vec::new());
+    }
+    // `SMSG_OPEN_CONTAINER` → `BAG_OPEN(containerId)` (decision 2339). The reference's arm
+    // `0x5e3b35` fires it from the packet handler; ours reaches the VM here — after this frame's
+    // `BAG_UPDATE`s, so the frame the stock `ContainerFrame_OnEvent` shows paints the bag as it now
+    // is. The id is the reference's own: 0 backpack, 1..4 equipped, 5..10 bank.
+    pushed |= !opened.is_empty();
+    for bag in opened {
+        script.fire_event("BAG_OPEN", vec![ScriptValue::Int(bag)]);
     }
     // Whether anything went into the VM — the caller's gate audit reads it (1439).
     pushed
@@ -1401,12 +1427,11 @@ fn diff_and_push(
     fresh: HashMap<i64, ContainerState>,
     guids: SlotGuids,
 ) -> bool {
-    // **`BAG_CLOSED` — the only thing in the image that hides an open bag window** (CARVED, wow-re
-    // `system/ui/scratch/equipped-bag-slot-events.md`: one fire site, `0x4f92b5`, and
-    // `ContainerFrame_OnEvent`'s `this:Hide()` is its one consumer; `CloseBag`/`CloseAllBags` are
-    // not even strings in `WoW.exe`). Its condition is **not** "the bag went away" — it is
-    // `new != old && old != 0` (`0x4f923d je` unchanged, `0x4f9247 je` old-was-empty), so a bag
-    // SWAPPED for another fires `BAG_CLOSED(n)` and then `BAG_UPDATE(n)`.
+    // **`BAG_CLOSED` — the only thing in the image that hides an open bag window** (one fire site,
+    // `0x4f92b5`, and `ContainerFrame_OnEvent`'s `this:Hide()` is its one consumer;
+    // `CloseBag`/`CloseAllBags` are not even strings in `WoW.exe`). Its condition is **not** "the
+    // bag went away" — it is `new != old && old != 0` (`0x4f923d je` unchanged, `0x4f9247 je`
+    // old-was-empty), so a bag SWAPPED for another fires `BAG_CLOSED(n)` and then `BAG_UPDATE(n)`.
     //
     // Diffed on the BAG's own guid rather than on the pushed `ContainerState` below, because it is
     // a fact about the bag and not about its contents: two identical empty bags exchanged between
@@ -1421,7 +1446,7 @@ fn diff_and_push(
         })
         .collect();
     // The other half of the same branch: a bag REMOVED fires `BAG_CLOSED` and no `BAG_UPDATE`
-    // (the unequip row of the carve's event table). Every other transition still announces.
+    // (`0x4f92cc`). Every other transition still announces.
     let emptied: Vec<i64> = closed
         .iter()
         .copied()
@@ -1432,9 +1457,8 @@ fn diff_and_push(
         script.fire_event("BAG_CLOSED", vec![ScriptValue::Int(*id)]);
     }
     // **`PLAYERBANKSLOTS_CHANGED` has TWO producers in the reference, and they carry different
-    // arguments** (CARVED — wow-re `system/object-layer/scratch/bank-slot-event-law.md` §3/§4;
-    // decision 2140). benilla had one fire for both, so half of them were argless where the
-    // reference pushes a string:
+    // arguments** (decision 2140). benilla had one fire for both, so half of them were argless
+    // where the reference pushes a string:
     //
     // * **P1, the player-descriptor path** — `0x5ddcf0`'s watcher sees the slot's own GUID field
     //   change and fires `0x5ddd6e`, `FrameScript_SignalEvent 0x703e50`, `__fastcall(ecx = id)`
@@ -1535,12 +1559,12 @@ fn diff_and_push(
         );
         for &bag in &changed {
             // The vault fires the reference's own event, once per changed slot and **with no
-            // arguments** (CARVED — `0x5ddd6e` calls `FrameScript_SignalEvent 0x703e50`, an
-            // `__fastcall(ecx = id)` with a plain `ret` and no vararg push; wow-re
-            // `system/object-layer/scratch/bank-slot-event-law.md`). It is a broadcast: every bank
-            // button repaints from its own `GetInventorySlot()`, which is why no slot id is needed
-            // and why the bank BAG band's copy of this event — fired by `ui_char::feed_char`, the
-            // feed that owns that band — is indistinguishable from this one.
+            // arguments** (`0x5ddd6e` calls `FrameScript_SignalEvent 0x703e50`, an
+            // `__fastcall(ecx = id)` with a plain `ret` and no vararg push). It is a broadcast:
+            // every bank button repaints from its own `GetInventorySlot()`, which is why no slot id
+            // is needed and why the bank BAG band's copy of this event — fired by
+            // `ui_char::feed_char`, the feed that owns that band — is indistinguishable from this
+            // one.
             //
             // Everything else — backpack, equipped bags, AND bank bags (ordinary container frames
             // in the reference) — fires BAG_UPDATE(bagID). The vault is the one band that fires
@@ -1584,16 +1608,56 @@ mod tests {
     };
 
     /// **`PLAYERBANKSLOTS_CHANGED` has two producers and they carry different arguments**
-    /// (decision 2140; CARVED, wow-re `object-layer/scratch/bank-slot-event-law.md` §3/§4).
+    /// (decision 2140).
     ///
     /// benilla fired the argless one for every transition, which is right for half of them and
     /// wrong for the other half — and the half it got wrong is the one a view diff cannot even
-    /// see. The three arms below are the three the carve distinguishes:
+    /// see. The three arms below are the three the reference distinguishes:
     ///
     ///  · a slot's item GUID changes (arrive / leave / exchange) → `0x5ddd6e`, **no arguments**;
     ///  · the same item's own fields change (a restack) → `0x4c728d`, **`arg1 = "player"`**;
     ///  · two IDENTICAL items exchanged between two slots → the pushed views are equal, so the
     ///    container diff sees nothing at all, and the reference fires the argless one **twice**.
+    /// `SMSG_OPEN_CONTAINER` → `BAG_OPEN(containerId)` (decision 2339): the ids the handler
+    /// resolved reach the VM in order, after the frame's container push, and the stock
+    /// `ContainerFrame_OnEvent` sees the id as `arg1` — the reference's own event shape.
+    #[test]
+    fn a_server_opened_bag_fires_bag_open_with_its_container_id() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            "SEEN = {} \
+             local f = CreateFrame('Frame') \
+             f:RegisterEvent('BAG_OPEN') \
+             f:RegisterEvent('BAG_UPDATE') \
+             f:SetScript('OnEvent', function() \
+                 table.insert(SEEN, event .. ' ' .. tostring(arg1)) end)",
+        )
+        .unwrap();
+        let mut memory = FeedMemory::default();
+        // A bag equipped into the second bag slot, and nothing else changed this frame.
+        assert!(apply_container_source(
+            &mut s,
+            &mut memory,
+            None,
+            NO_BAGS,
+            Vec::new(),
+            vec![2]
+        ));
+        let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
+        assert_eq!(seen, vec!["BAG_OPEN 2"]);
+        // Nothing queued: nothing fired, and the push reports nothing went in.
+        s.run("SEEN = {}").unwrap();
+        assert!(!apply_container_source(
+            &mut s,
+            &mut memory,
+            None,
+            NO_BAGS,
+            Vec::new(),
+            Vec::new()
+        ));
+        assert!(s.eval::<Vec<String>>("return SEEN").unwrap().is_empty());
+    }
+
     #[test]
     fn playerbankslots_changed_names_its_producer_by_the_slot_guid() {
         let mut s = UiScript::new().unwrap();
@@ -1633,16 +1697,37 @@ mod tests {
 
         // An item ARRIVES in vault slot 1 — the descriptor path, no arguments.
         guids.vault[0] = 0xF00D;
-        apply_container_source(&mut s, &mut memory, Some(vault(1, 5)), guids, Vec::new());
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(vault(1, 5)),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(seen(&mut s), vec!["PLAYERBANKSLOTS_CHANGED nil"]);
 
         // The SAME item restacks — its own `ITEM_FIELD_STACK_COUNT` moved, which is the item
         // watcher's path, and the reference pushes the unit token there.
-        apply_container_source(&mut s, &mut memory, Some(vault(1, 9)), guids, Vec::new());
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(vault(1, 9)),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(seen(&mut s), vec!["PLAYERBANKSLOTS_CHANGED player"]);
 
         // Nothing moved at all.
-        apply_container_source(&mut s, &mut memory, Some(vault(1, 9)), guids, Vec::new());
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(vault(1, 9)),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         assert!(seen(&mut s).is_empty(), "an unchanged vault says nothing");
 
         // Two IDENTICAL stacks exchanged between slots 1 and 2. Both slot views are equal before
@@ -1676,10 +1761,24 @@ mod tests {
             )])
         };
         guids.vault[1] = 0xBEEF;
-        apply_container_source(&mut s, &mut memory, Some(two()), guids, Vec::new());
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(two()),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(seen(&mut s), vec!["PLAYERBANKSLOTS_CHANGED nil"]);
         guids.vault.swap(0, 1);
-        let pushed = apply_container_source(&mut s, &mut memory, Some(two()), guids, Vec::new());
+        let pushed = apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(two()),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(
             seen(&mut s),
             vec![
@@ -1692,7 +1791,7 @@ mod tests {
     }
 
     /// **`BAG_CLOSED`, the only thing that hides an open bag window** — and the three ways to get
-    /// its condition wrong (CARVED, wow-re `system/ui/scratch/equipped-bag-slot-events.md`).
+    /// its condition wrong (`0x4f92b5`).
     ///
     /// benilla never fired this event at all, so a `ContainerFrame` outlived the bag it belonged
     /// to: `ContainerFrame_OnEvent`'s `this:Hide()` arm is its one consumer in all of FrameXML,
@@ -1738,12 +1837,26 @@ mod tests {
         // Equip a bag into the first equipped bag slot: BAG_UPDATE, and no BAG_CLOSED — the slot
         // was empty, which is the `0x4f9247 je` arm.
         guids.bags[0] = 0xAAAA;
-        apply_container_source(&mut s, &mut memory, Some(pouch(6)), guids, Vec::new());
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(pouch(6)),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(seen(&mut s), vec!["BAG_UPDATE 1"]);
 
         // Its contents change: the bag guid stands, so neither the close nor its suppression
         // applies and the ordinary announce runs.
-        apply_container_source(&mut s, &mut memory, Some(pouch(6)), guids, Vec::new());
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(pouch(6)),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         assert!(
             seen(&mut s).is_empty(),
             "an unchanged container says nothing"
@@ -1752,12 +1865,26 @@ mod tests {
         // SWAP for a different bag: closed FIRST, then updated. This is the arm a "the bag went
         // away" reading gets wrong — the slot is still occupied.
         guids.bags[0] = 0xBBBB;
-        apply_container_source(&mut s, &mut memory, Some(pouch(10)), guids, Vec::new());
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(pouch(10)),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(seen(&mut s), vec!["BAG_CLOSED 1", "BAG_UPDATE 1"]);
 
         // UNEQUIP: closed, and **no** BAG_UPDATE.
         guids.bags[0] = 0;
-        apply_container_source(&mut s, &mut memory, Some(HashMap::new()), guids, Vec::new());
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(HashMap::new()),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(seen(&mut s), vec!["BAG_CLOSED 1"]);
 
         // Two IDENTICAL empty bags exchanged between bank bag slots 5 and 6. Every container
@@ -1787,10 +1914,24 @@ mod tests {
         let mut guids = NO_BAGS;
         guids.bags[4] = 0x1111;
         guids.bags[5] = 0x2222;
-        apply_container_source(&mut s, &mut memory, Some(two()), guids, Vec::new());
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(two()),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         let _ = seen(&mut s);
         guids.bags.swap(4, 5);
-        let pushed = apply_container_source(&mut s, &mut memory, Some(two()), guids, Vec::new());
+        let pushed = apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(two()),
+            guids,
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(seen(&mut s), vec!["BAG_CLOSED 5", "BAG_CLOSED 6"]);
         assert!(
             pushed,
@@ -1833,13 +1974,14 @@ mod tests {
             Some(HashMap::from([(0, bag0)])),
             NO_BAGS,
             Vec::new(),
+            Vec::new(),
         );
         assert_eq!(s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(), 16);
         assert_eq!(s.eval::<i64>("return BAG_EVENTS").unwrap(), 1);
 
         // The logout despawn frame: no store. The VM keeps its last-pushed bags and no event
         // fires — an addon reading its bags out of the PLAYER_LOGOUT edge sees them intact.
-        apply_container_source(&mut s, &mut memory, None, NO_BAGS, Vec::new());
+        apply_container_source(&mut s, &mut memory, None, NO_BAGS, Vec::new(), Vec::new());
         assert_eq!(
             s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(),
             16,
@@ -1857,6 +1999,7 @@ mod tests {
             &mut memory,
             Some(HashMap::new()),
             NO_BAGS,
+            Vec::new(),
             Vec::new(),
         );
         assert_eq!(s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(), 0);
@@ -1915,6 +2058,7 @@ mod tests {
             Some(bag(arrows(200))),
             NO_BAGS,
             Vec::new(),
+            Vec::new(),
         );
         assert_eq!(
             s.eval::<String>("return table.concat(ORDER, ' ')").unwrap(),
@@ -1929,6 +2073,7 @@ mod tests {
             &mut memory,
             Some(bag(arrows(199))),
             NO_BAGS,
+            Vec::new(),
             Vec::new(),
         );
         assert_eq!(
@@ -1945,7 +2090,14 @@ mod tests {
         s.run("ORDER = {}").unwrap();
         let mut other = arrows(20);
         other.item_id = 3033; // Razor Arrow
-        apply_container_source(&mut s, &mut memory, Some(bag(other)), NO_BAGS, Vec::new());
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(bag(other)),
+            NO_BAGS,
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(
             s.eval::<String>("return table.concat(ORDER, ' ')").unwrap(),
             "BAG_UPDATE:0,nil",

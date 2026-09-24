@@ -1,16 +1,15 @@
-//! The mouseover / target **model brighten** — the real client's per-model highlight emissive
-//! (wow-re `object-layer/scratch/selection-circle.md` PART 2, §5 cross-checked).
+//! The mouseover / target **model brighten** — the real client's per-model highlight emissive.
 //!
 //! The reference pushes it on hover/target *change*, never a per-frame compare: the mouseover
 //! publisher and the target setter call `SetHighlight 0x614550` / `ClearHighlight 0x6144f0` with a
 //! per-object reason bitmask (bit 0 = target, bit 1 = mouseover — hover + target **stack**, and the
-//! glow drops only when the last reason clears). `SetHighlight` writes the config RGB — shipped
-//! default `0xff404040` ⇒ **+64/255 per channel** — into the model, and the animate kernel adds it
-//! to the material emissive (`glMaterialfv(GL_EMISSION)`): a flat additive lift inside the GL
-//! lighting sum, pre-texture-modulate, riding every lit material of the model *and* its attachments.
+//! glow drops only when the last reason clears). `SetHighlight` samples the scene's committed
+//! ambient (`[0xce9cd8]`, read at `0x614576`-`0x6145bd`) into the model and holds it until the last
+//! reason clears; each batch adds it to its colour before the final clamp (`c29`), lit or unlit,
+//! the model's attachments included. `0xff404040` is only the fallback before a map's light loads.
 //!
 //! benilla carries the flag in **bit 31 of the per-instance `MeshTag`** (the convention home is
-//! `benilla_world::mesh_tag`); `wow_model.wgsl` adds the 64/255 lift to its lighting factor when set. This
+//! `benilla_world::mesh_tag`); `wow_model.wgsl` adds the scene ambient when it is set. This
 //! system is the bit's only writer: each frame (PostUpdate — after every Update payload writer, so
 //! their whole-`u32` overwrites can't strand the bit) it ORs the flag onto every part of the
 //! hovered + selected roots and clears it on roots that left the set. The reason bitmask collapses

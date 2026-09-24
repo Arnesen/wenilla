@@ -1,9 +1,4 @@
-//! Shared fixtures for the world message layer's oracle-free regression tests (split by domain
-//! across `tests/*.rs`). Client packet bodies are pinned to golden hex captured from the validated
-//! implementation (byte-validated against `wow_world_messages` during the decision-0021 migration);
-//! `SMSG_UPDATE_OBJECT` fixtures are real serialized packet bodies from that same corpus, parsed +
-//! decoded here. Simple server bodies are hand-built (their layout is trivial: a few little-endian
-//! scalars).
+//! Shared fixtures for the protocol tests: `hx` decodes the hex of a golden packet body.
 
 pub fn hx(s: &str) -> Vec<u8> {
     (0..s.len())

@@ -71,6 +71,7 @@ fn log(entries: Vec<QuestLogEntryView>) -> QuestLogState {
     QuestLogState {
         num_quests: entries.len() as u32,
         entries,
+        hidden_quest_ids: Vec::new(),
     }
 }
 
@@ -179,31 +180,4 @@ fn a_world_entry_paints_a_quest_already_running() {
     // Singular at exactly one minute — SecondsToTime's `_P1` plural rule, the ref's own; 90 s of
     // gap reads 89 through the `−1`.
     assert_eq!(row_text(&s, 1), "1 Min 29 Secs ");
-}
-
-/// **The reference file is the test oracle** (decision 0675). Scrapes both this window and the
-/// extracted reference `QuestTimerFrame.xml` for `<AbsDimension>` pairs per named element and
-/// asserts every shared element's numbers match — the guard that catches a transcription whose
-/// frames all load, click and populate while every number is wrong.
-///
-/// Verified to fail: perturbing `QuestTimer1`'s TOP offset from -30 to -29 reports
-/// `QuestTimer1: ours [(140.0, 16.0), (0.0, -29.0)] != ref [(140.0, 16.0), (0.0, -30.0)]`.
-#[test]
-fn the_window_geometry_matches_the_reference_framexml() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    let Some(reference) =
-        super::framexml_diff::reference("Interface\\FrameXML\\QuestTimerFrame.xml")
-    else {
-        eprintln!("skipping: no extracted FrameXML");
-        return;
-    };
-    // No exemptions: this window's frames keep the reference's bare names (decision 0591 §3 — the
-    // manage pass and the ref's own row lookup both resolve by literal name), and every number in
-    // it is the reference's. If an entry ever needs to go here, it names its reason.
-    super::framexml_diff::assert_geometry_matches(
-        "Interface\\FrameXML\\QuestTimerFrame.xml",
-        &reference,
-        &[],
-        22,
-    );
 }

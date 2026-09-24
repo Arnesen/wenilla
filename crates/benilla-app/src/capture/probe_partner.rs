@@ -4,9 +4,9 @@
 //! leader/loot management, pings — solo, with the probe account as the other member. It also
 //! accepts **duel** challenges (decision 0637), which is what makes the duel arc's two-client
 //! questions answerable at all: whether the opponent turns hostile, whether the arbiter flag
-//! plants. Non-combat (the unattended-combat ban, `method.md` "The local vmangos server", stands
+//! plants. Non-combat (the unattended-combat ban, `docs/METHOD.md` "The local vmangos server", stands
 //! untouched: this probe answers a challenge but never swings, and a duel nobody strikes in
-//! simply times out). Pair with the slot-keyed probe identity (`WOW_USER=probeN …`, method.md).
+//! simply times out). Pair with the checkout's probe identity (the `probe` skill).
 
 use bevy::prelude::*;
 

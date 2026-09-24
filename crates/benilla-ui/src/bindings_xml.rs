@@ -1,8 +1,8 @@
 //! **`Bindings.xml`** — an addon's key-binding declaration (decision 1188 phase 4).
 //!
-//! The reference loads one per addon, at a verified position inside `AddOn_Load 0x51f240`
-//! (wow-5875-re `system/ui/ui.md`): **after** that addon's `.toc`-listed files (`0x51f3fa`) and
-//! **before** its saved-variables files (`0x51f400` → `0x51f4b5`). Both of benilla's load paths
+//! The reference loads one per addon, at a verified position inside `AddOn_Load 0x51f240`:
+//! **after** that addon's `.toc`-listed files (`0x51f3fa`) and **before** its saved-variables
+//! files (`0x51f400` → `0x51f4b5`). Both of benilla's load paths
 //! attach there — the startup walk (`benilla_app::ui_script::addons`) and the demand load
 //! ([`crate::script::addon`]) — and what they parse here feeds the same table the Key Bindings
 //! window edits ([`crate::script::keybind`]).
@@ -17,6 +17,9 @@
 //! out the whole `MOVEVIEW*` family in place. A parser that finds bindings by scanning text (and
 //! any count taken by `grep`) registers those six as real, which is why the counts here are the
 //! ones this module's own parse returns and why `a_commented_out_binding_is_not_a_binding` exists.
+//! The counts are pinned against the install itself by
+//! `benilla_app::bindings::commands::tests::the_installs_bindings_xml_reads_as_the_parsers_header_says`
+//! — there, because there is where the patch chain is (this crate reads no install).
 //!
 //! ```xml
 //! <Bindings>
@@ -64,9 +67,8 @@
 //! unreachable from the host's own load path without going through the VM, which is exactly the
 //! shape 1186 spent a decision untangling.
 //!
-//! XML *parsing* is delegated plumbing here for the same reason it is in [`crate::framexml`] (the
-//! RE spec's own split: "XML parsing is DELEGATED; the schema→op map is owned") — `roxmltree`
-//! reads the bytes, and only the schema→meaning map below is ours.
+//! XML *parsing* is delegated plumbing here for the same reason it is in [`crate::framexml`] —
+//! `roxmltree` reads the bytes, and only the schema→meaning map below is ours.
 
 use std::fmt;
 
@@ -344,38 +346,5 @@ mod tests {
     fn malformed_xml_is_an_error() {
         let e = parse("<Bindings><Binding name=\"X\"></Bindings>").expect_err("malformed");
         assert!(e.to_string().starts_with("malformed Bindings.xml:"));
-    }
-
-    /// Parses the REAL shipped file when `BENILLA_BINDINGS_XML` points at one (never committed —
-    /// extract `Interface\FrameXML\Bindings.xml` with benilla-extract). Skips silently otherwise,
-    /// matching `toc.rs`'s and `framexml.rs`'s pattern so the gates never depend on client data.
-    ///
-    /// The numbers are the ones this module's header quotes, so a wrong count here is either a
-    /// wrong file or a header that has drifted from the client.
-    #[test]
-    fn real_bindings_xml_when_available() {
-        let Ok(path) = std::env::var("BENILLA_BINDINGS_XML") else {
-            return;
-        };
-        let text = std::fs::read_to_string(&path).expect("reading BENILLA_BINDINGS_XML");
-        let binds = parse(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
-        assert_eq!(
-            binds.len(),
-            228,
-            "1.12.1 ships 228 live bindings — the other six are inside a comment"
-        );
-        assert!(binds.iter().all(|b| !b.name.is_empty()));
-        assert!(
-            !binds.iter().any(|b| b.name.starts_with("MOVEVIEW")),
-            "the commented-out family must not register"
-        );
-        assert_eq!(binds.iter().filter(|b| b.run_on_up).count(), 94);
-        assert_eq!(binds.iter().filter(|b| b.header.is_some()).count(), 13);
-        assert_eq!(binds.iter().filter(|b| b.hidden).count(), 12);
-        assert_eq!(
-            binds[0].header.as_deref(),
-            Some("MOVEMENT"),
-            "the file opens on the MOVEMENT section"
-        );
     }
 }

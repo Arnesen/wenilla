@@ -16,52 +16,18 @@
 //! The director saw the first (their `Bagnon_Core` loaded at startup, so `currentPlayer` was
 //! captured nil). Fix only that and you get the second. So the tests below pin **both**, and the
 //! headline is a quad count, not an error count: [`bagnon_draws_a_slot_for_every_bag_slot`] is
-//! green only when 16 item-slot quads actually reach the render list.
+//! green only when every live slot's quad actually reaches the render list — the backpack's 16
+//! and, since the reference's own `ContainerFrame.lua` runs off the chain (1751), the keyring's 12
+//! beside them (Bagnon's default bag set is `{-2, 0, 1, 2, 3, 4}`, `Bagnon.lua:25`).
 //!
 //! Nothing from the corpus is committed, and every test here skips cleanly on a machine without
 //! it — the `ui_chat::ace_gate_tests` rule.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use benilla_formats::addon_corpus_or_skip as corpus_or_skip;
 use benilla_ui::script::{AddOnInfo, ContainerSlot, ContainerState, QuadContent, UiScript};
 use benilla_ui::toc::Toc;
-
-/// Where the vanilla addon corpus might be — `$BENILLA_ADDON_CORPUS`, else a sibling checkout
-/// resolved from this crate's manifest (a pool worktree's cwd is not stable across tool calls).
-fn corpus_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(over) = std::env::var_os("BENILLA_ADDON_CORPUS") {
-        out.push(PathBuf::from(over));
-    }
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for up in [2usize, 3, 4] {
-        if let Some(root) = manifest.ancestors().nth(up) {
-            out.push(root.join("wow-addons-vanilla"));
-        }
-    }
-    out
-}
-
-/// The corpus root, or `None` — **a skip, never a failure**: it is third-party content that is
-/// deliberately not in this repo.
-fn corpus() -> Option<PathBuf> {
-    corpus_candidates().into_iter().find(|c| c.is_dir())
-}
-
-macro_rules! corpus_or_skip {
-    () => {
-        match corpus() {
-            Some(root) => root,
-            None => {
-                eprintln!(
-                    "skipping: no vanilla addon corpus — looked in {:?} (set $BENILLA_ADDON_CORPUS)",
-                    corpus_candidates()
-                );
-                return;
-            }
-        }
-    };
-}
 
 /// The corpus **and** a client install — for the tests whose subject is a global that comes from
 /// the reference file this client SOURCES off the player's own patch chain rather than shipping
@@ -177,6 +143,29 @@ fn roster() -> crate::char_select::Roster {
     crate::char_select::Roster::with_pending_pick(vec![row], 7)
 }
 
+/// The `"player"` snapshot the self descriptor builds when it lands — what `ui_unit::feed_units`
+/// pushes (its `"player"` leg) and fires `PLAYER_ENTERING_WORLD` off. It is the roster seat plus
+/// the fields only the descriptor can say: the unit EXISTS, at the roster's level, with health
+/// and a live object. [`super::seat_from_roster`] deliberately leaves those at nil/0 (decision
+/// 2263: the reference's `UnitExists("player")` is nil and `UnitLevel("player")` is 0 before the
+/// object exists), so the seat can no longer stand in for the descriptor the way it did from 1230
+/// until then — a fixture that never pushes this stays in the pre-object window for good, which
+/// is a state the real client is never in when a player opens their bags.
+fn descriptor_snapshot(seat: &benilla_ui::script::UnitState) -> benilla_ui::script::UnitState {
+    benilla_ui::script::UnitState {
+        exists: true,
+        has_object: true,
+        is_connected: true,
+        guid: 7,
+        level: 60,
+        health: 4_000,
+        max_health: 4_000,
+        power_type: 1, // a Warrior's rage
+        max_power: 1_000,
+        ..seat.clone()
+    }
+}
+
 /// A VM shaped like the director's session: our whole interface, their installed addons walked in
 /// dependency order the way `addons::load_third_party` walks them, and a real backpack.
 fn seat(root: &Path, seat: Seat) -> UiScript {
@@ -191,6 +180,10 @@ fn seat(root: &Path, seat: Seat) -> UiScript {
     s.set_realm_name("Harness");
     let player = super::seat_from_roster(&roster()).expect("a pending pick seats a player");
     if seat == Seat::BeforeAddons {
+        // The real entry load seeds the player RECORD beside the seat (`lifecycle.rs`, decisions
+        // 2261/2263); this one push does both, by `set_unit`'s keep-in-step rule — a `"player"`
+        // push that carries a name seeds the record — so `UnitName("player")` is "Harness" at
+        // addon file scope, which is what sends Bagnon down its LIVE path.
         s.set_unit("player", Some(player.clone()));
     }
     let failures = super::load_default_ui(&s);
@@ -239,12 +232,14 @@ fn seat(root: &Path, seat: Seat) -> UiScript {
     for event in ["VARIABLES_LOADED", "PLAYER_LOGIN"] {
         s.fire_event(event, Vec::new());
     }
-    // The self descriptor's arrival: `ui_unit::feed_units` pushes the player and fires
-    // PLAYER_ENTERING_WORLD off it. In the `AfterAddons` arm this is the FIRST time the VM has
-    // ever had a `"player"` — which is the state this file exists to reproduce.
-    if seat == Seat::AfterAddons {
-        s.set_unit("player", Some(player));
-    }
+    // The self descriptor's arrival: `ui_unit::feed_units` pushes the snapshot the descriptor
+    // builds and fires PLAYER_ENTERING_WORLD off it — in BOTH arms, because that is the world
+    // every real Bagnon open happens in. It matters: the reference's `GetKeyRingSize`
+    // (`ContainerFrame.lua:773-786`) reads `UnitLevel("player")`, and a fixture left in the
+    // pre-object window (level 0, the roster seat's answer since 2263) sizes the keyring at 4
+    // where the level-60 session sizes it at 12. In the `AfterAddons` arm this is the FIRST time
+    // the VM has ever had a `"player"` — which is the state this file exists to reproduce.
+    s.set_unit("player", Some(descriptor_snapshot(&player)));
     s.fire_event("PLAYER_ENTERING_WORLD", Vec::new());
     for _ in 0..10 {
         s.tick(0.1);
@@ -366,6 +361,7 @@ fn click(s: &mut UiScript, name: &str, button: &str) {
 /// director was on.
 #[test]
 fn bagnon_draws_a_slot_for_every_bag_slot() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = seat(&root, Seat::BeforeAddons);
 
@@ -381,17 +377,24 @@ fn bagnon_draws_a_slot_for_every_bag_slot() {
             .unwrap(),
         "the window must be on screen"
     );
+    // 28 = the backpack's 16 + the keyring's 12. Bagnon's default bag set carries the keyring
+    // (`Bagnon.lua:25`, `{-2, 0, 1, 2, 3, 4}`), and its size is the reference's own
+    // `GetKeyRingSize` ladder off `UnitLevel("player")` (`ContainerFrame.lua:773-786`: 4, 8 at
+    // 40, 12 at 50, 16 only above 60) — 12 for the fixture's level-60 Warrior. The four bag slots
+    // hold nothing, so they add nothing.
     assert_eq!(
         s.eval::<i64>("return Bagnon.size").unwrap(),
-        16,
-        "Bagnon must size itself off the LIVE backpack (GetContainerNumSlots(0) == 16), not off \
-         Bagnon_Forever's empty offline cache — nil UnitName('player') is what sent it there"
+        28,
+        "Bagnon must size itself off the LIVE bags (GetContainerNumSlots(0) == 16 plus \
+         GetKeyRingSize() == 12 at level 60), not off Bagnon_Forever's empty offline cache — nil \
+         UnitName('player') is what sent it there"
     );
     assert_eq!(
         bagnon_slot_quads(&mut s),
-        16,
-        "sixteen bag slots must actually be DRAWN — the director saw a title and a gold line and \
-         nothing else, while every column of the addon survey called this addon fine"
+        28,
+        "every live slot must actually be DRAWN (16 backpack + 12 keyring) — the director saw a \
+         title and a gold line and nothing else, while every column of the addon survey called \
+         this addon fine"
     );
     assert!(
         s.errors().is_empty(),
@@ -408,6 +411,7 @@ fn bagnon_draws_a_slot_for_every_bag_slot() {
 /// drawing slots, the headline above has stopped testing the thing it was written for.
 #[test]
 fn without_a_player_at_addon_load_bagnon_draws_an_empty_window() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = seat(&root, Seat::AfterAddons);
     s.run("ToggleBackpack()").expect("ToggleBackpack");
@@ -447,6 +451,7 @@ fn without_a_player_at_addon_load_bagnon_draws_an_empty_window() {
 /// on screen at all — and it is what the identity fix alone would have produced.
 #[test]
 fn the_item_button_helpers_paint_a_slots_icon_and_count() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().expect("VM");
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -733,6 +738,7 @@ fn dragging_a_bagnon_slot_picks_the_item_up() {
 /// ```
 #[test]
 fn the_backpack_button_still_hovers_with_bagnon_holding_its_script() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon(&root);
 
@@ -761,10 +767,11 @@ fn the_backpack_button_still_hovers_with_bagnon_holding_its_script() {
 }
 
 /// **Bug 3.** `Bagnon_Forever/database/ui.lua:61` sizes its character dropdown from
-/// `button:GetTextWidth()` on a **CheckButton** — a real 1.12 Button method (wow-re
-/// `widget-api-batch-benilla.md` Q8 lists it present, and `GetStringWidth` absent, on Button).
+/// `button:GetTextWidth()` on a **CheckButton** — a real 1.12 Button method (`0x782290`, and
+/// `GetStringWidth` is absent on Button).
 #[test]
 fn a_button_reports_its_own_label_width() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon(&root);
 
@@ -827,6 +834,7 @@ fn a_button_reports_its_own_label_width() {
 /// we had never declared, so every one of the 36 buttons warned and the child came out bare.
 #[test]
 fn the_reference_cooldown_template_resolves() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let s = open_bagnon(&root);
     let occupied = bagnon_button_for_slot(&s, 0, 1);
@@ -855,12 +863,15 @@ fn the_reference_cooldown_template_resolves() {
 /// does.
 #[test]
 fn the_whole_bagnon_window_survives_being_used() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon(&root);
 
     // 1 · Every slot, hovered and left again — the OnEnter/OnUpdate/OnLeave loop on both an
-    //     occupied and an empty slot.
-    for i in 1..=16 {
+    //     occupied and an empty slot, across every bag the window lays out (the keyring's slots
+    //     come first in Bagnon's default order, the backpack's after them).
+    let size = s.eval::<i64>("return Bagnon.size").expect("Bagnon.size");
+    for i in 1..=size {
         let name = format!("BagnonItem{i}");
         if s.eval::<bool>(&format!("return getglobal(\"{name}\") ~= nil"))
             .unwrap_or(false)
@@ -886,7 +897,8 @@ fn the_whole_bagnon_window_survives_being_used() {
     // 3 · Bagnon's OWN bag buttons (the row it just revealed — `BagnonBags0..4` plus the
     //     keyring's `BagnonBags-2`, from `Bagnon.xml`'s `$parent<id>` naming): hover, click and
     //     drag each. `BagnonBag_OnClick` is `PutItemInBackpack`/`PutItemInBag`, `BagnonBag_OnDrag`
-    //     is `PickupBagFromSlot` — three engine verbs, none of which existed here.
+    //     is `PickupBagFromSlot` — three engine verbs that did not exist here when this test was
+    //     written and are `script/cursor/bag_verbs.rs` now.
     for id in ["0", "1", "2", "3", "4", "-2"] {
         let name = format!("BagnonBags{id}");
         if !s
@@ -906,8 +918,9 @@ fn the_whole_bagnon_window_survives_being_used() {
         s.mouse_button(x + 12.0, y + 12.0, "LeftButton", false);
     }
 
-    // 4 · The money frame's three coin buttons — `OpenCoinPickupFrame`, guarded in our own
-    //     MoneyFrame.xml and *not* guarded in Bagnon's copy of the same handler.
+    // 4 · The money frame's three coin buttons — `OpenCoinPickupFrame`, which Bagnon's own
+    //     `BagnonFrameMoney_OnClick` (`Frame.lua:537-543`) calls unguarded, exactly as the
+    //     reference's `MoneyFrame.xml` coin buttons do.
     for coin in ["Gold", "Silver", "Copper"] {
         let name = format!("BagnonMoneyFrame{coin}Button");
         if s.eval::<bool>(&format!(
@@ -949,32 +962,16 @@ fn the_whole_bagnon_window_survives_being_used() {
     //
     // To retire an entry: implement it and delete the line. To add one: you had better be able to
     // say why, in the same sentence.
-    const KNOWN_GAPS: &[(&str, &str)] = &[
-        // The bag-BUTTON cursor trio (`Bag.lua:199-215` — Bagnon's own bag row, click and drag).
-        // Three 1.12 engine bindings benilla does not have: `PutItemInBackpack 0x4c8f70`,
-        // `PutItemInBag 0x4c8f00`, `PickupBagFromSlot 0x4c8fa0` (wow-re `system/ui/ledger.tsv`
-        // l.1962-1964 has the registrations verified; the DECOMPILATION on disk is partial —
-        // Ghidra removed unreachable blocks from two of the three — so what each one actually
-        // DOES is not read).
-        //
-        // **Deliberately not guessed.** The open question is whether `PutItemInBag(inv)`
-        // auto-stores the held item into that bag's CONTENTS or places it onto the equipment slot,
-        // and those are different opcodes. Writing a cursor transition on the wrong one moves a
-        // player's items to the wrong place, which is the most expensive kind of wrong here
-        // (the contract §4), so an RE cross-check is dispatched into wow-5875-re and these land on
-        // its verdict, not before.
-        ("PutItemInBackpack", "Bagnon_Core\\core\\Bag.lua:202"),
-        ("PutItemInBag", "Bagnon_Core\\core\\Bag.lua:204"),
-        ("PickupBagFromSlot", "Bagnon_Core\\core\\Bag.lua:214"),
-        // Money on the cursor. `Frame.lua:537-543` — Bagnon's money frame calls this UNGUARDED
-        // where benilla's own `MoneyFrame.xml:411` guards its copy of the same reference handler.
-        // It is the head of a whole feature, not a missing line: the reference's
-        // `CoinPickupFrame.lua`/`.xml` need `GetCursorMoney`, `PickupPlayerMoney`, a MONEY cursor
-        // payload (wow-re `cursor-dragdrop-payload.md` row 2 — benilla's cursor has Item/Spell/
-        // Action only) and a keyboard-focused frame with `OnChar`/`OnKeyDown`, which this engine
-        // deliberately does not have (see `EnableKeyboard` in the same landing's report).
-        ("OpenCoinPickupFrame", "Bagnon_Core\\core\\Frame.lua:543"),
-    ];
+    //
+    // **Empty, and that is the list's best state, not a reason to delete it.** Four rows sat here
+    // when it was written, and each retired the way the rule above says: the bag-BUTTON cursor
+    // trio (`PutItemInBackpack`, `PutItemInBag`, `PickupBagFromSlot` — `Bag.lua:199-215`) once
+    // `script/cursor/bag_verbs.rs` bound all three; and money on
+    // the cursor (`OpenCoinPickupFrame`, `Frame.lua:537-543`) when the money kit went stock and
+    // the reference's own `CoinPickupFrame.xml` joined the manifest with the money cursor under
+    // it (decision 1962). With nothing on the list, "unexplained" is every error, which is the
+    // assertion this test was always reaching for.
+    const KNOWN_GAPS: &[(&str, &str)] = &[];
 
     let raised = s.errors();
     let unexplained: Vec<&String> = raised
@@ -1057,6 +1054,7 @@ fn text_quad(s: &mut UiScript, owner: &str) -> QuadContent {
 /// asserted as such — a future "fix" that adds one would be a divergence, not an improvement.
 #[test]
 fn a_stack_count_wears_the_font_object_its_font_attr_names() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon_stacked(&root);
 
@@ -1107,10 +1105,11 @@ fn a_stack_count_wears_the_font_object_its_font_attr_names() {
 /// `<Gradient>`, and dropped it in silence, so the white art rendered untinted.
 ///
 /// `<Gradient>` survives beside a `file=` where `<Color>` does not, and that asymmetry is the
-/// point: they land in different fields (vertex colours `+0xb8` vs the texture `+0xcc` —
-/// wow-re `texture-color-composition.md` §1-2).
+/// point: they land in different fields (vertex colours `+0xb8`, written by `0x77f910`, vs the
+/// texture `+0xcc`, written by `0x770360`).
 #[test]
 fn a_texture_gradient_tints_the_art_it_sits_on() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon_stacked(&root);
     s.run("BagnonDBUI_ShowCharacterList(Bagnon)")
@@ -1161,6 +1160,7 @@ fn a_texture_gradient_tints_the_art_it_sits_on() {
 /// The assertion is the FIRST open, which is the half that was broken.
 #[test]
 fn a_money_frame_is_the_right_width_on_the_first_open() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = seat(&root, Seat::BeforeAddons);
 
@@ -1225,6 +1225,7 @@ fn resolved_font(s: &UiScript, lua_expr: &str) -> (String, String) {
 /// zero against nine controls each returning one); it is a later-client idiom.
 #[test]
 fn a_button_state_font_takes_the_font_attribute_not_just_inherits() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon_stacked(&root);
     s.run("BagnonDBUI_ShowCharacterList(Bagnon)")
@@ -1258,6 +1259,7 @@ fn a_button_state_font_takes_the_font_attribute_not_just_inherits() {
 /// reference does not.
 #[test]
 fn a_fontheight_with_no_font_attr_beside_it_is_never_read() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let s = open_bagnon_stacked(&root);
     assert_eq!(
@@ -1298,6 +1300,7 @@ impl benilla_ui::script::TextMeasure for BlockFont {
 /// name plus the addon's own 40px of checkbox and padding.
 #[test]
 fn the_character_dropdown_is_as_wide_as_the_names_in_it() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon(&root);
     s.set_text_measurer(Box::new(BlockFont));
@@ -1352,18 +1355,26 @@ fn the_character_dropdown_is_as_wide_as_the_names_in_it() {
 /// (`ui_items::feed::tests::an_absent_self_player_is_no_source_never_an_empty_bag_burst`).
 #[test]
 fn bagnon_forevers_records_survive_the_logout_boundary() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = seat(&root, Seat::BeforeAddons);
 
     // The first-login scan (PLAYER_LOGIN, inside `seat`) recorded the live backpack: 16 slots,
     // the pouch in slot 1, in Bagnon_Forever's own short-link shape.
+    //
+    // **`16,1,` — the 1 is the reference's, not a stray.** The recorder's count is
+    // `GetInventoryItemCount("player", ContainerIDToInventoryID(0))`, and `ContainerIDToInventoryID`
+    // has no backpack arm (`0x4f94e0`: `id - 1 < 4` → `+20`), so bag 0 asks inventory slot 19 —
+    // the tabard slot. `GetInventoryItemCount 0x4c8680` pushes **1** for an empty slot
+    // (`0x4c8797`), and 1 for a
+    // worn tabard's stack count too, so the real client writes this row as `16,1,` either way.
     let record = "local r = BagnonForeverData[GetRealmName()][UnitName('player')] \
                   return tostring(r[0] and r[0].s), tostring(r[0] and r[0][1])";
     let (size, item) = s
         .eval::<(String, String)>(record)
         .expect("the record reads");
     assert_eq!(
-        size, "16,0,",
+        size, "16,1,",
         "the login scan records the backpack's size row"
     );
     assert_eq!(
@@ -1415,6 +1426,7 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
         None,
         Default::default(),
         Vec::new(),
+        Vec::new(),
     );
     s.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
     s.fire_event("PLAYER_LOGOUT", Vec::new());
@@ -1422,7 +1434,7 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
         .eval::<(String, String)>(record)
         .expect("the record reads");
     assert_eq!(
-        size, "16,0,",
+        size, "16,1,",
         "the logout boundary must not erase the size row"
     );
     assert_eq!(item, "4496", "the logout boundary must not erase the slot");
@@ -1441,7 +1453,10 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
 /// here with a real mouse click, an equipped bag in slot 2, and Bagnon fully hooked.
 #[test]
 fn a_bag_slot_click_toggles_bagnon_not_the_native_window() {
-    let root = corpus_or_skip!();
+    // The install too: "is a native bag window open" is asked of the reference's own `IsBagOpen`
+    // scan (`ContainerFrame.lua:177`, off the chain) — the windows are RECYCLED (1751), so there
+    // is no frame to name, and `bag_tests.rs` asks the same way.
+    let root = corpus_and_install_or_skip!();
     let mut s = open_bagnon(&root);
 
     // An equipped bag behind CharacterBag1Slot (bagId 2): the inventory surface (the bag ITEM in
@@ -1489,8 +1504,7 @@ fn a_bag_slot_click_toggles_bagnon_not_the_native_window() {
         "the slot click must reach Bagnon's ToggleBag override and close its window"
     );
     assert!(
-        !s.eval::<bool>("return BenillaBagFrame2:IsVisible() or false")
-            .unwrap(),
+        !super::test_ui::bag_open(&s, 2),
         "the native bag window must NOT open — the click belongs to the addon's override"
     );
 
@@ -1508,8 +1522,7 @@ fn a_bag_slot_click_toggles_bagnon_not_the_native_window() {
         "the second click re-opens Bagnon through the same override"
     );
     assert!(
-        !s.eval::<bool>("return BenillaBagFrame2:IsVisible() or false")
-            .unwrap(),
+        !super::test_ui::bag_open(&s, 2),
         "the native window stays shut on the re-open too"
     );
     assert!(
@@ -1517,29 +1530,38 @@ fn a_bag_slot_click_toggles_bagnon_not_the_native_window() {
             .unwrap(),
         "the slot button stays unlit with an addon holding the bags (the ref scan is native-only)"
     );
+    // Nothing is filtered out any more: the bag-button cursor trio the round-trip reaches
+    // (`PutItemInBag` on the click) is built (`script/cursor/bag_verbs.rs`), so a raise on it is
+    // a real one.
     let raised = s.errors();
-    let unexplained: Vec<&String> = raised
-        .iter()
-        .filter(|e| !e.contains("PutItemIn") && !e.contains("PickupBagFromSlot"))
-        .collect();
     assert!(
-        unexplained.is_empty(),
-        "the click round-trip raised: {unexplained:#?}"
+        raised.is_empty(),
+        "the click round-trip raised: {raised:#?}"
     );
 }
 
-/// **Bug 7 — the director's unlit backpack button.** Bagnon lights `MainMenuBarBackpackButton`
-/// from its window's OnShow/OnHide (`Bagnon.lua:33/39` — `SetChecked(1/0)`), and OnShow dispatch
-/// is synchronous (wow-re `onshow-onhide-dispatch-order.md`), so whoever writes checked AFTER the
-/// toggle wins. Two of our seats overwrote it: the button's old click tail re-derived checked
-/// from the NATIVE backpack window (the ref's own scan — which leaves the button unlit on the
-/// real client's click path too, a ref wart our stated divergence closes), and the `B` binding
-/// ran the BUTTON handler instead of the ref's bare `ToggleBackpack()` body, dragging that tail
-/// onto the one path the real client lights. Now: a real click on the button ends lit while
-/// Bagnon's window is open and unlit when it closes, and the bare-global path (the binding's
-/// body) does the same.
+/// **Bug 7 — the director's unlit backpack button — and where it stands since the bag bar went
+/// stock.** Bagnon lights `MainMenuBarBackpackButton` from its window's OnShow/OnHide
+/// (`Bagnon.lua:33/39` — `SetChecked(1/0)`), and OnShow dispatch is synchronous
+/// (`0x775750` → `0x76ae10`), so whoever writes checked AFTER the toggle wins. On the
+/// reference's own click path the stock `BackpackButton_OnClick` tail
+/// (`MainMenuBarBagButtons.lua:55-69`) runs last: it re-derives checked by scanning the NATIVE
+/// container frames, finds none for bag 0 while an addon holds the bags, and writes 0 — so the
+/// real client leaves the button unlit after a click with Bagnon, a wart of its own. Our own
+/// `BagFrame.xml` once closed that wart on the director's call (Bug 7: an auto-toggle undo in
+/// place of the scan, a stated divergence); decision 1783 sourced the stock file unedited and the
+/// divergence went with it, unrecorded — and this suite, skipping at every land from 08-30
+/// (2329), never said so.
+///
+/// What this pins is the client as it is, which is the reference: the bare `ToggleBackpack()`
+/// path (the `B` binding's body) ends lit, because nothing runs after OnShow there; a real click
+/// ends **unlit** on open as well as on close, because the stock tail is the last word. Decision
+/// 2332 retired Bug 7's divergence on record (1751 §2 reserves shims for engine differences, and
+/// this is a look); if the director ever wants it lit, the second assertion below flips back and
+/// a shim in `ContainerFrameAdapters.xml` carries the why.
 #[test]
-fn the_backpack_button_lights_while_bagnon_holds_the_bags() {
+fn the_backpack_button_lit_state_with_bagnon_holding_the_bags() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = open_bagnon(&root);
 
@@ -1568,7 +1590,9 @@ fn the_backpack_button_lights_while_bagnon_holds_the_bags() {
         "closed ⇒ unlit (Bagnon's OnHide write is the last word)"
     );
 
-    // And the second click: open again, lit again — the director's report, closed.
+    // And the second click: open again — and UNLIT, the stock tail's native scan overwriting
+    // Bagnon's OnShow write, as the reference does. Bug 7's "lit" is the assertion this replaces;
+    // it comes back with the shim if the director asks for it (the doc above).
     s.mouse_button(x, y, "LeftButton", true);
     s.mouse_button(x, y, "LeftButton", false);
     assert!(
@@ -1577,8 +1601,9 @@ fn the_backpack_button_lights_while_bagnon_holds_the_bags() {
         "the second click re-opens Bagnon"
     );
     assert!(
-        s.eval::<bool>("return MainMenuBarBackpackButton:GetChecked() and true or false")
+        !s.eval::<bool>("return MainMenuBarBackpackButton:GetChecked() and true or false")
             .unwrap(),
-        "open ⇒ lit (Bagnon's OnShow write is the last word)"
+        "open by click ⇒ unlit: the stock BackpackButton_OnClick tail's native scan is the last \
+         word, as on the reference (Bug 7's divergence retired with the stock bag bar, 1783)"
     );
 }

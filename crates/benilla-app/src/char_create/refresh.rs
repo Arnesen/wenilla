@@ -219,11 +219,17 @@ pub(super) fn refresh_dynamic(
     }
 }
 
-/// Per-frame interaction visuals the CREATE screen owns: highlight overlays (hover — and held
-/// while selected, the ref's `LockHighlight`), hover labels, and the Create button's disabled
-/// latch while a create is in flight. The screen-agnostic passes — up/down art swaps, the glue
-/// buttons' art + caption color, outline mirroring — are [`crate::glue`]'s, registered beside
-/// this in the plugin chain.
+/// Per-frame interaction visuals the CREATE screen owns: which icon is *chosen* (the ref's
+/// `LockHighlight`, which [`crate::glue::glue_hilights`] then renders), hover labels, the no-art
+/// fallback shade, and the Create button's disabled latch while a create is in flight. The
+/// screen-agnostic passes — up/down art swaps, the glue buttons' art + caption color, outline
+/// mirroring — are [`crate::glue`]'s, registered beside this in the plugin chain.
+///
+/// **The chosen-icon write is its own query, deliberately.** It used to be a sixth term on the
+/// hover query below, which meant a button without a [`LockHighlight`] dropped out of the hover
+/// visuals too — and since no spawn site on this screen had one, that query matched *nothing*:
+/// no selected sheen and no icon name anywhere on the create screen. Two jobs, two queries, so a
+/// missing component can only ever cost its own job.
 #[allow(clippy::type_complexity)]
 pub(super) fn refresh_hover(
     sel: Res<CreateSelection>,
@@ -238,10 +244,10 @@ pub(super) fn refresh_hover(
             &Children,
             &mut BackgroundColor,
             Has<FallbackFace>,
-            &mut LockHighlight,
         ),
         (With<Button>, Without<crate::glue::widgets::GlueBtn>),
     >,
+    mut locks: Query<(&CreateAction, &mut LockHighlight)>,
     mut labels: Query<&mut Visibility, (With<HoverLabel>, Without<Hilight>)>,
     mut disables: Query<(&CreateAction, &mut GlueDisabled)>,
 ) {
@@ -254,14 +260,20 @@ pub(super) fn refresh_hover(
         _ => false,
     };
 
-    for (action, interaction, children, mut bg, fallback, mut locked) in &mut buttons {
+    // `SetCharacterRace`/`SetCharacterClass`/`SetCharacterGender`: `LockHighlight()` on the one
+    // that is chosen, `UnlockHighlight()` on the rest. Nothing about visibility — the sheen is
+    // `crate::glue::glue_hilights`' alone.
+    for (action, mut locked) in &mut locks {
         let is_sel = selected(action);
-        let hovered = *interaction != Interaction::None;
-        let lit = is_sel || hovered;
-        // The sheen itself is `crate::glue::glue_hilights`' — this says only which row is chosen.
         if locked.0 != is_sel {
             locked.0 = is_sel;
         }
+    }
+
+    for (action, interaction, children, mut bg, fallback) in &mut buttons {
+        let is_sel = selected(action);
+        let hovered = *interaction != Interaction::None;
+        let lit = is_sel || hovered;
         // No-art fallback only: buttons spawned with a plain face get a hover shade. (Every node
         // *has* a `BackgroundColor` — only a `FallbackFace`'s belongs to us.)
         if fallback {

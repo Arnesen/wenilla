@@ -1,17 +1,11 @@
-//! Vendor messages — `CMSG_LIST_INVENTORY`/buy/sell (opcodes 414-421, vmangos `Opcodes_1_12_1.h`,
-//! VERIFIED). Bodies from vmangos `Item.{h,cpp}` + the hand-serialized `ItemHandler.cpp`. Lives
-//! beside, not inside, [`super::items`] (the item-*template* query pair): vendor rows carry their
-//! own wire shape and the buy/sell result vocabulary, unrelated to
-//! `SMSG_ITEM_QUERY_SINGLE_RESPONSE`.
+//! Vendor messages: the inventory list, buy and sell (opcodes 414-421), buyback and repair.
 
 use std::io;
 
 use crate::wire::{capacity_hint, read_u32_le, read_u64_le, read_u8};
 
-/// One vendor row (`SMSG_LIST_INVENTORY`, vmangos `ItemHandler.cpp:741-810`). `slot` (the wire's
-/// `muid`) is the row's 1-based position in the vendor's list — **not** what buying uses; buying
-/// addresses the item by [`VendorItem::entry`] (see [`buy_item`]). `current_count` of
-/// `0xFFFF_FFFF` means unlimited stock; `price` is already reputation-discounted server-side.
+/// One vendor row (`ItemHandler.cpp:741-810`): `slot` is the 1-based list position, not what a buy
+/// sends; `current_count` `0xFFFF_FFFF` is unlimited; `price` is already reputation-discounted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VendorItem {
     pub slot: u32,
@@ -26,7 +20,7 @@ pub struct VendorItem {
     pub buy_count: u32,
 }
 
-/// `BuyResult` (vmangos `ItemDefines.h:120-141`) — the `u8` reason on `SMSG_BUY_FAILED`.
+/// `BuyResult` (vmangos `ItemDefines.h:120-141`): the `u8` reason on `SMSG_BUY_FAILED`.
 pub mod buy_result {
     pub const CANT_FIND_ITEM: u8 = 0;
     pub const ITEM_ALREADY_SOLD: u8 = 1;
@@ -39,9 +33,7 @@ pub mod buy_result {
     pub const REPUTATION_REQUIRE: u8 = 12;
 }
 
-/// `SellResult` (vmangos `ItemDefines.h:120-141`) — the `u8` reason on `SMSG_SELL_ITEM`. A
-/// *successful* sell sends no packet at all (the item vanishes + coinage rises via
-/// `UPDATE_OBJECT`); only the error path (`SendSellError`, `Player.cpp:11723`) uses this shape.
+/// `SellResult` (vmangos `ItemDefines.h:120-141`): the `u8` reason on `SMSG_SELL_ITEM`.
 pub mod sell_result {
     pub const CANT_FIND_ITEM: u8 = 1;
     pub const CANT_SELL_ITEM: u8 = 2;
@@ -51,16 +43,13 @@ pub mod sell_result {
     pub const ONLY_EMPTY_BAG: u8 = 6;
 }
 
-/// Body of `CMSG_LIST_INVENTORY` (vmangos `Item.cpp:94`): one full 8-byte vendor guid. The server
-/// gates on `UNIT_NPC_FLAG_VENDOR` + the player being alive (`ItemHandler.cpp:693`).
+/// Body of `CMSG_LIST_INVENTORY`: the vendor guid; the dead get no list (`ItemHandler.cpp:693`).
 pub fn list_inventory(vendor_guid: u64) -> Vec<u8> {
     vendor_guid.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_BUY_ITEM` (vmangos `Item.cpp:104-110`): `u64 vendorGuid, u32 item` (the template
-/// **entry**, not the vendor row's `muid`), `u8 count` (stacks to buy), `u8 unk1` (always 0).
-/// Auto-places into the first free bag slot — the specific-bag-slot variant is
-/// [`buy_item_in_slot`]. Handler → `BuyItemFromVendor` (`ItemHandler.cpp:688`).
+/// Body of `CMSG_BUY_ITEM` (vmangos `Item.cpp:104-110`): `u64 vendorGuid`, `u32` template entry
+/// (not the row's `muid`), `u8 count` (stacks), `u8 unk1` (0); it fills the first free slot.
 pub fn buy_item(vendor_guid: u64, entry: u32, count: u8) -> Vec<u8> {
     let mut body = Vec::with_capacity(14);
     body.extend_from_slice(&vendor_guid.to_le_bytes());
@@ -70,18 +59,9 @@ pub fn buy_item(vendor_guid: u64, entry: u32, count: u8) -> Vec<u8> {
     body
 }
 
-/// Body of `CMSG_BUY_ITEM_IN_SLOT` (vmangos `Item.cpp:113-120`): `u64 vendorGuid, u32 item`
-/// (the template **entry**, like [`buy_item`]), `u64 bagGuid`, `u8 bagSlot`, `u8 count`.
-///
-/// The buy-into-a-named-slot variant, and the packet the **merchant cursor** sends: the reference
-/// puts a vendor row on the cursor as payload mode 5 (`PickupMerchantItem 0x4fb760`) and the
-/// three container drop handlers each call the sender `0x5e1f30` with `count = 1`
-/// (wow-re `system/ui/scratch/merchant-cursor-law.md` §5). Clicking a row is the auto-place
-/// [`buy_item`]; dragging it into a slot is this.
-///
-/// `bag_guid` is the **container object's** guid, or the player's own for the backpack and the
-/// equipment slots; `bag_slot` is the destination within it. Handler → `BuyItemFromVendor`, the
-/// same one `CMSG_BUY_ITEM` reaches, with the slot pair filled instead of `NULL_BAG`/`NULL_SLOT`.
+/// Body of `CMSG_BUY_ITEM_IN_SLOT` (vmangos `Item.cpp:113-120`): `u64 vendorGuid`, `u32` template
+/// entry, `u64 bagGuid` (ours for the backpack), `u8 bagSlot`, `u8 count`; the reference sends it
+/// with `count = 1` for a vendor row dropped into a slot (`0x5e1f30`).
 pub fn buy_item_in_slot(
     vendor_guid: u64,
     entry: u32,
@@ -98,8 +78,8 @@ pub fn buy_item_in_slot(
     body
 }
 
-/// Body of `CMSG_SELL_ITEM` (vmangos `Item.cpp:87-92`): `u64 vendorGuid, u64 itemGuid, u8 count`
-/// (0 = sell the whole stack). Handler `ItemHandler.cpp:442`.
+/// Body of `CMSG_SELL_ITEM` (vmangos `Item.cpp:87-92`): `u64 vendorGuid, u64 itemGuid, u8 count`,
+/// where 0 sells the whole stack.
 pub fn sell_item(vendor_guid: u64, item_guid: u64, count: u8) -> Vec<u8> {
     let mut body = Vec::with_capacity(17);
     body.extend_from_slice(&vendor_guid.to_le_bytes());
@@ -108,10 +88,8 @@ pub fn sell_item(vendor_guid: u64, item_guid: u64, count: u8) -> Vec<u8> {
     body
 }
 
-/// Body of `CMSG_BUYBACK_ITEM` (VERIFIED wow-re ui/scratch/buyback-data-path.md, `0x4fb950`:
-/// `u64 vendorGuid, u32 slot` — the slot is the **absolute** player-array buyback slot 69–80
-/// (`BUYBACK_SLOT_START` + index), sent raw with no re-base; vmangos `HandleBuybackItem` reads it
-/// the same way).
+/// Body of `CMSG_BUYBACK_ITEM` (`0x4fb950`): `u64 vendorGuid, u32 slot`, the absolute buyback
+/// slot 69-80 (`BUYBACK_SLOT_START` + index), not re-based.
 pub fn buyback_item(vendor_guid: u64, slot: u32) -> Vec<u8> {
     let mut body = Vec::with_capacity(12);
     body.extend_from_slice(&vendor_guid.to_le_bytes());
@@ -119,9 +97,7 @@ pub fn buyback_item(vendor_guid: u64, slot: u32) -> Vec<u8> {
     body
 }
 
-/// Body of `CMSG_REPAIR_ITEM` (VERIFIED wow-re ui/scratch/repair-machinery.md, all 4 client send
-/// sites: `u64 vendorGuid, u64 itemGuid`; `itemGuid == 0` = repair everything. vmangos
-/// `HandleRepairItemOpcode` corroborates).
+/// Body of `CMSG_REPAIR_ITEM`: `u64 vendorGuid, u64 itemGuid`; item guid 0 repairs everything.
 pub fn repair_item(vendor_guid: u64, item_guid: u64) -> Vec<u8> {
     let mut body = Vec::with_capacity(16);
     body.extend_from_slice(&vendor_guid.to_le_bytes());
@@ -130,12 +106,8 @@ pub fn repair_item(vendor_guid: u64, item_guid: u64) -> Vec<u8> {
 }
 
 /// Read `SMSG_LIST_INVENTORY` (vmangos `ItemHandler.cpp:741-810`): `u64 vendorGuid, u8 count`
-/// (≤ `MAX_VENDOR_ITEMS` 128) then `count` rows of [`VendorItem`]. The empty-vendor case is
-/// `count = 0` followed by one trailing `u8` — both producers write a literal `uint8(0)`
-/// ("Vendor has no inventory": `ItemHandler.cpp:728-733` for a creature with no item lists,
-/// `:806-809` for one whose every item is hidden from this player). It carries no other value
-/// on this wire, so it is consumed and dropped — consumed *explicitly*, so an empty list leaves
-/// no tail for the decode-length check to report (decision 2265 §B1).
+/// (at most 128), then `count` rows. An empty list is followed by one `u8` 0
+/// (`ItemHandler.cpp:728-733`, `:806-809`), read here so no tail is left over.
 pub(super) fn read_list_inventory(r: &mut &[u8]) -> io::Result<(u64, Vec<VendorItem>)> {
     let vendor_guid = read_u64_le(r)?;
     let count = read_u8(r)?;
@@ -159,11 +131,8 @@ pub(super) fn read_list_inventory(r: &mut &[u8]) -> io::Result<(u64, Vec<VendorI
     Ok((vendor_guid, items))
 }
 
-/// Read `SMSG_BUY_ITEM` (vmangos `Item.cpp:190-196`, sent from `Player.cpp:18637`): `u64
-/// vendorGuid, u32 vendorSlot` (1-based), `u32 newCount` (new stock; `0xFFFF_FFFF` unlimited),
-/// `u32 purchaseCount`. Only updates the vendor stock display — the purchased item itself arrives
-/// through the normal `SMSG_ITEM_PUSH_RESULT` + `UPDATE_OBJECT` path (`SendNewItem`,
-/// `Player.cpp:18644`), which benilla's inventory already handles.
+/// Read `SMSG_BUY_ITEM` (vmangos `Item.cpp:190-196`): `u64 vendorGuid, u32 vendorSlot` (1-based),
+/// `u32 newCount` (`0xFFFF_FFFF` unlimited), `u32 purchaseCount`; the item arrives separately.
 pub(super) fn read_buy_item(r: &mut &[u8]) -> io::Result<(u64, u32, u32, u32)> {
     Ok((
         read_u64_le(r)?,
@@ -174,8 +143,7 @@ pub(super) fn read_buy_item(r: &mut &[u8]) -> io::Result<(u64, u32, u32, u32)> {
 }
 
 /// Read `SMSG_SELL_ITEM` (vmangos `Item.cpp:183-188`): `u64 vendorGuid, u64 itemGuid, u8 reason`
-/// (a [`sell_result`] code). Only the error path sends this packet at all — a successful sell is
-/// silent, visible only as the item's removal + coinage rising via `UPDATE_OBJECT`.
+/// (a [`sell_result`] code). Only a failed sell sends it; a sale shows only in `UPDATE_OBJECT`.
 pub(super) fn read_sell_item(r: &mut &[u8]) -> io::Result<(u64, u64, u8)> {
     Ok((read_u64_le(r)?, read_u64_le(r)?, read_u8(r)?))
 }

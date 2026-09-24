@@ -19,7 +19,7 @@ use super::{
 /// [`Site`] can be pinned without hunting. `WOW_DUMP_TILE=map,x,y` (default Azeroth,31,49 —
 /// Goldshire).
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+#[ignore = "instrument: run by hand — cargo test -p benilla-world --lib wmo_portal::audit::light_probe -- --ignored --nocapture"]
 fn dump_tile_placements() {
     let spec = std::env::var("WOW_DUMP_TILE").unwrap_or_else(|_| "Azeroth,31,49".into());
     let parts: Vec<&str> = spec.split(',').collect();
@@ -66,7 +66,7 @@ fn raw_downray_winner(model: &WmoModel, probe: [f32; 3]) -> Option<(usize, f32)>
 /// `X` = an EXTERIOR group's face won (exterior lane), `·` = no floor. A patchwork of D/d/digit
 /// across the walkable floor is the per-step lane-flip mechanism made visible.
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+#[ignore = "instrument: run by hand — cargo test -p benilla-world --lib wmo_portal::audit::light_probe -- --ignored --nocapture"]
 fn forge_floor_lane_map() {
     let subject = load_subject(BLACKSMITH.wmo, Some(&BLACKSMITH));
     let model = &subject.model;
@@ -193,7 +193,7 @@ fn face_stack(model: &WmoModel, x: f32, y: f32, max_z: f32) {
 /// verdict (`area_down_ray` — the entity classifier's exact leg, probe at feet+0.1, terrain-raced).
 /// Prints an XY map around the doorway so the g00/g11 ownership boundary is visible at a glance.
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+#[ignore = "instrument: run by hand — cargo test -p benilla-world --lib wmo_portal::audit::light_probe -- --ignored --nocapture"]
 fn inn_corridor_light_probe() {
     let subject = load_subject(GOLDSHIRE.wmo, Some(&GOLDSHIRE));
     let model = &subject.model;
@@ -316,7 +316,7 @@ fn inn_corridor_light_probe() {
             };
             // The exterior-leg intensity discriminator: the terrain MCSH bit BENEATH the point
             // (the reference samples it WMO-obliviously even on a porch floor — a building's baked
-            // ground shadow dims a porch character to 0.5; `unit-light-combine-storm.md` a4) — and
+            // ground shadow dims a porch character to 0.5) — and
             // the world WoW coords, so a live `.go` probe can stand exactly here.
             let (mcsh, world) = match subject.placed.as_ref() {
                 Some(p) => {
@@ -373,7 +373,7 @@ fn inn_corridor_light_probe() {
 /// `z + centre` (`benilla-extract m2coll <model>` prints the box; the two Stratholme portcullises
 /// that found 0776 read `exterior` at their spawn z and `BAKE g02` at their centres).
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+#[ignore = "instrument: run by hand — cargo test -p benilla-world --lib wmo_portal::audit::light_probe -- --ignored --nocapture"]
 fn world_point_light_probe() {
     let spec =
         std::env::var("WOW_LIGHT_AT").unwrap_or_else(|_| "Kalimdor,1629.4,-4373.4,31.3".into());

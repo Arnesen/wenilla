@@ -9,7 +9,7 @@
 //! window is first-party, no Lua click surface to drive); the live Lua VM is only touched for the
 //! bonus refusal step's `UI_ERROR_MESSAGE` observation, the mail probe's own idiom.
 //!
-//! ## The banker (live-DB verified this session, `/Users/sam/dev/vmangos-deploy` → `characters`/
+//! ## The banker (live-DB verified against the local vmangos, `characters`/
 //! `mangos` DBs)
 //!
 //! Soleil Stonemantle, creature entry 5099, spawn guid 12629, map 0 (Ironforge, The Vault), pos
@@ -23,7 +23,7 @@
 //!
 //! vmangos `Chat.cpp`'s `modifyCommandTable` pins `.modify money` at `SEC_BASIC_ADMIN` (4,
 //! `Common.h` `AccountTypes`) — one level ABOVE `SEC_GAMEMASTER` (3), the level every probe account
-//! is provisioned at (method.md). So `.modify money` is refused server-side for a probe login,
+//! is provisioned at (docs/METHOD.md). So `.modify money` is refused server-side for a probe login,
 //! exactly the same floor [`super::probe_taxi`]'s module doc already found for the taxi fare. This
 //! probe never sends it: step (e) reads the character's live `money` field instead (DB-verified
 //! this session: `Probeone` carries 100000 copper, `bank_bag_slots` 0 — comfortably funds the
@@ -36,7 +36,8 @@
 //! WOW_DATA=WoW/Data WOW_USER=probe1 WOW_PASS=pprobe1 WOW_CHAR=Probeone \
 //!     WOW_PROBE_BANK=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — this worktree is `pool-1` → `probe1`/`pprobe1`/`Probeone`).
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill).
 //! Non-combat; GM mode is left exactly as found. An outer `timeout` + grep on `PROBE_BANK:` is the
 //! whole harness; the probe self-exits ([`super::probes::ProbeExitPlugin`]'s pattern) once DONE.
 
