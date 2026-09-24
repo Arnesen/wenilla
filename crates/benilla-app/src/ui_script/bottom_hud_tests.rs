@@ -309,6 +309,7 @@ const RAISABLE_BARS: &[&str] = &[
 /// eventually wired), and re-runs the pass between combinations exactly as a live bar change does.
 #[test]
 fn no_bottom_band_frame_overlaps_a_raised_bar() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1600.0, 900.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -457,6 +458,7 @@ fn overlaps(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
 /// is the test that says so out loud rather than the change slipping through green.
 #[test]
 fn the_item_push_card_shares_the_band_with_a_raised_bar_exactly_as_the_reference_does() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1600.0, 900.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the

@@ -1,8 +1,5 @@
-//! Oracle-free golden tests for the gossip/vendor interaction arc's protocol layer (Phase 1 of the
-//! gossip/vendor arc): `CMSG_GOSSIP_HELLO`/`SELECT_OPTION`, `CMSG_NPC_TEXT_QUERY`, and the vendor
-//! `LIST_INVENTORY`/`BUY_ITEM`/`SELL_ITEM` family. Split out from `messages.rs` (same idioms —
-//! `hx(...)` golden CMSG bodies, hand-built SMSG bodies round-tripped through `parse_server`) since
-//! it's a self-contained wire family or size.
+//! The gossip and vendor wire: hello, option select, NPC text and the greeting draw, and the vendor
+//! inventory, buy and sell messages.
 
 use benilla_protocol::events::{decode, SessionEvent};
 use benilla_protocol::messages;
@@ -17,8 +14,7 @@ fn hx(s: &str) -> Vec<u8> {
 
 #[test]
 fn gossip_bodies_golden() {
-    // CMSG_GOSSIP_HELLO (vmangos Npc.cpp:3) / CMSG_LIST_INVENTORY (Item.cpp:94) share the same
-    // full-guid body shape.
+    // CMSG_GOSSIP_HELLO (vmangos Npc.cpp:3): a full guid.
     assert_eq!(
         messages::gossip_hello(0x1234_5678_9abc_def0),
         hx("f0debc9a78563412"),
@@ -32,9 +28,8 @@ fn gossip_bodies_golden() {
         "CMSG_NPC_TEXT_QUERY body"
     );
 
-    // CMSG_GOSSIP_SELECT_OPTION (vmangos Npc.cpp:78-86): guid, gossipListId, then an optional
-    // trailing code cstring — appended only for a coded option with a real code, omitted entirely
-    // otherwise (the server reads it only when the buffer is non-empty).
+    // CMSG_GOSSIP_SELECT_OPTION (vmangos Npc.cpp:78-86): guid, gossipListId, then a code cstring
+    // only for a coded option; the server reads it only when bytes remain.
     assert_eq!(
         messages::gossip_select_option(0x1234_5678_9abc_def0, 3, None),
         hx(concat!("f0debc9a78563412", "03000000")),
@@ -58,8 +53,7 @@ fn vendor_bodies_golden() {
         "CMSG_LIST_INVENTORY body"
     );
 
-    // CMSG_BUY_ITEM (vmangos Item.cpp:104-110): vendorGuid, item ENTRY (not muid), count, unk1(0).
-    // entry 2488 is the live-verified creature-54 vendor's Gladius row (decision 0081).
+    // CMSG_BUY_ITEM (vmangos Item.cpp:104-110): vendorGuid, item entry (not muid), count, unk1 (0).
     assert_eq!(
         messages::buy_item(0x1234_5678_9abc_def0, 2488, 1),
         hx(concat!("f0debc9a78563412", "b8090000", "01", "00")),
@@ -78,9 +72,7 @@ fn vendor_bodies_golden() {
 fn gossip_message_wire() {
     use benilla_protocol::messages::{GossipOption, QuestOption};
 
-    // SMSG_GOSSIP_MESSAGE (vmangos GossipDef.cpp:180-225, the 1.12 shape): objectGuid, textId,
-    // optionCount + options (index, icon, coded, message), questOptionCount + quest options. Zero
-    // quest options — the common case for a pure vendor/gossip NPC.
+    // SMSG_GOSSIP_MESSAGE (vmangos GossipDef.cpp:180-225), with no quest options.
     let mut body = 0xAAu64.to_le_bytes().to_vec(); // objectGuid
     body.extend_from_slice(&100u32.to_le_bytes()); // textId
     body.extend_from_slice(&2u32.to_le_bytes()); // optionCount
@@ -124,7 +116,6 @@ fn gossip_message_wire() {
         other => panic!("gossip message, got {}", other.name()),
     }
 
-    // decode() surfaces a GossipMenu event carrying the (empty here) quest block.
     let packet = messages::parse_server(messages::opcode::SMSG_GOSSIP_MESSAGE, &body).unwrap();
     match decode(packet).pop().unwrap() {
         SessionEvent::GossipMenu {
@@ -139,8 +130,6 @@ fn gossip_message_wire() {
         other => panic!("gossip menu event, got {other:?}"),
     }
 
-    // Nonzero quest options: parsed for byte alignment, kept on the wire struct (arc ignores them
-    // downstream — quest-giver flows are out of scope, decision 0081).
     let mut body_q = 0xBBu64.to_le_bytes().to_vec();
     body_q.extend_from_slice(&200u32.to_le_bytes()); // textId
     body_q.extend_from_slice(&0u32.to_le_bytes()); // optionCount: 0
@@ -172,7 +161,6 @@ fn gossip_message_wire() {
         other => panic!("gossip message with quests, got {}", other.name()),
     }
 
-    // SMSG_GOSSIP_COMPLETE — empty body.
     match messages::parse_server(messages::opcode::SMSG_GOSSIP_COMPLETE, &[]).unwrap() {
         ServerPacket::GossipComplete => {}
         other => panic!("gossip complete, got {}", other.name()),
@@ -184,10 +172,8 @@ fn gossip_message_wire() {
     }
 }
 
-/// `SMSG_GOSSIP_POI` — the guard's directions marker (vmangos `GossipDef.cpp:239-295`):
-/// `u32 flags, f32 x, f32 y, u32 icon, u32 data, cstr name`. The golden body is a REAL row of the
-/// 5875-era `points_of_interest` table (entry 658, "Lion's Pride Inn": flags 99, icon 6 =
-/// `ICON_POI_REDFLAG`, data 0) — the shape every guard direction actually takes.
+/// `SMSG_GOSSIP_POI`, a guard's directions marker (vmangos `GossipDef.cpp:239-295`); the body is
+/// `points_of_interest` row 658, "Lion's Pride Inn".
 #[test]
 fn gossip_poi_wire_and_event() {
     let body = hx(concat!(
@@ -235,7 +221,7 @@ fn npc_text_update_greeting_extraction() {
         }
     }
 
-    // The wire carries all 8 blocks through UNDECIDED — the parse layer no longer picks.
+    // The parse carries all 8 blocks; `select_greeting` picks one.
     let mut body = 321u32.to_le_bytes().to_vec(); // textID
     block(&mut body, 0.1, "Low probability greeting", "");
     block(&mut body, 0.0, "", "");
@@ -263,14 +249,23 @@ fn npc_text_update_greeting_extraction() {
         SessionEvent::NpcGreeting { text_id, blocks } => {
             assert_eq!(text_id, 321);
             assert_eq!(blocks.len(), messages::NPC_TEXT_BLOCKS);
+
+            // A near-zero threshold draws the first block with text in the gender's column, the
+            // full sum the last; the male column skips block 6, the female column block 0.
+            const NEAR: f32 = 1.999_999_9;
+            const FAR: f32 = 1.0;
+            let pick = |gender, roll| messages::select_greeting(&blocks, gender, roll);
+            assert_eq!(pick(0, NEAR), Some("Low probability greeting"));
+            assert_eq!(pick(0, FAR), Some("Welcome, $N!"));
+            assert_eq!(pick(1, NEAR), Some("Welcome, traveler!"));
+            assert_eq!(pick(1, FAR), Some("Female-only greeting"));
         }
         other => panic!("npc greeting event, got {other:?}"),
     }
 }
 
-/// The greeting DRAW (wow-re `gossip-npctext-law.md`, reference `0x4e2010`) — a weighted random
-/// pick over the blocks whose chosen gender column is non-empty. Every branch pinned with an
-/// explicit roll, because all three rules here are the opposite of what this client used to do.
+/// The greeting draw (reference `0x4e2010`): a weighted random pick over the blocks whose chosen
+/// gender column is non-empty.
 #[test]
 fn greeting_draw_follows_the_weighted_law() {
     use benilla_protocol::messages::{select_greeting, NpcTextBlock};
@@ -280,27 +275,24 @@ fn greeting_draw_follows_the_weighted_law() {
         male: male.into(),
         female: female.into(),
     };
-    // roll ∈ [1, 2) ⇒ thr = (2 - roll) * sum ∈ (0, sum]. roll = 1.0 is the far end (thr = sum),
-    // roll → 2.0 the near end (thr → 0).
+    // The threshold is (2 - roll) * sum for roll in [1, 2): FAR gives the sum, NEAR nearly 0.
     const NEAR: f32 = 1.999_999_9;
     const FAR: f32 = 1.0;
 
-    // 1 · The all-zero record — vmangos's fallback, and much of the 1.12 table. sum = 0 ⇒ thr = 0,
-    //     and the predicate is `<=`, so block 0 wins on EVERY roll rather than nothing winning.
+    // An all-zero record, vmangos's fallback: the threshold is 0 and the test is `<=`, so block 0
+    // wins on every roll.
     let zeros: Vec<_> = (0..8).map(|i| b(0.0, &format!("line {i}"), "")).collect();
     for roll in [FAR, 1.5, NEAR] {
         assert_eq!(select_greeting(&zeros, 0, roll), Some("line 0"));
     }
 
-    // 2 · Real weights: the draw walks in order, so a near-zero threshold takes the first non-empty
-    //     block and a threshold of the full sum takes the last. The old rule — highest probability
-    //     wins — would have answered "big" for both.
+    // The draw walks in order: a near-zero threshold takes the first non-empty block, the full
+    // sum the last.
     let weighted = vec![b(0.1, "small", ""), b(0.8, "big", ""), b(0.1, "last", "")];
     assert_eq!(select_greeting(&weighted, 0, NEAR), Some("small"));
     assert_eq!(select_greeting(&weighted, 0, FAR), Some("last"));
 
-    // 3 · The column is the NPC's gender, chosen once. Genderless (2) reads as male, because the
-    //     reference tests `== 1`, not `!= 0`.
+    // Genderless (2) reads as male: the reference tests the gender `== 1`, not `!= 0`.
     let gendered = vec![b(1.0, "sir", "madam")];
     assert_eq!(select_greeting(&gendered, 0, FAR), Some("sir"));
     assert_eq!(select_greeting(&gendered, 1, FAR), Some("madam"));
@@ -310,9 +302,8 @@ fn greeting_draw_follows_the_weighted_law() {
         "genderless"
     );
 
-    // 4 · No fallback to the other column. A female NPC skips male-only blocks outright — she does
-    //     NOT borrow their text (this client used to) — and if that empties the record she gets no
-    //     greeting at all, which is the reference's "Missing gossip text!" path.
+    // No fallback to the other column: a female NPC skips male-only blocks, and if none remain she
+    // gets no greeting, the reference's "Missing gossip text!" path.
     let male_only = vec![b(1.0, "men only", ""), b(1.0, "", "ladies")];
     assert_eq!(select_greeting(&male_only, 1, FAR), Some("ladies"));
     assert_eq!(select_greeting(&male_only, 1, NEAR), Some("ladies"));
@@ -324,11 +315,8 @@ fn greeting_draw_follows_the_weighted_law() {
 fn vendor_list_inventory_wire() {
     use benilla_protocol::messages::VendorItem;
 
-    // SMSG_LIST_INVENTORY (vmangos ItemHandler.cpp:741-810): vendorGuid, u8 count, count x {muid,
-    // entry, displayId, currentCount, price, maxDurability, buyCount}. Two rows keyed off the
-    // live-verified creature-54 weapon vendor data (decision 0081): Gladius (entry
-    // 2488, price 536, display 22078, maxcount 0 -> unlimited) and a limited-stock second row.
-    // Trailing junk proves the parser stops reading rows at `count`.
+    // SMSG_LIST_INVENTORY (vmangos ItemHandler.cpp:741-810): vendorGuid, `u8` count, then per row
+    // `u32` muid, entry, displayId, currentCount, price, maxDurability and buyCount.
     let mut body = 0xCCu64.to_le_bytes().to_vec();
     body.push(2); // count
     for v in [1u32, 2488, 22078, 0xFFFF_FFFF, 536, 35, 1] {
@@ -377,8 +365,7 @@ fn vendor_list_inventory_wire() {
         other => panic!("vendor inventory event, got {other:?}"),
     }
 
-    // Empty stock: count = 0 followed by the trailing error byte (ItemHandler.cpp:728-733,
-    // 806-809) — consumed explicitly, so the decode leaves no tail to report.
+    // Empty stock: count 0, then an error byte (vmangos ItemHandler.cpp:728-733, 806-809).
     let mut empty_body = 0xDDu64.to_le_bytes().to_vec();
     empty_body.push(0); // count
     empty_body.push(0); // trailing errorByte(0)
@@ -393,14 +380,13 @@ fn vendor_list_inventory_wire() {
         }
         other => panic!("empty vendor list, got {}", other.name()),
     }
-    // …and the byte is REQUIRED: a count of 0 with nothing after it is the short read it is.
+    // The error byte is required: count 0 with nothing after it is a short read.
     let truncated = &empty_body[..empty_body.len() - 1];
     assert!(messages::parse_server(messages::opcode::SMSG_LIST_INVENTORY, truncated).is_err());
 }
 
-/// **The falsifier for decision 2265 §B1** on a `u32`-counted list: an option count of
-/// `0xFFFF_FFFF` followed by one valid option must come back as a short-read `Err` — the decoder
-/// must neither reserve the count nor abort.
+/// A `u32` option count of `0xFFFF_FFFF` over one valid option is a short-read `Err`: the decoder
+/// neither reserves the count nor aborts.
 #[test]
 fn a_lying_gossip_option_count_is_a_short_read_not_an_allocation() {
     let mut body = 0x77u64.to_le_bytes().to_vec(); // npc guid
@@ -420,8 +406,8 @@ fn a_lying_gossip_option_count_is_a_short_read_not_an_allocation() {
 fn vendor_buy_sell_result_wire() {
     use benilla_protocol::messages::{buy_result, sell_result};
 
-    // SMSG_BUY_ITEM (vmangos Item.cpp:190-196): vendorGuid, vendorSlot (1-based), newCount
-    // (0xFFFF_FFFF unlimited), purchaseCount. Only the vendor stock display changes here.
+    // SMSG_BUY_ITEM (vmangos Item.cpp:190-196): vendorGuid, 1-based vendorSlot, newCount
+    // (0xFFFF_FFFF unlimited), purchaseCount.
     let mut body = 0xCCu64.to_le_bytes().to_vec();
     for v in [1u32, 0xFFFF_FFFF, 1] {
         body.extend_from_slice(&v.to_le_bytes());
@@ -448,7 +434,7 @@ fn vendor_buy_sell_result_wire() {
         other => panic!("vendor buy result event, got {other:?}"),
     }
 
-    // SMSG_SELL_ITEM (vmangos Item.cpp:183-188) — the error path only: vendorGuid, itemGuid, reason.
+    // SMSG_SELL_ITEM (vmangos Item.cpp:183-188), the error path only: vendorGuid, itemGuid, reason.
     let mut body = 0xCCu64.to_le_bytes().to_vec();
     body.extend_from_slice(&0x42u64.to_le_bytes());
     body.push(sell_result::CANT_FIND_ITEM);
@@ -498,7 +484,7 @@ fn vendor_buy_sell_result_wire() {
         other => panic!("vendor buy failed event, got {other:?}"),
     }
 
-    // Result enum values (vmangos ItemDefines.h:120-141) — pinned so a future edit can't drift them.
+    // The result codes (vmangos ItemDefines.h:120-141).
     assert_eq!(
         (
             buy_result::CANT_FIND_ITEM,

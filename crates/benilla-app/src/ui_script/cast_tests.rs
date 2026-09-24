@@ -50,6 +50,7 @@ fn tex_quad<'a>(quads: &'a [ExtractedQuad], leaf: &str) -> Option<&'a ExtractedQ
 
 #[test]
 fn cast_fills_then_completes_green_and_fades() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     assert!(
         !s.eval::<bool>("return CastingBarFrame:IsShown()").unwrap(),
@@ -99,6 +100,7 @@ fn cast_fills_then_completes_green_and_fades() {
 
 #[test]
 fn a_hit_pushes_the_bar_back_it_does_not_cancel() {
+    benilla_formats::wow_data_or_skip!();
     // Pushback (`SMSG_SPELL_DELAYED` → `SPELLCAST_DELAYED`): a hit while casting must slide the
     // bar's window out (the spark jumps back and it keeps running), never hide or fail it —
     // decision 0256's open item, the "disappears on a hit" report.
@@ -145,6 +147,7 @@ fn a_hit_pushes_the_bar_back_it_does_not_cancel() {
 
 #[test]
 fn failed_cast_turns_red_holds_then_fades() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event(
         "SPELLCAST_START",
@@ -179,6 +182,7 @@ fn failed_cast_turns_red_holds_then_fades() {
 
 #[test]
 fn channel_counts_down_not_up() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     // SPELLCAST_CHANNEL_START(ms, name) — args reversed vs START, per the reference contract.
     // The name is whatever `ui_cast::channel_start_args` composed; for all but nine of the 323
@@ -261,6 +265,7 @@ fn channel_counts_down_not_up() {
 /// `SPELLCAST_CHANNEL_STOP` by hand, which is the *interrupt* timing, not this one.
 #[test]
 fn a_finished_channel_fades_on_its_own_clock_and_the_late_stop_is_inert() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event(
         "SPELLCAST_CHANNEL_START",
@@ -316,6 +321,7 @@ const FILL: &str = "UI-StatusBar";
 /// smear over the bar from the first frame — invisible to every state assertion above.
 #[test]
 fn the_flash_stays_hidden_for_the_whole_cast() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event(
         "SPELLCAST_START",
@@ -343,6 +349,7 @@ fn the_flash_stays_hidden_for_the_whole_cast() {
 /// finished.
 #[test]
 fn the_flash_blooms_from_zero_only_on_completion() {
+    benilla_formats::wow_data_or_skip!();
     const REF_TICK: f32 = 1.0 / 30.0; // one reference tick of wall clock
     let mut s = harness();
     s.fire_event(
@@ -373,6 +380,7 @@ fn the_flash_blooms_from_zero_only_on_completion() {
 /// A failed cast never flashes — the reference only arms the ramp on STOP/CHANNEL_STOP.
 #[test]
 fn a_failed_cast_never_flashes() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event(
         "SPELLCAST_START",
@@ -395,6 +403,7 @@ fn a_failed_cast_never_flashes() {
 /// border art's own layer, where declaration order put the fill on top.)
 #[test]
 fn the_fill_draws_beneath_the_border_art() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event(
         "SPELLCAST_START",
@@ -411,11 +420,12 @@ fn the_fill_draws_beneath_the_border_art() {
     );
 }
 
-/// A StatusBar fill CROPs its texture — it never squeezes it (wow-re `nameplate-vkey.md`). At a
+/// A StatusBar fill CROPs its texture — it never squeezes it (`0x770410`). At a
 /// fraction f the quad is f·width wide AND samples u ∈ [0, f], so `UI-StatusBar`'s left-to-right
 /// ramp keeps its true gradient at every fill level.
 #[test]
 fn the_fill_crops_its_texture_rather_than_stretching_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event(
         "SPELLCAST_START",
@@ -460,6 +470,7 @@ fn bottom(s: &UiScript, name: &str) -> f64 {
 /// (base + bottomEither/bottomLeft + pet, and chat's bottomLeft-and-pet +23 extra).
 #[test]
 fn managed_positions_track_the_bottom_bar_stack() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -553,6 +564,7 @@ fn managed_positions_track_the_bottom_bar_stack() {
 /// "exists" and still break every addon that drives the bar through it.
 #[test]
 fn the_casting_bar_publishes_its_status_bar_alias() {
+    benilla_formats::wow_data_or_skip!();
     let s = harness();
     assert!(
         s.eval::<bool>("return CastingBarFrameStatusBar ~= nil")

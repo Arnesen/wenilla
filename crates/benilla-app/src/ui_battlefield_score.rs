@@ -1,20 +1,22 @@
-//! The battleground **scoreboard** feed (decision 1972; wow-re `battlefield-verb-family.md`):
+//! The battleground **scoreboard** feed (decision 1972):
 //! the app's half of the stock `WorldStateFrame.lua` score frame — the name-resolution barrier,
 //! the team derivation, the column headers, the request throttle and the leave.
 //!
 //! - **The board arrives raw** (`MSG_PVP_LOG_DATA`, GUIDs and numbers, wire order) and the
-//!   reference does nothing with it until EVERY row's name has resolved (§6.1: the last name
-//!   arrival is what rebuilds and fires). Ours asks the name cache for each row every frame it
-//!   is unresolved and pushes the board the frame the last one lands.
-//! - **Team is derived, never wire data** (§6.2): race → faction; `0` Horde, `1` Alliance, `-1`
-//!   for a race the tables do not carry. Race and class strings come off the same traits the
+//!   reference does nothing with it until EVERY row's name has resolved (`0x4aa580` → `0x4aa200`:
+//!   the last name arrival is what rebuilds and fires). Ours asks the name cache for each row every
+//!   frame it is unresolved and pushes the board the frame the last one lands.
+//! - **Team is derived, never wire data** (`0x4aa200`): race → faction; `0` Horde, `1` Alliance,
+//!   `-1` for a race the tables do not carry. Race and class strings come off the same traits the
 //!   name query answered with.
-//! - **Columns are `WorldStateUI.dbc` rows** (`worldstate-ui-law.md`, the `0x2D4` status-3 arm):
+//! - **Columns are `WorldStateUI.dbc` rows** (the `0x2D4` status-3 arm, `0x4aa9c3`–`0x4aaa17`):
 //!   in table order, the first contiguous run of rows whose `MapID` is the battleground's map or
 //!   `-1` and whose `Type` is 2; the text raw, the icon, the tooltip.
 //! - **`UPDATE_BATTLEFIELD_SCORE`** fires here — on a pushed board, and on the status-3 arrival
-//!   the queue flags — BEFORE the queue feed fires `UPDATE_BATTLEFIELD_STATUS` (§4.2's order).
-//! - **The request is throttled to 5000 ms** (§5.1) and the leave carries the active map (§5.3).
+//!   the queue flags — BEFORE the queue feed fires `UPDATE_BATTLEFIELD_STATUS` (`0x4aaa5a` before
+//!   `0x4aab05`).
+//! - **The request is throttled to 5000 ms** (`0x4aa170`) and the leave carries the active map
+//!   (`LeaveBattlefield 0x4abe60`).
 
 use std::time::Duration;
 
@@ -36,7 +38,8 @@ use crate::world_state_ui::WorldStateUiRes;
 /// `RequestBattlefieldScoreData`'s throttle — `0x4aa170`: `now + 0x1388`.
 const REQUEST_THROTTLE: Duration = Duration::from_millis(5000);
 
-/// The last `MSG_PVP_LOG_DATA`, and the request stamp.
+/// The last `MSG_PVP_LOG_DATA`, and the request stamp. Both die with the session
+/// (`net::on_session_end`).
 #[derive(Resource, Default)]
 pub(crate) struct BattlefieldScoreboard {
     log: Option<PvpLogData>,
@@ -175,10 +178,39 @@ fn drain_battlefield_score(
     }
 }
 
+/// The scoreboard's packet handler (in the net handler table since 2313).
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::BattlefieldScoreboard;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handler — called from [`super::BattlefieldScorePlugin`].
+    pub(super) fn register(app: &mut App) {
+        app.net_handler(SessionEventKind::PvpLogData, on_pvp_log_data)
+            .net_handler(SessionEventKind::Disconnected, on_session_end);
+    }
+
+    /// The board and the request stamp are zeroed at every login (module init `0x4a9c40` zeroes
+    /// the score scalars) — a listener on the session end (a second handler on the kind, after the
+    /// bridge's own teardown).
+    fn on_session_end(In(_): In<SessionEvent>, mut board: ResMut<BattlefieldScoreboard>) {
+        *board = BattlefieldScoreboard::default();
+    }
+
+    fn on_pvp_log_data(In(ev): In<SessionEvent>, mut board: ResMut<BattlefieldScoreboard>) {
+        if let SessionEvent::PvpLogData(data) = ev {
+            board.apply(data);
+        }
+    }
+}
+
 pub(crate) struct BattlefieldScorePlugin;
 
 impl Plugin for BattlefieldScorePlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<BattlefieldScoreboard>().add_systems(
             Update,
             (
@@ -237,5 +269,37 @@ mod tests {
             .map(|c| c.text)
             .collect();
         assert_eq!(cols, ["Flags Returned"]);
+    }
+
+    /// **The board is zeroed at every login** (module
+    /// init `0x4a9c40`, from `InitializeGame`, zeroes the score scalars) — the last session's
+    /// `MSG_PVP_LOG_DATA` must not come back as the next character's scoreboard, and its request
+    /// stamp must not throttle that character's first ask.
+    #[test]
+    fn the_session_end_zeroes_the_scoreboard() {
+        let mut app = App::new();
+        app.init_resource::<BattlefieldScoreboard>();
+        net::register(&mut app);
+        {
+            let mut board = app.world_mut().resource_mut::<BattlefieldScoreboard>();
+            board.apply(PvpLogData {
+                ended: true,
+                winner: Some(1),
+                rows: Vec::new(),
+            });
+            board.last_request = Some(Instant::now());
+        }
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+        );
+
+        let board = app.world().resource::<BattlefieldScoreboard>();
+        assert!(board.log.is_none());
+        assert!(board.last_request.is_none());
     }
 }

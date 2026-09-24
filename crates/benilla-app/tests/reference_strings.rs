@@ -72,10 +72,8 @@ fn is_instrument(rel: &str) -> bool {
     [
         "/capture/",
         "/bin/",
-        "/probes/",
         "debug_panel",
         "shape_gate",
-        "framexml_diff",
         "resolve_bench",
     ]
     .iter()

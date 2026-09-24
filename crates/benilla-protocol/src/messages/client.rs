@@ -1,14 +1,10 @@
-//! Client packet **body builders** — the outbound half of the message layer (the inbound parse +
-//! the `ServerPacket` vocabulary stay in [`super`]; spell/attack builders live with their family
-//! in [`super::spells`]). Framing/encryption is `world.rs`'s job; these produce plain body bytes.
+//! Client packet body builders: plain body bytes, framed and encrypted elsewhere.
 
 use super::addons::{addon_tail, SecureAddon};
 use super::{CharCreateReq, MovementInfo};
 
-/// `CMSG_AUTH_SESSION` body: build, server id, account name, client seed, proof, and the
-/// **addon-info block** — `addons`' uncompressed size plus its zlib stream, exactly as the writer
-/// at `0x51d910` appends it (see [`super::addons`], decision 1497). Pass
-/// [`super::STOCK_SECURE_ADDONS`] for what a stock install sends.
+/// `CMSG_AUTH_SESSION` body: build, server id, account, seed, proof, then the addon block's
+/// uncompressed size and zlib stream (`0x51d910`); stock sends [`super::STOCK_SECURE_ADDONS`].
 pub fn auth_session(
     build: u32,
     username: &str,
@@ -28,15 +24,12 @@ pub fn auth_session(
     body
 }
 
-/// `CMSG_CHAR_CREATE` body: name (CString), then race/class/gender + the 5 appearance bytes
-/// (skin/face/hair_style/hair_color/facial_hair) + `outfit_id`. Matches vmangos's read exactly
-/// (`Packets/Character.cpp:4-19`): name + 9 bytes. `outfit_id` is always 0 — the server reads and
-/// ignores it (`CharacterHandler.cpp:310`) and recomputes start gear (decision 0423).
+/// `CMSG_CHAR_CREATE` body: the name cstring then nine bytes (`Packets/Character.cpp:4-19`); the
+/// last, `outfit_id`, is 0 because the server ignores it (`CharacterHandler.cpp:310`).
 pub fn char_create(req: &CharCreateReq) -> Vec<u8> {
     let mut body = Vec::with_capacity(req.name.len() + 10);
     body.extend_from_slice(req.name.as_bytes());
     body.push(0);
-    // race, class, gender, skin, face, hair_style, hair_color, facial_hair, outfit_id(0).
     body.extend_from_slice(&[
         req.race,
         req.class,
@@ -51,13 +44,8 @@ pub fn char_create(req: &CharCreateReq) -> Vec<u8> {
     body
 }
 
-/// `CMSG_MESSAGECHAT` body for every sendable `ChatMsg` type (VERIFIED vmangos
-/// `WorldPackets::Chat::ChatMessage::ReadFromWorldPacket`, `Server/Packets/Chat.cpp:3-12`):
-/// `recv_data >> type >> lang`, then `>> whisperTargetOrChannel` **only** for
-/// `CHAT_MSG_WHISPER`/`CHAT_MSG_CHANNEL` (the target name or channel name rides *before* the
-/// message, not after — vmangos's own union of the two), then `>> message`. `target` is `None` for
-/// every other sendable type. The general form [`messagechat`]/[`messagechat_whisper`]/
-/// [`messagechat_channel`] build on.
+/// `CMSG_MESSAGECHAT` body: `u32` type and language, the target or channel name for whisper and
+/// channel only (`None` otherwise), then the message (vmangos `Server/Packets/Chat.cpp:3-12`).
 pub fn messagechat_kind(
     chat_type: u32,
     language: u32,
@@ -76,31 +64,22 @@ pub fn messagechat_kind(
     body
 }
 
-/// `CMSG_MESSAGECHAT` body (chat type + language as `u32`, then the message) — the shape shared by
-/// every type that carries no target/channel name (SAY, YELL, EMOTE, PARTY, RAID, GUILD, OFFICER,
-/// RAID_LEADER, RAID_WARNING, BATTLEGROUND(+LEADER), AFK, DND). Thin wrapper over
-/// [`messagechat_kind`] with `target: None`.
+/// `CMSG_MESSAGECHAT` body for every type without a target or channel name.
 pub fn messagechat(chat_type: u32, language: u32, message: &str) -> Vec<u8> {
     messagechat_kind(chat_type, language, None, message)
 }
 
-/// `CMSG_MESSAGECHAT` body for `CHAT_MSG_WHISPER` (`0x6`): chat type + language, then the whisper
-/// **target's player name**, then the message. Thin wrapper over [`messagechat_kind`].
+/// `CMSG_MESSAGECHAT` body for a whisper: the target's player name precedes the message.
 pub fn messagechat_whisper(language: u32, target: &str, message: &str) -> Vec<u8> {
     messagechat_kind(super::CHAT_TYPE_WHISPER, language, Some(target), message)
 }
 
-/// `CMSG_MESSAGECHAT` body for `CHAT_MSG_CHANNEL` (`0xE`): chat type + language, then the
-/// **channel name**, then the message — the same wire shape as [`messagechat_whisper`], vmangos's
-/// `whisperTargetOrChannel` field doing double duty. Thin wrapper over [`messagechat_kind`].
+/// `CMSG_MESSAGECHAT` body for a channel line: the channel name precedes the message.
 pub fn messagechat_channel(language: u32, channel: &str, message: &str) -> Vec<u8> {
     messagechat_kind(super::CHAT_TYPE_CHANNEL, language, Some(channel), message)
 }
 
-/// Concatenate `strings` as back-to-back NUL-terminated C-strings — the shape shared by the whole
-/// `CMSG_CHANNEL_*` family (VERIFIED vmangos `Server/Packets/Channel.cpp`, every `ReadFromWorldPacket`
-/// there: a channel name alone, or a channel name + a second field — a password or a target player
-/// name).
+/// Back-to-back cstrings, the shape of every `CMSG_CHANNEL_*` body (`Packets/Channel.cpp`).
 fn cstrings_body(strings: &[&str]) -> Vec<u8> {
     let mut body = Vec::with_capacity(strings.iter().map(|s| s.len() + 1).sum());
     for s in strings {
@@ -110,125 +89,101 @@ fn cstrings_body(strings: &[&str]) -> Vec<u8> {
     body
 }
 
-/// `CMSG_JOIN_CHANNEL` body (VERIFIED vmangos `WorldPackets::Channel::JoinChannel::
-/// ReadFromWorldPacket`, `Server/Packets/Channel.cpp:3-7`): cstring channel name + cstring password
-/// (empty string for none) — **no channel id** on the 1.12 wire (a TBC+ addition).
+/// `CMSG_JOIN_CHANNEL` body: channel name, then password (empty for none); 1.12 sends no channel
+/// id (`Channel.cpp:3-7`).
 pub fn join_channel(name: &str, password: &str) -> Vec<u8> {
     cstrings_body(&[name, password])
 }
 
-/// `CMSG_LEAVE_CHANNEL` body: cstring channel name (VERIFIED vmangos
-/// `WorldPackets::Channel::LeaveChannel::ReadFromWorldPacket`, `Channel.cpp:9-12`).
+/// `CMSG_LEAVE_CHANNEL` body: the channel name (`Channel.cpp:9-12`).
 pub fn leave_channel(name: &str) -> Vec<u8> {
     cstrings_body(&[name])
 }
 
-/// `CMSG_CHANNEL_LIST` body — asks for the member roster (VERIFIED vmangos
-/// `WorldPackets::Channel::ChannelList::ReadFromWorldPacket`, `Channel.cpp:14-17`): cstring channel
-/// name. Answered by `SMSG_CHANNEL_LIST` ([`super::channel::read_channel_list`]).
+/// `CMSG_CHANNEL_LIST` body, the member-roster request: the channel name (`Channel.cpp:14-17`).
 pub fn channel_list(name: &str) -> Vec<u8> {
     cstrings_body(&[name])
 }
 
-/// `CMSG_CHANNEL_PASSWORD` body (VERIFIED vmangos `ChannelPassword::ReadFromWorldPacket`,
-/// `Channel.cpp:19-23`): cstring channel name + cstring new password.
+/// `CMSG_CHANNEL_PASSWORD` body: channel name, then the new password (`Channel.cpp:19-23`).
 pub fn channel_password(name: &str, password: &str) -> Vec<u8> {
     cstrings_body(&[name, password])
 }
 
-/// `CMSG_CHANNEL_SET_OWNER` body (VERIFIED vmangos `ChannelSetOwner::ReadFromWorldPacket`,
-/// `Channel.cpp:25-29`): cstring channel name + cstring new owner's player name.
+/// `CMSG_CHANNEL_SET_OWNER` body: channel name, then the new owner's name (`Channel.cpp:25-29`).
 pub fn channel_set_owner(name: &str, player: &str) -> Vec<u8> {
     cstrings_body(&[name, player])
 }
 
-/// `CMSG_CHANNEL_OWNER` body — asks who owns the channel (VERIFIED vmangos
-/// `ChannelOwner::ReadFromWorldPacket`, `Channel.cpp:31-34`): cstring channel name only (the answer
-/// rides `SMSG_CHANNEL_NOTIFY`'s [`super::channel::channel_notice::CHANNEL_OWNER`] notice).
+/// `CMSG_CHANNEL_OWNER` body: the channel name (`Channel.cpp:31-34`); the answer is a
+/// `SMSG_CHANNEL_NOTIFY` owner notice.
 pub fn channel_owner(name: &str) -> Vec<u8> {
     cstrings_body(&[name])
 }
 
-/// `CMSG_CHANNEL_MODERATOR` body (VERIFIED vmangos `ChannelModerator::ReadFromWorldPacket`,
-/// `Channel.cpp:36-40`): cstring channel name + cstring target player name.
+/// `CMSG_CHANNEL_MODERATOR` body: channel name, then the player's name (`Channel.cpp:36-40`).
 pub fn channel_moderator(name: &str, player: &str) -> Vec<u8> {
     cstrings_body(&[name, player])
 }
 
-/// `CMSG_CHANNEL_UNMODERATOR` body (VERIFIED vmangos `ChannelUnmoderator::ReadFromWorldPacket`,
-/// `Channel.cpp:42-46`): cstring channel name + cstring target player name.
+/// `CMSG_CHANNEL_UNMODERATOR` body: channel name, then the player's name (`Channel.cpp:42-46`).
 pub fn channel_unmoderator(name: &str, player: &str) -> Vec<u8> {
     cstrings_body(&[name, player])
 }
 
-/// `CMSG_CHANNEL_MUTE` body (VERIFIED vmangos `ChannelMute::ReadFromWorldPacket`,
-/// `Channel.cpp:48-52`): cstring channel name + cstring target player name.
+/// `CMSG_CHANNEL_MUTE` body: channel name, then the player's name (`Channel.cpp:48-52`).
 pub fn channel_mute(name: &str, player: &str) -> Vec<u8> {
     cstrings_body(&[name, player])
 }
 
-/// `CMSG_CHANNEL_UNMUTE` body (VERIFIED vmangos `ChannelUnmute::ReadFromWorldPacket`,
-/// `Channel.cpp:54-58`): cstring channel name + cstring target player name.
+/// `CMSG_CHANNEL_UNMUTE` body: channel name, then the player's name (`Channel.cpp:54-58`).
 pub fn channel_unmute(name: &str, player: &str) -> Vec<u8> {
     cstrings_body(&[name, player])
 }
 
-/// `CMSG_CHANNEL_INVITE` body (VERIFIED vmangos `ChannelInvite::ReadFromWorldPacket`,
-/// `Channel.cpp:60-64`): cstring channel name + cstring invitee player name.
+/// `CMSG_CHANNEL_INVITE` body: channel name, then the invitee's name (`Channel.cpp:60-64`).
 pub fn channel_invite(name: &str, player: &str) -> Vec<u8> {
     cstrings_body(&[name, player])
 }
 
-/// `CMSG_CHANNEL_KICK` body (VERIFIED vmangos `ChannelKick::ReadFromWorldPacket`,
-/// `Channel.cpp:66-70`): cstring channel name + cstring target player name.
+/// `CMSG_CHANNEL_KICK` body: channel name, then the player's name (`Channel.cpp:66-70`).
 pub fn channel_kick(name: &str, player: &str) -> Vec<u8> {
     cstrings_body(&[name, player])
 }
 
-/// `CMSG_CHANNEL_BAN` body (VERIFIED vmangos `ChannelBan::ReadFromWorldPacket`,
-/// `Channel.cpp:72-76`): cstring channel name + cstring target player name.
+/// `CMSG_CHANNEL_BAN` body: channel name, then the player's name (`Channel.cpp:72-76`).
 pub fn channel_ban(name: &str, player: &str) -> Vec<u8> {
     cstrings_body(&[name, player])
 }
 
-/// `CMSG_CHANNEL_UNBAN` body (VERIFIED vmangos `ChannelUnban::ReadFromWorldPacket`,
-/// `Channel.cpp:78-82`): cstring channel name + cstring target player name.
+/// `CMSG_CHANNEL_UNBAN` body: channel name, then the player's name (`Channel.cpp:78-82`).
 pub fn channel_unban(name: &str, player: &str) -> Vec<u8> {
     cstrings_body(&[name, player])
 }
 
-/// `CMSG_CHANNEL_ANNOUNCEMENTS` body — toggles the channel's join/leave announcements (VERIFIED
-/// vmangos `ChannelAnnouncements::ReadFromWorldPacket`, `Channel.cpp:84-87`): cstring channel name
-/// only.
+/// `CMSG_CHANNEL_ANNOUNCEMENTS` body, the join/leave notice toggle (`Channel.cpp:84-87`).
 pub fn channel_announcements(name: &str) -> Vec<u8> {
     cstrings_body(&[name])
 }
 
-/// `CMSG_CHANNEL_MODERATE` body — toggles channel moderation (VERIFIED vmangos
-/// `ChannelModerate::ReadFromWorldPacket`, `Channel.cpp:89-92`): cstring channel name only.
+/// `CMSG_CHANNEL_MODERATE` body, the moderation toggle (`Channel.cpp:89-92`).
 pub fn channel_moderate(name: &str) -> Vec<u8> {
     cstrings_body(&[name])
 }
 
-/// `CMSG_PLAYED_TIME` body — empty (VERIFIED vmangos: the handler takes a `NullClientPacket`,
-/// `Handlers/MiscHandler.cpp:935`). The `/played` request.
+/// `CMSG_PLAYED_TIME` body, the `/played` request: empty (`Handlers/MiscHandler.cpp:935`).
 pub fn played_time() -> Vec<u8> {
     Vec::new()
 }
 
-/// `CMSG_QUERY_TIME` body — empty (VERIFIED vmangos: `HandleQueryTimeOpcode` takes a
-/// `NullClientPacket`, `Handlers/QueryHandler.cpp:107`). Asks for the server's wall clock; the
-/// answer is `SMSG_QUERY_TIME_RESPONSE`, one `u32` of unix-epoch seconds. Decision 1150 — a timed
-/// quest's deadline is an absolute stamp in *that* epoch, so the countdown is only as right as our
-/// sample of the server's clock.
+/// `CMSG_QUERY_TIME` body: empty (`Handlers/QueryHandler.cpp:107`). The answer is the server's
+/// clock in unix seconds, the epoch timed-quest deadlines are stamped in.
 pub fn query_time() -> Vec<u8> {
     Vec::new()
 }
 
-/// `MSG_RANDOM_ROLL` client→server request body (VERIFIED vmangos
-/// `WorldPackets::Group::RandomRoll::ReadFromWorldPacket`, `Server/Packets/Group.cpp:39-43`): `u32
-/// minimum + u32 maximum`. The server validates `minimum <= maximum <= 10000` and broadcasts the
-/// roll (layout in [`super::chat::read_random_roll`]); an out-of-range request is silently dropped.
+/// `MSG_RANDOM_ROLL` request body (`Server/Packets/Group.cpp:39-43`); the server silently drops
+/// one outside `minimum <= maximum <= 10000`.
 pub fn random_roll(min: u32, max: u32) -> Vec<u8> {
     let mut body = Vec::with_capacity(8);
     body.extend_from_slice(&min.to_le_bytes());
@@ -236,14 +191,8 @@ pub fn random_roll(min: u32, max: u32) -> Vec<u8> {
     body
 }
 
-/// `CMSG_TEXT_EMOTE` body: `u32 textEmote (EmotesText.dbc id), u32 emoteNum, u64 target guid`
-/// (0 = no target) — VERIFIED vmangos `TextEmote::ReadFromWorldPacket` (`Misc.cpp:60-65`), three
-/// fields. `emoteNum` is only relayed to observers inside `SMSG_TEXT_EMOTE` (the emote-text
-/// variation index; we send 0 = the first variation). The 12-byte two-field body this originally
-/// sent made the server's guid read run off the packet's end — the emote was silently discarded,
-/// on every send, which read as "/wave does nothing" (director-caught against the ref client).
-/// The server echoes `SMSG_TEXT_EMOTE` to everyone in range **including us**, so our own emote
-/// sound/anim plays through the same receive path as everyone else's.
+/// `CMSG_TEXT_EMOTE` body: `u32` EmotesText.dbc id, `u32` text variation (only relayed), `u64`
+/// target or 0 (`Misc.cpp:60-65`). The server echoes `SMSG_TEXT_EMOTE` to us as well.
 pub fn text_emote(text_id: u32, target: u64) -> Vec<u8> {
     let mut b = Vec::with_capacity(16);
     b.extend_from_slice(&text_id.to_le_bytes());
@@ -256,8 +205,7 @@ pub fn full_guid(guid: u64) -> Vec<u8> {
     guid.to_le_bytes().to_vec()
 }
 
-/// Body of a `CMSG_CREATURE_QUERY`: the template `entry` + the asking guid (VERIFIED vmangos
-/// `QueryCreature::ReadFromWorldPacket` — `entry` then a full 8-byte guid).
+/// `CMSG_CREATURE_QUERY` body: the template entry, then a full guid (vmangos `QueryCreature`).
 pub fn creature_query(entry: u32, guid: u64) -> Vec<u8> {
     let mut body = Vec::with_capacity(12);
     body.extend_from_slice(&entry.to_le_bytes());
@@ -265,10 +213,8 @@ pub fn creature_query(entry: u32, guid: u64) -> Vec<u8> {
     body
 }
 
-/// Body of a `CMSG_PET_NAME_QUERY`: the pet's **number** then its full guid (VERIFIED vmangos
-/// `QueryPetName::ReadFromWorldPacket`, `Server/Packets/Pet.cpp:3-7`). Both values come out of the
-/// pet's own guid ([`crate::guid::pet_number`]); the server answers only when the number agrees with
-/// the live pet's `CharmInfo` (`PetHandler.cpp:190-192`), and stays silent otherwise.
+/// `CMSG_PET_NAME_QUERY` body: the pet number, then its full guid (`Server/Packets/Pet.cpp:3-7`);
+/// the server stays silent unless the number matches the live pet (`PetHandler.cpp:190-192`).
 pub fn pet_name_query(pet_number: u32, guid: u64) -> Vec<u8> {
     let mut body = Vec::with_capacity(12);
     body.extend_from_slice(&pet_number.to_le_bytes());
@@ -276,19 +222,15 @@ pub fn pet_name_query(pet_number: u32, guid: u64) -> Vec<u8> {
     body
 }
 
-/// Body of a movement message (`MSG_MOVE_*`) — a `MovementInfo`.
+/// Body of a `MSG_MOVE_*` message: a `MovementInfo`.
 pub fn movement(info: &MovementInfo) -> Vec<u8> {
     let mut body = Vec::with_capacity(28);
     info.write(&mut body);
     body
 }
 
-/// Body of `CMSG_MOVE_TIME_SKIPPED` (client): the mover's **full 8-byte** guid then the skipped
-/// milliseconds (vmangos `MoveTimeSkipped::ReadFromWorldPacket`, `Server/Packets/Movement.cpp:10-14`
-/// — `recv_data >> guid` is `ObjectGuid`'s plain `read<uint64>`, `ObjectGuid.cpp:180`, not the
-/// packed reader `PackedGuidReader` takes). Note the asymmetry with the server's own relay of the
-/// same fact, `MSG_MOVE_TIME_SKIPPED`, which writes `GetPackGUID()` (`MovementHandler.cpp:1014`):
-/// inbound is full, outbound is packed.
+/// `CMSG_MOVE_TIME_SKIPPED` body: the mover's unpacked guid, then the skipped ms
+/// (`Server/Packets/Movement.cpp:10-14`); the server's relayed `MSG_MOVE_TIME_SKIPPED` packs it.
 pub fn move_time_skipped(guid: u64, lag_ms: u32) -> Vec<u8> {
     let mut body = Vec::with_capacity(12);
     body.extend_from_slice(&guid.to_le_bytes());
@@ -296,15 +238,9 @@ pub fn move_time_skipped(guid: u64, lag_ms: u32) -> Vec<u8> {
     body
 }
 
-/// Body of `CMSG_MOVE_SPLINE_DONE` (client): the `MovementInfo` at the ride's endpoint, the
-/// `spline_id` being acknowledged (matched against the server's newest spline for our mover), and a
-/// trailing float the server reads-and-discards (`MoveSplineDone::ReadFromWorldPacket` does an
-/// unconditional `read_skip<float>()`, so the four bytes MUST be present or the server's parse
-/// under-runs). The real client writes its **completion fraction** `clamp(elapsed/duration, 0, 1)`
-/// there (byte-verified — `0x600b10`, decision 0496 §claim-6); we only ever send at ride
-/// completion, so the faithful value is `1.0`. Emitted once when a server spline that drove our own
-/// player (Charge/knockback/taxi) finishes; the server then relocates us and re-broadcasts a
-/// stop/heartbeat to observers.
+/// `CMSG_MOVE_SPLINE_DONE` body: the `MovementInfo` at the ride's end, the acked spline id, and a
+/// float the server skips but requires. The 1.12 client writes its completion fraction there
+/// (`0x600b10`); we send only at completion, so it is always 1.0.
 pub fn move_spline_done(info: &MovementInfo, spline_id: u32) -> Vec<u8> {
     let mut body = Vec::with_capacity(36);
     info.write(&mut body);
@@ -313,8 +249,7 @@ pub fn move_spline_done(info: &MovementInfo, spline_id: u32) -> Vec<u8> {
     body
 }
 
-/// Body of `MSG_MOVE_TELEPORT_ACK` (client): a **full** 8-byte GUID (not packed — vmangos requires
-/// it for this opcode), the movement counter, and the client time.
+/// `MSG_MOVE_TELEPORT_ACK` body: an unpacked guid (vmangos requires it), counter, client time.
 pub fn teleport_ack(guid: u64, counter: u32, time_ms: u32) -> Vec<u8> {
     let mut body = Vec::with_capacity(16);
     body.extend_from_slice(&guid.to_le_bytes());
@@ -323,13 +258,9 @@ pub fn teleport_ack(guid: u64, counter: u32, time_ms: u32) -> Vec<u8> {
     body
 }
 
-/// Body of a `CMSG_FORCE_*_SPEED_CHANGE_ACK` (all six kinds share it): a **full** 8-byte guid (the
-/// mover the SMSG named — vmangos `MoveSpeedAck::ReadFromWorldPacket` extracts a plain `ObjectGuid`,
-/// which reads a raw `uint64`, `ObjectGuid.cpp:180` — NOT packed, unlike the SMSG's guid), the
-/// echoed movement counter, our live `MovementInfo`, and the echoed new speed. The server accepts
-/// only an exact counter match and a speed within ±0.01 of what it sent
-/// (`Unit::FindPendingMovementSpeedChange`), then relocates us to the carried pose — so the info
-/// must be the mover's honest live state, same as any `MSG_MOVE_*`.
+/// Body of all six `CMSG_FORCE_*_SPEED_CHANGE_ACK`s: the mover's unpacked guid, the echoed
+/// counter, our live `MovementInfo`, the echoed speed. The server needs an exact counter and a
+/// speed within 0.01 (`Unit::FindPendingMovementSpeedChange`), then moves us to that pose.
 pub fn force_speed_ack(guid: u64, counter: u32, info: &MovementInfo, speed: f32) -> Vec<u8> {
     let mut body = Vec::with_capacity(44);
     body.extend_from_slice(&guid.to_le_bytes());
@@ -339,10 +270,8 @@ pub fn force_speed_ack(guid: u64, counter: u32, info: &MovementInfo, speed: f32)
     body
 }
 
-/// Body of `CMSG_PING` (the ~30 s keepalive): `{u32 sequence, u32 lastRtt}` — VERIFIED twice, wow-re
-/// net W1 (`SendPing 0x537e10`: seq = ++counter, then the last measured round-trip ms) and vmangos
-/// `WorldSocket::_HandlePing` (`recvPacket >> ping >> latency`). The server echoes `sequence` back
-/// as `SMSG_PONG` and stores `lastRtt` as the session's reported latency.
+/// `CMSG_PING` body, the ~30 s keepalive (`0x537e10`): the sequence, then the last round trip in
+/// ms, which the server stores as our latency; it echoes the sequence in `SMSG_PONG`.
 pub fn ping(sequence: u32, last_rtt_ms: u32) -> Vec<u8> {
     let mut body = Vec::with_capacity(8);
     body.extend_from_slice(&sequence.to_le_bytes());
@@ -350,18 +279,10 @@ pub fn ping(sequence: u32, last_rtt_ms: u32) -> Vec<u8> {
     body
 }
 
-/// Body of a **movement-mode ack** — the whole ack'd family (root / water-walk / feather-fall /
-/// hover; decisions 0308, 0866): a **full** `u64` guid, the echoed `u32` movement counter, our
-/// current `MovementInfo`, and — for every mode *except root* — a trailing `u32 apply` (VERIFIED
-/// vmangos `Server/Packets/Movement.cpp:38-59`: `MoveFlagChangeAck` reads the apply dword,
-/// `MoveRootAck` does not; [`MoveMode::ack_carries_apply`](super::MoveMode::ack_carries_apply) is
-/// that rule). The counter MUST be the one the server sent — a zero/greater counter trips its cheat
-/// log (`HandleMoveRootAck`).
-///
-/// **`info.flags` must carry the applied mode bit.** vmangos hard-requires it for root
-/// (`HandleMoveRootAck:715` KICKS an apply-ack whose `MovementInfo` lacks `MOVEFLAG_ROOT`) and takes
-/// the word as the mover's new flags for the rest — so an ack that drops the bit un-grants the very
-/// mode it is accepting.
+/// Body of a movement-mode ack: unpacked guid, the echoed counter, our `MovementInfo`, then
+/// `u32 apply` for every mode but root (`Server/Packets/Movement.cpp:38-59`). `info.flags` must
+/// carry the applied mode bit: vmangos kicks a root ack without it (`MovementHandler.cpp:722-729`)
+/// and takes the flags as the mover's new ones for the other modes.
 pub fn move_flag_ack(guid: u64, counter: u32, info: &MovementInfo, apply: Option<bool>) -> Vec<u8> {
     let mut body = Vec::with_capacity(48);
     body.extend_from_slice(&guid.to_le_bytes());
@@ -373,18 +294,10 @@ pub fn move_flag_ack(guid: u64, counter: u32, info: &MovementInfo, apply: Option
     body
 }
 
-/// Body of `CMSG_MOVE_KNOCK_BACK_ACK` (decision 1702) — **the same shape as a movement-mode ack
-/// without its trailing `apply`**: a full `u64` guid, the echoed `u32` counter, and our
-/// `MovementInfo`. Not a coincidence of layout: both land on a `WorldSession::HandleMove*Ack` that
-/// reads exactly `guid >> counter >> movementInfo` (vmangos `Server/Packets/Movement.cpp:38-68`),
-/// so they are one wire shape with two meanings, and delegating says so.
-///
-/// **`info` must carry `MOVEFLAG_JUMPING` and the launch quad in its jump tail.**
-/// `Unit::FindPendingMovementKnockbackChange` walks the pending changes and matches on the counter
-/// *plus* all four floats within `0.01`; miss, and the ack is discarded as `OnWrongAckData` and the
-/// knockback never reaches observers (the server builds their `MSG_MOVE_KNOCK_BACK` from this very
-/// `MovementInfo`). Send nothing at all and it is `OnFailedToAckChange` — a knockback is the one
-/// pending change vmangos refuses to re-send (`Unit.cpp:6887`).
+/// `CMSG_MOVE_KNOCK_BACK_ACK` body, a movement-mode ack without `apply` (`Movement.cpp:38-68`).
+/// `info` must carry `MOVEFLAG_JUMPING` and the launch quad: the server matches the counter and
+/// all four floats within 0.01 (`Unit::FindPendingMovementKnockbackChange`), builds observers'
+/// `MSG_MOVE_KNOCK_BACK` from this info, and never re-sends a knockback (`Unit.cpp:6887`).
 pub fn knock_back_ack(guid: u64, counter: u32, info: &MovementInfo) -> Vec<u8> {
     move_flag_ack(guid, counter, info, None)
 }
@@ -394,11 +307,7 @@ mod tests {
     use super::*;
     use crate::wire::Vector3d;
 
-    /// `CMSG_MOVE_SPLINE_DONE` body, byte-exact: a `MovementInfo` (here with no swim/jump tail),
-    /// then the acked `splineId`, then the trailing float the server `read_skip`s. The order and the
-    /// mandatory-but-ignored trailing four bytes are what vmangos `MoveSplineDone::ReadFromWorldPacket`
-    /// requires (`>> movementInfo; >> splineId; read_skip<float>()`); omitting the float under-runs
-    /// its parse. A new wire body never lands without a golden (method).
+    /// vmangos `MoveSplineDone::ReadFromWorldPacket` reads info, spline id, then a skipped float.
     #[test]
     fn move_spline_done_body_golden() {
         let info = MovementInfo {
@@ -429,7 +338,6 @@ mod tests {
             0x00, 0x00, 0x80, 0x3F, // completion fraction 1.0 (server-skipped)
         ];
         assert_eq!(body, want, "CMSG_MOVE_SPLINE_DONE body");
-        // The leading bytes are exactly a MovementInfo (the shape the server reads first).
         let mi = movement(&info);
         assert_eq!(
             &body[..mi.len()],

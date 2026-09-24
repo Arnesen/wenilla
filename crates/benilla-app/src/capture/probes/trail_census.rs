@@ -32,7 +32,7 @@
 //! Off a transport `deck=` reads `-` and the deck columns are the world ones, which is the control:
 //! this census must not change on the ground, where a streak *should* smear behind a moving host.
 //!
-//! Pair it with the slot-keyed probe identity and a `.go` onto the Thunder Bluff lift:
+//! Pair it with the checkout's probe identity (the `probe` skill) and a `.go` onto the Thunder Bluff lift:
 //!
 //! ```text
 //! WOW_USER=probeN WOW_PASS=pprobeN WOW_CHAR=Probe<n> WOW_NOSOUND=1 \

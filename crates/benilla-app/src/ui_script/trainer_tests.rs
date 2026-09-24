@@ -244,6 +244,7 @@ fn menu() -> TrainerState {
 /// and hides on TRAINER_CLOSED.
 #[test]
 fn shipped_trainer_frame_drives_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
 
     // Hidden by default.
@@ -351,6 +352,7 @@ fn shipped_trainer_frame_drives_end_to_end() {
 /// the row button's OnClick → Collapse/ExpandTrainerSkillLine(headerIndex).
 #[test]
 fn clicking_a_header_row_collapses_its_group() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));
@@ -388,6 +390,7 @@ fn clicking_a_header_row_collapses_its_group() {
 /// its header stays, and the row count falls.
 #[test]
 fn filter_hides_a_state_keeping_headers() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));
@@ -424,6 +427,7 @@ fn filter_hides_a_state_keeping_headers() {
 /// have to agree.
 #[test]
 fn filter_rows_toggle_through_the_dropdown_kit() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));
@@ -513,6 +517,7 @@ fn long_menu() -> TrainerState {
 
 #[test]
 fn wheel_over_a_row_scrolls_the_list() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(long_menu()));
@@ -594,6 +599,7 @@ fn wheel_over_a_row_scrolls_the_list() {
 /// (decision 1605).
 #[test]
 fn a_selected_or_hovered_service_row_paints_its_name_white() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));
@@ -657,6 +663,7 @@ fn a_selected_or_hovered_service_row_paints_its_name_white() {
 /// while the arrow BUTTONS keep the ref's `UChatScrollButton` click.
 #[test]
 fn wheel_scroll_is_silent_but_the_arrows_click() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(long_menu())); // 16 rows > 11 visible → the bar + arrows show
@@ -707,6 +714,7 @@ fn wheel_scroll_is_silent_but_the_arrows_click() {
 /// a number someone has to re-derive.
 #[test]
 fn the_scrollbar_arrows_step_the_list_the_way_they_point() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(long_menu())); // 16 rows > 11 visible → the bar shows
@@ -810,7 +818,7 @@ fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
         0,
         "the click must write the SAVED global, not just the engine mask"
     );
-    let text = s.saved_variables_text_for(&info().saved_variables);
+    let text = String::from_utf8(s.saved_variables_bytes_for(&info().saved_variables)).unwrap();
     assert!(
         text.contains("TRAINER_FILTER_UNAVAILABLE = 0"),
         "the file carries the toggle: {text}"
@@ -841,6 +849,7 @@ fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
 /// the window re-pushes its saved globals on every show.
 #[test]
 fn a_new_list_packet_resets_the_filter_mask_and_the_collapse_set() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
     s.set_trainer(Some(menu()));
     s.fire_event(
@@ -930,6 +939,7 @@ fn recipe_menu() -> TrainerState {
 /// carries a wrap width, the long name measures two lines, and its height passes the row height.
 #[test]
 fn a_long_row_name_stays_on_one_line_and_carries_its_rank_along() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
     s.set_money(5000);
     s.set_trainer(Some(recipe_menu()));
@@ -1032,6 +1042,7 @@ fn a_long_row_name_stays_on_one_line_and_carries_its_rank_along() {
 /// collapsed groups, which 1128 recorded as "a collapse does not survive a purchase" — with it.
 #[test]
 fn learning_a_spell_keeps_the_filter_and_the_collapse_a_re_open_still_resets() {
+    benilla_formats::wow_data_or_skip!();
     use crate::ui_trainer::TrainerOpen;
     const DAZALAR: u64 = 0xabc;
 
@@ -1085,12 +1096,11 @@ fn learning_a_spell_keeps_the_filter_and_the_collapse_a_re_open_still_resets() {
     s.run("CollapseTrainerSkillLine(1)").unwrap();
     assert_eq!(rows(&mut s), 3, "the folded group keeps its header only");
 
-    // He trains. The app re-asks for the list (`trainer_buy_succeeded`) and marks its own answer as
-    // the repaint it is; the bought service comes back gray.
+    // He trains. The spell lands (`SMSG_LEARNED_SPELL`) and the state re-evaluator (2333, the
+    // reference's `0x4d7d40`) repaints the bought row gray IN PLACE — no second list, so nothing
+    // that a list packet resets.
     let mut learned = menu();
     learned.services[0].category = TrainerServiceCategory::Used;
-    open.refresh_pending = true;
-    open.open(DAZALAR, 0, vec![], "Hello, hunter!".into());
     feed(&mut s, &mut open, learned, "TRAINER_UPDATE");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
@@ -1161,6 +1171,7 @@ fn learning_a_spell_keeps_the_filter_and_the_collapse_a_re_open_still_resets() {
 /// reason: the packet-vs-repaint decision under test is the app's own.
 #[test]
 fn learning_a_spell_takes_the_detail_pane_with_it_instead_of_stranding_the_last_one() {
+    benilla_formats::wow_data_or_skip!();
     use crate::ui_trainer::TrainerOpen;
     const DAZALAR: u64 = 0xabc;
 
@@ -1214,13 +1225,12 @@ fn learning_a_spell_takes_the_detail_pane_with_it_instead_of_stranding_the_last_
         "the Train button bought the selected row"
     );
 
-    // The app re-asks for the list and marks its answer the repaint it is (B256); the bought
-    // service comes back gray and, with "already known" off, leaves the list. Cleave slides up into
-    // row 2 under where the selection used to be.
+    // The spell lands and the re-evaluator (2333) repaints the bought row gray in place; with
+    // "already known" off it leaves the list, and Cleave slides up into row 2 under where the
+    // selection used to be. (Until 2333 this was a second list packet marked as a refresh —
+    // B256.)
     let mut learned = menu();
     learned.services[0].category = TrainerServiceCategory::Used;
-    open.refresh_pending = true;
-    open.open(DAZALAR, 0, vec![], "Hello, warrior!".into());
     feed(&mut s, &mut open, learned, "TRAINER_UPDATE");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
@@ -1265,6 +1275,7 @@ fn learning_a_spell_takes_the_detail_pane_with_it_instead_of_stranding_the_last_
 /// (`mov ecx,0x136; jmp 0x703e50`). Ours did not, so the checkbox moved and the list did not.
 #[test]
 fn a_filter_click_repaints_the_rows_the_player_is_looking_at() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));

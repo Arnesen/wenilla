@@ -15,12 +15,10 @@
 //! The floor is what lifts the sweep origin clear — to `surface + 2/9` — so the boom never starts
 //! near the plane. Neither half is optional; see [`corridor`].
 //!
-//! Transcribed from wow-re `ui/scratch/camera-water-corridor-spec.md` §1–§4 and §7 (a two-round §5:
-//! seven cold workers, byte arbitration on the `(live, target)` polarity, and a rate sweep of the
-//! verified loop). Constants: `[0x8089cc] = 5/6`, `[0x8089d0] = 2/9`, `[0x8089d4] = 5/9`,
-//! `[0x808a04] = 1/9`.
+//! Transcribed from the reference. Constants: `[0x8089cc] = 5/6`, `[0x8089d0] = 2/9`,
+//! `[0x8089d4] = 5/9`, `[0x808a04] = 1/9`.
 //!
-//! **§5 · The two catch-up blocks, named and NOT built** (`camera-catchup-blocks.md`).
+//! **The two catch-up blocks, named and NOT built.**
 //!
 //! `0x50eeb0` (pivot height) and `0x50ee5d` (distance) are a matched pair that pull a live channel
 //! down when it has drifted more than `1/9` above what the solver just produced:
@@ -65,7 +63,7 @@ const SURFACE_BAND: f32 = 2.0 / 9.0;
 /// 1.036/0.293 instead of 1.0556/0.2778.
 const SUBMERGE_EDGE: f32 = 5.0 / 9.0;
 /// `[0x808a04]` — the minimum head-room the pivot keeps above the corridor floor, and the offset
-/// the catch-up blocks of §5 would pin their live field to.
+/// the catch-up blocks `0x50eeb0`/`0x50ee5d` would pin their live field to.
 const MIN_HEADROOM: f32 = 1.0 / 9.0;
 
 /// **Which liquid band the camera target is in** — the two bits `0x511ad0` writes into `[cam+0x90]`
@@ -98,9 +96,9 @@ pub(super) enum WaterBand {
 /// An invalid or null liquid object makes `0x511ad0` return `+0.0` with both bits cleared — hence
 /// `surface_y: None` mapping to [`WaterBand::Clear`] and `d = 0.0`, not to a panic or a probe.
 ///
-/// **The comparison is against the pivot TARGET, not its live value** — the asymmetry that three of
-/// seven cold workers inverted and that was arbitrated at the bytes: `[cam+0x1c8]` is the target and
-/// `[cam+0xfc]` the live value (the only directional store is `0x50f3e7 call 0x5b7bb0 →
+/// **The comparison is against the pivot TARGET, not its live value** — an asymmetry that's easy
+/// to invert, but byte-exact: `[cam+0x1c8]` is the target and `[cam+0xfc]` the live value (the
+/// only directional store is `0x50f3e7 call 0x5b7bb0 →
 /// 0x50f3ec fstp [esi+0xfc]`; `0x50f3ff`'s `[0x1c8] := [0xfc]` is a settle guarded by
 /// `|Δ| < 2⁻²²`). The classifier reads the target; the corridor seeds its cap from the live value.
 /// Getting this backwards bands against a continuously-eased quantity and chatters on its own,
@@ -292,9 +290,9 @@ mod tests {
     }
 
     /// The upper edge — `+5/18`. **This is also what this client ships**, because the reference's
-    /// two catch-up blocks are absent (module §5): with them, leaving the submerge band steps
-    /// `+1/9` at most and can go negative on a fast ascent. `+0.278` yd where the reference gives
-    /// at most `+0.111`, once, on surfacing — smaller than the dive step above it, which is
+    /// two catch-up blocks (`0x50eeb0`/`0x50ee5d`) are absent: with them, leaving the submerge band
+    /// steps `+1/9` at most and can go negative on a fast ascent. `+0.278` yd where the reference
+    /// gives at most `+0.111`, once, on surfacing — smaller than the dive step above it, which is
     /// intended and four times larger.
     #[test]
     fn leaving_the_submerge_band_with_the_live_pivot_held_is_the_closed_forms_five_eighteenths() {

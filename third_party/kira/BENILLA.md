@@ -10,8 +10,8 @@ upstream files are CRLF and are left so, except the one file patched.
 
 The mixer runs on benilla's own audio render thread (`sound/output`), and with a raid buffing
 itself — a dozen live voices, most of them spatial — that thread cost **~1.5 ms of every 60 Hz
-frame** on the M2 Air (decision 1945: a sampled profile of the crowd rig's Blackrock leg with
-sound on, `Track::process` two thirds of it). Upstream's sub-track `process` spatializes **every
+frame** on an M2 Air (a sampled profile with a dozen spatial voices playing, `Track::process`
+two thirds of it). Upstream's sub-track `process` spatializes **every
 frame**: two vector normalizes, a length, the attenuation curve and a dB→amplitude `powf` per
 frame per spatial track, then two more `powf`s per frame for the volume tween and the fade. At
 48 kHz × 12 tracks that is ~1.7 M `powf`s a second plus the vector math, for gains that change

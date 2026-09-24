@@ -83,10 +83,10 @@ fn load_ui(script: &UiScript) {
 /// The page body as the reader actually DRAWS it, one string per block.
 ///
 /// `ItemTextPageText` is a `SimpleHTML` since decisions 1337/1338, and 5875's SimpleHTML has no
-/// `GetText` — its Lua table is 19 entries and none of them is a text getter (wow-re
-/// `simplehtml-markup-engine.md` §5.1; later clients grew one, this one has not). So the page is
-/// read the way it is seen: off the render list. A plain body is one block through the engine's
-/// raw-text fallback, which is what every letter here is.
+/// `GetText` — its Lua table is 19 entries and none of them is a text getter (`0x87ba80`; later
+/// clients grew one, this one has not). So the page is read the way it is seen: off the render
+/// list. A plain body is one block through the engine's raw-text fallback, which is what every
+/// letter here is.
 fn page_blocks(s: &UiScript) -> Vec<String> {
     use benilla_ui::script::QuadContent;
     s.extract()
@@ -249,7 +249,7 @@ fn closing_queues_the_close_intent() {
     assert!(s.take_errors().is_empty());
 }
 
-/// **B240's render half, on the reported page.** Goudy's plaque body (`page_text` 2676, the
+/// **B240's render half, on the reported page.** The plaque body (`page_text` 2676, the
 /// *Alliance Military Ranks* wall plaque in Stormwind's Old Town) went through the reader and came
 /// out as its own source — `<HTML><BODY><H1 align="center">…` drawn literally, and cut off with
 /// "..." partway down. Both were the page being a plain FontString where the reference has a
@@ -314,16 +314,15 @@ fn the_reported_html_page_draws_as_blocks_not_as_its_own_markup() {
     );
 }
 
-/// **B342, on the reported page, through the real archives.** Goudy, 2026-08-27 (`#bugs`
-/// `1542371921486811236`): *"html images in books are not scaled correctly"* — the Alliance crest
-/// on *A Treatise on Military Ranks* drawn several times the reference's size with the page's own
-/// text over it, beside a 1.12.1 shot of the same page for comparison.
+/// **B342, on the reported page, through the real archives.** The symptom: the Alliance crest
+/// on *A Treatise on Military Ranks* draws several times the reference's size, with the page's own
+/// text over it.
 ///
 /// The body is `page_text` 2654, quoted verbatim below, and its one `<IMG>` carries **no `width=`
 /// and no `height=`**. In the reference that is the CONTENT-derived span: the resolver's size call
 /// is virtual, and `CSimpleTexture`'s override answers an authored `0.0` with the loaded texture's
-/// texel extent, one texel to one FrameXML unit (wow-re `region-size-fallback.md` §2, decision
-/// 1349). `Interface\PvPRankBadges\PvPRankAlliance` is a 128×128 BLP, so the crest is a 128-unit
+/// texel extent, one texel to one FrameXML unit (`0x770720`, decision 1349).
+/// `Interface\PvPRankBadges\PvPRankAlliance` is a 128×128 BLP, so the crest is a 128-unit
 /// square inside a 270-wide page.
 ///
 /// The engine half is pinned in `benilla-ui`'s own `simplehtml` tests against a stub oracle; what
@@ -443,7 +442,7 @@ fn the_reported_book_crest_draws_at_the_blps_own_size() {
     }
 }
 
-/// **B288, closed at the reported symptom** (CarlG, decision 1507): the Verdant Note open from
+/// **B288, closed at the reported symptom** (decision 1507): the Verdant Note open from
 /// the bag, then a quest giver's gossip — both frames drew at the same TOPLEFT 0,-104 anchor,
 /// page text and greeting interleaved. The cause was the reader's missing `UIPanelWindows` row:
 /// registered (the ref's own `{ area = "left", pushable = 0 }`, UIParent.lua l.20), the two are

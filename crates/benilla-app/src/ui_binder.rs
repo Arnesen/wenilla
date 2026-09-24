@@ -18,9 +18,8 @@
 //!   frame it goes false.
 //!
 //! Both halves are now **byte-pinned** against the reference's own handler `0x5dfdc0` and its
-//! `SMSG_BINDER_CONFIRM` arm `0x5e4aa2` (wow-re
-//! `system/ui/scratch/gossip-icon-and-binder-flow.md`; folded back by decision 1335, which
-//! promotes what decision 1331 had to leave INFERRED):
+//! `SMSG_BINDER_CONFIRM` arm `0x5e4aa2` (folded back by decision 1335, which promotes what
+//! decision 1331 had to leave INFERRED):
 //!
 //! 1. **`arg1` is an AREA name, never the NPC's** — the handler never looks a name up. It resolves
 //!    the player's own **sub-area** through `AreaTable.dbc`, falls back to the **parent zone** when
@@ -148,8 +147,8 @@ fn area_name(
 /// [`area_name`]'s chain over a bare leaf id — split out so the three legs are testable against the
 /// real `AreaTable` without standing up a world.
 ///
-/// The tail is the `HOME_INN` GlobalString (`GetBindLocation` uses the identical fallback, which is
-/// how wow-re cross-checked the order), read off the player's own table rather than re-typed
+/// The tail is the `HOME_INN` GlobalString (`GetBindLocation 0x48dae0` uses the identical
+/// fallback), read off the player's own table rather than re-typed
 /// (decision 2045); an install that does not carry it yields the empty string, which is the
 /// reference's data-suppression face and still fires the question.
 fn area_name_of(
@@ -207,14 +206,49 @@ fn drain_binder(
 /// silent but still audible, which is the reference's own ordering rather than an accident of ours.
 const SOUND_PLAYERBOUND: u32 = 1141;
 
-/// The net drain's `SessionEvent::PlayerBound` arm, factored here so the wire law lives beside the
-/// state it drives.
-pub(crate) mod apply {
+/// The innkeeper's packet handlers (in the net handler table since 2312), beside the state they
+/// drive.
+pub(crate) mod net {
     use super::*;
 
     use bevy::ecs::message::MessageWriter;
 
     use crate::net::{ServerSoundKind, ServerSoundMessage};
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+
+    use crate::net::NetHandlerApp;
+
+    /// Register the binder's handlers — called from [`UiBinderPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::BinderConfirm, on_confirm)
+            .net_handler(K::PlayerBound, on_bound);
+    }
+
+    fn on_confirm(In(ev): In<SessionEvent>, mut binder: ResMut<BinderState>) {
+        if let SessionEvent::BinderConfirm { binder: npc } = ev {
+            binder.ask(npc);
+        }
+    }
+
+    fn on_bound(
+        In(ev): In<SessionEvent>,
+        mut binder: ResMut<BinderState>,
+        mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+        areas: Option<Res<AreaTableRes>>,
+        mut sounds: MessageWriter<ServerSoundMessage>,
+    ) {
+        if let SessionEvent::PlayerBound { binder: npc, area } = ev {
+            debug!("net: bound to area {area} by {npc:#x}");
+            bound(
+                area,
+                &mut binder,
+                &mut errors,
+                areas.as_deref(),
+                &mut sounds,
+            );
+        }
+    }
 
     /// `SMSG_PLAYERBOUND` — the bind took. Retract the question, play the sound, and queue
     /// `DisplayError(0x138)` = `ERR_DEATHBIND_SUCCESS_S` (catalog row 312, `kind 0` — a system
@@ -260,6 +294,7 @@ pub(crate) struct UiBinderPlugin;
 
 impl Plugin for UiBinderPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<BinderState>().add_systems(
             Update,
             (

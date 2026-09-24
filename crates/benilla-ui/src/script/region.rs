@@ -1,8 +1,8 @@
-//! The **region** side of the object model (RF-0023's distinct-tag leaves): the `Texture`/
-//! `FontString` wrapper cache, their shared metatable, and the region method surface. Split from
-//! [`super::object`] (which keeps the frame side + `CreateFrame`) so each grows along its own
-//! axis — frames grow per-kind method tables ([`super::statusbar`], [`super::button`]), regions
-//! grow paint/coords methods here.
+//! The **region** side of the object model (each leaf carries the reference's own type tag): the
+//! `Texture`/`FontString` wrapper cache, their shared metatable, and the region method surface.
+//! Split from [`super::object`] (which keeps the frame side + `CreateFrame`) so each grows along
+//! its own axis — frames grow per-kind method tables ([`super::statusbar`], [`super::button`]),
+//! regions grow paint/coords methods here.
 
 use mlua::{Lua, MultiValue, Table, Value};
 
@@ -10,6 +10,7 @@ use super::object::anchor_args::{parse_set_point, resolve_rel_target, UNNAMED};
 use super::object::{
     anchor_bits_eq, anchor_retarget_is_structural, decode_id, id_to_lud, NamedTarget,
 };
+use super::region_map::{set_shared, Side};
 use super::{
     Model, REG_FONTSTRING_META, REG_FONTSTRING_METHODS, REG_REGION_META, REG_REGION_METHODS,
     REG_TEXTURE_META, REG_TEXTURE_METHODS, REG_TITLE_META, REG_TITLE_METHODS, REG_WRAPPERS, SCREEN,
@@ -77,11 +78,11 @@ pub(super) fn region_wrapper(lua: &Lua, id: u32) -> mlua::Result<Table> {
     }
     let t = lua.create_table()?;
     t.raw_set(0, Value::LightUserData(id_to_lud(id)))?;
-    // **A title region gets a NARROWER metatable, chosen here rather than per lookup.** wow-re Q6
-    // carves the object as answering *exactly* the 19 Region methods — no Show/Hide, no textures,
-    // no text — and this cache is created once per region, so picking the table at construction
-    // costs nothing on the call path (dispatching inside `__index` would put a model borrow and a
-    // kind lookup in front of EVERY region method call in the UI).
+    // **A title region gets a NARROWER metatable, chosen here rather than per lookup.**
+    // `CreateTitleRegion 0x773910`'s object answers *exactly* the 19 Region methods — no
+    // Show/Hide, no textures, no text — and this cache is created once per region, so picking the
+    // table at construction costs nothing on the call path (dispatching inside `__index` would
+    // put a model borrow and a kind lookup in front of EVERY region method call in the UI).
     let kind = {
         let model = lua.app_data_ref::<Model>().expect("model");
         model
@@ -159,9 +160,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // client's own file calls this global inside our VM.**
     //
     // A NAME, not a region handle — strictly what the reference's callers are attested to pass.
-    // Whether the real binding also accepts a texture object is not carved, so it is not accepted
-    // here: inventing the wider signature is how a superset starts (1189), and nothing needs it —
-    // both of our own callers already hold the name.
+    // Whether the real binding also accepts a texture object has not been read from the bytes, so
+    // it is not accepted here: inventing the wider signature is how a superset starts (1189), and
+    // nothing needs it — both of our own callers already hold the name.
     //
     // The behaviour is the crop it was always: set the texture AND mark the region a portrait, so
     // it draws masked to its inscribed circle. The client's portraits are circular and the frame
@@ -211,12 +212,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // **`__index` is the method TABLE, not a dispatcher function** (decision 2310) — here and at
+    // the three leaf metatables below. A Rust `__index` makes every `t.SetTexture` a Lua→Rust→Lua
+    // round trip plus a named-registry string lookup; measured at ~195 ns against ~9 ns for the
+    // table form, paid by every widget method access in the client. Nothing mutates these tables
+    // after install (`super::region_map::install` writes into them in place, and runs inside
+    // `super::object::install`), so holding the table itself cannot go stale.
     let region_meta = lua.create_table()?;
-    let region_index = lua.create_function(|lua, (_this, key): (Table, Value)| {
-        let methods: Table = lua.named_registry_value(REG_REGION_METHODS)?;
-        methods.get::<Value>(key)
-    })?;
-    region_meta.set("__index", region_index)?;
+    region_meta.set(
+        "__index",
+        lua.named_registry_value::<Table>(REG_REGION_METHODS)?,
+    )?;
     lua.set_named_registry_value(REG_REGION_META, region_meta)?;
     Ok(())
 }
@@ -236,35 +242,34 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     //
     // Resolution is [`region_name_of`], shared with `IsObjectType`'s `Usage:` text so the two can
     // never disagree about what this region is called.
-    m.set(
-        "GetName",
-        lua.create_function(|lua, this: Table| {
-            let id = decode_id(&this)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            match region_name_of(&model, id) {
-                Some(n) => Ok(Value::String(lua.create_string(&n)?)),
-                None => Ok(Value::Nil),
-            }
-        })?,
-    )?;
+    set_shared(lua, &m, Side::Region, "GetName", |lua, this: Table| {
+        let id = decode_id(&this)?;
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        match region_name_of(&model, id) {
+            Some(n) => Ok(Value::String(lua.create_string(&n)?)),
+            None => Ok(Value::Nil),
+        }
+    })?;
 
     // ── GetObjectType / IsObjectType: the last two of the Region map (1244 §4 closed) ───────────
     //
     // 1244 shipped four of the six missing Region-map members and deliberately left these two
     // DISPATCHED rather than guessed, because every interesting detail is one a plausible
-    // implementation gets wrong. wow-re answered (§5 trio + byte cross-check,
-    // `system/ui/scratch/widget-type-identity.md`), and every one of those details is below.
+    // implementation gets wrong. Every one of those details is below, verified at the bytes.
     //
     // `GetObjectType` is a per-class `.data` `const char*` read through `vtable[+0x1c]` — Texture
     // `0x773480` → `"Texture"`, FontString `0x7735d0` → `"FontString"` — pushed with
     // `lua_pushstring`, exactly one value, extra arguments ignored with no arity check.
-    m.set(
+    set_shared(
+        lua,
+        &m,
+        Side::Region,
         "GetObjectType",
-        lua.create_function(|lua, this: Table| {
+        |lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
             Ok(region_type_name(&model, rh))
-        })?,
+        },
     )?;
 
     // `IsObjectType(name)` — binding `0x7a1290`. Four traps, all verified, all here:
@@ -288,9 +293,12 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     //    in place, so `tex:IsObjectType(5)` compares against `"5"` and quietly answers nil — we
     //    format it and compare for real rather than short-circuiting, though no type name is
     //    numeric so the answer is nil either way.
-    m.set(
+    set_shared(
+        lua,
+        &m,
+        Side::Region,
         "IsObjectType",
-        lua.create_function(|lua, (this, want): (Table, Value)| {
+        |lua, (this, want): (Table, Value)| {
             let rh = region_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
             let want = match &want {
@@ -308,14 +316,13 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             let leaf = region_type_name(&model, rh);
             let hit = want.eq_ignore_ascii_case(leaf) || want.eq_ignore_ascii_case("Region");
             Ok(if hit { Value::Number(1.0) } else { Value::Nil })
-        })?,
+        },
     )?;
 
     // SetParent(frame) — **a Texture/FontString really does have this**, and we were the ones
     // missing it. `SetParent` lives in the REGION method table (`0x7a1550`); Texture's class lookup
-    // falls back to Region's at `0x79c650` and FontString's at `0x79ee50`, so both reach it (wow-re
-    // `system/ui/scratch/widget-api-batch-benilla.md` Q7, §5-verified). `FuBar_FuXPFu.lua:210`'s
-    // `self.Spark:SetParent(self.XPBar)` is not a broken addon.
+    // falls back to Region's at `0x79c650` and FontString's at `0x79ee50`, so both reach it.
+    // `FuBar_FuXPFu.lua:210`'s `self.Spark:SetParent(self.XPBar)` is not a broken addon.
     //
     // Four contract traps, each spelled out because each is a plausible implementation's silent
     // divergence:
@@ -335,9 +342,12 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     //
     // The mechanism half — full re-link, layer and sub-level preserved, `nil` = orphaned but not
     // destroyed — is [`crate::widget::WidgetArena::set_region_owner`]'s doc.
-    m.set(
+    set_shared(
+        lua,
+        &m,
+        Side::Region,
         "SetParent",
-        lua.create_function(|lua, args: mlua::MultiValue| {
+        |lua, args: mlua::MultiValue| {
             let mut it = args.into_iter();
             let Some(Value::Table(this)) = it.next() else {
                 return Err(mlua::Error::runtime("SetParent: expected a region"));
@@ -393,7 +403,7 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 model.touch_layout();
             }
             Ok(())
-        })?,
+        },
     )?;
 
     // Region-level visibility — the real VisibleRegion Show/Hide on Textures/FontStrings (the
@@ -469,15 +479,15 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     // **The Texture/FontString superset is NOT closed here, deliberately.** They still share one
     // table, so a Texture answers `SetText` and a FontString answers `SetTexture`. Splitting those
     // needs the per-table membership facts, and the naive partition is WRONG: `paint.rs` installs
-    // `SetDrawLayer`/`SetVertexColor`/`SetAlpha`/`SetAlphaGradient`, all of which the font carve
-    // says a FontString legitimately has. A wrong split REMOVES verbs addons use, which is worse
-    // than the superset it fixes — so that half waits for the membership read (1238's shape).
+    // `SetDrawLayer`/`SetVertexColor`/`SetAlpha`/`SetAlphaGradient`, all of which FontString's own
+    // method table (`0xcf5400`) legitimately has. A wrong split REMOVES verbs addons use, which is
+    // worse than the superset it fixes — so that half waits for the membership read (1238's shape).
     let title = lua.create_table()?;
     for name in super::REGION_MAP_METHODS {
         let f: Value = m.get(name)?;
         title.set(name, f)?;
     }
-    // ── The two LEAF tables (wow-re `texture-fontstring-method-split.md`) ───────────────────────
+    // ── The two LEAF tables ──────────────────────────────────────────────────────────────────
     //
     // Texture's map is `0x87c128` (22 entries, lookup `0x79c620`), FontString's is `0xcf5400` (32,
     // lookup `0x79ee20`); both tail-call the Region map and stop there — no third table. Until now
@@ -493,8 +503,9 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     // are the client's own lists now.
     //
     // Copied out of the full table rather than installed twice, so one implementation stands behind
-    // both visibilities — and note the carve's warning that the shared names use the IDENTICAL
-    // `const char*` in the client's two tables, so de-duplicating by name would drop one side.
+    // both visibilities — and note that the shared names use the IDENTICAL `const char*` in the
+    // client's two tables (e.g. `GetDrawLayer` at `0x87c41c`), so de-duplicating by name would
+    // drop one side.
     for (key, extra) in [
         (REG_TEXTURE_METHODS, &super::TEXTURE_ONLY_METHODS[..]),
         (REG_FONTSTRING_METHODS, &super::FONTSTRING_ONLY_METHODS[..]),
@@ -515,20 +526,12 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         (REG_FONTSTRING_META, REG_FONTSTRING_METHODS),
     ] {
         let meta = lua.create_table()?;
-        let index = lua.create_function(move |lua, (_this, key): (Table, Value)| {
-            let methods: Table = lua.named_registry_value(methods_key)?;
-            methods.get::<Value>(key)
-        })?;
-        meta.set("__index", index)?;
+        meta.set("__index", lua.named_registry_value::<Table>(methods_key)?)?;
         lua.set_named_registry_value(meta_key, meta)?;
     }
 
     let title_meta = lua.create_table()?;
-    let title_index = lua.create_function(|lua, (_this, key): (Table, Value)| {
-        let methods: Table = lua.named_registry_value(REG_TITLE_METHODS)?;
-        methods.get::<Value>(key)
-    })?;
-    title_meta.set("__index", title_index)?;
+    title_meta.set("__index", title.clone())?;
     lua.set_named_registry_value(REG_TITLE_METHODS, title)?;
     lua.set_named_registry_value(REG_TITLE_META, title_meta)?;
 
@@ -579,7 +582,8 @@ pub(super) fn region_type_name(model: &Model, rh: RegionHandle) -> &'static str 
     match model.arena.region(rh).map(|r| r.kind) {
         Some(RegionKind::Texture) => "Texture",
         Some(RegionKind::FontString) => "FontString",
-        // The title region's own type name — it is a Region and nothing more (Q6).
+        // The title region's own type name — it is a Region and nothing more (`CreateTitleRegion
+        // 0x773910`).
         Some(RegionKind::Title) => "Region",
         None => "Region",
     }
@@ -621,13 +625,12 @@ pub(super) fn region_owner_id(model: &mut Model, rh: RegionHandle) -> u32 {
     }
 }
 
-/// The client's **creation-path implicit anchor** (wow-re `system/ui/scratch/`
-/// `region-implicit-anchor.md`, §5 VERIFIED; decision 1310): a per-region-type post-step the real
-/// engine runs immediately after a region's LoadXML returns (`0x7701c0` texture / `0x771480`
-/// fontstring — the same two fire from the Button state-texture and ButtonText paths, and from Lua
-/// `CreateTexture`/`CreateFontString` only on a template-registry hit). Condition: the region has a
-/// parent AND every one of its nine anchor slots is empty — any anchor from any source suppresses
-/// it. Then:
+/// The client's **creation-path implicit anchor** (decision 1310): a per-region-type post-step
+/// the real engine runs immediately after a region's LoadXML returns (`0x7701c0` texture /
+/// `0x771480` fontstring — the same two fire from the Button state-texture and ButtonText paths,
+/// and from Lua `CreateTexture`/`CreateFontString` only on a template-registry hit). Condition:
+/// the region has a parent AND every one of its nine anchor slots is empty — any anchor from any
+/// source suppresses it. Then:
 ///
 /// - a **Texture** gets `SetAllPoints(parent)` — two corner anchors, TOPLEFT→TOPLEFT and
 ///   BOTTOMRIGHT→BOTTOMRIGHT at (0,0). Two opposing corners pin all four edges, so an authored
@@ -805,7 +808,7 @@ pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> ml
 /// `Region:GetWidth()`/`GetHeight()` — **the virtual size getters**, per region class.
 ///
 /// The Lua bindings are not field reads. `GetWidth 0x7a1e00` ends `ff 52 1c` and
-/// `GetHeight 0x7a2030` ends `ff 52 20` (wow-re `minimap-ping-law.md`): both dispatch through the
+/// `GetHeight 0x7a2030` ends `ff 52 20`: both dispatch through the
 /// receiver's own **geometry vtable** — slots `+0x1c`/`+0x20` — which is the identical call the
 /// rect resolver makes (`0x767579`). So a region's Lua-visible size and the size its rect is built
 /// from are one number BY CONSTRUCTION on the reference, and this function is how they are one
@@ -830,7 +833,7 @@ pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> ml
 ///   wrap constraint, the very cell `GetStringWidth 0x79e510` returns. The *height* is the other
 ///   cell, `0x7729b0`'s `[fs+0x100]`, which IS the wrapped line count × line height. So a wrapped
 ///   string reports a width wider than its own box and a height taller than one line, and that
-///   asymmetry is the client's (wow-re `fontstring-overflow.md` "The measurement echo").
+///   asymmetry is the client's.
 pub(super) fn measured_wh(lua: &Lua, this: &Table) -> mlua::Result<(f32, f32)> {
     let rh = region_handle_of(lua, this)?;
     // Same-tick measure when a host font engine is installed — see `region::text`'s `natural_w`.

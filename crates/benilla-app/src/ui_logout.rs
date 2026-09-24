@@ -39,7 +39,7 @@
 //!
 //! The 1.12 FrameXML fixes the rest: the CAMP/QUIT dialogs, their 20 s timeouts, and their
 //! `PLAYER_CAMPING` / `PLAYER_QUITING` / `LOGOUT_CANCEL` drivers (UIParent.lua l.304-315, event
-//! ids 276/277/278 in wow-re's `re/events/event-catalog.tsv`).
+//! ids 276/277/278 in the client's event-name table `0xbe1198`).
 
 use benilla_ui::script::{SessionRequest, UiScript};
 use bevy::prelude::*;
@@ -215,9 +215,9 @@ fn drain_logout(
             }
             // `CMSG_PLAYER_LOGOUT`, the forced flavour: the dispatcher's own gate is a live
             // in-world session, and nothing happens without one (decision 1963).
-            // `0x5aaff0` calls the dispatcher with `force = 1`, which BYPASSES the pending bail
-            // and does NOT set the latch (wow-re `staticpopup-dialog-bindings.md` §4) — so a
-            // forced logout is exactly the escape hatch from a stuck pending one.
+            // `0x5aaff0` calls the dispatcher `0x5ab000` with `force = 1`, which BYPASSES the
+            // pending bail and does NOT set the latch — so a forced logout is exactly the escape
+            // hatch from a stuck pending one.
             SessionRequest::ForceLogout => {
                 if self_guid.0.is_some() {
                     info!("logout: forced");
@@ -261,6 +261,7 @@ pub struct UiLogoutPlugin;
 
 impl Plugin for UiLogoutPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<LogoutState>().add_systems(
             Update,
             (
@@ -269,6 +270,33 @@ impl Plugin for UiLogoutPlugin {
                 exit_on_logout_complete.after(UiInput),
             ),
         );
+    }
+}
+
+/// The logout arc's two narration packets (decision 0674; in the net handler table since 2326)
+/// — this module owns the decision table; the handler is only the hand-off.
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::LogoutState;
+    use crate::net::NetHandlerApp;
+
+    /// Register the pair — called from [`super::UiLogoutPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::LogoutResponse, on_narration)
+            .net_handler(K::LogoutCancelled, on_narration);
+    }
+
+    fn on_narration(In(ev): In<SessionEvent>, mut logout: ResMut<LogoutState>) {
+        match ev {
+            SessionEvent::LogoutResponse { reason, instant } => {
+                logout.apply_response(reason, instant)
+            }
+            SessionEvent::LogoutCancelled => logout.apply_cancelled(),
+            _ => {}
+        }
     }
 }
 

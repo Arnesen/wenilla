@@ -9,7 +9,7 @@
 //! item-targeted cast (`SPELL_EFFECT_ENCHANT_ITEM`/`_TEMPORARY`, `Targets = 0x10`). Since
 //! decision 0923 this window owns none of that machinery — `DoCraft` goes down the ONE cast
 //! ladder like every other caster surface, and the resolver's item arm raises the ONE targeting
-//! cursor, which the bag and paper-doll click seams complete ([`crate::ui_action::targeting`]).
+//! cursor, which the bag and paper-doll click seams complete ([`crate::spell::targeting`]).
 //! The private `PendingItemCast` this file used to carry — a second targeting state with its own
 //! arm, its own bag-click completion and its own cursor overlay, bypassing every ladder rung
 //! including the reagent check an enchant most needs — is gone.
@@ -24,12 +24,14 @@ use benilla_formats::{
     SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_SPELL,
 };
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
+use benilla_protocol::{SessionEvent, SessionEventKind};
 use benilla_ui::script::{CraftReagent, CraftRecipe, CraftState, CraftTooltip, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{cast_target, CastCommit, CastLadder, PlayerActions, Spells};
+use crate::net::{NetCommands, NetHandlerApp, ObjectStore, Objects, SelfPlayer};
+use crate::spell::{cast_target, CastCommit, CastLadder};
+use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_items::{count_of, item_icon, InventoryScope};
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
@@ -39,14 +41,16 @@ use crate::ui_unit::UnitFeed;
 // NOTE on the admission filter below: Craft recipes (enchants, the rod crafts) do NOT carry
 // `SPELL_ATTR_IS_TRADESKILL` — they carry **`castUI != 0`** instead (pinned on the live 5875 data:
 // 7418/7421 castUI=3, attributes bare 0x10000; exactly the spellbook add-gate's third exclusion
-// leg). INTERIM admission pending a wow-re detail pass: a known spell joins the craft list when its
+// leg). INTERIM admission, unconfirmed in the binary: a known spell joins the craft list when its
 // SLA line matches AND (`castUI != 0` OR the tradeskill bit) and it is not an opener.
 
 /// The open Craft window: the skill line whose recipes it lists (`None` = closed) and the **craft
-/// type** that opened it. Routed here by the opener's `EffectMiscValue[0] != 0` (byte-VERIFIED —
-/// wow-re `tradeskill` TU-A); that same misc value *is* the craft type (1 Beast Training ·
+/// type** that opened it. Routed here by the opener's `EffectMiscValue[0] != 0`
+/// (`Spell_C::TryCast 0x6e4b60`); that same misc value *is* the craft type (1 Beast Training ·
 /// 3 Enchanting), which the client keeps at `ds:0xbdcfb8` and reads for both the window's admission
-/// filter and its row comparator (decision 1124). Client-local state, no wire.
+/// filter and its row comparator (decision 1124). Client-local state, no wire. Cleared by the Lua
+/// close and by the session end ([`on_session_end`]) — a logout's fresh VM never runs the old one's
+/// `OnHide`, so the close alone would carry the window into the next login.
 #[derive(Resource, Default)]
 pub(crate) struct CraftOpen {
     pub(crate) line: Option<u32>,
@@ -57,6 +61,7 @@ pub(crate) struct UiCraftPlugin;
 
 impl Plugin for UiCraftPlugin {
     fn build(&self, app: &mut App) {
+        app.net_handler(SessionEventKind::Disconnected, on_session_end);
         app.init_resource::<CraftOpen>().add_systems(
             Update,
             (feed_craft.in_set(UnitFeed), drain_craft.after(UiInput)),
@@ -64,9 +69,15 @@ impl Plugin for UiCraftPlugin {
     }
 }
 
+/// The Craft window dies with the session — a listener on the session end (a second handler on
+/// the kind, after the bridge's own teardown).
+fn on_session_end(In(_): In<SessionEvent>, mut open: ResMut<CraftOpen>) {
+    *open = CraftOpen::default();
+}
+
 /// The line's `(rank, max, bonus)` off the skill block — the Craft window bands difficulty on
-/// the EFFECTIVE skill (rank + bonuses), byte-VERIFIED unlike the TradeSkill window's raw rank
-/// (wow-re `tradeskill` TU-C).
+/// the EFFECTIVE skill (rank + bonuses, `0x5ea520` in the Craft build `0x4f60c0`), unlike the
+/// TradeSkill window's raw rank.
 fn skill_rank(store: &ObjectStore, skill_id: u32) -> (u32, u32, i32) {
     for i in 0..PLAYER_SKILL_SLOTS {
         if let Some(s) = store.0.player_skill(i) {
@@ -82,9 +93,8 @@ fn skill_rank(store: &ObjectStore, skill_id: u32) -> (u32, u32, i32) {
     (0, 0, 0)
 }
 
-/// **Law D** — the Craft window's row icon, transcribing `GetCraftIcon 0x4f7160` (byte-VERIFIED;
-/// wow-re `ui/scratch/spell-icon-substitution-law.md` §2, folded back by decision 1107): **always**
-/// this recipe's own `SpellIconID`, straight off `Spell.dbc`.
+/// **Law D** — the Craft window's row icon, transcribing `GetCraftIcon 0x4f7160` (decision 1107):
+/// **always** this recipe's own `SpellIconID`, straight off `Spell.dbc`.
 ///
 /// The one-liner is the point, and it is not an oversight to be "improved". The Craft window and
 /// the TradeSkill window are two translation units of the *same* node, and their icon laws are
@@ -97,10 +107,9 @@ fn craft_icon(d: &benilla_formats::SpellDisplay) -> Option<String> {
     d.icon.clone()
 }
 
-/// The Craft window's **tooltip law** — `SetCraftSpell 0x533e90`, byte-verified in wow-re
-/// (`ui/scratch/trainer-service-tooltip-law.md` §4.1). Like the trainer's, the binding is a
-/// selector into the two shared builders and emits no line of its own; unlike the trainer's, it
-/// reads the **recipe's own** effect columns:
+/// The Craft window's **tooltip law** — `SetCraftSpell 0x533e90`. Like the trainer's, the binding
+/// is a selector into the two shared builders and emits no line of its own; unlike the trainer's,
+/// it reads the **recipe's own** effect columns:
 ///
 /// ```text
 /// for i in 0..3:
@@ -137,6 +146,7 @@ fn feed_craft(
     focus: Option<Res<SpellFocus>>,
     icons: Option<Res<ItemDisplays>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    objects: Objects,
     items: Res<Items>,
     commands: Res<NetCommands>,
     mut last: Local<crate::ui_script::VmMemo<Option<CraftState>>>,
@@ -191,9 +201,9 @@ fn feed_craft(
                 let mut reagents = Vec::new();
                 let mut num_available = u32::MAX;
                 for &(entry, need) in d.reagents.iter().filter(|&&(e, n)| e != 0 && n != 0) {
-                    let have = count_of(&store.0, &items, entry, InventoryScope::CARRIED);
+                    let have = count_of(&store.0, &objects, entry, InventoryScope::CARRIED);
                     // A reagent is an ITEM row, so it terminates in the one genuinely shared chain
-                    // (wow-re §5): ItemTemplate → ItemDisplayInfo → icon. Unlike the *recipe* icon
+                    // (`0x5d88b0`): ItemTemplate → ItemDisplayInfo → icon. Unlike the *recipe* icon
                     // above, there is nothing per-binding about this one.
                     let (name, icon) = match items.template(entry, 0, &commands) {
                         Some(t) => (
@@ -215,10 +225,9 @@ fn feed_craft(
                     num_available = 0;
                 }
                 // **Focus first, then the totems** — `0x4ff980`'s own push order, and
-                // `GetCraftSpellFocus 0x4f78b0` returns the very same pair list despite its name
-                // (wow-re `tradeskill-tools-and-spell-focus.md`). The focus's flag is the literal
-                // `1.0` with no predicate: the reference never reddens it. See
-                // [`crate::ui_tradeskill`]'s twin, where the law is written out.
+                // `GetCraftSpellFocus 0x4f78b0` returns the very same pair list despite its name.
+                // The focus's flag is the literal `1.0` with no predicate: the reference never
+                // reddens it. See [`crate::ui_tradeskill`]'s twin, where the law is written out.
                 let mut tools = Vec::new();
                 if d.requires_spell_focus != 0 {
                     if let Some(n) = focus
@@ -229,7 +238,7 @@ fn feed_craft(
                     }
                 }
                 for &t in d.totems.iter().filter(|&&t| t != 0) {
-                    let have = count_of(&store.0, &items, t, InventoryScope::CARRIED) > 0;
+                    let have = count_of(&store.0, &objects, t, InventoryScope::CARRIED) > 0;
                     if let Some(info) = items.template(t, 0, &commands) {
                         tools.push((info.name.clone(), have));
                     }
@@ -309,7 +318,7 @@ fn feed_craft(
 
 /// Drain the Lua intents: every `DoCraft` goes down the ONE cast ladder, and the resolver decides
 /// what happens next — an enchant's `Targets = 0x10` word arms the targeting cursor's item half
-/// (decision 0923; the bag / paper-doll click completes it, in `ui_action::targeting`), a rod
+/// (decision 0923; the bag / paper-doll click completes it, in `spell::targeting`), a rod
 /// craft's zero word commits immediately. `CloseCraft` closes the window; a pick armed by it is
 /// the one targeting word, cancelled the ordinary ways (ESC, right-click, a new cast).
 ///
@@ -399,5 +408,30 @@ mod tests {
         teacher.effects[1] = SPELL_EFFECT_LEARN_SPELL;
         teacher.effect_trigger_spell[1] = 999_999;
         assert_eq!(craft_tooltip(5149, &teacher), CraftTooltip::Spell(999_999));
+    }
+
+    /// **The Craft window dies with the session** — the TradeSkill book's twin: only `CloseCraft`
+    /// cleared it, and a logout's fresh VM never runs the old one's `OnHide`, so the next login
+    /// fired `CRAFT_SHOW` into the new character's UI.
+    #[test]
+    fn the_session_end_closes_the_craft_window() {
+        let mut app = App::new();
+        app.add_plugins(UiCraftPlugin);
+        {
+            let mut open = app.world_mut().resource_mut::<CraftOpen>();
+            open.line = Some(333);
+            open.craft_type = 3;
+        }
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "socket".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+        );
+
+        let open = app.world().resource::<CraftOpen>();
+        assert_eq!((open.line, open.craft_type), (None, 0));
     }
 }

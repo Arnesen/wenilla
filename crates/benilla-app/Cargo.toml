@@ -3,37 +3,20 @@ name = "benilla-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The Bevy app as a library: everything but the build-id stamp, which lives in the `benilla` launcher shim so a commit dirties ~30 lines instead of this crate (decision 0993)"
+description = "The Bevy app as a library: everything but the build-id stamp, which lives in the `benilla` launcher so a new commit does not rebuild this crate"
 
 [lints]
 workspace = true
 
 [features]
-# **The dev/player seam** (decisions 0026 + 1173). Default-ON, so every ordinary `cargo run`,
-# capture, probe and gate builds exactly what it built before. `--no-default-features` compiles
-# the instruments — the debug panel, the perf HUD, the inspector, the capture harness and the
-# probe fleet — physically OUT: not dormant behind a runtime flag, absent. That is the whole
-# requirement a player client has of them, and a runtime toggle cannot meet it.
-#
-# The rule the seam enforces is one-directional: **dev may see anything; nothing may depend on
-# dev.** It is enforced by `cargo build -p benilla --no-default-features` in `scripts/gates.sh`,
-# not by anyone remembering it — 0026 adopted the rule in June 2026 with no failing build behind
-# it, and twenty-four couplings had accumulated by August (1173).
+# `dev` compiles in the instruments: the debug panel, perf HUD, inspector, capture harness and
+# probes. Nothing may depend on it; `scripts/gates.sh` builds `benilla` with no default features.
 default = ["dev"]
-#
-# The three benilla crates below are taken with `default-features = false` and their `dev`
-# re-exported here (1175). Their `dev` is default-on too, so without the round trip a
-# `--no-default-features` build gets the feature back through unification — and the binary
-# carries the build machine's source-tree path after all. Same trap as the shim's, one level down.
+# `benilla-assets`, `-formats` and `-world` come in without default features and their `dev` is
+# forwarded here: it is on by default in each, so unification would put it back in a player build.
 dev = ["benilla-assets/dev", "benilla-formats/dev", "benilla-world/dev", "dep:bevy_egui"]
-# Opt-in Tracy profiling: `cargo run --features tracy` streams per-system `info_span!` markers (on the
-# hot systems) + render-pass CPU timings to a Tracy capture (decision 0026 — the dev/player seam;
-# a `docs/howto/running.md` this once cited never landed).
 tracy = ["bevy/trace_tracy"]
-# Opt-in Chrome-trace profiling: `cargo run --features trace_chrome` writes a `trace-<ts>.json` of
-# every system's per-run span next to the working dir. Tracy's offline twin — it needs no GUI and no
-# live capture, so a per-system cost question is answerable from a terminal (and from a run someone
-# else recorded). Aggregate it with `scripts/tracesum.py`.
+# `--features trace_chrome` writes every system's per-run span to `trace-<ts>.json` in the cwd.
 trace_chrome = ["bevy/trace_chrome"]
 # Browser render backend, forwarded from `wenilla` (see benilla-world's note on why the world
 # needs WebGPU).
@@ -48,40 +31,22 @@ anyhow.workspace = true
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true
 wgpu.workspace = true
-# Optional: the dev overlays are its only consumers (the panel, the perf pill, the inspector
-# card), so a player build does not link it at all (`dev` feature, decision 1173).
 bevy_egui = { version = "0.39", optional = true }
-# Zero-copy POD→bytes for the shared light storage buffer (one per-frame write_buffer). Already in
-# the tree transitively; pinned to the same version as the dev-dep below.
 bytemuck = { version = "1", features = ["derive"] }
-# `f16` decode for the booth-target dump (`WOW_BOOTH_DUMP`): the booth render targets are
-# `Rgba16Float` (decision 0804) and the PNG wants display bytes. Already in the tree via
-# wgpu/bevy_image; declared so the call site is an honest dependency.
+# `f16` decode for the `WOW_BOOTH_DUMP` dump of the `Rgba16Float` booth render targets.
 half = "2"
-# The shipped FrameXML tree, compiled into the binary (decision 1175 §2): 61 files, ~2.8 MB, so the
-# client cannot boot without its interface on a machine that has never seen our source. A proc
-# macro plus a no-dependency runtime shim — it adds nothing to the graph at runtime, and it is the
-# crate everyone uses for this. `assets/ui` is OUR content (MIT/Apache), not Blizzard's.
+# Compiles `assets/ui` into the binary, so the interface loads on a machine without the source.
 include_dir = "0.7"
-# The 1.12 chat filters are PCRE over shipped DBCs (decision 2077; `text_filter`): 2289 profanity
-# expressions and 28 spam ones, compiled once at startup and run over every chat line. `RegexSet` is
-# exactly the shape that needs — one automaton over the whole list for the "can anything match at
-# all" pass — and the crate is already in the tree transitively.
+# The 1.12 chat filters (`text_filter`): the DBCs' 2289 profanity and 28 spam patterns, with one
+# `RegexSet` for the any-match pass over every chat line.
 regex = "1"
-# `getrusage` — whole-process CPU time (all threads), the perf probes' `cpu_ms`/`cpu_pct` metric
-# (`perf::process_cpu_secs`). Wall-clock fps is unusable as a regression instrument on a machine
-# running parallel sessions' builds; CPU-per-frame is, and it is also the number the Mac report
-# is about ("250 % CPU at 59 fps"). Was dev-only; since 1857 the output backend needs it in every
-# build too (`mach_absolute_time`, the host clock its meters read; `thread_policy_set`, the render
-# thread's realtime policy).
+# `getrusage` for the perf probes' process CPU time; `mach_absolute_time` and `thread_policy_set`
+# for the audio output's meter clock and its render thread's realtime policy.
 libc = "0.2"
-# Resample varying-size layer BLPs to a uniform size for the terrain texture array; `png` so we can
-# encode the cursor image into data an NSImage can load (macOS hardware cursor).
+# PNG encoding only: the macOS hardware cursor's NSImage data and screenshots.
 image = { version = "0.25", default-features = false, features = ["png"] }
-# The net↔ECS bridge: a background IO thread streams typed `SessionEvent`s to the ECS over a
-# channel, and outbound `ClientCommand`s back. crossbeam's Sender/Receiver are `Send + Sync + Clone`
-# (std's mpsc Sender is `!Sync`, so it can't be a Bevy resource without a mutex — the very thing this
-# bridge deletes). The canonical Bevy background-thread→channel→system idiom. See decision 0006.
+# Thread-to-ECS channels such as the net bridge's: crossbeam's `Receiver` is `Sync`, so either end
+# can be a Bevy resource without a mutex.
 crossbeam-channel = "0.5"
 # The two channels the sequencer *waits* at (credentials, character pick). crossbeam's `recv` parks
 # the calling thread, which the browser build has none of — `async_channel`'s awaits instead, and the
@@ -93,60 +58,31 @@ benilla-assets = { path = "../benilla-assets", default-features = false }
 benilla-formats = { path = "../benilla-formats", default-features = false }
 benilla-protocol = { path = "../benilla-protocol" }
 benilla-world = { path = "../benilla-world", default-features = false }
-# The CVar config diff (`benilla/config.toml`, decision 0954): serde derive on the persisted
-# shape, toml as its format. (serde_json left with the era manifest — 0978.)
+# The CVar diff persisted in `benilla-config/config.toml`.
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-# ECS-native physics: collider storage + broadphase BVH + shape-casts, with a thin custom kinematic
-# character controller on top (decision 0009). Pinned 0.6: it targets Bevy 0.18 (verified single,
-# unified bevy 0.18.1 in the tree); 0.7.0 jumps to Bevy 0.19 and would duplicate bevy. avian wraps
-# parry under the hood, so adopting it lets us drop the *direct* parry3d dep once the bespoke
-# CollisionWorld is gone. See docs… (decision 0007 superseded by 0009).
+# Collision for our kinematic character controller; 0.6 targets Bevy 0.18, 0.7 moves to 0.19.
 avian3d = "0.6"
-# The glyph shaper + rasterizer for `FontString` text (decision 0068 §2, probe-verified in
-# `probes/text-glyph`). Pinned to 0.16 — the exact version already in the tree transitively
-# (`bevy_text`'s own dependency, see `Cargo.lock`) — so this is the *same* `cosmic-text` the decision
-# already commits to, not a second copy. Used as a standalone shaper/rasterizer (`FontSystem` +
-# `Buffer` + `SwashCache`) in `ui_text.rs`, never `bevy_text`'s `Text2d`/ECS integration (that path
-# doesn't feed our custom z-ordered `UiQuad` stream).
+# Shapes and rasterizes `FontString` text standalone (`ui_text`), at bevy_text's own 0.16.
 cosmic-text = "0.16"
-# The font database `cosmic-text` 0.16 uses (its `Source`/`ID`/`FaceInfo` appear in `ui_text.rs`'s
-# public-in-crate types). Pinned to the exact version `cosmic-text` 0.16 depends on so there's one
-# `fontdb` in the graph.
+# `cosmic-text`'s font database, whose types `ui_text` names; must stay the version it depends on.
 fontdb = "0.23"
-# kira renders the mix; the device it plays through is OURS (`sound::output`, decision 1857) —
-# kira's own `cpal` backend is not enabled on any target. On macOS that took cpal out of the graph
-# entirely: it could neither report a lost default device nor rebuild on one, and it discarded the
-# IO-cycle timestamp the deadline meters need. Off macOS cpal is back (1920) but as OUR device
-# layer under the same backend, not as kira's — the ring, the render thread and the meters are the
-# same code on every platform.
+# The mixer. Its `cpal` backend stays off on every target: `sound::output` is our own backend.
 kira = { version = "0.12", default-features = false, features = ["mp3", "wav", "pcm", "adpcm"] }
-# The realtime-audio allocation tripwire (decision 1857): `assert_no_alloc(|| …)` around the output
-# IO callback and the render pass aborts a DEBUG build on any allocation inside them, so a
-# realtime-safety regression fails a test or a smoke instead of reaching an ear. Release builds
-# compile it out (`disable_release`, the crate's default) and carry no allocator wrapper.
+# Aborts a debug build on an allocation in the audio IO callback or render pass; off in release.
 assert_no_alloc = "1.1"
-# kira's own decoder, named directly for one trait: the mixer feeds streams through its own
-# `MediaSource` so kira's per-stream decode thread runs OUR code and can promote its QoS (decision
-# 1109 — a bare-spawned decode thread starves under the world-entry burst and zero-fills the mix).
-# No codecs of its own (kira's features enable those); must stay the version kira resolves — one
-# symphonia in the graph, or the trait impl won't line up.
+# For `MediaSource`: kira's decode thread reads through our source, which raises the thread's QoS
+# so the world-entry burst cannot starve it. Must stay kira's version, or the trait won't match.
 symphonia = { version = "0.5", default-features = false }
-# The mix tap's audio-thread → writer-thread ring (decision 1112): the tap effect must never
-# block or allocate on the render path. kira's own SPSC ring crate; kept on the version kira
-# resolves so the graph carries one rtrb.
+# The audio threads' lock-free SPSC rings (output, mix tap); kira's version, so the graph has one.
 rtrb = "0.3"
 mint = "0.5"
-# The gossip greeting is a weighted random DRAW per menu-open, not a fixed pick (wow-re
-# `gossip-npctext-law.md` — the reference re-rolls in its gossip handler), so the app needs a uniform
-# source. Pinned to 0.8: the version `benilla-srp` already depends on, so this adds no crate.
+# The gossip greeting's weighted draw, re-rolled per open as in the reference; `benilla-srp`'s 0.8.
 rand = "0.8"
 
-# OS clipboard access for the UI EditBox copy/cut/paste chords (chat input). Already in the tree via
-# bevy_egui; pinned to the same 3.x so there's one copy. Read on the main thread (the UI key feed is
-# a NonSend system) — required for the macOS NSPasteboard path. Covers macOS, Windows, and Linux/BSD
-# under X11; the Wayland backend is `smithay-clipboard` below (decision 0702). Native-only: arboard
-# has no wasm32 backend at all (`textinput/clipboard.rs` falls back to no pasteboard there).
+# The EditBox clipboard chords, read on the main thread as macOS NSPasteboard requires; Wayland
+# goes through `smithay-clipboard`. The 3.x bevy_egui uses, so the graph has one copy. Native-only:
+# arboard has no wasm32 backend (`textinput/clipboard.rs` falls back to no pasteboard there).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 arboard = "3"
 
@@ -155,32 +91,18 @@ arboard = "3"
 # the 0978 decision to keep serde_json out of the shipped app stands.
 serde_json = "1"
 
-# The WMO portal-cull audit's raw-face instruments (`WOW_PIN_COL`): the pin probe compares the
-# filtered walking-collision set against the group file's FULL face list with per-face MOPY flags,
-# which only the raw parser exposes — benilla-formats' gathers are exactly the filtered views.
-benilla-wmo = { path = "../benilla-wmo" }
-
-# Linux/BSD: the Wayland clipboard (decision 0702). We build with bevy's `wayland` feature, so on a
-# Wayland session winit gives us a native Wayland window and `arboard` — X11-only without its
-# non-default `wayland-data-control` feature — finds no X11 CLIPBOARD owner and every paste fails.
-# smithay-clipboard is the right crate for a windowed app: it drives the *standard* `wl_data_device`
-# off our own `wl_display`/seat, which every compositor supports. arboard's own Wayland feature would
-# not do: it speaks `wlr-data-control`, a privileged manager protocol GNOME/Mutter deliberately
-# doesn't implement. `raw-window-handle` (pinned to the 0.6 already in the tree via bevy_window, so
-# this adds no crate) is only needed to read the `wl_display` out of bevy's `RawHandleWrapper`.
+# Linux/BSD Wayland clipboard: smithay-clipboard drives the standard `wl_data_device` on our own
+# `wl_display`, read through raw-window-handle (bevy's 0.6). arboard's Wayland feature speaks
+# `wlr-data-control`, which GNOME does not implement.
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
 raw-window-handle = "0.6"
 smithay-clipboard = "0.7"
 
-# macOS: drive a native NSCursor for a crisp hardware cursor. winit drives the cursor via AppKit
-# cursor-rects, which our continuous Metal render loop doesn't honor on mouse-move (custom cursor /
-# hide revert to the arrow); we bypass it with NSCursor + NSWindow::disableCursorRects. See
-# docs/knowledge/camera-control.md.
+# macOS: AppKit through objc2 drives a native NSCursor with the window's cursor rects disabled;
+# winit's cursor rects revert to the arrow under our continuous render loop (`cursor.rs`).
 [target.'cfg(target_os = "macos")'.dependencies]
-# The audio device layer (decision 1857, `sound::output::coreaudio`): the HAL output unit through
-# coreaudio-rs's `AudioUnit`, and the AudioObject property/listener API through the objc2 CoreAudio
-# bindings — the two crates cpal itself stood on, now used directly. The versions are the ones the
-# graph already carries; the feature sets are the ones cpal proved to compile against.
+# The audio device layer (`sound::output::coreaudio`): the HAL output unit through coreaudio-rs,
+# the AudioObject property API through objc2-core-audio, at the versions and features cpal uses.
 coreaudio-rs = { version = "0.13", default-features = false, features = ["audio_unit", "core_audio"] }
 objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware"] }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
@@ -233,21 +155,13 @@ web-sys = { version = "0.3", features = [
     "OfflineAudioContext",
 ] }
 
-# Everywhere else: the same device layer over cpal (decision 1920, `sound::output::cpal`). 1857
-# owns the mix-ahead ring, the render thread and the meters on every platform; only the last
-# hop — find the default device, open a stream on it, hand back one buffer per cycle — is
-# platform code, and off macOS that hop is ALSA/PipeWire, WASAPI or the host's own API. cpal is
-# the layer that already speaks all of them; on macOS it is still not in the graph, because
-# there its defects (a no-op error callback on the default device, a pinned `DefaultOutput`
-# unit, the discarded IO-cycle timestamp) are exactly what 1857 went direct to escape. On an
-# unsupported target cpal compiles to its Null host, which reports no device — the same silent
-# posture `stub.rs` has, which is why that file now survives for wasm32 alone (below).
+# Off macOS the device layer's last hop runs over cpal (`sound::output::cpal`). macOS goes direct:
+# there cpal cannot report or rebuild on a lost default device and drops the IO-cycle timestamp.
+# An unsupported target gets cpal's Null host, which reports no device.
 # wasm32 is excluded: see the browser note in the wasm32 section above.
 [target.'cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
 cpal = "0.17"
 
-# Windows: the journal's and the probes' CPU clocks (decision 2219, `perf::clock`) —
-# `GetProcessTimes`, `GetThreadTimes` and `GetSystemTimes`, the twins of the `getrusage`,
-# `clock_gettime` and `host_statistics64` arms. The version is one the graph already carries.
+# Windows CPU clocks for `perf::clock`: `GetProcessTimes`, `GetThreadTimes`, `GetSystemTimes`.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

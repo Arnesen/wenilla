@@ -1,6 +1,5 @@
-//! `--questlog`: the quest-LOG wire (decision 0109). Accept quest 7 at McBride, `CMSG_QUEST_QUERY`
-//! it (the fat template parser's live golden), poll the `PLAYER_QUEST_LOG` slot, GM-complete it and
-//! require the COMPLETE state byte, then `CMSG_QUESTLOG_REMOVE_QUEST` and require the id field to clear.
+//! `--questlog`: accept quest 7 at McBride, query its template, GM-complete it and require the
+//! slot's complete bit, then abandon it and require the slot's id field to clear.
 
 use std::time::{Duration, Instant};
 
@@ -17,10 +16,7 @@ pub(crate) struct QuestLog;
 
 impl Probe for QuestLog {
     fn stage(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Same cleanup-then-teleport pattern as --quest (idempotent across re-runs); McBride is
-        // both giver and ender for quest 7, so one teleport (already onto him) suffices. Shared with
-        // --giverstatus: the `mcbride_staged` flag makes the two GM lines go out exactly once for a
-        // co-run, matching today's single `cli.questlog || cli.giverstatus` staging block.
+        // Shared with --giverstatus: `mcbride_staged` keeps these GM lines to one send per run.
         if !cx.world.mcbride_staged {
             cx.session
                 .send_chat(&format!(".quest remove {QUESTLOG_ID}"))?;
@@ -38,8 +34,7 @@ impl Probe for QuestLog {
         let session = &mut *cx.session;
         let self_guid = world.self_guid;
 
-        // --questlog: live-verify the quest-LOG wire (decision 0109) against quest 7 "Kobold Camp
-        // Cleanup" — McBride streamed in and we're in interaction range from the preamble teleport.
+        // The staging teleport lands on McBride, so he is streamed and in interaction range.
         let mcbride = world
             .tracked
             .iter()
@@ -52,8 +47,7 @@ impl Probe for QuestLog {
             )?;
         println!("\nMarshal McBride: guid {mcbride:#x}");
 
-        // 1) Query + accept quest 7 at McBride (he's both giver and ender — copies --quest's
-        // hello → query → accept flow, minus the separate turn-in NPC).
+        // 1) Hello, query and accept quest 7 at McBride, who also ends it.
         println!("giver: CMSG_QUESTGIVER_HELLO + CMSG_QUESTGIVER_QUERY_QUEST({QUESTLOG_ID})");
         session.questgiver_hello(mcbride)?;
         session.questgiver_query_quest(mcbride, QUESTLOG_ID)?;
@@ -75,8 +69,7 @@ impl Probe for QuestLog {
 
         println!("giver: CMSG_QUESTGIVER_ACCEPT_QUEST");
         session.questgiver_accept_quest(mcbride, QUESTLOG_ID)?;
-        // Let the accept settle (its values delta can trail the GOSSIP_COMPLETE that closes the
-        // interaction) before asking for the template/slot below.
+        // The accept's values delta can trail the GOSSIP_COMPLETE that closes the interaction.
         let drain_until = Instant::now() + Duration::from_secs(3);
         while Instant::now() < drain_until {
             let Ok(msg) = session.recv() else { continue };
@@ -91,9 +84,7 @@ impl Probe for QuestLog {
             }
         }
 
-        // 2) The template: CMSG_QUEST_QUERY → SMSG_QUEST_QUERY_RESPONSE — the fat parser's live
-        // golden (hand-built fixtures already cover the wire traps; this proves the real byte
-        // stream). Require the title and at least one real (required_count > 0) objective.
+        // 2) CMSG_QUEST_QUERY: the template parser against the live server's bytes.
         println!("CMSG_QUEST_QUERY({QUESTLOG_ID})");
         session.quest_query(QUESTLOG_ID)?;
         let mut template: Option<benilla_protocol::messages::QuestTemplate> = None;
@@ -148,10 +139,8 @@ impl Probe for QuestLog {
             "✅ template: title matches '{QUESTLOG_TITLE}', ≥1 objective with required_count > 0."
         );
 
-        // 3) Slot state: find which PLAYER_QUEST_LOG slot the accept landed in (same poll pattern
-        // --quest uses for its soft accept check, made a hard requirement here), then GM-complete
-        // it and require the slot's count-state field (id-field + 1) to gain the COMPLETE state
-        // byte (bit 0x01 at byte 3 — `count_state & 0xFF00_0000` gains `0x01 << 24`).
+        // 3) Find the accept's PLAYER_QUEST_LOG slot, GM-complete it, and require the slot's
+        // count-state field (id field + 1) to gain the complete bit, 0x01 in its top byte.
         let find_slot = |sf: &Option<benilla_protocol::messages::ObjectFields>| {
             sf.as_ref().and_then(|sf| {
                 (0..benilla_protocol::messages::PLAYER_QUEST_LOG_SLOTS)
@@ -183,8 +172,7 @@ impl Probe for QuestLog {
         )?;
         println!("quest {QUESTLOG_ID} occupies PLAYER_QUEST_LOG slot {slot}");
 
-        // The count-state word itself (id-field + 1) — read raw so we can print the exact
-        // before/after bytes, not just the decoded [`QuestLogSlot::state`].
+        // Raw rather than decoded, so the exact before and after bytes print.
         let count_state_word = |sf: &Option<benilla_protocol::messages::ObjectFields>| {
             sf.as_ref().and_then(|sf| {
                 sf.raw_fields()
@@ -233,8 +221,7 @@ impl Probe for QuestLog {
              complete ({before_word:#010x} → {after_word:#010x})."
         );
 
-        // 4) Abandon: CMSG_QUESTLOG_REMOVE_QUEST(slot) — no ack SMSG exists on this wire (decision
-        // 0109); the descriptor's id field clearing to 0 IS the confirmation.
+        // 4) CMSG_QUESTLOG_REMOVE_QUEST has no reply; the slot's id field clearing is the ack.
         println!("CMSG_QUESTLOG_REMOVE_QUEST(slot {slot})");
         session.questlog_remove_quest(slot)?;
         let mut cleared = false;
@@ -261,17 +248,17 @@ impl Probe for QuestLog {
             bail!(
                 "--questlog: slot {slot}'s PLAYER_QUEST_LOG id field never cleared to 0 within \
                  8s after CMSG_QUESTLOG_REMOVE_QUEST (no ack SMSG exists on this wire — the field \
-                 clear IS the confirmation, decision 0109)"
+                 clear IS the confirmation)"
             );
         }
         println!(
             "✅ abandon: slot {slot}'s PLAYER_QUEST_LOG id field cleared to 0 (no ack SMSG on \
-             this wire — the field update is the confirmation, decision 0109)."
+             this wire — the field update is the confirmation)."
         );
 
         println!(
             "\n✅ --questlog PASS: template parsed, slot {slot} tracked → COMPLETE → abandoned \
-             (id field cleared) — the quest-log wire verified end to end (decision 0109)."
+             (id field cleared) — the quest-log wire verified end to end."
         );
         Ok(())
     }

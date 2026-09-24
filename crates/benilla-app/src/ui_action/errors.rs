@@ -184,7 +184,7 @@ pub(crate) use benilla_ui::messages::MsgKind;
 /// One argument in a message's **argText list**.
 ///
 /// Heterogeneous and ordered because the template's specifiers are: the lock-refusal toast
-/// `ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI` is String-then-Integer (wow-re cursor-system.md §8.8,
+/// `ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI` is String-then-Integer (its arm `0x5f34a9`,
 /// decision 0545), and a list of strings beside a separate number cannot express that.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FillArg {
@@ -198,10 +198,9 @@ pub(crate) enum FillArg {
 /// refusals carry their chat lines in it too (decision 0669).
 ///
 /// **`0x496720` is variadic** — cdecl, the catalog id first and the argText after it, `add esp,4`
-/// at a bare call site and `add esp,8` at a one-string one (wow-re
-/// `system/ui/scratch/staticpopup-dialog-bindings.md`; `guild-api-carve.md` §5's "22 of 22" arity
-/// control). Three strings is the most any call site pushes: `SMSG_GUILD_EVENT`'s shared emitter
-/// tail `0x5e745f` passes **1, 2 or 3** of them off the packet's `strCount`, feeding
+/// at a bare call site and `add esp,8` at a one-string one (22 of 22 in the guild command-result
+/// handler `0x5e7520`). Three strings is the most any call site pushes: `SMSG_GUILD_EVENT`'s
+/// shared emitter tail `0x5e745f` passes **1, 2 or 3** of them off the packet's `strCount`, feeding
 /// `ERR_GUILD_PROMOTE_SSS`. This field was a single `fill_s` until decision 2054, which is why
 /// the guild lines could not use this route at all and composed their own English instead.
 ///
@@ -281,9 +280,9 @@ pub(crate) struct UiErrorKeys(pub Vec<UiError>);
 /// `mov edx,1; call 0x4945b0` → `UI_ERROR_MESSAGE`) and `SMSG_AREA_TRIGGER_MESSAGE` (`0x2b8`, the
 /// shared handler `0x48f690`'s arm at `0x48f8ff` — `xor edx,edx; call 0x4945b0` →
 /// `UI_INFO_MESSAGE`). `0x4945b0(text, flag)` is the whole sink: null/empty guard, then
-/// `neg edx; sbb edx,edx; add edx,0xe1` = event `0xe1` when the flag is 0 and `0xe0` when it is 1
-/// (wow-re `system/ui/ui.md` l.2459). The handler's own choice of flag is what the [`MsgKind`]
-/// here carries — the same two surfaces the catalog names, reached by a different road.
+/// `neg edx; sbb edx,edx; add edx,0xe1` = event `0xe1` when the flag is 0 and `0xe0` when it is 1.
+/// The handler's own choice of flag is what the [`MsgKind`] here carries — the same two surfaces
+/// the catalog names, reached by a different road.
 #[derive(Resource, Default)]
 pub(crate) struct UiErrorTexts(pub Vec<(String, MsgKind)>);
 
@@ -300,7 +299,7 @@ impl UiErrorTexts {
 }
 
 /// Resolve one [`UiError`] to its displayed text — `GetText(key)` + the `%s`/`%d` argText
-/// substitution ("Requires %s" + "Herbalism" → "Requires Herbalism", cursor-system.md §8.8).
+/// substitution ("Requires %s" + "Herbalism" → "Requires Herbalism").
 /// `None` (the key resolves to nothing, or the filled text is empty) = show nothing — a
 /// **NAMED DIVERGENCE**, corrected from a false citation this doc carried until 2246.
 ///
@@ -481,13 +480,12 @@ pub(crate) struct MessageSink<'w> {
 }
 
 /// `UNIT_FIELD_FLAGS` bits the attack-start validator refuses on, paired with the message each
-/// raises — read at `0x612eec`+ in the binary's own test order (wow-re
-/// `object-layer/scratch/pet-command-validators.md` §2). All four are crowd control: the actor is
-/// not refusing, it is unable.
+/// raises — read at `0x612eec`+ in the binary's own test order. All four are crowd control: the
+/// actor is not refusing, it is unable.
 ///
 /// Each has a second face in the reference — errorId `0xa9`
 /// `ERR_ATTACK_PREVENTED_BY_MECHANIC_S`, which substitutes a resolved mechanic name — chosen by
-/// five `0x6e9…` resolvers whose bodies wow-re records as **not carved**. We raise the plain form
+/// five `0x6e9…` resolvers whose bodies are **not yet decoded**. We raise the plain form
 /// only; the fill is a strictly better message for the same refusal, never a different one.
 const ATTACK_FLAG_REFUSALS: [(u32, &str); 4] = [
     (0x0004_0000, "ERR_ATTACK_STUNNED"),
@@ -497,8 +495,8 @@ const ATTACK_FLAG_REFUSALS: [(u32, &str); 4] = [
 ];
 
 /// Phase A of the shared attack-start validator `0x612df0` — **the actor's own eligibility**
-/// (wow-re `object-layer/scratch/pet-command-validators.md` §2, carved 2026-08-05; it supersedes
-/// the mounted-only fragment decision 0481 built from the one gate that was known then).
+/// (it supersedes the mounted-only fragment decision 0481 built from the one gate that was known
+/// then).
 ///
 /// `0x612df0(ecx = actor, &outGuid)` is ONE function with three call sites, and **the actor is
 /// whoever the caller passes in `ecx`** — the player for the melee attack-start router `0x6131aa`,
@@ -516,7 +514,7 @@ const ATTACK_FLAG_REFUSALS: [(u32, &str); 4] = [
 /// `dead` is `0x605f30(actor)`, which for any non-player actor — a pet never carries the player
 /// typemask bit — degenerates to exactly `health <= 0`. Its further leg for a *player* actor
 /// (`[[obj+0xe68]+8]` bit 4, reached only when health is positive, so plainly the ghost state) is
-/// byte-read but unnamed in wow-re's note, so it is left to the caller: pass `dead` yourself when
+/// byte-read but its name is unconfirmed, so it is left to the caller: pass `dead` yourself when
 /// you know more than the health field does.
 pub(crate) fn attack_actor_refusal(
     actor: Option<&ObjectStore>,
@@ -533,7 +531,7 @@ pub(crate) fn attack_actor_refusal(
 
 /// The same ladder **without the message** — which condition blocks the swing, or `None`.
 ///
-/// It exists because `0x612df0` is not on every attack-start path, and 1851's §5 pinned which:
+/// It exists because `0x612df0` is not on every attack-start path, and decision 1851 pinned which:
 /// its three callers image-wide are the pet-attack command (`0x4bd40d`), the Attack
 /// action/keybind (`0x6131aa`) and TryCast (`0x6e4efb`) — and **not** the world right-click.
 /// That click runs `0x60bea0` → `0x60c247 call 0x5ecb70`, whose whole extent
@@ -576,8 +574,8 @@ pub(crate) fn attack_actor_blocked(
     Some(key)
 }
 
-/// The ref's pre-send totem/reagent possession check — `CheckReagentsAndTotems 0x6e4000`,
-/// byte-verified (decision 0552; wow-re `cast-fail-strings.md` "Loose end 2"): TryCast runs it
+/// The ref's pre-send totem/reagent possession check — `CheckReagentsAndTotems 0x6e4000`
+/// (decision 0552): TryCast runs it
 /// for EVERY cast path (action bar, Lua, the GameObject-use opener) **before any packet is
 /// built**. Totems first (2 slots, a bag **presence** test — the Mining Pick / Skinning Knife /
 /// Thieves' Tools tools), then reagents (8 slots, a bag **count** test). The first failing slot
@@ -591,16 +589,16 @@ pub(crate) fn reagent_totem_refusal(
     spell_id: u32,
     def: Option<&benilla_formats::SpellDisplay>,
     self_store: Option<&ObjectStore>,
-    items: &crate::items::Items,
+    objects: &crate::net::Objects,
     errors: &mut CastErrors,
 ) -> bool {
     let (Some(d), Some(store)) = (def, self_store) else {
         return false;
     };
     // Totems before reagents — the ref's in-function loop order.
-    let reason = if first_missing_totem(d, store, items).is_some() {
+    let reason = if first_missing_totem(d, store, objects).is_some() {
         0x78
-    } else if first_short_reagent(d, store, items).is_some() {
+    } else if first_short_reagent(d, store, objects).is_some() {
         0x5c
     } else {
         return false;
@@ -615,13 +613,13 @@ pub(crate) fn reagent_totem_refusal(
 pub(super) fn first_missing_totem(
     d: &benilla_formats::SpellDisplay,
     store: &ObjectStore,
-    items: &crate::items::Items,
+    objects: &crate::net::Objects,
 ) -> Option<u32> {
     d.totems
         .iter()
         .copied()
         .filter(|&t| t != 0)
-        .find(|&t| count_of(&store.0, items, t, InventoryScope::CARRIED) == 0)
+        .find(|&t| count_of(&store.0, objects, t, InventoryScope::CARRIED) == 0)
 }
 
 /// The first reagent slot whose owned count falls short — the `0x6e4000` reagent loop's failing
@@ -629,13 +627,13 @@ pub(super) fn first_missing_totem(
 pub(super) fn first_short_reagent(
     d: &benilla_formats::SpellDisplay,
     store: &ObjectStore,
-    items: &crate::items::Items,
+    objects: &crate::net::Objects,
 ) -> Option<u32> {
     d.reagents
         .iter()
         .copied()
         .filter(|&(id, _)| id != 0)
-        .find(|&(id, n)| count_of(&store.0, items, id, InventoryScope::CARRIED) < n)
+        .find(|&(id, n)| count_of(&store.0, objects, id, InventoryScope::CARRIED) < n)
         .map(|(id, _)| id)
 }
 
@@ -817,7 +815,7 @@ mod ui_error_tests {
     }
 
     /// The RUNTIME leg on the real data (the `cast_fail`/mount pattern): every GlobalStrings
-    /// key the lock-refusal toasts (decision 0545, wow-re cursor-system.md §8.8) and the totem
+    /// key the lock-refusal toasts (decision 0545, the USE sender `0x5f33e0`) and the totem
     /// fill can emit resolves in the shipped 1.12 `GlobalStrings.lua`, with the exact ref-quoted
     /// formats — the guard against a typo'd key silently swallowing the red line. Skips without
     /// client data.
@@ -994,7 +992,7 @@ mod attack_actor_tests {
         ] {
             assert!(!g(key).unwrap_or_default().is_empty(), "{key} missing");
         }
-        // The one wow-re quotes from the file, as a spot check that the ids line up with the keys.
+        // One key's text quoted from the file, as a spot check that the ids line up with the keys.
         assert_eq!(g("ERR_ATTACK_DEAD").unwrap(), "Can't attack while dead.");
     }
 }
@@ -1008,6 +1006,12 @@ mod totem_reagent_tests {
     fn store() -> ObjectStore {
         // Empty bags: no pack fields streamed → every count reads 0, everything is "missing".
         ObjectStore(ObjectFields::default())
+    }
+
+    /// The object index the count walks read — nothing streamed, which is the empty-bags pole
+    /// every case here is graded at (2334).
+    fn objects() -> crate::ui_items::TestObjects {
+        crate::ui_items::TestObjects::new()
     }
 
     fn spell(totems: [u32; 2], reagents: [(u32, u32); 8]) -> SpellDisplay {
@@ -1024,7 +1028,7 @@ mod totem_reagent_tests {
     /// `IsActivePlayer` gate) — the cast then goes out for the server to judge.
     #[test]
     fn missing_materials_refuse_with_the_refs_reasons() {
-        let items = crate::items::Items::default();
+        let mut objs = objects();
         let st = store();
         let mining = spell([2901, 0], [(0, 0); 8]);
         let mut errors = CastErrors::default();
@@ -1032,7 +1036,7 @@ mod totem_reagent_tests {
             2575,
             Some(&mining),
             Some(&st),
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert_eq!(errors.0.as_slice(), &[CastFail::local(2575, 0x78)]);
@@ -1045,7 +1049,7 @@ mod totem_reagent_tests {
             130,
             Some(&slow_fall),
             Some(&st),
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert_eq!(errors.0.as_slice(), &[CastFail::local(130, 0x5c)]);
@@ -1056,7 +1060,7 @@ mod totem_reagent_tests {
             1,
             Some(&both),
             Some(&st),
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert_eq!(errors.0.as_slice(), &[CastFail::local(1, 0x78)]);
@@ -1067,21 +1071,21 @@ mod totem_reagent_tests {
             133,
             Some(&plain),
             Some(&st),
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert!(!reagent_totem_refusal(
             2575,
             None,
             Some(&st),
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert!(!reagent_totem_refusal(
             2575,
             Some(&mining),
             None,
-            &items,
+            &objs.get(),
             &mut errors
         ));
         assert!(errors.0.is_empty());
@@ -1091,15 +1095,15 @@ mod totem_reagent_tests {
     /// reagent (against empty bags, the first nonzero of each).
     #[test]
     fn first_failing_slot_is_named() {
-        let items = crate::items::Items::default();
+        let mut objs = objects();
         let st = store();
         let mut reagents = [(0, 0); 8];
         reagents[1] = (17056, 1);
         let d = spell([0, 7005], reagents);
-        assert_eq!(first_missing_totem(&d, &st, &items), Some(7005));
-        assert_eq!(first_short_reagent(&d, &st, &items), Some(17056));
+        assert_eq!(first_missing_totem(&d, &st, &objs.get()), Some(7005));
+        assert_eq!(first_short_reagent(&d, &st, &objs.get()), Some(17056));
         let none = spell([0, 0], [(0, 0); 8]);
-        assert_eq!(first_missing_totem(&none, &st, &items), None);
-        assert_eq!(first_short_reagent(&none, &st, &items), None);
+        assert_eq!(first_missing_totem(&none, &st, &objs.get()), None);
+        assert_eq!(first_short_reagent(&none, &st, &objs.get()), None);
     }
 }

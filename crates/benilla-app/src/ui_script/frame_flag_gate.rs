@@ -1,7 +1,7 @@
 //! **The reference's frame FLAGS are the test oracle** — the flag half of decision 0675's "the
 //! reference file is the test oracle", and the gate for the class decision 1739 closed.
 //!
-//! `framexml_diff` guards the *numbers* a transcribed window carries. Nothing guarded its *flags*,
+//! A window's numbers are the stock file's own now. Nothing guarded its *flags*,
 //! and they went quietly wrong at scale: on 2026-08-30 a sweep found **47 frames** the reference
 //! marks `toplevel` and ours did not (so no window ever came to the front), **23** the reference
 //! makes mouse-interactive and ours did not (so a click on a window's own background fell through
@@ -14,8 +14,8 @@
 //! **Our side is read from the ENGINE, never from our XML.** An attribute-vs-attribute diff is
 //! precisely what let the class hide, twice over: benilla renames templates (`ChatFrameTemplate` →
 //! `BenillaChatFrameTemplate`), so a name-keyed text diff reports a gap of zero on a window that is
-//! entirely missing the flag; and the `<Scripts>` **auto-enable** law (wow-re
-//! `ui/scratch/scripts-auto-enable.md` §1, VERIFIED — an `<OnEnter>`/`<OnLeave>`/`<OnMouseDown>`/
+//! entirely missing the flag; and the `<Scripts>` **auto-enable** law (an
+//! `<OnEnter>`/`<OnLeave>`/`<OnMouseDown>`/
 //! `<OnMouseUp>`/`<OnDragStart>` reaches the same enable primitive `0x76af00(2,-1)` the attribute
 //! does) makes `enableMouse=` a poor proxy for whether the frame actually takes the mouse. Asking
 //! the loaded engine — `IsToplevel()`, `IsMouseEnabled()`, `GetID()`, `GetParent()` — is immune to
@@ -71,11 +71,10 @@
 //! can hide a divergence, never invent one — so nothing it misses turns into a false failure. It
 //! would be a `KNOWN` entry's reason if any frame still needed one.
 //!
-//! The whole module skips cleanly with no install — `_extracted_framexml/` is a gitignored
-//! Blizzard asset, like every other client-data test here.
+//! The whole module skips cleanly with no install — the reference corpus is read off the
+//! player's own patch chain, like every other client-data test here.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
 
 use benilla_ui::framexml::{self, Element, TopLevel};
 
@@ -104,7 +103,7 @@ const FRAME_TAGS: &[&str] = &[
 ];
 
 /// The five `<Scripts>` handler names that auto-enable the MOUSE kind, and only those five
-/// (wow-re `ui/scratch/scripts-auto-enable.md` §1's kind-2 OR-chain, `0x769fb7`..`0x76a022`).
+/// (the kind-2 OR-chain, `0x769fb7`..`0x76a022`).
 /// `OnDragStop`/`OnReceiveDrag` bind a slot and trip no enable — they are deliberately absent.
 const MOUSE_HANDLERS: &[&str] = &[
     "OnEnter",
@@ -232,34 +231,54 @@ const KNOWN: &[Known] = &[
     // window is the reference's own now, scroll children and all.
 ];
 
-/// The extracted reference FrameXML directory, or `None` when the install isn't there.
-fn reference_dir() -> Option<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../WoW/_extracted_framexml");
-    dir.is_dir().then_some(dir)
+/// Every reference FrameXML document, read off the player's own patch chain in the client's
+/// load order: the files `FrameXML.toc` lists, and what each `<Include>`s, each once. `None`
+/// without an install. Off the chain, never an extracted folder, so the gate is armed on any
+/// machine with the install rather than on the one that happened to extract it.
+fn reference_documents() -> Option<Vec<framexml::ParsedDocument>> {
+    let data = benilla_formats::wow_data()?;
+    let chain = benilla_formats::open_chain(&data).ok()?;
+    let toc = chain.read("Interface\\FrameXML\\FrameXML.toc").ok()?;
+    let toc = benilla_ui::toc::Toc::parse(&benilla_ui::source::decode(&toc));
+    let mut queue: Vec<String> = toc
+        .files
+        .iter()
+        .filter(|f| f.to_ascii_lowercase().ends_with(".xml"))
+        .map(|f| format!("Interface\\FrameXML\\{f}"))
+        .collect();
+    let mut seen = HashSet::new();
+    let mut docs = Vec::new();
+    while !queue.is_empty() {
+        let path = queue.remove(0);
+        if !seen.insert(path.to_ascii_lowercase()) {
+            continue;
+        }
+        let Ok(bytes) = chain.read(&path) else {
+            continue;
+        };
+        // Blizzard ships a UTF-8 BOM on some of these and stray high bytes in comments; the parse
+        // is what matters, so read lossily rather than refusing the file.
+        let text = String::from_utf8_lossy(&bytes);
+        let Ok(doc) = framexml::parse(text.trim_start_matches('\u{feff}')) else {
+            continue;
+        };
+        let dir = path.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        for item in &doc.items {
+            if let TopLevel::Include(file) = item {
+                queue.push(format!("{dir}\\{file}"));
+            }
+        }
+        docs.push(doc);
+    }
+    Some(docs)
 }
 
 /// Every named *frame* element in the reference corpus, keyed by name — templates and instances
 /// alike, nested `<Frames>` included, `$parent`-relative names excluded (they repeat across
 /// templates and name nothing on their own).
 fn reference_frames() -> Option<HashMap<String, Element>> {
-    let dir = reference_dir()?;
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml")))
-        .collect();
-    paths.sort();
-
     let mut out: HashMap<String, Element> = HashMap::new();
-    for path in paths {
-        // Blizzard ships a UTF-8 BOM on some of these and stray high bytes in comments; the parse
-        // is what matters, so read lossily rather than refusing the file.
-        let bytes = std::fs::read(&path).ok()?;
-        let text = String::from_utf8_lossy(&bytes);
-        let Ok(doc) = framexml::parse(text.trim_start_matches('\u{feff}')) else {
-            continue;
-        };
+    for doc in reference_documents()? {
         for item in &doc.items {
             if let TopLevel::Template(el) | TopLevel::Instance(el) = item {
                 collect_named(el, &mut out);
@@ -315,24 +334,8 @@ fn collect_nesting(
 
 /// The reference's nesting table, built over the same corpus [`reference_frames`] reads.
 fn reference_nesting() -> Option<HashMap<String, Option<String>>> {
-    let dir = reference_dir()?;
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml")))
-        .collect();
-    paths.sort();
-
     let mut out: HashMap<String, Option<String>> = HashMap::new();
-    for path in paths {
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        let text = String::from_utf8_lossy(&bytes);
-        let Ok(doc) = framexml::parse(text.trim_start_matches('\u{feff}')) else {
-            continue;
-        };
+    for doc in reference_documents()? {
         for item in &doc.items {
             if let TopLevel::Template(el) | TopLevel::Instance(el) = item {
                 collect_nesting(el, None, &mut out);
@@ -396,7 +399,7 @@ fn declares_handler(
 }
 
 /// Whether the reference's frame of this name **takes the mouse** once loaded — the three ways
-/// `0x76af00(2, -1)` is reached, per `scripts-auto-enable.md` §1.3: the widget's own ctor, the
+/// `0x76af00(2, -1)` is reached: the widget's own ctor, the
 /// `enableMouse` attribute, or an auto-enabling `<Scripts>` handler.
 fn reference_takes_mouse(name: &str, frames: &HashMap<String, Element>) -> bool {
     let Some(el) = frames.get(name) else {
@@ -436,14 +439,8 @@ fn describe(frame: &str, flag: Flag, ours: &str, theirs: &str) -> String {
 /// `parent="UIParent"` back on `BlackoutWorld` and it names that.
 #[test]
 fn the_shipped_frames_carry_the_references_flags() {
-    // Two gates, because the corpus and the manifest are two assets: the extracted reference
-    // dir below, and the chain `load_default_ui` reads — under `WOW_DATA=` (1451) the first is
-    // still there and the second is not.
     let _data = benilla_formats::wow_data_or_skip!();
-    let Some(reference) = reference_frames() else {
-        eprintln!("skipping: no extracted reference FrameXML (WoW/_extracted_framexml)");
-        return;
-    };
+    let reference = reference_frames().expect("the reference FrameXML off the player's chain");
     let nesting = reference_nesting().expect("the same corpus the frames came from");
     assert!(
         reference.len() > 500,

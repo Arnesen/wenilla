@@ -4,9 +4,9 @@
 //!
 //! ## Why this exists
 //!
-//! 1.12's own FrameXML never touches the API — `grep -c FontObject` over
-//! `wow-5875-re/WoW/_extracted_framexml/*.lua` is **0** — so the whole surface is addon-facing, and
-//! the corpus (`/Users/sam/dev/wow-addons-vanilla`, 218 addons) is where the demand is:
+//! 1.12's own FrameXML never touches the API — `grep -c FontObject` over the reference
+//! FrameXML's own `.lua` is **0** — so the whole surface is addon-facing, and
+//! the addon corpus (`benilla_formats::addon_corpus`, 218 addons) is where the demand is:
 //!
 //! | call shape | sites | note |
 //! |---|---|---|
@@ -20,10 +20,10 @@
 //!
 //! ## The method surface, and where it came from
 //!
-//! §5-verified in wow-re, `system/ui/scratch/font-object-lua-surface.md` (landed `0193861a`). The
-//! Font method table is `.data 0x87c7c8` with **22 entries** — the count read from `mov edx,0x16`
-//! at `0x7a10d5`, not from a run-length scan, which merges neighbouring tables and reports a bogus
-//! 54. Its lookup `0x7a1100` has **no base-class fallback**, so 22 is the entire surface:
+//! The Font method table is `.data 0x87c7c8` with **22 entries** — the count read from `mov
+//! edx,0x16` at `0x7a10d5`, not from a run-length scan, which merges neighbouring tables and
+//! reports a bogus 54. Its lookup `0x7a1100` has **no base-class fallback**, so 22 is the entire
+//! surface:
 //! `GetObjectType · IsObjectType · GetName · SetFontObject · GetFontObject · CopyFontObject ·
 //! SetFont · GetFont · SetAlpha · GetAlpha · SetTextColor · GetTextColor · SetShadowColor ·
 //! GetShadowColor · SetShadowOffset · GetShadowOffset · SetSpacing · GetSpacing · SetJustifyH ·
@@ -134,8 +134,7 @@ fn name_of(this: &Table) -> mlua::Result<String> {
 /// `None` for the nil form (clear the link).
 ///
 /// The reference's own usage string settles the shape — `.rdata 0x87c5cc` reads verbatim
-/// `Usage: %s:SetFontObject(font or "font" or nil)` (wow-re
-/// `system/ui/scratch/font-object-lua-surface.md`, §5-verified). So all three are real: the object
+/// `Usage: %s:SetFontObject(font or "font" or nil)`. So all three are real: the object
 /// (3,180 of the corpus's 3,186 sites), the name string (our own shipped `assets/ui` plus 6 corpus
 /// sites), and nil.
 ///
@@ -388,8 +387,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // **An unset Font answers `(nil, 0, "")`, all three ctor-determined** — `0x783a40` writes
     // `[esi+0x48]` and `[esi+0x4c]` from a zeroed register, and its `0x41e3a0(NULL)` stores the
     // shared empty record whose `char*` is NULL, which `lua_pushstring` turns into nil. So the
-    // height is the NUMBER zero, not nil (wow-re `font-object-lua-surface.md` §9.3,
-    // §5-cross-checked; decision 2129).
+    // height is the NUMBER zero, not nil (decision 2129).
     m.set(
         "GetFont",
         lua.create_function(|lua, this: Table| {
@@ -403,8 +401,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // ── colour, and the alpha that is its fourth channel ────────────────────────────────────
-    // Shape C on the three channels (`SetTextColor 0x79f4d0`, `2=C 3=C 4=C 5=B`, wow-re
-    // `numeric-arg-coercion-law.md`): a nil or non-number is 0.0, never a raise (1973).
+    // Shape C on the three channels (`SetTextColor 0x79f4d0`, `2=C 3=C 4=C 5=B`): a nil or
+    // non-number is 0.0, never a raise (1973).
     m.set(
         "SetTextColor",
         lua.create_function(
@@ -428,11 +426,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok((c[0], c[1], c[2], c[3]))
         })?,
     )?;
-    // SetAlpha/GetAlpha on a FontInstance are its text colour's alpha channel, not a separate
-    // slot: wow-re's field map gives a FontInstance exactly one colour word (`FONTINSTANCE+0x058
-    // textColor`, a packed CImVector) and no alpha field of its own, so there is nowhere else for
-    // an alpha to live. Zero corpus sites; implemented because a duck-typed `if f.SetAlpha` should
-    // find it and because the semantics follow from the storage rather than from a guess.
+    // SetAlpha/GetAlpha on a FontInstance are its text colour's alpha channel, not a separate slot:
+    // a FontInstance has exactly one colour word (`FONTINSTANCE+0x058 textColor`, a packed
+    // CImVector) and no alpha field of its own, so there is nowhere else for an alpha to live. Zero
+    // corpus sites; implemented because a duck-typed `if f.SetAlpha` should find it and because the
+    // semantics follow from the storage rather than from a guess.
     m.set(
         "SetAlpha",
         lua.create_function(|lua, (this, a): (Table, f32)| {
@@ -453,8 +451,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetShadowColor",
         lua.create_function(
-            // Shape C on r, g, b (`Font:SetShadowColor 0x79f730`, `2=C 3=C 4=C 5=B`, wow-re
-            // `numeric-arg-coercion-law.md`) — bare `lua_tonumber`, no gate, never raises.
+            // Shape C on r, g, b (`Font:SetShadowColor 0x79f730`, `2=C 3=C 4=C 5=B`) — bare
+            // `lua_tonumber`, no gate, never raises.
             |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
                 let (r, g, b) = (
                     crate::script::object::as_f32(&r),
@@ -550,14 +548,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    lua.set_named_registry_value(REG_FONT_METHODS, m)?;
-
     let meta = lua.create_table()?;
-    let index = lua.create_function(|lua, (_this, key): (Table, Value)| {
-        let methods: Table = lua.named_registry_value(REG_FONT_METHODS)?;
-        methods.get::<Value>(key)
-    })?;
-    meta.set("__index", index)?;
+    // **`__index` is the method TABLE, not a dispatcher function** (decision 2310). A Rust
+    // `__index` turns every `fo.GetFont` — a plain table index in the source — into a Lua→Rust→Lua
+    // round trip plus a named-registry string lookup; measured at ~200 ns against ~9 ns for the
+    // table form, on a path every widget call in the client begins with. The table is mutated in
+    // place by nothing after this point, so pointing at it cannot go stale.
+    meta.set("__index", m.clone())?;
+    lua.set_named_registry_value(REG_FONT_METHODS, m)?;
     lua.set_named_registry_value(REG_FONT_META, meta)?;
 
     lua.globals()

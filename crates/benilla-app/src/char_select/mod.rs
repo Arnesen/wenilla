@@ -154,11 +154,14 @@ impl Plugin for CharSelectPlugin {
                         input::rotate_model,
                         debug_select_dialog,
                         dialog::drive_delete_dialog,
+                        // Ahead of the dialog driver, so a refused delete is on screen the frame
+                        // its answer lands rather than the next.
+                        delete_result,
                         // The reference's one `GlueDialog` (`crate::glue::dialog`), which on this
-                        // screen carries the refused character login. Both glue screens run the
-                        // same system over the same resource; what a press *means* is answered
-                        // per-screen, and an `Error` — the only kind reachable here — needs no
-                        // answer at all.
+                        // screen carries the refused character login and the refused delete. Both
+                        // glue screens run the same system over the same resource; what a press
+                        // *means* is answered per-screen, and an `Error` — the only kind reachable
+                        // here — needs no answer at all.
                         crate::glue::dialog::drive_glue_dialog,
                         // Before the list refresh, and before `select_input` reads a click that
                         // landed on the panel rather than the screen (decision 1196).
@@ -168,7 +171,6 @@ impl Plugin for CharSelectPlugin {
                         refresh::refresh_list,
                         refresh::refresh_banner_and_buttons,
                         refresh::feed_glue_preview,
-                        delete_result,
                         debug_select_shot,
                     )
                         .chain()
@@ -210,16 +212,16 @@ pub(crate) struct Roster {
     ///
     /// The ref's `SelectCharacter` zeroes the select facing **unconditionally**: `0x472950`'s
     /// `mov ds:0xb4217c, 0` sits one instruction *above* the already-built discriminator, so it
-    /// dominates both legs, and the merged tail re-applies it geometrically (wow-re
-    /// `glue/scratch/glue-preview-facing-law.md`, 1533). A counter rather than change-detection on
-    /// `selected`, because the engine re-squares on a *re*-selection of the same index too — which
-    /// is exactly what a roster refresh does, calling it with the index it already holds.
+    /// dominates both legs, and the merged tail re-applies it geometrically (1533). A counter
+    /// rather than change-detection on `selected`, because the engine re-squares on a
+    /// *re*-selection of the same index too — which is exactly what a roster refresh does, calling
+    /// it with the index it already holds.
     ///
     /// **The click is the one caller that does not reach it**, and the gate is in the stock Lua
-    /// rather than in the engine — see [`Roster::click_row`] and decision 2194. The caller census
-    /// is wow-re `glue/scratch/select-character-caller-gate.md`: of the ten Lua call sites only the
-    /// two click handlers are gated, and of `0x472740`'s four C callers two are the roster teardown
-    /// passing `-1` (so `0x472950` exits above the reset) — every ungated path re-squares.
+    /// rather than in the engine — see [`Roster::click_row`] and decision 2194. Of the ten Lua call
+    /// sites only the two click handlers are gated, and of `0x472740`'s four C callers two are the
+    /// roster teardown passing `-1` (so `0x472950` exits above the reset) — every ungated path
+    /// re-squares.
     pub(super) select_seq: u64,
     /// The guid we answered the IO thread with; `Some` = a login is requested/live.
     pub(super) pending_pick: Option<u64>,
@@ -303,9 +305,8 @@ impl Roster {
     /// So the row you are already on is never re-selected from a click, and the facing zero
     /// [`Self::select`] owes never fires for it: the angle you dragged the character to survives
     /// clicking it again. Decision 2194, correcting 1533 — the engine function is unconditional as
-    /// recorded (verified again, three ways, in wow-re
-    /// `glue/scratch/select-character-caller-gate.md`), but the click never reaches it: the binding
-    /// has exactly one live call site, and the two handlers that lead to it both gate.
+    /// recorded (`0x472740`), but the click never reaches it: the binding has exactly one live call
+    /// site, and the two handlers that lead to it both gate.
     pub(super) fn click_row(&mut self, row: usize) {
         if self.selected != Some(row) {
             self.select(Some(row));
@@ -374,7 +375,7 @@ impl Roster {
 
 // ── The remembered character (`lastCharacterIndex`, decision 1622) ───────────────────────────────
 
-/// The CVar the select screen remembers you by — a **real 1.12 CVar**, byte-verified in wow-re
+/// The CVar the select screen remembers you by — a **real 1.12 CVar**
 /// (registered at `0x402d93`, name `0x82e8f8`, help "Last character selected", default `"0"`,
 /// pointer cached at `[0x882674]`), and written engine-side: no shipped GlueXML names it and the
 /// binary never looks it up by name.
@@ -579,7 +580,7 @@ fn apply_roster_policy(
                     warn!("char select: WOW_CHAR={name} not on this account — showing roster");
                     // A driverless run can never pick a different row itself — parked here it
                     // burns its whole wall-clock. Same home as the login arm's verdict, so the
-                    // marker leg.sh greps for is written in exactly one place (1371, 1769).
+                    // marker a leg runner greps for is written in exactly one place (1371, 1769).
                     if std::env::var_os("WOW_LOGIN_SMOKE").is_none()
                         && crate::run_mode::fatal_when_driverless(&format!(
                             "WOW_CHAR={name} is not on this account"
@@ -668,9 +669,8 @@ fn back_on_login_refused(
 /// **skipping `0x41`**, `CHAR_LOGIN_FAILED`, which is reachable only as the default. So the
 /// tempting `0x3d + byte` is right for four rows and wrong for the rest, and `0` and anything past
 /// `6` are "Login failed" rather than an out-of-bounds read: the `ja` guard precedes the table.
-/// (VERIFIED off `WoW.exe`, cross-checked — wow-5875-re
-/// `system/net/scratch/char-login-failed-law.md`. The strings are the shipped
-/// `GlueStrings.lua:158-166`, quoted here only as the graceful-absence fallback.)
+/// (The strings are the shipped `GlueStrings.lua:158-166`, quoted here only as the
+/// graceful-absence fallback.)
 ///
 /// Both emulators speak this dialect. vmangos sends a bare `1` for all three of its refusal
 /// guards (`PlayerLoading() || GetPlayer() || !guid.IsPlayer()`), so **every** refusal from our
@@ -723,17 +723,65 @@ fn back_on_logout(
     }
 }
 
-/// Surface a refused delete (the roster refresh already reflects a success — the row vanishes).
-/// A refusal is realistically unreachable on vmangos (any enumerated character deletes), so a log
-/// line honest-flags it rather than growing an error dialog nothing can trigger.
-fn delete_result(mut msgs: MessageReader<CharActionResultMessage>) {
+/// Surface a refused delete in the glue dialog; a success needs nothing here, since `net::io`
+/// re-enumerates before the result and the row is already gone.
+///
+/// **A refusal is reachable, and was silent.** vmangos refuses to delete a guild master
+/// (`HandleCharDeleteOpcode`: `GetGuildByLeader` → `CHAR_DELETE_FAILED`), and this used to be a
+/// `warn!` under a comment calling the refusal unreachable — so the player pressed Delete, typed
+/// DELETE, and watched nothing happen.
+///
+/// The reference's shape, read off `WoW.exe`: `SMSG_CHAR_DELETE 0x5b45c0` hands the result byte to
+/// `0x5ab0e0`, which passes it **straight through** as the operation status
+/// (`SetStatus(byte == 0x39, byte)`); `CGlueMgr::Update`'s `screenState == 6` arm (`0x46c14e`)
+/// then, on a completed-and-failed operation, fires `OPEN_STATUS_DIALOG("OKAY", text)`
+/// (`0x46c177` pushes `"OKAY"` `0x837084`) with the status text the key table `0x85cae8` names —
+/// the one-button dialog [`crate::glue::dialog::GlueDialog::open_error`] is.
+fn delete_result(
+    mut msgs: MessageReader<CharActionResultMessage>,
+    mut dialog: ResMut<crate::glue::dialog::GlueDialog>,
+    strings: Option<Res<GlueStrings>>,
+) {
+    let empty = GlueStrings::default();
+    let strings = strings.as_deref().unwrap_or(&empty);
     for msg in msgs.read() {
-        if msg.action == CharAction::Delete
-            && msg.code != benilla_protocol::messages::CHAR_DELETE_SUCCESS
-        {
-            warn!("char select: delete refused (code {:#04x})", msg.code);
+        if msg.action != CharAction::Delete {
+            continue;
+        }
+        if let Some(text) = char_delete_refusal_text(strings, msg.code) {
+            info!(
+                "char select: delete refused (code {:#04x}) — {text}",
+                msg.code
+            );
+            dialog.open_error(text);
         }
     }
+}
+
+/// A `SMSG_CHAR_DELETE` result byte → the sentence the refusal dialog says, or `None` for the
+/// success (`0x39`), which the refreshed roster says instead.
+///
+/// The keys are the `CHAR_DELETE_*` block of the reference's status-key table `0x85cae8`
+/// (`0x38..=0x3b`), numbered exactly as vmangos's `ResponseCodes` (`SharedDefines.h`). vmangos
+/// sends only two of them: `0x39` on success and `0x3a` for a guild master; its three other
+/// refusals (a character still loaded, one not found, one on another account) send nothing at all.
+///
+/// **The default arm is benilla's, not the reference's.** The reference indexes the whole 83-row
+/// table with the byte, so an out-of-block byte would read some other family's sentence (and one
+/// past `0x52` would read `"(%i)"`); that table is not transcribed here, and no server we speak to
+/// sends such a byte, so anything unnamed says the block's own generic failure.
+pub(crate) fn char_delete_refusal_text(strings: &GlueStrings, code: u8) -> Option<&str> {
+    let (key, fallback): (&str, &str) = match code {
+        benilla_protocol::messages::CHAR_DELETE_SUCCESS => return None,
+        0x38 => ("CHAR_DELETE_IN_PROGRESS", "Deleting character"),
+        0x3B => (
+            "CHAR_DELETE_FAILED_LOCKED_FOR_TRANSFER",
+            "Your character is currently locked as part of the paid character transfer process.",
+        ),
+        // `0x3a` — the guild-master refusal — and the default arm above.
+        _ => ("CHAR_DELETE_FAILED", "Character deletion failed"),
+    };
+    Some(strings.text(key, fallback))
 }
 
 /// Glue-flow smoke (`WOW_GLUE_ROUNDTRIP=1`, decision 0423): once a real roster is up, bounce
@@ -1383,6 +1431,73 @@ mod tests {
             "CHAR_LOGIN_NO_CHARACTER",
             "CHAR_LOGIN_LOCKED_FOR_TRANSFER",
             "CHAR_LOGIN_FAILED",
+        ] {
+            assert!(map.contains_key(key), "{key} is not in the shipped table");
+        }
+    }
+
+    /// **A refused delete is said, not swallowed.** vmangos refuses to delete a guild master with
+    /// `CHAR_DELETE_FAILED` (0x3a); the screen used to `warn!` into the log and show nothing, so
+    /// the confirmed delete just silently did not happen. The reference raises its one-button
+    /// glue dialog with the `CHAR_DELETE_*` status text (`CGlueMgr::Update`'s `screenState == 6`
+    /// arm). A success raises nothing — the refreshed roster is the answer.
+    #[test]
+    fn a_refused_delete_raises_the_glue_dialog() {
+        use crate::glue::dialog::{DialogKind, GlueDialog};
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<CharActionResultMessage>()
+            .init_resource::<GlueDialog>()
+            .add_systems(Update, delete_result);
+
+        app.world_mut().write_message(CharActionResultMessage {
+            action: CharAction::Delete,
+            code: benilla_protocol::messages::CHAR_DELETE_SUCCESS,
+        });
+        app.update();
+        assert!(
+            !app.world().resource::<GlueDialog>().is_open(),
+            "a success is answered by the roster, not a dialog"
+        );
+
+        app.world_mut().write_message(CharActionResultMessage {
+            action: CharAction::Delete,
+            code: 0x3A,
+        });
+        app.update();
+        let dialog = app.world().resource::<GlueDialog>();
+        assert_eq!(dialog.kind, Some(DialogKind::Error), "the OKAY dialog");
+        // No GlueStrings in this App: the fallback literal. The shipped sentence is asserted
+        // against the real chain below.
+        assert_eq!(dialog.text, "Character deletion failed");
+    }
+
+    /// The delete refusals resolve to the sentences 1.12 ships, off the player's own chain — and
+    /// every key named is a REAL key, so a matching fallback cannot hide a missing one. Skips
+    /// without client data.
+    #[test]
+    fn every_delete_result_resolves_in_the_real_glue_strings() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let strings = crate::glue_strings::table_from_chain(&mut chain);
+
+        assert_eq!(char_delete_refusal_text(&strings, 0x39), None);
+        assert_eq!(
+            char_delete_refusal_text(&strings, 0x3A),
+            Some("Character deletion failed")
+        );
+        assert_eq!(
+            char_delete_refusal_text(&strings, 0x3B),
+            Some(
+                "Your character is currently locked as part of the paid character transfer \
+                 process."
+            )
+        );
+        let map = strings.into_map();
+        for key in [
+            "CHAR_DELETE_IN_PROGRESS",
+            "CHAR_DELETE_FAILED",
+            "CHAR_DELETE_FAILED_LOCKED_FOR_TRANSFER",
         ] {
             assert!(map.contains_key(key), "{key} is not in the shipped table");
         }

@@ -40,6 +40,7 @@ mod input;
 mod language;
 /// `LoggingChat`/`LoggingCombat` — the two log files `/chatlog` and `/combatlog` toggle.
 mod logging;
+mod net;
 /// The `AUTO_JOIN_GUILD_CHANNEL` cascade (decision 2144) — the one place the client joins or
 /// leaves `GuildRecruitment - City` on its own.
 mod recruitment;
@@ -76,6 +77,7 @@ pub(crate) struct UiChatPlugin;
 
 impl Plugin for UiChatPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.add_observer(combat::on_cvar);
         app.init_resource::<ChatLog>()
             .init_resource::<away::AfkMirror>()
@@ -164,7 +166,7 @@ impl Plugin for UiChatPlugin {
             // the queue for the frames after it, and this is what holds it for that one.
             //
             // **…and after the world-enter cascade, because that is the reference's own order**
-            // (decision 2221, carved in wow-5875-re for this — their `ca5f7d38`). The real client does not print
+            // (decision 2221). The real client does not print
             // login chat when it arrives either: `[0x8435fc]` is a latch that ships statically
             // `1`, so every `SMSG_MESSAGECHAT` in the login burst is queued into
             // `__AUPENDINGCHAT__` (`0x49db5c`/`0x49db62` → `0x49cae0`) instead of displayed. It is
@@ -173,7 +175,7 @@ impl Plugin for UiChatPlugin {
             // call drains the queue. `SMSG_GUILD_EVENT` 0x02 has no such latch: it fires
             // `GUILD_MOTD` synchronously in its own handler (`0x5e7288`). So the reference paints
             // the guild line FIRST and the realm's welcome lines after it, inverting the wire
-            // order — and that is what the report asked for ("before server messages").
+            // order.
             //
             // Our held `ChatLog` queue IS that latch: the early return above `mem::take` is what
             // keeps the login burst waiting. This says when it drains. Without these two edges
@@ -281,7 +283,7 @@ impl Plugin for UiChatPlugin {
 /// **The chat module's session end** — what the reference gets for free by destroying its Lua
 /// state, and we have to do by hand until that teardown lands (1288).
 ///
-/// `shutdown_ui_state`'s own doc carves the reference's logout tail: `PLAYER_LEAVING_WORLD` →
+/// `shutdown_ui_state`'s own doc records the reference's logout tail: `PLAYER_LEAVING_WORLD` →
 /// `PLAYER_LOGOUT` → the saved files → **destroy the Lua state**. That last step is the one
 /// `crate::ui_script::IngameUiLoaded` exists to stand in for; while it does, every window in the
 /// VM keeps its contents across a character switch. The director saw it as the previous

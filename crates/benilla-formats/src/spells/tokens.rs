@@ -1,7 +1,7 @@
 //! The spell-description **$-token engine** (decision 0274 P2) — the substitution the real
 //! client runs over `Spell.dbc` Description/AuraDescription text (and item trigger lines), with
-//! the value formulas byte-verified by the 0276 fold-back (wow-re `tooltip-content-law.md`,
-//! `0x5075f0 → 0x507710`, the effect-value core `0x6e3800`):
+//! the value formulas from the 0276 fold-back
+//! (`0x5075f0 → 0x507710`, the effect-value core `0x6e3800`):
 //!
 //! - `$s` (and `$m`/`$M`): `MIN = BasePoints + BaseDice`, `MAX = BasePoints + DieSides·BaseDice`
 //!   — the general n-dice rule (the common `BaseDice = 1` case reduces to `base+1 … base+dieSides`).
@@ -13,7 +13,7 @@
 //! - `$o`: the over-time total `perTick · duration / period` (period = `EffectAmplitude`,
 //!   defaulting 5000 ms when 0 — the byte default).
 //! - `$d`: the duration via `SpellDuration.dbc` — "until cancelled" when permanent; whole
-//!   seconds/minutes/hours text (INTERIM shape pending the `0x52fa50` formatter's pin).
+//!   seconds/minutes/hours text (INTERIM shape pending the `0x52fa50` formatter).
 //! - `$t` period seconds · `$a` radius yards (`SpellRadius.dbc`) · `$h` proc chance · `$x` chain
 //!   targets · `$e` the multiple-value float · `$r` range yards · `$u` stack/charge count
 //!   (unparsed — leaves the token in place, a visible fold-back flag).
@@ -75,8 +75,8 @@ fn duration_ms(d: &SpellDisplay, ctx: &TokenContext) -> Option<i64> {
 /// exactly the trap decision 2045 describes: a text search finds a key, and it is the wrong key
 /// for this call site. It also had no days arm at all, so a two-day aura read "48 hrs".
 ///
-/// The ladder is the one `0x52fa50` walks (byte-pinned for the aura line as wow-re §3-BUFF, and
-/// implemented for that surface in `benilla_ui::script::tooltip::duration_text`) and the plural
+/// The ladder is the one `0x52fa50` walks for the aura line (implemented for that surface in
+/// `benilla_ui::script::tooltip::duration_text`) and the plural
 /// pick is `GetText`'s: the bare token at exactly one, the `_P1` twin otherwise. Only HOURS ships
 /// a twin in this family, so the other three fall back to the bare token — which is the same
 /// fallback `plural_template` takes, and the reason `INT_SPELL_DURATION_MIN` reads "1 min" and
@@ -283,13 +283,17 @@ pub fn substitute(text: &str, spell: &SpellDisplay, ctx: &TokenContext) -> Strin
         };
         let letter = letter_b as char;
         if !letter.is_ascii_alphabetic() {
-            out.push_str(&text[start..i + 1]);
-            i += 1;
+            // Not a token: keep `$` and the char after it, raw. `i + 1` would cut a multi-byte
+            // char in half (`$é` in a localized or patched Spell.dbc), so step by its width.
+            let ch_len = utf8_len(letter_b);
+            out.push_str(&text[start..i + ch_len]);
+            i += ch_len;
             continue;
         }
         i += 1;
         let slot = if i < bytes.len() && bytes[i].is_ascii_digit() {
-            let s = (bytes[i] - b'1') as usize;
+            // `$s0` is a 1-based slot below 1: saturate to slot 0 rather than wrap.
+            let s = bytes[i].saturating_sub(b'1') as usize;
             i += 1;
             s.min(2)
         } else {
@@ -503,5 +507,25 @@ mod tests {
             substitute("Returns you to $z.", &d, &unbound),
             "Returns you to $z."
         );
+    }
+
+    /// `$` before a non-ASCII char is not a token, and the raw pass-through must cut on the
+    /// char's boundary: `&text[start..i + 1]` ended inside the `é` and panicked on every tooltip
+    /// of a localized or private-server Spell.dbc that carried one.
+    #[test]
+    fn a_dollar_before_a_multibyte_char_passes_through_on_the_char_boundary() {
+        let durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        let d = SpellDisplay {
+            effect_base_points: [13, 24, 0],
+            effect_base_dice: [1, 0, 0],
+            effect_die_sides: [9, 0, 0],
+            ..Default::default()
+        };
+        let c = ctx(&durations, &radii, &none_lookup);
+        assert_eq!(substitute("coûte $é or $…!", &d, &c), "coûte $é or $…!");
+        assert_eq!(substitute("$é", &d, &c), "$é");
+        // A slot digit below the 1-based range (`$s0`) reads as slot 0 rather than wrapping.
+        assert_eq!(substitute("$s0", &d, &c), "<14..22>");
     }
 }

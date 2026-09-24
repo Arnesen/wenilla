@@ -1,5 +1,5 @@
-//! `--equip-pack-slot`: `CMSG_AUTOEQUIP_ITEM` on a 1-based backpack slot; require a server reaction
-//! (the guid landing in an equipment INV slot, or a decoded refusal), then swap it home.
+//! `--equip-pack-slot`: `CMSG_AUTOEQUIP_ITEM` on a 1-based backpack slot must land the item in an
+//! equipment slot or draw a refusal; the item is then swapped home.
 
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,6 @@ impl Probe for EquipPackSlot {
         let session = &mut *cx.session;
         let n = self.n;
 
-        // --equip-pack-slot: auto-equip a real bag item and require a server reaction.
         let sf = world
             .self_fields
             .as_mut()
@@ -36,7 +35,7 @@ impl Probe for EquipPackSlot {
         session.auto_equip_item(255, 23 + n0)?;
         let drain_until = Instant::now() + Duration::from_secs(5);
         let mut verdict: Option<String> = None;
-        // The equipment INV slot the item landed in (Some once equipped) — so we can restore it.
+        // The equipment slot the item landed in, for the restore.
         let mut equipped_slot: Option<u8> = None;
         while Instant::now() < drain_until && verdict.is_none() {
             let Ok(msg) = session.recv() else { continue };
@@ -67,10 +66,8 @@ impl Probe for EquipPackSlot {
         let v = verdict.context("no reaction to CMSG_AUTOEQUIP_ITEM within 5s")?;
         println!("✅ auto-equip: {v}.");
 
-        // Restore: if we actually equipped it, SWAP_INV_ITEM the equipment slot back to the source
-        // backpack slot — moves the item home (and whatever it displaced back into place), leaving
-        // the character exactly as found. (The wire's both-slots-on-the-player addressing spans
-        // equipment 0-18 ↔ backpack 23-38.)
+        // Swap the equipment slot back to the backpack slot, which also returns anything it
+        // displaced. Player slots: equipment 0-18, backpack 23-38.
         if let Some(slot) = equipped_slot {
             println!(
                 "restoring: CMSG_SWAP_INV_ITEM equipment slot {slot} → backpack slot {}",

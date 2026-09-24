@@ -1,17 +1,6 @@
-//! The guild family's `WorldWriter` sends — the two cache asks, the invitation dance, the member
-//! verbs, and rank administration.
-//!
-//! Three shapes of the family are worth knowing before calling any of these:
-//!
-//! - **Almost nothing is acked individually.** Promote, demote, remove, the leader handover, the
-//!   MOTD, both notes and every rank verb answer with a fresh `SMSG_GUILD_ROSTER` (and, for the
-//!   rank verbs, an `SMSG_GUILD_QUERY_RESPONSE` too) — the server re-sends the whole snapshot
-//!   rather than a delta. A refusal instead comes back as `SMSG_GUILD_COMMAND_RESULT`. So the
-//!   caller's model updates when the roster lands, never optimistically at the send.
-//! - **Members are addressed by NAME here**, unlike the friend list's remove-by-guid: every verb
-//!   below that targets a player takes the character name, and the server normalises its case.
-//! - **Rank ids are 0-based with 0 = guild master**, and authority *decreases* as the id rises —
-//!   [`WorldWriter::guild_promote`] moves a member to `rank - 1`.
+//! The guild sends. Members are addressed by name, and rank 0 is the guild master. The server acks
+//! a member or rank change with a whole fresh `SMSG_GUILD_ROSTER` and refuses one with
+//! `SMSG_GUILD_COMMAND_RESULT`, so state updates when the roster lands, not at the send.
 
 use anyhow::Result;
 
@@ -20,67 +9,52 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// Ask for a guild's public identity by id (`CMSG_GUILD_QUERY`) — name, rank names, tabard.
-    /// The ask-once cache fill behind every "which guild is that?": a roster row, a `/who` hit and
-    /// a guild chat line all reference a guild by id alone.
+    /// `CMSG_GUILD_QUERY`: a guild's name, rank names and tabard by id, for the ask-once cache.
     pub fn guild_query(&mut self, guild_id: u32) -> Result<()> {
         self.send(opcode::CMSG_GUILD_QUERY, &messages::guild_query(guild_id))
     }
 
-    /// Found a guild by name (`CMSG_GUILD_CREATE`). vmangos registers this opcode `STATUS_NEVER`:
-    /// on a 1.12 realm founding runs through the charter/petition flow instead, so this send is
-    /// here for completeness of the family and draws no reply.
+    /// `CMSG_GUILD_CREATE`: `STATUS_NEVER` in vmangos, so no reply; guilds are founded by charter.
     pub fn guild_create(&mut self, name: &str) -> Result<()> {
         self.send(opcode::CMSG_GUILD_CREATE, &messages::guild_create(name))
     }
 
-    /// Invite a character into our guild by name (`CMSG_GUILD_INVITE`). They get an
-    /// `SMSG_GUILD_INVITE` popup; we get an `SMSG_GUILD_COMMAND_RESULT` only if it was refused
-    /// (already guilded, ignoring us, wrong faction, no permission).
+    /// `CMSG_GUILD_INVITE`: the invitee gets `SMSG_GUILD_INVITE`; we hear back only on a refusal.
     pub fn guild_invite(&mut self, name: &str) -> Result<()> {
         self.send(opcode::CMSG_GUILD_INVITE, &messages::guild_invite(name))
     }
 
-    /// Accept the guild invitation we are holding (`CMSG_GUILD_ACCEPT`, empty body). Which
-    /// invitation is the server's pending state, not a field — so there is nothing to pass, and
-    /// nothing to get wrong except sending it when no invite is outstanding (a silent no-op).
+    /// `CMSG_GUILD_ACCEPT`, empty: takes the server's pending invite; a silent no-op without one.
     pub fn guild_accept(&mut self) -> Result<()> {
         self.send(opcode::CMSG_GUILD_ACCEPT, &messages::guild_accept())
     }
 
-    /// Turn down the guild invitation we are holding (`CMSG_GUILD_DECLINE`, empty body). The
-    /// inviter is told by `SMSG_GUILD_DECLINE`; we hear nothing back.
+    /// `CMSG_GUILD_DECLINE`, empty: the inviter gets `SMSG_GUILD_DECLINE`; we hear nothing.
     pub fn guild_decline(&mut self) -> Result<()> {
         self.send(opcode::CMSG_GUILD_DECLINE, &messages::guild_decline())
     }
 
-    /// Ask for our guild's founding date and member/account counts (`CMSG_GUILD_INFO`, empty
-    /// body), answered by `SMSG_GUILD_INFO`. A different ask from the roster, sharing no fields.
+    /// `CMSG_GUILD_INFO`, empty: answered by `SMSG_GUILD_INFO`, the founding date and counts.
     pub fn guild_info(&mut self) -> Result<()> {
         self.send(opcode::CMSG_GUILD_INFO, &messages::guild_info())
     }
 
-    /// Ask for the whole guild roster (`CMSG_GUILD_ROSTER`, empty body). The server also pushes
-    /// `SMSG_GUILD_ROSTER` unasked after every change it makes, so this is a refresh — the guild
-    /// pane's opener — and never the only way the roster arrives.
+    /// `CMSG_GUILD_ROSTER`, empty: a refresh; the server also pushes the roster after every change.
     pub fn guild_roster(&mut self) -> Result<()> {
         self.send(opcode::CMSG_GUILD_ROSTER, &messages::guild_roster())
     }
 
-    /// Promote a member one rank (`CMSG_GUILD_PROMOTE`): the server does `rank - 1`, *towards*
-    /// guild master. Answered by a fresh roster, or refused with `RANK_TOO_HIGH_S`/`PERMISSIONS`.
+    /// `CMSG_GUILD_PROMOTE`: the server moves the member to `rank - 1`, toward guild master.
     pub fn guild_promote(&mut self, name: &str) -> Result<()> {
         self.send(opcode::CMSG_GUILD_PROMOTE, &messages::guild_promote(name))
     }
 
-    /// Demote a member one rank (`CMSG_GUILD_DEMOTE`): `rank + 1`, away from guild master.
+    /// `CMSG_GUILD_DEMOTE`: `rank + 1`, away from guild master.
     pub fn guild_demote(&mut self, name: &str) -> Result<()> {
         self.send(opcode::CMSG_GUILD_DEMOTE, &messages::guild_demote(name))
     }
 
-    /// Leave our guild (`CMSG_GUILD_LEAVE`, empty body). Refused with
-    /// `(QUIT, LEADER_LEAVE)` while we are the guild master and anyone else remains — hand over
-    /// with [`Self::guild_leader`] first, or [`Self::guild_disband`].
+    /// `CMSG_GUILD_LEAVE`, empty: refused (`LEADER_LEAVE`) for a guild master while others remain.
     pub fn guild_leave(&mut self) -> Result<()> {
         self.send(opcode::CMSG_GUILD_LEAVE, &messages::guild_leave())
     }
@@ -90,32 +64,24 @@ impl WorldWriter {
         self.send(opcode::CMSG_GUILD_REMOVE, &messages::guild_remove(name))
     }
 
-    /// Disband the guild (`CMSG_GUILD_DISBAND`, empty body). Guild master only, and irreversible —
-    /// every member gets a `GE_DISBANDED` event.
+    /// `CMSG_GUILD_DISBAND`, empty: guild master only; every member gets `GE_DISBANDED`.
     pub fn guild_disband(&mut self) -> Result<()> {
         self.send(opcode::CMSG_GUILD_DISBAND, &messages::guild_disband())
     }
 
-    /// Hand the guild to another member (`CMSG_GUILD_LEADER`). Guild master only; both names ride
-    /// back to everyone as a `GE_LEADER_CHANGED` event.
+    /// `CMSG_GUILD_LEADER`: guild master only; everyone gets both names in `GE_LEADER_CHANGED`.
     pub fn guild_leader(&mut self, name: &str) -> Result<()> {
         self.send(opcode::CMSG_GUILD_LEADER, &messages::guild_leader(name))
     }
 
-    /// Set the message of the day (`CMSG_GUILD_MOTD`). Passing `""` clears it — see
-    /// [`messages::guild_motd`] for why we send the one-byte empty cstring rather than an empty
-    /// body, which the server also accepts.
+    /// `CMSG_GUILD_MOTD`: `""` clears the message of the day.
     pub fn guild_motd(&mut self, motd: &str) -> Result<()> {
         self.send(opcode::CMSG_GUILD_MOTD, &messages::guild_motd(motd))
     }
 
-    /// Rewrite one rank's name **and** rights in a single packet (`CMSG_GUILD_RANK`).
-    ///
-    /// There is no partial form: a caller changing only the name must still send the rank's
-    /// current rights, and vice versa. Guild master only; `rights` is ignored and replaced with
-    /// [`messages::guild_rank_right::ALL`] for rank 0; and a `name` over
-    /// [`messages::GUILD_RANK_MAX_LENGTH`] characters gets the session **kicked** by vmangos's
-    /// anticheat rather than refused, so the caller caps it.
+    /// `CMSG_GUILD_RANK`: a rank's name and rights together, with no partial form. Guild master
+    /// only; rank 0 always gets all rights, and a name over [`messages::GUILD_RANK_MAX_LENGTH`]
+    /// gets the session kicked by vmangos, so the caller caps it.
     pub fn guild_rank(&mut self, rank_id: u32, rights: u32, name: &str) -> Result<()> {
         self.send(
             opcode::CMSG_GUILD_RANK,
@@ -123,22 +89,18 @@ impl WorldWriter {
         )
     }
 
-    /// Append a rank at the bottom of the ladder (`CMSG_GUILD_ADD_RANK`). It starts with guild
-    /// chat listen + speak and nothing else. Silently ignored once the guild already has
-    /// [`messages::GUILD_RANKS_MAX_COUNT`] ranks — the reference UI hides the button there.
+    /// `CMSG_GUILD_ADD_RANK`: a new bottom rank with only guild chat rights; ignored at
+    /// [`messages::GUILD_RANKS_MAX_COUNT`] ranks.
     pub fn guild_add_rank(&mut self, name: &str) -> Result<()> {
         self.send(opcode::CMSG_GUILD_ADD_RANK, &messages::guild_add_rank(name))
     }
 
-    /// Delete the **lowest** rank (`CMSG_GUILD_DEL_RANK`, empty body). There is no rank id on the
-    /// wire: it is always the last one, which is why the reference UI only ever offers to remove
-    /// the bottom row. Refused with `RANK_IN_USE` while a member still holds it.
+    /// `CMSG_GUILD_DEL_RANK`, empty: always the lowest rank; refused with `RANK_IN_USE` while held.
     pub fn guild_del_rank(&mut self) -> Result<()> {
         self.send(opcode::CMSG_GUILD_DEL_RANK, &messages::guild_del_rank())
     }
 
-    /// Set a member's public note (`CMSG_GUILD_SET_PUBLIC_NOTE`); needs
-    /// [`messages::guild_rank_right::EDIT_PUBLIC_NOTE`].
+    /// `CMSG_GUILD_SET_PUBLIC_NOTE`: needs [`messages::guild_rank_right::EDIT_PUBLIC_NOTE`].
     pub fn guild_set_public_note(&mut self, name: &str, note: &str) -> Result<()> {
         self.send(
             opcode::CMSG_GUILD_SET_PUBLIC_NOTE,
@@ -146,9 +108,7 @@ impl WorldWriter {
         )
     }
 
-    /// Set a member's officer note (`CMSG_GUILD_SET_OFFICER_NOTE`); needs
-    /// [`messages::guild_rank_right::EDIT_OFFICER_NOTE`]. Note that *seeing* officer notes is a
-    /// separate right — a roster whose officer notes are all empty may mean we cannot view them.
+    /// `CMSG_GUILD_SET_OFFICER_NOTE`: needs [`messages::guild_rank_right::EDIT_OFFICER_NOTE`].
     pub fn guild_set_officer_note(&mut self, name: &str, note: &str) -> Result<()> {
         self.send(
             opcode::CMSG_GUILD_SET_OFFICER_NOTE,
@@ -156,8 +116,7 @@ impl WorldWriter {
         )
     }
 
-    /// Set the guild information text (`CMSG_GUILD_INFO_TEXT`) — the long free-text pane, not the
-    /// MOTD and not `SMSG_GUILD_INFO`'s counts. It rides back on the roster as its `info` field.
+    /// `CMSG_GUILD_INFO_TEXT`: the free-text info pane; it comes back as the roster's `info`.
     pub fn guild_info_text(&mut self, text: &str) -> Result<()> {
         self.send(
             opcode::CMSG_GUILD_INFO_TEXT,

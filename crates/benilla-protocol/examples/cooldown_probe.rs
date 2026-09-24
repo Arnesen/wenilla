@@ -1,19 +1,13 @@
-//! Diagnostic probe: measure the server's ACTUAL cooldown window for Charge (spell 100,
-//! `recoveryTime 0 / category 44 / categoryRecoveryTime 15000`) against the client-rendered
-//! 15 s sweep — the "I can charge before the indicator is up" report.
+//! Diagnostic probe: the server's cooldown window for Charge (spell 100: `recoveryTime 0`,
+//! category 44, `categoryRecoveryTime 15000`) against the client's 15 s sweep. It charges a
+//! Northshire Kobold Vermin (entry 6), then recasts every 200 ms. vmangos checks the cooldown
+//! first in `CheckCast` (`Spell.cpp:5369`), so the first result other than
+//! `SPELL_FAILED_NOT_READY` (60), or a second `SMSG_SPELL_GO`, marks the server's cooldown end
+//! relative to the first GO.
 //!
-//! Flow: log in the slot's probe warrior (`Probe<N-spelled>`), `.learn 100`, teleport into the Northshire kobold
-//! cluster, Battle Stance, pick a Kobold Vermin (entry 6) from the create stream, Charge it,
-//! then spam re-casts every 200 ms. vmangos checks the cooldown at the TOP of `CheckCast`
-//! (`Spell.cpp:5369`), so the flip from `SPELL_FAILED_NOT_READY` (60) to any other code (or a
-//! second `SMSG_SPELL_GO`) timestamps the server's cooldown end relative to the first GO.
-//!
-//! Run: `cargo run -p benilla-protocol --example cooldown_probe -- probeN pprobeN [host]` — the
-//! slot-keyed probe account (method.md "The local vmangos server"; NEVER `one`, the director's
-//! account — a probe login there kicks their live session). Two caveats: this is a COMBAT probe,
-//! so it runs director-supervised (method.md: no unattended combat probes), and `.learn` is
-//! SEC_DEVELOPER (5); probe accounts are gmlevel 6 (SEC_ADMINISTRATOR), so it lands. The vmangos
-//! console for the run and restore it after.
+//! Run: `cargo run -p benilla-protocol --example cooldown_probe -- probeN pprobeN [host]` on a
+//! probe account with a warrior (a login kicks whoever is on the account); `.learn` needs
+//! gmlevel 5 (`SEC_DEVELOPER`).
 
 use std::time::{Duration, Instant};
 
@@ -43,10 +37,10 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let user = args
         .next()
-        .context("usage: cooldown_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
+        .context("usage: cooldown_probe -- <probeN> <pprobeN> [host] (a probe account)")?;
     let pass = args
         .next()
-        .context("usage: cooldown_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
+        .context("usage: cooldown_probe -- <probeN> <pprobeN> [host] (a probe account)")?;
     let host = args.next().unwrap_or_else(|| "localhost".into());
 
     let logon = benilla_protocol::logon(&host, &user, &pass)?;
@@ -107,7 +101,7 @@ fn main() -> Result<()> {
         _ => {}
     };
 
-    // World-enter settle, then arm the character: learn Charge, stance, teleport to the kobolds.
+    // Let the world-enter flood settle first.
     drain(&mut session, &mut kobolds, 3.0, &mut quiet)?;
     session.set_selection(self_guid)?;
     session.send_chat(".learn 100")?;
@@ -137,8 +131,7 @@ fn main() -> Result<()> {
         println!("charging kobold {guid:#x}…");
         session.set_selection(guid)?;
         session.cast_spell(CHARGE, Some(guid))?;
-        // The anchor is stamped INSIDE the watch, at GO decode — the drain window runs its full
-        // length regardless, and a window-end stamp would smear the anchor by up to 1.5 s.
+        // Stamp the anchor at GO decode: the drain runs its full 1.5 s regardless.
         let mut verdict: Option<(bool, Instant)> = None;
         let mut watch = |_t: f64, ev: SessionEvent| match ev {
             SessionEvent::SpellGo {

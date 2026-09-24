@@ -1,11 +1,4 @@
-//! The loot window's `WorldWriter` sends — open, take a row, take the coin pile, close, and vote
-//! in a group roll. Bodies in [`crate::messages::loot`], whose scope this mirrors. Split out of
-//! `writer/mod.rs` (decision 0636).
-//!
-//! Two addressing quirks worth keeping together: [`WorldWriter::loot_release`] passes a guid the
-//! server *ignores* (it releases whatever loot guid it has stored for us), and
-//! [`WorldWriter::loot_roll`] is addressed by the `(looted_target, item_slot)` pair the roll was
-//! opened with — never by the client-internal `rollID` the reference UI keys its frames on.
+//! The loot window sends: open, take, coin, close, roll, and the master looter's give.
 
 use anyhow::Result;
 
@@ -14,18 +7,12 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// Open a loot window (`CMSG_LOOT`, layout in [`messages::loot`]) — a full guid naming the
-    /// corpse/creature/player to loot. Answered by `SMSG_LOOT_RESPONSE` (a `LootResponse` event
-    /// on success, `LootError` on refusal).
+    /// `CMSG_LOOT`: open the loot of a corpse, creature or player (`SMSG_LOOT_RESPONSE`).
     pub fn loot(&mut self, guid: u64) -> Result<()> {
         self.send(opcode::CMSG_LOOT, &messages::loot(guid))
     }
 
-    /// Take one loot-window row (`CMSG_AUTOSTORE_LOOT_ITEM`, layout in
-    /// [`messages::autostore_loot_item`]): `loot_slot` is the wire's 0-based row index. The server
-    /// auto-places the item into the first free bag slot; success arrives via the normal
-    /// item-create/values path plus `SMSG_LOOT_REMOVED` clearing the row and
-    /// `SMSG_ITEM_PUSH_RESULT` naming what landed.
+    /// `CMSG_AUTOSTORE_LOOT_ITEM`: take the 0-based row `loot_slot` into the first free bag slot.
     pub fn autostore_loot_item(&mut self, loot_slot: u8) -> Result<()> {
         self.send(
             opcode::CMSG_AUTOSTORE_LOOT_ITEM,
@@ -33,25 +20,19 @@ impl WorldWriter {
         )
     }
 
-    /// Take the loot's coin pile (`CMSG_LOOT_MONEY`, empty body). Answered by
-    /// `SMSG_LOOT_MONEY_NOTIFY` (our share) then `SMSG_LOOT_CLEAR_MONEY` (the coin line clears for
-    /// every looter) plus the coinage rising via `UPDATE_OBJECT`.
+    /// `CMSG_LOOT_MONEY`, empty: answered by `SMSG_LOOT_MONEY_NOTIFY` with our share, then
+    /// `SMSG_LOOT_CLEAR_MONEY` to every looter.
     pub fn loot_money(&mut self) -> Result<()> {
         self.send(opcode::CMSG_LOOT_MONEY, &messages::loot_money())
     }
 
-    /// Close the loot window (`CMSG_LOOT_RELEASE`, layout in [`messages::loot_release`]); the
-    /// server ignores `guid` and releases whatever loot guid it has stored for us instead.
-    /// Answered by `SMSG_LOOT_RELEASE_RESPONSE` (a `LootReleaseResponse` event).
+    /// `CMSG_LOOT_RELEASE`: the server ignores `guid` and releases the loot it has stored for us.
     pub fn loot_release(&mut self, guid: u64) -> Result<()> {
         self.send(opcode::CMSG_LOOT_RELEASE, &messages::loot_release(guid))
     }
 
-    /// Cast a group-loot vote (`CMSG_LOOT_ROLL`, layout in [`messages::loot_roll`]) — the roll is
-    /// addressed by the `(looted_target, item_slot)` pair `SMSG_LOOT_START_ROLL` opened it with,
-    /// never by the client-internal `rollID`. `roll_type` is a [`messages::roll_vote`] value; the
-    /// server drops anything `>= 3` without a reply. Answered by an `SMSG_LOOT_ROLL` broadcast of
-    /// our vote, then the resolution (`SMSG_LOOT_ROLL_WON` / `SMSG_LOOT_ALL_PASSED`).
+    /// `CMSG_LOOT_ROLL`: addressed by the `(looted_target, item_slot)` of `SMSG_LOOT_START_ROLL`,
+    /// not the UI's `rollID`; a [`messages::roll_vote`] of 3 or more is dropped unanswered.
     pub fn loot_roll(&mut self, looted_target: u64, item_slot: u32, roll_type: u8) -> Result<()> {
         self.send(
             opcode::CMSG_LOOT_ROLL,
@@ -59,15 +40,8 @@ impl WorldWriter {
         )
     }
 
-    /// Hand one loot-window row to a group member (`CMSG_LOOT_MASTER_GIVE`, layout in
-    /// [`messages::loot_master_give`]) — the master looter's replacement for taking the row
-    /// themselves. `loot_guid` is the open loot source and `slot` the wire's 0-based row index,
-    /// the same one [`WorldWriter::autostore_loot_item`] would carry.
-    ///
-    /// Success looks like anyone else's loot from here: `SMSG_LOOT_REMOVED` clears the row for
-    /// every looter, and the *recipient* (not us) gets the item-create traffic. A refusal comes
-    /// back on `SMSG_LOOT_RESPONSE`'s error shape carrying a `MASTER_*`
-    /// [`messages::loot_error`] code.
+    /// `CMSG_LOOT_MASTER_GIVE`: the master looter hands 0-based row `slot` of `loot_guid` to a
+    /// member; a refusal is an `SMSG_LOOT_RESPONSE` error with a `MASTER_*` loot error code.
     pub fn loot_master_give(&mut self, loot_guid: u64, slot: u8, player_guid: u64) -> Result<()> {
         self.send(
             opcode::CMSG_LOOT_MASTER_GIVE,

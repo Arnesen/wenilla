@@ -11,7 +11,7 @@
 //!    player** — the client's own membership gate at `0x4d5555`, where the add call sits inside the
 //!    accept block of the same loop that picks the base value. Whether the pane then *lists* it is
 //!    the single flag `VISIBLE`, off until the player first meets them — which is why
-//!    `SMSG_SET_FACTION_VISIBLE` has to be applied (`net::apply::session::reputation_visible`).
+//!    `SMSG_SET_FACTION_VISIBLE` has to be applied (`net::session::reputation_visible`).
 //!
 //!    **Unlisted factions are pushed anyway, carrying `visible: false`.** They are how the pane's
 //!    headers learn their names: all five header factions carry `HEADER` (`0x08`) and only one of
@@ -449,8 +449,8 @@ mod live_wire_tests {
     ///
     /// Kept as real bytes rather than a hand-built fixture because this is the one input the whole
     /// pane is a function of, and a plausible-looking invention would agree with whatever the code
-    /// did. It also settles, at the wire, the single claim the wow-re carve could only mark
-    /// INFERRED: that the live server marks exactly the five header factions with `0x08`.
+    /// did. It also settles, at the wire, the single claim the binary alone could only leave
+    /// inferred: that the live server marks exactly the five header factions with `0x08`.
     const LIVE_FLAGS: &[(usize, u8)] = &[
         (0, 0x02),
         (2, 0x02),
@@ -525,7 +525,7 @@ mod live_wire_tests {
         let cat = benilla_formats::load_faction_catalog(&mut chain).expect("factions");
         let store = live_store();
 
-        // The five header factions, asserted at the wire — the wow-re carve's one INFERRED claim.
+        // The five header factions, asserted at the wire — the one claim the binary left inferred.
         use benilla_formats::faction_flags as flag;
         let headers: Vec<usize> = LIVE_FLAGS
             .iter()

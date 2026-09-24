@@ -52,7 +52,7 @@ fn harness() -> UiScript {
 /// button and the elapsed time its one argument. Everything on the sheet — the arrow, the party
 /// and raid blips, the battleground teammates and flags, the corpse — is seated here.
 /// The map arrow's file facts (`MinimapArrow.m2`: one looping 3.333 s Stand keying no bone; the
-/// header box `x ∈ [−0.0127, 0.0135]`, `y ∈ [−0.0118, 0.0145]` — render law §2), handed to the
+/// header box `x ∈ [−0.0127, 0.0135]`, `y ∈ [−0.0118, 0.0145]`), handed to the
 /// engine the way the app does once the asset lands (2007/2015).
 fn arrow_facts(s: &mut UiScript) {
     use benilla_ui::widget::{ModelFileFacts, SequenceFacts};
@@ -913,5 +913,54 @@ fn a_stale_layout_row_cannot_seat_a_stock_frame() {
     let saved = s.user_placed_layouts();
     assert_eq!(saved.len(), 1, "which is what puts the row back: {saved:?}");
     assert_eq!(saved[0], row(), "unchanged through the round trip");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The full-screen quads follow a resize** — `BlackoutWorld` behind the map, and the cinematic
+/// letterbox bars. Stock `WorldMapFrame_OnLoad` and `CinematicFrame_OnLoad` size them ONCE from
+/// `GetScreenWidth()`/`GetScreenHeight()` and nothing in FrameXML touches them again (no
+/// `DISPLAY_SIZE_CHANGED` listener); 2242 fixed the load edge, and this is the other edge. A window
+/// grown after the load left the quad at the old size and the world showed through beside it.
+#[test]
+fn the_fullscreen_quads_follow_a_resize() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    // A player exists by the time the manifest loads (decision 1848; see the test above).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+
+    let width = |s: &UiScript, f: &str| s.eval::<f64>(&format!("return {f}:GetWidth()")).unwrap();
+    assert_eq!(width(&s, "BlackoutWorld"), 1600.0, "the load edge sized it");
+
+    // Grown, still wider than 4:3 so every one of the three takes its recompute branch.
+    assert!(s.set_screen_size(1920.0, 1080.0), "the size changed");
+    super::manifest::on_screen_resized(&s);
+    s.resolve();
+
+    let screen = s.eval::<f64>("return GetScreenWidth()").unwrap();
+    assert_eq!(screen, 1920.0);
+    for quad in ["BlackoutWorld", "UpperBlackBar", "LowerBlackBar"] {
+        assert_eq!(
+            width(&s, quad),
+            screen,
+            "{quad} still spans the OLD screen after a resize — the world shows through beside it"
+        );
+    }
+    assert_eq!(
+        s.eval::<f64>("return BlackoutWorld:GetHeight()").unwrap(),
+        1080.0,
+        "…and the blackout is the new height too"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

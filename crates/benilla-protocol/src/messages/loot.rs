@@ -1,25 +1,12 @@
-//! Loot messages — the solo-loot wire family (opcodes 264, 349-355, 357-358; VERIFIED vmangos
-//! `Server/Protocol/Opcodes_1_12_1.h:267,350-359`). Bodies from vmangos `Server/Packets/Loot.{h,cpp}`
-//! (the light client-read / server-append shapes) + the hand-serialized `LootMgr.cpp`
-//! (`operator<<(LootItem)`/`operator<<(LootView)`) and `Player.cpp` (`SendLoot`/`SendLootError`).
-//! The group-roll family (opcodes 670-674 — `SMSG_LOOT_START_ROLL`/`SMSG_LOOT_ROLL`/
-//! `SMSG_LOOT_ROLL_WON`/`SMSG_LOOT_ALL_PASSED` + our `CMSG_LOOT_ROLL`) rides here too, from
-//! vmangos `Group/Group.cpp`'s four senders (decision 0591). Master loot
-//! (`CMSG_LOOT_MASTER_GIVE` 675 / `SMSG_LOOT_MASTER_LIST` 676) lands here too, from
-//! `Group::MasterLoot` + `WorldSession::HandleLootMasterGiveOpcode` (decision 1675).
+//! Loot wire messages: the loot window, group rolls, master loot and item-push results.
 
 use std::io;
 
 use crate::wire::{capacity_hint, read_u32_le, read_u64_le, read_u8};
 
-/// One item row on the normal shape of `SMSG_LOOT_RESPONSE` (vmangos `LootMgr.cpp:837-845` the
-/// `LootItem` write, wrapped by the slot index + trailing slot-type byte the caller appends around
-/// it — `LootMgr.cpp:900-912`, `ALL_PERMISSION` branch, the solo-loot path). `slot` is the wire's
-/// 0-based loot-window slot — what [`autostore_loot_item`] addresses back; a quest item rides the
-/// same list with `slot = items.len() + i` (`LootMgr.cpp:970`, out of the solo drop-loot path but
-/// parsed the same way if ever present). The wire's `randomSuffix` field is **not** a real per-item
-/// value — the server always writes a literal `0` there (`LootMgr.cpp:841`) — so this parser reads
-/// and discards it.
+/// One item row of `SMSG_LOOT_RESPONSE` (vmangos `LootMgr.cpp:837-845,900-912`). `slot` is the
+/// 0-based wire slot that [`autostore_loot_item`] sends back; quest items follow at
+/// `items.len() + i` (`LootMgr.cpp:970`). The wire's `randomSuffix` is always 0 and is discarded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootItem {
     pub slot: u8,
@@ -28,44 +15,27 @@ pub struct LootItem {
     /// `item_template.display_id` → icon via `ItemDisplayInfo.dbc`.
     pub display_info_id: u32,
     pub random_property_id: u32,
-    /// A [`slot_type`] code. Solo paths (`ALL_PERMISSION`/`OWNER_PERMISSION`) always write
-    /// `ALLOW_LOOT` (`LootMgr.cpp:918-926`); `MASTER` rides the master-loot path (decision 1675),
-    /// `ROLL_ONGOING` a group roll in flight, `LOCKED` a requirement the viewer fails.
+    /// A [`slot_type`] code; solo looting always writes `ALLOW_LOOT` (`LootMgr.cpp:918-926`).
     pub slot_type: u8,
 }
 
-/// `LootSlotType` (VERIFIED vmangos `LootMgr.h:75-83`) — the `u8` riding after each [`LootItem`] on
-/// `SMSG_LOOT_RESPONSE`.
+/// `LootSlotType` (vmangos `LootMgr.h:75-83`): the `u8` that ends each [`LootItem`] row.
 pub mod slot_type {
-    /// The player can loot the item.
     pub const ALLOW_LOOT: u8 = 0;
-    /// A group roll is ongoing on this item — shown, not yet lootable.
+    /// A group roll is in progress on this item: shown, not yet lootable.
     pub const ROLL_ONGOING: u8 = 1;
-    /// Only the group's loot master can distribute this item — the row is not takeable by a
-    /// `CMSG_AUTOSTORE_LOOT_ITEM` from anyone, and the master looter assigns it with
-    /// [`loot_master_give`] instead (decision 1675).
-    ///
-    /// **vmangos stamps this on *every* row it shows a group member under master loot**
-    /// (`LootMgr.cpp:917-941`, the `MASTER_PERMISSION` arm, which never consults
-    /// `is_underthreshold`) — even greys, which the server's own take handler would have allowed
-    /// (`LootHandler.cpp:171-182`). `LootItem::GetSlotTypeForSharedLoot` (`LootMgr.cpp:443-459`)
-    /// encodes the threshold-aware answer but is not on this path. So under vmangos the whole
-    /// window reads as master-only; we render the wire (decision 0086's rule).
+    /// Only the loot master can hand this out ([`loot_master_give`]). Under master loot vmangos
+    /// sends it on every row, even greys its take handler allows (`LootMgr.cpp:917-941`).
     pub const MASTER: u8 = 2;
-    /// Shown red — not lootable (a missing-requirement item in a group).
+    /// Shown red and not lootable: a requirement the viewer fails, in a group.
     pub const LOCKED: u8 = 3;
     /// Owner-permission solo looting, binding checks skipped.
     pub const OWNER: u8 = 4;
 }
 
-/// `LootType` (VERIFIED vmangos `LootMgr.h:49-61`) — the `u8` naming what's being looted on the
-/// normal shape of `SMSG_LOOT_RESPONSE`. Only 4 values ever reach the wire: `Player::SendLoot`
-/// (`Player.cpp:8117-8131`) remaps `SKINNING`(6)/`INSIGNIA`(22) to `PICKPOCKETING` and
-/// `FISHING_HOLE`(20)/`FISHING_FAIL`(21) to `FISHING` before sending — the client has no separate
-/// UI state for those. `CMSG_LOOT` (a corpse/creature loot request) always answers with `CORPSE`
-/// (`LootHandler.cpp:340-354`, `HandleLootOpcode` → `SendLoot(guid, LOOT_CORPSE)` unconditionally);
-/// the rest arrive only from other loot sources (pickpocket spell, fishing, disenchant), out of
-/// scope for this slice but pinned for completeness.
+/// `LootType` (vmangos `LootMgr.h:49-61`). Only these four reach the wire: `SendLoot` remaps
+/// skinning and insignia to `PICKPOCKETING`, fishing holes and fails to `FISHING`
+/// (`Player.cpp:8117-8131`); `CMSG_LOOT` always gets `CORPSE` (`LootHandler.cpp:340-354`).
 pub mod loot_type {
     pub const CORPSE: u8 = 1;
     pub const PICKPOCKETING: u8 = 2;
@@ -73,16 +43,10 @@ pub mod loot_type {
     pub const DISENCHANTING: u8 = 4;
 }
 
-/// `LootError` (VERIFIED vmangos `LootMgr.h:85-100`) — the `u8` on the error shape of
-/// `SMSG_LOOT_RESPONSE` (`Player::SendLootError`, `Player.cpp:7744-7750`). A plain `CMSG_LOOT` on a
-/// creature corpse can only surface a subset: `DIDNT_KILL` (guid isn't a lootable
-/// creature/player/corpse, or the creature check fails — `LootHandler.cpp:342-346`,
-/// `Player.cpp:7938-7943`), `PLAYER_NOT_FOUND` (dead/not-in-world — `LootHandler.cpp:349-353`),
-/// `PLAY_TIME_EXCEEDED`, `NOTSTANDING`, `STUNNED` (`LootHandler.cpp:358-373`), and `TOO_FAR`
-/// (range check in `Player.cpp:7938-7947`). The `MASTER_*` trio answers a refused
-/// [`loot_master_give`] and reaches only the master looter (`LootHandler.cpp:618-750`, decision
-/// 1675); `BAD_FACING`/`LOCKED`/`ALREADY_PICKPOCKETED`/`NOT_WHILE_SHAPESHIFTED` ride other loot
-/// sources, pinned for completeness.
+/// `LootError` (vmangos `LootMgr.h:85-100`): the code on the error shape of `SMSG_LOOT_RESPONSE`.
+/// `CMSG_LOOT` can draw `DIDNT_KILL`, `PLAYER_NOT_FOUND`, `PLAY_TIME_EXCEEDED`, `NOTSTANDING`,
+/// `STUNNED` (`LootHandler.cpp:342-373`) and `TOO_FAR` (`Player.cpp:7938-7947`); the `MASTER_*`
+/// codes answer a refused [`loot_master_give`], to the master looter only.
 pub mod loot_error {
     pub const DIDNT_KILL: u8 = 0;
     pub const TOO_FAR: u8 = 4;
@@ -99,70 +63,49 @@ pub mod loot_error {
     pub const NOT_WHILE_SHAPESHIFTED: u8 = 16;
 }
 
-/// The two shapes `SMSG_LOOT_RESPONSE` can take, disambiguated by the `lootType` byte right after
-/// the guid: `0` means "no window — this is an error", anything else is a real loot window.
+/// The two shapes of `SMSG_LOOT_RESPONSE`: a `lootType` of 0 after the guid is the error shape.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LootResponseBody {
-    /// The normal shape (VERIFIED vmangos `Player.cpp:8135-8138` + `operator<<(LootView)`,
-    /// `LootMgr.cpp:848-873`): `u32 gold, u8 itemCount`, then `itemCount` rows of [`LootItem`].
+    /// `u32 gold, u8 itemCount`, then the [`LootItem`] rows (vmangos `LootMgr.cpp:848-873`).
     Items {
         loot_type: u8,
         gold: u32,
         items: Vec<LootItem>,
     },
-    /// The error shape (VERIFIED vmangos `Player::SendLootError`, `Player.cpp:7744-7750`): just
-    /// the trailing `u8` error code, nothing else follows.
+    /// Only a [`loot_error`] code follows (`Player.cpp:7744-7750`).
     Error { error: u8 },
 }
 
-/// Body of `CMSG_LOOT` (VERIFIED vmangos `Server/Packets/Loot.cpp:8-11`,
-/// `LootUnit::ReadFromWorldPacket`): one full 8-byte guid — the corpse/creature/player being
-/// opened. Always answered by `SMSG_LOOT_RESPONSE` (one shape or the other).
+/// `CMSG_LOOT` (`Loot.cpp:8-11`): the guid to open, always answered by `SMSG_LOOT_RESPONSE`.
 pub fn loot(guid: u64) -> Vec<u8> {
     guid.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_AUTOSTORE_LOOT_ITEM` (VERIFIED vmangos `Server/Packets/Loot.cpp:3-6`,
-/// `AutoStoreLootItem::ReadFromWorldPacket`): one `u8` — the 0-based wire loot slot (see
-/// [`LootItem::slot`]). The server auto-places the item into the first free bag slot
-/// (`LootHandler.cpp:183-206`, `CanStoreNewItem`/`StoreNewItem`); no specific-slot variant exists
-/// for loot (unlike vendor buy).
+/// `CMSG_AUTOSTORE_LOOT_ITEM` (`Loot.cpp:3-6`): a [`LootItem::slot`]; the server picks the bag.
 pub fn autostore_loot_item(loot_slot: u8) -> Vec<u8> {
     vec![loot_slot]
 }
 
-/// Body of `CMSG_LOOT_MONEY` (VERIFIED vmangos `Server/Protocol/Opcodes_1_12_1.h:351` — the
-/// handler `WorldSession::HandleLootMoneyOpcode` takes a `NullClientPacket`): empty.
+/// `CMSG_LOOT_MONEY`: an empty body (vmangos `Opcodes_1_12_1.h:351`).
 pub fn loot_money() -> Vec<u8> {
     Vec::new()
 }
 
-/// Body of `CMSG_LOOT_RELEASE` (VERIFIED vmangos `Server/Packets/Loot.cpp:13-16`,
-/// `LootRelease::ReadFromWorldPacket`): one full 8-byte guid, though the server ignores it and
-/// releases whatever loot guid it has stored for us instead (`Server/Packets/Loot.h:31-36`: "not
-/// used by server"; handler `HandleLootReleaseOpcode`, `LootHandler.cpp:383-389`).
+/// `CMSG_LOOT_RELEASE` (`Loot.cpp:13-16`): a guid the server ignores for the loot guid it stored.
 pub fn loot_release(guid: u64) -> Vec<u8> {
     guid.to_le_bytes().to_vec()
 }
 
-/// `RollVote` (VERIFIED vmangos `Group/Group.h:88-99`) — the `u8` vote a client may cast on
-/// `CMSG_LOOT_ROLL`. The server hard-rejects anything `>= 3` (`MAX_ROLL_FROM_CLIENT`,
-/// `GroupHandler.cpp:367-368`), so these three are the whole client-side vocabulary; `Group.h`'s
-/// `ROLL_NOT_EMITED_YET`(3)/`ROLL_NOT_VALID`(4) are server bookkeeping that never reaches us.
-///
-/// These same values also ride *back* as `SMSG_LOOT_ROLL`/`SMSG_LOOT_ROLL_WON`'s `roll_type` —
-/// but there they are **not** self-describing: see [`LootRoll::is_dice`] for the disambiguation.
+/// `RollVote` (vmangos `Group/Group.h:88-99`): the server rejects a vote `>= 3`
+/// (`GroupHandler.cpp:367-368`). Overloaded on `SMSG_LOOT_ROLL`: see [`LootRoll::is_dice`].
 pub mod roll_vote {
     pub const PASS: u8 = 0;
     pub const NEED: u8 = 1;
     pub const GREED: u8 = 2;
 }
 
-/// Body of `CMSG_LOOT_ROLL` (VERIFIED vmangos `Server/Packets/Loot.cpp:18-23`,
-/// `LootRoll::ReadFromWorldPacket`): `u64 lootedTarget, u32 itemSlot, u8 rollType` — the corpse
-/// guid + wire loot slot that identify *which* roll, and our [`roll_vote`]. The pair
-/// `(lootedTarget, itemSlot)` is the roll's server-side identity; the client-side `rollID` the
-/// FrameXML API passes around is ours alone and never reaches the wire.
+/// `CMSG_LOOT_ROLL` (`Loot.cpp:18-23`): `u64 lootedTarget, u32 itemSlot, u8 rollType`. The
+/// corpse and slot identify the roll; the FrameXML `rollID` never reaches the wire.
 pub fn loot_roll(looted_target: u64, item_slot: u32, roll_type: u8) -> Vec<u8> {
     let mut body = looted_target.to_le_bytes().to_vec();
     body.extend_from_slice(&item_slot.to_le_bytes());
@@ -170,15 +113,8 @@ pub fn loot_roll(looted_target: u64, item_slot: u32, roll_type: u8) -> Vec<u8> {
     body
 }
 
-/// Body of `CMSG_LOOT_MASTER_GIVE` (VERIFIED vmangos `Server/Packets/Loot.{h:50-59,cpp:25-30}`,
-/// `LootMasterGive::ReadFromWorldPacket`): `u64 lootGuid, u8 slotId, u64 playerGuid` — the open
-/// loot source, the **wire** loot slot (see [`LootItem::slot`], not the display row), and the
-/// group member to hand the item to.
-///
-/// Sent only by the master looter; the server re-checks all three (`LootHandler.cpp:618-750`) and
-/// answers a refusal with a [`loot_error`] `MASTER_*` code on `SMSG_LOOT_RESPONSE`. Note the slot
-/// width: this one is a `u8` where the roll family's `item_slot` is a `u32`, so the two are not
-/// interchangeable even though they index the same array.
+/// `CMSG_LOOT_MASTER_GIVE` (`Loot.cpp:25-30`): `u64 lootGuid, u8 slotId, u64 playerGuid`; the
+/// slot is a `u8` here, a `u32` in the roll family. A refusal is a `MASTER_*` [`loot_error`].
 pub fn loot_master_give(loot_guid: u64, slot: u8, player_guid: u64) -> Vec<u8> {
     let mut body = loot_guid.to_le_bytes().to_vec();
     body.push(slot);
@@ -186,69 +122,40 @@ pub fn loot_master_give(loot_guid: u64, slot: u8, player_guid: u64) -> Vec<u8> {
     body
 }
 
-/// `SMSG_LOOT_START_ROLL` (VERIFIED vmangos `Server/Packets/Loot.{h:78-90,cpp:43-51}`) — a group
-/// roll opened on one drop; sent to every eligible roller. `countdown_ms` is the server's
-/// `LOOT_ROLL_TIMEOUT`, a flat `1*MINUTE*IN_MILLISECONDS` = `60_000` at 5875
-/// (`Group/Group.cpp:67`), but it is read from the wire rather than assumed.
-///
-/// The wire's `randomSuffix` field is a literal `0` the server never fills (`Group.cpp:764`), so
-/// this parser reads and discards it — same treatment as [`LootItem`]'s.
+/// `SMSG_LOOT_START_ROLL` (`Loot.cpp:43-51`): a group roll opened on one drop, sent to every
+/// eligible roller. Its `randomSuffix` is always 0 (`Group/Group.cpp:764`) and is discarded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootStartRoll {
-    /// The corpse/container being looted — with `item_slot`, the roll's wire identity.
     pub looted_target: u64,
-    /// The 0-based **wire** loot slot (the same vocabulary as [`LootItem::slot`], widened to `u32`
-    /// here because this packet carries it as one).
+    /// The wire [`LootItem::slot`], carried as a `u32` here.
     pub item_slot: u32,
     pub item_id: u32,
     pub random_property_id: u32,
-    /// How long the roll stays open, in milliseconds.
+    /// How long the roll stays open, in ms (vmangos: `60_000`, `Group.cpp:67`).
     pub countdown_ms: u32,
 }
 
-/// `SMSG_LOOT_ROLL` (VERIFIED vmangos `Server/Packets/Loot.{h:92-106,cpp:53-63}`) — one
-/// announcement about one roller, broadcast to every eligible roller.
-///
-/// **The `(roll_number, roll_type)` pair is overloaded** and this is the load-bearing subtlety of
-/// the whole family. vmangos emits exactly four shapes (VERIFIED `Group/Group.cpp:970-990` for the
-/// votes, `:1163`/`:1214` for the dice):
-///
-/// | `roll_number` | `roll_type` | meaning                                    |
-/// |---------------|-------------|--------------------------------------------|
-/// | `0`           | `0`         | that player **voted** Need                  |
-/// | `128`         | `128`       | that player **voted** Pass                  |
-/// | `128`         | `2`         | that player **voted** Greed                 |
-/// | `1..=100`     | `1` or `2`  | that player's **dice result** (Need/Greed)  |
-///
-/// So `roll_type` alone cannot tell a Greed *vote* (`128, 2`) from a Greed *dice roll*
-/// (`57, 2`) — `roll_number` is the discriminator. [`LootRoll::is_dice`] encodes it.
+/// `SMSG_LOOT_ROLL` (`Loot.cpp:53-63`): one player's vote or dice roll, sent to every roller.
+/// `(roll_number, roll_type)` is overloaded: a vote is `(0, 0)` Need, `(128, 128)` Pass or
+/// `(128, 2)` Greed; a dice result is `(1..=100, 1 or 2)` (`Group/Group.cpp:970-990,1163,1214`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootRoll {
     pub looted_target: u64,
     pub item_slot: u32,
-    /// The player this announcement is about — compare against our own guid for the "You …"
-    /// phrasing.
     pub roller: u64,
     pub item_id: u32,
     pub random_property_id: u32,
-    /// `1..=100` for a dice result; `0`/`128` for a vote announcement (see the type docs).
     pub roll_number: u8,
-    /// A [`roll_vote`] value for a dice result; `0`/`2`/`128` for a vote (see the type docs).
     pub roll_type: u8,
 }
 
 impl LootRoll {
-    /// Whether this is an actual **dice result** (`roll_number` in `1..=100`) rather than one of
-    /// the three vote announcements (`roll_number` `0` or `128`). See the type docs for the table
-    /// this encodes — vmangos only ever emits `urand(1, 100)` for real rolls (`Group.cpp:1162`,
-    /// `:1213`), and only `0`/`128` for votes, so the ranges cannot collide.
+    /// A dice result rather than a vote: vmangos rolls `urand(1, 100)` (`Group.cpp:1162,1213`).
     pub fn is_dice(&self) -> bool {
         (1..=100).contains(&self.roll_number)
     }
 
-    /// The vote this announcement reports when it is *not* a dice result — a [`roll_vote`] value.
-    /// `None` for a dice result (there `roll_type` is already a true [`roll_vote`]) or for a pair
-    /// outside the four shapes vmangos emits.
+    /// The [`roll_vote`] this announcement reports, when it is a vote.
     pub fn vote(&self) -> Option<u8> {
         match (self.roll_number, self.roll_type) {
             (0, 0) => Some(roll_vote::NEED),
@@ -259,9 +166,8 @@ impl LootRoll {
     }
 }
 
-/// `SMSG_LOOT_ROLL_WON` (VERIFIED vmangos `Server/Packets/Loot.{h:108-122,cpp:65-75}`) — the roll
-/// resolved and `winner` took the item. Note the field order differs from [`LootRoll`]: the winner
-/// guid lands *after* the item block, not before it.
+/// `SMSG_LOOT_ROLL_WON` (`Loot.cpp:65-75`): `winner` took the item. Unlike [`LootRoll`], the
+/// winner guid comes after the item fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootRollWon {
     pub looted_target: u64,
@@ -269,21 +175,14 @@ pub struct LootRollWon {
     pub item_id: u32,
     pub random_property_id: u32,
     pub winner: u64,
-    /// The winning dice value (`1..=100`), or a literal `100` on the uncontested
-    /// single-eligible-roller short-circuit (`Group.cpp:1110`, sent with `ROLL_NEED`).
+    /// The winning dice value, or 100 with Need when only one player may roll (`Group.cpp:1110`).
     pub roll_number: u8,
-    /// A [`roll_vote`] value — which kind of roll won.
+    /// The [`roll_vote`] that won.
     pub roll_type: u8,
 }
 
-/// `SMSG_LOOT_ALL_PASSED` (VERIFIED vmangos `Server/Packets/Loot.{h:124-134,cpp:77-84}`) — nobody
-/// wanted it; the roll closes and the item returns to the corpse for ordinary looting.
-///
-/// **Field-order quirk:** unlike every other packet in this family, the append order here is
-/// `itemRandomPropId` **then** `randomSuffixId` (`Loot.cpp:79-83`) — the two `u32`s are swapped
-/// relative to [`LootStartRoll`]/[`LootRoll`]/[`LootRollWon`]. Both are effectively `0` in
-/// practice (the server never fills `randomSuffixId`), so the swap is invisible on the wire today,
-/// but the parser follows the source order rather than the family's.
+/// `SMSG_LOOT_ALL_PASSED` (`Loot.cpp:77-84`): everyone passed; the item stays for normal looting.
+/// Unlike the rest of the family, `itemRandomPropId` comes before `randomSuffixId` here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootAllPassed {
     pub looted_target: u64,
@@ -292,7 +191,6 @@ pub struct LootAllPassed {
     pub random_property_id: u32,
 }
 
-/// Read `SMSG_LOOT_START_ROLL` (see [`LootStartRoll`]).
 pub(super) fn read_loot_start_roll(r: &mut &[u8]) -> io::Result<LootStartRoll> {
     let looted_target = read_u64_le(r)?;
     let item_slot = read_u32_le(r)?;
@@ -309,7 +207,6 @@ pub(super) fn read_loot_start_roll(r: &mut &[u8]) -> io::Result<LootStartRoll> {
     })
 }
 
-/// Read `SMSG_LOOT_ROLL` (see [`LootRoll`] — including the overloaded `(roll_number, roll_type)`).
 pub(super) fn read_loot_roll(r: &mut &[u8]) -> io::Result<LootRoll> {
     let looted_target = read_u64_le(r)?;
     let item_slot = read_u32_le(r)?;
@@ -330,7 +227,6 @@ pub(super) fn read_loot_roll(r: &mut &[u8]) -> io::Result<LootRoll> {
     })
 }
 
-/// Read `SMSG_LOOT_ROLL_WON` (see [`LootRollWon`] — the winner guid follows the item block).
 pub(super) fn read_loot_roll_won(r: &mut &[u8]) -> io::Result<LootRollWon> {
     let looted_target = read_u64_le(r)?;
     let item_slot = read_u32_le(r)?;
@@ -351,13 +247,12 @@ pub(super) fn read_loot_roll_won(r: &mut &[u8]) -> io::Result<LootRollWon> {
     })
 }
 
-/// Read `SMSG_LOOT_ALL_PASSED` (see [`LootAllPassed`] — note the swapped `u32` pair).
 pub(super) fn read_loot_all_passed(r: &mut &[u8]) -> io::Result<LootAllPassed> {
     let looted_target = read_u64_le(r)?;
     let item_slot = read_u32_le(r)?;
     let item_id = read_u32_le(r)?;
     let random_property_id = read_u32_le(r)?;
-    let _random_suffix = read_u32_le(r)?; // the swapped tail — a literal 0 (Group.cpp:849)
+    let _random_suffix = read_u32_le(r)?; // the swapped tail, a literal 0 (Group.cpp:849)
     Ok(LootAllPassed {
         looted_target,
         item_slot,
@@ -366,19 +261,12 @@ pub(super) fn read_loot_all_passed(r: &mut &[u8]) -> io::Result<LootAllPassed> {
     })
 }
 
-/// Read `SMSG_LOOT_MASTER_LIST` (VERIFIED vmangos `Server/Packets/Group.{h:288-296,cpp:182-187}`,
-/// `LootMasterList::AppendBodyTo`): `u8 count`, then `count` full guids — the group members
-/// eligible to be handed an item from the loot window that is opening.
-///
-/// It rides the **open**, not a click: `Player::SendLoot` calls `Group::MasterLoot`
-/// (`Player.cpp:8077-8081`) before it writes `SMSG_LOOT_RESPONSE`, so the candidate list is
-/// already in hand by the time the window paints. vmangos sends it to *every* group member who
-/// opens the corpse, not only the master looter (the `MASTER_PERMISSION` arm is unconditional),
-/// and filters the list by loot-XP distance and `IsAllowedLooter` (`Group.cpp:914-940`).
+/// `SMSG_LOOT_MASTER_LIST` (vmangos `Server/Packets/Group.cpp:182-187`): `u8 count`, then the
+/// eligible members' guids. Every member who opens the corpse gets it just before
+/// `SMSG_LOOT_RESPONSE` (`Player.cpp:8077-8081`), filtered by range (`Group/Group.cpp:914-940`).
 pub(super) fn read_loot_master_list(r: &mut &[u8]) -> io::Result<Vec<u64>> {
     let count = read_u8(r)?;
-    // The candidates are group members (`Group.cpp:914-940`): vmangos `MAX_RAID_SIZE` 40
-    // (`Group/Group.h:50`).
+    // At most a raid: vmangos `MAX_RAID_SIZE` is 40 (`Group/Group.h:50`).
     let mut candidates = Vec::with_capacity(capacity_hint(count, 40));
     for _ in 0..count {
         candidates.push(read_u64_le(r)?);
@@ -386,11 +274,8 @@ pub(super) fn read_loot_master_list(r: &mut &[u8]) -> io::Result<Vec<u64>> {
     Ok(candidates)
 }
 
-/// Read `SMSG_LOOT_RESPONSE` — both shapes (see [`LootResponseBody`]). Wire order (VERIFIED
-/// vmangos `Player.cpp:8135-8138`): `u64 guid, u8 lootType`, then either the error tail (`lootType
-/// == 0`) or `u32 gold, u8 itemCount` + `itemCount` × [`LootItem`] rows (each `u8 slot, u32
-/// itemid, u32 count, u32 displayInfoID, u32 0(randomSuffix, discarded), u32 randomPropertyId, u8
-/// slotType` — `LootMgr.cpp:848-873,900-912`, the `ALL_PERMISSION` solo branch).
+/// `SMSG_LOOT_RESPONSE` (vmangos `Player.cpp:8135-8138`): `u64 guid, u8 lootType`, then the
+/// error code when `lootType` is 0, else gold and the [`LootItem`] rows.
 pub(super) fn read_loot_response(r: &mut &[u8]) -> io::Result<(u64, LootResponseBody)> {
     let guid = read_u64_le(r)?;
     let loot_type = read_u8(r)?;
@@ -400,8 +285,7 @@ pub(super) fn read_loot_response(r: &mut &[u8]) -> io::Result<(u64, LootResponse
     }
     let gold = read_u32_le(r)?;
     let count = read_u8(r)?;
-    // The loot view indexes both lists by one `u8`: `MAX_NR_LOOT_ITEMS` 16 + `MAX_NR_QUEST_ITEMS`
-    // 32 (vmangos `LootMgr.h:34,36`).
+    // `MAX_NR_LOOT_ITEMS` 16 + `MAX_NR_QUEST_ITEMS` 32 (vmangos `LootMgr.h:34,36`).
     let mut items = Vec::with_capacity(capacity_hint(count, 16 + 32));
     for _ in 0..count {
         let slot = read_u8(r)?;
@@ -430,44 +314,34 @@ pub(super) fn read_loot_response(r: &mut &[u8]) -> io::Result<(u64, LootResponse
     ))
 }
 
-/// Read `SMSG_LOOT_RELEASE_RESPONSE` (VERIFIED vmangos `Server/Packets/Loot.h:137-145`,
-/// `Player::SendLootRelease`, `Player.cpp:7736-7742`): `u64 guid, u8 result` — `result` is always
-/// `1` (the struct's default; vmangos never sets it otherwise).
+/// `SMSG_LOOT_RELEASE_RESPONSE` (`Loot.h:137-145`): `u64 guid, u8 result`; the result is always 1.
 pub(super) fn read_loot_release_response(r: &mut &[u8]) -> io::Result<(u64, u8)> {
     Ok((read_u64_le(r)?, read_u8(r)?))
 }
 
-/// Read `SMSG_LOOT_REMOVED` (VERIFIED vmangos `Server/Packets/Loot.h:147-154`): one `u8` — the wire
-/// loot slot that was just taken (by anyone; the row disappears from every current looter's
-/// window, `Loot::NotifyItemRemoved`).
+/// `SMSG_LOOT_REMOVED` (`Loot.h:147-154`): the wire slot just taken, sent to every looter.
 pub(super) fn read_loot_removed(r: &mut &[u8]) -> io::Result<u8> {
     read_u8(r)
 }
 
-/// Read `SMSG_LOOT_MONEY_NOTIFY` (VERIFIED vmangos `Server/Packets/Loot.h:69-76`): one `u32` — the
-/// requester's share of the coin pile (an equal split among current looters; solo looting is the
-/// degenerate 1-looter case, the requester's whole share).
+/// `SMSG_LOOT_MONEY_NOTIFY` (`Loot.h:69-76`): our share of the coin, split equally among looters.
 pub(super) fn read_loot_money_notify(r: &mut &[u8]) -> io::Result<u32> {
     read_u32_le(r)
 }
 
-/// `SMSG_ITEM_PUSH_RESULT` (VERIFIED vmangos `Server/Packets/Item.h:324-345` +
-/// `Item.cpp:211-224`; both `SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_10_2` conditionals evaluate
-/// *included* for build 5875) — drives the "You receive loot: …" / "You receive item: …" chat
-/// line. `item_slot` is `0xFFFF_FFFF` when the item stacked onto an existing slot instead of
-/// landing in a fresh one.
+/// `SMSG_ITEM_PUSH_RESULT` (vmangos `Server/Packets/Item.cpp:211-224`, both post-1.10.2 fields
+/// present at 5875): the "You receive …" chat line. `item_slot` is `0xFFFF_FFFF` when it stacked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemPushResult {
     pub player_guid: u64,
     /// `false` = looted, `true` = received from an NPC (vendor purchase, quest reward).
     pub from_npc: bool,
-    /// `true` = the item was CREATED (crafting's `EffectCreateItem`, a conjure aura — vmangos
-    /// `SendNewItem`'s own comment "0=received, 1=created"; the only `created=true` senders are
-    /// the create-item paths) → the client's "You create: …" line. NOT a stack-merge flag.
+    /// Crafted or conjured, giving the "You create: …" line; not a stack-merge flag (vmangos
+    /// `SendNewItem`: "0=received, 1=created").
     pub created: bool,
     pub show_in_chat: bool,
-    /// Which bag slot the item went to (`NULL_BAG`/`INVENTORY_SLOT_BAG_0`-style index — the same
-    /// vocabulary as [`super::items::BAG_PLAYER_INVENTORY`]/[`super::items::SLOT_BAG_FIRST`]).
+    /// The bag it went to, numbered as [`super::items::BAG_PLAYER_INVENTORY`] and
+    /// [`super::items::SLOT_BAG_FIRST`].
     pub bag_slot: u8,
     pub item_slot: u32,
     pub item_entry: u32,
@@ -476,7 +350,6 @@ pub struct ItemPushResult {
     pub count: u32,
 }
 
-/// Read `SMSG_ITEM_PUSH_RESULT` (see [`ItemPushResult`] for the field-inclusion verification).
 pub(super) fn read_item_push_result(r: &mut &[u8]) -> io::Result<ItemPushResult> {
     let player_guid = read_u64_le(r)?;
     let received = read_u32_le(r)?;
@@ -516,40 +389,32 @@ mod tests {
 
     #[test]
     fn cmsg_bodies_golden() {
-        // CMSG_LOOT (Server/Packets/Loot.cpp:8-11): a full guid.
         assert_eq!(
             loot(0x1234_5678_9abc_def0),
             hx("f0debc9a78563412"),
             "CMSG_LOOT body"
         );
 
-        // CMSG_AUTOSTORE_LOOT_ITEM (Loot.cpp:3-6): one u8 wire slot.
         assert_eq!(
             autostore_loot_item(3),
             hx("03"),
             "CMSG_AUTOSTORE_LOOT_ITEM body"
         );
 
-        // CMSG_LOOT_MONEY: empty.
         assert_eq!(loot_money(), Vec::<u8>::new(), "CMSG_LOOT_MONEY body");
 
-        // CMSG_LOOT_RELEASE (Loot.cpp:13-16): a full guid (server ignores it).
         assert_eq!(
             loot_release(0x1234_5678_9abc_def0),
             hx("f0debc9a78563412"),
             "CMSG_LOOT_RELEASE body"
         );
 
-        // CMSG_LOOT_ROLL (Loot.cpp:18-23): u64 lootedTarget, u32 itemSlot, u8 rollType.
         assert_eq!(
             loot_roll(0x1234_5678_9abc_def0, 2, roll_vote::GREED),
             hx("f0debc9a785634120200000002"),
             "CMSG_LOOT_ROLL body"
         );
 
-        // CMSG_LOOT_MASTER_GIVE (Loot.cpp:25-30): u64 lootGuid, u8 slotId, u64 playerGuid. The
-        // slot is a BYTE here — the roll family's itemSlot is a u32 over the same array, so the
-        // two builders are not interchangeable and the byte count proves which one this is.
         let give = loot_master_give(0x1234_5678_9abc_def0, 2, 0x0fed_cba9_8765_4321);
         assert_eq!(
             give,
@@ -559,8 +424,7 @@ mod tests {
         assert_eq!(give.len(), 17, "8 + 1 + 8, not 8 + 4 + 8");
     }
 
-    /// The five group-roll opcode values (VERIFIED vmangos `Opcodes_1_12_1.h:671-675`) and the
-    /// master-loot pair that follows them (`:676-677`).
+    /// The roll and master-loot opcodes (vmangos `Opcodes_1_12_1.h:671-677`).
     #[test]
     fn roll_opcode_values() {
         assert_eq!(opcode::SMSG_LOOT_ALL_PASSED, 670);
@@ -574,7 +438,6 @@ mod tests {
 
     #[test]
     fn loot_master_list_decodes() {
-        // Group.cpp:182-187: u8 count, then count full guids.
         let mut body = vec![3u8];
         for guid in [0xAAu64, 0xBB, 0xCC] {
             body.extend_from_slice(&guid.to_le_bytes());
@@ -588,9 +451,7 @@ mod tests {
         }
     }
 
-    /// An empty candidate list is a legal body, not a truncation: `Group::MasterLoot`
-    /// (`Group.cpp:925-937`) filters by loot-XP distance and `IsAllowedLooter`, so a group whose
-    /// other members are all out of range sends `count = 0` and nothing else.
+    /// `Group::MasterLoot` filters by range (`Group/Group.cpp:925-937`): `count = 0` is legal.
     #[test]
     fn loot_master_list_accepts_an_empty_list() {
         match parse_server(opcode::SMSG_LOOT_MASTER_LIST, &[0u8]).unwrap() {
@@ -601,12 +462,10 @@ mod tests {
 
     #[test]
     fn loot_start_roll_decodes() {
-        // Group.cpp:759-772 / Loot.cpp:43-51: guid, itemSlot, itemEntry, randomSuffix(0),
-        // randomPropId, countdown.
         let mut body = 0xAAu64.to_le_bytes().to_vec();
         body.extend_from_slice(&1u32.to_le_bytes()); // itemSlot
         body.extend_from_slice(&17182u32.to_le_bytes()); // itemEntryId
-        body.extend_from_slice(&0u32.to_le_bytes()); // randomSuffix — always 0
+        body.extend_from_slice(&0u32.to_le_bytes()); // randomSuffix, always 0
         body.extend_from_slice(&0u32.to_le_bytes()); // itemRandomPropId
         body.extend_from_slice(&60_000u32.to_le_bytes()); // LOOT_ROLL_TIMEOUT (Group.cpp:67)
 
@@ -625,10 +484,7 @@ mod tests {
         }
     }
 
-    /// The four `(roll_number, roll_type)` shapes vmangos actually emits — the overloaded pair
-    /// [`LootRoll::is_dice`]/[`LootRoll::vote`] disentangle. The Greed pair is the load-bearing
-    /// case: a Greed *vote* is `(128, 2)` and a Greed *dice roll* is `(1..=100, 2)`, identical in
-    /// `roll_type`.
+    /// A Greed vote `(128, 2)` and a Greed roll `(1..=100, 2)` share their `roll_type`.
     #[test]
     fn loot_roll_decodes_and_disambiguates() {
         let announce = |roll_number: u8, roll_type: u8| {
@@ -646,7 +502,6 @@ mod tests {
             }
         };
 
-        // Field placement, once, off the Need-vote shape.
         let need_vote = announce(0, 0);
         assert_eq!(
             need_vote,
@@ -661,7 +516,7 @@ mod tests {
             }
         );
 
-        // The three vote announcements (Group.cpp:970-990).
+        // The three vote shapes (Group.cpp:970-990).
         assert!(!need_vote.is_dice());
         assert_eq!(need_vote.vote(), Some(roll_vote::NEED));
 
@@ -673,7 +528,7 @@ mod tests {
         assert!(!greed_vote.is_dice());
         assert_eq!(greed_vote.vote(), Some(roll_vote::GREED));
 
-        // The dice results (Group.cpp:1163 / :1214) — urand(1, 100), so both bounds are legal.
+        // Dice results are urand(1, 100) (Group.cpp:1163, 1214), so both bounds are legal.
         for roll_number in [1u8, 57, 100] {
             for roll_type in [roll_vote::NEED, roll_vote::GREED] {
                 let dice = announce(roll_number, roll_type);
@@ -686,7 +541,6 @@ mod tests {
 
     #[test]
     fn loot_roll_won_decodes() {
-        // Loot.cpp:65-75 — note the winner guid lands AFTER the item block, unlike SMSG_LOOT_ROLL.
         let mut body = 0xAAu64.to_le_bytes().to_vec();
         body.extend_from_slice(&1u32.to_le_bytes()); // itemSlot
         body.extend_from_slice(&17182u32.to_le_bytes()); // itemEntryId
@@ -715,13 +569,12 @@ mod tests {
 
     #[test]
     fn loot_all_passed_decodes() {
-        // Loot.cpp:77-84 — the SWAPPED tail: itemRandomPropId THEN randomSuffixId, the reverse of
-        // every sibling in this family. A non-zero prop id proves the parser follows source order.
+        // A non-zero prop id ahead of the suffix proves the swapped order (Loot.cpp:77-84).
         let mut body = 0xAAu64.to_le_bytes().to_vec();
         body.extend_from_slice(&1u32.to_le_bytes()); // itemSlot
         body.extend_from_slice(&17182u32.to_le_bytes()); // itemEntryId
-        body.extend_from_slice(&7u32.to_le_bytes()); // itemRandomPropId — read
-        body.extend_from_slice(&0u32.to_le_bytes()); // randomSuffixId — discarded
+        body.extend_from_slice(&7u32.to_le_bytes()); // itemRandomPropId, read
+        body.extend_from_slice(&0u32.to_le_bytes()); // randomSuffixId, discarded
 
         match parse_server(opcode::SMSG_LOOT_ALL_PASSED, &body).unwrap() {
             ServerPacket::LootAllPassed(p) => assert_eq!(
@@ -739,12 +592,11 @@ mod tests {
 
     #[test]
     fn loot_response_items_shape_decodes() {
-        // SMSG_LOOT_RESPONSE, normal shape: guid, lootType=CORPSE, gold, itemCount, 2 rows.
         let mut body = 0xAAu64.to_le_bytes().to_vec();
         body.push(loot_type::CORPSE);
         body.extend_from_slice(&1234u32.to_le_bytes()); // gold
         body.push(2); // item count
-                      // item 0: slot 0, entry 117, count 1, display 123, randomSuffix(0), randomPropertyId 0, ALLOW_LOOT
+                      // slot 0: entry 117, count 1, display 123, suffix 0, prop 0, ALLOW_LOOT
         body.push(0);
         body.extend_from_slice(&117u32.to_le_bytes());
         body.extend_from_slice(&1u32.to_le_bytes());
@@ -752,7 +604,7 @@ mod tests {
         body.extend_from_slice(&0u32.to_le_bytes());
         body.extend_from_slice(&0u32.to_le_bytes());
         body.push(slot_type::ALLOW_LOOT);
-        // item 1: slot 1, entry 6948 (Hearthstone), count 1, display 4500, randomSuffix(0), randomPropertyId 0, LOCKED
+        // slot 1: entry 6948 (Hearthstone), count 1, display 4500, suffix 0, prop 0, LOCKED
         body.push(1);
         body.extend_from_slice(&6948u32.to_le_bytes());
         body.extend_from_slice(&1u32.to_le_bytes());
@@ -799,8 +651,6 @@ mod tests {
 
     #[test]
     fn loot_response_error_shape_decodes() {
-        // SMSG_LOOT_RESPONSE, error shape: guid, lootType=0, error code. Nothing else follows —
-        // the parser must not try to read gold/itemCount off a slice this short.
         let mut body = 0xBBu64.to_le_bytes().to_vec();
         body.push(0); // lootType 0 ⇒ error shape
         body.push(loot_error::TOO_FAR);
@@ -855,9 +705,6 @@ mod tests {
 
     #[test]
     fn item_push_result_wire() {
-        // SMSG_ITEM_PUSH_RESULT (Item.cpp:211-224, both build-5875 conditionals included):
-        // playerGuid, received, created, showInChat, bagSlot, itemSlot, itemEntry, suffixFactor,
-        // randomPropertyId, count.
         let mut body = 0x42u64.to_le_bytes().to_vec();
         body.extend_from_slice(&0u32.to_le_bytes()); // received: looted
         body.extend_from_slice(&1u32.to_le_bytes()); // created: new item

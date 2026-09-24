@@ -1,33 +1,24 @@
-// The player-UI quad material (decision 0068 §2's sorted-quad pass), on the UI **gamma composite
-// lane** (decision 0254 — the UI sibling of 0161's world lane).
-//
-// The reference draws the whole UI through its fixed-function device into an 8-bit backbuffer, so
-// every UI multiply AND every UI blend is arithmetic on GAMMA BYTES. We reproduce that here: the
-// fragment puts its texel back into the client's byte space, does the tint/premultiply there, and
-// hands the pipeline a RAW GAMMA value. Under the `(One, OneMinusSrcAlpha)` blend state the
-// hardware then composes in gamma, and (because the target is 8-bit unorm) clamps at every write,
-// exactly like the reference's byte buffer:
+// The player-UI quad material, on the UI gamma composite lane. The reference draws the UI
+// fixed-function into an 8-bit backbuffer, so every UI multiply and blend is arithmetic on gamma
+// bytes: the fragment returns its texel to byte space, tints and premultiplies there, and outputs
+// raw gamma, which the `(One, OneMinusSrcAlpha)` blend composes in gamma, clamped at every write by
+// the 8-bit unorm target:
 //   BLEND (EGxBlend 2, `SrcAlpha/OneMinusSrcAlpha`): out = (rgb·a, a) ⇒ dst·(1−a) + rgb·a
 //   ADD   (EGxBlend 3, `SrcAlpha/One`):              out = (rgb·a, 0) ⇒ dst      + rgb·a
-// so a per-material flag picks the mode without splitting the pipeline. The frame's single
-// gamma→linear decode happens once afterwards, in `ui_gamma.wgsl` — the twin of the FFXGlow
-// combine owning the world lane's one decode.
+// so a per-material flag picks the mode on one pipeline. The frame's one gamma-to-linear decode
+// is `ui_gamma.wgsl`.
 //
-// Why the encode below, rather than uploading UI art as raw `Rgba8Unorm`: our BLPs load as
-// `Rgba8UnormSrgb`, so the sampler hands us a LINEARIZED texel. `linear_to_srgb` puts the authored
-// byte back (exact in f32: encode ∘ decode = identity), and it is the rule for every texture the
-// pass samples — sRGB art, the sRGB glyph atlas, and the portrait booth's `Rgba8Unorm` bake (which
-// stores linear bytes) — EXCEPT a texture that says otherwise: a SKIP_DECODE upload (`gamma_texel`
-// below — the minimap tiles) already holds the authored byte, and encoding it again is the
-// double-gamma that washed the outdoor minimap bright. Uploading everything raw would be cheaper
-// and would also move bilinear filtering into gamma (as the reference filters), but it forces the
-// booth to emit gamma — a contained follow-up, not a look change.
+// BLPs load as `Rgba8UnormSrgb`, so the sampler returns a linearized texel and `linear_to_srgb`
+// restores the authored byte (exact in f32). That holds for every texture here, the portrait
+// booth's `Rgba8Unorm` bake (which stores linear bytes) included, except a SKIP_DECODE upload
+// (`gamma_texel`), which already holds the byte and must not be encoded twice.
+// Deviation: bilinear filtering runs on the decoded texel, not on the gamma byte the reference
+// filters, because the booth bake stores linear bytes.
 
 #import bevy_sprite::mesh2d_functions as mesh_functions
 
-// The mesh's own vertex layout, at bevy's fixed Mesh2d locations (`Mesh2dPipeline::specialize`
-// binds POSITION at 0, UV_0 at 2, COLOR at 4 and defines `VERTEX_UVS` / `VERTEX_COLORS` for the
-// attributes the mesh actually carries — the minimap's composite tile quad has no colours).
+// The mesh vertex at bevy's fixed Mesh2d locations (`Mesh2dPipeline::specialize`: POSITION 0, UV_0
+// 2, COLOR 4); `VERTEX_UVS`/`VERTEX_COLORS` are defined only for attributes the mesh carries.
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
@@ -40,28 +31,17 @@ struct Vertex {
 }
 
 struct VertexOutput {
-    // Clip position out of the vertex stage, the FRAGMENT COORDINATE (physical px) into the
-    // fragment — the screen mask below compares against it.
+    // Clip position out; in the fragment, the pixel coordinate (physical px) the screen mask uses.
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
 #ifdef VERTEX_COLORS
     @location(1) color: vec4<f32>,
 #endif
-    // The instance's whole-run colour, read off bevy's per-instance mesh TAG (`MeshTag`, a u32 the
-    // mesh uniform carries for every Mesh2d entity, re-uploaded with its transform each frame).
-    // A run with one colour draws WHITE vertices and carries that colour here — so a colour
-    // pulse is one component write on the batch entity: not an `Assets<Mesh>` write (which arms
-    // bevy's asset-changed probes over every `Mesh3d` row in the scene, 1982) and not a material
-    // write (which re-creates the material's bind group and uniform buffers on the render thread,
-    // 2–3 of them a frame at a parked pin costing ~9 ms on Intel's DX12 driver, 2236).
-    //
-    // Packed as the reference packs a vertex colour: one BYTE per channel — `CImVector`, the
-    // client's `SetVertexColor` quantising `×255 + 0.5` and folding the frame's alpha in bytes
-    // (wow-re `system/ui/scratch/texture-color-composition.md`) — so this carries exactly the
-    // precision the real client draws with. Stored COMPLEMENTED (`!packed`): an entity with no
-    // `MeshTag` reads 0 from bevy, and the complement makes that opaque white, i.e. untinted,
-    // rather than transparent black — every Mesh2d that draws with this material and never
-    // asked for a tint (the minimap's interior tiles) is right by default.
+    // The run's colour off the per-instance `MeshTag` (a one-colour run draws white vertices), so a
+    // colour change is a component write, not a mesh or material change. One byte per channel, as
+    // the reference's `CImVector` (`SetVertexColor` quantises `×255 + 0.5` and folds the frame's
+    // alpha in bytes). Stored complemented, so an entity with no `MeshTag` (read as 0) is opaque
+    // white, untinted.
     @location(2) @interpolate(flat) tint: vec4<f32>,
 }
 
@@ -90,110 +70,61 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 @group(2) @binding(0) var<uniform> additive: u32;
 @group(2) @binding(1) var quad_texture: texture_2d<f32>;
 @group(2) @binding(2) var quad_sampler: sampler;
-// Mask the quad to its inscribed circle — the live unit PORTRAIT: the real client stamps a round
-// alpha stencil into its 64² bake; ours cuts the same circle at draw time, so the opaque booth
-// backdrop never pokes past the frame ring's thin band. UV-space, so it holds at any quad size.
+// Mask the quad to its inscribed circle in UV space: the unit portrait, whose round alpha stencil
+// the reference stamps into its 64² bake and this cuts at draw time.
 @group(2) @binding(3) var<uniform> circular: u32;
-// The screen-anchored alpha mask (the MINIMAP's MinimapMask.blp circle, decision 0203): the mask
-// spans mask_rect (physical framebuffer px: min.xy, max.xy; z <= x disables), and the fragment's
-// alpha multiplies by the mask's ALPHA channel there (MinimapMask.blp is DXT3 — white color, the
-// circle ramp authored in its 8-bit alpha; header-verified this session after a mis-read as
-// palettized cost a debug cycle). Screen-anchored — not quad UV space — so world-anchored tile
-// quads pan under a fixed window. Outside the rect drops. Sampled at level 0 (a branch on
-// per-fragment coords would break the uniform control flow implicit derivatives need).
+// The screen-anchored alpha mask (the minimap's `MinimapMask.blp`, DXT3, the circle ramp in its
+// alpha): `mask_rect` is its span in physical framebuffer px (min.xy, max.xy; z <= x disables), so
+// world-anchored tile quads pan under a fixed window; outside the rect is dropped. Sampled at
+// level 0: the sample sits in a branch on per-fragment coordinates, outside the uniform control
+// flow implicit derivatives need.
 @group(2) @binding(4) var<uniform> mask_rect: vec4<f32>;
 @group(2) @binding(5) var mask_texture: texture_2d<f32>;
 @group(2) @binding(6) var mask_sampler: sampler;
-// `Texture:SetDesaturated(1)` — the greyed-out icon (decisions 1327, 1330). This is the verb every
-// disabled affordance in the reference is built on: a bag icon under the game menu, an unusable pet
-// action, a disconnected party portrait — and the unavailable talent B162 reported.
-//
-// It is not a tint and not a stage flag: `+0x128` on the texture object is a `CGxShader*`, and the
-// one shader the UI ever loads is `Shaders\Pixel\Desaturate.bls` (wow-re
-// `system/ui/scratch/texture-desaturate-law.md`, VERIFIED at the asset's own bytes). Its whole body
-// is four instructions, and the two that matter are reproduced exactly below:
-//
+// `Texture:SetDesaturated(1)`: the texture object's `+0x128` `CGxShader*` binds
+// `Shaders\Pixel\Desaturate.bls`, whose two working instructions are
 //     MUL result.color.w   , fragment.color.primary, texel   ; a = vertexColour.a x texel.a
 //     DP3 result.color.xyz , texel, c[0]                     ; rgb = dot(texel.rgb, LUMA)
-//
-// **The vertex colour's RGB is DISCARDED, not modulated in.** A bound fragment program supersedes
-// the fixed-function stage chain entirely, so the `MODULATE(TEXTURE, DIFFUSE)` law that governs
-// every other UI quad simply does not run here — there is no desaturate-then-tint or
-// tint-then-desaturate, the tint is *absent*. FrameXML walks straight into this:
-// `SetItemButtonDesaturated(button, 1, 0.65, 0.65, 0.65)` still SETS that 0.65, and on
-// shader-capable hardware it has no effect on colour. Only its ALPHA survives, which is why the
-// alpha multiply below is shared with the ordinary path rather than special-cased — dropping it
-// would make every desaturated icon ignore `SetAlpha` and its frame's alpha.
-//
-// The fold runs on the GAMMA byte (after `linear_to_srgb`) because the reference's UI is 8-bit
-// arithmetic end to end; greying a linearized texel would land a different byte than the client's.
+// A bound fragment program replaces the fixed-function MODULATE, so the vertex colour's RGB is
+// discarded (the 0.65 of FrameXML's `SetItemButtonDesaturated(button, 1, 0.65, 0.65, 0.65)` has
+// no effect) and only its alpha survives. The dot runs on the gamma byte, after `linear_to_srgb`.
 @group(2) @binding(7) var<uniform> desaturate: u32;
-// The sampled texture is already PREMULTIPLIED — a portrait/paper-doll/dressing-room booth bake,
-// and nothing else (see `UiQuad::premultiplied`).
-//
-// Every other texture this pass samples is authored STRAIGHT (a BLP's rgb means nothing where its
-// alpha is 0), so the premultiply below has to happen here. A booth render target is the opposite
-// by construction: its opaque geometry wrote `a = 1`, its alpha batches blended over that, and its
-// ADDITIVE particles added light while contributing NO coverage (`wow_effect.wgsl` returns
-// `(rgb·a, 0)`). Colour is emitted light, alpha is coverage — premultiplied. Weighting it by its own
-// alpha again multiplies exactly the emitted light that sits over EMPTY pane space by zero, which is
-// how a transparent-clear pane lost the R14 pauldrons' fire entirely and kept a weapon glow only
-// where it overlapped the model's own opaque pixels.
+// The texture is already premultiplied: only a portrait, paper-doll or dressing-room booth bake
+// (`UiQuad::premultiplied`), whose additive particles add light with no coverage. Every other
+// texture is straight alpha and is premultiplied here.
 @group(2) @binding(8) var<uniform> premultiplied: u32;
-// **Alpha TEST** reference — `<= 0` disables. The WMO-interior minimap tiles, and nothing else so
-// far: the reference draws them under EGxBlend **1**, whose applicator `glDisable`s blending
-// outright, with the `SetRenderState` id-7→id-8 cascade arming `glAlphaFunc(GL_GEQUAL,
-// 0.87843144)` — `.data 0x85ad20[1] = 224`, times the f32 reciprocal of 255 (wow-re
-// `system/minimap/scratch/wmo-interior-minimap-composite.md`). So a tile fragment either writes
-// FULLY OPAQUE or is discarded; partial coverage does not exist on that path, and two overlapping
-// group tiles can never leave the clear colour showing between them. Blending them the ordinary
-// way leaves `(1−a)(1−b)` of the black clear at every boundary — B141's "odd black lines".
-//
-// The tested value is `texel.a × colour.a`, the client's MODULATE of the texel against the
-// stride-0 vertex dword `(frameAlpha << 24) | 0xFFFFFF`. The SCREEN MASK is deliberately NOT in
-// it: the reference alpha-tests each tile into an offscreen and cuts the round mask at the BLIT,
-// so folding the mask ramp into the test would saw the disc's soft rim into a hard, undersized
-// circle.
+// Alpha-test reference, <= 0 disables; only the WMO-interior minimap tiles. The reference draws
+// them under EGxBlend 1: blending off and `glAlphaFunc(GL_GEQUAL, 0.87843144)`
+// (`.data 0x85ad20[1]` = 224, times the f32 reciprocal of 255), so a tile fragment is fully opaque
+// or discarded. The tested value is `texel.a × colour.a`, the MODULATE against the vertex dword
+// `(frameAlpha << 24) | 0xFFFFFF`. The screen mask stays out of it: the reference tests each tile
+// into an offscreen and cuts the mask at the blit.
 @group(2) @binding(9) var<uniform> alpha_ref: f32;
-// The bound texture was uploaded UNDECODED — `BlpVariant::MapTile`'s `GL_SKIP_DECODE_EXT`, the
-// minimap tiles — so the sampler hands back the authored GAMMA byte itself and the ordinary arm's
-// `linear_to_srgb` has no decode to undo: the texel passes through as-is. The alpha-test arm
-// ignores this flag — its target is the un-encoded composite, so it decodes explicitly instead.
+// The texture was uploaded undecoded (`BlpVariant::MapTile`'s `GL_SKIP_DECODE_EXT`, the minimap
+// tiles), so the texel is already the authored gamma byte and skips `linear_to_srgb`. The
+// alpha-test arm ignores this flag and decodes explicitly for its un-encoded target.
 @group(2) @binding(10) var<uniform> gamma_texel: u32;
-// The **UV window this quad may sample** — `(u_min, v_min, u_max, v_max)`, already inset by half a
-// texel by the producer; an axis whose `min > max` is left unclamped. The atlas-cell guard,
-// decision 1608.
-//
-// `CLAMP_TO_EDGE` clamps at the IMAGE's edge, not at a `SetTexCoord` crop's, so a magnified atlas
-// cell's outermost destination pixels sample half a texel past the crop and linear-filter in the
-// NEIGHBOURING cell. `POIIcons` cell 15 (the generic zone landmark) is fully transparent and the
-// cell above it is a coffin whose bottom row is opaque black: the world map drew a ~24%-black
-// hairline along the top edge of every zone POI. Clamping here makes a cell sample exactly what a
-// standalone clamped texture of it would. Producers leave it off for UVs that run past `[0,1]` —
-// that is the backdrop's tiling idiom, not a cell.
+// The UV window this quad may sample, `(u_min, v_min, u_max, v_max)`, inset half a texel by the
+// producer; an axis with `min > max` is unclamped (UVs past `[0,1]`, the backdrop's tiling).
+// `CLAMP_TO_EDGE` clamps at the image edge, not at a `SetTexCoord` crop, so without this a
+// magnified atlas cell's outer pixels filter in the neighbouring cell.
 @group(2) @binding(11) var<uniform> uv_clamp: vec4<f32>;
 
-// ITU-R BT.601 luma — the `PARAM c[0]` of that shader, read as raw f32 words: `0x3E991687`,
-// `0x3F1645A2`, `0x3DE978D5`. Not `(0.3, 0.3, 0.3)`, not `(0.3, 0.59, 0.11)` (this file's own first
-// guess, corrected by the carve), not BT.709.
-//
-// **Do not normalise these and do not compute them in f64.** They sum to 1.0000000074505806, so a
-// white texel evaluates just above 1.0 and relies on the output clamp; the ARB text and the D3D
-// blob round-trip to the same three f32 words, so the backend cannot change a bit and neither may
-// we.
+// BT.601 luma, `Desaturate.bls`'s `PARAM c[0]` as raw f32 words `0x3E991687`, `0x3F1645A2`,
+// `0x3DE978D5`. Do not normalise them or compute them in f64: they sum to 1.0000000074505806, so
+// white lands just above 1.0 and relies on the output clamp.
 const LUMA: vec3<f32> = vec3<f32>(0.299, 0.587, 0.114);
 
-// Linear → sRGB (the exact IEC 61966-2-1 curve the hardware's sRGB store uses, so this inverts the
-// sampler's decode bit-for-bit in f32). Alpha carries no gamma and never passes through here.
+// Linear to sRGB: the IEC 61966-2-1 curve the hardware's sRGB conversion uses, so this inverts the
+// sampler's decode exactly in f32. Alpha has no gamma and never passes through here.
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     let higher = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
     let lower = c * 12.92;
     return select(higher, lower, c <= vec3<f32>(0.0031308));
 }
 
-// sRGB → linear — the inverse of `linear_to_srgb`, for a texture uploaded UNDECODED so the hardware
-// filters its authored bytes (the minimap tiles' `GL_SKIP_DECODE_EXT`). The conversion happens here,
-// after the filter, which is exactly the order the reference's fixed-function pipe uses.
+// sRGB to linear, for an undecoded texture (the minimap tiles): the hardware filters the authored
+// bytes and the conversion follows the filter, the reference's fixed-function order.
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let higher = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
     let lower = c / 12.92;
@@ -202,38 +133,34 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Branchless so the sample stays in uniform control flow (implicit derivatives), and the
-    // bounds are sorted before `clamp` so a DISABLED (`min > max`) axis never forms an
-    // ill-ordered range — `select` evaluates both arms.
+    // Branchless, so the sample stays in uniform control flow for implicit derivatives. The bounds
+    // are sorted first because `select` evaluates both arms: a disabled (`min > max`) axis must
+    // still hand `clamp` an ordered range.
     let lo = min(uv_clamp.xy, uv_clamp.zw);
     let hi = max(uv_clamp.xy, uv_clamp.zw);
     let uv = select(in.uv, clamp(in.uv, lo, hi), uv_clamp.xy <= uv_clamp.zw);
     let t = textureSample(quad_texture, quad_sampler, uv);
-    // The quad's colour: its vertex colour (white for a one-colour run) times the run's tint off
-    // the instance tag (see `VertexOutput::tint`) — a mesh without colours is the tint alone.
 #ifdef VERTEX_COLORS
     let c = in.color * in.tint;
 #else
     let c = in.tint;
 #endif
-    // Back to the client's byte space, then tint there: `UiQuad.color` is already a client-space
-    // sRGB value (FrameXML's `<Color>`, `|cff…`, quality colors), so this multiply IS the FFP's
-    // gamma-space `tint × texel`. A SKIP_DECODE texture (`gamma_texel`) is already IN byte space —
-    // re-encoding it is the double-gamma that washed the outdoor minimap bright.
+    // Back to the client's byte space, then tint there: `UiQuad.color` is a client-space sRGB value
+    // (FrameXML `<Color>`, `|cff…`, quality colours), so this is the fixed-function gamma-space
+    // `tint × texel`. A SKIP_DECODE texture (`gamma_texel`) is already in byte space.
     let texel = select(linear_to_srgb(t.rgb), t.rgb, gamma_texel != 0u);
-    // The desaturated arm REPLACES the modulate — see the `desaturate` binding above. `c.rgb` is
-    // deliberately unread here; only `c.a` carries into the alpha below, as it does on both paths.
+    // Desaturate replaces the modulate: `c.rgb` is unread there, and only `c.a` reaches the alpha.
     var rgb = texel * c.rgb;
     if desaturate != 0u {
         rgb = vec3<f32>(dot(texel, LUMA));
     }
-    // `k` is the COVERAGE the UI itself imposes — the vertex colour's alpha (`SetAlpha`, the frame's
-    // inherited alpha) and the two masks. It is kept apart from the texel's OWN alpha `t.a` because
-    // the two premultiply differently: `k` scales a premultiplied source's colour and alpha alike,
-    // while `t.a` must weight the colour only when the source is straight.
+    // `k` is the coverage the UI imposes: the vertex alpha (`SetAlpha`, the inherited frame alpha)
+    // and the two masks. It stays apart from the texel's own `t.a` because they premultiply
+    // differently: `k` scales a premultiplied source's colour and alpha alike, `t.a` weights the
+    // colour only on a straight source.
     var k = c.a;
     if circular != 0u {
-        // Soft ~2%-of-width edge: reads as the ref's stencil at portrait size, no jaggies.
+        // A soft edge 2% of the width wide, like the reference's stencil at portrait size.
         k *= 1.0 - smoothstep(0.48, 0.5, distance(in.uv, vec2<f32>(0.5)));
     }
     if mask_rect.z > mask_rect.x {
@@ -242,29 +169,20 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let m = textureSampleLevel(mask_texture, mask_sampler, clamp(muv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).a;
         k *= m * inside;
     }
-    // The alpha TEST arm (see `alpha_ref`): pass ⇒ fully opaque, fail ⇒ nothing.
-    //
-    // It returns the **un-encoded** texel, not `rgb`: this arm draws only into the minimap's own
-    // 256² composite target, which is un-encoded float like the portrait booths' (decisions
-    // 0254/0804 — the UI arc does its one sRGB encode at the end, so a target that pre-encoded
-    // would land a second one downstream). The blit quad that samples that target is an ordinary
-    // quad and takes the `linear_to_srgb` above, which is where the authored byte comes back.
-    // Nothing is lost by skipping it here: the composite does no colour arithmetic at all — no
-    // blend, no day-night tint, a white vertex colour — so this path is a pure copy, and there is
-    // no gamma-space multiply to preserve.
+    // The alpha-test arm (`alpha_ref`): pass is fully opaque, fail draws nothing. It returns the
+    // un-encoded texel, not `rgb`: it draws only into the minimap's 256² composite, an un-encoded
+    // float target whose blit quad takes `linear_to_srgb`, and the composite does no colour
+    // arithmetic, so there is no gamma-space multiply to keep.
     if alpha_ref > 0.0 {
         if t.a * c.a < alpha_ref {
             discard;
         }
-        // The tile arrived as gamma bytes (SKIP_DECODE) and the composite target is un-encoded, so
-        // the conversion the sampler did not do happens HERE — after the filter, which is the point.
         return vec4<f32>(srgb_to_linear(t.rgb) * c.rgb, 1.0);
     }
     let a = t.a * k;
-    // Premultiply in GAMMA (decision 0160's lesson, here for the UI): the hardware `SrcAlpha` factor
-    // would weight a linearized colour and inflate every soft edge and every dim additive skirt.
-    // An already-premultiplied source (a booth bake) takes `k` alone — folding in `t.a` a second
-    // time is the double multiply that erased the panes' effects.
+    // Premultiply in gamma: the hardware `SrcAlpha` factor would weight a linearized colour and
+    // inflate every soft edge and dim additive skirt. A premultiplied source (a booth bake) takes
+    // `k` alone; folding in `t.a` again would zero its additive light over empty pane space.
     let weight = select(a, k, premultiplied != 0u);
     if additive != 0u {
         return vec4<f32>(rgb * weight, 0.0);

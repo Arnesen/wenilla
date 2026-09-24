@@ -1,4 +1,4 @@
-//! The probe **rig** (`WOW_RIG="<spec>"`, decision 0651) — one command that puts this slot's probe
+//! The probe **rig** (`WOW_RIG="<spec>"`, decision 0651) — one command that puts this checkout's probe
 //! account into a chosen **body** and hands the session a world that is ready to test.
 //!
 //! ## Why it exists
@@ -17,7 +17,7 @@
 //! ```text
 //! WOW_RIG="tauren druid 60 gear:heal-preraid-bis spec:heal-preraid-bis at:ThunderBluff"
 //! WOW_RIG="gnome mage 39 gear:dps-39-twink gm:off"
-//! WOW_RIG="60 gear:dps-preraid-bis"          # the slot's own Probe<N>, no new character
+//! WOW_RIG="60 gear:dps-preraid-bis"          # the account's own probe body, no new character
 //! WOW_RIG="nightelf druid"                   # just a body of that shape, level 1
 //! ```
 //!
@@ -26,14 +26,15 @@
 //! **Race + class name a character, so the rig owns the pick.** vmangos has no class-change command
 //! (`.character race` exists; there is no `.character class`), so a different class *is* a different
 //! character — which makes creating one the honest primitive rather than a fallback. The name is
-//! derived, never invented: `<Race3><Class3><slot-word>[f]`, e.g. Tauren Druid on `pool-1` →
-//! `Taudruone`. Deterministic means the *next* session reuses the same body instead of littering a
-//! second one, and the pattern is what makes eviction safe (below). Omit race+class and the rig
-//! configures whatever `WOW_CHAR`/the slot default already logs in as.
+//! derived, never invented: `<Race3><Class3><word>[f]`, the word being this checkout's
+//! (`run_mode::rig_suffix`), e.g. a Tauren Druid for `Probeone` → `Taudruone`. Deterministic means
+//! the *next* session reuses the same body instead of littering a second one, and the pattern is
+//! what makes eviction safe (below). Omit race+class and the rig configures whatever `WOW_CHAR`
+//! already logs in as.
 //!
 //! **The roster is a cache with an eviction policy.** `CharactersPerRealm` is 10, and there are 40
 //! valid race/class pairs, so a busy account fills. The rig does not hardcode the limit: it tries
-//! the create, and only on `CHAR_CREATE_SERVER_LIMIT` evicts **the rig-named character on this slot
+//! the create, and only on `CHAR_CREATE_SERVER_LIMIT` evicts **the rig-named character of this checkout
 //! that is cheapest to rebuild** — lowest level first, ties broken by oldest — then retries once.
 //! Nothing outside the rig's own naming pattern is ever deleted, so `Probe<N>` and anything a human
 //! made are untouchable.
@@ -44,7 +45,7 @@
 //! It always revives a dead or ghost body, whether or not you asked — that is the 121× command, and
 //! there is no session that wants to keep testing on a corpse.
 //!
-//! ## The GM verbs behind it (all verified against `/Users/sam/wre/vmangos-src`)
+//! ## The GM verbs behind it (all verified against the vmangos source, github.com/vmangos/core)
 //!
 //! | rig token | command | needs | note |
 //! |---|---|---|---|
@@ -71,7 +72,7 @@
 //! character (give `WOW_RIG` a race+class) starts with empty bags and is the cheaper path.
 //!
 //! Non-combat throughout: the rig creates, configures, places and stops. It never fights, so the
-//! unattended-combat ban (method.md) is untouched.
+//! unattended-combat ban (docs/METHOD.md) is untouched.
 
 use benilla_protocol::{messages, CharAction, CharCreateReq};
 use bevy::prelude::*;
@@ -225,7 +226,7 @@ impl RigSpec {
     fn describe(&self) -> String {
         let body = self
             .body
-            .map_or("this slot's probe character".into(), |(r, c, g)| {
+            .map_or("the account's probe character".into(), |(r, c, g)| {
                 format!(
                     "{} {} {}",
                     if g == 1 { "female" } else { "male" },
@@ -360,13 +361,13 @@ fn drive_rig(
                 messages::CHAR_CREATE_SUCCESS => rig.phase = RigPhase::AwaitRoster,
                 messages::CHAR_CREATE_SERVER_LIMIT if !rig.evicted => {
                     rig.evicted = true;
-                    match crate::run_mode::slot_word().and_then(|slot| {
-                        evictable(&rig.roster, rig_char_name(&rig.spec).as_deref(), slot)
+                    match crate::run_mode::rig_suffix().and_then(|word| {
+                        evictable(&rig.roster, rig_char_name(&rig.spec).as_deref(), &word)
                     }) {
                         Some((guid, name)) => {
                             warn!(
                                 "rig: the account is full — evicting the cheapest rig character to rebuild, {name} \
-                                 (guid {guid}). Only rig-named characters on this slot are ever \
+                                 (guid {guid}). Only this checkout's rig-named characters are ever \
                                  deleted; Probe<N> and hand-made characters are never touched."
                             );
                             let _ = pick.0.try_send(CharRequest::Delete(guid));
@@ -518,7 +519,7 @@ fn build_steps(spec: &RigSpec, dead: bool) -> Vec<String> {
 /// `game_tele` name. The facing is load-bearing exactly when a motion probe walks from the
 /// pin: `W` follows the BODY's facing, and each probe character keeps whatever facing it last
 /// had — an unpinned facing sent probe0 and probe4 down different routes from the same point,
-/// which invalidated a cross-slot A/B before 1462's sitting caught it.
+/// which invalidated a cross-checkout A/B before 1462's sitting caught it.
 fn parse_point(at: &str) -> Option<(i32, f32, f32, f32, Option<f32>)> {
     let mut parts = at.split(',').map(str::trim);
     let map = parts.next()?.parse().ok()?;
@@ -536,9 +537,9 @@ fn parse_point(at: &str) -> Option<(i32, f32, f32, f32, Option<f32>)> {
 
 fn rig_char_name(spec: &RigSpec) -> Option<String> {
     let (race, class, gender) = spec.body?;
-    let slot = crate::run_mode::slot_word()?;
+    let word = crate::run_mode::rig_suffix()?;
     let name = format!(
-        "{}{}{slot}{}",
+        "{}{}{word}{}",
         race_code(race)?,
         class_code(class)?,
         if gender == 1 { "f" } else { "" }
@@ -550,45 +551,45 @@ fn rig_char_name(spec: &RigSpec) -> Option<String> {
     Some(chars.next()?.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase())
 }
 
-/// The rig-named character on this slot that costs least to lose: **lowest level first**, ties
+/// The rig-named character of this checkout that costs least to lose: **lowest level first**, ties
 /// broken by oldest (the enum is ordered by `create_time` — vmangos `HandleCharEnumOpcode` — so an
 /// earlier index *is* older). Level is the proxy for invested setup: a level-1 body is 15 seconds to
 /// rebuild, a geared 60 is a minute and a talent tree. Evicting by age alone would throw away the
 /// most valuable body on the account first, which the live fill test made obvious.
 ///
-/// Anything that is not a rig name for `slot` — `Probe<N>`, a hand-made character, another slot's
-/// leftovers — is invisible here, and that is what makes automatic deletion safe.
+/// Anything that is not a rig name for `word` — the probe body itself, a hand-made character,
+/// another checkout's leftovers — is invisible here, and that is what makes automatic deletion safe.
 ///
-/// `slot` is a **parameter, not a `slot_word()` call inside**: reading the ambient slot here made
-/// the eviction test pass only in the worktree it was written in (`pool-1`, whose rig names end
-/// `…one`) and fail in every other slot — and in the primary checkout, where `slot_word()` is
-/// `None` and nothing matches at all. A unit test's answer must not depend on which directory the
-/// build happened in.
+/// `word` is a **parameter, not a `rig_suffix()` call inside**: reading the ambient word here made
+/// the eviction test pass only in the checkout it was written in (whose rig names end `…one`) and
+/// fail in every other — and in a checkout with no declaration, where `rig_suffix()` is `None` and
+/// nothing matches at all. A unit test's answer must not depend on which directory the build
+/// happened in.
 fn evictable(
     roster: &[benilla_protocol::Character],
     want: Option<&str>,
-    slot: &str,
+    word: &str,
 ) -> Option<(u64, String)> {
     roster
         .iter()
         .enumerate()
         .filter(|(_, c)| {
-            !want.is_some_and(|w| c.name.eq_ignore_ascii_case(w)) && is_rig_name(&c.name, slot)
+            !want.is_some_and(|w| c.name.eq_ignore_ascii_case(w)) && is_rig_name(&c.name, word)
         })
         .min_by_key(|(age, c)| (c.level, *age))
         .map(|(_, c)| (c.guid, c.name.clone()))
 }
 
-/// Whether a roster name was minted by [`rig_char_name`] for this slot: a known race code, a known
-/// class code, this slot's word, and nothing but an optional `f` after it.
-fn is_rig_name(name: &str, slot: &str) -> bool {
+/// Whether a roster name was minted by [`rig_char_name`] for this checkout: a known race code, a
+/// known class code, this checkout's word, and nothing but an optional `f` after it.
+fn is_rig_name(name: &str, word: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     let Some(rest) = lower.get(3..).and_then(|r| r.get(3..)) else {
         return false;
     };
     let has_codes = RACE_CODES.iter().any(|(_, c)| lower.starts_with(c))
         && CLASS_CODES.iter().any(|(_, c)| lower[3..].starts_with(c));
-    has_codes && (rest == slot || rest == format!("{slot}f"))
+    has_codes && (rest == word || rest == format!("{word}f"))
 }
 
 /// Race id → the 3-letter name code. `Nel`/`Und` rather than the DBC's own prefixes: unambiguous,
@@ -770,7 +771,7 @@ mod tests {
 
     #[test]
     fn the_derived_name_is_deterministic_and_fits_the_server_limit() {
-        // `<Race3><Class3><slot-word>[f]`, normalized the way vmangos normalizes a player name.
+        // `<Race3><Class3><word>[f]`, normalized the way vmangos normalizes a player name.
         let name = |spec: &str, slot: &str| {
             let s = RigSpec::parse(spec).unwrap();
             let (race, class, gender) = s.body.unwrap();
@@ -835,9 +836,9 @@ mod tests {
 
     #[test]
     fn eviction_spends_the_body_that_is_cheapest_to_rebuild() {
-        // The slot is passed in, never read from the ambient build directory — these names are
-        // pool-1's, and taking the slot from `slot_word()` made this test pass in pool-1 and fail
-        // in every other worktree (and in the primary checkout, where it is `None`).
+        // The word is passed in, never read from the ambient checkout — these names are one
+        // checkout's, and taking the word from `rig_suffix()` made this test pass there and fail
+        // in every other checkout (and in one with no declaration, where it is `None`).
         let slot = "one";
         // Roster order IS create order (vmangos enumerates by `create_time`).
         let roster = [
@@ -859,8 +860,8 @@ mod tests {
         );
         // Nothing rig-named on this slot ⇒ nothing to evict; the caller errors rather than guessing.
         assert_eq!(evictable(&roster[..2], None, slot), None);
-        // And another slot's leftovers are invisible: the same roster, read as pool-3, evicts
-        // nothing. This is the assertion that would have caught the ambient-slot read.
+        // And another checkout's leftovers are invisible: the same roster, read with another word,
+        // evicts nothing. This is the assertion that would have caught the ambient read.
         assert_eq!(evictable(&roster, None, "three"), None);
     }
 

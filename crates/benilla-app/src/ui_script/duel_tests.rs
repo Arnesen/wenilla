@@ -27,6 +27,7 @@ fn setup() -> UiScript {
 /// Accept queues `AcceptDuel()`.
 #[test]
 fn the_challenge_popup_shows_the_name_and_accept_queues_the_accept() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event(
         "DUEL_REQUESTED",
@@ -54,6 +55,7 @@ fn the_challenge_popup_shows_the_name_and_accept_queues_the_accept() {
 /// engine routes an escape through OnCancel.
 #[test]
 fn decline_and_escape_both_cancel() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("DUEL_REQUESTED", vec![ScriptValue::Str("Twomage".into())]);
     s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
@@ -69,6 +71,7 @@ fn decline_and_escape_both_cancel() {
 /// StaticPopup engine's per-tick branch, and `DUEL_INBOUNDS` takes it away.
 #[test]
 fn out_of_bounds_counts_down_and_inbounds_dismisses_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("DUEL_OUTOFBOUNDS", vec![]);
     assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
@@ -100,6 +103,7 @@ fn out_of_bounds_counts_down_and_inbounds_dismisses_it() {
 /// leave a stale popup or fire a second cancel.
 #[test]
 fn finishing_sweeps_both_dialogs_silently() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.fire_event("DUEL_REQUESTED", vec![ScriptValue::Str("Twomage".into())]);
     assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
@@ -123,6 +127,7 @@ fn finishing_sweeps_both_dialogs_silently() {
 /// their argument through so the app can resolve it.
 #[test]
 fn the_era_globals_queue_their_intents() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     s.run("AcceptDuel(); CancelDuel(); StartDuel('Onerogue'); StartDuelUnit('target')")
         .unwrap();

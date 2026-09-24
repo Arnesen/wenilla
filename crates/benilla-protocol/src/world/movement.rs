@@ -1,18 +1,10 @@
 use crate::messages::MovementInfo;
 use crate::wire::Vector3d;
 
-/// `MovementFlags::FORWARD` — the only movement flag benilla sets.
 pub(super) const MOVEMENT_FLAG_FORWARD: u32 = 0x1;
 
-/// A monotonic **client-uptime** millisecond stamp for the `MovementInfo` time field — the kind the real
-/// 1.12 client sends (`GetTickCount()`, ms since the client started), **not** wall-clock. vmangos reads it
-/// into `MovementInfo::ctime` and uses it only two ways (VERIFIED, decision 0057): a non-zero guard
-/// (`ctime == 0` reads as "not a client packet" and *pauses* its movement extrapolation) and *deltas*
-/// (`getMSTimeDiff`, so the epoch cancels). It never compares the value to its own clock, and it
-/// overwrites the field with its server clock before relaying to nearby players — so this value never
-/// reaches observers. Hence: match the real client's clock kind, wrap cleanly as a full `u32` (~49.7 days,
-/// which `getMSTimeDiff` handles), and keep it non-zero. (The old value was wall-clock masked to 31 bits,
-/// which folded backwards every ~24.85 days — a delta glitch the clean `u32` wrap avoids.)
+/// Ms since start for the `MovementInfo` time, as the 1.12 client's `GetTickCount()`, never 0:
+/// vmangos pauses extrapolation on 0 and otherwise uses only deltas, so a full `u32` wrap is safe.
 pub(super) fn client_uptime_ms() -> u32 {
     use std::sync::OnceLock;
     // `web_time::Instant`, not `std::time::Instant`: the browser has no clock behind the std one
@@ -26,7 +18,7 @@ pub(super) fn client_uptime_ms() -> u32 {
     (START.get_or_init(Instant::now).elapsed().as_millis() as u32).max(1)
 }
 
-/// Build a `MovementInfo` stamped with the client-uptime time ([`client_uptime_ms`]).
+/// Build a `MovementInfo` stamped with [`client_uptime_ms`].
 pub(super) fn movement_info(pos: [f32; 3], orientation: f32, flags: u32) -> MovementInfo {
     MovementInfo {
         flags,
@@ -37,11 +29,9 @@ pub(super) fn movement_info(pos: [f32; 3], orientation: f32, flags: u32) -> Move
             z: pos[2],
         },
         orientation,
-        // benilla never sets ON_TRANSPORT outbound yet (boarding/riding is decision 0438 phase 2) — the
-        // writer only emits the transport tail while the flag is set, so this is always dropped.
+        // Written only under ON_TRANSPORT, which benilla does not send.
         transport: None,
-        // Level swim (0) by default; the writer only emits the pitch tail while SWIMMING is set, and the
-        // controller supplies the live swim pitch through `send_movement` when it does.
+        // Written only under SWIMMING; `send_movement` supplies the live pitch then.
         pitch: 0.0,
         fall_time: 0,
         jump: None,
@@ -52,15 +42,13 @@ pub(super) fn movement_info(pos: [f32; 3], orientation: f32, flags: u32) -> Move
 mod tests {
     use super::*;
 
+    /// Never 0, and a stamp taken right after is not smaller; it wraps at `u32::MAX` ms.
     #[test]
-    fn client_uptime_ms_is_nonzero_and_monotonic() {
-        // The load-bearing property: vmangos treats `ctime == 0` as "not a client packet" and pauses its
-        // extrapolation, so our stamp must never be zero (the bug the old wall-clock value worked around).
-        // It must also be non-decreasing so `getMSTimeDiff` deltas stay sane.
+    fn client_uptime_ms_is_nonzero_and_back_to_back_calls_do_not_decrease() {
         let a = client_uptime_ms();
         let b = client_uptime_ms();
         assert!(a >= 1, "stamp is non-zero: {a}");
-        assert!(b >= a, "stamp is monotonic non-decreasing: {a} -> {b}");
+        assert!(b >= a, "the next stamp is not smaller: {a} -> {b}");
     }
 
     #[test]

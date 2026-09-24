@@ -50,6 +50,7 @@ fn alpha(s: &UiScript) -> f64 {
 /// captured cannot contain it.
 #[test]
 fn the_capture_is_asked_for_silently_and_only_the_answer_speaks() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     assert!(!shown(&s), "the status line starts hidden");
 
@@ -76,6 +77,7 @@ fn the_capture_is_asked_for_silently_and_only_the_answer_speaks() {
 /// engine is asked — otherwise that shot would have "Screen Captured" printed across it.
 #[test]
 fn a_second_press_inside_the_fade_clears_the_line_before_capturing() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("SCREENSHOT_SUCCEEDED", Vec::new());
     s.tick(0.5);
@@ -97,6 +99,7 @@ fn a_second_press_inside_the_fade_clears_the_line_before_capturing() {
 /// The 1.5 s fade: alpha falls with elapsed time and the frame takes itself off screen at the end.
 #[test]
 fn the_line_fades_out_over_the_reference_s_second_and_a_half() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("SCREENSHOT_SUCCEEDED", Vec::new());
 
@@ -114,6 +117,7 @@ fn the_line_fades_out_over_the_reference_s_second_and_a_half() {
 /// The failure path says so, in the reference's own words.
 #[test]
 fn a_failed_capture_shows_the_failure_string() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("SCREENSHOT_FAILED", Vec::new());
     assert!(shown(&s));

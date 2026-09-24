@@ -3,26 +3,21 @@ name = "benilla"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The launcher: build.rs stamps the git build id, main() hands it to benilla-app. A shim, so the stamp's every-commit rebuild dirties this package and not the app crate (decision 0993)"
+description = "The launcher: build.rs stamps the git build id and main() hands it to benilla-app, so a new commit rebuilds this package and not the app crate"
 
 [lints]
 workspace = true
 
 [features]
-# The dev/player seam, forwarded (decisions 0026 + 1173): this shim is the binary a player would
-# run, so `cargo build -p benilla --no-default-features` is the player build — and the gate.
+# The dev/player seam: `cargo build -p benilla --no-default-features` is the player build.
 default = ["dev"]
 dev = ["benilla-app/dev"]
-# Forwarded profiling switches, so `cargo run --features tracy -p benilla` keeps working.
+# Profiling switches, forwarded so `cargo run -p benilla --features tracy` works.
 tracy = ["benilla-app/tracy"]
 trace_chrome = ["benilla-app/trace_chrome"]
 
 [dependencies]
-# `default-features = false` is LOAD-BEARING, not tidiness: without it `cargo build -p benilla
-# --no-default-features` still builds the library with ITS defaults (a path dep gets its own),
-# so the player-build gate would compile the full dev tree and pass no matter what. Measured on
-# 1174's first green run — `cargo tree` listed bevy_egui either way. The `dev` feature above is
-# what turns the instruments back on, and it is on by default here.
+# `default-features = false`, or `--no-default-features` here still builds benilla-app with `dev`.
 benilla-app = { path = "../benilla-app", default-features = false }
 
 [build-dependencies]
@@ -31,6 +26,5 @@ benilla-buildstamp = { path = "../benilla-buildstamp" }
 [[bin]]
 name = "benilla"
 path = "src/main.rs"
-# No tests live here — and test-building this bin would relink the whole app in the test profile
-# on every sha change, which is the exact tax the shim exists to kill (decision 0993).
+# No tests here, and test-building this bin would relink the whole app on every commit.
 test = false

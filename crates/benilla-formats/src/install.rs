@@ -137,9 +137,12 @@ fn candidates_from(override_dir: Option<PathBuf>, exe_dir: Option<PathBuf>) -> V
 /// ```
 ///
 /// These tests read the **real** 1.12 install, which is gitignored and not on every machine
-/// (the contract: never commit Blizzard assets), so "no install" has always meant *pass without
+/// (`docs/METHOD.md`: never commit Blizzard assets), so "no install" has always meant *pass without
 /// asserting* rather than *fail*. That is deliberately unchanged; what changes is that the message
 /// now names every path that was tried, so a machine where the tests silently do nothing says why.
+///
+/// **Except where the gate says the data is here** — see [`skipped`]: under
+/// `BENILLA_REQUIRE_DATA=1` a skip is a failure.
 #[macro_export]
 macro_rules! wow_data_or_skip {
     () => {
@@ -149,9 +152,117 @@ macro_rules! wow_data_or_skip {
         match $crate::wow_data() {
             Some(data) => data,
             None => {
-                eprintln!(
-                    "skipping: no WoW install found — looked in {:?}",
-                    $crate::candidates()
+                $crate::skipped("no WoW install found", &$crate::candidates());
+                return $ret;
+            }
+        }
+    };
+}
+
+/// A data-gated test's skip, said out loud — and **refused when the gate says the data is here.**
+///
+/// libtest swallows a passing test's stderr, and `scripts/gates.sh` keeps no log of a green run,
+/// so a skip is invisible at exactly the place it matters: a resolver that has drifted reads as
+/// green. That is how the thirty addon-corpus tests skipped at every land for three weeks after
+/// the pool moved drives (2026-08-30 → 09-22) — the ladder looked beside the checkout, the slots
+/// had moved, and nothing said so. So the gate sets `BENILLA_REQUIRE_DATA=1` on the machine that
+/// has the data, and there a skip is what it actually is: a broken resolver, a missing link, a
+/// ladder that looks in the wrong place. A machine without the data keeps the skip — third-party
+/// content is not on every machine, and never in this repo.
+#[doc(hidden)]
+pub fn skipped(what: &str, looked_in: &[PathBuf]) {
+    skipped_under(
+        std::env::var_os("BENILLA_REQUIRE_DATA").is_some_and(|v| !v.is_empty() && v != "0"),
+        what,
+        looked_in,
+    );
+    // `$BENILLA_SKIP_LOG`: libtest swallows the line above, so a gate hands in a file and counts
+    // the skips after the run — a clone without the data sees how hollow its green is.
+    if let Some(log) = std::env::var_os("BENILLA_SKIP_LOG").filter(|p| !p.is_empty()) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+        {
+            // One write per line: parallel test threads append to the same file, and a
+            // formatted write is several syscalls that interleave.
+            let _ = f.write_all(format!("{what}\n").as_bytes());
+        }
+    }
+}
+
+/// [`skipped`] with the switch passed in, so the refusal is testable without touching the
+/// process environment (the same rule as [`candidates_from`]).
+fn skipped_under(required: bool, what: &str, looked_in: &[PathBuf]) {
+    let msg = format!("skipping: {what} — looked in {looked_in:?}");
+    assert!(
+        !required,
+        "{msg} — and BENILLA_REQUIRE_DATA is set: the gate resolved this data on this machine, \
+         so a skip here is a broken resolver or a missing link, not a missing install"
+    );
+    eprintln!("{msg}");
+}
+
+/// The vanilla addon corpus — the third-party addons the UI engine's real-addon tests run
+/// against — or `None` when it is not on this machine. Third-party content, never in this repo;
+/// the tests that need it skip through [`addon_corpus_or_skip`] the way the install's do.
+///
+/// Two rungs, the install's own shape: **`$BENILLA_ADDON_CORPUS`**, then
+/// **`<project folder>/wow-addons-vanilla`** — `dev` only, the same `CARGO_MANIFEST_DIR` hop as
+/// the install's rung 2. That folder is a gitignored symlink beside `WoW`, laid by whoever set the
+/// checkout up; the corpus itself lives outside the tree.
+///
+/// **Why one rung and a link, not a walk up the tree.** Five test files carried their own copy of
+/// this resolver, and every copy looked for a *sibling* of the checkout — the manifest's ancestors
+/// two to four, joined with the folder name. That found the corpus from the primary and from the
+/// old pool root beside it, and nothing once the pool moved to the external drive (2026-08-30):
+/// from a worktree on another volume the three hops name three folders that do not exist.
+/// Every land gates in a slot, so thirty tests — a ratchet among them — skipped at every land for
+/// three weeks. A resolver that looks *outside* the checkout answers according to where the
+/// checkout happens to sit; the install learned this in 1175, and this is the same rule for the
+/// second piece of external data the tests read.
+pub fn addon_corpus() -> Option<PathBuf> {
+    addon_corpus_candidates().into_iter().find(|c| c.is_dir())
+}
+
+/// Every place [`addon_corpus`] looks, in order, whether or not it exists — for the skip message.
+pub fn addon_corpus_candidates() -> Vec<PathBuf> {
+    addon_corpus_candidates_from(std::env::var_os("BENILLA_ADDON_CORPUS").map(PathBuf::from))
+}
+
+/// [`addon_corpus_candidates`] with the environment fact passed in — testable without touching
+/// the process environment, like [`candidates_from`].
+fn addon_corpus_candidates_from(override_dir: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(2);
+    if let Some(over) = override_dir {
+        out.push(over);
+    }
+    // The project folder — dev builds only, the install's rung 2 verbatim: a player build has no
+    // business knowing where a test corpus was.
+    #[cfg(feature = "dev")]
+    if let Some(root) = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2) {
+        out.push(root.join("wow-addons-vanilla"));
+    }
+    out
+}
+
+/// The addon corpus, or **skip this test** — [`wow_data_or_skip`]'s twin for the second piece of
+/// external data the tests read, with the same two spellings (`addon_corpus_or_skip!()` in a
+/// `-> ()` test, `addon_corpus_or_skip!(None)` in a helper returning `Option`) and the same
+/// `BENILLA_REQUIRE_DATA` refusal.
+#[macro_export]
+macro_rules! addon_corpus_or_skip {
+    () => {
+        $crate::addon_corpus_or_skip!(())
+    };
+    ($ret:expr) => {
+        match $crate::addon_corpus() {
+            Some(root) => root,
+            None => {
+                $crate::skipped(
+                    "no vanilla addon corpus (set $BENILLA_ADDON_CORPUS)",
+                    &$crate::addon_corpus_candidates(),
                 );
                 return $ret;
             }
@@ -261,5 +372,54 @@ mod tests {
             "the dev build lost its project-folder candidate ({}): {c:?}",
             root.display()
         );
+    }
+
+    /// The corpus ladder is the install's in shape: the override leads, and the project folder —
+    /// the checkout itself, never a sibling of it — is the only other rung a dev build has.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn the_corpus_ladder_is_override_then_the_project_folder_and_nothing_outside_it() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap();
+        let c = addon_corpus_candidates_from(Some(PathBuf::from("/opt/corpus")));
+        assert_eq!(
+            c,
+            vec![
+                PathBuf::from("/opt/corpus"),
+                root.join("wow-addons-vanilla")
+            ],
+            "{c:?}"
+        );
+        for c in addon_corpus_candidates_from(None) {
+            assert!(
+                c.starts_with(root),
+                "a corpus candidate outside the checkout ({}) — that is the resolver whose answer \
+                 moved when the pool did",
+                c.display()
+            );
+        }
+    }
+
+    /// A player build's corpus ladder is the override alone — a shipped binary knows no test
+    /// corpus, exactly as it knows no source tree.
+    #[cfg(not(feature = "dev"))]
+    #[test]
+    fn a_player_build_has_no_corpus_rung_of_its_own() {
+        assert_eq!(addon_corpus_candidates_from(None), Vec::<PathBuf>::new());
+    }
+
+    /// Unrequired, a skip is a line on stderr and the test goes on.
+    #[test]
+    fn a_skip_is_a_skip_where_nothing_requires_the_data() {
+        skipped_under(false, "no WoW install found", &[PathBuf::from("/nowhere")]);
+    }
+
+    /// Required, the same skip is the failure it actually is.
+    #[test]
+    #[should_panic(expected = "BENILLA_REQUIRE_DATA is set")]
+    fn a_skip_is_refused_where_the_gate_says_the_data_is_present() {
+        skipped_under(true, "no WoW install found", &[PathBuf::from("/nowhere")]);
     }
 }

@@ -1,21 +1,12 @@
-//! The guild tabard designer's wire (decision 1977; wow-re `system/ui/scratch/tabard-designer.md`
-//! §4, VERIFIED at the bytes): two `MSG_*` opcodes used in both directions, and the battlemaster
-//! greeting the same TU ships beside them.
-//!
-//! - `MSG_TABARDVENDOR_ACTIVATE 0x1F2` — out: `u64 npcGuid` (the NPC-click ladder's
-//!   TABARDDESIGNER arm, `0x5e00e0`); in: `u64 vendorGuid`, the only thing that opens the frame
-//!   (`0x5e70c0` → `0x4f5840`).
-//! - `MSG_SAVE_GUILD_EMBLEM 0x1F1` — out: `u64 vendorGuid` then the five `u32` design values in
-//!   the order *emblemStyle, emblemColor, borderStyle, borderColor, backgroundColor* (`0x5e03f0`);
-//!   in: one `u32` result (`0x5e70f0`), indexed into a six-row message table.
-//! - `CMSG_BATTLEMASTER_HELLO 0x2D7` — out: `u64 npcGuid`, no gate (`0x5e01a0`).
+//! The guild tabard designer's wire, two `MSG_*` opcodes used both ways, plus the battlemaster
+//! greeting.
 
 use std::io::{self, Read};
 
 use crate::wire::{read_u32_le, read_u64_le};
 
-/// Body of `MSG_SAVE_GUILD_EMBLEM` outbound: the vendor guid raw little-endian (not packed), then
-/// the five design values as `u32`s in the designer's slot order.
+/// Body of `MSG_SAVE_GUILD_EMBLEM` (0x1F1, client `0x5e03f0`): the raw vendor guid, then emblem
+/// style, emblem color, border style, border color and background color as `u32`s.
 pub fn save_guild_emblem(vendor: u64, design: [u32; 5]) -> Vec<u8> {
     let mut body = vendor.to_le_bytes().to_vec();
     for v in design {
@@ -24,29 +15,28 @@ pub fn save_guild_emblem(vendor: u64, design: [u32; 5]) -> Vec<u8> {
     body
 }
 
-/// Body of `MSG_TABARDVENDOR_ACTIVATE` outbound: the NPC guid and nothing else.
+/// Body of `MSG_TABARDVENDOR_ACTIVATE` (0x1F2, client `0x5e00e0`): the NPC guid.
 pub fn tabard_vendor_activate(npc: u64) -> Vec<u8> {
     npc.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_BATTLEMASTER_HELLO`: the NPC guid and nothing else.
+/// Body of `CMSG_BATTLEMASTER_HELLO` (0x2D7, client `0x5e01a0`, no gate): the NPC guid.
 pub fn battlemaster_hello(npc: u64) -> Vec<u8> {
     npc.to_le_bytes().to_vec()
 }
 
-/// `MSG_SAVE_GUILD_EMBLEM` inbound: one `u32` result.
+/// `MSG_SAVE_GUILD_EMBLEM` inbound (client `0x5e70f0`): the result row.
 pub(super) fn read_save_guild_emblem_result(r: &mut impl Read) -> io::Result<u32> {
     read_u32_le(r)
 }
 
-/// `MSG_TABARDVENDOR_ACTIVATE` inbound: the vendor guid.
+/// `MSG_TABARDVENDOR_ACTIVATE` inbound (`0x5e70c0`): the vendor guid. Only this opens the frame.
 pub(super) fn read_tabard_vendor_activate(r: &mut impl Read) -> io::Result<u64> {
     read_u64_le(r)
 }
 
-/// The reply handler's result table (`0x85fe88`, six rows — the consumer's own `0 ≤ result < 6`
-/// bound): the message-catalog key each result shows, `None` for row 5, the `0x1d1` sentinel that
-/// shows nothing. A result past the table is ignored outright.
+/// The reply's message keys (`0x85fe88`); row 5 is the `0x1d1` sentinel that shows nothing, and a
+/// result past the table is ignored.
 pub const GUILD_EMBLEM_RESULT_MESSAGES: [Option<&str>; 6] = [
     Some("ERR_GUILDEMBLEM_SUCCESS"),
     Some("ERR_GUILDEMBLEM_INVALID_TABARD_COLORS"),

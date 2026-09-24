@@ -1,11 +1,7 @@
-//! `--groundfx <spell_id>`: capture the **dest-anchored effect wire** a ground cast produces —
-//! the instrument for the B132 follow-up ("the cast lands but nothing shows"). GM-learn the
-//! spell, GM-fill mana (any class can then channel it), cast it at our own feet through the same
-//! `cast_spell_at_dest` body the client's world-click commit sends, and dump raw everything the
-//! server anchors at the point: every `DynamicObject` create (all `DYNAMICOBJECT_*` fields,
-//! labeled per vmangos `UpdateFields_1_12_1.h`), the `SPELL_GO`, and the removal edge with its
-//! measured lifetime. Run with `--seconds 25`+ so a channeled spell's whole life fits the window
-//! (Blizzard 10 channels 8 s and its object outlives the channel).
+//! `--groundfx <spell_id>`: the effect wire of a ground cast. Learns the spell, fills mana, casts
+//! it at our feet with the body a world click sends (`cast_spell_at_dest`), and dumps every
+//! `DynamicObject` create, the `SPELL_GO` and the removal with its lifetime. Blizzard (spell 10)
+//! channels 8 s and its object outlives the channel, so run with `--seconds 25`.
 
 use std::time::Instant;
 
@@ -40,18 +36,16 @@ fn dyn_field_is_f32(index: u16) -> bool {
     matches!(index, 4 | 10..=14)
 }
 
-/// `UNIT_FIELD_POWER1` (mana) for 1.12.1 — `OBJECT_END(6) + 0x11` (vmangos
-/// `UpdateFields_1_12_1.h:50`). The mana-ack gate below watches this on the self guid.
+/// `UNIT_FIELD_POWER1` (mana): `OBJECT_END` (6) + 0x11 (`UpdateFields_1_12_1.h:50`).
 const FIELD_UNIT_POWER1: u16 = 6 + 0x11;
 
 pub(crate) struct GroundFx {
     spell: u32,
     staged: bool,
     known: bool,
-    /// Set when the self unit's `UNIT_FIELD_POWER1` echoes the GM fill — BOTH chat commands
-    /// (`.learn`, `.modify mana`) execute deferred, and each needs its own server-side evidence
-    /// before the cast: a cast in the learn's batch is dropped as unknown (decision 0792's trap),
-    /// and one in the mana fill's batch refuses with no-power (observed live, reason 77).
+    /// Set once our `UNIT_FIELD_POWER1` shows the fill. `.learn` and `.modify mana` run deferred:
+    /// a cast before the learn lands is dropped as unknown, one before the fill fails with no
+    /// power (reason 77).
     mana_seen: bool,
     cast_sent: Option<Instant>,
     /// DynamicObject creates seen: (guid, seen-at, spell id from field 9).
@@ -77,10 +71,8 @@ impl GroundFx {
 
 impl Probe for GroundFx {
     fn poll(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Stage once the book is in: GM-learn the spell (skipped if already known — a prior run's
-        // leftover) and fill a mana pool any class can spend (the probe char may be a warrior).
-        // Both chat commands execute DEFERRED server-side, so the cast waits for the
-        // SMSG_LEARNED_SPELL ack (the same trap the --spells dest phase hit, decision 0792).
+        // Once the spell book is in, learn the spell unless known and fill mana, which any class
+        // can spend; the cast then waits for `SMSG_LEARNED_SPELL`.
         if !self.staged {
             let Some(book) = &cx.world.spell_book else {
                 return Ok(());
@@ -113,8 +105,7 @@ impl Probe for GroundFx {
             SessionEvent::SpellLearned { spell_id } if *spell_id == self.spell => {
                 self.known = true;
             }
-            // The mana-ack gate: the self unit's POWER1 showing a real pool — either the login
-            // create (a mage arrives full) or the `.modify mana` echo (the warrior's fill).
+            // The mana gate: our POWER1 shows a real pool, at login or after `.modify mana`.
             SessionEvent::ObjectCreate { guid, fields, .. }
             | SessionEvent::ObjectValues { guid, fields }
                 if *guid == cx.world.self_guid && !self.mana_seen =>
@@ -127,8 +118,7 @@ impl Probe for GroundFx {
                     println!("groundfx: self mana visible — the cast gate is open");
                 }
             }
-            // vmangos sends UPDATEFLAG_HAS_POSITION on every dynobj create, so the position is
-            // always live here. Field 9 (SPELLID) is dumped with the rest raw.
+            // Every vmangos dynobj create has `UPDATEFLAG_HAS_POSITION`, so the position is real.
             SessionEvent::ObjectCreate {
                 guid,
                 kind: EntityKind::DynamicObject,

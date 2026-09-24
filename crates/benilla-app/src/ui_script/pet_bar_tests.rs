@@ -128,6 +128,7 @@ fn texture_rect(
 /// painting what they should, and hidden again when the pet goes.
 #[test]
 fn the_shipped_pet_bar_drives_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
@@ -249,6 +250,7 @@ fn the_shipped_pet_bar_drives_end_to_end() {
 /// `IsPetAttackActive` fork — the one branch that makes the Attack button a toggle).
 #[test]
 fn clicks_route_through_the_attack_toggle_fork() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
@@ -310,6 +312,7 @@ fn clicks_route_through_the_attack_toggle_fork() {
 /// director; decision 1027 diverged from it and 1030 put it back.
 #[test]
 fn a_click_drops_the_ring_and_the_repaint_restores_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
@@ -353,6 +356,7 @@ fn a_click_drops_the_ring_and_the_repaint_restores_it() {
 /// looks like, and collapsing it to "hide the bar" would lose the state entirely.
 #[test]
 fn a_disabled_bar_greys_rather_than_hides() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
@@ -429,6 +433,7 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
 /// is the base position, so a pass that never fired would leave it exactly where the bug was.
 #[test]
 fn the_pet_bar_rises_and_sheds_its_shelf_over_the_bottom_left_bar() {
+    benilla_formats::wow_data_or_skip!();
     let (low_shelf, low_top) = pet_bar_row(false);
     let (high_shelf, high_top) = pet_bar_row(true);
 
@@ -454,6 +459,7 @@ fn the_pet_bar_rises_and_sheds_its_shelf_over_the_bottom_left_bar() {
 /// exists, and the reason an unnamed button's `Hide()` is conditional.
 #[test]
 fn dragging_a_pet_spell_between_slots_moves_it_through_the_shipped_handlers() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
@@ -507,6 +513,7 @@ fn dragging_a_pet_spell_between_slots_moves_it_through_the_shipped_handlers() {
 /// reference leaves it (l.253-255).
 #[test]
 fn the_lock_stops_the_pet_bar_drag_but_not_its_shift_click() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
@@ -556,6 +563,7 @@ fn the_lock_stops_the_pet_bar_drag_but_not_its_shift_click() {
 /// puts shift above the left/right split, so it never toggles autocast by accident.
 #[test]
 fn shift_clicking_a_pet_button_picks_it_up_rather_than_casting() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
@@ -598,6 +606,7 @@ fn shift_clicking_a_pet_button_picks_it_up_rather_than_casting() {
 /// one worth pinning. Read as "ordinary pets differ from clicks", this test would be lying.
 #[test]
 fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
@@ -661,7 +670,7 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
 
 /// A hunter bar hovered through the REAL gesture, with the real binding registry and the real CVar
 /// table behind it — `mouse_move` runs the shipped `<OnEnter>` with `this` bound, which is the only
-/// way this fork gets exercised the way nazriel exercised it.
+/// way this fork gets exercised the way a player's hover exercises it.
 ///
 /// Buttons are 30 px chained +8 from the bar's own origin: button 1 spans x[72,102] y[56,86] ⇒
 /// centre (87,71), button 4's left = 72 + 3·38 ⇒ centre (201,71) — the geometry
@@ -692,8 +701,7 @@ fn tooltip_line1(s: &UiScript) -> String {
 
 /// **B230 — Attack/Follow/Stay name their keybinding; the pet's own spells do not.**
 ///
-/// nazriel: *"On 1.12 when you hover over Attack, Follow, Stay pet action buttons they show the
-/// keybinding - which is not the case with Benilla"*. The reference agrees with him and is
+/// On 1.12, hovering Attack, Follow or Stay shows the button's keybinding in its tooltip. That is
 /// narrower than "the pet bar": `PetActionButton_OnEnter` (PetActionBarFrame.lua l.285-305) forks
 /// on `isToken or UberTooltips == "0"`, and only THAT branch concatenates
 /// `NORMAL_FONT_COLOR_CODE.." ("..GetBindingText(GetBindingKey("BONUSACTIONBUTTON"..id), "KEY_")..")"`.
@@ -705,6 +713,7 @@ fn tooltip_line1(s: &UiScript) -> String {
 /// which is what the stock `MicroButtonTooltipText` — the same idea, the other shape — produces).
 #[test]
 fn token_tooltips_name_their_binding_and_pet_spells_do_not() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = hovered_pet_bar();
 
     s.mouse_move(ATTACK_BUTTON.0, ATTACK_BUTTON.1);
@@ -742,6 +751,7 @@ fn token_tooltips_name_their_binding_and_pet_spells_do_not() {
 /// deliberate unbind to see, which is exactly what this does.
 #[test]
 fn an_unbound_token_row_renders_the_references_empty_parentheses() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = hovered_pet_bar();
     s.run(r#"SetBinding("CTRL-1")"#).unwrap();
     assert!(
@@ -770,6 +780,7 @@ fn an_unbound_token_row_renders_the_references_empty_parentheses() {
 /// at all because these Lua sites read it (the honest-tree rule's live-consumer half).
 #[test]
 fn ubertooltips_off_takes_the_spells_through_the_token_branch_and_moves_the_plate() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = hovered_pet_bar();
     s.set_cvar_engine("UberTooltips", "0");
 

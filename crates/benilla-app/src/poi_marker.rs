@@ -8,18 +8,17 @@
 //!
 //! **The reference does NOT give this its own drawing code.** It builds a synthetic `AreaPOI`
 //! record out of the packet and appends it to the minimap's landmark candidate list — one fixed
-//! static slot, so a new marker overwrites the old. Byte law and packet→record map:
-//! `wow-5875-re` `system/ui/scratch/gossip-poi-marker.md` (the §5 for this feature, folded back as 1516) — handler
-//! `0x4e2840`, `set_blip 0x6dac10` writing static slot **1** at `0xcea7d4`, and
-//! `minimap-poi-questdot.md` §A3's candidate array, which appends the static slots
-//! *unconditionally*, bypassing the DBC scan's `ContinentID`/`Flags & 1` gate. So it is a landmark
+//! static slot, so a new marker overwrites the old. Byte law and packet→record map (1516): handler
+//! `0x4e2840`, `set_blip 0x6dac10` writing static slot **1** at `0xcea7d4`, and the minimap's
+//! candidate array, which appends the static slots *unconditionally* (`0x6d8fa8`), bypassing
+//! the DBC scan's `ContinentID`/`Flags & 1` gate. So it is a landmark
 //! in every way that follows — the 0.8 in/out split, the `POIIcons` cell picked by `Icon`, the rim
 //! arrow, the nearest-3 `Importance` rank, the 694.444-yd rank cut (the marker gets **no**
 //! exemption from it — that belongs to the corpse slot `0xcea848`), the hover tooltip on both the
 //! icon and the arrow. This module holds only what is *specific* to the marker: the record, and
 //! its lifetime. The drawing is [`crate::minimap::blips`] and the world map's POI pool.
 //!
-//! **The lifetime is four ways to lose it, whichever comes first** (all VERIFIED, §5):
+//! **The lifetime is four ways to lose it, whichever comes first**:
 //! - **8 minutes.** `set_blip` stamps a deadline of `time() + 480` — *seconds*, not the
 //!   milliseconds a `GetTickCount` reading would suggest (`0x429580` is a cached `time()`; the
 //!   tick count is only its 500 ms cache check).
@@ -45,9 +44,8 @@ use crate::player::Player;
 /// The arrival clear's radius, squared, in yards² — `0x806b10` = 100 = (10 yd)², VERIFIED, and the
 /// compare is strict (`<`), so a marker exactly 10 yd away survives.
 const ARRIVE_CLEAR_YD_SQ: f32 = 100.0;
-/// How long a set of directions lasts before it drops itself: `time() + 480` **seconds**, VERIFIED
-/// (`set_blip 0x6dac10`'s deadline stamp; the §5 corrected the unit — 480 ms would be a marker you
-/// could never walk to).
+/// How long a set of directions lasts before it drops itself: `time() + 480` **seconds**
+/// (`set_blip 0x6dac10`'s deadline stamp; 480 ms would be a marker you could never walk to).
 const MARKER_TTL_SECS: f64 = 480.0;
 
 /// The one point of interest a guard's directions left on the map — a synthetic `AreaPOI` record,
@@ -79,8 +77,8 @@ impl PoiMarker {
         self.expires_at = now_secs + MARKER_TTL_SECS;
         self.poi = Some(AreaPoi {
             // The nearest-3 rim rank key is the packet's own `data` field, verbatim (`0x6dac4e`
-            // writes it to `+0x04 Importance` — the §5's P4 correction (1516); we had guessed a constant
-            // `0`). Shipped server data sends `0` in every row, which lands the marker in the
+            // writes it to `+0x04 Importance` — 1516's correction; we had guessed a constant `0`).
+            // Shipped server data sends `0` in every row, which lands the marker in the
             // first rank band: it out-ranks 28 of Kalimdor's 29 possible competitors outright and
             // ties Eastern Kingdoms' Importance-0 landmarks, winning those on distance.
             importance: wire.data,
@@ -138,11 +136,57 @@ fn clear_on_world_entry(
     }
 }
 
+/// The marker's packet handler (in the net handler table since 2318, moved out of the drain's npc
+/// arm file) — registered from [`PoiMarkerPlugin`].
+fn on_gossip_poi(
+    In(ev): In<benilla_protocol::SessionEvent>,
+    mut marker: ResMut<PoiMarker>,
+    current_map: Option<Res<benilla_world::world_map::CurrentMap>>,
+    real_clock: Res<Time<Real>>,
+) {
+    if let benilla_protocol::SessionEvent::GossipPoi(poi) = ev {
+        gossip_poi(
+            &poi,
+            &mut marker,
+            current_map.as_ref().map_or(0, |m| m.0),
+            real_clock.elapsed_secs_f64(),
+        );
+    }
+}
+
+/// The guard's directions (`SMSG_GOSSIP_POI`): drop the marker at that spot. Volunteered by the
+/// server for a gossip option carrying an `action_poi_id` — it answers nothing we asked for, and
+/// it does **not** end the gossip session on its own (vmangos `Player::OnGossipSelect`'s
+/// `GOSSIP_OPTION_GOSSIP` arm sends the POI *before* it decides whether to move the menu on, leave
+/// it, or close it).
+///
+/// `map_id` is the map the player is standing on, which is the only place the marker can mean
+/// anything — the wire carries no map field, and the reference reads its own current-map global at
+/// exactly this point. `now_secs` starts the marker's 8-minute clock (this module); it
+/// is the same real clock the corpse reclaim delay is stamped against (decision 0846).
+fn gossip_poi(
+    poi: &benilla_protocol::messages::GossipPoi,
+    marker: &mut PoiMarker,
+    map_id: u32,
+    now_secs: f64,
+) {
+    debug!(
+        "net: directions to \"{}\" at ({:.1}, {:.1}) — icon {}, flags {:#x}",
+        poi.name, poi.pos[0], poi.pos[1], poi.icon, poi.flags
+    );
+    marker.set(poi, map_id, now_secs);
+}
+
 /// The guard's directions marker — see the module doc.
 pub(crate) struct PoiMarkerPlugin;
 
 impl Plugin for PoiMarkerPlugin {
     fn build(&self, app: &mut App) {
+        {
+            use crate::net::NetHandlerApp;
+            use benilla_protocol::SessionEventKind as K;
+            app.net_handler(K::GossipPoi, on_gossip_poi);
+        }
         app.init_resource::<PoiMarker>()
             .add_systems(Update, (expire_marker, clear_on_world_entry));
     }
@@ -192,7 +236,7 @@ mod tests {
         assert_eq!(poi.continent_id, 0, "the map it was given on");
     }
 
-    /// The rim rank key is the packet's `data`, verbatim — not a constant of ours (§5 P4).
+    /// The rim rank key is the packet's `data`, verbatim — not a constant of ours (`0x6dac4e`).
     #[test]
     fn the_rank_key_is_the_packets_data_field() {
         let mut w = wire("The Bank", -8900.0, 600.0);
@@ -215,8 +259,8 @@ mod tests {
         assert_eq!(m.expires_at, 100.0 + MARKER_TTL_SECS);
     }
 
-    /// The deadline is 480 **seconds** — long enough to walk across a capital, which is the whole
-    /// point of the §5's unit correction.
+    /// The deadline is 480 **seconds**, not milliseconds (`0x429580` is a cached `time()`) — long
+    /// enough to walk across a capital.
     #[test]
     fn the_deadline_is_eight_minutes_from_when_it_was_given() {
         let mut m = PoiMarker::default();

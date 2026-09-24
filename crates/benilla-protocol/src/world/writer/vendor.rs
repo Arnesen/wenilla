@@ -1,12 +1,5 @@
-//! The vendor window's `WorldWriter` sends — list the stock, buy, sell, buy back, repair. Bodies in
-//! [`crate::messages::vendor`], whose scope this mirrors. Split out of `writer/mod.rs`
-//! (decision 0636).
-//!
-//! Note the two different item identities the family uses: buying names the item **template
-//! entry** (not the vendor row's `muid`), while selling and repairing name the **item guid** of the
-//! thing in our bags, and buyback names an absolute player-array slot 69–80. Only the two failures
-//! answer with a packet (`SMSG_BUY_FAILED` / `SMSG_SELL_ITEM`'s error shape); every success is
-//! ordinary `UPDATE_OBJECT` traffic.
+//! The vendor sends. Buying names an item template entry, not the vendor row's `muid`; selling and
+//! repairing name the item guid in our bags.
 
 use anyhow::Result;
 
@@ -15,9 +8,7 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// Ask a vendor's stock (`CMSG_LIST_INVENTORY`, layout in [`messages::list_inventory`]) — the
-    /// server requires `UNIT_NPC_FLAG_VENDOR` + the player alive (`ItemHandler.cpp:693`). Answered
-    /// by `SMSG_LIST_INVENTORY` (a `VendorInventory` event).
+    /// `CMSG_LIST_INVENTORY`: needs `UNIT_NPC_FLAG_VENDOR` and us alive (`ItemHandler.cpp:693`).
     pub fn list_inventory(&mut self, vendor_guid: u64) -> Result<()> {
         self.send(
             opcode::CMSG_LIST_INVENTORY,
@@ -25,10 +16,8 @@ impl WorldWriter {
         )
     }
 
-    /// Buy from a vendor (`CMSG_BUY_ITEM`, layout in [`messages::buy_item`]): `entry` is the item
-    /// **template** id (not the vendor row's `muid`), `count` the number of stacks. Auto-places
-    /// into the first free bag slot. Success updates the vendor stock (`SMSG_BUY_ITEM`) and
-    /// delivers the item via the normal item-create path; refusal answers `SMSG_BUY_FAILED`.
+    /// `CMSG_BUY_ITEM`: `count` stacks into the first free bag slot; answered by `SMSG_BUY_ITEM`
+    /// with the new stock, or by `SMSG_BUY_FAILED`.
     pub fn buy_item(&mut self, vendor_guid: u64, entry: u32, count: u8) -> Result<()> {
         self.send(
             opcode::CMSG_BUY_ITEM,
@@ -36,10 +25,8 @@ impl WorldWriter {
         )
     }
 
-    /// Buy into a **named** container slot (`CMSG_BUY_ITEM_IN_SLOT`, layout in
-    /// [`messages::buy_item_in_slot`]) — the merchant cursor's drop, as against [`Self::buy_item`]'s
-    /// auto-place from a row click. `bag_guid` is the container object's guid, or the player's own
-    /// for the backpack and the equipment slots.
+    /// `CMSG_BUY_ITEM_IN_SLOT`: the merchant cursor's drop. `bag_guid` is the container's guid, or
+    /// the player's own for the backpack and the equipment slots.
     pub fn buy_item_in_slot(
         &mut self,
         vendor_guid: u64,
@@ -54,10 +41,8 @@ impl WorldWriter {
         )
     }
 
-    /// Sell an item to a vendor (`CMSG_SELL_ITEM`, layout in [`messages::sell_item`]): `count` 0 =
-    /// sell the whole stack. Success is silent (the item vanishes + coinage rises via
-    /// `UPDATE_OBJECT`); refusal answers `SMSG_SELL_ITEM`'s error shape (a `VendorSellFailed`
-    /// event).
+    /// `CMSG_SELL_ITEM`: `count` 0 sells the whole stack. Success is silent; a refusal comes back
+    /// as `SMSG_SELL_ITEM`'s error shape.
     pub fn sell_item(&mut self, vendor_guid: u64, item_guid: u64, count: u8) -> Result<()> {
         self.send(
             opcode::CMSG_SELL_ITEM,
@@ -65,9 +50,8 @@ impl WorldWriter {
         )
     }
 
-    /// Buy a sold item back (`CMSG_BUYBACK_ITEM`, layout in [`messages::buyback_item`]): `slot` is
-    /// the absolute player-array buyback slot 69–80. Success is the item re-creating + coinage
-    /// falling via `UPDATE_OBJECT`; refusal answers `SMSG_BUY_FAILED`.
+    /// `CMSG_BUYBACK_ITEM`: `slot` is the absolute player-array buyback slot, 69 to 80; a refusal
+    /// is `SMSG_BUY_FAILED`.
     pub fn buyback_item(&mut self, vendor_guid: u64, slot: u32) -> Result<()> {
         self.send(
             opcode::CMSG_BUYBACK_ITEM,
@@ -75,9 +59,7 @@ impl WorldWriter {
         )
     }
 
-    /// Repair at a repair-capable vendor (`CMSG_REPAIR_ITEM`, layout in
-    /// [`messages::repair_item`]): `item_guid` 0 = repair everything. No dedicated answer packet —
-    /// durability rises + coinage falls via `UPDATE_OBJECT`.
+    /// `CMSG_REPAIR_ITEM`: `item_guid` 0 repairs everything; there is no reply packet.
     pub fn repair_item(&mut self, vendor_guid: u64, item_guid: u64) -> Result<()> {
         self.send(
             opcode::CMSG_REPAIR_ITEM,

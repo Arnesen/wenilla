@@ -35,10 +35,10 @@ use crate::net::{ClientCommand, MoveKind};
 
 use super::Player;
 
-/// How often (s) we send a `MSG_MOVE_HEARTBEAT` while moving. **VERIFIED** against wow-5875-re
-/// (collision node, "the move-send cadence"): the local-player send-deadline `mgr+0x130` is armed to
-/// `clientTime + 500 ms` (`0x615b80`) — the wire report is the per-transition broadcast plus this
-/// ~500 ms-paced heartbeat, independent of the 250 ms physics substeps.
+/// How often (s) we send a `MSG_MOVE_HEARTBEAT` while moving: the local-player send-deadline
+/// `mgr+0x130` is armed to `clientTime + 500 ms` (`0x615b80`) — the wire report is the
+/// per-transition broadcast plus this ~500 ms-paced heartbeat, independent of the 250 ms physics
+/// substeps.
 const HEARTBEAT_INTERVAL: f32 = 0.5;
 /// The move-flag bits we put on the wire — the base directional / turn / walk set **plus `FALLING`**
 /// (= `MOVEFLAG_JUMPING` 0x2000): we serialize the jump tail (`zspeed, cos, sin, xyspeed`) whenever it's
@@ -129,7 +129,7 @@ pub(super) struct ArcEdges {
 /// Stream this frame's movement to the server the way the real client does: a `MSG_MOVE_*` per movement-
 /// *axis* transition (start/stop forward-back, strafe, turn), a JUMP on take-off, a SET_FACING every
 /// frame the facing changes off the turn axis, and a HEARTBEAT every ~500 ms while moving — each
-/// carrying the current `MovementInfo`. **VERIFIED** against wow-5875-re (collision "move-send cadence"):
+/// carrying the current `MovementInfo`:
 /// the move-state-change broadcaster `0x61a820` selects the wire opcode *from the flag delta*
 /// (`0x619f00`), and the flag report is exactly "per-transition broadcast + ~500 ms heartbeat" — with
 /// the *facing* report its own independent emitter alongside it (decision 0617: in the 1.12.1 sniff
@@ -301,7 +301,7 @@ pub(super) fn stream_self_movement(
     // not a carve-out: the wire mirrors actual motion (0056). The reference's airborne silence is a
     // real flags-side mechanism — while FALLING, `StartMove 0x7c6ae0` defers a new press into an inert
     // latch (`0x20000`/`0x40000`) instead of flipping the direction bit, "**unless nothing is
-    // currently moving**" (wow-re `hvel-fall-arc.md` Q3, VERIFIED bytes) — and the broadcaster
+    // currently moving**" — and the broadcaster
     // `0x61a820` picks its opcode from the *flag delta*, so a deferred press produces no delta and
     // no packet. In the one non-deferred case the bit really flips, so the transition really
     // broadcasts. That case is exactly our nudge (`mover::step`: airborne, nothing moving, a
@@ -317,7 +317,7 @@ pub(super) fn stream_self_movement(
     //
     // **A fall that had no jump opens with NOTHING** — decision 1464, and the third of 0053's
     // inventions to be retired by the bytes. We used to push an immediate heartbeat here "so
-    // observers start the arc promptly"; wow-re's §5 refuted it three ways: the move-state
+    // observers start the arc promptly"; the reference refutes it three ways: the move-state
     // broadcaster `0x61a820` gates every send on the *locomotion nibble* (`61a99d test al,0xf`)
     // and FALLING/`0x2000` lives in `ah`, so a flags change that is only the fall bit never
     // broadcasts at all; every non-jump `StartFalling 0x7c61f0` site seeds `+0xa0 = 0.0f` while
@@ -347,10 +347,9 @@ pub(super) fn stream_self_movement(
         send_move!(MoveKind::FallLand);
     }
     // Swim transition: the real client announces entering/leaving the water with a dedicated
-    // MSG_MOVE_START_SWIM (0xca) / STOP_SWIM (0xcb) the frame the `SWIMMING` bit flips (VERIFIED, wow-re
-    // swim-transition — the local `0x6030c0` decision enqueues it), rather than letting the flag ride
-    // the next heartbeat. Airborne and swimming are mutually exclusive, so this never races the arc
-    // lifecycle above.
+    // MSG_MOVE_START_SWIM (0xca) / STOP_SWIM (0xcb) the frame the `SWIMMING` bit flips (the local
+    // `0x6030c0` decision enqueues it), rather than letting the flag ride the next heartbeat.
+    // Airborne and swimming are mutually exclusive, so this never races the arc lifecycle above.
     if added & move_flags::SWIMMING != 0 {
         send_move!(MoveKind::StartSwim);
     } else if removed & move_flags::SWIMMING != 0 {
@@ -406,7 +405,7 @@ pub(super) fn stream_self_movement(
     // SET_FACING — more than every other movement opcode combined — streamed at *frame* cadence (median
     // 41 ms between them, p25 23 ms, minimum 17 ms) and, decisively, **while moving**: 116 of the 179
     // carry a direction bit (`Forward` ×68, `StrafeRight` ×12, `Forward+StrafeRight` ×9, `Backward` ×12,
-    // `Forward+Falling` ×4, …). There is no rate limit and no angular epsilon — wow-re's `0x617100`
+    // `Forward+Falling` ×4, …). There is no rate limit and no angular epsilon — `0x617100`
     // (SetFacing-then-send) reports whenever `0x617170`'s **exact-equality** change detector says the
     // facing differs at all, so a frame that didn't move the mouse sends nothing and a frame that did
     // sends one packet. (Our own `face_yaw` is likewise only written by real input, so the exact
@@ -437,7 +436,7 @@ pub(super) fn stream_self_movement(
     //
     // **And it runs while FALLING too** (decision 1464). This arm used to carry `&& !falling`,
     // defended as "the real client sends a normal-length jump with no mid-air packet at all
-    // (sniff-verified)" — which wow-re's §5 refuted on both halves against the same 1.12.1 capture.
+    // (sniff-verified)" — which the same 1.12.1 capture refutes on both halves.
     // `MSG_MOVE_JUMP` is the **44-byte** form (the jump quad is present, `vz = -7.955547`, matching
     // the `.text` constant `0xc0fe93d8` bit for bit), and mid-air packets are routine: heartbeats
     // and a mid-air SET_FACING, all 44 B. The "untraced trigger" behind the sniff's sparse mid-air
@@ -496,8 +495,7 @@ pub(super) fn stream_self_movement(
 /// (decision 1935). Accumulate while the mover holds; report the total once, on the release edge.
 ///
 /// **The law is "time the movement simulation advanced through without integrating"** — not "a
-/// long frame", which is what this packet is usually described as. wow-re's carve
-/// (`collision/scratch/move-time-skipped-law.md`, §5-verified, landed 2026-09-03) found **four**
+/// long frame", which is what this packet is usually described as. The reference has **four**
 /// emission sites feeding one builder `0x600be0`, and the long-frame one (`0x616642 cmp esi,0xfa`
 /// → send `dt − 250`) is only one of them and not the common one. The two that dominate real
 /// traffic are the **no-geometry** pair: the resolve entry's swept query returning nothing
@@ -525,9 +523,9 @@ pub(super) fn stream_self_movement(
 /// The other two sites are deliberately unbuilt. The long-frame one has no meaning here: benilla
 /// has no 250 ms substep clamp — it integrates the whole frame — so a long frame is time we
 /// *spent*, not time we skipped, and reporting it would be a lie about our own simulation. The
-/// `[CMovement+0x40] & 0x8000000` free-advance bit's own setter is not modelled at all. wow-re's
-/// own verdict on the build order says as much: a client implementing cases 1–3 matches every
-/// packet in the shipped captures.
+/// `[CMovement+0x40] & 0x8000000` free-advance bit's own setter is not modelled at all, and need
+/// not be: a client implementing the other three sites matches every packet in the shipped
+/// captures.
 fn stream_skipped_time(sender: &Sender<ClientCommand>, player: &mut Player, skip: SkipClock) {
     if skip.held {
         player.skipped_ms += skip.dt * 1000.0;
@@ -578,6 +576,64 @@ pub(super) fn park_mover(sender: &Sender<ClientCommand>, player: &mut Player) {
     });
     player.move_flags = 0;
     player.last_facing = facing;
+}
+
+/// The rider's boat-local pose for the wire's `ON_TRANSPORT` tail, or `None` off a deck.
+/// `bevy_to_wow` is a pure basis rotation, so the boat-local Bevy vector converts directly, and the
+/// local orientation is `face_yaw − boat_yaw` (the GetAbsoluteFacing law in reverse), normalized
+/// like any wire orientation.
+pub(super) fn wire_transport(player: &Player) -> Option<TransportPose> {
+    player.ride.as_ref().map(|r| {
+        let local = bevy_to_wow(r.local_pos);
+        TransportPose {
+            guid: r.guid,
+            pos: benilla_protocol::wire::Vector3d {
+                x: local[0],
+                y: local[1],
+                z: local[2],
+            },
+            orientation: (player.face_yaw - r.boat_yaw).rem_euclid(std::f32::consts::TAU),
+        }
+    })
+}
+
+/// **The forced-speed acks owed on a frame the controller does not drive** — a server spline
+/// (`server_riding`), a fear (`control_lost`) or a mover hand-off (`reseat`). Those frames return
+/// before [`stream_self_movement`], which is where a controlled frame's acks go out, so until this
+/// the change was applied locally and never answered: vmangos holds an unacked change for
+/// `PendingAckResponseTime` (4 s) before enforcing it, counts it in `OnFailedToAckChange` (a kick
+/// under the default anticheat penalty) and blocks the graveyard repop while one is pending. The
+/// reference acks from its per-mover drain whoever is driving (`0x616142`/`0x61812d`).
+///
+/// The payload is the honest state we last reported: our streamed flags (a ride's deliberate
+/// FORWARD included) with the transport tail when we are on a deck, minus the airborne pair — no
+/// arc is being integrated on these frames, so there is no jump tail to send with them.
+pub(super) fn ack_speeds_undriven(
+    sender: &Sender<ClientCommand>,
+    player: &Player,
+    acks: &[crate::net::SpeedChangeMessage],
+) {
+    let transport = wire_transport(player);
+    let mut flags =
+        player.move_flags & OUTBOUND_FLAG_MASK & !(move_flags::FALLING | move_flags::FALLING_FAR);
+    if transport.is_none() {
+        flags &= !move_flags::ON_TRANSPORT; // flag and tail travel together
+    }
+    for ack in acks {
+        let _ = sender.send(ClientCommand::ForceSpeedAck {
+            kind: ack.kind,
+            guid: ack.guid,
+            counter: ack.counter,
+            speed: ack.speed,
+            flags,
+            pos: bevy_to_wow(player.pos),
+            orientation: player.face_yaw.rem_euclid(std::f32::consts::TAU),
+            pitch: 0.0,
+            fall_time: 0,
+            jump: None,
+            transport: transport.filter(|_| flags & move_flags::ON_TRANSPORT != 0),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -937,8 +993,8 @@ mod tests {
     }
 
     /// **A fall that had no jump opens with nothing, and then heartbeats on the ordinary deadline**
-    /// — decision 1464, replacing two 0053-era inventions with the law wow-re's §5 read off the
-    /// broadcaster and reproduced in the 1.12.1 capture: `echo → heartbeats every 500 ms while the
+    /// — decision 1464, replacing two 0053-era inventions with the law read off the broadcaster
+    /// `0x61a820` and reproduced in the 1.12.1 capture: `echo → heartbeats every 500 ms while the
     /// fall lasts → FALL_LAND`, the parenthesis empty for any fall shorter than the deadline.
     ///
     /// The opener is the load-bearing half. It is the only packet that could put `MOVEFLAG_JUMPING`
@@ -1438,6 +1494,73 @@ mod tests {
             "the parked facing is normalized into [0, 2π), got {orientation}"
         );
         assert_eq!(player.move_flags, 0, "bookkeeping is zeroed after parking");
+    }
+
+    /// **A forced speed change is acked on a frame nobody is driving** — a fear, a server spline,
+    /// a mover hand-off. Those frames return before the stream, which is where a controlled
+    /// frame's acks go out, so the change was applied and never answered (vmangos enforces it 4 s
+    /// late, counts the miss toward its anticheat kick, and blocks the graveyard repop meanwhile).
+    /// The payload is the honest reported word: the ride's FORWARD kept, the airborne pair dropped
+    /// (no arc tail exists here), and `ON_TRANSPORT` only with the tail that must travel with it.
+    #[test]
+    fn a_speed_change_is_acked_while_not_driving() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let ack = crate::net::SpeedChangeMessage {
+            guid: 7,
+            kind: benilla_protocol::SpeedKind::Run,
+            counter: 3,
+            speed: 3.5,
+        };
+
+        // A spline ride reporting FORWARD, off any deck, with a stale ON_TRANSPORT bit.
+        let player = Player {
+            move_flags: move_flags::FORWARD | move_flags::FALLING | move_flags::ON_TRANSPORT,
+            face_yaw: -1.0,
+            ..Default::default()
+        };
+        ack_speeds_undriven(&tx, &player, &[ack]);
+        let Ok(ClientCommand::ForceSpeedAck {
+            counter,
+            speed,
+            flags,
+            orientation,
+            transport,
+            jump,
+            ..
+        }) = rx.try_recv()
+        else {
+            panic!("the change is acked");
+        };
+        assert_eq!((counter, speed), (3, 3.5), "the ack echoes the change");
+        assert_eq!(
+            flags,
+            move_flags::FORWARD,
+            "FORWARD kept; FALLING and a tailless ON_TRANSPORT dropped"
+        );
+        assert!(transport.is_none() && jump.is_none());
+        assert!((0.0..TAU).contains(&orientation));
+        assert!(rx.try_recv().is_err(), "one ack per change");
+
+        // On a deck: the transport bit rides with its tail.
+        let player = Player {
+            move_flags: move_flags::ON_TRANSPORT,
+            ride: Some(super::super::state::PlayerRide {
+                entity: bevy::ecs::entity::Entity::PLACEHOLDER,
+                guid: 0x1F,
+                local_pos: bevy::math::Vec3::ZERO,
+                boat_yaw: 0.0,
+            }),
+            ..Default::default()
+        };
+        ack_speeds_undriven(&tx, &player, &[ack]);
+        let Ok(ClientCommand::ForceSpeedAck {
+            flags, transport, ..
+        }) = rx.try_recv()
+        else {
+            panic!("the change is acked");
+        };
+        assert_eq!(flags, move_flags::ON_TRANSPORT);
+        assert_eq!(transport.map(|t| t.guid), Some(0x1F));
     }
 
     /// **A knockback launch acks, and sends no `MSG_MOVE_JUMP`** (decision 1702).

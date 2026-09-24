@@ -53,6 +53,7 @@ fn exp_bar_harness() -> UiScript {
 /// transparent and the hover silently never fires, which no tooltip assertion alone would catch.
 #[test]
 fn the_xp_bar_takes_the_mouse_and_explains_itself() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = exp_bar_harness();
     s.resolve();
 
@@ -106,6 +107,7 @@ fn the_xp_bar_takes_the_mouse_and_explains_itself() {
 /// pool whose span runs past the level's end hides the tick but keeps the rested blue.
 #[test]
 fn the_exhaustion_tick_marks_where_rested_runs_out() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = exp_bar_harness();
 
     s.set_player_xp(1000, 10000);
@@ -113,8 +115,8 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.resolve();
 
-    // The binding trio underneath (the app-feed shape the XML consumes) — the byte-verified
-    // contract (wow-re rested-xp-bindings.md, decision 1087).
+    // The binding trio underneath (the app-feed shape the XML consumes) — the reference's
+    // contract (`0x48d350`, `0x48d3f0`, `0x516ea0`; decision 1087).
     let (id, name, mult) = s
         .eval::<(i64, String, f64)>("return GetRestState()")
         .unwrap();
@@ -220,6 +222,7 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
 /// hides it — the ref's own load order, ending hidden.
 #[test]
 fn the_max_level_rail_replaces_the_xp_bar_at_60() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = exp_bar_harness();
     s.set_player_xp(1000, 10000);
     s.set_rest_state(1, 700, true);
@@ -271,6 +274,7 @@ fn the_max_level_rail_replaces_the_xp_bar_at_60() {
 /// re-stamp can lift a lower layer over them.
 #[test]
 fn the_gryphons_outrank_the_bars_across_hide_show_cycles() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = exp_bar_harness();
     s.set_player_xp(300, 400);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -307,6 +311,7 @@ fn the_gryphons_outrank_the_bars_across_hide_show_cycles() {
 /// 0↔1 edge — the `statusBarText` cvar that pins it on permanently reads OFF here).
 #[test]
 fn the_xp_bar_numerals_show_on_hover() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = exp_bar_harness();
     s.set_player_xp(1234, 5678);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -342,6 +347,7 @@ fn the_xp_bar_numerals_show_on_hover() {
 /// held-open newbie tip, once (the handshake is consumed).
 #[test]
 fn the_rest_state_line_joins_the_held_open_tooltip() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = exp_bar_harness();
     s.set_player_xp(1000, 10000);
     s.set_rest_state(1, 700, true);

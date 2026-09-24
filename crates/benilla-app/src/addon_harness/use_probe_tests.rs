@@ -248,22 +248,6 @@ fn the_use_column_can_fail() {
     );
 }
 
-/// Where the corpus might be — the same resolver `render_tests` uses, so a machine without the
-/// third-party corpus skips rather than reddens.
-fn corpus() -> Option<PathBuf> {
-    if let Some(over) = std::env::var_os("BENILLA_ADDON_CORPUS") {
-        let p = PathBuf::from(over);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    (2usize..=4)
-        .filter_map(|up| manifest.ancestors().nth(up))
-        .map(|root| root.join("wow-addons-vanilla"))
-        .find(|c| c.is_dir())
-}
-
 /// **The real oracle: the director's two verified addons.**
 ///
 /// - `!OmniCC` **works** — its countdown numbers are on their screen. It must not be reported as
@@ -278,10 +262,9 @@ fn corpus() -> Option<PathBuf> {
 ///   silently stops touching them is exactly how this instrument has been wrong four times.
 #[test]
 fn the_directors_two_verified_addons_are_reachable_and_omnicc_is_not_broken() {
-    let Some(corpus) = corpus() else {
-        eprintln!("skipping: no vanilla addon corpus (set $BENILLA_ADDON_CORPUS)");
-        return;
-    };
+    benilla_formats::wow_data_or_skip!();
+    // The one resolver, and a skip the gate can refuse (`benilla_formats::install`).
+    let corpus = benilla_formats::addon_corpus_or_skip!();
     let fx = Fixtures::new("oracle");
     for name in ["!OmniCC", "Bagnon", "Bagnon_Core", "Bagnon_Forever"] {
         #[cfg(unix)]

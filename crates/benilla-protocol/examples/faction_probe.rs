@@ -1,11 +1,8 @@
-//! Diagnostic probe: stream object creates and print each unit's decoded
-//! `UNIT_FIELD_FACTIONTEMPLATE` (+ level/display id as sanity anchors), to check the descriptor
-//! decode against the server DB's `creature_template.faction`.
+//! Diagnostic probe: prints each streamed unit's `UNIT_FIELD_FACTIONTEMPLATE`, with level and
+//! display id, to check the descriptor decode against `creature_template.faction`.
 //!
-//! Run: `cargo run -p benilla-protocol --example faction_probe -- probeN pprobeN [host]`
-//! — the slot-keyed probe account (method.md "The local vmangos server"). The account is a
-//! REQUIRED arg with no default: a default was once `one`, the director's account, where a
-//! probe login kicks their live session (decision 0530).
+//! Run: `cargo run -p benilla-protocol --example faction_probe -- probeN pprobeN [host]`. The
+//! account has no default, because a login kicks whoever is on the account.
 
 use std::time::{Duration, Instant};
 
@@ -16,10 +13,10 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let user = args
         .next()
-        .context("usage: faction_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
+        .context("usage: faction_probe -- <probeN> <pprobeN> [host] (a probe account)")?;
     let pass = args
         .next()
-        .context("usage: faction_probe -- <probeN> <pprobeN> [host] (slot-keyed account)")?;
+        .context("usage: faction_probe -- <probeN> <pprobeN> [host] (a probe account)")?;
     let host = args.next().unwrap_or_else(|| "localhost".into());
 
     let logon = benilla_protocol::logon(&host, &user, &pass)?;

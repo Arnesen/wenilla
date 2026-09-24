@@ -2,8 +2,9 @@
 //! placement). At tile-load each chunk's tufts are **scattered** (MCSH/normal-baked) into a per-chunk
 //! [`ClutterChunk`]; [`stream_chunk_clutter`] then **builds** its merged meshes lazily only while the
 //! chunk is within the ~70 yd detail-doodad horizon and tears them down past it — the reference's
-//! per-chunk `CDetailDoodadInst` lifecycle (`ground-effects.md` §7), which bounds live grass to a bubble
-//! and spreads the build across frames. [`ClutterPlugin`] owns the catalog + the lazy build lifecycle
+//! per-chunk `CDetailDoodadInst` lifecycle (build/unlink at the 70 yd `[0x867958]`), which bounds
+//! live grass to a bubble and spreads the build across frames. [`ClutterPlugin`] owns the
+//! catalog + the lazy build lifecycle
 //! independently of the terrain streamer; whichever streamer is active does the per-tile *scatter* (it
 //! has the tile's chunks) into the `ClutterChunk`s this builds — so the streamer can be swapped.
 
@@ -163,14 +164,13 @@ pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 70.0;
 /// — player-settable through **either** registered CVar over this one field, [`ClutterConfig::frill_density`]
 /// being the conversion: `WorldDetail` (the panel's stop, 0/1/2 → ×1/×2/×3) or `frillDensity` (the
 /// reference's own cells-per-chunk, 1..256), both arms in `benilla-app`'s `cvars`;
-/// `scale` resizes each doodad model; `alpha_ref` is the alpha-test cutout threshold
+/// `alpha_ref` is the alpha-test cutout threshold
 /// ([`DETAIL_DOODAD_ALPHA_REF`]); `fade_far` is the clutter draw-distance horizon (yd,
 /// [`DETAIL_DOODAD_FADE_FAR`]; fade starts at 0.75×). Initial values from `$WOW_CLUTTER_DENSITY` /
-/// `$WOW_CLUTTER_SCALE` / `$WOW_CLUTTER_ALPHA` / `$WOW_CLUTTER_FADE`; `density 0` disables clutter.
+/// `$WOW_CLUTTER_ALPHA` / `$WOW_CLUTTER_FADE`; `density 0` disables clutter.
 #[derive(Resource, Clone, Copy)]
 pub struct ClutterConfig {
     pub density: f32,
-    pub scale: f32,
     pub alpha_ref: f32,
     pub fade_far: f32,
 }
@@ -216,7 +216,6 @@ impl Default for ClutterConfig {
             // overdraw on the ground — the thing a bandwidth-bound part has least of. Medium is the
             // nearest stop no sparser than a fresh install, and the row is one drag from High.
             density: env("WOW_CLUTTER_DENSITY").unwrap_or(2.0).max(0.0),
-            scale: env("WOW_CLUTTER_SCALE").unwrap_or(1.0).max(0.01),
             alpha_ref: env("WOW_CLUTTER_ALPHA")
                 .unwrap_or(DETAIL_DOODAD_ALPHA_REF)
                 .clamp(0.0, 1.0),
@@ -237,7 +236,8 @@ pub(crate) struct ClutterGeometry(
 );
 
 /// One MCNK chunk's ground clutter as a **lazily-built** unit — the faithful per-chunk `CDetailDoodadInst`
-/// lifecycle (`ground-effects.md` §7): scattered + MCSH/normal-baked at tile-load, but its meshes are
+/// lifecycle (build/unlink at the 70 yd `[0x867958]`): scattered + MCSH/normal-baked at
+/// tile-load, but its meshes are
 /// built only while the chunk is within the detail-doodad horizon and torn down past it. This bounds live
 /// grass to a ~70 yd bubble (vs every loaded tile) and spreads the mesh-build over frames instead of one
 /// per-tile hitch. Owned by its tile (despawned on unload, which cascades to `built`).
@@ -402,7 +402,6 @@ pub(crate) fn scatter_tile_clutter(
 fn build_chunk_clutter(
     chunk_entity: Entity,
     models: &[(String, Vec<ShadedPlacement>)],
-    scale: f32,
     alpha_ref: f32,
     fade_far: f32,
     geometry: &mut ClutterGeometry,
@@ -437,8 +436,8 @@ fn build_chunk_clutter(
                 let base = positions.len() as u32;
                 let origin = wow_to_bevy(d.position);
                 let rot = Quat::from_rotation_y(d.yaw);
-                // Per-instance scale (client's random [0.9,1.1]) × the debug-panel size multiplier.
-                let inst_scale = scale * d.scale;
+                // Per-instance scale (the client's random [0.9,1.1]).
+                let inst_scale = d.scale;
                 // MCSH tint per placement — same value on every vertex of THIS instance, so all
                 // tris of one grass clump share the lit/shadowed colour. The shader multiplies
                 // `texture × vertex_color` in gamma space (the faithful MODULATE 1×).
@@ -626,7 +625,6 @@ pub(crate) fn stream_chunk_clutter(
         let built = build_chunk_clutter(
             ent,
             &cc.models,
-            cfg.scale,
             cfg.alpha_ref,
             cfg.fade_far,
             &mut geometry,
@@ -678,7 +676,7 @@ mod tests {
         ((254.0 - 256.0 * u) / 255.0).clamp(0.0, 252.0 / 255.0)
     }
 
-    /// wow-re `terrain/scratch/detail-doodad-distance-fade.md`: a 64-texel CLAMP/LINEAR ramp whose
+    /// The 64-texel CLAMP/LINEAR ramp (`0x6b235b` fills it, `[0x867958] = 70.0` anchors it): its
     /// texel centres give `alpha = (254 − 256u)/255`, capped at texel 0's `252/255`. So the plateau
     /// runs to 52.63672 yd (not 52.5), the ramp hits zero at 69.86328 yd (not 70), the slope is
     /// −0.0573670 per yard, and the 128/255 detail-doodad cutout erases a fully-opaque texel at

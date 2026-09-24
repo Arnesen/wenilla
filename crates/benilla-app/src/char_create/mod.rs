@@ -326,7 +326,7 @@ impl CreateSelection {
 }
 
 /// One clickable control on the screen — a single component so one query dispatches every button.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 enum CreateAction {
     Race(u8),
     Gender(u8),
@@ -372,8 +372,8 @@ fn class_file(class: u8) -> &'static str {
 
 // ── Input ────────────────────────────────────────────────────────────────────────────────────────
 
-/// The name box's caret blink clock (the ref's `blinkSpeed`, f32 default 0.5 s — wow-re
-/// `rf82-editbox-runtime.md`, period `E+0x370` / accumulator `E+0x374`), reset on every keystroke
+/// The name box's caret blink clock (the ref's `blinkSpeed`, f32 default 0.5 s — `0x77a790`,
+/// period `E+0x370` / accumulator `E+0x374`), reset on every keystroke
 /// so the caret is solid while you type.
 ///
 /// Its own resource rather than a [`CreateSelection`] field on purpose: ticking it there would trip
@@ -807,5 +807,119 @@ mod tests {
             warrior, mage,
             "the booth look must differ by class, or the preview cannot re-dress"
         );
+    }
+
+    /// **The chosen race / gender / class icon is LOCK-HIGHLIGHTED** — the reference's own verb:
+    /// `SetCharacterRace`, `SetCharacterClass` and `SetCharacterGender` each call
+    /// `button:LockHighlight()` on the one that is chosen and `UnlockHighlight()` on the rest
+    /// (`CharacterCreate.lua` l.171/254/326). In 1.12 that lock *is* the whole selected visual:
+    /// `CharacterCreateIconButtonTemplate` has its `<CheckedTexture>` commented out, leaving the
+    /// ADD `ButtonHilight-Square` and the HIGHLIGHT-layer `$parentHighlightText` — both of which
+    /// the lock is what lights.
+    ///
+    /// **The regression this exists for** (director, 2026-09-17: *"it doesn't show that mage is
+    /// selected"*): 2072 moved the sheen to one owner and gave this screen's visuals query a
+    /// `&mut LockHighlight` term — but [`crate::glue::widgets::icon_button`], the only spawn site
+    /// for all eighteen of these icons, inserted no such component. A `&mut T` term is a filter,
+    /// so the query matched **nothing**: no selected sheen and no icon name on race, gender or
+    /// class, for ten days. Every existing sheen test hand-spawned the flag, so the consumer was
+    /// covered and the producer was not — hence this one builds the icons with the real
+    /// `icon_button` and runs the real system.
+    #[test]
+    fn the_chosen_icons_are_lock_highlighted() {
+        use crate::glue::art::GlueArt;
+        use crate::glue::widgets::{icon_button, LockHighlight};
+
+        fn spawn_icons(mut commands: Commands, art: Res<GlueArt>) {
+            let font = Handle::<Font>::default();
+            commands.spawn(Node::default()).with_children(|p| {
+                for race in ALLIANCE {
+                    icon_button(
+                        p,
+                        &font,
+                        CreateAction::Race(race),
+                        None::<parts::DynIcon>,
+                        None,
+                        None::<parts::DynText>,
+                        "",
+                        &art,
+                        1.0,
+                    );
+                }
+                for sex in 0..2u8 {
+                    icon_button(
+                        p,
+                        &font,
+                        CreateAction::Gender(sex),
+                        None::<parts::DynIcon>,
+                        None,
+                        None::<parts::DynText>,
+                        "",
+                        &art,
+                        1.0,
+                    );
+                }
+                for slot in 0..8u8 {
+                    icon_button(
+                        p,
+                        &font,
+                        CreateAction::ClassSlot(slot),
+                        None::<parts::DynIcon>,
+                        None,
+                        None::<parts::DynText>,
+                        "",
+                        &art,
+                        1.0,
+                    );
+                }
+            });
+        }
+
+        let mut app = App::new();
+        app.init_resource::<GlueArt>()
+            // Human, female, MAGE — the director's own case. With no catalog loaded
+            // `race_classes` is the full list, so mage (8) is slot 6.
+            .insert_resource(CreateSelection {
+                race: 1,
+                sex: 1,
+                class: 8,
+                ..default()
+            })
+            .add_systems(Startup, spawn_icons)
+            .add_systems(Update, refresh::refresh_hover);
+        app.update();
+
+        let locked: Vec<CreateAction> = app
+            .world_mut()
+            .query::<(&CreateAction, &LockHighlight)>()
+            .iter(app.world())
+            .filter(|(_, l)| l.0)
+            .map(|(a, _)| *a)
+            .collect();
+        assert_eq!(
+            locked.len(),
+            3,
+            "exactly one race, one gender and one class icon is locked — got {locked:?}"
+        );
+        assert!(locked.contains(&CreateAction::Race(1)), "Human");
+        assert!(locked.contains(&CreateAction::Gender(1)), "female");
+        assert!(
+            locked.contains(&CreateAction::ClassSlot(6)),
+            "mage is slot 6 of [1,2,3,4,5,7,8,9,11] — and it is the mage icon the director saw \
+             unmarked"
+        );
+
+        // …and the selection moving takes the lock with it, rather than lighting a second icon.
+        app.world_mut().resource_mut::<CreateSelection>().class = 1; // warrior, slot 0
+        app.update();
+        let locked: Vec<CreateAction> = app
+            .world_mut()
+            .query::<(&CreateAction, &LockHighlight)>()
+            .iter(app.world())
+            .filter(|(_, l)| l.0)
+            .map(|(a, _)| *a)
+            .collect();
+        assert!(locked.contains(&CreateAction::ClassSlot(0)));
+        assert!(!locked.contains(&CreateAction::ClassSlot(6)));
     }
 }

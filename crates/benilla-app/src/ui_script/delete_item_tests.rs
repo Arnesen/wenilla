@@ -135,6 +135,7 @@ fn drop_in_world(s: &mut UiScript, item_id: u32, name: &str, quality: u32) {
 /// `DeleteCursorItem()` — the item leaves the cursor and queues its wire destroy.
 #[test]
 fn delete_item_confirm_shows_the_real_strings_and_yes_deletes() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     pick_up_and_drop_in_world(&mut s);
 
@@ -261,6 +262,7 @@ fn desaturated(s: &mut UiScript, button: &str) -> bool {
 /// this mainly proves the popup itself closes.)
 #[test]
 fn escape_closes_the_delete_confirm_popup() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     pick_up_and_drop_in_world(&mut s);
 
@@ -280,6 +282,7 @@ fn escape_closes_the_delete_confirm_popup() {
 /// DIFFERENT visible dialog is untouched by cursor traffic.
 #[test]
 fn the_delete_entry_polls_itself_hidden_and_other_dialogs_are_untouched() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     pick_up_and_drop_in_world(&mut s);
     assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
@@ -316,6 +319,7 @@ fn the_delete_entry_polls_itself_hidden_and_other_dialogs_are_untouched() {
 /// focused, and OKAY **disabled** until the confirm word is typed.
 #[test]
 fn a_rare_payload_raises_the_typed_confirm_with_okay_disabled() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     drop_in_world(&mut s, 871, "Flurry Axe", 4);
 
@@ -354,6 +358,7 @@ fn a_rare_payload_raises_the_typed_confirm_with_okay_disabled() {
 /// passes, and backing away from the word disables it again. Then OKAY destroys.
 #[test]
 fn typing_the_confirm_word_enables_okay_and_untyping_it_disables_again() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     drop_in_world(&mut s, 871, "Flurry Axe", 4);
 
@@ -408,6 +413,7 @@ fn typing_the_confirm_word_enables_okay_and_untyping_it_disables_again() {
 /// only while OKAY is enabled, so a reflexive Enter over a half-typed word does nothing at all.
 #[test]
 fn enter_in_the_box_destroys_only_once_okay_is_enabled() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     drop_in_world(&mut s, 871, "Flurry Axe", 4);
 
@@ -437,6 +443,7 @@ fn enter_in_the_box_destroys_only_once_okay_is_enabled() {
 /// left over from last time would be armed before the player read the dialog).
 #[test]
 fn no_on_the_typed_confirm_clears_and_leaves_the_box_empty_for_next_time() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     drop_in_world(&mut s, 871, "Flurry Axe", 4);
     s.run(r#"StaticPopup1EditBox:SetText("DELETE")"#).unwrap();
@@ -476,6 +483,7 @@ fn no_on_the_typed_confirm_clears_and_leaves_the_box_empty_for_next_time() {
 /// cancel here, which the earlier form of this test pinned.
 #[test]
 fn escape_in_the_typed_confirms_box_is_swallowed_as_the_reference_leaves_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     drop_in_world(&mut s, 871, "Flurry Axe", 4);
     assert_eq!(
@@ -502,6 +510,7 @@ fn escape_in_the_typed_confirms_box_is_swallowed_as_the_reference_leaves_it() {
 /// destroy must not grow a field to type into. The control for every test above.
 #[test]
 fn the_plain_arm_shows_no_edit_box() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = setup();
     pick_up_and_drop_in_world(&mut s); // Tough Jerky, quality 1
 

@@ -1,23 +1,17 @@
-// The UI gamma lane's ONE decode (decision 0254) — the twin of `ffx_glow.wgsl`'s combine, which owns
-// the world lane's single decode (0161) — and the client's display-gamma ramp (2182), which rides in
-// front of it because the value this pass samples is exactly the byte the RAMDAC would have read.
-//
-// `ui_quad.wgsl` composites the whole UI in gamma bytes, like the reference's fixed-function
-// backbuffer. The UI camera's target is `Rgba8UnormSrgb`, so a stored byte round-trips through the
-// hardware's encode/decode and the sampler hands this pass back the gamma value the UI pass wrote.
-// Emitting `srgb_to_linear` of it re-encodes on write to the exact client byte — written straight
-// into the swapchain (decision 2206: the camera's output mode is `Skip`, so no blit follows).
-//
-// RGB is premultiplied by coverage; alpha is coverage and carries no gamma, so it passes through.
+// The UI lane's one gamma decode, with the client's display-gamma ramp applied first: the value
+// sampled here is the byte the reference's RAMDAC would read. `ui_quad.wgsl` composites gamma bytes
+// into an `Rgba8UnormSrgb` target, so the sampler returns the value written and `srgb_to_linear`
+// re-encodes it to the exact byte in the swapchain (output mode `Skip`, no blit follows). RGB is
+// premultiplied by coverage; alpha is coverage, carries no gamma, and passes through.
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;
 @group(0) @binding(1) var screen_sampler: sampler;
-// `.x` = the `gamma` CVar. The rest is padding — a uniform struct is 16-byte aligned.
+// `.x` = the `gamma` CVar; the rest is padding (a uniform is 16-byte aligned).
 @group(0) @binding(2) var<uniform> ramp: vec4<f32>;
 
-// sRGB → linear (IEC 61966-2-1), the exact inverse of `ui_quad.wgsl`'s `linear_to_srgb`.
+// sRGB to linear (IEC 61966-2-1), the exact inverse of `ui_quad.wgsl`'s `linear_to_srgb`.
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let higher = pow((max(c, vec3<f32>(0.0)) + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
     let lower = c / 12.92;
@@ -28,13 +22,9 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 fn fs_decode(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let ui = textureSample(screen_texture, screen_sampler, in.uv);
     var rgb = ui.rgb;
-    // The reference's hardware ramp `ramp[i] = pow(i/255, gamma)` (`0x591680`), in its continuous
-    // form: `i/255` IS `rgb` here, so this is the same curve over the same values.
-    //
-    // **The branch is not an optimisation.** It is uniform across the draw, so it costs nothing —
-    // and at the registered default the pass has to be the exact identity it was before this
-    // existed, which `pow` is not: `pow(x, 1.0)` compiles to `exp2(log2(x))` and `log2(0)` is
-    // undefined. The floor inside the taken arm is the same guard for a non-default gamma.
+    // The reference's hardware ramp `pow(i / 255, gamma)` (`0x591680`), with `rgb` as `i / 255`.
+    // The uniform branch keeps the default an exact identity: `pow(x, 1.0)` compiles to
+    // `exp2(log2(x))` and `log2(0)` is undefined, which the floor also guards for other gammas.
     if (ramp.x != 1.0) {
         rgb = pow(max(rgb, vec3<f32>(1e-6)), vec3<f32>(ramp.x));
     }

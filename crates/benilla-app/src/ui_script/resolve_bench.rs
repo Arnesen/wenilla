@@ -156,6 +156,7 @@ fn tooltip_change_costs_a_whole_ui_solve() {
 /// about the second solve is tooltip-sized, and nothing about it is cheap.
 #[test]
 fn a_tooltip_content_change_costs_exactly_one_layout_solve() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = settled_default_ui();
     install_changing_tooltip(&s, "GateOwner", "gate_change");
 
@@ -215,6 +216,7 @@ fn a_tooltip_content_change_costs_exactly_one_layout_solve() {
 /// backtracing the touch sites on a live run.
 #[test]
 fn the_settled_shipped_ui_costs_no_gate_walk_on_a_quiet_frame() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = settled_default_ui();
     // Ticked frames, so the shipped UI's own OnUpdate handlers run — the whole point (see
     // `app_frame_ticked`). A couple of frames of grace first: `settled_default_ui` stops as soon
@@ -272,6 +274,7 @@ fn the_settled_shipped_ui_costs_no_gate_walk_on_a_quiet_frame() {
 ///   walks was exactly that, so the old counter under-reported the bug by a third.
 #[test]
 fn a_region_moving_every_frame_costs_one_gate_walk_on_the_shipped_ui() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = settled_default_ui();
     s.run(
         r#"
@@ -356,6 +359,7 @@ fn a_region_moving_every_frame_costs_one_gate_walk_on_the_shipped_ui() {
 /// everything else, and only a ticked frame can see that.
 #[test]
 fn a_region_moving_every_frame_costs_no_graph_derivation_on_the_shipped_ui() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = settled_default_ui();
     s.run(
         r#"
@@ -424,6 +428,7 @@ fn a_region_moving_every_frame_costs_no_graph_derivation_on_the_shipped_ui() {
 /// skipped as well as the ones it resolved.
 #[test]
 fn a_tooltip_content_change_solves_a_tooltip_sized_scope() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = settled_default_ui();
     install_changing_tooltip(&s, "ScopeSizeOwner", "scope_size_change");
 
@@ -457,6 +462,7 @@ fn a_tooltip_content_change_solves_a_tooltip_sized_scope() {
 /// bug, and a stale rect that one does carry is the bug in the form the screen would show it.
 #[test]
 fn a_scoped_resolve_reproduces_the_whole_graph_solve() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = settled_default_ui();
     install_changing_tooltip(&s, "ScopeOwner", "scope_change");
 
@@ -530,6 +536,7 @@ fn measure_sweep_steady_state_cost() {
 /// structural) and the counter is proved able to move.
 #[test]
 fn a_tooltip_line_flipping_wrapped_to_plain_costs_no_graph_derivation() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = settled_default_ui();
     s.run(
         r#"
@@ -601,6 +608,7 @@ fn a_tooltip_line_flipping_wrapped_to_plain_costs_no_graph_derivation() {
 /// is big enough for the derivation to matter.
 #[test]
 fn a_hover_sweep_across_owners_costs_no_graph_derivation() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = settled_default_ui();
     s.run(
         r#"
@@ -676,6 +684,7 @@ fn a_hover_sweep_across_owners_costs_no_graph_derivation() {
 /// idiom, not the gesture.
 #[test]
 fn an_action_bar_hover_sweep_costs_no_graph_derivation() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = settled_default_ui();
     s.run(
         r#"
@@ -752,6 +761,7 @@ fn an_action_bar_hover_sweep_costs_no_graph_derivation() {
 /// addons. `derives/frame` read 0.88 with Bagnon and 0.00 without.
 #[test]
 fn a_bag_addon_hover_sweep_costs_no_graph_derivation() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = settled_default_ui();
     s.run(
         r#"

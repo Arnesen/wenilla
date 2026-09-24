@@ -3,12 +3,11 @@ name = "benilla-buildstamp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The git build-id stamp emitter shared by the launcher shims' build scripts (decision 0993/1160)"
+description = "The git build-id stamp shared by the launchers' build scripts"
 
 [lints]
 workspace = true
 
 [lib]
-# A build-dependency only. No tests, no bevy, no app deps — it runs inside cargo's build-script
-# pass and must stay trivially cheap to compile.
+# A build-dependency only: it runs in cargo's build-script pass, so it must stay cheap to compile.
 path = "src/lib.rs"

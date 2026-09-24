@@ -1,146 +1,107 @@
-//! World opcode numbers (verified against `wow_world_messages` 0.3 / wowdev + vmangos
-//! `Opcodes_1_12_1.h`). All are 16-bit values — the client packet header's opcode field is 4 bytes
-//! wide but every value fits `u16`, so we keep one natural type and the senders widen to the wire field.
+//! The 1.12.1 world opcode numbers (vmangos `Opcodes_1_12_1.h`). A client packet's header holds
+//! the opcode in 4 bytes, but every value fits `u16`; the senders widen it.
 
-// Server → client.
 pub const SMSG_CHAR_CREATE: u16 = 0x003A;
 pub const SMSG_CHAR_ENUM: u16 = 0x003B;
-// The delete pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 56/60): CMSG body a full u64 guid,
-// SMSG body the result byte (`CHAR_DELETE_SUCCESS` = 0x39, `SharedDefines.h` ResponseCodes).
+// Character delete: CMSG a full u64 guid, SMSG one result byte (`CHAR_DELETE_SUCCESS` = 0x39).
 pub const CMSG_CHAR_DELETE: u16 = 0x0038;
 pub const SMSG_CHAR_DELETE: u16 = 0x003C;
-/// `SMSG_CHARACTER_LOGIN_FAILED` (VERIFIED vmangos `Opcodes_1_12_1.h`: 65) — the server's refusal
-/// of a `CMSG_PLAYER_LOGIN`. Body: one result byte.
+/// The server's refusal of a `CMSG_PLAYER_LOGIN`: one result byte.
 pub const SMSG_CHARACTER_LOGIN_FAILED: u16 = 0x0041;
 pub const SMSG_NAME_QUERY_RESPONSE: u16 = 0x0051; // 81
 pub const SMSG_CREATURE_QUERY_RESPONSE: u16 = 0x0061; // 97
-/// VERIFIED vmangos `Opcodes_1_12_1.h:86`: 83. Answers `CMSG_PET_NAME_QUERY` — the only query that
-/// can name a pet, whose guid carries no template entry ([`crate::guid::pet_number`]). Body: `u32
-/// petNumber`, cstring name, `u32 nameTimestamp` (`Server/Packets/Pet.cpp:79-84`). The server simply
-/// does not reply when the guid is not a live pet bearing that number (`PetHandler.cpp:190-192`), so
-/// there is no "unknown" answer shape to model.
+/// Answers `CMSG_PET_NAME_QUERY`: `u32 petNumber`, cstring name, `u32 nameTimestamp`. No reply
+/// comes unless the guid is a live pet with that number (`PetHandler.cpp:190-192`).
 pub const SMSG_PET_NAME_QUERY_RESPONSE: u16 = 0x0053; // 83
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 95 (decision 0236). Answers `CMSG_GAMEOBJECT_QUERY`; body
-/// (`GameObjectQueryInfo`) in [`super::gameobject`].
+/// Answers `CMSG_GAMEOBJECT_QUERY` with the GameObject's template.
 pub const SMSG_GAMEOBJECT_QUERY_RESPONSE: u16 = 0x005F; // 95
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 93. Answers `CMSG_QUEST_QUERY`; body in
-/// [`super::quest::read_quest_query_response`] ([`super::QuestTemplate`]).
+/// Answers `CMSG_QUEST_QUERY` with the quest's template.
 pub const SMSG_QUEST_QUERY_RESPONSE: u16 = 0x005D; // 93
 
-// The **page-text** query pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 90/91) — the ask-once cache
-// behind every readable BOOK, and a different one from the mail letter's `CMSG_ITEM_TEXT_QUERY`
-// further down: a `PageText.wdb` id names one *page*, chained by `nextPageId`, and it is what a
-// readable item TEMPLATE (`PageText`) and a world book/plaque GameObject (`GAMEOBJECT_TYPE_TEXT`'s
-// `data[0]`) both read from. Bodies in [`super::page_text`]; decision 1105.
+// Page text: the ask-once `PageText.wdb` cache behind readable items and book GameObjects; an id
+// names one page, chained by `nextPageId`. Mail letters use `CMSG_ITEM_TEXT_QUERY` instead.
 pub const CMSG_PAGE_TEXT_QUERY: u16 = 0x005A; // 90
 pub const SMSG_PAGE_TEXT_QUERY_RESPONSE: u16 = 0x005B; // 91
 
 pub const SMSG_NEW_WORLD: u16 = 0x003E;
-// The far-teleport preamble pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 63/64). TRANSFER_PENDING's
-// optional transport block decides how NEW_WORLD's coordinates read — boat-local when present,
-// world otherwise (decision 0455; vmangos `Player.cpp:2065-2068` / `SendNewWorld`).
+// The far-teleport preamble: with `SMSG_TRANSFER_PENDING`'s optional transport block, the next
+// `SMSG_NEW_WORLD`'s coordinates are transport-local, else world (`Player.cpp:2065-2068`).
 pub const SMSG_TRANSFER_PENDING: u16 = 0x003F;
 pub const SMSG_TRANSFER_ABORTED: u16 = 0x0040;
 pub const SMSG_LOGIN_SETTIMESPEED: u16 = 0x0042;
 pub const SMSG_BINDPOINTUPDATE: u16 = 0x0155;
-/// 295 — the per-item-class proficiency mask (VERIFIED vmangos `Opcodes_1_12_1.h` + Skill.h).
+/// The proficiency mask for one item class (vmangos `Skill.h`).
 pub const SMSG_SET_PROFICIENCY: u16 = 0x0127;
 pub const SMSG_LOGOUT_RESPONSE: u16 = 0x004C;
 pub const SMSG_LOGOUT_COMPLETE: u16 = 0x004D;
-/// 79 — the ack for [`CMSG_LOGOUT_CANCEL`] (VERIFIED vmangos `Opcodes_1_12_1.h`), empty body.
+/// The ack for [`CMSG_LOGOUT_CANCEL`]; empty body.
 pub const SMSG_LOGOUT_CANCEL_ACK: u16 = 0x004F;
 pub const SMSG_UPDATE_OBJECT: u16 = 0x00A9;
 pub const SMSG_DESTROY_OBJECT: u16 = 0x00AA;
-// The cinematic pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 250/252). The server sends the trigger
-// on a character's first-ever login (the race intro) and for GameObject type-13 cameras; while one
-// runs UNACKED, vmangos re-anchors object visibility to the flying cinematic camera
-// (`Player::UpdateCinematic`), despawning everything around the body — so the client must answer.
+// Cinematics: a first login's race intro, or a type-13 GameObject camera. Until the COMPLETE ack,
+// vmangos sees from the camera and despawns all around the body (`Player::UpdateCinematic`).
 pub const SMSG_TRIGGER_CINEMATIC: u16 = 0x00FA;
-/// Sent when playback advances from one camera of a multi-camera `CinematicSequences` row to the
-/// next — empty body, exactly like the completion ack. VERIFIED in the reference at `0x48efe0`
-/// (`NextCamera`): it bumps the camera index, and the send is `push 0xfb; call 0x418190` with
-/// nothing written between the CDataStore open and `call 0x5ab630`.
+/// The next camera of a multi-camera `CinematicSequences` row began; empty body (`0x48efe0`).
 pub const CMSG_NEXT_CINEMATIC_CAMERA: u16 = 0x00FB;
 pub const CMSG_COMPLETE_CINEMATIC: u16 = 0x00FC;
 pub const SMSG_MONSTER_MOVE: u16 = 0x00DD;
-/// `SMSG_MONSTER_MOVE_TRANSPORT` (VERIFIED vmangos `Opcodes_1_12_1.h`: 686) — the transport twin of
-/// [`SMSG_MONSTER_MOVE`]: the identical body with the **transport's packed guid inserted after the
-/// mover's**, and every coordinate in it a deck-local offset instead of a world position. Sent for a
-/// unit pathing *on* a transport — a pet following its owner aboard a boat, anything a player pulls
-/// onto a deck (`Movement::MoveSplineInit::Launch`, `spline/MoveSplineInit.cpp:146-154`). Body in
-/// [`super::monster_move::read_monster_move`]; decision 1936.
+/// [`SMSG_MONSTER_MOVE`] for a unit on a transport: the transport's packed guid follows the
+/// mover's, and every coordinate is deck-local (`MoveSplineInit.cpp:146-154`).
 pub const SMSG_MONSTER_MOVE_TRANSPORT: u16 = 0x02AE; // 686
 pub const SMSG_INITIALIZE_FACTIONS: u16 = 0x0122;
-/// A faction became visible in the reputation pane (VERIFIED vmangos `Opcodes_1_12_1.h`: 291,
-/// sender `ReputationMgr::SendVisible`) — body one `u32` reputation-list slot. The server sets the
-/// slot's `FACTION_FLAG_VISIBLE` on first contact and pushes *only* this, never a fresh standing:
-/// a client that ignores it keeps a correct standing on a row the pane refuses to list.
+/// A faction became visible in the reputation pane: one `u32` list slot. It is the only notice of
+/// `FACTION_FLAG_VISIBLE`; no fresh standing comes with it (`ReputationMgr::SendVisible`).
 pub const SMSG_SET_FACTION_VISIBLE: u16 = 0x0123;
 pub const SMSG_SET_FACTION_STANDING: u16 = 0x0124;
-/// The reputation pane's three send verbs (VERIFIED vmangos `Opcodes.cpp`'s `DEFINE_HANDLER`
-/// registrations: 293, 791, 792). Bodies in [`super::reputation`]; none is acked.
+/// Set a faction's at-war flag from the reputation pane; none of the pane's three verbs is acked.
 pub const CMSG_SET_FACTION_ATWAR: u16 = 0x0125; // 293
 pub const CMSG_SET_FACTION_INACTIVE: u16 = 0x0317; // 791
 pub const CMSG_SET_WATCHED_FACTION: u16 = 0x0318; // 792
 pub const SMSG_AUTH_CHALLENGE: u16 = 0x01EC;
 pub const SMSG_AUTH_RESPONSE: u16 = 0x01EE;
-/// The Warden anticheat challenge. A server that sends this starts a response-timeout clock
-/// (vmangos `Warden::BeginTimeoutClock`, `Warden.ClientResponseDelay` — default 30 s) and kicks
-/// unconditionally when it expires (`Warden::Update`), so a client that can't answer cannot stay
-/// in the world. benilla does not implement Warden; [`crate::WorldSession::connect`] refuses such
-/// a server at the handshake rather than entering a 30-second kick/reconnect cycle.
+/// The Warden anticheat challenge; vmangos kicks a client that leaves it unanswered for 30 s
+/// (`Warden::Update`). Deviation: no Warden ([`crate::WardenRequired`]), so the connect refuses.
 pub const SMSG_WARDEN_DATA: u16 = 0x02E6;
-/// The server's answer to `CMSG_AUTH_SESSION`'s addon block — one record per `## Secure:` addon we
-/// sent, in the order we sent them, with no count and no names (decision 2175).
+/// One record per `## Secure:` addon in `CMSG_AUTH_SESSION`, in order, with no count or names.
 pub const SMSG_ADDON_INFO: u16 = 0x02EF;
 pub const SMSG_COMPRESSED_UPDATE_OBJECT: u16 = 0x01F6;
-/// A zlib envelope holding a **batch of whole movement packets** (763, VERIFIED vmangos
-/// `Opcodes_1_12_1.h`). Not an edge case: vmangos moves a session onto this carrier the moment it
-/// has pushed 300 movement packets to it inside ten seconds (`Compression.Movement.Count`), which
-/// one nearby player moving at frame cadence reaches in about five. See
-/// [`super::ServerPacket::CompressedMoves`].
+/// A zlib envelope of whole movement packets. Routine: vmangos switches a session to it after 300
+/// movement packets in ten seconds (`Compression.Movement.Count`).
 pub const SMSG_COMPRESSED_MOVES: u16 = 0x02FB;
 pub const SMSG_LOGIN_VERIFY_WORLD: u16 = 0x0236;
-/// The account's tutorial bank (wow-re `tutorial-flags.md` §7, decision 1976): every remaining
-/// byte of the body is the bank, both of the client's banks copied from it — vmangos sends 32
-/// bytes (256 bits) after the login. Until it lands no tutorial can fire.
+/// The account's tutorial bits: the whole body (32 bytes from vmangos after login), copied into
+/// both of the client's banks. No tutorial fires before it arrives.
 pub const SMSG_TUTORIAL_FLAGS: u16 = 0x00FD; // 253
-/// `FlagTutorial(n)` and the six auto-acknowledge sites (§5/§6, 1976): one `u32`, the 0-based id.
+/// `FlagTutorial(n)` and the client's six auto-acknowledge sites: one `u32`, the 0-based id.
 pub const CMSG_TUTORIAL_FLAG: u16 = 0x00FE; // 254
-/// `ClearTutorials()` (§6, 1976): EMPTY — every bit set locally and on the server.
+/// `ClearTutorials()`: empty body; every bit is set locally and on the server.
 pub const CMSG_TUTORIAL_CLEAR: u16 = 0x00FF; // 255
-/// `ResetTutorials()` (§6, 1976): EMPTY — every bit cleared locally and on the server.
+/// `ResetTutorials()`: empty body; every bit is cleared locally and on the server.
 pub const CMSG_TUTORIAL_RESET: u16 = 0x0100; // 256
-                                             // The server-pushed sound trio (1.12.1 values VERIFIED vmangos `Opcodes_1_12_1.h`:
-                                             // 631/632/722).
 pub const SMSG_PLAY_MUSIC: u16 = 0x0277;
 pub const SMSG_PLAY_OBJECT_SOUND: u16 = 0x0278;
 pub const SMSG_PLAY_SOUND: u16 = 0x02D2;
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 756.
+/// The zone's weather, pushed by the server.
 pub const SMSG_WEATHER: u16 = 0x02F4;
-// The emote pair + our send side (VERIFIED vmangos `Opcodes_1_12_1.h`: 259/260/261).
 pub const SMSG_EMOTE: u16 = 0x0103;
 pub const CMSG_TEXT_EMOTE: u16 = 0x0104;
 pub const SMSG_TEXT_EMOTE: u16 = 0x0105;
-// The spell-book/action-bar/cast/attack set (VERIFIED vmangos `Opcodes_1_12_1.h`:
-// 297/298/304/323/324 in, 302/321/322 out). Bodies in [`super::spells`].
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 88. Body in [`items`].
+/// Answers `CMSG_ITEM_QUERY_SINGLE` with the item's template.
 pub const SMSG_ITEM_QUERY_SINGLE_RESPONSE: u16 = 0x0058;
-// The item-move CMSG family (VERIFIED vmangos `Opcodes_1_12_1.h:269-273`; bodies in [`items`]).
 pub const CMSG_AUTOEQUIP_ITEM: u16 = 0x010A; // 266
 pub const CMSG_AUTOSTORE_BAG_ITEM: u16 = 0x010B; // 267
 pub const CMSG_SWAP_ITEM: u16 = 0x010C; // 268
 pub const CMSG_SWAP_INV_ITEM: u16 = 0x010D; // 269
 pub const CMSG_SPLIT_ITEM: u16 = 0x010E; // 270
-pub const CMSG_DESTROYITEM: u16 = 0x0111; // 273 — the popup-confirmed world-drop delete (0216 §3)
+pub const CMSG_DESTROYITEM: u16 = 0x0111; // 273, the popup-confirmed world-drop delete
 pub const SMSG_INVENTORY_CHANGE_FAILURE: u16 = 0x0112; // 274
+/// A bag was auto-equipped: one raw `u64` guid (`ItemHandler.cpp:227`). The reference raises
+/// `BAG_OPEN` for it (`0x4f9410`): our own guid is container 0, a cached bag 1..10, else nothing.
+pub const SMSG_OPEN_CONTAINER: u16 = 0x0113; // 275
 
-// The player-to-player trade family (VERIFIED vmangos `Opcodes_1_12_1.h:278-289`,
-// `Handlers/TradeHandler.cpp`, `Server/Packets/Trade.{h,cpp}`; bodies/parses in [`trade`],
-// decision 0592 P0). CMSG bodies: INITIATE = u64 target; ACCEPT = u32 (read-skipped);
-// SET_ITEM = 3×u8 (tradeSlot, bag, slot); CLEAR_ITEM = u8 tradeSlot; SET_GOLD = u32 copper;
-// BEGIN/BUSY/IGNORE/UNACCEPT/CANCEL are empty. SMSG: TRADE_STATUS = u32 status (+ a per-status
-// tail); TRADE_STATUS_EXTENDED = the 444-byte item/gold snapshot.
+// Trade. CMSG bodies: INITIATE u64 target, ACCEPT u32 (ignored), SET_ITEM 3×u8 (tradeSlot, bag,
+// slot), CLEAR_ITEM u8, SET_GOLD u32 copper, the rest empty. SMSG: TRADE_STATUS u32 plus a
+// per-status tail; TRADE_STATUS_EXTENDED the 444-byte item/gold snapshot.
 pub const CMSG_INITIATE_TRADE: u16 = 0x0116; // 278
 pub const CMSG_BEGIN_TRADE: u16 = 0x0117; // 279
 pub const CMSG_BUSY_TRADE: u16 = 0x0118; // 280
@@ -153,301 +114,141 @@ pub const CMSG_CLEAR_TRADE_ITEM: u16 = 0x011E; // 286
 pub const CMSG_SET_TRADE_GOLD: u16 = 0x011F; // 287
 pub const SMSG_TRADE_STATUS: u16 = 0x0120; // 288
 pub const SMSG_TRADE_STATUS_EXTENDED: u16 = 0x0121; // 289
-/// Load ammo into the ammo "slot" (`PLAYER_AMMO_ID`) — VERIFIED wow-re `cursor-dragdrop-slots.md`
-/// (the client's auto-equip sender `0x5e1480` forks ammo-class here) + vmangos `Opcodes_1_12_1.h`:
-/// 616. Body in [`items::set_ammo`]. Note the hex/decimal trap: `0x0268` (this) ≠ `0x010C`
-/// (`CMSG_SWAP_ITEM`, "opcode 268" in decimal). Decision 0526.
+/// Load ammo (`PLAYER_AMMO_ID`); the auto-equip sender `0x5e1480` sends ammo here. Trap: `0x0268`
+/// is not decimal 268, which is `CMSG_SWAP_ITEM` (`0x010C`).
 pub const CMSG_SET_AMMO: u16 = 0x0268; // 616
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 296 — `MiscHandler.cpp:885`'s `HandleSetActionButtonOpcode`
-/// (decision 0216 §7/0218 §4). Body in [`super::action_bar::set_action_button`].
+/// Set one action-bar button (`HandleSetActionButtonOpcode`, `MiscHandler.cpp:885`).
 pub const CMSG_SET_ACTION_BUTTON: u16 = 0x0128; // 296
-/// The four extra action bars' visibility byte (`PLAYER_FIELD_BYTES` byte 2) — VERIFIED at the
-/// bytes, wow-re `system/ui/scratch/action-bar-toggles.md` §3: `0x4e771d push 0x2bf` is the ONE
-/// site image-wide that emits this opcode, and the frame it builds is `u32 opcode` + a single `u8`
-/// and nothing else (`0x418190` PutUInt32 then `0x418070` PutUInt8; `0x5379b3` computes the
-/// payload as size − read = **5**). Body in [`super::action_bar::set_actionbar_toggles`].
-///
-/// Corroborated by vmangos `Opcodes_1_12_1.h`: 703 → `HandleSetActionBarTogglesOpcode`
-/// (`Packets/Misc.cpp:150-153` reads one `uint8`; `Handlers/MiscHandler.cpp:923-932` stores it with
-/// `SetByteValue(PLAYER_FIELD_BYTES, 2, …)`).
+/// The four extra action bars' visibility: one `u8`, stored as `PLAYER_FIELD_BYTES` byte 2
+/// (sent only from `0x4e771d`; `MiscHandler.cpp:923-932`).
 pub const CMSG_SET_ACTIONBAR_TOGGLES: u16 = 0x02BF; // 703
 pub const SMSG_ACTION_BUTTONS: u16 = 0x0129; // 297
 pub const SMSG_INITIAL_SPELLS: u16 = 0x012A; // 298
 
-// The incremental spell-learn pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 299/300) — a spell added to
-// the book after login (trainer purchase / quest reward / level-up), and the rank-up in-place swap.
-// Bodies in [`super::spells`] (decision 0237).
+// Spell-book changes after login: a spell learned, and a rank swapped in place.
 pub const SMSG_LEARNED_SPELL: u16 = 0x012B; // 299
 pub const SMSG_SUPERCEDED_SPELL: u16 = 0x012C; // 300
 
-/// The **third** member of that family and the only one that shrinks the book (VERIFIED vmangos
-/// `Opcodes_1_12_1.h`: 515; `Player::SendSpellRemoved`, the tail of `Player::RemoveSpell`). Sent
-/// once per spell the server takes away — a talent wipe sends one for every rank of every talent,
-/// which is the whole reason decision 1584 exists. Body in [`super::spellbook`]: one `u16`.
+/// A spell left the book (`Player::RemoveSpell`): one `u16` id; a talent wipe sends one per rank.
 pub const SMSG_REMOVED_SPELL: u16 = 0x0203; // 515
 pub const SMSG_CAST_RESULT: u16 = 0x0130; // 304
 
-// The pet action bar's inbound wire (decision 0982; VERIFIED vmangos `Opcodes_1_12_1.h`:
-// 377/378/710/312). Bodies in [`super::pet`].
-/// The control handoff (VERIFIED vmangos `Opcodes_1_12_1.h`: 345; built at
-/// `Server/Packets/Misc.cpp:677-682`). Body: **packed** mover guid, then a `u8` `allowMove`.
-///
-/// It is the whole of possession's control half, and it is a *statement about one unit*, not a
-/// swap: the server always sends it to our own session, naming some unit and whether we may drive
-/// it. Mind Control's start sends the caster `(victim, 1)` and the victim `(victim, 0)`; the end
-/// sends the caster `(self, 1)` **then** `(victim, 0)`, and the victim `(victim, 1)`.
-///
-/// **Two consequences the server leans on us for.** It expects a
-/// [`CMSG_SET_ACTIVE_MOVER`] reply and drops every `MSG_MOVE_*` for the new mover until it
-/// arrives (`Player::GetConfirmedMover`). And it never immobilises a possessed *player* — no root,
-/// no speed change, and its `StopMoving()` is a documented no-op for one — nor does it validate
-/// their movement, so `allowMove = 0` for our own guid is the **only** thing standing between a
-/// mind-controlled player and walking away. Enforcing that is the client's job.
+/// Whether we may drive one unit: packed guid, `u8 allowMove` (`Misc.cpp:677-682`). Each packet
+/// is about one unit, not a swap: ending Mind Control sends the caster `(self, 1)` then
+/// `(victim, 0)`. The server drops `MSG_MOVE_*` for a new mover until [`CMSG_SET_ACTIVE_MOVER`]
+/// answers, and never stops a possessed player: `allowMove = 0` on our guid is ours to enforce.
 pub const SMSG_CLIENT_CONTROL_UPDATE: u16 = 0x0159; // 345
-/// The whole pet bar in one body — the ten slots, the react/command state, the pet's spell list
-/// and its cooldowns. Its **8-byte guid-only form is the teardown** (`Player::RemovePetActionBar`),
-/// and the only signal that the bar has gone away.
+/// The whole pet bar: ten slots, react/command state, spell list, cooldowns. The 8-byte
+/// guid-only form is the teardown, the only sign the bar is gone (`Player::RemovePetActionBar`).
 pub const SMSG_PET_SPELLS: u16 = 0x0179; // 377
 /// The state-only refresh: the same four state bytes, with no bar behind them.
 pub const SMSG_PET_MODE: u16 = 0x017A; // 378
 /// One reason byte for a refused pet order (the red error line).
 pub const SMSG_PET_ACTION_FEEDBACK: u16 = 0x02C6; // 710
-/// The pet's twin of [`SMSG_CAST_RESULT`] — the same `SpellCastResult` vocabulary, its own opcode
-/// because the caster that failed is the pet, not us.
+/// [`SMSG_CAST_RESULT`] for a failed pet cast, with the same `SpellCastResult` codes.
 pub const SMSG_PET_CAST_FAILED: u16 = 0x0138; // 312
 
-// The three remaining pet-feedback arms, carved together (decision 2039). Each was name-table-only
-// until then, and each has a handler in the reference that does something visible.
-/// **The taming refusal** — one `u8` reason from `PetTameFailureReason`. Not only taming: vmangos
-/// sends it for Call Pet and Revive Pet too (`SpellEffects.cpp:3167/3174`, `Spell.cpp:5463/6113`).
-///
-/// The reference's handler `0x6e97e0` reads the byte and hands it to `0x6e6a20`, which turns
-/// `reason - 1` into one of eleven `PETTAME_*` GlobalStrings keys through the jump table at
-/// `0x6e6ac0`, resolves it (`0x703bf0`) and raises `DisplayError(0xee)` =
-/// `ERR_TAME_FAILED` (`"%s."`) with that string as the fill. Anything outside `1..=11` — `0` and
-/// `12` included — takes the default arm's `PETTAME_UNKNOWNERROR`. The map is in
-/// [`super::pet::pet_tame_failure_key`].
+/// Tame, Call Pet or Revive Pet refused: one `u8` reason. The reference (`0x6e97e0`) shows
+/// `ERR_TAME_FAILED` with the reason's `PETTAME_*` string, `PETTAME_UNKNOWNERROR` outside 1..=11.
 pub const SMSG_PET_TAME_FAILURE: u16 = 0x0173; // 371
-/// **The refused rename** — an EMPTY body, and a visible error all the same.
-///
-/// vmangos's `SendPetNameInvalid` drops both the reason code and the name with the comment "not
-/// read by vanilla client" (`PetHandler.cpp:542-548`), and the reference agrees: its arm reads no
-/// body. What it does read is the *opcode* — 0x178 lands in the shared dispatcher `0x5e38c0`,
-/// whose index byte at `0x5e4c6c[0]` selects target `0x5e4c40[0]` = `0x5e3e33`, five instructions:
-/// `push 0xf7; call 0x496720` = `DisplayError(247)` = **`ERR_INVALID_PETNAME`**, "Error, invalid
-/// name entered.".
-///
-/// **Decision 1066 said the opposite** — that a refused rename "silently does nothing, which is
-/// what the reference does too" — on a carve that had attributed [`SMSG_PET_BROKEN`]'s handler
-/// `0x4bdc00` to this opcode. `re/net/opcode-handlers.tsv` maps 0x178 to `0x5e38c0` and 0x2AF to
-/// `0x4bdc00`; they are different functions raising different messages.
+/// A refused pet rename: empty body (`PetHandler.cpp:542-548`), yet the reference shows
+/// `ERR_INVALID_PETNAME` for it (`0x5e3e33`).
 pub const SMSG_PET_NAME_INVALID: u16 = 0x0178; // 376
-/// **The pet ran away** — an empty body; vmangos sends it when a hunter pet's loyalty hits zero
-/// (`Pet.cpp:822`, immediately before `Unsummon(PET_SAVE_AS_DELETED)`).
-///
-/// Handler `0x4bdc00`: `push 0x1a3; call 0x496720` = `DisplayError(419)` = `ERR_PET_BROKEN`,
-/// "Your pet has run away". It reads no body, writes no state and fires no event — the bar's
-/// teardown rides the `SMSG_PET_SPELLS` zero-guid form as usual (wow-re
-/// `ui/scratch/pet-action-bar-api.md` §11c.5).
+/// The pet ran away at zero loyalty (`Pet.cpp:822`): empty body. The reference (`0x4bdc00`) only
+/// shows `ERR_PET_BROKEN`; the bar's teardown still comes as an `SMSG_PET_SPELLS`.
 pub const SMSG_PET_BROKEN: u16 = 0x02AF; // 687
-/// **The pet's voice** — `u64 petGuid` then a `u32` *talk* selector (not a `SoundEntries` id):
-/// `0` = `PET_TALK_SPECIAL_SPELL`, `1` = `PET_TALK_ATTACK` (vmangos `Pet.h:98`,
-/// `Unit::SendPetTalk`).
-///
-/// Handler `0x6040c0` resolves the guid, then calls the creature bark dispatcher
-/// `0x623a40(unit, state)` with **state 1 for selector 0 and state 2 for selector 1** — i.e.
-/// `CreatureSoundData` columns 28 (`PetOrder`) and 27 (`PetAttack`). Any other selector plays
-/// nothing. The bark rides the unit's ordinary one-shot voice slot and its priority latch, so it
-/// is not a free-standing sound (see `crate::sound::creature`'s bark core on the benilla side).
+/// The pet's voice: `u64 petGuid`, `u32` talk selector (`Pet.h:98`). The reference (`0x6040c0`)
+/// barks `CreatureSoundData` column 28 (`PetOrder`) for 0, 27 (`PetAttack`) for 1, else nothing,
+/// through the unit's one-shot voice slot.
 pub const SMSG_PET_ACTION_SOUND: u16 = 0x0324; // 804
-/// **The dismissed pet's parting sound** — `u32 creatureModelDataId` then a `f32` x/y/z, and the
-/// odd one of the family in every way.
-///
-/// Handler `0x604140` reads those four fields, walks **`CreatureModelData[id]` → its own
-/// `SoundID` (col 13, `[row+0x34]`) → `CreatureSoundData` → column 29**, and plays that kit at the
-/// given point with `z + 1.0` (`0x7ff9d8`) and a free-picked variation. No unit is involved: it is
-/// off the bark dispatcher's table entirely, takes no voice latch and has no attach point —
-/// because by the time it sounds the pet has gone. That fresh, inlined, by-id resolve is also why
-/// a census over the *cached* `[unit+0xb40]` row's consumers concluded column 29 was dead.
-///
-/// **vmangos never sends it** (no `SendPetDismissSound` anywhere in the tree; the opcode is
-/// registered only as server-bound). Built because the reference is the spec and this handler is
-/// what makes column 29 load-bearing — not because anything we talk to can trigger it.
+/// A dismissed pet's parting sound: `u32 creatureModelDataId`, `f32` x, y, z. The reference
+/// (`0x604140`) plays that model's `CreatureSoundData` column 29 there at `z + 1.0`, with no unit.
+/// vmangos never sends it.
 pub const SMSG_PET_DISMISS_SOUND: u16 = 0x0325; // 805
 
-/// The client's ack that a server-authored spline (`SMSG_MONSTER_MOVE` to our own guid — Charge,
-/// knockback, taxi) finished. Body: a `MovementInfo` at the endpoint, the `splineId` being acked,
-/// and a trailing float the server `read_skip`s (VERIFIED vmangos `Opcodes_1_12_1.h`: 713;
-/// `MoveSplineDone::ReadFromWorldPacket`).
+/// Our own server-driven spline (Charge, taxi) finished: `MovementInfo` at the endpoint, the
+/// `splineId`, and a float the server skips (`MoveSplineDone::ReadFromWorldPacket`).
 pub const CMSG_MOVE_SPLINE_DONE: u16 = 0x02C9; // 713
-/// The client's report that its movement clock **skipped** — a stall, a long frame, a window that
-/// went to the background — carrying the mover and how many milliseconds went missing (VERIFIED
-/// vmangos `Opcodes_1_12_1.h`: 718). Body in [`super::client::move_time_skipped`].
-///
-/// vmangos adds the reported `lag` to the mover's `stime`/`ctime` so its own movement clock stays
-/// aligned with ours — **and hangs a 1.12-specific transport fix off it**: a player whose last
-/// movement packet was the *first* one carrying `MOVEFLAG_ONTRANSPORT` is flagged `JustBoarded`,
-/// and the next `CMSG_MOVE_TIME_SKIPPED` makes the server re-send that transport's out-of-range
-/// update followed by a fresh create (`HandleMoveTimeSkippedOpcode`,
-/// `Handlers/MovementHandler.cpp:989-1019`, comment *"fix an 1.12 client problem with
-/// transports"*). A client that never sends this never gets that refresh. Decision 1935.
+/// Our movement clock skipped (a stall, a long frame): the mover and the missing milliseconds.
+/// vmangos shifts its clock, and re-creates a just-boarded transport (`MovementHandler.cpp:989`).
 pub const CMSG_MOVE_TIME_SKIPPED: u16 = 0x02CE; // 718
-/// The **broadcast twin** of [`CMSG_MOVE_TIME_SKIPPED`] (VERIFIED vmangos `Opcodes_1_12_1.h`: 793):
-/// the server relays one mover's skip to everyone watching it, so their copies of that unit's
-/// movement clock move with it (`MovementHandler.cpp:1011-1017`, packed guid + the same `u32`).
-///
-/// **Not ignorable.** The reference registers a handler for it (`0x6035e0` → `0x603b40`) that reads
-/// a packed guid, resolves under `TYPEMASK_UNIT`, and adds the lag to `[CMovement+0xac]` — the
-/// observed unit's last-seen **wire** movement timestamp, the monotonic maximum the relay chain
-/// hangs off (`0x601560` → `0x61ab90`). That cell is benilla-app's relay-chain `last_wire_ms`
-/// (`net::motion::relay::RelayChain`, decision 0615, which models `+0xa8`/`+0xac` by name). Drop the packet and the chain's copy stays `lag` ms short of the sender's
-/// forever: the mover's next real packet then reads as a step `lag` too large and is scheduled
-/// that much late — a hitch on that unit, not a lost packet. Decision 1935.
+/// Another mover's clock skip, relayed: packed guid, `u32` lag (`MovementHandler.cpp:1011-1017`).
+/// The reference (`0x603b40`) adds it to that unit's last wire timestamp (`CMovement+0xac`); if
+/// dropped, the unit's next packet lands `lag` ms late.
 pub const MSG_MOVE_TIME_SKIPPED: u16 = 0x0319; // 793
 pub const SMSG_ATTACKSTART: u16 = 0x0143; // 323
 pub const SMSG_ATTACKSTOP: u16 = 0x0144; // 324
 pub const SMSG_ATTACKERSTATEUPDATE: u16 = 0x014A; // 330
 
-// The four melee swing REFUSALS — the server's answers to a `CMSG_ATTACKSWING` it will not honour.
-// All four bodies are EMPTY (vmangos `Server/Packets/Combat.cpp`, every `AppendBodyTo` a no-op),
-// and the reference's arms read nothing from the datastore either.
-//
-// **There is no `0x147` here, and that is the finding, not an omission.** The reference registers
-// exactly these four opcodes onto its combat handler `0x6255b0` (`0x62555f`/`0x625570`/`0x625581`/
-// `0x625592`); `0x147` SMSG_ATTACKSWING_NOTSTANDING is never registered, so the client ignores it —
-// and vmangos never sends it either (`Player::SendAttackSwingNotStanding` has zero callers). An arm
-// for it would be code no server can reach and no client ever ran.
+// The server's refusals of a `CMSG_ATTACKSWING`, all with empty bodies (`Combat.cpp`). `0x147`
+// NOTSTANDING is absent on purpose: the reference registers no handler for it (`0x6255b0`).
 pub const SMSG_ATTACKSWING_NOTINRANGE: u16 = 0x0145; // 325
 pub const SMSG_ATTACKSWING_BADFACING: u16 = 0x0146; // 326
 pub const SMSG_ATTACKSWING_DEADTARGET: u16 = 0x0148; // 328
 pub const SMSG_ATTACKSWING_CANT_ATTACK: u16 = 0x0149; // 329
 
-/// The FORCED attack cancel — the swing family's fourth arm, and the one that is not an
-/// `SMSG_ATTACKSWING_*` at all. Empty body (vmangos `WorldPackets::Combat::CancelCombat`), sent by
-/// `Player::SendAttackSwingCancelAttack()` from four places: `Unit::CombatStop`,
-/// `Unit::StopAttackFaction`, `Unit::InterruptAttacksOnMe`, and a resisted feign death.
-///
-/// Registered by the SPELL TU, not the combat one (`0x5e3308`, handler `0x5e7dd0`) — which is why
-/// `0x625520`'s eight-opcode census does not list it. Its handler is **byte-identical to arm 4**
-/// (`0x625ab8`), down to the `__LINE__` it pushes: resolve the active player and StopAttack, no
-/// message on any surface.
+/// The forced attack cancel: empty body (`Player::SendAttackSwingCancelAttack`). The reference
+/// (`0x5e7dd0`) stops our attack and shows nothing.
 pub const SMSG_CANCEL_COMBAT: u16 = 0x014E; // 334
 
-/// A Feign Death the target resisted — empty body (vmangos
-/// `WorldPackets::Combat::FeignDeathResisted`), sent by `Player::SendFeignDeathResisted()` from the
-/// one site that also sends [`SMSG_CANCEL_COMBAT`] (`Objects/Unit.cpp:9445-9451`). The reference's
-/// handler `0x6e9800` is two instructions — `push 0x1a5; call 0x496720` — so it is a plain
-/// `DisplayError(421)` = `ERR_FEIGN_DEATH_RESISTED` = "Resisted", with no latch and no cooldown
-/// behind it.
+/// A Feign Death was resisted: empty body (`Unit.cpp:9445-9451`). The reference (`0x6e9800`) only
+/// shows `ERR_FEIGN_DEATH_RESISTED`.
 pub const SMSG_FEIGN_DEATH_RESISTED: u16 = 0x02B4; // 692
-/// Creature aggro/alert flare (VERIFIED vmangos `Opcodes_1_12_1.h`: 316; body in
-/// [`super::attack::read_ai_reaction`]).
+/// A creature's aggro or alert flare.
 pub const SMSG_AI_REACTION: u16 = 0x013C; // 316
 
-// The spell-visual pipeline wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 305/306/499/668/678;
-// decision 0099 phase 1). Bodies in [`super::spells`].
 pub const SMSG_SPELL_START: u16 = 0x0131; // 305
 pub const SMSG_SPELL_GO: u16 = 0x0132; // 306
 pub const SMSG_PLAY_SPELL_VISUAL: u16 = 0x01F3; // 499
-/// The guild tabard designer's two-way pair (decision 1977; bodies in [`super::tabard`]): the
-/// vendor activation that opens the frame, and the save whose reply is a six-row result.
+/// Save the tabard design, both ways; the reply is one of six results.
 pub const MSG_SAVE_GUILD_EMBLEM: u16 = 0x01F1; // 497
 pub const MSG_TABARDVENDOR_ACTIVATE: u16 = 0x01F2; // 498
 pub const SMSG_CANCEL_AUTO_REPEAT: u16 = 0x029C; // 668
 pub const SMSG_SPELL_FAILED_OTHER: u16 = 0x02A6; // 678
 
-/// `SMSG_SPELL_UPDATE_CHAIN_TARGETS` (VERIFIED vmangos `Opcodes_1_12_1.h`: 816) — the **only**
-/// source of the client's chain-target list, and so the only way a beam gets more than one hop.
-/// The client's handler is `0x6e9820`; it fills the growable array at `unit+0xd44`, which the
-/// chain `CharProc` consumes once and zeroes (decision 0955). Body in [`super::spells`].
+/// The only source of a chain beam's extra hops: the reference (`0x6e9820`) fills `unit+0xd44`,
+/// which the chain `CharProc` consumes once and zeroes.
 pub const SMSG_SPELL_UPDATE_CHAIN_TARGETS: u16 = 0x0330; // 816
 
-/// The **talent spell-modifier** pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 614/615) — the only
-/// feed for every talent that cheapens a spell, shortens its cast or cooldown, extends its range
-/// or radius, or lengthens its duration. Body in [`super::spells::read_set_spell_modifier`];
-/// decision-level law in wow-re `system/spell/scratch/spellmod-table-law.md`.
-///
-/// **One handler, two tables.** Both opcodes register to `Spell_C::HandleSetSpellModifier
-/// 0x6e9950` (`0x6e7245`/`0x6e7255`), which reads the same 6-byte body either way and forks on the
-/// opcode alone (`6e9989: cmp edi,0x267`): `0x266` stores into the FLAT table `0xcead60`, `0x267`
-/// into the PCT table `0xcecb30`, each `i32[64][29]`. The store is a plain `mov`, so the server
-/// sends the **absolute** value of one cell, never a delta (vmangos `Player::SendSpellMod` sends
-/// one packet per set mask bit carrying that pair's total).
-///
-/// That is why the two share a variant here rather than taking one each: the wire shape is
-/// identical and the opcode IS the discriminant, exactly as the reference treats it.
+/// A talent's flat spell modifier; the next opcode is the percent one. Both carry the same 6-byte
+/// body, the absolute value of one table cell, never a delta (reference `0x6e9950`).
 pub const SMSG_SET_FLAT_SPELL_MODIFIER: u16 = 0x0266; // 614
 pub const SMSG_SET_PCT_SPELL_MODIFIER: u16 = 0x0267; // 615
 
-// The cooldown wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 308/176/309/478/481; the client
-// handlers are byte-verified in wow-re `wave-handlers.md` — 0x6e9460/0x6e95d0/0x6e9670/0x6e9730;
-// decision 0137 phase 4). Bodies in [`super::spells`].
 pub const SMSG_SPELL_COOLDOWN: u16 = 0x0134; // 308
 pub const SMSG_ITEM_COOLDOWN: u16 = 0x00B0; // 176
 pub const SMSG_COOLDOWN_EVENT: u16 = 0x0135; // 309
 pub const SMSG_CLEAR_COOLDOWN: u16 = 0x01DE; // 478
 pub const SMSG_COOLDOWN_CHEAT: u16 = 0x01E1; // 481
 
-/// `SMSG_ITEM_TIME_UPDATE` (VERIFIED vmangos `Opcodes_1_12_1.h`: 490) — the
-/// remaining lifetime, in **seconds**, of one duration-limited item instance (a conjured stone, a
-/// holiday gift, a timed quest item). Shares its handler with
-/// [`SMSG_ITEM_ENCHANT_TIME_UPDATE`]: both read an 8-byte item guid first and then fork on the
-/// opcode (`0x5e4f69 sub eax,0x1ea ; je …` / `0x5e4f74 dec eax` — wow-re
-/// `ui/scratch/weapon-enchant-info.md` §7).
-///
-/// The item's own `ITEM_FIELD_DURATION` (wire field 15) carries the same number and is sent to the
-/// owner, but vmangos's writer says in as many words that it is not what the client displays —
-/// *"Though the client has the information in the item's data field, we have to send
-/// SMSG_ITEM_TIME_UPDATE to display the remaining time"* (`Item::SendTimeUpdate`,
-/// `Objects/Item.cpp:1094`). Same shape as the enchant countdown (decision 0920): a client-local
-/// deadline whose only feed is the packet. Body in [`super::items::read_item_time`]; decision 1933.
+/// A timed item's remaining life in seconds; the display reads this, not `ITEM_FIELD_DURATION`
+/// (`Item.cpp:1094`). It shares the reference handler (`0x5e4f69`) with the enchant update below.
 pub const SMSG_ITEM_TIME_UPDATE: u16 = 0x01EA; // 490
 
-/// `SMSG_ITEM_ENCHANT_TIME_UPDATE` (VERIFIED vmangos `Opcodes_1_12_1.h`: 491) — the **only** source
-/// of a temporary enchant's remaining time. The item's `ITEM_FIELD_ENCHANTMENT` duration field is
-/// never read for it: the reference's tooltip reads a client-side per-slot deadline array
-/// (`[obj + slot*4 + 0x324]`) whose only writers are this packet's handler `0x5e4f82` and the item
-/// refresh `0x5ebe34` (wow-re `ui/scratch/tooltip-content-law.md` §E3, byte-verified). Body in
-/// [`super::items::read_item_enchant_time`]; decision 0920.
+/// The only source of a temporary enchant's remaining time: the reference tooltip reads a
+/// per-slot deadline (`obj + slot*4 + 0x324`) that this handler (`0x5e4f82`) writes.
 pub const SMSG_ITEM_ENCHANT_TIME_UPDATE: u16 = 0x01EB; // 491
 
-/// Pushback (VERIFIED vmangos `Opcodes_1_12_1.h`: 482): sent to the caster when a cast takes damage
-/// and the server delays it (`Spell::Delayed`, `Spell.cpp:7472` — a raw `u64` caster guid + `u32`
-/// delaytime ms). The cast bar slides its window out by it (`SPELLCAST_DELAYED`); a normal hit never
-/// interrupts a cast, it only pushes it back (decision 0256).
+/// Cast pushback, to the caster: raw `u64` guid, `u32` delay ms (`Spell.cpp:7472`), and the cast
+/// bar slides by it. A hit only pushes a cast back, never interrupts it.
 pub const SMSG_SPELL_DELAYED: u16 = 0x01E2; // 482
 
-// The self-only channel UI pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 313/314; sent only to the
-// casting player — `Spell::SendChannelStart` {spellId u32, duration_ms u32},
-// `Player::SendChannelUpdate` {remaining_ms u32, 0 = the channel is over}; decision 0137 phase 1,
-// the cast bar's channel half). Bodies in [`super::spells`].
+// The channel bar, to the caster only: START is `u32 spellId`, `u32 duration_ms`; UPDATE is
+// `u32 remaining_ms`, 0 when the channel is over.
 pub const MSG_CHANNEL_START: u16 = 0x0139; // 313
 pub const MSG_CHANNEL_UPDATE: u16 = 0x013A; // 314
 
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 311. Body in [`super::spells::read_update_aura_duration`] —
-/// `{u8 slot, u32 remaining_ms}`. **The only aura fact not carried by the descriptor**, and it is
-/// self-only: `SpellAuraHolder::UpdateAuraDuration` (`SpellAuras.cpp:7511-7523`) writes it to the
-/// aura's *target* (gated on `TYPEID_PLAYER`) and skips permanent auras entirely. So we learn how
-/// long our own buffs last, and never how long anyone else's do. It is also sent **before** the
-/// `UNIT_FIELD_AURA` delta that names the slot's spell — the server writes the descriptor dirty
-/// (flushed at end of tick) and then sends this immediately (decision 0255).
+/// Our own aura's remaining time: `u8 slot`, `u32 remaining_ms`; never for others' or permanent
+/// auras (`SpellAuras.cpp:7511-7523`). It arrives before the `UNIT_FIELD_AURA` delta for the slot.
 pub const SMSG_UPDATE_AURA_DURATION: u16 = 0x0137; // 311
 
-/// The ding (VERIFIED vmangos `Opcodes_1_12_1.h`: 468) — our own level-up, self-addressed only
-/// (`Player::GiveLevel` builds it with no guid and sends straight to the leveling session). Body
-/// in [`super::progression::read_level_up_info`] — decision 0304.
+/// Our own level-up, with no guid and sent only to the leveling player (`Player::GiveLevel`).
 pub const SMSG_LEVELUP_INFO: u16 = 0x01D4; // 468
-/// A newly explored area — area id + the XP it granted (0 at max level). Body
-/// in [`super::progression::read_exploration_xp`] — decision 0828.
-pub const SMSG_EXPLORATION_EXPERIENCE: u16 = 0x01F8; // 504 (VERIFIED vmangos `Opcodes_1_12_1.h:505`)
-/// The honor payout (VERIFIED vmangos `Opcodes_1_12_1.h`: 652) — the XP-gain line's PvP twin, and
-/// the only attributed notice of an honor award: the descriptor's contribution fields move too,
-/// but they are running totals. Sent for **dishonorable** kills as well, carrying negative honor.
-/// Body in [`super::pvp::read_pvp_credit`] ([`super::PvpCredit`]) — decision 1512.
+/// A newly explored area: the area id and the XP it granted (0 at max level).
+pub const SMSG_EXPLORATION_EXPERIENCE: u16 = 0x01F8; // 504
+/// An honor award, the only attributed notice of one; dishonorable kills carry negative honor.
 pub const SMSG_PVP_CREDIT: u16 = 0x028C; // 652
 
-// The combat-log wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 464/587/590/591/592) — decision 0137
-// phase 2's floating-combat-text data feed. Bodies in [`super::spells`].
 pub const SMSG_ENVIRONMENTALDAMAGELOG: u16 = 0x01FC; // 508
 pub const SMSG_LOG_XPGAIN: u16 = 0x01D0; // 464
 pub const SMSG_SPELLLOGMISS: u16 = 0x024B; // 587
@@ -455,9 +256,6 @@ pub const SMSG_PERIODICAURALOG: u16 = 0x024E; // 590
 pub const SMSG_SPELLDAMAGESHIELD: u16 = 0x024F; // 591
 pub const SMSG_SPELLNONMELEEDAMAGELOG: u16 = 0x0250; // 592
 
-// The combat log's remaining wire (VERIFIED vmangos `Opcodes_1_12_1.h`; decision 1703 — the
-// families 1571 §5 named as "deliberately out because their wire sources are undecoded"). Bodies
-// in [`super::combat_log`].
 pub const SMSG_ENCHANTMENTLOG: u16 = 0x01D7; // 471
 pub const SMSG_PARTYKILLLOG: u16 = 0x01F5; // 501
 pub const SMSG_SPELLLOGEXECUTE: u16 = 0x024C; // 588
@@ -467,131 +265,69 @@ pub const SMSG_SPELLORDAMAGE_IMMUNE: u16 = 0x0263; // 611
 pub const SMSG_SPELLDISPELLOG: u16 = 0x027B; // 635
 pub const SMSG_SPELLINSTAKILLLOG: u16 = 0x032F; // 815
 
-// The heal/energize pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 336/337) — the center combat
-// text's HEAL / power-gain feed (decision 0578). Bodies in [`super::spells`].
 pub const SMSG_SPELLHEALLOG: u16 = 0x0150; // 336
 pub const SMSG_SPELLENERGIZELOG: u16 = 0x0151; // 337
 
-// Client → server.
 pub const CMSG_CHAR_CREATE: u16 = 0x0036;
 pub const CMSG_CHAR_ENUM: u16 = 0x0037;
 pub const CMSG_PLAYER_LOGIN: u16 = 0x003D;
 pub const CMSG_LOGOUT_REQUEST: u16 = 0x004B;
-/// The forced logout (`ForceLogout 0x48ab50`, decision 1963): the same session dispatcher as
-/// `Logout`/`Quit` with `force = 1`, which turns the opcode from `0x4B` into `0x4A` and bypasses
-/// the pending-logout latch. Empty body (wow-re `staticpopup-dialog-bindings.md` §4).
+/// The forced logout (`ForceLogout`, `0x48ab50`): empty body, sent in place of
+/// `CMSG_LOGOUT_REQUEST` and past the pending-logout latch.
 pub const CMSG_PLAYER_LOGOUT: u16 = 0x004A; // 74
-/// 78 — call off a pending logout (VERIFIED vmangos `Opcodes_1_12_1.h`), empty body; answered by
-/// [`SMSG_LOGOUT_CANCEL_ACK`]. The CAMP/QUIT dialog's Cancel (decision 0674).
+/// The CAMP/QUIT dialog's Cancel: empty body, answered by [`SMSG_LOGOUT_CANCEL_ACK`].
 pub const CMSG_LOGOUT_CANCEL: u16 = 0x004E;
 pub const CMSG_NAME_QUERY: u16 = 0x0050; // 80
 pub const CMSG_CREATURE_QUERY: u16 = 0x0060; // 96
-/// VERIFIED vmangos `Opcodes_1_12_1.h:85`: 82. Body in [`super::client::pet_name_query`]. Answered
-/// by [`SMSG_PET_NAME_QUERY_RESPONSE`].
+/// Ask a pet's name; answered by [`SMSG_PET_NAME_QUERY_RESPONSE`].
 pub const CMSG_PET_NAME_QUERY: u16 = 0x0052; // 82
 
-// The pet action bar's outbound verbs (decision 0982; VERIFIED vmangos `Opcodes_1_12_1.h`:
-// 373/372/755/746). Bodies in [`super::pet`].
-/// One pet bar press: the slot's own packed word, echoed back with a target guid. The server
-/// re-splits it and dispatches on the type byte — command, reaction, or cast.
+/// A pet bar press: the slot's packed word and a target guid, dispatched on its type byte.
 pub const CMSG_PET_ACTION: u16 = 0x0175; // 373
-/// Move/swap a pet bar slot (the drag). One or two `(position, packed)` pairs; the server tells
-/// the two forms apart **by body size alone**.
+/// A pet bar drag: one or two `(position, packed)` pairs, told apart by body size alone.
 pub const CMSG_PET_SET_ACTION: u16 = 0x0174; // 372
-/// Ask for a pet spell's autocast bit to be set to a given value (the right-click).
+/// Set a pet spell's autocast bit to a given value (the right-click).
 pub const CMSG_PET_SPELL_AUTOCAST: u16 = 0x02F3; // 755
-/// Call the pet off — the Attack button's second press.
+/// Call the pet off: the Attack button's second press.
 pub const CMSG_PET_STOP_ATTACK: u16 = 0x02EA; // 746
-/// Take an aura off the **pet** — a pet bar spell click on a spell already running on it. The
-/// player's own `CMSG_CANCEL_AURA` cannot serve: its body is a bare spell id with no room to name
-/// whose aura to drop.
+/// Cancel one of the pet's auras; `CMSG_CANCEL_AURA` carries only a spell id, no unit.
 pub const CMSG_PET_CANCEL_AURA: u16 = 0x026B; // 619
 
-// The pet right-click menu's two outbound verbs (decision 1066; VERIFIED vmangos
-// `Opcodes_1_12_1.h`: 374/375). Bodies in [`super::pet`].
-/// **Give the pet up permanently** — the right-click menu's Abandon row, and `PetAbandon
-/// 0x4be4c0`'s only packet (wow-re `ui/scratch/pet-action-bar-api.md` §11c, `push 0x176`
-/// @`0x4bd765`). `HandlePetAbandon` deletes a hunter pet (`PET_SAVE_AS_DELETED`) and merely
-/// unsummons anything else (`PET_SAVE_NOT_IN_SLOT`, `PetHandler.cpp:347-374`).
-///
-/// The menu's **Dismiss** row is NOT this opcode, which is worth stating because the two would be
-/// indistinguishable in play: `PetDismiss 0x4be4d0` opens no packet at all and hands the packed
-/// word `0x07000003` to the pet bar's own dispatcher, so it leaves as [`CMSG_PET_ACTION`].
+/// The pet menu's Abandon (`PetAbandon`, `0x4be4c0`): deletes a hunter pet, unsummons anything
+/// else (`PetHandler.cpp:347-374`). Dismiss sends [`CMSG_PET_ACTION`] word `0x07000003` instead.
 pub const CMSG_PET_ABANDON: u16 = 0x0176; // 374
-/// Rename the pet — `PetRename 0x4be4e0` → `0x4bd840` (`push 0x177` @`0x4bd8fe`). Gated server-side
-/// on `UNIT_FLAG_PET_RENAME` and **one-shot**: the handler clears that bit on success, so the row
-/// disappears after the first rename (`PetHandler.cpp:302-345`). Nothing client-side clears it —
-/// wow-re's census found no writer of that byte anywhere in `.text`.
-///
-/// A refused name answers with [`SMSG_PET_NAME_INVALID`] (0x178). Its body really is empty — but
-/// the reference is **not** silent about it: the handler raises `ERR_INVALID_PETNAME` on the red
-/// line. Decision 1066's claim that it does nothing was a mis-attributed handler; see that
-/// constant's own note.
+/// Rename the pet (`PetRename`, `0x4be4e0`). One-shot: the server clears `UNIT_FLAG_PET_RENAME`
+/// on success (`PetHandler.cpp:302-345`); a refusal is [`SMSG_PET_NAME_INVALID`].
 pub const CMSG_PET_RENAME: u16 = 0x0177; // 375
 
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 94 (decision 0236). Body in
-/// [`super::gameobject::gameobject_query`] — the ask-once GO template lookup, identical shape to
-/// `CMSG_CREATURE_QUERY`.
+/// The ask-once GameObject template lookup, shaped like `CMSG_CREATURE_QUERY`.
 pub const CMSG_GAMEOBJECT_QUERY: u16 = 0x005E; // 94
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 92. Body in [`super::quest::quest_query`].
+/// Ask for a quest's template; answered by [`SMSG_QUEST_QUERY_RESPONSE`].
 pub const CMSG_QUEST_QUERY: u16 = 0x005C; // 92
 pub const CMSG_ITEM_QUERY_SINGLE: u16 = 0x0056; // 86
 pub const CMSG_USE_ITEM: u16 = 0x00AB; // 171
-/// VERIFIED vmangos `Opcodes_1_12_1.h:175`: 172. Body in [`super::items::open_item`] — the bag
-/// position of an *openable* item (a clam, an unlocked lockbox, a wrapped gift). The right-click
-/// fork `CMSG_USE_ITEM` never takes: the server answers `SMSG_LOOT_RESPONSE` on the **item's own
-/// guid** (`HandleOpenItemOpcode` → `SendLoot(item, LOOT_CORPSE)`), so the loot window opens over
-/// a thing in your bag rather than a corpse in the world.
+/// Open an openable item (a clam, a lockbox, a gift) by bag position; the loot that answers names
+/// the item's own guid (`HandleOpenItemOpcode`).
 pub const CMSG_OPEN_ITEM: u16 = 0x00AC; // 172
-/// Wrap an item in a piece of gift wrapping (VERIFIED vmangos `Opcodes_1_12_1.h`: 467). Body in
-/// [`super::items::wrap_item`]: `giftBag`, `giftSlot`, `itemBag`, `itemSlot` — the **paper first**,
-/// then the thing being wrapped.
-///
-/// The other half of the gift arc: [`CMSG_OPEN_ITEM`] above *unwraps* one, and this is how a gift
-/// gets made. Right-clicking a `ITEM_FLAG_WRAPPER` template whose instance is **not** already
-/// wrapped sends nothing at all — it arms a purely local wrap cursor (`0x5edea0`: the item lock
-/// `0x4953e0` @`0x5edeb5` + `CursorSetMode(2)`, disarmed by `0x5eded0` from inside `ClearCursor`;
-/// wow-re `ui/scratch/right-click-open.md`, use-dispatcher arm 2, VERIFIED) — and *this* opcode
-/// goes out when the armed cursor is then clicked on a target. Decision 1934.
+/// Gift-wrap an item: `giftBag`, `giftSlot`, `itemBag`, `itemSlot`, paper first. Sent when the
+/// wrap cursor, armed locally by right-clicking the paper (`0x5edea0`), clicks the item.
 pub const CMSG_WRAP_ITEM: u16 = 0x01D3; // 467
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 177. Body in [`super::gameobj_use`] — a full guid, the
-/// GameObject to use (decision 0236). Not interchangeable with `CMSG_LOOT`: the server rejects a
-/// GameObject guid on `CMSG_LOOT`, so a chest opens its loot through this opcode.
+/// Use a GameObject by full guid; chests loot through this, since `CMSG_LOOT` refuses their guids.
 pub const CMSG_GAMEOBJ_USE: u16 = 0x00B1; // 177
-/// A GameObject plays a one-shot **custom** animation (VERIFIED vmangos `Opcodes_1_12_1.h`: 179;
-/// body in [`super::read_gameobject_custom_anim`] — `u64 guid + u32 animId`, from
-/// `GameObject::SendGameObjectCustomAnim`). The client arms GO substate `8 + animId`
-/// (Custom0..3, AnimationData ids 153..156), rejecting `animId >= 4` — wow-re
-/// `gameobject-anim-arm.md` §"one-shot channel" step 8. The load-bearing sender: the fishing
-/// bobber's bite (`animId 0` — the splash; decision 1086).
+/// A GameObject's one-shot custom animation: `u64 guid`, `u32 animId`. The client arms substate
+/// `8 + animId` (AnimationData 153..156) and rejects `animId >= 4`; the bobber's bite is 0.
 pub const SMSG_GAMEOBJECT_CUSTOM_ANIM: u16 = 0x00B3; // 179
-/// The **other** one-shot GameObject arm channel (VERIFIED vmangos `Opcodes_1_12_1.h`: 533,
-/// `WorldObject::SendObjectDeSpawnAnim` → `WorldPackets::Misc::GameObjectDespawnAnim`). Body in
-/// [`super::gameobject`]: a bare `u64` guid. The client arms substate **12** — AnimationData id
-/// **157 Despawn** — and the object then survives its own `SMSG_DESTROY_OBJECT` for the length of
-/// that play (wow-re `gameobject-anim-arm.md` §2c's code table `0x80b0e0[6]` → the `0x8607e4` LUT,
-/// and `go-display-sound-events.md` §6d's arm-time pin). The load-bearing sender: a TRAP that has
-/// spent its charges — UBRS's Rookery Eggs hatch on this packet (decision 1404).
-///
-/// It is **not** GameObject-only: `SendObjectDeSpawnAnim` lives on `WorldObject`, so a totem's
-/// death and a DynamicObject's expiry send it too. The consumer treats a guid with nothing armable
-/// as an ordinary destroy.
+/// The despawn animation: a bare `u64` guid, from `WorldObject` so totems and DynamicObjects too.
+/// The client arms substate 12 (AnimationData 157) and the object outlives its
+/// `SMSG_DESTROY_OBJECT` for that play.
 pub const SMSG_GAMEOBJECT_DESPAWN_ANIM: u16 = 0x0215; // 533
-/// VERIFIED vmangos `Opcodes_1_12_1.h:183`: 180 — and the reference writes this literal
-/// (`0x5e2110`, its area-trigger check, builds `0xb4` + the trigger id). Body in
-/// [`super::area_trigger`]: the `AreaTrigger.dbc` id the player just walked into.
+/// We walked into an area trigger: its `AreaTrigger.dbc` id (reference `0x5e2110`).
 pub const CMSG_AREATRIGGER: u16 = 0x00B4; // 180
-/// VERIFIED vmangos `Opcodes_1_12_1.h:697`: 696. Body in
-/// [`super::area_trigger::read_area_trigger_message`] — why a trigger refused (level, ghost form,
-/// battleground faction). The reference displays it through the same system-message sink as
-/// `SMSG_NOTIFICATION` (`0x4945b0`).
+/// An area trigger's refusal (level, ghost, faction), shown like `SMSG_NOTIFICATION` (`0x4945b0`).
 pub const SMSG_AREA_TRIGGER_MESSAGE: u16 = 0x02B8; // 696
 pub const CMSG_MESSAGECHAT: u16 = 0x0095;
 pub const SMSG_MESSAGECHAT: u16 = 0x0096;
-// The channel family (VERIFIED vmangos `Server/Protocol/Opcodes_1_12_1.h:154-171`, decimal
-// 151-168): join/leave/list + the whole moderation set. Every CMSG here is `cstring channelName [+
-// cstring playerName]` (bodies in [`super::channel`]/[`super::client`]); no channel id rides the
-// 1.12 wire (that's a TBC+ addition). `SMSG_CHANNEL_NOTIFY`/`_LIST` layouts in [`super::channel`].
+// Channels: every CMSG is `cstring channelName` [+ `cstring playerName`]; 1.12 has no channel id.
 pub const CMSG_JOIN_CHANNEL: u16 = 0x0097; // 151
 pub const CMSG_LEAVE_CHANNEL: u16 = 0x0098; // 152
 pub const SMSG_CHANNEL_NOTIFY: u16 = 0x0099; // 153
@@ -611,176 +347,90 @@ pub const CMSG_CHANNEL_UNBAN: u16 = 0x00A6; // 166
 pub const CMSG_CHANNEL_ANNOUNCEMENTS: u16 = 0x00A7; // 167
 pub const CMSG_CHANNEL_MODERATE: u16 = 0x00A8; // 168
 
-// The remaining decision-0288 "wire completeness" opcodes — small, single-purpose chat-adjacent
-// packets that don't belong to any of the families above.
-/// The ignore-list self-notice ("Name is now ignoring you" — VERIFIED vmangos `Opcodes_1_12_1.h`:
-/// 549). Body in [`super::client::chat_ignored`] — a raw `u64` guid
-/// (`WorldPackets::Misc::ChatIgnored::ReadFromWorldPacket`, `Server/Packets/Misc.cpp:127-130`).
+/// The ignore notice ("Name is now ignoring you"): a raw `u64` guid (`Misc.cpp:127-130`).
 pub const CMSG_CHAT_IGNORED: u16 = 0x0225; // 549
-/// A whisper target wasn't found online (VERIFIED vmangos `Opcodes_1_12_1.h`: 681). Body:
-/// [`super::chat::read_chat_player_not_found`] (cstring name, `Server/Packets/Chat.cpp:26-29`).
+/// A whisper target is not online: one cstring name (`Chat.cpp:26-29`).
 pub const SMSG_CHAT_PLAYER_NOT_FOUND: u16 = 0x02A9; // 681
-/// A cross-faction whisper was refused (VERIFIED vmangos `Opcodes_1_12_1.h`: 537); empty body
-/// (`WorldPackets::Chat::ChatWrongFaction::AppendBodyTo`, `Server/Packets/Chat.cpp:16-18`).
+/// A cross-faction whisper was refused; empty body (`Chat.cpp:16-18`).
 pub const SMSG_CHAT_WRONG_FACTION: u16 = 0x0219; // 537
-/// The fishing channel ended with nothing on the hook (VERIFIED vmangos `Opcodes_1_12_1.h`: 456;
-/// empty body — `GameObject::Update`'s bobber-expiry arm and `Use(FISHINGNODE)`'s
-/// clicked-too-early arm both send size 0). The red `ERR_FISH_NOT_HOOKED` toast — "No fish are
-/// hooked." (decision 1086).
+/// Nothing hooked (the bobber expired or was clicked early): empty body, `ERR_FISH_NOT_HOOKED`.
 pub const SMSG_FISH_NOT_HOOKED: u16 = 0x01C8; // 456
-/// The hooked fish got away — the fishing-skill roll failed on the click (VERIFIED vmangos
-/// `Opcodes_1_12_1.h`: 457; empty body — `GameObject::Use`'s FISHINGNODE failure arm). The red
-/// `ERR_FISH_ESCAPED` toast — "Your fish got away!" (decision 1086).
+/// The hooked fish got away (the skill roll failed); empty body, `ERR_FISH_ESCAPED`.
 pub const SMSG_FISH_ESCAPED: u16 = 0x01C9; // 457
-/// A server notice the real client flashes in the red UIErrorsFrame (VERIFIED vmangos
-/// `Opcodes_1_12_1.h`: 459): one cstring (`WorldSession::SendNotification`,
-/// `Server/WorldSession.cpp:900-915`) — "You do not know that language", trade refusals, and kin.
+/// A server notice shown in the red UIErrorsFrame: one cstring (`WorldSession.cpp:900-915`).
 pub const SMSG_NOTIFICATION: u16 = 0x01CB; // 459
 
-// The **world broadcasts** — sent to everyone, or to everyone in a zone, rather than to one player
-// about their own doing. Bodies and the client's own handlers: [`super::broadcast`].
-/// An area is under attack by enemy players (VERIFIED vmangos `Opcodes_1_12_1.h`: 596): one `u32`
-/// `AreaTable.dbc` id (`WorldPackets::Misc::ZoneUnderAttack::AppendBodyTo`,
-/// `Server/Packets/Misc.cpp:451-454`). The client (`0x49dcc0`) formats FrameXML's
-/// `ZONE_UNDER_ATTACK` global string with the area's name and delivers it as `CHAT_MSG_CHANNEL` on
-/// the joined defense channels — **not** as a system line.
+// World broadcasts: to everyone, or to everyone in a zone.
+/// An area is under attack: one `u32` `AreaTable.dbc` id. The client (`0x49dcc0`) fills
+/// `ZONE_UNDER_ATTACK` and posts it on the joined defense channels, not as a system line.
 pub const SMSG_ZONE_UNDER_ATTACK: u16 = 0x0254; // 596
-/// A shutdown/restart countdown or an operator's broadcast (VERIFIED vmangos `Opcodes_1_12_1.h`:
-/// 657): `u32 messageType` + one cstring (`WorldPackets::Misc::ServerMessage::AppendBodyTo`,
-/// `Server/Packets/Misc.cpp:341-345`; layout in [`super::broadcast::read_server_message`]). The
-/// type indexes `ServerMessages.dbc`, whose text is the format string the packet's text fills; the
-/// client (`0x49df80`) shows the result as `CHAT_MSG_SYSTEM`.
+/// A shutdown countdown or operator broadcast: a `u32` `ServerMessages.dbc` id, whose text formats
+/// the cstring that follows; shown as `CHAT_MSG_SYSTEM` (`0x49df80`).
 pub const SMSG_SERVER_MESSAGE: u16 = 0x0291; // 657
-/// A trial account hit its whisper cap (VERIFIED vmangos `Opcodes_1_12_1.h`: 765); **empty body**
-/// (`WorldPackets::Chat::ChatRestricted::AppendBodyTo`, `Server/Packets/Chat.cpp:21-23`), and the
-/// client's arm (`0x5e4a09`) reads none — it is three instructions, `DisplayError(0x1c3)`.
+/// A trial account hit its whisper cap: empty body; the client (`0x5e4a09`) shows error `0x1c3`.
 pub const SMSG_CHAT_RESTRICTED: u16 = 0x02FD; // 765
-/// A world-defense broadcast — the Eastern Plaguelands tower captures (VERIFIED vmangos
-/// `Opcodes_1_12_1.h`: 827): `u32 zoneId`, `u32 length`, then the text (`Map::SendDefenseMessage`,
-/// `src/game/Maps/Map.cpp:1868-1884`, built raw rather than through a packet class and
-/// **1.12-only**). Same destination as [`SMSG_ZONE_UNDER_ATTACK`] and the same handler shape
-/// (`0x49de30`), but the text rides the wire instead of a global string.
+/// A defense broadcast (the Eastern Plaguelands towers): `u32 zoneId`, `u32 length`, the text
+/// (`Map.cpp:1868-1884`). Posted like [`SMSG_ZONE_UNDER_ATTACK`] (`0x49de30`).
 pub const SMSG_DEFENSE_MESSAGE: u16 = 0x033B; // 827
 
-/// `/played` (VERIFIED vmangos `Opcodes_1_12_1.h`: 460/461): empty CMSG body
-/// (`NullClientPacket`), SMSG body `u32 total + u32 level` seconds
-/// (`WorldPackets::Misc::PlayedTime::AppendBodyTo`, `Server/Packets/Misc.cpp:278-282`; layout in
-/// [`super::chat::read_played_time`]).
+/// `/played`: an empty request; the reply is `u32 total`, `u32 level` seconds (`Misc.cpp:278-282`).
 pub const CMSG_PLAYED_TIME: u16 = 0x01CC; // 460
 pub const SMSG_PLAYED_TIME: u16 = 0x01CD; // 461
-/// The server's wall clock (VERIFIED vmangos `Opcodes_1_12_1.h`: 462/463): empty CMSG body
-/// (`NullClientPacket`), SMSG body one `u32` = the server's `time(nullptr)`, i.e. **unix-epoch
-/// seconds** (`WorldSession::SendQueryTimeResponse`, `Handlers/QueryHandler.cpp:418-423`).
-///
-/// This is the epoch the quest-log slot's timer field is expressed in — a timed quest's deadline
-/// is written as `time(nullptr) + limitTime` (`Player::AddQuest`), an absolute stamp with no
-/// relative form anywhere on the wire. So a countdown needs the *server's* now, not ours: that is
-/// what this pair is for, and why benilla sends it (decision 1150). The CMSG body is
-/// [`super::query_time`]; the response is decoded inline beside `SMSG_LOGIN_SETTIMESPEED`, the
-/// other clock packet.
+/// Ask the server's clock: an empty request; the reply is one `u32` of unix seconds
+/// (`QueryHandler.cpp:418-423`). Timed-quest deadlines are stamps on this clock.
 pub const CMSG_QUERY_TIME: u16 = 0x01CE; // 462
 pub const SMSG_QUERY_TIME_RESPONSE: u16 = 0x01CF; // 463
-/// `/random` (VERIFIED vmangos `Opcodes_1_12_1.h`: 507) — same opcode both directions, different
-/// bodies: client sends `u32 min + u32 max` ([`super::client::random_roll`],
-/// `WorldPackets::Group::RandomRoll::ReadFromWorldPacket`, `Server/Packets/Group.cpp:39-43`); the
-/// server broadcasts `u32 min + u32 max + u32 roll + u64 guid`
-/// (`WorldSession::HandleRandomRollOpcode`, `Handlers/GroupHandler.cpp:394-422`; layout in
-/// [`super::chat::read_random_roll`]).
+/// `/random`, both ways: we send `u32 min`, `u32 max`; the server broadcasts min, max,
+/// `u32 roll`, `u64 guid` (`GroupHandler.cpp:394-422`).
 pub const MSG_RANDOM_ROLL: u16 = 0x01FB; // 507
 
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 257. Body in [`super::stand_state_change`].
+/// Ask for a new stand state.
 pub const CMSG_STANDSTATECHANGE: u16 = 0x0101; // 257
+/// A server-side change to our stand state (eat/drink sit, stand on damage): one `u8`, no guid
+/// (`Unit.cpp:9541`). The reference (`0x603e50`) applies it to the local player, ungated.
+pub const SMSG_STANDSTATE_UPDATE: u16 = 0x029D; // 669
 pub const CMSG_CAST_SPELL: u16 = 0x012E; // 302
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 310. Body in [`super::spells::cancel_aura`] — a lone `u32`
-/// spell id (`Server/Packets/Spell.h:55-62`): the server cancels **by spell, never by slot**, and
-/// its handler (`SpellHandler.cpp:333-405`) refuses passives, `SPELL_ATTR_NO_AURA_CANCEL` spells,
-/// and debuffs. wow-re independently records the real client's sender (`Spell_C::CancelAura`
-/// `0x6e7040`, `push 0x136`). Decision 0255.
-/// Body: one `u32` spell id (vmangos `HandleCancelCastOpcode`). The wand-only auto-repeat
-/// handoff sends it for the cached wand Shoot before the local cancel (`0x6095b8`, wow-re
-/// `nocked-ammo-cancel.md` §Q-B-5).
+/// Cancel our cast: one `u32` spell id. The wand auto-repeat handoff sends it for the cached Shoot
+/// before the local cancel (`0x6095b8`).
 pub const CMSG_CANCEL_CAST: u16 = 0x012F; // 303
 pub const CMSG_CANCEL_AURA: u16 = 0x0136; // 310
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 315. Body: one `u32` spell id — the server ignores it
-/// (`Server/Packets/Spell.h:69` "not used by server"; `HandleCancelChanneling` interrupts the
-/// current channel unconditionally) but the real client writes it, so ours does too. Sent by the
-/// cast bar's local self-cancel (`benilla::ui_cast`) when movement/Esc ends our own channel.
+/// Cancel our channel: a `u32` spell id the server ignores (`Spell.h:69`) and 1.12 still sends.
 pub const CMSG_CANCEL_CHANNELLING: u16 = 0x013B; // 315
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 276. Body: a raw 8-byte guid ([`super::full_guid`] —
-/// `WorldPackets::Misc::Inspect`). The server sets our selection to it, refuses beyond
-/// `INSPECT_DISTANCE` (10.0y) or on `IsValidAttackTarget`, and otherwise replies `SMSG_INSPECT`
-/// (277) carrying **only the echoed guid** (`MiscHandler.cpp:943-960`). We deliberately do not
-/// parse that reply: it carries no data, the real client's inspect frame paints from the already-
-/// streamed PUBLIC `PLAYER_VISIBLE_ITEM_*` fields without waiting on it, and no FrameXML handler
-/// registers an inspect event. Decision 0631.
+/// Inspect a player: a raw 8-byte guid. The server selects it, then answers `SMSG_INSPECT` unless
+/// it is beyond 10 yd or attackable (`MiscHandler.cpp:943-960`).
 pub const CMSG_INSPECT: u16 = 0x0114; // 276
-/// 726 (VERIFIED vmangos `Opcodes_1_12_1.h`) — the inspect window's **Honor tab**, and an `MSG_`:
-/// the one opcode number carries both directions. Our request is a raw 8-byte guid
-/// ([`super::inspect_honor_stats`]); the server's reply, on the same number, is the 50-byte
-/// [`super::InspectHonorStats`] body. Nothing needs to disambiguate the two shapes — direction
-/// does: [`super::parse_server`] only ever sees inbound bodies, so a 0x2D6 there is always the
-/// reply, and our outbound body never passes through it.
-///
-/// Same three silent refusals as [`CMSG_INSPECT`] (`MiscHandler.cpp:962-972`), but *unlike* it
-/// this handler does not set our selection. Decision 1512.
+/// The inspect reply, the echoed `u64` guid; the reference discards it (`0x5e7d70`), so we drop it.
+pub const SMSG_INSPECT: u16 = 0x0115; // 277
+/// The inspect Honor tab, both ways: we send a raw 8-byte guid, the reply is a 50-byte body.
+/// Refused silently like [`CMSG_INSPECT`], but without selecting (`MiscHandler.cpp:962-972`).
 pub const MSG_INSPECT_HONOR_STATS: u16 = 0x02D6; // 726
-/// The NPC-click ladder's BATTLEMASTER arm (`0x5e01a0`): a `u64` NPC guid, no gate; the server
-/// answers with `SMSG_BATTLEFIELD_LIST` (decision 1977 retires 1861's greeting stand-in).
+/// Right-click a battlemaster (`0x5e01a0`): a `u64` guid; answered by `SMSG_BATTLEFIELD_LIST`.
 pub const CMSG_BATTLEMASTER_HELLO: u16 = 0x02D7; // 727
 pub const CMSG_SET_SELECTION: u16 = 0x013D; // 317
 pub const CMSG_ATTACKSWING: u16 = 0x0141; // 321
 pub const CMSG_ATTACKSTOP: u16 = 0x0142; // 322
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 480. Body in [`super::pose::set_sheathed`].
+/// Set our weapon sheath state.
 pub const CMSG_SETSHEATHED: u16 = 0x01E0; // 480
 pub const CMSG_AUTH_SESSION: u16 = 0x01ED;
 pub const CMSG_SET_ACTIVE_MOVER: u16 = 0x026A;
-/// The other half of the mover handshake (VERIFIED vmangos `Opcodes_1_12_1.h`: 721,
-/// `MovementHandler.cpp:886-965`). Body: the full u64 guid of the mover we are *giving up*, then a
-/// whole `MovementInfo`. It clears the server's `m_clientMoverGuid` and re-broadcasts a stop under
-/// the old guid, so skipping it strands observers on that mover's last relayed pose.
+/// Give up a mover: its full u64 guid, then a `MovementInfo`. The server re-broadcasts a stop for
+/// it; unsent, observers keep its last relayed pose (`MovementHandler.cpp:886-965`).
 pub const CMSG_MOVE_NOT_ACTIVE_MOVER: u16 = 0x02D1; // 721
-/// The far-sight **toggle vote** (VERIFIED vmangos `Opcodes_1_12_1.h`: 634,
-/// `MiscHandler.cpp:1138-1155`). Body is a single `u8`: `1` = look through the object, `0` = look
-/// through my own body again.
-///
-/// **The client never names the object.** The server resolves it from `PLAYER_FARSIGHT`, which
-/// only the server writes — so this is a vote on a view it already chose, not a request. Both
-/// branches pass `update_far_sight_field = false`, so **neither touches the field**: it keeps
-/// naming the object while the view toggles under it.
-///
-/// **Sending `0` is destructive and must be deliberate.** It moves the server's *visibility*
-/// source back to our body while `PLAYER_FARSIGHT` still names the object — the world around that
-/// object stops streaming while the camera is still anchored to it. Sending nothing is the safe
-/// default: the server tracks no reply, and it has already attached the viewpoint before we could
-/// answer. `1` is a no-op in every normal flow (`Camera::SetView` early-returns on an unchanged
-/// source); it exists for the buff-click toggle, whose only shipped user is Sentry Totem.
+/// The far-sight toggle: one `u8`, 1 views through the `PLAYER_FARSIGHT` object, 0 through our
+/// body (`MiscHandler.cpp:1138-1155`). Sending 0 moves visibility home while the camera stays on
+/// the object, so it must be deliberate; the server expects no reply.
 pub const CMSG_FAR_SIGHT: u16 = 0x027A; // 634
-/// Empty body. The real client sends it from exactly ONE site — inside the local auto-repeat
-/// cancel `0x6ea080` (`0x6ea0c6`) — so it rides along with *every* cancel trigger (wow-re
-/// `nocked-ammo-cancel.md`). vmangos `HandleCancelAutoRepeatSpellOpcode` interrupts the held
-/// auto-repeat spell (idempotent when the server already cancelled it first).
+/// Stop auto-repeat: empty body, sent from the local cancel (`0x6ea080`), so on every cancel.
 pub const CMSG_CANCEL_AUTO_REPEAT_SPELL: u16 = 0x026D; // 621
 
-// The keepalive pair (VERIFIED twice: vmangos `Opcodes_1_12_1.h` 476/477 AND wow-re net W1 —
-// `SendPing 0x537e10` pushes opcode 0x1dc, `HandlePong 0x537d60` matches 0x1dd). The real client
-// pings every 30 000 ms (wow-re `0x537ff0`, the connection drain's cadence check); vmangos kicks a
-// player socket that pings *faster* than 27 s apart more than `MaxOverspeedPings` (default 2) times
-// (`WorldSocket::_HandlePing`). Bodies: CMSG `{u32 sequence, u32 lastRtt}`; SMSG echoes `{u32
-// sequence}`. vmangos handles the ping inline on the socket (pre-session-queue) and stores the
-// latency field for `.server info`.
+// Keepalive: the 1.12 client pings every 30 s (`0x537ff0`) with `u32 sequence`, `u32 lastRtt`,
+// and the pong echoes the sequence. vmangos kicks after more than 2 pings under 27 s apart.
 pub const CMSG_PING: u16 = 0x01DC; // 476
 pub const SMSG_PONG: u16 = 0x01DD; // 477
 
-// The force-speed-change family (VERIFIED vmangos `Opcodes_1_12_1.h`: 226-231 + 730-735): the
-// server tells the CONTROLLER of a unit its speed changed (an aura slow, a mount, GM `.modify
-// speed`) as `[packed mover guid][u32 movementCounter][f32 newSpeed]` (flat yd/s —
-// `MovementPacketSender::SendSpeedChangeToController`, 5875 = the `> 1_9_4` branch), and the client
-// MUST answer the matching ACK: `[u64 FULL guid][u32 movementCounter][MovementInfo][f32 speed]`
-// (`MoveSpeedAck::ReadFromWorldPacket` — plain `ObjectGuid` extraction reads a full 8 bytes,
-// `ObjectGuid.cpp:180`; the echoed speed must match the sent one ±0.01 and the counter must match
-// a pending change, `Unit::FindPendingMovementSpeedChange`). Unacked, the server force-resolves
-// after `Movement.PendingAckResponseTime` (4 s default) and flags the anticheat's
-// `OnFailedToAckChange` — every speed change desyncs for 4 s and looks like cheating.
+// Speed changes to a unit's controller: `[packed guid][u32 counter][f32 yd/s]`. The client must
+// ack with `[full u64 guid][u32 counter][MovementInfo][f32 speed]`, the speed within 0.01 and the
+// counter pending; unacked, vmangos force-resolves after 4 s and flags it as cheating.
 pub const SMSG_FORCE_RUN_SPEED_CHANGE: u16 = 0x00E2; // 226
 pub const CMSG_FORCE_RUN_SPEED_CHANGE_ACK: u16 = 0x00E3; // 227
 pub const SMSG_FORCE_RUN_BACK_SPEED_CHANGE: u16 = 0x00E4; // 228
@@ -794,14 +444,9 @@ pub const CMSG_FORCE_SWIM_BACK_SPEED_CHANGE_ACK: u16 = 0x02DD; // 733
 pub const SMSG_FORCE_TURN_RATE_CHANGE: u16 = 0x02DE; // 734
 pub const CMSG_FORCE_TURN_RATE_CHANGE_ACK: u16 = 0x02DF; // 735
 
-// The OBSERVER speed-change legs (VERIFIED vmangos `MovementPacketSender`, decision 0441): a
-// speed change on a unit we don't control reaches us one of two ways, neither acked. A
-// server-controlled mover (creature), or a player mid-spline, broadcasts
-// `SMSG_SPLINE_SET_*_SPEED` = `[packed guid][f32 speed]` (`SendSpeedChangeToAll` / the
-// non-finalized `SendSpeedChangeToObservers` branch; 766-771). A freely-moving player's change —
-// the common case: another player mounting up — broadcasts `MSG_MOVE_SET_*_SPEED` =
-// `[packed guid][MovementInfo][f32 speed]` (the finalized-spline branch; 205-216, gaps real),
-// which also carries a fresh authoritative pose.
+// Speed changes on units we do not control, never acked. A creature's, or a player's mid-spline,
+// come as `SMSG_SPLINE_SET_*` `[packed guid][f32 speed]`; a freely moving player's come as
+// `MSG_MOVE_SET_*` `[packed guid][MovementInfo][f32 speed]`, which also carries a fresh pose.
 pub const SMSG_SPLINE_SET_RUN_SPEED: u16 = 0x02FE; // 766
 pub const SMSG_SPLINE_SET_RUN_BACK_SPEED: u16 = 0x02FF; // 767
 pub const SMSG_SPLINE_SET_SWIM_SPEED: u16 = 0x0300; // 768
@@ -809,39 +454,10 @@ pub const SMSG_SPLINE_SET_WALK_SPEED: u16 = 0x0301; // 769
 pub const SMSG_SPLINE_SET_SWIM_BACK_SPEED: u16 = 0x0302; // 770
 pub const SMSG_SPLINE_SET_TURN_RATE: u16 = 0x0303; // 771
 
-// **The OBSERVER movement-mode family** (decision 1780) — the spline-move twelve. Where the
-// `SMSG_FORCE_*`/`SMSG_MOVE_*` family above hands the *controlling client* a mode to ack, this one
-// tells everyone else that some unit's mode changed, and it is a different wire in three ways:
-// the body is a **bare packed guid** (no counter, no `MovementInfo`), there is **no ack**, and the
-// target is **any unit**, not our mover.
-//
-// VERIFIED both ends. Server: vmangos `MovementPacketSender::SendMovementFlagChangeToAll` /
-// `SendToggleRunWalkToAll` (`MovementPacketSender.cpp:399-462`) write `data << unit->GetPackGUID()`
-// and stop — the `+ 4` / `9` in the `WorldPacket` ctor is a capacity hint, not content. Client:
-// all twelve register the single handler `0x603c80`, which reads one packed guid (`0x642ed0`),
-// resolves it with `ClntObjMgrObjectPtr(TYPEMASK_UNIT)` and calls the dispatcher `0x601420`
-// (`lea eax,[edi-0x304]; cmp eax,0x16; ja` — so `0x304..=0x31A`, and `SMSG_SPLINE_MOVE_ROOT`'s
-// out-of-band `0x31A` is deliberately the range's top). An unresolvable guid is dropped silently.
-//
-// The dispatcher's twelve arms, in registration order (`0x603775`-`0x603830`), are a 1:1 map onto
-// the twelve opcodes; six of the arms are independently VERIFIED in wow-re's collision ledger:
-//
-// | opcode | arm | effect on `CMovement+0x40` |
-// |---|---|---|
-// | `0x31A` ROOT | `0x619a10` | `SetRoot 0x7c7340` — sets `0x1000`, and **wipes `0xffe07f00`'s complement once at apply** |
-// | `0x304` UNROOT | `0x619a40` | `ClearRoot 0x7c7370(1)` — clears `0x1000` |
-// | `0x305`/`0x306` | `0x61a4e0` | `SetFeatherFall 0x7c72e0` — `0x20000000` |
-// | `0x307`/`0x308` | `0x61a620` | `SetHover 0x7c7310` — `0x40000000` |
-// | `0x309`/`0x30A` | `0x61a3d0` | `SetWaterWalk 0x7c7280` — `0x10000000` |
-// | `0x30B`/`0x30C` | `0x61a130`/`0x61a160` | `SetSwim 0x7c6e50`/`0x7c6e80` — `0x200000` |
-// | `0x30D`/`0x30E` | `0x617e80` | `SetRunMode 0x7c71c0` — `0x100`, **inverted** (see below) |
-//
-// After any arm the dispatcher re-runs the unit's animation selector (`0x6014ec push edi; call
-// 0x60e480` then `push -1; call 0x5fd9e0`), which is why this family is *visual*: the mode change
-// re-picks the gait on the spot rather than waiting for the next pose.
-//
-// (wow-re `collision/scratch/moveflag-family.md` §§2-5, `collision/scratch/walk-mode-law.md` §5,
-// `collision/scratch/remote-swim-decision.md` §1.4, `collision/ledger.tsv` rows for each arm.)
+// Mode changes on any unit, for observers: a bare packed guid, no counter, no ack
+// (`MovementPacketSender.cpp:399-462`). The reference handles all twelve at `0x603c80`, drops an
+// unresolvable guid, and re-picks the unit's animation after each. Trap: SET_RUN_MODE clears
+// `MOVEFLAG_WALK_MODE` and SET_WALK_MODE sets it (`0x617e80`).
 pub const SMSG_SPLINE_MOVE_UNROOT: u16 = 0x0304; // 772
 pub const SMSG_SPLINE_MOVE_FEATHER_FALL: u16 = 0x0305; // 773
 pub const SMSG_SPLINE_MOVE_NORMAL_FALL: u16 = 0x0306; // 774
@@ -851,11 +467,6 @@ pub const SMSG_SPLINE_MOVE_WATER_WALK: u16 = 0x0309; // 777
 pub const SMSG_SPLINE_MOVE_LAND_WALK: u16 = 0x030A; // 778
 pub const SMSG_SPLINE_MOVE_START_SWIM: u16 = 0x030B; // 779
 pub const SMSG_SPLINE_MOVE_STOP_SWIM: u16 = 0x030C; // 780
-                                                    // **The run/walk pair is inverted against the flag bit, and that is the reference's own sign.**
-                                                    // `0x617e80` passes the opcode's bool straight to `CMovement::SetRunMode 0x7c71c0`, whose argument
-                                                    // is *run* — so `SET_RUN_MODE` CLEARS `MOVEFLAG_WALK_MODE` (`0x100`) and `SET_WALK_MODE` sets it.
-                                                    // Modelled as one [`super::movement::SplineMode::WalkMode`] whose `apply` is the flag's direction,
-                                                    // so every arm of the family means the same thing by "apply": set this bit.
 pub const SMSG_SPLINE_MOVE_SET_RUN_MODE: u16 = 0x030D; // 781
 pub const SMSG_SPLINE_MOVE_SET_WALK_MODE: u16 = 0x030E; // 782
 pub const SMSG_SPLINE_MOVE_ROOT: u16 = 0x031A; // 794
@@ -866,28 +477,18 @@ pub const MSG_MOVE_SET_SWIM_SPEED: u16 = 0x00D3; // 211
 pub const MSG_MOVE_SET_SWIM_BACK_SPEED: u16 = 0x00D5; // 213
 pub const MSG_MOVE_SET_TURN_RATE: u16 = 0x00D8; // 216
 
-// Mount feedback (VERIFIED vmangos `Opcodes_1_12_1.h` 366-367, `Player::SendMountResult` /
-// `SendDismountResult` — one u32 result code; decision 0441). The success codes
-// (`MOUNTRESULT_OK` = 10 / `DISMOUNTRESULT_OK` = 3) are silent in the reference; the failure
-// codes map to red error lines (a P2 trimming — decoded and logged for now).
+// Mount results: one `u32` code (`Player::SendMountResult`). Success (`MOUNTRESULT_OK` = 10,
+// `DISMOUNTRESULT_OK` = 3) is silent in the reference; any other code is a red error line.
 pub const SMSG_MOUNTRESULT: u16 = 0x016E; // 366
 pub const SMSG_DISMOUNTRESULT: u16 = 0x016F; // 367
 
-// The mounted space-bar flourish (VERIFIED vmangos `HandleMountSpecialAnimOpcode`,
-// `MovementHandler.cpp:967`): the CMSG is an EMPTY body; the server rebroadcasts
-// `SMSG_MOUNTSPECIAL_ANIM` — one raw u64 guid — to everyone in range, INCLUDING the sender
-// on vmangos's non-broadcaster delivery path (its `self=false` only gates cheat-logging;
-// live-verified by the double-flourish probe 2026-07-17). The app plays its own flourish
-// locally at send time and self-suppresses the echo; receivers play MountSpecial(94) on
-// that unit's mount (decision 0441 P2).
+// The mounted space-bar flourish: an empty CMSG, echoed as `SMSG_MOUNTSPECIAL_ANIM` (raw u64 guid)
+// to all in range, the sender too (`MovementHandler.cpp:967`); receivers play MountSpecial (94).
 pub const CMSG_MOUNTSPECIAL_ANIM: u16 = 0x0171; // 369
 pub const SMSG_MOUNTSPECIAL_ANIM: u16 = 0x0172; // 370
 
-// Movement (`MSG_MOVE_*`, both directions). The player-movement relay set: the server rebroadcasts
-// each opcode bound to its `HandleMovementOpcodes` (VERIFIED vmangos `Opcodes.cpp`) to nearby clients
-// as `[packed mover guid][MovementInfo]`, same opcode. We *send* the locomotion subset to drive our
-// own avatar and *receive* the whole set as other players' movement (see [`is_movement_relay`]). The
-// two acks (TELEPORT/WORLDPORT) ride the same family but carry different bodies, handled separately.
+// Movement, both ways: vmangos relays each `HandleMovementOpcodes` opcode to nearby clients as
+// `[packed mover guid][MovementInfo]` (`Opcodes.cpp`); the TELEPORT and WORLDPORT acks differ.
 pub const MSG_MOVE_START_FORWARD: u16 = 0x00B5; // 181
 pub const MSG_MOVE_START_BACKWARD: u16 = 0x00B6; // 182
 pub const MSG_MOVE_STOP: u16 = 0x00B7; // 183
@@ -912,9 +513,6 @@ pub const MSG_MOVE_SET_FACING: u16 = 0x00DA; // 218
 pub const MSG_MOVE_SET_PITCH: u16 = 0x00DB; // 219
 pub const MSG_MOVE_HEARTBEAT: u16 = 0x00EE; // 238
 
-// The gossip/vendor interaction set — "right-click a friendly NPC → dialog/vendor" (VERIFIED
-// vmangos `Opcodes_1_12_1.h`: 379-384 gossip/NPC-text, 414-421 vendor). Bodies in
-// [`super::gossip`] (gossip + NPC text) and [`super::vendor`] (vendor list/buy/sell).
 pub const CMSG_GOSSIP_HELLO: u16 = 0x017B; // 379
 pub const CMSG_GOSSIP_SELECT_OPTION: u16 = 0x017C; // 380
 pub const SMSG_GOSSIP_MESSAGE: u16 = 0x017D; // 381
@@ -922,14 +520,9 @@ pub const SMSG_GOSSIP_COMPLETE: u16 = 0x017E; // 382
 pub const CMSG_NPC_TEXT_QUERY: u16 = 0x017F; // 383
 pub const SMSG_NPC_TEXT_UPDATE: u16 = 0x0180; // 384
 
-// The guard's directions marker. Volunteered by a gossip option carrying an `action_poi_id`
-// (vmangos `Player::OnGossipSelect` → `PlayerMenu::SendPointOfInterest`, `GossipDef.cpp:253`), so
-// it answers no request of ours — a gossip-family SMSG with no CMSG beside it, which is why it
-// sits out at 548 instead of inside the 379-384 block. Body in [`super::gossip`].
+// A guard's map marker, pushed unasked by a gossip option's `action_poi_id` (`GossipDef.cpp:253`).
 pub const SMSG_GOSSIP_POI: u16 = 0x0224; // 548
 
-// The questgiver panel set — "accept/turn-in a quest at an NPC" (VERIFIED vmangos
-// `Opcodes_1_12_1.h`: 386-402). Bodies + SMSG layouts in [`super::quest`] (decision 0088).
 pub const CMSG_QUESTGIVER_STATUS_QUERY: u16 = 0x0182; // 386
 pub const SMSG_QUESTGIVER_STATUS: u16 = 0x0183; // 387
 pub const CMSG_QUESTGIVER_HELLO: u16 = 0x0184; // 388
@@ -946,9 +539,6 @@ pub const SMSG_QUESTGIVER_QUEST_INVALID: u16 = 0x018F; // 399
 pub const SMSG_QUESTGIVER_QUEST_COMPLETE: u16 = 0x0191; // 401
 pub const SMSG_QUESTGIVER_QUEST_FAILED: u16 = 0x0192; // 402
 
-// The quest-log wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 403-410) — swap/abandon a logged
-// quest, the full-log refusal, and the log's live progress/state pushes. Bodies + the
-// `SMSG_QUEST_QUERY_RESPONSE` full template in [`super::quest`].
 pub const CMSG_QUESTLOG_SWAP_QUEST: u16 = 0x0193; // 403
 pub const CMSG_QUESTLOG_REMOVE_QUEST: u16 = 0x0194; // 404
 pub const SMSG_QUESTLOG_FULL: u16 = 0x0195; // 405
@@ -958,10 +548,8 @@ pub const SMSG_QUESTUPDATE_COMPLETE: u16 = 0x0198; // 408
 pub const SMSG_QUESTUPDATE_ADD_KILL: u16 = 0x0199; // 409
 pub const SMSG_QUESTUPDATE_ADD_ITEM: u16 = 0x019A; // 410
 
-// The party quest-**share** set (VERIFIED vmangos `Opcodes_1_12_1.h`: 411-413 + 630) — decision
-// 1733. `MSG_QUEST_PUSH_RESULT` is the one bidirectional opcode of the quest family: the receiver
-// sends its own verdict up, the server relays every verdict (its own and the receiver's) back down
-// to the SHARER. Bodies in [`super::quest`]'s `share` submodule.
+// Quest sharing. `MSG_QUEST_PUSH_RESULT` runs both ways: the receiver sends its verdict, and the
+// server relays every verdict, its own and the receiver's, to the sharer.
 pub const CMSG_QUEST_CONFIRM_ACCEPT: u16 = 0x019B; // 411
 pub const SMSG_QUEST_CONFIRM_ACCEPT: u16 = 0x019C; // 412
 pub const CMSG_PUSHQUESTTOPARTY: u16 = 0x019D; // 413
@@ -972,25 +560,16 @@ pub const SMSG_LIST_INVENTORY: u16 = 0x019F; // 415
 pub const CMSG_SELL_ITEM: u16 = 0x01A0; // 416
 pub const SMSG_SELL_ITEM: u16 = 0x01A1; // 417
 pub const CMSG_BUY_ITEM: u16 = 0x01A2; // 418
-/// Buy into a **specific** bag slot. This is what a vendor row dropped out of the merchant
-/// cursor sends (`PickupMerchantItem` mode 5 → the container/doll drop), as against
-/// `CMSG_BUY_ITEM`'s auto-place, which is what clicking the row sends. Both ship (decision 1797).
+/// Buy into a given bag slot (a vendor row dropped from the cursor); a click sends `CMSG_BUY_ITEM`.
 pub const CMSG_BUY_ITEM_IN_SLOT: u16 = 0x01A3; // 419
 pub const SMSG_BUY_ITEM: u16 = 0x01A4; // 420
 pub const SMSG_BUY_FAILED: u16 = 0x01A5; // 421
-/// Buy a sold item back (VERIFIED wow-re `BuybackItem 0x4fb950`'s PutUint32 opcode immediate,
-/// ui/scratch/buyback-data-path.md + vmangos `Opcodes_1_12_1.h` 656 — NOT in the 0x19E vendor run).
+/// Buy a sold item back (`BuybackItem`, `0x4fb950`); outside the 0x19E vendor run.
 pub const CMSG_BUYBACK_ITEM: u16 = 0x0290; // 656
-/// Repair one item (guid) or everything (guid 0) at a repair-capable vendor (VERIFIED wow-re
-/// ui/scratch/repair-machinery.md: `68 a8 02 00 00` at all 4 client send sites; vmangos 680).
+/// Repair one item by guid, or everything with guid 0, at a repair vendor.
 pub const CMSG_REPAIR_ITEM: u16 = 0x02A8; // 680
 
-// The taxi/flight-master set (VERIFIED vmangos `Opcodes_1_12_1.h`: 425-431 the status/menu/
-// activate family, 786 the express-route activate — added later in the opcode table but the same
-// wire family, kept here rather than off with the vendor-era outliers). Guid fields on every one
-// of these (both directions) are a PLAIN u64, never a packed guid (vmangos `ObjectGuid::operator
-// >>/<<`, `ObjectGuid.cpp:174-186` — `PackedGuid` is a distinct type these packets never use).
-// Bodies in [`super::taxi`] (decision 0484).
+// Taxi: every guid in these, both ways, is a plain u64, never packed (`ObjectGuid.cpp:174-186`).
 pub const SMSG_SHOWTAXINODES: u16 = 0x01A9; // 425
 pub const CMSG_TAXINODE_STATUS_QUERY: u16 = 0x01AA; // 426
 pub const SMSG_TAXINODE_STATUS: u16 = 0x01AB; // 427
@@ -998,48 +577,25 @@ pub const CMSG_TAXIQUERYAVAILABLENODES: u16 = 0x01AC; // 428
 pub const CMSG_ACTIVATETAXI: u16 = 0x01AD; // 429
 pub const SMSG_ACTIVATETAXIREPLY: u16 = 0x01AE; // 430
 pub const SMSG_NEW_TAXI_PATH: u16 = 0x01AF; // 431
-/// `> CLIENT_BUILD_1_9_4` — active for 5875. Multi-hop route activate (guid, totalcost, node
-/// list); a single hop still goes through plain `CMSG_ACTIVATETAXI` above (vmangos accepts both).
+/// A multi-hop flight: guid, total cost, node list; a single hop uses `CMSG_ACTIVATETAXI`.
 pub const CMSG_ACTIVATETAXIEXPRESS: u16 = 0x0312; // 786
 
-// The class/profession trainer set (VERIFIED vmangos `Opcodes_1_12_1.h`: 432-436) — one window for
-// both, reached through the gossip trainer option (`GOSSIP_OPTION_TRAINER`), not a trainer-specific
-// open verb. `CMSG_TRAINER_LIST` requests/refreshes the list; buy is `CMSG_TRAINER_BUY_SPELL`.
-// Bodies in [`super::trainer`] (decision 0237).
+// Trainers, class and profession alike, open from `GOSSIP_OPTION_TRAINER`; there is no open verb.
 pub const CMSG_TRAINER_LIST: u16 = 0x01B0; // 432
 pub const SMSG_TRAINER_LIST: u16 = 0x01B1; // 433
 pub const CMSG_TRAINER_BUY_SPELL: u16 = 0x01B2; // 434
 pub const SMSG_TRAINER_BUY_SUCCEEDED: u16 = 0x01B3; // 435
 pub const SMSG_TRAINER_BUY_FAILED: u16 = 0x01B4; // 436
 
-// The innkeeper bind set (VERIFIED vmangos `Opcodes_1_12_1.h`: 437, 344, 747; decision 1331).
-// Selecting an innkeeper's `GOSSIP_OPTION_INNKEEPER` line makes the server close the gossip menu
-// and send `SMSG_BINDER_CONFIRM` — a QUESTION, not a bind. Nothing is bound until the client
-// answers `CMSG_BINDER_ACTIVATE`, which is what the confirm dialog's Accept sends; the server then
-// has the innkeeper cast spell 3286 "Bind" on the player, whose `SPELL_EFFECT_BIND` sends
-// `SMSG_BINDPOINTUPDATE` (above) and `SMSG_PLAYERBOUND` (vmangos `SpellEffects.cpp` `EffectBind`).
-// Bodies in [`super::binder`]. `SMSG_PLAYERBINDERROR` (0x01B6) is the refusal and is not parsed:
-// vmangos never sends it on any path (`SendBindPoint` simply returns inside an instance).
+// The innkeeper bind: `SMSG_BINDER_CONFIRM` only asks; Accept sends `CMSG_BINDER_ACTIVATE`, then
+// spell 3286 binds and sends `SMSG_BINDPOINTUPDATE` and `SMSG_PLAYERBOUND` (`EffectBind`).
 pub const CMSG_BINDER_ACTIVATE: u16 = 0x01B5; // 437
 pub const SMSG_PLAYERBOUND: u16 = 0x0158; // 344
 pub const SMSG_BINDER_CONFIRM: u16 = 0x02EB; // 747
 
-// The GM trouble-ticket set (VERIFIED vmangos `Opcodes_1_12_1.h` + `Opcodes.cpp:608-630`; decision
-// 1673). Five request/answer pairs behind the Help window, and the client asks for all of them —
-// there is no ticket state pushed at login, so `CMSG_GMTICKET_GETTICKET` right after world entry is
-// the client's own (seen in the 1.12.1 retail sniff, answered `TicketStatus: 10 (NoText)`).
-//
-// **Two of these answers can also arrive UNSOLICITED on vmangos**, which is why they are decoded
-// rather than correlated to a pending ask: `.ticket viewid`/`viewname`/`escalate`/`complete` push a
-// fresh `SMSG_GMTICKET_GETTICKET` at the ticket's author (`GMTicketMgr.cpp:153-159`,
-// `TicketCommands.cpp:265,443-452`), and `.ticket delete <id>` pushes a
-// `SMSG_GMTICKET_DELETETICKET` = `TICKET_DELETED` (`TicketCommands.cpp:100-103`).
-//
-// **And two requests can be answered with SILENCE**, which is why nothing in the client blocks on a
-// reply: `HandleGMTicketCreateOpcode` simply returns — no packet at all — when the queue is off,
-// when the player is under `GMTickets.MinLevel`, or when the category is >= 11
-// (`GMTicketHandler.cpp:91,106-113`), and delete-with-no-ticket likewise returns silently (`:73-86`).
-// Bodies in [`super::gm_ticket`].
+// GM tickets: nothing is pushed at login, so the client asks `CMSG_GMTICKET_GETTICKET`. GM commands
+// push GETTICKET and DELETETICKET answers unasked (`TicketCommands.cpp`), and a create or delete
+// can go unanswered (`GMTicketHandler.cpp:73-113`), so nothing waits on a reply.
 pub const CMSG_GMTICKET_CREATE: u16 = 0x0205; // 517
 pub const SMSG_GMTICKET_CREATE: u16 = 0x0206; // 518
 pub const CMSG_GMTICKET_UPDATETEXT: u16 = 0x0207; // 519
@@ -1051,24 +607,13 @@ pub const SMSG_GMTICKET_DELETETICKET: u16 = 0x0218; // 536
 pub const CMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021A; // 538
 pub const SMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021B; // 539
 
-/// The GM's own ticket-state push (VERIFIED vmangos `Opcodes_1_12_1.h`: 808). Body is a bare `u32`:
-/// 1 = updated, 2 = closed, 3 = a survey is offered.
-///
-/// **vmangos never constructs this packet on any path** — it is registered in its opcode table and
-/// nothing in its source sends it — so on the server benilla talks to this arm is dead. cmangos-
-/// classic makes it the core of its notification model (escalation, first GM read, re-sort, text
-/// update, assignment, queue toggle, close), which is why it is parsed rather than dropped.
-///
-/// It is decoded for one reason beyond completeness: the reference engine answers value 1 by
-/// re-asking for the ticket (`0x5e7932`, wow-re §5), the same leg the create/update success codes
-/// take. Values 2 and 3 are recorded but not acted on — 3 is the GM-survey trigger, and the survey
-/// window is deferred (decision 1673).
+/// A ticket-state push: `u32` 1 updated, 2 closed, 3 survey offered; vmangos never sends it. The
+/// reference re-asks for the ticket on 1 (`0x5e7932`). Deviation: 3 opens no survey window,
+/// since vmangos can never offer one.
 pub const SMSG_GM_TICKET_STATUS_UPDATE: u16 = 0x0328; // 808
 
-// The bank set (VERIFIED vmangos `Opcodes_1_12_1.h`: 439,440-441,642-643).
-// `CMSG_BANKER_ACTIVATE` right-clicks a pure banker;
-// `SMSG_SHOW_BANK` also arrives unprompted from the `GOSSIP_OPTION_BANKER` gossip option. Slot
-// purchase and deposit/withdraw bodies in [`super::bank`].
+// The bank: `CMSG_BANKER_ACTIVATE` opens a pure banker; `SMSG_SHOW_BANK` also arrives unasked
+// from the `GOSSIP_OPTION_BANKER` option.
 pub const CMSG_BANKER_ACTIVATE: u16 = 0x01B7; // 439
 pub const SMSG_SHOW_BANK: u16 = 0x01B8; // 440
 pub const CMSG_BUY_BANK_SLOT: u16 = 0x01B9; // 441
@@ -1076,20 +621,12 @@ pub const SMSG_BUY_BANK_SLOT_RESULT: u16 = 0x01BA; // 442
 pub const CMSG_AUTOSTORE_BANK_ITEM: u16 = 0x0282; // 642
 pub const CMSG_AUTOBANK_ITEM: u16 = 0x0283; // 643
 
-// The pet-stable set (VERIFIED vmangos `Opcodes_1_12_1.h`: 623-629). `MSG_LIST_STABLED_PETS` is one
-// opcode in BOTH directions: the gossip stable option makes the server send the list unprompted
-// (that is how the window opens), and the client sends the same number back — one guid — to
-// refresh. The four mutations are all answered by a single `SMSG_STABLE_RESULT` byte and nothing
-// else, so a successful one is a cue to re-ask the list. Bodies in [`super::stable`]
-// (decision 1676). `CMSG_STABLE_REVIVE_PET` (0x0274, 628) is deliberately absent: vmangos's handler
-// is an empty no-op and whether the 5875 client ever sends it is an open RE question.
-/// Forget a cached player name (VERIFIED vmangos `Opcodes_1_12_1.h`: 796) — body `{u64 guid}`.
-/// The client's name cache has **no TTL**: eviction is explicit, and this is the one packet that
-/// does it for a player (wow-re `system/dbcache/dbcache.md` Contracts, remove-by-key `0x556ff0`).
-/// Decision 1689. vmangos never sends it, so this is the mechanism present and correct rather
-/// than a path our own server exercises.
+/// Forget a cached player name: `u64 guid`, the cache's only eviction for a player (it has no
+/// TTL; `0x556ff0`). vmangos never sends it.
 pub const SMSG_INVALIDATE_PLAYER: u16 = 0x031C; // 796
 
+// The pet stable. `MSG_LIST_STABLED_PETS` runs both ways: the server sends the list to open the
+// window, the client sends one guid to refresh. Mutations get only one `SMSG_STABLE_RESULT` byte.
 pub const MSG_LIST_STABLED_PETS: u16 = 0x026F; // 623
 pub const CMSG_STABLE_PET: u16 = 0x0270; // 624
 pub const CMSG_UNSTABLE_PET: u16 = 0x0271; // 625
@@ -1097,172 +634,102 @@ pub const CMSG_BUY_STABLE_SLOT: u16 = 0x0272; // 626
 pub const SMSG_STABLE_RESULT: u16 = 0x0273; // 627
 pub const CMSG_STABLE_SWAP_PET: u16 = 0x0275; // 629
 
-/// Spend talent points (VERIFIED vmangos `Opcodes_1_12_1.h`: 593) — body in
-/// [`super::progression::learn_talent`]; the server answers with the rank spell's learn effects
-/// (`SMSG_LEARNED_SPELL` etc.) and the refreshed `PLAYER_CHARACTER_POINTS1`. Decision 0304.
+/// Spend a talent point; the rank's `SMSG_LEARNED_SPELL` and `PLAYER_CHARACTER_POINTS1` answer it.
 pub const CMSG_LEARN_TALENT: u16 = 0x0251; // 593
 
-/// The respec question and its answer — **one opcode, both directions** (VERIFIED vmangos
-/// `Opcodes_1_12_1.h`: 682 + `Opcodes.cpp`'s `HandleTalentWipeConfirmOpcode` registration; decision
-/// 1580). Selecting a class trainer's "I wish to unlearn my talents" line
-/// (`GOSSIP_OPTION_UNLEARNTALENTS`, `Player.cpp:12330`) makes the server close the gossip menu and
-/// send this **inbound** carrying the trainer's guid and the current cost — a QUESTION, the talent
-/// twin of [`SMSG_BINDER_CONFIRM`]. Nothing is unlearned until the client sends the same opcode
-/// **outbound** with that guid, which is the `CONFIRM_TALENT_WIPE` dialog's Accept; the server then
-/// runs `Player::ResetTalents` and has the trainer cast 14867 "Untalent Visual Effect".
-///
-/// Byte-verified client-side too (wow-re `system/ui/scratch/talent-api.md` §ConfirmTalentWipe,
-/// `0x48dc40` → `0x5df980`): both directions run through one range-gated function, whose outbound
-/// leg puts the *latched* trainer guid on the wire. Bodies in [`super::progression`].
+/// The respec, both ways: the trainer's gossip line (`Player.cpp:12330`) makes the server ask with
+/// the trainer's guid and the cost; the `CONFIRM_TALENT_WIPE` Accept sends the latched guid back.
 pub const MSG_TALENT_WIPE_CONFIRM: u16 = 0x02AA; // 682
-/// `SMSG_RAID_GROUP_ONLY` (wow-re `staticpopup-dialog-bindings.md` §5.2): `u32 delayMs`,
-/// `u32 reason`. Every arrival fires an instance-boot event — START for a positive delay, STOP
-/// for zero — and a zero delay with reason 1/2 also shows `ERR_RAID_GROUP_ONLY`/`_FULL`
-/// (decision 1963).
+/// The instance boot timer: `u32 delayMs`, `u32 reason`; boot START for a positive delay, STOP for
+/// zero, and with reason 1 or 2 a zero delay also shows `ERR_RAID_GROUP_ONLY` or `_FULL`.
 pub const SMSG_RAID_GROUP_ONLY: u16 = 0x0286; // 646
-/// The battleground queue's slot update (§7): `u32 slot`, `u32 mapId`, `u8 bracket`, `u32`,
-/// `u32 status`, then `u32` when status is 2 and two `u32` when it is 3; fires
-/// `UPDATE_BATTLEFIELD_STATUS` (decision 1963).
+/// A battleground queue slot: `u32 slot`, `u32 mapId`, `u8 bracket`, `u32`, `u32 status`, then
+/// one `u32` for status 2, two for 3; fires `UPDATE_BATTLEFIELD_STATUS`.
 pub const SMSG_BATTLEFIELD_STATUS: u16 = 0x02D4; // 724
-/// `AcceptBattlefieldPort(index, accept)`'s packet (§7): `u32 mapId` (the slot's Map.dbc row),
-/// `u8 accept` (decision 1963).
+/// `AcceptBattlefieldPort(index, accept)`: `u32 mapId` (the slot's Map.dbc row), `u8 accept`.
 pub const CMSG_BATTLEFIELD_PORT: u16 = 0x02D5; // 725
-/// The battleground scoreboard, both ways (wow-re `battlefield-verb-family.md` §4.3/§5.1, 1972):
-/// the client's `RequestBattlefieldScoreData` sends it EMPTY (throttled to 5000 ms client-side);
-/// the server's answer is `u8 ended`, `u8 winner` only when ended, `u32 count`, then per row
-/// `u64 guid, u32 rank, u32 killingBlows, u32 honorableKills, u32 deaths, u32 honorGained,
-/// u32 statCount, statCount × u32` (the client stores at most eight). Fires
-/// `UPDATE_BATTLEFIELD_SCORE` once every row's name resolves.
+/// The battleground scoreboard, both ways: an empty request (throttled to 5000 ms); the reply is
+/// `u8 ended`, `u8 winner` if ended, `u32 count`, then per row `u64 guid`, `u32` rank,
+/// killingBlows, honorableKills, deaths, honorGained, statCount, and statCount `u32` (the client
+/// keeps eight). Fires `UPDATE_BATTLEFIELD_SCORE` once every row's name resolves.
 pub const MSG_PVP_LOG_DATA: u16 = 0x02E0; // 736
-/// `LeaveBattlefield()`'s packet (§5.3, 1972): `u32 mapId` of the battleground the client is in,
-/// sent only once the scoreboard's "ended" byte has arrived.
+/// `LeaveBattlefield()`: `u32 mapId`, sent only once the scoreboard's ended byte has arrived.
 pub const CMSG_LEAVE_BATTLEFIELD: u16 = 0x02E1; // 737
-/// The battleground teammate positions, both ways (wow-re `worldmap-arrow-and-positions.md` §3.1,
-/// 1980): `RequestBattlefieldPositions()` sends it EMPTY (5000 ms throttle, only with an active
-/// slot); the server's answer is `u32 count`, `count × (u64 guid, f32 x, f32 y)`, then
-/// `u8 hasCarrier` and, when set, one `(u64 guid, f32 x, f32 y)` flag carrier. No event fires on
-/// arrival — the UI polls.
+/// Battleground teammate positions, both ways: an empty request (5000 ms throttle, active slot
+/// only); the reply is `u32 count`, count × `(u64 guid, f32 x, f32 y)`, `u8 hasCarrier`, and if
+/// set one more such triple for the flag carrier. No event fires; the UI polls.
 pub const MSG_BATTLEGROUND_PLAYER_POSITIONS: u16 = 0x02E9; // 745
-/// `ShowBattlefieldList(index)`'s packet (wow-re `battlefield-verb-family.md` §5, 1974): `u32 mapId`
-/// of a QUEUED slot — the battlemaster-less way to reopen the instance list.
+/// `ShowBattlefieldList(index)`: a queued slot's `u32 mapId`, reopening the list without an NPC.
 pub const CMSG_BATTLEFIELD_LIST: u16 = 0x023C; // 572
-/// The battleground instance list (§4.1, 1974): `u64 battlemaster` (zero when the list was not
-/// opened at an NPC), `u32 mapId`, `u8 bracket`, `u32 count`, `count × u32 instanceId`. Fires
-/// `BATTLEFIELDS_SHOW`; the cached battlemaster guid decides which join opcode a later
-/// `JoinBattlefield` sends.
+/// The battleground instance list: `u64 battlemaster` (0 away from an NPC), `u32 mapId`,
+/// `u8 bracket`, `u32 count`, count × `u32 instanceId`. Fires `BATTLEFIELDS_SHOW`; the
+/// battlemaster guid decides which join opcode `JoinBattlefield` sends.
 pub const SMSG_BATTLEFIELD_LIST: u16 = 0x023D; // 573
-/// `JoinBattlefield`'s packet when the list arrived WITHOUT a battlemaster (§5.2, 1974): `u32 mapId`,
-/// `u32 instanceId` (0 = first available), `u8 asGroup`.
+/// `JoinBattlefield`, no battlemaster: `u32 mapId`, `u32 instanceId` (0 = any), `u8 asGroup`.
 pub const CMSG_BATTLEFIELD_JOIN: u16 = 0x023E; // 574
-/// `JoinBattlefield`'s packet when the list arrived from a battlemaster (§5.2, 1974): `u64 guid`,
-/// `u32 mapId`, `u32 instanceId` (0 = first available), `u8 asGroup`.
+/// `JoinBattlefield` at a battlemaster: `u64 guid`, then the body of [`CMSG_BATTLEFIELD_JOIN`].
 pub const CMSG_BATTLEMASTER_JOIN: u16 = 0x02EE; // 750
-/// The world-enter status request (§5/§8, 1974): EMPTY; the server answers with one
-/// `SMSG_BATTLEFIELD_STATUS` per live queue slot.
+/// The world-entry status request: empty; answered by one `SMSG_BATTLEFIELD_STATUS` per live slot.
 pub const CMSG_BATTLEFIELD_STATUS: u16 = 0x02D3; // 723
-/// A group join's verdict (§4.4, 1974): `u32 result` — `0xFFFFFFFE` deserters (message 439), a
-/// Map.dbc id joined (440, with the map's name), anything else the generic failure (441).
+/// A group join's verdict: `u32`, `0xFFFFFFFE` for deserters (message 439), a Map.dbc id joined
+/// (440), anything else failure (441).
 pub const SMSG_GROUP_JOINED_BATTLEGROUND: u16 = 0x02E8; // 744
-/// A player joined the battleground (§4.5, 1974): `u64 guid`, printed as message 444 once the name
-/// cache answers.
+/// A player joined the battleground: `u64 guid`, printed as message 444 once the name resolves.
 pub const SMSG_BATTLEGROUND_PLAYER_JOINED: u16 = 0x02EC; // 748
-/// A player left the battleground (§4.5, 1974): `u64 guid`, message 445.
+/// A player left the battleground: `u64 guid`, message 445.
 pub const SMSG_BATTLEGROUND_PLAYER_LEFT: u16 = 0x02ED; // 749
-/// The area spirit healer query the client sends when it adopts a new healer (§6): `u64 guid`;
-/// answered by [`SMSG_AREA_SPIRIT_HEALER_TIME`] (decision 1963).
+/// Sent on adopting a new area spirit healer: `u64 guid`; [`SMSG_AREA_SPIRIT_HEALER_TIME`] answers.
 pub const CMSG_AREA_SPIRIT_HEALER_QUERY: u16 = 0x02E2; // 738
-/// `AcceptAreaSpiritHeal()`'s packet (§6): `u64 guid`, the CACHED current-area healer, never an
-/// argument (decision 1963).
+/// `AcceptAreaSpiritHeal()`: the cached area healer's `u64 guid`, never an argument.
 pub const CMSG_AREA_SPIRIT_HEALER_QUEUE: u16 = 0x02E3; // 739
-/// The healer's next-resurrection clock (§6): `u64 guid`, `u32 ms`; a match against the cached
-/// healer with a positive time arms the deadline and fires `AREA_SPIRIT_HEALER_IN_RANGE`
-/// (decision 1963).
+/// The healer's next resurrection: `u64 guid`, `u32 ms`. For the cached healer and a positive
+/// time it arms the deadline and fires `AREA_SPIRIT_HEALER_IN_RANGE`.
 pub const SMSG_AREA_SPIRIT_HEALER_TIME: u16 = 0x02E4; // 740
-/// The meeting stone's JOIN — the packet a right-click on a `GAMEOBJECT_TYPE_MEETINGSTONE` (23)
-/// sends: `u64 gameObjectGuid`, built and sent by `0x4c9ff0` from the tail (`0x5f6af6`) of that
-/// type's own use-slot validator `0x5f69d0` = `[0x80bf40+0x1c]` (decision 2283, VERIFIED by
-/// wow-re's §5 round on that function). Twelve bytes on the wire, body exactly eight, no padding.
-///
-/// A meeting stone **cannot** send [`CMSG_GAMEOBJ_USE`]: the shared sender `0x5f33e0` has zero
-/// direct callers and is reachable only as some vtable's `+0x1c`, which type 23's is not. And
-/// vmangos would drop it anyway — `GameObject::Use` has an explicit do-nothing type-23 arm
-/// (`GameObject.cpp:1836`, "Should never be called for this type of object").
+/// Right-click a meeting stone (GameObject type 23): `u64` guid, sent by `0x4c9ff0`. A stone never
+/// sends [`CMSG_GAMEOBJ_USE`], which vmangos ignores for type 23 (`GameObject.cpp:1836`).
 pub const CMSG_MEETINGSTONE_JOIN: u16 = 0x0292; // 658
-/// `CancelMeetingStoneRequest()`'s packet (§8): EMPTY. Gated client-side on party leadership
-/// only; clears nothing — the server's `0x295` reply does (decision 1963). The emulators' name
-/// for this number does not line up with the client's block; the number is what is verified.
+/// `CancelMeetingStoneRequest()`: empty, party leader only; the server's `0x295` reply clears the
+/// state. The name is the emulators'; the number is the client's.
 pub const CMSG_MEETINGSTONE_LEAVE: u16 = 0x0293; // 659
-/// The meeting-stone queue state (§8): `u32 areaId`, `u8 status`; stored unconditionally, a
-/// status message per value, then `MEETINGSTONE_CHANGED` (decision 1963).
+/// The meeting-stone queue state: `u32 areaId`, `u8 status`; always stored, a message per
+/// status, then `MEETINGSTONE_CHANGED`.
 pub const SMSG_MEETINGSTONE_SETQUEUE: u16 = 0x0295; // 661
-/// The enter-world "what is my meeting-stone status" query (wow-re `meeting-stone-status.md`
-/// §6, 1974): EMPTY, sent once per world session right after the status text resets to the
-/// localized `UNKNOWN`; the server answers with `0x295`. The emulators' names for this block do
-/// not line up with the client's; the numbers are what is verified.
+/// The world-entry meeting-stone status query: empty, once per session; answered by `0x295`.
+/// vmangos names it `CMSG_MEETINGSTONE_INFO`.
 pub const CMSG_MEETINGSTONE_STATUS_QUERY: u16 = 0x0296; // 662
-/// Display-only (§9): empty; `ERR_MEETING_STONE_SUCCESS` (1974).
+/// Display only: empty; `ERR_MEETING_STONE_SUCCESS`.
 pub const SMSG_MEETINGSTONE_SUCCESS: u16 = 0x0297; // 663
-/// Display-only (§9): empty; `ERR_MEETING_STONE_IN_PROGRESS` (1974).
+/// Display only: empty; `ERR_MEETING_STONE_IN_PROGRESS`.
 pub const SMSG_MEETINGSTONE_IN_PROGRESS: u16 = 0x0298; // 664
-/// Display-only (§9): `u64 guid`; `ERR_MEETING_STONE_MEMBER_ADDED_S` with the name once the name
-/// cache answers, nothing on a miss that never resolves (1974).
+/// Display only: `u64 guid`; `ERR_MEETING_STONE_MEMBER_ADDED_S` once the name resolves.
 pub const SMSG_MEETINGSTONE_MEMBER_ADDED: u16 = 0x0299; // 665
-/// Display-only (§9): `u8 code` — `1` must-be-leader, `2` group full, `3` no raid group, anything
-/// else nothing (1974).
+/// Display only: `u8 code`, 1 must be leader, 2 group full, 3 no raid group, else nothing.
 pub const SMSG_MEETINGSTONE_JOIN_FAILED: u16 = 0x02BB; // 699
-/// `ConfirmPetUnlearn()`'s packet (§9): `u64 trainerGuid`, the latch — never an argument
-/// (decision 1963).
+/// `ConfirmPetUnlearn()`: the latched `u64 trainerGuid`, never an argument.
 pub const CMSG_PET_UNLEARN: u16 = 0x02F0; // 752
-/// The pet trainer's question (§9): `u64 trainerGuid`, `u32 costCopper` — latched, then
-/// `CONFIRM_PET_UNLEARN(cost)`; a zero guid shows `ERR_TALENT_WIPE_ERROR` instead (the reference
-/// re-uses the talent-wipe string there) (decision 1963).
+/// The pet trainer asks: `u64 trainerGuid`, `u32 costCopper`, latched for
+/// `CONFIRM_PET_UNLEARN`; a zero guid shows `ERR_TALENT_WIPE_ERROR` instead.
 pub const SMSG_PET_UNLEARN_CONFIRM: u16 = 0x02F1; // 753
 
-/// The player-summon pair — the question and the accept (VERIFIED vmangos `Opcodes_1_12_1.h`:
-/// 683/684 + `Opcodes.cpp`'s `HandleSummonResponseOpcode` registration; decision 1747). A
-/// warlock's Ritual of Summoning, a meeting stone and a GM `.summon` all arrive as the same
-/// inbound question, and the client answers only to say **yes**: there is no decline opcode and no
-/// accept flag in the body, so a declined summon is silence and the server's own two-minute timer.
-///
-/// Byte-verified client-side as well as against vmangos (wow-re: the `0x5ab650` registration site
-/// maps `0x2ab` to handler `0x5e6140`, and the `ConfirmSummon` binding `0x48b770` writes `0x2ac`).
-/// Bodies in [`super::summon`].
+/// A summon offer (warlock, meeting stone, GM). The client can only accept, with
+/// `CMSG_SUMMON_RESPONSE` (`0x48b770`); a decline is silence until the two-minute timeout.
 pub const SMSG_SUMMON_REQUEST: u16 = 0x02AB; // 683
 pub const CMSG_SUMMON_RESPONSE: u16 = 0x02AC; // 684
 
-/// Unlearn (abandon) a whole skill line — the skills pane's red circle-slash (VERIFIED vmangos
-/// `Opcodes.cpp` handler registration + `Opcodes_1_9_4.h`: 514). Body in
-/// [`super::skills::unlearn_skill`]; no ack — the removal returns as a `PLAYER_SKILL_INFO`
-/// field update.
+/// Abandon a skill line; no ack, the removal arrives as a `PLAYER_SKILL_INFO` update.
 pub const CMSG_UNLEARN_SKILL: u16 = 0x0202; // 514
 
-/// Ask to flip our own PvP flag (decision 0646). A **two-way** opcode: vmangos reads a `bool`
-/// target state iff the body is exactly one byte (`Server/Packets/Misc.cpp`
-/// `TogglePvP::ReadFromWorldPacket`) and otherwise *toggles* `PLAYER_FLAGS_PVP_DESIRED`
-/// (`Handlers/MiscHandler.cpp` `HandleTogglePvP`). benilla sends the **empty** body — the verb is
-/// a toggle. No ack: the answer arrives as the `UNIT_FIELD_FLAGS` PvP bit in a descriptor update,
-/// and turning the preference *off* changes nothing until the server's 300 s drop timer expires.
+/// Toggle our PvP flag: we send the empty body, a toggle; one byte would set a state instead
+/// (`TogglePvP`). No ack; the flag arrives in `UNIT_FIELD_FLAGS`, and turning it off waits out
+/// the server's 300 s timer.
 pub const CMSG_TOGGLE_PVP: u16 = 0x0253; // 595
 
-/// The two **equipment-display** toggles — "show my helm" / "show my cloak" (VERIFIED vmangos
-/// `Opcodes_1_12_1.h`: 697/698, handlers `HandleShowingHelmOpcode`/`HandleShowingCloakOpcode` in
-/// `Handlers/CharacterHandler.cpp:753-761`). Both are **empty-bodied pure toggles**: the handler
-/// is a bare `ToggleFlag(PLAYER_FLAGS, PLAYER_FLAGS_HIDE_HELM | HIDE_CLOAK)` with no target-state
-/// form at all, unlike [`CMSG_TOGGLE_PVP`] above — so a client that wants a *specific* state must
-/// compare against the flag it already holds and send only on a difference.
-///
-/// No ack, exactly like the PvP toggle: the answer is the `PLAYER_FLAGS` bit arriving in the next
-/// descriptor update. That field is `UF_FLAG_PUBLIC` (vmangos `UpdateFields_1_12_1`), which is what
-/// makes the preference *everyone's* — a remote player's hidden helm hides on our screen too, off
-/// their own descriptor. The server round-trips the same preference through the char-enum record's
-/// `CHARACTER_FLAG_HIDE_HELM`/`HIDE_CLOAK` at load and save (`Player.cpp:14839-14842` /
-/// `16504-16505`), so the glue lane's flags and this one are the same stored bit (decision 1472).
+/// Toggle `PLAYER_FLAGS_HIDE_HELM`: an empty body and a pure toggle, so send only when the held
+/// flag differs (`CharacterHandler.cpp:753-761`). No ack; the public flag hides it for everyone.
 pub const CMSG_TOGGLE_HELM: u16 = 0x02B9; // 697
-/// The cloak half of [`CMSG_TOGGLE_HELM`] — same shape, `PLAYER_FLAGS_HIDE_CLOAK`.
+/// [`CMSG_TOGGLE_HELM`] for `PLAYER_FLAGS_HIDE_CLOAK`.
 pub const CMSG_TOGGLE_CLOAK: u16 = 0x02BA; // 698
 
-// The solo-loot wire family (VERIFIED vmangos `Opcodes_1_12_1.h`: 264, 349-355, 357-358).
-// Bodies in [`super::loot`].
 pub const CMSG_AUTOSTORE_LOOT_ITEM: u16 = 0x0108; // 264
 pub const CMSG_LOOT: u16 = 0x015D; // 349
 pub const CMSG_LOOT_MONEY: u16 = 0x015E; // 350
@@ -1274,24 +741,18 @@ pub const SMSG_LOOT_MONEY_NOTIFY: u16 = 0x0163; // 355
 pub const SMSG_LOOT_CLEAR_MONEY: u16 = 0x0165; // 357
 pub const SMSG_ITEM_PUSH_RESULT: u16 = 0x0166; // 358
 
-// The group-loot roll family (VERIFIED vmangos `Opcodes_1_12_1.h:671-675`) — the Need/Greed/Pass
-// flow the `GroupLootFrame`s drive when the group's loot method is group/need-before-greed and a
-// drop is at or above the quality threshold (decision 0591). Bodies in [`super::loot`].
+// Need/Greed/Pass rolls: group or need-before-greed loot on a drop at or above the threshold.
 pub const SMSG_LOOT_ALL_PASSED: u16 = 0x029E; // 670
 pub const SMSG_LOOT_ROLL_WON: u16 = 0x029F; // 671
 pub const CMSG_LOOT_ROLL: u16 = 0x02A0; // 672
 pub const SMSG_LOOT_START_ROLL: u16 = 0x02A1; // 673
 pub const SMSG_LOOT_ROLL: u16 = 0x02A2; // 674
 
-// Master loot (VERIFIED vmangos `Opcodes_1_12_1.h:676-677`) — the other answer to an
-// above-threshold drop: no roll, the master looter is handed the eligible-member list at
-// window-open and assigns each row from a dropdown (decision 1675). Bodies in [`super::loot`].
+// Master loot: no roll; the master looter gets the eligible members when the window opens.
 pub const CMSG_LOOT_MASTER_GIVE: u16 = 0x02A3; // 675
 pub const SMSG_LOOT_MASTER_LIST: u16 = 0x02A4; // 676
 
-// The death arc (decision 0308) — release/repop, corpse query, reclaim, spirit healer, resurrect
-// requests (all VERIFIED vmangos `Opcodes_1_12_1.h`: 346-348, 466, 534, 540, 546, 617). Bodies in
-// [`super::death`]. `CMSG_REPOP_REQUEST` and our `MSG_CORPSE_QUERY` request are EMPTY bodies.
+// Death: `CMSG_REPOP_REQUEST` and our `MSG_CORPSE_QUERY` request have empty bodies.
 pub const CMSG_REPOP_REQUEST: u16 = 0x015A; // 346
 pub const SMSG_RESURRECT_REQUEST: u16 = 0x015B; // 347
 pub const CMSG_RESURRECT_RESPONSE: u16 = 0x015C; // 348
@@ -1300,32 +761,15 @@ pub const MSG_CORPSE_QUERY: u16 = 0x0216; // 534
 pub const CMSG_SPIRIT_HEALER_ACTIVATE: u16 = 0x021C; // 540
 pub const SMSG_SPIRIT_HEALER_CONFIRM: u16 = 0x0222; // 546
 pub const SMSG_CORPSE_RECLAIM_DELAY: u16 = 0x0269; // 617
-/// Self-resurrect — the DEATH popup's soulstone/Reincarnation button (`UseSoulstone()`, decision
-/// 1746). **EMPTY body** (VERIFIED vmangos `Opcodes_1_12_1.h:692` = 691, handler
-/// `WorldSession::HandleSelfResOpcode(NullClientPacket const&)`, `SpellHandler.cpp:461`): the
-/// server casts whatever `PLAYER_SELF_RES_SPELL` holds on us and zeroes the field. There is no
-/// answer packet — the resurrection arrives as ordinary descriptor deltas, exactly like a reclaim.
+/// `UseSoulstone()`: empty body; the server casts our `PLAYER_SELF_RES_SPELL` and zeroes it
+/// (`SpellHandler.cpp:461`). No answer packet, only descriptor deltas.
 pub const CMSG_SELF_RES: u16 = 0x02B3; // 691
-/// Sent with the 10% durability loss a natural (non-PvP) death applies (VERIFIED vmangos
-/// `Opcodes_1_12_1.h` 701 + `Unit.cpp:1170-1182` — an EMPTY body; the client's cue for the red
-/// "Your equipped items suffer a 10%% durability loss." error line).
+/// A non-PvP death's 10% durability loss: empty body, a red error line (`Unit.cpp:1170-1182`).
 pub const SMSG_DURABILITY_DAMAGE_DEATH: u16 = 0x02BD; // 701
 
-// **The ack'd movement-mode family** — four granted mover modes, one wire shape (decision 0866).
-// This is not our grouping: the server names the set itself in `IsFlagAckOpcode`
-// (`Server/Protocol/Opcodes.h`) and routes all four through one sender
-// (`MovementPacketSender::AddMovementFlagChangeToController`, whose `MovementChangeType` is exactly
-// `{ROOT, WATER_WALK, SET_HOVER, FEATHER_FALL}`). Opcode numbers VERIFIED vmangos `Opcodes_1_1x.h`
-// (unchanged into 1.12.1) and cross-checked against the client's own name table
-// ([`super::opcode_names`]).
-//
-// **The wire shape is uniform.** The SMSG to the mover carries `packed guid + u32 counter`; the ack
-// echoes `full u64 guid + u32 counter + MovementInfo`, plus a trailing `u32 apply` for every mode
-// **except root** — the root ack lands on vmangos's `HandleMoveRootAck`, the other three on
-// `HandleMovementFlagChangeToggleAck`, which reads that extra dword
-// (`Server/Packets/Movement.cpp:38-59`). Un-acked changes never reach observers, and wrong/zero
-// counters trip the server's cheat log — the counter must be echoed. Modelled as
-// [`super::MoveMode`], whose docs carry what each flag does to the mover.
+// Mover modes, acked (`IsFlagAckOpcode`): the SMSG is a packed guid and `u32 counter`; the ack
+// echoes the full u64 guid, the counter and a `MovementInfo`, plus a `u32 apply` for all but root
+// (`Movement.cpp:38-59`). An unacked change never reaches observers.
 pub const SMSG_MOVE_WATER_WALK: u16 = 0x00DE; // 222
 pub const SMSG_MOVE_LAND_WALK: u16 = 0x00DF; // 223
 pub const CMSG_MOVE_WATER_WALK_ACK: u16 = 0x02D0; // 720
@@ -1340,38 +784,10 @@ pub const SMSG_MOVE_UNSET_HOVER: u16 = 0x00F5; // 245
 pub const CMSG_MOVE_HOVER_ACK: u16 = 0x00F6; // 246
 pub const CMSG_MOVE_FEATHER_FALL_ACK: u16 = 0x02CF; // 719
 
-// **The OBSERVER leg of that same family** — what everyone *else* is told once the mover acks
-// (decision 2061). The ack'd family above and the `SMSG_SPLINE_MOVE_*` twelve below are only two
-// of the three legs, and this is the one that was missing: `SMSG_SPLINE_MOVE_*` reaches a unit the
-// **server** drives (a creature), and the ack'd leg reaches only the mover's **own** client — so a
-// *player* being rooted, levitated or blinked had no leg at all, and every such change was invisible
-// until that player's next ordinary pose packet.
-//
-// vmangos names the three legs itself, in one table (`Movement/MovementPacketSender.h:30-60`):
-// `{ SMSG_FORCE_MOVE_ROOT → CMSG_FORCE_MOVE_ROOT_ACK → MSG_MOVE_ROOT }` and its three siblings,
-// plus `{ MSG_MOVE_TELEPORT_ACK → MSG_MOVE_TELEPORT_ACK → MSG_MOVE_TELEPORT }`. `SendMovementFlagChange
-// ToObservers` / `SendTeleportToObservers` (`MovementPacketSender.cpp:221-239`, `:368-397`) write
-// `[packed guid][MovementInfo]` and stop — **the ordinary relay shape**, decoded by
-// [`super::parse`]'s relay arm like a heartbeat.
-//
-// **The client agrees they are one family.** All six register the *same* handler as the 22 relay
-// opcodes we already carry — `0x603bb0` (wow-re `re/net/opcode-handlers.tsv`; 30 rows, one handler),
-// which reads a packed guid, resolves it under `TYPEMASK_UNIT` and hands the body to
-// `OnUnitMoveEvent 0x601580`. There is nothing to ack: the ack already happened, on the mover's own
-// client.
-//
-// **Apply/unapply is in the flags word, not the opcode.** Only root splits into two opcodes; hover,
-// feather-fall and water-walk each use ONE for both directions, because the server has already
-// written the bit into the `m_movementInfo` it is about to broadcast (`SetHoverReal` &co. run
-// *before* the send, `Handlers/MovementHandler.cpp:626-638`/`:743-744`). So the receiver folds the
-// whole word and asks nothing of the opcode — which is what our relay arm already does.
-//
-// **`MSG_MOVE_TELEPORT` carries no counter** (unlike `MSG_MOVE_TELEPORT_ACK`, 0x00C7, whose
-// `[packed guid][u32 counter][MovementInfo]` is the *mover's* handshake): an observer has nothing to
-// ack, so the dword isn't there. It is sent **twice** per near-teleport — once before the relocation
-// and once after (`Player::ExecuteTeleportNear`) — so observers around both the old and the new
-// position hear it; both carry the destination, so applying both is idempotent. It is also how a
-// **creature** blink arrives (`Unit::NearTeleportTo`, which `DisableSpline()`s first).
+// The observers' leg of those modes and of teleports (`MovementPacketSender.h:30-60`): the relay
+// shape `[packed guid][MovementInfo]`, handled like the relay opcodes (`0x603bb0`). Only root has
+// two opcodes; apply is in the flags word. `MSG_MOVE_TELEPORT` has no counter and comes twice per
+// near teleport, both with the destination; a creature blink arrives the same way.
 pub const MSG_MOVE_TELEPORT: u16 = 0x00C5; // 197
 pub const MSG_MOVE_ROOT: u16 = 0x00EC; // 236
 pub const MSG_MOVE_UNROOT: u16 = 0x00ED; // 237
@@ -1379,78 +795,32 @@ pub const MSG_MOVE_HOVER: u16 = 0x00F7; // 247
 pub const MSG_MOVE_FEATHER_FALL: u16 = 0x02B0; // 688
 pub const MSG_MOVE_WATER_WALK: u16 = 0x02B1; // 689
 
-// **The knockback handshake** — the server aims a launch at our own mover, the mover flies it, and
-// the ack is what the server relays onward (decision 1702). Numbers VERIFIED vmangos
-// `Opcodes_1_11_2.h:242-244` (unchanged into 1.12.1) and cross-checked against the client's own name
-// table ([`super::opcode_names`]).
-//
-// **The shape.** `SMSG_MOVE_KNOCK_BACK` carries `packed guid + u32 counter + f32 vcos + f32 vsin +
-// f32 speedXY + f32 speedZ` (vmangos `MovementPacketSender::SendKnockBackToController`, the
-// `> CLIENT_BUILD_1_9_4` branch that carries the counter). Those last four floats are a
-// [`super::JumpInfo`] in a different field order — the same launch quad, and that is not a
-// coincidence: the ack must echo them back as the `MovementInfo` **jump tail**, which is why
-// `speedZ` rides the jump tail's **down-positive** convention (vmangos negates the caller's
-// upward `verticalSpeed` on the way out, with the source comment "!! notice the - sign in front of
-// speedZ !!").
-//
-// **The ack is mandatory and checked value-by-value.** `CMSG_MOVE_KNOCK_BACK_ACK` is
-// `full u64 guid + u32 counter + MovementInfo` (`Server/Packets/Movement.cpp:61-68` — the same
-// shape as the movement-mode family's ack minus its trailing `apply` dword), and
-// `Unit::FindPendingMovementKnockbackChange` refuses it unless the counter matches **and** all four
-// jump-tail floats are within `0.01` of what was sent — so `MOVEFLAG_JUMPING` must be set and the
-// tail must be the launch quad. A mismatched ack is `OnWrongAckData`; a missing one is
-// `OnFailedToAckChange` (a knockback is the one pending change the server will not re-send,
-// `Unit.cpp:6887`). The ack is also the observers' packet: the server answers it with
-// `MSG_MOVE_KNOCK_BACK` built from the `MovementInfo` we sent.
+// Knockback. `SMSG_MOVE_KNOCK_BACK` to the mover: packed guid, `u32 counter`, `f32` vcos, vsin,
+// speedXY, speedZ, with speedZ down-positive like the jump tail. The mandatory ack is full u64
+// guid, counter, `MovementInfo`, whose jump tail must echo the four floats within 0.01 with
+// `MOVEFLAG_JUMPING` set; a knockback is never re-sent (`Unit.cpp:6887`). Observers get
+// `MSG_MOVE_KNOCK_BACK`: the relay shape plus the four floats, re-launched by `0x6026f0`.
 pub const SMSG_MOVE_KNOCK_BACK: u16 = 0x00EF; // 239
 pub const CMSG_MOVE_KNOCK_BACK_ACK: u16 = 0x00F0; // 240
-                                                  //
-                                                  // **And the observers hear it — `MSG_MOVE_KNOCK_BACK` is NOT dead** (decision 1702, correcting
-                                                  // decision 0277's "no observer-side knockback signal exists in 1.12 at all"). The reference
-                                                  // registers `0xF1` at its own dispatch entry `0x603bb0`, which reaches `CGUnit_C::OnKnockBack`
-                                                  // `0x6026f0` — it reads the four floats *after* a full `MovementInfo` and re-launches the unit
-                                                  // locally through the very same `0x6179c0` the controller's own knockback uses, acking nothing.
-                                                  // That body (`packed guid + MovementInfo + vcos + vsin + speedXY + speedZ`) is exactly what vmangos
-                                                  // sends (`SendKnockBackToObservers`), and its leading `[packed guid][MovementInfo]` is the ordinary
-                                                  // relay shape — the launch quad also rides that `MovementInfo`'s own jump tail, so a receiver that
-                                                  // replays the relayed arc reproduces the re-launch without reading the trailing four.
 pub const MSG_MOVE_KNOCK_BACK: u16 = 0x00F1; // 241
 
-// The social family — the friend list, the ignore list, and `/who` (VERIFIED vmangos
-// `Opcodes_1_12_1.h` + `Server/Packets/Social.{h,cpp}`, `Handlers/MiscHandler.cpp`,
-// `SocialMgr.{h,cpp}`; client side wow-re's `FriendList.cpp` TU, `system/net/scratch/w2b.md`).
-// Bodies in [`super::social`]; decision 0668.
 pub const CMSG_WHO: u16 = 0x0062; // 98
 pub const SMSG_WHO: u16 = 0x0063; // 99
 pub const CMSG_FRIEND_LIST: u16 = 0x0066; // 102
 pub const SMSG_FRIEND_LIST: u16 = 0x0067; // 103
 pub const SMSG_FRIEND_STATUS: u16 = 0x0068; // 104
 pub const CMSG_ADD_FRIEND: u16 = 0x0069; // 105
-/// The client's LFG slots and comment (wow-re `lfg-set-get-law.md`: written into a `CDataStore`
-/// at exactly one site image-wide, `0x4e8948`; no registered handler answers it). The name is
-/// the emulators' — the value and its site are the bytes'.
+/// Our LFG slots and comment, sent only from `0x4e8948`; nothing answers it. The name is the
+/// emulators'.
 pub const CMSG_SET_LOOKING_FOR_GROUP: u16 = 0x0200; // 512
 pub const CMSG_DEL_FRIEND: u16 = 0x006A; // 106
 pub const SMSG_IGNORE_LIST: u16 = 0x006B; // 107
 pub const CMSG_ADD_IGNORE: u16 = 0x006C; // 108
 pub const CMSG_DEL_IGNORE: u16 = 0x006D; // 109
 
-// The guild family — the query/roster caches, invitations, the member verbs, rank administration
-// and the event broadcast (VERIFIED vmangos `Opcodes_1_12_1.h:87-88`, `:132-151`, `:562-566`,
-// `:765` + `Server/Packets/Guild.{h,cpp}`, `Guild/Guild.{h,cpp}`, `Handlers/GuildHandler.cpp`; the
-// client side of `SMSG_GUILD_EVENT` is wow-re's RF-0077,
-// `system/object-layer/scratch/rf77-smsg-chat-wire-order.md`, which pins handler `0x5e7180` to
-// this 0x92 and reads its guild-init registration/teardown block). Bodies in [`super::guild`].
-//
-// The numbers are two contiguous runs plus two strays: the query pair sits with the other ask-once
-// caches at 0x54/0x55, the core family runs 0x81-0x93 immediately after the group family, rank
-// administration was appended at 0x231-0x235, and the guild info text at 0x2FC. The
-// charter/petition opcodes that *found* a guild are their own family, below; the tabard
-// opcodes that dress one are not built.
 pub const CMSG_GUILD_QUERY: u16 = 0x0054; // 84
 pub const SMSG_GUILD_QUERY_RESPONSE: u16 = 0x0055; // 85
-/// vmangos registers this `STATUS_NEVER` (`Opcodes.cpp:210`): at 1.12 a guild is founded through
-/// the charter/petition flow, not by this packet. Modelled for completeness; no reply comes back.
+/// Never handled (`STATUS_NEVER`, `Opcodes.cpp:210`): 1.12 guilds are founded by petition.
 pub const CMSG_GUILD_CREATE: u16 = 0x0081; // 129
 pub const CMSG_GUILD_INVITE: u16 = 0x0082; // 130
 pub const SMSG_GUILD_INVITE: u16 = 0x0083; // 131
@@ -1460,8 +830,8 @@ pub const SMSG_GUILD_DECLINE: u16 = 0x0086; // 134
 pub const CMSG_GUILD_INFO: u16 = 0x0087; // 135
 pub const SMSG_GUILD_INFO: u16 = 0x0088; // 136
 pub const CMSG_GUILD_ROSTER: u16 = 0x0089; // 137
-/// The widest packet in the game — the sender truncates its member list to `0x8000 - 4` bytes —
-/// and the one conditional-field trap in the family: see [`super::guild::read_guild_roster`].
+/// The roster, cut by the sender at `0x8000 - 4` bytes; one field is conditional (see
+/// `super::guild::read_guild_roster`).
 pub const SMSG_GUILD_ROSTER: u16 = 0x008A; // 138
 pub const CMSG_GUILD_PROMOTE: u16 = 0x008B; // 139
 pub const CMSG_GUILD_DEMOTE: u16 = 0x008C; // 140
@@ -1479,44 +849,25 @@ pub const CMSG_GUILD_SET_PUBLIC_NOTE: u16 = 0x0234; // 564
 pub const CMSG_GUILD_SET_OFFICER_NOTE: u16 = 0x0235; // 565
 pub const CMSG_GUILD_INFO_TEXT: u16 = 0x02FC; // 764
 
-// The petition family — the guild-charter flow that FOUNDS a guild (VERIFIED vmangos
-// `Opcodes_1_12_1.h:444-456`, `:705-706` + `Server/Packets/Petition.{h,cpp}`,
-// `Handlers/PetitionsHandler.cpp`; the handler table is `Opcodes.cpp:528-540` and `:800-801`).
-// Bodies in [`super::petition`]; decision 1672.
-//
-// Two shapes to know. The three `MSG_` opcodes are genuinely bidirectional with *different*
-// bodies each way — decline sends an item guid and receives a player guid — so each has its own
-// reader and its own builder rather than one shared body. And `MSG_DELETE_GUILD_CHARTER` (0x2C0)
-// is deliberately **absent**: vmangos registers it `INVALID_PACKET(…, Unhandled)`
-// (`Opcodes.cpp:800`) and has no handler at all, because destroying a charter runs through the
-// ordinary item-destroy path, which cascades into deleting the petition (`Player.cpp:10811-10817`,
-// `Item.cpp:515-516`). Declaring it would model traffic that nothing on either end sends.
 pub const CMSG_PETITION_SHOWLIST: u16 = 0x01BB; // 443
 pub const SMSG_PETITION_SHOWLIST: u16 = 0x01BC; // 444
 pub const CMSG_PETITION_BUY: u16 = 0x01BD; // 445
 pub const CMSG_PETITION_SHOW_SIGNATURES: u16 = 0x01BE; // 446
-/// The answer to **two** different asks — our own `CMSG_PETITION_SHOW_SIGNATURES`, and someone
-/// else's `CMSG_OFFER_PETITION` aimed at us. Only its `owner` field tells the two apart.
+/// Answers our `CMSG_PETITION_SHOW_SIGNATURES` and another player's `CMSG_OFFER_PETITION` alike;
+/// only `owner` tells them apart.
 pub const SMSG_PETITION_SHOW_SIGNATURES: u16 = 0x01BF; // 447
 pub const CMSG_PETITION_SIGN: u16 = 0x01C0; // 448
 pub const SMSG_PETITION_SIGN_RESULTS: u16 = 0x01C1; // 449
-/// Bidirectional with different bodies: we send the charter **item's** guid, the owner receives
-/// the declining **player's** guid.
+/// Both ways, different bodies: we send the charter item's guid, the owner gets the decliner's.
 pub const MSG_PETITION_DECLINE: u16 = 0x01C2; // 450
 pub const CMSG_OFFER_PETITION: u16 = 0x01C3; // 451
 pub const CMSG_TURN_IN_PETITION: u16 = 0x01C4; // 452
 pub const SMSG_TURN_IN_PETITION_RESULTS: u16 = 0x01C5; // 453
 pub const CMSG_PETITION_QUERY: u16 = 0x01C6; // 454
 pub const SMSG_PETITION_QUERY_RESPONSE: u16 = 0x01C7; // 455
-/// Bidirectional, and here the two bodies agree: `u64 item` + the new name, both ways. The echo
-/// comes back only on success.
+/// Both ways, one body: `u64 item` and the new name; echoed back only on success.
 pub const MSG_PETITION_RENAME: u16 = 0x02C1; // 705
 
-// The group/party family — invite/accept/decline/kick/leader/disband, the loot-method setting, the
-// roster push (`SMSG_GROUP_LIST`), party command feedback, live member stats for the party/raid
-// frame, minimap pings, raid subgroup management, raid-target icons, and ready checks (VERIFIED
-// vmangos `Opcodes_1_12_1.h` + `Server/Packets/Group.{h,cpp}`, `Handlers/GroupHandler.cpp`,
-// `Group/Group.{h,cpp}`). Bodies in [`super::group`].
 pub const CMSG_GROUP_INVITE: u16 = 0x006E; // 110
 pub const SMSG_GROUP_INVITE: u16 = 0x006F; // 111
 pub const CMSG_GROUP_ACCEPT: u16 = 0x0072; // 114
@@ -1533,10 +884,7 @@ pub const SMSG_GROUP_DESTROYED: u16 = 0x007C; // 124
 pub const SMSG_GROUP_LIST: u16 = 0x007D; // 125
 pub const SMSG_PARTY_MEMBER_STATS: u16 = 0x007E; // 126
 pub const SMSG_PARTY_COMMAND_RESULT: u16 = 0x007F; // 127
-/// Same opcode both directions (VERIFIED vmangos `Group.cpp:33-37` client read, `Handlers/
-/// GroupHandler.cpp:382-391` server rebroadcast): the client's own ping carries no guid, the
-/// server stamps ours on before relaying to the rest of the group (see
-/// [`super::group::minimap_ping`] / the parse arm).
+/// Both ways: our ping has no guid; the server adds ours and relays it (`GroupHandler.cpp:382`).
 pub const MSG_MINIMAP_PING: u16 = 0x01D5; // 469
 pub const CMSG_GROUP_CHANGE_SUB_GROUP: u16 = 0x027E; // 638
 pub const CMSG_REQUEST_PARTY_MEMBER_STATS: u16 = 0x027F; // 639
@@ -1544,28 +892,17 @@ pub const CMSG_GROUP_SWAP_SUB_GROUP: u16 = 0x0280; // 640
 pub const CMSG_GROUP_RAID_CONVERT: u16 = 0x028E; // 654
 pub const CMSG_GROUP_ASSISTANT_LEADER: u16 = 0x028F; // 655
 pub const SMSG_PARTY_MEMBER_STATS_FULL: u16 = 0x02F2; // 754
-/// Same opcode both directions, mode-prefixed shapes on the server's side (VERIFIED vmangos
-/// `Server/Packets/Group.cpp:77-82` client read, `:132-147` server write; see
-/// [`super::group::RaidTargetUpdate`]).
+/// Both ways; the server's side is mode-prefixed (`Group.cpp:77-82` read, `:132-147` write).
 pub const MSG_RAID_TARGET_UPDATE: u16 = 0x0321; // 801
-/// Same opcode both directions — an empty body starts/requests, a non-empty one answers (VERIFIED
-/// vmangos `Server/Packets/Group.cpp:84-96`, `:126-130`; see [`super::group::ReadyCheck`]).
+/// Both ways: an empty body starts a check, a non-empty one answers (`Group.cpp:84-96`).
 pub const MSG_RAID_READY_CHECK: u16 = 0x0322; // 802
-/// Ask the server for our saved-instance (raid lockout) list — empty body (VERIFIED vmangos
-/// `Server/Protocol/Opcodes.cpp` registers it against `HandleRequestRaidInfoOpcode`, which is a
-/// bare `SendRaidInfo()`). The RaidFrame's `RequestRaidInfo()` on every OnShow (decision 1549).
+/// Ask for our raid lockouts: empty body, sent by `RequestRaidInfo()` on every RaidFrame show.
 pub const CMSG_REQUEST_RAID_INFO: u16 = 0x02CD; // 717
-/// The answer: `u32 count` then `count` × `{u32 mapId, u32 secondsUntilReset, u32 instanceId}`
-/// (VERIFIED vmangos `Objects/Player.cpp::Player::SendRaidInfo`, permanent binds only; see
-/// [`super::group::read_raid_instance_info`]).
+/// Our permanent binds: `u32 count`, count × `{u32 mapId, u32 secondsUntilReset, u32 instanceId}`.
 pub const SMSG_RAID_INSTANCE_INFO: u16 = 0x02CC; // 716
 
-// The duel family (decision 0633) — the six inbound handlers WoW.exe registers in
-// `Ui/DuelInfo.cpp` at `0x4d4710` plus the two it sends from `AcceptDuel 0x4d4830` /
-// `CancelDuel 0x4d48b0`; server side VERIFIED vmangos `Server/Packets/Duel.{h,cpp}` +
-// `Handlers/DuelHandler.cpp`. There is no CMSG for *starting* a duel: the challenge is a normal
-// `CMSG_CAST_SPELL` of the spellbook spell whose `Effect[0]` is `SPELL_EFFECT_DUEL` (83).
-// Bodies in [`super::duel`].
+// Duels (reference handlers registered at `0x4d4710`). A challenge is a `CMSG_CAST_SPELL` of the
+// `SPELL_EFFECT_DUEL` (83) spell; there is no opcode to start one.
 pub const SMSG_DUEL_REQUESTED: u16 = 0x0167; // 359
 pub const SMSG_DUEL_OUTOFBOUNDS: u16 = 0x0168; // 360
 pub const SMSG_DUEL_INBOUNDS: u16 = 0x0169; // 361
@@ -1573,118 +910,84 @@ pub const SMSG_DUEL_COMPLETE: u16 = 0x016A; // 362
 pub const SMSG_DUEL_WINNER: u16 = 0x016B; // 363
 pub const CMSG_DUEL_ACCEPTED: u16 = 0x016C; // 364
 pub const CMSG_DUEL_CANCELLED: u16 = 0x016D; // 365
-/// Milliseconds, not seconds — the client divides by 1000 (`0x4d4aef`). Live on 5875 despite the
-/// opcode's high number: `0x4d474a` registers a handler for it alongside the 0x167 block.
+/// The duel countdown in milliseconds; the client divides by 1000 (`0x4d4aef`). Registered with
+/// the 0x167 block (`0x4d474a`) despite its number.
 pub const SMSG_DUEL_COUNTDOWN: u16 = 0x02B7; // 695
 
-// The mirror timers — breath / fatigue / feign-death (decision 0874; VERIFIED vmangos
-// `Opcodes_1_12_1.h:474-476` + `Server/Packets/Misc.{h,cpp}`). Server-authoritative countdowns the
-// client only mirrors and integrates; the family has no CMSG and no separate "update" opcode — a
-// running timer that changes anything is re-sent as a whole START. Bodies in
-// [`super::mirror_timer`].
+// Mirror timers (breath, fatigue, feign death): server countdowns; any change re-sends a START.
 pub const SMSG_START_MIRROR_TIMER: u16 = 0x01D9; // 473
-/// Never sent by vmangos, on purpose (`Player::SendMirrorTimers` substitutes a full START and says
-/// why in the source): the shipped 1.12 `MirrorTimer.lua` handler reads the same `arg1` as both a
-/// timer name and a number, so a real pause packet errors out in the reference UI. Decoded anyway.
+/// Never sent by vmangos, which re-sends a START instead: the stock `MirrorTimer.lua` errors on
+/// a real pause (`Player::SendMirrorTimers`).
 pub const SMSG_PAUSE_MIRROR_TIMER: u16 = 0x01DA; // 474
 pub const SMSG_STOP_MIRROR_TIMER: u16 = 0x01DB; // 475
 
-// The mail arc (decision 0544; VERIFIED vmangos `Opcodes_1_12_1.h` + `Handlers/MailHandler.cpp`).
-// There is no `SMSG_SHOW_MAILBOX` on 5875 — the mailbox window opens entirely client-side; every
-// CMSG below carries the mailbox guid at its head, and the server independently re-validates the
-// 5 yd interact distance (`CheckMailBox`) on each one. Bodies in [`super::mail`].
+// Mail opens client-side; every CMSG leads with the mailbox guid, checked at 5 yd (`CheckMailBox`).
 pub const CMSG_SEND_MAIL: u16 = 0x0238; // 568
 pub const SMSG_SEND_MAIL_RESULT: u16 = 0x0239; // 569
 pub const CMSG_GET_MAIL_LIST: u16 = 0x023A; // 570
 pub const SMSG_MAIL_LIST_RESULT: u16 = 0x023B; // 571
-/// Letter bodies never ride the list inline — the client fetches them ask-once by `itemTextId`.
+/// A letter's text, fetched ask-once by `itemTextId`; the mail list never carries it.
 pub const CMSG_ITEM_TEXT_QUERY: u16 = 0x0243; // 579
 pub const SMSG_ITEM_TEXT_QUERY_RESPONSE: u16 = 0x0244; // 580
 pub const CMSG_MAIL_TAKE_MONEY: u16 = 0x0245; // 581
 pub const CMSG_MAIL_TAKE_ITEM: u16 = 0x0246; // 582
-/// No response packet — the app flips the local `checked` READ bit and repaints.
+/// No response; the client sets the letter's read bit itself.
 pub const CMSG_MAIL_MARK_AS_READ: u16 = 0x0247; // 583
 pub const CMSG_MAIL_RETURN_TO_SENDER: u16 = 0x0248; // 584
 pub const CMSG_MAIL_DELETE: u16 = 0x0249; // 585
 pub const CMSG_MAIL_CREATE_TEXT_ITEM: u16 = 0x024A; // 586
-/// Same opcode both directions (VERIFIED vmangos `Opcodes_1_12_1.h`: 644): our request is an EMPTY
-/// body; the reply (same opcode) is one `f32` — `0.0` unread mail waiting, `-86400.0` none.
+/// Both ways: an empty request; the reply is one `f32`, `0.0` for unread mail, `-86400.0` none.
 pub const MSG_QUERY_NEXT_MAIL_TIME: u16 = 0x0284; // 644
-/// One `u32` (always 0) — sent when a mail *arrives* (instant for text-only, on the delivery
-/// timer's expiry otherwise).
+/// A mail arrived (text-only at once, else when its delivery timer ends): one `u32`, always 0.
 pub const SMSG_RECEIVED_MAIL: u16 = 0x0285; // 645
 
-// The auction house arc (decision 1511 P0; VERIFIED vmangos `Opcodes_1_12_1.h`: 597-607, 612-613,
-// 653 — every value re-read against that table). Bodies in [`super::auction`]. Two family facts
-// belong here: **there is no `*_LIST_PENDING_SALES` on 5875** — the symbol exists in no vmangos
-// opcode table at all, so the pending-sales pane is a later client's and has no wire to build —
-// and every CMSG below carries the auctioneer guid at its head because the server re-validates
-// the 5 yd interact distance on each one independently; the hello is not a session token.
-/// Same opcode both directions (597): our request is one auctioneer guid; the reply echoes it and
-/// adds `u32 houseId` (`AuctionHouse.dbc`, rows 1..7, which carries the deposit/cut rates). It is
-/// the **reply** that opens the window, not our send.
+// The auction house: every CMSG leads with the auctioneer guid, and the server checks 5 yd on
+// each, so the hello is no session token.
+/// Both ways: we send the auctioneer guid; the reply echoes it with `u32 houseId`
+/// (`AuctionHouse.dbc` 1..7) and opens the window.
 pub const MSG_AUCTION_HELLO: u16 = 0x0255; // 597
 pub const CMSG_AUCTION_SELL_ITEM: u16 = 0x0256; // 598
 pub const CMSG_AUCTION_REMOVE_ITEM: u16 = 0x0257; // 599
-/// The Browse search — ten fields and **no sort bytes** on 5875: filtering is server-side,
-/// sorting entirely client-side ([`super::auction::auction_list_items`]).
+/// The Browse search: ten fields and no sort bytes; the server filters, the client sorts.
 pub const CMSG_AUCTION_LIST_ITEMS: u16 = 0x0258; // 600
 pub const CMSG_AUCTION_LIST_OWNER_ITEMS: u16 = 0x0259; // 601
-/// Bid *and* buy out: buyout is inferred from the price (`price >= buyout && buyout != 0`), never
-/// flagged, and there is no separate opcode for it.
+/// Bid or buy out: a buyout is `price >= buyout && buyout != 0`, never flagged.
 pub const CMSG_AUCTION_PLACE_BID: u16 = 0x025A; // 602
-/// The one verdict opcode for sell/cancel/bid, with a conditional tail keyed on its error
-/// ([`super::auction::AuctionCommandTail`]). Several refusals send **nothing at all** instead.
+/// The sell, cancel or bid verdict, with a tail keyed on its error; some refusals send nothing.
 pub const SMSG_AUCTION_COMMAND_RESULT: u16 = 0x025B; // 603
-/// This and the two list results below share ONE frame and ONE 64-byte record layout
-/// ([`super::auction::read_auction_list_result`]): `u32 count`, the records, then `u32 totalCount`
-/// at the very end — the match count *before* the 50-row page cap.
+/// Shared with the owner and bidder list results: `u32 count`, 64-byte records, then
+/// `u32 totalCount`, the matches before the 50-row page cap.
 pub const SMSG_AUCTION_LIST_RESULT: u16 = 0x025C; // 604
 pub const SMSG_AUCTION_OWNER_LIST_RESULT: u16 = 0x025D; // 605
-/// Pushed to the bidder: won, or outbid — `bidOrZero == 0` means **won**, not "no bid".
+/// To the bidder, won or outbid: `bidOrZero == 0` means won, not "no bid".
 pub const SMSG_AUCTION_BIDDER_NOTIFICATION: u16 = 0x025E; // 606
-/// Pushed to the seller. A **different field order** from the bidder notification, and no
-/// `houseId`; the two never share a struct or a reader.
+/// To the seller: a different field order from the bidder notification, and no `houseId`.
 pub const SMSG_AUCTION_OWNER_NOTIFICATION: u16 = 0x025F; // 607
 pub const CMSG_AUCTION_LIST_BIDDER_ITEMS: u16 = 0x0264; // 612
 pub const SMSG_AUCTION_BIDDER_LIST_RESULT: u16 = 0x0265; // 613
 /// Pushed to a bidder whose auction the seller cancelled.
 pub const SMSG_AUCTION_REMOVED_NOTIFICATION: u16 = 0x028D; // 653
 
-// The world-state table (VERIFIED both ways: vmangos `Opcodes_1_12_1.h` 706-707, and wow-re's read
-// of the reference's own handler `0x48f690`, whose registration at `0x48f515-0x48f52f` selects these
-// two arms as the ONLY writers of the table setter `0x4c5870`). Bodies in
-// [`super::world_state`]. Backs the NPC-text `$<n>w`/`$<n>e` tokens today; the BG/PvP scoreboard
-// later.
+// The world-state table; these two are its only writers (reference `0x48f690`). NPC text's
+// `$<n>w`/`$<n>e` tokens read it.
 pub const SMSG_INIT_WORLD_STATES: u16 = 0x02C2; // 706
 pub const SMSG_UPDATE_WORLD_STATE: u16 = 0x02C3; // 707
 
-// ── The instance/raid lockout family (decision 1748) ──────────────────────────────────────────
-//
-// The five inbound handlers WoW.exe registers together at `0x498680`-`0x4986cf`, plus the
-// save-created one registered apart at `0x4e7e48`, plus the one thing the player can ask for.
-// Bodies (and the client's own read order) in [`super::instance`]; server side VERIFIED vmangos
-// `Server/Packets/Misc.{h,cpp}` + `Maps/Map.cpp`.
+// ── Instance and raid lockouts ──
 
-/// "You are now saved to this instance" (`u32` flag; handler `0x4e7e60`). vmangos always sends
-/// `0`; the client's `== 1` arm wraps the same string in a `"(Debug-Only Lock Notice) %s"`
-/// literal, and anything ≥ 2 prints an uninitialized buffer (a real 1.12 bug — we print nothing).
+/// "You are now saved to this instance": a `u32` flag, 0 from vmangos (`0x4e7e60`; 1 adds a debug
+/// prefix). Deviation: 2 or more prints nothing; the reference prints an uninitialized buffer.
 pub const SMSG_INSTANCE_SAVE_CREATED: u16 = 0x02CB; // 715
-/// The raid-lockout welcome/countdown line: `u32 type`, `u32 mapId`, `u32 secondsUntilReset`
-/// (handler `0x49e1c0`; the four types in [`super::instance::RaidInstanceWarning`]).
+/// A raid-lockout warning: `u32 type`, `u32 mapId`, `u32 secondsUntilReset` (`0x49e1c0`).
 pub const SMSG_RAID_INSTANCE_MESSAGE: u16 = 0x02FA; // 762
-/// "Reset all instances" — empty body (the `ResetInstances` binding `0x48a6b0`; vmangos
-/// `HandleResetInstancesOpcode`).
+/// "Reset all instances": empty body (`ResetInstances`, `0x48a6b0`).
 pub const CMSG_RESET_INSTANCES: u16 = 0x031D; // 797
-/// "%s has been reset." — `u32 mapId` (handler `0x49e470`, which also clears the last-instance
-/// latch `0x495d00` *before* reading the body).
+/// "%s has been reset.": `u32 mapId`; `0x49e470` clears the last-instance latch before reading it.
 pub const SMSG_INSTANCE_RESET: u16 = 0x031E; // 798
-/// The reset refusal: `u32 reason`, `u32 mapId` (handler `0x49e540`; the three reasons in
-/// [`super::instance::InstanceResetFailure`]).
+/// The reset refusal: `u32 reason`, `u32 mapId` (`0x49e540`).
 pub const SMSG_INSTANCE_RESET_FAILED: u16 = 0x031F; // 799
-/// The dungeon we were last in: `u32 mapId` (handler `0x49e670` → `0x495d10`). Shows no line —
-/// it is half of what `CanShowResetInstances()` reads.
+/// The dungeon we were last in: `u32 mapId` (`0x49e670`), half of what
+/// `CanShowResetInstances()` reads; it shows no line.
 pub const SMSG_UPDATE_LAST_INSTANCE: u16 = 0x0320; // 800
-/// Whether we hold any permanent bind: `u32` flag (handler `0x49e6c0` → `0x495d50`). The other
-/// half of `CanShowResetInstances()`.
+/// Whether we hold any permanent bind: `u32` flag (`0x49e6c0`), half of `CanShowResetInstances()`.
 pub const SMSG_UPDATE_INSTANCE_OWNERSHIP: u16 = 0x032B; // 811

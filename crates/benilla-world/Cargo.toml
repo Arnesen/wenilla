@@ -3,24 +3,17 @@ name = "benilla-world"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The world renderer: terrain, water, sky, weather, models, lighting, collision and the frame ladder — everything needed to put something in a world and ask the world about itself, with no game attached (decision 1160)"
+description = "The world renderer: terrain, water, sky, weather, models, lighting, collision and the frame ladder; everything needed to put something in a world and ask the world about itself, with no game attached"
 
 [lints]
 workspace = true
 
 [features]
-# Forwarded dev/player seam (0026 · 1173/1174 · 1175). Default-on. `benilla-formats` must be taken
-# with `default-features = false` and its `dev` re-exported here: it is default-on there too, so
-# without this a `--no-default-features` player build gets the feature back through unification and
-# the binary carries the build machine's source-tree path after all.
+# The dev/player seam, on by default. `benilla-assets` and `-formats` come in without default
+# features and their `dev` is forwarded here, or unification would put it back in a player build.
 default = ["dev"]
-#
-# `bevy/debug` rides with it (decision 1451): without it every ECS diagnostic — a panicking system,
-# a parameter that will not validate, the enforcer's whole fault list — reads `<Enable the debug
-# feature to see the name>`, which is what the frame-one crash it fixes was reported as. It stores
-# `&'static str` names on systems and params; it is diagnostics, not an instrument, so nothing
-# depends on it and the player build simply says less. Enabled here rather than in `benilla-app`
-# so `benilla-worldview` — the enforcer, whose entire output is these names — carries it too.
+# `bevy/debug` names systems and parameters in ECS diagnostics (else "Enable the debug feature to
+# see the name"); set here so `benilla-worldview`, which reports those names, gets it too.
 dev = ["benilla-formats/dev", "benilla-assets/dev", "bevy/debug"]
 # The browser render backend, chosen by the launcher (`wenilla`): WebGL2 runs everywhere but has
 # no storage buffers (the shared light blob and the skin palettes are storage — decision 0278), so
@@ -33,25 +26,20 @@ webgpu = ["bevy/webgpu"]
 avian3d = "0.6"
 benilla-assets = { path = "../benilla-assets", default-features = false }
 benilla-formats = { path = "../benilla-formats", default-features = false }
-# The wire crate (`benilla_protocol`) is deliberately NOT here. The engine renders a world; it
-# does not speak a protocol. Decision 1177 took the last crossing out — `WorldUnit.kind:
-# EntityKind` became `WorldUnit.wades: bool` — and the absence of that dependency line IS the
-# record's gate: the crate graph enforces it, so no test has to.
-# The WMO group parser — the portal audit re-parses a group to pin its own decode against the file.
+# No `benilla-protocol`: the engine renders a world and does not speak the protocol.
+# For the portal audit, which re-parses a WMO group to check its decode against the file.
 benilla-wmo = { path = "../benilla-wmo" }
 bevy.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-libc = "0.2"
 
-# macOS: `bgwin` demotes the app to Accessory for a background run and orders the window out of
-# the way. Same pins as `benilla-app`'s — one objc2 in the graph.
+# macOS AppKit calls, at `benilla-app`'s pins so the graph has one objc2.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.2", features = [
     # `bgwin`'s Accessory demotion and window ordering, and `modkeys`' modifier read.
     "NSApplication",
     "NSEvent",
-    # `mac_quit` walks the default menu bar to re-point the Quit item (decision 1528).
+    # `mac_quit` walks the default menu bar to re-point the Quit item.
     "NSMenu",
     "NSMenuItem",
     "NSResponder",
@@ -60,8 +48,7 @@ objc2-app-kit = { version = "0.2", features = [
 ] }
 # `MainThreadMarker`, for the AppKit calls above.
 objc2-foundation = "0.2"
-# `sel!`, for the two selectors `mac_quit` swaps. The pin objc2-app-kit 0.2 itself builds against,
-# so this adds a name to the manifest and nothing to the graph.
+# `sel!`, for the two selectors `mac_quit` swaps; the objc2 that objc2-app-kit 0.2 builds against.
 objc2 = "0.5"
 
 # WebGL2 is bevy's wasm32 render backend (no WebGPU fallback here). `bevy.workspace = true` above

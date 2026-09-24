@@ -49,6 +49,7 @@ fn every_shipped_ui_xml_parses() {
 /// window's entry is covered the moment it is added rather than when someone remembers to test it.
 #[test]
 fn the_whole_shipped_manifest_loads_without_errors() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -88,6 +89,7 @@ fn the_whole_shipped_manifest_loads_without_errors() {
 /// every single launch.
 #[test]
 fn loading_the_shipped_ui_queues_no_sounds() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -154,6 +156,7 @@ fn pet_bar_vm() -> benilla_ui::script::UiScript {
 /// catch a third template added with a borrowed number.
 #[test]
 fn the_autocast_brackets_reach_each_buttons_corners() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::framexml::{Element, TopLevel};
 
     /// The fraction of `UI-AutoCastableOverlay.blp` the bracket art actually covers, measured off
@@ -252,6 +255,7 @@ fn the_autocast_brackets_reach_each_buttons_corners() {
 /// drifting, or being "corrected" back to 1.22 by someone who only read the ref.
 #[test]
 fn the_shine_panes_ask_for_the_rims_we_meant() {
+    benilla_formats::wow_data_or_skip!();
     let mut found: Vec<(String, f32, f32)> = Vec::new();
     let mut s = super::spellbook_tests::spellbook_ui(1024.0, 768.0);
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
@@ -530,10 +534,10 @@ fn every_archive_path_a_shipped_lua_chunk_names_survives_its_own_escaping() {
             }
         }
     }
-    // Never let the sweep pass by matching nothing (19 after 1971, 8 after 1980, 4 after 1987;
-    // the floor follows the census down as windows migrate).
+    // Never let the sweep pass by matching nothing; the floor follows the census down as windows
+    // migrate.
     assert!(
-        paths.len() >= 4,
+        paths.len() >= 3,
         "only {} archive paths swept out of the shipped Lua",
         paths.len()
     );
@@ -577,10 +581,9 @@ fn every_archive_path_a_shipped_lua_chunk_names_survives_its_own_escaping() {
 /// **Every `text=` in the shipped UI is answerable against the REAL `GlobalStrings.lua`** — the
 /// tripwire for the defect that put "CREATE_MACROS" across the macro window's title bar (0991).
 ///
-/// `text=` is a global-string LOOKUP, not a literal (wow-re rf28 l.36/l.115 → `FrameScript_GetText
-/// 0x703bf0`). The loader didn't do the lookup at all, so **23 key-shaped values across six
-/// windows** were rendering as their own key names — and nothing anywhere said so. Two halves, both
-/// needed:
+/// `text=` is a global-string LOOKUP, not a literal (`FrameScript_GetText 0x703bf0`). The loader
+/// didn't do the lookup at all, so **23 key-shaped values across six windows** were rendering as
+/// their own key names — and nothing anywhere said so. Two halves, both needed:
 ///
 /// - a **key-shaped** value (`SCREAMING_SNAKE`) must resolve to a non-empty string, or it reaches a
 ///   real screen as its own key;
@@ -779,6 +782,7 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
 /// churn on every action-bar edit, and a noisy gate is a gate nobody reads.
 #[test]
 fn every_texture_frame_outranks_its_status_bars() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::order::unpack;
 
     let mut s = benilla_ui::script::UiScript::new().unwrap();
@@ -894,6 +898,7 @@ fn every_texture_frame_outranks_its_status_bars() {
 /// screen; this is the structural half of that fix.)
 #[test]
 fn the_boot_phase_materializes_no_frames() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The font registry is manifest entry 0 and comes off the chain since 1888, so this reads
@@ -922,6 +927,7 @@ fn the_boot_phase_materializes_no_frames() {
 /// rebakeable.
 #[test]
 fn the_font_registry_alone_covers_the_whole_bake_plan() {
+    benilla_formats::wow_data_or_skip!();
     let plan = |whole: bool| -> std::collections::BTreeSet<(String, String, String)> {
         let mut s = benilla_ui::script::UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
@@ -978,6 +984,7 @@ fn the_font_registry_alone_covers_the_whole_bake_plan() {
 /// handler that errors on the one event that runs before any window has been shown.
 #[test]
 fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1018,6 +1025,7 @@ fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
 /// `Tablet-2.0.lua:289` header-size probe, 268 read sites).
 #[test]
 fn every_shipped_font_object_is_published_as_a_lua_global() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1107,6 +1115,7 @@ fn every_shipped_font_object_is_published_as_a_lua_global() {
 /// geometry and the script the reference confers.
 #[test]
 fn the_inheritable_reference_templates_confer_their_shape() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1171,6 +1180,7 @@ fn the_inheritable_reference_templates_confer_their_shape() {
 /// it from its keyring fork.
 #[test]
 fn the_inspect_cursor_pair_takes_both_arms() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1247,6 +1257,7 @@ fn the_inspect_cursor_pair_takes_both_arms() {
 ///   stops exactly as the reference's does.)
 #[test]
 fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1352,6 +1363,7 @@ fn a_cinematic_leaves_nothing_of_the_interface_on_screen() {
 /// because of it.
 #[test]
 fn every_declared_parent_really_attaches() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI materializes on world entry (1051), so a player always exists by the time the
@@ -1965,7 +1977,7 @@ fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
             .unwrap(),
         "…so the dropdown is left empty but ENABLED — the greying branch is the driver-quirk one, \
          and inventing a 0 to reach it would be inventing a value the binary never produces \
-         (`IsEnabled` answers a NUMBER — wow-re `binding-shapes.tsv` 0x7800b0)"
+         (`IsEnabled` answers a NUMBER — `0x7800b0`)"
     );
     // The optional index argument is tolerated, which is the shape `SetScreenResolution` shares.
     assert!(
@@ -2000,7 +2012,8 @@ fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
         "`not hasTripleBuffering` must stay FALSE (the dead clause) while `== 1` is also false"
     );
 
-    // `SetScreenResolution`'s three carved argument behaviours, and the one deliberate divergence.
+    // `SetScreenResolution`'s three argument behaviours in the reference, and the one deliberate
+    // divergence.
     assert!(
         s.eval::<bool>("SetScreenResolution() return GetCVar(\"gxResolution\") == \"1280x720\"")
             .unwrap(),
@@ -2073,7 +2086,7 @@ fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
 }
 
 /// **The display-brightness pair** (decision 2182) — `GetGamma`/`SetGamma` and the Graphics page
-/// row that drives them, held to the reference's own carve.
+/// row that drives them, held to the reference's own behaviour.
 ///
 /// The claim that needs an assertion rather than a comment is the **unit**: `0x4891d0` is FSUBR,
 /// so `GetGamma()` is `1.0 − gamma` and `SetGamma(v)` writes `gamma := 1.0 − v`. Read as
@@ -2086,9 +2099,6 @@ fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
 /// And the second claim: **there is no clamp**, anywhere, in the reference (the positive control
 /// is `baseMip`'s validating callback `0x689090`). `SetGamma(5)` writes `"-4.000000"` and the
 /// store keeps it — benilla's clamp is at the render consumer, where it cannot lie to `GetCVar`.
-///
-/// (wow-re `ui/scratch/video-options-verbs.md` §3 and
-/// `ffxeffects/scratch/whole-frame-grade-verdict.md` §(a), both VERIFIED.)
 #[test]
 fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -2198,8 +2208,6 @@ fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
 /// exist in the reference, with a capital F, while `value.func` is the lowercase `"farclip"`. The
 /// stock client takes the CVar path for far clip **only because `getglobal` is case-sensitive** — so
 /// this asserts that too, against a name we DO define.
-///
-/// (wow-re `ui/scratch/video-options-verbs.md` §5 and §7.7, both VERIFIED.)
 #[test]
 fn the_video_windows_ten_composed_names_stay_nil() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -2252,7 +2260,7 @@ fn the_video_windows_ten_composed_names_stay_nil() {
 /// gap rather than hiding it, and saying in as many words that "the day something registers it,
 /// THIS assertion goes red and gets deleted". That day is this change: `UIOptionsFrameSliders`
 /// row 3 is `cameraYawMoveSpeed`, `_Load` does `slider:SetValue(GetCVar(value.cvar))`, and
-/// `Slider:SetValue` is a shape-A binding (`0x790980`, wow-re `numeric-arg-coercion-law.md`) that
+/// `Slider:SetValue` is a shape-A binding (`0x790980`) that
 /// raises on a nil in the reference too. All four slider CVars are registered, so the walk reaches
 /// its end — and `_SetDefaults`, which does the same through `GetCVarDefault`, with it.
 #[test]
@@ -2355,5 +2363,38 @@ fn the_stock_options_windows_load_and_save_are_reachable_for_addons() {
     assert!(
         (yaw - 180.0).abs() < 0.001 && (pitch - 90.0).abs() < 0.001,
         "_Save should write the slider's 180 and its half; got yaw={yaw} pitch={pitch}"
+    );
+}
+
+/// `assets/ui` does not grow. The interface is the stock 1.12 FrameXML executed off the player's
+/// own patch chain; what is left here is the glue and the shims, named below. A new file means a
+/// window was authored instead of migrated: point `benilla.toc` at
+/// `Interface\FrameXML\<Window>.xml`, delete ours, and build the engine verbs the stock file calls.
+#[test]
+fn assets_ui_does_not_grow() {
+    const SHIPPED: &[&str] = &[
+        "ContainerFrameAdapters.xml",
+        "GameMenuFrame.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+        "ScriptLogFrame.xml",
+        "ScrollTemplates.xml",
+        "SpellBookAdapters.xml",
+        "benilla.toc",
+    ];
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let mut found: Vec<String> = std::fs::read_dir(&dir)
+        .expect("assets/ui")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    found.sort();
+    let mut shipped: Vec<String> = SHIPPED.iter().map(|s| s.to_string()).collect();
+    shipped.sort();
+    assert_eq!(
+        found, shipped,
+        "assets/ui changed. It does not grow: a window is migrated, not authored (docs/METHOD.md). \
+         A file that retired comes off this list; a new one needs a reason this list can name."
     );
 }

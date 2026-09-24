@@ -42,7 +42,9 @@ pub(super) fn seed_ui_fixture(
     mut quest: ResMut<crate::ui_quest::QuestGiver>,
     mut quest_log: ResMut<crate::ui_quest_log::QuestLog>,
     mut loot: ResMut<crate::ui_loot::LootState>,
-    mut items: ResMut<crate::items::Items>,
+    // The item store and the object index as one param (the 16-SystemParam ceiling): the item
+    // objects are entities in the index (2334), and the fixture spawns them like the wire does.
+    store: (ResMut<crate::items::Items>, ResMut<crate::net::GuidIndex>),
     mut names: ResMut<crate::names::NameCache>,
     icons: Option<Res<crate::entities::ItemDisplays>>,
     mut script: Option<NonSendMut<benilla_ui::script::UiScript>>,
@@ -57,6 +59,7 @@ pub(super) fn seed_ui_fixture(
         ResMut<crate::loading_screen::LoadingScreen>,
     ),
 ) {
+    let (mut items, mut index) = store;
     // A glue-screen capture has no world scenario, and no glue screen opens a UI fixture.
     let Some(scenario) = ctx.scenario else {
         return;
@@ -72,7 +75,7 @@ pub(super) fn seed_ui_fixture(
     // **A UI capture with no script VM is not a capture — refuse it.** Every seed below opens its
     // window by calling into the in-game UI, so with no VM they all fail the same way: a nil
     // global, one `warn!` in a log full of pipeline chatter, a valid-looking PNG of a UI-less
-    // world, and exit 0. That is the false-negative shape `method.md` §6 exists to prevent, and it
+    // world, and exit 0. That is the false-negative shape `docs/METHOD.md` §6 exists to prevent, and it
     // burned a session. `scenario_wants_ui` removed the cause (a `ui:` scenario no longer needs
     // `WOW_CAPTURE_UI=1`); this is the tripwire for whatever else could leave the VM absent, and
     // it exits non-zero the way the window-size refusal does (`video::warn_if_window_mismatch`).
@@ -326,7 +329,7 @@ pub(super) fn seed_ui_fixture(
                 (G_STONE, 94_004, 1, "Hearthstone", DISP_STONE, 1),
                 (G_BANKBAG, 94_005, 1, "Small Brown Pouch", DISP_STONE, 1),
             ] {
-                items.insert_object(guid, obj(entry, stack));
+                crate::items::spawn_item(&mut commands, &mut index, guid, obj(entry, stack), false);
                 let mut t = template(name, quality);
                 t.display_info_id = disp;
                 if guid == G_BANKBAG {
@@ -338,7 +341,9 @@ pub(super) fn seed_ui_fixture(
             // The held bank bag is a real CONTAINER object (its contents stream on the bag item —
             // decision 0604): 6 slots, one occupied, so the POPOUT window (container 5) is in the
             // shot too — its snug-fit stitch, lit bag button, and own-icon portrait.
-            items.insert_object(
+            crate::items::spawn_item(
+                &mut commands,
+                &mut index,
                 G_BANKBAG,
                 ObjectFields::from_pairs(&[
                     (3, 94_005),
@@ -346,6 +351,7 @@ pub(super) fn seed_ui_fixture(
                     (48, 6),              // CONTAINER_NUM_SLOTS
                     (50, G_JERKY as u32), // CONTAINER_SLOT_1
                 ]),
+                true,
             );
             // The self player: 4 occupied vault slots, the bank bag, TWO bought bag slots
             // (`PLAYER_BYTES_2` byte 2 — bag button 1 owned, 2 bought-but-empty, 3–6 the red
@@ -717,7 +723,7 @@ pub(super) fn seed_ui_fixture(
             // Raised through the real registry entry, not a hand-built frame: the text comes from
             // the chain's own `INVITATION` GlobalString and the two buttons from ACCEPT/DECLINE,
             // so the capture exercises the same Show path a real invite takes.
-            if let Err(e) = script.run(r#"StaticPopup_Show("PARTY_INVITE", "Thalyn")"#) {
+            if let Err(e) = script.run(r#"StaticPopup_Show("PARTY_INVITE", "Brisca")"#) {
                 warn!("capture: ui-partyinvite seed failed to raise the dialog: {e}");
             }
         }
@@ -765,8 +771,8 @@ pub(super) fn seed_ui_fixture(
                     ..Default::default()
                 },
             );
-            // The §22 SET block (real Defias Leather shape, 5 members, one equipped): gold
-            // "(1/5)" header + spacer, cream/gray member ladder, green (2)-bonus vs gray
+            // The item-SET block (`0x52b650`; real Defias Leather shape, 5 members, one equipped):
+            // gold "(1/5)" header + spacer, cream/gray member ladder, green (2)-bonus vs gray
             // (4)-bonus — the whole block's visual regression instrument.
             let mut inv: benilla_ui::script::InventorySlots = Default::default();
             inv[4] = Some(benilla_ui::script::InvSlotView {
@@ -911,10 +917,10 @@ pub(super) fn seed_ui_fixture(
             let obj = |entry: u32, stack: u32| {
                 ObjectFields::from_pairs(&[(3, entry), (14, stack)]) // OBJECT_ENTRY, STACK_COUNT
             };
-            items.insert_object(G_CHEST, obj(93_010, 1));
-            items.insert_object(G_SWORD, obj(93_011, 1));
-            items.insert_object(G_BOW, obj(93_013, 1));
-            items.insert_object(G_ARROWS, obj(93_012, 200));
+            crate::items::spawn_item(&mut commands, &mut index, G_CHEST, obj(93_010, 1), false);
+            crate::items::spawn_item(&mut commands, &mut index, G_SWORD, obj(93_011, 1), false);
+            crate::items::spawn_item(&mut commands, &mut index, G_BOW, obj(93_013, 1), false);
+            crate::items::spawn_item(&mut commands, &mut index, G_ARROWS, obj(93_012, 200), false);
             let mut chest = template("Tarnished Chainmail", 1);
             chest.display_info_id = DISP_SHIELD;
             chest.inventory_type = 5;
@@ -1171,7 +1177,13 @@ pub(super) fn seed_ui_fixture(
                 crate::net::Guid(PLAYER_GUID),
             ));
             // The equipped main-hand weapon — the auto-attack borrows its icon (decision 0230).
-            items.insert_object(G_SWORD, ObjectFields::from_pairs(&[(3, 93_011), (14, 1)]));
+            crate::items::spawn_item(
+                &mut commands,
+                &mut index,
+                G_SWORD,
+                ObjectFields::from_pairs(&[(3, 93_011), (14, 1)]),
+                false,
+            );
             let mut sword = template("Militia Shortsword", 2);
             sword.display_info_id = DISP_SWORD;
             items.insert_template(93_011, Some(sword));

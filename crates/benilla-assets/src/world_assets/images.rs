@@ -121,8 +121,8 @@ fn dc_normalization_enabled() -> bool {
 /// a per-frame brightness swing is the intended pulse, so the caller passes `false` for the
 /// fullbright kinds and their DC is left alone.
 ///
-/// **This is a deliberate divergence from the shipped art**, pending the RE round on whether the
-/// reference shows the same breathing (it uploads the same authored, same-quantised mips, so it
+/// **This is a deliberate divergence from the shipped art**, pending whether the reference shows
+/// the same breathing (it uploads the same authored, same-quantised mips, so it
 /// plausibly does). `WOW_LIQUID_DC=raw` restores the frames verbatim for the A/B.
 fn flatten_frame_dc(data: &mut [u8], spans: &[Vec<(usize, usize)>], levels: usize) {
     for level in 0..levels {
@@ -375,12 +375,13 @@ pub fn portrait_image(width: u32, height: u32, mut rgba: Vec<u8>) -> Image {
 }
 
 /// A single-mip, **sRGB**, **repeat**-sampled image for a frame `Backdrop`'s tiled pieces (the
-/// tooltip/panel border edges + a tiling background — `backdrop-mechanism.md` §2/§3). Identical to
+/// tooltip/panel border edges + a tiling background — `0x77e8d0`/`0x77f0c0`). Identical to
 /// [`sprite_image`] except the address mode is `Repeat`: a backdrop edge strip runs UVs `[0..N]`
 /// (N = the edge count = frame-side / edgeSize − 2) and a tiled bg runs `[0..w/period]`, so the
 /// slice must *wrap*, not clamp-stretch. The real client flags exactly this on the backdrop's
-/// `SetTexture` (arg2 pushed twice into the load descriptor — `backdrop-mechanism.md` §2, INFERRED
-/// U+V wrap). sRGB + no mips, same as the clamp sprite (UI art, one authored gamma round-trip).
+/// `SetTexture` (arg2 pushed twice into the load descriptor — `0x770200`, inferred U+V wrap, not
+/// traced to the sampler). sRGB + no mips, same as the clamp sprite (UI art, one authored gamma
+/// round-trip).
 ///
 /// Both axes wrap — the backdrop's bg tiles both ways, and its edge strips are atlas crops on
 /// their bounded axis, kept off the image edge by `inset_atlas_bleed`. A texture that tiles

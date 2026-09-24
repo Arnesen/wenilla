@@ -1,6 +1,6 @@
-//! `--aura`: the aura wire (decision 0255 phase 1). GM-apply a buff + a DoT with explicit durations,
-//! require both in `UNIT_FIELD_AURA` (correct half, cancelable nibble, level byte, stack bias), and
-//! require an `SMSG_UPDATE_AURA_DURATION` per aura ordered BEFORE the descriptor delta that names it.
+//! `--aura`: the aura wire. Applies a buff and a DoT with set durations, requires both in
+//! `UNIT_FIELD_AURA` (half, cancelable bit, level byte, stack bias), and requires each one's
+//! `SMSG_UPDATE_AURA_DURATION` to arrive before the descriptor delta that names it.
 
 use std::time::{Duration, Instant};
 
@@ -9,17 +9,15 @@ use benilla_protocol::{decode, ObjectFields, ServerPacket, SessionEvent};
 
 use crate::probes::{Ctx, Probe};
 
-// --aura: two spells with opposite sign, applied to ourselves by the GM `.aura <spell> <seconds>`
-// command (`ChatHandler::HandleAuraCommand` → `HandleAuraHelper`, `UnitCommands.cpp:997-1051`;
-// with no selection it targets the caster — `ChatHandler::GetSelectedUnit`, `Chat.cpp:2621-2622`).
-/// Mark of the Wild — positive, and lacks `SPELL_ATTR_NO_AURA_CANCEL`, so the wire's cancelable bit
-/// must be set. Lands in the positive half (slots 0–31).
+// `.aura <spell> <seconds>` (`UnitCommands.cpp:997-1051`) targets the caster when nothing is
+// selected (`Chat.cpp:2621-2622`).
+/// Mark of the Wild: positive, without `SPELL_ATTR_NO_AURA_CANCEL`, so cancelable (slots 0–31).
 const AURA_BUFF_SPELL: u32 = 1126;
-/// Shadow Word: Pain — `SPELL_AURA_PERIODIC_DAMAGE`, unambiguously negative however it is applied.
-/// Lands in the negative half (slots 32–47) and must NOT be cancelable.
+/// Shadow Word: Pain, `SPELL_AURA_PERIODIC_DAMAGE`, negative however applied: slots 32–47, not
+/// cancelable.
 const AURA_DEBUFF_SPELL: u32 = 589;
 const AURA_BUFF_SECONDS: u32 = 300;
-/// Short: this one ticks damage on us, and we want it gone even if the cleanup `.unaura` is missed.
+/// Short, since it damages us and must expire even if the cleanup `.unaura` is missed.
 const AURA_DEBUFF_SECONDS: u32 = 15;
 
 pub(crate) struct Aura;
@@ -28,13 +26,9 @@ impl Probe for Aura {
     fn verify(&mut self, cx: &mut Ctx) -> Result<()> {
         let self_guid = cx.world.self_guid;
         let self_level = cx.world.self_level;
-        // --aura: live-verify the aura descriptor block + SMSG_UPDATE_AURA_DURATION (decision 0255).
-        // Nothing here trusts a field index: the probe *searches* the decoded slots for the spell ids it
-        // asked for, so a wrong `FIELD_UNIT_AURA` fails as "never appeared" rather than passing on
-        // garbage.
-        // Start from the LOGIN snapshot, not an empty store: a values delta only carries *changed*
-        // fields, so a delta-only view would silently hide auras the server restored at login from
-        // `character_aura` (they persist across logout) — and then misreport which slots are free.
+        // The probe searches the decoded slots for its spell ids, so a wrong field index fails as
+        // "never appeared". Start from the login snapshot: deltas carry only changed fields, and
+        // auras restored from `character_aura` at login would otherwise be invisible.
         let mut fields = cx.world.self_fields.clone().unwrap_or_default();
         let session = &mut *cx.session;
         let dump = |label: &str, f: &ObjectFields| {
@@ -58,8 +52,8 @@ impl Probe for Aura {
         };
         dump("at login (restored from character_aura)", &fields);
 
-        // Clean slate, so a re-run measures a fresh apply and not a leftover refresh. `.unaura`
-        // zeroes the slot, which reaches us as an explicit `0` in the next delta.
+        // A clean slate, so a re-run measures a fresh apply. `.unaura` zeroes the slot, which
+        // arrives as an explicit `0` in the next delta.
         session.send_chat(&format!(".unaura {AURA_BUFF_SPELL}"))?;
         session.send_chat(&format!(".unaura {AURA_DEBUFF_SPELL}"))?;
         let settle = Instant::now() + Duration::from_secs(3);
@@ -74,10 +68,9 @@ impl Probe for Aura {
             }
         }
         dump("after .unaura of both probe spells", &fields);
-        // Whatever survives is not ours to touch (a warrior's Battle Stance, 2457, permanently owns
-        // slot 0). Nothing may report a duration for these while we watch: the server sends
-        // `SMSG_UPDATE_AURA_DURATION` only on apply/refresh, and never at all for a permanent aura —
-        // which is precisely the reference's "until cancelled" (an occupied slot with no timer).
+        // Survivors are not ours (Battle Stance, 2457, owns slot 0) and must report no duration:
+        // the server sends `SMSG_UPDATE_AURA_DURATION` only on apply or refresh, never for a
+        // permanent aura, which the 1.12 client shows as "until cancelled".
         let untouched: Vec<u8> = fields.unit_auras().map(|a| a.slot).collect();
 
         println!("\nGM: .aura {AURA_BUFF_SPELL} {AURA_BUFF_SECONDS} (Mark of the Wild)");
@@ -85,10 +78,8 @@ impl Probe for Aura {
         session.send_chat(&format!(".aura {AURA_BUFF_SPELL} {AURA_BUFF_SECONDS}"))?;
         session.send_chat(&format!(".aura {AURA_DEBUFF_SPELL} {AURA_DEBUFF_SECONDS}"))?;
 
-        // Record the arrival ORDER of the first duration packet against the values delta that first
-        // names the buff's spell in its slot — both indexed by PACKET arrival, the axis the ordering
-        // claim is actually about. `SMSG_UPDATE_AURA_DURATION` has no `SessionEvent` yet (nothing in
-        // the app consumes it until phase 2), so the probe reads the `ServerPacket` directly.
+        // Index the first duration packet and the first delta naming the buff by packet arrival;
+        // `SMSG_UPDATE_AURA_DURATION` is read off the `ServerPacket`, before decode.
         let mut durations: Vec<(u8, u32)> = Vec::new();
         let (mut seq, mut first_duration_at, mut buff_field_at) = (0usize, None, None);
         let drain_until = Instant::now() + Duration::from_secs(8);
@@ -124,10 +115,8 @@ impl Probe for Aura {
             .context(
                 "--aura: spell 1126 never appeared in UNIT_FIELD_AURA. Either the descriptor field \
                  index is wrong, or the GM `.aura` command was refused — it needs gmlevel >= 4 \
-                 (VERIFIED vmangos `Chat/Chat.cpp:1229`: SEC_BASIC_ADMIN, which is 4 in \
-                 `shared/Common.h:142`), and the slot-keyed probe accounts are gmlevel 6, so this \
-                 probe cannot run as `probeN` without a temporary grant (method.md, decision 0450's \
-                 precedent for --worldstate).",
+                 (vmangos `Chat/Chat.cpp:1229`: SEC_BASIC_ADMIN, which is 4 in \
+                 `shared/Common.h:142`).",
             )?;
         let debuff = auras
             .iter()
@@ -135,7 +124,6 @@ impl Probe for Aura {
             .copied()
             .context("--aura: spell 589 never appeared in UNIT_FIELD_AURA")?;
 
-        // The halves, the nibble, the level byte, the stack bias — each a distinct packing claim.
         ensure!(
             buff.is_helpful() && buff.slot < 32,
             "buff landed in the debuff half (slot {})",
@@ -170,8 +158,7 @@ impl Probe for Aura {
             debuff.stacks
         );
 
-        // Durations: keyed by slot, carrying what we asked for. `.aura` sets an exact duration, and
-        // the packet is sent immediately, so allow only for a tick of decay.
+        // `.aura` sets an exact duration and the packet goes out at once: allow 2 s of decay.
         for (label, aura, asked) in [
             ("buff", buff, AURA_BUFF_SECONDS),
             ("debuff", debuff, AURA_DEBUFF_SECONDS),
@@ -203,19 +190,18 @@ impl Probe for Aura {
         ensure!(
             d < v,
             "SMSG_UPDATE_AURA_DURATION arrived AFTER the descriptor delta (seq {d} vs {v}) — \
-             decision 0255's slot-keyed buffering is built on the opposite order"
+             the app's slot-keyed buffering is built on the opposite order"
         );
         println!("✅ duration packet precedes the descriptor delta (event {d} before {v})");
 
-        // Durations are apply/refresh EDGES, not a stream — the client counts down locally from
-        // here (the cast bar's model). An untouched slot must never have reported one.
+        // Durations are apply/refresh edges, not a stream; the client counts down locally.
         if let Some(&slot) = untouched
             .iter()
             .find(|s| durations.iter().any(|(d, _)| d == *s))
         {
             bail!(
                 "--aura: slot {slot} reported a duration without being (re)applied — durations are \
-                 not the apply/refresh edges decision 0255's client-side countdown assumes"
+                 not the apply/refresh edges the client-side countdown assumes"
             );
         }
         println!(
@@ -224,8 +210,8 @@ impl Probe for Aura {
             untouched.len()
         );
 
-        // Leave the character as found. The drain matters: `character_aura` persists across logout,
-        // so exiting before the server processes these would save the probe's buffs onto the char.
+        // Clean up, then drain: `character_aura` persists across logout, so an unprocessed
+        // `.unaura` would leave the probe's auras on the character.
         session.send_chat(&format!(".unaura {AURA_BUFF_SPELL}"))?;
         session.send_chat(&format!(".unaura {AURA_DEBUFF_SPELL}"))?;
         let settle = Instant::now() + Duration::from_secs(3);

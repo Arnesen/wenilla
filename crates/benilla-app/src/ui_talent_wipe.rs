@@ -13,8 +13,7 @@
 //! It is the innkeeper bind's twin, not a talent-window affordance, and that is why it lives beside
 //! [`crate::ui_binder`] rather than inside [`crate::ui_talent`]: same shape on the wire (a question
 //! carrying a guid, an answer echoing it), same latch, same range gate, same free-standing dialog
-//! over a gossip menu that is already gone. wow-re says so at the bytes
-//! (`system/ui/scratch/gossip-icon-and-binder-flow.md` §5.3): the talent master
+//! over a gossip menu that is already gone. The bytes say so: the talent master
 //! (`0xc4d7a0`/`0xc4d7a4`), the pet untrainer and the binder are **one latch/range family**, three
 //! copies of a single shape.
 //!
@@ -28,8 +27,7 @@
 //!   the frame it goes false.
 //!
 //! Both halves are **byte-pinned** against the reference's `0x5df980`, one function that serves
-//! both directions of the opcode (wow-re `system/ui/scratch/talent-api.md` §ConfirmTalentWipe, and
-//! the disassembly under it):
+//! both directions of the opcode:
 //!
 //! 1. **Arrival** (`guid != 0`): resolve the unit, gate on `d² <= [0xc4c28c]` — the identical
 //!    constant behind [`crate::target::SERVICE_RANGE_SQ`], which is what makes modelling the
@@ -196,10 +194,39 @@ fn drain_talent_wipe(
 }
 
 /// The respec flow: the range guard, the dialog's feed, and its answer.
+/// The talent-wipe question's packet handler (decision 1580; in the net handler table since 2313).
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::TalentWipeState;
+    use crate::net::NetHandlerApp;
+
+    /// Register the handler — called from [`super::UiTalentWipePlugin`].
+    pub(super) fn register(app: &mut App) {
+        app.net_handler(SessionEventKind::TalentWipeConfirm, on_confirm);
+    }
+
+    /// A zero trainer guid is vmangos's "you have no talents to reset" refusal, not a question —
+    /// there is nothing to ask about, so nothing goes on screen (this module's header carries
+    /// why the reference instead re-sends here).
+    fn on_confirm(In(ev): In<SessionEvent>, mut wipe: ResMut<TalentWipeState>) {
+        if let SessionEvent::TalentWipeConfirm { trainer, cost } = ev {
+            if trainer == 0 {
+                debug!("net: talent wipe refused (no talents to reset) — no dialog");
+            } else {
+                debug!("net: trainer {trainer:#x} asks to wipe talents for {cost} copper");
+                wipe.ask(trainer, cost);
+            }
+        }
+    }
+}
+
 pub(crate) struct UiTalentWipePlugin;
 
 impl Plugin for UiTalentWipePlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<TalentWipeState>().add_systems(
             Update,
             (

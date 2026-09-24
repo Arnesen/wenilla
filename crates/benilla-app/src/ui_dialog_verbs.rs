@@ -1,6 +1,6 @@
 //! The dialog engine's verbs, app half (decision 1963): the feeds behind the stock
 //! `StaticPopup.lua` dialogs benilla never raised and the drains behind their buttons, each to
-//! wow-re's `staticpopup-dialog-bindings.md` (VERIFIED at the bytes unless a line says INFERRED).
+//! the reference's bytes unless a line says INFERRED.
 //!
 //! * **Pet trainer** — `SMSG_PET_UNLEARN_CONFIRM {guid, cost}` latches both and owes
 //!   `CONFIRM_PET_UNLEARN(cost)`; `ConfirmPetUnlearn()` answers with `CMSG_PET_UNLEARN {guid}` unless
@@ -22,10 +22,10 @@
 //! * **Battlefield queue** — `SMSG_BATTLEFIELD_STATUS` fills one of three slots and fires
 //!   `UPDATE_BATTLEFIELD_STATUS`; `AcceptBattlefieldPort(index, accept)` sends the slot's map id
 //!   with the answer as one byte.
-//! * **Meeting stone** (wow-re `meeting-stone-status.md`, 1974) — two globals: the queued area
+//! * **Meeting stone** (1974) — two globals: the queued area
 //!   (`[0xb72038]`) and the cached status text (`[0xb7203c]`). `SMSG 0x295 {areaId, status}`
 //!   latches the old area, stores the new one unconditionally, prints one of five chat lines by
-//!   the status byte (with the two asymmetries §8 records: status 0 names the OLD area and is
+//!   the status byte (with `0x4ca230`'s two asymmetries: status 0 names the OLD area and is
 //!   silent when it has no row; status 1 is skipped entirely when the area did not change, names
 //!   the NEW one with an `UNKNOWN` fallback, and plays the `HARDCODED Meeting Stone Join` visual
 //!   on the player), then — on EVERY path, an out-of-range status included — rebuilds the text
@@ -126,7 +126,7 @@ impl InstanceBoot {
 }
 
 /// `SPIRITGUIDE` — `UNIT_NPC_FLAGS` bit 6, the flag the acquire callback `0x4924c0` tests at
-/// `0x4924fc shr eax,0x6; test al,1` (wow-re `interact-dead-fork-and-npc-service-ladder.md` §C).
+/// `0x4924fc shr eax,0x6; test al,1`.
 const NPC_FLAG_SPIRITGUIDE: u32 = 1 << 6;
 
 /// The area spirit healer's aura, `0xA18` = 2584 — the one spell `0x4921c0`'s cancel leg and
@@ -160,11 +160,9 @@ pub(crate) struct SetHealerOutcome {
 /// The current-area spirit healer (`[0xb4e330/334]`) and its wave clock (`[0xb4e338]`).
 ///
 /// **The writer is [`Self::set_healer`], and it is the reference's `0x4921c0` to the branch.**
-/// 1963 shipped this resource with the note "no writer yet" because the acquire side was thought
-/// to be uncarved; it is not — wow-re recorded the whole trio, in two different nodes, before that
-/// record landed (`ui/scratch/staticpopup-dialog-bindings.md` §6 for the setter and the poll's
-/// radii, `object-layer/scratch/interact-dead-fork-and-npc-service-ladder.md` §C row 6 for the
-/// click arm). Both roads in are built here.
+/// 1963 shipped this resource with the note "no writer yet"; the reference has the whole acquire
+/// trio: the setter, the poll `0x4923b0` with its radii, and the click arm `0x5df950`. Both roads
+/// in are built here.
 #[derive(Resource, Default)]
 pub(crate) struct AreaSpiritHealer {
     /// The cached healer (`[0xb4e330/334]`), written only by [`Self::set_healer`].
@@ -245,22 +243,24 @@ impl AreaSpiritHealer {
 }
 
 /// The three battleground queue slots (`0xb6e9d0`, stride `0x20`), each with the moment its
-/// status landed — the clock every stamp in the slot is relative to.
+/// status landed — the clock every stamp in the slot is relative to. Kept across an in-session
+/// world enter (`0x4a9db0`); zeroed whole at the session end, as the reference's module init
+/// zeroes it at every login (`net::on_session_end`).
 #[derive(Resource, Default)]
 pub(crate) struct BattlefieldQueue {
     slots: [Option<(BattlefieldStatus, Instant)>; 3],
     changed: bool,
     /// The slot the player is IN (`[0x8457cc]`, the status-3 arm) and its map.
     active: Option<(usize, u32)>,
-    /// The instance's two clocks (`[0xb6ebbc]`/`[0xb6ebb8]`, wow-re `battlefield-verb-family.md`
-    /// §4.2): the run-time stamp `now − Δ₂` and the expiration `now + Δ₁`, set by a status-3
-    /// message and zeroed by ANY non-clearing message of another status — whatever slot it is
-    /// about (§10's anomaly 4, reproduced: 1972 zeroed them only for the active slot; 1974
-    /// corrects it to the handler's unconditional clear).
+    /// The instance's two clocks (`[0xb6ebbc]`/`[0xb6ebb8]`): the run-time stamp `now − Δ₂` and
+    /// the expiration `now + Δ₁`, set by a status-3 message and zeroed by ANY non-clearing message
+    /// of another status — whatever slot it is about (an anomaly of the handler `0x4aa850`,
+    /// reproduced: 1972 zeroed them only for the active slot; 1974 corrects it to the handler's
+    /// unconditional clear).
     run_started: Option<Instant>,
     instance_expiration: Option<Instant>,
     /// The status-3 arm rebuilds the scoreboard and fires `UPDATE_BATTLEFIELD_SCORE` before
-    /// `UPDATE_BATTLEFIELD_STATUS` (§4.2's ordering) — the score feed reads this first.
+    /// `UPDATE_BATTLEFIELD_STATUS` (`0x4aaa5a`, then `0x4aab05`) — the score feed reads this first.
     score_dirty: bool,
     /// The handler's two tutorial arms (`0x2f` on queued, `0x30` on confirm; 1976), owed to the
     /// tutorial system on the next feed.
@@ -268,8 +268,8 @@ pub(crate) struct BattlefieldQueue {
 }
 
 impl BattlefieldQueue {
-    /// `SMSG_BATTLEFIELD_STATUS` (§4.2): an out-of-range slot abandons the message; a zero map
-    /// takes the clear arm (the slot emptied, the instance clocks zeroed only when this was the
+    /// `SMSG_BATTLEFIELD_STATUS` (`0x4aa850`): an out-of-range slot abandons the message; a zero
+    /// map takes the clear arm (the slot emptied, the instance clocks zeroed only when this was the
     /// active slot — and the active index itself left alone, as the handler leaves `[0x8457cc]`);
     /// status 3 stamps the instance clocks and names the slot active; every other status zeroes
     /// the instance clocks unconditionally and un-names the slot if it was the active one.
@@ -453,9 +453,9 @@ fn build_stone_text(script: &UiScript, areas: Option<&AreaTableRes>, area: u32) 
     text
 }
 
-/// The `0x295` handler's five-way table (§8), as the line it prints for `(old, new, status)` —
-/// `None` where the reference prints nothing: status 0 with no row for the OLD area, status 1
-/// with an unchanged area, and any status past 4.
+/// The `0x295` handler's five-way table (`0x4ca3a4`), as the line it prints for
+/// `(old, new, status)` — `None` where the reference prints nothing: status 0 with no row for the
+/// OLD area, status 1 with an unchanged area, and any status past 4.
 fn stone_line(
     script: &UiScript,
     areas: Option<&AreaTableRes>,
@@ -618,7 +618,7 @@ fn feed_meeting_stone(
 /// round trip during which the icon is genuinely absent is faithful, not a defect: the reference
 /// has the same gap, because only the server's reply fires the event.
 ///
-/// The queued area itself is untouched here, matching `[0xb72038]`, which the RE round found is
+/// The queued area itself is untouched here, matching `[0xb72038]`, which is
 /// referenced six times image-wide and by nothing in either reload closure — it survives, and
 /// [`MeetingStone::enter_world`]'s `dirty` is what re-pushes it to the fresh VM.
 fn meeting_stone_enter_world(
@@ -666,9 +666,7 @@ pub(crate) enum StoneJoin {
 }
 
 /// The four client-side refusals inside MEETINGSTONE(23)'s own use slot (`0x5f69d0`, whose tail
-/// `0x5f6af6` is the sole caller of the `CMSG 0x292` builder `0x4c9ff0`) — **VERIFIED at the
-/// bytes** by wow-re's §5 round on that function (four cold workers plus the orchestrator's own
-/// derivation, arbitrated; `system/object-layer/scratch/meeting-stone-use-validator.md` §4).
+/// `0x5f6af6` is the sole caller of the `CMSG 0x292` builder `0x4c9ff0`).
 ///
 /// Two gates run before any of them. `0x5f69f8`: no local player ⇒ [`StoneJoin::Silent`].
 /// `0x5f6a10 je 0x5f6a65`: **not in a group ⇒ both group refusals are skipped**, and a solo player
@@ -1080,10 +1078,90 @@ fn poll_area_spirit_healer(
     }
 }
 
+/// The dialog verbs' packet handlers (in the net handler table since 2313) — each parks a
+/// question or a countdown on its own store for the feed to turn into a StaticPopup.
+mod net {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::prelude::*;
+
+    use super::{AreaSpiritHealer, BattlefieldQueue, InstanceBoot, MeetingStone, PetUnlearnState};
+    use crate::net::NetHandlerApp;
+
+    /// Register the handlers — called from [`super::UiDialogVerbsPlugin`].
+    pub(super) fn register(app: &mut App) {
+        use SessionEventKind as K;
+        app.net_handler(K::PetUnlearnConfirm, on_pet_unlearn_confirm)
+            .net_handler(K::RaidGroupOnly, on_raid_group_only)
+            .net_handler(K::AreaSpiritHealerTime, on_area_spirit_healer_time)
+            .net_handler(K::BattlefieldStatus, on_battlefield_status)
+            .net_handler(K::MeetingStoneSetQueue, on_meeting_stone)
+            .net_handler(K::MeetingStoneNotice, on_meeting_stone)
+            .net_handler(K::Disconnected, on_session_end);
+    }
+
+    /// The battleground queue is zeroed at every login (module init `0x4a9c40`, from
+    /// `InitializeGame` — the three slots, `[0x8457cc] = -1`, the
+    /// scalars), and vmangos never sends a clear for the queue of a player who logged out. A
+    /// listener on the session end (a second handler on the kind, after the bridge's own
+    /// teardown). The in-session world enter (`0x4a9db0`) is a different edge that KEEPS the slots,
+    /// and it does not come through here.
+    fn on_session_end(In(_): In<SessionEvent>, mut queue: ResMut<BattlefieldQueue>) {
+        *queue = BattlefieldQueue::default();
+    }
+
+    /// The pet trainer's question (decision 1963) — the talent wipe's twin
+    /// ([`crate::ui_talent_wipe`]); a zero guid is the reference's own `ERR_TALENT_WIPE_ERROR`
+    /// leg, carried over as observed.
+    fn on_pet_unlearn_confirm(
+        In(ev): In<SessionEvent>,
+        mut unlearn: ResMut<PetUnlearnState>,
+        mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+    ) {
+        if let SessionEvent::PetUnlearnConfirm { trainer, cost } = ev {
+            if trainer == 0 {
+                debug!("net: pet unlearn refused (zero trainer) — no dialog");
+                errors
+                    .0
+                    .push(crate::ui_action::UiError::key("ERR_TALENT_WIPE_ERROR"));
+            } else {
+                debug!("net: trainer {trainer:#x} asks to unlearn the pet for {cost} copper");
+                unlearn.ask(trainer, cost);
+            }
+        }
+    }
+
+    fn on_raid_group_only(In(ev): In<SessionEvent>, mut boot: ResMut<InstanceBoot>) {
+        if let SessionEvent::RaidGroupOnly { delay_ms, reason } = ev {
+            boot.apply(delay_ms, reason, bevy::platform::time::Instant::now());
+        }
+    }
+
+    fn on_area_spirit_healer_time(In(ev): In<SessionEvent>, mut spirit: ResMut<AreaSpiritHealer>) {
+        if let SessionEvent::AreaSpiritHealerTime { healer, ms } = ev {
+            spirit.on_time(healer, ms, bevy::platform::time::Instant::now());
+        }
+    }
+
+    fn on_battlefield_status(In(ev): In<SessionEvent>, mut queue: ResMut<BattlefieldQueue>) {
+        if let SessionEvent::BattlefieldStatus(status) = ev {
+            queue.apply(status);
+        }
+    }
+
+    fn on_meeting_stone(In(ev): In<SessionEvent>, mut stone: ResMut<MeetingStone>) {
+        match ev {
+            SessionEvent::MeetingStoneSetQueue { area, status } => stone.apply(area, status),
+            SessionEvent::MeetingStoneNotice(notice) => stone.apply_notice(notice),
+            _ => {}
+        }
+    }
+}
+
 pub(crate) struct UiDialogVerbsPlugin;
 
 impl Plugin for UiDialogVerbsPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<PetUnlearnState>()
             .init_resource::<InstanceBoot>()
             .init_resource::<AreaSpiritHealer>()
@@ -1189,8 +1267,8 @@ impl Plugin for UiDialogVerbsPlugin {
 #[cfg(test)]
 const AREA_SPIRIT_HEALER_SPELL: u32 = AREA_SPIRIT_HEALER_AURA;
 
-/// The generic cancel-aura routine's refusal (`0x6e7040`, wow-re `staticpopup-dialog-bindings.md`
-/// §6): it returns without sending when the spell's `AttributesEx` has bit 13 set and bit 2
+/// The generic cancel-aura routine's refusal (`0x6e7040`): it returns without sending when the
+/// spell's `AttributesEx` has bit 13 set and bit 2
 /// clear **and** `0x5ee290(player)` holds. Whether the third leg ever matters for spell 2584 is
 /// decided by the first two, read off the shipped Spell.dbc in [`tests::spell_2584_never_trips_the_cancel_gate`].
 #[cfg(test)]
@@ -1595,7 +1673,7 @@ mod tests {
         // **An unanswered template refuses**, because `0x5f8150` reads `0/0` off an uncached
         // object and every level >= 1 is outside `0..=0`. The permissive "skip the term while the
         // query is in flight" default the highlight column takes is not this slot's — the first
-        // cut of this code had it, and the §5 round is what corrected it.
+        // cut of this code had it.
         assert_eq!(
             meeting_stone_join_refusal(None, Some(ME), Some(5), None),
             StoneJoin::Refuse("ERR_MEETING_STONE_INVALID_LEVEL")
@@ -1699,16 +1777,11 @@ mod tests {
     /// **The `/reload` re-query** — the meeting-stone half of 1290's class, and the reference's
     /// own behaviour rather than an invention of ours.
     ///
-    /// wow-re's §5 trio (3/3 unanimous, every byte re-decoded from the raw image) settled that
-    /// the run-once byte `[0xb4b424]` is cleared by the UI teardown at `0x490a8d` and that
+    /// The run-once byte `[0xb4b424]` is cleared by the UI teardown at `0x490a8d`, and
     /// `UI_Init` re-runs the bring-up and re-sends `CMSG 0x296`. So the gate is once per **VM**,
     /// not once per world session — and against the old `MessageReader<EnteredWorldMessage>`
     /// shape this fails on the second VM, which is exactly the reported symptom: the queued
     /// player's minimap icon never comes back after a `/reload`.
-    ///
-    /// It also corrects wow-re's own `meeting-stone-status.md` §6, which asserted the query "is
-    /// sent exactly once per world session … has no other trigger" — true of the entry points it
-    /// enumerated, but it never asked who *clears* the byte.
     ///
     /// **A registered schedule, not `run_system_once`**: the gate is a `Local<VmMemo<bool>>`, and
     /// `run_system_once` builds a fresh system — and so a fresh `Local` — on every call, which
@@ -1776,7 +1849,7 @@ mod tests {
             .expect("spell 2584 in Spell.dbc");
         assert!(
             !cancel_gate_could_apply(ex),
-            "spell 2584 AttributesEx = {ex:#x}: the gate's third leg would decide, and it is uncarved"
+            "spell 2584 AttributesEx = {ex:#x}: the gate's third leg would decide, and it is open"
         );
     }
 
@@ -1840,8 +1913,8 @@ mod tests {
         assert_eq!(q.map_id(2), None, "a zero map clears the slot");
     }
 
-    /// The instance clocks (§4.2): stamped by status 3, zeroed by any other status of ANY slot,
-    /// and by a clear of the active slot only — which leaves the active index alone.
+    /// The instance clocks (`0x4aa850`): stamped by status 3, zeroed by any other status of ANY
+    /// slot, and by a clear of the active slot only — which leaves the active index alone.
     #[test]
     fn the_instance_clocks_follow_the_status_handler() {
         let mut q = BattlefieldQueue::default();
@@ -1992,5 +2065,66 @@ mod tests {
         pet.close();
         assert_eq!(pet.pending(), None);
         assert_eq!(pet.cost, 0);
+    }
+
+    /// **The queue is zeroed at every login, not kept across it**: module init `0x4a9c40`, run
+    /// from `InitializeGame`, zeroes the three slots, the active index (`[0x8457cc] = -1`) and the
+    /// scalars, and vmangos never sends a clear for a queue whose player logged out. So a slot,
+    /// the active map and the instance clocks from the last session must not reach the next —
+    /// only an in-session world enter (`0x4a9db0`) keeps the slots, and that is
+    /// `ui_battlefield`'s, untouched here.
+    #[test]
+    fn the_session_end_zeroes_the_battlefield_queue() {
+        let mut app = App::new();
+        app.init_resource::<BattlefieldQueue>();
+        net::register(&mut app);
+        let now = Instant::now();
+        {
+            let mut q = app.world_mut().resource_mut::<BattlefieldQueue>();
+            q.apply_at(
+                BattlefieldStatus {
+                    slot: 0,
+                    map_id: 489,
+                    bracket: 0,
+                    instance_id: 3,
+                    status: 3,
+                    time_ms: None,
+                    in_progress: Some((90_000, 30_000)),
+                    queued: None,
+                },
+                now,
+            );
+            q.apply_at(
+                BattlefieldStatus {
+                    slot: 1,
+                    map_id: 30,
+                    bracket: 0,
+                    instance_id: 0,
+                    status: 1,
+                    time_ms: Some(0),
+                    in_progress: None,
+                    queued: None,
+                },
+                now,
+            );
+        }
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "logged out".into(),
+                end: benilla_protocol::SessionEnd::LoggedOut,
+            }],
+        );
+
+        let mut q = app.world_mut().resource_mut::<BattlefieldQueue>();
+        assert!(
+            q.slots().iter().all(Option::is_none),
+            "all three slots empty"
+        );
+        assert_eq!(q.active_map(), None);
+        assert_eq!(q.run_time_ms(now), 0);
+        assert_eq!(q.instance_expiration_ms(now), 0);
+        assert!(!q.take_score_dirty());
     }
 }

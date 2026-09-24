@@ -94,13 +94,14 @@ fn ui() -> UiScript {
 }
 
 /// The runner delivers every body line through the reference's own door — one
-/// `EXECUTE_CHAT_LINE` event per non-empty line, in order (0996, wow-re `macro-execution-law.md`
-/// §4) — and the reference's own `ChatFrame_OnEvent` arm does the rest: `SetText(arg1)`,
+/// `EXECUTE_CHAT_LINE` event per non-empty line, in order (0996, `0x4f14e0`) — and the
+/// reference's own `ChatFrame_OnEvent` arm does the rest: `SetText(arg1)`,
 /// `ChatEdit_SendText`, `ChatEdit_OnEscapePressed` (ChatFrame.lua l.1343-1347). So a macro line
 /// lands wherever a typed line lands — a chat type in the send queue, an emote in the emote
 /// queue, a roll in the roll queue — without the runner knowing any of them.
 #[test]
 fn running_a_macro_runs_its_lines_through_the_references_edit_box() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui();
     s.set_macros(MacroState {
         account: vec![macro_view("Greet", "/wave\n\n  /say pew  \n/roll 1 100")],
@@ -142,6 +143,7 @@ fn running_a_macro_runs_its_lines_through_the_references_edit_box() {
 /// case anywhere in the runner.
 #[test]
 fn a_character_macro_runs_by_its_own_index() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui();
     s.set_macros(MacroState {
         account: Vec::new(),
@@ -202,6 +204,7 @@ fn the_generation_moves_on_every_write_and_is_not_drained() {
 /// UI's use of it.
 #[test]
 fn a_registered_frame_sees_every_macro_line_as_an_event() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui();
     s.run(
         r#"MacroSpy = CreateFrame("Frame")
@@ -239,10 +242,11 @@ fn a_registered_frame_sees_every_macro_line_as_an_event() {
 }
 
 /// The reference's tokenizer takes `"\r\n"` as a delimiter SET — either character splits a line
-/// (wow-re `macro-execution-law.md` §3). A body carrying lone `\r`s (an old-Mac hand edit, or a
-/// file round-tripped through one) is therefore three lines, not one long one.
+/// (`0x64ae50`). A body carrying lone `\r`s (an old-Mac hand edit, or a file round-tripped through
+/// one) is therefore three lines, not one long one.
 #[test]
 fn either_line_ending_splits_a_body() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = ui();
     s.set_macros(MacroState {
         account: vec![macro_view("Mixed", "/say Charge\r/say a\r\n/say b")],
@@ -283,8 +287,8 @@ fn either_line_ending_splits_a_body() {
 fn every_macro_chooser_icon_resolves_in_the_client_archives() {
     /// Icons on a stock 5875 install: `patch.MPQ` 77 + `interface.MPQ` 443 = 520 raw names under
     /// `Interface\Icons\` matching `Spell_`/`Ability_`, less 3 that differ only by case or
-    /// extension — independently counted off the binary's own enumeration by the wow-re note
-    /// `system/ui/scratch/macro-icon-chooser.md`. The DBC scan this replaced served 521, a
+    /// extension — independently counted off the binary's own enumeration
+    /// (`BuildMacroIconList 0x4f0090`). The DBC scan this replaced served 521, a
     /// different set: it included five names with no file and missed art the archive has.
     const CHOOSER_ICONS_5875: usize = 517;
 

@@ -1,6 +1,6 @@
-//! `--death`: the death-arc slice-1 wire (decision 0308). The shared [`crate::world::DeathArc`] runs
-//! the die → release → ghost transition; this probe adds the corpse query, the self-revive cleanup,
-//! and the post-revive not-found re-query, then asserts the whole arc in wire order.
+//! `--death`: the death wire. [`crate::world::DeathArc`] runs die, release and the ghost
+//! transition; this probe adds the corpse query, a GM revive and a post-revive re-query that must
+//! find nothing, then checks the whole arc in wire order.
 
 use anyhow::{bail, Context, Result};
 use benilla_protocol::{EntityKind, SessionEvent};
@@ -12,22 +12,18 @@ pub(crate) struct Death {
     corpse_query_sent: bool,
     corpse_answer: Option<(bool, i32, [f32; 3], u32)>,
     revive_sent: bool,
-    /// The post-revive corpse re-query — the app's marker-drop mechanism (the server's own
-    /// "corpse gone" push is LOOTER-gated, vmangos Map.cpp:3617-3629, so a PvE res never sends
-    /// one; the client must re-ask and hear not-found). Director-reported: the map tombstone
-    /// survived a spirit-healer res before this was mirrored.
+    /// The post-revive corpse re-query: the server's "corpse gone" push goes only to looters
+    /// (`Map.cpp:3617-3629`), so after a PvE res the client must re-ask and hear not-found.
     post_revive_query_sent: bool,
     corpse_gone: Option<bool>,
     corpse_create: Option<(u64, [f32; 3])>,
-    /// The corpse descriptor's interaction bits at create: `(CORPSE_FIELD_FLAGS, owner, bones,
-    /// lootable, insignia)` — decision 1723's inputs, read off the wire rather than assumed.
+    /// The corpse descriptor at create: `(CORPSE_FIELD_FLAGS, owner, bones, lootable, insignia)`.
     corpse_flags: Option<(u32, u64, bool, bool, bool)>,
 }
 
 impl Probe for Death {
     fn poll(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Once we're a released ghost AND the graveyard teleport has landed, ask where our corpse
-        // is — the corpse-run marker's own source (decision 0308 §5).
+        // A released ghost at the graveyard asks where its corpse is (the corpse-run marker).
         if !self.corpse_query_sent {
             if let Some(arc) = &cx.world.death_arc {
                 if arc.ghost_seen && arc.graveyard_pos.is_some() {
@@ -37,9 +33,7 @@ impl Probe for Death {
                 }
             }
         }
-        // Once the corpse-query answer is in, GM-revive so the round trip leaves the character
-        // alive (cleanup, not part of the wire under test — a real player would corpse-run +
-        // CMSG_RECLAIM_CORPSE instead).
+        // Then GM-revive as cleanup; a real player corpse-runs and sends `CMSG_RECLAIM_CORPSE`.
         if !self.revive_sent && self.corpse_answer.is_some() {
             cx.session.send_chat(".revive")?;
             println!("sent GM: .revive (self-revive)");
@@ -48,8 +42,7 @@ impl Probe for Death {
                 arc.revive_initiated = true;
             }
         }
-        // Once revived, re-ask where the corpse is: the answer MUST be not-found (the corpse
-        // unbinds at SpawnCorpseBones) — the round trip the app's unghost-edge marker drop rides.
+        // Once revived, the re-query must find nothing: the corpse unbinds at `SpawnCorpseBones`.
         if !self.post_revive_query_sent {
             if let Some(arc) = &cx.world.death_arc {
                 if arc.revived_seen {
@@ -71,23 +64,13 @@ impl Probe for Death {
                 fields,
                 ..
             } => {
-                // --death: the corpse streams in once we've released (decision 0308 §4).
-                //
-                // **It is `EntityKind::Corpse`, not `Other`** — and this line said `Other` from
-                // 0308 until 1723 found it. 1706 gave TYPEID_CORPSE its own `EntityKind` variant;
-                // the compiler enumerated every `match` on the enum and corrected them, but this
-                // is an `==`, so it stayed silent and the probe's corpse capture quietly stopped
-                // firing: the arc would have bailed "the corpse object never streamed" on a wire
-                // that was perfectly correct. An instrument that fails closed after a refactor is
-                // the expensive kind (the contract §5 — the instruments are part of the codebase).
+                // The corpse streams in after release as `EntityKind::Corpse`; an `==` here, unlike
+                // a `match`, gets no compiler help if the variant changes.
                 let repop_sent = cx.world.death_arc.as_ref().is_some_and(|a| a.repop_sent);
                 if repop_sent && self.corpse_create.is_none() && *kind == EntityKind::Corpse {
                     self.corpse_create = Some((*guid, *position));
-                    // The descriptor bits the client's whole corpse interaction hangs off
-                    // (decision 1723): BONES picks the model, DYNAMIC_FLAGS bit 0 is the only
-                    // thing that opens the `CMSG_LOOT` route, FLAGS bit 5 is the PvP insignia the
-                    // skin leg reads. Printed rather than asserted — what vmangos actually sets on
-                    // a plain PvE death is a fact worth having in the log, not a pass/fail.
+                    // BONES picks the model, DYNAMIC_FLAGS bit 0 alone opens `CMSG_LOOT`, FLAGS
+                    // bit 5 is the PvP insignia. Printed, not asserted.
                     self.corpse_flags = Some((
                         fields.corpse_flags(),
                         fields.corpse_owner().unwrap_or(0),
@@ -132,9 +115,7 @@ impl Probe for Death {
             .as_ref()
             .expect("death_arc present when --death is set");
 
-        // --death verdict (decision 0308 slice 1): every signal in the release→ghost→corpse arc, in
-        // wire order — `bail!` on the first one that never arrived, so a partial run points straight
-        // at the phase that broke.
+        // Every signal of the arc in wire order, bailing on the first one missing.
         let death_pos = arc.death_pos.context(
             "--death: `.die` never dropped our health to 0 — is the account gmlevel ≥ 2?",
         )?;
@@ -153,9 +134,7 @@ impl Probe for Death {
         if !arc.ghost_seen {
             bail!("--death: PLAYER_FLAGS_GHOST (bit 0x10, field 190) never set");
         }
-        // Full 3D distance: the corpse/graveyard/query checks below all compare against where we
-        // died, and elevation is as telling as the ground plane (a graveyard directly below/above
-        // death, or a corpse object mis-z'd, are both real wire bugs — not noise to filter out).
+        // 3D distance from where we died: a wrong z is as much a wire bug as a wrong x or y.
         let dist3 = |a: [f32; 3], b: [f32; 3]| {
             ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
         };

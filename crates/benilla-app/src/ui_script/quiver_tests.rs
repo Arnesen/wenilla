@@ -37,27 +37,12 @@ use std::path::{Path, PathBuf};
 use benilla_ui::script::{ScriptValue, UiScript, UnitState};
 use benilla_ui::toc::Toc;
 
-/// Where the vanilla addon corpus might be — `$BENILLA_ADDON_CORPUS`, else a sibling checkout
-/// resolved from this crate's manifest (a pool worktree's cwd is not stable across tool calls).
-fn corpus_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(over) = std::env::var_os("BENILLA_ADDON_CORPUS") {
-        out.push(PathBuf::from(over));
-    }
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for up in [2usize, 3, 4] {
-        if let Some(root) = manifest.ancestors().nth(up) {
-            out.push(root.join("wow-addons-vanilla"));
-        }
-    }
-    out
-}
-
 /// The corpus root **and** a Quiver in it, or `None` — a skip, never a failure. Quiver is a live
 /// third-party addon (`github.com/SabineWren/Quiver`) whose shipped file is a generated bundle, so
-/// a machine that wants this test builds it into the corpus once.
+/// a machine that wants this test builds it into the corpus once. The corpus itself resolves
+/// through `benilla_formats::addon_corpus` — the one resolver, whose doc carries the incident.
 fn quiver_root() -> Option<PathBuf> {
-    corpus_candidates()
+    benilla_formats::addon_corpus_candidates()
         .into_iter()
         .find(|c| c.join("Quiver").join("Quiver.toc").is_file())
 }
@@ -67,10 +52,10 @@ macro_rules! quiver_or_skip {
         match quiver_root() {
             Some(root) => root,
             None => {
-                eprintln!(
-                    "skipping: no Quiver in the addon corpus — looked in {:?} \
-                     (set $BENILLA_ADDON_CORPUS; the folder needs Quiver.toc + Quiver.bundle.lua)",
-                    corpus_candidates()
+                benilla_formats::skipped(
+                    "no Quiver in the addon corpus (set $BENILLA_ADDON_CORPUS; the folder needs \
+                     Quiver.toc + Quiver.bundle.lua)",
+                    &benilla_formats::addon_corpus_candidates(),
                 );
                 return;
             }
@@ -217,6 +202,7 @@ fn seat_a_hunter(root: &Path) -> UiScript {
 /// again even if it left a different error behind.
 #[test]
 fn quiver_publishes_its_global_functions_for_a_hunter() {
+    benilla_formats::wow_data_or_skip!();
     let root = quiver_or_skip!();
     let mut s = seat_a_hunter(&root);
 
@@ -264,6 +250,7 @@ fn quiver_publishes_its_global_functions_for_a_hunter() {
 /// the test that names a *new* wall the moment one appears, instead of reporting a nil field.
 #[test]
 fn quiver_survives_a_hunter_session_start_without_raising() {
+    benilla_formats::wow_data_or_skip!();
     let root = quiver_or_skip!();
     let mut s = seat_a_hunter(&root);
     assert!(load_addon_files(&s, &root, "Quiver").is_empty());
@@ -337,6 +324,7 @@ fn shot_state(s: &mut UiScript) -> (bool, bool, f64, f64) {
 /// forever for a shot it is never told about — which is a bar pinned at 100%.
 #[test]
 fn auto_shot_bar_saturates_when_no_ammo_lock_event_ever_arrives() {
+    benilla_formats::wow_data_or_skip!();
     let root = quiver_or_skip!();
     let mut s = seat_a_hunter(&root);
     seat_a_bow(&mut s);
@@ -368,6 +356,7 @@ fn auto_shot_bar_saturates_when_no_ammo_lock_event_ever_arrives() {
 /// the addon, on `SetWidth`, or on the standing-still check.
 #[test]
 fn auto_shot_bar_drains_the_moment_an_ammo_lock_event_arrives() {
+    benilla_formats::wow_data_or_skip!();
     let root = quiver_or_skip!();
     let mut s = seat_a_hunter(&root);
     seat_a_bow(&mut s);
@@ -451,6 +440,7 @@ fn draws(s: &mut UiScript, leaf: &str) -> bool {
 /// dependency of ours, and a break in any of them shows up here as a missing quad.
 #[test]
 fn aspect_tracker_draws_the_icon_for_an_active_aspect() {
+    benilla_formats::wow_data_or_skip!();
     let root = quiver_or_skip!();
     let mut s = seat_a_hunter(&root);
     assert!(load_addon_files(&s, &root, "Quiver").is_empty());
@@ -492,6 +482,7 @@ fn aspect_tracker_draws_the_icon_for_an_active_aspect() {
 /// Hawk is up" and failed — the addon was right and the test was wrong.
 #[test]
 fn the_hawk_reminder_is_suppressed_only_once_frames_are_locked() {
+    benilla_formats::wow_data_or_skip!();
     let root = quiver_or_skip!();
     let mut s = seat_a_hunter(&root);
     assert!(load_addon_files(&s, &root, "Quiver").is_empty());
@@ -531,6 +522,7 @@ fn the_hawk_reminder_is_suppressed_only_once_frames_are_locked() {
 /// spent**, which is the half that was missing (decision 1509).
 #[test]
 fn spending_an_arrow_starts_quivers_reload_through_the_real_item_feed() {
+    benilla_formats::wow_data_or_skip!();
     use crate::ui_items::feed::{apply_container_source, FeedMemory};
     use benilla_ui::script::{ContainerSlot, ContainerState};
     use std::collections::HashMap;
@@ -565,6 +557,7 @@ fn spending_an_arrow_starts_quivers_reload_through_the_real_item_feed() {
         quiver(200),
         Default::default(),
         Vec::new(),
+        Vec::new(),
     );
 
     s.fire_event("START_AUTOREPEAT_SPELL", Vec::new());
@@ -579,6 +572,7 @@ fn spending_an_arrow_starts_quivers_reload_through_the_real_item_feed() {
         &mut memory,
         quiver(199),
         Default::default(),
+        Vec::new(),
         Vec::new(),
     );
     s.tick(0.1);

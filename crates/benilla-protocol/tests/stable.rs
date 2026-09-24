@@ -1,13 +1,5 @@
-//! Oracle-free golden tests for the stable-master arc's protocol layer (decision 1676): the five
-//! send verbs, the `MSG_LIST_STABLED_PETS` list, and the `SMSG_STABLE_RESULT` byte. Same idioms as
-//! `trainer.rs` — `hx(...)` golden CMSG bodies, hand-built SMSG bodies round-tripped through
-//! `parse_server`.
-//!
-//! Every layout here is VERIFIED against vmangos: the send bodies from
-//! `Server/Packets/Npc.cpp:51-76` (`ReadFromWorldPacket` for each `ClientPacket`), the list from
-//! `WorldSession::SendStablePet` (`Handlers/NPCHandler.cpp:522-575`), and the result byte from
-//! `StableResult::AppendBodyTo` (`Npc.cpp:99-102`) with the codes from that file's
-//! `StableResultCode` enum (`NPCHandler.cpp:40-47`).
+//! Stable-master wire: send bodies per vmangos `Server/Packets/Npc.cpp:51-76`, the pet list per
+//! `Handlers/NPCHandler.cpp:522-575` and the result byte per `Npc.cpp:99-102`.
 
 use benilla_protocol::messages::{self, stable_result, StabledPet};
 use benilla_protocol::ServerPacket;
@@ -24,10 +16,7 @@ const NPC_HEX: &str = "f0debc9a78563412";
 
 #[test]
 fn stable_send_bodies_golden() {
-    // The three guid-only verbs. They are byte-identical bodies on three different opcodes — the
-    // opcode IS the verb — so each is asserted separately rather than through a shared helper: a
-    // writer that sent `stable_pet`'s body under `CMSG_BUY_STABLE_SLOT` would still match a shared
-    // assertion.
+    // Three guid-only verbs with identical bodies: only the opcode tells them apart.
     assert_eq!(
         messages::list_stabled_pets(NPC),
         hx(NPC_HEX),
@@ -44,9 +33,7 @@ fn stable_send_bodies_golden() {
         "CMSG_BUY_STABLE_SLOT body"
     );
 
-    // The two pet-number verbs: u64 npcGuid, u32 petNumber. The number is the pet's OWN id
-    // (`character_pet.id`), never its slot — a body carrying a slot index would name the wrong pet
-    // for every hunter whose stable is not in id order.
+    // u64 npcGuid + u32 petNumber, the pet's own id (`character_pet.id`), never its slot.
     assert_eq!(
         messages::unstable_pet(NPC, 42),
         hx(&format!("{NPC_HEX}2a000000")),
@@ -59,9 +46,7 @@ fn stable_send_bodies_golden() {
     );
 }
 
-/// Append one variable-length pet record to a `MSG_LIST_STABLED_PETS` body, in wire order:
-/// `u32 petNumber, u32 creatureEntry, u32 level, cstring name, u32 loyalty, u8 slot` — where
-/// `slot` is the **wire** value (1-based), not the client index the decode produces.
+/// Appends one pet record in wire order; `wire_slot` is 1-based, unlike the decoded index.
 fn push_pet(
     body: &mut Vec<u8>,
     pet_number: u32,
@@ -101,11 +86,8 @@ fn parse_list(body: &[u8]) -> (u64, u8, Vec<StabledPet>) {
     }
 }
 
-/// A full hunter: a pet at their side and both stable slots occupied. **The slot rebasing is the
-/// assertion that matters** — the wire is 1-based (`SendStablePet` writes a literal `0x01` for the
-/// current pet and `it->slot + 1` for a stabled one) and the client is 0-based, so a decode that
-/// forwarded the wire byte would put the current pet in stable slot 1 and drop the last pet off the
-/// end of a 3-slot window.
+/// Wire slots are 1-based (`SendStablePet` writes 1 for the current pet and `slot + 1` for a
+/// stabled one); decoded slots are 0-based.
 #[test]
 fn a_full_stable_decodes_with_client_slot_indices() {
     let body = list_body(
@@ -135,16 +117,13 @@ fn a_full_stable_decodes_with_client_slot_indices() {
     );
     assert_eq!(pets[1].slot, 1);
     assert_eq!(pets[2].slot, 2);
-    // The name is a cstring mid-record, so every field after it depends on having consumed it
-    // exactly: a mis-read name shifts loyalty and slot together.
+    // The name is a cstring mid-record; every later field depends on consuming it exactly.
     assert_eq!(pets[2].name, "Nibbles");
     assert_eq!((pets[2].loyalty, pets[2].creature_entry), (1, 883));
 }
 
-/// A hunter with **no current pet** — the row for slot 0 is simply absent (vmangos emits it only
-/// for a live `HUNTER_PET` or a cached one). The rows must therefore be read BY SLOT: a consumer
-/// that treated `pets[0]` as the current pet would show a stabled wolf standing at the player's
-/// side.
+/// vmangos sends the slot-0 row only for a live or cached `HUNTER_PET`, so rows are read by slot,
+/// never by position.
 #[test]
 fn an_absent_current_pet_leaves_no_slot_zero_row() {
     let body = list_body(1, &[(8, 1126, 38, "Bruiser", 4, 2)]);
@@ -158,26 +137,21 @@ fn an_absent_current_pet_leaves_no_slot_zero_row() {
     assert!(!pets.iter().any(|p| p.slot == 0));
 }
 
-/// A hunter who has bought a slot and stabled nothing: an empty list with a non-zero slot count.
-/// This must decode to an empty vec — the count and the rows are independent numbers, and treating
-/// `num_stable_slots` as a row count would over-read the body.
+/// The purchased slot count and the row count are independent numbers.
 #[test]
 fn an_empty_list_still_carries_the_purchased_slot_count() {
     let (_, slots, pets) = parse_list(&list_body(1, &[]));
     assert_eq!(slots, 1);
     assert!(pets.is_empty());
 
-    // And the true zero state: nothing bought, nothing stabled.
     let (_, slots, pets) = parse_list(&list_body(0, &[]));
     assert_eq!(slots, 0);
     assert!(pets.is_empty());
 }
 
-/// Every `StableResultCode` vmangos can send, round-tripped. The success codes are distinct
-/// numbers but `SUCCESS_UNSTABLE` answers BOTH a plain unstable and a swap, so the reply alone
-/// never identifies which verb ran.
+/// Each result byte parses as itself, and the codes are vmangos's `StableResultCode` values.
 #[test]
-fn stable_result_codes_round_trip() {
+fn stable_result_codes_parse_as_their_vmangos_bytes() {
     for code in [
         stable_result::ERR_MONEY,
         stable_result::ERR_STABLE,
@@ -191,8 +165,7 @@ fn stable_result_codes_round_trip() {
         }
     }
 
-    // The values themselves, against vmangos's enum — a renumbering here would silently turn a
-    // refusal into a success in the app's match.
+    // vmangos's `StableResultCode` values (`NPCHandler.cpp:40-47`).
     assert_eq!(
         [
             stable_result::ERR_MONEY,

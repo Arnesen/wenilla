@@ -1,13 +1,5 @@
-//! The bag/equipment family's `WorldWriter` sends — the item-template ask, use, auto-equip, the
-//! ammo fork, the three move/swap/split shapes, and destroy. Bodies in
-//! [`crate::messages::items`], whose scope this mirrors. Split out of `writer/mod.rs`
-//! (decision 0636).
-//!
-//! Three distinct swap opcodes exist because the addressable space differs, not the intent:
-//! `CMSG_SWAP_INV_ITEM` only ever names two slots in the player's own grid, while `CMSG_SWAP_ITEM`
-//! and `CMSG_SPLIT_ITEM` take a `(bag, slot)` pair on each side so either endpoint may be an
-//! equipped bag (decision 0216 §6). Every one of them refuses the same way —
-//! `SMSG_INVENTORY_CHANGE_FAILURE` — and succeeds silently, as values deltas on both slots.
+//! The bag and equipment sends. A move succeeds silently, as values deltas on both slots, and is
+//! refused with `SMSG_INVENTORY_CHANGE_FAILURE`.
 
 use anyhow::Result;
 
@@ -16,9 +8,7 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// Ask an item template's display head (`CMSG_ITEM_QUERY_SINGLE`: entry + item guid, 0 for
-    /// template-only asks). Answered by `SMSG_ITEM_QUERY_SINGLE_RESPONSE` (an `ItemTemplate`
-    /// event) — the T2 container groundwork.
+    /// `CMSG_ITEM_QUERY_SINGLE`: an item template by entry; `guid` is 0 for a template-only ask.
     pub fn item_query(&mut self, entry: u32, guid: u64) -> Result<()> {
         self.send(
             opcode::CMSG_ITEM_QUERY_SINGLE,
@@ -26,10 +16,8 @@ impl WorldWriter {
         )
     }
 
-    /// Use an item by bag position (`CMSG_USE_ITEM`, layout in [`messages::use_item`]) — eat the
-    /// food, drink the potion, hearthstone home. `go_target` aims the use at a GameObject, which is
-    /// how a KEY opens a locked door (decision 0769). The server answers with the effect (values
-    /// deltas, a stack decrement/destroy) or `SMSG_CAST_RESULT` on refusal.
+    /// `CMSG_USE_ITEM`: use the item at a bag position; a GameObject `target` is how a key opens a
+    /// locked door. Refused with `SMSG_CAST_RESULT`.
     pub fn use_item(
         &mut self,
         bag_index: u8,
@@ -43,11 +31,8 @@ impl WorldWriter {
         )
     }
 
-    /// Open an item by bag position (`CMSG_OPEN_ITEM`, layout in [`messages::open_item`]) — crack
-    /// the clam, empty the picked lockbox, unwrap the gift. The right-click fork for an
-    /// `crate::ItemInfo::openable` item; the server answers with `SMSG_LOOT_RESPONSE` on the
-    /// item's **own** guid (so the loot window opens over a thing in the bag), or an equip error
-    /// on a refusal (still locked, dead, flying).
+    /// `CMSG_OPEN_ITEM`: open a clam, lockbox or gift; the loot window comes back on the item's
+    /// own guid.
     pub fn open_item(&mut self, bag_index: u8, slot: u8) -> Result<()> {
         self.send(
             opcode::CMSG_OPEN_ITEM,
@@ -55,10 +40,8 @@ impl WorldWriter {
         )
     }
 
-    /// Wrap an item in gift paper (`CMSG_WRAP_ITEM`, layout in [`messages::wrap_item`]) — the
-    /// completion of the local wrap cursor a `ITEM_FLAG_WRAPPER` item's right-click arms. The
-    /// paper's `(bag, slot)` leads, the target's follows. Success is silent (field updates on the
-    /// target, one paper destroyed); every refusal comes back as `SMSG_INVENTORY_CHANGE_FAILURE`.
+    /// `CMSG_WRAP_ITEM`: wrap an item in the `ITEM_FLAG_WRAPPER` paper; success is silent and
+    /// consumes one paper.
     pub fn wrap_item(
         &mut self,
         gift_bag: u8,
@@ -72,9 +55,7 @@ impl WorldWriter {
         )
     }
 
-    /// Equip a bag item (`CMSG_AUTOEQUIP_ITEM`, layout in [`messages::auto_equip_item`]) — the
-    /// server picks the destination slot. Success arrives as inventory-slot values deltas (and the
-    /// visible-item change everyone renders); refusal as `SMSG_INVENTORY_CHANGE_FAILURE`.
+    /// `CMSG_AUTOEQUIP_ITEM`: equip a bag item; the server picks the slot.
     pub fn auto_equip_item(&mut self, bag_index: u8, slot: u8) -> Result<()> {
         self.send(
             opcode::CMSG_AUTOEQUIP_ITEM,
@@ -82,19 +63,13 @@ impl WorldWriter {
         )
     }
 
-    /// Load ammo into the ammo slot (`CMSG_SET_AMMO`, layout in [`messages::set_ammo`]) — the
-    /// client's own auto-equip fork for ammo-class items (wow-re `cursor-dragdrop-slots.md`).
-    /// Addressed by item *entry*, not a bag slot; the stack stays in the bag and `PLAYER_AMMO_ID`
-    /// starts referencing it. A wrong/absent ranged weapon refuses via
-    /// `SMSG_INVENTORY_CHANGE_FAILURE`. Decision 0526.
+    /// `CMSG_SET_AMMO`: what the 1.12 client sends to auto-equip ammo. It names an item entry, not
+    /// a slot; the stack stays in the bag and `PLAYER_AMMO_ID` points at it.
     pub fn set_ammo(&mut self, entry: u32) -> Result<()> {
         self.send(opcode::CMSG_SET_AMMO, &messages::set_ammo(entry))
     }
 
-    /// Swap two of the player's own inventory slots (`CMSG_SWAP_INV_ITEM`, layout in
-    /// [`messages::swap_inv_item`]) — the wire for a backpack-internal pick/place/swap (both slots
-    /// are `INVENTORY_SLOT_ITEM_START`+i). An empty destination is a move; the server settles both
-    /// slots with values deltas, or refuses via `SMSG_INVENTORY_CHANGE_FAILURE`.
+    /// `CMSG_SWAP_INV_ITEM`: two slots of the player's own grid; an empty destination is a move.
     pub fn swap_inv_item(&mut self, src_slot: u8, dst_slot: u8) -> Result<()> {
         self.send(
             opcode::CMSG_SWAP_INV_ITEM,
@@ -102,11 +77,7 @@ impl WorldWriter {
         )
     }
 
-    /// The general bag↔bag move (`CMSG_SWAP_ITEM`, layout in [`messages::swap_item`]): either
-    /// endpoint may be an equipped bag (unlike [`Self::swap_inv_item`], which only ever addresses
-    /// the player's own grid) — the wire for a whole-space bag-window pick/place/swap (decision
-    /// 0216 §6, slice 2). An empty destination is a move, same as `swap_inv_item`; refusal answers
-    /// `SMSG_INVENTORY_CHANGE_FAILURE`.
+    /// `CMSG_SWAP_ITEM`: a `(bag, slot)` on each side, so either end may be in an equipped bag.
     pub fn swap_item(
         &mut self,
         dst_bag: u8,
@@ -120,11 +91,8 @@ impl WorldWriter {
         )
     }
 
-    /// Auto-store an item into a bag (`CMSG_AUTOSTORE_BAG_ITEM`, layout in
-    /// [`messages::auto_store_bag_item`]): take `(src_bag, src_slot)` and put it anywhere inside
-    /// `dst_bag` — **the client names no destination slot; the server picks it**. The wire for
-    /// `PutItemInBag`'s auto-store leg and the whole of `PutItemInBackpack` (wow-re
-    /// `bag-verbs-law.md`). Refusal answers `SMSG_INVENTORY_CHANGE_FAILURE`.
+    /// `CMSG_AUTOSTORE_BAG_ITEM`: into `dst_bag` at a slot the server picks; the wire of
+    /// `PutItemInBackpack` and of `PutItemInBag`'s auto-store.
     pub fn auto_store_bag_item(&mut self, src_bag: u8, src_slot: u8, dst_bag: u8) -> Result<()> {
         self.send(
             opcode::CMSG_AUTOSTORE_BAG_ITEM,
@@ -132,10 +100,7 @@ impl WorldWriter {
         )
     }
 
-    /// Split a stack (`CMSG_SPLIT_ITEM`, layout in [`messages::split_item`]): carry `count` off
-    /// `(src_bag, src_slot)` onto `(dst_bag, dst_slot)` — either endpoint may be an equipped bag
-    /// (unlike [`Self::swap_inv_item`]). Success settles both slots via values deltas; refusal
-    /// answers `SMSG_INVENTORY_CHANGE_FAILURE`.
+    /// `CMSG_SPLIT_ITEM`: move `count` off a stack; either end may be in an equipped bag.
     pub fn split_item(
         &mut self,
         src_bag: u8,
@@ -150,9 +115,7 @@ impl WorldWriter {
         )
     }
 
-    /// Destroy a bag item (`CMSG_DESTROYITEM`, layout in [`messages::destroy_item`]): `count` 0 =
-    /// the whole stack. The delete-confirm popup's `OnAccept` (decision 0216 §3) — no dedicated
-    /// answer packet; the item's disappearance is the ordinary field-update stream.
+    /// `CMSG_DESTROYITEM`: `count` 0 destroys the whole stack; there is no reply packet.
     pub fn destroy_item(&mut self, bag: u8, slot: u8, count: u8) -> Result<()> {
         self.send(
             opcode::CMSG_DESTROYITEM,

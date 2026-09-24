@@ -30,8 +30,7 @@
 //! answers `none`. A body left queued is not harmful, only surprising: every later login on that
 //! account carries an extra `SMSG_BATTLEFIELD_STATUS` in its burst.
 //!
-//! Non-combat. Pair with the SLOT-KEYED probe identity (`WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>`; `method.md`, "The local vmangos server"), and `WOW_NOSOUND=1` when
+//! Non-combat. Pair with the checkout's probe identity (`.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR — the `probe` skill), and `WOW_NOSOUND=1` when
 //! it runs unattended. One `timeout`'d run plus a grep for `PROBE bgqueue:` is the whole harness.
 
 use bevy::prelude::*;

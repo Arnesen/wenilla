@@ -680,42 +680,35 @@ void luaV_execute (lua_State *L, int nexeccalls) {
       }
       case OP_TFORLOOP: {
         StkId cb = ra + 3;  /* call base */
-        /* BENILLA: Lua 5.0's OP_TFORPREP, folded into the loop opcode.
-        ** See third_party/lua-src/BENILLA.md and benilla decision 1215.
+        /* BENILLA: Lua 5.0's OP_TFORPREP, folded into the loop opcode (see
+        ** third_party/lua-src/BENILLA.md).
         **
-        ** 5.0 ran this ONCE at loop entry in its own opcode (index 30, 157 bytes, verified in
-        ** the 1.12.1 client at 0x6f94a2): when a generic-for's generator is a table, the table
-        ** becomes the STATE and the generator becomes the global `next`. 5.1 deleted the opcode,
-        ** so `for k, v in someTable do` -- which 183 of 218 corpus addons are reached by, and
-        ** which is the first session-start error for 60 of them -- raises "attempt to call a
-        ** table value".
+        ** 5.0 ran this once at loop entry in its own opcode (index 30, 157 bytes, at
+        ** 0x6f94a2 in the 1.12.1 client): when a generic-for's generator is a table, the
+        ** table becomes the STATE and the generator becomes the global `next`. 5.1 deleted
+        ** the opcode, so `for k, v in someTable do`, which most 1.12 addons use, raised
+        ** "attempt to call a table value".
         **
-        ** Placing it here is timing-exact rather than approximate: 5.1's parser emits a JMP
-        ** straight to this instruction, so the top of TFORLOOP IS 5.0's prep point, before the
-        ** first call. It is self-clearing -- after one pass `ra` holds a function, so the test
-        ** fails on every later iteration -- which is what makes an entry-only rule safe to
-        ** express as a per-iteration check.
+        ** The top of TFORLOOP is 5.0's prep point exactly: 5.1's parser emits a JMP straight
+        ** to this instruction, before the first call. The check is self-clearing, since after
+        ** one pass `ra` holds a function, so an entry-only rule is safe as a per-iteration
+        ** test.
         **
-        ** Three details are the client's, not conveniences, each byte-verified in wow-5875-re
-        ** system/ui/scratch/lua-generic-for.md:
-        **   - the test is a BARE TYPE TAG equality. The handler makes no metatable access at
-        **     all, so a table carrying __call still gets `next` and never reaches tryfuncTM.
-        **     "not callable" and "no __call" are different conditions and both diverge here.
-        **   - the callee is the GLOBAL `next`, read RAW (no __index) from the thread's own
+        ** Three details are the client's, each byte-read there:
+        **   - the test is a BARE TYPE TAG equality. The handler makes no metatable access, so
+        **     a table carrying __call still gets `next` and never reaches tryfuncTM.
+        **   - the callee is the GLOBAL `next`, read raw (no __index) from the thread's own
         **     globals table, fetched fresh at every loop entry. An addon that assigns
-        **     `next = myfn` therefore changes every later generic-for in the session. That is
-        **     observable, and it is reproduced rather than improved on.
+        **     `next = myfn` therefore changes every later generic-for in the session.
         **   - userdata is NOT substituted (tag mismatch), so it still reaches __call, and a
         **     nil/string/number generator still raises on iteration 1, not at entry.
         **
-        ** KNOWN, MEASURED DIVERGENCE THIS DOES NOT CLOSE. 5.0's generic-for has two hidden
-        ** locals, not three: ra+2 is the first user variable AND the control, so assigning to it
-        ** inside the body changes what the next iteration is asked for. 5.1 gives the control
-        ** its own slot, and this patch does not move it -- that is a register-layout property
-        ** owned by the code generator, not by this handler. Measured before shipping
-        ** (scripts/generic-for-control-census.py): 95 addons contain the shape, concentrated in
-        ** two files nearly everything embeds -- Dewdrop-2.0.lua (123 sites) and AceEvent-2.0.lua
-        ** (113). Recorded rather than hidden; closing it is a separate change.
+        ** Deviation from 1.12 this does not close: 5.0's generic-for has two hidden locals,
+        ** not three, so ra+2 is the first user variable AND the control, and assigning to it
+        ** inside the body changes what the next iteration asks for. 5.1 gives the control its
+        ** own slot, a register-layout property of the code generator, not of this handler.
+        ** 95 corpus addons contain the shape, concentrated in Dewdrop-2.0.lua (123 sites) and
+        ** AceEvent-2.0.lua (113).
         */
         if (ttistable(ra)) {
           setobjs2s(L, ra+1, ra);

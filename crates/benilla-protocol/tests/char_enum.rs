@@ -1,17 +1,11 @@
-//! `SMSG_CHAR_ENUM` (the character-select roster) + the logout round-trip. The enum body is
-//! hand-built byte-exact to the vmangos serializer (`Player::BuildEnumData`, `Player.cpp:1629`:
-//! guid u64 · name cstring · race/class/gender/skin/face/hairStyle/hairColor/facialHair u8 ·
-//! level u8 · zone u32 · map u32 · x/y/z f32 · guild u32 · flags u32 · firstLogin u8 ·
-//! petDisplay/petLevel/petFamily u32 · 19×(display u32 + invType u8) equipment · first-bag
-//! display u32 + invType u8); two characters in one body exercise the alignment of everything
-//! the parser skips.
+//! `SMSG_CHAR_ENUM` in vmangos `Player::BuildEnumData` order (`Player.cpp:1629`), two entries per
+//! body so any misalignment shows, plus the logout and refused-login replies.
 
 use benilla_protocol::events::{decode, SessionEvent};
 use benilla_protocol::messages;
 use benilla_protocol::ServerPacket;
 
-/// One serialized enum entry, vmangos field order. Non-roster fields get distinct junk values so a
-/// misaligned parse can't accidentally pass.
+/// One enum entry; the fixed fields hold distinct values so a misaligned parse cannot pass.
 fn enum_entry(
     guid: u64,
     name: &str,
@@ -36,7 +30,7 @@ fn enum_entry(
         b.extend_from_slice(&c.to_le_bytes());
     }
     b.extend_from_slice(&0u32.to_le_bytes()); // guild id
-    b.extend_from_slice(&0x0200_0000u32.to_le_bytes()); // character flags (DECLINED — junk)
+    b.extend_from_slice(&0x0200_0000u32.to_le_bytes()); // character flags (DECLINED, a junk value)
     b.push(1); // first login
     b.extend_from_slice(&pet_display.to_le_bytes()); // pet display id
     b.extend_from_slice(&7u32.to_le_bytes()); // pet level
@@ -62,7 +56,7 @@ fn char_enum_roster_parses_and_decodes() {
         1,
         0,
         [-8949.95, -132.493, 83.5312],
-        99, // a pet — the select screen stands one beside this character
+        99, // a pet, which the select screen stands beside this character
     ));
     body.extend(enum_entry(
         0x0000_0000_0000_0009,
@@ -86,17 +80,12 @@ fn char_enum_roster_parses_and_decodes() {
         (c.guid, c.name.as_str(), c.race, c.class, c.gender),
         (7, "Two", 1, 1, 0)
     );
-    // The appearance bytes + zone + flags land verbatim (decision 0465 — the select screen
-    // renders them; they used to be alignment-skips).
     assert_eq!(
         (c.skin, c.face, c.hair_style, c.hair_color, c.facial_hair),
         (3, 4, 5, 6, 7)
     );
     assert_eq!((c.zone, c.flags), (12, 0x0200_0000));
-    // The pet triple, which used to be three alignment-skips: it sits between the first-login byte
-    // and the equipment array, and reading it *as* the roster's fields is what stands a pet on the
-    // select screen. The equipment assertions below are the alignment half of this — a triple read
-    // one field wide would slide every display id.
+    // The pet triple sits before the equipment array: a misread slides every display id below.
     assert_eq!(
         (c.pet_display_id, c.pet_level, c.pet_family),
         (99, 7, 1),
@@ -104,7 +93,6 @@ fn char_enum_roster_parses_and_decodes() {
     );
     assert_eq!((c.level, c.map), (1, 0));
     assert_eq!((c.position.x, c.position.y), (-8949.95, -132.493));
-    // All 19 equipment pairs, in slot order: display 1000+slot, invType = slot.
     for (slot, item) in c.equipment.iter().enumerate() {
         assert_eq!(
             (item.display_id, item.inventory_type),
@@ -118,12 +106,11 @@ fn char_enum_roster_parses_and_decodes() {
     );
     assert_eq!((c.level, c.map, c.position.z), (60, 1, 3.5));
     assert_eq!(c.equipment[18].display_id, 1018);
-    // No pet: `petDisplayId == 0` is the whole gate — the server zeroes the triple for every
-    // character but a living hunter's or warlock's, so the client needs no class test of its own.
+    // The server zeroes the triple for all but a hunter's or warlock's pet, so display id 0 is the
+    // whole no-pet gate.
     assert_eq!(c.pet_display_id, 0);
 
-    // Decodes to one CharacterList event carrying the roster through (no realm context on the raw
-    // decode path — the IO thread's own emit is what carries the auth realm entry).
+    // The raw decode has no realm; the IO thread's own emit carries the auth realm entry.
     match &decode(p)[..] {
         [SessionEvent::CharacterList { characters, realm }] => {
             assert_eq!(characters.len(), 2);
@@ -135,20 +122,12 @@ fn char_enum_roster_parses_and_decodes() {
 
 #[test]
 fn logout_complete_decodes_to_logged_out() {
-    // SMSG_LOGOUT_COMPLETE: empty body.
     let p = messages::parse_server(messages::opcode::SMSG_LOGOUT_COMPLETE, &[]).unwrap();
     assert!(matches!(decode(p)[..], [SessionEvent::LoggedOut]));
 }
 
-/// The **refused** pick (`SMSG_CHARACTER_LOGIN_FAILED`, opcode 65): one result byte, straight
-/// through to the event the glue layer answers.
-///
-/// It used to parse into nothing at all — the opcode had a name and no arm — so a server that
-/// refused a character login said it to a client that could not hear it, and the entry the IO
-/// thread had already announced simply never finished. The byte travels **raw**: it is a 1-based
-/// reason index whose meaning is a table in the reference's glue layer, and the wire has no
-/// business holding that table. `0x01` is vmangos's only value; `0x08` is the top of
-/// mangos-classic's `CharLoginFailReasons`, past the client's six-entry switch.
+/// `SMSG_CHARACTER_LOGIN_FAILED` (opcode 65): one raw 1-based reason byte the glue layer maps;
+/// vmangos sends only `0x01`, and `0x08` is past the reference's six-entry switch.
 #[test]
 fn a_refused_character_login_parses_and_decodes() {
     for result in [0x01u8, 0x08] {

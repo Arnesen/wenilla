@@ -8,7 +8,7 @@
 //! machine's source tree. On a player's machine every one of those files resolves to nothing and
 //! the client boots with no interface at all: not a crash, just an empty screen and one log line
 //! per manifest entry that nobody sees.
-//! `assets/ui` is our own content (MIT/Apache, not Blizzard's — the contract's hard rule is
+//! `assets/ui` is our own content (MIT/Apache, not Blizzard's — `docs/METHOD.md`'s hard rule is
 //! untouched), so it can simply be part of the program.
 //!
 //! ## Resolution order — the same in every build
@@ -71,7 +71,7 @@ fn read_source_tree(req: &str) -> Option<String> {
 ///
 /// It exists because a number taken from the corpus harness is meaningless without it. In a dev
 /// build [`read`] prefers the SOURCE TREE, so editing an `assets/ui` file changes what a survey
-/// loads **with no rebuild** — and this repo's worktrees are routinely shared by several agents at
+/// loads **with no rebuild** — and a tree is routinely edited by several agents at
 /// once. Three separate measurements this arc were taken across a moving tree and one of them
 /// landed a wrong attribution in a decision record: 87/218 was credited to a single table when a
 /// controlled A/B later put it at 75, with the other twelve belonging to a neighbour's uncommitted

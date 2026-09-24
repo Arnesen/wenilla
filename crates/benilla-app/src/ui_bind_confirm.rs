@@ -4,8 +4,8 @@
 //!
 //! ## The three predicates are three different predicates
 //!
-//! VERIFIED at the 1.12.1 bytes (wow-re `system/object-layer/scratch/bind-confirm-law.md`), one
-//! `item_template + 0x194` compare per arm and **no `+0x1c` (quality) read in any of the three**:
+//! In the 1.12.1 client, one `item_template + 0x194` compare per arm and **no `+0x1c` (quality)
+//! read in any of the three**:
 //!
 //! | arm | event | fires from | predicate | site |
 //! |---|---|---|---|---|
@@ -16,8 +16,8 @@
 //!
 //! Carrying the loot arm's `quality >= 2` across would have been wrong twice over: it would have
 //! silenced the confirm on a white BoE, and it would have asked about the wrong `bonding` value
-//! entirely. (This was benilla's working assumption until the RE refuted it; that is why the table
-//! is here and not a sentence.)
+//! entirely. (This was benilla's working assumption until the reference refuted it; that is why the
+//! table is here and not a sentence.)
 //!
 //! ## The other conjuncts, and where benilla already had them
 //!
@@ -48,8 +48,8 @@
 //!
 //! ## The index space is the reference's own
 //!
-//! `arg1` is a **0-based index into the pending array**, not a slot (wow-re corrected benilla's
-//! assumption here). It is opaque on both sides — the event hands it out, `dialog.data` carries it,
+//! `arg1` is a **0-based index into the pending array**, not a slot (allocated by `0x5e1110`).
+//! It is opaque on both sides — the event hands it out, `dialog.data` carries it,
 //! and the two verbs hand it straight back — so unlike the loot arm's row number (1744, translated
 //! into benilla's display space) there is nothing to gain by re-basing it, and it is kept as-is.
 
@@ -59,6 +59,7 @@ use bevy::prelude::*;
 use benilla_ui::script::{ScriptValue, UiScript};
 
 use crate::items::{Enchants, Items};
+use crate::net::Objects;
 
 /// `item_template.bonding` — the values the three arms compare against (vmangos
 /// `ItemPrototype.h`'s `ItemBondingType`; the client reads the same field at `+0x194`).
@@ -147,7 +148,7 @@ pub(crate) struct PendingBindOnUse(pub(crate) Option<PendingUse>);
 pub(crate) type PendingUse = crate::ui_items::ItemUse;
 
 /// The three resources the deferral needs, bundled so a drain can take them in one parameter
-/// (the shape `crate::ui_action::CastLadder` established). [`Items`] is deliberately NOT in here:
+/// (the shape `crate::spell::CastLadder` established). [`Items`] is deliberately NOT in here:
 /// every caller already holds it, and a second `ResMut<Items>` in one system is a conflict.
 #[derive(SystemParam)]
 pub(crate) struct BindGate<'w> {
@@ -169,17 +170,18 @@ impl BindGate<'_> {
     pub(crate) fn equip_binds(
         &self,
         script: &UiScript,
+        objects: &Objects,
         items: &Items,
         commands: &crate::net::NetCommands,
         item_guid: u64,
     ) -> bool {
-        let Some(fields) = items.object(item_guid) else {
+        let Some(fields) = objects.object(item_guid) else {
             return false;
         };
         if crate::items::already_bound(fields, self.enchants.as_deref()) {
             return false;
         }
-        let Some(entry) = items.object(item_guid).and_then(|o| o.object_entry()) else {
+        let Some(entry) = objects.object(item_guid).and_then(|o| o.object_entry()) else {
             return false;
         };
         let Some(t) = items.template(entry, item_guid, commands) else {
@@ -198,17 +200,18 @@ impl BindGate<'_> {
     /// the fire site is reached the item has already passed it.
     pub(crate) fn use_binds(
         &self,
+        objects: &Objects,
         items: &Items,
         commands: &crate::net::NetCommands,
         item_guid: u64,
     ) -> bool {
-        let Some(fields) = items.object(item_guid) else {
+        let Some(fields) = objects.object(item_guid) else {
             return false;
         };
         if crate::items::already_bound(fields, self.enchants.as_deref()) {
             return false;
         }
-        let Some(entry) = items.object(item_guid).and_then(|o| o.object_entry()) else {
+        let Some(entry) = objects.object(item_guid).and_then(|o| o.object_entry()) else {
             return false;
         };
         items

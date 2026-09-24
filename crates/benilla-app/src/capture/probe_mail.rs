@@ -5,7 +5,7 @@
 //! `PROBE_MAIL: DONE pass=<n> fail=<m>` summary. Modeled closely on [`super::probe_taxi`] (same
 //! phase-machine shape, same trace style, same self-terminating exit).
 //!
-//! ## The GM `.send` syntax (verified `/Users/sam/wre/vmangos-src`, `Chat/Chat.cpp` +
+//! ## The GM `.send` syntax (verified against the vmangos source, `Chat/Chat.cpp` +
 //! `Commands/MiscCommands.cpp`)
 //!
 //! `sendCommandTable[]` (Chat.cpp ~l.931): `.send mail <name> "subject" "text"` is
@@ -39,9 +39,8 @@
 //! WOW_DATA=<vanilla Data dir> WOW_USER=probe2 WOW_PASS=pprobe2 WOW_CHAR=Probetwo \
 //!     WOW_PROBE_MAIL=1 cargo run -q -p benilla
 //! ```
-//! (the slot-keyed probe identity — `pool-N` → `WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>`, method.md "The local vmangos server"; this worktree is `pool-2` →
-//! `probe2`/`pprobe2`/`Probetwo`). `WOW_CHAR` doubles as the probe's own mail-send target — read
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill). `WOW_CHAR` doubles as the probe's own mail-send target — read
 //! once at world-enter, never hardcoded. An outer `timeout` + grep on `PROBE_MAIL:` is the whole
 //! harness; the probe self-exits (the [`super::probes::ProbeExitPlugin`] pattern) once DONE.
 
@@ -359,7 +358,7 @@ fn mail_probe(
             let Some(idx) = index_of(&mail, letter_id) else {
                 return; // shouldn't happen the same frame we just found it — re-poll
             };
-            // CheckInbox() called twice, idempotently (wow-re §5's 60s client-side throttle,
+            // CheckInbox() called twice, idempotently (`0x4aeab0`'s 60s client-side throttle,
             // decision 0548 §2/0544) — proves a rapid re-call is a no-op, not a packet storm.
             if let Err(e) = script.run(&format!("CheckInbox() CheckInbox() GetInboxText({idx})")) {
                 error!("PROBE_MAIL: FAIL (b) — GetInboxText({idx}) errored: {e}");

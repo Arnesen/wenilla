@@ -1,5 +1,5 @@
-//! `--query-names`: the name-query pair. Ask our own name (`CMSG_NAME_QUERY`) at staging and the
-//! first streamed creature's template name (`CMSG_CREATURE_QUERY`), require both to arrive and parse.
+//! `--query-names`: the name-query pair. `CMSG_NAME_QUERY` for our own name and
+//! `CMSG_CREATURE_QUERY` for the first streamed creature must both be answered and parse.
 
 use anyhow::{bail, Context, Result};
 use benilla_protocol::{guid, EntityKind};
@@ -40,8 +40,7 @@ impl Probe for QueryNames {
     }
 
     fn verify(&mut self, cx: &mut Ctx) -> Result<()> {
-        // --query-names verdict: both answers must have arrived and parsed (the creature one only if a
-        // creature streamed in at all).
+        // The creature answer is required only if a creature streamed in.
         let own = cx
             .world
             .player_name_answer

@@ -1,6 +1,5 @@
-//! `--quest`: accept + turn in a real quest end-to-end (decision 0088). GM-teleport onto Deputy
-//! Willem, run the full questgiver wire (details → accept → complete → request/offer reward → choose
-//! reward → quest-complete), verified against `PLAYER_QUEST_LOG` + `PLAYER_XP`.
+//! `--quest`: accepts and turns in a real quest over the whole questgiver wire (details, accept,
+//! complete, reward, quest-complete), checked against `PLAYER_QUEST_LOG` and `PLAYER_XP`.
 
 use std::time::{Duration, Instant};
 
@@ -9,30 +8,21 @@ use benilla_protocol::{decode, guid, EntityKind, SessionEvent, WorldSession};
 
 use crate::probes::{Ctx, Probe, FIELD_PLAYER_QUEST_LOG_1_1, QUEST_TURNIN_ENTRY, QUEST_TURNIN_TP};
 
-/// A per-event handler passed to the `--quest` probe's `drain_quest` pump: it inspects each decoded
-/// [`SessionEvent`] and returns `Some(msg)` to stop the drain early (the match landed) or `None` to
-/// keep pumping.
+/// A `drain_quest` handler: `Some(msg)` stops the drain, `None` keeps pumping.
 type QuestEventHandler = Box<dyn FnMut(&SessionEvent) -> Option<String>>;
 
-/// The `--quest` probe target: Northshire's opening quest 783 "A Threat Within" — no prerequisite,
-/// no kill/collect objective (a "report to McBride" quest, so it's completable the instant it's
-/// accepted, no GM objective-grind needed). Given by Deputy Willem (entry 823, at
-/// -8933.5 -136.5 83.4) and turned in at Marshal McBride (entry 197, at -8902.6 -162.6 82.0) — both
-/// a few yards apart in the Abbey, so one teleport streams both. Rewards 40 XP (no money), so the
-/// grant is verified on `PLAYER_XP`.
+/// Quest 783 "A Threat Within": no prerequisite and no objective, from Deputy Willem (823) to
+/// Marshal McBride (197), a few yards apart in the Abbey. It rewards 40 XP and no money.
 const QUEST_GIVER_TP: &str = ".go xyz -8933.54 -136.523 83.4466"; // onto Deputy Willem
-const QUEST_GIVER_ENTRY: u32 = 823; // Deputy Willem — gives 783
+const QUEST_GIVER_ENTRY: u32 = 823; // Deputy Willem, who gives 783
 const QUEST_ID: u32 = 783;
 
 pub(crate) struct Quest;
 
 impl Probe for Quest {
     fn stage(&mut self, cx: &mut Ctx) -> Result<()> {
-        // Clean slate so the accept is a real fresh accept (idempotent across probe re-runs), then
-        // teleport onto the giver (Deputy Willem) so he streams AND is in interaction range (the
-        // accept's CanInteractWithQuestGiver distance gate — ~5yd — is stricter than QUERY_QUEST).
-        // McBride streams too (~30yd away, within object-stream range); the turn-in teleports onto
-        // him later.
+        // Remove the quest for a fresh accept, then stand on Willem: the accept's
+        // `CanInteractWithQuestGiver` gate (about 5 yd) is stricter than QUERY_QUEST's.
         cx.session.send_chat(&format!(".quest remove {QUEST_ID}"))?;
         cx.session.send_chat(QUEST_GIVER_TP)?;
         println!("sent GM: .quest remove {QUEST_ID}; teleport onto Willem {QUEST_GIVER_TP}");
@@ -44,10 +34,7 @@ impl Probe for Quest {
         let session = &mut *cx.session;
         let self_guid = world.self_guid;
 
-        // --quest: accept + turn in a real quest end-to-end (decision 0088). McBride streamed in after
-        // the QUEST_TP; run the full questgiver wire against him.
-        // A short blocking drain helper: pump packets up to `secs`, folding self-descriptor deltas
-        // into `self_fields`, and hand each decoded event to `f`; stop early when `f` returns Some.
+        // Pump for up to `secs`, folding self deltas into `self_fields`, until `f` returns `Some`.
         let drain_quest = |session: &mut WorldSession,
                            sf: &mut Option<benilla_protocol::messages::ObjectFields>,
                            secs: u64,
@@ -72,9 +59,7 @@ impl Probe for Quest {
             None
         };
 
-        // Find the giver (Deputy Willem) + the turn-in NPC (Marshal McBride) among the streamed
-        // creatures (each guid carries its template entry in bits 24–47). Both stand in the Abbey a
-        // few yards from the teleport spot.
+        // Find Willem and McBride by entry, which a creature guid carries in bits 24–47.
         let find_npc = |entry: u32| {
             world
                 .tracked
@@ -113,9 +98,8 @@ impl Probe for Quest {
         .context("--quest: no SMSG_QUESTGIVER_QUEST_DETAILS for quest 783 within 5s")?;
         println!("✅ details: {details}");
 
-        // 2) Accept at the giver, then confirm the quest id landed in a PLAYER_QUEST_LOG slot of our
-        // descriptor (id field 198 + 3·i, over 20 slots). Poll ~6s — the values delta can trail the
-        // GOSSIP_COMPLETE that closes the interaction.
+        // 2) Accept, then find the quest id in a `PLAYER_QUEST_LOG` slot (field 198 + 3·i, 20
+        // slots), polling 6 s since the delta can trail the closing GOSSIP_COMPLETE.
         println!("giver: CMSG_QUESTGIVER_ACCEPT_QUEST");
         session.questgiver_accept_quest(willem, QUEST_ID)?;
         let quest_in_log = |sf: &Option<benilla_protocol::messages::ObjectFields>| {
@@ -138,19 +122,16 @@ impl Probe for Quest {
         if in_log {
             println!("✅ accept: quest {QUEST_ID} is in the player descriptor's PLAYER_QUEST_LOG (field-confirmed)");
         } else {
-            // The quest-log UpdateFields are the deferred log slice; a solo accept's low-priority
-            // values delta may not stream inside the poll window. Not fatal — the turn-in below can
-            // only produce QUEST_COMPLETE if the accept took, so it's the authoritative check.
+            // Not fatal: the delta may miss the window, and the turn-in only completes if the
+            // accept took.
             println!(
                 "ℹ️  accept: quest {QUEST_ID} not observed in a PLAYER_QUEST_LOG field within the poll \
                  window (the log UpdateFields are a deferred slice); the turn-in below is authoritative"
             );
         }
 
-        // 3) Mark the quest COMPLETE server-side. "A Threat Within" is a talk-to-McBride quest — its
-        // status stays INCOMPLETE until the ender interaction, and CHOOSE_REWARD's CanRewardQuest
-        // gate requires COMPLETE — so GM-complete it (fair per the brief; grinding is impractical
-        // and this one has no grindable objective anyway). Print the server's reply and let it apply.
+        // 3) GM-complete it: a talk-to quest stays INCOMPLETE until the ender interaction, and
+        // CHOOSE_REWARD's `CanRewardQuest` requires COMPLETE.
         session.send_chat(&format!(".quest complete {QUEST_ID}"))?;
         println!("GM: .quest complete {QUEST_ID} (letting it apply…)");
         drain_quest(
@@ -165,13 +146,12 @@ impl Probe for Quest {
             }),
         );
 
-        // Teleport onto McBride so the turn-in is in interaction range (his guid is already known
-        // from the giver-spot stream; only our position needs to change). Drain until the port acks.
+        // Teleport onto McBride for interaction range; his guid is already known.
         session.send_chat(QUEST_TURNIN_TP)?;
         println!("moving to McBride: {QUEST_TURNIN_TP}");
         drain_quest(session, &mut world.self_fields, 3, Box::new(|_| None));
 
-        // Turn in at McBride: COMPLETE_QUEST → REQUEST_ITEMS(complete) or straight to OFFER_REWARD.
+        // Turn in at McBride: COMPLETE_QUEST answers REQUEST_ITEMS, or OFFER_REWARD directly.
         println!("turn-in: CMSG_QUESTGIVER_HELLO + CMSG_QUESTGIVER_COMPLETE_QUEST({QUEST_ID})");
         session.questgiver_hello(mcbride)?;
         session.questgiver_complete_quest(mcbride, QUEST_ID)?;
@@ -196,9 +176,8 @@ impl Probe for Quest {
         .context("--quest: no REQUEST_ITEMS/OFFER_REWARD after COMPLETE_QUEST within 5s")?;
         println!("✅ progress: {progress}");
 
-        // 4) Reach the reward panel. When the quest has required items the progress panel came back
-        // above; its Continue → REQUEST_REWARD → OFFER_REWARD. When it has none (783), COMPLETE_QUEST
-        // *already* answered with OFFER_REWARD, so the reward panel is reached — skip REQUEST_REWARD.
+        // 4) With required items, the progress panel's Continue sends REQUEST_REWARD for
+        // OFFER_REWARD; without them (783), COMPLETE_QUEST already answered OFFER_REWARD.
         if !progress.contains("OFFER_REWARD") {
             println!("turn-in: CMSG_QUESTGIVER_REQUEST_REWARD");
             session.questgiver_request_reward(mcbride, QUEST_ID)?;
@@ -225,8 +204,7 @@ impl Probe for Quest {
             );
         }
 
-        // 5) Finish: CHOOSE_REWARD (index 0 — no choice rewards) → QUEST_COMPLETE + the XP grant via
-        // UPDATE_OBJECT. Quest 783 rewards 40 XP (no money), so the grant is verified on PLAYER_XP.
+        // 5) CHOOSE_REWARD (index 0, no choices) brings QUEST_COMPLETE and the XP delta.
         let xp_before = world.self_fields.as_ref().and_then(|sf| sf.player_xp());
         println!("turn-in: CMSG_QUESTGIVER_CHOOSE_REWARD (choice 0)");
         session.questgiver_choose_reward(mcbride, QUEST_ID, 0)?;
@@ -242,8 +220,8 @@ impl Probe for Quest {
                     c.money,
                     c.items.len()
                 )),
-                // Diagnostics: the server re-offers the reward if it rejected the choice, or offers
-                // the next quest in the chain (783 → 7) after a successful reward.
+                // Diagnostics: a rejected choice re-offers the reward, and a success offers the
+                // chain's next quest (783, then 7).
                 SessionEvent::QuestOffer(o) => {
                     eprintln!("   (diag) OFFER_REWARD again for quest {}", o.quest_id);
                     None

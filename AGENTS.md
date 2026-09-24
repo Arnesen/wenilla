@@ -6,7 +6,9 @@ fork rides on upstream: upstream is merged into `main` as it publishes, and our 
 on the same branch alongside it. This file is the map for a person or an agent who has to build,
 fix or ship something here. The path from a merge to a running realm is documented in
 [wenilla-realm/docs/RELEASE.md](https://github.com/Arnesen/wenilla-realm/blob/main/docs/RELEASE.md);
-syncing upstream is [docs/UPSTREAM.md](docs/UPSTREAM.md).
+syncing upstream is [docs/UPSTREAM.md](docs/UPSTREAM.md). Upstream's own map and rules for the
+client crates are `docs/METHOD.md`, `docs/MAP.md` and `docs/CONTRIBUTING.md`; read them before
+changing client code, and treat this file as authoritative for the fork's crates and process.
 
 ## What lives where
 

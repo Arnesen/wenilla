@@ -26,7 +26,7 @@
 //! 1. **`$BENILLA_HOME`** — explicit override (tests point it at a tempdir; a shared-config setup
 //!    points it wherever it likes).
 //! 2. **`<project folder>/benilla-config/`** — `#[cfg(feature = "dev")]` only, so dev runs across the
-//!    worktree pool keep one predictable place. Gated for the same reason the install resolver's
+//!    worktrees of the repo keep one predictable place. Gated for the same reason the install resolver's
 //!    project-folder probe is: a shipped binary must not carry the build machine's source tree.
 //!    (`.gitignore` carries `/benilla-config` for it.)
 //! 3. **`<exe dir>/benilla-config/`** — the release answer: your settings sit next to the program that
@@ -90,11 +90,12 @@ pub(crate) fn home() -> Option<PathBuf> {
 /// this binary was actually built in.
 ///
 /// This is the one place 1175's §4 needed a correction on contact with how we work. `benilla/` used
-/// to hang off `$WOW_DATA`, and every pool slot symlinks `WoW` to the same install — so there has
-/// always been exactly ONE settings folder no matter which of the eight slots built the binary.
-/// Resolving to `CARGO_MANIFEST_DIR` instead would give eight, and the director's keybinds, macros
-/// and camera pose would appear to reset whenever a session happened to claim a different slot.
-/// That is a silent, recurring surprise, and it is not what "one predictable place" meant.
+/// to hang off `$WOW_DATA`, and every worktree of the repo points `WoW` at the same install — so
+/// there has always been exactly ONE settings folder no matter which worktree built the binary.
+/// Resolving to `CARGO_MANIFEST_DIR` instead would give one per worktree, and the player's
+/// keybinds, macros and camera pose would appear to reset whenever a session happened to build
+/// in a different one. That is a silent, recurring surprise, and it is not what "one predictable
+/// place" meant.
 ///
 /// A linked worktree's `.git` is a **file** reading `gitdir: <primary>/.git/worktrees/<slot>`, so
 /// the primary is derivable with no git binary and no build script: walk up to the common dir and
@@ -262,7 +263,7 @@ pub(crate) fn layout_character_path(realm: &str, character: &str) -> Option<Path
 ///
 /// The reference's residents are `WDB/namecache.wdb`, `creaturecache.wdb` and `petnamecache.wdb`
 /// — three files **inside the install**, which is exactly where benilla may not write (the install
-/// is read-only, the contract's hard rule), so ours lives here like every other thing we persist.
+/// is read-only, `docs/METHOD.md`'s hard rule), so ours lives here like every other thing we persist.
 /// One file rather than three because our three stores share a lifetime and a realm; the
 /// reference's split follows its `DBCache<T>` template instantiation, not a property of the data.
 ///
@@ -296,7 +297,7 @@ pub(crate) fn shots_path() -> Option<PathBuf> {
 ///
 /// **The reference writes `Screenshots\\` inside the install and we deliberately do not.** benilla
 /// reads a WoW install; it never writes to one (decision 1486, the director's rule) — the folder is
-/// somebody else's, it is shared with the sibling RE repo on this machine, and a client that
+/// somebody else's, it is shared with other tools on this machine, and a client that
 /// scatters its output through it makes "what here is benilla's?" unanswerable. So the reference's
 /// own folder NAME is kept, capital S and all, and only its parent moves: a player who knows where
 /// WoW put screenshots finds the same folder one level over.
@@ -337,13 +338,22 @@ pub(crate) fn fps_journal_path() -> Option<PathBuf> {
     diagnostics_dir().map(|d| d.join("fps-journal.csv"))
 }
 
-/// Make an arbitrary realm/character name safe as one path component: anything outside
-/// `[A-Za-z0-9_]` becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
+/// Make an arbitrary realm/character name safe as one path component: anything that is not a
+/// letter or digit becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
 /// escape the folder or collide with the path separator.
+///
+/// **Letters are any script's, kept as they are** — the reference names its per-character folder
+/// with the raw name (`WTF/Account/<ACC>/<REALM>/<CHAR>/`). This was ASCII-only, which folded every
+/// other letter to `_`: vmangos accepts extended-Latin, Cyrillic and East-Asian names by default
+/// (`StrictPlayerNames = 0`), so `Zoë` and `Zoé` — or any two Cyrillic names of one length — shared
+/// one set of macros, bindings, addon state and SavedVariables, and each login saved over the
+/// other's. A character name is letters only (vmangos `isValidString`), so keeping every letter
+/// makes the token one-to-one for them; an ASCII name maps exactly as before, so no existing file
+/// moves.
 fn file_token(s: &str) -> String {
     let t: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
     if t.is_empty() {
         "unknown".into()
@@ -356,21 +366,28 @@ fn file_token(s: &str) -> String {
 /// a crash mid-write leaves the old file intact, never a truncated one. The one write path for
 /// every resident of the folder.
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    write_atomic_bytes(path, contents.as_bytes())
+}
+
+/// [`write_atomic`] for a resident that is bytes, not text — the saved-variables files, which
+/// carry a Lua byte string's bytes as they are. On the page the store holds text, so bytes that
+/// are not UTF-8 are stored lossily there.
+pub(crate) fn write_atomic_bytes(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(target_arch = "wasm32")]
-    return web_store::set(path, contents);
+    return web_store::set(path, &String::from_utf8_lossy(contents));
     #[cfg(not(target_arch = "wasm32"))]
     write_atomic_fs(path, contents)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write_atomic_fs(path: &Path, contents: &str) -> std::io::Result<()> {
+fn write_atomic_fs(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("tmp");
     {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
+        f.write_all(contents)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)
@@ -486,6 +503,28 @@ pub(crate) mod test_env {
 mod tests {
     use super::test_env::{EnvGuard, ENV_LOCK};
     use super::*;
+
+    /// **Two characters never share a file.** Every per-character resident keys on this token, so
+    /// a collision is one character's macros, bindings and SavedVariables loaded and then saved
+    /// over by another. ASCII names — every file already on disk — keep their exact paths.
+    #[test]
+    fn distinct_names_never_share_a_token() {
+        assert_ne!(file_token("Вася"), file_token("Петя"));
+        assert_ne!(file_token("Zoë"), file_token("Zoé"));
+        assert_eq!(file_token("Zoë"), "Zoë");
+        assert_eq!(file_token("Onehunter"), "Onehunter");
+        assert_eq!(file_token("Hydraxian Waterlords"), "Hydraxian_Waterlords");
+        assert_eq!(
+            file_token("a/b\\c:d"),
+            "a_b_c_d",
+            "separators never survive"
+        );
+        assert_eq!(
+            file_token("realm-name"),
+            "realm_name",
+            "the key's own `-` stays unforgeable"
+        );
+    }
 
     /// The residents' layout, exercised through the override — which is the *only* step of
     /// [`home`] whose answer a test can state, since the other two are the machine's project
@@ -612,7 +651,7 @@ mod tests {
     /// One test rather than a `#[cfg]`-ed pair, because the seam is `run_mode::dev_source_dir()`'s
     /// to know and nothing else's (1179): a player build has no source dir, so the state folder
     /// must sit beside the binary; a dev build has one, and must resolve to the PRIMARY checkout
-    /// so the eight pool slots keep sharing a single settings folder — exactly as they did when it
+    /// so every worktree keeps sharing a single settings folder — exactly as they did when it
     /// hung off the shared install. The dev half is asserted structurally (a `.git` *file* means a
     /// linked worktree, and then the answer must be somewhere else), so it says the same thing
     /// whether it runs in the primary or in a slot.
@@ -642,7 +681,7 @@ mod tests {
             assert_ne!(
                 h,
                 here.join(STATE_DIR),
-                "a linked worktree must not get its own settings folder — the pool shares one"
+                "a linked worktree must not get its own settings folder — the worktrees share one"
             );
             assert!(
                 h.parent().unwrap().join(".git").is_dir(),

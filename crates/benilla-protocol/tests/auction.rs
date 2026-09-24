@@ -1,11 +1,5 @@
-//! Oracle-free golden tests for the auction house arc's protocol layer (decision 1511 phase P0):
-//! byte-exact goldens for all seven CMSG bodies, the `MSG_AUCTION_HELLO` reply, the four
-//! `SMSG_AUCTION_COMMAND_RESULT` tail shapes, the one 64-byte record and one frame the three list
-//! results share (including that `total_count` rides *after* the records, and that a body shorter
-//! than its own `count` claims still yields the records it does carry), the two deliberately
-//! different notifications, and the removal notice. Same idioms as `tests/mail.rs` — `hx(...)`
-//! golden CMSG bodies, hand-built SMSG bodies round-tripped through `parse_server`, and a
-//! `decode()` bridge assertion.
+//! Golden tests for the auction house wire: every client body byte-exact, and hand-built server
+//! bodies through `parse_server` and `decode`.
 
 use benilla_protocol::events::{decode, SessionEvent};
 use benilla_protocol::messages::{
@@ -26,14 +20,13 @@ const AUCTIONEER: u64 = 0x00F1_3000_0000_0055;
 
 #[test]
 fn auction_send_bodies_golden() {
-    // MSG_AUCTION_HELLO: one full auctioneer guid, nothing else.
+    // MSG_AUCTION_HELLO: the auctioneer's full guid and nothing else.
     assert_eq!(
         messages::auction_hello(AUCTIONEER),
         hx("550000000030f100"),
         "MSG_AUCTION_HELLO body"
     );
 
-    // CMSG_AUCTION_SELL_ITEM: u64 auctioneer, u64 itemGuid, u32 bid, u32 buyout, u32 etime.
     assert_eq!(
         messages::auction_sell_item(
             AUCTIONEER,
@@ -76,9 +69,7 @@ fn auction_send_bodies_golden() {
 
 #[test]
 fn auction_list_items_body_golden() {
-    // CMSG_AUCTION_LIST_ITEMS with every filter set: u64 auctioneer, u32 listfrom, cstr name,
-    // u8 levelmin, u8 levelmax, u32 slotId, u32 mainCategory, u32 subCategory, u32 quality,
-    // u8 usable. TEN fields — no sort column, no sort count, no trailing padding on 5875.
+    // Ten fields and nothing after them: 1.12 has no sort column, sort count or padding.
     assert_eq!(
         messages::auction_list_items(AUCTIONEER, 50, "Copper", 10, 20, 1, 2, 3, 4, 1),
         hx(concat!(
@@ -90,15 +81,13 @@ fn auction_list_items_body_golden() {
             "01000000",         // slotId
             "02000000",         // mainCategory
             "03000000",         // subCategory
-            "04000000",         // quality (a MINIMUM, not an equality)
+            "04000000",         // quality, a minimum, not an equality
             "01",               // usable
         )),
         "CMSG_AUCTION_LIST_ITEMS body (filters set)"
     );
 
-    // The default browse: every filter at its sentinel and an EMPTY search name — which is just
-    // the lone NUL byte between `listfrom` and `levelmin`, nothing more. This exact body is the
-    // one that puts vmangos on its no-filter fast path.
+    // Every filter at its sentinel: the body that takes vmangos's no-filter fast path.
     let body = messages::auction_list_items(
         AUCTIONEER,
         0,
@@ -116,7 +105,7 @@ fn auction_list_items_body_golden() {
         hx(concat!(
             "550000000030f100", // auctioneer
             "00000000",         // listfrom 0
-            "00",               // "" — the lone NUL, and the whole of the name field
+            "00",               // "": the lone NUL is the whole name field
             "00",               // levelmin 0
             "00",               // levelmax 0
             "ffffffff",         // slotId    ANY
@@ -127,22 +116,19 @@ fn auction_list_items_body_golden() {
         )),
         "CMSG_AUCTION_LIST_ITEMS body (empty name, all sentinels)"
     );
-    // 8 + 4 + 1 + 1 + 1 + 4*4 + 1 — the tightest possible browse body. Stated as a number so an
-    // invented trailing field cannot slip in behind a hex string nobody re-counts.
+    // 8 + 4 + 1 + 1 + 1 + 4 * 4 + 1: the smallest browse body.
     assert_eq!(body.len(), 32, "no trailing sort bytes ride this opcode");
 }
 
 #[test]
 fn auction_list_bidder_items_body_golden() {
-    // CMSG_AUCTION_LIST_BIDDER_ITEMS with NO refresh ids: u64 auctioneer, u32 listfrom, u32 0.
-    // The count field is always present even when the list is empty.
+    // u64 auctioneer, u32 listfrom, u32 id count: the count is present even with no ids.
     assert_eq!(
         messages::auction_list_bidder_items(AUCTIONEER, 0, &[]),
         hx("550000000030f1000000000000000000"),
         "CMSG_AUCTION_LIST_BIDDER_ITEMS body (no ids)"
     );
 
-    // ...and with several: the count, then that many u32 auction ids.
     assert_eq!(
         messages::auction_list_bidder_items(AUCTIONEER, 50, &[7, 4242, 0xDEAD_BEEF]),
         hx(concat!(
@@ -159,7 +145,7 @@ fn auction_list_bidder_items_body_golden() {
 
 #[test]
 fn auction_hello_reply_wire() {
-    // MSG_AUCTION_HELLO's reply (same opcode as our request): u64 auctioneerGuid, u32 houseId.
+    // The reply rides the request's opcode: u64 auctioneer, u32 houseId.
     let mut body = AUCTIONEER.to_le_bytes().to_vec();
     body.extend_from_slice(&6u32.to_le_bytes()); // houseId 6 (Orgrimmar), AuctionHouse.dbc 1..7
     match messages::parse_server(messages::opcode::MSG_AUCTION_HELLO, &body).unwrap() {
@@ -169,7 +155,6 @@ fn auction_hello_reply_wire() {
         } => assert_eq!((auctioneer, house_id), (AUCTIONEER, 6)),
         other => panic!("auction hello, got {}", other.name()),
     }
-    // The decode() bridge carries both fields through unchanged.
     let packet = messages::parse_server(messages::opcode::MSG_AUCTION_HELLO, &body).unwrap();
     match decode(packet).pop().unwrap() {
         SessionEvent::AuctionHello {
@@ -202,8 +187,7 @@ fn parse_command(body: &[u8]) -> (u32, u32, u32, AuctionCommandTail) {
 
 #[test]
 fn auction_command_result_bare_wire() {
-    // The bare 3-u32 form: OK + STARTED carries NO tail (the server's OK arm writes one only for
-    // BID_PLACED). This is the shape a successful listing and a successful cancel both take.
+    // OK carries a tail only with BID_PLACED, so a successful listing or cancel is bare.
     let body = command_head(4242, auction_action::STARTED, auction_error::OK);
     assert_eq!(body.len(), 12);
     assert_eq!(
@@ -216,7 +200,6 @@ fn auction_command_result_bare_wire() {
         )
     );
 
-    // OK + REMOVED, likewise bare.
     assert_eq!(
         parse_command(&command_head(
             4242,
@@ -227,8 +210,7 @@ fn auction_command_result_bare_wire() {
         AuctionCommandTail::Empty
     );
 
-    // A named error with no tail of its own (NOT_ENOUGH_MONEY) — bare too, and `auction_id` is
-    // `0` because the server had no AuctionEntry to name.
+    // `auction_id` is 0 when the server had no auction to name.
     assert_eq!(
         parse_command(&command_head(
             0,
@@ -243,14 +225,12 @@ fn auction_command_result_bare_wire() {
         )
     );
 
-    // An UNNAMED error code (6, 8, 9, 11, 12 have no vmangos enumerator) also decodes bare rather
-    // than erroring — the real client falls through to a generic failure branch for these.
+    // Codes 6, 8, 9, 11 and 12 have no vmangos name; the 1.12 client shows a generic failure.
     assert_eq!(
         parse_command(&command_head(0, auction_action::BID_PLACED, 9)).3,
         AuctionCommandTail::Empty
     );
 
-    // The decode() bridge, asserted on this shape.
     let packet = messages::parse_server(
         messages::opcode::SMSG_AUCTION_COMMAND_RESULT,
         &command_head(4242, auction_action::STARTED, auction_error::OK),
@@ -277,8 +257,6 @@ fn auction_command_result_bare_wire() {
 
 #[test]
 fn auction_command_result_bid_placed_tail_wire() {
-    // OK **and** BID_PLACED: one trailing u32 newMinOutBid. Both fields have to match — an OK on
-    // any other action carries nothing (asserted in the bare test above).
     let mut body = command_head(4242, auction_action::BID_PLACED, auction_error::OK);
     body.extend_from_slice(&617u32.to_le_bytes());
     assert_eq!(
@@ -296,8 +274,7 @@ fn auction_command_result_bid_placed_tail_wire() {
 
 #[test]
 fn auction_command_result_inventory_tail_wire() {
-    // INVENTORY: one trailing u32 InventoryResult (EQUIP_ERR_*). Keyed on the ERROR alone — the
-    // action here is STARTED, which carries no tail under OK.
+    // The INVENTORY tail is keyed on the error alone, whatever the action.
     let mut body = command_head(0, auction_action::STARTED, auction_error::INVENTORY);
     body.extend_from_slice(&2u32.to_le_bytes()); // EQUIP_ERR_* code
     assert_eq!(
@@ -313,8 +290,6 @@ fn auction_command_result_inventory_tail_wire() {
 
 #[test]
 fn auction_command_result_higher_bid_tail_wire() {
-    // HIGHER_BID: u64 newBidder, u32 newBid, u32 newMinOutBid — 16 trailing bytes, the longest of
-    // the three tails and the one a reader most easily under-reads.
     let mut body = command_head(4242, auction_action::BID_PLACED, auction_error::HIGHER_BID);
     body.extend_from_slice(&0x0000_0000_0000_07D1u64.to_le_bytes()); // new bidder
     body.extend_from_slice(&25_000u32.to_le_bytes()); // new bid
@@ -352,8 +327,7 @@ fn push_record(body: &mut Vec<u8>, e: &AuctionListEntry) {
     body.extend_from_slice(&e.time_left_ms.to_le_bytes());
     body.extend_from_slice(&e.bidder_guid.to_le_bytes());
     body.extend_from_slice(&e.current_bid.to_le_bytes());
-    // The record's width is load-bearing (it is the reader's short-buffer bound) and decision
-    // 1511's prose miscounts it as 60; pin it here so the two can never drift apart silently.
+    // The record width is the reader's short-buffer bound.
     assert_eq!(body.len() - before, AUCTION_RECORD_BYTES);
     assert_eq!(AUCTION_RECORD_BYTES, 64);
 }
@@ -398,14 +372,11 @@ fn parse_list(opcode: u16, body: &[u8]) -> (Vec<AuctionListEntry>, u32) {
 
 #[test]
 fn auction_list_result_empty_wire() {
-    // count 0, no records, then the trailing totalCount — which can still be nonzero (page 2 of a
-    // one-page result set asked past the end).
+    // Count 0, then a totalCount that is still nonzero when a page past the end is asked.
     let mut body = 0u32.to_le_bytes().to_vec();
     body.extend_from_slice(&37u32.to_le_bytes());
     assert_eq!(body.len(), 8);
 
-    // All three list opcodes share this frame and this record; assert on each so a future arm
-    // cannot be wired to the wrong reader.
     for opcode in [
         messages::opcode::SMSG_AUCTION_LIST_RESULT,
         messages::opcode::SMSG_AUCTION_OWNER_LIST_RESULT,
@@ -419,7 +390,6 @@ fn auction_list_result_empty_wire() {
 
 #[test]
 fn auction_list_result_records_wire() {
-    // Three rows through the real parse_server entry point, then the trailing totalCount.
     let rows = [
         unbid_row(1),
         AuctionListEntry {
@@ -451,14 +421,12 @@ fn auction_list_result_records_wire() {
     assert_eq!(auctions, rows);
     assert_eq!(total_count, 129);
 
-    // Field semantics worth pinning rather than assuming: `min_increment` is 0 while nobody has
-    // bid, `buyout` 0 means no buyout, and `start_bid` is NOT the current bid.
+    // `min_increment` is 0 until a bid, `buyout` 0 means none, `start_bid` is not the current bid.
     assert_eq!(auctions[0].min_increment, 0);
     assert_eq!(auctions[0].current_bid, 0);
     assert_eq!(auctions[1].buyout, 0);
     assert_ne!(auctions[1].start_bid, auctions[1].current_bid);
 
-    // The decode() bridge carries the rows and the total through unchanged.
     let packet = messages::parse_server(messages::opcode::SMSG_AUCTION_LIST_RESULT, &body).unwrap();
     match decode(packet).pop().unwrap() {
         SessionEvent::AuctionListResult {
@@ -471,7 +439,6 @@ fn auction_list_result_records_wire() {
         other => panic!("auction list result event, got {other:?}"),
     }
 
-    // The owner/bidder opcodes land on their own variants off the same bytes.
     let packet =
         messages::parse_server(messages::opcode::SMSG_AUCTION_OWNER_LIST_RESULT, &body).unwrap();
     assert!(matches!(
@@ -488,10 +455,7 @@ fn auction_list_result_records_wire() {
 
 #[test]
 fn auction_list_result_total_count_rides_after_the_records() {
-    // `totalCount` is at the very END of the body, not beside the leading `count`. Build ONE
-    // record whose every field differs from the total, so a reader that took the total from the
-    // front (or from any record field) is caught: the leading count is 1, the total is 9999, and
-    // no record field holds 9999.
+    // Neither the leading count nor any record field is 9999, so only the trailing total can be.
     let row = AuctionListEntry {
         auction_id: 11,
         item_entry: 12,
@@ -522,9 +486,7 @@ fn auction_list_result_total_count_rides_after_the_records() {
 
 #[test]
 fn auction_list_record_round_trips_negative_signed_fields() {
-    // `random_property_id` and `spell_charges` are SIGNED (the server casts int32 through uint32).
-    // A negative random property id is a random *suffix* ("of the Bear"); a negative charge count
-    // means "N charges then destroy". Read unsigned, both become ~4.29-billion nonsense.
+    // Both are int32: a negative property id is a suffix; negative charges destroy when spent.
     let row = AuctionListEntry {
         auction_id: 77,
         item_entry: 7_078,
@@ -550,8 +512,7 @@ fn auction_list_record_round_trips_negative_signed_fields() {
     assert_eq!(auctions[0].spell_charges, -5);
     assert_eq!(auctions[0].suffix_factor, 143);
 
-    // And the unclamped time_left: an expired-but-unswept auction wraps rather than clamping to
-    // 0. The reader must pass it through faithfully; judging it is the consumer's job.
+    // An expired but unswept auction's time left wraps instead of clamping; it passes through.
     let mut expired = unbid_row(78);
     expired.time_left_ms = u32::MAX - 500; // (expire - now) * 1000 on a negative difference
     let mut body = 1u32.to_le_bytes().to_vec();
@@ -563,9 +524,7 @@ fn auction_list_record_round_trips_negative_signed_fields() {
 
 #[test]
 fn auction_list_result_survives_a_count_larger_than_the_records() {
-    // vmangos's browse fast path increments `count` for a record it then fails to write (a stale
-    // auction whose item row is gone writes ZERO bytes and still counts). A body claiming 3 and
-    // carrying 2 must yield those 2 rather than failing the whole page.
+    // vmangos's browse fast path counts a stale auction whose item is gone but writes no bytes.
     let rows = [unbid_row(1), unbid_row(2)];
     let mut body = 3u32.to_le_bytes().to_vec(); // the server's inflated count
     for row in &rows {
@@ -577,8 +536,7 @@ fn auction_list_result_survives_a_count_larger_than_the_records() {
     assert_eq!(auctions, rows, "the records that DID arrive come back");
     assert_eq!(total_count, 2);
 
-    // The harsher variant: truncated past the last record, so even the trailing total is missing.
-    // Still not an error — the total falls back to what we read.
+    // With the trailing total missing too, the total falls back to the records read.
     let mut body = 3u32.to_le_bytes().to_vec();
     for row in &rows {
         push_record(&mut body, row);
@@ -587,8 +545,7 @@ fn auction_list_result_survives_a_count_larger_than_the_records() {
     assert_eq!(auctions, rows);
     assert_eq!(total_count, 2, "falls back to the records actually read");
 
-    // And a count that is pure nonsense (a hostile/desynced body) must not allocate on its word
-    // alone or error — it yields the one record the buffer holds.
+    // A nonsense count yields the one record the buffer holds.
     let mut body = u32::MAX.to_le_bytes().to_vec();
     push_record(&mut body, &rows[0]);
     let (auctions, _) = parse_list(messages::opcode::SMSG_AUCTION_LIST_RESULT, &body);
@@ -597,13 +554,11 @@ fn auction_list_result_survives_a_count_larger_than_the_records() {
 
 #[test]
 fn auction_bidder_notification_wire() {
-    // SMSG_AUCTION_BIDDER_NOTIFICATION: u32 houseId, u32 auctionId, u64 bidderGuid,
-    // u32 bidOrZero, u32 outBid, u32 itemEntry, i32 randomPropertyId — houseId FIRST and the
-    // guid THIRD, unlike the owner notification.
+    // House id first and the guid third, unlike the owner notification.
     let mut body = 6u32.to_le_bytes().to_vec(); // houseId
     body.extend_from_slice(&4242u32.to_le_bytes()); // auctionId
     body.extend_from_slice(&0x0000_0000_0000_0505u64.to_le_bytes()); // bidderGuid
-    body.extend_from_slice(&15_000u32.to_le_bytes()); // bidOrZero — nonzero: OUTBID
+    body.extend_from_slice(&15_000u32.to_le_bytes()); // bidOrZero, nonzero: outbid
     body.extend_from_slice(&750u32.to_le_bytes()); // outBid
     body.extend_from_slice(&12_640u32.to_le_bytes()); // itemEntry
     body.extend_from_slice(&(-19i32).to_le_bytes()); // randomPropertyId, signed
@@ -623,8 +578,7 @@ fn auction_bidder_notification_wire() {
         other => panic!("auction bidder notification, got {}", other.name()),
     }
 
-    // bidOrZero == 0 means WON, not "no bid" — the one field whose zero is a *state*, and the
-    // reason this notification cannot share a struct with the owner one.
+    // bidOrZero 0 means won, not no bid.
     let mut won = body.clone();
     won[16..20].copy_from_slice(&0u32.to_le_bytes());
     match messages::parse_server(messages::opcode::SMSG_AUCTION_BIDDER_NOTIFICATION, &won).unwrap()
@@ -637,9 +591,7 @@ fn auction_bidder_notification_wire() {
         other => panic!("auction bidder notification (won), got {}", other.name()),
     }
 
-    // The two notifications must never share a reader. Feed these same bytes to the OWNER opcode
-    // (28 bytes needed, 32 available, so it parses rather than EOF-ing) and every field lands
-    // somewhere else: the house id is eaten as the auction id and the guid slides four bytes.
+    // The owner reader takes 28 of these 32 bytes and misplaces every field.
     match messages::parse_server(messages::opcode::SMSG_AUCTION_OWNER_NOTIFICATION, &body).unwrap()
     {
         ServerPacket::AuctionOwnerNotification(n) => {
@@ -663,9 +615,7 @@ fn auction_bidder_notification_wire() {
 
 #[test]
 fn auction_owner_notification_wire() {
-    // SMSG_AUCTION_OWNER_NOTIFICATION: u32 auctionId, u32 bid, u32 outBid, u64 bidderGuid,
-    // u32 itemEntry, i32 randomPropertyId — NO houseId, and the guid sits FOURTH. Deliberately a
-    // different shape from the bidder notification above.
+    // No house id and the guid fourth, unlike the bidder notification.
     let mut body = 4242u32.to_le_bytes().to_vec(); // auctionId
     body.extend_from_slice(&15_000u32.to_le_bytes()); // bid
     body.extend_from_slice(&750u32.to_le_bytes()); // outBid
@@ -688,7 +638,7 @@ fn auction_owner_notification_wire() {
         other => panic!("auction owner notification, got {}", other.name()),
     }
 
-    // An all-zero bidder guid is the "sold" signal, not a missing bidder.
+    // An all-zero bidder guid means sold, not a missing bidder.
     let mut sold = body.clone();
     sold[12..20].copy_from_slice(&0u64.to_le_bytes());
     match messages::parse_server(messages::opcode::SMSG_AUCTION_OWNER_NOTIFICATION, &sold).unwrap()

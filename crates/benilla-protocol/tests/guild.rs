@@ -1,17 +1,5 @@
-//! Golden tests for the guild opcode family — the query and roster caches, invitations, the member
-//! verbs, rank administration, the event broadcast and the command-result feedback. CMSG bodies are
-//! asserted byte-exact against the builder output; SMSG bodies are hand-built per the vmangos
-//! layouts (cited inline) and round-tripped through `parse_server` + `decode`. See `tests/common`
-//! for the shared `hx()` fixture helper and methodology note.
-//!
-//! Three of the tests below exist for a specific failure mode rather than for coverage, and each
-//! was mutation-checked — the parser was broken that exact way and the test observed to fail:
-//! `guild_roster_conditional_float_keeps_later_members_in_sync` (the `f32` that rides on the
-//! presence byte, whose third member is the one that proves the parse re-synchronises after a
-//! wider record), `guild_query_response_always_carries_ten_rank_names` (the fixed ten, which a
-//! counted read walks straight past into the emblem block), and
-//! `guild_event_trailing_guid_rides_on_the_event_id` (which pins us to the *client's* narrower
-//! read, not vmangos's write rule).
+//! The guild wire: the query and roster caches, invitations, member verbs, rank administration,
+//! the event broadcast and command results, laid out per vmangos.
 
 mod common;
 
@@ -23,9 +11,6 @@ use benilla_protocol::messages::{
 use benilla_protocol::ServerPacket;
 use common::hx;
 
-/// Every CMSG builder in the family, byte-exact — the six empty-body verbs asserting an empty
-/// `Vec`, the eight one-cstring verbs, the two two-cstring note verbs, the `u32` query, and the
-/// three-field rank write.
 #[test]
 fn cmsg_bodies_golden() {
     // CMSG_GUILD_QUERY (vmangos Server/Packets/Guild.cpp:8-11): one u32, the guild id.
@@ -84,8 +69,7 @@ fn cmsg_bodies_golden() {
         "CMSG_GUILD_MOTD body"
     );
 
-    // The empty-body verbs (vmangos Opcodes.cpp: NullClientPacket at :213, :214, :216, :218, :222,
-    // :224, :655). Every one of these carries its meaning entirely in the opcode.
+    // The empty verbs (vmangos Opcodes.cpp:213, 214, 216, 218, 222, 224, 655: NullClientPacket).
     assert_eq!(
         messages::guild_accept(),
         Vec::<u8>::new(),
@@ -122,8 +106,7 @@ fn cmsg_bodies_golden() {
         "CMSG_GUILD_DEL_RANK body"
     );
 
-    // CMSG_GUILD_RANK (Guild.cpp:78-83): u32 rankId, u32 rights, cstring rankName — the rights
-    // here are the officer set (chat listen/speak both channels, invite, promote, demote).
+    // CMSG_GUILD_RANK (Guild.cpp:78-83): u32 rankId, u32 rights, cstring rankName.
     let rights = guild_rank_right::GCHAT_LISTEN
         | guild_rank_right::GCHAT_SPEAK
         | guild_rank_right::OFFCHAT_LISTEN
@@ -138,8 +121,7 @@ fn cmsg_bodies_golden() {
         "CMSG_GUILD_RANK body"
     );
 
-    // CMSG_GUILD_SET_PUBLIC_NOTE / _OFFICER_NOTE (Guild.cpp:61-65 / 67-71): name then note, two
-    // cstrings — the same byte shape, distinguished only by opcode and by which right gates it.
+    // CMSG_GUILD_SET_PUBLIC_NOTE / _OFFICER_NOTE (Guild.cpp:61-65 / 67-71): name, then note.
     assert_eq!(
         messages::guild_set_public_note("Bob", "hi"),
         hx(concat!("426f6200", "686900")),
@@ -152,14 +134,8 @@ fn cmsg_bodies_golden() {
     );
 }
 
-/// Clearing the MOTD.
-///
-/// vmangos's read is guarded — `GuildMOTD::ReadFromWorldPacket` (Server/Packets/Guild.cpp:38-42)
-/// is `if (!recv_data.empty()) recv_data >> motd;` — so a **zero-byte** body is a legal shape that
-/// also means "clear it" (the packet's `motd` stays default-constructed). We emit the well-formed
-/// one-byte empty cstring instead: one builder, one shape, and the empty string is not a special
-/// case anywhere in the crate. Both land on the server as `motd == ""`, so this is a choice about
-/// our own code, not about what the server does.
+/// An empty MOTD is a one-byte empty cstring; vmangos (`Server/Packets/Guild.cpp:38-42`) reads a
+/// zero-byte body as a clear too.
 #[test]
 fn guild_motd_clears_with_an_empty_cstring_not_an_empty_body() {
     assert_eq!(
@@ -170,14 +146,8 @@ fn guild_motd_clears_with_an_empty_cstring_not_an_empty_body() {
     assert_eq!(messages::guild_motd("").len(), 1, "one NUL, not zero bytes");
 }
 
-/// `SMSG_GUILD_QUERY_RESPONSE`: **exactly ten** rank-name cstrings, always — a fixed loop over the
-/// sender's `rankNames[10]`, not a counted list (vmangos Server/Packets/Guild.cpp:118-131, filled
-/// by Guild/Guild.cpp:862-880, whose own comment reads "show always 10 ranks").
-///
-/// The fixture gives the guild five real ranks, so five of the ten are empty strings. A parser
-/// that read a count, or that stopped at the guild's real rank count, would land in the middle of
-/// the five-`u32` emblem block — which is why the emblem values here are all distinct: getting
-/// them back in order is the proof the ten were consumed.
+/// `SMSG_GUILD_QUERY_RESPONSE` always carries ten rank-name cstrings, not a counted list (vmangos
+/// `Server/Packets/Guild.cpp:118-131`); the distinct emblem values after them catch a short read.
 #[test]
 fn guild_query_response_always_carries_ten_rank_names() {
     let mut body = Vec::new();
@@ -193,7 +163,7 @@ fn guild_query_response_always_carries_ten_rank_names() {
         body.extend_from_slice(name);
         body.push(0);
     }
-    // The five ranks this guild never created: an empty string each — a bare NUL, not absent.
+    // The five uncreated ranks: an empty string each, a bare NUL, not absent.
     body.extend_from_slice(&[0u8; GUILD_RANKS_MAX_COUNT - 5]);
     body.extend_from_slice(&1u32.to_le_bytes()); // emblemStyle
     body.extend_from_slice(&2u32.to_le_bytes()); // emblemColor
@@ -215,7 +185,6 @@ fn guild_query_response_always_carries_ten_rank_names() {
         &["", "", "", "", ""],
         "the five uncreated ranks are empty strings on the wire"
     );
-    // The emblem block landing intact is what proves all ten strings were consumed.
     assert_eq!(response.emblem_style, 1, "emblemStyle — the desync canary");
     assert_eq!(response.emblem_color, 2);
     assert_eq!(response.border_style, 3);
@@ -228,13 +197,8 @@ fn guild_query_response_always_carries_ten_rank_names() {
     }
 }
 
-/// "No such guild" has no flag of its own: the answer is a normal, complete
-/// `SMSG_GUILD_QUERY_RESPONSE` whose **guild name is empty**. The reference client branches on
-/// exactly that (`0x5552ae test al,al` → cache insert `0x561070` vs cache remove `0x561390`,
-/// wow-re `system/ui/scratch/guild-roster-wire.md`) and consumes the whole record either way.
-///
-/// So the not-found shape must still parse end to end — all ten rank strings and the emblem block
-/// included — or a consumer keying off the empty name would be reading a half-parsed record.
+/// "No such guild" is a complete `SMSG_GUILD_QUERY_RESPONSE` with an empty name: the reference
+/// branches on it (`0x5552ae`) and still consumes the whole record.
 #[test]
 fn guild_query_response_reports_no_such_guild_as_an_empty_name() {
     let mut body = Vec::new();
@@ -256,11 +220,8 @@ fn guild_query_response_reports_no_such_guild_as_an_empty_name() {
     }
 }
 
-/// Append one `SMSG_GUILD_ROSTER` member per vmangos Server/Packets/Guild.cpp:155-172.
-///
-/// `last_online` is passed explicitly rather than derived from `presence`, so the *fixture* states
-/// the wire rule independently of the parser under test: an offline member carries the float, an
-/// online one does not.
+/// Append one `SMSG_GUILD_ROSTER` member (vmangos `Server/Packets/Guild.cpp:155-172`); the caller
+/// passes `last_online` itself, `Some` only for an offline member.
 fn push_member(
     body: &mut Vec<u8>,
     guid: u64,
@@ -291,8 +252,8 @@ fn push_member(
     body.push(0);
 }
 
-/// Append an `SMSG_GUILD_ROSTER` head (Server/Packets/Guild.cpp:143-153): member count, MOTD, info
-/// text, then the counted rank-rights array.
+/// An `SMSG_GUILD_ROSTER` head (Server/Packets/Guild.cpp:143-153): member count, MOTD, info text,
+/// then the counted rank-rights array.
 fn roster_head(member_count: u32, motd: &str, info: &str, rank_rights: &[u32]) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(&member_count.to_le_bytes());
@@ -307,15 +268,9 @@ fn roster_head(member_count: u32, motd: &str, info: &str, rank_rights: &[u32]) -
     body
 }
 
-/// **The one that matters.** `SMSG_GUILD_ROSTER`'s `f32 lastOnlineTime` is on the wire only when
-/// the member's presence byte is `0` (vmangos Server/Packets/Guild.cpp:164-165, and independently
-/// Guild/Guild.cpp:793-794's size accounting, which decides where the sender truncates).
-///
-/// The fixture is deliberately **online, offline, online**, and the assertions that count are on
-/// the *third* member: it is the only one that can show the parse **re-synchronising** after a
-/// record of a different width. Getting one member's own fields right proves the field list; only
-/// a member that follows a wider one proves the stride. Mutation-checked — reading the float
-/// unconditionally fails this test (and the officer-note one) on exactly those assertions.
+/// `SMSG_GUILD_ROSTER`'s `f32 lastOnlineTime` is sent only when the presence byte is 0 (vmangos
+/// `Server/Packets/Guild.cpp:164-165`); the third member, after a wider offline one, checks the
+/// parse stays in step.
 #[test]
 fn guild_roster_conditional_float_keeps_later_members_in_sync() {
     let mut body = roster_head(
@@ -324,7 +279,6 @@ fn guild_roster_conditional_float_keeps_later_members_in_sync() {
         "We are a guild.",
         &[guild_rank_right::ALL, 0x0000_019F, 0x0000_0003],
     );
-    // 1. online — NO float.
     push_member(
         &mut body,
         0x1111,
@@ -338,7 +292,6 @@ fn guild_roster_conditional_float_keeps_later_members_in_sync() {
         "the GM",
         "trusted",
     );
-    // 2. offline — the float IS there. This is the member whose width differs.
     push_member(
         &mut body,
         0x2222,
@@ -352,7 +305,6 @@ fn guild_roster_conditional_float_keeps_later_members_in_sync() {
         "on holiday",
         "back next week",
     );
-    // 3. online again — the one that catches a desynchronised parse.
     push_member(
         &mut body,
         0x3333,
@@ -396,7 +348,6 @@ fn guild_roster_conditional_float_keeps_later_members_in_sync() {
     assert_eq!(bob.public_note, "on holiday");
     assert_eq!(bob.officer_note, "back next week");
 
-    // The whole point of the fixture: everything about the member *after* the wider one.
     let carol = &roster.members[2];
     assert_eq!(carol.guid, 0x3333, "third member guid — the desync canary");
     assert_eq!(carol.name, "Carol");
@@ -416,9 +367,6 @@ fn guild_roster_conditional_float_keeps_later_members_in_sync() {
     }
 }
 
-/// A roster with no members at all — the head alone, and nothing after the rank-rights array. The
-/// degenerate shape a brand-new or just-disbanded guild produces; the member loop must simply not
-/// run rather than reach for a first guid.
 #[test]
 fn guild_roster_with_no_members_is_just_the_head() {
     let body = roster_head(0, "", "", &[guild_rank_right::ALL]);
@@ -434,11 +382,8 @@ fn guild_roster_with_no_members_is_just_the_head() {
     }
 }
 
-/// Officer notes blanked because *we* lack `GR_RIGHT_VIEWOFFNOTE`: vmangos decides that once, per
-/// viewer (`canViewOfficerNote`, Guild/Guild.cpp:821), and writes `""` for every member
-/// (`:844`) — the cstring is still on the wire, just empty. Dropping the field for an
-/// unprivileged viewer would desynchronise exactly as the float does, so this pins that the
-/// terminator is read.
+/// A viewer without `GR_RIGHT_VIEWOFFNOTE` gets `""` for every officer note (vmangos
+/// `Guild/Guild.cpp:821`, `:844`): the cstring's NUL is still on the wire.
 #[test]
 fn guild_roster_reads_the_empty_officer_notes_of_an_unprivileged_viewer() {
     let mut body = roster_head(2, "motd", "info", &[guild_rank_right::ALL, 0x0000_0003]);
@@ -485,20 +430,13 @@ fn guild_roster_reads_the_empty_officer_notes_of_an_unprivileged_viewer() {
     }
 }
 
-/// The float's condition is the **whole presence byte** against zero, never `presence & ONLINE`.
-///
-/// That is the reference client's own predicate — it derives the flag with `0x4d0c12 test dl,dl` /
-/// `0x4d0c1d setne cl` and branches on the result (wow-re `system/ui/scratch/guild-roster-wire.md`),
-/// and the binary never tests bit `0x1` at all. The difference shows up on any presence byte with
-/// a bit set that we don't have a name for: a whole-byte test reads it as online and skips the
-/// float, a `& 0x1` mask reads it as offline and eats four bytes of the next field. This fixture
-/// uses `0x08` — a bit no 1.12 flag owns — as the member *before* a normal one, so a masking
-/// implementation desynchronises and fails on the second member.
+/// The float's condition is the whole presence byte against zero, as the reference tests it
+/// (`0x4d0c12`), never `presence & ONLINE`; `0x08`, a bit no 1.12 flag owns, still means online.
 #[test]
 fn roster_presence_is_tested_whole_byte_not_masked_against_online() {
     let mut body = roster_head(2, "", "", &[guild_rank_right::ALL]);
     push_member(
-        &mut body, 0x1111, 0x08, // an unnamed presence bit: online, so NO float
+        &mut body, 0x1111, 0x08, // an unnamed presence bit: online, so no float
         "Alice", 0, 60, 2, 1519, None, "first", "",
     );
     push_member(
@@ -532,17 +470,12 @@ fn roster_presence_is_tested_whole_byte_not_masked_against_online() {
     }
 }
 
-/// `SMSG_GUILD_EVENT`'s trailing guid rides on the **event id**, not on whether bytes remain.
-///
-/// The reference client's handler `0x5e7180` reads it in only the `0xc`/`0xd` arms of its jump
-/// table (wow-re RF-0077, `system/object-layer/scratch/rf77-smsg-chat-wire-order.md`), while
-/// vmangos *writes* one whenever `affectedPlayerGuid` is set — which its callers also do for
-/// `GE_JOINED` (Handlers/GuildHandler.cpp:218) and `GE_LEFT` (`:405`). benilla is the client, so
-/// the third case below is the interesting one: a `GE_JOINED` **with** vmangos's trailing guid
-/// still reports `guid: None`, and its params parse correctly, exactly as the reference does.
+/// `SMSG_GUILD_EVENT`'s trailing guid rides on the event id: the reference (`0x5e7180`) reads it
+/// only for 0x0c and 0x0d, though vmangos also writes one for `GE_JOINED` and `GE_LEFT`
+/// (`Handlers/GuildHandler.cpp:218`, `:405`).
 #[test]
 fn guild_event_trailing_guid_rides_on_the_event_id() {
-    // GE_SIGNED_ON (0x0c) — one param and the guid (Server/Packets/Guild.cpp:133-141).
+    // GE_SIGNED_ON (0x0c): one param and the guid (Server/Packets/Guild.cpp:133-141).
     let mut body = vec![guild_event::SIGNED_ON, 1];
     body.extend_from_slice(b"Alice\0");
     body.extend_from_slice(&0xDEAD_BEEFu64.to_le_bytes());
@@ -560,7 +493,7 @@ fn guild_event_trailing_guid_rides_on_the_event_id() {
         other => panic!("guild event decode: {other:?}"),
     }
 
-    // GE_MOTD (0x02) — one param, no guid at all on the wire.
+    // GE_MOTD (0x02): one param, no guid.
     let mut body = vec![guild_event::MOTD, 1];
     body.extend_from_slice(b"Raid at 8\0");
     let packet = messages::parse_server(opcode::SMSG_GUILD_EVENT, &body).unwrap();
@@ -573,8 +506,7 @@ fn guild_event_trailing_guid_rides_on_the_event_id() {
         other => panic!("expected GuildEvent, got {}", other.name()),
     }
 
-    // GE_JOINED (0x03) — vmangos DOES append a guid here; the reference client never reads it.
-    // The params must still be right, and the guid must be reported absent.
+    // GE_JOINED (0x03): vmangos appends a guid here, which the reference never reads.
     let mut body = vec![guild_event::JOINED, 1];
     body.extend_from_slice(b"Carol\0");
     body.extend_from_slice(&0x1234u64.to_le_bytes());
@@ -590,7 +522,7 @@ fn guild_event_trailing_guid_rides_on_the_event_id() {
         other => panic!("expected GuildEvent, got {}", other.name()),
     }
 
-    // GE_PROMOTION (0x00) — the three-param maximum (promoter, promoted, new rank name).
+    // GE_PROMOTION (0x00): the three-param maximum (promoter, promoted, new rank name).
     let mut body = vec![guild_event::PROMOTION, 3];
     body.extend_from_slice(b"Alice\0Bob\0Officer\0");
     match &messages::parse_server(opcode::SMSG_GUILD_EVENT, &body).unwrap() {
@@ -601,7 +533,7 @@ fn guild_event_trailing_guid_rides_on_the_event_id() {
         other => panic!("expected GuildEvent, got {}", other.name()),
     }
 
-    // GE_DISBANDED (0x08) — no params, no guid: the two-byte minimum body.
+    // GE_DISBANDED (0x08): no params, no guid, the two-byte minimum body.
     let packet = messages::parse_server(
         opcode::SMSG_GUILD_EVENT,
         &hx(concat!("08", "00")), // event, paramCount
@@ -617,12 +549,8 @@ fn guild_event_trailing_guid_rides_on_the_event_id() {
     }
 }
 
-/// `SMSG_GUILD_COMMAND_RESULT` (Server/Packets/Guild.cpp:96-101): `u32 command`, cstring, `u32
-/// result` — the string sits in the **middle**, which is the field order to get wrong.
-///
-/// The two cases here are the pair that share result `0x08`: with `QUIT` it is "the guild master
-/// cannot leave", with anything else it is "you don't have permission". Carrying the command tag
-/// through is what keeps them apart.
+/// `SMSG_GUILD_COMMAND_RESULT` (Server/Packets/Guild.cpp:96-101): `u32` command, a cstring in the
+/// middle, `u32` result.
 #[test]
 fn guild_command_result_wire() {
     let mut body = Vec::new();
@@ -643,8 +571,8 @@ fn guild_command_result_wire() {
         other => panic!("guild command result decode: {other:?}"),
     }
 
-    // The collision: 0x08 under QUIT is ERR_GUILD_LEADER_LEAVE, under anything else it is
-    // ERR_GUILD_PERMISSIONS (vmangos Guild/Guild.h:106-107) — and both carry an empty string.
+    // Result 0x08 is ERR_GUILD_LEADER_LEAVE under QUIT and ERR_GUILD_PERMISSIONS otherwise
+    // (vmangos Guild/Guild.h:106-107); the command tag tells them apart.
     assert_eq!(
         guild_command_error::LEADER_LEAVE,
         guild_command_error::PERMISSIONS
@@ -699,8 +627,8 @@ fn guild_info_wire() {
     }
 }
 
-/// The two notification packets: `SMSG_GUILD_INVITE` (Server/Packets/Guild.cpp:85-89) is inviter
-/// then guild, two cstrings; `SMSG_GUILD_DECLINE` (`:91-94`) is one cstring, the decliner.
+/// `SMSG_GUILD_INVITE` (Server/Packets/Guild.cpp:85-89) is inviter then guild, two cstrings;
+/// `SMSG_GUILD_DECLINE` (`:91-94`) is one cstring, the decliner.
 #[test]
 fn guild_invite_and_decline_wire() {
     let packet = messages::parse_server(

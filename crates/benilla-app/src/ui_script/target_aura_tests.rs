@@ -134,6 +134,7 @@ fn size(s: &UiScript, name: &str) -> (f64, f64) {
 
 #[test]
 fn a_hostile_target_draws_debuffs_first_with_tint_and_count() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     target(
         &mut s,
@@ -214,6 +215,7 @@ fn a_hostile_target_draws_debuffs_first_with_tint_and_count() {
 
 #[test]
 fn a_friendly_target_puts_the_buff_row_first() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     target(
         &mut s,
@@ -241,6 +243,7 @@ fn a_friendly_target_puts_the_buff_row_first() {
 
 #[test]
 fn reaching_the_wrap_shrinks_the_first_row_to_17px() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     let debuffs: Vec<AuraState> = (0..6)
         .map(|i| debuff(1000 + i, &format!("D{i}"), 1, None))
@@ -262,6 +265,7 @@ fn reaching_the_wrap_shrinks_the_first_row_to_17px() {
 
 #[test]
 fn clearing_the_list_or_the_target_hides_the_buttons() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     target(&mut s, 2, vec![debuff(589, "Pain", 1, Some("Magic"))]);
     assert!(shown(&s, "TargetFrameDebuff1"));

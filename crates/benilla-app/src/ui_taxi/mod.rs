@@ -1,7 +1,7 @@
 //! The app-side **taxi feed/drain** (decision 0484 phases 1-2) — the two-way half of the taxi-map
 //! seam around [`benilla_ui::script`]'s `taxi` module ([`crate::ui_trainer`]'s feed/drain shape).
 //!
-//! **Phase 1** (unchanged): the net bridge (`crate::net::apply::npc`) fills [`TaxiState`] from the
+//! **Phase 1** (unchanged): the net bridge (`crate::ui_taxi::net`) fills [`TaxiState`] from the
 //! wire — `SMSG_SHOWTAXINODES` opens the map (flight master + nearest node + known-node bitmask),
 //! `SMSG_ACTIVATETAXIREPLY` stages the activate verdict, the first-visit "learn" pair stages the
 //! discovery flag — and the standardized NPC-session range guard client-side-closes the map when
@@ -34,8 +34,8 @@ use bevy::prelude::*;
 use benilla_ui::script::{TaxiUiState, UiScript};
 
 use crate::names::NameCache;
-use crate::net::{ClientCommand, NetCommands};
-use crate::player::Player;
+use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::player::UNIT_FLAG_TAXI_FLIGHT;
 use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
@@ -98,8 +98,8 @@ impl TaxiState {
 
 /// A flight master's answered node status (`SMSG_TAXINODE_STATUS`, upserted by the net bridge):
 /// `known = false` (an undiscovered nearest node) shows the green `TalkToMeGreen` overhead icon —
-/// the client's `0x5ecdd0` handler → `0x607480` marker swap (resource table `0xc4d9d8` index 4),
-/// byte-verified in the 0497 §5.
+/// the client's `0x5ecdd0` handler → `0x607480` marker swap (resource table `0xc4d9d8` index 4,
+/// decision 0497).
 ///
 /// **The query and the teardown are [`crate::quest_markers::query`]'s, not this module's**
 /// (decision 1918). `0x5eb170` — the only `CMSG_TAXINODE_STATUS_QUERY` sender in the image — has
@@ -128,19 +128,17 @@ impl NpcSession for TaxiState {
 /// Push the current taxi map into the VM, fire `TAXIMAP_OPENED`/`TAXIMAP_CLOSED` on a transition
 /// (or a content/name change), surface an activate refusal on the red error line (closing the map
 /// on `OK` instead — the flight starts and the map has nothing left to show), present a
-/// first-visit discovery, and push the `UnitOnTaxi` ride flag off [`Player::server_riding`].
-/// Diffed against `Local` memory, the trainer/merchant feed shape.
+/// first-visit discovery. Diffed against `Local` memory, the trainer/merchant feed shape. (The
+/// `UnitOnTaxi` flag is [`feed_on_taxi`]'s — it reads the descriptor, not the taxi window.)
 fn feed_taxi(
     script: Option<NonSendMut<UiScript>>,
     mut state: ResMut<TaxiState>,
     catalogs: Option<Res<TaxiCatalogs>>,
-    player: Res<Player>,
     names: Res<NameCache>,
     commands: Res<NetCommands>,
     mut cache: ResMut<TaxiRouteCache>,
     mut last: Local<crate::ui_script::VmMemo<Option<TaxiUiState>>>,
     mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
-    mut last_riding: Local<crate::ui_script::VmMemo<Option<bool>>>,
     mut sink: crate::ui_action::MessageSink,
 ) {
     let Some(mut script) = script else {
@@ -148,7 +146,6 @@ fn feed_taxi(
     };
     let last = last.get(&script);
     let last_name = last_name.get(&script);
-    let last_riding = last_riding.get(&script);
 
     // The activate verdict (SMSG_ACTIVATETAXIREPLY), staged by the net bridge: a refusal goes to
     // the surface its message record names ([`taxi_error_key`] — seven of the twelve are the
@@ -178,8 +175,8 @@ fn feed_taxi(
     }
 
     // The first-visit "learn" (SMSG_NEW_TAXI_PATH): the real client shows message 0xf2 —
-    // ERR_NEWTAXIPATH, "New flight path discovered!" — via its descriptor (byte-verified at §5
-    // grade, decision 0516 resolving 0501 §1's INTERIM): channel 1 routes the text to the
+    // ERR_NEWTAXIPATH, "New flight path discovered!" — via its descriptor (decision 0516
+    // resolving 0501 §1's INTERIM): channel 1 routes the text to the
     // YELLOW `UI_INFO_MESSAGE` FrameScript event (`0x4945b0` → event 0xe1 — good news, not the
     // red warning), and tag 0x44 plays the descriptor's `+0x08` string as a SOUND-KIT NAME
     // through `PlaySoundByName` (`0x458030`, the `MasterSoundEffects`-gated kit lookup) —
@@ -251,14 +248,37 @@ fn feed_taxi(
         *last = fresh;
         *last_name = flightmaster_name;
     }
+}
 
-    // UnitOnTaxi: a server-authored spline currently owns the avatar (Charge/knockback/taxi —
-    // 0260's rails); taxi is one of its callers, so this is the faithful signal without any
-    // taxi-specific movement state. Diffed like every other single-value push.
-    let riding = player.server_riding();
-    if *last_riding != Some(riding) {
-        script.set_on_taxi(riding);
-        *last_riding = Some(riding);
+/// Push `UnitOnTaxi("player")` — **our own descriptor's `UNIT_FLAG_TAXI_FLIGHT`, and nothing
+/// else**. The reference's verb (`0x517a40`) resolves the token, then reads `UNIT_FIELD_FLAGS`
+/// (`[[obj+0x110]+0xa0]`) and answers `1` iff bit 20 is set (`0x517a86 shr ecx,0x14; test cl,1`).
+/// vmangos sets and clears that bit exactly around a flight (`WaypointMovementGenerator.cpp`, the
+/// `FlightPathMovementGenerator` initialize/finalize).
+///
+/// It used to read [`crate::player::Player::server_riding`] — "a server spline owns the avatar" —
+/// which is also true under a fear's flee path, a Charge and a knockback. That was not a cosmetic
+/// over-answer: stock `UIParent.lua`'s `PLAYER_CONTROL_LOST` handler returns early on
+/// `UnitOnTaxi("player")`, so a feared player kept every window open that the reference closes.
+///
+/// No self store streamed yet reads as not on a taxi — the verb's own absent-object `nil`.
+/// Diffed like every other single-value push.
+fn feed_on_taxi(
+    script: Option<NonSendMut<UiScript>>,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<bool>>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let last = last.get(&script);
+    let on_taxi = self_q
+        .iter()
+        .next()
+        .is_some_and(|s| s.0.unit_flags() & UNIT_FLAG_TAXI_FLIGHT != 0);
+    if *last != Some(on_taxi) {
+        script.set_on_taxi(on_taxi);
+        *last = Some(on_taxi);
     }
 }
 
@@ -323,10 +343,13 @@ fn drain_taxi(
     }
 }
 
+mod net;
+
 pub(crate) struct UiTaxiPlugin;
 
 impl Plugin for UiTaxiPlugin {
     fn build(&self, app: &mut App) {
+        net::register(app);
         app.init_resource::<TaxiState>()
             .init_resource::<TaxiRouteCache>()
             .add_systems(
@@ -338,6 +361,7 @@ impl Plugin for UiTaxiPlugin {
                     // frame; drain after it (mirrors ui_merchant/ui_trainer).
                     close_npc_session_out_of_range::<TaxiState>.before(feed_taxi),
                     feed_taxi.in_set(UiFeed),
+                    feed_on_taxi.in_set(UiFeed),
                     drain_taxi.after(UiInput),
                 ),
             );
@@ -347,6 +371,50 @@ impl Plugin for UiTaxiPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_protocol::field::FIELD_UNIT_FLAGS;
+    use benilla_protocol::ObjectFields;
+
+    /// `UnitOnTaxi("player")` answers our descriptor's `UNIT_FLAG_TAXI_FLIGHT` — `1` with the
+    /// bit, `nil` without it — whatever else owns the avatar's movement. (A fear's flee path, a
+    /// Charge or a knockback are server splines too, and the feed reads nothing that knows about
+    /// them: it takes no `Player` at all.)
+    #[test]
+    fn unit_on_taxi_reads_the_taxi_flight_flag() {
+        let mut app = App::new();
+        app.add_systems(Update, feed_on_taxi);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                ObjectStore(ObjectFields::from_pairs(&[(FIELD_UNIT_FLAGS, 0x1000)])),
+            ))
+            .id();
+        let on_taxi = |app: &mut App| -> bool {
+            app.update();
+            let s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.eval::<Option<i64>>(r#"return UnitOnTaxi("player")"#)
+                .unwrap()
+                .is_some()
+        };
+        assert!(!on_taxi(&mut app), "no TAXI_FLIGHT bit: nil");
+
+        app.world_mut()
+            .entity_mut(me)
+            .insert(ObjectStore(ObjectFields::from_pairs(&[(
+                FIELD_UNIT_FLAGS,
+                0x1000 | UNIT_FLAG_TAXI_FLIGHT,
+            )])));
+        assert!(on_taxi(&mut app), "the bit set: 1");
+
+        app.world_mut()
+            .entity_mut(me)
+            .insert(ObjectStore(ObjectFields::from_pairs(&[(
+                FIELD_UNIT_FLAGS,
+                0,
+            )])));
+        assert!(!on_taxi(&mut app), "landed: nil again");
+    }
 
     #[test]
     fn open_close_and_session_clear() {

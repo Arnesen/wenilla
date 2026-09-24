@@ -1,8 +1,7 @@
 //! The **ground-targeting AoE reticle** — the terrain-projected decal a **location** cast's
-//! cursor drags across the world (decisions 0797 / 0943; byte-pinned in wow-re
-//! `ground-target-reticle.md`). Only a word that passes `TargetingWantsLocation`'s `& 0x60` has
-//! one: the other two seams (a bag click, a world GameObject click) arm the same cursor and draw
-//! no decal at all — see [`update_reticle`]'s guard.
+//! cursor drags across the world (decisions 0797 / 0943). Only a word that passes
+//! `TargetingWantsLocation`'s `& 0x60` has one: the other two seams (a bag click, a world
+//! GameObject click) arm the same cursor and draw no decal at all — see [`update_reticle`]'s guard.
 //!
 //! For every ordinary area spell (Blizzard, Flamestrike — no object-placement effect), the
 //! reference draws a **projected decal**, not a model: box = the picked ground point ± r in the
@@ -19,24 +18,25 @@
 //! (slot 2 is never read), max with candidate-1 winning ties/NaN. **Out of range forces the
 //! radius to 0.0** — the decal shrinks to the 1.3888889 default *and* turns red. `r == 0` (no
 //! radius rows — a dest spell with no area) also draws at the default. Spell-mod op 6
-//! (SPELLMOD_RADIUS) is not folded in: the tables are live ([`crate::spell_mods`]), this consumer
+//! (SPELLMOD_RADIUS) is not folded in: the tables are live (`crate::spell::mods`), this consumer
 //! is not wired to them (the same residual as the range gate, 0792).
 //!
 //! **States**: in range → Acceptable at `r`; out of range → Unacceptable at the default size;
 //! cursor over sky / no world hit → **nothing is drawn** (the ref resets its draw state every
 //! hover pass before the pick — the "frozen at the last point" reading was refuted at the
 //! bytes). Over a unit the decal draws on the ground behind it (the pick can't see units while
-//! a dest-only word is up — `world-click-targeting.md` Q2).
+//! a dest-only word is up — its flags skip the object trace at `0x480e7b`).
 //!
-//! Named gap (shared with the blob shadow): the ref's second projection pass takes **liquid**
-//! surfaces (flags `0x0f0000`) — our [`GroundDecalSurface`] set has no liquid yet, so the
-//! reticle vanishes over water instead of floating on it (wow-re trap #8, half-carried).
+//! Named gap (shared with the blob shadow): the ref's second projection pass (`0x483727`) takes
+//! **liquid** surfaces (flags `0x0f0000`) — our [`GroundDecalSurface`] set has no liquid yet, so
+//! the reticle vanishes over water instead of floating on it.
 
 use bevy::prelude::*;
 
 use crate::net::{ObjectStore, SelfPlayer};
+use crate::spell::{ground_cast_radius, SpellTargeting, TargetingWants};
 use crate::target::{PickOcclusion, WorldCursor};
-use crate::ui_action::{ground_cast_radius, SpellTargeting, Spells, TargetingWants};
+use crate::ui_action::Spells;
 use benilla_world::decal::{DecalFrame, WorldDecal};
 use benilla_world::particles::buffer::EffectVertex;
 use benilla_world::view::WorldCamera;
@@ -211,7 +211,7 @@ pub(super) fn push_reticle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui_action::CastCommit;
+    use crate::spell::CastCommit;
     use avian3d::prelude::Collider;
     use benilla_world::collision::GroundDecalSurface;
     use bevy::ecs::system::RunSystemOnce;

@@ -2,8 +2,7 @@
 //! (decision 0567) over the 1.12 wire laws.
 //!
 //! The 1.12 byte algorithm (±30° cone about the *character's* facing, cone-first-then-nearest
-//! sort, 10-yd out-of-cone bubble, snapshot list + cursor cycling — wow-re
-//! `object-layer/scratch/targeting-nearest-and-autoacquire.md`, §5-verified twice) was
+//! sort, 10-yd out-of-cone bubble, snapshot list + cursor cycling — the TAB core `0x493f60`) was
 //! implemented faithfully, live-reproduced, and then **replaced at the director's call**: the
 //! authentic law skips a close mob that fills your screen (at 2 yd the cone is ~±1 yd wide, and
 //! the camera sits ~9 yd behind — "right in front of my cam" is routinely 40°+ off the
@@ -108,9 +107,7 @@ fn tab_trace_on() -> bool {
 /// place: `0x493e40`'s jump table (`0x493f50 = {0x493e73, 0x493eca, 0x493eed, 0x493f15}`). The
 /// enumeration, the creature-type table, the range cvars, the scene-attach gate, the scorer
 /// `0x494200`, the comparator `0x494450` and the commit `0x493540` are literally the same
-/// instructions for both sides — so this is a parameter on the one scan, never a second scanner
-/// (wow-re `object-layer/scratch/targeting-nearest-and-autoacquire.md` PART A;
-/// `object-layer/scratch/targeting-by-name.md` "the mode filter").
+/// instructions for both sides — so this is a parameter on the one scan, never a second scanner.
 ///
 /// Modes 3 and 4 (party / raid) are not built: they need the roster-only candidate set, and the
 /// two commands that drive them stay in the binding registry's absent table until they are.
@@ -227,9 +224,8 @@ fn combat_with_me(store: &ObjectStore, me: Option<u64>) -> bool {
 /// critter filtering, like the missing-catalog fallbacks elsewhere.
 ///
 /// **Critter alone** — the flag column is 1 for CreatureType 8 and for nothing else in the shipped
-/// 5875 DBC (Totem reads 0, and 1.12 has no non-combat-pet row). This prose said "critter/totem",
-/// copying a wow-re gloss that its own `targeting-friend-and-lastenemy.md` has since closed
-/// against the file; the code was always reading the flag rather than a type list, so only the
+/// 5875 DBC (Totem reads 0, and 1.12 has no non-combat-pet row). This prose said "critter/totem";
+/// the code was always reading the flag rather than a type list, so only the
 /// words were wrong.
 #[derive(Resource)]
 pub(crate) struct CreatureTypes(CreatureTypeFlags);
@@ -261,15 +257,14 @@ pub(super) fn load_creature_types(mut commands: Commands, world_assets: Option<R
 /// the player: `CanAssist(P, P)` is true (`0x6061e0` returns 4 when A == B) and the cone test
 /// `0x47f220(p, p)` returns exactly π/2, so the self entry is in-cone whenever your facing falls
 /// in (π/3, 2π/3) and — at distance² 0 — sorts first. Plain TAB is spared only because
-/// `CanAttack(P, P)` is false. (wow-re `targeting-friend-and-lastenemy.md`, verified
-/// exhaustively; its own write-up asks a re-implementation to add the player to both candidate
+/// `CanAttack(P, P)` is false. (A faithful re-implementation adds the player to both candidate
 /// sets.)
 ///
 /// We do not, and the reason is 0567: that behaviour is an artifact of the ±30° facing cone, and
 /// 0567 replaced the cone with screen-space priority. Under our scoring the player is at distance
 /// 0 and screen-centre *unconditionally*, so porting the byte-level rule would make `CTRL-TAB`
 /// self-target on **every** press rather than facing-dependently — faithful to the bytes,
-/// unfaithful to the behaviour, which is the trade `CLAUDE.md` §7 hands to the director rather
+/// unfaithful to the behaviour, which is the trade `docs/METHOD.md` §7 hands to the director rather
 /// than to this file. Recorded here so it is a known divergence and not a gap (decision 1745).
 #[derive(SystemParam)]
 #[allow(clippy::type_complexity)] // one bundled system param — the app's convention for big query sets
@@ -283,7 +278,6 @@ pub(crate) struct TargetScan<'w, 's> {
             &'static Guid,
             &'static Transform,
             Option<&'static ObjectStore>,
-            Option<&'static Visibility>,
         ),
         Without<SelfPlayer>,
     >,
@@ -410,8 +404,8 @@ impl TargetScan<'_, '_> {
         let self_store = self.self_store();
         self.units
             .iter()
-            .find(|(_, _, g, _, _, _)| g.0 == guid)
-            .is_some_and(|(_, _, _, _, store, _)| {
+            .find(|(_, _, g, _, _)| g.0 == guid)
+            .is_some_and(|(_, _, _, _, store)| {
                 reaction_from_player(
                     self.factions.as_deref(),
                     &self.reputations,
@@ -425,8 +419,8 @@ impl TargetScan<'_, '_> {
     fn unit_by_guid(&self, guid: u64) -> Option<(Entity, Option<&ObjectStore>)> {
         self.units
             .iter()
-            .find(|(_, _, g, _, _, _)| g.0 == guid)
-            .map(|(e, _, _, _, store, _)| (e, store))
+            .find(|(_, _, g, _, _)| g.0 == guid)
+            .map(|(e, _, _, _, store)| (e, store))
     }
 
     /// The full build: walk every known unit, filter (the kept 1.12 legality laws), project
@@ -441,7 +435,7 @@ impl TargetScan<'_, '_> {
     /// deliberate divergence, because the reference's enumeration walks ClntObjMgr table #1 —
     /// which holds the player's own object — and no self-compare has been derived on the mode-2
     /// path. Self sits at dist² 0 dead-centre, so a faithful `TargetNearestFriend` would appear to
-    /// always self-target; we refuse to ship that on an underived gate. RE dispatched.
+    /// always self-target; we refuse to ship that on an underived gate.
     fn build(&self, side: ScanSide) -> Vec<Candidate> {
         let Ok((self_tf, self_store, self_guid)) = self.self_q.single() else {
             return Vec::new();
@@ -478,7 +472,7 @@ impl TargetScan<'_, '_> {
             );
         };
         let mut out = Vec::new();
-        for (entity, net, guid_c, tf, store, vis) in &self.units {
+        for (entity, net, guid_c, tf, store) in &self.units {
             if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
                 continue;
             }
@@ -507,11 +501,12 @@ impl TargetScan<'_, '_> {
                     }
                 }
             }
-            // The scene-attach/hide notion (kept): an explicitly hidden root is out.
-            if vis == Some(&Visibility::Hidden) {
-                trace_unit(guid_c.0, tf, "REJECT hidden");
-                continue;
-            }
+            // **No scene-attach gate.** The reference rejects a not-currently-rendered object
+            // here (`0x6704c0`), and this scan kept that while nothing hid a unit root. Since the
+            // outdoor draw election (1270/1475) hides every body outside the frustum, reading its
+            // `Visibility` would be the frustum by another name — and would empty the off-screen
+            // tier the Classic design (0567) keeps as the fallback. Tiering by the camera is the
+            // `project` step below; stealth and the like leave through the server's out-of-range.
             let dist = (tf.translation - self_tf.translation).length();
             if dist > TAB_RANGE {
                 trace_unit(guid_c.0, tf, "REJECT range (41 yd)");
@@ -608,7 +603,7 @@ pub(super) struct CommitOutcome {
 
 /// Commit a target through the SetSelection path (`0x493540`), byte-complete: dedup, then — on a
 /// switch while auto-attacking — the **stop → select → re-swing** law read directly from the
-/// binary (wow-re disasm, 2026-07-14):
+/// binary:
 ///
 /// 1. `0x493637–0x4936ac` latches "attacking AND the old target is still a live attackable unit"
 ///    into `[ebp-1]` before anything changes;
@@ -646,7 +641,7 @@ pub(super) fn commit(
     new_attackable: bool,
 ) -> CommitOutcome {
     // **`IsSelectable`, and it comes BEFORE the dedup** — `0x4935ec`–`0x4935f3`, the third of
-    // `0x493540`'s early-outs (wow-re `object-layer/scratch/selection-attack-seam.md` §3.1): the
+    // `0x493540`'s early-outs: the
     // resolved object's slot-`+0x58` vcall answering 0 is a bare RETURN, so a non-selectable unit
     // is a **complete** no-op — no stop, no `CMSG_SET_SELECTION`, no `PLAYER_TARGET_CHANGED`, no
     // re-swing, and the target you already had is left exactly where it was.
@@ -677,8 +672,7 @@ pub(super) fn commit(
     if swung {
         // `0x4938c8 call 0x5ecb70` with a stop in flight (`[+0xc54]`, set by the call above), so
         // the swing goes out despite the still-set lock. Its tail cancels a running auto-repeat —
-        // wow-re `melee-autorepeat-exclusion.md` §6 REFUTES `nocked-ammo-cancel.md`'s
-        // direct-callers-only census, which had this chain never reaching `0x6ea080`.
+        // this chain does reach `0x6ea080`, which a direct-callers-only census misses.
         seam.start(guid, engaged, true);
     }
     CommitOutcome {
@@ -1072,8 +1066,8 @@ pub(super) fn acquire_and_attack(
 /// The reference keeps two guid pairs beside the current selection, both written inside
 /// `SetSelection 0x493540`: `[0xb4e2e0]/[0xb4e2e4]`, the plain outgoing target (`TargetLastTarget`
 /// reads it, `0x493622`/`0x493628` write it), and `[0xb4e2e8]/[0xb4e2ec]`, the last **attackable**
-/// one (`TargetLastEnemy` reads it at `0x489b45`, `0x49377d` writes it) — wow-re
-/// `object-layer/scratch/selection-attack-seam.md` §3.1. So the memory belongs at the **selection
+/// one (`TargetLastEnemy` reads it at `0x489b45`, `0x49377d` writes it). So the memory belongs at
+/// the **selection
 /// commit**, which is where this puts it, and it is deliberately not a second thing to remember at
 /// each of [`commit`]'s six call sites: [`remember_last_enemy`] reads the frame's settled
 /// selection instead, so a selection writer added later cannot forget to stamp.
@@ -1099,8 +1093,7 @@ pub(crate) struct LastEnemy(pub(crate) Option<u64>);
 /// `TargetLastEnemy` back onto a corpse is faithful, and it is what you want a second after a kill.
 ///
 /// **The whole gate, not just the attackability leg.** `0x49372f`–`0x493778` is five conjuncts and
-/// this shipped with one of them (wow-re `targeting-friend-and-lastenemy.md`, §5 trio — the note
-/// was dispatched from this work and landed after it): the player object resolves, **the player is
+/// this shipped with one of them: the player object resolves, **the player is
 /// not dead or a ghost**, **the player is not mounted**, the new target reads
 /// `HEALTH > 0 || UNIT_DYNFLAG_DEAD`, and `CanAttack(player, new)`. Without the middle three we
 /// remembered in three states the reference does not — targeting a hostile while mounted, while
@@ -1243,8 +1236,8 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut world = World::new();
         world.insert_resource(NetCommands(tx));
-        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
-        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<crate::spell::QueuedMeleeSpell>();
+        world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<Messages<crate::player::StandStateRequest>>();
         world.init_resource::<Selection>();
@@ -1312,9 +1305,9 @@ mod tests {
         // engaged switch onto an attackable unit: the stop un-queues the strike, the re-swing
         // kills the repeat.
         world
-            .resource_mut::<crate::ui_cast::QueuedMeleeSpell>()
+            .resource_mut::<crate::spell::QueuedMeleeSpell>()
             .arm(78);
-        world.resource_mut::<crate::ui_action::AutoRepeatActive>().0 = Some(75);
+        world.resource_mut::<crate::spell::AutoRepeatActive>().0 = Some(75);
         let out = go(&mut world, 0xF, true, Some(1), true);
         assert!(out.changed && out.swung);
         assert_eq!(
@@ -1322,14 +1315,12 @@ mod tests {
             ["stop", "cancel-cast", "select", "swing", "cancel-repeat"]
         );
         assert_eq!(
-            world
-                .resource::<crate::ui_cast::QueuedMeleeSpell>()
-                .current(),
+            world.resource::<crate::spell::QueuedMeleeSpell>().current(),
             None,
             "the switch un-queued Heroic Strike"
         );
         assert_eq!(
-            world.resource::<crate::ui_action::AutoRepeatActive>().0,
+            world.resource::<crate::spell::AutoRepeatActive>().0,
             None,
             "and the re-swing killed Auto Shot"
         );
@@ -1699,6 +1690,53 @@ mod tests {
         // camera in the world nothing projects, so the order is pure distance (ALLY at 10 yd
         // before ALLY_FEIGN at 20).
         assert_eq!(pool(&mut world, ScanSide::Friend), [ALLY, ALLY_FEIGN]);
+    }
+
+    /// **A unit the draw election culled is still a TAB candidate.** The outdoor election
+    /// (decisions 1270/1475) writes `Visibility::Hidden` on every body root outside the camera
+    /// frustum, every frame — so a scan gate on `Hidden` emptied the off-screen tier 0567 keeps
+    /// as the fallback, and TAB / attack-with-no-target / pet Attack could never reach a mob
+    /// hitting you from behind while nothing was on screen.
+    #[test]
+    fn a_body_the_draw_election_culled_is_still_a_candidate() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        const MOB: u64 = 0xBEEF;
+        let mut world = World::new();
+        world.init_resource::<Reputations>();
+        world.init_resource::<NameCache>();
+        world.spawn((
+            SelfPlayer,
+            Transform::default(),
+            Guid(1),
+            store(&[
+                (F_TYPE, TYPE_PLAYER),
+                (F_FLAGS, CONTROLLED),
+                (F_HEALTH, 100),
+                (F_MAXHEALTH, 100),
+            ]),
+        ));
+        world.spawn((
+            NetEntity {
+                kind: EntityKind::Unit,
+                display_id: None,
+                scale: 1.0,
+            },
+            Guid(MOB),
+            Transform::from_xyz(0.0, 0.0, 5.0),
+            store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)]),
+            // The election's out-of-view verdict (`exterior_cull`'s body leg).
+            Visibility::Hidden,
+        ));
+        let pool = world
+            .run_system_once(|scan: TargetScan| {
+                scan.build(ScanSide::Enemy)
+                    .iter()
+                    .map(|c| c.guid)
+                    .collect::<Vec<_>>()
+            })
+            .expect("the scan runs as a one-shot system");
+        assert_eq!(pool, [MOB]);
     }
 
     /// [`LastEnemy`] tracks the last **attackable** selection and nothing else — `TargetLastEnemy`'s

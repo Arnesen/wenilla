@@ -296,7 +296,7 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // Rows 1-2 carry the quest titles (active first, matching the order the menu supplied them —
-    // benilla's seam already flattens available/active into one ordered list, ui_gossip.rs), row 3
+    // benilla's seam already flattens available/active into one ordered list, `ui_gossip`), row 3
     // the option, row 4+ hidden.
     let (r1_text, r1_vis, r2_vis, r3_text, r3_vis, r4_vis, r5_text, r5_vis, r6_vis): (
         String,
@@ -1271,8 +1271,8 @@ fn a_dead_player_opens_only_whiledead_windows() {
         s.eval::<bool>("return GetLeftFrame() == nil").unwrap(),
         "the refused window took no slot"
     );
-    // ...and the refusal is heard: NotWhileDeadError (the binary's 0x48d340 — push 0x7e, wow-re
-    // cross-checked) queued the catalog row's key for the app to resolve and toast.
+    // ...and the refusal is heard: NotWhileDeadError (the binary's 0x48d340 — push 0x7e) queued
+    // the catalog row's key for the app to resolve and toast.
     assert_eq!(
         s.take_ui_errors(),
         vec!["ERR_PLAYER_DEAD"],

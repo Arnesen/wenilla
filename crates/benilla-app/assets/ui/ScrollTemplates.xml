@@ -1,54 +1,30 @@
 <Ui>
     <!--
-        benilla's reusable scroll kits — TWO of them, sharing one scrollbar, one pair of arrow
-        helpers and one optional TROUGH (`BenillaScrollTroughTemplate`, at the foot: the recessed
-        channel a bar rides in — 1.12 authors that art per window, so an owner declares one beside
-        its bar and the kit shows and hides the two together).
-        The **faux-scroll** kit (this header) re-binds a fixed set of rows to a moving data
-        offset; the **real-scroll** kit (second half of the script block) pans and CLIPS a
-        variable-height child through the engine's `<ScrollFrame>` (decision 0112) — the one a gossip
-        menu of wrapped options needs, since its content height isn't known until it is laid out.
-        Only their OnValueChanged differs, and an instance overrides the template's (the loader
-        SetScripts every `<Scripts>` block in order, so the instance's handler wins).
-
-        The faux kit (decisions 0247/0250/0251): a draggable scroll bar over
-        the `Slider` primitive (0250) plus the fixed-row "faux scroll" Lua layer — the reference's
-        `FauxScrollFrame`, which never really scrolls a child: it re-binds a fixed set of row buttons to
-        a moving data offset. First customer: the class trainer's skill-line list (TrainerFrame.xml).
-        The quest log's chunk-local faux-scroll upvalue is a later migration onto this.
-
-        DESIGN — collapsed from the real client's three-part decomposition (0250: FauxScrollFrame =
-        ScrollFrame + Slider + Lua). The real `FauxScrollFrameTemplate` routes the scrollbar's value
-        through its parent `ScrollFrame` (`OnValueChanged → parent:SetVerticalScroll(v)`; the
-        ScrollFrame's `OnVerticalScroll` then derives `offset = floor(v/itemHeight + 0.5)`). That
-        ScrollFrame adds nothing to the value on its way through: 0251 believed it clamped to the
-        scroll range and called the clamp a liability, and decision 2017 read the bytes — the
-        reference's `SetVerticalScroll` stores what the bar hands it. So the relay is a pure
-        pass-through, and benilla's faux frame is a plain `<Frame>` + a `Slider`: fewer moving parts
-        and the identical on-screen result (a smooth, pixel-granularity thumb whose position maps
-        1:1 to the scroll offset). See 0251 for the full rationale + the divergence from 0250's
-        described (real-client) shape.
-
-        VALUE MODEL. The scrollbar's value is in PIXELS: `[0, (numItems − numToDisplay) * itemHeight]`,
-        `valueStep = itemHeight`. The row offset is `floor(value / itemHeight + 0.5)` — sub-pixel
-        rounding, so the thumb (drawn at the raw value fraction) and the list (drawn at the rounded
-        offset) never visibly disagree. The frame carries `frame.offset` (the top visible row, 0-based)
-        and `frame.updateFunc` (the owner's list-repaint, set by the owner's OnLoad).
+        Benilla's scroll kits, sharing one `Slider` bar, its arrow helpers and an optional trough:
+        a faux-scroll kit that re-binds a fixed set of rows to a moving data offset, and a
+        real-scroll kit that pans and clips a `<ScrollFrame>` child whose height is known only after
+        layout. A real-scroll bar overrides the template's OnValueChanged on its instance, which
+        wins because the loader runs every `<Scripts>` block in order.
+        Faux model: the value is pixels, `[0, (numItems - numToDisplay) * itemHeight]` in steps of
+        `itemHeight`; the parent holds the 0-based top row in `frame.offset` and its repaint in
+        `frame.updateFunc`, set by the owner's OnLoad.
+        Deviation: the faux parent is a plain `<Frame>`, not the reference's ScrollFrame relay,
+        which adds nothing because the reference's `SetVerticalScroll` stores the bar's value as is.
+        `FauxScrollFrameTemplate` and the `FauxScrollFrame_*`, `ScrollFrame_*` and
+        `ScrollingEdit_*` API are the stock `UIPanelTemplates` on the player's chain, which loads
+        after this file, so its declarations win.
     -->
     <Script><![CDATA[
-        -- Step the bar one row (the slider's valueStep) — the sensible step for an item list (the
-        -- generic ref scrollbar steps half its height; a discrete row list wants one). Silent by
-        -- design: the ref plays UChatScrollButton only on the arrow *buttons'* OnClick, never on the
-        -- wheel (ScrollFrameTemplate_OnMouseWheel is soundless). Both the wheel and the arrows call
-        -- this, so the click lives on the arrow OnClick, keeping wheel-scroll silent.
+        -- Steps the bar by its valueStep. Deviation: one row on a faux list, where the reference
+        -- bar's arrows step half its height. Soundless: the reference plays UChatScrollButton on
+        -- an arrow click, never on the wheel, so the arrows' OnClick plays it.
         function BenillaScrollBar_Step(scrollBar, dir)
             local step = scrollBar:GetValueStep()
             if step <= 0 then step = 1 end
             scrollBar:SetValue(scrollBar:GetValue() + dir * step)
         end
 
-        -- Grey the up arrow at the top and the down arrow at the bottom (ref
-        -- ScrollFrame_OnScrollRangeChanged's arrow handling), from the slider's own value/range.
+        -- Greys each arrow at its end of the range (reference: ScrollFrame_OnScrollRangeChanged).
         function BenillaScrollBar_UpdateArrows(scrollBar)
             local minV, maxV = scrollBar:GetMinMaxValues()
             local val = scrollBar:GetValue()
@@ -58,29 +34,11 @@
             if val >= maxV then down:Disable() else down:Enable() end
         end
 
-        -- The scrollbar's OnValueChanged: derive the row offset from the (pixel) value and, only when
-        -- it actually moved, repaint the owner's list. The change-gate is load-bearing: the owner's
-        -- repaint calls _Update below, which SetValue()s the thumb back to offset*itemHeight — a value
-        -- that maps to the SAME offset, so this handler no-ops and the cycle stops after one hop (the
-        -- Slider's own SetValue change-gate stops the value side, decision 0250).
-        --
-        -- THE SECOND HALF IS FOR ADDONS, and it is the reference's own wiring. The ref's
-        -- `UIPanelScrollBarTemplate` routes its value through the ScrollFrame it rides
-        -- (`<OnValueChanged>this:GetParent():SetVerticalScroll(arg1)</OnValueChanged>`,
-        -- ref-UIPanelTemplates.xml l.156-158), and that frame's `<OnVerticalScroll>` is where an
-        -- addon puts `FauxScrollFrame_OnVerticalScroll(itemHeight, MyUpdate)`. Our OWN faux frames
-        -- are plain `<Frame>`s (the 0251 divergence in the header above), so they have no
-        -- SetVerticalScroll and this line never fires for them — but an addon's is declared
-        -- `<ScrollFrame ... inherits="FauxScrollFrameTemplate">`, and the instance's own tag wins
-        -- over the template's on inherit (framexml.rs `merge`), so it really is one. Duck-typed for
-        -- exactly that reason.
-        --
-        -- The engine's SetVerticalScroll takes the bar's value as given (decision 2017 — the
-        -- reference's never reads the scroll range), so an addon frame's `<OnVerticalScroll>`
-        -- fires with this very value and its `FauxScrollFrame_OnVerticalScroll` derives the offset
-        -- from it, the reference's path end to end. The offset our own kit computes above is the
-        -- same number by construction — it comes straight off the Slider, which is the whole point
-        -- of 0251.
+        -- The faux bar's OnValueChanged: the top row is the value rounded to the nearest row, so
+        -- thumb and rows agree, and `updateFunc` runs only when that row changes, which also ends
+        -- the loop when a repaint re-seats the thumb.
+        -- A ScrollFrame parent also gets the value through SetVerticalScroll, as the reference's
+        -- `UIPanelScrollBarTemplate` routes it (UIPanelTemplates.xml l.156-158).
         function BenillaFauxScrollBar_OnValueChanged(scrollBar, value)
             local frame = scrollBar:GetParent()
             local step = scrollBar:GetValueStep()
@@ -94,27 +52,10 @@
             if frame.SetVerticalScroll then frame:SetVerticalScroll(value) end
         end
 
-        -- Seat a trough ON ITS BAR. THE SOCKETS, and why this is not a free choice: the channel art
-        -- is not a plain tube — each end carries a 16-tall SOCKET that the arrow button drops into,
-        -- bounded by the frame's outer cap and an inner crossbar. Measured texel-exact off
-        -- UI-Character-ScrollBar (64x256):
-        --   top piece    (left column) : rows 0-3 CAP · rows 4-19 SOCKET · rows 20-21 crossbar
-        --   bottom piece (right column): rows 85-86 crossbar · rows 87-102 SOCKET · rows 104-106 CAP
-        -- Both pieces draw 1:1 anchored to their own end of the trough, and the arrow buttons sit 16
-        -- outside the slider's ends — so a socket lands on its arrow only when the trough OVERHANGS
-        -- the bar by 21 above and 20 below (4 rows of cap at the top against 3+1 at the bottom; that
-        -- 1 is the whole asymmetry). Those are the ref's own numbers, reached from the other side:
-        -- ReputationFrame hangs its trough at the scroll frame's TOPRIGHT (-2,+5) / BOTTOMRIGHT
-        -- (-2,-4) against a bar seated (6,-16)/(6,+16) — 21, 20, and the 8-left hang
-        -- (ref-ReputationFrame.xml l.573-599 against ref-UIPanelTemplates.xml l.166-181). Miss it by
-        -- even 4 and the arrows ride OUT of their sockets onto the caps with a sliver of bare socket
-        -- showing beside them, which is exactly what B224 reported.
-        --
-        -- Seated HERE, off the bar, rather than restated in each owner's XML: it is one law, and an
-        -- owner made to re-derive it in offsets is an owner that can get it wrong — which is how
-        -- B224 happened. So a trough carries NO anchors of its own; declare it before the bar (so it
-        -- draws beneath) and name it `<barname>Trough`, and that is the whole contract. Lazy,
-        -- because the bar is declared after the trough and does not exist at the trough's OnLoad.
+        -- Seats a trough on its bar with the reference's ReputationFrame hang, 8 left, 21 above and
+        -- 20 below (ReputationFrame.xml l.573-599 against UIPanelTemplates.xml l.166-181), which
+        -- puts each art socket on its arrow button. Lazy, because the bar is declared after its
+        -- trough and does not exist at the trough's OnLoad.
         function BenillaScrollTrough_Seat(trough, scrollBar)
             if trough.seated then return end
             trough.seated = true
@@ -123,19 +64,9 @@
             trough:SetPoint("BOTTOMRIGHT", scrollBar, "BOTTOMRIGHT", 7, -20)
         end
 
-        -- Show/hide a bar TOGETHER WITH ITS TROUGH — the recessed channel it rides in, if the
-        -- owner authored one beside it (a `<barname>Trough` frame on BenillaScrollTroughTemplate
-        -- below). Every path that shows or hides a bar goes through here, so a window that fits
-        -- shows neither and one that overflows shows both — and so a trough is seated on its bar
-        -- before it can ever be visible, whichever way the first call goes.
-        --
-        -- Why the trough is OPT-IN rather than part of the bar template: 1.12 authors trough art
-        -- PER WINDOW, never in the shared scroll kit — `UIPanelScrollBarTemplate` carries only the
-        -- two arrow buttons and the knob, and the ref's FrameXML then hangs loose trough textures
-        -- beside 29 individual bars, in two different skins (UI-Character-ScrollBar for the
-        -- dialog/paperdoll family, UI-ClassTrainer-ScrollBar for the trainer family). The era's own
-        -- MinimalScrollBar went the other way and made its Track part of the bar; this pair keeps
-        -- the era's COUPLING (track lives and dies with the bar) on 1.12's per-window SKIN.
+        -- Shows or hides a bar and its `<barname>Trough` together, seating the trough first; show
+        -- and hide a bar only through here. The trough is opt-in because 1.12 draws trough art per
+        -- window: `UIPanelScrollBarTemplate` carries only the arrows and the knob.
         function BenillaScrollBar_SetShown(scrollBar, shown)
             local trough = getglobal(scrollBar:GetName() .. "Trough")
             if trough then BenillaScrollTrough_Seat(trough, scrollBar) end
@@ -148,17 +79,9 @@
             end
         end
 
-        -- **Our trough, following the REFERENCE's bar.** `BenillaScrollBar_SetShown` above is the
-        -- Benilla kit's own pairing and nothing in the reference's faux kit calls it — the
-        -- reference has no trough at all, which is exactly why this template stays ours (1837's
-        -- manifest note). Since the faux frames took the chain's `FauxScrollFrameTemplate` their
-        -- bar is `UIPanelScrollBarTemplate`, so an owner that wants its trough asks for it here,
-        -- right after its `FauxScrollFrame_Update`. Seating is idempotent and the visibility
-        -- simply mirrors the bar's, which the reference's `_Update` has already decided by
-        -- showing or hiding the scroll FRAME.
-        --
-        -- Decision 1860. Named after the bar rather than the frame because the trough is declared
-        -- `<barname>Trough` — one law, stated once, exactly as BenillaScrollTrough_Seat wants it.
+        -- The same for a stock `FauxScrollFrameTemplate` frame, whose bar is the reference's: seats
+        -- `<frame>ScrollBarTrough` and mirrors the frame's shown state. Call it after
+        -- `FauxScrollFrame_Update`, which shows or hides the frame.
         function BenillaScrollTrough_Follow(scrollFrameName)
             local sf = getglobal(scrollFrameName)
             if not sf then return end
@@ -170,45 +93,30 @@
             if sf:IsShown() then trough:Show() else trough:Hide() end
         end
 
-        -- A wheel spin over the list → one row (WoW convention: +1 up, −1 down). Called from the
-        -- owner window's OnMouseWheel (the engine bubbles the spin up the parent chain, so the handler
-        -- lives on the window, not a child — TrainerFrame.xml's own note).
-        --
-        -- KEEPS the `Benilla` prefix on purpose: the reference has no faux-scroll wheel function to
-        -- take the name of. Its `ScrollFrameTemplate_OnMouseWheel` is the REAL-scroll one and moves
-        -- by half the bar's height; its faux owners each write a wheel body of their own inline.
+        -- One row per wheel notch (+1 up) on a faux list, called from the owner window's
+        -- OnMouseWheel since the spin bubbles up the parent chain. Benilla-named: the reference has
+        -- no faux wheel function (its `ScrollFrameTemplate_OnMouseWheel` moves half the bar).
         function BenillaFauxScrollFrame_OnMouseWheel(frame, delta)
             local scrollBar = getglobal(frame:GetName() .. "ScrollBar")
             BenillaScrollBar_Step(scrollBar, -delta)
         end
 
-        -- ══════════════════════════ The REAL-scroll kit ══════════════════════════════════════════
-        --
-        -- The other half of the file: a true `<ScrollFrame>` (engine mechanism, decision 0112) that
-        -- pans and CLIPS a variable-height child, as against the faux kit above (fixed rows re-bound
-        -- to a data offset). Windows whose content height is unknown until it is laid out — a gossip
-        -- menu of wrapped options, a quest's body text — need this one; a uniform list wants the faux.
-        --
-        -- SHAPE, from the reference `UIPanelScrollFrameTemplate` (Interface\FrameXML\
-        -- UIPanelTemplates.xml l.166-211, extracted via mpqx): the scrollbar is a SLIDER that rides
-        -- its ScrollFrame as a child, so `bar:GetParent()` IS the frame it scrolls — no name
-        -- derivation, and `$parentBar` gives SyncBar its handle. The ref's OnVerticalScroll drives
-        -- the bar's value and greys the two arrows at the ends; ours does the same through the
-        -- shared arrow helper above.
-        BENILLA_SCROLL_STEP = 20   -- px per arrow click / wheel notch
-        BENILLA_SCROLL_PAD = 20    -- breathing room under the last element in the child
+        -- ══════════════════════════ The real-scroll kit ══════════════════════════════════════════
+        -- Shaped on the reference `UIPanelScrollFrameTemplate` (UIPanelTemplates.xml l.166-211):
+        -- the bar is a `Slider` child, `$parentBar`, so `bar:GetParent()` is the frame it pans.
+        BENILLA_SCROLL_STEP = 20   -- px per arrow click or wheel notch
+        BENILLA_SCROLL_PAD = 20    -- px of room below the child's last element
 
-        -- The bar moved (drag, arrow, or SyncBar): pan the frame it rides. The loop this could form
-        -- (bar → scroll → OnVerticalScroll → SyncBar → bar) dead-ends in one hop — SyncBar writes the
-        -- value the bar already holds, and the Slider's SetValue change-gate (decision 0250) drops it.
+        -- Pans the frame the bar rides. The loop back through OnVerticalScroll and SyncBar ends in
+        -- one hop: SyncBar writes the value the bar already holds, which Slider:SetValue ignores.
         function BenillaScrollBar_OnValueChanged(bar, value)
             bar:GetParent():SetVerticalScroll(value)
             BenillaScrollBar_UpdateArrows(bar)
         end
 
-        -- Reconcile a ScrollFrame's bar to its live range (ref ScrollFrame_OnScrollRangeChanged):
-        -- the bar spans [0, range] in pixels, seats at the current scroll, and hides entirely when
-        -- the content fits. Wired to both OnScrollRangeChanged and OnVerticalScroll by the owner.
+        -- Fits the bar to the frame's live range, [0, range] px, and hides it when the content fits
+        -- (reference: ScrollFrame_OnScrollRangeChanged). Owners call it from OnScrollRangeChanged
+        -- and OnVerticalScroll.
         function BenillaScroll_SyncBar(sf)
             local bar = getglobal(sf:GetName() .. "Bar")
             if not bar then return end
@@ -220,10 +128,8 @@
             BenillaScrollBar_SetShown(bar, range > 0)
         end
 
-        -- Pan by `delta` px, clamped to [0, range] HERE: the engine's SetVerticalScroll stores
-        -- what it is given (decision 2017 — the reference's never reads the range), and the
-        -- reference's own wheel handler bounds itself the same way, through its bar's [min, max]
-        -- (ScrollFrameTemplate_OnMouseWheel → scrollBar:SetValue).
+        -- Pans by `delta` px, clamped here: SetVerticalScroll stores any value, as the reference's
+        -- does; the reference's ScrollFrameTemplate_OnMouseWheel clamps through its bar's range.
         function BenillaScroll_Step(sf, delta)
             local target = sf:GetVerticalScroll() + delta
             local range = sf:GetVerticalScrollRange()
@@ -233,13 +139,12 @@
             BenillaScroll_SyncBar(sf)
         end
 
-        -- WoW wheel convention: +1 per notch up, -1 down — up lifts the content.
+        -- The wheel's delta is +1 per notch up, and up scrolls toward the top.
         function BenillaScroll_OnMouseWheel(sf, delta)
             BenillaScroll_Step(sf, -delta * BENILLA_SCROLL_STEP)
         end
 
-        -- A widget's resolved bottom edge for the content sum — nil when it isn't contributing
-        -- (hidden frame / blank FontString / not yet resolved this frame).
+        -- A widget's resolved bottom, or nil if hidden, a blank FontString, or not laid out yet.
         function BenillaScroll_WidgetBottom(w)
             if not w then return nil end
             if w.IsShown then
@@ -251,19 +156,13 @@
             return w:GetBottom()
         end
 
-        -- Size a scroll child to its MEASURED content — the resolved bottom of the lowest visible
-        -- widget, plus padding — instead of a fixed budget, and tell the frame (which fires
-        -- OnScrollRangeChanged → the owner's SyncBar). Frame-late by nature: rects resolve after Lua
-        -- runs, so owners re-run this from an OnUpdate until it stops changing. Returns true when it
-        -- actually resized (only a real change writes: SetHeight invalidates layout, and an
-        -- every-frame write would fight the resolver).
+        -- Sizes the scroll child to its lowest visible widget plus BENILLA_SCROLL_PAD and updates
+        -- the frame's range. Rects resolve after Lua runs, so owners re-run it from OnUpdate until
+        -- it returns false; it writes only on a real change, since SetHeight invalidates layout.
         function BenillaScroll_ResizeChild(scrollName, widgets)
             local sf = getglobal(scrollName)
-            -- ASK THE FRAME, don't guess a name. This used to be
-            -- `getglobal(scrollName .. "Child")`, which only ever worked because every caller wore
-            -- a private name in that exact shape — the reference's own convention is
-            -- `<X>ScrollFrame` / `<X>ScrollChildFrame`, not a suffix, so the derivation broke the
-            -- moment QuestFrame took the reference's names. A ScrollFrame knows its own child.
+            -- The frame's own child, not a derived name: the reference pairs `<X>ScrollFrame` with
+            -- `<X>ScrollChildFrame`.
             local child = sf:GetScrollChild()
             if not child then return false end
             local top = child:GetTop()
@@ -284,11 +183,9 @@
     ]]></Script>
 
     <!--
-        The scroll bar: a `Slider` (0250) 16px wide, its up/down step buttons pinned above/below the
-        track, and the knob thumb. The value is in pixels (see the header); the thumb draws at the
-        value fraction along the track (engine-side, decision 0250 §4), draggable (§5). The step-button
-        + knob art is the stock 1.12 scrollbar kit, each texture cropped to its centred 16px (the
-        `0.25..0.75` TexCoords the ref's `UIPanelScrollBarButton` applies).
+        The bar: a 16px `Slider` with step buttons above and below the track, on the stock 1.12
+        scrollbar art cropped to its centred 16px (the `0.25..0.75` TexCoords of the reference's
+        `UIPanelScrollBarButton`).
     -->
     <Slider name="BenillaScrollBarTemplate" virtual="true">
         <Size><AbsDimension x="16" y="0"/></Size>
@@ -322,39 +219,24 @@
     </Slider>
 
     <!--
-        The scroll bar's TROUGH — the recessed channel the bar rides in: the "background and
-        border" a bare arrows+knob bar is missing. An owner declares one of these BESIDE its bar,
-        named `<barname>Trough` and WITH NO ANCHORS — it seats itself on the bar the first time
-        BenillaScrollBar_SetShown touches it (BenillaScrollTrough_Seat above, where the socket law
-        and the ref citations live). Declare it BEFORE the bar so it draws beneath.
-
-        THE ART, and why it is sliced this way. `Interface\PaperDollInfoFrame\UI-Character-ScrollBar`
-        is a 64x256 sheet holding TWO 31-wide channel pieces, measured texel-exact from the file —
-        rails at x 2-5 and 25-30 with a 19-wide interior between them, and each piece bearing a
-        16-tall SOCKET for its arrow button:
-          · LEFT column (u 0 .. 31/64): rows 0-3 the solid TOP cap, 4-19 the up-arrow socket,
-            20-21 the crossbar that closes it, then plain channel from row 22 to the bottom edge.
-          · RIGHT column (u 33/64 .. 1): plain channel, then rows 85-86 the crossbar, 87-102 the
-            down-arrow socket, 104-106 the solid BOTTOM cap (nothing below 107).
-        The ref composes a trough from exactly two quads — the whole left column plus the right
-        column's bottom 108 rows — which reaches 362 units and no further, and only works because
-        its scroll frames are short enough for the two to OVERLAP. Ours must span a 563-tall page,
-        so the same art is cut as a THREE-SLICE instead: the two socket ends at their natural
-        heights and a plain-channel slice stretched between them. The middle is constant down its
-        whole length, so stretching it is exact — there is no seam to find.
-
-        The black `Fill` is the ref's own trough backing, not an invention: ItemTextFrame draws a
-        0.8-alpha black quad behind its channel art for exactly this (ref-ItemTextFrame.xml's
-        `Middle`). It sits in BACKGROUND and the channel art in BORDER — two layers, because within
-        ONE layer the client re-sorts overlapping quads by texture handle and their order is not
-        ours to depend on (order.rs). The bar's own furniture stays clear above both: button state
-        textures are ARTWORK, the knob is OVERLAY.
+        A bar's trough, the recessed channel it rides in; the reference's scroll kit has none.
+        Declare it before its bar, so it draws beneath, named `<barname>Trough` and with no
+        anchors: BenillaScrollTrough_Seat seats it on the bar.
+        `UI-Character-ScrollBar` (64x256) holds two 31-wide channel pieces, the left column
+        (u 0 .. 31/64) capped at the top and the right (u 33/64 .. 1) at the bottom, each with a
+        16-tall socket for its arrow button: rows 4-19 at the top, rows 87-102 at the bottom.
+        Deviation: cut as a three-slice (both socket ends at natural height, the plain channel
+        stretched between) where the reference overlaps two quads, since two quads reach only 362
+        units and a page here is 563 tall.
+        The black fill is the reference's trough backing (ItemTextFrame's 0.8-alpha `Middle`). It
+        is in BACKGROUND and the art in BORDER because the client orders overlapping quads within
+        one layer by texture handle; the bar's buttons (ARTWORK) and knob (OVERLAY) draw above both.
     -->
     <Frame name="BenillaScrollTroughTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="31"/></Size>
         <Layers>
             <Layer level="BACKGROUND">
-                <!-- The channel interior: x 6..24 of the 31-wide piece, i.e. inset 6 from each edge. -->
+                <!-- The channel interior: x 6..24 of the 31-wide piece, inset 6 from each edge. -->
                 <Texture name="$parentFill">
                     <Anchors>
                         <Anchor point="TOPLEFT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor>
@@ -374,9 +256,7 @@
                     <TexCoords left="0" right="0.484375" top="0" bottom="0.08984375"/>
                 </Texture>
                 <!-- Crossbar + down-arrow socket + cap: right column, rows 82..107
-                     (v 82/256 .. 108/256) — the mirror of the top's 23, cut to put row 107 on the
-                     trough's bottom edge exactly as ReputationFrame's own 108/0.421875 does, which
-                     is what lands the socket on the arrow (BenillaScrollTrough_Seat's law). -->
+                     (v 82/256 .. 108/256), ending on v 0.421875 as ReputationFrame's does. -->
                 <Texture name="$parentBottom" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
                     <Size><AbsDimension y="26"/></Size>
                     <Anchors>
@@ -386,8 +266,7 @@
                     <TexCoords left="0.515625" right="1.0" top="0.3203125" bottom="0.421875"/>
                 </Texture>
                 <!-- The stretched run between them: left column rows 30..70, plain rails only.
-                     Declared LAST because it anchors to the two above by name, and an anchor whose
-                     target is declared later falls back to the parent (ItemTextFrame's own note). -->
+                     Declared last: an anchor to a later sibling falls back to the parent. -->
                 <Texture name="$parentMiddle" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
                     <Anchors>
                         <Anchor point="TOPLEFT" relativeTo="$parentTop" relativePoint="BOTTOMLEFT"/>
@@ -399,22 +278,4 @@
         </Layers>
     </Frame>
 
-    <!-- ══ Carried here from UiPanels.xml when that file went stock (decision 1988) ══
-         The placeholder icon our UIParent.lua counterpart held and the reference's does not,
-         seated in the earliest file of ours every consumer loads after. The window tab template
-         and its settle stood here too until 1993 put them on the chain. -->
-    <Script><![CDATA[
-        -- The placeholder icon for an item/spell whose texture has not arrived yet (Craft, Quest,
-        -- QuestLog, Trainer and TradeSkill read it). Was ActionBar.xml's (stock since 1938), then
-        -- UiPanels.xml's (stock since 1988); this file is the earliest of ours every reader loads
-        -- after. A benilla name, so nothing stock reads it.
-        BENILLA_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
-    ]]></Script>
-
-    <!-- `FauxScrollFrameTemplate` and the `FauxScrollFrame_*`/`ScrollFrame_*`/`ScrollingEdit_*`
-         API are the REFERENCE's, off the player's chain (`Interface\FrameXML\UIPanelTemplates`,
-         seated below this file — so its declarations win). Our transcriptions stood here dead
-         from the day that entry landed and are gone (1860). What stays is
-         `BenillaScrollBarTemplate` + `BenillaScrollTroughTemplate` and their helpers, which are
-         ours: six windows inherit the bar directly and the reference has no trough at all. -->
 </Ui>

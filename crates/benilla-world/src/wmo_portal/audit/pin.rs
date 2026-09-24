@@ -70,7 +70,7 @@ fn site_from_env() -> Site {
 /// so a "which group is that thing on my screen" question becomes a grep instead of a guess. Same
 /// `WOW_PIN_*` targeting as the pin probe.
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+#[ignore = "instrument: aimed by WOW_PIN_*, run by hand — cargo test -p benilla-world --lib wmo_portal::audit::pin -- --ignored --nocapture"]
 fn wmo_group_census() {
     let site = site_from_env();
     let subject = load_subject(site.wmo, Some(&site));
@@ -335,7 +335,7 @@ fn wmo_group_census() {
 /// The subject defaults to [`UNDERCITY`] (B26); `WOW_PIN_WMO` + `WOW_PIN_UID` + `WOW_PIN_MAP` +
 /// `WOW_PIN_TILE` retarget it at another placement. Output is Blizzard-derived — keep it out of the repo.
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+#[ignore = "instrument: aimed by WOW_PIN_*, run by hand — cargo test -p benilla-world --lib wmo_portal::audit::pin -- --ignored --nocapture"]
 fn wmo_pin_probe() {
     fn xyz(var: &str, default: [f32; 3]) -> [f32; 3] {
         let Ok(s) = std::env::var(var) else {
@@ -541,8 +541,9 @@ fn wmo_pin_probe() {
 /// lane, and the chain breaks below the exterior-lit courtyards, so **g61 must be on the scene
 /// lane**. The control is the seed itself, which must stay on the interior lane.
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
 fn shadowfang_courtyard_leaves_the_far_room_on_the_scene_fog() {
+    // The data gate (2331): a skip where no install is, a failure where the gate says one is.
+    let _data = benilla_formats::wow_data_or_skip!();
     let site = SHADOWFANG;
     let subject = load_subject(site.wmo, Some(&site));
     let placed = subject
@@ -647,8 +648,9 @@ fn shadowfang_courtyard_leaves_the_far_room_on_the_scene_fog() {
 /// because it is what makes the conjunct load-bearing rather than theoretical. The conjunct itself
 /// is `crate::interior`'s `a_settled_anchor_follows_its_rooms_fog_gate_without_moving`.
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
 fn shadowfang_sees_true_interiors_that_are_off_the_fog_chain() {
+    // The data gate (2331): a skip where no install is, a failure where the gate says one is.
+    let _data = benilla_formats::wow_data_or_skip!();
     let site = SHADOWFANG;
     let subject = load_subject(site.wmo, Some(&site));
     let placed = subject
@@ -750,8 +752,9 @@ fn shadowfang_sees_true_interiors_that_are_off_the_fog_chain() {
 /// The measurement is the **gain**: groups the Pass-2 walk entered that no window admitted directly
 /// and Pass 1 never reached. Under the marking implementation the gain is zero by construction.
 #[test]
-#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
 fn darnassus_pass_two_walks_on_from_the_window() {
+    // The data gate (2331): a skip where no install is, a failure where the gate says one is.
+    let _data = benilla_formats::wow_data_or_skip!();
     use std::collections::HashSet;
 
     /// Splits the flood's `entered` steps into Pass 1's and Pass 2's, and records which groups a

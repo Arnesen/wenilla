@@ -1,66 +1,37 @@
-//! The social family — the friend list, the ignore list, and `/who` (opcodes 0x62–0x6d;
-//! decision 0668).
-//!
-//! Like the duel family, **both ends are pinned at the bytes**. The server side is vmangos
-//! `SocialMgr.{h,cpp}` (`PlayerSocial::SendFriendList`/`SendIgnoreList`,
-//! `SocialMgr::SendFriendStatus`), `Server/Packets/Social.{h,cpp}` (every `AppendBodyTo`),
-//! `Server/Packets/Misc.{h,cpp}` (the five client reads) and `Handlers/MiscHandler.cpp`
-//! (`HandleWhoOpcode`'s `WhoListClientQueryTask` + the add/del handlers). The client side is
-//! WoW.exe's own `FriendList.cpp` TU, recorded VERIFIED in wow-re `system/net/scratch/w2b.md`
-//! (the 0x728-byte `FriendList` object `DAT_00c28168`, its six registered SMSG handlers, and the
-//! Lua glue):
-//!
-//! | opcode | client fn | what it reads / writes |
-//! |---|---|---|
-//! | `SMSG_FRIEND_LIST` 0x67 | `FriendList::ParseFriendList 0x5ae350` | `u8` count, per slot `{guid u64, online u8, area/level/class u32}` |
-//! | `SMSG_FRIEND_STATUS` 0x68 | `0x5add30` → `HandleResult 0x5acab0` | `u8` op + `u64` guid (+ the online tail) |
-//! | `SMSG_IGNORE_LIST` 0x6b | the ignore-slot half of the same object | `u8` count, `u64` guids into the 25 slots @+0x650 |
-//! | `SMSG_WHO` 0x63 | `0x5adde0` | count-led entry list → FrameScript |
-//!
-//! Two client-side facts that shape everything above this layer, both from that TU:
-//!
-//! - **The friend/ignore lists are guids, not names.** A slot holds `{status, note*, guid, area,
-//!   level, class}` — no name — and the client resolves the display name through the **ObjectMgr
-//!   name cache** (`0x55f080`, the `CMSG_NAME_QUERY` cache) at format time. benilla's
-//!   [`NameCache`](../../../benilla/src/names.rs) plays that role, which is why a friend row can
-//!   populate a frame late rather than never.
-//! - **The client's own capacity is 50 friends / 25 ignores** (the slot arrays at `+0x008` and
-//!   `+0x650`), exactly vmangos's `SOCIALMGR_FRIEND_LIMIT` / `SOCIALMGR_IGNORE_LIMIT`. The
-//!   FrameXML's `MAX_IGNORE = 50` is dead data — the engine cap is 25.
+//! The social family: friend list, ignore list and `/who` (0x62-0x6d). The 1.12 client holds 50
+//! friends and 25 ignores (the `FriendList` slot arrays at `+0x008` and `+0x650`), the vmangos
+//! limits too; FrameXML's `MAX_IGNORE = 50` is dead data.
 
 use std::io::{self, Read};
 
 use crate::wire::{capacity_hint, read_cstring, read_u32_le, read_u64_le, read_u8};
 
-/// `SMSG_FRIEND_STATUS`'s result byte — vmangos's `FriendsResult` (`SocialMgr.h:81-110`), which is
-/// the client's own enum: `FriendList::HandleResult 0x5acab0` switches on it and displays
-/// `0x496720`'s catalog ids `0x104..0x114` (one per result, `ADDED_ONLINE`/`ADDED_OFFLINE`
-/// sharing `ERR_FRIEND_ADDED_S`). Every one of those rows routes **kind 0 = the chat frame**, not
-/// the red error line — see [`crate::messages`]'s consumer for that mapping.
+/// `SMSG_FRIEND_STATUS`'s result byte, vmangos `FriendsResult` (`SocialMgr.h:81-110`). The client
+/// (`0x5acab0`) prints each result's `ERR_*` string to the chat frame, not the red error line.
 pub mod friend_result {
-    /// `ERR_FRIEND_DB_ERROR` — the server's lookup failed.
+    /// `ERR_FRIEND_DB_ERROR`: the server's lookup failed.
     pub const DB_ERROR: u8 = 0x00;
-    /// `ERR_FRIEND_LIST_FULL` — 50 friends already.
+    /// `ERR_FRIEND_LIST_FULL`: 50 friends already.
     pub const LIST_FULL: u8 = 0x01;
-    /// `ERR_FRIEND_ONLINE_SS` — a friend just logged in (broadcast, not an ack).
+    /// `ERR_FRIEND_ONLINE_SS`: a friend just logged in (broadcast, not an ack).
     pub const ONLINE: u8 = 0x02;
-    /// `ERR_FRIEND_OFFLINE_S` — a friend just logged out (broadcast).
+    /// `ERR_FRIEND_OFFLINE_S`: a friend just logged out (broadcast).
     pub const OFFLINE: u8 = 0x03;
-    /// `ERR_FRIEND_NOT_FOUND` — no character by that name.
+    /// `ERR_FRIEND_NOT_FOUND`: no character by that name.
     pub const NOT_FOUND: u8 = 0x04;
-    /// `ERR_FRIEND_REMOVED_S` — the ack for `CMSG_DEL_FRIEND`.
+    /// `ERR_FRIEND_REMOVED_S`: the ack for `CMSG_DEL_FRIEND`.
     pub const REMOVED: u8 = 0x05;
-    /// `ERR_FRIEND_ADDED_S`, and the added friend is online — carries the online tail.
+    /// `ERR_FRIEND_ADDED_S`, friend online: carries the online tail.
     pub const ADDED_ONLINE: u8 = 0x06;
-    /// `ERR_FRIEND_ADDED_S`, added while offline — no tail.
+    /// `ERR_FRIEND_ADDED_S`, friend offline: no tail.
     pub const ADDED_OFFLINE: u8 = 0x07;
     /// `ERR_FRIEND_ALREADY_S`.
     pub const ALREADY: u8 = 0x08;
     /// `ERR_FRIEND_SELF`.
     pub const SELF: u8 = 0x09;
-    /// `ERR_FRIEND_WRONG_FACTION` — cross-faction friending, refused by config.
+    /// `ERR_FRIEND_WRONG_FACTION`: cross-faction friending, refused by config.
     pub const ENEMY: u8 = 0x0A;
-    /// `ERR_IGNORE_FULL` — 25 ignores already.
+    /// `ERR_IGNORE_FULL`: 25 ignores already.
     pub const IGNORE_FULL: u8 = 0x0B;
     /// `ERR_IGNORE_SELF`.
     pub const IGNORE_SELF: u8 = 0x0C;
@@ -68,21 +39,19 @@ pub mod friend_result {
     pub const IGNORE_NOT_FOUND: u8 = 0x0D;
     /// `ERR_IGNORE_ALREADY_S`.
     pub const IGNORE_ALREADY: u8 = 0x0E;
-    /// `ERR_IGNORE_ADDED_S` — the ack for `CMSG_ADD_IGNORE`.
+    /// `ERR_IGNORE_ADDED_S`: the ack for `CMSG_ADD_IGNORE`.
     pub const IGNORE_ADDED: u8 = 0x0F;
-    /// `ERR_IGNORE_REMOVED_S` — the ack for `CMSG_DEL_IGNORE`.
+    /// `ERR_IGNORE_REMOVED_S`: the ack for `CMSG_DEL_IGNORE`.
     pub const IGNORE_REMOVED: u8 = 0x10;
     /// `ERR_IGNORE_AMBIGUOUS`.
     pub const IGNORE_AMBIGUOUS: u8 = 0x11;
-    /// `ERR_FRIEND_ERROR` — "Unknown friend response from server."; vmangos's `FRIEND_UNKNOWN`.
+    /// `ERR_FRIEND_ERROR` ("Unknown friend response from server."), vmangos `FRIEND_UNKNOWN`.
     pub const UNKNOWN: u8 = 0x1A;
 }
 
-/// A friend slot's presence byte — vmangos's `FriendStatus` (`SocialMgr.h:36-43`). `0` is the
-/// only value the wire treats specially (it suppresses the area/level/class tail); the rest are
-/// the AFK/DND flavours the friends list renders as its `<AFK>` / `<DND>` tag.
+/// A friend's presence byte, vmangos `FriendStatus` (`SocialMgr.h:36-43`).
 pub mod friend_status {
-    /// Offline — the entry carries no area/level/class.
+    /// Offline: the entry carries no area/level/class.
     pub const OFFLINE: u8 = 0;
     /// Online, no away flag.
     pub const ONLINE: u8 = 1;
@@ -92,42 +61,29 @@ pub mod friend_status {
     pub const DND: u8 = 4;
 }
 
-/// One row of the friend list — a guid plus, when the friend is online, where they are.
-///
-/// The name is deliberately absent: it is not on the wire (see the module doc's first client-side
-/// fact) and is resolved from the name cache by the consumer.
+/// One friend-list row. The name is not on the wire: the client resolves it through its name cache
+/// (`0x55f080`, filled by `CMSG_NAME_QUERY`) when it draws the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FriendEntry {
-    /// The friend's player guid. vmangos rebuilds it as `ObjectGuid(HIGHGUID_PLAYER, lowguid)`,
-    /// so it is always a player guid.
+    /// Always a player guid: vmangos rebuilds it as `ObjectGuid(HIGHGUID_PLAYER, lowguid)`.
     pub guid: u64,
-    /// [`friend_status`] — `OFFLINE` means the three fields below were **not** sent and read back
-    /// as zero.
+    /// A [`friend_status`]; when `OFFLINE`, the fields below were not sent and read as zero.
     pub status: u8,
-    /// The friend's zone id (`AreaTable.dbc`), `0` when offline.
+    /// The friend's zone id (`AreaTable.dbc`).
     pub area: u32,
-    /// The friend's level, `0` when offline.
     pub level: u32,
-    /// The friend's class id, `0` when offline.
     pub class: u32,
 }
 
 impl FriendEntry {
-    /// Is this friend online at all (any of ONLINE/AFK/DND)? The wire's own test — vmangos writes
-    /// the area/level/class tail under exactly `if (entry.status)`, and the client's parse reads
-    /// it under the same condition.
+    /// Any of ONLINE/AFK/DND: the wire's own test for whether the area/level/class tail is sent.
     pub fn is_online(&self) -> bool {
         self.status != friend_status::OFFLINE
     }
 }
 
-/// Read `SMSG_FRIEND_LIST` (VERIFIED vmangos `Social.cpp`
-/// `WorldPackets::Social::FriendList::AppendBodyTo`, and WoW.exe
-/// `FriendList::ParseFriendList 0x5ae350`): a `u8` count, then per friend a `u64` guid and a `u8`
-/// status — and the `u32` area/level/class triple **only when the status is non-zero**.
-///
-/// The conditional tail is why this cannot be a fixed-stride read: an offline friend is 9 bytes,
-/// an online one 21.
+/// Read `SMSG_FRIEND_LIST` (vmangos `Social.cpp`, client `0x5ae350`): a `u8` count, then per
+/// friend a `u64` guid, a `u8` status and, only if the status is non-zero, `u32` area/level/class.
 pub fn read_friend_list(r: &mut impl Read) -> io::Result<Vec<FriendEntry>> {
     let count = read_u8(r)?;
     // vmangos `SOCIALMGR_FRIEND_LIMIT` 50 (`SocialMgr.h:114`).
@@ -148,53 +104,36 @@ pub fn read_friend_list(r: &mut impl Read) -> io::Result<Vec<FriendEntry>> {
     Ok(friends)
 }
 
-/// Read `SMSG_IGNORE_LIST` (VERIFIED vmangos `Social.cpp`
-/// `WorldPackets::Social::IgnoreList::AppendBodyTo`): a `u8` count then that many full guids, and
-/// nothing else — an ignore slot in the client is 8 bytes wide for the same reason (the `+0x650`
-/// array).
+/// Read `SMSG_IGNORE_LIST` (vmangos `Social.cpp`): a `u8` count, then that many guids.
 pub fn read_ignore_list(r: &mut impl Read) -> io::Result<Vec<u64>> {
     let count = read_u8(r)?;
     (0..count).map(|_| read_u64_le(r)).collect()
 }
 
-/// `SMSG_FRIEND_STATUS` — one result code about one player, and (for the two "is online" results)
-/// where they are.
+/// `SMSG_FRIEND_STATUS`: one result about one player, with their whereabouts when online.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FriendStatusUpdate {
-    /// A [`friend_result`] code. It is both an ack (we asked to add/remove) and a broadcast (a
-    /// friend logged in or out) — the code, not the opcode, says which.
+    /// A [`friend_result`] code, either an ack or a login/logout broadcast; the code says which.
     pub result: u8,
-    /// The player the result is about. Note vmangos sends the *asked-for* guid even for
-    /// `NOT_FOUND`, where it is `0`.
+    /// The player the result is about; 0 for `NOT_FOUND`.
     pub guid: u64,
-    /// The online tail, present iff the result is [`friend_result::ONLINE`] or
-    /// [`friend_result::ADDED_ONLINE`] (VERIFIED `SocialMgr::SendFriendStatus`'s switch).
+    /// Present only for [`friend_result::ONLINE`] and [`friend_result::ADDED_ONLINE`].
     pub online: Option<FriendOnline>,
 }
 
-/// The presence tail `SMSG_FRIEND_STATUS` carries for an online friend — the same four fields a
-/// [`FriendEntry`] holds, so a status update can refresh a list row in place.
+/// The presence tail of an online `SMSG_FRIEND_STATUS`: the four fields a [`FriendEntry`] holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FriendOnline {
-    /// [`friend_status`] — 1.12 sends this byte (the `SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_8_4`
-    /// arm; the 1.8 wire had no status byte here).
+    /// A [`friend_status`] (the vmangos `SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_8_4` arm).
     pub status: u8,
     /// Zone id.
     pub area: u32,
-    /// Level.
     pub level: u32,
-    /// Class id.
     pub class: u32,
 }
 
-/// Read `SMSG_FRIEND_STATUS` (VERIFIED vmangos `Social.cpp`
-/// `WorldPackets::Social::FriendStatus::AppendBodyTo` + `SocialMgr::SendFriendStatus`; client
-/// handler `0x5add30`, which reads `u8` op + `u64` guid before handing off to
-/// `HandleResult 0x5acab0`).
-///
-/// The tail is read on the *result code*, not on a length check: only `FRIEND_ADDED_ONLINE` and
-/// `FRIEND_ONLINE` carry it. Reading it on any other code would desynchronise the parse, which is
-/// exactly why the condition is spelled out rather than "read if bytes remain".
+/// Read `SMSG_FRIEND_STATUS` (vmangos `SocialMgr::SendFriendStatus`, client `0x5add30`): `u8`
+/// result, `u64` guid, then the online tail when the result code says so, whatever the length.
 pub fn read_friend_status(r: &mut impl Read) -> io::Result<FriendStatusUpdate> {
     let result = read_u8(r)?;
     let guid = read_u64_le(r)?;
@@ -215,43 +154,32 @@ pub fn read_friend_status(r: &mut impl Read) -> io::Result<FriendStatusUpdate> {
     })
 }
 
-/// One `/who` hit. Unlike the friend list, every field is on the wire — a who result is a
-/// snapshot the server composed, not a reference into any client cache.
+/// One `/who` hit; unlike a friend row, every field is on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WhoEntry {
-    /// Character name.
     pub name: String,
-    /// Guild name, empty when unguilded (vmangos writes `GetGuildNameById(0)` = `""`).
+    /// An empty cstring when unguilded.
     pub guild: String,
-    /// Level.
     pub level: u32,
-    /// Class id.
     pub class: u32,
-    /// Race id.
     pub race: u32,
-    /// Zone id (`AreaTable.dbc`) — the server sends the id, the client names it.
+    /// `AreaTable.dbc` zone id; the client resolves the name.
     pub zone: u32,
 }
 
-/// `SMSG_WHO` — the results, plus the two counts the "N players total (M displayed)" line needs.
+/// `SMSG_WHO`: the results and the two counts of the "N players total (M displayed)" line.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WhoResults {
-    /// How many entries follow (`clientCount`, ≤ 49 — vmangos breaks the walk at 49 despite the
-    /// "50 is maximum" comment).
+    /// Entries that follow (`clientCount`); vmangos stops at 49.
     pub displayed: u32,
-    /// How many matched in total: the full match count when it exceeds 49, otherwise the same as
-    /// [`Self::displayed`] (VERIFIED `data.put(4, count > 49 ? count : clientCount)`).
+    /// The full match count when over 49, else equal to [`Self::displayed`].
     pub total: u32,
-    /// The entries themselves, server order.
+    /// In server order.
     pub entries: Vec<WhoEntry>,
 }
 
-/// Read `SMSG_WHO` (VERIFIED vmangos `MiscHandler.cpp`'s `WhoListClientQueryTask::operator()`):
-/// two `u32` counts, then `displayed` entries of `{name, guild, level, class, race, zone}`.
-///
-/// 1.12 does **not** carry the trailing party-status `u32` — vmangos writes it only under
-/// `SUPPORTED_CLIENT_BUILD <= CLIENT_BUILD_1_8_4`, and its own comment calls it "not actually
-/// displayed anywhere".
+/// Read `SMSG_WHO` (vmangos `WhoListClientQueryTask`, client `0x5adde0`): two `u32` counts, then
+/// `{name, guild, level, class, race, zone}` per entry. 1.12 has no trailing party-status `u32`.
 pub fn read_who(r: &mut impl Read) -> io::Result<WhoResults> {
     let displayed = read_u32_le(r)?;
     let total = read_u32_le(r)?;
@@ -273,31 +201,25 @@ pub fn read_who(r: &mut impl Read) -> io::Result<WhoResults> {
     })
 }
 
-/// A `/who` query, already parsed out of the filter string the player typed.
-///
-/// The *parsing* is engine work in the real client too (the FrameXML hands `SendWho` a raw string
-/// like `z-"Elwynn Forest" 1-10`), and it needs `AreaTable.dbc` to turn a zone name into the id
-/// the wire wants — so benilla parses it app-side, where the DBCs live, and this struct is the
-/// result. [`Default`] is the query the client sends for a bare `/who` with no terms.
+/// A `/who` query parsed from the typed filter, e.g. `z-"Elwynn Forest" 1-10`, which the 1.12
+/// engine (not FrameXML) parses for `SendWho`. [`Default`] is a bare `/who`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WhoRequest {
     /// Inclusive minimum level.
     pub level_min: u32,
-    /// Inclusive maximum level. The real client's un-set value is **100** (vmangos's own comment:
-    /// "client send in case not set max level value 100"), not 255 — so that is the default here.
+    /// Inclusive maximum level; the 1.12 client sends 100 when unset, not 255.
     pub level_max: u32,
-    /// `n-` — a name substring, empty for "any".
+    /// `n-`: a name substring, empty for any.
     pub player_name: String,
-    /// `g-` — a guild-name substring, empty for "any".
+    /// `g-`: a guild-name substring, empty for any.
     pub guild_name: String,
-    /// `r-` — a bitmask over race ids (`1 << race`), all-ones for "any".
+    /// `r-`: a bitmask over race ids (`1 << race`), all-ones for any.
     pub race_mask: u32,
-    /// `c-` — a bitmask over class ids (`1 << class`), all-ones for "any".
+    /// `c-`: a bitmask over class ids (`1 << class`), all-ones for any.
     pub class_mask: u32,
-    /// `z-` — zone ids, resolved from names client-side. The server refuses more than 10.
+    /// `z-`: zone ids, resolved from names client-side.
     pub zones: Vec<u32>,
-    /// Untagged words: the server matches each against name, guild **and** zone name (any hit
-    /// keeps the row). Refused past 4.
+    /// Untagged words; the server matches each against name, guild and zone name.
     pub search_terms: Vec<String>,
 }
 
@@ -316,20 +238,13 @@ impl Default for WhoRequest {
     }
 }
 
-/// The server's own limits on a `/who` (`HandleWhoOpcode`: `> 10` zones or `> 4` terms and the
-/// whole packet is dropped, silently). Trimming to them client-side turns a dropped query into a
-/// narrower one.
+/// Over 10 zones or 4 search terms, `HandleWhoOpcode` silently drops the whole query.
 pub const WHO_MAX_ZONES: usize = 10;
 /// See [`WHO_MAX_ZONES`].
 pub const WHO_MAX_SEARCH_TERMS: usize = 4;
 
-/// Body of `CMSG_WHO` (VERIFIED vmangos `Misc.cpp` `WorldPackets::Misc::Who::ReadFromWorldPacket`):
-/// `levelMin`, `levelMax`, name cstring, guild cstring, `raceMask`, `classMask`, then a counted
-/// `u32` zone array and a counted cstring array — in that order.
-///
-/// Both arrays are trimmed to the server's caps ([`WHO_MAX_ZONES`], [`WHO_MAX_SEARCH_TERMS`]):
-/// over them the handler `return`s before doing anything, so an untrimmed query would look
-/// exactly like a `/who` that matched nobody.
+/// Body of `CMSG_WHO` (vmangos `Misc.cpp`, `Who::ReadFromWorldPacket`). Both arrays are trimmed to
+/// the server's caps, so an over-long query narrows instead of matching nobody.
 pub fn who(request: &WhoRequest) -> Vec<u8> {
     let zones = &request.zones[..request.zones.len().min(WHO_MAX_ZONES)];
     let terms = &request.search_terms[..request.search_terms.len().min(WHO_MAX_SEARCH_TERMS)];
@@ -352,43 +267,34 @@ pub fn who(request: &WhoRequest) -> Vec<u8> {
     body
 }
 
-/// Body of `CMSG_FRIEND_LIST` (VERIFIED vmangos `Opcodes.cpp` — `NullClientPacket`): empty. The
-/// list also arrives unasked at login (`CharacterHandler.cpp:527`), so this is a refresh, which is
-/// exactly what the FrameXML's `ShowFriends()` is for.
+/// Body of `CMSG_FRIEND_LIST`: empty. The `ShowFriends()` refresh; the list also arrives unasked
+/// at login (`CharacterHandler.cpp:527`).
 pub fn friend_list() -> Vec<u8> {
     Vec::new()
 }
 
-/// Body of `CMSG_ADD_FRIEND` (VERIFIED vmangos `Misc.cpp` `AddFriend::ReadFromWorldPacket`): one
-/// cstring, the name to befriend. The server normalises the case itself
-/// (`normalizePlayerName`), so the client need not.
+/// Body of `CMSG_ADD_FRIEND`: the name; the server normalises its case (`normalizePlayerName`).
 pub fn add_friend(name: &str) -> Vec<u8> {
     cstring_body(name)
 }
 
-/// Body of `CMSG_DEL_FRIEND` (VERIFIED vmangos `Misc.cpp` `DelFriend::ReadFromWorldPacket`): one
-/// full guid. Removal is by **guid**, not name — which is why the client keeps the list keyed by
-/// guid and resolves names for display only.
+/// Body of `CMSG_DEL_FRIEND`: removal is by guid, not name.
 pub fn del_friend(guid: u64) -> Vec<u8> {
     guid.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_ADD_IGNORE` (VERIFIED vmangos `Misc.cpp` `AddIgnore::ReadFromWorldPacket`): one
-/// cstring, the name to ignore.
+/// Body of `CMSG_ADD_IGNORE`: the name to ignore.
 pub fn add_ignore(name: &str) -> Vec<u8> {
     cstring_body(name)
 }
 
-/// Body of `CMSG_DEL_IGNORE` (VERIFIED vmangos `Misc.cpp` `DelIgnore::ReadFromWorldPacket`): one
-/// full guid, the [`del_friend`] shape.
+/// Body of `CMSG_DEL_IGNORE`: removal is by guid.
 pub fn del_ignore(guid: u64) -> Vec<u8> {
     guid.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_SET_LOOKING_FOR_GROUP` (VERIFIED at the bytes, wow-re `lfg-set-get-law.md` §5,
-/// `0x4e88c0`): the three slot words as stored (`u32` LE each), then the comment as a
-/// NUL-terminated string, appended unconditionally — a packet, once sent, always carries it. The
-/// reference sends only when the commit changed something, which the caller decides.
+/// Body of `CMSG_SET_LOOKING_FOR_GROUP` (`0x4e88c0`): the three slot words as stored, then the
+/// comment cstring, always. The 1.12 client sends it only when a commit changed something.
 pub fn set_looking_for_group(slots: [u32; 3], comment: &str) -> Vec<u8> {
     let mut body = Vec::with_capacity(12 + comment.len() + 1);
     for slot in slots {
@@ -398,14 +304,12 @@ pub fn set_looking_for_group(slots: [u32; 3], comment: &str) -> Vec<u8> {
     body
 }
 
-/// A body that is exactly one NUL-terminated string.
 fn cstring_body(s: &str) -> Vec<u8> {
     let mut body = Vec::with_capacity(s.len() + 1);
     push_cstring(&mut body, s);
     body
 }
 
-/// Append a NUL-terminated string to `body`.
 fn push_cstring(body: &mut Vec<u8>, s: &str) {
     body.extend_from_slice(s.as_bytes());
     body.push(0);
@@ -415,7 +319,6 @@ fn push_cstring(body: &mut Vec<u8>, s: &str) {
 mod tests {
     use super::*;
 
-    /// `CMSG_SET_LOOKING_FOR_GROUP`: three slot words then the comment, NUL-terminated (1961).
     #[test]
     fn set_looking_for_group_is_three_words_and_a_cstring() {
         let body = set_looking_for_group([0, 0, 0], "LF2M UBRS");
@@ -428,9 +331,6 @@ mod tests {
         });
     }
 
-    /// `SMSG_FRIEND_LIST`: the area/level/class tail rides on the status byte, so an offline and
-    /// an online entry have different widths in the same packet — the parse has to follow it or
-    /// every later entry is garbage.
     #[test]
     fn friend_list_tail_is_conditional_on_the_status_byte() {
         let mut body = vec![2u8]; // count
@@ -463,7 +363,6 @@ mod tests {
         assert!(!friends[0].is_online() && friends[1].is_online());
     }
 
-    /// `SMSG_IGNORE_LIST` is a `u8` count and bare guids.
     #[test]
     fn ignore_list_is_a_counted_guid_array() {
         let mut body = vec![2u8];
@@ -475,8 +374,6 @@ mod tests {
         );
     }
 
-    /// `SMSG_FRIEND_STATUS`: only ONLINE and ADDED_ONLINE carry the presence tail. A REMOVED with
-    /// trailing bytes must still read as tail-less — the code decides, not the length.
     #[test]
     fn friend_status_tail_is_keyed_on_the_result_code() {
         let mut online = vec![friend_result::ONLINE];
@@ -507,8 +404,6 @@ mod tests {
         assert_eq!(status.online, None);
     }
 
-    /// `SMSG_WHO`: two counts, then name/guild cstrings and four `u32`s per entry. `total` can
-    /// exceed `displayed` — that difference is what the "(N displayed)" suffix reports.
     #[test]
     fn who_results_carry_both_counts() {
         let mut body = Vec::new();
@@ -538,8 +433,6 @@ mod tests {
         );
     }
 
-    /// An unguilded who row still carries its (empty) guild cstring — dropping it would eat the
-    /// next field.
     #[test]
     fn who_reads_the_empty_guild_string() {
         let mut body = Vec::new();
@@ -556,8 +449,6 @@ mod tests {
         assert_eq!(who.entries[0].level, 5);
     }
 
-    /// `CMSG_WHO`'s field order, byte for byte — the golden for the one body in this family the
-    /// server actually parses field-by-field.
     #[test]
     fn who_request_body_is_byte_exact() {
         let request = WhoRequest {
@@ -584,10 +475,9 @@ mod tests {
         assert_eq!(who(&request), want);
     }
 
-    /// The default query is the bare `/who`: every level up to the client's own 100, every race
-    /// and class, no terms.
+    /// A bare `/who` as bytes: levels 0 to 100, both names empty, every race and class, no lists.
     #[test]
-    fn the_default_who_query_is_the_clients_unset_shape() {
+    fn the_default_who_query_encodes_levels_0_to_100_with_every_filter_open() {
         let body = who(&WhoRequest::default());
         assert_eq!(&body[0..4], &0u32.to_le_bytes(), "levelMin");
         assert_eq!(&body[4..8], &100u32.to_le_bytes(), "levelMax — not 255");
@@ -599,8 +489,6 @@ mod tests {
         assert_eq!(body.len(), 26);
     }
 
-    /// Both arrays are trimmed to the server's caps: past them `HandleWhoOpcode` drops the whole
-    /// packet, so an over-long query would silently return nothing at all.
     #[test]
     fn who_trims_to_the_servers_caps() {
         let request = WhoRequest {
@@ -616,7 +504,6 @@ mod tests {
         assert_eq!(term_count as usize, WHO_MAX_SEARCH_TERMS);
     }
 
-    /// The four small client bodies: two cstrings, two bare guids.
     #[test]
     fn the_add_and_del_bodies() {
         assert_eq!(add_friend("Bob"), b"Bob\0");

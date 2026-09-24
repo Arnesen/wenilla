@@ -1,8 +1,4 @@
-//! The channel family's `WorldWriter` sends — join/leave/list/moderation (bodies in
-//! [`crate::messages`]'s `join_channel`/`leave_channel`/`channel_*` builders, all cstring-only
-//! shapes; layout VERIFIED against vmangos `Server/Packets/Channel.h`/`.cpp`). Split out of
-//! `writer/mod.rs` (decision 0288 phase 1) — the channel administration commands are one clearly
-//! separable concern among the writer's many domains.
+//! The channel sends: join, leave, list and moderation, all with cstring-only bodies.
 
 use anyhow::Result;
 
@@ -11,12 +7,7 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
-    /// Join a channel (`CMSG_JOIN_CHANNEL`, layout in [`messages::join_channel`]): `password` is an
-    /// empty string for a channel that has none. Zone channels (General/Trade/LocalDefense) are
-    /// joined by the CLIENT too — in 1.12 the client walks ChatChannels.dbc on login/zone-in and
-    /// sends this same packet with the composed name ("General - Elwynn Forest"); the server only
-    /// tracks membership by name (decision 0288 phase 6 drives that walk). Answered by
-    /// `SMSG_CHANNEL_NOTIFY`'s `YOU_JOINED`/`WRONG_PASSWORD`/`BANNED`/… notice.
+    /// Join a channel; the 1.12 client joins zone channels this way ("General - Elwynn Forest").
     pub fn join_channel(&mut self, name: &str, password: &str) -> Result<()> {
         self.send(
             opcode::CMSG_JOIN_CHANNEL,
@@ -24,19 +15,17 @@ impl WorldWriter {
         )
     }
 
-    /// Leave a channel (`CMSG_LEAVE_CHANNEL`, layout in [`messages::leave_channel`]).
+    /// Leave a channel (`CMSG_LEAVE_CHANNEL`).
     pub fn leave_channel(&mut self, name: &str) -> Result<()> {
         self.send(opcode::CMSG_LEAVE_CHANNEL, &messages::leave_channel(name))
     }
 
-    /// Ask a channel's member roster (`CMSG_CHANNEL_LIST`, layout in [`messages::channel_list`]),
-    /// the `/chatlist` / `/list` command. Answered by `SMSG_CHANNEL_LIST`.
+    /// Ask a channel's members (`CMSG_CHANNEL_LIST`, `/chatlist`), answered by `SMSG_CHANNEL_LIST`.
     pub fn channel_list(&mut self, name: &str) -> Result<()> {
         self.send(opcode::CMSG_CHANNEL_LIST, &messages::channel_list(name))
     }
 
-    /// Set a channel's password (`CMSG_CHANNEL_PASSWORD`, layout in
-    /// [`messages::channel_password`]) — owner-only server-side.
+    /// Set a channel's password (`CMSG_CHANNEL_PASSWORD`); owner only.
     pub fn channel_password(&mut self, name: &str, password: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_PASSWORD,
@@ -44,8 +33,7 @@ impl WorldWriter {
         )
     }
 
-    /// Transfer channel ownership (`CMSG_CHANNEL_SET_OWNER`, layout in
-    /// [`messages::channel_set_owner`]) — owner-only server-side.
+    /// Transfer channel ownership (`CMSG_CHANNEL_SET_OWNER`); owner only.
     pub fn channel_set_owner(&mut self, name: &str, player: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_SET_OWNER,
@@ -53,14 +41,12 @@ impl WorldWriter {
         )
     }
 
-    /// Ask who owns a channel (`CMSG_CHANNEL_OWNER`, layout in [`messages::channel_owner`]) — the
-    /// `/console` "who owns" query. Answered by `SMSG_CHANNEL_NOTIFY`'s `CHANNEL_OWNER` notice.
+    /// Ask who owns a channel (`CMSG_CHANNEL_OWNER`), answered by a `CHANNEL_OWNER` notify.
     pub fn channel_owner(&mut self, name: &str) -> Result<()> {
         self.send(opcode::CMSG_CHANNEL_OWNER, &messages::channel_owner(name))
     }
 
-    /// Grant moderator (`CMSG_CHANNEL_MODERATOR`, layout in [`messages::channel_moderator`]) —
-    /// owner-only server-side.
+    /// Grant moderator (`CMSG_CHANNEL_MODERATOR`); owner only.
     pub fn channel_moderator(&mut self, name: &str, player: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_MODERATOR,
@@ -68,7 +54,7 @@ impl WorldWriter {
         )
     }
 
-    /// Revoke moderator (`CMSG_CHANNEL_UNMODERATOR`, layout in [`messages::channel_unmoderator`]).
+    /// Revoke moderator (`CMSG_CHANNEL_UNMODERATOR`).
     pub fn channel_unmoderator(&mut self, name: &str, player: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_UNMODERATOR,
@@ -76,8 +62,7 @@ impl WorldWriter {
         )
     }
 
-    /// Mute a player on the channel (`CMSG_CHANNEL_MUTE`, layout in [`messages::channel_mute`]) —
-    /// moderator-only server-side.
+    /// Mute a player on the channel (`CMSG_CHANNEL_MUTE`); moderator only.
     pub fn channel_mute(&mut self, name: &str, player: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_MUTE,
@@ -85,7 +70,7 @@ impl WorldWriter {
         )
     }
 
-    /// Unmute a player (`CMSG_CHANNEL_UNMUTE`, layout in [`messages::channel_unmute`]).
+    /// Unmute a player (`CMSG_CHANNEL_UNMUTE`).
     pub fn channel_unmute(&mut self, name: &str, player: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_UNMUTE,
@@ -93,9 +78,7 @@ impl WorldWriter {
         )
     }
 
-    /// Invite a player to a moderated/private channel (`CMSG_CHANNEL_INVITE`, layout in
-    /// [`messages::channel_invite`]); level-gated server-side
-    /// (`CONFIG_UINT32_CHANNEL_INVITE_MIN_LEVEL`).
+    /// Invite a player to a channel, gated on `CONFIG_UINT32_CHANNEL_INVITE_MIN_LEVEL`.
     pub fn channel_invite(&mut self, name: &str, player: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_INVITE,
@@ -103,8 +86,7 @@ impl WorldWriter {
         )
     }
 
-    /// Kick a player off the channel (`CMSG_CHANNEL_KICK`, layout in [`messages::channel_kick`]) —
-    /// moderator-only server-side.
+    /// Kick a player off the channel (`CMSG_CHANNEL_KICK`); moderator only.
     pub fn channel_kick(&mut self, name: &str, player: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_KICK,
@@ -112,8 +94,7 @@ impl WorldWriter {
         )
     }
 
-    /// Ban a player from the channel (`CMSG_CHANNEL_BAN`, layout in [`messages::channel_ban`]) —
-    /// moderator-only server-side.
+    /// Ban a player from the channel (`CMSG_CHANNEL_BAN`); moderator only.
     pub fn channel_ban(&mut self, name: &str, player: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_BAN,
@@ -121,7 +102,7 @@ impl WorldWriter {
         )
     }
 
-    /// Unban a player (`CMSG_CHANNEL_UNBAN`, layout in [`messages::channel_unban`]).
+    /// Unban a player (`CMSG_CHANNEL_UNBAN`).
     pub fn channel_unban(&mut self, name: &str, player: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_UNBAN,
@@ -129,8 +110,7 @@ impl WorldWriter {
         )
     }
 
-    /// Toggle join/leave announcements (`CMSG_CHANNEL_ANNOUNCEMENTS`, layout in
-    /// [`messages::channel_announcements`]) — owner/moderator-only server-side.
+    /// Toggle join/leave announcements (`CMSG_CHANNEL_ANNOUNCEMENTS`); owner or moderator only.
     pub fn channel_announcements(&mut self, name: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_ANNOUNCEMENTS,
@@ -138,8 +118,7 @@ impl WorldWriter {
         )
     }
 
-    /// Toggle moderation (speak-restricted-to-moderators) mode (`CMSG_CHANNEL_MODERATE`, layout in
-    /// [`messages::channel_moderate`]) — owner-only server-side.
+    /// Toggle moderated mode, where only moderators speak (`CMSG_CHANNEL_MODERATE`); owner only.
     pub fn channel_moderate(&mut self, name: &str) -> Result<()> {
         self.send(
             opcode::CMSG_CHANNEL_MODERATE,

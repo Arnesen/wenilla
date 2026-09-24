@@ -48,6 +48,7 @@ fn load_unit_frames(s: &UiScript) {
 /// name arriving via UNIT_NAME_UPDATE.
 #[test]
 fn shipped_unit_frames_drive_end_to_end() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -306,6 +307,7 @@ fn extracted_text_height(s: &mut UiScript, text: &str) -> Option<f32> {
 /// touches it (only the player frame registers UNIT_COMBAT in 1.12).
 #[test]
 fn unit_combat_drives_the_player_hit_indicator() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -408,6 +410,7 @@ fn unit_combat_drives_the_player_hit_indicator() {
 /// menu), the full leader set once a party is pushed.
 #[test]
 fn left_clicking_the_player_frame_targets_self() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The SELF-menu strings the popup rows bake at UnitPopup.xml load arrive with
@@ -528,6 +531,7 @@ fn left_clicking_the_player_frame_targets_self() {
 /// unit. The level-1 click was pinned above; this pins the level the marks actually live on.
 #[test]
 fn raid_mark_clicks_through_the_nested_level() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The menu strings arrive with `load_unit_frames`' own `GlobalStrings.lua`
@@ -644,6 +648,7 @@ fn raid_mark_clicks_through_the_nested_level() {
 /// GetQuestGreenRange binding.
 #[test]
 fn shipped_target_frame_runs_the_level_law() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::PlayerReqState;
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -742,8 +747,9 @@ fn shipped_target_frame_runs_the_level_law() {
         .unwrap();
     assert!(ok, "hostile +10: the skull shows ({:?})", s.errors());
 
-    // A DEAD mob is NOT a corpse (§5: UnitIsCorpse is a pure TYPEID_CORPSE object check, and
-    // UnitLevel has no health test) — the ref shows a dead mob's NUMBER, not the skull.
+    // A DEAD mob is NOT a corpse (UnitIsCorpse `0x5161c0` is a pure TYPEID_CORPSE object check,
+    // and UnitLevel `0x517fc0` has no health test) — the ref shows a dead mob's NUMBER, not the
+    // skull.
     s.set_unit(
         "target",
         Some(UnitState {
@@ -835,6 +841,7 @@ fn shipped_target_frame_runs_the_level_law() {
 /// UNIT_FACTION edge, not on every repaint.
 #[test]
 fn pvp_icon_follows_the_three_branch_law() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -944,6 +951,7 @@ fn pvp_icon_follows_the_three_branch_law() {
 /// both collapsed into blue.
 #[test]
 fn flagged_friendly_player_plate_is_green() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -1005,6 +1013,7 @@ fn flagged_friendly_player_plate_is_green() {
 /// UNIT_CLASSIFICATION_CHANGED alone, with no re-target.
 #[test]
 fn target_frame_border_follows_the_classification_law() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -1135,6 +1144,7 @@ fn target_frame_border_follows_the_classification_law() {
 /// level *below* the texture frame, where no layer can lift them back over it.
 #[test]
 fn the_ring_art_paints_over_the_bars() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -1206,6 +1216,7 @@ fn the_ring_art_paints_over_the_bars() {
 /// silence — nobody was in a party when the director reported the player frame.
 #[test]
 fn the_party_art_paints_over_the_bars() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     // The loot test's prefix (`loot_tests.rs`): PartyFrame's inline <Script> reads
@@ -1344,6 +1355,7 @@ fn the_party_art_paints_over_the_bars() {
 /// lights on the same `UnitHealth(unit) <= 0` test a corpse trips.
 #[test]
 fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -1352,7 +1364,7 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
         Some(UnitState {
             exists: true,
             is_connected: true, // CheckDead's second term — a feign is not a link-drop
-            name: Some("Nazriel".into()),
+            name: Some("Corvane".into()),
             health,
             max_health: 1500,
             level: 60,
@@ -1444,6 +1456,7 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
 /// ring/swords/disc — resting still wins when both hold — and leaving both states clears the lot.
 #[test]
 fn the_player_frame_flashes_zzz_while_resting() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -1546,6 +1559,7 @@ fn the_player_frame_flashes_zzz_while_resting() {
 /// the number rode on the badge (director report, 2026-08-07).
 #[test]
 fn the_rest_badge_covers_the_level_number() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -1616,6 +1630,7 @@ fn the_rest_badge_covers_the_level_number() {
 /// no such cut.
 #[test]
 fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -1785,6 +1800,7 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
 /// back to its owner's rect and every string would appear to sit in the same box.
 #[test]
 fn no_two_numeral_strings_overlap_on_any_frame() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
@@ -1871,6 +1887,7 @@ fn no_two_numeral_strings_overlap_on_any_frame() {
 /// addons and fires events, but never hovers anything.
 #[test]
 fn the_unit_frame_hover_hooks_carry_the_references_names() {
+    benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_unit_frames(&s);
 
@@ -1922,6 +1939,7 @@ fn the_unit_frame_hover_hooks_carry_the_references_names() {
 /// sheet's mark order says it should.
 #[test]
 fn the_raid_mark_helper_maps_each_index_to_its_cell() {
+    benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_unit_frames(&s);
     s.run(r#"RTMark = UIParent:CreateTexture("RTMark", "OVERLAY")"#)
@@ -1963,6 +1981,7 @@ fn the_raid_mark_helper_maps_each_index_to_its_cell() {
 /// index is `0` — the player's own seat on that scale — *and* that we are grouped at all.
 #[test]
 fn the_player_frame_wears_the_leader_and_master_looter_icons() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::{PartyMemberInfo, PartyState};
 
     let mut s = UiScript::new().unwrap();
@@ -1972,7 +1991,7 @@ fn the_player_frame_wears_the_leader_and_master_looter_icons() {
         "player",
         Some(UnitState {
             exists: true,
-            name: Some("Frostshake".into()),
+            name: Some("Aldwyn".into()),
             health: 100,
             max_health: 100,
             level: 60,
@@ -1994,7 +2013,7 @@ fn the_player_frame_wears_the_leader_and_master_looter_icons() {
 
     let party = |leader_index: u32, master_looter: Option<u32>, method: &str| PartyState {
         members: vec![PartyMemberInfo {
-            name: "Thalyn".into(),
+            name: "Brisca".into(),
             guid: 0x7A17,
         }],
         leader_index,
@@ -2057,6 +2076,7 @@ fn the_player_frame_wears_the_leader_and_master_looter_icons() {
 /// not asserted against; what is asserted is that nothing the reference declares is absent.
 #[test]
 fn the_unit_frames_publish_every_name_the_reference_declares() {
+    benilla_formats::wow_data_or_skip!();
     let s = UiScript::new().unwrap();
     load_unit_frames(&s);
 
@@ -2189,6 +2209,7 @@ fn the_unit_frames_publish_every_name_the_reference_declares() {
 /// This drives the real stock file, so it is the symptom itself and not a proxy for it.
 #[test]
 fn the_target_leader_crown_follows_player_flags_changed() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);

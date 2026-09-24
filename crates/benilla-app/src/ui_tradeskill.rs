@@ -4,7 +4,7 @@
 //!
 //! There is no wire here at all, by the byte law: casting a profession opener (`Effect[0] ==
 //! SPELL_EFFECT_TRADE_SKILL`) never reaches the send — `Spell_C::TryCast 0x6e4b60` branches
-//! client-side and opens the window (wow-re `wave-cast.md`, VERIFIED; 0437). benilla mirrors that
+//! client-side and opens the window (0437). benilla mirrors that
 //! as the [`TradeSkillOpens`] intercept inside `ui_action::send_spell_cast`. The book itself is
 //! **client-built**: every known spell ([`PlayerActions::spells`]) carrying
 //! `SPELL_ATTR_IS_TRADESKILL` (`0x20` — the same bit that hides recipes from the spellbook, 0227)
@@ -12,7 +12,7 @@
 //! `Spell.dbc` columns, have-counts off the bags ([`count_of`]), the product off
 //! `EffectItemType`, names/icons through the ask-once item-template cache.
 //!
-//! The §5 fold-back (wow-re `tradeskill` node, VERIFIED at the bytes, decision 0446): the
+//! Per decision 0446 (the book build `0x4fca20`, `DoTradeSkill 0x500280`): the
 //! client-built list, the difficulty bands + the `low==0 → high−25` fallback, the numMade dice
 //! law, the one-cast-per-item repeat machine (clamped to numAvailable at the latch, re-cast off
 //! our own `SMSG_SPELL_GO`, canceled by fail/ESC/close), and the `EffectMiscValue[0] != 0`
@@ -20,7 +20,7 @@
 //! by the created item's `(ItemClass, ItemSubClass)`, named from `ItemSubClass.dbc`, two-level
 //! sort (0446; the filter family on top of it, 0452) — this feed resolves each recipe's `group`
 //! ([`resolve_recipe`]), so the book is no longer flat. The spell-focus tool never renders red, and
-//! that is **faithful, not a gap** (wow-re `tradeskill-tools-and-spell-focus.md`, §5-carved): the
+//! that is **faithful, not a gap** (`0x4ffa8b`): the
 //! reference's own `hasTool` for a focus is the literal `1.0` with no predicate anywhere, and the
 //! client holds neither a focus id nor a radius to test proximity with. The server refusing the
 //! cast is the whole of the feedback, there as here.
@@ -32,6 +32,7 @@ use bevy::prelude::*;
 
 use benilla_formats::{SpellFocusCatalog, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM};
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
+use benilla_protocol::{SessionEvent, SessionEventKind};
 use benilla_ui::script::{
     TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState, UiScript,
 };
@@ -39,8 +40,9 @@ use benilla_ui::script::{
 use crate::creature_anim::{CastEvent, CastEventKind};
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{cast_target, CastCommit, CastLadder, PlayerActions, Spells};
+use crate::net::{NetCommands, NetHandlerApp, ObjectStore, Objects, SelfPlayer};
+use crate::spell::{cast_target, CastCommit, CastLadder};
+use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_items::{count_of, item_icon, InventoryScope};
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
@@ -54,15 +56,19 @@ use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 pub(crate) struct TradeSkillOpens(pub(crate) Vec<u32>);
 
 /// The open crafting book: the skill line whose recipes the window shows. `None` = closed.
-/// Client-local state — no wire owns it (0437).
+/// Client-local state — no wire owns it (0437). Cleared by the Lua close and by the session end
+/// ([`on_session_end`]): a logout installs a fresh VM without running the old one's `OnHide`, so
+/// the close alone never comes, and the next login's feed would fire `TRADE_SKILL_SHOW` into the
+/// new character's UI.
 #[derive(Resource, Default)]
 pub(crate) struct TradeSkillOpen {
     pub(crate) line: Option<u32>,
 }
 
-/// The Create/Create All repeat machine (TU-D, byte-confirmed — decision 0446):
+/// The Create/Create All repeat machine (`DoTradeSkill 0x500280`, decision 0446):
 /// `DoTradeSkill(spell, n)` latches `n`, casts once, and each of our own `SMSG_SPELL_GO`s for
-/// that spell decrements and re-casts until dry; any cast failure or a window close stops it cold.
+/// that spell decrements and re-casts until dry; any cast failure, a window close or the session
+/// end ([`on_session_end`]) stops it cold.
 #[derive(Resource, Default)]
 pub(crate) struct TradeSkillRepeat {
     pub(crate) spell_id: u32,
@@ -86,6 +92,7 @@ pub(crate) struct UiTradeSkillPlugin;
 
 impl Plugin for UiTradeSkillPlugin {
     fn build(&self, app: &mut App) {
+        app.net_handler(SessionEventKind::Disconnected, on_session_end);
         app.init_resource::<TradeSkillOpens>()
             .init_resource::<TradeSkillOpen>()
             .init_resource::<TradeSkillRepeat>()
@@ -102,6 +109,20 @@ impl Plugin for UiTradeSkillPlugin {
                 ),
             );
     }
+}
+
+/// The book and its repeat die with the session — a listener on the session end (a second handler
+/// on the kind, after the bridge's own teardown). Queued opener casts go too: they were the old
+/// character's.
+fn on_session_end(
+    In(_): In<SessionEvent>,
+    mut opens: ResMut<TradeSkillOpens>,
+    mut open: ResMut<TradeSkillOpen>,
+    mut repeat: ResMut<TradeSkillRepeat>,
+) {
+    opens.0.clear();
+    open.line = None;
+    repeat.clear();
 }
 
 fn load_spell_focus(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
@@ -125,7 +146,7 @@ fn load_spell_focus(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 /// Resolve intercepted opener casts to their skill line and open the right book. The line comes
 /// from the opener's own `SkillLineAbility` row (3908 Tailoring → 197) — the client's
 /// `SkillLineRecIndex_Find` hop (`0x6de040`); the Craft-vs-TradeSkill fork is the opener's
-/// `EffectMiscValue[0]` (byte-VERIFIED, wow-re `tradeskill` TU-A).
+/// `EffectMiscValue[0]` (`0x6e4bd7`).
 fn open_trade_skill(
     mut opens: ResMut<TradeSkillOpens>,
     mut open: ResMut<TradeSkillOpen>,
@@ -143,10 +164,10 @@ fn open_trade_skill(
             warn!("ui_tradeskill: opener {spell_id} has no SkillLineAbility row — dropped");
             continue;
         };
-        // The routing key — byte-VERIFIED (wow-re `tradeskill` TU-A, `0x6e4bd7`): the opener's
+        // The routing key (`0x6e4bd7`): the opener's
         // `EffectMiscValue[0] != 0` routes to the CraftFrame (Enchanting 3, Beast Training 1);
         // zero routes to the TradeSkillFrame. NOT a skill-line test — 0437's line-333 INTERIM
-        // is corrected by this fold-back. The nonzero value is not merely a flag: it IS the craft
+        // is corrected here. The nonzero value is not merely a flag: it IS the craft
         // type the client keeps at `ds:0xbdcfb8`, and the Craft window keys both its admission
         // filter and its row comparator on it (decision 1124), so it rides along.
         let craft_type = spells
@@ -183,7 +204,7 @@ fn skill_rank(store: &ObjectStore, skill_id: u32) -> (u32, u32) {
     (0, 0)
 }
 
-/// The difficulty banding — byte-VERIFIED (wow-re `tradeskill` TU-C): gray at rank ≥ trivialHigh,
+/// The difficulty banding (`0x4fcbfc`): gray at rank ≥ trivialHigh,
 /// green ≥ the (low+high)/2 midpoint, yellow ≥ trivialLow, orange below; the client's one
 /// fallback is `low == 0 → low = max(high − 25, 0)`. The TradeSkill window bands the RAW rank;
 /// the Craft window bands the effective skill (rank + bonuses) — the caller picks.
@@ -205,16 +226,15 @@ pub(crate) fn difficulty(rank: u32, low: u32, high: u32) -> TradeSkillDifficulty
 }
 
 /// **Law C** — the TradeSkill window's row icon, transcribing `GetTradeSkillIcon 0x4fdae0`
-/// (byte-VERIFIED; wow-re `ui/scratch/spell-icon-substitution-law.md` §2, folded back by decision
-/// 1107). Read `EffectItemType[0]` **unconditionally** as an item id and paint that item's icon;
-/// on any miss — a zero id, a template not yet landed — return **`None`**.
+/// (decision 1107). Read `EffectItemType[0]` **unconditionally** as an item id and paint that
+/// item's icon; on any miss — a zero id, a template not yet landed — return **`None`**.
 ///
 /// Two things the binding pointedly does *not* do, both of which this used to:
 ///
 /// - **No `CREATE_ITEM` gate.** `Effect[0]` (`+0xf4`) is never read anywhere in `[0x4fdae0,
 ///   0x4fdc29]`. So this takes `d.effect_item_type[0]` directly rather than the `product_item`
-///   computed beside it — that variable's `CREATE_ITEM` gate belongs to the separately-verified
-///   *made-count* law (wow-re `tradeskill` TU-C) and has no business steering an icon.
+///   computed beside it — that variable's `CREATE_ITEM` gate belongs to the separate
+///   *made-count* law (`GetTradeSkillNumMade 0x4fdc50`) and has no business steering an icon.
 /// - **No spell-icon fallback.** `+0x1d4`/`+0x1d8` and the `SpellIcon.dbc` globals appear nowhere
 ///   in the extent — proof by exhaustion over its three return paths, the last of which is a bare
 ///   `lua_pushnil`. A row whose item will not resolve shows *nothing*, never the recipe's own art.
@@ -250,9 +270,10 @@ fn resolve_recipe(
     icons: Option<&ItemDisplays>,
     subclasses: Option<&crate::ui_items::ItemSubClasses>,
     store: &ObjectStore,
+    objects: &Objects,
     items: &Items,
     commands: &NetCommands,
-    cooldowns: &crate::cooldowns::Cooldowns,
+    cooldowns: &crate::spell::Cooldowns,
     now: Instant,
 ) -> Option<TradeSkillRecipe> {
     let d = spells.catalog.get(spell_id)?;
@@ -262,7 +283,7 @@ fn resolve_recipe(
     let mut reagents = Vec::new();
     let mut num_available = u32::MAX;
     for &(entry, need) in d.reagents.iter().filter(|&&(e, n)| e != 0 && n != 0) {
-        let have = count_of(&store.0, items, entry, InventoryScope::CARRIED);
+        let have = count_of(&store.0, objects, entry, InventoryScope::CARRIED);
         let (name, icon) = match items.template(entry, 0, commands) {
             Some(t) => (Some(t.name.clone()), item_icon(icons, t.display_info_id)),
             None => (None, None),
@@ -282,8 +303,8 @@ fn resolve_recipe(
 
     // The product (CREATE_ITEM's EffectItemType, slot 0 — every probed recipe carries it there;
     // a multi-slot product is unobserved in 5875): the tooltip channel's item and the header key's
-    // source. The made-count is byte-VERIFIED (wow-re `tradeskill` TU-C): min = BasePoints +
-    // BaseDice, max = BasePoints + DieSides × BaseDice (multiplicative), clamped ≥ 1.
+    // source. The made-count (`GetTradeSkillNumMade 0x4fdc50`): min = BasePoints + BaseDice,
+    // max = BasePoints + DieSides × BaseDice (multiplicative), clamped ≥ 1.
     let (product_item, min_made, max_made) = if d.effects[0] == SPELL_EFFECT_CREATE_ITEM {
         let base = d.effect_base_points[0].max(0) as u32;
         let dice = d.effect_base_dice[0].max(0) as u32;
@@ -294,7 +315,7 @@ fn resolve_recipe(
         (0, 1, 1)
     };
     let icon = recipe_icon(d, icons, items, commands);
-    // The VERIFIED header key (wow-re `tradeskill` TU-B): the created item's (class, subclass),
+    // The header key (the book build `0x4fca20`): the created item's (class, subclass),
     // named from ItemSubClass.dbc (verbose-first). `None` while the ask-once template is in
     // flight — the client's own one-frame header deferral; the engine buckets it trailing. The
     // same template answer carries the product's InventoryType — the InvSlot filter's raw input
@@ -313,8 +334,7 @@ fn resolve_recipe(
         .flatten()
         .map_or((None, 0, 0), |(g, it, il)| (Some(g), it, il));
 
-    // Tools — **the spell FOCUS first, then `Totem[0]`, then `Totem[1]`** (wow-re
-    // `tradeskill/scratch/tradeskill-tools-and-spell-focus.md`, §5-carved: `0x4ff980`'s own push
+    // Tools — **the spell FOCUS first, then `Totem[0]`, then `Totem[1]`** (`0x4ff980`'s own push
     // order). We had the totems leading, which reverses the Requirements line for every recipe
     // that needs both — a Blacksmithing anvil recipe reads "Blacksmith Hammer, Anvil" instead of
     // "Anvil, Blacksmith Hammer".
@@ -337,7 +357,7 @@ fn resolve_recipe(
         }
     }
     for &t in d.totems.iter().filter(|&&t| t != 0) {
-        let have = count_of(&store.0, items, t, InventoryScope::CARRIED) > 0;
+        let have = count_of(&store.0, objects, t, InventoryScope::CARRIED) > 0;
         if let Some(info) = items.template(t, 0, commands) {
             tools.push((info.name.clone(), have));
         }
@@ -364,7 +384,7 @@ fn resolve_recipe(
 
 /// Build the book: the known attr-`0x20` recipes of the open line, difficulty-banded against the
 /// current rank. No sort applied here — the engine owns ALL ordering (group + tier + name, the
-/// VERIFIED two-level law, decision 0446 wow-re `tradeskill` TU-B).
+/// two-level law `0x4fd180`, decision 0446).
 fn feed_trade_skill(
     script: Option<NonSendMut<UiScript>>,
     open: Res<TradeSkillOpen>,
@@ -376,9 +396,10 @@ fn feed_trade_skill(
     subclasses: Option<Res<crate::ui_items::ItemSubClasses>>,
     repeat: Res<TradeSkillRepeat>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    objects: Objects,
     items: Res<Items>,
     commands: Res<NetCommands>,
-    cooldowns: Res<crate::cooldowns::Cooldowns>,
+    cooldowns: Res<crate::spell::Cooldowns>,
     mut last: Local<crate::ui_script::VmMemo<Option<TradeSkillState>>>,
 ) {
     let Some(mut script) = script else {
@@ -417,6 +438,7 @@ fn feed_trade_skill(
                     icons.as_deref(),
                     subclasses.as_deref(),
                     store,
+                    &objects,
                     &items,
                     &commands,
                     &cooldowns,
@@ -424,8 +446,8 @@ fn feed_trade_skill(
                 )
             })
             .collect();
-        // No app-side sort: the engine owns ALL ordering (group + tier + name — the VERIFIED
-        // two-level law, wow-re `tradeskill` TU-B).
+        // No app-side sort: the engine owns ALL ordering (group + tier + name — the
+        // two-level law, `0x4fd180`).
         Some(TradeSkillState {
             line,
             line_name,
@@ -634,5 +656,34 @@ mod tests {
         // The template landed but ItemDisplayInfo is unresolved — still nil, still not "SPELL".
         let d = recipe(SPELL_EFFECT_CREATE_ITEM, 777);
         assert_eq!(recipe_icon(&d, None, &deps.items, &deps.commands), None);
+    }
+
+    /// **The book and its repeat die with the session.** Both are client-local and only the Lua
+    /// close cleared them — but a logout installs a fresh VM without running the old one's
+    /// `OnHide`, so the close never comes: the next login's feed saw `None → Some` and fired
+    /// `TRADE_SKILL_SHOW` into the new character's UI, and a latched "Create All" re-cast on that
+    /// character's first own `SMSG_SPELL_GO` of the same id. Driven through the real registration.
+    #[test]
+    fn the_session_end_closes_the_book_and_drops_the_repeat() {
+        let mut app = App::new();
+        app.add_plugins(UiTradeSkillPlugin);
+        app.world_mut().resource_mut::<TradeSkillOpen>().line = Some(197);
+        {
+            let mut repeat = app.world_mut().resource_mut::<TradeSkillRepeat>();
+            repeat.spell_id = 3915;
+            repeat.remaining = 4;
+        }
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "logged out".into(),
+                end: benilla_protocol::SessionEnd::LoggedOut,
+            }],
+        );
+
+        assert_eq!(app.world().resource::<TradeSkillOpen>().line, None);
+        let repeat = app.world().resource::<TradeSkillRepeat>();
+        assert_eq!((repeat.spell_id, repeat.remaining), (0, 0));
     }
 }

@@ -3,7 +3,7 @@ name = "benilla-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Engine-free WoW UI engine core: TOC/FrameXML parsing, templates, anchors, z-order — decision 0068"
+description = "Engine-free WoW UI engine core: TOC and FrameXML parsing, templates, anchors, z-order"
 
 [lints]
 workspace = true
@@ -13,7 +13,5 @@ workspace = true
 # `Date.now()` in a browser, where std's panics on first use.
 web-time = "1"
 roxmltree = "0.20"
-# The embedded Lua runtime for the script host (decision 0068). `lua51` = Classic Era's Lua
-# version; `vendored` builds PUC-Rio Lua from source (no system dependency). 0.11 matches the
-# runtime that decision 0068's probe A verified (mlua + the LUAI_MAXCSTACK=8000 finding).
+# The script host's Lua 5.1; `vendored` builds it from the workspace's patched `lua-src`.
 mlua = { version = "0.11", features = ["lua51", "vendored"] }

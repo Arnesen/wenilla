@@ -4,7 +4,7 @@
 //! Cinematics/TOS side of the reference screen is deliberately cut (the director's call).
 //!
 //! This module owns the **credential policy** — the 0193 §3 mirror for the IO thread's pre-logon
-//! park: the env fast path (any of `WOW_USER`/`WOW_PASS`/`WOW_CHAR` explicitly set auto-submits
+//! park: the env fast path (`WOW_USER` and `WOW_PASS` both set auto-submits
 //! with the old `one`/`pone` defaults, so every probe/smoke invocation keeps working), the
 //! pending-credentials resubmit (paced at the flat 3 s, app-side — the IO thread never sleeps),
 //! and the director's typed submit. A *refused* code (bad password) clears the intent and shows
@@ -268,8 +268,8 @@ fn fail_text(
 
 /// **The world server's** `SMSG_AUTH_RESPONSE` refusal, in the client's own words.
 ///
-/// A straight transcription of the client's own dispatch over this enum, decompiled in wow-re
-/// `system/net/scratch/w2b-pack.c` — each case loads exactly the `GlueStrings` key named below,
+/// A straight transcription of the client's own dispatch over this enum (`0x5aa960`, through the
+/// key table `0x85cae8`) — each case loads exactly the `GlueStrings` key named below,
 /// and the numbering is `AuthResponseCodes` in cmangos `SharedDefines.h:1721+`. Nothing here is a
 /// judgement call; where the client picks a string, so do we.
 ///
@@ -371,13 +371,12 @@ fn without_dead_url(text: &str) -> std::borrow::Cow<'_, str> {
 /// password showed the terse `AUTH_UNKNOWN_ACCOUNT` ("Unknown account") — a real reference string,
 /// in the wrong slot.
 ///
-/// VERIFIED (wow-re `system/glue/scratch/login-failure-dialogs.md`, §5 cross-checked): the client
-/// keeps **two** login-status enums with **two** key tables, and they are conflated precisely
-/// because both raise the dialog through `OPEN_STATUS_DIALOG`. realmd's results resolve against
-/// table `0x836b78` — the long `LOGIN_*` family; the world server's resolve against `0x85cae8` —
-/// the short `AUTH_*` family ([`world_refusal_text`]). The chain is grunt opcode table `0x85e278`
-/// → `Logon::OnAuthResult 0x5b2c90` (byte-index table `0x5b2ea4` + jump table `0x5b2e78`) →
-/// `CGlueMgr::OnLoginState 0x46b0f0` → `CGlueMgr::UpdateGlueDialog 0x46b140`.
+/// The client keeps **two** login-status enums with **two** key tables, and they are conflated
+/// precisely because both raise the dialog through `OPEN_STATUS_DIALOG`. realmd's results resolve
+/// against table `0x836b78` — the long `LOGIN_*` family; the world server's resolve against
+/// `0x85cae8` — the short `AUTH_*` family ([`world_refusal_text`]). The chain is grunt opcode table
+/// `0x85e278` → `Logon::OnAuthResult 0x5b2c90` (byte-index table `0x5b2ea4` + jump table
+/// `0x5b2e78`) → `CGlueMgr::OnLoginState 0x46b0f0` → `CGlueMgr::UpdateGlueDialog 0x46b140`.
 ///
 /// Two consequences worth stating outright:
 ///
@@ -470,7 +469,7 @@ fn drive_policy(
     // nobody at the keyboard: a login failure no resubmit can change would leave it parked on a
     // dialog for its whole wall-clock, and every retry a runner grants it is spent the same way.
     // Those failures exit non-zero instead, on one greppable marker — "login: FATAL" — that
-    // leg.sh keys on (decision 1371).
+    // a leg runner keys on (decision 1371).
     //
     // **Nobody is here only if the run says so** (decision 1769). Whether the client may end the
     // run itself is [`crate::run_mode::fatal_when_driverless`]'s to answer; the two facts this
@@ -479,20 +478,20 @@ fn drive_policy(
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
 
-    // The env fast path, once (decision 0539 §3): any of WOW_USER/WOW_PASS/WOW_CHAR explicitly
-    // set → auto-submit env-with-defaults, so every probe/smoke/harness invocation keeps working.
+    // The env fast path, once (decision 0539 §3): WOW_USER and WOW_PASS both set → auto-submit
+    // them, so every probe/smoke/harness invocation keeps working. There is no default account.
     // The login smoke drives its own credentials instead.
     if !attempt.intent.env_read {
         attempt.intent.env_read = true;
         // Purely "are the credentials in the environment?" (decision 1769) — whether anybody is
         // here to *react* is a different fact with a different home, `run_mode::unattended`.
         if crate::run_mode::env_login() && std::env::var_os("WOW_LOGIN_SMOKE").is_none() {
-            let user = crate::webenv::var("WOW_USER").unwrap_or_else(|| "one".into());
-            let pass = crate::webenv::var("WOW_PASS").unwrap_or_else(|| "pone".into());
+            let user = crate::webenv::var("WOW_USER").unwrap_or_default();
+            let pass = crate::webenv::var("WOW_PASS").unwrap_or_default();
             // The account guard (decision 0649): a vmangos login KICKS whoever holds the account,
-            // so an unattended run from a pool slot must not authenticate as the director's `one`
-            // or a neighbouring slot's probe. Only the *automated* path is gated — a typed login
-            // is the director's own and is never second-guessed.
+            // so an unattended run authenticates as the account its checkout declares
+            // (`.probe-identity`) and nothing else. Only the *automated* path is gated — a typed
+            // login is the player's own and is never second-guessed.
             match crate::run_mode::account_guard(&user) {
                 Ok(()) => {
                     info!("login: env fast path — auto-submitting as {user}");
@@ -726,15 +725,14 @@ impl LoginForm {
     /// Give `field` the keyboard **and select everything already in it** — dropping the selection
     /// on the box being left.
     ///
-    /// **A knowing divergence** (director's call, 2026-08-28), and the reference half of it is now
-    /// byte-settled rather than inferred (wow-re `editbox-selection-focus-law.md` §4/§5, §5-VERIFIED,
-    /// dispatched from this work). The reference does the *opposite* on a click: `OnMouseDown`
-    /// (`0x77b800`) hit-tests the click to a byte index, **collapses** the selection onto it
-    /// (`0x77b86f call 0x77ccf0`) and only then calls `SetFocus` — so a fresh click-focus leaves an
-    /// EMPTY selection at the character you clicked. And `SetFocus` itself writes no selection field
-    /// at all; `0x77e3f6` being the only instruction image-wide that grants focus makes *every* focus
-    /// gain selection-neutral, TAB included. Losing focus likewise touches nothing (`0x77af50` raises
-    /// only the cursor dirty bit).
+    /// **A knowing divergence** (director's call, 2026-08-28), and the reference half of it is
+    /// byte-settled rather than inferred. The reference does the *opposite* on a click:
+    /// `OnMouseDown` (`0x77b800`) hit-tests the click to a byte index, **collapses** the selection
+    /// onto it (`0x77b86f call 0x77ccf0`) and only then calls `SetFocus` — so a fresh click-focus
+    /// leaves an EMPTY selection at the character you clicked. And `SetFocus` itself writes no
+    /// selection field at all; `0x77e3f6` being the only instruction image-wide that grants focus
+    /// makes *every* focus gain selection-neutral, TAB included. Losing focus likewise touches
+    /// nothing (`0x77af50` raises only the cursor dirty bit).
     ///
     /// So we diverge in both directions, deliberately: the reference collapses where we select, and
     /// leaves stale where we collapse. The reason is the same one for both — the thing a player does
@@ -832,18 +830,18 @@ fn login_input(
     let dialog_open = dialog.kind.is_some();
 
     // **The edit boxes focus on the PRESS**, and only they. The reference's `CEditBox` takes focus
-    // from its own OnMouseDown handler (`0x77b800`), unconditionally and autoFocus-independent
-    // (wow-re `ui.md`) — an edit box is not a Button and does not wait for the release. Every
-    // *button* on this screen fires from the release loop below (1533).
+    // from its own OnMouseDown handler (`0x77b800`), unconditionally and autoFocus-independent —
+    // an edit box is not a Button and does not wait for the release. Every *button* on this
+    // screen fires from the release loop below (1533).
     for (entity, action, interaction) in &presses {
         if dialog_open {
             continue;
         }
         // **The edit boxes focus on the PRESS**, and only they: the reference's `CEditBox` takes
         // focus from its own OnMouseDown handler (`0x77b800`), unconditionally and
-        // autoFocus-independent (wow-re `ui.md`) — an edit box is not a Button and does not wait
-        // for the release. `Ref` supplies the press *edge* the old `Changed<Interaction>` filter
-        // gave, without costing this system a second query.
+        // autoFocus-independent — an edit box is not a Button and does not wait for the release.
+        // `Ref` supplies the press *edge* the old `Changed<Interaction>` filter gave, without
+        // costing this system a second query.
         if interaction.is_changed() && *interaction == Interaction::Pressed {
             match action {
                 // A click takes the focus the same way TAB does — the solid caret, and the
@@ -1713,7 +1711,7 @@ mod tests {
     }
 
     /// The code→string map quotes the client's own strings for the vmangos-verified rows.
-    /// The realmd map, against the byte-verified table (wow-re `login-failure-dialogs.md`).
+    /// The realmd map, against the client's table (`0x5b2c90` → key table `0x836b78`).
     ///
     /// Every row of this changed in decision 1679: the codes were always right and the string
     /// FAMILY was always wrong, so each of these used to answer with the terse `AUTH_*` twin of
@@ -1765,7 +1763,7 @@ mod tests {
         assert_eq!(world(m::AUTH_BILLING_ERROR), "Billing system error");
         assert_ne!(logon(0x0C), world(0x0C));
 
-        // Every world row is the client's own dispatch (`w2b-pack.c`), transcribed.
+        // Every world row is the client's own dispatch (`0x5aa960`), transcribed.
         assert_eq!(world(m::AUTH_INCORRECT_PASSWORD), "Incorrect Password");
         assert_eq!(world(m::AUTH_SESSION_EXPIRED), "Session Expired");
         assert_eq!(world(m::AUTH_SERVER_SHUTTING_DOWN), "Server Shutting Down");

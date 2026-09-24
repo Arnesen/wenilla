@@ -1,38 +1,23 @@
-//! The death-arc messages (decision 0308): release/repop, the corpse query, the reclaim delay +
-//! reclaim, the spirit healer, and resurrect requests. Every body shape below is VERIFIED against
-//! vmangos source (file:line cites per item); the goldens mirror the server's own packet builds.
-//!
-//! Not modelled here (known siblings): `SMSG_DURABILITY_DAMAGE_DEATH` (0x2BD — an EMPTY body the
-//! server sends with the 10% natural-death durability loss; the real client shows a durability
-//! warning — a later polish slice), and the BG-only death family (area spirit healers, the forced
-//! BG repop aura 2584 — 0308 defers battlegrounds).
+//! Death and resurrection: the corpse query, corpse reclaim, spirit healers, resurrect offers.
 
 use std::io;
 
 use crate::wire::{read_cstring, read_f32_le, read_i32_le, read_u32_le, read_u64_le, read_u8};
 
-/// `MSG_CORPSE_QUERY`'s answer (opcode `0x216`/534 — VERIFIED vmangos `Opcodes_1_12_1.h:535`; our
-/// request is the same opcode with an EMPTY body, `NullClientPacket`). VERIFIED
-/// `QueryHandler.cpp:258-304` (`HandleCorpseQueryOpcode`): not-found = the lone `u8(0)`; found =
-/// `u8(1), i32 mapid, f32 x, f32 y, f32 z, u32 corpsemapid`.
-///
-/// The two maps differ deliberately: `display_map`/`position` are **where to walk toward** — for a
-/// corpse inside a dungeon they are rewritten to the dungeon's `ghostEntranceMap` + entrance
-/// coordinates — while `corpse_map` is always the corpse's real map, untouched. The server also
-/// pushes an UNPROMPTED not-found (`u8(0)`) when a lootable corpse converts to bones
-/// (`Map.cpp:3624-3629`), so a not-found mid-session means "drop the marker", not "query failed".
+/// `MSG_CORPSE_QUERY`'s answer (`QueryHandler.cpp:258-304`), a lone `u8(0)` when not found; the
+/// request is the same opcode, empty. The server also sends an unprompted not-found when the
+/// corpse turns to bones (`Map.cpp:3624-3629`), which means "drop the marker".
 #[derive(Debug, Clone, PartialEq)]
 pub struct CorpseLocation {
     pub found: bool,
-    /// The map to show/route toward (dungeon-entrance-adjusted). `0` when `!found`.
+    /// The map to walk toward, rewritten to the entrance's for a corpse inside a dungeon.
     pub display_map: i32,
-    /// Raw WoW coordinates of the corpse (or the dungeon entrance). Zeroed when `!found`.
+    /// Raw WoW coordinates of the corpse, or of the dungeon entrance.
     pub position: [f32; 3],
-    /// The corpse's REAL map id, never adjusted. `0` when `!found`.
+    /// The corpse's real map id, never adjusted.
     pub corpse_map: u32,
 }
 
-/// Read `MSG_CORPSE_QUERY`'s answer — both shapes (see [`CorpseLocation`]).
 pub(super) fn read_corpse_query_response(r: &mut &[u8]) -> io::Result<CorpseLocation> {
     let found = read_u8(r)? != 0;
     if !found {
@@ -54,26 +39,16 @@ pub(super) fn read_corpse_query_response(r: &mut &[u8]) -> io::Result<CorpseLoca
     })
 }
 
-/// Read `SMSG_CORPSE_RECLAIM_DELAY` (opcode `0x269`/617 — VERIFIED `Opcodes_1_12_1.h:618`): one
-/// `u32`, the delay in **milliseconds** before the corpse can be reclaimed (VERIFIED
-/// `Server/Packets/Misc.cpp:653-656` — `buffer << delayMs`). Sent at release
-/// (`Player::BuildPlayerRepop`, `Player.cpp:4677`) and at login while dead
-/// (`CharacterHandler.cpp:571-572`) — never at the death itself. The value is 30 s base,
-/// 60/120 s for repeated deaths within 5-minute steps (`copseReclaimDelay[]`, `Player.cpp:106`).
+/// Read `SMSG_CORPSE_RECLAIM_DELAY`: the ms until the corpse can be reclaimed
+/// (`Misc.cpp:653-656`), sent at release and at login while dead, never at death itself. It is
+/// 30 s, or 60 or 120 s after repeated deaths (`Player.cpp:106`).
 pub(super) fn read_corpse_reclaim_delay(r: &mut &[u8]) -> io::Result<u32> {
     read_u32_le(r)
 }
 
-/// A resurrection offer (`SMSG_RESURRECT_REQUEST`, opcode `0x15B`/347 — VERIFIED
-/// `Opcodes_1_12_1.h:348`). VERIFIED `Spell.cpp:5024-5044` (`Spell::SendResurrectRequest`):
-/// `u64 caster, u32 nameLen (strlen+1), cstring name, u8 sickness, u8 hasResTimer`.
-///
-/// `name` is **empty when the caster is a player** (the client resolves the offerer's display name
-/// from the guid through the ordinary name-query cache); it carries the localized creature name for
-/// an NPC caster. `sickness` warns the accept applies resurrection sickness; `has_timer` says the
-/// client should still honor the `SMSG_CORPSE_RECLAIM_DELAY` gate (inverted server-side from
-/// `SPELL_ATTR_EX3_NO_RES_TIMER`). The reference UI picks its popup off exactly these two bits
-/// (RESURRECT / RESURRECT_NO_SICKNESS / RESURRECT_NO_TIMER — UIParent.lua's RESURRECT_REQUEST arm).
+/// `SMSG_RESURRECT_REQUEST`, a resurrection offer (`Spell.cpp:5024-5044`). `sickness` warns the
+/// accept brings resurrection sickness, `has_timer` keeps the reclaim-delay gate, and the stock
+/// popup picks its variant by the two.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResurrectRequestBody {
     pub caster: u64,
@@ -83,9 +58,7 @@ pub struct ResurrectRequestBody {
     pub has_timer: bool,
 }
 
-/// Read `SMSG_RESURRECT_REQUEST` (see [`ResurrectRequestBody`]). The `u32` length prefix duplicates
-/// the C-string's own length (strlen+1) — read and cross-checked loosely (the cstring terminator is
-/// authoritative; vmangos always writes both consistently).
+/// Read `SMSG_RESURRECT_REQUEST`; the name's `u32` length (strlen + 1) is skipped for its NUL.
 pub(super) fn read_resurrect_request(r: &mut &[u8]) -> io::Result<ResurrectRequestBody> {
     let caster = read_u64_le(r)?;
     let _name_len = read_u32_le(r)?;
@@ -100,40 +73,27 @@ pub(super) fn read_resurrect_request(r: &mut &[u8]) -> io::Result<ResurrectReque
     })
 }
 
-/// Read `SMSG_SPIRIT_HEALER_CONFIRM` (opcode `0x222`/546 — VERIFIED `Opcodes_1_12_1.h:547`): one
-/// full `u64`, the spirit-healer NPC's guid. VERIFIED `SpellEffects.cpp:818-831` — vmangos sends it
-/// from the gossip-menu spirit-healer option (the NPC casts 17251 "Spirit Healer Res" whose dummy
-/// effect builds this packet), NOT from `CMSG_SPIRIT_HEALER_ACTIVATE`. The client answers the
-/// eventual XP_LOSS confirm-accept with [`spirit_healer_activate`] carrying this guid.
+/// Read `SMSG_SPIRIT_HEALER_CONFIRM`: the spirit healer's full guid, sent from its gossip option
+/// through spell 17251 (`SpellEffects.cpp:818-831`); accepting sends [`spirit_healer_activate`].
 pub(super) fn read_spirit_healer_confirm(r: &mut &[u8]) -> io::Result<u64> {
     read_u64_le(r)
 }
 
-/// Body of `CMSG_RECLAIM_CORPSE` (opcode `0x1D2`/466 — VERIFIED `Opcodes_1_12_1.h:467`): one full
-/// `u64` guid (VERIFIED `Server/Packets/Misc.cpp:122-125` — `recv_data >> guid`). The server
-/// resolves the corpse through the player itself and never checks this guid's content, but the
-/// real client sends its corpse's guid — we do the same. Server gates (`MiscHandler.cpp:573-603`):
-/// dead + `PLAYER_FLAGS_GHOST` + corpse exists + the reclaim delay elapsed + within
-/// `CORPSE_RECLAIM_RADIUS` (39 yd, `Corpse.h:40`) — success is `ResurrectPlayer(0.5)` + bones.
+/// `CMSG_RECLAIM_CORPSE` body: the corpse's full guid, as the 1.12 client sends, though the server
+/// ignores it. It requires a ghost, the delay elapsed and 39 yd range (`MiscHandler.cpp:573-603`).
 pub fn reclaim_corpse(corpse_guid: u64) -> Vec<u8> {
     corpse_guid.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_SPIRIT_HEALER_ACTIVATE` (opcode `0x21C`/540 — VERIFIED `Opcodes_1_12_1.h:541`):
-/// one full `u64`, the spirit healer's guid (VERIFIED `Server/Packets/Npc.cpp:40-43`). Server
-/// gates (`NPCHandler.cpp:416-428` → `CanInteractWithNPC` with `UNIT_NPC_FLAG_SPIRITHEALER`
-/// `0x20`): 5-yd interaction distance, ghost-visible NPC. Effect (`SendSpiritResurrect`,
-/// `NPCHandler.cpp:430-477`): res at 50%, 25% durability loss on ALL items, resurrection sickness
-/// 15007 at level ≥ 11 (scaling duration to 10 min at 20+), corpse → bones, teleport to the
-/// corpse-nearest graveyard when it differs from the current one.
+/// `CMSG_SPIRIT_HEALER_ACTIVATE` body: the healer's full guid (`Npc.cpp:40-43`), within 5 yd. The
+/// server resurrects at 50% with 25% durability loss and, from level 11, sickness
+/// (`NPCHandler.cpp:430-477`).
 pub fn spirit_healer_activate(npc: u64) -> Vec<u8> {
     npc.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_RESURRECT_RESPONSE` (opcode `0x15C`/348 — VERIFIED `Opcodes_1_12_1.h:349`): the
-/// offerer's `u64` guid + `u8 accept` (VERIFIED `Server/Packets/Misc.cpp:132-136`). A decline just
-/// clears the server-side offer; an accept teleports us to the caster (cross-instance redirected to
-/// the entrance) and resurrects with the offer's stored health/mana (`Player.cpp:20188-20244`).
+/// `CMSG_RESURRECT_RESPONSE` body: the offerer's guid and `u8 accept` (`Misc.cpp:132-136`); an
+/// accept moves us to the caster and resurrects us (`Player.cpp:20188-20244`).
 pub fn resurrect_response(caster: u64, accept: bool) -> Vec<u8> {
     let mut body = Vec::with_capacity(9);
     body.extend_from_slice(&caster.to_le_bytes());
@@ -145,9 +105,7 @@ pub fn resurrect_response(caster: u64, accept: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// The found shape, byte-exact against `HandleCorpseQueryOpcode`'s build (`QueryHandler.cpp:
-    /// 296-303`): `u8(1) << i32(mapid) << f32(x) << f32(y) << f32(z) << u32(corpsemapid)` — here a
-    /// corpse on Eastern Kingdoms (0) at Northshire-ish coords, no entrance adjustment.
+    /// Built as `HandleCorpseQueryOpcode` builds it (`QueryHandler.cpp:296-303`).
     #[test]
     fn corpse_query_found_golden() {
         let mut body = vec![1u8];
@@ -170,8 +128,7 @@ mod tests {
         );
     }
 
-    /// The not-found shape is the lone `u8(0)` (`QueryHandler.cpp:262-267`) — also pushed
-    /// unprompted at bones-conversion (`Map.cpp:3624-3629`).
+    /// The lone `u8(0)` of `QueryHandler.cpp:262-267`.
     #[test]
     fn corpse_query_not_found_golden() {
         let body = [0u8];
@@ -182,8 +139,7 @@ mod tests {
         assert_eq!(loc.corpse_map, 0);
     }
 
-    /// A dungeon corpse: `mapid`/coords rewritten to the ghost entrance, `corpsemapid` kept real
-    /// (`QueryHandler.cpp:276-292`) — the two-map split the marker consumer relies on.
+    /// A dungeon corpse's entrance map and real map (`QueryHandler.cpp:276-292`).
     #[test]
     fn corpse_query_dungeon_entrance_split() {
         let mut body = vec![1u8];
@@ -191,14 +147,14 @@ mod tests {
         body.extend_from_slice(&(-11209.6f32).to_le_bytes()); // Deadmines entrance-ish
         body.extend_from_slice(&1666.54f32.to_le_bytes());
         body.extend_from_slice(&25.0f32.to_le_bytes());
-        body.extend_from_slice(&36u32.to_le_bytes()); // the corpse's REAL map: Deadmines
+        body.extend_from_slice(&36u32.to_le_bytes()); // the corpse's real map: Deadmines
         let mut r = body.as_slice();
         let loc = read_corpse_query_response(&mut r).unwrap();
         assert_eq!(loc.display_map, 0);
         assert_eq!(loc.corpse_map, 36);
     }
 
-    /// `SMSG_CORPSE_RECLAIM_DELAY` is one `u32` of milliseconds (`Misc.cpp:653-656`; 30 s base).
+    /// One `u32` of ms (`Misc.cpp:653-656`); 30 s is the base delay.
     #[test]
     fn corpse_reclaim_delay_golden() {
         let body = 30_000u32.to_le_bytes();
@@ -207,9 +163,7 @@ mod tests {
         assert!(r.is_empty());
     }
 
-    /// A player-caster offer, byte-exact against `Spell::SendResurrectRequest` (`Spell.cpp:
-    /// 5024-5044`): empty name (len prefix 1 = just the terminator), sickness 0 (a player res
-    /// spell), hasResTimer 1 (no `SPELL_ATTR_EX3_NO_RES_TIMER`).
+    /// Built as `Spell::SendResurrectRequest` builds a player's offer (`Spell.cpp:5024-5044`).
     #[test]
     fn resurrect_request_player_caster_golden() {
         let mut body = Vec::new();
@@ -232,8 +186,7 @@ mod tests {
         );
     }
 
-    /// An NPC-caster offer carries the creature's localized name and (for a spirit-healer-style
-    /// caster) the sickness warning bit.
+    /// A spirit healer's offer as `Spell::SendResurrectRequest` builds it: named, with sickness.
     #[test]
     fn resurrect_request_npc_caster_golden() {
         let name = b"Spirit Healer";
@@ -243,12 +196,19 @@ mod tests {
         body.extend_from_slice(name);
         body.push(0);
         body.push(1); // sickness = true
-        body.push(1);
+        body.push(1); // hasResTimer = true
         let mut r = body.as_slice();
         let req = read_resurrect_request(&mut r).unwrap();
         assert!(r.is_empty());
-        assert_eq!(req.name, "Spirit Healer");
-        assert!(req.sickness);
+        assert_eq!(
+            req,
+            ResurrectRequestBody {
+                caster: 0xF130_0FBE_0000_2AB3,
+                name: "Spirit Healer".into(),
+                sickness: true,
+                has_timer: true,
+            }
+        );
     }
 
     /// `SMSG_SPIRIT_HEALER_CONFIRM` is one full guid (`SpellEffects.cpp:825-829`).
@@ -263,8 +223,6 @@ mod tests {
         assert!(r.is_empty());
     }
 
-    /// The three client bodies: full little-endian guids (+ the accept byte), matching the server
-    /// readers quoted on each builder.
     #[test]
     fn client_bodies_are_full_guids() {
         assert_eq!(
@@ -281,19 +239,21 @@ mod tests {
         let mut expect = 0x2Au64.to_le_bytes().to_vec();
         expect.push(0);
         assert_eq!(resurrect_response(0x2A, false), expect);
+        assert_eq!(
+            area_spirit_healer(0xF130_0033_3C00_0010),
+            0xF130_0033_3C00_0010u64.to_le_bytes().to_vec()
+        );
     }
 }
 
-/// `SMSG_AREA_SPIRIT_HEALER_TIME` (VERIFIED, wow-re `staticpopup-dialog-bindings.md` §6, arm
-/// `0x48fa29`): the battleground spirit healer's guid and the milliseconds to its next
-/// resurrection wave. Decision 1963.
+/// `SMSG_AREA_SPIRIT_HEALER_TIME`: a battleground spirit healer's guid and the ms until its next
+/// resurrection wave (client `0x48fa29`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AreaSpiritHealerTime {
     pub healer: u64,
     pub ms: u32,
 }
 
-/// Parse `SMSG_AREA_SPIRIT_HEALER_TIME`: `u64 guid`, `u32 ms`.
 pub(super) fn read_area_spirit_healer_time(
     r: &mut impl std::io::Read,
 ) -> std::io::Result<AreaSpiritHealerTime> {
@@ -303,8 +263,8 @@ pub(super) fn read_area_spirit_healer_time(
     })
 }
 
-/// Body of `CMSG_AREA_SPIRIT_HEALER_QUERY` / `CMSG_AREA_SPIRIT_HEALER_QUEUE` (VERIFIED, §6): one
-/// `u64`, the healer's guid — the query when the client adopts a healer, the queue on Accept.
+/// `CMSG_AREA_SPIRIT_HEALER_QUERY` or `_QUEUE` body: the healer's guid; the client queries when it
+/// adopts a healer and queues on accept.
 pub fn area_spirit_healer(healer: u64) -> Vec<u8> {
     healer.to_le_bytes().to_vec()
 }

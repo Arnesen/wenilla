@@ -1,50 +1,29 @@
-//! The shared movement vocabulary: the `MovementInfo` body (+ its `JumpInfo` ballistic tail and
-//! `TransportPose` rider tail) every `MSG_MOVE_*` relay carries, its flag bits, and the parse — read by
-//! the update-object living block and [`super`]'s relay arms, written by [`super::client`]'s outbound
-//! movement.
+//! The `MovementInfo` body every `MSG_MOVE_*` carries, its flag bits, and the movement verbs.
 
 use std::io::{self, Read};
 
 use crate::wire::{read_f32_le, read_u32_le, read_u64_le, Vector3d};
 
-// MovementFlags bits, shared by the living [`MovementBlock`](super::MovementBlock) (in
-// `update_object`) and the client [`MovementInfo`] parse ([`read_movement_info`]) below.
-// ON_TRANSPORT is 1.12's bit 25 (vmangos `MovementInfo.h:56` `MOVEFLAG_ONTRANSPORT = 0x02000000`)
-// — NOT the TBC-era 0x200, which in vanilla is `MOVEFLAG_UNUSED10`. The original transcription
-// carried 0x200; caught 2026-07-17 against the vmangos source when riding (0438 phase 2) landed.
+// MovementFlags bits (vmangos `MovementInfo.h`). ON_TRANSPORT is 1.12's 0x0200_0000
+// (`MovementInfo.h:56`), not TBC's 0x200, which 1.12 names `MOVEFLAG_UNUSED10`.
 pub(super) const MOVEMENT_FLAG_ON_TRANSPORT: u32 = 0x0200_0000;
 pub(super) const MOVEMENT_FLAG_JUMPING: u32 = 0x2000;
 pub(super) const MOVEMENT_FLAG_SWIMMING: u32 = 0x20_0000;
 pub(super) const MOVEMENT_FLAG_SPLINE_ENABLED: u32 = 0x40_0000;
 pub(super) const MOVEMENT_FLAG_SPLINE_ELEVATION: u32 = 0x400_0000;
 
-/// Read `MSG_MOVE_TIME_SKIPPED` — one observed mover's **packed** guid and the milliseconds its
-/// own client skipped (VERIFIED: the reference's handler `0x603b40` reads a packed guid through
-/// `0x642ed0`, resolves under `TYPEMASK_UNIT`, then reads a plain `u32`; vmangos relays exactly
-/// that shape, `MovementHandler.cpp:1011-1017`).
-///
-/// Note the **asymmetry with the client's own send**, which is the same fact in the other
-/// direction and writes a *plain* 8-byte guid (see [`super::client::move_time_skipped`]).
-/// Inbound packed, outbound plain — that is the reference's own encoding, not a slip.
+/// `MSG_MOVE_TIME_SKIPPED` inbound: a packed guid and the ms that mover's client skipped
+/// (reference handler `0x603b40`; vmangos `MovementHandler.cpp:1011-1017`). Our own send uses a
+/// plain 8-byte guid ([`super::client::move_time_skipped`]); the asymmetry is the reference's.
 pub(super) fn read_move_time_skipped(r: &mut &[u8]) -> io::Result<(u64, u32)> {
     let guid = crate::wire::read_packed_guid(r)?;
     let lag_ms = read_u32_le(r)?;
     Ok((guid, lag_ms))
 }
 
-/// Read a wire `MovementInfo` — the body shared by every `MSG_MOVE_*` (and the teleport ack). Surfaces
-/// `flags`/`position`/`orientation`/`timestamp`/`fall_time`, the **transport pose** ([`TransportPose`],
-/// present iff `MOVEFLAG_ON_TRANSPORT` — this is how a boarded rider's `MSG_MOVE_*` heartbeat carries
-/// its local frame, decision 0438 "Riding is the mover's platform frame"), the **swim pitch**
-/// (`Self::pitch`, present iff `MOVEFLAG_SWIMMING`), and the **jump tail** ([`JumpInfo`], so an
-/// observer can replay a jump arc); the spline-elevation tail is parsed to stay aligned but discarded.
-///
-/// VERIFIED byte-for-byte against vmangos `MovementInfo::Read` (build 1.12.1): note 1.12 has **no**
-/// transport-time field after the transport pose — that was added in TBC. (The `update_object`
-/// movement-block transport read, proven against `wow_world_messages`, omits it for the same reason.)
-/// The **swim pitch** is a lone `f32` after the (optional) transport pose and before `fallTime`, gated on
-/// `MOVEFLAG_SWIMMING`. `fallTime` is a `u32` and the jump tail (gated on `MOVEFLAG_JUMPING`) is `zspeed,
-/// cosAngle, sinAngle, xyspeed`, after `fallTime` and before the spline-elevation float.
+/// vmangos `MovementInfo::Read` order: flags, time, position, facing, the transport pose if
+/// `ON_TRANSPORT` (1.12 has no transport time), the swim pitch if `SWIMMING`, `u32` fall time, the
+/// jump tail if `JUMPING`, then a spline-elevation `f32` if `SPLINE_ELEVATION`, read and dropped.
 pub(super) fn read_movement_info(r: &mut impl Read) -> io::Result<MovementInfo> {
     let flags = read_u32_le(r)?;
     let timestamp = read_u32_le(r)?;
@@ -52,9 +31,7 @@ pub(super) fn read_movement_info(r: &mut impl Read) -> io::Result<MovementInfo> 
     let orientation = read_f32_le(r)?;
     let transport = if flags & MOVEMENT_FLAG_ON_TRANSPORT != 0 {
         Some(TransportPose {
-            // A FULL u64, not packed: vmangos `data >> t_guid` resolves to the plain
-            // `ObjectGuid` operator (`ObjectGuid.cpp:180`, `buf.read<uint64>()`); the packed
-            // reader is a distinct operator this path never uses.
+            // A full u64, not packed (vmangos `ObjectGuid.cpp:180`, `buf.read<uint64>()`).
             guid: read_u64_le(r)?,
             pos: Vector3d::read(r)?,
             orientation: read_f32_le(r)?,
@@ -93,11 +70,10 @@ pub(super) fn read_movement_info(r: &mut impl Read) -> io::Result<MovementInfo> 
     })
 }
 
-// --- shared movement vocabulary (read by the arms above, written by `client`) ---------------------
+// --- movement vocabulary ---
 
-/// Which of a mover's six movement speeds a force-speed-change packet addresses — the wire family's
-/// shared axis (each kind is its own SMSG/CMSG opcode pair; see [`super::opcode`]'s force-speed
-/// block). Order matches the `LIVING` block's speed array and vmangos `UnitMoveType`.
+/// A mover speed, each with its own force-change opcode pair; the order is the `LIVING` block's
+/// speed array and vmangos `UnitMoveType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpeedKind {
     Walk,
@@ -123,25 +99,11 @@ impl SpeedKind {
     }
 }
 
-/// **A granted mover *mode*** — one of the four the server hands the controlling client, each a
-/// single `MOVEMENTFLAGS` bit that changes how the mover behaves rather than where it is going
-/// (decision 0866). Sibling of [`SpeedKind`]: same shape (a mode per opcode pair, an ack per mode),
-/// same reason for existing — the server treats the set as one family (`IsFlagAckOpcode`,
-/// `MovementChangeType`), so we do too, and a fifth mode is a variant rather than a new lane.
-///
-/// The bit values are 1.12's, VERIFIED vmangos `Objects/MovementInfo.h:25-62`. What each one *does*
-/// is the client's own business — the server only grants it — and all four are byte-verified in the
-/// reference's CMovement setter cluster (`0x7c7280`–`0x7c7370`, wow-re `system/collision`):
-///
-/// | mode | bit | reference effect | granted by |
-/// |---|---|---|---|
-/// | [`Root`](Self::Root) | `0x0000_1000` | translation dies; the fall stops. **Turning stays live**, by the input tick's authored allow-list (`0x618054`). | root/stun/death |
-/// | [`WaterWalk`](Self::WaterWalk) | `0x1000_0000` | the liquid surface becomes walkable ground | `SPELL_AURA_WATER_WALK` (104) |
-/// | [`FeatherFall`](Self::FeatherFall) | `0x2000_0000` | terminal fall velocity drops to 7 yd/s from 60.148 (`0x7c5d20`) | `SPELL_AURA_FEATHER_FALL` (105) |
-/// | [`Hover`](Self::Hover) | `0x4000_0000` | ground contact rises by 1.0 yd (walk resolver `0x6367b0`) | `SPELL_AURA_HOVER` (106) |
-///
-/// **Levitate (1706) grants three of them at once** — feather fall + hover + water walk — which is
-/// what makes them one system rather than four coincidences.
+/// A mode the server grants the controlling client, one `MOVEMENTFLAGS` bit each (vmangos
+/// `MovementInfo.h:25-62`, reference setters `0x7c7280`-`0x7c7370`). Root stops translation and
+/// falling but not turning (`0x618054`); water walk makes liquid walkable (aura 104); feather fall
+/// caps the fall at 7 yd/s instead of 60.148 (aura 105, `0x7c5d20`); hover lifts ground contact by
+/// 1.0 yd (aura 106, `0x6367b0`). Levitate (spell 1706) grants the last three at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveMode {
     Root,
@@ -161,8 +123,8 @@ impl MoveMode {
         }
     }
 
-    /// The `CMSG_*_ACK` opcode answering this mode's SMSG. Root is the only mode whose two
-    /// directions ack on *different* opcodes (vmangos routes both to `HandleMoveRootAck`).
+    /// The `CMSG_*_ACK` answering this mode's SMSG. Only root acks apply and remove on different
+    /// opcodes (vmangos routes both to `HandleMoveRootAck`).
     pub fn ack_opcode(self, apply: bool) -> u16 {
         use super::opcode;
         match (self, apply) {
@@ -174,53 +136,32 @@ impl MoveMode {
         }
     }
 
-    /// Whether the ack body carries the trailing `u32 apply` dword. Root's does **not**: it lands on
-    /// vmangos's `HandleMoveRootAck` (which infers apply from the opcode), while the other three land
-    /// on `HandleMovementFlagChangeToggleAck`, which reads it (`Server/Packets/Movement.cpp:38-59`).
+    /// Whether the ack ends in a `u32 apply`: not root's, whose handler infers it from the opcode
+    /// (vmangos `Server/Packets/Movement.cpp:38-59`).
     pub fn ack_carries_apply(self) -> bool {
         !matches!(self, MoveMode::Root)
     }
 }
 
-/// **A movement mode granted on a unit we do not control** — the `SMSG_SPLINE_MOVE_*` twelve
-/// (decision 1780), the observer half of [`MoveMode`]'s family.
-///
-/// Same bits, and for the four they share the same reference setters — but it is a *different
-/// message*, and the three differences are what the type exists to keep straight:
-///
-/// 1. **No counter and no ack.** The controller's family is a handshake (`packed guid + u32
-///    counter`, ack or the server never applies it); this one is a bare `packed guid` broadcast.
-///    The client's handler `0x603c80` replies to nothing.
-/// 2. **Any unit.** `0x603c80` resolves the guid with `TYPEMASK_UNIT` and applies to whatever it
-///    finds — normally a creature, since vmangos only takes this leg for a unit *not* being moved
-///    by a player (`Unit::SetRooted`/`SetWaterWalking`/`SetFeatherFall`/`SetHover`'s `else` arm,
-///    and `SendToggleRunWalkToAll` unconditionally).
-/// 3. **Two extra modes.** [`WalkMode`](Self::WalkMode) and [`Swimming`](Self::Swimming) have no
-///    ack'd counterpart at all.
-///
-/// [`Swimming`](Self::Swimming) is modelled but vmangos never sends it — nothing in the tree
-/// constructs `SMSG_SPLINE_MOVE_START_SWIM`/`_STOP_SWIM`, and `Opcodes.cpp:888` marks both
-/// `SendByServer`-only. The client handles them (`0x61a130`/`0x61a160`), so we decode them; on this
-/// server they are dead wire.
+/// A mode set on a unit we do not control, by the twelve `SMSG_SPLINE_MOVE_*`: a bare packed guid,
+/// no counter, no ack (client handler `0x603c80`, any unit). vmangos sends the four shared modes
+/// only for units no player moves, and walk/run always. Walk mode and swimming have no acked form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplineMode {
     Root,
     WaterWalk,
     FeatherFall,
     Hover,
-    /// `MOVEFLAG_WALK_MODE` (`0x100`) — the gait selector. **`apply` here is the flag's direction,
-    /// not the opcode's noun**: `SMSG_SPLINE_MOVE_SET_WALK_MODE` is `apply: true` and
-    /// `..._SET_RUN_MODE` is `apply: false`, because the reference's `0x617e80` passes the opcode's
-    /// bool to `SetRunMode 0x7c71c0`, whose argument is *run*. The inversion is folded at the parse
-    /// so every variant of this enum means the same thing by "apply".
+    /// `MOVEFLAG_WALK_MODE` (`0x100`); `apply` is the flag's direction, so `SET_WALK_MODE` applies
+    /// and `SET_RUN_MODE` removes (the reference `0x617e80` feeds `SetRunMode`, `0x7c71c0`).
     WalkMode,
-    /// `MOVEFLAG_SWIMMING` (`0x20_0000`) — `SMSG_SPLINE_MOVE_START_SWIM`/`_STOP_SWIM`. Never sent by
-    /// vmangos (see the type docs).
+    /// `MOVEFLAG_SWIMMING` (`0x20_0000`), by `START_SWIM`/`STOP_SWIM`. The reference handles them
+    /// (`0x61a130`, `0x61a160`); vmangos never sends them (`Opcodes.cpp:888`).
     Swimming,
 }
 
 impl SplineMode {
-    /// This mode's `MOVEMENTFLAGS` bit — the same word [`MoveMode::flag`] writes into.
+    /// This mode's `MOVEMENTFLAGS` bit, in the same word as [`MoveMode::flag`].
     pub fn flag(self) -> u32 {
         match self {
             SplineMode::Root => 0x0000_1000,
@@ -233,55 +174,29 @@ impl SplineMode {
     }
 }
 
-/// **What the opcode of a relayed move means**, beyond the pose every one of them carries — the
-/// receiver's switch, modelled once (decision 2064).
-///
-/// The `[packed guid][MovementInfo]` relay family is 23 opcodes on ONE client handler (`0x603bb0` →
-/// `OnUnitMoveEvent 0x601580`), and for most of them the opcode is pure narration: the flags word in
-/// the body already says what changed, and `0x601580`'s parse runs *before* it even loads the opcode
-/// (`0x47eba0` at `0x6015ce`). Three cases are not narration, and this enum is exactly those three —
-/// VERIFIED against the binary in wow-re's `collision/scratch/movement-relay-family-map.md`, which
-/// maps all thirty rows.
-///
-/// Deliberately one field rather than a bag of booleans: they are disjoint (one opcode per packet)
-/// and the set is closed, so an enum forces every receiver to say what it does with each — which is
-/// how the mistake below was possible for as long as it was.
+/// What a relayed move's opcode means beyond its pose. The 23 `[packed guid][MovementInfo]` relays
+/// share one reference handler (`0x603bb0`, `0x601580`), and for most the opcode adds nothing the
+/// flags word does not say. The variants beyond `Pose` name the opcodes a receiver tells apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RelayVerb {
-    /// The ordinary pose stream: start/stop/strafe/jump/turn/pitch/swim/fall-land/set-facing,
-    /// walk-vs-run mode, the observer's hover / feather-fall / water-walk, and the knockback relay.
-    /// The opcode adds nothing the flags word does not already carry.
+    /// Every other relay (start, stop, strafe, jump, turn, swim, land, facing, modes, knockback).
     #[default]
     Pose,
-    /// `MSG_MOVE_HEARTBEAT` — the periodic mid-move pulse.
-    ///
-    /// **It is NOT excluded from the pre-fire reconcile, and believing otherwise was a two-year
-    /// error** (decision 2064, correcting 0601/0603). The queued move-event node's tag `0x26`, which
-    /// `0x619030` (facing interp) and `0x619090` (position reconcile) both skip, is the
-    /// **teleport's**, not the heartbeat's — `push 0x26` appears at exactly two addresses in the
-    /// movement region, `0x6186bd` and `0x618736`, both inside functions reached only from the
-    /// teleport arms (`0x602fb0`, whose other branch sends `push 0xc7` = `MSG_MOVE_TELEPORT_ACK`).
-    /// A deferred heartbeat *is* eligible for both blends. The variant survives the correction
-    /// because the distinction is still worth tracing.
+    /// `MSG_MOVE_HEARTBEAT`, the periodic mid-move pulse. Both reference blends apply to it
+    /// (`0x619030`, `0x619090`); the tag they skip, `0x26`, is only pushed for a teleport.
     Heartbeat,
-    /// `MSG_MOVE_TELEPORT` — the observer's near-teleport (a Blink, a `.tele`). **The one opcode of
-    /// the thirty the client never smooths toward**: tag `0x26`, skipped by both blends. Every relay
-    /// snaps the pose (`0x7c6420` writes the wire pose into the live position *and* the integrator
-    /// base); this one additionally re-bases the mover, zeroes the interp cells `[cmov+0x148]`/
-    /// `[cmov+0x14c]` via `0x617e90`, and past 30.0 yd forces a world re-anchor.
+    /// `MSG_MOVE_TELEPORT`, an observed near-teleport (Blink, `.tele`): the one relay the client
+    /// never smooths toward (tag `0x26`). It also re-bases the mover, zeroes its interpolation
+    /// (`0x617e90`) and past 30 yd re-anchors the world.
     Teleport,
-    /// `MSG_MOVE_ROOT` (`true`) / `MSG_MOVE_UNROOT` (`false`) — the one place in this family where
-    /// **the opcode decides and the flags word does not get a vote**. After the masked merge, the
-    /// client runs `SetRoot 0x7c7340` (`or 0x1000`, then the one-shot motion wipe `& 0xffe07f00`) or
-    /// `ClearRoot 0x7c7370` (`and ~0x1000`) unconditionally. vmangos happens to send a word that
-    /// already agrees — it forces `MOVEFLAG_ROOT` back on for a rooted mover
-    /// (`MovementHandler.cpp:1070`) — so honouring the opcode changes nothing today and makes the
-    /// root independent of the server continuing to be careful.
+    /// `MSG_MOVE_ROOT` (`true`) / `MSG_MOVE_UNROOT` (`false`): the opcode, not the flags word,
+    /// decides. The client then runs `SetRoot` (`0x7c7340`, also wiping motion) or `ClearRoot`
+    /// (`0x7c7370`) unconditionally; vmangos's flags already agree (`MovementHandler.cpp:1070`).
     Root(bool),
 }
 
 impl RelayVerb {
-    /// Which verb a relay opcode carries. Anything not named here is [`Self::Pose`].
+    /// The verb a relay opcode carries.
     pub fn of(opcode: u16) -> Self {
         use super::opcode as op;
         match opcode {
@@ -294,77 +209,43 @@ impl RelayVerb {
     }
 }
 
-/// One jump's ballistic launch parameters — the conditional `MovementInfo` tail present iff the
-/// `MOVEFLAG_JUMPING` (0x2000) flag is set. VERIFIED byte-for-byte against vmangos `MovementInfo::Read`
-/// (build 1.12.1): wire order is `zspeed, cosAngle, sinAngle, xyspeed` (note cos *before* sin). The
-/// horizontal launch velocity is `(cos_angle, sin_angle) · xy_speed` in **world XY** (absolute, frozen
-/// at take-off) and `zspeed` is the constant take-off vertical speed (+Z up); the resulting arc is
-/// `pos += horiz·t`, `z += zspeed·t − ½·g·t²` (the same `g = 19.291105` the controller uses). This is
-/// what lets a receiver replay a jump as one ballistic event between packets rather than snapping its
-/// height at the packet rate (decision 0053). Corroborated by vmangos `Unit.cpp` `ExtrapolateMovement`,
-/// which integrates exactly this arc from the same fields.
+/// The `JUMPING` tail: `zspeed, cosAngle, sinAngle, xyspeed`, cos before sin (vmangos
+/// `MovementInfo::Read`). The launch is `(cos, sin) * xy_speed` in world XY, frozen at take-off,
+/// so a receiver can replay the arc under `g = 19.291105` (vmangos `ExtrapolateMovement`).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct JumpInfo {
-    /// Take-off vertical speed (yd/s), constant for the whole arc, **down-positive**: the real 1.12.1
-    /// client sends `-7.955547` for a *rising* jump (VERIFIED, vanilla-sniffs `dwarf_rogue_dun_morogh`).
-    /// The receiver's up-speed is therefore `-zspeed` (decision 0054).
+    /// Take-off vertical speed (yd/s), down-positive: the 1.12 client sends `-7.955547` for a
+    /// rising jump, so the up-speed is `-zspeed`.
     pub zspeed: f32,
-    /// Cosine of the horizontal launch heading (the X component of the unit launch direction, world XY).
     pub cos_angle: f32,
-    /// Sine of the horizontal launch heading (the Y component, world XY).
     pub sin_angle: f32,
     /// Horizontal launch speed (yd/s); the frozen ground speed at take-off.
     pub xy_speed: f32,
 }
 
-/// A rider's pose **relative to the transport it's on** — the `MOVEFLAG_ON_TRANSPORT` (0x0200_0000)
-/// conditional tail carried by both a `LIVING` update-object movement block (`MovementBlock::transport`,
-/// in `update_object`) and a `MSG_MOVE_*` relay's `MovementInfo` ([`Self::transport`]): `[u64
-/// transport guid][local x, y, z][local o]`. VERIFIED byte-for-byte against vmangos `MovementInfo::Read`
-/// (build 1.12.1) — the guid is a FULL u64 (never packed here), and 1.12 carries **no**
-/// transport-time field after this (added TBC).
-/// `pos`/`orientation` are in the transport's own local frame (decision 0438 "Riding is the mover's
-/// platform frame"): a consumer composes `world = transport_matrix × local` off the named transport's
-/// live pose each frame, never treats these as raw world coordinates.
+/// The `ON_TRANSPORT` tail of `MovementInfo` and of a `LIVING` block: a full `u64` transport guid,
+/// then position and facing in the transport's own frame (vmangos `MovementInfo::Read`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TransportPose {
-    /// The transport GameObject's guid (`HIGH_MO_TRANSPORT` or `HIGH_TRANSPORT` — [`crate::guid`]).
+    /// The transport GameObject's guid, `HIGH_MO_TRANSPORT` or `HIGH_TRANSPORT`.
     pub guid: u64,
     pub pos: Vector3d,
     pub orientation: f32,
 }
 
-/// A wire `MovementInfo` — the body shared by every `MSG_MOVE_*` (both directions) and the teleport
-/// ack. benilla sets the base directional/turn/walk flags, `JUMPING` while airborne, `SWIMMING`
-/// while in the water, and `ON_TRANSPORT` (+ the [`TransportPose`] tail) while riding a boat/zepp
-/// (decision 0438 phase 2). The transport, swim-pitch, and jump tails are conditional
-/// outbound, gated on their flags. Inbound, every conditional tail is parsed (see
-/// [`read_movement_info`]) — the transport pose into [`Self::transport`], the swim pitch into
-/// `Self::pitch`, the jump tail into [`Self::jump`], and the spline-elevation float to stay aligned
-/// only (no consumer needs it).
+/// The body of every `MSG_MOVE_*`, in both directions, and of the teleport ack.
 pub struct MovementInfo {
     pub flags: u32,
     pub timestamp: u32,
     pub position: Vector3d,
     pub orientation: f32,
-    /// The sender's pose on a transport — `Some` iff `flags & MOVEMENT_FLAG_ON_TRANSPORT`, carried
-    /// right after `orientation` and before the swim-pitch tail (VERIFIED order vs vmangos
-    /// `MovementInfo::Read`). This is how another rider's `MSG_MOVE_*` heartbeat tells us they're on a
-    /// boat/elevator and where, in that transport's local frame.
+    /// `Some` iff `ON_TRANSPORT` is set: the sender's pose in the transport's frame.
     pub transport: Option<TransportPose>,
-    /// The **swim pitch** (radians, +up) — the conditional `f32` tail present iff `flags &
-    /// MOVEMENT_FLAG_SWIMMING`, carried after the orientation/transport pose and before `fall_time`
-    /// (VERIFIED order vs vmangos `MovementInfo::Read`). It is the vertical angle of the swim heading, so
-    /// observers can pitch a swimming body up/down the way the local client does. `0.0` (level) when not
-    /// swimming — the serializer only emits it while the `SWIMMING` flag is set, so a zero here on a
-    /// non-swimming packet costs nothing.
+    /// Swim pitch in radians, up-positive; on the wire only while `SWIMMING`, else read as `0.0`.
     pub pitch: f32,
-    /// Milliseconds airborne — a **`u32`** on the wire (VERIFIED vmangos `MovementInfo::fallTime`; it
-    /// was read+written as an f32 while discarded, harmless then but wrong once consumed). The
-    /// receiver's ballistic clock: current vertical speed is `zspeed − g·(fall_time/1000)`.
+    /// Milliseconds airborne, a `u32` (vmangos `MovementInfo::fallTime`): the jump arc's clock.
     pub fall_time: u32,
-    /// The jump tail — `Some` iff `flags & MOVEMENT_FLAG_JUMPING`. The launch params an observer
-    /// replays the arc from.
+    /// `Some` iff `JUMPING` is set: the launch an observer replays the arc from.
     pub jump: Option<JumpInfo>,
 }
 
@@ -376,11 +257,7 @@ impl MovementInfo {
         w.extend_from_slice(&self.position.y.to_le_bytes());
         w.extend_from_slice(&self.position.z.to_le_bytes());
         w.extend_from_slice(&self.orientation.to_le_bytes());
-        // The transport tail rides iff ON_TRANSPORT is set — right after `orientation`, before the
-        // swim pitch, matching vmangos `MovementInfo::Read` exactly: `[u64 guid][local x,y,z][local
-        // o]` (the guid is a FULL u64 — see `read_movement_info`). Flag and tail must travel
-        // together or the server's read desyncs; the caller sets both from one rider state
-        // (decision 0438 "Riding is the mover's platform frame").
+        // Each conditional tail must travel with its flag or vmangos `MovementInfo::Read` desyncs.
         if self.flags & MOVEMENT_FLAG_ON_TRANSPORT != 0 {
             let t = self.transport.unwrap_or(TransportPose {
                 guid: 0,
@@ -397,18 +274,10 @@ impl MovementInfo {
             w.extend_from_slice(&t.pos.z.to_le_bytes());
             w.extend_from_slice(&t.orientation.to_le_bytes());
         }
-        // The swim-pitch tail rides iff SWIMMING is set — after the transport pose and before
-        // `fall_time`, matching `read_movement_info`'s gate and order exactly: setting the flag
-        // without serializing the pitch (or vice-versa) desyncs the server's `MovementInfo::Read`,
-        // the reason this bit was masked off the wire until now.
         if self.flags & MOVEMENT_FLAG_SWIMMING != 0 {
             w.extend_from_slice(&self.pitch.to_le_bytes());
         }
-        // fall_time follows the transport + swim-pitch tails.
         w.extend_from_slice(&self.fall_time.to_le_bytes());
-        // The jump tail rides iff JUMPING is set — matching the parser's gate exactly: setting the flag
-        // without serializing the tail (or vice-versa) desyncs the server's `MovementInfo::Read`. Order
-        // matches vmangos: zspeed, cosAngle, sinAngle, xyspeed.
         if self.flags & MOVEMENT_FLAG_JUMPING != 0 {
             let j = self.jump.unwrap_or_default();
             w.extend_from_slice(&j.zspeed.to_le_bytes());
@@ -441,9 +310,6 @@ mod tests {
         }
     }
 
-    /// The swim-pitch tail round-trips byte-exactly through `write` → `read_movement_info` when
-    /// SWIMMING is set: the reason the flag was masked off the wire (an unwritten tail desyncing the
-    /// server's `MovementInfo::Read`) is closed only if write and read agree on gate + order.
     #[test]
     fn swim_pitch_round_trips_when_swimming() {
         let mut bytes = Vec::new();
@@ -458,10 +324,6 @@ mod tests {
         );
     }
 
-    /// The transport tail round-trips byte-exactly through `write` → `read_movement_info` when
-    /// ON_TRANSPORT is set: `[u64 guid][x,y,z][o]` right after `orientation` (vmangos
-    /// `MovementInfo::Read`/`Write` order), 24 bytes exactly — a packed guid or the TBC 0x200
-    /// flag value would both shift `fall_time` and desync the server.
     #[test]
     fn transport_tail_round_trips_when_riding() {
         let mut riding = info(MOVEMENT_FLAG_ON_TRANSPORT);
@@ -491,8 +353,6 @@ mod tests {
         assert_eq!(back.fall_time, 42, "fall_time lands after the tail");
     }
 
-    /// Non-swimming packets carry NO pitch tail — the four pitch bytes are absent, so the wire stays
-    /// byte-identical to before this tail existed (and `fall_time` reads from the right offset).
     #[test]
     fn no_pitch_tail_when_not_swimming() {
         let mut swimming = Vec::new();

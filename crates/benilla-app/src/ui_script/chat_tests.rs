@@ -67,6 +67,7 @@ fn close(a: f32, b: f32) -> bool {
 
 #[test]
 fn injected_lines_render_in_the_pinned_colors() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     // The app's feed passes 0..1 floats from the pinned type→color table; the seam quantizes them.
     // SAY white (FFFFFF), SYSTEM yellow (FFFF00 — the GM-feedback color), LOOT green (00AA00).
@@ -104,6 +105,7 @@ fn injected_lines_render_in_the_pinned_colors() {
 
 #[test]
 fn newest_line_sits_at_the_bottom() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     s.add_chat_message("ChatFrame1", "older", 1.0, 1.0, 1.0);
     s.add_chat_message("ChatFrame1", "newer", 1.0, 1.0, 1.0);
@@ -124,11 +126,12 @@ fn newest_line_sits_at_the_bottom() {
 
 /// The whole fade round trip as it reaches a real chat window: a line ramps down, a scroll brings
 /// it back to full, the scrolled-up view then holds it there, and returning to the bottom lets it
-/// ramp again. The re-arm half is `msgframe-fade-rearm-law.md` — every scroll entry reaches
+/// ramp again. The re-arm half: every scroll entry reaches
 /// `0x788b80` or the relayout's `0x788af0`; before it, a faded-out chat could not be recovered by
 /// any input the client offers (director-reported, 2026-08-29).
 #[test]
 fn wheel_scroll_re_arms_the_fade_then_freezes_it() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     s.run("ChatFrame1:SetTimeVisible(0); ChatFrame1:SetFadeDuration(4)")
         .unwrap();
@@ -160,6 +163,7 @@ fn wheel_scroll_re_arms_the_fade_then_freezes_it() {
 
 #[test]
 fn input_editbox_enter_drains_the_typed_line() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     assert!(s.focus_editbox("ChatFrameEditBox"), "the edit box focuses");
     assert!(s.has_keyboard_focus(), "focus gates the world's keys");
@@ -184,6 +188,7 @@ fn input_editbox_enter_drains_the_typed_line() {
 
 #[test]
 fn input_escape_closes_without_submitting() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.char_input("hello");
@@ -198,6 +203,7 @@ fn input_escape_closes_without_submitting() {
 /// leave LEFT/RIGHT consumed-but-dead here, and an unpushed history would leave Up/Down empty.
 #[test]
 fn chat_box_arrows_edit_and_history_recalls() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::{EditAction, EditUnit};
     let mut s = chat_frame();
     assert!(s.focus_editbox("ChatFrameEditBox"));
@@ -265,6 +271,7 @@ fn chat_box_arrows_edit_and_history_recalls() {
 /// untouched (a silent item dismissal would be a destroy — only the world-drop popup offers that).
 #[test]
 fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
+    benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::{
         ContainerSlot, ContainerState, SpellBookState, SpellSlotView, SpellTabView,
     };
@@ -380,11 +387,12 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
 
 /// `ChatTypeInfo` carries the shipped default chat colors twice: once in
 /// `Interface\FrameXML\ChatFrame.xml` for addons to read, and once in
-/// [`crate::ui_chat::default_color`] for our own feed to render. Both are the same wow-re byte
-/// table (`chat-color-table.md`, the static registry at `.rdata 0x804710`) — so this is the gate
+/// [`crate::ui_chat::default_color`] for our own feed to render. Both are the same reference byte
+/// table (the static registry at `.rdata 0x804710`) — so this is the gate
 /// that makes the duplication safe: every kind we model must agree to the byte, and the table's shape (`sticky`/`id`) must be the reference's.
 #[test]
 fn chat_type_info_matches_the_host_color_table() {
+    benilla_formats::wow_data_or_skip!();
     use crate::ui_chat::{default_color, ChatEventKind as K};
 
     /// Each modeled kind and its `ChatTypeInfo` key — the reference's own spellings.
@@ -453,6 +461,7 @@ fn chat_type_info_matches_the_host_color_table() {
 /// extras. An addon reads `.sticky` and `.id` as often as it reads the color.
 #[test]
 fn chat_type_info_has_the_references_shape() {
+    benilla_formats::wow_data_or_skip!();
     let s = chat_frame();
 
     let count: i64 = s
@@ -518,6 +527,7 @@ fn chat_type_info_has_the_references_shape() {
 /// a matching table key fails here instead of shipping a name nothing can resolve.
 #[test]
 fn fired_event_names_are_all_chat_type_info_keys() {
+    benilla_formats::wow_data_or_skip!();
     use crate::ui_chat::{event_name, ChatEventKind as K};
 
     let s = chat_frame();
@@ -544,6 +554,7 @@ fn fired_event_names_are_all_chat_type_info_keys() {
 /// guard (`LazyPig.lua:1992`), so the constant without the frames is worse than neither.
 #[test]
 fn every_window_num_chat_windows_promises_is_a_real_frame() {
+    benilla_formats::wow_data_or_skip!();
     let s = chat_frame();
     assert_eq!(s.eval::<i64>("return NUM_CHAT_WINDOWS").unwrap(), 7);
     for i in 1..=7 {
@@ -561,6 +572,7 @@ fn every_window_num_chat_windows_promises_is_a_real_frame() {
 /// `getglobal(...):IsVisible()` that used to die at i=3.
 #[test]
 fn the_lazypig_window_walk_survives_all_seven_indices() {
+    benilla_formats::wow_data_or_skip!();
     let s = chat_frame();
     let visible: i64 = s
         .eval(
@@ -587,6 +599,7 @@ fn the_lazypig_window_walk_survives_all_seven_indices() {
 /// tabs (1575), so the Outfitter walk below is still safe.
 #[test]
 fn the_undocked_windows_are_hidden_and_carry_no_is_docked() {
+    benilla_formats::wow_data_or_skip!();
     let s = chat_frame();
     for i in 1..=2 {
         let docked: bool = s
@@ -626,6 +639,7 @@ fn the_undocked_windows_are_hidden_and_carry_no_is_docked() {
 /// frame will disagree about the same window. The drift guard between the Rust table and the XML.
 #[test]
 fn get_chat_window_info_shown_matches_the_shipped_frames() {
+    benilla_formats::wow_data_or_skip!();
     let s = chat_frame();
     for i in 1..=7 {
         let agrees: bool = s
@@ -650,6 +664,7 @@ fn get_chat_window_info_shown_matches_the_shipped_frames() {
 /// in ChatFrame3 and nowhere near the window the player is reading.
 #[test]
 fn a_line_added_to_chat_frame3_lands_in_chat_frame3_only() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     s.add_chat_message("ChatFrame1", "a real line", 1.0, 1.0, 1.0);
     s.run("ChatFrame3:AddMessage('Radar: debug', 1, 1, 0)")
@@ -683,6 +698,7 @@ fn a_line_added_to_chat_frame3_lands_in_chat_frame3_only() {
 /// reaches it, since both pass `DEFAULT_CHAT_FRAME`.
 #[test]
 fn fcf_select_dock_frame_selects_by_frame_and_leaves_an_undocked_one_alone() {
+    benilla_formats::wow_data_or_skip!();
     let s = chat_frame();
     s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
     let (one, two): (bool, bool) = (
@@ -733,6 +749,7 @@ fn fcf_select_dock_frame_selects_by_frame_and_leaves_an_undocked_one_alone() {
 /// next tick overwrites 0.42 with 0 and this goes red.
 #[test]
 fn an_idle_dock_stops_rewriting_the_tab_alpha_every_frame() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     s.mouse_move(1500.0, 850.0); // far from the dock: no hover, so `reveal` stays 0
     for _ in 0..8 {
@@ -758,6 +775,7 @@ fn an_idle_dock_stops_rewriting_the_tab_alpha_every_frame() {
 /// cursor over the dock for longer than `CHAT_TAB_SHOW_DELAY` fades the selected tab to full.
 #[test]
 fn hovering_the_dock_still_reveals_the_tabs() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     s.mouse_move(1500.0, 850.0);
     for _ in 0..4 {
@@ -798,6 +816,7 @@ fn hovering_the_dock_still_reveals_the_tabs() {
 /// 0.5s toggle; and scrolling back while the flash is LIT still hides it and zeroes the timer.
 #[test]
 fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     for t in ["L0", "L1", "L2"] {
         s.add_chat_message("ChatFrame1", t, 1.0, 1.0, 1.0);
@@ -866,6 +885,7 @@ fn a_chat_view_at_the_bottom_stops_rewriting_the_flash() {
 /// dead driver. So this drives the clock and nothing else.
 #[test]
 fn selecting_the_combat_log_keeps_the_dock_driver_running() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     let (x, y): (f32, f32) = s
         .eval(
@@ -912,6 +932,7 @@ fn selecting_the_combat_log_keeps_the_dock_driver_running() {
 /// `reveal` never decayed either, so the chat box and both tabs stayed lit after the cursor left.
 #[test]
 fn the_dock_still_fades_out_with_the_combat_log_selected() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     let (x, y): (f32, f32) = s
         .eval(
@@ -955,6 +976,7 @@ fn the_dock_still_fades_out_with_the_combat_log_selected() {
 /// button, which only happens if window 2 both HAS the button and runs `ChatFrame_OnUpdate`.
 #[test]
 fn the_combat_log_window_runs_its_own_bottom_button_blink() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
     for i in 0..40 {
@@ -1064,6 +1086,7 @@ fn the_chat_menu_builds_its_rows_on_the_references_kit() {
 /// the chat window shows the tabs and the buttons but no plate.
 #[test]
 fn a_glass_windows_plate_fades_in_on_every_hover() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = chat_frame();
     s.mouse_move(1500.0, 850.0);
     for _ in 0..4 {
@@ -1109,6 +1132,7 @@ fn a_glass_windows_plate_fades_in_on_every_hover() {
 /// The same law under the WHOLE shipped manifest, driven the way the app drives it.
 #[test]
 fn a_glass_windows_plate_fades_in_on_every_hover_under_the_full_manifest() {
+    benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1600.0, 900.0);
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -1207,6 +1231,7 @@ fn a_glass_windows_plate_fades_in_on_every_hover_under_the_full_manifest() {
 /// then a repair of nothing.
 #[test]
 fn a_quick_exit_and_reentry_keeps_the_plates_hover_fade() {
+    benilla_formats::wow_data_or_skip!();
     fn drive(s: &mut UiScript) -> (f64, f64, f64) {
         let (x, y): (f32, f32) = s
             .eval(
@@ -1312,6 +1337,7 @@ fn a_quick_exit_and_reentry_keeps_the_plates_hover_fade() {
 /// broken — which is exactly how this shipped.
 #[test]
 fn the_stock_afk_and_dnd_commands_reach_the_wire() {
+    benilla_formats::wow_data_or_skip!();
     use crate::net::ChatKind;
     use crate::ui_chat::edit::SendType;
 

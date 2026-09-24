@@ -12,8 +12,7 @@
 //! ## The grammar is the reference's
 //!
 //! 1.12 keeps these in `WTF/Account/<ACC>/<REALM>/<CHAR>/chat-cache.txt`, written whole by
-//! `0x499a80` and read by `0x498a60` (wow-re `system/ui/scratch/chat-cache-grammar.md`, §1 and
-//! §3 — every line below is that note's):
+//! `0x499a80` and read by `0x498a60` (every line below is the reference's):
 //!
 //! ```text
 //! VERSION 2
@@ -71,10 +70,10 @@
 //! ## The login events
 //!
 //! The loader fires `UPDATE_CHAT_WINDOWS` once and then `UPDATE_CHAT_COLOR` for **every** registry
-//! entry — file or no file (§8). The first is what `FloatingChatFrame_Update` docks, hides and
-//! colours the windows from; the second is how a saved colour reaches `ChatTypeInfo` and repaints
-//! the lines already in the window (`ChatFrame_OnEvent`'s arm). So does ours, once per character
-//! per VM.
+//! entry — file or no file (`0x4996b9`, `0x499934`). The first is what `FloatingChatFrame_Update`
+//! docks, hides and colours the windows from; the second is how a saved colour reaches
+//! `ChatTypeInfo` and repaints the lines already in the window (`ChatFrame_OnEvent`'s arm). So does
+//! ours, once per character per VM.
 //!
 //! ## Why per character, and not a CVar
 //!
@@ -110,8 +109,8 @@ const SAVE_QUIET: std::time::Duration = std::time::Duration::from_secs(1);
 /// The file's header — where these values come from and where the law lives. Comment lines; the
 /// reference's reader has none, ours skips them.
 const HEADER: &str = "\
-# benilla chat cache (decisions 1589, 1948) — the reference's chat-cache.txt grammar (wow-re
-# chat-cache-grammar.md): the custom channels to re-join, the joined zone channels as bits, the
+# benilla chat cache (decisions 1589, 1948) — the reference's chat-cache.txt grammar (written by
+# 0x499a80, read by 0x498a60): the custom channels to re-join, the joined zone channels as bits, the
 # per-type COLORS table, then one WINDOW block per chat frame — NAME (when one was set), SIZE,
 # COLOR r g b a as bytes, LOCKED, DOCKED, SHOWN, the MESSAGES … END list of the groups the window
 # shows, its CHANNELS … END list of custom channels, and its zone channels as ZONECHANNELS bits.
@@ -168,7 +167,7 @@ pub(super) struct Parsed {
     pub(super) zone_mask: Option<u32>,
     /// `OPTION_GUILD_RECRUITMENT_CHANNEL` — the auto-join latch `GetGuildRecruitmentMode` returns
     /// (decision 2115). `STANDARD` is 0 and **anything else, a missing word included, is 1**: that
-    /// is the reference's own reading (wow-re `chat-cache-grammar.md` — `"STANDARD"` takes the
+    /// is the reference's own reading (`"STANDARD"` takes the
     /// `0x49ea70(ecx=0)` leg and every other word takes `ecx=1`), and it is why a file with no such
     /// line at all reads as AUTO here, exactly as it does there.
     pub(super) guild_recruitment_auto: bool,
@@ -189,22 +188,23 @@ impl Default for Parsed {
     }
 }
 
-/// Render the file exactly as the writer does (§1), window order.
+/// Render the file exactly as the writer does (`0x499a80`), window order.
 ///
-/// `joined` is the client's current channel roster and supplies the header's `CHANNELS` names —
-/// **the custom ones only** (`id == 0`): a zone channel is never written as a name, it travels as
-/// its bit (wow-re `chat-cache-grammar.md` §1.1, which is why all 34 stock files have an empty
-/// per-window `CHANNELS` block beside a non-zero `ZONECHANNELS`).
+/// `custom` is [`super::edit::ChannelState::custom`] and supplies the header's `CHANNELS` names —
+/// **the custom channels only**: a zone channel is never written as a name, it travels as its bit
+/// (`0x499ba1`, which is why all 34 stock files have an empty per-window
+/// `CHANNELS` block beside a non-zero `ZONECHANNELS`). Durable, not the live roster, for the
+/// mask's own reason: the session end clears the roster before the flush reads it.
 ///
 /// `zone_mask` is [`super::edit::ChannelState::zone_mask`], written raw into the header
 /// (`0x499c19`) and ANDed with each window's own bits for its block (`0x49a133`/`0x49a138`). It is
-/// **passed in rather than derived from `joined`** — decision 2120, and the whole bug: derived, it
+/// **passed in rather than derived from the live roster** — decision 2120, and the whole bug: derived, it
 /// was 0 on any save taken while the roster was empty, and `window AND 0` erased the window's
 /// channel list for good.
 fn render(
     looks: &[ChatWindowLook],
     colors: &[ChatTypeColor],
-    joined: &[(String, u32)],
+    custom: &[String],
     zone_mask: u32,
     guild_recruitment_auto: bool,
 ) -> String {
@@ -222,11 +222,9 @@ fn render(
     out.push_str(&format!(
         "\nVERSION 2\n\nADDEDVERSION 2\n\nOPTION_GUILD_RECRUITMENT_CHANNEL {recruitment}\n\nCHANNELS\n"
     ));
-    for (name, id) in joined {
-        if *id == 0 {
-            out.push_str(name);
-            out.push('\n');
-        }
+    for name in custom {
+        out.push_str(name);
+        out.push('\n');
     }
     out.push_str(&format!("END\n\nZONECHANNELS {zone_mask}\n\nCOLORS\n"));
     for c in colors {
@@ -341,8 +339,8 @@ fn parse(text: &str, rows: &[(u32, String)]) -> Parsed {
                     // its id and this restores it (decision 2130).
                     //
                     // Not a heuristic: the reference's engine resolves every name through the
-                    // shortcut walk before it stores one (`AddChatWindowChannel 0x4a1000`,
-                    // chat-cache-grammar.md §5), so a *custom* entry can never be spelled exactly
+                    // shortcut walk before it stores one (`AddChatWindowChannel 0x4a1000`),
+                    // so a *custom* entry can never be spelled exactly
                     // like a built-in shortcut — all 34 stock files carry an empty per-window
                     // `CHANNELS` block beside a non-zero `ZONECHANNELS`. Ours could, because the
                     // VM's catalog was still empty when the window was written, and `General` came
@@ -415,9 +413,9 @@ fn parse(text: &str, rows: &[(u32, String)]) -> Parsed {
         }
     }
     flush(&mut current, &mut out);
-    // The loader's EOF back-fill (§3): a file older than the groups added since gets them, into
-    // window 1 for the first ten groups and window 2 otherwise — the two `addedVersion` rows are
-    // both window 2's.
+    // The loader's EOF back-fill (`0x49967c`): a file older than the groups added since gets them,
+    // into window 1 for the first ten groups and window 2 otherwise — the two `addedVersion` rows
+    // are both window 2's.
     if added_version < 2 {
         for (i, (name, on, ver)) in MESSAGE_GROUPS.iter().enumerate() {
             if *on && *ver > added_version {
@@ -491,15 +489,6 @@ fn shortcut_rows(channels: &super::edit::ChannelState) -> Vec<(u32, String)> {
         .rows()
         .iter()
         .map(|r| (r.id, r.shortcut.clone()))
-        .collect()
-}
-
-/// The client's channel roster as `(name, zone id)` — what the writer's header and masks are made
-/// of.
-fn roster(channels: &super::edit::ChannelState) -> Vec<(String, u32)> {
-    channels
-        .iter_names()
-        .map(|name| (name.to_string(), channels.channels.zone_channel_id(name)))
         .collect()
 }
 
@@ -585,7 +574,7 @@ pub(crate) fn restore_chat_looks(world: &mut World, script: &mut UiScript) {
             .is_some_and(|t| !t.contains(WRITER_GENERATION));
         parsed = text.map(|t| parse(&t, &rows)).unwrap_or_default();
         if !had_file {
-            // The loader's no-file path (§3, `0x4997ad`): the mask is seeded from those rows, and
+            // The loader's no-file path (`0x4997ad`): the mask is seeded from those rows, and
             // window 1's channel slots get each of them as `(Shortcut, id)` — the rows
             // `ChatFrame_RegisterForChannels` will match zone speech against by id. The rest of the
             // record is the boot init the VM already holds.
@@ -632,12 +621,15 @@ pub(crate) fn restore_chat_looks(world: &mut World, script: &mut UiScript) {
         // `Some` is the reference's "chat system ready" flag (`0x499a18`): the walk and the
         // guild-recruitment cascade both hold until this line has run (decision 2144).
         channels.zone_mask = Some(mask);
+        // The custom re-join list is durable on the same terms: seated from the file here, then
+        // moved only by a confirmed join and an explicit leave (`ChannelState::custom`).
+        channels.custom = parsed.joined.clone();
     }
     script.set_guild_recruitment_mode(u8::from(parsed.guild_recruitment_auto));
     script.set_chat_colors(parsed.colors);
     script.set_chat_window_looks(parsed.looks);
-    // §8: UPDATE_CHAT_WINDOWS once, then UPDATE_CHAT_COLOR for every registry entry, on the file
-    // path and the no-file path alike.
+    // UPDATE_CHAT_WINDOWS once, then UPDATE_CHAT_COLOR for every registry entry, on the file
+    // path and the no-file path alike (`0x4996b9`, `0x499934`).
     script.fire_event("UPDATE_CHAT_WINDOWS", vec![]);
     let renorm = |b: u8| f64::from(b as f32 * (1.0f32 / 255.0f32));
     for entry in script.chat_colors() {
@@ -691,7 +683,7 @@ fn write(script: &UiScript, channels: &super::edit::ChannelState, path: &std::pa
     let body = render(
         &script.chat_window_looks(),
         &script.chat_colors(),
-        &roster(channels),
+        &channels.custom,
         zone_mask,
         script.guild_recruitment_mode() != 0,
     );
@@ -705,7 +697,7 @@ fn write(script: &UiScript, channels: &super::edit::ChannelState, path: &std::pa
 /// - **A flush** (`exiting`) — the session end or the window close — writes **unconditionally**,
 ///   provided this VM restored the character's file (`restored`): the reference rewrites the
 ///   whole file at chat teardown (`0x499a80` from `0x490c55`) with no dirty flag in the way
-///   (`[0xb6e5c4]` has three writers and no reader; wow-re `guild-recruitment-mode.md` §6). The
+///   (`[0xb6e5c4]` has three writers and no reader). The
 ///   `ZONECHANNELS` word and the guild-recruitment latch are host state that no Lua write ever
 ///   dirties — gating the flush on `dirty` is how a `/leave General` was persisted only when the
 ///   player also happened to drag a window, and 2120's "durable state" was durable on paper.
@@ -886,14 +878,9 @@ mod tests {
             named,
         ];
         let colors = colors(&[("SAY", [1, 2, 3]), ("CHANNEL7", [4, 5, 6])]);
-        let joined = vec![
-            ("General - Elwynn Forest".to_string(), 1),
-            ("Trade - City".to_string(), 2),
-            ("MyChan".to_string(), 0),
-        ];
-        // The mask is the character's durable one now (2120), passed in rather than derived —
-        // here, the two zone channels the roster holds.
-        let text = render(&looks, &colors, &joined, 0b11, true);
+        // The mask and the custom list are the character's durable state (2120), passed in rather
+        // than derived from the live roster.
+        let text = render(&looks, &colors, &["MyChan".to_string()], 0b11, true);
         assert!(
             text.contains("\nCHANNELS\nMyChan\nEND\n\nZONECHANNELS 3\n"),
             "{text}"
@@ -966,13 +953,7 @@ mod tests {
         w.channels = vec![("General".into(), 1), ("Trade".into(), 2)];
         // The mask holds General alone — Trade was explicitly left, so the window's own Trade
         // bit is ANDed away on the way out.
-        let text = render(
-            &[w],
-            &[],
-            &[("General - Elwynn Forest".to_string(), 1)],
-            1,
-            true,
-        );
+        let text = render(&[w], &[], &[], 1, true);
         let windows: Vec<&str> = text.split("WINDOW 1").collect();
         assert!(windows[1].contains("ZONECHANNELS 1\n"), "{text}");
     }
@@ -1062,7 +1043,7 @@ mod tests {
         state.note_zone_channel_joined("MyChan");
         assert_eq!(state.zone_mask, Some(0b11), "a custom channel has no bit");
         // The clear is keyed on the SLOT the wire name finds, and its own id (decision 2144,
-        // wow-re `leavechannelbyname-contract.md` §8) — a name we hold no slot for clears nothing.
+        // `0x49f0f4`–`0x49f11a`) — a name we hold no slot for clears nothing.
         state.note_zone_channel_left("Trade - City");
         assert_eq!(state.zone_mask, Some(0b11), "no slot carries it yet");
         state.claim_slot("Trade - City");
@@ -1072,6 +1053,30 @@ mod tests {
             Some(0b01),
             "an explicit leave clears one bit"
         );
+    }
+
+    /// The custom re-join list moves on the same two edges as the mask — a confirmed join of a
+    /// channel with no DBC id, and an explicit leave — and a zone channel never enters it.
+    #[test]
+    fn the_custom_list_moves_on_join_and_explicit_leave_only() {
+        let mut state = super::super::edit::ChannelState {
+            channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+                benilla_formats::ChatChannelRow {
+                    id: 1,
+                    flags: 0x11,
+                    pattern: "General - %s".into(),
+                    shortcut: "General".into(),
+                },
+            ]),
+            ..Default::default()
+        };
+        state.note_custom_channel_joined("General - Elwynn Forest");
+        assert!(state.custom.is_empty(), "a zone channel travels as its bit");
+        state.note_custom_channel_joined("MyChan");
+        state.note_custom_channel_joined("mychan");
+        assert_eq!(state.custom, vec!["MyChan".to_string()], "once, by name");
+        state.note_custom_channel_left("MYCHAN");
+        assert!(state.custom.is_empty(), "an explicit leave drops it");
     }
 
     /// **The teardown write is unconditional; only the debounce reads the dirty flag** (decision
@@ -1272,34 +1277,7 @@ mod tests {
         world.init_resource::<super::super::edit::ChannelState>();
         world.init_resource::<ChatWindowFile>();
         crate::ui_script::setup_script(&mut world);
-        world.insert_resource(crate::char_select::Roster::with_pending_pick(
-            vec![benilla_protocol::Character {
-                guid: 1,
-                name: "Reloadprobe".into(),
-                race: 1,  // Human → Alliance
-                class: 1, // Warrior
-                gender: 0,
-                level: 60,
-                skin: 0,
-                face: 0,
-                hair_style: 0,
-                hair_color: 0,
-                facial_hair: 0,
-                zone: 0,
-                map: 0,
-                position: benilla_protocol::wire::Vector3d {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                },
-                flags: 0,
-                equipment: [benilla_protocol::CharEnumItem::default(); 19],
-                pet_display_id: 0,
-                pet_level: 0,
-                pet_family: 0,
-            }],
-            1,
-        ));
+        world.insert_resource(probe_roster("Reloadprobe"));
         crate::ui_script::load_ingame_ui_on_world_entry(&mut world);
 
         let path = world
@@ -1341,6 +1319,132 @@ mod tests {
         assert_eq!(
             name, "Reloaded",
             "the rebuilt VM restored the renamed window, not the stale one"
+        );
+
+        drop(world);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A roster with one character picked — what `load_ingame_ui_on_world_entry` keys the
+    /// character's chat cache path on.
+    fn probe_roster(name: &str) -> crate::char_select::Roster {
+        crate::char_select::Roster::with_pending_pick(
+            vec![benilla_protocol::Character {
+                guid: 1,
+                name: name.into(),
+                race: 1,  // Human → Alliance
+                class: 1, // Warrior
+                gender: 0,
+                level: 60,
+                skin: 0,
+                face: 0,
+                hair_style: 0,
+                hair_color: 0,
+                facial_hair: 0,
+                zone: 0,
+                map: 0,
+                position: benilla_protocol::wire::Vector3d {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                flags: 0,
+                equipment: [benilla_protocol::CharEnumItem::default(); 19],
+                pet_display_id: 0,
+                pet_level: 0,
+                pet_family: 0,
+            }],
+            1,
+        )
+    }
+
+    /// **A custom channel survives `/logout`** (2184 §6, the question it left open). The header's
+    /// `CHANNELS` list is the character's custom channels to re-join at the next login. It was
+    /// composed from the live roster, and the logout clears that roster first: the
+    /// `Disconnected{LoggedOut}` that arrives in the same net drain as the logout runs
+    /// `end_session_channels_on_disconnect` in `Update`, a frame before `OnExit(InWorld)` reaches
+    /// `end_ui_session`'s flush. So the file was written with an empty list and the channel was
+    /// never re-joined. The same order is driven here, by the same functions.
+    #[test]
+    fn a_custom_channel_survives_a_logout() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-chat-custom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("benilla-config")).expect("hermetic home");
+        let _capture = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let _home = crate::local_state::test_env::EnvGuard::set(
+            "BENILLA_HOME",
+            tmp.join("benilla-config")
+                .to_str()
+                .expect("utf-8 temp path"),
+        );
+
+        let roster = probe_roster("Channelprobe");
+        let id = crate::ui_macro::identity(&roster).expect("a picked character");
+        let path = crate::local_state::chat_character_path(&id.0, &id.1).expect("a cache path");
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the character dir");
+        // A file this writer made (the marker), listing one custom channel in the header.
+        let file = format!(
+            "{WRITER_GENERATION}\nVERSION 2\n\nCHANNELS\nMyChan\nEND\n\nZONECHANNELS 3\n\n\
+             COLORS\nEND\n\nWINDOW 1\nSIZE 0\n\nMESSAGES\nSAY\nEND\n\nCHANNELS\nEND\n\n\
+             ZONECHANNELS 3\n\nEND\n"
+        );
+        std::fs::write(&path, file).expect("seed the file");
+
+        let mut world = World::new();
+        world.init_resource::<crate::ui_script::AddOnIdentity>();
+        world.init_resource::<crate::minimap::MinimapZoom>();
+        world.init_resource::<crate::ui_script::ReloadUiPending>();
+        world.init_resource::<super::super::edit::ChannelState>();
+        world.init_resource::<super::super::channels::ZoneChannelWalk>();
+        world.init_resource::<super::super::recruitment::GuildRecruitmentCascade>();
+        world.init_resource::<Messages<crate::net::DisconnectedMessage>>();
+        world.init_resource::<ChatWindowFile>();
+        crate::ui_script::setup_script(&mut world);
+        world.insert_resource(roster);
+        crate::ui_script::load_ingame_ui_on_world_entry(&mut world);
+
+        // The login's re-join is confirmed: the server's YOU_JOINED, through the real feed arm.
+        world.resource_scope(
+            |world, mut channels: Mut<super::super::edit::ChannelState>| {
+                let mut script = world.non_send_resource_mut::<UiScript>();
+                let mut windows = super::super::frames::ChatWindows::default();
+                let mut e = super::super::event::ChatEvent::text_only(
+                    super::super::event::ChatEventKind::ChannelNotice,
+                    String::new(),
+                );
+                e.channel = "MyChan".into();
+                e.notice = "2".into(); // YOU_JOINED
+                super::super::feed::deliver(&mut script, &mut windows, &mut channels, &mut e);
+            },
+        );
+        assert_eq!(
+            world
+                .resource::<super::super::edit::ChannelState>()
+                .number_of("MyChan"),
+            Some(1),
+            "precondition: the channel is joined and numbered"
+        );
+
+        // `/logout`: the disconnect lands in `Update` first…
+        world.write_message(crate::net::DisconnectedMessage::new(
+            "logged out".into(),
+            benilla_protocol::SessionEnd::LoggedOut,
+        ));
+        world
+            .run_system_once(super::super::channels::end_session_channels_on_disconnect)
+            .expect("the disconnect twin runs");
+        // …and `OnExit(InWorld)` flushes the dying VM's cache a frame later.
+        crate::ui_script::end_ui_session(&mut world);
+
+        let on_disk = std::fs::read_to_string(&path).expect("the flush wrote the file");
+        assert!(
+            on_disk.contains("\nCHANNELS\nMyChan\nEND\n\nZONECHANNELS"),
+            "the custom channel is still in the header's re-join list; file was:\n{on_disk}"
         );
 
         drop(world);

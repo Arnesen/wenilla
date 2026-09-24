@@ -1,22 +1,4 @@
-//! Golden tests for the petition opcode family — the guild-charter flow that founds a guild
-//! (decision 1672). CMSG bodies are asserted byte-exact against the builder output; SMSG bodies are
-//! hand-built per the vmangos layouts (cited inline) and round-tripped through `parse_server` +
-//! `decode`. See `tests/common` for the shared `hx()` helper and methodology note.
-//!
-//! Four of the tests exist for a specific failure mode rather than for coverage, and each was
-//! mutation-checked — the code was broken that exact way and the test observed to fail:
-//!
-//! - `petition_buy_body_is_the_full_seventy_two_byte_frame` — vmangos's reader walks 72 fixed bytes
-//!   field by field and never checks the remainder, so a body one field short leaves it reading
-//!   garbage and the buy is dropped **silently**. There is no error packet for a malformed buy.
-//! - `petition_query_response_gender_is_sixteen_bit` — the one odd width in the family. Read as a
-//!   `u32`, every field after it shifts by two bytes and the choice count becomes a huge number.
-//! - `petition_show_signatures_stride_is_twelve_bytes` — the trailing zero dword per signature is
-//!   easy to omit; a nine-signature charter then reads eight signers and a truncation error, and a
-//!   two-signature fixture would still pass.
-//! - `msg_petition_opcodes_read_a_different_body_than_they_write` — the two `MSG_` opcodes are
-//!   genuinely asymmetric (decline sends an item guid and receives a player guid), which is exactly
-//!   the shape a shared body type would paper over.
+//! The petition wire: the guild-charter flow that founds a guild, laid out per vmangos.
 
 mod common;
 
@@ -27,7 +9,6 @@ use benilla_protocol::messages::{
 use benilla_protocol::ServerPacket;
 use common::hx;
 
-/// Every CMSG builder in the family, byte-exact.
 #[test]
 fn cmsg_bodies_golden() {
     // CMSG_PETITION_SHOWLIST (vmangos Server/Packets/Petition.cpp:3-6): one u64, the NPC.
@@ -37,7 +18,7 @@ fn cmsg_bodies_golden() {
         "CMSG_PETITION_SHOWLIST body"
     );
 
-    // CMSG_PETITION_SHOW_SIGNATURES (Petition.cpp:8-11): one u64, the charter ITEM.
+    // CMSG_PETITION_SHOW_SIGNATURES (Petition.cpp:8-11): one u64, the charter item.
     assert_eq!(
         messages::petition_show_signatures(0x0000_0000_0001_0203),
         hx("0302010000000000"),
@@ -51,16 +32,15 @@ fn cmsg_bodies_golden() {
         "CMSG_TURN_IN_PETITION body"
     );
 
-    // MSG_PETITION_DECLINE outbound (Petition.cpp:19-22): one u64 — the ITEM, not the player.
+    // MSG_PETITION_DECLINE outbound (Petition.cpp:19-22): one u64, the item, not the player.
     assert_eq!(
         messages::petition_decline(0x0000_0000_0001_0203),
         hx("0302010000000000"),
         "MSG_PETITION_DECLINE body"
     );
 
-    // CMSG_PETITION_SIGN (Petition.cpp:35-39): u64 item, then an i8 the server reads and skips.
-    // The client's own default for that byte is 1, not 0 (`0x4f46d9`) — and because the server
-    // discards it, this golden is the ONLY thing that can tell the two apart.
+    // CMSG_PETITION_SIGN (Petition.cpp:35-39): u64 item, then an i8 the server skips; the
+    // reference defaults it to 1 (`0x4f46d9`).
     assert_eq!(
         messages::petition_sign(0x0000_0000_0001_0203, 1),
         hx("030201000000000001"),
@@ -94,14 +74,9 @@ fn cmsg_bodies_golden() {
     );
 }
 
-/// `CMSG_PETITION_BUY` is 72 fixed bytes plus the name's, laid out exactly as vmangos's reader
-/// walks them (`Server/Packets/Petition.cpp:47-67`): `u64 npc`, `u32 0`, `u64 0`, cstring name,
-/// `10 × u32 0`, `u16 0`, `u8 0`, `u32 index`, `u32 0`.
-///
-/// **Mutation-checked.** Dropping any one of the skipped fields still compiles, still sends, and is
-/// answered by nothing at all — the server reads past the end, `IsValidCharterName` sees garbage or
-/// the handler returns, and no error packet exists for a malformed buy. This test is the only thing
-/// between that and a "the Purchase button does nothing" report.
+/// `CMSG_PETITION_BUY` is 72 fixed bytes plus the name, in vmangos's read order
+/// (`Server/Packets/Petition.cpp:47-67`); a short body gets no reply at all, since the server has
+/// no error packet for a malformed buy.
 #[test]
 fn petition_buy_body_is_the_full_seventy_two_byte_frame() {
     let body = messages::petition_buy(0x0000_0000_0000_2a1f, "Legacy");
@@ -116,15 +91,14 @@ fn petition_buy_body_is_the_full_seventy_two_byte_frame() {
             "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
             "0000",     // u16 skipped
             "00",       // u8 skipped
-            "00000000", // u32 index — the server's own "unused"
+            "00000000", // u32 index, unused by the server
             "00000000", // u32 skipped
         )),
         "CMSG_PETITION_BUY body"
     );
     assert_eq!(body.len(), 72 + "Legacy".len(), "72 fixed bytes + the name");
 
-    // The name is the only variable-length part, and it sits at offset 20 — where the server's
-    // reader arrives after skipping 8 + 4 + 8 bytes.
+    // The name, the only variable part, starts at offset 20 (8 + 4 + 8).
     assert_eq!(
         &body[20..27],
         b"Legacy\0",
@@ -132,17 +106,13 @@ fn petition_buy_body_is_the_full_seventy_two_byte_frame() {
     );
 }
 
-/// `SMSG_PETITION_SHOWLIST` — the packet that opens the guild registrar. Layout from
-/// `Server/Packets/Petition.cpp:115-127`, values from `Handlers/PetitionsHandler.cpp:482-507`.
-///
-/// The list is **counted**, and parsed as one even though vmangos's own header says the reference
-/// client supports only one row: a reader that assumed one would desynchronise rather than degrade
-/// if a server ever sent two. The fixture sends two for exactly that reason.
+/// `SMSG_PETITION_SHOWLIST` opens the guild registrar (`Server/Packets/Petition.cpp:115-127`).
+/// The list is counted: vmangos sends one row, the fixture two, so a one-row reader fails.
 #[test]
 fn petition_show_list_parses_a_counted_list() {
     let body = hx(concat!(
         "1f2a000000000000", // u64 npcGuid
-        "02",               // u8 count — deliberately not vmangos's 1
+        "02",               // u8 count, not vmangos's 1
         // row 1: index 1, entry 5863, display 16161, cost 1000, flags 1
         "01000000",
         "e7160000",
@@ -184,13 +154,9 @@ fn petition_show_list_parses_a_counted_list() {
     );
 }
 
-/// `SMSG_PETITION_SHOW_SIGNATURES` — `u64 item`, `u64 owner`, `u32 petitionId`, `u8 count`, then
-/// **12 bytes per signature**: the signer's guid and a dword vmangos writes as a literal zero
-/// (`Handlers/PetitionsHandler.cpp:160-168`, `Guild/GuildMgr.cpp:358-366`).
-///
-/// **Mutation-checked** against omitting that dword. The fixture carries a full nine signatures
-/// because that is the only size at which the drift is unmistakable — with two, an 8-byte stride
-/// reads one signer and then a truncation error, which is easy to misread as a short packet.
+/// `SMSG_PETITION_SHOW_SIGNATURES`: `u64` item, `u64` owner, `u32` petitionId, `u8` count, then
+/// 12 bytes per signature, the signer's guid and a zero dword (vmangos
+/// `Handlers/PetitionsHandler.cpp:160-168`); nine signatures make a wrong stride fail plainly.
 #[test]
 fn petition_show_signatures_stride_is_twelve_bytes() {
     let mut body = hx(concat!(
@@ -212,8 +178,6 @@ fn petition_show_signatures_stride_is_twelve_bytes() {
     assert_eq!(sigs.owner, 0xaa);
     assert_eq!(sigs.petition_id, 7);
     assert_eq!(sigs.signatures.len(), MAX_PETITION_SIGNATURES);
-    // The LAST signer is the one that proves the stride: an 8-byte stride would have walked into
-    // the padding long before here.
     assert_eq!(
         sigs.signatures[MAX_PETITION_SIGNATURES - 1].signer,
         MAX_PETITION_SIGNATURES as u64,
@@ -228,12 +192,8 @@ fn petition_show_signatures_stride_is_twelve_bytes() {
     );
 }
 
-/// `SMSG_PETITION_QUERY_RESPONSE` — sixteen fields, one of which is sixteen bits.
-///
-/// **Mutation-checked** against reading `allowedGender` as a `u32`. That shifts everything after it
-/// by two bytes: `allowedMinLevel` picks up half of `allowedMaxLevel`, and the choice count reads a
-/// large number, so the parse fails on a truncated cstring — far from the cause. The fixture gives
-/// every trailing field a distinct value so the shift cannot land on a lucky zero.
+/// `SMSG_PETITION_QUERY_RESPONSE`: sixteen fields, of which `allowedGender` alone is a `u16`; the
+/// fields after it get distinct values so a 32-bit read cannot land on a lucky zero.
 #[test]
 fn petition_query_response_gender_is_sixteen_bit() {
     let body = hx(concat!(
@@ -267,7 +227,6 @@ fn petition_query_response_gender_is_sixteen_bit() {
     assert_eq!(r.min_signatures, 9);
     assert_eq!(r.max_signatures, 9);
     assert_eq!(r.allowed_gender, 0x6666, "sixteen bits, not thirty-two");
-    // These two are what a 32-bit gender read would corrupt first.
     assert_eq!(r.allowed_min_level, 0x7777_7777);
     assert_eq!(r.allowed_max_level, 0x8888_8888);
     assert_eq!(r.choices, vec!["Yes".to_string()], "the counted tail");
@@ -280,14 +239,13 @@ fn petition_query_response_gender_is_sixteen_bit() {
     );
 }
 
-/// `SMSG_PETITION_SIGN_RESULTS` (`Petition.cpp:69-74`) and `SMSG_TURN_IN_PETITION_RESULTS`
-/// (`:76-79`) share the `PetitionSigns` enum but not a layout: the first carries two guids and a
-/// code, the second carries **only** the code.
+/// `SMSG_PETITION_SIGN_RESULTS` (`Petition.cpp:69-74`) carries two guids and a code,
+/// `SMSG_TURN_IN_PETITION_RESULTS` (`:76-79`) only the code, from the same `PetitionSigns` enum.
 #[test]
 fn the_two_results_packets_share_an_enum_but_not_a_layout() {
     let body = hx(concat!(
         "0302010000000000", // u64 itemGuid
-        "bb00000000000000", // u64 playerGuid — the SIGNER, in both copies of this packet
+        "bb00000000000000", // u64 playerGuid: the signer, in both copies of this packet
         "03000000",         // u32 result = CANT_SIGN_OWN
     ));
     let packet = messages::parse_server(opcode::SMSG_PETITION_SIGN_RESULTS, &body).unwrap();
@@ -298,7 +256,6 @@ fn the_two_results_packets_share_an_enum_but_not_a_layout() {
     assert_eq!(r.player, 0xbb);
     assert_eq!(r.result, petition_result::CANT_SIGN_OWN);
 
-    // The turn-in answer is a bare u32 with no charter named at all.
     let packet = messages::parse_server(
         opcode::SMSG_TURN_IN_PETITION_RESULTS,
         &hx("04000000"), // NEED_MORE
@@ -322,16 +279,10 @@ fn the_two_results_packets_share_an_enum_but_not_a_layout() {
     );
 }
 
-/// The two `MSG_` opcodes are genuinely bidirectional, and **decline reads a different body than it
-/// writes**: we send the charter's item guid, the owner receives the declining player's guid. Both
-/// are eight bytes, so nothing but this test distinguishes a correct implementation from one that
-/// reuses a single body type and is wrong half the time.
-///
-/// Rename, by contrast, is symmetric — the same `u64 item` + cstring both ways — which is why the
-/// two are asserted together: the family is not uniformly one or the other.
+/// `MSG_PETITION_DECLINE` sends the charter's item guid but receives the decliner's player guid,
+/// both eight bytes; `MSG_PETITION_RENAME` is `u64` item and cstring name both ways.
 #[test]
-fn msg_petition_opcodes_read_a_different_body_than_they_write() {
-    // Decline: outbound is the ITEM, inbound is the PLAYER. Same width, opposite meaning.
+fn msg_petition_decline_differs_by_direction_and_rename_does_not() {
     assert_eq!(
         messages::petition_decline(0x0001_0203),
         hx("0302010000000000"),
@@ -345,7 +296,7 @@ fn msg_petition_opcodes_read_a_different_body_than_they_write() {
         packet.name()
     );
 
-    // Rename: symmetric, and the echo arrives only on success.
+    // The rename echo arrives only on success.
     let body = hx("03020100000000004c656761637900");
     assert_eq!(
         messages::petition_rename(0x0001_0203, "Legacy"),
@@ -366,9 +317,6 @@ fn msg_petition_opcodes_read_a_different_body_than_they_write() {
     );
 }
 
-/// An empty charter — no signatures yet, which is what the owner sees the moment they buy one.
-/// The count byte is zero and the packet simply ends; nothing may read a signature record that is
-/// not there.
 #[test]
 fn a_freshly_bought_charter_has_no_signatures() {
     let body = hx(concat!(

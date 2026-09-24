@@ -1,10 +1,6 @@
-//! The world handshake against a fake server, exercising [`WorldSession::connect`] over a real
-//! socket with real header obfuscation.
-//!
-//! What these pin down is the packet *ordering* tolerance the handshake needs. A server does not
-//! promise `SMSG_AUTH_RESPONSE` is the first encrypted packet — it interleaves its own traffic —
-//! and one of those interleaved packets, `SMSG_WARDEN_DATA`, means the server runs an anticheat we
-//! cannot answer and must be refused at login rather than entered and kicked ~30 s later.
+//! The world handshake over a real socket against a fake server: packets may precede
+//! `SMSG_AUTH_RESPONSE`. Deviation: `SMSG_WARDEN_DATA` refuses the login, because benilla cannot
+//! answer Warden and the server kicks a client that stays silent about 30 s later.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -18,8 +14,8 @@ use benilla_srp::SESSION_KEY_LENGTH;
 const SESSION_KEY: [u8; SESSION_KEY_LENGTH] = [7u8; SESSION_KEY_LENGTH];
 const SERVER_SEED: u32 = 0xDEAD_BEEF;
 
-/// Write one server packet: 2-byte BE size (counts the opcode, not itself) + 2-byte LE opcode,
-/// encrypted once `crypto` is in play, then the plaintext body.
+/// Write one server packet: `u16` BE size (opcode plus body) and `u16` LE opcode, encrypted once
+/// `crypto` is set, then the plaintext body.
 fn send(stream: &mut TcpStream, crypto: Option<&mut HeaderCrypto>, opcode: u16, body: &[u8]) {
     let size = (body.len() + 2) as u16;
     let s = size.to_be_bytes();
@@ -41,8 +37,8 @@ fn read_auth_session(stream: &mut TcpStream) {
     stream.read_exact(&mut body).unwrap();
 }
 
-/// Stand up a fake world server that sends `pre` (opcode, body) pairs — encrypted, in order —
-/// before a successful `SMSG_AUTH_RESPONSE`. Returns the address to point `connect` at.
+/// A fake world server that sends the `pre` packets, encrypted and in order, before a successful
+/// `SMSG_AUTH_RESPONSE`; returns its address.
 fn fake_server(pre: Vec<(u16, Vec<u8>)>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -71,15 +67,13 @@ fn fake_server(pre: Vec<(u16, Vec<u8>)>) -> String {
     addr
 }
 
-/// The plain case: `SMSG_AUTH_RESPONSE` leads, the handshake completes.
 #[test]
 fn auth_response_alone_completes_the_handshake() {
     let addr = fake_server(vec![]);
     assert!(WorldSession::connect(&addr, "one", SESSION_KEY).is_ok());
 }
 
-/// A server interleaving its own traffic ahead of the auth response must not fail the handshake —
-/// the real one does this, and demanding AUTH_RESPONSE lead once broke login outright.
+/// The server interleaves its own packets ahead of the auth response.
 #[test]
 fn packets_ahead_of_the_auth_response_are_skipped() {
     let addr = fake_server(vec![
@@ -89,8 +83,6 @@ fn packets_ahead_of_the_auth_response_are_skipped() {
     assert!(WorldSession::connect(&addr, "one", SESSION_KEY).is_ok());
 }
 
-/// Warden among them is refused, with the error the login screen shows — never a session that
-/// would be kicked once the server's response clock expires.
 #[test]
 fn a_warden_server_is_refused_at_the_handshake() {
     let addr = fake_server(vec![(opcode::SMSG_WARDEN_DATA, vec![0u8; 16])]);

@@ -14,7 +14,7 @@
 //! is the step this probe exists for. The house id is checked to be in `1..=7` because it keys the
 //! deposit rate the sell pane quotes, and a zero would silently quote a free listing.
 //!
-//! ## The auctioneer (live-DB verified this session, `/Users/sam/dev/vmangos-deploy` → `mangos`)
+//! ## The auctioneer (live-DB verified against the local vmangos, `mangos`)
 //!
 //! Auctioneer Fitch, creature entry 8719, spawn guid 12696, map 0 (Stormwind, Trade District),
 //! pos `(-8821.53, 659.886, 97.4645)`. Her `creature_template.npc_flags` is **4096** exactly —
@@ -57,8 +57,8 @@
 //! WOW_PROBE_AUCTION=1 WOW_NOSOUND=1 WOW_USER=probe5 WOW_PASS=pprobe5 WOW_CHAR=Probefive \
 //!     cargo run -p benilla
 //! ```
-//! (the slot-keyed probe identity — `pool-N` → `WOW_USER=probeN WOW_PASS=pprobeN
-//! WOW_CHAR=Probe<N-spelled>`, method.md "The local vmangos server"; this worktree is `pool-5`).
+//! (the checkout's probe identity — `.probe-identity`, or WOW_USER/WOW_PASS/WOW_CHAR; the `probe`
+//! skill).
 //! Non-combat. An outer grep on `PROBE_AUCTION:` is the whole harness; the probe self-exits (the
 //! [`super::probes::ProbeExitPlugin`] pattern) once DONE.
 
@@ -161,11 +161,20 @@ struct AuctionProbe {
     baseline_money: u32,
     /// `AUCTION_OWNED_LIST_UPDATE`'s count immediately before `StartAuction` went in.
     ///
-    /// Taken THERE and not when step (6) starts, because the STARTED result queues an owner
-    /// re-query of its own: by the time (6) is reached the event may already have fired, and a
-    /// baseline taken then would be waiting for a second one that a repeated identical page will
-    /// never produce.
+    /// Taken THERE and not when step (6) starts, so that an owner re-query queued by the STARTED
+    /// result cannot fire the event before the baseline is read — a baseline taken after it would
+    /// wait for a second event that a repeated identical page will never produce. (Since 2308 that
+    /// re-query only happens for a list we already hold, and step 6 is what first asks for this
+    /// one, so the ordering is belt and braces rather than load-bearing.)
     owned_event_baseline: i64,
+    /// How many red `UI_ERROR_MESSAGE` lines the run had already raised when the auction window
+    /// opened — the login environment's own, not the arc's.
+    ///
+    /// Step (6d) asserts the arc raised **no** red line, and it used to read the whole tally: on a
+    /// `probeN` account that is never zero, because the preflight's `GM mode is ON` and
+    /// `GOD mode is ON` banners (0679) are red lines too, and they land before the greeting. The
+    /// assertion was therefore FAILING on every clean run, which is worse than not making it.
+    red_baseline: i64,
     passes: u32,
     fails: u32,
     /// Latched once [`Phase::Done`] has fired its exit (never re-fire on a later frame).
@@ -287,6 +296,13 @@ fn last_error(script: &UiScript) -> String {
 ///
 /// Compared against `getglobal("ERR_AUCTION_STARTED")` rather than against English: the string is
 /// the player's own, and this file must not carry a copy of it.
+/// Red `UI_ERROR_MESSAGE` lines raised so far, as the hook's own array counts them.
+fn red_count(script: &UiScript) -> i64 {
+    script
+        .eval::<i64>("return table.getn(ProbeAuctionErrors)")
+        .unwrap_or(-1)
+}
+
 fn started_chat_check(script: &UiScript, probe: &mut AuctionProbe) {
     let said = script
         .eval::<i64>(
@@ -298,9 +314,7 @@ fn started_chat_check(script: &UiScript, probe: &mut AuctionProbe) {
              return 0",
         )
         .unwrap_or(-2);
-    let reds = script
-        .eval::<i64>("return table.getn(ProbeAuctionErrors)")
-        .unwrap_or(-1);
+    let reds = red_count(script) - probe.red_baseline;
     match (said, reds) {
         (1, 0) => {
             info!(
@@ -317,13 +331,16 @@ fn started_chat_check(script: &UiScript, probe: &mut AuctionProbe) {
             probe.fails += 1;
         }
         (said, reds) => {
+            // The reds are listed from the baseline on, for the same reason `reds` counts from
+            // there: the login environment's own banners are not this arc's output.
             let lines = script
-                .eval::<String>(
-                    "local t = {} \
+                .eval::<String>(&format!(
+                    "local t = {{}} \
                      for i = 1, table.getn(ProbeAuctionChat) do table.insert(t, ProbeAuctionChat[i]) end \
-                     for i = 1, table.getn(ProbeAuctionErrors) do table.insert(t, \"RED:\" .. ProbeAuctionErrors[i]) end \
+                     for i = {} + 1, table.getn(ProbeAuctionErrors) do table.insert(t, \"RED:\" .. ProbeAuctionErrors[i]) end \
                      return table.concat(t, \" | \")",
-                )
+                    probe.red_baseline.max(0)
+                ))
                 .unwrap_or_default();
             error!(
                 "PROBE_AUCTION: FAIL (6d chat) — wanted the STARTED line in chat and zero red \
@@ -342,8 +359,15 @@ fn started_chat_check(script: &UiScript, probe: &mut AuctionProbe) {
 /// coin. Derived from `probe.min_bid` rather than hardcoded, because the listing price is computed
 /// from the item's own vendor value and a fixed expectation would be a lie the day the item changes.
 ///
-/// `IsShown`, not `IsVisible`: the Auctions pane is behind the Browse tab at this point in the run
-/// and the rows are painted either way — visibility would test the tab, not the coins.
+/// `IsShown`, not `IsVisible`: the coin buttons' own shown-ness is the subject, not whatever the
+/// window is doing around them.
+///
+/// The pane is the *front* tab by the time this runs, and that is load-bearing rather than
+/// incidental: the row is painted by `AuctionFrameAuctions_Update`, which cannot complete before
+/// the tab's `OnShow` has given it a `page` (decision 2308). This check read the player's purse
+/// out of the row's money frame for as long as the probe asked for the owned list without opening
+/// the tab — the frame was still on its `MoneyTypeInfo["PLAYER"]` default because nothing had ever
+/// repainted it.
 fn owner_money_check(script: &UiScript, probe: &mut AuctionProbe) {
     let (gold, silver, copper) = (
         probe.min_bid / 10_000,
@@ -601,6 +625,9 @@ fn auction_probe(
                         auction.auctioneer.unwrap_or(0)
                     );
                     probe.passes += 1;
+                    // Everything red before this instant is the login environment (the GM/GOD
+                    // banners); the arc's own tally starts here.
+                    probe.red_baseline = red_count(&script);
                 } else {
                     error!(
                         "PROBE_AUCTION: FAIL (2 greet) — the session opened, but on {:?} (we \
@@ -1151,10 +1178,27 @@ fn auction_probe(
                 probe.phase = cancel_at(now);
                 return;
             }
-            // Re-ask on a cadence: the server drops a second in-flight list request silently, and
-            // the STARTED result has already queued a refresh of its own.
+            // Re-ask on a cadence: the server drops a second in-flight list request silently.
+            //
+            // **The FIRST ask is the tab click, not the raw binding** (decision 2308). Every
+            // caller of `GetOwnerAuctionItems` in the stock files lives inside the Auctions pane —
+            // its `OnShow` and its two page turners — and the `OnShow` is also the one place that
+            // assigns `AuctionFrameAuctions.page`. Calling the binding cold puts the window in a
+            // state no click can reach, and the reply's `AUCTION_OWNED_LIST_UPDATE` then repaints
+            // a tab whose `page` is still nil: this probe raised
+            // `Blizzard_AuctionUI.lua:837: attempt to perform arithmetic on field 'page'` twice a
+            // run doing exactly that, at WARN, where nothing was looking. Clicking the tab is both
+            // the faithful drive ("exactly as a click would", this file's header) and what makes
+            // step (6c) a real assertion instead of a permanently red one.
             if last_ask == 0.0 || now - last_ask > OWNER_REASK_SECS {
-                crate::ui_script::run_or_warn(&script, "GetOwnerAuctionItems()");
+                let ask = if last_ask == 0.0 {
+                    // The tab's own OnShow issues the query, once per window session
+                    // (`AuctionFrame.gotAuctions`), and sets the page the repaint needs.
+                    "AuctionFrameTab_OnClick(3)"
+                } else {
+                    "GetOwnerAuctionItems()"
+                };
+                crate::ui_script::run_or_warn(&script, ask);
                 probe.phase = Phase::OwnerList {
                     since,
                     last_ask: now,

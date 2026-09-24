@@ -32,53 +32,17 @@
 //! **Nothing from the corpus is committed**, and the tests skip cleanly on a machine without it
 //! (see [`corpus`]) — a checkout with no addon folder must never go red here.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use benilla_ui::script::UiScript;
 
 use super::event::{ChatEvent, ChatEventKind as K};
 use super::frames::{route, ChatWindows};
 
-/// Where the vanilla addon corpus might be, in order. `$BENILLA_ADDON_CORPUS` first so a machine
-/// that keeps it elsewhere needs no patch; then the sibling checkout, resolved from this crate's
-/// manifest rather than the cwd (a pool worktree's cwd is not stable across tool calls, and
-/// `CARGO_MANIFEST_DIR` is).
-fn corpus_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(over) = std::env::var_os("BENILLA_ADDON_CORPUS") {
-        out.push(PathBuf::from(over));
-    }
-    // …/<checkout>/crates/benilla-app → up to the checkout, then to its parent(s). A pool slot
-    // lives one level deeper than the primary checkout, so both hops are tried.
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for up in [2usize, 3, 4] {
-        if let Some(root) = manifest.ancestors().nth(up) {
-            out.push(root.join("wow-addons-vanilla"));
-        }
-    }
-    out
-}
-
-/// The corpus root, or `None`. **`None` is a skip, never a failure**: the corpus is third-party
-/// content that is deliberately not in this repo, so a machine without it must still be green.
-fn corpus() -> Option<PathBuf> {
-    corpus_candidates().into_iter().find(|c| c.is_dir())
-}
-
-macro_rules! corpus_or_skip {
-    () => {
-        match corpus() {
-            Some(root) => root,
-            None => {
-                eprintln!(
-                    "skipping: no vanilla addon corpus — looked in {:?} (set $BENILLA_ADDON_CORPUS)",
-                    corpus_candidates()
-                );
-                return;
-            }
-        }
-    };
-}
+/// The corpus, or a skip — `benilla_formats::addon_corpus_or_skip!`, the one resolver (its doc
+/// carries the incident: five copies of a ladder that looked beside the checkout, and thirty
+/// tests that skipped at every land once the pool moved).
+use benilla_formats::addon_corpus_or_skip as corpus_or_skip;
 
 /// FuBar's `.toc` load order for the four files the gate lives in (`FuBar/FuBar.toc:16-19`).
 /// AceEvent is last because it needs all three under it — AceLibrary to register into, Compost for
@@ -128,6 +92,7 @@ fn gate_open(s: &UiScript) -> bool {
 /// end to end — not a hand-rolled `fire_event`.
 #[test]
 fn a_you_joined_notice_opens_ace2s_initialisation_gate() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = ace_vm(&root);
     let mut windows = ChatWindows::default();
@@ -186,6 +151,7 @@ fn a_you_joined_notice_opens_ace2s_initialisation_gate() {
 /// gate and the headline is measuring the wrong thing.
 #[test]
 fn without_the_notice_the_gate_stays_shut() {
+    benilla_formats::wow_data_or_skip!();
     let root = corpus_or_skip!();
     let mut s = ace_vm(&root);
     for _ in 0..40 {
@@ -210,7 +176,7 @@ fn the_auto_join_walk_names_the_channels_the_server_resolves() {
 
     // The city word is DBC data, so read it the way the walk does rather than spelling it here —
     // that this resolves to "City" at all is the finding (`AreaTable.dbc` row 3459,
-    // `Flags & 0x200`; wow-re `zone-chat-channel-autojoin.md` §3).
+    // `Flags & 0x200`, the row `0xb4e4f0` caches).
     let areas = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable.dbc");
     let city = super::channels::city_word(&areas);
     assert_eq!(

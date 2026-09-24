@@ -1,68 +1,31 @@
 <Ui>
     <!--
-        benilla's **script error log** (decision 1495) — the window B293 asked for, and it is
-        entirely OURS: 1.12 has no counterpart, so every name here wears the `Benilla` prefix (1254's
-        rule, `tests::reference_surface`'s gate).
-
-        ## Why it exists beside `ScriptErrors`
-
-        `BasicControls.xml`'s red `ScriptErrors` dialog is the reference's whole answer to a Lua
-        fault, transcribed and installed by 1305 — and it stays exactly as it is. It shows **one**
-        message, because `_ERRORMESSAGE` guards on `ScriptErrors:IsVisible()`, and it remembers
-        nothing. Two reporters said so within days of it shipping: Goudy, *minutes after
-        screenshotting that dialog working*, *"some kind of lua error frame probably needs to be
-        implemented, as there are a lot of addons that still doesn't work"*; nazriel_0, *"probably we
-        should start using something like Bug Grabber to report those stack traces better"*.
-
-        So: the dialog is the interrupt, this is the log. Additive, no divergence — the reference
-        simply never had this instrument.
-
-        ## Shape
-
-        `CraftFrame.xml`'s shape, which is the house idiom for "windowed panel, faux-scrolled row
-        list, detail pane that repaints on selection": 13 fixed 16px rows over a
-        `FauxScrollFrameTemplate`, and a **real** `<ScrollFrame>` detail pane below (the real kit,
-        not the faux one — a message is a `mlua` error string with its `stack traceback:` tail
-        attached, so the detail is genuinely variable-height content, which is what the real kit is
-        for; `GossipFrame.xml`'s greeting pane is the same wiring).
-
-        The window registers itself in `UIPanelWindows` (below; the table is the stock UIParent.lua's
-        since 1988), which is what seats it in the
-        left slot and gets it closed by `CloseAllWindows()` — i.e. by ESC — with no code here. Our
-        own toplevels deliberately stay OUT of `UISpecialFrames`: that table is the addons' (0544's
-        note, 1206).
-
-        ## Reading the model
-
-        Three engine reads, all from the retained log on the model
-        (`benilla_ui::script::diagnostics`): `BenillaGetNumScriptErrors()` →
-        `retained, totalEverRecorded`; `BenillaGetScriptErrorInfo(i)` → `seq, kind, message, count`
-        (1-based, oldest first, nil past the end); `BenillaClearScriptErrors()`. There is no per-frame
-        feed and nothing to keep in step — the window polls the log it is a view of.
+        Benilla's script error log. 1.12 has no such window, so every name here carries the
+        `Benilla` prefix (`tests::reference_surface` checks it). It sits beside the stock
+        `ScriptErrors` dialog, which shows one message and keeps none: the dialog interrupts,
+        this window keeps the log.
+        Shaped like the reference's CraftFrame: 13 fixed 16px rows over the stock faux-scroll kit
+        and a detail pane below. It registers in `UIPanelWindows`, which seats it in the left slot
+        and closes it on ESC, and stays out of `UISpecialFrames`, which belongs to addons.
+        The engine's log API: `BenillaGetNumScriptErrors()` returns retained and total-ever
+        counts; `BenillaGetScriptErrorInfo(i)` returns `seq, kind, message, count` (1-based,
+        oldest first, nil past the end); `BenillaClearScriptErrors()`. The window polls it.
     -->
     <Script><![CDATA[
-        -- The slot-manager row (decision 1495): a left-area window one tier above every stock
-        -- panel's pushable, so opening a game window pushes the log aside rather than the reverse.
+        -- A left-slot window with a pushable above every stock panel's, so a game window opening
+        -- pushes the log aside.
         UIPanelWindows["BenillaScriptLogFrame"] = { area = "left", pushable = 9, whileDead = 1 }
 
         BENILLA_SCRIPTLOG_ROWS = 13
         BENILLA_SCRIPTLOG_ROW_HEIGHT = 16
-        -- How much of a message a ROW shows. The full text is the detail pane's job; a row is an
-        -- index, and a row that wraps would break the fixed-height list the faux kit requires.
+        -- How much of a message a row shows; a wrapped row would break the faux kit's fixed rows.
         BENILLA_SCRIPTLOG_ROW_CHARS = 52
 
-        -- Which row is selected (a `seq`, not an index — indices shift when the cap evicts, and a
-        -- selection that silently slides onto a different error is worse than one that goes away).
+        -- The selected row's `seq`, not its index: indices shift when the cap evicts.
         BenillaScriptLogSelected = nil
 
-        -- The first line of a message, trimmed to a row's width. A traceback's later lines are
-        -- indented continuations; on one row they read as noise.
-        -- `strsub` is BYTE-indexed (Lua 5.0 strings are byte strings, and benilla keeps them that
-        -- way — decision 1193), so a cut that lands inside a multi-byte character leaves half of
-        -- one. Every message here is UTF-8 and ours are full of em dashes, so this was not
-        -- theoretical: the log window's own repaint raised on the first warning it was ever asked
-        -- to show (2135/2138). Back the cut up over any continuation byte (`10xxxxxx`, i.e.
-        -- 0x80..0xBF) so it lands on a character boundary.
+        -- A message's first line, trimmed to a row. `strsub` counts bytes and messages are UTF-8,
+        -- so the cut backs up over continuation bytes (0x80..0xBF) onto a character boundary.
         function BenillaScriptLog_RowText(message)
             local cut = strfind(message, "\n", 1, 1)
             local head = message
@@ -79,13 +42,10 @@
             return head
         end
 
-        -- The three kinds, coloured by CONSEQUENCE — how much of the addon is broken:
-        --   `load`  red    an addon is not running at all (the thing a player can act on)
+        -- Coloured by how much of the addon is broken:
+        --   `load`  red    the addon is not running at all
         --   `error` amber  code ran and raised; the addon is otherwise up
-        --   `warn`  grey   a call was accepted and quietly did not do what it said (2135)
-        -- Grey rather than a fourth bright colour because a warning is the least urgent of the
-        -- three and there are more of them: colour has to keep ranking the list, not just label
-        -- it. Colours come from the shipped tables so this window matches the rest of the UI.
+        --   `warn`  grey   a call was accepted and quietly did not do what it said
         function BenillaScriptLog_RowColor(kind)
             if kind == "load" then return 1.0, 0.3, 0.3 end
             if kind == "warn" then return 0.65, 0.65, 0.65 end
@@ -95,12 +55,8 @@
         function BenillaScriptLog_Update()
             local shown, total = BenillaGetNumScriptErrors()
 
-            -- The summary line carries the one number a bug report needs and the window cannot
-            -- otherwise show: how many were DROPPED. `total` counts distinct failures ever
-            -- recorded; `shown` is what survived the cap.
-            -- "problems", not "errors": the log carries three kinds now and two of them are not
-            -- errors (2135). The window is still `/errors` and still opens on the same key —
-            -- what changed is that a count of 7 stopped meaning "7 things raised".
+            -- `total` counts distinct failures ever recorded, `shown` what the cap kept. The
+            -- summary says "problems" because two of the three kinds are not errors.
             local summary
             if total == 0 then
                 summary = "No problems this session."
@@ -126,9 +82,7 @@
                 if seq then
                     button.seq = seq
                     button.message = message
-                    -- The count rides the index, not the text: `#12 x1113` says "this is one
-                    -- failure that happened 1,113 times", which is the whole reason the log
-                    -- deduplicates instead of listing 1,113 rows.
+                    -- `#12 x1113`: one deduplicated failure that happened 1,113 times.
                     local label = "#" .. seq
                     if count > 1 then label = label .. " x" .. count end
                     button.index:SetText(label)
@@ -143,9 +97,8 @@
                 end
             end
 
-            -- The moving highlight, seated onto the selected row only when that row is on screen —
-            -- scrolling the selection away hides the glow rather than stranding it (CraftFrame's
-            -- own behaviour).
+            -- The highlight follows the selected row and hides when it scrolls away, as the
+            -- reference's CraftFrame does.
             local highlight = getglobal("BenillaScriptLogHighlightFrame")
             if selectedRow then
                 highlight:SetPoint("TOPLEFT", selectedRow:GetName(), "TOPLEFT", 0, 0)
@@ -157,8 +110,8 @@
             BenillaScriptLog_UpdateDetail()
         end
 
-        -- The detail pane: the FULL message of the selected row, traceback and all. Selection is by
-        -- `seq`, so this walks the log rather than indexing it.
+        -- The selected message in full, traceback and all; selection is a `seq`, so this walks
+        -- the log rather than indexing it.
         function BenillaScriptLog_UpdateDetail()
             local text = ""
             if BenillaScriptLogSelected then
@@ -177,18 +130,14 @@
             getglobal("BenillaScriptLogDetailText"):SetText(text)
         end
 
-        -- Frame-late by nature (the shared kit's own note): text rects resolve after Lua runs, so
-        -- the child is re-measured from OnUpdate until it stops changing, after which this is a
-        -- no-op compare per frame. OnUpdate only fires on visible frames, so a closed window costs
-        -- nothing.
+        -- Text rects resolve after Lua runs, so the detail child is re-measured every frame; once
+        -- it settles that is one compare, and OnUpdate fires only while the window is shown.
         function BenillaScriptLogFrame_OnUpdate()
             BenillaScroll_ResizeChild("BenillaScriptLogDetailScroll", { "BenillaScriptLogDetailText" })
         end
 
         function BenillaScriptLogRow_OnClick(button)
             if not button.seq then return end
-            -- Clicking the selected row deselects: the detail pane is a drawer, and a list with no
-            -- way back to "nothing selected" is a small trap.
             if BenillaScriptLogSelected == button.seq then
                 BenillaScriptLogSelected = nil
             else
@@ -198,20 +147,17 @@
         end
 
         function BenillaScriptLogFrame_OnLoad(self)
-            -- The ring's icon, through the portrait verb rather than left at its `file=` — see the
-            -- texture's own note. MailFrame.xml's open-letter icon is the same fix.
+            -- Masks the square icon to the portrait ring.
             SetPortraitToTexture("BenillaScriptLogFramePortrait",
                 "Interface\\Icons\\INV_Misc_Note_01")
         end
 
-        -- The shared helper steps the faux frame's bar, whose OnValueChanged runs the kit's
-        -- offset handler and thence `updateFunc` — so the repaint is wired once, at OnLoad, and
-        -- not repeated here.
+        -- Stepping the bar repaints through the list frame's OnVerticalScroll, so no repaint here.
         function BenillaScriptLogFrame_OnMouseWheel(delta)
             BenillaFauxScrollFrame_OnMouseWheel(getglobal("BenillaScriptLogListScrollFrame"), delta)
         end
 
-        -- ── The three entry points the client and the player reach this by ────────────────────
+        -- ── Entry points ──────────────────────────────────────────────────────────────────────
 
         function BenillaScriptLog_Toggle()
             local frame = getglobal("BenillaScriptLogFrame")
@@ -222,10 +168,8 @@
             end
         end
 
-        -- `/errors clear`. Forgets the rows, keeps the numbering (the engine's own rule — a number
-        -- must never name two different failures across a screenshot). Prints a confirmation
-        -- because a command whose whole effect is "a window you may not have open is now empty"
-        -- is otherwise indistinguishable from a typo.
+        -- `/errors clear`: forgets the rows but keeps the numbering, so a number never names two
+        -- failures. It confirms in chat because the window may be closed.
         function BenillaScriptLog_Clear()
             BenillaClearScriptErrors()
             BenillaScriptLogSelected = nil
@@ -236,9 +180,8 @@
         end
     ]]></Script>
 
-    <!-- One list row: the `#N xCount` index column, then the message head. Fixed columns, 1.12's
-         own list idiom — not a width limitation: a FontString with a zero-authored axis takes its
-         measured box into the resolve (`benilla-ui` `script/layout.rs`, decision 1664). -->
+    <!-- One list row: the `#N xCount` index column, then the message head, in fixed columns as
+         1.12's lists are. -->
     <Button name="BenillaScriptLogRowTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="293" y="16"/></Size>
         <Layers>
@@ -268,18 +211,15 @@
         <Size><AbsDimension x="384" y="512"/></Size>
         <Layers>
             <Layer level="BACKGROUND">
-                <!-- The same square ITEM icon the mail window's ring holds, and it needs the same
-                     portrait verb for the same reason (`SetPortraitToTexture` in OnLoad below):
-                     `file=` alone draws it unmasked and its corners show through the ring's
-                     transparent ones. -->
+                <!-- A square item icon: OnLoad masks it with `SetPortraitToTexture`, since `file=`
+                     alone shows its corners through the ring. -->
                 <Texture name="BenillaScriptLogFramePortrait" file="Interface\Icons\INV_Misc_Note_01">
                     <Size><AbsDimension x="60" y="60"/></Size>
                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
                 </Texture>
             </Layer>
-            <!-- The four quadrant slabs. The ClassTrainer family, all four, because it is the one
-                 UNIFORM set in the 1.12 art (CraftFrame's own note) and this window belongs to no
-                 profession — borrowing a themed half would make it look like a window it isn't. -->
+            <!-- The ClassTrainer quadrants, the one uniform set in the 1.12 art; this window
+                 belongs to no profession. -->
             <Layer level="BORDER">
                 <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="TOPLEFT"/></Anchors></Texture>
                 <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="TOPRIGHT"/></Anchors></Texture>
@@ -288,22 +228,18 @@
                 <FontString name="BenillaScriptLogTitle" inherits="GameFontNormal" justifyH="CENTER" text="Script Errors">
                     <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
                 </FontString>
-                <!-- The summary line, and the ONLY place the dropped-row count can be told. -->
+                <!-- The summary line, the only place the dropped-row count shows. -->
                 <FontString name="BenillaScriptLogSummary" inherits="GameFontHighlightSmall" justifyH="LEFT" text="">
                     <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="26" y="-76"/></Offset></Anchor></Anchors>
                 </FontString>
             </Layer>
         </Layers>
         <Frames>
-            <!-- The top-right X: the chain's own `UIPanelCloseButton` (seated at benilla.toc's
-                 `Interface\FrameXML\UIPanelTemplates.xml`, 757 lines above this file). Its
-                 32x32, its three minimize-button state textures and its
-                 `HideUIPanel(this:GetParent())` are byte-for-byte what stood here authored. -->
             <Button name="BenillaScriptLogCloseButton" inherits="UIPanelCloseButton">
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-29" y="-8"/></Offset></Anchor></Anchors>
             </Button>
 
-            <!-- Declared BEFORE the rows so row text paints over the glow (the house z-tiebreak). -->
+            <!-- Declared before the rows so their text draws over the glow. -->
             <Frame name="BenillaScriptLogHighlightFrame" hidden="true">
                 <Size><AbsDimension x="293" y="16"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
@@ -335,16 +271,14 @@
                 <Size><AbsDimension x="293" y="208"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-94"/></Offset></Anchor></Anchors>
                             <Scripts>
-                    <!-- The reference's kit writes `frame.offset` ONLY from here; its
-                         `updateFunc` field does not exist, so without this the bar moves and
-                         the list does not follow (1868). -->
+                    <!-- The stock kit sets the offset only from here and has no `updateFunc`, so
+                         the repaint is wired here too. -->
                     <OnVerticalScroll>FauxScrollFrame_OnVerticalScroll(BENILLA_SCRIPTLOG_ROW_HEIGHT, BenillaScriptLog_Update)</OnVerticalScroll>
                 </Scripts>
 </ScrollFrame>
 
-            <!-- The detail pane: the REAL scroll kit, because a message carries its `stack
-                 traceback:` tail and is genuinely variable-height. GossipFrame's greeting pane is
-                 the same wiring. -->
+            <!-- The detail pane, on the real-scroll kit: a message with its `stack traceback:` tail
+                 has variable height. -->
             <ScrollFrame name="BenillaScriptLogDetailScroll">
                 <Size><AbsDimension x="293" y="128"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-314"/></Offset></Anchor></Anchors>
@@ -367,8 +301,7 @@
                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                         <Layers>
                             <Layer level="ARTWORK">
-                                <!-- 270 wide so the engine wraps the traceback rather than clipping
-                                     it; the pane pans over whatever height that comes to. -->
+                                <!-- 270 wide so the traceback wraps rather than clips. -->
                                 <FontString name="BenillaScriptLogDetailText" inherits="GameFontHighlightSmall" justifyH="LEFT" justifyV="TOP" text="">
                                     <Size><AbsDimension x="270" y="0"/></Size>
                                     <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="6" y="-6"/></Offset></Anchor></Anchors>
@@ -392,18 +325,16 @@
         </Frames>
         <Scripts>
             <OnLoad>BenillaScriptLogFrame_OnLoad(self)</OnLoad>
-            <!-- The list wheel lives on the WINDOW: the engine bubbles a spin up the parent chain
-                 (CraftFrame's own note). The detail pane has its own, which wins over its own rect. -->
+            <!-- The list's wheel handler is on the window, since a spin bubbles up the parent
+                 chain; the detail pane's own handler wins over its rect. -->
             <OnMouseWheel>BenillaScriptLogFrame_OnMouseWheel(arg1)</OnMouseWheel>
             <OnShow>BenillaScriptLog_Update()</OnShow>
             <OnUpdate>BenillaScriptLogFrame_OnUpdate()</OnUpdate>
         </Scripts>
     </Frame>
-    <!-- benilla's own commands over the reference's SlashCmdList (decision 1948). The stock
-         ChatEdit_ParseText walks SlashCmdList after its own built-ins, so each of benilla's commands
-         (ui_chat::commands — the dev instruments and the three additions) hands its line to
-         SubmitChatInput, where ui_chat::input's parser still owns it. This file loads after the
-         reference's ChatFrame.xml, which is what declares the table. -->
+    <!-- Benilla's slash commands in the stock SlashCmdList, which ChatEdit_ParseText walks after
+         its built-ins; each hands its line to SubmitChatInput, where ui_chat::input parses it.
+         This file loads after the stock ChatFrame.xml, which declares the table. -->
     <Script><![CDATA[
         local BENILLA_COMMANDS = {
             { "CHATTEST", "/chattest" },

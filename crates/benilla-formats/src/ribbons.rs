@@ -1,9 +1,8 @@
 //! Vanilla (build 5875 / MD20 v256) M2 **ribbon emitter** parsing — the weapon trails, wisp
 //! streamers, and spell-missile trails. Read straight from raw bytes, like `particles`.
 //!
-//! Byte layout is wow-5875-re's transcription-ready spec (`system/models/scratch/
-//! ribbon-emitter-spec.md`, their `9c862186` — a §5 pair over the MD20 relocation fixup + the
-//! ctor/render reads; closes the models item-12 remainder for the ribbon record):
+//! Byte layout is the reference's, read off the MD20 relocation fixup `0x71ef40` + the
+//! ctor/render reads:
 //!
 //! ```text
 //! header array : count @ MD20+0x134, ptr @ MD20+0x138        record stride 0xdc
@@ -30,10 +29,9 @@
 //! `block+0xbc` — ctor `0x71b34c` = 0, loader default `0x70f80e` = 1, then written every frame
 //! from the sampled value at `0x7176ee` / `0x717714` inside `0x714260`; `0x718960` only reads it,
 //! and no equipment/attach/sheathe writer exists anywhere in the binary. Clearing it **kills the
-//! whole ribbon's draw** (`0x7080c2` → the collect loop's continue at `0x708263`). wow-re
-//! `ribbon-emitter-spec.md` §6/§7, settled by the dispatch behind decision 1017: §7 previously
-//! left the writer OPEN and *guessed* the equip/attach route, and decision 1013 unwound the whole
-//! mechanism on the strength of that guess.
+//! whole ribbon's draw** (`0x7080c2` → the collect loop's continue at `0x708263`). Settled for
+//! decision 1017; decision 1013 had unwound the whole mechanism on the strength of a *guessed*
+//! equip/attach route.
 //!
 //! The thrown weapon keys its flight trail OFF in Stand (worn in the hand) and Impact (landed),
 //! ON only in InFlight. Keeping the keys — rather than the old band-start bool per sequence — is
@@ -264,6 +262,14 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
     };
     let count = le_u32(bytes, HDR_COUNT) as usize;
     let base = le_u32(bytes, HDR_PTR) as usize;
+    // The particle twin's refusal (`particles.rs`), for the same reason: `count` is a raw header
+    // u32 that sizes the reservation below (~250 B per emitter — u32::MAX is a terabyte and an
+    // allocator abort), and the table must fit in the file. 256 is far past anything authored:
+    // the corpus scan cited below found 590 ribbons over 176 models, a handful per model. It is
+    // checked first so `count * STRIDE` cannot overflow.
+    if count == 0 || count > 256 || base + count * STRIDE > bytes.len() {
+        return Ok(Vec::new());
+    }
     let rf_count = le_u32(bytes, HDR_RENDER_FLAGS) as usize;
     let rf_base = le_u32(bytes, HDR_RENDER_FLAGS + 4) as usize;
     // The first sequence's absolute time band — the keyed look tracks rebase onto it
@@ -321,9 +327,9 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
             color: track_keys_with(bytes, e + 0x24, [1.0; 3], band, 12, |b, o| {
                 [le_f32(b, o), le_f32(b, o + 4), le_f32(b, o + 8)]
             }),
-            // fix16 keys are SIGNED (`movsx`, wow-re `tracks.md` flavour (c) — the same decode as
-            // `benilla_m2::track_fix16`; the ribbon spec calls the stride-2 values int16 outright,
-            // `ribbon-emitter-spec.md` +0x40). The strip's own draw clamps a negative to 0 below.
+            // fix16 keys are SIGNED (`movsx` at the alpha site `0x717933` — the same decode as
+            // `benilla_m2::track_fix16`; the record's stride-2 values at +0x40 are int16 outright).
+            // The strip's own draw clamps a negative to 0 below.
             alpha: track_keys_with(bytes, e + 0x40, 1.0, band, 2, |b, o| {
                 f32::from(le_u16(b, o) as i16) / 32767.0
             }),
@@ -344,6 +350,21 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The header's ribbon count (0x134) sized the reservation straight off the file — at ~250 B
+    /// per `RibbonEmitterDef`, u32::MAX is a terabyte request and an allocator abort, where the
+    /// particle twin had refused the same shape all along. Refused the same way now.
+    #[test]
+    fn a_hostile_ribbon_count_yields_nothing_not_an_abort() {
+        let mut b = vec![0u8; HDR_PTR + 4];
+        b[0..4].copy_from_slice(b"MD20");
+        b[HDR_COUNT..HDR_COUNT + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_m2_ribbon_emitters(&b).unwrap().is_empty());
+        // And a table the file cannot hold, at a plausible count, is refused too.
+        b[HDR_COUNT..HDR_COUNT + 4].copy_from_slice(&3u32.to_le_bytes());
+        b[HDR_PTR..HDR_PTR + 4].copy_from_slice(&((HDR_PTR + 4) as u32).to_le_bytes());
+        assert!(parse_m2_ribbon_emitters(&b).unwrap().is_empty());
+    }
 
     /// [`RibbonVisibility::at`]'s sampling law, on a hand-built gate: STEP (nearest-previous, the
     /// track's own `interp == 0`), the band-opening entry answers before the first in-band key,

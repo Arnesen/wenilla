@@ -509,22 +509,17 @@ static void constructor (LexState *ls, expdesc *t) {
   checknext(ls, '{');
   do {
     lua_assert(cc.v.k == VVOID || cc.tostore > 0);
-    /* BENILLA: Lua 5.0's constructor compat-semicolon, restored (decision 1315;
-    ** see third_party/lua-src/BENILLA.md). 5.0 opened this loop with exactly the
-    ** line below -- its own comment read "compatibility only", a Lua 4.0 leftover
-    ** (4.0 separated a constructor's list part from its record part with `;`).
-    ** 5.1 deleted the line, so one extra `;` after a field separator -- the
-    ** `Back_Title = AL["Factions"];;` shape AtlasLoot's ButtonRegistry.lua writes
-    ** twenty times -- became "unexpected symbol near ';'" here while the 1.12.1
-    ** client (Lua 5.0) accepts it. Statement-level `;;` stays rejected by both,
-    ** which is the half wow-5875-re byte-verified first (system/ui/scratch/
-    ** lua-dialect.md 9.1), and byte-verified in the client itself rather than
-    ** inferred from stock 5.0: constructor is 0x6fd430, and its loop head
-    ** 0x6fd4a0 calls testnext(ls,';') WITHOUT testing EAX -- a skip, not a
-    ** separator check -- while the loop's continuation at 0x6fd4f5/0x6fd505 does
-    ** test it. Of the 16 call sites of testnext 0x6fccf0 image-wide, the only
-    ** other consumer of `;' is chunk 0x6fcccc, at STATEMENT level, with no such
-    ** head skip. This line restores the constructor context only. */
+    /* BENILLA: Lua 5.0's constructor compat-semicolon, restored (see
+    ** third_party/lua-src/BENILLA.md). 5.0 opened this loop with exactly the
+    ** line below, a Lua 4.0 leftover; 5.1 deleted it, so one extra `;' after a
+    ** field separator (`Back_Title = AL["Factions"];;', which AtlasLoot writes)
+    ** raised "unexpected symbol near ';'" while the 1.12.1 client accepts it.
+    ** Statement-level `;;' stays rejected by both. Byte-read in the client:
+    ** constructor is 0x6fd430, and its loop head 0x6fd4a0 calls testnext(ls,';')
+    ** without testing EAX (a skip, not a separator check), while the loop's
+    ** continuation at 0x6fd4f5/0x6fd505 does test it; of testnext 0x6fccf0's 16
+    ** call sites, the only other `;' consumer is chunk 0x6fcccc, at statement
+    ** level, with no such head skip. */
     testnext(ls, ';');  /* compatibility only */
     if (ls->t.token == '}') break;
     closelistfield(fs, &cc);
@@ -766,39 +761,32 @@ static void simpleexp (LexState *ls, expdesc *v) {
       init_exp(v, VFALSE, 0);
       break;
     }
-    /* BENILLA: 5.1's vararg EXPRESSION arm, deleted (decision 2101; see
+    /* BENILLA: 5.1's vararg EXPRESSION arm, deleted (see
     ** third_party/lua-src/BENILLA.md). Lua 5.0 has no grammar for `...' as a
-    ** value -- a vararg function reads its extra arguments out of the implicit
-    ** `arg' table -- and `...' as an expression is the construct the Ace2 corpus
-    ** uses to ASK which interpreter it is running:
+    ** value: a vararg function reads its extra arguments out of the implicit
+    ** `arg' table. `...' as an expression is how the Ace2 corpus asks which
+    ** interpreter it is on:
     **
     **     local lua51 = loadstring("return function(...) return ... end") and true or false
     **
-    ** 170 loadstring sites across the 219-addon corpus are that question, and 92
-    ** library files in 24 folders gate on it (decision 1208). Answering it wrong
-    ** makes every one of them take a client-2.0 branch on a 1.12 client -- which
-    ** is how Cartographer came to hook `CloseSpecialWindows', a name 1.12 does
-    ** not have.
+    ** and 92 library files in 24 folders branch on the answer, taking a
+    ** client-2.0 path on a 1.12 client when it is wrong.
     **
-    ** Byte-verified in the client itself, not inferred from stock 5.0. simpleexp
-    ** is 0x6fd240; it switches on `token - 0x7B' bounded at 0xA3, indexes the
-    ** byte table at 0x6fd338 and jumps through the 8-entry table at 0x6fd318.
-    ** TK_DOTS is 0x118 (TK_NAME is 0x116 -- wow-5875-re system/ui/scratch/
-    ** lua-dialect.md 9), so its index byte is 0x9D, whose value is 7: the DEFAULT
-    ** arm, 0x6fd30a, which tail-jumps to primaryexp 0x6fdb00. The seven real arms
-    ** are `{', TK_FALSE, TK_FUNCTION, TK_NIL, TK_TRUE, TK_NUMBER and TK_STRING --
-    ** stock Lua 5.0's simpleexp exactly, with no vararg case.
+    ** Byte-read in the client: simpleexp is 0x6fd240; it switches on
+    ** `token - 0x7B' bounded at 0xA3, indexes the byte table at 0x6fd338 and
+    ** jumps through the 8-entry table at 0x6fd318. TK_DOTS is 0x118, so its
+    ** index byte is 0x9D, whose value is 7: the DEFAULT arm, 0x6fd30a, which
+    ** tail-jumps to primaryexp 0x6fdb00. The seven real arms are `{', TK_FALSE,
+    ** TK_FUNCTION, TK_NIL, TK_TRUE, TK_NUMBER and TK_STRING: stock Lua 5.0's
+    ** simpleexp exactly, with no vararg case. So `...' as a value reaches
+    ** prefixexp 0x6fde40, whose head accepts only `(' or TK_NAME and otherwise
+    ** raises "unexpected symbol" (0x871e80); deleting the arm reproduces that
+    ** error here, verbatim.
     **
-    ** So `...' as a value reaches prefixexp 0x6fde40, whose head accepts only `('
-    ** or TK_NAME and otherwise raises "unexpected symbol" (0x871e80) -- the same
-    ** reject site lua-dialect.md 9 documents for a stray `;'. Deleting the arm
-    ** reproduces that error here, verbatim.
-    **
-    ** It also restores 5.0's `arg' rule for free: the deleted line cleared
-    ** VARARG_NEEDSARG for any function that mentioned `...', so `arg' was not
-    ** built for it. With the arm gone, NEEDSARG is never cleared and EVERY vararg
-    ** function gets its `arg' table -- which is what 5.0 does and what all 177
-    ** files of the shipped 1.12 FrameXML read. */
+    ** It also restores 5.0's `arg' rule: the deleted line cleared
+    ** VARARG_NEEDSARG for any function that mentioned `...', so with the arm
+    ** gone every vararg function gets its `arg' table, which is what 5.0 does
+    ** and what the shipped 1.12 FrameXML reads. */
     case '{': {  /* constructor */
       constructor(ls, v);
       return;
@@ -821,15 +809,14 @@ static UnOpr getunopr (int op) {
   switch (op) {
     case TK_NOT: return OPR_NOT;
     case '-': return OPR_MINUS;
-    /* BENILLA: 5.1's `#' length operator, deleted (decision 2101). 5.0 asks a
-    ** table for its size with table.getn/getn and a string with string.len; the
-    ** operator does not exist and neither does its __len metamethod.
-    ** Byte-verified: getunopr is 0x6fe0a0, a leaf with exactly TWO token tests
-    ** -- `cmp ecx,0x2D' (`-') then `cmp ecx,0x10E' (TK_NOT), then setne/inc -- so
-    ** its OPR_NOUNOPR is 2, i.e. the enum has three members, not 5.1's four. The
-    ** metamethod-name pool at 0x871896 agrees: no __len (wow-5875-re
-    ** system/ui/scratch/lua-dialect.md 1, discriminator 4). A `#' therefore
-    ** reaches simpleexp's default arm and raises "unexpected symbol near `#'". */
+    /* BENILLA: 5.1's `#' length operator, deleted. 5.0 asks a table for its
+    ** size with table.getn and a string with string.len; the operator does not
+    ** exist and neither does its __len metamethod. Byte-read in the client:
+    ** getunopr is 0x6fe0a0, a leaf with exactly two token tests, `cmp ecx,0x2D'
+    ** (`-') then `cmp ecx,0x10E' (TK_NOT), so its OPR_NOUNOPR is 2: a
+    ** three-member enum, not 5.1's four. The metamethod-name pool at 0x871896
+    ** has no __len. A `#' therefore reaches simpleexp's default arm and raises
+    ** "unexpected symbol near `#'". */
     default: return OPR_NOUNOPR;
   }
 }
@@ -841,16 +828,14 @@ static BinOpr getbinopr (int op) {
     case '-': return OPR_SUB;
     case '*': return OPR_MUL;
     case '/': return OPR_DIV;
-    /* BENILLA: 5.1's `%' modulo operator, deleted (decision 2101). 5.0 spells it
-    ** math.mod (and the bare global `mod'), which this VM already publishes.
-    ** Byte-verified: getbinopr is 0x6fe0c0 and its switch is based at `ecx-0x2A'
-    ** -- `*', the LOWEST token it handles. `%' is 0x25, below the base, so it is
+    /* BENILLA: 5.1's `%' modulo operator, deleted. 5.0 spells it math.mod
+    ** (and the bare global `mod'), which this VM publishes. Byte-read in the
+    ** client: getbinopr is 0x6fe0c0 and its switch is based at `ecx-0x2A' (`*',
+    ** the lowest token it handles). `%' is 0x25, below the base, so it is
     ** outside the range test (`cmp eax,0xF2; ja') and falls to the default,
-    ** 0x6fe129, `mov eax,0xE' = OPR_NOBINOPR 14 -- a 15-member BinOpr, 5.0's, not
-    ** 5.1's 16-member one with OPR_MOD. Had 5.1's `%' case been present the
-    ** switch would have been based at 0x25. The metamethod pool has no __mod
-    ** either (wow-5875-re system/ui/scratch/lua-dialect.md 1, discriminator 4).
-    ** priority[] is indexed by the BinOpr enum, which is untouched -- only the
+    ** 0x6fe129, `mov eax,0xE' = OPR_NOBINOPR 14: a 15-member BinOpr, 5.0's, not
+    ** 5.1's 16-member one with OPR_MOD. The metamethod pool has no __mod either.
+    ** priority[] is indexed by the BinOpr enum, which is untouched; only the
     ** token that reaches OPR_MOD is gone. */
     case '^': return OPR_POW;
     case TK_CONCAT: return OPR_CONCAT;
