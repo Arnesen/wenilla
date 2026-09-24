@@ -41,7 +41,7 @@ const CENSUS_NEAR: f32 = 15.0;
 /// identical code. Two census lines are only comparable at equal `frames` — measured, the field
 /// tracks `fps/60` and nothing else: 1542/2115 = 72.9% and 1598/2134 = 74.9% against frame-rate
 /// ratios of 71.8% and 73.0%. (An earlier revision of this line claimed 48%, which was an
-/// arithmetic slip on my part; it read as an unexplained anomaly and cost a wasted RE question.)
+/// arithmetic slip on my part.)
 pub(super) fn census(
     drops: &[Drop],
     cam: Vec3,
@@ -94,7 +94,7 @@ const CENSUS_TOP_BANDS: usize = 10;
 /// **Alpha-weighted, deliberately.** The geometric ceiling is a razor plane by construction —
 /// every flake is born at local `z = +30` ([`super::pool::spawn_particle`]) — so a raw count *always* reports a
 /// hard edge and can never tell the two clients apart. What the eye sees is softened by the 1 s
-/// linear fade-in (`alpha = clamp01(t − f1)`, wow-re `rf-snow-flake-render` §2.4), and that fade is
+/// linear fade-in (`alpha = clamp01(t − f1)`, `snowpoint.bls`), and that fade is
 /// the only thing standing between a flat spawn plane and a visible cut. So the weight is the alpha
 /// the renderer actually emits, and the profile reads the way the look does: a soft edge climbs to
 /// the plateau over several steps, a hard one reaches it in the first.
