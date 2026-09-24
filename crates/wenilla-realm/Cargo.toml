@@ -10,6 +10,9 @@ anyhow.workspace = true
 clap.workspace = true
 wenilla-host = { path = "../wenilla-host" }
 benilla-formats = { path = "../benilla-formats", default-features = false }
+# The headless player that builds a preset group's characters: logon, create, GM chat, equip.
+benilla-protocol = { path = "../benilla-protocol" }
+toml = "0.8"
 axum = { version = "0.8", features = ["ws", "macros", "form", "json"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "sync", "time"] }

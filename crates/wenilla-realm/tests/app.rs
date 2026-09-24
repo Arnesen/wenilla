@@ -12,6 +12,23 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 use wenilla_realm::{db, mangos_conf, ratelimit, realmdb, secrets, soap, AppState, Config};
 
+/// Stands in for the headless player: names the character after the first candidate, instantly.
+struct FakeBuilder;
+
+#[async_trait::async_trait]
+impl wenilla_realm::presets::Provisioner for FakeBuilder {
+    async fn build(
+        &self,
+        job: wenilla_realm::presets::Job,
+    ) -> anyhow::Result<wenilla_realm::presets::headless::Built> {
+        Ok(wenilla_realm::presets::headless::Built {
+            name: job.names[0].clone(),
+            guid: 1,
+            not_equipped: Vec::new(),
+        })
+    }
+}
+
 /// A stand-in for mangosd's SOAP port: records every command, answers `ok`.
 async fn mock_soap() -> (String, Arc<Mutex<Vec<String>>>) {
     let log: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -82,6 +99,7 @@ async fn harness() -> Harness {
         secrets: secrets::Keyring::load_or_create(&state_dir).unwrap(),
         providers: Vec::new(),
         limiter: ratelimit::Limiter::default(),
+        provisioner: Arc::new(FakeBuilder),
         client_data_error: Some("test: no client data".into()),
         db: sqlite,
         cfg: cfg.clone(),
@@ -649,4 +667,247 @@ async fn setup_cache_refreshes_after_completion_and_external_reset() {
         true,
     ));
     assert!(!h.state.setup_complete().await.unwrap());
+}
+
+/// Poll until the background build of `group` has finished (the fake builder is instant).
+async fn wait_group(h: &Harness, group: i64) -> wenilla_realm::presets::Group {
+    for _ in 0..100 {
+        let g = wenilla_realm::presets::by_id(&h.state.db, group)
+            .await
+            .unwrap()
+            .unwrap();
+        if g.status != "building" {
+            return g;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("group {group} never finished building");
+}
+
+#[tokio::test]
+async fn a_preset_group_link_joins_summons_and_deletes() {
+    let h = harness().await;
+    let admin = run_setup(&h).await;
+
+    // The admin makes a Deadmines group.
+    let page = send(&h.app, get("/admin/presets", Some(&admin))).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(page.body.contains("The Deadmines") && page.body.contains("Blackrock Depths"));
+    let csrf = csrf_of(&page.body);
+    let r = send(
+        &h.app,
+        form(
+            "/admin/presets",
+            Some(&admin),
+            &[("_csrf", "nope"), ("preset", "deadmines")],
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "CSRF still applies");
+    let r = send(
+        &h.app,
+        form(
+            "/admin/presets",
+            Some(&admin),
+            &[("_csrf", &csrf), ("preset", "deadmines")],
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    let g = wait_group(&h, 1).await;
+    assert_eq!(g.status, "ready");
+    let members = wenilla_realm::presets::members(&h.state.db, 1)
+        .await
+        .unwrap();
+    assert_eq!(members.len(), 5);
+    assert!(members
+        .iter()
+        .all(|m| m.status == "ready" && m.char_name.is_some()));
+
+    // Each builder got GM for the build and lost it after.
+    let log = h.soap_log.lock().unwrap().clone();
+    for m in &members {
+        let acct = wenilla_realm::accounts::get(&h.state.db, m.user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .game_username;
+        assert!(acct.starts_with("WP") && acct.len() == 12, "{acct}");
+        assert!(
+            log.iter()
+                .any(|c| c.starts_with(&format!("account create {acct} "))),
+            "{log:?}"
+        );
+        let up = log
+            .iter()
+            .position(|c| *c == format!("account set gmlevel {acct} 3 -1"));
+        let down = log
+            .iter()
+            .position(|c| *c == format!("account set gmlevel {acct} 0 -1"));
+        assert!(up.is_some() && down > up, "{acct}: {log:?}");
+    }
+
+    // The link: shown on the admin page, it opens without a session.
+    let page = send(&h.app, get("/admin/presets", Some(&admin))).await;
+    let at = page.body.find("/g/").expect("link on the admin page");
+    let token: String = page.body[at + 3..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    assert_eq!(token.len(), 43);
+    // Preset users stay off the Users page.
+    let users = send(&h.app, get("/admin/users", Some(&admin))).await;
+    assert!(!users.body.contains("preset-1-"), "{}", users.body);
+
+    let r = send(&h.app, get(&format!("/g/{token}"), None)).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("Play Warrior") && r.body.contains("Play Priest"));
+    assert_eq!(
+        r.headers.get("referrer-policy").unwrap(),
+        "no-referrer",
+        "the link must not leak through a Referer"
+    );
+    let wrong: String = token.chars().rev().collect();
+    assert_eq!(
+        send(&h.app, get(&format!("/g/{wrong}"), None)).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        send(&h.app, get("/g/short", None)).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // Joining the tank signs the browser in as that character; /api/play names it.
+    let r = send(&h.app, form(&format!("/g/{token}/join/0"), None, &[])).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(r.location(), "/");
+    let player = r.cookie().expect("session cookie");
+    let r = send(
+        &h.app,
+        Request::get("/api/play")
+            .header(header::COOKIE, &player)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+    assert_eq!(v["char"].as_str(), members[0].char_name.as_deref());
+    assert!(v["user"].as_str().unwrap().starts_with("WP"));
+    // …and it is a player, not an admin.
+    assert_eq!(
+        send(&h.app, get("/admin", Some(&player))).await.status,
+        StatusCode::FORBIDDEN
+    );
+
+    // Summon: one console teleport per character, by name, to the preset's entrance.
+    let r = send(&h.app, form(&format!("/g/{token}/summon"), None, &[])).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    let log = h.soap_log.lock().unwrap().clone();
+    for m in &members {
+        let want = format!("tele name {} TheDeadmines", m.char_name.as_deref().unwrap());
+        assert!(log.contains(&want), "{want}: {log:?}");
+    }
+
+    let mut accts = std::collections::HashMap::new();
+    for m in &members {
+        let a = wenilla_realm::accounts::get(&h.state.db, m.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        accts.insert(m.user_id, a.game_username);
+    }
+    // Delete needs the confirmation box.
+    let r = send(&h.app, form(&format!("/g/{token}/delete"), None, &[])).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert!(wenilla_realm::presets::by_id(&h.state.db, 1)
+        .await
+        .unwrap()
+        .is_some());
+    // A cross-site delete is refused before any handler.
+    let mut req = form(&format!("/g/{token}/delete"), None, &[("confirm", "yes")]);
+    req.headers_mut()
+        .insert("sec-fetch-site", "cross-site".parse().unwrap());
+    assert_eq!(send(&h.app, req).await.status, StatusCode::FORBIDDEN);
+
+    let r = send(
+        &h.app,
+        form(&format!("/g/{token}/delete"), None, &[("confirm", "yes")]),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("Group deleted"));
+    let log = h.soap_log.lock().unwrap().clone();
+    for m in &members {
+        let acct = &accts[&m.user_id];
+        assert!(
+            log.contains(&format!("account delete {acct}")),
+            "{acct}: {log:?}"
+        );
+        assert!(log.contains(&format!("kick {}", m.char_name.as_deref().unwrap())));
+    }
+    let left: Vec<(i64,)> = sqlx::query_as("SELECT id FROM users WHERE username LIKE 'preset-%'")
+        .fetch_all(&h.state.db)
+        .await
+        .unwrap();
+    assert!(left.is_empty());
+    // The link is dead, and so is the session it minted.
+    assert_eq!(
+        send(&h.app, get(&format!("/g/{token}"), None)).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let r = send(
+        &h.app,
+        Request::get("/api/play")
+            .header(header::COOKIE, &player)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_group_cannot_be_deleted_while_it_is_being_built() {
+    let h = harness().await;
+    run_setup(&h).await;
+    let (id, token) = wenilla_realm::presets::create(
+        &h.state,
+        wenilla_realm::presets::defs::get("brd").unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    wait_group(&h, id).await;
+    // Pretend a build is still running.
+    sqlx::query("UPDATE preset_groups SET status = 'building' WHERE id = ?")
+        .bind(id)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    let r = send(
+        &h.app,
+        form(&format!("/g/{token}/delete"), None, &[("confirm", "yes")]),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert!(r.location().contains("error="), "{}", r.location());
+    assert!(wenilla_realm::presets::by_id(&h.state.db, id)
+        .await
+        .unwrap()
+        .is_some());
+    // A restart fails the stale build, and then it can go.
+    wenilla_realm::presets::recover_interrupted(&h.state.db)
+        .await
+        .unwrap();
+    let r = send(
+        &h.app,
+        form(&format!("/g/{token}/delete"), None, &[("confirm", "yes")]),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(wenilla_realm::presets::by_id(&h.state.db, id)
+        .await
+        .unwrap()
+        .is_none());
 }

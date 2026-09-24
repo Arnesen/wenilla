@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use benilla_formats::Chain;
 use clap::{Parser, Subcommand};
-use wenilla_realm::{audit, db, mangos_conf, ratelimit, realmdb, secrets, soap, AppState, Config};
+use wenilla_realm::{
+    audit, db, mangos_conf, presets, ratelimit, realmdb, secrets, soap, AppState, Config,
+};
 
 #[derive(Parser)]
 #[command(
@@ -75,10 +77,11 @@ async fn main() -> Result<()> {
             (None, Some(msg))
         }
     };
+    let realmdb = realmdb::connect(&cfg.mariadb_url).await?;
     let state = Arc::new(AppState {
         setup_cache: Default::default(),
         client_data_error,
-        realmdb: realmdb::connect(&cfg.mariadb_url).await?,
+        realmdb: realmdb.clone(),
         soap: soap::Client::new(
             &cfg.soap_url,
             &cfg.soap_bootstrap_user,
@@ -88,10 +91,18 @@ async fn main() -> Result<()> {
         secrets: keys,
         providers: Vec::new(),
         limiter: ratelimit::Limiter::default(),
+        provisioner: Arc::new(presets::Headless {
+            servers: presets::headless::Servers {
+                realmd: cfg.realmd_host.clone(),
+                mangosd: cfg.mangosd_host.clone(),
+            },
+            realmdb: realmdb.clone(),
+        }),
         db: sqlite,
         cfg: cfg.clone(),
     });
     state.load_soap_credentials().await?;
+    presets::recover_interrupted(&state.db).await?;
 
     if !db::setup_complete(&state.db).await? {
         let token = write_setup_token(&cfg, &state.db).await?;

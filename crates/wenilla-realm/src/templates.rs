@@ -132,3 +132,57 @@ pub fn when(ts: &i64) -> String {
 pub fn hours(secs: &i64) -> String {
     format!("{:.1}", *secs as f64 / 3600.0)
 }
+
+pub struct PresetCard {
+    pub slot: i64,
+    pub label: String,
+    pub role: String,
+    pub race: &'static str,
+    pub char_name: Option<String>,
+    pub status: String,
+    pub detail: Option<String>,
+    pub level: i64,
+    pub online: bool,
+}
+
+#[derive(Template)]
+#[template(path = "preset_group.html")]
+pub struct PresetGroup {
+    pub realm_name: String,
+    pub preset: &'static crate::presets::Preset,
+    pub token: String,
+    pub status: String,
+    pub building: bool,
+    pub cards: Vec<PresetCard>,
+    pub notice: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "preset_deleted.html")]
+pub struct PresetDeleted {
+    pub realm_name: String,
+    pub preset_name: String,
+}
+
+pub struct PresetGroupRow {
+    pub id: i64,
+    pub preset_name: String,
+    pub link: String,
+    pub status: String,
+    pub created_at: i64,
+    pub characters: Vec<String>,
+}
+
+#[derive(Template)]
+#[template(path = "admin_presets.html")]
+pub struct AdminPresets {
+    pub realm_name: String,
+    pub nav: &'static str,
+    pub csrf: String,
+    pub me: User,
+    pub presets: &'static [crate::presets::Preset],
+    pub groups: Vec<PresetGroupRow>,
+    pub notice: Option<String>,
+    pub error: Option<String>,
+}

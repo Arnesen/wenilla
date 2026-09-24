@@ -35,6 +35,10 @@ async fn play(session: Session, State(state): State<Arc<AppState>>) -> Result<Re
         "host": state.cfg.public_host(),
         "realm": state.realm_name().await,
     });
+    // A dungeon-preset character: the client skips the login and character screens into it.
+    if let Some(name) = crate::presets::character_of(&state.db, session.user.id).await? {
+        body["char"] = serde_json::Value::String(name);
+    }
     if state.cfg.dev_query_creds {
         body["dev_query_creds"] = serde_json::Value::String("1".into());
     }
