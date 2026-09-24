@@ -41,10 +41,22 @@ pub async fn provision(
     keys: &Keyring,
     user_id: i64,
 ) -> Result<GameAccount> {
+    provision_as(db, soap, keys, user_id, &game_username(user_id)).await
+}
+
+/// [`provision`] under a chosen account name (dungeon presets use random ones, so they never meet
+/// an account an earlier install left behind).
+pub async fn provision_as(
+    db: &SqlitePool,
+    soap: &Client,
+    keys: &Keyring,
+    user_id: i64,
+    name: &str,
+) -> Result<GameAccount> {
     if let Some(existing) = get(db, user_id).await? {
         return Ok(existing);
     }
-    let name = game_username(user_id);
+    let name = soap::arg(name, MAX_ACCOUNT_STR)?.to_string();
     let pass = random_string(ALNUM_UPPER, MAX_ACCOUNT_STR);
     match soap.exec(&format!("account create {name} {pass}")).await {
         Ok(_) => {}

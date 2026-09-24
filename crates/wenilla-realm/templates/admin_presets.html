@@ -1,0 +1,36 @@
+{% extends "admin_base.html" %}
+{% import "icons.html" as ic %}
+{% block title %}Presets — {{ realm_name }}{% endblock %}
+{% block top_title %}Presets{% endblock %}
+{% block flash %}
+{% if let Some(n) = notice %}<div class="flash notice">{% call ic::icon("check") %}<span>{{ n }}</span></div>{% endif %}
+{% if let Some(e) = error %}<div class="flash error">{% call ic::icon("alert") %}<span>{{ e }}</span></div>{% endif %}
+{% endblock %}
+{% block content %}
+<div class="head"><span class="eyebrow">Dungeon groups</span><h1 class="headline" style="text-transform: none; letter-spacing: 0.02em;">Presets</h1><p class="deck">One click makes a full group of geared, level-appropriate characters waiting at a dungeon entrance, and a secret link your friends open to pick a hero and play. No sign-up: whoever has the link can join, summon the group, or delete it.</p></div>
+<div class="grid-2">
+  {% for p in presets %}
+  <div class="plate" style="padding: 24px 26px; display: flex; flex-direction: column; gap: 12px;"><div class="corners"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+    <span class="eyebrow" style="color: var(--accent);">Level {{ p.level }} · {{ p.slots.len() }} heroes</span>
+    <h2 style="font-size: 20px;">{{ p.name }}</h2>
+    <p style="font-size: 14px;">{{ p.blurb }}</p>
+    <div class="wrap">{% for s in p.slots %}<span class="tag">{{ s.label }} · {{ s.role }}</span>{% endfor %}</div>
+    <form method="post" action="/admin/presets"><input type="hidden" name="_csrf" value="{{ csrf }}"><input type="hidden" name="preset" value="{{ p.id }}"><button class="btn-gold" type="submit">{% call ic::icon("sparkle") %}Create group</button></form>
+  </div>
+  {% endfor %}
+</div>
+<div class="card">
+  <div class="card-head"><span class="card-title">{{ groups.len() }} group{% if groups.len() != 1 %}s{% endif %}</span></div>
+  <table class="t">
+    <tr><th>Group</th><th>Characters</th><th>Link</th><th>Actions</th></tr>
+    {% for g in groups %}
+    <tr>
+      <td><b>{{ g.preset_name }}</b> {% if g.status == "ready" %}<span class="chip ok">ready</span>{% else if g.status == "building" %}<span class="chip dim">building</span>{% else %}<span class="chip bad">{{ g.status }}</span>{% endif %}<span class="sub">#{{ g.id }} · {{ self::when(g.created_at) }}</span></td>
+      <td>{% for c in g.characters %}<div>{{ c }}</div>{% endfor %}</td>
+      <td class="k"><a href="{{ g.link }}" target="_blank" rel="noreferrer"><code style="overflow-wrap: anywhere;">{{ g.link }}</code></a></td>
+      <td class="actions"><form class="inline" method="post" action="/admin/presets/groups/{{ g.id }}/delete" onsubmit="return confirm('Delete this group AND all its characters? This cannot be undone.')"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="btn-danger sm" type="submit">{% call ic::icon("trash") %}Delete</button></form></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

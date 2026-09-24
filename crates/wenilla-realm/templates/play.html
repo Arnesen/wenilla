@@ -86,7 +86,9 @@
   if (r.status === 401) { location.href = '/login'; throw new Error('not signed in'); }
   if (!r.ok) { msg.textContent = 'Could not fetch your realm credentials (' + r.status + '). Try again in a minute.'; throw new Error('play ' + r.status); }
   const env = await r.json();
-  window.__wenilla_env = { user: env.user, pass: env.pass, host: env.host, ...(env.dev_query_creds ? { dev_query_creds: '1' } : {}) };
+  // `realm` skips the realm list (a name the list lacks falls through to it); `char` is set for a
+  // dungeon-preset character, which the client then enters the world as directly.
+  window.__wenilla_env = { user: env.user, pass: env.pass, host: env.host, realm: env.realm, ...(env.char ? { char: env.char } : {}), ...(env.dev_query_creds ? { dev_query_creds: '1' } : {}) };
   const { default: init } = await import('./wenilla.js');
   const { bind } = await import('./wasi_stubs.js');
   const { boot } = await import('./boot.js');

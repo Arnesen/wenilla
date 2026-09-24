@@ -12,6 +12,7 @@ pub mod control;
 pub mod csrf;
 pub mod db;
 pub mod mangos_conf;
+pub mod presets;
 pub mod ratelimit;
 pub mod realmdb;
 pub mod secrets;
@@ -45,6 +46,8 @@ pub struct AppState {
     pub secrets: secrets::Keyring,
     pub providers: Vec<Arc<dyn auth::provider::IdentityProvider>>,
     pub limiter: ratelimit::Limiter,
+    /// Builds dungeon-preset characters: the headless player in the service, a stand-in in tests.
+    pub provisioner: Arc<dyn presets::Provisioner>,
     /// Why the client data could not be opened at start — `None` when it could. The service
     /// still runs (setup and the panel work) so an operator sees the problem instead of a
     /// crash loop; `/data` answers 503 and `/healthz` reports it until a restart with a valid
@@ -204,12 +207,14 @@ pub fn app(state: Arc<AppState>, chain: Option<Arc<Chain>>, www: &Path) -> Route
         .merge(wenilla_host::static_site::router(www))
         .layer(session_layer.clone());
     let admin = web::admin::router()
+        .merge(web::presets::admin_router())
         .route_layer(admin_layer)
         .route_layer(session_layer);
 
     let service = Router::new()
         .merge(web::setup::router())
         .merge(web::pages::router())
+        .merge(web::presets::public_router())
         .merge(auth::router())
         .merge(locked)
         .merge(admin)

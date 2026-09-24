@@ -30,8 +30,8 @@ pub fn router() -> Router<Arc<AppState>> {
 
 #[derive(serde::Deserialize, Default)]
 pub struct Flash {
-    notice: Option<String>,
-    error: Option<String>,
+    pub notice: Option<String>,
+    pub error: Option<String>,
 }
 
 async fn restart_pending(state: &AppState) -> bool {
@@ -92,7 +92,7 @@ pub struct ServerForm {
     delay: Option<u32>,
 }
 
-fn back(path: &str, notice: Result<String, String>) -> Response {
+pub(crate) fn back(path: &str, notice: Result<String, String>) -> Response {
     let (k, v) = match notice {
         Ok(m) => ("notice", m),
         Err(m) => ("error", m),
@@ -170,8 +170,10 @@ async fn server_action(
 
 async fn user_rows(state: &AppState) -> Result<Vec<UserRow>, AppError> {
     let rows: Vec<(i64, String, String, String, i64, Option<String>)> = sqlx::query_as(
+        // Preset characters' users belong to their group and are managed on /admin/presets.
         "SELECT u.id, u.username, u.display_name, u.role, u.disabled, g.game_username FROM users u \
-         LEFT JOIN game_accounts g ON g.user_id = u.id ORDER BY u.id",
+         LEFT JOIN game_accounts g ON g.user_id = u.id \
+         WHERE u.id NOT IN (SELECT user_id FROM preset_members) ORDER BY u.id",
     )
     .fetch_all(&state.db)
     .await?;

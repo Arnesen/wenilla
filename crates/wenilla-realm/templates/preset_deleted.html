@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% import "icons.html" as ic %}
+{% block title %}Group deleted — {{ realm_name }}{% endblock %}
+{% block page %}<div class="center">
+  <div class="plate" style="width: min(460px, 100%); padding: 36px 36px 30px; display: flex; flex-direction: column; gap: 16px; text-align: center;"><div class="corners"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+    <span class="eyebrow">{{ realm_name }}</span>
+    <h1 style="font-size: 24px;">Group deleted</h1>
+    <p>The {{ preset_name }} group is gone: every character and account it had was deleted, and its link no longer works.</p>
+  </div>
+</div>
+{% endblock %}
