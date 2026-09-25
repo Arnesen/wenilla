@@ -16,7 +16,24 @@ pub struct Preset {
     pub tele: String,
     /// Copper each character starts with.
     pub money: u32,
+    /// Quests every character is given and turned in before it goes to the entrance — an
+    /// attunement, such as the Molten Core's.
+    #[serde(default)]
+    pub turn_ins: Vec<TurnIn>,
     pub slots: Vec<Slot>,
+}
+
+/// A quest turned in by playing it: the character is put beside the NPC that ends it, the GM
+/// commands add and complete it, and the character hands it in as a player would.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TurnIn {
+    pub quest: u32,
+    /// The creature entry that ends the quest.
+    pub npc: u32,
+    pub map: u32,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -25,6 +42,9 @@ pub struct Slot {
     pub label: String,
     /// The group role as the card shows it ("Tank").
     pub role: String,
+    /// The talent and gear build, e.g. `warrior_prot` (the generator's spec name).
+    #[serde(default)]
+    pub spec: String,
     pub class: u8,
     pub race: u8,
     pub gender: u8,
@@ -37,13 +57,21 @@ pub struct Slot {
     pub bags: Vec<u32>,
     /// One item per equipment slot (two rings take two entries).
     pub gear: Vec<u32>,
+    /// The equipment slot each `gear` item belongs in (0 head … 15 main hand, 16 off hand).
+    #[serde(default)]
+    pub gear_slots: Vec<u8>,
     /// `[item, count]`, left in the bags.
     pub consumables: Vec<(u32, u32)>,
 }
 
 const FILES: &[(&str, &str)] = &[
     ("deadmines", include_str!("../../presets/deadmines.toml")),
+    ("scarlet", include_str!("../../presets/scarlet.toml")),
+    ("sunken", include_str!("../../presets/sunken.toml")),
     ("brd", include_str!("../../presets/brd.toml")),
+    ("stratholme", include_str!("../../presets/stratholme.toml")),
+    ("ubrs", include_str!("../../presets/ubrs.toml")),
+    ("mc", include_str!("../../presets/mc.toml")),
 ];
 
 fn parse() -> Result<Vec<Preset>> {
@@ -75,6 +103,31 @@ pub fn get(id: &str) -> Option<&'static Preset> {
     all().iter().find(|p| p.id == id)
 }
 
+impl Preset {
+    /// The roster as the preset menu shows it: "Warrior · Tank" per hero for a party, and
+    /// "8 × Warrior" per class for anything bigger.
+    pub fn roster(&self) -> Vec<String> {
+        if self.slots.len() <= 5 {
+            return self
+                .slots
+                .iter()
+                .map(|s| format!("{} · {}", s.label, s.role))
+                .collect();
+        }
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for s in &self.slots {
+            match counts.iter_mut().find(|(l, _)| *l == s.label) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((&s.label, 1)),
+            }
+        }
+        counts
+            .into_iter()
+            .map(|(l, n)| format!("{n} × {l}"))
+            .collect()
+    }
+}
+
 pub fn class_name(class: u8) -> &'static str {
     crate::realmdb::class_name(i64::from(class))
 }
@@ -88,7 +141,15 @@ mod tests {
         let all = parse().unwrap();
         assert_eq!(
             all.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-            ["deadmines", "brd"]
+            [
+                "deadmines",
+                "scarlet",
+                "sunken",
+                "brd",
+                "stratholme",
+                "ubrs",
+                "mc"
+            ]
         );
         for p in &all {
             for s in &p.slots {
@@ -101,6 +162,9 @@ mod tests {
                     matches!(s.race, 1 | 3 | 4 | 7),
                     "{at}: not an Alliance race"
                 );
+                assert!(!s.spec.is_empty(), "{at}: no spec");
+                assert_eq!(s.gear_slots.len(), s.gear.len(), "{at}: gear_slots");
+                assert!(s.gear_slots.iter().all(|&e| e < 19), "{at}: gear_slots");
                 assert!(s.gender <= 1, "{at}: gender");
                 assert_ne!(class_name(s.class), "?", "{at}: class {}", s.class);
             }

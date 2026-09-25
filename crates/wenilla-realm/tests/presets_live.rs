@@ -190,16 +190,34 @@ fn skill_of(proficiency: u32) -> i64 {
 }
 
 /// The outdoor `game_tele` point each preset lands on, from the world DB's rows.
-fn entrance(preset: &str) -> (i64, f64, f64) {
-    match preset {
-        "deadmines" => (0, -11208.7, 1673.52),
-        "brd" => (0, -7179.34, -921.212),
-        p => panic!("no entrance for {p}"),
-    }
+/// Where a preset's `game_tele` point is, from the world DB.
+async fn entrance(db: &MySqlPool, tele: &str) -> (i64, f64, f64) {
+    sqlx::query_as(
+        "SELECT CAST(map AS SIGNED), CAST(position_x AS DOUBLE), CAST(position_y AS DOUBLE) \
+         FROM classicmangos.game_tele WHERE name = ?",
+    )
+    .bind(tele)
+    .fetch_one(db)
+    .await
+    .unwrap()
+}
+
+async fn quest_rewarded(db: &MySqlPool, guid: i64, quest: u32) -> bool {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT CAST(rewarded AS SIGNED) FROM classiccharacters.character_queststatus \
+         WHERE guid = ? AND quest = ?",
+    )
+    .bind(guid)
+    .bind(quest)
+    .fetch_optional(db)
+    .await
+    .unwrap();
+    row.is_some_and(|(r,)| r == 1)
 }
 
 async fn wait_built(st: &AppState, group: i64) -> presets::Group {
-    let deadline = Instant::now() + Duration::from_secs(300);
+    // A raid builds a few characters at a time: allow it the better part of a quarter hour.
+    let deadline = Instant::now() + Duration::from_secs(900);
     loop {
         let g = presets::by_id(&st.db, group).await.unwrap().unwrap();
         if g.status != "building" {
@@ -207,7 +225,7 @@ async fn wait_built(st: &AppState, group: i64) -> presets::Group {
         }
         assert!(
             Instant::now() < deadline,
-            "group {group} still building after 5 minutes"
+            "group {group} still building after 15 minutes"
         );
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -225,7 +243,11 @@ async fn presets_build_real_characters_and_delete_them() {
 
     let mut groups = Vec::new();
     for p in defs::all() {
-        if only.as_deref().is_some_and(|o| o != p.id) {
+        // TEST_PRESET=deadmines,brd builds just those.
+        if only
+            .as_deref()
+            .is_some_and(|o| !o.split(',').any(|id| id.trim() == p.id))
+        {
             continue;
         }
         let (id, token) = presets::create(&st, p, None).await.unwrap();
@@ -247,7 +269,12 @@ async fn presets_build_real_characters_and_delete_them() {
             }
             let name = m.char_name.as_deref().unwrap();
             let c = char_row(&st.realmdb, name).await.expect("character row");
-            let (map, x, y) = entrance(&p.id);
+            let (map, x, y) = entrance(&st.realmdb, &p.tele).await;
+            for t in &p.turn_ins {
+                if !quest_rewarded(&st.realmdb, c.guid, t.quest).await {
+                    problems.push(format!("{at}: quest {} not turned in", t.quest));
+                }
+            }
             if c.level != i64::from(p.level) {
                 problems.push(format!("{at}: level {} (want {})", c.level, p.level));
             }
@@ -338,4 +365,102 @@ async fn presets_build_real_characters_and_delete_them() {
     assert!(left.is_empty(), "preset users left behind: {left:?}");
 
     assert!(problems.is_empty(), "problems:\n{}", problems.join("\n"));
+}
+
+/// A dev tool, not a check: say GM commands as an existing account's character and print what the
+/// server answered, then what a player would find. Skipped unless pointed at one:
+///
+///   TEST_SAY_ACCOUNT=WP… TEST_SAY_PASSWORD=… TEST_SAY='.learn 23922;.gm' TEST_REALMD_HOST=127.0.0.1 \
+///     cargo test -p wenilla-realm --test presets_live say_as -- --nocapture
+///
+/// The account needs GM for dot-commands (`account set gmlevel <acct> 3 -1` over SOAP).
+#[test]
+fn say_as() {
+    let v = |k: &str| std::env::var(k).ok();
+    let (Some(account), Some(password), Some(realmd)) = (
+        v("TEST_SAY_ACCOUNT"),
+        v("TEST_SAY_PASSWORD"),
+        v("TEST_REALMD_HOST"),
+    ) else {
+        eprintln!("TEST_SAY_ACCOUNT/TEST_SAY_PASSWORD/TEST_REALMD_HOST not set — skipping");
+        return;
+    };
+    let servers = presets::headless::Servers {
+        mangosd: v("TEST_MANGOSD_HOST").unwrap_or_else(|| realmd.clone()),
+        realmd,
+    };
+    let lines: Vec<String> = v("TEST_SAY")
+        .unwrap_or_default()
+        .split(';')
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .collect();
+    if !lines.is_empty() {
+        for l in presets::headless::say(&servers, &account, &password, &lines).unwrap() {
+            println!("server: {l}");
+        }
+    }
+    let i = presets::headless::inspect(&servers, &account, &password).unwrap();
+    let mut spells: Vec<u32> = i.spells.into_iter().collect();
+    spells.sort();
+    println!(
+        "level {}, {} free talent points, worn {:?}\nspells {spells:?}",
+        i.level, i.free_talent_points, i.worn
+    );
+}
+
+/// A dev tool, not a check: build one preset slot on a fresh account exactly as a group build
+/// does, but stop before the check login, and print the account — to look at a character in the
+/// state the builder leaves it. Needs the TEST_SOAP_* and TEST_MARIADB_URL variables as well:
+///
+///   TEST_BUILD=ubrs:2 TEST_SOAP_URL=… TEST_SOAP_USER=… TEST_SOAP_PASS=… TEST_REALMD_HOST=127.0.0.1 \
+///     cargo test -p wenilla-realm --test presets_live build_one -- --nocapture
+#[tokio::test(flavor = "multi_thread")]
+async fn build_one() {
+    let (Some(e), Some(which)) = (env(), std::env::var("TEST_BUILD").ok()) else {
+        eprintln!("TEST_BUILD and the live variables not set — skipping");
+        return;
+    };
+    let (id, slot) = which.split_once(':').expect("TEST_BUILD=<preset>:<slot>");
+    let p = defs::get(id).expect("preset");
+    let slot = p.slots[slot.parse::<usize>().unwrap()].clone();
+    let soap = soap::Client::new(&e.soap_url, &e.soap_user, &e.soap_pass);
+    let account = format!("WPT{}", rand_u16());
+    let password = "TESTPW12".to_string();
+    soap.exec(&format!("account create {account} {password}"))
+        .await
+        .unwrap();
+    soap.exec(&format!("account set gmlevel {account} 3 -1"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let servers = presets::headless::Servers {
+        realmd: e.realmd.clone(),
+        mangosd: e.mangosd.clone(),
+    };
+    let names = presets::names(slot.race, 8);
+    let (a, pw) = (account.clone(), password.clone());
+    let built = tokio::task::spawn_blocking(move || {
+        presets::headless::build(
+            &servers,
+            &presets::headless::Job {
+                account: &a,
+                password: &pw,
+                slot: &slot,
+                level: p.level,
+                tele: &p.tele,
+                money: p.money,
+                names: &names,
+                turn_ins: &p.turn_ins,
+            },
+            &mut |m| println!("build: {m}"),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    soap.exec(&format!("account set gmlevel {account} 0 -1"))
+        .await
+        .unwrap();
+    println!("built {} on {account} / {password}", built.name);
 }

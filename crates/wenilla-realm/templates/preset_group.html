@@ -12,10 +12,16 @@
   .rc form { margin-top: auto; }
   .rc .btn-gold { width: 100%; justify-content: center; height: 44px; }
   .rc .detail { font-size: 12px; color: var(--fg-3); overflow-wrap: anywhere; }
+  .grp-raid .grp-cards { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+  .grp-raid .rc { min-height: 0; padding: 14px 14px 14px; gap: 6px; }
+  .grp-raid .rc h2 { font-size: 15px; letter-spacing: 0.08em; }
+  .grp-raid .rc .who { font-size: 13px; }
+  .grp-raid .rc .btn-gold { height: 34px; font-size: 10px; }
+  .grp-section { display: flex; flex-direction: column; gap: 12px; }
   .grp-tools { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; justify-content: space-between; }
   .grp-tools form { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 </style>
-<div class="grp">
+<div class="grp{% if raid %} grp-raid{% endif %}">
   <div class="head">
     <span class="eyebrow">{{ realm_name }} · dungeon group · level {{ preset.level }}</span>
     <h1 class="headline">{{ preset.name }}</h1>
@@ -24,6 +30,10 @@
   {% if let Some(n) = notice %}<div class="flash notice">{% call ic::icon("check") %}<span>{{ n }}</span></div>{% endif %}
   {% if let Some(e) = error %}<div class="flash error">{% call ic::icon("alert") %}<span>{{ e }}</span></div>{% endif %}
   {% if building %}<div class="flash warn">{% call ic::icon("refresh") %}<span>The heroes are being made — this page refreshes itself. It takes about a minute.</span></div>{% endif %}
+  <div class="wrap"><span class="chip">{{ ready }} of {{ total }} ready</span>{% if in_game > 0 %}<span class="chip ok">{{ in_game }} in game</span>{% endif %}</div>
+  {% for (role, cards) in sections %}
+  <div class="grp-section">
+  {% if raid %}<span class="eyebrow">{{ role }} · {{ cards.len() }}</span>{% endif %}
   <div class="grp-cards">
     {% for c in cards %}
     <div class="plate rc"><div class="corners"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
@@ -42,12 +52,14 @@
     </div>
     {% endfor %}
   </div>
+  </div>
+  {% endfor %}
   <div class="card">
     <div class="card-head"><span class="card-title">Run tools</span><span class="hint">group status: {{ status }}</span></div>
     <div class="grp-tools">
       <form method="post" action="/g/{{ token }}/summon"><button class="btn" type="submit">{% call ic::icon("refresh") %}Summon everyone to the entrance</button><span class="hint">Lost, dead in a corner, or starting over — works in or out of the game.</span></form>
       <form method="post" action="/g/{{ token }}/delete">
-        <label class="check"><input type="checkbox" name="confirm" value="yes" required><span>Delete all {{ cards.len() }} characters and their accounts. This cannot be undone.</span></label>
+        <label class="check"><input type="checkbox" name="confirm" value="yes" required><span>Delete all {{ total }} characters and their accounts. This cannot be undone.</span></label>
         <button class="btn-danger" type="submit">{% call ic::icon("trash") %}Delete group</button>
       </form>
     </div>

@@ -25,6 +25,20 @@ impl wenilla_realm::presets::Provisioner for FakeBuilder {
             name: job.names[0].clone(),
             guid: 1,
             not_equipped: Vec::new(),
+            problems: Vec::new(),
+        })
+    }
+
+    /// Everything as built: the level, every talent, every item.
+    async fn inspect(
+        &self,
+        job: &wenilla_realm::presets::Job,
+    ) -> anyhow::Result<wenilla_realm::presets::headless::Inspection> {
+        Ok(wenilla_realm::presets::headless::Inspection {
+            level: u32::from(job.level),
+            free_talent_points: 0,
+            spells: job.slot.talents.iter().copied().collect(),
+            worn: job.slot.gear.clone(),
         })
     }
 }
@@ -879,12 +893,31 @@ async fn a_group_cannot_be_deleted_while_it_is_being_built() {
     .await
     .unwrap();
     wait_group(&h, id).await;
-    // Pretend a build is still running.
+    // Pretend a build is still running (one slot mid-build, holding the builder's GM).
     sqlx::query("UPDATE preset_groups SET status = 'building' WHERE id = ?")
         .bind(id)
         .execute(&h.state.db)
         .await
         .unwrap();
+    sqlx::query("UPDATE preset_members SET status = 'building' WHERE group_id = ? AND slot = 0")
+        .bind(id)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    let builder = wenilla_realm::presets::members(&h.state.db, id)
+        .await
+        .unwrap()[0]
+        .user_id;
+    let builder = wenilla_realm::accounts::get(&h.state.db, builder)
+        .await
+        .unwrap()
+        .unwrap()
+        .game_username;
+    let revoke = format!("account set gmlevel {builder} 0 -1");
+    let revokes = |log: &Arc<Mutex<Vec<String>>>| {
+        log.lock().unwrap().iter().filter(|c| **c == revoke).count()
+    };
+    let before = revokes(&h.soap_log);
     let r = send(
         &h.app,
         form(&format!("/g/{token}/delete"), None, &[("confirm", "yes")]),
@@ -896,10 +929,22 @@ async fn a_group_cannot_be_deleted_while_it_is_being_built() {
         .await
         .unwrap()
         .is_some());
-    // A restart fails the stale build, and then it can go.
-    wenilla_realm::presets::recover_interrupted(&h.state.db)
+    // A restart fails the stale build — and takes the interrupted builder's GM back — and then
+    // the group can go.
+    wenilla_realm::presets::recover_interrupted(&h.state)
         .await
         .unwrap();
+    for _ in 0..100 {
+        if revokes(&h.soap_log) > before {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        revokes(&h.soap_log),
+        before + 1,
+        "the builder's GM was not taken back"
+    );
     let r = send(
         &h.app,
         form(&format!("/g/{token}/delete"), None, &[("confirm", "yes")]),
@@ -910,4 +955,25 @@ async fn a_group_cannot_be_deleted_while_it_is_being_built() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn a_raid_group_builds_forty_and_groups_its_cards_by_role() {
+    let h = harness().await;
+    run_setup(&h).await;
+    let mc = wenilla_realm::presets::defs::get("mc").unwrap();
+    assert_eq!(mc.slots.len(), 40);
+    let (id, token) = wenilla_realm::presets::create(&h.state, mc, None)
+        .await
+        .unwrap();
+    let g = wait_group(&h, id).await;
+    assert_eq!(g.status, "ready");
+    let r = send(&h.app, get(&format!("/g/{token}"), None)).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("40 of 40 ready"), "{}", r.body);
+    let tanks = r.body.find("Tank · 4").expect("tank section");
+    let healers = r.body.find("Healer · 13").expect("healer section");
+    let damage = r.body.find("Damage · 23").expect("damage section");
+    assert!(tanks < healers && healers < damage);
+    assert_eq!(r.body.matches("/join/").count(), 40);
 }

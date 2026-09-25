@@ -34,6 +34,7 @@ pub struct Job {
     pub tele: String,
     pub money: u32,
     pub names: Vec<String>,
+    pub turn_ins: Vec<defs::TurnIn>,
 }
 
 #[async_trait]
@@ -41,6 +42,11 @@ pub trait Provisioner: Send + Sync {
     /// Create the job's character on its (empty, GM-enabled) account and leave it saved at the
     /// entrance.
     async fn build(&self, job: Job) -> Result<headless::Built>;
+
+    /// Log in to the built character as its player will (GM already dropped) and read it back:
+    /// the server re-checks a character at that first login — it resets talents it cannot account
+    /// for and unequips gear the character may not wear.
+    async fn inspect(&self, job: &Job) -> Result<headless::Inspection>;
 }
 
 /// The real one: [`headless::build`] on a blocking thread, bounded.
@@ -51,8 +57,9 @@ pub struct Headless {
 }
 
 /// `account set gmlevel` answers before the login database has the new level (the world server
-/// queues that write), and a login that reads the old level cannot say GM commands. Wait for it.
-async fn gm_visible(db: &sqlx::MySqlPool, account: &str) -> Result<()> {
+/// queues that write), and a login reads whatever is there: the builder must see 3 (or its GM
+/// commands go unheard) and the check must see 0 (or it is not a player's login). Wait for it.
+async fn wait_gmlevel(db: &sqlx::MySqlPool, account: &str, want: i64) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         let level: Option<(i64,)> = sqlx::query_as(
@@ -61,12 +68,12 @@ async fn gm_visible(db: &sqlx::MySqlPool, account: &str) -> Result<()> {
         .bind(account)
         .fetch_optional(db)
         .await
-        .context("reading the builder's GM level")?;
-        if level.is_some_and(|(l,)| l >= 3) {
+        .context("reading the account's GM level")?;
+        if level.is_some_and(|(l,)| l == want) {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("{account} never showed GM level 3 in the login database");
+            anyhow::bail!("{account} never showed GM level {want} in the login database");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -75,7 +82,7 @@ async fn gm_visible(db: &sqlx::MySqlPool, account: &str) -> Result<()> {
 #[async_trait]
 impl Provisioner for Headless {
     async fn build(&self, job: Job) -> Result<headless::Built> {
-        gm_visible(&self.realmdb, &job.account).await?;
+        wait_gmlevel(&self.realmdb, &job.account, 3).await?;
         let servers = self.servers.clone();
         let account = job.account.clone();
         let task = tokio::task::spawn_blocking(move || {
@@ -87,6 +94,7 @@ impl Provisioner for Headless {
                 tele: &job.tele,
                 money: job.money,
                 names: &job.names,
+                turn_ins: &job.turn_ins,
             };
             headless::build(
                 &servers,
@@ -100,6 +108,57 @@ impl Provisioner for Headless {
             Err(_) => anyhow::bail!("building {account} took more than four minutes"),
         }
     }
+
+    async fn inspect(&self, job: &Job) -> Result<headless::Inspection> {
+        wait_gmlevel(&self.realmdb, &job.account, 0).await?;
+        let servers = self.servers.clone();
+        let (account, password) = (job.account.clone(), job.password.clone());
+        let task =
+            tokio::task::spawn_blocking(move || headless::inspect(&servers, &account, &password));
+        match tokio::time::timeout(Duration::from_secs(120), task).await {
+            Ok(joined) => joined.context("the checker thread panicked")?,
+            Err(_) => anyhow::bail!("checking {} took more than two minutes", job.account),
+        }
+    }
+}
+
+/// What a player would find wrong with a built character: `(fatal, problems)`. Lost talents or
+/// a wrong level fail the slot; gear the server took off is reported but the slot still plays.
+pub fn check(
+    slot: &Slot,
+    level: u8,
+    built: &headless::Built,
+    seen: &headless::Inspection,
+) -> (bool, Vec<String>) {
+    let mut fatal = false;
+    let mut problems = Vec::new();
+    if seen.level != u32::from(level) {
+        fatal = true;
+        problems.push(format!("level {} at login, not {level}", seen.level));
+    }
+    let lost: Vec<u32> = slot
+        .talents
+        .iter()
+        .copied()
+        .filter(|t| !seen.spells.contains(t))
+        .collect();
+    if !lost.is_empty() || seen.free_talent_points > 0 {
+        fatal = true;
+        problems.push(format!(
+            "talents lost at login ({} unspent, missing {lost:?})",
+            seen.free_talent_points
+        ));
+    }
+    let off: Vec<u32> = slot
+        .gear
+        .iter()
+        .copied()
+        .filter(|g| !seen.worn.contains(g) && !built.not_equipped.iter().any(|(e, _)| e == g))
+        .collect();
+    if !off.is_empty() {
+        problems.push(format!("unequipped at login: {off:?}"));
+    }
+    (fatal, problems)
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -262,6 +321,9 @@ async fn set_member(
     }
 }
 
+/// Characters built at the same time, realm-wide.
+const BUILDS_AT_ONCE: usize = 8;
+
 async fn build_group(state: Arc<AppState>, group_id: i64, preset: &'static Preset) {
     let members = match members(&state.db, group_id).await {
         Ok(m) => m,
@@ -270,21 +332,31 @@ async fn build_group(state: Arc<AppState>, group_id: i64, preset: &'static Prese
             return;
         }
     };
+    // A raid is forty characters, and several groups can be made at once; building them all
+    // together would be dozens of game sessions saying GM commands on one world server. A few at
+    // a time across the whole realm, the rest wait as `pending`.
+    static GATE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    let gate =
+        Arc::clone(GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(BUILDS_AT_ONCE))));
     let mut set = tokio::task::JoinSet::new();
     for m in members {
         let st = Arc::clone(&state);
+        let gate = Arc::clone(&gate);
         set.spawn(async move {
+            let _turn = gate.acquire_owned().await;
             let slot = &preset.slots[m.slot as usize];
             let ok = match build_member(&st, group_id, preset, slot, &m).await {
                 Ok(built) => {
-                    let detail = (!built.not_equipped.is_empty()).then(|| {
+                    let mut notes = built.problems.clone();
+                    if !built.not_equipped.is_empty() {
                         let items: Vec<String> = built
                             .not_equipped
                             .iter()
                             .map(|(item, why)| format!("{item} ({why})"))
                             .collect();
-                        format!("not equipped: {}", items.join(", "))
-                    });
+                        notes.push(format!("not equipped: {}", items.join(", ")));
+                    }
+                    let detail = (!notes.is_empty()).then(|| notes.join("; "));
                     set_member(
                         &st.db,
                         group_id,
@@ -365,14 +437,34 @@ async fn build_member(
         tele: preset.tele.clone(),
         money: preset.money,
         names: names(slot.race, 8),
+        turn_ins: preset.turn_ins.clone(),
     };
-    let built = state.provisioner.build(job).await;
+    let built = state.provisioner.build(job.clone()).await;
     let revoke = state
         .soap
         .exec(&format!("account set gmlevel {} 0 -1", acct.game_username))
         .await;
-    let built = built?;
+    let mut built = built?;
     revoke.context("dropping the builder's GM")?;
+    set_member(
+        &state.db,
+        group_id,
+        m.slot,
+        "checking",
+        Some(&built.name),
+        None,
+    )
+    .await;
+    let seen = state
+        .provisioner
+        .inspect(&job)
+        .await
+        .context("logging in as its player to check it")?;
+    let (fatal, problems) = check(slot, preset.level, &built, &seen);
+    if fatal {
+        anyhow::bail!("{}", problems.join("; "));
+    }
+    built.problems = problems;
     Ok(built)
 }
 
@@ -406,9 +498,28 @@ pub async fn delete(state: &AppState, g: &Group) -> Result<(), DeleteError> {
             // Online characters are kicked first so the delete does not wait on a session.
             let _ = accounts::kick(&state.soap, name).await;
         }
-        accounts::delete_user(&state.db, &state.soap, m.user_id)
+        let acct = accounts::get(&state.db, m.user_id)
             .await
             .map_err(DeleteError::Other)?;
+        if let Err(e) = accounts::delete_user(&state.db, &state.soap, m.user_id).await {
+            // The console answers `account delete` for an account that is already gone (deleted
+            // by hand, or never fully made) with an empty reply, not a fault. Gone is deleted.
+            let gone = match &acct {
+                Some(a) => matches!(
+                    crate::realmdb::account_exists(&state.realmdb, &a.game_username).await,
+                    Ok(false)
+                ),
+                None => false,
+            };
+            if !gone {
+                return Err(DeleteError::Other(e));
+            }
+            sqlx::query("DELETE FROM users WHERE id = ?")
+                .bind(m.user_id)
+                .execute(&state.db)
+                .await
+                .map_err(|e| DeleteError::Other(e.into()))?;
+        }
     }
     sqlx::query("DELETE FROM preset_groups WHERE id = ?")
         .bind(g.id)
@@ -436,14 +547,45 @@ impl std::fmt::Display for DeleteError {
 }
 
 /// A restart mid-build leaves groups marked `building` that nothing is building: fail them, so
-/// they can be deleted.
-pub async fn recover_interrupted(db: &SqlitePool) -> Result<()> {
-    sqlx::query("UPDATE preset_members SET status = 'failed', detail = 'interrupted by a restart of the realm service' WHERE status IN ('pending', 'building')")
-        .execute(db)
+/// they can be deleted. Their accounts may still hold the builder's GM level; that is taken back
+/// in the background (the world server may not be up yet), retried until it answers.
+pub async fn recover_interrupted(state: &Arc<AppState>) -> Result<()> {
+    let accounts: Vec<(String,)> = sqlx::query_as(
+        "SELECT g.game_username FROM preset_members m JOIN game_accounts g ON g.user_id = m.user_id \
+         WHERE m.status IN ('building', 'checking')",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    sqlx::query("UPDATE preset_members SET status = 'failed', detail = 'interrupted by a restart of the realm service' WHERE status IN ('pending', 'building', 'checking')")
+        .execute(&state.db)
         .await?;
     sqlx::query("UPDATE preset_groups SET status = 'failed' WHERE status = 'building'")
-        .execute(db)
+        .execute(&state.db)
         .await?;
+    if !accounts.is_empty() {
+        let st = Arc::clone(state);
+        tokio::spawn(async move {
+            for (name,) in accounts {
+                for attempt in 0..60 {
+                    match st
+                        .soap
+                        .exec(&format!("account set gmlevel {name} 0 -1"))
+                        .await
+                    {
+                        Ok(_) => break,
+                        // An account the console no longer has is no concern.
+                        Err(crate::soap::SoapError::Fault(_)) => break,
+                        Err(e) => {
+                            if attempt == 59 {
+                                tracing::warn!(account = %name, error = %e, "could not drop an interrupted builder's GM");
+                            }
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                        }
+                    }
+                }
+            }
+        });
+    }
     Ok(())
 }
 
@@ -508,6 +650,45 @@ mod tests {
                 assert!(n.chars().skip(1).all(|c| c.is_ascii_lowercase()), "{n}");
             }
         }
+    }
+
+    fn built() -> headless::Built {
+        headless::Built {
+            name: "Test".into(),
+            guid: 1,
+            not_equipped: vec![(3, "refused".into())],
+            problems: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn check_fails_a_character_whose_talents_did_not_survive_login() {
+        let slot = defs::get("brd").unwrap().slots[0].clone();
+        let mut seen = headless::Inspection {
+            level: 56,
+            free_talent_points: 0,
+            spells: slot.talents.iter().copied().collect(),
+            worn: slot.gear.clone(),
+        };
+        assert_eq!(check(&slot, 56, &built(), &seen), (false, vec![]));
+
+        // The server's reset at first login: every talent gone, all points free again.
+        seen.spells.clear();
+        seen.free_talent_points = 47;
+        let (fatal, problems) = check(&slot, 56, &built(), &seen);
+        assert!(fatal, "{problems:?}");
+
+        // Gear the server took off is reported, not fatal; gear the build already reported is not
+        // reported twice.
+        seen.spells = slot.talents.iter().copied().collect();
+        seen.free_talent_points = 0;
+        seen.worn.retain(|g| *g != slot.gear[0]);
+        let (fatal, problems) = check(&slot, 56, &built(), &seen);
+        assert!(!fatal);
+        assert_eq!(
+            problems,
+            vec![format!("unequipped at login: [{}]", slot.gear[0])]
+        );
     }
 
     #[test]

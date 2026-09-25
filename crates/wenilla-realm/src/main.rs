@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
         cfg: cfg.clone(),
     });
     state.load_soap_credentials().await?;
-    presets::recover_interrupted(&state.db).await?;
+    presets::recover_interrupted(&state).await?;
 
     if !db::setup_complete(&state.db).await? {
         let token = write_setup_token(&cfg, &state.db).await?;

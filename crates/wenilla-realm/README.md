@@ -25,12 +25,14 @@ repo is the place to start: `realmctl up`, then `/setup`). This crate is what ru
   random-bot count, auction-house bot, applied live through `reload config` where the core
   allows it; an audit log of everything.
 - **Dungeon presets** (`/admin/presets`, `/g/{token}`). One click makes a group of geared,
-  talented, level-appropriate Alliance characters standing at an instance entrance — *The
-  Deadmines* (five level-20 heroes) and *Blackrock Depths* (five level-56) — and a secret link
-  for it. Whoever opens the link picks a role card ("Warrior · Tank") and is dropped straight into
-  the world as that character, with no sign-up; the same page summons the group back to the
-  entrance and deletes the whole group (every account and character). See *Dungeon presets*
-  below.
+  talented, level-appropriate Alliance characters standing at an instance entrance, and a secret
+  link for it: *The Deadmines* (5 × level 20), *The Scarlet Monastery* (5 × 38), *The Sunken
+  Temple* (5 × 52), *Blackrock Depths* (5 × 56), *Stratholme* (5 × 58), *Upper Blackrock Spire*
+  (10 × 60, pre-raid gear, the tank carries the Seal of Ascension) and *Molten Core* (a 40-strong
+  raid in pre-raid gear, every character attuned). Whoever opens the link picks a role card
+  ("Warrior · Tank") and is dropped straight into the world as that character, with no sign-up;
+  the same page summons the group back to the entrance and deletes the whole group (every account
+  and character). See *Dungeon presets* below.
 - **Setup wizard** (`/setup`), gated by a one-time token printed at first start: admin account,
   realm name, presets. It also creates its own console account (`WRSOAP`) and re-passwords the
   seeded `ADMINISTRATOR`/`GAMEMASTER`/`MODERATOR`/`PLAYER` accounts.
@@ -73,40 +75,62 @@ password has expired — it needs no password at all, only shell access to the h
 
 ## Dungeon presets
 
-A preset is a file in `presets/` (compiled in): the level, the `game_tele` entrance, and per slot
-the race, class, spells, proficiencies, talent picks, bags, gear and consumables. The files are
-generated from a world database and `Talent.dbc` by `scripts/gen-realm-presets.py` (the roster
-and talent picks are written in that script; the trainer spells and the best obtainable gear per
-slot are queried) — change the script and rerun it rather than editing the output.
+A preset is a file in `presets/` (compiled in): the level, the `game_tele` entrance, any quests
+to turn in first (an attunement), and per slot the race, class, spec, spells, proficiencies,
+talent picks, bags, gear with the equipment slot of each piece, and consumables. The files are
+generated from a world database, `Talent.dbc` and `SkillLineAbility.dbc` by
+`scripts/gen-realm-presets.py` — change the rosters there and rerun it (about 15 s) rather than
+editing the output. In the script:
+
+- **A spec** (`warrior_prot`, `priest_holy`, `druid_resto`, …) is a class, a stat weighting and a
+  weapon plan for choosing gear, and its talents as one ordered list; a preset takes the prefix
+  its level affords (`level − 9` points), and every prefix is checked against the tree's tiers.
+- **Gear** is the best-scoring item per slot among items a player can obtain (loot, vendors,
+  quest rewards), up to rare quality — up to epic below item level 64 for the level-60 content —
+  never battleground or PvP-rank gear.
+- **Spells** are the class trainer's up to the level, less anything whose rank chain runs back to
+  a talent (Shield Slam's trainer ranks, Prayer of Spirit). The server adds such a talent as a
+  dependent spell at load and counts its point again; a character over its level's points has
+  every talent reset at its next login. A taken talent ability therefore stays at rank 1.
 
 Making a group creates one ordinary player user per slot, with its own hidden game account
 (named `WP` + random, never `WR<id>`, so it cannot meet an account an earlier install left), and
-builds the characters in the background, all at once, in about half a minute. The service builds
-each one **by playing it** (`src/presets/headless.rs`, on `benilla-protocol`): it logs in to the
-fresh account, which holds GM level 3 for the duration, creates the character, and says the
-dot-commands — `.levelup`, `.learn`, `.maxskill`, `.additem`, `.modify money`, `.tele` — then
-equips every item with the same `CMSG_AUTOEQUIP_ITEM` a right-click sends, logs out (which saves
-it) and drops GM back to 0. The world server applies and checks every step, so the service needs
-no write access to the character database.
+builds the characters in the background, eight at a time across the realm: about 30 s for a
+party, 6 minutes for the raid. The service builds each one **by playing it** (`src/presets/headless.rs`, on
+`benilla-protocol`): it logs in to the fresh account, which holds GM level 3 for the duration,
+creates the character, and says the dot-commands — `.levelup`, `.learn`, `.maxskill`, `.additem`,
+`.modify money`, `.tele` — equips every item with the same `CMSG_AUTOEQUIP_ITEM` a right-click
+sends (and drags back into its slot anything a later item pushed out), turns in any quest by
+talking to its NPC as a player does, logs out (which saves it) and drops GM back to 0. Then it
+**logs in once more as the player will**: the server re-checks a character at that first login —
+it resets talents it cannot account for and takes off gear the character may not wear — so a slot
+is only *ready* if its level, every talent (with no point unspent) and every item survive it. The
+world server applies and checks every step, so the service needs no write access to the
+character database.
 
 The link's token is 256 random bits, stored hashed (and encrypted, so `/admin/presets` can show
 the link again). The `/g/…` routes sit outside the session layer, are rate-limited per IP, send
 `no-store`/`no-referrer`/`noindex`, and joining mints an ordinary session for that slot's user —
 the play page, relay and locks treat it like any invited player, and `/api/play` adds the
 character's name, so the client skips the login, realm and character screens. Deleting kicks
-anyone online, deletes each game account (and with it the character) and the users, which ends
-their sessions. A group cannot be deleted while it is still being built; a service restart
-mid-build marks it failed so it can be.
+anyone online, deletes each game account (and with it the character; an account that is already
+gone counts as deleted) and the users, which ends their sessions. A group cannot be deleted while
+it is still being built; a service restart mid-build marks it failed so it can be, and takes back
+the GM level of any character it interrupted.
 
 Checked against a real realm by `tests/presets_live.rs` (skipped unless pointed at one): it builds
-both presets and verifies every character in the character database — level, class, position at
-the entrance, every item worn, bags, talents, weapon/armor skills, GM level back to 0 — then
-deletes both groups and checks nothing is left.
+every preset and verifies every character in the character database — level, class, position at
+the entrance, every item worn, bags, talents, weapon/armor skills, quests turned in, GM level back
+to 0 — then deletes the groups and checks nothing is left. All seven, 75 characters, pass in about
+ten minutes. The same file has two dev tools: `say_as` (say GM commands as an existing account's
+character and read it back as its player would find it) and `build_one` (build one slot and stop
+before the check login).
 
 ```bash
 TEST_SOAP_URL=http://127.0.0.1:7878/ TEST_SOAP_USER=<gm> TEST_SOAP_PASS=<pass> \
 TEST_MARIADB_URL=mysql://mangos:mangos@127.0.0.1:3306/classicrealmd TEST_REALMD_HOST=127.0.0.1 \
-  cargo test -p wenilla-realm --test presets_live -- --nocapture   # TEST_PRESET=brd for one, TEST_KEEP=1 to keep
+  cargo test -p wenilla-realm --test presets_live -- --nocapture
+# TEST_PRESET=brd,mc for some, TEST_KEEP=1 to keep them; TEST_BUILD=ubrs:2 with build_one
 ```
 
 ## Developing
