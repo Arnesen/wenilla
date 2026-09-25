@@ -10,6 +10,7 @@ money = 500000
 [[slots]]
 label = "Warrior"
 role = "Tank"
+spec = "warrior_prot"
 class = 1  # warrior
 race = 1  # human
 gender = 0
@@ -31,6 +32,7 @@ gear = [
   2194,  # main hand: Diamond Hammer
   12997,  # shield: Redbeard Crest
 ]
+gear_slots = [2, 4, 5, 6, 7, 8, 9, 14, 10, 11, 15, 16]
 consumables = [
   [4542, 20],  # Moist Cornbread
   [929, 5],  # Healing Potion
@@ -39,12 +41,13 @@ consumables = [
 [[slots]]
 label = "Priest"
 role = "Healer"
+spec = "priest_holy"
 class = 5  # priest
 race = 3  # dwarf
 gender = 1
 spells = [17, 139, 453, 527, 528, 586, 588, 589, 591, 592, 594, 598, 600, 970, 1243, 1244, 2006, 2052, 2053, 2054, 2061, 6074, 6075, 6346, 7128, 8092, 8102, 8122, 9484, 9578, 14914, 19296]
 proficiencies = [227, 5009]
-talents = [17191, 15012, 18535, 14889]  # Improved Renew 3, Healing Focus 2, Divine Fury 5, Holy Specialization 1
+talents = [15012, 17191, 15011, 18530]  # Healing Focus 2, Improved Renew 3, Holy Specialization 5, Divine Fury 1
 bags = [4500, 4500, 4500, 4500]  # Traveler's Backpack, Traveler's Backpack, Traveler's Backpack, Traveler's Backpack
 gear = [
   12998,  # shoulders: Magician's Mantle
@@ -60,6 +63,7 @@ gear = [
   3415,  # staff: Staff of the Friar
   5198,  # wand: Cookie's Stirring Rod
 ]
+gear_slots = [2, 4, 5, 6, 7, 8, 9, 14, 10, 11, 15, 17]
 consumables = [
   [4542, 20],  # Moist Cornbread
   [929, 5],  # Healing Potion
@@ -70,12 +74,13 @@ consumables = [
 [[slots]]
 label = "Mage"
 role = "Damage"
+spec = "mage_frost"
 class = 8  # mage
 race = 7  # gnome
 gender = 1
 spells = [10, 116, 118, 122, 130, 143, 145, 205, 475, 543, 587, 597, 604, 837, 1008, 1449, 1459, 1460, 1463, 1953, 2120, 2136, 2137, 2855, 3140, 5143, 5144, 5504, 5505, 5506, 7300, 7301, 7322, 12051, 12824]
 proficiencies = [227, 5009]
-talents = [16766, 15053, 29438]  # Improved Frostbolt 5, Ice Shards 5, Elemental Precision 1
+talents = [16766, 29440, 15047]  # Improved Frostbolt 5, Elemental Precision 3, Ice Shards 3
 bags = [4500, 4500, 4500, 4500]  # Traveler's Backpack, Traveler's Backpack, Traveler's Backpack, Traveler's Backpack
 gear = [
   12998,  # shoulders: Magician's Mantle
@@ -91,6 +96,7 @@ gear = [
   890,  # staff: Twisted Chanter's Staff
   5198,  # wand: Cookie's Stirring Rod
 ]
+gear_slots = [2, 4, 5, 6, 7, 8, 9, 14, 10, 11, 15, 17]
 consumables = [
   [4542, 20],  # Moist Cornbread
   [929, 5],  # Healing Potion
@@ -101,12 +107,13 @@ consumables = [
 [[slots]]
 label = "Rogue"
 role = "Damage"
+spec = "rogue_combat"
 class = 4  # rogue
 race = 1  # human
 gender = 0
 spells = [53, 674, 703, 921, 1757, 1758, 1766, 1776, 1777, 1784, 1785, 1804, 1943, 1966, 2589, 2590, 2983, 3127, 3420, 5171, 5277, 6760, 6761, 6770, 8647, 8676]
 proficiencies = [201, 674]
-talents = [13863, 13789, 13845, 13733]  # Improved Sinister Strike 2, Lightning Reflexes 3, Precision 5, Improved Backstab 1
+talents = [13863, 13789, 13845, 13713]  # Improved Sinister Strike 2, Lightning Reflexes 3, Precision 5, Deflection 1
 bags = [4500, 4500, 4500, 4500]  # Traveler's Backpack, Traveler's Backpack, Traveler's Backpack, Traveler's Backpack
 gear = [
   14566,  # shoulders: Prospector's Pads
@@ -122,6 +129,7 @@ gear = [
   1482,  # main hand: Shadowfang
   5191,  # off hand: Cruel Barb
 ]
+gear_slots = [2, 4, 5, 6, 7, 8, 9, 14, 10, 11, 15, 16]
 consumables = [
   [4542, 20],  # Moist Cornbread
   [929, 5],  # Healing Potion
@@ -130,6 +138,7 @@ consumables = [
 [[slots]]
 label = "Hunter"
 role = "Damage"
+spec = "hunter_mm"
 class = 3  # hunter
 race = 4  # nightelf
 gender = 1
@@ -151,6 +160,7 @@ gear = [
   890,  # two-hand: Twisted Chanter's Staff
   3021,  # ranged: Ranger Bow
 ]
+gear_slots = [2, 4, 5, 6, 7, 8, 9, 14, 10, 11, 15, 17]
 consumables = [
   [4542, 20],  # Moist Cornbread
   [929, 5],  # Healing Potion

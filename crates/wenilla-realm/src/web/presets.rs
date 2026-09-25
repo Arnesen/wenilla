@@ -119,13 +119,33 @@ async fn group_page(
 ) -> Result<Response, AppError> {
     let (g, p) = resolve(&state, &headers, &token).await?;
     let cards = cards(&state, &g, p).await?;
+    let (total, ready, in_game) = (
+        cards.len(),
+        cards.iter().filter(|c| c.status == "ready").count(),
+        cards.iter().filter(|c| c.online).count(),
+    );
+    let mut sections: Vec<(String, Vec<templates::PresetCard>)> = Vec::new();
+    for role in ["Tank", "Healer", "Damage"] {
+        sections.push((role.to_string(), Vec::new()));
+    }
+    for c in cards {
+        match sections.iter_mut().find(|(r, _)| *r == c.role) {
+            Some((_, v)) => v.push(c),
+            None => sections.push((c.role.clone(), vec![c])),
+        }
+    }
+    sections.retain(|(_, v)| !v.is_empty());
     Ok(private(render(templates::PresetGroup {
         realm_name: state.realm_name().await,
         preset: p,
         token,
         building: g.status == "building",
         status: g.status,
-        cards,
+        raid: total > 5,
+        sections,
+        total,
+        ready,
+        in_game,
         notice: flash.notice,
         error: flash.error,
     })))

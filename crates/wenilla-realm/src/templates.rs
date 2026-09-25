@@ -153,7 +153,13 @@ pub struct PresetGroup {
     pub token: String,
     pub status: String,
     pub building: bool,
-    pub cards: Vec<PresetCard>,
+    /// The cards under their role ("Tank", "Healer", "Damage"), in that order.
+    pub sections: Vec<(String, Vec<PresetCard>)>,
+    pub total: usize,
+    pub ready: usize,
+    pub in_game: usize,
+    /// More than a party: smaller cards.
+    pub raid: bool,
     pub notice: Option<String>,
     pub error: Option<String>,
 }

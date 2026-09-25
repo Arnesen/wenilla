@@ -147,6 +147,15 @@ pub async fn set_realm_name(db: &MySqlPool, name: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn account_exists(db: &MySqlPool, username: &str) -> Result<bool> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT CAST(id AS SIGNED) FROM classicrealmd.account WHERE username = ?")
+            .bind(username)
+            .fetch_optional(db)
+            .await?;
+    Ok(row.is_some())
+}
+
 pub async fn ping(db: &MySqlPool) -> bool {
     sqlx::query("SELECT 1").execute(db).await.is_ok()
 }

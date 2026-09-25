@@ -11,10 +11,10 @@
 <div class="grid-2">
   {% for p in presets %}
   <div class="plate" style="padding: 24px 26px; display: flex; flex-direction: column; gap: 12px;"><div class="corners"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
-    <span class="eyebrow" style="color: var(--accent);">Level {{ p.level }} · {{ p.slots.len() }} heroes</span>
+    <span class="eyebrow" style="color: var(--accent);">Level {{ p.level }} · {% if p.slots.len() > 5 %}raid of {% endif %}{{ p.slots.len() }} heroes</span>
     <h2 style="font-size: 20px;">{{ p.name }}</h2>
     <p style="font-size: 14px;">{{ p.blurb }}</p>
-    <div class="wrap">{% for s in p.slots %}<span class="tag">{{ s.label }} · {{ s.role }}</span>{% endfor %}</div>
+    <div class="wrap">{% for r in p.roster() %}<span class="tag">{{ r }}</span>{% endfor %}</div>
     <form method="post" action="/admin/presets"><input type="hidden" name="_csrf" value="{{ csrf }}"><input type="hidden" name="preset" value="{{ p.id }}"><button class="btn-gold" type="submit">{% call ic::icon("sparkle") %}Create group</button></form>
   </div>
   {% endfor %}
@@ -26,7 +26,7 @@
     {% for g in groups %}
     <tr>
       <td><b>{{ g.preset_name }}</b> {% if g.status == "ready" %}<span class="chip ok">ready</span>{% else if g.status == "building" %}<span class="chip dim">building</span>{% else %}<span class="chip bad">{{ g.status }}</span>{% endif %}<span class="sub">#{{ g.id }} · {{ self::when(g.created_at) }}</span></td>
-      <td>{% for c in g.characters %}<div>{{ c }}</div>{% endfor %}</td>
+      <td>{% if g.characters.len() > 5 %}<details><summary>{{ g.characters.len() }} heroes</summary>{% for c in g.characters %}<div>{{ c }}</div>{% endfor %}</details>{% else %}{% for c in g.characters %}<div>{{ c }}</div>{% endfor %}{% endif %}</td>
       <td class="k"><a href="{{ g.link }}" target="_blank" rel="noreferrer"><code style="overflow-wrap: anywhere;">{{ g.link }}</code></a></td>
       <td class="actions"><form class="inline" method="post" action="/admin/presets/groups/{{ g.id }}/delete" onsubmit="return confirm('Delete this group AND all its characters? This cannot be undone.')"><input type="hidden" name="_csrf" value="{{ csrf }}"><button class="btn-danger sm" type="submit">{% call ic::icon("trash") %}Delete</button></form></td>
     </tr>
