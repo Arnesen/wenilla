@@ -1,20 +1,11 @@
-//! The engine unit tooltip builder (decision 0274 P3, law per 0276): the level-line composition
-//! (four `TOOLTIP_UNIT_LEVEL*` keys, the `ELITE`/`BOSS` rank table, "??", `CORPSE`, "Race Class"
-//! over `PLAYER` — all seeded here as marked stand-ins, see [`seed_level_strings`]), the flag lines
-//! (PvP white / Skinnable red / Civilian green), the world-mouseover drive (default anchor +
-//! `UPDATE_MOUSEOVER_UNIT` recolor + the fade arm on loss), and the health-bar watcher.
+//! The engine unit tooltip builder: the level line, the flag lines, the world-mouseover drive and
+//! the health-bar watcher.
 
 use super::common::script;
 use crate::script::*;
 
-/// A stand-in string table for the level line — the four `TOOLTIP_UNIT_LEVEL*` templates and the
-/// three word slots that fill them, **deliberately not the shipped wording**. What these tests
-/// establish is *which key* each slot combination reaches and what fills it, never what the
-/// sentence says (decision 2045, "assert the identifier, not the sentence"), and here that is not
-/// a formality: `TOOLTIP_UNIT_LEVEL_CLASS`'s enUS "Level %s %s" is word-for-word
-/// `FRIENDS_LEVEL_TEMPLATE`, `UNIT_TYPE_LEVEL_TEMPLATE` and `CHARACTER_SELECT_INFO`, and the bare
-/// template's "Level %s" is also `ITEM_LEVEL`, `LEVEL_GAINED` and `UNIT_LEVEL_TEMPLATE`. An
-/// assertion on the English would pass on all seven.
+/// Stand-in level-line strings, deliberately not the shipped wording: the enUS templates repeat
+/// other globals word for word, so only a marked stand-in shows which key was reached.
 fn seed_level_strings(s: &mut UiScript) {
     s.run(
         r#"
@@ -34,6 +25,7 @@ fn seed_level_strings(s: &mut UiScript) {
 fn wolf() -> UnitState {
     UnitState {
         exists: true,
+        guid: 0xF130_0000_4500_0001,
         name: Some("Timber Wolf".into()),
         health: 30,
         max_health: 50,
@@ -46,7 +38,7 @@ fn wolf() -> UnitState {
     }
 }
 
-/// The creature law: gold name, subtitle, the CLASS_TYPE level line, red Skinnable.
+/// A creature: gold name, subtitle, the CLASS_TYPE level line, red Skinnable.
 #[test]
 fn creature_line_law() {
     let mut s = script();
@@ -82,10 +74,8 @@ fn creature_line_law() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The snapshot the app pushes for a creature the client has only just seen: the DESCRIPTOR's
-/// fields are in (level, reaction, the skinnable flag) and everything the creature record carries
-/// — name, subtitle, type word, rank, civilian/leader — is still absent, because they all arrive
-/// together in the one `SMSG_CREATURE_QUERY_RESPONSE` that fills `CGUnit+0xb30`.
+/// A creature just seen: its descriptor fields are in, but the record fields (name, subtitle, type,
+/// rank, civilian) wait for the `SMSG_CREATURE_QUERY_RESPONSE` that fills `CGUnit+0xb30`.
 fn unqueried_wolf() -> UnitState {
     UnitState {
         exists: true,
@@ -101,22 +91,9 @@ fn unqueried_wolf() -> UnitState {
     }
 }
 
-/// **A name still in flight titles the plate `UNKNOWNOBJECT` — never an empty line** (decision
-/// 2040, closing 2002's residue).
-///
-/// The builder's name read is `CGUnit_C::GetUnitName 0x609210` (`0x52a187`), the same resolver
-/// `UnitName 0x517020` delegates to, and every one of its misses — a null `CGUnit+0xb30`
-/// (`0x609353 je 0x609324`) among them — ends at the same `FrameScript_GetText("UNKNOWNOBJECT")`
-/// tail. So the verb and the plate answer the same string for the same instant, and because the
-/// string is read out of the VM's `_G` it translates with `GlobalStrings.lua`.
-///
-/// The builder has NO counterpart to `UnitName`'s two nils: the `"player"` fast path is the
-/// *binding's* (`0x517083`, before any resolve), so a player whose name has not arrived titles
-/// `UNKNOWNOBJECT` too; and a token resolving to nothing never reaches a builder at all — the
-/// entry gate hands back no object, `SetUnit` answers nil and no plate is drawn.
-///
-/// Failure looks like the empty first line the residue named: `TextLeft1` reads `""`, the plate
-/// measures to a blank row, and the level line reads as the tooltip's title.
+/// `CGUnit_C::GetUnitName 0x609210` (`0x52a187`) reads the name, as for `UnitName 0x517020`, and
+/// every miss, a null `CGUnit+0xb30` among them (`0x609353 je 0x609324`), ends at
+/// `FrameScript_GetText("UNKNOWNOBJECT")`. The `"player"` fast path is the binding's (`0x517083`).
 #[test]
 fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
     let mut s = script();
@@ -145,9 +122,7 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
     )
     .unwrap();
 
-    // The query answers: the very next render replaces the placeholder with the real name and
-    // fills the record's lines. (Live, the hover feed re-drives this without the mouse moving —
-    // its rebuild key is the whole line-affecting snapshot, `ui_tooltip::lines_view`.)
+    // The query answers: the next render replaces the placeholder and fills the record's lines.
     let mut answered = unqueried_wolf();
     answered.name = Some("Timber Wolf".into());
     answered.subtitle = Some("Alpha".into());
@@ -165,8 +140,7 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
     )
     .unwrap();
 
-    // An EMPTY (or absent) global is the same miss as no global — `0x609324`'s own check, which
-    // falls to the binary's literal `0x860fa4`.
+    // An empty or absent global falls to the binary's own literal `0x860fa4` (`0x609324`).
     s.set_unit("target", Some(unqueried_wolf()));
     s.run(
         r#"
@@ -177,8 +151,7 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
     )
     .unwrap();
 
-    // The `"player"` fast path is the BINDING's, not the builder's: a player whose name-cache row
-    // has not answered titles the same placeholder, where `UnitName("player")` would push nil.
+    // A player whose name has not arrived titles the placeholder; `UnitName("player")` pushes nil.
     s.set_unit(
         "player",
         Some(UnitState {
@@ -195,7 +168,7 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
     s.run(
         r#"
         UNKNOWNOBJECT = "Unknown"
-        assert(UnitName("player") == nil, "the binding's own fast path still pushes nil (2002)")
+        assert(UnitName("player") == nil, "the binding's own fast path still pushes nil")
         assert(TT:SetUnit("player") == 1)
         assert(TTTextLeft1:GetText() == UNKNOWNOBJECT,
                "the builder has no player fast path, got " .. tostring(TTTextLeft1:GetText()))
@@ -203,18 +176,15 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
     )
     .unwrap();
 
-    // The GUID-0 counterpart: a recognised token naming nothing resolves to no object, so no
-    // builder runs — nil, and no plate. (There is no third answer; the builder never sees it.)
+    // A recognised token naming nothing resolves to no object, so no builder runs.
     s.run(r#"assert(TT:SetUnit("party4") == nil, "an absent unit draws no plate at all")"#)
         .unwrap();
     assert!(s.take_errors().is_empty());
 }
 
-/// The faction-name line sits between the level line and "PvP" (the builder-tail block of
-/// `0x529fe0` — the director's Marshal McBride reference: Level, Stormwind, PvP); the
-/// CIVILIAN line is the dishonorable-kill warning, whole gate (`0x612550`): PvP bit + civilian
-/// flag + HOSTILE + GREY/trivial — a friendly (or non-grey) civilian never shows it; LEADER
-/// (white) needs only the PvP bit + the flag (`0x6125c0`).
+/// The faction line sits between the level line and "PvP" (`0x529fe0`). Civilian needs the PvP
+/// bit, the flag, hostility and a grey level (`0x612550`); Leader only the PvP bit and the flag
+/// (`0x6125c0`).
 #[test]
 fn faction_line_and_civilian_gate() {
     let mut s = script();
@@ -224,7 +194,7 @@ fn faction_line_and_civilian_gate() {
         level: 30,
         ..Default::default()
     });
-    // The reference shot's shape: a FRIENDLY civilian guard — faction line, PvP, NO Civilian.
+    // A friendly civilian guard: faction line and PvP, no Civilian.
     s.set_unit(
         "target",
         Some(UnitState {
@@ -252,7 +222,7 @@ fn faction_line_and_civilian_gate() {
     "#,
     )
     .unwrap();
-    // The warning case: HOSTILE + grey (level 20 vs player 30 → gap 10 > band 8) + PvP-flagged.
+    // Hostile, PvP-flagged and grey (a gap of 10 is past the band of 8): the warning shows.
     s.set_unit(
         "target",
         Some(UnitState {
@@ -278,7 +248,7 @@ fn faction_line_and_civilian_gate() {
     "#,
     )
     .unwrap();
-    // Same unit but NOT grey (level 25, gap 5 ≤ band 8): the warning drops.
+    // Not grey (a gap of 5 is inside the band of 8): no warning.
     s.set_unit(
         "target",
         Some(UnitState {
@@ -380,7 +350,7 @@ fn level_line_variants() {
     "#,
     )
     .unwrap();
-    // The "??" gate, byte-pinned: HOSTILE (reaction ≤ 2) + 10 levels up reads "??"…
+    // A hostile unit (reaction 2 or less) 10 levels up reads "??".
     let ten_up = |reaction: u8, is_player: bool| UnitState {
         exists: true,
         name: Some("Elder".into()),
@@ -400,7 +370,7 @@ fn level_line_variants() {
     "#,
     )
     .unwrap();
-    // …but UNFRIENDLY (reaction 3) does not — the internal bound is hated/hostile only…
+    // An unfriendly one (reaction 3) does not.
     s.set_unit("target", Some(ten_up(3, false)));
     s.run(
         r#"
@@ -409,7 +379,7 @@ fn level_line_variants() {
     "#,
     )
     .unwrap();
-    // …and PLAYERS never read "??" regardless of reaction/delta.
+    // Players never read "??".
     s.set_unit("target", Some(ten_up(2, true)));
     s.run(
         r#"
@@ -421,9 +391,56 @@ fn level_line_variants() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The world-mouseover drive: `world_tooltip_unit` fires the default-anchor script, renders,
-/// fires `UPDATE_MOUSEOVER_UNIT` (the Lua recolor), and the health bar tracks later pushes;
-/// hover loss arms the fade (alpha ramps, then hides).
+/// A player's level line reads "Race Class (Player)" whatever creature type the snapshot carries:
+/// the builder tests the player type bit (`0x52a4a6`) and takes the race and class names for a
+/// player (`0x52a4e5`-`0x52a555`), the type row only otherwise (`0x52a4bd`-`0x52a4d4`), so a
+/// shapeshifted player's Beast never reaches the line.
+#[test]
+fn a_players_level_line_ignores_the_snapshots_creature_type() {
+    let mut s = script();
+    seed_level_strings(&mut s);
+    s.set_screen_size(800.0, 600.0);
+    s.set_player_req_state(PlayerReqState {
+        level: 60,
+        ..Default::default()
+    });
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "UF3"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+    "#,
+    )
+    .unwrap();
+    let druid = |reaction: u8, creature_type: Option<&str>| UnitState {
+        exists: true,
+        name: Some("Fenwick".into()),
+        level: 40,
+        reaction,
+        is_player: true,
+        race: Some("Night Elf".into()),
+        class: Some("Druid".into()),
+        creature_type_name: creature_type.map(str::to_string),
+        ..Default::default()
+    };
+    // Hostile, neutral and friendly: the three sides of the reaction gate the creature arm reads.
+    for reaction in [2, 4, 6] {
+        for creature_type in [None, Some("Humanoid"), Some("Beast")] {
+            s.set_unit("target", Some(druid(reaction, creature_type)));
+            s.run(
+                r#"
+                TT:SetOwner(UF3, "ANCHOR_RIGHT"); TT:SetUnit("target")
+                assert(TTTextLeft2:GetText() == "[LEVEL_CLASS_TYPE 40 Night Elf Druid [PLAYER]]",
+                    "got " .. TTTextLeft2:GetText())
+            "#,
+            )
+            .unwrap_or_else(|e| panic!("reaction {reaction}, type {creature_type:?}: {e}"));
+        }
+    }
+    assert!(s.take_errors().is_empty());
+}
+
+/// `world_tooltip_unit` fires the default anchor, renders, then fires `UPDATE_MOUSEOVER_UNIT`.
 #[test]
 fn world_hover_drive_and_health_watcher() {
     let mut s = script();
@@ -466,8 +483,7 @@ fn world_hover_drive_and_health_watcher() {
     "#,
     )
     .unwrap();
-    // The handler's seating resolved: bottom-right of the 800×600 screen, −13 in, 70 up.
-    // (Answer the line measures first — the auto-size needs them before the plate has a rect.)
+    // The auto-size needs the line measures before the plate has a rect.
     let answers: Vec<(u32, f32, f32, u64)> = s
         .fontstrings_needing_measure()
         .iter()
@@ -480,7 +496,7 @@ fn world_hover_drive_and_health_watcher() {
                   "plate at the default corner, got " .. tostring(GameTooltip:GetRight()) .. "," .. tostring(GameTooltip:GetBottom()))"#,
     )
     .unwrap();
-    // A health push for the LIVE token re-drives the bar without a rebuild.
+    // A health push for the live token re-drives the bar without a rebuild.
     let mut hurt = wolf();
     hurt.health = 12;
     s.set_unit("mouseover", Some(hurt));
@@ -488,17 +504,35 @@ fn world_hover_drive_and_health_watcher() {
         r#"assert(GameTooltipStatusBar:GetValue() == 12, "the health watcher tracked the push")"#,
     )
     .unwrap();
-    // Hover loss: the fade arms; past the ramp the tooltip hides.
+    // Hover lost: the fade arms and `"mouseover"` names nobody (`0x492890` zeroes the pair), yet
+    // the fading plate keeps its bar, whose watcher follows the unit's guid, not the token.
     s.world_tooltip_fade();
-    s.tick(0.6);
+    s.set_unit("mouseover", None);
+    s.tick(0.1);
+    s.run(
+        r#"
+        assert(UnitExists("mouseover") == nil, "the token is cleared")
+        assert(GameTooltip:IsShown(), "still fading")
+        assert(GameTooltipStatusBar:IsShown(), "the fading plate keeps its bar")
+        assert(GameTooltipStatusBar:GetValue() == 12, "and its value")
+        assert(recolored == 1, "the clear fires no UPDATE_MOUSEOVER_UNIT")
+    "#,
+    )
+    .unwrap();
+    // The same unit pushed under another token still drives the bar.
+    let mut as_target = wolf();
+    as_target.health = 8;
+    s.set_unit("target", Some(as_target));
+    s.run(r#"assert(GameTooltipStatusBar:GetValue() == 8, "the watcher follows the guid")"#)
+        .unwrap();
+    s.tick(0.5);
     s.run(r#"assert(not GameTooltip:IsShown(), "faded out after the ramp")"#)
         .unwrap();
     assert!(s.take_errors().is_empty());
 }
 
-/// The minimap BLIP tooltip (`minimap_tooltip`): refuses without a Minimap widget; with one, one
-/// white line seated against the widget (the INTERIM ANCHOR_LEFT law), world-owned so the shared
-/// fade arm hides it on hover loss.
+/// The minimap blip tooltip (`minimap_tooltip`): refused without `UIParent`, otherwise one line
+/// seated above the cursor, world-owned so the shared fade hides it on hover loss.
 #[test]
 fn minimap_blip_tooltip_shows_and_fades() {
     let mut s = script();
@@ -524,8 +558,7 @@ fn minimap_blip_tooltip_shows_and_fades() {
     "#,
     )
     .unwrap();
-    // Seated 5 px from the 800-wide screen's right edge: the clamp (the client's G bit4)
-    // slides the plate back inside instead of letting it clip (director-caught).
+    // Seated 5 px from the right edge, the clamp (the client's G bit4) slides the plate inside.
     let answers: Vec<(u32, f32, f32, u64)> = s
         .fontstrings_needing_measure()
         .iter()
@@ -537,11 +570,10 @@ fn minimap_blip_tooltip_shows_and_fades() {
         r#"assert(GameTooltip:GetRight() <= 800, "clamped inside the screen, got " .. tostring(GameTooltip:GetRight()))"#,
     )
     .unwrap();
-    // Follow: a move re-seats without rebuilding the line.
     s.world_tooltip_move(400.0, 300.0);
     s.run(r#"assert(GameTooltipTextLeft1:GetText() == "Stormwind", "content survives a move")"#)
         .unwrap();
-    // Hover loss rides the shared world fade: armed, then hidden past the ramp.
+    // Hover loss rides the shared world fade.
     s.world_tooltip_fade();
     s.tick(0.6);
     s.run(r#"assert(not GameTooltip:IsShown(), "faded out after the ramp")"#)

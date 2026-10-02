@@ -90,12 +90,12 @@ The recurring ones and the rule for each:
 | `benilla-app/src/net/io.rs` | `dispatch()` extracted; native/wasm split around the spawn | keep the split, take upstream's arms |
 | `benilla-app/src/net.rs` | `bevy::platform::time::Instant` (std's panics on wasm) | keep ours |
 | `benilla-protocol/…/world/session.rs` | `recv_async().await` | keep ours, take upstream's new fields |
-| `benilla-app/src/sound/mixer.rs`, `sound/mod.rs` | kira backend per target: upstream's `OutputBackend` natively, kira's own cpal backend (Web Audio) on wasm32 | keep the split |
-| `benilla-app/src/sound/zone.rs`, `sound/web_load.rs` | soundscape loading off the frame on wasm | keep ours |
-| `benilla-app/src/cvars.rs` | `apply_query_overrides` (wasm-only) | follow upstream's `REGISTERED` shape |
-| `benilla-app/src/bindings.rs` | `BindKey::Synth`, the bridge's synthetic latch | keep ours |
+| `benilla-app/src/sound/mixer.rs`, `sound/mod.rs` | kira backend per target: upstream's `OutputBackend` natively, our `sound/web_backend.rs` (Web Audio over cpal 0.17) on wasm32 | keep the split; kira's own cpal backend is on cpal 0.18, which cannot share the lockfile (`alsa-sys`) |
+| `benilla-app/src/sound/zone.rs`, `sound/web_load.rs` | soundscape loading off the frame on wasm: the music load, and the ambience bed's `OpeningBed` holding a `web_load::Pending` where native holds an IO-pool task | keep ours |
+| `benilla-app/src/cvars/mod.rs`, `cvars/browser.rs` | the page's URL overrides (wasm-only), `local_state` reads | follow upstream's `REGISTERED` shape |
+| `benilla-app/src/bindings.rs` | `BindingsState::synth_*`: the bridge presses a command by name through its `Bindings.xml` body, latched apart from the keys | keep ours |
 | `benilla-app/src/lib.rs`, `benilla-app/Cargo.toml` | plugin registration, wasm-only deps | keep ours plus upstream's additions |
-| `benilla-app/src/ui_script/lifecycle.rs` | the entry load sliced across frames (`run_pending_entry_load`, `entry_prepare`/`entry_finish`) | keep the split; lift upstream's one-shot body into `entry_finish`, and thread any new load input (the roster, the sound-suppression bracket) through the sliced path too |
+| `benilla-app/src/ui_script/lifecycle.rs`, `manifest.rs` | the entry load sliced across frames (`run_pending_entry_load`, `entry_prepare`/`entry_finish`/`entry_close`), stepping the core's `FrameXML.toc` rows through `manifest::load_core_missing`/`close_core` | keep the split; lift upstream's one-shot body into the three, and thread any new load input (`EntryInputs`) through the sliced path too |
 | `benilla-app/src/local_state.rs`, `ui_saved.rs`, `ui_script/addons.rs`, `login/mod.rs` | state files through `local_state::read*`/`write_atomic*` (localStorage on the page) | keep ours; a new `std::fs` read of a state file takes the `local_state` twin |
 | `benilla-protocol/src/{auth,lib}.rs`, `world/{mod,reader,session,writer/mod}.rs`, `tests/auth.rs` | the awaited readers over `transport::Conn` | keep ours; upstream's edits there have been comment-only so far |
 | `AGENTS.md`, `README.md`, `.gitignore` | the fork's map and front page | keep ours; upstream's own map is `docs/METHOD.md` and `docs/MAP.md` |

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["sam <samuv.eth@gmail.com>"]
@@ -41,7 +41,7 @@ sha1 = "0.10.6"
 lua-src = { path = "third_party/lua-src" }
 # The browser build keeps `lua_Integer = i64` on wasm32 — one-line fork, see third_party/mlua-sys/BENILLA.md.
 mlua-sys = { path = "third_party/mlua-sys" }
-# kira 0.12.1, patched to compute spatial gains and the volume tween per output chunk and
+# kira 0.12.4, patched to compute spatial gains and the volume tween per output chunk and
 # interpolate them, not per sample frame (`third_party/kira/BENILLA.md`).
 kira = { path = "third_party/kira" }
 

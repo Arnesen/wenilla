@@ -308,7 +308,7 @@ fn player_bytes_3_byte_3_is_the_current_pvp_rank_not_the_highest() {
     assert_eq!(
         f.player_honor_rank(),
         None,
-        "the HIGHEST rank is a different field (1222) — absent means absent"
+        "the HIGHEST rank is a different field: absent means absent"
     );
     // A demoted player keeps the higher lifetime rank.
     let demoted = ObjectFields::from_pairs(&[(195, 0x03_00_00_00), (1222, 0x0B_00_00_00)]);
@@ -547,7 +547,7 @@ fn corpse_descriptor_indices_and_packing() {
     // `+0x1D = 35` flags · `+0x1E = 36` dynamic flags (vmangos `UpdateFields_1_12_1.h:338-350`).
     let corpse = ObjectFields::from_pairs(&[
         (12, 49),
-        // Slot 4 (chest): DisplayInfoID 902 | InventoryType 5 << 24 (`Player.cpp:4821`).
+        // Slot 4 (chest): DisplayInfoID 902 | InventoryType 5 << 24 (`Player.cpp:4822`).
         (13 + 4, 902 | (5 << 24)),
         // BYTES_1: (0) | race<<8 | gender<<16 | skin<<24 (`Corpse.cpp:228`).
         (32, (6 << 8) | (1 << 16) | (3 << 24)),
@@ -755,6 +755,33 @@ fn dynamicobject_fields_read_the_live_blizzard_capture() {
     );
 }
 
+/// `0x605f30`: health 0 (`0x605f3b`), or `PLAYER_FLAGS & 0x10` (`0x605f59`); a released ghost has
+/// health 1, so only the flag catches it, and feign death is neither.
+#[test]
+fn dead_or_ghost_is_health_zero_or_the_ghost_flag() {
+    let unit = |pairs: &[(u16, u32)]| ObjectFields::from_pairs(pairs);
+    let alive = unit(&[(FIELD_UNIT_HEALTH, 100), (FIELD_UNIT_MAXHEALTH, 100)]);
+    let corpse = unit(&[(FIELD_UNIT_HEALTH, 0), (FIELD_UNIT_MAXHEALTH, 100)]);
+    let ghost = unit(&[
+        (FIELD_UNIT_HEALTH, 1),
+        (FIELD_UNIT_MAXHEALTH, 100),
+        (FIELD_PLAYER_FLAGS, 0x10),
+    ]);
+    let feigning = unit(&[
+        (FIELD_UNIT_HEALTH, 100),
+        (FIELD_UNIT_MAXHEALTH, 100),
+        (FIELD_UNIT_DYNAMIC_FLAGS, 0x20),
+    ]);
+    assert!(!alive.is_dead_or_ghost());
+    assert!(corpse.is_dead_or_ghost());
+    assert!(!ghost.unit_is_dead(), "a ghost has health");
+    assert!(ghost.is_dead_or_ghost(), "the ghost-flag leg");
+    assert!(
+        !feigning.is_dead_or_ghost(),
+        "feign death is 0x605f90's, not this"
+    );
+}
+
 /// `Unit::SetFeignDeath` sets only `UNIT_DYNFLAG_DEAD`: the raw predicates stay false, the
 /// reads-dead ones (`0x605f90`, `UnitHealth`, `UnitMana`) flip, and the maxima stay.
 #[test]
@@ -861,4 +888,13 @@ fn rage_and_happiness_divide_for_display_but_not_for_the_raw_readers() {
     ]);
     assert_eq!(feigning_warrior.unit_shown_power(RAGE), Some(0));
     assert_eq!(feigning_warrior.unit_shown_max_power(RAGE), Some(100));
+}
+
+/// `UNIT_FIELD_BASE_MANA` and `UNIT_FIELD_BASE_HEALTH` are fields 162 and 163
+/// (`UpdateFields_1_12_1.h:101-102`), the unit block's `+0x270` and `+0x274` `0x612c50` reads.
+#[test]
+fn base_mana_and_base_health_read_fields_162_and_163() {
+    let unit = ObjectFields::from_pairs(&[(162, 1500), (163, 1689)]);
+    assert_eq!(unit.unit_base_mana(), Some(1500));
+    assert_eq!(unit.unit_base_health(), Some(1689));
 }

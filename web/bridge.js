@@ -40,7 +40,7 @@ const push = (cmd) => hook.queue.push(cmd);
 // Bridge-level event names; anything else passed to `on()` is taken as a Lua event name and
 // subscribed to on the page's behalf.
 const BRIDGE_EVENTS = new Set([
-  'frame', 'ready', 'state', 'map', 'zone', 'chat', 'lua', 'event', 'input', 'error',
+  'frame', 'ready', 'commands', 'state', 'map', 'zone', 'chat', 'lua', 'event', 'input', 'error',
 ]);
 
 hook.onFrame = (snapshot) => {
@@ -52,6 +52,8 @@ hook.onEvent = (name, payload) => {
     wenilla.ready = true;
     wenilla.commands = payload.commands;
     // The wasm re-reads `events` every frame; a subscription made before boot is honoured now.
+  } else if (name === 'commands') {
+    wenilla.commands = payload;
   } else if (name === 'lua') {
     const p = pendingLua.get(payload.id);
     if (p) {
@@ -70,7 +72,7 @@ hook.onEvent = (name, payload) => {
 export const wenilla = {
   /** The last `onFrame` snapshot (see README for the schema), or null before the first. */
   state: null,
-  /** `[{name, kind, category}]` — every command `hold`/`fire` accepts, from the `ready` event. */
+  /** `[{name, category}]` — every command `hold`/`fire` accepts, from `ready` and `commands`. */
   commands: [],
   ready: false,
 

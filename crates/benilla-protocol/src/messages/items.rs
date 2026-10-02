@@ -461,6 +461,9 @@ pub enum UseItemTarget {
     /// `TARGET_FLAG_SOURCE_LOCATION` and three `f32` coords (`BindLocation`, `0x6e60f0`); only
     /// items carrying spell 265, such as Martin Fury, use it. vmangos reads it before the dest.
     Source([f32; 3]),
+    /// A corpse bit and the corpse's packed guid: Goblin Jumper Cables' Defibrillate
+    /// (`Targets 0x8000`) on a released player's corpse.
+    Corpse(super::spells::CorpseTarget, u64),
 }
 
 /// Body of `CMSG_USE_ITEM` (opcode 171): bag index (a bag's player-array slot 19-22, or
@@ -485,6 +488,10 @@ pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) 
         }
         UseItemTarget::Item(guid) => {
             body.extend_from_slice(&TARGET_FLAG_ITEM.to_le_bytes());
+            guid
+        }
+        UseItemTarget::Corpse(corpse, guid) => {
+            body.extend_from_slice(&corpse.target_flag().to_le_bytes());
             guid
         }
         UseItemTarget::Dest(dest) => {
@@ -565,7 +572,7 @@ pub fn set_ammo(entry: u32) -> Vec<u8> {
 /// Read `SMSG_INVENTORY_CHANGE_FAILURE` into `(reason, required_level, item_guid, bag_slot)`: a
 /// `u8` reason and, unless it is 0, a `u32` level for reason 1 only, two item guids and a bag
 /// slot. That slot is the target bag's player-array slot, 255 for the player's own
-/// (`Player.cpp:8899`); the reference names that bag in reason 16's message (`0x5ede00`).
+/// (`Player.cpp:8975`); the reference names that bag in reason 16's message (`0x5ede00`).
 pub(super) fn read_inventory_change_failure(
     r: &mut &[u8],
 ) -> io::Result<(u8, Option<u32>, u64, u8)> {

@@ -1,44 +1,23 @@
-//! **The tests' interface loader — one copy, both stores** (decision 1751).
-//!
-//! Half a dozen test files carried an identical private `load_xml` that read
-//! `assets/ui/<name>` off disk, parsed it, and asserted the loader reported no errors — each with
-//! the comment "duplicated so this file is self-contained". That was fine while `assets/ui` was
-//! the only place an interface file could come from. It is not any more: a migrated window's file
-//! lives in the player's own patch chain, so a test that wants bag windows has to name
-//! `Interface\FrameXML\ContainerFrame.xml`, and six copies of a disk-only reader cannot say that.
-//!
-//! [`load_ui`] is that reader, generalised the same way [`super::manifest::load_manifest`] is:
-//! **a bare filename is a file we ship, a path is one off the player's install.** The two are told
-//! apart by [`super::reference_ui::is_chain_entry`], the manifest's own rule, so a test loads the
-//! entries in the order `benilla.toc` names them and gets what the client gets.
-//!
-//! It reads the SOURCE TREE rather than the compiled-in copy, deliberately: these tests exist to
-//! catch a mistake in a file somebody just edited, and `content::read`'s dev-build probe already
-//! prefers disk for the same reason.
+//! The tests' interface loader: a bare filename is a file we ship under `assets/ui`, a path one off
+//! the player's patch chain ([`super::reference_ui::is_chain_entry`]). It reads the source tree,
+//! not the compiled-in copy. A kit loads in the production order ([`production_rank`]), which
+//! every load checks.
 
 use benilla_ui::script::{QuadContent, UiScript};
 
-/// Load one interface file into `s`, panicking on any loader error, and return how many frames it
-/// materialized (`0` for a `.lua` entry, which materializes none).
-///
-/// `entry` is a manifest entry: `"BagFrame.xml"` for one of ours, or
-/// `"Interface\\FrameXML\\ContainerFrame.xml"` for the reference's own — which also brings its
-/// `<Script file="ContainerFrame.lua"/>` off the chain, exactly as it does in a real load.
-///
-/// **A chain entry needs client data**, so a test that names one has to open with
-/// `benilla_formats::wow_data_or_skip!()`; [`BAG_UI`] is a list that always does.
+/// Load one interface file into `s`, panicking on any loader error; returns the frames it built
+/// (0 for a `.lua`). A chain entry needs client data, so a test naming one opens with
+/// `benilla_formats::wow_data_or_skip!()`.
 pub(crate) fn load_ui(s: &UiScript, entry: &str) -> usize {
     load_entry(s, entry, false, false)
 }
 
-/// The cooldown indicator's file: `Interface\Cooldown\UI-Cooldown-Indicator.mdx`, as the
-/// stock `CooldownFrameTemplate` names it.
+/// The cooldown indicator's file, as the stock `CooldownFrameTemplate` names it.
 pub(super) const COOLDOWN_MODEL: &str = r"Interface\Cooldown\UI-Cooldown-Indicator.mdx";
 
-/// The cooldown indicator's file facts (`benilla-extract m2seq`): sequence 0 = id 0, 1000 ms,
-/// clamp — the sweep `CooldownFrame_OnUpdateModel` scrubs; sequence 1 = id 1, 1000 ms, clamp —
-/// the finish flash, whose completion hides the frame. Handed to the engine the way the app does
-/// once the asset lands (decisions 2007/2019); every pane holding the file arms its Stand.
+/// The cooldown indicator's file facts (`benilla-extract m2seq`), handed to the engine as the app
+/// does: sequence 0 (id 0, 1000 ms, clamp) is the sweep `CooldownFrame_OnUpdateModel` scrubs,
+/// sequence 1 (id 1, 1000 ms, clamp) the finish flash whose end hides the frame.
 pub(super) fn cooldown_facts(s: &mut UiScript) {
     use benilla_ui::widget::{ModelFileFacts, SequenceFacts};
     let seq = |anim_id, duration_ms| SequenceFacts {
@@ -56,9 +35,8 @@ pub(super) fn cooldown_facts(s: &mut UiScript) {
     );
 }
 
-/// The play head `(anim_id, cursor_ms)` of the SHOWN cooldown pane `owner` names (`None` while
-/// it is hidden, or has nothing armed) — what the tile renderer samples the file at. Read the way
-/// the renderer reads it: the pane's quad in the extract joined to the engine's paint list.
+/// The play head `(anim_id, cursor_ms)` of the shown cooldown pane `owner` names, as the tile
+/// renderer samples it.
 pub(super) fn cooldown_play(s: &UiScript, owner: &str) -> Option<(u16, u32)> {
     let heads = s.visible_model_panes();
     s.extract().into_iter().find_map(|q| match &q.content {
@@ -78,9 +56,8 @@ pub(super) fn cooldown_play(s: &UiScript, owner: &str) -> Option<(u16, u32)> {
     })
 }
 
-/// [`cooldown_play`] for whichever cooldown pane is shown — the bag windows number their slots
-/// from the far end (`ContainerFrame_GenerateFrame`: `Item{j}` carries id `size − j + 1`), so a
-/// test that seats one item asks for "the" sweep rather than a name.
+/// [`cooldown_play`] for whichever cooldown pane is shown: `ContainerFrame_GenerateFrame` numbers
+/// a bag's slots from the far end, so a one-item test asks for the sweep, not a name.
 pub(super) fn cooldown_play_any(s: &UiScript) -> Option<(u16, u32)> {
     let heads = s.visible_model_panes();
     s.extract().into_iter().find_map(|q| match &q.content {
@@ -96,35 +73,20 @@ pub(super) fn cooldown_play_any(s: &UiScript) -> Option<(u16, u32)> {
     })
 }
 
-/// [`load_ui`], and **a missing template is a failure too**.
-///
-/// A frame that inherits a template nothing declares is a loader *warning*, not an error: the frame
-/// is built and simply has none of the template's art. So an under-loaded dependency list passes
-/// [`load_ui`] and then loses a window's whole skin silently — which is why four of the social
-/// windows' test modules grew this check by hand. It is one function now rather than four copies,
-/// and any test may ask for it.
+/// [`load_ui`], and a missing template fails too: the loader only warns, and the art is lost.
 pub(super) fn load_ui_strict(s: &UiScript, entry: &str) -> usize {
     load_entry(s, entry, true, false)
 }
 
-/// [`load_ui`], and **no loader warning of any kind is tolerated**.
-///
-/// Stricter than [`load_ui_strict`], which only fails a missing template. A file whose own
-/// assignment is "this loads perfectly clean" wants the whole warnings channel asserted empty — a
-/// stale unknown-attribute or dropped-script warning is exactly the drift that check exists to
-/// catch. It was a fourth private disk-only reader in `group_loot_tests.rs` until 1838; a
-/// disk-only reader cannot name a chain file, which is what that test now loads.
+/// [`load_ui`], and any loader warning fails.
 pub(super) fn load_ui_no_warnings(s: &UiScript, entry: &str) -> usize {
     load_entry(s, entry, false, true)
 }
 
 fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bool) -> usize {
-    // **A kit's VM is the client's VM, and that includes the CVar table** (decision 2115). The app
-    // registers `crate::cvars::REGISTERED` at startup, before any interface file loads;
-    // `UiScript::new()` carries only `benilla-ui`'s own. The stock `UIOptionsFrame.xml` reads two
-    // camera CVars inside its dropdowns' `OnLoad` and raises on a nil, so a kit that skips this is
-    // measuring a client that does not exist. Idempotent, and it never clobbers a value a test set
-    // first — `register_cvars` only refreshes an existing slot's default.
+    follow_production_order(s, entry);
+    // The app registers its CVars before any file loads: stock `UIOptionsFrame.xml` reads two
+    // camera CVars at `OnLoad` and raises on a nil. A value a test already set stands.
     s.register_cvars(crate::cvars::registered_pairs());
     let path = entry.replace('\\', "/");
     let bytes = read(&path).unwrap_or_else(|| panic!("{entry}: not found"));
@@ -136,9 +98,8 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
     let doc = benilla_ui::framexml::parse(&benilla_ui::source::decode(&bytes))
         .unwrap_or_else(|e| panic!("{entry}: {e}"));
     let provider = |req: &str| -> Option<Vec<u8>> { read(req) };
-    // Seated BEFORE the load, not after it like the two below: `MultiActionBarFrame_OnLoad`
-    // indexes `UIOptionsFrameCheckButtons` from inside this very load walk, where the micro row's
-    // and UIParent's callees only run later (decision 2115).
+    // Seated before the load: `MultiActionBarFrame_OnLoad` indexes `UIOptionsFrameCheckButtons`
+    // during this load walk.
     if path
         .rsplit('/')
         .next()
@@ -147,14 +108,8 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
         s.run(MULTI_ACTION_BAR_STAND_INS)
             .expect("the multibar stand-ins");
     }
-    // **Our options window's Graphics rows read the REFERENCE's slider table, at OnLoad**
-    // (decision 2177): `OptionsFrameSliders[1..3]` are the bounds those three rows are built with,
-    // and they come from `Interface\FrameXML\OptionsFrame.lua` — which the shipped manifest loads
-    // as part of the stock VIDEO window, one seat above ours. A kit that seats our file alone has
-    // to bring it too, and brings the reference's own file rather than a transcription of the
-    // three rows: a stand-in here would be a second copy of numbers whose whole point is that
-    // they are no longer ours. Seated BEFORE the load, for the same reason MultiActionBars is:
-    // the rows index it from inside this very load walk.
+    // Our options window's Graphics rows read stock `OptionsFrameSliders` (`OptionsFrame.lua`) at
+    // OnLoad; the core loads it before the layer, so a kit seats it before our file.
     if path
         .rsplit('/')
         .next()
@@ -177,8 +132,15 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
         s.run(MICRO_BUTTON_STAND_INS)
             .expect("the micro-button stand-ins");
     }
-    if leaf.eq_ignore_ascii_case("UIParent.xml") && super::reference_ui::is_chain_entry(&path) {
+    // The stock GameMenuFrame.xml sources UIParent.lua again, which drops the stand-ins' wrappers.
+    if (leaf.eq_ignore_ascii_case("UIParent.xml") || leaf.eq_ignore_ascii_case("GameMenuFrame.xml"))
+        && super::reference_ui::is_chain_entry(&path)
+    {
         s.run(UIPARENT_STAND_INS).expect("the UIParent stand-ins");
+    }
+    if leaf.eq_ignore_ascii_case("GameMenuFrame.xml") && super::reference_ui::is_chain_entry(&path)
+    {
+        s.run(GAME_MENU_STAND_INS).expect("the game menu stand-ins");
     }
     if leaf.eq_ignore_ascii_case("UIOptionsFrame.xml") {
         s.run(UIOPTIONS_STAND_INS)
@@ -206,32 +168,124 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
     report.frames
 }
 
-/// **What a kit owes the stock micro-button row.** `UpdateMicroButtons`
-/// (`MainMenuBarMicroButtons.lua:20-84`) reads ten panels, `KeyRingButton` and `IsBagOpen`
-/// UNGUARDED — the reference's own contract, because in the client every one of them is up
-/// before anything can be shown. A kit is a prefix of the manifest and stops wherever its window
-/// does, so [`load_entry`] wraps the function the moment the row loads: on its FIRST call — a
-/// panel's OnShow, by which time the kit is complete — the wrapper seats a hidden, unnamed
-/// stand-in under each name the kit never declared (a hidden frame is what a closed panel
-/// answers), then runs the reference's own body. First use rather than load time, and unnamed,
-/// because both registries keep the first writer: the arena's name map
-/// (`named_registry_is_non_overwriting`) and `_G` itself — a named frame is published
-/// non-overwriting (`0x701bd0`: a `lua_gettable` nil check on GLOBALSINDEX, which is why a
-/// metatable fallback would block the real publish just the same). A stand-in seated before the
-/// real declaration shadows the real frame for good; the first cut did exactly that, 126
-/// failures, every tabbed panel's `numTabs` read off the stand-in. `fire_chat_login`'s
-/// `UIOptionsFrame` stand-in is the same move for the chat files. Seated here rather than at the
-/// kits' seventy-odd consumers because the dependency is the row's, not any one window's — and
-/// the shipped manifest never needs it. `tests/common/mod.rs` carries the same chunk for the
-/// integration tests, which cannot reach this module (decision 1987).
-/// **What a kit owes the stock `UIParent.xml`.** Its `<OnUpdate>` calls `FCF_OnUpdate`,
-/// `UnitPopup_OnUpdate` and `BattlefieldFrame_OnUpdate` unguarded (the chat, unit-menu and
-/// battlefield files, far below it in the manifest), `UIParent_OnEvent`'s `PLAYER_ENTERING_WORLD`
-/// arm calls `MultiActionBar_Update`, and `ShowUIPanel` calls `CloseAllBags` (the container file's).
-/// A kit that stops short of those files would raise on its first tick or first shown panel, so
-/// [`load_entry`] seats a no-op stand-in under each name the moment the stock file loads. Unlike
-/// the micro row's frames these are FUNCTIONS: a later chunk's `function X()` overwrites a global
-/// outright, so seating at load is safe and the kit's order does not matter (decision 1988).
+/// Where `entry` falls in the production load, for [`follow_production_order`]: a `FrameXML.toc`
+/// row at its row, a file a row pulls in (`<Include>` or `<Script file=>`, at any depth) just
+/// above the first row that does, a layer file after every row in `layer.toc`'s order, and `None`
+/// for anything else (a fixture, an on-demand addon's file). Read off the player's own toc.
+pub(super) fn production_rank(entry: &str) -> Option<usize> {
+    static RANKS: std::sync::OnceLock<std::collections::HashMap<String, usize>> =
+        std::sync::OnceLock::new();
+    let ranks = RANKS.get_or_init(|| {
+        let key = |path: &str| path.replace('/', "\\").to_ascii_lowercase();
+        let mut ranks = std::collections::HashMap::new();
+        let rows = super::reference_ui::core()
+            .map(|core| core.toc.files)
+            .unwrap_or_default();
+        for (i, row) in rows.iter().enumerate() {
+            ranks.insert(key(row), 2 * i + 1);
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let mut queue = vec![row.clone()];
+            while let Some(file) = queue.pop() {
+                let Some(bytes) = super::reference_ui::read(&file) else {
+                    continue;
+                };
+                let text = String::from_utf8_lossy(&bytes);
+                for chunk in text.split('<').skip(1) {
+                    let tag = chunk.split('>').next().unwrap_or("").trim_start();
+                    if !tag.starts_with("Include") && !tag.starts_with("Script") {
+                        continue;
+                    }
+                    let Some(name) = tag
+                        .split("file=\"")
+                        .nth(1)
+                        .and_then(|r| r.split('"').next())
+                    else {
+                        continue;
+                    };
+                    let path = format!(r"Interface\FrameXML\{name}");
+                    if let std::collections::hash_map::Entry::Vacant(slot) = ranks.entry(key(&path))
+                    {
+                        slot.insert(2 * i);
+                        queue.push(path);
+                    }
+                }
+            }
+        }
+        let after = 2 * rows.len() + 2;
+        for (j, file) in super::addons::Addon::layer().toc.files.iter().enumerate() {
+            ranks.insert(key(file), after + j);
+        }
+        ranks
+    });
+    ranks
+        .get(&entry.replace('/', "\\").to_ascii_lowercase())
+        .copied()
+}
+
+/// A kit's files in the production order ([`production_rank`]): the lists merged, each file once,
+/// and a file with no rank (a fixture) kept behind the file listed before it.
+pub(crate) fn production_order<'a>(parts: &[&[&'a str]]) -> Vec<&'a str> {
+    let mut seen = std::collections::HashSet::new();
+    let mut keyed = Vec::new();
+    let mut last = 0;
+    for (i, file) in parts.iter().flat_map(|p| p.iter()).enumerate() {
+        if !seen.insert(file.replace('/', "\\").to_ascii_lowercase()) {
+            continue;
+        }
+        last = production_rank(file).unwrap_or(last);
+        keyed.push((last, i, *file));
+    }
+    keyed.sort_by_key(|&(rank, i, _)| (rank, i));
+    keyed.into_iter().map(|(_, _, file)| file).collect()
+}
+
+/// Loads `parts` in the production order ([`production_order`]) and returns the frames `counted`
+/// built.
+pub(crate) fn load_kit_counting(s: &UiScript, parts: &[&[&str]], counted: &str) -> usize {
+    let mut built = 0;
+    for file in production_order(parts) {
+        let frames = load_ui(s, file);
+        if file == counted {
+            built = frames;
+        }
+    }
+    built
+}
+
+thread_local! {
+    /// Per VM session, the furthest [`production_rank`] a kit has loaded and the file at it.
+    static KIT_AT: std::cell::RefCell<std::collections::HashMap<u64, (usize, String)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Panics when `entry` loads after a file the production load runs after it: a kit is a
+/// subsequence of the production load, `FrameXML.toc`'s order then `layer.toc`'s, so a test sees
+/// the order effects the player does (event dispatch, child and draw order, which definition
+/// wins).
+fn follow_production_order(s: &UiScript, entry: &str) {
+    let Some(rank) = production_rank(entry) else {
+        return;
+    };
+    KIT_AT.with(|at| {
+        let mut at = at.borrow_mut();
+        if let Some((furthest, file)) = at.get(&s.session()) {
+            assert!(
+                rank >= *furthest,
+                "{entry} loads after {file}, but the production load runs it first: a kit \
+                 follows FrameXML.toc's order, then layer.toc's"
+            );
+            if rank == *furthest {
+                return;
+            }
+        }
+        at.insert(s.session(), (rank, entry.to_string()));
+    });
+}
+
+/// What a kit owes stock `UIParent.xml`: no-op stand-ins, seated when it loads, for what its
+/// `<OnUpdate>`, `UIParent_OnEvent` and `ShowUIPanel` call from files a kit may stop short of. A
+/// `function X()` is a plain global write, so the real definition replaces a stand-in in any order.
 pub(super) const UIPARENT_STAND_INS: &str = r#"
     -- Callees of the stock UIParent.xml's <OnUpdate> and of UIParent_OnEvent's arms that live in
     -- files a kit may stop short of, plus the bag verbs the stock ShowUIPanel calls and the two
@@ -247,7 +301,7 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
     LocalizeFrames = LocalizeFrames or function() end
     updateContainerFrameAnchors = updateContainerFrameAnchors or function() end
     -- 1.12 keeps UpdateNameplates in UIOptionsFrame.lua, which a kit reaches only at manifest
-    -- l.21; our own OptionsFrame.xml re-declares it below that (decision 2132). Both are plain
+    -- l.21; our own OptionsFrame.xml re-declares it below that. Both are plain
     -- `function X()` writes, so a full kit ends on ours and a short one keeps this no-op.
     UpdateNameplates = UpdateNameplates or function() end
     CloseAllBags = CloseAllBags or function() end
@@ -294,9 +348,9 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
             -- …and every row's ANCHOR TARGET (`anchorTo`, l.1668), which is a different set: the
             -- keys are the frames being MOVED, the targets are what they move relative to, and
             -- several targets (`ActionButton1`, `MainMenuBarArtFrame`) are declared in files a
-            -- one-window kit never loads. An unresolvable name is a RAISE now (decision 2176), so
-            -- a target the kit is missing aborts `UIParent_ManageFramePositions` mid-pass where it
-            -- used to anchor to the parent and carry on.
+            -- one-window kit never loads. An unresolvable name is a RAISE, so a target the kit is
+            -- missing aborts `UIParent_ManageFramePositions` mid-pass rather than anchoring to
+            -- the parent and carrying on.
             if row.anchorTo then table.insert(named, row.anchorTo) end
         end
         benilla_seat(named)
@@ -308,10 +362,10 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
     -- The four options/menu windows `IsOptionFrameOpen` (l.997) and `ToggleGameMenu` (l.1467)
     -- index unguarded. `IsOptionFrameOpen` is on the path of every window close, so a kit that
     -- loads no options window raised on the first bag click. In the shipped manifest all four
-    -- names are real, and since 2177 all three options windows are the REFERENCE's own files,
+    -- names are real, and all three options windows are the REFERENCE's own files,
     -- loaded hidden — including `OptionsFrame`, the video window, which used to be our own
     -- window's name. Ours is `BenillaOptionsFrame` now and is not in this list: it is not a name
-    -- the reference indexes, and the wrappers in `GameMenuFrame.xml` are what tell these two
+    -- the reference indexes, and the wrappers in `GameMenuAdapters.xml` are what tell these two
     -- functions about it. A KIT is a prefix of the manifest and may load none of the four, which
     -- is what these stand-ins are for.
     local function benilla_seat_options()
@@ -333,32 +387,18 @@ pub(super) const UIPARENT_STAND_INS: &str = r#"
     end
 "#;
 
-/// **What a kit owes the stock `MultiActionBars.xml`.** Its `MultiActionBarFrame_OnLoad`
-/// (`MultiActionBars.lua:10`, under the reference's own comment *"Hack to get around load order
-/// dependencies"*) writes five rows into `UIOptionsFrameCheckButtons` — a table whose home is
-/// `UIOptionsFrame.xml`, which the reference's toc seats at l.21, eighteen rows above this one.
-/// The shipped manifest has that order (decision 2115) and needs nothing here; a KIT is a prefix
-/// of the manifest and dozens of them load the bars without any options window.
-///
-/// `or {}` rather than a fresh table, and seated at load rather than on first use, for the reason
-/// 1988 gives: a table, like a function, is a plain global write, so a real declaration that lands
-/// afterwards simply wins — and in manifest order it never lands afterwards, which is exactly what
-/// the shipped `UIOptionsFrameCheckButtons` order proof asserts. A kit that loads both in manifest
-/// order therefore gets the real table with the bars' five rows in it, which is the client's own
-/// state.
-/// **What a kit owes the stock `UIOptionsFrame.xml`.** Its `UIOptionsFrame_OnEvent`'s
-/// VARIABLES_LOADED arm (`UIOptionsFrame.lua` l.193-227) is the reference's own load-time ladder —
-/// the one decision 2115 retired our re-expression of — and it calls six functions unguarded:
-/// `BuffButtons_UpdatePositions`, `FCF_Set_SimpleChat`, `FCF_Set_ChatLocked`,
-/// `SetChatMouseOverDelay`, `MultiActionBar_ShowAllGrids` and
-/// `RaidOptionsFrame_UpdatePartyFrames`. In the shipped manifest that is fine twice over: the
-/// buff bar loads far above this row, the chat and raid files far below it, and the event does not
-/// fire until every one of them has loaded. A KIT is a prefix of the manifest and fires the event
-/// itself, so it needs the names to exist.
-///
-/// Functions, so load-time seating is safe and the kit's order does not matter: a later chunk's
-/// `function X()` is a plain global write that overwrites the stand-in, unlike a frame's
-/// non-overwriting publish (1988's reasoning, and its precedent).
+/// What a kit owes stock `GameMenuFrame.xml`: its OnShow and OnHide (`GameMenuFrame.xml:188-195`)
+/// call the micro-button and bag-bar verbs unguarded, from files a kit may stop short of. Plain
+/// global writes, so the real definitions replace them in any order.
+pub(super) const GAME_MENU_STAND_INS: &str = r#"
+    UpdateMicroButtons = UpdateMicroButtons or function() end
+    Disable_BagButtons = Disable_BagButtons or function() end
+    Enable_BagButtons = Enable_BagButtons or function() end
+"#;
+
+/// What a kit owes stock `UIOptionsFrame.xml`: its `VARIABLES_LOADED` arm
+/// (`UIOptionsFrame.lua:193-227`) calls six functions from files a kit may not load, and a kit
+/// fires the event itself. Functions, so seating them at load is safe in any order.
 pub(super) const UIOPTIONS_STAND_INS: &str = r#"
     BuffButtons_UpdatePositions = BuffButtons_UpdatePositions or function() end
     FCF_Set_SimpleChat = FCF_Set_SimpleChat or function() end
@@ -373,13 +413,16 @@ pub(super) const UIOPTIONS_STAND_INS: &str = r#"
     UpdatePartyMemberBackground = UpdatePartyMemberBackground or function() end
 "#;
 
+/// What a kit owes stock `MultiActionBars.xml`: its OnLoad (`MultiActionBars.lua:10`) writes five
+/// rows into `UIOptionsFrameCheckButtons`, which `UIOptionsFrame.xml` declares eighteen toc rows
+/// earlier; `or {}` keeps the real table when that file loaded first.
 pub(super) const MULTI_ACTION_BAR_STAND_INS: &str = r#"
     UIOptionsFrameCheckButtons = UIOptionsFrameCheckButtons or {}
     -- The five ROWS it writes into, not just the table: the reference's hack assigns
     -- `UIOptionsFrameCheckButtons["SHOW_MULTIBAR1_TEXT"].setFunc`, which needs the row to exist.
     -- Empty rows on purpose — the real ones carry `index = 33..36, 40`, and a stand-in that
     -- restated those numbers would be a transcription of the reference's table in a test helper,
-    -- which is the thing 2115 deleted from `OptionsFrame.xml`. Any kit that reads an index has the
+    -- which `OptionsFrame.xml` does not carry either. Any kit that reads an index has the
     -- real window loaded and therefore the real table.
     for _, key in ipairs({ "SHOW_MULTIBAR1_TEXT", "SHOW_MULTIBAR2_TEXT", "SHOW_MULTIBAR3_TEXT",
                            "SHOW_MULTIBAR4_TEXT", "ALWAYS_SHOW_MULTIBARS_TEXT" }) do
@@ -387,6 +430,11 @@ pub(super) const MULTI_ACTION_BAR_STAND_INS: &str = r#"
     end
 "#;
 
+/// What a kit owes the stock micro-button row: `UpdateMicroButtons`
+/// (`MainMenuBarMicroButtons.lua:20-84`) reads ten panels, `KeyRingButton` and `IsBagOpen`
+/// unguarded. Hidden, unnamed stand-ins are seated on its first call, not at load: a named frame's
+/// publish never overwrites (`0x701bd0`), so an early one would shadow the real frame.
+/// `tests/common/mod.rs` carries the same chunk.
 pub(super) const MICRO_BUTTON_STAND_INS: &str = r#"
     local real = UpdateMicroButtons
     function UpdateMicroButtons()
@@ -402,9 +450,8 @@ pub(super) const MICRO_BUTTON_STAND_INS: &str = r#"
     end
 "#;
 
-/// One file's bytes, from whichever store its path names — the chain for a path, this crate's
-/// `assets/ui` for a bare name. Also the `<Include>` / `<Script file=>` provider, which is why it
-/// takes an already-resolved path in either space.
+/// One file's bytes, off the chain for a path or from this crate's `assets/ui` for a bare name;
+/// also the loader's `<Include>`/`<Script file=>` provider.
 pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     if super::reference_ui::is_chain_entry(req) {
         return super::reference_ui::read(req);
@@ -413,281 +460,179 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     std::fs::read(dir.join(req)).ok()
 }
 
-/// The files a test needs before it can open a bag window, in manifest order: the four templates
-/// stock `ContainerFrame.xml` inherits, then the reference's own file, then our bag bar.
-///
-/// Named as a list rather than folded into a `setup()` because the callers all want to add their
-/// own files around it (a merchant, the bank, the action bar art), and the ORDER is the thing
-/// being reused — it is `benilla.toc`'s, trimmed to what the bags actually reach for.
-/// What the **loot window** needs before `Interface\FrameXML\LootFrame.xml` will load and behave —
-/// the same shape as [`BAG_UI`], for the same reason, and it grew for 1751 exactly as that one did.
-///
-/// Three of these are load-bearing in a way that is invisible if you leave them out:
-///
-/// * **`GlobalStrings.lua`** — the stock file concatenates `GROUP` and `GIVE_LOOT` while building
-///   the master-loot menu. The app loads the player's own copy ahead of the whole manifest at VM
-///   setup; a bare `UiScript::new()` does not. Our deleted `LootFrame.xml` carried
-///   `X = X or "…"` fallbacks for precisely these; the stock file carries none.
-/// * **`ItemButtonTemplate.xml`** — stock `LootButtonTemplate` inherits it, and a missing template
-///   is a loader *warning*, not an error. Leave it out and every row loads clean with no art and
-///   no `$parentIconTexture`, which reads as a pass until an assertion looks for an icon.
-/// * **`PartyFrame.xml`** — for `MAX_PARTY_MEMBERS`, which stock `LootFrame.lua:217` does
-///   arithmetic on at LOAD time, not at click time. Its home is the reference's own
-///   (`PartyMemberFrame.lua:1`), and it wants the dropdown kit and `UnitPopup` ahead of it — the
-///   manifest's order (167 → 185 → 262), reproduced rather than short-circuited. Setting the
-///   constant by hand would pass and teach nothing about the real load.
-///
-/// Needs client data, like [`BAG_UI`]: open with `benilla_formats::wow_data_or_skip!()`.
-/// What the **vendor window** needs before `Interface\FrameXML\MerchantFrame.xml` will load and
-/// behave — the same shape as [`BAG_UI`] and [`LOOT_UI`], and it grew for 1751 the same way.
-///
-/// The two that fail in the ways worth naming:
-///
-/// * **`BasicControls.xml`** — for `TEXT()`, the reference's identity-function wrapper, which
-///   stock `MerchantFrame.lua:70` calls while building every row. Absent, it raises on the first
-///   `MerchantFrame_UpdateMerchantInfo`, which is the first thing the window does when it shows.
-/// * **`Interface\FrameXML\ItemButtonTemplate.xml`** — the stock rows' `$parentItemButton`
-///   inherits it, and a missing template is a loader *warning*: the rows load clean with no art.
-///
-/// Needs client data: open with `benilla_formats::wow_data_or_skip!()`.
+/// What stock `MerchantFrame.xml` needs to load and behave, including `BasicControls.xml` for the
+/// `TEXT()` that `MerchantFrame.lua:70` calls on first show and `ItemButtonTemplate.xml`, whose
+/// absence only warns. Needs client data: open with `benilla_formats::wow_data_or_skip!()`.
 pub(super) const MERCHANT_UI: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\BasicControls.xml", // TEXT()
-    "Interface\\FrameXML\\ItemButtonTemplate.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    r"Interface\FrameXML\UIParent.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    r"Interface\FrameXML\UIParent.xml",
+    "Interface\\FrameXML\\GameTooltip.xml", // app load order: tooltip before merchant
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
-    // The reference's own window tab (`CharacterFrameTabButtonTemplate`), whose `<OnShow>`
-    // fits each tab to its text — it needs the `UIPanelTemplates` pair above it (1993).
+    // The stock window tab, whose `<OnShow>` needs the `UIPanelTemplates` pair above it.
     r"Interface\FrameXML\CharacterFrameTemplates.xml",
-    "ScrollTemplates.xml",
-    "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\StaticPopup.xml",
-    "Interface\\FrameXML\\GameTooltip.xml", // app load order: tooltip before merchant
+    "Interface\\FrameXML\\ItemButtonTemplate.xml",
+    "ScrollTemplates.xml",
 ];
 
-/// The stock gossip window's dependencies in `benilla.toc` order — the list
-/// `panel_tests::shipped_gossip_frame_drives_end_to_end` and its siblings load by hand, shared so
-/// a feed-level test in `ui_gossip` can drive the reference's own `GossipFrame.xml` (1751).
-/// `UIParent.xml` brings the slot manager (`ShowUIPanel`/`HideUIPanel`) the window's OnEvent
-/// calls; `ScrollTemplates.xml` is our scroll kit the greeting pane inherits — a missing template
-/// is a loader *warning*, so an under-loaded list passes and silently loses the scrollbar.
-///
-/// Needs client data: open with `benilla_formats::wow_data_or_skip!()`.
+/// Stock `GossipFrame.xml`'s dependencies in the production order, shared with `ui_gossip`'s feed
+/// tests. The greeting pane inherits `UIPanelScrollFrameTemplate`, and a missing template only
+/// warns, losing the scrollbar silently. Needs client data.
 pub(crate) const GOSSIP_UI: &[&str] = &[
-    r"Interface\FrameXML\MoneyFrame.lua",
-    r"Interface\FrameXML\MoneyFrame.xml",
-    r"Interface\FrameXML\UIParent.xml",
-    "ScrollTemplates.xml",
-    r"Interface\FrameXML\UIPanelTemplates.lua",
-    r"Interface\FrameXML\UIPanelTemplates.xml",
     r"Interface\FrameXML\GlobalStrings.lua",
     r"Interface\FrameXML\BasicControls.xml",
     r"Interface\FrameXML\LocaleProperties.lua",
+    r"Interface\FrameXML\UIParent.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     r"Interface\FrameXML\StaticPopup.xml",
+    "ScrollTemplates.xml",
 ];
 
+/// What stock `LootFrame.xml` needs to load and behave. `GlobalStrings.lua` because a bare VM
+/// lacks what the app loads at setup (the master-loot menu reads `GROUP` and `GIVE_LOOT`),
+/// `ItemButtonTemplate.xml` because a missing template only warns, and `PartyFrame.xml` because
+/// `LootFrame.lua:217` reads `MAX_PARTY_MEMBERS` at load. Needs client data.
 pub(super) const LOOT_UI: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\Fonts.xml",
-    "Interface\\FrameXML\\ItemButtonTemplate.xml",
+    "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    r"Interface\FrameXML\UIParent.xml", // UIParent.lua: the panel slot manager and the fades
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    r"Interface\FrameXML\UIParent.xml", // UIParent + UIParent.lua (the slot manager, the fades; 1988)
-    r"Interface\FrameXML\UIPanelTemplates.lua",
-    r"Interface\FrameXML\UIPanelTemplates.xml",
-    "Interface\\FrameXML\\LocaleProperties.lua",
-    "Interface\\FrameXML\\BasicControls.xml",
-    "Interface\\FrameXML\\StaticPopup.xml",
     "Interface\\FrameXML\\GameTooltip.xml", // TOOLTIP_DEFAULT_COLOR, read by the dropdown backdrop
     "Interface\\FrameXML\\UIDropDownMenu.xml", // GroupLootDropDown's OnLoad calls UIDropDownMenu_Initialize
-    // `UnitPopup.xml` reads ITEM_QUALITY_COLORS at FILE SCOPE for its three loot-threshold rows,
-    // exactly as the reference's own UnitPopup.lua:47-49 does — so its declarer has to precede it.
-    // That declarer is UIParent (ref UIParent.lua:65); 1888 moved the table there when Fonts.xml
-    // went on the chain, because the reference's Fonts.xml does not declare it.
-    "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
-    "Interface\\FrameXML\\UnitPopup.xml",
-    // …and what its rows' OnLoad calls: every `PartyMemberFrame<N>` and its pet frame runs
-    // `UnitFrame_Initialize`, which lives in UnitFrame.lua and itself calls
-    // `SetTextStatusBarText` out of TextStatusBar.lua. Naming PartyFrame without these loads
-    // four rows that each raise on their own OnLoad — the loader reports it, but only because
-    // `load_ui_strict` looks; a plain load would have gone quiet.
-    "Interface\\FrameXML\\TextStatusBar.lua",
-    "Interface\\FrameXML\\TextStatusBar.xml",
-    "Interface\\FrameXML\\UnitFrame.xml",
-    // …and `RefreshBuffs`, which `PartyMemberFrame.lua:60` calls from each row's OnLoad. Its home
-    // is BuffFrame.lua, which the chain's BuffFrame.xml sources — the reference's own toc has
-    // BuffFrame at 40 and PartyFrame at 45 for exactly this reason.
-    "Interface\\FrameXML\\BuffFrame.xml",
-    "Interface\\FrameXML\\PartyFrame.xml",
-];
-
-/// What the **character window** needs before `Interface\FrameXML\CharacterFrame.xml`,
-/// `PaperDollFrame.xml` and `PetPaperDollFrame.xml` will load and behave — the same shape as
-/// [`BAG_UI`] / [`LOOT_UI`] / [`MERCHANT_UI`], and grown the same way (decision 1751).
-///
-/// This one is the longest of the four, and the reason is `CharacterFrame_OnLoad`: it is the only
-/// migrated window whose LOAD-time body reaches outside its own file, and it reaches into four
-/// others at once —
-///
-/// * **`Interface\FrameXML\TextStatusBar.lua`** for `SetTextStatusBarTextPrefix`, which it calls
-///   three times before doing anything else. Its `.xml` twin comes too, because the pet page's XP
-///   bar inherits the `TextStatusBar` template it declares and a missing template is a loader
-///   *warning* — the bar would load with no art and no text region and read as a pass.
-/// * **`Interface\FrameXML\PlayerFrame.xml`** for `PlayerFrameHealthBar` / `PlayerFrameManaBar`,
-///   the frames those three calls name, and **`PetFrame.xml`** for `PetFrameHealthBar` /
-///   `PetFrameManaBar`, which `CharacterFrame_OnShow` shows the text on. Both call
-///   `UnitFrame_Initialize` in their OnLoad and `PlayerFrame` also calls `CombatFeedback_Initialize`,
-///   so `UnitFrame.xml` and `CombatFeedback.xml` come first — the reference's own toc order.
-///   (This entry used to be our one `UnitFrames.xml`, and this note used to say "when they are
-///   migrated, this becomes the stock pair". They are; it did.)
-/// * **`Interface\FrameXML\MainMenuBar.xml`** for `MainMenuExpBar` — the third bar of that prefix call — and for
-///   `ShowWatchedReputationBarText` / `HideWatchedReputationBarText`, which the window's
-///   show/hide pair calls.
-/// * **`UIPanelTemplates.xml`** for `PanelTemplates_SetNumTabs`/`_SetTab`, the last two lines of
-///   that same OnLoad.
-///
-/// And two more that only bite later, which is exactly why they are written down:
-///
-/// * **`Interface\FrameXML\HonorFrame.xml`** — `PaperDollFrame_SetLevel` and `_SetGuild` write
-///   `HonorLevelText` and `HonorGuildText` "while we're at it" (`PaperDollFrame.lua:100`/`:120`).
-///   Nothing touches them at load, so leaving this out loads clean and then raises the first time
-///   the window is SHOWN. It sits below the character block in the manifest for the same reason.
-/// * **`MainMenuBarMicroButtons.xml`** — `UpdateMicroButtons` (called by both
-///   `CharacterFrame_OnShow` and `_OnHide`) and `MicroButtonTooltipText` (all five tab hovers).
-///   A tab hover is the only thing that reaches the second one, so its absence is invisible
-///   until a test hovers a tab. The reference's own file since 1987; the panels its
-///   `UpdateMicroButtons` reads unguarded and this kit stops short of are
-///   [`MICRO_BUTTON_STAND_INS`]'s.
-///
-/// Needs client data, like its three siblings: open with `benilla_formats::wow_data_or_skip!()`.
-pub(super) const CHARACTER_UI: &[&str] = &[
-    // The reference's own localized strings. The stock file has no `X = X or "…"` fallbacks —
-    // `PaperDollFrame_OnLoad` sets seven labels from them at LOAD, and `PaperDollFrame_SetStats`
-    // concatenates `SPELL_STAT0_NAME`..`4` on every repaint.
-    "Interface\\FrameXML\\GlobalStrings.lua",
-    "Interface\\FrameXML\\Fonts.xml",
-    // `GetText` — the reference's gendered-string helper, which stock
-    // `ReputationFrame.lua:65` calls for every row's standing label. Manifest line 94
-    // (1875).
-    r"Interface\FrameXML\LocaleProperties.lua",
-    "Interface\\FrameXML\\BasicControls.xml", // TEXT(), which every one of those label sets goes through
-    "Interface\\FrameXML\\ItemButtonTemplate.xml", // PaperDollItemSlotButtonTemplate's base
-    r"Interface\FrameXML\MoneyFrame.lua",
-    r"Interface\FrameXML\MoneyFrame.xml",
-    r"Interface\FrameXML\UIParent.xml", // Model_OnLoad/_Rotate*/_OnUpdate — the model panes' turntable
-    "Interface\\FrameXML\\GameTooltip.xml",
-    "Interface\\FrameXML\\Cooldown.xml", // CooldownFrameTemplate + CooldownFrame_SetTimer, per equipment slot
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\StaticPopup.xml",
-    // The unit frames' four right-click dropdowns call `UIDropDownMenu_Initialize` at LOAD, so the
-    // kit and the menu table it initialises from both precede them — the manifest's own order
-    // (175 → 189 → 193 → 263).
-    "Interface\\FrameXML\\UIDropDownMenu.xml",
-    "Interface\\FrameXML\\UIMenu.xml",
-    "Interface\\FrameXML\\UnitPopup.xml",
+    // Each `PartyMemberFrame<N>` and its pet frame run `UnitFrame_Initialize` (UnitFrame.lua) at
+    // OnLoad, which calls `SetTextStatusBarText` (TextStatusBar.lua).
     "Interface\\FrameXML\\TextStatusBar.lua",
     "Interface\\FrameXML\\TextStatusBar.xml",
-    // `UnitFrame_Initialize` and `CombatFeedback_Initialize`, which the two windows below call in
-    // their OnLoad. Neither file declares a frame; both are pure script.
+    // `RefreshBuffs`, which each party row's OnLoad reaches (`PartyMemberFrame.lua:60`), is in
+    // BuffFrame.lua: the reference's toc has BuffFrame at 40 and PartyFrame at 45.
+    "Interface\\FrameXML\\BuffFrame.xml",
+    // `UnitPopup.lua` reads `ITEM_QUALITY_COLORS` at file scope (`UnitPopup.lua:47-49`), so its
+    // declarer, `UIParent.lua:65`, precedes it.
+    "Interface\\FrameXML\\UnitPopup.xml",
     "Interface\\FrameXML\\UnitFrame.xml",
-    "Interface\\FrameXML\\CombatFeedback.xml",
-    "Interface\\FrameXML\\PlayerFrame.xml",
-    // `PetFrame.xml`'s four `PetFrameBuff*` inherit `PartyBuffButtonTemplate`, which lives here.
-    // The manifest never names this file: it arrives through `PartyFrame.xml`'s
-    // `<Include file="PartyFrameTemplates.xml"/>`, and the reference's own toc puts PartyFrame (45)
-    // ahead of TargetFrame (46) and PetFrame (47) for exactly that reason. This kit wants the
-    // template and not four party member frames, so it takes the included file directly.
-    "Interface\\FrameXML\\PartyFrameTemplates.xml",
-    "Interface\\FrameXML\\PetFrame.xml",
-    "Interface\\FrameXML\\ActionButtonTemplate.xml",
-    "Interface\\FrameXML\\MainMenuBar.xml",
-    "Interface\\FrameXML\\ActionBarFrame.xml",
-    "Interface\\FrameXML\\BonusActionBarFrame.xml",
-    r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
-    // The two page files these three need before the window can be OPENED, which is not the same
-    // as before it can load: `CHARACTERFRAME_SUBFRAMES` lists all five pages by name and
-    // `CharacterFrame_ShowSubFrame` calls `getglobal(value):Hide()` on each one it is not showing
-    // (`CharacterFrame.lua:25-32`), unguarded. A missing page is `attempt to index a nil value` on
-    // the very first `ToggleCharacter` — load-clean, then dead on the first click. Their own
-    // template dependencies come with them.
-    "ScrollTemplates.xml", // SkillFrame's faux list + trough
+    "Interface\\FrameXML\\PartyFrame.xml",
+    "Interface\\FrameXML\\ItemButtonTemplate.xml",
+];
+
+/// What stock `CharacterFrame.xml`, `PaperDollFrame.xml` and `PetPaperDollFrame.xml` need to load
+/// and behave. `CharacterFrame_OnLoad` reaches `TextStatusBar.lua`, `PlayerFrame.xml`,
+/// `MainMenuBar.xml` (`MainMenuExpBar`) and the `UIPanelTemplates` pair; two bite only on show:
+/// `HonorFrame.xml`, whose labels `PaperDollFrame.lua:103` and `:122` write, and
+/// `MainMenuBarMicroButtons.xml` (`MicroButtonTooltipText` on a tab hover). Needs client data.
+pub(super) const CHARACTER_UI: &[&str] = &[
+    // The stock strings, which `PaperDollFrame_OnLoad` reads at load; there are no fallbacks.
+    "Interface\\FrameXML\\GlobalStrings.lua",
+    "Interface\\FrameXML\\Fonts.xml",
+    "Interface\\FrameXML\\BasicControls.xml", // TEXT(), which those labels go through
+    // `GetText`, the gendered-string helper `ReputationFrame.lua:65` calls for each standing.
+    r"Interface\FrameXML\LocaleProperties.lua",
+    r"Interface\FrameXML\UIParent.xml", // Model_OnLoad/_Rotate*/_OnUpdate: the model turntable
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
+    "Interface\\FrameXML\\GameTooltip.xml",
+    "Interface\\FrameXML\\UIMenu.xml",
+    // The unit frames' dropdowns call `UIDropDownMenu_Initialize` at load, so the kit and the menu
+    // table precede them.
+    "Interface\\FrameXML\\UIDropDownMenu.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
-    // The reference's own window tab (`CharacterFrameTabButtonTemplate`), whose `<OnShow>`
-    // fits each tab to its text — it needs the `UIPanelTemplates` pair above it (1993).
-    r"Interface\FrameXML\CharacterFrameTemplates.xml",
-    // The four options templates off the chain — ReputationFrame's detail check boxes inherit
-    // `OptionsCheckButtonTemplate`. Ours beside it is gone with 2115: its one template,
-    // `UIOptionsCheckButtonTemplate`, comes off the chain out of `UIOptionsFrame.xml` now.
+    // ReputationFrame's detail check boxes inherit its `OptionsCheckButtonTemplate`.
     "Interface\\FrameXML\\OptionsFrameTemplates.xml",
+    // The stock window tab, whose `<OnShow>` needs the `UIPanelTemplates` pair above it.
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
+    "Interface\\FrameXML\\StaticPopup.xml",
+    "Interface\\FrameXML\\TextStatusBar.lua",
+    "Interface\\FrameXML\\TextStatusBar.xml",
+    "Interface\\FrameXML\\MainMenuBar.xml",
+    r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+    "Interface\\FrameXML\\Cooldown.xml", // CooldownFrameTemplate + CooldownFrame_SetTimer, per equipment slot
+    "Interface\\FrameXML\\ActionButtonTemplate.xml",
+    "Interface\\FrameXML\\ActionBarFrame.xml",
+    "Interface\\FrameXML\\CombatFeedback.xml",
+    "Interface\\FrameXML\\UnitPopup.xml",
+    // `UnitFrame_Initialize` and `CombatFeedback_Initialize`, called by the frames below at load.
+    "Interface\\FrameXML\\UnitFrame.xml",
+    "Interface\\FrameXML\\PlayerFrame.xml",
+    // `PetFrame.xml`'s debuff buttons inherit `PartyBuffButtonTemplate`, declared here; the
+    // manifest reaches this file only through `PartyFrame.xml`'s `<Include>`.
+    "Interface\\FrameXML\\PartyFrameTemplates.xml",
+    "Interface\\FrameXML\\PetFrame.xml",
+    "Interface\\FrameXML\\ItemButtonTemplate.xml", // PaperDollItemSlotButtonTemplate's base
+    // Every page must exist before the window opens: `CharacterFrame_ShowSubFrame` hides each
+    // `CHARACTERFRAME_SUBFRAMES` page it is not showing, unguarded (`CharacterFrame.lua:25-32`).
     "Interface\\FrameXML\\CharacterFrame.xml",
     "Interface\\FrameXML\\PaperDollFrame.xml",
     "Interface\\FrameXML\\PetPaperDollFrame.xml",
-    // `updateContainerFrameAnchors` — `ReputationWatchBar_Update` hard-calls it when the bar
-    // moves (ReputationFrame.lua:248), because in the reference the bar's presence reflows the
-    // bag row. It comes with `ContainerFrame.xml`, manifest 585 against the pane's 693 (1875).
-    "Interface\\FrameXML\\ContainerFrame.xml",
-    r"Interface\FrameXML\ReputationFrame.xml",
     "Interface\\FrameXML\\SkillFrame.xml",
+    r"Interface\FrameXML\ReputationFrame.xml",
     "Interface\\FrameXML\\HonorFrame.xml",
+    // `updateContainerFrameAnchors`, which `ReputationWatchBar_Update` calls when the bar moves
+    // (`ReputationFrame.lua:248`): in the reference the bar's presence reflows the bag row.
+    "Interface\\FrameXML\\ContainerFrame.xml",
+    "Interface\\FrameXML\\BonusActionBarFrame.xml",
+    "ScrollTemplates.xml", // our scroll kit
 ];
 
-/// The social window's slice of the manifest (1959): everything the reference's
-/// `FriendsFrame.xml` + `RaidFrame.xml` reach at load or on show — `TEXT` and `GetText`, the
-/// bar chain under `UpdateMicroButtons`, the chat window whose edit box `FriendsFrame_SendMessage`
-/// opens, the unit menu, the party frames `RaidFrame_OnLoad` reconciles — in the manifest's own
-/// order; the raid tab's LoadOnDemand addon follows through [`load_social_ui`]. Shared by the
-/// friends, guild and raid harnesses.
+/// The manifest slice stock `FriendsFrame.xml` and `RaidFrame.xml` reach at load or on show, in its
+/// order; [`load_social_ui`] adds the raid tab's LoadOnDemand addon.
 pub(super) const SOCIAL_UI: &[&str] = &[
-    "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\GlobalStrings.lua",
-    "Interface\\FrameXML\\LocaleProperties.lua",
+    "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\BasicControls.xml",
+    "Interface\\FrameXML\\LocaleProperties.lua",
     r"Interface\FrameXML\UIParent.xml",
-    "Interface\\FrameXML\\Cooldown.xml",
-    "Interface\\FrameXML\\ActionButtonTemplate.xml",
-    "Interface\\FrameXML\\TextStatusBar.lua",
-    "Interface\\FrameXML\\TextStatusBar.xml",
-    "Interface\\FrameXML\\MainMenuBar.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
     "Interface\\FrameXML\\GameTooltip.xml",
-    "Interface\\FrameXML\\ActionBarFrame.xml",
-    "Interface\\FrameXML\\BonusActionBarFrame.xml",
-    "ScrollTemplates.xml",
+    "Interface\\FrameXML\\UIMenu.xml",
+    "Interface\\FrameXML\\UIDropDownMenu.xml",
     "Interface\\FrameXML\\UIPanelTemplates.lua",
     "Interface\\FrameXML\\UIPanelTemplates.xml",
-    // The reference's own window tab (`CharacterFrameTabButtonTemplate`), whose `<OnShow>`
-    // fits each tab to its text — it needs the `UIPanelTemplates` pair above it (1993).
-    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\OptionsFrameTemplates.xml",
-    "Interface\\FrameXML\\ReputationFrame.xml",
+    // The stock window tab, whose `<OnShow>` needs the `UIPanelTemplates` pair above it.
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     "Interface\\FrameXML\\StaticPopup.xml",
-    "Interface\\FrameXML\\UIDropDownMenu.xml",
-    "KeyBindingsPage.xml",
-    "OptionsFrame.xml",
-    "Interface\\FrameXML\\MultiActionBars.xml",
+    "Interface\\FrameXML\\TextStatusBar.lua",
+    "Interface\\FrameXML\\TextStatusBar.xml",
+    "Interface\\FrameXML\\MainMenuBar.xml",
     r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+    "Interface\\FrameXML\\Cooldown.xml",
+    "Interface\\FrameXML\\ActionButtonTemplate.xml",
+    "Interface\\FrameXML\\ActionBarFrame.xml",
+    "Interface\\FrameXML\\MultiActionBars.xml",
+    "Interface\\FrameXML\\BuffFrame.xml",
+    "Interface\\FrameXML\\CombatFeedback.xml",
     "Interface\\FrameXML\\UnitPopup.xml",
-    "Interface\\FrameXML\\UIMenu.xml",
+    "Interface\\FrameXML\\UnitFrame.xml",
+    "Interface\\FrameXML\\PartyFrame.xml",
     "Interface\\FrameXML\\ChatFrame.xml",
     "Interface\\FrameXML\\FloatingChatFrame.xml",
-    "Interface\\FrameXML\\BuffFrame.xml",
-    "Interface\\FrameXML\\UnitFrame.xml",
-    "Interface\\FrameXML\\CombatFeedback.xml",
-    "Interface\\FrameXML\\PartyFrame.xml",
+    "Interface\\FrameXML\\ReputationFrame.xml",
     "Interface\\FrameXML\\FriendsFrame.xml",
     "Interface\\FrameXML\\RaidFrame.xml",
+    "Interface\\FrameXML\\BonusActionBarFrame.xml",
+    "ScrollTemplates.xml",
+    "KeyBindingsPage.xml",
+    "OptionsFrame.xml",
 ];
 
-/// Load [`SOCIAL_UI`], then the raid tab's LoadOnDemand addon the way the app reaches it: seated
-/// off the chain as a registry row (1957) and loaded by the reference's own `RaidFrame_LoadUI`
-/// (UIParent.xml; 1967). Needs client data — the caller has checked with `wow_data_or_skip!`.
+/// Load [`SOCIAL_UI`], then the raid tab's LoadOnDemand addon as the app reaches it: seated off the
+/// chain and loaded by stock `RaidFrame_LoadUI`. Needs client data.
 pub(super) fn load_social_ui(s: &mut UiScript) {
     for f in SOCIAL_UI {
         load_ui_strict(s, f);
@@ -696,115 +641,77 @@ pub(super) fn load_social_ui(s: &mut UiScript) {
     s.run("RaidFrame_LoadUI()").unwrap();
 }
 
+/// The files a test needs before it can open a bag window, in the production order, trimmed to what
+/// the bags reach for. Needs client data: open with `benilla_formats::wow_data_or_skip!()`.
 pub(super) const BAG_UI: &[&str] = &[
-    // The reference's own localized strings — `BACKPACK_TOOLTIP`, `EQUIP_CONTAINER`, `KEYRING`,
-    // the `*_FONT_COLOR_CODE` pair. The app loads this at VM setup, ahead of the manifest
-    // (`ui_script/mod.rs`, `setup_script`); a test VM has to say so itself. Not optional since
-    // 1751's third window: stock `MainMenuBarBagButtons.lua`'s hovers pass these straight into
-    // `GameTooltip:SetText`, and `SetText(nil)` raises rather than showing an empty plate. Our
-    // deleted `BagFrame.xml` carried `X = X or "…"` fallbacks for exactly this gap; the real file
-    // is the better answer, and these tests already gate on the install.
+    // The stock strings: the bar's hovers pass them to `GameTooltip:SetText`, which raises on nil.
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\Fonts.xml",
-    // `TEXT()` — the reference's own identity-function wrapper, which stock
-    // `MainMenuBarBackpackButton`'s OnEnter calls (`GameTooltip:SetText(TEXT(BACKPACK_TOOLTIP)…)`)
-    // and `BagSlotButton_OnEnter` calls for `EQUIP_CONTAINER`. Manifest entry 3, and not optional
-    // for the bag bar since 1751's third window made that bar the reference's own.
+    // `TEXT()`, which the backpack button's OnEnter and `BagSlotButton_OnEnter` call.
     "Interface\\FrameXML\\BasicControls.xml",
-    // `UIParent` itself: the twelve `ContainerFrame`s declare `parent="UIParent"`, and
-    // `updateContainerFrameAnchors` anchors each open bag to `frame:GetParent()` while
-    // `OpenAllBags` opens with `if not UIParent:IsVisible() then return end`. Without it the
-    // windows fall out of the cascade and the reference's own layout pass has nothing to measure.
+    "Interface\\FrameXML\\LocaleProperties.lua",
+    // `UIParent`: the twelve `ContainerFrame`s are its children, `updateContainerFrameAnchors`
+    // anchors each open bag to its parent, and `OpenAllBags` returns unless `UIParent` is visible.
     r"Interface\FrameXML\UIParent.xml",
-    "ScrollTemplates.xml", // our scroll kit + the placeholder icon
-    "Interface\\FrameXML\\ItemButtonTemplate.xml",
     r"Interface\FrameXML\MoneyFrame.lua",
     r"Interface\FrameXML\MoneyFrame.xml",
-    "Interface\\FrameXML\\LocaleProperties.lua",
     "Interface\\FrameXML\\GameTooltip.xml",
-    "Interface\\FrameXML\\Cooldown.xml",
-    // The bag BAR declares `parent="MainMenuBarArtFrame"`, resolved at LOAD — so without this the
-    // six buttons fall back to UIParent and sit at a level no production run ever puts them at.
-    // It also carries `MainMenuBar_UpdateKeyRing`, which is what puts the keyring on the bar.
-    "Interface\\FrameXML\\ActionButtonTemplate.xml",
-    "Interface\\FrameXML\\TextStatusBar.lua",
-    "Interface\\FrameXML\\TextStatusBar.xml",
-    "Interface\\FrameXML\\MainMenuBar.xml",
-    "Interface\\FrameXML\\ActionBarFrame.xml",
-    "Interface\\FrameXML\\BonusActionBarFrame.xml",
-    // `UpdateMicroButtons` — the KEYRING's own OnShow/OnHide calls it (ContainerFrame.lua l.117,
-    // l.137), because in the reference the keyring's existence moves the micro-button row.
-    r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+    "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
+    "Interface\\FrameXML\\UIDropDownMenu.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
-    // The dialog engine, after the UIPanelCloseButton it inherits (1960).
+    // The dialog engine, after the `UIPanelCloseButton` it inherits.
     r"Interface\FrameXML\StaticPopup.xml",
-    "Interface\\FrameXML\\ContainerFrame.xml",
-    // `PaperDollItemSlotButtonTemplate` and the `PaperDollItemSlotButton_*` family behind it,
-    // which every bag button inherits and runs — resolved at load, so this has to precede the bar
-    // exactly as it does in the manifest. Stock `BagSlotButtonTemplate`'s OnLoad *is*
-    // `PaperDollItemSlotButton_OnLoad()`, which gives each bag button its inventory-slot id
-    // (20..23 via `GetInventorySlotInfo`), its six event registrations and its first paint.
-    //
-    // The whole paper-doll file, because that is where the reference declares both — our
-    // `ItemSlotButtonTemplates.xml` held a transcribed copy of the template only because our own
-    // character window loaded too late to declare it, and it is deleted (decision 1751). Its
-    // companion `Interface\\FrameXML\\CharacterFrame.xml` is deliberately NOT here: this list is
-    // the bags, `PaperDollFrame` only names `CharacterFrame` in `parent=` (a missing parent is a
-    // loader warning, not an error), and `CharacterFrame_OnLoad` would drag in the unit frames,
-    // the XP bar and the text-status-bar file for a window no bag test opens.
-    "Interface\\FrameXML\\PaperDollFrame.xml",
-    // The bag BAR itself, the reference's own since 1751's third window: MainMenuBarBackpackButton,
-    // CharacterBag0..3Slot, KeyRingButton, `BagSlotButtonTemplate`, and `KEYRING_CONTAINER`.
-    "Interface\\FrameXML\\MainMenuBarBagButtons.xml",
-    // `StackSplitFrame` is not optional either: the reference's own
-    // `ContainerFrameItemButton_OnClick` calls `StackSplitFrame:Hide()` on EVERY plain click
-    // (ContainerFrame.lua l.581) before the pickup, and opens it on the shift fork.
+    // `ContainerFrameItemButton_OnClick` hides `StackSplitFrame` on every plain click
+    // (`ContainerFrame.lua:581`) and opens it on the shift fork.
     "Interface\\FrameXML\\StackSplitFrame.xml",
-    // …nor is the chat edit box. The reference's SHIFT arm opens with
-    // `if ( ChatFrameEditBox:IsShown() )` (ContainerFrame.lua l.569) to decide between posting the
-    // item's link and splitting the stack, so a VM without it raises before either.
-    "Interface\\FrameXML\\UIMenu.xml", // the kit ChatMenu/EmoteMenu/VoiceMacroMenu build from
+    "Interface\\FrameXML\\TextStatusBar.lua",
+    "Interface\\FrameXML\\TextStatusBar.xml",
+    // `MainMenuBar.xml` and its templates: the bag bar's `parent="MainMenuBarArtFrame"` resolves
+    // at load, and `MainMenuBar_UpdateKeyRing` puts the keyring on the bar.
+    "Interface\\FrameXML\\MainMenuBar.xml",
+    // `UpdateMicroButtons`, which the keyring's OnHide and OnShow call
+    // (`ContainerFrame.lua:117`, `:137`).
+    r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+    "Interface\\FrameXML\\Cooldown.xml",
+    "Interface\\FrameXML\\ActionButtonTemplate.xml",
+    "Interface\\FrameXML\\ActionBarFrame.xml",
+    // The chat edit box: the shift arm tests `ChatFrameEditBox:IsShown()`
+    // (`ContainerFrame.lua:568`) to choose between linking the item and splitting the stack.
     "Interface\\FrameXML\\ChatFrame.xml",
-    "Interface\\FrameXML\\UIDropDownMenu.xml",
-    "Interface\\FrameXML\\UIPanelTemplates.lua",
-    "Interface\\FrameXML\\UIPanelTemplates.xml",
     "Interface\\FrameXML\\FloatingChatFrame.xml",
-    // Our adapters over the reference's container files — the keyring tooltip wrapper and the
-    // three bag verbs 0561 shadows (`OpenBackpack`/`CloseBackpack`/`CloseAllBags`). It has to be
-    // AFTER `ContainerFrame.xml` and after the bar, which is why it is here and not up with
-    // `UIParent.xml`.
-    "ContainerFrameAdapters.xml",
+    "Interface\\FrameXML\\ItemButtonTemplate.xml",
+    // `BagSlotButtonTemplate` inherits `PaperDollItemSlotButtonTemplate`, and its OnLoad
+    // (`PaperDollItemSlotButton_OnLoad`) gives each bag button its inventory-slot id, 20..23.
+    // `CharacterFrame.xml` stays out: a missing `parent=` only warns.
+    "Interface\\FrameXML\\PaperDollFrame.xml",
+    // The stock bag bar, with `BagSlotButtonTemplate` and `KEYRING_CONTAINER`.
+    "Interface\\FrameXML\\MainMenuBarBagButtons.xml",
+    "Interface\\FrameXML\\ContainerFrame.xml",
     // `updateContainerFrameAnchors` measures every open bag against `BankFrame:GetRight()`
-    // (ContainerFrame.lua l.505) on EVERY open and close, so the bank window is not optional
-    // scenery for a bag test — it is a hard dependency of the reference's own layout pass. It is
-    // one in the real client too; the manifest just satisfies it far below the bags. The
-    // reference's own file since 1751's second window.
+    // (`ContainerFrame.lua:505`) on every open and close, so the bank window is a hard dependency.
     "Interface\\FrameXML\\BankFrame.xml",
+    "Interface\\FrameXML\\BonusActionBarFrame.xml",
+    "ScrollTemplates.xml", // our scroll kit
+    // Our adapters over the stock container files, loaded after them and the bar so they win.
+    "ContainerFrameAdapters.xml",
 ];
 
-/// The name of the `ContainerFrame` currently showing bag `id`, or `None` if it is not open.
-///
-/// **Ask, never assume.** The reference recycles twelve windows across every container
-/// (`ContainerFrame_GetOpenFrame`), so which one a bag lands in depends on what else is open —
-/// there is no `BenillaBagFrame2` to name any more, and pinning `ContainerFrame3` in a test would
-/// pin a coincidence. `IsBagOpen` is the reference's own published scan.
+/// The name of the `ContainerFrame` showing bag `id`, asked of `IsBagOpen`: the reference recycles
+/// twelve windows across every container (`ContainerFrame_GetOpenFrame`).
 pub(super) fn bag_window(s: &UiScript, id: i64) -> Option<String> {
     s.eval::<Option<i64>>(&format!("return IsBagOpen({id})"))
         .unwrap()
         .map(|i| format!("ContainerFrame{i}"))
 }
 
-/// Is bag `id` open? [`bag_window`]'s predicate half.
+/// Is bag `id` open?
 pub(super) fn bag_open(s: &UiScript, id: i64) -> bool {
     bag_window(s, id).is_some()
 }
 
-/// The item button in bag `id`'s open window that holds game slot `slot`.
-///
-/// Asked of the buttons' own `GetID`, never derived: `ContainerFrame_GenerateFrame` numbers them
-/// backwards (`index = size - j + 1`, so `…Item1` is the bag's LAST slot, bottom-right), and a
-/// window generated for a different bag size numbers them differently.
+/// The item button in bag `id`'s open window that holds game slot `slot`, found by `GetID`:
+/// `ContainerFrame_GenerateFrame` numbers the buttons backwards (`index = size - j + 1`).
 pub(super) fn bag_slot_button(s: &UiScript, id: i64, slot: u32) -> String {
     let w = bag_window(s, id).unwrap_or_else(|| panic!("bag {id} is not open"));
     s.eval::<String>(&format!(
@@ -830,20 +737,14 @@ pub(super) fn centre_of(s: &mut UiScript, name: &str) -> (f32, f32) {
     (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0)
 }
 
-/// Move the mouse onto the centre of `name` — the whole engine path (hit test → `OnEnter`), never
-/// `s.run("Handler(button)")`.
-///
-/// **This is not a style preference any more.** The reference's own handlers read `this`
-/// (`ContainerFrameItemButton_OnClick(button, ignoreModifiers)` takes the MOUSE button as its first
-/// argument and gets the frame from `this`), and only the engine sets `this`. A migrated window's
-/// tests therefore drive the mouse, which is also the stronger test — it puts the
-/// `RegisterForClicks` gate and the template's own script wiring under test.
+/// Move the mouse onto the centre of `name` through the engine's hit test and `OnEnter`: stock
+/// handlers read `this`, which only the engine sets.
 pub(super) fn hover(s: &mut UiScript, name: &str) {
     let (x, y) = centre_of(s, name);
     s.mouse_move(x, y);
 }
 
-/// Move the mouse well clear of everything — the `OnLeave` half of [`hover`].
+/// Move the mouse well clear of everything: the `OnLeave` half of [`hover`].
 pub(super) fn unhover(s: &mut UiScript) {
     s.mouse_move(-500.0, -500.0);
 }
@@ -856,36 +757,16 @@ pub(super) fn click(s: &mut UiScript, name: &str, button: &str) {
     s.mouse_button(x, y, button, false);
 }
 
-/// Seat the world frame in a fixture, the way the manifest does — the file the world drop's
-/// click target comes from, plus the one its `OnUpdate` reads a constant out of.
-///
-/// `WorldFrame_OnUpdate` ticks the popups and breath bars that a hidden UI would otherwise
-/// freeze, and it walks `1, MIRRORTIMER_NUMTIMERS` to do it — a global whose home is
-/// `MirrorTimer.lua`, manifest entry 53. A harness that takes the world frame without it raises
-/// `'for' limit must be a number` on every tick. Loading the real file rather than setting the
-/// constant by hand is [`BAG_UI`]'s own rule (`PartyFrame.xml` is there for the same reason):
-/// a stubbed constant passes and teaches nothing about the real load.
-///
-/// `StaticPopup.xml` — the other name that loop reads — is already in every fixture that calls
-/// this, since the popup is what these tests are about.
-pub(super) fn load_world_frame(s: &UiScript) {
-    load_ui(s, r"Interface\FrameXML\WorldFrame.xml");
-    load_ui(s, r"Interface\FrameXML\MirrorTimer.xml");
-}
+/// Stock `WorldFrame.xml` and `MirrorTimer.xml`: `WorldFrame_OnUpdate` loops to
+/// `MIRRORTIMER_NUMTIMERS`, which `MirrorTimer.lua` declares, and raises every tick without it.
+/// Its other loop reads `STATICPOPUP_NUMDIALOGS`, which every caller already loads.
+pub(super) const WORLD_FRAME_UI: &[&str] = &[
+    r"Interface\FrameXML\WorldFrame.xml",
+    r"Interface\FrameXML\MirrorTimer.xml",
+];
 
-/// A completed left CLICK on the game world, at a point the loaded `WorldFrame` actually owns.
-///
-/// **The point is searched, not assumed, and that is the whole lesson of B380** (decision 2089).
-/// Every world-drop fixture in the house used to click `(-50, -50)` — off-screen, where the hit
-/// test answers nothing at all — which is a world click only in a house with no `WorldFrame`
-/// loaded. The stock file's frame is full-screen and mouse-enabled, so from the day it joined the
-/// manifest it took every real world click while those fixtures went on passing over the void.
-///
-/// The point cannot be a constant either, because a harness holds the windows its test needs and
-/// not the ones that would hide them — `bag_setup`'s `PaperDollFrame` has no `CharacterFrame` to
-/// sit inside, so it covers the middle of the screen. So: walk a coarse grid over the world
-/// frame's own rect and take the first cell it owns. When it owns none, panic naming what is
-/// there — a fixture with no world to click is one that would pass for the wrong reason.
+/// A completed left click on the game world, at a point the loaded `WorldFrame` owns: searched on
+/// a grid, since a harness's windows may cover any fixed point.
 pub(super) fn world_click(s: &mut UiScript) {
     let (x, y) = world_point(s);
     s.mouse_move(x, y);
@@ -896,7 +777,7 @@ pub(super) fn world_click(s: &mut UiScript) {
     );
 }
 
-/// [`world_click`]'s search. Separate so the failure can say what it looked at.
+/// [`world_click`]'s search.
 fn world_point(s: &mut UiScript) -> (f32, f32) {
     s.resolve();
     let r: Vec<f32> = s
@@ -906,7 +787,7 @@ fn world_point(s: &mut UiScript) -> (f32, f32) {
         )
         .expect(
             "the fixture must load Interface\\FrameXML\\WorldFrame.xml (load_world_frame): a \
-             world drop is a click on THAT frame, not on nothing (decision 2089)",
+             world drop is a click on THAT frame, not on nothing",
         );
     assert_eq!(r.len(), 4, "WorldFrame: unresolved rect {r:?}");
     let (steps, mut blockers) = (7, Vec::new());
@@ -929,9 +810,8 @@ fn world_point(s: &mut UiScript) -> (f32, f32) {
 }
 
 /// Seat one of the reference's LoadOnDemand Blizzard addons off the chain, so a harness's
-/// `UIParentLoadAddOn(name)` can load it the way the app does (1957; the combat text since
-/// 1964). Needs client data — the caller has already checked with `wow_data_or_skip!`.
-pub(super) fn seat_chain_addon(s: &mut UiScript, name: &str) {
+/// `UIParentLoadAddOn(name)` loads it as the app does. Needs client data.
+pub(crate) fn seat_chain_addon(s: &mut UiScript, name: &str) {
     let toc = super::reference_ui::read(&format!("Interface/AddOns/{name}/{name}.toc"))
         .map(|b| benilla_ui::toc::Toc::parse(&benilla_ui::source::decode(&b)))
         .unwrap_or_else(|| panic!("{name}: no toc off the chain"));
@@ -939,4 +819,52 @@ pub(super) fn seat_chain_addon(s: &mut UiScript, name: &str) {
     info.chain = true;
     s.set_addon_chain_reader(Box::new(super::reference_ui::read));
     s.register_addons(vec![info], None, None, None);
+}
+
+#[cfg(test)]
+mod tests {
+    use benilla_ui::script::UiScript;
+
+    /// A kit that loads a file after one the production load runs after it fails at that load.
+    #[test]
+    fn a_kit_out_of_the_production_order_fails_at_the_load() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let s = UiScript::new().unwrap();
+        super::load_ui(&s, r"Interface\FrameXML\Fonts.xml");
+        let late = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::load_ui(&s, r"Interface\FrameXML\GlobalStrings.lua")
+        }));
+        let message = late.expect_err("GlobalStrings.lua after Fonts.xml loaded");
+        let message = message
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            message.contains("the production load runs it first"),
+            "{message}"
+        );
+    }
+
+    /// The merged kit runs toc rows in the toc's order, a file a row includes just above it and a
+    /// layer file after them all, each once.
+    #[test]
+    fn a_merged_kit_takes_the_production_order() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        assert_eq!(
+            super::production_order(&[
+                &["ScrollTemplates.xml", r"Interface\FrameXML\UIParent.xml"],
+                &[
+                    r"Interface\FrameXML\LocaleProperties.lua",
+                    r"Interface\FrameXML\GlobalStrings.lua",
+                    r"Interface\FrameXML\UIParent.xml",
+                ],
+            ]),
+            [
+                r"Interface\FrameXML\GlobalStrings.lua",
+                r"Interface\FrameXML\LocaleProperties.lua",
+                r"Interface\FrameXML\UIParent.xml",
+                "ScrollTemplates.xml",
+            ]
+        );
+    }
 }

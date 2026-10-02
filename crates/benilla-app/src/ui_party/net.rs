@@ -1,32 +1,24 @@
-//! The group/party packet handlers (decision 0434 §D2, superseded by 0440; in the net handler
-//! table since 2321, moved out of the drain's group arm file). [`GroupState`] mirrors the wire and
-//! names the **messages** its roster diff implies; these are the shims that put them on the
-//! shared by-key queue. Two bodies here are not packet handlers but the object layer's hook on a
-//! roster member's stream-out ([`member_deactivated`], [`roster_deactivated`]); the drain's
-//! object arms still call them, and they become listeners on the object kinds once those are
-//! peeled.
-//!
-//! **They are message ids, not sentences** (decisions 2045/2054). The reference reaches all twelve
-//! through one `CGGameUI::DisplayError(msgId)`, and the catalog row that id names answers three
-//! questions at once — the text, the surface, and the sound. Composing the English here answered
-//! only the first, and got the third wrong for free: `ERR_DECLINE_GROUP_S` carries the
-//! `igPlayerInviteDecline` cue, which a straight chat push had no way to play.
+//! The group packet handlers. [`GroupState`] names the messages each packet implies and these
+//! queue them by key, as the reference's `DisplayError` (`0x496720`) takes a message id: the
+//! catalog row gives the text, the surface and the sound. [`member_deactivated`] and
+//! [`roster_deactivated`] are the object layer's hooks on a roster member's stream-out.
 
-use benilla_protocol::messages::{
-    member_status, GroupLootInfo, GroupMemberEntry, PartyMemberStatsInfo,
-};
+use benilla_protocol::messages::{GroupLootInfo, GroupMemberEntry, PartyMemberStatsInfo};
 use bevy::prelude::*;
 
 use benilla_protocol::{SessionEvent, SessionEventKind};
 
-use super::GroupState;
+use super::{GroupState, GROUPTYPE_RAID};
 use crate::names::NameCache;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, NetHandlerApp, ObjectStore, SelfGuid};
+use crate::sound::MessageSounds;
 use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_quest::QuestGiver;
 
-/// Register the group handlers — called from [`super::UiPartyPlugin`]. One per kind, plus the
-/// session-end listener.
+/// The join chime, played by name (`0x840404` through `0x458030`).
+const INVITE_ACCEPT_SOUND: &str = "igPlayerInviteAccept";
+
+/// One handler per group kind, plus the session-end listener.
 pub(super) fn register(app: &mut App) {
     use SessionEventKind as K;
     app.net_handler(K::GroupInvite, on_invite)
@@ -109,7 +101,9 @@ fn on_list(
     In(ev): In<SessionEvent>,
     mut group: ResMut<GroupState>,
     mut errors: ResMut<UiErrorKeys>,
+    mut sounds: ResMut<MessageSounds>,
     mut quest: ResMut<QuestGiver>,
+    self_guid: Res<SelfGuid>,
     names: Res<NameCache>,
     index: Res<GuidIndex>,
     commands: Res<NetCommands>,
@@ -125,12 +119,14 @@ fn on_list(
         list(
             &mut group,
             &mut errors,
+            &mut sounds,
             &mut quest,
             group_type,
             own_flags,
             members,
             leader,
             loot,
+            &self_guid,
             &names,
             &index,
             &commands,
@@ -190,49 +186,39 @@ fn on_raid_instance_info(In(ev): In<SessionEvent>, mut group: ResMut<GroupState>
     }
 }
 
-/// The group dies with the socket. A listener on the session end
-/// (a second handler on the kind, after the bridge's own teardown).
+/// The group state dies with the socket, after the bridge's own teardown.
 fn on_session_end(In(_): In<SessionEvent>, mut group: ResMut<GroupState>) {
     group.clear_session();
 }
 
-/// Queue the messages a `GroupState::apply_*` named. `ui_action::feed_actions` resolves each key
-/// against the VM's own `GlobalStrings.lua` and puts the line on the surface its catalog row
-/// names — `ui_guild`'s `push_lines` (decision 2054), one window over.
+/// Queue the messages an `apply_*` named; `ui_action::feed_actions` resolves and shows them.
 fn push_group_lines(errors: &mut UiErrorKeys, lines: Vec<UiError>) {
     errors.0.extend(lines);
 }
 
-/// `MSG_RAID_READY_CHECK`, the open form (decision 1989): our own echo as leader takes the
-/// response-collection arm and prints nothing; as anyone else we print the leader's line and take
-/// the popup ticket. The leader test is the reference's guid compare (`0x4ba3a0`).
+/// We lead when our guid is the leader's, the reference's test at `0x4ba3a0`.
 fn ready_check_request(group: &mut GroupState, errors: &mut UiErrorKeys, self_guid: &SelfGuid) {
     let we_lead = self_guid.0 == Some(group.leader);
     push_group_lines(errors, group.apply_ready_check_request(we_lead));
 }
 
-/// `SMSG_GROUP_INVITE` — someone asked us into their group.
 fn invited(group: &mut GroupState, errors: &mut UiErrorKeys, inviter: &str) {
     push_group_lines(errors, group.apply_invited(inviter));
 }
 
-/// `SMSG_GROUP_DECLINE` — our invitee said no (sent to the inviter only).
 fn declined(group: &mut GroupState, errors: &mut UiErrorKeys, name: &str) {
     push_group_lines(errors, group.apply_declined(name));
 }
 
-/// `SMSG_GROUP_UNINVITE` — we were kicked.
 fn uninvited(group: &mut GroupState, errors: &mut UiErrorKeys) {
     push_group_lines(errors, group.apply_uninvited());
 }
 
-/// `SMSG_GROUP_DESTROYED` — the group is gone outright.
 fn destroyed(group: &mut GroupState, errors: &mut UiErrorKeys) {
     push_group_lines(errors, group.apply_destroyed());
 }
 
-/// `SMSG_GROUP_SET_LEADER` — the line reads differently when the new leader is us, so the composer
-/// needs our own name. It is cache-seeded at login (`session::connected`), so this never asks.
+/// Our own name, cached from login (`session::connected`), picks the line; this never queries.
 fn leader_changed(
     group: &mut GroupState,
     errors: &mut UiErrorKeys,
@@ -247,58 +233,64 @@ fn leader_changed(
     push_group_lines(errors, group.apply_leader_changed(name, own.as_deref()));
 }
 
-/// `SMSG_GROUP_LIST` — the roster echo (and the join/leave diff's line source). Roster changes move
-/// shared-quest availability, so the questgiver sweep re-asks from here (0654).
-///
-/// **A roster entry is a sighting** (decision 1564): every member guid is warmed into the
-/// [`NameCache`] here, the same ask-once discipline `net::objects` applies the moment a unit
-/// streams in. The roster wire carries a member's *name*, so this is not asked for the name — it is
-/// asked for the `(race, class, gender)` triple that rides the same answer, and which is the ONLY
-/// source of those three for a member we never see: their descriptor never arrives. Two surfaces
-/// read them and both were empty for an out-of-area member before this — the raid grid's class
-/// column (`ui_party::feed::raid_roster`, whose own-row twin of this hole 1549 §7 found live), and
-/// the party frame's 2D portrait stand-in (`portrait::temporary_portrait`, report B315).
+/// `SMSG_GROUP_LIST`: apply the roster, seat new members' records and re-ask the questgiver sweep
+/// (shared-quest availability follows the roster). Every member is name-queried once: the
+/// answer's race, class and gender are the only source of them for a member we never see streamed.
+/// A raid's rebuild counts the rows whose name is still to come (`0x4ba9b6`-`0x4ba9d0`), ours
+/// among them once others are listed (`0x5e6e73`), and signals `RAID_ROSTER_UPDATE` only with none
+/// (`0x4babdf`-`0x4babef`).
 fn list(
     group: &mut GroupState,
     errors: &mut UiErrorKeys,
+    sounds: &mut MessageSounds,
     quest: &mut QuestGiver,
     group_type: u8,
     own_flags: u8,
     members: Vec<GroupMemberEntry>,
     leader: u64,
     loot: Option<GroupLootInfo>,
+    self_guid: &SelfGuid,
     names: &NameCache,
     index: &GuidIndex,
     net_commands: &NetCommands,
 ) {
+    let mut names_pending = false;
     for m in &members {
-        let _ = names.resolve(m.guid, net_commands);
+        names_pending |= names.resolve(m.guid, net_commands).is_none();
     }
-    // The roster BEFORE the apply, so the "new to this roster" test below is the slot writer's
-    // own `srcRec == 0` (see `seat_new_records`), not a re-read of what we just stored.
+    if group_type == GROUPTYPE_RAID && !members.is_empty() {
+        if let Some(own) = self_guid.0 {
+            names_pending |= names.resolve(own, net_commands).is_none();
+        }
+    }
+    // Taken before `apply_list` consumes the list; `seat_new_records` then treats a member with
+    // no record as new, the reference's `srcRec == 0`.
     let seats: Vec<(u64, bool)> = members
         .iter()
-        .map(|m| (m.guid, m.status & member_status::ONLINE != 0))
+        .map(|m| (m.guid, m.listed_online()))
         .collect();
-    let lines = group.apply_list(group_type, own_flags, members, leader, loot);
-    push_group_lines(errors, lines);
+    let shown = group.apply_list_awaiting(
+        group_type,
+        own_flags,
+        members,
+        leader,
+        loot,
+        self_guid.0,
+        names_pending,
+    );
+    push_group_lines(errors, shown.lines);
+    if shown.invite_accept {
+        sounds.push_cue(INVITE_ACCEPT_SOUND);
+    }
     seat_new_records(group, &seats, index, net_commands);
     quest.bump_reask();
 }
 
-/// **The GROUP_LIST slot writer's record leg** — `0x4e82d0`, the second of the two places the
-/// reference asks for a member's stats.
-///
-/// Per member the writer has two legs, chosen on whether the member already had a record
-/// (`srcRec`): a **known** member's record is copied forward and *nothing is sent* — a resync of a
-/// group you are already in must not fire four queries — while a member **new to the roster** gets
-/// a zeroed record with the `1/1` placeholder ([`PartyMemberStatsInfo::placeholder`]), and then, if
-/// their player object is not in the object manager (`4e8398 74 4a je`), the request
-/// (`4e83e4 39 7d f8 cmp [ebp-8],edi; 75 5f jne` — the second gate, on `srcRec` again).
-///
-/// The consequence worth stating: after this, **every roster member owns a record**, which is what
-/// makes the merged view's out-of-range leg total. A member you have never seen shows a full `1/1`
-/// bar rather than an empty `0/0` one until their stats land — the reference's own picture.
+/// `SMSG_GROUP_LIST`'s record leg (`0x4e82d0`, raid twin `0x4ba5f0`): a known member's record
+/// carries over, its online bit rewritten by [`GroupState::apply_list`], and nothing is sent; a new
+/// member gets the 1/1 placeholder and, when we hold no object for them, a stats request
+/// (`0x4e83f1`, raid `0x4bab6e`). A listed member therefore owns a record, so an unseen one shows
+/// full bars, not 0/0, until their stats land.
 fn seat_new_records(
     group: &mut GroupState,
     seats: &[(u64, bool)],
@@ -306,8 +298,7 @@ fn seat_new_records(
     net_commands: &NetCommands,
 ) {
     for (guid, online) in seats {
-        // `apply_list` has already dropped the records of everyone who left, and kept the rest —
-        // so "no record now" is exactly the writer's `srcRec == 0`.
+        // `apply_list` kept only the staying members' records, so a missing one means new.
         if group.stats.contains_key(guid) {
             continue;
         }
@@ -322,26 +313,17 @@ fn seat_new_records(
     }
 }
 
-/// **The despawn edge** — CGPlayer_C vtable slot 1 `0x5e9aa0`, which `0x464920` invokes on both
-/// `SMSG_DESTROY_OBJECT` and the `SMSG_UPDATE_OBJECT` OUT_OF_RANGE block. A party or raid
-/// member's object is leaving the object manager, so:
-/// **snapshot its live descriptor into the roster record** (`0x5f0880`), then **ask the server for
-/// the member's stats** (`CMSG_REQUEST_PARTY_MEMBER_STATS`, `0x4e8646`), in that order and on that
-/// same instruction sequence.
-///
-/// The pair is why the reference's party frame does not blank when somebody walks over the hill
-/// (report B334): the snapshot means the bars keep the numbers they were showing at the edge, and
-/// the request means the server answers `_FULL` rather than leaving us on whatever delta its
-/// accumulated mask happens to carry next. Neither existed here before decision 1640.
-///
-/// **Two gates, and both are the reference's.** This runs on every despawn, so a guid that is not
-/// on the roster falls straight through; and a guid we hold **no object for** falls through too —
-/// the hook is a *virtual on the object*, so no object means it never ran, and a server that
-/// re-announces a stream-out we have already applied must not cost a packet.
-pub(crate) fn member_deactivated(
+/// The despawn hook, the reference's deactivate virtual `0x5e9aa0` (object destroyed or out of
+/// range): for a roster member, snapshot the live descriptor into their record (`0x5f0880`), their
+/// pet's too while `held` finds it, with the name `names` holds for it, then request their stats
+/// (`0x4e8646`). Nothing happens off the roster or without an object, since the hook is a virtual
+/// on the object.
+pub(crate) fn member_deactivated<'a>(
     guid: u64,
     group: &mut GroupState,
-    store: Option<&ObjectStore>,
+    store: Option<&'a ObjectStore>,
+    held: impl Fn(u64) -> Option<&'a ObjectStore>,
+    names: &NameCache,
     net_commands: &NetCommands,
 ) {
     let Some(store) = store else {
@@ -350,23 +332,28 @@ pub(crate) fn member_deactivated(
     if !group.members.iter().any(|m| m.guid == guid) {
         return;
     }
+    let pet_guid = store.0.unit_pet_guid();
+    let pet = pet_guid.and_then(held);
+    let pet_name = pet_guid
+        .zip(pet)
+        .and_then(|(g, p)| names.peek_unit(g, Some(p)));
     group
         .stats
         .entry(guid)
         .or_default()
-        .snapshot_descriptor(&store.0);
+        .snapshot_descriptor(&store.0, pet.map(|p| &p.0), pet_name);
     let _ = net_commands
         .0
         .send(ClientCommand::RequestPartyMemberStats { guid });
 }
 
-/// [`member_deactivated`] for **every** streamed roster member at once — the bulk teardown a
-/// cross-map transfer performs, where the reference destroys the same objects one at a time and
-/// runs the same hook on each.
+/// [`member_deactivated`] for every streamed roster member: a cross-map transfer's teardown, where
+/// the reference destroys each object and runs the hook on each.
 pub(crate) fn roster_deactivated(
     group: &mut GroupState,
     index: &GuidIndex,
     stores: &Query<&mut ObjectStore>,
+    names: &NameCache,
     net_commands: &NetCommands,
 ) {
     let streamed: Vec<u64> = group
@@ -375,13 +362,12 @@ pub(crate) fn roster_deactivated(
         .map(|m| m.guid)
         .filter(|g| index.0.contains_key(g))
         .collect();
+    let held = |g: u64| index.0.get(&g).and_then(|e| stores.get(*e).ok());
     for guid in streamed {
-        let store = index.0.get(&guid).and_then(|e| stores.get(*e).ok());
-        member_deactivated(guid, group, store, net_commands);
+        member_deactivated(guid, group, held(guid), held, names, net_commands);
     }
 }
 
-/// `SMSG_PARTY_COMMAND_RESULT` — the verdict on an invite/kick/leave we asked for.
 fn command_result(
     group: &mut GroupState,
     errors: &mut crate::ui_action::UiErrorKeys,
@@ -389,10 +375,7 @@ fn command_result(
     member: &str,
     result: u32,
 ) {
-    // By KEY, not by sentence, and into the shared queue rather than straight into chat: the
-    // catalog row decides the surface, so `result == 7` reaches the red `UIErrorsFrame` line while
-    // the other nine stay chat lines (`0x496720`; decision 2035's shape). `None` is the
-    // reference's own silence — three inputs display nothing at all.
+    // By key, so the catalog row picks the surface; `None` is the reference's silence.
     errors
         .0
         .extend(group.apply_command_result(operation, member, result));
@@ -403,6 +386,7 @@ mod tests {
     use super::*;
     use crate::net::ClientCommand;
     use benilla_protocol::guid;
+    use benilla_protocol::messages::member_status;
 
     fn member(g: u64, name: &str) -> GroupMemberEntry {
         GroupMemberEntry {
@@ -413,13 +397,6 @@ mod tests {
         }
     }
 
-    /// The roster edge is where a member we may never SEE becomes askable. Their descriptor is the
-    /// only other source of race/class/gender, and it never arrives while they are out of the local
-    /// area — so without this ask the raid grid's class column and the party frame's portrait
-    /// stand-in are both permanently blank for exactly the members that need them (B315).
-    ///
-    /// Ask-ONCE: a re-sent roster (every join, leave, loot-method change re-sends the whole list)
-    /// must not re-ask, or a busy group would spam a query per member per packet.
     #[test]
     fn the_roster_warms_every_member_into_the_name_cache_once() {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -430,19 +407,21 @@ mod tests {
             QuestGiver::default(),
         );
         let mut names = NameCache::default();
-        // A player guid: `counter | (high << 48)` — the shape `NameCache::resolve` routes on.
+        // A player guid, `counter | (high << 48)`, the shape `NameCache::resolve` routes on.
         let player_guid = |counter: u64| counter | (u64::from(guid::HIGH_PLAYER) << 48);
         let (leader, far) = (player_guid(7), player_guid(8));
 
         list(
             &mut group,
             &mut errors,
+            &mut MessageSounds::default(),
             &mut quest,
             0,
             0,
             vec![member(leader, "Aldwyn"), member(far, "Brisca")],
             leader,
             None,
+            &SelfGuid::default(),
             &names,
             &GuidIndex::default(),
             &net,
@@ -466,12 +445,14 @@ mod tests {
         list(
             &mut group,
             &mut errors,
+            &mut MessageSounds::default(),
             &mut quest,
             0,
             0,
             vec![member(leader, "Aldwyn"), member(far, "Brisca")],
             leader,
             None,
+            &SelfGuid::default(),
             &names,
             &GuidIndex::default(),
             &net,
@@ -484,13 +465,121 @@ mod tests {
         assert_eq!(names.player_traits(leader), Some((1, 4, 1)));
     }
 
-    // ── The out-of-range record (decision 1640, report B334) ────────────────────────────────
+    /// The rebuild counts the rows whose name has not landed (`0x4ba9b6`-`0x4ba9d0`), ours among
+    /// them once others are listed (`0x5e6e73`), and the roster event waits for none (`0x4babdf`).
+    #[test]
+    fn a_raid_list_signals_the_roster_only_once_every_name_is_held() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let net = NetCommands(tx);
+        let (mut group, mut errors, mut quest) = (
+            GroupState::default(),
+            UiErrorKeys::default(),
+            QuestGiver::default(),
+        );
+        let mut names = NameCache::default();
+        let player_guid = |counter: u64| counter | (u64::from(guid::HIGH_PLAYER) << 48);
+        let (me, a, b) = (player_guid(1), player_guid(7), player_guid(8));
+        let mut raid = |group: &mut GroupState, names: &NameCache, group_type: u8| {
+            list(
+                group,
+                &mut errors,
+                &mut MessageSounds::default(),
+                &mut quest,
+                group_type,
+                0,
+                vec![member(a, "Aldwyn"), member(b, "Brisca")],
+                a,
+                None,
+                &SelfGuid(Some(me)),
+                names,
+                &GuidIndex::default(),
+                &net,
+            );
+            group.roster_updates
+        };
 
-    /// Descriptor field indices, spelled locally the way the other app-side descriptor tests do
-    /// (`ui_unit`'s vitals block) — the private `FIELD_UNIT_*` values, build 5875.
+        assert_eq!(raid(&mut group, &names, 1), 0, "no name held");
+        names.insert_player(a, "Aldwyn".into(), Some((1, 4, 1)));
+        assert_eq!(
+            raid(&mut group, &names, 1),
+            0,
+            "one member's name still to come"
+        );
+        names.insert_player(b, "Brisca".into(), Some((1, 5, 0)));
+        assert_eq!(
+            raid(&mut group, &names, 1),
+            0,
+            "our own row's name still to come"
+        );
+        names.insert_player(me, "Me".into(), None);
+        assert_eq!(raid(&mut group, &names, 1), 1, "every name held");
+        assert_eq!(raid(&mut group, &names, 1), 2, "and the same list again");
+
+        // A party's list runs no roster writer; it names nothing, and drops the raid it finds.
+        assert_eq!(
+            raid(&mut group, &NameCache::default(), 0),
+            3,
+            "the raid dropped"
+        );
+        assert_eq!(
+            raid(&mut group, &NameCache::default(), 0),
+            3,
+            "a party's list"
+        );
+    }
+
+    #[test]
+    fn a_join_queues_the_invite_accept_chime_and_a_resync_does_not() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let net = NetCommands(tx);
+        let (mut group, mut errors, mut sounds, mut quest) = (
+            GroupState::default(),
+            UiErrorKeys::default(),
+            MessageSounds::default(),
+            QuestGiver::default(),
+        );
+        let names = NameCache::default();
+        let mut send = |sounds: &mut MessageSounds, members: Vec<GroupMemberEntry>| {
+            list(
+                &mut group,
+                &mut errors,
+                sounds,
+                &mut quest,
+                0,
+                0,
+                members,
+                7,
+                None,
+                &SelfGuid(Some(9)),
+                &names,
+                &GuidIndex::default(),
+                &net,
+            );
+        };
+
+        send(&mut sounds, vec![member(7, "Aldwyn")]);
+        assert_eq!(
+            sounds.queued_cues(),
+            ["igPlayerInviteAccept"],
+            "our first party"
+        );
+        send(&mut sounds, vec![member(7, "Aldwyn")]);
+        assert_eq!(sounds.queued_cues().len(), 1, "a resync is silent");
+        send(&mut sounds, vec![member(7, "Aldwyn"), member(8, "Brisca")]);
+        assert_eq!(sounds.queued_cues().len(), 2, "a member joining our party");
+        assert_eq!(
+            benilla_ui::messages::by_key("ERR_JOINED_GROUP_S").and_then(|r| r.sound),
+            None,
+            "the join line's own row carries no sound, so the chime is the only one"
+        );
+    }
+
+    // ── The out-of-range record ──────────────────────────────────────────────
+
+    /// Unit descriptor field indices, build 5875.
     const HEALTH: u16 = 22;
     const MAXHEALTH: u16 = 28;
-    /// `UNIT_FIELD_POWER2` / `MAXPOWER2` — the RAGE slot (`POWER1 + POWER_RAGE`).
+    /// `UNIT_FIELD_POWER2`/`MAXPOWER2`, the rage slot (`POWER1 + POWER_RAGE`).
     const POWER2: u16 = 24;
     const MAXPOWER2: u16 = 30;
     const LEVEL: u16 = 34;
@@ -507,27 +596,19 @@ mod tests {
 
     fn grouped(members: &[GroupMemberEntry]) -> GroupState {
         let mut group = GroupState::default();
-        group.apply_list(0, 0, members.to_vec(), members[0].guid, None);
+        group.apply_list(0, 0, members.to_vec(), members[0].guid, None, None);
         group
     }
 
-    /// **The despawn edge is where the numbers are kept** (the deactivate virtual `0x5e9aa0`
-    /// snapshots `0x5f0880` and sends `0x27f`, in that order).
-    ///
-    /// Falsifier for the whole report: delete the snapshot and this member's record stays whatever
-    /// the wire last said — which, for a member who has never had a stats packet, is nothing, and
-    /// the frame reads `0/0`. Delete the send and the server is never asked for a `_FULL`, so the
-    /// record stays frozen at the snapshot until the member's health happens to change.
     #[test]
     fn a_members_despawn_snapshots_their_descriptor_and_asks_for_their_stats() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
         let guid = 0x1234;
         let mut group = grouped(&[member(guid, "Brisca"), member(0x99, "Aldwyn")]);
-        let _ = asked(&rx); // the roster's own seat-time asks (they are unstreamed here)
+        let _ = asked(&rx); // start from an empty queue
 
-        // A warrior: rage rides the wire ×10, and the record stores it raw exactly as the
-        // descriptor does.
+        // A warrior: rage is stored raw, ten times the shown value, as in the descriptor.
         let store = ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(&[
             (HEALTH, 2400),
             (MAXHEALTH, 3000),
@@ -536,7 +617,14 @@ mod tests {
             (LEVEL, 41),
             (BYTES_0, 1 << 24), // POWER_RAGE in BYTES_0 byte 3
         ]));
-        member_deactivated(guid, &mut group, Some(&store), &net);
+        member_deactivated(
+            guid,
+            &mut group,
+            Some(&store),
+            |_| None,
+            &NameCache::default(),
+            &net,
+        );
 
         let rec = group.stats.get(&guid).expect("the member has a record");
         assert_eq!(
@@ -558,9 +646,66 @@ mod tests {
         assert_eq!(asked(&rx), vec![guid], "and the server is asked, once");
     }
 
-    /// The hook runs on **every** despawn — a mob, a totem, a stranger — and must be silent for
-    /// everyone who is not on the roster. Without the guard every stream-out in a busy city would
-    /// put a `CMSG_REQUEST_PARTY_MEMBER_STATS` on the wire.
+    /// `0x5f098d`-`0x5f09f2`: a slot is copied when its id is set and its `AURAFLAGS` nibble has an
+    /// effect bit; the pet block comes off the pet's own object (`0x5f0a1f`-`0x5f0b72`).
+    #[test]
+    fn a_members_despawn_snapshots_their_auras_and_their_pets() {
+        const AURA: u16 = 47;
+        const AURAFLAGS: u16 = 95;
+        const SUMMON: u16 = 8;
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let net = NetCommands(tx);
+        let guid = 0x1234;
+        let pet_guid = 0xF140_0000_0000_0077;
+        let mut group = grouped(&[member(guid, "Brisca")]);
+
+        let store = ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(&[
+            (AURA, 1126),     // slot 0, live (nibble 0x8)
+            (AURA + 1, 6673), // slot 1, a stale id: its nibble has no effect bit
+            (AURA + 33, 589), // slot 33, live
+            (AURAFLAGS, 0x0000_0018),
+            (AURAFLAGS + 4, 0x0000_0020),
+            (SUMMON, pet_guid as u32),
+            (SUMMON + 1, (pet_guid >> 32) as u32),
+        ]));
+        // `UNIT_FIELD_PETNUMBER`, the key the pet-name cache files a pet's name under.
+        const PETNUMBER: u16 = 139;
+        let pet = ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(&[
+            (HEALTH, 900),
+            (PETNUMBER, 4),
+            (AURA + 40, 770),
+            (AURAFLAGS + 5, 0x0000_0002),
+        ]));
+        let held = |g: u64| (g == pet_guid).then_some(&pet);
+        let mut names = NameCache::default();
+        names.insert_pet(4, "Whelp".into());
+        member_deactivated(guid, &mut group, Some(&store), held, &names, &net);
+
+        let rec = group.stats.get(&guid).expect("the member has a record");
+        assert_eq!(
+            rec.auras,
+            Some(vec![(0, 1126)]),
+            "the stale slot 1 is dropped"
+        );
+        assert_eq!(rec.auras_negative, Some(vec![(33, 589)]));
+        assert_eq!(rec.pet_guid, Some(pet_guid));
+        assert_eq!(
+            rec.pet_name.as_deref(),
+            Some("Whelp"),
+            "the pet's cached name rides into the record, as `0x5f0a63`-`0x5f0a70` copy it (`+0x88`)"
+        );
+        assert_eq!(rec.pet_cur_hp, Some(900));
+        assert_eq!(rec.pet_auras, Some(vec![]));
+        assert_eq!(rec.pet_auras_negative, Some(vec![(40, 770)]));
+
+        // The pet not held: its block is emptied, not left as it was.
+        member_deactivated(guid, &mut group, Some(&store), |_| None, &names, &net);
+        let rec = group.stats.get(&guid).unwrap();
+        assert_eq!((rec.pet_guid, rec.pet_auras_negative.clone()), (None, None));
+        assert_eq!(rec.pet_name, None, "and its name with it (`0x5f0a0f`)");
+        assert_eq!(rec.auras, Some(vec![(0, 1126)]));
+    }
+
     #[test]
     fn a_despawn_that_is_not_a_party_member_asks_nothing() {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -571,20 +716,29 @@ mod tests {
         let store = ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(&[(
             HEALTH, 40,
         )]));
-        member_deactivated(0xdead, &mut group, Some(&store), &net);
+        member_deactivated(
+            0xdead,
+            &mut group,
+            Some(&store),
+            |_| None,
+            &NameCache::default(),
+            &net,
+        );
         assert!(asked(&rx).is_empty());
         assert!(!group.stats.contains_key(&0xdead));
 
-        // …and the object gate on its own: a roster member we hold no object for never
-        // deactivated, so re-announcing their stream-out costs nothing.
-        member_deactivated(0x1234, &mut group, None, &net);
+        // The object gate alone: a roster member we hold no object for asks nothing.
+        member_deactivated(
+            0x1234,
+            &mut group,
+            None,
+            |_| None,
+            &NameCache::default(),
+            &net,
+        );
         assert!(asked(&rx).is_empty());
     }
 
-    /// **The roster seat** (`0x4e82d0`): a member new to the roster gets the `1/1`
-    /// placeholder, and is asked for only when we hold no object for them. A resync asks nothing —
-    /// the gate the reference puts on `srcRec`, and the reason a busy group does not fire four
-    /// queries per GROUP_LIST.
     #[test]
     fn a_roster_new_member_is_seated_at_one_one_and_asked_for_only_when_unseen() {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -607,12 +761,14 @@ mod tests {
             list(
                 group,
                 &mut errors,
+                &mut MessageSounds::default(),
                 &mut quest,
                 0,
                 0,
                 members,
                 near,
                 None,
+                &SelfGuid::default(),
                 &names,
                 &index,
                 &net,
@@ -634,8 +790,7 @@ mod tests {
             );
         }
 
-        // The wire answers for `far`, and then the roster is re-sent (somebody changed the loot
-        // method). The cached record is restored and nothing is asked again.
+        // The wire answers for `far`, then the roster is re-sent: nothing is asked again.
         group.apply_stats(
             far,
             true,
@@ -655,5 +810,67 @@ mod tests {
             Some((Some(900), Some(1100))),
             "and the record it already had survives the resync"
         );
+    }
+
+    /// A re-sent list that moves only a member's status rewrites the online bit of the record the
+    /// member already owns (`0x4e82d0`), asks nothing, and leaves the rest of the record.
+    #[test]
+    fn a_resent_list_moves_a_known_members_online_bit_and_keeps_its_record() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let net = NetCommands(tx);
+        let (mut group, mut errors, mut quest) = (
+            GroupState::default(),
+            UiErrorKeys::default(),
+            QuestGiver::default(),
+        );
+        let names = NameCache::default();
+        let far = 0x22u64;
+        let mut send = |group: &mut GroupState, status: u8| {
+            let row = GroupMemberEntry {
+                status,
+                ..member(far, "Brisca")
+            };
+            list(
+                group,
+                &mut errors,
+                &mut MessageSounds::default(),
+                &mut quest,
+                0,
+                0,
+                vec![row],
+                far,
+                None,
+                &SelfGuid::default(),
+                &names,
+                &GuidIndex::default(),
+                &net,
+            );
+        };
+
+        send(&mut group, member_status::ONLINE);
+        group.apply_stats(
+            far,
+            false,
+            PartyMemberStatsInfo {
+                cur_hp: Some(900),
+                pet_guid: Some(0xF140_0000_0000_0077),
+                ..PartyMemberStatsInfo::default()
+            },
+        );
+        assert!(group.stats[&far].is_online(), "seated from the row");
+        let _ = asked(&rx);
+
+        send(&mut group, member_status::OFFLINE);
+        let rec = &group.stats[&far];
+        assert!(!rec.is_online(), "the row's byte moved the record's bit");
+        assert_eq!(
+            (rec.cur_hp, rec.pet_guid),
+            (Some(900), Some(0xF140_0000_0000_0077)),
+            "and nothing else"
+        );
+        assert!(asked(&rx).is_empty(), "no stats request for a known member");
+
+        send(&mut group, member_status::ONLINE);
+        assert!(group.stats[&far].is_online());
     }
 }

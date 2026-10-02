@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # The land gate chain: every gate in order, stopping at the first failure.
 #
-# fmt, clippy, test, test-no-install, doc-links, pass-span-lint, player-build, player-tests,
-# enforcer, enforcer-no-install. A failure prints the gate's log tail and exits nonzero; a green
+# fmt, clippy, test, test-no-install, doc-links, pass-span-lint, player-tests, enforcer,
+# enforcer-no-install. A failure prints the gate's log tail and exits nonzero; a green
 # run stamps the tree, which then re-greens without running. GATES_FORCE=1 runs the chain anyway,
 # WOW_DATA picks the install (set and empty: none) and TMPDIR holds the scratch files; the script
-# sets BENILLA_REQUIRE_DATA, BENILLA_SKIP_LOG and WOW_WORLDVIEW_CHECK for its gates.
+# sets BENILLA_REQUIRE_DATA, BENILLA_ADDON_CORPUS, BENILLA_SKIP_LOG and WOW_WORLDVIEW_CHECK for
+# its gates.
+# `.github/workflows/ci.yml` runs the gates that need neither the install nor a display on a fork's
+# pull request: a gate added here goes there too, if it can run on a bare Linux runner.
 #
 #   scripts/gates.sh
 set -uo pipefail
@@ -132,15 +135,18 @@ run doc-links scripts/doc-links.py
 # wgpu validation error on Vulkan and a silent no-op on Metal and DX12, which no macOS run sees.
 run pass-span-lint scripts/pass-span-lint.py
 
-# player-build: `benilla` without `dev`, which compiles out the debug panel, perf HUD, inspector,
-# capture harness and probes, so it fails when any other code names one of them.
-run player-build cargo build -p benilla --no-default-features
-
-# player-tests: the unit tests of the `cfg(not(feature = "dev"))` code (the resolver skips the
-# source tree; the state folder sits beside the binary), which no other gate runs. WOW_DATA, which
-# a player build reads too, goes in for the shipped-UI tests that read FrameXML off the install; no
-# BENILLA_REQUIRE_DATA, since without `dev` only $BENILLA_ADDON_CORPUS finds the addon corpus.
-run player-tests env ${wow_data:+WOW_DATA="$wow_data"} BENILLA_SKIP_LOG="$skips" \
+# player-tests: the player build, `benilla-app` without `dev`, which compiles out the debug panel,
+# perf HUD, inspector, capture harness and probes, so it fails when any other code names one of
+# them. Its test build compiles every line of the player graph but the `benilla` launcher, a shim
+# with no `dev` seam, so a `cargo build -p benilla --no-default-features` would add only the shim
+# and a link. It runs the unit tests of the `cfg(not(feature = "dev"))` code (the resolver skips
+# the source tree; the state folder sits beside the binary), which no other gate runs. WOW_DATA, which
+# a player build reads too, goes in for the shipped-UI tests that read FrameXML off the install.
+# Without `dev` only $BENILLA_ADDON_CORPUS finds the addon corpus, so the link goes in by that name,
+# and BENILLA_REQUIRE_DATA refuses a skip here exactly where it does in `test`.
+run player-tests env ${wow_data:+WOW_DATA="$wow_data"} \
+    ${corpus:+BENILLA_ADDON_CORPUS="$root/wow-addons-vanilla"} \
+    ${require_data:+BENILLA_REQUIRE_DATA=1} BENILLA_SKIP_LOG="$skips" \
     cargo test -p benilla-formats -p benilla-app --no-default-features --lib
 report_skips player-tests
 

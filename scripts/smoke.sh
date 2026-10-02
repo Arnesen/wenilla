@@ -108,7 +108,7 @@ sup="$(printf '%s\n' "$plain" | sed -n 's/.*logout-smoke: re-entered.*suppressor
 printf '  %-24s %s\n' "re-entry suppressors" "${sup:-<unreported>}"
 [ "$sup" = "none" ] ||
     fail "the re-entered character could not be driven — suppressors: ${sup:-<unreported>} \
-(1542: everything the ended session granted its mover dies with it)"
+(everything the ended session granted its mover dies with it)"
 
 # vmangos skips the logout root when resting, on a taxi or at account security >= `InstantLogout`
 # (`MiscHandler.cpp`, `CMSG_LOGOUT_REQUEST`); probe accounts are GM, so report whether the check
@@ -126,24 +126,25 @@ panics="$(printf '%s\n' "$plain" | grep -cE 'panicked at')"
 [ "$errors" -ne 0 ] && fail "$errors ERROR line(s)"
 
 # A marker counts once per edge it fires on. Each world entry builds a world VM beside the
-# character screen's glue VM (the reference's `0x490bd0`/`0x48fbf0` pair), so per-VM markers count
+# character screen's glue VM (the reference's `0x490bd0`/`0x48fbf0` pair), so the VM marker counts
 # twice per login; half that means an entry adopted the glue VM and its spent `VmMemo`s.
 sessions=2            # world entries in this walk
 vms=$((sessions * 2)) # …and the Lua states they cost: a glue VM and a world VM each
-for marker in "Fonts.xml loaded"; do
+for marker in "new VM, session"; do
     n="$(printf '%s\n' "$plain" | grep -cF "$marker")"
     printf '  %-24s %s\n' "$marker" "$n"
     [ "$n" -eq "$vms" ] ||
         fail "'$marker' happened $n time(s), expected $vms — one per VM built, two per login; \
 $sessions would mean the entry adopted the character screen's VM and inherited its spent VmMemos"
 done
-# The in-game UI and the keybinding table (`seed_bindings_for_vm`, run on the world-entry edge)
-# build once per login; one count for two logins means the second reused the first's frame tree.
-for marker in "UIParent.xml loaded" "commands registered"; do
+# The in-game UI, `FrameXML.toc`'s `Fonts.xml` included, and the key-binding commands (the core's
+# `Bindings.xml`, loaded after the toc) build once per login; one count for two logins means the
+# second reused the first's frame tree.
+for marker in "Fonts.xml loaded" "UIParent.xml loaded" "commands registered"; do
     n="$(printf '%s\n' "$plain" | grep -cF "$marker")"
     printf '  %-24s %s\n' "$marker" "$n"
     [ "$n" -eq "$sessions" ] ||
-        fail "'$marker' happened $n time(s), expected $sessions — once per login: the UI rebuilt per login and the keybinding table seeded on the entry edge"
+        fail "'$marker' happened $n time(s), expected $sessions — once per login: the UI and its binding commands rebuilt per login"
 done
 
 # The shutdown tail runs once per session: at the /logout, and at the exit, which closes the window
@@ -152,7 +153,7 @@ writes="$(printf '%s\n' "$plain" | grep -cF "saved variables: wrote")"
 printf '  %-24s %s\n' "shutdown writes" "$writes"
 [ "$writes" -eq "$sessions" ] ||
     fail "the shutdown tail wrote $writes time(s), expected $sessions — a session ended without \
-saving (1528: the quit root must be observed in \`Last\`, after PostUpdate's exit_on_all_closed)"
+saving (the quit root must be observed in \`Last\`, after PostUpdate's exit_on_all_closed)"
 
 # The read-only verdict names each changed file, the whole lead to whatever wrote it.
 if [ -n "$install_root" ]; then

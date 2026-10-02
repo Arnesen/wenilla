@@ -40,6 +40,8 @@ pub const SMSG_UPDATE_OBJECT: u16 = 0x00A9;
 pub const SMSG_DESTROY_OBJECT: u16 = 0x00AA;
 // Cinematics: a first login's race intro, or a type-13 GameObject camera. Until the COMPLETE ack,
 // vmangos sees from the camera and despawns all around the body (`Player::UpdateCinematic`).
+/// Lua's `OpeningCinematic()` (`0x48c8c0`); empty body. vmangos does not handle it.
+pub const CMSG_OPENING_CINEMATIC: u16 = 0x00F9;
 pub const SMSG_TRIGGER_CINEMATIC: u16 = 0x00FA;
 /// The next camera of a multi-camera `CinematicSequences` row began; empty body (`0x48efe0`).
 pub const CMSG_NEXT_CINEMATIC_CAMERA: u16 = 0x00FB;
@@ -60,9 +62,11 @@ pub const CMSG_SET_WATCHED_FACTION: u16 = 0x0318; // 792
 pub const SMSG_AUTH_CHALLENGE: u16 = 0x01EC;
 pub const SMSG_AUTH_RESPONSE: u16 = 0x01EE;
 /// The Warden anticheat challenge; vmangos kicks a client that leaves it unanswered for 30 s
-/// (`Warden::Update`). Deviation: no Warden ([`crate::WardenRequired`]), so the connect refuses.
+/// (`Warden::Update`). Deviation: benilla has no Warden, so the connect refuses such a server
+/// ([`crate::WardenRequired`]) because a session there would only be kicked.
 pub const SMSG_WARDEN_DATA: u16 = 0x02E6;
-/// One record per `## Secure:` addon in `CMSG_AUTH_SESSION`, in order, with no count or names.
+/// The answer to `CMSG_AUTH_SESSION`'s addon block: one record per `## Secure:` addon, in order,
+/// with no count or names.
 pub const SMSG_ADDON_INFO: u16 = 0x02EF;
 pub const SMSG_COMPRESSED_UPDATE_OBJECT: u16 = 0x01F6;
 /// A zlib envelope of whole movement packets. Routine: vmangos switches a session to it after 300
@@ -172,7 +176,7 @@ pub const CMSG_MOVE_SPLINE_DONE: u16 = 0x02C9; // 713
 /// Our movement clock skipped (a stall, a long frame): the mover and the missing milliseconds.
 /// vmangos shifts its clock, and re-creates a just-boarded transport (`MovementHandler.cpp:989`).
 pub const CMSG_MOVE_TIME_SKIPPED: u16 = 0x02CE; // 718
-/// Another mover's clock skip, relayed: packed guid, `u32` lag (`MovementHandler.cpp:1011-1017`).
+/// Another mover's clock skip, relayed: packed guid, `u32` lag (`MovementHandler.cpp:1005-1011`).
 /// The reference (`0x603b40`) adds it to that unit's last wire timestamp (`CMovement+0xac`); if
 /// dropped, the unit's next packet lands `lag` ms late.
 pub const MSG_MOVE_TIME_SKIPPED: u16 = 0x0319; // 793
@@ -191,7 +195,7 @@ pub const SMSG_ATTACKSWING_CANT_ATTACK: u16 = 0x0149; // 329
 /// (`0x5e7dd0`) stops our attack and shows nothing.
 pub const SMSG_CANCEL_COMBAT: u16 = 0x014E; // 334
 
-/// A Feign Death was resisted: empty body (`Unit.cpp:9445-9451`). The reference (`0x6e9800`) only
+/// A Feign Death was resisted: empty body (`Unit.cpp:9465-9471`). The reference (`0x6e9800`) only
 /// shows `ERR_FEIGN_DEATH_RESISTED`.
 pub const SMSG_FEIGN_DEATH_RESISTED: u16 = 0x02B4; // 692
 /// A creature's aggro or alert flare.
@@ -222,7 +226,8 @@ pub const SMSG_CLEAR_COOLDOWN: u16 = 0x01DE; // 478
 pub const SMSG_COOLDOWN_CHEAT: u16 = 0x01E1; // 481
 
 /// A timed item's remaining life in seconds; the display reads this, not `ITEM_FIELD_DURATION`
-/// (`Item.cpp:1094`). It shares the reference handler (`0x5e4f69`) with the enchant update below.
+/// (`Item.cpp:1094`). Its reference handler is the enchant update's, forking on the opcode
+/// (`0x5e4f69`).
 pub const SMSG_ITEM_TIME_UPDATE: u16 = 0x01EA; // 490
 
 /// The only source of a temporary enchant's remaining time: the reference tooltip reads a
@@ -482,8 +487,7 @@ pub const MSG_MOVE_SET_TURN_RATE: u16 = 0x00D8; // 216
 pub const SMSG_MOUNTRESULT: u16 = 0x016E; // 366
 pub const SMSG_DISMOUNTRESULT: u16 = 0x016F; // 367
 
-// The mounted space-bar flourish: an empty CMSG, echoed as `SMSG_MOUNTSPECIAL_ANIM` (raw u64 guid)
-// to all in range, the sender too (`MovementHandler.cpp:967`); receivers play MountSpecial (94).
+// The mounted flourish, an empty CMSG; who gets the echo: `ServerPacket::MountSpecialAnim`.
 pub const CMSG_MOUNTSPECIAL_ANIM: u16 = 0x0171; // 369
 pub const SMSG_MOUNTSPECIAL_ANIM: u16 = 0x0172; // 370
 
@@ -608,8 +612,8 @@ pub const CMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021A; // 538
 pub const SMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021B; // 539
 
 /// A ticket-state push: `u32` 1 updated, 2 closed, 3 survey offered; vmangos never sends it. The
-/// reference re-asks for the ticket on 1 (`0x5e7932`). Deviation: 3 opens no survey window,
-/// since vmangos can never offer one.
+/// reference re-asks for the ticket on 1 (`0x5e7932`); 2 and 3 are recorded, not acted on, and
+/// the survey window 3 offers is not built.
 pub const SMSG_GM_TICKET_STATUS_UPDATE: u16 = 0x0328; // 808
 
 // The bank: `CMSG_BANKER_ACTIVATE` opens a pure banker; `SMSG_SHOW_BANK` also arrives unasked
@@ -637,7 +641,7 @@ pub const CMSG_STABLE_SWAP_PET: u16 = 0x0275; // 629
 /// Spend a talent point; the rank's `SMSG_LEARNED_SPELL` and `PLAYER_CHARACTER_POINTS1` answer it.
 pub const CMSG_LEARN_TALENT: u16 = 0x0251; // 593
 
-/// The respec, both ways: the trainer's gossip line (`Player.cpp:12330`) makes the server ask with
+/// The respec, both ways: the trainer's gossip line (`Player.cpp:12406`) makes the server ask with
 /// the trainer's guid and the cost; the `CONFIRM_TALENT_WIPE` Accept sends the latched guid back.
 pub const MSG_TALENT_WIPE_CONFIRM: u16 = 0x02AA; // 682
 /// The instance boot timer: `u32 delayMs`, `u32 reason`; boot START for a positive delay, STOP for
@@ -798,7 +802,7 @@ pub const MSG_MOVE_WATER_WALK: u16 = 0x02B1; // 689
 // Knockback. `SMSG_MOVE_KNOCK_BACK` to the mover: packed guid, `u32 counter`, `f32` vcos, vsin,
 // speedXY, speedZ, with speedZ down-positive like the jump tail. The mandatory ack is full u64
 // guid, counter, `MovementInfo`, whose jump tail must echo the four floats within 0.01 with
-// `MOVEFLAG_JUMPING` set; a knockback is never re-sent (`Unit.cpp:6887`). Observers get
+// `MOVEFLAG_JUMPING` set; a knockback is never re-sent (`Unit.cpp:6912`). Observers get
 // `MSG_MOVE_KNOCK_BACK`: the relay shape plus the four floats, re-launched by `0x6026f0`.
 pub const SMSG_MOVE_KNOCK_BACK: u16 = 0x00EF; // 239
 pub const CMSG_MOVE_KNOCK_BACK_ACK: u16 = 0x00F0; // 240
@@ -892,9 +896,10 @@ pub const CMSG_GROUP_SWAP_SUB_GROUP: u16 = 0x0280; // 640
 pub const CMSG_GROUP_RAID_CONVERT: u16 = 0x028E; // 654
 pub const CMSG_GROUP_ASSISTANT_LEADER: u16 = 0x028F; // 655
 pub const SMSG_PARTY_MEMBER_STATS_FULL: u16 = 0x02F2; // 754
-/// Both ways; the server's side is mode-prefixed (`Group.cpp:77-82` read, `:132-147` write).
+/// Both ways; the server's side is mode-prefixed (`Packets/Group.cpp:77-82` read, `:132-147`
+/// write).
 pub const MSG_RAID_TARGET_UPDATE: u16 = 0x0321; // 801
-/// Both ways: an empty body starts a check, a non-empty one answers (`Group.cpp:84-96`).
+/// Both ways: an empty body starts a check, a non-empty one answers (`Packets/Group.cpp:84-96`).
 pub const MSG_RAID_READY_CHECK: u16 = 0x0322; // 802
 /// Ask for our raid lockouts: empty body, sent by `RequestRaidInfo()` on every RaidFrame show.
 pub const CMSG_REQUEST_RAID_INFO: u16 = 0x02CD; // 717
@@ -976,7 +981,8 @@ pub const SMSG_UPDATE_WORLD_STATE: u16 = 0x02C3; // 707
 // ── Instance and raid lockouts ──
 
 /// "You are now saved to this instance": a `u32` flag, 0 from vmangos (`0x4e7e60`; 1 adds a debug
-/// prefix). Deviation: 2 or more prints nothing; the reference prints an uninitialized buffer.
+/// prefix). Deviation: 2 or more prints nothing, because the reference prints an uninitialized
+/// buffer.
 pub const SMSG_INSTANCE_SAVE_CREATED: u16 = 0x02CB; // 715
 /// A raid-lockout warning: `u32 type`, `u32 mapId`, `u32 secondsUntilReset` (`0x49e1c0`).
 pub const SMSG_RAID_INSTANCE_MESSAGE: u16 = 0x02FA; // 762

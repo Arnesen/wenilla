@@ -1,10 +1,5 @@
-//! Print screen's UI half — the stock `WorldFrame.xml`'s `ScreenshotStatus` (decision 1983) — and above
-//! all **B261's third clause: the "Screen Captured" line must not be in the file it announces.**
-//!
-//! That contract is an ORDERING, so it is tested as one. Two paths could put text in a picture and
-//! both are pinned here: the ordinary press (nothing is shown until the engine reports back, which
-//! it can only do after the readback) and the double press inside the 1.5 s fade (the previous
-//! shot's line is still up, and `TakeScreenshot` takes it down *before* asking).
+//! The stock screenshot status line (`WorldFrame.xml`'s `ScreenshotStatus`), which must never be
+//! in the picture it announces.
 
 use benilla_ui::script::UiScript;
 
@@ -14,17 +9,17 @@ fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     for f in [
+        "Interface\\FrameXML\\GlobalStrings.lua",
         "Interface\\FrameXML\\Fonts.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        r"Interface\FrameXML\WorldFrame.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\MoneyFrame.lua",
         r"Interface\FrameXML\MoneyFrame.xml",
-        r"Interface\FrameXML\UIParent.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        "Interface\\FrameXML\\GlobalStrings.lua",
-        "Interface\\FrameXML\\BasicControls.xml",
-        "Interface\\FrameXML\\LocaleProperties.lua",
         "Interface\\FrameXML\\StaticPopup.xml",
-        r"Interface\FrameXML\WorldFrame.xml",
     ] {
         load_xml(&s, f);
     }
@@ -45,9 +40,7 @@ fn alpha(s: &UiScript) -> f64 {
     s.eval::<f64>("return ScreenshotStatus:GetAlpha()").unwrap()
 }
 
-/// **The bug, as a test.** A press asks the engine and shows NOTHING; the line appears only when
-/// the engine reports back, which in the real client is frames later — so the frame that was
-/// captured cannot contain it.
+/// The line appears only on the engine's answer, frames after the capture.
 #[test]
 fn the_capture_is_asked_for_silently_and_only_the_answer_speaks() {
     benilla_formats::wow_data_or_skip!();
@@ -62,7 +55,7 @@ fn the_capture_is_asked_for_silently_and_only_the_answer_speaks() {
     );
     assert!(
         !shown(&s),
-        "NOTHING is on screen at the moment of capture — this is B261's whole contract"
+        "NOTHING is on screen at the moment of capture — this is the whole contract"
     );
 
     // The engine's answer, one or more frames later.
@@ -72,9 +65,7 @@ fn the_capture_is_asked_for_silently_and_only_the_answer_speaks() {
     assert_eq!(alpha(&s), 1.0);
 }
 
-/// **The second leak path, and the reason `TakeScreenshot` hides rather than waiting for the
-/// fade.** Press again while the last confirmation is still on screen and it comes off BEFORE the
-/// engine is asked — otherwise that shot would have "Screen Captured" printed across it.
+/// `TakeScreenshot` hides a line still fading before it calls `Screenshot()` (`WorldFrame.lua:47`).
 #[test]
 fn a_second_press_inside_the_fade_clears_the_line_before_capturing() {
     benilla_formats::wow_data_or_skip!();
@@ -91,12 +82,12 @@ fn a_second_press_inside_the_fade_clears_the_line_before_capturing() {
     );
     assert_eq!(s.take_screenshot_asks(), 1);
 
-    // The new answer restarts the fade at full rather than inheriting the old alpha.
+    // The new answer restarts at full alpha (`WorldFrame.lua:60`).
     s.fire_event("SCREENSHOT_SUCCEEDED", Vec::new());
     assert_eq!(alpha(&s), 1.0);
 }
 
-/// The 1.5 s fade: alpha falls with elapsed time and the frame takes itself off screen at the end.
+/// `SCREENSHOT_STATUS_FADETIME` is 1.5 s (`WorldFrame.lua:44`).
 #[test]
 fn the_line_fades_out_over_the_reference_s_second_and_a_half() {
     benilla_formats::wow_data_or_skip!();
@@ -114,7 +105,6 @@ fn the_line_fades_out_over_the_reference_s_second_and_a_half() {
     assert!(!shown(&s), "and it is gone at the end of the fade");
 }
 
-/// The failure path says so, in the reference's own words.
 #[test]
 fn a_failed_capture_shows_the_failure_string() {
     benilla_formats::wow_data_or_skip!();

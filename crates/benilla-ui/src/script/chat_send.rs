@@ -1,77 +1,84 @@
-//! **`SendChatMessage`** — the addon's own line into the chat wire (decision 1199).
+//! `SendChatMessage(text [, chatType [, language [, target]]])` (`0x49f1e0`): the engine verb an
+//! addon speaks through, with no FrameXML between it and the wire. `chatType` defaults to
+//! `"SAY"`; the fourth argument is the whisper target or the channel's number.
 //!
-//! 24 corpus addons call it, and it is the one verb that makes an addon able to *say* anything:
-//! every "announce the pull", every raid warning helper, every whisper-the-invite bot is this one
-//! call. It is `function engine` in the captured `_G` — the engine takes the line and the wire
-//! sends it, with no FrameXML in between.
+//! It queues a [`ChatSend`] rather than going through the edit box, whose drain runs the slash
+//! grammar: an addon's `SendChatMessage("/dance")` says the characters. The reference splits the
+//! same way, `ChatEdit_SendText` parsing and `SendChatMessage` not.
 //!
-//! ```lua
-//! SendChatMessage(text [, chatType [, language [, channel/target]]])
-//! ```
+//! `language` starts as the speaker's race base language (`0x5ec890`, at `0x49f2aa`). A string or
+//! number third argument is matched by name, case-insensitively, against every `Languages.dbc`
+//! row (`0x49f8a0`), known to the character or not, and a miss raises `Unknown language`
+//! (`0x844afc`, at `0x49f2e1`): a number is its text, so `7` raises. Refusing a tongue the
+//! character never learned is the server's (vmangos `ChatHandler.cpp:175`).
 //!
-//! `chatType` defaults to `"SAY"`; `language` is accepted and **ignored** (`0x49f1e0`); the fourth
-//! argument is the whisper target for `"WHISPER"` and the channel name or number for
-//! `"CHANNEL"`, and is unused otherwise.
-//!
-//! ## The seam
-//!
-//! Same shape as [`super::social`]'s: the verb queues a [`ChatSend`] and the app drains it
-//! ([`super::UiScript::take_chat_sends`]) into `ClientCommand::Chat`. It deliberately does **not**
-//! go through the chat edit box's own drain: that path runs the slash grammar, and an addon's
-//! `SendChatMessage("/dance", "SAY")` must *say the four characters*, not dance. The reference has
-//! the same split — `ChatEdit_SendText` parses, `SendChatMessage` does not.
-//!
-//! ## What is not carried, and why
-//!
-//! **`language`.** The reference resolves a language id to the garble table the receiver's client
-//! reverses. benilla sends every line in the speaker's own tongue because the app's chat command
-//! carries no language field yet, and inventing one here would put the id in a queue nothing
-//! reads. Accepted and dropped, said out loud rather than silently — an addon passing it is not
-//! wrong, we are incomplete.
-//!
-//! **No rate limit and no length cap.** The reference truncates at 255 and the *server* throttles.
-//! Ours passes the line through; vmangos enforces both, so a misbehaving addon meets the same wall
-//! it would meet on a real server rather than a client-side one we made up.
+//! Deviation: no truncation at 255 characters (`0x49f604`), because vmangos refuses a longer line
+//! itself (`Chat.cpp:2177`): it is dropped where the reference sends its first 255. The server
+//! throttles in both.
 
 use mlua::{Lua, MultiValue, Value};
 
 use super::Model;
 
 impl super::UiScript {
-    /// Push the player's **default chat language** — the name `GetDefaultLanguage()` answers.
-    /// `None` (the default) is the reference's own no-player-object state, which returns **zero
-    /// Lua values**, not `nil`. The app resolves it once per world entry from
-    /// `ChrRaces.BaseLanguage` × `Languages.dbc` (`benilla_formats::DefaultLanguages`).
+    /// Push the name `GetDefaultLanguage()` answers. `None` is the reference's no-player state,
+    /// which returns zero values, not `nil`; the app resolves it per world entry from
+    /// `ChrRaces.BaseLanguage` and `Languages.dbc`.
     pub fn set_default_language(&mut self, name: Option<String>) {
         self.model_mut().default_language = name;
     }
 }
 
-/// One queued outbound chat line (`SendChatMessage`), drained by the app into the wire.
-///
-/// Plain data — [`super::social::SocialRequest`]'s twin, and deliberately *not* the app's own
-/// `ClientCommand::Chat`: this crate has no wire types and must not grow one.
+/// One queued `SendChatMessage` line, plain data: this crate holds no wire types.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatSend {
-    /// The line, verbatim. Never parsed here — a leading `/` is four characters, not a command.
+    /// The line, verbatim: a leading `/` is text, not a command.
     pub text: String,
-    /// The chat type token, uppercased (`"SAY"`, `"YELL"`, `"PARTY"`, `"GUILD"`, `"WHISPER"`,
-    /// `"CHANNEL"`, `"EMOTE"`, …). Uppercased because the reference's own token compare is, and
-    /// addons write `"say"` as often as `"SAY"`.
+    /// The chat type token (`"SAY"`, `"WHISPER"`, `"CHANNEL"`, …), uppercased, since the
+    /// reference's compare ignores case.
     pub chat_type: String,
-    /// The whisper target (`"WHISPER"`) or the channel name/number (`"CHANNEL"`); `None`
-    /// otherwise. Kept as a string for the channel case, where an addon passes either `"General"`
-    /// or `1` and the app resolves both.
+    /// The fourth argument as `lua_tostring` gives it (`0x49f306`): the whisper target, or the
+    /// channel number the app resolves to a joined channel's name.
     pub target: Option<String>,
+    /// The `Languages.dbc` id the third argument named; `None` is the speaker's default.
+    pub language: Option<u32>,
+}
+
+impl ChatSend {
+    /// The empty-line gate (`0x49f28d`-`0x49f2a1`): a line whose first byte is NUL ends the call,
+    /// before the language is read or anything is sent, unless its type is AFK (`0x14`) or DND
+    /// (`0x15`). The chat-type lookup and its "Unknown chat type" (`0x49f27f`) come first.
+    pub fn ends_at_empty_line(&self) -> bool {
+        ends_at_empty_line(&self.text, &self.chat_type)
+    }
+}
+
+/// [`ChatSend::ends_at_empty_line`] on the binding's arguments, before the line is built.
+fn ends_at_empty_line(text: &str, chat_type: &str) -> bool {
+    text.bytes().next().unwrap_or(0) == 0 && !matches!(chat_type, "AFK" | "DND")
 }
 
 impl super::UiScript {
-    /// The languages this character **knows**, in `Languages.dbc` row order — what
-    /// `GetNumLaguages`/`GetLanguageByIndex` walk. The app folds it the reference's way:
-    /// `0x4b25b0` stores `[languageId] = spellId` for every known spell whose `Effect_1 == 39`,
-    /// and `0x5ec720` answers non-zero only when that spell's skill line is in the player's
-    /// skill block. Fires `LANGUAGE_LIST_CHANGED`
-    /// (`0x49b970`, event 0x102) when the list moves.
+    /// Push `Languages.dbc` as `(ID, Name_lang)` rows in file order, the table `SendChatMessage`
+    /// matches its language name against (`[0xc0db40]`, count `[0xc0db44]`).
+    pub fn set_language_table(&mut self, rows: Vec<(u32, String)>) {
+        self.model_mut().language_table = rows;
+    }
+}
+
+/// `0x49f8a0`: the first row, in file order, whose name equals `name` ignoring case (`SStrCmpI`
+/// `0x64a4c0`, unbounded length), checked against every row, not only the known languages.
+fn language_id(table: &[(u32, String)], name: &str) -> Option<u32> {
+    table
+        .iter()
+        .find(|(_, row)| row.eq_ignore_ascii_case(name))
+        .map(|&(id, _)| id)
+}
+
+impl super::UiScript {
+    /// The languages this character knows, in `Languages.dbc` row order: a language counts when a
+    /// known spell with `Effect_1 == 39` teaches it (`0x4b25b0`) and its skill line is in the skill
+    /// block (`0x5ec720`). A change fires `LANGUAGE_LIST_CHANGED` (`0x49b970`, event 0x102).
     pub fn set_known_languages(&mut self, names: Vec<String>) {
         let changed = {
             let mut model = self.model_mut();
@@ -89,8 +96,8 @@ impl super::UiScript {
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
-    // GetNumLaguages() — `0x49fb30`, the binary's own spelling. Walks `Languages.dbc` and counts
-    // the rows `0x5ec720` answers non-zero for; **one number**.
+    // GetNumLaguages(), `0x49fb30`: one number, the known languages. The misspelling is the
+    // reference's registered name (`0x843628`); the correct spelling is nowhere in the binary.
     lua.globals().set(
         "GetNumLaguages",
         lua.create_function(|lua, _ignored: MultiValue| {
@@ -98,8 +105,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(model.known_languages.len() as i64)
         })?,
     )?;
-    // GetLanguageByIndex(i) — `0x49fbe0`: the same walk, pushing **one string** — the
-    // `Name_lang` of the i-th (1-based) *known* language. Positional among the known rows,
+    // GetLanguageByIndex(i), `0x49fbe0`: the `Name_lang` of the i-th known language, positional,
     // never a row number or a language id; past the end it pushes nothing.
     lua.globals().set(
         "GetLanguageByIndex",
@@ -115,33 +121,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
-    // GetDefaultLanguage() → **exactly ONE value, a string** — or **zero values**, which is not
-    // the same thing (`0x49fcd0`).
-    //
-    // The binding takes **no arguments** (no arg-presence check and no arg-fetch call anywhere in
-    // its 94 bytes — contrast its sibling `GetLanguageByIndex 0x49fbe0`, which opens with
-    // `0x6f34d0`), so the corpus's `GetDefaultLanguage("player")` — `Auctioneer/AucAskPrice.lua:42`
-    // and `Enchantrix/EnchantrixBarker.lua:149` both write it — is harmlessly ignored, here as
-    // there.
-    //
-    // There is exactly one push in the body and it is `0x6f3890` (push-STRING): the numeric
-    // language id is consumed as a table index and never reaches Lua, so this is not `(name, id)`
-    // and not an id. All **four** failure edges — no player object, a negative id, an id past the
-    // language count, a null record — converge on `0x49fd2a xor eax,eax; ret`, i.e. **zero Lua
-    // values**. That is shape 2 of the argument ABI ([`super::binding_abi`]) and it is the one
-    // place in this repo where the distinction is observable: the call's return-list COUNT is `0`
-    // outside the world and `1` inside it, while a single-value caller reads `nil` either way.
-    // Returning `nil` here would be a quiet divergence, so we do not.
-    //
-    // **Its sibling is misspelled in the binary, and is deliberately NOT registered here.** The
-    // `.data` `{const char* name, void* fn}` record at `0x843628` names `0x49fb30`
-    // **`GetNumLaguages`** — and a whole-image byte search for the correct spelling returns **zero
-    // hits** (with `GetNumLaguages` and `GetDefaultLanguage` as satisfied positive controls), so
-    // the typo is the only Lua-visible name and a faithful client would ship it. What is missing
-    // is not the name but the *answer*: `0x49fb30`'s body was not carved beyond "returns through
-    // the push-number helper", no corpus addon calls it at all, and registering it would mean
-    // inventing a count. The name is recorded here so that whoever carves the body knows how to
-    // spell the global.
+    // GetDefaultLanguage(), `0x49fcd0`: one string (`0x6f3890`), or zero values, never `nil`, on
+    // all four failure edges (`0x49fd2a`). It reads no arguments, so an addon's
+    // `GetDefaultLanguage("player")` is ignored.
     lua.globals().set(
         "GetDefaultLanguage",
         lua.create_function(|lua, _ignored: MultiValue| {
@@ -159,20 +141,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "SendChatMessage",
         lua.create_function(
-            |lua, (text, chat_type, _language, target): (String, Option<String>, Value, Value)| {
-                // The reference's default is SAY — an addon that passes only a string is saying it.
+            |lua, (text, chat_type, language, target): (String, Option<String>, Value, Value)| {
                 let chat_type = chat_type
                     .unwrap_or_else(|| "SAY".into())
                     .to_ascii_uppercase();
-                // The fourth argument is a name for WHISPER and a name-or-number for CHANNEL, so
-                // it arrives as either a string or a number and is normalised to text here rather
-                // than at every consumer.
-                let target = match target {
-                    Value::String(s) => Some(s.to_string_lossy()),
-                    Value::Integer(n) => Some(n.to_string()),
-                    Value::Number(n) => Some(format!("{n:.0}")),
+                // The language is read only past the empty-line gate. The line is queued
+                // anyway: the type check that precedes the gate is the app's, and the drain
+                // applies the gate after it.
+                let reads_language = !ends_at_empty_line(&text, &chat_type);
+                let language = match super::binding_abi::optional_string(lua, &language) {
+                    Some(name) if reads_language => {
+                        let model = lua.app_data_ref::<Model>().expect("model app_data");
+                        let id = language_id(&model.language_table, &name);
+                        Some(
+                            id.ok_or_else(|| mlua::Error::RuntimeError("Unknown language".into()))?,
+                        )
+                    }
                     _ => None,
                 };
+                // `lua_isstring` then `lua_tostring` (`0x49f2f6`, `0x49f306`): a number is its
+                // text, so `2.7` reaches the channel's `SStrToInt` as "2.7", which reads 2.
+                let target = super::binding_abi::optional_string(lua, &target);
                 lua.app_data_mut::<Model>()
                     .expect("model app_data")
                     .chat_sends
@@ -180,6 +169,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         text,
                         chat_type,
                         target,
+                        language,
                     });
                 Ok(())
             },
@@ -200,11 +190,6 @@ mod tests {
     use super::*;
     use crate::script::UiScript;
 
-    /// The default is SAY, the type is uppercased, and **a leading slash is text**.
-    ///
-    /// That last one is the whole reason this verb has its own queue rather than reusing the chat
-    /// box's: the box's drain runs the slash grammar, and an addon announcing "/dance" wants the
-    /// six characters said, not the emote played. The reference splits the same way.
     #[test]
     fn send_chat_message_queues_a_line_without_parsing_it() {
         let mut s = UiScript::new().unwrap();
@@ -217,22 +202,21 @@ mod tests {
                     text: "hello".into(),
                     chat_type: "SAY".into(),
                     target: None,
+                    language: None,
                 },
                 ChatSend {
                     text: "/dance".into(),
                     chat_type: "SAY".into(),
                     target: None,
+                    language: None,
                 },
             ]
         );
-        // Drained, not re-read.
         assert!(s.take_chat_sends().is_empty());
     }
 
-    /// The fourth argument is a whisper target or a channel, and a channel arrives as either a
-    /// name or a number — both normalise to text so one consumer handles both.
     #[test]
-    fn the_target_argument_takes_a_name_or_a_channel_number() {
+    fn the_target_argument_is_its_lua_tostring_text() {
         let mut s = UiScript::new().unwrap();
         s.run(r#"SendChatMessage("hi", "WHISPER", nil, "Bob")"#)
             .unwrap();
@@ -240,28 +224,87 @@ mod tests {
             .unwrap();
         s.run(r#"SendChatMessage("lf1m", "CHANNEL", nil, "General")"#)
             .unwrap();
+        s.run(r#"SendChatMessage("lf1m", "CHANNEL", nil, 2.7)"#)
+            .unwrap();
+        s.run(r#"SendChatMessage("lf1m", "CHANNEL", nil, {})"#)
+            .unwrap();
         let sent = s.take_chat_sends();
         assert_eq!(sent[0].target.as_deref(), Some("Bob"));
         assert_eq!(sent[1].target.as_deref(), Some("1"));
         assert_eq!(sent[2].target.as_deref(), Some("General"));
+        assert_eq!(
+            sent[3].target.as_deref(),
+            Some("2.7"),
+            "not rounded: the app's `SStrToInt` reads 2"
+        );
+        assert_eq!(sent[4].target, None, "a table is no string");
         assert_eq!(sent[1].chat_type, "CHANNEL");
     }
 
-    /// `language` is accepted and dropped — an addon passing it must not error, and the module
-    /// doc says why nothing reads it.
-    #[test]
-    fn the_language_argument_is_accepted_and_ignored() {
-        let mut s = UiScript::new().unwrap();
-        s.run(r#"SendChatMessage("hi", "SAY", 7)"#).unwrap();
-        assert_eq!(s.take_chat_sends().len(), 1);
-        assert!(s.errors().is_empty(), "{:?}", s.errors());
+    /// Three `Languages.dbc` rows, in the shipped file's order.
+    fn with_languages(s: &mut UiScript) {
+        s.set_language_table(vec![
+            (1, "Orcish".into()),
+            (2, "Darnassian".into()),
+            (7, "Common".into()),
+        ]);
     }
 
-    /// **One string, or ZERO values — never `nil`.** The four failure edges reach
-    /// `0x49fd2a xor eax,eax; ret` *without* passing through `luaL_error`, which is the only place
-    /// the "returns nothing" shape is real. A single-value caller cannot tell the two apart; the
-    /// return-list count can ([`UiScript::arity`]), and both corpus callers feed the result straight to
-    /// `SendChatMessage`, where the difference is an argument that exists versus one that does not.
+    #[test]
+    fn a_language_name_sends_its_languages_dbc_id() {
+        let mut s = UiScript::new().unwrap();
+        with_languages(&mut s);
+        s.run(r#"SendChatMessage("hi", "SAY", "Darnassian")"#)
+            .unwrap();
+        s.run(r#"SendChatMessage("hi", "YELL", "dARNASSIAN")"#)
+            .unwrap();
+        s.run(r#"SendChatMessage("hi", "WHISPER", "orcish", "Bob")"#)
+            .unwrap();
+        let sent = s.take_chat_sends();
+        assert_eq!(sent[0].language, Some(2), "Darnassian's row ID");
+        assert_eq!(sent[1].language, Some(2), "SStrCmpI ignores case");
+        assert_eq!(
+            sent[2].language,
+            Some(1),
+            "a language the character may not know is sent: the server refuses it"
+        );
+        assert_eq!(sent[2].target.as_deref(), Some("Bob"));
+    }
+
+    #[test]
+    fn no_language_argument_speaks_the_default() {
+        let mut s = UiScript::new().unwrap();
+        with_languages(&mut s);
+        s.run(r#"SendChatMessage("hi")"#).unwrap();
+        s.run(r#"SendChatMessage("hi", "SAY", nil)"#).unwrap();
+        s.run(r#"SendChatMessage("hi", "SAY", {})"#).unwrap();
+        s.run(r#"SendChatMessage("hi", "SAY", true)"#).unwrap();
+        let sent = s.take_chat_sends();
+        assert_eq!(sent.len(), 4);
+        assert!(
+            sent.iter().all(|c| c.language.is_none()),
+            "not a string, so `lua_isstring` keeps the default: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_language_raises_and_sends_nothing() {
+        let mut s = UiScript::new().unwrap();
+        with_languages(&mut s);
+        for arg in [r#""Klingon""#, r#""""#, "7", r#""Darnassian ""#] {
+            let err = s
+                .run(&format!(r#"SendChatMessage("hi", "SAY", {arg})"#))
+                .expect_err(&format!("{arg} names no row"));
+            assert!(err.to_string().contains("Unknown language"), "{arg}: {err}");
+        }
+        assert!(s.take_chat_sends().is_empty());
+        // AFK and DND pass the empty-line gate, so their language is read.
+        assert!(s.run(r#"SendChatMessage("", "AFK", "Klingon")"#).is_err());
+        // An empty line of any other type ends before the language is read.
+        s.run(r#"SendChatMessage("", "SAY", "Klingon")"#).unwrap();
+    }
+
+    /// The count matters: an addon passes the result straight to `SendChatMessage` as `language`.
     #[test]
     fn get_default_language_is_one_string_or_zero_values() {
         let mut s = UiScript::new().unwrap();
@@ -281,7 +324,7 @@ mod tests {
             s.eval::<String>("return GetDefaultLanguage()").unwrap(),
             "Common"
         );
-        // The binding reads NO arguments; the corpus passes `"player"` anyway and must not error.
+        // The binding reads no arguments; addons pass `"player"` anyway.
         assert_eq!(
             s.eval::<String>(r#"return GetDefaultLanguage("player")"#)
                 .unwrap(),

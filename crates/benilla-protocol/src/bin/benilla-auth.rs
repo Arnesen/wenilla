@@ -1,6 +1,6 @@
 //! `benilla-auth`: SRP6 logon against a vanilla realmd, printing the realm list.
 //!
-//! Example: `cargo run --bin benilla-auth -- one pone localhost`
+//! Example: `cargo run --bin benilla-auth -- <account> <password> localhost`
 
 // These CLIs are native tools — a browser has no argv, no realmd to dial by hand, and none of the
 // blocking `WorldSession` twins the probe harness is written against. The bin target still needs a

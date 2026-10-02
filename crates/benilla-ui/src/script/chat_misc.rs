@@ -1,27 +1,22 @@
-//! The chat slash handlers' engine verbs that are not sends, channels, or window state —
-//! `DoEmote`, `RandomRoll`, `AssistByName`, `UninviteByName`, `ConsoleExec`, `LoggingChat`,
-//! `LoggingCombat`. Each is what a stock `ChatFrame.lua` built-in handler calls once it has
-//! parsed the line (`SlashCmdList` walk, decision 1195); the app used to parse these lines
-//! itself (`ui_chat/input/parse.rs`) and now drains what the reference's own Lua decided.
-//!
-//! Every verb is a queue or a flag — the engine-free seam (0068 §3): the VM never sees the wire,
-//! the app drains and sends. Registrar addresses:
-//! `0x49fd30 DoEmote`, `0x48c7b0 RandomRoll`, `0x489c40 AssistByName`, `0x48a610 UninviteByName`.
+//! The engine verbs stock `ChatFrame.lua`'s slash handlers call that are not sends, channels or
+//! window state: `DoEmote` (`0x49fd30`), `RandomRoll` (`0x48c7b0`), `AssistByName` (`0x489c40`),
+//! `UninviteByName` (`0x48a610`), `ConsoleExec`, `LoggingChat` and `LoggingCombat`. Each is a
+//! queue or a flag the app drains.
 
 use mlua::{Lua, MultiValue, Value};
 
 use super::Model;
 
-/// `DoEmote(token [, target])` — the `EmotesText.dbc` **name token** (`"WAVE"`, not `/wave`) and
-/// the optional target name the handler split off the line.
+/// `DoEmote(token [, target])`: the `EmotesText.dbc` name token (`"WAVE"`, not `/wave`) and an
+/// optional target string (`0x49fd30` reads arg 2 with `lua_tostring`): a player name, or a `%`
+/// word for the selection. A non-string, non-number second argument reads as none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmoteRequest {
     pub token: String,
     pub target: Option<String>,
 }
 
-/// Lua number coercion the way the reference's `lua_tonumber` does it: an integer, a float, or a
-/// string that parses; anything else is 0.
+/// The reference's `lua_tonumber` coercion: a number or a numeric string; anything else is 0.
 fn to_u32(v: &Value) -> u32 {
     match v {
         Value::Integer(i) => u32::try_from(*i).unwrap_or(0),
@@ -53,8 +48,7 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().emote_requests)
     }
 
-    /// `RandomRoll(min, max)` calls since the last drain, as the app sends them
-    /// (`CMSG_RANDOM_ROLL`).
+    /// `RandomRoll(min, max)` calls since the last drain, each a `CMSG_RANDOM_ROLL`.
     pub fn take_roll_requests(&mut self) -> Vec<(u32, u32)> {
         std::mem::take(&mut self.model_mut().roll_requests)
     }
@@ -64,21 +58,18 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().uninvite_requests)
     }
 
-    /// `ConsoleExec` lines whose first word is not a registered CVar — the console commands the
-    /// app owns (`reloadui`, …). A CVar line is written to the store directly and never appears
-    /// here.
+    /// `ConsoleExec` lines that write no CVar: the app's console commands (`reloadui`, …).
     pub fn take_console_lines(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().console_lines)
     }
 
-    /// `(chat, combat)` — the two logging flags as `LoggingChat`/`LoggingCombat` last set them.
+    /// `(chat, combat)`, as `LoggingChat` and `LoggingCombat` last set them.
     pub fn logging_flags(&self) -> (bool, bool) {
         let model = self.model_mut();
         (model.logging_chat, model.logging_combat)
     }
 
-    /// Whether either logging flag moved since the last drain — the app's cue to open or close
-    /// its log files.
+    /// Whether a logging flag moved since the last drain: the app's cue to open or close its logs.
     pub fn take_logging_changes(&mut self) -> bool {
         std::mem::take(&mut self.model_mut().logging_changed)
     }
@@ -89,14 +80,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "DoEmote",
-        lua.create_function(|lua, (token, target): (Option<String>, Option<String>)| {
+        lua.create_function(|lua, (token, target): (Option<String>, Value)| {
             let Some(token) = token.filter(|t| !t.is_empty()) else {
                 return Ok(());
             };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.emote_requests.push(EmoteRequest {
                 token: token.to_ascii_uppercase(),
-                target: target.filter(|t| !t.trim().is_empty()),
+                target: match target {
+                    Value::String(s) => Some(s.to_string_lossy()),
+                    Value::Integer(i) => Some(i.to_string()),
+                    Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                }
+                .filter(|t| !t.is_empty()),
             });
             Ok(())
         })?,
@@ -119,9 +116,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model
-                .selection_requests
-                .push(super::SelectionRequest::AssistByName(name));
+            model.script_calls.push(super::ScriptCall::Select(
+                super::SelectionRequest::AssistByName(name),
+            ));
             Ok(())
         })?,
     )?;
@@ -138,12 +135,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // ConsoleExec("name value") — the console line `/console` hands over. A registered CVar
-    // WITH a value is written the way `SetCVar` writes it (same store, same change queue, no
-    // CVAR_UPDATE token), synchronously, so a script reading it back on the next line sees the
-    // write. Everything else — a command name, or a bare CVar name, which the reference's
-    // per-CVar console command answers with `CVar "%s" is "%s"` (`0x63dde0`) — is a line for
-    // the host's command registry (decision 2303).
+    // `ConsoleExec("name value")`: a registered CVar with a value is written at once, as `SetCVar`
+    // writes it; anything else, a bare CVar name included (the reference answers it with
+    // `CVar "%s" is "%s"`, `0x63dde0`), goes to the app's command registry.
     g.set(
         "ConsoleExec",
         lua.create_function(|lua, line: Option<String>| {
@@ -156,7 +150,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let is_cvar = model.cvars.contains_key(&name.to_ascii_lowercase());
             if is_cvar && !value.is_empty() {
-                super::cvars::write_cvar(&mut model, name, value.to_string(), None);
+                super::cvars::write_cvar(&mut model, name, value.to_string());
             } else {
                 model.console_lines.push(line.clone());
             }
@@ -221,6 +215,24 @@ mod tests {
         assert!(s.take_emote_requests().is_empty(), "drained");
     }
 
+    /// The second argument is a string, never a unit token: `"target"` is a name like any other,
+    /// and `%t` reaches the app's selection arm untouched (`0x49fdb1`).
+    #[test]
+    fn do_emote_second_argument_is_passed_as_a_string() {
+        let mut s = UiScript::new().unwrap();
+        s.run("DoEmote('WAVE', 'target') DoEmote('WAVE', '%t') DoEmote('WAVE', {})")
+            .unwrap();
+        let targets: Vec<_> = s
+            .take_emote_requests()
+            .into_iter()
+            .map(|e| e.target)
+            .collect();
+        assert_eq!(
+            targets,
+            vec![Some("target".into()), Some("%t".into()), None]
+        );
+    }
+
     #[test]
     fn random_roll_coerces_the_strings_the_stock_handler_passes() {
         let mut s = UiScript::new().unwrap();
@@ -252,8 +264,7 @@ mod tests {
             "0.8",
             "the CVar store is the same one SetCVar writes, matched case-insensitively"
         );
-        // A bare CVar name is the host's to answer (2303: the reference prints its value from
-        // the per-CVar console command), so it rides the command lane like `reloadui`.
+        // A bare CVar name, whose value the reference prints, goes to the command lane.
         assert_eq!(
             s.take_console_lines(),
             vec!["reloadui".to_string(), "uiScale".to_string()]

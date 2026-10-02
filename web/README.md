@@ -140,13 +140,14 @@ as a resource.
 Where control goes: every key the client reads collapses into one `BindingsState` resource
 that the movement controller, jump, sit, TAB-targeting, attack and the camera zoom read —
 nothing downstream reads raw keys — so the bridge asserts *commands by name* into that state
-(`MOVEFORWARD`, `JUMP`, `ACTIONBUTTON1`: the 202 names in the Key Bindings window, listed in
-the `ready` event). A page cannot do anything a key cannot, and rebinding keys does not change
-what the page's `hold('MOVEFORWARD')` does. `Kind::Held` commands latch (re-asserted every
-frame until released; dropped when the chat box takes focus, like keys, and resumed when it
-loses it, unlike keys — a stick has no re-press); host edges fire once with an amount (the
-wheel's zoom notch); action-button commands run their Lua press and release bodies
-back-to-back, the wheel-notch law that makes a button cast. Movement, jump, sit, sheath,
+(`MOVEFORWARD`, `JUMP`, `ACTIONBUTTON1`: the names in the Key Bindings window, listed in the
+`ready` and `commands` events). Each runs its `Bindings.xml` body exactly as a key does, so a
+page cannot do anything a key cannot, and rebinding keys does not change what the page's
+`hold('MOVEFORWARD')` does. A hold runs the press half once and stays latched (re-asserted
+every frame until released; dropped when the chat box takes focus, like keys, and resumed when
+it loses it, unlike keys — a stick has no re-press), and its release runs the `runOnUp` half.
+A fire is a tap: the press now and the release a frame later, which is what makes an action
+button cast; its amount scales the one-shot the body fires (the wheel's zoom notch). Movement, jump, sit, sheath,
 autorun and interaction have no Lua verbs in 1.12, which is why the bridge goes under the
 bindings instead of through the VM for them. Casting, targeting by name, quests, bags and
 reading state back out go through the VM: `lua(chunk)` evaluates a chunk and returns its
@@ -196,7 +197,8 @@ Events (`wenilla.on(name, cb)`):
 
 | name | payload |
 |---|---|
-| `ready` | `{ version, commands: [{name, kind: 'held'|'host'|'lua', category}] }` — once, when the wasm first sees the object |
+| `ready` | `{ version, commands: [{name, category}] }` — once, when the wasm first sees the object (`commands` is empty before the first UI load) |
+| `commands` | `[{name, category}]` — the binding commands, again, whenever the VM's table changes (a UI load, an addon's bindings) |
 | `state` | `{ state, connected }` on change (any screen, not only in-world) |
 | `map` | `{ id }` on a worldport |
 | `zone` | the `zone` block, on change |

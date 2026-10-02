@@ -1,41 +1,37 @@
-//! Drives the stock `Interface\FrameXML\MailFrame.xml` through the engine (decision 0544 P1/P2) —
-//! the mail twin of `tradeskill_frame.rs`: it loads the same file chain the app does (cut to the
-//! mail window's dependency prefix), pushes a synthetic inbox, opens the window with the app's own
-//! `MAIL_SHOW`/`MAIL_INBOX_UPDATE` events, and asserts the transcribed Lua actually paints — the
-//! named regions exist, the rows populate from a fed `MailState`, the paging math is right, and the
-//! unread/read row state tracks the wire `wasRead` flag.
+//! Drives the stock `MailFrame.xml` off the player's chain with a synthetic inbox and the app's
+//! own `MAIL_SHOW`/`MAIL_INBOX_UPDATE` events, and asserts what it paints and queues.
 
 mod common;
 
-use benilla_ui::script::{MailInboxRow, MailInvoice, MailState, UiScript};
+use benilla_ui::script::{
+    EditAction, EditBoxAdvanceRequest, EditUnit, MailInboxRow, MailInvoice, MailState,
+    MeasureRequest, TextMeasure, UiScript,
+};
 
-/// The mail window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
-/// MerchantFrame.xml rides along because MailFrame.xml reuses its global `BenillaMoney_*` coin
-/// helpers (postage display), so a load error in either fails here.
+/// The mail window's load prefix, in the app's order.
 const FILES: &[&str] = &[
-    "Interface\\FrameXML\\Fonts.xml",
-    r"Interface\FrameXML\MoneyFrame.lua",
-    r"Interface\FrameXML\MoneyFrame.xml",
-    // The send tab's money entry comes off the chain since 1882 — `MoneyInputFrameTemplate` and
-    // the `MoneyInputFrame_*` verbs. Seated straight after MoneyFrame.xml, benilla.toc's order.
-    r"Interface\FrameXML\MoneyInputFrame.lua",
-    r"Interface\FrameXML\MoneyInputFrame.xml",
     "Interface\\FrameXML\\GlobalStrings.lua",
-    r"Interface\FrameXML\UIParent.xml",
-    "ScrollTemplates.xml", // our scroll kit + the placeholder icon
-    r"Interface\FrameXML\UIPanelTemplates.lua",
-    r"Interface\FrameXML\UIPanelTemplates.xml",
+    "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\BasicControls.xml",
     "Interface\\FrameXML\\LocaleProperties.lua",
-    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine (1960)
+    r"Interface\FrameXML\UIParent.xml",
+    r"Interface\FrameXML\MoneyFrame.lua",
+    r"Interface\FrameXML\MoneyFrame.xml",
+    // The send tab's money entry: `MoneyInputFrameTemplate` and the `MoneyInputFrame_*` verbs.
+    r"Interface\FrameXML\MoneyInputFrame.lua",
+    r"Interface\FrameXML\MoneyInputFrame.xml",
     "Interface\\FrameXML\\GameTooltip.xml",
-    r"Interface\FrameXML\ItemButtonTemplate.xml", // the send tab's attachment slot inherits it
-    // The stock tabs inherit `FriendsFrameTabTemplate`, and `inherits=` resolves at load — so the
-    // social window and the kit it needs come first, as the reference's toc has them (1970).
+    // The tabs inherit `FriendsFrameTabTemplate` and `inherits=` resolves at load, so the social
+    // window and its kit come first, as in the stock toc.
     "Interface\\FrameXML\\UIDropDownMenu.xml",
+    r"Interface\FrameXML\UIPanelTemplates.lua",
+    r"Interface\FrameXML\UIPanelTemplates.xml",
     "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+    "Interface\\FrameXML\\StaticPopup.xml", // the dialog engine
+    r"Interface\FrameXML\ItemButtonTemplate.xml", // the send tab's attachment slot inherits it
     "Interface\\FrameXML\\FriendsFrame.xml",
     "Interface\\FrameXML\\MailFrame.xml",
+    "ScrollTemplates.xml", // our scroll kit + the placeholder icon
 ];
 
 fn load_ui(script: &UiScript) {
@@ -74,9 +70,8 @@ fn row(sender: &str, subject: &str, was_read: bool, item_id: u32, cod: u32) -> M
     }
 }
 
-/// One Linen Cloth in the backpack — the send tab's attachment fixture. `ClickSendMailItemButton`
-/// reads the cursor, and `GetSendMailItem` answers off the bag slot it came from, so the row needs
-/// a real name and texture for the stock tab to title the letter with.
+/// A Linen Cloth stack in the backpack, the send tab's attachment: `GetSendMailItem` answers off
+/// its bag slot, so it needs a real name and texture.
 fn one_linen_backpack() -> benilla_ui::script::ContainerState {
     let mut slots = std::collections::HashMap::new();
     slots.insert(
@@ -164,8 +159,8 @@ fn mail_show_opens_and_inbox_populates() {
             .unwrap(),
         "Warchief's orders"
     );
-    // The row's clickable child button is shown for a populated row, hidden past the 2 mails (the
-    // reference row FRAME stays shown — only $parentButton toggles; ref InboxFrame_Update l.120/180).
+    // Only the row's `$parentButton` toggles; the row frame stays shown (`MailFrame.lua:120`,
+    // `:180`).
     assert!(s.eval::<bool>("return MailItem1Button:IsShown()").unwrap());
     assert!(!s.eval::<bool>("return MailItem3Button:IsShown()").unwrap());
 
@@ -204,9 +199,6 @@ fn paging_math_enables_next_only_when_overflowing() {
         .unwrap());
 }
 
-/// The unread/read row *coloring* (SetTextColor / SetVertexColor) has no engine getter to assert
-/// against, so the harness verifies the other observable per-row state the same Update paints: the
-/// COD tag shows on a COD mail and hides on a plain one, and the plain row's money field is nil.
 #[test]
 fn cod_tag_shows_on_a_cod_mail() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -244,7 +236,6 @@ fn opening_a_letter_shows_the_open_frame_and_queues_the_body() {
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
     let _ = s.take_mail_opens();
 
-    // Click row 1: the check button toggles on → open the letter.
     // A programmatic click toggles the check button on, then fires OnClick (this = the button).
     s.run("MailItem1Button:Click()").unwrap();
     assert!(
@@ -260,14 +251,9 @@ fn opening_a_letter_shows_the_open_frame_and_queues_the_body() {
     assert!(s.take_errors().is_empty());
 }
 
-/// **The letter and the centre seat exclude each other, in BOTH arrival orders** (decision 1520,
-/// director-reported and ref-checked): with the mailbox at the left slot and the character sheet
-/// pushed to centre beside it (its pushable=2 row), clicking a mail item must EVICT the sheet —
-/// the letter's OnShow is the ref's own (`if GetCenterFrame() then HideUIPanel(...)`, ref
-/// MailFrame.xml l.1903-1907) — not open underneath it, which is what a bare Show did. The
-/// reverse order is 1507's child-window loop: a frame arriving at centre puts the letter away.
-/// Whichever comes second wins the space; they can never stack. A bare stand-in carries the
-/// CharacterFrame row (the real file isn't in this harness's chain).
+/// The open letter and the centre panel exclude each other in both orders: the letter's OnShow
+/// hides the centre frame (`MailFrame.xml:1903-1907`), and a frame arriving at centre hides the
+/// letter. A bare stand-in carries the `CharacterFrame` row.
 #[test]
 fn a_letter_and_the_centre_occupant_evict_each_other() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -278,7 +264,7 @@ fn a_letter_and_the_centre_occupant_evict_each_other() {
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
     let _ = s.take_mail_opens();
 
-    // The director's setup: mailbox left, character sheet pushed to centre beside it.
+    // Mailbox left, character sheet pushed to centre beside it.
     s.run(
         r#"local c = CreateFrame("Frame", "CharacterFrame") c:SetWidth(50); c:SetHeight(50) c:Hide()
            ShowUIPanel(CharacterFrame)"#,
@@ -293,7 +279,7 @@ fn a_letter_and_the_centre_occupant_evict_each_other() {
         "mail holds left, the sheet was pushed to centre"
     );
 
-    // Click a mail item: the letter opens AND the sheet is evicted — one thing beside the mailbox.
+    // Click a mail item: the letter opens and the sheet is evicted.
     s.run("MailItem1Button:Click()").unwrap();
     assert!(s.take_errors().is_empty());
     assert!(
@@ -314,8 +300,7 @@ fn a_letter_and_the_centre_occupant_evict_each_other() {
         "the mailbox itself is untouched"
     );
 
-    // The reverse arrival: re-opening the sheet over the open letter puts the LETTER away
-    // (1507's child-window loop) — the same exclusion, other direction.
+    // The reverse: re-opening the sheet over the open letter puts the letter away.
     s.run("ShowUIPanel(CharacterFrame)").unwrap();
     assert!(s.take_errors().is_empty());
     assert!(
@@ -351,8 +336,8 @@ fn reply_switches_to_send_tab_prefilled() {
     );
 }
 
-/// Closing an ordinary letter (no money, no item, textCreated=false) must NOT delete it — the
-/// reference OnHide rule (MailFrame.lua l.256-272) only purges a fully-taken husk.
+/// `OpenMailFrame_OnHide` deletes only a mail with no money, no item and `textCreated`
+/// (`MailFrame.lua:256-272`).
 #[test]
 fn closing_a_plain_letter_does_not_delete_it() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -377,12 +362,9 @@ fn closing_a_plain_letter_does_not_delete_it() {
     );
 }
 
-/// Closing a fully-taken husk (no money, no item, textCreated=TRUE) deletes it — the reference
-/// OnHide purge. This is also the live "mail vanished on close" moment against vmangos: the server
-/// stamps an EMPTY-BODY player mail MAIL_CHECK_MASK_COPIED (`MailHandler.cpp` l.421,
-/// `req->body.empty() ? MAIL_CHECK_MASK_COPIED : MAIL_CHECK_MASK_HAS_BODY`), which IS the wire's
-/// textCreated bit — so a subject-only letter with nothing attached auto-purges when closed, in
-/// the real 1.12 client exactly as here.
+/// A mail with no money, no item and `textCreated` is deleted on close. vmangos marks an
+/// empty-body player mail COPIED, the wire's `textCreated` bit (`MailHandler.cpp:421`), so a
+/// subject-only letter with nothing attached is deleted when closed.
 #[test]
 fn closing_a_taken_husk_deletes_it() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -406,8 +388,8 @@ fn closing_a_taken_husk_deletes_it() {
     );
 }
 
-/// The expiry text pluralizes like the reference (`GetText("DAYS_ABBR", nil, n)`: "Day"/"Days") —
-/// and carries the reference's own trailing space before the colour close (MailFrame.lua l.144).
+/// The expiry text pluralizes via `GetText("DAYS_ABBR", nil, n)` and keeps a trailing space before
+/// the colour close (`MailFrame.lua:144`).
 #[test]
 fn expiry_text_pluralizes_days() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -433,10 +415,8 @@ fn expiry_text_pluralizes_days() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The letter button — "make a permanent copy" (ref OpenMail_Update l.364-376): a mail whose body
-/// is takeable (`item_text_id != 0`) and not yet copied shows it; clicking queues the
-/// `TakeInboxTextItem` intent (→ `CMSG_MAIL_CREATE_TEXT_ITEM`). With money enclosed too, both
-/// buttons show and the caption reads "Take Attachments:".
+/// The permanent-copy letter button shows for a takeable, not yet copied body
+/// (`MailFrame.lua:364-376`); a click queues `TakeInboxTextItem` (`CMSG_MAIL_CREATE_TEXT_ITEM`).
 #[test]
 fn letter_button_shows_for_a_body_letter_and_click_queues_the_copy() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -471,8 +451,7 @@ fn letter_button_shows_for_a_body_letter_and_click_queues_the_copy() {
     assert!(s.take_errors().is_empty());
 }
 
-/// Once the body is copied (`textCreated`, the wire COPIED bit) the letter button hides — the same
-/// flag whose OnHide purge then deletes the husk on close.
+/// Once the body is copied (`textCreated`, the wire COPIED bit) the letter button hides.
 #[test]
 fn letter_button_hides_once_copied() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -495,7 +474,7 @@ fn letter_button_hides_once_copied() {
     assert!(s.take_errors().is_empty());
 }
 
-/// Hovering the coins shows the plain money tooltip (ref OpenMailMoneyButton OnEnter l.1823-1829).
+/// Hovering the coins shows the money tooltip (`MailFrame.xml:1823-1829`).
 #[test]
 fn money_button_hover_shows_the_amount_tooltip() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -508,7 +487,7 @@ fn money_button_hover_shows_the_amount_tooltip() {
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
     s.run("MailItem1Button:Click()").unwrap();
 
-    // The hover is the button's own inline handler (stock MailFrame.xml), reading `this`.
+    // The hover is the button's inline handler, which reads `this`.
     s.run("this = OpenMailMoneyButton OpenMailMoneyButton:GetScript(\"OnEnter\")()")
         .unwrap();
     assert!(
@@ -523,9 +502,7 @@ fn money_button_hover_shows_the_amount_tooltip() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The inbox page label stays EMPTY: the ref XML declares InboxCurrentPage (l.329) but no
-/// reference Lua ever writes it — the real 1.12 window shows nothing there ("Page 1" was our
-/// invention, now removed).
+/// `InboxCurrentPage` is declared (`MailFrame.xml:329`) but no stock Lua writes it.
 #[test]
 fn inbox_page_label_stays_empty_like_the_reference() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -543,13 +520,8 @@ fn inbox_page_label_stays_empty_like_the_reference() {
     );
 }
 
-/// A runtime-shown child `<Frame>` renders its own `<Layers>` FontStrings (decision 1517).
-///
-/// This pins a fact three window files spent months asserting the opposite of. `SendMailFrame`
-/// ships `hidden="true"` and is shown by the tab click; its title lives in its OWN Layers, not on
-/// the window root. The "flat layout" those windows adopted was a workaround for a constraint that
-/// never existed — and it produced no symptom precisely because it was always obeyed, which is why
-/// the claim needed a test rather than a header comment.
+/// A runtime-shown child `<Frame>` renders its own `<Layers>` FontStrings: `SendMailFrame` ships
+/// `hidden="true"` and holds its title in its own Layers.
 #[test]
 fn a_runtime_shown_pane_renders_its_own_layers() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -568,22 +540,13 @@ fn a_runtime_shown_pane_renders_its_own_layers() {
     );
 }
 
-/// The auction house's mail is a RECEIPT, not a letter (decision 1522). Before this the window
-/// showed exactly what the server wrote — `From: Unknown / Subject: 5529:0:2` over a body of
-/// `6C:10000:10000:25:500` — because nothing parsed it. The subject rewrite is the engine's
-/// (`ui_mail::invoice`); this is the pane, and it comes in two shapes off one set of seven values.
-///
-/// (`From: Unknown` is NOT part of the bug and is not fixed here: an auction mail carries no
-/// player sender guid, so the reference's own `if ( not sender ) then sender = UNKNOWN` is what
-/// puts that word there — MailFrame.lua l.286-288.)
-///
-/// The body text assertion is the 1527 fold-back: `GetInboxText` returns **nil** for an invoice by
-/// an explicit carve-out in the reference, so `SetText(nil)` leaves the page genuinely empty.
+/// An auction mail opens as a receipt, in a seller and a buyer shape; its subject is rewritten
+/// by `ui_mail::invoice`. It has no player sender, so the stock Lua shows `UNKNOWN`
+/// (`MailFrame.lua:286-288`), and `GetInboxText` returns nil for an invoice.
 #[test]
 fn an_auction_invoice_renders_as_a_receipt() {
     let _data = benilla_formats::wow_data_or_skip!();
-    /// The pane reads the player's own GlobalStrings, which a bare-XML harness has none of. Stand
-    /// in synthetic ones: what is under test is that each reaches the right region, never their text.
+    /// Synthetic GlobalStrings: the test checks each reaches the right region, not the text.
     fn strings(s: &UiScript) {
         s.run(concat!(
             "ITEM_SOLD_COLON = 'SOLD:' PURCHASED_BY_COLON = 'BY:' AMOUNT_RECEIVED_COLON = 'GOT:' ",
@@ -614,7 +577,7 @@ fn an_auction_invoice_renders_as_a_receipt() {
             .unwrap()
     };
 
-    // ── The seller's: the full sum. 1g sale + 25c deposit back − 5c the house takes. ──────────
+    // ── The seller's: 1g sale + 25c deposit back - 5c house cut. ──────────────────────────────
     let mut s = open_with(MailInvoice {
         seller: true,
         item_name: "Linen Cloth".into(),
@@ -631,7 +594,7 @@ fn an_auction_invoice_renders_as_a_receipt() {
     );
     assert_eq!(text(&s, "OpenMailInvoiceItemLabel"), "SOLD: Linen Cloth");
     assert_eq!(text(&s, "OpenMailInvoicePurchaser"), "BY: Twowarrior");
-    // bid == buyout, so it was bought outright rather than won on a bid.
+    // bid == buyout: bought outright.
     assert_eq!(text(&s, "OpenMailInvoiceBuyMode"), "(Buyout)");
     assert_eq!(money(&s, "OpenMailSalePriceMoneyFrame"), "10000");
     assert_eq!(money(&s, "OpenMailDepositMoneyFrame"), "25");
@@ -647,12 +610,12 @@ fn an_auction_invoice_renders_as_a_receipt() {
     assert_eq!(
         text(&s, "OpenMailBodyText"),
         "nil",
-        "an invoice has no letter body at all — `GetInboxText` nils it (1527), so the receipt has \
+        "an invoice has no letter body at all — `GetInboxText` nils it, so the receipt has \
          nothing to sit on top of"
     );
     assert!(s.take_errors().is_empty());
 
-    // ── The buyer's: one line, and the seller-only rows gone. Won on a bid, not bought out. ───
+    // ── The buyer's: one line, the seller-only rows hidden, won on a bid. ────────────────────
     let mut s = open_with(MailInvoice {
         seller: false,
         item_name: "Small Blue Pouch".into(),
@@ -675,7 +638,7 @@ fn an_auction_invoice_renders_as_a_receipt() {
         text(&s, "OpenMailInvoiceBuyMode"),
         "nil",
         "the buy-mode line is blank on a bid win, and a blank FontString reads back nil — \
-         `FontString:GetText 0x79d690` substitutes (decision 2110); this helper `tostring`s it"
+         `FontString:GetText 0x79d690` substitutes; this helper `tostring`s it"
     );
     assert_eq!(money(&s, "OpenMailTransactionAmountMoneyFrame"), "9000");
     for gone in [
@@ -694,8 +657,7 @@ fn an_auction_invoice_renders_as_a_receipt() {
     assert!(s.take_errors().is_empty());
 }
 
-/// A mail that is NOT an auction invoice keeps its letter: the pane stays hidden and the body text
-/// survives. The blanking above is aimed at one kind of mail and must not reach any other.
+/// A mail that is not an invoice keeps its body and shows no receipt.
 #[test]
 fn a_plain_letter_keeps_its_body_and_shows_no_receipt() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -716,14 +678,8 @@ fn a_plain_letter_keeps_its_body_and_shows_no_receipt() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The open letter's ring holds an ordinary **item** icon (`INV_Misc_Note_01`), so it has to go
-/// through the PORTRAIT verb and not a bare `SetTexture` — which is exactly what the reference
-/// reaches for here, and nowhere else in the file (`MailFrame.lua` l.174).
-///
-/// Set raw, the icon's square dark border shows through the ring's transparent corners as four
-/// little squares around the circle (director's report, 2026-08-22). The INBOX window's ring is the
-/// control: it holds `Mail-Icon`, purpose-drawn art that needs no mask, and the reference leaves
-/// that one at its `file=` (ref l.258) — so a blanket "mask every ring" would be wrong too.
+/// The open letter's ring takes an item icon through `SetPortraitToTexture` (`MailFrame.lua:174`),
+/// so it draws masked; the inbox ring's `Mail-Icon` stays a plain `file=` (`MailFrame.xml:258`).
 #[test]
 fn the_open_letters_ring_icon_is_masked_but_the_inboxs_is_not() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -770,19 +726,9 @@ fn the_open_letters_ring_icon_is_masked_but_the_inboxs_is_not() {
     );
 }
 
-/// **"I can't even type anything in the mailbox window"** — the director's report, at its cause.
-///
-/// The send tab has five edit boxes, and exactly one of them — `SendMailNameEditBox` — carries an
-/// XML `<OnChar>` (`SendMailFrame_SendeeAutocomplete`). That handler auto-enables the box for the
-/// keyboard walk, and the box is the first-registered keyboard frame in the window, so on every
-/// keystroke the walk reached it first and the **base** `CSimpleFrame::OnChar` gate consumed:
-/// script present → fire → stop. Nothing downstream of it ever saw a character. The reference
-/// cannot do that — `CSimpleEditBox` replaces slot `+0x5c` with `0x77a900`, which asks about focus
-/// and declines (`0x77a956`) when another box owns it, and never chains to the base gate at all
-/// ([`benilla_ui`]'s `script::keyboard::is_editbox`, decision 2145).
-///
-/// The one box that DID work is the assertion's control: the autocomplete box types, once per
-/// character, and the four that were dead now type too.
+/// Only `SendMailNameEditBox` has an `<OnChar>`, which puts it in the keyboard walk first. An edit
+/// box's `OnChar` slot `+0x5c` is `0x77a900`, which declines (`0x77a956`) when another box has
+/// focus and never chains to the base `CSimpleFrame` gate (`script::keyboard::is_editbox`).
 #[test]
 fn every_send_tab_box_takes_a_keystroke_not_just_the_one_with_an_onchar() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -794,8 +740,7 @@ fn every_send_tab_box_takes_a_keystroke_not_just_the_one_with_an_onchar() {
     s.resolve();
     assert!(s.eval::<bool>("return SendMailFrame:IsVisible()").unwrap());
 
-    // The box whose handler was eating everyone else's keys: it still types, and its OnChar still
-    // fires exactly once per character (the insert path's fire — never the walk's).
+    // The `<OnChar>` box types, and its OnChar fires once per character, from the insert.
     s.run("SendMailNameEditBox:SetText('') SendMailNameEditBox:SetFocus()")
         .unwrap();
     s.run("SendMailChars = 0 \
@@ -815,7 +760,7 @@ fn every_send_tab_box_takes_a_keystroke_not_just_the_one_with_an_onchar() {
         "OnChar fires once per character, from the insert — not a second time from the walk"
     );
 
-    // …and the four that took nothing at all. The money boxes are `numeric`, so they get digits.
+    // The other four boxes; the money boxes are `numeric`.
     for (box_name, typed, expect) in [
         ("SendMailSubjectEditBox", ["H", "e", "y"], "Hey"),
         ("SendMailBodyEditBox", ["o", "d", "d"], "odd"),
@@ -837,13 +782,8 @@ fn every_send_tab_box_takes_a_keystroke_not_just_the_one_with_an_onchar() {
     assert!(s.take_errors().is_empty(), "and nothing raised on the way");
 }
 
-/// **"Sending an item still leaves the subject and the item image in the input"** — the director's
-/// second report, at its cause: the compose-tab reset used to fire `MAIL_SEND_SUCCESS` *before* it
-/// dropped the attachment, so the stock `SendMailFrame_Reset`'s own tail
-/// (`SendMailFrame_Update` → `GetSendMailItem`) painted the just-sent item straight back into the
-/// form it had blanked one line earlier. `UiScript::reset_compose_tab` is now `0x4acdc0(1)` whole —
-/// zero the globals, THEN tail-fire the three events — so there is no window in which the two
-/// disagree (decision 2145).
+/// `UiScript::reset_compose_tab` is `0x4acdc0(1)`: it clears the attachment before firing the
+/// events, since `SendMailFrame_Reset` ends in `SendMailFrame_Update`, reading `GetSendMailItem`.
 #[test]
 fn the_compose_reset_clears_the_subject_and_the_attachment_together() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -854,8 +794,7 @@ fn the_compose_reset_clears_the_subject_and_the_attachment_together() {
     s.fire_event("MAIL_SHOW", vec![]);
     s.run("MailFrameTab_OnClick(2)").unwrap();
 
-    // Attach the item the way the player does: pick it up, click the send slot. The stock tab
-    // names the letter after it, which is the text that used to survive the send.
+    // Pick the item up and click the send slot; the stock tab names the letter after it.
     s.run("PickupContainerItem(0, 1) ClickSendMailItemButton()")
         .unwrap();
     s.fire_event("MAIL_SEND_INFO_UPDATE", vec![]);
@@ -866,8 +805,7 @@ fn the_compose_reset_clears_the_subject_and_the_attachment_together() {
         "the stock tab titles the letter after its attachment"
     );
 
-    // The send lands. This is the whole edge: one call, and the form is clean when the FrameXML
-    // handler reads it.
+    // The send lands.
     s.reset_compose_tab();
     assert_eq!(
         s.eval::<String>("return SendMailSubjectEditBox:GetText()")
@@ -879,4 +817,166 @@ fn the_compose_reset_clears_the_subject_and_the_attachment_together() {
         s.eval::<bool>("return GetSendMailItem() == nil").unwrap(),
         "and the attachment is gone with it"
     );
+}
+
+/// A stand-in font engine: each byte 7 wide, each line 14 tall, a multi-line box's rows starting
+/// after each newline, a trailing one opening an empty row as the reference's break routine does
+/// (`0x5c250b`–`0x5c2522`); the texts here never wrap.
+struct Mono;
+
+impl TextMeasure for Mono {
+    fn measure(&mut self, req: &MeasureRequest) -> (f32, f32, f32) {
+        let text = req.text.strip_suffix('\n').unwrap_or(&req.text);
+        let natural = text.split('\n').map(str::len).max().unwrap_or(0) as f32 * 7.0;
+        (natural, text.split('\n').count() as f32 * 14.0, natural)
+    }
+
+    fn editbox_advances(
+        &mut self,
+        req: &EditBoxAdvanceRequest,
+    ) -> Option<(Vec<f32>, Vec<usize>, f32)> {
+        let cum = (0..=req.text.len()).map(|i| i as f32 * 7.0).collect();
+        if req.wrap_width.is_none() {
+            return Some((cum, vec![0], 0.0));
+        }
+        let breaks = req.text.match_indices('\n').map(|(i, _)| i + 1);
+        let rows = std::iter::once(0).chain(breaks).collect();
+        Some((cum, rows, 14.0))
+    }
+}
+
+/// The send tab, open, its boxes measured by [`Mono`].
+fn send_tab() -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.set_text_measurer(Box::new(Mono));
+    load_ui(&s);
+    s.fire_event("MAIL_SHOW", vec![]);
+    s.run("MailFrameTab_OnClick(2)").unwrap();
+    s.resolve();
+    s
+}
+
+fn frames(s: &mut UiScript, n: usize) {
+    for _ in 0..n {
+        s.tick(0.016);
+        s.resolve();
+    }
+}
+
+fn mv(s: &mut UiScript, unit: EditUnit, back: bool) {
+    assert!(s.editbox_action(EditAction::Move {
+        unit,
+        back,
+        extend: false,
+    }));
+}
+
+/// The letter body is multi-line: UP and DOWN move a row at the caret's letter column (`0x77cb20`),
+/// HOME and END stop at the line's newline (`0x77c980`, `0x77c9f0`), and Ctrl+HOME and Ctrl+END
+/// go to the letter's ends (`0x77ca60`, `0x77cac0`).
+#[test]
+fn the_letter_body_moves_its_caret_by_rows_and_lines() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = send_tab();
+    s.run(
+        "SendMailBodyEditBox:SetText('Dear Thrall,\\nthe ore\\nis late.') \
+         SendMailBodyEditBox:SetFocus()",
+    )
+    .unwrap();
+    frames(&mut s, 1);
+    let body = |s: &UiScript| {
+        s.eval::<String>("return SendMailBodyEditBox:GetText()")
+            .unwrap()
+    };
+    // From the end, column 8: past "the ore", so it holds before that line's newline.
+    mv(&mut s, EditUnit::Row, true);
+    s.char_input("!");
+    assert_eq!(body(&s), "Dear Thrall,\nthe ore!\nis late.");
+    mv(&mut s, EditUnit::Line, true);
+    s.char_input("-");
+    assert_eq!(
+        body(&s),
+        "Dear Thrall,\n-the ore!\nis late.",
+        "HOME: this line's start"
+    );
+    mv(&mut s, EditUnit::Line, false);
+    mv(&mut s, EditUnit::Row, false);
+    s.char_input("?");
+    assert_eq!(
+        body(&s),
+        "Dear Thrall,\n-the ore!\nis late.?",
+        "END, then DOWN at column 9: past the last line's letters, to the text's end"
+    );
+    mv(&mut s, EditUnit::Edge, true);
+    s.char_input(">");
+    assert_eq!(body(&s), ">Dear Thrall,\n-the ore!\nis late.?", "Ctrl+HOME");
+    assert!(s.take_errors().is_empty(), "and nothing raised on the way");
+}
+
+/// Ctrl+A is `HighlightText(0, -1)` (`0x77b239`), which leaves the caret (`0x77cca0`): no
+/// `OnCursorChanged` reaches `ScrollingEdit_OnCursorChanged`, so a long letter scrolled to its top
+/// stays there.
+#[test]
+fn select_all_in_a_long_letter_keeps_its_scroll() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = send_tab();
+    s.run(
+        "SendMailBodyEditBox:SetText(string.rep('line\\n', 29) .. 'end') \
+         SendMailBodyEditBox:SetFocus()",
+    )
+    .unwrap();
+    frames(&mut s, 4);
+    let scroll = |s: &UiScript| {
+        s.eval::<f64>("return SendMailScrollFrame:GetVerticalScroll()")
+            .unwrap()
+    };
+    assert!(
+        scroll(&s) > 0.0,
+        "the caret at the end scrolled the letter down"
+    );
+    mv(&mut s, EditUnit::Edge, true);
+    frames(&mut s, 4);
+    assert_eq!(scroll(&s), 0.0, "Ctrl+HOME scrolled it back to the top");
+    assert!(s.editbox_action(EditAction::SelectAll));
+    frames(&mut s, 4);
+    assert_eq!(
+        scroll(&s),
+        0.0,
+        "Ctrl+A left the caret, and the view, at the top"
+    );
+    s.char_input("x");
+    assert_eq!(
+        s.eval::<String>("return SendMailBodyEditBox:GetText()")
+            .unwrap(),
+        "x",
+        "with all of it selected"
+    );
+    assert!(s.take_errors().is_empty(), "and nothing raised on the way");
+}
+
+/// The money boxes select all on focus (`MoneyInputFrame.xml`, `HighlightText()`), and `Insert`
+/// deletes a selection before its `numeric` test refuses a letter (`0x77bf13`, `0x77bf41`): a
+/// letter typed into the gold box clears the amount.
+#[test]
+fn a_letter_typed_over_the_selected_gold_clears_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = send_tab();
+    s.run("SendMailMoneyGold:SetText('12') SendMailMoneyGold:SetFocus()")
+        .unwrap();
+    frames(&mut s, 1);
+    assert!(s.char_input("g"), "the focused box consumes");
+    assert_eq!(
+        s.eval::<String>("return SendMailMoneyGold:GetText()")
+            .unwrap(),
+        ""
+    );
+    frames(&mut s, 1);
+    assert_eq!(
+        s.eval::<f64>("return MoneyInputFrame_GetCopper(SendMailMoney)")
+            .unwrap(),
+        0.0,
+        "OnTextChanged told the money frame"
+    );
+    assert!(s.take_errors().is_empty(), "and nothing raised on the way");
 }

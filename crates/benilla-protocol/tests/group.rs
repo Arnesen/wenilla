@@ -5,8 +5,8 @@ mod common;
 
 use benilla_protocol::events::{decode, SessionEvent};
 use benilla_protocol::messages::{
-    self, member_status, opcode, party_member_mask, party_operation, party_result, GroupLootInfo,
-    GroupMemberEntry, PartyMemberStatsInfo, GROUP_MEMBER_ASSISTANT,
+    self, member_status, opcode, party_member_mask, party_operation, party_result, patch_auras,
+    GroupLootInfo, GroupMemberEntry, PartyMemberStatsInfo, GROUP_MEMBER_ASSISTANT,
 };
 use benilla_protocol::ServerPacket;
 use common::hx;
@@ -372,8 +372,8 @@ fn group_list_empty_you_left_shape_is_14_bytes() {
     }
 }
 
-/// `SMSG_PARTY_COMMAND_RESULT` (Group.cpp:100-105): a named refusal, and the ignoring-you refusal,
-/// which names no one (`Handlers/GroupHandler.cpp:466`).
+/// `SMSG_PARTY_COMMAND_RESULT` (`GroupHandler.cpp:47-54`): a named result, and one with an empty
+/// name, as the raid-convert confirmation sends (`GroupHandler.cpp:466`).
 #[test]
 fn party_command_result_wire() {
     let mut body = party_operation::INVITE.to_le_bytes().to_vec();
@@ -518,8 +518,9 @@ fn party_member_stats_full_position_auras_and_pet_block() {
             assert_eq!(*guid, 0x7F);
             assert!(*full);
             assert_eq!(info.position, Some((1234, -5678)));
-            assert_eq!(info.auras, Some(vec![133, 116]));
-            assert_eq!(info.auras_negative, Some(vec![8050]));
+            assert_eq!(info.auras, Some(vec![(0, 133), (5, 116)]));
+            // The debuff slot is absolute: mask bit 2 is slot 34.
+            assert_eq!(info.auras_negative, Some(vec![(34, 8050)]));
             assert_eq!(info.pet_guid, Some(0x1122_3344_5566_7788));
             assert_eq!(info.pet_name.as_deref(), Some("Fido"));
             assert_eq!(info.pet_model_id, Some(618));
@@ -528,8 +529,8 @@ fn party_member_stats_full_position_auras_and_pet_block() {
             assert_eq!(info.pet_power_type, Some(0));
             assert_eq!(info.pet_cur_power, Some(80));
             assert_eq!(info.pet_max_power, Some(100));
-            assert_eq!(info.pet_auras, Some(vec![1126]));
-            assert_eq!(info.pet_auras_negative, Some(vec![770]));
+            assert_eq!(info.pet_auras, Some(vec![(3, 1126)]));
+            assert_eq!(info.pet_auras_negative, Some(vec![(33, 770)]));
             assert_eq!(info.status, None);
             assert_eq!(info.level, None);
         }
@@ -546,7 +547,39 @@ fn party_member_stats_full_position_auras_and_pet_block() {
     }
 }
 
-/// The reply for a member not in our group (`Handlers/GroupHandler.cpp:763-774`):
+/// A delta's aura mask names the slots that changed, a 0 id among them for an aura that fell off
+/// (`Player::GetAuraUpdateMask`, `GroupHandler.cpp:627-633`), and the record takes each named slot
+/// and keeps the rest (`0x5e52d0`-`0x5e52f8`).
+#[test]
+fn a_delta_aura_mask_patches_the_named_slots_and_a_zero_clears_one() {
+    // Slots 0 and 5 changed: slot 0 lost its aura, slot 5 took 116.
+    let body = hx(concat!(
+        "017f",     // packed guid 0x7F
+        "00020000", // mask: AURAS
+        "21000000", // slot mask: bits 0 and 5
+        "0000",     // slot 0: cleared
+        "7400",     // slot 5: 116
+    ));
+    let p = messages::parse_server(opcode::SMSG_PARTY_MEMBER_STATS, &body).unwrap();
+    let ServerPacket::PartyMemberStats { info, full, .. } = &p else {
+        panic!("expected PartyMemberStats, got {}", p.name());
+    };
+    assert!(!*full);
+    assert_eq!(info.auras, Some(vec![(0, 0), (5, 116)]));
+
+    let mut record = Some(vec![(0, 133), (3, 1126), (5, 10)]);
+    patch_auras(&mut record, info.auras.as_deref().unwrap());
+    assert_eq!(
+        record,
+        Some(vec![(3, 1126), (5, 116)]),
+        "slot 0 emptied, slot 3 untouched, slot 5 overwritten"
+    );
+    // A new slot goes in slot order, and clearing an empty slot is a no-op.
+    patch_auras(&mut record, &[(1, 774), (9, 0)]);
+    assert_eq!(record, Some(vec![(1, 774), (3, 1126), (5, 116)]));
+}
+
+/// The reply for a member not in our group (`Handlers/GroupHandler.cpp:773-789`):
 /// `SMSG_PARTY_MEMBER_STATS_FULL` with only `STATUS`, set to offline (0).
 #[test]
 fn party_member_stats_offline_miss_is_status_only() {

@@ -1,56 +1,68 @@
-//! Binding persistence (decision 0997): `benilla-config/bindings/account.txt` and
-//! `benilla-config/bindings/<Realm>-<Char>.txt`, through [`crate::local_state`] like every resident.
-//!
-//! Format is **command-centric diff-vs-defaults** — one line per command whose keys moved:
+//! Binding persistence in `benilla-config/bindings/account.txt` and `<Realm>-<Char>.txt`: one
+//! line per command whose keys differ from its defaults.
 //!
 //! ```text
-//! # benilla key bindings (decision 0997)
+//! # benilla key bindings
 //! bind JUMP F
 //! bind MOVEFORWARD W
 //! bind TOGGLESHEATH
 //! ```
 //!
-//! `bind <COMMAND> [key...]` replaces that command's whole key list; no tokens = deliberately
-//! unbound; a command absent from the file = its registered defaults. This diverges from the
-//! reference's full-snapshot `bindings-cache.wtf` deliberately (recorded in 0997): benilla grows
-//! commands weekly, and a wholesale snapshot would ship every new command unbound to anyone with
-//! a saved file. Tokens are the canonical chord strings, which never contain spaces, so
-//! whitespace splitting is safe (`-` and `=` are key tokens, hence no sentinel for "empty" —
-//! absence of tokens is the sentinel).
+//! `bind <COMMAND> [key...]` replaces the command's key list; no tokens means unbound, an absent
+//! command keeps its defaults. Tokens are canonical chord strings and never contain spaces.
+//! Deviation: the reference saves a full snapshot (`bindings-cache.wtf`); a diff is stored
+//! because a full snapshot would leave every command added later unbound for a saved file.
 
-use std::collections::HashMap;
+use benilla_ui::script::keybind::KeyBinding;
 
-use super::commands::SPECS;
+/// A key list grouped by command, in first-appearance order; names compare case-insensitively.
+fn by_command(list: &[KeyBinding]) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for (key, command) in list {
+        match out
+            .iter_mut()
+            .find(|(c, _)| c.eq_ignore_ascii_case(command))
+        {
+            Some((_, keys)) => keys.push(key.clone()),
+            None => out.push((command.clone(), vec![key.clone()])),
+        }
+    }
+    out
+}
 
-/// Serialize the live table as the diff file. `snapshot` is `(command, keys)` in registry order
-/// ([`benilla_ui::script::UiScript::keybind_snapshot`]'s shape).
-pub(crate) fn to_diff(snapshot: &[(String, Vec<String>)]) -> String {
-    let defaults: HashMap<&str, Vec<&str>> = SPECS
+/// Serialize the live `(command, keys)` table (`keybind_snapshot`) as the diff file against the
+/// defaults (`WTF\DefaultBindings.wtf`): a line for each command whose keys differ, including a
+/// defaulted command the live table left unbound.
+pub(crate) fn to_diff(snapshot: &[(String, Vec<String>)], defaults: &[KeyBinding]) -> String {
+    let defaults = by_command(defaults);
+    let default_of = |name: &str| {
+        defaults
+            .iter()
+            .find(|(c, _)| c.eq_ignore_ascii_case(name))
+            .map_or(&[][..], |(_, k)| k.as_slice())
+    };
+    let mut out = String::from("# benilla key bindings — diff vs defaults\n");
+    let unlisted = defaults
         .iter()
-        .map(|s| (s.name, [s.d1, s.d2].into_iter().flatten().collect()))
-        .collect();
-    let mut out = String::from("# benilla key bindings (decision 0997) — diff vs defaults\n");
-    for (name, keys) in snapshot {
-        let is_default = defaults
-            .get(name.as_str())
-            .is_some_and(|d| d.iter().copied().eq(keys.iter().map(String::as_str)));
-        if is_default {
+        .filter(|(c, _)| !snapshot.iter().any(|(n, _)| n.eq_ignore_ascii_case(c)))
+        .map(|(c, _)| (c.clone(), Vec::new()));
+    for (name, keys) in snapshot.iter().cloned().chain(unlisted) {
+        if default_of(&name) == keys.as_slice() {
             continue;
         }
         out.push_str("bind ");
-        out.push_str(name);
+        out.push_str(&name);
         for k in keys {
             out.push(' ');
-            out.push_str(k);
+            out.push_str(&k);
         }
         out.push('\n');
     }
     out
 }
 
-/// Parse a diff file into `(command, keys)` overrides — the shape
-/// [`benilla_ui::script::UiScript::seed_binding_set`] takes. Unknown commands are kept (a file
-/// from a newer build stays intact through load/save); malformed lines are skipped.
+/// Parse a diff file into `(command, keys)` overrides; unknown commands are kept, malformed lines
+/// skipped.
 pub(crate) fn from_diff(text: &str) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -71,41 +83,14 @@ pub(crate) fn from_diff(text: &str) -> Vec<(String, Vec<String>)> {
     out
 }
 
-/// Resolve a diff into the **full** per-command key table (defaults with the overrides applied,
-/// steal law honored file-order) — what a stored set seeds. The steal pass matters: a file that
-/// binds `W` to JUMP must also strip `W` from MOVEFORWARD even if MOVEFORWARD has no line (older
-/// file, new default collision) — one key, one command, always.
-pub(crate) fn resolve(diff: &[(String, Vec<String>)]) -> Vec<(String, Vec<String>)> {
-    let mut table: Vec<(String, Vec<String>)> = SPECS
-        .iter()
-        .map(|s| {
-            (
-                s.name.to_string(),
-                [s.d1, s.d2]
-                    .into_iter()
-                    .flatten()
-                    .map(str::to_owned)
-                    .collect(),
-            )
-        })
-        .collect();
+/// Resolve a diff into the full key table: the defaults, then each override in file order
+/// replacing its command's keys and stealing each key from every other command, so one key always
+/// maps to one command.
+pub(crate) fn resolve(diff: &[(String, Vec<String>)], defaults: &[KeyBinding]) -> Vec<KeyBinding> {
+    let mut table = defaults.to_vec();
     for (name, keys) in diff {
-        // Steal each key from wherever it currently sits, then install the command's list.
-        for k in keys {
-            for (_, held) in table.iter_mut() {
-                held.retain(|h| h != k);
-            }
-        }
-        match table.iter_mut().find(|(n, _)| n == name) {
-            Some((_, slot)) => *slot = keys.clone(),
-            // **A name that is not in SPECS is an ADDON's command, and it is kept** (decision
-            // 1201). Dropping it here is what made an addon binding forget its key every restart:
-            // the row was written by `to_diff`, read back by `from_diff`, had its chord stolen
-            // from whoever else held it by the pass above — and was then thrown away, so the
-            // binding registered at world entry with nothing to restore. `Bindings.txt` is a flat
-            // list in the reference too; an addon's row is a row like any other.
-            None => table.push((name.clone(), keys.clone())),
-        }
+        table.retain(|(k, c)| !c.eq_ignore_ascii_case(name) && !keys.contains(k));
+        table.extend(keys.iter().map(|k| (k.clone(), name.clone())));
     }
     table
 }
@@ -114,67 +99,73 @@ pub(crate) fn resolve(diff: &[(String, Vec<String>)]) -> Vec<(String, Vec<String
 mod tests {
     use super::*;
 
+    fn defaults() -> Vec<KeyBinding> {
+        [
+            ("W", "MOVEFORWARD"),
+            ("UP", "MOVEFORWARD"),
+            ("Q", "STRAFELEFT"),
+            ("SPACE", "JUMP"),
+            ("NUMPAD0", "JUMP"),
+            ("Z", "TOGGLESHEATH"),
+        ]
+        .into_iter()
+        .map(|(k, c)| (k.to_string(), c.to_string()))
+        .collect()
+    }
+
+    fn keys(table: &[KeyBinding], command: &str) -> Vec<String> {
+        table
+            .iter()
+            .filter(|(_, c)| c == command)
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
     #[test]
     fn the_diff_round_trips_and_defaults_stay_silent() {
-        // All-defaults snapshot → header-only file.
-        let snapshot: Vec<(String, Vec<String>)> = SPECS
-            .iter()
-            .map(|s| {
-                (
-                    s.name.to_string(),
-                    [s.d1, s.d2]
-                        .into_iter()
-                        .flatten()
-                        .map(str::to_owned)
-                        .collect(),
-                )
-            })
-            .collect();
-        let text = to_diff(&snapshot);
+        // All defaults: a header-only file.
+        let snapshot = by_command(&defaults());
+        let text = to_diff(&snapshot, &defaults());
         assert_eq!(text.lines().count(), 1, "defaults produce no bind lines");
 
-        // Move JUMP to F (unbinding SPACE/NUMPAD0), unbind TOGGLESHEATH entirely.
-        let mut moved = snapshot.clone();
+        // Move JUMP to F (unbinding SPACE/NUMPAD0), unbind TOGGLESHEATH entirely, and leave
+        // STRAFELEFT out of the snapshot with no keys (a defaulted command no file declared).
+        let mut moved: Vec<(String, Vec<String>)> = snapshot
+            .into_iter()
+            .filter(|(n, _)| n != "STRAFELEFT")
+            .collect();
         moved.iter_mut().find(|(n, _)| n == "JUMP").unwrap().1 = vec!["F".into()];
         moved
             .iter_mut()
             .find(|(n, _)| n == "TOGGLESHEATH")
             .unwrap()
             .1 = vec![];
-        let text = to_diff(&moved);
+        let text = to_diff(&moved, &defaults());
         assert!(text.contains("bind JUMP F\n"));
         assert!(
             text.contains("bind TOGGLESHEATH\n"),
             "unbound = a bare line"
         );
         assert!(
+            text.contains("bind STRAFELEFT\n"),
+            "a defaulted command the snapshot lacks is unbound too"
+        );
+        assert!(
             !text.contains("MOVEFORWARD"),
             "untouched commands stay absent"
         );
 
-        let parsed = from_diff(&text);
-        let resolved = resolve(&parsed);
-        let get = |n: &str| {
-            resolved
-                .iter()
-                .find(|(name, _)| name == n)
-                .map(|(_, k)| k.clone())
-                .unwrap()
-        };
-        assert_eq!(get("JUMP"), vec!["F".to_string()]);
-        assert!(get("TOGGLESHEATH").is_empty());
-        assert_eq!(get("MOVEFORWARD"), vec!["W".to_string(), "UP".to_string()]);
+        let resolved = resolve(&from_diff(&text), &defaults());
+        assert_eq!(keys(&resolved, "JUMP"), ["F"]);
+        assert!(keys(&resolved, "TOGGLESHEATH").is_empty());
+        assert_eq!(keys(&resolved, "MOVEFORWARD"), ["W", "UP"]);
     }
 
     #[test]
     fn resolve_steals_across_commands_even_without_a_line_for_the_victim() {
-        // A file that binds W to JUMP: MOVEFORWARD keeps UP but loses W, with no MOVEFORWARD
-        // line in the file at all.
-        let resolved = resolve(&[("JUMP".to_string(), vec!["W".to_string()])]);
-        let fwd = &resolved.iter().find(|(n, _)| n == "MOVEFORWARD").unwrap().1;
-        assert_eq!(fwd, &vec!["UP".to_string()]);
-        let jump = &resolved.iter().find(|(n, _)| n == "JUMP").unwrap().1;
-        assert_eq!(jump, &vec!["W".to_string()]);
+        let resolved = resolve(&[("JUMP".to_string(), vec!["W".to_string()])], &defaults());
+        assert_eq!(keys(&resolved, "MOVEFORWARD"), ["UP"]);
+        assert_eq!(keys(&resolved, "JUMP"), ["W"]);
     }
 
     #[test]
@@ -187,19 +178,11 @@ mod tests {
                 ("BOGUSCMD".to_string(), vec!["Q".to_string()]),
             ]
         );
-        // **A command the registry does not know is KEPT** (decision 1201). It used to be
-        // dropped after its keys were stolen, which was right for a genuinely bogus line and
-        // catastrophic for the case that actually occurs: an ADDON's command, whose
-        // `Bindings.xml` registers at world entry, hours after this file was read. Dropping it
-        // meant the binding registered with nothing to restore and forgot the player's chord
-        // every restart (1192 §4). The steal still happens either way, so the file's intent
-        // ("Q belongs to that command, not STRAFELEFT") holds for the commands we do have.
-        let resolved = resolve(&parsed);
-        let bogus = &resolved.iter().find(|(n, _)| n == "BOGUSCMD").unwrap().1;
-        assert_eq!(bogus, &vec!["Q".to_string()]);
-        let strafe = &resolved.iter().find(|(n, _)| n == "STRAFELEFT").unwrap().1;
+        // An unknown command (an addon's, registered later) is kept, and still steals its key.
+        let resolved = resolve(&parsed, &defaults());
+        assert_eq!(keys(&resolved, "BOGUSCMD"), ["Q"]);
         assert!(
-            strafe.is_empty(),
+            keys(&resolved, "STRAFELEFT").is_empty(),
             "Q was stolen by the unknown command's line"
         );
     }

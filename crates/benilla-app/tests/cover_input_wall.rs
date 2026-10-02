@@ -1,33 +1,17 @@
-//! **The cover-input wall** — the loading screen's input rule, counted from source on every
-//! `cargo test`, so the swallow list can never quietly fall behind what the client actually reads.
+//! The cover-input wall: every input channel the workspace names must carry a verdict in
+//! [`VERDICTS`], because the loading cover (`loading_screen/input.rs`) swallows input at the source
+//! only for the channels it names.
 //!
-//! `loading_screen/input.rs` takes the whole input plane while the cover is up, at the source, in
-//! `PreUpdate`. That cut is what makes the rule survive a consumer nobody remembered — the world
-//! pick chain, which hovered units and changed the hardware cursor *through* the loading screen
-//! until the director noticed. But a source cut only covers the channels it names, and bevy has
-//! more channels than we currently read: touch, IME, gamepads, the trackpad gestures. The day
-//! someone reads one of those, the cover has to grow a line — and nothing in the compiler will say
-//! so.
-//!
-//! This is that "nothing". It scans every workspace source for the input channels the client
-//! reaches for and requires each to carry a **verdict** in [`VERDICTS`] below:
-//!
-//! - **`Swallowed`** — the cover empties it. Cross-checked: the name must literally appear in the
-//!   gate's own source, so the table cannot claim coverage the gate does not implement.
-//! - **`Open`** — deliberately *not* swallowed, with the reason written down. Window lifecycle is
-//!   the whole of this class today: a close request, a focus change and an occlusion change must
-//!   still land while a load is running.
-//! - **`Plumbing`** — a type, enum, plugin or system-set name that carries no player input at all.
-//!
-//! An unclassified name fails the test with the question it wants answered: *does the cover
-//! swallow this?* Answering it is one line here and, when the answer is yes, one line in the gate.
+//! - `Swallowed`: the cover empties it; the name must appear in the gate's source.
+//! - `Open`: deliberately not swallowed, with the reason.
+//! - `Plumbing`: a type, plugin or set name that carries no player input.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Verdict {
-    /// The cover empties this channel — see `loading_screen/input.rs`.
+    /// The cover empties this channel.
     Swallowed,
     /// Deliberately left open under the cover. The `&str` is the reason.
     Open(&'static str),
@@ -36,8 +20,8 @@ enum Verdict {
 }
 use Verdict::{Open, Plumbing, Swallowed};
 
-/// Every `bevy::input::…` / `bevy::window::…` leaf the workspace names, plus the prelude-sourced
-/// input items, each with its verdict. **The wall itself.**
+/// Every `bevy::input::…` / `bevy::window::…` / `bevy::winit::…` leaf the workspace names, plus
+/// the prelude input items, each with its verdict.
 const VERDICTS: &[(&str, Verdict)] = &[
     // ── The channels the cover takes ────────────────────────────────────────────────────────
     ("ButtonInput", Swallowed),
@@ -48,8 +32,7 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("CursorMoved", Swallowed),
     ("AccumulatedMouseMotion", Swallowed),
     ("AccumulatedMouseScroll", Swallowed),
-    // The pointer position is a *field*, not a message; the cover blanks it, which is why every
-    // hit-test in the client goes quiet without knowing the cover exists.
+    // The pointer position is a field, not a message; the cover blanks it.
     ("cursor_position", Swallowed),
     ("physical_cursor_position", Swallowed),
     // ── Deliberately open under the cover ───────────────────────────────────────────────────
@@ -62,6 +45,13 @@ const VERDICTS: &[(&str, Verdict)] = &[
         Open("alt-tab bookkeeping; `cursor.rs` re-asserts the hardware cursor on the focus edge"),
     ),
     (
+        "KeyboardFocusLost",
+        Open(
+            "the window deactivate, not player input: `bindings.rs` clears the held direction \
+             bits on it, the reference's `0x514490`, which a load must not hide",
+        ),
+    ),
+    (
         "WindowOccluded",
         Open("the present-mode throttle: a load behind another window must still throttle"),
     ),
@@ -70,9 +60,17 @@ const VERDICTS: &[(&str, Verdict)] = &[
         Open("an OUTPUT (grab/visible), not a channel — the cover has nothing to take from it"),
     ),
     (
+        "RawWinitWindowEvent",
+        Open(
+            "read only to learn what the layout names each key (`bindings/layout.rs`), which acts \
+             on nothing: a press under the cover still never reaches a binding or a box, and the \
+             name it refreshes must be current when the cover lifts",
+        ),
+    ),
+    (
         "CursorLeft",
         Open(
-            "the cover READS it rather than taking it (decision 2090): a `None` in the window's \
+            "the cover READS it rather than taking it: a `None` in the window's \
              position field is either winit's departure or the cover's own blank, and the hand-back \
              must not confuse them — restoring the stash over a pointer the player took out of the \
              window would warp it back in. Draining it would blind the gate to its own signal.",
@@ -80,13 +78,13 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ),
     // ── Not input at all ────────────────────────────────────────────────────────────────────
     ("ButtonState", Plumbing),
-    // The cursor OUTPUTS — the art and the grab mode benilla *writes*. Nothing arrives through
-    // them, so there is nothing for the cover to take.
+    // Cursor outputs benilla writes; nothing arrives through them.
     ("CursorGrabMode", Plumbing),
     ("CursorIcon", Plumbing),
     ("CustomCursor", Plumbing),
     ("CustomCursorImage", Plumbing),
     ("InputPlugin", Plumbing),
+    ("WinitPlugin", Plumbing),
     ("InputSystems", Plumbing),
     ("Key", Plumbing),
     ("KeyCode", Plumbing),
@@ -107,11 +105,10 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("WindowResolution", Plumbing),
 ];
 
-/// The gate's own source — the cross-check target for every `Swallowed` row.
+/// The gate's source, which every `Swallowed` row must name.
 const GATE: &str = "crates/benilla-app/src/loading_screen/input.rs";
 
-/// The prelude re-exports these, so a source can name them with no `bevy::input::` path in sight.
-/// Scanned for by bare identifier; anything matched still has to carry a verdict above.
+/// Prelude re-exports, scanned for by bare identifier since no `bevy::input::` path names them.
 const PRELUDE_INPUT_NAMES: &[&str] = &[
     "ButtonInput",
     "AccumulatedMouseMotion",
@@ -125,7 +122,7 @@ fn every_input_channel_the_client_reads_has_a_verdict_under_the_cover() {
     let root = workspace_root();
     let mut found: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for file in workspace_sources(&root) {
-        // The wall names every channel in its own prose; scanning it would only find itself.
+        // The wall names every channel itself.
         if file.ends_with("tests/cover_input_wall.rs") {
             continue;
         }
@@ -162,8 +159,7 @@ fn every_input_channel_the_client_reads_has_a_verdict_under_the_cover() {
             .join("\n")
     );
 
-    // A `Swallowed` verdict is a claim about the gate's source; hold it to it. (The reverse is not
-    // asserted: the gate may name a channel nothing reads yet — that is the cover being ahead.)
+    // A `Swallowed` row must be named by the gate; the gate may name channels nothing reads yet.
     let gate = std::fs::read_to_string(root.join(GATE)).expect("the gate's source");
     let unbacked: Vec<&str> = VERDICTS
         .iter()
@@ -175,8 +171,7 @@ fn every_input_channel_the_client_reads_has_a_verdict_under_the_cover() {
         "VERDICTS claims the cover swallows these, but {GATE} never names them: {unbacked:?}"
     );
 
-    // And the table itself must not rot: a row nothing in the workspace names any more is a row to
-    // delete, not to keep as decoration. (`Plumbing` rows are exempt — they exist to absorb noise.)
+    // A non-`Plumbing` row nothing names is stale.
     let stale: Vec<&str> = VERDICTS
         .iter()
         .filter(|(name, v)| *v != Plumbing && !found.contains_key(*name))
@@ -188,15 +183,15 @@ fn every_input_channel_the_client_reads_has_a_verdict_under_the_cover() {
     );
 }
 
-/// Every input-ish identifier `text` names: the leaf of any `bevy::input::…`/`bevy::window::…`
-/// path (grouped `use` braces expanded), plus the prelude-sourced names.
+/// Every input identifier `text` names: the leaf of any `bevy::input::…`/`bevy::window::…`/
+/// `bevy::winit::…` path (grouped `use` braces expanded), plus the prelude names.
 fn input_names(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    for prefix in ["bevy::input::", "bevy::window::"] {
+    for prefix in ["bevy::input::", "bevy::window::", "bevy::winit::"] {
         let mut rest = text;
         while let Some(at) = rest.find(prefix) {
             rest = &rest[at + prefix.len()..];
-            // `use bevy::input::mouse::{A, B};` — take the braced group whole.
+            // `use bevy::input::mouse::{A, B};`: take the braced group whole.
             let path: String = rest
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
@@ -208,8 +203,7 @@ fn input_names(text: &str) -> BTreeSet<String> {
                 path.clone()
             };
             for item in leaf_source.split(',') {
-                // `keyboard::KeyboardInput`, `KeyCode::Space`, `self` → the first segment that is
-                // a type-shaped name (upper-case initial) wins; a module segment is skipped.
+                // The first segment with an upper-case initial wins; module segments are skipped.
                 if let Some(name) = item
                     .split("::")
                     .map(str::trim)
@@ -237,9 +231,7 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Every `.rs` under each crate's `src/` and `examples/` — the client's own code. Test files are
-/// included on purpose: a test that reaches for a new input channel is still a signal that the
-/// channel exists, and the verdict costs one line.
+/// Every `.rs` under each crate's `src/`, `examples/` and `tests/`.
 fn workspace_sources(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for crate_dir in std::fs::read_dir(root.join("crates"))

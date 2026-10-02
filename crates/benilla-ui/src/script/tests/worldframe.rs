@@ -1,6 +1,5 @@
-//! The `WorldFrame` kind (decisions 1983/1984; vtable `0x8043e8`): a `Frame` to Lua,
-//! a one-shot type, born in stratum `WORLD` with mouse and wheel enabled, and a hit the app's
-//! arbiter must be able to tell apart.
+//! The `WorldFrame` kind (vtable `0x8043e8`): a `Frame` to Lua, creatable once, born in stratum
+//! `WORLD` with mouse and wheel on, and a hit the app can tell apart.
 
 use crate::script::UiScript;
 
@@ -13,9 +12,8 @@ fn vm() -> UiScript {
     s
 }
 
-/// `GetObjectType()` answers `"Frame"` and `IsObjectType("WorldFrame")` is nil: the class
-/// inherits the base table's type slots (the TaxiRouteFrame precedent), so the registered name
-/// never becomes an identity.
+/// `GetObjectType()` answers `"Frame"`: the class keeps the base table's type slots, as
+/// `TaxiRouteFrame` does.
 #[test]
 fn the_world_frame_is_a_frame_to_lua() {
     let s = vm();
@@ -65,15 +63,16 @@ fn the_world_frame_is_born_in_stratum_world_with_the_mouse_and_wheel() {
         .run(r#"plain:SetFrameStrata("WORLD")"#)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("unknown frameStrata 'WORLD'"), "{err}");
+    assert!(
+        err.contains("Plain:SetFrameStrata(): Unknown frame strata: WORLD"),
+        "{err}"
+    );
     assert_eq!(
         s.eval::<String>("return plain:GetFrameStrata()").unwrap(),
         "BACKGROUND"
     );
 }
 
-/// The hit test answers the world frame where nothing else is under the cursor — the addon-facing
-/// scripts on it fire — and the app can tell that hit apart from a UI hit.
 #[test]
 fn a_hit_on_the_world_frame_is_told_apart_from_a_ui_hit() {
     let mut s = vm();

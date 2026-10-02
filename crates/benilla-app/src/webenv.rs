@@ -192,20 +192,10 @@ mod tests {
     }
 }
 
-/// `WOW_HOST`'s fallback when unset — `net/io.rs`'s `NetConfig::from_env` calls this instead of
-/// hard-coding a default, so it stays a one-line swap there (`var("WOW_HOST").unwrap_or_else(…)`)
-/// no matter what the right default is per platform.
-///
-/// Native: `localhost`, decision 0539's original default, unchanged. Web: the page's own
-/// hostname — `wenilla-host`'s proxy always runs beside the game server it forwards to, so
-/// whatever host served this page is already the right one to open `/ws/{port}` against; a
-/// browser tab has no `localhost`-as-loopback concept worth defaulting to instead (the page did
-/// not load from the player's own machine).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn default_wow_host() -> String {
-    "localhost".into()
-}
-
+/// The realmlist a page dials when nothing pins one (`crate::realmlist`'s default): the page's own
+/// hostname. `wenilla-host`'s proxy always runs beside the game server it forwards to, so whatever
+/// host served this page is the one to open `/ws/{port}` against; a browser tab has no
+/// `localhost`-as-loopback default worth falling back to. Native dials `DEFAULT_REALMLIST`.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn default_wow_host() -> String {
     web_sys::window()
