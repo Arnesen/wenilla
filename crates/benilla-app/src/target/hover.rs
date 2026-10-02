@@ -1,9 +1,6 @@
-//! The mouseover pick — which unit is under the cursor, recomputed each frame into
-//! [`super::Hovered`] the way the real client finds it (`CGWorldFrame` pick `0x481190` →
-//! `0x7089c0`): a **broad phase** ray-vs-sphere on the current animation's bounds, then a
-//! **narrow phase** ray-vs-triangle against the unit's **posed render mesh**, with the
-//! reference's generous +1-model-unit halo retry when nothing hits exactly. The selection /
-//! interaction story that consumes the verdict lives in the [`super`] module doc.
+//! The mouseover picks, each frame: the unit under the cursor into [`super::Hovered`] and the
+//! GameObject into [`super::HoveredObject`], as the reference's pick (`0x481190` → `0x7089c0`)
+//! finds them.
 
 use std::collections::HashSet;
 
@@ -27,15 +24,10 @@ use benilla_world::view::WorldCamera;
 
 use super::{Hovered, HoveredObject, PickOcclusion};
 
-/// Trace this frame's **world-occlusion distance** (the reference's `CWorld::Intersect` leg of the
-/// scene trace `0x480df0`): one
-/// physics ray from the cursor through the [`PickOccluder`] set (terrain, the WMO walk-bake faces
-/// ≈ the byte-decoded `0x84` reject-mask, static doodad hulls). Both object picks below run
-/// **unbounded** and post-compare against it — the reference discards the object hit iff the world
-/// hit is *strictly* nearer (`0x480eb4`: tie keeps the object). No cursor / mouselook →
-/// `INFINITY` (the picks bail on their own guards). The occluder set deliberately excludes net
-/// entities (units, GameObject hulls, transports) — they are the *object* trace; a chest must not
-/// occlude itself.
+/// Trace this frame's world hit, the reference's `CWorld::Intersect` leg of the scene trace
+/// (`0x480df0`), through the [`PickOccluder`] set: terrain, the WMO walk-bake faces (about the
+/// `0x84` reject mask) and static doodad hulls. Net entities are the object trace, not occluders,
+/// so a chest never occludes itself. The picks run unbounded and compare against it after.
 pub(super) fn update_pick_occlusion(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     window: Query<&Window, With<PrimaryWindow>>,
@@ -59,8 +51,7 @@ pub(super) fn update_pick_occlusion(
         ray.direction,
         f32::MAX,
         true,
-        // Default (terrain/doodads) + the WMO *walk* bake — the mask that reaches every
-        // `PickOccluder`-marked collider; the marker picks the exact occluder set within it.
+        // The mask that reaches every `PickOccluder` collider; the marker picks the set within it.
         &benilla_world::collision::WorldCollision::body_filter(),
         &|e| occluders.contains(e),
     ) {
@@ -69,19 +60,10 @@ pub(super) fn update_pick_occlusion(
     }
 }
 
-/// Every model instance whose parts are `unit`'s pick geometry: **the body, everything it wears,
-/// and its mount** (decision 1658; the mount leg is 0441's).
-///
-/// This is the reference's chained-model set. `0x480d90` registers a pick candidate by walking the
-/// object's CM2 **attachment tree** — `[model+0x1dc]` list head → `[+0x1e4]` sibling, the same two
-/// fields the dress and paperdoll lanes walk — and calling the registrar `0x713cb0` on *each* model
-/// it finds, all under one candidate node. So the ray tests the held axe's own triangles and the
-/// hit comes back as the unit holding it.
-///
-/// Takes the worn roots as a plain slice rather than the `HeldAttached` that supplies them, so the
-/// rule is testable without building one. `pub(crate)` for the **census**
-/// ([`crate::capture::probes`]'s `pick=` column), which must count what the picker will actually
-/// test and not a second opinion about it.
+/// The model instances whose parts are `unit`'s pick geometry: the body, everything it wears, and
+/// its mount. The reference's `0x480d90` walks the CM2 attachment tree (`[model+0x1dc]` head,
+/// `[+0x1e4]` sibling) and registers each model (`0x713cb0`) under one candidate, so a hit on a
+/// held axe is a hit on its wielder. `pub(crate)` for the capture census, which counts the same.
 pub(crate) fn pick_model_roots(
     unit: Entity,
     worn: &[Option<Entity>],
@@ -92,68 +74,129 @@ pub(crate) fn pick_model_roots(
         .chain(mount)
 }
 
-/// **Where every model's skeleton is right now** — the owned palette rows and the per-part link
-/// that indexes them, as one [`SystemParam`].
-///
-/// They are two halves of one lookup ([`update_hover`]'s `palette_of` reads both, in that order,
-/// and neither has ever been wanted alone) and they are bundled because the picker sits exactly on
-/// Bevy's 16-param function-system ceiling — the seat this freed went to the `IsSelectable` grader
-/// (decision 2060), which has to run *inside* the pick rather than after it so [`Hovered`] is never
-/// published in its ungraded state.
+/// Every model's current skeleton pose, as one [`SystemParam`] (the picker is at Bevy's 16-param
+/// limit): the palette rows and the per-part rig link that indexes them.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct PickPose<'w, 's> {
-    /// The owned palette table (decision 0720): the picker reads the same world-space matrices the
-    /// vertex stage skins with, straight from the CPU rows.
+    /// The world-space matrices the vertex stage skins with, read from the CPU rows.
     palettes: Res<'w, benilla_world::rig_palette::RigPalettes>,
     rigs: Query<'w, 's, &'static benilla_world::rig_palette::RigSkin>,
 }
 
-/// Recompute the unit under the cursor each frame — the real client's two-phase pick (the
-/// resolve `0x7089c0`): **broad** = the cursor ray vs the *current animation's*
-/// bounds sphere (world-placed + world-scaled, no pad); **pass 1** = the ray vs the unit's **posed
-/// render mesh** (each drawn vertex skinned through the live joint pose, per-triangle), nearest
-/// world-distance hit wins; **pass 2, only when pass 1 hit nothing anywhere** (the mouse pick's
-/// generous retry — never LoS/spell traces): the same posed mesh with every vertex displaced
-/// **+1 model-unit along its skinned normal** (a ~1-yd halo, fattest where the body is widest),
-/// resolved by the reference's priority ladder — last frame's pick sticks (anti-flicker), else an
-/// alive unit beats a dead one even when farther, ties by distance. A unit with no skinned parts
-/// (cube fallback) keeps the interim render-mesh AABB test, competing at pass-1 level. Inert while
-/// mouse-looking (cursor hidden) or over the dev UI.
-///
-/// **A unit's pick geometry includes what it wears** (decision 1658): every model chained to the
-/// body — held weapons, the helm, the shoulders, a mount — is its own pass-1/pass-2 candidate
-/// resolving to the same unit, because the reference registers the whole CM2 attachment tree into
-/// the pick scene under one candidate node (`0x480d90` walking `[model+0x1dc]`/`[+0x1e4]`).
+/// The local identity and what of it and of the corpses the pick takes, one [`SystemParam`] under
+/// the picker's param limit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct TargetHoverState<'w, 's> {
+    /// For `IsSelectable`'s `UNIT_FIELD_CREATEDBY` clause and the pick filter's possession clause.
+    self_guid: Res<'w, crate::net::SelfGuid>,
+    /// `0x6e61a0`'s pick flag `0x20`, as the frame began.
+    picks_self: Res<'w, crate::spell::PicksSelf>,
+    /// The corpse leg's word, as the frame began.
+    corpse_pick: Res<'w, crate::spell::CorpsePick>,
+    /// The corpse reaction gate's inputs (`0x6067d0`).
+    factions: Option<Res<'w, super::Factions>>,
+    self_store: Query<'w, 's, &'static ObjectStore, With<SelfPlayer>>,
+    /// The unit and player filter while a word stands (`0x480610`).
+    units: crate::spell::targeting::PickChecks<'w, 's>,
+}
+
+impl TargetHoverState<'_, '_> {
+    /// `0x480610`'s two exclusions, which come first and which a pick whose flags carry `0x20`
+    /// skips (`48062c`, [`crate::spell::PicksSelf`]; `0x481050` ORs it in only for a word
+    /// `0x6e61a0` passes, so outside targeting they always run): the active player (`480638`),
+    /// and a unit they possess, an Eye of Kilrogg or a Mind Controlled target
+    /// ([`super::is_possessed_by`], `48064f`-`480674`), so the cursor and the click pass through
+    /// it to what lies behind.
+    fn excludes(&self, is_self: bool, store: Option<&ObjectStore>) -> bool {
+        !self.picks_self.0 && (is_self || super::is_possessed_by(store, self.self_guid.0))
+    }
+
+    /// Whether an object of this kind is a candidate of this pick, the posed pass and the box
+    /// fallback alike: every unit and player outside targeting but the two [`Self::excludes`]
+    /// drops, and while targeting the ones `0x480610` passes for the word
+    /// ([`crate::spell::targeting::PickChecks::admits_unit`]); a corpse (`0x480816`) always
+    /// outside targeting, whose pick flags carry `0x40`, and while targeting only one `0x6e6260`
+    /// passes. A corpse whose store has not streamed is refused then. `is_self` is the active
+    /// player's own body. The hover and the press, which latches this pick, share it.
+    fn is_candidate(
+        &self,
+        entity: Entity,
+        kind: EntityKind,
+        is_self: bool,
+        store: Option<&ObjectStore>,
+    ) -> bool {
+        match kind {
+            EntityKind::Unit | EntityKind::Player => {
+                !self.excludes(is_self, store) && self.units.admits_unit(entity, store)
+            }
+            EntityKind::Corpse => {
+                let Some(word) = self.corpse_pick.0 else {
+                    return true;
+                };
+                store.is_some_and(|store| {
+                    crate::spell::targeting::corpse_pick_admits(
+                        word,
+                        store,
+                        self.factions.as_deref(),
+                        self.self_store.iter().next(),
+                    )
+                })
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The posed pick's geometry under one model root: its skinned parts. Ours are dropped while
+/// hidden: first person hides them ([`crate::player::apply_self_model_fade`] at alpha 0), where the
+/// reference's camera fade clears its player-visible flag `[0xc4d74c]` (`0x482c41`) and
+/// `ShouldRender 0x5ec8f0` refuses the active player, so it is never picked.
+#[allow(clippy::type_complexity)] // the picker's own part query, borrowed as-is
+fn posed_parts<'a>(
+    kids: &Children,
+    parts: &'a Query<(
+        &Mesh3d,
+        &benilla_world::rig_palette::RigPart,
+        Option<&InheritedVisibility>,
+    )>,
+    is_self: bool,
+) -> Vec<(&'a Mesh3d, &'a benilla_world::rig_palette::RigPart)> {
+    kids.iter()
+        .filter_map(|c| parts.get(c).ok())
+        .filter(|(_, _, drawn)| !is_self || drawn.is_none_or(|v| v.get()))
+        .map(|(mesh, part, _)| (mesh, part))
+        .collect()
+}
+
+/// The unit under the cursor, as the reference's pick (`0x7089c0`) finds it. Broad phase: the ray
+/// against the playing sequence's bounds sphere. Pass 1: the ray against the posed render mesh,
+/// nearest wins. Pass 2, the mouse pick's retry when pass 1 hit nothing anywhere: every vertex
+/// pushed 1 model unit along its skinned normal, a halo of about a yard, won by last frame's pick,
+/// else the higher priority (alive 3, dead 2), else the nearer. Every model chained to a unit is
+/// its geometry ([`pick_model_roots`]); a unit with no skinned parts takes a box test at pass-1
+/// level. Inert while mouse-looking or over the UI.
 #[allow(clippy::type_complexity)]
 pub(super) fn update_hover(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     window: Query<&Window, With<PrimaryWindow>>,
     rig: Res<CameraControl>,
     pointer_over_ui: Res<PointerOverUi>,
-    // The frame's world-occlusion distance: the final pick is discarded iff the world hit is
-    // strictly nearer (behind terrain/WMO/doodad geometry — the post-hoc compare below).
     occlusion: Res<PickOcclusion>,
-    // The unit whose plate the pointer is inside (last frame's layout — the plate drive runs
-    // after this chain), published by the plate widgets themselves.
+    // The unit whose plate holds the pointer, as of last frame's plate layout.
     plate_hover: Res<crate::vplates::PlateHover>,
     mut hovered: ResMut<Hovered>,
     mesh_assets: Res<Assets<Mesh>>,
     pose: PickPose,
-    // `IsSelectable`'s second clause reads the active player's guid — see the grader at the publish.
-    self_guid: Res<crate::net::SelfGuid>,
-    // Last frame's pick, for pass 2's sticky-hover (the reference's anti-flicker cache: the previous
-    // pick outranks everything in the halo retry, so the hover doesn't strobe between two units).
+    // Our own body joins the pick only while a targeting word takes it (`0x6e61a0`).
+    target_state: TargetHoverState,
+    // Last frame's pick, which outranks everything in pass 2 (the reference's anti-flicker cache).
     mut last_pick: Local<Option<Entity>>,
-    // Unit roots: pose + scale, the playing animation (for its bounds sphere), the descriptor store
-    // (alive-vs-dead sets the pass-2 priority), the part children — and whether the body is drawn
-    // at all. **You cannot click what is not in the scene** (decision 1277): a body the
-    // exterior-scene election sent to pass 2 never reaches the reference's draw list, so it takes
-    // no mouseover, no sword cursor and no click. This lane used to ray-test every unit root with a
-    // `Guid` and never ask, which is how the director could still target Tanaris mobs through a
-    // sealed cavern ceiling after their models had correctly stopped drawing.
+    // Unit roots. An undrawn body is not in the reference's draw list, so it takes no mouseover,
+    // cursor or click.
     roots: Query<
         (
             Entity,
+            Has<SelfPlayer>,
             &GlobalTransform,
             &NetEntity,
             Option<&ModelAnimations>,
@@ -162,22 +205,18 @@ pub(super) fn update_hover(
             Option<&Children>,
             Option<&crate::entities::mount::MountChild>,
             Option<&InheritedVisibility>,
-            // What this unit WEARS — the spawned root per attach slot. Each is a chained model
-            // and therefore pick geometry of its wearer (see the system doc); read here rather
-            // than by a query of its own because this system sits at Bevy's 16-param ceiling.
             Option<&HeldAttached>,
         ),
-        (With<Guid>, Without<SelfPlayer>),
+        With<Guid>,
     >,
-    // A mounted unit's mount-child part children (decision 0441): the mount's geometry joins the
-    // unit's pick set — the reference draws mount + rider as one clickable unit.
+    // The part children of every pick model root: body, worn items and mount.
     child_sets: Query<&Children>,
-    // A part child's mesh + its palette-rig link (the rig its vertices pose through).
-    parts: Query<(&Mesh3d, &benilla_world::rig_palette::RigPart)>,
-    // Fallback path: a unit's pickable mesh children, by [`CreaturePickPart`] (stamped beside the
-    // part's `WorldObject` at the attach sites, fallback cube included — the archetype filter that
-    // replaced a per-frame kind-compare over every streamed row) — model-local `Aabb`, world
-    // transform, and the link to the streamed parent (whose `Guid` we resolve the hit to).
+    parts: Query<(
+        &Mesh3d,
+        &benilla_world::rig_palette::RigPart,
+        Option<&InheritedVisibility>,
+    )>,
+    // The box fallback: every `CreaturePickPart`, the fallback cube included.
     meshes: Query<
         (
             &ChildOf,
@@ -187,11 +226,8 @@ pub(super) fn update_hover(
         ),
         With<CreaturePickPart>,
     >,
-    // The pick's guid resolution — **and its kind**, which the skinless fallback below needs to
-    // apply the same eligibility rule the faithful path states inline (decision 1706: a corpse
-    // renders, and renders as a character body with pickable parts, but it is not a unit and a
-    // click must never send `CMSG_SET_SELECTION` for it).
-    units: Query<(&Guid, &NetEntity), Without<SelfPlayer>>,
+    // The pick's guid and kind; the kind decides which slot of `Hovered` a hit lands in.
+    units: Query<(&Guid, &NetEntity)>,
 ) {
     hovered.target = None;
     hovered.guid = None;
@@ -199,19 +235,14 @@ pub(super) fn update_hover(
     hovered.corpse_guid = None;
     hovered.distance = f32::MAX;
     hovered.refused = false;
-    // **The plate publishes the mouseover, and it does so THROUGH the UI gate below, not around
-    // it.** A plate is mouse-enabled UI (2148): with the pointer inside one, the UI pointer pass
-    // owns the cursor, `PointerOverUi` is true, and the world pick correctly stands down — so this
-    // has to be read before that early return or hovering a plate would clear the mouseover it is
-    // supposed to set. That is the reference's own arrangement: the plate's OnEnter (`0x7cb850`)
-    // publishes `[0xb4e2c8]` directly, with none of the world hover's grading, and the frame walk
-    // stops there — no world pick behind it. Freelook still wins, because there the plates have
-    // handed the mouse back (`0x60f830`).
+    // A plate under the pointer is the mouseover, read before the UI gate below, which the plate
+    // itself trips: the reference's plate OnEnter (`0x7cb850`) publishes `[0xb4e2c8]` ungraded,
+    // with no world pick behind it. Freelook wins, as the plates hand the mouse back (`0x60f830`).
     if !rig.is_looking() {
         if let Some(entity) = plate_hover.0 {
             hovered.target = Some(entity);
             hovered.guid = units.get(entity).ok().map(|(g, _)| g.0);
-            hovered.distance = 0.0; // topmost UI — it beats any world GameObject at a tie
+            hovered.distance = 0.0; // topmost UI: it beats any world GameObject at a tie
             *last_pick = Some(entity);
             return;
         }
@@ -232,57 +263,34 @@ pub(super) fn update_hover(
     let (origin, dir) = (ray.origin, *ray.direction);
     let limit = occlusion.distance;
 
-    // ── The faithful path: collect broad-sphere-passing candidates, then pass 1 / pass 2 ────────
-    // A pass-2-eligible candidate: the unit, its pass-2 priority (alive 3 / dead 2 — the lootable
-    // refinement awaits loot state), its parts' mesh ids, and its posed joint palette.
+    // ── Broad phase, then pass 1 and pass 2 ──
+    // A candidate: the unit, its pass-2 priority, its parts' mesh ids and its posed joint palette.
     let mut candidates: Vec<(Entity, u8, Vec<AssetId<Mesh>>, Vec<Mat4>)> = Vec::new();
-    // Units the faithful path *owns* (they have skinned parts): excluded from the AABB fallback
-    // even when the broad phase rejects them — the reference wouldn't click them there either.
+    // Units with skinned parts: out of the box fallback even when the broad phase rejects them.
     let mut faithful: HashSet<Entity> = HashSet::new();
-    for (entity, gt, net, anims, drv, store, children, mount_child, drawn, held) in &roots {
-        // Units, players — and **corpses** (decision 1723). A corpse is a skinned character body
-        // like any other, so it belongs in this pass, not in a fourth picker duplicating it; the
-        // reference picks every CGObject in one trace and switches on type at the end. Which slot
-        // of [`Hovered`] the winner lands in is decided at the publish below, by kind.
-        if !matches!(
-            net.kind,
-            EntityKind::Unit | EntityKind::Player | EntityKind::Corpse
-        ) {
+    for (entity, is_self, gt, net, anims, drv, store, children, mount_child, drawn, held) in &roots
+    {
+        // Units, players and corpses: the reference picks every CGObject in one trace and
+        // switches on type at the end, below.
+        if !target_state.is_candidate(entity, net.kind, is_self, store) {
             continue;
         }
-        // Not drawn ⇒ not clickable (see the query's note). Deliberately BEFORE `faithful.insert`
-        // below, so an undrawn unit is not claimed by the faithful path either — otherwise it
-        // would merely be excluded from the AABB fallback and stay unpickable by accident rather
-        // than by rule.
+        // Not drawn, not clickable. Checked before `faithful.insert`, so an undrawn unit is out by
+        // this rule, not by its exclusion from the box fallback.
         if !drawn.is_none_or(|v| v.get()) {
             continue;
         }
         let Some(children) = children else { continue };
-        // The models this unit WEARS, each its own pick candidate below. The reference registers
-        // every model **chained** to the object, not just its body: `0x480d90` walks the CM2
-        // attachment tree (`[model+0x1dc]` list head → `[+0x1e4]` sibling — the same two fields
-        // the dress and paperdoll lanes walk) and registers each child model into the pick scene
-        // under the SAME candidate node, so a ray that strikes the axe resolves to the unit
-        // holding it (decision 1658). Ours tested the body alone,
-        // which is why a Naxxramas weapon mob — an `InvisibleStalker` body that draws nothing,
-        // whose entire visible self is the weapon in its hand — could only be targeted through
-        // its name plate.
         let worn = held.map_or(&[][..], |h| h.spawned_slots().as_slice());
-        // Ownership probe only — no collect yet. The `skinned` Vec used to be built HERE, for
-        // every drawn unit in the scene, ahead of the few-FLOP broad phase that rejects nearly
-        // all of them (1473 §3's hover row); the survivors alone pay it now, below. Membership
-        // in `faithful` must still be decided pre-reject — a broad-phase-rejected skinned unit
-        // stays excluded from the AABB fallback by RULE, not by accident.
+        // Membership in `faithful` is decided before the broad phase rejects; the parts are
+        // collected below, for the survivors only.
         if !children.iter().any(|c| parts.contains(c)) && worn.iter().all(Option::is_none) {
             continue; // static/cube unit → the AABB fallback below
         }
         faithful.insert(entity);
-        // Broad phase: the playing sequence's bounds sphere, world-placed + world-scaled (uniform
-        // scale — the root bakes `OBJECT_FIELD_SCALE_X`). An unknown clip / unauthored radius passes
-        // through (the reference falls back to the header sphere; permissive is the safe direction).
-        // A MOUNTED unit passes through too: the rider's Mount-pose sphere doesn't cover the
-        // mount's body (the reference recomputes the pick radius from the mount's box — a P2
-        // refinement, decision 0441).
+        // Broad phase: the playing sequence's bounds sphere, scaled by `OBJECT_FIELD_SCALE_X`. An
+        // unauthored radius passes (the reference uses the header sphere), as does a mounted unit
+        // (the reference sizes it from the mount's box).
         let clip = match (anims, drv) {
             (Some(a), Some(d)) => d.active_anim().and_then(|id| a.find(id)),
             _ => None,
@@ -290,18 +298,14 @@ pub(super) fn update_hover(
         if let Some(c) = clip.filter(|c| c.bounds_radius > 0.0 && mount_child.is_none()) {
             let centre = gt.transform_point(c.bounds_center);
             let radius = c.bounds_radius * gt.scale().max_element();
-            // Ray-sphere: reject when the ray's closest approach to the centre exceeds the radius
-            // (dir is normalized; a centre behind the origin projects to t=0, keeping units we
-            // stand inside clickable).
+            // Reject when the ray's closest approach exceeds the radius; a centre behind the
+            // origin clamps to t = 0, so a unit we stand inside stays clickable.
             let along = (centre - origin).dot(dir).max(0.0);
             if (centre - origin - dir * along).length_squared() > radius * radius {
                 continue;
             }
         }
-        // The posed joint palette (parts of one skeleton share the rig): the same
-        // world-from-bind-pose matrices GPU skinning applies, read from the owned palette rows
-        // (decision 0720 — last frame's propagated pose, exactly what the previous
-        // joint-GlobalTransform read gave).
+        // The skinning matrices of one skeleton's parts, as of last frame's propagated pose.
         let palette_of =
             |sk: &[(&Mesh3d, &benilla_world::rig_palette::RigPart)]| -> Option<Vec<Mat4>> {
                 sk.first().and_then(|(_, part)| {
@@ -309,16 +313,9 @@ pub(super) fn update_hover(
                     pose.palettes.world_palette(rig.slot, rig.bones() as usize)
                 })
             };
-        // The halo ladder (alive 3 / dead 2), with the corpse rung no longer guessed (1723's open
-        // question): `0x480c90`'s arm at `0x480cec` scores a corpse **2 when
-        // `CORPSE_DYNFLAG_LOOTABLE`, else 0** — the same rung as a dead unit when there is
-        // something to take, and the floor otherwise. 1723 guessed a flat 1; this replaces it.
-        //
-        // The rung matters less than it looks: **pass 1 sorts on distance alone**, so a corpse
-        // can neither steal a click from a unit standing in front of it nor lose one it is in
-        // front of. Priority decides only the inflated pass-2 retry. Still not read off
-        // `unit_is_dead()` — a corpse descriptor has no UNIT block, so that accessor answers
-        // "alive" for one.
+        // The pass-2 ladder (`0x480c90`): alive 3, dead 2, a corpse 2 when
+        // `CORPSE_DYNFLAG_LOOTABLE`, else 0 (`0x480cec`). A corpse has no UNIT block, so
+        // `unit_is_dead()` would answer alive for it.
         let priority = if net.kind == EntityKind::Corpse {
             u8::from(store.is_some_and(|s| s.0.corpse_lootable())) * 2
         } else if store.is_some_and(|s| s.0.unit_is_dead()) {
@@ -326,17 +323,13 @@ pub(super) fn update_hover(
         } else {
             3
         };
-        // **One candidate per model instance, every one of them resolving to this unit** — the
-        // reference's own shape (one candidate node; every chained model registered under it).
-        // The body contributes nothing when it has no parts, which is not a reason to stop: a
-        // trigger creature's whole visible self is what it wears. An attached item rides a rigid
-        // one-frame palette of its own (`RigRider`, 1609), so it reads here exactly like a body —
-        // its parts, its rig, its pose — and so does a mount child (decision 0441).
+        // One candidate per model instance, all resolving to this unit. A partless body is no
+        // reason to stop: a trigger creature's whole visible self can be what it wears.
         for root in pick_model_roots(entity, worn, mount_child.map(|mc| mc.0)) {
             let Ok(kids) = child_sets.get(root) else {
                 continue;
             };
-            let sk: Vec<_> = kids.iter().filter_map(|c| parts.get(c).ok()).collect();
+            let sk = posed_parts(kids, &parts, is_self);
             let Some(palette) = palette_of(&sk) else {
                 continue;
             };
@@ -349,9 +342,8 @@ pub(super) fn update_hover(
         }
     }
 
-    // Pass 1 — the exact posed render mesh, pure nearest-wins (the reference's first pass).
-    // UNBOUNDED, like the reference: the object trace never carries the world distance; occlusion
-    // is one strict compare on the final result (below).
+    // Pass 1: the exact posed mesh, nearest wins, unbounded as in the reference; occlusion is one
+    // compare on the result, below.
     let mut best: Option<(f32, Entity)> = None;
     for (entity, _, mesh_ids, palette) in &candidates {
         for id in mesh_ids {
@@ -364,11 +356,11 @@ pub(super) fn update_hover(
         }
     }
 
-    // ── Fallback for skinless units only: the model-bounds box test (pre-RE interim) ────────────
-    // A unit's parts are separate meshes; testing each and keeping the closest parent is equivalent
-    // to testing the union. `dir` is normalized, so `t` is a world distance like the hits above.
+    // ── The box fallback, for skinless units only ──
+    // The nearest part per parent is the union's hit; `dir` is normalized, so `t` is a world
+    // distance like the hits above.
     for (child_of, aabb, gt, drawn) in &meshes {
-        // …and the same rule on the skinless fallback: a part inherits its root's pass-2 verdict.
+        // Not drawn, not clickable: a part inherits its root's visibility.
         if !drawn.is_none_or(|v| v.get()) {
             continue;
         }
@@ -376,19 +368,15 @@ pub(super) fn update_hover(
         if faithful.contains(&parent) {
             continue; // posed-mesh-tested above
         }
-        // The same eligibility the faithful path states at its head — and **a bone pile lives
-        // here** (decision 1723): the skeletal corpse model ships without a skeleton, so it never
-        // reaches the posed-mesh pass and this box test is the only thing that can ever pick it.
-        // The self player is still excluded (its query filter), and so is everything that is not a
-        // body: a hit resolves to a `Guid` the click will act on, and the kind decides which slot
-        // of [`Hovered`] receives it.
+        // The same candidates as the posed pick. A bone pile lands here: its corpse model has no
+        // skeleton, so only this box test can pick it.
         let Ok((_, parent_net)) = units.get(parent) else {
             continue;
         };
-        if !matches!(
-            parent_net.kind,
-            EntityKind::Unit | EntityKind::Player | EntityKind::Corpse
-        ) {
+        let root = roots.get(parent).ok();
+        let is_self = root.as_ref().is_some_and(|root| root.1);
+        let store = root.and_then(|root| root.6);
+        if !target_state.is_candidate(parent, parent_net.kind, is_self, store) {
             continue;
         }
         if let Some(t) = ray_mesh_bounds(origin, dir, aabb, gt) {
@@ -398,10 +386,7 @@ pub(super) fn update_hover(
         }
     }
 
-    // Pass 2 — nothing exactly hit: the reference's generous retry (mouse-pick only). Same
-    // candidates, every vertex displaced +1 model-unit along its skinned normal — a ~1-yd halo
-    // around the drawn body. Accept by the priority ladder, not pure distance: last frame's pick
-    // sticks (anti-flicker), else higher priority wins even when farther, ties by distance.
+    // Pass 2, when nothing hit exactly: the halo, won by the priority ladder, not distance.
     if best.is_none() {
         let mut best2: Option<(f32, u32, Entity)> = None;
         for (entity, priority, mesh_ids, palette) in &candidates {
@@ -423,83 +408,51 @@ pub(super) fn update_hover(
         best = best2.map(|(t, _, e)| (t, e));
     }
 
-    // The occlusion verdict — the reference's single strict compare (`0x480df0` @ `0x480eb4`):
-    // the object hit is discarded iff the world hit is STRICTLY nearer (a tie keeps the object).
+    // Occlusion (`0x480eb4`): a strictly nearer world hit drops the pick, a tie keeps it.
     if best.is_some_and(|(t, _)| limit < t) {
         best = None;
     }
-    // **Switch on type at the end**, the reference's own shape: the one pick lands in the unit slot
-    // or the corpse slot, never both. Everything downstream that means "unit" reads `target` and so
-    // stays right by construction; the corpse legs read `corpse`.
+    // Switch on type at the end, as the reference does: the one pick lands in the unit slot or the
+    // corpse slot, and a unit the `IsSelectable` grader refuses in neither.
     if let Some((t, entity)) = best {
         if let Ok((guid, net)) = units.get(entity) {
             if net.kind == EntityKind::Corpse {
                 hovered.corpse = Some(entity);
                 hovered.corpse_guid = Some(guid.0);
-            } else if selectable_pick(entity, &roots, self_guid.0) {
+            } else if selectable_pick(entity, &roots, target_state.self_guid.0) {
                 hovered.target = Some(entity);
                 hovered.guid = Some(guid.0);
             } else {
                 hovered.refused = true;
             }
-        } else if selectable_pick(entity, &roots, self_guid.0) {
+        } else if selectable_pick(entity, &roots, target_state.self_guid.0) {
             hovered.target = Some(entity);
         } else {
             hovered.refused = true;
         }
-        // Set on EVERY arm, the refusal included — see [`Hovered::refused`].
+        // Set on every arm, the refusal included (`Hovered::refused`).
         hovered.distance = t;
     }
     *last_pick = best.map(|(_, e)| e);
 }
 
-/// **The hover grader's `IsSelectable` verdict** — `0x4828d0`, the step between the pick and the
-/// mouseover publish:
+/// The hover grader's `IsSelectable` test: `0x4828d0` calls vtable slot 21 at `0x482982`
+/// (`0x60be60`, the predicate `SetSelection` runs), and a refusal jumps to `0x482090(0,0)` and
+/// `ResetCursor 0x523d30`, past the publisher `0x492890`: no tooltip, cursor, brighten or click.
 ///
-/// ```text
-/// 48297d  mov  eax,[esi]              ; the picked object's vtable
-/// 482982  call [eax+0x54]             ; slot 21 = 0x60be60 IsSelectable — the SAME predicate
-/// 482985  test eax,eax                ;   SetSelection runs, reached there via the +0x58 thunk
-/// 482987  je   0x4829ed               ; FALSE -> 0x482090(0,0) + ResetCursor 0x523d30
-/// ```
-///
-/// So the refusal is **total, and it is one rule**: the mouseover globals `[0xb4e2c8]/[0xb4e2cc]`
-/// are cleared (their only two writers image-wide live in the publisher `0x492890`, which that jump
-/// skips), the cursor is reset, and the type dispatch that would have chosen an Interact/Attack
-/// cursor never runs. No tooltip, no cursor, no brighten and no click, out of one predicate rather
-/// than four.
-///
-/// **It is a grader, not a filter, and the difference is observable.** A census over the pick itself
-/// (`0x480a50`, `0x480d90`, `0x713cb0`, `0x481190`, `0x480df0`) finds **zero** reads of
-/// `[obj+0x110]`/`[+0xa0]` — positive control: four such reads inside `CanAttack` — so the flagged
-/// unit is registered as a candidate and *wins* the trace before anything looks at it. That is why
-/// the caller records [`Hovered::refused`] and keeps the pick's distance instead of skipping the
-/// candidate: a trigger stalker in front of a chest takes the pick, and the chest behind it must not
-/// inherit the mouseover.
-///
-/// Applied to the **unit** arms only. A corpse reaches `0x482982` too, but slot 21 there is
-/// `CGCorpse_C`'s, not `CGUnit_C`'s — the `xor eax,eax` base stub sits at slot **22** (`+0x58`),
-/// which is what makes a non-unit unselectable for `SetSelection`, and is not what this call goes
-/// through.
-///
-/// A **plate** hover is a deliberate non-case: the reference publishes it straight from
-/// `0x7cb869 call 0x492890` with no grader at all, so a plate on a flagged unit *would* tooltip —
-/// but the per-tick plate gate `0x60f600` refuses the same units one step earlier
-/// (`0x60f622`/`0x60f628`, unconditional, re-run every OnUpdate), which `crate::vplates` already
-/// models. There is no reachable state where the two disagree.
-///
-/// Run at the publish rather than as a system of its own, deliberately. The reference really does
-/// pick and *then* grade, but a second Bevy system means [`Hovered`] is briefly readable in its
-/// ungraded state by anything that forgot to order after `TargetUpdate` — a one-frame tooltip pop
-/// for a unit that must never have one. Written once, already graded, that state does not exist.
-///
-/// Decision 2060.
+/// It grades the winner and filters no candidate: the pick (`0x480a50`, `0x480d90`, `0x713cb0`,
+/// `0x481190`, `0x480df0`) reads no unit field, so a refused unit in front of a chest still takes
+/// the pick ([`Hovered::refused`]). A corpse's slot 21 is `CGCorpse_C`'s, so only the unit arms
+/// run this. A plate hover skips the grader (`0x7cb869`), but the plate gate `0x60f600` already
+/// refuses the same units (`0x60f622`/`0x60f628`). Graded at the publish, so [`Hovered`] is never
+/// readable ungraded.
 #[allow(clippy::type_complexity)] // the picker's own root query, borrowed as-is
 fn selectable_pick(
     entity: Entity,
     roots: &Query<
         (
             Entity,
+            Has<SelfPlayer>,
             &GlobalTransform,
             &NetEntity,
             Option<&ModelAnimations>,
@@ -510,86 +463,41 @@ fn selectable_pick(
             Option<&InheritedVisibility>,
             Option<&HeldAttached>,
         ),
-        (With<Guid>, Without<SelfPlayer>),
+        With<Guid>,
     >,
     self_guid: Option<u64>,
 ) -> bool {
-    let store = roots.get(entity).ok().and_then(|r| r.5);
+    let store = roots.get(entity).ok().and_then(|r| r.6);
     super::relations::is_selectable(store, self_guid)
 }
 
-/// Recompute the **GameObject** under the cursor each frame into [`HoveredObject`] (decision 0236):
-/// a mesh-accurate ray pick against GameObject parts *only*, reusing the inspector's picker
-/// (the resident-geometry caster of decision 0857, which hits the colliderless props a physics ray
-/// misses and the `RENDER_WORLD`-only static forms Bevy's `MeshRayCast` lost at 0834). Kept
-/// separate from [`update_hover`]'s unit pick because a GameObject is usable-but-not-*selected*:
-/// this drives the Interact cursor and the right-click USE, never selection. Inert while
-/// mouse-looking (cursor hidden) or over the dev UI, exactly like the unit pick. Cheap — only the
-/// handful of GO parts on screen are in the pick set.
-///
-/// **Two passes, like the unit pick** (decision 1071 — GameObjects are the same type-1 candidates
-/// as units in the reference's resolve `0x7089c0`): **pass 1** =
-/// the exact resident mesh, pure nearest-wins; **pass 2, only when pass 1 hit nothing anywhere**
-/// (the mouse pick's generous retry): the same geometry with every vertex displaced +1 model-unit
-/// along its authored normal — a ~1-yd halo, which is what makes a wispy herb clickable *around*
-/// its leaves instead of only pixel-on-texture. "Nothing anywhere" spans the unit pick too (one
-/// resolve in the reference): a frame where [`Hovered`] holds any unit — exact hit or its own
-/// halo — never opens the GO halo, because the pass-2 accept ladder ranks every unit (alive 3 /
-/// dead 2) above every GameObject (highlightable 1 / else 0). Within the GO halo the same ladder
-/// applies: last frame's pick sticks (anti-flicker), else higher priority wins even when farther,
-/// ties by distance. Both passes stay world-occlusion-clamped. (Residual, same slice as the
-/// eligibility note below: the reference's sticky slot is cross-type, so a stuck GO pick can
-/// outrank a unit's halo there; our split picks give the unit that frame instead.)
-/// The GO picker's own state, bundled — the pick-set cache with the stream edges that rebuild
-/// it, plus the sticky-hover memory — one [`SystemParam`] because [`update_hovered_object`]
-/// sits at Bevy's 16-param function-system ceiling. See the maintenance comment at the top of
-/// that system for the cache contract.
+/// The GameObject picker's state as one [`SystemParam`] (the picker is at Bevy's 16-param limit):
+/// the pick-set cache and the stream edges that rebuild it, the sticky pick and the probe's locals.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct GoPickSet<'w, 's> {
     added: Query<'w, 's, (), Added<GoPickPart>>,
     removed: RemovedComponents<'w, 's, GoPickPart>,
     cache: Local<'s, bevy::platform::collections::HashSet<Entity>>,
-    /// Last frame's GO pick, for pass 2's sticky-hover (the reference's anti-flicker cache, by
-    /// net entity — the same rung the unit picker keeps).
+    /// Last frame's pick by net entity, which outranks everything in pass 2.
     last_pick: Local<'s, Option<Entity>>,
-    /// Every pickable billboard card, for [`net_entity_of`]'s first hop. Bundled here rather than
-    /// taken as its own `SystemParam` because [`update_hovered_object`] is at Bevy's 16-param
-    /// function-system ceiling.
+    /// Every billboard card, for [`net_entity_of`]'s first hop.
     cards: Query<'w, 's, &'static BillboardCard>,
-    /// The headless probe's frame counter and its say-once report ([`super::hover_probe`], 2250).
-    /// `Local`s: in a player run the probe is unarmed, so these are one `u64` and one `None` that
-    /// nothing ever reads.
+    /// The headless probe's frame counter and say-once report ([`super::hover_probe`]), idle in
+    /// a player run.
     frame: Local<'s, u64>,
     report: Local<'s, super::hover_probe::ProbeReport>,
-    /// `WOW_HOVER_PROBE=lock`'s held target (2255) — the object the probe rests its aim on for the
-    /// remainder of the run.
+    /// `WOW_HOVER_PROBE=lock`'s held target, where the probe rests its aim for the rest of the run.
     lock: Local<'s, super::hover_probe::LockedAim>,
 }
 
-/// The number of `ChildOf` hops [`net_entity_of`] will climb before giving up — a malformed-data
-/// guard, not a real depth. The deepest real chain is a card on a nested joint (bone hierarchies
-/// in the shipped corpus are single digits deep), so this is orders of margin.
+/// The most `ChildOf` hops [`net_entity_of`] climbs: a malformed-data guard, as real joint chains
+/// are single digits deep.
 const NET_WALK_HOPS: usize = 64;
 
-/// A picked GameObject part → the **net entity** that carries its `Guid` (the object the mouseover
-/// publishes, the cursor classifies and the right-click USEs).
-///
-/// Two shapes reach here and they attach differently. An ordinary mesh part is a direct child of
-/// the net entity — one `ChildOf` hop. A **billboard card is a world ROOT** (decision 0153: a card
-/// writes an absolute world transform and lives at the root/identity), so it has no `ChildOf` edge
-/// at all: its link to the model is [`BillboardCard::follows`] — the joint it rides on a rigged
-/// host, the mirror anchor under the net entity otherwise — and the climb continues from there.
-///
-/// Before the card hop existed a card hit resolved to the **card**, which carries no `Guid`, so
-/// [`update_hovered_object`] bailed and published the **null** mouseover: no cursor, no tooltip and
-/// a dead right-click over exactly the screen area the card covers. The Lightwell found it (B169's
-/// second half) — its light shaft is a lock-Z card standing 4.5 yd out of a 1.09 yd bowl, so the
-/// card swallowed nearly every ray and only the sliver of bowl around it ever answered.
-///
-/// The reference has no such split to reconcile: the resolve `0x7089c0`'s narrow phase walks the
-/// ONE model's render batches — the actual visible RENDER MESH, posed to the current animation,
-/// billboard batch included, skinned through the live bone matrices — so
-/// a hit on the shaft **is** a hit on the GameObject, which is what this restores.
+/// A picked GameObject part's net entity, the one carrying its `Guid`. A mesh part is its child; a
+/// billboard card is a world root linked by [`BillboardCard::follows`] (a joint on a rigged host,
+/// else the mirror anchor), and the climb goes on from there. The reference's narrow phase walks
+/// the one model's batches, billboards included (`0x7089c0`), so a card hit is a GameObject hit.
 fn net_entity_of(
     e: Entity,
     cards: &Query<&BillboardCard>,
@@ -611,22 +519,19 @@ fn net_entity_of(
     cur
 }
 
-/// The state the GameObject gates read beside the object's own store, bundled because this system
-/// sits at Bevy's 16-`SystemParam` ceiling: the ask-once template cache (GENERIC's eligibility is
-/// its `data[1]`, decision 0762; MEETINGSTONE's is its `data[2]`), the faction catalog behind the
-/// eligibility faction term (decision 0764), and the live meeting-stone queue — benilla's
-/// `[0xb72038]`, the other half of MEETINGSTONE(23)'s own highlightable predicate (decision 2283).
+/// What the GameObject gates read beside the object's store: the template cache (GENERIC's
+/// eligibility is its `data[1]`, MEETINGSTONE's its `data[2]`), the faction catalog, and the
+/// meeting-stone queue, the reference's `[0xb72038]`.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct GoGateInputs<'w> {
     pub(crate) templates: Res<'w, crate::go_templates::GameObjectTemplates>,
     pub(crate) factions: Option<Res<'w, super::ring::Factions>>,
-    /// `Option` because a headless/net-less build mounts no UI dialog verbs; absent reads as the
-    /// reference's zero-initialized `[0xb72038]`, i.e. not queued.
+    /// Absent in a net-less build, read as the reference's zeroed `[0xb72038]`: not queued.
     pub(crate) stone: Option<Res<'w, crate::ui_dialog_verbs::MeetingStone>>,
 }
 
 impl GoGateInputs<'_> {
-    /// `[0xb72038]` — the area we are queued at, `0` when we are not (or when there is no VM).
+    /// `[0xb72038]`, the area we are queued at, or 0.
     pub(crate) fn queued_area(&self) -> u32 {
         self.stone.as_deref().map_or(0, |s| s.area)
     }
@@ -638,24 +543,16 @@ pub(super) fn update_hovered_object(
     rig: Res<CameraControl>,
     pointer_over_ui: Res<PointerOverUi>,
     occlusion: Res<PickOcclusion>,
-    // The unit pick's verdict — [`update_hover`] runs earlier in the target chain. Any unit hover
-    // means pass 1 + the unit halo already own the mouseover, so the GO pass 2 stays shut.
+    // The unit pick, earlier in the chain: a unit hover keeps the GameObject halo shut.
     unit_hovered: Res<Hovered>,
     mut hovered: ResMut<HoveredObject>,
-    // Every pickable GameObject part carries [`GoPickPart`] (stamped beside its
-    // `WorldObject { kind: GameObject }` at the attach sites; units/doodads/WMOs never enter this
-    // query — units have their own posed-mesh pick).
     go_parts: Query<Entity, With<GoPickPart>>,
     child_of: Query<&ChildOf>,
     guids: Query<&Guid>,
     stores: Query<&ObjectStore>,
-    // The three state reads the GameObject gates need beside the object's own store, as one
-    // param (the 16-`SystemParam` ceiling) — see [`GoGateInputs`].
     go_gate: GoGateInputs,
     self_q: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
     parts: PickParts,
-    // The picker's own state, one bundled param ([`GoPickSet`] — the fn sits at Bevy's
-    // 16-param ceiling): the pick-set cache, its stream edges, and the sticky-hover memory.
     mut cache: GoPickSet,
 ) {
     *cache.frame = cache.frame.wrapping_add(1);
@@ -664,30 +561,19 @@ pub(super) fn update_hovered_object(
     let pickable = &mut *cache.cache;
     let last_pick = &mut *cache.last_pick;
     let cards = &cache.cards;
-    // The hit part → its guid-bearing net entity ([`net_entity_of`]: the card hop, then the climb).
     let resolve_net = |e: Entity| net_entity_of(e, cards, &guids, &child_of);
-    // The pick set (bevy's `HashSet` — the caster's type, not the `std` one this module uses
-    // elsewhere), rebuilt on GO-part stream edges ONLY — the `WaterIndex` shape. It used to be
-    // collected from every streamed GO part on every cursor frame (ChildOf hop + store probe +
-    // hash insert each); membership only actually changes when GO models spawn or despawn, and
-    // a GO's type id never changes after create. Maintained FIRST, ahead of every early return:
-    // an `Added` edge is only visible on the frame it happens (the run advances this system's
-    // change tick even through a `return`), so a rebuild parked behind the cursor gates would
-    // silently drop parts streamed in while the pointer sat on UI. A despawned entry between
-    // edges self-filters at the caster (`parts.get` on a dead entity misses).
+    // The pick set, rebuilt only on GameObject-part stream edges (a type id never changes after
+    // create). Maintained before any early return: an `Added` edge shows only on its own frame, so
+    // a rebuild behind the cursor gates would drop parts streamed in while the pointer sat on UI.
+    // A part despawned between edges misses at the caster.
     //
-    // A transport-family GO (TRANSPORT 11 / MAP_OBJECT 14 / MO_TRANSPORT 15) never joins the
-    // set: in the reference it has no pick geometry at all — the GO model resolver `0x5f80e0`
-    // returns 0 for these three types (they render via the WMO/spline path, not an M2) and their
-    // strategy's interaction predicates are constant-false (w2c1 + go-render-gate + the +0x14
-    // vtable dump). Concretely: a ship's hull must not swallow the pick — an NPC on deck stays
-    // hoverable through the railing, and the hull shows no gear or tooltip.
+    // Transports (TRANSPORT 11, MAP_OBJECT 14, MO_TRANSPORT 15) never join: the reference's model
+    // resolver `0x5f80e0` gives them no pick geometry and their interaction predicates are
+    // constant false, so a ship's hull never swallows the pick of an NPC on deck.
     if removed_parts.read().next().is_some() || !added_parts.is_empty() {
         pickable.clear();
         pickable.extend(go_parts.iter().filter(|&e| {
-            // Through the same resolver the hit uses, so a card and its mesh siblings can never
-            // disagree about which GameObject they belong to (a transport's card would otherwise
-            // stay in the set while its meshes were filtered out).
+            // Through the hit's own resolver, so a card and its mesh siblings agree.
             !stores
                 .get(resolve_net(e))
                 .is_ok_and(|s| matches!(s.0.gameobject_type_id(), 11 | 14 | 15))
@@ -696,8 +582,7 @@ pub(super) fn update_hovered_object(
     hovered.target = None;
     hovered.guid = None;
     hovered.distance = f32::MAX;
-    // The sticky-hover cache drops the moment the pointer is not ours, exactly as before — the
-    // probe's aim below must not change *when* that happens.
+    // The sticky pick drops the moment the pointer is not ours.
     let yielded = rig.is_looking() || pointer_over_ui.0;
     if yielded {
         *last_pick = None;
@@ -705,13 +590,9 @@ pub(super) fn update_hovered_object(
     let (Ok((camera, cam_tf)), Ok(window)) = (camera.single(), window.single()) else {
         return;
     };
-    // The aim. A person's pointer always wins; the probe (2250) answers only for a window that has
-    // no cursor at all, which is every automated run — see [`super::hover_probe`].
-    //
-    // **Resolved and PUBLISHED ahead of the yield below** (2255), because the UI mouse feed reads
-    // the published aim as its pointer: a frame that returned early without publishing would take
-    // the pointer off the UI, drop `PointerOverUi`, and unlatch the very gate that skipped the
-    // pick — the probe would flicker the interface on and off instead of resting on it.
+    // The aim: the OS pointer, else the probe's for a cursorless window. Published before the
+    // yield, as the UI mouse feed reads it as its pointer: skipping it would drop `PointerOverUi`
+    // and flicker the UI the probe rests on.
     let probing = super::hover_probe::armed();
     let probe_aim = cache
         .lock
@@ -733,10 +614,8 @@ pub(super) fn update_hovered_object(
     };
     let self_store = self_q.single().ok();
 
-    // The probe's census (2250): once a second, where the pickable GameObjects actually ARE on
-    // screen. Without it a headless "no hit" is unreadable — it cannot tell a pick fault from a
-    // camera that is simply not looking at the thing, which is the single question a person with a
-    // mouse never has to ask.
+    // The probe's census, once a second: where the pickable GameObjects are on screen, so a
+    // headless miss tells a pick fault from a camera looking elsewhere.
     if probing && (*cache.frame).is_multiple_of(60) {
         let rows: Vec<String> = pickable
             .iter()
@@ -765,15 +644,18 @@ pub(super) fn update_hovered_object(
         );
     }
 
-    // Pass 1 — the exact resident geometry, pure nearest-wins (priority-independent).
+    // Pass 1: the exact resident geometry, nearest wins.
     let mut best: Option<(f32, Entity)> =
         benilla_world::interact::cast_pick_ray(ray, pickable, &parts, false)
             .into_iter()
             .next()
             .map(|(e, h)| (h.distance, e));
 
-    // Pass 2 — nothing exactly hit anywhere (no GO, and no unit either — the doc above): the
-    // generous retry over the normal-inflated geometry, accepted by the priority ladder.
+    // Pass 2, only when nothing hit anywhere, units included (one resolve in the reference): the
+    // geometry pushed 1 model unit along its normals, a halo of about a yard that makes a wispy
+    // herb clickable around its leaves. Every unit outranks every GameObject on that ladder, so a
+    // unit hover keeps it shut. The reference's sticky pick is cross-type and can hold a
+    // GameObject over a unit's halo; here the unit wins that frame.
     if best.is_none() {
         if unit_hovered.target.is_some() {
             *last_pick = None;
@@ -785,9 +667,8 @@ pub(super) fn update_hovered_object(
             let prio = if *last_pick == Some(net) {
                 u32::MAX // the sticky-hover cache outranks everything
             } else {
-                // The classify priority (`0x480c90`): highlightable GameObject 1, else 0. A store
-                // that hasn't streamed reads highlightable — the eligibility gate's own
-                // permissive default, so a fresh spawn isn't a dead zone for its first frames.
+                // `0x480c90`: highlightable 1, else 0. A store not yet streamed reads
+                // highlightable, the eligibility gate's own default.
                 stores.get(net).map_or(1, |s| {
                     let reaction = crate::target::cursor_mode::go_reaction(
                         go_gate.factions.as_deref(),
@@ -820,8 +701,7 @@ pub(super) fn update_hovered_object(
         best = best2.map(|(t, _, e)| (t, e));
     }
 
-    // The occlusion verdict (`0x480df0` @ `0x480eb4`): discard the GO hit iff the world hit is
-    // STRICTLY nearer — a tie keeps the object.
+    // Occlusion (`0x480eb4`): a strictly nearer world hit drops the pick, a tie keeps it.
     if best.is_some_and(|(t, _)| occlusion.distance < t) {
         best = None;
     }
@@ -839,17 +719,10 @@ pub(super) fn update_hovered_object(
     let Ok(guid) = guids.get(net_entity) else {
         return;
     };
-    // **The mouseover-eligibility gate** (`[obj->vtbl+0x54]` at `0x482982`, decision 0762): an
-    // ineligible object publishes the NULL mouseover, so it gets no tooltip, no +64 brighten and no
-    // cursor — nothing. Applied here, at the one place the GO mouseover is published, so all three
-    // consumers fall out together exactly as they do in the reference (which reaches `0x492890`,
-    // `0x52aa20` and `0x4945e0` only past this gate).
-    //
-    // KNOWN RESIDUAL: the reference nulls the **whole** mouseover, so a unit standing behind an
-    // ineligible portcullis is not hoverable through it either. benilla picks unit and GameObject
-    // separately and arbitrates by distance, so here the unit behind it stays hoverable. Narrower
-    // than the old behaviour (which tooltipped the portcullis itself) and documented rather than
-    // silently accepted; closing it wants the single-pick arbitration, which is its own slice.
+    // The mouseover-eligibility gate (vtable `+0x54` at `0x482982`): an ineligible object
+    // publishes the null mouseover, so no tooltip, brighten or cursor; the reference reaches
+    // `0x492890`, `0x52aa20` and `0x4945e0` only past it. Its null mouseover also hides a unit
+    // behind the object, which our split picks leave hoverable.
     if let Ok(store) = stores.get(net_entity) {
         let tmpl = go_gate.templates.get(guid.0);
         let reaction = crate::target::cursor_mode::go_reaction(
@@ -896,10 +769,8 @@ pub(super) fn update_hovered_object(
                 tmpl.map(|t| t.highlight_column),
                 occlusion.distance,
             ));
-            // `lock` takes its target here and nowhere else: past the eligibility gate, so the
-            // probe holds something that actually publishes a mouseover rather than the first
-            // lamp-post the grid grazed. The hit point is re-expressed in the PART's frame so the
-            // aim survives the camera settling and the object moving (see [`LockedAim`]).
+            // `lock` holds only an object past the eligibility gate, the hit kept in the part's
+            // frame so the aim survives the camera and the object moving.
             if super::hover_probe::locks() {
                 if let Some((t, part)) = best {
                     if let Ok((_, gt, ..)) = parts.get(part) {
@@ -917,6 +788,7 @@ pub(super) fn update_hovered_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spell::targeting::corpse_fixture as fx;
     use bevy::ecs::system::RunSystemOnce;
 
     fn card(bone: u16, owner: Entity) -> BillboardCard {
@@ -930,24 +802,13 @@ mod tests {
         BillboardCard::following(&info, owner)
     }
 
-    /// **A billboard card's hit belongs to its GameObject** — bug B169's second half, the Lightwell
-    /// you could see but not click (2026-08-25).
-    ///
-    /// A card is a world ROOT, so the old one-`ChildOf`-hop resolve answered with the card itself;
-    /// the card carries no `Guid`, so `update_hovered_object` bailed and published the null
-    /// mouseover — no cursor, no tooltip, a dead right-click — over the whole screen area the card
-    /// covers. On `G_HolyLightWell.m2` that is a 4.5 yd shaft standing out of a 1.09 yd bowl, so
-    /// nearly every ray landed on the dead card and only the ring of bowl around it answered:
-    /// *"very hard to find the right position, and even when I see the cog nothing happens"*.
-    ///
-    /// Both card shapes are covered, because `spawn_billboard_part` picks between them on whether
-    /// the host is rigged: following the **mirror anchor** (a direct child of the net entity) and
-    /// following a **joint** (nested under the model root, so the climb is more than one hop).
+    /// Both card shapes `spawn_billboard_part` makes: following the mirror anchor (a rigless host)
+    /// and following a nested joint (a rigged one).
     #[test]
     fn a_billboard_cards_hit_resolves_to_its_gameobject() {
         let mut world = World::new();
         let net = world.spawn(Guid(0xdead_beef)).id();
-        // An ordinary mesh part: the direct child the old one-hop resolve was written for.
+        // An ordinary mesh part, a direct child.
         let mesh_part = world.spawn(ChildOf(net)).id();
         // The rigless shape: the card follows the mirror anchor under the net entity.
         let anchor = world.spawn(ChildOf(net)).id();
@@ -995,14 +856,550 @@ mod tests {
         assert_eq!(resolved[4], net, "the net entity resolves to itself");
     }
 
-    /// **A unit's pick geometry is every model chained to it** — decision 1658, the Naxxramas
-    /// weapon mobs (`.go xyz 2729.28 -3159.80 267.54 533`).
-    ///
-    /// "Unholy Axe" is an `InvisibleStalker` body — 80 bones, 135 animations, zero vertices —
-    /// holding a real axe on its right-hand attachment. Enumerating only the body left the unit
-    /// with no pick candidate at all, so the model could not be hovered or clicked and the name
-    /// plate was the only way to select it. The reference registers each chained model under the
-    /// same candidate node, which is what makes the axe itself the clickable surface.
+    /// First person hides our own parts (`Visibility::Hidden`), and the posed pick drops them, as
+    /// `ShouldRender 0x5ec8f0` refuses the active player then; anyone else's stay the root's call.
+    #[test]
+    fn our_hidden_parts_leave_the_posed_pick() {
+        let mut world = World::new();
+        let root = world.spawn_empty().id();
+        let rig = world.spawn_empty().id();
+        let part = |world: &mut World, drawn| {
+            world
+                .spawn((
+                    ChildOf(root),
+                    Mesh3d(Handle::default()),
+                    benilla_world::rig_palette::RigPart(rig),
+                    drawn,
+                ))
+                .id()
+        };
+        let shown = part(&mut world, InheritedVisibility::VISIBLE);
+        part(&mut world, InheritedVisibility::HIDDEN);
+        let count = move |is_self: bool| {
+            move |kids: Query<&Children>,
+                  parts: Query<(
+                &Mesh3d,
+                &benilla_world::rig_palette::RigPart,
+                Option<&InheritedVisibility>,
+            )>| {
+                posed_parts(kids.get(root).expect("the parts"), &parts, is_self).len()
+            }
+        };
+        assert_eq!(world.run_system_once(count(false)).unwrap(), 2);
+        assert_eq!(
+            world.run_system_once(count(true)).unwrap(),
+            1,
+            "ours: only the drawn part"
+        );
+        world.entity_mut(shown).insert(InheritedVisibility::HIDDEN);
+        assert_eq!(
+            world.run_system_once(count(true)).unwrap(),
+            0,
+            "first person: nothing of ours to pick"
+        );
+    }
+
+    /// The picker's inputs with a camera ten yards up the Z axis, looking down it through a
+    /// 100-pixel square with the cursor at its centre, over whatever stands at the origin.
+    fn pick_world() -> World {
+        use bevy::camera::RenderTargetInfo;
+        use bevy::window::WindowResolution;
+
+        let mut world = World::new();
+        world.init_resource::<CameraControl>();
+        world.init_resource::<PointerOverUi>();
+        world.insert_resource(PickOcclusion {
+            distance: f32::INFINITY,
+            point: None,
+        });
+        world.init_resource::<crate::vplates::PlateHover>();
+        world.init_resource::<Hovered>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<benilla_world::rig_palette::RigPalettes>();
+        world.insert_resource(crate::net::SelfGuid(Some(1)));
+        world.init_resource::<crate::spell::PicksSelf>();
+        world.init_resource::<crate::spell::CorpsePick>();
+        world.init_resource::<crate::spell::targeting::UnitPick>();
+        world.insert_resource(crate::net::Reputations(Vec::new()));
+        let mut camera = Camera::default();
+        camera.computed.clip_from_view = Mat4::perspective_infinite_reverse_rh(1.0, 1.0, 0.1);
+        camera.computed.target_info = Some(RenderTargetInfo {
+            physical_size: UVec2::splat(100),
+            scale_factor: 1.0,
+        });
+        world.spawn((
+            camera,
+            GlobalTransform::from_translation(Vec3::new(0.0, 0.0, 10.0)),
+            WorldCamera,
+        ));
+        let mut window = Window {
+            resolution: WindowResolution::new(100, 100),
+            ..Default::default()
+        };
+        window.set_cursor_position(Some(Vec2::splat(50.0)));
+        world.spawn((window, PrimaryWindow));
+        world
+    }
+
+    /// One drawn pick box around the origin, the box fallback's geometry for a partless body.
+    fn pick_box(world: &mut World, body: Entity) {
+        world.spawn((
+            ChildOf(body),
+            CreaturePickPart,
+            Aabb::from_min_max(Vec3::splat(-1.0), Vec3::splat(1.0)),
+            GlobalTransform::default(),
+            InheritedVisibility::VISIBLE,
+        ));
+    }
+
+    /// Our own body joins the unit pick only while [`crate::spell::PicksSelf`] says the word takes
+    /// it (`0x480610` at `480638`), here through the box fallback of a body with no skinned parts.
+    #[test]
+    fn our_body_joins_the_pick_only_while_the_word_takes_it() {
+        let mut world = pick_world();
+        // Us, at the origin under the cursor, with one drawn pick box.
+        let me = world
+            .spawn((
+                SelfPlayer,
+                Guid(1),
+                NetEntity {
+                    kind: EntityKind::Player,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                GlobalTransform::default(),
+                InheritedVisibility::VISIBLE,
+            ))
+            .id();
+        pick_box(&mut world, me);
+        let hover = |world: &mut World, picks: bool| {
+            world.resource_mut::<crate::spell::PicksSelf>().0 = picks;
+            world
+                .run_system_cached(update_hover)
+                .expect("the pick runs");
+            world.resource::<Hovered>().target
+        };
+
+        assert_eq!(hover(&mut world, false), None, "not ours to pick");
+        assert_eq!(hover(&mut world, true), Some(me), "a word that takes us");
+        assert_eq!(hover(&mut world, false), None, "and not once it ends");
+    }
+
+    /// A corpse is a candidate outside targeting (`0x5c` carries flag `0x40`); while targeting,
+    /// only under a word in `0x8600` and only one `0x6e6260` passes, as
+    /// [`crate::spell::CorpsePick`] carries the standing word to the picker.
+    #[test]
+    fn a_corpse_joins_the_pick_as_the_word_admits_it() {
+        use crate::spell::targeting::corpse_fixture as fx;
+
+        let hover = |corpse: ObjectStore, word: Option<u16>| {
+            let mut world = pick_world();
+            world.insert_resource(fx::factions());
+            world.init_resource::<crate::spell::SpellTargeting>();
+            // Us, a human, away from the ray: the reaction gate's other side.
+            world.spawn((
+                SelfPlayer,
+                Guid(1),
+                GlobalTransform::from_translation(Vec3::new(50.0, 0.0, 0.0)),
+                fx::caster(1.5),
+            ));
+            let body = world
+                .spawn((
+                    Guid(fx::CORPSE),
+                    NetEntity {
+                        kind: EntityKind::Corpse,
+                        display_id: None,
+                        scale: 1.0,
+                    },
+                    GlobalTransform::default(),
+                    InheritedVisibility::VISIBLE,
+                    corpse,
+                ))
+                .id();
+            pick_box(&mut world, body);
+            if let Some(word) = word {
+                world.resource_mut::<crate::spell::SpellTargeting>().enter(
+                    fx::RESURRECTION,
+                    crate::spell::CastCommit::Spell,
+                    word,
+                );
+            }
+            world
+                .run_system_cached(crate::spell::targeting::publish_corpse_pick)
+                .expect("the word publishes");
+            world
+                .run_system_cached(update_hover)
+                .expect("the pick runs");
+            let hovered = *world.resource::<Hovered>();
+            assert_eq!(hovered.target, None, "a corpse is never the unit slot");
+            hovered.corpse.inspect(|&e| assert_eq!(e, body)).is_some()
+        };
+        let friend = || fx::corpse(fx::HUMAN, false);
+        let foe = || fx::corpse(fx::ORC, false);
+        let bones = || fx::corpse(fx::HUMAN, true);
+
+        // Not targeting: every corpse, bones and foes included.
+        for (corpse, what) in [(friend(), "friend"), (foe(), "foe"), (bones(), "bones")] {
+            assert!(hover(corpse, None), "{what} outside targeting");
+        }
+        // Resurrection's word: a friend's corpse, never a foe's or bones.
+        assert!(hover(friend(), Some(0x8000)));
+        assert!(!hover(foe(), Some(0x8000)), "a hostile corpse");
+        assert!(!hover(bones(), Some(0x8000)), "bones");
+        // The enemy bit takes the other side.
+        assert!(hover(foe(), Some(0x0200)));
+        assert!(!hover(friend(), Some(0x0200)));
+        // A heal word sets no flag `0x40`: the corpse is out of the pick, so a unit behind it
+        // is reachable.
+        assert!(!hover(friend(), Some(0x0002)));
+        assert!(!hover(friend(), Some(0x0040)), "a ground word");
+    }
+
+    /// A unit or player at depth `z` on the cursor's ray with one drawn pick box, of this store.
+    fn unit_at(world: &mut World, guid: u64, z: f32, store: ObjectStore) -> Entity {
+        let at = GlobalTransform::from_translation(Vec3::new(0.0, 0.0, z));
+        let body = world
+            .spawn((
+                Guid(guid),
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                at,
+                InheritedVisibility::VISIBLE,
+                store,
+            ))
+            .id();
+        world.spawn((
+            ChildOf(body),
+            CreaturePickPart,
+            Aabb::from_min_max(Vec3::splat(-1.0), Vec3::splat(1.0)),
+            at,
+            InheritedVisibility::VISIBLE,
+        ));
+        body
+    }
+
+    /// A store of `UNIT_FIELD_FACTIONTEMPLATE` (35), `UNIT_FIELD_FLAGS` (46) and
+    /// `UNIT_FIELD_HEALTH` (22), on [`fx::factions`]' rows: template 1 the caster's Human, 2 an Orc.
+    fn unit_store(template: u32, flags: u32, health: u32) -> ObjectStore {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+            (35, template),
+            (46, flags),
+            (22, health),
+        ]))
+    }
+
+    /// A living player of the caster's faction: assistable, not attackable.
+    fn friend() -> ObjectStore {
+        unit_store(1, 0x8, 100)
+    }
+
+    /// A living Orc creature: attackable, not assistable.
+    fn foe() -> ObjectStore {
+        unit_store(2, 0, 100)
+    }
+
+    /// The pick over `word`, the way a frame runs it: the word published, its flags `0x20` and the
+    /// unit legs both, then the pick.
+    fn pick_under(world: &mut World, word: Option<u16>) -> Hovered {
+        let mut targeting = world.resource_mut::<crate::spell::SpellTargeting>();
+        match word {
+            Some(word) => targeting.enter(fx::RESURRECTION, crate::spell::CastCommit::Spell, word),
+            None => targeting.clear(),
+        }
+        world
+            .run_system_cached(crate::spell::targeting::publish_unit_pick)
+            .expect("the word publishes");
+        world
+            .run_system_cached(crate::spell::targeting::publish_picks_self)
+            .expect("the self bit publishes");
+        world
+            .run_system_cached(update_hover)
+            .expect("the pick runs");
+        *world.resource::<Hovered>()
+    }
+
+    /// Us, a human away from the ray, the faction tables, and the units a case puts on it.
+    fn unit_pick_world() -> World {
+        let mut world = pick_world();
+        world.insert_resource(fx::factions());
+        world.init_resource::<crate::spell::SpellTargeting>();
+        world.spawn((
+            SelfPlayer,
+            Guid(1),
+            GlobalTransform::from_translation(Vec3::new(50.0, 0.0, 0.0)),
+            fx::caster(1.5),
+        ));
+        world
+    }
+
+    /// `0x480610` while a word stands: a unit the word cannot take is no candidate, so the one
+    /// behind it takes the pick, where outside targeting the nearer wins whatever it is. The
+    /// front unit is 5 yards nearer the camera than the rear one.
+    #[test]
+    fn a_unit_the_word_cannot_take_lets_the_pick_through_to_the_one_behind() {
+        const HEAL: u16 = 0x0100;
+        const ENEMY: u16 = 0x0080;
+        const RESURRECTION: u16 = 0x8000;
+        const SKINNING: u16 = 0x0402;
+        // (word, the front unit it refuses, the rear unit it takes, what stands behind it)
+        let cases: [(&str, u16, ObjectStore, ObjectStore); 6] = [
+            ("a foe before a friend, under a heal", HEAL, foe(), friend()),
+            (
+                "a corpse before a friend, under a heal",
+                HEAL,
+                unit_store(1, 0x8, 0),
+                friend(),
+            ),
+            (
+                "a friend before a foe, under an enemy word",
+                ENEMY,
+                friend(),
+                foe(),
+            ),
+            (
+                "the living before a corpse, under Resurrection",
+                RESURRECTION,
+                friend(),
+                unit_store(1, 0x8, 0),
+            ),
+            (
+                "the living before a corpse, under Skinning",
+                SKINNING,
+                foe(),
+                unit_store(2, 0, 0),
+            ),
+            (
+                "a unit immune to players before a friend, under a heal",
+                HEAL,
+                unit_store(1, 0x108, 100),
+                friend(),
+            ),
+        ];
+        for (what, word, front_store, rear_store) in cases {
+            let mut world = unit_pick_world();
+            let front = unit_at(&mut world, 10, 5.0, front_store);
+            let rear = unit_at(&mut world, 11, 0.0, rear_store);
+            // Outside targeting the nearer unit wins, whoever it is.
+            assert_eq!(
+                pick_under(&mut world, None).target,
+                Some(front),
+                "{what}: outside targeting"
+            );
+            let hovered = pick_under(&mut world, Some(word));
+            assert_eq!(
+                hovered.target,
+                Some(rear),
+                "{what}: the word takes the rear"
+            );
+            assert_eq!(hovered.guid, Some(11), "{what}");
+            assert_eq!(
+                pick_under(&mut world, None).target,
+                Some(front),
+                "{what}: and back outside targeting"
+            );
+        }
+    }
+
+    /// The control of the table above: the same front unit is the pick when the word takes it.
+    #[test]
+    fn a_unit_the_word_takes_keeps_the_pick_in_front_of_the_one_behind() {
+        let cases: [(&str, u16, ObjectStore); 4] = [
+            ("a friend under a heal", 0x0100, friend()),
+            ("a foe under an enemy word", 0x0080, foe()),
+            ("a corpse under Resurrection", 0x8000, unit_store(1, 0x8, 0)),
+            ("a foe under a plain unit word", 0x0002, foe()),
+        ];
+        for (what, word, front_store) in cases {
+            let mut world = unit_pick_world();
+            let front = unit_at(&mut world, 10, 5.0, front_store);
+            let rear_store = if word == 0x8000 {
+                unit_store(1, 0x8, 0)
+            } else {
+                friend()
+            };
+            unit_at(&mut world, 11, 0.0, rear_store);
+            assert_eq!(
+                pick_under(&mut world, Some(word)).target,
+                Some(front),
+                "{what}"
+            );
+        }
+    }
+
+    /// With nothing behind it, a unit the word cannot take leaves the pick empty, which is no
+    /// refusal: `IsSelectable` grades the winner only, and there is none.
+    #[test]
+    fn a_lone_unit_the_word_cannot_take_is_no_pick_at_all() {
+        let mut world = unit_pick_world();
+        unit_at(&mut world, 10, 0.0, foe());
+        let hovered = pick_under(&mut world, Some(0x0100));
+        assert_eq!((hovered.target, hovered.guid), (None, None));
+        assert!(!hovered.refused);
+        assert_eq!(hovered.distance, f32::MAX);
+    }
+
+    /// A living Orc creature whose `UNIT_FIELD_FLAGS` are `flags`, with its `UNIT_FIELD_CHARMEDBY`
+    /// (10) and `UNIT_FIELD_CREATEDBY` (14) the guids `charmed_by` and `created_by`, 0 for none.
+    fn owned(flags: u32, charmed_by: u32, created_by: u32) -> ObjectStore {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+            (35, 2),
+            (46, flags),
+            (22, 100),
+            (10, charmed_by),
+            (11, 0),
+            (14, created_by),
+            (15, 0),
+        ]))
+    }
+
+    /// The word's plain unit bit (`0x0002`), which `0x6e61a0` takes the player for (`0x850e`), and
+    /// the enemy bit (`0x0080`), which it does not.
+    const SELF_WORD: u16 = 0x0002;
+    const ENEMY_WORD: u16 = 0x0080;
+
+    /// `0x480610`, `48064f`-`480676`: a unit flagged `UNIT_FLAG_POSSESSED` whose charmer, else
+    /// creator, is the active player is no candidate outside targeting, or while a word without
+    /// `0x20` stands, so the pick passes through it to the unit behind. Us is guid 1.
+    #[test]
+    fn a_unit_you_possess_lets_the_pick_through_to_the_one_behind() {
+        let possessed = crate::target::UNIT_FLAG_POSSESSED;
+        let cases: [(&str, ObjectStore); 3] = [
+            (
+                "a Mind Controlled unit, charmed by us",
+                owned(possessed, 1, 0),
+            ),
+            ("an Eye of Kilrogg, created by us", owned(possessed, 0, 1)),
+            (
+                "charmed by us, created by another: the charmer comes first",
+                owned(possessed, 1, 7),
+            ),
+        ];
+        for (what, front_store) in cases {
+            let mut world = unit_pick_world();
+            let front = unit_at(&mut world, 10, 5.0, front_store);
+            let rear = unit_at(&mut world, 11, 0.0, foe());
+            for word in [None, Some(ENEMY_WORD)] {
+                let hovered = pick_under(&mut world, word);
+                assert_eq!(
+                    hovered.target,
+                    Some(rear),
+                    "{what}: the rear, word {word:?}"
+                );
+                assert_eq!(hovered.guid, Some(11), "{what}: word {word:?}");
+            }
+            // The word that takes us takes it too: the exclusions are skipped (`48062c`).
+            assert_eq!(
+                pick_under(&mut world, Some(SELF_WORD)).target,
+                Some(front),
+                "{what}: while flag 0x20 stands"
+            );
+            assert_eq!(
+                pick_under(&mut world, None).target,
+                Some(rear),
+                "{what}: and excluded again once the word ends"
+            );
+        }
+    }
+
+    /// With nothing behind it, the unit you possess leaves the pick empty, which is no refusal.
+    #[test]
+    fn a_lone_unit_you_possess_is_no_pick_at_all() {
+        let mut world = unit_pick_world();
+        unit_at(
+            &mut world,
+            10,
+            0.0,
+            owned(crate::target::UNIT_FLAG_POSSESSED, 1, 0),
+        );
+        let hovered = pick_under(&mut world, None);
+        assert_eq!((hovered.target, hovered.guid), (None, None));
+        assert!(!hovered.refused);
+    }
+
+    /// The exclusion asks for the flag, then for us: an owned unit that is not possessed, a unit
+    /// someone else possesses, and one whose charmer is another even where its creator is us, all
+    /// stay candidates.
+    #[test]
+    fn a_unit_you_do_not_possess_keeps_the_pick() {
+        let possessed = crate::target::UNIT_FLAG_POSSESSED;
+        let cases: [(&str, ObjectStore); 5] = [
+            ("possessed, charmed by another", owned(possessed, 2, 0)),
+            ("possessed, created by another", owned(possessed, 0, 2)),
+            (
+                "possessed, charmed by another, created by us: the charmer comes first",
+                owned(possessed, 2, 1),
+            ),
+            (
+                "our own pet, created by us but not possessed",
+                owned(0, 0, 1),
+            ),
+            ("possessed by no one", owned(possessed, 0, 0)),
+        ];
+        for (what, front_store) in cases {
+            let mut world = unit_pick_world();
+            let front = unit_at(&mut world, 10, 5.0, front_store);
+            unit_at(&mut world, 11, 0.0, foe());
+            for word in [None, Some(ENEMY_WORD), Some(SELF_WORD)] {
+                assert_eq!(
+                    pick_under(&mut world, word).target,
+                    Some(front),
+                    "{what}: word {word:?}"
+                );
+            }
+        }
+    }
+
+    /// `0x481116`: only a word with unit bits (`0x878e`) puts units and players in the pick. A
+    /// ground word, a lock word and a bag-item word pick none, so a unit in front of the ground
+    /// or the chest is no obstacle, and a unit word does pick them.
+    #[test]
+    fn only_a_word_with_unit_bits_picks_units() {
+        let mut world = unit_pick_world();
+        let front = unit_at(&mut world, 10, 5.0, friend());
+        for word in [0x0040, 0x0020, 0x4800, 0x0800, 0x0010] {
+            let hovered = pick_under(&mut world, Some(word));
+            assert_eq!(hovered.target, None, "{word:#06x}");
+            assert!(!hovered.refused, "{word:#06x}");
+        }
+        for word in [0x0002, 0x0100] {
+            assert_eq!(
+                pick_under(&mut world, Some(word)).target,
+                Some(front),
+                "{word:#06x}"
+            );
+        }
+    }
+
+    /// The press latches the hover's pick, so the click reaches what the cursor showed: the unit
+    /// behind, not the one in front the word refuses.
+    #[test]
+    fn the_press_latches_the_pick_the_word_left() {
+        use crate::target::{latch_press_pick, PressPick};
+
+        let mut world = unit_pick_world();
+        unit_at(&mut world, 10, 5.0, foe());
+        let rear = unit_at(&mut world, 11, 0.0, friend());
+        world.init_resource::<HoveredObject>();
+        world.init_resource::<PressPick>();
+        world.init_resource::<crate::target::WorldCursor>();
+        world.init_resource::<crate::target::cursor_mode::AttackFork>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+
+        pick_under(&mut world, Some(0x0100));
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        world
+            .run_system_cached(latch_press_pick)
+            .expect("the press latches");
+        assert_eq!(world.resource::<PressPick>().hovered.target, Some(rear));
+    }
+
+    /// Naxxramas's "Unholy Axe" is an `InvisibleStalker` body with no vertices holding a real axe,
+    /// which is its whole pick surface.
     #[test]
     fn a_units_pick_geometry_is_every_model_chained_to_it() {
         let unit = Entity::from_raw_u32(1).unwrap();
@@ -1013,8 +1410,8 @@ mod tests {
         let bare: Vec<_> = pick_model_roots(unit, &[], None).collect();
         assert_eq!(bare, vec![unit], "a unit wearing nothing is just its body");
 
-        // The empty slots between the filled ones are the real `HeldAttached` shape (main/off/
-        // ranged/helm/shL/shR/ammo/quiver), and must not become candidates.
+        // Empty slots, as in the real `HeldAttached` (main, off, ranged, helm, both shoulders,
+        // ammo, quiver), are not candidates.
         let worn = [
             Some(main_hand),
             None,
@@ -1032,7 +1429,7 @@ mod tests {
             "body, then every worn model, then the mount — all one unit's geometry"
         );
 
-        // The case that was broken: the body draws nothing, so the axe is the whole hit surface.
+        // A body that draws nothing: the axe is the whole hit surface.
         let trigger: Vec<_> = pick_model_roots(unit, &worn[..1], None).collect();
         assert!(
             trigger.contains(&main_hand),

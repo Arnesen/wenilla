@@ -127,7 +127,7 @@ pub(super) fn begin_sfx(url: String, path: String) -> Pending {
 /// Begin a load. Returns immediately — nothing after this point runs on the frame until
 /// [`Pending::take`] answers.
 ///
-/// `looping` marks the whole-file loop a bed needs (`mixer::loop_from_bytes`'s job on the
+/// `looping` marks the whole-file loop a bed needs (the native bed's `loop_region(..)` on the
 /// synchronous path): music never loops, an ambience bed always does.
 pub(super) fn begin(
     url: String,

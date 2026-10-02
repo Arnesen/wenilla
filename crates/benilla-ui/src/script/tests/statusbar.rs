@@ -1,4 +1,4 @@
-//! StatusBar (per-kind behavior; LoadXML `0x782ef0`).
+//! StatusBar behaviour (`LoadXML` `0x782ef0`).
 
 use super::common::script;
 use crate::script::*;
@@ -50,7 +50,7 @@ fn statusbar_setvalue_fires_onvaluechanged() {
         local b = CreateFrame("StatusBar", "SbEvt")
         b:SetMinMaxValues(0, 10)
         seen = {}
-        b:SetScript("OnValueChanged", function(self, value)
+        b:SetScript("OnValueChanged", function() local self, value = this, arg1
             table.insert(seen, value)
             assert(self == b and arg1 == value, "handler-firing conventions carry the value")
         end)
@@ -126,9 +126,8 @@ fn statusbar_bar_region_scales_by_fraction_on_extract() {
     );
 }
 
-/// The fill CROPs its art, never squeezes it (`0x770410`): `SetValue`
-/// rewrites the region's 4-corner UV block with `u1 = GetValue()` *and* shrinks the quad. Squeezing
-/// instead would run a bar texture's whole horizontal ramp inside every partial fill.
+/// The fill crops its art, never squeezes it (`0x770410`): `SetValue` sets the UV `u1` to the fill
+/// fraction `(value - min) / (max - min)` and shrinks the quad by the same fraction.
 #[test]
 fn statusbar_bar_region_crops_its_texture_rather_than_stretching_it() {
     let mut s = script();
@@ -164,7 +163,7 @@ fn statusbar_bar_region_crops_its_texture_rather_than_stretching_it() {
         "horizontal: u cropped to the fill fraction, v whole"
     );
 
-    // Vertical fills bottom-up, so the art's BOTTOM edge is the one pinned.
+    // Vertical fills bottom-up, so the art's bottom edge is pinned.
     s.run(r#"SbCrop:SetOrientation("VERTICAL")"#).unwrap();
     assert_eq!(
         uv(&s),

@@ -1,7 +1,5 @@
-//! Helpers for the crate's **structural tests** — the ones that read this crate's own source
-//! and insist on a shape (decisions 1290, 2220, 2279). A structural test exists where the
-//! failure is silent at runtime, so the check has to happen at the line; these are the readers
-//! they share.
+//! What the crate's structural tests share: source readers over its own code, and a check of
+//! the order its `Update` schedule builds.
 
 /// Every `.rs` file under `root`, recursively.
 pub(crate) fn rust_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -28,7 +26,7 @@ pub(crate) fn src_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
-/// A file's path under `src/`, with forward slashes — the key every `EXEMPT` table uses.
+/// A file's path under `src/`, with forward slashes: the key every `EXEMPT` table uses.
 pub(crate) fn rel_path(file: &std::path::Path) -> String {
     let src = src_dir();
     file.strip_prefix(&src)
@@ -37,18 +35,14 @@ pub(crate) fn rel_path(file: &std::path::Path) -> String {
         .replace('\\', "/")
 }
 
-/// One `fn` item as the scanners see it: its name, its parenthesised parameter list, and its
-/// body (the text between the outermost braces), each found by bracket matching so a scan
-/// sees a signature or a body rather than whatever text happens to follow.
+/// One `fn` item: name, parameter list and body, each found by bracket matching.
 pub(crate) struct FnItem<'a> {
     pub name: &'a str,
     pub params: &'a str,
     pub body: &'a str,
 }
 
-/// Every `fn` in `text`. A `fn` with no body (a trait method signature) comes back with an
-/// empty body; a generic parameter list before the `(` is tolerated in the shapes this
-/// codebase writes.
+/// Every `fn` in `text`; a bodiless signature comes back with an empty body.
 pub(crate) fn fn_items(text: &str) -> Vec<FnItem<'_>> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -66,8 +60,7 @@ pub(crate) fn fn_items(text: &str) -> Vec<FnItem<'_>> {
             continue;
         };
         let params = &text[open + 1..close];
-        // The body: the first `{` after the parameter list, unless a `;` (a bodiless
-        // signature) or another `fn` comes first.
+        // The body: the first `{` after the parameters, unless a `;` comes first.
         let tail = &text[close + 1..];
         let body = match (tail.find('{'), tail.find(';')) {
             (Some(b), Some(s)) if s < b => "",
@@ -85,7 +78,7 @@ pub(crate) fn fn_items(text: &str) -> Vec<FnItem<'_>> {
     out
 }
 
-/// The parenthesised parameter list of every `fn` in `text` — see [`fn_items`].
+/// The parameter list of every `fn` in `text`.
 pub(crate) fn fn_parameter_lists(text: &str) -> Vec<&str> {
     fn_items(text).into_iter().map(|f| f.params).collect()
 }
@@ -104,6 +97,62 @@ fn matching(text: &str, open: usize, lhs: u8, rhs: u8) -> Option<usize> {
         }
     }
     None
+}
+
+/// `a` runs before `b` in `app`'s built `Update`, by system identity: a `.after()` on a system
+/// missing from the schedule is silently nothing, and debug names may be off. The dependency graph
+/// is walked with the set hierarchy unfolded, so a set `a` sits in precedes what that set
+/// precedes, and a successor set brings its members.
+pub(crate) fn runs_before<MA, MB>(
+    app: &mut bevy::app::App,
+    a: impl bevy::ecs::system::IntoSystem<(), (), MA>,
+    b: impl bevy::ecs::system::IntoSystem<(), (), MB>,
+) -> bool {
+    use bevy::ecs::schedule::graph::Direction::{Incoming, Outgoing};
+    use bevy::ecs::schedule::NodeId;
+    use bevy::ecs::system::{IntoSystem, System};
+    use std::any::TypeId;
+    use std::collections::HashSet;
+
+    let a = System::type_id(&IntoSystem::into_system(a));
+    let b = System::type_id(&IntoSystem::into_system(b));
+    // `schedule_scope`, not `resource_scope::<Schedules>`: initializing the schedule inserts
+    // `Schedules`, which a resource scope refuses.
+    app.world_mut()
+        .schedule_scope(bevy::app::Update, |world, schedule| {
+            schedule
+                .initialize(world)
+                .expect("the Update schedule builds");
+            let key = |id: TypeId| -> NodeId {
+                schedule
+                    .systems()
+                    .expect("initialized")
+                    .find(|&(_, s)| System::type_id(&**s) == id)
+                    .map(|(k, _)| NodeId::System(k))
+                    .expect("the system is in Update")
+            };
+            let (a, b) = (key(a), key(b));
+            let dep = schedule.graph().dependency().graph();
+            let hier = schedule.graph().hierarchy().graph();
+            let (mut after, mut containers) = (HashSet::new(), HashSet::new());
+            let mut work = vec![(a, false)];
+            while let Some((n, is_after)) = work.pop() {
+                let fresh = if is_after {
+                    after.insert(n)
+                } else {
+                    containers.insert(n)
+                };
+                if !fresh {
+                    continue;
+                }
+                work.extend(dep.neighbors_directed(n, Outgoing).map(|m| (m, true)));
+                work.extend(hier.neighbors_directed(n, Incoming).map(|p| (p, false)));
+                if is_after {
+                    work.extend(hier.neighbors_directed(n, Outgoing).map(|c| (c, true)));
+                }
+            }
+            after.contains(&b)
+        })
 }
 
 #[cfg(test)]

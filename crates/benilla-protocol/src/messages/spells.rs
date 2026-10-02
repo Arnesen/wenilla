@@ -182,7 +182,7 @@ pub(super) fn read_spell_go(r: &mut impl Read) -> io::Result<SpellGo> {
     let spell_id = read_u32_le(r)?;
     let cast_flags = read_u16_le(r)?;
 
-    // Both counts are `u8`s the server backfills (`Spell.cpp:4607-4609`); no tighter bound.
+    // Both counts are `u8`s the server backfills (`Spell.cpp:4657-4658`); no tighter bound.
     let hit_count = read_u8(r)?;
     let mut hits = Vec::with_capacity(capacity_hint(hit_count, usize::from(u8::MAX)));
     for _ in 0..hit_count {
@@ -234,7 +234,7 @@ pub(super) fn read_spell_delayed(r: &mut impl Read) -> io::Result<(u64, u32)> {
     Ok((caster, delay_ms))
 }
 
-/// Read `MSG_CHANNEL_START` (vmangos `Spell.cpp:4951-4954`): `(spell_id, duration_ms)`, sent only
+/// Read `MSG_CHANNEL_START` (vmangos `Spell.cpp:4963-4966`): `(spell_id, duration_ms)`, sent only
 /// to the caster, so no guid.
 pub(super) fn read_channel_start(r: &mut impl Read) -> io::Result<(u32, u32)> {
     let spell_id = read_u32_le(r)?;
@@ -242,7 +242,7 @@ pub(super) fn read_channel_start(r: &mut impl Read) -> io::Result<(u32, u32)> {
     Ok((spell_id, duration_ms))
 }
 
-/// Read `MSG_CHANNEL_UPDATE` (vmangos `Player.cpp:21106-21110`): ms left, caster only; 0 ends the
+/// Read `MSG_CHANNEL_UPDATE` (vmangos `Player.cpp:21141-21146`): ms left, caster only; 0 ends the
 /// channel, whether it finished or was interrupted.
 pub(super) fn read_channel_update(r: &mut impl Read) -> io::Result<u32> {
     read_u32_le(r)
@@ -268,8 +268,8 @@ pub(super) fn read_update_aura_duration(r: &mut impl Read) -> io::Result<(u8, u3
     Ok((slot, remaining_ms))
 }
 
-/// Read `SMSG_PLAY_SPELL_VISUAL` (vmangos `Spell.cpp:54-58`): raw `u64` unit, `u32` kit id. The
-/// client (`0x6e98d0`) checks the kit against `SpellVisualKit.dbc` and plays it at stage 0.
+/// Read `SMSG_PLAY_SPELL_VISUAL` (vmangos `Packets/Spell.cpp:54-58`): raw `u64` unit, `u32` kit
+/// id. The client (`0x6e98d0`) checks the kit against `SpellVisualKit.dbc` and plays it at stage 0.
 pub(super) fn read_play_spell_visual(r: &mut impl Read) -> io::Result<(u64, u32)> {
     let unit = read_u64_le(r)?;
     let kit_id = read_u32_le(r)?;
@@ -301,6 +301,38 @@ pub fn cast_spell_gameobject(spell_id: u32, go_guid: u64) -> Vec<u8> {
     body.extend_from_slice(&spell_id.to_le_bytes());
     body.extend_from_slice(&TARGET_FLAG_GAMEOBJECT.to_le_bytes());
     crate::wire::write_packed_guid(go_guid, &mut body).expect("vec write");
+    body
+}
+
+/// The corpse bit a corpse cast carries: `BindTarget 0x6e5b40`'s corpse arm writes `0x8000` for a
+/// corpse its caster's reaction toward is friendly (`0x6e5fc7`), `0x200` for one it is not
+/// (`0x6e600c`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CorpseTarget {
+    /// `TARGET_FLAG_CORPSE_ALLY`, a resurrection's.
+    Ally,
+    /// `TARGET_FLAG_CORPSE_ENEMY`.
+    Enemy,
+}
+
+impl CorpseTarget {
+    /// The wire mask bit, which is also the flag-word bit the bind clears.
+    pub const fn target_flag(self) -> u16 {
+        match self {
+            Self::Ally => TARGET_FLAG_CORPSE_ALLY,
+            Self::Enemy => TARGET_FLAG_CORPSE_ENEMY,
+        }
+    }
+}
+
+/// Body of `CMSG_CAST_SPELL` at a corpse: the corpse bit and the corpse's packed guid. The client's
+/// targets writer `0x7e4e10` puts the guid for any mask bit in `0x8a02`; vmangos reads it for
+/// either corpse bit (`SpellCastTargetsInfo.cpp:156-157`).
+pub fn cast_spell_corpse(spell_id: u32, target: CorpseTarget, corpse_guid: u64) -> Vec<u8> {
+    let mut body = Vec::with_capacity(16);
+    body.extend_from_slice(&spell_id.to_le_bytes());
+    body.extend_from_slice(&target.target_flag().to_le_bytes());
+    crate::wire::write_packed_guid(corpse_guid, &mut body).expect("vec write");
     body
 }
 
@@ -361,6 +393,28 @@ mod tests {
         );
         // The self-cast shape stays distinct: mask 0, no guid.
         assert_eq!(cast_spell(1, None), [0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    /// Resurrection (2006) at a released player's corpse, `HIGHGUID_CORPSE` 0xF101
+    /// (vmangos `ObjectGuid.h:76`), counter 0x2A.
+    #[test]
+    fn cast_spell_corpse_body_golden() {
+        const CORPSE: u64 = 0xF101_0000_0000_002A;
+        assert_eq!(
+            cast_spell_corpse(2006, CorpseTarget::Ally, CORPSE),
+            [
+                0xD6, 0x07, 0x00, 0x00, // spell id 2006
+                0x00, 0x80, // TARGET_FLAG_CORPSE_ALLY
+                0xC1, 0x2A, 0x01, 0xF1, // packed guid: bytes 0, 6 and 7
+            ],
+            "CMSG_CAST_SPELL (ally corpse) body"
+        );
+        // The enemy arm differs only in the mask.
+        assert_eq!(
+            cast_spell_corpse(2006, CorpseTarget::Enemy, CORPSE),
+            [0xD6, 0x07, 0x00, 0x00, 0x00, 0x02, 0xC1, 0x2A, 0x01, 0xF1],
+            "CMSG_CAST_SPELL (enemy corpse) body"
+        );
     }
 
     #[test]

@@ -16,8 +16,8 @@ pub struct XpGain {
 }
 
 /// Read `SMSG_LOG_XPGAIN`: `u64 victim, u32 total, u8 type` (0 kill, 1 other), then for a kill
-/// `u32 base, f32 groupBonus`. Deviation: the group bonus is read and dropped; vmangos always
-/// sends 1.0, meaning none (`Player.cpp:3039`), so 1.12 shows no group-bonus line either.
+/// `u32 base, f32 groupBonus`. The group bonus is read and dropped, its chat line not built;
+/// vmangos always sends 1.0, meaning none (`Player.cpp:3039`).
 pub(super) fn read_xp_gain(r: &mut impl Read) -> io::Result<XpGain> {
     let victim = read_u64_le(r)?;
     let total = read_u32_le(r)?;
@@ -63,7 +63,7 @@ pub fn learn_talent(talent_id: u32, requested_rank: u32) -> Vec<u8> {
 }
 
 /// Inbound `MSG_TALENT_WIPE_CONFIRM`: a class trainer asks whether to unlearn every talent
-/// (vmangos `Player.cpp:8338`).
+/// (vmangos `Player.cpp:8414`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TalentWipeConfirm {
     /// The asking trainer, echoed in the answer and required to be a trainer in range there.

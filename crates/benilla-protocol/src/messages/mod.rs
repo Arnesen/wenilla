@@ -124,10 +124,10 @@ pub use group::{
     group_accept, group_assistant_leader, group_change_sub_group, group_decline, group_disband,
     group_invite, group_raid_convert, group_set_leader, group_swap_sub_group, group_uninvite,
     group_uninvite_guid, loot_method, member_status, minimap_ping, party_member_mask,
-    party_operation, party_result, raid_target_request, raid_target_set, ready_check_answer,
-    ready_check_start, request_party_member_stats, request_raid_info, GroupLootInfo,
-    GroupMemberEntry, PartyMemberStatsInfo, RaidInstanceEntry, RaidTargetUpdate, ReadyCheck,
-    GROUP_MEMBER_ASSISTANT,
+    party_operation, party_result, patch_auras, raid_target_request, raid_target_set,
+    ready_check_answer, ready_check_start, request_party_member_stats, request_raid_info,
+    GroupLootInfo, GroupMemberEntry, PartyMemberStatsInfo, RaidInstanceEntry, RaidTargetUpdate,
+    ReadyCheck, GROUP_MEMBER_ASSISTANT,
 };
 pub use guild::{
     guild_accept, guild_add_rank, guild_command, guild_command_error, guild_create, guild_decline,
@@ -223,8 +223,9 @@ pub use social::{
 };
 pub use spellbook::SpellCooldown;
 pub use spells::{
-    cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_at_source, cast_spell_gameobject,
-    cast_spell_item, CastOutcome, SpellCastTargets, SpellChainTargets, SpellGo, SpellStart,
+    cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_at_source, cast_spell_corpse,
+    cast_spell_gameobject, cast_spell_item, CastOutcome, CorpseTarget, SpellCastTargets,
+    SpellChainTargets, SpellGo, SpellStart,
 };
 pub use stable::{
     buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,
@@ -297,7 +298,7 @@ pub const LANGUAGE_ORCISH: u32 = 0x1;
 /// `LANG_ADDON` (vmangos `SharedDefines.h:270`): marks a chat line as addon data, not speech;
 /// 1.12 has no addon opcode, and the client routes such a line to `CHAT_MSG_ADDON`. The server
 /// skips language, flood and sanitize checks for it, never rewrites it, and allows it only on the
-/// group, guild and channel lanes (`ChatHandler.cpp:49,84,176-218`). The 1.12 `SendAddonMessage`
+/// group, guild and channel lanes (`ChatHandler.cpp:49,84,172-219`). The 1.12 `SendAddonMessage`
 /// (`0x49f920`) sends only PARTY, RAID, GUILD and BATTLEGROUND, and the receive side names any
 /// other lane "UNKNOWN" (`0x49aff4`).
 pub const LANGUAGE_ADDON: u32 = 0xFFFF_FFFF;

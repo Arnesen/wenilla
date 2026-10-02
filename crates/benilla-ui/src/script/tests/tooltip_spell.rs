@@ -1,8 +1,6 @@
-//! The engine spell/aura tooltip channel (decision 0274 P2, law per 0276): the verified line
-//! shapes — name|rank, ONE cost|range line, ONE casttime|cooldown line, the passive omission,
-//! the aura variant (white description + the SetPlayerBuff-only remaining line, itself gold —
-//! B62), and SetAction's
-//! pure delegation.
+//! The engine spell and aura tooltips: name|rank, one cost|range line, one casttime|cooldown line,
+//! the passive omission, the aura variant (white description, and the gold remaining line on
+//! `SetPlayerBuff` only), and the selectors that delegate to them.
 
 use super::common::script;
 use crate::script::*;
@@ -20,7 +18,7 @@ fn fireball() -> SpellTooltipView {
     }
 }
 
-/// The spellbook hover: name|rank gray, cost|range one line, casttime line, gold description.
+/// The spellbook hover: no rank column, cost|range on one line, cast time, gold description.
 #[test]
 fn spellbook_hover_renders_the_verified_shape() {
     let mut s = script();
@@ -53,7 +51,6 @@ fn spellbook_hover_renders_the_verified_shape() {
     "#,
     )
     .unwrap();
-    // The description wears the byte-verified gold.
     s.resolve();
     let quads = s.extract();
     let gold = quads.iter().any(|q| {
@@ -64,19 +61,15 @@ fn spellbook_hover_renders_the_verified_shape() {
     assert!(s.take_errors().is_empty());
 }
 
-/// **`bookType` decides which book the hover reads** — the fork `SetSpell 0x532d10` makes at
-/// `0x532e1c`/`0x532e2a` (`[4*i + 0xb6f098]` for the pet, `[4*i + 0xb700f0]` otherwise).
-///
-/// The defect (1050): the binding took the argument and dropped it, so a pet-book hover indexed the
-/// PLAYER's slot list — the imp's first spell showed the player's first spell, "Attack" and its
-/// crit line, on the director's screen. Both books are populated here with a *different* spell at
-/// the same slot id, which is the only arrangement that can tell the two apart.
+/// `SetSpell`'s `bookType` picks the book (`0x532d10` forks at `0x532e1c`, `0x532e2a`: the pet's
+/// slots at `0xb6f098`, the player's at `0xb700f0`); both books hold a different spell at slot 1.
 #[test]
 fn a_pet_book_hover_reads_the_pets_book_not_the_players() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.set_spell_tooltip(133, fireball());
-    s.set_spell_tooltip(
+    // The pet book's flag is the builder's unit selector, so its hover reads the pet's view.
+    s.set_pet_spell_tooltip(
         3110,
         SpellTooltipView {
             name: "Firebolt".into(),
@@ -126,9 +119,8 @@ fn a_pet_book_hover_reads_the_pets_book_not_the_players() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The tracking icon's hover (SetTrackingSpell): a GOLD name over the white (aura-variant)
-/// description — the shape the director's reference A/B pinned (2026-07-20), distinct from
-/// SetPlayerBuff's white name. No cost/casttime lines, no duration-remaining line.
+/// `SetTrackingSpell`, as the reference draws it: a gold name over the white aura description,
+/// with no cost, cast time or remaining line.
 #[test]
 fn tracking_hover_renders_gold_name_over_white_description() {
     let mut s = script();
@@ -173,12 +165,12 @@ fn tracking_hover_renders_gold_name_over_white_description() {
         matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
             if t == "Finding Minerals." && (c[1] - 1.0).abs() < 1e-6 && (c[2] - 1.0).abs() < 1e-6)
     });
-    assert!(gold_name, "the tracking name line is GOLD (director A/B)");
+    assert!(gold_name, "the tracking name line is GOLD");
     assert!(white_desc, "the description is the aura-variant white");
     assert!(s.take_errors().is_empty());
 }
 
-/// A passive spell omits the casttime|cooldown line whole — never a "Passive" text line.
+/// A passive spell omits the casttime|cooldown line whole, with no "Passive" text line.
 #[test]
 fn passive_omits_the_casttime_line() {
     let mut s = script();
@@ -220,8 +212,8 @@ fn passive_omits_the_casttime_line() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The buff hover: the aura variant — WHITE description + the duration-remaining line (only
-/// this entry point), computed off the aura's GetTime expiry.
+/// The buff hover is the aura variant: a white description and, on this entry point only, the
+/// remaining-time line computed off the aura's `GetTime` expiry.
 #[test]
 fn player_buff_hover_is_the_aura_variant() {
     let mut s = script();
@@ -241,17 +233,14 @@ fn player_buff_hover_is_the_aura_variant() {
         },
     );
     s.tick(10.0); // GetTime = 10
-    s.set_auras(
-        "player",
-        Some(vec![AuraState {
-            spell_id: 1459,
-            name: Some("Arcane Intellect".into()),
-            duration: 1800.0,
-            expiration_time: 100.0, // 90 s left at now = 10
-            helpful: true,
-            ..Default::default()
-        }]),
-    );
+    s.set_player_auras(vec![AuraState {
+        spell_id: 1459,
+        name: Some("Arcane Intellect".into()),
+        duration: 1800.0,
+        expiration_time: 100.0, // 90 s left at now = 10
+        helpful: true,
+        ..Default::default()
+    }]);
     s.run(
         r#"
         -- The duration line's wording comes from the VM's GlobalStrings, which the app runs off
@@ -272,7 +261,6 @@ fn player_buff_hover_is_the_aura_variant() {
     "#,
     )
     .unwrap();
-    // The aura description is WHITE (the byte-verified aura/spell difference).
     s.resolve();
     let quads = s.extract();
     let white = quads.iter().any(|q| {
@@ -280,18 +268,14 @@ fn player_buff_hover_is_the_aura_variant() {
             if t.starts_with("Intellect increased") && *c == [1.0, 1.0, 1.0, 1.0])
     });
     assert!(white, "aura description is white, not gold");
-    // …and the NAME is GOLD: the aura builder `0x52f880` writes it through the gold wrapper
-    // `0x530380`, where the spell builder uses the plain `0x530270`. Pinned against the
-    // reference's own buff hover (2026-07-25 report B53), which the white name did not match.
+    // The name is gold: the aura builder `0x52f880` writes it through the gold wrapper
+    // `0x530380`, where the spell builder uses the plain `0x530270`.
     let gold_name = quads.iter().any(|q| {
         matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
             if t == "Arcane Intellect" && (c[1] - 210.0 / 255.0).abs() < 1e-6)
     });
     assert!(gold_name, "aura name is gold, not white");
-    // …and so is the DURATION-REMAINING line — the same `0xffffd200`, not the description's
-    // white. On a 1.12.1 reference shot the "29 minutes remaining" glyphs are exactly
-    // `(255, 210, 0)`, the same pixels as that shot's title row, while its description rows are
-    // `(255, 255, 255)`.
+    // So is the remaining line, the same `0xffffd200`, as in the reference's buff hover.
     let gold_remaining = quads.iter().any(|q| {
         matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
             if t == "<2 mm>" && *c == [1.0, 210.0 / 255.0, 0.0, 1.0])
@@ -300,10 +284,8 @@ fn player_buff_hover_is_the_aura_variant() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The buff builder `0x52f880`'s right column: the buff hover names the DISPEL CLASS where the
-/// spell hover would put a gray "Rank N" — "Magic" on Ice Armor, the half of B53 the gold name
-/// didn't cover — and it is gold, sharing the aura name's wrapper. A `rank` on the same view must
-/// NOT displace it.
+/// The buff builder's (`0x52f880`) right column is the dispel class, gold through the aura name's
+/// wrapper, where the spell hover puts a gray rank; a `rank` on the view must not displace it.
 #[test]
 fn player_buff_hover_names_the_dispel_class_in_gold() {
     let mut s = script();
@@ -312,21 +294,18 @@ fn player_buff_hover_names_the_dispel_class_in_gold() {
         168,
         SpellTooltipView {
             name: "Ice Armor".into(),
-            rank: Some("Rank 1".into()), // the spell variant's column — never the aura's
+            rank: Some("Rank 1".into()), // the spell variant's column, never the aura's
             dispel_type: Some("Magic".into()),
             aura_description: "Encases the caster in a layer of ice.".into(),
             ..Default::default()
         },
     );
-    s.set_auras(
-        "player",
-        Some(vec![AuraState {
-            spell_id: 168,
-            name: Some("Ice Armor".into()),
-            helpful: true,
-            ..Default::default()
-        }]),
-    );
+    s.set_player_auras(vec![AuraState {
+        spell_id: 168,
+        name: Some("Ice Armor".into()),
+        helpful: true,
+        ..Default::default()
+    }]);
     s.run(
         r#"
         local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
@@ -350,9 +329,8 @@ fn player_buff_hover_names_the_dispel_class_in_gold() {
     assert!(s.take_errors().is_empty());
 }
 
-/// `0x52e610`'s equipped-item line and its reagents line — the two lines the 2026-07-25 reports
-/// found missing (B54, B56). Order: cast|cooldown → requires-item → requires-form → reagents →
-/// description, each requirement red while unmet.
+/// `0x52e610`'s line order: cast|cooldown, requires-item, requires-form, reagents, description,
+/// each requirement red while unmet.
 #[test]
 fn requirement_and_reagent_lines_render_in_law_order() {
     let mut s = script();
@@ -401,10 +379,8 @@ fn requirement_and_reagent_lines_render_in_law_order() {
             if t == "Requires Wands" && *c == [1.0, 32.0 / 255.0, 32.0 / 255.0, 1.0])
     });
     assert!(red, "an unmet equipped-item requirement is red");
-    // The reagent's inline `|cffff2020` escape reaches the region VERBATIM: the engine paints
-    // the line's BASE colour white and the app's text layer resolves the escape into colour runs
-    // (`benilla::ui_text::markup`, covered by its own `color_runs_survive_the_wrap`). So what this
-    // layer owns is that the escape is neither stripped nor pre-flattened.
+    // The reagent's `|cffff2020` escape reaches the region verbatim over a white base colour; the
+    // app's text layer (`ui_text::markup`) turns it into colour runs.
     let verbatim = quads.iter().any(|q| {
         matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
             if t == "Reagents: |cffff2020Light Feather|r" && *c == [1.0, 1.0, 1.0, 1.0])
@@ -416,9 +392,9 @@ fn requirement_and_reagent_lines_render_in_law_order() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The target-frame aura hover: SetUnitBuff/SetUnitDebuff render the aura variant for the token's
-/// sign-filtered list — WITHOUT the duration-remaining line (byte-verified: only SetPlayerBuff
-/// appends it, and no other unit carries a duration on the 1.12 wire anyway).
+/// `SetUnitBuff`/`SetUnitDebuff` render the aura variant from the unit's sign-filtered list, with
+/// no remaining line: only `SetPlayerBuff` appends it, and the 1.12 wire carries no other unit's
+/// durations.
 #[test]
 fn unit_buff_and_debuff_hover_render_the_aura_variant_without_remaining() {
     let mut s = script();
@@ -439,8 +415,13 @@ fn unit_buff_and_debuff_hover_render_the_aura_variant_without_remaining() {
             ..Default::default()
         },
     );
-    s.set_auras(
-        "target",
+    // The target, guid 7, through the resolver.
+    s.set_unit_guids(&crate::script::UnitGuids {
+        target: 7,
+        ..Default::default()
+    });
+    s.set_unit_auras(
+        7,
         Some(vec![
             AuraState {
                 spell_id: 1126,
@@ -477,20 +458,9 @@ fn unit_buff_and_debuff_hover_render_the_aura_variant_without_remaining() {
     assert!(s.take_errors().is_empty());
 }
 
-/// **`SetPlayerBuff` reads a 1.12 cache position, not an Era ordinal** — the index space the whole
-/// `GetPlayerBuff*` family shares (`script::aura`'s header; pinned by `ref-BuffFrame.lua:105`,
-/// which passes `GetPlayerBuff`'s return straight in).
-///
-/// Every assertion here is a case the previous 1-based, sign-filtered reading got wrong, and got
-/// wrong *silently* — the plate still rendered, just for the wrong aura:
-///
-/// - position 1 is the SECOND aura, not the first again;
-/// - a debuff is reachable at all (the old sign filter defaulted to helpful, so no position ever
-///   resolved to one);
-/// - `-1` clears instead of showing the first buff. `BigWigs/Raids/Naxxramas/Loatheb.lua:260-271`
-///   feeds an unchecked `GetPlayerBuff(i, "HARMFUL")` in and breaks its scan when line 1 goes nil,
-///   so "shows something" there is an addon that never stops scanning;
-/// - a surplus filter argument is ignored (`CT_BuffMod/CT_BuffFrame.lua:151` passes one).
+/// `SetPlayerBuff` takes a 1.12 cache position, the `GetPlayerBuff` family's index space:
+/// `BuffFrame.lua:105` passes that return straight in. A miss, `-1` included, clears the plate,
+/// and a surplus filter argument is ignored.
 #[test]
 fn player_buff_hover_indexes_the_cache_position_not_a_filtered_ordinal() {
     let mut s = script();
@@ -509,30 +479,27 @@ fn player_buff_hover_indexes_the_cache_position_not_a_filtered_ordinal() {
             },
         );
     }
-    // The player's cache: two buffs then a debuff, ONE list, insertion-ordered (decision 0257).
-    s.set_auras(
-        "player",
-        Some(vec![
-            AuraState {
-                spell_id: 1126,
-                name: Some("Mark of the Wild".into()),
-                helpful: true,
-                ..Default::default()
-            },
-            AuraState {
-                spell_id: 2457,
-                name: Some("Battle Stance".into()),
-                helpful: true,
-                ..Default::default()
-            },
-            AuraState {
-                spell_id: 589,
-                name: Some("Shadow Word: Pain".into()),
-                helpful: false,
-                ..Default::default()
-            },
-        ]),
-    );
+    // The player's cache: two buffs then a debuff, in one insertion-ordered list.
+    s.set_player_auras(vec![
+        AuraState {
+            spell_id: 1126,
+            name: Some("Mark of the Wild".into()),
+            helpful: true,
+            ..Default::default()
+        },
+        AuraState {
+            spell_id: 2457,
+            name: Some("Battle Stance".into()),
+            helpful: true,
+            ..Default::default()
+        },
+        AuraState {
+            spell_id: 589,
+            name: Some("Shadow Word: Pain".into()),
+            helpful: false,
+            ..Default::default()
+        },
+    ]);
     s.run(
         r#"
         local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
@@ -562,8 +529,8 @@ fn player_buff_hover_indexes_the_cache_position_not_a_filtered_ordinal() {
     assert!(s.take_errors().is_empty(), "{:?}", s.take_errors());
 }
 
-/// SetAction delegates by payload kind: a SPELL slot renders the spell view; an empty slot shows
-/// nothing; a miss records the ask.
+/// `SetAction` delegates by payload kind: a spell slot renders the spell view, and a spell the
+/// store lacks shows no plate and records the ask.
 #[test]
 fn action_hover_delegates_by_kind() {
     let mut s = script();
@@ -581,7 +548,7 @@ fn action_hover_delegates_by_kind() {
         25,
         Some(ActionSlot {
             kind: 0x00,
-            action: 5143, // not in the store — the ask channel fires
+            action: 5143, // not in the store: the ask channel fires
             ..Default::default()
         }),
     );
@@ -603,10 +570,8 @@ fn action_hover_delegates_by_kind() {
     assert!(s.take_errors().is_empty());
 }
 
-/// A MACRO slot's hover is the reference's `0x52b040`: ONE white line, the macro's name (the
-/// "normal" colour `0xc0cf60` = 0xffffffff), and a slot whose
-/// macro no longer exists shows no plate at all. The director's report after 1636 landed: a macro
-/// on the bar had no tooltip — the arm was a pre-0983 `_ => Ok(())`.
+/// A macro slot's hover is the reference's `0x52b040`: one line, the macro's name in the normal
+/// colour (`0xc0cf60` holds `0xffffffff`, white); a slot whose macro is gone shows no plate.
 #[test]
 fn action_hover_on_a_macro_slot_shows_its_name_in_white() {
     let mut s = script();
@@ -684,12 +649,8 @@ fn trainer_service(spell_id: u32, name: &str, tooltip: TrainerTooltip) -> Traine
     }
 }
 
-/// `SetTrainerService` is a SELECTOR: it renders no line of its own and routes to whichever shared
-/// builder the app-side law picked. All three arms are pinned here — the item arm, the spell arm
-/// (with `altCaster` suppressing the reagents block), and a header row, which is a no-op.
-///
-/// The index is a VISIBLE row index, so row 1 is the "Arms" header and the services start at 2 —
-/// the same interleave `SetTradeSkillItem` has, and the same way to get it wrong.
+/// `SetTrainerService` renders no line of its own: it routes to the item or spell builder the app
+/// picked (`altCaster` drops the reagents), and its index is a visible row, so row 1 is a header.
 #[test]
 fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
     let mut s = script();
@@ -701,22 +662,22 @@ fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
             quality: 1,
             class: 2,
             subclass: 7,
-            // The type cell's word is app-resolved off ItemSubClass.dbc, never composed in the
-            // renderer — a view that carries none prints no type cell.
+            // The app resolves the type cell's word from ItemSubClass.dbc; a view without one
+            // prints no type cell.
             sub_class_display: Some("Sword".into()),
             ..Default::default()
         },
     );
-    s.set_spell_tooltip(
-        200,
-        SpellTooltipView {
-            name: "Heroic Strike".into(),
-            cost: Some("15 Rage".into()),
-            reagents: Some("Reagents: Linen Cloth".into()),
-            description: "A strong attack.".into(),
-            ..Default::default()
-        },
-    );
+    let heroic_strike = SpellTooltipView {
+        name: "Heroic Strike".into(),
+        cost: Some("15 Rage".into()),
+        reagents: Some("Reagents: Linen Cloth".into()),
+        description: "A strong attack.".into(),
+        ..Default::default()
+    };
+    s.set_spell_tooltip(200, heroic_strike.clone());
+    // altCaster is the builder's unit selector, which reads the pet's view.
+    s.set_pet_spell_tooltip(200, heroic_strike);
     s.set_trainer(Some(TrainerState {
         services: vec![
             trainer_service(2756, "Copper Shortsword", TrainerTooltip::Item(2847)),
@@ -759,7 +720,7 @@ fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
     )
     .unwrap();
 
-    // Row 3: the class-trainer service -> the SPELL builder on the TAUGHT spell, reagents shown.
+    // Row 3: the class-trainer service goes to the spell builder on the taught spell.
     s.run(
         r#"
         TT:SetOwner(AB1, "ANCHOR_RIGHT")
@@ -781,7 +742,7 @@ fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
         "the gold description is part of the shared builder's law: {texts:?}"
     );
 
-    // Row 4: the same view, altCaster set -> the reagents block is gone, everything else stays.
+    // Row 4: the same view with altCaster set loses only the reagents block.
     s.run(
         r#"
         TT:SetOwner(AB1, "ANCHOR_RIGHT")
@@ -801,11 +762,8 @@ fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
     assert!(s.take_errors().is_empty());
 }
 
-/// `SetCraftSpell` is `SetTrainerService`'s structural twin: a selector, not the two-line
-/// name/description stub it used to be. Both arms are pinned, and the assertion that matters most
-/// is the negative one — a rod recipe's hover shows the ROD's item tooltip while the same row's
-/// ICON is the spell's (Law D, decision 1107). Icon and tooltip disagreeing on one row is the
-/// verified shape, not a bug to reconcile.
+/// `SetCraftSpell` is a selector like `SetTrainerService`: a rod recipe hovers the rod's item
+/// tooltip while its row's icon is the spell's, which is the reference's shape, not a bug.
 #[test]
 fn set_craft_spell_selects_the_builder_like_the_trainer_hover_does() {
     let mut s = script();
@@ -893,10 +851,8 @@ fn set_craft_spell_selects_the_builder_like_the_trainer_hover_does() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The duration line's **gate**: `0x532b00` skips the duration block on `untilCancelled`
-/// (`532bda: 8b 46 0c` / `532bdf: 75 2d`) — never on "has this aura a duration yet". The three
-/// cases below are the ones that separate the two questions, and the middle two are what the old
-/// `duration > 0 && left > 0` gate got wrong.
+/// `0x532b00` skips the remaining line on `untilCancelled` (`0x532bda`, `0x532bdf`), never on
+/// whether the aura has a duration yet.
 #[test]
 fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
     let mut s = script();
@@ -929,7 +885,7 @@ fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
         BENILLA_LAST = BENILLA_LINES == 3 and TT2TextLeft3:GetText() or ""
     "#;
     let mut show = |aura: AuraState| {
-        s.set_auras("player", Some(vec![aura]));
+        s.set_player_auras(vec![aura]);
         s.run(hover).unwrap();
         (
             s.eval::<i64>("return BENILLA_LINES").unwrap(),
@@ -943,8 +899,7 @@ fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
         ..Default::default()
     };
 
-    // 1 · Permanent — and carrying a duration anyway, so only the FLAG can be doing the work.
-    // Title + description, nothing else.
+    // 1 · Permanent, with a duration anyway, so only the flag can suppress the line.
     assert_eq!(
         show(AuraState {
             duration: 1800.0,
@@ -956,8 +911,7 @@ fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
         "untilCancelled suppresses the line even with a live duration on the record"
     );
 
-    // 2 · Timed, but no duration packet has landed yet — the frame an aura appears. The old gate
-    // blanked this; the reference shows the line, counting from zero.
+    // 2 · Timed, before any duration packet: the reference shows the line, counting from zero.
     assert_eq!(
         show(AuraState {
             duration: 0.0,
@@ -969,8 +923,7 @@ fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
         "a timed aura's first frames still carry the line"
     );
 
-    // 3 · Lapsed — the reading the reference's own truncating seconds arm produces, which the old
-    // gate hid entirely.
+    // 3 · Lapsed: the reference's truncating seconds arm reads 0.
     assert_eq!(
         show(AuraState {
             duration: 30.0,
@@ -982,8 +935,7 @@ fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
         "a lapsed aura reads 0, it does not lose the line"
     );
 
-    // Control: an ordinary live aura still counts, so none of the above is the line going missing
-    // for an unrelated reason.
+    // Control: an ordinary live aura still counts down.
     assert_eq!(
         show(AuraState {
             duration: 1800.0,
@@ -996,9 +948,9 @@ fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
     assert!(s.take_errors().is_empty());
 }
 
-/// `GetRewardSpell()` / `GetQuestLogRewardSpell()` answer `texture, name, isTradeskillSpell` —
-/// three nils when the quest teaches nothing (the reference's own `(nil,nil,nil)` kind) — and
-/// `GameTooltip:SetQuestRewardSpell()` / `SetQuestLogRewardSpell()` render that spell (1944).
+/// `GetRewardSpell()` and `GetQuestLogRewardSpell()` answer `texture, name, isTradeskillSpell`,
+/// three nils when the quest teaches nothing, and `SetQuestRewardSpell()` and
+/// `SetQuestLogRewardSpell()` render that spell.
 #[test]
 fn quest_reward_spell_getters_and_hovers() {
     let mut s = script();
@@ -1066,7 +1018,7 @@ fn quest_reward_spell_getters_and_hovers() {
         }],
         ..Default::default()
     });
-    // The detail hangs on the row now, so both readers go through the selection (2247).
+    // The detail hangs on the row, so both readers go through the selection.
     s.run("SelectQuestLogEntry(1)").unwrap();
     assert_eq!(
         s.eval::<(String, String, Option<i64>)>("return GetQuestLogRewardSpell()")
@@ -1082,4 +1034,477 @@ fn quest_reward_spell_getters_and_hovers() {
         "Fireball"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// A craft recipe row whose detail icon hovers `tooltip`.
+fn craft_recipe(spell_id: u32, name: &str, tooltip: CraftTooltip) -> CraftRecipe {
+    CraftRecipe {
+        spell_id,
+        tooltip,
+        name: name.into(),
+        sub_name: String::new(),
+        difficulty: TradeSkillDifficulty::Optimal,
+        num_available: 1,
+        icon: None,
+        description: None,
+        needs_item_target: false,
+        reagents: vec![],
+        tools: vec![],
+        spell_level: 0,
+    }
+}
+
+/// Firebolt (3110) on a pet-bar slot.
+fn firebolt_slot() -> PetActionView {
+    PetActionView {
+        name: Some("Firebolt".into()),
+        spell_id: Some(3110),
+        ..Default::default()
+    }
+}
+
+fn firebolt() -> SpellTooltipView {
+    SpellTooltipView {
+        name: "Firebolt".into(),
+        rank: Some("Rank 1".into()),
+        cost: Some("10 Mana".into()),
+        range: Some("30 yd range".into()),
+        cast_time: Some("1 sec cast".into()),
+        description: "Deals 7 to 10 Fire damage to a target.".into(),
+        ..Default::default()
+    }
+}
+
+/// Pet-bar tokens and craft item subjects name no spell, so they are left out.
+#[test]
+fn the_spell_subjects_are_what_the_setters_read_from_the_vm() {
+    let mut s = script();
+    s.set_pet_actions(
+        true,
+        true,
+        true,
+        vec![
+            PetActionView {
+                name: Some("PET_ACTION_ATTACK".into()),
+                is_token: true,
+                ..Default::default()
+            },
+            firebolt_slot(),
+        ],
+    );
+    s.set_pet_book(PetBookState {
+        token: Some("DEMON".into()),
+        slots: vec![SpellSlotView {
+            spell_id: 6307,
+            name: "Blood Pact".into(),
+            ..Default::default()
+        }],
+    });
+    let reward = |spell_id| {
+        Some(QuestRewardSpell {
+            spell_id,
+            ..Default::default()
+        })
+    };
+    s.set_quest(Some(QuestState {
+        panel: QuestPanel::Reward,
+        reward_spell: reward(133),
+        ..QuestState::default()
+    }));
+    s.set_quest_log(QuestLogState {
+        entries: vec![QuestLogEntryView {
+            quest_id: 7,
+            detail: Some(QuestLogDetail {
+                reward_spell: reward(116),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    s.set_craft(Some(CraftState {
+        name: "Beast Training".into(),
+        rank: 0,
+        max_rank: 0,
+        craft_type: 1,
+        recipes: vec![
+            craft_recipe(24599, "Bite", CraftTooltip::Spell(17253)),
+            craft_recipe(7421, "Runed Copper Rod", CraftTooltip::Item(6218)),
+        ],
+    }));
+    let aura = |spell_id| AuraState {
+        spell_id,
+        ..Default::default()
+    };
+    s.set_player_auras(vec![aura(1459)]);
+    // The pet's, the target-of-target's and party1's lists, by guid.
+    s.set_unit_auras(0xF140_0000_0000_0077, Some(vec![aura(172)]));
+    s.set_unit_auras(0x21, Some(vec![aura(589)]));
+    s.set_unit_auras(0x22, Some(vec![aura(8921)]));
+    s.set_tracking(Some(TrackingState {
+        spell_id: 2580,
+        name: Some("Find Minerals".into()),
+        icon: None,
+        cancelable: true,
+    }));
+
+    let mut subjects = s.spell_tooltip_subjects();
+    subjects.sort_unstable();
+    assert_eq!(subjects, vec![116, 133, 172, 589, 1459, 2580, 8921, 17253]);
+    // The pet's bar and book are read through the builder's unit selector: the pet's views.
+    let mut pet_subjects = s.pet_spell_tooltip_subjects();
+    pet_subjects.sort_unstable();
+    assert_eq!(pet_subjects, vec![3110, 6307]);
+}
+
+/// The builder's unit selector picks the view built against the pet: `SetPetAction` passes it
+/// (`0x532888`, `0x5328d0`), `SetSpell` on the pet book (`0x532e23`) and a pet-learn
+/// `SetTrainerService` (`0x533a7f`); the player's book, a class service and a craft pass 0.
+#[test]
+fn the_unit_selector_setters_read_the_pet_view() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let view = |description: &str| SpellTooltipView {
+        name: "Sacrifice".into(),
+        description: description.into(),
+        ..Default::default()
+    };
+    s.set_spell_tooltip(7812, view("absorb 305 damage"));
+    s.set_pet_spell_tooltip(7812, view("absorb 318 damage"));
+    s.set_pet_actions(
+        true,
+        true,
+        true,
+        vec![PetActionView {
+            name: Some("Sacrifice".into()),
+            spell_id: Some(7812),
+            ..Default::default()
+        }],
+    );
+    let slot = SpellSlotView {
+        spell_id: 7812,
+        name: "Sacrifice".into(),
+        ..Default::default()
+    };
+    s.set_pet_book(PetBookState {
+        token: Some("DEMON".into()),
+        slots: vec![slot.clone()],
+    });
+    s.set_spellbook(SpellBookState {
+        tabs: Vec::new(),
+        slots: vec![slot],
+    });
+    let service = |alt_caster| {
+        trainer_service(
+            100,
+            "Sacrifice",
+            TrainerTooltip::Spell {
+                spell_id: 7812,
+                alt_caster,
+            },
+        )
+    };
+    s.set_trainer(Some(TrainerState {
+        services: vec![service(true), service(false)],
+        ..Default::default()
+    }));
+    s.set_craft(Some(CraftState {
+        name: "Beast Training".into(),
+        rank: 0,
+        max_rank: 0,
+        craft_type: 1,
+        recipes: vec![craft_recipe(24599, "Sacrifice", CraftTooltip::Spell(7812))],
+    }));
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT")
+        local function desc(set)
+            TT:SetOwner(PB1, "ANCHOR_RIGHT"); set(); return TTTextLeft2:GetText()
+        end
+        PET_BAR = desc(function() TT:SetPetAction(1) end)
+        PET_BOOK = desc(function() TT:SetSpell(1, "pet") end)
+        BOOK = desc(function() TT:SetSpell(1, "spell") end)
+        -- Row 1 is the group header.
+        PET_SERVICE = desc(function() TT:SetTrainerService(2) end)
+        SERVICE = desc(function() TT:SetTrainerService(3) end)
+        CRAFT = desc(function() TT:SetCraftSpell(1) end)
+    "#,
+    )
+    .unwrap();
+    let got = |name: &str| s.eval::<String>(&format!("return {name}")).unwrap();
+    assert_eq!(got("PET_BAR"), "absorb 318 damage");
+    assert_eq!(got("PET_BOOK"), "absorb 318 damage");
+    assert_eq!(got("PET_SERVICE"), "absorb 318 damage");
+    assert_eq!(got("BOOK"), "absorb 305 damage");
+    assert_eq!(got("SERVICE"), "absorb 305 damage");
+    assert_eq!(got("CRAFT"), "absorb 305 damage");
+    assert!(s.take_spell_tooltip_asks().is_empty());
+    assert!(s.take_pet_spell_tooltip_asks().is_empty());
+    assert!(s.take_errors().is_empty());
+}
+
+/// A pet view's miss asks the pet's store, and only the pet view's answer re-renders it.
+#[test]
+fn a_pet_view_miss_waits_on_the_pet_store() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_pet_actions(true, true, true, vec![firebolt_slot()]);
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT")
+        TT:SetOwner(PB1, "ANCHOR_RIGHT")
+        TT:SetPetAction(1)
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_spell_tooltip_asks().is_empty());
+    assert_eq!(s.take_pet_spell_tooltip_asks(), vec![3110]);
+    // The player's view of the same id is not the one the selector renders.
+    s.set_spell_tooltip(3110, firebolt());
+    assert_eq!(left_lines(&mut s), vec!["Firebolt"]);
+    s.set_pet_spell_tooltip(3110, firebolt());
+    assert_eq!(
+        left_lines(&mut s),
+        vec![
+            "Firebolt",
+            "10 Mana",
+            "1 sec cast",
+            "Deals 7 to 10 Fire damage to a target."
+        ]
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// No second hover and no second `OnTooltipCleared`: the reference builds the tooltip at the call.
+#[test]
+fn a_missed_view_re_renders_the_tooltip_when_the_app_answers() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_pet_actions(true, true, true, vec![firebolt_slot()]);
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT")
+        TT:SetOwner(PB1, "ANCHOR_RIGHT")
+        CLEARED = 0
+        TT:SetScript("OnTooltipCleared", function() CLEARED = CLEARED + 1 end)
+        TT:SetPetAction(1)
+    "#,
+    )
+    .unwrap();
+    assert_eq!(left_lines(&mut s), vec!["Firebolt"]);
+    assert_eq!(s.take_pet_spell_tooltip_asks(), vec![3110]);
+
+    s.set_pet_spell_tooltip(3110, firebolt());
+    assert_eq!(
+        left_lines(&mut s),
+        vec![
+            "Firebolt",
+            "10 Mana",
+            "1 sec cast",
+            "Deals 7 to 10 Fire damage to a target."
+        ]
+    );
+    assert!(s.eval::<bool>("return TT:IsShown() == 1").unwrap());
+    assert!(
+        s.take_pet_spell_tooltip_asks().is_empty(),
+        "the re-render found the view"
+    );
+    assert_eq!(
+        s.eval::<i64>("return CLEARED").unwrap(),
+        1,
+        "one setter call, one OnTooltipCleared"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// Beast Training's icon has no fallback name, so its miss is a hidden plate.
+#[test]
+fn a_hidden_miss_shows_and_an_enchant_link_fills_when_answered() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_craft(Some(CraftState {
+        name: "Beast Training".into(),
+        rank: 0,
+        max_rank: 0,
+        craft_type: 1,
+        recipes: vec![craft_recipe(24599, "Bite", CraftTooltip::Spell(17253))],
+    }));
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "CI"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT")
+        CreateFrame("GameTooltip", "REF")
+        TT:SetOwner(CI, "ANCHOR_RIGHT")
+        TT:SetCraftSpell(1)
+        REF:SetOwner(CI, "ANCHOR_PRESERVE")
+        REF:SetHyperlink("|cffffd000|Henchant:20034|h[Enchant Weapon - Crusader]|h|r")
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.eval::<i64>("return TT:NumLines()").unwrap(), 0);
+    assert!(!s.eval::<bool>("return TT:IsShown() == 1").unwrap());
+    assert_eq!(
+        s.eval::<String>("return REFTextLeft1:GetText()").unwrap(),
+        "Enchant Weapon - Crusader"
+    );
+    assert_eq!(s.eval::<i64>("return REF:NumLines()").unwrap(), 1);
+
+    s.set_spell_tooltip(
+        17253,
+        SpellTooltipView {
+            name: "Bite".into(),
+            description: "Bite the enemy.".into(),
+            ..Default::default()
+        },
+    );
+    s.set_spell_tooltip(
+        20034,
+        SpellTooltipView {
+            name: "Enchant Weapon - Crusader".into(),
+            cast_time: Some("5 sec cast".into()),
+            description: "Permanently enchant a melee weapon.".into(),
+            ..Default::default()
+        },
+    );
+    assert!(s.eval::<bool>("return TT:IsShown() == 1").unwrap());
+    assert_eq!(
+        s.eval::<(String, String)>("return TTTextLeft1:GetText(), TTTextLeft2:GetText()")
+            .unwrap(),
+        ("Bite".to_string(), "Bite the enemy.".to_string())
+    );
+    assert_eq!(
+        s.eval::<(i64, String)>("return REF:NumLines(), REFTextLeft3:GetText()")
+            .unwrap(),
+        (3, "Permanently enchant a melee weapon.".to_string())
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// A new hover, a hide, an added line or a running fade leaves the tooltip as it is.
+#[test]
+fn new_content_or_an_added_line_ends_the_wait() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_pet_actions(true, true, true, vec![firebolt_slot()]);
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT")
+        CreateFrame("GameTooltip", "HID")
+        CreateFrame("GameTooltip", "ADD")
+        TT:SetOwner(PB1, "ANCHOR_RIGHT")
+        TT:SetPetAction(1)
+        TT:SetOwner(PB1, "ANCHOR_RIGHT")
+        TT:SetText("Attack")
+        HID:SetOwner(PB1, "ANCHOR_RIGHT")
+        HID:SetPetAction(1)
+        HID:Hide()
+        ADD:SetOwner(PB1, "ANCHOR_RIGHT")
+        ADD:SetPetAction(1)
+        ADD:AddLine("an addon's line")
+        CreateFrame("GameTooltip", "FAD")
+        FAD:SetOwner(PB1, "ANCHOR_RIGHT")
+        FAD:SetPetAction(1)
+        FAD:FadeOut()
+    "#,
+    )
+    .unwrap();
+    s.set_pet_spell_tooltip(3110, firebolt());
+    assert_eq!(left_lines(&mut s), vec!["Attack"]);
+    assert_eq!(s.eval::<i64>("return HID:NumLines()").unwrap(), 0);
+    assert!(!s.eval::<bool>("return HID:IsShown() == 1").unwrap());
+    assert_eq!(
+        s.eval::<(i64, String)>("return ADD:NumLines(), ADDTextLeft2:GetText()")
+            .unwrap(),
+        (2, "an addon's line".to_string())
+    );
+    assert_eq!(s.eval::<i64>("return FAD:NumLines()").unwrap(), 1);
+    assert!(s.take_errors().is_empty());
+}
+
+/// What Lua wrote after the miss is kept: a line rewritten in place, by `AppendText` or a cell's
+/// `SetTextColor`, or new content that reads the same as the miss's line.
+#[test]
+fn a_line_rewritten_in_place_ends_the_wait() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_pet_actions(true, true, true, vec![firebolt_slot()]);
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "APP")
+        CreateFrame("GameTooltip", "COL")
+        APP:SetOwner(PB1, "ANCHOR_RIGHT")
+        APP:SetPetAction(1)
+        APP:AppendText(" (Pet)")
+        COL:SetOwner(PB1, "ANCHOR_RIGHT")
+        COL:SetPetAction(1)
+        COLTextLeft1:SetTextColor(1, 0, 0)
+        CreateFrame("GameTooltip", "SAM")
+        SAM:SetOwner(PB1, "ANCHOR_RIGHT")
+        SAM:SetPetAction(1)
+        SAM:SetOwner(PB1, "ANCHOR_RIGHT")
+        SAM:SetText("Firebolt", 1, 1, 1)
+    "#,
+    )
+    .unwrap();
+    s.set_pet_spell_tooltip(3110, firebolt());
+    assert_eq!(
+        s.eval::<(i64, String)>("return APP:NumLines(), APPTextLeft1:GetText()")
+            .unwrap(),
+        (1, "Firebolt (Pet)".to_string())
+    );
+    assert_eq!(
+        s.eval::<(i64, f32, f32)>(
+            "local r, g = COLTextLeft1:GetTextColor(); return COL:NumLines(), r, g"
+        )
+        .unwrap(),
+        (1, 1.0, 0.0)
+    );
+    assert_eq!(s.eval::<i64>("return SAM:NumLines()").unwrap(), 1);
+    assert!(s.take_errors().is_empty());
+}
+
+/// A re-render's `OnShow` can move another waiting tooltip onto a new spell.
+#[test]
+fn a_wait_replaced_by_an_earlier_re_render_is_not_replayed() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_craft(Some(CraftState {
+        name: "Beast Training".into(),
+        rank: 0,
+        max_rank: 0,
+        craft_type: 1,
+        recipes: vec![craft_recipe(24599, "Firebolt", CraftTooltip::Spell(3110))],
+    }));
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "A")
+        CreateFrame("GameTooltip", "B")
+        A:SetOwner(PB1, "ANCHOR_RIGHT")
+        A:SetCraftSpell(1)
+        B:SetOwner(PB1, "ANCHOR_RIGHT")
+        B:SetCraftSpell(1)
+        A:SetScript("OnShow", function()
+            B:SetOwner(PB1, "ANCHOR_RIGHT")
+            B:SetHyperlink("|cffffd000|Henchant:20034|h[Enchant Weapon - Crusader]|h|r")
+        end)
+    "#,
+    )
+    .unwrap();
+    s.set_spell_tooltip(3110, firebolt());
+    assert_eq!(
+        s.eval::<(i64, String)>("return B:NumLines(), BTextLeft1:GetText()")
+            .unwrap(),
+        (1, "Enchant Weapon - Crusader".to_string())
+    );
+    assert_eq!(
+        s.eval::<String>("return ATextLeft1:GetText()").unwrap(),
+        "Firebolt"
+    );
+    assert!(s.take_errors().is_empty());
 }

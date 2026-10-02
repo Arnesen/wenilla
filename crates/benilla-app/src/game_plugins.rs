@@ -1,26 +1,14 @@
-//! **[`GamePlugins`] — the game, as one name** (decision 2279, 2265 §C2).
+//! [`GamePlugins`]: the game as one plugin group, on top of the engine's
+//! `benilla_world::world_plugins::WorldPlugins`. `schedule_tests` builds it headless and checks
+//! the schedule for undeclared orders.
 //!
-//! `benilla_world::world_plugins::WorldPlugins` is the engine as one name (1164); this is the
-//! client on top of it: every plugin the game adds, in the order `run()` always added them.
-//! Until 2279 that chain lived inline in `run()` — 616 lines, the crate's only public function,
-//! ~150 `add_plugins` — so nothing could build the game's schedule except the binary, and no
-//! test could ask the one question Bevy can answer about a schedule: which conflicting pairs
-//! have no declared order (the instrument that would have caught 2220 and B354 at the line).
-//! `schedule_tests` below builds it headless and asks.
+//! The order is load-bearing. Some plugins read a resource an earlier one inserts at build time
+//! (`VideoPlugin` and `RealmlistPlugin` before `CvarPlugin`, `WorldBackdropPlugin` after
+//! `PlayerUiPlugin`, the `UiActionPlugin` family), and registration order is the executor's
+//! tie-break between systems with no declared order, so reordering members changes behaviour.
 //!
-//! **The order is load-bearing and is preserved from `run()` as-is.** Two kinds of edge live in
-//! it: documented dependencies (a plugin that reads a resource an earlier one inserts at build
-//! time — `VideoPlugin` and `RealmlistPlugin` before `CvarPlugin`, `WorldBackdropPlugin` after
-//! `PlayerUiPlugin`, the `UiActionPlugin` family), and registration order, which is the
-//! executor's tie-break between systems with no declared order. The second kind is exactly
-//! what the ambiguity count measures; until it is zero, reordering members is a behaviour
-//! change.
-//!
-//! **What is NOT here:** the engine (`WorldPlugins`), the three process plugins (`ThreadQos`,
-//! `BgWin`, `MacQuit`), the instruments that sit above the stack (`dev::DevToolsPlugin`,
-//! `perf::FpsJournalPlugin`, `dev::DevProbesPlugin`) — all still `run()`'s, in their places
-//! around this group. `pipe_warm` is inside, at its old position: a client instrument, but one
-//! that warms the *game's* pipeline set and has always been added among them.
+//! Not here, and added by `run()` around this group: the engine, the three process plugins
+//! (`ThreadQos`, `BgWin`, `MacQuit`) and the dev instruments above the stack.
 
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
@@ -106,8 +94,8 @@ use crate::world_backdrop::WorldBackdropPlugin;
 
 /// The game, as one plugin group. The two fields are the two plugins `run()` parameterises.
 pub(crate) struct GamePlugins {
-    /// [`NetPlugin::connect`]: `false` in capture mode — the channel resources exist, no IO
-    /// thread runs, so captures are deterministic regardless of whether a server is up.
+    /// [`NetPlugin::connect`]: `false` in capture mode, where no IO thread runs, so captures are
+    /// deterministic whether or not a server is up.
     pub(crate) connect: bool,
     /// [`crate::char_select::CharSelectPlugin::start`]: the screen this session opens on.
     pub(crate) start: crate::char_select::ClientState,
@@ -116,340 +104,151 @@ pub(crate) struct GamePlugins {
 impl PluginGroup for GamePlugins {
     fn build(self) -> PluginGroupBuilder {
         PluginGroupBuilder::start::<Self>()
-            // The game's own WGSL, compiled into the binary (decision 1175) — before anything that could
-            // ask for one. The engine's seven register themselves inside `WorldPlugins`, which
-            // `run()` adds ahead of this group.
+            // The game's own WGSL, compiled in, before anything that could ask for one.
             .add(crate::shaders::plugin)
             .add(BowstringPlugin)
             .add(crate::weapon_trail::WeaponTrailPlugin)
             .add(FishingLinePlugin)
             .add(QuestMarkersPlugin)
-            // Pipeline-compile counters + the live-compile tripwire (decision 0837: macOS builds every
-            // pipeline synchronously on the render thread, so a live compile is a felt stall).
             .add(crate::pipe_warm::plugin)
-            // Streamed world entities: cube assets + display catalogs at startup, sync each frame.
             .add(EntitiesPlugin)
-            // Creature animation: pick Stand/Walk/Run from each creature's movement state each frame (Milestone C).
-            // The combat log — every combat packet's chat line and floating number, one handler each
-            // (decision 2323); ahead of the animation layer, whose two shared kinds run second.
+            // The combat log, ahead of the animation layer, whose two shared kinds run second.
             .add(crate::combat_log::CombatLogPlugin)
             .add(CreatureAnimPlugin)
-            // The unit blob shadow: the dark ground oval under every unit, sized from the playing
-            // animation's box (`0x6d7920`), on the same
-            // surface-decal projector as the selection ring.
+            // The blob shadow (`0x6d7920`), sized from the Stand box (`playableAnimationLookup[0]`,
+            // fixed per model), never the playing sequence.
             .add(BlobShadowPlugin)
-            // Footprint decals (B212, decision 1006): the prints a walking unit leaves on snow/sand,
-            // spawn-once projections on the same decal projector, fading off the effect stream.
             .add(CameraShakePlugin)
             .add(FootprintsPlugin)
-            // GameObject animation (decision 0242): net-streamed GObjects (doors/chests) play an M2 sequence
-            // on GAMEOBJECT_STATE change — the state-machine sibling of the doodad idle loop above.
             .add(crate::go_anim::plugin)
             .add(crate::doodad_events::plugin)
-            // Avatar + camera + input.
             .add(PlayerPlugin)
-            // Cinematic fly-bys (`SMSG_TRIGGER_CINEMATIC`): the race intro a first login plays, and the
-            // GameObject cameras. Takes the world camera for the duration — hence after PlayerPlugin,
-            // whose `control` it overrides within the same stage (decision 0196's deferred arc).
             .add(crate::screen_fade::ScreenFadePlugin)
+            // After PlayerPlugin, whose `control` it overrides in the same stage.
             .add(CinematicPlugin)
-            // The real client's hardware mouse cursor (native NSCursor on macOS).
             .add(CursorPlugin)
-            // Net↔ECS bridge: spawns the world thread, exposes the snapshot + writer resources. In capture
-            // mode the IO thread is skipped (`connect: false`) so the scene is deterministic.
             .add(NetPlugin {
                 connect: self.connect,
             })
-            // The death arc (decision 0308): the wire-fed death stores + the root/water-walk ack messages.
             .add(crate::death::DeathPlugin)
-            // The shared glue vocabulary both pre-world screens stand on (decision 0465): the ADD-mode UI
-            // material, the client-data art set, the GlueStrings table.
             .add(crate::glue::GluePlugin)
-            // The glue layer (decision 0193): the ClientState machine + the character-select screen
-            // that answers the parked IO thread's pick. A world capture boots straight InWorld (no net,
-            // no picker); a glue capture boots onto the screen it photographs.
             .add(crate::char_select::CharSelectPlugin { start: self.start })
-            // The login screen (decision 0539): the faithful AccountLogin glue + the credential policy
-            // that answers the IO thread's pre-logon park.
             .add(crate::login::LoginPlugin)
-            // The realm list: the faithful RealmList glue + the policy that answers the IO thread's
-            // realm park. The client used to take `realms.first()` and offer no way to say otherwise.
             .add(crate::realm_select::RealmSelectPlugin)
-            // The character-creation screen + its live preview booth (decision 0423).
             .add(crate::char_create::CharCreatePlugin)
-            // Audio: the delegated mixer + WoW's owned selection layer (decision 0070).
             .add(SoundPlugin)
-            // Targeting: left-click a unit to select it (→ CMSG_SET_SELECTION) + draw its ground ring.
             .add(TargetPlugin)
             .add(TransportPlugin)
-            // Faithful world-load splash + progress bar on startup + cross-map teleport (the load latency
-            // streaming can't hide); per-map art via the Map.dbc→LoadingScreens.dbc→BLP chain.
             .add(LoadingScreenPlugin)
-            // The player-UI quad pass (decision 0068 §2): its own composited-above-the-world,
-            // below-the-egui-dev-overlays camera + sorted-quad renderer. `$WOW_UI_DEMO=1` seeds a proof scene.
+            // The player-UI quad pass; `$WOW_UI_DEMO=1` seeds a proof scene.
             .add(PlayerUiPlugin)
-            // The world's frame, rendered off-screen and drawn first in the UI camera's main pass —
-            // the seam that puts the UI-over-world blend back into gamma bytes (0161/0254's last piece,
-            // a pass rather than a quad since 2234). Registered AFTER the UI pass: it points that
-            // plugin's camera at the world camera.
+            // After the UI pass: it points that plugin's camera at the world camera.
             .add(WorldBackdropPlugin)
-            // The HUD minimap (decision 0203 phase 1): fills the `<Minimap>` widget's extracted hole with
-            // the streamed tile window + mask + player arrow, and feeds the zone text.
             .add(crate::minimap::MinimapPlugin)
-            // The pet-bar / spellbook autocast shine, drawn on the append lane from the conversion's
-            // parked sites — zero per-frame script-layout traffic (decision 1383, B282).
-            // The `<Model>` widgets' M2s, rendered as tiles of one atlas and composited at the
-            // callback rank (decision 2008).
             .add(crate::ui_models::UiModelsPlugin)
-            // The shared AreaTable catalog + the ZONE_CHANGED event family / zone-text host globals
-            // behind GetZoneText & co. (the zone-entry splash arc, decision 0287).
             .add(crate::area::AreaPlugin)
             .add(crate::area_poi::AreaPoiPlugin)
             .add(crate::world_state_ui::WorldStateUiPlugin)
-            // The `AreaTrigger.dbc` volumes + the per-frame containment check that reports walking into
-            // one (`CMSG_AREATRIGGER`) — the client's whole part in portals, instance entrances and
-            // explore objectives; the server owns what each trigger means.
             .add(crate::area_trigger::AreaTriggerPlugin)
             .add(crate::ui_world_map::WorldMapUiPlugin)
-            // The guard's directions marker (`SMSG_GOSSIP_POI`) — one landmark record, drawn by the
-            // minimap's landmark pass and the world map's POI child, cleared by arriving at it.
             .add(crate::poi_marker::PoiMarkerPlugin)
-            // The glyph atlas (client TTFs -> baked bitmap) `ui_script`'s extraction draws `FontString`
-            // regions through. Loads at Startup, after the asset chain opens (decision 0068 §2).
             .add(UiTextPlugin)
-            // The one "which NPC am I interacting with" answer, shared by the portrait booth's `"npc"`
-            // token and the interaction face-me (decision 1467) — hence its own plugin, ahead of both.
+            // Ahead of the portrait booth and the interaction face-me, which both read it.
             .add(crate::ui_session::UiSessionPlugin)
-            // Unit-frame portraits: the token -> off-screen-baked-face bridge the UI extract samples for a
-            // `SetPortraitTexture`-bound region (the modern high-res 2D model bake).
             .add(PortraitPlugin)
             .add(TextInputPlugin)
             .add(UiScriptPlugin)
-            // The video knobs the CVar host writes into (today: `gxVSync`). Before CvarPlugin so the
-            // resource exists when `load_config` applies the saved value at Startup.
+            // Before CvarPlugin, so the resource exists when `load_config` applies the saved value.
             .add(crate::video::VideoPlugin)
-            // The realmlist (decision 1667) — the logon address the login screen edits. Same reason as
-            // VideoPlugin above: it is a CVar knob, so its resource has to exist before `load_config`.
+            // A CVar knob too, so before CvarPlugin for the same reason.
             .add(crate::realmlist::RealmlistPlugin)
-            // The CVar host (decision 0954): registration, knob sync, config.toml persistence. After
-            // UiScriptPlugin only for reading order — its systems gate on the VM existing anyway.
             .add(crate::cvars::CvarPlugin)
-            // The console command registry (decision 2303): the reference's `ConsoleCommand` table,
-            // its four CVar commands and `help`; subsystems register their own from their plugins.
             .add(crate::console::ConsolePlugin)
-            // The key-binding engine (decision 0997): the chord→command dispatch every rebindable input
-            // runs through, its persistence, and the Key Bindings window's capture seam.
             .add(crate::bindings::BindingsPlugin)
-            // The unit snapshot + event feed (decision 0068 §3): pushes ECS game state into the VM as the
-            // plain data the `Unit*` bindings read, and fires the matching WoW events.
             .add(UiUnitPlugin)
             .add(UiPartyPlugin)
-            // Duels (decision 0633): the wire session, the client-side countdown tick, the four Era
-            // events, and the accept/cancel/challenge intents.
             .add(UiDuelPlugin)
-            // Setting your hearthstone (decision 1331): the innkeeper's SMSG_BINDER_CONFIRM question, the
-            // CONFIRM_BINDER dialog it raises, and the CMSG_BINDER_ACTIVATE its Accept sends — the only
-            // packet in the flow that actually binds anything.
             .add(UiBinderPlugin)
-            // The dialog engine's own verbs (decision 1963): the pet trainer's question, the instance
-            // boot clock, the area spirit healer, the battleground queue, the meeting stone.
             .add(UiDialogVerbsPlugin)
             .add(BattlefieldScorePlugin)
             .add(BattlefieldPlugin)
             .add(BattlefieldPositionsPlugin)
             .add(crate::game_tip::GameTipPlugin)
             .add(crate::text_filter::TextFilterPlugin)
-            // The re-shape a `bevy_ui` text root loses when its last span is despawned
-            // (decision 2212, B383): an upstream change-detection hole whose only symptom is a
-            // panic inside `bevy_text` on the next window resize.
+            // Re-shapes a `bevy_ui` text root whose last span was despawned, an upstream hole
+            // that otherwise panics in `bevy_text` on the next resize.
             .add(crate::text_reshape::TextReshapePlugin)
             .add(TutorialPlugin)
-            // The melee swing refusals (`SMSG_ATTACKSWING_NOTINRANGE`/`_BADFACING`/`_DEADTARGET`/
-            // `_CANT_ATTACK`): the latch the packets set, and the 4 s repeat that shows it while an
-            // attack target stands and no swing lands.
             .add(crate::swing_refusal::SwingRefusalPlugin)
-            // Being summoned (decision 1747): SMSG_SUMMON_REQUEST's latch, the CONFIRM_SUMMON dialog it
-            // raises, and the CMSG_SUMMON_RESPONSE its Accept sends. The binder's twin one line up — a
-            // server-asked question whose only wire answer is yes — and here for that reason.
             .add(UiSummonPlugin)
-            // The GM trouble-ticket flow (decision 1673): the Help window's five sends, the UPDATE_TICKET
-            // answer ticket behind its 10-minute poll, and the GMTicketCategory.dbc list its "page a GM"
-            // rows are built from. Beside the binder because it is the same feed/drain shape, and after it
-            // because both want UiInput ordering and this reads better grouped.
             .add(UiGmTicketPlugin)
-            // Auto-follow's UI seam: the popup's Follow row + `FollowUnit`/`FollowByName` inbound, and
-            // the AUTOFOLLOW_BEGIN/END pair that drives the centre-screen status line outbound.
             .add(UiFollowPlugin)
-            // Instance/raid lockouts (decision 1748): the four CHAT_MSG_SYSTEM lines the client composes
-            // itself out of GlobalStrings, the last-dungeon/ownership bookkeeping behind
-            // `CanShowResetInstances()`, and the SELF menu's one send. Beside the binder family for the
-            // same feed/drain shape; it needs the map catalog, which is up long before Update runs.
             .add(UiInstancePlugin)
-            // Leaving (decision 0674): the game menu's Logout/Exit Game — the request, the server's
-            // 20-second answer narrated as the CAMP/QUIT countdown, and the process exit.
             .add(UiLogoutPlugin)
             .add(UiSocialPlugin)
-            // Guilds (decision 1257): the identity/roster mirror behind the four guild windows, the
-            // membership verbs, and the `ERR_GUILD_*` lines. Right after the social session, whose
-            // FriendsFrame it shares a window with and whose ignore list its sign-on lines consult.
+            // After the social session, whose FriendsFrame and ignore list it uses.
             .add(UiGuildPlugin)
-            // Founding a guild (decision 1672): the guild registrar and the charter window — the slice
-            // 1257 §2 left out. Right after the guild session, whose error channel its refusals ride and
-            // whose roster its success produces.
+            // After the guild session, whose error channel its refusals ride.
             .add(UiPetitionPlugin)
             .add(UiTooltipPlugin)
-            // The character-window feed (decision 0208): the combat-stats/inventory snapshots + events
-            // the paper doll reads, and the paper-doll booth's yaw mirror.
             .add(UiCharPlugin)
-            // The reputation-pane feed: the player's wire faction slots resolved against Faction.dbc into
-            // the pane's snapshot, plus the pane's three outbound verbs. Beside the character feed because
-            // it is the same window's other tab.
             .add(crate::ui_reputation::UiReputationPlugin)
-            // The inspect feed (decision 0631): another player's equipment off their PUBLIC visible-item
-            // entries, plus the "inspect" booth's unit + yaw. Right after the character feed it mirrors.
             .add(crate::ui_inspect::InspectUiPlugin)
-            // The honor feed (decision 1512): the PRIVATE honor descriptor block as the snapshot both
-            // Honor tabs read, plus the inspect-honor round trip. After the inspect feed because it
-            // resolves that feed's target to address its request at.
+            // After the inspect feed, whose target it asks about.
             .add(crate::ui_honor::UiHonorPlugin)
-            // The dressing-room feed (decision 1060): the window's try-on intents → the player's own look
-            // with the tried-on items substituted in, plus the "dressup" booth's yaw. Beside the inspect
-            // feed, whose shape it shares (intents in, a booth look out).
             .add(crate::ui_dressup::DressUpUiPlugin)
             .add(UiActionPlugin)
-            // The spell (2265 §A7's owner): the cast lifecycle's state — the pending cast, the queued
-            // strike, the running channel, the auto-repeat key, the chain outbox — its local cancel,
-            // the cooldown store, the talent modifier tables and the packet handlers (decisions 2324,
-            // 2328). After UiActionPlugin, whose feeds and cast ladder read the state through it.
+            // The cast lifecycle; after UiActionPlugin, whose feeds and cast ladder read it.
             .add(crate::spell::SpellPlugin)
-            // The aura feed (decisions 0255/0257): the player's insertion-ordered buff/debuff cache + the
-            // self-only durations, pushed as the data the `UnitAura` bindings read; fires UNIT_AURA and
-            // drains the right-click cancels. After UiActionPlugin (shares its `Spells` catalog).
+            // After UiActionPlugin, whose `Spells` catalog it shares.
             .add(UiAuraPlugin)
-            // The spellbook window feed (decision 0216 §8, slice 5): builds the book from
-            // PlayerActions.spells through the Spell.dbc/SkillLine.dbc join and drives
-            // SpellBookFrame.xml's snapshot + cast-drain seam — the spell SOURCE for the cursor payload
-            // arc (bags/doll/bars/book). After UiActionPlugin (shares its `Spells` resource + the cast
-            // tail `send_spell_cast`).
+            // After UiActionPlugin, whose `Spells` and `send_spell_cast` it shares.
             .add(UiSpellbookPlugin)
-            // The macro system (decision 0983): the icon chooser's catalog, the `benilla-config/macros/`
-            // files, `UPDATE_MACROS`, and the macro→bound-spell table the action bar's MACRO slots
-            // resolve their cooldown/usability through. After UiSpellbookPlugin — the bound spell is
-            // resolved against the book that feed pushes, by the same law `CastSpellByName` uses.
+            // After UiSpellbookPlugin: a macro's spell resolves against the book it pushes.
             .add(crate::ui_macro::UiMacroPlugin)
-            // The talent window feed (decision 0304): builds the class pages from Talent.dbc × the
-            // known-spell set + PLAYER_CHARACTER_POINTS, drives TalentFrame.xml through the engine's
-            // talent seam, and drains learn clicks into CMSG_LEARN_TALENT. After UiActionPlugin
-            // (shares its `Spells` catalog), beside the spellbook it mirrors.
+            // After UiActionPlugin, whose `Spells` catalog it shares.
             .add(UiTalentPlugin)
-            // Unlearning them again (decision 1580): the class trainer's respec question, its
-            // CONFIRM_TALENT_WIPE dialog, and the answer that is the only packet in the flow which
-            // unlearns anything. Beside UiTalentPlugin for the subject, but it is UiBinderPlugin's twin
-            // in shape — a guid-carrying question over an already-closed gossip menu.
             .add(UiTalentWipePlugin)
-            // The stance/shapeshift bar feed: builds the form list from PlayerActions.spells per
-            // the reference's admission and order (`0x4b25b0`, `0x4b2bb0`), drives the stock
-            // shapeshift bar through the engine's shapeshift seam, and drains its clicks
-            // (cancel-if-active else cast). After UiActionPlugin (shares `Spells`) and SpellPlugin
-            // (the `usable` walk, the cast tail).
+            // The form list by the reference's admission and order (`0x4b25b0`, `0x4b2bb0`); after
+            // UiActionPlugin (`Spells`) and SpellPlugin (the cast tail).
             .add(UiShapeshiftPlugin)
-            // The pet action bar (decision 0982) — the stance bar's mirror image: server-authoritative,
-            // so this renders the ten packed words the last `SMSG_PET_SPELLS` delivered and sends
-            // intents back. After UiActionPlugin (shares `Spells` and the cooldown triple's clock).
+            // After UiActionPlugin, whose `Spells` and cooldown clock it shares.
             .add(UiPetPlugin)
             .add(ChrClassesPlugin)
             .add(UiPetBookPlugin)
-            // The pet's paper-doll stat block (happiness/loyalty/XP/training points). Its own plugin
-            // because it runs off descriptor fields and two DBC tables rather than off `SMSG_PET_SPELLS`.
             .add(UiPetStatsPlugin)
-            // The pet paper doll's SHARED surface (decision 1057) — the combat-stats snapshot under the
-            // `"pet"` token and the page's model booth. Apart from the block above because these values
-            // pass through the character sheet's own bindings and events, with no hunter gate.
             .add(UiPetDollPlugin)
-            // The connection-telemetry feed: the averaged ping RTT behind `GetNetStats()`, which the main
-            // bar's performance meter polls (decision 0658).
             .add(UiNetPlugin)
             .add(UiCastPlugin)
-            // The breath / fatigue bars (decision 0874): server-authoritative mirror timers off the
-            // wire into the transcribed MirrorTimer1/2/3 frames. Beside the cast bar it shares its
-            // feed→drain shape (and its art: the same UI-CastingBar-Border chrome).
             .add(UiMirrorPlugin)
-            // Floating combat text (decision 0137 phase 2): the WORLDTEXTSTRING law — world-anchored
-            // damage numbers/outcome words projected into the UI quad pass each frame.
             .add(crate::combat_text::CombatTextPlugin)
-            // Overhead unit names (nameplates): world-billboard name text over players + NPCs.
             .add(crate::nameplates::NameplatesPlugin)
-            // Raid-target marker billboards (0434 §6): the mark icon over marked units, one line-pitch
-            // above the overhead name; plated units show the plate's raid child instead.
             .add(crate::raid_marks::RaidMarksPlugin)
-            // V-key nameplates (0167): the toggled health-bar plates, a 2-D overlay replacing the
-            // overhead name on plated units.
             .add(crate::vplates::VPlatesPlugin)
-            // Chat speech bubbles (0598): the over-the-head bubble a say/yell/party line spawns, the
-            // plates' 2-D overlay sibling — mutually exclusive with both the plate and the name.
             .add(crate::chat_bubble::ChatBubblePlugin)
-            // TOGGLEUI (`CTRL-Z`/`Cmd-Z`): the whole quad layer goes dark — frames, minimap, plates,
-            // bubbles, combat text — leaving the world and the cursor.
-            .add(crate::ui_hide::UiHidePlugin)
             .add(UiItemsPlugin)
-            // The gossip window (decision 0081): fills from the net drain's GossipState and drives
-            // GossipFrame.xml over the Era gossip API.
             .add(UiGossipPlugin)
-            // The merchant window (decision 0081 phase 4): fills from the net drain's MerchantOpen and
-            // drives MerchantFrame.xml over the Era vendor API + the money display.
             .add(UiMerchantPlugin)
-            // The bank window (decision 0604): the SHOW_BANK session (BankOpen) + the purchase row;
-            // the vault's slots ride the container feed as bags −1/5..=10.
-            // The auction house (decision 1511) — an NPC-session window like the bank beside it, but the
-            // only `doublewide` panel in the UI, so it displaces both the left and center seats.
             .add(UiAuctionPlugin)
             .add(UiBankPlugin)
-            // The mail window (decision 0544 P1/P2): the client-side mailbox session (MailOpen), the
-            // NPC-session range guard, and MailFrame.xml over the Era mail API (inbox, open-letter,
-            // send tab).
             .add(UiMailPlugin)
-            // Player-to-player trade (TradeFrame.xml): the two-sided trade window, driven server-side over
-            // the P0 wire; the partner's portrait rides the shared "npc" booth (decision 0592 P1).
             .add(UiTradePlugin)
-            // The item-text reader (ItemTextFrame.xml): right-clicked bag letters (mail-made permanent
-            // copies) read in the reference reader window over the shared ask-once item-text cache.
             .add(UiItemTextPlugin)
             .add(UiSavedPlugin)
             .add(NamePersistPlugin)
             .add(UiStablePlugin)
             .add(TabardUiPlugin)
             .add(UiTrainerPlugin)
-            // The taxi map (decision 0484 phases 1-2): the SMSG_SHOWTAXINODES-fed TaxiState resource, the
-            // NPC-session range guard, and the TaxiFrame.xml window feed/drain (catalogs, node
-            // projection/route computation, the activate send, the UnitOnTaxi ride flag).
             .add(UiTaxiPlugin)
             .add(UiTradeSkillPlugin)
             .add(UiCraftPlugin)
-            // The loot window (decision 0084): fills from the net drain's LootState and drives
-            // LootFrame.xml over the Era loot API (coin + rows, paging).
             .add(UiLootPlugin)
             .add(UiLootRollPlugin)
-            // The questgiver window (decision 0088): fills from the net drain's QuestGiver and drives
-            // the stock questgiver window's four sub-panels over the Era quest API (1944).
             .add(UiQuestPlugin)
-            // The quest-log window (decision 0088's deferred second slice): fills from the self player's
-            // PLAYER_QUEST_LOG descriptor slots + the SMSG_QUEST_QUERY_RESPONSE template cache, and drives
-            // the stock quest log over the Era quest-log API (1944).
             .add(UiQuestLogPlugin)
-            // The party quest-share (decision 1733): the verdict lines on a quest we pushed, and the
-            // escort-quest confirm. Neither is bound to a window, so it is its own plugin rather than a
-            // lodger in either quest plugin above.
             .add(QuestSharePlugin)
             .add(UiChatPlugin)
-            // The layout cache: the geometry of every window the player has dragged or resized, restored
-            // at world entry and written back a quiet second after the last drag
-            // (`benilla-config/layout/<realm>-<character>.txt`). The consumer of the engine's userPlaced
-            // bit, which nothing read before it.
             .add(UiLayoutPlugin)
-            // Print screen (decision 1487): the SCREENSHOT binding's engine half — one PNG per
-            // `Screenshot()` call into `benilla-config/Screenshots/` (never the install — decision 1486),
-            // answered to the UI as SCREENSHOT_SUCCEEDED/FAILED so the status text can never be in the
-            // frame it announces.
             .add(crate::screenshot::ScreenshotPlugin)
     }
 }
@@ -464,12 +263,9 @@ pub(crate) mod schedule_tests {
     use bevy::ecs::schedule::graph::Direction;
     use bevy::ecs::schedule::{LogLevel, NodeId, ScheduleBuildSettings, ScheduleLabel, SystemKey};
 
-    /// **The whole client, built headless.** The tuned `DefaultPlugins` with no window, no
-    /// winit, no logger and no GPU (`backends: None` — bevy then creates no render app), then
-    /// the engine, then the game. Every plugin's `build` and `finish` runs; no schedule does.
-    /// What this yields is the schedule GRAPH — which is fixed once the plugins have built
-    /// (the census probe's own argument, `capture::probes::sched_census`) — so a question
-    /// about ordering can be asked here, in a test, instead of on a login.
+    /// The whole client, built headless: the tuned `DefaultPlugins` with no window, winit, logger
+    /// or GPU (`backends: None`, so no render app), then the engine, then the game. Every
+    /// plugin's `build` and `finish` runs and no schedule does, which fixes the schedule graph.
     pub(crate) fn headless_client() -> App {
         let mut app = App::new();
         app.add_plugins(
@@ -509,26 +305,24 @@ pub(crate) mod schedule_tests {
         pub conditions: Vec<String>,
     }
 
-    /// One schedule, read two ways: the graph before it builds (names, sets, conditions — all
-    /// of which move into the executable when it does), and the conflict list after (which
-    /// only exists once it has).
+    /// One schedule, read two ways: the graph before it builds (names, sets, conditions move
+    /// into the executable when it does), and the conflict list after.
     pub(crate) struct Census {
         pub systems: HashMap<SystemKey, SystemInfo>,
         /// Pairs of systems with conflicting access and no path between them, each with what
         /// they fight over.
         pub conflicts: Vec<(SystemKey, SystemKey, Vec<ComponentId>)>,
         /// Everything any pair fights over, by name (a placeholder in a build without type
-        /// names — [`type_names_available`]).
+        /// names, [`type_names_available`]).
         pub components: HashMap<ComponentId, String>,
-        /// The explained classes, resolved against this world (decision 2287).
+        /// The explained classes, resolved against this world.
         pub classes: Classes,
         /// Every declared `a` runs before `b`, at the system level.
         pub dependencies: Vec<(SystemKey, SystemKey)>,
         /// The systems that must run on the main thread (the VM's, the audio layer's).
         pub non_send: Vec<SystemKey>,
-        /// The systems whose declared access includes the Lua VM — read off each system's
-        /// own access set, not off the conflicts it happens to have (a holder whose every VM
-        /// pair is declared would not show there).
+        /// The systems whose declared access includes the Lua VM, read off each system's own
+        /// access set: a holder whose every VM pair is declared shows in no conflict.
         pub holds_vm: HashSet<SystemKey>,
     }
 
@@ -545,31 +339,21 @@ pub(crate) mod schedule_tests {
         }
     }
 
-    /// Which graph a census reads (decision 2337).
-    ///
-    /// Bevy's build inserts an `ApplyDeferred` barrier between a system with commands and its
-    /// dependents, and it **shares one barrier per "distance"** (the number of barriers between
-    /// a node and the schedule's start — `auto_insert_apply_deferred.rs`, `get_sync_point`).
-    /// Two systems that share a barrier are ordered *through* it, so a pair the graph never
-    /// declared reads as ordered — and one edge added anywhere upstream re-homes whole groups
-    /// onto a different barrier and moves pairs among systems the edit never touched (2333's
-    /// five-out-six-in). Measured on this tree the day it was named: 2,888 actionable pairs
-    /// with the barriers, 5,063 without — the barriers were hiding 43% of the undeclared
-    /// orders behind their accidental placement.
+    /// Which graph a census reads. Bevy's build shares one `ApplyDeferred` barrier per distance
+    /// from the schedule's start (`auto_insert_apply_deferred.rs`, `get_sync_point`), so two
+    /// systems sharing a barrier read as ordered through it, and one upstream edge can re-home
+    /// whole groups and move unrelated pairs.
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum SyncPoints {
-        /// The schedule as it actually runs, barriers included — what an executor census
-        /// wants, since a barrier really is a wave boundary.
+        /// The schedule as it runs, barriers included: a barrier is a real wave boundary.
         Built,
-        /// The **declared** graph only: no auto-inserted barriers, so "no path between two
-        /// systems" means exactly "nobody declared an order", and the count is a function of
-        /// the edges alone. What a ratchet on undeclared orders must read.
+        /// The declared graph only, no barriers: "no path" means "nobody declared an order".
+        /// What a ratchet on undeclared orders must read.
         Declared,
     }
 
-    /// Take the census of one schedule. Initializing it runs every system's param setup, and
-    /// at least one of those inserts `Schedules` itself, so this goes through bevy's own
-    /// take-out-initialize-put-back rather than a `resource_scope` on that resource.
+    /// Take the census of one schedule. Initializing it can insert `Schedules` itself, so this
+    /// goes through bevy's `schedule_scope`, not a `resource_scope` on that resource.
     pub(crate) fn census(app: &mut App, label: impl ScheduleLabel, sync: SyncPoints) -> Census {
         let label = label.intern();
         app.world_mut().schedule_scope(label, |world, schedule| {
@@ -578,9 +362,8 @@ pub(crate) mod schedule_tests {
                 auto_insert_apply_deferred: sync == SyncPoints::Built,
                 ..default()
             });
-            // The systems' access is filled by `initialize`, which the build below would run
-            // anyway (bevy drains one list of uninitialized systems, once). Done first, so pass
-            // 1 can read it while the graph still holds the systems.
+            // `initialize` fills the systems' access (the build would run it anyway); done
+            // first so pass 1 can read it while the graph still holds the systems.
             schedule.graph_mut().systems.initialize(world);
             let vm = world
                 .components()
@@ -641,9 +424,8 @@ pub(crate) mod schedule_tests {
                     },
                 );
             }
-            // Every declared order, at the system level: a `.before`/`.after`/`chain` edge
-            // between sets is an edge between every member of one and every member of the
-            // other.
+            // Every declared order at the system level: an edge between sets is an edge between
+            // every member of one and every member of the other.
             let members = |node: NodeId| -> Vec<SystemKey> {
                 let mut out = Vec::new();
                 let mut stack = vec![node];
@@ -678,8 +460,8 @@ pub(crate) mod schedule_tests {
                 if !system.is_send() {
                     non_send.push(key);
                 }
-                // The build inserts what nobody added: the `ApplyDeferred` sync points between a
-                // system with commands and its dependents. Name them so a census can count them.
+                // The build inserts the `ApplyDeferred` sync points; name them so a census can
+                // count them.
                 systems.entry(key).or_insert_with(|| SystemInfo {
                     name: system.name().to_string(),
                     sets: Vec::new(),
@@ -718,64 +500,34 @@ pub(crate) mod schedule_tests {
         })
     }
 
-    /// **Does this build carry type names?** bevy only does under its `debug` feature, which
-    /// rides with ours (`benilla-world`'s `dev`, decision 1451); a player build names every
-    /// system and resource `<Enable the debug feature …>`. Probed off the census itself rather
-    /// than off a feature flag — a `cfg(feature = "dev")` outside `run_mode` is a seam leak (1179),
-    /// and what these tests need is the capability, not the plane. The name-dependent tests
-    /// announce the skip and return; the name-free ratchets run either way.
+    /// Does this build carry type names? Bevy has them only under its `debug` feature, which
+    /// rides with `benilla-world`'s `dev`. Probed off the census, not a `cfg`, which belongs in
+    /// `run_mode` alone; name-dependent tests skip without them.
     fn type_names_available(c: &Census) -> bool {
         c.systems.values().any(|s| s.name.contains("benilla_app::"))
     }
 
-    /// **The explained classes** (decision 2287) — what an undeclared order may be about
-    /// without anyone declaring it, argued once here instead of by every session that adds a
-    /// system. On 2287's eve three sessions raised the two constants this table replaced,
-    /// each with a paragraph, each through a rebase conflict on the same lines, none declaring
-    /// an order (2281, 2282, 2283) — because for most of what those counts held there was
-    /// nothing to declare:
-    ///
-    /// - **A non-`Send` owner** — the Lua VM, the audio layer's handles. Their systems run on
-    ///   the main thread one at a time under any executor, so no order among them is a race.
-    ///   *Which feed fires its Lua events first* is a real question, answered by the `UiFeed`
-    ///   phase (decision 2304): every push after the drain and before the tick, and among the
-    ///   pushes an order declared where it matters (the chat cascade, the cooldown events),
-    ///   registration order otherwise. Derived, not listed: every registration that is not
-    ///   `Send + Sync`.
-    /// - **A pure cache** — a read is a write because a miss records itself: the ask-once
-    ///   caches mark the key pending and send one query (`NameCache`, the GameObject
-    ///   templates, the page texts), the load-once caches build the entry (`WorldAssets`,
-    ///   `Creatures`' display models). Two misses for one key commute — one query, or one
-    ///   build, whichever runs first — and the answer lands in the net drain, in packet order,
-    ///   inside `WorldStage::Net`. *Pure* is the condition: a resource that is a cache **and**
-    ///   a window's state (`Items`, `MailOpen`, `GuildState`, `QuestLog`, `PetitionState`) is
-    ///   not here, because its other writers do not commute; 2265 §A4 is what lets those
-    ///   split (decision 2288).
-    /// - **An append-only sink** — `ChatLog`, `MessageSounds`, `UiErrorKeys`, `UiErrorTexts`:
-    ///   writers commute, and a drain's order against a writer is one frame of latency, never
-    ///   a loss. (2283's ten pairs were all this shape: a new verb drain against its siblings
-    ///   over the chat and error sinks.)
-    /// - **Not an exclusive edge.** A pair bevy reports with NO component list has an exclusive
-    ///   system on one side (`bevy_ecs` `node.rs:625`: it reports every unordered pair with an
-    ///   exclusive system and never reads its access). 2304 explained that class as the
-    ///   build's barriers; the ratchet reads the declared graph since 2337, which has none, so
-    ///   what it held was only the hand-written exclusive systems — the net drain, whose 143
-    ///   unordered partners read this frame's packets or the last frame's by coin, and
-    ///   `finish_colliders`. Those are undeclared orders like any other: actionable (2343).
-    /// - **A random stream** — `SoundKits`, which every sound system holds to play a kit: a
-    ///   decode cache, a per-kit last-variation memory and one xorshift stream. Any
-    ///   interleaving of draws is a valid draw, and that is the reference's own contract for
-    ///   its single stream, consumed in whatever order its callers happen to run.
-    ///
-    /// A pair is **explained** when everything it fights over is in one of the four, and
-    /// **actionable** otherwise; only the actionable count is ratcheted. Adding a type here is
-    /// the act raising the ceiling used to be — a claim, with its reason, made in review — and
-    /// it is a claim about *every* writer of that resource, which is why the pure caches are
-    /// pure. Resolved by `TypeId`, so the ratchet runs in the player build, which carries no
-    /// names (1451).
     /// One row of the class table: the type's name for the message, and its `TypeId`.
     type ClassRow = (&'static str, fn() -> TypeId);
 
+    /// The explained classes: what an undeclared order may be about with nothing to declare.
+    ///
+    /// - A non-`Send` owner (the Lua VM, the audio handles): its systems run on the main thread
+    ///   one at a time, so no order among them is a race; which feed fires first is the `UiFeed`
+    ///   phase's job. Derived: every registration that is not `Send + Sync`.
+    /// - A pure cache, where a miss records itself (`NameCache`, the GameObject templates, the
+    ///   page texts, `WorldAssets`, `Creatures`' display models): two misses for one key commute.
+    ///   A cache that is also a window's state is not pure, and not here.
+    /// - An append-only sink (`ChatLog`, `MessageSounds`, `UiErrorKeys`, `UiErrorTexts`):
+    ///   writers commute, and a drain's order against a writer is one frame of latency.
+    /// - A random stream (`SoundKits`, `AnimRng`): any interleaving of draws is a valid draw,
+    ///   the reference's contract for its single stream.
+    ///
+    /// Not a class: a pair bevy reports with no component list has an exclusive system on one
+    /// side (`bevy_ecs` `node.rs:625` never reads its access), and is actionable. A pair is
+    /// explained when everything it fights over is in a class; only actionable pairs are
+    /// ratcheted. A row is a claim about every writer of that type, made in review with its
+    /// reason. Resolved by `TypeId`, so it works in the player build, which carries no names.
     pub(crate) struct Classes {
         /// The VM's own id, for the executor census.
         pub vm: Option<ComponentId>,
@@ -804,25 +556,16 @@ pub(crate) mod schedule_tests {
         ];
         const STREAMS: &[ClassRow] = &[
             ("SoundKits", TypeId::of::<crate::sound::SoundKits>),
-            // The client's ONE `rand()` stream (decision 2301). Four lanes draw from it — the
-            // placed-doodad host, the creature driver, the GameObject arm and the portrait booth —
-            // and in the reference they draw from one TLS cell in whatever order the frame runs
-            // them. The interleaving IS the mechanism: a shared sequence is what de-syncs a stand
-            // of identical props, and no consumer can observe which draw it got, only that it got
-            // a fresh one. So an undeclared order here is not a missing `.after`; declaring one
-            // would be inventing a determinism the reference does not have.
-            //
-            // It reduces the count by **nothing** today, and that is not an oversight: the three
-            // Update-side lanes already conflict on `Query<&mut AnimationPlayer>`, which no class
-            // explains, so every pair this row would cover is counted for that instead. It is the
-            // standing claim about the resource — what keeps these pairs from surfacing the day
-            // that other conflict is declared — not a saving.
+            // The client's one `rand()` stream: the doodad host, the creature driver, the
+            // GameObject arm and the portrait booth draw from it in frame order, as the
+            // reference's lanes draw from one TLS cell; declaring an order would invent a
+            // determinism the reference lacks. It removes no pair today: those lanes already
+            // conflict on `Query<&mut AnimationPlayer>`.
             ("AnimRng", TypeId::of::<benilla_assets::AnimRng>),
         ];
 
-        /// Resolve the table against a world whose schedules have initialized (every param
-        /// has registered its resource by then). A row that resolves to nothing is a stale
-        /// row, and the test says which.
+        /// Resolve the table against a world whose schedules have initialized; a row that
+        /// resolves to nothing is stale, and the panic names it.
         fn read(world: &World) -> Self {
             let comps = world.components();
             let resolve = |rows: &[ClassRow]| -> HashSet<ComponentId> {
@@ -854,10 +597,9 @@ pub(crate) mod schedule_tests {
                 || self.streams.contains(&id)
         }
 
-        /// Which class explains this pair — `None` if it is actionable.
+        /// Which class explains this pair; `None` if it is actionable.
         pub fn class_of(&self, what: &[ComponentId]) -> Option<&'static str> {
-            // An exclusive system on one side: bevy cannot see its access, so nothing here can
-            // argue the pair away (see the doc above: not an exclusive edge).
+            // An exclusive system on one side: bevy cannot see its access, so no class applies.
             if what.is_empty() {
                 return None;
             }
@@ -894,135 +636,62 @@ pub(crate) mod schedule_tests {
         assert!(app.world().contains_resource::<Schedules>());
     }
 
-    /// `PostUpdate`, 181 systems: `GlobalTransform` and the particle `EffectQuads` are most of it.
-    /// **371 (decision 2337)** — the declared-graph count, re-measured beside `Update`'s when
-    /// the census stopped reading bevy's barriers as orders (see the ledger below).
+    /// `PostUpdate`'s undeclared-order pairs on the declared graph; `GlobalTransform` and the
+    /// particle `EffectQuads` are most of it.
     const POST_UPDATE_CEILING: usize = 371;
     const POST_UPDATE_SLACK: usize = 20;
-    /// The **actionable** pairs in `Update` — two systems with conflicting access and no
-    /// declared order, where [`Classes`] explains none of what they share, so the executor
-    /// runs them in whatever order the graph around them happens to produce (B354, 2220). Same
-    /// shape as `world_api_wall.rs`: the count may not rise past the ceiling, and the ceiling
-    /// follows the count down. `WOW_AMBIGUITY_DUMP=1` prints every actionable pair with what
-    /// it fights over.
+    /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
+    /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
+    /// not rise past the ceiling, and the ceiling follows the count down; read on the declared
+    /// graph ([`SyncPoints::Declared`]). `WOW_AMBIGUITY_DUMP=1` prints every pair.
     ///
-    /// **Measured 2026-09-17 (decision 2287), 662 systems:** 16,548 pairs in all, 12,849 of
-    /// them explained — 10,703 on the VM alone, 431 on the other non-`Send` owners, 556 on
-    /// the pure caches, 87 on the sinks, 41 on the stream, 1,031 on a mix of those — and
-    /// 3,699 actionable. The largest part of those is `Transform` on disjoint lanes (716 pairs
-    /// alone): populations that never intersect, which the filter algebra cannot see. A lane
-    /// is not a class — the checker cannot tell a disjoint lane from two writers of the same
-    /// entity — so they stay here, and each new one is a claim made at the registration with
-    /// its reason:
+    /// The largest part is `Transform` on disjoint lanes, populations that never intersect,
+    /// which no class can express. Known pairs accepted with a reason:
+    /// - the ranged prop's two `AnimationPlayer` writers against the booth's and the quest
+    ///   markers';
+    /// - the fx attaches and `entities::update_display_models`/`attach_entity_visuals` against
+    ///   the mat-anim tick over `MatAnimTable`/`UvAnimMaterials`: attach writes the rows a tick
+    ///   would, off the same clock;
+    /// - the area-spirit-healer poll over `Transform` and `NetEntity`: it is level-triggered, so a
+    ///   unit seen a frame early or late is decided again next frame;
+    /// - `ui_models::forget_dead_vm_tiles` against `portrait::glue_booth::sync_glue_scene` over
+    ///   `MatAnimTable`, a slot allocator whose owners touch disjoint slots;
+    /// - the cursor classifier against `world_focus`'s focus publish and settle release over
+    ///   `Player`: it reads `control_lost`, and they write only `settling` and `world_stale`;
+    /// - `ui_quest::lines::feed_quest_lines` against `ui_items::feed_item_stats` and
+    ///   `ui_tooltip::feed_spell_tooltips` over `Items` and the VM: it only reads templates, which
+    ///   those two do not write, and a chat line commutes with their pushes;
+    /// - `script_calls::apply_script_calls`, in the target chain, against the `.after(UiInput)`
+    ///   drains of gestures that are not such script calls (the ATTACKTARGET binding, the
+    ///   item-pick commit, the GameObject openers, the chat, party, duel, trade and death drains)
+    ///   over the `CastLadder`, the selection and the unit-token resolver: the class
+    ///   `drop_item_on_unit` and the world click's legs already carry, as none of those drains
+    ///   orders against the target chain. Such a gesture and a script call in one frame take
+    ///   either order;
+    /// - the range compare's readers (`ui_action::state::feed_action_state`,
+    ///   `ui_tooltip::spell_feed::feed_spell_tooltips`, `spell::targeting::feed_targeting_to_vm`,
+    ///   the targeting cursor and the object-click commit) against the writers of `Player` and
+    ///   `RemoteMotion` (`camera_saved::load_camera_pose`, `world_focus`'s focus publish and settle
+    ///   release, `transport::compose_riders` and `ground_deck_riders`): the readers take the
+    ///   movement flags of the caster (`Player::move_flags`) and its target
+    ///   (`RemoteMotion::flags`), and those writers touch `login_pitch`, the settle fields and a
+    ///   rider's pose, never the flags;
+    /// - Click to Move's steer and arrival (`player::approach::steer_approach`,
+    ///   `target::click::act_on_arrival`) against what `steer_follow` and `act_on_right_click`
+    ///   already pair with: the steer is chained after follow's and writes the same `Player`
+    ///   fields, the arrival runs the click's dispatchers, and their `Transform` reads are the
+    ///   disjoint-lane kind. The dispatchers also carry the walk's start (`Player`,
+    ///   `FollowState`, `Approach`, the stand request), which only a click, an arrival or a
+    ///   crate's interaction writes;
+    /// - a crate's interaction (`target::click::act_on_interact`) against what
+    ///   `act_on_right_click` and the cursor classifier already pair with: it runs the click's
+    ///   dispatchers over the classifier's reading of its object, and its attack leg
+    ///   selects as the click does, so it writes `Selection` where the click's drain does.
     ///
-    /// - **2281:** the ranged prop's two `AnimationPlayer` writers against the booth's and the
-    ///   quest markers' (four lanes; the held weapon, a booth model, a marker).
-    /// - **2282:** the three fx attaches against the mat-anim tick and its probe, over
-    ///   `MatAnimTable`/`UvAnimMaterials` — immaterial by construction, because attach writes
-    ///   the rows a tick would, off the same clock.
-    /// - **2295:** the same two readers against `entities::update_display_models` and
-    ///   `entities::attach::attach_entity_visuals`, over the same two resources, now that the
-    ///   entity lane registers its own texture transform. **+4**, measured pair by pair on the
-    ///   rebased tree rather than assumed additive — both writers already held
-    ///   `Assets<WowModelMaterial>`, so most of the systems they newly meet were already
-    ///   ambiguous against them for another reason, and `redress_player_looks` takes the
-    ///   identical three resources and adds no pair at all. Immaterial for 2282's reason plus
-    ///   one: a display is built ONCE, the frame its asset lands, and a row left unwritten for
-    ///   a frame reads as the material's own built seed — the batch's authored `t = 0`, not a
-    ///   wrong value — because the same call seeds `sun_scale.zw` at the loop's opening.
-    ///
-    /// **3,280 (decision 2288)** — the one query cache: a read that asks marks its miss through
-    /// `&self`, so a feed that only resolves a name or a template holds the owner shared, and
-    /// its pairs over `Items` (725 → 104, the largest non-class resource in the count) are gone;
-    /// the pairs over the pure caches moved into the VM-only class, where the same systems still
-    /// meet over the VM alone.
-    ///
-    /// **3,288 (decision 2291, corrected)** — the area-spirit-healer poll. Its **four** remaining
-    /// pairs, named one by one because the first version of this paragraph named the wrong ones:
-    /// `portrait::booth::face_booth_billboards`, `quest_markers::bake_seat_scale` and
-    /// `entities::live_display::tick_scale_ease` over `Transform`, and
-    /// `entities::live_display::refresh_live_display` over **`NetEntity`** — a row read, not a
-    /// `Transform` pair at all. All four are the poll seeing a unit one mover early or late, which
-    /// moves a 20 yd acquire decision by at most one frame of walking; the poll is
-    /// **level**-triggered, re-deriving the whole cache every frame, so a boundary case decided
-    /// early is decided again next frame. The target scanner carries the same class for the same
-    /// reason.
-    ///
-    /// **The correction is the part worth keeping.** This paragraph first claimed "+6, all
-    /// `&Transform`", and that the poll's "one write-write pair … is *declared*". Both were wrong,
-    /// and the second one hid a real defect. There were **two** undeclared write-write pairs, and
-    /// the system on the other side of both was `drain_latch_verbs` — the one that turns
-    /// `AcceptAreaSpiritHeal()` into `CMSG_AREA_SPIRIT_HEALER_QUEUE`. It met the poll *and*
-    /// `target::click::act_on_right_click` over `AreaSpiritHealer`, because `.after(UiInput)`
-    /// orders it against neither (`UiInput` precedes `WorldStage::Input`; `TargetUpdate` follows
-    /// it). The drain takes its presses unconditionally and only then reads the healer, so that
-    /// undeclared order decided whether a ghost's Accept became a packet or vanished with no
-    /// message. Declaring `drain_latch_verbs.before(TargetUpdate)` — the reference's own order, the
-    /// dialog's Lua handler running in the UI dispatch ahead of `CGWorldFrame`'s poll and pick —
-    /// removed exactly those two.
-    ///
-    /// **Re-measured at 3,289 on the rebased tree**, not carried across as arithmetic. This branch
-    /// measured 3,290 → 3,288 on its own base; a neighbour landed 3,291 first, and the resolution
-    /// is the number the dump prints on the merged tree — which happens to agree with 3,291 − 2
-    /// this time, and is right for the reason that it was read rather than that it adds up.
-    ///
-    /// A ceiling raised with the wrong reason is a ratchet that has stopped meaning anything. The
-    /// lesson this one cost: **read the dump, do not reason about what the new pairs must be.**
-    ///
-    /// **3,291 (decision 2300)** — the glue create/main-menu scene's material lane: exactly **one**
-    /// new pair, `ui_models::forget_dead_vm_tiles` against `portrait::glue_booth::sync_glue_scene`
-    /// over `MatAnimTable`, measured pair by pair on the tree that lands rather than assumed
-    /// additive (the scene builder's other three new resources add none — it already held
-    /// `RigPalettes` and `Assets<WowModelMaterial>`, so the systems they newly meet were already
-    /// ambiguous against it). Immaterial by construction, and narrowly: `MatAnimTable` is a slot
-    /// **allocator**, one owner per slot. A tile reaping its dead rows and the scene claiming
-    /// fresh ones touch disjoint slots and neither reads the other's; the only thing the order
-    /// decides is *which* free slot the scene is handed, and a slot number is not observable —
-    /// the row behind it is, and it is written by whoever owns it. A scene is also built **once**,
-    /// the frame its model asset lands, against a reaper that fires only when a tile dies.
-    ///
-    /// **2,886 (decision 2330)** — read off the dump on the tree that lands, after the
-    /// `modalNextSpell` outbox's drain retired: `drain_chain_casts` held the whole cast ladder
-    /// (`CastLadder`'s fourteen parameters and `CastTargeting`'s ten) with no declared order
-    /// against anything but `UiInput`, and the cast reply's handler now casts the chain itself,
-    /// as a one-shot outside the schedule. The three targeting systems the same record moved
-    /// from `UiActionPlugin` to `SpellPlugin` kept their orders and their sets.
-    ///
-    /// **2,888 (decision 2333)** — the trainer feed became the state re-evaluator's host and
-    /// reads the pet bar, the player's descriptor and its field edges. Read off the dump on the
-    /// tree that lands: undeclared, the feed met six systems; `.after(UnitFeed)` (the shape the
-    /// demo unit feed already takes) declares five of them, and the one it keeps —
-    /// `entities::evict_display_caches` — is the pair every feed that reads `ItemDisplays` has
-    /// (42 on this tree). So the feed's own count went 6 → 1, and the total went 2,887 → 2,888:
-    /// diffing the two dumps, the edge **re-partitioned** the census — five pairs among unrelated
-    /// systems (`cinematic::*` against `ui_logout::drain_logout`, `arm_loot_fx` against the
-    /// party/social drains, …) left the actionable list and six others (`resolve_equipment`
-    /// against `drain_guild`, `emit_minimap` against `drain_quest`, …) entered it, none of them
-    /// touching anything this record touched. That is the instrument moving under an edge, not
-    /// a new undeclared order; 2333 hands it to this ratchet's owner (2287) as a finding. The
-    /// number is the dump's, not a sum.
-    ///
-    /// **5,063 (decision 2337)** — not a raise: a re-measurement. Until here the census read
-    /// the *built* schedule, barriers included, and bevy shares one `ApplyDeferred` barrier per
-    /// distance from the schedule's start — so 2,175 pairs (43%) were "ordered" only through a
-    /// barrier the build happened to place between them, and moved whenever an edge anywhere
-    /// upstream re-homed a group onto another barrier: that is 2333's five-out-six-in, and it is
-    /// the one build step that can make a pair *enter* when an edge is added. The ratchet reads
-    /// the declared graph now ([`SyncPoints::Declared`]); this is the same tree's count with the
-    /// barriers gone, checked by removing one declared edge and watching exactly its five pairs
-    /// return and nothing else move. The dump prints each pair in canonical order since the same
-    /// record, so two dumps diff by text. The number is the dump's, not a sum.
-    ///
-    /// Raising this ceiling is a claim that a new undeclared order is acceptable; make it with
-    /// the reason, or declare the order instead (`.after`, a set, a `chain`). If the pair is
-    /// about a resource that commutes by construction, the claim belongs in [`Classes`].
-    /// **5,608 (decision 2343)** — not a raise: a re-measurement. The 556 pairs with an
-    /// exclusive system on one side were read as "explained" by a class argued for the build's
-    /// barriers, which the declared graph (2337) no longer has; 413 are `finish_colliders`', 143
-    /// the net drain's. Same tree, the class dropped, nothing else moved: 5,052 + 556.
-    /// **5,554 (decision 2345)** — lowered: the TAB scan stopped reading `Visibility` (the draw
-    /// election's verdict), which ended its pairs with every `Visibility` writer.
-    const UPDATE_ACTIONABLE_CEILING: usize = 5_554;
+    /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
+    /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
+    /// that commutes by construction belongs in [`Classes`].
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_980;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1033,7 +702,7 @@ pub(crate) mod schedule_tests {
              undeclared order against something it shares state with — declare the order \
              (`.after`, a set, a `chain`), or raise the ceiling here with the reason. \
              `WOW_AMBIGUITY_DUMP=1` on this test lists the pairs; a resource that commutes by \
-             construction belongs in `Classes` instead (decisions 2279, 2287)."
+             construction belongs in `Classes` instead."
         );
         assert!(
             n + slack >= ceiling,
@@ -1047,8 +716,7 @@ pub(crate) mod schedule_tests {
     #[test]
     fn the_schedules_have_no_more_undeclared_orders_than_the_ceilings_say() {
         let mut app = headless_client();
-        // The declared graph, not the built one: a barrier bevy placed is not an order anyone
-        // declared, and it moves under unrelated edits (2337; see [`SyncPoints`]).
+        // The declared graph: a barrier bevy placed is not a declared order (`SyncPoints`).
         let update = census(&mut app, Update, SyncPoints::Declared);
         let post = census(&mut app, PostUpdate, SyncPoints::Declared);
         let mut explained: BTreeMap<&str, usize> = BTreeMap::new();
@@ -1079,8 +747,7 @@ pub(crate) mod schedule_tests {
             let mut rows: Vec<String> = actionable
                 .iter()
                 .map(|(a, b, what)| {
-                    // Canonical order within the pair: bevy reports (a, b) in whichever order
-                    // its walk met them, and a diff of two dumps must not see that as movement.
+                    // Canonical order within the pair, so two dumps diff by text.
                     let (x, y) = if update.name(*a) <= update.name(*b) {
                         (*a, *b)
                     } else {
@@ -1121,21 +788,17 @@ pub(crate) mod schedule_tests {
         name == "bevy_ecs::apply_deferred"
     }
 
-    /// **How parallel could `Update` be?** A greedy list schedule with unlimited threads: each
-    /// wave takes every system whose predecessors have run and that shares no undeclared
-    /// conflict with a system already in the wave; non-`Send` systems are pairwise exclusive
-    /// besides (the multi-threaded executor runs them one at a time on the main thread). The
-    /// wave count is the frame's serial depth under that executor; the longest declared chain
-    /// is its floor. Returned as `(waves, critical_path)`.
+    /// How parallel could `Update` be? A greedy list schedule with unlimited threads: each wave
+    /// takes every ready system that shares no undeclared conflict with one already in it, and
+    /// non-`Send` systems are pairwise exclusive. Returns `(waves, critical_path)`: the frame's
+    /// serial depth, and its floor, the longest declared chain.
     fn waves(
         c: &Census,
         keep_conflict: impl Fn(&[ComponentId]) -> bool,
         non_send: &[SystemKey],
     ) -> (usize, usize) {
         use std::collections::{HashMap, HashSet};
-        // The build-inserted sync points are left out: they are exclusive barriers the build
-        // places from the flattened graph, which this model does not see; their count is
-        // reported beside the waves instead.
+        // The build-inserted sync points are left out; their count is reported beside the waves.
         let mut order: Vec<SystemKey> = c
             .systems
             .iter()
@@ -1218,15 +881,10 @@ pub(crate) mod schedule_tests {
         (waves, critical)
     }
 
-    /// The structural half of 2265 §A3's executor question — is the prize of collapsing the VM
-    /// (and the audio layer) to one `Send` owner correctness only, or correctness plus
-    /// parallelism? Prints the serial depth of `Update` today and under each collapse.
-    ///
-    /// An instrument, not a gate: it asserts nothing, so it can only fail by panicking inside the
-    /// census, and it boots a headless client to print four numbers. Ignored for the same reason
-    /// `reference_ui`'s chain reports are (2331); run it by hand when the A3 question is live.
+    /// An instrument, not a gate: prints `Update`'s serial depth as-is and with the VM, then
+    /// the audio layer too, made `Send`-owned. Asserts nothing; run it by hand.
     #[test]
-    #[ignore = "instrument: run by hand (2265 §A3's executor census) — cargo test -p benilla-app --lib concurrency_census -- --ignored --nocapture"]
+    #[ignore = "instrument: run by hand (the executor census) — cargo test -p benilla-app --lib concurrency_census -- --ignored --nocapture"]
     fn concurrency_census() {
         let mut app = headless_client();
         let c = census(&mut app, Update, SyncPoints::Built);
@@ -1297,33 +955,24 @@ pub(crate) mod schedule_tests {
         eprintln!("  declared edges only:   {w3} waves (every conflict ordered, everything Send)");
     }
 
-    /// Why a system that holds the VM in `Update` and is ordered before the tick may stay OUT
-    /// of [`crate::ui_script::UiFeed`] — keyed by a suffix of the system's full name, with the
-    /// reason. Read beside [`every_vm_holder_in_update_declares_its_side_of_the_tick`].
-    /// Empty at 2304: every holder ordered before the tick joined the phase (`ui_session::
-    /// feed_interact_npc`, seated inside `WorldStage::Net` for decision 2022's reason, looked
-    /// like the one exception and is not — it writes a resource the unit feed reads, and
-    /// never holds the VM).
+    /// Why a VM holder in `Update` ordered before the tick may stay out of
+    /// [`crate::ui_script::UiFeed`], keyed by a suffix of the system's full name, with the
+    /// reason.
     const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[];
 
-    /// **Every system that holds the VM in `Update` declares its side of the tick** (decision
-    /// 2304). The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick
-    /// must see rides `UiFeed`, which the plugin chains after the net drain and before the
-    /// tick; a drain of what the tick produced is `.after(UiInput)`. Read off the built graph,
-    /// so a membership through a parent set and an order through a chain both count. Three
-    /// things fail here: a holder with no declared path to or from the tick; one ordered
-    /// before the tick without riding the feed phase — so it may run before this frame's
-    /// packets land, the class 2265 §A3 counted as "ordered only against `UiInput`" — unless
-    /// it is argued in [`OUTSIDE_THE_FEED_PHASE`]; and a feed-phase member the graph does not
-    /// actually place after the drain and before the tick, the set's contract checked rather
-    /// than trusted. A row arguing a system the graph places elsewhere fails too.
+    /// The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick must
+    /// see rides `UiFeed`, chained after the net drain and before the tick; a drain of what it
+    /// produced is `.after(UiInput)`. Read off the built graph. Fails a holder with no path to or
+    /// from the tick, one before the tick outside `UiFeed` and not argued in
+    /// [`OUTSIDE_THE_FEED_PHASE`], a `UiFeed` member the graph does not place between the drain
+    /// and the tick, and a stale row.
     #[test]
     fn every_vm_holder_in_update_declares_its_side_of_the_tick() {
         let mut app = headless_client();
         let c = census(&mut app, Update, SyncPoints::Built);
         if !type_names_available(&c) {
             eprintln!(
-                "skipped: this build carries no type names (bevy/debug rides with dev, 1451)"
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
             );
             return;
         }
@@ -1422,43 +1071,35 @@ pub(crate) mod schedule_tests {
         assert!(
             offenders.is_empty(),
             "these systems hold the VM in `Update` without declaring their side of the tick \
-             (decision 2304):\n  {}",
+             (`UiFeed` before it, or `.after(UiInput)`):\n  {}",
             offenders.join("\n  ")
         );
         assert!(stale.is_empty(), "stale rows:\n  {}", stale.join("\n  "));
     }
 
-    /// The consumer markers 2220's census used: a system that holds the VM and does one of
-    /// these to host state has spent something this frame that nothing can re-spend.
+    /// The consumer markers: a VM holder that does one of these to host state has spent
+    /// something this frame that nothing can re-spend.
     const CONSUMES: &[&str] = &["fire_event(", "mem::take(", ".drain("];
 
-    /// Why a one-shot consumer that holds the VM and is NOT gated on `ingame_ui_up` cannot lose
-    /// anything in 2214's one-frame window — 2232's discriminator, as a type. (In that window
-    /// the wire is in-world and the boot VM is still live and frameless, so a one-shot spent
-    /// then is published to a VM with nothing to show it.)
+    /// Why an ungated one-shot consumer holding the VM loses nothing in the one-frame window
+    /// where the wire is in world and the boot VM is still live and frameless.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Because {
         /// The consumed queue is filled only by Lua asking; a frameless VM asks for nothing.
         FilledByVm,
-        /// Filled only by a server reply to something the player had to click in the interface
-        /// — or, noted in the reason, by another player's act on us, which can share a drain
-        /// with the login burst only by coincidence (the residual 2279 names).
+        /// Filled only by a server reply to a click in the interface, or (noted in the reason)
+        /// another player's act on us, which meets the login burst only by coincidence.
         PlayerRoundTrip,
         /// Consumed in the window or not, the state is re-asked or re-derived once the UI is up.
         SelfHealing,
-        /// The publication is driven by a `VmMemo` diff, so a new VM re-derives and re-fires it
-        /// (decision 2226).
+        /// The publication is driven by a `VmMemo` diff, so a new VM re-derives and re-fires it.
         MemoLatched,
         /// Documented at the line as intentional.
         Deliberate,
     }
 
-    /// Every one-shot consumer that holds the VM, is not gated on `ingame_ui_up` (by its own
-    /// run condition or a set's — read off the real schedule, not off the registration text),
-    /// and is not a memo-diffed `fire_event` — each with the reason it is safe. Keyed
-    /// `(path under src/, fn)`. Audited 2026-09-16 (decision 2279) against the fill sites;
-    /// the reason names them. Adding a consumer the ordinary way (gated) passes; adding one
-    /// ungated fails here, at the line, until it is either gated or argued.
+    /// Every one-shot VM consumer not gated on `ingame_ui_up` (read off the schedule) and not a
+    /// memo-diffed `fire_event`, keyed `(path under src/, fn)`, with the reason it is safe.
     const EXEMPT: &[(&str, &str, Because, &str)] = &[
         ("webbridge/mod.rs", "run_vm_ops", Because::Deliberate,
          "Launcher-installed bridge: explicit page Lua/chat requests may target glue too; a missing VM gets an error response, and event-tap state is keyed per VM"),
@@ -1479,7 +1120,7 @@ pub(crate) mod schedule_tests {
         ("tutorial.rs", "drain_tutorials", Because::FilledByVm,
          "`sends` exist only after Lua acknowledged, cleared or reset a flag, and go to the wire"),
         ("ui_action/drain.rs", "drain_go_openers", Because::FilledByVm,
-         "filled only by a world right-click on a GameObject; the drain sends casts to the wire (2232's own bucket)"),
+         "filled only by a world right-click on a GameObject; the drain sends casts to the wire"),
         ("ui_auction/mod.rs", "drain_auction", Because::FilledByVm,
          "VM verbs; the refresh flags act only under an open window and become wire re-asks"),
         ("ui_bank/mod.rs", "feed_bank", Because::PlayerRoundTrip,
@@ -1510,8 +1151,6 @@ pub(crate) mod schedule_tests {
          "`told` is a `VmMemo` inside the session (a fresh VM re-begins), and the open is a player click"),
         ("ui_items/drain.rs", "drain_container_destroys", Because::FilledByVm,
          "`take_container_destroys` is a VM-owned queue filled by Lua's `DeleteCursorItem`"),
-        ("ui_items/drain.rs", "drain_container_uses", Because::FilledByVm,
-         "`take_container_uses` and `take_container_repairs` are Lua intents held by the VM"),
         ("ui_logout.rs", "feed_logout", Because::PlayerRoundTrip,
          "both packets answer the `CMSG_LOGOUT_REQUEST`/cancel the game menu sent"),
         ("ui_loot/mod.rs", "drain_loot", Because::Deliberate,
@@ -1519,7 +1158,7 @@ pub(crate) mod schedule_tests {
         ("ui_loot_roll.rs", "drain_loot_rolls", Because::FilledByVm,
          "only a Need/Greed/Pass click queues a confirm or vote, held in the VM"),
         ("ui_loot_roll.rs", "feed_loot_rolls", Because::PlayerRoundTrip,
-         "a roll exists only after a group member loots under group loot (2232's bucket); leftovers are cleared at socket teardown (another player's act: coincidence-only residual)"),
+         "a roll exists only after a group member loots under group loot; leftovers are cleared at socket teardown (another player's act: coincidence-only residual)"),
         ("ui_macro/mod.rs", "load_macros", Because::MemoLatched,
          "`MacroFiles.identity` is a `VmMemo`, so a new session re-reads the files and re-fires UPDATE_MACROS; also `InWorldGated`"),
         ("ui_macro/mod.rs", "save_dirty_macros", Because::FilledByVm,
@@ -1533,13 +1172,13 @@ pub(crate) mod schedule_tests {
         ("ui_quest_share.rs", "feed_quest_share", Because::PlayerRoundTrip,
          "a verdict answers our own push and a confirm follows a party member's escort accept, both held until the name resolves (the confirm is another player's act: coincidence-only residual)"),
         ("ui_script/extract/mod.rs", "paint_script", Because::Deliberate,
-         "per-frame paint and cost state, not a queue (2232)"),
+         "per-frame paint and cost state, not a queue"),
         ("ui_social/feed.rs", "feed_social", Because::MemoLatched,
          "the login-burst lists are re-announced to a new VM by `fed.seeded` (`VmMemo<FedSocial>`); the show flag is Lua's; a status line waits on the name resolve"),
         ("ui_stable/mod.rs", "feed_stable", Because::PlayerRoundTrip,
          "both packets follow a stable master's gossip and a click in its window"),
         ("ui_summon.rs", "feed_summon", Because::PlayerRoundTrip,
-         "only another player's Ritual of Summoning latches the ask (2232's duel shape; coincidence-only residual)"),
+         "only another player's Ritual of Summoning latches the ask (the duel's shape; coincidence-only residual)"),
         ("ui_tabard.rs", "drain_tabard", Because::FilledByVm,
          "the intents are Lua's; the event answers a Save intent"),
         ("ui_tabard.rs", "feed_tabard", Because::PlayerRoundTrip,
@@ -1547,7 +1186,7 @@ pub(crate) mod schedule_tests {
         ("ui_talent_wipe.rs", "feed_talent_wipe", Because::PlayerRoundTrip,
          "`MSG_TALENT_WIPE_CONFIRM` answers the trainer's gossip option"),
         ("ui_taxi/mod.rs", "feed_taxi", Because::PlayerRoundTrip,
-         "both packets follow talking to a flight master (2232's own example)"),
+         "both packets follow talking to a flight master"),
         ("ui_tradeskill.rs", "drain_trade_skill", Because::FilledByVm,
          "every consumed queue is Lua's; the cast-event continuation is inert until a Lua `DoTradeSkill` latched a count"),
         ("ui_trainer/mod.rs", "feed_trainer", Because::PlayerRoundTrip,
@@ -1565,15 +1204,11 @@ pub(crate) mod schedule_tests {
         }
     }
 
-    /// **Every one-shot consumer that holds the VM is gated, memo-latched, or argued** (2220's
-    /// proposed test, built on the real schedule rather than on the registration text — which
-    /// is why 2220 refused a mechanical pass: `.run_if(ingame_ui_up)` on a set, on a tuple, or
-    /// on the member all read differently in source and identically here). A consumer is one
-    /// of 2220's census: a system taking `NonSend[Mut]<UiScript>` whose body has a
-    /// [`CONSUMES`] marker. It passes if the schedule shows `ingame_ui_up` on it or on a set
-    /// above it, or if it is a `fire_event` driven by a `VmMemo` parameter, or if it is in
-    /// [`EXEMPT`] with its reason. An `EXEMPT` row for a system that is gated after all, or
-    /// that no longer consumes, fails too — the table describes the tree, not its history.
+    /// A consumer (a system taking `NonSend[Mut]<UiScript>` whose body has a [`CONSUMES`]
+    /// marker) passes if the schedule shows `ingame_ui_up` on it or a set above it, if it is a
+    /// `fire_event` driven by a `VmMemo` parameter, or if [`EXEMPT`] argues it. Read off the
+    /// schedule, where a gate on a set, a tuple or the member all look alike. A stale `EXEMPT`
+    /// row fails too.
     #[test]
     fn every_one_shot_consumer_that_holds_the_vm_is_gated_or_argued() {
         use crate::test_support::{fn_items, rel_path, rust_files, src_dir};
@@ -1599,7 +1234,7 @@ pub(crate) mod schedule_tests {
         let update = census(&mut app, Update, SyncPoints::Built);
         if !type_names_available(&update) {
             eprintln!(
-                "skipped: this build carries no type names (bevy/debug rides with dev, 1451)"
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
             );
             return;
         }
@@ -1651,7 +1286,7 @@ pub(crate) mod schedule_tests {
             } else if exempt.is_some() {
                 argued += 1;
             } else {
-                // Name the sets it is under: the fix is usually a gate on one of them.
+                // Name its sets: the fix is usually a gate on one of them.
                 let where_ = match info {
                     None => " (not found in Update/PostUpdate)".to_string(),
                     Some(i) => {
@@ -1684,10 +1319,10 @@ pub(crate) mod schedule_tests {
         assert!(
             offenders.is_empty(),
             "these systems hold the VM and consume a one-shot with nothing gating them on the \
-             interface being up — in 2214's one-frame window they publish to a VM with no frames \
-             and the edge is lost (2220, 2232). Gate them (`.run_if(ingame_ui_up)`, on the system \
+             interface being up — in the one frame before it is, they publish to a VM with no \
+             frames and the edge is lost. Gate them (`.run_if(ingame_ui_up)`, on the system \
              or its set), or add them to `EXEMPT` with the reason they cannot be filled before \
-             the interface exists (decision 2279):\n  {}",
+             the interface exists:\n  {}",
             offenders.join("\n  ")
         );
         assert!(

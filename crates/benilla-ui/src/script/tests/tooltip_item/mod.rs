@@ -1,22 +1,13 @@
-//! The engine item-tooltip renderer (decision 0274 P1, law per 0276): the verified line law
-//! end-to-end, the red failed-requirement law against live player state, the sell-price money
-//! protocol (engine fires `OnTooltipAddMoney` — merchant open + real instance + repair off),
-//! and the in-flight-template fallback.
+//! The engine item-tooltip renderer: line order, requirement reds against live player state, the
+//! sell price (`OnTooltipAddMoney` at an open merchant, for a real instance, out of repair mode)
+//! and the fallback for a template still in flight.
 
 use super::common::script as bare_script;
 use crate::script::*;
 
-/// A stand-in `GlobalStrings.lua` for the item builder — **deliberately not the shipped wording**.
-///
-/// Every sentence the builder draws is a key resolved off the VM's own globals (decision 2045),
-/// and what these tests establish is *which key* each line reaches and what fills it, never what
-/// the sentence says. Naming each value after its own key is the point: `INVTYPE_SHIELD`,
-/// `INVTYPE_WEAPONOFFHAND` and `SECONDARYHANDSLOT` all read "Off Hand" in enUS, `ITEM_REQ_SKILL`
-/// shares "Requires %s" with the three `LOCKED_WITH_*` keys, and an assertion on the English
-/// would pass on every one of them. Read an expected line here as "this key, filled with these".
-///
-/// The values keep each shipped template's *hole shape* — that is what proves the fill — and
-/// nothing else about it.
+/// Stand-in `GlobalStrings.lua` values, each named after its key with the shipped hole shape:
+/// several keys share one enUS sentence ("Off Hand", "Requires %s"), so the tests assert which key
+/// each line reaches and what fills it.
 fn seed_item_strings(s: &mut UiScript) {
     s.run(
         r#"
@@ -121,11 +112,18 @@ fn seed_item_strings(s: &mut UiScript) {
     .unwrap();
 }
 
-/// The shared fixture VM, with [`seed_item_strings`] already run — every test in this tree needs
-/// it, because a builder that resolves nothing draws nothing.
+/// The fixture VM, with [`seed_item_strings`] run and `SetItemByIdForTest(tooltip, itemId)`, the
+/// test VM's door onto the id-keyed render the engine's item hovers call from Rust.
 fn script() -> UiScript {
     let mut s = bare_script();
     seed_item_strings(&mut s);
+    let f = s
+        .lua()
+        .create_function(|lua, (tt, id): (mlua::Table, u32)| {
+            crate::script::tooltip_item::render_by_id(lua, &tt, id, None, None)
+        })
+        .unwrap();
+    s.lua().globals().set("SetItemByIdForTest", f).unwrap();
     s
 }
 
@@ -136,8 +134,7 @@ fn axe() -> ItemTemplateView {
         quality: 3,
         class: 2,
         subclass: 1,
-        // ItemSubClass.dbc's DisplayName for (2, 1) — the app-resolved word the type cell
-        // prints; the two axe subclasses share it.
+        // `ItemSubClass.dbc`'s DisplayName for (2, 1), which both axe subclasses share.
         sub_class_display: Some("Axe".into()),
         inventory_type: 17,
         bonding: 2,
@@ -155,8 +152,7 @@ fn axe() -> ItemTemplateView {
     }
 }
 
-/// The tooltip's left-column lines in order, each with its draw color (read from the extract —
-/// the color a renderer would actually paint).
+/// The tooltip's left-column lines in order, each with the colour the extract paints it.
 fn lines_of(s: &mut UiScript) -> Vec<(String, [f32; 4])> {
     s.resolve();
     let quads = s.extract();

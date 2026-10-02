@@ -1,30 +1,16 @@
-//! **The integration tests' interface loader — one copy, both stores** (decision 1751).
-//!
-//! The in-crate sibling of `ui_script::test_ui::load_ui`, which integration tests cannot reach:
-//! they link this crate as a library, so its `#[cfg(test)]` items are not compiled for them. Each
-//! `tests/*.rs` therefore grew its own reader off `assets/ui`, and every one of them broke the
-//! first time a file it names became the reference's own.
-//!
-//! The rule is the manifest's, verbatim: **a bare filename is a file we ship, a path is the
-//! reference's own off the player's installed chain.** Our shipped tree is flat, so a separator
-//! decides, and nothing here needs to know which windows have migrated.
-//!
-//! The provider half matters as much as the loop. A sourced document pulls its Lua through its own
-//! `<Script file="X.lua"/>`, which the loader resolves against the *including document's*
-//! directory — `Interface\FrameXML\X.lua`, a chain path. A disk-only provider leaves every one of
-//! those globals nil and the failures land nowhere near the cause.
-//!
-//! **A chain entry needs client data**, so a test that names one opens with
-//! `benilla_formats::wow_data_or_skip!()`, like every other archive-backed test.
+//! The integration tests' interface loader: integration tests cannot reach
+//! `ui_script::test_ui::load_ui`, which is `#[cfg(test)]`. A bare filename is a file we ship
+//! under `assets/ui`, a path is the reference's own off the installed chain, and `<Script file>`
+//! includes resolve through the same provider. A test that names a chain entry opens with
+//! `benilla_formats::wow_data_or_skip!()`. A kit loads in the production order, `FrameXML.toc`'s
+//! then `layer.toc`'s, which every load checks ([`follow_production_order`]).
 
 use benilla_ui::script::UiScript;
 
-/// Load one manifest entry into `script`, panicking on any loader error.
-///
-/// A `.lua` entry is run as a chunk rather than parsed as a document — `GlobalStrings.lua` and
-/// `LocaleProperties.lua` are entries of that shape in the real manifest too. Bytes, not text: a
-/// chunk goes to Lua as it sits in the archive and only an XML parse decodes (1193).
+/// Load one manifest entry into `script`, panicking on any loader error. A `.lua` entry runs as a
+/// chunk of raw bytes, as `GlobalStrings.lua` does in the real manifest; only XML is decoded.
 pub fn load_ui(script: &UiScript, entry: &str) {
+    follow_production_order(script, entry);
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
     let chain = |req: &str| -> Option<Vec<u8>> {
         let data = benilla_formats::wow_data()?;
@@ -58,18 +44,109 @@ pub fn load_ui(script: &UiScript, entry: &str) {
             .run(MICRO_BUTTON_STAND_INS)
             .expect("the micro-button stand-ins");
     }
-    if leaf.eq_ignore_ascii_case("UIParent.xml") && entry.contains('\\') {
+    // The stock GameMenuFrame.xml sources UIParent.lua again, which drops the stand-ins' wrappers.
+    if (leaf.eq_ignore_ascii_case("UIParent.xml") || leaf.eq_ignore_ascii_case("GameMenuFrame.xml"))
+        && entry.contains('\\')
+    {
         script
             .run(UIPARENT_STAND_INS)
             .expect("the UIParent stand-ins");
     }
 }
 
-/// The stock micro-button row's unguarded reads, stood in for on the row's first call — one copy
-/// per store, like the loader itself. `ui_script::test_ui::MICRO_BUTTON_STAND_INS` is the
-/// original and carries the why (decision 1987).
-/// The stock `UIParent.xml`'s unguarded callees, stood in for at load — see
-/// `ui_script::test_ui::UIPARENT_STAND_INS` (decision 1988).
+/// Where `entry` falls in the production load: a `FrameXML.toc` row at its row, a file a row pulls
+/// in (`<Include>` or `<Script file=>`, at any depth) just above the first row that does, a layer
+/// file after every row, and `None` for anything else; the copy of
+/// `ui_script::test_ui::production_rank`.
+fn production_rank(entry: &str) -> Option<usize> {
+    static RANKS: std::sync::OnceLock<std::collections::HashMap<String, usize>> =
+        std::sync::OnceLock::new();
+    let ranks = RANKS.get_or_init(|| {
+        let key = |path: &str| path.replace('/', "\\").to_ascii_lowercase();
+        let mut ranks = std::collections::HashMap::new();
+        let Some(chain) =
+            benilla_formats::wow_data().and_then(|data| benilla_formats::open_chain(&data).ok())
+        else {
+            return ranks;
+        };
+        let read = |path: &str| chain.read(path).ok();
+        let toc = read(r"Interface\FrameXML\FrameXML.toc").unwrap_or_default();
+        let rows: Vec<String> = benilla_ui::toc::Toc::parse(&benilla_ui::source::decode(&toc))
+            .files
+            .iter()
+            .map(|f| format!(r"Interface\FrameXML\{f}"))
+            .collect();
+        for (i, row) in rows.iter().enumerate() {
+            ranks.insert(key(row), 2 * i + 1);
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let mut queue = vec![row.clone()];
+            while let Some(file) = queue.pop() {
+                let Some(bytes) = read(&file) else { continue };
+                let text = String::from_utf8_lossy(&bytes);
+                for chunk in text.split('<').skip(1) {
+                    let tag = chunk.split('>').next().unwrap_or("").trim_start();
+                    if !tag.starts_with("Include") && !tag.starts_with("Script") {
+                        continue;
+                    }
+                    let Some(name) = tag
+                        .split("file=\"")
+                        .nth(1)
+                        .and_then(|r| r.split('"').next())
+                    else {
+                        continue;
+                    };
+                    let path = format!(r"Interface\FrameXML\{name}");
+                    if let std::collections::hash_map::Entry::Vacant(slot) = ranks.entry(key(&path))
+                    {
+                        slot.insert(2 * i);
+                        queue.push(path);
+                    }
+                }
+            }
+        }
+        let layer = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/layer.toc");
+        let layer = std::fs::read_to_string(layer).unwrap_or_default();
+        let after = 2 * rows.len() + 2;
+        for (j, file) in benilla_ui::toc::Toc::parse(&layer).files.iter().enumerate() {
+            ranks.insert(key(file), after + j);
+        }
+        ranks
+    });
+    ranks
+        .get(&entry.replace('/', "\\").to_ascii_lowercase())
+        .copied()
+}
+
+thread_local! {
+    /// Per VM session, the furthest [`production_rank`] a kit has loaded and the file at it.
+    static KIT_AT: std::cell::RefCell<std::collections::HashMap<u64, (usize, String)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Panics when `entry` loads after a file the production load runs after it.
+fn follow_production_order(script: &UiScript, entry: &str) {
+    let Some(rank) = production_rank(entry) else {
+        return;
+    };
+    KIT_AT.with(|at| {
+        let mut at = at.borrow_mut();
+        if let Some((furthest, file)) = at.get(&script.session()) {
+            assert!(
+                rank >= *furthest,
+                "{entry} loads after {file}, but the production load runs it first: a kit \
+                 follows FrameXML.toc's order, then layer.toc's"
+            );
+            if rank == *furthest {
+                return;
+            }
+        }
+        at.insert(script.session(), (rank, entry.to_string()));
+    });
+}
+
+/// The stock `UIParent.xml`'s unguarded callees, stood in for at load; the copy of
+/// `ui_script::test_ui::UIPARENT_STAND_INS`.
 const UIPARENT_STAND_INS: &str = r#"
     -- Callees of the stock UIParent.xml's <OnUpdate> and of UIParent_OnEvent's arms that live in
     -- files a kit may stop short of, plus the bag verbs the stock ShowUIPanel calls and the two
@@ -85,7 +162,7 @@ const UIPARENT_STAND_INS: &str = r#"
     LocalizeFrames = LocalizeFrames or function() end
     updateContainerFrameAnchors = updateContainerFrameAnchors or function() end
     -- 1.12 keeps UpdateNameplates in UIOptionsFrame.lua, which a kit reaches only at manifest
-    -- l.21; our own OptionsFrame.xml re-declares it below that (decision 2132). Both are plain
+    -- l.21; our own OptionsFrame.xml re-declares it below that. Both are plain
     -- `function X()` writes, so a full kit ends on ours and a short one keeps this no-op.
     UpdateNameplates = UpdateNameplates or function() end
     CloseAllBags = CloseAllBags or function() end
@@ -139,10 +216,10 @@ const UIPARENT_STAND_INS: &str = r#"
     -- The four options/menu windows `IsOptionFrameOpen` (l.997) and `ToggleGameMenu` (l.1467)
     -- index unguarded. `IsOptionFrameOpen` is on the path of every window close, so a kit that
     -- loads no options window raised on the first bag click. In the shipped manifest all four
-    -- names are real, and since 2177 all three options windows are the REFERENCE's own files,
+    -- names are real, and all three options windows are the REFERENCE's own files,
     -- loaded hidden — including `OptionsFrame`, the video window, which used to be our own
     -- window's name. Ours is `BenillaOptionsFrame` now and is not in this list: it is not a name
-    -- the reference indexes, and the wrappers in `GameMenuFrame.xml` are what tell these two
+    -- the reference indexes, and the wrappers in `GameMenuAdapters.xml` are what tell these two
     -- functions about it. A KIT is a prefix of the manifest and may load none of the four, which
     -- is what these stand-ins are for.
     local function benilla_seat_options()
@@ -164,6 +241,8 @@ const UIPARENT_STAND_INS: &str = r#"
     end
 "#;
 
+/// The stock micro-button row's unguarded reads, stood in for on the row's first call; the copy of
+/// `ui_script::test_ui::MICRO_BUTTON_STAND_INS`.
 const MICRO_BUTTON_STAND_INS: &str = r#"
     local real = UpdateMicroButtons
     function UpdateMicroButtons()

@@ -1,6 +1,5 @@
-//! The talent engine seam (decision 0304): the Era binding tuples over a pushed snapshot, the
-//! learn-click queue, and the `SetTalent` tooltip — the spell builder with the talent
-//! interleave (rank line white, req lines red, next-rank block, learn hint green).
+//! The talent bindings over a pushed snapshot, the learn queue, and `SetTalent`: the talent builder
+//! for a passive talent, the spell tooltip with the talent lines interleaved for an exceptional one.
 
 use super::common::script;
 use crate::script::*;
@@ -62,8 +61,6 @@ fn one_tab_state() -> TalentUiState {
     }
 }
 
-/// The Era tuples read back exactly what the app pushed — including the 1-based grid seats,
-/// the flat prereq triplets, and the points pair.
 #[test]
 fn bindings_read_the_pushed_snapshot() {
     let mut s = script();
@@ -95,7 +92,6 @@ fn bindings_read_the_pushed_snapshot() {
     assert!(s.take_errors().is_empty());
 }
 
-/// LearnTalent queues (tab, index) verbatim for the app's wire drain.
 #[test]
 fn learn_talent_queues_for_the_app_drain() {
     let mut s = script();
@@ -106,9 +102,8 @@ fn learn_talent_queues_for_the_app_drain() {
     assert!(s.take_errors().is_empty());
 }
 
-/// A stand-in string table for the talent tail's three keys — **deliberately not the shipped
-/// wording**, because what is under test is which key each line reaches and what fills it, never
-/// what the sentence says (decision 2045).
+/// Stand-in values for the three talent keys, not the shipped wording: the tests check which key
+/// each line reaches.
 fn seed_talent_strings(s: &mut UiScript) {
     s.run(
         r#"
@@ -120,30 +115,40 @@ fn seed_talent_strings(s: &mut UiScript) {
     .unwrap();
 }
 
-/// SetTalent = the spell builder + the talent interleave: name, TOOLTIP_TALENT_RANK white, cost
-/// line, gold description, TOOLTIP_TALENT_NEXT_RANK + the next rank's gold description, green
-/// TOOLTIP_TALENT_LEARN.
+/// A passive talent's full spell view, every body line filled, so a test sees which ones the talent
+/// builder drops.
+fn passive_body(description: &str) -> SpellTooltipView {
+    SpellTooltipView {
+        name: "Improved Fireball".into(),
+        cost: Some("35 Mana".into()),
+        range: Some("30 yd range".into()),
+        cast_time: Some("Instant".into()),
+        cooldown: Some("6 sec cooldown".into()),
+        requires_item: Some("Requires One-Handed Axes".into()),
+        requires_form: Some("Requires Battle Stance".into()),
+        reagents: Some("Reagents: Light Feather".into()),
+        chance: Some("2.62% chance to dodge".into()),
+        description: description.into(),
+        ..Default::default()
+    }
+}
+
+/// `SetTalent` on a passive talent is the talent builder `0x52b0a0`: name, `TOOLTIP_TALENT_RANK`
+/// (white), the gold description, a `" "` spacer, `TOOLTIP_TALENT_NEXT_RANK` and the next rank's
+/// gold description, green `TOOLTIP_TALENT_LEARN`; no cost, range, cast, requirement, reagent or
+/// chance line.
 #[test]
-fn set_talent_renders_the_interleaved_tooltip() {
+fn set_talent_on_a_passive_talent_is_the_talent_builder() {
     let mut s = script();
     seed_talent_strings(&mut s);
     s.set_talents(one_tab_state());
     s.set_spell_tooltip(
         11070,
-        SpellTooltipView {
-            name: "Improved Fireball".into(),
-            cast_time: Some("Instant".into()),
-            description: "Reduces the casting time of your Fireball spell by 0.3 sec.".into(),
-            ..Default::default()
-        },
+        passive_body("Reduces the casting time of your Fireball spell by 0.3 sec."),
     );
     s.set_spell_tooltip(
         11071,
-        SpellTooltipView {
-            name: "Improved Fireball".into(),
-            description: "Reduces the casting time of your Fireball spell by 0.4 sec.".into(),
-            ..Default::default()
-        },
+        passive_body("Reduces the casting time of your Fireball spell by 0.4 sec."),
     );
     s.run(
         r#"
@@ -152,17 +157,21 @@ fn set_talent_renders_the_interleaved_tooltip() {
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetTalent(1, 1)
         assert(tt:IsShown(), "SetTalent shows")
-        -- name, rank, Instant, desc, next-rank header, next desc, learn hint = 7 lines.
+        -- name, rank, desc, spacer, next-rank header, next desc, learn hint = 7 lines.
         assert(tt:NumLines() == 7, "got " .. tt:NumLines())
         assert(TTTextLeft1:GetText() == "Improved Fireball")
         assert(TTTextLeft2:GetText() == "[RANK 3/5]", "got " .. TTTextLeft2:GetText())
-        assert(TTTextLeft3:GetText() == "Instant")
+        assert(TTTextLeft3:GetText() == "Reduces the casting time of your Fireball spell by 0.3 sec.")
+        assert(TTTextLeft4:GetText() == " ", "the spacer, got " .. tostring(TTTextLeft4:GetText()))
         assert(TTTextLeft5:GetText() == "[NEXT_RANK]")
+        assert(TTTextLeft6:GetText() == "Reduces the casting time of your Fireball spell by 0.4 sec.")
         assert(TTTextLeft7:GetText() == "[LEARN]")
+        for i = 1, 7 do
+            assert(getglobal("TTTextRight" .. i):GetText() == nil, "no right column on line " .. i)
+        end
     "#,
     )
     .unwrap();
-    // The learn hint wears the tooltip green; the requirement red is exercised below.
     s.resolve();
     let quads = s.extract();
     let green = quads.iter().any(|q| {
@@ -170,17 +179,66 @@ fn set_talent_renders_the_interleaved_tooltip() {
             if t == "[LEARN]" && c[0] < 1e-6 && (c[1] - 1.0).abs() < 1e-6)
     });
     assert!(green, "the learn hint is green");
+    // The spacer is `0x530380`'s gold, not `0x5303b0`'s caller colour.
+    let gold_spacer = quads.iter().any(|q| {
+        matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
+            if t == " " && (c[0] - 1.0).abs() < 1e-6 && (c[1] - 210.0 / 255.0).abs() < 1e-3 && c[2] < 1e-6)
+    });
+    assert!(gold_spacer, "the spacer is gold");
     assert!(s.take_errors().is_empty());
 }
 
-/// A locked talent shows its red requirement line; a missing spell view falls back to the rank
-/// line alone and records the ask for the app resolver (the shared ask-once channel).
+/// An exceptional talent (`Talent.dbc` Flags bit 0) is the spell builder `0x52e610` instead, whose
+/// cost, cast and required-item lines stay: Holy Shield's "Requires Shields".
+#[test]
+fn set_talent_on_an_exceptional_talent_keeps_the_spell_body() {
+    let mut s = script();
+    seed_talent_strings(&mut s);
+    let mut state = one_tab_state();
+    let holy_shield = &mut state.talents[0][1];
+    holy_shield.name = "Holy Shield".into();
+    holy_shield.exceptional = true;
+    holy_shield.req_lines = vec!["Requires 30 points in Protection Talents".into()];
+    s.set_talents(state);
+    s.set_spell_tooltip(
+        11119,
+        SpellTooltipView {
+            name: "Holy Shield".into(),
+            cost: Some("150 Mana".into()),
+            cast_time: Some("Instant cast".into()),
+            requires_item: Some("Requires Shields".into()),
+            description: "Increases chance to block by 30% for 10 sec.".into(),
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "TB3"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT3")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        tt:SetTalent(1, 2)
+        local want = {
+            "Holy Shield", "[RANK 0/5]", "Requires 30 points in Protection Talents", "150 Mana",
+            "Instant cast", "Requires Shields", "Increases chance to block by 30% for 10 sec.",
+        }
+        assert(tt:NumLines() == table.getn(want), "got " .. tt:NumLines())
+        for i, text in ipairs(want) do
+            local got = getglobal("TT3TextLeft" .. i):GetText()
+            assert(got == text, "line " .. i .. ": " .. tostring(got))
+        end
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// A missing spell view renders the rank line alone and asks for the view once.
 #[test]
 fn set_talent_locked_reqs_and_the_ask_once_miss() {
     let mut s = script();
     seed_talent_strings(&mut s);
     s.set_talents(one_tab_state());
-    // No spell view pushed for Ignite (11119): the render falls back, the ask is recorded.
+    // No spell view pushed for Ignite (11119).
     s.run(
         r#"
         local a = CreateFrame("Button", "TB2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
@@ -198,7 +256,6 @@ fn set_talent_locked_reqs_and_the_ask_once_miss() {
         "the display spell was asked: {asks:?}"
     );
 
-    // With the view landed, the full render carries the red requirement line.
     s.set_spell_tooltip(
         11119,
         SpellTooltipView {

@@ -67,6 +67,15 @@ impl ObjectFields {
     pub fn unit_summon(&self) -> Option<u64> {
         self.get_guid(FIELD_UNIT_SUMMON).filter(|&g| g != 0)
     }
+    /// `UNIT_FIELD_CHARM`: the unit this one charms.
+    pub fn unit_charm(&self) -> Option<u64> {
+        self.get_guid(FIELD_UNIT_CHARM).filter(|&g| g != 0)
+    }
+    /// A player's pet as the client reads it off the descriptor: `CHARM` if set, else `SUMMON`
+    /// (`partypetN`'s `0x4e8204`-`0x4e821a`, the party snapshot's `0x5f0a25`-`0x5f0a39`).
+    pub fn unit_pet_guid(&self) -> Option<u64> {
+        self.unit_charm().or_else(|| self.unit_summon())
+    }
     /// `UNIT_FIELD_SUMMONEDBY`: the summoner of a pet, guardian or totem.
     pub fn unit_summoned_by(&self) -> Option<u64> {
         self.get_guid(FIELD_UNIT_SUMMONEDBY).filter(|&g| g != 0)
@@ -99,7 +108,8 @@ impl ObjectFields {
         self.unit_pet_number() != 0
     }
     /// `UNIT_FIELD_PETNUMBER`: `GetUnitName` (`0x609210`) keys the pet-name cache on it when
-    /// nonzero; a `HIGHGUID_PET` guid's number is not a substitute, no name query answers it.
+    /// nonzero. A `HIGHGUID_PET` guid's number is no substitute: a companion's is never filed in
+    /// its charm info, so no pet-name query answers it.
     pub fn unit_pet_number(&self) -> u32 {
         self.get_u32(FIELD_UNIT_PETNUMBER).unwrap_or(0)
     }
@@ -258,6 +268,10 @@ impl ObjectFields {
     pub fn unit_base_mana(&self) -> Option<u32> {
         self.get_u32(FIELD_UNIT_BASE_MANA)
     }
+    /// `UNIT_FIELD_BASE_HEALTH` (field 163, owner only): the basis for percentage health costs.
+    pub fn unit_base_health(&self) -> Option<u32> {
+        self.get_u32(FIELD_UNIT_BASE_HEALTH)
+    }
     /// `UNIT_FIELD_FACTIONTEMPLATE` (public, `+0x74`): the `FactionTemplate.dbc` row reactions use.
     pub fn unit_faction_template(&self) -> Option<u32> {
         self.get_u32(FIELD_UNIT_FACTIONTEMPLATE)
@@ -266,7 +280,7 @@ impl ObjectFields {
     pub fn unit_flags(&self) -> u32 {
         self.get_u32(FIELD_UNIT_FLAGS).unwrap_or(0)
     }
-    /// `UNIT_FIELD_COMBATREACH` (`+0x1f0`): melee reach, summed as `rA + rB + 1.333`, cap 5.0,
+    /// `UNIT_FIELD_COMBATREACH` (`+0x1f0`): melee reach, summed as `rA + rB + 1.333`, floor 5.0,
     /// by the attack range gate (`0x6e3480`); 1.5, the vanilla default, before it streams.
     pub fn unit_combat_reach(&self) -> f32 {
         self.get_f32(FIELD_UNIT_COMBATREACH).unwrap_or(1.5)

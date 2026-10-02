@@ -13,7 +13,7 @@ pub(super) const MOVEMENT_FLAG_SPLINE_ENABLED: u32 = 0x40_0000;
 pub(super) const MOVEMENT_FLAG_SPLINE_ELEVATION: u32 = 0x400_0000;
 
 /// `MSG_MOVE_TIME_SKIPPED` inbound: a packed guid and the ms that mover's client skipped
-/// (reference handler `0x603b40`; vmangos `MovementHandler.cpp:1011-1017`). Our own send uses a
+/// (reference handler `0x603b40`; vmangos `MovementHandler.cpp:1005-1011`). Our own send uses a
 /// plain 8-byte guid ([`super::client::move_time_skipped`]); the asymmetry is the reference's.
 pub(super) fn read_move_time_skipped(r: &mut &[u8]) -> io::Result<(u64, u32)> {
     let guid = crate::wire::read_packed_guid(r)?;
@@ -100,7 +100,7 @@ impl SpeedKind {
 }
 
 /// A mode the server grants the controlling client, one `MOVEMENTFLAGS` bit each (vmangos
-/// `MovementInfo.h:25-62`, reference setters `0x7c7280`-`0x7c7370`). Root stops translation and
+/// `MovementInfo.h:28-62`, reference setters `0x7c7280`-`0x7c7370`). Root stops translation and
 /// falling but not turning (`0x618054`); water walk makes liquid walkable (aura 104); feather fall
 /// caps the fall at 7 yd/s instead of 60.148 (aura 105, `0x7c5d20`); hover lifts ground contact by
 /// 1.0 yd (aura 106, `0x6367b0`). Levitate (spell 1706) grants the last three at once.
@@ -191,7 +191,7 @@ pub enum RelayVerb {
     Teleport,
     /// `MSG_MOVE_ROOT` (`true`) / `MSG_MOVE_UNROOT` (`false`): the opcode, not the flags word,
     /// decides. The client then runs `SetRoot` (`0x7c7340`, also wiping motion) or `ClearRoot`
-    /// (`0x7c7370`) unconditionally; vmangos's flags already agree (`MovementHandler.cpp:1070`).
+    /// (`0x7c7370`) unconditionally; vmangos's flags already agree (`MovementHandler.cpp:1064`).
     Root(bool),
 }
 

@@ -23,8 +23,8 @@ use crate::entities::mount::MountChild;
 use crate::names::NameCache;
 use crate::net::{Guid, NetEntity, NetStatus, ObjectStore, Reputations, SelfGuid, SelfPlayer};
 use crate::player::Player;
-use crate::target::{ring_reaction, Factions, Hovered, Selection};
 use crate::spell::{ActiveChannel, PendingCast};
+use crate::target::{ring_reaction, Factions, Hovered, Selection};
 use crate::ui_chat::ChatEvent;
 
 use super::BridgeConfig;
@@ -144,7 +144,8 @@ impl BridgeReadout<'_, '_> {
             (Some(player), Some((store, motion, mounted))) => {
                 let guid = self.self_guid.as_ref().and_then(|g| g.0).unwrap_or(0);
                 let name = self.peek_name(guid);
-                let unit = crate::ui_unit::snapshot(store, name, 0, chr);
+                let unit =
+                    crate::ui_unit::snapshot(store, guid, name, 0, chr, self.creature_types());
                 let mut u = unit_fields(guid, EntityKind::Player, &unit, motion, None);
                 u.push(("pos".into(), pos_payload(player.pos)));
                 u.push((
@@ -238,6 +239,15 @@ impl BridgeReadout<'_, '_> {
         PlainValue::Map(m)
     }
 
+    /// The creature-type resolver's sources: the name cache's templates, no form table (the
+    /// snapshot reads no `creatureType`).
+    fn creature_types(&self) -> crate::creature_type::CreatureTypeSources<'_> {
+        crate::creature_type::CreatureTypeSources {
+            names: self.names.as_deref(),
+            forms: None,
+        }
+    }
+
     fn peek_name(&self, guid: u64) -> Option<String> {
         self.names
             .as_ref()
@@ -268,7 +278,14 @@ impl BridgeReadout<'_, '_> {
                     }
                     _ => 0,
                 };
-                let unit = crate::ui_unit::snapshot(store, name, reaction, chr);
+                let unit = crate::ui_unit::snapshot(
+                    store,
+                    guid,
+                    name,
+                    reaction,
+                    chr,
+                    self.creature_types(),
+                );
                 unit_fields(guid, net.kind, &unit, motion, store.0.unit_target())
             }
             None => vec![
