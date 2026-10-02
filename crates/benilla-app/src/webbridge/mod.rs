@@ -201,12 +201,25 @@ fn unknown_command(name: &str, memo: &mut BridgeMemo, out: &mut BridgeOutbox) {
     }
 }
 
-/// The VM's binding commands as `(name, category)`, in the Key Bindings window's order: the
-/// category is the `HEADER_` row above each.
+/// The VM's binding commands as `(name, category)`, as the Key Bindings window lists them: the
+/// `GetNumBindings`/`GetBinding` walk, each command under the `HEADER_` row above it (hidden
+/// commands are not in that walk).
 fn command_list(script: &UiScript) -> Vec<(String, String)> {
+    const WALK: &str = "local t = {} for i = 1, GetNumBindings() do t[i] = (GetBinding(i)) end \
+                        return unpack(t)";
+    let rows = match script.eval_plain(WALK) {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!("webbridge: listing the binding commands: {e}");
+            return Vec::new();
+        }
+    };
     let mut category = String::new();
     let mut out = Vec::new();
-    for (name, _) in script.keybind_snapshot() {
+    for row in rows {
+        let PlainValue::Str(name) = row else {
+            continue;
+        };
         match name.strip_prefix("HEADER_") {
             Some(header) => category = header.to_string(),
             None => out.push((name, category.clone())),

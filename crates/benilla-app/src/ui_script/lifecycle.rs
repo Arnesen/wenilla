@@ -292,6 +292,8 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     unpark_boot_vm(world);
     if !ui_wanted(world) {
         world.remove_resource::<PendingEntryUiLoad>();
+        // The world entry's own step still runs with no UI to load.
+        crate::vplates::clear_at_world_entry(world);
         return;
     }
     if world.resource::<PendingEntryUiLoad>().stage == EntryStage::Armed {
