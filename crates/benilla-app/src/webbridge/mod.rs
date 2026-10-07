@@ -203,12 +203,18 @@ fn unknown_command(name: &str, memo: &mut BridgeMemo, out: &mut BridgeOutbox) {
 
 /// The VM's binding commands as `(name, category)`, as the Key Bindings window lists them: the
 /// `GetNumBindings`/`GetBinding` walk, each command under the `HEADER_` row above it (hidden
-/// commands are not in that walk).
+/// commands are not in that walk). One table, not ~240 returns: those overflow mlua's wasm stack.
 fn command_list(script: &UiScript) -> Vec<(String, String)> {
     const WALK: &str = "local t = {} for i = 1, GetNumBindings() do t[i] = (GetBinding(i)) end \
-                        return unpack(t)";
-    let rows = match script.eval_plain(WALK) {
-        Ok(rows) => rows,
+                        return t";
+    let rows = match script.eval_plain(WALK).map(|mut values| values.pop()) {
+        Ok(Some(PlainValue::List(rows))) => rows,
+        // No bindings: an empty table renders as an empty map.
+        Ok(Some(PlainValue::Map(m))) if m.is_empty() => Vec::new(),
+        Ok(other) => {
+            warn!("webbridge: listing the binding commands: unexpected result {other:?}");
+            return Vec::new();
+        }
         Err(e) => {
             warn!("webbridge: listing the binding commands: {e}");
             return Vec::new();
