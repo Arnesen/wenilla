@@ -71,13 +71,28 @@ pub enum LoginStage {
     Authenticating,
     /// Realm picked; the world-socket handshake and char enum (`LOGIN_STATE_HANDSHAKING`).
     Handshaking,
+    /// The world socket connected, before its authentication (`RESPONSE_CONNECTED`, `0x5aaa90`).
+    WorldConnected,
+}
+
+/// What a roster was fetched for. The screen takes a reply as its own only when it asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RosterCause {
+    /// A roster no ask of the screen's fetched: an `SMSG_CHAR_ENUM` the world stream carried on its
+    /// own.
+    Unasked,
+    /// The reply to a roster request from the screen (`CMSG_CHAR_ENUM` for
+    /// `GetCharacterListUpdate`, `0x5aabb0`).
+    Asked,
 }
 
 /// How a world session ended. On a loss the reference fires `DISCONNECTED_FROM_SERVER` and
 /// `GlueParent.lua` returns to the login screen; a logout returns to character select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEnd {
-    /// A logout the server confirmed (`SMSG_LOGOUT_COMPLETE`); a fresh roster follows.
+    /// A logout the server confirmed (`SMSG_LOGOUT_COMPLETE`), or a refused character login: the
+    /// world link is kept and the session is back at character select on it, as the reference's
+    /// `0x5aaeb0` and `0x5aad70` close nothing.
     LoggedOut,
     /// The stream died: a socket error, an EOF or a post-roster handshake failure. A displacement
     /// kick is this too: vmangos `WorldSession::KickPlayer` only closes the socket, no packet.
@@ -88,8 +103,11 @@ pub enum SessionEnd {
 /// `AUTH_LOGON_FAILED_SUSPENDED` to realmd but `AUTH_OK` to the world server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginRefusal {
-    /// realmd's logon-proof `AuthLogonResult` (`crate::AuthReject`).
+    /// realmd's `AuthLogonResult` in its logon-challenge reply (`crate::AuthReject`).
     Logon(u8),
+    /// realmd's `AuthLogonResult` in its logon-proof reply, where the reference swallows `0x0A`
+    /// (`0x5bada2`).
+    LogonProof(u8),
     /// The world server's `SMSG_AUTH_RESPONSE` code (`crate::WorldAuthReject`).
     World(u8),
 }
@@ -98,7 +116,7 @@ impl LoginRefusal {
     /// The raw byte, for logging only: without its server it is ambiguous.
     pub fn byte(self) -> u8 {
         match self {
-            LoginRefusal::Logon(b) | LoginRefusal::World(b) => b,
+            LoginRefusal::Logon(b) | LoginRefusal::LogonProof(b) | LoginRefusal::World(b) => b,
         }
     }
 }
@@ -112,20 +130,44 @@ impl LoginRefusal {
 pub enum SessionEvent {
     /// A login attempt reached `stage`; emitted by the IO thread, never wire-decoded.
     LoginStage { stage: LoginStage },
-    /// The account's realms (`CMD_REALM_LIST`); the IO thread blocks for the app's pick. Re-sent on
-    /// each refresh (the reference re-requests every 5 s) and on a realm change.
-    RealmList { realms: Vec<crate::RealmInfo> },
+    /// The account's realms (`CMD_REALM_LIST`); emitted by the IO thread after the logon and for
+    /// each query (the reference re-requests every 5 s). `failed` is a query that got no answer
+    /// (`REALM_LIST_FAILED`); `realms` is then the list last held, empty with no logon.
+    RealmList {
+        realms: Vec<crate::RealmInfo>,
+        failed: bool,
+    },
+    /// The world server accepted the authentication (`SMSG_AUTH_RESPONSE` `AUTH_OK`, `0x5ab2b8`
+    /// → `0x5aab80`): the world connect is done and the IO thread is at the character park, with
+    /// no roster fetched unless the native policy's enumeration follows. Emitted by the IO thread,
+    /// never wire-decoded. `epoch` numbers the world session, per process; `generation` is the
+    /// abandon generation of the attempt that dialed it, which a Cancel or a disconnect since has
+    /// moved past (the reference drops the socket there, `0x46befd`, `0x46d360`).
+    WorldAuthenticated {
+        realm: crate::RealmInfo,
+        epoch: u64,
+        generation: u64,
+    },
+    /// `SMSG_ADDON_INFO` was read (the handler `0x5b4260`, which rebuilds the AddOn index with
+    /// `0x51da70` and then calls the listener slot `0x80a400`, `0x5ab2f0`, whose one effect is
+    /// `ADDON_LIST_UPDATE`): its records, each named for the addon we sent in that place. Emitted
+    /// by the IO thread once per world session, never wire-decoded.
+    AddonInfo {
+        records: Vec<crate::messages::AddonRecord>,
+    },
+    /// A roster ask on the parked session failed on the stream (`0x5ab300`'s failure leg,
+    /// `SetStatus(0, 0x2c)`, `CHAR_LIST_FAILED`); the session ends after it. Emitted by the IO
+    /// thread, never wire-decoded.
+    RosterFailed { epoch: u64 },
     /// Queued for a full realm (`AUTH_WAIT_QUEUE`), per queue packet: a wait, not an outcome.
     LoginQueued {
         position: Option<u32>,
         realm: Option<String>,
     },
-    /// A login failed before the roster; `refusal` is `None` for a transport failure. A `terminal`
-    /// one ([`crate::WardenRequired`]) no retry can fix: show `reason` and stop.
+    /// A login failed before the roster; `refusal` is `None` for a transport failure.
     LoginFailed {
         refusal: Option<LoginRefusal>,
         reason: String,
-        terminal: bool,
         /// `Some` only when the socket never opened: which dial failure, and the address.
         dial: Option<crate::DialFailure>,
     },
@@ -134,32 +176,45 @@ pub enum SessionEvent {
     CharacterList {
         characters: Vec<Character>,
         realm: Option<crate::RealmInfo>,
+        cause: RosterCause,
+        /// The world session's number ([`Self::WorldAuthenticated`]'s), 0 on the raw decode path.
+        epoch: u64,
+        /// The abandon generation of the attempt that dialed that session.
+        generation: u64,
     },
     /// `SMSG_CHAR_CREATE`/`_DELETE`'s raw `WorldResult`; on success a fresh roster comes first.
     CharActionResult { action: CharAction, code: u8 },
+    /// `SMSG_CHAR_RENAME`'s result byte and, on success, the renamed guid and new name; emitted
+    /// by the IO thread at character select, never wire-decoded.
+    CharRenamed {
+        result: u8,
+        renamed: Option<(u64, String)>,
+    },
     /// We are in the world; the IO thread emits this before any object update.
     Connected {
         self_guid: u64,
         name: String,
-        /// Rested billing minutes for `GetBillingTimeRested()`, sent once, at auth.
-        billing_time_rested: u32,
+        /// The connection's billing group, from its authentication alone.
+        billing: crate::messages::Billing,
         /// `SMSG_TUTORIAL_FLAGS` if it came during the handshake; `None` if it comes in-world.
         tutorial_flags: Option<Vec<u8>>,
-        /// The addons `SMSG_ADDON_INFO` hid. `None` is no reply at all, where the reference's
+        /// The `SMSG_ADDON_INFO` records. `None` is no reply at all, where the reference's
         /// `GetNumAddOns()` answers 0; an empty list is a reply that hid nothing.
-        addon_info: Option<Vec<String>>,
+        addon_info: Option<Vec<crate::messages::AddonRecord>>,
     },
     /// Our pick was refused (`SMSG_CHARACTER_LOGIN_FAILED`) after [`Self::Connected`] was sent;
     /// `result` is a 1-based index into the reference's six `CHAR_LOGIN_*` strings.
     CharacterLoginFailed { result: u8 },
-    /// Logout confirmed (`SMSG_LOGOUT_COMPLETE`); a fresh [`Self::CharacterList`] follows.
+    /// Logout confirmed (`SMSG_LOGOUT_COMPLETE`); the session returns to character select on the
+    /// same link, where the roster is asked for again.
     LoggedOut,
     /// `SMSG_LOGOUT_RESPONSE`. A non-zero `reason` refuses: 1 in combat, 2 GM-frozen, 3 falling
     /// (vmangos). Zero starts the 20 s camp timer, or with `instant` (resting, taxi, GM) logs out.
     LogoutResponse { reason: u32, instant: bool },
     /// The server dropped a pending logout at our `CMSG_LOGOUT_CANCEL` (`SMSG_LOGOUT_CANCEL_ACK`).
     LogoutCancelled,
-    /// The session ended; `reason` is human-readable.
+    /// The world session ended, and with [`SessionEnd::Lost`] the link with it; `reason` is
+    /// human-readable.
     Disconnected { reason: String, end: SessionEnd },
     /// A placed object entered view, its spawn identity decoded per object type.
     ObjectCreate {
@@ -351,6 +406,9 @@ pub enum SessionEvent {
     Reputations { standings: Vec<(u8, i32)> },
     /// `SMSG_SET_FACTION_STANDING`: `(reputationListId, standing)` per slot, base excluded.
     ReputationDelta { standings: Vec<(u32, i32)> },
+    /// `SMSG_SET_FORCED_REACTIONS`: `(Faction.dbc id, reaction rank)`, the whole table replacing
+    /// the last. The reaction resolvers read it ahead of the faction rules.
+    ForcedReactions { reactions: Vec<(u32, u32)> },
     /// `SMSG_SET_FACTION_VISIBLE`: sets the slot's visible flag, which decides if it is listed.
     ReputationVisible { list_id: u32 },
     /// `SMSG_NAME_QUERY_RESPONSE`: names are never descriptor fields in 1.12, only query answers.
@@ -387,7 +445,7 @@ pub enum SessionEvent {
         racial_leader: bool,
     },
     /// `SMSG_GAMEOBJECT_QUERY_RESPONSE`, keyed by template `entry`; `data` is the type-specific
-    /// raw tail. An unknown entry still fires, every field zero or empty.
+    /// raw tail.
     GameObjectInfo {
         entry: u32,
         type_id: u32,
@@ -395,6 +453,9 @@ pub enum SessionEvent {
         name: String,
         data: [i32; 24],
     },
+    /// `SMSG_GAMEOBJECT_QUERY_RESPONSE` for an entry the server does not know: the lone `entry`
+    /// with its top bit set, the refusal the template cache frees a node on (`0x5588e0`).
+    GameObjectUnknown { entry: u32 },
     /// `SMSG_GAMEOBJECT_CUSTOM_ANIM`: the reference arms substate `8 + anim_id`, AnimationData
     /// 153..156 (Custom0..3), and rejects `anim_id >= 4`. A fishing bobber's bite sends 0.
     GameObjectCustomAnim { guid: u64, anim_id: u32 },
@@ -525,6 +586,9 @@ pub enum SessionEvent {
         reason: u8,
         required_level: Option<u32>,
         item_guid: u64,
+        /// The second item the refused operation named, or 0; the client unlocks both
+        /// (`0x5e3ac0`, `0x5e3ad3`).
+        item2_guid: u64,
         /// The destination bag's absolute player slot, reason 16's `%s`; 255 is the player's own.
         bag_slot: u8,
     },
@@ -622,7 +686,7 @@ pub enum SessionEvent {
     ChannelUpdate { remaining_ms: u32 },
     /// Time left on one of our auras by `UNIT_FIELD_AURA` slot (`SMSG_UPDATE_AURA_DURATION`),
     /// never for a permanent one. It arrives before the delta naming the slot's spell.
-    AuraDuration { slot: u8, remaining_ms: u32 },
+    AuraDuration { slot: u8, remaining_ms: i32 },
     /// A spell-visual kit outside the cast sequence (`SMSG_PLAY_SPELL_VISUAL`), such as eat/drink.
     PlaySpellVisual { unit: u64, kit_id: u32 },
     /// Spell damage dealt (`SMSG_SPELLNONMELEEDAMAGELOG`).
@@ -789,8 +853,9 @@ pub enum SessionEvent {
     LootMoneyNotify { amount: u32 },
     /// The coin line disappears for every current looter (`SMSG_LOOT_CLEAR_MONEY`).
     LootClearMoney,
-    /// The loot window closes (`SMSG_LOOT_RELEASE_RESPONSE`), answering our `CMSG_LOOT_RELEASE`.
-    LootReleaseResponse { guid: u64 },
+    /// A loot release (`SMSG_LOOT_RELEASE_RESPONSE`), answering a `CMSG_LOOT_RELEASE`; `result`
+    /// is the wire byte, which the client reads as a gate.
+    LootReleaseResponse { guid: u64, result: u8 },
     /// A group roll opened on one drop (`SMSG_LOOT_START_ROLL`); its `rollID` is client-allocated.
     LootStartRoll(LootStartRoll),
     /// A vote or dice (`SMSG_LOOT_ROLL`); `LootRoll::is_dice`/`vote` split the overloaded pair.
@@ -1111,14 +1176,21 @@ impl SessionEventKind {
 /// The result of polling the reader for the next packet's events.
 pub enum Poll {
     /// A decoded packet; `events` is empty for an opcode parsed but not modelled. `tail` counts
-    /// body bytes left unread, which shows a decoder shorter than the server's layout.
+    /// body bytes left unread, which shows a decoder shorter than the server's layout. `body` is
+    /// the packet as it came off the wire, after the header, for the packet trace.
     Events {
         opcode: u16,
         events: Vec<SessionEvent>,
         tail: usize,
+        body: Vec<u8>,
     },
-    /// An unparseable packet, skipped to keep the stream aligned; `reason` has a hex preview.
-    Skipped { opcode: u16, reason: String },
+    /// An unparseable packet, skipped to keep the stream aligned; `reason` has a hex preview and
+    /// `body` the whole packet.
+    Skipped {
+        opcode: u16,
+        reason: String,
+        body: Vec<u8>,
+    },
 }
 
 mod decode;

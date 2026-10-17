@@ -63,6 +63,15 @@ impl super::UiScript {
     pub fn take_tabard_intents(&mut self) -> Vec<TabardIntent> {
         std::mem::take(&mut self.model_mut().tabard_intents)
     }
+
+    /// Take the `CloseTabardCreation()` calls queued since the last drain, leaving the saves in
+    /// order: a close core answers the call its own `CLOSE_TABARD_FRAME` raised through `OnHide`.
+    pub fn take_tabard_close(&mut self) -> bool {
+        let intents = &mut self.model_mut().tabard_intents;
+        let before = intents.len();
+        intents.retain(|i| !matches!(i, TabardIntent::Close));
+        intents.len() != before
+    }
 }
 
 /// The three `this` raises every method shares (`0x847ef8`, `0x847ec0`, `0x847e98`).
@@ -191,11 +200,14 @@ fn emblem_texture(lua: &Lua, this: Value, texture: Value, upper: bool) -> mlua::
         return Err(wrong());
     }
     let path = emblem_path(design(&model, h), half);
+    model.set_texel(
+        rh,
+        super::texel::TexSet::Own(Some(format!("{EMBLEM_MASK_TOKEN}{path}"))),
+    );
     let data = model.region_data.entry(rh).or_default();
-    data.texture = Some(format!("{EMBLEM_MASK_TOKEN}{path}"));
-    data.fill = None;
     data.portrait_unit = None;
     data.circular = false;
+    model.note_art(rh);
     Ok(())
 }
 

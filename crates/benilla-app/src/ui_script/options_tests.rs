@@ -52,9 +52,9 @@ fn harness_with(mut s: UiScript, definers: &[&str]) -> UiScript {
             super::test_ui::load_ui(&s, file);
         }
     }
-    // The app's post-load pass: `BuffFrame_OnLoad` never pitches the buff rows, and the stock arm
-    // that does waits for `VARIABLES_LOADED` (`UIOptionsFrame.lua:206`).
-    super::manifest::apply_buff_durations(&s).unwrap();
+    // `BuffFrame_OnLoad` never pitches the buff rows; the stock arm that does waits for
+    // `VARIABLES_LOADED` (`UIOptionsFrame.lua:206`).
+    s.fire_event("VARIABLES_LOADED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
 }
@@ -112,6 +112,46 @@ fn controls_is_the_default_category_and_the_title_reads_it() {
         "Action Bars"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The page body is the ScrollFrame's scroll child, which its HIGHLIGHT callback draws at the
+/// ScrollFrame's level (`0x787220`); the bar's trough sits at that level too, so the body and the
+/// bar, a level up, both draw over it.
+#[test]
+fn the_page_body_and_its_bar_draw_over_the_bar_trough() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.resolve();
+    s.tick(0.05);
+    s.resolve();
+    assert!(
+        s.eval::<bool>("return BenillaOptionsFrameContainerScrollBarTrough:IsVisible() == 1")
+            .unwrap(),
+        "the Controls page scrolls, so its trough shows"
+    );
+    let quads = s.extract();
+    let zs = |pick: &dyn Fn(&str) -> bool| -> Vec<u128> {
+        quads
+            .iter()
+            .filter(|q| s.quad_owner_name(q.target).is_some_and(|n| pick(&n)))
+            .map(|q| q.z)
+            .collect()
+    };
+    let trough = zs(&|n| n == "BenillaOptionsFrameContainerScrollBarTrough");
+    let body = zs(&|n| n.starts_with("BenillaOptionsFrameContainerBody"));
+    let bar =
+        zs(&|n| n.starts_with("BenillaOptionsFrameContainerScrollBar") && !n.ends_with("Trough"));
+    let top = *trough.iter().max().expect("the trough draws");
+    assert!(!body.is_empty() && !bar.is_empty());
+    assert!(
+        body.iter().all(|&z| z > top),
+        "the body draws over the trough"
+    );
+    assert!(
+        bar.iter().all(|&z| z > top),
+        "the bar draws over the trough"
+    );
 }
 
 /// The selection survives a close and reopen: the OnShow re-applies the last category.
@@ -311,7 +351,7 @@ fn the_ground_dim_draws_over_the_tile_and_clear_of_the_rope() {
     let ground = quads
         .iter()
         .position(|q| match &q.content {
-            QuadContent::Backdrop { path, .. } => path.contains("UI-DialogBox-Background"),
+            QuadContent::Texture { path: Some(p), .. } => p.contains("UI-DialogBox-Background"),
             _ => false,
         })
         .expect("the window still wears the 1.14 dialog ground");
@@ -1346,14 +1386,17 @@ fn the_nameplates_page_toggles_the_unit_name_cvars() {
             "{row} defaults unchecked"
         );
     }
-    // The name rows at the reference's registered defaults: player "1", NPC and own "0".
-    assert!(
-        s.eval::<bool>(
-            "return BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:GetChecked()"
-        )
-        .unwrap(),
-        "Player Names defaults checked"
-    );
+    // The name rows at the reference's registered defaults: player, guild and titles "1", NPC and
+    // own "0".
+    for row in ["RowPlayerNames", "RowGuildNames", "RowPlayerTitles"] {
+        assert!(
+            s.eval::<bool>(&format!(
+                "return BenillaOptionsFrameContainerBodyNameplates{row}Check:GetChecked()"
+            ))
+            .unwrap(),
+            "{row} defaults checked"
+        );
+    }
     for row in ["RowNpcNames", "RowOwnName"] {
         assert!(
             !s.eval::<bool>(&format!(
@@ -1904,16 +1947,23 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
             "{f} stays away while the page fits"
         );
     }
-    let page_h: f32 = s
-        .eval("return BenillaOptionsFrameContainerScroll:GetHeight()")
+    // The page rect in the window's units, from its edges: the scroll is sized by its anchors,
+    // so its `GetWidth`/`GetHeight` answer the span before the window's scale divides it.
+    let (page_w, page_h): (f32, f32) = s
+        .eval(
+            "local sf = BenillaOptionsFrameContainerScroll \
+             return sf:GetRight() - sf:GetLeft(), sf:GetTop() - sf:GetBottom()",
+        )
+        .unwrap();
+    let (body_w, body_h): (f32, f32) = s
+        .eval(
+            "return BenillaOptionsFrameContainerBody:GetWidth(), \
+             BenillaOptionsFrameContainerBody:GetHeight()",
+        )
         .unwrap();
     assert!(
-        (s.eval::<f32>("return BenillaOptionsFrameContainerBody:GetHeight()")
-            .unwrap()
-            - page_h)
-            .abs()
-            < 0.5,
-        "the body is the page rect when nothing overflows"
+        (body_w - page_w).abs() < 0.5 && (body_h - page_h).abs() < 0.5,
+        "the body is the page rect when nothing overflows: {body_w}x{body_h} vs {page_w}x{page_h}"
     );
 
     s.run("BenillaOptionsFrameSearchBox:SetText(\"e\")")
@@ -2111,7 +2161,8 @@ fn hover_label(s: &mut UiScript, frame: &str) {
 
 /// Scroll `frame` into the page's rect: past the fold a row is clipped and cannot be hovered.
 fn scroll_into_view(s: &mut UiScript, frame: &str) {
-    s.resolve();
+    // The page's fit and the range it marks land in the walk.
+    settle(s);
     s.run(&format!(
         "local sf = BenillaOptionsFrameContainerScroll \
          local range = sf:GetVerticalScrollRange() \
@@ -2314,9 +2365,9 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 83 rows less the three untipped below; four of the 80 carry a `BENILLA_` key, and a dropdown
+    // 84 rows less the three untipped below; four of the 81 carry a `BENILLA_` key, and a dropdown
     // row is checked on the key it wears at rest.
-    assert_eq!(checked, 80, "every tipped row carries a live key");
+    assert_eq!(checked, 81, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2412,8 +2463,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // Every tipped row: the same 80 the key census counts.
-    assert_eq!(raised, 80, "every row but Auto Loot raises a description");
+    // Every tipped row: the same 81 the key census counts.
+    assert_eq!(raised, 81, "every row but Auto Loot raises a description");
 }
 
 /// 1.12's AdvancedOptionsCombatText box as saved-global rows: a click writes the global, never a
@@ -2718,6 +2769,7 @@ fn the_action_bars_page_locks_the_real_bar() {
             action: 111,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -4069,13 +4121,6 @@ fn without_a_seated_measurer_the_same_fit_reads_zero() {
 // nothing and reads back nil, so its box would offer a setting benilla does not have. A CVar is
 // registered only once something reads it.
 const UNBACKED_REFERENCE_CVARS: &[(&str, &str)] = &[
-    (
-        "UnitNamePlayerPVPTitle",
-        "the PvP rank prefix on the overhead name line — slot a4 of `0x608f50`, bit `0x20` of the \
-         same mask, resolved by `0x609370` through the `PVP_RANK_%d_%d` GlobalStrings key. Blocked \
-         one step further back than its guild twin: the rank byte streams, but the key's second \
-         index is a FACTION SIDE that `ui_unit` does not resolve for an arbitrary player yet",
-    ),
     // No slider CVar may land here: `UIOptionsFrame_Load` hands `GetCVar` to `Slider:SetValue`
     // (`UIOptionsFrame.lua:271-275`), which raises on nil (`0x790980`) and stops the stock
     // window's load. A check button's `GetCVar(x) == "1"` is nil-safe.
@@ -4379,7 +4424,48 @@ fn show_target_damage_greys_its_own_pair_and_the_floating_text_master_leaves_it_
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The reference's rules: Player Guild Names is dead while player names are off
+/// The titles box is the guild row's twin: checked and live at the registered defaults (`"1"`),
+/// and a click survives closing and reopening the panel because the CVar is its store.
+#[test]
+fn the_titles_box_sticks_across_a_panel_reopen() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
+        .unwrap();
+    let checked = |s: &mut UiScript| -> bool {
+        s.eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyNameplatesRowPlayerTitlesCheck:GetChecked()",
+        )
+        .unwrap()
+    };
+    let cvar = |s: &mut UiScript| -> Option<String> {
+        s.eval::<Option<String>>(r#"return GetCVar("UnitNamePlayerPVPTitle")"#)
+            .unwrap()
+    };
+    assert!(checked(&mut s), "the registered default is \"1\"");
+    assert_eq!(cvar(&mut s).as_deref(), Some("1"));
+
+    // A click writes the CVar; the box and the mirror agree.
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerTitlesCheck:Click()")
+        .unwrap();
+    assert!(!checked(&mut s));
+    assert_eq!(cvar(&mut s).as_deref(), Some("0"));
+
+    // Closed and reopened, the row re-reads the CVar instead of a staged value.
+    s.run("HideUIPanel(BenillaOptionsFrame) ShowUIPanel(BenillaOptionsFrame)")
+        .unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
+        .unwrap();
+    assert!(!checked(&mut s), "the click stuck");
+    s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerTitlesCheck:Click()")
+        .unwrap();
+    assert!(checked(&mut s));
+    assert_eq!(cvar(&mut s).as_deref(), Some("1"));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The reference's rules: Player Guild Names and Player Titles are dead while player names are off
 /// (`UIOptionsFrame.lua:703-709`), Auto-Follow Speed while the style is Never (`:717-721`).
 #[test]
 fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() {
@@ -4387,22 +4473,28 @@ fn the_guild_line_greys_with_player_names_and_the_follow_speed_with_the_style() 
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
 
-    // Nameplates: `UnitNamePlayer` ships "1", so the child arrives live.
+    // Nameplates: `UnitNamePlayer` ships "1", so both children arrive live.
     s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
         .unwrap();
-    let guild_on = |s: &mut UiScript| -> bool {
-        s.eval::<bool>(
-            "return BenillaOptionsFrameContainerBodyNameplatesRowGuildNamesCheck:IsEnabled() ~= 0",
-        )
+    let child_on = |s: &mut UiScript, row: &str| -> bool {
+        s.eval::<bool>(&format!(
+            "return BenillaOptionsFrameContainerBodyNameplates{row}Check:IsEnabled() ~= 0"
+        ))
         .unwrap()
     };
-    assert!(guild_on(&mut s));
+    for row in ["RowGuildNames", "RowPlayerTitles"] {
+        assert!(child_on(&mut s, row), "{row} arrives live");
+    }
     s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:Click()")
         .unwrap();
-    assert!(!guild_on(&mut s), "no names, no guild line to gate");
+    for row in ["RowGuildNames", "RowPlayerTitles"] {
+        assert!(!child_on(&mut s, row), "no names, no {row} to gate");
+    }
     s.run("BenillaOptionsFrameContainerBodyNameplatesRowPlayerNamesCheck:Click()")
         .unwrap();
-    assert!(guild_on(&mut s));
+    for row in ["RowGuildNames", "RowPlayerTitles"] {
+        assert!(child_on(&mut s, row));
+    }
 
     // Controls: the style ships "1" (Smart), so the slider arrives live; "0" is Never.
     s.run("BenillaOptionsFrameCategoryListRowControls:Click()")

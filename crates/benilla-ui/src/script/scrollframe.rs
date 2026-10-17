@@ -1,6 +1,7 @@
 //! The `ScrollFrame` methods (`CSimpleScrollFrame`): the scroll child, the two offsets, the two
-//! ranges and `UpdateScrollChildRect`, over [`ScrollFrameState`]; the layout's `resolve`,
-//! `extract` and `hit_test` place and clip the child. The axes are one mechanism: `0x786d30`
+//! ranges and `UpdateScrollChildRect`, over [`ScrollFrameState`], and the frame's own update
+//! ([`update`]), which keeps the ranges; the layout's `resolve`, `extract` and `hit_test` place
+//! and clip the child. The axes are one mechanism: `0x786d30`
 //! (horizontal) is a byte-clone of `0x786db0` (vertical) on `[+0x324]`/`[+0x32c]` for
 //! `[+0x328]`/`[+0x334]`, and `0x786e30` measures both ranges in one pass. The methods sit in
 //! their own table, so on every other frame kind `SetScrollChild` is nil, as in the client.
@@ -42,9 +43,8 @@ enum Axis {
     Vertical,
 }
 
-/// `Get{Vertical,Horizontal}ScrollRange()`: `max(0, content − frame)` from the resolved rects,
-/// computed on every call, where the reference caches both (`[+0x31c]`, `[+0x320]`) and recomputes
-/// them only once marked dirty. The content is the scroll child's whole subtree, not its own rect
+/// One range as the recompute `0x786e30` measures it: `max(0, content − frame)` from the resolved
+/// rects. The content is the scroll child's whole subtree, not its own rect
 /// (`0x786e30` calls the recursive `0x786f80`): stock `ItemTextPageScrollChild` is 10×10 around a
 /// 270×304 SimpleHTML (`ItemTextFrame.xml:198`). Each extent is divided by its frame's effective
 /// scale, since the offset is in local units; a range in screen px under-scrolls a scaled frame.
@@ -113,29 +113,6 @@ fn subtree_span(model: &Model, f: FrameHandle, axis: Axis) -> Option<(f32, f32)>
     span
 }
 
-/// Every FontString under `f` (its own regions, then its visible children's), in tree order.
-fn subtree_font_strings(model: &Model, f: FrameHandle) -> Vec<crate::widget::RegionHandle> {
-    let mut out = Vec::new();
-    let Some(frame) = model.arena.frame(f) else {
-        return out;
-    };
-    for &rh in &frame.regions {
-        if model
-            .arena
-            .region(rh)
-            .is_some_and(|r| matches!(r.kind, crate::widget::RegionKind::FontString))
-        {
-            out.push(rh);
-        }
-    }
-    for &ch in &frame.children {
-        if model.arena.frame(ch).is_some_and(|c| c.effective_visible) {
-            out.extend(subtree_font_strings(model, ch));
-        }
-    }
-    out
-}
-
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
@@ -165,15 +142,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     _ => None,
                 }
             };
-            let changed = with_scroll(lua, &this, |s| {
-                let changed = s.child != new_child;
-                s.child = new_child;
-                changed
-            })?;
-            if changed {
-                // The child is an input of the layout resolve, so a real change dirties it.
-                lua.app_data_mut::<Model>().expect("model").touch_layout();
+            // Every call marks the range (`0x786d16`), the same child again included.
+            with_scroll(lua, &this, |s| s.range_dirty = true)?;
+            {
+                let h = frame_handle_of(lua, &this)?;
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model.arena.set_scroll_child(h, new_child);
             }
+            // The old child keeps its point and is not invalidated (`0x786ce6`–`0x786cf4` only
+            // flags it); the new one is re-anchored on every call (`0x786d11`).
+            reanchor_child(lua, &this)?;
             Ok(())
         })?,
     )?;
@@ -209,7 +187,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if !changed {
                 return Ok(());
             }
-            lua.app_data_mut::<Model>().expect("model").touch_layout();
+            // The re-anchor at the new offset (`0x786dd8` → `0x787100`).
+            reanchor_child(lua, &this)?;
             fire_scroll(lua, &this, "OnVerticalScroll", px)
         })?,
     )?;
@@ -217,13 +196,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetVerticalScroll",
         lua.create_function(|lua, this: Table| with_scroll(lua, &this, |s| s.vertical))?,
     )?;
+    // The stored range (`0x7917d0` reads `[+0x320]` at `0x791873`), stale while the frame is
+    // hidden or its range unmarked.
     m.set(
         "GetVerticalScrollRange",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(scroll_range(&model, h, Axis::Vertical))
-        })?,
+        lua.create_function(|lua, this: Table| with_scroll(lua, &this, |s| s.range[1]))?,
     )?;
 
     // ── The horizontal axis ──
@@ -241,7 +218,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if !changed {
                 return Ok(());
             }
-            lua.app_data_mut::<Model>().expect("model").touch_layout();
+            reanchor_child(lua, &this)?;
             fire_scroll(lua, &this, "OnHorizontalScroll", px)
         })?,
     )?;
@@ -251,63 +228,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     m.set(
         "GetHorizontalScrollRange",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(scroll_range(&model, h, Axis::Horizontal))
-        })?,
+        lua.create_function(|lua, this: Table| with_scroll(lua, &this, |s| s.range[0]))?,
     )?;
-    // UpdateScrollChildRect(): recomputes both ranges and fires `OnScrollRangeChanged` at once,
-    // where the reference only marks them dirty (`0x791943`) for its next pump, which fires on a
-    // change. A script resize reaches the resolved rects only at the app's next resolve, so this
-    // resolves first.
+    // UpdateScrollChildRect() (`0x7918b0`) marks the range and does nothing else (`0x791943`):
+    // the frame's next update while shown recomputes it.
     m.set(
         "UpdateScrollChildRect",
-        lua.create_function(|lua, this: Table| {
-            let h = frame_handle_of(lua, &this)?;
-            // The reference measures text synchronously and ours lands a frame later, so the
-            // child's FontStrings are measured first: `QuestLog_UpdateQuestDetails` calls this
-            // right after its SetTexts (`QuestLogFrame.lua:458`).
-            let strings: Vec<crate::widget::RegionHandle> = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                match model.arena.frame(h).map(|f| &f.kind_state) {
-                    Some(KindState::Scroll(sf)) => sf
-                        .child
-                        .map(|c| subtree_font_strings(&model, c))
-                        .unwrap_or_default(),
-                    _ => Vec::new(),
-                }
-            };
-            for rh in strings {
-                super::measure::ensure_measured(lua, rh);
-            }
-            let (id, x_range, y_range) = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                super::UiScript::resolve_layout(&mut model);
-                let x_range = scroll_range(&model, h, Axis::Horizontal);
-                let y_range = scroll_range(&model, h, Axis::Vertical);
-                (model.frame_id(h), x_range, y_range)
-            };
-            // The resolve can move sizes, and the reference fires `OnSizeChanged` during layout, so
-            // those fire before the range notify.
-            event::fire_size_changes(lua);
-            // `OnScrollRangeChanged(self, xRange, yRange)`: horizontal first (`0x786eff`), which is
-            // why stock passes `arg2` on as the vertical range (`UIPanelTemplates.xml:188`).
-            if let Err(e) = event::fire_widget_handler(
-                lua,
-                id,
-                "OnScrollRangeChanged",
-                vec![
-                    Value::Number(f64::from(x_range)),
-                    Value::Number(f64::from(y_range)),
-                ],
-            ) {
-                lua.app_data_mut::<Model>()
-                    .expect("model app_data")
-                    .record_script_error(e.to_string());
-            }
-            Ok(())
-        })?,
+        lua.create_function(|lua, this: Table| with_scroll(lua, &this, |s| s.range_dirty = true))?,
     )?;
 
     lua.set_named_registry_value(REG_SCROLLFRAME_METHODS, m)?;
@@ -327,7 +254,124 @@ fn fire_scroll(lua: &Lua, this: &Table, script: &str, value: f32) -> mlua::Resul
     {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
-            .record_script_error(e.to_string());
+            .record_lua_error(&e);
     }
+    Ok(())
+}
+
+/// The frame's update (`0x787140`, the walk's slot after its `OnUpdate`), so only while shown. A
+/// resize since the last one marks the range, as the size slot `0x7871f0` does (`0x787205`). A
+/// marked range is recomputed (`0x787152`–`0x7871a0`, `0x786e30`) unless the frame has no rect
+/// (`0x787186`) or no scroll child (`0x786e42`), and the mark is cleared either way, after the
+/// notify (`0x7871a5`). The recompute stores both ranges (`0x786eaa`, `0x786ed1`) and fires
+/// `OnScrollRangeChanged(self, xRange, yRange)` when either moved by 2⁻²² (`[0x8029d4]`) or more
+/// in the reference's units (the screen diagonal as 1) (`0x786ed7`–`0x786efd`), which is that times the
+/// layout unit in ours.
+///
+/// The rects it reads are the ones the pump's drain before the walk (`0x7656ba`) resolved: the
+/// recompute reads them through `0x768320`, which never resolves, so a resize made earlier in the
+/// walk counts from the next tick, and the size it notes is the one that drain applied.
+pub(super) fn update(lua: &Lua, h: FrameHandle) {
+    let notify = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let rect = model.resolved.get(&h).copied();
+        let eps = model.size_eps();
+        let Some(s) = scroll_state(&mut model, h) else {
+            return;
+        };
+        see_size(s, rect, eps);
+        if !s.range_dirty {
+            return;
+        }
+        let has_child = s.child.is_some();
+        let measured = (rect.is_some() && has_child).then(|| {
+            [
+                scroll_range(&model, h, Axis::Horizontal),
+                scroll_range(&model, h, Axis::Vertical),
+            ]
+        });
+        let Some(s) = scroll_state(&mut model, h) else {
+            return;
+        };
+        let moved = measured.filter(|new| {
+            let old = std::mem::replace(&mut s.range, *new);
+            (0..2).any(|i| (f64::from(new[i]) - f64::from(old[i])).abs() >= eps)
+        });
+        if moved.is_none() {
+            s.range_dirty = false;
+        }
+        moved.map(|range| (model.frame_id(h), range))
+    };
+    let Some((id, [x_range, y_range])) = notify else {
+        return;
+    };
+    // Horizontal first (`0x786eff`), which is why stock passes `arg2` on as the vertical range
+    // (`UIPanelTemplates.xml:188`).
+    if let Err(e) = event::fire_widget_handler(
+        lua,
+        id,
+        "OnScrollRangeChanged",
+        vec![
+            Value::Number(f64::from(x_range)),
+            Value::Number(f64::from(y_range)),
+        ],
+    ) {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .record_lua_error(&e);
+    }
+    // The mark clears after the notify, so one the handler set is dropped.
+    if let Some(s) = scroll_state(&mut lua.app_data_mut::<Model>().expect("model app_data"), h) {
+        s.range_dirty = false;
+    }
+}
+
+/// Frame `h`'s ScrollFrame state, if it is a live ScrollFrame.
+fn scroll_state(model: &mut Model, h: FrameHandle) -> Option<&mut ScrollFrameState> {
+    match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+        Some(KindState::Scroll(s)) => Some(s),
+        _ => None,
+    }
+}
+
+/// Note the frame's resolved size; a change since the last note marks the range, by the width or
+/// height move that fires `OnSizeChanged` ([`crate::layout::size_changed`] at `eps`,
+/// [`Model::size_eps`]). No rect, no note.
+fn see_size(s: &mut ScrollFrameState, rect: Option<crate::layout::Rect>, eps: f64) {
+    let Some(r) = rect else { return };
+    let size = [r.width(), r.height()];
+    let moved = |i: usize| (f64::from(size[i]) - f64::from(s.seen_size[i])).abs() >= eps;
+    if moved(0) || moved(1) {
+        s.range_dirty = true;
+    }
+    s.seen_size = size;
+}
+
+/// The re-anchor (`0x787100`): when the frame holds a child, clear its points (`0x787110` →
+/// `0x767620`) and set one TOPLEFT on the frame's TOPLEFT at the raw `(horizontal, vertical)`
+/// offsets, y up, with the invalidate flag (`0x787136`). A real write on the child: its own
+/// points are gone, and it keeps the new one when the frame lets it go.
+fn reanchor_child(lua: &Lua, this: &Table) -> mlua::Result<()> {
+    let (child, x, y) = with_scroll(lua, this, |s| (s.child, s.horizontal, s.vertical))?;
+    let Some(child) = child else {
+        return Ok(());
+    };
+    let h = frame_handle_of(lua, this)?;
+    let mut model = lua.app_data_mut::<Model>().expect("model");
+    if model.arena.frame(child).is_none() {
+        return Ok(());
+    }
+    let sid = model.frame_id(h);
+    let pin = crate::layout::Anchors::from([crate::layout::Anchor::new(
+        crate::layout::Point::TopLeft,
+        sid,
+        crate::layout::Point::TopLeft,
+        x,
+        y,
+    )]);
+    let input = model.layout_inputs.entry(child).or_default();
+    let changed = !input.anchors.bits_eq(&pin);
+    input.anchors = pin;
+    model.invalidate_frame(child, changed);
     Ok(())
 }

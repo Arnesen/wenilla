@@ -5,8 +5,9 @@
 //! content draws here: a placement inside its fade band is exiled to ordinary entities.
 //!
 //! Declined batches fall through to the merge or entity path, counted in a census: env-mapped
-//! (`texture_unit_lookup > 2`, view-generated UVs), depth-flagged, the `ShadeSel::Rig` family,
-//! exterior fader props, and props of a placement without a portal instance.
+//! (`texture_unit_lookup > 2`, view-generated UVs) or two-texture units, depth-flagged, the
+//! `ShadeSel::Rig` family, exterior fader props, and props of a placement without a portal
+//! instance.
 
 use bevy::camera::primitives::Aabb;
 use bevy::mesh::MeshVertexAttribute;
@@ -284,6 +285,7 @@ pub struct GxBatch<'a> {
     pub two_sided: bool,
     pub unlit: bool,
     pub fog_policy: benilla_formats::FogPolicy,
+    /// A stage samples view-generated coordinates, stage 0's or a second stage's: declined.
     pub env_map: bool,
     pub no_depth_write: bool,
     pub no_depth_test: bool,

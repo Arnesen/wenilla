@@ -132,7 +132,7 @@ fn service(
         name: Some(name.into()),
         subtext: None,
         texture: Some("Interface\\Icons\\INV_Sword_04".into()),
-        description: String::new(),
+        description: None,
         cost,
         prof_first_rank: false,
         category,
@@ -142,6 +142,9 @@ fn service(
         is_trade_skill: false,
         group_key: skill_line,
         group_name: line_name.into(),
+        skill_step: false,
+        step_increase: None,
+        line_name: Some(line_name.into()),
     }
 }
 
@@ -222,10 +225,7 @@ fn shipped_trainer_frame_drives_end_to_end() {
     // 50 copper: Heroic Strike (10c) is affordable, Thunder Clap (500c) is not.
     s.set_money(50);
     s.set_trainer(Some(menu()));
-    s.fire_event(
-        "TRAINER_SHOW",
-        vec![ScriptValue::Str("Sana Winterhoof".into())],
-    );
+    s.fire_event("TRAINER_SHOW", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     assert!(s
@@ -312,7 +312,7 @@ fn clicking_a_header_row_collapses_its_group() {
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));
-    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    s.fire_event("TRAINER_SHOW", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // Full tree: 2 headers + 4 services = 6 rows; row 2 is Heroic Strike.
@@ -346,7 +346,7 @@ fn filter_hides_a_state_keeping_headers() {
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));
-    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    s.fire_event("TRAINER_SHOW", vec![]);
 
     assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 6);
 
@@ -376,7 +376,7 @@ fn filter_rows_toggle_through_the_dropdown_kit() {
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));
-    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    s.fire_event("TRAINER_SHOW", vec![]);
 
     // Row 2 is "Unavailable", checked since `trainer_script` turns every state on.
     s.run("ToggleDropDownMenu(1, nil, ClassTrainerFrameFilterDropDown)")
@@ -458,7 +458,7 @@ fn wheel_over_a_row_scrolls_the_list() {
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(long_menu()));
-    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    s.fire_event("TRAINER_SHOW", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     let row1 = "return ClassTrainerSkill1Text:GetText()";
@@ -521,7 +521,7 @@ fn a_selected_or_hovered_service_row_paints_its_name_white() {
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));
-    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    s.fire_event("TRAINER_SHOW", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     assert!(
@@ -578,7 +578,7 @@ fn wheel_scroll_is_silent_but_the_arrows_click() {
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(long_menu())); // 16 rows > 11 visible → the bar + arrows show
-    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    s.fire_event("TRAINER_SHOW", vec![]);
     let _ = s.take_sounds(); // drain the window's OnShow open sound
 
     let click = SoundRequest::KitName("UChatScrollButton".into());
@@ -617,7 +617,7 @@ fn the_scrollbar_arrows_step_the_list_the_way_they_point() {
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(long_menu())); // 16 rows > 11 visible → the bar shows
-    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    s.fire_event("TRAINER_SHOW", vec![]);
     let offset = |s: &mut UiScript| {
         s.eval::<i64>("return ClassTrainerListScrollFrame.offset or -1")
             .unwrap()
@@ -654,11 +654,7 @@ fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
             .map(|b| benilla_ui::toc::Toc::parse(&benilla_ui::source::decode(&b)))
             .expect("the addon's toc off the chain");
     assert!(toc.load_on_demand(), "the reference ships it LoadOnDemand");
-    let info = || {
-        let mut i = super::addons::info_from_toc("Blizzard_TrainerUI", &toc);
-        i.chain = true;
-        i
-    };
+    let info = || super::addons::info_from_toc("Blizzard_TrainerUI", &toc, true);
     let saved_dir =
         std::env::temp_dir().join(format!("benilla-trainer-saved-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&saved_dir);
@@ -677,7 +673,7 @@ fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
         s.set_money(50);
         s.set_trainer(Some(menu()));
         // The reference's arm: TRAINER_SHOW → ClassTrainerFrame_LoadUI → UIParentLoadAddOn.
-        s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+        s.fire_event("TRAINER_SHOW", vec![]);
         assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
         assert!(
             s.eval::<bool>("return IsAddOnLoaded('Blizzard_TrainerUI') == 1")
@@ -825,7 +821,7 @@ fn a_long_row_name_stays_on_one_line_and_carries_its_rank_along() {
     let mut s = trainer_script();
     s.set_money(5000);
     s.set_trainer(Some(recipe_menu()));
-    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Nadyia".into())]);
+    s.fire_event("TRAINER_SHOW", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // A host measure of 6 px per character and 14 px per line; the name's requests are kept, since
@@ -1120,7 +1116,7 @@ fn a_filter_click_repaints_the_rows_the_player_is_looking_at() {
     let mut s = trainer_script();
     s.set_money(50);
     s.set_trainer(Some(menu()));
-    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    s.fire_event("TRAINER_SHOW", vec![]);
 
     // The painted row buttons, as the player sees them.
     let painted = "\

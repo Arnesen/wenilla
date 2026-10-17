@@ -10,8 +10,9 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use super::binding_abi::flag;
+use super::binding_abi::{bool_or_default, flag};
 use super::Model;
+use crate::script::binding_abi::{Idx, Idx32};
 
 /// `CLootButton`'s own Lua method table (`0x847ce4`): one entry, per the registrar's `mov edx,1`.
 pub(super) const REG_LOOTBUTTON_METHODS: &str = "__benilla_lootbutton_methods";
@@ -48,7 +49,8 @@ pub struct LootRow {
     pub quality: Option<u32>,
     /// The synthesized coin pile (`LootSlotIsCoin` true, `LootSlotIsItem` false).
     pub is_coin: bool,
-    /// The tooltip store's key, 0 for the coin row: `GetLootSlotInfo`'s fifth return, not 1.12's.
+    /// The tooltip store's key, 0 for the coin row: `SetLootItem` reads it. `GetLootSlotInfo`
+    /// returns four values and no id (`0x4c2d07`).
     pub item_id: u32,
     /// `GetLootSlotLink`'s answer; `None` for the coin row and while the template is in flight.
     pub link: Option<String>,
@@ -100,9 +102,10 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().loot_confirms)
     }
 
-    /// Whether `CloseLoot` was called since the last drain; the app releases an open loot.
-    pub fn take_loot_close(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().loot_close)
+    /// Whether `CloseLoot` was called since the last drain, with its `failed` flag: the app
+    /// releases an open loot and, on a set flag, shows `ERR_LOOT_NO_UI`.
+    pub fn take_loot_close(&mut self) -> Option<bool> {
+        self.model_mut().loot_close.take()
     }
 
     /// Drain the `GiveMasterLoot(slot, candidateIndex)` pairs, both 1-based; the app resolves them
@@ -129,11 +132,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 super::region::clear_texture(&mut model, rh);
                 return Ok(Value::Nil);
             }
+            model.set_texel(rh, super::texel::TexSet::Own(None));
             let data = model.region_data.entry(rh).or_default();
             data.portrait_unit = Some(LOOT_PORTRAIT_UNIT.to_string());
-            data.texture = None;
-            data.fill = None;
             data.circular = true;
+            model.note_art(rh);
             Ok(Value::Integer(1))
         })?,
     )?;
@@ -153,7 +156,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // template lands, and the app holds `LOOT_OPENED` back likewise.
     g.set(
         "GetLootSlotInfo",
-        lua.create_function(|lua, slot: usize| {
+        lua.create_function(|lua, Idx(slot): Idx| {
             // `Some(Some(row))` live, `Some(None)` cleared, `None` no such slot.
             let slot_state = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
@@ -174,8 +177,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     } else {
                         NO_SLOT_QUALITY
                     }),
-                    // The trailing item id: none here.
-                    Value::Integer(0),
                 ]));
             };
             let texture =
@@ -188,8 +189,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 item,
                 Value::Integer(i64::from(row.quantity)),
                 quality,
-                // The item id, a fifth return that is not a 1.12 value.
-                Value::Integer(i64::from(row.item_id)),
             ]))
         })?,
     )?;
@@ -199,7 +198,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `ChatFrameEditBox:Insert` (`:152`), both of which take a nil.
     g.set(
         "GetLootSlotLink",
-        lua.create_function(|lua, slot: usize| {
+        lua.create_function(|lua, Idx(slot): Idx| {
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model
@@ -219,10 +218,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "LootSlotIsItem",
         lua.create_function(|lua, slot: usize| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(slot
-                .checked_sub(1)
-                .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
-                .is_some_and(|r| !r.is_coin))
+            Ok(flag(
+                slot.checked_sub(1)
+                    .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
+                    .is_some_and(|r| !r.is_coin),
+            ))
         })?,
     )?;
 
@@ -230,10 +230,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "LootSlotIsCoin",
         lua.create_function(|lua, slot: usize| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(slot
-                .checked_sub(1)
-                .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
-                .is_some_and(|r| r.is_coin))
+            Ok(flag(
+                slot.checked_sub(1)
+                    .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
+                    .is_some_and(|r| r.is_coin),
+            ))
         })?,
     )?;
 
@@ -287,12 +288,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // CloseLoot([failed]): the "unable to open the UI" argument (`LootFrame.lua:18`) is ignored.
+    // CloseLoot([failed]) (`0x4c2ec0`): the flag is read through the client's flag coercion
+    // (`0x4c2ec7`, `0x6f1c10`, default 0) and handed to the close (`0x48f200`), which raises
+    // `ERR_LOOT_NO_UI` for a set one (`0x48f27b`). Stock `LootFrame.lua:18` passes 1 when the
+    // window cannot open.
     g.set(
         "CloseLoot",
-        lua.create_function(|lua, _args: MultiValue| {
+        lua.create_function(|lua, args: MultiValue| {
+            let failed = bool_or_default(args.front(), false);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.loot_close = true;
+            model.loot_close.get_or_insert(failed);
             Ok(())
         })?,
     )?;
@@ -302,7 +307,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // as nobody (`LootFrame.lua:168-232`).
     g.set(
         "GetMasterLootCandidate",
-        lua.create_function(|lua, index: u32| {
+        lua.create_function(|lua, Idx32(index): Idx32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let name = index.checked_sub(1).and_then(|i| {
                 model
@@ -339,10 +344,10 @@ mod tests {
     /// The region data behind a named texture: its portrait key and file.
     fn portrait_of(s: &UiScript, name: &str) -> (Option<String>, Option<String>) {
         let model = s.model_ref();
-        let id = model.region_names[name];
+        let id = model.region_by_name[name];
         let rh = *model.id_to_region.get(&id).expect("a region");
         let data = &model.region_data[&rh];
-        (data.portrait_unit.clone(), data.texture.clone())
+        (data.portrait_unit.clone(), data.tex.path().clone())
     }
 
     /// `SetLootPortrait` (`0x4c2b40`): a unit source binds the loot portrait and answers 1;
@@ -506,6 +511,33 @@ mod tests {
         assert!(s.eval::<bool>("return LootSlotIsItem(2)").unwrap());
     }
 
+    /// `GetLootSlotInfo` pushes four values on every leg (`0x4c2d07 mov eax,4`): texture, name,
+    /// quantity, quality, with no item id.
+    #[test]
+    fn loot_slot_info_returns_four_values_on_every_leg() {
+        let mut s = UiScript::new().unwrap();
+        let count = |s: &UiScript, slot: u32| -> i64 {
+            s.eval::<i64>(&format!(
+                "return (function(...) return arg.n end)(GetLootSlotInfo({slot}))"
+            ))
+            .unwrap()
+        };
+        // No window.
+        assert_eq!(count(&s, 1), 4);
+        let mut state = loot();
+        state.rows[0].as_mut().unwrap().item_id = 2589;
+        state.rows[1].as_mut().unwrap().item_id = 2589;
+        s.set_loot(Some(state.clone()));
+        // A coin row, an item row with an id, an in-flight row, past the end.
+        for slot in [1, 2, 3, 9] {
+            assert_eq!(count(&s, slot), 4, "slot {slot}");
+        }
+        // A looted slot.
+        state.rows[0] = None;
+        s.set_loot(Some(state));
+        assert_eq!(count(&s, 1), 4);
+    }
+
     #[test]
     fn master_loot_candidates_read_1_based_and_nil_past_the_end() {
         let mut s = UiScript::new().unwrap();
@@ -616,12 +648,26 @@ mod tests {
     fn close_loot_flags_the_intent() {
         let mut s = UiScript::new().unwrap();
         s.set_loot(Some(loot()));
-        assert!(!s.take_loot_close());
+        assert_eq!(s.take_loot_close(), None);
         s.run("CloseLoot()").unwrap();
-        assert!(s.take_loot_close());
-        assert!(!s.take_loot_close(), "drained");
+        assert_eq!(s.take_loot_close(), Some(false));
+        assert_eq!(s.take_loot_close(), None, "drained");
         s.run("CloseLoot(1)").unwrap();
-        assert!(s.take_loot_close());
+        assert_eq!(
+            s.take_loot_close(),
+            Some(true),
+            "the failed flag (`0x6f1c10`)"
+        );
+        for (arg, failed) in [("nil", false), ("0", false), ("'1'", true), ("true", true)] {
+            s.run(&format!("CloseLoot({arg})")).unwrap();
+            assert_eq!(s.take_loot_close(), Some(failed), "CloseLoot({arg})");
+        }
+        s.run("CloseLoot() CloseLoot(1)").unwrap();
+        assert_eq!(
+            s.take_loot_close(),
+            Some(false),
+            "the first close releases the loot; the second finds none"
+        );
     }
 
     #[test]

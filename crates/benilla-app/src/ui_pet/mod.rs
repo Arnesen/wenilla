@@ -17,6 +17,7 @@ use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 mod bar;
+pub(crate) use bar::active_aura_press;
 mod drain;
 mod menu;
 mod net;
@@ -29,7 +30,7 @@ use drain::drain_pet_actions;
 pub(crate) use drain::pet_stop_on_old_target_clear;
 pub(crate) use drain::PetPress;
 use menu::{drain_pet_menu, feed_pet_menu};
-use unit::feed_pet_unit;
+pub(crate) use unit::feed_pet_unit;
 
 #[cfg(test)]
 mod flush_tests;
@@ -111,6 +112,7 @@ impl Plugin for UiPetPlugin {
                     .after(CooldownEvents),
                 feed_pet_unit
                     .in_set(UnitFeed)
+                    .in_set(crate::ui_unit::field_events::FieldEventPushes)
                     .after(crate::ui_pet_stats::PetSnapshot),
                 feed_pet_menu.in_set(UnitFeed),
                 // After this frame's presses, as the one drain before it ran them ahead of the
@@ -145,11 +147,5 @@ impl PetUnit<'_, '_> {
     /// usability predicate makes on the client's player guid (`0x4bcf89`, typemask `0x10`).
     pub(crate) fn player_store(&self) -> Option<&ObjectStore> {
         self.store(self.self_guid.0?)
-    }
-
-    /// The pet's entity under [`Self::store`]'s contract, for the pet paper doll's model.
-    pub(crate) fn entity(&self, pet_guid: u64) -> Option<Entity> {
-        let e = *self.index.0.get(&pet_guid)?;
-        self.stores.contains(e).then_some(e)
     }
 }

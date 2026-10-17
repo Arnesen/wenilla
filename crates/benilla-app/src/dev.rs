@@ -51,6 +51,8 @@ impl Plugin for DevToolsPlugin {
                 // A probe account's body gets vmangos `.cheat god` (damage stops at 1 hp) and GM
                 // mode off on every world entry; inert on any other account.
                 .add_plugins(crate::probe_shield::ProbeShieldPlugin);
+            // Hot reload, the addon profiler and the Lua inspector.
+            app.add_plugins(crate::devtools::DevtoolsPlugin);
         }
     }
 }
@@ -100,6 +102,10 @@ impl Plugin for DevProbesPlugin {
             // `WOW_PROBE_LUA`: runs a chunk in the live UI VM once per world entry, across relogs.
             if std::env::var("WOW_PROBE_LUA").is_ok() {
                 app.add_plugins(crate::capture::ProbeLuaPlugin);
+            }
+            // `WOW_PROBE_GLUE_LUA`: runs a chunk once in the stock glue VM, then one shot.
+            if std::env::var("WOW_PROBE_GLUE_LUA").is_ok() {
+                app.add_plugins(crate::capture::ProbeGlueLuaPlugin);
             }
             // `WOW_PROBE_DRAG="A>B"`: drags frame A onto B through the real pointer path.
             if std::env::var("WOW_PROBE_DRAG").is_ok() {

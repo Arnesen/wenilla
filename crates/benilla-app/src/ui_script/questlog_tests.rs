@@ -1,11 +1,14 @@
-//! The quest log window, engine-only: stock `QuestLogFrame.xml` fed a synthetic eight-quest log.
+//! The quest log window, engine-only: stock `QuestLogFrame.xml` fed a synthetic eight-quest log,
+//! the quests under one zone header, so the header is row 1 and quest k row k + 1.
 //! A missing template only warns under `load_xml`, so every list loads the `UIPanelTemplates` pair
 //! the list and detail scroll frames inherit (`QuestLogFrame.xml:589`, `:606`).
 
 use benilla_ui::script::{
-    ExtractedQuad, PartyMemberInfo, PartyState, QuadContent, QuestItemView, QuestLogDetail,
-    QuestLogEntryView, QuestLogObjectiveView, QuestLogState, SoundRequest, UiScript,
+    ExtractedQuad, ItemTemplateView, PartyMemberInfo, PartyState, QuadContent, SoundRequest,
+    UiScript,
 };
+
+use crate::ui_quest_log::fixture::{kill, quest, seat, LogQuest};
 
 use super::test_ui::load_ui as load_xml;
 
@@ -22,57 +25,41 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
         .unwrap_or_else(|| panic!("no bare-frame quad sized {w}x{h}"))
 }
 
-thread_local! {
-    /// The detail every fixture row carries, so any selection reads it.
-    static DETAIL_FIXTURE: QuestLogDetail = QuestLogDetail {
-            description: "Speak with Marshal McBride.".into(),
-            objectives_text: "Report to Marshal McBride.".into(),
-            required_money: 0,
-            reward_money: 40,
-            choices: vec![],
-            rewards: vec![QuestItemView {
-                item_id: 2024,
-                name: Some("Militia Hammer".into()),
-                texture: Some("Interface\\Icons\\INV_Hammer_15".into()),
-                count: 1,
-                quality: 1,
-                usable: true,
-                // What `GetQuestLogItemLink` returns for a ctrl or shift click.
-                link: Some(HAMMER_LINK.into()),
-            }],
-            reward_spell: None,
-        };
+/// The fixture reward, item 2024, as its record caches it.
+fn hammer() -> ItemTemplateView {
+    ItemTemplateView {
+        name: "Militia Hammer".into(),
+        quality: 1,
+        icon: Some("Interface\\Icons\\INV_Hammer_15".into()),
+        ..Default::default()
+    }
 }
 
-/// Eight quests, two more than the list shows (`QUESTS_DISPLAYED`, `QuestLogFrame.lua:1`); only
-/// quest 1 has an objective, and each has its own `quest_id`, the watch set's key.
-fn eight_entries() -> QuestLogState {
-    let entries = (1..=8)
-        .map(|i| QuestLogEntryView {
-            quest_id: i,
-            title: format!("Quest {i}"),
-            level: 5,
-            complete: 0,
-            objectives: if i == 1 {
-                vec![QuestLogObjectiveView {
-                    text: "Kobold Vermin slain: 3/10".into(),
-                    kind: "monster".into(),
-                    finished: false,
-                    cur: 3,
-                    req: 10,
-                }]
-            } else {
-                vec![]
-            },
-            detail: Some(DETAIL_FIXTURE.with(Clone::clone)),
-            ..Default::default()
+/// Eight quests, three more rows than the list shows with their header (`QUESTS_DISPLAYED`,
+/// `QuestLogFrame.lua:1`); only quest 1 has an objective, 3 of 10 Kobold Vermin (entry 6), and
+/// every quest carries the same text and the hammer reward.
+fn eight() -> Vec<LogQuest> {
+    (1..=8)
+        .map(|i| {
+            let mut q = quest(i, &format!("Quest {i}"), 5);
+            q.record.description = "Speak with Marshal McBride.".into();
+            q.record.objectives_text = "Report to Marshal McBride.".into();
+            q.record.reward_money = 40;
+            q.record.rewards = vec![(2024, 1)];
+            if i == 1 {
+                q.record.objectives[0] = kill(6, 10);
+                q.slot.counters[0] = 3;
+            }
+            q
         })
-        .collect();
-    QuestLogState {
-        num_quests: 8,
-        entries,
-        hidden_quest_ids: Vec::new(),
-    }
+        .collect()
+}
+
+/// `quests` seated with the hammer and the vermin cached.
+fn seat_cached(s: &mut UiScript, quests: &[LogQuest]) {
+    s.set_item_template(2024, hammer());
+    s.set_quest_creature_name(6, "Kobold Vermin".into());
+    seat(s, quests);
 }
 
 /// The fixture reward's escaped link, a white (quality 1) 1.12 item.
@@ -102,6 +89,57 @@ fn shipped_questlog_frame_loads_clean() {
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 }
 
+/// The collapse-all button folds in place: `CollapseQuestHeader(0)` signals `QUEST_LOG_UPDATE`
+/// inside the click (`0x4ded30`), so `QuestLog_Update` has hidden the quest rows by its next line.
+#[test]
+fn the_collapse_all_button_repaints_the_list_in_place() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in [
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\BasicControls.xml",
+        r"Interface\FrameXML\LocaleProperties.lua",
+        r"Interface\FrameXML\UIParent.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\CharacterFrameTemplates.xml",
+        r"Interface\FrameXML\StaticPopup.xml",
+        r"Interface\FrameXML\MainMenuBarMicroButtons.xml",
+        "Interface\\FrameXML\\ItemButtonTemplate.xml",
+        "Interface\\FrameXML\\QuestFrame.xml",
+        "Interface\\FrameXML\\QuestLogFrame.xml",
+        "Interface\\FrameXML\\MerchantFrame.xml",
+        "ScrollTemplates.xml",
+    ] {
+        load_xml(&s, f);
+    }
+    let mut log = eight();
+    log.truncate(2);
+    seat_cached(&mut s, &log);
+    s.run("ToggleQuestLog()").unwrap();
+    assert!(s
+        .eval::<bool>("return QuestLogTitle2:IsShown() == 1")
+        .unwrap());
+    let shown: bool = s
+        .eval(
+            "this = QuestLogCollapseAllButton QuestLogCollapseAllButton_OnClick() \
+             return QuestLogTitle2:IsShown() == 1",
+        )
+        .unwrap();
+    assert!(!shown, "the folded quests left the list inside the click");
+    assert_eq!(
+        s.eval::<i64>("return GetNumQuestLogEntries()").unwrap(),
+        1,
+        "and stay folded: the selection kept its quest, so QuestLog_Update reopened no header"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Open, read the list and the detail, wheel the list, abandon through the confirm, close.
 #[test]
 fn shipped_questlog_frame_drives_end_to_end() {
@@ -127,7 +165,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(eight_entries());
+    seat_cached(&mut s, &eight());
 
     assert!(
         s.take_sounds().is_empty(),
@@ -145,9 +183,10 @@ fn shipped_questlog_frame_drives_end_to_end() {
         "opening the quest log plays igQuestLogOpen"
     );
 
-    // With no selection the first quest selects itself (`QuestLogFrame.lua:294-296`).
+    // With no selection the first quest selects itself (`QuestLogFrame.lua:294-296`), under its
+    // header.
     assert!(s
-        .eval::<String>("return QuestLogTitle1NormalText:GetText()")
+        .eval::<String>("return QuestLogTitle2NormalText:GetText()")
         .unwrap()
         .contains("Quest 1"));
     assert_eq!(
@@ -155,7 +194,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
             .unwrap(),
         "Quests: |cffffffff8/20|r"
     );
-    assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 1);
+    assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 2);
 
     assert_eq!(
         s.eval::<String>("return QuestLogQuestTitle:GetText()")
@@ -222,7 +261,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
         before,
         "wheel-down scrolled the list"
     );
-    assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 1);
+    assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 2);
 
     // Abandon, then No: the ABANDON_QUEST popup closes and queues nothing.
     s.run("QuestLogFrameAbandonButton:Click()").unwrap();
@@ -252,10 +291,10 @@ fn shipped_questlog_frame_drives_end_to_end() {
         "No: dialog open/close kits only, no abandon kit"
     );
 
-    // Yes: the index marked at click time drains.
+    // Yes: the quest marked at click time drains as its slot, quest 1's 0.
     s.run("QuestLogFrameAbandonButton:Click()").unwrap();
     s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
-    assert_eq!(s.take_quest_log_abandons(), vec![1]);
+    assert_eq!(s.take_quest_log_abandons(), vec![0]);
     // `StaticPopup_OnClick` runs OnAccept before it hides (`StaticPopup.lua:1849-1867`).
     assert_eq!(
         s.take_sounds(),
@@ -310,10 +349,9 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(eight_entries());
-    // The app fires QUEST_LOG_UPDATE when the log lands; its `QuestWatch_Update` hides an empty
-    // tracker (`QuestLogFrame.lua:58-60`, `:672-676`).
-    s.fire_event("QUEST_LOG_UPDATE", vec![]);
+    seat_cached(&mut s, &eight());
+    // The seat's QUEST_LOG_UPDATE ran `QuestWatch_Update`, which hides an empty tracker
+    // (`QuestLogFrame.lua:58-60`, `:672-676`).
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
@@ -329,11 +367,11 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     };
     assert!(!checkbox_shown(&mut s), "no checkbox before any watch");
 
-    // Row 1, quest 1, the one with an objective: 300x16 at the window's TOPLEFT +19,-75
-    // (`QuestLogFrame.xml:4-7`, `:535-539`).
+    // Row 2, quest 1, the one with an objective: rows are 300x16 from the window's TOPLEFT +19,-75
+    // at a 15 px pitch (`QuestLogFrame.xml:4-7`, `:535-548`).
     s.resolve();
     let win = frame_rect(&s.extract(), 384.0, 512.0);
-    let (rx, ry) = (win.left + 19.0 + 150.0, win.top - 75.0 - 8.0);
+    let (rx, ry) = (win.left + 19.0 + 150.0, win.top - 75.0 - 15.0 - 8.0);
     s.set_modifiers(true, false, false);
     s.mouse_button(rx, ry, "LeftButton", true);
     s.mouse_button(rx, ry, "LeftButton", false);
@@ -344,7 +382,7 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
         s.errors()
     );
 
-    assert!(s.eval::<bool>("return IsQuestWatched(1)").unwrap());
+    assert!(s.eval::<bool>("return IsQuestWatched(2)").unwrap());
     assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 1);
     assert!(checkbox_shown(&mut s), "watched row shows its checkbox");
     // The check seats at the title's width + 24 from the row's left (`QuestLogFrame.lua:228`), 4
@@ -397,7 +435,7 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     s.mouse_button(rx, ry, "LeftButton", true);
     s.mouse_button(rx, ry, "LeftButton", false);
     s.set_modifiers(false, false, false);
-    assert!(!s.eval::<bool>("return IsQuestWatched(1)").unwrap());
+    assert!(!s.eval::<bool>("return IsQuestWatched(2)").unwrap());
     assert!(!checkbox_shown(&mut s), "unwatching clears the checkbox");
     assert!(!s
         .eval::<bool>("return QuestWatchFrame:IsVisible()")
@@ -436,7 +474,7 @@ fn watch_guards_no_op_without_erroring() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(eight_entries());
+    seat_cached(&mut s, &eight());
     s.run("ToggleQuestLog()").unwrap();
 
     // Rows are 300x16 from the window's TOPLEFT +19,-75, each overlapping the last by 1, a 15 px
@@ -446,17 +484,17 @@ fn watch_guards_no_op_without_erroring() {
     let row_center = |n: u32| win.top - 75.0 - 15.0 * (n - 1) as f32 - 8.0;
     let x = win.left + 19.0 + 150.0;
 
-    // Quest 2 has no objectives.
+    // Quest 2, row 3, has no objectives.
     s.set_modifiers(true, false, false);
-    s.mouse_button(x, row_center(2), "LeftButton", true);
-    s.mouse_button(x, row_center(2), "LeftButton", false);
+    s.mouse_button(x, row_center(3), "LeftButton", true);
+    s.mouse_button(x, row_center(3), "LeftButton", false);
     s.set_modifiers(false, false, false);
     assert!(
         s.errors().is_empty(),
         "no-objectives guard errors: {:?}",
         s.errors()
     );
-    assert!(!s.eval::<bool>("return IsQuestWatched(2)").unwrap());
+    assert!(!s.eval::<bool>("return IsQuestWatched(3)").unwrap());
     // `UIErrorsFrame` is a MessageFrame: its lines are read off the drawn quads.
     s.resolve();
     assert!(
@@ -468,29 +506,29 @@ fn watch_guards_no_op_without_erroring() {
     );
     assert_eq!(
         s.eval::<i64>("return GetQuestLogSelection()").unwrap(),
-        1,
+        2,
         "a guarded shift-click never selects — each guard's `return` in the stock shift branch \
          comes before the plain-click arm's QuestLog_SetSelection (QuestLogFrame.lua:472-500)"
     );
 
-    // Fill the five watches with quests 2-6: the objectives guard is the click handler's
+    // Fill the five watches with quests 2-6, rows 3-7: the objectives guard is the click handler's
     // (`QuestLogFrame.lua:489`), not `AddQuestWatch`'s.
-    for i in 2..=6 {
+    for i in 3..=7 {
         s.run(&format!("AddQuestWatch({i})")).unwrap();
     }
     assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 5);
 
     // Quest 1 has an objective, so this click reaches the full-list guard.
     s.set_modifiers(true, false, false);
-    s.mouse_button(x, row_center(1), "LeftButton", true);
-    s.mouse_button(x, row_center(1), "LeftButton", false);
+    s.mouse_button(x, row_center(2), "LeftButton", true);
+    s.mouse_button(x, row_center(2), "LeftButton", false);
     s.set_modifiers(false, false, false);
     assert!(
         s.errors().is_empty(),
         "too-many guard errors: {:?}",
         s.errors()
     );
-    assert!(!s.eval::<bool>("return IsQuestWatched(1)").unwrap());
+    assert!(!s.eval::<bool>("return IsQuestWatched(2)").unwrap());
     assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 5);
     s.resolve();
     assert!(
@@ -531,22 +569,25 @@ fn progress_auto_watches_for_five_minutes() {
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
-    s.set_quest_log(eight_entries());
+    seat_cached(&mut s, &eight());
 
     // The app fires this with the quest's log row, as the 1.12 client does: `0x4df880` searches
-    // the log rows, and `AutoQuestWatch_Update` takes that index.
+    // the log rows, and `AutoQuestWatch_Update` takes that index, 2 for quest 1.
     s.fire_event(
         "QUEST_WATCH_UPDATE",
-        vec![benilla_ui::script::ScriptValue::Int(1)],
+        vec![benilla_ui::script::ScriptValue::Int(2)],
     );
     assert!(s.errors().is_empty(), "auto-watch errors: {:?}", s.errors());
-    assert!(s.eval::<bool>("return IsQuestWatched(1)").unwrap());
+    assert!(s.eval::<bool>("return IsQuestWatched(2)").unwrap());
+    // The tracker paints at the log's update, which the progress's own field change brings after
+    // its packet (vmangos `Player.cpp:14571`, `:14575`).
+    s.fire_event("QUEST_LOG_UPDATE", vec![]);
     assert!(s
         .eval::<bool>("return QuestWatchFrame:IsVisible()")
         .unwrap());
     assert!(
         s.eval::<bool>(
-            "return QUEST_WATCH_LIST[1] ~= nil and QUEST_WATCH_LIST[1].index == 1 \
+            "return QUEST_WATCH_LIST[1] ~= nil and QUEST_WATCH_LIST[1].index == 2 \
              and QUEST_WATCH_LIST[1].timer == MAX_QUEST_WATCH_TIMER"
         )
         .unwrap(),
@@ -554,19 +595,19 @@ fn progress_auto_watches_for_five_minutes() {
     );
 
     s.tick(299.0);
-    assert!(s.eval::<bool>("return IsQuestWatched(1)").unwrap());
+    assert!(s.eval::<bool>("return IsQuestWatched(2)").unwrap());
     s.fire_event(
         "QUEST_WATCH_UPDATE",
-        vec![benilla_ui::script::ScriptValue::Int(1)],
+        vec![benilla_ui::script::ScriptValue::Int(2)],
     );
     s.tick(299.0);
     assert!(
-        s.eval::<bool>("return IsQuestWatched(1)").unwrap(),
+        s.eval::<bool>("return IsQuestWatched(2)").unwrap(),
         "re-armed by fresh progress"
     );
     s.tick(2.0);
     assert!(
-        !s.eval::<bool>("return IsQuestWatched(1)").unwrap(),
+        !s.eval::<bool>("return IsQuestWatched(2)").unwrap(),
         "expired after 300 s without progress"
     );
     assert!(!s
@@ -605,25 +646,25 @@ fn the_auto_watch_flag_is_the_references_uvar_and_gates_the_watch() {
     load_xml(&s, "ScrollTemplates.xml");
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
-    s.set_quest_log(eight_entries());
+    seat_cached(&mut s, &eight());
     assert_eq!(s.eval::<String>("return AUTO_QUEST_WATCH").unwrap(), "1");
 
     s.run(r#"AUTO_QUEST_WATCH = "0""#).unwrap();
     s.fire_event(
         "QUEST_WATCH_UPDATE",
-        vec![benilla_ui::script::ScriptValue::Int(1)],
+        vec![benilla_ui::script::ScriptValue::Int(2)],
     );
     assert!(
-        !s.eval::<bool>("return IsQuestWatched(1)").unwrap(),
+        !s.eval::<bool>("return IsQuestWatched(2)").unwrap(),
         "the flag off means progress watches nothing"
     );
 
     s.run(r#"AUTO_QUEST_WATCH = "1""#).unwrap();
     s.fire_event(
         "QUEST_WATCH_UPDATE",
-        vec![benilla_ui::script::ScriptValue::Int(1)],
+        vec![benilla_ui::script::ScriptValue::Int(2)],
     );
-    assert!(s.eval::<bool>("return IsQuestWatched(1)").unwrap());
+    assert!(s.eval::<bool>("return IsQuestWatched(2)").unwrap());
     assert!(s.errors().is_empty(), "auto-watch errors: {:?}", s.errors());
 }
 
@@ -654,16 +695,16 @@ fn the_row_tag_is_its_own_right_flush_string_and_the_state_word_wins() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    let mut state = eight_entries();
-    // Row 1 tagged, row 2 tagged and complete, row 3 failed, row 4 a header.
-    state.entries[0].tag = Some("Elite".into());
-    state.entries[1].tag = Some("Raid".into());
-    state.entries[1].complete = 1;
-    state.entries[2].complete = -1;
-    state.entries[3].is_header = true;
-    state.entries[3].title = "Elwynn Forest".into();
-    state.entries[3].tag = None;
-    s.set_quest_log(state);
+    let mut log = eight();
+    // Row 1 the header, row 2 tagged, row 3 tagged and complete, row 4 failed.
+    log[0].record.tag = Some("Elite".into());
+    log[1].record.tag = Some("Raid".into());
+    // The flags ask for the server's complete bit, so the bit decides (`0x4df6bd`); with no
+    // objective and no flags the quest would never be complete (`0x4df6ae`).
+    log[1].record.needs_complete_bit = true;
+    log[1].slot.state = 0x01;
+    log[2].slot.state = 0x02;
+    seat_cached(&mut s, &log);
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
@@ -672,37 +713,37 @@ fn the_row_tag_is_its_own_right_flush_string_and_the_state_word_wins() {
         s.eval::<Option<String>>(&format!("return QuestLogTitle{i}Tag:GetText()"))
             .unwrap()
     };
+    assert_eq!(tag(&mut s, 1), None, "a header carries no tag");
     assert_eq!(
-        tag(&mut s, 1).as_deref(),
+        tag(&mut s, 2).as_deref(),
         Some("(Elite)"),
         "the engine's tag, in parentheses"
     );
     assert_eq!(
-        tag(&mut s, 2).as_deref(),
+        tag(&mut s, 3).as_deref(),
         Some("(Complete)"),
         "COMPLETE overwrites the quest's own tag — ref l.190-192"
     );
     assert_eq!(
-        tag(&mut s, 3).as_deref(),
+        tag(&mut s, 4).as_deref(),
         Some("(Failed)"),
         "FAILED, same override"
     );
-    assert_eq!(tag(&mut s, 4), None, "a header carries no tag");
 
     // The title is the indented bare name; the state word is only on the tag.
     let title1 = s
-        .eval::<String>("return QuestLogTitle1NormalText:GetText()")
+        .eval::<String>("return QuestLogTitle2NormalText:GetText()")
         .unwrap();
     assert_eq!(title1, "  Quest 1");
     let title2 = s
-        .eval::<String>("return QuestLogTitle2NormalText:GetText()")
+        .eval::<String>("return QuestLogTitle3NormalText:GetText()")
         .unwrap();
     assert_eq!(title2, "  Quest 2", "no \"(Complete)\" on the title");
 
     // Anchored RIGHT, -2 (`QuestLogFrame.xml:10-21`).
-    let row_right = s.eval::<f32>("return QuestLogTitle1:GetRight()").unwrap();
+    let row_right = s.eval::<f32>("return QuestLogTitle2:GetRight()").unwrap();
     let tag_right = s
-        .eval::<f32>("return QuestLogTitle1Tag:GetRight()")
+        .eval::<f32>("return QuestLogTitle2Tag:GetRight()")
         .unwrap();
     assert!(
         (row_right - tag_right - 2.0).abs() < 0.5,
@@ -734,7 +775,7 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(QuestLogState::default());
+    seat(&mut s, &[]);
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
@@ -791,48 +832,29 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    let mut state = eight_entries();
-    // Every row carries the detail, and the window paints the auto-selected one.
-    let detail = QuestLogDetail {
-        description: "Speak with Marshal McBride.".into(),
-        objectives_text: "Report to Marshal McBride.".into(),
-        required_money: 0,
-        reward_money: 150, // 1s 50c
-        choices: vec![
-            QuestItemView {
-                item_id: 0,
-                name: Some("Worn Sword".into()),
-                texture: None,
-                count: 1,
-                quality: 1,
-                usable: true,
-                ..Default::default()
-            },
-            QuestItemView {
-                item_id: 0,
-                name: Some("Worn Mace".into()),
-                texture: None,
-                count: 1,
-                quality: 1,
-                usable: true,
-                ..Default::default()
-            },
-        ],
-        rewards: vec![QuestItemView {
-            item_id: 0,
-            name: Some("Militia Hammer".into()),
-            texture: None,
-            count: 1,
+    // Every quest carries two choices and the reward, and the window paints the auto-selected one.
+    s.set_item_template(
+        2001,
+        ItemTemplateView {
+            name: "Worn Sword".into(),
             quality: 1,
-            usable: true,
             ..Default::default()
-        }],
-        reward_spell: None,
-    };
-    for e in &mut state.entries {
-        e.detail = Some(detail.clone());
+        },
+    );
+    s.set_item_template(
+        2002,
+        ItemTemplateView {
+            name: "Worn Mace".into(),
+            quality: 1,
+            ..Default::default()
+        },
+    );
+    let mut log = eight();
+    for q in &mut log {
+        q.record.reward_money = 150; // 1s 50c
+        q.record.choices = vec![(2001, 1), (2002, 1)];
     }
-    s.set_quest_log(state);
+    seat_cached(&mut s, &log);
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
@@ -910,45 +932,18 @@ fn answer_measures(s: &mut UiScript) {
     s.set_measured_text_unwrapped(&answers);
 }
 
-fn overflowing_entry() -> QuestLogState {
-    let objectives = (1..=10)
-        .map(|i| QuestLogObjectiveView {
-            text: format!("Objective {i} of 10 slain: 0/5"),
-            kind: "monster".into(),
-            finished: false,
-            cur: 0,
-            req: 5,
-        })
-        .collect();
-    QuestLogState {
-        num_quests: 1,
-        hidden_quest_ids: Vec::new(),
-        entries: vec![QuestLogEntryView {
-            quest_id: 1,
-            title: "A Very Long Quest".into(),
-            level: 5,
-            complete: 0,
-            objectives,
-            detail: Some(QuestLogDetail {
-                description: "A very long description. ".repeat(20),
-                objectives_text: "Report back once every objective below is complete.".into(),
-                required_money: 0,
-                reward_money: 0,
-                choices: vec![],
-                rewards: vec![QuestItemView {
-                    item_id: 0,
-                    name: Some("Militia Hammer".into()),
-                    texture: None,
-                    count: 1,
-                    quality: 1,
-                    usable: true,
-                    ..Default::default()
-                }],
-                reward_spell: None,
-            }),
-            ..Default::default()
-        }],
+/// One quest whose detail overflows the pane: every objective set, the hammer reward and a long
+/// description.
+fn overflowing_entry() -> Vec<LogQuest> {
+    let mut q = quest(1, "A Very Long Quest", 5);
+    for (i, o) in q.record.objectives.iter_mut().enumerate() {
+        *o = kill(10 + i as u32, 5);
+        o.text = format!("Objective {} of 4", i + 1);
     }
+    q.record.description = "A very long description. ".repeat(40);
+    q.record.objectives_text = "Report back once every objective below is complete.".into();
+    q.record.rewards = vec![(2024, 1)];
+    vec![q]
 }
 
 /// Quads under the scroll child carry `QuestLogDetailScrollFrame`'s rect as their clip; the
@@ -977,7 +972,7 @@ fn overflowing_detail_content_clips_to_the_scrollframe_rect() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(overflowing_entry());
+    seat_cached(&mut s, &overflowing_entry());
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
@@ -1045,13 +1040,14 @@ fn wheel_over_the_detail_pane_changes_vertical_scroll() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(overflowing_entry());
+    seat_cached(&mut s, &overflowing_entry());
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     // The scroll range spans the measured content, so answer the measures as the app does.
     s.resolve();
     answer_measures(&mut s);
     s.resolve(); // the measures reach the scroll range and the bar
+    s.tick(0.016); // the marked range is recomputed in the frame's update
 
     s.resolve();
     let quads = s.extract();
@@ -1102,14 +1098,14 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(overflowing_entry());
+    seat_cached(&mut s, &overflowing_entry());
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     // The scroll range spans the measured content, so answer the measures as the app does.
     s.resolve();
     answer_measures(&mut s);
     s.resolve(); // the measures reach the scroll range and the bar
-    s.resolve(); // the range reads resolved rects
+    s.tick(0.016); // the marked range is recomputed in the frame's update
 
     // Scroll through the bar, as the wheel does: a reselect snaps back with the bar's
     // `SetValue(0)`, which changes nothing on a bar already at 0.
@@ -1130,7 +1126,7 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
         "QUEST_LOG_UPDATE's data-refresh path must not yank the scroll position"
     );
 
-    s.run("QuestLogTitle1:Click()").unwrap();
+    s.run("QuestLogTitle2:Click()").unwrap();
     assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
     assert_eq!(
         s.eval::<f32>("return QuestLogDetailScrollFrame:GetVerticalScroll()")
@@ -1140,8 +1136,9 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     );
 }
 
-/// The reward row's OnEnter calls `SetQuestLogItem` (`QuestLogFrame.xml:113`): a cold store shows
-/// the name and asks once, and after the answer a re-hover shows the full item lines.
+/// The reward row's item is asked by `GetQuestLogRewardInfo` with a callback (`0x4e0b9e`); its
+/// landing fires `QUEST_LOG_UPDATE`, which repaints the row, and the row's OnEnter
+/// (`SetQuestLogItem`, `QuestLogFrame.xml:113`) shows the full item lines.
 #[test]
 fn reward_row_hover_serves_the_shared_item_tooltip() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -1169,9 +1166,31 @@ fn reward_row_hover_serves_the_shared_item_tooltip() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(eight_entries());
+    s.set_quest_creature_name(6, "Kobold Vermin".into());
+    seat(&mut s, &eight());
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_item_stat_asks(),
+        vec![2024],
+        "the detail's reward getter missed and asked"
+    );
+    s.set_item_template(
+        2024,
+        ItemTemplateView {
+            name: "Militia Hammer".into(),
+            quality: 1,
+            icon: Some("Interface\\Icons\\INV_Hammer_15".into()),
+            inventory_type: 21, // Main Hand
+            class: 2,
+            subclass: 4, // mace
+            damages: vec![(4.0, 9.0, 0)],
+            delay_ms: 2200,
+            ..Default::default()
+        },
+    );
+    s.flush_quest_log_refires();
+    assert!(s.errors().is_empty(), "refire errors: {:?}", s.errors());
     s.resolve();
 
     let icon_rect = s
@@ -1200,28 +1219,6 @@ fn reward_row_hover_serves_the_shared_item_tooltip() {
         s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
         "tooltip shows on hover"
     );
-    assert_eq!(
-        s.take_item_stat_asks(),
-        vec![2024],
-        "the miss recorded the ask"
-    );
-
-    s.set_item_template(
-        2024,
-        ItemTemplateView {
-            name: "Militia Hammer".into(),
-            quality: 1,
-            inventory_type: 21, // Main Hand
-            class: 2,
-            subclass: 4, // mace
-            damages: vec![(4.0, 9.0, 0)],
-            delay_ms: 2200,
-            ..Default::default()
-        },
-    );
-    s.mouse_move(0.0, 0.0);
-    s.mouse_move(cx, cy);
-    assert!(s.errors().is_empty(), "re-hover errors: {:?}", s.errors());
     assert!(
         has_text(&mut s, "Main Hand"),
         "slot line from the shared store"
@@ -1262,7 +1259,7 @@ fn popup_children_inherit_the_dialog_stratum() {
     let backdrop_z = quads
         .iter()
         .find_map(|q| match &q.content {
-            QuadContent::Backdrop { path, .. } if path.contains("UI-DialogBox-Background") => {
+            QuadContent::Texture { path: Some(p), .. } if p.contains("UI-DialogBox-Background") => {
                 Some(q.z)
             }
             _ => None,
@@ -1315,7 +1312,7 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     load_xml(&s, "Interface\\FrameXML\\DressUpFrame.xml"); // DressUpItemLink lives here
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(eight_entries());
+    seat_cached(&mut s, &eight());
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
@@ -1399,14 +1396,14 @@ fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_i
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(eight_entries());
+    seat_cached(&mut s, &eight());
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    // Row 1's centre: 300x16 at the window's TOPLEFT +19,-75.
+    // Row 2's centre, quest 1: rows are 300x16 from the window's TOPLEFT +19,-75, 15 apart.
     s.resolve();
     let win = frame_rect(&s.extract(), 384.0, 512.0);
-    let (rx, ry) = (win.left + 19.0 + 150.0, win.top - 75.0 - 8.0);
+    let (rx, ry) = (win.left + 19.0 + 150.0, win.top - 75.0 - 15.0 - 8.0);
     let shift_click = |s: &mut UiScript| {
         s.set_modifiers(true, false, false);
         s.mouse_button(rx, ry, "LeftButton", true);
@@ -1416,11 +1413,11 @@ fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_i
 
     shift_click(&mut s);
     assert!(
-        s.eval::<bool>("return IsQuestWatched(1)").unwrap(),
+        s.eval::<bool>("return IsQuestWatched(2)").unwrap(),
         "with chat closed, shift-click still toggles the quest watch"
     );
     shift_click(&mut s); // and off again
-    assert!(!s.eval::<bool>("return IsQuestWatched(1)").unwrap());
+    assert!(!s.eval::<bool>("return IsQuestWatched(2)").unwrap());
 
     assert!(s.focus_editbox("ChatFrameEditBox"));
     shift_click(&mut s);
@@ -1431,11 +1428,11 @@ fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_i
         "the trimmed quest name landed in the chat box (ref's gsub result, no row indent)"
     );
     assert!(
-        !s.eval::<bool>("return IsQuestWatched(1)").unwrap(),
+        !s.eval::<bool>("return IsQuestWatched(2)").unwrap(),
         "with chat open the watch must NOT toggle — the ref makes watching the else"
     );
     // Either way the click ends by selecting the row (`QuestLogFrame.lua:503-504`).
-    assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 1);
+    assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 2);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -1455,12 +1452,12 @@ fn party(n: usize) -> PartyState {
 }
 
 /// The eight quests with `pushable` set on `ids`; the app reads it from `QUEST_FLAGS_SHARABLE`.
-fn entries_sharable(ids: &[u32]) -> QuestLogState {
-    let mut state = eight_entries();
-    for e in &mut state.entries {
-        e.pushable = ids.contains(&e.quest_id);
+fn entries_sharable(ids: &[u32]) -> Vec<LogQuest> {
+    let mut log = eight();
+    for q in &mut log {
+        q.record.pushable = ids.contains(&q.id);
     }
-    state
+    log
 }
 
 /// Share needs both a sharable selection and a party (`QuestLogFrame.lua:299-305`); each half is
@@ -1489,11 +1486,11 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(entries_sharable(&[1]));
+    seat_cached(&mut s, &entries_sharable(&[1]));
     s.set_party(PartyState::default());
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 1);
+    assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 2);
     // `GetQuestLogPushable` answers 1 or nil.
     assert!(
         s.eval::<bool>("return GetQuestLogPushable() ~= nil")
@@ -1515,7 +1512,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
         "PARTY_MEMBERS_CHANGED alone re-tests the button"
     );
 
-    s.run("SelectQuestLogEntry(2)").unwrap();
+    s.run("SelectQuestLogEntry(3)").unwrap();
     s.run("QuestLog_Update()").unwrap();
     assert!(
         s.eval::<bool>("return GetQuestLogPushable() == nil")
@@ -1528,7 +1525,7 @@ fn share_quest_needs_both_a_sharable_selection_and_a_party() {
         "in a party: an unsharable selection is still dark"
     );
 
-    s.run("SelectQuestLogEntry(1)").unwrap();
+    s.run("SelectQuestLogEntry(2)").unwrap();
     s.run("QuestLog_Update()").unwrap();
     assert!(s
         .eval::<bool>("return QuestFramePushQuestButton:IsEnabled() ~= 0")
@@ -1565,7 +1562,7 @@ fn share_quest_is_dark_on_an_empty_log_even_in_a_party() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(QuestLogState::default());
+    seat(&mut s, &[]);
     s.set_party(party(4));
     s.run("ToggleQuestLog()").unwrap();
     assert!(!s
@@ -1599,11 +1596,11 @@ fn share_quest_click_queues_the_selected_quests_id() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    s.set_quest_log(entries_sharable(&[1, 5]));
+    seat_cached(&mut s, &entries_sharable(&[1, 5]));
     s.set_party(party(1));
     s.run("ToggleQuestLog()").unwrap();
 
-    s.run("SelectQuestLogEntry(5)").unwrap();
+    s.run("SelectQuestLogEntry(6)").unwrap();
     s.run("QuestLog_Update()").unwrap();
     s.run("QuestFramePushQuestButton:Click()").unwrap();
     assert_eq!(s.take_quest_log_pushes(), vec![5]);
@@ -1640,14 +1637,16 @@ fn the_stock_title_width_cap_bites_and_is_sticky_per_row_button() {
     load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
     load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
 
-    // A long Dungeon-tagged title.
+    // A long Dungeon-tagged title and the same untagged, a level under the rest so they sort to
+    // rows 2 and 3 (`0x4decd9`).
     const LONG: &str = "The Left Piece of Lord Valthalak's Amulet";
-    let mut state = eight_entries();
-    state.entries[0].title = LONG.into();
-    state.entries[0].tag = Some("Dungeon".into());
-    state.entries[1].title = LONG.into();
-    state.entries[1].tag = None;
-    s.set_quest_log(state.clone());
+    let mut log = eight();
+    log[0].record.title = LONG.into();
+    log[0].record.tag = Some("Dungeon".into());
+    log[0].record.level = 4;
+    log[1].record.title = LONG.into();
+    log[1].record.level = 4;
+    seat_cached(&mut s, &log);
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
@@ -1658,16 +1657,16 @@ fn the_stock_title_width_cap_bites_and_is_sticky_per_row_button() {
             .unwrap()
     };
 
-    let tag_w = width(&mut s, "QuestLogTitle1Tag");
-    let capped = width(&mut s, "QuestLogTitle1NormalText");
+    let tag_w = width(&mut s, "QuestLogTitle2Tag");
+    let capped = width(&mut s, "QuestLogTitle2NormalText");
     assert!(
         (capped - (275.0 - 15.0 - tag_w)).abs() < 0.5,
         "the row's title is capped at 275-15-tagWidth ({tag_w} wide): got {capped}"
     );
-    let natural = ink(&mut s, "QuestLogTitle1NormalText");
+    let natural = ink(&mut s, "QuestLogTitle2NormalText");
     assert!(natural > capped, "the fixture title ({natural} px) must overflow the {capped} px cap or this test proves nothing");
     assert!(
-        (s.eval::<f32>("return QuestLogTitle1NormalText:GetHeight()")
+        (s.eval::<f32>("return QuestLogTitle2NormalText:GetHeight()")
             .unwrap()
             - 10.0)
             .abs()
@@ -1677,19 +1676,131 @@ fn the_stock_title_width_cap_bites_and_is_sticky_per_row_button() {
 
     // An untagged title keeps its width; the reset fires only above 275 (`QuestLogFrame.lua:220`).
     assert!(
-        (width(&mut s, "QuestLogTitle2NormalText") - ink(&mut s, "QuestLogTitle2NormalText")).abs()
+        (width(&mut s, "QuestLogTitle3NormalText") - ink(&mut s, "QuestLogTitle3NormalText")).abs()
             < 0.5,
         "an untagged title keeps its natural width"
     );
 
     // The cap sticks to the row button, as in the reference: `GetWidth()` then answers the set
     // width, so the `> 275` reset never fires when an untagged quest takes the row.
-    state.entries[0].tag = None;
-    s.set_quest_log(state);
+    log[0].record.tag = None;
+    seat(&mut s, &log);
     s.run("QuestLog_Update()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        (width(&mut s, "QuestLogTitle1NormalText") - capped).abs() < 0.5,
+        (width(&mut s, "QuestLogTitle2NormalText") - capped).abs() < 0.5,
         "the capped box survives the row going untagged (the ref's own 275 reset never fires)"
     );
+}
+
+// ── The group-mates count ──
+
+/// A party member held with `ids` in their quest-log window, named `name`.
+fn mate_on(guid: u64, name: &str, ids: &[u32]) -> benilla_ui::script::UnitState {
+    let mut quest_log = [[0; 3]; 20];
+    for (slot, &id) in quest_log.iter_mut().zip(ids) {
+        *slot = [id, 0, 0];
+    }
+    benilla_ui::script::UnitState {
+        exists: true,
+        has_object: true,
+        is_player: true,
+        guid,
+        name: Some(name.into()),
+        quest_log,
+        ..Default::default()
+    }
+}
+
+/// Each quest row counts the party members on it as `[n]` (`QuestLogFrame.lua:168-183`), through
+/// `IsUnitOnQuest(questIndex, "partyN")`; the row tooltip names them (`:515-541`), and a mate's
+/// `UNIT_QUEST_LOG_CHANGED` recounts (`:69-72`).
+#[test]
+fn quest_rows_count_the_party_members_on_each_quest() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
+    load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
+    load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
+    load_xml(&s, r"Interface\FrameXML\LocaleProperties.lua");
+    load_xml(&s, r"Interface\FrameXML\UIParent.xml");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
+    load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    load_xml(&s, "Interface\\FrameXML\\CharacterFrameTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
+    load_xml(&s, r"Interface\FrameXML\MainMenuBarMicroButtons.xml");
+    load_xml(&s, "Interface\\FrameXML\\ItemButtonTemplate.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
+    load_xml(&s, "Interface\\FrameXML\\MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // our scroll kits
+
+    seat_cached(&mut s, &eight());
+    s.set_party(party(2));
+    s.set_unit("party1", Some(mate_on(0x300, "Mate0", &[1, 3])));
+    s.set_unit("party2", Some(mate_on(0x301, "Mate1", &[1])));
+    s.run("ToggleQuestLog()").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    let mates = |s: &mut UiScript, row: u32| {
+        s.eval::<String>(&format!(
+            "return QuestLogTitle{row}GroupMates:GetText() or ''"
+        ))
+        .unwrap()
+    };
+    assert_eq!(mates(&mut s, 2), "[2]", "both mates are on quest 1");
+    assert_eq!(mates(&mut s, 3), "", "nobody is on quest 2");
+    assert_eq!(mates(&mut s, 4), "[1]", "party1 is on quest 3");
+
+    // The row tooltip, as `QuestLogTitleButton_OnEnter` builds it for quest 1, then quest 2.
+    let line = |s: &mut UiScript, n: u32| {
+        s.eval::<String>(&format!("return GameTooltipTextLeft{n}:GetText() or ''"))
+            .unwrap()
+    };
+    s.run("this = QuestLogTitle2 QuestLog_UpdatePartyInfoTooltip()")
+        .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(line(&mut s, 1), "Quest 1");
+    assert!(s
+        .eval::<bool>(
+            "return GameTooltipTextLeft2:GetText() == \
+             HIGHLIGHT_FONT_COLOR_CODE..PARTY_QUEST_STATUS_ON..FONT_COLOR_CODE_CLOSE"
+        )
+        .unwrap());
+    assert!(line(&mut s, 3).contains("Mate0"), "{}", line(&mut s, 3));
+    assert!(line(&mut s, 4).contains("Mate1"), "{}", line(&mut s, 4));
+    s.run("this = QuestLogTitle3 QuestLog_UpdatePartyInfoTooltip()")
+        .unwrap();
+    assert!(s
+        .eval::<bool>(
+            "return GameTooltipTextLeft2:GetText() == \
+             HIGHLIGHT_FONT_COLOR_CODE..PARTY_QUEST_STATUS_NONE..FONT_COLOR_CODE_CLOSE"
+        )
+        .unwrap());
+
+    // party2 takes quest 3: their quest-log event recounts the open log.
+    s.set_unit("party2", Some(mate_on(0x301, "Mate1", &[1, 3])));
+    s.fire_event(
+        "UNIT_QUEST_LOG_CHANGED",
+        vec![benilla_ui::script::ScriptValue::Str("party2".into())],
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(mates(&mut s, 4), "[2]");
+
+    // Out of range, a mate counts for nothing, whatever their last window held (`0x468460` finds
+    // no object).
+    s.set_unit(
+        "party1",
+        Some(benilla_ui::script::UnitState {
+            has_object: false,
+            ..mate_on(0x300, "Mate0", &[1, 3])
+        }),
+    );
+    s.run("QuestLog_Update()").unwrap();
+    assert_eq!(mates(&mut s, 2), "[1]");
+    assert_eq!(mates(&mut s, 4), "[1]");
 }

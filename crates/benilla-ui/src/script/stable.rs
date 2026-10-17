@@ -38,6 +38,9 @@ pub struct StablePetSlot {
     pub loyalty: Option<String>,
     /// The localized food names the pet's family eats: `GetStablePetFoodTypes`'s returns.
     pub diet: Vec<String>,
+    /// The creature display the row's entry names in the creature cache, the record
+    /// `SetPetStablePaperdoll` shows (`0x4cba0e`); `None` while the query is in flight.
+    pub display_id: Option<u32>,
 }
 
 /// The open stable's snapshot, pushed whole; `None` when no stable is open.
@@ -78,7 +81,7 @@ pub enum StableIntent {
 }
 
 /// The window's own state beside the snapshot: the selection, the queued verbs and the close flag.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct StableModel {
     pub(crate) state: Option<StableState>,
     /// The selection as the client holds it (`[0xb72250]`): -1 the summoned pet, 0 nothing, else
@@ -86,6 +89,10 @@ pub(crate) struct StableModel {
     pub(crate) selected: i32,
     pub(crate) intents: Vec<StableIntent>,
     pub(crate) close: bool,
+    /// The summoned pet's creature-cache display while the client holds its unit: `[unit+0xb30]`
+    /// is the unit's cache record (`0x60b131`), whose display `0x505a70` reads at `[rec+0x2c]`
+    /// (`0x505a83`). Apart from the snapshot, whose changes fire the window's events.
+    pub(crate) live_pet_display: Option<u32>,
 }
 
 /// Nothing selected, the client's reset (`0x4caad3`); Lua reads it as -1 through
@@ -97,6 +104,7 @@ impl Default for StableModel {
             selected: 0,
             intents: Vec::new(),
             close: false,
+            live_pet_display: None,
         }
     }
 }
@@ -111,6 +119,13 @@ impl super::UiScript {
         // A held pet stays on the cursor: the reference's close clears only the stable-master
         // guid (`0x4cae10`).
         model.stable.state = state;
+    }
+
+    /// Push the summoned pet's creature-cache display, `None` while the client holds no pet unit
+    /// or its record has not answered ([`StableModel::live_pet_display`]). Fires nothing: the
+    /// reference's paperdoll event comes only from the cache callbacks (`0x4cba50`, `0x4cb3b0`).
+    pub fn set_stable_live_pet_display(&mut self, display: Option<u32>) {
+        self.model_mut().stable.live_pet_display = display;
     }
 
     /// Drain the queued stable verbs.
@@ -155,6 +170,28 @@ fn selected_slot(m: &StableModel) -> i32 {
     }
 }
 
+/// The creature display `SetPetStablePaperdoll` puts on its pane for the selection: the
+/// summoned pet's live one, else its row's; a stabled pet's row's; `None` for nothing selected, a
+/// pet the list no longer holds, or a display the creature cache has not answered.
+fn paperdoll_display(m: &StableModel) -> Option<u32> {
+    let state = m.state.as_ref()?;
+    let row = |pet_number: i64| {
+        state
+            .slots
+            .iter()
+            .flatten()
+            .find(|p| i64::from(p.pet_number) == pet_number)
+    };
+    match m.selected {
+        0 => None,
+        -1 => m
+            .live_pet_display
+            .or_else(|| state.slots[0].as_ref().and_then(|p| p.display_id)),
+        pet_number => row(i64::from(pet_number)).and_then(|p| p.display_id),
+    }
+    .filter(|&d| d != 0)
+}
+
 /// A slot argument as an index into [`StableState::slots`], `None` out of range.
 fn slot_index(i: i64) -> Option<usize> {
     usize::try_from(i).ok().filter(|&i| i < NUM_STABLE_SLOTS)
@@ -184,6 +221,56 @@ fn drag_verb(from: u8, to: u8, state: &StableState) -> Option<StableIntent> {
         }),
         _ => None,
     }
+}
+
+/// `ClickStablePet(i)`'s one value (`0x4cb420`), keyed only on whether the cursor held a pet: a
+/// plain click selects and answers 1, so the stock window repaints; a drop answers nil, packet or
+/// not, and the repaint comes with the server's next list.
+fn click_stable_pet(model: &mut Model, i: i64) -> Value {
+    let Some(to) = slot_index(i) else {
+        // Out of range: a click selects nothing, a drop clears the cursor.
+        if !matches!(
+            model.cursor,
+            Some(super::cursor::CursorPayload::StablePet(_))
+        ) {
+            model.stable.selected = 0;
+            return Value::Number(1.0);
+        }
+        super::cursor::clear_cursor(model);
+        return Value::Nil;
+    };
+    let to = to as u8;
+
+    // A drop.
+    if let Some(super::cursor::CursorPayload::StablePet(held)) = model.cursor.clone() {
+        let from = held.slot;
+        let intent = model
+            .stable
+            .state
+            .as_ref()
+            .and_then(|state| drag_verb(from, to, state));
+        super::cursor::clear_cursor(model);
+        if let Some(intent) = intent {
+            model.stable.intents.push(intent);
+        }
+        return Value::Nil;
+    }
+
+    // A plain click: select only.
+    let pet_number = model
+        .stable
+        .state
+        .as_ref()
+        .and_then(|s| s.slots[usize::from(to)].as_ref())
+        .map(|p| p.pet_number);
+    model.stable.selected = match (to, pet_number) {
+        // Slot 0 selects the summoned pet by its sentinel, not a pet number.
+        (0, _) => -1,
+        (_, Some(n)) => n as i32,
+        // An empty slot selects nothing.
+        (_, None) => 0,
+    };
+    Value::Number(1.0)
 }
 
 /// Register the stable globals.
@@ -296,77 +383,39 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // ClickStablePet(i) → one value (`0x4cb420`), keyed only on whether the cursor held a pet: a
-    // plain click selects and answers 1, so the stock window repaints; a drop answers nil, packet
-    // or not, and the repaint comes with the server's next list.
+    // ClickStablePet(i) → one value ([`click_stable_pet`]).
     g.set(
         "ClickStablePet",
         lua.create_function(|lua, i: i64| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let Some(to) = slot_index(i) else {
-                // Out of range: a click selects nothing, a drop clears the cursor.
-                if !matches!(
-                    model.cursor,
-                    Some(super::cursor::CursorPayload::StablePet(_))
-                ) {
-                    model.stable.selected = 0;
-                    return Ok(Value::Number(1.0));
-                }
-                super::cursor::clear_cursor(&mut model);
-                return Ok(Value::Nil);
-            };
-            let to = to as u8;
-
-            // A drop.
-            if let Some(super::cursor::CursorPayload::StablePet(held)) = model.cursor.clone() {
-                let from = held.slot;
-                let intent = model
-                    .stable
-                    .state
-                    .as_ref()
-                    .and_then(|state| drag_verb(from, to, state));
-                super::cursor::clear_cursor(&mut model);
-                if let Some(intent) = intent {
-                    model.stable.intents.push(intent);
-                }
-                return Ok(Value::Nil);
-            }
-
-            // A plain click: select only.
-            let pet_number = model
-                .stable
-                .state
-                .as_ref()
-                .and_then(|s| s.slots[usize::from(to)].as_ref())
-                .map(|p| p.pet_number);
-            model.stable.selected = match (to, pet_number) {
-                // Slot 0 selects the summoned pet by its sentinel, not a pet number.
-                (0, _) => -1,
-                (_, Some(n)) => n as i32,
-                // An empty slot selects nothing.
-                (_, None) => 0,
-            };
-            Ok(Value::Number(1.0))
+            Ok(super::tick::verb(lua, |model| click_stable_pet(model, i)))
         })?,
     )?;
 
-    // PickupStablePet(i): the mode-10 cursor grab, returning nothing. The gate is the family icon,
-    // not occupancy (`0x495010`): no icon, no grab.
+    // PickupStablePet(i) (`0x4cb7a0`): the mode-10 cursor grab, returning nothing. The binding
+    // takes an occupied slot only (`0x4cb7f9`); the grab (`0x495010`) clears with
+    // `ClearCursor(1,1)` (`0x495034`) before its own check, the family icon: no icon, no grab, the
+    // cursor left clear. The set fires nothing of its own.
     g.set(
         "PickupStablePet",
         lua.create_function(|lua, i: i64| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let texture = slot_index(i)
-                .and_then(|i| model.stable.state.as_ref()?.slots[i].as_ref())
-                .and_then(|p| p.icon.clone());
-            if let Some(texture) = texture {
-                model.cursor = Some(super::cursor::CursorPayload::StablePet(
-                    super::cursor::CursorStablePet {
-                        slot: i as u8,
-                        texture,
-                    },
-                ));
-                super::cursor::queue_cursor_update(&mut model);
+            let occupied = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                slot_index(i)
+                    .and_then(|i| model.stable.state.as_ref()?.slots[i].as_ref())
+                    .is_some()
+            };
+            if occupied {
+                super::cursor::set_cursor(lua, true, |model| {
+                    let texture = slot_index(i)
+                        .and_then(|i| model.stable.state.as_ref()?.slots[i].as_ref())
+                        .and_then(|p| p.icon.clone())?;
+                    Some(super::cursor::CursorPayload::StablePet(
+                        super::cursor::CursorStablePet {
+                            slot: i as u8,
+                            texture,
+                        },
+                    ))
+                });
             }
             Ok(())
         })?,
@@ -411,11 +460,41 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // Deviation: SetPetStablePaperdoll(model) is inert, because the model pane is an app-side
-    // booth that follows the selection every frame, with no VM-side unit to point.
+    // SetPetStablePaperdoll(frame) (`0x4cb870`): the selection's creature display onto a
+    // character pane (`0x505cb0`), never a unit copy. The summoned pet shows its live display
+    // (`[unit+0xb30]`, `0x4cb99e`), else its record's through the creature cache (`0x4cb9bc`); a
+    // stabled pet its row's (`0x4cb9dc`); nothing selected sets nothing (`0x4cb931`), and neither
+    // does a display the cache has not answered (`0x4cba1a`), whose answer fires
+    // `PET_STABLE_UPDATE_PAPERDOLL` (`0x4cba5f`).
     g.set(
         "SetPetStablePaperdoll",
-        lua.create_function(|_, _model: Value| Ok(()))?,
+        lua.create_function(|lua, frame: Value| {
+            let Value::Table(frame) = frame else {
+                return Err(mlua::Error::runtime(
+                    "Usage: SetPetStablePaperdoll(characterModel)",
+                ));
+            };
+            let h = super::object::frame_handle_of(lua, &frame).map_err(|_| {
+                mlua::Error::runtime(
+                    "SetPetStablePaperdoll(): Couldn't find 'this' in frame object",
+                )
+            })?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // The object type check (`0x4cb904`): a character pane, else the error at `0x848fd8`.
+            let character = matches!(
+                model.arena.frame(h).map(|f| &f.kind_state),
+                Some(crate::widget::KindState::Model(m)) if m.character.is_some()
+            );
+            if !character {
+                return Err(mlua::Error::runtime(
+                    "SetPetStablePaperdoll(): Wrong object type, expected frame",
+                ));
+            }
+            if let Some(display) = paperdoll_display(&model.stable) {
+                model.set_pane_display(h, display);
+            }
+            Ok(())
+        })?,
     )?;
 
     // BuyStableSlot(): the client's silent gates, in order: an open stable, fewer than 2 slots
@@ -465,6 +544,8 @@ mod tests {
             family: Some("Wolf".into()),
             loyalty: Some("(Loyalty Level 6) Best Friend".into()),
             diet: vec!["Meat".into(), "Fish".into()],
+            // One display per pet number, so a test can tell the rows apart.
+            display_id: Some(1000 + number),
         }
     }
 
@@ -725,9 +806,105 @@ mod tests {
         assert!(!s.take_stable_close(), "drain clears");
     }
 
+    /// `0x4cb870` reads its frame argument as a table (`0x4cb89a`, else the usage at `0x848f78`).
     #[test]
-    fn the_paperdoll_setter_is_callable() {
+    fn the_paperdoll_setter_wants_a_frame() {
         let s = UiScript::new().unwrap();
-        s.eval::<()>("SetPetStablePaperdoll(nil)").unwrap();
+        let err = s.eval::<()>("SetPetStablePaperdoll(nil)").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Usage: SetPetStablePaperdoll(characterModel)"),
+            "{err}"
+        );
+        // A frame, but no character pane: the object type check (`0x4cb904`, `0x848fd8`).
+        s.run(r#"plain = CreateFrame("Model")"#).unwrap();
+        let err = s.eval::<()>("SetPetStablePaperdoll(plain)").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("SetPetStablePaperdoll(): Wrong object type, expected frame"),
+            "{err}"
+        );
+    }
+
+    /// The pane shows a creature display, never a unit copy: the summoned pet's live one, else
+    /// its row's, and a stabled pet its row's (`0x4cb99e`, `0x4cba0e`, then `0x505cb0`).
+    #[test]
+    fn the_paperdoll_setter_puts_the_selections_display_on_the_pane() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        s.run(r#"m = CreateFrame("PlayerModel", "StableDoll", UIParent)"#)
+            .unwrap();
+        let h = s.frame_handle("StableDoll").unwrap();
+        let shown = |s: &UiScript| {
+            let c = s.character_pane(h).unwrap();
+            (c.guid, c.display)
+        };
+        open(&mut s);
+        // The summoned pet's cache record, held apart from the snapshot.
+        s.set_stable_live_pet_display(Some(4449));
+        // Nothing selected after a list: the call sets nothing (`0x4cb931`).
+        s.eval::<()>("SetPetStablePaperdoll(m)").unwrap();
+        assert_eq!(shown(&s), (0, 0));
+
+        // The current pet out: its live display.
+        s.eval::<()>("ClickStablePet(0) SetPetStablePaperdoll(m)")
+            .unwrap();
+        assert_eq!(shown(&s), (0, 4449));
+        let builds = s.character_pane(h).unwrap().builds;
+        assert!(builds > 0, "a visible pane asks for its copy");
+
+        // A stabled pet: its row's display, through the creature cache.
+        s.eval::<()>("ClickStablePet(1) SetPetStablePaperdoll(m)")
+            .unwrap();
+        assert_eq!(shown(&s), (0, 1008));
+        assert!(s.character_pane(h).unwrap().builds > builds);
+
+        // The pet dismissed: the current pet's row.
+        let mut dismissed = state([Some(pet(7, "Rex", 41)), Some(pet(8, "Bruiser", 38)), None]);
+        dismissed.has_live_pet = false;
+        s.set_stable(Some(dismissed));
+        s.set_stable_live_pet_display(None);
+        s.eval::<()>("ClickStablePet(0) SetPetStablePaperdoll(m)")
+            .unwrap();
+        assert_eq!(shown(&s), (0, 1007));
+
+        // A unit stored over it clears the display, as `0x505b50` does.
+        s.set_unit_guids(&crate::script::UnitGuids {
+            player: 0x42,
+            ..Default::default()
+        });
+        s.eval::<()>("m:SetUnit('player')").unwrap();
+        assert_eq!(shown(&s), (0x42, 0));
+    }
+
+    /// The grab clears first (`0x495034`) and only then checks the family icon: a slot without one
+    /// leaves the cursor clear. The set fires nothing of its own, so every `CURSOR_UPDATE` reads
+    /// the emptied cursor.
+    #[test]
+    fn a_stable_grab_clears_before_its_icon_check() {
+        let mut s = UiScript::new().unwrap();
+        let mut iconless = pet(8, "Bruiser", 38);
+        iconless.icon = None;
+        s.set_stable(Some(state([Some(pet(7, "Rex", 41)), Some(iconless), None])));
+        crate::script::cursor::install_kind_probe(&s);
+        crate::script::tick::heard::listen(&s, &["CURSOR_UPDATE"], Some("CursorKind()"));
+        s.set_cursor_for_test(crate::script::cursor::CursorPayload::Macro(
+            crate::script::cursor::CursorMacro {
+                index: 1,
+                texture: None,
+            },
+        ));
+        s.run("PickupStablePet(1)").unwrap();
+        assert!(s.cursor_payload().is_none(), "cleared, and nothing grabbed");
+        assert_eq!(crate::script::tick::heard::take(&s), ["CURSOR_UPDATE none"]);
+        s.run("PickupStablePet(0)").unwrap();
+        assert!(matches!(
+            s.cursor_payload(),
+            Some(crate::script::cursor::CursorPayload::StablePet(_))
+        ));
+        assert_eq!(crate::script::tick::heard::take(&s), ["CURSOR_UPDATE none"]);
+        // An empty slot is the binding's own refusal, ahead of the grab and its clear.
+        s.run("PickupStablePet(2)").unwrap();
+        assert!(crate::script::tick::heard::take(&s).is_empty());
     }
 }

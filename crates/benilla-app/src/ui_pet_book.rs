@@ -168,6 +168,10 @@ fn slot_view(
         // Off the raw word; `0x4bdd65` also requires a `Spell.dbc` record, which every slot has.
         autocast: Some((entry.autocast_allowed(), entry.autocast_on())),
         packed: entry.packed,
+        // The pet bar paints a running spell's `ActiveIconID`, with no fallback (`0x4bdd2f`), on
+        // the same predicate as `current`.
+        bar_texture: crate::ui_pet::active_aura_press(entry, pet_store, Some(d))
+            .map(|_| d.active_icon.clone()),
     }
 }
 
@@ -234,9 +238,7 @@ pub(crate) fn drain_pet_book(
         let Some(on) = flip_autocast(&mut bar.spells, spell_id) else {
             continue;
         };
-        // `0x4bcdc6`'s `SignalEvent(0x161)`: the bar repaints before the packet leaves, and the
-        // signal count carries that to the feed.
-        bar.bar_signals = bar.bar_signals.wrapping_add(1);
+        // The VM flipped its own book and bar and fired `PET_BAR_UPDATE` in the verb (`0x4bcdcb`).
         debug!("ui_pet_book: autocast {spell_id} -> {on}");
         let _ = commands.0.send(ClientCommand::PetSpellAutocast {
             pet_guid,

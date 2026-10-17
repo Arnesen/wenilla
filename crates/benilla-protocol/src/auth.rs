@@ -79,7 +79,10 @@ const fn client_os() -> u32 {
         OS_WINDOWS
     }
 }
-const LOCALE_EN_US: u32 = 0x656e_5553; // "enUS"
+
+/// The enUS locale tag, for the tools that log in with no install of their own to read one from;
+/// the client sends its install's ([`write_logon_challenge`]).
+pub const LOCALE_TAG_EN_US: u32 = u32::from_be_bytes(*b"enUS");
 
 /// A non-success auth result byte, typed so the app can map it to its `AUTH_*` glue string; it
 /// survives [`crate::logon`]'s `anyhow` contexts via `downcast_ref`. vmangos answers an unknown
@@ -88,7 +91,33 @@ const LOCALE_EN_US: u32 = 0x656e_5553; // "enUS"
 pub struct AuthReject {
     /// The grunt result byte (`WOW_FAIL_*`).
     pub code: u8,
+    /// Which reply carried it: the reference handles a byte by its reply, swallowing a proof's
+    /// `0x0A` (`0x5bada2`) where a challenge's reaches the patch state.
+    ///
+    /// Deviation: the patch state downloads no patch and starts no updater, because benilla runs
+    /// no code a server sends. There the reference takes the server's transfer into
+    /// `wow-patch.mpq` (`0x474610`), runs the archive's `prepatch.lst`, whose `execute` lines start
+    /// its programs (`0x474820`), and quits (`0x46b870`). The rule covers the system survey
+    /// ([`read_proof_reply`]) and Warden ([`crate::WorldSession::recv`]) too: each is native code
+    /// the server picks for the original client, which benilla cannot run on its three platforms
+    /// and would not run if it could. A fork that wants any of them builds it on top of the
+    /// decoded wire.
+    pub reply: LogonReply,
 }
+
+/// The two realmd replies a logon reads a result byte from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogonReply {
+    /// `CMD_AUTH_LOGON_CHALLENGE` (`Grunt::OnLogonChallenge`, `0x5baa20`).
+    Challenge,
+    /// `CMD_AUTH_LOGON_PROOF` (`Grunt::OnLogonProof`, `0x5bacb0`).
+    Proof,
+}
+
+/// `WOW_SUCCESS_SURVEY`: a success. Both reply handlers take it down their failure branch
+/// (`0x5baa77`, `0x5bace5` test the byte for zero), reading nothing after it, and
+/// `Logon::OnAuthResult` sends it down 0x00's success arm (`0x5b2cd4` `cmp eax,0xe; je 0x5b2e16`).
+pub const SUCCESS_SURVEY: u8 = 0x0e;
 
 impl std::fmt::Display for AuthReject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -109,11 +138,14 @@ pub struct ChallengeReply {
 }
 
 /// Send `CMD_AUTH_LOGON_CHALLENGE_Client`. `account_name` must be uppercased, as the SRP6 hashes
-/// use it; `build` is 5875.
+/// use it; `build` is 5875. `locale` is the client's locale tag, `[0xc2a2a4]` (`0x5b2115`): the
+/// configured string packed big-endian, written like the other tags as a little-endian dword, so
+/// "enGB" reaches the wire as `B G n e`.
 pub fn write_logon_challenge(
     w: &mut impl Write,
     account_name: &str,
     build: u16,
+    locale: u32,
 ) -> std::io::Result<()> {
     // Everything after the 2-byte size field, assembled first so we can prefix its length.
     let mut body = Vec::with_capacity(34 + account_name.len());
@@ -124,7 +156,7 @@ pub fn write_logon_challenge(
     body.extend_from_slice(&build.to_le_bytes());
     body.extend_from_slice(&PLATFORM_X86.to_le_bytes());
     body.extend_from_slice(&client_os().to_le_bytes());
-    body.extend_from_slice(&LOCALE_EN_US.to_le_bytes());
+    body.extend_from_slice(&locale.to_le_bytes());
     body.extend_from_slice(&0u32.to_le_bytes()); // utc_timezone_offset
     body.extend_from_slice(&Ipv4Addr::LOCALHOST.octets()); // client_ip_address (network order)
     body.push(account_name.len() as u8);
@@ -138,16 +170,24 @@ pub fn write_logon_challenge(
     w.write_all(&packet)
 }
 
-/// Read the challenge reply, returning the SRP6 inputs (or erroring on a non-success result).
-pub async fn read_challenge_reply(r: &mut impl ReadExactAsync) -> Result<ChallengeReply> {
+/// Read the challenge reply: the SRP6 inputs, `None` for [`SUCCESS_SURVEY`] (a success that
+/// carries none), or an [`AuthReject`].
+pub async fn read_challenge_reply(r: &mut impl ReadExactAsync) -> Result<Option<ChallengeReply>> {
     let opcode = read_u8_async(r).await?;
     if opcode != CMD_AUTH_LOGON_CHALLENGE {
         bail!("expected CMD_AUTH_LOGON_CHALLENGE (0x00), got {opcode:#x}");
     }
     let _protocol_version = read_u8_async(r).await?;
     let result = read_u8_async(r).await?;
+    if result == SUCCESS_SURVEY {
+        return Ok(None);
+    }
     if result != 0 {
-        return Err(AuthReject { code: result }.into());
+        return Err(AuthReject {
+            code: result,
+            reply: LogonReply::Challenge,
+        }
+        .into());
     }
     let server_public_key = read_array_async::<32>(r).await?;
     let generator_len = read_u8_async(r).await?;
@@ -176,13 +216,13 @@ pub async fn read_challenge_reply(r: &mut impl ReadExactAsync) -> Result<Challen
         let _pin_grid_seed = read_u32_le_async(r).await?;
         let _pin_salt = read_array_async::<16>(r).await?;
     }
-    Ok(ChallengeReply {
+    Ok(Some(ChallengeReply {
         server_public_key,
         generator,
         large_safe_prime,
         salt,
         crc_salt,
-    })
+    }))
 }
 
 // --- the version (client-integrity) proof --------------------------------------------------------
@@ -256,20 +296,32 @@ pub fn write_logon_proof(
     w.write_all(&packet)
 }
 
-/// Read the proof reply, returning the server's proof `M2` (or erroring on a non-success result).
-pub async fn read_proof_reply(r: &mut impl ReadExactAsync) -> Result<[u8; 20]> {
+/// Read the proof reply: the server's `M2`, `None` for [`SUCCESS_SURVEY`] (a success with no `M2`
+/// read), or an [`AuthReject`].
+pub async fn read_proof_reply(r: &mut impl ReadExactAsync) -> Result<Option<[u8; 20]>> {
     let opcode = read_u8_async(r).await?;
     if opcode != CMD_AUTH_LOGON_PROOF {
         bail!("expected CMD_AUTH_LOGON_PROOF (0x01), got {opcode:#x}");
     }
     let result = read_u8_async(r).await?;
+    if result == SUCCESS_SURVEY {
+        return Ok(None);
+    }
     if result != 0 {
         // A wrong password fails here, where `M1` does not verify: vmangos answers 0x04.
-        return Err(AuthReject { code: result }.into());
+        return Err(AuthReject {
+            code: result,
+            reply: LogonReply::Proof,
+        }
+        .into());
     }
     let server_proof = read_array_async::<20>(r).await?;
+    // Deviation: the survey id is read and dropped, and no survey runs, where the reference keeps
+    // it on the link (`0x5bad53`) for the `Survey.dll` it downloads and calls (`GetSurveyId
+    // 0x5ab620`, passed at `0x47404f`). benilla runs no code a server sends
+    // ([`AuthReject::reply`] gives the rule).
     let _hardware_survey_id = read_u32_le_async(r).await?;
-    Ok(server_proof)
+    Ok(Some(server_proof))
 }
 
 /// Send `CMD_REALM_LIST_Client` (opcode + a `u32` padding of 0).
@@ -368,6 +420,30 @@ mod tests {
         assert_eq!(spelled(OS_WINDOWS), "Win");
         assert_eq!(spelled(OS_MACOS), "OSX");
         assert_eq!(spelled(PLATFORM_X86), "x86");
+    }
+
+    /// The whole challenge for account `AB` on an enGB install: the locale tag as `0x5b2115` loads
+    /// it, `0x656e4742`, goes out little-endian like `'WoW'` and `'x86'` (benilla-re
+    /// `net/login#logon-challenge`).
+    #[test]
+    fn the_challenge_carries_the_locale_tag() {
+        let mut out = Vec::new();
+        write_logon_challenge(&mut out, "AB", 5875, u32::from_be_bytes(*b"enGB")).unwrap();
+        let mut want = vec![
+            0x00, 0x03, 0x20, 0x00, // command, protocol 3, 32 bytes follow
+            b'W', b'o', b'W', 0x00, // game
+            1, 12, 1, // version
+            0xf3, 0x16, // build 5875
+            b'6', b'8', b'x', 0x00, // platform
+        ];
+        want.extend_from_slice(&client_os().to_le_bytes());
+        want.extend_from_slice(&[
+            b'B', b'G', b'n', b'e', // locale "enGB"
+            0, 0, 0, 0, // time zone
+            127, 0, 0, 1, // address
+            2, b'A', b'B', // account
+        ]);
+        assert_eq!(out, want);
     }
 
     #[test]

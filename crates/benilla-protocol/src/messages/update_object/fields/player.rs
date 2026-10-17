@@ -6,7 +6,16 @@ impl ObjectFields {
     /// `OBJECT_FIELD_ENTRY` (3): the template entry. The only route to a pet's template: its guid
     /// holds a pet number instead, but vmangos writes the entry here (`Creature.cpp:376`).
     pub fn object_entry(&self) -> Option<u32> {
-        self.get_u32(3)
+        self.get_u32(FIELD_OBJECT_ENTRY)
+    }
+    /// `ITEM_FIELD_OWNER` (field 6): the item's owner, which the client's lock watchers compare
+    /// with the active player.
+    pub fn item_owner(&self) -> Option<u64> {
+        self.get_guid(6)
+    }
+    /// `OBJECT_FIELD_TYPE & TYPEMASK_ITEM`: an item, a bag included.
+    pub fn is_item(&self) -> bool {
+        self.get_u32(FIELD_OBJECT_TYPE).unwrap_or(0) & 0x2 != 0
     }
     /// `ITEM_FIELD_STACK_COUNT`: an item object's stack size.
     pub fn item_stack_count(&self) -> Option<u32> {
@@ -16,7 +25,7 @@ impl ObjectFields {
     /// charges left on spell `i`, signed; negative is consumed when empty, 0 is spent.
     pub fn item_spell_charges(&self, i: u8) -> Option<i32> {
         (i < 5)
-            .then(|| self.get_u32(FIELD_ITEM_STACK_COUNT + 2 + u16::from(i)))?
+            .then(|| self.get_u32(FIELD_ITEM_SPELL_CHARGES + u16::from(i)))?
             .map(|v| v as i32)
     }
     /// `ITEM_FIELD_FLAGS` (field 21): `0x08` wrapped, never alerts; `0x10` forces red status 4.
@@ -26,6 +35,11 @@ impl ObjectFields {
     /// `ITEM_FIELD_CREATOR` (field 10): crafter, or letter sender (`HandleMailCreateTextItem`).
     pub fn item_creator(&self) -> Option<u64> {
         self.get_guid(10).filter(|&g| g != 0)
+    }
+    /// `ITEM_FIELD_GIFTCREATOR` (field 12, `[item+0x114]+0x18` at `0x52e32a`): who wrapped the
+    /// item, read only while it carries the WRAPPED flag.
+    pub fn item_gift_creator(&self) -> Option<u64> {
+        self.get_guid(12).filter(|&g| g != 0)
     }
     /// `ITEM_FIELD_ITEM_TEXT_ID` (field 45, owner only): a mailed letter copy's text; nonzero
     /// makes a right-click read it (`CMSG_ITEM_TEXT_QUERY`) instead of using the item.
@@ -200,6 +214,17 @@ impl ObjectFields {
             counters,
             state: (count_state >> 24) as u8,
             timer,
+        })
+    }
+    /// The whole `PLAYER_QUEST_LOG` window, `[id, count-state, timer]` per slot as the wire left
+    /// it, 0 where absent: a group mate's carries the ids alone, the one dword per slot vmangos
+    /// flags `GROUP_ONLY` (`UpdateFields_1_12_1.h:128-129`).
+    pub fn player_quest_log_window(&self) -> [[u32; 3]; PLAYER_QUEST_LOG_SLOTS as usize] {
+        std::array::from_fn(|slot| {
+            std::array::from_fn(|k| {
+                self.get_u32(FIELD_PLAYER_QUEST_LOG_1_1 + 3 * slot as u16 + k as u16)
+                    .unwrap_or(0)
+            })
         })
     }
     /// `PLAYER_EXPLORED_ZONES_1 + i`: bitset dword `i`; bit `n` is `AreaTable` explore flag `n`.

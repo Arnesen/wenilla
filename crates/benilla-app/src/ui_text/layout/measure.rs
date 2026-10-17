@@ -4,12 +4,13 @@
 
 use bevy::math::Rect;
 
-use benilla_ui::script::{JustifyH, JustifyV};
+use benilla_ui::script::{JustifyH, JustifyV, Outline};
 
-use super::super::engine::{TextEngine, UiFontAtlas};
+use super::super::engine::{GlyphRef, TextEngine, UiFontAtlas};
 use super::super::markup::{fontstring_lines, parse_markup, ColorRun};
-use super::wrap::{greedy_pack, tokenize_words};
-use super::{client_step, overflow, FontSpec, Justify, HEIGHT_LIMIT_MIN, WRAP_MIN_WIDTH};
+use super::super::outline::Bake;
+use super::wrap::{self, row_limit, RowPricer};
+use super::{overflow, FontSpec, Justify, HEIGHT_LIMIT_MIN, WRAP_MIN_WIDTH};
 
 /// A [`FontSpec`] resolved once, so measure and draw agree on face and raster size.
 #[derive(Clone, Copy)]
@@ -20,86 +21,264 @@ pub(super) struct Resolved {
     pub(super) ppem: u16,
     /// The logical height `ppem` draws at, not the requested one: the pitch and every block em.
     pub(super) size: f32,
-    /// The outline cell variant (`0` = plain).
-    pub(super) radius: u8,
+    /// The cell's bake: the outline's ring and the monochrome raster.
+    pub(super) bake: Bake,
     /// The step law's per-glyph bias ([`super::step_extra_of`]).
     pub(super) step_extra: f32,
+    /// The line gap, whole device pixels in logical px ([`super::line_gap`]).
+    pub(super) gap: f32,
+    /// The outline's growth of a line's last glyph in device px ([`outline_lead`]).
+    pub(super) lead: f32,
+    /// What seeds each laid-out row's pen in device px: the outline's lead and the drawn shadow's
+    /// x offset ([`FontSpec::shadow_x`], [`shadow_px`]), as the line builder is handed both
+    /// (`0x5cddb1`, `0x5c7470` @`0x5c749d`–`0x5c74f2`).
+    pub(super) seed: f32,
+}
+
+/// `n` lines' height, `n·S + (n−1)·gap` (`0x5c2070`); 0 for none.
+pub(super) fn block_height(n: usize, r: Resolved) -> f32 {
+    if n == 0 {
+        return 0.0;
+    }
+    n as f32 * r.size + (n - 1) as f32 * r.gap
 }
 
 /// Resolve a spec without touching the caches ([`TextEngine::ensure_metrics`] covers the text).
 pub(super) fn resolve(e: &mut TextEngine, font: &FontSpec) -> Resolved {
     let face = e.face_for(font.path);
     let ppem = e.ppem(font.height.unwrap_or(super::super::DEFAULT_FONT_SIZE));
+    let lead = outline_lead(font.outline);
     Resolved {
         face,
         ppem,
         size: e.logical_size(ppem),
-        radius: super::super::outline::radius_of(font.outline),
+        bake: Bake::of(font.outline, font.monochrome),
         step_extra: super::step_extra_of(font.outline),
+        gap: super::line_gap(font.spacing, e.dpi()),
+        lead,
+        seed: lead + shadow_px(font.shadow_x, e.dpi()),
     }
 }
 
-/// One line's width in logical px, the sum of its characters' steps ([`client_step`]) as the
-/// reference's `GetTextWidth` sums them; every measure, the one inside a Lua call
-/// ([`benilla_ui::script::TextMeasure`]) included, runs through here. The caller ensures `text`'s
-/// metrics first: this is `&`-only, and a character not in the cache counts 0.
-pub(super) fn measure_line_width(e: &TextEngine, r: Resolved, step_extra: f32, text: &str) -> f32 {
-    // Summed in device px and divided once, as the pen does: a sum of quotients is another `f32`,
-    // and measure must equal render to the bit.
-    let steps: f32 = text
-        .chars()
-        .filter_map(|c| e.char_cell(r.face, r.ppem, c))
-        .map(|c| c.floor_sum + step_extra * c.glyphs.len() as f32)
-        .sum();
-    steps / e.dpi()
+/// What an outline adds to a line in device px, twice: the reference seeds every line's pen with
+/// it before the first glyph (`0x5c6940` @`0x5c69c0`, `0x5c7470` @`0x5c74d0`), and its rasterizer
+/// widens each glyph's bitmap by it (`0x5ca160` → `0x5d1120`, `out[4]`), which the line's last glyph
+/// counts. 4 for THICK (font flag `0x8`), 2 for NORMAL (`0x1`).
+fn outline_lead(outline: Outline) -> f32 {
+    match outline {
+        Outline::Thick => 4.0,
+        Outline::Normal => 2.0,
+        Outline::None => 0.0,
+    }
 }
 
-/// The width law itself, for the differential test that pins it to a shaped sum.
-#[cfg(test)]
-pub(crate) fn measure_line_width_for_test(
-    e: &mut TextEngine,
-    face: usize,
-    ppem: u16,
-    step_extra: f32,
-    text: &str,
-) -> f32 {
-    e.ensure_metrics(face, ppem, text);
-    let r = Resolved {
-        face,
-        ppem,
-        size: e.logical_size(ppem),
-        radius: 0,
-        step_extra,
-    };
-    measure_line_width(e, r, step_extra, text)
+/// A shadow's x offset, in logical px, as the pen seed it is in device px: whole pixels when it
+/// points right, else nothing (`0x5c69a4`/`0x5c74b4`: `round` then `ceil`, only past 0).
+fn shadow_px(shadow_x: f32, dpi: f32) -> f32 {
+    if shadow_x > 0.0 {
+        (shadow_x * dpi + 0.5).floor()
+    } else {
+        0.0
+    }
 }
 
-/// Greedy wrap of one markup line into rows no wider than `max_width` px, the reference's wrap
-/// kernel (`0x5c6c50`/`0x5c7780`): break at the last opportunity, else force-break at the last
-/// fitting glyph; inter-word whitespace stays verbatim and only the separator at a break drops.
-///
-/// Break opportunities are whitespace only: the reference's classifier (`0x5c7780`) also breaks
-/// after `-`, `:` and `/` and by CJK kinsoku classes, and its `nonspacewrap` flag (ui `0x1000`) is
-/// not modelled; of the flag's three stock users, only `ScriptErrors_Message` wraps past one line.
-pub(super) fn wrap_line(
+/// The first glyph `c` draws, the one a step looks at past its own glyph (`0x5c6b70`).
+fn first_glyph(e: &TextEngine, r: Resolved, c: char) -> Option<GlyphRef> {
+    e.char_cell(r.face, r.ppem, c)
+        .and_then(|cell| cell.glyphs.first().copied())
+}
+
+/// A row priced as it grows, the step law of [`line_extent_dev`] one character at a time: the
+/// wrap's [`RowPricer`], so a row of `n` characters costs `n` steps, not `n²`.
+struct EnginePricer<'a> {
+    e: &'a TextEngine,
+    r: Resolved,
+    /// The steps between the glyphs so far, in device px.
+    inner: f32,
+    first: Option<GlyphRef>,
+    last: Option<GlyphRef>,
+    /// A glyphless character after the last glyph: a code the look-ahead steps to.
+    code_after: Option<Option<GlyphRef>>,
+}
+
+impl<'a> EnginePricer<'a> {
+    fn new(e: &'a TextEngine, r: Resolved) -> Self {
+        Self {
+            e,
+            r,
+            inner: 0.0,
+            first: None,
+            last: None,
+            code_after: None,
+        }
+    }
+
+    /// The row's extent in device px past its seed, with its first and last glyphs: each glyph
+    /// steps to the next ([`TextEngine::step`], kerned); the last looks past itself as the
+    /// reference does (`0x5c6b70`): when any character follows it, in the row or as `next`, the
+    /// source character after it, it takes its step to that character, else its ink plus the
+    /// outline's growth.
+    fn extent(&self, next: Option<char>) -> (f32, Option<GlyphRef>, Option<GlyphRef>) {
+        let (Some(first), Some(last)) = (self.first, self.last) else {
+            return (0.0, None, None);
+        };
+        let r = self.r;
+        let follow = self
+            .code_after
+            .or_else(|| next.map(|c| first_glyph(self.e, r, c)));
+        let ink = last.ink + r.lead;
+        let tail = match follow {
+            // `0x5c6beb`: a zero step falls through to the ink.
+            Some(right) => Some(
+                self.e
+                    .step(r.face, r.ppem, r.step_extra, &last, right.as_ref()),
+            )
+            .filter(|s| *s != 0.0)
+            .unwrap_or(ink),
+            None => ink,
+        };
+        (self.inner + tail, Some(first), Some(last))
+    }
+}
+
+impl RowPricer for EnginePricer<'_> {
+    fn reset(&mut self) {
+        *self = Self::new(self.e, self.r);
+    }
+
+    fn push(&mut self, c: char) -> bool {
+        let r = self.r;
+        match self.e.char_cell(r.face, r.ppem, c) {
+            Some(cell) if !cell.glyphs.is_empty() => {
+                for g in &cell.glyphs {
+                    match &self.last {
+                        Some(prev) => {
+                            self.inner += self.e.step(r.face, r.ppem, r.step_extra, prev, Some(g));
+                        }
+                        None => self.first = Some(*g),
+                    }
+                    self.last = Some(*g);
+                }
+                self.code_after = None;
+                true
+            }
+            _ => {
+                if self.last.is_some() && self.code_after.is_none() {
+                    self.code_after = Some(None);
+                }
+                false
+            }
+        }
+    }
+
+    fn width(&self, next: Option<char>) -> f32 {
+        self.r.seed + self.extent(next).0
+    }
+}
+
+/// One line's extent in device px past its seed, with its first and last glyphs
+/// ([`EnginePricer::extent`]). A character with no glyph steps nothing and keeps the glyph before
+/// it, as the kernels skip it.
+fn line_extent_dev(
     e: &TextEngine,
     r: Resolved,
-    line: &[ColorRun],
-    max_width: f32,
-) -> Vec<Vec<ColorRun>> {
-    let words = tokenize_words(line);
-    if words.is_empty() {
-        // A blank or all-whitespace line still takes a row.
-        return vec![line.to_vec()];
+    text: impl Iterator<Item = char>,
+    next: Option<char>,
+) -> (f32, Option<GlyphRef>, Option<GlyphRef>) {
+    let mut p = EnginePricer::new(e, r);
+    for c in text {
+        p.push(c);
     }
-    greedy_pack(words, max_width, |t| {
-        measure_line_width(e, r, r.step_extra, t)
-    })
+    p.extent(next)
 }
 
-/// `text`'s laid-out size, the widest line by all lines' height, wrapping at `wrap_width` by the
-/// render's own [`wrap_line`] pass; the engine's measure round-trip sizes height-less FontStrings
-/// by it ([`benilla_ui::script::UiScript::fontstrings_needing_measure`]).
+/// `GetStringWidth`'s measure in logical px, the kernel `0x5c6940` as `0x772890` calls it: each
+/// line is [`line_extent_dev`] with nothing after its last glyph, the widest wins, and nothing
+/// rounds it or pads it. The first line's pen is seeded with the outline's lead and the shadow's
+/// x offset ([`shadow_px`]); `shadow_x` is in this measure's logical px, which `0x772890` leaves
+/// unscaled by the frame (`[fs+0x108]`), unlike the draw's ([`FontSpec::shadow_x`]). The
+/// reference's kernel resets the pen at a break but not the previous glyph (`0x5c6aa0`–`0x5c6abe`
+/// leave `[ebp-0x10]`), so in its measure each later line opens with the step from the last glyph
+/// before it, kerned as any step, and without the seed.
+pub(crate) fn string_width(e: &mut TextEngine, text: &str, font: FontSpec, shadow_x: f32) -> f32 {
+    let r = resolve(e, &font);
+    e.ensure_metrics(r.face, r.ppem, text);
+    let e = &*e;
+    let dpi = e.dpi();
+    let mut widest = 0.0f32;
+    let mut carry: Option<GlyphRef> = None;
+    for (i, line) in fontstring_lines(text, [1.0, 1.0, 1.0, 1.0])
+        .iter()
+        .enumerate()
+    {
+        let chars = line.iter().flat_map(|run| run.text.chars());
+        let (extent, first, last) = line_extent_dev(e, r, chars, None);
+        let open = if i == 0 {
+            r.lead + shadow_px(shadow_x, dpi)
+        } else {
+            // The previous glyph the break kept (`0x5c6aa0`), stepped to this line's first.
+            match (carry, first) {
+                (Some(p), Some(f)) => e.step(r.face, r.ppem, r.step_extra, &p, Some(&f)),
+                _ => 0.0,
+            }
+        };
+        widest = widest.max(open + extent);
+        carry = last.or(carry);
+    }
+    widest / dpi
+}
+
+/// Wrap the `lines` of one text into rows within `max_width` px, the reference's line kernel
+/// (`0x5c7470`, [`wrap::wrap_text`]): a row ends at the last break opportunity the classifier
+/// (`0x5c7780`) found, else is cut at the last fitting glyph; inter-word whitespace stays verbatim
+/// and only the whitespace at a break drops. A row is priced as its line builder prices it: its
+/// seed, then its glyphs' steps, the last looking past itself to the source character after it
+/// ([`EnginePricer`]), and it fits when that is within the width rounded up to a whole device
+/// pixel (`0x5c752a`-`0x5c7530`). `non_space_wrap` is the string's flag `0x40`; `max_rows` stops
+/// the walk once that many rows are laid.
+pub(super) fn wrap_lines(
+    e: &TextEngine,
+    r: Resolved,
+    lines: &[Vec<ColorRun>],
+    max_width: f32,
+    non_space_wrap: bool,
+    max_rows: usize,
+) -> wrap::Laid {
+    wrap::wrap_text(
+        lines,
+        row_limit(max_width, e.dpi()),
+        non_space_wrap,
+        max_rows,
+        &mut EnginePricer::new(e, r),
+    )
+}
+
+/// A laid-out row's width in logical px, its seed included, as the line builder hands it to the
+/// justify (`0x5c7470` → `0x5cddf9`); `next` is the source character after it ([`wrap_lines`]).
+pub(super) fn row_width(e: &TextEngine, r: Resolved, row: &[ColorRun], next: Option<char>) -> f32 {
+    let chars = row.iter().flat_map(|run| run.text.chars());
+    (r.seed + line_extent_dev(e, r, chars, next).0) / e.dpi()
+}
+
+/// [`wrap_lines`] with each row's runs and the source character after it.
+pub(super) fn wrap_rows(
+    e: &TextEngine,
+    r: Resolved,
+    lines: &[Vec<ColorRun>],
+    max_width: f32,
+    non_space_wrap: bool,
+) -> Vec<(Vec<ColorRun>, Option<char>)> {
+    wrap_lines(e, r, lines, max_width, non_space_wrap, usize::MAX)
+        .rows
+        .into_iter()
+        .map(|row| (row.runs, row.next))
+        .collect()
+}
+
+/// `text`'s laid-out size, by all lines' height: unwrapped, the width is [`string_width`]'s with
+/// the spec's shadow, the one the reference keeps (`[fs+0xfc]`); wrapped at `wrap_width`, it is the
+/// widest row the render's own [`wrap_rows`] pass lays. The engine's measure round-trip sizes
+/// height-less FontStrings by it ([`benilla_ui::script::UiScript::fontstrings_needing_measure`]).
 pub(crate) fn measure_text(
     e: &mut TextEngine,
     text: &str,
@@ -109,31 +288,29 @@ pub(crate) fn measure_text(
     let r = resolve(e, &font);
     // Metrics only: a string measured and never drawn costs no raster.
     e.ensure_metrics(r.face, r.ppem, text);
-    let e = &*e;
-
     let lines = fontstring_lines(text, [1.0, 1.0, 1.0, 1.0]);
-    let render_lines: Vec<Vec<ColorRun>> = match wrap_width {
-        Some(w) if w > WRAP_MIN_WIDTH => lines
-            .iter()
-            .flat_map(|line| wrap_line(e, r, line, w))
-            .collect(),
-        _ => lines,
-    };
-    let mut max_w = 0.0f32;
-    for line in &render_lines {
-        let mut w = 0.0f32;
-        for run in line {
-            if !run.text.is_empty() {
-                w += measure_line_width(e, r, r.step_extra, &run.text);
-            }
+    // Height: N lines at the font em with no outline pad, the gap between them (`0x5c2070`:
+    // `N·S + (N-1)·gap`); an outlined ring pokes past it, as in the reference.
+    let (w, rows) = match wrap_width {
+        Some(w) if w > WRAP_MIN_WIDTH => {
+            let e = &*e;
+            let rows = wrap_rows(e, r, &lines, w, font.non_space_wrap);
+            let widest = rows
+                .iter()
+                .map(|(row, next)| row_width(e, r, row, *next))
+                .fold(0.0f32, f32::max);
+            (widest, rows.len())
         }
-        max_w = max_w.max(w);
-    }
-    // Deviation: one pixel of headroom over the reference's measured width, kept because dropping
-    // it narrows every auto-sized FontString, a look change.
-    // Height: N lines at the font em with no outline pad (`0x5c2070`: `N·S + (N-1)·gap`, gap 0 in
-    // shipped UI); an outlined ring pokes past it, as in the reference.
-    (max_w.ceil() + 1.0, render_lines.len() as f32 * r.size)
+        _ => (string_width(e, text, font, font.shadow_x), lines.len()),
+    };
+    (w, block_height(rows, r))
+}
+
+/// `text`'s unwrapped height, its lines and the gaps between them ([`measure_text`]'s, without a
+/// width).
+pub(crate) fn unwrapped_height(e: &mut TextEngine, text: &str, font: FontSpec) -> f32 {
+    let r = resolve(e, &font);
+    block_height(fontstring_lines(text, [1.0, 1.0, 1.0, 1.0]).len(), r)
 }
 
 /// How many rows `text` wraps into at `wrap_width`, by the render's own [`wrap_line`] pass: the
@@ -147,37 +324,54 @@ pub(crate) fn measure_wrapped_rows(
 ) -> u16 {
     let r = resolve(e, &font);
     e.ensure_metrics(r.face, r.ppem, text);
-    let rows = wrapped_rows(e, r, text, wrap_width);
+    let rows = wrapped_rows(e, r, text, wrap_width, font.non_space_wrap);
     rows.clamp(1, usize::from(u16::MAX)) as u16
 }
 
 /// The wrapped row count of `text` at `wrap_width`; an unconstrained width counts the `\n` lines.
-fn wrapped_rows(e: &TextEngine, r: Resolved, text: &str, wrap_width: f32) -> usize {
-    wrapped_rows_capped(e, r, text, wrap_width, usize::MAX)
+fn wrapped_rows(
+    e: &TextEngine,
+    r: Resolved,
+    text: &str,
+    wrap_width: f32,
+    non_space_wrap: bool,
+) -> usize {
+    let lines = fontstring_lines(text, [1.0, 1.0, 1.0, 1.0]);
+    if wrap_width <= WRAP_MIN_WIDTH {
+        return lines.len();
+    }
+    wrap_lines(e, r, &lines, wrap_width, non_space_wrap, usize::MAX)
+        .rows
+        .len()
 }
 
-/// [`wrapped_rows`], stopping at `cap` as the reference's fit walk (`0x5c21c0`) lays out only
-/// `min(needed, fits + 1)` lines: an overflow test passes `allowed + 1`, the chat band's real count
-/// [`usize::MAX`].
-fn wrapped_rows_capped(
+/// The row count of the reference's fit walk (`0x5c21c0`), which lays out only `min(needed, fits +
+/// 1)` lines: an overflow test passes `allowed + 1` as `cap`, and a count at `cap` is an overflow.
+/// The walk also stops after a force-broken line while the string's `nonspacewrap` is off
+/// (`0x5c22e8`-`0x5c22f5`, the carry byte it passed down), so the text after it does not fit
+/// however many lines the box has left: that too counts `cap`.
+fn fit_rows(
     e: &TextEngine,
     r: Resolved,
     text: &str,
     wrap_width: f32,
     cap: usize,
+    non_space_wrap: bool,
 ) -> usize {
     let lines = fontstring_lines(text, [1.0, 1.0, 1.0, 1.0]);
     if wrap_width <= WRAP_MIN_WIDTH {
         return lines.len().min(cap);
     }
-    let mut rows = 0usize;
-    for line in &lines {
-        rows += wrap_line(e, r, line, wrap_width).len();
-        if rows >= cap {
-            return cap;
-        }
+    let laid = wrap_lines(e, r, &lines, wrap_width, non_space_wrap, cap);
+    // A row no byte of which fits ends the walk short of the text (`0x5c22c0`), as a force-cut one
+    // does while `nonspacewrap` is off.
+    let stops = laid.bailed_at.is_some()
+        || (!non_space_wrap && laid.rows.iter().any(|row| row.forced && row.more));
+    if stops {
+        cap
+    } else {
+        laid.rows.len()
     }
-    rows
 }
 
 /// [`wrapped_rows`], for the tests.
@@ -187,27 +381,28 @@ pub(super) fn wrapped_rows_for_test(
     r: Resolved,
     text: &str,
     wrap_width: f32,
+    non_space_wrap: bool,
 ) -> usize {
-    wrapped_rows(e, r, text, wrap_width)
+    wrapped_rows(e, r, text, wrap_width, non_space_wrap)
 }
 
-/// [`wrapped_rows_capped`], for the tests.
+/// [`fit_rows`], for the tests.
 #[cfg(test)]
-pub(super) fn wrapped_rows_capped_for_test(
+pub(super) fn fit_rows_for_test(
     e: &TextEngine,
     r: Resolved,
     text: &str,
     wrap_width: f32,
     cap: usize,
+    non_space_wrap: bool,
 ) -> usize {
-    wrapped_rows_capped(e, r, text, wrap_width, cap)
+    fit_rows(e, r, text, wrap_width, cap, non_space_wrap)
 }
 
-/// The display string under the reference's height-gated ellipsis truncate (`CSimpleFontString`
-/// `0x771ec0`): wrapped past the box, the text backs off a char at a time behind `"..."` until it
-/// fits; `None` draws it raw. The gate is `boxW > 0 && boxH > 0` (`maxLines` is not modelled), so
-/// an auto-height rect never truncates. Region FontStrings only: edit boxes, message lines and
-/// world text never reach `0x771ec0` in the reference either.
+/// The display string under the reference's ellipsis truncate (`CSimpleFontString` `0x771ec0`),
+/// remembered per region ([`super::super::EllipsisMemo`]); `None` draws the text raw. See
+/// [`ellipsize_text`] for the law. Region FontStrings only: edit boxes, message lines and world
+/// text never reach `0x771ec0` in the reference either.
 pub(crate) fn ellipsize_to_fit(
     atlas: &mut UiFontAtlas,
     region: benilla_ui::widget::RegionHandle,
@@ -215,7 +410,8 @@ pub(crate) fn ellipsize_to_fit(
     rect: Rect,
     font: FontSpec,
 ) -> Option<String> {
-    if rect.width() <= WRAP_MIN_WIDTH || rect.height() <= HEIGHT_LIMIT_MIN {
+    if rect.width() <= WRAP_MIN_WIDTH || (font.max_lines == 0 && rect.height() <= HEIGHT_LIMIT_MIN)
+    {
         return None;
     }
     let (box_w, box_h) = (rect.width(), rect.height());
@@ -224,23 +420,40 @@ pub(crate) fn ellipsize_to_fit(
     if let Some(hit) = atlas.ellipsis.get(region, text, box_w, box_h, &font) {
         return hit.clone();
     }
-    let display = {
-        let mut e = atlas.lock();
-        let r = resolve(&mut e, &font);
-        // Every candidate is a prefix of `text` plus "...", so these two cover the whole walk.
-        e.ensure_metrics(r.face, r.ppem, text);
-        e.ensure_metrics(r.face, r.ppem, "...");
-        let e = &*e;
-        // Overflow is decided one row past the box, the reference's bound (`wrapped_rows_capped`).
-        let cap = overflow::lines_fitting(box_h.max(r.size), r.size) + 1;
-        overflow::ellipsize_in_box(text, box_h, r.size, |candidate| {
-            wrapped_rows_capped(e, r, candidate, box_w, cap)
-        })
-    };
+    let display = ellipsize_text(&mut atlas.lock(), text, box_w, box_h, font);
     atlas
         .ellipsis
         .put(region, text, box_w, box_h, &font, display.clone());
     display
+}
+
+/// The reference's ellipsis truncate (`0x771ec0`) of `text` in a `box_w` by `box_h` box (px of
+/// `font`'s space): it runs for any box with a width (`0x771efb`) and either a height
+/// (`0x771f19`) or a `maxLines` (`0x771f0f`), which sets the height to that many line pitches
+/// (`0x771f48`-`0x771f61`) whatever the box holds; the text that wraps past it backs off a char at
+/// a time behind `"..."` until the fit walk takes it ([`fit_rows`]). `None`: it fits.
+pub(crate) fn ellipsize_text(
+    e: &mut TextEngine,
+    text: &str,
+    box_w: f32,
+    box_h: f32,
+    font: FontSpec,
+) -> Option<String> {
+    let r = resolve(e, &font);
+    // Every candidate is a prefix of `text` plus "...", so these two cover the whole walk.
+    e.ensure_metrics(r.face, r.ppem, text);
+    e.ensure_metrics(r.face, r.ppem, "...");
+    let e = &*e;
+    let box_h = if font.max_lines > 0 {
+        font.max_lines as f32 * (r.size + r.gap)
+    } else {
+        box_h
+    };
+    // Overflow is decided one row past the box, the reference's bound ([`fit_rows`]).
+    let cap = overflow::lines_fitting(box_h.max(r.size + r.gap), r.size, r.gap) + 1;
+    overflow::ellipsize_in_box(text, box_h, r.size, r.gap, |candidate| {
+        fit_rows(e, r, candidate, box_w, cap, font.non_space_wrap)
+    })
 }
 
 /// The EditBox overlays' line origin (x0 under `justifyH`, where caret offsets start) and one-line
@@ -258,7 +471,7 @@ pub(crate) fn line_origin(
     let x0 = match justify.h {
         JustifyH::Left => rect.min.x,
         JustifyH::Center | JustifyH::Right => {
-            let w = measure_line_width(e, r, r.step_extra, drawn);
+            let w = (r.seed + line_extent_dev(e, r, drawn.chars(), None).0) / e.dpi();
             if matches!(justify.h, JustifyH::Center) {
                 rect.min.x + ((rect.width() - w) * 0.5).max(0.0)
             } else {
@@ -300,13 +513,23 @@ pub(crate) fn line_advances(e: &mut TextEngine, text: &str, font: FontSpec) -> V
 
     let mut written = vec![false; text.len() + 1];
     written[0] = true;
-    // The render's device-px pen, so a caret boundary is the x the glyph before it was drawn at.
+    // Each glyph with the glyph after it, so a kerned step lands where the draw lands it.
+    let glyphs: Vec<(usize, GlyphRef)> = drawn
+        .char_indices()
+        .flat_map(|(off, ch)| {
+            e.char_cell(r.face, r.ppem, ch)
+                .map(|c| c.glyphs.iter().map(move |g| (off, *g)).collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+        .collect();
+    // The render's device-px pen, so a caret boundary is the x the glyph after it is drawn at.
     let mut x_dev = 0.0f32;
+    let mut k = 0usize;
     for (off, ch) in drawn.char_indices() {
-        if let Some(c) = e.char_cell(r.face, r.ppem, ch) {
-            for g in &c.glyphs {
-                x_dev += client_step(g.advance, r.step_extra);
-            }
+        while k < glyphs.len() && glyphs[k].0 == off {
+            let next = glyphs.get(k + 1).map(|(_, g)| g);
+            x_dev += e.step(r.face, r.ppem, r.step_extra, &glyphs[k].1, next);
+            k += 1;
         }
         // The character's end in drawn bytes, mapped to its raw boundary.
         let end = bounds[(off + ch.len_utf8()).min(drawn.len())];
@@ -323,8 +546,9 @@ pub(crate) fn line_advances(e: &mut TextEngine, text: &str, font: FontSpec) -> V
 }
 
 /// The multiline EditBox row table: the raw byte where each wrapped row of `text` starts at
-/// `wrap_width`, by the render's own [`wrap_line`] pass, and the row pitch (the font em). Never
-/// empty (`[0]` for empty text).
+/// `wrap_width`, by the render's own [`wrap_lines`] pass, and the row pitch, the font em plus the
+/// line gap (`0x77d133`-`0x77d161`). Never empty (`[0]` for empty text). A trailing break leaves
+/// the empty row its caret sits on, which the FontString law does not count.
 pub(crate) fn line_rows(
     e: &mut TextEngine,
     text: &str,
@@ -334,111 +558,88 @@ pub(crate) fn line_rows(
     let r = resolve(e, &font);
     e.ensure_metrics(r.face, r.ppem, text);
     let e = &*e;
-    let mut rows = Vec::new();
-    let mut base = 0usize; // byte offset of the current '\n' segment within `text`
-    for seg in text.split('\n') {
-        let lines = parse_markup(seg, [1.0, 1.0, 1.0, 1.0]);
-        let sub: Vec<Vec<ColorRun>> = if wrap_width > WRAP_MIN_WIDTH {
-            lines
-                .iter()
-                .flat_map(|line| wrap_line(e, r, line, wrap_width))
-                .collect()
-        } else {
-            lines
-        };
-        segment_row_starts(seg, &sub, base, &mut rows);
-        base += seg.len() + 1; // + the '\n' itself (swallowed by the split)
+    let lines = parse_markup(text, [1.0, 1.0, 1.0, 1.0]);
+    let starts: Vec<usize> = if wrap_width > WRAP_MIN_WIDTH {
+        // The enumerator records a row's start before it asks the kernel (`0x5c24a9`), so the row
+        // that ends the layout counts.
+        let laid = wrap_lines(e, r, &lines, wrap_width, font.non_space_wrap, usize::MAX);
+        laid.rows
+            .iter()
+            .map(|row| row.start)
+            .chain(laid.bailed_at)
+            .collect()
+    } else {
+        let mut at = 0usize;
+        lines
+            .iter()
+            .map(|line| {
+                let start = at;
+                // A character, a line break and a code are one element each.
+                at += line
+                    .iter()
+                    .map(|run| run.text.chars().count() + run.marks as usize)
+                    .sum::<usize>()
+                    + 1;
+                start
+            })
+            .collect()
+    };
+    let mut rows = raw_offsets(text, &starts);
+    // The text's end is no row: the line break that ends the last line is the walk's end. What
+    // the enumerator adds for a text ending in LF (`0x5c250b`) is the end offset itself, even when
+    // a wrap's whitespace skip ate that LF, and after a bail.
+    rows.retain(|&at| at < text.len());
+    if text.ends_with('\n') {
+        rows.push(text.len());
     }
     if rows.is_empty() {
         rows.push(0);
     }
-    (rows, r.size)
+    (rows, r.size + r.gap)
 }
 
-/// [`line_rows`]'s walk for one `\n` segment at `base`: each row starts past the previous row's
-/// bytes and the whitespace its break dropped (none after a force-break); a blank segment still
-/// takes a row.
-fn segment_row_starts(seg: &str, sub: &[Vec<ColorRun>], base: usize, rows: &mut Vec<usize>) {
-    if sub.is_empty() {
-        rows.push(base);
-        return;
-    }
-    // Rows hold drawn text, but a row start is a raw byte, the space the cursor and
-    // [`line_advances`] use: walk drawn bytes and map each start back.
-    let (drawn, bounds) = crate::ui_text::markup::visible_map(seg);
-    let mut p = 0usize; // byte cursor within `drawn`
-    for (j, line) in sub.iter().enumerate() {
-        if j > 0 {
-            while let Some(c) = drawn[p.min(drawn.len())..].chars().next() {
-                if c.is_whitespace() {
-                    p += c.len_utf8();
-                } else {
-                    break;
-                }
-            }
-        }
-        rows.push(base + bounds[p.min(drawn.len())]);
-        p += line.iter().map(|r| r.text.len()).sum::<usize>();
-    }
+/// The raw byte of each element index in `starts`: the cursor of the token it is, so a row that
+/// opens on a glyph with codes before it starts past them, and one that opens on a code, on it.
+/// One past the last token is the text's end.
+fn raw_offsets(text: &str, starts: &[usize]) -> Vec<usize> {
+    let at: Vec<usize> = benilla_ui::markup::tokens(text)
+        .map(|(at, _)| at)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    starts.iter().map(|&c| at[c.min(at.len() - 1)]).collect()
 }
 
 #[cfg(test)]
 mod row_start_tests {
     use super::*;
 
-    fn runs(texts: &[&str]) -> Vec<Vec<ColorRun>> {
-        texts
-            .iter()
-            .map(|t| {
-                vec![ColorRun {
-                    text: (*t).to_string(),
-                    color: [1.0; 4],
-                    link: None,
-                }]
-            })
-            .collect()
-    }
-
-    fn starts(seg: &str, sub: &[Vec<ColorRun>], base: usize) -> Vec<usize> {
-        let mut out = Vec::new();
-        segment_row_starts(seg, sub, base, &mut out);
-        out
-    }
-
     #[test]
-    fn a_word_break_swallows_its_separator() {
-        assert_eq!(starts("hello world", &runs(&["hello", "world"]), 0), [0, 6]);
-    }
-
-    #[test]
-    fn a_force_broken_word_swallows_nothing() {
+    fn a_plain_start_is_its_byte() {
+        assert_eq!(raw_offsets("hello world", &[0, 6]), [0, 6]);
         assert_eq!(
-            starts(
-                "supercalifragilistic",
-                &runs(&["supercali", "fragilistic"]),
-                0
-            ),
-            [0, 9]
-        );
-    }
-
-    #[test]
-    fn a_double_space_separator_is_swallowed_whole() {
-        assert_eq!(starts("one  two", &runs(&["one", "two"]), 0), [0, 5]);
-    }
-
-    #[test]
-    fn inner_whitespace_stays_verbatim_inside_a_row() {
-        assert_eq!(
-            starts("a b  c d", &runs(&["a b  c", "d"]), 0),
+            raw_offsets("h\u{e9}llo w", &[0, 6]),
             [0, 7],
-            "only the BREAK's separator is dropped"
+            "an element index counts characters"
+        );
+    }
+
+    /// A code is an element of its own: a start on the glyph after it is past the code, a start on
+    /// the code is on it.
+    #[test]
+    fn a_start_past_a_code_is_past_its_bytes() {
+        let text = "a|cffff0000b c";
+        // a, the code, b, ' ', c.
+        assert_eq!(raw_offsets(text, &[0, 1, 2, 4]), [0, 1, 11, 13]);
+        assert_eq!(
+            raw_offsets("a||b", &[0, 2]),
+            [0, 3],
+            "`||` draws one byte from two"
         );
     }
 
     #[test]
-    fn a_blank_segment_still_occupies_a_row_and_base_offsets() {
-        assert_eq!(starts("", &[], 12), [12]);
-        assert_eq!(starts("hi there", &runs(&["hi", "there"]), 100), [100, 103]);
+    fn a_start_at_the_end_is_the_texts_end() {
+        assert_eq!(raw_offsets("ab\n", &[0, 3]), [0, 3]);
+        assert_eq!(raw_offsets("", &[0]), [0]);
     }
 }

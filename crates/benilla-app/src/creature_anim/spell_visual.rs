@@ -15,11 +15,13 @@ use benilla_protocol::EntityKind;
 use crate::aura_visual::AuraProc;
 use crate::entities::ItemDisplays;
 use crate::items::{ItemObject, Items};
-use crate::net::{FieldChanged, NetCommands, NetEntity, ObjectStore};
+use crate::net::{FieldChanged, NetEntity, ObjectStore};
+use crate::query_cache::Ask;
 use benilla_assets::{LockRecover, WorldAssets};
 
 use super::{
-    BaseAnimRecompute, CastEvent, CastEventKind, CastHold, EmoteAnim, SpellGoTargets, WoundAnim,
+    BaseAnimRecompute, CastEvent, CastEventKind, CastHold, EmoteAnim, SpellGoTargets, StateKitPins,
+    WoundAnim,
 };
 
 /// The 1.12 client's missile model for an unresolvable visual (`0x860c9c`), shipped in the MPQs.
@@ -224,7 +226,6 @@ pub(super) fn load_spell_visuals(mut commands: Commands, assets: Option<Res<Worl
 pub(super) struct WeaponVisualSrc<'w, 's> {
     displays: Option<Res<'w, ItemDisplays>>,
     items: Option<Res<'w, Items>>,
-    net: Option<Res<'w, NetCommands>>,
     // `Without<ItemObject>`: an item's store overlaps the unit indices, so a unit read of it
     // answers item fields.
     units: Query<'w, 's, (Option<&'static NetEntity>, &'static ObjectStore), Without<ItemObject>>,
@@ -241,7 +242,8 @@ impl WeaponVisualSrc<'_, '_> {
             EntityKind::Player => s
                 .player_visible_item_entry(17)
                 .filter(|e| *e != 0)
-                .and_then(|entry| self.items.as_deref()?.held(entry, self.net.as_deref()?))
+                // The visible item's change looked it up (`0x5ed764`); this only reads.
+                .and_then(|entry| self.items.as_deref()?.held(entry, Ask::Read))
                 .map(|t| t.display_info_id),
             _ => None,
         }
@@ -432,11 +434,13 @@ fn play_kit(
 ) {
     if let Some(anim_id) = kit.anim_id {
         if play.stage_2 {
-            // Stage 2 compares, never plays; the driver holds the armed id and compares.
+            // Stage 2 compares, never plays; the driver holds the armed id and compares. Any id of
+            // 0 or more reaches it (`0x60f366 jl`), Stand included.
             out.recomputes.write(BaseAnimRecompute { entity, anim_id });
         } else if (8..=10).contains(&anim_id) {
             // A CombatWound id (8 to 10) lays a severity-0 wound in the blend slot, not the
-            // kit's own id (`0x60f3ad` → `0x60f510`, `0x60f3b8`).
+            // kit's own id (`0x60f3ad` → `0x60f510`, `0x60f3b8`). Every other id, Stand included
+            // (`0x60f510(0)` is false), plays through `0x5fe2f0` (`0x60f3c5`).
             out.wounds.write(WoundAnim { entity });
         } else {
             out.oneshots.write(EmoteAnim {
@@ -665,7 +669,8 @@ pub(super) fn route_cast_visuals(
                     } else {
                         commands.entity(ev.entity).try_remove::<super::RangedHold>();
                     }
-                    if let Some(anim_id) = kit.anim_id {
+                    // The hold resolver takes only an id above 0 (`0x612a0a jle`).
+                    if let Some(anim_id) = kit.positive_anim() {
                         commands.entity(ev.entity).try_insert(CastHold {
                             anim_id,
                             spell_id: ev.spell_id,
@@ -859,11 +864,12 @@ pub(super) fn route_cast_visuals(
             // Only an empty hit array consults the ground point (`0x6e8abc … je 0x6e8ba2`).
             let ground_aim = targets.is_empty().then_some(go.dest).flatten();
             if !targets.is_empty() || ground_aim.is_some() {
-                // The release gate (`0x6e7a70`, inverted).
+                // The release gate (`0x6e7a70`, inverted): a cast kit animation above 0 waits for
+                // the release keyframe (`0x6e8295 jg`); Stand launches at once (`0x6e829d`).
                 let awaits_release = stages
                     .filter(|s| s.cast != 0)
                     .and_then(|s| visuals.0.kit(s.cast))
-                    .is_some_and(|k| k.anim_id.is_some());
+                    .is_some_and(|k| k.positive_anim().is_some());
                 missiles.write(MissileSpawn {
                     caster: go.caster,
                     spell_id: go.spell_id,
@@ -902,7 +908,8 @@ pub(super) fn route_cast_visuals(
             }
             // No ranged fallback on the channel poll (`0x612a30`).
             if let Some(kit) = resolve_kit(spells, &visuals.0, cur, |s| s.channel, || None) {
-                if let Some(anim_id) = kit.anim_id {
+                // The hold resolver takes only an id above 0 (`0x612a0a jle`).
+                if let Some(anim_id) = kit.positive_anim() {
                     // Fallible: a unit mid-stream-out is un-indexed but still in this query.
                     commands.entity(entity).try_insert(CastHold {
                         anim_id,
@@ -968,10 +975,13 @@ const AURA_WATCH_SPAN: u16 = 54;
 /// the slots begins its kit's models persistent, also on a unit streamed in mid-aura, and leaving
 /// reaps them (`0x604d00` → `0x5ff350`; remove `0x612320` → `0x614150(spellId, force=1)`). The add
 /// edge rings the kit sound ungated (`0x5ff4c6`) and never plays the kit's anim: stage 2 compares
-/// it with what the unit plays, a mismatch spent on a [`BaseAnimRecompute`]. `CharProc` columns go
-/// out as [`AuraProc`] edges, and a kit arms for any leg (Stealth's kit 312 is one `CharProc`).
-/// `armed` holds only the pairs this watcher began.
+/// it with what the unit plays, a mismatch spent on a [`BaseAnimRecompute`], and a kit with an anim
+/// pins the unit's plays while it lives ([`StateKitPins`]). `CharProc` columns go out as
+/// [`AuraProc`] edges, and a kit arms for any leg (Stealth's kit 312 is one `CharProc`). `armed`
+/// holds only the pairs this watcher began.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn arm_aura_state_fx(
+    mut commands: Commands,
     // Re-run on an edge inside the aura watch span and on first sight (a standing aura is a
     // state); the full sweep runs once per DBC-resource arrival.
     units: Query<(Entity, &ObjectStore), Without<ItemObject>>,
@@ -984,6 +994,8 @@ pub(crate) fn arm_aura_state_fx(
     mut sounds: MessageWriter<SpellKitSound>,
     mut recomputes: MessageWriter<BaseAnimRecompute>,
     mut armed: Local<EntityHashMap<Vec<u32>>>,
+    // Each unit's live pins, newest first, mirrored onto its `StateKitPins` on a change.
+    mut pinned: Local<EntityHashMap<Vec<(u32, u16)>>>,
 ) {
     let full_sweep = visuals.as_ref().is_some_and(|v| v.is_changed())
         || spells.as_ref().is_some_and(|s| s.is_changed());
@@ -1007,18 +1019,33 @@ pub(crate) fn arm_aura_state_fx(
     };
     for (entity, store) in scan {
         let prev = armed.entry(entity).or_default();
-        // Occupied slots, deduped: one state instance per spell however many casters hold it.
-        let mut cur: Vec<u32> = store.0.unit_auras().map(|a| a.spell_id).collect();
-        cur.sort_unstable();
-        cur.dedup();
+        let pins = pinned.entry(entity).or_default();
+        let pins_before = pins.clone();
+        // Occupied slots in ascending order, deduped by first slot: one state instance per spell
+        // however many casters hold it. `0x604d00` removes first, then adds by slot ascending
+        // (`0x604e7b`-`0x604e85`), so the highest new slot's effect ends at the head.
+        //
+        // Deviation: a spell's state kit and body procs are reaped only once no slot holds the
+        // spell. The reference's removal of one slot (`0x612320` → `0x5ff290`) stops every
+        // effect of that spell on the unit (`0x614150(spell, 1)` at `0x5ff2d2`, and its procs
+        // through `0x60d150` and `0x5ff320`), even while another slot holds the same spell: it
+        // drops a visual the server says still holds.
+        let mut cur: Vec<u32> = Vec::new();
+        for a in store.0.unit_auras() {
+            if !cur.contains(&a.spell_id) {
+                cur.push(a.spell_id);
+            }
+        }
         for &spell_id in prev.iter() {
-            if cur.binary_search(&spell_id).is_err() {
+            if !cur.contains(&spell_id) {
                 fx.write(SpellKitFx::Reap {
                     entity,
                     spell_id,
                     class: FxClass::AuraState,
                 });
                 procs.write(AuraProc::Reap { entity, spell_id });
+                // The forced stop takes the 0x1000 effect too (`0x614179`).
+                pins.retain(|&(s, _)| s != spell_id);
                 // A looping state-kit sound dies with the aura (`0x614150`, 0.15 s fade).
                 if let Some(kit_sound) =
                     resolve_kit(spells, &visuals.0, spell_id, |s| s.state, || None)
@@ -1072,15 +1099,31 @@ pub(crate) fn arm_aura_state_fx(
             }
             // The stage-2 anim leg, on the add edge only: an aura refreshed in place keeps its id,
             // and `0x604d00` fires neither arm.
+            // The kind-2 effect carries the kit, flagged 0x1000, at the head of `+0xb4`; one
+            // with no model is made bare for it (`0x60f3d4`, `0x60f424`). Only a positive id pins
+            // (`0x5fdeb5 jle`); the recompute skips only a negative one (`0x60f366`).
             if let Some(anim_id) = kit.anim_id {
                 recomputes.write(BaseAnimRecompute { entity, anim_id });
+                if let Some(pin) = kit.positive_anim() {
+                    pins.insert(0, (spell_id, pin));
+                }
             }
             next.push(spell_id);
         }
         *prev = next;
+        if *pins != pins_before {
+            if pins.is_empty() {
+                commands.entity(entity).try_remove::<StateKitPins>();
+            } else {
+                commands
+                    .entity(entity)
+                    .try_insert(StateKitPins(pins.clone()));
+            }
+        }
     }
     // Streamed units despawn on range-out; drop their rows.
     armed.retain(|e, _| units.contains(*e));
+    pinned.retain(|e, _| units.contains(*e));
 }
 
 /// Arm and reap the loot sparkle on a dead lootable unit and on a corpse object with

@@ -1,5 +1,5 @@
 //! The 1.12 surface as a gate: every global the engine puts in a bare VM is one the 1.12.1 client
-//! has (`reference/1.12-globals.tsv`) or a commented entry on [`BEYOND_1_12`], since addons branch
+//! has (`reference/lua_globals.tsv`) or a commented entry on [`BEYOND_1_12`], since addons branch
 //! on a global's presence; no prefix excuses an engine name, as a host seam belongs in Rust. The
 //! production load, core and layer, is `benilla-app`'s `ui_script::surface_gate`; what 1.12 has
 //! and benilla lacks is `scripts/api-coverage.sh`'s count.
@@ -9,25 +9,18 @@ use std::collections::HashSet;
 use super::common::script;
 
 /// Globals the engine exposes that 1.12 does not, each with its reason. The list is exact.
-const BEYOND_1_12: &[&str] = &[
-    // Our Lua runtime is 5.1 where 1.12's is 5.0: 1.12's base library does not export `_G` (an
-    // addon reaches the globals with `getfenv(0)`); ours does, as our `getglobal`/`setglobal` are
-    // written over it.
-    "_G",
-];
+const BEYOND_1_12: &[&str] = &[];
 
-/// `reference/1.12-globals.tsv`'s names.
+/// `reference/lua_globals.tsv`'s names.
 fn reference() -> HashSet<String> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../reference/1.12-globals.tsv"
+        "/../../reference/lua_globals.tsv"
     );
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        panic!("reading {path}: {e} — regenerate with scripts/gen-reference-globals.py")
-    });
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
     let names: HashSet<String> = text
         .lines()
-        .filter(|l| !l.starts_with('#'))
+        .skip(1)
         .filter_map(|l| l.split('\t').next().map(str::to_string))
         .collect();
     assert!(
@@ -537,10 +530,11 @@ fn button_set_font_returns_nothing_and_is_a_no_op_without_a_label() {
     );
 }
 
-/// FontString's `SetNonSpaceWrap`/`CanNonSpaceWrap` (`0x79e9f0`/`0x79ead0`): on by default, the
-/// getter answers `1` or nil, and a bare `SetNonSpaceWrap()` turns it on.
+/// FontString's `SetNonSpaceWrap`/`CanNonSpaceWrap` (`0x79e9f0`/`0x79ead0`): off from the
+/// constructor (`0x770dd3` stores `0x212`), the getter answers `1` or nil, and a bare
+/// `SetNonSpaceWrap()` turns it on.
 #[test]
-fn non_space_wrap_defaults_on_and_answers_one_or_nil() {
+fn non_space_wrap_defaults_off_and_answers_one_or_nil() {
     let s = crate::script::UiScript::new().unwrap();
     s.run(r#"f = CreateFrame("Frame", "NSF") fs = f:CreateFontString("NSFText", "ARTWORK")"#)
         .unwrap();
@@ -548,8 +542,16 @@ fn non_space_wrap_defaults_on_and_answers_one_or_nil() {
     assert_eq!(
         s.eval::<Option<i64>>("return NSFText:CanNonSpaceWrap()")
             .unwrap(),
+        None,
+        "off from the constructor, answered nil"
+    );
+
+    s.run("NSFText:SetNonSpaceWrap()").unwrap();
+    assert_eq!(
+        s.eval::<Option<i64>>("return NSFText:CanNonSpaceWrap()")
+            .unwrap(),
         Some(1),
-        "default on, answered as 1"
+        "a bare SetNonSpaceWrap() turns it ON, answered as 1"
     );
     assert!(
         !s.eval::<bool>("return NSFText:CanNonSpaceWrap() == true")
@@ -564,20 +566,11 @@ fn non_space_wrap_defaults_on_and_answers_one_or_nil() {
         None,
         "off answers nil, not 0 and not false"
     );
-
-    s.run("NSFText:SetNonSpaceWrap()").unwrap();
-    assert_eq!(
-        s.eval::<Option<i64>>("return NSFText:CanNonSpaceWrap()")
-            .unwrap(),
-        Some(1),
-        "a bare SetNonSpaceWrap() turns it ON"
-    );
 }
 
 /// EditBox's registrar table (`.data 0x87bb68`, 48 entries, `mov edx,0x30` at `0x799ab5`) opens
-/// with the font block each text-bearing type re-declares over the shared impl `0x79f210`: its
-/// fourteen font verbs answer, its `SetSpacing`/`GetSpacing` (#10, #11) are not installed as
-/// nothing models line spacing, and other tables' names do not leak onto it.
+/// with the font block each text-bearing type re-declares over the shared impls (`0x79f210`,
+/// `0x79fb40`): its sixteen font verbs answer, and other tables' names do not leak onto it.
 #[test]
 fn editbox_carries_the_font_block_its_registrar_table_declares() {
     let s = crate::script::UiScript::new().unwrap();
@@ -594,6 +587,8 @@ fn editbox_carries_the_font_block_its_registrar_table_declares() {
         "GetShadowColor",
         "SetShadowOffset",
         "GetShadowOffset",
+        "SetSpacing",
+        "GetSpacing",
         "SetJustifyH",
         "GetJustifyH",
         "SetJustifyV",
@@ -608,9 +603,6 @@ fn editbox_carries_the_font_block_its_registrar_table_declares() {
     }
 
     for name in [
-        // On EditBox's table, not installed: nothing models line spacing.
-        "SetSpacing",
-        "GetSpacing",
         // Not on EditBox's table.
         "CopyFontObject",
         "SetNonSpaceWrap",
@@ -1118,12 +1110,8 @@ fn the_region_map_readers_answer_the_way_the_edges_do() {
     );
     assert_eq!(
         s.arity("RRPlate:GetPoint(7)").unwrap(),
-        5,
-        "an out-of-range index still answers five values, all nil"
-    );
-    assert!(
-        s.eval::<bool>("return RRPlate:GetPoint(7) == nil").unwrap(),
-        "…and the first of them is nil"
+        0,
+        "an out-of-range index pushes no value (`0x7a240d`)"
     );
 }
 

@@ -5,9 +5,8 @@
 //! 81.. with no container object, like the bank), the object index and the template cache, and
 //! fires `BAG_UPDATE(bagID)` per changed bag. [`drain`] sends the Lua intents over [`wire_pos`]:
 //! an equippable item that starts no quest goes out as `CMSG_AUTOEQUIP_ITEM`, anything else
-//! through [`send_item_use`]. A move or split locks both ends and a destroy its slot in
-//! [`PendingItemOps`], until the descriptor resolves them or the server answers a non-zero
-//! `SMSG_INVENTORY_CHANGE_FAILURE`.
+//! through [`send_item_use`]. The cursor verbs lock what they pick up and place onto, and the
+//! server's answer lifts it ([`crate::ui_items::locks`]).
 
 use benilla_protocol::messages::{BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST, SLOT_PACK_FIRST};
 use benilla_protocol::ObjectFields;
@@ -15,17 +14,19 @@ use benilla_ui::script::EQUIPMENT_BAG;
 use bevy::prelude::*;
 
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, Objects};
-use crate::pending_item_ops::{LockTransitions, PendingItemOps};
+use crate::net::{ObjectStore, Objects};
+use crate::query_cache::Ask;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 mod drain;
 mod equip_error;
 pub(crate) mod feed;
+mod lock_openers;
+pub(crate) mod locks;
 mod net;
 
-pub(crate) use drain::send_auto_equip;
+pub(crate) use drain::{dispatch_fork, send_auto_equip};
 use drain::{
     drain_bag_autostores, drain_container_autoequips, drain_container_destroys,
     drain_container_moves, drain_container_repairs,
@@ -33,7 +34,8 @@ use drain::{
 // `UseContainerItem` and `UseInventoryItem`, applied in call order by `crate::script_calls`.
 pub(crate) use drain::ScriptItemUse;
 use feed::{
-    feed_containers, feed_item_sets, feed_item_stats, feed_player_req, feed_random_properties,
+    ask_item_build_lookups, feed_containers, feed_item_sets, feed_item_stats, feed_player_req,
+    feed_random_properties,
 };
 
 /// The backpack's capacity (`PLAYER_FIELD_PACK_SLOT_1..`).
@@ -118,6 +120,9 @@ pub(crate) struct EquipError {
     /// Reason 16's `%s` source: the destination bag's player slot (255 names no bag), which the
     /// drain resolves to the bag's `BagFamily` name.
     pub bag_slot: u8,
+    /// The item guids a refused inventory operation unlocks after its line (`0x5e3ac0`,
+    /// `0x5e3ad3`); none for a mail refusal.
+    pub unlocks: [u64; 2],
 }
 
 /// Inventory refusals (`SMSG_INVENTORY_CHANGE_FAILURE`) queued for the UI error line.
@@ -169,7 +174,7 @@ pub(crate) fn slot_guid(
 }
 
 /// `(item guid, stack count)` at a Lua-space `(bag, 1-based slot)`, `(0, 0)` when empty:
-/// [`PendingItemOps`]'s baseline, since a partial split or destroy changes only the count.
+/// the trade window's offered-item view reads both.
 pub(crate) fn slot_guid_count(
     store: Option<&ObjectStore>,
     bag: i64,
@@ -248,15 +253,18 @@ impl InventoryScope {
         bank: true,
         ..Self::DEFAULT
     };
-    /// Bags and backpack only, narrower than any reference mask: the action-bar and reagent counts
-    /// use it, where the reference's `0x47` also counts worn gear and the keyring.
-    pub(crate) const CARRIED: Self = Self {
-        equipment: false,
-        bags: true,
-        backpack: true,
-        bank: false,
-        keyring: false,
-    };
+}
+
+/// The walker's per-item gate (`0x6224f4`-`0x622513`): `ITEM_FIELD_FLAGS` (field 21) bit `0x8`
+/// (wrapped) exempts an item from the durability test; otherwise a maximum above 0
+/// (`+0xa4`, field 47) with durability 0 (`+0xa0`, field 46) is broken and skipped; bit `0x10`
+/// skips it either way.
+fn item_is_whole(fields: &ObjectFields) -> bool {
+    let flags = fields.item_flags().unwrap_or(0);
+    let broken = flags & 0x8 == 0
+        && fields.item_max_durability().unwrap_or(0) > 0
+        && fields.item_durability().unwrap_or(0) == 0;
+    !broken && flags & 0x10 == 0
 }
 
 /// The reference's inventory walk (`0x622420`): one ascending pass over the player's slot array,
@@ -268,8 +276,22 @@ fn walk_inventory<T>(
     store: &ObjectFields,
     objects: &Objects,
     scope: InventoryScope,
-    mut visit: impl FnMut(u8, u8, u64) -> Option<T>,
+    mut raw: impl FnMut(u8, u8, u64) -> Option<T>,
 ) -> Option<T> {
+    // The walker passes an item to its callback only when it is whole (`0x6224f4`-`0x622513`):
+    // an unwrapped item with durability 0 of a nonzero maximum is broken and skipped, and so is
+    // one with flags bit `0x10`. Skipped, a container is not entered either (`0x622576`). The
+    // reference also skips a released object (`0x6224e1`, `0x614ea0`); a released item is no
+    // object here, so the lookups below already find none. An item whose object is not held is
+    // still visited, for the callers that judge it themselves.
+    let whole = |guid: u64| objects.object(guid).is_none_or(item_is_whole);
+    let mut visit = |bag: u8, slot: u8, guid: u64| {
+        if whole(guid) {
+            raw(bag, slot, guid)
+        } else {
+            None
+        }
+    };
     // A container's contents, addressed by its player-array slot as the wire bag byte.
     let contents =
         |bag_slot: u8, bag_guid: u64, visit: &mut dyn FnMut(u8, u8, u64) -> Option<T>| {
@@ -296,6 +318,9 @@ fn walk_inventory<T>(
             let bag_slot = BAG_SLOT_FIRST + bag;
             let bag_guid = store.player_inv_slot(bag_slot).unwrap_or(0);
             if bag_guid == 0 {
+                continue;
+            }
+            if !whole(bag_guid) {
                 continue;
             }
             // The bag object is a candidate itself, before its contents.
@@ -329,7 +354,7 @@ fn walk_inventory<T>(
         for bag in 0..BANK_BAGS {
             let bag_slot = BANK_BAG_SLOT_FIRST + bag;
             let bag_guid = store.player_bank_bag_slot(bag).unwrap_or(0);
-            if bag_guid == 0 {
+            if bag_guid == 0 || !whole(bag_guid) {
                 continue;
             }
             if let Some(hit) = visit(BAG_PLAYER_INVENTORY, bag_slot, bag_guid) {
@@ -357,19 +382,33 @@ fn walk_inventory<T>(
 /// How many of `entry` the player holds within `scope`, summing each copy's
 /// `ITEM_FIELD_STACK_COUNT`: the reference's `0x622130(itemId, mask)`, whose per-item predicate
 /// `0x622160` tests `OBJECT_FIELD_ENTRY` (`0x622166`) and adds `[+0x20]` (`0x622177`). A quest
-/// objective counts banked copies ([`InventoryScope::QUEST_ITEMS`]); an action-button or reagent
-/// count does not.
+/// objective counts banked copies ([`InventoryScope::QUEST_ITEMS`]); the reagent, craft and
+/// tradeskill counts pass mask 0 ([`InventoryScope::DEFAULT`]: `0x6e405f`, `0x4f62cc`, `0x4fccfc`,
+/// `0x4f76b2`, `0x4ff7a2`).
 pub(crate) fn count_of(
     store: &ObjectFields,
     objects: &Objects,
     entry: u32,
     scope: InventoryScope,
 ) -> u32 {
+    sum_of(store, objects, entry, scope, |fields| {
+        fields.item_stack_count().unwrap_or(1)
+    })
+}
+
+/// The sum of `weight` over every copy of `entry` within `scope`; a dword add, so it wraps.
+fn sum_of(
+    store: &ObjectFields,
+    objects: &Objects,
+    entry: u32,
+    scope: InventoryScope,
+    weight: impl Fn(&ObjectFields) -> u32,
+) -> u32 {
     let mut total = 0u32;
     walk_inventory::<()>(store, objects, scope, |_, _, guid| {
         if let Some(fields) = objects.object(guid) {
             if fields.object_entry() == Some(entry) {
-                total += fields.item_stack_count().unwrap_or(1);
+                total = total.wrapping_add(weight(fields));
             }
         }
         None
@@ -377,17 +416,39 @@ pub(crate) fn count_of(
     total
 }
 
-/// Every carried entry's count in one walk ([`InventoryScope::CARRIED`]): [`count_of`] for a
-/// caller asking about many entries in a frame.
-pub(crate) fn carried_counts(
+/// An action slot's item count, `0x4e6d20(entry)`: with the entry's template cached and its first
+/// spell's charges (`template+0x144`) neither 0 nor -1, the sum of each copy's absolute
+/// `ITEM_FIELD_SPELL_CHARGES[0]` (`0x4e6d9c` into `0x622180`, `0x6221c7`-`0x6221d0`), else the
+/// stack counts (`0x4e6db6` into `0x622130`). Both walk mask 0 ([`InventoryScope::DEFAULT`]), so a
+/// worn copy and the keyring count; a template that has not answered takes the stack branch
+/// (`0x55ba30` returns null, `0x4e6d7f`).
+pub(crate) fn action_count(
+    store: &ObjectFields,
+    objects: &Objects,
+    entry: u32,
+    template: Option<&benilla_protocol::ItemInfo>,
+) -> u32 {
+    if template.is_some_and(benilla_protocol::ItemInfo::has_finite_charges) {
+        sum_of(store, objects, entry, InventoryScope::DEFAULT, |fields| {
+            fields.item_spell_charges(0).unwrap_or(0).unsigned_abs()
+        })
+    } else {
+        count_of(store, objects, entry, InventoryScope::DEFAULT)
+    }
+}
+
+/// Every entry's stack count in one walk at mask 0 ([`InventoryScope::DEFAULT`]): [`count_of`] for
+/// a caller asking about many entries in a frame.
+pub(crate) fn stack_counts(
     store: &ObjectFields,
     objects: &Objects,
 ) -> std::collections::HashMap<u32, u32> {
     let mut counts = std::collections::HashMap::new();
-    walk_inventory::<()>(store, objects, InventoryScope::CARRIED, |_, _, guid| {
+    walk_inventory::<()>(store, objects, InventoryScope::DEFAULT, |_, _, guid| {
         if let Some(fields) = objects.object(guid) {
             if let Some(entry) = fields.object_entry() {
-                *counts.entry(entry).or_insert(0) += fields.item_stack_count().unwrap_or(1);
+                let n = counts.entry(entry).or_insert(0u32);
+                *n = n.wrapping_add(fields.item_stack_count().unwrap_or(1));
             }
         }
         None
@@ -455,12 +516,7 @@ pub(crate) fn collect_inventory(
 /// walker (`0x6223a0` → `0x622420`) with predicate `0x6223d0`, `BagFamily == 9` (`template+0x1d0`),
 /// at mode `0x4f`, so a key in the bank counts. A slot whose template is still in flight reads as
 /// no key until the answer lands.
-pub(crate) fn has_key(
-    store: &ObjectFields,
-    objects: &Objects,
-    items: &Items,
-    commands: &NetCommands,
-) -> bool {
+pub(crate) fn has_key(store: &ObjectFields, objects: &Objects, items: &Items) -> bool {
     // Every guid mode `0x4f` reaches, in the walker's order: each bag's contents follow its slot.
     fn contents(bag_guid: u64, objects: &Objects, out: &mut Vec<u64>) {
         let Some(f) = objects.object(bag_guid) else {
@@ -499,8 +555,9 @@ pub(crate) fn has_key(
         let Some(entry) = objects.object(guid).and_then(|f| f.object_entry()) else {
             return false;
         };
+        // The bag family getter only reads (`0x5da08d`).
         items
-            .template(entry, guid, commands)
+            .template(entry, guid, Ask::Read)
             .is_some_and(|t| t.bag_family == BAG_FAMILY_KEYS)
     })
 }
@@ -525,6 +582,11 @@ impl TestObjects {
     /// One item instance in the index, as the wire's `ItemCreate` makes it.
     pub(crate) fn spawn(&mut self, guid: u64, fields: ObjectFields) {
         crate::items::test_spawn_item(&mut self.world, guid, fields, false);
+    }
+
+    /// Any other object in the index, with its descriptor.
+    pub(crate) fn spawn_object(&mut self, guid: u64, fields: ObjectFields) {
+        crate::items::test_spawn_object(&mut self.world, guid, fields);
     }
 
     /// The same for a container instance (`TYPEMASK_CONTAINER`).
@@ -627,6 +689,15 @@ pub(crate) fn item_use_route(
     }
 }
 
+/// `CGItem::Use`'s first gate (`0x5d8d32`): a locked item is refused, silently. Of its callers the
+/// doll (`0x4c7af0`) and the bag (`0x4fa430`, behind `UseContainerItem`'s own `0x4fa1cd`) are
+/// refused in their Lua call and the bar (`0x4e607b`) against the locks its call read
+/// ([`benilla_ui::script::ActionUse`]); the soulstone (`0x48ae7d`) and the bind-on-use confirm
+/// (`0x5d92c1`) ask here.
+pub(crate) fn item_use_refused(script: &benilla_ui::script::UiScript, guid: Option<u64>) -> bool {
+    guid.is_some_and(|g| script.item_locked(g))
+}
+
 /// Send what [`item_use_route`] decides; the only place a `CMSG_USE_ITEM` leaves benilla. The
 /// reference's cast tail calls `0x6e5a90`, whose body is `call 0x6e4b60`, `TryCast`: the function
 /// the spellbook, `/cast` and the action bar run, with the item as an argument no gate skips for
@@ -647,6 +718,15 @@ pub(crate) fn send_item_use(
     // Passed in, not carried on `CastLadder`, so no system reaches it twice.
     ui_errors: &mut crate::ui_action::UiErrorKeys,
 ) -> bool {
+    // `0x5d8d00`'s requirement check (`0x5d8e0e`) and control gate (`0x5d8eaa`), past the
+    // quest-starter arm (`0x5d8dcc`), which runs before them.
+    if it.start_quest == 0 {
+        if let Some(key) = script.item_use_refusal(it.entry, it.use_spell.unwrap_or(0)) {
+            debug!("ui_items: item use refused — {key}");
+            ui_errors.0.push(crate::ui_action::UiError::key(key));
+            return false;
+        }
+    }
     // The toggle predicate over the caster's live aura slots.
     let aura_cancels = |spell: u32| {
         let Some(d) = ladder.spells.as_ref().and_then(|s| s.catalog.get(spell)) else {
@@ -658,12 +738,7 @@ pub(crate) fn send_item_use(
     };
     // The disarm ladder, asked of the caster's own inventory.
     let disarmed_hand = ctx.rel.self_store.and_then(|store| {
-        crate::items::disarmed_equipment_slot(
-            store,
-            &ladder.objects,
-            &ladder.items,
-            &ladder.commands,
-        )
+        crate::items::disarmed_equipment_slot(store, &ladder.objects, &ladder.items)
     });
     match item_use_route(it, aura_cancels, disarmed_hand) {
         ItemUseRoute::CantUseDisarmed => {
@@ -704,9 +779,9 @@ pub(crate) fn send_item_use(
         // are on-use spell lookup failures, so the reference asks with no usable on-use spell.
         ItemUseRoute::Nothing | ItemUseRoute::Cast(_)
             if !suppress
-                && it.guid.is_some_and(|g| {
-                    gate.use_binds(&ladder.objects, &ladder.items, &ladder.commands, g)
-                }) =>
+                && it
+                    .guid
+                    .is_some_and(|g| gate.use_binds(&ladder.objects, &ladder.items, g)) =>
         {
             gate.defer_use(script, it);
             false
@@ -773,8 +848,8 @@ pub(super) fn item_link(item_id: u32, name: &str, quality: u32) -> String {
     item_link_full(item_id, 0, 0, 0, name, quality)
 }
 
-/// `INVTYPE_AMMO`: loaded with `CMSG_SET_AMMO`, not the equip swap.
-pub(super) const INVTYPE_AMMO: u32 = 24;
+/// `ITEM_CLASS_PROJECTILE`, the template class `UseContainerItem` leaves unlocked (`0x4fa40b`).
+pub(super) const ITEM_CLASS_PROJECTILE: u32 = 6;
 
 /// The `InventoryType` → live-API equip slots map (wire `EQUIPMENT_SLOT_*` + 1, bag icons
 /// 20..23; empty is not equippable), from vmangos `ItemPrototype::GetAllowedEquipSlots`
@@ -838,7 +913,7 @@ pub(super) fn find_equip_slot(inventory_type: u32, has_relic_slot: bool) -> Vec<
         21 => vec![MAINHAND],                  // INVTYPE_WEAPONMAINHAND
         22 => vec![OFFHAND],                   // INVTYPE_WEAPONOFFHAND
         23 => vec![OFFHAND],                   // INVTYPE_HOLDABLE
-        24 => vec![AMMO],                      // INVTYPE_AMMO → the ammo slot (loaded via SET_AMMO)
+        24 => vec![AMMO],                      // INVTYPE_AMMO
         25 | 26 if !has_relic_slot => vec![RANGED], // INVTYPE_THROWN / INVTYPE_RANGEDRIGHT
         28 if has_relic_slot => vec![RANGED],  // INVTYPE_RELIC, the same slot
         // NON_EQUIP (0), QUIVER (27), a RANGED-slot type on the wrong side of the relic test, and
@@ -918,12 +993,13 @@ impl Plugin for UiItemsPlugin {
         net::register(app);
         // The icons come from the equipment renderer's `ItemDisplays`.
         app.init_resource::<EquipErrors>()
-            .init_resource::<PendingItemOps>()
+            .init_resource::<crate::ui_items::locks::ItemReleases>()
+            .init_resource::<crate::ui_items::locks::HeldItemLocks>()
+            .init_resource::<crate::ui_items::locks::LockWatch>()
             // The soulbind confirmations' pending records: the client's pending-equip array and
             // its one bind-on-use cell.
             .init_resource::<crate::ui_bind_confirm::PendingEquips>()
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
-            .init_resource::<LockTransitions>()
             .init_resource::<net::BagOpens>()
             // After the chain opens: unordered, it can run first and skip every item DBC.
             .add_systems(
@@ -933,8 +1009,10 @@ impl Plugin for UiItemsPlugin {
             .add_systems(
                 Update,
                 (
-                    // The pending-lock clear, ahead of both feeds that push `locked`.
-                    feed::resolve_item_locks
+                    // The server's unlocks, ahead of both inventory feeds: the reference's
+                    // watchers run before the descriptor takes the new guid.
+                    crate::ui_items::locks::apply_item_releases
+                        .in_set(crate::ui_script::UiFeed)
                         .before(feed_containers)
                         .before(crate::ui_char::feed_char),
                     // The slot cooldowns must be in the VM before `feed_action_state`'s
@@ -943,12 +1021,18 @@ impl Plugin for UiItemsPlugin {
                         .in_set(UnitFeed)
                         .before(crate::ui_action::CooldownEvents),
                     // The item-tooltip store answers before the input pass, so a re-hover the
-                    // next frame sees the answer.
-                    feed_item_stats.in_set(UnitFeed),
+                    // next frame sees the answer, and seats a new VM before its world entry.
+                    feed_item_stats
+                        .in_set(UnitFeed)
+                        .in_set(crate::ui_unit::WorldEnterSeats),
                     feed_item_sets.in_set(UnitFeed),
+                    ask_item_build_lookups.in_set(UnitFeed),
                     // The roll table, pushed whole once per VM, before the first hover.
                     feed_random_properties.in_set(UnitFeed),
                     feed_player_req.in_set(UnitFeed),
+                    // The item tooltip's lock check: `Lock.dbc` once, the player's openers on change.
+                    lock_openers::feed_lock_rows.in_set(UnitFeed),
+                    lock_openers::feed_lock_openers.in_set(UnitFeed),
                     // After the input pass, so a repair-mode click goes out the same frame; a
                     // plain `UseContainerItem` is a script call.
                     drain_container_repairs.after(UiInput),
@@ -1453,12 +1537,9 @@ mod find_item_tests {
     fn has_key_finds_a_key_anywhere_the_reference_looks() {
         use super::{has_key, BAG_FAMILY_KEYS};
         use crate::items::{test_template, Items};
-        use crate::net::NetCommands;
 
         const KEY: u32 = 7_146; // The Scarlet Key (bag_family 9)
         const BREAD: u32 = 4_540;
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let commands = NetCommands(tx);
 
         let mut objs = TestObjects::new();
         let mut items = Items::default();
@@ -1469,35 +1550,20 @@ mod find_item_tests {
         item(&mut objs, 0xF1, KEY, None);
         item(&mut objs, 0xF2, BREAD, None);
 
-        assert!(!has_key(&player(&[]), &objs.get(), &items, &commands));
+        assert!(!has_key(&player(&[]), &objs.get(), &items));
         // A non-key in the backpack is not a key.
-        assert!(!has_key(
-            &player(&[(23, 0xF2)]),
-            &objs.get(),
-            &items,
-            &commands
-        ));
+        assert!(!has_key(&player(&[(23, 0xF2)]), &objs.get(), &items));
         // A key in keyring slot 1.
-        assert!(has_key(
-            &player(&[(81, 0xF1)]),
-            &objs.get(),
-            &items,
-            &commands
-        ));
+        assert!(has_key(&player(&[(81, 0xF1)]), &objs.get(), &items));
         // And in the backpack, before it has been filed.
-        assert!(has_key(
-            &player(&[(23, 0xF1)]),
-            &objs.get(),
-            &items,
-            &commands
-        ));
+        assert!(has_key(&player(&[(23, 0xF1)]), &objs.get(), &items));
 
         // The bank: mode `0x4f` reaches it, `find_item`'s `0x47` does not.
         let mut banked = std::collections::HashMap::new();
         banked.insert(39u16, 0xF1u64);
         let store = bank_player(&banked);
         assert!(
-            has_key(&store, &objs.get(), &items, &commands),
+            has_key(&store, &objs.get(), &items),
             "a key in the bank still gives you a keyring"
         );
         assert_eq!(
@@ -1521,15 +1587,19 @@ mod find_item_tests {
 }
 
 /// [`count_of`]'s scope: the quest surfaces pass mask `8`, rewritten to `0x4F`, and count banked
-/// copies; mask `0` becomes `0x47`, which does not.
+/// copies; mask `0` becomes `0x47`, which does not but reaches worn gear and the keyring. The
+/// action slot's count ([`action_count`]) walks mask `0` and sums charges for a charged template.
 #[cfg(test)]
 mod count_of_tests {
-    use super::{count_of, InventoryScope, TestObjects};
+    use super::{
+        action_count, count_of, find_item, stack_counts, InventoryScope, ItemSearch, TestObjects,
+    };
     use benilla_protocol::ObjectFields;
 
     // Descriptor field indices, raw.
     const ENTRY: u16 = 3; // OBJECT_FIELD_ENTRY
     const STACK: u16 = 14; // ITEM_FIELD_STACK_COUNT
+    const CHARGES: u16 = 16; // ITEM_FIELD_SPELL_CHARGES[0]
     const NUM_SLOTS: u16 = 48; // CONTAINER_FIELD_NUM_SLOTS
     const SLOT_1: u16 = 50; // CONTAINER_FIELD_SLOT_1 (2 fields per guid)
     const INV_SLOT_HEAD: u16 = 486; // player slots 0..22
@@ -1589,7 +1659,7 @@ mod count_of_tests {
             "mask 0x4F sees the bank"
         );
         assert_eq!(
-            count_of(&store, &objs.get(), AMMO, InventoryScope::CARRIED),
+            count_of(&store, &objs.get(), AMMO, InventoryScope::DEFAULT),
             3,
             "an action-bar/reagent count must NOT see the bank"
         );
@@ -1608,26 +1678,89 @@ mod count_of_tests {
             8
         );
         assert_eq!(
-            count_of(&store, &objs.get(), AMMO, InventoryScope::CARRIED),
+            count_of(&store, &objs.get(), AMMO, InventoryScope::DEFAULT),
             0
         );
     }
 
-    /// Worn gear and the keyring: in `0x47` and the quest scope, not [`InventoryScope::CARRIED`].
+    /// Worn gear and the keyring: in mask 0's `0x47` and in the quest scope. The reagent, craft and
+    /// tradeskill counts (`0x6e405f`, `0x4f62cc`, `0x4fccfc`, `0x4f76b2`, `0x4ff7a2`) pass mask 0.
     #[test]
-    fn the_quest_scope_also_reaches_worn_gear_and_the_keyring() {
-        let store = player(&[(5, 0xE1), (81, 0xF1)]); // a worn copy and one in the keyring
+    fn mask_zero_also_reaches_worn_gear_and_the_keyring() {
+        let store = player(&[(5, 0xE1), (81, 0xF1), (39, 0xB1)]); // worn, keyring, bank
         let mut objs = TestObjects::new();
         stack(&mut objs, 0xE1, AMMO, 1);
         stack(&mut objs, 0xF1, AMMO, 1);
+        stack(&mut objs, 0xB1, AMMO, 4);
         assert_eq!(
             count_of(&store, &objs.get(), AMMO, InventoryScope::QUEST_ITEMS),
-            2
+            6
         );
         assert_eq!(
-            count_of(&store, &objs.get(), AMMO, InventoryScope::CARRIED),
-            0,
-            "the carried scope reaches neither worn gear nor the keyring — the named narrowing"
+            count_of(&store, &objs.get(), AMMO, InventoryScope::DEFAULT),
+            2,
+            "worn and keyring count, the bank does not"
+        );
+        assert_eq!(
+            stack_counts(&store, &objs.get()).get(&AMMO),
+            Some(&2),
+            "the per-frame map walks the same mask"
+        );
+    }
+
+    /// `0x4e6d20`: a thrown stack worn in the ranged slot counts as the stack.
+    #[test]
+    fn an_action_count_reaches_a_worn_stack_and_the_keyring() {
+        let store = player(&[(17, 0xE1), (25, 0xA1), (81, 0xF1)]);
+        let mut objs = TestObjects::new();
+        stack(&mut objs, 0xE1, AMMO, 18);
+        stack(&mut objs, 0xA1, AMMO, 2);
+        stack(&mut objs, 0xF1, AMMO, 1);
+        assert_eq!(action_count(&store, &objs.get(), AMMO, None), 21);
+        let plain = benilla_protocol::ItemInfo {
+            spell_charges_0: 0,
+            ..crate::items::test_template("Thrown")
+        };
+        assert_eq!(action_count(&store, &objs.get(), AMMO, Some(&plain)), 21);
+    }
+
+    /// `0x4e6d81`-`0x4e6d8c`: a template whose first spell's charges are neither 0 nor -1 sums the
+    /// copies' absolute charges (`0x6221c7`-`0x6221d0`); -1 and 0 keep the stack counts.
+    #[test]
+    fn a_charged_template_counts_absolute_charges_not_stacks() {
+        let store = player(&[(23, 0xA1), (24, 0xA2), (25, 0xA3)]);
+        let mut objs = TestObjects::new();
+        // Charges -2 (consumed at 0), 3 and 0; stacks 1, 1 and 5.
+        for (guid, charges, n) in [(0xA1u64, (-2i32) as u32, 1u32), (0xA2, 3, 1), (0xA3, 0, 5)] {
+            objs.spawn(
+                guid,
+                ObjectFields::from_pairs(&[(ENTRY, AMMO), (STACK, n), (CHARGES, charges)]),
+            );
+        }
+        let with = |charges: i32| benilla_protocol::ItemInfo {
+            spell_charges_0: charges,
+            ..crate::items::test_template("Elixir")
+        };
+        assert_eq!(
+            action_count(&store, &objs.get(), AMMO, Some(&with(-2))),
+            5,
+            "|-2| + |3| + |0|"
+        );
+        assert_eq!(action_count(&store, &objs.get(), AMMO, Some(&with(5))), 5);
+        assert_eq!(
+            action_count(&store, &objs.get(), AMMO, Some(&with(-1))),
+            7,
+            "unlimited charges (-1) counts stacks"
+        );
+        assert_eq!(
+            action_count(&store, &objs.get(), AMMO, Some(&with(0))),
+            7,
+            "no charges counts stacks"
+        );
+        assert_eq!(
+            action_count(&store, &objs.get(), AMMO, None),
+            7,
+            "an unanswered template takes the stack branch"
         );
     }
 
@@ -1643,8 +1776,63 @@ mod count_of_tests {
             5
         );
         assert_eq!(
-            count_of(&store, &objs.get(), AMMO, InventoryScope::CARRIED),
+            count_of(&store, &objs.get(), AMMO, InventoryScope::DEFAULT),
             5
+        );
+    }
+
+    /// `0x6224f4`-`0x622513`: the walker skips an unwrapped item with durability 0 of a nonzero
+    /// maximum, and any item with flags bit `0x10`; a wrapped broken item and a whole one pass.
+    /// A skipped container is not entered (`0x622576`).
+    #[test]
+    fn the_walker_skips_a_broken_item_and_a_flagged_one() {
+        const FLAGS: u16 = 21; // ITEM_FIELD_FLAGS
+        const DURABILITY: u16 = 46;
+        const MAX_DURABILITY: u16 = 47;
+        let store = player(&[(15, 0xA1), (16, 0xA2), (17, 0xA3), (18, 0xA4), (19, 0xBA)]);
+        let mut objs = TestObjects::new();
+        let item = |objs: &mut TestObjects, guid: u64, flags: u32, durability: u32, max: u32| {
+            objs.spawn(
+                guid,
+                ObjectFields::from_pairs(&[
+                    (ENTRY, AMMO),
+                    (STACK, 1),
+                    (FLAGS, flags),
+                    (DURABILITY, durability),
+                    (MAX_DURABILITY, max),
+                ]),
+            );
+        };
+        item(&mut objs, 0xA1, 0, 0, 40); // broken
+        item(&mut objs, 0xA2, 0x8, 0, 40); // wrapped: exempt from the durability test
+        item(&mut objs, 0xA3, 0, 12, 40); // whole
+        item(&mut objs, 0xA4, 0x10, 40, 40); // flag 0x10
+                                             // A broken bag: its contents are never reached.
+        let mut pairs = vec![
+            (ENTRY, 4_500),
+            (NUM_SLOTS, 16),
+            (DURABILITY, 0),
+            (MAX_DURABILITY, 10),
+            (SLOT_1, 0xC1u32),
+            (SLOT_1 + 1, 0),
+        ];
+        pairs.push((FLAGS, 0));
+        objs.spawn_container(0xBA, ObjectFields::from_pairs(&pairs));
+        stack(&mut objs, 0xC1, AMMO, 9);
+        assert_eq!(
+            count_of(&store, &objs.get(), AMMO, InventoryScope::DEFAULT),
+            2,
+            "the wrapped and the whole copy; the broken, the flagged and the broken bag's are not"
+        );
+        assert_eq!(
+            find_item(&store, &objs.get(), AMMO, ItemSearch::default()).map(|h| h.2),
+            Some(0xA2),
+            "the first hit skips the broken copy before it"
+        );
+        assert_eq!(
+            action_count(&store, &objs.get(), AMMO, None),
+            2,
+            "and so does the bar's count"
         );
     }
 

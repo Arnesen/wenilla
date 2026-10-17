@@ -276,6 +276,8 @@ pub(crate) struct AttackSeam<'w, 's> {
     pub(crate) ecs: Commands<'w, 's>,
     /// Our own entity.
     pub(crate) me: Query<'w, 's, Entity, With<crate::net::SelfPlayer>>,
+    /// Our own descriptor, for [`Self::player_is_charmed`].
+    self_store: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
     /// The open loot, which the selection teardown closes when it loots the outgoing target.
     pub(crate) loot: ResMut<'w, crate::ui_loot::LootState>,
     /// The loot latch: the teardown's close drops it, and the right-click loot legs arm it.
@@ -283,6 +285,16 @@ pub(crate) struct AttackSeam<'w, 's> {
 }
 
 impl AttackSeam<'_, '_> {
+    /// `SelectTarget`'s first return (`0x493589`-`0x49359c`): the active player is charmed
+    /// (`UNIT_FIELD_CHARMEDBY`), and whatever the guid, a select and a deselect alike return before
+    /// they touch anything.
+    pub(crate) fn player_is_charmed(&self) -> bool {
+        self.self_store
+            .iter()
+            .next()
+            .is_some_and(|me| me.0.unit_charmed_by().is_some())
+    }
+
     /// The selection teardown's loot close (`0x493910`, `0x493959`–`0x493974`): a window looting
     /// the outgoing selection closes as `CloseLoot` does, its release ahead of anything the new
     /// selection sends. The close's dead-unit deselect (`0x48f369`) targets the selection already
@@ -290,6 +302,11 @@ impl AttackSeam<'_, '_> {
     /// `CMSG_SET_SELECTION` 0 (`0x493a2a`), which this does not.
     pub(crate) fn close_loot_on(&mut self, outgoing: u64) {
         if self.loot.source() == Some(outgoing) {
+            // `dl` clear (`0x493970`): a disenchant window with rows left is swept, not closed.
+            if self.loot.disenchant_holds() {
+                self.loot.owe_sweep();
+                return;
+            }
             debug!("target: the selection teardown closes the loot on {outgoing:#x}");
             crate::ui_loot::close_interaction(
                 &mut self.loot,
@@ -349,6 +366,12 @@ pub(crate) struct CastEvent {
     pub(crate) entity: Entity,
     pub(crate) spell_id: u32,
     pub(crate) kind: CastEventKind,
+    /// `SMSG_SPELL_GO`'s cast flags, 0 on every other edge: the tradeskill repeat's hook skips a
+    /// GO with `0x41` set (`0x6e81de`, vmangos `Spell.h:54`).
+    pub(crate) cast_flags: u16,
+    /// `SMSG_SPELL_GO`'s first guid is an item, not the caster: the tradeskill repeat's hook runs
+    /// only when that guid is the player (`0x6e81d3`-`0x6e81dc`).
+    pub(crate) item_cast: bool,
     /// `PlaySeq` stamp, carried to the kit's `EmoteAnim`.
     pub(crate) seq: u64,
 }
@@ -381,6 +404,21 @@ pub(crate) struct CastHold {
     /// A ranged wind-up (`Attributes & 0x2`): the reference brackets it with ranged snaps
     /// (`0x60f34c`, `0x6e5930`), so the sheath reconcile's force-stow never survives the frame.
     pub(crate) ranged: bool,
+}
+
+/// The live aura state kits that carry an animation, `(spell id, kit AnimID)` newest first: the
+/// stage-2 effects on the unit's list `+0xb4`, each flagged 0x1000 (`0x60eecd`) and linked at the
+/// head (`0x620360`). While the unit is stationary (`[+0x9e8] & 0x20000f` clear) every play but a
+/// death plays the head's id in its place (`0x5fde80`, called at `0x5feab5`), so a sleeping peon
+/// lies down and a stunned unit plays Stun although the base pick never names either.
+#[derive(Component, Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StateKitPins(pub(crate) Vec<(u32, u16)>);
+
+impl StateKitPins {
+    /// The id the walk at `0x5fde80` finds first.
+    pub(crate) fn head(&self) -> Option<u16> {
+        self.0.first().map(|&(_, id)| id)
+    }
 }
 
 /// A hand's fingers close (`HandsClosed`, 15) purely because a weapon occupies its attach point,
@@ -430,11 +468,11 @@ pub(crate) struct EmoteAnim {
     pub(crate) via_player: bool,
 }
 
-/// A state kit's `AnimID`, compared and never played: both field-4 callers (`0x5ff4c6`,
+/// A state kit's `AnimID`, compared and not played here: both field-4 callers (`0x5ff4c6`,
 /// `0x61dced`) pass stage 2, which `0x60edf0` diverts at `0x60f387`, and a mismatch with the armed
-/// id (`0x5fdb50`) recomputes the base (`0x5fd9e0`). So it only cuts: Charge's
-/// Knockdown (121) falls to Stand, since `0x5fd8b0` never yields its Stun (14). An in-place aura
-/// refresh emits nothing (`0x604d00`).
+/// requested id (`0x5fdb50`, `+0xf8`) recomputes the base (`0x5fd9e0`). The recompute's play is
+/// what [`StateKitPins`] turns into the kit's id on a stationary unit; `0x5fd8b0` itself never
+/// yields Charge's Stun (14). An in-place aura refresh emits nothing (`0x604d00`).
 #[derive(Message, Clone, Copy)]
 pub(crate) struct BaseAnimRecompute {
     pub(crate) entity: Entity,
@@ -567,6 +605,10 @@ pub(crate) struct AnimDriver {
     mode: Mode,
     /// The targeted gait id, to cross-fade only on a change; `None` forces a fresh pick.
     gait: Option<u16>,
+    /// Whether [`StateKitPins`] chose `gait`: once the aura goes, nothing re-picks
+    /// (`0x614150` stops the effect and calls no recompute), so the pinned clip plays out its
+    /// window before Stand takes over.
+    gait_pinned: bool,
     /// The movement flags the base was last armed for: the reference has no per-one-shot latch,
     /// so a root landing with a cast one-shot (Ice Block) still lets the base overwrite bone 0.
     gait_flags: u32,
@@ -688,6 +730,7 @@ impl Default for AnimDriver {
         Self {
             mode: Mode::Gait,
             gait: None,
+            gait_pinned: false,
             gait_flags: 0,
             interacting: false,
             interact_player: false,

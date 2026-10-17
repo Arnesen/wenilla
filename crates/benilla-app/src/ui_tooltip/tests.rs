@@ -4,7 +4,7 @@ use super::spell_feed::{build_view, feed_spell_tooltips, ViewCaster, ViewCtx};
 use super::*;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
-use crate::ui_action::{PlayerActions, Spells};
+use crate::ui_action::{real_spells, PlayerActions, Spells};
 
 /// The view alone, for the cell tests; the feed keeps what it read beside it.
 fn spell_tooltip_view(
@@ -103,20 +103,6 @@ impl TestCtx {
         ctx.caster = ViewCaster::Pet(pet);
         ctx
     }
-}
-
-/// The 5875 spell data the view builder reads; `None` skips where the install is absent.
-pub(super) fn real_spells() -> Option<Spells> {
-    let data = benilla_formats::wow_data_or_skip!(None);
-    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
-    Some(Spells {
-        catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),
-        forms: benilla_formats::load_shapeshift_forms(&mut chain).expect("forms"),
-        ranges: benilla_formats::load_spell_ranges(&mut chain).expect("ranges"),
-        cast_times: benilla_formats::load_spell_cast_times(&mut chain).expect("cast times"),
-        durations: benilla_formats::load_spell_durations(&mut chain).expect("durations"),
-        radii: benilla_formats::load_spell_radii(&mut chain).expect("radii"),
-    })
 }
 
 /// A unit's fields: level (34) and base mana (162).
@@ -220,6 +206,51 @@ fn a_pet_view_costs_seduction_from_the_pets_base_mana() {
     assert_eq!(v.cost, None);
 }
 
+/// The `$g`/`$G` branch (`0x508180`) reads the active player's `UNIT_FIELD_BYTES_0` byte 2
+/// (`0x508214`): the first form on 0, the second on anything else. A female player's Conjure Food
+/// and Water (587, 5504) tooltips read "her allies" and Hellfire (1949) "to herself".
+#[test]
+fn a_female_players_spell_tooltips_take_the_second_gender_form() {
+    let Some(spells) = real_spells() else { return };
+    let mut t = TestCtx::new();
+    let mut objs = no_objects();
+    let objects = objs.get();
+    // A level 60 player whose `UNIT_FIELD_BYTES_0` (36) holds `gender` in byte 2.
+    let player = |gender: u32| {
+        let mut fields = unit(60, 1373);
+        fields.merge(benilla_protocol::ObjectFields::from_pairs(&[(
+            36,
+            gender << 16,
+        )]));
+        ObjectStore(fields)
+    };
+    let (her, him) = (player(1), player(0));
+    let mut text = |id: u32, store: &ObjectStore| {
+        spell_tooltip_view(id, &spells, &mut t.ctx_for(&objects, 0, None, Some(store)))
+            .unwrap_or_else(|| panic!("spell {id} view"))
+            .description
+    };
+    for id in [587u32, 5504] {
+        let female = text(id, &her);
+        assert!(female.contains("the mage and her allies"), "{id}: {female}");
+        let male = text(id, &him);
+        assert!(male.contains("the mage and his allies"), "{id}: {male}");
+    }
+    let hellfire = text(1949, &her);
+    assert!(hellfire.contains("Fire damage to herself"), "{hellfire}");
+    // The branch looks the active player up (`0x508189`-`0x5081a4`): a pet view reads the
+    // player's gender, never the pet's.
+    let pet = unit(20, 0);
+    let pets = spell_tooltip_view(
+        587,
+        &spells,
+        &mut t.pet_ctx(&objects, Some(&her), Some(&pet)),
+    )
+    .expect("Conjure Food view")
+    .description;
+    assert!(pets.contains("the mage and her allies"), "{pets}");
+}
+
 /// An object index with nothing streamed: no worn item, and every reagent count 0.
 fn no_objects() -> crate::ui_items::TestObjects {
     crate::ui_items::TestObjects::new()
@@ -302,6 +333,7 @@ fn fireball_view_on_real_data() {
         v.cooldown, None,
         "Fireball has no recovery in either column"
     );
+    assert_eq!(v.recovery_ms, 0);
     assert_eq!(v.requires_form, None);
     assert!(
         v.description.starts_with("Hurls a fiery ball that causes"),
@@ -328,6 +360,7 @@ fn fireball_view_on_real_data() {
     assert_eq!(v.range.as_deref(), Some("8-25 yd range"));
     assert_eq!(v.cast_time.as_deref(), Some("Instant"));
     assert_eq!(v.cooldown.as_deref(), Some("15 sec cooldown"));
+    assert_eq!(v.recovery_ms, 15_000, "the same column, in ms");
     assert_eq!(v.requires_form.as_deref(), Some("Requires Battle Stance"));
     assert!(!v.form_met, "form 0 (unshifted) does not satisfy the mask");
     assert_eq!(
@@ -404,12 +437,14 @@ fn improved_fire_blast_shortens_the_cooldown_cell() {
     let objects = objs.get();
     let base = spell_tooltip_view(2136, &spells, &mut t.ctx(&objects, 0, None)).unwrap();
     assert_eq!(base.cooldown.as_deref(), Some("8 sec cooldown"));
+    assert_eq!(base.recovery_ms, 8_000);
 
     t.spell_mods.set_class_family(fire_blast.spell_family);
     t.spell_mods
         .set(true, bit, crate::spell::OP_COOLDOWN, -1_500);
     let improved = spell_tooltip_view(2136, &spells, &mut t.ctx(&objects, 0, None)).unwrap();
     assert_eq!(improved.cooldown.as_deref(), Some("6.5 sec cooldown"));
+    assert_eq!(improved.recovery_ms, 6_500, "the modified column, in ms");
 }
 
 /// The cast cell reads `GetCastTime(1)` (`52eb4b`): op 10 applies and nothing clamps, so a
@@ -839,19 +874,18 @@ fn the_spell_feed_runs_after_the_trainer_feed() {
     ));
 }
 
-const ME: u64 = 0x77;
-const WOLF: u64 = 0xF130_0000_4500_0001;
-const BOAR: u64 = 0xF130_0000_4600_0002;
+pub(super) const ME: u64 = 0x77;
+pub(super) const WOLF: u64 = 0xF130_0000_4500_0001;
+pub(super) const BOAR: u64 = 0xF130_0000_4600_0002;
 
 /// The world-hover driver over a bare VM holding `"player"` (us) and `"target"` (the wolf), each
 /// with its guid, as the unit feed pushes them; returns the app, the wolf and the boar.
-fn mouseover_app() -> (App, Entity, Entity) {
+pub(super) fn mouseover_app() -> (App, Entity, Entity) {
     use benilla_protocol::ObjectFields;
 
     let mut app = App::new();
     let (tx, _rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx))
-        .insert_resource(crate::ui_script::UiScaleCvar(1.0))
         .init_resource::<Hovered>()
         .init_resource::<HoveredObject>()
         .init_resource::<NameCache>()
@@ -887,13 +921,13 @@ fn mouseover_app() -> (App, Entity, Entity) {
 }
 
 /// Set this frame's pick and run the driver.
-fn hover(app: &mut App, pick: Hovered, object: HoveredObject) {
+pub(super) fn hover(app: &mut App, pick: Hovered, object: HoveredObject) {
     *app.world_mut().resource_mut::<Hovered>() = pick;
     *app.world_mut().resource_mut::<HoveredObject>() = object;
     app.update();
 }
 
-fn hover_unit(app: &mut App, entity: Entity, guid: u64) {
+pub(super) fn hover_unit(app: &mut App, entity: Entity, guid: u64) {
     let pick = Hovered {
         target: Some(entity),
         guid: Some(guid),
@@ -903,7 +937,7 @@ fn hover_unit(app: &mut App, entity: Entity, guid: u64) {
     hover(app, pick, HoveredObject::default());
 }
 
-fn eval(app: &mut App, lua: &str) -> Option<i64> {
+pub(super) fn eval(app: &mut App, lua: &str) -> Option<i64> {
     app.world_mut()
         .non_send_resource_mut::<UiScript>()
         .eval::<Option<i64>>(lua)
@@ -964,6 +998,7 @@ fn the_mouseover_token_names_the_hovered_units_creature_type() {
         },
     );
     app.insert_resource(spells);
+    app.insert_resource(crate::target::CreatureTypes::korean_for_tests());
     let druid = app
         .world_mut()
         .spawn(ObjectStore(ObjectFields::from_pairs(&[
@@ -979,7 +1014,7 @@ fn the_mouseover_token_names_the_hovered_units_creature_type() {
     };
 
     hover_unit(&mut app, druid, DRUID);
-    assert_eq!(creature_type(&mut app).as_deref(), Some("Beast"));
+    assert_eq!(creature_type(&mut app).as_deref(), Some("야수"));
     app.world_mut()
         .entity_mut(druid)
         .get_mut::<ObjectStore>()
@@ -987,7 +1022,7 @@ fn the_mouseover_token_names_the_hovered_units_creature_type() {
         .0
         .merge(ObjectFields::from_pairs(&[(BYTES_1, 0)]));
     hover_unit(&mut app, druid, DRUID);
-    assert_eq!(creature_type(&mut app).as_deref(), Some("Humanoid"));
+    assert_eq!(creature_type(&mut app).as_deref(), Some("인간형"));
 }
 
 /// Once no unit wins the pick, `"mouseover"` names nobody: the publisher `0x492890` zeroes the pair
@@ -1087,6 +1122,7 @@ fn the_feed_pushes_the_spells_the_vm_holds_before_a_hover() {
     .add_systems(Update, feed_spell_tooltips);
 
     let mut script = UiScript::new().unwrap();
+    crate::ui_script::test_ui::load_tooltip_template(&script);
     script.set_pet_actions(
         true,
         true,
@@ -1115,6 +1151,7 @@ fn the_feed_pushes_the_spells_the_vm_holds_before_a_hover() {
             reagents: vec![],
             tools: vec![],
             spell_level: 0,
+            skill_line: None,
         }],
     }));
     // We target a mob that targets party1, whose list the VM holds by guid.
@@ -1144,7 +1181,7 @@ fn the_feed_pushes_the_spells_the_vm_holds_before_a_hover() {
         .run(
             r#"
             local a = CreateFrame("Button", "B"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-            CreateFrame("GameTooltip", "TT")
+            CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
             local function lines()
                 local t = {}
                 for i = 1, TT:NumLines() do t[i] = getglobal("TTTextLeft" .. i):GetText() end
@@ -1221,6 +1258,7 @@ fn the_feed_builds_the_pet_views_against_the_pet_and_rebuilds_them_on_its_level(
     index.0.insert(IMP, imp);
 
     let mut script = UiScript::new().unwrap();
+    crate::ui_script::test_ui::load_tooltip_template(&script);
     script.set_pet_actions(
         true,
         true,
@@ -1248,7 +1286,7 @@ fn the_feed_builds_the_pet_views_against_the_pet_and_rebuilds_them_on_its_level(
         .run(
             r#"
             local a = CreateFrame("Button", "B"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-            CreateFrame("GameTooltip", "TT")
+            CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
             function DESC(set) TT:SetOwner(B, "ANCHOR_RIGHT"); set(); return TTTextLeft2:GetText() end
             "#,
         )
@@ -1292,4 +1330,38 @@ fn the_feed_builds_the_pet_views_against_the_pet_and_rebuilds_them_on_its_level(
             Some("Stamina by 10.".to_string())
         )
     );
+}
+
+/// The build looks the hovered unit's name up with a callback (`GetUnitName`, `0x609210`, from
+/// `0x529fe0`) once per hover; the frames under that hover read. A refused name is asked again by
+/// the next hover onto the unit, once, and by no frame.
+#[test]
+fn a_refused_hover_name_is_asked_again_by_the_next_hover_only() {
+    let (mut app, _wolf, boar) = mouseover_app();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    app.insert_resource(NetCommands(tx));
+    const PLAYER: u64 = 0x42;
+    hover_unit(&mut app, boar, PLAYER);
+    assert!(matches!(
+        crate::query_cache::queries(&rx)[..],
+        [crate::net::ClientCommand::NameQuery { guid: PLAYER }]
+    ));
+    app.world_mut()
+        .resource_mut::<NameCache>()
+        .insert_player(PLAYER, String::new(), None);
+    for _ in 0..600 {
+        hover_unit(&mut app, boar, PLAYER);
+    }
+    assert!(crate::query_cache::queries(&rx).is_empty(), "no frame asks");
+    hover(&mut app, Hovered::default(), HoveredObject::default());
+    hover_unit(&mut app, boar, PLAYER);
+    assert_eq!(
+        crate::query_cache::queries(&rx).len(),
+        1,
+        "the new hover does"
+    );
+    for _ in 0..600 {
+        hover_unit(&mut app, boar, PLAYER);
+    }
+    assert!(crate::query_cache::queries(&rx).is_empty());
 }

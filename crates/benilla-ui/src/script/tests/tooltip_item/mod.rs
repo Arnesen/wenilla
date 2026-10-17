@@ -197,6 +197,9 @@ fn right_color(s: &mut UiScript, needle: &str) -> [f32; 4] {
 }
 
 mod bindings;
+mod cooldown;
 mod law;
+mod lock;
 mod mechanics;
+mod rebuild;
 mod set;

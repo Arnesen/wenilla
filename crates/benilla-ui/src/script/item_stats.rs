@@ -32,6 +32,14 @@ pub struct ItemTemplateView {
     /// prerequisite, or its postrequisite when the prerequisite is -1. A weapon with only the
     /// alternate's bit reds the slot cell, not the type cell.
     pub proficiency_alt: Option<u32>,
+    /// `ItemSubClass.dbc`'s prerequisite proficiency alone (row `+0x08`, `None` for -1):
+    /// `GetTradeSkillItemStats` reads this field where the tooltip walks on to the postrequisite.
+    pub proficiency_prereq: Option<u32>,
+    /// The template's item level (`+0x38`).
+    pub item_level: u32,
+    /// `(spell name, charges)` for each of the five spell slots whose id names a `Spell.dbc` row,
+    /// in slot order (`+0x11c`, `+0x144`): `GetTradeSkillItemStats`' `ITEM_SPELL_EFFECT` lines.
+    pub spell_slots: Vec<(String, i32)>,
     /// `ItemSubClass.dbc` displayFlags bit 0: the type cell never prints (rings, trinkets, …).
     pub hide_subclass: bool,
     /// Template flags; `0x2` prints "Conjured Item".
@@ -115,62 +123,101 @@ pub struct PlayerReqState {
     pub honor_rank: u8,
 }
 
+/// The icon an item-texture getter answers while the item's template is unknown or its display
+/// has no icon: `0x5d8af0` looks the template up, finds none and passes display id 0 to `0x5d88b0`,
+/// which falls back to `INV_Misc_QuestionMark` (`0x847fe4`, `0x5d8927`) under the icon directory.
+/// `GetContainerItemInfo` (`0x4f9708`) and `GetTradePlayerItemInfo` (`0x4c0529`) push it, so their
+/// texture is a string on every path.
+pub(super) const MISSING_ITEM_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
+
+/// The quality an item-info getter answers: the template's quality only when the template is
+/// cached and its InventoryType is nonzero, else -1 (`GetContainerItemInfo` `0x4f9794`..`0x4f97a6`,
+/// `GetTradePlayerItemInfo` `0x4c059c`..`0x4c05af`, `GetTradeTargetItemInfo` `0x4c0241`). A potion,
+/// a reagent or a trade good (InventoryType 0) answers -1 with its template in hand, and the
+/// number is never nil. `inventory_type` is 0 while the template is unresolved.
+pub(super) fn gated_quality(quality: Option<u32>, inventory_type: u32) -> i64 {
+    match quality {
+        Some(q) if inventory_type != 0 => i64::from(q),
+        _ => -1,
+    }
+}
+
 /// [`item_usable`] by item entry: entry 0 and a template not yet answered are usable, as the
 /// merchant getter skips an uncached record (`0x4fb298`).
 pub(super) fn item_usable_by_id(model: &super::Model, item_id: u32) -> bool {
-    item_id == 0
-        || model.item_templates.get(&item_id).is_none_or(|v| {
-            item_usable(v, &model.player_req, |id| {
-                model.spellbook.slots.iter().any(|s| s.spell_id == id)
-            })
-        })
+    item_refusal_by_id(model, item_id).is_none()
 }
+
+/// [`item_refusal`] by item entry, with the same fail-open for entry 0 and an unanswered template.
+pub(super) fn item_refusal_by_id(model: &super::Model, item_id: u32) -> Option<&'static str> {
+    if item_id == 0 {
+        return None;
+    }
+    model.item_templates.get(&item_id).and_then(|v| {
+        item_refusal(v, &model.player_req, |id| {
+            model.spellbook.slots.iter().any(|s| s.spell_id == id)
+        })
+    })
+}
+
 /// The client's item-usable predicate `0x5ea930`, whose answer the merchant getters push as
-/// `isUsable` (`0x4fb2a3`, `0x4fb4f7`), its legs in the reference's order. Proficiency tests the
-/// item's own subclass bit, with no alternate walk. A nonzero city rank always fails: it tests
-/// `PLAYER_FIELD_PVP_MEDALS`, which is never written. Reputation compares ranks, equivalent to the
-/// reference's standing threshold (`0x4d6370`, table `0x80928c`); an unknown faction is rank 0. An
-/// unpushed state (level 0) declines to judge, answering usable.
+/// `isUsable` (`0x4fb2a3`, `0x4fb4f7`).
 pub fn item_usable(
     v: &ItemTemplateView,
     req: &PlayerReqState,
     knows_spell: impl Fn(u32) -> bool,
 ) -> bool {
+    item_refusal(v, req, knows_spell).is_none()
+}
+
+/// `0x5ea930`'s refusal, as the key of the error line its caller shows (`0x5d8e0e`, `0x5d926d`),
+/// its legs in the reference's order: the proficiency leg is `ERR_PROFICIENCY_NEEDED` (`0x7`,
+/// `0x5ea9b3`), every other failure `ERR_CANT_USE_ITEM` (`0x9c`, `0x5eaace`). Proficiency tests the
+/// item's own subclass bit, with no alternate walk. A nonzero city rank always fails: it tests
+/// `PLAYER_FIELD_PVP_MEDALS`, which is never written. Reputation compares ranks, equivalent to the
+/// reference's standing threshold (`0x4d6370`, table `0x80928c`); an unknown faction is rank 0. An
+/// unpushed state (level 0) declines to judge, answering usable.
+pub fn item_refusal(
+    v: &ItemTemplateView,
+    req: &PlayerReqState,
+    knows_spell: impl Fn(u32) -> bool,
+) -> Option<&'static str> {
+    const CANT_USE: Option<&str> = Some("ERR_CANT_USE_ITEM");
     if req.level == 0 {
-        return true;
+        return None;
     }
     if v.required_level > req.level {
-        return false;
+        return CANT_USE;
     }
     if req.class_id == 0 || v.allowable_class as u32 & (1 << (req.class_id - 1)) == 0 {
-        return false;
+        return CANT_USE;
     }
     if req.race_id == 0 || v.allowable_race as u32 & (1 << (req.race_id - 1)) == 0 {
-        return false;
+        return CANT_USE;
     }
     if let Some(&mask) = req.proficiency.get(&v.class) {
         if mask & (1 << v.subclass) == 0 {
-            return false;
+            return Some("ERR_PROFICIENCY_NEEDED");
         }
     }
     if v.required_skill != 0 {
         match req.skills.get(&v.required_skill) {
-            None => return false,
+            None => return CANT_USE,
             Some(&val) => {
                 if val < v.required_skill_rank {
-                    return false;
+                    return CANT_USE;
                 }
             }
         }
     }
     if v.required_spell != 0 && !knows_spell(v.required_spell) {
-        return false;
+        return CANT_USE;
     }
     if v.required_honor_rank != 0 && u32::from(req.honor_rank) < v.required_honor_rank {
-        return false;
+        return CANT_USE;
     }
     if v.required_city_rank != 0 {
-        return false;
+        return CANT_USE;
     }
     if v.required_rep_faction != 0 {
         let rank = req
@@ -179,10 +226,10 @@ pub fn item_usable(
             .copied()
             .unwrap_or(0);
         if u32::from(rank) < v.required_rep_rank {
-            return false;
+            return CANT_USE;
         }
     }
-    true
+    None
 }
 
 /// An item set's tooltip block (`0x854b1c`), app-resolved from `ItemSet.dbc`: member names from
@@ -202,11 +249,13 @@ pub struct ItemSetView {
 }
 
 impl super::UiScript {
-    /// Stores or replaces an item's template view, clearing its ask.
+    /// Stores or replaces an item's template view, clearing its ask and its read.
     pub fn set_item_template(&mut self, item_id: u32, view: ItemTemplateView) {
         let mut model = self.model_mut();
         model.item_stat_asks.remove(&item_id);
+        model.item_stat_reads.remove(&item_id);
         model.item_templates.insert(item_id, view);
+        model.quest_store.item_landed(item_id);
     }
 
     /// Asks for the templates of `ids` the store lacks, for the trade-skill and craft lists,
@@ -220,9 +269,25 @@ impl super::UiScript {
         }
     }
 
-    /// Drains the ids read or asked for that the store did not hold.
+    /// Drains the ids asked for that the store did not hold.
     pub fn take_item_stat_asks(&mut self) -> Vec<u32> {
         self.model_mut().item_stat_asks.drain().collect()
+    }
+
+    /// Drains the guids an item build missed in the name cache: a creator or a giver.
+    pub fn take_item_name_asks(&mut self) -> Vec<u64> {
+        self.model_mut().item_name_asks.drain().collect()
+    }
+
+    /// Drains the charter item guids an item build missed the petition record or owner of.
+    pub fn take_petition_asks(&mut self) -> Vec<u64> {
+        self.model_mut().petition_asks.drain().collect()
+    }
+
+    /// Drains the ids `GetItemInfo` read that the store did not hold, which the app serves from
+    /// its cache and never asks the server for.
+    pub fn take_item_stat_reads(&mut self) -> Vec<u32> {
+        self.model_mut().item_stat_reads.drain().collect()
     }
 
     /// Stores or replaces a set's view, re-pushed as member names resolve.
@@ -315,33 +380,6 @@ fn equip_loc_token(inventory_type: u32) -> &'static str {
     TOKENS.get(inventory_type as usize).copied().unwrap_or("")
 }
 
-/// The reference's `SStrToInt` (`0x64ac60`) over an `item:` field: an optional `-`, then digits up
-/// to the first non-digit, with no whitespace skip and no `+`. Deviation: an overflow saturates at
-/// `u32::MAX` where the reference wraps, because only a script can overflow it.
-fn reference_atoi(s: &str) -> i64 {
-    let b = s.as_bytes();
-    let (neg, mut i) = match b.first() {
-        Some(b'-') => (true, 1),
-        _ => (false, 0),
-    };
-    let mut n: i64 = 0;
-    while let Some(&c) = b.get(i) {
-        if !c.is_ascii_digit() {
-            break;
-        }
-        n = n
-            .saturating_mul(10)
-            .saturating_add(i64::from(c - b'0'))
-            .min(i64::from(u32::MAX));
-        i += 1;
-    }
-    if neg {
-        -n
-    } else {
-        n
-    }
-}
-
 /// `GetItemInfo`'s argument as the reference parses it (`0x48e0a3`-`0x48e16d`): a number, or a
 /// string `lua_isnumber` (`0x6f34d0`) coerces, is the id alone; another string (`0x6f3510`) must
 /// pass `strnicmp(s, "item:", 5)` (`0x64a4c0`) for its four fields, else it is id 0, so a name or
@@ -372,7 +410,9 @@ fn parse_item_arg(v: &Value) -> mlua::Result<(i64, u32, u32, u32)> {
     else {
         return Ok((0, 0, 0, 0));
     };
-    let mut fields = rest.splitn(4, ':').map(reference_atoi);
+    let mut fields = rest
+        .splitn(4, ':')
+        .map(crate::script::binding_abi::s_str_to_int);
     let id = fields.next().unwrap_or(0);
     let mut next = || u32::try_from(fields.next().unwrap_or(0)).unwrap_or(0);
     Ok((id, next(), next(), next()))
@@ -406,8 +446,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // is the bare template name, where the reference appends the random suffix (`0x5d8b00`); the
     // link is the item string (`0x48e1c9`, literal `0x842d4c`), not a hyperlink; the level is the
     // required one (`[record+0x3c]`; `ItemLevel` at `+0x38` is never pushed). An uncached
-    // template answers no values and records the ask, as the reference's lookup (`0x55ba30`)
-    // queries and returns null, sending the binding to `xor eax,eax; ret`.
+    // template answers no values and asks nothing: the lookup passes no callback (`0x48e172`), so
+    // the cache (`0x55ba30`) returns null without a query (`0x55baac`), sending the binding to
+    // `xor eax,eax; ret`. The miss is recorded as a read, which the app answers from its cache.
     lua.globals().set(
         "GetItemInfo",
         lua.create_function(|lua, arg: Value| {
@@ -419,7 +460,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let v = model.item_templates.get(&item_id).cloned();
                 if v.is_none() && item_id != 0 {
-                    model.item_stat_asks.insert(item_id);
+                    model.item_stat_reads.insert(item_id);
                 }
                 v
             };
@@ -545,11 +586,14 @@ mod tests {
         assert!(item_usable(&v, &PlayerReqState::default(), knows_none));
     }
 
+    /// A miss records a read, never an ask: `GetItemInfo`'s lookup passes no callback
+    /// (`0x48e172`).
     #[test]
-    fn miss_records_ask_and_push_serves_the_stats() {
+    fn miss_records_a_read_and_push_serves_the_stats() {
         let mut s = UiScript::new().unwrap();
         assert!(s.eval::<bool>("return GetItemInfo(25) == nil").unwrap());
-        assert_eq!(s.take_item_stat_asks(), vec![25]);
+        assert_eq!(s.take_item_stat_reads(), vec![25]);
+        assert!(s.take_item_stat_asks().is_empty(), "no ask of the server");
 
         s.set_item_template(
             25,
@@ -568,16 +612,16 @@ mod tests {
             .eval("local n, _, q = GetItemInfo(25) return n, q")
             .unwrap();
         assert_eq!((name.as_str(), quality), ("Worn Shortsword", 1));
-        assert!(s.take_item_stat_asks().is_empty(), "push cleared the ask");
-        // Id 0 records no ask.
+        assert!(s.take_item_stat_reads().is_empty(), "push cleared the read");
+        // Id 0 records no read.
         assert!(s.eval::<bool>("return GetItemInfo(0) == nil").unwrap());
-        assert!(s.take_item_stat_asks().is_empty());
+        assert!(s.take_item_stat_reads().is_empty());
     }
 }
 
 #[cfg(test)]
 mod get_item_info_tests {
-    use super::{equip_loc_token, reference_atoi, ItemTemplateView};
+    use super::{equip_loc_token, ItemTemplateView};
     use crate::script::UiScript;
 
     /// Worn Shortsword, item 25, as vmangos `item_template` holds it (item level 2).
@@ -705,7 +749,7 @@ mod get_item_info_tests {
     }
 
     #[test]
-    fn an_uncached_id_returns_nothing_and_records_the_ask() {
+    fn an_uncached_id_returns_nothing_and_records_a_read() {
         let mut s = UiScript::new().unwrap();
         assert_eq!(
             s.arity("GetItemInfo(2589)").unwrap(),
@@ -713,7 +757,12 @@ mod get_item_info_tests {
             "an unseen template returns NO values"
         );
         assert!(s.eval::<bool>("return (GetItemInfo(2589)) == nil").unwrap());
-        assert_eq!(s.take_item_stat_asks(), vec![2589], "the ask was recorded");
+        assert_eq!(
+            s.take_item_stat_reads(),
+            vec![2589],
+            "the read was recorded"
+        );
+        assert!(s.take_item_stat_asks().is_empty(), "and no ask");
 
         s.set_item_template(
             2589,
@@ -805,17 +854,6 @@ mod get_item_info_tests {
         assert_eq!(equip_loc_token(28), "INVTYPE_RELIC", "the last real token");
         assert_eq!(equip_loc_token(29), "", "the array's trailing \"\"");
         assert_eq!(equip_loc_token(9999), "", "past the array");
-    }
-
-    #[test]
-    fn the_field_parser_is_the_references_atoi() {
-        assert_eq!(reference_atoi("2589"), 2589);
-        assert_eq!(reference_atoi("-5"), -5);
-        assert_eq!(reference_atoi(""), 0);
-        assert_eq!(reference_atoi("abc"), 0);
-        assert_eq!(reference_atoi(" 12"), 0, "no leading-whitespace skip");
-        assert_eq!(reference_atoi("+12"), 0, "no unary plus");
-        assert_eq!(reference_atoi("12abc"), 12, "stops at the first non-digit");
     }
 }
 

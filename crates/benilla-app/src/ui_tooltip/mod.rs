@@ -1,7 +1,11 @@
 //! The world-mouseover tooltip and the spell tooltip views. The world tooltip rebuilds once per
-//! hover-target change and a lost hover arms a fade; the pick is [`Hovered`] or
-//! [`HoveredObject`], arbitrated by [`go_is_nearest`] as the click router does. The spell views
-//! are built and pushed ahead of a hover by [`spell_feed`].
+//! hover-target change, published through the VM ([`UiScript::publish_world_mouseover`]), whose
+//! change requests the fade; the pick is [`Hovered`] or [`HoveredObject`], arbitrated by
+//! [`go_is_nearest`] as the click router does. The pick stands for the WorldFrame's own update
+//! (`0x481790`), which picks only while the WorldFrame holds the hover (`0x4817ae`); the loss when
+//! the cursor moves onto a window is published by the WorldFrame's leave in the UI's walk, before
+//! the window's `OnEnter`. The spell views are built and pushed ahead of a hover by
+//! [`spell_feed`].
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -11,6 +15,7 @@ use benilla_ui::strings::Arg;
 
 use crate::names::NameCache;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::target::{go_is_nearest, Hovered, HoveredObject, GO_FLAG_LOCKED, GO_TYPE_GENERIC};
 use crate::ui_script::UiFeed;
 use crate::ui_trainer::TrainerFeed;
@@ -22,12 +27,19 @@ use spell_feed::feed_spell_tooltips;
 
 pub struct UiTooltipPlugin;
 
+/// The frame's world-mouseover publish ([`UiScript::publish_world_mouseover`]), which the readers
+/// of the published guid follow.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct MouseoverPublish;
+
 impl Plugin for UiTooltipPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
             (
-                drive_mouseover_tooltip.in_set(UnitFeed),
+                drive_mouseover_tooltip
+                    .in_set(UnitFeed)
+                    .in_set(MouseoverPublish),
                 // After the trainer and quest feeds, so a list that lands this frame is hoverable
                 // in its tick; outside `UnitFeed`, which the trainer feed follows, so it takes that
                 // set's gate.
@@ -47,24 +59,11 @@ fn keyed(get: &dyn Fn(&str) -> Option<String>, key: &str, args: &[Arg<'_>]) -> O
     (!text.is_empty()).then_some(text)
 }
 
-/// What the world tooltip was last built for; the reference rebuilds once per hover-target change.
-#[derive(Default, PartialEq, Clone, Copy)]
-enum LastHover {
-    #[default]
-    None,
-    Unit(u64),
-    Go(u64),
-    /// A hovered corpse object, keyed on the corpse's guid.
-    Corpse(u64),
-}
-
 /// The world-hover driver's memory, one `SystemParam` because the driver is at Bevy's 16-param
-/// ceiling.
+/// ceiling. What it last published is the VM's ([`UiScript::world_mouseover`]), which a hover
+/// leave in the UI's walk also writes.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct HoverMemo<'s> {
-    /// Which world plate is up. On an unchanged mouseover the reference makes no call (`0x482090`
-    /// returns at `0x4820b5`), so a plate Lua takes mid-hover stays gone.
-    last: Local<'s, crate::ui_script::VmMemo<LastHover>>,
     /// The line-affecting fields the current unit plate was built from, so a late-arriving name or
     /// creature-info rebuilds it under the same hover.
     last_lines: Local<'s, crate::ui_script::VmMemo<Option<UnitState>>>,
@@ -72,7 +71,14 @@ pub(crate) struct HoverMemo<'s> {
     trace: Local<'s, String>,
     /// Whether the VM holds a `"mouseover"` unit, so the clear is pushed once.
     published: Local<'s, crate::ui_script::VmMemo<bool>>,
+    /// What the last frame hovered, unit, corpse and object: a hover onto anything else is the
+    /// build, whose lookups pass a callback (`GetUnitName` `0x609210` from `0x529fe0`, the corpse's
+    /// owner `0x52af77`, a lock's key `0x52aca6`); the frames under the same hover read.
+    hovering: Local<'s, Option<HoverKey>>,
 }
+
+/// What the pointer is over: the picked unit, corpse and object guids.
+type HoverKey = (Option<u64>, Option<u64>, Option<u64>);
 
 fn lines_view(s: &UnitState) -> UnitState {
     UnitState {
@@ -114,8 +120,6 @@ fn drive_mouseover_tooltip(
     go_inputs: crate::target::lock::GoLockInputs,
     // The known-spell set the resolver's SKILL arm scans.
     player_actions: Res<crate::ui_action::PlayerActions>,
-    // The cursor seat crosses the VM seam: the anchor below is UI units, not px.
-    ui_scale: Res<crate::ui_script::UiScaleCvar>,
     mut memo: HoverMemo,
     // `ChrClasses.dbc` field 16, `UnitHasRelicSlot`'s input, and the form table the creature type
     // reads.
@@ -124,18 +128,35 @@ fn drive_mouseover_tooltip(
     let Some(mut script) = script else {
         return;
     };
-    let (last, last_lines, trace) = (&mut memo.last, &mut memo.last_lines, &mut *memo.trace);
-    let last = last.get(&script);
+    let (last_lines, trace) = (&mut memo.last_lines, &mut *memo.trace);
     let last_lines = last_lines.get(&script);
+    // The publisher's change check (`0x482090`) compares against the VM's last publish.
+    let last = script.world_mouseover();
     let published = memo.published.get(&script);
     let self_store = self_q.iter().next();
-    let chr = tables.classes();
+    let chr = tables.unit_names();
     let types = tables.types(&names);
 
+    // A plate's pick stands for its enter's publish (`0x7cb850`), so it holds only while that plate
+    // holds the hover: a plate retired after the pick was taken has run its leave (`0x7cb8b0`),
+    // which published the loss, and the hover re-picks to the WorldFrame.
+    if hovered.plate && script.hovered_nameplate() != hovered.guid {
+        if std::mem::take(published) {
+            script.set_unit("mouseover", None);
+        }
+        script.publish_world_mouseover(None);
+        return;
+    }
+    let hover: HoverKey = (
+        hovered.mouseover(&hovered_go).map(|(_, guid)| guid),
+        hovered.corpse_guid,
+        hovered_go.guid,
+    );
+    let ask = Ask::at(memo.hovering.replace(hover) != Some(hover), &commands);
     let unit = hovered.mouseover(&hovered_go).and_then(|(entity, guid)| {
         let store = stores.get(entity).ok()?;
         let name = names
-            .resolve_unit(guid, Some(store), &commands)
+            .resolve_unit(guid, Some(store), ask)
             .map(str::to_string);
         let reaction = unit_reaction(rx.factions.as_deref(), &rx.reputations, store, self_store);
         // The hovered guid, the pair `0x492890` writes to `0xb4e2c8`/`0xb4e2cc` and the token
@@ -159,14 +180,15 @@ fn drive_mouseover_tooltip(
     });
 
     if let Some((guid, state)) = unit {
-        // Push first: the builder reads the token. Rebuild on a new target or a late name or
-        // creature answer; health and power stay out of the key, since the watcher drives the bar.
+        // Publish, which tears the old hover down, then push: the builder reads the token. Rebuild
+        // on a new target or a late name or creature answer, which rebuilds under the same hover
+        // with no teardown; health and power stay out of the key, since the watcher drives the bar.
         let key = lines_view(&state);
+        let changed = script.publish_world_mouseover(Some(guid));
         script.set_unit("mouseover", Some(state));
         *published = true;
-        if *last != LastHover::Unit(guid) || last_lines.as_ref() != Some(&key) {
+        if changed || last_lines.as_ref() != Some(&key) {
             script.world_tooltip_unit("mouseover");
-            *last = LastHover::Unit(guid);
             *last_lines = Some(key);
         }
         return;
@@ -191,20 +213,17 @@ fn drive_mouseover_tooltip(
         };
         // A bone pile with nothing to take publishes no mouseover: no plate, no brighten.
         if !crate::target::corpse_mouseover_eligible(store) {
-            if !matches!(*last, LastHover::None) {
-                script.world_tooltip_fade();
-                *last = LastHover::None;
-            }
+            script.publish_world_mouseover(None);
             return;
         }
-        if *last == LastHover::Corpse(guid) {
+        if last == Some(guid) {
             return; // already up; a corner plate never re-seats
         }
         // A corpse carries `CORPSE_FIELD_OWNER`, not a name; the plate waits for the name query.
         let Some(owner) = store.0.corpse_owner() else {
             return;
         };
-        let Some(name) = names.resolve(owner, &commands).map(str::to_string) else {
+        let Some(name) = names.resolve_player(owner, ask).map(str::to_string) else {
             return;
         };
         // `CORPSE_TOOLTIP`, the builder's key; no string, no plate.
@@ -215,47 +234,43 @@ fn drive_mouseover_tooltip(
         ) else {
             return;
         };
-        script.world_tooltip_gameobject(&plate, &[], None);
-        *last = LastHover::Corpse(guid);
+        script.publish_world_mouseover(Some(guid));
+        script.world_tooltip_gameobject(&plate, &[], false);
         return;
     }
     if let Some((entity, guid)) = go {
         // The plate follows the cursor iff `[vtbl+0x5c]` (`0x5f8630`) finds
         // `data[0x621b00(type, 0x13)]` set, and semantic `0x13` exists only for GENERIC(5), at
         // `data[0]`. `data[1]` (`0x5f4830`) is whether it can be hovered, not where it sits.
-        let cursor_seated = stores.get(entity).map(|s| s.0.gameobject_type_id())
-            == Ok(GO_TYPE_GENERIC)
-            && go_inputs
-                .templates
-                .get(guid)
+        let go_fields = stores.get(entity).ok().map(|s| &s.0);
+        let cursor_seated = go_fields.map(|f| f.gameobject_type_id()) == Some(GO_TYPE_GENERIC)
+            && go_fields
+                .and_then(|f| go_inputs.templates.of(f))
                 .is_some_and(|t| t.floating_tooltip);
-        // Window px to the VM's y-up UI units, as the input seam converts.
+        // Window px to the VM's y-up root units, as the input seam converts.
         let cursor_ui = cursor_seated
             .then(|| {
                 window.iter().next().and_then(|w| {
-                    let s = crate::ui_script::seam_scale(w.height(), ui_scale.0);
                     // The hover probe's aim stands in for a missing cursor; a real pointer wins.
                     w.cursor_position()
                         .or_else(crate::target::hover_probe_point)
-                        .map(|c| (c.x / s, (w.height() - c.y) / s))
+                        .map(|c| {
+                            let at = crate::ui_script::window_to_ui(w.height(), c);
+                            (at.x, at.y)
+                        })
                 })
             })
             .flatten();
-        if *last == LastHover::Go(guid) {
+        if last == Some(guid) {
             if crate::target::hover_probe_armed() {
-                let line = format!(
-                    "held Go({guid:#x}) — plate up {}",
-                    script.world_tooltip_up()
-                );
+                let line = format!("held Go({guid:#x})");
                 if *trace != line {
                     info!("hover probe/tooltip: {line}");
                     *trace = line;
                 }
             }
-            // The cursor arm follows the pointer; the corner arm has nothing to re-seat.
-            if let Some((x, y)) = cursor_ui {
-                script.world_tooltip_move(x, y);
-            }
+            // A cursor-seated plate follows the pointer in its own update (mode 6); the corner arm
+            // has nothing to re-seat.
             return;
         }
         if cursor_seated && cursor_ui.is_none() {
@@ -265,12 +280,17 @@ fn drive_mouseover_tooltip(
             info!(
                 "hover probe/tooltip: guid {guid:#x} cursor_seated {cursor_seated} cursor_ui \
                  {cursor_ui:?} template {:?}",
-                go_inputs.templates.get(guid).map(|t| t.name.clone()),
+                go_fields
+                    .and_then(|f| go_inputs.templates.of(f))
+                    .map(|t| t.name.clone()),
             );
         }
-        let Some(template) = go_inputs.templates.get(guid).cloned() else {
-            // Template in flight: ask once, and show it when it lands.
-            go_inputs.templates.request(guid, &commands);
+        let Some(fields) = go_fields else {
+            return; // not streamed: no descriptor, no entry
+        };
+        // The builder reads the record its create asked for (`0x5f7d81`, `0x5f8100`): an object
+        // whose template has not landed shows when it does.
+        let Some(template) = go_inputs.templates.of(fields).cloned() else {
             return;
         };
         // The builder's lock lines (`0x52aa20`): "Locked" iff `GO_FLAG_LOCKED` (`0x52aae5`), then
@@ -318,7 +338,7 @@ fn drive_mouseover_tooltip(
         {
             match slot0.key_type {
                 benilla_formats::LOCK_KEY_ITEM => {
-                    if let Some(t) = go_inputs.items.template(slot0.index, 0, &commands) {
+                    if let Some(t) = go_inputs.items.template(slot0.index, 0, ask) {
                         // `LOCKED_WITH_ITEM`, at `0x52acb8`.
                         if let Some(text) = keyed(&go_get, "LOCKED_WITH_ITEM", &[Arg::S(&t.name)]) {
                             lines.push((text, TooltipTint::White));
@@ -344,15 +364,12 @@ fn drive_mouseover_tooltip(
                 _ => {}
             }
         }
-        script.world_tooltip_gameobject(&template.name, &lines, cursor_ui);
-        *last = LastHover::Go(guid);
+        script.publish_world_mouseover(Some(guid));
+        script.world_tooltip_gameobject(&template.name, &lines, cursor_seated);
         return;
     }
-    if !matches!(*last, LastHover::None) {
-        // Hover lost: arm the fade (`0x492909` → `0x530ae0`).
-        script.world_tooltip_fade();
-        *last = LastHover::None;
-    }
+    // Hover lost: the same teardown, with no plate after it.
+    script.publish_world_mouseover(None);
 }
 
 #[cfg(test)]
@@ -361,5 +378,7 @@ mod bench;
 mod deps_tests;
 #[cfg(test)]
 mod feed_tests;
+#[cfg(test)]
+mod hover_order_tests;
 #[cfg(test)]
 mod tests;

@@ -79,7 +79,11 @@ fn left_click(s: &mut UiScript, frame: &str) {
 /// The tabs ship hidden until a stationary hover reveals them (`FCF_OnUpdate`), and a window
 /// moves by its tab (`OnDragStart` calls `StartMoving`), so every drag starts here.
 fn reveal(s: &mut UiScript) {
-    let (cx, cy) = centre(s, "ChatFrame1");
+    reveal_window(s, "ChatFrame1");
+}
+
+fn reveal_window(s: &mut UiScript, window: &str) {
+    let (cx, cy) = centre(s, window);
     s.mouse_move(cx, cy);
     for _ in 0..45 {
         s.tick(0.016);
@@ -87,11 +91,14 @@ fn reveal(s: &mut UiScript) {
     }
 }
 
+/// A move past the drag-start distance (0.01 of the 1600×900 diagonal, 15.7 root units).
+const DRAG_STARTS_AT: f32 = 20.0;
+
 fn drag_tab(s: &mut UiScript, dx: f32, dy: f32) {
     reveal(s);
     let (tx, ty) = centre(s, "ChatFrame1Tab");
     s.mouse_button(tx, ty, "LeftButton", true);
-    s.mouse_move(tx + 5.0, ty); // past the 4px threshold: OnDragStart -> StartMoving
+    s.mouse_move(tx + DRAG_STARTS_AT, ty); // past the drag-start distance: OnDragStart -> StartMoving
     s.mouse_move(tx + dx, ty + dy);
     s.mouse_button(tx + dx, ty + dy, "LeftButton", false);
     s.resolve();
@@ -280,18 +287,18 @@ fn the_tab_drag_moves_an_unlocked_window_and_a_locked_one_stays_put() {
     reveal(&mut s);
     let (tx, ty) = centre(&mut s, "ChatFrame1Tab");
     s.mouse_button(tx, ty, "LeftButton", true);
-    s.mouse_move(tx + 5.0, ty);
+    s.mouse_move(tx + DRAG_STARTS_AT, ty);
     s.mouse_move(tx + 80.0, ty);
     assert_eq!(
         left(&mut s),
-        start + 75.0,
+        start + 80.0 - DRAG_STARTS_AT,
         "the window followed the cursor from where the drag started"
     );
     s.mouse_button(tx + 80.0, ty, "LeftButton", false);
     s.mouse_move(tx + 400.0, ty);
     assert_eq!(
         left(&mut s),
-        start + 75.0,
+        start + 80.0 - DRAG_STARTS_AT,
         "OnDragStop ended it — a move that outlived the button would keep going"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -314,8 +321,8 @@ fn a_moved_window_is_user_placed_and_the_managed_pass_skips_it() {
     let moved = left(&mut s);
     assert_eq!(
         moved,
-        seated + 115.0,
-        "120 less the 5px spent on the threshold"
+        seated + 120.0 - DRAG_STARTS_AT,
+        "120 less the move spent on the drag-start distance"
     );
     assert!(
         s.eval::<bool>("return ChatFrame1:IsUserPlaced()").unwrap(),
@@ -354,7 +361,9 @@ fn the_geometry_round_trips_through_the_save_file() {
     assert_eq!(saved.len(), 1, "one window was placed: {saved:?}");
     assert_eq!(saved[0].name, "ChatFrame1");
     let text = crate::ui_layout::render(&saved);
-    let read_back = crate::ui_layout::parse(&text);
+    let crate::ui_layout::Layout::Rect(read_back) = crate::ui_layout::parse(&text) else {
+        panic!("written in the rect form:\n{text}");
+    };
     assert_eq!(
         read_back, saved,
         "the file expresses what the seam produced"
@@ -515,5 +524,160 @@ fn the_docked_combat_log_cannot_be_moved_or_resized_on_its_own() {
     let one: f64 = s.eval("return ChatFrame1:GetLeft()").unwrap();
     let two: f64 = s.eval("return ChatFrame2:GetLeft()").unwrap();
     assert_eq!(one, two, "the dock moved as one");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Drag `window`'s tab by `(dx, dy)`: press, past the drag threshold, move, release.
+fn drag_named_tab(s: &mut UiScript, window: &str, dx: f32, dy: f32) {
+    reveal_window(s, window);
+    let tab = format!("{window}Tab");
+    let tab = tab.as_str();
+    let (tx, ty) = centre(s, tab);
+    assert_eq!(
+        s.hit_test_name(tx, ty).as_deref(),
+        Some(tab),
+        "the tab is hit"
+    );
+    // As a player's mouse runs it: the hover is on the tab before the press, and a frame resolves
+    // the moved layout before the release tests the cursor against the tab.
+    s.mouse_move(tx, ty);
+    s.mouse_button(tx, ty, "LeftButton", true);
+    s.mouse_move(tx + DRAG_STARTS_AT, ty);
+    s.mouse_move(tx + dx, ty + dy);
+    s.resolve();
+    s.mouse_button(tx + dx, ty + dy, "LeftButton", false);
+    s.resolve();
+}
+
+/// `FCF_Tab_OnClick` reads `GetButtonState()` inside `OnClick`: NORMAL on the press (`0x779285`
+/// before the push `0x7792b1`) so an undocked tab picks its window up, PUSHED on the release
+/// (`0x7793a9` before `0x7793de`) so it drops it. A tab pulled out of the dock drags again, and a
+/// plain click picks the window up and puts it down, never leaving it on the cursor.
+#[test]
+fn an_undocked_tab_drags_again_and_a_plain_click_drops_the_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_ui();
+    s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
+    s.resolve();
+    drag_named_tab(&mut s, "ChatFrame2", 0.0, -200.0);
+    assert!(
+        s.eval::<bool>("return not ChatFrame2.isDocked").unwrap(),
+        "the first drag pulled the window out of the dock"
+    );
+    assert!(s.eval::<bool>("return MOVING_CHATFRAME == nil").unwrap());
+
+    let first = centre(&mut s, "ChatFrame2");
+    drag_named_tab(&mut s, "ChatFrame2", 0.0, 120.0);
+    let second = centre(&mut s, "ChatFrame2");
+    assert_eq!(
+        second.1,
+        first.1 + 120.0,
+        "the second drag of the undocked tab moved the window"
+    );
+
+    reveal_window(&mut s, "ChatFrame2");
+    let (tx, ty) = centre(&mut s, "ChatFrame2Tab");
+    s.mouse_move(tx, ty);
+    s.mouse_button(tx, ty, "LeftButton", true);
+    assert!(
+        s.eval::<bool>("return MOVING_CHATFRAME == ChatFrame2")
+            .unwrap(),
+        "the press picked the window up"
+    );
+    s.mouse_button(tx, ty, "LeftButton", false);
+    assert!(
+        s.eval::<bool>("return MOVING_CHATFRAME == nil").unwrap(),
+        "the release put it down"
+    );
+    let before = centre(&mut s, "ChatFrame2");
+    s.mouse_move(tx + 90.0, ty + 40.0);
+    assert_eq!(
+        centre(&mut s, "ChatFrame2"),
+        before,
+        "the window does not follow a cursor with no button held"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// `(left, right, bottom, top)` of `frame`, after a resolve.
+fn edges(s: &mut UiScript, frame: &str) -> (f32, f32, f32, f32) {
+    s.resolve();
+    let (l, r, b, t): (f64, f64, f64, f64) = s
+        .eval(&format!(
+            "return {frame}:GetLeft(), {frame}:GetRight(), {frame}:GetBottom(), {frame}:GetTop()"
+        ))
+        .unwrap();
+    (l as f32, r as f32, b as f32, t as f32)
+}
+
+/// Unlocking a docked window re-anchors it at CENTER (`FloatingChatFrame.lua:785-792`); a grip
+/// then moves only the grabbed edge, since the resize starts by pinning the window to one TOPLEFT
+/// anchor at its rect (`0x7652b0` → `0x768430`).
+#[test]
+fn an_unlocked_centred_window_resizes_from_the_grabbed_edge_only() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_ui();
+    reveal(&mut s);
+    right_click(&mut s, "ChatFrame2Tab");
+    assert!(s
+        .eval::<bool>("return DropDownList1Button1:GetText() == UNLOCK_WINDOW")
+        .unwrap());
+    left_click(&mut s, "DropDownList1Button1");
+    assert_eq!(
+        s.eval::<(String, i64)>("return (ChatFrame2:GetPoint(1)), ChatFrame2:GetNumPoints()")
+            .unwrap(),
+        ("CENTER".to_string(), 1),
+        "FCF_ToggleLock undocked it and centred it"
+    );
+
+    for (grip, dx, dy) in [("Right", 40.0, 0.0), ("Top", 0.0, 30.0)] {
+        reveal_window(&mut s, "ChatFrame2");
+        let before = edges(&mut s, "ChatFrame2");
+        let name = format!("ChatFrame2Resize{grip}");
+        let (x, y) = centre(&mut s, &name);
+        assert_eq!(s.hit_test_name(x, y).as_deref(), Some(name.as_str()));
+        s.mouse_button(x, y, "LeftButton", true);
+        s.mouse_move(x + dx, y + dy);
+        s.mouse_button(x + dx, y + dy, "LeftButton", false);
+        let after = edges(&mut s, "ChatFrame2");
+        assert_eq!(
+            after,
+            (before.0, before.1 + dx, before.2, before.3 + dy),
+            "the {grip} grip moved its own edge and no other"
+        );
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// A tab dropped off the bottom of the screen: `FCF_ValidateChatFramePosition`'s
+/// `SetPoint("TOPLEFT", …)` (`FloatingChatFrame.lua:1304-1334`) replaces the drag's one TOPLEFT
+/// anchor, so the window comes back whole at its own size.
+#[test]
+fn a_tab_dropped_off_screen_puts_the_window_back_whole() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_ui();
+    s.run("FCF_SetLocked(ChatFrame1, nil)").unwrap();
+    let (w, h) = (width(&mut s), height(&mut s));
+    drag_tab(&mut s, 0.0, -600.0);
+    let (n, point, rel, rp) = s
+        .eval::<(i64, String, String, String)>(
+            "local p, rel, rp = ChatFrame1:GetPoint(1) \
+             return ChatFrame1:GetNumPoints(), p, rel:GetName(), rp",
+        )
+        .unwrap();
+    assert_eq!(
+        (n, point.as_str(), rel.as_str(), rp.as_str()),
+        (1, "TOPLEFT", "UIParent", "TOPLEFT"),
+        "the validate's anchor is the only one"
+    );
+    assert_eq!((width(&mut s), height(&mut s)), (w, h), "at its own size");
+    let want_top: f64 = s
+        .eval("return MainMenuBar:GetHeight() + ChatFrame1Tab:GetHeight()")
+        .unwrap();
+    let top: f64 = s.eval("return ChatFrame1:GetTop()").unwrap();
+    assert!(
+        (top - want_top).abs() < 1e-3,
+        "back on screen: {top} vs {want_top}"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

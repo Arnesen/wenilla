@@ -1,6 +1,7 @@
 //! The EditBox seam the host drives each frame: the advance-table round trip, the caret,
 //! selection and scroll geometry derived from it, and the clipboard pair.
 
+use crate::script::TextMeasure as _;
 use mlua::Lua;
 
 use crate::script::{types, Model, UiScript};
@@ -36,9 +37,10 @@ impl UiScript {
         }
     }
 
-    /// The focused EditBox's text geometry this frame: its text quad, the scroll window and the
-    /// caret and selection spans in it, after scrolling the caret into view (`0x77da80`). `None`
-    /// until the advance table is answered: the text draws, without caret or highlight.
+    /// The focused EditBox's text geometry this frame: its text quad and the caret and selection
+    /// spans in it, measured from the window's start, which the box's flush keeps
+    /// (`0x77d4d0`). `None` until the advance table is answered: the text draws, without caret or
+    /// highlight.
     pub fn focused_editbox_text_ui(&mut self) -> Option<types::EditBoxTextUi> {
         let h = {
             let model = self.model_mut();
@@ -52,13 +54,6 @@ impl UiScript {
         // Materialize the lazy text region, so an empty, just-focused box has a caret home.
         let rh = super::ensure_text_region(self.lua(), h)?;
         let mut model = self.model_mut();
-        // An unanchored text region draws over its owner, so the frame's own width stands in.
-        let avail = model
-            .region_resolved
-            .get(&rh)
-            .or_else(|| model.resolved.get(&h))
-            .map(|r| r.right - r.left)
-            .unwrap_or(0.0);
         let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state)
         else {
             return None;
@@ -71,10 +66,13 @@ impl UiScript {
             eb.advances = vec![0.0];
             eb.rows = vec![0];
         }
-        // Keep the caret inside the window with room at the right edge; a multi-line box wraps
-        // instead, its window pinned at 0.
-        eb.clamp_scroll((avail - 2.0).max(0.0));
-        let from = eb.scroll_start.min(display.len());
+        // The text region holds the display from the window's start; a multi-line box's window
+        // starts at 0.
+        let from = if eb.multi_line {
+            0
+        } else {
+            eb.scroll_start.min(display.len())
+        };
         let origin = eb.advances[from];
         let cursor_d = eb.text_to_display(eb.cursor).min(display.len());
         let (a, b) = (eb.sel_start.min(eb.sel_end), eb.sel_start.max(eb.sel_end));
@@ -111,7 +109,6 @@ impl UiScript {
         };
         Some(types::EditBoxTextUi {
             target: crate::order::ZTarget::Region(rh),
-            display_from: from,
             multi_line: eb.multi_line,
             caret_x,
             caret_row,
@@ -122,8 +119,8 @@ impl UiScript {
         })
     }
 
-    /// Ctrl/Cmd+C: the focused EditBox's selection for the OS clipboard; a password box yields its
-    /// mask run, never the text, where the client copies the empty string (`0x882748`).
+    /// Ctrl/Cmd+C: the focused EditBox's selection for the OS clipboard; a password box yields the
+    /// empty string, as the client's copy does (`0x77e1f8`, `0x882748`).
     pub fn editbox_copy(&mut self) -> Option<String> {
         super::copy_selection(self.lua())
     }
@@ -165,6 +162,9 @@ fn stale_advances(
     let font = d.and_then(|d| d.font_path.clone());
     let height = d.and_then(|d| d.font_height);
     let outline = d.map(|d| d.outline).unwrap_or_default();
+    // A multi-line box steps its rows by the font height plus the gap (`0x77d133`-`0x77d161`).
+    let spacing = d.map_or(0.0, super::super::RegionData::line_gap);
+    let shadow_x = d.map_or(0.0, |d| d.shadow_x());
     // The host measures at the drawn raster size, so the advances land on the drawn glyphs.
     let scale = model
         .arena
@@ -187,6 +187,8 @@ fn stale_advances(
     font.hash(&mut hasher);
     height.map(f32::to_bits).hash(&mut hasher);
     (outline as u8).hash(&mut hasher);
+    spacing.to_bits().hash(&mut hasher);
+    shadow_x.to_bits().hash(&mut hasher);
     wrap_width.map(f32::to_bits).hash(&mut hasher);
     scale.to_bits().hash(&mut hasher);
     let key = hasher.finish();
@@ -207,6 +209,8 @@ fn stale_advances(
         font,
         height,
         outline,
+        spacing,
+        shadow_x,
         scale,
         text: display,
         wrap_width,

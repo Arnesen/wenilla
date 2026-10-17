@@ -1,11 +1,13 @@
 //! Frame methods: visibility, hierarchy, strata, level, scale, alpha, backdrop and input flags.
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, MultiValue, Table, Value};
+
+use crate::script::binding_abi::bool_or_default;
 
 use crate::script::region_map::{set_shared, Side};
 
 use crate::order::Strata;
-use crate::script::{event, Backdrop, Insets, Model};
+use crate::script::{visibility, Backdrop, Insets, Model};
 use crate::widget::FrameKind;
 
 use super::{decode_id, draw_layer_from_str, frame_handle_of, frame_wrapper, strata_from_str};
@@ -248,8 +250,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
     // `SetParent` (`0x7a1550`): a frame, a name (`0x76c760`) or an explicit nil; an absent argument
     // raises like an unknown name (`0x6f3400` gives -1), and so does a cycle (`0x87cb14`). As in
-    // the reference, hide fires before show, between `reparent_begin` and `reparent_finish`,
-    // since `fire_visibility_changes` reads each frame's live state for the direction.
+    // the reference, the hide transition runs between `reparent_begin` and `reparent_finish`, and
+    // the show transition after.
     set_shared(
         lua,
         m,
@@ -330,24 +332,28 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     )));
                 }
             }
-            let hidden = {
+            let was_visible = {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 model.arena.reparent_begin(h, new_parent)
             };
             // None: the same parent, a total no-op (`0x76ab20`), not even a layout touch.
-            let Some(hidden) = hidden else { return Ok(()) };
-            let was_visible = !hidden.is_empty();
-            event::fire_visibility_changes(lua, hidden);
-            let shown = {
+            let Some(was_visible) = was_visible else {
+                return Ok(());
+            };
+            if was_visible {
+                visibility::hide(lua, h);
+            }
+            {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                let shown = model.arena.reparent_finish(h, new_parent, was_visible);
+                model.arena.reparent_finish(h, new_parent);
                 // A reparent moves the subtree's effective scale, a layout input and part of every
                 // descendant FontString's measure key.
-                model.touch_layout_reparent(h);
+                model.touch_layout_subtree(h);
                 model.touch_measure_all();
-                shown
-            };
-            event::fire_visibility_changes(lua, shown);
+            }
+            if was_visible {
+                visibility::show(lua, h);
+            }
             Ok(())
         },
     )?;
@@ -414,14 +420,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetScale",
         lua.create_function(|lua, (this, scale): (Table, f32)| {
             let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            let changed = model.arena.frame(h).is_some_and(|f| f.scale != scale);
-            model.arena.set_scale(h, scale);
-            if changed {
-                model.touch_layout();
-                // The owner's effective scale is in every descendant FontString's measure key.
-                model.touch_measure_all();
-            }
+            lua.app_data_mut::<Model>()
+                .expect("model")
+                .set_frame_scale(h, scale);
             Ok(())
         })?,
     )?;
@@ -454,8 +455,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
     // `SetBackdrop(table|nil)` (`0x7776e0` → `0x76a5d0`) installs or removes the tiled background
-    // and 8-piece border, both white until tinted; the two colour setters tint the background and
-    // the border respectively (`0x77f410`/`0x77f440`).
+    // and 8-piece border, nine Texture regions on the frame (`script::backdrop::install`), both
+    // white until tinted; the two colour setters tint the background and the border respectively
+    // (`0x77f410`/`0x77f440`).
     m.set(
         "SetBackdrop",
         lua.create_function(|lua, (this, arg): (Table, Value)| {
@@ -471,14 +473,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 }
             };
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            match bd {
-                Some(b) => {
-                    model.backdrops.insert(h, b);
-                }
-                None => {
-                    model.backdrops.remove(&h);
-                }
-            }
+            crate::script::backdrop::install(&mut model, h, bd);
             Ok(())
         })?,
     )?;
@@ -494,7 +489,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // re-enters and would panic on the app-data borrow.
             let bd = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                model.backdrops.get(&h).cloned()
+                model.backdrops.get(&h).map(|i| i.spec.clone())
             };
             let Some(bd) = bd else {
                 return Ok(mlua::MultiValue::new());
@@ -536,9 +531,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let color = backdrop_color(lua, args);
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            if let Some(bd) = model.backdrops.get_mut(&h) {
-                bd.bg_color = color;
-            }
+            crate::script::backdrop::set_color(&mut model, h, false, color);
             Ok(())
         })?,
     )?;
@@ -548,9 +541,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let color = backdrop_color(lua, args);
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            if let Some(bd) = model.backdrops.get_mut(&h) {
-                bd.border_color = color;
-            }
+            crate::script::backdrop::set_color(&mut model, h, true, color);
             Ok(())
         })?,
     )?;
@@ -559,7 +550,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            match model.backdrops.get(&h) {
+            match model.backdrops.get(&h).map(|i| &i.spec) {
                 Some(bd) => Ok((
                     bd.bg_color[0],
                     bd.bg_color[1],
@@ -575,7 +566,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            match model.backdrops.get(&h) {
+            match model.backdrops.get(&h).map(|i| &i.spec) {
                 Some(bd) => Ok((
                     bd.border_color[0],
                     bd.border_color[1],
@@ -589,12 +580,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // Mouse interaction: `EnableMouse` gates hit-testing.
     m.set(
         "EnableMouse",
-        lua.create_function(|lua, (this, enable): (Table, bool)| {
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            let enable = bool_or_default(args.front(), true); // `0x7770fe`
             let h = frame_handle_of(lua, &this)?;
-            lua.app_data_mut::<Model>()
-                .expect("model")
-                .arena
-                .set_mouse_enabled(h, enable);
+            visibility::set_mouse_enabled(lua, h, enable);
             Ok(())
         })?,
     )?;
@@ -612,7 +601,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // (`script::keyboard`), separate from having a handler (`0x76af00`).
     m.set(
         "EnableKeyboard",
-        lua.create_function(|lua, (this, enable): (Table, bool)| {
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            let enable = bool_or_default(args.front(), true); // `0x776f4e`
             let h = frame_handle_of(lua, &this)?;
             lua.app_data_mut::<Model>()
                 .expect("model")
@@ -661,7 +651,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // in the reference, and the one the wheel hit test gates on.
     m.set(
         "EnableMouseWheel",
-        lua.create_function(|lua, (this, enable): (Table, bool)| {
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            let enable = bool_or_default(args.front(), true); // `0x77727e`
             let h = frame_handle_of(lua, &this)?;
             lua.app_data_mut::<Model>()
                 .expect("model")
@@ -680,18 +671,18 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             ))
         })?,
     )?;
-    // Clamp-to-screen (`0x776c00`/`0x776cb0`, geometry flags bit 4): the layout resolve keeps the
+    // Clamp-to-screen (`0x776c00`/`0x776cb0`, geometry flags `0x10`): the layout resolve keeps the
     // frame's rect inside the window, size preserved.
     m.set(
         "SetClampedToScreen",
-        lua.create_function(|lua, (this, clamp): (Table, bool)| {
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            let clamp = bool_or_default(args.front(), true); // `0x776c8e`
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let changed = model.arena.is_clamped_to_screen(h) != clamp;
             model.arena.set_clamped_to_screen(h, clamp);
-            if changed {
-                model.touch_layout();
-            }
+            // `0x768cc0` invalidates whether or not the flag moved.
+            model.invalidate_frame(h, changed);
             Ok(())
         })?,
     )?;
@@ -741,10 +732,9 @@ fn backdrop_from_table(t: &Table) -> mlua::Result<Backdrop> {
     if let Ok(Value::String(s)) = t.get::<Value>("edgeFile") {
         bd.edge_file = Some(s.to_str()?.to_string());
     }
-    bd.tile = !matches!(
-        t.get::<Value>("tile").unwrap_or(Value::Nil),
-        Value::Nil | Value::Boolean(false)
-    );
+    // `GetBoolOrDefault` (`0x7778a3`) with default 0 on the `tile` key's value, so `tile = "0"`
+    // and `tile = 0` are off and `tile = "yes"` is on.
+    bd.tile = bool_or_default(Some(&t.get::<Value>("tile").unwrap_or(Value::Nil)), false);
     if let Ok(Value::Number(n)) = t.get::<Value>("tileSize") {
         bd.tile_size = n as f32;
     } else if let Ok(Value::Integer(n)) = t.get::<Value>("tileSize") {
@@ -789,11 +779,7 @@ fn strata_name(s: Strata) -> &'static str {
 
 fn set_shown(lua: &Lua, this: &Table, shown: bool) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-    let changed = {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
-        model.arena.set_shown(h, shown)
-    };
-    event::fire_visibility_changes(lua, changed);
+    visibility::set_shown(lua, h, shown);
     Ok(())
 }
 

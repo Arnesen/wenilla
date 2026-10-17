@@ -29,6 +29,7 @@ use crate::names::NameCache;
 use crate::net::{ChatKind, ClientCommand, Guid, NetCommands, NetEntity, ObjectStore, SelfPlayer};
 use crate::player::Player;
 use crate::portrait::{BoothPanes, PortraitImages, PortraitSource};
+use crate::query_cache::Ask;
 use crate::ui_merchant::MerchantOpen;
 
 /// Brog Hamfist `<General Supplies>`: `creature_template.entry = 151`, `npc_flags = 4`.
@@ -194,7 +195,15 @@ fn vendor_swap_probe(
             };
             let (brog, dobbins) = (find(BROG_ENTRY), find(DOBBINS_ENTRY));
             // Both names must be cached before the legs read them back out of the VM.
-            let named = |g: Option<u64>| g.is_some_and(|g| names.resolve(g, &net).is_some());
+            let named = |g: Option<u64>| {
+                g.is_some_and(|g| {
+                    let store = units
+                        .iter()
+                        .find(|(guid, ..)| guid.0 == g)
+                        .map(|(_, _, s, _)| s);
+                    names.resolve_unit(g, store, Ask::New(&net)).is_some()
+                })
+            };
             let (brog_named, dobbins_named) = (named(brog), named(dobbins));
             if brog_named && dobbins_named {
                 probe.brog = brog;
@@ -221,7 +230,10 @@ fn vendor_swap_probe(
         }
         Phase::Open { since } => {
             let brog = probe.brog.expect("set at Settle");
-            let expect = names.peek(brog).unwrap_or("").to_string();
+            let expect = names
+                .resolve_unit(brog, None, Ask::Read)
+                .unwrap_or("")
+                .to_string();
             match (merchant.vendor == Some(brog), first_show(&script)) {
                 (true, Some((npc, title))) => {
                     if npc == expect && title == expect {
@@ -279,7 +291,10 @@ fn vendor_swap_probe(
         }
         Phase::Swap { since } => {
             let dobbins = probe.dobbins.expect("set at Settle");
-            let expect = names.peek(dobbins).unwrap_or("").to_string();
+            let expect = names
+                .resolve_unit(dobbins, None, Ask::Read)
+                .unwrap_or("")
+                .to_string();
             match (merchant.vendor == Some(dobbins), first_show(&script)) {
                 (true, Some((npc, title))) => {
                     if npc == expect && title == expect {
@@ -314,7 +329,10 @@ fn vendor_swap_probe(
                 return;
             }
             let dobbins = probe.dobbins.expect("set at Settle");
-            let expect = names.peek(dobbins).unwrap_or("").to_string();
+            let expect = names
+                .resolve_unit(dobbins, None, Ask::Read)
+                .unwrap_or("")
+                .to_string();
             let title: String = script
                 .eval("return tostring(MerchantNameText:GetText())")
                 .unwrap_or_default();

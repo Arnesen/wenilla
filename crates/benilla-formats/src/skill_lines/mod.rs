@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
-use crate::dbc::{parse, str_at, u32_at};
+use crate::dbc::{loc_str, parse, u32_at};
 use crate::Chain;
 
 const SKILL_LINE: &str = "DBFilesClient\\SkillLine.dbc";
@@ -26,8 +26,8 @@ const SKILL_LINE_ABILITY: &str = "DBFilesClient\\SkillLineAbility.dbc";
 const SKILL_RACE_CLASS_INFO: &str = "DBFilesClient\\SkillRaceClassInfo.dbc";
 
 const SKILL_LINE_FIELDS: usize = 22;
-const COL_SL_NAME_ENUS: usize = 3;
-const COL_SL_DESC_ENUS: usize = 12;
+const COL_SL_NAME: usize = 3;
+const COL_SL_DESC: usize = 12;
 const COL_SL_SPELL_ICON: usize = 21;
 
 const SKILL_LINE_ABILITY_FIELDS: usize = 15;
@@ -43,7 +43,7 @@ const MAX_RANK_CHAIN: usize = 16;
 
 const SKILL_LINE_CATEGORY: &str = "DBFilesClient\\SkillLineCategory.dbc";
 const SKILL_LINE_CATEGORY_FIELDS: usize = 11;
-const COL_SLC_NAME_ENUS: usize = 1;
+const COL_SLC_NAME: usize = 1;
 const COL_SLC_ORDER: usize = 10;
 
 const SKILL_RACE_CLASS_INFO_FIELDS: usize = 8;
@@ -52,6 +52,7 @@ const COL_SRCI_RACE_MASK: usize = 2;
 const COL_SRCI_CLASS_MASK: usize = 3;
 const COL_SRCI_FLAGS: usize = 4;
 const COL_SRCI_MIN_LEVEL: usize = 5;
+const COL_SRCI_TIER_ID: usize = 6;
 const COL_SRCI_COST_INDEX: usize = 7;
 
 /// Flag `0x80` (cmangos `SKILL_FLAG_DISPLAY_SORTED`), which the tab classifier reads as the low
@@ -84,7 +85,8 @@ pub struct SkillLineInfo {
     pub category_id: u32,
     /// The tab icon's extensionless path (`Interface\Icons\…`), from `spellIcon`, column 21.
     pub icon: Option<String>,
-    /// enUS `description_lang`, column 12: `GetSkillLineInfo`'s 13th return.
+    /// `description_lang`, the block at column 12 read at the locale: `GetSkillLineInfo`'s 13th
+    /// return.
     pub description: String,
 }
 
@@ -104,6 +106,9 @@ pub struct SkillRaceClass {
     pub flags: u32,
     /// `reqLevel`, column 5: the level an untrained `0x4` line starts showing at.
     pub min_level: u32,
+    /// `skillTierID`, column 6: the `SkillTiers.dbc` row `BuySkillTier` prices a step by
+    /// (`0x6de1c0` reads it at `+0x18`).
+    pub tier_id: u32,
     /// `skillCostID`, column 7: `GetSkillLineInfo`'s 12th return is this plus one (`0x4d3a06`).
     pub cost_index: u32,
 }
@@ -161,7 +166,7 @@ pub struct SlaInfo {
 pub struct SkillLineCatalog {
     lines: HashMap<u32, SkillLineInfo>,
     abilities: HashMap<u32, SlaInfo>,
-    /// `SkillLineCategory.dbc`: id to (enUS name, displayOrder).
+    /// `SkillLineCategory.dbc`: id to (name, displayOrder).
     categories: HashMap<u32, (String, u32)>,
     /// Skill line id to its `SkillRaceClassInfo` rows; empty if the DBC failed to load.
     race_class: HashMap<u32, Vec<SrciRow>>,
@@ -193,6 +198,23 @@ impl SkillLineCatalog {
             race_class: HashMap::new(),
             rank_prev: HashMap::new(),
         }
+    }
+
+    /// This catalog with `SkillLine.dbc` display rows for `(id, name)` pairs, for tests and
+    /// fixtures.
+    pub fn with_line_names<'a>(mut self, lines: impl IntoIterator<Item = (u32, &'a str)>) -> Self {
+        for (id, name) in lines {
+            self.lines.insert(
+                id,
+                SkillLineInfo {
+                    name: name.to_string(),
+                    category_id: 0,
+                    icon: None,
+                    description: String::new(),
+                },
+            );
+        }
+        self
     }
 
     /// The skill line a spell belongs to, if `SkillLineAbility.dbc` names one.
@@ -364,9 +386,9 @@ impl SkillLineCatalog {
 fn skill_line_schema() -> Schema {
     let mut s = Schema::new("SkillLine");
     for i in 0..SKILL_LINE_FIELDS {
-        if i == COL_SL_NAME_ENUS {
+        if i == COL_SL_NAME {
             s.add_field(SchemaField::new("NameEnUs", FieldType::String));
-        } else if i == COL_SL_DESC_ENUS {
+        } else if i == COL_SL_DESC {
             s.add_field(SchemaField::new("DescEnUs", FieldType::String));
         } else {
             s.add_field(SchemaField::new(format!("F{i}"), FieldType::UInt32));
@@ -386,7 +408,7 @@ fn skill_line_ability_schema() -> Schema {
 fn skill_line_category_schema() -> Schema {
     let mut s = Schema::new("SkillLineCategory");
     for i in 0..SKILL_LINE_CATEGORY_FIELDS {
-        let ty = if i == COL_SLC_NAME_ENUS {
+        let ty = if i == COL_SLC_NAME {
             FieldType::String
         } else {
             FieldType::UInt32
@@ -399,6 +421,7 @@ fn skill_line_category_schema() -> Schema {
 /// `SkillLineCategory.dbc`; an unreadable file gives an empty map and the pane one flat group.
 fn load_categories(chain: &mut Chain) -> HashMap<u32, (String, u32)> {
     let mut map = HashMap::new();
+    let locale = chain.locale();
     let Ok(bytes) = chain.read_file(SKILL_LINE_CATEGORY) else {
         return map;
     };
@@ -411,7 +434,7 @@ fn load_categories(chain: &mut Chain) -> HashMap<u32, (String, u32)> {
     };
     for r in set.records() {
         let Some(id) = u32_at(r, 0) else { continue };
-        if let Some(name) = str_at(&set, r, COL_SLC_NAME_ENUS) {
+        if let Some(name) = loc_str(&set, r, COL_SLC_NAME, locale) {
             map.insert(id, (name, u32_at(r, COL_SLC_ORDER).unwrap_or(0)));
         }
     }
@@ -451,6 +474,7 @@ fn load_race_class_info(chain: &mut Chain) -> HashMap<u32, Vec<SrciRow>> {
             row: SkillRaceClass {
                 flags: u32_at(r, COL_SRCI_FLAGS).unwrap_or(0),
                 min_level: u32_at(r, COL_SRCI_MIN_LEVEL).unwrap_or(0),
+                tier_id: u32_at(r, COL_SRCI_TIER_ID).unwrap_or(0),
                 cost_index: u32_at(r, COL_SRCI_COST_INDEX).unwrap_or(0),
             },
         });
@@ -466,15 +490,16 @@ pub fn load_skill_line_catalog(chain: &mut Chain) -> Result<SkillLineCatalog> {
         .read_file(SKILL_LINE)
         .context("reading SkillLine.dbc")?;
     let sl_set = parse(&sl_bytes, skill_line_schema(), "SkillLine.dbc")?;
+    let locale = chain.locale();
     let mut lines: HashMap<u32, SkillLineInfo> = HashMap::new();
     for r in sl_set.records() {
         let Some(id) = u32_at(r, 0) else { continue };
-        let name = str_at(&sl_set, r, COL_SL_NAME_ENUS).unwrap_or_default();
+        let name = loc_str(&sl_set, r, COL_SL_NAME, locale).unwrap_or_default();
         let icon = u32_at(r, COL_SL_SPELL_ICON)
             .filter(|&i| i != 0)
             .and_then(|i| icons.get(&i).cloned());
         let category_id = u32_at(r, 1).unwrap_or(0);
-        let description = str_at(&sl_set, r, COL_SL_DESC_ENUS).unwrap_or_default();
+        let description = loc_str(&sl_set, r, COL_SL_DESC, locale).unwrap_or_default();
         lines.insert(
             id,
             SkillLineInfo {

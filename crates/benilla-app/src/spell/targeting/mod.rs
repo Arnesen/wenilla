@@ -15,6 +15,10 @@
 //! - [`item`]: the bag click (`PickupContainerItem 0x4f9b30`) and the paper-doll click
 //!   (`0x4c7300`), both `IsTargeting`, `TargetingWantsItem 0x6e6330`, then `0x495d60`, whose
 //!   confirm popups park the clicked guid (`0xb4e3c0`) with the word still standing.
+//! - [`CursorPicks`]: the selection writers' own seam. `SelectTarget 0x493540` binds the unit it was
+//!   given to the pending cast and returns, with the cursor up (`0x4935ca`-`0x4935d5`), so a script's
+//!   `TargetUnit`, `TargetByName`, a TAB and the rest never select then ([`crate::target`]'s front
+//!   parks the unit here), and the cursor's owner binds it through [`bind_target_unit`].
 //!
 //! Every seam commits through [`crate::spell::CastLadder::commit_targeted`] (`SendCast 0x6e54f0`).
 //! Only the unit and corpse arms have a range gate ([`merge`]): the terrain and GameObject clicks
@@ -80,6 +84,16 @@ pub(crate) struct BindChecks<'w, 's> {
 }
 
 impl BindChecks<'_, '_> {
+    /// `SelectTarget`'s first return (`0x49359c`): the active player is charmed, and the click's
+    /// bind (`0x4935d5`) is never reached.
+    fn player_is_charmed(&self) -> bool {
+        self.self_q
+            .iter()
+            .next()
+            .and_then(|(_, store)| store)
+            .is_some_and(|store| store.0.unit_charmed_by().is_some())
+    }
+
     fn is_self(&self, entity: Entity) -> bool {
         self.self_q
             .iter()
@@ -105,6 +119,7 @@ impl BindChecks<'_, '_> {
             types: crate::creature_type::CreatureTypeSources {
                 names: self.names.as_deref(),
                 forms: self.spells.as_deref().map(|s| &s.forms),
+                ..Default::default()
             },
             group: super::group_relation::GroupInputs {
                 self_guid: me
@@ -214,10 +229,33 @@ impl TargetingWants {
 /// assist, the explicit gate and the ally corpse, never enemy (`0x80`) or enemy corpse (`0x200`).
 const SELF_PICK_BITS: u16 = 0x850e;
 
+/// The units `SelectTarget 0x493540` found the cursor up for (`0x4935ca`) and so hands to
+/// `BindTarget 0x6e5b40` in place of selecting (`0x4935d5`): parked by the selection writers, which
+/// own no cast ladder, and bound in order by the script calls' pass ([`ScriptCursor::bind_parked`]):
+/// after the call that parked them, and at the head of the next pass for a writer outside it (a
+/// loot window's select, the chat layer's `/target`), which waits for it.
+#[derive(Resource, Default)]
+pub(crate) struct CursorPicks(Vec<(Entity, u64)>);
+
+impl CursorPicks {
+    /// Park a unit for the bind.
+    pub(crate) fn park(&mut self, entity: Entity, guid: u64) {
+        self.0.push((entity, guid));
+    }
+
+    /// Bind every parked unit, front to back: a unit the cursor no longer wants (an earlier one
+    /// emptied the word) binds nothing, as [`bind_target_unit`] finds no pending cast.
+    fn bind_all(&mut self, ladder: &mut crate::spell::CastLadder, checks: &BindChecks) {
+        for (entity, guid) in std::mem::take(&mut self.0) {
+            bind_target_unit(ladder, checks, entity, guid);
+        }
+    }
+}
+
 /// The targeting mode, `Some` while the flag_word is nonzero. Entered by the cast-send path
 /// ([`super::cast_target::CastWireTarget::Targeting`]), cleared by a commit or a cancel.
 #[derive(Resource, Default)]
-pub(crate) struct SpellTargeting(Option<Targeting>);
+pub(crate) struct SpellTargeting(Option<Targeting>, u32);
 
 struct Targeting {
     spell_id: u32,
@@ -317,6 +355,20 @@ impl SpellTargeting {
     pub(crate) fn clear(&mut self) {
         self.0 = None;
     }
+
+    /// A cancel, not a commit: `StopTargeting 0x6e4900`, or `TryCast`'s supersede (`0x6e4d62`),
+    /// both the cast abort with its disarm flag (`0x6e4940(cl=1)`), counted for the tradeskill
+    /// repeat's disarm ([`Self::aborts`]). Nothing up, nothing aborts (`0x6e4907`).
+    pub(crate) fn cancel(&mut self) {
+        if self.0.take().is_some() {
+            self.1 = self.1.wrapping_add(1);
+        }
+    }
+
+    /// The cancels so far, wrapping: only a change is read.
+    pub(crate) fn aborts(&self) -> u32 {
+        self.1
+    }
 }
 
 /// Right-click cancels on the down edge (WorldFrame `OnMouseDown 0x483c40` → `0x492c20` →
@@ -338,7 +390,7 @@ pub(crate) fn cancel_targeting_on_right_press(
         return;
     }
     debug!("ui_action: targeting cancelled (right-click)");
-    targeting.clear();
+    targeting.cancel();
 }
 
 /// [`SpellTargeting::picks_self`] as the frame began, which the world pick reads
@@ -423,10 +475,12 @@ fn bind_target_unit(
 
 /// `BindTarget`'s merge (`6e602c`–`6e60d7`): a bind whose mask is in `0x8202`, a unit or a corpse,
 /// runs the range test `0x6e47b0` (`6e6063`). Out of range raises "Out of range." or "Target too
-/// close" and binds nothing; otherwise the emptied word commits (`SendCast 0x6e54f0`). The
-/// reference's range failure also aborts the cast (`6e6089`), which sends CMSG_CANCEL_CAST and
-/// strands the cursor (`6e5b93`) until a cancel: a bug, not copied; targeting stays armed and
-/// working.
+/// close" and binds nothing; otherwise the emptied word commits (`SendCast 0x6e54f0`).
+///
+/// Deviation: a range failure leaves targeting armed and working. The reference's report
+/// (`0x6e6089`) also cancels the cast (`0x6e2218` → `0x6e4940`), clearing its caster, and then
+/// restores the pre-click word, so every later click fails the caster test (`0x6e5b93`) and the
+/// cursor is stranded until a cancel; that is a defect, and staying armed is what a player can use.
 fn merge(
     ladder: &mut crate::spell::CastLadder,
     spell_id: u32,
@@ -450,6 +504,7 @@ pub(crate) struct ScriptCursor<'w, 's> {
     selection: Res<'w, crate::target::Selection>,
     checks: BindChecks<'w, 's>,
     ladder: crate::spell::CastLadder<'w, 's>,
+    picks: ResMut<'w, CursorPicks>,
 }
 
 impl ScriptCursor<'_, '_> {
@@ -474,11 +529,17 @@ impl ScriptCursor<'_, '_> {
         }
     }
 
+    /// Bind the units the call just applied handed the cursor instead of selecting
+    /// ([`CursorPicks`]), before the next call reads the cursor and the selection.
+    pub(crate) fn bind_parked(&mut self) {
+        self.picks.bind_all(&mut self.ladder, &self.checks);
+    }
+
     /// The ESC chain's `SpellStopTargeting()` (`0x6e6e30`): `StopTargeting 0x6e4900`, word
     /// cleared, no packet.
     pub(crate) fn stop_targeting(&mut self) {
         debug!("ui_action: targeting cancelled (ESC chain)");
-        self.ladder.ground.clear();
+        self.ladder.ground.cancel();
     }
 }
 
@@ -507,7 +568,7 @@ mod tests {
         world.insert_resource(NetCommands(tx));
         world.init_resource::<crate::items::Items>();
         world.init_resource::<crate::net::GuidIndex>();
-        world.insert_resource(crate::net::Reputations(Vec::new()));
+        world.insert_resource(crate::net::Reputations::default());
         world.init_resource::<crate::spell::PendingCast>();
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
         world.init_resource::<crate::spell::Cooldowns>();
@@ -516,6 +577,7 @@ mod tests {
         world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
         world.init_resource::<SpellTargeting>();
+        world.init_resource::<CursorPicks>();
         world.init_resource::<crate::spell::HeldForPick>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<crate::ui_party::GroupState>();
@@ -750,6 +812,47 @@ mod tests {
         }
     }
 
+    /// `SpellTargetUnit("npc")` binds the interaction NPC (`0x6e6de1` into `0x515970`, whose `npc`
+    /// compare reads `[0xb4e2d0]`), not the selection; with no window open it names no unit and
+    /// the cast ends with "Out of range.".
+    #[test]
+    fn spell_target_unit_binds_the_interaction_npc() {
+        use crate::ui_session::InteractNpc;
+
+        let (mut world, rx, ally) = unit_world(10.0);
+        world
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(ALLY, ally);
+        world.insert_resource(InteractNpc(Some(ally), Some(ALLY)));
+        arm(&mut world, HEAL, 0x0002);
+        spell_target_unit(&mut world, "npc");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CastSpell {
+                spell_id: HEAL,
+                target: Some(ALLY),
+            })
+        ));
+        assert!(errors(&mut world).is_empty());
+        assert!(!world.resource::<SpellTargeting>().active());
+
+        let (mut world, rx, ally) = unit_world(10.0);
+        world
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(ALLY, ally);
+        world.init_resource::<InteractNpc>();
+        arm(&mut world, HEAL, 0x0002);
+        spell_target_unit(&mut world, "npc");
+        assert!(rx.try_recv().is_err(), "no window, no send");
+        assert_eq!(
+            errors(&mut world),
+            vec![crate::ui_action::CastFail::local(HEAL, 0x59)]
+        );
+        assert!(!world.resource::<SpellTargeting>().active());
+    }
+
     /// `SpellCanTargetUnit` resolves a chain as `SpellTargetUnit` does and answers the verdict of
     /// the unit it ends on (`0x6e6d3a` into `0x515970`, then `0x6e6460`): the ally we and our pet
     /// target, in range of the spell or not, and nobody past a unit with no target.
@@ -800,7 +903,7 @@ mod tests {
                 .expect("the feed runs");
             world
                 .non_send_resource::<UiScript>()
-                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == true"))
+                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                 .expect("a boolean")
         };
         for token in ["pettarget", "playertarget", "PETTARGET", "target"] {
@@ -988,7 +1091,7 @@ mod tests {
                 .expect("the feed runs");
             let hover = world
                 .non_send_resource::<UiScript>()
-                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == true"))
+                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                 .expect("a boolean");
             assert_eq!(hover, binds, "{label}: the hover verdict");
 
@@ -1023,10 +1126,11 @@ mod tests {
                     target_owner_store: None,
                     self_store: Some(&store),
                     factions: None,
-                    reputations: &crate::net::Reputations(Vec::new()),
+                    reputations: &crate::net::Reputations::default(),
                     types: crate::creature_type::CreatureTypeSources {
                         names: Some(&names),
                         forms: None,
+                        ..Default::default()
                     },
                     group: Default::default(),
                 },
@@ -1226,7 +1330,7 @@ mod tests {
                     .expect("the feed runs");
                 let hover = world
                     .non_send_resource::<UiScript>()
-                    .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == true"))
+                    .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                     .expect("a boolean");
                 assert_eq!(hover, binds, "{label}: the hover verdict");
 
@@ -1279,7 +1383,7 @@ mod tests {
                 .expect("the feed runs");
             world
                 .non_send_resource::<UiScript>()
-                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == true"))
+                .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                 .expect("a boolean")
         };
         assert!(can(10.0, HEAL, "target"), "in range");

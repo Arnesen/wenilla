@@ -11,10 +11,11 @@ use std::ffi::c_void;
 use mlua::{LightUserData, Lua, ObjectLike, Table, Value};
 
 use super::binding_abi::optional_string;
+use super::glue::VmKind;
 use super::{Model, REG_FRAME_META, REG_FRAME_METHODS, REG_SCRIPTS, REG_WRAPPERS};
 use crate::layout::Point;
 use crate::order::{DrawLayer, Strata};
-use crate::widget::{FrameHandle, FrameKind};
+use crate::widget::{FrameHandle, FrameKind, KindState};
 
 // The frame method clusters, split out for size.
 pub(crate) mod anchor_args;
@@ -22,10 +23,10 @@ mod events_regions;
 mod frame_state;
 mod layout_methods;
 pub(crate) use layout_methods::eff_scale;
+pub(in crate::script) use layout_methods::{settle_frame, settle_region};
 pub(crate) mod movable;
 pub(crate) mod toplevel;
-pub(crate) use layout_methods::{anchor_bits_eq, anchor_retarget_is_structural};
-pub(crate) use movable::{advance_move, advance_size, FrameMove, FrameSizing};
+pub(crate) use movable::{cancel_on_hide, pump_move_or_size, FrameMove};
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // id ↔ lightuserdata
@@ -248,10 +249,10 @@ pub(super) fn draw_layer_name(l: DrawLayer) -> &'static str {
     }
 }
 
-/// A widget tag or `CreateFrame` type → its [`FrameKind`] ([`enum_token`]). Public so the app asks
-/// this one mapping rather than keeping a copy.
+/// A widget tag or `CreateFrame` type → its [`FrameKind`] ([`enum_token`]), whichever registration
+/// makes it known. Public so the app asks this one mapping rather than keeping a copy.
 pub fn frame_kind_from_tag(s: &str) -> Option<FrameKind> {
-    frame_kind_from_str(s)
+    frame_type(s).map(|t| t.kind)
 }
 
 /// The type registry lookup `CreateFrame` and the XML loader share (`0x6ee280`, table
@@ -259,66 +260,100 @@ pub fn frame_kind_from_tag(s: &str) -> Option<FrameKind> {
 /// record is released once the first one is made (`0x6ee439`), so a second one misses. On a miss
 /// Lua raises and XML logs `Unknown frame type: %s` and skips the node.
 pub(crate) fn registered_frame_kind(lua: &Lua, kind: &str) -> Option<FrameKind> {
-    let frame_kind = frame_kind_from_str(kind)?;
-    let one_shot_spent = frame_kind == FrameKind::WorldFrame
-        && lua
-            .app_data_ref::<Model>()
-            .expect("model app_data")
-            .world_frame_made;
-    (!one_shot_spent).then_some(frame_kind)
+    let t = frame_type(kind)?;
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let registered = match t.factory {
+        Factory::Startup => true,
+        Factory::InGame => model.vm == VmKind::InGame,
+    };
+    let one_shot_spent = t.kind == FrameKind::WorldFrame && model.world_frame_made;
+    (registered && !one_shot_spent).then_some(t.kind)
 }
 
-fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
-    Some(match enum_token(s).as_str() {
-        "FRAME" => FrameKind::Frame,
+/// `ModelFFX`, the glue's `CSimpleModelFFX` (factory `0x46fa00`): a `CSimpleModel` (its ctor
+/// `0x46fa30` runs `0x76c8e0`, then swaps the vtable) answering as `Model` (`0x470030`) with
+/// `Model`'s methods and `LoadXML` (`0x76cac0`), which differs in its OnShow (`0x46fa60`) and its
+/// paint (`0x46fa90`, [`crate::widget::ModelState::ffx`]).
+pub(crate) fn is_model_ffx(kind: &str) -> bool {
+    enum_token(kind) == "MODELFFX"
+}
+
+/// When a frame type's factory is registered (`0x6ee880`) into the process-wide registry, which
+/// nothing clears before shutdown (`0x6ee800`, from `0x4036fc`).
+#[derive(Clone, Copy)]
+enum Factory {
+    /// Before any FrameScript state is built: the 13 base types (`0x6ef070`, from `0x402af3`), and
+    /// `ModelFFX`, which the glue manager's init registers (`0x46a4fe`) before its first build
+    /// (`0x46a505`), so the in-game state has it too.
+    Startup,
+    /// `UI_Init`'s eight (`0x495940`, from `0x48feb5`). They stay registered after a logout, so
+    /// only a glue state that never entered the world lacks them, which is the one benilla builds.
+    InGame,
+}
+
+/// A registered type: the [`FrameKind`] its factory builds, and its registration.
+struct FrameType {
+    kind: FrameKind,
+    factory: Factory,
+}
+
+fn frame_type(s: &str) -> Option<FrameType> {
+    use Factory::{InGame, Startup};
+    let (kind, factory) = match enum_token(s).as_str() {
+        "FRAME" => (FrameKind::Frame, Startup),
         // Registered at `0x495948`, the one row passing `1` as its third argument.
-        "WORLDFRAME" => FrameKind::WorldFrame,
+        "WORLDFRAME" => (FrameKind::WorldFrame, InGame),
         // A plain `CSimpleFrame`: factory `0x495ba0` allocates `0x314` like `<Frame>`'s `0x6eec10`,
         // the ctor `0x506950` adds no field, and its paint `0x506a90` does nothing, so
         // `GetObjectType()` is "Frame" and `IsObjectType("TaxiRouteFrame")` false (`0x484800` is
         // not overridden). The flight lines are the FrameXML's own rotated textures.
-        "TAXIROUTEFRAME" => FrameKind::Frame,
-        "BUTTON" => FrameKind::Button,
-        "CHECKBUTTON" => FrameKind::CheckButton,
+        "TAXIROUTEFRAME" => (FrameKind::Frame, InGame),
+        "BUTTON" => (FrameKind::Button, Startup),
+        "CHECKBUTTON" => (FrameKind::CheckButton, Startup),
         // Its own registered type (`0x4959a6`), not a Button: 1.12 has no Lua verb to take loot
         // slot N (`LootSlot` only continues a bind confirm), so a Button row could loot nothing.
-        "LOOTBUTTON" => FrameKind::LootButton,
-        "EDITBOX" => FrameKind::EditBox,
-        "STATUSBAR" => FrameKind::StatusBar,
-        "SLIDER" => FrameKind::Slider,
-        "SCROLLFRAME" => FrameKind::ScrollFrame,
-        "MODEL" => FrameKind::Model,
-        "PLAYERMODEL" => FrameKind::PlayerModel,
-        "DRESSUPMODEL" => FrameKind::DressUpModel,
-        "TABARDMODEL" => FrameKind::TabardModel,
-        "MESSAGEFRAME" => FrameKind::MessageFrame,
-        "SCROLLINGMESSAGEFRAME" => FrameKind::ScrollingMessageFrame,
-        "COLORSELECT" => FrameKind::ColorSelect,
-        "SIMPLEHTML" => FrameKind::SimpleHtml,
-        "MOVIEFRAME" => FrameKind::MovieFrame,
-        "GAMETOOLTIP" => FrameKind::GameTooltip,
-        "MINIMAP" => FrameKind::Minimap,
+        "LOOTBUTTON" => (FrameKind::LootButton, InGame),
+        "EDITBOX" => (FrameKind::EditBox, Startup),
+        "STATUSBAR" => (FrameKind::StatusBar, Startup),
+        "SLIDER" => (FrameKind::Slider, Startup),
+        "SCROLLFRAME" => (FrameKind::ScrollFrame, Startup),
+        "MODEL" => (FrameKind::Model, Startup),
+        "MODELFFX" => (FrameKind::Model, Startup),
+        "PLAYERMODEL" => (FrameKind::PlayerModel, InGame),
+        "DRESSUPMODEL" => (FrameKind::DressUpModel, InGame),
+        "TABARDMODEL" => (FrameKind::TabardModel, InGame),
+        "MESSAGEFRAME" => (FrameKind::MessageFrame, Startup),
+        "SCROLLINGMESSAGEFRAME" => (FrameKind::ScrollingMessageFrame, Startup),
+        "COLORSELECT" => (FrameKind::ColorSelect, Startup),
+        "SIMPLEHTML" => (FrameKind::SimpleHtml, Startup),
+        "MOVIEFRAME" => (FrameKind::MovieFrame, Startup),
+        "GAMETOOLTIP" => (FrameKind::GameTooltip, InGame),
+        "MINIMAP" => (FrameKind::Minimap, InGame),
         _ => return None,
-    })
+    };
+    Some(FrameType { kind, factory })
 }
 
-/// A Lua number-ish → f32 (nil/other → 0.0), for offset/color args.
-pub(super) fn as_f32(v: &Value) -> f32 {
-    match v {
-        Value::Number(n) => *n as f32,
-        Value::Integer(i) => *i as f32,
-        _ => 0.0,
-    }
+/// A colour or coordinate argument by the reference's bare `lua_tonumber` (`0x6f3620`): a number,
+/// or a string `luaO_str2d` (`0x6f5900`) reads as one, and 0.0 for anything else, with no type gate
+/// and no raise. [`super::binding_abi::coerced_number`] narrowed to the `f32` the widgets store.
+pub(super) fn tonumber_f32(lua: &Lua, v: &Value) -> f32 {
+    super::binding_abi::coerced_number(lua, Some(v.clone())) as f32
 }
 
-/// [`as_f32`] in `f64`, for `ColorSelect:SetColorRGB`, whose quantizer an `f32` detour could push
-/// across a rounding boundary.
-pub(super) fn as_f64(v: &Value) -> f64 {
-    match v {
-        Value::Number(n) => *n,
-        Value::Integer(i) => *i as f64,
-        _ => 0.0,
-    }
+/// A colour's alpha argument: `lua_isnumber`-gated (`0x781037`, `0x79f5a2`, ...), so a numeric
+/// string counts and anything else, a table or boolean included, stages 1.0 without raising.
+pub(super) fn alpha_f32(lua: &Lua, v: &Value) -> f32 {
+    lua.coerce_number(v.clone())
+        .ok()
+        .flatten()
+        .map_or(1.0, |n| n as f32)
+}
+
+/// [`tonumber_f32`] in `f64`, for `ColorSelect:SetColorRGB`, whose quantizer an `f32` detour could
+/// push across a rounding boundary.
+pub(super) fn tonumber_f64(lua: &Lua, v: &Value) -> f64 {
+    super::binding_abi::coerced_number(lua, Some(v.clone()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -351,20 +386,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     let create_frame = lua.create_function(create_frame)?;
     lua.globals().set("CreateFrame", create_frame)?;
+    Ok(())
+}
 
-    // `GetScreenWidth`/`GetScreenHeight`: the screen root's size in UI units.
+/// The frame globals only the in-game state registers (table `0x83de68`, `UI_Init`'s): the glue
+/// state's `GetScreenWidth`/`GetScreenHeight` are other bindings (`0x46dd30`/`0x46dd80`), and it
+/// has no modifier-key or fullscreen-scale verb.
+pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
+    // `GetScreenWidth`/`GetScreenHeight` (`0x48b480`/`0x48b4d0`): the screen root's size divided by
+    // `UIParent`'s scale (`GetUiScale`, `0x494590`), so they answer in `UIParent`'s units.
     lua.globals().set(
         "GetScreenWidth",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.screen.width())
+            Ok(model.screen.width() / super::ui_scale::ui_parent_scale(&model))
         })?,
     )?;
     lua.globals().set(
         "GetScreenHeight",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.screen.height())
+            Ok(model.screen.height() / super::ui_scale::ui_parent_scale(&model))
         })?,
     )?;
 
@@ -393,16 +435,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 fullscreen_scale(model.screen.width() / model.screen.height())
             };
             frame.call_method::<()>("SetScale", scale)
-        })?,
-    )?;
-
-    // `GetCursorPosition()`: the last cursor position the host fed, in screen UI units, y up, as
-    // the reference returns it; a caller in a scaled frame divides by its `GetEffectiveScale()`.
-    lua.globals().set(
-        "GetCursorPosition",
-        lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.cursor_pos)
         })?,
     )?;
 
@@ -475,6 +507,7 @@ fn kind_method_registries(kind: Option<FrameKind>) -> &'static [&'static str] {
         Some(FrameKind::SimpleHtml) => &[super::simplehtml::REG_SIMPLEHTML_METHODS],
         Some(FrameKind::Slider) => &[super::slider::REG_SLIDER_METHODS],
         Some(FrameKind::ColorSelect) => &[super::colorselect::REG_COLORSELECT_METHODS],
+        Some(FrameKind::MovieFrame) => &[super::movieframe::REG_MOVIEFRAME_METHODS],
         Some(FrameKind::Button) => &[super::button::REG_BUTTON_METHODS],
         // Its one method, then `Button`'s: `0x4c1be0` probes its map `0xb71b64`, then `0x782c90`.
         Some(FrameKind::LootButton) => &[
@@ -564,12 +597,13 @@ pub(super) fn create_frame(
     // leaves no partial widget and no global. The raise never returns and `pcall` catches it, as
     // the widget dispatcher (`0x704f10`) does for every handler.
     if let Some(t) = template.as_deref().filter(|t| !t.is_empty()) {
-        let known = {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let templates = model.framexml_templates.borrow();
-            // One name, verbatim, case-folded, as `framexml::expand` resolves it.
-            templates.contains_key(t) || templates.keys().any(|k| k.eq_ignore_ascii_case(t))
-        };
+        // One name, verbatim, case-folded, as `framexml::expand` resolves it.
+        let known = lua
+            .app_data_ref::<Model>()
+            .expect("model app_data")
+            .framexml_templates
+            .borrow()
+            .contains(t);
         if !known {
             return Err(mlua::Error::runtime(format!(
                 "CreateFrame(): Couldn't find inherited node \"{t}\""
@@ -592,6 +626,11 @@ pub(super) fn create_frame(
         if frame_kind == FrameKind::WorldFrame {
             model.world_frame_made = true;
         }
+        if is_model_ffx(&kind) {
+            if let Some(KindState::Model(m)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+                m.ffx = true;
+            }
+        }
         // A child enters its parent's stratum at the parent's level + 1; an explicit
         // `frameStrata` or `frameLevel` still overrides it afterwards.
         if let Some(p) = parent_handle {
@@ -602,6 +641,11 @@ pub(super) fn create_frame(
         }
         let id = model.frame_id(h);
         model.layout_inputs.entry(h).or_default();
+        // The builder's pre-load and post-load hooks (`0x6ee4d6`, `0x6ee4ea`): a frame born hidden
+        // is deferred, as a hidden parent leaves it. A template's load opens its own window.
+        model.layout_load_begin(h);
+        // No handler is bound yet, so the resolve this owes fires nothing.
+        let _ = model.layout_load_end(h);
         id
     };
 
@@ -609,13 +653,16 @@ pub(super) fn create_frame(
     // this call, so the handler can reach the frame by name.
     let wrapper = frame_wrapper(lua, id)?;
     if let Some(template) = template {
-        let messages = crate::loader::apply_template(lua, &wrapper, &kind, &template);
-        if !messages.is_empty() {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            for m in messages {
-                model.record_warning(m);
-            }
+        let report = crate::loader::apply_template(lua, &wrapper, &kind, &template);
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        for (log, heard) in report.raised() {
+            model.record_script_error(log.to_string(), heard.to_string());
         }
+        for w in report.warnings {
+            model.record_warning(w);
+        }
+    } else {
+        super::tooltip_post_load(lua, &wrapper);
     }
     Ok(wrapper)
 }

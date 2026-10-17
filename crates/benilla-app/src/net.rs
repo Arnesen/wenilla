@@ -7,7 +7,7 @@
 //! in one frame. Coordinates cross from WoW into Bevy space here (`wow_to_bevy`).
 
 use bevy::platform::time::Instant;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use benilla_protocol::{
@@ -23,13 +23,14 @@ use benilla_world::schedule::WorldStage;
 mod apply;
 pub(crate) mod handlers;
 pub(crate) mod io;
-mod motion;
+pub(crate) mod motion;
 mod objects;
 pub(crate) use objects::tear_down;
 mod session;
 mod world;
 
 pub(crate) use apply::apply_net_updates;
+pub(crate) use apply::enter_world_on_self_create;
 use apply::tag_self_player;
 pub(crate) use handlers::NetHandlerApp;
 
@@ -41,13 +42,9 @@ use motion::{
 // `pub(crate)`: `creature_anim` reads the shuffle latch it produces, and a test runs both.
 pub(crate) use motion::drive_display_facing;
 pub(crate) use motion::{
-    ground_derived, grounded_y, jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline,
-    SplineStopped, UnitMoveModes,
+    grounded_y, jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
+    UnitMoveModes,
 };
-// Only the ground-census probe reads this, so a build without the instruments leaves it unused.
-// Not a `cfg`: seam knowledge lives in three fixed places, and this file is not one of them.
-#[allow(unused_imports)]
-pub(crate) use motion::GroundClamped;
 
 /// The net subsystem: spawns the background IO threads and drives the per-frame event drain.
 pub(crate) struct NetPlugin {
@@ -106,6 +103,7 @@ impl Plugin for NetPlugin {
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
             .init_resource::<AddonInfoReply>()
+            .init_resource::<SessionBilling>()
             .init_resource::<PendingTransfer>()
             .init_resource::<NetStatus>()
             .init_resource::<DroppedOpcodes>()
@@ -121,6 +119,8 @@ impl Plugin for NetPlugin {
             .init_resource::<crate::world_state::WorldStates>()
             .add_message::<TeleportMessage>()
             .add_message::<FieldChanged>()
+            .add_message::<crate::item_watch::ItemNotice>()
+            .add_message::<crate::field_watch::FieldNotice>()
             .add_message::<SelfMoveMessage>()
             .add_message::<SpeedChangeMessage>()
             .add_message::<ClientControlMessage>()
@@ -134,9 +134,14 @@ impl Plugin for NetPlugin {
             .add_message::<WorldportMessage>()
             .add_message::<RealmListMessage>()
             .add_message::<CharListMessage>()
+            .add_message::<WorldAuthMessage>()
+            .add_message::<RosterFailedMessage>()
+            .add_message::<AddonInfoMessage>()
             .add_message::<CharActionResultMessage>()
+            .add_message::<CharRenameMessage>()
             .add_message::<CharacterLoginFailedMessage>()
             .add_message::<EnteredWorldMessage>()
+            .add_message::<WorldEnterCascadeMessage>()
             .add_message::<CinematicTriggeredMessage>()
             .add_message::<ServerSaidMessage>()
             .add_message::<LoggedOutMessage>()
@@ -149,6 +154,10 @@ impl Plugin for NetPlugin {
                 (
                     apply_net_updates,
                     tag_self_player,
+                    enter_world_on_self_create,
+                    // The create gives control back (`0x5deb56`), in the Net stage ahead of
+                    // `control`'s read of the flags.
+                    crate::player::regain_control_on_arrival.in_set(crate::player::ControlRestore),
                     sample_splines,
                     // Swim state from the water at the feet (the wire never carries it for
                     // creatures), before the clamp so a swimmer is exempt the same frame.
@@ -168,8 +177,14 @@ impl Plugin for NetPlugin {
                 // `apply_net_updates` and before `drive_display_facing`, so the `"npc"` token is
                 // current when a window's show handler reads it.
             )
-            // Not part of the movement chain above: one send on the world-enter message.
-            .add_systems(Update, send_query_time.in_set(WorldStage::Net))
+            // Not part of the movement chain above: the cascade's time query, after the self create
+            // has claimed the mover.
+            .add_systems(
+                Update,
+                send_query_time
+                    .in_set(WorldStage::Net)
+                    .after(enter_world_on_self_create),
+            )
             .add_systems(Update, population_pulse.in_set(WorldStage::Net));
     }
 }
@@ -177,8 +192,8 @@ impl Plugin for NetPlugin {
 /// The web build's write half.
 ///
 /// A page has no write thread — it has no threads at all — so what `io::writer_loop` owns natively
-/// lives here instead: the current [`WorldWriter`], the swap channel each new connection hands one
-/// over, and the command queue. [`web_writer_pump`] drains both once a frame through the same
+/// lives here instead: the current [`WorldWriter`], the swap channel each world entry hands one
+/// over on (and a logout takes it back on, [`io::WriterSwap`]), and the command queue. [`web_writer_pump`] drains both once a frame through the same
 /// `io::dispatch` the native thread calls, so the two targets send byte-identical packets.
 ///
 /// A `Resource` (not a non-`Send` one — Bevy 0.18 has none) because `WorldWriter` **is** `Send` on
@@ -188,7 +203,7 @@ impl Plugin for NetPlugin {
 #[derive(Resource)]
 pub(crate) struct WebWriter {
     writer: Option<benilla_protocol::WorldWriter>,
-    writer_rx: Receiver<benilla_protocol::WorldWriter>,
+    writer_rx: Receiver<io::WriterSwap>,
     cmd_rx: Receiver<ClientCommand>,
     /// `Time`'s elapsed seconds at the last keepalive — the tick the write thread gets from
     /// `crossbeam_channel::tick`, kept off the frame count so it holds at any frame rate.
@@ -198,18 +213,32 @@ pub(crate) struct WebWriter {
     warned: u32,
 }
 
-/// Adopt a freshly-connected writer, drain the frame's commands through it, and keep the 30 s
-/// keepalive going — the web's `writer_loop`, once per frame instead of once per `select!`.
+/// Apply the sequencer's writer swaps, drain the frame's commands through the writer, and keep the
+/// 30 s keepalive going — the web's `writer_loop`, once per frame instead of once per `select!`.
 #[cfg(target_arch = "wasm32")]
 fn web_writer_pump(mut web: ResMut<WebWriter>, time: Res<Time>, ping: Res<PingShared>) {
     let web = &mut *web;
-    while let Ok(w) = web.writer_rx.try_recv() {
-        web.writer = Some(w);
-        web.warned = 0;
-        web.last_ping = time.elapsed_secs_f64();
-        // A fresh connection restarts the keepalive from scratch, like the real client: sequence 1
-        // is the new socket's first ping, and a stale pong from the old one can no longer match.
-        *ping.0.lock().expect("ping clock") = io::PingClock::default();
+    while let Ok(swap) = web.writer_rx.try_recv() {
+        match swap {
+            io::WriterSwap::Install { writer, fresh_link } => {
+                web.writer = Some(writer);
+                web.warned = 0;
+                // The first keepalive is a full interval after the entry (`0x537bcf`).
+                web.last_ping = time.elapsed_secs_f64();
+                // Sequence 1 is a new socket's first ping, so an old socket's pong cannot match; a
+                // later entry on the same link keeps the connection's block.
+                if fresh_link {
+                    *ping.0.lock().expect("ping clock") = io::PingClock::default();
+                }
+            }
+            // The world session is over and the link kept: the writer goes back to the sequencer,
+            // and commands drop until the next install.
+            io::WriterSwap::Reclaim(reply) => {
+                if let Some(w) = web.writer.take() {
+                    let _ = reply.try_send(w);
+                }
+            }
+        }
     }
     let Some(writer) = web.writer.as_mut() else {
         // No live writer: the session is gone and these commands evaporate — the same answer the
@@ -232,8 +261,6 @@ fn web_writer_pump(mut web: ResMut<WebWriter>, time: Res<Time>, ping: Res<PingSh
             }
         }
     }
-    // The `out` trace, where the native write thread takes it — same lines, same drain.
-    io::trace_sends(writer);
     let now = time.elapsed_secs_f64();
     if now - web.last_ping >= io::PING_INTERVAL.as_secs_f64() {
         web.last_ping = now;
@@ -365,24 +392,6 @@ impl FieldChanged {
     }
 }
 
-/// The field edges one feed saw this run, by guid and index: the reference fans a moved field out
-/// to every unit token naming the unit (`0x515e50`).
-#[derive(Default)]
-pub(crate) struct FieldEdges(HashSet<(u64, u16)>);
-
-impl FieldEdges {
-    pub fn collect(reader: &mut MessageReader<FieldChanged>) -> Self {
-        Self(reader.read().map(|e| (e.guid, e.index)).collect())
-    }
-    pub fn moved(&self, guid: u64, index: u16) -> bool {
-        self.0.contains(&(guid, index))
-    }
-    #[cfg(test)]
-    pub fn of(edges: &[(u64, u16)]) -> Self {
-        Self(edges.iter().copied().collect())
-    }
-}
-
 /// Merge a descriptor update into a store and emit its [`FieldChanged`] edges; the drain and the
 /// test harness share it.
 pub(crate) fn merge_store_fields(
@@ -461,13 +470,93 @@ pub(crate) struct ActiveMover;
 pub(crate) struct NetEvents(Receiver<SessionEvent>);
 
 /// The outbound command channel.
-#[derive(Resource)]
+#[derive(Resource, Debug)]
 pub(crate) struct NetCommands(pub(crate) Sender<ClientCommand>);
 
 /// The character-select channel to the IO thread parked at select: create and delete are served
-/// in place, re-emitting the roster, until an [`CharRequest::Enter`] moves into the world.
+/// in place until an [`CharRequest::Enter`] moves into the world.
 #[derive(Resource)]
-pub(crate) struct CharPick(pub(crate) async_channel::Sender<CharRequest>);
+pub(crate) struct CharPick(pub(crate) ParkSender<CharRequest>);
+
+/// A request to the IO thread at a park. The character screen's and the realm list's requests
+/// travel on one channel, in the order the app made them: the reference's verbs act at the call
+/// (`GetCharacterListUpdate` sends its `CMSG_CHAR_ENUM`, `ChangeRealm` then closes the link), so
+/// the IO thread must meet them in that order, which two channels cannot give.
+pub(crate) enum ParkRequest {
+    Char(CharRequest),
+    Realm(RealmRequest),
+}
+
+impl From<CharRequest> for ParkRequest {
+    fn from(r: CharRequest) -> Self {
+        ParkRequest::Char(r)
+    }
+}
+
+impl From<RealmRequest> for ParkRequest {
+    fn from(r: RealmRequest) -> Self {
+        ParkRequest::Realm(r)
+    }
+}
+
+/// The IO thread is gone.
+#[derive(Debug)]
+pub(crate) struct ParkGone;
+
+/// The app's end of the park channel for one kind of request. An `async_channel` (wenilla), so
+/// the IO task can await it on wasm; unbounded, so `try_send` fails only once the IO side is gone.
+pub(crate) enum ParkSender<T> {
+    /// The shared, ordered channel the IO thread reads.
+    Park(async_channel::Sender<ParkRequest>, std::marker::PhantomData<fn(T)>),
+    /// A channel of that kind alone, for a test that reads the requests itself.
+    #[cfg(test)]
+    Direct(async_channel::Sender<T>),
+}
+
+impl<T> Clone for ParkSender<T> {
+    fn clone(&self) -> Self {
+        match self {
+            ParkSender::Park(tx, kind) => ParkSender::Park(tx.clone(), *kind),
+            #[cfg(test)]
+            ParkSender::Direct(tx) => ParkSender::Direct(tx.clone()),
+        }
+    }
+}
+
+impl<T> ParkSender<T> {
+    /// The app's end of the IO thread's park channel.
+    pub(super) fn park(tx: async_channel::Sender<ParkRequest>) -> Self {
+        ParkSender::Park(tx, std::marker::PhantomData)
+    }
+}
+
+impl<T> ParkSender<T> {
+    /// Send a request of either kind, in the order it is made against the rest.
+    pub(crate) fn send_request(&self, request: ParkRequest) -> Result<(), ParkGone> {
+        match self {
+            ParkSender::Park(tx, _) => tx.try_send(request).map_err(|_| ParkGone),
+            #[cfg(test)]
+            ParkSender::Direct(_) => Err(ParkGone),
+        }
+    }
+}
+
+impl<T: Into<ParkRequest>> ParkSender<T> {
+    pub(crate) fn send(&self, request: T) -> Result<(), ParkGone> {
+        match self {
+            ParkSender::Park(tx, _) => tx.try_send(request.into()).map_err(|_| ParkGone),
+            #[cfg(test)]
+            ParkSender::Direct(tx) => tx.try_send(request).map_err(|_| ParkGone),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<T> From<async_channel::Sender<T>> for ParkSender<T> {
+    fn from(tx: async_channel::Sender<T>) -> Self {
+        ParkSender::Direct(tx)
+    }
+}
 
 /// One request to the IO thread parked at character select.
 pub(crate) enum CharRequest {
@@ -477,36 +566,62 @@ pub(crate) enum CharRequest {
     Create(benilla_protocol::CharCreateReq),
     /// Delete a character by guid (`CMSG_CHAR_DELETE`), then stay parked at select.
     Delete(u64),
+    /// Rename a character the server flagged for it (`CMSG_CHAR_RENAME`), then stay parked at
+    /// select with the reply.
+    Rename { guid: u64, name: String },
     /// Select's Back: drop the session and return to the pre-logon park.
     Abandon,
+    /// Fetch the roster again (`CMSG_CHAR_ENUM`) on the parked session, then stay parked with
+    /// the fresh roster: `GetCharacterListUpdate`, which the stock screen calls whenever it shows.
+    Enumerate,
 }
 
 /// The realm channel: the answer to each [`RealmListMessage`]. Two parks listen, the login-side
 /// one and the character one, since the reference's realm list is a dialog over either screen
 /// (`RealmList.xml` is `frameStrata="DIALOG"`).
 #[derive(Resource)]
-pub(crate) struct RealmChoice(pub(crate) async_channel::Sender<RealmRequest>);
+pub(crate) struct RealmChoice(pub(crate) ParkSender<RealmRequest>);
 
-/// One request to the IO thread parked at the realm list.
+/// One request to the IO thread about the realm list, served at the logon park and at character
+/// select; at the login park a query fails and the rest are dropped.
 #[derive(Debug)]
 pub(crate) enum RealmRequest {
-    /// Enter this realm, by name: the list refreshes while open, so an index could shift.
-    Enter(String),
-    /// Re-request the realm list (`RequestRealmList`, every 5 s from `RealmList_OnUpdate`).
+    /// Dial this realm (`ConnectToRealm`, `0x46b210`), the record as the list held it, as the
+    /// reference dials its copy (`0xc27fb8`) whatever a later list says. `generation` is the
+    /// abandon generation the app held when it asked: a later Cancel ends the dial however early
+    /// it lands.
+    Enter {
+        realm: benilla_protocol::RealmInfo,
+        generation: u64,
+    },
+    /// Query the realm list (`RequestRealmList`, every 5 s from `RealmList_OnUpdate`); the answer
+    /// is a [`RealmListMessage`], failed when the link gave none.
     Refresh,
-    /// Cancel (`RealmList_OnCancel` only hides the frame): the screen underneath stays, login or
-    /// character select.
-    Abandon,
+    /// `CLoginMgr::Cancel` (`0x5b3320`, from `RealmListDialogCancelled` on the login screen, the
+    /// logon's Cancel and `DisconnectFromServer`): the realmd link closes and the thread parks for
+    /// credentials. At character select, where `RealmListDialogCancelled` is a no-op, nothing.
+    Close,
+    /// `ConnectToRealm` with the world up (`0x46b22b` → `0x5ab1a0`): the session at character
+    /// select drops and the thread returns to the logon park, the realmd link as it was (closed
+    /// since a world entry). Elsewhere, nothing.
+    Leave,
 }
 
-/// The credentials channel to the IO thread's pre-logon park, sent by [`crate::login`].
+/// The credentials channel to the IO thread's pre-logon park, sent by [`crate::glue_session::login`].
 #[derive(Resource)]
 pub(crate) struct LoginSubmit(pub(crate) async_channel::Sender<io::LoginRequest>);
 
 /// The login abandon generation: Cancel bumps it, and the IO thread drops an
-/// [`io::LoginRequest`] submitted under an older value.
+/// [`io::LoginRequest`] or a [`RealmRequest::Enter`] asked under an older value.
 #[derive(Resource)]
 pub(crate) struct LoginAbandon(pub(crate) std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl LoginAbandon {
+    /// The generation an ask is stamped with now.
+    pub(crate) fn now(abandon: Option<&LoginAbandon>) -> u64 {
+        abandon.map_or(0, |a| a.0.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
 
 /// Guid to entity for every kind, items included, like the reference's one `ClntObjMgr` index.
 /// Written only by `net::objects`.
@@ -531,11 +646,15 @@ impl Objects<'_, '_> {
 
     /// A streamed object's merged descriptor fields, found as `0x468460` does, by guid.
     pub fn object(&self, guid: u64) -> Option<&ObjectFields> {
+        self.store(guid).map(|s| &s.0)
+    }
+
+    /// [`Self::object`] with its component.
+    pub(crate) fn store(&self, guid: u64) -> Option<&ObjectStore> {
         self.index
             .0
             .get(&guid)
             .and_then(|&e| self.stores.get(e).ok())
-            .map(|s| &s.0)
     }
 
     /// Every streamed object, items included.
@@ -622,15 +741,32 @@ pub(crate) struct WallClockSample {
     /// The server's `time(nullptr)` at `received`.
     base_unix: u32,
     received: Instant,
+    /// The responses of the session so far, this one included.
+    count: u64,
+    /// Whether the local clock read the server's second exactly, where the reference's offset
+    /// `G = local - server` would be 0 and is stored as 1 (`0x4def00`, `0x4def02`).
+    zero_offset: bool,
 }
 
 impl ServerWallClock {
     /// Take a fresh sample; it reads about RTT/2 behind, below a countdown's one-second grain.
-    pub(crate) fn sample(&mut self, unix_time: u32) {
+    pub(crate) fn sample(&mut self, unix_time: u32, local_unix: i64) {
         self.0 = Some(WallClockSample {
             base_unix: unix_time,
             received: Instant::now(),
+            count: self.samples() + 1,
+            zero_offset: local_unix == i64::from(unix_time),
         });
+    }
+
+    /// Whether the last sample found the local clock on the server's second (`0x4def02`).
+    pub(crate) fn zero_offset(&self) -> bool {
+        self.0.is_some_and(|s| s.zero_offset)
+    }
+
+    /// The responses sampled so far.
+    pub(crate) fn samples(&self) -> u64 {
+        self.0.map_or(0, |s| s.count)
     }
 
     /// Server unix seconds now, fractional.
@@ -648,31 +784,75 @@ impl ServerWallClock {
 /// `[0xbb749c]`, armed `now + 0xe10` at `0x4def11`).
 const RESYNC_AFTER: Duration = Duration::from_secs(3600);
 
-/// Ask for the server's wall clock on entering the world (login, worldport, instance transfer)
-/// and hourly after, which tracks a server re-clocked under us.
-fn send_query_time(
-    mut entered: MessageReader<EnteredWorldMessage>,
+/// Ask for the server's wall clock at each world-enter cascade (the quest-log init `0x4de430`,
+/// called at `0x4909a1`, sends it at `0x4de45b`) and hourly after, which tracks a server
+/// re-clocked under us.
+pub(crate) fn send_query_time(
+    mut cascades: MessageReader<WorldEnterCascadeMessage>,
     commands: Res<NetCommands>,
     clock: Res<ServerWallClock>,
     status: Res<NetStatus>,
     mut asked_at: Local<Option<Instant>>,
+    mut seated: Local<bool>,
 ) {
-    let entering = entered.read().next().is_some();
-    // Only while connected; the world-enter send covers a reconnect.
-    let due =
-        status.connected && clock.stale() && asked_at.is_none_or(|t| t.elapsed() >= RESYNC_AFTER);
+    let entering = cascades.read().next().is_some();
+    // `connected` rises at `CMSG_PLAYER_LOGIN`, before the server seats us, so the resync waits
+    // for the first cascade; a logout or a disconnect clears `connected` and so the wait re-arms.
+    *seated = status.connected && (*seated || entering);
+    let due = *seated && clock.stale() && asked_at.is_none_or(|t| t.elapsed() >= RESYNC_AFTER);
     if entering || due {
         *asked_at = Some(Instant::now());
         let _ = commands.0.send(ClientCommand::QueryTime);
     }
 }
 
-/// Our `(flags, standing)` per slot, indexed by `Faction.dbc`'s `reputationIndex`. The standing
-/// excludes the DBC race/class base, which consumers add before ranking. Filled by
-/// `SMSG_INITIALIZE_FACTIONS`, kept current by `SMSG_SET_FACTION_STANDING` (which also reveals)
-/// and `SMSG_SET_FACTION_VISIBLE`. Flag bit `0x08` marks a pane header.
+/// Our reputation state: the `(flags, standing)` per slot and the forced-reaction table.
+///
+/// `slots` is indexed by `Faction.dbc`'s `reputationIndex`. The standing excludes the DBC
+/// race/class base, which consumers add before ranking. Filled by `SMSG_INITIALIZE_FACTIONS`, kept
+/// current by `SMSG_SET_FACTION_STANDING` (which also reveals) and `SMSG_SET_FACTION_VISIBLE`.
+/// Flag bit `0x08` marks a pane header.
+///
+/// `forced` is `SMSG_SET_FORCED_REACTIONS` (`0x4d59a0`): `(Faction.dbc id, reaction rank)` per
+/// faction a `SPELL_AURA_FORCE_REACTION` aura forces, which answers with that rank whatever its
+/// templates or our standing say. Both halves live on one resource so a change to either wakes the
+/// unit feed and the questgiver-marker re-query that read reactions.
 #[derive(Resource, Default)]
-pub(crate) struct Reputations(pub(crate) Vec<(u8, i32)>);
+pub(crate) struct Reputations {
+    pub(crate) slots: Vec<(u8, i32)>,
+    pub(crate) forced: Vec<(u32, u32)>,
+    /// How many forced tables have arrived. The reference's handler fires `UNIT_FACTION` on every
+    /// arrival, a resend of the same table included, so a feed counts arrivals, not table diffs.
+    forced_arrivals: u64,
+}
+
+impl Reputations {
+    /// A store holding only `slots`, with nothing forced.
+    #[cfg(test)]
+    pub(crate) const fn from_slots(slots: Vec<(u8, i32)>) -> Self {
+        Self {
+            slots,
+            forced: Vec::new(),
+            forced_arrivals: 0,
+        }
+    }
+
+    /// `SMSG_SET_FORCED_REACTIONS`: the table replaces the last whole (`0x4d59a0`).
+    pub(crate) fn set_forced(&mut self, table: Vec<(u32, u32)>) {
+        self.forced = table;
+        self.forced_arrivals += 1;
+    }
+
+    /// Drops the table: the reference's teardown zeroes the count (`0x4d5419`).
+    pub(crate) fn clear_forced(&mut self) {
+        self.forced.clear();
+    }
+
+    /// The tables that have arrived so far.
+    pub(crate) fn forced_arrivals(&self) -> u64 {
+        self.forced_arrivals
+    }
+}
 
 /// The hearthstone bind point (`SMSG_BINDPOINTUPDATE`): the AreaTable id the tooltip's `$z`
 /// token names.
@@ -907,8 +1087,8 @@ pub(crate) enum ClientCommand {
         guid: u64,
         lag_ms: u32,
     },
-    /// `CMSG_SET_ACTIVE_MOVER`: at login and on possession; the server drops `MSG_MOVE_*` for an
-    /// unconfirmed mover.
+    /// `CMSG_SET_ACTIVE_MOVER`: at our own player's create and on possession; the server drops
+    /// `MSG_MOVE_*` for an unconfirmed mover.
     SetActiveMover {
         guid: u64,
     },
@@ -1220,6 +1400,25 @@ pub(crate) enum ClientCommand {
     },
     /// `CMSG_GMTICKET_GETTICKET`: `GetGMTicket()`.
     GmTicketGet,
+    /// `CMSG_SKILL_BUY_STEP`: `BuySkillTier`, the skill line id.
+    SkillBuyStep {
+        skill_id: u32,
+    },
+    /// `CMSG_LOTTERY_QUERY_OBSOLETE`: `GetLastLotteryNumbers()`.
+    LotteryQuery,
+    /// `CMSG_BUY_LOTTERY_TICKET_OBSOLETE`: `BuyRandomPicks` is `(count, 0)`, `SubmitNumbers`
+    /// `(0, mask)`.
+    BuyLotteryTicket {
+        first: u32,
+        second: u32,
+    },
+    /// `CMSG_GMSURVEY_SUBMIT`: `GMSurveySubmit()`, the survey id, each answered question as
+    /// `(question id, rating, comment)` and the overall comment.
+    GmSurveySubmit {
+        survey: u32,
+        answers: Vec<(u32, u8, String)>,
+        comment: String,
+    },
     /// `CMSG_GMTICKET_DELETETICKET`.
     GmTicketDelete,
     /// `CMSG_GMTICKET_SYSTEMSTATUS`: `GetGMStatus()`.
@@ -1887,6 +2086,11 @@ pub(crate) enum ClientCommand {
         slots: [u32; 3],
         comment: String,
     },
+    /// `MSG_LOOKING_FOR_GROUP`: `LFGQuery`'s inquiry.
+    LfgQuery {
+        criterion: u32,
+        class: u32,
+    },
     /// `CMSG_DEL_FRIEND`.
     DelFriend {
         guid: u64,
@@ -2061,18 +2265,49 @@ pub(crate) enum ClientCommand {
     },
 }
 
-/// The realm list (`CMD_REALM_LIST`); the IO thread waits for [`crate::realm_select`] to pick.
+/// The realm list (`CMD_REALM_LIST`); the IO thread waits for a [`RealmRequest`]. `failed` is a
+/// query that got no answer (`REALM_LIST_FAILED`), `realms` then the list last held.
 #[derive(Message)]
 pub(crate) struct RealmListMessage {
     pub(crate) realms: Vec<benilla_protocol::RealmInfo>,
+    pub(crate) failed: bool,
 }
 
-/// The character roster (`SMSG_CHAR_ENUM`); the IO thread waits for [`crate::char_select`] to
-/// pick. `realm` is the realm this session connected to.
+/// The character roster (`SMSG_CHAR_ENUM`); the IO thread waits for the select screen to pick. `realm` is the realm this session connected to.
 #[derive(Message)]
 pub(crate) struct CharListMessage {
     pub(crate) characters: Vec<benilla_protocol::Character>,
     pub(crate) realm: Option<benilla_protocol::RealmInfo>,
+    /// What the roster was fetched for.
+    pub(crate) cause: benilla_protocol::RosterCause,
+    /// The world session that sent it ([`WorldAuthMessage::epoch`]).
+    pub(crate) epoch: u64,
+}
+
+/// The world server accepted the authentication: the world connect to `realm` is done and the IO
+/// thread is at the character park (`SMSG_AUTH_RESPONSE` success, `0x5ab2b8`).
+#[derive(Message)]
+pub(crate) struct WorldAuthMessage {
+    pub(crate) realm: benilla_protocol::RealmInfo,
+    /// This world session's number, counted per process: what its roster replies carry.
+    pub(crate) epoch: u64,
+    /// The abandon generation of the attempt that dialed it: behind [`LoginAbandon`], the attempt
+    /// was cancelled or disconnected since, and the session is not the screen's.
+    pub(crate) generation: u64,
+}
+
+/// A roster ask on the world session `epoch` failed on the stream.
+#[derive(Message)]
+pub(crate) struct RosterFailedMessage {
+    pub(crate) epoch: u64,
+}
+
+/// The world session read `SMSG_ADDON_INFO` (the handler `0x5b4260`): the addons it hid from the
+/// Lua index space, at the point the reference's listener fires `ADDON_LIST_UPDATE`
+/// (`0x5b4290` → `0x5ab2f0`). [`AddonInfoReply`] holds the same records for a screen built later.
+#[derive(Message)]
+pub(crate) struct AddonInfoMessage {
+    pub(crate) records: Vec<benilla_protocol::messages::AddonRecord>,
 }
 
 /// A character create or delete result; a refreshed [`CharListMessage`] precedes a success.
@@ -2083,8 +2318,16 @@ pub(crate) struct CharActionResultMessage {
     pub(crate) code: u8,
 }
 
+/// `SMSG_CHAR_RENAME`: the result byte (0 success) and, when the reply carried them, the renamed
+/// character's guid and new name.
+#[derive(Message, Clone)]
+pub(crate) struct CharRenameMessage {
+    pub(crate) result: u8,
+    pub(crate) renamed: Option<(u64, String)>,
+}
+
 /// `SMSG_CHARACTER_LOGIN_FAILED`: the picked character was refused. `result` is the raw reason,
-/// read by [`crate::char_select::char_login_refusal_text`].
+/// read by the glue manager ([`crate::ui_script::glue_mgr`]).
 #[derive(Message, Clone, Copy)]
 pub(crate) struct CharacterLoginFailedMessage {
     pub(crate) result: u8,
@@ -2093,17 +2336,27 @@ pub(crate) struct CharacterLoginFailedMessage {
 /// We entered the world.
 #[derive(Message)]
 pub(crate) struct EnteredWorldMessage {
-    /// Rested billing minutes from `SMSG_AUTH_RESPONSE`, the only time they arrive.
-    pub(crate) billing_time_rested: u32,
     /// The tutorial flags, if `SMSG_TUTORIAL_FLAGS` came during the login handshake.
     pub(crate) tutorial_flags: Option<Vec<u8>>,
 }
 
+/// The reference's world-enter cascade (`0x4908c0`) ran: our own player's create, at login and
+/// every cross-map worldport ([`enter_world_on_self_create`]), or a `/reload`. Its sends wait for
+/// this, not [`EnteredWorldMessage`], which fires before the server has seated the player.
+#[derive(Message)]
+pub(crate) struct WorldEnterCascadeMessage;
+
 /// `SMSG_ADDON_INFO`: the addons the server hid from the Lua index space, or `None` if it did
 /// not answer. A resource, since it must exist before the world-entry UI load runs any addon;
-/// rewritten on every login.
+/// rewritten on every login from the reply its link got.
 #[derive(Resource, Default)]
-pub(crate) struct AddonInfoReply(pub(crate) Option<Vec<String>>);
+pub(crate) struct AddonInfoReply(pub(crate) Option<Vec<benilla_protocol::messages::AddonRecord>>);
+
+/// The connection's billing group, from its authentication alone (`0x5b41b0`); a resource for the
+/// same reason as [`AddonInfoReply`], rewritten at every login. The in-game `GetBillingTimeRested`
+/// and [`crate::ui_billing`]'s warning read it.
+#[derive(Resource, Default, Clone, Copy)]
+pub(crate) struct SessionBilling(pub(crate) benilla_protocol::messages::Billing);
 
 /// `SMSG_TRIGGER_CINEMATIC`: a `CinematicSequences.dbc` id; [`crate::cinematic`] plays and acks it.
 #[derive(Message)]
@@ -2135,7 +2388,9 @@ pub(crate) struct LoginQueuedMessage {
     pub(crate) realm: Option<String>,
 }
 
-/// The session ended; the IO thread is back at its pre-logon park.
+/// The world session ended. After a logout or a refused character login ([`SessionEnd::LoggedOut`](
+/// benilla_protocol::SessionEnd::LoggedOut)) the IO thread is back at character select on the
+/// same link; after a loss, at its pre-logon park.
 #[derive(Message, Clone)]
 pub(crate) struct DisconnectedMessage {
     pub(crate) reason: String,
@@ -2147,8 +2402,8 @@ pub(crate) struct DisconnectedMessage {
 }
 
 impl DisconnectedMessage {
-    /// `session_over` is false after a logout (the relist is the select the player asked for) and
-    /// in a run declared unattended ([`crate::run_mode::unattended`]), which reconnects. Not the
+    /// `session_over` is false after a logout (the link is kept and character select is what the
+    /// player asked for) and in a run declared unattended ([`crate::run_mode::unattended`]), which reconnects. Not the
     /// login env vars: a person's launch line sets them too, and a reconnect would take the
     /// account back from whoever displaced us.
     pub(crate) fn new(reason: String, end: benilla_protocol::SessionEnd) -> Self {
@@ -2163,16 +2418,11 @@ impl DisconnectedMessage {
 }
 
 /// A login attempt failed before the roster; the IO thread is back at its pre-logon park.
-/// `terminal` is a failure retrying cannot fix (the server requires Warden, say): never resubmit.
 #[derive(Message, Clone)]
 pub(crate) struct LoginFailedMessage {
     /// Which server refused us, with which byte; `None` on a transport failure.
     pub(crate) refusal: Option<benilla_protocol::LoginRefusal>,
     pub(crate) reason: String,
-    pub(crate) terminal: bool,
-    /// The dial that never opened a socket, so the screen can tell an unknown name from a host
-    /// that does not answer.
-    pub(crate) dial: Option<benilla_protocol::DialFailure>,
 }
 
 /// A same-map teleport of our player: snap, then ack. Read by the controller in `Input`.

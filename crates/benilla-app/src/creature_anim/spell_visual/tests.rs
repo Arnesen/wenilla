@@ -109,6 +109,8 @@ fn cast_event(entity: Entity, spell_id: u32, kind: CastEventKind) -> CastEvent {
         entity,
         spell_id,
         kind,
+        cast_flags: 0,
+        item_cast: false,
         seq: 1,
     }
 }
@@ -705,16 +707,20 @@ fn a_harmful_go_wounds_each_hit_once_and_a_missile_arrival_always() {
     assert_eq!(wounds(&mut app), vec![target], "missile arrival");
 }
 
-/// The GO's release gate (`0x6e7a70`): a Speed>0 spell whose cast kit plays a body animation
-/// defers its [`MissileSpawn`] to the animation's release keyframe; any other launches at GO.
+/// The GO's release gate (`0x6e7a70`): a Speed>0 spell whose cast kit plays a body animation above
+/// 0 defers its [`MissileSpawn`] to the animation's release keyframe; any other, Stand included
+/// (`0x6e8295 jg`), launches at GO.
 #[test]
 fn missile_spawn_defers_iff_the_cast_kit_animates() {
     const ANIMATED: u32 = 133; // Fireball's shape: cast kit with anim 53
     const SILENT: u32 = 134; // same chain, cast kit with no anim
+    const STANDING: u32 = 135; // same chain, cast kit naming Stand
     const ANIMATED_VISUAL: u32 = 67;
     const SILENT_VISUAL: u32 = 68;
+    const STANDING_VISUAL: u32 = 69;
     const CAST_KIT: u32 = 38;
     const MUTE_KIT: u32 = 39;
+    const STAND_KIT: u32 = 40;
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
@@ -749,6 +755,13 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
                     ..Default::default()
                 },
             ),
+            (
+                STANDING_VISUAL,
+                VisualStages {
+                    cast: STAND_KIT,
+                    ..Default::default()
+                },
+            ),
         ]),
         HashMap::from([
             (
@@ -762,6 +775,13 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
                 MUTE_KIT,
                 VisualKit {
                     anim_id: None,
+                    ..Default::default()
+                },
+            ),
+            (
+                STAND_KIT,
+                VisualKit {
+                    anim_id: Some(0),
                     ..Default::default()
                 },
             ),
@@ -785,6 +805,14 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
                     ..Default::default()
                 },
             ),
+            (
+                STANDING,
+                SpellDisplay {
+                    visual: STANDING_VISUAL,
+                    speed: 24.0,
+                    ..Default::default()
+                },
+            ),
         ])),
         ..crate::ui_action::Spells::empty_for_tests()
     });
@@ -792,7 +820,7 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
 
     let caster = app.world_mut().spawn_empty().id();
     let target = app.world_mut().spawn_empty().id();
-    for spell_id in [ANIMATED, SILENT] {
+    for spell_id in [ANIMATED, SILENT, STANDING] {
         app.world_mut().write_message(SpellGoTargets {
             caster,
             spell_id,
@@ -812,8 +840,8 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
         .collect();
     assert_eq!(
         spawns,
-        vec![(ANIMATED, true), (SILENT, false)],
-        "deferred iff the cast kit animates"
+        vec![(ANIMATED, true), (SILENT, false), (STANDING, false)],
+        "deferred iff the cast kit animates past Stand"
     );
 }
 
@@ -909,6 +937,8 @@ fn a_targetless_dest_go_spawns_a_ground_missile_whose_arrival_sounds_at_the_poin
         entity: caster,
         spell_id: GROUND,
         kind: CastEventKind::GroundImpact { pos: at },
+        cast_flags: 0,
+        item_cast: false,
         seq: 2,
     });
     app.update();
@@ -1201,6 +1231,186 @@ fn a_kit_with_a_chain_char_proc_asks_for_a_beam_from_both_dispatcher_sites() {
         plays(&mut app),
         vec![(channeller, BEAM_SPELL, true)],
         "the channel kit's type-0 proc asks for a persistent beam"
+    );
+}
+
+/// The hold resolver (`0x612990`) returns a kit animation only above 0 (`0x612a0a jle`), so a
+/// precast or channel kit naming Stand holds nothing, at the START and on the channel poll alike.
+#[test]
+fn a_precast_or_channel_kit_naming_stand_arms_no_hold() {
+    const STAND_SPELL: u32 = 2060;
+    const STAND_VISUAL: u32 = 90;
+    const STAND_PRECAST_KIT: u32 = 6000;
+    const STAND_CHANNEL_KIT: u32 = 6001;
+
+    let mut app = app();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([
+            (
+                STAND_VISUAL,
+                VisualStages {
+                    precast: STAND_PRECAST_KIT,
+                    channel: STAND_CHANNEL_KIT,
+                    ..Default::default()
+                },
+            ),
+            (
+                VISUAL,
+                VisualStages {
+                    precast: PRECAST_KIT,
+                    ..Default::default()
+                },
+            ),
+        ]),
+        HashMap::from([
+            (
+                STAND_PRECAST_KIT,
+                VisualKit {
+                    anim_id: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                STAND_CHANNEL_KIT,
+                VisualKit {
+                    anim_id: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                PRECAST_KIT,
+                VisualKit {
+                    anim_id: Some(HOLD_ANIM),
+                    ..Default::default()
+                },
+            ),
+        ]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([
+            (
+                STAND_SPELL,
+                SpellDisplay {
+                    visual: STAND_VISUAL,
+                    ..Default::default()
+                },
+            ),
+            (
+                SPELL,
+                SpellDisplay {
+                    visual: VISUAL,
+                    ..Default::default()
+                },
+            ),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+
+    let unit = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .write_message(cast_event(unit, STAND_SPELL, CastEventKind::Start));
+    app.update();
+    assert!(
+        app.world().entity(unit).get::<CastHold>().is_none(),
+        "a precast kit naming Stand holds nothing"
+    );
+    let control = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .write_message(cast_event(control, SPELL, CastEventKind::Start));
+    app.update();
+    assert_eq!(hold(&app, control), Some(SPELL), "the control still holds");
+
+    let channeller = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(
+            benilla_protocol::ObjectFields::from_pairs(&[(144, STAND_SPELL)])
+                .into_created(benilla_protocol::messages::ObjectType::Unit),
+        ))
+        .id();
+    app.update();
+    assert!(
+        app.world().entity(channeller).get::<CastHold>().is_none(),
+        "a channel kit naming Stand holds nothing"
+    );
+}
+
+/// A cast kit's animation plays as a one-shot through `0x5fe2f0` (`0x60f3c5`), Stand (0) included:
+/// `0x60f366` skips only a negative id and `0x60f510(0)` is false.
+#[test]
+fn a_cast_kit_naming_stand_plays_it_like_any_id() {
+    const STAND_SPELL: u32 = 2061;
+    const STAND_VISUAL: u32 = 91;
+    const STAND_CAST_KIT: u32 = 6002;
+    const SWING_SPELL: u32 = 2062;
+    const SWING_VISUAL: u32 = 92;
+    const SWING_CAST_KIT: u32 = 6003;
+    const SPELL_CAST_DIRECTED: u16 = 53;
+
+    let mut app = app();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([
+            (
+                STAND_VISUAL,
+                VisualStages {
+                    cast: STAND_CAST_KIT,
+                    ..Default::default()
+                },
+            ),
+            (
+                SWING_VISUAL,
+                VisualStages {
+                    cast: SWING_CAST_KIT,
+                    ..Default::default()
+                },
+            ),
+        ]),
+        HashMap::from([
+            (
+                STAND_CAST_KIT,
+                VisualKit {
+                    anim_id: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                SWING_CAST_KIT,
+                VisualKit {
+                    anim_id: Some(SPELL_CAST_DIRECTED),
+                    ..Default::default()
+                },
+            ),
+        ]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([
+            (
+                STAND_SPELL,
+                SpellDisplay {
+                    visual: STAND_VISUAL,
+                    ..Default::default()
+                },
+            ),
+            (
+                SWING_SPELL,
+                SpellDisplay {
+                    visual: SWING_VISUAL,
+                    ..Default::default()
+                },
+            ),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+
+    let unit = app.world_mut().spawn_empty().id();
+    for spell in [STAND_SPELL, SWING_SPELL] {
+        app.world_mut()
+            .write_message(cast_event(unit, spell, CastEventKind::Go));
+    }
+    app.update();
+    assert_eq!(
+        emote_anims(&mut app, unit),
+        vec![0, SPELL_CAST_DIRECTED],
+        "the Stand kit plays as the control does"
     );
 }
 
@@ -1650,5 +1860,315 @@ fn an_anim_only_state_kit_still_arms_on_the_aura_add_edge() {
         recomputes,
         vec![(unit, STUN)],
         "an anim-only state kit is not nothing — its ADD edge owes a recompute"
+    );
+}
+
+/// A state kit naming Stand (0) is not skipped: the recompute runs for any id of 0 or more
+/// (`0x60f366 jl`), but the pin takes only an id above 0 (`0x5fdeb5 jle`). Kit 6354, Heart of
+/// Hakkar Banning's, names Stand and has no effect, sound or proc.
+#[test]
+fn a_stand_state_kit_recomputes_but_never_pins() {
+    use benilla_protocol::messages::ObjectFields;
+
+    const SPELL: u32 = 24203;
+    const VISUAL: u32 = 7243;
+    const STATE_KIT: u32 = 6354;
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
+        .add_message::<crate::aura_visual::AuraProc>()
+        .add_message::<SpellKitSound>()
+        .add_message::<super::BaseAnimRecompute>();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(
+            VISUAL,
+            VisualStages {
+                state: STATE_KIT,
+                ..Default::default()
+            },
+        )]),
+        HashMap::from([(
+            STATE_KIT,
+            VisualKit {
+                anim_id: Some(0),
+                ..Default::default()
+            },
+        )]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([(
+            SPELL,
+            SpellDisplay {
+                visual: VISUAL,
+                ..Default::default()
+            },
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.add_systems(Update, super::arm_aura_state_fx);
+
+    let unit = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(
+            ObjectFields::from_pairs(&[(47, SPELL), (95, 0x0E)])
+                .into_created(benilla_protocol::messages::ObjectType::Unit),
+        ))
+        .id();
+    app.update();
+
+    let recomputes: Vec<(Entity, u16)> = app
+        .world_mut()
+        .resource_mut::<Messages<super::BaseAnimRecompute>>()
+        .drain()
+        .map(|r| (r.entity, r.anim_id))
+        .collect();
+    assert_eq!(
+        recomputes,
+        vec![(unit, 0)],
+        "Stand still owes the recompute"
+    );
+    assert!(
+        app.world()
+            .entity(unit)
+            .get::<super::super::StateKitPins>()
+            .is_none(),
+        "…but id 0 pins nothing"
+    );
+}
+
+/// A state kit with an anim pins its unit while the aura lives, newest at the head (`0x620360`),
+/// and the aura's removal takes its pin (`0x614150` force 1).
+#[test]
+fn a_state_kits_anim_pins_its_unit_while_the_aura_lives() {
+    use benilla_protocol::messages::{ObjectFields, ObjectType};
+
+    const PEON_SLEEPING: u32 = 17743;
+    const SLEEP_VISUAL: u32 = 4762;
+    const SLEEP_KIT: u32 = 906; // EmoteSleep (71) and the head's Sleep_State_Head
+    const EMOTE_SLEEP: u16 = 71;
+    const SNEEZING_FIT: u32 = 6902;
+    const SNEEZE_VISUAL: u32 = 517;
+    const SNEEZE_KIT: u32 = 586; // anim-only Stun (14)
+    const STUN: u16 = 14;
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
+        .add_message::<crate::aura_visual::AuraProc>()
+        .add_message::<SpellKitSound>()
+        .add_message::<super::BaseAnimRecompute>();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([
+            (
+                SLEEP_VISUAL,
+                VisualStages {
+                    state: SLEEP_KIT,
+                    ..Default::default()
+                },
+            ),
+            (
+                SNEEZE_VISUAL,
+                VisualStages {
+                    state: SNEEZE_KIT,
+                    ..Default::default()
+                },
+            ),
+        ]),
+        HashMap::from([
+            (
+                SLEEP_KIT,
+                VisualKit {
+                    anim_id: Some(EMOTE_SLEEP),
+                    ..Default::default()
+                },
+            ),
+            (
+                SNEEZE_KIT,
+                VisualKit {
+                    anim_id: Some(STUN),
+                    ..Default::default()
+                },
+            ),
+        ]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([
+            (
+                PEON_SLEEPING,
+                SpellDisplay {
+                    visual: SLEEP_VISUAL,
+                    ..Default::default()
+                },
+            ),
+            (
+                SNEEZING_FIT,
+                SpellDisplay {
+                    visual: SNEEZE_VISUAL,
+                    ..Default::default()
+                },
+            ),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.add_systems(Update, super::arm_aura_state_fx);
+    let pins = |app: &App, unit: Entity| {
+        app.world()
+            .entity(unit)
+            .get::<super::super::StateKitPins>()
+            .cloned()
+    };
+
+    // vmangos puts the peon's aura in the first negative slot, 32 (field 79).
+    let unit = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(
+            ObjectFields::from_pairs(&[(79, PEON_SLEEPING), (99, 0x09)])
+                .into_created(ObjectType::Unit),
+        ))
+        .id();
+    app.update();
+    assert_eq!(
+        pins(&app, unit),
+        Some(super::super::StateKitPins(vec![(
+            PEON_SLEEPING,
+            EMOTE_SLEEP
+        )])),
+        "the sleeping aura pins EmoteSleep"
+    );
+
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        ObjectFields::from_pairs(&[(80, SNEEZING_FIT), (99, 0x99)]),
+    );
+    app.update();
+    assert_eq!(
+        pins(&app, unit),
+        Some(super::super::StateKitPins(vec![
+            (SNEEZING_FIT, STUN),
+            (PEON_SLEEPING, EMOTE_SLEEP)
+        ])),
+        "the newer kit is the head"
+    );
+
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        ObjectFields::from_pairs(&[(79, 0), (99, 0x90)]),
+    );
+    app.update();
+    assert_eq!(
+        pins(&app, unit),
+        Some(super::super::StateKitPins(vec![(SNEEZING_FIT, STUN)])),
+        "the sleep's removal takes its pin alone"
+    );
+
+    crate::net::apply_fields_for_test(
+        app.world_mut(),
+        unit,
+        ObjectFields::from_pairs(&[(80, 0), (99, 0)]),
+    );
+    app.update();
+    assert_eq!(pins(&app, unit), None, "no live kit, no pin");
+}
+
+/// One sweep arms by ascending slot (`0x604e7b`-`0x604e85`), so the highest slot's kit is the
+/// head, whatever the spell ids: Sneezing Fit (6902) in slot 33 over Peon Sleeping in slot 32.
+#[test]
+fn a_sweeps_pins_arm_in_slot_order() {
+    use benilla_protocol::messages::{ObjectFields, ObjectType};
+
+    const PEON_SLEEPING: u32 = 17743;
+    const SLEEP_VISUAL: u32 = 4762;
+    const SLEEP_KIT: u32 = 906;
+    const EMOTE_SLEEP: u16 = 71;
+    const SNEEZING_FIT: u32 = 6902;
+    const SNEEZE_VISUAL: u32 = 517;
+    const SNEEZE_KIT: u32 = 586;
+    const STUN: u16 = 14;
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<SpellKitFx>()
+        .add_message::<crate::net::FieldChanged>()
+        .add_message::<crate::aura_visual::AuraProc>()
+        .add_message::<SpellKitSound>()
+        .add_message::<super::BaseAnimRecompute>();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([
+            (
+                SLEEP_VISUAL,
+                VisualStages {
+                    state: SLEEP_KIT,
+                    ..Default::default()
+                },
+            ),
+            (
+                SNEEZE_VISUAL,
+                VisualStages {
+                    state: SNEEZE_KIT,
+                    ..Default::default()
+                },
+            ),
+        ]),
+        HashMap::from([
+            (
+                SLEEP_KIT,
+                VisualKit {
+                    anim_id: Some(EMOTE_SLEEP),
+                    ..Default::default()
+                },
+            ),
+            (
+                SNEEZE_KIT,
+                VisualKit {
+                    anim_id: Some(STUN),
+                    ..Default::default()
+                },
+            ),
+        ]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([
+            (
+                PEON_SLEEPING,
+                SpellDisplay {
+                    visual: SLEEP_VISUAL,
+                    ..Default::default()
+                },
+            ),
+            (
+                SNEEZING_FIT,
+                SpellDisplay {
+                    visual: SNEEZE_VISUAL,
+                    ..Default::default()
+                },
+            ),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.add_systems(Update, super::arm_aura_state_fx);
+
+    let unit = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(
+            ObjectFields::from_pairs(&[(79, PEON_SLEEPING), (80, SNEEZING_FIT), (99, 0x99)])
+                .into_created(ObjectType::Unit),
+        ))
+        .id();
+    app.update();
+    assert_eq!(
+        app.world()
+            .entity(unit)
+            .get::<super::super::StateKitPins>()
+            .cloned(),
+        Some(super::super::StateKitPins(vec![
+            (SNEEZING_FIT, STUN),
+            (PEON_SLEEPING, EMOTE_SLEEP)
+        ])),
+        "slot 33's kit armed last, so it is the head"
     );
 }

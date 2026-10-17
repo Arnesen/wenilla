@@ -3,10 +3,10 @@
 //! `OPEN_LOCK` cast, an unlocked one by `CMSG_GAMEOBJ_USE`.
 
 use benilla_formats::{LockCatalog, LockTypeCatalog};
-use benilla_protocol::guid;
+use benilla_protocol::messages::{ObjectFields, ObjectType};
 use bevy::prelude::*;
 
-use crate::net::{ClientCommand, NetCommands};
+use crate::net::{ClientCommand, NetCommands, Objects};
 use crate::query_cache::QueryCache;
 
 /// `Lock.dbc`: decides use against cast, and which `LockType` the opener spell must match.
@@ -75,7 +75,7 @@ pub(crate) struct TextPage {
     pub(crate) material: u32,
 }
 
-/// Entry to template, asked once per connection.
+/// Entry to template, asked once while in flight.
 #[derive(Resource, Default)]
 pub(crate) struct GameObjectTemplates {
     templates: QueryCache<u32, GoTemplate>,
@@ -88,20 +88,48 @@ impl crate::query_cache::AskOnce for GameObjectTemplates {
 }
 
 impl GameObjectTemplates {
-    /// Asks for a template once per entry; every spawn of a template shares the one query.
-    pub(crate) fn request(&self, guid: u64, commands: &NetCommands) {
-        let Some(entry) = guid::entry(guid) else {
-            return;
-        };
-        self.templates.get_or_ask(entry, || {
-            debug!("go: asking template (entry {entry}, guid {guid:#x})");
-            let _ = commands
-                .0
-                .send(ClientCommand::GameObjectQuery { entry, guid });
-        });
+    /// The key an object's template is cached under: its descriptor's `OBJECT_FIELD_ENTRY`
+    /// (`[descriptor+0xc]`, `0x5f7d77`), never the guid, whose bits carry the entry only on some
+    /// cores. `None` for a descriptor that has not received the field.
+    fn key(fields: &ObjectFields) -> Option<u32> {
+        fields.object_entry().filter(|&e| e != 0)
     }
 
-    /// Records a `SMSG_GAMEOBJECT_QUERY_RESPONSE`; a miss arrives zeroed, so no lock.
+    /// The creation hook's ask: it looks the template up with a callback, by the descriptor's
+    /// entry and the guid (`0x5f7c40`, `0x5f7d81`), so a refused entry is asked again by the next
+    /// spawn. Every spawn of a template shares the one pending query.
+    pub(crate) fn request_at_create(
+        &self,
+        guid: u64,
+        fields: &ObjectFields,
+        commands: &NetCommands,
+    ) {
+        if let Some(entry) = Self::key(fields) {
+            self.templates
+                .lookup(entry, || Self::send(entry, guid, commands));
+        }
+    }
+
+    fn send(entry: u32, guid: u64, commands: &NetCommands) {
+        debug!("go: asking template (entry {entry}, guid {guid:#x})");
+        let _ = commands
+            .0
+            .send(ClientCommand::GameObjectQuery { entry, guid });
+    }
+
+    /// A refused entry (`SMSG_GAMEOBJECT_QUERY_RESPONSE` with the top bit set, `0x5588e0`): no
+    /// template, and the next lookup asks again ([`QueryCache::refuse`]).
+    pub(crate) fn refuse(&mut self, entry: u32) {
+        self.templates.refuse(entry);
+    }
+
+    /// Whether the server refused `entry` and nothing has asked for it since.
+    #[cfg(test)]
+    pub(crate) fn is_unknown(&self, entry: u32) -> bool {
+        self.templates.answered_unknown(entry)
+    }
+
+    /// Records a `SMSG_GAMEOBJECT_QUERY_RESPONSE`.
     pub(crate) fn insert(&mut self, entry: u32, type_id: u32, name: String, data: &[i32; 24]) {
         let lock_id = go_lock_slot(type_id)
             .and_then(|slot| data.get(slot))
@@ -137,7 +165,7 @@ impl GameObjectTemplates {
         };
         self.templates.insert(
             entry,
-            Some(GoTemplate {
+            GoTemplate {
                 lock_id,
                 name,
                 highlight_column,
@@ -146,13 +174,28 @@ impl GameObjectTemplates {
                 mo_transport,
                 text_page,
                 quest_material,
-            }),
+            },
         );
     }
 
-    /// The cached template for a GameObject guid.
-    pub(crate) fn get(&self, guid: u64) -> Option<&GoTemplate> {
-        guid::entry(guid).and_then(|e| self.templates.get(e))
+    /// A template's name by entry, read without a callback (the cache `0xc0e318`).
+    pub(crate) fn name(&self, entry: u32) -> Option<&str> {
+        self.templates.get(entry).map(|t| t.name.as_str())
+    }
+
+    /// The cached template for a GameObject, found through its own descriptor.
+    pub(crate) fn of(&self, fields: &ObjectFields) -> Option<&GoTemplate> {
+        Self::key(fields).and_then(|e| self.templates.get(e))
+    }
+
+    /// [`Self::of`] for a guid, through the streamed object (`ClntObjMgrObjectPtr`, `0x468460`);
+    /// `None` for an object that is not streamed, and for any kind but a GameObject, whose entry
+    /// names another table.
+    pub(crate) fn of_guid(&self, objects: &Objects, guid: u64) -> Option<&GoTemplate> {
+        objects
+            .object(guid)
+            .filter(|f| f.object_type() == Some(ObjectType::GameObject))
+            .and_then(|f| self.of(f))
     }
 }
 
@@ -168,6 +211,14 @@ fn go_lock_slot(type_id: u32) -> Option<usize> {
         25 => Some(4),
         _ => None,
     }
+}
+
+/// A GameObject's descriptor as a create leaves it: `OBJECT_FIELD_TYPE` and `OBJECT_FIELD_ENTRY`.
+#[cfg(test)]
+pub(crate) fn test_fields(entry: u32) -> ObjectFields {
+    use benilla_protocol::field::FIELD_OBJECT_ENTRY;
+    // `OBJECT_FIELD_TYPE` is field 2: `TYPEMASK_OBJECT | TYPEMASK_GAMEOBJECT`.
+    ObjectFields::from_pairs(&[(2, 0x21), (FIELD_OBJECT_ENTRY, entry)])
 }
 
 #[cfg(test)]
@@ -254,15 +305,8 @@ mod tests {
         let mut t = GameObjectTemplates::default();
         let mut data = [0i32; 24];
         data[0] = 38; // a Copper Vein's lockId lives in chest slot 0
-                      // HIGHGUID_GAMEOBJECT with entry 1731 in bits 24..47.
-        let guid = 0xF110_0000_0000_0000 | (1731u64 << 24) | 0x40;
-        t.insert(
-            guid::entry(guid).unwrap(),
-            3,
-            "Alliance Chest".into(),
-            &data,
-        );
-        assert_eq!(t.get(guid).map(|g| g.lock_id), Some(38));
+        t.insert(1731, 3, "Alliance Chest".into(), &data);
+        assert_eq!(t.of(&entry_fields(1731)).map(|g| g.lock_id), Some(38));
     }
 
     /// Real rows from the 1.12 client's `gameobjectcache.wdb`: two pointer signs, both hoverable,
@@ -308,5 +352,54 @@ mod tests {
                 "type {type_id} must not take the cursor arm — it carries no semantic 0x13"
             );
         }
+    }
+
+    use super::test_fields as entry_fields;
+
+    /// `0x5f7c40` keys the cache with `[descriptor+0xc]`, the object's `OBJECT_FIELD_ENTRY`
+    /// (`0x5f7d77`), and never the guid: a boat whose guid counter is not its template entry is
+    /// asked and read by the field.
+    #[test]
+    fn the_template_is_keyed_by_the_descriptors_entry_not_the_guid_bits() {
+        const FIELD_ENTRY: u32 = 176231;
+        // A MO_TRANSPORT guid whose low 32 bits are a plain counter.
+        let boat = (u64::from(benilla_protocol::guid::HIGH_MO_TRANSPORT) << 48) | 7;
+        let fields = entry_fields(FIELD_ENTRY);
+
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let commands = NetCommands(tx);
+        let mut t = GameObjectTemplates::default();
+        t.request_at_create(boat, &fields, &commands);
+        t.request_at_create(boat, &fields, &commands);
+        let asked: Vec<_> = rx
+            .try_iter()
+            .map(|c| match c {
+                ClientCommand::GameObjectQuery { entry, guid } => (entry, guid),
+                _ => panic!("only the template query is sent"),
+            })
+            .collect();
+        assert_eq!(asked, vec![(FIELD_ENTRY, boat)], "asked once, by the field");
+
+        let mut data = [0i32; 24];
+        data[0] = 292;
+        t.insert(FIELD_ENTRY, 15, "Boat".into(), &data);
+        let mo = t.of(&fields).and_then(|g| g.mo_transport);
+        assert_eq!(mo.map(|m| m.taxi_path_id), Some(292), "read by the field");
+
+        // A second object of the same template shares the one query.
+        t.request_at_create(boat + 2, &fields, &commands);
+        assert!(rx.try_recv().is_err(), "the cached entry is not re-asked");
+    }
+
+    /// A descriptor that has not received the entry has no template to ask for or read.
+    #[test]
+    fn a_descriptor_without_an_entry_asks_nothing() {
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let commands = NetCommands(tx);
+        let mut t = GameObjectTemplates::default();
+        t.request_at_create(1, &ObjectFields::default(), &commands);
+        assert!(rx.try_recv().is_err());
+        t.insert(0, 3, "Chest".into(), &[0; 24]);
+        assert!(t.of(&ObjectFields::default()).is_none());
     }
 }

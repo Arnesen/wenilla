@@ -14,23 +14,34 @@ fn one_item_backpack(item_id: u32, name: &str, quality: u32) -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,
             quality: Some(quality),
+            inventory_type: 0,
             item_id,
             link: Some(format!("|cffffffff|Hitem:{item_id}|h[{name}]|h|r")),
-            locked: false,
+            guid: 0x711,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     ContainerState {
@@ -174,7 +185,7 @@ fn delete_item_confirm_no_clears_without_destroying() {
         "repaints = 0\n\
          local real = ContainerFrame_Update\n\
          ContainerFrame_Update = function(...) repaints = repaints + 1; \
-         return real(unpack(arg, 1, arg.n)) end",
+         return real(unpack(arg)) end",
     )
     .unwrap();
 

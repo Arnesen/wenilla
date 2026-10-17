@@ -11,7 +11,7 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use super::ReadExactAsync;
+use super::{LinkState, ReadExactAsync};
 
 /// One connection, both directions — what the handshake holds before [`Conn::split`].
 pub struct Conn {
@@ -44,6 +44,31 @@ impl Conn {
     /// Bound how long a read may wait; `None` blocks forever (decision 0065's handshake timeout).
     pub fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()> {
         self.stream.set_read_timeout(t)
+    }
+
+    /// Look at the socket without blocking: a one-byte `peek` with the socket briefly
+    /// non-blocking.
+    pub fn link_state(&self) -> io::Result<LinkState> {
+        self.stream.set_nonblocking(true)?;
+        let peeked = self.stream.peek(&mut [0u8; 1]);
+        self.stream.set_nonblocking(false)?;
+        match peeked {
+            Ok(0) => Ok(LinkState::Closed),
+            Ok(_) => Ok(LinkState::Readable),
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {
+                Ok(LinkState::Quiet)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The halves [`Self::split`] made, one connection again: the write half's socket, the read
+    /// half's clone dropped (which closes nothing).
+    pub fn rejoin(reader: ConnReader, writer: ConnWriter) -> Conn {
+        drop(reader);
+        Conn {
+            stream: writer.stream,
+        }
     }
 
     /// Split into independent halves so a reader can stream while another path writes.

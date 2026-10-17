@@ -15,9 +15,10 @@ use super::keyed;
 use super::spell_deps::{Chance, Changes, Deps, RangeSeen, Reagents, Seen, UnitField};
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::spell::usable::{self, CostBasis};
 use crate::ui_action::{PlayerActions, Spells};
-use crate::ui_items::{count_of, InventoryScope};
+use crate::ui_items::{count_of, find_item, InventoryScope, ItemSearch};
 use crate::ui_trainer::TrainerTooltipSubjects;
 
 /// The unit a view's caster cells are computed against, the spell builder `0x52e610`'s fourth
@@ -29,17 +30,6 @@ pub(super) enum ViewCaster<'a> {
     /// Selector 1: the player's charm, else its summon (`0x6e3159`-`0x6e317f`, `0x6e31fe`-
     /// `0x6e3228`), `None` when neither is streamed.
     Pet(Option<&'a benilla_protocol::ObjectFields>),
-}
-
-impl ViewCaster<'_> {
-    /// The pet's `[vtbl+0xa8]`, `CGUnit`'s `0x60cd80`: `UNIT_FIELD_LEVEL × 5`, which
-    /// [`benilla_formats::SpellDisplay::skill_level`] caps at `maxLevel × 5` and divides by 5 as
-    /// `0x60cdb2`-`0x60cdb9` and `0x6e3195` do. No unit reads 0 (`0x6e31a4`).
-    fn pet_skill_value(pet: Option<&benilla_protocol::ObjectFields>) -> u32 {
-        pet.and_then(|p| p.unit_level())
-            .unwrap_or(0)
-            .saturating_mul(5)
-    }
 }
 
 /// The caster-dependent inputs of a spell view: the worn set (`0x5f0c50`), the bags, the form and
@@ -99,7 +89,7 @@ pub(super) fn build_view(
             line.map_or(0, |line| crate::spell::skill_line_value(vctx.store, line))
         }
         // The pet's level is one of the pet's own inputs.
-        ViewCaster::Pet(pet) => ViewCaster::pet_skill_value(pet),
+        ViewCaster::Pet(pet) => crate::spell::pet_skill_value(pet),
     };
     // A cross-referenced spell's own family mask decides its modifiers.
     let lookup = |id| {
@@ -112,8 +102,13 @@ pub(super) fn build_view(
         deps.borrow_mut().home = true;
         home
     };
+    // `$g`/`$G` read the active player's gender byte (`0x508214`), a pet view's too.
+    let gender = || {
+        deps.borrow_mut().gender = true;
+        vctx.store.and_then(|s| s.0.unit_gender()).unwrap_or(0)
+    };
     // `0x6e3130` for this spell: the level the cost's and the cast time's per-level terms read.
-    let pet_level = |pet| d.skill_level(ViewCaster::pet_skill_value(pet));
+    let pet_level = |pet| d.skill_level(crate::spell::pet_skill_value(pet));
     let ctx = benilla_formats::TokenContext {
         durations: &spells.durations,
         radii: &spells.radii,
@@ -122,6 +117,7 @@ pub(super) fn build_view(
         lookup: &lookup,
         mods: Some(vctx.spell_mods),
         unmodified_points: false,
+        gender: &gender,
         home_area: &home_area,
         global: vctx.get,
         printf: &crate::ui_script::token_printf,
@@ -326,18 +322,19 @@ pub(super) fn build_view(
         deps.borrow_mut().item_search(usable::worn_slots_read(d));
     }
     let item_met = matches!(caster, ViewCaster::Pet(_))
-        || vctx.store.is_none_or(|s| {
-            usable::equipped_item_fits(d, s, vctx.objects, vctx.items, vctx.commands)
-        });
+        || vctx
+            .store
+            .is_none_or(|s| usable::equipped_item_fits(d, s, vctx.objects, vctx.items));
     // Reagents (`SPELL_REAGENTS`, `0x854e54`), red when short; one whose template has not
-    // streamed is absent until `feed_spell_tooltips` re-pushes on its arrival.
+    // streamed is absent until `feed_spell_tooltips` re-pushes on its arrival. A build is the
+    // reference's, which looks each reagent up with a callback (`0x52f3f4`).
     let reagents = {
         let mut parts: Vec<String> = Vec::new();
         for (entry, count) in d.reagents.iter().copied().filter(|&(e, _)| e != 0) {
             deps.borrow_mut().reagent(entry);
             let Some(name) = vctx
                 .items
-                .template(entry, 0, vctx.commands)
+                .template(entry, 0, Ask::Event(vctx.commands))
                 .map(|t| t.name.clone())
             else {
                 continue;
@@ -347,8 +344,10 @@ pub(super) fn build_view(
             } else {
                 name
             };
+            // Red only when no copy is found at all (`0x52f49f`, `0x622270` at mask 0 returning
+            // null at `0x52f4a6`); the count in the line is shown, never compared.
             let short = vctx.store.is_some_and(|s| {
-                count_of(&s.0, vctx.objects, entry, InventoryScope::CARRIED) < count
+                find_item(&s.0, vctx.objects, entry, ItemSearch::default()).is_none()
             });
             parts.push(if short {
                 format!("|cffff2020{text}|r")
@@ -367,6 +366,7 @@ pub(super) fn build_view(
         range,
         cast_time,
         cooldown,
+        recovery_ms,
         requires_item,
         item_met,
         requires_form,
@@ -462,17 +462,17 @@ impl SpellFeedMemory {
     }
 }
 
-/// What a reagent's line renders for `entry`: the carried count and whether its name has streamed.
+/// What a reagent's line renders for `entry`: the carried count and whether its name has streamed,
+/// read without an ask: the view's build asked.
 pub(super) fn reagent_state(
     entry: u32,
     store: Option<&ObjectStore>,
     objects: &Objects,
-    items: &mut Items,
-    commands: &NetCommands,
+    items: &Items,
 ) -> (u32, bool) {
-    let named = items.template(entry, 0, commands).is_some();
+    let named = items.template(entry, 0, Ask::Read).is_some();
     let owned = store.map_or(0, |s| {
-        count_of(&s.0, objects, entry, InventoryScope::CARRIED)
+        count_of(&s.0, objects, entry, InventoryScope::DEFAULT)
     });
     (owned, named)
 }
@@ -653,12 +653,7 @@ pub(super) fn feed_spell_tooltips(
     let reagent_state: Reagents = memory
         .reagents
         .keys()
-        .map(|&entry| {
-            (
-                entry,
-                reagent_state(entry, self_store, &objects, &mut items, &commands),
-            )
-        })
+        .map(|&entry| (entry, reagent_state(entry, self_store, &objects, &items)))
         .collect();
     changes = changes.with_reagents(&memory.reagents, &reagent_state);
     memory.reagents = reagent_state;
@@ -737,13 +732,7 @@ fn build_views(
         };
         for &entry in deps.reagents() {
             if let std::collections::btree_map::Entry::Vacant(slot) = memory.reagents.entry(entry) {
-                slot.insert(reagent_state(
-                    entry,
-                    vctx.store,
-                    vctx.objects,
-                    vctx.items,
-                    vctx.commands,
-                ));
+                slot.insert(reagent_state(entry, vctx.store, vctx.objects, vctx.items));
             }
         }
         built.push((id, view));
@@ -755,4 +744,36 @@ fn build_views(
         pushed.insert(id, deps);
     }
     built
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benilla_protocol::field::{
+        FIELD_ITEM_STACK_COUNT, FIELD_OBJECT_ENTRY, FIELD_PLAYER_INV_SLOT_HEAD,
+    };
+    use benilla_protocol::ObjectFields;
+
+    /// The reagent line's carried test is `0x622270` at mask 0 (`0x52f49f`): a copy in the keyring
+    /// or worn in a slot is carried, so its count shows.
+    #[test]
+    fn a_reagent_line_counts_the_keyring_and_worn_gear() {
+        let mut deps = crate::items::TestDeps::new();
+        deps.spawn_item(
+            0xA1,
+            ObjectFields::from_pairs(&[(FIELD_OBJECT_ENTRY, 17056), (FIELD_ITEM_STACK_COUNT, 3)]),
+        );
+        let seat = |slot: u16| {
+            let lo = FIELD_PLAYER_INV_SLOT_HEAD + 2 * slot;
+            [(lo, 0xA1), (lo + 1, 0)]
+        };
+        for slot in [81, 17] {
+            let store = ObjectStore(ObjectFields::from_pairs(&seat(slot)));
+            let items = &deps.items;
+            let mut state = bevy::ecs::system::SystemState::<Objects>::new(&mut deps.world);
+            let objects = state.get(&deps.world);
+            let (owned, _) = reagent_state(17056, Some(&store), &objects, items);
+            assert_eq!(owned, 3, "player slot {slot}");
+        }
+    }
 }

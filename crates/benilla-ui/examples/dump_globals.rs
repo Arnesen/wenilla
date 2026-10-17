@@ -6,7 +6,7 @@
 //! ```
 //!
 //! The namespace is [`UiScript::new`]'s, the engine half before any FrameXML loads, which
-//! `scripts/api-coverage.sh` compares with `reference/1.12-globals.tsv`. `--members` adds what `_G`
+//! `scripts/api-coverage.sh` compares with `reference/lua_globals.tsv`. `--members` adds what `_G`
 //! cannot show: the stdlib tables' members (`table.setn` is one) and the per-type metatables.
 use benilla_ui::script::UiScript;
 
@@ -14,13 +14,13 @@ use benilla_ui::script::UiScript;
 /// and a frame's members are the widget API.
 const STDLIB: &[&str] = &["string", "table", "math", "coroutine", "os", "io", "debug"];
 
-fn main() -> mlua::Result<()> {
+fn main() -> benilla_ui::mlua::Result<()> {
     let script = UiScript::new()?;
     // Joined Lua-side into one `name<TAB>type` string per entry: a `Vec<String>` crosses the mlua
     // boundary directly, where a `Vec<(String, String)>` does not.
     let mut rows: Vec<String> = script.eval(
         "local out = {} \
-         for k, v in pairs(_G) do \
+         for k, v in pairs(getfenv(0)) do \
            if type(k) == 'string' then table.insert(out, k .. '\\t' .. type(v)) end \
          end \
          return out",

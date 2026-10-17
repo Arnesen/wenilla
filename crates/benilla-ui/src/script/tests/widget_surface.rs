@@ -114,17 +114,6 @@ const NOT_YET_ANSWERED: &[(&str, &str, &str)] = &[
         "Button CheckButton LootButton",
         "the same family",
     ),
-    // ── Line spacing, on the five classes that carry text ──
-    (
-        "GetSpacing",
-        "EditBox Font FontString MessageFrame ScrollingMessageFrame",
-        "line spacing is not modelled by `ui_text`'s layout; no caller anywhere measured",
-    ),
-    (
-        "SetSpacing",
-        "EditBox Font FontString MessageFrame ScrollingMessageFrame",
-        "the same — the setter is a layout change, not a stored value",
-    ),
     // ── EditBox mode read-backs ──
     (
         "IsAutoFocus",
@@ -163,11 +152,8 @@ const ALLOWED_BEYOND: &[(&str, &str, &str)] = &[];
 
 /// The reference's widget rows, `table_va -> {name}`.
 fn reference_tables() -> BTreeMap<String, BTreeSet<String>> {
-    let tsv = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../reference/1.12-shapes.tsv"
-    );
-    let text = std::fs::read_to_string(tsv).expect("reference/1.12-shapes.tsv");
+    let tsv = concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/bindings.tsv");
+    let text = std::fs::read_to_string(tsv).expect("reference/bindings.tsv");
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for line in text.lines() {
         if line.starts_with('#') || line.starts_with("name\t") {

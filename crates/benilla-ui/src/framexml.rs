@@ -27,16 +27,27 @@ impl Element {
             .map(|(_, v)| v.as_str())
     }
 
-    /// True only for a case-insensitive `"true"` (`0x6f1b30`); there is no `"false"` branch.
-    pub fn attr_bool(&self, name: &str) -> bool {
+    /// A boolean attribute as the frame loaders read it: `0x6f2cf0` fetches the attribute and a
+    /// missing or empty one is skipped (`0x769891`, `0x77a0b5`), leaving what the constructor set;
+    /// any other goes through the client's string-to-bool `0x6f1b30`
+    /// ([`crate::strings::string_to_bool`]), so `hidden="1"` and `movable="yes"` are true and
+    /// `hidden="false"` is not.
+    pub fn attr_bool_opt(&self, name: &str) -> Option<bool> {
         self.attr(name)
-            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+            .filter(|v| !v.is_empty())
+            .map(crate::strings::string_to_bool)
     }
 
-    /// [`attr_bool`](Self::attr_bool), but `None` when absent, for a flag whose default is on
-    /// (`<EditBox autoFocus="false">`).
-    pub fn attr_bool_opt(&self, name: &str) -> Option<bool> {
-        self.attr(name).map(|v| v.eq_ignore_ascii_case("true"))
+    /// [`attr_bool_opt`](Self::attr_bool_opt) for a flag the constructor leaves off.
+    pub fn attr_bool(&self, name: &str) -> bool {
+        self.attr_bool_opt(name).unwrap_or(false)
+    }
+
+    /// The two attributes the reference compares whole, case-insensitively, against `"true"`
+    /// (`0x862234`) rather than parsing: `virtual` (`0x6ee190`) and `setAllPoints` (`0x767879`).
+    pub fn attr_is_true(&self, name: &str) -> bool {
+        self.attr(name)
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
     }
 
     pub fn name(&self) -> Option<&str> {
@@ -81,22 +92,125 @@ pub enum TopLevel {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedDocument {
     pub items: Vec<TopLevel>,
-    /// An unnamed virtual, an `<Include>` or `<Font>` missing its attribute, a root that is not
-    /// `<Ui>`: logged, and the file goes on.
+    /// An `<Include>` or `<Font>` missing its attribute, a root that is not `<Ui>`: logged, and the
+    /// file goes on.
     pub warnings: Vec<String>,
 }
 
 impl ParsedDocument {
-    /// The named templates, for [`expand`]; an unnamed one (the reference's "Unnamed virtual
-    /// node" error, `0x6ee500`) is absent.
-    pub fn templates(&self) -> HashMap<&str, &Element> {
-        self.items
-            .iter()
-            .filter_map(|item| match item {
-                TopLevel::Template(el) => el.name().map(|name| (name, el)),
-                _ => None,
-            })
-            .collect()
+    /// The named templates, registered in document order as the loader registers them, for
+    /// [`expand`]; an unnamed one (the reference's "Unnamed virtual node" error, `0x6ee1c4`) is
+    /// absent.
+    pub fn templates(&self) -> Templates {
+        let mut templates = Templates::default();
+        for item in &self.items {
+            if let TopLevel::Template(el) = item {
+                if let Some(name) = el.name().filter(|n| !n.is_empty()) {
+                    templates.register(name, el.clone(), None);
+                }
+            }
+        }
+        templates
+    }
+}
+
+/// What an `inherits=` name resolves against: the template table, or the font namespace.
+pub trait Inheritable {
+    /// The element registered under `name`, compared case-insensitively, ASCII only.
+    fn find(&self, name: &str) -> Option<&Element>;
+}
+
+impl Inheritable for HashMap<&str, &Element> {
+    fn find(&self, name: &str) -> Option<&Element> {
+        self.get(name).copied().or_else(|| {
+            self.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| *v)
+        })
+    }
+}
+
+/// The FrameXML template table (`0x6ee500`), global across a UI load's files. A name registers
+/// once: the hash upper-cases it (`SStrHash 0x64b3f0`) and the bucket walk compares with
+/// `SStrCmpI 0x64a4c0`, so the key is the name with ASCII case folded, and the lookup `0x6ee6f0`
+/// matches the same way. Each entry keeps the script-execution context it was registered under.
+#[derive(Debug, Clone, Default)]
+pub struct Templates {
+    entries: HashMap<String, Template>,
+}
+
+#[derive(Debug, Clone)]
+struct Template {
+    element: Element,
+    /// The context word at registration (`[entry+0x1c]`, `0x6ee6be`); `None` is the reference's 0.
+    context: Option<String>,
+}
+
+/// What [`Templates::register`] did with a definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registration {
+    /// The name was free.
+    Added,
+    /// The name's entry came from a non-zero context and this one from context 0 (`0x6ee5c1`).
+    Replaced,
+    /// The name was taken: the reference logs `"Virtual object named %s already exists"`
+    /// (`0x871188`, severity 1) and keeps the first (`0x6ee5a4`).
+    Refused,
+}
+
+impl Templates {
+    /// Register `element` under `name` from `context` (`None` is context 0). A taken name is
+    /// replaced only when its entry's context is non-zero and this one is 0 (`0x6ee594`-`0x6ee5a2`);
+    /// every other repeat is refused and leaves the entry as it was.
+    pub fn register(
+        &mut self,
+        name: &str,
+        element: Element,
+        context: Option<&str>,
+    ) -> Registration {
+        let template = Template {
+            element,
+            context: context.map(str::to_owned),
+        };
+        match self.entries.entry(name.to_ascii_lowercase()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(template);
+                Registration::Added
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if slot.get().context.is_some() && context.is_none() {
+                    slot.insert(template);
+                    Registration::Replaced
+                } else {
+                    Registration::Refused
+                }
+            }
+        }
+    }
+
+    /// The template registered under `name`, case-folded (`0x6ee6f0`).
+    pub fn get(&self, name: &str) -> Option<&Element> {
+        self.entries
+            .get(&name.to_ascii_lowercase())
+            .map(|t| &t.element)
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.entries.contains_key(&name.to_ascii_lowercase())
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Inheritable for Templates {
+    fn find(&self, name: &str) -> Option<&Element> {
+        self.get(name)
     }
 }
 
@@ -176,15 +290,8 @@ pub fn parse(text: &str) -> Result<ParsedDocument, Error> {
             items.push(TopLevel::Font(el));
         } else {
             let el = element_from_node(child);
-            if el.attr_bool("virtual") {
-                if el.name().is_none() {
-                    warnings.push(format!(
-                        "virtual <{}> without a name — a load error in the real client \
-                         (\"Unnamed virtual node\"); kept but unregistered, \
-                         so nothing can inherit it",
-                        el.tag
-                    ));
-                }
+            if el.attr_is_true("virtual") {
+                // An unnamed one is kept: the loader reports it where the reference does.
                 items.push(TopLevel::Template(el));
             } else {
                 items.push(TopLevel::Instance(el));
@@ -315,11 +422,13 @@ fn element_from_node(node: roxmltree::Node) -> Element {
 /// attributes override or extend the template's (case-insensitively). The reference merges
 /// nothing: `LoadXML` re-enters itself on the one object against each template, the most distant
 /// first, then the instance (`0x76985c`; `<Frames>` repeat the walk, `0x76a060`), and reads `name`
-/// and `id` from the instance alone (`PreLoadXML 0x769770`). Here `name` and `virtual` merge like
-/// any attribute. A cycle is skipped with a warning.
+/// and `id` from the instance alone (`PreLoadXML 0x769770`; a region's factory reads its `name`
+/// once, outside the walk, `0x6f2751`/`0x6f27e1`). So here `name` and `id` come from the element
+/// alone, and an unnamed instance stays unnamed; `virtual` merges like any attribute, read only at
+/// registration. A cycle is skipped with a warning.
 pub fn expand(
     element: &Element,
-    templates: &HashMap<&str, &Element>,
+    templates: &dyn Inheritable,
     warnings: &mut Vec<String>,
 ) -> Element {
     expand_known(element, templates, &HashSet::new(), warnings)
@@ -329,7 +438,7 @@ pub fn expand(
 /// `<FontString inherits="GameFontNormalSmall">` takes a font, applied later, not a template.
 pub fn expand_known(
     element: &Element,
-    templates: &HashMap<&str, &Element>,
+    templates: &dyn Inheritable,
     fonts: &HashSet<&str>,
     warnings: &mut Vec<String>,
 ) -> Element {
@@ -339,7 +448,7 @@ pub fn expand_known(
 
 fn expand_inner(
     element: &Element,
-    templates: &HashMap<&str, &Element>,
+    templates: &dyn Inheritable,
     fonts: &HashSet<&str>,
     warnings: &mut Vec<String>,
     active: &mut HashSet<String>,
@@ -360,13 +469,7 @@ fn expand_inner(
             ));
             continue;
         }
-        let hit = templates.get(name).copied().or_else(|| {
-            templates
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                .map(|(_, v)| *v)
-        });
-        let Some(template) = hit else {
+        let Some(template) = templates.find(name) else {
             // A font object is not an unknown template; it is applied after this.
             if !fonts.contains(name) {
                 warnings.push(format!(
@@ -390,9 +493,43 @@ fn expand_inner(
     }
 }
 
-/// [`expand`]'s merge; `over`'s tag wins, and its body when it has one.
+/// The elements `element`'s load runs, in the order the reference runs them: each level's
+/// `inherits` template is loaded through its own recursive load first (`0x76fe5b`), then the
+/// level's own body. [`expand`] flattens the same chain into one element, losing the boundaries
+/// that per-level state (a texture's wrap flag, `0x76fec6`) follows.
+pub fn inherit_chain<'a>(element: &'a Element, templates: &'a dyn Inheritable) -> Vec<&'a Element> {
+    fn walk<'a>(
+        el: &'a Element,
+        templates: &'a dyn Inheritable,
+        active: &mut Vec<String>,
+        out: &mut Vec<&'a Element>,
+    ) {
+        if let Some(name) = el.attr("inherits").filter(|n| !n.is_empty()) {
+            let key = name.to_ascii_lowercase();
+            if !active.contains(&key) {
+                if let Some(template) = templates.find(name) {
+                    active.push(key);
+                    walk(template, templates, active, out);
+                    active.pop();
+                }
+            }
+        }
+        out.push(el);
+    }
+    let mut out = Vec::new();
+    walk(element, templates, &mut Vec::new(), &mut out);
+    out
+}
+
+/// [`expand`]'s merge; `over`'s tag wins, and its body when it has one. `base`'s `name` and `id`
+/// are dropped: they belong to the node they are written on.
 fn merge(base: &Element, over: &Element) -> Element {
-    let mut attrs = base.attrs.clone();
+    let mut attrs: Vec<(String, String)> = base
+        .attrs
+        .iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("name") && !k.eq_ignore_ascii_case("id"))
+        .cloned()
+        .collect();
     for (k, v) in &over.attrs {
         if let Some(slot) = attrs.iter_mut().find(|(ek, _)| ek.eq_ignore_ascii_case(k)) {
             slot.1 = v.clone();
@@ -447,8 +584,74 @@ pub fn resolve_name(raw: &str, parent_name: &str) -> String {
     }
 }
 
+/// C's `atof` (`0x64aaa0`), which the reference reads numeric attributes with (SimpleHTML's
+/// `width=` and `height=`, `spacing=`): the longest numeric prefix after leading whitespace, 0 when
+/// there is none, so `"12px"` is 12.
+pub(crate) fn atof(s: &str) -> f32 {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && (b[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    let start = i;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    // An exponent counts only when complete: `"1e"` is 1, as `strtod` backtracks.
+    if i < b.len() && (b[i] | 0x20) == b'e' {
+        let mut j = i + 1;
+        if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
+            j += 1;
+        }
+        if j < b.len() && b[j].is_ascii_digit() {
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            i = j;
+        }
+    }
+    s[start..i].parse::<f32>().unwrap_or(0.0)
+}
+
 #[cfg(test)]
 mod tests {
+    /// The frame loaders' bool attribute (`0x6f2cf0` then `0x6f1b30`, skipped when missing or
+    /// empty), and the two the reference compares against `"true"` alone.
+    #[test]
+    fn bool_attributes_read_through_the_clients_string_to_bool() {
+        let doc = parse(
+            r#"<Ui><Frame a="1" b="yes" c="On" d="false" e="0" f="" g="maybe" h="true" i="Y" j="off"/></Ui>"#,
+        )
+        .unwrap();
+        let TopLevel::Instance(el) = &doc.items[0] else {
+            panic!("an instance");
+        };
+        for yes in ["a", "b", "c", "h", "i"] {
+            assert_eq!(el.attr_bool_opt(yes), Some(true), "{yes}");
+            assert!(el.attr_bool(yes), "{yes}");
+        }
+        for no in ["d", "e", "g", "j"] {
+            assert_eq!(el.attr_bool_opt(no), Some(false), "{no}");
+            assert!(!el.attr_bool(no), "{no}");
+        }
+        assert_eq!(el.attr_bool_opt("f"), None, "an empty value is skipped");
+        assert_eq!(el.attr_bool_opt("absent"), None);
+        assert!(!el.attr_bool("f") && !el.attr_bool("absent"));
+        assert!(el.attr_is_true("h") && !el.attr_is_true("a") && !el.attr_is_true("i"));
+        // `virtual="1"` is no template: its test is the whole word `true` (`0x6ee190`).
+        let doc = parse(r#"<Ui><Frame name="One" virtual="1"/></Ui>"#).unwrap();
+        assert!(matches!(doc.items[0], TopLevel::Instance(_)));
+    }
+
     use super::*;
 
     #[test]
@@ -600,8 +803,8 @@ print(x)</Script>
             "virtual attribute name/value compare is case-insensitive"
         );
         let templates = doc.templates();
-        assert!(templates.contains_key("MyTemplate"));
-        assert!(templates.contains_key("CasedTemplate"));
+        assert!(templates.contains("MyTemplate"));
+        assert!(templates.contains("CasedTemplate"));
         assert_eq!(templates.len(), 2);
     }
 
@@ -609,11 +812,8 @@ print(x)</Script>
     fn unnamed_virtual_warns_but_does_not_fail() {
         let doc = parse(r#"<Ui><Frame virtual="true"/></Ui>"#).unwrap();
         assert!(matches!(doc.items[0], TopLevel::Template(_)));
-        assert_eq!(doc.warnings.len(), 1);
-        assert!(
-            doc.warnings[0].contains("Unnamed virtual node")
-                || doc.warnings[0].contains("without a name")
-        );
+        // Reported by the loader into the document's record, not at parse.
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert!(
             doc.templates().is_empty(),
             "an unnamed template cannot be inherited"
@@ -765,5 +965,21 @@ print(x)</Script>
         assert_eq!(child_name, "PlayerFrameHealthBar");
         let grandchild_name = resolve_name("$parentText", &child_name);
         assert_eq!(grandchild_name, "PlayerFrameHealthBarText");
+    }
+}
+
+#[cfg(test)]
+mod atof_tests {
+    use super::atof;
+
+    #[test]
+    fn atof_takes_the_numeric_prefix() {
+        assert_eq!(atof("64"), 64.0);
+        assert_eq!(atof(" 12.5px"), 12.5);
+        assert_eq!(atof("-3"), -3.0);
+        assert_eq!(atof("px"), 0.0);
+        assert_eq!(atof(""), 0.0);
+        assert_eq!(atof("1e2"), 100.0);
+        assert_eq!(atof("1e"), 1.0);
     }
 }

@@ -12,7 +12,9 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{bool_or_default, flag};
-use super::cursor::{queue_cursor_update, CursorPayload, CursorSpell};
+use super::cursor::{clear_cursor, set_cursor, CursorPayload, CursorSpell};
+use super::protected::{self, Tag};
+use super::tick::verb;
 use super::{Model, ScriptCall};
 
 const BOOKTYPE_SPELL: &str = "spell";
@@ -57,6 +59,20 @@ pub struct SpellSlotView {
     /// The pet slot's packed word as the server sent it, which `PickupSpell(id, "pet")` puts on the
     /// cursor (`0x4b3260` hands `0x494e20` a pointer to it); 0 in the player book.
     pub packed: u32,
+    /// The face an action bar paints for this spell now, when it is not `texture`: the weapon
+    /// face (`0x4e6870`) or the live `ActiveIconID` (`0x4e6bbd`, the pet bar's `0x4bdd2f`), which
+    /// the book never serves; `Some(None)` paints none. A drop onto a bar writes it, so the slot's
+    /// in-place event reads the face its feed would.
+    pub bar_texture: Option<Option<String>>,
+}
+
+impl SpellSlotView {
+    /// The face an action bar paints for this spell.
+    pub fn bar_face(&self) -> Option<String> {
+        self.bar_texture
+            .clone()
+            .unwrap_or_else(|| self.texture.clone())
+    }
 }
 
 /// The pet's book, the reference's second flat array (`0xb6f098`, count `0xb71174`):
@@ -119,7 +135,9 @@ impl super::UiScript {
     /// `(spell id, onSelf)`.
     pub fn take_spell_casts(&mut self) -> Vec<(u32, bool)> {
         self.take_calls_where(|c| match c {
-            ScriptCall::CastSpell { spell_id, on_self } => Some((*spell_id, *on_self)),
+            ScriptCall::CastSpell {
+                spell_id, on_self, ..
+            } => Some((*spell_id, *on_self)),
             _ => None,
         })
     }
@@ -169,7 +187,11 @@ pub(super) fn is_pet_book(book_type: &str) -> bool {
 /// The reference's shared spell-slot marshaller (`0x4b3ec0`): arg 1 a number, arg 2 a number or
 /// string (`0x4b3ee8`), and the index `trunc(arg1 - 1)` in `[0, 0x400)`, else the binding raises
 /// `Invalid spell slot in <Verb>`. Answers the 1-based id and the normalised book type.
-fn spell_slot_args(id: Value, book_type: Value, verb: &str) -> mlua::Result<(u32, String)> {
+pub(super) fn spell_slot_args(
+    id: Value,
+    book_type: Value,
+    verb: &str,
+) -> mlua::Result<(u32, String)> {
     let invalid = || mlua::Error::runtime(format!("Invalid spell slot in {verb}"));
     // `lua_isnumber` + `lua_tonumber` (`0x6f34d0`/`0x6f3620`): a numeric string is a number.
     let index = match id {
@@ -187,8 +209,10 @@ fn spell_slot_args(id: Value, book_type: Value, verb: &str) -> mlua::Result<(u32
         Value::Integer(_) | Value::Number(_) => String::new(),
         _ => return Err(invalid()),
     };
-    let index = (index - 1.0).trunc();
-    if !(0.0..1024.0).contains(&index) {
+    // `fsub 1.0` then `_ftol` (`0x4b3efd`, `0x532dd9`): the cast wraps to its low dword, so
+    // 4294967297 is slot 1, and the signed result must lie in `[0, 0x400)`.
+    let index = super::binding_abi::ftol(index - 1.0);
+    if !(0..1024).contains(&index) {
         return Err(invalid());
     }
     let book = if is_pet_book(&book) {
@@ -281,43 +305,53 @@ fn rank_number(subtext: Option<&str>) -> u32 {
         .fold(0u32, |acc, c| acc * 10 + c.to_digit(10).unwrap_or(0))
 }
 
-/// `PickupSpell(id, bookType)`, the spell button's drag and shift-click
-/// (`SpellBookFrame.lua:266-290`). It refuses while the cursor holds anything, where the
-/// reference's setters clear the cursor first (`0x495190`, called at `0x494dab` and `0x494f00`).
-fn pickup_spell(model: &mut Model, id: u32, book_type: &str) -> bool {
-    if model.cursor.is_some() {
+/// `PickupSpell(id, bookType)` (`0x4b42a0` into `0x4b3260`), the spell button's drag and
+/// shift-click (`SpellBookFrame.lua:266-290`). It reads the held spell, then clears with
+/// `ClearCursor(1,1)` (`0x4b3293`) whatever is held. Picking up the spell already held only puts
+/// it down (`0x4b329a`), and with another spell held the clear is all (`0x4b32aa`). Otherwise the
+/// slot's setter runs, its own inner clear signalling again on the empty cursor: the pet arm puts
+/// the pet's raw word on the cursor (`0x494e20`, cursor mode 4), the player arm a spell id
+/// (`0x494d20`, mode 3); only the pet word drops on the pet bar. Returns whether a payload went
+/// on.
+fn pickup_spell(lua: &Lua, id: u32, book_type: &str) -> bool {
+    let (payload, target, held) = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let held = match &model.cursor {
+            Some(CursorPayload::Spell(s)) => s.spell_id,
+            _ => 0,
+        };
+        let Some(slot) = book_slot(&model, id, book_type) else {
+            drop(model);
+            verb(lua, clear_cursor);
+            return false;
+        };
+        let payload = if is_pet_book(book_type) {
+            // `0x494e20` refuses type 0 and types 8 and up, before its clear.
+            let packed = slot.packed;
+            (1..=7).contains(&((packed >> 24) & 0x3F)).then(|| {
+                CursorPayload::PetAction(super::cursor::CursorPetAction {
+                    // No source slot: the word comes from the book, not the bar.
+                    src_slot: 0,
+                    packed,
+                    passive: slot.passive,
+                    texture: slot.texture.clone(),
+                    view: super::pet::book_word_view(slot),
+                })
+            })
+        } else {
+            Some(CursorPayload::Spell(CursorSpell {
+                spell_id: slot.spell_id,
+                texture: slot.texture.clone(),
+                passive: slot.passive,
+            }))
+        };
+        (payload, slot.spell_id, held)
+    };
+    verb(lua, clear_cursor);
+    if target == held || held != 0 {
         return false;
     }
-    let Some(slot) = book_slot(model, id, book_type) else {
-        return false;
-    };
-    // The pet arm of `0x4b3260` puts the pet's raw word on the cursor (`0x494e20`, cursor mode 4),
-    // the player arm a spell id (`0x494d20`, mode 3); only the pet word drops on the pet bar.
-    let payload = if is_pet_book(book_type) {
-        // `0x494e20` refuses type 0 and types 8 and up.
-        let packed = slot.packed;
-        if !(1..=7).contains(&((packed >> 24) & 0x3F)) {
-            return false;
-        }
-        CursorPayload::PetAction(super::cursor::CursorPetAction {
-            // No source slot: the word comes from the book, not the bar.
-            src_slot: 0,
-            packed,
-            passive: slot.passive,
-            texture: slot.texture.clone(),
-        })
-    } else {
-        CursorPayload::Spell(CursorSpell {
-            book_slot: id,
-            book_type: book_type.to_string(),
-            spell_id: slot.spell_id,
-            texture: slot.texture.clone(),
-            passive: slot.passive,
-        })
-    };
-    model.cursor = Some(payload);
-    queue_cursor_update(model);
-    true
+    payload.is_some_and(|payload| set_cursor(lua, true, |_| Some(payload)))
 }
 
 /// Register the spellbook globals.
@@ -454,7 +488,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     let (start, duration) =
                         (start_ms as f64 / 1000.0, f64::from(duration_ms) / 1000.0);
                     if start + duration > now || !enabled {
-                        (start, duration, i32::from(enabled))
+                        (
+                            crate::script::clock::held_start(start, enabled, now),
+                            duration,
+                            i32::from(enabled),
+                        )
                     } else {
                         (0.0, 0.0, 1)
                     }
@@ -489,14 +527,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             |lua, (id, book_type, on_self): (Value, Value, Option<Value>)| {
                 let (id, book_type) = spell_slot_args(id, book_type, "CastSpell")?;
                 let on_self = bool_or_default(on_self.as_ref(), false);
+                // The player book's cast is `TryCastSpell`, behind the gate's tag 2 (`0x6e4bc1`),
+                // after the cancels of an active aura or form (`0x4b3466`, `0x4b35da`), so the call
+                // is queued whatever the gate said and carries the answer to the cast alone; the
+                // pet book's `CMSG_PET_ACTION` fork (`0x4b34c8`) is not gated.
+                let pet = is_pet_book(&book_type);
+                let may_cast = pet || protected::gate(lua, Tag::CAST);
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 if let Some(slot) = book_slot(&model, id, &book_type) {
                     if !slot.passive {
                         let spell_id = slot.spell_id;
-                        model.script_calls.push(if is_pet_book(&book_type) {
+                        model.queue_call(if pet {
                             ScriptCall::CastPetSpell { spell_id, on_self }
                         } else {
-                            ScriptCall::CastSpell { spell_id, on_self }
+                            ScriptCall::CastSpell {
+                                spell_id,
+                                on_self,
+                                may_cast,
+                            }
                         });
                     }
                 }
@@ -539,21 +587,44 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // ToggleSpellAutocast(id, bookType), the pet book's right click (`0x4b4240`): queued only for
-    // an autocast-allowed word, the gate `0x4bccb0` applies before sending (`0x4bccf5`). The app
-    // sends `CMSG_PET_SPELL_AUTOCAST` and flips bit 30 on the book and the bar at the drain.
+    // ToggleSpellAutocast(id, bookType), the pet book's right click (`0x4b4240` → `0x4bccb0`): on a
+    // usable pet (`0x4bccce`) an autocast-allowed word (`0x4bccf5`) flips bit 30, every bar slot
+    // holding the same action takes the bit (`0x4bcd20`-`0x4bcd5a`), the app's
+    // `CMSG_PET_SPELL_AUTOCAST` is queued, and `PET_BAR_UPDATE` fires before the verb returns
+    // (`0x4bcdcb`).
     g.set(
         "ToggleSpellAutocast",
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "ToggleSpellAutocast")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let spell_id = book_slot(&model, id, &book_type)
-                .filter(|_| is_pet_book(&book_type))
-                .filter(|s| s.autocast.is_some_and(|(allowed, _)| allowed))
-                .map(|s| s.spell_id);
-            if let Some(spell_id) = spell_id {
-                model.pet_spell_autocasts.push(spell_id);
+            // `SendSpellAutocast 0x4bccb0` opens on the gate's tag 2 (`0x4bccc1`).
+            if !is_pet_book(&book_type) || !protected::gate(lua, Tag::CAST) {
+                return Ok(());
             }
+            super::tick::verb(lua, |model| {
+                if !model.pet_bar.actions_usable {
+                    return;
+                }
+                let Some(book) = slot_index(id).and_then(|i| model.pet_book.slots.get_mut(i))
+                else {
+                    return;
+                };
+                if !book.autocast.is_some_and(|(allowed, _)| allowed) {
+                    return;
+                }
+                let word = book.packed ^ super::pet::AUTOCAST_ON;
+                super::pet::set_book_word(book, word);
+                let spell_id = book.spell_id;
+                for slot in &mut model.pet_bar.slots {
+                    let view = &mut slot.view;
+                    if view.packed & super::pet::ACTION_MASK == word & super::pet::ACTION_MASK {
+                        view.packed =
+                            view.packed & !super::pet::AUTOCAST_ON | word & super::pet::AUTOCAST_ON;
+                        view.autocast_enabled = view.packed & super::pet::AUTOCAST_ON != 0;
+                    }
+                }
+                model.pet_spell_autocasts.push(spell_id);
+                model.raise("PET_BAR_UPDATE", Vec::new());
+            });
             Ok(())
         })?,
     )?;
@@ -566,12 +637,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "CastSpellByName",
         lua.create_function(|lua, (name, on_self): (String, Option<Value>)| {
             let on_self = bool_or_default(on_self.as_ref(), false);
+            // `TryCastSpell`'s gate, tag 2 (`0x6e4bc1`), behind the cancels as for `CastSpell`. The
+            // name resolves in the player book alone, whose leg is the gated one.
+            let may_cast = protected::gate(lua, Tag::CAST);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if let Some(slot) = resolve_spell_by_name(&model.spellbook, &name) {
                 let spell_id = slot.spell_id;
-                model
-                    .script_calls
-                    .push(ScriptCall::CastSpell { spell_id, on_self });
+                model.queue_call(ScriptCall::CastSpell {
+                    spell_id,
+                    on_self,
+                    may_cast,
+                });
             }
             Ok(())
         })?,
@@ -581,8 +657,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "PickupSpell",
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "PickupSpell")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            Ok(pickup_spell(&mut model, id, &book_type))
+            pickup_spell(lua, id, &book_type);
+            Ok(())
         })?,
     )?;
 
@@ -594,9 +670,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "SpellStopCasting",
         lua.create_function(|lua, ()| {
+            // The gate's tag 2 opens the function (`0x6e6e88`); a refusal answers nil, as nothing
+            // to stop does (`0x6e6edd`).
+            let may_stop = protected::gate(lua, Tag::CAST);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if model.casting {
-                model.script_calls.push(ScriptCall::SpellStopCasting);
+            if may_stop && model.casting {
+                model.queue_call(ScriptCall::SpellStopCasting);
                 Ok(Value::Integer(1))
             } else {
                 Ok(Value::Nil)
@@ -604,23 +683,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SpellIsTargeting() (`0x6e6cd0`): true while the targeting cursor is up, else nil.
+    // SpellIsTargeting() (`0x6e6cd0`): 1 while the targeting cursor is up, else nil.
     g.set(
         "SpellIsTargeting",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            if model.spell_targeting {
-                Ok(Value::Boolean(true))
-            } else {
-                Ok(Value::Nil)
-            }
+            Ok(flag(model.spell_targeting))
         })?,
     )?;
 
     // SpellCanTargetUnit("unit") (`0x6e6d00`): the argument is a string or a number (`0x6e6d0e`,
     // else `Usage:`), resolved through `0x515970` (`0x6e6d3a`), which raises for a token it does
     // not know; a token naming nobody answers nil (`0x6e6d43`), and a guid asks `0x6e6460`'s unit
-    // leg whether the standing word clears against it.
+    // leg whether the standing word clears against it, answering 1 or nil.
     g.set(
         "SpellCanTargetUnit",
         lua.create_function(|lua, unit: Value| {
@@ -634,11 +709,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .unit_guids
                 .guid_of(&token)?
                 .is_some_and(|guid| model.spell_targetable_units.contains(&guid));
-            if can {
-                Ok(Value::Boolean(true))
-            } else {
-                Ok(Value::Nil)
-            }
+            Ok(flag(can))
         })?,
     )?;
 
@@ -648,9 +719,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "SpellStopTargeting",
         lua.create_function(|lua, ()| {
+            // The gate's tag 2 opens the function (`0x6e6e38`); a refusal answers nil (`0x6e6e69`).
+            let may_stop = protected::gate(lua, Tag::CAST);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if model.spell_targeting {
-                model.script_calls.push(ScriptCall::SpellStopTargeting);
+            if may_stop && model.spell_targeting {
+                model.queue_call(ScriptCall::SpellStopTargeting);
                 Ok(Value::Integer(1))
             } else {
                 Ok(Value::Nil)
@@ -663,9 +736,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PetBookState, SpellBookState, SpellSlotView, SpellTabView};
+    use super::{pickup_spell, PetBookState, SpellBookState, SpellSlotView, SpellTabView};
     use crate::script::cursor::{CursorAction, CursorPayload};
     use crate::script::UiScript;
+
+    #[test]
+    fn spell_is_targeting_answers_one_or_nil() {
+        let mut s = UiScript::new().unwrap();
+        assert!(s.eval::<bool>("return SpellIsTargeting() == nil").unwrap());
+        s.set_spell_targeting(true);
+        assert!(s.eval::<bool>("return SpellIsTargeting() == 1").unwrap());
+        s.set_spell_targeting(false);
+        assert!(s.eval::<bool>("return SpellIsTargeting() == nil").unwrap());
+    }
 
     /// Two tabs: Fire (Fireball, and Fire Blast marked passive) and Frost (Frost Armor).
     fn book() -> SpellBookState {
@@ -767,11 +850,20 @@ mod tests {
                 .unwrap(),
             (14.0, 10.0, 1)
         );
-        // On hold survives the expiry guard.
+        // On hold survives the expiry guard, and its start is the call's now (`0x6e1517`).
         assert_eq!(
             s.eval::<(f64, f64, i64)>("return GetSpellCooldown(2, BOOKTYPE_SPELL)")
                 .unwrap(),
-            (2.0, 8.0, 0)
+            (20.0, 8.0, 0)
+        );
+        s.tick(0.02);
+        let (start, _, _) = s
+            .eval::<(f64, f64, i64)>("return GetSpellCooldown(2, BOOKTYPE_SPELL)")
+            .unwrap();
+        assert_eq!(start, s.eval::<f64>("return GetTime()").unwrap());
+        assert!(
+            (start - 20.02).abs() < 1e-9,
+            "a second poll reads its own now"
         );
         // Elapsed goes cold.
         assert_eq!(
@@ -910,21 +1002,19 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_spellbook(book());
 
-        s.run(r#"picked = PickupSpell(1, BOOKTYPE_SPELL)"#).unwrap();
-        assert!(s.eval::<bool>("return picked").unwrap());
+        s.run(r#"PickupSpell(1, BOOKTYPE_SPELL)"#).unwrap();
         assert!(s.cursor_payload().is_some());
         assert!(
             matches!(
                 s.cursor_payload(),
                 Some(crate::script::CursorPayload::Spell(c))
-                    if c.book_slot == 1 && c.book_type == "spell" && c.spell_id == 133
+                    if c.spell_id == 133
             ),
             "{:?}",
             s.cursor_payload()
         );
 
-        // Tick first to flush the first pickup's `CURSOR_UPDATE`, so the count below is the
-        // refused call's alone.
+        // The pickup's events fired inside it; the listener below counts the next call's alone.
         s.tick(0.0);
         s.run(
             r#"
@@ -935,48 +1025,54 @@ mod tests {
             "#,
         )
         .unwrap();
-        s.run(r#"PickupSpell(3, BOOKTYPE_SPELL)"#).unwrap(); // already holding -> refused, no-op
+        // Another spell held: the binding's clear is all (`0x4b3293`, `0x4b32aa`).
+        s.run(r#"PickupSpell(3, BOOKTYPE_SPELL)"#).unwrap();
         s.tick(0.01);
-        assert_eq!(
-            s.eval::<i64>("return cursorUpdates").unwrap(),
-            0,
-            "refused pickup fires no CURSOR_UPDATE"
-        );
-        // Still holding the first pickup: a refusal never clobbers it.
-        assert!(
-            matches!(
-                s.cursor_payload(),
-                Some(crate::script::CursorPayload::Spell(c))
-                    if c.book_slot == 1 && c.book_type == "spell" && c.spell_id == 133
-            ),
-            "{:?}",
-            s.cursor_payload()
-        );
+        assert_eq!(s.eval::<i64>("return cursorUpdates").unwrap(), 1);
+        assert!(s.cursor_payload().is_none(), "{:?}", s.cursor_payload());
     }
 
     #[test]
-    fn pickup_spell_refuses_while_already_holding_any_payload() {
+    fn pickup_spell_clears_a_held_payload_first() {
         let mut s = UiScript::new().unwrap();
         s.set_spellbook(book());
+        crate::script::tick::heard::listen(
+            &s,
+            &["CURSOR_UPDATE", "ACTIONBAR_SHOWGRID", "ACTIONBAR_HIDEGRID"],
+            Some("CursorHasSpell()"),
+        );
+        // Another payload: the binding's clear (`0x4b3293`) and the setter's (`0x494dab`) drop
+        // it, then the spell goes on with its grid and no `CURSOR_UPDATE` after (`0x494dd1`).
         s.set_cursor_for_test(CursorPayload::Action(CursorAction {
             src_slot: 1,
             kind: 0,
             action: 111,
             texture: None,
+            count: 0,
+            consumable: false,
         }));
-
-        assert!(!s
-            .eval::<bool>(r#"return PickupSpell(1, BOOKTYPE_SPELL)"#)
-            .unwrap());
-        // The original (action) payload survives untouched.
-        assert!(
-            matches!(
-                s.cursor_payload(),
-                Some(crate::script::CursorPayload::Action(_))
-            ),
-            "{:?}",
-            s.cursor_payload()
+        assert!(pickup_spell(&s.lua, 1, "spell"));
+        assert!(matches!(s.cursor_payload(), Some(CursorPayload::Spell(_))));
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            [
+                "CURSOR_UPDATE nil",
+                "CURSOR_UPDATE nil",
+                "ACTIONBAR_SHOWGRID 1"
+            ]
         );
+        // The held spell again: put down, nothing picked up (`0x4b329a`).
+        assert!(!pickup_spell(&s.lua, 1, "spell"));
+        assert!(s.cursor_payload().is_none());
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            ["ACTIONBAR_HIDEGRID 1", "CURSOR_UPDATE nil"]
+        );
+        // Another spell held: the clear is all (`0x4b32aa`).
+        assert!(pickup_spell(&s.lua, 1, "spell"));
+        crate::script::tick::heard::take(&s);
+        assert!(!pickup_spell(&s.lua, 2, "spell"));
+        assert!(s.cursor_payload().is_none());
     }
 
     #[test]
@@ -1091,9 +1187,7 @@ mod tests {
         assert!(s.take_spell_casts().is_empty(), "pet cast is a no-op");
         assert!(s.take_pet_spell_casts().is_empty());
 
-        assert!(!s
-            .eval::<bool>(r#"return PickupSpell(1, BOOKTYPE_PET)"#)
-            .unwrap());
+        assert!(!pickup_spell(&s.lua, 1, "pet"));
         assert!(s.cursor_payload().is_none(), "pet pickup is a no-op");
     }
 
@@ -1236,11 +1330,52 @@ mod tests {
         );
     }
 
+    /// `0x4bccb0` flips the book word and every bar slot holding the action, then signals
+    /// `PET_BAR_UPDATE` before the verb returns; an unusable pet (`0x4bccce`) does nothing.
+    #[test]
+    fn a_book_autocast_toggle_repaints_book_and_bar_in_place() {
+        let mut s = UiScript::new().unwrap();
+        s.set_pet_book(pet_book());
+        let growl = crate::script::PetActionView {
+            name: Some("Growl".into()),
+            autocast_allowed: true,
+            autocast_enabled: true,
+            packed: 0xC100_0000 | 2649,
+            ..Default::default()
+        };
+        s.set_pet_actions(true, false, true, vec![growl.clone()]);
+        s.run(
+            "function PROBE() \
+               local _, e = GetSpellAutocast(1, BOOKTYPE_PET) \
+               local _, _, _, _, _, _, b = GetPetActionInfo(1) \
+               return tostring(e) .. ',' .. tostring(b) \
+             end",
+        )
+        .unwrap();
+        crate::script::tick::heard::listen(&s, &["PET_BAR_UPDATE"], Some("PROBE()"));
+        s.run("ToggleSpellAutocast(1, BOOKTYPE_PET)").unwrap();
+        assert!(crate::script::tick::heard::take(&s).is_empty());
+        assert!(
+            s.take_pet_spell_autocasts().is_empty(),
+            "unusable: nothing sent"
+        );
+
+        s.set_pet_actions(true, true, true, vec![growl]);
+        s.run("ToggleSpellAutocast(1, BOOKTYPE_PET)").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            ["PET_BAR_UPDATE nil,nil"],
+            "the book and the bar both read autocast off before the verb returns"
+        );
+        assert_eq!(s.take_pet_spell_autocasts(), vec![2649]);
+    }
+
     #[test]
     fn only_an_autocastable_pet_slot_queues_a_toggle() {
         let mut s = UiScript::new().unwrap();
         s.set_spellbook(book());
         s.set_pet_book(pet_book());
+        s.set_pet_actions(true, true, true, Vec::new());
 
         s.run(
             r#"ToggleSpellAutocast(1, BOOKTYPE_PET)
@@ -1281,9 +1416,7 @@ mod tests {
         s.set_spellbook(book());
         s.set_pet_book(pet_book());
 
-        assert!(s
-            .eval::<bool>(r#"return PickupSpell(1, BOOKTYPE_PET)"#)
-            .unwrap());
+        assert!(pickup_spell(&s.lua, 1, "pet"));
         let Some(CursorPayload::PetAction(p)) = s.cursor_payload() else {
             panic!(
                 "expected a pet action payload, got {:?}",
@@ -1295,9 +1428,7 @@ mod tests {
 
         // The player book still produces a spell payload.
         s.run("ClearCursor()").unwrap();
-        assert!(s
-            .eval::<bool>(r#"return PickupSpell(1, BOOKTYPE_SPELL)"#)
-            .unwrap());
+        assert!(pickup_spell(&s.lua, 1, "spell"));
         assert!(matches!(s.cursor_payload(), Some(CursorPayload::Spell(_))));
     }
 
@@ -1412,7 +1543,7 @@ mod tests {
             1,
             "UpdateSpells must fire SPELLS_CHANGED synchronously, as SignalEvent does"
         );
-        // Zero returns, `reference/1.12-shapes.tsv`'s `arity = 0 (exact)`.
+        // Zero returns, `reference/bindings.tsv`'s `arity = 0 (exact)`.
         assert_eq!(s.arity("UpdateSpells()").unwrap(), 0);
         assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
     }

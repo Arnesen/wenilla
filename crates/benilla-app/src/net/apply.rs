@@ -1,14 +1,19 @@
 //! The per-frame wire→ECS bridge systems: [`apply_net_updates`] drains the inbound
-//! [`SessionEvent`] channel through the handler table, and [`tag_self_player`] marks our own
-//! streamed entity. Nothing is applied here: every packet's handler lives with its subsystem.
+//! [`SessionEvent`] channel through the handler table, [`tag_self_player`] marks our own
+//! streamed entity, and [`enter_world_on_self_create`] runs what its create starts. Nothing is
+//! applied here: every packet's handler lives with its subsystem.
 
 use benilla_protocol::SessionEvent;
 use bevy::prelude::*;
 
-use super::{Guid, NetEvents, SelfGuid, SelfPlayer};
+use super::{
+    ClientCommand, Guid, NetCommands, NetEvents, SelfGuid, SelfPlayer, WorldEnterCascadeMessage,
+};
 
 #[cfg(test)]
 mod seam_tests;
+#[cfg(test)]
+mod world_enter_tests;
 
 // ── The per-frame bridge systems ─────────────────────────────────────────────────────────────────
 
@@ -36,5 +41,28 @@ pub(super) fn tag_self_player(
             // Identity only: `MovementState` belongs to the body we steer (`player::embody`).
             commands.entity(entity).insert(SelfPlayer);
         }
+    }
+}
+
+/// Our own player's create, the reference's `0x5dea50` (reached `0x465dbc` → `0x5debe0` →
+/// `0x5dec7b`): `SetActiveMover` (`0x6006e0`, sending `CMSG_SET_ACTIVE_MOVER` at `0x6007ae`), then
+/// the world-enter cascade (`0x5deb60 call 0x4908c0`). `SMSG_LOGIN_VERIFY_WORLD` and
+/// `SMSG_NEW_WORLD` purge the streamed world (`session::worldport`), so a login, a reconnect and
+/// every cross-map worldport create us afresh and tag us again; a same-map teleport creates
+/// nothing. The server has seated the player by then, so nothing sent here is dropped.
+pub(crate) fn enter_world_on_self_create(
+    created: Query<&Guid, Added<SelfPlayer>>,
+    net: Res<NetCommands>,
+    mut cascades: MessageWriter<WorldEnterCascadeMessage>,
+) {
+    for guid in &created {
+        if benilla_assets::trace::enabled() {
+            benilla_assets::trace::line(
+                "mvr",
+                &format!("SET_ACTIVE_MOVER guid={:#x} (self create)", guid.0),
+            );
+        }
+        let _ = net.0.send(ClientCommand::SetActiveMover { guid: guid.0 });
+        cascades.write(WorldEnterCascadeMessage);
     }
 }

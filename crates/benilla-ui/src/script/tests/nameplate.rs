@@ -6,8 +6,10 @@ use crate::script::{PlateGeometry, PlateState, UiScript};
 
 /// A VM with a `WorldFrame` to hang plates off, all [`UiScript::sync_nameplates`] requires.
 fn vm() -> UiScript {
-    let mut s = UiScript::new().unwrap();
+    let mut s = super::common::script();
     s.set_screen_size(1024.0, 768.0);
+    // Stock `Fonts.xml` sets it; a plate or bubble built without it has no font and draws no text.
+    s.run(r#"NAMEPLATE_FONT = "Fonts\\FRIZQT__.TTF""#).unwrap();
     s.run(r#"WorldFrame = CreateFrame("WorldFrame", "WorldFrame") WorldFrame:SetAllPoints()"#)
         .unwrap();
     s.resolve();
@@ -355,6 +357,7 @@ fn a_hovered_plate_emits_no_glow_quad() {
     p.hovered = true;
     p.lit = true;
     drive(&mut s, &[p]);
+    s.tick(0.0);
 
     assert!(s
         .eval::<bool>(
@@ -391,6 +394,7 @@ fn the_plates_texts_carry_the_world_seat_and_its_textures_do_not() {
     use crate::script::QuadContent;
     let mut s = vm();
     drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    s.tick(0.0);
 
     let seats: Vec<(String, bool)> = s
         .extract()
@@ -413,7 +417,8 @@ fn the_plates_texts_carry_the_world_seat_and_its_textures_do_not() {
     // A FontString on an ordinary frame stays on the grid.
     s.run(
         r#"local f = CreateFrame("Frame", "Chrome", UIParent) f:SetAllPoints()
-           local t = f:CreateFontString("ChromeText") t:SetAllPoints() t:SetText("Chrome")"#,
+           local t = f:CreateFontString("ChromeText") t:SetAllPoints()
+           t:SetFont("Fonts\\FRIZQT__.TTF", 12) t:SetText("Chrome")"#,
     )
     .unwrap();
     s.resolve();
@@ -425,7 +430,8 @@ fn the_plates_texts_carry_the_world_seat_and_its_textures_do_not() {
     // An addon's own string on the plate, as pfUI draws its text, gets the same seat.
     s.run(
         r#"local plate = WorldFrame:GetChildren()
-           local t = plate:CreateFontString() t:SetAllPoints() t:SetText("pfName")"#,
+           local t = plate:CreateFontString() t:SetAllPoints()
+           t:SetFont("Fonts\\FRIZQT__.TTF", 12) t:SetText("pfName")"#,
     )
     .unwrap();
     s.resolve();
@@ -446,6 +452,7 @@ fn an_addon_that_retextures_the_glow_gets_its_art_painted() {
     let mut p = plate("Wolf", 30.0, 40.0);
     p.hovered = true;
     drive(&mut s, &[p]);
+    s.tick(0.0);
     s.run(
         r#"local _, glow = WorldFrame:GetChildren():GetRegions()
            glow:SetTexture("Interface\\AddOns\\pfUI\\img\\glow")"#,
@@ -734,4 +741,413 @@ fn a_ground_target_veto_refuses_the_hit_without_disabling_the_mouse() {
         s.hovered_nameplate().is_some(),
         "and the plate takes it back when the cast is gone"
     );
+}
+
+/// A plate's leave (`0x7cb8b0`) publishes the empty mouseover first (`0x7cb8bf`), whose change
+/// requests the fade (`0x492909`), so a window entered from a plate finds the plate's cursor-seated
+/// tooltip gone; a hovered plate retired by its unit leaving takes the same leave (`0x764cce`).
+#[test]
+fn leaving_a_plate_publishes_the_empty_mouseover_before_the_next_enter() {
+    let mut s = vm();
+    let wolf = plate("Wolf", 30.0, 40.0);
+    let key = wolf.key;
+    s.run(
+        r#"
+        CreateFrame("GameTooltip", "GameTooltip", nil, "TestTooltipTemplate"):Hide()
+        Bag = CreateFrame("Button", "Bag")
+        Bag:SetPoint("BOTTOMLEFT", 40, 40); Bag:SetWidth(40); Bag:SetHeight(40)
+        Bag:EnableMouse(true)
+        Bag:SetScript("OnEnter", function() entered_visible = GameTooltip:IsVisible() end)
+        "#,
+    )
+    .unwrap();
+    drive(&mut s, std::slice::from_ref(&wolf));
+    let hover_plate = |s: &mut UiScript| {
+        s.mouse_move(500.0, 384.0);
+        assert!(s.publish_world_mouseover(Some(key)), "the plate's enter");
+        s.run(r#"GameTooltip:SetOwner(WorldFrame, "ANCHOR_CURSOR"); GameTooltip:SetText("Wolf")"#)
+            .unwrap();
+    };
+    hover_plate(&mut s);
+    s.mouse_move(60.0, 60.0);
+    assert!(s.eval::<bool>("return entered_visible == nil").unwrap());
+    assert_eq!(s.world_mouseover(), None);
+
+    hover_plate(&mut s);
+    drive(&mut s, &[]);
+    assert_eq!(s.world_mouseover(), None, "the retired plate's leave");
+    assert!(!s
+        .eval::<bool>("return GameTooltip:IsVisible() == 1")
+        .unwrap());
+    assert!(s.take_errors().is_empty());
+}
+
+/// Freelook's entry disables every plate's mouse through `0x76af50(2)` (`0x60f830`), whose removal
+/// tail (`0x764ba0`, flag 0, `0x76af7f`) ends the hovered plate's hover and runs its leave
+/// (`0x7cb8b0`): `OnLeave` fires, the mouseover is published empty, and the hover re-picks.
+#[test]
+fn freelook_ends_a_hovered_plates_hover_through_its_leave() {
+    let mut s = vm();
+    let wolf = plate("Wolf", 30.0, 40.0);
+    let key = wolf.key;
+    drive(&mut s, std::slice::from_ref(&wolf));
+    s.run(
+        r#"
+        left = 0
+        local plate = WorldFrame:GetChildren()
+        plate:SetScript("OnLeave", function() left = left + 1 end)
+        "#,
+    )
+    .unwrap();
+    s.mouse_move(500.0, 384.0);
+    assert!(s.publish_world_mouseover(Some(key)), "the plate's enter");
+    s.set_nameplate_mouse(false);
+    assert_eq!(
+        s.eval::<i64>("return left").unwrap(),
+        1,
+        "the plate's OnLeave"
+    );
+    assert_eq!(s.world_mouseover(), None, "published empty");
+    assert_eq!(s.hovered_nameplate(), None);
+    assert!(s.take_errors().is_empty());
+}
+
+fn texture_paths(s: &UiScript) -> Vec<String> {
+    s.extract()
+        .into_iter()
+        .filter_map(|quad| match quad.content {
+            crate::script::QuadContent::Texture { path, .. } => path,
+            _ => None,
+        })
+        .collect()
+}
+
+/// World-render allocations miss the WORLD batches already emitted (`0x765896`, `0x7658e2`).
+#[test]
+fn a_new_plate_is_readable_and_clickable_before_its_first_batch() {
+    let mut s = vm();
+    s.run(
+        r#"
+        local chrome = CreateFrame("Frame", "Chrome")
+        chrome:SetPoint("BOTTOMLEFT", 10, 10)
+        chrome:SetWidth(10); chrome:SetHeight(10)
+        local art = chrome:CreateTexture()
+        art:SetAllPoints(); art:SetTexture("ChromeArt")
+        "#,
+    )
+    .unwrap();
+    s.tick(0.0);
+    let wolf = plate("Wolf", 30.0, 40.0);
+    let key = wolf.key;
+    drive(&mut s, &[wolf]);
+    s.run(
+        r#"
+        local plate = WorldFrame:GetChildren()
+        local bar = plate:GetChildren()
+        local child = CreateFrame("Frame", nil, bar)
+        child:SetAllPoints()
+        local art = child:CreateTexture()
+        art:SetAllPoints(); art:SetTexture("PlateChildArt")
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(s
+        .eval::<bool>(
+            r#"
+            local plate = WorldFrame:GetChildren()
+            local bar = plate:GetChildren()
+            local low, high = bar:GetMinMaxValues()
+            return plate:IsShown() == 1 and plate:IsMouseEnabled() == 1
+                and plate:GetAlpha() == 1 and plate:GetCenter() ~= nil
+                and bar:GetValue() == 30 and low == 0 and high == 40
+            "#
+        )
+        .unwrap());
+    s.mouse_move(500.0, 384.0);
+    assert_eq!(s.hovered_nameplate(), Some(key));
+    assert_eq!(texture_paths(&s), ["ChromeArt"]);
+    assert_eq!(
+        texture_paths(&s),
+        ["ChromeArt"],
+        "another extraction is not another UI update"
+    );
+
+    // A zero elapsed tick still builds the next batch, without an elapsed-time timer.
+    s.tick(0.0);
+    let paths = texture_paths(&s);
+    for path in [
+        "Nameplate-Border",
+        "UI-TargetingFrame-BarFill",
+        "PlateChildArt",
+        "ChromeArt",
+    ] {
+        assert!(paths.iter().any(|p| p.contains(path)), "{path}: {paths:?}");
+    }
+    assert!(s.take_errors().is_empty());
+}
+
+/// The next ordinary `OnUpdate` runs before the new plate's first batch (`0x764340`, `0x764347`).
+#[test]
+fn an_on_update_scanner_skins_a_plate_before_any_stock_art_draws() {
+    let mut s = vm();
+    s.run(
+        r#"
+        updates = 0
+        scanner = CreateFrame("Frame")
+        scanner:SetScript("OnUpdate", function()
+            updates = updates + 1
+            for _, plate in ipairs({ WorldFrame:GetChildren() }) do
+                if not plate.skinned then
+                    plate.skinned = true
+                    local border, _, _, level = plate:GetRegions()
+                    border:SetTexture("SkinnedBorder")
+                    level:Hide()
+                    local bar = plate:GetChildren()
+                    bar:SetStatusBarTexture("SkinnedFill")
+                    bar:SetScript("OnValueChanged", function() health_changed = arg1 end)
+                end
+            end
+        end)
+        "#,
+    )
+    .unwrap();
+    s.tick(0.0);
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    assert!(texture_paths(&s).is_empty());
+    assert_eq!(s.eval::<i64>("return updates").unwrap(), 1);
+
+    s.tick(0.0);
+    let paths = texture_paths(&s);
+    assert!(paths.iter().any(|p| p == "SkinnedBorder"));
+    assert!(paths.iter().any(|p| p == "SkinnedFill"));
+    assert!(!paths.iter().any(|p| p.contains("Nameplate-Border")));
+    assert!(!paths
+        .iter()
+        .any(|p| p.contains("UI-TargetingFrame-BarFill")));
+    assert_eq!(s.eval::<i64>("return updates").unwrap(), 2);
+
+    drive(&mut s, &[plate("Wolf", 20.0, 40.0)]);
+    assert_eq!(s.eval::<i64>("return health_changed").unwrap(), 20);
+    assert!(texture_paths(&s).iter().any(|p| p == "SkinnedFill"));
+    assert!(s.take_errors().is_empty());
+}
+
+/// Pool growth and rebinds enter the next batch without delaying native show/hide handlers.
+#[test]
+fn growth_and_reuse_wait_one_update_without_delaying_an_existing_plate() {
+    let mut s = vm();
+    let wolf = plate("Wolf", 30.0, 40.0);
+    let bear = plate("Bear", 10.0, 90.0);
+    drive(&mut s, std::slice::from_ref(&wolf));
+    s.tick(0.0);
+    drive(&mut s, &[wolf.clone(), bear.clone()]);
+    let texts = |s: &UiScript| -> Vec<String> {
+        s.extract()
+            .into_iter()
+            .filter_map(|q| match q.content {
+                crate::script::QuadContent::Text { text, .. } => text,
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(texts(&s).iter().any(|t| t == "Wolf"));
+    assert!(!texts(&s).iter().any(|t| t == "Bear"));
+    s.tick(0.0);
+    assert!(texts(&s).iter().any(|t| t == "Bear"));
+    s.run(
+        r#"
+        pooled = WorldFrame:GetChildren()
+        shows = 0; hides = 0
+        pooled:SetScript("OnHide", function() hides = hides + 1 end)
+        pooled:SetScript("OnShow", function()
+            shows = shows + 1
+            local border = this:GetRegions()
+            border:SetTexture("ReboundBorder")
+        end)
+        "#,
+    )
+    .unwrap();
+    drive(&mut s, std::slice::from_ref(&bear));
+    drive(&mut s, &[bear, plate("Cat", 5.0, 10.0)]);
+    assert_eq!(
+        s.eval::<(i64, i64, bool)>("return shows, hides, pooled:IsShown() == 1")
+            .unwrap(),
+        (1, 1, true),
+        "pooling fires both native visibility transitions synchronously"
+    );
+    assert!(!texts(&s).iter().any(|t| t == "Cat"));
+    assert!(!texture_paths(&s).iter().any(|p| p == "ReboundBorder"));
+    s.tick(0.0);
+    assert!(texts(&s).iter().any(|t| t == "Cat"));
+    assert!(texture_paths(&s).iter().any(|p| p == "ReboundBorder"));
+    assert!(s.take_errors().is_empty());
+}
+
+/// Later strata build their batches after the WORLD callback (`0x765896`, `0x7658e2`).
+#[test]
+fn a_pending_plate_does_not_defer_art_promoted_to_a_later_stratum() {
+    let mut s = vm();
+    s.tick(0.0);
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    s.run(
+        r#"
+        local plate = WorldFrame:GetChildren()
+        local child = CreateFrame("Frame", nil, plate)
+        child:SetAllPoints(); child:SetFrameStrata("HIGH")
+        local art = child:CreateTexture()
+        art:SetAllPoints(); art:SetTexture("HighChildArt")
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(texture_paths(&s), ["HighChildArt"]);
+
+    s.run(r#"WorldFrame:GetChildren():SetFrameStrata("HIGH")"#)
+        .unwrap();
+    let paths = texture_paths(&s);
+    for path in [
+        "Nameplate-Border",
+        "UI-TargetingFrame-BarFill",
+        "HighChildArt",
+    ] {
+        assert!(paths.iter().any(|p| p.contains(path)), "{path}: {paths:?}");
+    }
+    assert!(s.take_errors().is_empty());
+}
+
+/// A scroll child draws in its ScrollFrame's callback, ignoring its own stratum (`0x78754c`).
+#[test]
+fn a_pending_plates_scroll_child_uses_the_callback_stratum() {
+    let mut s = vm();
+    s.tick(0.0);
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    s.run(
+        r#"
+        local plate = WorldFrame:GetChildren()
+        local scroll = CreateFrame("ScrollFrame", nil, plate)
+        scroll:SetAllPoints()
+        local child = CreateFrame("Frame", nil, scroll)
+        child:SetWidth(128); child:SetHeight(32)
+        scroll:SetScrollChild(child)
+        child:SetFrameStrata("HIGH")
+        local art = child:CreateTexture()
+        art:SetAllPoints(); art:SetTexture("ScrollChildArt")
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(texture_paths(&s).is_empty());
+    s.tick(0.0);
+    assert!(texture_paths(&s).iter().any(|p| p == "ScrollChildArt"));
+    assert!(s.take_errors().is_empty());
+}
+
+/// A plate hidden and re-shown in one world pass keeps the records its batch copied
+/// (`0x772fd0`), so a unit taking a drawn plate's slot draws in that frame.
+#[test]
+fn a_slot_retired_and_retaken_in_one_sync_draws_at_once() {
+    let mut s = vm();
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    s.tick(0.0);
+    drive(&mut s, &[plate("Bear", 10.0, 90.0)]);
+    let texts: Vec<String> = s
+        .extract()
+        .into_iter()
+        .filter_map(|q| match q.content {
+            crate::script::QuadContent::Text { text, .. } => text,
+            _ => None,
+        })
+        .collect();
+    assert!(texts.iter().any(|t| t == "Bear"), "{texts:?}");
+    assert!(s.take_errors().is_empty());
+}
+
+/// The name's and level's `GetFont` for the plate at child `n`, as `nil` or the path.
+fn plate_fonts(s: &mut UiScript, n: usize) -> (Option<String>, Option<String>) {
+    let read = |s: &mut UiScript, region: &str| {
+        s.eval::<Option<String>>(&format!(
+            "local _, _, name, level = ({{ WorldFrame:GetChildren() }})[{n}]:GetRegions() \
+             local r = {region} return (r:GetFont())"
+        ))
+        .unwrap()
+    };
+    (read(s, "name"), read(s, "level"))
+}
+
+/// The constructor looks `NAMEPLATE_FONT` up for each FontString (`0x7cb3f9`, `0x7cb49b` →
+/// `0x703bf0`) and only then, so a plate built after the global is set takes it, and a plate built
+/// before keeps its font when the global changes.
+#[test]
+fn a_new_plate_takes_the_nameplate_font_global_and_a_built_one_keeps_its_font() {
+    let mut s = vm();
+    s.run(r#"NAMEPLATE_FONT = "Fonts\\ARIALN.TTF""#).unwrap();
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    let arial = Some("Fonts\\ARIALN.TTF".to_string());
+    assert_eq!(plate_fonts(&mut s, 1), (arial.clone(), arial.clone()));
+
+    s.run(r#"NAMEPLATE_FONT = "Fonts\\MORPHEUS.TTF""#).unwrap();
+    drive(
+        &mut s,
+        &[plate("Wolf", 30.0, 40.0), plate("Bear", 10.0, 90.0)],
+    );
+    let morph = Some("Fonts\\MORPHEUS.TTF".to_string());
+    assert_eq!(plate_fonts(&mut s, 1), (arial.clone(), arial));
+    assert_eq!(plate_fonts(&mut s, 2), (morph.clone(), morph));
+    assert!(s.take_errors().is_empty());
+}
+
+/// The lookup answers the global's text for a string or a number (`lua_isstring` `0x6f3510`,
+/// `lua_tostring` `0x6f3690`) and "" for anything else; `SetFont` rejects the empty path
+/// (`0x44d05c`), so such a plate's FontStrings get no font.
+#[test]
+fn a_missing_or_non_string_nameplate_font_leaves_the_plate_strings_without_a_font() {
+    for (setup, want) in [
+        ("", None),
+        ("NAMEPLATE_FONT = nil", None),
+        (r#"NAMEPLATE_FONT = """#, None),
+        ("NAMEPLATE_FONT = true", None),
+        ("NAMEPLATE_FONT = {}", None),
+        ("NAMEPLATE_FONT = function() end", None),
+        ("NAMEPLATE_FONT = 12", Some("12")),
+    ] {
+        let mut s = vm();
+        s.run("NAMEPLATE_FONT = nil").unwrap();
+        s.run(setup).unwrap();
+        drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+        let want = want.map(str::to_string);
+        assert_eq!(plate_fonts(&mut s, 1), (want.clone(), want), "{setup:?}");
+    }
+}
+
+/// The lookup is a `lua_gettable` on the globals (`0x704373`), so an `_G` `__index` runs inside
+/// it and may call any verb, the Model's included: strict-mode and global-tracking addons do. The
+/// lookup is made for a new plate only, and outside the Model's borrow.
+#[test]
+fn a_global_index_metamethod_may_touch_the_model_during_a_plates_font_lookup() {
+    let mut s = vm();
+    s.run(
+        r#"NAMEPLATE_FONT = nil
+           hits = 0
+           setmetatable(getfenv(0), { __index = function(t, k)
+               if k == "NAMEPLATE_FONT" then
+                   hits = hits + 1
+                   CreateFrame("Frame", nil, UIParent):SetWidth(UIParent:GetWidth())
+               end
+               return nil
+           end })"#,
+    )
+    .unwrap();
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    assert_eq!(s.eval::<i64>("return hits").unwrap(), 2, "name and level");
+    // A built plate is not looked up again, and a retaken slot is not a new plate.
+    drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
+    drive(&mut s, &[plate("Bear", 10.0, 90.0)]);
+    assert_eq!(s.eval::<i64>("return hits").unwrap(), 2);
+    drive(
+        &mut s,
+        &[plate("Bear", 10.0, 90.0), plate("Wolf", 30.0, 40.0)],
+    );
+    assert_eq!(s.eval::<i64>("return hits").unwrap(), 4);
+    assert!(s.take_errors().is_empty());
 }

@@ -17,6 +17,7 @@ use mlua::{Lua, Value};
 
 use super::binding_abi::flag;
 use super::{binding_abi, Model};
+use crate::script::binding_abi::Idx;
 
 /// The `SkillLine.dbc` id behind weapon subclass `0..=20` (vmangos `Item.cpp:700-707`), `None`
 /// for the obsolete, exotic and misc rows; with no weapon the skill is [`SKILL_UNARMED`]
@@ -168,6 +169,8 @@ pub struct InvSlotView {
     pub item_id: u32,
     /// Whether the item may go on an action bar, by the same filter as a bag slot's.
     pub bar_placeable: bool,
+    /// The action bar's count gate, as a bag slot's ([`super::container::ContainerSlot`]).
+    pub consumable: bool,
     /// Icon texture path (`Interface\Icons\…`); `None` while the template answer is in flight.
     pub icon: Option<String>,
     /// `ITEM_FIELD_STACK_COUNT`, or for the ammo slot the bag-summed carried total.
@@ -188,14 +191,35 @@ pub struct InvSlotView {
     /// Bound at runtime (`0x5da2c0`): `ITEM_FIELD_FLAGS & 1`, or an enchant whose
     /// `SpellItemEnchantment` row binds. The tooltip's bind line then says Soulbound.
     pub already_bound: bool,
+    /// The template's bonding (`[rec+0x194]`), 0 while unresolved: the equip arms ask on 2.
+    pub bonding: u32,
+    /// For a container, how many of its seats hold an item, as
+    /// [`super::container::ContainerSlot::occupied_seats`].
+    pub occupied_seats: Option<u32>,
+    /// The on-use spell the dispatcher reads (`0x5d8c80`), 0 for none or while unresolved.
+    pub use_spell: u32,
+    /// The template's block 0 names a spell (`+0x11c`, any trigger): `GetInventoryItemCooldown`
+    /// runs no query without one (`0x4c8b47`).
+    pub spell_0: bool,
+    /// The arm `UseInventoryItem` takes in the dispatcher, with no equip fork; `link` is set once
+    /// the template is cached, which the dispatcher needs (`0x5d8d5c`).
+    pub use_fork: super::container::UseFork,
     /// An `|Hitem:…|h[Name]|h` link once the name is known.
     pub link: Option<String>,
-    /// Whether a pending item operation covers this slot (`IsInventoryItemLocked`).
-    pub locked: bool,
+    /// The item object's guid, 0 while unresolved: `IsInventoryItemLocked` reads the client's lock
+    /// on it.
+    pub guid: u64,
     /// The 1-based live-API slots this item could be equipped into; empty if none.
     pub equip_slots: Vec<u8>,
     /// The resolved `ITEM_FIELD_CREATOR` name, the tooltip's "<Made by %s>" line.
     pub creator: Option<String>,
+    /// The resolved `ITEM_FIELD_GIFTCREATOR` name, the tooltip's `ITEM_WRAPPED_BY` line.
+    pub gift_creator: Option<String>,
+    /// The `ITEM_FIELD_CREATOR` guid, 0 for none: with no [`Self::creator`] yet, the name the
+    /// tooltip waits for.
+    pub creator_guid: u64,
+    /// The `ITEM_FIELD_GIFTCREATOR` guid, 0 for none, as [`Self::creator_guid`].
+    pub gift_creator_guid: u64,
     /// The resolved enchant slots in slot order. An inspected player's record has all 7 too, but
     /// vmangos fills only PERM and TEMP (`Player.cpp:10594-10595`).
     pub enchants: Vec<super::EnchantView>,
@@ -330,7 +354,7 @@ impl super::UiScript {
     /// `CMSG_USE_ITEM`, bag 255 and the 0-based slot.
     pub fn take_inventory_uses(&mut self) -> Vec<u32> {
         self.take_calls_where(|c| match c {
-            super::ScriptCall::UseInventoryItem(id) => Some(*id),
+            super::ScriptCall::UseInventoryItem { slot, .. } => Some(*slot),
             _ => None,
         })
     }
@@ -406,7 +430,7 @@ pub(super) const KEYRING_INV_SLOTS: std::ops::RangeInclusive<usize> = 82..=113;
 
 /// The keyring's container id (`KEYRING_CONTAINER`, `MainMenuBarBagButtons.lua:1`); must match
 /// `ui_items::KEYRING_CONTAINER` in the app, which feeds the keys as that container.
-const KEYRING_CONTAINER: i64 = -2;
+pub(super) const KEYRING_CONTAINER: i64 = -2;
 
 impl Model {
     /// The item `token` exposes at live-API id `slot`, the one routing the `GetInventoryItem*`
@@ -449,6 +473,23 @@ impl Model {
                 .and_then(|s| costs.equipped.get(&s))
         };
         cost.copied().unwrap_or(0)
+    }
+
+    /// The use cooldown `(start, duration, enabled)` in `GetTime` seconds of the player's item at
+    /// live id `slot`: the vault and keyring bands by their container slots, the doll's from the
+    /// worn push.
+    pub(super) fn inv_slot_cooldown(&self, slot: usize) -> Option<(f64, f64, bool)> {
+        if BANK_INV_SLOTS.contains(&slot) {
+            let n = (slot - BANK_INV_SLOTS.start() + 1) as u32;
+            self.container_cooldowns.get(&(BANK_CONTAINER, n)).copied()
+        } else if KEYRING_INV_SLOTS.contains(&slot) {
+            let n = (slot - KEYRING_INV_SLOTS.start() + 1) as u32;
+            self.container_cooldowns
+                .get(&(KEYRING_CONTAINER, n))
+                .copied()
+        } else {
+            self.worn_cooldowns.get(&slot).copied()
+        }
     }
 
     fn bank_inv_slot(&self, slot: usize) -> Option<InvSlotView> {
@@ -497,10 +538,20 @@ impl InvSlotView {
             name: slot.link.as_deref().and_then(link_item_name),
             durability: slot.durability,
             already_bound: slot.already_bound,
+            bonding: slot.bonding,
+            occupied_seats: slot.occupied_seats,
+            use_spell: slot.use_spell,
+            spell_0: slot.spell_0,
             link: slot.link.clone(),
-            locked: slot.locked,
+            guid: slot.guid,
             creator: slot.creator.clone(),
+            gift_creator: slot.gift_creator.clone(),
+            creator_guid: slot.creator_guid,
+            gift_creator_guid: slot.gift_creator_guid,
             enchants: slot.enchants.clone(),
+            // The item's own flags (UNLOCKED, WRAPPED) and expiry, which the tooltip builder reads.
+            flags: slot.flags,
+            duration_ms: slot.duration_ms,
             // Slot 20 (`Bag0Slot`) among `equip_slots` marks a container (`INVTYPE_BAG`). The bank
             // vault is past the `0x16` short-circuit, so only `Some` versus `None` matters.
             contents_count: slot.equip_slots.contains(&20).then_some(0),
@@ -845,13 +896,45 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetInventoryItemCooldown(unit, slot) → (start, duration, enable). Not fed: with no
-    // equipped-item cooldown source it answers `(0, 0, 1)`, no cooldown, as the container verb
-    // does; stock calls it on every slot update (`PaperDollFrame.lua:691`).
+    // The reference's verbatim strings (`0x848a74`, `0x848a40`): arg 1 neither number nor string,
+    // arg 2 not a number or not a whitelisted slot.
+    const USAGE_GET_INVENTORY_ITEM_COOLDOWN: &str = "Usage: GetInventoryItemCooldown(unit, slot)";
+    const INVALID_SLOT_GET_INVENTORY_ITEM_COOLDOWN: &str =
+        "Invalid inventory slot in GetInventoryItemCooldown";
+    // GetInventoryItemCooldown(unit, slot) (`0x4c8a60`) → (start, duration, enable) on the
+    // `GetTime` clock, three zeros for every case but one (`0x4c8bdf`): slot -1 (the ammo leg), a
+    // unit that is not the active player (a player in range passes `0x4944a0`, but only the active
+    // player's table holds items, `0x6228a0`), an empty slot, a template with no block-0 spell
+    // (`+0x11c`, `0x4c8b47`) and a charged one with none left (`0x4c8b55`-`0x4c8b6a`). The rest
+    // push the item query `0x6e2ed0`, scaled by 0.001 (`0x4c8b9e`, `0x4c8bbd`), with its enable
+    // as it is.
     g.set(
         "GetInventoryItemCooldown",
-        lua.create_function(|_, (_token, _slot): (Option<String>, i64)| {
-            Ok((0.0f64, 0.0f64, 1i64))
+        lua.create_function(|lua, (unit, slot): (Value, Value)| {
+            let token =
+                super::binding_abi::string_arg(lua, unit, USAGE_GET_INVENTORY_ITEM_COOLDOWN)?;
+            let slot0 = super::binding_abi::number_arg(
+                lua,
+                slot,
+                INVALID_SLOT_GET_INVENTORY_ITEM_COOLDOWN,
+            )?
+            .wrapping_sub(1);
+            if !inventory_slot_reader_accepts(slot0) {
+                return Err(mlua::Error::RuntimeError(
+                    INVALID_SLOT_GET_INVENTORY_ITEM_COOLDOWN.into(),
+                ));
+            }
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let live = usize::try_from(slot0 + 1).ok();
+            let answer = live
+                .filter(|_| slot0 != -1 && token.eq_ignore_ascii_case("player"))
+                .filter(|&live| {
+                    model
+                        .inv_slot("player", live)
+                        .is_some_and(|v| v.item_id != 0 && v.spell_0)
+                })
+                .and_then(|live| model.inv_slot_cooldown(live));
+            Ok(super::container::item_cooldown_triple(answer, model.now))
         })?,
     )?;
 
@@ -859,7 +942,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // 4 broken.
     g.set(
         "GetInventoryAlertStatus",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_mut::<Model>().expect("model app_data");
             Ok(if (1..=12).contains(&index) {
                 i64::from(model.inventory_alerts[index - 1])

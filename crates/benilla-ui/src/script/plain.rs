@@ -111,7 +111,7 @@ fn render(v: &Value, depth: u8, budget: &mut usize) -> PlainValue {
         }
         Value::Function(_) => PlainValue::Str("<function>".into()),
         Value::Thread(_) => PlainValue::Str("<thread>".into()),
-        Value::LightUserData(_) | Value::UserData(_) => PlainValue::Str("<userdata>".into()),
+        Value::LightUserData(_) => PlainValue::Str("<userdata>".into()),
         _ => PlainValue::Str("<?>".into()),
     }
 }

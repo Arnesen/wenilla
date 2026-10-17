@@ -13,13 +13,13 @@ use bevy::prelude::*;
 
 use benilla_formats::SpellCatalog;
 use benilla_protocol::messages::{UnitAuraSlot, AURA_FLAG_CANCELABLE, UNIT_AURA_POSITIVE_SLOTS};
-use benilla_ui::script::{AuraState, ScriptValue, TrackingState, UiScript};
+use benilla_ui::script::{AuraState, TrackingState, UiScript};
 
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::net::{
     ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, Reputations, SelfPlayer,
 };
-use crate::target::{can_assist, Factions, Selection};
+use crate::target::{can_assist, Assist, Factions, Selection};
 use crate::ui_action::Spells;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
@@ -43,14 +43,24 @@ struct DurationStamp {
 }
 
 impl AuraDurations {
-    /// Records one `SMSG_UPDATE_AURA_DURATION`.
-    pub(crate) fn set(&mut self, slot: u8, remaining_ms: u32, now: f64) {
-        let total = f64::from(remaining_ms) / 1000.0;
+    /// Records one `SMSG_UPDATE_AURA_DURATION`. The reference stores `now + ms` over the slot's
+    /// expiry (`0x4e4390`) and its reader answers 0 once `now - expiry >= 0` (`0x4e4472`), so a
+    /// negative span is a lapsed timer that replaces the slot's last one; here that is no stamp,
+    /// which every reader answers `(0, 0)`. The one exception is `i32::MIN`: the wrapped
+    /// difference `now - (now + 0x80000000)` is itself negative, so the `js` is taken and the
+    /// reader returns `expiry - now`, 2^31 ms (24.8 days) left, shrinking with the clock.
+    pub(crate) fn set(&mut self, slot: u8, remaining_ms: i32, now: f64) {
         if trace_period().is_some() {
             info!(
                 "aura trace: SMSG_UPDATE_AURA_DURATION slot {slot} = {remaining_ms} ms @ {now:.2}"
             );
         }
+        if remaining_ms < 0 && remaining_ms != i32::MIN {
+            self.by_slot.remove(&slot);
+            return;
+        }
+        // `i32::MIN` reads back as the unsigned 2^31.
+        let total = f64::from(remaining_ms.unsigned_abs()) / 1000.0;
         self.by_slot.insert(
             slot,
             DurationStamp {
@@ -79,8 +89,9 @@ pub(crate) struct PlayerAuraCache {
     auras: Vec<CachedAura>,
 }
 
-/// [`feed_auras`] fires `PLAYER_AURAS_CHANGED` and `UNIT_AURA` inline, so a feed whose state their
-/// handlers re-read (the stance feed) runs `.before(AuraEvents)` or they read last frame's.
+/// [`feed_auras`] fires `PLAYER_AURAS_CHANGED` inline and seats the unit tokens the field events
+/// fan out over, so a feed whose state their handlers re-read (the stance feed) runs
+/// `.before(AuraEvents)` or they read last frame's.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AuraEvents;
 
@@ -93,7 +104,14 @@ impl Plugin for UiAuraPlugin {
             .init_resource::<PlayerAuraCache>()
             .init_resource::<AuraFeedMemory>()
             // Feed before the VM dispatch, drain after it.
-            .add_systems(Update, feed_auras.in_set(UnitFeed).in_set(AuraEvents))
+            // After this frame's world publish, so the gain names the unit in the same frame.
+            .add_systems(
+                Update,
+                feed_auras
+                    .in_set(UnitFeed)
+                    .in_set(AuraEvents)
+                    .after(crate::ui_tooltip::MouseoverPublish),
+            )
             .add_systems(Update, drain_aura_cancels.after(UiInput))
             // Torn down only at the session's end, not with the avatar, which a worldport drops.
             .add_systems(OnExit(ClientState::InWorld), end_session_aura_state);
@@ -134,8 +152,8 @@ fn reconcile(cache: &mut Vec<CachedAura>, live: &[UnitAuraSlot], now: f64) {
 /// What a frame repaints on; not the countdown, which the button polls.
 type AuraProjection = (u32, u8, bool, Option<String>);
 
-/// The feed's edge memory: per token, the projection last pushed. Behind a
-/// [`crate::ui_script::VmMemo`], so a `/reload`'s new VM reads it fresh and `UNIT_AURA` re-fires.
+/// The feed's memory of what each VM holds. Behind a [`crate::ui_script::VmMemo`], so a
+/// `/reload`'s new VM reads it fresh and `PLAYER_AURAS_CHANGED` re-fires.
 #[derive(Resource, Default)]
 struct AuraFeedMemory {
     /// What this VM was last told.
@@ -144,7 +162,7 @@ struct AuraFeedMemory {
     traced_at: f64,
 }
 
-/// The per-VM `UNIT_AURA` edge keys.
+/// One VM's: the player's projection, `PLAYER_AURAS_CHANGED`'s edge key, and every other list.
 #[derive(Default)]
 struct AuraFeedMemo {
     present: bool,
@@ -308,7 +326,14 @@ fn buffs_visible_on(
     if self_store.is_some_and(|s| s.0.unit_charmed_by().is_some()) {
         return false;
     }
-    can_assist(Some(store), factions, reputations, self_store, owner_store)
+    can_assist(
+        Some(store),
+        factions,
+        reputations,
+        self_store,
+        owner_store,
+        Assist::PlayerToUnit,
+    )
 }
 
 /// `UNIT_FIELD_FLAGS` bit 27, `0x08000000` (`0x5195b6`).
@@ -377,7 +402,8 @@ fn tracking_state_of(
     })
 }
 
-/// The units the resolver's guid globals name, from `UnitTokens`' own sources.
+/// The units the resolver's guid globals name, from `UnitTokens`' own sources; the mouseover is
+/// the VM's published one.
 #[derive(bevy::ecs::system::SystemParam)]
 struct AuraUnits<'w> {
     selection: Res<'w, Selection>,
@@ -385,8 +411,6 @@ struct AuraUnits<'w> {
     // `Option`: a UI-only harness lacks their plugins; without the party's no group token names
     // anyone.
     group: Option<Res<'w, crate::ui_party::GroupState>>,
-    hovered: Option<Res<'w, crate::target::Hovered>>,
-    hovered_go: Option<Res<'w, crate::target::HoveredObject>>,
     interact: Option<Res<'w, crate::ui_session::InteractNpc>>,
 }
 
@@ -530,22 +554,22 @@ fn feed_auras(
             )
     };
     let target_guid = units.selection.guid.unwrap_or(0);
+    // The resolver reads the published pair `[0xb4e2c8]` (`0x515bb6`, `0x515bdb`), not the pick,
+    // and takes it only as a unit (`0x515bca mov ecx,8`, `0x515bd9 je`): a GameObject, a corpse or
+    // nothing names nobody.
+    let mouseover = script
+        .world_mouseover()
+        .filter(|&guid| held(guid).is_some_and(|s| s.is_unit()))
+        .unwrap_or(0);
     let catalog_moved = spells.as_ref().is_some_and(|s| s.is_changed());
     let unit_changed = memo.units.feed(
         &mut script,
         units::Inputs {
             group: units.group.as_deref(),
-            me: (self_guid.0, changed),
+            me: self_guid.0,
             pet: pet_guid,
             target: target_guid,
-            // The world pick, as `UnitTokens` resolves `"mouseover"`.
-            mouseover: units
-                .hovered
-                .as_deref()
-                .and_then(|h| {
-                    h.mouseover(&units.hovered_go.as_deref().copied().unwrap_or_default())
-                })
-                .map_or(0, |(_, guid)| guid),
+            mouseover,
             npc: units.interact.as_deref().and_then(|i| i.1).unwrap_or(0),
             held,
             buffs_visible,
@@ -554,7 +578,9 @@ fn feed_auras(
         },
     );
 
-    if unit_changed.contains(&"target") && std::env::var_os("BENILLA_AURA_DUMP").is_some() {
+    let target_moved =
+        unit_changed.contains(&target_guid) || (target_guid == self_guid.0 && changed);
+    if target_moved && std::env::var_os("BENILLA_AURA_DUMP").is_some() {
         let l = if target_guid == self_guid.0 {
             Some(list.as_slice())
         } else {
@@ -576,17 +602,12 @@ fn feed_auras(
     script.set_player_auras(list);
     script.set_tracking(tracking);
     if changed {
-        script.fire_event("UNIT_AURA", vec![ScriptValue::Str("player".into())]);
         // The cache rebuild's own event, no arguments (`0x4e437f`): the stock buff bar and
-        // `MiniMapTrackingFrame` register it, the unit frames `UNIT_AURA`.
+        // `MiniMapTrackingFrame` register it. The unit frames' `UNIT_AURA` is the aura fields'
+        // watches (ids 41 and 107), the flags watcher's bit 27 and the stats packet's record diff
+        // (`0x5e57d8`, the pet's `0x5e58f1`), all fired by `crate::ui_unit` after this push; a
+        // token that comes to name another unit hears it from its own event, not from here.
         script.fire_event("PLAYER_AURAS_CHANGED", vec![]);
-    }
-    // The reference fires these from the live descriptor's aura fields and the record's aura bits
-    // (`0x5e57d8`, the pet's `0x5e58f1`), to every token naming the guid (`0x515e50`); a token
-    // naming a new unit fires too, and a token clearing fires nothing, since the frames react to
-    // their own events (`PLAYER_TARGET_CHANGED`, `UNIT_PET`, `PARTY_MEMBERS_CHANGED`).
-    for token in unit_changed {
-        script.fire_event("UNIT_AURA", vec![ScriptValue::Str(token.into())]);
     }
 }
 
@@ -868,6 +889,30 @@ mod tests {
         );
         // No stamp: a permanent aura, which gets no packet.
         assert_eq!(join_duration(None, 200.0, 200.0, 5000.0), (0.0, 0.0));
+    }
+
+    /// The span is a signed dword that the reference adds to its clock (`0x4e4390`) and reads back
+    /// as 0 once past (`0x4e4472`): a core that sends -1 for a permanent aura reads as no time
+    /// left, and the slot's earlier timer is overwritten, not kept.
+    #[test]
+    fn a_negative_span_leaves_the_slot_reading_zero_and_drops_its_last_timer() {
+        let mut durations = AuraDurations::default();
+        durations.set(0, 300_000, 15.0);
+        let live = join_duration(durations.by_slot.get(&0), 15.0, 15.0, 900.0);
+        assert_eq!(live.0, 300.0, "control: a positive span joins");
+
+        durations.set(0, -1, 16.0);
+        assert_eq!(
+            join_duration(durations.by_slot.get(&0), 15.0, 16.0, 901.0),
+            (0.0, 0.0),
+            "-1 is not 4,294,967 seconds, and not the earlier 300"
+        );
+        // The one negative the client's wrapped sign test reads as time left (`0x4e4472`).
+        durations.set(1, i32::MIN, 16.0);
+        let (total, _) = join_duration(durations.by_slot.get(&1), 15.0, 16.0, 901.0);
+        assert_eq!(total, 2_147_483.648, "i32::MIN reads as 2^31 ms");
+        durations.set(2, 0, 16.0);
+        assert!(durations.by_slot.contains_key(&2), "0 ms is a stamp, now");
     }
 
     /// The duration packet arrives about a frame before the delta that fills its slot.

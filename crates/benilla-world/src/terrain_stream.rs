@@ -76,6 +76,8 @@ pub struct TerrainStreamer {
     wdt_ungated: bool,
     /// This WMO-only map's one building is registered as a placement.
     global_wmo: bool,
+    /// The loaded WDT sets `MPHD` bit 0, the client's map-is-one-object flag (`[0xc9e384]`).
+    one_object: bool,
     /// [`ViewFocus::paced`] last frame: the residency latch re-arms on the edge into a load, since
     /// a viewer with no avatar is unpaced forever and the level would re-arm it every frame.
     was_paced: bool,
@@ -91,6 +93,12 @@ pub struct TerrainStreamer {
 const GLOBAL_WMO_UID: u32 = u32::MAX;
 
 impl TerrainStreamer {
+    /// Whether the loaded map, whose `Map.dbc` directory is `dir`, has its WDT's one-object flag
+    /// set; false until that WDT has loaded.
+    pub(crate) fn is_one_object_map(&self, dir: &str) -> bool {
+        self.one_object && self.map_dir.as_deref() == Some(dir)
+    }
+
     /// `(spawned, requested)` tiles for the debug panel: furnished, and all in the window.
     pub fn residency(&self) -> (usize, usize) {
         let spawned = self.tiles.values().filter(|t| t.furnished).count();
@@ -175,7 +183,7 @@ pub struct WorldLoadProgress {
     pub ready: usize,
     pub total: usize,
     /// The tile under the view focus is furnished; false at startup and whenever a teleport lands
-    /// on unloaded ground, same map or not, which is the loading screen's backstop trigger.
+    /// on unloaded ground, same map or not. The loading screen's backstop trigger.
     pub focus_resident: bool,
     /// The focus tile and its 8 neighbours are up with every placement they reference; consumers
     /// read [`Self::presentable`], which adds the backlogs.
@@ -234,7 +242,7 @@ pub struct ViewFocus {
     /// The picked character's map and position, before an avatar exists.
     entry: Option<(u32, [f32; 3])>,
     /// The focus is settled, so spawning is paced; false through entry, a teleport and a world
-    /// swap, while the loading cover absorbs the burst.
+    /// swap, while the loading cover or the settle hold absorbs the burst.
     pub(crate) paced: bool,
 }
 
@@ -382,6 +390,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<StaticMerge>()
             .init_resource::<crate::model_forms::ModelForms>()
             .init_resource::<CurrentArea>()
+            .init_resource::<queries::AreaMap>()
             // In `WorldStage::Stream`, between the teleport snap (Input) and the loading cover
             // (Present), so a swap never renders uncovered. `finish_colliders` heads the chain so
             // the collider queue read downstream is this frame's.
@@ -516,6 +525,10 @@ fn stream_terrain(
     }
     // A failed WDT falls back to ungated probing, warned once per map, never to no world.
     let wdt_index = state.wdt.as_ref().and_then(|h| wdts.get(h));
+    let one_object = wdt_index.is_some_and(|w| w.is_one_object());
+    if state.one_object != one_object {
+        state.one_object = one_object;
+    }
     if wdt_index.is_none() && !state.wdt_ungated {
         if let Some(h) = &state.wdt {
             if matches!(
@@ -658,7 +671,7 @@ fn stream_terrain(
     }
 
     // Request new tiles once the WDT has answered. While paced, one per frame and nearest first,
-    // so a fresh row's landings stagger; entry and teleports request all at once under the cover.
+    // so a fresh row's landings stagger; entry and teleports request all at once.
     let mut fresh_empty = true;
     if wdt_index.is_some() || state.wdt_ungated {
         let live = focus.paced;
@@ -981,6 +994,7 @@ fn drop_streamed_world(
     if std::mem::take(&mut state.global_wmo) {
         release_placement(commands, placements, GLOBAL_WMO_UID, activity);
     }
+    state.one_object = false;
     placements.materials.clear();
     // Cleared here, not by the flush's dead-key discard: tile keys repeat across maps, and the
     // new map's tiles are inserted this same frame. The same holds for the merge accumulators,

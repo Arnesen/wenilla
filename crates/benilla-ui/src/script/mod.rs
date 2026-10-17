@@ -1,14 +1,15 @@
 //! The Lua scripting host: the engine-free VM that runs FrameXML and addons over the frame arena,
-//! the anchor resolver and the draw order. It embeds mlua's Lua 5.1, reshaped by [`lua50`] to
-//! answer as the 1.12 client's Lua 5.0.
+//! the anchor resolver and the draw order. It embeds benilla-lua through benilla-mlua's
+//! mlua-shaped API: 5.1.5's runtime under the 1.12 grammar, reshaped by [`lua50`] to answer as
+//! the 1.12 client's Lua 5.0.
 //!
 //! A frame's Lua value is a table whose `T[0]` lightuserdata (`0x701bd0`) holds a `u32` id where
 //! the reference holds the `CScriptObject*`, with an `__index` metatable (`0x7020b0`). A handler
 //! is `pcall`ed with `this`, `event` and `arg1..argN` set as globals and restored after
 //! (`0x704d50`); it also gets `(self, event, ...)` as arguments, which 1.12 does not pass.
 //!
-//! The `LUAI_MAXCSTACK` discipline: Rust holds no persistent Lua handle, since each owned `Table`
-//! or `Function` takes a slot on mlua's reference thread, capped at the vendored 8000. Lua-side
+//! The handle discipline: Rust holds no persistent Lua handle, since each owned `Table` or
+//! `Function` is a collector root that keeps everything it reaches alive. Lua-side
 //! state lives in the registry under named keys, fetched per call; [`Model`] is plain data in
 //! `lua.app_data`, borrowed briefly and released before re-entering Lua.
 
@@ -34,6 +35,8 @@ mod calls;
 mod camera_view;
 mod channel;
 mod char_stats;
+pub mod chat_bubble;
+pub use chat_bubble::{BubbleGeometry, BubbleState};
 mod chat_misc;
 mod chat_send;
 mod chat_types;
@@ -47,12 +50,15 @@ mod death;
 pub mod diagnostics;
 mod editbox;
 pub mod instance;
-pub(crate) use editbox::{adopt_text_region, editbox_text_region_wrapper};
+pub(crate) use editbox::{adopt_text_region, apply_xml_bytes, editbox_text_region_wrapper};
+pub(crate) use tooltip::post_load as tooltip_post_load;
 pub(crate) mod addon;
 mod addon_enable;
 pub mod addon_gate;
+mod char_name;
 mod client;
 mod clock;
+mod cvar_checks;
 mod cvars;
 mod dressup;
 mod duel;
@@ -62,10 +68,37 @@ mod follow;
 pub(crate) mod font;
 mod font_block;
 mod frame_enum;
+pub use char_name::{check_char_name, NameCharsets, NameLists, NoNameLists, CHAR_NAME_SUCCESS};
+mod glue;
+mod glue_addons;
+mod glue_core;
+mod glue_create;
+mod glue_realm;
+mod glue_select;
+pub use glue::{glue_events, VmKind};
+pub use glue_core::{
+    glue_status_key, launch_addon_url, launch_addon_url_allowed, launch_url_allowed, GlueCall,
+    GlueCredentials, GlueHost, GlueNotice, GlueRequest, GlueSignal, GlueText, NoticeState,
+    GLUE_STATUS_KEYS,
+};
+pub use glue_create::{
+    GlueCreateCatalog, GlueCreateClass, GlueCreateCounts, GlueCreateLook, GlueCreateRace,
+    GlueCreateRequest, GlueNameRow,
+};
+pub use glue_realm::{
+    realm_load_classify, realm_load_stats, GlueRealm, GlueRealmCategory, GlueRealmCells,
+    GlueRealmType, RealmSortKey,
+};
+pub use glue_select::{GlueCharacter, GlueScenePane, GlueSelectCells};
+mod denied;
+mod gm_survey;
 mod gm_ticket;
 mod gossip;
 mod guild;
 mod handler_prof;
+mod hyperlink;
+mod lfg;
+mod lottery;
 mod screenshot;
 mod tabard;
 pub use handler_prof::HandlerRow;
@@ -79,6 +112,16 @@ mod item_stats;
 mod item_text;
 pub mod keybind;
 mod keyboard;
+mod layer_batch;
+mod lock_check;
+mod protected;
+pub(crate) mod taint;
+pub(crate) mod texel;
+pub(crate) mod use_gates;
+mod wheel;
+pub(crate) use keyboard::enable_for_script;
+pub use keyboard::{KeyUp, KeyWalk};
+pub use wheel::WheelWalk;
 mod layout;
 mod layout_cache;
 mod loot;
@@ -90,10 +133,12 @@ mod measure;
 mod merchant;
 mod messageframe;
 mod minimap;
+mod movieframe;
 pub mod nameplate;
 pub use nameplate::{PlateBitWrites, PlateGeometry, PlateState, PLATE_BIT_ENEMY, PLATE_BIT_FRIEND};
 mod model;
 mod modelframe;
+mod mouseover;
 mod net_stats;
 pub(crate) mod object;
 pub use object::frame_kind_from_tag;
@@ -122,15 +167,20 @@ mod spellbook;
 mod stable;
 mod statusbar;
 mod stdlib;
+/// An mlua error's bare Lua message, the one value the error handler is called with.
+pub use stdlib::lua_message;
 mod summon;
 mod talent;
 mod taxi;
 mod tick;
+pub use tick::system_chat_args;
 mod tooltip;
 mod tooltip_item;
 mod tooltip_spell;
 mod tooltip_unit;
 mod ui_errors;
+mod ui_scale;
+mod update_walk;
 pub use tooltip_unit::TooltipTint;
 mod trade;
 mod tradeskill;
@@ -138,6 +188,7 @@ mod trainer;
 mod types;
 mod unit;
 mod video_pairs;
+pub(crate) mod visibility;
 mod weapon_enchant;
 mod who_sort;
 mod worldmap;
@@ -146,51 +197,60 @@ mod worn_display;
 mod zone_text;
 
 pub use action::{ActionSlot, ActionState, ActionUse};
-pub use addon::AddOnInfo;
-pub use addon_enable::EnableHash;
+pub use addon::{addon_load_context, AddOnInfo, AddonLoad, AddonReply, AddonSecurity};
+pub use addon_enable::{AddonStateFiles, EnableHash, EnableStore};
 pub use addon_message::{AddonDistribution, AddonSend};
 pub use auction::{
     AuctionBid, AuctionCategory, AuctionHighBidder, AuctionItemRow, AuctionListState, AuctionQuery,
     AuctionStartRequest, AuctionState, AuctionSubCategory, BIDDER, LIST, OWNER, SORT_KEYS,
 };
 pub use aura::{AuraState, TrackingState};
-pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
+pub use backdrop::{Backdrop, Insets};
 pub use bank::BankState;
 pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
 pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
 pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
-pub use calls::{NearestMode, ScriptCall};
+pub use calls::{NearestMode, QueuedCall, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
-pub use channel::{ChannelCommand, ZoneChannelRow};
+pub use channel::{ChannelCommand, RecruitmentPlan, RecruitmentRun, ZoneChannelRow};
 pub use char_stats::{
     weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, UnitCombatStats,
     BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_misc::EmoteRequest;
-pub use chat_send::ChatSend;
+pub use chat_send::{ChatGroup, ChatSend, SEND_CHAT_TOKENS};
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
 pub use container::{
-    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PendingWrap,
-    PetitionSlotView, RandomPropertyView, UiCursorMode,
+    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, ContainerUse, EnchantView,
+    PendingWrap, PetitionSlotView, RandomPropertyView, UiCursorMode, UseArm, UseFork,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
+pub use cursor::equip::{AutoEquip, BIND_WHEN_EQUIPPED};
 pub use cursor::money::coin_icon;
 pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorMoney, CursorPayload,
-    CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
+    CursorPetAction, CursorSpell, CursorStablePet, EnchantAnswer, EnchantConfirm, HeldCursor,
+    ItemPick, WorldPick, EQUIPMENT_BAG,
+};
+pub use cvar_checks::{
+    check_base_mip, check_camera_decay, check_camera_distance_max, check_camera_pitch,
+    check_camera_rate, check_camera_smooth_style, check_camera_time, check_camera_view,
+    check_camera_yaw, check_farclip, check_frill_density, check_refresh, check_shadow_level,
+    check_small_cull, check_tex_lod_bias, check_triple_buffer, CvarCheck, CvarVerdict,
 };
 pub use cvars::{small_cull_text, sstr_to_int};
 pub use cvars::{
     MultisampleFormat, ScreenResolution, SeededCvar, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
-    CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, VIDEO_DEFAULT_CVARS,
-    WORLD_DETAIL_STOPS,
+    CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, LUA_CVAR_LIMIT,
+    VIDEO_DEFAULT_CVARS, WORLD_DETAIL_STOPS,
 };
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;
 pub use follow::FollowRequest;
+pub use gm_survey::{GmSurveyTables, SurveyAnswerSend};
 pub use gm_ticket::{GmTicketIntent, GmTicketWrite};
 pub use gossip::{GossipMenu, GossipOptionView, GossipQuestRow};
 pub use guild::{
@@ -198,11 +258,14 @@ pub use guild::{
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
 pub use input_verbs::{BindingInput, FiredInput, HeldInput};
-pub use modelframe::ModelPaneFrame;
+pub use lfg::LfgDungeon;
+pub use lottery::UnservedSend;
+pub use modelframe::{CharacterPaneFrame, ModelPaneFrame};
 pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
 };
+pub use protected::InputEvents;
 pub use tabard::{
     emblem_mask_path, TabardHost, TabardIntent, EMBLEM_MASK_TOKEN, TABARD_COUNTS,
     TABARD_CREATION_COST,
@@ -214,7 +277,8 @@ pub(crate) use button::{set_label_font_justify_h_lua, LabelFont};
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
-pub use layout_cache::{FrameLayout, LayoutPoint};
+pub use layout_cache::{AnchorLayout, FrameLayout, LayoutPoint};
+pub use lock_check::{check_lock, LockCheck, LockOpener, LockOpeners, LockSlotView};
 pub use loot::{LootRow, LootState, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macros::{MacroBinding, MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
@@ -225,15 +289,20 @@ pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub(crate) use model::Model;
-pub use model::{FontProbe, TextureProbe, TextureSizeProbe, WorldLocProjector};
+pub use model::{
+    FontProbe, TextureProbe, TextureSizeFn, TextureSizeProbe, WorldLocFn, WorldLocProjector,
+};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
-pub use pvp::{HonorState, InspectHonorData};
+pub use pvp::{decorated_name, pvp_name_global_keys, HonorState, InspectHonorData, RankTitle};
 pub use quest::{
     QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
 };
-pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
-pub(crate) use region::{apply_font_parts, implicit_creation_anchor_lua};
+pub use quest_log::{QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS};
+pub(crate) use region::{
+    apply_font_parts, apply_wrap_attrs, implicit_creation_anchor_lua, install_loaded_texture,
+    load_texture_file,
+};
 pub use reputation::{FactionEntry, ReputationSend, ReputationState};
 pub use session::SessionRequest;
 pub use shapeshift::ShapeshiftFormView;
@@ -258,12 +327,13 @@ pub use trainer::{
     TrainerAbilityReq, TrainerGroup, TrainerService, TrainerServiceCategory, TrainerSkillReq,
     TrainerState, TrainerTooltip, TRAINER_GROUP_KNOWN,
 };
+pub(crate) use types::{monochrome_flag, FontExplicit, MeasuredText, RegionData};
 pub use types::{
     BlendMode, EditAction, EditBoxAdvanceRequest, EditBoxTextUi, EditOutcome, EditUnit,
     ExtractedQuad, FontObject, FontShadow, Gradient, JustifyH, JustifyV, LineMeasureRequest,
     MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords,
 };
-pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
+pub use unit::by_name::{self, NameCandidate};
 pub use unit::{
     grey_band, level_reads_unknown, parse_unit_token, power_token, unit_is_grey, PlayerRecord,
     SelectionRequest, UnitBase, UnitGuids, UnitState, UnitTokenParse,
@@ -271,8 +341,8 @@ pub use unit::{
 pub use weapon_enchant::WeaponEnchant;
 pub use who_sort::{WhoSortChain, WhoSortKey};
 pub use worldmap::{
-    WorldMapContinentView, WorldMapLandmarkView, WorldMapOverlayView, WorldMapState,
-    WorldMapZoneView,
+    WorldMapContinentView, WorldMapLandmarkSource, WorldMapLandmarkView, WorldMapLevel,
+    WorldMapOverlayView, WorldMapSheetRow, WorldMapState, WorldMapZoneView,
 };
 pub use worldstate::WorldStateUiView;
 pub use worn_display::WornDisplay;
@@ -284,7 +354,7 @@ use crate::layout::Rect;
 use crate::order::ZTarget;
 use crate::widget::{FrameHandle, KindState};
 
-// Registry keys, the only roots of Lua-side state (the `LUAI_MAXCSTACK` discipline).
+// Registry keys, the only roots of Lua-side state.
 const REG_FRAME_META: &str = "__benilla_frame_meta";
 const REG_REGION_META: &str = "__benilla_region_meta";
 const REG_FRAME_METHODS: &str = "__benilla_frame_methods";
@@ -336,9 +406,9 @@ pub(crate) const TEXTURE_ONLY_METHODS: [&str; 12] = [
     "GetVertexColor",
 ];
 
-/// FontString-only: the font, text, justify and shadow block and the string metrics.
+/// FontString-only: the font, text, justify, shadow and spacing block and the string metrics.
 /// `GetStringHeight`, `SetFormattedText` and `SetSize` are not 1.12 FontString methods.
-pub(crate) const FONTSTRING_ONLY_METHODS: [&str; 21] = [
+pub(crate) const FONTSTRING_ONLY_METHODS: [&str; 23] = [
     "SetFont",
     "GetFont",
     "SetFontObject",
@@ -349,6 +419,8 @@ pub(crate) const FONTSTRING_ONLY_METHODS: [&str; 21] = [
     "GetShadowColor",
     "SetShadowOffset",
     "GetShadowOffset",
+    "SetSpacing",
+    "GetSpacing",
     "SetJustifyH",
     "GetJustifyH",
     "SetJustifyV",
@@ -400,12 +472,13 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// ScrollFrame's three scroll kinds are `+0x32c`/`+0x334`/`+0x33c` (script-name map `0x786c40`).
 /// The EditBox's vtable (`0x81c910`) replaces the key and char slots: an EditBox never fires
 /// `OnKeyDown`, and fires `OnChar` only from `Insert`, with the inserted text (`0x77c13c`).
-const SCRIPT_KINDS: [&str; 39] = [
+const SCRIPT_KINDS: [&str; 44] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
-    // The model pane's two, fired by the tick's model pass (`tick_model_panes`): `OnUpdateModel`
-    // at the top of a visible pane's paint, `OnAnimFinished` when the armed sequence completes.
+    // The model pane's two: `OnUpdateModel` from its paint in the draw pass
+    // (`paint_model_panes`), `OnAnimFinished` from its clock advance in the update walk
+    // (`advance_pane`) when the armed sequence completes.
     "OnUpdateModel",
     "OnAnimFinished",
     "OnShow",
@@ -435,9 +508,12 @@ const SCRIPT_KINDS: [&str; 39] = [
     "OnDragStart",
     "OnDragStop",
     "OnReceiveDrag",
-    // A release over a message-frame hyperlink span, `OnHyperlinkClick(link, text, button)`;
-    // `ChatFrameTemplate` passes it to `SetItemRef` (`ChatFrame.xml:15`, `ChatFrame.lua:1534`).
+    // A text frame's hyperlink button hands it these ([`hyperlink`]): the click as
+    // `OnHyperlinkClick(link, text, button)`, which `ChatFrameTemplate` passes to `SetItemRef`
+    // (`ChatFrame.xml:15`, `ChatFrame.lua:1534`), and the enter and leave with the link alone.
     "OnHyperlinkClick",
+    "OnHyperlinkEnter",
+    "OnHyperlinkLeave",
     // The GameTooltip's engine-fired scripts: money render, money clear and world-hover default
     // placement, all three wired by the stock template (`GameTooltipTemplate.xml:617-625`).
     "OnTooltipAddMoney",
@@ -450,9 +526,15 @@ const SCRIPT_KINDS: [&str; 39] = [
     "OnDoubleClick",
     // The layout event (base map `0x76a0d0`, `+0x120`), fired by the resolve pass on a size change.
     "OnSizeChanged",
-    // The key channels, fired by [`keyboard`]'s walk (`0x765f10`). `OnKeyUp` never fires, as the
-    // host feeds no key-up, but a frame carrying only `OnKeyUp` still consumes every key-down and
-    // runs nothing, the reference's own asymmetry.
+    // The movie frame's three (script map `0x78c2e0`): fired by its player alone, which does not
+    // exist here ([`movieframe`]), so they are stored and never run.
+    "OnMovieFinished",
+    "OnMovieShowSubtitle",
+    "OnMovieHideSubtitle",
+    // The key channels: `OnChar` and `OnKeyDown` fired by [`keyboard`]'s walks (`0x765df0`,
+    // `0x765f10`), `OnKeyUp` by the key-up dispatcher (`0x765fd0`) on the frame that took the
+    // key's down. A frame carrying only `OnKeyUp` still consumes every key-down and runs nothing
+    // on it, the reference's own asymmetry.
     "OnChar",
     "OnKeyDown",
     "OnKeyUp",
@@ -485,117 +567,186 @@ pub fn addon_chunk_name(folder: &str, file: &str) -> String {
     format!("@Interface\\AddOns\\{folder}\\{}", file.replace('/', "\\"))
 }
 
+/// The state as `0x7039e0` leaves it: benilla-lua's client-shaped opening with the host's base
+/// functions, the dialect and the stdlib layer set over it, which replace values and add no key.
+fn open_state(vm: VmKind) -> mlua::Result<Lua> {
+    // `Lua::new` sets `InitLua`'s 256 KB threshold first (`0x7039f2`), then opens the state.
+    let lua = Lua::new();
+    let mut model = Model::new();
+    model.vm = vm;
+    lua.set_app_data(model);
+    // Before anything can fire a handler and while no app-data borrow is held, as the
+    // profiler's slot requires.
+    handler_prof::install(&lua);
+
+    // `0x7039e0`: the base array `0x811e28`, the four libraries and the compat chunk `0x8722e8`.
+    stdlib::sandbox(&lua)?;
+    // Before the stdlib layer, so its aliases bind the 5.0-shaped functions.
+    lua50::install(&lua)?;
+    taint::install(&lua)?;
+    stdlib::install(&lua)?;
+
+    Ok(lua)
+}
+
+/// What both FrameScript states hold: FrameScript's Lua init (`0x7039e0`), the bare state the glue
+/// builder starts from (left by startup `0x402aee` on its first build, re-run by its reset
+/// `0x703b80` on a later one) and `UI_Init` rebuilds through its own, and the three registrars
+/// the glue registrar `0x46abb0` shares with `UI_Init`: `0x51bb20` (the clock, `ConsoleExec` and
+/// the file trio), `0x706350` (the frame factory globals and the 17 widget method tables) and
+/// `0x4587f0` (sound).
+fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
+    let lua = open_state(vm)?;
+
+    // `0x51bb20` (table `0x8503f4`): `GetTime`, `GetGameTime` and `ConsoleExec`. `ReadFile`,
+    // `DeleteFile` and `AppendToFile` are not built.
+    clock::install(&lua)?;
+    chat_misc::install_console_exec(&lua)?;
+
+    // `0x706350`: `CreateFrame`, `CreateFont`, `GetNumFrames`, `EnumerateFrames` (table
+    // `0x872e74`), then the widget method tables `0x7a2e70`..`0x78dc60`.
+    object::install(&lua)?;
+    frame_enum::install(&lua)?;
+    // After `object`, whose `publish_global` it reuses, and before any FrameXML loads:
+    // `Loader::do_font` publishes into the tables this builds.
+    font::install(&lua)?;
+    messageframe::install(&lua)?;
+    scrollframe::install(&lua)?;
+    simplehtml::install(&lua)?;
+    slider::install(&lua)?;
+    colorselect::install(&lua)?;
+    movieframe::install(&lua)?;
+    modelframe::install(&lua)?;
+
+    // `0x4587f0` (table `0x835a50`): `PlaySound`, `PlayMusic`, `PlaySoundFile`, `StopMusic`.
+    sound::install(&lua)?;
+    Ok(lua)
+}
+
+/// The in-game surface: everything `UI_Init` registers past the shared registrars (`0x490250` and
+/// the calls around it), the in-game widget types' method tables among it.
+fn install_in_game(lua: &Lua) -> mlua::Result<()> {
+    addon::install(lua)?;
+    addon_message::install(lua)?;
+    chat_send::install(lua)?;
+    chat_types::install(lua)?;
+    chat_misc::install(lua)?;
+    channel::install(lua)?;
+    chat_window::install(lua)?;
+    client::install(lua)?;
+    screenshot::install(lua)?;
+    zone_text::install(lua)?;
+    object::install_in_game(lua)?;
+    region::install_in_game(lua)?;
+    modelframe::install_player_model(lua)?;
+    unit::install(lua)?;
+    party::install(lua)?;
+    social::install(lua)?;
+    guild::install(lua)?;
+    petition::install(lua)?;
+    binder::install(lua)?;
+    summon::install(lua)?;
+    bind_confirm::install(lua)?;
+    instance::install(lua)?;
+    gm_ticket::install(lua)?;
+    gm_survey::install(lua)?;
+    denied::install(lua)?;
+    lfg::install(lua)?;
+    lottery::install(lua)?;
+    duel::install(lua)?;
+    follow::install(lua)?;
+    camera_view::install(lua)?;
+    input_verbs::install(lua)?;
+    session::install(lua)?;
+    pvp::install(lua)?;
+    worn_display::install(lua)?;
+    death::install(lua)?;
+    aura::install(lua)?;
+    cvars::install(lua)?;
+    nameplate::install_verbs(lua)?;
+    saved::install(lua)?;
+    keybind::install(lua)?;
+    ui_errors::install(lua)?;
+    pointer::install(lua)?;
+    action::install(lua)?;
+    action_bar_toggles::install(lua)?;
+    container::install(lua)?;
+    cursor::install(lua)?;
+    spellbook::install(lua)?;
+    macros::install(lua)?;
+    talent::install(lua)?;
+    dialog_verbs::install(lua)?;
+    battlefield_score::install(lua)?;
+    battlefield_queue::install(lua)?;
+    battlefield_positions::install(lua)?;
+    tutorial::install(lua)?;
+    worldmap_arrow::install(lua)?;
+    shapeshift::install(lua)?;
+    pet::install(lua)?;
+    gossip::install(lua)?;
+    merchant::install(lua)?;
+    bank::install(lua)?;
+    stable::install(lua)?;
+    item_text::install(lua)?;
+    mail::install(lua)?;
+    auction::install(lua)?;
+    trainer::install(lua)?;
+    taxi::install(lua)?;
+    trade::install(lua)?;
+    inspect::install(lua)?;
+    dressup::install(lua)?;
+    tabard::install(lua)?;
+    tradeskill::install(lua)?;
+    craft::install(lua)?;
+    reputation::install(lua)?;
+    skills::install(lua)?;
+    item_stats::install(lua)?;
+    char_stats::install(lua)?;
+    inventory_verbs::install(lua)?;
+    weapon_enchant::install(lua)?;
+    loot::install(lua)?;
+    loot_roll::install(lua)?;
+    quest::install(lua)?;
+    quest_log::install(lua)?;
+    minimap::install(lua)?;
+    tooltip::install(lua)?;
+    worldmap::install(lua)?;
+    worldstate::install(lua)?;
+    net_stats::install(lua)?;
+    Ok(())
+}
+
 impl UiScript {
-    /// Build a fully sandboxed, stdlib- and object-model-equipped host.
+    /// The in-game VM: FrameScript's base set and the registrars both states share
+    /// ([`install_framescript`]), then the in-game surface `UI_Init` (`0x48fbf0`) registers.
     pub fn new() -> mlua::Result<UiScript> {
-        let lua = Lua::new();
-        lua.set_app_data(Model::new());
-        // Before anything can fire a handler and while no app-data borrow is held, as the
-        // profiler's slot requires.
-        handler_prof::install(&lua);
+        let lua = install_framescript(VmKind::InGame)?;
+        install_in_game(&lua)?;
+        Ok(Self::host(lua))
+    }
 
-        addon::install(&lua)?;
-        addon_message::install(&lua)?;
-        chat_send::install(&lua)?;
-        chat_types::install(&lua)?;
-        chat_misc::install(&lua)?;
-        channel::install(&lua)?;
-        chat_window::install(&lua)?;
-        client::install(&lua)?;
-        screenshot::install(&lua)?;
-        stdlib::sandbox(&lua)?;
-        // Before the stdlib layer, so its aliases bind the 5.0-shaped functions.
-        lua50::install(&lua)?;
-        stdlib::install(&lua)?;
-        object::install(&lua)?;
-        frame_enum::install(&lua)?;
-        // After `object`, whose `publish_global` it reuses, and before any FrameXML loads:
-        // `Loader::do_font` publishes into the tables this builds.
-        font::install(&lua)?;
-        unit::install(&lua)?;
-        party::install(&lua)?;
-        social::install(&lua)?;
-        guild::install(&lua)?;
-        petition::install(&lua)?;
-        binder::install(&lua)?;
-        summon::install(&lua)?;
-        bind_confirm::install(&lua)?;
-        instance::install(&lua)?;
-        gm_ticket::install(&lua)?;
-        duel::install(&lua)?;
-        follow::install(&lua)?;
-        camera_view::install(&lua)?;
-        input_verbs::install(&lua)?;
-        session::install(&lua)?;
-        pvp::install(&lua)?;
-        worn_display::install(&lua)?;
-        death::install(&lua)?;
-        aura::install(&lua)?;
-        cvars::install(&lua)?;
-        nameplate::install_verbs(&lua)?;
-        saved::install(&lua)?;
-        keybind::install(&lua)?;
-        sound::install(&lua)?;
-        ui_errors::install(&lua)?;
-        pointer::install(&lua)?;
-        action::install(&lua)?;
-        action_bar_toggles::install(&lua)?;
-        container::install(&lua)?;
-        cursor::install(&lua)?;
-        spellbook::install(&lua)?;
-        macros::install(&lua)?;
-        talent::install(&lua)?;
-        dialog_verbs::install(&lua)?;
-        battlefield_score::install(&lua)?;
-        battlefield_queue::install(&lua)?;
-        battlefield_positions::install(&lua)?;
-        tutorial::install(&lua)?;
-        worldmap_arrow::install(&lua)?;
-        shapeshift::install(&lua)?;
-        pet::install(&lua)?;
-        gossip::install(&lua)?;
-        merchant::install(&lua)?;
-        bank::install(&lua)?;
-        stable::install(&lua)?;
-        item_text::install(&lua)?;
-        mail::install(&lua)?;
-        auction::install(&lua)?;
-        trainer::install(&lua)?;
-        taxi::install(&lua)?;
-        trade::install(&lua)?;
-        inspect::install(&lua)?;
-        dressup::install(&lua)?;
-        tabard::install(&lua)?;
-        tradeskill::install(&lua)?;
-        craft::install(&lua)?;
-        reputation::install(&lua)?;
-        skills::install(&lua)?;
-        item_stats::install(&lua)?;
-        char_stats::install(&lua)?;
-        inventory_verbs::install(&lua)?;
-        weapon_enchant::install(&lua)?;
-        loot::install(&lua)?;
-        loot_roll::install(&lua)?;
-        quest::install(&lua)?;
-        quest_log::install(&lua)?;
-        messageframe::install(&lua)?;
-        scrollframe::install(&lua)?;
-        simplehtml::install(&lua)?;
-        slider::install(&lua)?;
-        colorselect::install(&lua)?;
-        minimap::install(&lua)?;
-        modelframe::install(&lua)?;
-        tooltip::install(&lua)?;
-        worldmap::install(&lua)?;
-        worldstate::install(&lua)?;
-        net_stats::install(&lua)?;
+    /// The glue screens' VM, as the glue builder (`0x46a7b0`) leaves its state before GlueXML
+    /// loads: the base set and the shared registrars, with the glue event table and the glue frame
+    /// types ([`glue`]), and none of the in-game surface. Of the glue registrar's own four tables
+    /// (`0x46ddf0`, `0x4736c0`, `0x471a20`, `0x46f480`) the screen verbs and the realm list are
+    /// built ([`glue::install`]).
+    pub fn new_glue() -> mlua::Result<UiScript> {
+        let lua = install_framescript(VmKind::Glue)?;
+        glue::install(&lua)?;
+        Ok(Self::host(lua))
+    }
 
-        let s = UiScript {
+    fn host(lua: Lua) -> UiScript {
+        UiScript {
             lua,
             instructions: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session: NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        };
-        Ok(s)
+        }
+    }
+
+    /// Which FrameScript state this VM is.
+    pub fn vm_kind(&self) -> VmKind {
+        self.model_ref().vm
     }
 
     /// The embedded VM, for the app and the loader to add their bindings over this object model.
@@ -614,10 +765,29 @@ impl UiScript {
         self.session
     }
 
-    /// Bound how long a chunk may run: past `budget` VM instructions the hook raises a Lua error,
-    /// so a loop that never ends fails its addon and the rest still runs. The app arms it only for
-    /// the world-entry load, so a hung load reports instead of freezing the loading screen, and
-    /// disarms it ([`Self::clear_instruction_budget`]) before the session's first frame.
+    /// An independent copy of this UI, Lua and Rust sides both, as a fresh session: a built state
+    /// to start many runs from without building it again. The host's services (the text measurer,
+    /// the probes) are shared with the original; an instruction budget is not carried over.
+    pub fn fork(&self) -> UiScript {
+        let lua = self.lua.fork();
+        lua.remove_hook();
+        lua.set_app_data(self.model_ref().clone());
+        handler_prof::install(&lua);
+        UiScript {
+            lua,
+            instructions: Default::default(),
+            session: NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Bound how long a chunk may run: past `budget` VM instructions the hook aborts the chunk to
+    /// the host, past every `pcall` and `xpcall` and running no error handler
+    /// (`benilla_lua::Vm::abort`), so a loop that never ends fails its addon and the rest still
+    /// runs. The app arms it only for the world-entry load, so a hung load reports instead of
+    /// freezing the loading screen, and disarms it ([`Self::clear_instruction_budget`]) before the
+    /// session's first frame. Deviation: the client's Lua has no such bound, as nothing sets a
+    /// hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that
+    /// never ends hangs it.
     pub fn set_instruction_budget(&self, budget: u64) {
         let used = self.instructions.clone();
         used.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -725,7 +895,8 @@ impl UiScript {
         self.model_mut().minimap_ping = ping;
     }
 
-    /// Drain a `Minimap:PingLocation(x, y)`: centre-relative offsets in UI units, x right, y up.
+    /// Drain a `Minimap:PingLocation(x, y)`: centre-relative offsets in the screen root's units,
+    /// x right, y up.
     pub fn take_minimap_ping_request(&mut self) -> Option<(f32, f32)> {
         self.model_mut().minimap_ping_request.take()
     }
@@ -811,9 +982,10 @@ impl UiScript {
         let Some(h) = model.arena.lookup(frame) else {
             return false;
         };
+        let rows = Self::message_viewport(&model, h);
         match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
             Some(crate::widget::KindState::ScrollingMessage(smf)) => {
-                smf.add(text.to_string(), r, g, b);
+                smf.add_with_id(text.to_string(), r, g, b, 0, rows);
                 true
             }
             _ => false,
@@ -832,7 +1004,7 @@ impl UiScript {
         ) {
             return false;
         }
-        model.arena.set_shown(h, true);
+        model.set_shown_silent(h, true);
         model.focused_editbox = Some(h);
         true
     }
@@ -849,17 +1021,9 @@ impl UiScript {
     }
 
     /// Replace the hyperlink spans `(frame, y-up rect, link, markup)` the app rasterized this
-    /// frame; a release inside one fires `OnHyperlinkClick` on its frame ([`pointer`]).
+    /// frame: each is a hyperlink button over its span, a child of its frame ([`hyperlink`]).
     pub fn set_link_spans(&mut self, spans: Vec<(FrameHandle, Rect, String, String)>) {
-        let mut model = self.model_mut();
-        model.link_spans.clear();
-        for (fh, rect, link, markup) in spans {
-            model
-                .link_spans
-                .entry(fh)
-                .or_default()
-                .push((rect, link, markup));
-        }
+        hyperlink::set_spans(&self.lua, spans);
     }
 
     /// Whether the frame with this global name is shown with every ancestor (`IsVisible()`).
@@ -880,7 +1044,8 @@ impl UiScript {
             .map(|(_, f)| f.effective_alpha)
     }
 
-    /// Resolve and cache every frame's rect, which `GetWidth`/`GetHeight`/`extract` read, then fire
+    /// The layout drain (`0x768ed0`), which [`Self::tick`] runs before and after its walk: resolve
+    /// and cache every frame's rect, which `GetWidth`/`GetHeight`/`extract` read, then fire
     /// `OnSizeChanged` for frames whose size moved ([`event::fire_size_changes`]) and re-seat the
     /// text of every resized EditBox.
     pub fn resolve(&mut self) {
@@ -930,8 +1095,10 @@ impl UiScript {
                 d.measured = Some(new);
             }
             if moved {
-                // Touched per region, so the layout gate need not re-walk the whole roster.
+                // Touched per region, so the layout gate need not re-walk the whole roster; stored
+                // whole, as the reference's `SetText` clears the resolved bit (`0x771ea4`).
                 model.touch_layout_region(rh);
+                model.queue_force(id);
             }
         }
     }
@@ -989,6 +1156,33 @@ impl UiScript {
 
     // ── Input: the pointer leaving the window ────────────────────────────────────────────────────
 
+    /// The OS pointer left the window: the hovered frame loses the hover, with its leave notify
+    /// ([`mouseover::leave`]) as a walk that found nothing would run it. It is no cursor event, so
+    /// it feeds no position: no probe runs and a move or size in flight holds its last sample
+    /// (`[root+0xd08]`/`[root+0xd0c]`), as the reference's pump only sees real cursor events
+    /// (`0x7655b0`). The saved cursor position stays too.
+    pub fn pointer_left_hover(&mut self) {
+        let leave = {
+            let mut model = self.model_mut();
+            // A frame destroyed since it took the hover gets no leave.
+            let old = model
+                .mouseover
+                .take()
+                .filter(|&h| model.arena.frame(h).is_some());
+            old.map(|h| {
+                let script = model
+                    .frame_to_id
+                    .get(&h)
+                    .copied()
+                    .filter(|_| button::hover_notify_runs(&model, Some(h)));
+                (h, script)
+            })
+        };
+        if let Some((h, script)) = leave {
+            mouseover::leave(&self.lua, h, script);
+        }
+    }
+
     /// The OS pointer left the window, so no release will be fed: clears [`Model::drag`], which
     /// would start a drag on re-entry, and [`Model::mouse_down_on`], which would click the frame
     /// it left. The app calls it where it fires the synthetic `OnLeave`.
@@ -1003,7 +1197,8 @@ impl UiScript {
             self.fire_drag_stop(source);
         }
         let mut model = self.model_mut();
-        let held: Vec<crate::widget::FrameHandle> = model.mouse_down_on.values().copied().collect();
+        let held: Vec<crate::widget::FrameHandle> =
+            model.mouse_down_on.values().copied().flatten().collect();
         model.mouse_down_on.clear();
         // Every held button gets the release edge never fed (`0x7793de`), else it stays pushed.
         for h in held {
@@ -1019,36 +1214,65 @@ impl UiScript {
 
     // ── Keyboard entry ───────────────────────────────────────────────────────────────────────────
     //
-    // Keys arrive by name; the host maps its keycodes. The box routing: a focused box consumes
-    // every event; with none focused, the topmost visible `autoFocus` box takes focus and
+    // Keys arrive by name; the host maps its keycodes. Every EditBox is a frame in the key and
+    // char walks ([`keyboard`]): the focused box consumes every event at its own strata and level;
+    // with none focused, the first visible `autoFocus` box in walk order takes focus and
     // processes that same event; otherwise nothing is consumed.
 
     /// A typed character (UTF-8) from the host: a focused box inserts it (numeric, cap and
     /// password rules apply) or, for Ctrl+A's control code, selects all. `true` if consumed.
     pub fn char_input(&mut self, text: &str) -> bool {
-        // The frame walk first ([`keyboard`]), the focused box a participant at its own strata and
-        // level, as in the reference's one dispatcher; an unconsumed event goes to the box routing.
-        keyboard::char_input(&self.lua, text) || editbox::char_input(&self.lua, text)
+        // The one dispatcher (`0x765df0`): the boxes are frames in the walk, at their own strata
+        // and level.
+        keyboard::char_input(&self.lua, text)
     }
 
-    /// Paste host clipboard text into the focused EditBox as one edit: newlines survive only in a
-    /// `multiLine` box, other control characters drop. `true` if a box consumed it.
+    /// Paste host clipboard text into the focused EditBox, typed a character at a time as the
+    /// reference's paste is (`0x77e250`), with a typed character's escapes and events. `true` if
+    /// a box consumed it.
     pub fn paste(&mut self, text: &str) -> bool {
         editbox::paste(&self.lua, text)
     }
 
-    /// A non-character key by name (`"ENTER"`, `"ESCAPE"`, `"TAB"`); editing keys come through
-    /// [`Self::editbox_action`]. A focused box consumes a key even when it does nothing with it.
-    pub fn key_input(&mut self, key: &str) -> bool {
-        // The same two stages as `char_input`.
-        keyboard::key_input(&self.lua, key) || editbox::key_input(&self.lua, key)
+    /// A key pressed, by name (`"ENTER"`, `"A"`, `"SHIFT"`, `"UNKNOWN"`): the key-down walk
+    /// (`0x765f10`), which an EditBox joins at its own place. `Box` means the walk reached a box
+    /// that took the key, and the host then runs the key's editing action on it
+    /// ([`Self::editbox_action`], [`Self::paste`]); `Frame`, a frame that took it, and the host
+    /// runs neither the action nor the key's binding (`0x76b7d0`).
+    pub fn key_down(&mut self, key: &str) -> KeyWalk {
+        keyboard::key_down(&self.lua, key)
     }
 
-    /// An editing key (BACKSPACE, DELETE, the arrows, HOME, END) offered to the keyboard frames
-    /// before the focused box gets it as an [`EditAction`]. On `true` the caller dispatches neither
-    /// the action nor the key's binding (consumption suppresses it, `0x76b7d0`).
+    /// A key held down and repeating, by name: the auto-repeat dispatcher (`0x766070`) hands it to
+    /// the frame that took the press, a stub on a plain frame and the key-down again on a box.
+    pub fn key_repeat(&mut self, key: &str) -> KeyWalk {
+        keyboard::key_repeat(&self.lua, key)
+    }
+
+    /// A key released, by the name its press went by: the key-up dispatcher (`0x765fd0`) runs
+    /// `OnKeyUp` on the frame that consumed that key's last down.
+    pub fn key_up(&mut self, key: &str) -> KeyUp {
+        keyboard::key_up(&self.lua, key)
+    }
+
+    /// A binding took this key's press: the world frame is its consumer (`0x483b70`).
+    pub fn note_world_key(&mut self, key: &str) {
+        keyboard::note_world_key(&self.lua, key);
+    }
+
+    /// Whether ALT is held, which an alt-arrow EditBox reads for the arrows (`0x77b1b3`).
+    pub fn set_alt_down(&mut self, alt: bool) {
+        self.model_mut().alt_down = alt;
+    }
+
+    /// Whether the key-down walk takes `key`, a frame or a box.
+    pub fn key_input(&mut self, key: &str) -> bool {
+        self.key_down(key) != KeyWalk::Declined
+    }
+
+    /// Whether a frame, not a box, takes `key`.
     pub fn frame_key_input(&mut self, key: &str) -> bool {
-        keyboard::frame_key_input(&self.lua, key)
+        self.key_down(key) == KeyWalk::Frame
     }
 
     /// One text-editing operation on the focused EditBox, from the host's per-OS keymap.
@@ -1118,9 +1342,7 @@ impl UiScript {
     /// Whether `name` is a registered FrameXML template, case-folded as the loader resolves it, for
     /// the corpus harness: an addon naming a missing template gets a bare frame and no load error.
     pub fn has_framexml_template(&self, name: &str) -> bool {
-        let model = self.model_ref();
-        let templates = model.framexml_templates.borrow();
-        templates.contains_key(name) || templates.keys().any(|k| k.eq_ignore_ascii_case(name))
+        self.model_ref().framexml_templates.borrow().contains(name)
     }
 
     /// Whether `name` is a registered font object, the other namespace an `inherits=` may name
@@ -1160,7 +1382,7 @@ impl UiScript {
             });
         }
         // Region leaves publish into their own name table, not the arena's.
-        let id = *model.region_names.get(name)?;
+        let id = *model.region_by_name.get(name)?;
         let h = *model.id_to_region.get(&id)?;
         model.arena.region(h).map(|r| match r.kind {
             crate::widget::RegionKind::Texture => "Texture",
@@ -1192,14 +1414,16 @@ impl UiScript {
 
     /// Report a script error the host caught outside the VM's dispatch (an addon file that failed
     /// to compile or raised at file scope): it joins the handler-dispatch queue and the retained
-    /// log, not `errors`, since the caller has already logged it.
-    pub fn report_script_error(&self, msg: &str) {
+    /// log, not `errors`, since the caller has already logged it. `log` is the decorated text the
+    /// log keeps; `handler` is the one value the error handler is called with, the bare Lua
+    /// message as `lua_pcall` leaves it (`0x703b40`).
+    pub fn report_script_error(&self, log: &str, handler: &str) {
         // A Load row, not an Error one: to the player a file scope that raised and a missing file
         // are the same fact, the addon is not running.
-        diagnostics::record_load_failure(&self.lua, msg);
+        diagnostics::record_load_failure(&self.lua, log);
         self.model_mut()
             .pending_error_dispatch
-            .push(msg.to_string());
+            .push(model::HandlerArg::Text(handler.to_string()));
     }
 
     /// Hand each queued script error to the Lua error handler, as the reference's catch closure
@@ -1216,8 +1440,8 @@ impl UiScript {
         let Some(handler) = stdlib::error_handler(&self.lua) else {
             return;
         };
-        for msg in pending {
-            if let Err(e) = handler.call::<()>(msg) {
+        for arg in pending {
+            if let Err(e) = arg.value(&self.lua).and_then(|v| handler.call::<()>(v)) {
                 self.model_mut()
                     .errors
                     .push(format!("error handler itself failed: {e}"));
@@ -1256,7 +1480,7 @@ impl UiScript {
     }
 
     fn push_error(&self, e: mlua::Error) {
-        self.model_mut().record_script_error(e.to_string());
+        self.model_mut().record_lua_error(&e);
     }
 }
 

@@ -5,6 +5,9 @@
 
 /// A trace, printed only under `FrameXML_Debug` (`"-- Creating %s named %s"`, `0x6ee2bc`).
 pub const TRACE: u8 = 0;
+/// An error the load goes on past: an unnamed template (`0x6ee1cc`), a template name already
+/// registered (`0x6ee5af`).
+pub const WARNING: u8 = 1;
 /// A file-level failure: a file that did not open or did not parse (`0x6edad4`, `0x704c15`).
 pub const FAILURE: u8 = 2;
 
@@ -117,7 +120,7 @@ pub enum LogWrite {
 /// A VM's two load records and the drains they have made. `LoadAddOn` keeps its own record
 /// (`ds:0xb4e3dc`), refcounted (`ds:0xb4e3e0`) so a nested call writes one block, and drained when
 /// the count returns to zero (`0x48eab4`), even inside a UI load, whose own drain comes last.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct LoadLog {
     pub(crate) ui: Status,
     pub(crate) demand: Status,

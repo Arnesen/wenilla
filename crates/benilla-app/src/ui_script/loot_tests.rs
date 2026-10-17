@@ -219,7 +219,7 @@ fn shipped_loot_frame_drives_end_to_end() {
         vec![1, 2],
         "coin row is pick 1, the first item row is pick 2"
     );
-    assert!(!s.take_loot_close());
+    assert_eq!(s.take_loot_close(), None);
 
     // The looted coin row hides in place, off `LOOT_SLOT_CLEARED` alone, and the items keep their
     // rows.
@@ -243,8 +243,9 @@ fn shipped_loot_frame_drives_end_to_end() {
     );
 
     s.run("LootCloseButton:Click()").unwrap();
-    assert!(
+    assert_eq!(
         s.take_loot_close(),
+        Some(false),
         "closing the window releases the loot (OnHide → CloseLoot)"
     );
     assert!(!s.eval::<bool>("return LootFrame:IsVisible()").unwrap());
@@ -544,10 +545,9 @@ fn the_loot_window_draws_over_the_party_frames() {
         "the loot window's background must draw OVER the party frame art: \
          panel {loot_panel:#x} vs party {party_art:#x}"
     );
-    // The stratum is the draw key's top bits: in sync with `benilla_ui::order`'s `STRATUM_SHIFT`.
-    const STRATUM_SHIFT: u32 = 60;
+    let stratum = |z| benilla_ui::order::unpack(z).strata;
     assert!(
-        (party_art >> STRATUM_SHIFT) < (loot_panel >> STRATUM_SHIFT),
+        stratum(party_art) < stratum(loot_panel),
         "they must differ by STRATUM, not by luck within one"
     );
 }

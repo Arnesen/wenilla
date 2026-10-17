@@ -19,8 +19,13 @@ fn harness() -> UiScript {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     // `BuffButton_Update` asks `GameTooltip:IsOwned(this)` unguarded (`BuffFrame.lua:104`).
     load_xml(&s, "Interface\\FrameXML\\GameTooltip.xml");
+    load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
+    // The stock arm that pitches the rows, `UIOptionsFrame.lua:193-206`, on the stock options kit.
+    load_xml(&s, r"Interface\FrameXML\OptionsFrameTemplates.xml");
+    load_xml(&s, r"Interface\FrameXML\OptionsFrame.lua");
+    load_xml(&s, r"Interface\FrameXML\UIOptionsFrame.xml");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.lua");
     load_xml(&s, "Interface\\FrameXML\\TextStatusBar.xml");
@@ -34,7 +39,7 @@ fn harness() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
     // As the app does: `BuffFrame_OnLoad` never calls `BuffButtons_UpdatePositions`, which 1.12
     // runs on `VARIABLES_LOADED` (`UIOptionsFrame.lua:206`).
-    super::manifest::apply_buff_durations(&s).unwrap();
+    s.fire_event("VARIABLES_LOADED", vec![]);
     s
 }
 
@@ -861,6 +866,7 @@ fn the_duration_line_reads_the_real_global_strings() {
         .expect("GlobalStrings.lua in the chain");
 
     let mut s = UiScript::new().unwrap();
+    crate::ui_script::test_ui::load_tooltip_template(&s);
     s.set_screen_size(1024.0, 768.0);
     s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
     s.set_spell_tooltip(
@@ -876,7 +882,7 @@ fn the_duration_line_reads_the_real_global_strings() {
         r#"
         BENILLA_ANCHOR = CreateFrame("Button", "BF9")
         BENILLA_ANCHOR:SetPoint("CENTER", 0, 0); BENILLA_ANCHOR:SetWidth(10); BENILLA_ANCHOR:SetHeight(10)
-        BENILLA_TIP = CreateFrame("GameTooltip", "TT9")
+        BENILLA_TIP = CreateFrame("GameTooltip", "TT9", nil, "TestTooltipTemplate")
     "#,
     )
     .unwrap();

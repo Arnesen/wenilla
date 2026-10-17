@@ -17,7 +17,7 @@ fn text_of(s: &UiScript, fontstring: &str) -> String {
 }
 
 /// The zone caches the app pushes on an area change: the minimap line is the subzone, else the
-/// zone; an empty PvP word or faction is nil.
+/// zone; an empty PvP word is nil, and an answered one carries its faction name, `""` included.
 fn area(zone: &str, sub: &str, pvp: &str, faction: &str) -> ZoneTexts {
     let some = |t: &str| (!t.is_empty()).then(|| t.to_string());
     ZoneTexts {
@@ -26,7 +26,7 @@ fn area(zone: &str, sub: &str, pvp: &str, faction: &str) -> ZoneTexts {
         subzone: sub.into(),
         minimap: if sub.is_empty() { zone } else { sub }.into(),
         pvp_type: some(pvp),
-        pvp_faction: some(faction),
+        pvp_faction: (!pvp.is_empty()).then(|| faction.to_string()),
         is_arena: false,
     }
 }
@@ -271,6 +271,27 @@ fn room_to_room_hop_splashes_the_room_name_alone() {
     );
     assert!(visible(&s, "SubZoneTextFrame"));
     assert_eq!(text_of(&s, "SubZoneTextString"), "Library Wing");
+}
+
+/// A nil pvpType, a PvE realm outside a capital: no territory line, and the zone and subzone in
+/// the stock else-arm's cream (`ZoneText.xml:32-33`), not a faction colour.
+#[test]
+fn a_nil_pvp_type_splashes_uncoloured_with_no_territory_line() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+    set_area(&mut s, "Elwynn Forest", "Goldshire", "", "");
+    s.fire_event("ZONE_CHANGED_NEW_AREA", vec![]);
+    assert!(visible(&s, "ZoneTextFrame"));
+    assert_eq!(text_of(&s, "PVPInfoTextString"), "");
+    for region in ["ZoneTextString", "SubZoneTextString"] {
+        let (r, g, b) = s
+            .eval::<(f32, f32, f32)>(&format!("return {region}:GetTextColor()"))
+            .unwrap();
+        assert!(
+            (r - 1.0).abs() < 1e-3 && (g - 0.9294).abs() < 1e-3 && (b - 0.7607).abs() < 1e-3,
+            "{region} is ({r}, {g}, {b})"
+        );
+    }
 }
 
 /// An FFA pit: `GetZonePVPInfo`'s isArena, the leaf area's flag `0x80`.

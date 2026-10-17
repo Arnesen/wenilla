@@ -13,9 +13,10 @@ use bevy::prelude::*;
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::target::Selection;
 use crate::ui_action::Spells;
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
 
 /// The `Effect[0]` that marks the duel spell (7266 on 1.12 data): the reference's spell-learned
 /// walk stores any learned spell with `SpellRec+0xf4 == 0x53` in `[0xb71130]` (`0x4b2605`), which
@@ -43,10 +44,14 @@ enum OwedLine {
 pub(crate) struct DuelState {
     owed: Vec<OwedLine>,
     /// The duel flag's guid, `[0xb73240]`: set by the request, echoed on accept and cancel, and
-    /// cleared only by completion, which fires `DUEL_FINISHED`. `0` is no duel.
+    /// cleared by completion, which fires `DUEL_FINISHED`, and silently by the leave-world sweep
+    /// ([`clear_duel_on_leave_world`]). `0` is no duel.
     pub(crate) arbiter: u64,
     /// Set while the challenge popup is owed; the challenger never gets one.
     challenger: Option<u64>,
+    /// The owed popup's name has been looked up once, as the challenge packet's: the frames that
+    /// wait on it read.
+    challenger_asked: bool,
     out_of_bounds: bool,
     countdown: Option<Countdown>,
 }
@@ -64,6 +69,7 @@ impl DuelState {
         self.arbiter = arbiter;
         let ours = Some(challenger) == own;
         self.challenger = (!ours).then_some(challenger);
+        self.challenger_asked = false;
         ours
     }
 
@@ -256,6 +262,14 @@ pub(crate) mod net {
     }
 }
 
+/// The leave-world sweep's duel leg (`0x490afd` → `0x4d47d0`): the arbiter is zeroed
+/// (`0x4d47d8`, `0x4d47e2`) and the `ProcessCountdown` timer cancelled (`0x4d47ee`), with no
+/// event, so a completion after it finds no duel (`0x4d4b20`).
+fn clear_duel_on_leave_world(mut duel: ResMut<DuelState>) {
+    duel.arbiter = 0;
+    duel.countdown = None;
+}
+
 /// Fire the four duel events on [`DuelState`]'s edges.
 fn feed_duel(
     script: Option<NonSendMut<UiScript>>,
@@ -264,11 +278,14 @@ fn feed_duel(
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
     mut fed: Local<crate::ui_script::VmMemo<FedDuel>>,
+    // Apart from the bounds: the leave-world sweep drops the arbiter with no `DUEL_FINISHED`.
+    mut fed_held: crate::ui_script::WindowMemo<bool>,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let fed = fed.get(&script);
+    let fed_held = fed_held.get(&script);
 
     // Lines before events: a line describes the transition its event announces.
     let owed = std::mem::take(&mut duel.owed);
@@ -286,7 +303,11 @@ fn feed_duel(
 
     // `DUEL_REQUESTED(name)`, held until the name resolves (the module's deviation).
     if let Some(guid) = duel.challenger {
-        if let Some(name) = names.resolve(guid, &commands).map(str::to_string) {
+        let ask = Ask::at(
+            !std::mem::replace(&mut duel.challenger_asked, true),
+            &commands,
+        );
+        if let Some(name) = names.resolve_player(guid, ask).map(str::to_string) {
             script.fire_event("DUEL_REQUESTED", vec![ScriptValue::Str(name)]);
             duel.challenger = None;
         }
@@ -294,10 +315,10 @@ fn feed_duel(
 
     // `DUEL_FINISHED` when the arbiter clears (`0x4d4b51`).
     let held = duel.arbiter != 0;
-    if fed.held && !held {
+    if *fed_held && !held {
         script.fire_event("DUEL_FINISHED", Vec::new());
     }
-    fed.held = held;
+    *fed_held = held;
 
     // The bounds pair (`0x4d4aa0`, `0x4d4ac0`).
     if fed.out_of_bounds != duel.out_of_bounds {
@@ -314,7 +335,6 @@ fn feed_duel(
 /// What [`feed_duel`] last announced.
 #[derive(Default)]
 struct FedDuel {
-    held: bool,
     out_of_bounds: bool,
 }
 
@@ -412,7 +432,11 @@ pub(crate) fn streamed_player_named(
         .keys()
         .copied()
         .filter(|g| benilla_protocol::guid::is_player(*g))
-        .find(|g| names.peek(*g).is_some_and(|n| n.eq_ignore_ascii_case(name)))
+        .find(|g| {
+            names
+                .resolve_unit(*g, None, Ask::Read)
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })
 }
 
 /// Cast the duel spell at `guid`, a plain spell cast as in the reference's `0x4d4810`, not a duel
@@ -461,22 +485,64 @@ pub(crate) struct UiDuelPlugin;
 impl Plugin for UiDuelPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.init_resource::<DuelState>().add_systems(
-            Update,
-            (
-                // The tick names its line and `feed_duel` resolves it, so the tick runs first or
-                // each "Duel starting: N" lands a frame late.
-                tick_countdown.before(feed_duel),
-                feed_duel.in_set(UiFeed),
-                drain_duel.after(UiInput),
-            ),
-        );
+        app.init_resource::<DuelState>()
+            .add_sweep_leg(SweepLeg::Duel, clear_duel_on_leave_world)
+            .add_systems(
+                Update,
+                (
+                    // The tick names its line and `feed_duel` resolves it, so the tick runs first or
+                    // each "Duel starting: N" lands a frame late.
+                    tick_countdown.before(feed_duel),
+                    feed_duel.in_set(UiFeed),
+                    drain_duel.after(UiInput),
+                ),
+            );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The challenge looks its challenger's name up once, as its packet's; the frames the popup
+    /// waits through read. A refused name is asked by no frame after it, only by the next
+    /// challenge.
+    #[test]
+    fn a_refused_challenger_is_asked_by_the_next_challenge_never_by_a_frame() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<DuelState>()
+            .init_resource::<NameCache>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .add_systems(Update, feed_duel);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        let challenge = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<DuelState>()
+                .apply_requested(0xA1, 9, Some(7));
+            app.update();
+        };
+        challenge(&mut app);
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(9, String::new(), None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "no frame asks a refusal"
+        );
+        challenge(&mut app);
+        assert_eq!(
+            crate::query_cache::queries(&rx).len(),
+            1,
+            "the next challenge asks again"
+        );
+    }
 
     /// Both sides store the arbiter, so `DUEL_FINISHED` reaches both.
     #[test]

@@ -109,6 +109,8 @@ impl UnitFields {
 pub(super) struct Deps {
     /// A `$z` expanded: the bind point.
     pub(super) home: bool,
+    /// A `$g`/`$G` expanded: the branch read the active player's gender byte (`0x508214`).
+    pub(super) gender: bool,
     /// The required-form test read the shapeshift form.
     pub(super) form: bool,
     /// The range cell's melee arm read the caster's and the auto-attack target's combat reach and
@@ -169,6 +171,7 @@ impl Deps {
     pub(super) fn hits(&self, changes: &Changes) -> bool {
         changes.everything
             || (changes.home && self.home)
+            || (changes.gender && self.gender)
             || (changes.form && self.form)
             || (changes.range_units && self.range_units)
             || changes.avoidance & self.avoidance != 0
@@ -193,6 +196,7 @@ pub(super) struct Changes {
     /// An input no view can be ruled out of: every view is due.
     pub(super) everything: bool,
     pub(super) home: bool,
+    pub(super) gender: bool,
     pub(super) form: bool,
     pub(super) range_units: bool,
     /// A [`Chance`] bit each.
@@ -212,6 +216,7 @@ impl Changes {
     pub(super) fn is_empty(&self) -> bool {
         !self.everything
             && !self.home
+            && !self.gender
             && !self.form
             && !self.range_units
             && self.avoidance == 0
@@ -274,6 +279,8 @@ impl RangeSeen {
 pub(super) struct Seen {
     /// The bind point `$z` names.
     home: Option<String>,
+    /// The gender byte `$g`/`$G` branch on (`0x508214`), 0 without a player as the views read it.
+    gender: u8,
     /// The form the required-form line's colour follows (`0x52f1e3`).
     form: u8,
     /// The skills the descriptions' per-level terms scale by ([`crate::spell::skill_snapshot`]).
@@ -301,6 +308,7 @@ impl Seen {
     ) -> Self {
         Seen {
             home: home.map(str::to_string),
+            gender: player.and_then(|s| s.0.unit_gender()).unwrap_or(0),
             form: player.map_or(0, |s| s.0.unit_shapeshift_form()),
             skills: crate::spell::skill_snapshot(player),
             worn: player
@@ -317,6 +325,7 @@ impl Seen {
     pub(super) fn changes_since(&self, prev: &Seen) -> Changes {
         let mut changes = Changes {
             home: self.home != prev.home,
+            gender: self.gender != prev.gender,
             form: self.form != prev.form,
             range_units: self.range_units != prev.range_units,
             disarm: self.disarmed != prev.disarmed,

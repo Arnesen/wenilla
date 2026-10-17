@@ -4,10 +4,11 @@
 //! - Focus: one owner ([`Model::focused_editbox`], the client's `DAT_00cf4dc8`). A left click
 //!   focuses and collapses the selection to the clicked byte (`0x77b86f call 0x77ccf0`, before
 //!   `SetFocus` at `0x77b881`), so it never selects all. An `autoFocus` box takes the focus on show
-//!   when none is held and on the first key, and a hidden box drops it ([`visibility_focus`]).
-//! - Routing: a focused box consumes every key and char and fires only its specialized scripts
-//!   (Enter, Escape, Space, Tab, TextChanged, TextSet, focus), never a generic `OnKeyDown`; an
-//!   unfocused box that is not `autoFocus` ignores input.
+//!   when none is held and on the first key the walk offers it, and a hidden box drops it ([`visibility_focus`]).
+//! - Routing: the key and char walks reach a box at its own place ([`super::keyboard`]); the focused
+//!   one consumes every key and char and fires only its specialized scripts (Enter, Escape, Space,
+//!   Tab, TextChanged, TextSet, focus), never a generic `OnKeyDown`; an unfocused box that is not
+//!   `autoFocus` ignores input.
 //! - Editing: an insert deletes the selection, then `numeric` aborts a whole insert on any
 //!   non-digit; caps trim from the end (`maxBytes`, then `maxLetters`).
 //! - Events: an edit, a caret move, a focus change or a re-seat of the text only raises the box's
@@ -19,15 +20,16 @@
 //! and [`seam`]; the OS clipboard is host-side, [`paste`] in and `UiScript::editbox_copy` or
 //! `editbox_cut` out. The host's per-OS keymap sends editing keys as [`EditAction`]s ([`action`]).
 //!
-//! Deviation: word and edge deletes (`Delete{Word,Edge}`), which 1.12 does not have, exist because
-//! the host's OS-native chords (Option/Cmd+Backspace, Ctrl+Backspace/Delete) expect them.
+//! The word deletes are the reference's (`0x77c3f0`, `0x77c310`), and Ctrl+U/K delete to the text's
+//! edges (`0x77c4a0`, `0x77c4d0`). `Delete{Edge}` is the Mac's Cmd+Backspace/Delete, whose chords
+//! are the keymap's.
 
 use mlua::{Lua, Table};
 
 use super::object::frame_handle_of;
 use super::types::{EditAction, EditUnit};
 use super::{event, Model, RegionData};
-use crate::order::{self, DrawLayer, ZTarget};
+use crate::order::DrawLayer;
 use crate::widget::{EditBoxState, FrameHandle, FrameKind, KindState, RegionHandle, RegionKind};
 
 /// Registry key of the EditBox method table (the MAXCSTACK discipline: Lua-side root, named key).
@@ -48,25 +50,36 @@ pub(super) fn char_input(lua: &Lua, text: &str) -> bool {
     if text == "\u{1}" {
         // Ctrl+A selects all (the client's keydown case 0x41/0x61).
         highlight_text(lua, h, 0, -1);
-    } else if text.chars().any(|c| (c as u32) >= 0x20) {
-        // A typed `|` goes in as `||` (`0x77c200` pushes the literal `"||"` at `0x879cac`), so
-        // markup cannot be typed; the pair draws as one `|` and counts as one letter.
-        insert(lua, h, &text.replace('|', "||"), true);
+    } else {
+        // Each character is typed on its own, as each `WM_CHAR` is; the host's control codes
+        // (Tab, Enter, Backspace) arrive as keys, so their chars stay inert here.
+        for c in text.chars().filter(|&c| (c as u32) >= 0x20) {
+            type_char(lua, h, c);
+        }
     }
     true
 }
 
-/// Paste host clipboard text into the focused box as one edit: C0 controls are dropped, except a
-/// newline in a `multiLine` box, and no `OnSpacePressed` fires.
+/// Ctrl+V or Shift+Insert (`0x77b3bb`, `0x77b55c`) into the focused box, `0x77e250`: the
+/// clipboard typed one character at a time (`0x77e27d`), so each is escaped and filtered as a
+/// typed one and fires `OnChar`, and `OnSpacePressed` for a space or a tab, as it goes in.
 pub(super) fn paste(lua: &Lua, text: &str) -> bool {
     let Some(h) = route(lua) else {
         return false;
     };
     flush::flush(lua, h); // Ctrl+V is a key-down (`0x77b1e2`)
-    if with_eb(lua, h, |eb| eb.paste(text)).is_some_and(|o| o.text_changed) {
-        sync_text_region(lua, h);
+    for c in text.chars() {
+        type_char(lua, h, c);
     }
     true
+}
+
+/// One typed character, `0x77c200`: what [`EditBoxState::typed`] makes of it goes through
+/// `Insert` with its events on (`0x77c274`), so a numeric box refuses each non-digit alone.
+fn type_char(lua: &Lua, h: FrameHandle, c: char) {
+    if let Some(s) = with_eb(lua, h, |eb| eb.typed(c)).flatten() {
+        insert(lua, h, &s, true);
+    }
 }
 
 /// A named key: only Enter, Escape and Tab act, and a focused box consumes every key.
@@ -84,6 +97,8 @@ pub(super) fn key_input(lua: &Lua, key: &str) -> bool {
             if with_eb(lua, h, |eb| eb.multi_line).unwrap_or(false) {
                 insert(lua, h, "\n", false);
             } else {
+                // The enter script runs with the gate's edit-box flag up (`0x77b438`-`0x77b459`).
+                let _enter = super::protected::raise(lua, super::protected::Event::Enter);
                 fire_script(lua, id, "OnEnterPressed");
             }
         }
@@ -128,12 +143,19 @@ pub(super) fn action(lua: &Lua, a: EditAction) -> bool {
         },
         EditAction::Delete { unit, back } => match unit {
             EditUnit::Char => delete_dir(lua, h, !back),
-            EditUnit::Word => delete_span(lua, h, |eb| eb.word_boundary(!back)),
+            EditUnit::Word => delete_span(lua, h, |eb| eb.word_delete_target(!back)),
             EditUnit::Edge => delete_span(lua, h, |eb| if back { 0 } else { eb.text.len() }),
             // No keymap deletes by line or row.
             EditUnit::Line | EditUnit::Row => {}
         },
         EditAction::SelectAll => highlight_text(lua, h, 0, -1),
+        EditAction::DeleteToEdge { back } => {
+            if with_eb(lua, h, |eb| eb.delete_to_edge(back)) == Some(true) {
+                sync_text_region(lua, h);
+            }
+        }
+        // In any box, a multi-line one included (`0x77d030`, `0x77cfd0`).
+        EditAction::History { older } => history_step_key(lua, h, older),
     }
     true
 }
@@ -153,39 +175,49 @@ pub(in crate::script) use relayout::reseat_resized;
 // Focus model
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// The box that processes a key or char. A hidden focused box blocks self-acquire (the client's
-/// guard returns 0 with the focus still set); with no focus, the topmost visible `autoFocus` box
-/// takes it and processes this same event.
+/// The box that processes a key or char: the focused one, taken at the walk (`takes_event`). A
+/// hidden focused box blocks (the client's guard returns 0 with the focus still set); with none
+/// focused nothing processes, since an `autoFocus` box takes the focus only where the walk
+/// reaches it.
 fn route(lua: &Lua) -> Option<FrameHandle> {
-    {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        if let Some(h) = model.focused_editbox {
-            match model.arena.frame(h) {
-                Some(f) if f.effective_visible && f.kind == FrameKind::EditBox => return Some(h),
-                Some(_) => return None, // alive but hidden: block self-acquire, don't consume
-                None => model.focused_editbox = None, // stale: drop and self-acquire below
-            }
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let h = model.focused_editbox?;
+    match model.arena.frame(h) {
+        Some(f) if f.effective_visible && f.kind == FrameKind::EditBox => Some(h),
+        Some(_) => None, // alive but hidden: don't consume
+        None => {
+            model.focused_editbox = None; // stale
+            None
         }
     }
-    let h = topmost_autofocus(lua)?;
-    set_focus_handle(lua, h);
-    Some(h)
 }
 
-/// The topmost-drawn visible `autoFocus` EditBox, the keyboard self-acquire target.
-fn topmost_autofocus(lua: &Lua) -> Option<FrameHandle> {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
-    let sorted = order::traversal(&model.arena);
-    for (target, _) in sorted.iter().rev() {
-        if let ZTarget::Frame(fh) = *target {
-            if let Some(KindState::EditBox(eb)) = model.arena.frame(fh).map(|f| &f.kind_state) {
-                if eb.auto_focus {
-                    return Some(fh);
-                }
+/// Whether the EditBox `h`, reached by the key or char walk, takes the event (its vtable's
+/// `+0x5c`/`+0x60`/`+0x64`, `0x77a900`/`0x77b160`/`0x77b7c0`): with a box focused (`[0xcf4dc8]`,
+/// even a hidden one) only that box does; with none, an `autoFocus` box takes the focus through
+/// `SetFocus` at its own walk position and the event with it; any other box declines.
+pub(super) fn takes_event(lua: &Lua, h: FrameHandle) -> bool {
+    {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        if let Some(f) = model.focused_editbox {
+            if model.arena.frame(f).is_some() {
+                return f == h;
             }
+            model.focused_editbox = None; // stale: no box holds the focus
+        }
+        let auto = matches!(
+            model.arena.frame(h).map(|f| &f.kind_state),
+            Some(KindState::EditBox(eb)) if eb.auto_focus
+        );
+        if !auto {
+            return false;
         }
     }
-    None
+    set_focus_handle(lua, h);
+    lua.app_data_ref::<Model>()
+        .expect("model app_data")
+        .focused_editbox
+        == Some(h)
 }
 
 /// `SetFocus` (`0x77e3d0`): needs effective visibility, a no-op when already focused; fires
@@ -271,8 +303,8 @@ fn clear_focus_handle(lua: &Lua, h: FrameHandle) {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// `Insert` (`0x77bee0`): delete the selection, abort on a non-digit when `numeric`, splice,
-/// enforce caps, raise the dirty bits for the flush, and with `fire_space` fire one
-/// `OnSpacePressed` per space.
+/// enforce caps, raise the dirty bits for the flush, and with `fire_space` fire `OnSpacePressed`
+/// once if the string holds a space.
 fn insert(lua: &Lua, h: FrameHandle, ins: &str, fire_space: bool) {
     let Some(out) = with_eb(lua, h, |eb| eb.insert(ins)) else {
         return; // not an EditBox
@@ -294,12 +326,10 @@ fn insert(lua: &Lua, h: FrameHandle, ins: &str, fire_space: bool) {
     if let Err(e) = on_char {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
-            .record_script_error(e.to_string());
+            .record_lua_error(&e);
     }
-    if fire_space {
-        for _ in 0..out.spaces {
-            fire_script(lua, id, "OnSpacePressed");
-        }
+    if fire_space && out.space {
+        fire_script(lua, id, "OnSpacePressed");
     }
 }
 
@@ -314,8 +344,8 @@ fn set_text(lua: &Lua, h: FrameHandle, s: &str) {
     }
 }
 
-/// Word and edge deletes (no 1.12 counterpart): the selection if any, else the cursor to
-/// `target_of(eb)`.
+/// Word deletes (Ctrl+Backspace and Ctrl+W, `0x77c3f0`) and the Mac's edge delete: the selection
+/// if any, else the cursor to `target_of(eb)`.
 fn delete_span(lua: &Lua, h: FrameHandle, target_of: impl FnOnce(&EditBoxState) -> usize) {
     let changed = with_eb(lua, h, |eb| {
         let t = target_of(eb);
@@ -362,23 +392,30 @@ fn highlight_text(lua: &Lua, h: FrameHandle, start: i64, end: i64) {
 
 // ── text-region sync ─────────────────────────────────────────────────────────────────────────
 
-/// Write the display string into the text region; a `password` box shows one `*` per character.
+/// After an edit, write the display from the window's start into the text region; a `password`
+/// box shows one `*` per byte. The reference sets the region only in the flush's relayout
+/// (`0x77d858`); benilla's host takes input after the tick's flush, so this shows what was typed
+/// in the same frame, and the next flush trims it to the window.
 fn sync_text_region(lua: &Lua, h: FrameHandle) {
     let Some(rh) = ensure_text_region(lua, h) else {
         return;
     };
-    let display = with_eb(lua, h, |eb| {
-        if eb.password {
-            "*".repeat(eb.text.chars().count())
-        } else {
-            eb.text.clone()
-        }
-    });
-    if let Some(display) = display {
+    if let Some(text) = with_eb(lua, h, |eb| eb.window_text(true)) {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        model.region_data.entry(rh).or_default().text = Some(display);
-        model.touch_measure(rh);
+        write_region_text(&mut model, rh, text);
     }
+}
+
+/// Set the text region's string, `SetText` on the box's font string (`0x771d80`).
+fn write_region_text(model: &mut Model, rh: RegionHandle, text: String) {
+    let data = model.region_data.entry(rh).or_default();
+    if data.text.as_deref() == Some(text.as_str()) {
+        return;
+    }
+    let was_shown = data.text.as_deref().is_some_and(|t| !t.is_empty());
+    data.text = Some(text);
+    model.touch_measure(rh);
+    model.touch_layout_text(rh, was_shown);
 }
 
 /// `SetTextInsets(l, r, t, b)` (`0x77a6e0`): store the insets and re-seat the text region by
@@ -432,6 +469,18 @@ pub(crate) fn adopt_text_region(lua: &Lua, frame: &Table, region: &Table) -> mlu
     Ok(())
 }
 
+/// An EditBox's `<FontString bytes="N">` (`0x77a225`-`0x77a260`): `SStrToInt` of a non-empty value
+/// caps the box at N - 1 bytes, and a value of 0 or less lifts the cap.
+pub(crate) fn apply_xml_bytes(lua: &Lua, frame: &Table, bytes: &str) -> mlua::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let n = super::binding_abi::s_str_to_int(bytes);
+    let h = frame_handle_of(lua, frame)?;
+    with_eb(lua, h, |eb| eb.max_bytes = (n > 0).then(|| n as usize - 1));
+    Ok(())
+}
+
 /// Get or create the box's text FontString; an XML-declared one is wired by [`adopt_text_region`].
 pub(super) fn ensure_text_region(lua: &Lua, h: FrameHandle) -> Option<RegionHandle> {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -461,7 +510,7 @@ fn ensure_text_region_in(model: &mut Model, h: FrameHandle) -> Option<RegionHand
         };
         apply_text_region_justify(&mut data, multi_line);
         slot.insert(data);
-        model.touch_layout(); // a region entered the layout gate's read set
+        model.touch_layout_region(rh);
     }
     if let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
         eb.text_region = Some(rh);
@@ -519,7 +568,7 @@ fn fire_script(lua: &Lua, id: u32, name: &str) {
     if let Err(e) = event::fire_widget_handler(lua, id, name, Vec::new()) {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
-            .record_script_error(e.to_string());
+            .record_lua_error(&e);
     }
 }
 

@@ -205,28 +205,6 @@ impl ChatWindowLook {
     }
 }
 
-/// The leading decimal integer after optional whitespace and a sign, 0 when there is none. The
-/// reference's `SStrToInt` (`0x64ac60`) takes neither the whitespace nor a `+`.
-pub(super) fn leading_int(s: &str) -> i64 {
-    let s = s.trim_start();
-    let (neg, digits) = match s.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, s.strip_prefix('+').unwrap_or(s)),
-    };
-    let n: i64 = digits
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .fold(0i64, |acc, c| {
-            acc.saturating_mul(10)
-                .saturating_add(i64::from(c as u8 - b'0'))
-        });
-    if neg {
-        -n
-    } else {
-        n
-    }
-}
-
 /// The byte `__ftol(x · 255.0)` stores, clamped (the module's deviation); non-finite stores 0.
 fn to_byte(x: f64) -> u8 {
     if !x.is_finite() {
@@ -407,11 +385,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // SetChatWindowLocked(id, isLocked) (`0x4a1650`): the record's `+0x8c` (`0x4a16a2`), 1 at
     // boot (`0x4984e4`). A `bool` holds it, as the cache writer stores it through `setne`
-    // (`0x499e8b`). The argument is Lua truthiness, where the reference coerces through `0x6f1c10`
-    // (default 0): `0` and "off" unlock there and lock here. FrameXML passes only 1 and nil.
+    // (`0x499e8b`). The argument goes through `GetBoolOrDefault` (`0x4a1697`, default 0), so `0`
+    // and "off" unlock and "yes" locks. FrameXML passes only 1 and nil.
     lua.globals().set(
         "SetChatWindowLocked",
-        lua.create_function(|lua, (id, locked): (i64, bool)| {
+        lua.create_function(|lua, (id, locked): (i64, Option<Value>)| {
+            let locked = crate::script::binding_abi::bool_or_default(locked.as_ref(), false);
             let i = window_index(id)?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let look = &mut model.chat_window_looks[i];
@@ -513,31 +492,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetChatWindowShown(id [, shown]): `+0x94` through the flag coercion `0x6f1c10`, default 1.
-    // No argument stores 1; nil, false, 0, "0", "off" and "disabled" store 0. The reference also
-    // stores 0 for a string opening F or N ("false", "no"), which stores 1 here.
+    // SetChatWindowShown(id [, shown]): `+0x94` (`0x4a1782`) through `GetBoolOrDefault`
+    // (`0x4a1777`) with default 1: no argument stores 1; nil, false, `0`, "0", "off", "disabled"
+    // and anything opening F or N ("false", "no") store 0.
     lua.globals().set(
         "SetChatWindowShown",
         lua.create_function(|lua, (id, rest): (i64, MultiValue)| {
-            let shown = match rest.front() {
-                None => true,
-                Some(Value::Nil) | Some(Value::Boolean(false)) => false,
-                Some(Value::Boolean(true)) => true,
-                Some(Value::Integer(n)) => *n != 0,
-                Some(Value::Number(n)) => n.is_finite() && n.trunc() != 0.0,
-                Some(Value::String(s)) => {
-                    let s = s
-                        .to_str()
-                        .map(|s| s.trim().to_ascii_lowercase())
-                        .unwrap_or_default();
-                    if s.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
-                        leading_int(&s) != 0
-                    } else {
-                        !(s == "off" || s == "disabled")
-                    }
-                }
-                Some(_) => true,
-            };
+            let shown = crate::script::binding_abi::bool_or_default(rest.front(), true);
             with_look(lua, id, |look| look.shown = shown)
         })?,
     )?;
@@ -620,7 +581,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // RemoveChatWindowChannel(id, name | n) (`0x4a1260`): a numeric key names the joined channel
-    // in slot n, and an empty slot removes nothing; the key then resolves to its DBC Shortcut as
+    // in slot n, and an empty slot or a negative number removes nothing; the key then resolves to its DBC Shortcut as
     // above, and the entry of that name is freed.
     lua.globals().set(
         "RemoveChatWindowChannel",
@@ -630,8 +591,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let key = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let n = leading_int(&key);
-                let key = if n > 0 {
+                let n = crate::script::binding_abi::s_str_to_int(&key);
+                // `0x49e880`: a non-zero `SStrToInt` names a joined slot, and `0x49be50` answers
+                // NULL below slot 1, so `"-1"` removes nothing (`0x4a12c9`); a zero keeps the
+                // string raw, untrimmed, for the case-insensitive compares (`0x4a1315`,
+                // `0x4a1359`).
+                let key = if n != 0 {
                     match usize::try_from(n)
                         .ok()
                         .and_then(|n| model.joined_channels.get(n - 1))
@@ -641,7 +606,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         None => return Ok(()),
                     }
                 } else {
-                    key.trim().to_string()
+                    key
                 };
                 match model
                     .zone_channel_catalog
@@ -917,6 +882,41 @@ mod record_tests {
     use super::{ChatWindowLook, MESSAGE_GROUPS};
     use crate::script::{UiScript, ZoneChannelRow};
 
+    /// `MESSAGE_GROUPS` is `reference/chat_groups.tsv`, row for row: index, name, `defaultOn` and
+    /// `addedVersion`.
+    #[test]
+    fn the_message_groups_are_the_reference_table() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../reference/chat_groups.tsv"
+        );
+        let text = std::fs::read_to_string(path).expect("reference/chat_groups.tsv");
+        let rows: Vec<Vec<&str>> = text
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').collect())
+            .collect();
+        assert_eq!(rows.len(), MESSAGE_GROUPS.len(), "row count");
+        for (i, (row, (name, on, added))) in rows.iter().zip(MESSAGE_GROUPS).enumerate() {
+            let got = (
+                i.to_string(),
+                name,
+                if on { "1" } else { "0" }.to_string(),
+                added.to_string(),
+            );
+            assert_eq!(
+                (
+                    row[0].to_string(),
+                    row[1],
+                    row[2].to_string(),
+                    row[3].to_string()
+                ),
+                got,
+                "group {i}"
+            );
+        }
+    }
+
     /// The boot init (`0x4982c0`); 34 of groups 11 to 68 are `defaultOn`.
     #[test]
     fn the_stock_records_are_the_boot_init() {
@@ -1060,6 +1060,54 @@ mod record_tests {
             "a number names a joined slot; with none joined it removes nothing"
         );
         assert_eq!(s.take_chat_window_changes(), vec![0]);
+    }
+
+    /// A channel key is `SStrToInt` (`0x64ac60`, through `0x49e880`): an optional `-` and digits,
+    /// with no whitespace skip and no `+`, so only a plain number names a joined slot.
+    #[test]
+    fn a_channel_key_is_a_slot_only_as_sstrtoint_reads_it() {
+        let mut s = UiScript::new().unwrap();
+        s.set_joined_channels(vec![Some("MyChan".into())]);
+        s.run("AddChatWindowChannel(1, 'MyChan')").unwrap();
+        for key in ["+1", " 1", "x1"] {
+            s.run(&format!("RemoveChatWindowChannel(1, {key:?})"))
+                .unwrap();
+            assert_eq!(
+                s.chat_window_looks()[0].channels,
+                vec![("MyChan".to_string(), 0)],
+                "{key:?} is a name, not slot 1"
+            );
+        }
+        // A negative number is a slot too (non-zero, `0x49e889`) and no slot is below 1.
+        s.run("AddChatWindowChannel(1, '-1')").unwrap();
+        s.run("RemoveChatWindowChannel(1, '-1')").unwrap();
+        assert_eq!(
+            s.chat_window_looks()[0].channels,
+            vec![("MyChan".to_string(), 0), ("-1".to_string(), 0)],
+            "'-1' removes nothing"
+        );
+        // A name is raw: the blanks around it are part of it.
+        s.set_chat_window_looks([(
+            4,
+            ChatWindowLook {
+                channels: vec![(" pad ".into(), 0)],
+                ..Default::default()
+            },
+        )]);
+        s.run("RemoveChatWindowChannel(5, 'pad')").unwrap();
+        assert_eq!(
+            s.chat_window_looks()[4].channels.len(),
+            1,
+            "'pad' is not ' pad '"
+        );
+        s.run("RemoveChatWindowChannel(5, ' pad ')").unwrap();
+        assert!(s.chat_window_looks()[4].channels.is_empty());
+        s.run("RemoveChatWindowChannel(1, '1abc')").unwrap();
+        assert_eq!(
+            s.chat_window_looks()[0].channels,
+            vec![("-1".to_string(), 0)],
+            "'1abc' reads 1 and frees the channel joined in slot 1"
+        );
     }
 
     #[test]

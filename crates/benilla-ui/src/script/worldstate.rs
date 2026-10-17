@@ -25,7 +25,7 @@ pub struct WorldStateUiView {
     pub extended_ui_state: [i32; 3],
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct WorldStateUiState {
     pub(crate) rows: Vec<WorldStateUiView>,
 }

@@ -7,18 +7,18 @@
 //! unit no base does, so the VM resolves it to a guid and reads that guid's snapshot, which
 //! [`feed_chain_units`] pushes for the guids [`UiScript::chain_end_guids`] lists.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
-use benilla_formats::ChrClasses;
-use benilla_ui::script::{UiScript, UnitState};
+use benilla_ui::script::{NameCandidate, UiScript, UnitState};
 
 use super::{enrich_unit, faction_group, faction_group_localized, snapshot, unit_reaction};
 use crate::creature_type::CreatureTypeSources;
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, ObjectStore, Reputations, SelfPlayer};
-use crate::target::Factions;
+use crate::query_cache::Ask;
+use crate::target::{Candidacy, Factions, NameSearch};
 use crate::ui_script::{gate, VmMemo};
 
 /// What a held unit's snapshot reads beside its descriptor.
@@ -30,8 +30,10 @@ pub(super) struct HeldUnits<'a> {
     pub(super) group: &'a crate::ui_party::GroupState,
     /// Our own descriptor, which reaction, attackability and the faction line read.
     pub(super) self_store: Option<&'a ObjectStore>,
-    pub(super) classes: Option<&'a ChrClasses>,
+    pub(super) unit_names: super::UnitNames<'a>,
     pub(super) types: CreatureTypeSources<'a>,
+    /// The object manager's lookup by guid (`0x468460`), which `CanAssist`'s owner leg reads.
+    pub(super) by_guid: &'a dyn Fn(u64) -> Option<ObjectStore>,
 }
 
 impl HeldUnits<'_> {
@@ -39,12 +41,20 @@ impl HeldUnits<'_> {
     /// other than the player carries it. It has no guild leg, so `GetGuildInfo` on a chain answers
     /// nothing, where the reference resolves the token and reads the object's guild (`0x4c9330`).
     pub(super) fn state(&self, store: &ObjectStore, guid: u64) -> UnitState {
+        // The unit's create looked its name up with a callback (`0x5dec12`); a frame asks only
+        // a name the cache holds nothing for, as one invalidated since, and a refused one waits
+        // for the next create.
         let name = self
             .names
-            .resolve_unit(guid, Some(store), self.commands)
+            .resolve_unit(guid, Some(store), Ask::New(self.commands))
             .map(str::to_string);
+        self.state_named(store, guid, name)
+    }
+
+    /// [`Self::state`] under a name the caller looked up, which sends no name query.
+    fn state_named(&self, store: &ObjectStore, guid: u64, name: Option<String>) -> UnitState {
         let reaction = unit_reaction(self.factions, self.reputations, store, self.self_store);
-        let mut s = snapshot(store, guid, name, reaction, self.classes, self.types);
+        let mut s = snapshot(store, guid, name, reaction, self.unit_names, self.types);
         s.raid_target = self.group.raid_target_index(guid);
         s.faction_group = faction_group(store, self.factions);
         s.faction_group_localized = faction_group_localized(store, self.factions);
@@ -54,6 +64,23 @@ impl HeldUnits<'_> {
             self.factions,
             self.reputations,
             self.self_store,
+        );
+        // `CanAssist` (`0x6066f0`), the player toward the unit; `UnitCanAssist` reads it.
+        s.can_assist = crate::target::can_assist(
+            Some(store),
+            self.factions,
+            self.reputations,
+            self.self_store,
+            self.by_guid,
+            crate::target::Assist::PlayerToUnit,
+        );
+        s.can_assist_player = crate::target::can_assist(
+            Some(store),
+            self.factions,
+            self.reputations,
+            self.self_store,
+            self.by_guid,
+            crate::target::Assist::UnitToPlayer,
         );
         enrich_unit(
             &mut s,
@@ -134,6 +161,9 @@ pub(super) fn feed_chain_units(
         return;
     }
 
+    let by_guid = |guid: u64| -> Option<ObjectStore> {
+        stores.get(*index.as_ref()?.0.get(&guid)?).ok().cloned()
+    };
     let held = HeldUnits {
         names: &names,
         commands: &commands,
@@ -141,8 +171,9 @@ pub(super) fn feed_chain_units(
         reputations: &reputations,
         group: &group,
         self_store: self_q.iter().next(),
-        classes: tables.classes(),
+        unit_names: tables.unit_names(),
         types: tables.types(&names),
+        by_guid: &by_guid,
     };
     let built: HashMap<u64, UnitState> = ends
         .iter()
@@ -169,6 +200,130 @@ pub(super) fn feed_chain_units(
         }
     }
     memo.ends = ends;
+}
+
+/// [`feed_name_candidates`]' per-VM memory.
+#[derive(Default)]
+pub(crate) struct CandidateMemo {
+    /// What each pushed candidate was built from: the name it was pushed under, and whether its
+    /// entry's creature record had answered. A creature's name is its record, but a pet's name
+    /// and its record (the creature type the snapshot reads) come back apart.
+    pushed: HashMap<u64, (String, bool)>,
+    /// This frame's candidates, kept between frames so the walk allocates nothing.
+    seen: HashSet<u64>,
+}
+
+/// Push every unit `TargetByName` can pick, by guid, so the binding resolves its name against
+/// them and shows the pick as `"target"` to the rest of its chunk, as `0x489d60` commits before it
+/// returns: the by-name scan's candidates (typemask 8, a cached name, no query sent) with their
+/// distance each frame, and each one's snapshot when it is new, its descriptor, name or creature
+/// record moved, or an input every snapshot reads did; another name's answer rebuilds nothing.
+/// The snapshot has no guild leg, as a chain end's; it is a view for the rest of a chunk, which
+/// [`super::feed_units`] replaces with the committed selection's next frame.
+/// A move of our own descriptor does not rebuild the rest, so a reaction can lag our own faction
+/// change until the unit's next update. Without an active player object nothing is a candidate,
+/// as the reference resolves nothing then (`0x493ae0`).
+pub(crate) fn feed_name_candidates(
+    script: Option<NonSendMut<UiScript>>,
+    tables: super::SnapshotTables,
+    // [`GlobalTransform`], as [`crate::target::PlayerLookup`] reads it: `Transform` would put
+    // this feed in an undeclared order against every system that moves a unit.
+    units: Query<(&Guid, &GlobalTransform, Option<Ref<ObjectStore>>)>,
+    index: Option<Res<crate::net::GuidIndex>>,
+    all_stores: Query<&ObjectStore>,
+    self_q: Query<(&Guid, &GlobalTransform, Option<&ObjectStore>), With<SelfPlayer>>,
+    names: Res<NameCache>,
+    commands: Res<NetCommands>,
+    factions: Option<Res<Factions>>,
+    reputations: Res<Reputations>,
+    group: Res<crate::ui_party::GroupState>,
+    mut memo: Local<VmMemo<CandidateMemo>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let (memo, vm_reset) = memo.get_reset(&script);
+    let rebuild = vm_reset
+        || group.is_changed()
+        || reputations.is_changed()
+        || factions.as_ref().is_some_and(|r| r.is_changed());
+    let me = self_q.single().ok();
+    let by_guid = |guid: u64| -> Option<ObjectStore> {
+        all_stores.get(*index.as_ref()?.0.get(&guid)?).ok().cloned()
+    };
+    let held = HeldUnits {
+        names: &names,
+        commands: &commands,
+        factions: factions.as_deref(),
+        reputations: &reputations,
+        group: &group,
+        self_store: me.and_then(|(_, _, s)| s),
+        unit_names: tables.unit_names(),
+        types: tables.types(&names),
+        by_guid: &by_guid,
+    };
+    memo.seen.clear();
+    let origin = me.map(|(_, tf, _)| tf.translation());
+    let self_guid = me.map(|(g, _, _)| g.0);
+    for (guid, tf, store) in origin.iter().flat_map(|_| &units) {
+        let guid = guid.0;
+        let Candidacy::Named(name) = NameSearch::AnyUnit.candidacy(&names, guid) else {
+            continue;
+        };
+        memo.seen.insert(guid);
+        let dist2 = origin.map_or(0.0, |o| tf.translation().distance_squared(o));
+        let record = store
+            .as_ref()
+            .and_then(|s| s.0.object_entry())
+            .filter(|&e| e != 0)
+            .is_some_and(|e| names.creature_record(e).is_some());
+        let fresh = rebuild
+            || store.as_ref().is_some_and(|s| s.is_changed())
+            || memo
+                .pushed
+                .get(&guid)
+                .is_none_or(|(n, r)| n != name || *r != record);
+        if !fresh {
+            script.set_name_candidate_dist2(guid, dist2);
+            continue;
+        }
+        let state = match store.as_deref() {
+            // The name as the target feed reads it off the descriptor, from the cache alone.
+            Some(store) => {
+                let named = names
+                    .resolve_unit(guid, Some(store), Ask::Read)
+                    .map(str::to_string);
+                held.state_named(store, guid, named)
+            }
+            None => UnitState {
+                exists: true,
+                has_object: true,
+                is_connected: true,
+                guid,
+                name: Some(name.to_string()),
+                is_player: benilla_protocol::guid::is_player(guid),
+                ..Default::default()
+            },
+        };
+        script.set_name_candidate(
+            guid,
+            Some(NameCandidate {
+                name: name.to_string(),
+                dist2,
+                state,
+                selectable: crate::target::is_selectable(store.as_deref(), self_guid),
+            }),
+        );
+        memo.pushed.insert(guid, (name.to_string(), record));
+    }
+    let seen = &memo.seen;
+    memo.pushed.retain(|guid, _| {
+        let keep = seen.contains(guid);
+        if !keep {
+            script.set_name_candidate(*guid, None);
+        }
+        keep
+    });
 }
 
 #[cfg(test)]
@@ -228,7 +383,12 @@ mod tests {
         unit(0x09, target, health)
     }
 
-    fn spawn(app: &mut App, guid: u64, store: ObjectStore) -> Entity {
+    /// Streams `guid` in. A creature's descriptor carries its `OBJECT_FIELD_ENTRY` (field 3), the
+    /// key its name and record are cached under; these guids spell it in their entry bits.
+    fn spawn(app: &mut App, guid: u64, mut store: ObjectStore) -> Entity {
+        if let Some(entry) = benilla_protocol::guid::entry(guid) {
+            store.0.merge(ObjectFields::from_pairs(&[(3, entry)]));
+        }
         let e = app.world_mut().spawn((Guid(guid), store)).id();
         app.world_mut()
             .resource_mut::<GuidIndex>()
@@ -255,7 +415,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
-            .insert_state(crate::char_select::ClientState::InWorld)
+            .insert_state(crate::client_state::ClientState::InWorld)
             .init_resource::<Selection>()
             .init_resource::<GuidIndex>()
             .init_resource::<Reputations>()
@@ -456,6 +616,99 @@ mod tests {
         app.update();
         // The name would be the name cache's (`0x5171eb`), which a chain's end does not read yet.
         assert_eq!(health(&app, "raid3target"), 0);
+    }
+
+    /// `UnitCanAssist` (`0x516bb0`) over a chain's end reads the feed's `CanAssist` verdict
+    /// (`0x6066f0`): the player's template toward the unit's friendly, the unit not
+    /// unselectable, and, for a unit that is not player-controlled, PvP-flagged.
+    #[test]
+    fn unit_can_assist_reads_the_feeds_can_assist_for_a_chain_end() {
+        use crate::spell::targeting::corpse_fixture as fx;
+        const TEMPLATE: u16 = 35;
+        const FLAGS: u16 = 46;
+        let mut app = app();
+        app.insert_resource(fx::factions());
+        let with = |extra: &[(u16, u32)], target: u64, kind: u32| {
+            let mut pairs = vec![
+                (OBJECT_TYPE, kind),
+                (TARGET, target as u32),
+                (TARGET + 1, (target >> 32) as u32),
+                (HEALTH, 4000),
+                (MAXHEALTH, 5000),
+                (LEVEL, 60),
+            ];
+            pairs.extend_from_slice(extra);
+            ObjectStore(ObjectFields::from_pairs(&pairs))
+        };
+        let put = |app: &mut App, guid: u64, store: ObjectStore| {
+            let e = app.world().resource::<GuidIndex>().0[&guid];
+            app.world_mut().entity_mut(e).insert(store);
+        };
+        // We are a human; `BOSS` (party1's target) a human creature, PvP-flagged; `ADD`
+        // (raid3's target) a human creature that is not.
+        // A player carries the player-controlled bit, which makes `IsPvP` the unit's test.
+        put(
+            &mut app,
+            ME,
+            with(&[(TEMPLATE, 1), (FLAGS, 0x8)], MOB, 0x19),
+        );
+        put(
+            &mut app,
+            BOSS,
+            with(&[(TEMPLATE, 1), (FLAGS, 0x1000)], GONE, 0x09),
+        );
+        put(&mut app, ADD, with(&[(TEMPLATE, 1)], 0, 0x09));
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_unit(
+                "player",
+                Some(UnitState {
+                    exists: true,
+                    ..Default::default()
+                }),
+            );
+        app.update();
+        assert!(
+            holds(&app, r#"UnitCanAssist("player", "party1target") == 1"#),
+            "a friendly, PvP-flagged creature"
+        );
+        assert!(
+            holds(&app, r#"UnitCanAssist("player", "raid3target") == nil"#),
+            "a friendly creature that is not PvP-flagged"
+        );
+        // The other way round the creature is `this` and the player the argument: the player is
+        // player-controlled, so no PvP flag is asked, and `ADD` assists us though we cannot it.
+        assert!(
+            holds(&app, r#"UnitCanAssist("raid3target", "player") == 1"#),
+            "a friendly creature toward the player"
+        );
+        // A unit nobody holds is no unit: nil.
+        assert!(holds(
+            &app,
+            r#"UnitCanAssist("player", "party1targettarget") == nil"#
+        ));
+        // The verdict follows a descriptor that moves: `ADD` takes the flag.
+        put(
+            &mut app,
+            ADD,
+            with(&[(TEMPLATE, 1), (FLAGS, 0x1000)], 0, 0x09),
+        );
+        app.update();
+        assert!(holds(
+            &app,
+            r#"UnitCanAssist("player", "raid3target") == 1"#
+        ));
+        // `UNIT_FLAG_NOT_SELECTABLE` (bit 25) refuses it.
+        put(
+            &mut app,
+            ADD,
+            with(&[(TEMPLATE, 1), (FLAGS, 0x1000 | 0x0200_0000)], 0, 0x09),
+        );
+        app.update();
+        assert!(holds(
+            &app,
+            r#"UnitCanAssist("player", "raid3target") == nil"#
+        ));
     }
 
     /// The chain feed reads the resolver inputs the aura feed pushes in the same frame, so the

@@ -41,20 +41,20 @@ fn the_canonical_addon_idiom_moves_a_frame_and_the_position_survives_the_stop() 
     assert_eq!(corner(&mut s), (100.0, 100.0), "born where SetPoint put it");
 
     s.mouse_button(150.0, 140.0, "LeftButton", true); // press inside the panel
-    s.mouse_move(152.0, 140.0); // 2 px, under the drag threshold
+    s.mouse_move(152.0, 140.0); // 2 units, under the drag threshold
     assert_eq!(s.eval::<i64>("return starts").unwrap(), 0);
     assert_eq!(corner(&mut s), (100.0, 100.0));
 
-    s.mouse_move(160.0, 140.0); // crosses the threshold ⇒ OnDragStart ⇒ StartMoving
+    s.mouse_move(170.0, 140.0); // crosses the threshold ⇒ OnDragStart ⇒ StartMoving
     assert_eq!(s.eval::<i64>("return starts").unwrap(), 1);
-    s.mouse_move(260.0, 190.0); // +100, +50 from the grab
+    s.mouse_move(270.0, 190.0); // +100, +50 from the grab
     assert_eq!(
         corner(&mut s),
         (200.0, 150.0),
         "the frame follows the cursor delta since StartMoving"
     );
 
-    s.mouse_button(260.0, 190.0, "LeftButton", false); // OnDragStop ⇒ StopMovingOrSizing
+    s.mouse_button(270.0, 190.0, "LeftButton", false); // OnDragStop ⇒ StopMovingOrSizing
     assert_eq!(s.eval::<i64>("return stops").unwrap(), 1);
     assert_eq!(corner(&mut s), (200.0, 150.0), "the position survives");
 
@@ -62,11 +62,12 @@ fn the_canonical_addon_idiom_moves_a_frame_and_the_position_survives_the_stop() 
     assert_eq!(corner(&mut s), (200.0, 150.0), "no longer following");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 
-    // The reference moves the anchors in place, so GetPoint reads the frame's own point, dragged.
+    // The drag re-anchored it to one TOPLEFT against the screen (`0x768430`), so GetPoint reads
+    // that point, not the authored BOTTOMLEFT: top 230 on a 600 screen is y -370.
     let (point, x, y) = s
         .eval::<(String, f64, f64)>("local p, _, _, x, y = MovePanel:GetPoint() return p, x, y")
         .unwrap();
-    assert_eq!((point.as_str(), x, y), ("BOTTOMLEFT", 200.0, 150.0));
+    assert_eq!((point.as_str(), x, y), ("TOPLEFT", 200.0, -370.0));
 }
 
 /// Each move applies only its own delta: the pump re-centers its sample after every step.
@@ -74,17 +75,17 @@ fn the_canonical_addon_idiom_moves_a_frame_and_the_position_survives_the_stop() 
 fn a_moving_frame_follows_successive_mouse_moves() {
     let mut s = movable_panel();
     s.mouse_button(150.0, 140.0, "LeftButton", true);
-    s.mouse_move(160.0, 140.0); // the move that starts the drag
+    s.mouse_move(170.0, 140.0); // the move that starts the drag
     assert_eq!(
         corner(&mut s),
         (100.0, 100.0),
         "the frame follows from where StartMoving was called, so the starting move moves nothing"
     );
     for (step, want) in [
-        ((170.0, 140.0), (110.0, 100.0)),
-        ((170.0, 160.0), (110.0, 120.0)),
-        ((120.0, 160.0), (60.0, 120.0)), // back left of where it started
-        ((120.0, 160.0), (60.0, 120.0)), // a zero-delta move changes nothing
+        ((180.0, 140.0), (110.0, 100.0)),
+        ((180.0, 160.0), (110.0, 120.0)),
+        ((130.0, 160.0), (60.0, 120.0)), // back left of where it started
+        ((130.0, 160.0), (60.0, 120.0)), // a zero-delta move changes nothing
     ] {
         s.mouse_move(step.0, step.1);
         assert_eq!(corner(&mut s), want, "after moving to {step:?}");
@@ -163,7 +164,8 @@ fn stop_moving_or_sizing_is_harmless_with_nothing_moving_and_stops_only_its_own_
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
-/// A move translates every anchor, so a frame sized by two anchors keeps its size.
+/// A frame sized by two anchors keeps its size: the drag pins it to one anchor with the size its
+/// rect had (`0x768430`).
 #[test]
 fn a_frame_stretched_between_two_anchors_moves_rigidly() {
     let mut s = script();
@@ -194,7 +196,7 @@ fn a_frame_stretched_between_two_anchors_moves_rigidly() {
     let size_after = s
         .eval::<(f64, f64)>("return StretchPanel:GetWidth(), StretchPanel:GetHeight()")
         .unwrap();
-    assert_eq!((left, bottom), (130.0, 140.0), "both anchors translated");
+    assert_eq!((left, bottom), (130.0, 140.0), "the pinned anchor moved");
     assert_eq!(size_after, (200.0, 100.0), "and the frame kept its size");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
@@ -323,9 +325,45 @@ fn the_xml_movable_and_resizable_attributes_reach_the_methods() {
     );
 }
 
+/// The frame flags read through the client's string-to-bool `0x6f1b30` (`0x769908`, `0x769932`,
+/// `0x769898`): `"yes"` and `"1"` are true, `"off"` and `"0"` false, and an empty value is skipped.
+#[test]
+fn xml_flags_read_the_clients_string_to_bool() {
+    let s = script();
+    let doc = crate::framexml::parse(
+        r#"<Ui>
+             <Frame name="YesFrame" movable="yes" resizable="1" hidden="On"/>
+             <Frame name="NoFrame" movable="off" resizable="0" hidden="false"/>
+             <Frame name="EmptyFrame" movable="" resizable="" hidden=""/>
+           </Ui>"#,
+    )
+    .expect("valid FrameXML");
+    crate::loader::load(&s, &doc, &|_| None);
+    assert_eq!(
+        s.eval::<(bool, bool, bool)>(
+            "return YesFrame:IsMovable(), YesFrame:IsResizable(), YesFrame:IsShown()"
+        )
+        .unwrap(),
+        (true, true, false)
+    );
+    assert_eq!(
+        s.eval::<(bool, bool, bool)>(
+            "return NoFrame:IsMovable(), NoFrame:IsResizable(), NoFrame:IsShown()"
+        )
+        .unwrap(),
+        (false, false, true)
+    );
+    assert_eq!(
+        s.eval::<(bool, bool, bool)>(
+            "return EmptyFrame:IsMovable(), EmptyFrame:IsResizable(), EmptyFrame:IsShown()"
+        )
+        .unwrap(),
+        (false, false, true)
+    );
+}
+
 /// `StartSizing(grip)` (`0x776830`, called from `FloatingChatFrame.lua:600`) moves the gripped
-/// edges and plants the opposite ones. Which edges a grip moves is untraced in the reference, whose
-/// verb has no inline math; this takes the anchor point's plain meaning, as that caller does.
+/// edges and plants the opposite ones (`0x768710`'s grip cases).
 #[test]
 fn start_sizing_moves_the_gripped_edge_and_plants_the_other() {
     let mut s = crate::script::UiScript::new().unwrap();
@@ -607,19 +645,15 @@ fn the_write_filter_is_user_placed_and_movable_or_resizable() {
 /// neither flag is left alone.
 #[test]
 fn the_apply_seats_position_behind_movable_and_size_behind_resizable() {
-    use crate::script::{FrameLayout, LayoutPoint};
+    use crate::script::FrameLayout;
 
     let row = |name: &str| FrameLayout {
         name: name.to_owned(),
-        width: 200.0,
-        height: 80.0,
-        points: vec![LayoutPoint {
-            point: "BOTTOMLEFT".into(),
-            relative_to: None,
-            relative_point: "BOTTOMLEFT".into(),
-            x: 300.0,
-            y: 200.0,
-        }],
+        level: None,
+        x: Some(300),
+        y: Some(-200),
+        width: Some(200),
+        height: Some(80),
     };
     // Three frames, one per flag state, all authored identically.
     let mut s = script();
@@ -668,5 +702,165 @@ fn the_apply_seats_position_behind_movable_and_size_behind_resizable() {
         ["Movable", "Sizable"],
         "and only the two that took an arm are written back"
     );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The apply sets a saved level of zero or more whatever the flags (`0x4905ee`–`0x4905f5`), and
+/// takes a zero `X` and `Y` for no position (`0x490607`–`0x490613`), so the frame keeps its anchors.
+#[test]
+fn the_apply_sets_the_level_and_reads_a_zero_position_as_none() {
+    use crate::script::FrameLayout;
+
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        F = CreateFrame("Frame", "Corner")
+        F:SetPoint("BOTTOMLEFT", 10, 10); F:SetWidth(50); F:SetHeight(50)
+        F:SetMovable(true)
+        "#,
+    )
+    .unwrap();
+    s.restore_user_placed_layouts([FrameLayout {
+        name: "Corner".into(),
+        level: Some(6),
+        x: Some(0),
+        y: Some(0),
+        width: None,
+        height: None,
+    }]);
+    s.resolve();
+    assert_eq!(
+        s.eval::<(f64, i64, bool)>(
+            "return Corner:GetLeft(), Corner:GetFrameLevel(), Corner:IsUserPlaced()"
+        )
+        .unwrap(),
+        (10.0, 6, false),
+        "levelled, but left on its anchors and unstamped"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+// ── The drag slot is taken, never refused (`0x7652b0`) ──────────────────────────────────────────
+
+/// A title-region frame `A` at (100, 100) 200×80 and a movable `B` at (500, 100), on 800×600.
+fn title_and_mover() -> UiScript {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        log = {}
+        A = CreateFrame("Frame", "A")
+        A:SetPoint("BOTTOMLEFT", 100, 100); A:SetWidth(200); A:SetHeight(80)
+        A:EnableMouse(true)
+        A:SetScript("OnMouseUp", function() table.insert(log, "A:up:"..arg1) end)
+        local title = A:CreateTitleRegion()
+        title:SetPoint("TOPLEFT", A, "TOPLEFT", 0, 0)
+        title:SetPoint("BOTTOMRIGHT", A, "TOPRIGHT", 0, -20)
+        B = CreateFrame("Frame", "B")
+        B:SetPoint("BOTTOMLEFT", 500, 100); B:SetWidth(100); B:SetHeight(100)
+        B:SetMovable(true)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    s
+}
+
+fn lefts(s: &mut UiScript) -> (f64, f64) {
+    s.resolve();
+    s.eval::<(f64, f64)>("return A:GetLeft(), B:GetLeft()")
+        .unwrap()
+}
+
+/// A title press while a scripted `StartMoving` holds the slot takes it: the drag entry stores the
+/// new frame over the old one with no test of the slot (`0x7652f3`–`0x76530f`), and nothing runs
+/// on the frame it displaced, which simply stops following.
+#[test]
+fn a_title_press_takes_the_slot_from_a_running_move() {
+    let mut s = title_and_mover();
+    s.mouse_move(150.0, 170.0); // the hover: A, in its title strip
+    s.run("B:StartMoving()").unwrap();
+    s.mouse_button(150.0, 170.0, "LeftButton", true);
+    // The slot holds A now, so B's own stop clears nothing (`0x776990` tests the holder).
+    s.run("B:StopMovingOrSizing()").unwrap();
+    s.mouse_move(250.0, 170.0);
+    assert_eq!(
+        lefts(&mut s),
+        (200.0, 500.0),
+        "A follows; B stopped where it was"
+    );
+    assert!(s.eval::<bool>("return A:IsUserPlaced()").unwrap());
+    // The title move is mode 2, which the release ends.
+    s.mouse_button(250.0, 170.0, "LeftButton", false);
+    s.mouse_move(350.0, 170.0);
+    assert_eq!(lefts(&mut s), (200.0, 500.0));
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The press goes to the capture, else the hover (`0x76637f`–`0x766389`), and a walk that finds a
+/// move in flight pumps it and returns before its sweep (`0x766164`): the hover stays the frame it
+/// was when the move began. So with a window riding the cursor (as a clicked chat tab leaves it),
+/// a press over another frame's title region reaches the riding window, not that frame.
+#[test]
+fn a_press_during_a_move_goes_to_the_hover_the_move_froze() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        log = {}
+        W = CreateFrame("Frame", "W")
+        W:SetPoint("BOTTOMLEFT", 100, 100); W:SetWidth(200); W:SetHeight(100)
+        W:EnableMouse(true); W:SetMovable(true)
+        W:SetScript("OnMouseDown", function() table.insert(log, "W:down"); this:StartMoving() end)
+        T = CreateFrame("Frame", "T")
+        T:SetFrameStrata("HIGH"); T:SetToplevel(true); T:SetMovable(true)
+        T:SetPoint("BOTTOMLEFT", 400, 100); T:SetWidth(200); T:SetHeight(100)
+        T:EnableMouse(true)
+        T:SetScript("OnMouseDown", function() table.insert(log, "T:down") end)
+        T:CreateTitleRegion():SetAllPoints(T)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_move(150.0, 150.0);
+    s.mouse_button(150.0, 150.0, "LeftButton", true); // W starts moving (mode 3)
+    s.mouse_button(150.0, 150.0, "LeftButton", false); // which the release does not end
+    s.mouse_move(450.0, 150.0); // W rides to 400, under T
+    assert_eq!(s.hit_test_name(450.0, 150.0).as_deref(), Some("T"));
+    s.mouse_button(450.0, 150.0, "LeftButton", true);
+    s.mouse_button(450.0, 150.0, "LeftButton", false);
+    s.mouse_move(500.0, 150.0);
+    s.resolve();
+    assert_eq!(
+        s.eval::<(f64, f64)>("return W:GetLeft(), T:GetLeft()")
+            .unwrap(),
+        (450.0, 400.0),
+        "W still rides; T never moved"
+    );
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ' ')").unwrap(),
+        "W:down W:down"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A release while a title move (mode 2) holds the slot ends it and does nothing else
+/// (`0x76646d`–`0x76647c` → `0x7664e0`): no `OnMouseUp` on the capture a chorded press left.
+#[test]
+fn a_release_that_ends_a_title_move_fires_nothing() {
+    let mut s = title_and_mover();
+    s.mouse_move(150.0, 120.0); // A, below its title strip
+    s.mouse_button(150.0, 120.0, "RightButton", true); // capture A
+    s.mouse_move(150.0, 170.0);
+    s.mouse_button(150.0, 170.0, "LeftButton", true); // A's title region: mode 2
+    s.mouse_button(150.0, 170.0, "RightButton", false);
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ' ')").unwrap(),
+        "",
+        "the right release ended the move and reached no script"
+    );
+    s.mouse_move(250.0, 170.0);
+    assert_eq!(lefts(&mut s).0, 100.0, "and the move is over");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

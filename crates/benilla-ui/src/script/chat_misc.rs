@@ -5,6 +5,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::bool_or_default;
 use super::Model;
 
 /// `DoEmote(token [, target])`: the `EmotesText.dbc` name token (`"WAVE"`, not `/wave`) and an
@@ -28,17 +29,6 @@ fn to_u32(v: &Value) -> u32 {
             .filter(|n| n.is_finite() && *n >= 0.0)
             .map_or(0, |n| n as u32),
         _ => 0,
-    }
-}
-
-fn flag_arg(v: Option<Value>) -> Option<bool> {
-    match v {
-        None | Some(Value::Nil) => None,
-        Some(Value::Boolean(b)) => Some(b),
-        Some(Value::Integer(n)) => Some(n != 0),
-        Some(Value::Number(n)) => Some(n != 0.0),
-        Some(Value::String(s)) => Some(s.to_str().is_ok_and(|s| s != "0" && !s.is_empty())),
-        Some(_) => Some(true),
     }
 }
 
@@ -73,6 +63,42 @@ impl super::UiScript {
     pub fn take_logging_changes(&mut self) -> bool {
         std::mem::take(&mut self.model_mut().logging_changed)
     }
+}
+
+/// `ConsoleExec` (`0x515f10`) is in the registrar both states call (`0x51bb20`, from the glue
+/// registrar `0x46abb0` and the in-game `0x51bb60`), so it installs apart from this file's in-game
+/// verbs.
+pub(super) fn install_console_exec(lua: &Lua) -> mlua::Result<()> {
+    // `ConsoleExec("name value")`: a registered CVar with a value is written at once, as `SetCVar`
+    // writes it; anything else, a bare CVar name included (the reference answers it with
+    // `CVar "%s" is "%s"`, `0x63dde0`), goes to the app's command registry.
+    lua.globals().set(
+        "ConsoleExec",
+        lua.create_function(|lua, line: Option<String>| {
+            let Some(line) = line.map(|l| l.trim().to_string()).filter(|l| !l.is_empty()) else {
+                return Ok(());
+            };
+            let (name, value) = line
+                .split_once(char::is_whitespace)
+                .map_or((line.as_str(), ""), |(n, v)| (n, v.trim()));
+            // `reloadUI` is `ReloadUiCommand` (`0x4035f0`), which asks `CGGameUI::Reload`'s gate,
+            // tag 10 (`0x4035fa` → `0x491380`), inside the call: refused, it does nothing.
+            if name.eq_ignore_ascii_case("reloadui")
+                && !super::protected::gate(lua, super::protected::Tag::RELOAD)
+            {
+                return Ok(());
+            }
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let is_cvar = model.cvars.contains_key(&name.to_ascii_lowercase());
+            if is_cvar && !value.is_empty() {
+                super::cvars::write_cvar(&mut model, name, value.to_string());
+            } else {
+                model.console_lines.push(line.clone());
+            }
+            Ok(())
+        })?,
+    )?;
+    Ok(())
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -115,10 +141,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
                 return Ok(());
             };
+            let may_cast = super::protected::select_may_cast(lua);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.script_calls.push(super::ScriptCall::Select(
-                super::SelectionRequest::AssistByName(name),
-            ));
+            model.queue_call(super::ScriptCall::Select {
+                request: super::SelectionRequest::AssistByName(name),
+                may_cast,
+            });
             Ok(())
         })?,
     )?;
@@ -135,53 +163,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // `ConsoleExec("name value")`: a registered CVar with a value is written at once, as `SetCVar`
-    // writes it; anything else, a bare CVar name included (the reference answers it with
-    // `CVar "%s" is "%s"`, `0x63dde0`), goes to the app's command registry.
-    g.set(
-        "ConsoleExec",
-        lua.create_function(|lua, line: Option<String>| {
-            let Some(line) = line.map(|l| l.trim().to_string()).filter(|l| !l.is_empty()) else {
-                return Ok(());
-            };
-            let (name, value) = line
-                .split_once(char::is_whitespace)
-                .map_or((line.as_str(), ""), |(n, v)| (n, v.trim()));
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let is_cvar = model.cvars.contains_key(&name.to_ascii_lowercase());
-            if is_cvar && !value.is_empty() {
-                super::cvars::write_cvar(&mut model, name, value.to_string());
-            } else {
-                model.console_lines.push(line.clone());
-            }
-            Ok(())
-        })?,
-    )?;
-
     for (name, chat) in [("LoggingChat", true), ("LoggingCombat", false)] {
         g.set(
             name,
-            lua.create_function(move |lua, flag: Option<Value>| {
+            lua.create_function(move |lua, args: MultiValue| {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                let slot = if chat {
-                    &mut model.logging_chat
-                } else {
-                    &mut model.logging_combat
-                };
-                match flag_arg(flag) {
-                    None => Ok(MultiValue::from_vec(vec![if *slot {
-                        Value::Integer(1)
+                // With an argument (`lua_gettop > 0`, `0x49fe57`) the flag is set from
+                // `GetBoolOrDefault` (`0x49fe69`, default 1), so an explicit nil clears it. Both
+                // paths then answer the flag as it stands, 1 or nil, one value (`0x49feb2`-`0x49fee1`):
+                // the reference re-reads it after the log-open attempt, which can clear it
+                // (`0x49feab`); the app owns that attempt here.
+                if let Some(on) = args.front().map(|v| bool_or_default(Some(v), true)) {
+                    let slot = if chat {
+                        &mut model.logging_chat
                     } else {
-                        Value::Nil
-                    }])),
-                    Some(on) => {
-                        if *slot != on {
-                            *slot = on;
-                            model.logging_changed = true;
-                        }
-                        Ok(MultiValue::new())
+                        &mut model.logging_combat
+                    };
+                    if *slot != on {
+                        *slot = on;
+                        model.logging_changed = true;
                     }
                 }
+                let now = if chat {
+                    model.logging_chat
+                } else {
+                    model.logging_combat
+                };
+                Ok(if now { Value::Integer(1) } else { Value::Nil })
             })?,
         )?;
     }
@@ -276,6 +284,20 @@ mod tests {
         );
     }
 
+    /// `reloadUI` is `ReloadUiCommand` (`0x4035f0`), which asks the gate's tag 10 (`0x4035fa`): a
+    /// macro's line outside an input event is ignored, a key's body or the client's own passes.
+    #[test]
+    fn console_exec_reload_ui_asks_the_gate() {
+        let mut s = UiScript::new().unwrap();
+        s.run(r#"RunScript("ConsoleExec('reloadUI')")"#).unwrap();
+        assert!(s.take_console_lines().is_empty());
+        s.run_binding(r#"RunScript("ConsoleExec('ReloadUI')")"#)
+            .unwrap();
+        assert_eq!(s.take_console_lines(), vec!["ReloadUI".to_string()]);
+        s.run("ConsoleExec('reloadui')").unwrap();
+        assert_eq!(s.take_console_lines(), vec!["reloadui".to_string()]);
+    }
+
     #[test]
     fn the_logging_flags_read_as_one_or_nil_and_set_from_any_truthy_arg() {
         let mut s = UiScript::new().unwrap();
@@ -283,8 +305,8 @@ mod tests {
         assert!(s.eval::<bool>("return LoggingCombat() == nil").unwrap());
         assert_eq!(
             s.arity("LoggingChat(true)").unwrap(),
-            0,
-            "the setter returns nothing"
+            1,
+            "the setter answers the flag too (`0x49fed3`)"
         );
         assert_eq!(s.eval::<i64>("return LoggingChat()").unwrap(), 1);
         assert_eq!(s.logging_flags(), (true, false));
@@ -297,5 +319,9 @@ mod tests {
             !s.take_logging_changes(),
             "a write that moves nothing cues nothing"
         );
+        // The setter answers the flag it leaves: 1 or nil, one value either way.
+        assert_eq!(s.eval::<i64>("return LoggingChat(true)").unwrap(), 1);
+        assert_eq!(s.arity("LoggingChat(nil)").unwrap(), 1);
+        assert!(s.eval::<bool>("return LoggingChat(nil) == nil").unwrap());
     }
 }

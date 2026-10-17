@@ -1,6 +1,6 @@
 use mlua::{Lua, Value};
 
-use crate::layout::{Anchor, Rect};
+use crate::layout::{Anchors, Rect};
 use crate::order::ZTarget;
 
 /// A value the host passes into Lua, such as a `fire_event` argument, without an mlua handle.
@@ -65,14 +65,17 @@ pub enum QuadContent {
         /// The indoor zoom index (`0x86f69c`), sent too so the renderer picks by its own test.
         inside_zoom: u8,
     },
-    /// A `Model` or `PlayerModel` widget's 3D pane: a `model` file draws as a tile, a unit pane
-    /// samples the bake of the window its name belongs to, or nothing. The host memoizes on this
+    /// A `Model` or `PlayerModel` widget's 3D pane: a `model` file draws as a tile, a character
+    /// pane its own copy of its subject, an empty pane nothing. The host memoizes on this
     /// list, so it reads the moving play head from `UiScript::visible_model_panes` instead.
     ModelPane {
         /// The renderer's key for the tile it keeps per pane.
         handle: crate::widget::FrameHandle,
         /// The global frame name; `None` for an anonymous `CreateFrame("Model")`.
         name: Option<String>,
+        /// A `PlayerModel`, `DressUpModel` or `TabardModel`: with no file it draws its copy of
+        /// the subject `SetUnit` stored ([`crate::script::UiScript::character_panes`]).
+        character: bool,
         /// The `SetModel` file; `None` for a unit pane or an empty one.
         model: Option<String>,
         /// `SetFacing`'s radians (0 default).
@@ -93,17 +96,28 @@ pub enum QuadContent {
         /// The embedded `CGLight`, off on every shipped pane; a lit batch under it draws black, as
         /// in the reference.
         light: crate::widget::ModelLight,
-        /// The fog, when armed; a material with the UNFOGGED bit ignores it.
+        /// The fog the scene draws with ([`crate::widget::ModelState::scene_fog`]); a material
+        /// with the UNFOGGED bit ignores it.
         fog: Option<crate::widget::ModelFog>,
+        /// A `ModelFFX` (`0x46fa00`): the glue screens' scene, which the app's glue booth draws.
+        ffx: bool,
     },
     /// A `Texture` region: a BLP path, a solid or vertex colour, or both (a tinted texture).
     Texture {
         path: Option<String>,
+        /// The solid fill times the one vertex colour; with `gradient`, the fill alone.
         color: Option<[f32; 4]>,
+        /// A gradient's four vertex colours, `[TL, TR, BR, BL]` ([`Gradient::vertex_colors`]),
+        /// each multiplying the texel and `color`; `None` for a one-colour quad.
+        gradient: Option<[[f32; 4]; 4]>,
         /// The `ADD` blend instead of straight alpha.
         additive: bool,
         /// `None` is the full texture.
         tex_coords: Option<TexCoords>,
+        /// The wrap flag the file loaded with (`0x770200`, bits 3 and 4 of the texture's flags):
+        /// the sampler repeats on both axes, else clamps to the edge, whatever the coordinates
+        /// say now.
+        wrap: bool,
         /// A portrait, masked to the inscribed circle.
         circular: bool,
         /// A live unit portrait's unit: the renderer samples the app's bake of it instead of
@@ -129,17 +143,6 @@ pub enum QuadContent {
         /// `0..=1`; the widget's value moves only its marker, never the strip.
         sat: f32,
     },
-    /// One `Backdrop` piece, the tiled background or one of the 8 border pieces, drawn in the
-    /// frame's slot behind its regions; per-corner UVs, since the top and bottom edges turn 90°.
-    Backdrop {
-        path: String,
-        /// The `SetBackdropColor` or `SetBackdropBorderColor` tint, pre-alpha.
-        color: [f32; 4],
-        /// `[TL, TR, BR, BL]`, screen order.
-        uvs: [[f32; 2]; 4],
-        /// Sample with repeat (wrap) addressing.
-        tile: bool,
-    },
     /// A `FontString` region with its resolved font; the app measures and draws it.
     Text {
         text: Option<String>,
@@ -155,6 +158,11 @@ pub enum QuadContent {
         /// 1.12's `MasterFont` sets `(1,-1)` black, so nearly every stock font has one.
         shadow: Option<FontShadow>,
         outline: Outline,
+        /// The `monochrome` flag (font flag bit 1): the glyphs draw from a 1-bit raster.
+        monochrome: bool,
+        /// The gap between lines in logical px, never negative: the line step is the font height
+        /// plus this, rounded up to a whole device pixel (`LayoutLines` `0x5cdc20`).
+        spacing: f32,
         /// `SetAlphaGradient`: before `start` opaque, the next `length` characters fading from 1
         /// to 0, the rest invisible.
         alpha_gradient: Option<(f32, f32)>,
@@ -162,6 +170,14 @@ pub enum QuadContent {
         /// (`super::nameplate::is_world_seated`), which slides on a device-pixel snap, so a second
         /// snap would jitter its text. Not a reference field.
         world_seat: bool,
+        /// A single-line EditBox's text, which holds the box's window (`0x77d858`): one line from
+        /// the region's left, never wrapped or ellipsized, cut at the region's rect.
+        edit_line: bool,
+        /// `nonspacewrap` ([`RegionData::non_space_wrap`]); a multi-line EditBox's text is always
+        /// on (`0x77a58f`).
+        non_space_wrap: bool,
+        /// `maxLines` ([`RegionData::max_lines`]).
+        max_lines: u32,
     },
 }
 
@@ -249,7 +265,7 @@ impl Outline {
 
     /// Parse a Lua `SetFont` flags string, shared by every `SetFont` (`0x79f210`) and matched by
     /// substring against `{0x1 OUTLINE, 0x4 THICKOUTLINE, 0x2 MONOCHROME}` (`0x811b10`): THICK
-    /// first, since `THICKOUTLINE` contains `OUTLINE`. MONOCHROME is ignored, its mode not built.
+    /// first, since `THICKOUTLINE` contains `OUTLINE`. MONOCHROME is [`monochrome_flag`]'s.
     pub fn flags(s: &str) -> Outline {
         let s = s.to_ascii_uppercase();
         if s.contains("THICK") {
@@ -269,6 +285,12 @@ impl Outline {
             Outline::Thick => "THICKOUTLINE",
         }
     }
+}
+
+/// Whether a Lua `SetFont` flags string holds `MONOCHROME` (`0x2` in `0x811b10`), matched as
+/// [`Outline::flags`] matches its names.
+pub(crate) fn monochrome_flag(s: &str) -> bool {
+    s.to_ascii_uppercase().contains("MONOCHROME")
 }
 
 /// A font object's `<Shadow>`, inherited down `<Font>` chains; 1.12's `MasterFont` sets `(1,-1)`
@@ -292,8 +314,12 @@ pub struct FontObject {
     pub shadow: Option<FontShadow>,
     pub color: Option<[f32; 4]>,
     pub outline: Outline,
+    /// `monochrome=` (font flag bit 1).
+    pub monochrome: bool,
     pub justify_h: Option<JustifyH>,
     pub justify_v: Option<JustifyV>,
+    /// The gap between lines (`spacing=`, `SetSpacing`), stored as given (`+0x50`).
+    pub spacing: Option<f32>,
 }
 
 /// One entry of [`UiScript::extract`](super::UiScript::extract)'s render list, in the client's
@@ -303,7 +329,7 @@ pub struct ExtractedQuad {
     /// A frame's own slot, or one of its regions.
     pub target: ZTarget,
     /// The packed draw-order key (`ZKey::raw`); entries are sorted ascending by it.
-    pub z: u64,
+    pub z: u128,
     /// `None` when the owning frame's anchors do not resolve; a renderer skips it.
     pub rect: Option<Rect>,
     /// A frame's `effective_alpha`, or a region's alpha times its owner's, one hop only.
@@ -316,24 +342,31 @@ pub struct ExtractedQuad {
     pub scale: f32,
 }
 
-/// A two-stop linear gradient (`SetGradientAlpha`/`SetGradient`).
+/// A two-stop gradient (`SetGradientAlpha`/`SetGradient`, XML `<Gradient>`): the four-colour form
+/// of the vertex-colour slot (`+0xb0`, count 4), which `0x77f910` writes and `SetVertexColor`
+/// collapses back to one colour (`0x77f87f`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gradient {
-    /// `"VERTICAL"`, matched case-insensitively; anything else is horizontal, as in the client.
+    /// `VERTICAL` (1) rather than `HORIZONTAL` (0), the `0x811b00` enum.
     pub vertical: bool,
-    /// RGBA; `SetGradient`, which takes no alpha, sets both alphas to 1.
+    /// `MinColor`, RGBA in `0..=1`; `SetGradient`, which takes no alpha, sets both alphas to 1.
     pub start: [f32; 4],
+    /// `MaxColor`.
     pub end: [f32; 4],
 }
 
 impl Gradient {
-    /// The midpoint, the one colour a one-tint quad can show.
-    pub fn midpoint(&self) -> [f32; 4] {
-        let mut out = [0.0; 4];
-        for (i, chan) in out.iter_mut().enumerate() {
-            *chan = (self.start[i] + self.end[i]) / 2.0;
+    /// The quad's vertex colours in screen order `[TL, TR, BR, BL]`. `0x77f910` writes the
+    /// vertices in `0x7705b0`'s order `TL BL TR BR`: HORIZONTAL the min on the left pair and the
+    /// max on the right (`0x77f9c3`), VERTICAL the min on the bottom pair and the max on the top
+    /// (`0x77fa2c`).
+    pub fn vertex_colors(&self) -> [[f32; 4]; 4] {
+        let (min, max) = (self.start, self.end);
+        if self.vertical {
+            [max, max, min, min]
+        } else {
+            [min, max, max, min]
         }
-        out
     }
 }
 
@@ -346,16 +379,17 @@ pub(crate) struct RegionData {
     ///
     /// Deviation: kept apart from [`Self::vertex_color`], which the reference's `Texture:SetAlpha`
     /// (`0x79b580`) rewrites, because the drawn product differs only on a region that sets both,
-    /// which no stock code does, and a FontString's `SetAlpha` then keeps its font colour.
+    /// or a gradient and an alpha, which no stock code does, and a FontString's `SetAlpha` then
+    /// keeps its font colour.
     pub(crate) alpha: Option<f32>,
-    /// A texture path (`SetTexture("Interface\\...")`).
-    pub(crate) texture: Option<String>,
-    /// `SetTexture(r, g, b, a)` or an XML `<Color>` with no `file=`, sharing `+0xcc` with
-    /// [`Self::texture`]: setting one clears the other. The reference makes an 8×8 texture of it
-    /// (`0x770360` → `0x44a9c0` → `0x5c5350`), so its alpha multiplies with the vertex colour's.
-    pub(crate) fill: Option<[f32; 4]>,
-    /// `SetGradientAlpha`/`SetGradient`, stored whole and drawn as its midpoint: the renderer has
-    /// one tint per quad, so the reference's gradient is not built.
+    /// The texture slot (`+0xcc`): a path (`SetTexture("Interface\\...")`) or a solid fill
+    /// (`SetTexture(r, g, b, a)`, an XML `<Color>` with no `file=`), each clearing the other. The
+    /// reference makes an 8×8 texture of a fill (`0x770360` → `0x44a9c0` → `0x5c5350`), so its alpha
+    /// multiplies with the vertex colour's. Written only through [`super::Model::set_texel`].
+    pub(crate) tex: super::texel::TexSlot,
+    /// `SetGradientAlpha`/`SetGradient` or `<Gradient>`: four vertex colours, drawn as
+    /// `texel × vertexColour` like [`Self::vertex_color`], whose slot it shares, so setting either
+    /// clears the other. It is no texture: a gradient alone draws nothing (`0x7706e0`).
     pub(crate) gradient: Option<Gradient>,
     /// `SetVertexColor` (`0x79abd0` → `0x77f750`, `+0xb8`), `SetStatusBarColor` or a text colour,
     /// drawn as `texel × colour` per channel, alpha included: a `<Color 1,1,1,0.2>` tinted
@@ -381,20 +415,26 @@ pub(crate) struct RegionData {
     /// extent, never the owner's rect; one still unset leaves the region unresolved (`0x767a20`).
     /// Empty is a Lua region nobody anchored, which never draws: every other has an authored or
     /// creation-time anchor ([`super::region::implicit_creation_anchor`]).
-    pub(crate) anchors: Vec<Anchor>,
+    pub(crate) anchors: Anchors,
     /// `SetDesaturated` (`0x79c1e0`): the renderer greys the texel, so the binding reports support.
     pub(crate) desaturated: bool,
-    /// `SetNonSpaceWrap`/`CanNonSpaceWrap` (`0x79e9f0`/`0x79ead0`), `None` on. Stored, not applied:
-    /// the reference's flag `0x40` drives a mid-word wrap and the ellipsis fit count (`0x771ec0`).
-    pub(crate) non_space_wrap: Option<bool>,
+    /// `nonspacewrap` / `SetNonSpaceWrap` / `CanNonSpaceWrap` (`0x77103f`, `0x79e9f0`,
+    /// `0x79ead0`): bit `0x1000` of the justify word, off from the constructor (`0x770dd3`). The
+    /// text layer takes it as flag `0x40` (`0x44d4c7`, `0x44d9c5`): it decides what a force-broken
+    /// line leaves to the next and where the ellipsis fit stops.
+    pub(crate) non_space_wrap: bool,
+    /// XML `maxLines` (`0x7710b2`-`0x7710cd`, `+0x128`), 0 for none: the ellipsis truncate fits the
+    /// text into that many lines, with or without a height (`0x771ec0`).
+    pub(crate) max_lines: u32,
     /// The client's dword at `CSimpleFontString+0x120`: bits 0-2 horizontal, 3-5 vertical, `0x212`
     /// from the constructor. A cleared axis answers `"UNKNOWN"` to the getter and draws centred.
     pub(crate) justify: crate::justify::Justify,
     /// The `<TexCoords>`/`SetTexCoord` mapping; `None` is the full texture.
     pub(crate) tex_coords: Option<TexCoords>,
-    /// `SetTexCoordModifiesRect`, the reference's `+0x124` (written only at `0x79c113`, in
-    /// `0x79c080`). Stored, not applied: there a set flag makes `SetTexCoord` re-derive the rect
-    /// from the UV quad (`0x770462`); no stock or corpus code sets it.
+    /// The reference's `+0x124`: `SetTexCoordModifiesRect` writes it (`0x79c113`, in `0x79c080`)
+    /// and installing the texture as a StatusBar's bar sets it (`0x783220`, in `0x7831f0`). Stored,
+    /// not applied: there a set flag makes `SetTexCoord` re-derive the rect from the UV quad
+    /// (`0x770462`); no stock or corpus code sets it.
     pub(crate) tex_coord_modifies_rect: bool,
     /// Rotation about the centre, radians counterclockwise; always 0: 1.12 has no Texture setter.
     pub(crate) rotation: f32,
@@ -404,7 +444,8 @@ pub(crate) struct RegionData {
     pub(crate) font_object: Option<String>,
     /// What this region set for itself, which its font object no longer overwrites.
     pub(crate) font_explicit: FontExplicit,
-    /// Resolved font face path (`SetFont`/`SetFontObject`); `None` is the renderer's default.
+    /// Resolved font face path (`SetFont`/`SetFontObject`); `None` is no font, the reference's
+    /// null `+0xe0` (`font_block::has_font`).
     pub(crate) font_path: Option<String>,
     /// Resolved font height in logical px; `None` is the renderer's default.
     pub(crate) font_height: Option<f32>,
@@ -413,8 +454,15 @@ pub(crate) struct RegionData {
     pub(crate) text_height: Option<f32>,
     /// Resolved glyph outline (`SetFont` flags or the font object).
     pub(crate) outline: Outline,
+    /// Resolved monochrome flag, from the same flags word as [`Self::outline`].
+    pub(crate) monochrome: bool,
     /// Resolved drop shadow (font object `<Shadow>`), drawn behind the glyphs.
     pub(crate) font_shadow: Option<FontShadow>,
+    /// The gap between lines, as set (`SetSpacing`, XML `spacing=` or the font object): a
+    /// FontString's own setter clamps it (`0x772240`), the message frames' and the EditBox's font
+    /// stores it raw (`0x79fb40`). A line string reads it through [`Self::line_gap`]; the plain
+    /// message frame's pitch reads it raw (`0x785f06`).
+    pub(crate) spacing: f32,
     /// The host-measured size of a FontString with no explicit height.
     pub(crate) measured: Option<MeasuredText>,
 }
@@ -429,7 +477,8 @@ pub(crate) struct FontExplicit {
     pub(crate) face: bool,
     /// `SetFont`'s height argument, or XML `<FontHeight>`.
     pub(crate) height: bool,
-    /// `SetFont`'s flags argument, or XML `outline=`.
+    /// `SetFont`'s flags argument, or XML `outline=` and `monochrome=`: the outline and the
+    /// monochrome flag together.
     pub(crate) outline: bool,
     /// `SetTextColor`/`SetVertexColor`, or a `<FontString><Color>`.
     pub(crate) color: bool,
@@ -439,6 +488,8 @@ pub(crate) struct FontExplicit {
     pub(crate) justify_h: bool,
     /// `SetJustifyV`, or XML `justifyV=`.
     pub(crate) justify_v: bool,
+    /// `SetSpacing`, or XML `spacing=` (inherit bit `0x10`).
+    pub(crate) spacing: bool,
 }
 
 /// A cached host measurement of a FontString's laid-out text.
@@ -466,9 +517,26 @@ impl MeasuredText {
 }
 
 impl RegionData {
-    /// The measure-cache key of the text, font, wrap width, outline and owner scale. A Lua metric
-    /// read treats a measure under another key as absent; the layout keeps the old box until the
-    /// new one lands, except for empty text, which is never measured.
+    /// Write the one vertex colour (`0x77f750`), which collapses a gradient's four (`0x77f87f`).
+    pub(crate) fn set_vertex_color(&mut self, color: Option<[f32; 4]>) {
+        self.vertex_color = color;
+        self.gradient = None;
+    }
+
+    /// The gap a line string lays its lines out by: [`Self::spacing`] clamped at 0, as a line
+    /// string stores it through `0x772240`.
+    pub(crate) fn line_gap(&self) -> f32 {
+        self.spacing.max(0.0)
+    }
+
+    /// The shadow's x offset in UI units, 0 for none ([`MeasureRequest::shadow_x`]).
+    pub(crate) fn shadow_x(&self) -> f32 {
+        self.font_shadow.map_or(0.0, |s| s.offset[0])
+    }
+
+    /// The measure-cache key of the text, font, wrap width, outline, line gap, shadow and owner
+    /// scale. A Lua metric read treats a measure under another key as absent; the layout keeps the
+    /// old box until the new one lands, except for empty text, which is never measured.
     pub(crate) fn measure_key(&self, scale: f32) -> u64 {
         // By reference: `String` hashes as `str` does, and this runs for every FontString every
         // frame, so a clone would allocate for nothing.
@@ -486,8 +554,13 @@ impl RegionData {
         let wrap_width = self.size.map(|s| s.0).filter(|w| *w > 0.0);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         // The outline changes the measure: a THICK one steps each glyph 1 px further
-        // (`GlyphStepBase 0x5ca2b0`).
+        // (`GlyphStepBase 0x5ca2b0`); so does the shadow's x offset, which seeds the line.
         (self.outline as u8).hash(&mut hasher);
+        self.line_gap().to_bits().hash(&mut hasher);
+        self.shadow_x().to_bits().hash(&mut hasher);
+        // The flag moves the wrap and `maxLines` the cut text the height is measured from.
+        self.non_space_wrap.hash(&mut hasher);
+        self.max_lines.hash(&mut hasher);
         scale.to_bits().hash(&mut hasher);
         hasher.finish()
     }
@@ -505,6 +578,11 @@ pub struct EditBoxAdvanceRequest {
     pub height: Option<f32>,
     /// A THICK outline adds 1 px to every glyph step (`GlyphStepBase 0x5ca2b0`).
     pub outline: Outline,
+    /// The gap between a multiline box's rows, in frame-local units: the row pitch is the height
+    /// plus it (`0x77d133`-`0x77d161`).
+    pub spacing: f32,
+    /// The shadow's x offset in UI units, 0 for none: it seeds each drawn row's pen.
+    pub shadow_x: f32,
     /// The box's `effective_scale`. The host measures at `height × scale × seam` but divides by
     /// the seam alone, so advances come back in screen UI units, like the mouse feed and the
     /// box's rect; a [`MeasureRequest`] answer is frame-local instead.
@@ -526,11 +604,10 @@ pub use crate::widget::{EditAction, EditOutcome, EditUnit};
 pub struct EditBoxTextUi {
     /// The text region's draw target, to find its extracted Text quad by.
     pub target: crate::order::ZTarget,
-    /// The scroll window's start, a display byte offset; always 0 for a multiline box.
-    pub display_from: usize,
     /// Multiline: the whole wrapped block draws, caret and selection seated by `(row, x)`.
     pub multi_line: bool,
-    /// Caret x in px from the drawn window's text origin (multiline: from the row's origin).
+    /// Caret x in px from the text region's origin, the window's start (multiline: from the
+    /// row's origin).
     pub caret_x: f32,
     /// Always 0 single-line.
     pub caret_row: usize,
@@ -558,6 +635,16 @@ pub struct MeasureRequest {
     pub wrap_width: Option<f32>,
     /// A THICK outline adds 1 px to every glyph step (`GlyphStepBase 0x5ca2b0`).
     pub outline: Outline,
+    /// The gap between wrapped lines in frame-local units ([`RegionData::line_gap`]), scaled like
+    /// the height: the measure is `N·S + (N−1)·gap` (`0x5c2070`).
+    pub spacing: f32,
+    /// The shadow's x offset in UI units, 0 for none: `GetStringWidth` seeds its line with it,
+    /// unscaled by the frame (`0x772890` hands `[fs+0x108]` to the kernel as it is).
+    pub shadow_x: f32,
+    /// `nonspacewrap`: what a force-broken line leaves to the next one ([`RegionData::non_space_wrap`]).
+    pub non_space_wrap: bool,
+    /// `maxLines`: the text is cut to that many lines before it is measured, 0 for no cut.
+    pub max_lines: u32,
     /// The owner's `effective_scale`. The host measures at `font_height × scale × seam` and
     /// divides by that whole product: advances step to whole pixels, so a measure at the
     /// unscaled size is not proportional to the drawn one.
@@ -581,6 +668,8 @@ pub struct LineMeasureRequest {
     /// The frame's inner width: already scale-multiplied, unlike `height`, the font's own size.
     pub wrap_width: f32,
     pub outline: Outline,
+    /// The font's shadow x offset in UI units, 0 for none: it seeds each drawn row's pen.
+    pub shadow_x: f32,
     /// As for [`MeasureRequest::scale`].
     pub scale: f32,
     pub text: String,

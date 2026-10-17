@@ -35,24 +35,30 @@ wgpu = "27"
 clap = { version = "4.6.1", features = ["derive"] }
 sha1 = "0.10.6"
 
-# lua-src builds the addon VM's Lua 5.1.5, patched to accept exactly the 1.12 client's grammar;
-# the hunks and the command that checks them: `third_party/lua-src/BENILLA.md`.
 [patch.crates-io]
-lua-src = { path = "third_party/lua-src" }
-# The browser build keeps `lua_Integer = i64` on wasm32 — one-line fork, see third_party/mlua-sys/BENILLA.md.
-mlua-sys = { path = "third_party/mlua-sys" }
 # kira 0.12.4, patched to compute spatial gains and the volume tween per output chunk and
 # interpolate them, not per sample frame (`third_party/kira/BENILLA.md`).
 kira = { path = "third_party/kira" }
+# A lock-only stand-in: bevy_audio's unbuilt cpal 0.15 would otherwise hold `alsa-sys` 0.3 against
+# cpal 0.17's 0.4, and a lock holds one `links = "alsa"` (`third_party/alsa-0.9/BENILLA.md`).
+alsa = { path = "third_party/alsa-0.9" }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]
 opt-level = 3
+# One codegen unit each, since `lto = "off"` below drops the ThinLTO that inlines across a crate's
+# units: at 16 units the dependencies cost +1.2 cpu_ms at the leg pin, at one nothing, and a cold
+# build is no slower.
+codegen-units = 1
 
 # Our crates at opt-level 1: Bevy's generic hot paths monomorphize into them, and at opt-level 0
-# Stormwind drops from a pinned 60 fps to ~45; the warm incremental rebuild cost is ~0.
+# Stormwind drops from a pinned 60 fps to ~45.
 [profile.dev]
 opt-level = 1
+# No ThinLTO: above opt-level 0 rustc runs it over a crate's own codegen units by default, and an
+# incremental rebuild redoes it whole: 19 s of a one-line `benilla-app` edit's 25 s, and half its
+# 5.3 GB. Off, our crates cost +0.7 cpu_ms (+6 %) at the leg pin.
+lto = "off"
 
 # No debuginfo trimming: `debug = "line-tables-only"` measures no recurring win on macOS + sccache.
 
@@ -73,3 +79,8 @@ incremental = true
 # Not for speed: under `incremental`, thin-local LTO leaves promoted `anon.*.llvm.*` symbols
 # unresolved and the link fails intermittently (rustc #86049).
 lto = "off"
+
+# One codegen unit each, as in dev: at 16 the dependencies cost +1.2 cpu_ms against `release` at
+# the leg pin, at one the profile is +0.5, and a cold build is no slower.
+[profile.play.package."*"]
+codegen-units = 1

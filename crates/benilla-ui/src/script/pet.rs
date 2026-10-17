@@ -7,7 +7,9 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::protected::{self, Tag};
 use super::Model;
+use crate::script::binding_abi::Idx32;
 
 // The slot-word values the one-shot orders synthesize, restated from
 // `benilla_protocol::messages::pet` because this crate does not depend on the protocol.
@@ -19,6 +21,8 @@ const PET_COMMAND_ATTACK: u32 = 2;
 const PET_REACT_PASSIVE: u32 = 0;
 const PET_REACT_DEFENSIVE: u32 = 1;
 const PET_REACT_AGGRESSIVE: u32 = 2;
+/// Bit 27 of the pet state word: the server has disabled the bar.
+const PET_STATE_BAR_DISABLED: u32 = 0x0800_0000;
 
 /// A slot word as the server packs it: the type in the top byte, the action in the low bits.
 const fn order(kind: u8, action: u32) -> u32 {
@@ -126,9 +130,69 @@ pub(crate) struct PetBarState {
     /// The charm or possess expiry `[0xb714a8]` on the `GetTime` clock, in seconds: the last
     /// `SMSG_PET_SPELLS` duration past its arrival, `None` for a packet whose duration is 0.
     pub(crate) expiry: Option<f64>,
+    /// The pet's state word (`[0xb71468]`): the reaction in byte 0, the command in bits 8-15 and
+    /// the server's bar-disabled bit 27. A reaction or Stay/Follow press writes it here.
+    pub(crate) state: u32,
+}
+
+/// The press dispatcher's local half (`0x4bd1d0`) for a usable bar (`0x4bd1f2`): a reaction
+/// writes byte 0 (`0x4bd399` → `0x4bc940`) and Stay or Follow bits 8-15 (`0x4bd43f` →
+/// `0x4bc960`), each signalling `PET_BAR_UPDATE` (`0x4bc956`, `0x4bc979`) before the send at
+/// `0x4bd444`, even when nothing moved. The token slots repaint from the word first, so the
+/// handler reads the lit button. Attack's latch rides its validator, which is the app's.
+fn latch_press(model: &mut Model, packed: u32) {
+    let bar = &mut model.pet_bar;
+    if !bar.has_bar || !bar.actions_usable {
+        return;
+    }
+    let kind = ((packed >> 24) & 0x3F) as u8;
+    let action = packed & 0xFFFF;
+    match kind {
+        PET_ACT_REACTION => bar.state = (bar.state & 0xFFFF_FF00) | action,
+        PET_ACT_COMMAND if action <= PET_COMMAND_FOLLOW => {
+            bar.state = (bar.state & 0x0800_00FF) | (action << 8);
+        }
+        _ => return,
+    }
+    repaint_tokens(bar);
+    model.raise("PET_BAR_UPDATE", Vec::new());
+}
+
+/// The token slots' checked ring from the state word, as `GetPetActionInfo` lights them: a
+/// command when the unmasked `state >> 8` equals it or Attack's latch is up (`0x4bdf01`-`0x4bdf22`),
+/// a reaction when byte 0 does, a disabled bar reading as Passive (`0x4bde3c`).
+fn repaint_tokens(bar: &mut PetBarState) {
+    let react = if bar.state & PET_STATE_BAR_DISABLED != 0 {
+        PET_REACT_PASSIVE
+    } else {
+        bar.state & 0xFF
+    };
+    for slot in bar.slots.iter_mut().filter(|s| s.view.is_token) {
+        let kind = ((slot.view.packed >> 24) & 0x3F) as u8;
+        let action = slot.view.packed & 0xFFFF;
+        slot.view.active = match kind {
+            PET_ACT_COMMAND => bar.state >> 8 == action || slot.view.attack_active,
+            PET_ACT_REACTION => react == action,
+            _ => slot.view.active,
+        };
+    }
 }
 
 impl super::UiScript {
+    /// The ten slot views as the VM holds them, the drag's and the toggles' writes included, each
+    /// without its cooldown: what the bar's `PET_BAR_UPDATE` handler last read.
+    pub fn pet_action_views(&self) -> Vec<PetActionView> {
+        self.model_ref()
+            .pet_bar
+            .slots
+            .iter()
+            .map(|s| PetActionView {
+                cooldown: None,
+                ..s.view.clone()
+            })
+            .collect()
+    }
+
     /// Push the whole pet bar; the app diffs and fires `PET_BAR_UPDATE`.
     pub fn set_pet_actions(
         &mut self,
@@ -156,6 +220,12 @@ impl super::UiScript {
                 StoredPetAction { view, cooldown }
             })
             .collect();
+    }
+
+    /// Push the pet's state word (`[0xb71468]`), as `SMSG_PET_SPELLS` and the app's latches leave
+    /// it.
+    pub fn set_pet_state(&mut self, state: u32) {
+        self.model_mut().pet_bar.state = state;
     }
 
     /// Push the stat block and `HasPetUI`'s first return, which move on descriptor updates rather
@@ -234,6 +304,36 @@ impl super::UiScript {
     }
 }
 
+/// A pet word's autocast-on bit (30); bit 31 allows it.
+pub(crate) const AUTOCAST_ON: u32 = 0x4000_0000;
+/// A pet word without its two autocast bits: the type and the action, which the client compares
+/// words under (`0x4bca44`, `0x4bcd2a`, `0x4bd1b9`).
+pub(crate) const ACTION_MASK: u32 = 0x3FFF_FFFF;
+
+/// A pet book entry takes a word that differs from its own in the autocast bits alone.
+pub(crate) fn set_book_word(book: &mut super::spellbook::SpellSlotView, word: u32) {
+    book.packed = word;
+    if let Some((_, on)) = book.autocast.as_mut() {
+        *on = word & AUTOCAST_ON != 0;
+    }
+}
+
+/// A book word as the bar paints a spell (`0x4bdc50`'s spell arm): its name, rank and icon, the
+/// spell id, and the autocast bits read off the word (`0x4bdd65`, `0x4bdda4`).
+pub(crate) fn book_word_view(book: &super::spellbook::SpellSlotView) -> PetActionView {
+    PetActionView {
+        name: Some(book.name.clone()),
+        subtext: book.rank.clone(),
+        texture: book.bar_face(),
+        spell_id: Some(book.spell_id),
+        autocast_allowed: book.packed & 0x8000_0000 != 0,
+        autocast_enabled: book.packed & AUTOCAST_ON != 0,
+        packed: book.packed,
+        passive: book.passive,
+        ..Default::default()
+    }
+}
+
 /// The stored slot at a 1-based button index.
 fn slot_at(model: &Model, i: u32) -> Option<&StoredPetAction> {
     usize::try_from(i.checked_sub(1)?)
@@ -285,13 +385,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // An out-of-range index answers a single nil, which the Lua reads as an empty slot.
+    // An out-of-range index answers seven nils (`0x4bdf3e`), which the Lua reads as an empty slot.
     g.set(
         "GetPetActionInfo",
-        lua.create_function(move |lua, i: u32| {
+        lua.create_function(move |lua, Idx32(i): Idx32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(slot) = slot_at(&model, i) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(super::binding_abi::tuple(&[None; 7]));
             };
             let v = &slot.view;
             let text = |s: &Option<String>| match s {
@@ -313,13 +413,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // An elapsed or absent cooldown answers (0, 0, 1), so a re-feed never replays the sweep.
     g.set(
         "GetPetActionCooldown",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, Idx32(i): Idx32| {
             let now = crate::script::clock::now(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(match slot_at(&model, i).and_then(|s| s.cooldown) {
-                Some((start, duration, enabled)) if start + duration > now || !enabled => {
-                    (start, duration, i32::from(enabled))
-                }
+                Some((start, duration, enabled)) if start + duration > now || !enabled => (
+                    crate::script::clock::held_start(start, enabled, now),
+                    duration,
+                    i32::from(enabled),
+                ),
                 _ => (0.0, 0.0, 1),
             })
         })?,
@@ -328,7 +430,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // The one pet binding that answers a real boolean (`0x6f39f0`), `false` even out of range.
     g.set(
         "IsPetAttackActive",
-        lua.create_function(move |lua, i: u32| {
+        lua.create_function(move |lua, Idx32(i): Idx32| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(slot_at(&model, i).is_some_and(|s| s.view.attack_active))
         })?,
@@ -340,22 +442,78 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CastPetAction",
         lua.create_function(|lua, i: u32| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if slot_at(&model, i).is_some_and(|s| s.view.name.is_some()) {
-                model.script_calls.push(super::ScriptCall::PetAction(i));
+            // `PressPetAction 0x4bd1d0` opens on the gate's tag 2 (`0x4bd1e5`), ahead of its bar
+            // test and every effect; a refusal is silent.
+            if !protected::gate(lua, Tag::CAST) {
+                return Ok(());
             }
+            super::tick::verb(lua, |model| {
+                let Some(packed) = slot_at(model, i)
+                    .filter(|s| s.view.name.is_some())
+                    .map(|s| s.view.packed)
+                else {
+                    return;
+                };
+                latch_press(model, packed);
+                model.queue_call(super::ScriptCall::PetAction(i));
+            });
             Ok(())
         })?,
     )?;
 
-    // Only a slot that can autocast queues: the wire verb names a spell, and a token has none.
+    // `0x4be290`: a non-number raises the usage line and an index past the eleventh slot raises
+    // "Invalid slot" (`0x4be2d0`). Then, whatever is held, `ClearCursor(1,1)` (`0x4be2f8`); a held
+    // pet action is dropped on the slot (`0x4be309`) and the verb ends, else `0x4bcbb0` runs:
+    // on a usable pet (`0x4bcbcf`) a slot whose word allows autocast (bit 31,
+    // `0x4bcbf1`) flips bit 30 in place, copies a spell word onto its book entry (`0x4bd190`),
+    // queues the `CMSG_PET_SET_ACTION` and signals `PET_BAR_UPDATE` (`0x4bcc81`) before the verb
+    // returns. A token has no bit 31, so it does nothing.
     g.set(
         "TogglePetAutocast",
-        lua.create_function(|lua, i: u32| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if slot_at(&model, i).is_some_and(|s| s.view.autocast_allowed) {
-                model.pet_autocast_toggles.push(i);
+        lua.create_function(|lua, i: mlua::Value| {
+            let i =
+                super::binding_abi::number_arg(lua, i, "Usage: TogglePetAutocast(index)")? as u32;
+            if i.wrapping_sub(1) > 10 {
+                return Err(mlua::Error::RuntimeError(
+                    "Invalid slot in TogglePetAutocast".into(),
+                ));
             }
+            if super::cursor::pet::clear_and_drop(lua, i).is_some() {
+                return Ok(());
+            }
+            // `TogglePetSlotAutocast 0x4bcbb0` opens on the gate's tag 2 (`0x4bcbc2`).
+            if !protected::gate(lua, Tag::CAST) {
+                return Ok(());
+            }
+            super::tick::verb(lua, |model| {
+                let Some(n) = i
+                    .checked_sub(1)
+                    .map(|n| n as usize)
+                    .filter(|&n| n < model.pet_bar.slots.len())
+                else {
+                    return;
+                };
+                if !model.pet_bar.actions_usable || !model.pet_bar.slots[n].view.autocast_allowed {
+                    return;
+                }
+                let view = &mut model.pet_bar.slots[n].view;
+                view.packed ^= AUTOCAST_ON;
+                view.autocast_enabled = view.packed & AUTOCAST_ON != 0;
+                let word = view.packed;
+                if (word >> 24) & 0x3F == 1 {
+                    if let Some(book) = model
+                        .pet_book
+                        .slots
+                        .iter_mut()
+                        .rev()
+                        .find(|b| b.packed & ACTION_MASK == word & ACTION_MASK)
+                    {
+                        set_book_word(book, word);
+                    }
+                }
+                model.pet_autocast_toggles.push(i);
+                model.raise("PET_BAR_UPDATE", Vec::new());
+            });
             Ok(())
         })?,
     )?;
@@ -501,10 +659,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         g.set(
             name,
             lua.create_function(move |lua, ()| {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                if model.pet_bar.has_bar {
-                    model.script_calls.push(super::ScriptCall::PetOrder(packed));
+                // Each re-enters `PressPetAction`, whose gate (tag 2) opens it.
+                if !protected::gate(lua, Tag::CAST) {
+                    return Ok(());
                 }
+                super::tick::verb(lua, |model| {
+                    if model.pet_bar.has_bar {
+                        latch_press(model, packed);
+                        model.queue_call(super::ScriptCall::PetOrder(packed));
+                    }
+                });
                 Ok(())
             })?,
         )?;
@@ -541,8 +705,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "PetAbandon",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.pet_abandons += 1;
+            // `SendPetAbandon 0x4bd740` opens on the gate's tag 2 (`0x4bd74b`).
+            if protected::gate(lua, Tag::CAST) {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model.pet_abandons += 1;
+            }
             Ok(())
         })?,
     )?;
@@ -551,8 +718,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "PetDismiss",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.pet_dismisses += 1;
+            // `PressPetDismiss 0x4bd6e0` re-enters `PressPetAction`, behind its tag-2 gate.
+            if protected::gate(lua, Tag::CAST) {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model.pet_dismisses += 1;
+            }
             Ok(())
         })?,
     )?;
@@ -748,6 +918,47 @@ mod tests {
         assert_eq!(s.take_pet_stop_attacks(), 0, "drain empties");
     }
 
+    /// `0x4bcbb0` flips the slot and its book entry and signals `PET_BAR_UPDATE` before the verb
+    /// returns; an unusable pet (`0x4bcbcf`) does nothing.
+    #[test]
+    fn a_slot_autocast_toggle_repaints_in_place() {
+        let mut s = UiScript::new().unwrap();
+        s.set_pet_book(crate::script::PetBookState {
+            token: Some("PET".into()),
+            slots: vec![crate::script::SpellSlotView {
+                spell_id: 2649,
+                name: "Growl".into(),
+                autocast: Some((true, true)),
+                packed: 0xC100_0000 | 2649,
+                ..Default::default()
+            }],
+        });
+        let mut bar = slots();
+        bar[1].packed = 0xC100_0000 | 2649;
+        s.set_pet_actions(true, false, true, bar.clone());
+        s.run(
+            "function PROBE() \
+               local _, e = GetSpellAutocast(1, BOOKTYPE_PET) \
+               local _, _, _, _, _, _, b = GetPetActionInfo(2) \
+               return tostring(e) .. ',' .. tostring(b) \
+             end",
+        )
+        .unwrap();
+        crate::script::tick::heard::listen(&s, &["PET_BAR_UPDATE"], Some("PROBE()"));
+        s.run("TogglePetAutocast(2)").unwrap();
+        assert!(crate::script::tick::heard::take(&s).is_empty());
+        assert!(s.take_pet_autocast_toggles().is_empty());
+
+        s.set_pet_actions(true, true, true, bar);
+        s.run("TogglePetAutocast(2)").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            ["PET_BAR_UPDATE nil,nil"],
+            "the slot and its book entry both read autocast off"
+        );
+        assert_eq!(s.take_pet_autocast_toggles(), vec![2]);
+    }
+
     #[test]
     fn attack_active_is_a_per_slot_boolean() {
         let mut s = UiScript::new().unwrap();
@@ -859,6 +1070,84 @@ mod tests {
             ]
         );
         assert!(s.take_pet_orders().is_empty(), "drained");
+    }
+
+    /// The reaction and Stay/Follow presses write the state word and signal `PET_BAR_UPDATE` in
+    /// the verb (`0x4bc956`, `0x4bc979`), before the send, even when nothing moved; the handler
+    /// reads the lit token. An unusable bar latches and signals nothing (`0x4bd1f9`); Attack's
+    /// latch is the app's.
+    #[test]
+    fn the_reaction_and_command_presses_signal_in_place() {
+        use crate::script::tick::heard;
+        let token = |name: &str, packed: u32| PetActionView {
+            name: Some(name.into()),
+            texture: Some("T".into()),
+            is_token: true,
+            packed,
+            ..Default::default()
+        };
+        let bar = vec![
+            token("PET_ACTION_WAIT", 0x0700_0000),
+            token("PET_ACTION_FOLLOW", 0x0700_0001),
+            token("PET_MODE_PASSIVE", 0x0600_0000),
+            token("PET_MODE_DEFENSIVE", 0x0600_0001),
+            token("PET_ACTION_ATTACK", 0x0700_0002),
+        ];
+        let mut s = UiScript::new().unwrap();
+        s.set_pet_actions(true, true, true, bar.clone());
+        s.set_pet_state(1 << 8 | 1);
+        s.run("function LIT(i) local _, _, _, _, a = GetPetActionInfo(i) return a or 0 end")
+            .unwrap();
+        let lit = "LIT(1) .. LIT(2) .. LIT(3) .. LIT(4)";
+        heard::listen(&s, &["PET_BAR_UPDATE"], Some(lit));
+        s.run("PetWait()").unwrap();
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+        assert_eq!(heard::take(&s), ["PET_BAR_UPDATE 1001"]);
+        s.run("PetWait()").unwrap();
+        assert_eq!(
+            heard::take(&s),
+            ["PET_BAR_UPDATE 1001"],
+            "unmoved, signalled"
+        );
+        s.run("CastPetAction(3)").unwrap();
+        assert_eq!(heard::take(&s), ["PET_BAR_UPDATE 1010"]);
+        s.run("PetFollow() PetDefensiveMode()").unwrap();
+        assert_eq!(
+            heard::take(&s),
+            ["PET_BAR_UPDATE 0110", "PET_BAR_UPDATE 0101"]
+        );
+        s.run("PetAttack() CastPetAction(5)").unwrap();
+        assert!(heard::take(&s).is_empty(), "Attack's latch is the app's");
+
+        s.set_pet_actions(true, false, true, bar);
+        s.run("PetWait()").unwrap();
+        assert!(heard::take(&s).is_empty(), "an unusable bar");
+    }
+
+    /// A pet book word dropped on the bar paints as the bar would: a running spell's
+    /// `ActiveIconID` (`0x4bdd2f`), which the book carries for it, not the book's icon.
+    #[test]
+    fn a_book_word_paints_the_bars_face() {
+        let book = crate::script::SpellSlotView {
+            spell_id: 24450,
+            name: "Prowl".into(),
+            texture: Some("BOOK".into()),
+            bar_texture: Some(Some("ACTIVE".into())),
+            packed: 0x8100_5f82,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::book_word_view(&book).texture.as_deref(),
+            Some("ACTIVE")
+        );
+        let idle = crate::script::SpellSlotView {
+            bar_texture: None,
+            ..book
+        };
+        assert_eq!(
+            super::book_word_view(&idle).texture.as_deref(),
+            Some("BOOK")
+        );
     }
 
     #[test]
@@ -1089,5 +1378,24 @@ mod tests {
         );
         assert!(s.eval::<bool>("return GetPetLoyalty() == nil").unwrap());
         assert_eq!(s.arity("GetPetFoodTypes()").unwrap(), 0);
+    }
+
+    /// A held pet action answers the call's own now, whatever was pushed (`0x6e1517`).
+    #[test]
+    fn a_held_pet_action_answers_the_polls_now() {
+        let mut s = UiScript::new().unwrap();
+        s.tick(10.0);
+        let mut v = slots();
+        v[1].cooldown = Some((0, 1, false));
+        s.set_pet_actions(true, true, true, v);
+        let poll = |s: &UiScript| {
+            s.eval::<(f64, f64, i32)>("return GetPetActionCooldown(2)")
+                .unwrap()
+        };
+        assert_eq!(poll(&s), (10.0, 0.001, 0));
+        s.tick(0.02);
+        let (start, _, _) = poll(&s);
+        assert_eq!(start, s.eval::<f64>("return GetTime()").unwrap());
+        assert!((start - 10.02).abs() < 1e-9);
     }
 }

@@ -97,6 +97,10 @@ pub(crate) fn commit_object_cast_on_click(
     if clicks.read().last().is_none() {
         return;
     }
+    // The click's `SelectTarget` returns first for a charmed player (`0x49359c`), bind and all.
+    if checks.player_is_charmed() {
+        return;
+    }
     // `TargetingWantsGameObject 0x6e62d0`: without it the pick holds no GameObject.
     if !(ladder.ground.wants(TargetingWants::GameObject)
         && go_is_nearest(&hovered, &hovered_object))
@@ -139,7 +143,7 @@ mod tests {
         world.insert_resource(NetCommands(tx));
         world.init_resource::<crate::items::Items>();
         world.init_resource::<crate::net::GuidIndex>();
-        world.insert_resource(crate::net::Reputations(Vec::new()));
+        world.insert_resource(crate::net::Reputations::default());
         world.init_resource::<crate::spell::PendingCast>();
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
         world.init_resource::<crate::spell::Cooldowns>();
@@ -189,6 +193,7 @@ mod tests {
                 crate::target::PickOcclusion {
                     distance: 5.0,
                     point: Some(Vec3::new(1.0, 2.0, 3.0)),
+                    ray: None,
                 };
         };
         let run = |world: &mut World, id: SystemId| {

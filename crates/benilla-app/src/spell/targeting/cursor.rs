@@ -199,11 +199,15 @@ fn object_arm(
     range: Option<RangeCall>,
     me: Option<Vec3>,
 ) -> bool {
-    let (Some(entity), Some(guid)) = (hovered_object.target, hovered_object.guid) else {
+    let Some(entity) = hovered_object.target else {
         return false;
     };
     // `0x5f8260`'s lookups: the template, then its `Lock.dbc` row. A template in flight is grey.
-    let Some(tmpl) = lock_inputs.templates.get(guid) else {
+    let Some(tmpl) = stores
+        .get(entity)
+        .ok()
+        .and_then(|(s, ..)| lock_inputs.templates.of(&s.0))
+    else {
         return false;
     };
     let lock_id = tmpl.lock_id;
@@ -512,10 +516,11 @@ mod tests {
             world.init_resource::<crate::items::Items>();
             world.init_resource::<crate::net::GuidIndex>();
             world.init_resource::<crate::spell::SpellModifiers>();
-            world.insert_resource(crate::net::Reputations(Vec::new()));
+            world.insert_resource(crate::net::Reputations::default());
             world.insert_resource(PickOcclusion {
                 distance: 10.0,
                 point,
+                ray: None,
             });
             if let Some(distance) = go {
                 let chest = world.spawn(Transform::default()).id();
@@ -589,10 +594,11 @@ mod tests {
                 world.init_resource::<crate::target::HoveredObject>();
                 world.init_resource::<crate::go_templates::GameObjectTemplates>();
                 world.init_resource::<crate::items::Items>();
-                world.insert_resource(crate::net::Reputations(Vec::new()));
+                world.insert_resource(crate::net::Reputations::default());
                 world.insert_resource(PickOcclusion {
                     distance: 10.0,
                     point: Some(Vec3::new(d, 0.0, 0.0)),
+                    ray: None,
                 });
                 let mut mods = SpellModifiers::default();
                 mods.set_class_family(3);
@@ -687,7 +693,7 @@ mod tests {
             world.init_resource::<crate::target::Hovered>();
             world.init_resource::<crate::items::Items>();
             world.init_resource::<crate::net::GuidIndex>();
-            world.insert_resource(crate::net::Reputations(Vec::new()));
+            world.insert_resource(crate::net::Reputations::default());
             world.init_resource::<PickOcclusion>();
             let mut mods = SpellModifiers::default();
             mods.set_class_family(3);
@@ -736,7 +742,10 @@ mod tests {
             world.insert_resource(templates);
             world.spawn((SelfPlayer, Transform::default(), fx::caster(1.5)));
             let chest = world
-                .spawn(Transform::from_translation(Vec3::new(d, 0.0, 0.0)))
+                .spawn((
+                    Transform::from_translation(Vec3::new(d, 0.0, 0.0)),
+                    crate::net::ObjectStore(crate::go_templates::test_fields(7)),
+                ))
                 .id();
             world.insert_resource(crate::target::HoveredObject {
                 target: Some(chest),
@@ -780,7 +789,7 @@ mod tests {
             world.init_resource::<crate::items::Items>();
             world.init_resource::<crate::net::GuidIndex>();
             world.init_resource::<crate::spell::SpellModifiers>();
-            world.insert_resource(crate::net::Reputations(Vec::new()));
+            world.insert_resource(crate::net::Reputations::default());
             world.init_resource::<PickOcclusion>();
             let display = |range_index| benilla_formats::SpellDisplay {
                 range_index,
@@ -868,7 +877,7 @@ mod tests {
             world.init_resource::<crate::items::Items>();
             world.init_resource::<crate::net::GuidIndex>();
             world.init_resource::<crate::spell::SpellModifiers>();
-            world.insert_resource(crate::net::Reputations(Vec::new()));
+            world.insert_resource(crate::net::Reputations::default());
             world.init_resource::<PickOcclusion>();
             world.insert_resource(crate::player::Player::with_move_flags(if caster_runs {
                 crate::creature_anim::move_flags::FORWARD
@@ -969,7 +978,7 @@ mod tests {
             world.init_resource::<crate::items::Items>();
             world.init_resource::<crate::net::GuidIndex>();
             world.init_resource::<crate::spell::SpellModifiers>();
-            world.insert_resource(crate::net::Reputations(Vec::new()));
+            world.insert_resource(crate::net::Reputations::default());
             world.init_resource::<PickOcclusion>();
             world.insert_resource(fx::spells());
             world.insert_resource(fx::factions());

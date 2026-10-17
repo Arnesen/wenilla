@@ -35,7 +35,7 @@ use benilla_ui::widget::MINIMAP_DEFAULT_ZOOM;
 use crate::player::Player;
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuadMask, UiQuads, UvRect};
 use benilla_assets::MapCatalogRes;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::{AssetSet, LockRecover, LooseOpen, WorldAssets};
 use benilla_world::wmo_portal::{
     down_ray_seeds, terrain_z_local, WmoPortalInstance, INTERIOR_PROBE_HEIGHT,
 };
@@ -145,7 +145,7 @@ fn probe_minimap_widget(mut widget: ResMut<MinimapWidget>, windows: Query<&Windo
     let min = Vec2::new(win.width() - side - margin, margin);
     widget.0 = Some(MinimapSlot {
         rect: Rect::from_corners(min, min + Vec2::splat(side)),
-        z: u64::MAX / 2,
+        z: u128::MAX / 2,
         zoom: 3,
         inside_zoom: 3,
         alpha: 1.0,
@@ -199,7 +199,7 @@ impl Default for MinimapZoom {
 /// One extracted Minimap widget: its rect (y-down logical px), paint key and live state.
 pub(crate) struct MinimapSlot {
     pub(crate) rect: Rect,
-    pub(crate) z: u64,
+    pub(crate) z: u128,
     /// The outdoor zoom index; `inside_zoom` is the indoor one, picked by WMO containment.
     pub(crate) zoom: u8,
     pub(crate) inside_zoom: u8,
@@ -207,10 +207,14 @@ pub(crate) struct MinimapSlot {
 }
 
 /// The loaded minimap fixtures; absent, the map draws nothing and its XML children still render.
-#[derive(Resource)]
+#[derive(Resource, Default)]
 struct MinimapAssets {
     translate: MinimapTranslate,
+    /// The disc's mask, the reference's one process-wide texture (`0xbc7968`): the default until
+    /// `Minimap:SetMaskTexture` replaces it, and no VM owns it, so a new VM inherits it.
     mask: Option<Handle<Image>>,
+    /// `Textures\MinimapMask`, which every world entry loads into [`Self::mask`] (`0x4ed810`).
+    default_mask: Option<Handle<Image>>,
     arrow: Option<Handle<Image>>,
     /// The POI atlas (`Interface\Minimap\POIIcons`), for the corpse skull.
     poi: Option<Handle<Image>>,
@@ -251,15 +255,25 @@ fn setup_minimap(
     match translate {
         Ok(translate) => {
             info!("minimap: md5translate.trs — {} tiles", translate.len());
-            let mask = assets.mask_texture("Textures\\MinimapMask", &mut images);
+            // The default mask and icons open from the archives alone, as `0x4ed810`'s
+            // `TextureCreate` calls pass file flag 0 (`0x4ed862`, `0x4ed88b`, `0x4ed8b4`). The
+            // arrows are model textures (`MinimapArrow.m2`, `Rotating-MinimapArrow.m2`), and
+            // `CGMinimapFrame::LoadArrowModel` creates the models with flags 4 (`0x4ee181`), which
+            // their textures' opens keep (`0x71da64`), so they open loose-flagged.
+            let archives = LooseOpen::Archives;
+            let mask = assets.mask_texture("Textures\\MinimapMask", archives, &mut images);
             let arrow = assets.sprite_texture(blips::PLAYER_ARROW_TEXTURE, &mut images);
-            let poi = assets.sprite_texture("Interface\\Minimap\\POIIcons", &mut images);
+            let poi =
+                assets.sprite_texture_opened("Interface\\Minimap\\POIIcons", archives, &mut images);
             let mut rim_arrows = blips::RimArrowArt::default();
             for kind in blips::RimArrow::ALL {
                 rim_arrows.set(kind, assets.sprite_texture(kind.texture(), &mut images));
             }
-            let object_icons =
-                assets.sprite_texture("Interface\\Minimap\\ObjectIcons", &mut images);
+            let object_icons = assets.sprite_texture_opened(
+                "Interface\\Minimap\\ObjectIcons",
+                archives,
+                &mut images,
+            );
             if mask.is_none() {
                 warn!("minimap: MinimapMask.blp missing — the map will draw square");
             }
@@ -275,6 +289,7 @@ fn setup_minimap(
             };
             commands.insert_resource(MinimapAssets {
                 translate,
+                default_mask: mask.clone(),
                 mask,
                 arrow,
                 poi,
@@ -351,7 +366,6 @@ fn emit_minimap(
         unit_pos,
         window,
         mut blip_hover,
-        ui_scale,
         group,
         tracked,
         self_store,
@@ -621,7 +635,7 @@ fn emit_minimap(
         }
         let win = window.iter().next();
         let cursor = win.and_then(|w| w.cursor_position());
-        let seam = win.map_or(1.0, |w| crate::ui_script::seam_scale(w.height(), ui_scale.0));
+        let seam = win.map_or(1.0, |w| crate::ui_script::seam_scale(w.height()));
         // The pan origin snapped to a half-logical-pixel grid: every blip offset and rim bearing
         // derives from `wx`/`wy`, so the layer steps together instead of rewriting the batch mesh
         // every frame while walking. Blip world positions stay exact.
@@ -637,11 +651,6 @@ fn emit_minimap(
             wy: (wy / q).round() * q,
             wz: wow[2],
             cursor,
-            // The cursor in UI space (y-up, ÷ the seam scale): the tooltip anchor resolves in
-            // 768-virtual units, not window px.
-            cursor_ui: cursor
-                .zip(win)
-                .map(|(c, w)| Vec2::new(c.x / seam, (w.height() - c.y) / seam)),
             seam,
         }
     });
@@ -800,8 +809,23 @@ fn feed_minimap_inside(
     }
 }
 
+/// A world entry puts the default mask back before the interface loads: `CGGameUI::InitializeGame`
+/// (`0x48f480`, from `0x401570`, the glue's enter-world step at `0x46c236`) calls `0x4ed810` at
+/// `0x48f590`, which loads `Textures\MinimapMask` over the process-wide mask `0xbc7968`. So an
+/// addon's mask lasts to the next logout (`ClientDestroyGame` `0x401ee0` runs `ShutdownGame`, which
+/// releases it at `0x49118c`). A `ReloadUI` (`0x490bd0`, `0x48fbf0`) and a worldport (`0x401bc0`)
+/// reach neither, and keep it; an addon that sets its mask while it loads wins, being applied
+/// after this ([`feed_minimap_mask`]).
+pub(crate) fn restore_default_mask(world: &mut World) {
+    if let Some(mut assets) = world.get_resource_mut::<MinimapAssets>() {
+        assets.mask = assets.default_mask.clone();
+    }
+}
+
 /// Swap the disc's mask for the one `Minimap:SetMaskTexture` names (a 1.12 method). Memoised on the
-/// path and re-read with a fresh VM; a path that fails to load keeps the current mask and warns.
+/// path per VM, so a new VM whose Minimap has set nothing leaves the process-wide mask as it is
+/// ([`restore_default_mask`] owns the world-entry reset); a path that fails to load keeps the
+/// current mask and warns.
 fn feed_minimap_mask(
     script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
     assets: Option<ResMut<MinimapAssets>>,
@@ -819,10 +843,15 @@ fn feed_minimap_mask(
         return;
     }
     *last = want.clone();
-    let path = want
-        .as_deref()
-        .unwrap_or(benilla_ui::widget::MINIMAP_DEFAULT_MASK);
-    match world_assets.mask_texture(path, &mut images) {
+    // `SetMaskTexture` opens with the loose flag (`0x4ee5e4`); the default, with flag 0 (`0x4ed862`).
+    let (path, open) = match want.as_deref() {
+        Some(path) => (path, LooseOpen::Index),
+        None => (
+            benilla_ui::widget::MINIMAP_DEFAULT_MASK,
+            LooseOpen::Archives,
+        ),
+    };
+    match world_assets.mask_texture(path, open, &mut images) {
         Some(handle) => assets.mask = Some(handle),
         None => {
             warn!("minimap: SetMaskTexture(\"{path}\") — no such texture; keeping the current mask")
@@ -887,7 +916,9 @@ impl Plugin for MinimapPlugin {
                         .before(emit_minimap),
                     // Not in `LightingConsumeSet` though it reads `WowLighting`: at most one frame
                     // of late tint on a 140 px map, not worth a world API item.
-                    emit_minimap.in_set(UiQuadAppend),
+                    emit_minimap
+                        .in_set(UiQuadAppend)
+                        .before(crate::portrait::PaneComposite),
                     // After the emit that fills it, so the blit never samples a frame-old target.
                     composite::drive_composite.after(UiQuadAppend),
                     // Before the script tick, so a zoom button routes to the live index.
@@ -900,21 +931,42 @@ impl Plugin for MinimapPlugin {
                         .before(UiQuadAppend),
                     // Before the script tick, after the containment verdict it reads. Gated on the
                     // in-game UI: a member's ping in the login burst would otherwise spend its
-                    // `fresh` latch on the boot VM, which has no `MiniMapPing` frame.
+                    // `fresh` latch on the glue VM, which has no `MiniMapPing` frame.
                     ping::drive_minimap_ping
                         .after(feed_minimap_inside)
                         .in_set(crate::ui_script::UiFeed)
                         .run_if(crate::ui_script::ingame_ui_up),
                     // Before the script tick, so GameTimeFrame reads this frame's minute.
                     feed_game_time.in_set(crate::ui_script::UiFeed),
-                    // After the world-mouseover drive (UnitFeed): a same-frame world-hover→blip
-                    // transition must end with the blip tooltip shown, not the fade.
+                    // In the feed, off the hover the last walk left; after the world drive only so
+                    // the two VM writers keep one order.
                     blips::drive_blip_tooltip
                         .after(crate::ui_unit::UnitFeed)
                         .in_set(crate::ui_script::UiFeed),
                 ),
             );
     }
+}
+
+/// The mask state for the lifecycle tests, which have no install to load a texture from: a
+/// [`MinimapAssets`] whose default and current masks are the given handles.
+#[cfg(test)]
+pub(crate) fn seat_mask_for_test(
+    world: &mut World,
+    default_mask: Handle<Image>,
+    current: Handle<Image>,
+) {
+    world.insert_resource(MinimapAssets {
+        default_mask: Some(default_mask),
+        mask: Some(current),
+        ..default()
+    });
+}
+
+/// The mask now drawn.
+#[cfg(test)]
+pub(crate) fn mask_for_test(world: &World) -> Option<Handle<Image>> {
+    world.resource::<MinimapAssets>().mask.clone()
 }
 
 #[cfg(test)]

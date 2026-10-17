@@ -1,54 +1,49 @@
-//! Frame methods: movable and resizable windows, and the drag pumps behind `StartMoving` and
+//! Frame methods: movable and resizable windows, and the drag pump behind `StartMoving` and
 //! `StartSizing`. The gesture that usually calls them, `OnDragStart`/`OnDragStop` (`0x76bf70`/
 //! `0x76c040`), is [`crate::script::cursor`]'s.
 //!
 //! The flags are bits of `[frame+0xb4]`, set by `0x76a3c0`: movable `0x100`, resizable `0x200`,
-//! userPlaced `0x1000`. A drag (`0x7652b0`) re-anchors the frame to one TOPLEFT against the screen
-//! root at its current rect (`0x768430`), raises it, sets userPlaced and takes the one drag slot
-//! (`root+0xcfc`). The pump (`0x7655b0`) adds each cursor delta, over the frame's scale, straight
-//! into that anchor's offsets (`0x768710` case 4), so stopping (`0x765640`) writes nothing.
-//!
-//! Here nothing re-anchors: a move translates every authored anchor, and a resize keeps the set.
+//! userPlaced `0x1000`. Every drag enters at `0x7652b0`, which pins the frame to one TOPLEFT
+//! anchor against the screen root at its current rect, with an explicit size (`0x768430`), then
+//! raises it, sets userPlaced and takes the one drag slot (`root+0xcfc`) with its grip (`+0xd04`).
+//! The pump (`0x7655b0` → `0x768710`) works on that anchor and size: a move, grip CENTER, adds
+//! each cursor delta over the frame's scale to the anchor's offsets (case 4), and each of the
+//! eight grips sizes the frame and re-pins it shifted by its left and top travel only. Stopping
+//! (`0x765640`) writes nothing, so after any drag `GetPoint` answers that one TOPLEFT.
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use crate::script::Model;
+use crate::layout::{Anchor, Anchors, Point};
+use crate::script::binding_abi::bool_or_default;
+use crate::script::{Model, UiScript, SCREEN};
 use crate::widget::FrameHandle;
 
-use super::frame_handle_of;
 use super::layout_methods::eff_scale;
+use super::{frame_handle_of, point_from_str};
 
-/// The one in-flight move, the reference's drag slot, held in [`Model::moving`].
+/// The one move or size in flight, the reference's drag slot, held in [`Model::moving`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FrameMove {
-    /// The frame being moved (`root+0xcfc`).
+    /// The frame being dragged (`root+0xcfc`).
     frame: FrameHandle,
+    /// The grip (`root+0xd04`): CENTER moves the frame, any other point resizes it from there.
+    grip: Point,
     /// The cursor position at the last pump (`root+0xd08`/`+0xd0c`), UI px, y-up.
     sample: (f32, f32),
-    /// Whether mouse-up ends the move, the drag mode as Lua sees it: `0x766420` ends modes 1
-    /// (modifier drag) and 2 (title region), never 3 (`StartMoving`).
+    /// Whether mouse-up ends the drag, the drag mode as Lua sees it: `0x766420` ends modes 1
+    /// (modifier drag) and 2 (title region), never 3 (`StartMoving`, `StartSizing`).
     pub(crate) auto_stop: bool,
-}
-
-/// An in-flight `StartSizing` drag: which frame, which grip, and the cursor at the last pump.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct FrameSizing {
-    frame: FrameHandle,
-    /// The edges the named grip moves: `LEFT` the left edge, `BOTTOMRIGHT` the bottom and right.
-    left: bool,
-    right: bool,
-    top: bool,
-    bottom: bool,
-    sample: (f32, f32),
 }
 
 /// Populate `m`'s movable and resizable methods.
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // SetMovable / IsMovable (`0x776420`/`0x7764d0`): a pure flag write, so clearing it mid-drag
-    // stops nothing. The argument is Lua truthiness, as the reference's `toboolean`.
+    // stops nothing. The argument goes through `GetBoolOrDefault` (`0x6f1c10`) with default 1
+    // (`0x7764ae`), as every flag setter of the Frame table does.
     m.set(
         "SetMovable",
-        lua.create_function(|lua, (this, flag): (Table, bool)| {
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            let flag = bool_or_default(args.front(), true);
             set_flag(lua, &this, Flag::Movable, flag)
         })?,
     )?;
@@ -59,7 +54,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // SetResizable / IsResizable (`0x776590`/`0x776640`): the same pure flag write.
     m.set(
         "SetResizable",
-        lua.create_function(|lua, (this, flag): (Table, bool)| {
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            let flag = bool_or_default(args.front(), true); // `0x77661e`
             set_flag(lua, &this, Flag::Resizable, flag)
         })?,
     )?;
@@ -140,7 +136,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // nor resizable (`0x776adb`).
     m.set(
         "SetUserPlaced",
-        lua.create_function(|lua, (this, flag): (Table, bool)| {
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            let flag = bool_or_default(args.front(), true); // `0x776b29`
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let ok = model
@@ -172,48 +169,28 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             start_moving(&mut model, h)
         })?,
     )?;
-    // StartSizing(point) (`0x776830`; stock caller `FloatingChatFrame.lua:600`): a resize from the
-    // named grip, ended by `StopMovingOrSizing`. The reference's per-grip switch (`0x768710`)
-    // moves the named edges with the cursor and keeps the opposite ones.
+    // StartSizing([point]) (`0x776830`; stock caller `FloatingChatFrame.lua:600`): a resize from
+    // the named grip, ended by `StopMovingOrSizing`. The grip starts as BOTTOMRIGHT (`0x776913`)
+    // and only a string naming a point, in any case, replaces it (`0x77691a`, `0x6f1840`).
     m.set(
         "StartSizing",
-        lua.create_function(|lua, (this, point): (Table, Option<String>)| {
+        lua.create_function(|lua, (this, point): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             if !model.arena.frame(h).is_some_and(|f| f.resizable) {
                 return Err(not_flagged(&model, h, "resizable"));
             }
-            // Same "do not start a second one" guard `start_moving` carries.
-            if model.sizing.is_some() || model.moving.is_some() {
+            // The same `root+0xcfc` guard `StartMoving` carries (`0x776947`).
+            if model.moving.is_some() {
                 return Ok(());
             }
-            let p = point.unwrap_or_default().to_ascii_uppercase();
-            let (left, right) = (p.contains("LEFT"), p.contains("RIGHT"));
-            let (top, bottom) = (p.contains("TOP"), p.contains("BOTTOM"));
-            // The raise and userPlaced belong to the drag entry `0x7652b0`, whatever the grip.
-            super::toplevel::raise(&mut model, h);
-            set_user_placed(&mut model, h);
-            let sample = model.cursor_pos;
-            // A CENTER grip is a move: the pump's case 4 shifts the anchor offsets and returns
-            // before the size clamp (`0x768bfb`).
-            if p == "CENTER" {
-                model.moving = Some(FrameMove {
-                    frame: h,
-                    sample,
-                    // `StartSizing` enters as drag mode 3 (`0x7652b0`), which mouse-up never ends.
-                    auto_stop: false,
-                });
-                return Ok(());
+            let grip = match &point {
+                Value::String(s) => s.to_str().ok().and_then(|t| point_from_str(&t)),
+                _ => None,
             }
-            // A name that is no point starts an inert drag: raised and userPlaced, moving nothing.
-            model.sizing = Some(FrameSizing {
-                frame: h,
-                left,
-                right,
-                top,
-                bottom,
-                sample,
-            });
+            .unwrap_or(Point::BottomRight);
+            // Drag mode 3, which mouse-up never ends.
+            begin_drag(&mut model, h, grip, false);
             Ok(())
         })?,
     )?;
@@ -223,9 +200,6 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            if model.sizing.is_some_and(|sz| sz.frame == h) {
-                model.sizing = None;
-            }
             if model.moving.is_some_and(|mv| mv.frame == h) {
                 model.moving = None;
             }
@@ -284,53 +258,168 @@ fn not_flagged(model: &Model, h: FrameHandle, want: &str) -> mlua::Error {
 }
 
 /// `StartMoving` (`0x776700` → `0x7652b0`): errors on a frame that is not movable (`0x77678b`),
-/// ignores a second move, then raises the frame, sets userPlaced and takes the slot, in that order.
+/// ignores a second drag, then starts a move, grip CENTER (`0x776819`).
 fn start_moving(model: &mut Model, h: FrameHandle) -> mlua::Result<()> {
     if !model.arena.frame(h).is_some_and(|f| f.movable) {
         return Err(not_flagged(model, h, "movable"));
     }
     // The `root+0xcfc != 0` guard (`0x7767e8`); what the reference does beyond not starting a
-    // second move is untraced.
+    // second drag is untraced.
     if model.moving.is_some() {
         return Ok(());
     }
-    // The drag-start raise (`0x7652d7`); the worker applies the toplevel gate.
-    super::toplevel::raise(model, h);
-    set_user_placed(model, h);
-    model.moving = Some(FrameMove {
-        frame: h,
-        sample: model.cursor_pos,
-        // Mode 3: only `StopMovingOrSizing` ends it.
-        auto_stop: false,
-    });
+    // Mode 3: only `StopMovingOrSizing` ends it.
+    begin_drag(model, h, Point::Center, false);
     Ok(())
 }
 
 /// Begin a title-region move, drag mode 2 (`0x7662c0` → `0x765320` → `0x7652b0`), with no movable
-/// check, since nothing on that path reads the bit. False when a move is already in flight.
+/// check, since nothing on that path reads the bit; `0x765320` asks for grip CENTER when it is not
+/// sizing (`0x765332` → `0x765464`). Neither reads the slot first, so a drag in flight is displaced
+/// and nothing runs on its frame. False when the frame has no rect, so nothing started.
 pub(crate) fn start_title_move(model: &mut Model, h: FrameHandle) -> bool {
-    if model.moving.is_some() {
-        return false;
-    }
-    super::toplevel::raise(model, h);
-    set_user_placed(model, h);
-    model.moving = Some(FrameMove {
-        frame: h,
-        sample: model.cursor_pos,
-        auto_stop: true,
-    });
-    true
+    begin_drag(model, h, Point::Center, true)
 }
 
-/// Set userPlaced as the drag entry `0x7652b0` does; the layout cache is dirtied only on the
-/// transition, since every title-region click runs this.
-fn set_user_placed(model: &mut Model, h: FrameHandle) {
+/// Begin the layout-mode modifier drag on the toplevel window `h` that `0x765490`'s walk lifted,
+/// from its flag test on: Control held sizes and needs the window resizable (`0x765570`), else it
+/// moves and needs it movable (`0x765560`). Then `0x765320` with drag mode 1, which the release
+/// ends: grip CENTER for a move, the cell of `grid_grip` for a size. False when nothing started.
+pub(crate) fn start_layout_drag(
+    model: &mut Model,
+    h: FrameHandle,
+    at: (f32, f32),
+    sizing: bool,
+) -> bool {
+    let allowed = model
+        .arena
+        .frame(h)
+        .is_some_and(|f| if sizing { f.resizable } else { f.movable });
+    if !allowed {
+        return false;
+    }
+    let grip = if sizing {
+        grid_grip(model, h, at)
+    } else {
+        Some(Point::Center)
+    };
+    grip.is_some_and(|grip| begin_drag(model, h, grip, true))
+}
+
+/// `0x765320`'s sizing grip: with the layout resolved (`0x76533e` → `0x7680e0`), the cell of a 3×3
+/// grid of the frame's rect (`0x768320`) that `at` falls in, each axis cut at a quarter and three
+/// quarters (`0.25` at `0x8029b0`, `3.0` at `0x80297c`), a cut belonging to the cell past it; the
+/// middle cell is CENTER, a move (`0x765384`–`0x765464`). The x offset and the quarter-width stay
+/// in x87 registers, the y offset and the quarter-height are stored as floats (`0x765390`,
+/// `0x7653ab`). None when the frame has no rect (`0x765379`).
+fn grid_grip(model: &mut Model, h: FrameHandle, (x, y): (f32, f32)) -> Option<Point> {
+    UiScript::resolve_layout(model);
+    let r = *model.resolved.get(&h)?;
+    let dx = f64::from(x) - f64::from(r.left);
+    let quarter_w = (f64::from(r.right) - f64::from(r.left)) * 0.25;
+    let dy = f64::from((f64::from(y) - f64::from(r.bottom)) as f32);
+    let quarter_h = f64::from(((f64::from(r.top) - f64::from(r.bottom)) * 0.25) as f32);
+    // 0 the near cell (left, bottom), 1 the middle, 2 the far.
+    let cell = |d: f64, quarter: f64| {
+        if d < quarter {
+            0
+        } else if d >= quarter * 3.0 {
+            2
+        } else {
+            1
+        }
+    };
+    Some(match (cell(dx, quarter_w), cell(dy, quarter_h)) {
+        (0, 2) => Point::TopLeft,
+        (1, 2) => Point::Top,
+        (2, 2) => Point::TopRight,
+        (0, 1) => Point::Left,
+        (2, 1) => Point::Right,
+        (0, 0) => Point::BottomLeft,
+        (1, 0) => Point::Bottom,
+        (2, 0) => Point::BottomRight,
+        _ => Point::Center,
+    })
+}
+
+/// The drag entry `0x7652b0`: pin the frame (`0x7652c6` → `0x768430`) and, only when it has a rect
+/// to pin (`0x7652cd`), raise it (`0x7652d7`), set userPlaced (`0x7652e5`) and take the slot
+/// (`0x7652f3`–`0x76530f`) over whatever held it. False when the frame has no rect, so nothing
+/// started.
+fn begin_drag(model: &mut Model, h: FrameHandle, grip: Point, auto_stop: bool) -> bool {
+    let Some(repinned) = pin_top_left(model, h, (0.0, 0.0), (0.0, 0.0)) else {
+        return false;
+    };
+    // The worker applies the toplevel gate.
+    super::toplevel::raise(model, h);
+    // The layout cache is dirtied on the bit's transition only, since every title-region click
+    // runs this, and again when the pin rewrote what a saved row holds.
     if let Some(f) = model.arena.frame_mut(h) {
         if !f.user_placed {
             f.user_placed = true;
             model.user_placed_changed = true;
         }
     }
+    if repinned {
+        mark_user_placed_change(model, h);
+    }
+    model.moving = Some(FrameMove {
+        frame: h,
+        grip,
+        sample: model.cursor_pos,
+        auto_stop,
+    });
+    true
+}
+
+/// `0x768430` against the screen root. With the layout settled first (`0x768464`–`0x76846f`), read
+/// the frame's rect (`0x76847a`), clear its anchors (`0x767620`), set one TOPLEFT on the screen's
+/// TOPLEFT at the rect's top-left moved by `travel` (`0x767c70`), and give it an explicit size,
+/// `size` per axis or the rect's where that is 0 (`0x7684e1`, `0x768508`). Offsets and size are in
+/// the frame's own units, screen over its effective scale (`[G+0x58]`). None when the frame has no
+/// rect (`0x768481`); else whether its anchors or size changed.
+fn pin_top_left(
+    model: &mut Model,
+    h: FrameHandle,
+    size: (f32, f32),
+    travel: (f32, f32),
+) -> Option<bool> {
+    UiScript::resolve_layout(model);
+    let r = *model.resolved.get(&h)?;
+    let root = model.screen;
+    let scale = f64::from(eff_scale(model, h));
+    let inv = 1.0 / scale;
+    let x = ((f64::from(r.left) + f64::from(travel.0)) - f64::from(root.left)) * inv;
+    let y = ((f64::from(r.top) + f64::from(travel.1)) - f64::from(root.top)) * inv;
+    let w = if size.0 == 0.0 {
+        ((f64::from(r.right) - f64::from(r.left)) / scale) as f32
+    } else {
+        size.0
+    };
+    let ht = if size.1 == 0.0 {
+        ((f64::from(r.top) - f64::from(r.bottom)) / scale) as f32
+    } else {
+        size.1
+    };
+    let pin = Anchors::from([Anchor::new(
+        Point::TopLeft,
+        SCREEN,
+        Point::TopLeft,
+        x as f32,
+        y as f32,
+    )]);
+    let input = model.layout_inputs.entry(h).or_default();
+    let changed = !input.anchors.bits_eq(&pin)
+        || input.width.to_bits() != w.to_bits()
+        || input.height.to_bits() != ht.to_bits();
+    input.anchors = pin;
+    input.width = w;
+    input.height = ht;
+    // The size setters and a closing `0x7680e0(1)` invalidate (`0x768533`).
+    model.invalidate_frame(h, changed);
+    // The size it now carries is explicit, as a `SetWidth`/`SetHeight` would leave it.
+    model.note_authored_size(h);
+    Some(changed)
 }
 
 /// A drag moved the frame: if it is user-placed, the layout cache owes its file a rewrite.
@@ -340,134 +429,173 @@ fn mark_user_placed_change(model: &mut Model, h: FrameHandle) {
     }
 }
 
-/// Apply the `SetMinResize`/`SetMaxResize` bounds to a proposed size per axis, as `0x768710`
-/// does: only an exact 0.0 is unbounded, min applies before max so max wins a crossed pair, and
-/// with no bound there is no floor, so a size can go negative.
-fn clamp_resize(model: &Model, h: FrameHandle, w: f32, hgt: f32) -> (f32, f32) {
+/// The hover walk's move/size branch (`0x766164`–`0x766193`): while the drag slot holds a target,
+/// the walk pumps it to `pos` (`0x7655b0`) and returns before any probe. True when one is in
+/// flight, a target whose frame is gone dropped first.
+pub(crate) fn pump_move_or_size(model: &mut Model, pos: (f32, f32)) -> bool {
+    let Some(mv) = model.moving else {
+        return false;
+    };
+    if model.arena.frame(mv.frame).is_none() {
+        model.moving = None;
+        return false;
+    }
+    let (dx, dy) = (pos.0 - mv.sample.0, pos.1 - mv.sample.1);
+    // A zero delta on both axes skips the step (`0x7655d6`–`0x7655f4`).
+    if dx != 0.0 || dy != 0.0 {
+        drag_step(model, mv, dx, dy);
+    }
+    // The sample takes the whole delta, whatever a bound kept of it (`0x765610`–`0x765628`).
+    model.moving = Some(FrameMove {
+        sample: (mv.sample.0 + dx, mv.sample.1 + dy),
+        ..mv
+    });
+    true
+}
+
+/// A hide ends the move or size whose target is the frame going hidden: the hide's de-registration
+/// (`0x76ad9d` → `0x764920`, flag 0) clears the slot when it holds the frame
+/// (`0x76492e`–`0x76493a` → `0x765640`).
+pub(crate) fn cancel_on_hide(model: &mut Model, h: FrameHandle) {
+    if model.moving.is_some_and(|mv| mv.frame == h) {
+        model.moving = None;
+    }
+}
+
+/// One pump step, `0x768710` by way of `0x76a660`, for the cursor delta `(dx, dy)` in screen units.
+/// The grips read the explicit size (`vtbl+0x1c`/`+0x20`, `G+0x50`/`+0x54`), size it by the travel
+/// over the frame's scale, clamp it, and re-pin TOPLEFT shifted by the left and top travel only
+/// (`0x768974` → `0x768430`); a move adds to the TOPLEFT anchor itself.
+fn drag_step(model: &mut Model, mv: FrameMove, dx: f32, dy: f32) {
+    let h = mv.frame;
+    let scale = f64::from(eff_scale(model, h));
+    let inv = 1.0 / scale;
+    let (mut w, mut ht) = model
+        .layout_inputs
+        .get(&h)
+        .map_or((0.0, 0.0), |i| (i.width, i.height));
+    // `G+0x60`/`+0x68` bound the width and `G+0x5c`/`+0x64` the height.
     let (min, max) = model
         .arena
         .frame(h)
         .map_or(((0.0, 0.0), (0.0, 0.0)), |f| (f.min_resize, f.max_resize));
-    let axis = |v: f32, lo: f32, hi: f32| {
-        let v = if lo != 0.0 && v < lo { lo } else { v };
-        if hi != 0.0 && v > hi {
-            hi
-        } else {
-            v
+    let (mut dx, mut dy) = (dx, dy);
+    let add = |v: f32, by: f64| (f64::from(v) + by) as f32;
+    let x = Axis::new(min.0, max.0, scale);
+    let y = Axis::new(min.1, max.1, scale);
+    match mv.grip {
+        // Case 4: the delta over the scale goes straight into the TOPLEFT anchor's offsets
+        // (`0x768c15`–`0x768c2e`); with no TOPLEFT anchor it re-pins at the whole delta instead
+        // (`0x768c00`, `0x768c0f`).
+        Point::Center => {
+            let moved = model
+                .layout_inputs
+                .get_mut(&h)
+                .and_then(|i| i.anchors.offset_mut(Point::TopLeft))
+                .map(|(x_off, y_off)| {
+                    *x_off = add(*x_off, f64::from(dx) / scale);
+                    *y_off = add(*y_off, f64::from(dy) / scale);
+                })
+                .is_some();
+            if moved {
+                // The offsets move and the frame is invalidated (`0x768c31`).
+                model.invalidate_frame(h, true);
+                mark_user_placed_change(model, h);
+                return;
+            }
         }
-    };
-    (axis(w, min.0, max.0), axis(hgt, min.1, max.1))
+        Point::TopLeft => {
+            w = add(w, -f64::from(dx) * inv);
+            x.clamp_near(&mut w, &mut dx, -1.0);
+            ht = add(ht, f64::from(dy) * inv);
+            y.clamp_near(&mut ht, &mut dy, 1.0);
+        }
+        Point::Top => {
+            ht = add(ht, f64::from(dy) / scale);
+            y.clamp_near(&mut ht, &mut dy, 1.0);
+            dx = 0.0;
+        }
+        Point::TopRight => {
+            w = add(w, f64::from(dx) * inv);
+            x.clamp_far(&mut w);
+            dx = 0.0;
+            ht = add(ht, f64::from(dy) * inv);
+            y.clamp_near(&mut ht, &mut dy, 1.0);
+        }
+        Point::Left => {
+            w = add(w, -f64::from(dx) / scale);
+            x.clamp_near(&mut w, &mut dx, -1.0);
+            dy = 0.0;
+        }
+        Point::Right => {
+            w = add(w, f64::from(dx) / scale);
+            x.clamp_far(&mut w);
+            (dx, dy) = (0.0, 0.0);
+        }
+        Point::BottomLeft => {
+            w = add(w, -f64::from(dx) * inv);
+            x.clamp_near(&mut w, &mut dx, -1.0);
+            ht = add(ht, -f64::from(dy) * inv);
+            y.clamp_far(&mut ht);
+            dy = 0.0;
+        }
+        Point::Bottom => {
+            ht = add(ht, -f64::from(dy) / scale);
+            y.clamp_far(&mut ht);
+            (dx, dy) = (0.0, 0.0);
+        }
+        Point::BottomRight => {
+            w = add(w, f64::from(dx) * inv);
+            x.clamp_far(&mut w);
+            ht = add(ht, -f64::from(dy) * inv);
+            y.clamp_far(&mut ht);
+            (dx, dy) = (0.0, 0.0);
+        }
+    }
+    if pin_top_left(model, h, (w, ht), (dx, dy)) == Some(true) {
+        mark_user_placed_change(model, h);
+    }
 }
 
-/// Pump an in-flight `StartSizing`: the gripped edges follow the cursor, the opposite ones stay.
-pub(crate) fn advance_size(model: &mut Model, pos: (f32, f32)) {
-    let Some(sz) = model.sizing else { return };
-    if model.arena.frame(sz.frame).is_none() {
-        model.sizing = None;
-        return;
-    }
-    let (dx, dy) = (pos.0 - sz.sample.0, pos.1 - sz.sample.1);
-    if dx == 0.0 && dy == 0.0 {
-        return;
-    }
-    let inv = 1.0 / eff_scale(model, sz.frame);
-    let (dx, dy) = (dx * inv, dy * inv);
-    let dw = if sz.right {
-        dx
-    } else if sz.left {
-        -dx
-    } else {
-        0.0
-    };
-    let dh = if sz.top {
-        dy
-    } else if sz.bottom {
-        -dy
-    } else {
-        0.0
-    };
-    let Some((w0, h0)) = model
-        .layout_inputs
-        .get(&sz.frame)
-        .map(|i| (i.width, i.height))
-    else {
-        return;
-    };
-    // The resize bounds are read only here, as only `0x76a660` reads them in the reference.
-    let (new_w, new_h) = clamp_resize(model, sz.frame, w0 + dw, h0 + dh);
-    // The rebate (`0x768770`/`0x7687a2`): the residual a clamp swallowed comes back out of the
-    // drag delta, so the moving edge stops at the bound instead of the window walking. The delta
-    // is already in local units, and an ungripped axis is not rebated.
-    let rebate = |d: f32, want: f32, got: f32, grew: bool, gripped: bool| {
-        if !gripped {
-            return d;
-        }
-        let residual = got - want;
-        if grew {
-            d + residual
-        } else {
-            d - residual
-        }
-    };
-    let dx = rebate(dx, w0 + dw, new_w, sz.right, sz.left || sz.right);
-    let dy = rebate(dy, h0 + dh, new_h, sz.top, sz.top || sz.bottom);
-    let Some(input) = model.layout_inputs.get_mut(&sz.frame) else {
-        return;
-    };
-    input.width = new_w;
-    input.height = new_h;
-    let mut moved = input.width.to_bits() != w0.to_bits() || input.height.to_bits() != h0.to_bits();
-    // A LEFT or BOTTOM grip also shifts the anchors on its axis, so a frame anchored by that side
-    // keeps its opposite edge. The reference instead re-anchors the frame to one TOPLEFT point at
-    // `StartSizing` (`0x768430`).
-    if !input.anchors.is_empty() && (sz.left || sz.bottom) {
-        for a in &mut input.anchors {
-            if sz.left {
-                a.x_off += dx;
-            }
-            if sz.bottom {
-                a.y_off += dy;
-            }
-        }
-        moved |= (sz.left && dx != 0.0) || (sz.bottom && dy != 0.0);
-    }
-    // A nonzero cursor delta can still move nothing (a grip dragged across its axis, or held at a
-    // bound), so the layout is touched only on a real change.
-    if moved {
-        // No anchor is retargeted, so only this node is touched.
-        model.touch_layout_frame(sz.frame);
-        mark_user_placed_change(model, sz.frame);
-    }
-    model.sizing = Some(FrameSizing { sample: pos, ..sz });
+/// One axis's `SetMinResize`/`SetMaxResize` pair, as `0x768710` applies it: only an exact 0.0 is
+/// unbounded, a size under the minimum or over the maximum takes the bound, min before max so max
+/// wins a crossed pair, and with no bound there is no floor, so a size can go negative.
+struct Axis {
+    min: f32,
+    max: f32,
+    scale: f64,
 }
 
-/// Pump an in-flight move to the cursor at `pos` (`0x7655b0`). Called from
-/// [`crate::script::UiScript::mouse_move`] before its hover-boundary early return, since a frame
-/// dragged under the cursor crosses no boundary.
-pub(crate) fn advance_move(model: &mut Model, pos: (f32, f32)) {
-    let Some(mv) = model.moving else { return };
-    if model.arena.frame(mv.frame).is_none() {
-        model.moving = None;
-        return;
+impl Axis {
+    fn new(min: f32, max: f32, scale: f64) -> Axis {
+        Axis { min, max, scale }
     }
-    let (dx, dy) = (pos.0 - mv.sample.0, pos.1 - mv.sample.1);
-    if dx == 0.0 && dy == 0.0 {
-        return;
-    }
-    // Anchor offsets are in the frame's own units, so the screen delta divides by its scale, as
-    // `0x768710`'s case 4 does.
-    let inv = 1.0 / eff_scale(model, mv.frame);
-    let (dx, dy) = (dx * inv, dy * inv);
-    if let Some(input) = model.layout_inputs.get_mut(&mv.frame) {
-        if !input.anchors.is_empty() {
-            for a in &mut input.anchors {
-                a.x_off += dx;
-                a.y_off += dy;
-            }
-            // No target moves, so only this node is touched; a zero delta already returned above.
-            model.touch_layout_frame(mv.frame);
-            mark_user_placed_change(model, mv.frame);
+
+    /// Clamp a size whose far edge moves (the right or the bottom), which the pin does not follow.
+    fn clamp_far(&self, v: &mut f32) {
+        if self.min != 0.0 && *v < self.min {
+            *v = self.min;
+        }
+        if self.max != 0.0 && *v > self.max {
+            *v = self.max;
         }
     }
-    model.moving = Some(FrameMove { sample: pos, ..mv });
+
+    /// Clamp a size whose anchored edge moves (the left or the top), taking the residual back out
+    /// of that edge's travel so it stops on the bound, as TOPLEFT's case does at `0x768770`,
+    /// `0x7687a2`, `0x7687dd` and `0x768817`. `grows` is the sign the travel sizes the frame with:
+    /// +1 for the top edge, -1 for the left.
+    fn clamp_near(&self, v: &mut f32, travel: &mut f32, grows: f64) {
+        let mut seat = |v: &mut f32, b: f32| {
+            *travel =
+                (f64::from(*travel) + grows * (f64::from(b) - f64::from(*v)) * self.scale) as f32;
+            *v = b;
+        };
+        if self.min != 0.0 && *v < self.min {
+            seat(v, self.min);
+        }
+        if self.max != 0.0 && *v > self.max {
+            seat(v, self.max);
+        }
+    }
 }

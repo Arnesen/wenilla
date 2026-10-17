@@ -3,37 +3,62 @@
 
 use super::common::script;
 
-// ── The positional format wrapper ──
+// ── format's positional items ──
 
+/// `str_format` (`0x7fd3d0`) reads one digit and `$` as the item's argument (`0x7fd4ac`) and goes on
+/// from the one after it, so a positional and a sequential item mix without an error.
 #[test]
-fn positional_format_reorders_and_mix_is_an_error() {
+fn format_takes_positional_items_as_the_client() {
     let s = script();
+    let f = |src: &str| s.eval::<String>(src).unwrap();
+    assert_eq!(f(r#"return format("%2$s %1$s", "a", "b")"#), "b a");
+    assert_eq!(f(r#"return format("%1$05d", 42)"#), "00042");
+    assert_eq!(f(r#"return string.format("%d-%s", 1, "x")"#), "1-x");
+    assert_eq!(f(r#"return format("%1$d%%", 50)"#), "50%");
+    // The cursor goes on from a positional item.
+    assert_eq!(f(r#"return format("%1$s %s", "a", "b")"#), "a b");
     assert_eq!(
-        s.eval::<String>(r#"return format("%2$s %1$s", "a", "b")"#)
-            .unwrap(),
-        "b a"
+        f(r#"return format("%2$s %s %1$s", "a", "b", "c")"#),
+        "b c a"
     );
-    // width/precision travel with the positional spec
+    // `%0$s` is the format itself.
+    assert_eq!(f(r#"return format("<%0$s>")"#), "<<%0$s>>");
+}
+
+/// A bad call raises from `format` itself, at its caller's line, in the client's words.
+#[test]
+fn format_errors_are_the_clients() {
+    let s = script();
+    // The message past the chunk's name: the caller's line, then the text.
+    let err = |src: &str| {
+        let e = s
+            .eval::<String>(&format!(
+                "local ok, e = pcall(function()\n{src}\nend) return e"
+            ))
+            .unwrap();
+        e[e.find(":2: ").expect("the caller's line")..].to_string()
+    };
     assert_eq!(
-        s.eval::<String>(r#"return format("%1$05d", 42)"#).unwrap(),
-        "00042"
+        err(r#"return format("%d")"#),
+        ":2: bad argument #2 to `format' (number expected, got no value)"
     );
-    // sequential still works, through the patched `string.format` too
     assert_eq!(
-        s.eval::<String>(r#"return string.format("%d-%s", 1, "x")"#)
-            .unwrap(),
-        "1-x"
+        err(r#"return string.format("%d", "x")"#),
+        ":2: bad argument #2 to `format' (number expected, got string)"
     );
-    // %% is preserved
     assert_eq!(
-        s.eval::<String>(r#"return format("%1$d%%", 50)"#).unwrap(),
-        "50%"
+        err(r#"return format("%y", 1)"#),
+        ":2: invalid option in `format'"
     );
-    // mixing positional and sequential is an error, as in the reference
-    let mixed_ok: bool = s
-        .eval(r#"return pcall(format, "%1$s %s", "a", "b")"#)
-        .unwrap();
-    assert!(!mixed_ok, "mixed positional+sequential must error");
+    // A positional item is one digit: `%10$s` is a width of 10 and the conversion `$`.
+    assert_eq!(
+        err(r#"return format("%10$s", "a")"#),
+        ":2: invalid option in `format'"
+    );
+    assert_eq!(
+        err(r#"return format("%123d", 1)"#),
+        ":2: invalid format (width or precision too long)"
+    );
 }
 
 // ── getglobal and the alias layer ──
@@ -185,7 +210,8 @@ fn debugstack_frames_end_in_newline_and_count1_does_not_clamp() {
 
 /// An addon chunk is named as the reference names it, `@Interface\AddOns\<folder>\<file>`:
 /// `FuBarPlugin-2.0.lua:752` finds its folder with a greedy `"\\AddOns\\(.*)\\"`, which captures
-/// up to the last backslash, so the file must be in the name.
+/// up to the last backslash, so the file must be in the name. The test bounds the capture at the
+/// folder's own backslash, so a later frame named by a host path (`\` on Windows) stays out of it.
 #[test]
 fn an_addon_chunk_is_named_the_way_the_client_names_it() {
     let name = crate::script::addon_chunk_name("FuBar_BagFu", "FuBar_BagFu.lua");
@@ -200,7 +226,7 @@ fn an_addon_chunk_is_named_the_way_the_client_names_it() {
     .unwrap();
     let folder: String = s
         .eval(
-            "local _, _, f = string.find(BenillaProbeFolder(), \"\\\\AddOns\\\\(.*)\\\\\") \
+            "local _, _, f = string.find(BenillaProbeFolder(), \"\\\\AddOns\\\\([^\\\\]*)\\\\\") \
              return f or '<no match>'",
         )
         .unwrap();
@@ -233,6 +259,45 @@ fn loadstring_is_text_only_bytecode_rejected() {
         )
         .unwrap();
     assert!(ok, "loadstring must reject bytecode");
+}
+
+/// `luaB_loadstring` (`0x703280`) names a chunk by its source's bytes as a C string, which
+/// `luaO_chunkid` (`0x6f5c40`) cuts at the first `\n` alone; a NUL in the source compiles.
+#[test]
+fn loadstring_names_a_chunk_by_its_raw_bytes() {
+    let s = script();
+    let err = |src: &str| {
+        s.eval::<String>(&format!(
+            "local f, e = loadstring({src}) if not f then return e end \
+             local ok, m = pcall(f) return m"
+        ))
+        .unwrap()
+    };
+    assert_eq!(
+        s.eval::<i64>(r#"return string.len(loadstring("return '\0'")())"#)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        err(r#""error('e') --\0x""#),
+        "[string \"error('e') --\"]:1: e"
+    );
+    assert_eq!(
+        err(r#""error('e')\r--x""#),
+        "[string \"error('e')\r--x\"]:1: e"
+    );
+    assert_eq!(
+        err(r#""error('e')\n--x""#),
+        "[string \"error('e')...\"]:1: e"
+    );
+    assert!(
+        s.eval::<bool>(
+            r#"local f = loadstring("error('e') --\233") local ok, m = pcall(f)
+               return string.find(m, "\233", 1, true) ~= nil"#
+        )
+        .unwrap(),
+        "a Latin-1 byte in the name stays itself"
+    );
 }
 
 // ── GetTime: the session clock ──
@@ -278,7 +343,7 @@ fn the_rest_of_the_bare_globals() {
     .unwrap();
 }
 
-/// 1.12 runs Lua 5.0 (`0x811b30`, "Lua: Lua 5.0 Copyright..."); this VM is mlua's `lua51`, and the
+/// 1.12 runs Lua 5.0 (`0x811b30`, "Lua: Lua 5.0 Copyright..."); this VM is 5.1.5's runtime, and the
 /// 5.0 idioms vanilla addons use run on it, above all the implicit vararg `arg` table.
 #[test]
 fn the_lua_5_0_dialect_vanilla_addons_are_written_in_runs_here() {
@@ -437,4 +502,32 @@ fn a_runscript_error_reaches_the_handler_and_not_the_caller() {
         errs[1].starts_with("[string \"this is not lua\"]:1:"),
         "a compile failure is reported under the same name, undecorated: {errs:?}"
     );
+}
+
+/// `date("*t")` sets its fields in the client's order, `sec` to `isdst` (`0x703452`..`0x7034e2`),
+/// so `pairs` walks the table as the client's does for the same sets, run in its code.
+#[test]
+fn date_star_t_walks_as_the_clients() {
+    let s = script();
+    let got: String = s
+        .eval(
+            r#"local o = {} for k in pairs(date("*t", 1000000000)) do table.insert(o, k) end
+               return table.concat(o, " ")"#,
+        )
+        .unwrap();
+    assert_eq!(got, "hour min wday year yday month sec day isdst");
+}
+
+/// The host's `setglobal` is the client's (`0x702770`): the global gets the top value, so a lone
+/// name sets it to itself and a third argument wins over the second.
+#[test]
+fn setglobal_sets_the_top_value_as_the_clients() {
+    let s = script();
+    let got: Vec<String> = s
+        .eval(
+            "setglobal('SgOne') setglobal('SgThree', 5, 6)
+             return { tostring(SgOne), tostring(SgThree), tostring(getglobal('SgThree')) }",
+        )
+        .unwrap();
+    assert_eq!(got, ["SgOne", "6", "6"]);
 }

@@ -41,8 +41,7 @@ fn answer_measures(s: &mut UiScript) {
     s.set_measured_text_unwrapped(&answers);
 }
 
-/// Every texture path drawn: `<Texture>` regions and the `<Backdrop>` plate, which is its own
-/// quad kind (`QuadContent::Backdrop`).
+/// Every texture path drawn: `<Texture>` regions, the `<Backdrop>` plate's nine pieces among them.
 fn drawn_textures(s: &mut UiScript) -> Vec<String> {
     s.resolve();
     answer_measures(s);
@@ -51,10 +50,27 @@ fn drawn_textures(s: &mut UiScript) -> Vec<String> {
         .into_iter()
         .filter_map(|q| match q.content {
             benilla_ui::script::QuadContent::Texture { path: Some(p), .. } => Some(p),
-            benilla_ui::script::QuadContent::Backdrop { path, .. } => Some(path),
             _ => None,
         })
         .collect()
+}
+
+/// The stock template declares 30 `TextLeft`/`TextRight` pairs, the tooltip's line limit
+/// (`0x529650`, `0x530291`): the 31st `AddLine` adds nothing.
+#[test]
+fn a_stock_template_tooltip_holds_30_lines() {
+    benilla_formats::wow_data_or_skip!();
+    let s = harness();
+    s.run(
+        r#"
+        local tip = CreateFrame("GameTooltip", "CapTip", UIParent, "GameTooltipTemplate")
+        for i = 1, 40 do tip:AddLine("line " .. i) end
+        assert(tip:NumLines() == 30, tip:NumLines())
+        assert(CapTipTextLeft30:GetText() == "line 30")
+        assert(CapTipTextLeft31 == nil)
+    "#,
+    )
+    .unwrap();
 }
 
 /// An addon tooltip's lines are named after the caller (`MyTipTextLeft1`), never the template, so

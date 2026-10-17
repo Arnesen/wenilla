@@ -12,8 +12,8 @@ use super::{
     combat_log, death, duel, gameobject, gm_ticket, gossip, group, guild, instance, items, loot,
     mail, meeting_stone, mirror_timer, monster_move, movement, opcode, page_text, pet, petition,
     pose, progression, pvp, quest, social, spellbook, spells, stable, summon, tabard, taxi, trade,
-    trainer, tutorial, update_object, vendor, world_state, AttackSwingError, Character,
-    CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind, SplineMode,
+    trainer, tutorial, update_object, vendor, world_state, AddonRecord, AttackSwingError,
+    Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind, SplineMode,
 };
 
 /// Read a `SMSG_FORCE_*_SPEED_CHANGE` body: `[packed guid][u32 counter][f32 speed]` for all six
@@ -162,32 +162,95 @@ const fn is_movement_relay(o: u16) -> bool {
 ///     if keyProvided: u8[256] modulus
 ///     u32 revision
 /// u8  urlProvided
-/// if urlProvided: u8[256] url
+/// if urlProvided: char url[]      ; a C string of at most 256 bytes, its NUL included
 /// ```
 ///
+/// The url is read by `0x4191b0` with a limit of 0x100: up to and including its NUL, and no
+/// further, so the next record starts right behind it. 256 bytes with no NUL are no string: the
+/// url reads empty and the read position goes past the end, which ends the walk (the record is
+/// still applied, with that empty url).
+///
 /// Retail sends the minimal form, 12 records of `{2, 1, 0, 0u32, 0}`. A truncated record ends the
-/// walk and keeps the whole records before it, so `statuses[i]` is always record i's.
-fn read_addon_info(r: &mut &[u8]) -> Vec<u8> {
-    let mut statuses = Vec::new();
+/// walk and keeps the whole records before it, so `records[i]` is always record i's.
+fn read_addon_info(r: &mut &[u8]) -> Vec<AddonRecord> {
+    let mut records = Vec::new();
     while !r.is_empty() {
         let Ok(status) = read_u8(r) else { break };
         let Ok(info_provided) = read_u8(r) else { break };
+        let (mut key_provided, mut revision) = (false, None);
         if info_provided != 0 {
-            let Ok(key_provided) = read_u8(r) else { break };
-            if key_provided != 0 && skip(r, 256).is_none() {
+            let Ok(key) = read_u8(r) else { break };
+            key_provided = key != 0;
+            if key_provided && skip(r, 256).is_none() {
                 break;
             }
-            if read_u32_le(r).is_err() {
-                break;
-            }
+            let Ok(rev) = read_u32_le(r) else { break };
+            revision = Some(rev);
         }
         let Ok(url_provided) = read_u8(r) else { break };
-        if url_provided != 0 && skip(r, 256).is_none() {
+        let mut url = None;
+        let mut url_overrun = false;
+        if url_provided != 0 {
+            let window = &r[..r.len().min(256)];
+            match window.iter().position(|&b| b == 0) {
+                Some(nul) => {
+                    url = Some(String::from_utf8_lossy(&window[..nul]).into_owned());
+                    *r = &r[nul + 1..];
+                }
+                // A full 256 bytes and no NUL: empty, and the walk ends after this record.
+                None if window.len() == 256 => {
+                    url = Some(String::new());
+                    url_overrun = true;
+                }
+                None => break,
+            }
+        }
+        records.push(AddonRecord {
+            name: String::new(),
+            status,
+            info_provided: info_provided != 0,
+            key_provided,
+            revision,
+            url,
+        });
+        if url_overrun {
             break;
         }
-        statuses.push(status);
     }
-    statuses
+    records
+}
+
+/// `SMSG_CHAR_RENAME` as `0x46b440` reads it: the result byte, then, only while bytes remain
+/// (`0x46b467`, the store's fully-read test), the guid (`0x4190b0`) and the name, a C string read
+/// by `0x4191b0` with a cap of 0x30.
+///
+/// A guid short of eight bytes overflows the store: the guid stays 0 (the locals are zeroed at
+/// `0x46b450`) and the name reads empty. A name with no NUL in its first 0x30 bytes, or none
+/// before the end, also reads empty (`0x4192be`). The server sends the tail only on success
+/// (`Packets/Character.cpp:61-69`).
+fn read_char_rename(r: &mut &[u8]) -> io::Result<ServerPacket> {
+    let result = read_u8(r)?;
+    let renamed = (!r.is_empty()).then(|| {
+        if r.len() < 8 {
+            *r = &[];
+            return (0, String::new());
+        }
+        let guid = u64::from_le_bytes(r[..8].try_into().expect("eight bytes"));
+        *r = &r[8..];
+        let window = &r[..r.len().min(0x30)];
+        match window.iter().position(|&b| b == 0) {
+            Some(nul) => {
+                let name = String::from_utf8_lossy(&window[..nul]).into_owned();
+                *r = &r[nul + 1..];
+                (guid, name)
+            }
+            None => {
+                *r = &r[window.len()..];
+                (guid, String::new())
+            }
+        }
+    });
+    Ok(ServerPacket::CharRename { result, renamed })
 }
 
 fn skip(r: &mut &[u8], n: usize) -> Option<()> {
@@ -234,17 +297,19 @@ fn parse_server_body(
             // showing a stale queue position as current is a client bug.
             let result = read_u8(&mut r)?;
             let queued = result == super::AUTH_WAIT_QUEUE;
-            let mut billing_time_rested = None;
+            let mut billing = None;
             if (result == super::AUTH_OK || queued) && r.len() >= 5 {
-                let _billing_time_remaining = read_u32_le(&mut r)?;
-                let _billing_plan_flags = read_u8(&mut r)?;
-                // The only source of `GetBillingTimeRested()` (the client's writer is `0x5b421a`).
-                billing_time_rested = Some(read_u32_le(&mut r)?);
+                // Read in the client's order, into `+0x1af4`, `+0x1afc` and `+0x1af8`.
+                billing = Some(super::Billing {
+                    time_remaining: read_u32_le(&mut r)?,
+                    plan_flags: read_u8(&mut r)?,
+                    time_rested: read_u32_le(&mut r)?,
+                });
             }
             ServerPacket::AuthResponse {
                 result,
                 queue_position: queued.then(|| read_u32_le(&mut r).ok()).flatten(),
-                billing_time_rested,
+                billing,
             }
         }
         opcode::SMSG_CHAR_ENUM => {
@@ -262,6 +327,7 @@ fn parse_server_body(
         opcode::SMSG_CHAR_CREATE => ServerPacket::CharCreate {
             result: read_u8(&mut r)?,
         },
+        opcode::SMSG_CHAR_RENAME => read_char_rename(&mut r)?,
         opcode::SMSG_CHARACTER_LOGIN_FAILED => ServerPacket::CharacterLoginFailed {
             result: read_u8(&mut r)?,
         },
@@ -598,12 +664,13 @@ fn parse_server_body(
             }
         }
         opcode::SMSG_INVENTORY_CHANGE_FAILURE => {
-            let (reason, required_level, item_guid, bag_slot) =
+            let (reason, required_level, item_guid, item2_guid, bag_slot) =
                 items::read_inventory_change_failure(&mut r)?;
             ServerPacket::InventoryChangeFailure {
                 reason,
                 required_level,
                 item_guid,
+                item2_guid,
                 bag_slot,
             }
         }
@@ -1127,6 +1194,17 @@ fn parse_server_body(
             }
             ServerPacket::SetFactionStanding { standings }
         }
+        opcode::SMSG_SET_FORCED_REACTIONS => {
+            let count = read_u32_le(&mut r)?;
+            let mut reactions =
+                Vec::with_capacity(capacity_hint(count, super::reputation::FACTION_LIST_LEN));
+            for _ in 0..count {
+                let faction = read_u32_le(&mut r)?;
+                let rank = read_u32_le(&mut r)?;
+                reactions.push((faction, rank));
+            }
+            ServerPacket::SetForcedReactions { reactions }
+        }
         opcode::SMSG_SET_FACTION_VISIBLE => ServerPacket::SetFactionVisible {
             list_id: read_u32_le(&mut r)?,
         },
@@ -1557,7 +1635,7 @@ fn parse_server_body(
             }
         }
         opcode::SMSG_ADDON_INFO => ServerPacket::AddonInfo {
-            statuses: read_addon_info(&mut r),
+            records: read_addon_info(&mut r),
         },
         other => ServerPacket::Other { opcode: other },
     };
@@ -1568,6 +1646,80 @@ fn parse_server_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `SMSG_AUTH_RESPONSE` as vmangos writes its four shapes: the admitting `AUTH_OK` and the first
+    /// `AUTH_WAIT_QUEUE` with the billing group (`World.cpp:325-331`, `:374-381`), then the queue's
+    /// later positions and its closing `AUTH_OK` without (`WorldSession.cpp:961-976`).
+    #[test]
+    fn the_auth_response_billing_group_decodes_in_the_clients_order() {
+        use crate::messages::{Billing, AUTH_OK, AUTH_WAIT_QUEUE};
+        let decode = |body: &[u8]| match parse_server_with_tail(opcode::SMSG_AUTH_RESPONSE, body)
+            .expect("a vmangos body decodes")
+        {
+            (
+                ServerPacket::AuthResponse {
+                    result,
+                    queue_position,
+                    billing,
+                },
+                tail,
+            ) => (result, queue_position, billing, tail),
+            _ => panic!("SMSG_AUTH_RESPONSE decodes as AuthResponse"),
+        };
+        // A trial account (`BILLING_FLAG_TRIAL | BILLING_FLAG_RESTRICTED`) with one minute left.
+        let ok = [0x0c, 0x01, 0x00, 0x00, 0x00, 0x44, 0x5a, 0x00, 0x00, 0x00];
+        assert_eq!(
+            decode(&ok),
+            (
+                AUTH_OK,
+                None,
+                Some(Billing {
+                    time_remaining: 1,
+                    plan_flags: 0x44,
+                    time_rested: 90,
+                }),
+                0
+            )
+        );
+        let queued = [
+            0x1b, 0x2c, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            decode(&queued),
+            (
+                AUTH_WAIT_QUEUE,
+                Some(3),
+                Some(Billing {
+                    time_remaining: 300,
+                    plan_flags: Billing::RECURRING,
+                    time_rested: 0,
+                }),
+                0
+            )
+        );
+        // Four bytes after the result are under the client's 5: the position alone.
+        assert_eq!(
+            decode(&[0x1b, 0x05, 0x00, 0x00, 0x00]),
+            (AUTH_WAIT_QUEUE, Some(5), None, 0)
+        );
+        assert_eq!(decode(&[0x0c]), (AUTH_OK, None, None, 0));
+    }
+
+    /// `SMSG_SET_FORCED_REACTIONS`: a count, then `(faction, rank)` pairs of `u32`s.
+    #[test]
+    fn the_forced_reaction_table_decodes_whole() {
+        let mut body = 2u32.to_le_bytes().to_vec();
+        for v in [1u32, 6, 72, 4] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        let (packet, tail) = parse_server_with_tail(opcode::SMSG_SET_FORCED_REACTIONS, &body)
+            .expect("a well-formed body decodes");
+        assert!(matches!(
+            packet,
+            ServerPacket::SetForcedReactions { ref reactions } if reactions == &[(1, 6), (72, 4)]
+        ));
+        assert_eq!(tail, 0);
+    }
 
     #[test]
     fn a_trailing_byte_is_reported_as_tail_one_and_never_as_a_failure() {

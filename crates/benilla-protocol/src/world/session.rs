@@ -3,7 +3,7 @@ use benilla_srp::vanilla_header::{HeaderCrypto, ProofSeed};
 use benilla_srp::{NormalizedString, SESSION_KEY_LENGTH};
 
 use crate::messages::{self, opcode, Character, MoveMode, ServerPacket};
-use crate::transport::Conn;
+use crate::transport::{Conn, LinkState};
 
 use super::movement::{client_uptime_ms, movement_info, MOVEMENT_FLAG_FORWARD};
 use super::reader::WorldReader;
@@ -16,12 +16,6 @@ const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// Read timeout in the login queue, where updates can be minutes apart. Deviation: the reference
 /// waits forever; a bound tells a server that died mid-queue from a long wait.
 const QUEUE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// The server requires Warden. Deviation: benilla does not implement it; vmangos ships with it
-/// off (`Warden.WinEnabled`, `Warden.OSXEnabled`). vmangos kicks a client that leaves a Warden
-/// request unanswered for 30 s (`Warden.cpp`), so the connect refuses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WardenRequired;
 
 /// The world server refused the session. Its code is from `messages`' `AUTH_*` block, not
 /// [`crate::AuthReject`]'s, whose numbers overlap with unrelated meanings.
@@ -42,39 +36,52 @@ impl std::fmt::Display for WorldAuthReject {
 
 impl std::error::Error for WorldAuthReject {}
 
-impl std::fmt::Display for WardenRequired {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "this server requires the Warden anticheat, which benilla does not implement"
-        )
-    }
-}
-
-impl std::error::Error for WardenRequired {}
-
 /// An authenticated world-server session with 1.12 header obfuscation active.
 pub struct WorldSession {
     conn: Conn,
     crypto: HeaderCrypto,
-    /// Roster guid to race, so [`Self::player_login`] can pick the chat language.
-    roster_races: std::collections::HashMap<u64, u8>,
+    link: LinkFacts,
     /// The language chat sends speak, the character's faction tongue: vmangos drops chat, even
     /// dot-commands, in a language the character does not know.
     chat_language: u32,
-    /// The rested billing minutes the admitting `SMSG_AUTH_RESPONSE` carried. Deviation: `0` when
-    /// the body is too short, where the reference leaves its global as it was; this field lives
-    /// per connection, with nothing earlier to keep.
-    billing_time_rested: u32,
     /// `SMSG_TUTORIAL_FLAGS` when it lands during the handshake rather than in the world stream.
     tutorial_flags: Option<Vec<u8>>,
+}
+
+/// What the connection learned that outlives one character's world session, carried by the read
+/// half across a split so [`WorldSession::rejoin`] has it back.
+#[derive(Default)]
+pub(super) struct LinkFacts {
+    /// Roster guid to race, so [`WorldSession::player_login`] can pick the chat language.
+    roster_races: std::collections::HashMap<u64, u8>,
+    /// The billing group the last `SMSG_AUTH_RESPONSE` to carry one gave. Deviation: zeros until
+    /// one does, where the reference's words are never initialised (the session is allocated
+    /// without zero-fill, `ui/billing` in benilla-re).
+    billing: messages::Billing,
     /// `SMSG_ADDON_INFO`'s per-record status bytes in order; `None` until the server answers.
-    addon_info: Option<Vec<u8>>,
+    /// vmangos sends it once per connection, after the authentication
+    /// (`WorldSocket.cpp:446-448`), and the reference applies it to add-on records that outlive
+    /// the world session (`0x5b4260` → `0x51da70`), so every login on the link reads it.
+    addon_info: Option<Vec<messages::AddonRecord>>,
+    /// The server sent `SMSG_WARDEN_DATA` before the world entry, which was read past
+    /// ([`WorldSession::recv`]).
+    warden_asked: bool,
+}
+
+/// What a world connect reports on its way to `SMSG_AUTH_RESPONSE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldConnectEvent {
+    /// The socket connected: the reference's connect operation completes `RESPONSE_CONNECTED`
+    /// here (`0x5aaa90`) and its authentication begins.
+    Connected,
+    /// A queue position (`AUTH_WAIT_QUEUE`), or `None` when the body carried none.
+    Queued(Option<u32>),
 }
 
 impl WorldSession {
-    /// Connect to the world server and complete the auth handshake (blocking) — the native twin of
-    /// [`Self::connect_async`], for the CLIs/probes and the native net thread.
+    /// Connect and complete the auth handshake with the logon's account and session key
+    /// (blocking) — the native twin of [`Self::connect_async`], for the CLIs/probes and the native
+    /// net thread.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn connect(
         addr: &str,
@@ -93,56 +100,42 @@ impl WorldSession {
         Self::connect_queued_async(addr, username, session_key, &mut |_| true).await
     }
 
-    /// [`Self::connect`], reporting our place in the **login queue** as it moves.
-    ///
-    /// `on_queue` fires once per `AUTH_WAIT_QUEUE` the server sends — `None` when the packet
-    /// carried no readable position — and the call returns only once we are admitted (`AUTH_OK`),
-    /// refused, or the socket fails. The queue is a wait, not an outcome, so it is a callback
-    /// rather than a return value: the screen has to be able to show the position *while* the
-    /// handshake is still parked here.
-    ///
-    /// **Returning `false` abandons the queue** and fails the connect. That is the only way out of
-    /// a wait that can last minutes: every other stage of the handshake is bounded tightly enough
-    /// that a cancel is honoured at its next boundary, and a queue is not. Abandoning is checked
-    /// once per packet rather than per frame — the reference tears the socket down on the next
-    /// tick, which is finer-grained, but it costs a player at most one server update.
+    /// [`Self::connect`], calling `on_event` once the socket connects and with each queue position;
+    /// `false` abandons the connect (blocking) — the native twin of [`Self::connect_queued_async`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn connect_queued(
         addr: &str,
         username: &str,
         session_key: [u8; SESSION_KEY_LENGTH],
-        on_queue: &mut dyn FnMut(Option<u32>) -> bool,
+        on_event: &mut dyn FnMut(WorldConnectEvent) -> bool,
     ) -> Result<Self> {
         futures_lite::future::block_on(Self::connect_queued_async(
             addr,
             username,
             session_key,
-            on_queue,
+            on_event,
         ))
     }
 
     /// [`Self::connect_queued`] as a future. `addr` is `host[:port]` (the realm list's own
     /// address form; a bare host gets [`WORLD_PORT`](crate::WORLD_PORT)).
+    /// Deviation: checked per queue packet where the reference checks each tick, so a cancel can
+    /// lag one server update.
     pub async fn connect_queued_async(
         addr: &str,
         username: &str,
         session_key: [u8; SESSION_KEY_LENGTH],
-        on_queue: &mut dyn FnMut(Option<u32>) -> bool,
+        on_event: &mut dyn FnMut(WorldConnectEvent) -> bool,
     ) -> Result<Self> {
         let (host, port) = crate::host_port(addr, super::WORLD_PORT);
         let mut queued = false;
         let mut stream = Conn::connect(host, port)
             .await
             .context("connecting to world server")?;
-        // **Nagle off** (decision 0617). VERIFIED in the reference client: `0x5bca60` calls
-        // `setsockopt(s, 6 /* IPPROTO_TCP */, 1 /* TCP_NODELAY */, &1, 4)` unconditionally on its game
-        // socket (WSOCK32 ordinal 21, IAT slot `0x7ff6f8`; a sibling helper at `0x43dda0` toggles the
-        // same option from a bool). Rust leaves Nagle *on*, which is exactly wrong for this protocol:
-        // every packet we send is a sub-MSS write on a latency-critical stream, so the kernel holds
-        // each one until the server ACKs the last — coalescing our movement stream into delayed-ACK-
-        // sized clumps. The de-jitter chain on the observing client then sizes its buffer to that
-        // self-inflicted lateness (decision 0615). Fatal on failure: the option cannot fail on a
-        // healthy connected socket, so an error here means the next handshake write is doomed anyway —
-        // better one named failure than a session that silently plays at delayed-ACK cadence.
+        if !on_event(WorldConnectEvent::Connected) {
+            bail!("world connect abandoned");
+        }
+        // Nagle off: the reference sets `TCP_NODELAY` on its game socket (`0x5bca60`).
         stream
             .set_nodelay(true)
             .context("disabling Nagle (TCP_NODELAY) on the world socket")?;
@@ -151,7 +144,6 @@ impl WorldSession {
             .set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))
             .context("setting handshake read timeout")?;
 
-        // 1. SMSG_AUTH_CHALLENGE (unencrypted) carries the server seed.
         let server_seed = match recv_packet(&mut stream, None).await? {
             ServerPacket::AuthChallenge { server_seed } => server_seed,
             other => bail!("expected SMSG_AUTH_CHALLENGE, got {}", other.name()),
@@ -179,25 +171,26 @@ impl WorldSession {
         let mut session = WorldSession {
             conn: stream,
             crypto,
-            roster_races: Default::default(),
+            link: LinkFacts::default(),
             chat_language: messages::LANGUAGE_COMMON,
-            billing_time_rested: 0,
             tutorial_flags: None,
-            addon_info: None,
         };
 
-        // AUTH_RESPONSE is not always first, so others are skipped; Warden data ends the connect.
+        // AUTH_RESPONSE is not always first, so others are skipped.
         loop {
-            match session.recv_async().await? {
-                ServerPacket::AuthResponse {
-                    result,
-                    billing_time_rested,
-                    ..
-                } if result == messages::AUTH_OK => {
-                    // The reference keeps the last AUTH_RESPONSE's billing group.
-                    session.billing_time_rested = billing_time_rested.unwrap_or(0);
-                    break;
-                }
+            let packet = session.recv_async().await?;
+            // Either admitting code may carry the group and one without leaves the last
+            // (`0x5b41f9`): vmangos sends it on the first queue response and not on the closing
+            // `AUTH_OK` (`World.cpp:374-381`, `WorldSession.cpp:961-967`).
+            if let ServerPacket::AuthResponse {
+                billing: Some(billing),
+                ..
+            } = packet
+            {
+                session.link.billing = billing;
+            }
+            match packet {
+                ServerPacket::AuthResponse { result, .. } if result == messages::AUTH_OK => break,
                 // Queued, not refused: the server re-sends as we move up and ends with `AUTH_OK`.
                 ServerPacket::AuthResponse {
                     result,
@@ -210,16 +203,13 @@ impl WorldSession {
                             .set_read_timeout(Some(QUEUE_READ_TIMEOUT))
                             .context("relaxing the read timeout for the login queue")?;
                     }
-                    if !on_queue(queue_position) {
+                    if !on_event(WorldConnectEvent::Queued(queue_position)) {
                         bail!("login queue abandoned");
                     }
                 }
                 ServerPacket::AuthResponse { result, .. } => {
                     return Err(WorldAuthReject { code: result }.into())
                 }
-                ServerPacket::Other {
-                    opcode: opcode::SMSG_WARDEN_DATA,
-                } => return Err(WardenRequired.into()),
                 _ => continue,
             }
         }
@@ -233,9 +223,9 @@ impl WorldSession {
         Ok(session)
     }
 
-    /// Rested billing minutes (`GetBillingTimeRested`); always 0 from vmangos (`World.cpp:331`).
-    pub fn billing_time_rested(&self) -> u32 {
-        self.billing_time_rested
+    /// The connection's billing group; vmangos sends no time and no rest (`World.cpp:327-331`).
+    pub fn billing(&self) -> messages::Billing {
+        self.link.billing
     }
 
     /// The tutorial bank captured during the login handshake, if any.
@@ -257,97 +247,167 @@ impl WorldSession {
         futures_lite::future::block_on(self.recv_async())
     }
 
-    /// The `SMSG_ADDON_INFO` statuses, taken once; `None` is real, as vmangos stays silent when it
-    /// rejects the addon block (`WorldSocket.cpp:447`).
-    pub fn take_addon_info(&mut self) -> Option<Vec<u8>> {
-        self.addon_info.take()
-    }
-
     /// Read + decrypt + parse one server packet.
     pub async fn recv_async(&mut self) -> Result<ServerPacket> {
         let packet = recv_packet(&mut self.conn, Some(self.crypto.decrypter())).await?;
-        // **Captured here rather than in a loop arm**, because it is not one loop's business:
-        // `SMSG_ADDON_INFO` lands somewhere between `CMSG_AUTH_SESSION` and the roster, and which
-        // of the handshake's three read loops sees it is the server's timing, not our contract.
-        // `recv_async` is the one place all of them go through — the native `recv` included
-        // (decision 2175).
-        if let ServerPacket::AddonInfo { statuses } = &packet {
-            self.addon_info = Some(statuses.clone());
+        // `SMSG_ADDON_INFO` can reach any of the handshake's read loops, so it is caught here.
+        match &packet {
+            ServerPacket::AddonInfo { records } => self.link.addon_info = Some(records.clone()),
+            // Deviation: benilla runs no Warden module and answers nothing, where the reference
+            // hands `SMSG_WARDEN_DATA` to the module its connect loads (`0x6ca2f0`, `0x6ca5c0`)
+            // and sends that module's answer as `CMSG_WARDEN_DATA` (`0x6ca6a0`). The message is
+            // read past like any stray and the login goes on; what follows is the server's policy
+            // (vmangos kicks after `Warden.ClientResponseDelay`, `Warden.cpp:686-691`). benilla
+            // runs no code a server sends ([`crate::auth::AuthReject::reply`] gives the rule).
+            ServerPacket::Other {
+                opcode: opcode::SMSG_WARDEN_DATA,
+            } => self.link.warden_asked = true,
+            _ => {}
         }
         Ok(packet)
     }
 
-    /// Send a client packet (encrypted header + plaintext body). Synchronous on every target — a
-    /// write is a buffered hand-off on both bodies of the transport seam.
+    /// Whether the server sent `SMSG_WARDEN_DATA` on this link before the world entry, which
+    /// was read past unanswered ([`Self::recv_async`]).
+    pub fn warden_asked(&self) -> bool {
+        self.link.warden_asked
+    }
+
+    /// The next packet a request at character select reads past, or `None` for one whose body did
+    /// not parse: skipped, as the world stream skips it ([`WorldReader::poll`]), since back from
+    /// the world the link still carries what the world session left in flight (a pong, a reply
+    /// vmangos serves to an authenticated session).
+    async fn recv_parsed(&mut self) -> Result<Option<ServerPacket>> {
+        match self.recv_async().await {
+            Ok(packet) => Ok(Some(packet)),
+            Err(e) if e.downcast_ref::<super::Unparsed>().is_some() => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The `SMSG_ADDON_INFO` records this connection received, for every login on it; `None` is
+    /// real, as vmangos stays silent when it rejects the addon block (`WorldSocket.cpp:447`).
+    pub fn addon_info(&self) -> Option<&[messages::AddonRecord]> {
+        self.link.addon_info.as_deref()
+    }
+
+    /// Send a client packet (encrypted header + plaintext body).
     fn send(&mut self, opcode: u16, body: &[u8]) -> Result<()> {
         send_packet(&mut self.conn, Some(self.crypto.encrypter()), opcode, body)
     }
 
-    /// Request the character list (blocking) — the native twin of [`Self::char_enum_async`].
+    /// Request and return the character list (blocking) — the native twin of
+    /// [`Self::char_enum_async`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn char_enum(&mut self) -> Result<Vec<Character>> {
         futures_lite::future::block_on(self.char_enum_async())
     }
 
-    /// Request the character list and return it (remembering each character's race, so
-    /// [`Self::player_login`] can pick the right chat tongue).
+    /// Request and return the character list, remembering each race for the chat language.
     pub async fn char_enum_async(&mut self) -> Result<Vec<Character>> {
         self.send(opcode::CMSG_CHAR_ENUM, &[])?;
         loop {
-            match self.recv_async().await? {
+            let Some(packet) = self.recv_parsed().await? else {
+                continue;
+            };
+            match packet {
                 ServerPacket::CharEnum { characters } => {
-                    self.roster_races = characters.iter().map(|c| (c.guid, c.race)).collect();
+                    self.link.roster_races = characters.iter().map(|c| (c.guid, c.race)).collect();
                     return Ok(characters);
                 }
-                // Warden can arm on either side of SMSG_AUTH_RESPONSE, so this step refuses it too.
-                ServerPacket::Other {
-                    opcode: opcode::SMSG_WARDEN_DATA,
-                } => return Err(WardenRequired.into()),
-                // Kept for the world entry when the server sends it this early.
-                ServerPacket::TutorialFlags(flags) => {
-                    self.tutorial_flags = Some(flags.bytes);
-                    continue;
-                }
-                // The server interleaves account-data / cache packets here; skip them.
-                _ => continue,
+                other => self.note_stray(other),
             }
         }
     }
 
-    /// Create a character (the create screen's request, or the create-if-empty starter that unblocks
-    /// `PLAYER_LOGIN` on a fresh account). Returns the `SMSG_CHAR_CREATE` result byte (`WorldResult`)
-    /// for the caller to inspect ([`messages::CHAR_CREATE_SUCCESS`], a `CHAR_NAME_*` code, …).
+    /// Look at the link while character select waits for the app: the reference keeps servicing
+    /// the connection there, and a drop ends the session (`CGlueMgr::NetDisconnectHandler`,
+    /// `0x46c540`). A closed or failed socket is an error, a packet sent unasked is read as a
+    /// stray, a quiet link is `Ok`. Nothing is sent, and a read waits only on a packet begun.
+    ///
+    /// wenilla: `async` and over [`Conn::link_state`], the transport's non-blocking look (a peek
+    /// natively, the inbound queue on the web).
+    pub async fn poll_link(&mut self) -> Result<()> {
+        match self.conn.link_state() {
+            Ok(LinkState::Closed) => {
+                bail!("world stream closed: the server ended the connection")
+            }
+            Ok(LinkState::Readable) => {
+                if let Some(packet) = self.recv_parsed().await? {
+                    self.note_stray(packet);
+                }
+                Ok(())
+            }
+            Ok(LinkState::Quiet) => Ok(()),
+            Err(e) => Err(anyhow!("world stream closed: {e}")),
+        }
+    }
+
+    /// A packet at character select that is not the answer being waited for: the tutorial bank
+    /// is kept for the world entry when the server sends it this early; the account-data, cache
+    /// and Warden packets the server interleaves here are skipped.
+    fn note_stray(&mut self, packet: ServerPacket) {
+        if let ServerPacket::TutorialFlags(flags) = packet {
+            self.tutorial_flags = Some(flags.bytes);
+        }
+    }
+
+    /// Create a character; returns the `SMSG_CHAR_CREATE` result byte (blocking) — the native twin
+    /// of [`Self::create_character_async`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn create_character(&mut self, req: &messages::CharCreateReq) -> Result<u8> {
         futures_lite::future::block_on(self.create_character_async(req))
     }
 
-    /// Create a character — the awaited twin of [`Self::create_character`].
+    /// Create a character; returns the `SMSG_CHAR_CREATE` result byte.
     pub async fn create_character_async(&mut self, req: &messages::CharCreateReq) -> Result<u8> {
         self.send(opcode::CMSG_CHAR_CREATE, &messages::char_create(req))?;
         loop {
-            match self.recv_async().await? {
-                ServerPacket::CharCreate { result } => return Ok(result),
-                _ => continue,
+            if let Some(ServerPacket::CharCreate { result }) = self.recv_parsed().await? {
+                return Ok(result);
             }
         }
     }
 
-    /// Delete a character (`CMSG_CHAR_DELETE`, full u64 guid — only valid at character select,
-    /// never while in-world). Returns the `SMSG_CHAR_DELETE` result byte
-    /// ([`messages::CHAR_DELETE_SUCCESS`] on success) for the caller to inspect.
+    /// Delete a character at character select; returns the `SMSG_CHAR_DELETE` result byte
+    /// (blocking) — the native twin of [`Self::delete_character_async`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn delete_character(&mut self, guid: u64) -> Result<u8> {
         futures_lite::future::block_on(self.delete_character_async(guid))
     }
 
-    /// Delete a character — the awaited twin of [`Self::delete_character`].
+    /// Delete a character at character select; returns the `SMSG_CHAR_DELETE` result byte.
     pub async fn delete_character_async(&mut self, guid: u64) -> Result<u8> {
         self.send(opcode::CMSG_CHAR_DELETE, &messages::full_guid(guid))?;
         loop {
-            match self.recv_async().await? {
-                ServerPacket::CharDelete { result } => return Ok(result),
-                _ => continue,
+            if let Some(ServerPacket::CharDelete { result }) = self.recv_parsed().await? {
+                return Ok(result);
+            }
+        }
+    }
+
+    /// Rename a character the server flagged for it, at character select; returns the
+    /// `SMSG_CHAR_RENAME` result byte and the renamed guid and name a success carries. The server
+    /// answers from a query callback (`CharacterHandler.cpp:763-835`), so the reply can trail.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn rename_character(
+        &mut self,
+        guid: u64,
+        name: &str,
+    ) -> Result<(u8, Option<(u64, String)>)> {
+        futures_lite::future::block_on(self.rename_character_async(guid, name))
+    }
+
+    /// [`Self::rename_character`], awaited.
+    pub async fn rename_character_async(
+        &mut self,
+        guid: u64,
+        name: &str,
+    ) -> Result<(u8, Option<(u64, String)>)> {
+        self.send(opcode::CMSG_CHAR_RENAME, &messages::char_rename(guid, name))?;
+        loop {
+            if let Some(ServerPacket::CharRename { result, renamed }) = self.recv_parsed().await? {
+                return Ok((result, renamed));
             }
         }
     }
@@ -355,6 +415,7 @@ impl WorldSession {
     /// Enter the world as `guid`, adopting its faction tongue for chat (Common if not enumerated).
     pub fn player_login(&mut self, guid: u64) -> Result<()> {
         self.chat_language = self
+            .link
             .roster_races
             .get(&guid)
             .map_or(messages::LANGUAGE_COMMON, |&race| {
@@ -363,7 +424,8 @@ impl WorldSession {
         self.send(opcode::CMSG_PLAYER_LOGIN, &messages::full_guid(guid))
     }
 
-    /// Declare the unit we move, as the 1.12 client does at login; vmangos drops moves until then.
+    /// Declare the unit we move, as the 1.12 client does at its own create; vmangos drops moves
+    /// until then.
     pub fn set_active_mover(&mut self, guid: u64) -> Result<()> {
         self.send(opcode::CMSG_SET_ACTIVE_MOVER, &messages::full_guid(guid))
     }
@@ -379,8 +441,7 @@ impl WorldSession {
         self.set_active_mover(guid)
     }
 
-    /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`, empty body) — the
-    /// unsplit twin of [`WorldWriter::complete_cinematic`], for the CLI/probe path.
+    /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`, empty body).
     pub fn complete_cinematic(&mut self) -> Result<()> {
         self.send(opcode::CMSG_COMPLETE_CINEMATIC, &[])
     }
@@ -850,28 +911,53 @@ impl WorldSession {
 
     /// Split into a reader and a writer on cloned sockets, after [`Self::player_login`].
     pub fn into_split(self) -> Result<(WorldReader, WorldWriter)> {
-        // The handshake is over — clear its read timeout (decision 0065): the streaming phase reads
-        // block indefinitely (a quiet world is legal; connection liveness is the caller's loop).
+        // A quiet world is legal, so streaming reads block without a timeout.
         self.conn
             .set_read_timeout(None)
             .context("clearing handshake read timeout")?;
         let (reader, writer) = self.conn.split().context("splitting the world connection")?;
         let (encrypter, decrypter) = self.crypto.split();
         Ok((
-            WorldReader { reader, decrypter },
+            WorldReader {
+                reader,
+                decrypter,
+                link: self.link,
+            },
             WorldWriter {
                 writer,
                 encrypter,
                 chat_language: self.chat_language,
-                sent: None,
             },
         ))
     }
 
-    /// Cleanly leave the world back to character-select: send `CMSG_LOGOUT_REQUEST` and wait for
-    /// `SMSG_LOGOUT_COMPLETE` (instant for GM / rested). The server persists the character on logout,
-    /// so a follow-up [`Self::char_enum`] reflects the saved position. Requires a read timeout (so the
-    /// poll loop can give up); returns once logged out or `timeout` elapses.
+    /// The halves [`Self::into_split`] made, one session again on the same connection: a logout
+    /// or a refused character login returns to character select on the link it entered by,
+    /// where the reference re-enumerates (`0x5aaeb0` → `0x401ee0(1, 1, 0)` → `0x46b880`), with
+    /// no new authentication. The cipher keeps the state each direction reached, and the reads
+    /// wait with the handshake's bound again, as every park step awaits one reply.
+    pub fn rejoin(reader: WorldReader, writer: WorldWriter) -> Result<Self> {
+        // The read half is a clone of (or a handle onto) the write half's connection; rejoining
+        // drops it and closes nothing.
+        let WorldReader {
+            reader: read_half,
+            decrypter,
+            link,
+        } = reader;
+        let session = WorldSession {
+            conn: Conn::rejoin(read_half, writer.writer),
+            crypto: HeaderCrypto::join(writer.encrypter, decrypter),
+            link,
+            chat_language: writer.chat_language,
+            tutorial_flags: None,
+        };
+        session
+            .set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))
+            .context("restoring the park's read timeout")?;
+        Ok(session)
+    }
+
+    /// Log out to character select, waiting up to `timeout`; needs a socket read timeout.
     ///
     /// Native only: the deadline is a `std::time::Instant`, which a browser has no clock for, and
     /// the in-app logout is the writer's `CMSG_LOGOUT_REQUEST` + the streamed `SMSG_LOGOUT_COMPLETE`

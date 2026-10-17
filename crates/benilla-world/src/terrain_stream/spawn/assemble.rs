@@ -180,6 +180,8 @@ pub fn spawn_model_entities(
             sub.no_depth_test,
             sub.fog_policy,
             sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
+            sub.stage1.as_ref(),
+            sub.combine,
             shade,
             batch_order,
             sub.uv_anim.as_ref(),
@@ -217,6 +219,8 @@ pub fn spawn_model_entities(
                 sub.no_depth_test,
                 sub.fog_policy,
                 sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
+                sub.stage1.as_ref(),
+                sub.combine,
                 shade,
                 batch_order,
                 sub.uv_anim.as_ref(),
@@ -371,7 +375,8 @@ pub fn spawn_model_entities(
                     two_sided,
                     unlit: sub.emissive,
                     fog_policy: sub.fog_policy,
-                    env_map: sub.env_map,
+                    // The retained pass bakes neither stage-0 nor stage-1 generated coordinates.
+                    env_map: sub.env_map || sub.stage1.is_some(),
                     no_depth_write: sub.no_depth_write,
                     no_depth_test: sub.no_depth_test,
                     shade,

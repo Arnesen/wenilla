@@ -26,9 +26,10 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{ScriptValue, UiScript};
 
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, SelfPlayer};
 use crate::player::Player;
+use crate::query_cache::Ask;
 use crate::ui_script::{UiFeed, UiInput};
 
 /// The popup cue `0x4b5390` plays on both legs (`0x846b68`).
@@ -270,7 +271,7 @@ const KEYRING_SLOTS: std::ops::RangeInclusive<u32> = 0x51..=0x70;
 /// Before the script tick: the sites' asks, the descriptor edges, the timers, the cue and the
 /// event, and the acknowledged bank's push to whichever VM is live.
 fn feed_tutorials(
-    script: Option<NonSendMut<UiScript>>,
+    mut script: Option<NonSendMut<UiScript>>,
     mut tutorials: ResMut<Tutorials>,
     mut asks: MessageReader<TutorialEvent>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -285,6 +286,12 @@ fn feed_tutorials(
             TutorialEvent::Acknowledge { id } => tutorials.acknowledge(id),
         }
     }
+    // The engine's sites: Quest Completion, a turn-in test that passed (`0x4df792`).
+    if let Some(script) = script.as_mut() {
+        for id in script.take_tutorial_triggers() {
+            tutorials.trigger(id, 0, now);
+        }
+    }
 
     // The item-received sites: Backpack always; Equippable Items for any non-zero inventory type
     // (the reference's 23-bit mask `0x809200` is not decoded); Hearthstones by entry; Ranged
@@ -293,7 +300,7 @@ fn feed_tutorials(
     let class = self_q.single().ok().and_then(|s| s.0.unit_class());
     for (entry, bag, slot) in pushes {
         tutorials.trigger(id::BACKPACK, 0, now);
-        if let Some(info) = items.template_cached(entry) {
+        if let Some(info) = items.template(entry, 0, Ask::Read) {
             if info.inventory_type != 0 {
                 tutorials.trigger(id::EQUIPPABLE_ITEMS, 0, now);
             }
@@ -561,9 +568,12 @@ impl Plugin for TutorialPlugin {
                     on_world_enter.before(run_world_enter_cascade),
                     run_world_enter_cascade.before(feed_tutorials),
                     watch_windows.before(feed_tutorials),
-                    watch_self.after(on_world_enter).before(feed_tutorials),
+                    watch_self
+                        .after(on_world_enter)
+                        .after(crate::player::ControlRestore)
+                        .before(feed_tutorials),
                     // Not before the in-game UI exists: `fired` is taken once, with no `VmMemo`
-                    // behind it, so the login's Welcome and Questgivers fired into the boot VM
+                    // behind it, so the login's Welcome and Questgivers fired into the glue VM
                     // during the one frame it is still live in the world would be lost. `fired`
                     // simply waits for the first frame with an interface.
                     feed_tutorials
@@ -787,6 +797,47 @@ mod tests {
     }
 
     /// The login's own tutorials wait for an interface, on the real plugin's registration:
+    /// The engine's ask, a passing turn-in test's Quest Completion (`0x4df792`), goes through the
+    /// fire-once bank to `TUTORIAL_TRIGGER(34)`.
+    #[test]
+    fn a_completable_quest_triggers_the_quest_completion_tutorial() {
+        let mut app = App::new();
+        app.init_resource::<Tutorials>()
+            .init_resource::<crate::items::Items>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .add_message::<TutorialEvent>()
+            .add_systems(Update, feed_tutorials);
+        let mut script = UiScript::new().unwrap();
+        let mut q = crate::ui_quest_log::fixture::quest(7, "Deliver the Message", 1);
+        q.record.objectives[0] = crate::ui_quest_log::fixture::kill(40, 3);
+        q.slot.counters[0] = 3;
+        crate::ui_quest_log::fixture::seat(&mut script, &[q]);
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("TUTORIAL_TRIGGER")
+                f:SetScript("OnEvent", function() table.insert(SEEN, arg1) end)
+                local _, _, _, _, _, c = GetQuestLogTitle(2)
+                assert(c == 1)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        app.world_mut()
+            .resource_mut::<Tutorials>()
+            .apply_flags(&[0u8; 32]);
+        app.update();
+        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        s.resolve();
+        assert_eq!(
+            s.eval::<Vec<i64>>("return SEEN").unwrap(),
+            [34],
+            "the engine's 0x21, published as `TUTORIAL_TITLE34`"
+        );
+    }
+
     /// `TUTORIAL_TRIGGER` is fired once, so one published to a frameless VM is gone for the
     /// session.
     #[test]
@@ -806,10 +857,10 @@ mod tests {
         app.insert_resource(crate::net::NetCommands(tx));
 
         // The deferral window: in the world on the wire, the entry load still owed, and a live
-        // boot VM with no frames.
-        app.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+        // VM with no frames.
+        app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
         app.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
-        app.insert_non_send_resource(UiScript::new().expect("the boot VM"));
+        app.insert_non_send_resource(UiScript::new().expect("a frameless VM"));
 
         {
             let mut t = app.world_mut().resource_mut::<Tutorials>();

@@ -153,7 +153,9 @@ pub(in crate::entities) fn build_glue_preview(
     };
     let (race, sex) = look.body();
     let Some(display_id) = char_create.0.body_display(race, sex) else {
-        state.built = true; // a non-playable race: nothing to show, stop retrying
+        // No ChrRaces row, a sex past 1 or a zero display id: no body (`0x5ec480`), so nothing
+        // to show; stop retrying.
+        state.built = true;
         return;
     };
 
@@ -475,6 +477,7 @@ fn glue_ghost_arm(
                 bone: point.bone,
                 offset: point.offset,
                 emitters: dm.emitters.clone(),
+                rig: None,
             });
         }
     }
@@ -679,6 +682,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
                     bone: point.bone,
                     offset: point.offset,
                     emitters: item.emitters.clone(),
+                    rig: item.emitter_rig(),
                 });
             }
             let Some(paths) = ctx.glows.as_deref().and_then(|g| g.effects(w.visual)) else {
@@ -734,6 +738,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
                         bone: point.bone,
                         offset,
                         emitters: glow.emitters.clone(),
+                        rig: None,
                     });
                 }
             }

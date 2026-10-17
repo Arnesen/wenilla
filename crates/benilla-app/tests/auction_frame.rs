@@ -374,10 +374,9 @@ fn only_the_bids_pane_gets_its_page_without_being_opened() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The reference's show cascade `0x76ae10` is post-order: a frame marks itself visible
-/// (`0x76ae7b`), walks its children re-reading live links, and fires its own `OnShow` last
-/// (`0x76aef5`). benilla's is pre-order, a gap in the engine; for this window both orders reach
-/// the same state, so only the `ShowOrder` assertions are benilla's order.
+/// The show cascade `0x76ae10` is post-order: a frame marks itself visible (`0x76ae7b`), walks its
+/// children re-reading live links, and fires its own `OnShow` last (`0x76aef5`), so the pane the
+/// XML leaves shown is notified before the window.
 #[test]
 fn the_show_cascade_notifies_the_bids_pane_once_and_keeps_its_page() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -408,11 +407,7 @@ fn the_show_cascade_notifies_the_bids_pane_once_and_keeps_its_page() {
     };
 
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
-    assert_eq!(
-        order(&s),
-        "window,pane",
-        "OURS, and a known deviation: the reference's cascade is post-order, \"pane,window\""
-    );
+    assert_eq!(order(&s), "pane,window", "children first, the window last");
     assert_eq!(
         page(&s),
         "0",
@@ -431,7 +426,7 @@ fn the_show_cascade_notifies_the_bids_pane_once_and_keeps_its_page() {
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     assert_eq!(
         order(&s),
-        "window,pane,window",
+        "pane,window,window",
         "the reopen notifies the window and not the pane it left hidden"
     );
     assert_eq!(page(&s), "0", "kept from the first open, not re-assigned");
@@ -764,6 +759,7 @@ fn the_create_gate_and_the_deposit() {
             slots: std::collections::HashMap::from([(
                 1,
                 benilla_ui::script::ContainerSlot {
+                    guid: 0x4001,
                     texture: Some("Interface\\Icons\\INV_Fabric_Linen_01".into()),
                     count: 4,
                     quality: Some(1),
@@ -839,9 +835,12 @@ fn the_create_gate_and_the_deposit() {
             .unwrap(),
         2
     );
-    let _ = s.take_auction_start();
+    let _ = s.take_auction_starts();
     s.run("AuctionsCreateAuctionButton:Click()").unwrap();
-    let start = s.take_auction_start().expect("Create queues one auction");
+    let start = s
+        .take_auction_starts()
+        .pop()
+        .expect("Create queues one auction");
     assert_eq!(start.min_bid, 10000);
     assert_eq!(start.buyout, 0);
     assert_eq!(start.duration, 1440, "the long run time is still selected");

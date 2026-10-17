@@ -206,7 +206,7 @@ fn shipped_spellbook_drives_end_to_end() {
     assert!(
         matches!(
             s.cursor_payload(),
-            Some(benilla_ui::script::CursorPayload::Spell(c)) if c.book_type == "spell" && c.spell_id == 133
+            Some(benilla_ui::script::CursorPayload::Spell(c)) if c.spell_id == 133
         ),
         "the cursor holds spell 133 from the spell book: {:?}",
         s.cursor_payload()
@@ -346,7 +346,10 @@ fn set_checked_uses_blizzard_bool_coercion() {
         ("\"false\"", false),
         ("\"1\"", true),
         ("\"0\"", false),
-        ("\"junk\"", false),
+        // An unknown first byte takes the default, 1 (`0x6f1c81`-`0x6f1cdc`).
+        ("\"junk\"", true),
+        ("\"off\"", false),
+        ("", true),
     ] {
         let got = s
             .eval::<bool>(&format!(
@@ -540,7 +543,9 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
     assert!(s.take_spell_casts().is_empty());
     assert!(s.take_pet_spell_autocasts().is_empty());
 
-    // Right: autocast, never a cast (`SpellBookFrame.lua:284-285`).
+    // Right: autocast, never a cast (`SpellBookFrame.lua:284-285`). On a usable pet the toggle's
+    // `PET_BAR_UPDATE` (`0x4bcdcb`) repaints the page inside the click, lighting the shine.
+    s.set_pet_actions(true, true, true, Vec::new());
     click(&mut s, "SpellButton3", "RightButton");
     assert!(
         s.errors().is_empty(),
@@ -548,6 +553,11 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
         s.errors()
     );
     assert_eq!(s.take_pet_spell_autocasts(), vec![16827]);
+    assert!(
+        s.eval::<bool>("return SpellButton3AutoCast:IsShown() == 1")
+            .unwrap(),
+        "Claw's shine lit before any feed ran"
+    );
     assert!(
         s.take_pet_spell_casts().is_empty(),
         "a right-click on the pet page must not also cast"

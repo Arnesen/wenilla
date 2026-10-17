@@ -21,7 +21,7 @@ fn item_line_law_and_red_requirements() {
     s.run(
         r#"
         local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         SetItemByIdForTest(tt, 871)
         assert(tt:IsShown(), "the id render shows")
@@ -88,7 +88,7 @@ fn red_lines_track_player_state() {
     s.run(
         r#"
         local a = CreateFrame("Button", "Slot2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         SetItemByIdForTest(tt, 871)
     "#,
@@ -111,7 +111,7 @@ fn red_lines_track_player_state() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The gated families (`0x52b650`): SIGNABLE green, UNIQUE before STARTS_QUEST, LOCKED red, six
+/// The gated families (`0x52b650`): SIGNABLE green, UNIQUE before STARTS_QUEST, six
 /// equal resistances as one ALL line (Holy never prints alone), a known taught spell's red
 /// "Already known", the gold description, and no openable line: the openable, readable and creator
 /// tail needs an item object (`0x52e1c7`, `0x52e2e0`), and a template has none.
@@ -144,7 +144,7 @@ fn verified_families_signable_locked_resists_known() {
     s.run(
         r#"
         local a = CreateFrame("Button", "Slot5"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         SetItemByIdForTest(tt, 5518)
     "#,
@@ -159,7 +159,7 @@ fn verified_families_signable_locked_resists_known() {
             "[ITEM_SIGNABLE]",
             "[ITEM_UNIQUE]",
             "[ITEM_STARTS_QUEST]",
-            "[LOCKED]",
+            // No LOCKED: a template source has no item object and no block (`0x52bdb3`..`0x52bdd8`).
             "[RESIST_ALL +5]",
             "[ITEM_SPELL_KNOWN]",
             "\"Sign here.\"",
@@ -168,7 +168,6 @@ fn verified_families_signable_locked_resists_known() {
     );
     let color = |needle: &str| lines.iter().find(|(t, _)| t == needle).unwrap().1;
     let red = [1.0, 32.0 / 255.0, 32.0 / 255.0, 1.0];
-    assert_eq!(color("[LOCKED]"), red, "LOCKED is red");
     assert_eq!(
         color("[ITEM_SPELL_KNOWN]"),
         red,
@@ -256,7 +255,7 @@ fn proficiency_and_reputation_reds() {
     s.run(
         r#"
         local a = CreateFrame("Button", "Slot9"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         SetItemByIdForTest(tt, 871)
     "#,
@@ -397,8 +396,7 @@ fn proficiency_and_reputation_reds() {
         r#"
         TT:SetOwner(Slot9, "ANCHOR_RIGHT"); SetItemByIdForTest(TT, 889)
         assert(TTTextLeft2:GetText() == "[INVTYPE_FINGER]")
-        assert(TTTextRight2:GetText() == nil or TTTextRight2:GetText() == "",
-               "a ring never prints its Miscellaneous type")
+        assert(not TTTextRight2:IsShown(), "a ring never prints its Miscellaneous type")
     "#,
     )
     .unwrap();
@@ -424,7 +422,7 @@ fn required_level_one_is_hidden() {
     s.run(
         r#"
         local a = CreateFrame("Button", "SlotR"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT"); SetItemByIdForTest(tt, 11)
         assert(tt:NumLines() == 1, "req 0: name only, got " .. tt:NumLines())
         tt:SetOwner(a, "ANCHOR_RIGHT"); SetItemByIdForTest(tt, 12)
@@ -501,7 +499,7 @@ fn charter_lines_sit_between_the_name_and_the_signable_line() {
     s.run(
         r#"
         local a = CreateFrame("Button", "SlotC"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetBagItem(0, 1)
     "#,
     )
@@ -582,6 +580,7 @@ fn instance_tail_creator_and_readable() {
             ..Default::default()
         },
     );
+    s.set_lock_rows(HashMap::from([(7, Vec::new())]));
     s.set_item_template(
         2589,
         ItemTemplateView {
@@ -634,7 +633,7 @@ fn instance_tail_creator_and_readable() {
     s.run(
         r#"
         local a = CreateFrame("Button", "SlotL"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetBagItem(0, 1)
     "#,
     )
@@ -692,6 +691,187 @@ fn instance_tail_creator_and_readable() {
     assert!(s.take_errors().is_empty());
 }
 
+/// A wrapped item (`ITEM_FIELD_FLAGS & 0x8`, `0x52b789`) takes the gift arm (`0x52e1b9`): it names
+/// its giver off `ITEM_FIELD_GIFTCREATOR` in white (`0x52e2cb`) and never prints the creator's
+/// line. A giver not yet resolved adds nothing, and an unwrapped item ignores the field.
+#[test]
+fn a_wrapped_item_names_its_giver_and_hides_the_creator_line() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(r#"ITEM_WRAPPED_BY = "[WRAPPED_BY %s]""#).unwrap();
+    s.set_item_template(
+        5042,
+        ItemTemplateView {
+            name: "Gift".into(),
+            quality: 1,
+            ..Default::default()
+        },
+    );
+    let slot = |flags: u32, creator: Option<&str>, gift: Option<&str>| ContainerSlot {
+        item_id: 5042,
+        count: 1,
+        quality: Some(1),
+        creator: creator.map(str::to_string),
+        gift_creator: gift.map(str::to_string),
+        flags,
+        ..Default::default()
+    };
+    let mut slots = HashMap::new();
+    slots.insert(1, slot(0x8, Some("Geoffrey"), Some("Santa"))); // wrapped, giver known
+    slots.insert(2, slot(0x8, Some("Geoffrey"), None)); // wrapped, giver zero or in flight
+    slots.insert(3, slot(0, Some("Geoffrey"), Some("Santa"))); // unwrapped keeps its creator
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 3,
+            slots,
+        }),
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "SlotG"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        TT:SetOwner(a, "ANCHOR_RIGHT"); TT:SetBagItem(0, 1)
+    "#,
+    )
+    .unwrap();
+    let lines = lines_of(&mut s);
+    let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(texts, vec!["Gift", "[WRAPPED_BY Santa]"]);
+    assert_eq!(lines[1].1, [1.0; 4], "ITEM_WRAPPED_BY is white");
+    for (n, want) in [
+        (2, vec!["Gift"]),
+        (3, vec!["Gift", "|cff00ff00[CREATED_BY Geoffrey]|r"]),
+    ] {
+        s.run(&format!(
+            r#"TT:SetOwner(getglobal("SlotG"), "ANCHOR_RIGHT"); TT:SetBagItem(0, {n})"#
+        ))
+        .unwrap();
+        let texts: Vec<String> = lines_of(&mut s).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(texts, want, "slot {n}");
+    }
+
+    // A worn wrapped item reaches the same arm through the doll's view.
+    let mut inv: InventorySlots = Default::default();
+    inv[16] = Some(InvSlotView {
+        item_id: 5042,
+        name: Some("Gift".into()),
+        quality: 1,
+        flags: 0x8,
+        creator: Some("Geoffrey".into()),
+        gift_creator: Some("Santa".into()),
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    s.run(r#"TT:SetOwner(getglobal("SlotG"), "ANCHOR_RIGHT"); TT:SetInventoryItem("player", 16)"#)
+        .unwrap();
+    let texts: Vec<String> = lines_of(&mut s).into_iter().map(|(t, _)| t).collect();
+    assert_eq!(texts, vec!["Gift", "[WRAPPED_BY Santa]"]);
+    assert!(s.take_errors().is_empty());
+}
+
+/// A wrapped gift in a trade names its giver on both sides. The player's slot is a live item
+/// object: its WRAPPED flag takes the gift arm (`0x52b789`) and the object's `ITEM_FIELD_GIFTCREATOR`
+/// names the giver, whether the slot came from a click or from the app. The partner's is a block:
+/// its wrapped word (`0x534559`) takes the same arm and its gift creator (`0x534574`) names the
+/// giver. A block whose wrapped word is clear ignores the giver, and an unresolved one adds nothing.
+#[test]
+fn a_wrapped_gift_in_trade_names_its_giver_on_both_sides() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(r#"ITEM_WRAPPED_BY = "[WRAPPED_BY %s]" ITEM_CREATED_BY = "[CREATED_BY %s]""#)
+        .unwrap();
+    s.set_item_template(
+        5042,
+        ItemTemplateView {
+            name: "Gift".into(),
+            quality: 1,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "SlotT"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+    "#,
+    )
+    .unwrap();
+    let row = |object_flags: Option<u32>, wrapped: bool, gift: Option<&str>| TradeSlotItem {
+        item_id: 5042,
+        name: Some("Gift".into()),
+        count: 1,
+        quality: Some(1),
+        object_flags,
+        wrapped,
+        gift_creator: gift.map(str::to_string),
+        ..Default::default()
+    };
+    let mut st = TradeState::default();
+    st.player.slots[0] = Some(row(Some(0x8), true, Some("Santa")));
+    st.player.slots[1] = Some(row(Some(0), false, Some("Santa")));
+    st.target.slots[0] = Some(row(None, true, Some("Santa")));
+    st.target.slots[1] = Some(row(None, false, Some("Santa")));
+    st.target.slots[2] = Some(row(None, true, None));
+    s.set_trade(Some(st));
+    let texts = |s: &mut UiScript, call: &str| -> Vec<String> {
+        s.run(&format!("TT:SetOwner(SlotT, 'ANCHOR_RIGHT') {call}"))
+            .unwrap();
+        lines_of(s).into_iter().map(|(t, _)| t).collect()
+    };
+    let gift = vec!["Gift".to_string(), "[WRAPPED_BY Santa]".to_string()];
+    assert_eq!(texts(&mut s, "TT:SetTradePlayerItem(1)"), gift, "player");
+    assert_eq!(texts(&mut s, "TT:SetTradeTargetItem(1)"), gift, "target");
+    assert_eq!(
+        texts(&mut s, "TT:SetTradePlayerItem(2)"),
+        vec!["Gift"],
+        "unwrapped"
+    );
+    assert_eq!(
+        texts(&mut s, "TT:SetTradeTargetItem(2)"),
+        vec!["Gift"],
+        "unwrapped block"
+    );
+    assert_eq!(
+        texts(&mut s, "TT:SetTradeTargetItem(3)"),
+        vec!["Gift"],
+        "giver unresolved"
+    );
+
+    // The player's click takes the giver from the bag record it places.
+    s.open_trade_window();
+    s.set_trade(Some(TradeState::default()));
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 1,
+            slots: HashMap::from([(
+                1,
+                ContainerSlot {
+                    item_id: 5042,
+                    guid: 0x5042,
+                    count: 1,
+                    quality: Some(1),
+                    link: Some("|cffffffff|Hitem:5042:0:0:0|h[Gift]|h|r".into()),
+                    creator: Some("Geoffrey".into()),
+                    gift_creator: Some("Santa".into()),
+                    flags: 0x8,
+                    ..Default::default()
+                },
+            )]),
+        }),
+    );
+    s.run("PickupContainerItem(0, 1) ClickTradeButton(1)")
+        .unwrap();
+    assert_eq!(
+        texts(&mut s, "TT:SetTradePlayerItem(1)"),
+        gift,
+        "placed by a click"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
 /// Bonding `[record+0x194]` in 1..5 decides whether a bind line prints; a runtime-bound instance
 /// (`0x5da2c0`: the soulbound flag, or a live enchant slot that binds) prints `ITEM_SOULBOUND`,
 /// or `ITEM_BIND_QUEST` for the quest kinds; else the jump table `0x52e4fc` picks 1 picked up,
@@ -740,7 +920,7 @@ fn a_runtime_bound_instance_overrides_the_bind_line_to_soulbound() {
     s.run(
         r#"
         local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(Slot, "ANCHOR_RIGHT")
         tt:SetBagItem(0, 1)
     "#,
@@ -792,7 +972,7 @@ fn damage_matrix_arms_and_the_first_flag() {
         s.set_item_template(id, v);
         s.run(&format!(
             r#"local a = CreateFrame("Button", "S{id}"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-               if not TT then CreateFrame("GameTooltip", "TT") end
+               if not TT then CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate") end
                TT:SetOwner(S{id}, "ANCHOR_RIGHT"); SetItemByIdForTest(TT, {id})"#
         ))
         .unwrap();
@@ -870,10 +1050,10 @@ fn damage_matrix_arms_and_the_first_flag() {
         !lines.iter().any(|l| l.starts_with("[DPS")),
         "ammo never reaches the DPS line: {lines:?}"
     );
-    let right: String = s
-        .eval("return TTTextRight3:GetText() or ''")
-        .expect("right cell");
-    assert_eq!(right, "", "ammo gets no Speed cell either");
+    // A cell the build did not write is hidden, its old text standing (`0x530050` clears no right
+    // text).
+    let shown: bool = s.eval("return TTTextRight3:IsShown()").expect("right cell");
+    assert!(!shown, "ammo gets no Speed cell either");
     let lines = show(
         &mut s,
         905,
@@ -929,7 +1109,7 @@ fn container_slots_line_names_its_subclass() {
         s.set_item_template(id, v);
         s.run(&format!(
             r#"local a = CreateFrame("Button", "B{id}"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-               if not TT then CreateFrame("GameTooltip", "TT") end
+               if not TT then CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate") end
                TT:SetOwner(B{id}, "ANCHOR_RIGHT"); SetItemByIdForTest(TT, {id})"#
         ))
         .unwrap();

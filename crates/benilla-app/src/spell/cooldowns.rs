@@ -63,15 +63,24 @@ struct Record {
     /// The recovery timers hold their durations but have not started.
     on_hold: bool,
     gcd_category: u32,
-    gcd: Timer,
+    /// The GCD's time; it runs from [`Self::recovery`]'s start, the one `+0x10` start the
+    /// reference's GCD leg reads (`0x6e15d8`), so `SMSG_COOLDOWN_EVENT` restarts it too.
+    gcd: Duration,
 }
 
-/// One action's cooldown read (`GetActionCooldown`): the winning timer's start, duration and
-/// remainder, and `enabled == false` for an on-hold record, which `CooldownFrame_SetTimer`
-/// hides. The start is what `GetCooldownInfo 0x6e13e0` returns, so two arms never alias.
+impl Record {
+    fn gcd_remaining(&self, now: Instant) -> Duration {
+        (self.recovery.start + self.gcd).saturating_duration_since(now)
+    }
+}
+
+/// One action's cooldown read (`GetActionCooldown`): the winning leg's start and duration, the
+/// remainder to the latest end, and `enabled == false` once a parked leg passed, which
+/// `CooldownFrame_SetTimer` hides. The start is what `GetCooldownInfo 0x6e13e0` returns, so two
+/// arms never alias.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CooldownInfo {
-    /// For an on-hold record, when it was inserted.
+    /// A parked leg reports the query's `now`.
     pub start: Instant,
     pub remaining_ms: u32,
     pub duration_ms: u32,
@@ -79,11 +88,16 @@ pub(crate) struct CooldownInfo {
 }
 
 impl CooldownInfo {
-    /// `(start_ms on the GetTime clock, duration_ms, enabled)`, or `None` when cold. `anchor` and
+    /// `(start_ms on the GetTime clock, duration_ms, enabled)`, or `None` when cold. A held read
+    /// (`enabled` false) pushes a start of 0: its start is the query's now (`0x6e1517`,
+    /// `0x6e15a1`), which the Lua bindings answer at call time, so the pushed state never moves. `anchor` and
     /// `ui_now` must be the frame's one clock pair ([`crate::ui_script::UiClock`]), so one arm
     /// derives the same start every frame; a fresh `Instant::now()` here would jitter it.
     pub(crate) fn ui_triple(&self, anchor: Instant, ui_now: f64) -> Option<(i64, u32, bool)> {
         (self.remaining_ms > 0).then(|| {
+            if !self.enabled {
+                return (0, self.duration_ms, false);
+            }
             // Signed both ways: a timer armed after the anchor sample projects forward.
             let start = match self.start.checked_duration_since(anchor) {
                 Some(ahead) => ui_now + ahead.as_secs_f64(),
@@ -137,7 +151,7 @@ impl Cooldowns {
             !r.on_hold
                 && r.recovery.remaining(now).is_zero()
                 && r.category_recovery.remaining(now).is_zero()
-                && r.gcd.remaining(now).is_zero()
+                && r.gcd_remaining(now).is_zero()
         })
     }
 
@@ -159,13 +173,13 @@ impl Cooldowns {
         category_recovery: Timer,
         on_hold: bool,
         gcd_category: u32,
-        gcd: Timer,
+        gcd: Duration,
     ) {
         // The client's early-out when nothing is tracked (`0x6e12c3`).
         if recovery.duration.is_zero()
             && category_recovery.duration.is_zero()
             && !on_hold
-            && gcd.duration.is_zero()
+            && gcd.is_zero()
         {
             return;
         }
@@ -194,7 +208,7 @@ impl Cooldowns {
             r.on_hold
                 || !r.recovery.remaining(now).is_zero()
                 || !r.category_recovery.remaining(now).is_zero()
-                || !r.gcd.remaining(now).is_zero()
+                || !r.gcd_remaining(now).is_zero()
         });
         if self.records.len() != before {
             self.expiry_epoch = self.expiry_epoch.wrapping_add(1);
@@ -242,7 +256,7 @@ impl Cooldowns {
             },
             spell.cooldown_on_event(),
             0,
-            Timer::none(now),
+            Duration::ZERO,
         );
     }
 
@@ -282,7 +296,7 @@ impl Cooldowns {
             },
             spell.is_some_and(|s| s.cooldown_on_event()),
             0,
-            Timer::none(now),
+            Duration::ZERO,
         );
     }
 
@@ -326,10 +340,7 @@ impl Cooldowns {
             Timer::none(now),
             spell.cooldown_on_event(),
             spell.start_recovery_category,
-            Timer {
-                start: now,
-                duration: Duration::from_millis(duration_ms as u64),
-            },
+            Duration::from_millis(duration_ms as u64),
         );
     }
 
@@ -337,10 +348,10 @@ impl Cooldowns {
     pub(crate) fn clear_gcd(&mut self, spell_id: u32, now: Instant) {
         let mut touched = false;
         for r in &mut self.records {
-            if r.spell_id == spell_id && !r.gcd.duration.is_zero() {
+            if r.spell_id == spell_id && !r.gcd.is_zero() {
                 // `0x6e1630` zeroes both the category and the time.
                 r.gcd_category = 0;
-                r.gcd = Timer::none(now);
+                r.gcd = Duration::ZERO;
                 touched = true;
             }
         }
@@ -356,7 +367,8 @@ impl Cooldowns {
         }
     }
 
-    /// `SMSG_COOLDOWN_EVENT` (`0x6e1790`, force 0): an on-hold record's timers start now.
+    /// `SMSG_COOLDOWN_EVENT` (`0x6e1790`, force 0): an on-hold record's recovery and category
+    /// starts become now (`0x6e185a`-`0x6e1863`), and with the recovery start the GCD leg's.
     pub(crate) fn cooldown_event(&mut self, spell_id: u32, now: Instant) {
         let mut touched = false;
         for r in &mut self.records {
@@ -447,10 +459,7 @@ impl Cooldowns {
             },
             on_hold,
             gcd_category,
-            Timer {
-                start: now,
-                duration: Duration::from_millis(u64::from(gcd_ms)),
-            },
+            Duration::from_millis(u64::from(gcd_ms)),
         );
     }
 
@@ -474,7 +483,7 @@ impl Cooldowns {
             Timer::none(now),
             false,
             0,
-            Timer::none(now),
+            Duration::ZERO,
         );
     }
 
@@ -502,7 +511,7 @@ impl Cooldowns {
             },
             false,
             0,
-            Timer::none(now),
+            Duration::ZERO,
         );
     }
 
@@ -537,7 +546,7 @@ impl Cooldowns {
             },
             false,
             0,
-            Timer::none(now),
+            Duration::ZERO,
         );
         self.generation = generation;
     }
@@ -563,23 +572,38 @@ impl Cooldowns {
     /// refused whatever its own `startRecoveryTime`. The caller picks the reason (`0x60952b`):
     /// 0x28 for an item, 0x3c for a spell. Refusing locally matters: the server's NOT_READY
     /// failure would clear the running GCD.
+    /// `item_category` is [`Self::info_item`]'s: the item's own for an item press, else 0.
     pub(crate) fn not_ready(
         &self,
         spell_id: u32,
         item_entry: u32,
+        item_category: u32,
         spell: Option<&SpellDisplay>,
         now: Instant,
     ) -> bool {
-        self.info(spell_id, item_entry, spell, now).remaining_ms > 0
+        self.info_item(spell_id, item_entry, item_category, spell, now)
+            .remaining_ms
+            > 0
     }
 
-    /// `GetCooldownInfo 0x6e13e0`: the longest remainder over every record's three legs.
+    /// `GetCooldownInfo 0x6e13e0`: the latest end over every record's three legs, in list order.
     ///
     /// - `Effect[0]` of ATTACK or TRADE_SKILL always reads cold (`0x6e1439`).
-    /// - Spell leg: id and item match; a parked record reads its full duration, disabled.
-    /// - Category leg: equal category, or any query for a wildcard row; parked likewise.
-    /// - GCD leg (`0x6e15cc`): the node's GCD category equals the query's
-    ///   `startRecoveryCategory` and the node's time is nonzero; it ignores on-hold.
+    /// - A leg passes when its end is not before the best so far (`0x6e14f7`, `0x6e1588`,
+    ///   `0x6e15df`, `js`), so on a tie the later leg writes; it writes its duration and start.
+    /// - Spell leg: id and item match, time or held nonzero (`0x6e14d2`). A parked record ends at
+    ///   its time past `now + 1 ms` and writes a duration of 1 ms and a start of now
+    ///   (`0x6e14ea`, `0x6e1503`, `0x6e1517`).
+    /// - Category leg (`0x6e155a`-`0x6e156d`): equal nonzero category, or any query for a wildcard
+    ///   row, with a category time. A parked record ends at its time past `now`, writes that time
+    ///   and a start of now (`0x6e15a1`).
+    /// - Both legs set `enabled` to "not parked" only while it is still true (`0x6e152d`,
+    ///   `0x6e15b2`): one parked leg that passes disables the read for the rest of the walk.
+    /// - GCD leg (`0x6e15cc`): the node's GCD category equals the query's `startRecoveryCategory`
+    ///   and the node's time is nonzero; it ignores on-hold and never touches `enabled`. It runs
+    ///   from the recovery start (`0x6e15d8`).
+    /// - With an item, the category leg queries the item's own spell-slot category instead of the
+    ///   spell's when that is positive (`0x6e1457`-`0x6e1499`): see [`Self::info_item`].
     pub(crate) fn info(
         &self,
         spell_id: u32,
@@ -587,53 +611,87 @@ impl Cooldowns {
         spell: Option<&SpellDisplay>,
         now: Instant,
     ) -> CooldownInfo {
-        let mut best = CooldownInfo {
+        self.info_item(spell_id, item_entry, 0, spell, now)
+    }
+
+    /// [`Self::info`] for an item's on-use spell: a positive `item_category` (the item's
+    /// `spellcategory` for that spell, `+0x16c` of its slot) replaces the spell's own category in
+    /// the category leg (`0x6e1492`), as Fishliver Oil's 28 replaces the spell's 4. The GCD leg
+    /// keeps the spell's `startRecoveryCategory`. 0 keeps the spell's.
+    pub(crate) fn info_item(
+        &self,
+        spell_id: u32,
+        item_entry: u32,
+        item_category: u32,
+        spell: Option<&SpellDisplay>,
+        now: Instant,
+    ) -> CooldownInfo {
+        let mut out = CooldownInfo {
             start: now,
             remaining_ms: 0,
             duration_ms: 0,
             enabled: true,
         };
         if spell.is_some_and(|s| s.cooldown_query_excluded()) {
-            return best;
+            return out;
         }
-        let category = spell.map_or(0, |s| s.category);
-        let start_recovery_category = spell.map_or(0, |s| s.start_recovery_category);
-        let mut consider = |timer: &Timer, remaining: Duration, enabled: bool| {
-            let remaining_ms = remaining.as_millis().min(u128::from(u32::MAX)) as u32;
-            if remaining_ms > best.remaining_ms {
-                best = CooldownInfo {
-                    start: timer.start,
-                    remaining_ms,
-                    duration_ms: timer.duration.as_millis().min(u128::from(u32::MAX)) as u32,
-                    enabled,
-                };
-            }
+        let category = match item_category {
+            0 => spell.map_or(0, |s| s.category),
+            c => c,
         };
+        let start_recovery_category = spell.map_or(0, |s| s.start_recovery_category);
+        let ms = |d: Duration| d.as_millis().min(u128::from(u32::MAX)) as u32;
+        let mut best_end = now;
+        let mut leg = |end: Instant, start: Instant, duration: Duration| {
+            if end < best_end {
+                return false;
+            }
+            best_end = end;
+            out.start = start;
+            out.duration_ms = ms(duration);
+            true
+        };
+        let mut enabled = true;
         for r in &self.records {
-            if r.spell_id == spell_id && r.item_id == item_entry {
-                if r.on_hold {
-                    // Parked: full duration, disabled (enable 0 hides the sweep).
-                    consider(&r.recovery, r.recovery.duration, false);
+            if r.spell_id == spell_id
+                && r.item_id == item_entry
+                && (!r.recovery.duration.is_zero() || r.on_hold)
+            {
+                let passed = if r.on_hold {
+                    let end = now + r.recovery.duration + Duration::from_millis(1);
+                    leg(end, now, Duration::from_millis(1))
                 } else {
-                    consider(&r.recovery, r.recovery.remaining(now), true);
+                    let end = r.recovery.start + r.recovery.duration;
+                    leg(end, r.recovery.start, r.recovery.duration)
+                };
+                if passed {
+                    enabled &= !r.on_hold;
                 }
             }
-            if (r.category != 0 && r.category == category) || r.category_wildcard {
-                if r.on_hold {
-                    consider(&r.category_recovery, r.category_recovery.duration, false);
+            if ((r.category != 0 && r.category == category) || r.category_wildcard)
+                && !r.category_recovery.duration.is_zero()
+            {
+                let passed = if r.on_hold {
+                    leg(
+                        now + r.category_recovery.duration,
+                        now,
+                        r.category_recovery.duration,
+                    )
                 } else {
-                    consider(
-                        &r.category_recovery,
-                        r.category_recovery.remaining(now),
-                        true,
-                    );
+                    let end = r.category_recovery.start + r.category_recovery.duration;
+                    leg(end, r.category_recovery.start, r.category_recovery.duration)
+                };
+                if passed {
+                    enabled &= !r.on_hold;
                 }
             }
-            if r.gcd_category == start_recovery_category && !r.gcd.duration.is_zero() {
-                consider(&r.gcd, r.gcd.remaining(now), true);
+            if r.gcd_category == start_recovery_category && !r.gcd.is_zero() {
+                leg(r.recovery.start + r.gcd, r.recovery.start, r.gcd);
             }
         }
-        best
+        out.remaining_ms = ms(best_end.saturating_duration_since(now));
+        out.enabled = enabled;
+        out
     }
 }
 
@@ -739,7 +797,7 @@ mod tests {
         assert_eq!(ch.remaining_ms, 0, "no startRecoveryCategory — no GCD read");
 
         // The press gate reads the same getter; `0x6e1690` stays false with nothing parked.
-        assert!(cds.not_ready(133, 0, Some(&fireball()), mid));
+        assert!(cds.not_ready(133, 0, 0, Some(&fireball()), mid));
         assert!(!cds.has_on_hold_record(133, 0, fireball().category));
     }
 
@@ -762,7 +820,7 @@ mod tests {
             "the GO self-insert must not eat the GCD node"
         );
         assert!(
-            cds.not_ready(133, 0, Some(&fireball()), mid),
+            cds.not_ready(133, 0, 0, Some(&fireball()), mid),
             "the local lock holds too"
         );
         // Frost Nova's own button reads the longer, its own cooldown.
@@ -778,12 +836,12 @@ mod tests {
         cds.start_gcd(5384, &fd, t0, &super::SpellModifiers::default());
         cds.start_spell(5384, &fd, 0, t0, None);
         let mid = t0 + Duration::from_millis(100);
-        assert!(cds.not_ready(5384, 0, Some(&fd), mid));
+        assert!(cds.not_ready(5384, 0, 0, Some(&fd), mid));
 
         // The fail path (0x6e1a00): GCD cleared (0x6e1630), the record removed (0x6e3050).
         cds.clear_gcd(5384, mid);
         cds.clear_spell(5384);
-        assert!(!cds.not_ready(5384, 0, Some(&fd), mid));
+        assert!(!cds.not_ready(5384, 0, 0, Some(&fd), mid));
         assert_eq!(cds.info(5384, 0, Some(&fd), mid).remaining_ms, 0);
     }
 
@@ -799,7 +857,7 @@ mod tests {
         let s = cds.info(999, 0, Some(&sibling), mid);
         assert_eq!((s.remaining_ms, s.duration_ms), (10_000, 15_000));
         assert!(
-            cds.not_ready(999, 0, Some(&sibling), mid),
+            cds.not_ready(999, 0, 0, Some(&sibling), mid),
             "category lock is a not-ready"
         );
         // An unrelated spell reads nothing.
@@ -814,14 +872,14 @@ mod tests {
         let fd = spell(0, 30_000, 0, (0, 0), 0x0200_0000);
         cds.start_spell(5384, &fd, 0, t0, None);
 
-        // Parked: full duration, disabled, and still not ready.
+        // Parked: the 30 s past now + 1 ms (`0x6e14ea`), disabled, and still not ready.
         let parked = cds.info(5384, 0, Some(&fd), t0 + Duration::from_secs(60));
         assert_eq!(
             (parked.remaining_ms, parked.enabled),
-            (30_000, false),
+            (30_001, false),
             "an on-hold record never elapses on its own"
         );
-        assert!(cds.not_ready(5384, 0, Some(&fd), t0 + Duration::from_secs(60)));
+        assert!(cds.not_ready(5384, 0, 0, Some(&fd), t0 + Duration::from_secs(60)));
         assert!(
             cds.has_on_hold_record(5384, 0, fd.category),
             "the corrected 0x6e1690: an on-hold record — the usable walk's grey-while-parked"
@@ -835,6 +893,160 @@ mod tests {
             (running.remaining_ms, running.duration_ms, running.enabled),
             (20_000, 30_000, true)
         );
+    }
+
+    /// Stealth-shaped: 10 s recovery, GCD category 133 for 1 s, `SPELL_ATTR_COOLDOWN_ON_EVENT`.
+    fn stealth() -> SpellDisplay {
+        spell(0, 10_000, 0, (133, 1_000), 0x0200_0000)
+    }
+
+    /// `0x6e1503`, `0x6e1517`: a parked spell leg writes a duration of 1 ms and the query's now,
+    /// not the record's recovery and insert time.
+    #[test]
+    fn a_parked_spell_leg_reads_one_ms_from_now() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        cds.start_spell(1784, &stealth(), 0, t0, None);
+
+        let now = t0 + Duration::from_secs(7);
+        let info = cds.info(1784, 0, Some(&stealth()), now);
+        assert_eq!(
+            (info.start, info.duration_ms, info.enabled),
+            (now, 1, false),
+            "(now, 0.001, 0), where the old read gave (insert time, 10, 0)"
+        );
+        assert_eq!(info.remaining_ms, 10_001, "the end is time + now + 1 ms");
+        let (start, duration, enabled) = info.ui_triple(now, 42.0).unwrap();
+        assert_eq!(
+            (start, duration, enabled),
+            (0, 1, false),
+            "a held read pushes the marker, not a moving start"
+        );
+    }
+
+    /// `0x6e15a1`: a parked category leg keeps the category time as the duration and reads a
+    /// start of now.
+    #[test]
+    fn a_parked_category_leg_reads_its_time_from_now() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        // Recovery 0, category 12 for 5 s, parked.
+        let parked = spell(12, 0, 5_000, (0, 0), 0x0200_0000);
+        cds.start_spell(900, &parked, 0, t0, None);
+
+        let now = t0 + Duration::from_secs(3);
+        let sibling = spell(12, 0, 0, (0, 0), 0);
+        let info = cds.info(901, 0, Some(&sibling), now);
+        assert_eq!(
+            (
+                info.start,
+                info.duration_ms,
+                info.remaining_ms,
+                info.enabled
+            ),
+            (now, 5_000, 5_000, false)
+        );
+    }
+
+    /// `0x6e152d`, `0x6e15b2`: once a parked leg that passed has set enable to 0 a later leg that
+    /// is not parked leaves it 0; in the other order the parked leg that ends earlier does not
+    /// pass, so the read stays enabled.
+    #[test]
+    fn a_disabled_read_stays_disabled_whatever_leg_follows() {
+        let t0 = Instant::now();
+        let plain = |recovery| spell(0, recovery, 0, (0, 0), 0);
+        let held = |recovery| spell(0, recovery, 0, (0, 0), 0x0200_0000);
+
+        let mut cds = Cooldowns::default();
+        cds.start_spell(77, &held(5_000), 0, t0, None);
+        cds.start_spell(77, &plain(60_000), 0, t0, None);
+        let info = cds.info(77, 0, Some(&plain(0)), t0);
+        assert_eq!((info.remaining_ms, info.duration_ms), (60_000, 60_000));
+        assert!(!info.enabled, "the later unparked leg does not re-enable");
+
+        let mut cds = Cooldowns::default();
+        cds.start_spell(77, &plain(60_000), 0, t0, None);
+        cds.start_spell(77, &held(5_000), 0, t0, None);
+        let info = cds.info(77, 0, Some(&plain(0)), t0);
+        assert_eq!((info.remaining_ms, info.duration_ms), (60_000, 60_000));
+        assert!(
+            info.enabled,
+            "5 s parked ends before the 60 s: it does not pass"
+        );
+    }
+
+    /// A held read's start is the query's now, which moves with it; the triple a feed pushes is
+    /// the held marker, so it does not move and the feeds see no change.
+    #[test]
+    fn a_held_triple_is_the_same_whatever_the_query_time() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        cds.start_spell(1784, &stealth(), 0, t0, None);
+        let at = |ms: u64| {
+            cds.info(1784, 0, Some(&stealth()), t0 + Duration::from_millis(ms))
+                .ui_triple(t0, 7.0)
+        };
+        assert_ne!(
+            cds.info(1784, 0, Some(&stealth()), t0).start,
+            cds.info(1784, 0, Some(&stealth()), t0 + Duration::from_millis(20))
+                .start,
+            "the read's own start moves"
+        );
+        assert_eq!(at(0), at(20));
+        assert_eq!(at(0), Some((0, 1, false)));
+    }
+
+    /// A parked record with no recovery (Shadowform) still passes the spell leg (`0x6e14d9`): the
+    /// read is not cold and a press is refused.
+    #[test]
+    fn a_parked_record_with_no_recovery_still_reads() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        let form = spell(0, 0, 0, (133, 1_500), 0x0200_0000);
+        cds.start_spell(15473, &form, 0, t0, None);
+
+        let info = cds.info(15473, 0, Some(&form), t0);
+        assert_eq!(
+            (
+                info.start,
+                info.duration_ms,
+                info.remaining_ms,
+                info.enabled
+            ),
+            (t0, 1, 1, false)
+        );
+        assert!(cds.not_ready(15473, 0, 0, Some(&form), t0));
+    }
+
+    /// `0x6e185a`-`0x6e1863`, `0x6e15d8`: the event moves the one start the GCD leg reads, so the
+    /// global cooldown runs again from the event.
+    #[test]
+    fn a_cooldown_event_restarts_the_gcd_from_the_event() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        let mods = SpellModifiers::default();
+        let form = spell(0, 0, 0, (133, 1_500), 0x0200_0000);
+        cds.start_gcd(15473, &form, t0, &mods);
+        cds.start_spell(15473, &form, 0, t0, None);
+
+        let event_at = t0 + Duration::from_secs(60);
+        cds.cooldown_event(15473, event_at);
+
+        let now = event_at + Duration::from_millis(500);
+        let info = cds.info(15473, 0, Some(&form), now);
+        assert_eq!(
+            (
+                info.start,
+                info.duration_ms,
+                info.remaining_ms,
+                info.enabled
+            ),
+            (event_at, 1_500, 1_000, true)
+        );
+        // A sibling of the GCD category reads the same run.
+        let sibling = spell(0, 0, 0, (133, 1_500), 0);
+        assert_eq!(cds.info(133, 0, Some(&sibling), now).remaining_ms, 1_000);
+        assert!(cds.not_ready(133, 0, 0, Some(&sibling), now));
     }
 
     #[test]
@@ -935,6 +1147,44 @@ mod tests {
         // So does any other category-4 potion.
         let other = cds.info(440, 929, Some(&potion_spell), mid);
         assert_eq!(other.remaining_ms, 45_000);
+    }
+
+    /// `0x6e1457`-`0x6e1499`: with an item, the category leg queries the item's own category for
+    /// the spell (Fishliver Oil: spell category 4, item category 28), so the oil's record reaches
+    /// a sibling of category 28 and no longer a bare category-4 spell.
+    #[test]
+    fn an_item_query_uses_the_items_category_override() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        let oil_spell = spell(4, 0, 0, (0, 0), 0);
+        let oil = ItemUseSpell {
+            spell_id: 1322,
+            cooldown_ms: 0,
+            category: 28,
+            category_cooldown_ms: 20_000,
+        };
+        cds.start_item(1322, &oil, Some(&oil_spell), t0);
+        let mid = t0 + Duration::from_secs(5);
+
+        // The oil's own query, and a second item of category 28 over the same spell.
+        let own = cds.info_item(1322, 1322, 28, Some(&oil_spell), mid);
+        assert_eq!((own.remaining_ms, own.duration_ms), (15_000, 20_000));
+        assert!(cds.not_ready(1322, 1322, 28, Some(&oil_spell), mid));
+        // Another item whose slot carries category 28 reads the oil's category timer; the spell's
+        // own category 4 does not match the record's 28.
+        let other = cds.info_item(1322, 4096, 28, Some(&oil_spell), mid);
+        assert_eq!(other.remaining_ms, 15_000);
+        let by_spell = cds.info(1322, 4096, Some(&oil_spell), mid);
+        assert_eq!(
+            by_spell.remaining_ms, 0,
+            "the spell's category 4 is not the record's 28"
+        );
+        // No override keeps the spell's category: a category-4 record reaches it.
+        cds.start_spell(77, &spell(4, 0, 9_000, (0, 0), 0), 0, t0, None);
+        assert_eq!(
+            cds.info(1322, 4096, Some(&oil_spell), mid).remaining_ms,
+            4_000
+        );
     }
 
     #[test]
@@ -1189,24 +1439,30 @@ mod tests {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
         assert!(
-            !cds.not_ready(133, 0, Some(&fireball()), t0),
+            !cds.not_ready(133, 0, 0, Some(&fireball()), t0),
             "no GCD running — nothing locks"
         );
 
         cds.start_gcd(772, &fireball(), t0, &super::SpellModifiers::default());
         let mid = t0 + Duration::from_millis(200);
         assert!(
-            cds.not_ready(133, 0, Some(&fireball()), mid),
+            cds.not_ready(133, 0, 0, Some(&fireball()), mid),
             "the spam press 200 ms later is locked — refused, never sent, the GCD lives"
         );
         // Scroll of Armor's shape.
         let scroll = spell(0, 0, 0, (133, 0), 0x10000);
         assert!(
-            cds.not_ready(8091, 0, Some(&scroll), mid),
+            cds.not_ready(8091, 0, 0, Some(&scroll), mid),
             "a zero-GCD press in the shared category is locked on the reference"
         );
-        assert!(!cds.not_ready(100, 0, Some(&charge()), mid));
-        assert!(!cds.not_ready(133, 0, Some(&fireball()), t0 + Duration::from_millis(1_501)));
+        assert!(!cds.not_ready(100, 0, 0, Some(&charge()), mid));
+        assert!(!cds.not_ready(
+            133,
+            0,
+            0,
+            Some(&fireball()),
+            t0 + Duration::from_millis(1_501)
+        ));
     }
 
     /// The getter's exclusion (`0x6e1439`, `0x6e1442`).
@@ -1222,7 +1478,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cds.info(6603, 0, Some(&attack), mid).remaining_ms, 0);
-        assert!(!cds.not_ready(6603, 0, Some(&attack), mid));
+        assert!(!cds.not_ready(6603, 0, 0, Some(&attack), mid));
     }
 
     /// The wildcard leg (`0x6e1563`): wand Shoot's category 351 sweeps every button.
@@ -1242,8 +1498,14 @@ mod tests {
         // Unrelated Fireball reads the wand swing and is not ready for its duration.
         let fb = cds.info(133, 0, Some(&fireball()), mid);
         assert_eq!((fb.remaining_ms, fb.duration_ms), (1000, 1500));
-        assert!(cds.not_ready(133, 0, Some(&fireball()), mid));
-        assert!(!cds.not_ready(133, 0, Some(&fireball()), t0 + Duration::from_millis(1_501)));
+        assert!(cds.not_ready(133, 0, 0, Some(&fireball()), mid));
+        assert!(!cds.not_ready(
+            133,
+            0,
+            0,
+            Some(&fireball()),
+            t0 + Duration::from_millis(1_501)
+        ));
     }
 
     #[test]
@@ -1275,9 +1537,9 @@ mod tests {
         assert_eq!(info.duration_ms, 2200, "the sweep is the weapon speed");
         assert_eq!(info.remaining_ms, 1200);
         assert!(info.enabled, "running, not parked");
-        assert!(cds.not_ready(2764, 0, Some(&throw), mid));
+        assert!(cds.not_ready(2764, 0, 0, Some(&throw), mid));
         assert!(
-            !cds.not_ready(2764, 0, Some(&throw), t0 + Duration::from_millis(2300)),
+            !cds.not_ready(2764, 0, 0, Some(&throw), t0 + Duration::from_millis(2300)),
             "free again after the weapon speed elapses"
         );
     }
@@ -1296,7 +1558,7 @@ mod tests {
             "no sweep for a category-0 record"
         );
         assert!(
-            !cds.not_ready(75, 0, Some(&auto_shot), mid),
+            !cds.not_ready(75, 0, 0, Some(&auto_shot), mid),
             "no local refusal either"
         );
     }

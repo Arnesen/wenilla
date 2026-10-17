@@ -11,6 +11,14 @@
 //! stores `standing - BaseRep` (`ReputationMgr.cpp:261`) and reports the sum
 //! (`ReputationMgr.cpp:82`). The rank is [`benilla_formats::reputation_rank`], shared with the
 //! unit-reaction decode, which caps it at 6, Revered (`0x606439`); the pane shows it uncapped.
+//!
+//! The chat line "You are now <rank> with <faction>." (`FACTION_STANDING_CHANGED`, `0x62c670`) is
+//! owed by three events: a faction newly listed by `SMSG_SET_FACTION_VISIBLE` (`0x4d5733`), a
+//! faction listed by the first `SMSG_SET_FACTION_STANDING` that names it (`0x4d5826`), and a
+//! standing change that moves the rank (`0x4d5896`) unless the faction is `HIDDEN`. The wire
+//! handlers decide the lines ([`visible_line`], [`delta_lines`]) and park them in the chat log in
+//! wire order ([`queue_standing_lines`]); the chat feed resolves their strings against the VM,
+//! which the wire drain cannot reach.
 
 use bevy::prelude::*;
 
@@ -18,6 +26,7 @@ use benilla_ui::script::{FactionEntry, ReputationSend, ReputationState, UiScript
 
 use crate::net::{ClientCommand, NetCommands, ObjectStore, Reputations, SelfPlayer};
 use crate::target::Factions;
+use crate::ui_chat::ChatLog;
 use crate::ui_script::{UiFeed, UiInput};
 
 /// Rank `r` spans `RANK_BOUNDS[r]..RANK_BOUNDS[r + 1]`, the client's table at `0x80928c`: vmangos's
@@ -33,11 +42,157 @@ impl Plugin for UiReputationPlugin {
         app.add_systems(
             Update,
             (
-                feed_reputation.in_set(UiFeed),
+                feed_reputation
+                    .in_set(UiFeed)
+                    .in_set(crate::ui_unit::field_events::FieldEventPushes),
                 drain_reputation_sends.after(UiInput),
             ),
         );
     }
+}
+
+/// One `FACTION_STANDING_CHANGED` line owed: the faction and the rank it names (`0x62c670`'s
+/// `ecx` and `edx`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StandingLine {
+    pub(crate) faction_id: u32,
+    /// The rank, 0 Hated to 7 Exalted; the label is `FACTION_STANDING_LABEL<rank + 1>`.
+    pub(crate) rank: u8,
+}
+
+/// The faction a wire slot names, with its row, when the player's race and class list it.
+fn faction_of_slot(
+    catalog: &benilla_formats::FactionCatalog,
+    list_id: u32,
+    race: u8,
+    class: u8,
+) -> Option<(u32, &benilla_formats::FactionInfo)> {
+    let index = i32::try_from(list_id).ok()?;
+    let (id, info) = catalog
+        .reputation_factions()
+        .find(|(_, f)| f.rep_index == index)?;
+    info.slot_for(race, class)?;
+    Some((id, info))
+}
+
+/// `SMSG_SET_FACTION_VISIBLE` (`0x4d5710`): a slot not yet `VISIBLE` is listed by `0x4d5a70` with
+/// the print flag set, which names its rank (`0x4d5bfb`); one already `VISIBLE` returns at
+/// `0x4d5731` and prints nothing. `store` is the state before the packet applies. A header slot
+/// that a listed child already put in the client's list is a dedup there (`0x4d5a93`); vmangos
+/// never sends one (`ReputationMgr.cpp:177`, `SetVisible` refuses flag `0x08`), so it is not
+/// modelled.
+pub(crate) fn visible_line(
+    list_id: u32,
+    store: &Reputations,
+    catalog: &benilla_formats::FactionCatalog,
+    race: u8,
+    class: u8,
+) -> Option<StandingLine> {
+    use benilla_formats::faction_flags as flag;
+    let (flags, wire) = store.slots.get(list_id as usize).copied().unwrap_or((0, 0));
+    if flags & flag::VISIBLE != 0 {
+        return None;
+    }
+    let (faction_id, info) = faction_of_slot(catalog, list_id, race, class)?;
+    Some(StandingLine {
+        faction_id,
+        rank: benilla_formats::reputation_rank(info.base_for(race, class) + wire),
+    })
+}
+
+/// `SMSG_SET_FACTION_STANDING` (`0x4d5760`), per entry against the state before it applies. A
+/// slot neither `VISIBLE` nor `HIDDEN` is listed first (`0x4d5815`-`0x4d5826`) and that print is
+/// the entry's only line (`0x4d588b`); otherwise a changed rank prints unless the slot is `HIDDEN`
+/// (`0x4d5880`-`0x4d5896`). Both name the rank after the new standing.
+pub(crate) fn delta_lines(
+    deltas: &[(u32, i32)],
+    store: &Reputations,
+    catalog: &benilla_formats::FactionCatalog,
+    race: u8,
+    class: u8,
+) -> Vec<StandingLine> {
+    use benilla_formats::faction_flags as flag;
+    let mut lines = Vec::new();
+    for &(list_id, standing) in deltas {
+        let Some((faction_id, info)) = faction_of_slot(catalog, list_id, race, class) else {
+            continue;
+        };
+        let base = info.base_for(race, class);
+        let (flags, old) = store.slots.get(list_id as usize).copied().unwrap_or((0, 0));
+        let (old_rank, rank) = (
+            benilla_formats::reputation_rank(base + old),
+            benilla_formats::reputation_rank(base + standing),
+        );
+        let listed_now = flags & (flag::VISIBLE | flag::HIDDEN) == 0;
+        let moved = rank != old_rank && flags & flag::HIDDEN == 0;
+        if listed_now || moved {
+            lines.push(StandingLine { faction_id, rank });
+        }
+    }
+    lines
+}
+
+/// Whether `SMSG_SET_FACTION_STANDING` moves any faction's rank (`0x4d5880`), `HIDDEN` or not,
+/// which the handler answers with one `0x4de510(0)` after its entries (`0x4d58ea`-`0x4d58f3`).
+pub(crate) fn rank_moved(
+    deltas: &[(u32, i32)],
+    store: &Reputations,
+    catalog: &benilla_formats::FactionCatalog,
+    race: u8,
+    class: u8,
+) -> bool {
+    deltas.iter().any(|&(list_id, standing)| {
+        faction_of_slot(catalog, list_id, race, class).is_some_and(|(_, info)| {
+            let base = info.base_for(race, class);
+            let old = store.slots.get(list_id as usize).map_or(0, |&(_, s)| s);
+            benilla_formats::reputation_rank(base + old)
+                != benilla_formats::reputation_rank(base + standing)
+        })
+    })
+}
+
+/// Park the lines in the chat log, after whatever the same packet already queued. The faction's
+/// name is the row's (`0x62c670` reads the name column), and `female` picks the label's gender.
+pub(crate) fn queue_standing_lines(
+    lines: impl IntoIterator<Item = StandingLine>,
+    catalog: &benilla_formats::FactionCatalog,
+    female: bool,
+    chat: &mut ChatLog,
+) {
+    for StandingLine { faction_id, rank } in lines {
+        if let Some(name) = catalog.faction_name(faction_id) {
+            chat.push_standing(name, rank, female);
+        }
+    }
+}
+
+/// `0x62c670`'s sentence: `FACTION_STANDING_CHANGED` filled with the rank label and the faction
+/// name. The label is `FACTION_STANDING_LABEL<rank + 1>` gendered by `0x612bf0`: a female player
+/// tries the `_FEMALE` twin and, when that is absent or empty, the bare key (`0x612c36`). A label
+/// absent altogether is an empty string, not a missing line: `0x703bf0` never returns NULL, and
+/// `0x62c670` prints with whatever it gave. Only a missing template prints nothing here, where the
+/// reference would send an empty string to the chat composer.
+pub(crate) fn standing_text(
+    get: &dyn Fn(&str) -> Option<String>,
+    rank: u8,
+    female: bool,
+    faction_name: &str,
+) -> Option<String> {
+    let key = format!("FACTION_STANDING_LABEL{}", rank.min(7) + 1);
+    let defined = |k: &str| get(k).filter(|v| !v.is_empty());
+    let label = female
+        .then(|| defined(&format!("{key}_FEMALE")))
+        .flatten()
+        .or_else(|| defined(&key))
+        .unwrap_or_default();
+    let template = defined("FACTION_STANDING_CHANGED")?;
+    Some(benilla_ui::strings::fill(
+        &template,
+        &[
+            benilla_ui::strings::Arg::S(&label),
+            benilla_ui::strings::Arg::S(faction_name),
+        ],
+    ))
 }
 
 /// One faction's row, or `None` when it is not in the player's list at all; a row the pane does
@@ -85,7 +240,7 @@ type ReputationInputs = Option<(u8, u8, Option<u32>)>;
 /// descriptions) runs only when the wire slots, the catalog, race/class or the watched index
 /// move, and the equality check behind it keeps a change to no listed row quiet. The first push
 /// fires too: the stock watch bar initializes off `UPDATE_FACTION` at login.
-fn feed_reputation(
+pub(crate) fn feed_reputation(
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     reputations: Res<Reputations>,
@@ -120,13 +275,14 @@ fn feed_reputation(
         return;
     }
     *last_inputs = Some(inputs);
+    script.set_faction_standings(faction_standings(catalog, &reputations, race, class));
 
     let mut entries = Vec::new();
     for (faction_id, info) in catalog.reputation_factions() {
         // An uncovered slot reads `(0, 0)`, unmet, and its row stays: a header's name rides on it.
         let (flags, wire) = usize::try_from(info.rep_index)
             .ok()
-            .and_then(|i| reputations.0.get(i))
+            .and_then(|i| reputations.slots.get(i))
             .copied()
             .unwrap_or((0, 0));
         if let Some(row) = reputation_row(faction_id, info, catalog, flags, wire, race, class) {
@@ -140,9 +296,45 @@ fn feed_reputation(
     if last.as_ref() == Some(&fresh) {
         return;
     }
+    let bare = faction_fires(last.as_ref(), &fresh);
     script.set_reputation(fresh.clone());
     *last = Some(fresh);
-    script.fire_event("UPDATE_FACTION", vec![]);
+    for _ in 0..bare {
+        script.fire_event("UPDATE_FACTION", vec![]);
+    }
+}
+
+/// Every faction with a reputation index under 64 (`0x4d6379`) at the base for `race`/`class` plus
+/// its wire slot (`0x4d6370`). The base table is zeroed at login (`0x4d5426`) and written only
+/// for a fitting column (`0x4d553c`), so a faction the pane does not list still has its wire
+/// standing here.
+pub(crate) fn faction_standings(
+    catalog: &benilla_formats::FactionCatalog,
+    reputations: &Reputations,
+    race: u8,
+    class: u8,
+) -> std::collections::HashMap<u32, i32> {
+    catalog
+        .reputation_factions()
+        .filter_map(|(faction_id, info)| {
+            let index = usize::try_from(info.rep_index).ok().filter(|&i| i < 64)?;
+            let wire = reputations.slots.get(index).map_or(0, |&(_, w)| w);
+            Some((faction_id, info.base_for(race, class) + wire))
+        })
+        .collect()
+}
+
+/// How many bare `UPDATE_FACTION` signals a transition makes. The standing, flag and rebuild
+/// producers (`0x4d569e`, `0x4d56f6`, `0x4d5984`, `0x4d5db0`) signal bare through `0x703e50`; a
+/// first push is the initialize message, which signals twice: the rebuild `0x4d5430` calls the
+/// sorter `0x4d5c40` (`0x4d55de`), which ends in a bare signal (`0x4d5db0`), and the message ends
+/// in another (`0x4d569e`). The watched index is pushed here and signals `("player")` from its
+/// own field watch (`0x5ddcce`, [`crate::field_watch`]), never from this diff.
+fn faction_fires(prev: Option<&ReputationState>, fresh: &ReputationState) -> usize {
+    match prev {
+        None => 2,
+        Some(p) => usize::from(p.entries != fresh.entries),
+    }
 }
 
 /// Send the pane's queued verbs; none is acked, and the engine already holds its own copy.
@@ -180,6 +372,105 @@ fn drain_reputation_sends(script: Option<NonSendMut<UiScript>>, commands: Res<Ne
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A live feed over an empty catalog: the first push is the initialize message's two bare
+    /// signals, and a watched-index change is pushed with no signal, its watch's to fire.
+    #[test]
+    fn the_list_signals_bare_and_the_watched_index_is_pushed_silently() {
+        use benilla_formats::FactionCatalog;
+        const FIELD_WATCHED: u16 = 1261;
+        let mut app = App::new();
+        app.init_resource::<Reputations>()
+            .insert_resource(Factions::from_catalog(FactionCatalog::from_rows(
+                Default::default(),
+                Default::default(),
+            )))
+            .add_systems(Update, feed_reputation);
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UPDATE_FACTION")
+                f:SetScript("OnEvent", function()
+                    table.insert(SEEN, event .. " " .. tostring(arg1))
+                end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                    FIELD_WATCHED,
+                    u32::MAX,
+                )])),
+            ))
+            .id();
+        let seen = |app: &mut App| {
+            app.update();
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.resolve();
+            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            out
+        };
+        assert_eq!(
+            seen(&mut app),
+            vec!["UPDATE_FACTION nil"; 2],
+            "initialize: the sorter's signal and the message's"
+        );
+        assert!(seen(&mut app).is_empty());
+        *app.world_mut().get_mut::<ObjectStore>(me).unwrap() = ObjectStore(
+            benilla_protocol::ObjectFields::from_pairs(&[(FIELD_WATCHED, 3)]),
+        );
+        assert!(seen(&mut app).is_empty());
+    }
+
+    /// The list's bare signals: two for the initialize message, one per list change, none for the
+    /// watched index alone.
+    #[test]
+    fn the_list_and_the_watched_index_are_two_producers() {
+        let entry = |id: u32| FactionEntry {
+            faction_id: id,
+            rep_list_id: id,
+            parent_id: 0,
+            name: String::new(),
+            description: String::new(),
+            standing: 0,
+            standing_id: 4,
+            bar_min: 0,
+            bar_max: 3000,
+            visible: true,
+            is_header: false,
+            at_war: false,
+            can_toggle_at_war: true,
+            inactive: false,
+        };
+        let base = ReputationState {
+            entries: vec![entry(1)],
+            watched: None,
+        };
+        assert_eq!(faction_fires(None, &base), 2);
+        let watched = ReputationState {
+            watched: Some(3),
+            ..base.clone()
+        };
+        assert_eq!(faction_fires(Some(&base), &watched), 0);
+        let listed = ReputationState {
+            entries: vec![entry(1), entry(2)],
+            ..base.clone()
+        };
+        assert_eq!(faction_fires(Some(&base), &listed), 1);
+        let both = ReputationState {
+            entries: vec![entry(2)],
+            watched: Some(1),
+        };
+        assert_eq!(faction_fires(Some(&base), &both), 1);
+    }
 
     /// The pane's bar reads [`RANK_BOUNDS`], the nameplate the rank function: they must agree.
     #[test]
@@ -351,6 +642,198 @@ mod tests {
             })
             .count();
         assert_eq!(visible_parents, 1, "only Alliance carries VISIBLE as well");
+    }
+
+    /// A human druid has no Cenarion Circle column (609, `0x4d5555`): the pane lists no row, and
+    /// the turn-in test still reads the wire standing on a base of 0 (`0x4d553c`). Skips without
+    /// client data.
+    #[test]
+    fn real_a_faction_with_no_fitting_column_stands_at_its_wire_standing() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let cat = benilla_formats::load_faction_catalog(&mut chain).expect("factions");
+        let cc = cat.reputation_faction(609).expect("Cenarion Circle");
+        let index = usize::try_from(cc.rep_index).unwrap();
+        let mut slots = vec![(0u8, 0i32); 64];
+        slots[index] = (0, 500);
+        let reps = Reputations::from_slots(slots);
+        assert!(reputation_row(609, cc, &cat, 0, 500, 1, 11).is_none());
+        let human_druid = faction_standings(&cat, &reps, 1, 11);
+        assert_eq!(human_druid.get(&609), Some(&500));
+        // A Night Elf druid's column is 2000.
+        assert_eq!(faction_standings(&cat, &reps, 4, 11).get(&609), Some(&2500));
+        assert_eq!(
+            human_druid.get(&72),
+            Some(&4000),
+            "Stormwind, a listed faction"
+        );
+    }
+
+    /// A human warrior (race 1, class 1) and Stormwind's slot on the real DBC: base 4000, Friendly.
+    fn stormwind() -> Option<(benilla_formats::FactionCatalog, u32)> {
+        let data = benilla_formats::wow_data_or_skip!(None);
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let cat = benilla_formats::load_faction_catalog(&mut chain).expect("factions");
+        let slot = u32::try_from(cat.reputation_faction(72).expect("Stormwind").rep_index).unwrap();
+        Some((cat, slot))
+    }
+
+    fn store(slot: u32, flags: u8, standing: i32) -> Reputations {
+        let mut v = vec![(0u8, 0i32); slot as usize + 1];
+        v[slot as usize] = (flags, standing);
+        Reputations::from_slots(v)
+    }
+
+    /// `0x4d5731` gates the list on `VISIBLE`: an unmet faction prints its rank (base 4000 is
+    /// Friendly, rank 4), one already listed prints nothing (the dedup return).
+    #[test]
+    fn a_newly_listed_faction_names_its_rank_and_a_listed_one_does_not() {
+        use benilla_formats::faction_flags as flag;
+        let Some((cat, slot)) = stormwind() else {
+            return;
+        };
+        assert_eq!(
+            visible_line(slot, &store(slot, 0, 0), &cat, 1, 1),
+            Some(StandingLine {
+                faction_id: 72,
+                rank: 4
+            })
+        );
+        // An empty store is the same first contact: the slot reads (0, 0).
+        assert!(visible_line(slot, &Reputations::default(), &cat, 1, 1).is_some());
+        assert_eq!(
+            visible_line(slot, &store(slot, flag::VISIBLE, 0), &cat, 1, 1),
+            None,
+            "already listed"
+        );
+        // The wire standing rides on the base: 5000 more is 9000, Honored.
+        assert_eq!(
+            visible_line(slot, &store(slot, 0, 5000), &cat, 1, 1).map(|l| l.rank),
+            Some(5)
+        );
+        // A slot the player's race and class do not list, or no faction names: nothing.
+        assert_eq!(visible_line(63, &Reputations::default(), &cat, 1, 1), None);
+    }
+
+    /// `0x4d5880`: any entry whose rank moves owes the quest log's `0x4de510(0)`, `HIDDEN` or not
+    /// listed alike; a move inside a rank owes nothing.
+    #[test]
+    fn a_rank_move_in_any_entry_owes_the_quest_log_its_update() {
+        use benilla_formats::faction_flags as flag;
+        let Some((cat, slot)) = stormwind() else {
+            return;
+        };
+        let moved = |flags: u8, old: i32, new: i32| {
+            rank_moved(
+                &[(63, 1), (slot, new)],
+                &store(slot, flags, old),
+                &cat,
+                1,
+                1,
+            )
+        };
+        assert!(moved(flag::VISIBLE, 0, 5000));
+        assert!(moved(flag::VISIBLE | flag::HIDDEN, 0, 5000));
+        assert!(moved(0, 0, -1001));
+        assert!(!moved(flag::VISIBLE, 0, 100));
+    }
+
+    /// `0x4d5760`: a rank change prints the new rank, an unchanged rank prints nothing, `HIDDEN`
+    /// silences a change, and a faction listed by this very entry prints once whatever it moved.
+    #[test]
+    fn a_standing_delta_prints_a_rank_change_and_a_first_listing_once() {
+        use benilla_formats::faction_flags as flag;
+        let Some((cat, slot)) = stormwind() else {
+            return;
+        };
+        let lines = |flags: u8, old: i32, new: i32| {
+            delta_lines(&[(slot, new)], &store(slot, flags, old), &cat, 1, 1)
+        };
+        let rank = |r: u8| {
+            vec![StandingLine {
+                faction_id: 72,
+                rank: r,
+            }]
+        };
+        // 4000 → 9000 crosses into Honored.
+        assert_eq!(lines(flag::VISIBLE, 0, 5000), rank(5));
+        // 4000 → 4100 stays Friendly; no line.
+        assert!(lines(flag::VISIBLE, 0, 100).is_empty());
+        // Down a rank is a change too.
+        assert_eq!(lines(flag::VISIBLE, 0, -1001), rank(3));
+        // HIDDEN keeps the gain off the screen (`0x4d5885`).
+        assert!(lines(flag::VISIBLE | flag::HIDDEN, 0, 5000).is_empty());
+        // Not yet listed: the reveal prints, with no second line for the rank it moved.
+        assert_eq!(lines(0, 0, 100), rank(4));
+        assert_eq!(lines(0, 0, 5000), rank(5));
+        // Several entries print one line each, in order.
+        let two = delta_lines(
+            &[(slot, 5000), (63, 1)],
+            &store(slot, flag::VISIBLE, 0),
+            &cat,
+            1,
+            1,
+        );
+        assert_eq!(two, rank(5), "the unnamed slot prints nothing");
+    }
+
+    /// `0x62c670`: `FACTION_STANDING_CHANGED` filled with the label and the name; a female player
+    /// takes the `_FEMALE` label where there is one; a missing label or template prints nothing.
+    #[test]
+    fn the_sentence_is_the_template_with_the_gendered_label_and_the_name() {
+        let strings = [
+            ("FACTION_STANDING_CHANGED", "You are now %s with %s."),
+            ("FACTION_STANDING_LABEL5", "Friendly"),
+            ("FACTION_STANDING_LABEL6", "Honored"),
+            ("FACTION_STANDING_LABEL6_FEMALE", "Honoured (f)"),
+        ];
+        let get = |k: &str| {
+            strings
+                .iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, v)| v.to_string())
+        };
+        assert_eq!(
+            standing_text(&get, 4, false, "Stormwind").as_deref(),
+            Some("You are now Friendly with Stormwind.")
+        );
+        assert_eq!(
+            standing_text(&get, 5, false, "Stormwind").as_deref(),
+            Some("You are now Honored with Stormwind.")
+        );
+        assert_eq!(
+            standing_text(&get, 5, true, "Stormwind").as_deref(),
+            Some("You are now Honoured (f) with Stormwind.")
+        );
+        assert_eq!(
+            standing_text(&get, 4, true, "Stormwind").as_deref(),
+            Some("You are now Friendly with Stormwind."),
+            "a missing twin falls back to the base label"
+        );
+        assert_eq!(
+            standing_text(&get, 0, false, "Stormwind").as_deref(),
+            Some("You are now  with Stormwind."),
+            "an absent label is an empty one (`0x703bf0` never returns NULL), not a missing line"
+        );
+        // A `_FEMALE` twin that is defined but empty falls back to the bare key (`0x612c36`).
+        let empty_twin = |k: &str| match k {
+            "FACTION_STANDING_LABEL6_FEMALE" => Some(String::new()),
+            other => get(other),
+        };
+        assert_eq!(
+            standing_text(&empty_twin, 5, true, "Stormwind").as_deref(),
+            Some("You are now Honored with Stormwind.")
+        );
+        assert_eq!(
+            standing_text(
+                &|k| get(k).filter(|_| k != "FACTION_STANDING_CHANGED"),
+                4,
+                false,
+                "X"
+            ),
+            None,
+            "no template"
+        );
     }
 }
 

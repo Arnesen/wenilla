@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 
-use crate::char_select::{ClientState, InWorldGated};
+use crate::client_state::{ClientState, InWorldGated};
 
 use super::camera::{CameraControl, FlyCam, CAM_PITCH_LIMIT};
 use super::camera_zoom::{CAM_DIST_DEFAULT, CAM_DIST_MAX, CAM_DIST_MIN};
@@ -90,7 +90,7 @@ fn parse(text: &str) -> (Option<f32>, Option<f32>) {
 /// Restores the pose once the roster names the character, the identity the macro and binding
 /// loads use. All three rig distances are set, so the login opens at the zoom, not gliding to it.
 fn load_camera_pose(
-    roster: Res<crate::char_select::Roster>,
+    roster: Res<crate::glue_session::roster::Roster>,
     mut file: ResMut<CameraPoseFile>,
     mut rig: ResMut<CameraControl>,
     mut cam: Query<&mut FlyCam, With<WorldCamera>>,
@@ -185,7 +185,10 @@ pub(super) fn plugin(app: &mut App) {
             Update,
             // Before the controller, so the first in-world frame renders the restored pose. A
             // capture resolves no state path, so this is inert there.
-            load_camera_pose.before(super::control).in_set(InWorldGated),
+            load_camera_pose
+                .after(super::ControlRestore)
+                .before(super::control)
+                .in_set(InWorldGated),
         )
         .add_systems(OnExit(ClientState::InWorld), save_on_session_end);
     // On the exit edge, never `Update`: the close button's `AppExit` is written in `PostUpdate`.
@@ -245,7 +248,7 @@ mod login_tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
-    use crate::char_select::Roster;
+    use crate::glue_session::roster::Roster;
     use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
 
     fn roster(name: &str, guid: u64) -> Roster {

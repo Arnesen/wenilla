@@ -11,9 +11,10 @@ use crate::area::AreaTableRes;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_action::{MessageSink, Shown, UiError};
-use crate::ui_unit::{class_names, race_names};
+use crate::ui_unit::{NameTables, UnitNames};
 
 use super::{name_pushes, result_key, status_flag_key, SocialState};
+use crate::query_cache::Ask;
 
 /// The chat-routed `/who` templates. FrameXML never names them: the engine prints these lines
 /// itself. None is a message-catalog row, so they go out through `Shown::unkeyed`, since
@@ -36,6 +37,8 @@ const WHO_CHAT_MAX: usize = 3;
 pub(super) struct FedSocial {
     /// Whether the VM has had a snapshot; the first push fires the list events regardless.
     seeded: bool,
+    /// Whether the VM has been given the dungeon table.
+    lfg_pushed: bool,
 }
 
 /// Push the display snapshot to the VM, fire the list events, and print the owed result lines.
@@ -44,6 +47,8 @@ pub(super) fn feed_social(
     mut social: ResMut<SocialState>,
     names: Res<NameCache>,
     areas: Option<Res<AreaTableRes>>,
+    unit_names: NameTables,
+    dungeons: Option<Res<super::LfgDungeonsRes>>,
     commands: Res<NetCommands>,
     mut sink: MessageSink,
     mut fed: Local<crate::ui_script::VmMemo<FedSocial>>,
@@ -53,20 +58,35 @@ pub(super) fn feed_social(
     };
     let fed = fed.get(&script);
     let areas = areas.as_deref().map(|a| &a.0);
+    // A name is asked at its packet's lookup ([`SocialState::name_events`]), and the frames between
+    // ask only a name the cache holds nothing for; a new VM's first feed stands for every list's
+    // packet.
+    let first = !fed.seeded;
+    // Taken in the frame before the interface is up too, deliberately: it marks only the ask,
+    // which goes to the server, not the VM.
+    let name_events = std::mem::take(&mut social.name_events);
+    let ask = |guid: u64| Ask::at(first || name_events.contains(&guid), &commands);
+    if !fed.lfg_pushed {
+        if let Some(d) = dungeons.as_deref() {
+            script.set_lfg_dungeons(d.0.clone());
+            fed.lfg_pushed = true;
+        }
+    }
 
     // Everything that reads the VM's own string table, resolved under one borrow of it.
     let (owed, friends, display_order) = {
         let get = |key: &str| script.lua().globals().get::<String>(key).ok();
         // Keyed, so the surface and the sound come from the catalog row (`ERR_FRIEND_ONLINE_SS`
         // plays `FRIENDJOINGAME`).
-        let owed: Vec<Shown> = drain_result_lines(&mut social, &names, &commands)
+        let owed: Vec<Shown> = drain_result_lines(&mut social, &names, &ask)
             .iter()
             .filter_map(|e| {
                 crate::ui_action::ui_error_text(e, &get).map(|text| Shown::keyed(e.key, text))
             })
             .collect();
         let away = |status: u8| status_flag_key(status).and_then(&get).unwrap_or_default();
-        let (friends, display_order) = friend_rows(&social, &names, &commands, areas, &away);
+        let (friends, display_order) =
+            friend_rows(&social, &names, &ask, areas, unit_names.get(), &away);
         (owed, friends, display_order)
     };
 
@@ -74,8 +94,8 @@ pub(super) fn feed_social(
     // zone.
     crate::ui_action::show_messages(&mut script, &mut sink, "ui_social", owed);
 
-    let (ignores, ignore_order) = ignore_rows(&social, &names, &commands);
-    let who = who_rows(&social, areas);
+    let (ignores, ignore_order) = ignore_rows(&social, &names, &ask);
+    let who = who_rows(&social, areas, unit_names.get());
 
     let selected_friend = index_of(&display_order, social.selected_friend);
     let selected_ignore = index_of(&ignore_order, social.selected_ignore);
@@ -93,16 +113,12 @@ pub(super) fn feed_social(
         who_sort: social.who_sort.clone(),
     });
 
-    let first = !fed.seeded;
     fed.seeded = true;
     if social.friends_dirty || first {
         social.friends_dirty = false;
-        let event = if std::mem::take(&mut social.friends_show_pending) {
-            "FRIENDLIST_SHOW"
-        } else {
-            "FRIENDLIST_UPDATE"
-        };
-        script.fire_event(event, Vec::new());
+        // The list ends in `FRIENDLIST_UPDATE` (`0x5ae867`), after `ShowFriends` too; the event
+        // table has no `FRIENDLIST_SHOW`.
+        script.fire_event("FRIENDLIST_UPDATE", Vec::new());
     }
     if social.ignores_dirty || first {
         social.ignores_dirty = false;
@@ -118,8 +134,11 @@ pub(super) fn feed_social(
             // `qsort` at `0x5ae0e2` orders the array `GetWhoInfo` reads.
             let printed = {
                 let get = |key: &str| script.lua().globals().get::<String>(key).ok();
-                let wire_order: Vec<WhoInfo> =
-                    social.who.iter().map(|e| who_row(e, areas)).collect();
+                let wire_order: Vec<WhoInfo> = social
+                    .who
+                    .iter()
+                    .map(|e| who_row(e, areas, unit_names.get()))
+                    .collect();
                 who_lines(&wire_order, social.who_total, &get)
             };
             crate::ui_action::show_messages(&mut script, &mut sink, "ui_social", printed);
@@ -133,11 +152,12 @@ fn answer_goes_to_the_frame(to_ui: bool, shown: usize) -> bool {
 }
 
 /// Name every result line whose subject has resolved: a line that needs a name waits for the name
-/// query, as the reference resolves before it composes.
-fn drain_result_lines(
+/// query, as the reference resolves before it composes. `ask` says how the subject's name is
+/// looked up: an event on the feed after its packet ([`SocialState::name_events`]).
+fn drain_result_lines<'a>(
     social: &mut SocialState,
     names: &NameCache,
-    commands: &NetCommands,
+    ask: &dyn Fn(u64) -> Ask<'a>,
 ) -> Vec<UiError> {
     let mut still_pending = Vec::new();
     let mut ready = Vec::new();
@@ -154,7 +174,10 @@ fn drain_result_lines(
         if update.guid == 0 {
             continue;
         }
-        match names.resolve(update.guid, commands).map(str::to_string) {
+        match names
+            .resolve_player(update.guid, ask(update.guid))
+            .map(str::to_string)
+        {
             // The name, once per `%s` the key's arity names (twice for the player link).
             Some(name) => ready.push(UiError::strings(key, &vec![name.as_str(); pushes])),
             None => still_pending.push(update),
@@ -204,12 +227,14 @@ fn who_lines(rows: &[WhoInfo], total: u32, get: &dyn Fn(&str) -> Option<String>)
     lines
 }
 
-/// The friend rows sorted by name, and their guids in the same order for the drain.
-fn friend_rows(
+/// The friend rows sorted by name, and their guids in the same order for the drain, each name
+/// looked up as `ask` says for its guid.
+fn friend_rows<'a>(
     social: &SocialState,
     names: &NameCache,
-    commands: &NetCommands,
+    ask: &dyn Fn(u64) -> Ask<'a>,
     areas: Option<&AreaTableCatalog>,
+    unit_names: UnitNames<'_>,
     away: &dyn Fn(u8) -> String,
 ) -> (Vec<FriendInfo>, Vec<u64>) {
     let mut rows: Vec<(u64, FriendInfo)> = social
@@ -217,7 +242,7 @@ fn friend_rows(
         .iter()
         .map(|entry| {
             let name = names
-                .resolve(entry.guid, commands)
+                .resolve_player(entry.guid, ask(entry.guid))
                 .map(str::to_string)
                 .unwrap_or_default();
             let online = entry.is_online();
@@ -229,7 +254,7 @@ fn friend_rows(
                     // An offline friend has no class or zone on the wire; empty, the frame prints
                     // its Offline template.
                     class: online
-                        .then(|| class_names(entry.class as u8))
+                        .then(|| unit_names.class(entry.class as u8))
                         .flatten()
                         .map(|(display, _)| display.to_string())
                         .unwrap_or_default(),
@@ -255,11 +280,11 @@ fn friend_rows(
     rows.into_iter().map(|(guid, row)| (row, guid)).unzip()
 }
 
-/// The ignore rows: names only, same ordering rule.
-fn ignore_rows(
+/// The ignore rows: names only, same ordering rule, each looked up as `ask` says for its guid.
+fn ignore_rows<'a>(
     social: &SocialState,
     names: &NameCache,
-    commands: &NetCommands,
+    ask: &dyn Fn(u64) -> Ask<'a>,
 ) -> (Vec<String>, Vec<u64>) {
     let mut rows: Vec<(u64, String)> = social
         .ignores
@@ -268,7 +293,7 @@ fn ignore_rows(
             (
                 *guid,
                 names
-                    .resolve(*guid, commands)
+                    .resolve_player(*guid, ask(*guid))
                     .map(str::to_string)
                     .unwrap_or_default(),
             )
@@ -284,23 +309,33 @@ fn ignore_rows(
 
 /// The `/who` rows, resolved, then sorted by the chain as the reference sorts every answer
 /// (`0x5ae0e2`); the comparator compares resolved names, so the sort runs after [`who_row`].
-fn who_rows(social: &SocialState, areas: Option<&AreaTableCatalog>) -> Vec<WhoInfo> {
-    let mut rows: Vec<WhoInfo> = social.who.iter().map(|e| who_row(e, areas)).collect();
+fn who_rows(
+    social: &SocialState,
+    areas: Option<&AreaTableCatalog>,
+    names: UnitNames<'_>,
+) -> Vec<WhoInfo> {
+    let mut rows: Vec<WhoInfo> = social
+        .who
+        .iter()
+        .map(|e| who_row(e, areas, names))
+        .collect();
     social.who_sort.sort(&mut rows);
     rows
 }
 
 /// One `/who` row, ids resolved; the wire carries class before race, the Lua API race first.
-fn who_row(entry: &WhoEntry, areas: Option<&AreaTableCatalog>) -> WhoInfo {
+fn who_row(entry: &WhoEntry, areas: Option<&AreaTableCatalog>, names: UnitNames<'_>) -> WhoInfo {
     WhoInfo {
         name: entry.name.clone(),
         guild: entry.guild.clone(),
         level: entry.level,
-        race: race_names(entry.race as u8)
+        race: names
+            .race(entry.race as u8)
             .map(|(display, _)| display)
             .unwrap_or_default()
             .to_string(),
-        class: class_names(entry.class as u8)
+        class: names
+            .class(entry.class as u8)
             .map(|(display, _)| display)
             .unwrap_or_default()
             .to_string(),
@@ -331,6 +366,7 @@ pub(super) fn drain_social(
     names: Res<NameCache>,
     commands: Res<NetCommands>,
     areas: Option<Res<AreaTableRes>>,
+    unit_names: NameTables,
     mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let Some(mut script) = script else {
@@ -343,7 +379,6 @@ pub(super) fn drain_social(
     for request in requests {
         match request {
             SocialRequest::RefreshFriends => {
-                social.friends_show_pending = true;
                 let _ = commands.0.send(ClientCommand::FriendListRequest);
             }
             SocialRequest::AddFriend(name) => {
@@ -359,6 +394,11 @@ pub(super) fn drain_social(
                 let _ = commands
                     .0
                     .send(ClientCommand::SetLookingForGroup { slots, comment });
+            }
+            SocialRequest::LfgQuery { criterion, class } => {
+                let _ = commands
+                    .0
+                    .send(ClientCommand::LfgQuery { criterion, class });
             }
             SocialRequest::RemoveFriendIndex(index) => {
                 if let Some(guid) = row_guid(&social.display_order, index) {
@@ -396,7 +436,8 @@ pub(super) fn drain_social(
                 social.selected_ignore = row_guid(&social.ignore_display_order, index).unwrap_or(0);
             }
             SocialRequest::Who(filter) => {
-                let request = super::who_query(&filter, areas.as_deref().map(|a| &a.0));
+                let request =
+                    super::who_query(&filter, areas.as_deref().map(|a| &a.0), unit_names.get());
                 let _ = commands.0.send(ClientCommand::Who {
                     request: Box::new(request),
                 });
@@ -421,7 +462,7 @@ fn row_guid(order: &[u64], index: u32) -> Option<u64> {
 fn guid_named(order: &[u64], name: &str, names: &NameCache) -> Option<u64> {
     order.iter().copied().find(|guid| {
         names
-            .peek(*guid)
+            .resolve_unit(*guid, None, Ask::Read)
             .is_some_and(|n| n.eq_ignore_ascii_case(name))
     })
 }
@@ -429,7 +470,9 @@ fn guid_named(order: &[u64], name: &str, names: &NameCache) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use benilla_protocol::messages::{friend_status, WhoResults};
+    use benilla_protocol::messages::{
+        friend_result, friend_status, FriendEntry, FriendStatusUpdate, WhoResults,
+    };
 
     fn entry(name: &str, level: u32, guild: &str) -> WhoEntry {
         WhoEntry {
@@ -464,18 +507,24 @@ mod tests {
         // The seeded chain is zone → level → class → group → name → …: one zone and one class
         // here, so it resolves on level, then name.
         assert_eq!(
-            names(&who_rows(&social, None)),
+            names(&who_rows(&social, None, Default::default())),
             ["erdrin", "Bruk", "Galas"],
             "wire order was Galas, erdrin, Bruk"
         );
 
         // A Name click: ascending and case-folded, so `erdrin` sorts among the capitals.
         social.who_sort.promote("name");
-        assert_eq!(names(&who_rows(&social, None)), ["Bruk", "erdrin", "Galas"]);
+        assert_eq!(
+            names(&who_rows(&social, None, Default::default())),
+            ["Bruk", "erdrin", "Galas"]
+        );
 
         // The same click again reverses.
         social.who_sort.promote("name");
-        assert_eq!(names(&who_rows(&social, None)), ["Galas", "erdrin", "Bruk"]);
+        assert_eq!(
+            names(&who_rows(&social, None, Default::default())),
+            ["Galas", "erdrin", "Bruk"]
+        );
 
         // A fresh answer arrives into that same chain.
         social.apply_who(WhoResults {
@@ -483,7 +532,10 @@ mod tests {
             total: 2,
             entries: vec![entry("Aaa", 1, ""), entry("Zzz", 1, "")],
         });
-        assert_eq!(names(&who_rows(&social, None)), ["Zzz", "Aaa"]);
+        assert_eq!(
+            names(&who_rows(&social, None, Default::default())),
+            ["Zzz", "Aaa"]
+        );
     }
 
     #[test]
@@ -508,12 +560,16 @@ mod tests {
         // A chain that would order them the other way round, to prove it is not consulted.
         social.who_sort.promote("name");
         assert_eq!(
-            names(&who_rows(&social, None)),
+            names(&who_rows(&social, None, Default::default())),
             ["Aaa", "Zzz"],
             "the frame's order"
         );
 
-        let wire: Vec<WhoInfo> = social.who.iter().map(|e| who_row(e, None)).collect();
+        let wire: Vec<WhoInfo> = social
+            .who
+            .iter()
+            .map(|e| who_row(e, None, Default::default()))
+            .collect();
         // The shipped templates: FrameXML never names these keys, so a stub would echo a guess.
         let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
@@ -553,6 +609,7 @@ mod tests {
                 zone: 999_999,
             },
             None,
+            crate::ui_unit::TestNames::english().names(),
         );
         assert_eq!(
             (row.class.as_str(), row.race.as_str(), row.zone.as_str()),
@@ -620,23 +677,143 @@ mod tests {
         );
     }
 
+    /// An online friend's class is the table's word at the install's locale; an offline one has
+    /// none on the wire and carries none.
     #[test]
-    fn an_offline_row_carries_no_class_or_zone() {
-        let entry = benilla_protocol::messages::FriendEntry {
-            guid: 7,
-            status: friend_status::OFFLINE,
+    fn a_friends_class_is_the_installs_word_and_an_offline_row_has_none() {
+        let mut social = SocialState::default();
+        let entry = |guid, status| benilla_protocol::messages::FriendEntry {
+            guid,
+            status,
             area: 12,
             level: 60,
             class: 4,
         };
-        // The class resolution `friend_rows` uses.
-        let online = entry.is_online();
-        assert!(!online);
-        let class = online
-            .then(|| class_names(entry.class as u8))
-            .flatten()
-            .map(|(d, _)| d.to_string())
-            .unwrap_or_default();
-        assert_eq!(class, "");
+        social.friends = vec![
+            entry(7, friend_status::ONLINE),
+            entry(8, friend_status::OFFLINE),
+        ];
+        let mut names = NameCache::default();
+        names.insert_player(7, "Aaa".into(), None);
+        names.insert_player(8, "Bbb".into(), None);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let korean = crate::ui_unit::TestNames::korean();
+        let (rows, _) = friend_rows(
+            &social,
+            &names,
+            &|_| Ask::New(&commands),
+            None,
+            korean.names(),
+            &|_| String::new(),
+        );
+        assert_eq!(rows[0].class, "도적", "online: Rogue at the koKR column");
+        assert_eq!(rows[1].class, "", "offline: nothing on the wire");
+    }
+
+    /// A `/who` row's race and class are the table's words at the install's locale.
+    #[test]
+    fn a_who_row_names_race_and_class_at_the_installs_locale() {
+        let entry = WhoEntry {
+            name: "Bob".into(),
+            guild: String::new(),
+            level: 60,
+            class: 8,
+            race: 5,
+            zone: 0,
+        };
+        let korean = crate::ui_unit::TestNames::korean();
+        let row = who_row(&entry, None, korean.names());
+        assert_eq!(
+            (row.race.as_str(), row.class.as_str()),
+            ("언데드", "마법사")
+        );
+    }
+
+    fn social_app() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<SocialState>()
+            .init_resource::<NameCache>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .insert_resource(NetCommands(tx))
+            .add_systems(Update, feed_social);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        (app, rx)
+    }
+
+    fn named(rx: &crossbeam_channel::Receiver<ClientCommand>) -> Vec<u64> {
+        crate::query_cache::queries(rx)
+            .into_iter()
+            .map(|c| match c {
+                ClientCommand::NameQuery { guid } => guid,
+                other => panic!("not a name query: {other:?}"),
+            })
+            .collect()
+    }
+
+    fn refuse(app: &mut App, guid: u64) {
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(guid, String::new(), None);
+    }
+
+    /// The lists' and the status's packets look their names up with a callback (`0x5ae438`,
+    /// `0x5af59a`, `0x5acb97`); the frames between ask only a name the cache holds nothing for. A
+    /// refused name is asked by no frame after it, only by the next packet that names its player,
+    /// once.
+    #[test]
+    fn a_refused_social_name_is_asked_at_its_next_packet_and_never_by_a_frame() {
+        let (mut app, rx) = social_app();
+        let friend = |guid| FriendEntry {
+            guid,
+            ..Default::default()
+        };
+        app.update();
+        app.world_mut()
+            .resource_mut::<SocialState>()
+            .apply_friend_list(vec![friend(7), friend(8)]);
+        app.world_mut()
+            .resource_mut::<SocialState>()
+            .apply_ignore_list(vec![9]);
+        app.update();
+        let mut asked = named(&rx);
+        asked.sort_unstable();
+        assert_eq!(asked, [7, 8, 9], "each name at its list's packet, once");
+        for guid in [7, 8, 9] {
+            refuse(&mut app, guid);
+        }
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(named(&rx).is_empty(), "no frame asks a refusal");
+
+        // A status for 8 alone asks 8 alone, the line's read and the row's read sharing the ask.
+        app.world_mut()
+            .resource_mut::<SocialState>()
+            .apply_friend_status(FriendStatusUpdate {
+                result: friend_result::OFFLINE,
+                guid: 8,
+                online: None,
+            });
+        app.update();
+        assert_eq!(named(&rx), [8]);
+        app.world_mut()
+            .resource_mut::<SocialState>()
+            .apply_ignore_list(vec![9]);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert_eq!(
+            named(&rx),
+            [9],
+            "the ignore list's packet asks its rows, once"
+        );
+        app.world_mut()
+            .resource_mut::<SocialState>()
+            .apply_friend_list(vec![friend(7), friend(8)]);
+        app.update();
+        assert_eq!(named(&rx), [7], "8 is still in flight; 7 is asked again");
     }
 }

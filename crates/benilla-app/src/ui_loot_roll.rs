@@ -9,8 +9,20 @@
 //! within [`TEMPLATE_HOLD_MAX_MS`], opens the frame unresolved, because a frame that never opens
 //! cannot even be passed on; the reference's callback fires on success only.
 //!
-//! A held roll's `arg2` is still the wire's countdown (`0x61b430` pushes `node+0x3c`); only the bar
-//! is short, as `GetLootRollTimeLeft` counts from the packet's arrival.
+//! At most [`MAX_OPEN`] rolls are open at once (`0x61b430` tests `[0xc4dda8]` against 4). A roll
+//! whose template is in finds the slots full and waits, deferred, in arrival order; every close
+//! (our vote `0x61bf46`, a win `0x61bc6b`, all-passed `0x61b74c`) walks the list oldest first and
+//! opens deferred rolls while a slot is free (`0x61b760`). Stock `GroupLootFrame_OpenNewFrame` has
+//! four frames and drops a fifth silently, so an unqueued fifth could never be voted.
+//!
+//! Deviation: the open count is the number of rolls announced and not closed. The reference keeps
+//! a counter that its server-close paths decrement for any roll whose closed byte is clear
+//! (`0x61b6f8`, `0x61bc17`), a deferred roll that never counted up included, so it under-counts
+//! and lets a fifth frame open; here a deferred roll's close changes nothing.
+//!
+//! A promoted roll's `arg2` is still the wire's countdown (`0x61b430` and `0x61b79a` push
+//! `node+0x3c`, which nothing rewrites); only the bar is short, as `GetLootRollTimeLeft` counts
+//! from the packet's arrival.
 //!
 //! `rollID` is a client-local serial; the wire addresses a roll by `(lootedTarget, itemSlot)`. Our
 //! own vote closes our frame at once, as `RollOnLoot` (`0x61bdf0`) sends the CMSG and fires
@@ -27,10 +39,11 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, SelfGuid};
+use crate::query_cache::Ask;
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_script::{UiFeed, UiInput};
 
-/// Frames a pending line retries its names before dropping: a negative-cached name never resolves.
+/// Frames a pending line retries its names before dropping: a refused name never resolves.
 const LINE_MAX_TRIES: u16 = 120;
 
 /// How long a fresh roll waits for its item template before `START_LOOT_ROLL` fires anyway: wall
@@ -40,6 +53,22 @@ const TEMPLATE_HOLD_MAX_MS: u32 = 2_000;
 /// `item_template.bonding` bind on pickup (vmangos `ItemPrototype.h` `ItemBondingType`); only 1
 /// gets `GroupLootFrame_OnShow`'s gold backdrop.
 const BIND_WHEN_PICKED_UP: u32 = 1;
+
+/// Rolls open at once (`0x61b435`, `0x61b765`); a fifth waits for a close.
+const MAX_OPEN: usize = 4;
+
+/// Where a roll stands between its packet and its frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    /// Its item template is not in, so `0x61b430` has not run on it.
+    Waiting,
+    /// `0x61b430` found four open: the node's queued byte `+0x39`, the oldest promoted first.
+    Deferred,
+    /// Counted among the open, its `START_LOOT_ROLL` not yet fired.
+    Starting,
+    /// `START_LOOT_ROLL` has gone out.
+    Open,
+}
 
 /// One group loot roll currently open on our screen.
 struct ActiveRoll {
@@ -57,8 +86,10 @@ struct ActiveRoll {
     remaining_ms: u32,
     /// How long the roll has waited for its item template.
     held_ms: u32,
-    /// Whether `START_LOOT_ROLL` has gone out.
-    announced: bool,
+    phase: Phase,
+    /// The start packet's lookup of the item, with the callback `0x61b460` (`0x61b40e`), is made:
+    /// the frames after only read, as the getters do (`0x4c30d2`).
+    asked: bool,
 }
 
 /// One queued chat announcement, awaiting the names it needs.
@@ -112,8 +143,44 @@ impl LootRolls {
             countdown_ms: p.countdown_ms,
             remaining_ms: p.countdown_ms,
             held_ms: 0,
-            announced: false,
+            phase: Phase::Waiting,
+            asked: false,
         });
+    }
+
+    /// Rolls counted open (`[0xc4dda8]`): announced, or about to be, and not closed.
+    fn open_count(&self) -> usize {
+        self.active
+            .iter()
+            .filter(|r| matches!(r.phase, Phase::Starting | Phase::Open))
+            .count()
+    }
+
+    /// `0x61b430` on every waiting roll `ready` accepts, oldest first: a free slot opens it, else
+    /// it is deferred. `ready` is the template's arrival, which runs it (`0x61b460`).
+    fn reach_ready(&mut self, mut ready: impl FnMut(&ActiveRoll) -> bool) {
+        for i in 0..self.active.len() {
+            if self.active[i].phase != Phase::Waiting || !ready(&self.active[i]) {
+                continue;
+            }
+            self.active[i].phase = if self.open_count() < MAX_OPEN {
+                Phase::Starting
+            } else {
+                Phase::Deferred
+            };
+        }
+    }
+
+    /// `0x61b760`: while a slot is free, open the oldest deferred roll. Run after every close.
+    fn promote(&mut self) {
+        for i in 0..self.active.len() {
+            if self.open_count() >= MAX_OPEN {
+                return;
+            }
+            if self.active[i].phase == Phase::Deferred {
+                self.active[i].phase = Phase::Starting;
+            }
+        }
     }
 
     /// `SMSG_LOOT_ROLL`: queue the chat line.
@@ -152,22 +219,24 @@ impl LootRolls {
         {
             let r = self.active.remove(i);
             self.cancelled.push(r.roll_id);
+            self.promote();
         }
     }
 
-    /// Our own vote: close the frame and return the roll's wire identity; `None` for a stale click.
+    /// Our own vote: drop the roll and return its wire identity; `None` for a stale click. The
+    /// vote's `CANCEL_LOOT_ROLL` fired in the verb, so none is queued here.
     fn vote(&mut self, roll_id: u32) -> Option<(u64, u32)> {
         let i = self.active.iter().position(|r| r.roll_id == roll_id)?;
         let r = self.active.remove(i);
-        self.cancelled.push(r.roll_id);
+        self.promote();
         Some((r.looted_target, r.item_slot))
     }
 
-    /// Tick every open roll's bar down, and the template hold of every unannounced roll up.
+    /// Tick every open roll's bar down, and the template hold of every waiting roll up.
     fn tick(&mut self, delta_ms: u32) {
         for r in &mut self.active {
             r.remaining_ms = r.remaining_ms.saturating_sub(delta_ms);
-            if !r.announced {
+            if r.phase == Phase::Waiting {
                 r.held_ms = r.held_ms.saturating_add(delta_ms);
             }
         }
@@ -354,7 +423,7 @@ fn render(
     self_guid: Option<u64>,
     items: &Items,
     names: &NameCache,
-    commands: &NetCommands,
+    ask: Ask<'_>,
     rolls: crate::items::RollCatalogs,
     detailed: bool,
 ) -> Option<String> {
@@ -364,7 +433,7 @@ fn render(
         RollLine::Won(p) => (p.item_id, p.random_property_id, Some(p.winner)),
         RollLine::AllPassed(p) => (p.item_id, p.random_property_id, None),
     };
-    let t = items.template(looted_item, 0, commands)?;
+    let t = items.template(looted_item, 0, ask)?;
     // The link names the rolled drop, suffix included, as the roll frame does.
     let link = crate::ui_items::item_link_full(
         looted_item,
@@ -384,7 +453,7 @@ fn render(
         RollLine::AllPassed(_) => false,
     };
     let name = match roller {
-        Some(g) if needs_name => Some(names.resolve(g, commands)?.to_string()),
+        Some(g) if needs_name => Some(names.resolve_player(g, ask)?.to_string()),
         _ => None,
     };
 
@@ -410,9 +479,13 @@ fn drain_lines(
         if !detailed && matches!(p.line, RollLine::Announce(_)) {
             continue;
         }
-        match render(
-            &p.line, self_guid, items, names, commands, catalogs, detailed,
-        ) {
+        // The packet's lookups pass callbacks (`0x61c047`, `0x61c08e`, `0x61b96a`, `0x61b5c0`):
+        // a line's first render asks as they do, and its retries ask only what the cache holds
+        // nothing for. So the roller's name, if still unasked, goes at the first render after the
+        // item lands, where the item's answer asks it (`0x61c4b0` → `0x61c53e` → `0x61c070`,
+        // `0x61c08e`).
+        let ask = Ask::at(p.tries == 0, commands);
+        match render(&p.line, self_guid, items, names, ask, catalogs, detailed) {
             Some(text) => chat.push_event(ChatEvent::text_only(ChatEventKind::Loot, text)),
             None => {
                 p.tries += 1;
@@ -430,14 +503,13 @@ fn snapshot(
     rolls: &LootRolls,
     items: &Items,
     icons: Option<&ItemDisplays>,
-    commands: &NetCommands,
     catalogs: crate::items::RollCatalogs,
 ) -> LootRollsState {
     let entries = rolls
         .active
         .iter()
         .map(|r| {
-            let t = items.template(r.item_id, 0, commands);
+            let t = items.template(r.item_id, 0, Ask::Read);
             let texture = t
                 .and_then(|t| icons?.catalog.get(t.display_info_id))
                 .and_then(|d| d.icon.clone());
@@ -445,9 +517,6 @@ fn snapshot(
                 roll_id: r.roll_id,
                 name: t.map(|t| catalogs.name(&t.name, r.random_property_id)),
                 texture,
-                // The reference's `GetLootRollItemInfo` returns a literal 1 (`0x4c3160`); the
-                // packet carries no count.
-                quantity: 1,
                 quality: t.map(|t| t.quality),
                 bind_on_pickup: t.is_some_and(|t| t.bonding == BIND_WHEN_PICKED_UP),
                 time_left_ms: r.remaining_ms,
@@ -509,23 +578,25 @@ fn feed_loot_rolls(
         loot.show_loot_spam,
     );
 
+    for r in rolls.active.iter_mut().filter(|r| !r.asked) {
+        items.template(r.item_id, 0, Ask::Event(&commands));
+        r.asked = true;
+    }
     // The snapshot goes in before the events: a `GroupLootFrame`'s `OnShow` reads its item from it.
-    let fresh = snapshot(&rolls, &items, icons.as_deref(), &commands, catalogs);
+    let fresh = snapshot(&rolls, &items, icons.as_deref(), catalogs);
     if fresh != *last {
         script.set_loot_rolls(fresh.clone());
         *last = fresh;
     }
 
-    // The hold: a fresh roll announces once its template is in the snapshot above.
-    for r in &mut rolls.active {
-        if r.announced {
-            continue;
-        }
-        if items.template(r.item_id, 0, &commands).is_none() {
+    // The hold: a fresh roll reaches `0x61b430` once its template is in the snapshot above, and
+    // takes a free slot or is deferred.
+    rolls.reach_ready(|r| {
+        if items.template(r.item_id, 0, Ask::Read).is_none() {
             // The module doc's deviation: an entry the server does not know, or an expired hold.
             let unknown = items.template_answered_unknown(r.item_id);
             if !unknown && r.held_ms < TEMPLATE_HOLD_MAX_MS {
-                continue;
+                return false;
             }
             debug!(
                 "ui_loot_roll: roll {} opening unresolved ({})",
@@ -537,7 +608,19 @@ fn feed_loot_rolls(
                 }
             );
         }
-        r.announced = true;
+        true
+    });
+    // Closes first: a promoted roll's frame needs the closed one's free, or the stock four-frame
+    // `GroupLootFrame_OpenNewFrame` drops it.
+    for roll_id in std::mem::take(&mut rolls.cancelled) {
+        debug!("ui_loot_roll: roll {roll_id} cancelled");
+        script.fire_event("CANCEL_LOOT_ROLL", vec![ScriptValue::Int(roll_id as i64)]);
+    }
+    for r in &mut rolls.active {
+        if r.phase != Phase::Starting {
+            continue;
+        }
+        r.phase = Phase::Open;
         debug!(
             "ui_loot_roll: roll {} opened ({} ms, held {} ms)",
             r.roll_id, r.countdown_ms, r.held_ms
@@ -550,10 +633,6 @@ fn feed_loot_rolls(
             ],
         );
     }
-    for roll_id in std::mem::take(&mut rolls.cancelled) {
-        debug!("ui_loot_roll: roll {roll_id} cancelled");
-        script.fire_event("CANCEL_LOOT_ROLL", vec![ScriptValue::Int(roll_id as i64)]);
-    }
 }
 
 /// Drain the Lua votes: each `RollOnLoot` is one `CMSG_LOOT_ROLL` and closes our frame.
@@ -565,18 +644,8 @@ fn drain_loot_rolls(
     let Some(mut script) = script else {
         return;
     };
-    // A bind-on-pickup Need or Greed sends nothing yet and its frame stays up:
-    // `UIParent_OnEvent` turns `CONFIRM_LOOT_ROLL` into its popup.
-    for (roll_id, roll_type) in script.take_loot_roll_confirms() {
-        debug!("ui_loot_roll: BoP confirm for {roll_type} on roll {roll_id}");
-        script.fire_event(
-            "CONFIRM_LOOT_ROLL",
-            vec![
-                ScriptValue::Int(roll_id as i64),
-                ScriptValue::Int(roll_type as i64),
-            ],
-        );
-    }
+    // The VM signalled each vote's `CANCEL_LOOT_ROLL`, and a bind-on-pickup Need or Greed's
+    // `CONFIRM_LOOT_ROLL`, inside the verb (`0x61bf2a`, `0x61be8b`).
     for (roll_id, roll_type) in script.take_loot_roll_votes() {
         match rolls.vote(roll_id) {
             Some((looted_target, item_slot)) => {
@@ -844,7 +913,7 @@ mod tests {
             assert_eq!(roll.countdown_ms, 60_000);
             assert_eq!(roll.remaining_ms, 60_000);
             assert!(
-                !roll.announced,
+                roll.phase == Phase::Waiting,
                 "the packet does not announce — the template does"
             );
             assert_eq!(roll.held_ms, 0);
@@ -915,7 +984,7 @@ mod tests {
         r.start(start(0xAA, 3, 17182));
         assert_eq!(r.vote(1), Some((0xAA, 3)));
         assert!(r.active.is_empty(), "the frame closes client-predicted");
-        assert_eq!(r.cancelled, vec![1]);
+        assert!(r.cancelled.is_empty(), "the verb signalled its own cancel");
         assert_eq!(r.vote(1), None);
         assert_eq!(r.vote(99), None);
     }
@@ -932,13 +1001,13 @@ mod tests {
     }
 
     #[test]
-    fn tick_ages_the_hold_only_while_the_roll_is_unannounced() {
+    fn tick_ages_the_hold_only_while_the_roll_is_waiting() {
         let mut r = LootRolls::default();
         r.start(start(0xAA, 0, 17182));
         r.tick(500);
         r.tick(250);
         assert_eq!(r.active[0].held_ms, 750);
-        r.active[0].announced = true;
+        r.active[0].phase = Phase::Open;
         r.tick(1_000);
         assert_eq!(r.active[0].held_ms, 750, "the hold is over");
         assert_eq!(r.active[0].remaining_ms, 60_000 - 1_750, "the bar is not");
@@ -984,11 +1053,50 @@ mod tests {
                  f:SetScript(\"OnEvent\", function()\n\
                    local _, name = GetLootRollItemInfo(arg1)\n\
                    tinsert(STARTS, arg1 .. \":\" .. arg2 .. \":\" .. (name or \"<blank>\"))\n\
+                 end)\n\
+                 EVENTS = {}\n\
+                 local g = CreateFrame(\"Frame\")\n\
+                 g:RegisterEvent(\"START_LOOT_ROLL\")\n\
+                 g:RegisterEvent(\"CANCEL_LOOT_ROLL\")\n\
+                 g:SetScript(\"OnEvent\", function()\n\
+                   tinsert(EVENTS, (event == \"START_LOOT_ROLL\" and \"S\" or \"C\") .. arg1)\n\
                  end)",
             )
             .unwrap();
         app.insert_non_send_resource(script);
         (app, rx)
+    }
+
+    /// The start packet looks its item up with the callback `0x61b460` (`0x61b40e`); the frames
+    /// its roll waits through read, as `GetLootRollItemInfo` does (`0x4c30d2`). A refused item is
+    /// asked by no frame after it, only by the next start.
+    #[test]
+    fn a_refused_roll_item_is_asked_by_the_next_start_never_by_a_frame() {
+        let (mut app, rx) = hold_app();
+        let begin = |app: &mut App, slot: u32| {
+            app.world_mut()
+                .resource_mut::<LootRolls>()
+                .start(start(0x42, slot, ROLLED));
+            app.update();
+        };
+        begin(&mut app, 0);
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(ROLLED, None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "no frame asks a refusal"
+        );
+        begin(&mut app, 1);
+        assert_eq!(
+            crate::query_cache::queries(&rx).len(),
+            1,
+            "the next start asks again"
+        );
     }
 
     /// `rollID:rollTime:name` for each `START_LOOT_ROLL` seen so far, in order.
@@ -999,6 +1107,19 @@ mod tests {
             .map(|i| {
                 script
                     .eval::<String>(&format!("return STARTS[{i}]"))
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    /// Every roll event seen so far, in firing order: `S<id>` a start, `C<id>` a cancel.
+    fn events(app: &mut App) -> Vec<String> {
+        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let n = script.eval::<i64>("return getn(EVENTS)").unwrap();
+        (1..=n)
+            .map(|i| {
+                script
+                    .eval::<String>(&format!("return EVENTS[{i}]"))
                     .unwrap()
             })
             .collect()
@@ -1125,6 +1246,196 @@ mod tests {
         assert!(
             starts(&mut app).is_empty(),
             "a roll that closed while held opens no frame"
+        );
+    }
+
+    // ── The four-roll queue (`0x61b430`, `0x61b760`) ──
+
+    /// An app with the template cached and `n` rolls (ids 1..=n, slot id-1, countdown 60 s + id)
+    /// started, run one pass.
+    fn queued_app(n: u32) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        let (mut app, rx) = hold_app();
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(ROLLED, Some(crate::items::test_template("Sulfuras")));
+        for slot in 0..n {
+            let mut p = start(0xAA, slot, ROLLED);
+            p.countdown_ms = 60_000 + slot + 1;
+            app.world_mut().resource_mut::<LootRolls>().start(p);
+        }
+        app.update();
+        (app, rx)
+    }
+
+    fn won_at(slot: u32) -> LootRollWon {
+        LootRollWon {
+            looted_target: 0xAA,
+            item_slot: slot,
+            item_id: ROLLED,
+            random_property_id: 0,
+            winner: 1,
+            roll_number: 84,
+            roll_type: roll_vote::NEED,
+        }
+    }
+
+    fn passed_at(slot: u32) -> LootAllPassed {
+        LootAllPassed {
+            looted_target: 0xAA,
+            item_slot: slot,
+            item_id: ROLLED,
+            random_property_id: 0,
+        }
+    }
+
+    fn ids(starts: &[String]) -> Vec<&str> {
+        starts
+            .iter()
+            .map(|s| s.split(':').next().unwrap())
+            .collect()
+    }
+
+    /// `0x61b430` opens a roll only while `[0xc4dda8] < 4`; the fifth is marked queued and fires
+    /// nothing, however many passes go by.
+    #[test]
+    fn five_rolls_announce_four() {
+        let (mut app, _rx) = queued_app(5);
+        assert_eq!(ids(&starts(&mut app)), ["1", "2", "3", "4"]);
+        app.update();
+        assert_eq!(starts(&mut app).len(), 4, "the fifth keeps waiting");
+        let rolls = app.world().resource::<LootRolls>();
+        assert_eq!(rolls.open_count(), 4);
+        assert_eq!(rolls.active[4].phase, Phase::Deferred);
+    }
+
+    /// Every close calls `0x61b760`: our vote (`0x61bf46`), a win (`0x61bc6b`) and all-passed
+    /// (`0x61b74c`) each open the oldest deferred roll, after the closed one's `CANCEL`.
+    #[test]
+    fn every_close_path_promotes_the_oldest_deferred_roll() {
+        type Close = fn(&mut LootRolls);
+        let closers: [(&str, Close); 3] = [
+            ("vote", |r| {
+                assert!(r.vote(2).is_some());
+            }),
+            ("won", |r| r.won(won_at(1))),
+            ("all passed", |r| r.all_passed(passed_at(1))),
+        ];
+        for (name, close) in closers {
+            let (mut app, _rx) = queued_app(6);
+            assert_eq!(starts(&mut app).len(), 4, "{name}");
+            close(&mut app.world_mut().resource_mut::<LootRolls>());
+            app.update();
+            // The oldest deferred is roll 5, not 6, with its own wire countdown.
+            assert_eq!(
+                starts(&mut app).last().map(String::as_str),
+                Some("5:60005:Sulfuras"),
+                "{name}"
+            );
+            assert_eq!(starts(&mut app).len(), 5, "{name}: one slot, one promotion");
+            if name != "vote" {
+                // The closed frame is freed before the promoted one asks for a frame.
+                let ev = events(&mut app);
+                let c = ev.iter().position(|e| e == "C2").unwrap();
+                let s = ev.iter().position(|e| e == "S5").unwrap();
+                assert!(c < s, "{name}: {ev:?}");
+            }
+        }
+    }
+
+    /// The promoted roll fires the wire's countdown, whole, though its bar has run down since the
+    /// packet (`0x61b79a` pushes `node+0x3c`).
+    #[test]
+    fn a_promoted_roll_fires_the_wire_countdown() {
+        let (mut app, _rx) = queued_app(5);
+        advance(&mut app, 30_000);
+        app.update();
+        advance(&mut app, 0);
+        app.world_mut()
+            .resource_mut::<LootRolls>()
+            .all_passed(passed_at(0));
+        app.update();
+        assert_eq!(
+            starts(&mut app).last().map(String::as_str),
+            Some("5:60005:Sulfuras")
+        );
+        let rolls = app.world().resource::<LootRolls>();
+        let fifth = rolls.active.iter().find(|r| r.roll_id == 5).unwrap();
+        assert_eq!(
+            fifth.remaining_ms,
+            60_005 - 30_000,
+            "the bar counts from the packet"
+        );
+    }
+
+    /// Queued rolls open oldest first, one per freed slot.
+    #[test]
+    fn deferred_rolls_open_oldest_first() {
+        let (mut app, _rx) = queued_app(6);
+        app.world_mut().resource_mut::<LootRolls>().won(won_at(3));
+        app.update();
+        assert_eq!(ids(&starts(&mut app)), ["1", "2", "3", "4", "5"]);
+        app.world_mut().resource_mut::<LootRolls>().won(won_at(0));
+        app.update();
+        assert_eq!(ids(&starts(&mut app)), ["1", "2", "3", "4", "5", "6"]);
+    }
+
+    /// A deferred roll never counted up, so closing it frees nothing: the reference's
+    /// `0x61b6f8`/`0x61bc17` decrement anyway and let a fifth frame open (the module doc's
+    /// deviation). It still sends its `CANCEL_LOOT_ROLL`.
+    #[test]
+    fn closing_a_deferred_roll_leaves_the_count_right() {
+        let (mut app, _rx) = queued_app(5);
+        for close in [
+            (|r: &mut LootRolls| r.all_passed(passed_at(4))) as fn(&mut LootRolls),
+            |r| r.won(won_at(4)),
+        ] {
+            let (mut app, _rx) = queued_app(5);
+            close(&mut app.world_mut().resource_mut::<LootRolls>());
+            app.update();
+            assert_eq!(app.world().resource::<LootRolls>().open_count(), 4);
+            assert_eq!(events(&mut app).last().map(String::as_str), Some("C5"));
+            // A new roll finds four open and waits.
+            app.world_mut()
+                .resource_mut::<LootRolls>()
+                .start(start(0xAA, 9, ROLLED));
+            app.update();
+            assert_eq!(starts(&mut app).len(), 4, "the sixth packet opens nothing");
+        }
+        // And a vote on a deferred roll (an addon's `RollOnLoot`) changes no count either.
+        let r = &mut *app.world_mut().resource_mut::<LootRolls>();
+        assert!(r.vote(5).is_some());
+        assert_eq!(r.open_count(), 4);
+    }
+
+    /// `0x61b430` runs when the template is in, not at the packet: a roll still waiting holds no
+    /// slot, so rolls behind it open ahead of it; once in, it queues behind four open.
+    #[test]
+    fn a_waiting_roll_holds_no_slot() {
+        let (mut app, _rx) = hold_app();
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(ROLLED, Some(crate::items::test_template("Sulfuras")));
+        let mut first = start(0xAA, 0, 4306);
+        first.countdown_ms = 70_000;
+        app.world_mut().resource_mut::<LootRolls>().start(first);
+        for slot in 1..=4 {
+            app.world_mut()
+                .resource_mut::<LootRolls>()
+                .start(start(0xAA, slot, ROLLED));
+        }
+        app.update();
+        assert_eq!(ids(&starts(&mut app)), ["2", "3", "4", "5"]);
+
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(4306, Some(crate::items::test_template("Tin Bar")));
+        app.update();
+        assert_eq!(starts(&mut app).len(), 4, "four are open: it queues");
+        app.world_mut().resource_mut::<LootRolls>().won(won_at(1));
+        app.update();
+        assert_eq!(
+            starts(&mut app).last().map(String::as_str),
+            Some("1:70000:Tin Bar")
         );
     }
 }

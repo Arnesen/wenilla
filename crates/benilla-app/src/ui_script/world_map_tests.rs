@@ -3,7 +3,7 @@
 //! marker, [`crate::poi_marker`]), the unit blips, the player arrow and the full-screen quads.
 
 use benilla_ui::script::{
-    BattlefieldFlagView, BattlefieldPositionView, QuadContent, UiScript, WorldMapLandmarkView,
+    BattlefieldFlagView, BattlefieldPositionView, QuadContent, UiScript, WorldMapLandmarkSource,
     ARROW_MODEL,
 };
 
@@ -34,6 +34,8 @@ fn harness() -> UiScript {
         super::test_ui::load_ui(&s, file);
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    // A world position here is already map UV, so a landmark source sits where it says.
+    s.set_world_loc_projector(Box::new(|_, _, x, y| Some((x, y))));
     s
 }
 
@@ -60,12 +62,14 @@ fn update(s: &mut UiScript) {
         .unwrap();
 }
 
-fn landmark(name: &str, icon: u32, uv: (f32, f32)) -> WorldMapLandmarkView {
-    WorldMapLandmarkView {
+/// A landmark at map UV `uv` on every level, through [`harness`]'s identity projection.
+fn landmark(name: &str, icon: u32, uv: (f32, f32)) -> WorldMapLandmarkSource {
+    WorldMapLandmarkSource {
         name: name.into(),
         description: String::new(),
-        texture_index: icon,
-        uv,
+        map: 0,
+        pos: uv,
+        icons: [Some(icon); 3],
     }
 }
 
@@ -75,7 +79,7 @@ fn landmark(name: &str, icon: u32, uv: (f32, f32)) -> WorldMapLandmarkView {
 fn a_landmark_draws_its_poi_icon_at_its_map_position() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
-    s.set_world_map_landmarks(vec![landmark("Stormwind Warrior Trainer", 6, (0.25, 0.5))]);
+    s.set_world_map_landmark_sources(vec![landmark("Stormwind Warrior Trainer", 6, (0.25, 0.5))]);
     s.run("WorldMapFrame_Update()").unwrap();
 
     assert_eq!(
@@ -115,7 +119,7 @@ fn a_landmark_draws_its_poi_icon_at_its_map_position() {
 fn the_poi_pool_grows_and_parks_its_tail() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
-    s.set_world_map_landmarks(vec![
+    s.set_world_map_landmark_sources(vec![
         landmark("The Bank", 6, (0.1, 0.1)),
         landmark("The Inn", 6, (0.2, 0.2)),
         landmark("The Auction House", 6, (0.3, 0.3)),
@@ -126,7 +130,7 @@ fn the_poi_pool_grows_and_parks_its_tail() {
         .eval::<bool>("return WorldMapFramePOI3:IsShown()")
         .unwrap());
 
-    s.set_world_map_landmarks(vec![landmark("The Inn", 6, (0.2, 0.2))]);
+    s.set_world_map_landmark_sources(vec![landmark("The Inn", 6, (0.2, 0.2))]);
     s.run("WorldMapFrame_Update()").unwrap();
     assert_eq!(
         s.eval::<i64>("return NUM_WORLDMAP_POIS").unwrap(),
@@ -158,7 +162,7 @@ fn the_poi_pool_grows_and_parks_its_tail() {
 fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
-    s.set_world_map_landmarks(vec![landmark("Lion's Pride Inn", 6, (0.5, 0.5))]);
+    s.set_world_map_landmark_sources(vec![landmark("Lion's Pride Inn", 6, (0.5, 0.5))]);
     s.run("WorldMapFrame_Update()").unwrap();
     s.run("this = WorldMapFramePOI1 this:GetScript(\"OnEnter\")() this = nil")
         .unwrap();
@@ -178,7 +182,7 @@ fn hovering_a_poi_names_it_and_adds_a_status_line_only_when_there_is_one() {
 
     let mut with_status = landmark("Stables", 6, (0.5, 0.5));
     with_status.description = "In Conflict".into();
-    s.set_world_map_landmarks(vec![with_status]);
+    s.set_world_map_landmark_sources(vec![with_status]);
     s.run("WorldMapFrame_Update()").unwrap();
     s.run("this = WorldMapFramePOI1 this:GetScript(\"OnEnter\")() this = nil")
         .unwrap();
@@ -197,7 +201,7 @@ fn the_landmark_getter_returns_the_references_five_values() {
     let mut s = harness();
     let mut with_status = landmark("Stables", 9, (0.25, 0.75));
     with_status.description = "In Conflict".into();
-    s.set_world_map_landmarks(vec![landmark("Woo Ping", 6, (0.5, 0.5)), with_status]);
+    s.set_world_map_landmark_sources(vec![landmark("Woo Ping", 6, (0.5, 0.5)), with_status]);
 
     let (name, desc_is_nil, icon, x, y): (String, bool, i64, f32, f32) = s
         .eval("local n, d, t, x, y = GetMapLandmarkInfo(1) return n, d == nil, t, x, y")
@@ -726,6 +730,80 @@ fn the_real_feralas_catalog_names_dire_maul_under_the_cursor() {
     );
 }
 
+/// The real catalog at the world level: the cursor over Kalimdor puts its `Map.dbc` name in the
+/// label and shows `Interface\WorldMap\Kalimdor\KalimdorHighlight` over its sheet rect, from its
+/// `WorldMapContinent` row (`0x4a83b9`): tiles 23..=48 by 9..=52 at scale 0.75, so 26 by 44 tiles
+/// of the 62.625 by 41.75 sheet, the texture's left 26/44 drawn.
+#[test]
+fn hovering_a_continent_on_the_world_map_lights_it() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+
+    let mut chain = benilla_formats::open_chain(&data).expect("chain");
+    for file in ["Kalimdor", "Azeroth"] {
+        let path = format!("Interface\\WorldMap\\{file}\\{file}Highlight.blp");
+        assert!(chain.contains(&path), "{path} ships");
+    }
+    let areas = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable");
+    let maps =
+        benilla_assets::MapCatalogRes(benilla_formats::load_map_catalog(&mut chain).expect("Map"));
+    let (views, _) =
+        crate::ui_world_map::build_catalog(&mut chain, &areas, &maps).expect("the real catalog");
+    // Every continent has its row, so no stock data reaches the rowless branch.
+    assert!(views.iter().all(|c| c.sheet.is_some()));
+    let kalimdor = views
+        .iter()
+        .find(|c| c.map_file == "Kalimdor")
+        .expect("Kalimdor is in the catalog");
+    let row = kalimdor
+        .sheet
+        .expect("Kalimdor has its WorldMapContinent row");
+    assert_eq!((row.tiles, row.scale), ((23, 48, 9, 52), 0.75));
+    s.set_world_map_catalog(views);
+    s.run("ToggleWorldMap()").unwrap();
+    s.run("SetMapZoom(0)").unwrap();
+    s.resolve();
+
+    let (l, r, t, b, eff) = s
+        .eval::<(f32, f32, f32, f32, f32)>(
+            "return WorldMapButton:GetLeft(), WorldMapButton:GetRight(), WorldMapButton:GetTop(), \
+             WorldMapButton:GetBottom(), WorldMapButton:GetEffectiveScale()",
+        )
+        .unwrap();
+    let (x, y) = ((l + (r - l) * 0.25) * eff, (t - (t - b) * 0.45) * eff);
+    s.mouse_move(x, y);
+    update(&mut s);
+    s.resolve();
+
+    assert_eq!(
+        s.eval::<String>("return WorldMapFrameAreaLabel:GetText()")
+            .unwrap(),
+        "Kalimdor"
+    );
+    let (shown, texture, w, h, dx, dy) = s
+        .eval::<(bool, String, f32, f32, f32, f32)>(
+            "return WorldMapHighlight:IsShown() == 1, WorldMapHighlight:GetTexture(), \
+             WorldMapHighlight:GetWidth(), WorldMapHighlight:GetHeight(), \
+             WorldMapHighlight:GetLeft() - WorldMapDetailFrame:GetLeft(), \
+             WorldMapDetailFrame:GetTop() - WorldMapHighlight:GetTop()",
+        )
+        .unwrap();
+    assert!(shown, "the stock OnUpdate shows the quad for a fileName");
+    assert!(
+        texture
+            .to_ascii_lowercase()
+            .ends_with("worldmap\\kalimdor\\kalimdorhighlight"),
+        "{texture}"
+    );
+    let (bw, bh) = (r - l, t - b);
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert!(near(w, 19.5 / 62.625 * bw), "width {w}");
+    assert!(near(h, 33.0 / 41.75 * bh), "height {h}");
+    // Seated on `WorldMapDetailFrame`'s top-left, in the button's own units.
+    assert!(near(dx, 5.5625 / 62.625 * bw), "left {dx}");
+    assert!(near(dy, 3.302_502 / 41.75 * bh), "top {dy}");
+}
+
 /// An addon that windows the map (Cartographer's `LookNFeel`) stamps userPlaced through a drag
 /// (`0x7652b0`, at `0x7652e5`). The layout cache gates both ends on `movable|resizable` too, as the
 /// reference does (writer `0x490e97`; apply `0x490600`, `0x490689`), and stock `WorldMapFrame` has
@@ -748,19 +826,15 @@ fn a_stale_layout_row_cannot_seat_a_stock_frame() {
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     s.resolve();
 
-    // The row as `benilla-config/layout/<realm>-<character>.txt` carries it: Cartographer's saved
-    // `LookNFeel` offsets and the size it forces.
+    // The row as the reference's `layout-cache.txt` carries it after Cartographer's `LookNFeel`:
+    // the size it forces, centred by its drag.
     let row = || benilla_ui::script::FrameLayout {
         name: "WorldMapFrame".into(),
-        width: 1024.0,
-        height: 768.0,
-        points: vec![benilla_ui::script::LayoutPoint {
-            point: "CENTER".into(),
-            relative_to: Some("UIParent".into()),
-            relative_point: "CENTER".into(),
-            x: -0.6369222,
-            y: 53.861614,
-        }],
+        level: None,
+        x: Some(307),
+        y: Some(-128),
+        width: Some(1024),
+        height: Some(768),
     };
 
     s.restore_user_placed_layouts([row()]);
@@ -809,7 +883,14 @@ fn a_stale_layout_row_cannot_seat_a_stock_frame() {
     );
     let saved = s.user_placed_layouts();
     assert_eq!(saved.len(), 1, "which is what puts the row back: {saved:?}");
-    assert_eq!(saved[0], row(), "unchanged through the round trip");
+    assert_eq!(
+        benilla_ui::script::FrameLayout {
+            level: None,
+            ..saved[0].clone()
+        },
+        row(),
+        "unchanged through the round trip"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -856,6 +937,69 @@ fn the_fullscreen_quads_follow_a_resize() {
         s.eval::<f64>("return BlackoutWorld:GetHeight()").unwrap(),
         1080.0,
         "…and the blackout is the new height too"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Reopening the map after zooming out shows the player's zone from its first paint. The OnShow
+/// calls `SetMapToCurrentZone()` (WorldMapFrame.xml:600), whose setter `0x4a67a0` fires
+/// `WORLD_MAP_UPDATE` before it returns (`0x4a6ce4`, `SignalEvent` dispatching in place), so the
+/// stock `WorldMapFrame_Update` sets the zone's tiles inside the show, before any tick or paint.
+#[test]
+fn a_reopened_map_shows_the_players_zone_before_its_first_paint() {
+    use benilla_ui::script::{WorldMapContinentView, WorldMapZoneView};
+    let _data = benilla_formats::wow_data_or_skip!();
+    // The whole stock UI: the OnShow's `UpdateMicroButtons` and the full-screen panel slot.
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probefour".into()),
+            level: 60,
+            ..Default::default()
+        }),
+    );
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.set_world_map_catalog(vec![WorldMapContinentView {
+        name: "Eastern Kingdoms".into(),
+        map_file: "Azeroth".into(),
+        zones: vec![WorldMapZoneView {
+            name: "Elwynn Forest".into(),
+            area_id: 12,
+            map_file: "Elwynn".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }]);
+    // The player stands in Elwynn Forest.
+    s.set_world_map_feed(Some((1, 1)), None, 0.0, None, Vec::new(), Vec::new());
+    s.tick(0.01);
+    let tile = |s: &UiScript| {
+        s.eval::<String>("return WorldMapDetailTile1:GetTexture()")
+            .unwrap()
+    };
+
+    s.run("ToggleWorldMap()").unwrap();
+    s.tick(0.01);
+    assert!(s.eval::<bool>("return WorldMapFrame:IsVisible()").unwrap());
+    assert_eq!(tile(&s), "Interface\\WorldMap\\Elwynn\\Elwynn1");
+    // A right-click on the map zooms out to the continent (WorldMapFrame.lua:294).
+    s.run("WorldMapZoomOutButton_OnClick()").unwrap();
+    s.tick(0.01);
+    assert_eq!(tile(&s), "Interface\\WorldMap\\Azeroth\\Azeroth1");
+
+    s.run("ToggleWorldMap()").unwrap();
+    s.tick(0.01);
+    assert!(!s.eval::<bool>("return WorldMapFrame:IsVisible()").unwrap());
+    s.run("ToggleWorldMap()").unwrap();
+    assert!(s.eval::<bool>("return WorldMapFrame:IsVisible()").unwrap());
+    assert_eq!(
+        tile(&s),
+        "Interface\\WorldMap\\Elwynn\\Elwynn1",
+        "the reopened map paints its first frame with the continent it was closed on"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

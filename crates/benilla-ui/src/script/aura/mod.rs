@@ -103,7 +103,7 @@ pub(crate) fn auras_of<'m>(model: &'m Model, token: &str) -> mlua::Result<Option
 }
 
 /// The `index`-th (1-based) buff (`helpful`) or debuff of `token`, in pushed order; out of range
-/// answers nothing, the loop terminator.
+/// answers one nil on every miss leg (`0x5195fe`, `0x5197d4`, `0x519a51`), the loop terminator.
 fn nth_aura(
     lua: &Lua,
     token: &Option<String>,
@@ -128,7 +128,7 @@ fn nth_aura(
     };
     match hit {
         Some(a) => returns(lua, &a, !helpful),
-        None => Ok(MultiValue::new()),
+        None => Ok(MultiValue::from_vec(vec![Value::Nil])),
     }
 }
 
@@ -164,6 +164,15 @@ impl super::UiScript {
         let mut model = self.model_mut();
         if model.unit_guids != *guids {
             model.unit_guids.clone_from(guids);
+        }
+    }
+
+    /// Seat the player's own guid in the unit-token resolver ahead of a full
+    /// [`Self::set_unit_guids`] push, so `"player"` names us from the world-enter cascade on.
+    pub fn seat_player_guid(&mut self, guid: u64) {
+        let mut model = self.model_mut();
+        if model.unit_guids.player != guid {
+            model.unit_guids.player = guid;
         }
     }
 
@@ -319,11 +328,17 @@ mod tests {
         assert!(s
             .eval::<bool>(r#"return UnitBuff("target", 1) == nil"#)
             .unwrap());
-        assert_eq!(
-            s.arity(r#"UnitBuff("player", 0)"#).unwrap(),
-            0,
-            "a miss answers nothing"
-        );
+        // One nil on every miss leg (`0x5195fe`, `0x5197d4`, `0x519a51`): an index out of range,
+        // zero or negative, and a unit with no list.
+        for call in [
+            r#"UnitBuff("player", 0)"#,
+            r#"UnitBuff("player", 9)"#,
+            r#"UnitDebuff("player", 9)"#,
+            r#"UnitBuff("target", 1)"#,
+            r#"UnitDebuff("target", 1)"#,
+        ] {
+            assert_eq!(s.arity(call).unwrap(), 1, "{call} answers one nil");
+        }
     }
 
     #[test]
@@ -431,6 +446,7 @@ mod tests {
     /// its own: `base + 1` and `base + 2`.
     fn group_script() -> UiScript {
         let mut s = UiScript::new().unwrap();
+        crate::script::tests::common::load_tooltip_template(&s);
         s.set_unit_guids(&UnitGuids {
             player: ME,
             target: TARGET,
@@ -570,7 +586,7 @@ mod tests {
         s.run(
             r#"local a = CreateFrame("Button", "TF1")
                a:SetPoint("CENTER", 0, 0) a:SetWidth(10) a:SetHeight(10)
-               TT = CreateFrame("GameTooltip", "TT")
+               TT = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
                TT:SetOwner(a, "ANCHOR_BOTTOMRIGHT")
                TT:SetUnitDebuff("MouseOver", 1)"#,
         )

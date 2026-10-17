@@ -12,6 +12,26 @@ pub(crate) fn load_ui(s: &UiScript, entry: &str) -> usize {
     load_entry(s, entry, false, false)
 }
 
+/// Declares `TestTooltipTemplate`, the stock template's 30 `TextLeft`/`TextRight` pairs, for a test
+/// with no install. A tooltip made without the template holds no line, as on 1.12.1; a test makes
+/// one with `CreateFrame("GameTooltip", name, parent, "TestTooltipTemplate")`.
+pub(crate) fn load_tooltip_template(s: &UiScript) {
+    let mut xml = String::from(
+        r#"<Ui><GameTooltip name="TestTooltipTemplate" virtual="true"><Layers><Layer level="ARTWORK">"#,
+    );
+    for i in 1..=30 {
+        for side in ["Left", "Right"] {
+            xml.push_str(&format!(
+                r#"<FontString name="$parentText{side}{i}" hidden="true"/>"#
+            ));
+        }
+    }
+    xml.push_str("</Layer></Layers></GameTooltip></Ui>");
+    let doc = benilla_ui::framexml::parse(&xml).expect("tooltip template parses");
+    let report = benilla_ui::loader::load(s, &doc, &|_| None);
+    assert!(report.errors.is_empty(), "template: {:?}", report.errors);
+}
+
 /// The cooldown indicator's file, as the stock `CooldownFrameTemplate` names it.
 pub(super) const COOLDOWN_MODEL: &str = r"Interface\Cooldown\UI-Cooldown-Indicator.mdx";
 
@@ -486,6 +506,7 @@ pub(super) const MERCHANT_UI: &[&str] = &[
 /// warns, losing the scrollbar silently. Needs client data.
 pub(crate) const GOSSIP_UI: &[&str] = &[
     r"Interface\FrameXML\GlobalStrings.lua",
+    r"Interface\FrameXML\Fonts.xml",
     r"Interface\FrameXML\BasicControls.xml",
     r"Interface\FrameXML\LocaleProperties.lua",
     r"Interface\FrameXML\UIParent.xml",
@@ -501,7 +522,7 @@ pub(crate) const GOSSIP_UI: &[&str] = &[
 /// lacks what the app loads at setup (the master-loot menu reads `GROUP` and `GIVE_LOOT`),
 /// `ItemButtonTemplate.xml` because a missing template only warns, and `PartyFrame.xml` because
 /// `LootFrame.lua:217` reads `MAX_PARTY_MEMBERS` at load. Needs client data.
-pub(super) const LOOT_UI: &[&str] = &[
+pub(crate) const LOOT_UI: &[&str] = &[
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\Fonts.xml",
     "Interface\\FrameXML\\BasicControls.xml", // `TEXT`, which UnitPopup.lua reads at file scope
@@ -660,6 +681,8 @@ pub(super) const BAG_UI: &[&str] = &[
     "Interface\\FrameXML\\UIDropDownMenu.xml",
     r"Interface\FrameXML\UIPanelTemplates.lua",
     r"Interface\FrameXML\UIPanelTemplates.xml",
+    // `CharacterFrame.xml`'s tab template, for the hidden parent `PaperDollFrame` needs below.
+    r"Interface\FrameXML\CharacterFrameTemplates.xml",
     // The dialog engine, after the `UIPanelCloseButton` it inherits.
     r"Interface\FrameXML\StaticPopup.xml",
     // `ContainerFrameItemButton_OnClick` hides `StackSplitFrame` on every plain click
@@ -683,7 +706,9 @@ pub(super) const BAG_UI: &[&str] = &[
     "Interface\\FrameXML\\ItemButtonTemplate.xml",
     // `BagSlotButtonTemplate` inherits `PaperDollItemSlotButtonTemplate`, and its OnLoad
     // (`PaperDollItemSlotButton_OnLoad`) gives each bag button its inventory-slot id, 20..23.
-    // `CharacterFrame.xml` stays out: a missing `parent=` only warns.
+    // Its hidden parent `CharacterFrame` comes first: a parentless `PaperDollFrame` would be
+    // visible at the end of its load and run its OnShow, which reaches for the Honor tab.
+    "Interface\\FrameXML\\CharacterFrame.xml",
     "Interface\\FrameXML\\PaperDollFrame.xml",
     // The stock bag bar, with `BagSlotButtonTemplate` and `KEYRING_CONTAINER`.
     "Interface\\FrameXML\\MainMenuBarBagButtons.xml",
@@ -815,8 +840,7 @@ pub(crate) fn seat_chain_addon(s: &mut UiScript, name: &str) {
     let toc = super::reference_ui::read(&format!("Interface/AddOns/{name}/{name}.toc"))
         .map(|b| benilla_ui::toc::Toc::parse(&benilla_ui::source::decode(&b)))
         .unwrap_or_else(|| panic!("{name}: no toc off the chain"));
-    let mut info = super::addons::info_from_toc(name, &toc);
-    info.chain = true;
+    let info = super::addons::info_from_toc(name, &toc, true);
     s.set_addon_chain_reader(Box::new(super::reference_ui::read));
     s.register_addons(vec![info], None, None, None);
 }

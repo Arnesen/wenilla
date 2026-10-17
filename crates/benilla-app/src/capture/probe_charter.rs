@@ -34,11 +34,11 @@ use crate::net::{
     ChatKind, ClientCommand, Guid, NetCommands, NetEntity, ObjectStore, Objects, SelfPlayer,
 };
 use crate::player::Player;
+use crate::query_cache::Ask;
 use crate::target::cursor_mode::npc_flags;
 use crate::ui_gossip::GossipState;
 use crate::ui_items::{find_item, ItemSearch, PACK_SLOTS};
 use crate::ui_petition::GuildRegistrarState;
-use crate::ui_session::NpcSession;
 
 /// Aldwin Laughlin's spawn, the `.go xyz` target.
 const REGISTRAR_AT: [f32; 3] = [-8885.25, 614.395, 95.2576];
@@ -641,7 +641,7 @@ fn charter_probe(
             // `ITEM_FLAG_CHARTER`. Folded into one `Option` so a missing template still times out.
             let ready = found.and_then(|(bag_index, slot, guid)| {
                 items
-                    .template(CHARTER_ITEM_ENTRY, guid, &net)
+                    .template(CHARTER_ITEM_ENTRY, guid, Ask::New(&net))
                     .map(|t| (bag_index, slot, guid, t.flags))
             });
             if let Some((bag_index, slot, guid, flags)) = ready {

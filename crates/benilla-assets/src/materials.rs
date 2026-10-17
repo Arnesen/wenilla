@@ -115,6 +115,16 @@ pub struct WowModelExt {
     /// tint, `z` = the texture-transform affine, `w` = the UI tile's cell clip.
     #[uniform(100)]
     pub anim_slots: Vec4,
+    /// The second texture stage: `x` = bound (1) or not (0), `y` = its combine preset 0-5
+    /// (`benilla_formats::TextureStage::combine`); `z` = the stage-0 combine preset plus one
+    /// (`benilla_formats::RenderSubmesh::combine`), 0 for a batch that has none; `w` unused.
+    #[uniform(100)]
+    pub stage1: Vec4,
+    /// Stage 1's texture, sampled at the generated environment coordinate when `stage1.x` is set;
+    /// `None` binds the fallback image, unread.
+    #[texture(101, visibility(fragment))]
+    #[sampler(102, visibility(fragment))]
+    pub stage1_texture: Option<Handle<Image>>,
     /// The shared global light (`lighting::global_light`), updated in place once a frame; the
     /// vertex stage reads its point-light table, since Bevy's clusterable lights are fragment-only.
     #[storage(90, read_only, buffer, visibility(vertex, fragment))]
@@ -447,6 +457,179 @@ mod tests {
             "the model lane writes a fragment depth again — the sky pin is the vertex stage's, \
              and a fragment write costs every draw on this lane its early-Z"
         );
+    }
+
+    /// A second texture stage samples `Model2.bls`'s generated coordinate: the program for a stage
+    /// whose coordinate lookup is above 2 reflects the view-space position about the normal
+    /// (`DP3`, `MUL 2`, `MAD −`), normalizes it (`RSQ`) and maps x, y by `MAD ·0.5 + 0.5`.
+    #[test]
+    fn stage1_samples_the_model2_environment_coordinate() {
+        let src = include_str!("shaders/wow_model.wgsl");
+        assert!(
+            src.contains("let refl = normalize(p_view - 2.0 * dot(p_view, n_view) * n_view);")
+                && src.contains("return refl.xy * 0.5 + vec2<f32>(0.5, 0.5);"),
+            "the environment coordinate left `Model2.bls`'s reflection"
+        );
+        assert!(
+            src.contains(
+                "out.env_uv = wow_env_uv(view_rot * p_cam, normalize(view_rot * out.world_normal));"
+            ),
+            "stage 1 no longer generates its coordinate in view space"
+        );
+        assert!(
+            src.contains(
+                "tex1 = textureSampleBias(stage1_texture, stage1_sampler, in.env_uv, view.mip_bias);"
+            ),
+            "stage 1 no longer samples its texture at the generated coordinate"
+        );
+
+        /// The ARB program's arithmetic, step for step.
+        fn env_uv(p: [f32; 3], n: [f32; 3]) -> [f32; 2] {
+            let pn = p[0] * n[0] + p[1] * n[1] + p[2] * n[2];
+            let r: [f32; 3] = std::array::from_fn(|k| p[k] - 2.0 * pn * n[k]);
+            let inv = 1.0 / (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+            [r[0] * inv * 0.5 + 0.5, r[1] * inv * 0.5 + 0.5]
+        }
+        let close =
+            |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6;
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // Facing the eye straight on: R = (0, 0, 5), the texture's centre.
+        assert!(close(env_uv([0.0, 0.0, -5.0], [0.0, 0.0, 1.0]), [0.5, 0.5]));
+        // Off-axis on a facing normal: R = (3, 0, 4), u = 0.5 + 0.3.
+        assert!(close(env_uv([3.0, 0.0, -4.0], [0.0, 0.0, 1.0]), [0.8, 0.5]));
+        // A 45° normal turns the view ray to +x: the rim, u = 1.
+        assert!(close(env_uv([0.0, 0.0, -4.0], [h, 0.0, h]), [1.0, 0.5]));
+        // An upward normal above the eye: R = (0, −2, −2), v = 0.5 − 0.5·√½.
+        assert!(close(
+            env_uv([0.0, 2.0, -2.0], [0.0, 1.0, 0.0]),
+            [0.5, 0.5 - 0.5 * h]
+        ));
+    }
+
+    /// Stage 1 combines by the gx preset tables of the default device, Direct3D (`gxApi`,
+    /// `0x63a230`): colour `0x80a25c` (4, 4, 13, 7, 5, 12 as `D3DTOP`) and alpha `0x80a274` (3, 4,
+    /// 3, 7, 5, 3), args TEXTURE and CURRENT. The OpenGL records of `0x85c250` differ only in the
+    /// weights of presets 2 and 5. Every stock two-texture unit is preset 1, colour and alpha
+    /// modulated.
+    #[test]
+    fn stage1_combines_by_the_gx_presets() {
+        let src = include_str!("shaders/wow_model.wgsl");
+        for (line, why) in [
+            (
+                "var c = prev * tex.rgb;",
+                "presets 0 and 1 modulate the colour",
+            ),
+            (
+                "c = mix(prev, tex.rgb, tex.a);",
+                "preset 2, BLENDTEXTUREALPHA, blends by the texel's alpha",
+            ),
+            ("c = prev + tex.rgb;", "preset 3 adds"),
+            ("c = 2.0 * prev * tex.rgb;", "preset 4 modulates twice"),
+            (
+                "c = mix(prev, tex.rgb, diffuse_a);",
+                "preset 5, BLENDDIFFUSEALPHA, blends by the diffuse alpha",
+            ),
+            (
+                "return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));",
+                "a stage saturates",
+            ),
+            ("a = prev * tex;", "preset 1 modulates the alpha"),
+            ("a = prev + tex;", "preset 3 adds the alpha"),
+            ("a = 2.0 * prev * tex;", "preset 4 doubles the alpha"),
+            (
+                "rgb = stage1_rgb(stage1_preset, rgb, tex1, obj_fade);",
+                "stage 1 combines with the lit stage-0 result, preset 5 by the diffuse alpha",
+            ),
+            (
+                "base_color.a = stage_alpha(stage1_preset, base_color.a, tex1.a);",
+                "stage 1's alpha joins the alpha the cutout reads",
+            ),
+        ] {
+            assert!(src.contains(line), "{why}: `{line}` is gone");
+        }
+        // Stage 1 combines after the light and before the fog, as the stages precede the fog.
+        let combine = src.find("rgb = stage1_rgb(").expect("the combine");
+        let fog = src
+            .find("var fog_color = wow_light.fog_color;")
+            .expect("the fog");
+        let lit = src
+            .find("var rgb = select(lit_rgb, unlit_rgb, is_emissive);")
+            .expect("lit");
+        assert!(
+            lit < combine && combine < fog,
+            "stage 1 sits between the light and the fog"
+        );
+
+        /// Preset 1 on one texel: the stock units' combine.
+        fn preset1(prev: [f32; 4], tex: [f32; 4]) -> [f32; 4] {
+            std::array::from_fn(|k| (prev[k] * tex[k]).clamp(0.0, 1.0))
+        }
+        let out = preset1([0.8, 0.6, 0.4, 1.0], [0.5, 0.25, 1.0, 0.5]);
+        assert_eq!(out, [0.4, 0.15, 0.4, 0.5], "colour and alpha both modulate");
+    }
+
+    /// A fade twin blends by the alpha chain on the instance alpha, not the texel's: stage 0
+    /// combines the diffuse alpha (`0x70c73a`, c28.w) with the texel by its preset's alpha op
+    /// (`0x80a274` = 3, 4, 3, 7, 5, 3 as `D3DTOP`, args TEXTURE and CURRENT, `ALPHAARG` never set),
+    /// so an opaque batch's preset 0 (`0x811f8c`) blends by the fade alone, and the 0x101 models'
+    /// preset 1 by texel × fade.
+    #[test]
+    fn a_fade_twin_blends_by_the_stage_zero_alpha_op() {
+        let src = include_str!("shaders/wow_model.wgsl");
+        for (line, why) in [
+            (
+                "faded_alpha = stage_alpha(u32(m.stage1.z) - 1u, obj_fade, tex0_alpha);",
+                "the blended alpha is stage 0's alpha op on the fade and the texel",
+            ),
+            (
+                "faded_alpha = stage_alpha(stage1_preset, faded_alpha, tex1.a);",
+                "stage 1 follows on the faded alpha",
+            ),
+            (
+                "let tex0_alpha = base_color.a;",
+                "stage 0's texel alpha is read before stage 1 joins it",
+            ),
+            (
+                "fn stage_alpha(preset: u32, prev: f32, tex: f32) -> f32 {\n    var a = prev;",
+                "an alpha op that selects ARG2 passes the previous alpha, the fade, whole",
+            ),
+            (
+                "out.color = vec4<f32>(out_rgb, select(faded_alpha, 1.0, opaque_intent));",
+                "the output alpha is the chain's",
+            ),
+        ] {
+            assert!(src.contains(line), "{why}: `{line}` is gone");
+        }
+        // The old output multiplied the texel into every twin, whatever its combine.
+        assert!(
+            !src.contains("let faded_alpha = base_color.a * obj_fade;"),
+            "the twin's alpha is the texel times the fade again, preset 0 included"
+        );
+
+        /// `stage_alpha`, step for step.
+        fn stage_alpha(preset: u32, prev: f32, tex: f32) -> f32 {
+            match preset {
+                1 => prev * tex,
+                3 => prev + tex,
+                4 => 2.0 * prev * tex,
+                _ => prev,
+            }
+            .clamp(0.0, 1.0)
+        }
+        // A texel at alpha 0 (the Wind Rider's `WyvernSkin02` batch) fading at 0.5.
+        let (fade, texel) = (0.5, 0.0);
+        assert_eq!(stage_alpha(0, fade, texel), 0.5, "preset 0: the fade alone");
+        assert_eq!(stage_alpha(1, fade, texel), 0.0, "preset 1: texel × fade");
+        // Preset 0's alpha does not move with the texel; preset 1's does.
+        for t in [0.0, 0.25, 1.0] {
+            assert_eq!(stage_alpha(0, fade, t), fade);
+            assert_eq!(stage_alpha(1, fade, t), fade * t);
+        }
+        // The rest of the alpha ops: 2 and 5 select ARG2, 3 adds, 4 doubles the product.
+        assert_eq!(stage_alpha(2, 0.5, 0.25), 0.5);
+        assert_eq!(stage_alpha(5, 0.5, 0.25), 0.5);
+        assert_eq!(stage_alpha(3, 0.5, 0.25), 0.75);
+        assert_eq!(stage_alpha(4, 0.5, 0.25), 0.25);
     }
 
     /// The WGSL carries the reference's swatch row arithmetic, and a Rust mirror of it reproduces

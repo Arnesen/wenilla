@@ -1,8 +1,8 @@
 //! The spell-description `$`-token engine the 1.12 client runs over `Spell.dbc` description and
 //! aura text (`0x5075f0` → `0x507710`), effect values from `GetEffectPoints 0x6e3800`. Effect
-//! point values print unsigned, as the client's do. `$g` takes the first form without gender
-//! input. `$c` and `$p` (`507dde`, `507ded`), which no shipped text uses, and unknown or
-//! unresolved tokens stay raw.
+//! point values print unsigned, as the client's do. `$g` and `$G` branch on the active player's
+//! gender ([`TokenContext::gender`]). `$c` and `$p` (`507dde`, `507ded`), which no shipped text
+//! uses, and unknown or unresolved tokens stay raw.
 
 use super::soft_float;
 use super::{SpellDisplay, SpellDurationCatalog, SpellRadiusCatalog, SpellRangeCatalog};
@@ -40,6 +40,9 @@ pub struct TokenContext<'a> {
     /// points skip their modifiers (`6e3925`), and so does the duration of `$d` and `$o`
     /// (`0x6ea000`'s flag, pushed at `507ccd` and `507917`).
     pub unmodified_points: bool,
+    /// The active player's gender, `UNIT_FIELD_BYTES_0` byte 2 (`0x508214`), which `$g`/`$G`
+    /// branch on. Asked only where a branch expands.
+    pub gender: &'a dyn Fn() -> u8,
     /// The `$z` token: the home-bind area's name, from `SMSG_BINDPOINTUPDATE`'s area id through
     /// `AreaTable.dbc`; `None` leaves the token raw. Asked only where a `$z` expands, so a caller
     /// can tell which texts read the bind point.
@@ -416,6 +419,12 @@ fn scale_prefix(text: &str, at: usize) -> Option<(f32, usize)> {
     Some((scale, semi + 1))
 }
 
+/// `0x5081c8`-`0x5081d7` and `0x50822a`-`0x50823b`: a `$g`/`$G` branch arm's leading spaces are
+/// skipped, and `0x508267`-`0x508280` trims its trailing spaces — both forms alike.
+fn trim_spaces(arm: &str) -> &str {
+    arm.trim_matches(' ')
+}
+
 /// The CRT's `atoi`: leading whitespace, an optional sign, then decimal digits up to the first
 /// other character; nothing parsed is 0.
 fn atoi(bytes: &[u8]) -> i32 {
@@ -494,7 +503,8 @@ pub fn substitute(text: &str, spell: &SpellDisplay, ctx: &TokenContext) -> Strin
                                 b
                             }
                         }
-                        _ => a, // $g: the first form, as there is no gender input
+                        // `$g`/`$G` (`0x508180`): the first form on gender 0, else the second.
+                        _ => trim_spaces(if (ctx.gender)() == 0 { a } else { b }),
                     };
                     out.push_str(pick);
                     i = i + 1 + end + 1;
@@ -671,6 +681,7 @@ mod tests {
             lookup,
             mods: None,
             unmodified_points: false,
+            gender: &|| 0,
             global: &global,
             printf: &printf,
         }
@@ -735,6 +746,50 @@ mod tests {
         // No positive duration, and no row, which `0x6ea000` reads as 0 (`507cda`).
         assert_eq!(d(7), "<forever>");
         assert_eq!(d(8), "<forever>");
+    }
+
+    /// `0x508180`'s branch: the first form on gender 0, the second on anything else, the chosen
+    /// form trimmed of spaces at both ends (`0x5081c8`-`0x5081d7`, `0x50822a`-`0x50823b`,
+    /// `0x508267`-`0x508280`).
+    #[test]
+    fn gender_takes_the_players_side_of_the_branch() {
+        let durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        let d = SpellDisplay::default();
+        let gender = std::cell::Cell::new(0u8);
+        let c = TokenContext {
+            gender: &|| gender.get(),
+            ..ctx(&durations, &radii, &none_lookup)
+        };
+
+        assert_eq!(substitute("$ghis:her;", &d, &c), "his");
+        gender.set(1);
+        assert_eq!(substitute("$ghis:her;", &d, &c), "her");
+        gender.set(2);
+        assert_eq!(substitute("$ghis:her;", &d, &c), "her");
+        // `G` is the same branch (`0x508138`'s table maps both spellings to `0x50786d`).
+        assert_eq!(substitute("$GLad:LAss;", &d, &c), "LAss");
+        // The chosen form's spaces go from both ends.
+        gender.set(0);
+        assert_eq!(substitute("$g his : her ;", &d, &c), "his");
+        gender.set(1);
+        assert_eq!(substitute("$g his : her ;", &d, &c), "her");
+        // An empty chosen arm consumes the token.
+        gender.set(0);
+        assert_eq!(substitute("$g:male;", &d, &c), "");
+        gender.set(1);
+        assert_eq!(substitute("$g:male;", &d, &c), "male");
+        assert_eq!(substitute("$g female:;", &d, &c), "");
+        // The shipped wording: Conjure Food 587 and Hellfire 1949.
+        assert_eq!(
+            substitute("providing the mage and $ghis:her; allies", &d, &c),
+            "providing the mage and her allies"
+        );
+        gender.set(0);
+        assert_eq!(
+            substitute("damage to $ghimself:herself;", &d, &c),
+            "damage to himself"
+        );
     }
 
     #[test]

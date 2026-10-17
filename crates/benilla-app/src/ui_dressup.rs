@@ -12,6 +12,7 @@ use crate::entities::equip_slot;
 use crate::items::Items;
 use crate::net::{NetCommands, NetEntity, ObjectStore, SelfPlayer};
 use crate::portrait::{DressUpLook, DressUpPreview};
+use crate::query_cache::Ask;
 use crate::ui_script::UiFeed;
 
 /// Every rendered equipment slot, the set [`equip_slot`] can map an item into.
@@ -93,8 +94,11 @@ pub(crate) struct DressUpRoom {
     /// Held substitutions (slots 15-17) in landing order, latest last: a held try-on can evict the
     /// other lane, so the order decides what survives.
     held_order: Vec<usize>,
-    /// Item ids still waiting on their template, retried every frame.
+    /// Item ids still waiting on their template, read again every frame.
     pending: Vec<u32>,
+    /// How many of `pending`, from the front, a resolve has looked up: the rest were tried on
+    /// since, each a lookup with the callback `0x504ba0` (`0x504579`).
+    pending_asked: usize,
 }
 
 impl DressUpRoom {
@@ -106,6 +110,7 @@ impl DressUpRoom {
                 self.worn = Default::default();
                 self.held_order.clear();
                 self.pending.clear();
+                self.pending_asked = 0;
             }
             DressUpIntent::Undress => {
                 self.open = true;
@@ -127,15 +132,21 @@ impl DressUpRoom {
                 self.worn = Default::default();
                 self.held_order.clear();
                 self.pending.clear();
+                self.pending_asked = 0;
             }
         }
     }
 
-    /// An id the server never answers stays pending, and its slot shows the player's own gear.
+    /// An id the server never answers stays pending, and its slot shows the player's own gear. A
+    /// try-on's first resolve is its lookup; the later ones read.
     fn resolve_pending(&mut self, items: &Items, commands: &NetCommands) {
         let mut pending = std::mem::take(&mut self.pending);
+        let asked = std::mem::take(&mut self.pending_asked);
+        let mut i = 0;
         pending.retain(|item| {
-            let Some(t) = items.template(*item, 0, commands) else {
+            let ask = Ask::at(i >= asked, commands);
+            i += 1;
+            let Some(t) = items.template(*item, 0, ask) else {
                 return true; // in flight
             };
             let (display_id, inventory_type) = (t.display_info_id, t.inventory_type as u8);
@@ -154,6 +165,7 @@ impl DressUpRoom {
             false
         });
         self.pending = pending;
+        self.pending_asked = self.pending.len();
     }
 }
 
@@ -173,9 +185,8 @@ fn feed_dressup(
     items: Res<Items>,
     commands: Res<NetCommands>,
     self_q: Query<(&ObjectStore, &NetEntity), With<SelfPlayer>>,
-    // `ResMut` because the guild cache is lazy: a miss sends the `CMSG_GUILD_QUERY` whose answer
-    // paints the tabard.
-    mut guilds: ResMut<crate::ui_guild::GuildState>,
+    // A miss sends the `CMSG_GUILD_QUERY` whose answer paints the tabard.
+    guilds: Res<crate::ui_guild::GuildState>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -193,19 +204,14 @@ fn feed_dressup(
     {
         room.apply(DressUpIntent::Close);
     }
-    // The stock rotate buttons set the yaw with `DressUpModel:SetRotation`; the booth mirrors it.
-    preview.yaw = script.model_pane_facing("DressUpModel");
-
     room.resolve_pending(&items, &commands);
 
     // The crest comes off the guild cache this system holds, not the outfit `player_look` builds.
     let look = match (room.open, self_q.single().ok()) {
-        (true, Some((store, net))) => {
-            player_look(store, net, &room, &items, &commands).map(|l| DressUpLook {
-                emblem: crate::ui_guild::unit_guild_emblem(&store.0, &mut guilds, &commands),
-                ..l
-            })
-        }
+        (true, Some((store, net))) => player_look(store, net, &room, &items).map(|l| DressUpLook {
+            emblem: crate::ui_guild::unit_guild_emblem(&store.0, &guilds, Ask::New(&commands)),
+            ..l
+        }),
         _ => None,
     };
     if preview.look != look {
@@ -219,7 +225,6 @@ fn player_look(
     net: &NetEntity,
     room: &DressUpRoom,
     items: &Items,
-    commands: &NetCommands,
 ) -> Option<DressUpLook> {
     let s = &store.0;
     let mut equipment = [CharEnumItem::default(); 19];
@@ -243,8 +248,9 @@ fn player_look(
         let Some(entry) = s.player_visible_item_entry(slot).filter(|e| *e != 0) else {
             continue;
         };
-        // The visible-item field carries an item entry; the display id is on its template.
-        if let Some(t) = items.template(entry, 0, commands) {
+        // The visible-item field carries an item entry; the display id is on its template, which
+        // the field's change looked up (`0x5ed764`).
+        if let Some(t) = items.template(entry, 0, Ask::Read) {
             equipment[idx] = CharEnumItem {
                 display_id: t.display_info_id,
                 inventory_type: t.inventory_type as u8,
@@ -311,6 +317,34 @@ mod tests {
         }
     }
 
+    /// A try-on looks its item up with the callback `0x504ba0` (`0x504579`); the resolves while it
+    /// waits read. A refused item is asked by no resolve after it, only by the next try-on.
+    #[test]
+    fn a_refused_try_on_is_asked_by_the_next_try_on_never_by_a_frame() {
+        let (cmds, rx) = commands();
+        let mut items = Items::default();
+        let mut room = DressUpRoom::default();
+        room.apply(DressUpIntent::Dress);
+        room.apply(DressUpIntent::TryOn(2000));
+        room.resolve_pending(&items, &cmds);
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        items.insert_template(2000, None);
+        for _ in 0..600 {
+            room.resolve_pending(&items, &cmds);
+        }
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "no frame asks a refusal"
+        );
+        room.apply(DressUpIntent::TryOn(2000));
+        room.resolve_pending(&items, &cmds);
+        assert_eq!(
+            crate::query_cache::queries(&rx).len(),
+            1,
+            "the next try-on asks again"
+        );
+    }
+
     #[test]
     fn a_try_on_substitutes_only_its_own_slot() {
         let (cmds, _rx) = commands();
@@ -327,7 +361,7 @@ mod tests {
         room.apply(DressUpIntent::TryOn(2000));
         room.resolve_pending(&items, &cmds);
 
-        let look = player_look(&store, &net(), &room, &items, &cmds).expect("a look");
+        let look = player_look(&store, &net(), &room, &items).expect("a look");
         assert_eq!(
             look.equipment[4].display_id, 7000,
             "the tried-on chest shows"
@@ -355,7 +389,7 @@ mod tests {
         room.apply(DressUpIntent::TryOn(2000));
         room.resolve_pending(&items, &cmds);
         assert_eq!(
-            player_look(&store, &net(), &room, &items, &cmds)
+            player_look(&store, &net(), &room, &items)
                 .unwrap()
                 .equipment[4]
                 .display_id,
@@ -364,7 +398,7 @@ mod tests {
 
         room.apply(DressUpIntent::Dress);
         assert_eq!(
-            player_look(&store, &net(), &room, &items, &cmds)
+            player_look(&store, &net(), &room, &items)
                 .unwrap()
                 .equipment[4]
                 .display_id,
@@ -391,7 +425,7 @@ mod tests {
         room.apply(DressUpIntent::TryOn(2000));
         room.resolve_pending(&items, &cmds);
         room.apply(DressUpIntent::Undress);
-        let look = player_look(&store, &net(), &room, &items, &cmds).unwrap();
+        let look = player_look(&store, &net(), &room, &items).unwrap();
         assert_eq!(look.equipment[4].display_id, 0, "the tried-on chest is off");
         assert_eq!(look.equipment[0].display_id, 0, "the worn helm is off");
         assert_eq!(
@@ -401,7 +435,7 @@ mod tests {
 
         room.apply(DressUpIntent::TryOn(2000));
         room.resolve_pending(&items, &cmds);
-        let look = player_look(&store, &net(), &room, &items, &cmds).unwrap();
+        let look = player_look(&store, &net(), &room, &items).unwrap();
         assert_eq!(
             look.equipment[4].display_id, 7000,
             "a try-on lands on the bare body"
@@ -412,7 +446,7 @@ mod tests {
         );
 
         room.apply(DressUpIntent::Dress);
-        let look = player_look(&store, &net(), &room, &items, &cmds).unwrap();
+        let look = player_look(&store, &net(), &room, &items).unwrap();
         assert_eq!(
             look.equipment[4].display_id, 5000,
             "Dress puts the player's own chest back"
@@ -433,7 +467,7 @@ mod tests {
         room.resolve_pending(&items, &cmds);
         assert_eq!(room.pending, vec![2000], "still waiting on the answer");
         assert_eq!(
-            player_look(&store, &net(), &room, &items, &cmds)
+            player_look(&store, &net(), &room, &items)
                 .unwrap()
                 .equipment[4]
                 .display_id,
@@ -450,7 +484,7 @@ mod tests {
         room.resolve_pending(&items, &cmds);
         assert!(room.pending.is_empty());
         assert_eq!(
-            player_look(&store, &net(), &room, &items, &cmds)
+            player_look(&store, &net(), &room, &items)
                 .unwrap()
                 .equipment[4]
                 .display_id,
@@ -488,7 +522,7 @@ mod tests {
             room.apply(DressUpIntent::TryOn(item));
             room.resolve_pending(&items, &cmds);
 
-            let look = player_look(&store, &net(), &room, &items, &cmds).expect("a look");
+            let look = player_look(&store, &net(), &room, &items).expect("a look");
             assert_eq!(
                 look.equipment[17].display_id, display,
                 "the {what} is in the ranged slot, which is what puts it in a hand"
@@ -504,7 +538,6 @@ mod tests {
     /// The booth is melee-drawn ([`held_lanes`]); a ranged weapon shows only while ranged-drawn.
     #[test]
     fn a_worn_ranged_weapon_is_not_shown_until_it_is_tried_on() {
-        let (cmds, _rx) = commands();
         let mut items = Items::default();
         items.insert_template(1500, Some(worn("Worn Sword", 5500, 21)));
         items.insert_template(1700, Some(worn("Worn Bow", 5700, 15)));
@@ -512,7 +545,7 @@ mod tests {
 
         let mut room = DressUpRoom::default();
         room.apply(DressUpIntent::Dress);
-        let look = player_look(&store, &net(), &room, &items, &cmds).expect("a look");
+        let look = player_look(&store, &net(), &room, &items).expect("a look");
         assert_eq!(
             look.equipment[17].display_id, 0,
             "the worn bow stays stowed"
@@ -536,7 +569,7 @@ mod tests {
         room.apply(DressUpIntent::TryOn(2700));
         room.resolve_pending(&items, &cmds);
 
-        let look = player_look(&store, &net(), &room, &items, &cmds).expect("a look");
+        let look = player_look(&store, &net(), &room, &items).expect("a look");
         assert_eq!(look.equipment[15].display_id, 8700, "the axe is in hand");
         assert_eq!(look.equipment[17].display_id, 0, "…and the bow is gone");
     }
@@ -554,11 +587,11 @@ mod tests {
         room.apply(DressUpIntent::TryOn(1600));
         room.resolve_pending(&items, &cmds);
 
-        let look = player_look(&player(&[(15, 1500)]), &net(), &room, &items, &cmds).unwrap();
+        let look = player_look(&player(&[(15, 1500)]), &net(), &room, &items).unwrap();
         assert_eq!(look.equipment[15].display_id, 5500, "the one-hander stays");
         assert_eq!(look.equipment[16].display_id, 5600, "…beside the shield");
 
-        let look = player_look(&player(&[(15, 1550)]), &net(), &room, &items, &cmds).unwrap();
+        let look = player_look(&player(&[(15, 1550)]), &net(), &room, &items).unwrap();
         assert_eq!(
             look.equipment[15].display_id, 0,
             "the two-hander is evicted"
@@ -589,7 +622,7 @@ mod tests {
             room.apply(DressUpIntent::TryOn(2000));
             room.resolve_pending(&items, &cmds);
 
-            let look = player_look(&store, &net(), &room, &items, &cmds).expect("a look");
+            let look = player_look(&store, &net(), &room, &items).expect("a look");
             assert_eq!(look.equipment[7].display_id, 7000, "the boots went on");
             assert_eq!(
                 (look.equipment[15].display_id, look.equipment[16].display_id),
@@ -617,7 +650,7 @@ mod tests {
 
         let mut room = DressUpRoom::default();
         room.apply(DressUpIntent::Dress);
-        let look = player_look(&store, &net(), &room, &items, &cmds).expect("a look");
+        let look = player_look(&store, &net(), &room, &items).expect("a look");
         assert_eq!(
             look.equipment[0].display_id, 0,
             "the player's own helm is hidden"
@@ -631,7 +664,7 @@ mod tests {
         // The reference's `TryOn` path never tests the flag.
         room.apply(DressUpIntent::TryOn(2000));
         room.resolve_pending(&items, &cmds);
-        let look = player_look(&store, &net(), &room, &items, &cmds).expect("a look");
+        let look = player_look(&store, &net(), &room, &items).expect("a look");
         assert_eq!(
             look.equipment[0].display_id, 7000,
             "the tried-on helm previews regardless of the preference"
@@ -639,7 +672,7 @@ mod tests {
 
         // Reset drops the substitution: bare-headed again.
         room.apply(DressUpIntent::Dress);
-        let look = player_look(&store, &net(), &room, &items, &cmds).expect("a look");
+        let look = player_look(&store, &net(), &room, &items).expect("a look");
         assert_eq!(
             look.equipment[0].display_id, 0,
             "Reset re-clones the hidden helm away"

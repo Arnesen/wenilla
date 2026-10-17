@@ -5,6 +5,7 @@ use bevy::prelude::*;
 
 use crate::net::Embodied;
 use crate::player::{head_height, CameraPivot, Player};
+use crate::query_cache::Ask;
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
 
@@ -55,7 +56,7 @@ pub(crate) use emote::EmoteSounds;
 pub(crate) fn kit_decodes() -> u32 {
     kit::DECODES.load(std::sync::atomic::Ordering::Relaxed)
 }
-pub(crate) use glue::GlueSound;
+pub(crate) use glue::GlueMusicRequest;
 pub(crate) use greeting::NpcGreetingRequest;
 /// Named by the schedule tests' class table (`game_plugins::schedule_tests::Classes`).
 #[cfg(test)]
@@ -288,13 +289,13 @@ pub(super) fn worn_chest_material(
     store: Option<&crate::net::ObjectStore>,
     objects: &crate::net::Objects,
     items: &crate::items::Items,
-    net: &crate::net::NetCommands,
 ) -> Option<u32> {
     /// The fifth 8-byte guid of the inv-slot array (`0x62fa50`/`0x62fb86`).
     const EQUIPMENT_SLOT_CHEST: u8 = 4;
     let guid = store?.0.player_inv_slot(EQUIPMENT_SLOT_CHEST)?;
     let entry = objects.object(guid)?.object_entry()?;
-    Some(items.held(entry, net)?.material)
+    // A worn item's record only read: its create asked.
+    Some(items.held(entry, Ask::Read)?.material)
 }
 
 /// This frame's listener pose in Bevy space, set by [`update_audio_listener`] and read by every
@@ -317,10 +318,10 @@ impl Default for AudioListener {
 /// The world soundscape is live: in the world and seated on the avatar. The seat check matters
 /// after a logout, when the camera still sits at the old spot until the next take-control.
 fn world_audio_live(
-    state: Res<State<crate::char_select::ClientState>>,
+    state: Res<State<crate::client_state::ClientState>>,
     player: Res<Player>,
 ) -> bool {
-    *state.get() == crate::char_select::ClientState::InWorld && player.active
+    *state.get() == crate::client_state::ClientState::InWorld && player.active
 }
 
 pub(crate) struct SoundPlugin;

@@ -110,7 +110,8 @@
             BenillaOptionsFrame:SetScale(k)
         end
 
-        -- The era tab width, label + 40, measured after OnShow sets the scale.
+        -- The era tab width, label + 40, measured after the window's OnShow sets the scale:
+        -- the tabs' own OnShows run before it, children first.
         function BenillaOptionsTab_FitWidth(tab)
             tab:SetWidth(getglobal(tab:GetName() .. "Text"):GetStringWidth() + 40)
         end
@@ -262,11 +263,29 @@
             return bottom
         end
 
+        -- The scroll frame's size in its own units, from its edges: its anchors size it, and
+        -- GetWidth answers such a frame's span before the window's scale divides it.
+        local function BenillaOptionsScroll_Size(sf)
+            local l, r, t, b = sf:GetLeft(), sf:GetRight(), sf:GetTop(), sf:GetBottom()
+            if not l or not r or not t or not b then return nil end
+            return r - l, t - b
+        end
+
+        -- The page's range is the body's overhang, the content Fit measures: the engine's range
+        -- also counts the Keybindings list's faux scroll child, which is sized to every row.
+        function BenillaOptionsScroll_Range(sf)
+            local _, fh = BenillaOptionsScroll_Size(sf)
+            if not fh then return 0 end
+            local range = BenillaOptionsFrameContainerBody:GetHeight() - fh
+            if range > 0 then return range end
+            return 0
+        end
+
         -- From OnUpdate, off the previous frame's rects; SetWidth and SetHeight invalidate layout.
         function BenillaOptionsScroll_Fit()
             local sf = BenillaOptionsFrameContainerScroll
             local body = BenillaOptionsFrameContainerBody
-            local fw, fh = sf:GetWidth(), sf:GetHeight()
+            local fw, fh = BenillaOptionsScroll_Size(sf)
             if not fw or fw <= 0 or not fh or fh <= 0 then return end
             if math.abs(body:GetWidth() - fw) >= 0.5 then body:SetWidth(fw) end
             local h = fh
@@ -278,6 +297,9 @@
             if math.abs(body:GetHeight() - h) >= 0.5 then
                 body:SetHeight(h)
                 sf:UpdateScrollChildRect()
+                -- The bar follows the body, which the range notify misses when the engine's range,
+                -- a whole-subtree union, does not move.
+                BenillaScroll_SyncBar(sf)
             end
         end
 
@@ -453,10 +475,11 @@
                 "RowWeatherDensity",
                 "RowDisplayMode", "RowVerticalSync", "RowRenderScale",
             },
-            -- Guild Names is a child of Player Names (UIOptionsFrame.lua:703-709).
+            -- Guild Names and Player Titles are children of Player Names
+            -- (UIOptionsFrame.lua:703-709).
             Nameplates = {
                 "RowEnemyPlates", "RowFriendlyPlates",
-                "RowPlayerNames", "RowGuildNames", "RowNpcNames", "RowOwnName",
+                "RowPlayerNames", "RowGuildNames", "RowPlayerTitles", "RowNpcNames", "RowOwnName",
             },
             -- 1.12's Display box by column, then Help; target-of-target sits under Status Text.
             Interface = {
@@ -849,9 +872,13 @@
                 return
             end
             if key == "Nameplates" then
-                -- UIOptionsFrame.lua:703-709: Player Names off greys Player Guild Names.
-                BenillaOptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyNameplatesRowGuildNames,
-                    GetCVar("UnitNamePlayer") ~= "0")
+                -- UIOptionsFrame.lua:703-709: Player Names off greys Player Guild Names and
+                -- Player Titles.
+                local on = GetCVar("UnitNamePlayer") ~= "0"
+                BenillaOptionsRow_SetEnabled(
+                    BenillaOptionsFrameContainerBodyNameplatesRowGuildNames, on)
+                BenillaOptionsRow_SetEnabled(
+                    BenillaOptionsFrameContainerBodyNameplatesRowPlayerTitles, on)
                 return
             end
             if key == "Interface" then
@@ -1248,9 +1275,11 @@
             <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
         </Backdrop>
         <Layers>
-            <Layer level="BACKGROUND">
+            <!-- BORDER, over the tile: a layer draws its textures sorted by texture, not in
+                 declaration order, so on BACKGROUND the fill could sort under the tile. -->
+            <Layer level="BORDER">
                 <!-- 0.88 combined with the tile, so labels read over bright terrain. Inset 15:
-                     regions draw over the border, whose ink ends by texel 14. -->
+                     clear of the border's ink, which ends by texel 14. -->
                 <Texture name="$parentGroundDim">
                     <Anchors>
                         <Anchor point="TOPLEFT"><Offset><AbsDimension x="15" y="-15"/></Offset></Anchor>
@@ -1336,9 +1365,6 @@
                 <NormalFont inherits="GameFontHighlightSmall"/>
                 <HighlightFont inherits="GameFontHighlightSmall"/>
                 <DisabledFont inherits="GameFontHighlightSmall"/>
-                <Scripts>
-                    <OnShow>BenillaOptionsTab_FitWidth(this)</OnShow>
-                </Scripts>
             </Button>
             <Button name="$parentAddOnsTab">
                 <Size><AbsDimension x="87" y="37"/></Size>
@@ -1366,7 +1392,6 @@
                 <!-- No addon list behind it: disabled, in the era's unselected gold. -->
                 <Scripts>
                     <OnLoad>this:Disable()</OnLoad>
-                    <OnShow>BenillaOptionsTab_FitWidth(this)</OnShow>
                 </Scripts>
             </Button>
 
@@ -1496,7 +1521,10 @@
                         </Anchors>
                         <Scripts>
                             <!-- The loader fires OnLoad bottom-up, so the body already exists. -->
-                            <OnLoad>this:SetScrollChild(BenillaOptionsFrameContainerBody)</OnLoad>
+                            <OnLoad>
+                                this:SetScrollChild(BenillaOptionsFrameContainerBody)
+                                this.contentRange = BenillaOptionsScroll_Range
+                            </OnLoad>
                             <OnUpdate>BenillaOptionsScroll_Fit()</OnUpdate>
                             <!-- An armed Keybindings capsule binds the wheel, search rows included. -->
                             <OnMouseWheel>
@@ -1510,8 +1538,14 @@
                             <OnScrollRangeChanged>BenillaScroll_SyncBar(this)</OnScrollRangeChanged>
                         </Scripts>
                         <Frames>
-                            <!-- Declared before the body and the bar so it draws beneath both. -->
-                            <Frame name="$parentBarTrough" inherits="BenillaScrollTroughTemplate"/>
+                            <!-- At the ScrollFrame's own level, beneath both the body, which the
+                                 ScrollFrame's HIGHLIGHT callback draws at that level, and the bar,
+                                 a level up. -->
+                            <Frame name="$parentBarTrough" inherits="BenillaScrollTroughTemplate">
+                                <Scripts>
+                                    <OnLoad>this:SetFrameLevel(this:GetParent():GetFrameLevel())</OnLoad>
+                                </Scripts>
+                            </Frame>
                             <!-- Sized, not anchored: SetScrollChild pins its TOPLEFT and
                                  BenillaOptionsScroll_Fit sizes it. -->
                             <Frame name="BenillaOptionsFrameContainerBody">
@@ -2638,10 +2672,23 @@
                                                 this.parentRow = "RowPlayerNames"
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowNpcNames" inherits="BenillaOptionsCheckboxRowTemplate">
+                                        <!-- A child of Player Names on its own CVar, CheckButton23 of
+                                             21 (`UIOptionsFrame.lua:24`), greyed with it (`:703-709`). -->
+                                        <Frame name="$parentRowPlayerTitles" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowGuildNames" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowGuildNames" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "UnitNamePlayerPVPTitle", "Player Titles",
+                                                    "OPTION_TOOLTIP_SHOW_PLAYER_TITLES", 1)
+                                                this.parentRow = "RowPlayerNames"
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowNpcNames" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerTitles" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerTitles" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>BenillaOptionsRow_OnLoad(this, "UnitNameNPC", "NPC Names",
                                                 "OPTION_TOOLTIP_SHOW_NPC_NAMES")</OnLoad></Scripts>
@@ -2829,7 +2876,8 @@
                                     </Anchors>
                                 </Frame>
                                         <!-- Declared before the faux frame so it draws beneath
-                                             it. -->
+                                             it: inside the body, the scroll child, link order
+                                             draws, not level. -->
                                         <Frame name="$parentScrollFrameScrollBarTrough" inherits="BenillaScrollTroughTemplate"/>
                                         <!-- Ends at -32, so the kit's bar rides the -26..-10
                                              gutter. -->
@@ -2941,7 +2989,6 @@
                                     <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-10" y="-21"/></Offset></Anchor>
                                     <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-10" y="20"/></Offset></Anchor>
                                 </Anchors>
-                                <Scripts><OnValueChanged>BenillaScrollBar_OnValueChanged(this, arg1)</OnValueChanged></Scripts>
                             </Slider>
                         </Frames>
                     </ScrollFrame>
@@ -3050,6 +3097,8 @@
             <!-- Controls by default; selection persists and the scale re-fits, as the era's. -->
             <OnShow>
                 BenillaOptionsFrame_UpdateScale()
+                BenillaOptionsTab_FitWidth(BenillaOptionsFrameGameTab)
+                BenillaOptionsTab_FitWidth(BenillaOptionsFrameAddOnsTab)
                 BenillaOptionsFrame_SelectCategory(this.selectedCategory or "Controls")
                 if UpdateMicroButtons then UpdateMicroButtons() end
             </OnShow>

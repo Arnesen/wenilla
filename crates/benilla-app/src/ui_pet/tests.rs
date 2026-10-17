@@ -312,33 +312,22 @@ fn a_press_latches_the_state_the_server_never_echoes() {
     );
 }
 
-/// `OnClick`'s `SetChecked(0)` unlights every press; `0x4bc940`/`0x4bc960` relight it by
-/// signalling unconditionally, and a hunter's Attack skips the signal at `0x4bd429`.
+/// The reaction and Stay/Follow presses signal in the VM's verb (`0x4bc956`, `0x4bc979`), so the
+/// app's mirror of the latch signals nothing; only the possessed Attack latch, behind the
+/// validator this side runs, still signals from here (`0x4bd438`).
 #[test]
-fn every_press_the_reference_signals_forces_a_repaint() {
+fn only_the_possessed_attack_press_signals_from_the_app() {
     let mut bar = PetBar {
         spells: state(PET_COMMAND_FOLLOW, PET_REACT_DEFENSIVE),
         ..Default::default()
     };
     let signals = |b: &PetBar| b.bar_signals;
 
-    // The mode the pet is already in: the state does not move, the signal still fires.
     let before = signals(&bar);
-    latch_press(&mut bar, packed(PET_COMMAND_FOLLOW, PET_ACT_COMMAND), false);
-    assert_eq!(bar.spells.command_state(), PET_COMMAND_FOLLOW, "unmoved");
-    assert_ne!(signals(&bar), before, "and it repaints anyway");
-
-    let before = signals(&bar);
-    latch_press(
-        &mut bar,
-        packed(PET_REACT_DEFENSIVE, PET_ACT_REACTION),
-        false,
-    );
-    assert_eq!(bar.spells.react_state(), PET_REACT_DEFENSIVE, "unmoved");
-    assert_ne!(signals(&bar), before, "same for the reaction side");
-
-    // The presses the reference leaves silent.
-    let before = signals(&bar);
+    latch_press(&mut bar, packed(PET_COMMAND_STAY, PET_ACT_COMMAND), false);
+    assert_eq!(bar.spells.command_state(), PET_COMMAND_STAY, "mirrored");
+    latch_press(&mut bar, packed(PET_REACT_PASSIVE, PET_ACT_REACTION), false);
+    assert_eq!(bar.spells.react_state(), PET_REACT_PASSIVE, "mirrored");
     latch_press(
         &mut bar,
         packed(PET_COMMAND_DISMISS, PET_ACT_COMMAND),
@@ -346,13 +335,8 @@ fn every_press_the_reference_signals_forces_a_repaint() {
     );
     latch_press(&mut bar, packed(3010, PET_ACT_ENABLED), false);
     latch_press(&mut bar, packed(PET_COMMAND_ATTACK, PET_ACT_COMMAND), false);
-    assert_eq!(
-        signals(&bar),
-        before,
-        "Dismiss, a spell and a pet's Attack all reach 0x4bd444 without signalling"
-    );
+    assert_eq!(signals(&bar), before, "none of these signals from the app");
 
-    // A possessed unit's Attack signals (`0x4bd429`).
     latch_press(&mut bar, packed(PET_COMMAND_ATTACK, PET_ACT_COMMAND), true);
     assert_ne!(signals(&bar), before);
 }
@@ -396,7 +380,8 @@ fn the_latch_gate_is_possession_not_ownership() {
     let hunter_pet = unit(&[
         (CREATEDBY, 0x77),
         (CREATEDBY + 1, 0),
-        (FLAGS, UNIT_FLAG_PET_IN_COMBAT),
+        // The in-combat bit, which `0x5ee5a0` does not read.
+        (FLAGS, 0x800),
     ]);
     assert!(!possessing(Some(&hunter_pet), me));
 
@@ -547,51 +532,6 @@ fn touching_your_target_calls_the_pet_off() {
     // With the latch down it sends nothing (`0x4bd65e`).
     assert!(!stop_pet_attack(&mut bar, &commands));
     assert!(rx.try_recv().is_err());
-}
-
-/// The owner test falls back to SUMMONEDBY, not `0x5ee5a0`'s CREATEDBY.
-#[test]
-fn the_attack_events_read_the_pets_combat_flag_not_the_click_latch() {
-    const FLAGS: u16 = 46;
-    const CHARMEDBY: u16 = 10;
-    const SUMMONEDBY: u16 = 12;
-    let unit =
-        |pairs: &[(u16, u32)]| ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs));
-    let me = Some(0x77u64);
-
-    // Ours by SUMMONEDBY, fighting or not.
-    let mine = |flags: u32| unit(&[(SUMMONEDBY, 0x77), (SUMMONEDBY + 1, 0), (FLAGS, flags)]);
-    assert_eq!(
-        pet_combat_flag(&mine(UNIT_FLAG_PET_IN_COMBAT), me),
-        Some(true)
-    );
-    assert_eq!(pet_combat_flag(&mine(0), me), Some(false));
-    // The callback tests one bit.
-    assert_eq!(pet_combat_flag(&mine(0x1000), me), Some(false));
-
-    // Another player's minion never fires.
-    let theirs = unit(&[
-        (SUMMONEDBY, 0x99),
-        (SUMMONEDBY + 1, 0),
-        (FLAGS, UNIT_FLAG_PET_IN_COMBAT),
-    ]);
-    assert_eq!(pet_combat_flag(&theirs, me), None);
-
-    // CHARMEDBY wins over SUMMONEDBY, both ways.
-    let charmed_by_me = unit(&[
-        (CHARMEDBY, 0x77),
-        (CHARMEDBY + 1, 0),
-        (FLAGS, UNIT_FLAG_PET_IN_COMBAT),
-    ]);
-    assert_eq!(pet_combat_flag(&charmed_by_me, me), Some(true));
-    let stolen = unit(&[
-        (CHARMEDBY, 0x99),
-        (CHARMEDBY + 1, 0),
-        (SUMMONEDBY, 0x77),
-        (SUMMONEDBY + 1, 0),
-        (FLAGS, UNIT_FLAG_PET_IN_COMBAT),
-    ]);
-    assert_eq!(pet_combat_flag(&stolen, me), None);
 }
 
 #[test]
@@ -999,6 +939,7 @@ fn a_held_pet_names_its_templates_creature_type() {
         .init_resource::<crate::net::GuidIndex>()
         .init_resource::<crate::net::SelfGuid>()
         .insert_resource(names)
+        .insert_resource(crate::target::CreatureTypes::korean_for_tests())
         .insert_resource(PetBar {
             spells: PetSpells {
                 pet_guid: PET,
@@ -1033,5 +974,79 @@ fn a_held_pet_names_its_templates_creature_type() {
         .non_send_resource_mut::<benilla_ui::script::UiScript>()
         .eval::<Option<String>>("return UnitCreatureType('pet')")
         .unwrap();
-    assert_eq!(answer.as_deref(), Some("Demon"));
+    assert_eq!(answer.as_deref(), Some("악마"));
+}
+
+/// `PET_ATTACK_START`/`STOP` are the flags watcher's (`crate::field_watch`, `0x5ff79f`): the pet
+/// feed fires neither, at first sight in combat or on either edge after.
+#[test]
+fn the_pet_feed_fires_no_attack_event() {
+    use bevy::prelude::*;
+    const ME: u64 = 0x77;
+    const PET: u64 = 0xF140_0000_0000_002A;
+    const FLAGS: u16 = 46;
+    const SUMMONEDBY: u16 = 12;
+
+    let mut app = App::new();
+    app.add_message::<crate::net::FieldChanged>()
+        .init_resource::<crate::net::GuidIndex>()
+        .insert_resource(crate::net::SelfGuid(Some(ME)))
+        .init_resource::<crate::names::NameCache>()
+        .insert_resource(PetBar {
+            spells: PetSpells {
+                pet_guid: PET,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .add_systems(Update, feed_pet_unit);
+    let (tx, rx) = crossbeam_channel::unbounded();
+    // Kept alive for the run: a dropped receiver would fail the name query.
+    std::mem::forget(rx);
+    app.insert_resource(NetCommands(tx));
+    let pet = app
+        .world_mut()
+        .spawn((
+            crate::net::Guid(PET),
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (SUMMONEDBY, ME as u32),
+                (FLAGS, 0x800),
+            ])),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<crate::net::GuidIndex>()
+        .0
+        .insert(PET, pet);
+    let script = benilla_ui::script::UiScript::new().unwrap();
+    script
+        .run(
+            r#"
+            SEEN = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("PET_ATTACK_START")
+            f:RegisterEvent("PET_ATTACK_STOP")
+            f:SetScript("OnEvent", function() table.insert(SEEN, event) end)
+        "#,
+        )
+        .unwrap();
+    app.insert_non_send_resource(script);
+
+    for flags in [0x800, 0, 0x800] {
+        app.world_mut()
+            .entity_mut(pet)
+            .get_mut::<ObjectStore>()
+            .unwrap()
+            .0
+            .merge(benilla_protocol::ObjectFields::from_pairs(&[(
+                FLAGS, flags,
+            )]));
+        app.update();
+        let mut script = app
+            .world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        script.resolve();
+        let seen = script.eval::<Vec<String>>("return SEEN").unwrap();
+        assert!(seen.is_empty(), "flags {flags:#x}: {seen:?}");
+    }
 }

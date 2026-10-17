@@ -64,6 +64,7 @@ fn shipped_action_bar_drives_end_to_end() {
             action: 100,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.set_action(
@@ -74,6 +75,7 @@ fn shipped_action_bar_drives_end_to_end() {
             action: 101,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -218,6 +220,7 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
             action: 133,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -320,6 +323,110 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// `SetAction` answers 1 when the spell tooltip it built holds a line that changes while shown
+/// (the chance line, or the remaining cooldown of a spell whose recovery is a minute or more:
+/// `0x52f68c`, `0x52f581`), else nil, and the stock `ActionButton_SetTooltip` arms `updateTooltip`
+/// from it (`ActionButton.lua:377-381`); `ActionButton_OnUpdate` then rebuilds the hovered
+/// tooltip. Run through the stock bar.
+#[test]
+fn a_spell_tooltip_with_a_live_line_arms_the_stock_refresh() {
+    benilla_formats::wow_data_or_skip!();
+    use benilla_ui::script::{ActionState, SpellTooltipView};
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Ability_Warrior_ShieldWall".into()),
+            kind: 0x00,
+            action: 871,
+            count: 0,
+            consumable: false,
+            use_spell: None,
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.tick(10.0); // a nonzero GetTime epoch
+    let view = |cast: &str, recovery_ms: u32, chance: Option<&str>| SpellTooltipView {
+        name: "Shield Wall".into(),
+        cast_time: Some(cast.into()),
+        recovery_ms,
+        chance: chance.map(str::to_string),
+        ..Default::default()
+    };
+    // The value the stock button saved from the setter's answer.
+    let armed = |s: &mut UiScript| -> Option<f64> {
+        s.eval::<Option<f64>>("return ActionButton1.updateTooltip")
+            .unwrap()
+    };
+    let line2 = |s: &mut UiScript| -> String {
+        s.eval::<String>("return GameTooltipTextLeft2:GetText() or ''")
+            .unwrap()
+    };
+    let running = |duration_ms: u32| ActionState {
+        usable: true,
+        // Started at 9.4 s on the GetTime clock, so it is running at 10 s.
+        cooldown: Some((9_400, duration_ms, true)),
+        ..Default::default()
+    };
+    let leave_and_enter = |s: &mut UiScript| {
+        super::test_ui::unhover(s);
+        s.tick(0.0);
+        super::test_ui::hover(s, "ActionButton1");
+    };
+
+    // No cooldown, no chance line: the setter answers nil, and nothing is armed.
+    s.set_spell_tooltip(871, view("Instant", 1_800_000, None));
+    super::test_ui::hover(&mut s, "ActionButton1");
+    assert!(s.eval::<bool>("return GameTooltip:IsVisible()").unwrap());
+    assert_eq!(armed(&mut s), None);
+
+    // A 30 minute recovery running: 1, so the button arms the stock refresh.
+    s.set_action_state(1, Some(running(1_800_000)));
+    leave_and_enter(&mut s);
+    assert_eq!(
+        armed(&mut s),
+        s.eval::<Option<f64>>("return TOOLTIP_UPDATE_TIME").unwrap()
+    );
+    assert!(armed(&mut s).is_some_and(|t| t > 0.0));
+    assert_eq!(line2(&mut s), "Instant");
+    // The refresh rebuilds the hovered tooltip from the current view.
+    s.set_spell_tooltip(871, view("Next melee", 1_800_000, None));
+    s.tick(0.5);
+    assert_eq!(
+        line2(&mut s),
+        "Next melee",
+        "ActionButton_OnUpdate rebuilt it"
+    );
+
+    // The same cooldown on a spell whose recovery is under a minute: nil.
+    s.set_spell_tooltip(871, view("Instant", 30_000, None));
+    s.set_action_state(1, Some(running(30_000)));
+    leave_and_enter(&mut s);
+    assert_eq!(armed(&mut s), None);
+
+    // A chance line alone does not: `SetAction` reads the builder's value only with a cooldown
+    // running (`0x532597`; the other leg pushes nil, `0x532690`), so a passive answers nil.
+    s.set_action_state(
+        1,
+        Some(ActionState {
+            usable: true,
+            ..Default::default()
+        }),
+    );
+    s.set_spell_tooltip(871, view("Instant", 0, Some("5.00% chance to parry")));
+    leave_and_enter(&mut s);
+    assert_eq!(armed(&mut s), None);
+    // With a cooldown running it does, whatever the spell's recovery.
+    s.set_action_state(1, Some(running(30_000)));
+    leave_and_enter(&mut s);
+    assert!(armed(&mut s).is_some_and(|t| t > 0.0));
+
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// `CooldownFrame_SetTimer` hides the pane unless `start > 0 and duration > 0 and enable > 0`
 /// (Cooldown.lua:3): a running cooldown whose start predates a restarted `GetTime` never draws.
 #[test]
@@ -338,6 +445,7 @@ fn a_start_behind_the_clocks_epoch_hides_the_stock_sweep() {
             action: 133,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -404,6 +512,7 @@ fn the_cooldown_sweep_paints_over_the_buttons_icon_and_ring() {
             action: 133,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -465,6 +574,7 @@ fn a_cooldown_count_addons_hook_leaves_the_sweep_running() {
             action: 133,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -581,6 +691,7 @@ fn a_cooldown_count_draws_over_the_bonus_bars_sweep() {
             action: 2687,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -638,6 +749,7 @@ fn a_right_click_on_an_action_button_uses_the_action() {
             action: 4540,
             count: 5,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -672,6 +784,22 @@ fn a_right_click_on_an_action_button_uses_the_action() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// `SetBinding` signals `UPDATE_BINDINGS` before it returns (`0x4b805b`), so the stock button's
+/// hotkey corner (`ActionButton_UpdateHotkeys`) shows the new key by the call's next line.
+#[test]
+fn a_rebind_repaints_the_hotkey_in_place() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    let hotkey: String = s
+        .eval("SetBinding('F', 'ACTIONBUTTON1') return ActionButton1HotKey:GetText()")
+        .unwrap();
+    assert_eq!(hotkey, "F");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Shift-click runs `PickupAction`, a plain click `UseAction` (ActionBarFrame.xml:12-22).
 #[test]
 fn shift_click_picks_up_not_uses() {
@@ -688,6 +816,7 @@ fn shift_click_picks_up_not_uses() {
             action: 111,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -712,6 +841,13 @@ fn shift_click_picks_up_not_uses() {
         vec![(1, 0)],
         "picking up queues the clear-the-slot send"
     );
+    // The slot's `ACTIONBAR_SLOT_CHANGED` ran `ActionButton_Update` inside the click, with no
+    // tick and no feed between.
+    assert!(
+        !s.eval::<bool>("return ActionButton1Icon:IsShown() == 1")
+            .unwrap(),
+        "the emptied button hid its icon in place"
+    );
 
     // A plain click while holding places (`UseAction(id, 1)`, ActionBarFrame.xml:19).
     s.mouse_button(26.0, 22.0, "LeftButton", true);
@@ -720,6 +856,15 @@ fn shift_click_picks_up_not_uses() {
     assert!(s.cursor_payload().is_none(), "empty destination clears");
     assert!(s.eval::<bool>("return HasAction(1)").unwrap());
     assert_eq!(s.take_action_sets(), vec![(1, 111)]);
+    assert_eq!(
+        s.eval::<Option<String>>(
+            "if ActionButton1Icon:IsShown() then return ActionButton1Icon:GetTexture() end"
+        )
+        .unwrap()
+        .as_deref(),
+        Some("Interface\\Icons\\Spell_A"),
+        "the placed action painted in place"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -745,6 +890,7 @@ fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
             action: 111,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -810,6 +956,7 @@ fn drag_drop_onto_another_button_hops_the_displaced_action() {
             action: 111,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.set_action(
@@ -820,13 +967,14 @@ fn drag_drop_onto_another_button_hops_the_displaced_action() {
             action: 222,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.resolve();
 
     s.mouse_button(26.0, 22.0, "LeftButton", true);
-    s.mouse_move(40.0, 22.0); // past the 4px drag-start threshold
+    s.mouse_move(40.0, 22.0); // past the drag-start distance
     let consumed = s.mouse_button(68.0, 22.0, "LeftButton", false);
     assert!(consumed, "OnReceiveDrag consumed the release");
 
@@ -841,8 +989,8 @@ fn drag_drop_onto_another_button_hops_the_displaced_action() {
         "slot 2 now shows the placed action"
     );
     assert!(
-        matches!(s.cursor_payload(), Some(benilla_ui::script::CursorPayload::Action(c)) if c.src_slot == 2),
-        "the displaced action hopped on, sourced from slot 2: {:?}",
+        matches!(s.cursor_payload(), Some(benilla_ui::script::CursorPayload::Spell(c)) if c.spell_id == 222),
+        "the displaced spell hopped on through the spell setter: {:?}",
         s.cursor_payload()
     );
 
@@ -870,6 +1018,7 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
             action: 111,
             count: 42, // the app never sets this for a spell; the XML must ignore it
             consumable: false,
+            use_spell: None,
         }),
     );
     s.set_action(
@@ -880,6 +1029,7 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
             action: 117,
             count: 15,
             consumable: true,
+            use_spell: None,
         }),
     );
     // A mount: an ITEM held eleven times that is not consumable.
@@ -891,6 +1041,7 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
             action: 13332,
             count: 11,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -932,6 +1083,7 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
             action: 117,
             count: 0,
             consumable: true,
+            use_spell: None,
         }),
     );
     s.fire_event("ACTIONBAR_SLOT_CHANGED", vec![ScriptValue::Int(2)]);
@@ -971,6 +1123,7 @@ fn macro_name_line_follows_get_action_text_through_the_xml() {
             action: 1,  // macro index 1
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.set_action(
@@ -981,6 +1134,7 @@ fn macro_name_line_follows_get_action_text_through_the_xml() {
             action: 111,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -1053,23 +1207,34 @@ fn shipped_bag_frame_drives_end_to_end() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,
             quality: Some(1),
+            inventory_type: 0,
             item_id: 117,
             link: None,
-            locked: false,
+            guid: 0x705,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     s.set_container(
@@ -1185,6 +1350,7 @@ fn state_events_leave_empty_wells_untinted() {
             action: 133,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.set_action_state(
@@ -1248,6 +1414,7 @@ fn an_occupied_slot_going_empty_leaves_no_white_plate() {
             action: 5185,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.set_action_state(
@@ -1337,6 +1504,7 @@ fn the_bonus_action_bar_exists_hidden_and_takes_layout_calls() {
             action: 100,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("ACTIONBAR_SLOT_CHANGED", vec![ScriptValue::Int(1)]);

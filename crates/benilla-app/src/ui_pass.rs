@@ -69,12 +69,16 @@ pub(crate) struct UiQuad {
     /// Screen pixels, y-down, anchor-resolved.
     pub rect: Rect,
     /// Paint order, stable-sorted ascending: higher draws on top.
-    pub z_key: u64,
+    pub z_key: u128,
     /// `None` samples the shared 1×1 white.
     pub texture: Option<Handle<Image>>,
     pub uv: UvRect,
     /// Straight-alpha tint in client-space sRGB, the raw FrameXML/Lua value, never converted.
     pub color: [f32; 4],
+    /// Per-vertex tints in [`UvRect`]'s winding (TL, TR, BR, BL), replacing `color` at each
+    /// corner and interpolated across the quad: a texture's `<Gradient>`, whose four colours the
+    /// reference submits with a vertex stride of 4 (`0x77304d`).
+    pub corner_colors: Option<[[f32; 4]; 4]>,
     /// WoW `ADD` blend (EGxBlend 3, `glBlendFunc(GL_SRC_ALPHA, GL_ONE)`) instead of straight alpha.
     pub additive: bool,
     /// Mask to the inscribed circle: the live unit portrait.
@@ -129,6 +133,7 @@ impl Default for UiQuad {
             texture: None,
             uv: UvRect::FULL,
             color: [1.0, 1.0, 1.0, 1.0],
+            corner_colors: None,
             additive: false,
             circular: false,
             desaturated: false,
@@ -158,19 +163,10 @@ pub(crate) struct UiQuads {
 }
 
 /// The append lane's z bands, far below the scripted UI's keys (a [`benilla_ui::order::ZKey`]
-/// region sets `1 << 20`), so the whole lane paints under the player UI.
+/// region sets bit 20 of the key's high word), so the whole lane paints under the player UI.
 pub(crate) mod overlay_z {
     /// Floating combat, XP and honor numbers, drawn by the client in the world scene under all UI.
-    pub(crate) const WORLD_TEXT: u64 = 0;
-    /// The chat bubbles: one frame level per live bubble, farthest from the camera first.
-    pub(crate) const BUBBLE: u64 = 1 << 8;
-    /// Keys per bubble level: its bg, edge, tail and text.
-    pub(crate) const BUBBLE_STRIDE: u64 = 4;
-    /// The V-plates, over every bubble; a unit never shows both, so this orders only across units.
-    pub(crate) const VPLATE: u64 = 1 << 16;
-    /// The highest bubble level below [`VPLATE`], a guard rail far past any real count (a bubble
-    /// needs a speaker within 20 yd).
-    pub(crate) const BUBBLE_MAX_LEVEL: u64 = (VPLATE - BUBBLE) / BUBBLE_STRIDE - 1;
+    pub(crate) const WORLD_TEXT: u128 = 0;
 }
 
 /// Clear the append lane at the top of the [`UiQuadAppend`] window, before every appender.
@@ -427,8 +423,21 @@ fn init_white_texture(mut commands: Commands, mut images: ResMut<Assets<Image>>)
     commands.insert_resource(UiWhiteTexture(images.add(image)));
 }
 
-/// Clip `rect` to `clip`, reprojecting the UVs to the clipped edges; `None` when nothing is left.
-fn clip_quad(rect: Rect, uv: UvRect, clip: Rect) -> Option<(Rect, UvRect)> {
+impl UiQuad {
+    /// The tint at each corner, TL, TR, BR, BL: [`Self::corner_colors`], or `color` at all four.
+    pub(crate) fn vertex_colors(&self) -> [[f32; 4]; 4] {
+        self.corner_colors.unwrap_or([self.color; 4])
+    }
+}
+
+/// Clip `rect` to `clip`, reprojecting the UVs and the corner colours to the clipped edges;
+/// `None` when nothing is left.
+fn clip_quad(
+    rect: Rect,
+    uv: UvRect,
+    colors: [[f32; 4]; 4],
+    clip: Rect,
+) -> Option<(Rect, UvRect, [[f32; 4]; 4])> {
     let clipped = rect.intersect(clip);
     if clipped.is_empty() {
         return None;
@@ -456,7 +465,22 @@ fn clip_quad(rect: Rect, uv: UvRect, clip: Rect) -> Option<(Rect, UvRect)> {
         bilerp(t_max_x, t_max_y),
         bilerp(t_min_x, t_max_y),
     ]);
-    Some((clipped, new_uv))
+    // The colours the same way, so a gradient keeps its ramp across a scissor edge.
+    let [ctl, ctr, cbr, cbl] = colors;
+    let color_at = |fx: f32, fy: f32| -> [f32; 4] {
+        std::array::from_fn(|i| {
+            let top = lerp(ctl[i], ctr[i], fx);
+            let bot = lerp(cbl[i], cbr[i], fx);
+            lerp(top, bot, fy)
+        })
+    };
+    let new_colors = [
+        color_at(t_min_x, t_min_y),
+        color_at(t_max_x, t_min_y),
+        color_at(t_max_x, t_max_y),
+        color_at(t_min_x, t_max_y),
+    ];
+    Some((clipped, new_uv, new_colors))
 }
 
 /// One run: contiguous quads, in `z_key` order, sharing a texture and every material flag.
@@ -503,7 +527,7 @@ impl Run {
         &mut self,
         rect: Rect,
         uv: UvRect,
-        color: [f32; 4],
+        colors: [[f32; 4]; 4],
         rotation: f32,
         to_world: impl Fn(Vec2) -> Vec2,
     ) {
@@ -523,18 +547,18 @@ impl Run {
                 *p = center + Vec2::new(d.x * cos - d.y * sin, d.x * sin + d.y * cos);
             }
         }
-        self.push_corners(corners, color, to_world);
+        self.push_corners(corners, colors, to_world);
     }
 
-    /// Append four screen corners with their UVs as the fan `(0,1,2)(0,2,3)`.
+    /// Append four screen corners with their UVs and colours as the fan `(0,1,2)(0,2,3)`.
     fn push_corners(
         &mut self,
         corners: [(Vec2, Vec2); 4],
-        color: [f32; 4],
+        colors: [[f32; 4]; 4],
         to_world: impl Fn(Vec2) -> Vec2,
     ) {
         let base = self.positions.len() as u32;
-        for (p, t) in corners {
+        for ((p, t), color) in corners.into_iter().zip(colors) {
             let w = to_world(p);
             self.positions.push([w.x, w.y, 0.0]);
             self.uvs.push([t.x, t.y]);
@@ -741,16 +765,34 @@ fn rebuild_ui_mesh(
     // leaks: a cached material holds a strong image handle and, prepared, its GPU texture.
     // `Removed`, not `Unused`: this cache is itself a strong handle, so `Unused` never fires for a
     // cached image, and a producer retiring an image removes the asset explicitly.
-    let retired: Vec<AssetId<Image>> = stores
-        .2
-        .read()
-        .filter_map(|e| match e {
-            AssetEvent::Removed { id } => Some(*id),
-            _ => None,
-        })
-        .collect();
+    let mut retired: Vec<AssetId<Image>> = Vec::new();
+    let mut replaced: Vec<AssetId<Image>> = Vec::new();
+    for e in stores.2.read() {
+        match e {
+            AssetEvent::Removed { id } => retired.push(*id),
+            AssetEvent::Modified { id } => replaced.push(*id),
+            _ => {}
+        }
+    }
     if !retired.is_empty() {
         pools.materials.retain(|key, _| !retired.contains(&key.0));
+    }
+    // A modified image is re-prepared into a new GPU texture, and a prepared material's bind group
+    // keeps sampling the old one: mark each material over it modified, so it is re-prepared too.
+    // The image's event reaches this read a frame after its own re-preparation was extracted, so
+    // the new texture is in place when the material's turn comes.
+    if !replaced.is_empty() {
+        let over: Vec<AssetId<UiQuadMaterial>> = pools
+            .materials
+            .iter()
+            .filter(|(key, _)| {
+                replaced.contains(&key.0) || key.7.is_some_and(|m| replaced.contains(&m))
+            })
+            .map(|(_, handle)| handle.id())
+            .collect();
+        for id in over {
+            stores.1.get_mut(id);
+        }
     }
     // The meter is off unless asked (the hover recorder, `WOW_UI_COST=1`): one bool test.
     let cost_on = cost_wanted.0 || crate::ui_script::extract::ui_cost_enabled();
@@ -865,11 +907,11 @@ fn rebuild_ui_mesh(
         // Explicit corners (the cooldown pie's wedge) are exact: no clip, rotation or reprojection.
         let plain = if q.corners.is_none() {
             match q.clip {
-                Some(clip) => match clip_quad(q.rect, q.uv, clip) {
-                    Some(pair) => Some(pair),
+                Some(clip) => match clip_quad(q.rect, q.uv, q.vertex_colors(), clip) {
+                    Some(clipped) => Some(clipped),
                     None => continue,
                 },
-                None => Some((q.rect, q.uv)),
+                None => Some((q.rect, q.uv, q.vertex_colors())),
             }
         } else {
             None
@@ -900,11 +942,13 @@ fn rebuild_ui_mesh(
                         (c[2], Vec2::from(br)),
                         (c[3], Vec2::from(bl)),
                     ],
-                    q.color,
+                    q.vertex_colors(),
                     to_world,
                 );
             }
-            (None, Some((rect, uv))) => run.push_quad(rect, uv, q.color, q.rotation, to_world),
+            (None, Some((rect, uv, colors))) => {
+                run.push_quad(rect, uv, colors, q.rotation, to_world);
+            }
             (None, None) => unreachable!("plain is Some when corners is None"),
         }
     }
@@ -1258,6 +1302,93 @@ mod tests {
         );
     }
 
+    /// A resized render target (the glue scene's, on a world round trip or a window resize) is a
+    /// new GPU texture: a material bound to the old one would show its last frame, frozen, for as
+    /// long as the cache keeps it. The material over the image is marked modified, and only it.
+    #[test]
+    fn a_modified_image_re_prepares_the_materials_over_it() {
+        let mut app = rebuild_app();
+        let new_image = |px: u8| {
+            Image::new_fill(
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                &[px; 4],
+                TextureFormat::Rgba8Unorm,
+                RenderAssetUsages::default(),
+            )
+        };
+        let (target, other) = {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            (images.add(new_image(0)), images.add(new_image(255)))
+        };
+        {
+            let mut q = app.world_mut().resource_mut::<UiQuads>();
+            for (texture, x) in [(&target, 0.0), (&other, 40.0)] {
+                q.quads.push(UiQuad {
+                    rect: Rect::new(x, 0.0, x + 32.0, 32.0),
+                    texture: Some(texture.clone()),
+                    ..default()
+                });
+            }
+            q.dirty = true;
+        }
+        app.update();
+        let material_of = |app: &App, image: AssetId<Image>| {
+            app.world()
+                .resource::<Assets<UiQuadMaterial>>()
+                .iter()
+                .find(|(_, m)| m.texture.as_ref().is_some_and(|t| t.id() == image))
+                .map(|(id, _)| id)
+                .expect("the quad's material")
+        };
+        let (on_target, on_other) = (
+            material_of(&app, target.id()),
+            material_of(&app, other.id()),
+        );
+        let mut cursor = bevy::ecs::message::MessageCursor::<AssetEvent<UiQuadMaterial>>::default();
+        let mut modified = |app: &App| {
+            cursor
+                .read(
+                    app.world()
+                        .resource::<Messages<AssetEvent<UiQuadMaterial>>>(),
+                )
+                .filter_map(|e| match e {
+                    AssetEvent::Modified { id } => Some(*id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        app.update();
+        assert!(modified(&app).is_empty(), "nothing changed yet");
+
+        // The resize, as `resize_target` makes it; the quads stay as they were.
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .get_mut(&target)
+            .expect("the target")
+            .resize(Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            });
+        for _ in 0..3 {
+            app.update();
+        }
+        let got = modified(&app);
+        assert!(
+            got.contains(&on_target),
+            "the material over the resized image must be re-prepared: {got:?}"
+        );
+        assert!(
+            !got.contains(&on_other),
+            "a material over another image is left alone"
+        );
+    }
+
     /// Does any live `UiQuadMaterial` still name this image?
     fn names_image(app: &App, id: AssetId<Image>) -> bool {
         app.world()
@@ -1438,8 +1569,8 @@ mod tests {
         let uv = UvRect::from_tex_coords([1.0, 0.09375, 0.0, 0.78125]);
         let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
         let clip = Rect::new(0.0, 0.0, 50.0, 100.0);
-        let (crect, cuv) =
-            clip_quad(rect, uv, clip).expect("left half is a non-empty intersection");
+        let (crect, cuv, _) = clip_quad(rect, uv, [[1.0; 4]; 4], clip)
+            .expect("left half is a non-empty intersection");
         assert_eq!(crect, Rect::new(0.0, 0.0, 50.0, 100.0));
         let [tl, tr, ..] = cuv.corners;
         assert!(
@@ -1462,12 +1593,60 @@ mod tests {
         let uv = UvRect::from_corners([[0.25, 4.0], [0.25, 0.0], [0.375, 0.0], [0.375, 4.0]]);
         let rect = Rect::new(0.0, 0.0, 100.0, 16.0);
         let clip = Rect::new(0.0, 0.0, 50.0, 16.0);
-        let (crect, cuv) = clip_quad(rect, uv, clip).expect("left half intersects");
+        let (crect, cuv, _) =
+            clip_quad(rect, uv, [[1.0; 4]; 4], clip).expect("left half intersects");
         assert_eq!(crect, Rect::new(0.0, 0.0, 50.0, 16.0));
         let [tl, tr, br, bl] = cuv.corners;
         assert!((tl[0] - 0.25).abs() < 1e-6 && (tr[0] - 0.25).abs() < 1e-6);
         assert!((bl[0] - 0.375).abs() < 1e-6 && (br[0] - 0.375).abs() < 1e-6);
         assert!((tl[1] - 4.0).abs() < 1e-6, "left v kept: {}", tl[1]);
         assert!((tr[1] - 2.0).abs() < 1e-6, "right v halved: {}", tr[1]);
+    }
+
+    /// A gradient's four colours reach the mesh one per vertex, in the TL, TR, BR, BL winding,
+    /// so the GPU interpolates the ramp across the quad as the reference's per-vertex submit does.
+    #[test]
+    fn corner_colours_reach_the_mesh_per_vertex() {
+        let mut app = rebuild_app();
+        let (top, bottom) = ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]);
+        {
+            let mut q = app.world_mut().resource_mut::<UiQuads>();
+            q.quads[0].corner_colors = Some([top, top, bottom, bottom]);
+            q.dirty = true;
+        }
+        app.update();
+        let batch = app
+            .world_mut()
+            .query_filtered::<&Mesh2d, With<UiQuadBatch>>()
+            .single(app.world())
+            .expect("one batch")
+            .0
+            .clone();
+        let mesh = app
+            .world()
+            .resource::<Assets<Mesh>>()
+            .get(&batch)
+            .expect("the pooled mesh");
+        let Some(bevy::mesh::VertexAttributeValues::Float32x4(colors)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the run's vertex colours are Float32x4");
+        };
+        assert_eq!(colors, &vec![top, top, bottom, bottom]);
+    }
+
+    /// A scissor cut through a gradient keeps its ramp: the clipped corners take the colour at
+    /// their place on the quad.
+    #[test]
+    fn clip_reprojects_corner_colours() {
+        let (top, bottom) = ([1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 1.0]);
+        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        // The lower quarter (y-down): from y = 75 to the bottom edge.
+        let clip = Rect::new(0.0, 75.0, 100.0, 100.0);
+        let (crect, _, colors) =
+            clip_quad(rect, UvRect::FULL, [top, top, bottom, bottom], clip).expect("intersects");
+        assert_eq!(crect, clip);
+        let quarter = [1.0, 0.0, 0.0, 0.75];
+        assert_eq!(colors, [quarter, quarter, bottom, bottom]);
     }
 }

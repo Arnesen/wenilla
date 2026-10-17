@@ -6,6 +6,10 @@ pub const SMSG_CHAR_ENUM: u16 = 0x003B;
 // Character delete: CMSG a full u64 guid, SMSG one result byte (`CHAR_DELETE_SUCCESS` = 0x39).
 pub const CMSG_CHAR_DELETE: u16 = 0x0038;
 pub const SMSG_CHAR_DELETE: u16 = 0x003C;
+// Character rename at select: CMSG a full u64 guid and the new name's cstring, SMSG a result byte
+// then, on success, the guid and the name (`Packets/Character.cpp:31-35`, `:61-69`).
+pub const CMSG_CHAR_RENAME: u16 = 0x02C7;
+pub const SMSG_CHAR_RENAME: u16 = 0x02C8;
 /// The server's refusal of a `CMSG_PLAYER_LOGIN`: one result byte.
 pub const SMSG_CHARACTER_LOGIN_FAILED: u16 = 0x0041;
 pub const SMSG_NAME_QUERY_RESPONSE: u16 = 0x0051; // 81
@@ -55,15 +59,19 @@ pub const SMSG_INITIALIZE_FACTIONS: u16 = 0x0122;
 /// `FACTION_FLAG_VISIBLE`; no fresh standing comes with it (`ReputationMgr::SendVisible`).
 pub const SMSG_SET_FACTION_VISIBLE: u16 = 0x0123;
 pub const SMSG_SET_FACTION_STANDING: u16 = 0x0124;
+/// The forced-reaction table, whole, on every change of a `SPELL_AURA_FORCE_REACTION` aura
+/// (`ReputationMgr::SendForceReactions`): a `u32` count, then `(faction id, reaction rank)` pairs
+/// of two `u32`s.
+pub const SMSG_SET_FORCED_REACTIONS: u16 = 0x02A5;
 /// Set a faction's at-war flag from the reputation pane; none of the pane's three verbs is acked.
 pub const CMSG_SET_FACTION_ATWAR: u16 = 0x0125; // 293
 pub const CMSG_SET_FACTION_INACTIVE: u16 = 0x0317; // 791
 pub const CMSG_SET_WATCHED_FACTION: u16 = 0x0318; // 792
 pub const SMSG_AUTH_CHALLENGE: u16 = 0x01EC;
 pub const SMSG_AUTH_RESPONSE: u16 = 0x01EE;
-/// The Warden anticheat challenge; vmangos kicks a client that leaves it unanswered for 30 s
-/// (`Warden::Update`). Deviation: benilla has no Warden, so the connect refuses such a server
-/// ([`crate::WardenRequired`]) because a session there would only be kicked.
+/// The Warden anticheat channel, which the reference hands to its Warden module (`0x6ca5c0`).
+/// benilla runs none and reads it past unanswered, a deviation recorded at
+/// [`crate::WorldSession::recv`] ([`crate::WorldSession::warden_asked`]).
 pub const SMSG_WARDEN_DATA: u16 = 0x02E6;
 /// The answer to `CMSG_AUTH_SESSION`'s addon block: one record per `## Secure:` addon, in order,
 /// with no count or names.
@@ -611,6 +619,15 @@ pub const SMSG_GMTICKET_DELETETICKET: u16 = 0x0218; // 536
 pub const CMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021A; // 538
 pub const SMSG_GMTICKET_SYSTEMSTATUS: u16 = 0x021B; // 539
 
+/// The GM survey's submission, built and sent by `0x496630` for `GMSurveySubmit` (`0x48cf80`).
+pub const CMSG_GMSURVEY_SUBMIT: u16 = 0x032A; // 810
+/// The lottery window's two sends: the last numbers' query (`0x4c4220`) and the ticket purchase
+/// (`0x4c4290`, `0x4c4400`). No 1.12 server handles either.
+/// `BuySkillTier`'s send (`0x4d3fbc`), the skill-point purchase of a step.
+pub const CMSG_SKILL_BUY_STEP: u16 = 0x021F; // 543
+pub const CMSG_LOTTERY_QUERY_OBSOLETE: u16 = 0x0334; // 820
+pub const CMSG_BUY_LOTTERY_TICKET_OBSOLETE: u16 = 0x0336; // 822
+
 /// A ticket-state push: `u32` 1 updated, 2 closed, 3 survey offered; vmangos never sends it. The
 /// reference re-asks for the ticket on 1 (`0x5e7932`); 2 and 3 are recorded, not acted on, and
 /// the survey window 3 offers is not built.
@@ -817,6 +834,8 @@ pub const CMSG_ADD_FRIEND: u16 = 0x0069; // 105
 /// Our LFG slots and comment, sent only from `0x4e8948`; nothing answers it. The name is the
 /// emulators'.
 pub const CMSG_SET_LOOKING_FOR_GROUP: u16 = 0x0200; // 512
+/// The LFG inquiry `LFGQuery` sends (`0x4e97f9`); the server's result list comes back under it.
+pub const MSG_LOOKING_FOR_GROUP: u16 = 0x01FF; // 511
 pub const CMSG_DEL_FRIEND: u16 = 0x006A; // 106
 pub const SMSG_IGNORE_LIST: u16 = 0x006B; // 107
 pub const CMSG_ADD_IGNORE: u16 = 0x006C; // 108

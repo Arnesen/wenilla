@@ -54,7 +54,12 @@ fn inventory_with_head_item() -> InventorySlots {
     slots[1] = Some(InvSlotView {
         duration_ms: None,
         already_bound: false,
+        occupied_seats: None,
+        bonding: 0,
+        use_spell: 0,
+        use_fork: Default::default(),
         bar_placeable: true,
+        consumable: false,
         durability: None,
         flags: 0,
         item_id: 1234,
@@ -64,10 +69,14 @@ fn inventory_with_head_item() -> InventorySlots {
         quality: 2,
         name: Some("Test Helm".into()),
         link: Some("|cff1eff00|Hitem:1234:0:0:0|h[Test Helm]|h|r".into()),
-        locked: false,
+        guid: 0x70e,
         equip_slots: vec![1],
         creator: None,
+        gift_creator: None,
+        creator_guid: 0,
+        gift_creator_guid: 0,
         enchants: Vec::new(),
+        spell_0: false,
     });
     slots
 }
@@ -78,23 +87,34 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
     slots.insert(
         1,
         benilla_ui::script::ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Helmet_02".into()),
             count: 1,
             quality: Some(3),
+            inventory_type: 0,
             item_id: 2000,
             link: Some("|cff0070dd|Hitem:2000:0:0:0|h[Another Helm]|h|r".into()),
-            locked: false,
+            guid: 0x70f,
             equip_slots: vec![1],
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     benilla_ui::script::ContainerState {
@@ -509,8 +529,20 @@ fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 
     // The predicate the arm branches on, pinned beside the effect.
-    assert!(s.eval::<bool>("return CursorCanGoInSlot(1)").unwrap());
-    assert!(!s.eval::<bool>("return CursorCanGoInSlot(2)").unwrap());
+    // `CursorCanGoInSlot` (`0x4c8ff0`) pushes the number 1 (`0x4c9063`) or nil (`0x4c909e`) and
+    // returns one value (`arg.n` counts the returns).
+    let ask =
+        "local function c(...) return arg.n .. ':' .. type(arg[1]) .. ':' .. tostring(arg[1]) end";
+    assert_eq!(
+        s.eval::<String>(&format!("{ask} return c(CursorCanGoInSlot(1))"))
+            .unwrap(),
+        "1:number:1"
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("{ask} return c(CursorCanGoInSlot(2))"))
+            .unwrap(),
+        "1:nil:nil"
+    );
 
     assert!(
         ring_lit(&mut s, "CharacterHeadSlot"),
@@ -658,6 +690,9 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
                 category_order: 1,
                 description: "Defensive expertise.".into(),
                 abandonable: false,
+                step: 0,
+                flags: 0,
+                tier_id: 0,
                 mono: false,
             },
             SkillEntry {
@@ -675,6 +710,9 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
                 description: "Working with metals.".into(),
                 // A primary profession: SkillRaceClassInfo flag 0x20, `SKILL_FLAG_UNLEARNABLE`.
                 abandonable: true,
+                step: 0,
+                flags: 0,
+                tier_id: 0,
                 mono: false,
             },
         ],

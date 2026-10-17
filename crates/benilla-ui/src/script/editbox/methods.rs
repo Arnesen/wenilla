@@ -57,13 +57,13 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    // GetNumber: the real text as a number, else 0. The reference (`0x798790`) is atof, which also
-    // reads the leading number of a text like "12abc".
+    // GetNumber (`0x798790`): the real text through Storm's `SStrToFloat` (`0x64aaa0`), a prefix
+    // parse, so "12abc" is 12 and " 12", "+12" and "inf" are 0.
     m.set(
         "GetNumber",
         lua.create_function(|lua, this: Table| {
             let text = with_editbox(lua, &this, |eb| eb.text.clone())?;
-            Ok(text.trim().parse::<f64>().unwrap_or(0.0))
+            Ok(crate::script::binding_abi::s_str_to_float(&text))
         })?,
     )?;
     // Insert: a nil is a no-op, not an error, since the reference reads the argument through
@@ -138,8 +138,8 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     m.set(
         // `SetMaxBytes` (`0x798f30`) has `SetMaxLetters`'s exact count gate (`0x798fbc`) and raw
-        // coercion, but its no-limit value is -1 (`0x799012`; the ctor writes -1 at `0x7799df`):
-        // a non-positive argument is unlimited, a positive one caps the bytes.
+        // coercion, but it stores n - 1 for a positive n and -1, unlimited, otherwise
+        // (`0x799012`-`0x799022`; the ctor writes -1 at `0x7799df`).
         "SetMaxBytes",
         lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
             let args: Vec<Value> = args.into_iter().collect();
@@ -151,15 +151,15 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let n = crate::script::binding_abi::coerced_number(lua, args.first().cloned());
             let n = n as i64;
             with_editbox(lua, &this, |eb| {
-                eb.max_bytes = (n > 0).then_some(n as usize);
+                eb.max_bytes = (n > 0).then(|| n as usize - 1);
             })
         })?,
     )?;
     m.set(
-        // -1 while unlimited, the reference's stored sentinel.
+        // The stored cap plus one (`0x7990e3`-`0x7990e9`), so 0 while unlimited.
         "GetMaxBytes",
         lua.create_function(|lua, this: Table| {
-            with_editbox(lua, &this, |eb| eb.max_bytes.map_or(-1, |n| n as i64))
+            with_editbox(lua, &this, |eb| eb.max_bytes.map_or(0, |n| n as i64 + 1))
         })?,
     )?;
     m.set(
@@ -293,8 +293,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         let refresh_text = name == "SetMultiLine";
         m.set(
             name,
-            lua.create_function(move |lua, (this, v): (Table, Value)| {
-                let on = !matches!(v, Value::Nil | Value::Boolean(false));
+            lua.create_function(move |lua, (this, args): (Table, mlua::MultiValue)| {
+                // `GetBoolOrDefault` (`0x6f1c10`) with default 1 (`0x797d1e`, `0x797e8e`,
+                // `0x797ffe`, `0x79816e`): a bare call enables, `"0"` and `nil` disable.
+                let on = crate::script::binding_abi::bool_or_default(args.front(), true);
                 with_editbox(lua, &this, |eb| set(eb, on))?;
                 if refresh_text {
                     // A multi-line box seats its text TOP and as tall as the text, a single-line
@@ -314,10 +316,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
 }
 
 /// The font block, entries #0-#15 of the EditBox's own 48-entry method table (`0x87bb68`, count
-/// at `0x799ab5`); 1.12 has no `FontInstance` class, so each text-bearing kind declares it. Ten
-/// come from [`super::super::font_block`]. `SetSpacing`/`GetSpacing` (#10-#11) are not installed:
-/// nothing renders line spacing, and a missing method raises by name. The justify four (#12-#15)
-/// act on the box's own [`EditBoxState::justify`] word, not its text region.
+/// at `0x799ab5`); 1.12 has no `FontInstance` class, so each text-bearing kind declares it. Twelve
+/// come from [`super::super::font_block`], `SetSpacing`/`GetSpacing` (#10-#11) among them. The
+/// justify four (#12-#15) act on the box's own [`EditBoxState::justify`] word, not its text region.
 fn install_font_block(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // Every font method acts on the box's implicit FontString (`[this+0x324]`, our
     // `text_region`), created on demand.
@@ -328,7 +329,7 @@ fn install_font_block(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let h = frame_handle_of(lua, this)?;
             super::ensure_text_region(lua, h).ok_or_else(|| mlua::Error::runtime("not an EditBox"))
         },
-        "EditBox",
+        crate::script::font_block::FontKind::Instance,
         // The box listens on its font (vtable `0x81c8dc` slot 0, `0x77e2a0`): a change of face or
         // spacing (mask `0x11`) re-seats its text region (`0x77e2b5` → `0x77b8c0`).
         Some(|lua, this| {
@@ -373,7 +374,7 @@ fn install_font_block(lua: &Lua, m: &Table) -> mlua::Result<()> {
 /// A `Set<Flag>` method name and the field write it drives.
 type FlagSetter = (&'static str, fn(&mut EditBoxState, bool));
 
-/// The four config-flag setters, each taking Lua truthiness.
+/// The four config-flag setters, each reading its flag with `GetBoolOrDefault`.
 fn flag_setters() -> [FlagSetter; 4] {
     [
         ("SetAutoFocus", |eb, on| eb.auto_focus = on),

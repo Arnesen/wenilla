@@ -207,6 +207,16 @@ fn gratuity_builds_its_thirty_line_scan_tooltip() {
     );
     // Gratuity's next call: `ClearLines` over the grown line stack.
     s.run("vars.tooltip:ClearLines()").unwrap();
+    // Each `AddFontStrings` raised the line limit by one (`0x529940`): a bare tooltip holds the 30
+    // pairs it was given, in the order given.
+    s.run(
+        r#"
+        for i = 1, 35 do vars.tooltip:AddLine("line " .. i) end
+        assert(vars.tooltip:NumLines() == 30, vars.tooltip:NumLines())
+        assert(vars.Llines[1]:GetText() == "line 1" and vars.Llines[30]:GetText() == "line 30")
+    "#,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -220,9 +230,11 @@ fn set_font_object_takes_the_object_or_the_name() {
             height: Some(11.0),
             color: Some([0.25, 0.5, 0.75, 1.0]),
             outline: Outline::Thick,
+            monochrome: false,
             justify_h: None,
             justify_v: None,
             shadow: None,
+            spacing: None,
         },
     );
     s.run(
@@ -230,11 +242,11 @@ fn set_font_object_takes_the_object_or_the_name() {
         f = CreateFrame("Frame", "TwoWays")
         f:SetWidth(200); f:SetHeight(40); f:SetPoint("CENTER", 0, 0)
         byObject = f:CreateFontString(nil, "ARTWORK")
-        byObject:SetText("obj")
         byObject:SetFontObject(GameFontHighlightSmall)
+        byObject:SetText("obj")
         byName = f:CreateFontString(nil, "ARTWORK")
-        byName:SetText("str")
         byName:SetFontObject("GameFontHighlightSmall")
+        byName:SetText("str")
     "#,
     )
     .unwrap();
@@ -280,9 +292,11 @@ fn dewdrop_recolors_a_row_from_its_own_font_object() {
             height: Some(10.0),
             color: Some([1.0, 1.0, 1.0, 1.0]),
             outline: Outline::None,
+            monochrome: false,
             justify_h: None,
             justify_v: None,
             shadow: None,
+            spacing: None,
         },
     );
     s.run(
@@ -290,8 +304,8 @@ fn dewdrop_recolors_a_row_from_its_own_font_object() {
         f = CreateFrame("Frame", "DdRow")
         f:SetWidth(120); f:SetHeight(16); f:SetPoint("CENTER", 0, 0)
         button = { text = f:CreateFontString(nil, "ARTWORK") }
-        button.text:SetText("row")
         button.text:SetFontObject(GameFontHighlightSmall)
+        button.text:SetText("row")
         button.text:SetTextColor(button.text:GetFontObject():GetTextColor())
     "#,
     )
@@ -315,19 +329,21 @@ fn mutating_a_font_object_repaints_everything_that_inherits_it() {
             height: Some(12.0),
             color: Some([1.0, 1.0, 1.0, 1.0]),
             outline: Outline::None,
+            monochrome: false,
             justify_h: None,
             justify_v: None,
             shadow: None,
+            spacing: None,
         },
     );
     s.run(
         r#"
         f = CreateFrame("Frame", "ThemeHost")
         f:SetWidth(200); f:SetHeight(60); f:SetPoint("CENTER", 0, 0)
-        a = f:CreateFontString(nil, "ARTWORK"); a:SetText("inherited")
-        a:SetFontObject(ThemeFont)
-        b = f:CreateFontString(nil, "ARTWORK"); b:SetText("overridden")
-        b:SetFontObject(ThemeFont)
+        a = f:CreateFontString(nil, "ARTWORK"); a:SetFontObject(ThemeFont)
+        a:SetText("inherited")
+        b = f:CreateFontString(nil, "ARTWORK"); b:SetFontObject(ThemeFont)
+        b:SetText("overridden")
         b:SetTextColor(1, 0, 0)
     "#,
     )
@@ -399,8 +415,8 @@ fn propagation_is_scoped_to_the_object_that_changed() {
         r#"
         f = CreateFrame("Frame", "ScopeHost")
         f:SetWidth(200); f:SetHeight(60); f:SetPoint("CENTER", 0, 0)
-        one = f:CreateFontString(nil, "ARTWORK"); one:SetText("one"); one:SetFontObject(FontOne)
-        two = f:CreateFontString(nil, "ARTWORK"); two:SetText("two"); two:SetFontObject(FontTwo)
+        one = f:CreateFontString(nil, "ARTWORK"); one:SetFontObject(FontOne); one:SetText("one")
+        two = f:CreateFontString(nil, "ARTWORK"); two:SetFontObject(FontTwo); two:SetText("two")
         FontOne:SetFont("Fonts\\CHANGED.TTF", 30)
     "#,
     )
@@ -428,8 +444,8 @@ fn create_font_mints_publishes_and_paints() {
         f = CreateFrame("Frame", "PlateHost")
         f:SetWidth(120); f:SetHeight(20); f:SetPoint("CENTER", 0, 0)
         Name = f:CreateFontString(nil, "ARTWORK")
-        Name:SetText("plate")
         Name:SetFontObject(Nameplate.Font)
+        Name:SetText("plate")
     "#,
     )
     .expect("_Nameplates' font setup must not raise");
@@ -501,9 +517,11 @@ fn fonz_appraiser_copies_a_shipped_object_then_overrides_the_face() {
             height: Some(10.0),
             color: Some([1.0, 1.0, 1.0, 1.0]),
             outline: Outline::None,
+            monochrome: false,
             justify_h: Some(JustifyH::Right),
             justify_v: None,
             shadow: None,
+            spacing: None,
         },
     );
     s.run(
@@ -536,14 +554,18 @@ fn fonz_appraiser_copies_a_shipped_object_then_overrides_the_face() {
     );
 }
 
-/// Line spacing is not built: the reference's `SetSpacing` is absent here, so a call raises rather
-/// than store a number nothing draws.
+/// A registered font object answers the spacing pair (`0x7a09f0`, `0x7a0ab0`), 0 until set, and a
+/// set reaches the FontStrings that inherit it.
 #[test]
-fn the_unmodelled_spacing_pair_fails_loudly() {
+fn a_font_objects_spacing_reaches_its_fontstrings() {
     let s = script();
     s.register_font_object("SomeFont", FontObject::default());
-    assert!(s.run("SomeFont:SetSpacing(4)").is_err());
-    assert!(s.eval::<bool>("return SomeFont.SetSpacing == nil").unwrap());
+    s.run("FS = CreateFrame('Frame'):CreateFontString() FS:SetFontObject(SomeFont)")
+        .unwrap();
+    assert_eq!(s.eval::<f32>("return SomeFont:GetSpacing()").unwrap(), 0.0);
+    s.run("SomeFont:SetSpacing(4)").unwrap();
+    assert_eq!(s.eval::<f32>("return SomeFont:GetSpacing()").unwrap(), 4.0);
+    assert_eq!(s.eval::<f32>("return FS:GetSpacing()").unwrap(), 4.0);
 }
 
 /// A button's state fonts take the object or the name; they are stored as names and re-resolved at
@@ -608,8 +630,8 @@ fn an_empty_font_object_copies_nothing_onto_a_fontstring() {
         f = CreateFrame("Frame", "EmptyFontHost")
         f:SetWidth(120); f:SetHeight(20); f:SetPoint("CENTER", 0, 0)
         fs = f:CreateFontString(nil, "ARTWORK")
-        fs:SetText("keep")
         fs:SetFontObject(DressedFont)
+        fs:SetText("keep")
         blank = CreateFont("ABlankFont")
         fs:SetFontObject(blank)
     "#,
@@ -772,6 +794,7 @@ fn a_cross_axis_token_erases_the_axis_but_still_draws_centred() {
         "f = CreateFrame('Frame', 'ClearAxisFrame')\n\
          f:SetWidth(200) f:SetHeight(40) f:SetPoint('CENTER', 0, 0)\n\
          fs = f:CreateFontString()\n\
+         fs:SetFont('Fonts\\\\FRIZQT__.TTF', 12)\n\
          fs:SetAllPoints(f)\n\
          fs:SetText('erased')",
     )
@@ -945,7 +968,7 @@ fn set_font_answers_the_hosts_load_verdict_when_there_is_a_host() {
         "an addon's own face, spelled in its own case, must load"
     );
     assert!(
-        s.eval::<bool>(r"return FS:SetFont('Interface\\AddOns\\MSBT\\Fonts\\gone.ttf', 18) == nil")
+        s.eval::<bool>(r"return FS:SetFont('Interface\\AddOns\\MSBT\\Fonts\\gone.ttf', 30) == nil")
             .unwrap(),
         "a path the store does not hold is the reference's falsey load failure"
     );
@@ -956,7 +979,10 @@ fn set_font_answers_the_hosts_load_verdict_when_there_is_a_host() {
         face, "Interface\\AddOns\\MSBT\\Fonts\\porky.ttf",
         "the refused face must not replace the one that loaded"
     );
-    assert_eq!(height, 18.0, "…while the height, which never fails, is set");
+    assert_eq!(
+        height, 18.0,
+        "a refused load writes nothing, the height included (`0x771571`)"
+    );
 }
 
 /// MSBT's per-event sequence over the stock `MasterFont` (`Fonts.xml:55`, a `<Shadow>` only): its
@@ -1037,4 +1063,94 @@ fn msbt_paints_its_own_face_size_outline_and_fade_over_the_font_object_it_inheri
             "OUTLINE".to_string()
         )
     );
+}
+
+/// The flags word of the text quad reading `text`: `(outline, monochrome)`.
+fn flags_of(s: &UiScript, text: &str) -> (Outline, bool) {
+    s.extract()
+        .into_iter()
+        .find_map(|q| match q.content {
+            QuadContent::Text {
+                text: Some(ref t),
+                outline,
+                monochrome,
+                ..
+            } if t == text => Some((outline, monochrome)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no text quad reading {text:?}"))
+}
+
+/// The action button's `HotKey` (`ActionButtonTemplate.xml`) inherits `NumberFontNormalSmallGray`,
+/// which inherits `NumberFontNormalSmall`'s `monochrome="true"` (`Fonts.xml`): the hotkey draws
+/// monochrome and THICK.
+#[test]
+fn the_hotkey_font_draws_monochrome_through_its_inherited_object() {
+    let mut s = script();
+    load(
+        &s,
+        r#"<Ui>
+             <Font name="NumberFontNormalSmall" font="Fonts\ARIALN.TTF" outline="THICK" virtual="true" monochrome="true">
+               <FontHeight><AbsValue val="12"/></FontHeight>
+             </Font>
+             <Font name="NumberFontNormalSmallGray" inherits="NumberFontNormalSmall" outline="THICK" virtual="true">
+               <Color r="0.6" g="0.6" b="0.6"/>
+             </Font>
+             <Font name="NumberFontNormal" font="Fonts\ARIALN.TTF" outline="NORMAL" virtual="true">
+               <FontHeight><AbsValue val="14"/></FontHeight>
+             </Font>
+             <Frame name="Bar" parent="UIParent">
+               <Size><AbsDimension x="36" y="36"/></Size>
+               <Anchors><Anchor point="CENTER"/></Anchors>
+               <Layers><Layer level="ARTWORK">
+                 <FontString name="$parentHotKey" inherits="NumberFontNormalSmallGray" text="2">
+                   <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                 </FontString>
+                 <FontString name="$parentCount" inherits="NumberFontNormal" text="4">
+                   <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                 </FontString>
+               </Layer></Layers>
+             </Frame>
+           </Ui>"#,
+    );
+    s.resolve();
+    assert_eq!(flags_of(&s, "2"), (Outline::Thick, true));
+    assert_eq!(flags_of(&s, "4"), (Outline::Normal, false));
+}
+
+/// `SetFont`'s flags are found as substrings (`0x6f1a90`), `MONOCHROME` among them, and replace the
+/// whole flags word, the inherited monochrome bit included.
+#[test]
+fn set_font_reads_and_clears_monochrome() {
+    let mut s = script();
+    load(
+        &s,
+        r#"<Ui>
+             <Font name="Mono" font="Fonts\ARIALN.TTF" monochrome="true">
+               <FontHeight><AbsValue val="12"/></FontHeight>
+             </Font>
+             <Frame name="F" parent="UIParent">
+               <Size><AbsDimension x="36" y="36"/></Size>
+               <Anchors><Anchor point="CENTER"/></Anchors>
+               <Layers><Layer level="ARTWORK">
+                 <FontString name="$parentA" inherits="Mono" text="a">
+                   <Anchors><Anchor point="TOP"/></Anchors>
+                 </FontString>
+                 <FontString name="$parentB" inherits="Mono" text="b">
+                   <Anchors><Anchor point="BOTTOM"/></Anchors>
+                 </FontString>
+               </Layer></Layers>
+             </Frame>
+           </Ui>"#,
+    );
+    s.run(
+        r#"
+        FA:SetFont("Fonts\\ARIALN.TTF", 12, "OUTLINE")
+        FB:SetFont("Fonts\\ARIALN.TTF", 12, "outline, monochrome")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(flags_of(&s, "a"), (Outline::Normal, false));
+    assert_eq!(flags_of(&s, "b"), (Outline::Normal, true));
 }

@@ -211,7 +211,7 @@ mod tests {
             speed: 0.0,
             vertical_velocity: 0.0,
             jump_xy_vel: [0.0; 2],
-            fall_start_z: None,
+            fall_start: None,
             pending: Default::default(),
             relay: Default::default(),
             last_apply_ms: 0.0,
@@ -315,7 +315,7 @@ mod tests {
                 0
             }));
             world.init_resource::<crate::spell::AutoSelfCast>();
-            world.insert_resource(crate::net::Reputations(Vec::new()));
+            world.insert_resource(crate::net::Reputations::default());
             world.insert_resource(crate::net::SelfGuid(Some(ME)));
             let run = UnitSpeeds(speeds());
             world.spawn((

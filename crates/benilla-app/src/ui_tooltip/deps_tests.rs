@@ -14,23 +14,25 @@ use benilla_ui::script::SpellTooltipView;
 
 use super::spell_deps::{Changes, Deps, RangeSeen, Reagents, Seen, UnitField};
 use super::spell_feed::{build_view, reagent_state, PetInputs, ViewCaster, ViewCtx};
-use super::tests::{real_spells, TestCtx};
+use super::tests::TestCtx;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Objects};
 use crate::spell::usable::{
     slot_item_cached, worn_slots_read, SlotItem, EQUIPMENT_MASK, EQUIPMENT_SLOTS,
 };
 use crate::spell::{ModsDiff, SpellModifiers};
-use crate::ui_action::Spells;
+use crate::ui_action::{real_spells, Spells};
 use crate::ui_items::TestObjects;
 use benilla_formats::{RangeUnit, UnitMotion};
 
 /// One side of each input group, so that moving an input is an xor: `false` is the empty side (no
-/// bind point, form 0, no percentages, default reach, no auto-attack target, both units standing,
-/// nothing worn, no skills, zero cells), `true` the populated one.
+/// bind point, gender 0, form 0, no percentages, default reach, no auto-attack target, both units
+/// standing, nothing worn, no skills, zero cells), `true` the populated one.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
 struct Inputs {
     home: bool,
+    /// The player's gender byte, `UNIT_FIELD_BYTES_0` byte 2.
+    gender: bool,
     form: bool,
     /// A `Chance` bit each: block, dodge, parry, crit.
     avoid: u8,
@@ -60,6 +62,7 @@ const POKE: u32 = 0x4020_0000;
 impl Inputs {
     const ALL: Inputs = Inputs {
         home: true,
+        gender: true,
         form: true,
         avoid: 0xf,
         reach: true,
@@ -76,6 +79,7 @@ impl Inputs {
     fn xor(self, o: Inputs) -> Inputs {
         Inputs {
             home: self.home ^ o.home,
+            gender: self.gender ^ o.gender,
             form: self.form ^ o.form,
             avoid: self.avoid ^ o.avoid,
             reach: self.reach ^ o.reach,
@@ -99,6 +103,15 @@ impl Inputs {
                 "the bind point".to_string(),
                 Inputs {
                     home: true,
+                    ..alone
+                },
+            ));
+        }
+        if self.gender {
+            parts.push((
+                "the gender byte".to_string(),
+                Inputs {
+                    gender: true,
                     ..alone
                 },
             ));
@@ -207,6 +220,7 @@ impl Inputs {
     fn outside(deps: &Deps, layout: &Layout) -> Inputs {
         Inputs {
             home: !deps.home,
+            gender: !deps.gender,
             form: !deps.form,
             avoid: !deps.avoidance & 0xf,
             reach: !deps.range_units,
@@ -323,6 +337,9 @@ fn mat(layout: &Layout, inputs: Inputs, p: Params) -> Mat {
     ];
     if inputs.disarm {
         pairs.push((46, 0x0020_0000));
+    }
+    if inputs.gender {
+        pairs.push((36, 1 << 16));
     }
     let form = if inputs.form { p.form } else { 0 };
     if form != 0 {
@@ -672,6 +689,19 @@ fn every_view_that_moves_with_an_input_is_requeued_by_that_input() {
         &any,
         &own,
         &cause(Inputs {
+            gender: true,
+            ..empty
+        }),
+    );
+    assert_covered("the gender byte", &s);
+    assert!(s.moved >= 50, "only {} views read the gender byte", s.moved);
+    row("gender byte ($g)", &s);
+    let s = sweep(
+        &mut rig,
+        empty,
+        &any,
+        &own,
+        &cause(Inputs {
             form: true,
             ..empty
         }),
@@ -857,7 +887,7 @@ fn a_reagent_moving_requeues_the_views_that_list_it() {
         reagents
             .iter()
             .map(|&e| {
-                let state = reagent_state(e, Some(store), &objects, &mut t.items, &t.commands);
+                let state = reagent_state(e, Some(store), &objects, &t.items);
                 (e, state)
             })
             .collect()
@@ -1337,7 +1367,7 @@ fn the_modifier_diff_names_the_family_flag_bit_of_a_changed_cell() {
 }
 
 /// A percentage's own bit, a worn slot's own bit, a skill line by its id, each unit field by its
-/// own bit and a player appearing, through the diff the feed runs each frame.
+/// own bit, the gender byte and a player appearing, through the diff the feed runs each frame.
 #[test]
 fn the_seen_diff_names_each_input_it_saw_move() {
     let mut objs = TestObjects::new();
@@ -1443,6 +1473,14 @@ fn the_seen_diff_names_each_input_it_saw_move() {
     assert!(c.disarm);
     let now = player(&[(22, 100), (46, 0x0000_0008)]);
     assert!(seen(&now).changes_since(&seen(&base)).is_empty());
+    // The gender byte, `UNIT_FIELD_BYTES_0` byte 2, and no other byte of the field.
+    let bytes_0 = |bytes: u32| player(&[(22, 100), (36, bytes)]);
+    let c = seen(&bytes_0(1 << 16)).changes_since(&seen(&base));
+    assert!(c.gender && !c.is_empty());
+    let race_class_power = bytes_0(4 | 1 << 8 | 1 << 24);
+    assert!(seen(&race_class_power)
+        .changes_since(&seen(&base))
+        .is_empty());
     // Each unit field on its own bit: level 34, base mana 162, base health 163, ranged attack
     // time 128; max health 28 and the max pools 29-33 on none, which no cost reads.
     let unit = [

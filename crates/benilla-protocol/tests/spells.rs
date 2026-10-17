@@ -1003,8 +1003,8 @@ fn combat_log_wire_golden() {
         other => panic!("exploration xp event, got {other:?}"),
     }
 
-    // SMSG_LEVELUP_INFO: twelve u32, level, healthGain, powerGains[5] (mana..happiness) and
-    // statGains[5] (str..spirit), no guid (vmangos `Misc.cpp:524-532`).
+    // SMSG_LEVELUP_INFO: u32 level, then the i32 gains, healthGain, powerGains[5] (mana..happiness)
+    // and statGains[5] (str..spirit), no guid (vmangos `Misc.cpp:524-532`).
     let mut body = Vec::new();
     for v in [7u32, 22, 15, 0, 0, 0, 0, 1, 0, 1, 2, 1] {
         body.extend_from_slice(&v.to_le_bytes());
@@ -1027,6 +1027,34 @@ fn combat_log_wire_golden() {
     }
     match decode(packet).pop().unwrap() {
         SessionEvent::LevelUp(l) => assert_eq!((l.level, l.health, l.powers[0]), (7, 22, 15)),
+        other => panic!("level up event, got {other:?}"),
+    }
+
+    // A loss the server wraps into its u32 reads negative, as the reference's `%d` fire prints it.
+    let mut body = Vec::new();
+    for v in [
+        7u32, 0xFFFFFFFE, 0xFFFFFFFD, 0, 0, 0, 0, 0xFFFFFFFE, 0, 0xFFFFFFFB, 0xFFFFFFFA, 0xFFFFFFF9,
+    ] {
+        body.extend_from_slice(&v.to_le_bytes());
+    }
+    assert_eq!(body.len(), 48);
+    let packet = messages::parse_server(messages::opcode::SMSG_LEVELUP_INFO, &body).unwrap();
+    match &packet {
+        ServerPacket::LevelUp(l) => {
+            assert_eq!(
+                l,
+                &LevelUpInfo {
+                    level: 7,
+                    health: -2,
+                    powers: [-3, 0, 0, 0, 0],
+                    stats: [-2, 0, -5, -6, -7],
+                }
+            );
+        }
+        other => panic!("level up, got {}", other.name()),
+    }
+    match decode(packet).pop().unwrap() {
+        SessionEvent::LevelUp(l) => assert_eq!((l.level, l.health, l.powers[0]), (7, -2, -3)),
         other => panic!("level up event, got {other:?}"),
     }
 }

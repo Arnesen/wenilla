@@ -1,6 +1,5 @@
 //! The vendor window's packet handlers: they fill [`MerchantOpen`] and [`MerchantErrors`].
 
-use benilla_protocol::messages::VendorItem;
 use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
@@ -17,9 +16,9 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::Disconnected, on_session_end);
 }
 
-fn on_inventory(In(ev): In<SessionEvent>, mut merchant: ResMut<MerchantOpen>) {
+fn on_inventory(In(ev): In<SessionEvent>, mut commands: Commands) {
     if let SessionEvent::VendorInventory { vendor, items } = ev {
-        vendor_inventory(vendor, items, &mut merchant);
+        commands.queue(move |world: &mut World| super::open_merchant(world, vendor, items));
     }
 }
 
@@ -50,21 +49,22 @@ fn on_buy_failed(
     }
 }
 
-fn on_sell_failed(In(ev): In<SessionEvent>, mut errors: ResMut<MerchantErrors>) {
-    if let SessionEvent::VendorSellFailed { reason, .. } = ev {
-        vendor_sell_failed(reason, &mut errors);
+fn on_sell_failed(
+    In(ev): In<SessionEvent>,
+    mut errors: ResMut<MerchantErrors>,
+    mut releases: ResMut<crate::ui_items::locks::ItemReleases>,
+) {
+    if let SessionEvent::VendorSellFailed {
+        item_guid, reason, ..
+    } = ev
+    {
+        vendor_sell_failed(reason, item_guid, &mut errors, &mut releases);
     }
 }
 
 /// The vendor window closes with the connection.
 fn on_session_end(In(_): In<SessionEvent>, mut merchant: ResMut<MerchantOpen>) {
     merchant.clear_session();
-}
-
-/// `SMSG_LIST_INVENTORY` opens the window on the vendor's rows.
-fn vendor_inventory(vendor: u64, items: Vec<VendorItem>, merchant: &mut MerchantOpen) {
-    debug!("net: vendor {vendor:#x} listed {} items", items.len());
-    merchant.open(vendor, items);
 }
 
 /// `SMSG_BUY_ITEM`'s new stock count, applied only to the open vendor.
@@ -96,8 +96,39 @@ fn vendor_buy_failed(
     errors.0.push(MerchantRefusal::Buy(reason));
 }
 
-/// `SMSG_SELL_ITEM`'s error path: queue the message line.
-fn vendor_sell_failed(reason: u8, errors: &mut MerchantErrors) {
-    debug!("net: sell failed (reason {reason})");
+/// `SMSG_SELL_ITEM` (`0x5dd1f0`): a zero result is a success and returns at once (`0x5dd221`);
+/// any other queues the message line and unlocks the item the sale locked (`0x5dd26b`), a zero
+/// guid excepted (`0x5dd267`). A success's item leaves its slot, which unlocks it.
+fn vendor_sell_failed(
+    reason: u8,
+    item_guid: u64,
+    errors: &mut MerchantErrors,
+    releases: &mut crate::ui_items::locks::ItemReleases,
+) {
+    if reason == 0 {
+        return;
+    }
+    debug!("net: sell failed (reason {reason}, item {item_guid:#x})");
     errors.0.push(MerchantRefusal::Sell(reason));
+    releases.unlock(item_guid);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui_items::locks::{ItemReleases, Release};
+
+    /// A refused sale unlocks the item it names (`0x5dd26b`); a zero result is a success, which
+    /// unlocks nothing and shows nothing (`0x5dd221`).
+    #[test]
+    fn a_refused_sale_unlocks_its_item_and_a_success_does_nothing() {
+        const ITEM: u64 = 0x4000_0000_0000_0042;
+        let mut errors = MerchantErrors::default();
+        let mut releases = ItemReleases::default();
+        vendor_sell_failed(0, ITEM, &mut errors, &mut releases);
+        assert!(errors.0.is_empty() && releases.0.is_empty());
+        vendor_sell_failed(1, ITEM, &mut errors, &mut releases);
+        assert_eq!(errors.0.len(), 1);
+        assert_eq!(releases.0, [Release::Item(ITEM)]);
+    }
 }
