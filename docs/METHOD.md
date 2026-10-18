@@ -17,8 +17,11 @@ crate of its own or a fork, and benilla opens a piece of itself to such a crate 
 ## The loop
 
 1. **The reference first.** For anything fidelity-defining, get the mechanism from the real
-   client before building: its behaviour, a DBC field, a FrameXML line, a packet capture. The
-   names and shapes under `reference/` are the surface benilla tracks.
+   client before building: its code as
+   [benilla-re](https://github.com/samwhosung/benilla-re) documents it by address, its
+   behaviour, a DBC field, a FrameXML line, a packet capture. The names and shapes under
+   `reference/` are the surface benilla tracks. A fact benilla-re lacks, or gets wrong, is
+   settled there, as an issue or a finding, and cited here by its client address.
 2. **Build it idiomatically.** Modern Bevy and Rust, performance woven in from the start.
    Implement the mechanism well; do not ape a quirk that is a bug.
 3. **Measure, never eyeball.** Timing, delay, ordering and feel are settled with instruments:
@@ -65,6 +68,8 @@ crate of its own or a fork, and benilla opens a piece of itself to such a crate 
 - `docs/METHOD.md`, this file: rules and method. Never state, never a log.
 - `docs/MAP.md`: what is built, generated from the code by `scripts/genmap.sh` at every land.
   Read it to orient; never edit or commit it by hand.
+- `docs/DEVIATIONS.md`: every place benilla differs from 1.12.1, its `Deviates` rows and `Deviation:`
+  comments, generated from the code by `scripts/genmap.sh` at every land; never edited by hand.
 - git: the history. No changelogs, no status docs, no "what we did" narratives.
 - The code: a comment says what the code does and the 1.12 fact behind it, in a line. No
   history, no stories.
@@ -72,8 +77,8 @@ crate of its own or a fork, and benilla opens a piece of itself to such a crate 
 ## Gates
 
 - **The land gates**: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
-  -- -D warnings`, `cargo test --workspace`, the doc-link and render-pass lints, the player
-  build without the `dev` feature with its own tests, and the engine boot checks, as
+  -- -D warnings`, `cargo test --workspace`, the doc-link lint (a full `cargo doc` of the workspace) and the render-pass lint, the vendored-reference and message-catalog checks, the player
+  build without the `dev` feature, linted and with its own tests, and the engine boot checks, as
   `scripts/gates.sh`. It runs on the tree that lands, before it lands; it is memoized on the
   tree. The tests that read the install or the addon corpus skip where the data is absent, and
   the gate prints the count; where the data is, a skip is a failure (`BENILLA_REQUIRE_DATA=1`).

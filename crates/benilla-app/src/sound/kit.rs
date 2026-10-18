@@ -881,9 +881,8 @@ impl SoundKits {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // **Two stores, one rule** — the chain, then an addon's own loose file
-            // ([`benilla_assets::read_chain_or_loose`], decision 1322's resolver): `PlaySoundFile`
-            // is a by-path verb, and the audio an addon ships lives on disk, never in an MPQ.
+            // An addon's loose file, then the chain ([`benilla_assets::read_loose_or_chain`]):
+            // `PlaySoundFile` is by path, and addon audio lives on disk, never in an MPQ.
             let bytes = assets
                 .read_file_or_loose(path)
                 .with_context(|| format!("reading {path}"))?;
@@ -1090,7 +1089,7 @@ pub(super) fn plugin(app: &mut App) {
             ),
         )
         .add_systems(
-            OnExit(crate::char_select::ClientState::InWorld),
+            OnExit(crate::client_state::ClientState::InWorld),
             stop_all_channels,
         );
     // wasm32: land the browser's finished loads ahead of the pump, and start a creature's vocal

@@ -6,8 +6,8 @@
 //! comment). `CEILING` is the standing count of gameplay files and `SLACK` how far under it the
 //! count may sit, as in `world_api_wall.rs`. `WOW_UISCRIPT_DUMP=1` prints the files.
 //!
-//! Window feeds (`ui_*`), `capture/` probes and test modules are reported; only gameplay files,
-//! the ones that can reach zero, are gated.
+//! Window feeds (`ui_*`), `capture/` probes, `devtools/` instruments and test modules are reported;
+//! only gameplay files, the ones that can reach zero, are gated.
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +18,8 @@ enum Family {
     Game,
     /// `ui_*`, a window's feed: the legitimate caller. Reported, never gated.
     Feed,
-    /// `capture/`, a live probe that asks the stock binding on purpose. Reported.
+    /// `capture/`, a live probe that asks the stock binding on purpose, or `devtools/`, a dev
+    /// instrument that reads the VM itself (hot reload, the addon profiler). Reported.
     Probe,
     /// A test module beside the code it tests. Reported.
     Test,
@@ -26,7 +27,7 @@ enum Family {
 
 fn family(rel: &str) -> Family {
     let file = rel.rsplit('/').next().unwrap_or(rel);
-    if rel.starts_with("capture/") {
+    if rel.starts_with("capture/") || rel.starts_with("devtools/") {
         Family::Probe
     } else if file == "tests.rs" || file.ends_with("_tests.rs") || rel.contains("/tests/") {
         Family::Test

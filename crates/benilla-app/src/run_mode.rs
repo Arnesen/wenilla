@@ -66,8 +66,8 @@ pub(crate) fn unattended() -> bool {
 
 /// A run stuck on a dialog: `true` (exit) only when the run is [`unattended`], logging the `FATAL`
 /// marker a leg runner greps for; otherwise the dialog stays up, with a hint when the credentials
-/// came from the environment. The call sites in [`crate::login`] and [`crate::char_select`] share
-/// it so the verdict and the marker cannot drift apart.
+/// came from the environment. Its call sites share it so the verdict and the marker cannot drift
+/// apart.
 pub(crate) fn fatal_when_driverless(why: &str) -> bool {
     if unattended() {
         error!("login: FATAL — {why}; exiting");
@@ -86,14 +86,14 @@ pub(crate) fn fatal_when_driverless(why: &str) -> bool {
 /// The screen the client starts on: a player at the login screen, a capture straight in the world,
 /// a glue capture on the screen it photographs. Needed before the plugins build, so it forwards
 /// into the dev half rather than reading a resource.
-pub(crate) fn start_state() -> crate::char_select::ClientState {
+pub(crate) fn start_state() -> crate::client_state::ClientState {
     #[cfg(feature = "dev")]
     {
         crate::capture::start_state()
     }
     #[cfg(not(feature = "dev"))]
     {
-        crate::char_select::ClientState::Login
+        crate::client_state::ClientState::Login
     }
 }
 
@@ -144,7 +144,7 @@ pub(crate) fn dev_source_dir() -> Option<&'static std::path::Path> {
     }
 }
 
-/// The pre-connect account guard on the env fast path ([`crate::login`]): `Err(explanation)` when
+/// The pre-connect account guard on the env fast path ([`crate::glue_session::login`]): `Err(explanation)` when
 /// this checkout declares an account ([`declared_identity`]) and the login is for another, because
 /// a login kicks whoever holds the account. Inert without a declaration. `WOW_ALLOW_ACCOUNT=1`
 /// turns the refusal into a warning.
@@ -233,6 +233,7 @@ mod tests {
             "debug_panel/",
             "asset_churn.rs",
             "dev.rs",
+            "devtools/",
             "hover_log.rs",
             "perf/",
             "preflight.rs",

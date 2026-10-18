@@ -474,9 +474,9 @@ fn the_active_tab_is_inert_and_toggle_inspect_closes() {
 }
 
 /// Re-opening through `ToggleInspect` after a close raises, as in the reference:
-/// `InspectFrame_OnHide` clears `this.unit`, so `OnShow` runs with no token, and
-/// `SetPortraitTexture` (`0x519ef0`) raises its usage error at its `lua_isstring` gate
-/// (`0x519fb4`), before the portrait is touched. Stock 1.12 has no inspect binding and no caller
+/// `InspectFrame_OnHide` clears `this.unit`, so `OnShow` runs with no token, and `SetUnit`
+/// (`0x505dfc`) and `SetPortraitTexture` (`0x519ef0`) raise their usage errors at their
+/// `lua_isstring` gates (`0x519fb4` for the portrait), before anything is touched. Stock 1.12 has no inspect binding and no caller
 /// outside the hidden window's own tabs, so only an addon or a macro gets here.
 #[test]
 fn toggle_inspect_reopens_after_a_close_and_raises_like_the_reference() {
@@ -492,16 +492,34 @@ fn toggle_inspect_reopens_after_a_close_and_raises_like_the_reference() {
         s.eval::<bool>("return InspectFrame:IsVisible()").unwrap(),
         "the window still shows — Show() runs before OnShow raises"
     );
-    // Two raises: `InspectFrame` and `InspectPaperDollFrame` each run their own `OnShow` under
-    // their own pcall, the first dying at the portrait's gate, the second at `UnitLevel`'s.
+    // Two raises: `InspectPaperDollFrame` and `InspectFrame` each run their own `OnShow` under
+    // their own pcall, the page first, since the show cascade notifies children before their
+    // parent (`0x76aed5`, then `0x76aef5`): the page dies at its first line, its pane's
+    // `SetUnit(InspectFrame.unit)` gate (`0x505dfc`), the window at the portrait's.
     let errors = s.errors();
     assert_eq!(errors.len(), 2, "one raise per OnShow handler: {errors:?}");
     assert!(
-        errors[0].contains(r#"Usage: SetPortraitTexture(texture, "unit")"#),
-        "the portrait's gate, before the name line is ever reached: {errors:?}"
+        errors[0].contains(r#"Usage: SetUnit("unit")"#),
+        "the paper doll's own handler, dying at its first line: {errors:?}"
     );
     assert!(
-        errors[1].contains(r#"Usage: UnitLevel("unit")"#),
-        "and the paper doll's own handler, dying at its first getter: {errors:?}"
+        errors[1].contains(r#"Usage: SetPortraitTexture(texture, "unit")"#),
+        "then the window's, at the portrait's gate, before the name line is ever reached: \
+         {errors:?}"
     );
+}
+
+/// `InspectPaperDollFrame_OnShow` binds the pane to the inspected unit
+/// (`InspectModelFrame:SetUnit(InspectFrame.unit)`), not to the player.
+#[test]
+fn the_inspect_pane_binds_the_inspected_unit() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let s = armed();
+    s.run(r#"InspectUnit("target")"#).unwrap();
+    let pane = s
+        .character_pane(s.frame_handle("InspectModelFrame").unwrap())
+        .expect("a character pane");
+    assert_eq!(pane.guid, TARGET);
+    assert!(pane.pending(), "the shown pane asks for its copy");
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }

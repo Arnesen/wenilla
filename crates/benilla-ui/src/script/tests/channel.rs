@@ -230,6 +230,80 @@ fn the_setter_asks_for_the_cascade_on_one_and_fires_update_chat_windows() {
     );
 }
 
+/// `SetGuildRecruitmentMode(1)` runs the cascade in place (`0x49ea70` → `0x49ea90`): the join
+/// takes its slot and window 1's entry, then fires `UPDATE_CHAT_WINDOWS` (`0x49eb5f`), all before
+/// the verb's own (`0x4a00a9`); a leave fires the same pair (`0x49eb21`); an owed run fires the
+/// verb's alone.
+#[test]
+fn the_recruitment_cascade_runs_inside_the_verb() {
+    use crate::script::{RecruitmentPlan, RecruitmentRun};
+    let mut s = script();
+    s.set_joined_channels(vec![Some("General - Orgrimmar".into()), None]);
+    crate::script::tick::heard::listen(
+        &s,
+        &["UPDATE_CHAT_WINDOWS"],
+        Some(
+            "(GetChannelName('GuildRecruitment - City')) .. ',' .. \
+             tostring((GetChatWindowChannels(1)))",
+        ),
+    );
+
+    s.set_guild_recruitment_plan(RecruitmentPlan::Join {
+        name: "GuildRecruitment - City".into(),
+        shortcut: "GuildRecruitment".into(),
+        id: 25,
+    });
+    s.run("SetGuildRecruitmentMode(1)").unwrap();
+    assert_eq!(
+        crate::script::tick::heard::take(&s),
+        [
+            "UPDATE_CHAT_WINDOWS 2,GuildRecruitment",
+            "UPDATE_CHAT_WINDOWS 2,GuildRecruitment"
+        ],
+        "the join fills the free slot and window 1 before either event"
+    );
+    assert_eq!(
+        s.take_guild_recruitment_runs(),
+        [RecruitmentRun::Join("GuildRecruitment - City".into())]
+    );
+    assert!(!s.take_guild_recruitment_cascade(), "the run is spent");
+
+    s.set_guild_recruitment_plan(RecruitmentPlan::Leave("GuildRecruitment - City".into()));
+    s.run("SetGuildRecruitmentMode(1)").unwrap();
+    assert_eq!(crate::script::tick::heard::take(&s).len(), 2);
+    assert_eq!(
+        s.take_guild_recruitment_runs(),
+        [RecruitmentRun::Leave("GuildRecruitment - City".into())]
+    );
+
+    // The retry owes the run; no player returns before anything (`0x49eac3`); an unnamed
+    // channel still signals the cascade's own event before the verb's.
+    for (plan, events, owed) in [
+        (RecruitmentPlan::Retry, 1, true),
+        (RecruitmentPlan::NoPlayer, 1, false),
+        (RecruitmentPlan::Unnamed, 2, false),
+    ] {
+        s.set_guild_recruitment_plan(plan);
+        s.run("SetGuildRecruitmentMode(1)").unwrap();
+        assert_eq!(crate::script::tick::heard::take(&s).len(), events);
+        assert!(s.take_guild_recruitment_runs().is_empty());
+        assert_eq!(s.take_guild_recruitment_cascade(), owed);
+    }
+
+    s.set_guild_recruitment_plan(RecruitmentPlan::Join {
+        name: "GuildRecruitment - City".into(),
+        shortcut: "GuildRecruitment".into(),
+        id: 25,
+    });
+    s.run("SetGuildRecruitmentMode(0)").unwrap();
+    assert_eq!(
+        crate::script::tick::heard::take(&s).len(),
+        1,
+        "mode 0 is the latch alone"
+    );
+    assert!(s.take_guild_recruitment_runs().is_empty());
+}
+
 /// A manual join or leave of `GuildRecruitment` calls `0x49ea70(0)` (`0x49ed3d`, `0x49ef8f`): it
 /// dirties the file and, as mode 0, asks for no cascade.
 #[test]
@@ -247,4 +321,44 @@ fn a_manual_guild_recruitment_verb_resets_the_latch() {
         "already 0: nothing moved"
     );
     assert!(!s.take_guild_recruitment_change());
+}
+
+/// `JoinChannelByName` (`0x49ff00`): a name that is neither string nor number raises the usage
+/// text (`0x49ffe7`); a spaced name pushes nothing (`0x49ff5e`); a join pushes two values (the
+/// channel id and the resolved name or nil, `0x49ffcc`, `0x49ffdd`) and sends; a `frameId` may be
+/// a numeric string.
+#[test]
+fn join_channel_by_name_raises_pushes_two_values_or_nothing() {
+    let mut s = script();
+    let count = |s: &crate::script::UiScript, call: &str| -> i64 {
+        s.eval(&format!("return (function(...) return arg.n end)({call})"))
+            .unwrap()
+    };
+    for call in [
+        "JoinChannelByName()",
+        "JoinChannelByName(nil)",
+        "JoinChannelByName({})",
+        "JoinChannelByName(true)",
+    ] {
+        let err = s.run(call).expect_err(call).to_string();
+        assert!(
+            err.contains(r#"Usage: JoinChannelByName("name")"#),
+            "{call}: {err}"
+        );
+    }
+    // A spaced name, and an empty one: nothing at all, and nothing sent.
+    assert_eq!(count(&s, "JoinChannelByName('two words')"), 0);
+    assert_eq!(count(&s, "JoinChannelByName('')"), 0);
+    assert!(s.take_channel_commands().is_empty());
+    // A custom channel: two values, the second nil; a number is stringified.
+    assert_eq!(count(&s, "JoinChannelByName('Guildies', 'pw', '2')"), 2);
+    assert_eq!(count(&s, "JoinChannelByName(7)"), 2);
+    let sent = s.take_channel_commands();
+    assert_eq!(sent.len(), 2);
+    // The numeric-string frame id registered the channel in window 2's list.
+    assert!(s
+        .eval::<bool>(
+            "for _, n in ipairs({ GetChatWindowChannels(2) }) do if n == 'Guildies' then return true end end return false"
+        )
+        .unwrap());
 }

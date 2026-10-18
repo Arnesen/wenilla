@@ -75,7 +75,7 @@ enum Seat {
 }
 
 /// A roster with a pending pick, for [`super::seat_from_roster`] itself to seat.
-fn roster() -> crate::char_select::Roster {
+fn roster() -> crate::glue_session::roster::Roster {
     let row = benilla_protocol::Character {
         guid: 7,
         name: "Harness".into(),
@@ -101,7 +101,7 @@ fn roster() -> crate::char_select::Roster {
         pet_level: 0,
         pet_family: 0,
     };
-    crate::char_select::Roster::with_pending_pick(vec![row], 7)
+    crate::glue_session::roster::Roster::with_pending_pick(vec![row], 7)
 }
 
 /// The `"player"` snapshot the self descriptor builds, as `ui_unit::feed_units` pushes it: the
@@ -129,11 +129,12 @@ fn seat(root: &Path, seat: Seat) -> UiScript {
 
     let mut registry: Vec<AddOnInfo> = INSTALLED
         .iter()
-        .map(|n| super::addons::info_from_toc(n, &read_toc(root, n)))
+        .map(|n| super::addons::info_from_toc(n, &read_toc(root, n), false))
         .collect();
     s.register_addons(registry.clone(), Some(root.to_path_buf()), None, None);
     s.set_realm_name("Harness");
-    let player = super::seat_from_roster(&roster()).expect("a pending pick seats a player");
+    let player = super::seat_from_roster(&roster(), crate::ui_unit::TestNames::english().names())
+        .expect("a pending pick seats a player");
     if seat == Seat::BeforeAddons {
         // A `"player"` push with a name also seeds the player record, as the entry load does, so
         // `UnitName("player")` answers at addon file scope and Bagnon reads the live bags.
@@ -440,7 +441,8 @@ fn the_item_button_helpers_paint_a_slots_icon_and_count() {
 /// What the roster seat puts in the VM, and `None` with no pick, so a capture loads unchanged.
 #[test]
 fn the_roster_seat_names_the_character_the_addons_will_meet() {
-    let seat = super::seat_from_roster(&roster()).expect("a pending pick seats a player");
+    let seat = super::seat_from_roster(&roster(), crate::ui_unit::TestNames::english().names())
+        .expect("a pending pick seats a player");
     assert_eq!(seat.name.as_deref(), Some("Harness"));
     // 0, not 60: `UnitLevel` (`0x517fc0`) has no `"player"` fast path, so with no object it pushes
     // the number 0 (`0x51813e`). The level arrives with the descriptor.
@@ -461,7 +463,11 @@ fn the_roster_seat_names_the_character_the_addons_will_meet() {
     assert_eq!((seat.health, seat.max_health), (0, 0));
 
     assert!(
-        super::seat_from_roster(&crate::char_select::Roster::default()).is_none(),
+        super::seat_from_roster(
+            &crate::glue_session::roster::Roster::default(),
+            Default::default(),
+        )
+        .is_none(),
         "no pick, no seat — a capture must load exactly as it did before"
     );
 }
@@ -576,7 +582,7 @@ fn dragging_a_bagnon_slot_picks_the_item_up() {
     let (dx, dy) = centre_of(&mut s, &empty);
     s.mouse_move(sx, sy);
     s.mouse_button(sx, sy, "LeftButton", true);
-    s.mouse_move(sx + 12.0, sy + 12.0); // past DRAG_START_THRESHOLD ⇒ OnDragStart
+    s.mouse_move(sx + 12.0, sy + 12.0); // past the drag-start distance ⇒ OnDragStart
     s.mouse_move(dx, dy);
     s.mouse_button(dx, dy, "LeftButton", false);
 
@@ -938,14 +944,18 @@ fn a_texture_gradient_tints_the_art_it_sits_on() {
         .map(|q| q.content.clone())
         .expect("the popup's background art reaches the render list");
 
-    let QuadContent::Texture { color, .. } = bg else {
+    let QuadContent::Texture {
+        color, gradient, ..
+    } = bg
+    else {
         unreachable!("filtered to Texture above")
     };
-    // The stops are (0,0,0,0.9) and (0.2,0.2,0.2,0.9). A quad carries one tint, so the paint shows
-    // their midpoint, 0.1 grey; the reference shades per vertex.
+    // VERTICAL, MinColor (0,0,0,0.9) on the bottom pair and MaxColor (0.2,0.2,0.2,0.9) on the top.
+    let (min, max) = ([0.0, 0.0, 0.0, 0.9], [0.2, 0.2, 0.2, 0.9]);
+    assert_eq!(color, None, "the art carries no one-colour tint");
     assert_eq!(
-        color,
-        Some([0.1, 0.1, 0.1, 0.9]),
+        gradient,
+        Some([max, max, min, min]),
         "the <Gradient> must tint the art; untinted this is the reported white box"
     );
 }
@@ -1169,7 +1179,6 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
         &mut memory,
         None,
         Default::default(),
-        Vec::new(),
         Vec::new(),
     );
     s.fire_event("PLAYER_LEAVING_WORLD", Vec::new());

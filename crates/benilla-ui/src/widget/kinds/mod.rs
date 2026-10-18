@@ -4,8 +4,10 @@ use std::collections::{HashSet, VecDeque};
 
 use super::{FrameHandle, RegionHandle};
 
+mod character;
 mod editbox;
 mod messageframe;
+pub use character::*;
 pub use editbox::*;
 pub use messageframe::*;
 
@@ -47,6 +49,54 @@ pub enum FrameKind {
     GameTooltip,
     /// The `<Minimap>` widget, a game-layer factory (`0x495940`) the app draws the map into.
     Minimap,
+}
+
+/// A kind's own per-frame update: the `vtable+0x38` override the update walk calls in the frame's
+/// place (`0x765710`), which fires the frame's `OnUpdate` (`0x76b2c0`) first and then does the
+/// kind's engine work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KindUpdate {
+    /// `CSimpleEditBox`'s `0x77a790`: the flush, then the caret blink.
+    EditBox,
+    /// `CGameTooltip`'s `0x530b20`: the fade.
+    Tooltip,
+    /// `CSimpleModel`'s `0x76d7f0`, in the slot of every model kind's vtable (`0x81c608`,
+    /// `0x8084f8`, `0x8083a8`, `0x808260`): the scene clock and the completions it reports.
+    Model,
+    /// `CSimpleMessageFrame`'s `0x786200` (slot `0x81cca0`): the cap to the lines that fit, then
+    /// the line fades.
+    MessageFrame,
+    /// `CSimpleMessageScrollFrame`'s `0x788460` (slot `0x81ce50`): the line fades.
+    ScrollingMessageFrame,
+    /// `CSimpleScrollFrame`'s `0x787140` (slot `0x81cd78`): a marked range's recompute.
+    ScrollFrame,
+}
+
+impl FrameKind {
+    /// A `CSimpleModel` kind, carrying a [`ModelState`].
+    pub fn is_model(self) -> bool {
+        matches!(
+            self,
+            FrameKind::Model
+                | FrameKind::PlayerModel
+                | FrameKind::DressUpModel
+                | FrameKind::TabardModel
+        )
+    }
+
+    /// The kind's own update, run in the walk after the frame's `OnUpdate`. The reference
+    /// overrides the slot on more kinds; benilla models these.
+    pub fn kind_update(self) -> Option<KindUpdate> {
+        match self {
+            FrameKind::EditBox => Some(KindUpdate::EditBox),
+            FrameKind::GameTooltip => Some(KindUpdate::Tooltip),
+            FrameKind::MessageFrame => Some(KindUpdate::MessageFrame),
+            FrameKind::ScrollingMessageFrame => Some(KindUpdate::ScrollingMessageFrame),
+            FrameKind::ScrollFrame => Some(KindUpdate::ScrollFrame),
+            k if k.is_model() => Some(KindUpdate::Model),
+            _ => None,
+        }
+    }
 }
 
 /// The kind of a [`Region`] leaf, the client's `CScriptRegion`-derived non-frame objects.
@@ -93,6 +143,34 @@ pub enum KindState {
 }
 
 impl KindState {
+    /// The owner's region-removed hook, frame vtable `+0x2c`, which `0x77fd10` runs on the old
+    /// parent whenever a region leaves it, freed, reparented or detached (`0x77fd55`): a kind
+    /// that keeps a region in a slot drops it there, so no slot names a dead region. Button
+    /// `0x778cb0`, CheckButton `0x785230`, StatusBar `0x783110`, Slider `0x789790` and ColorSelect
+    /// `0x78b530` override it; every other kind keeps the base unlink `0x76a7f0` alone.
+    pub fn region_removed(&mut self, rh: RegionHandle) {
+        let clear = |slot: &mut Option<RegionHandle>| {
+            if *slot == Some(rh) {
+                *slot = None;
+            }
+        };
+        match self {
+            KindState::Button(bs) => bs.region_removed(rh),
+            // The bar texture, `+0x324`.
+            KindState::StatusBar(sb) => clear(&mut sb.bar),
+            // The thumb, `+0x328`.
+            KindState::Slider(sl) => clear(&mut sl.thumb),
+            // The four art slots, `+0x318` to `+0x324`.
+            KindState::ColorSelect(cs) => {
+                clear(&mut cs.wheel);
+                clear(&mut cs.wheel_thumb);
+                clear(&mut cs.value_strip);
+                clear(&mut cs.value_thumb);
+            }
+            _ => {}
+        }
+    }
+
     /// The display lines of either message-frame class, which share the [`MessageLine`] record.
     pub fn message_lines(&self) -> Option<&VecDeque<MessageLine>> {
         match self {
@@ -177,32 +255,39 @@ impl TooltipAnchor {
 pub struct TooltipState {
     /// Lines currently filled (`NumLines`). Regions past this index exist but are hidden.
     pub num_lines: usize,
-    /// The left-column FontString pool, index i = line i+1, grown on demand with no line cap.
+    /// The left-column FontString array (`+0x32c`), index i = line i+1: the `<name>TextLeft<n>`
+    /// pairs the post-load pass found (`0x529650`), then one per `AddFontStrings` (`0x529940`). Its
+    /// length is the line limit (`+0x320`), `0x530270` adding no line past it (`0x530291`).
     pub left_lines: Vec<RegionHandle>,
     /// The right-column pool (the `AddDoubleLine`/`TextRightN` half), parallel to `left_lines`.
     pub right_lines: Vec<RegionHandle>,
     /// `SetOwner`'s frame, dropped on hide.
     pub owner: Option<FrameHandle>,
-    /// The last `SetOwner`'s mode, read back by `GetAnchorType()`.
+    /// The anchor mode (`+0x318`), read back by `GetAnchorType()`: the last `SetOwner`'s while
+    /// owned, `None` (mode 7) since a hide.
     pub anchor: TooltipAnchor,
     /// `SetMinimumWidth`: a floor on the auto-sized width, cleared with the content.
     pub min_width: f32,
-    /// `FadeOut()`'s start on the `GetTime` clock; any fresh content or `Show` cancels the fade.
-    pub fade_start: Option<f64>,
+    /// `FadeOut()`'s countdown in seconds (`[+0x3b4]` armed, `[+0x3b8]` left): the tooltip's own
+    /// update counts it down by its elapsed, so it stands still while the tooltip is not walked.
+    /// `FadeOut` arms it; the show, the SetOwner core (so every hide) and a cursor-mode `FadeOut`
+    /// disarm it, and nothing else.
+    pub fade_left: Option<f32>,
     /// The guid of the unit this tooltip shows (`+0x368`/`+0x36c`, stored at `0x52a070`), whose
     /// health watcher (`0x467e70`, registered at `0x52a0a8`) drives the bar; a `set_unit` push of
     /// that unit, under any token, re-drives it.
     pub unit_guid: Option<u64>,
-    /// Shows world-hover content, which fades when the hover is lost; a window hover never fades.
-    pub world_owned: bool,
     /// Armed for a compare render: the next `SetInventoryItem` prepends "Currently Equipped"
     /// (`[arg+0x18]`, not the compact `[arg+0x14]`), surviving the stock caller's `SetOwner` in
     /// between (`MerchantFrame.xml:67-72`); the reference's route to `0x52b650` is untraced.
     pub equipped_header_armed: bool,
     /// `SetPadding`: extra width past the content (`ItemRef.xml:40` sets 16 for the close button).
     pub padding: f32,
-    /// Line 1 came from XML (`ShoppingTooltipTemplate`), so later lines clone the previous fonts.
-    pub xml_declared_lines: bool,
+    /// How many leading pairs the line writers have seated (anchored, justified, hidden).
+    pub seated: usize,
+    /// A relayout (`0x530640`) is owed: Show and the line writers run it with an owner, and it
+    /// ends by invalidating the plate (`0x530a52`). The layout pre-pass pays it.
+    pub relayout_owed: bool,
 }
 
 /// The plate's text inset: the stock template seats `TextLeft1` at TOPLEFT (10, −10).
@@ -211,10 +296,19 @@ pub const TOOLTIP_PAD: f32 = 10.0;
 pub const TOOLTIP_LINE_GAP: f32 = 2.0;
 /// The least double-line column gap, the stock `TextRightN` offset; the reference's is untraced.
 pub const TOOLTIP_DOUBLE_GAP: f32 = 40.0;
-/// `FadeOut`'s ramp length in seconds; the reference's constant is untraced.
-pub const TOOLTIP_FADE_SECS: f64 = 0.5;
+/// `FadeOut`'s duration in seconds, `[0x808e7c]` = 2.0: the plate holds full alpha for the first
+/// half and ramps over the second.
+pub const TOOLTIP_FADE_SECS: f32 = 2.0;
 /// A wrap-flagged line's width, pinned when it is appended; the reference's column is untraced.
 pub const TOOLTIP_WRAP_WIDTH: f32 = 260.0;
+
+/// One frame's advance of a model pane's scene clock in whole milliseconds: `elapsed · 1000`
+/// truncated toward zero with no `+0.5` (`0x76d846`, then `__ftol` `0x40a2b0`), where the world's
+/// clock rounds (`0x483659`), so each frame's sub-millisecond remainder is dropped with no carry.
+/// A negative or NaN `elapsed` advances nothing.
+pub fn pane_clock_step_ms(elapsed: f32) -> u64 {
+    (elapsed * 1000.0).trunc().max(0.0) as u64
+}
 
 /// A model pane's scene: the `CSimpleModel` (`0x76c8e0`) members every model kind carries, read
 /// and written by `Model`'s 23 methods (table `0x878948`); the render is the app's.
@@ -222,8 +316,9 @@ pub const TOOLTIP_WRAP_WIDTH: f32 = 260.0;
 pub struct ModelState {
     /// `SetModel`'s path as written (`.mdx`); the app's loader maps it to the shipped `.m2`.
     pub path: Option<String>,
-    /// `PlayerModel:SetUnit`'s unit (`0x505d70`); it and [`Self::path`] each clear the other.
-    pub unit: Option<String>,
+    /// The `CGCharacterModelBase` half (`0x505680`) of a `PlayerModel`, `DressUpModel` or
+    /// `TabardModel`; `None` on a plain `Model`, which has no `SetUnit`.
+    pub character: Option<CharacterPane>,
     /// The last `SetSequence` id (`[bone0 block + 0xf8]`); what plays is [`Self::armed`].
     pub sequence: i32,
     /// The pane's own scene clock in ms (`0x76cfc0`): its `OnUpdate` (`0x76d7f0`) adds
@@ -263,6 +358,21 @@ pub struct ModelState {
     pub fog_near: f32,
     /// Fog far (`+0x3b0`), shaped like [`Self::fog_near`]; the ctor's is `1.0`.
     pub fog_far: f32,
+    /// A `ModelFFX`, the glue's `CSimpleModelFFX` (`0x46fa00`). Its vtable differs from
+    /// `CSimpleModel`'s in two slots past the destructor: its OnShow (`0x46fa60`) installs the glue
+    /// glow pass (`0x6cde60` with `[0xb414c4]`) and pins `LightParams.glow` to `*0x8380b4` (0.30),
+    /// and its layer-2 paint callback (`0x46fad0`, registered by `0x46fa90`) brackets the model
+    /// paint `0x76d240` with the full-screen-effect pass pair `0x6cd890`/`0x6cda70`.
+    pub ffx: bool,
+    /// The scene's fill callback is the select screen's (`0x472150`, installed by
+    /// `SetCharSelectBackground` at `0x472144`) in place of the fog callback `SetModel` installs
+    /// (`0x76cd96` → `0x76d680`): the scene draws unfogged whatever the fog fields hold. The
+    /// callback rides the model instance, so the next `SetModel` or `ClearModel` drops it.
+    pub select_fill: bool,
+    /// The number of the instance the last `SetModel` made: `0x76cce0` builds a new one on every
+    /// call (`0x76ccf5`-`0x76cd0d`), its scene starting over, even for the file it held. 0 for
+    /// none.
+    pub instance: u64,
 }
 
 /// A model pane's armed fog, all the renderer needs ([`ModelState::armed_fog`]).
@@ -283,9 +393,10 @@ impl ModelFog {
     }
 }
 
-/// A model pane's embedded `CGLight` (`+0x324`), its only light (`0x76d680`): off on a plain
-/// `<Model>` until Lua enables it, so a lit batch draws black (`0x71bf90`), and on for a
-/// `PlayerModel` (ctor `0x505680`). Colours are stored times their intensity.
+/// A model pane's embedded `CGLight` (`+0x324`), the light `0x76d680` adds to its file's own
+/// (`0x718960`): off on a plain `<Model>` until Lua enables it, so a file with no lights draws
+/// black (`0x71bf90`), and on for a `PlayerModel` (ctor `0x505680`). Colours are stored times
+/// their intensity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModelLight {
     /// `+0x60`: set by a nonzero `SetLight` (`0x76e1e0`) first argument; `SetLight(0, …)` is inert.
@@ -313,12 +424,31 @@ impl Default for ModelLight {
     }
 }
 
+impl ModelLight {
+    /// The `CGCharacterModelBase` ctor's light (`0x505680`), over the `<Model>` one it chains to:
+    /// directional (`0x71b620(0)` at `0x5056c9`), ambient 0.7 (`+0x30`, `0x50572e`), diffuse
+    /// (0.8, 0.8, 0.64) (`+0x3c`, `0x505702`) and enabled (`0x71b780(1)` at `0x50576a`). The
+    /// direction is the second `0x71b6a0` write, `(0, 1, 0)` at `0x505761`, which overwrites the
+    /// `(0, −√½, −√½)` of the first at `0x5056e9`. `PlayerModel`'s factory `0x495bd0` runs this
+    /// ctor, and `DressUpModel` and `TabardModel` subclass it; no 1.12 FrameXML calls `SetLight`,
+    /// so every stock window draws in this light.
+    pub fn character() -> Self {
+        Self {
+            enabled: true,
+            omni: false,
+            vector: [0.0, 1.0, 0.0],
+            ambient: [0.7; 3],
+            diffuse: [0.8, 0.8, 0.64],
+        }
+    }
+}
+
 /// A fresh pane as the `CSimpleModel` ctor leaves it.
 impl Default for ModelState {
     fn default() -> Self {
         Self {
             path: None,
-            unit: None,
+            character: None,
             sequence: 0,
             clock_ms: 0,
             armed: None,
@@ -335,6 +465,9 @@ impl Default for ModelState {
             fog: false,
             fog_near: 0.0,
             fog_far: 1.0,
+            ffx: false,
+            select_fill: false,
+            instance: 0,
         }
     }
 }
@@ -429,26 +562,45 @@ pub fn model_key(path: &str) -> String {
 }
 
 impl ModelState {
-    /// `SetModel` (`0x76cce0`): a fresh instance, dropping unit, icon override and arm, seeded now
-    /// if the file is resident, else when it lands (`0x70ebd0`); the scene clock runs on.
+    /// A fresh `PlayerModel`, `DressUpModel` or `TabardModel`: the `Model` ctor's state, then the
+    /// `CGCharacterModelBase` ctor's (`0x505680`): its members zeroed and its light switched on.
+    pub fn character() -> Self {
+        Self {
+            character: Some(CharacterPane::default()),
+            light: ModelLight::character(),
+            ..Self::default()
+        }
+    }
+
+    /// `SetModel` (`0x76cce0`): a fresh instance, dropping icon override and arm, seeded now if the
+    /// file is resident, else when it lands (`0x70ebd0`); the scene clock runs on. On a character
+    /// pane the file replaces the copy at `+0x318` (slot 37), while the stored subject stays for
+    /// the next build.
     pub fn set_file(&mut self, path: String, facts: Option<&ModelFileFacts>) {
         self.path = Some(path);
-        self.unit = None;
+        if let Some(c) = &mut self.character {
+            c.overtake();
+        }
         self.icon = None;
         self.armed = None;
         self.pending_seed = true;
+        self.select_fill = false;
         if let Some(facts) = facts {
             self.seed_from_facts(facts);
         }
     }
 
-    /// `ClearModel`: releases the instance.
+    /// `ClearModel`: releases the instance, a character pane's copy included (slot 36 with null),
+    /// which leaves its stored subject (`+0x3e0`, `+0x3f0`) as it was.
     pub fn clear_file(&mut self) {
         self.path = None;
-        self.unit = None;
+        if let Some(c) = &mut self.character {
+            c.overtake();
+        }
         self.icon = None;
         self.armed = None;
         self.pending_seed = false;
+        self.select_fill = false;
     }
 
     /// `SetSequence`/`SetSequenceTime` (`0x7121a0`): interrupts what plays, with no
@@ -500,6 +652,16 @@ impl ModelState {
             near: self.fog_near,
             far: self.fog_far,
         })
+    }
+
+    /// The fog the scene draws with: the armed fog under the fog callback `SetModel` installs
+    /// (`0x76d680`), none under the select screen's ([`Self::select_fill`]).
+    pub fn scene_fog(&self) -> Option<ModelFog> {
+        if self.select_fill {
+            None
+        } else {
+            self.armed_fog()
+        }
     }
 
     /// `SetCamera` by raw index (`0x76cec0`): deferred until the facts are known, then installed
@@ -623,11 +785,20 @@ pub const MINIMAP_DEFAULT_ARROW_MODEL: &str = "Interface\\Minimap\\Rotating-Mini
 /// The default `minimapPlayerModel` (`0x8453c0`), applied to engine child 9 alone (`0x4ee260`).
 pub const MINIMAP_DEFAULT_PLAYER_MODEL: &str = "Interface\\Minimap\\MinimapArrow.mdx";
 
-/// A `CSimpleScrollFrame`'s members (`+0x318`/`+0x324`/`+0x328`); the ranges are measured live.
+/// A `CSimpleScrollFrame`'s members (`+0x314`..`+0x328`), all zero from the ctor (`0x786a51`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScrollFrameState {
     /// `SetScrollChild`'s frame, which pans within this frame's rect.
     pub child: Option<FrameHandle>,
+    /// `[+0x31c]`, `[+0x320]`: the horizontal and vertical ranges in the frame's own units, as the
+    /// last recompute stored them (`0x786eaa`, `0x786ed1`); the getters answer these.
+    pub range: [f32; 2],
+    /// `[+0x314]`: the ranges are out of date. `UpdateScrollChildRect`, `SetScrollChild` and a
+    /// change in the frame's size set it; the frame's update recomputes and clears it.
+    pub range_dirty: bool,
+    /// The frame's width and height in px when its update last ran, from which that update sees a
+    /// resize (`0x7871f0`'s mark); the ctor's empty rect until then.
+    pub seen_size: [f32; 2],
     /// `SetHorizontalScroll`'s offset in px, unclamped; `0x787100` anchors the child at
     /// `(+horizontal, +vertical)`, so scrolling right takes a negative offset, down a positive.
     pub horizontal: f32,
@@ -646,6 +817,8 @@ pub struct ButtonFont {
     /// The normalized outline, `""`, `"OUTLINE"` or `"THICKOUTLINE"`, as `GetFont` answers it; an
     /// omitted `flags` clears it, where the reference's handling is untraced.
     pub flags: String,
+    /// The flags word's monochrome bit, written with the outline (`0x79f334`).
+    pub monochrome: bool,
 }
 
 /// A button's state, `[CSimpleButton+0x328]`: 0 DISABLED, 1 NORMAL, 2 PUSHED, also the index into
@@ -661,6 +834,23 @@ pub enum ButtonVisualState {
     Pushed,
 }
 
+/// The writes to regions' shown bit (`+0xc4`) a Button's state machine makes, in order. The bit
+/// is the region's own, the one `Show`/`Hide` write and `IsShown` and the draw read, so the
+/// machine hands its writes back for the caller to apply to the regions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[must_use = "the caller writes these bits into the regions"]
+pub struct ShownWrites(pub Vec<(RegionHandle, bool)>);
+
+impl ShownWrites {
+    fn hide(&mut self, rh: Option<RegionHandle>) {
+        self.0.extend(rh.map(|rh| (rh, false)));
+    }
+
+    fn show(&mut self, rh: Option<RegionHandle>) {
+        self.0.extend(rh.map(|rh| (rh, true)));
+    }
+}
+
 /// A button's state. The drawn state texture is latched, not derived: the shown pointer
 /// (`+0x4c4`) moves only on a transition into a state that has a texture ([`Self::set_state`]).
 #[derive(Clone, Debug, PartialEq)]
@@ -673,6 +863,9 @@ pub struct ButtonState {
     pub loot_slot: Option<u32>,
     /// A CheckButton's checked flag (`+0x4dc`, XML `checked`).
     pub checked: bool,
+    /// A `CSimpleHyperlinkButton`'s link (`+0x4dc`) and text (`+0x4e0`), which its enter, leave
+    /// and click hand to its text frame (`script::hyperlink`); `None` on any other Button.
+    pub hyperlink: Option<(String, String)>,
     /// `<NormalTexture>`/`SetNormalTexture` (`+0x4bc`).
     pub normal: Option<RegionHandle>,
     /// `<PushedTexture>` (`+0x4c0`); a button with none keeps what it showed ([`Self::set_state`]).
@@ -727,6 +920,7 @@ impl Default for ButtonState {
             loot_slot: None,
             locked: false,
             checked: false,
+            hyperlink: None,
             normal: None,
             pushed: None,
             disabled: None,
@@ -764,22 +958,53 @@ impl ButtonState {
 
     /// `SetState` (`0x779790`): entering a state with no texture keeps the shown one
     /// (`0x7797be`/`0x7797e2`). A button is NORMAL before `LoadXML` adds its art (ctor
-    /// `0x7786a0`), so a press or `Disable()` without its own texture keeps the normal art.
-    fn set_state(&mut self, new: ButtonVisualState) {
+    /// `0x7786a0`), so a press or `Disable()` without its own texture keeps the normal art. The
+    /// hide of the old (`0x7797c0`) runs only when the new state has a texture too, and the show of
+    /// the new (`0x7797ea`) writes its bit.
+    fn set_state(&mut self, new: ButtonVisualState) -> ShownWrites {
         if new == self.state {
-            return;
+            return ShownWrites::default();
         }
         self.state = new;
+        let mut w = ShownWrites::default();
         if let Some(slot) = self.state_slot(new) {
+            w.hide(self.shown);
             self.shown = Some(slot);
+            w.show(Some(slot));
         }
+        w
     }
 
     /// `SetButtonState(state, locked)` (`0x779790`), the one writer: the lock is stored before the
     /// equal-state early-out (`0x77979d`), so it is set or cleared even when the state holds.
-    pub fn set_button_state(&mut self, new: ButtonVisualState, locked: bool) {
+    pub fn set_button_state(&mut self, new: ButtonVisualState, locked: bool) -> ShownWrites {
         self.locked = locked;
-        self.set_state(new);
+        self.set_state(new)
+    }
+
+    /// `CSimpleCheckbox::Refresh` (`0x7854c0`): clears both checked textures' bits, then shows
+    /// the one the checked flag and the state pick (`0x785538`), the disabled pair's when DISABLED
+    /// and it exists, else the checked texture. `force` is its second argument: without it a flag
+    /// that holds does nothing (`0x7854d0`). Only `SetChecked`, a click, `SetEnabled`, the two
+    /// checked setters and the XML `checked=` attribute (`0x7851a6`) reach it; a state switch alone
+    /// leaves the pair. The reference's `checked=` runs before the checked textures exist, so it
+    /// shows nothing and each setter's refresh shows its texture; benilla's loader calls
+    /// `SetChecked` after the textures, which ends in the same state.
+    pub fn refresh_checked(&mut self, checked: bool, force: bool) -> ShownWrites {
+        if !force && checked == self.checked {
+            return ShownWrites::default();
+        }
+        self.checked = checked;
+        let mut w = ShownWrites::default();
+        w.hide(self.checked_tex);
+        w.hide(self.disabled_checked);
+        if checked {
+            w.show(match self.disabled_checked {
+                Some(dc) if !self.enabled() => Some(dc),
+                _ => self.checked_tex,
+            });
+        }
+        w
     }
 
     /// `IsEnabled` (`0x7800b0`): the state alone; the class has no enabled flag.
@@ -796,85 +1021,117 @@ impl ButtonState {
     // Six of `0x779790`'s seven call sites, all passing `locked = 0`; the seventh is Lua's.
 
     /// `SetEnabled` (`0x779160`): a no-op if nothing changes (`0x779175`/`0x77919c`), so enabling a
-    /// pushed button neither un-pushes nor unlocks it; returns whether it ran.
-    pub fn set_enabled(&mut self, on: bool) -> bool {
-        if on == self.enabled() {
-            return false;
-        }
-        self.set_button_state(
-            if on {
-                ButtonVisualState::Normal
-            } else {
-                ButtonVisualState::Disabled
-            },
-            false,
-        );
-        true
+    /// pushed button neither un-pushes nor unlocks it. A CheckButton's override (`0x785490`) then
+    /// refreshes the checked pair whether or not it changed, which a Button, with no checked
+    /// textures, does not notice.
+    pub fn set_enabled(&mut self, on: bool) -> ShownWrites {
+        let mut w = if on == self.enabled() {
+            ShownWrites::default()
+        } else {
+            self.set_button_state(
+                if on {
+                    ButtonVisualState::Normal
+                } else {
+                    ButtonVisualState::Disabled
+                },
+                false,
+            )
+        };
+        w.0.extend(self.refresh_checked(self.checked, true).0);
+        w
     }
 
     /// The hide edge (`0x7791e0`): an unlocked, enabled button goes NORMAL; `<OnHide>` still fires.
-    pub fn on_hide(&mut self) {
+    pub fn on_hide(&mut self) -> ShownWrites {
         if self.state != ButtonVisualState::Disabled && !self.locked {
-            self.set_button_state(ButtonVisualState::Normal, false);
+            self.set_button_state(ButtonVisualState::Normal, false)
+        } else {
+            ShownWrites::default()
         }
     }
 
     /// The press edge (`0x779210`), past the registration and hit gates, so a registered click
     /// pushes the button even when the click itself does nothing.
-    pub fn on_mouse_down(&mut self) {
+    pub fn on_mouse_down(&mut self) -> ShownWrites {
         if !self.locked && self.state != ButtonVisualState::Disabled {
-            self.set_button_state(ButtonVisualState::Pushed, false);
+            self.set_button_state(ButtonVisualState::Pushed, false)
+        } else {
+            ShownWrites::default()
         }
     }
 
     /// The release edge (`0x7792d0`): a pushed, unlocked button goes NORMAL wherever the cursor
     /// is, even one Lua pushed. The caller skips it when the release ends a drag (`0x7792df`).
-    pub fn on_mouse_up(&mut self) {
+    pub fn on_mouse_up(&mut self) -> ShownWrites {
         if !self.locked && self.state == ButtonVisualState::Pushed {
-            self.set_button_state(ButtonVisualState::Normal, false);
+            self.set_button_state(ButtonVisualState::Normal, false)
+        } else {
+            ShownWrites::default()
         }
     }
 
     /// The drag-start edge (`0x7793f0`), before `<OnDragStart>`: it fires at the drag threshold
     /// (0.01 frame units, `0x81c468`) on a `RegisterForDrag` frame, not at the rect edge.
-    pub fn on_drag_start(&mut self) {
+    pub fn on_drag_start(&mut self) -> ShownWrites {
         if !self.locked && self.state != ButtonVisualState::Disabled {
-            self.set_button_state(ButtonVisualState::Normal, false);
+            self.set_button_state(ButtonVisualState::Normal, false)
+        } else {
+            ShownWrites::default()
         }
     }
 
-    /// `SetNormalTexture` and kin (`0x778fd0`): stores the slot, shown only if it is the current
-    /// state's (`0x779027`). The reference destroys a displaced texture (`0x77900a`); here the
-    /// region is made once and repainted, so a held `GetNormalTexture()` stays live.
-    pub fn set_state_slot(&mut self, state: ButtonVisualState, rh: Option<RegionHandle>) {
-        match state {
-            ButtonVisualState::Disabled => self.disabled = rh,
-            ButtonVisualState::Normal => self.normal = rh,
-            ButtonVisualState::Pushed => self.pushed = rh,
+    /// `SetNormalTexture` and kin (`0x778fd0`): stores the slot; the state it is for being the
+    /// current one, the texture becomes the shown one and its bit is written (`0x779027`..
+    /// `0x779037`). A shown pointer at the displaced texture is dropped first (`0x778fe9`). The
+    /// reference destroys a displaced texture (`0x77900a`); the caller frees it.
+    pub fn set_state_slot(
+        &mut self,
+        state: ButtonVisualState,
+        rh: Option<RegionHandle>,
+    ) -> ShownWrites {
+        let slot = match state {
+            ButtonVisualState::Disabled => &mut self.disabled,
+            ButtonVisualState::Normal => &mut self.normal,
+            ButtonVisualState::Pushed => &mut self.pushed,
+        };
+        let old = std::mem::replace(slot, rh);
+        if self.shown == old {
+            self.shown = None;
         }
-        if state == self.state {
+        let mut w = ShownWrites::default();
+        if state == self.state && rh.is_some() {
             self.shown = rh;
+            w.show(rh);
+        }
+        w
+    }
+
+    /// The region-removed hook: a CheckButton drops its checked pair (`0x785230`, `+0x4e0` and
+    /// `+0x4e4`), then every button its label (`+0x338`), its three state slots (`+0x4b8` to
+    /// `+0x4c0`), the shown one (`+0x4c4`) and its highlight (`+0x4c8`) (`0x778cb0`).
+    fn region_removed(&mut self, rh: RegionHandle) {
+        for slot in [
+            &mut self.checked_tex,
+            &mut self.disabled_checked,
+            &mut self.text,
+            &mut self.disabled,
+            &mut self.normal,
+            &mut self.pushed,
+            &mut self.shown,
+            &mut self.highlight,
+        ] {
+            if *slot == Some(rh) {
+                *slot = None;
+            }
         }
     }
 
-    /// Whether a region of this button draws: a state texture only when shown, the highlight
-    /// while hovered or locked, the checked pair by their rule, anything else always.
-    pub fn region_visible(&self, rh: RegionHandle, hovered: bool) -> bool {
-        let some = Some(rh);
-        if some == self.normal || some == self.pushed || some == self.disabled {
-            return some == self.shown;
-        }
-        if some == self.highlight {
-            // No `enabled` term: `Disable()` turns the whole HIGHLIGHT layer off before this.
-            return hovered || self.locked_highlight;
-        }
-        if some == self.checked_tex {
-            return self.checked && (self.enabled() || self.disabled_checked.is_none());
-        }
-        if some == self.disabled_checked {
-            return self.checked && !self.enabled();
-        }
-        true
+    /// Whether the Highlight region draws: while hovered or locked. The reference gates it by its
+    /// layer's enable (`0x76b6a0`/`0x76b6f0`), not by its shown bit, which it keeps from the
+    /// link (`0x779139`); every other region of a Button draws by its own bit alone.
+    pub fn highlight_draws(&self, rh: RegionHandle, hovered: bool) -> bool {
+        // No `enabled` term: `Disable()` turns the whole HIGHLIGHT layer off before this.
+        Some(rh) != self.highlight || hovered || self.locked_highlight
     }
 }
 

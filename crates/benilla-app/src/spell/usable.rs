@@ -2,14 +2,13 @@
 //! `IsUsableAction`'s grey tint. Any tripped gate answers `(usable, oom) = (false, false)`; only
 //! the power leg, the last, sets `notEnoughMana`.
 //!
-//! Built: the TRADE_SKILL early-out, dead (leg 1), reagents and totems (3), the equipped item (4),
-//! combo points (5), shapeshift form (6), only-stealthed (7), not-in-combat (8), CasterAuraState
-//! (9), TargetAuraState and its CanAttack/CanAssist fork (10/10b, the only legs that read the
-//! current target), the bit-25 cooldown fold (11) and power (12).
+//! Built: the TRADE_SKILL early-out, dead (leg 1), lost control (2), reagents and totems (3), the
+//! equipped item (4), combo points (5), shapeshift form (6), only-stealthed (7), not-in-combat
+//! (8), CasterAuraState (9), TargetAuraState and its CanAttack/CanAssist fork (10/10b, the only
+//! legs that read the current target), the bit-25 cooldown fold (11) and power (12).
 //!
-//! Not built, each answering usable: leg 2's caster aura-immunity helpers (`0x6e9f20/40/60`), leg
-//! 4's `AttributesEx3` sub-conditions. CanAssist in leg 10b is a reaction-rank test (friendly or
-//! better), not the reference's `0x6066f0`.
+//! Not built, answering usable: leg 4's `AttributesEx3` sub-conditions. CanAssist in leg 10b is a
+//! reaction-rank test (friendly or better), not the reference's `0x6066f0`.
 
 use benilla_protocol::messages::ItemUseSpell;
 
@@ -19,7 +18,8 @@ use benilla_formats::{
 };
 
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, Objects, Reputations};
+use crate::net::{ObjectStore, Objects, Reputations};
+use crate::query_cache::Ask;
 use crate::spell::Cooldowns;
 use crate::spell::{SpellModifiers, OP_COST};
 use crate::target::{can_attack, ring_reaction, Factions};
@@ -44,8 +44,12 @@ pub(crate) struct UsableCtx<'a> {
     pub(crate) cooldowns: &'a Cooldowns,
     /// The talent spell-modifier tables leg 12's cost goes through.
     pub(crate) spell_mods: &'a SpellModifiers,
-    /// Every carried entry's count for the frame ([`crate::ui_items::carried_counts`]).
-    pub(crate) carried: &'a std::collections::HashMap<u32, u32>,
+    /// `[0xb4b3e4]` clear (`0x4958e0`): the player does not control the character. Leg 2 greys
+    /// every spell its immunity scans do not exempt.
+    pub(crate) control_lost: bool,
+    /// Every entry's stack count at mask 0 for the frame ([`crate::ui_items::stack_counts`]):
+    /// the reagent and totem counts of `0x6e4000`.
+    pub(crate) stacks: &'a std::collections::HashMap<u32, u32>,
 }
 
 /// The search covers equipment indices `0..=22` (`0x5f0c50`'s `cmp ebx,0x17; jl`): the 19 worn
@@ -104,9 +108,10 @@ const HANDS: u32 =
 /// Every equipment index the search covers, as a mask: the 19 worn slots and the four bags.
 pub(crate) const EQUIPMENT_MASK: u32 = (1 << EQUIPMENT_SLOTS) - 1;
 
-/// [`equipped_item_fits`] for the cast ladder's rung 7: the same search, never querying a
-/// missing template; an uncached one counts as a match.
-pub(crate) fn equipped_item_fits_cached(
+/// Leg 4 (`0x6e40e0`), shared with the tooltip's requirement line and the cast ladder's rung 7:
+/// does a worn item match `EquippedItemClass` and `EquippedItemSubClassMask`? The templates are
+/// only read (`0x6e428f`): one that has not streamed counts as a match.
+pub(crate) fn equipped_item_fits(
     d: &SpellDisplay,
     store: &ObjectStore,
     objects: &Objects,
@@ -116,7 +121,7 @@ pub(crate) fn equipped_item_fits_cached(
         return true;
     }
     let mut mask = hand_mask(d);
-    if let Some(hidden) = crate::items::disarmed_equipment_slot_cached(store, objects, items) {
+    if let Some(hidden) = crate::items::disarmed_equipment_slot(store, objects, items) {
         mask &= !(1u32 << hidden);
     }
     equipped_slots_match(
@@ -132,7 +137,7 @@ pub(crate) fn equipped_item_fits_cached(
 /// template has not streamed.
 fn worn_item_cached(guid: u64, objects: &Objects, items: &Items) -> Option<WornItem> {
     let obj = objects.object(guid)?;
-    let t = items.template_cached(obj.object_entry()?)?;
+    let t = items.template(obj.object_entry()?, 0, Ask::Read)?;
     Some(WornItem {
         class: t.class,
         subclass: t.subclass,
@@ -222,46 +227,6 @@ pub(crate) fn equipped_item_reason(d: &SpellDisplay) -> u8 {
     }
 }
 
-/// Leg 4 (`0x6e40e0`), shared with the tooltip's requirement line: does a worn item match
-/// `EquippedItemClass` and `EquippedItemSubClassMask`? An item whose template has not streamed
-/// counts as a match.
-pub(crate) fn equipped_item_fits(
-    d: &SpellDisplay,
-    store: &ObjectStore,
-    objects: &Objects,
-    items: &Items,
-    commands: &NetCommands,
-) -> bool {
-    // The short-circuits to "fits" (`0x6e40e0` at `6e4103`..`6e4130`): a caster that is not the
-    // active player (always ours here), and those of [`needs_equipped_item`].
-    if !needs_equipped_item(d) {
-        return true;
-    }
-    let class = d.equipped_item_class as u32;
-    let mut mask = hand_mask(d);
-    // The disarm ladder strips the one hidden hand from the mask (`0x5f0c69`/`0x5f0c91`).
-    if let Some(hidden) = crate::items::disarmed_equipment_slot(store, objects, items, commands) {
-        mask &= !(1u32 << hidden);
-    }
-    equipped_slots_match(store, mask, class, d.equipped_item_subclass_mask, |guid| {
-        let (entry, durability, max_durability) = objects.object(guid).and_then(|o| {
-            Some((
-                o.object_entry()?,
-                o.item_durability(),
-                o.item_max_durability(),
-            ))
-        })?;
-        let t = items.template(entry, guid, commands)?;
-        Some(WornItem {
-            class: t.class,
-            subclass: t.subclass,
-            flags: t.flags,
-            durability,
-            max_durability,
-        })
-    })
-}
-
 /// One worn item, as the equipped-item search reads it.
 pub(crate) struct WornItem {
     pub(crate) class: u32,
@@ -292,18 +257,17 @@ fn equipped_slots_match(
 
 /// The item arm of the usable compute (`0x4e5050`), gate by gate:
 ///
-/// 1. a held count of 0 (the cache at `0xbc6390`) answers `(false, false)` (`4e50ab`). `held`
-///    is carried copies ([`crate::ui_items::InventoryScope::CARRIED`]) or a worn copy. The
-///    reference's count (`0x4e6d20`, mask `0x47`) also takes the keyring and sums spell charges
-///    for a charged item; ours does neither, so a key reads count 0 and a spent charged copy
-///    stays lit.
+/// 1. a held count of 0 (the cache at `0xbc6390`) answers `(false, false)` (`4e50ab`). `held` is
+///    that cached count nonzero: the slot's stored count, which [`crate::ui_items::action_count`]
+///    (`0x4e6d20`) wrote at the last recount.
 /// 2. `IsItemOnCooldown 0x6e2fc0` (`4e50d0`) answers `(false, false)`. It asks `0x6e1690` with
 ///    the item's first on-use spell and the item entry as the key: an on-hold-record test, so a
 ///    running cooldown or the GCD never greys an item.
 /// 3. the item's first on-use spell runs the whole plain-spell walk, [`spell_usable`] (`0x4e5a50`
 ///    hands it back with type 0; `4e51b0`). This is where food greys in combat: its rows carry
 ///    [`ATTR_NOT_IN_COMBAT`], leg 8.
-/// 4. an item with no on-use spell, or no template yet, is usable (`4e5127`..`4e5135`).
+/// 4. an item with no on-use spell, or no template yet, is usable (`4e5127`..`4e5135`) while the
+///    player has control (`4e50f4`).
 ///
 /// An on-use spell with no catalog row reads grey with `notEnoughMana = 0` (`4e51aa`).
 pub(crate) fn item_usable(
@@ -314,14 +278,14 @@ pub(crate) fn item_usable(
     spells: Option<&Spells>,
     objects: &Objects,
     items: &Items,
-    commands: &NetCommands,
 ) -> (bool, bool) {
     if !held {
         return (false, false);
     }
     // Gate 4: no on-use spell, or no template yet.
     let Some(use_spell) = use_spell else {
-        return (true, false);
+        // The spell-less leg (`0x4e50f4`): lost control greys it before the item word is read.
+        return (!ctx.control_lost, false);
     };
     let spell_id = use_spell.spell_id;
     let d = spells.and_then(|s| s.catalog.get(spell_id));
@@ -337,7 +301,7 @@ pub(crate) fn item_usable(
     let (Some(d), Some(spells)) = (d, spells) else {
         return (false, false);
     };
-    spell_usable(spell_id, d, spells, ctx, objects, items, commands)
+    spell_usable(spell_id, d, spells, ctx, objects, items)
 }
 
 /// The walk; returns the `IsUsableAction` pair `(usable, not_enough_mana)`.
@@ -348,7 +312,6 @@ pub(crate) fn spell_usable(
     ctx: &UsableCtx,
     objects: &Objects,
     items: &Items,
-    commands: &NetCommands,
 ) -> (bool, bool) {
     // Early-out (`0x6e3d99`): a tradeskill "spell" is always usable.
     if d.effects[0] == SPELL_EFFECT_TRADE_SKILL {
@@ -359,20 +322,27 @@ pub(crate) fn spell_usable(
     if ctx.store.0.is_dead_or_ghost() && d.attributes & ATTR_CASTABLE_WHILE_DEAD == 0 {
         return (false, false);
     }
-    // Leg 3 (`0x6e4000`): every reagent count carried, every totem tool present.
-    let carried = |entry: u32| ctx.carried.get(&entry).copied().unwrap_or(0);
+    // Leg 2 (`0x6e3dc3`-`0x6e3e4c`): without control, only a spell whose immunity covers the aura
+    // that took it (fear, confusion, charm) passes.
+    if ctx.control_lost
+        && !crate::ui_unit::control_gate::exempts_lost_control(&spells.catalog, d, &ctx.store.0)
+    {
+        return (false, false);
+    }
+    // Leg 3 (`0x6e4000`): every reagent count stacks, every totem tool present.
+    let stacks = |entry: u32| ctx.stacks.get(&entry).copied().unwrap_or(0);
     for &(entry, count) in &d.reagents {
-        if entry != 0 && carried(entry) < count {
+        if entry != 0 && stacks(entry) < count {
             return (false, false);
         }
     }
     for &totem in &d.totems {
-        if totem != 0 && carried(totem) == 0 {
+        if totem != 0 && stacks(totem) == 0 {
             return (false, false);
         }
     }
     // Leg 4 (`0x6e40e0`): some worn item matches the class and subclass mask.
-    if !equipped_item_fits(d, ctx.store, objects, items, commands) {
+    if !equipped_item_fits(d, ctx.store, objects, items) {
         return (false, false);
     }
     // Leg 5 (`0x6e3e7a`..`0x6e3eb2`): a finishing move (`AttributesEx & 0x500000`, one any-of
@@ -580,8 +550,8 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            deps.with_objects(|objects, items, commands| {
-                equipped_item_fits(&needs_a_weapon, &store, objects, items, commands)
+            deps.with_objects(|objects, items, _| {
+                equipped_item_fits(&needs_a_weapon, &store, objects, items)
             })
         };
 
@@ -637,9 +607,7 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            deps.with_objects(|objects, items, commands| {
-                equipped_item_fits(d, &store, objects, items, commands)
-            })
+            deps.with_objects(|objects, items, _| equipped_item_fits(d, &store, objects, items))
         };
 
         let sound = |field| (field, 0x2au64, 0u32, 0u32, 0u32);
@@ -701,7 +669,7 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            deps.with_objects(|objects, items, commands| {
+            deps.with_objects(|objects, items, _| {
                 equipped_item_fits(
                     &SpellDisplay {
                         equipped_item_class: 2,
@@ -712,7 +680,6 @@ mod tests {
                     &store,
                     objects,
                     items,
-                    commands,
                 )
             })
         };
@@ -729,7 +696,7 @@ mod tests {
         store: &'a ObjectStore,
         cooldowns: &'a Cooldowns,
         reputations: &'a Reputations,
-        carried: &'a std::collections::HashMap<u32, u32>,
+        stacks: &'a std::collections::HashMap<u32, u32>,
         spell_mods: &'a SpellModifiers,
     ) -> UsableCtx<'a> {
         UsableCtx {
@@ -738,30 +705,28 @@ mod tests {
             factions: None,
             reputations,
             cooldowns,
-            carried,
+            stacks,
             spell_mods,
+            control_lost: false,
         }
     }
 
     fn walk(d: &SpellDisplay, store: &ObjectStore) -> (bool, bool) {
         let cooldowns = Cooldowns::default();
-        let reputations = Reputations(Vec::new());
+        let reputations = Reputations::default();
         let spells = Spells::empty_for_tests();
         let items = Items::default();
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let commands = NetCommands(tx);
         let mut objs = crate::ui_items::TestObjects::new();
         let objects = objs.get();
-        let carried = crate::ui_items::carried_counts(&store.0, &objects);
+        let stacks = crate::ui_items::stack_counts(&store.0, &objects);
         let spell_mods = SpellModifiers::default();
         spell_usable(
             1,
             d,
             &spells,
-            &ctx(store, &cooldowns, &reputations, &carried, &spell_mods),
+            &ctx(store, &cooldowns, &reputations, &stacks, &spell_mods),
             &objects,
             &items,
-            &commands,
         )
     }
 
@@ -976,11 +941,9 @@ mod tests {
     fn target_aura_state_reads_the_current_target() {
         let me = player(&[]);
         let cooldowns = Cooldowns::default();
-        let reputations = Reputations(Vec::new());
+        let reputations = Reputations::default();
         let spells = Spells::empty_for_tests();
         let items = Items::default();
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let commands = NetCommands(tx);
         let execute = SpellDisplay {
             target_aura_state: 2,
             implicit_target_a1: 6,
@@ -991,7 +954,7 @@ mod tests {
         let low = ObjectStore(ObjectFields::from_pairs(&[(22, 10), (125, 0x2)]));
         let mut objs = crate::ui_items::TestObjects::new();
         let objects = objs.get();
-        let carried = crate::ui_items::carried_counts(&me.0, &objects);
+        let stacks = crate::ui_items::stack_counts(&me.0, &objects);
         for (target, expect) in [(&healthy, false), (&low, true)] {
             let ctx = UsableCtx {
                 store: &me,
@@ -999,13 +962,101 @@ mod tests {
                 factions: None,
                 reputations: &reputations,
                 cooldowns: &cooldowns,
-                carried: &carried,
+                stacks: &stacks,
                 spell_mods: &SpellModifiers::default(),
+                control_lost: false,
             };
             assert_eq!(
-                spell_usable(5308, &execute, &spells, &ctx, &objects, &items, &commands),
+                spell_usable(5308, &execute, &spells, &ctx, &objects, &items),
                 (expect, false)
             );
         }
+    }
+
+    /// The walk with the control flag set as given, against `spells`' catalog.
+    fn walk_lost(
+        d: &SpellDisplay,
+        store: &ObjectStore,
+        spells: &Spells,
+        control_lost: bool,
+    ) -> (bool, bool) {
+        let cooldowns = Cooldowns::default();
+        let reputations = Reputations::default();
+        let items = Items::default();
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
+        let stacks = crate::ui_items::stack_counts(&store.0, &objects);
+        let spell_mods = SpellModifiers::default();
+        let mut c = ctx(store, &cooldowns, &reputations, &stacks, &spell_mods);
+        c.control_lost = control_lost;
+        spell_usable(1, d, spells, &c, &objects, &items)
+    }
+
+    /// `UNIT_FIELD_FLAGS` (46) bit 23 and the first `UNIT_FIELD_AURA` slot (47).
+    const FLEEING: u32 = 0x0080_0000;
+
+    /// Leg 2 (`0x6e3dc3`-`0x6e3e4c`): with `[0xb4b3e4]` clear every spell greys, but the one whose
+    /// immunity covers the fear that took control (Will of the Forsaken's shape) stays lit.
+    #[test]
+    fn lost_control_greys_every_spell_an_immunity_scan_does_not_exempt() {
+        const FEAR_AURA: u32 = 5782;
+        let mut fear = SpellDisplay {
+            mechanic: 5,
+            ..Default::default()
+        };
+        fear.effects[0] = 6;
+        fear.effect_apply_aura[0] = 7;
+        let mut immunity = SpellDisplay {
+            attributes_ex: 0x8000,
+            ..Default::default()
+        };
+        immunity.effects[0] = 6;
+        immunity.effect_apply_aura[0] = 77;
+        immunity.effect_misc_value[0] = 5;
+        let mut spells = Spells::empty_for_tests();
+        spells.catalog = benilla_formats::SpellCatalog::from_displays([(FEAR_AURA, fear)].into());
+        let plain = SpellDisplay::default();
+
+        let feared = player(&[(46, (1 << 3) | FLEEING), (47, FEAR_AURA)]);
+        assert_eq!(walk_lost(&plain, &feared, &spells, false), (true, false));
+        assert_eq!(
+            walk_lost(&plain, &feared, &spells, true),
+            (false, false),
+            "a plain spell greys while control is lost"
+        );
+        assert_eq!(
+            walk_lost(&immunity, &feared, &spells, true),
+            (true, false),
+            "the fear immunity passes the scan"
+        );
+        // The same spell without the fear flag asks no scan: control lost for another reason.
+        let rooted = player(&[(47, FEAR_AURA)]);
+        assert_eq!(walk_lost(&immunity, &rooted, &spells, true), (false, false));
+        // A charm reads `UNIT_FIELD_CHARMEDBY` (10) with no aura of its type on the caster: no
+        // aura found, no exemption.
+        let charmed = player(&[(10, 0x77)]);
+        assert_eq!(
+            walk_lost(&immunity, &charmed, &spells, true),
+            (false, false)
+        );
+    }
+
+    /// The spell-less leg (`0x4e50f4`) of the item arm: an item with no on-use spell greys while
+    /// control is lost.
+    #[test]
+    fn an_item_with_no_on_use_spell_greys_without_control() {
+        let cooldowns = Cooldowns::default();
+        let reputations = Reputations::default();
+        let items = Items::default();
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
+        let store = player(&[]);
+        let stacks = std::collections::HashMap::new();
+        let spell_mods = SpellModifiers::default();
+        let mut c = ctx(&store, &cooldowns, &reputations, &stacks, &spell_mods);
+        let usable = |c: &UsableCtx| item_usable(6948, None, true, c, None, &objects, &items);
+        assert_eq!(usable(&c), (true, false));
+        c.control_lost = true;
+        assert_eq!(usable(&c), (false, false));
     }
 }

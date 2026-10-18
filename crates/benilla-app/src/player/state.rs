@@ -308,6 +308,11 @@ pub(crate) struct Player {
     /// standing. The reference zeroes its mover; vmangos neither roots a charmed player nor refuses
     /// its movement, so nothing else holds the body. Unlike a root, it stops turning too.
     pub(crate) control_lost: bool,
+    /// The local player's own control, the reference's `[0xb4b3e4]` cleared (`0x4958e0`): written
+    /// by `0x5fa600` only when the named unit is our own character (`0x5fa6d0`), so a possessed
+    /// creature's loss ([`Self::control_lost`] on a released guid) never reaches it. The item and
+    /// cursor gates, `HasFullControl` and `PLAYER_CONTROL_LOST` read this one.
+    pub(crate) own_control_lost: bool,
     /// The unit we drive in place of our body (a mind-controlled creature, Eye of Kilrogg), `None`
     /// for our own. Our body must then send nothing: outbound `MSG_MOVE_*` carry no guid, so the
     /// server applies them to whatever we last claimed.
@@ -408,7 +413,7 @@ pub(crate) struct Player {
     /// live flags read them instead of the keys; re-seeded by the air nudge, stale while grounded.
     pub(super) airborne_dirs: u32,
     /// Launch height (Bevy Y), the client's `StartFalling` z snapshot (`+0x7c`): the FALLINGFAR
-    /// distance leg measures descent below it.
+    /// distance leg measures descent below it. A rider's moves with the deck ([`Self::carry_to`]).
     pub(super) fall_start_y: f32,
     /// `MOVEFLAG_FALLINGFAR` latched for this arc ([`FALL_FAR_DROP`], [`FALL_FAR_TIME`]); only
     /// landing clears it, as the client's `StopFalling` does.

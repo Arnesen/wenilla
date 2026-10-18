@@ -58,7 +58,7 @@ fn blocks(s: &UiScript, name: &str) -> Vec<Blk> {
             });
             Blk {
                 text: d.text.clone(),
-                texture: d.texture.clone(),
+                texture: d.tex.path().clone(),
                 justify_h: d.justify.name_h(),
                 font: d.font_path.clone(),
                 font_height: d.font_height,
@@ -226,9 +226,10 @@ fn spacing_steps_the_blocks_apart() {
         "block N+1 sits at block N's BOTTOMLEFT displaced by -spacing"
     );
     assert_eq!(s.eval::<f32>("return Page:GetSpacing()").unwrap(), 4.0);
-    // A negative spacing is clamped to 0 before it is stored (`0x772246`).
+    // The element font keeps a negative as given (`0x79fba2`); only the block FontString's
+    // setter clamps it (`0x772246`), for the next `SetText`.
     s.run("Page:SetSpacing(-9)").unwrap();
-    assert_eq!(s.eval::<f32>("return Page:GetSpacing()").unwrap(), 0.0);
+    assert_eq!(s.eval::<f32>("return Page:GetSpacing()").unwrap(), -9.0);
 
     measure_at_16px(&mut s);
     assert_eq!(
@@ -287,6 +288,21 @@ fn the_three_fallback_routes_each_land_on_one_raw_block() {
             "{raw}"
         );
     }
+}
+
+/// The login screen's server alert (`SHOW_SERVER_ALERT`'s text, `ServerAlertText:SetText(arg1)`)
+/// is plain text with blank lines, brackets, an apostrophe and a final newline: one `P` block of
+/// the raw string, no collapse (`0x78a501`).
+#[test]
+fn a_plain_text_server_alert_is_one_raw_p_block_with_its_newlines() {
+    let s = script();
+    page(&s);
+    let body = "[January 17, 2007 - 5:00PM PST]\n\nPlease note: free moves.\n\n\
+                Aggramar\nArgent Dawn\nZul'jin\n";
+    s.run(&format!("Page:SetText({})", lua_str(body))).unwrap();
+    assert_eq!(texts(&s, "Page"), [body]);
+    assert_eq!(blocks(&s, "Page")[0].justify_h, "LEFT");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
 #[test]

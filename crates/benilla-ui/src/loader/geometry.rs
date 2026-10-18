@@ -84,7 +84,7 @@ impl Loader<'_> {
                 self.call(wrapper, "SetID", n, dbg);
             }
         }
-        // `clampedToScreen`: the layout's screen clamp, geometry flag bit 4 (`0x768cc0`).
+        // `clampedToScreen`: the layout's screen clamp, geometry flag `0x10` (`0x768cc0`).
         if el.attr_bool("clampedToScreen") {
             self.call(wrapper, "SetClampedToScreen", true, dbg);
         }
@@ -146,9 +146,7 @@ impl Loader<'_> {
         let region: Table = match wrapper.call_method("CreateTitleRegion", ()) {
             Ok(r) => r,
             Err(e) => {
-                self.report
-                    .errors
-                    .push(format!("{dbg}: CreateTitleRegion: {e}"));
+                self.report.fault(format!("{dbg}: CreateTitleRegion: {e}"));
                 return;
             }
         };
@@ -179,7 +177,7 @@ impl Loader<'_> {
         parent_name: &str,
         dbg: &str,
     ) {
-        if el.attr_bool("setAllPoints") {
+        if el.attr_is_true("setAllPoints") {
             self.call(wrapper, "SetAllPoints", (), dbg);
         }
         for anchors in children_named(el, "Anchors") {

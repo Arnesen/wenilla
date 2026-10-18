@@ -5,6 +5,7 @@
 //! server, 6-byte client), bodies never, starting with `SMSG_AUTH_RESPONSE`.
 
 use std::io::Write;
+use std::sync::OnceLock;
 
 use anyhow::{anyhow, Result};
 use benilla_srp::vanilla_header::{DecrypterHalf, EncrypterHalf};
@@ -18,7 +19,8 @@ mod session;
 mod writer;
 
 pub use reader::WorldReader;
-pub use session::{WardenRequired, WorldAuthReject, WorldSession};
+pub use session::{WorldAuthReject, WorldConnectEvent, WorldSession};
+
 pub use writer::WorldWriter;
 
 /// The stock `mangosd` port, for probes that dial the world server without a realm list.
@@ -50,10 +52,47 @@ pub(super) async fn recv_packet(
         .read_exact_async(&mut body)
         .await
         .map_err(|e| anyhow!("reading world body (opcode {opcode:#x}, {body_len} bytes): {e}"))?;
-    messages::parse_server(opcode, &body).map_err(|e| anyhow!("parsing opcode {opcode:#x}: {e}"))
+    messages::parse_server(opcode, &body).map_err(|e| {
+        Unparsed {
+            opcode,
+            reason: e.to_string(),
+        }
+        .into()
+    })
+}
+
+/// A packet whose body did not parse. The whole body was read, so the stream is still aligned and
+/// a reader may skip it and go on, as [`WorldReader::poll`] does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unparsed {
+    pub opcode: u16,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Unparsed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "parsing opcode {:#x}: {}", self.opcode, self.reason)
+    }
+}
+
+impl std::error::Error for Unparsed {}
+
+/// What [`observe_sends`] takes: called with a sent packet's opcode and its body, the bytes after
+/// the 6-byte header and as plain as the caller built them (encryption covers the header alone).
+pub type SendObserver = fn(opcode: u16, body: &[u8]);
+
+static SEND_OBSERVER: OnceLock<SendObserver> = OnceLock::new();
+
+/// Report every client packet that reaches a world socket, from the `CMSG_AUTH_SESSION` of the
+/// handshake through each [`WorldSession`] and [`WorldWriter`] send, on the thread that wrote it
+/// and right after the write. The first observer set is kept for the process; with none set a send
+/// pays one atomic load.
+pub fn observe_sends(observer: SendObserver) {
+    let _ = SEND_OBSERVER.set(observer);
 }
 
 /// Write one client packet: a 6-byte header, its size counting opcode and body, then the body.
+/// The sole write path of the world socket, so the one place [`observe_sends`] reports from.
 pub(super) fn send_packet(
     stream: &mut impl Write,
     encrypter: Option<&mut EncrypterHalf>,
@@ -76,5 +115,9 @@ pub(super) fn send_packet(
     packet.extend_from_slice(body);
     stream
         .write_all(&packet)
-        .map_err(|e| anyhow!("sending opcode {opcode:#x}: {e}"))
+        .map_err(|e| anyhow!("sending opcode {opcode:#x}: {e}"))?;
+    if let Some(observer) = SEND_OBSERVER.get() {
+        observer(opcode, body);
+    }
+    Ok(())
 }

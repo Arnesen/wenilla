@@ -123,6 +123,20 @@ impl ItemInfo {
         self.spell_charges_0 != 0 && self.spell_charges_0 != -1
     }
 
+    /// The reference's `template+0x11c != 0`: block 0 names a spell, of any trigger. The worn-item
+    /// cooldown getter runs no query without one (`0x4c8b47`).
+    pub fn has_spell_0(&self) -> bool {
+        self.spells.iter().any(|s| s.index == 0)
+    }
+
+    /// The depleted-charge gate: block 0 carries charges (`template+0x144 != 0`, -1 unlimited
+    /// included) and the instance's `ITEM_FIELD_SPELL_CHARGES[0]` is 0. The tooltip setters and the
+    /// cooldown getters then skip the cooldown query (`0x5347e3`, `0x53318a`, `0x4f9a48`,
+    /// `0x4c8b55`).
+    pub fn charges_depleted(&self, charges_left: i32) -> bool {
+        self.spell_charges_0 != 0 && charges_left == 0
+    }
+
     /// The first ON_USE spell's block ordinal, the third byte of `CMSG_USE_ITEM`; usually 0, but
     /// an item with an ON_EQUIP block 0 has its on-use in a later block.
     pub fn use_spell_index(&self) -> Option<u8> {
@@ -178,6 +192,9 @@ impl ItemInfo {
 
 /// Template bit: right-click opens a loot window, as on a clam or lockbox (`ItemPrototype.h:66`).
 pub const ITEM_FLAG_LOOTABLE: u32 = 0x0000_0004;
+/// Template bit `ITEM_FLAG_PLAYERCAST` (`ItemPrototype.h:70`): the bit a use of the item must carry
+/// to hold the in-flight slot (`0x6e501d`).
+pub const ITEM_FLAG_PLAYERCAST: u32 = 0x0000_0040;
 /// Template bit for gift wrapping (`ItemPrototype.h:73`).
 pub const ITEM_FLAG_WRAPPER: u32 = 0x0000_0200;
 /// Instance (`ITEM_FIELD_FLAGS`) bit a lockbox gains once picked or keyed open.
@@ -575,10 +592,10 @@ pub fn set_ammo(entry: u32) -> Vec<u8> {
 /// (`Player.cpp:8975`); the reference names that bag in reason 16's message (`0x5ede00`).
 pub(super) fn read_inventory_change_failure(
     r: &mut &[u8],
-) -> io::Result<(u8, Option<u32>, u64, u8)> {
+) -> io::Result<(u8, Option<u32>, u64, u64, u8)> {
     let reason = read_u8(r)?;
     if reason == 0 {
-        return Ok((0, None, 0, 0));
+        return Ok((0, None, 0, 0, 0));
     }
     let required_level = if reason == 1 {
         Some(read_u32_le(r)?)
@@ -586,9 +603,9 @@ pub(super) fn read_inventory_change_failure(
         None
     };
     let item_guid = read_u64_le(r)?;
-    let _item2 = read_u64_le(r)?;
+    let item2_guid = read_u64_le(r)?;
     let bag_slot = read_u8(r)?;
-    Ok((reason, required_level, item_guid, bag_slot))
+    Ok((reason, required_level, item_guid, item2_guid, bag_slot))
 }
 
 /// Read `SMSG_ITEM_TIME_UPDATE` (`Objects/Item.cpp:1096-1106`): item guid, then seconds left, and
@@ -712,7 +729,7 @@ mod tests {
         let mut r = &buf[..];
         assert_eq!(
             read_inventory_change_failure(&mut r).unwrap(),
-            (0, None, 0, 0)
+            (0, None, 0, 0, 0)
         );
     }
 
@@ -727,7 +744,7 @@ mod tests {
         let mut r = &buf[..];
         assert_eq!(
             read_inventory_change_failure(&mut r).unwrap(),
-            (1, Some(40), 0x1122_3344_5566_7788, 7)
+            (1, Some(40), 0x1122_3344_5566_7788, 0, 7)
         );
     }
 
@@ -765,12 +782,12 @@ mod tests {
         let mut buf = Vec::new();
         buf.push(3u8); // reason (ITEM_DOESNT_GO_TO_SLOT)
         buf.extend_from_slice(&0xDEAD_BEEF_0000_0001u64.to_le_bytes()); // item1
-        buf.extend_from_slice(&0u64.to_le_bytes()); // item2
+        buf.extend_from_slice(&0xDEAD_BEEF_0000_0002u64.to_le_bytes()); // item2
         buf.push(0); // bagSlot
         let mut r = &buf[..];
         assert_eq!(
             read_inventory_change_failure(&mut r).unwrap(),
-            (3, None, 0xDEAD_BEEF_0000_0001, 0)
+            (3, None, 0xDEAD_BEEF_0000_0001, 0xDEAD_BEEF_0000_0002, 0)
         );
     }
 }

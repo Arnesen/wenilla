@@ -7,17 +7,16 @@ use benilla_protocol::messages::{buy_result, sell_result, VendorItem};
 use benilla_world::interact::WorldRightPress;
 use bevy::prelude::*;
 
-use benilla_ui::script::{
-    ItemStatsHead, MerchantItem, MerchantState, RepairCosts, ScriptValue, UiScript,
-};
+use benilla_ui::script::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, Objects, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::ui_items::{item_link, slot_guid, wire_pos};
-use crate::ui_script::{gate, UiFeed, UiInput};
-use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
+use crate::ui_script::{gate, SweepApp, SweepLeg, UiFeed, UiInput};
+use crate::ui_session::{CoreCloses, LatchApp, LatchedWindow, NpcWindow};
 use benilla_protocol::messages::BAG_PLAYER_INVENTORY;
 
 /// A vendor row's unlimited `current_count` (vmangos `ItemHandler.cpp:795`), `-1` to Lua.
@@ -48,6 +47,7 @@ impl MerchantOpen {
         self.items = items;
     }
 
+    #[cfg(test)]
     pub(crate) fn is_open(&self) -> bool {
         self.vendor.is_some()
     }
@@ -107,13 +107,14 @@ impl Plugin for UiMerchantPlugin {
         net::register(app);
         app.init_resource::<MerchantOpen>()
             .init_resource::<MerchantErrors>()
+            .add_latched_window::<MerchantOpen>()
+            // `0x490ada` → `0x4facc0` → `0x4fadf0`, the core itself.
+            .add_sweep_leg(SweepLeg::Merchant, close_core)
             .add_systems(
                 Update,
                 (
-                    // Range-close first so the clear fires `MERCHANT_CLOSED` the same frame. The
-                    // feed follows `UnitFeed`: `MERCHANT_SHOW`'s paint reads the item and
+                    // After `UnitFeed`: `MERCHANT_SHOW`'s paint reads the item and
                     // player-requirement stores for `GetMerchantItemInfo`'s `isUsable`.
-                    close_npc_session_out_of_range::<MerchantOpen>.before(feed_merchant),
                     feed_merchant.after(crate::ui_unit::UnitFeed).in_set(UiFeed),
                     // Before `feed_char`: the `UNIT_INVENTORY_CHANGED` a repair fires refreshes the
                     // Repair All button from this total (`PaperDollFrame.lua:717-724`).
@@ -162,14 +163,15 @@ fn sell_error_key(reason: u8) -> Option<&'static str> {
 }
 
 /// One wire row as a Lua row: the icon from the wire `display_id` at once, the name and stats once
-/// the item template answers.
+/// the item template answers. Read as `ask` says: `GetMerchantItemInfo` looks it up with a
+/// callback (`0x4faf1a`, callback `0x4fada0`).
 fn resolve_item(
     item: &VendorItem,
     items: &Items,
     icons: Option<&ItemDisplays>,
-    commands: &NetCommands,
+    ask: Ask<'_>,
 ) -> MerchantItem {
-    let template = items.template(item.entry, 0, commands);
+    let template = items.template(item.entry, 0, ask);
     let name = template.map(|t| t.name.clone());
     let stats = template.map(|t| ItemStatsHead {
         quality: t.quality,
@@ -224,20 +226,21 @@ fn buyback_order(store: &benilla_protocol::ObjectFields) -> Vec<u8> {
 }
 
 /// One buyback slot as a Lua row: the item from its object, which stays streamed while it sits in
-/// the slot, and the price from the player's buyback price field.
+/// the slot, and the price from the player's buyback price field. Read as `ask` says:
+/// `GetBuybackItemInfo` looks it up with a callback (`0x4fb40c`).
 fn resolve_buyback(
     idx: u8,
     store: &benilla_protocol::ObjectFields,
     objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
-    commands: &NetCommands,
+    ask: Ask<'_>,
 ) -> MerchantItem {
     let guid = store.player_buyback_slot(idx).unwrap_or(0);
     let obj = objects.object(guid);
     let entry = obj.and_then(|o| o.object_entry()).unwrap_or(0);
     let quantity = obj.and_then(|o| o.item_stack_count()).unwrap_or(1).max(1);
-    let template = items.template(entry, guid, commands);
+    let template = items.template(entry, guid, ask);
     let name = template.map(|t| t.name.clone());
     let stats = template.map(|t| ItemStatsHead {
         quality: t.quality,
@@ -274,13 +277,13 @@ fn resolve_buyback(
 }
 
 /// One item's repair cost, by the reference's `0x4faf30` arithmetic
-/// ([`benilla_formats::DurabilityTables`]), after the price `discount` (`0x4faf8a`).
+/// ([`benilla_formats::DurabilityTables`]), after the price `discount` (`0x4faf8a`). The template
+/// is only read (`0x5da368`).
 fn item_repair_cost(
     guid: u64,
     objects: &Objects,
     items: &Items,
     tables: &RepairTables,
-    commands: &NetCommands,
     discount: f64,
 ) -> u32 {
     let Some(obj) = objects.object(guid) else {
@@ -293,7 +296,7 @@ fn item_repair_cost(
         return 0;
     }
     let points = max - cur;
-    let Some(t) = items.template(entry, guid, commands) else {
+    let Some(t) = items.template(entry, guid, Ask::Read) else {
         return 0;
     };
     let (level, quality, class, subclass) = (t.item_level, t.quality, t.class, t.subclass);
@@ -308,12 +311,11 @@ fn repair_costs(
     objects: &Objects,
     items: &Items,
     tables: &RepairTables,
-    commands: &NetCommands,
     discount: f64,
 ) -> RepairCosts {
     let cost = |guid: u64| {
         (guid != 0)
-            .then(|| item_repair_cost(guid, objects, items, tables, commands, discount))
+            .then(|| item_repair_cost(guid, objects, items, tables, discount))
             .filter(|&c| c > 0)
     };
     let mut costs = RepairCosts::default();
@@ -401,7 +403,6 @@ fn vendor_npc_flags(
 pub(crate) struct RepairPurse<'w, 's> {
     objects: Objects<'w, 's>,
     items: Res<'w, Items>,
-    commands: Res<'w, NetCommands>,
     tables: Option<Res<'w, RepairTables>>,
     units: Query<'w, 's, (&'static Guid, &'static ObjectStore), Without<SelfPlayer>>,
     reactions: crate::target::ReactionInputs<'w>,
@@ -431,7 +432,7 @@ impl RepairPurse<'_, '_> {
         });
         let cost = guids.into_iter().filter(|&g| g != 0).fold(0u32, |sum, g| {
             let item = self.tables.as_deref().map_or(0, |t| {
-                item_repair_cost(g, &self.objects, &self.items, t, &self.commands, discount)
+                item_repair_cost(g, &self.objects, &self.items, t, discount)
             });
             sum.wrapping_add(item)
         });
@@ -462,7 +463,6 @@ fn feed_repair_costs(
     open: Res<MerchantOpen>,
     mut inv: crate::items::Inventory,
     items: Res<Items>,
-    commands: Res<NetCommands>,
     units: Query<(&Guid, &ObjectStore), Without<SelfPlayer>>,
     reactions: crate::target::ReactionInputs,
     tables: Option<Res<RepairTables>>,
@@ -518,7 +518,7 @@ fn feed_repair_costs(
         return;
     }
     let costs = tables.as_deref().map_or_else(RepairCosts::default, |t| {
-        repair_costs(&player.0, &inv.objects, &items, t, &commands, discount)
+        repair_costs(&player.0, &inv.objects, &items, t, discount)
     });
     let total = if repairer { repair_all_cost(&costs) } else { 0 };
     if memo
@@ -538,7 +538,7 @@ fn snapshot(
     objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
-    commands: &NetCommands,
+    ask: Ask<'_>,
     player: Option<&benilla_protocol::ObjectFields>,
     vendor_npc_flags: u32,
 ) -> Option<MerchantState> {
@@ -547,7 +547,7 @@ fn snapshot(
         .map(|store| {
             buyback_order(store)
                 .into_iter()
-                .map(|idx| resolve_buyback(idx, store, objects, items, icons, commands))
+                .map(|idx| resolve_buyback(idx, store, objects, items, icons, ask))
                 .collect()
         })
         .unwrap_or_default();
@@ -555,7 +555,7 @@ fn snapshot(
         items: open
             .items
             .iter()
-            .map(|it| resolve_item(it, items, icons, commands))
+            .map(|it| resolve_item(it, items, icons, ask))
             .collect(),
         buyback,
         can_repair: vendor_npc_flags & NPC_FLAG_REPAIR != 0,
@@ -563,7 +563,7 @@ fn snapshot(
 }
 
 /// Push the merchant into the VM and fire its events on a change; show the refusals and push the
-/// purse.
+/// purse. The close is the core's ([`close_core`]).
 fn feed_merchant(
     script: Option<NonSendMut<UiScript>>,
     open: Res<MerchantOpen>,
@@ -575,10 +575,10 @@ fn feed_merchant(
     units: Query<(&Guid, &ObjectStore), Without<SelfPlayer>>,
     names: Res<NameCache>,
     mut errors: ResMut<MerchantErrors>,
-    mut last: Local<crate::ui_script::VmMemo<Option<MerchantState>>>,
+    mut last: crate::ui_script::WindowMemo<Option<MerchantState>>,
     mut last_money: Local<crate::ui_script::VmMemo<Option<u64>>>,
-    mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
-    mut last_vendor: Local<crate::ui_script::VmMemo<Option<u64>>>,
+    mut last_name: crate::ui_script::WindowMemo<Option<String>>,
+    mut closes: CoreCloses,
     mut sink: crate::ui_action::MessageSink,
 ) {
     let Some(mut script) = script else {
@@ -587,7 +587,10 @@ fn feed_merchant(
     let last = last.get(&script);
     let last_money = last_money.get(&script);
     let last_name = last_name.get(&script);
-    let last_vendor = last_vendor.get(&script);
+    if closes.since_last(&script, NpcWindow::Merchant) {
+        *last = None;
+        *last_name = None;
+    }
     // Refusals show, and speak, as their message rows say; a silent code has no key.
     let refusals: Vec<_> = errors
         .0
@@ -616,59 +619,92 @@ fn feed_merchant(
 
     // The vendor's service bits gate the repair pair; the player's descriptor carries buyback.
     let player = self_q.iter().next().map(|s| &s.0);
+    // The stock window calls its getters at `MERCHANT_SHOW` and at the list's `MERCHANT_UPDATE`:
+    // a window opening, or the vendor's list or stock changing.
+    let ask = Ask::at(last.is_none() || open.is_changed(), &commands);
     let fresh = snapshot(
         &open,
         &objects,
         &items,
         icons.as_deref(),
-        &commands,
+        ask,
         player,
         vendor_npc_flags(&open, &units),
     );
-    // The vendor's name rides `MERCHANT_SHOW` and `MERCHANT_UPDATE` as arg1, and its landing alone
-    // re-fires `MERCHANT_UPDATE`; the reference fires both bare (`0x4fad92`, `0x4facaa`), and
-    // stock `MerchantFrame.lua:67` titles with `UnitName("NPC")`.
+    // `MERCHANT_SHOW` and `MERCHANT_UPDATE` carry no argument (`SignalEvent` `0x4fad92`,
+    // `0x4facaa`) and the stock window titles with `UnitName("NPC")` (`MerchantFrame.lua:67`), so
+    // the name's landing alone re-fires `MERCHANT_UPDATE`.
     let vendor_name = open
         .vendor
-        .and_then(|g| names.resolve(g, &commands).map(str::to_string));
+        .and_then(|g| names.resolve(&objects, g, ask).map(str::to_string));
     let name_changed = *last_name != vendor_name;
-    // A different vendor while open is a close then an open: `ShowUIPanel` returns early on a
-    // visible frame, so only a hide replays the open sound.
-    let switched = npc_switched(*last_vendor, open.vendor);
-    if fresh == *last && !name_changed && !switched {
+    if fresh == *last && !name_changed {
         return;
     }
     script.set_merchant(fresh.clone());
-    let name_arg = || vec![ScriptValue::Str(vendor_name.clone().unwrap_or_default())];
-    if switched {
-        // `MERCHANT_CLOSED` queues a close intent through OnHide; consume it so the drain keeps
-        // the new vendor.
-        script.fire_event("MERCHANT_CLOSED", vec![]);
-        script.fire_event("MERCHANT_SHOW", name_arg());
-        let _ = script.take_merchant_close();
-    } else {
-        match (&*last, &fresh) {
-            (None, Some(_)) => script.fire_event("MERCHANT_SHOW", name_arg()),
-            // A change while open: an item or the name landed, or the stock moved.
-            (Some(_), Some(_)) => script.fire_event("MERCHANT_UPDATE", name_arg()),
-            (Some(_), None) => script.fire_event("MERCHANT_CLOSED", vec![]),
-            (None, None) => {}
-        }
+    match (&*last, &fresh) {
+        (None, Some(_)) => script.fire_event("MERCHANT_SHOW", vec![]),
+        // A change while open: an item or the name landed, or the stock moved.
+        (Some(_), Some(_)) => script.fire_event("MERCHANT_UPDATE", vec![]),
+        // The core told the VM; a disconnect's clear tells it nothing.
+        (Some(_), None) | (None, None) => {}
     }
     *last = fresh;
     *last_name = vendor_name;
-    *last_vendor = open.vendor;
 }
 
-/// The range guard closes the window, as `CloseMerchant` does, when the vendor is out of range or
-/// gone.
-impl NpcSession for MerchantOpen {
-    fn npc(&self) -> Option<u64> {
+/// The vendor's cell `[0xbddfa0]`; `CloseMerchant` (`0x4fb120`) is the core itself.
+impl LatchedWindow for MerchantOpen {
+    const WINDOW: NpcWindow = NpcWindow::Merchant;
+
+    fn cell(&self) -> Option<u64> {
         self.vendor
     }
 
-    fn close(&mut self) {
-        self.clear();
+    fn dispatched(world: &mut World) {
+        close_core(world);
+    }
+
+    fn take_close_verb(script: &mut UiScript) -> bool {
+        script.take_merchant_close()
+    }
+}
+
+/// The close core `0x4fadf0`, every close's: with a vendor open, the latch release (`0x4fae04`),
+/// the cell cleared, `MERCHANT_CLOSED` (`0x4fae2c`), then the tail ([`drop_held_vendor_row`]).
+/// The leave-world sweep's leg (`0x490ada` → `0x4facc0`) calls it as it is.
+pub(crate) fn close_core(world: &mut World) {
+    let Some(vendor) = world.resource::<MerchantOpen>().vendor else {
+        return;
+    };
+    crate::ui_session::release(world, vendor);
+    world.resource_mut::<MerchantOpen>().clear();
+    crate::ui_session::note_closed(world, NpcWindow::Merchant);
+    crate::ui_session::fire(world, |script| {
+        script.set_merchant(None);
+        script.fire_event("MERCHANT_CLOSED", vec![]);
+        drop_held_vendor_row(script);
+    });
+}
+
+/// `SMSG_LIST_INVENTORY` opens the window on the vendor's rows (`0x4facf0`): it registers on the
+/// latch first with no test of its own cell (`0x4fad40`), so a list from the open vendor closes
+/// it and opens it again, then writes the cell (`0x4fad4b`).
+pub(crate) fn open_merchant(world: &mut World, vendor: u64, items: Vec<VendorItem>) {
+    debug!("net: vendor {vendor:#x} listed {} items", items.len());
+    crate::ui_session::register(world, vendor);
+    world.resource_mut::<MerchantOpen>().open(vendor, items);
+}
+
+/// The close core's tail (`0x4fadf0`, every close's): a vendor row held on the cursor, mode 5 with
+/// its entry stored (`0x4fae31`, `[0xb4b41c]` through `0x495170`), is cleared (`0x4fae4a` →
+/// `ClearCursor(1, 1)`), after `MERCHANT_CLOSED`.
+fn drop_held_vendor_row(script: &mut UiScript) {
+    if matches!(
+        script.held_cursor().payload(),
+        Some(benilla_ui::script::CursorPayload::Merchant(_))
+    ) {
+        script.clear_cursor_payload();
     }
 }
 
@@ -677,11 +713,12 @@ impl NpcSession for MerchantOpen {
 /// 0 when the purse covers the worn gear, and a close clears locally, as there is no close packet.
 fn drain_merchant(
     script: Option<NonSendMut<UiScript>>,
-    mut open: ResMut<MerchantOpen>,
+    open: Res<MerchantOpen>,
     commands: Res<NetCommands>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     objects: Objects,
     mut purse: RepairPurse,
+    mut commands_q: Commands,
 ) {
     let Some(mut script) = script else {
         return;
@@ -789,7 +826,7 @@ fn drain_merchant(
     }
     if script.take_merchant_close() {
         debug!("ui_merchant: client-side close (no packet)");
-        open.clear();
+        crate::ui_session::queue(&mut commands_q, close_core);
     }
 }
 
@@ -912,6 +949,7 @@ pub(crate) mod purse_fixture {
     /// A VM with the sword at live id 16, backpack slot 1 and bank slot 1, and a tooltip `TT`.
     pub(crate) fn sword_vm() -> UiScript {
         let mut script = UiScript::new().unwrap();
+        crate::ui_script::test_ui::load_tooltip_template(&script);
         let mut inv: benilla_ui::script::InventorySlots = Default::default();
         inv[16] = Some(benilla_ui::script::InvSlotView {
             item_id: SWORD_ENTRY,
@@ -934,7 +972,7 @@ pub(crate) mod purse_fixture {
         script.set_container(crate::ui_items::BANK_CONTAINER, Some(bag));
         script
             .run(
-                r#"CreateFrame("GameTooltip", "TT"):SetOwner(CreateFrame("Frame"), "ANCHOR_NONE")"#,
+                r#"CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate"):SetOwner(CreateFrame("Frame"), "ANCHOR_NONE")"#,
             )
             .unwrap();
         script
@@ -1451,10 +1489,15 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         // Unlimited stock is `numAvailable` -1; a finite count passes through.
-        let unlimited = resolve_item(&row(159, 1, STOCK_UNLIMITED), &items, None, &commands);
+        let unlimited = resolve_item(
+            &row(159, 1, STOCK_UNLIMITED),
+            &items,
+            None,
+            Ask::New(&commands),
+        );
         assert_eq!(unlimited.num_available, -1);
         assert_eq!(unlimited.item_id, 159);
-        let finite = resolve_item(&row(4540, 2, 5), &items, None, &commands);
+        let finite = resolve_item(&row(4540, 2, 5), &items, None, Ask::New(&commands));
         assert_eq!(finite.num_available, 5);
         // No template answer yet: no name or stats, the rest present.
         assert!(finite.name.is_none());
@@ -1524,7 +1567,7 @@ mod tests {
                 bag_family: 0,
             }),
         );
-        let resolved = resolve_item(&row(2129, 1, 3), &items, None, &commands);
+        let resolved = resolve_item(&row(2129, 1, 3), &items, None, Ask::New(&commands));
         let stats = resolved.stats.expect("template answered → stats present");
         assert_eq!(
             (
@@ -1555,5 +1598,102 @@ mod tests {
         open.clear();
         assert!(!open.is_open());
         assert!(open.items.is_empty());
+    }
+
+    /// `GetMerchantItemInfo` looks each row up with a callback (`0x4faf1a`) when the stock window
+    /// calls it, at `MERCHANT_SHOW` and the list's `MERCHANT_UPDATE`; the frames between ask only
+    /// what the cache holds nothing for. A refused row is asked by no frame, and again by the
+    /// vendor's next list.
+    #[test]
+    fn a_refused_vendor_row_is_asked_at_the_next_list_never_by_a_frame() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<MerchantOpen>()
+            .init_resource::<MerchantErrors>()
+            .init_resource::<NameCache>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .insert_resource(NetCommands(tx))
+            .add_systems(Update, feed_merchant);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        let item_asks = |rx: &crossbeam_channel::Receiver<ClientCommand>| {
+            crate::query_cache::queries(rx)
+                .into_iter()
+                .filter(|c| matches!(c, ClientCommand::ItemQuery { entry: 900, .. }))
+                .count()
+        };
+        const VENDOR: u64 = 0xF130_0000_0000_0E1D;
+        app.world_mut()
+            .resource_mut::<MerchantOpen>()
+            .open(VENDOR, vec![row(900, 1, 5)]);
+        app.update();
+        assert_eq!(item_asks(&rx), 1, "the show asks the row");
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(900, None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert_eq!(item_asks(&rx), 0, "no frame asks the refusal");
+        app.world_mut()
+            .resource_mut::<MerchantOpen>()
+            .open(VENDOR, vec![row(900, 1, 4)]);
+        app.update();
+        assert_eq!(item_asks(&rx), 1, "the next list asks it, once");
+        for _ in 0..600 {
+            app.update();
+        }
+        assert_eq!(item_asks(&rx), 0);
+    }
+
+    /// Every merchant close runs the core `0x4fadf0`, whose tail clears a vendor row held on the
+    /// cursor (`0x4fae31`-`0x4fae4a`): `CloseMerchant` here, through the feed's close edge.
+    #[test]
+    fn closing_the_vendor_drops_a_held_vendor_row() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<MerchantOpen>()
+            .init_resource::<MerchantErrors>()
+            .init_resource::<NameCache>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .insert_resource(NetCommands(tx))
+            .add_systems(Update, (drain_merchant, feed_merchant).chain());
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.world_mut()
+            .resource_mut::<MerchantOpen>()
+            .open(0xF130_0000_0000_0E1D, Vec::new());
+        app.update();
+        {
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.set_merchant(Some(benilla_ui::script::MerchantState {
+                items: vec![benilla_ui::script::MerchantItem {
+                    name: Some("Refreshing Spring Water".into()),
+                    price: 25,
+                    quantity: 5,
+                    num_available: -1,
+                    item_id: 159,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }));
+            s.run("PickupMerchantItem(1) CloseMerchant()").unwrap();
+            assert!(matches!(
+                s.cursor_payload(),
+                Some(benilla_ui::script::CursorPayload::Merchant(_))
+            ));
+        }
+        app.update();
+        assert!(app
+            .world()
+            .non_send_resource::<UiScript>()
+            .cursor_payload()
+            .is_none());
     }
 }

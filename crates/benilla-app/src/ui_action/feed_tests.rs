@@ -159,6 +159,113 @@ fn a_landed_item_template_also_lands_the_consumable_gate() {
     );
 }
 
+/// `PickupAction` and `PlaceAction` fire their slots' `ACTIONBAR_SLOT_CHANGED` in place
+/// (`0x4e5db0` and `0x4e684f` into `0x4e58e0`), each reading the slot as written, count and
+/// consumable gate included; the store catching up a frame later fires nothing more.
+#[test]
+fn a_bar_drag_fires_its_slots_in_place_and_the_feed_adds_nothing() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    app.add_systems(Update, super::drain::drain_action_sets.after(feed_actions));
+    let mut info = test_template("Tough Jerky");
+    info.display_info_id = JERKY_DISPLAY;
+    info.spells = vec![ItemSpellEntry {
+        index: 0,
+        spell_id: 433,
+        trigger: 0,
+        charges: -1,
+        cooldown_ms: -1,
+        category: 0,
+        category_cooldown_ms: -1,
+    }];
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(JERKY, Some(info));
+    app.update();
+    app.update();
+
+    fn script(app: &mut App) -> Mut<'_, UiScript> {
+        app.world_mut().non_send_resource_mut::<UiScript>()
+    }
+    script(&mut app)
+        .run(
+            r#"
+            SLOT_EVENTS = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+            f:SetScript("OnEvent", function()
+                table.insert(SLOT_EVENTS, arg1 .. ":" .. tostring(GetActionTexture(arg1))
+                    .. ":" .. tostring(IsConsumableAction(arg1)))
+            end)
+            "#,
+        )
+        .unwrap();
+    let seen: Vec<String> = script(&mut app)
+        .eval(&format!(
+            "PickupAction({JERKY_ACTION}) PlaceAction(1) local s = SLOT_EVENTS SLOT_EVENTS = {{}} return s"
+        ))
+        .unwrap();
+    assert_eq!(
+        seen,
+        [
+            format!("{JERKY_ACTION}:nil:nil"),
+            format!("1:{JERKY_ICON}:1"),
+        ],
+        "both slots signal before the verbs return, the placed one with its gate"
+    );
+
+    app.update();
+    app.update();
+    let late: Vec<String> = script(&mut app).eval("return SLOT_EVENTS").unwrap();
+    assert!(late.is_empty(), "the feed re-fired {late:?}");
+    let bar = app.world().resource::<PlayerActions>();
+    assert!(bar.buttons.contains_key(&0) && !bar.buttons.contains_key(&JERKY_SLOT));
+}
+
+/// A verb run after the drain and before the next feed (an addon's `PlaceAction` from a handler)
+/// is not rolled back: the store has not caught up, so a re-resolve in that window pushes nothing
+/// over the verb's write and fires nothing.
+#[test]
+fn a_verbs_bar_write_survives_a_resolve_of_the_stale_store() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    let mut info = test_template("Tough Jerky");
+    info.display_info_id = JERKY_DISPLAY;
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(JERKY, Some(info));
+    app.update();
+    app.update();
+
+    fn script(app: &mut App) -> Mut<'_, UiScript> {
+        app.world_mut().non_send_resource_mut::<UiScript>()
+    }
+    script(&mut app)
+        .run(&format!(
+            r#"
+            PickupAction({JERKY_ACTION}) PlaceAction(1)
+            SLOT_EVENTS = {{}}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+            f:SetScript("OnEvent", function() table.insert(SLOT_EVENTS, arg1) end)
+            "#
+        ))
+        .unwrap();
+    // The store has not seen the move; something else asks for a resolve.
+    app.world_mut().resource_mut::<PlayerActions>().dirty = true;
+    app.update();
+    let late: Vec<i64> = script(&mut app).eval("return SLOT_EVENTS").unwrap();
+    assert!(late.is_empty(), "the stale store fired {late:?}");
+    let faces: (Option<String>, Option<String>) = script(&mut app)
+        .eval(&format!(
+            "return GetActionTexture(1), GetActionTexture({JERKY_ACTION})"
+        ))
+        .unwrap();
+    assert_eq!(
+        faces,
+        (Some(JERKY_ICON.to_string()), None),
+        "the verb's write was rolled back"
+    );
+}
+
 /// `IsConsumableAction 0x4e5250`'s two clauses; the item class is neither.
 #[test]
 fn is_consumable_is_ammo_thrown_or_a_negative_charge_use_block() {
@@ -247,7 +354,7 @@ fn an_unknown_entry_answers_once_and_settles() {
         app.world()
             .resource::<Items>()
             .template_answered_unknown(JERKY),
-        "the negative is cached — the feed must not re-ask on the next resolve"
+        "the refusal stands for the readers still resolving it — the feed must not re-ask"
     );
 }
 
@@ -434,6 +541,53 @@ fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
     );
 }
 
+/// A login notice queued while the loading cover is up waits for the reveal: the reference's
+/// cover drops at the player's create (`0x5debbd`), ahead of the notice, so its `UIErrorsFrame`
+/// hold is never spent under the cover.
+#[test]
+fn a_notice_under_the_loading_cover_fires_at_the_reveal() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    app.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            BENILLA_TEST_ERRORS = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UI_ERROR_MESSAGE")
+            f:SetScript("OnEvent", function() table.insert(BENILLA_TEST_ERRORS, arg1) end)
+            "#,
+        )
+        .unwrap();
+    let fired = |app: &mut App| {
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .eval::<Vec<String>>("return BENILLA_TEST_ERRORS")
+            .unwrap()
+    };
+
+    app.world_mut()
+        .resource_mut::<UiErrorTexts>()
+        .error("GM mode is ON".to_string());
+    app.update();
+    app.update();
+    assert!(fired(&mut app).is_empty(), "nothing fires under the cover");
+    assert_eq!(
+        app.world().resource::<UiErrorTexts>().0.len(),
+        1,
+        "the notice stays queued"
+    );
+
+    app.insert_resource(crate::loading_screen::LoadingScreen::default());
+    app.update();
+    assert_eq!(
+        fired(&mut app),
+        ["GM mode is ON"],
+        "the reveal fires it once"
+    );
+    assert!(app.world().resource::<UiErrorTexts>().0.is_empty());
+}
+
 /// `HandleCastFailed 0x6e1a00` logs through `0x62c360`; `HandlePetCastFailed 0x6e8eb0` calls only
 /// the packet readers and `0x496720`, with no log line and no error sound. Both entries name the
 /// same spell, so only the caster differs.
@@ -454,6 +608,7 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
         arg: None,
         caster: Caster::Player,
         redisplay: false,
+        input: benilla_ui::script::InputEvents::NONE,
     });
     errors.push_pet(GROWL, 0x5F);
 
@@ -556,4 +711,197 @@ fn a_tame_failure_composes_the_reason_string_into_err_tame_failed() {
         None,
         "an unresolvable reason shows nothing"
     );
+}
+
+/// Every first pass through the failure handler `0x6e1a00`, a local refusal included, disarms the
+/// tradeskill repeat when it names the armed spell (`0x6e1a3c`-`0x6e1a55`); another spell's does
+/// not.
+#[test]
+fn a_refusal_of_the_armed_craft_disarms_the_batch() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    {
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script.set_trade_skill(Some(benilla_ui::script::TradeSkillState {
+            line: 197,
+            line_name: "Tailoring".into(),
+            rank: 1,
+            max_rank: 75,
+            recipes: vec![benilla_ui::script::TradeSkillRecipe {
+                group: None,
+                spell_id: 2963,
+                name: "Bolt of Linen Cloth".into(),
+                difficulty: benilla_ui::script::TradeSkillDifficulty::Trivial,
+                num_available: 5,
+                icon: None,
+                min_made: 1,
+                max_made: 1,
+                cooldown: None,
+                product_item: 2996,
+                product_inv_type: 0,
+                product_item_level: 0,
+                reagents: vec![],
+                tools: vec![],
+            }],
+        }));
+        script.run("DoTradeSkill(2, 3)").unwrap();
+    }
+    let repeat = |app: &App| {
+        app.world()
+            .non_send_resource::<UiScript>()
+            .trade_skill_repeat()
+    };
+    app.world_mut()
+        .resource_mut::<CastErrors>()
+        .push_local(133, 0x0c);
+    app.update();
+    assert_eq!(repeat(&app), (2963, 3), "another spell's refusal");
+    app.world_mut()
+        .resource_mut::<CastErrors>()
+        .push_local(2963, 0x0c);
+    app.update();
+    assert_eq!(repeat(&app), (0, 3), "the armed craft's refusal disarms");
+}
+
+/// An item slot's count is not polled: a stack the store changes between resolves, with no item
+/// watcher run, leaves the slot and fires nothing. The reference's slot count moves only at its
+/// recount (`0x4e5caa`) and its writes (`0x4e5d90`, `0x4e66f1`).
+#[test]
+fn a_bag_count_moving_between_resolves_is_not_polled_into_the_bar() {
+    use benilla_protocol::field::{FIELD_ITEM_STACK_COUNT, FIELD_OBJECT_ENTRY};
+    use benilla_protocol::ObjectFields;
+    const JERKIES: u64 = 0x4000_0000_0000_0117;
+    // `PLAYER_FIELD_PACK_SLOT_1`.
+    const F_PACK_SLOT_1: u16 = 532;
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    let mut info = test_template("Tough Jerky");
+    info.display_info_id = JERKY_DISPLAY;
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(JERKY, Some(info));
+    let world = app.world_mut();
+    let jerkies = crate::items::test_spawn_item(
+        world,
+        JERKIES,
+        ObjectFields::from_pairs(&[(FIELD_OBJECT_ENTRY, JERKY), (FIELD_ITEM_STACK_COUNT, 4)]),
+        false,
+    );
+    world.spawn((
+        crate::net::SelfPlayer,
+        crate::net::ObjectStore(ObjectFields::from_pairs(&[
+            (F_PACK_SLOT_1, JERKIES as u32),
+            (F_PACK_SLOT_1 + 1, (JERKIES >> 32) as u32),
+        ])),
+    ));
+    app.update();
+    let count = |app: &mut App| {
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .eval::<i64>(&format!("return GetActionCount({JERKY_ACTION})"))
+            .unwrap()
+    };
+    assert_eq!(count(&mut app), 4, "the resolve counts the bag");
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            SLOT_EVENTS = 0
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+            f:SetScript("OnEvent", function() SLOT_EVENTS = SLOT_EVENTS + 1 end)
+            "#,
+        )
+        .unwrap();
+    app.world_mut()
+        .get_mut::<crate::net::ObjectStore>(jerkies)
+        .unwrap()
+        .0
+        .merge(ObjectFields::from_pairs(&[(FIELD_ITEM_STACK_COUNT, 3)]));
+    app.update();
+    app.update();
+    let events: i64 = app
+        .world_mut()
+        .non_send_resource::<UiScript>()
+        .eval("return SLOT_EVENTS")
+        .unwrap();
+    assert_eq!(events, 0, "the feed polled the count into the bar");
+    assert_eq!(count(&mut app), 4, "the slot keeps its stored count");
+}
+
+/// Our player holding `(player slot, guid)` pairs: slot 17 (the ranged slot) is worn, 23 the
+/// backpack's first, 81 the keyring's first.
+fn hold(world: &mut World, items: &[(u16, u64, u32, u32, u32)]) {
+    use benilla_protocol::field::{FIELD_ITEM_SPELL_CHARGES, FIELD_ITEM_STACK_COUNT};
+    use benilla_protocol::field::{FIELD_OBJECT_ENTRY, FIELD_PLAYER_INV_SLOT_HEAD};
+    use benilla_protocol::ObjectFields;
+    let mut player = Vec::new();
+    for &(seat, guid, entry, stack, charges) in items {
+        crate::items::test_spawn_item(
+            world,
+            guid,
+            ObjectFields::from_pairs(&[
+                (FIELD_OBJECT_ENTRY, entry),
+                (FIELD_ITEM_STACK_COUNT, stack),
+                (FIELD_ITEM_SPELL_CHARGES, charges),
+            ]),
+            false,
+        );
+        let lo = FIELD_PLAYER_INV_SLOT_HEAD + 2 * seat;
+        player.push((lo, guid as u32));
+        player.push((lo + 1, (guid >> 32) as u32));
+    }
+    world.spawn((
+        crate::net::SelfPlayer,
+        crate::net::ObjectStore(ObjectFields::from_pairs(&player)),
+    ));
+}
+
+fn jerky_count(app: &mut App) -> i64 {
+    app.world_mut()
+        .non_send_resource::<UiScript>()
+        .eval::<i64>(&format!("return GetActionCount({JERKY_ACTION})"))
+        .unwrap()
+}
+
+/// `0x4e6d20` walks mask 0 (`0x47`): worn gear and the keyring count beside the bags, so a thrown
+/// stack worn in the ranged slot reads its stack on the bar.
+#[test]
+fn a_slot_counts_a_worn_stack_and_a_keyring_copy_beside_the_bags() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    let mut info = test_template("Throwing Knife");
+    info.display_info_id = JERKY_DISPLAY;
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(JERKY, Some(info));
+    hold(
+        app.world_mut(),
+        &[
+            (17, 0x4000_0000_0000_0201, JERKY, 18, 0),
+            (23, 0x4000_0000_0000_0202, JERKY, 2, 0),
+            (81, 0x4000_0000_0000_0203, JERKY, 1, 0),
+        ],
+    );
+    app.update();
+    assert_eq!(jerky_count(&mut app), 21);
+}
+
+/// With the template's first charges neither 0 nor -1 the slot shows the uses left: the sum of
+/// the copies' absolute `ITEM_FIELD_SPELL_CHARGES[0]` (`0x4e6d81`-`0x4e6d9c`, `0x6221c7`), not the
+/// stack count. A cold template falls to the stack, and the answer re-resolves it.
+#[test]
+fn a_charged_item_slot_shows_the_uses_left() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+    hold(
+        app.world_mut(),
+        &[(23, 0x4000_0000_0000_0202, JERKY, 1, (-2i32) as u32)],
+    );
+    app.update();
+    assert_eq!(jerky_count(&mut app), 1, "no template yet: the stack count");
+    let mut info = test_template("Tough Jerky");
+    info.display_info_id = JERKY_DISPLAY;
+    info.spell_charges_0 = -3;
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(JERKY, Some(info));
+    app.update();
+    assert_eq!(jerky_count(&mut app), 2, "|-2| charges, one item");
 }

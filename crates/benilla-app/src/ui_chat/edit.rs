@@ -16,11 +16,13 @@ pub(crate) enum SendType {
     Whisper,
     Party,
     Raid,
+    /// `RAID` sent by the group leader (`0x49f3bf`); no token names it.
     RaidLeader,
     RaidWarning,
     Guild,
     Officer,
     Battleground,
+    /// `BATTLEGROUND` sent by the group leader (`0x49f48b`); no token names it.
     BattlegroundLeader,
     Afk,
     Dnd,
@@ -28,9 +30,10 @@ pub(crate) enum SendType {
 }
 
 impl SendType {
-    /// The `SendChatMessage` chat-type token; `None` for a made-up one, reported rather than sent
-    /// as SAY. `AFK` and `DND` are sends: types `0x14`/`0x15` carrying the away message, which the
-    /// server turns into the flag (vmangos `ChatHandler.cpp:611-648`).
+    /// The `SendChatMessage` chat-type token, one of [`benilla_ui::script::SEND_CHAT_TOKENS`]
+    /// (the table `0x49f7a0`); `None` for any other. `AFK` and `DND` are sends: types
+    /// `0x14`/`0x15` carrying the away message, which the server turns into the flag (vmangos
+    /// `ChatHandler.cpp:611-648`).
     pub(crate) fn from_token(token: &str) -> Option<SendType> {
         Some(match token {
             "SAY" => SendType::Say,
@@ -39,12 +42,10 @@ impl SendType {
             "WHISPER" => SendType::Whisper,
             "PARTY" => SendType::Party,
             "RAID" => SendType::Raid,
-            "RAID_LEADER" => SendType::RaidLeader,
             "RAID_WARNING" => SendType::RaidWarning,
             "GUILD" => SendType::Guild,
             "OFFICER" => SendType::Officer,
             "BATTLEGROUND" => SendType::Battleground,
-            "BATTLEGROUND_LEADER" => SendType::BattlegroundLeader,
             "AFK" => SendType::Afk,
             "DND" => SendType::Dnd,
             "CHANNEL" => SendType::Channel,

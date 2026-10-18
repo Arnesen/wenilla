@@ -35,7 +35,7 @@ fn spellbook_hover_renders_the_verified_shape() {
     s.run(
         r#"
         local a = CreateFrame("Button", "SB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetSpell(1, "spell")
         assert(tt:IsShown(), "SetSpell shows")
@@ -96,7 +96,7 @@ fn a_pet_book_hover_reads_the_pets_book_not_the_players() {
     s.run(
         r#"
         local a = CreateFrame("Button", "SB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetSpell(1, "pet")
         assert(TTTextLeft1:GetText() == "Firebolt", "pet slot 1, got " .. TTTextLeft1:GetText())
@@ -109,10 +109,29 @@ fn a_pet_book_hover_reads_the_pets_book_not_the_players() {
         assert(TTTextLeft1:GetText() == "Firebolt", "case-insensitive pet")
         tt:SetSpell(1, "book")
         assert(TTTextLeft1:GetText() == "Fireball", "any other string is the player's book")
-        -- A non-string third argument is not "the player's book": the reference bails outright
-        -- (0x532dc0's isstring test), leaving whatever was shown.
+        -- A number is stringified (0x6f3510 accepts it) and so is the player's book.
+        tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetSpell(1, 7)
-        assert(TTTextLeft1:GetText() == "Fireball", "a non-string arg shows nothing new")
+        assert(TTTextLeft1:GetText() == "Fireball", "a number book type is the player's book")
+        -- A nil, table or boolean book type, a non-number index, and an index outside 1..1024
+        -- (trunc(n - 1) outside [0, 0x400)) raise "Invalid spell slot in SetSpell" (0x855290).
+        local function raises(...)
+            local ok, err = pcall(tt.SetSpell, tt, unpack(arg))
+            return not ok and string.find(tostring(err), "Invalid spell slot in SetSpell", 1, true)
+        end
+        assert(raises(1, nil), "nil book type")
+        assert(raises(1, {}), "table book type")
+        assert(raises(1, true), "boolean book type")
+        assert(raises("x", "spell"), "non-number index")
+        assert(raises(0, "spell"), "index 0")
+        assert(raises(1025, "spell"), "index 1025")
+        assert(raises(-3, "spell"), "negative index")
+        assert(not raises(1024, "spell"), "index 1024 is in range and misses quietly")
+        -- `_ftol` wraps to the low dword (0x532dd9): 4294967297 - 1 is 2^32, which is slot 1.
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        tt:SetSpell(4294967297, "spell")
+        assert(TTTextLeft1:GetText() == "Fireball", "a wrapped index reads slot 1")
+        assert(raises(4294967297 + 1024, "spell"), "2^32 + 1024 wraps to slot 1025, past the table")
     "#,
     )
     .unwrap();
@@ -145,7 +164,7 @@ fn tracking_hover_renders_gold_name_over_white_description() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "TRK"); f:SetPoint("CENTER", 0, 0); f:SetWidth(10); f:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(f, "ANCHOR_BOTTOMLEFT")
         tt:SetTrackingSpell()
         assert(tt:IsShown(), "SetTrackingSpell shows")
@@ -199,7 +218,7 @@ fn passive_omits_the_casttime_line() {
     s.run(
         r#"
         local a = CreateFrame("Button", "SB2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetSpell(1, "spell")
         assert(tt:NumLines() == 2, "name + description only, got " .. tt:NumLines())
@@ -250,7 +269,7 @@ fn player_buff_hover_is_the_aura_variant() {
         SPELL_TIME_REMAINING_MIN    = "<%d m>"
         SPELL_TIME_REMAINING_MIN_P1 = "<%d mm>"
         local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         -- 0, not 1: SetPlayerBuff takes a 1.12 CACHE POSITION (see `script::aura`'s header).
         tt:SetPlayerBuff(0)
@@ -309,7 +328,7 @@ fn player_buff_hover_names_the_dispel_class_in_gold() {
     s.run(
         r#"
         local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetPlayerBuff(0)
         assert(TTTextRight1:GetText() == "Magic",
@@ -359,7 +378,7 @@ fn requirement_and_reagent_lines_render_in_law_order() {
     s.run(
         r#"
         local a = CreateFrame("Button", "SB2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetSpell(1, "spell")
         assert(tt:NumLines() == 6, "name + range + cast + requires + reagents + desc, got " .. tt:NumLines())
@@ -440,7 +459,7 @@ fn unit_buff_and_debuff_hover_render_the_aura_variant_without_remaining() {
     s.run(
         r#"
         local a = CreateFrame("Button", "TF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_BOTTOMRIGHT", 15, -25)
         tt:SetUnitDebuff("target", 1)
         assert(tt:NumLines() == 2, "name + description, NO remaining line, got " .. tt:NumLines())
@@ -503,7 +522,7 @@ fn player_buff_hover_indexes_the_cache_position_not_a_filtered_ordinal() {
     s.run(
         r#"
         local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         local function at(i, extra)
             tt:SetOwner(a, "ANCHOR_RIGHT")
             tt:SetPlayerBuff(i, extra)
@@ -555,7 +574,7 @@ fn action_hover_delegates_by_kind() {
     s.run(
         r#"
         local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetAction(24)
         assert(TTTextLeft1:GetText() == "Fireball", "spell slot renders the spell view")
@@ -604,7 +623,7 @@ fn action_hover_on_a_macro_slot_shows_its_name_in_white() {
     s.run(
         r#"
         local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetAction(24)
         assert(tt:IsShown(), "a macro slot shows a plate")
@@ -704,7 +723,7 @@ fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
     s.run(
         r#"
         local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        CreateFrame("GameTooltip", "TT")
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
 
         -- Row 1 is the "Arms" header: a no-op, not a shifted hit onto a neighbouring service.
         TT:SetOwner(a, "ANCHOR_RIGHT")
@@ -798,6 +817,7 @@ fn set_craft_spell_selects_the_builder_like_the_trainer_hover_does() {
         reagents: vec![],
         tools: vec![],
         spell_level: 0,
+        skill_line: None,
     };
     s.set_craft(Some(CraftState {
         name: "Enchanting".into(),
@@ -817,7 +837,7 @@ fn set_craft_spell_selects_the_builder_like_the_trainer_hover_does() {
     s.run(
         r#"
         local a = CreateFrame("Button", "AB2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        CreateFrame("GameTooltip", "TT")
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         TT:SetOwner(a, "ANCHOR_RIGHT")
         TT:SetCraftSpell(1)
     "#,
@@ -874,7 +894,7 @@ fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
         SPELL_TIME_REMAINING_SEC_P1 = "<%d ss>"
         BENILLA_ANCHOR = CreateFrame("Button", "BF2")
         BENILLA_ANCHOR:SetPoint("CENTER", 0, 0); BENILLA_ANCHOR:SetWidth(10); BENILLA_ANCHOR:SetHeight(10)
-        BENILLA_TIP = CreateFrame("GameTooltip", "TT2")
+        BENILLA_TIP = CreateFrame("GameTooltip", "TT2", nil, "TestTooltipTemplate")
     "#,
     )
     .unwrap();
@@ -959,7 +979,7 @@ fn quest_reward_spell_getters_and_hovers() {
     s.run(
         r#"
         local a = CreateFrame("Button", "Q1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         "#,
     )
     .unwrap();
@@ -1007,19 +1027,14 @@ fn quest_reward_spell_getters_and_hovers() {
         "Fireball"
     );
 
-    s.set_quest_log(QuestLogState {
-        entries: vec![QuestLogEntryView {
-            quest_id: 7,
-            detail: Some(QuestLogDetail {
-                reward_spell: Some(reward),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }],
-        ..Default::default()
-    });
-    // The detail hangs on the row, so both readers go through the selection.
-    s.run("SelectQuestLogEntry(1)").unwrap();
+    let mut record = crate::script::quest_log::fixture::record("Q", 1, 12, "Elwynn Forest");
+    record.reward_spell = Some(reward);
+    crate::script::quest_log::fixture::seat(
+        &mut s,
+        &[(7, record, crate::script::quest_log::fixture::slot(7, 0, 0))],
+    );
+    // The spell is the selected quest's, so both readers go through the selection: row 2.
+    s.run("SelectQuestLogEntry(2)").unwrap();
     assert_eq!(
         s.eval::<(String, String, Option<i64>)>("return GetQuestLogRewardSpell()")
             .unwrap()
@@ -1051,6 +1066,7 @@ fn craft_recipe(spell_id: u32, name: &str, tooltip: CraftTooltip) -> CraftRecipe
         reagents: vec![],
         tools: vec![],
         spell_level: 0,
+        skill_line: None,
     }
 }
 
@@ -1111,17 +1127,12 @@ fn the_spell_subjects_are_what_the_setters_read_from_the_vm() {
         reward_spell: reward(133),
         ..QuestState::default()
     }));
-    s.set_quest_log(QuestLogState {
-        entries: vec![QuestLogEntryView {
-            quest_id: 7,
-            detail: Some(QuestLogDetail {
-                reward_spell: reward(116),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }],
-        ..Default::default()
-    });
+    let mut record = crate::script::quest_log::fixture::record("Q", 1, 12, "Elwynn Forest");
+    record.reward_spell = reward(116);
+    crate::script::quest_log::fixture::seat(
+        &mut s,
+        &[(7, record, crate::script::quest_log::fixture::slot(7, 0, 0))],
+    );
     s.set_craft(Some(CraftState {
         name: "Beast Training".into(),
         rank: 0,
@@ -1218,7 +1229,7 @@ fn the_unit_selector_setters_read_the_pet_view() {
     s.run(
         r#"
         local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        CreateFrame("GameTooltip", "TT")
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         local function desc(set)
             TT:SetOwner(PB1, "ANCHOR_RIGHT"); set(); return TTTextLeft2:GetText()
         end
@@ -1253,7 +1264,7 @@ fn a_pet_view_miss_waits_on_the_pet_store() {
     s.run(
         r#"
         local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        CreateFrame("GameTooltip", "TT")
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         TT:SetOwner(PB1, "ANCHOR_RIGHT")
         TT:SetPetAction(1)
     "#,
@@ -1286,7 +1297,7 @@ fn a_missed_view_re_renders_the_tooltip_when_the_app_answers() {
     s.run(
         r#"
         local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        CreateFrame("GameTooltip", "TT")
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         TT:SetOwner(PB1, "ANCHOR_RIGHT")
         CLEARED = 0
         TT:SetScript("OnTooltipCleared", function() CLEARED = CLEARED + 1 end)
@@ -1335,8 +1346,8 @@ fn a_hidden_miss_shows_and_an_enchant_link_fills_when_answered() {
     s.run(
         r#"
         local a = CreateFrame("Button", "CI"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        CreateFrame("GameTooltip", "TT")
-        CreateFrame("GameTooltip", "REF")
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        CreateFrame("GameTooltip", "REF", nil, "TestTooltipTemplate")
         TT:SetOwner(CI, "ANCHOR_RIGHT")
         TT:SetCraftSpell(1)
         REF:SetOwner(CI, "ANCHOR_PRESERVE")
@@ -1392,9 +1403,9 @@ fn new_content_or_an_added_line_ends_the_wait() {
     s.run(
         r#"
         local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        CreateFrame("GameTooltip", "TT")
-        CreateFrame("GameTooltip", "HID")
-        CreateFrame("GameTooltip", "ADD")
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        CreateFrame("GameTooltip", "HID", nil, "TestTooltipTemplate")
+        CreateFrame("GameTooltip", "ADD", nil, "TestTooltipTemplate")
         TT:SetOwner(PB1, "ANCHOR_RIGHT")
         TT:SetPetAction(1)
         TT:SetOwner(PB1, "ANCHOR_RIGHT")
@@ -1405,7 +1416,7 @@ fn new_content_or_an_added_line_ends_the_wait() {
         ADD:SetOwner(PB1, "ANCHOR_RIGHT")
         ADD:SetPetAction(1)
         ADD:AddLine("an addon's line")
-        CreateFrame("GameTooltip", "FAD")
+        CreateFrame("GameTooltip", "FAD", nil, "TestTooltipTemplate")
         FAD:SetOwner(PB1, "ANCHOR_RIGHT")
         FAD:SetPetAction(1)
         FAD:FadeOut()
@@ -1435,15 +1446,15 @@ fn a_line_rewritten_in_place_ends_the_wait() {
     s.run(
         r#"
         local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        CreateFrame("GameTooltip", "APP")
-        CreateFrame("GameTooltip", "COL")
+        CreateFrame("GameTooltip", "APP", nil, "TestTooltipTemplate")
+        CreateFrame("GameTooltip", "COL", nil, "TestTooltipTemplate")
         APP:SetOwner(PB1, "ANCHOR_RIGHT")
         APP:SetPetAction(1)
         APP:AppendText(" (Pet)")
         COL:SetOwner(PB1, "ANCHOR_RIGHT")
         COL:SetPetAction(1)
         COLTextLeft1:SetTextColor(1, 0, 0)
-        CreateFrame("GameTooltip", "SAM")
+        CreateFrame("GameTooltip", "SAM", nil, "TestTooltipTemplate")
         SAM:SetOwner(PB1, "ANCHOR_RIGHT")
         SAM:SetPetAction(1)
         SAM:SetOwner(PB1, "ANCHOR_RIGHT")
@@ -1483,8 +1494,8 @@ fn a_wait_replaced_by_an_earlier_re_render_is_not_replayed() {
     s.run(
         r#"
         local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        CreateFrame("GameTooltip", "A")
-        CreateFrame("GameTooltip", "B")
+        CreateFrame("GameTooltip", "A", nil, "TestTooltipTemplate")
+        CreateFrame("GameTooltip", "B", nil, "TestTooltipTemplate")
         A:SetOwner(PB1, "ANCHOR_RIGHT")
         A:SetCraftSpell(1)
         B:SetOwner(PB1, "ANCHOR_RIGHT")

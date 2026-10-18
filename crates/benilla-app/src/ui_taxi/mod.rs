@@ -10,8 +10,9 @@ use benilla_ui::script::{TaxiUiState, UiScript};
 use crate::names::NameCache;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
 use crate::player::UNIT_FLAG_TAXI_FLIGHT;
-use crate::ui_script::{UiFeed, UiInput};
-use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
+use crate::query_cache::Ask;
+use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
+use crate::ui_session::{CoreCloses, LatchApp, LatchedWindow, NpcWindow};
 
 mod routing;
 use routing::{build_nodes, load_taxi_catalogs, taxi_error_key, TaxiCatalogs, TaxiRouteCache};
@@ -58,6 +59,55 @@ impl TaxiState {
     }
 }
 
+/// The flight master's cell `[0xbb4ab8]`; `CloseTaxiMap` (`0x4dcce0`) is the core itself.
+impl LatchedWindow for TaxiState {
+    const WINDOW: NpcWindow = NpcWindow::Taxi;
+
+    fn cell(&self) -> Option<u64> {
+        self.open.as_ref().map(|o| o.flightmaster)
+    }
+
+    fn dispatched(world: &mut World) {
+        close_core(world);
+    }
+
+    fn take_close_verb(script: &mut UiScript) -> bool {
+        script.take_taxi_close()
+    }
+}
+
+/// The close core `0x4dc0f0`: with a map open, the latch release (`0x4dc105`), the cell cleared
+/// and the node textures freed (`0x4dc113`-`0x4dc158`), then `TAXIMAP_CLOSED` (`0x4dc15f`). An
+/// activate's `OK` (`0x5ed203`), a map from another flight master (`0x4db73a`) and the
+/// leave-world sweep's leg (`0x490ad0` → `0x4db700`) call it as it is.
+pub(crate) fn close_core(world: &mut World) {
+    let Some(flightmaster) = world.resource::<TaxiState>().cell() else {
+        return;
+    };
+    crate::ui_session::release(world, flightmaster);
+    world.resource_mut::<TaxiState>().clear();
+    crate::ui_session::note_closed(world, NpcWindow::Taxi);
+    crate::ui_session::fire(world, |script| {
+        script.set_taxi(None);
+        script.fire_event("TAXIMAP_CLOSED", vec![]);
+    });
+}
+
+/// `SMSG_SHOWTAXINODES`'s open (`0x4db710`): a map already on this flight master takes nothing
+/// (`0x4db730`); one on another is closed first through the core (`0x4db73a`); then the latch
+/// (`0x4dba5c`) and the cell (`0x4dba63`).
+pub(crate) fn open_map(world: &mut World, flightmaster: u64, nearest_node: u32, known: TaxiMask) {
+    match world.resource::<TaxiState>().cell() {
+        Some(open) if open == flightmaster => return,
+        Some(_) => close_core(world),
+        None => {}
+    }
+    crate::ui_session::register(world, flightmaster);
+    world
+        .resource_mut::<TaxiState>()
+        .open(flightmaster, nearest_node, known);
+}
+
 /// A flight master's `SMSG_TAXINODE_STATUS`: `known = false` shows the green `TalkToMeGreen`
 /// overhead icon (`0x5ecdd0` to `0x607480`, resource table `0xc4d9d8` index 4). The query and the
 /// teardown belong to [`crate::quest_markers::query`]: the reference's only sender, `0x5eb170`, is
@@ -66,18 +116,6 @@ impl TaxiState {
 #[derive(Component, Clone, Copy)]
 pub(crate) struct FlightMasterStatus {
     pub(crate) known: bool,
-}
-
-/// The range guard closes the map, as the close button does, when the flight master is out of
-/// range or gone.
-impl NpcSession for TaxiState {
-    fn npc(&self) -> Option<u64> {
-        self.open.as_ref().map(|o| o.flightmaster)
-    }
-
-    fn close(&mut self) {
-        self.clear();
-    }
 }
 
 /// Push the map into the VM and fire its events, show an activate refusal or close on `OK`, and
@@ -93,8 +131,9 @@ fn feed_taxi(
     stores: Query<&ObjectStore>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     reactions: crate::target::ReactionInputs,
-    mut last: Local<crate::ui_script::VmMemo<Option<TaxiUiState>>>,
-    mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
+    mut last: crate::ui_script::WindowMemo<Option<TaxiUiState>>,
+    mut last_name: crate::ui_script::WindowMemo<Option<String>>,
+    mut closes: CoreCloses,
     mut sink: crate::ui_action::MessageSink,
 ) {
     let Some(mut script) = script else {
@@ -102,27 +141,28 @@ fn feed_taxi(
     };
     let last = last.get(&script);
     let last_name = last_name.get(&script);
+    if closes.since_last(&script, NpcWindow::Taxi) {
+        *last = None;
+        *last_name = None;
+    }
 
-    // The activate reply: a refusal shows where its message row says; `OK` closes the map, as
-    // the reference's handler does for code 0.
+    // The activate reply: a refusal shows where its message row says; `OK` closed the map in
+    // its handler, through the core.
     if let Some(code) = state.reply.take() {
-        match taxi_error_key(code) {
-            Some(key) => {
-                let text = script
-                    .lua()
-                    .globals()
-                    .get::<String>(key)
-                    .unwrap_or_default();
-                if !text.is_empty() {
-                    crate::ui_action::show_messages(
-                        &mut script,
-                        &mut sink,
-                        "ui_taxi",
-                        [crate::ui_action::Shown::keyed(key, text)],
-                    );
-                }
+        if let Some(key) = taxi_error_key(code) {
+            let text = script
+                .lua()
+                .globals()
+                .get::<String>(key)
+                .unwrap_or_default();
+            if !text.is_empty() {
+                crate::ui_action::show_messages(
+                    &mut script,
+                    &mut sink,
+                    "ui_taxi",
+                    [crate::ui_action::Shown::keyed(key, text)],
+                );
             }
-            None => state.open = None,
         }
     }
 
@@ -181,20 +221,23 @@ fn feed_taxi(
     let flightmaster_name = state
         .open
         .as_ref()
-        .and_then(|open| names.resolve(open.flightmaster, &commands))
+        .and_then(|open| {
+            let store = index
+                .0
+                .get(&open.flightmaster)
+                .and_then(|&e| stores.get(e).ok());
+            // `UnitName("npc")` looks it up with a callback (`0x5171b8`), at the open's event.
+            names.resolve_unit(open.flightmaster, store, Ask::at(last.is_none(), &commands))
+        })
         .map(str::to_string);
     let name_changed = *last_name != flightmaster_name;
 
     if fresh != *last || (fresh.is_some() && name_changed) {
         script.set_taxi(fresh.clone());
-        match (&*last, &fresh) {
-            // No arguments: the event's one fire site, `0x4dba96`, is a plain
-            // `FrameScript_SignalEvent` (`0x703e50`).
-            (None, Some(_)) | (Some(_), Some(_)) => {
-                script.fire_event("TAXIMAP_OPENED", Vec::new());
-            }
-            (Some(_), None) => script.fire_event("TAXIMAP_CLOSED", vec![]),
-            (None, None) => {}
+        // No arguments: the event's one fire site, `0x4dba96`, is a plain
+        // `FrameScript_SignalEvent` (`0x703e50`). The close is the core's.
+        if fresh.is_some() {
+            script.fire_event("TAXIMAP_OPENED", Vec::new());
         }
         *last = fresh;
         *last_name = flightmaster_name;
@@ -228,13 +271,14 @@ fn feed_on_taxi(
 /// Drain the Lua intents. `TakeTaxiNode(i)` sends `CMSG_ACTIVATETAXI` when a direct `TaxiPath`
 /// edge joins the current node and the target, even if the drawn route detours, and otherwise
 /// `CMSG_ACTIVATETAXIEXPRESS` with the chain and its fare, as the reference's `0x4dbad0` test
-/// decides; the `Current` node sends nothing. `CloseTaxiMap()` clears locally, with no packet.
+/// decides; the `Current` node sends nothing. `CloseTaxiMap()` runs the core, with no packet.
 fn drain_taxi(
     script: Option<NonSendMut<UiScript>>,
-    mut state: ResMut<TaxiState>,
+    state: Res<TaxiState>,
     cache: Res<TaxiRouteCache>,
     catalogs: Option<Res<TaxiCatalogs>>,
     commands: Res<NetCommands>,
+    mut world_commands: Commands,
 ) {
     let Some(mut script) = script else {
         return;
@@ -279,7 +323,7 @@ fn drain_taxi(
     }
     if script.take_taxi_close() {
         debug!("ui_taxi: client-side close (no packet)");
-        state.clear();
+        crate::ui_session::queue(&mut world_commands, close_core);
     }
 }
 
@@ -292,12 +336,13 @@ impl Plugin for UiTaxiPlugin {
         net::register(app);
         app.init_resource::<TaxiState>()
             .init_resource::<TaxiRouteCache>()
+            .add_latched_window::<TaxiState>()
+            // `0x490ad0` → `0x4db700` → `0x4dc0f0`, the core.
+            .add_sweep_leg(SweepLeg::Taxi, close_core)
             .add_systems(
                 Update,
                 (
                     load_taxi_catalogs,
-                    // Range-close first so the clear fires `TAXIMAP_CLOSED` the same frame.
-                    close_npc_session_out_of_range::<TaxiState>.before(feed_taxi),
                     feed_taxi.in_set(UiFeed),
                     feed_on_taxi.in_set(UiFeed),
                     drain_taxi.after(UiInput),
@@ -460,20 +505,67 @@ mod tests {
         assert_eq!(node(&mut app, "Sentinel Hill, Westfall").1, 0);
     }
 
+    /// The open fires `TAXIMAP_OPENED`, whose handler titles the map with `UnitName("npc")`, which
+    /// looks the name up with a callback (`0x5171b8`); the frames between read. A refused name is
+    /// asked by no frame, and again by the next open.
+    #[test]
+    fn a_refused_flight_master_name_is_asked_at_the_next_open_never_by_a_frame() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let catalogs = TaxiCatalogs::load(&mut chain).expect("taxi DBCs");
+        // Not streamed, so its name is the creature cache's by the guid's entry bits.
+        const MASTER: u64 = 0xF130_0000_4500_0001;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<TaxiState>()
+            .init_resource::<TaxiRouteCache>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<NameCache>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .insert_resource(NetCommands(tx))
+            .insert_resource(catalogs)
+            .insert_non_send_resource(UiScript::new().unwrap())
+            .add_systems(Update, feed_taxi);
+        let open = |app: &mut App| {
+            app.world_mut().resource_mut::<TaxiState>().open(
+                MASTER,
+                2,
+                TaxiMask([0b1010_1010, 0, 0, 0, 0, 0, 0, 0]),
+            );
+        };
+        open(&mut app);
+        app.update();
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_creature(0x45, None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(crate::query_cache::queries(&rx).is_empty());
+        app.world_mut().resource_mut::<TaxiState>().clear();
+        app.update();
+        open(&mut app);
+        app.update();
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+    }
+
     #[test]
     fn open_close_and_session_clear() {
         let mut state = TaxiState::default();
-        assert_eq!(state.npc(), None);
+        assert_eq!(state.cell(), None);
 
         state.open(0x42, 2, TaxiMask([0xA, 0, 0, 0, 0, 0, 0, 0]));
-        assert_eq!(state.npc(), Some(0x42));
+        assert_eq!(state.cell(), Some(0x42));
         assert_eq!(state.open.as_ref().unwrap().nearest_node, 2);
 
         // A client-side close drops the map, nothing else.
         state.reply = Some(3);
         state.discovered = true;
-        NpcSession::close(&mut state);
-        assert_eq!(state.npc(), None);
+        state.clear();
+        assert_eq!(state.cell(), None);
         assert_eq!(
             state.reply,
             Some(3),
@@ -483,7 +575,7 @@ mod tests {
         // Disconnect drops everything.
         state.open(0x42, 2, TaxiMask::default());
         state.clear_session();
-        assert_eq!(state.npc(), None);
+        assert_eq!(state.cell(), None);
         assert_eq!(state.reply, None);
         assert!(!state.discovered);
     }

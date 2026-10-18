@@ -1,9 +1,9 @@
-//! ScrollFrame: the scroll-child layout override, the live scroll ranges, the clip on `extract`
+//! ScrollFrame: the scroll-child layout override, the stored scroll ranges, the clip on `extract`
 //! and the clip-gated `hit_test`.
 
 use super::common::script;
 use crate::layout::Rect;
-use crate::script::QuadContent;
+use crate::script::{QuadContent, UiScript};
 
 /// The rect of the first Texture quad whose path is `marker`.
 fn marker_rect(quads: &[crate::script::ExtractedQuad], marker: &str) -> Option<Rect> {
@@ -140,15 +140,64 @@ fn scroll_child_top_tracks_vertical_scroll_unclamped_then_restores_on_clear() {
         "a negative offset lowers the child: frame top 500 - 30"
     );
 
-    // Clearing the child stops the override, and its own untouched anchor applies again.
+    // Clearing the child leaves its one point alone and invalidates nothing (`0x786ce6`): it
+    // stays at the scroll frame's corner, and follows the frame when the frame moves.
     s.run("SF:SetScrollChild(nil)").unwrap();
     s.resolve();
     let quads = s.extract();
     assert_eq!(
         marker_rect(&quads, "marker:child").map(|r| r.top),
-        Some(580.0),
-        "authored anchor survives: screen top 600 - 20"
+        Some(470.0),
+        "the re-anchor's point stands: frame top 500 - 30"
     );
+    s.run(r#"SF:SetPoint("TOPLEFT", 0, -150)"#).unwrap();
+    s.resolve();
+    assert_eq!(
+        marker_rect(&s.extract(), "marker:child").map(|r| r.top),
+        Some(420.0),
+        "still on the frame's corner: frame top 450 - 30"
+    );
+}
+
+/// The re-anchor (`0x787100`) is a real write on the child: its points are cleared (`0x787110`)
+/// and one TOPLEFT on the scroll frame's TOPLEFT is set at the offsets (`0x787136`), at
+/// `SetScrollChild` and at each offset change; the authored points are gone.
+#[test]
+fn the_scroll_child_holds_one_topleft_on_the_scroll_frame() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        sf = CreateFrame("ScrollFrame", "SF")
+        sf:SetPoint("TOPLEFT", 0, -100); sf:SetWidth(300); sf:SetHeight(200)
+        c = CreateFrame("Frame", "Child")
+        c:SetPoint("CENTER", UIParent); c:SetPoint("BOTTOM", 0, 10)
+        c:SetWidth(100); c:SetHeight(400)
+        sf:SetScrollChild(c)
+    "#,
+    )
+    .unwrap();
+    let point = |s: &mut UiScript| {
+        s.eval::<(i64, String, bool, String, f64, f64)>(
+            "local p, r, rp, x, y = c:GetPoint(1); return c:GetNumPoints(), p, r == sf, rp, x, y",
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        point(&mut s),
+        (1, "TOPLEFT".into(), true, "TOPLEFT".into(), 0.0, 0.0)
+    );
+    s.run("sf:SetVerticalScroll(30); sf:SetHorizontalScroll(-12)")
+        .unwrap();
+    assert_eq!(
+        point(&mut s),
+        (1, "TOPLEFT".into(), true, "TOPLEFT".into(), -12.0, 30.0),
+        "scrolling moves the one point"
+    );
+    s.resolve();
+    assert_eq!(s.eval::<f64>("return c:GetTop()").unwrap(), 530.0);
+    assert_eq!(s.eval::<f64>("return c:GetLeft()").unwrap(), -12.0);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
 /// `0x786db0` acts only when the offset differs from the stored one; a value past the range is
@@ -183,8 +232,10 @@ fn set_vertical_scroll_fires_on_vertical_scroll_only_on_a_change() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The recompute measures `max(0, child − frame)`, and leaves the stored range alone when the
+/// frame has no rect (`0x787186`) or no scroll child (`0x786e42`).
 #[test]
-fn vertical_scroll_range_is_live_and_zero_when_unresolved_or_childless_or_shorter() {
+fn the_recompute_measures_the_overhang_and_skips_an_unresolved_or_childless_frame() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -198,33 +249,27 @@ fn vertical_scroll_range_is_live_and_zero_when_unresolved_or_childless_or_shorte
     "#,
     )
     .unwrap();
-    assert_eq!(
-        s.eval::<f32>("return SF:GetVerticalScrollRange()").unwrap(),
-        0.0,
-        "unresolved -> 0"
-    );
+    let range =
+        |s: &crate::script::UiScript| s.eval::<f32>("return SF:GetVerticalScrollRange()").unwrap();
+    assert_eq!(range(&s), 0.0, "the ctor's zero");
 
     s.resolve();
-    assert_eq!(
-        s.eval::<f32>("return SF:GetVerticalScrollRange()").unwrap(),
-        400.0,
-        "600 - 200"
-    );
+    s.tick(0.016);
+    assert_eq!(range(&s), 400.0, "600 - 200");
 
-    s.run("Child:SetWidth(300); Child:SetHeight(150)").unwrap();
-    s.resolve();
-    assert_eq!(
-        s.eval::<f32>("return SF:GetVerticalScrollRange()").unwrap(),
-        0.0,
-        "child shorter than frame -> 0, not negative"
-    );
+    s.run("Child:SetHeight(150) SF:UpdateScrollChildRect()")
+        .unwrap();
+    s.tick(0.016);
+    assert_eq!(range(&s), 0.0, "a shorter child: 0, not negative");
 
+    s.run("Child:SetHeight(600) SF:UpdateScrollChildRect()")
+        .unwrap();
+    s.tick(0.016);
+    assert_eq!(range(&s), 400.0);
     s.run("SF:SetScrollChild(nil)").unwrap();
-    assert_eq!(
-        s.eval::<f32>("return SF:GetVerticalScrollRange()").unwrap(),
-        0.0,
-        "no child -> 0"
-    );
+    s.tick(0.016);
+    assert_eq!(range(&s), 400.0, "no child: the stored range stands");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
 /// The range is `child:GetHeight() - self:GetHeight()` in local units, like the offset, which
@@ -246,6 +291,7 @@ fn vertical_scroll_range_is_local_units_on_a_scaled_frame() {
     )
     .unwrap();
     s.resolve();
+    s.tick(0.016);
     assert_eq!(
         s.eval::<f32>("return SF:GetVerticalScrollRange()").unwrap(),
         400.0,
@@ -275,7 +321,7 @@ fn vertical_scroll_range_is_local_units_on_a_scaled_frame() {
 /// `0x786db0` fires `OnVerticalScroll` with the unclamped stored value `[+0x328]`, under the
 /// handler conventions of `0x704f10`.
 #[test]
-fn vertical_scroll_fires_as_given_and_update_rect_fires_range_changed() {
+fn vertical_scroll_fires_as_given_and_the_marked_range_fires_range_changed() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -309,15 +355,16 @@ fn vertical_scroll_fires_as_given_and_update_rect_fires_range_changed() {
     );
 
     s.run("SF:UpdateScrollChildRect()").unwrap();
+    s.tick(0.016);
     let (lo, hi): (f32, f32) = s.eval("return seen_lo, seen_hi").unwrap();
     assert_eq!((lo, hi), (0.0, 400.0));
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
-/// `UpdateScrollChildRect` resolves for itself, so a resize earlier in the same tick counts; the
-/// app resolves only once per frame.
+/// The pump drains the layout before its walk (`0x7656ba`), so a resize made since the last tick
+/// counts in this tick's recompute, with no resolve of the host's in between.
 #[test]
-fn update_scroll_child_rect_sees_a_same_tick_resize_with_no_intervening_resolve() {
+fn the_recompute_sees_a_same_tick_resize_with_no_intervening_resolve() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -331,7 +378,8 @@ fn update_scroll_child_rect_sees_a_same_tick_resize_with_no_intervening_resolve(
     "#,
     )
     .unwrap();
-    s.resolve(); // the "last frame" resolve, before this tick's resize
+    s.resolve();
+    s.tick(0.016); // the first recompute: 0 stays 0, nothing fires
 
     s.run(
         r#"
@@ -342,12 +390,13 @@ fn update_scroll_child_rect_sees_a_same_tick_resize_with_no_intervening_resolve(
     "#,
     )
     .unwrap();
+    s.tick(0.016);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
     assert_eq!(
         s.eval::<f32>("return seen_hi").unwrap(),
         400.0,
-        "UpdateScrollChildRect must resolve the JUST-set height itself, not report the stale \
-         (pre-resize) range from the last full UiScript::resolve"
+        "the drain before the walk resolves the JUST-set height, so the recompute does not \
+         report the stale (pre-resize) range from the last full UiScript::resolve"
     );
     assert_eq!(
         s.eval::<f32>("return SF:GetVerticalScrollRange()").unwrap(),
@@ -483,7 +532,8 @@ fn hit_test_denies_a_button_clipped_out_and_admits_it_once_scrolled_into_view() 
         frame:SetWidth(300); frame:SetHeight(200)  -- bottom 300
         frame:EnableMouse(false)            -- isolate the button's own clip-gated hit
 
-        local child = CreateFrame("Frame", "Child")
+        -- Under its ScrollFrame, as a `<ScrollChild>` is: its rect is the hit clip.
+        local child = CreateFrame("Frame", "Child", frame)
         child:SetWidth(300); child:SetHeight(600)
         frame:SetScrollChild(child)
 
@@ -511,9 +561,218 @@ fn hit_test_denies_a_button_clipped_out_and_admits_it_once_scrolled_into_view() 
     );
 }
 
-/// The reference measures text synchronously, as stock `QuestLog_UpdateQuestDetails` relies on.
+/// The probe `0x76b020` climbs a scroll subtree's parent chain to the first frame without the
+/// scroll flag and clips to its rect; when the chain runs out first (`0x76b063`), as it does for a
+/// scroll child with no parent, nothing in the subtree is hit, though it draws.
 #[test]
-fn update_scroll_child_rect_measures_the_childs_text_before_it_reads_the_range() {
+fn a_parentless_scroll_childs_subtree_takes_no_hit() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local frame = CreateFrame("ScrollFrame", "SF")
+        frame:SetPoint("TOPLEFT", 0, -100)
+        frame:SetWidth(300); frame:SetHeight(200)
+        local child = CreateFrame("Frame", "Child")
+        child:SetWidth(300); child:SetHeight(600)
+        frame:SetScrollChild(child)
+        local btn = CreateFrame("Button", "Btn", child)
+        btn:SetPoint("TOPLEFT", "Child", "TOPLEFT", 0, -10)
+        btn:SetWidth(50); btn:SetHeight(20)
+        local t = btn:CreateTexture(nil, "ARTWORK"); t:SetTexture("marker:btn"); t:SetAllPoints()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(
+        marker_clip(&s.extract(), "marker:btn"),
+        Some(Some(Rect::new(300.0, 0.0, 500.0, 300.0))),
+        "it draws, clipped to the ScrollFrame"
+    );
+    assert_eq!(s.hit_test(25.0, 480.0), None);
+    // Parented under the ScrollFrame, the same button hits.
+    s.run("Child:SetParent(SF) SF:SetScrollChild(Child)")
+        .unwrap();
+    s.resolve();
+    assert_eq!(s.hit_test_name(25.0, 480.0).as_deref(), Some("Btn"));
+}
+
+/// The hit clip is one rect, the first unflagged ancestor's (`0x76b069`): inside a nested
+/// ScrollFrame, that is the outer ScrollFrame, so a button past the inner one's edge but inside
+/// the outer one's is hit where it is not drawn. The draw clip intersects both (`0x787220`).
+#[test]
+fn a_nested_scroll_childs_hit_clips_to_the_outer_scroll_frame_alone() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local outer = CreateFrame("ScrollFrame", "Outer")
+        outer:SetPoint("TOPLEFT", 0, 0)
+        outer:SetWidth(400); outer:SetHeight(400)   -- top 600, bottom 200
+        outer:EnableMouse(false)
+        local c1 = CreateFrame("Frame", "C1", outer)
+        c1:SetWidth(400); c1:SetHeight(400)
+        outer:SetScrollChild(c1)
+        local inner = CreateFrame("ScrollFrame", "Inner", c1)
+        inner:SetPoint("TOPLEFT", "C1", "TOPLEFT", 0, 0)
+        inner:SetWidth(100); inner:SetHeight(100)   -- x 0..100, y 500..600
+        local c2 = CreateFrame("Frame", "C2", inner)
+        c2:SetWidth(300); c2:SetHeight(300)
+        inner:SetScrollChild(c2)
+        local btn = CreateFrame("Button", "Btn", c2)
+        btn:SetPoint("TOPLEFT", "C2", "TOPLEFT", 150, -10)  -- x 150..200, y 570..590
+        btn:SetWidth(50); btn:SetHeight(20)
+        local t = btn:CreateTexture(nil, "ARTWORK"); t:SetTexture("marker:btn"); t:SetAllPoints()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(
+        marker_clip(&s.extract(), "marker:btn"),
+        Some(Some(Rect::new(500.0, 0.0, 600.0, 100.0))),
+        "drawn inside the inner ScrollFrame only"
+    );
+    assert_eq!(s.hit_test_name(175.0, 580.0).as_deref(), Some("Btn"));
+    assert_eq!(
+        s.hit_test(175.0, 100.0),
+        None,
+        "outside the outer ScrollFrame"
+    );
+}
+
+/// The callback clips to the ScrollFrame's `[+0xd8]` (`0x76b220`), its mouse rect, which its
+/// hit-rect insets shrink (`0x76b580`).
+#[test]
+fn the_draw_clip_is_the_scroll_frames_mouse_rect() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local frame = CreateFrame("ScrollFrame", "SF")
+        frame:SetPoint("TOPLEFT", 0, -100)
+        frame:SetWidth(300); frame:SetHeight(200)
+        frame:SetHitRectInsets(10, 20, 30, 40)
+        local child = CreateFrame("Frame", "Child", frame)
+        child:SetWidth(300); child:SetHeight(600)
+        frame:SetScrollChild(child)
+        local t = child:CreateTexture(nil, "ARTWORK")
+        t:SetTexture("marker:child"); t:SetAllPoints()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(
+        marker_clip(&s.extract(), "marker:child"),
+        Some(Some(Rect::new(340.0, 10.0, 470.0, 280.0)))
+    );
+}
+
+/// A nested ScrollFrame wholly outside its outer one leaves a clip with no positive span, and the
+/// callback then draws nothing (`0x78750e`–`0x787526`), not the strip between the two rects.
+#[test]
+fn a_nested_scroll_frame_outside_its_outer_one_draws_no_child() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local outer = CreateFrame("ScrollFrame", "Outer")
+        outer:SetPoint("TOPLEFT", 0, 0)
+        outer:SetWidth(200); outer:SetHeight(200)   -- x 0..200, y 400..600
+        local c1 = CreateFrame("Frame", "C1", outer)
+        c1:SetWidth(600); c1:SetHeight(600)
+        outer:SetScrollChild(c1)
+        local inner = CreateFrame("ScrollFrame", "Inner", c1)
+        inner:SetPoint("TOPLEFT", "C1", "TOPLEFT", 300, 0)  -- x 300..400: right of Outer
+        inner:SetWidth(100); inner:SetHeight(100)
+        local im = inner:CreateTexture(nil, "ARTWORK"); im:SetTexture("marker:inner")
+        im:SetAllPoints()
+        local c2 = CreateFrame("Frame", "C2", inner)
+        c2:SetWidth(100); c2:SetHeight(100)
+        inner:SetScrollChild(c2)
+        local leaf = c2:CreateTexture(nil, "ARTWORK"); leaf:SetTexture("marker:leaf")
+        leaf:SetAllPoints()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let quads = s.extract();
+    assert_eq!(
+        marker_clip(&quads, "marker:inner"),
+        Some(Some(Rect::new(400.0, 0.0, 600.0, 200.0))),
+        "the inner ScrollFrame itself is Outer's content, clipped away by Outer's rect"
+    );
+    assert_eq!(
+        marker_clip(&quads, "marker:leaf"),
+        None,
+        "its child is not drawn"
+    );
+}
+
+/// The probe reads the unflagged ancestor's `[+0xd8]` without its valid bit (`0x76b069`): under
+/// an ancestor that never resolved, that is the ctor's zero rect, which only the origin is in.
+#[test]
+fn a_hit_under_an_unplaced_ancestor_clips_to_the_zero_rect() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local holder = CreateFrame("Frame", "Holder")   -- no points: never resolves
+        local frame = CreateFrame("ScrollFrame", "SF")
+        frame:SetPoint("BOTTOMLEFT", 0, 0)
+        frame:SetWidth(100); frame:SetHeight(100)
+        local child = CreateFrame("Frame", "Child", holder)
+        child:SetWidth(100); child:SetHeight(100)
+        frame:SetScrollChild(child)
+        local btn = CreateFrame("Button", "Btn", child)
+        btn:SetPoint("BOTTOMLEFT", "SF", "BOTTOMLEFT", 0, 0)
+        btn:SetWidth(50); btn:SetHeight(50)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(
+        s.eval::<bool>("return Holder:GetLeft() == nil").unwrap(),
+        "the holder has no rect"
+    );
+    assert_eq!(s.hit_test_name(0.0, 0.0).as_deref(), Some("Btn"));
+    assert_eq!(s.hit_test(10.0, 10.0), None);
+}
+
+/// A ScrollFrame whose rect does not resolve draws no scroll child (`0x76b220` fails at
+/// `0x787253`), though the child itself resolves.
+#[test]
+fn a_scroll_frame_with_no_rect_draws_no_scroll_child() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local base = CreateFrame("Frame", "Base")
+        base:SetPoint("TOPLEFT", 0, 0); base:SetWidth(10); base:SetHeight(10)
+        local frame = CreateFrame("ScrollFrame", "SF")
+        frame:SetWidth(300); frame:SetHeight(200)
+        local child = CreateFrame("Frame", "Child", frame)
+        child:SetWidth(300); child:SetHeight(600)
+        local t = child:CreateTexture(nil, "ARTWORK")
+        t:SetTexture("marker:child"); t:SetAllPoints()
+        frame:SetScrollChild(child)
+        -- The re-anchor's TOPLEFT on the unplaced ScrollFrame, replaced by a placed one.
+        child:ClearAllPoints(); child:SetPoint("TOPLEFT", "Base", "TOPLEFT")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(
+        s.eval::<bool>("return SF:GetLeft() == nil and Child:GetLeft() ~= nil")
+            .unwrap(),
+        "the ScrollFrame has no rect and its child has one"
+    );
+    assert_eq!(marker_clip(&s.extract(), "marker:child"), None);
+}
+
+/// The reference measures text synchronously and drains the layout before the walk (`0x7656ba`),
+/// as stock `QuestLog_UpdateQuestDetails` relies on: the text set before the tick is in the range.
+#[test]
+fn the_recompute_measures_the_childs_text_before_it_reads_the_range() {
     struct Rows;
     impl crate::script::TextMeasure for Rows {
         fn measure(&mut self, req: &crate::script::MeasureRequest) -> (f32, f32, f32) {
@@ -533,7 +792,7 @@ fn update_scroll_child_rect_measures_the_childs_text_before_it_reads_the_range()
         sf:SetPoint("TOPLEFT", 0, 0); sf:SetWidth(100); sf:SetHeight(50)
         local child = CreateFrame("Frame", "SFChild", sf)
         child:SetWidth(100); child:SetHeight(50); sf:SetScrollChild(child)
-        local fs = child:CreateFontString("SFText", "ARTWORK")
+        local fs = child:CreateFontString("SFText", "ARTWORK"); fs:SetFont("Fonts\\FRIZQT__.TTF", 12)
         fs:SetPoint("TOPLEFT", 0, 0); fs:SetWidth(70)
         sf:SetScript("OnScrollRangeChanged", function() RANGE = arg2 end)
         fs:SetText(string.rep("x", 40))   -- 280px of ink over a 70px column: four 14px rows
@@ -541,11 +800,12 @@ fn update_scroll_child_rect_measures_the_childs_text_before_it_reads_the_range()
         "#,
     )
     .unwrap();
+    s.tick(0.016);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
         s.eval::<f64>("return RANGE").unwrap(),
         6.0,
-        "56px of measured text under a 50px frame: the range is known at the call, not a frame later"
+        "56px of measured text under a 50px frame: the recompute measures it, not a frame later"
     );
 }
 
@@ -577,6 +837,7 @@ fn scroll_child_left_tracks_horizontal_scroll_unclamped_and_fires_on_change() {
     )
     .unwrap();
     s.resolve();
+    s.tick(0.016);
 
     assert_eq!(
         s.eval::<f32>("return HSF:GetHorizontalScroll()").unwrap(),
@@ -661,7 +922,7 @@ fn scroll_child_left_tracks_horizontal_scroll_unclamped_and_fires_on_change() {
 /// The vertical range leaves `0x786e30` on top of the x87 stack and is `fstp`'d first, so it is
 /// pushed deepest and lands as `arg2`.
 #[test]
-fn update_scroll_child_rect_reports_both_ranges_horizontal_first() {
+fn the_range_notify_reports_both_ranges_horizontal_first() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -679,7 +940,7 @@ fn update_scroll_child_rect_reports_both_ranges_horizontal_first() {
     )
     .unwrap();
     s.resolve();
-    s.run("BSF:UpdateScrollChildRect()").unwrap();
+    s.tick(0.016);
     assert_eq!(
         s.eval::<f32>("return seen[1]").unwrap(),
         200.0,
@@ -691,4 +952,167 @@ fn update_scroll_child_rect_reports_both_ranges_horizontal_first() {
         "arg2 is the VERTICAL range (600 - 200)"
     );
     assert!(s.take_errors().is_empty());
+}
+
+// ── The stored ranges (`[+0x31c]`, `[+0x320]`), recomputed in the frame's walk slot ──────────
+
+/// A shown 300×200 scroll frame `SF` and a 600-tall `Child`, not yet set; `FIRES` counts
+/// `OnScrollRangeChanged` and `RANGE` keeps its last `(xRange, yRange)`.
+const RANGED: &str = r#"
+    FIRES, RANGE = 0, { -1, -1 }
+    local frame = CreateFrame("ScrollFrame", "SF")
+    frame:SetPoint("TOPLEFT", 0, -100)
+    frame:SetWidth(300); frame:SetHeight(200)
+    frame:SetScript("OnScrollRangeChanged", function()
+        FIRES = FIRES + 1
+        RANGE = { arg1, arg2 }
+    end)
+    local child = CreateFrame("Frame", "Child", frame)
+    child:SetWidth(300); child:SetHeight(600)
+"#;
+
+/// `(FIRES, yRange as fired, GetVerticalScrollRange())`.
+fn ranged(s: &crate::script::UiScript) -> (u32, f32, f32) {
+    s.eval("return FIRES, RANGE[2], SF:GetVerticalScrollRange()")
+        .unwrap()
+}
+
+/// `UpdateScrollChildRect` only marks the range (`0x791943`); the frame's update (`0x787140`)
+/// recomputes a marked range after its `OnUpdate` (`0x787152`–`0x7871a0`) and fires
+/// `OnScrollRangeChanged` only when a range moved by 2⁻²² or more (`0x786ed7`–`0x786efd`).
+#[test]
+fn the_range_is_recomputed_in_the_walk_and_fires_once_per_change() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(RANGED).unwrap();
+    s.run("SF:SetScrollChild(Child)").unwrap();
+    s.resolve();
+    assert_eq!(ranged(&s), (0, -1.0, 0.0), "nothing until the walk");
+    s.tick(0.016);
+    assert_eq!(ranged(&s), (1, 400.0, 400.0), "SetScrollChild marked it");
+
+    s.run("SF:UpdateScrollChildRect()").unwrap();
+    assert_eq!(ranged(&s).0, 1, "the call fires nothing");
+    s.tick(0.016);
+    assert_eq!(
+        ranged(&s),
+        (1, 400.0, 400.0),
+        "an unchanged range fires nothing"
+    );
+
+    s.run("Child:SetHeight(700) SF:UpdateScrollChildRect()")
+        .unwrap();
+    assert_eq!(ranged(&s), (1, 400.0, 400.0), "stored until the walk");
+    s.tick(0.016);
+    assert_eq!(ranged(&s), (2, 500.0, 500.0));
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The getters answer the stored value (`0x7917d0`, `[+0x320]` at `0x791873`), which the ctor
+/// zeroes (`0x786a63`) and only a marked recompute moves: a child resized with no mark leaves it.
+#[test]
+fn the_getters_answer_the_stored_range() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(RANGED).unwrap();
+    s.run("SF:SetScrollChild(Child)").unwrap();
+    s.resolve();
+    assert_eq!(
+        ranged(&s).2,
+        0.0,
+        "the ctor's zero before the first recompute"
+    );
+    s.tick(0.016);
+    assert_eq!(ranged(&s).2, 400.0);
+    s.run("Child:SetHeight(900)").unwrap();
+    s.resolve();
+    s.tick(0.016);
+    assert_eq!(
+        ranged(&s),
+        (1, 400.0, 400.0),
+        "a child's resize marks nothing"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The update runs only for a shown frame, so a hidden one keeps its range and fires nothing, and
+/// the mark waits for the show; a resize while hidden is marked the same way.
+#[test]
+fn a_hidden_scroll_frame_keeps_its_range_until_shown() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(RANGED).unwrap();
+    s.run("SF:SetScrollChild(Child)").unwrap();
+    s.resolve();
+    s.tick(0.016);
+    assert_eq!(ranged(&s), (1, 400.0, 400.0));
+
+    s.run("SF:Hide() Child:SetHeight(700) SF:UpdateScrollChildRect()")
+        .unwrap();
+    s.resolve();
+    s.tick(0.016);
+    s.tick(0.016);
+    assert_eq!(ranged(&s), (1, 400.0, 400.0), "hidden: stale, and silent");
+    s.run("SF:Show()").unwrap();
+    s.tick(0.016);
+    assert_eq!(
+        ranged(&s),
+        (2, 500.0, 500.0),
+        "the mark held until the show"
+    );
+
+    s.run("SF:Hide() SF:SetHeight(300)").unwrap();
+    s.resolve();
+    s.tick(0.016);
+    assert_eq!(ranged(&s).0, 2);
+    s.run("SF:Show()").unwrap();
+    s.tick(0.016);
+    assert_eq!(
+        ranged(&s),
+        (3, 400.0, 400.0),
+        "the resize while hidden marked it"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A change in the frame's own size marks the range (`0x7871f0`, `0x787205`), with no
+/// `UpdateScrollChildRect`: a frame whose code never calls it still gets its range.
+#[test]
+fn a_resize_marks_the_range() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(RANGED).unwrap();
+    s.run("SF:SetScrollChild(Child)").unwrap();
+    s.resolve();
+    s.tick(0.016);
+    assert_eq!(ranged(&s), (1, 400.0, 400.0));
+    s.run("SF:SetHeight(300)").unwrap();
+    s.resolve();
+    s.tick(0.016);
+    assert_eq!(ranged(&s), (2, 300.0, 300.0));
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The mark rides the frame's `OnSizeChanged` override, behind `ApplyRect`'s gate (`0x76b5e7`,
+/// `0x76b602`), which is 2⁻²² in the reference's units, the screen diagonal as 1: a jitter under it
+/// marks nothing, so a child's unmarked resize stays unreported until a real resize.
+#[test]
+fn a_sub_threshold_jitter_does_not_mark_the_range() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(RANGED).unwrap();
+    s.run("SF:SetScrollChild(Child)").unwrap();
+    s.resolve();
+    s.tick(0.016);
+    assert_eq!(ranged(&s), (1, 400.0, 400.0));
+    s.run("Child:SetHeight(700) SF:SetHeight(200.0001)")
+        .unwrap();
+    s.resolve();
+    s.tick(0.016);
+    assert_eq!(ranged(&s), (1, 400.0, 400.0), "a jitter marks nothing");
+    s.run("SF:SetHeight(201)").unwrap();
+    s.resolve();
+    s.tick(0.016);
+    assert_eq!(ranged(&s), (2, 499.0, 499.0));
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

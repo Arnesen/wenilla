@@ -413,17 +413,18 @@ fn paste_strips_newlines_in_a_single_line_box_but_keeps_them_when_multiline() {
     let mut s = script();
     s.run(r#"E = CreateFrame("EditBox", "E"); E:SetFocus()"#)
         .unwrap();
-    // Single-line: newlines/tabs and other control chars are dropped; spaces survive.
-    assert!(s.paste("one\ntwo\tthree\r"));
+    // Single-line: a newline and the other control chars are dropped, a tab types four spaces
+    // (`0x77c228`).
+    assert!(s.paste("one\ntwo\tthree\r\u{7f}"));
     assert_eq!(
         s.eval::<String>("return E:GetText()").unwrap(),
-        "onetwothree"
+        "onetwo    three"
     );
 
     let mut s = script();
     s.run(r#"E = CreateFrame("EditBox", "E"); E:SetMultiLine(true); E:SetFocus()"#)
         .unwrap();
-    assert!(s.paste("one\ntwo"));
+    assert!(s.paste("one\r\ntwo"));
     assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "one\ntwo");
 }
 
@@ -438,31 +439,44 @@ fn paste_honors_max_letters_and_numeric() {
     let mut s = script();
     s.run(r#"E = CreateFrame("EditBox", "E"); E:SetNumeric(true); E:SetFocus()"#)
         .unwrap();
-    assert!(s.paste("12a3"), "consumed even though the insert aborts");
-    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "");
-    assert!(s.paste("456"));
-    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "456");
+    // Each character is its own insert, so only the non-digits are refused.
+    assert!(s.paste("12a3"));
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "123");
 }
 
+/// A paste is typed (`0x77e250` feeds `0x77c200`): each character goes in as its own insert with
+/// `OnChar`, a `|` escaped, and a space or a tab fires `OnSpacePressed` as it lands, so
+/// `ChatEdit_OnSpacePressed` sees `/w ` before the rest arrives.
 #[test]
-fn paste_does_not_fire_onspacepressed() {
+fn a_paste_is_typed_one_character_at_a_time() {
     let mut s = script();
     s.run(
         r#"
-        spaces = 0
+        chars, spaces = {}, {}
         E = CreateFrame("EditBox", "E")
-        E:SetScript("OnSpacePressed", function() spaces = spaces + 1 end)
+        E:SetScript("OnChar", function() table.insert(chars, arg1) end)
+        E:SetScript("OnSpacePressed", function() table.insert(spaces, this:GetText()) end)
         E:SetFocus()
     "#,
     )
     .unwrap();
-    assert!(s.paste("a b c"));
-    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "a b c");
+    assert!(s.paste("/w a|r\tb"));
     assert_eq!(
-        s.eval::<i64>("return spaces").unwrap(),
-        0,
-        "a paste is not a typed space"
+        s.eval::<String>("return E:GetText()").unwrap(),
+        "/w a||r    b",
+        "markup stays literal text"
     );
+    assert_eq!(
+        s.eval::<String>("return table.concat(chars, ',')").unwrap(),
+        "/,w, ,a,||,r,    ,b"
+    );
+    assert_eq!(
+        s.eval::<String>("return table.concat(spaces, ',')")
+            .unwrap(),
+        "/w ,/w a||r    ",
+        "one OnSpacePressed per space, and one for the tab's four"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
 #[test]
@@ -654,6 +668,85 @@ fn get_number_parses_the_text() {
     assert_eq!(s.eval::<f64>("return E:GetNumber()").unwrap(), 12.5);
     s.run(r#"E:SetText("hello")"#).unwrap();
     assert_eq!(s.eval::<f64>("return E:GetNumber()").unwrap(), 0.0);
+}
+
+/// `GetNumber` pushes `SStrToFloat` of the text (`0x798790` → `0x64aaa0`): a prefix parse with no
+/// whitespace skip and no `+`.
+#[test]
+fn get_number_is_the_references_prefix_parse() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E")"#).unwrap();
+    for (text, want) in [
+        ("12abc", 12.0),
+        (" 12", 0.0),
+        ("+12", 0.0),
+        ("inf", 0.0),
+        ("nan", 0.0),
+        ("-12.5x", -12.5),
+        (".5", 0.5),
+        ("5.", 5.0),
+        ("1e3", 1000.0),
+        ("1E+2", 100.0),
+        ("0x10", 0.0),
+        ("", 0.0),
+    ] {
+        s.run(&format!("E:SetText({text:?})")).unwrap();
+        assert_eq!(
+            s.eval::<f64>("return E:GetNumber()").unwrap(),
+            want,
+            "{text:?}"
+        );
+    }
+}
+
+/// The four config flags are `GetBoolOrDefault` reads with default 1 (`0x797d1e`, `0x797e8e`,
+/// `0x797ffe`, `0x79816e`): a bare call enables, nil, `"0"` and `"no"` disable.
+#[test]
+fn editbox_flag_setters_read_get_bool_or_default_with_default_one() {
+    use crate::script::object::frame_handle_of;
+    use crate::widget::EditBoxState;
+    type Pick = fn(&EditBoxState) -> bool;
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E")"#).unwrap();
+    let state = |pick: Pick| {
+        let t: mlua::Table = s.lua().globals().get("E").unwrap();
+        let h = frame_handle_of(s.lua(), &t).unwrap();
+        super::with_eb(s.lua(), h, |eb| pick(eb)).unwrap()
+    };
+    for (set, pick) in [
+        ("SetAutoFocus", (|eb| eb.auto_focus) as Pick),
+        ("SetNumeric", |eb| eb.numeric),
+        ("SetPassword", |eb| eb.password),
+        ("SetMultiLine", |eb| eb.multi_line),
+    ] {
+        let put = |arg: &str| s.run(&format!("E:{set}({arg})")).unwrap();
+        put("true");
+        put("false");
+        put("");
+        assert!(state(pick), "{set}: no argument takes the default 1");
+        for (arg, want) in [
+            ("nil", false),
+            ("true", true),
+            ("false", false),
+            ("0", false),
+            ("0.5", false),
+            ("1", true),
+            ("2^32", false),
+            (r#""0""#, false),
+            (r#""1""#, true),
+            (r#""no""#, false),
+            (r#""yes""#, true),
+            (r#""off""#, false),
+            (r#""on""#, true),
+            (r#""""#, true),
+            ("{}", true),
+        ] {
+            put(if want { "false" } else { "true" });
+            assert_eq!(state(pick), !want, "{set}: setup");
+            put(arg);
+            assert_eq!(state(pick), want, "{set}({arg})");
+        }
+    }
 }
 
 // ── the generic OnChar and OnKeyDown ─────────────────────────────────────────────────────────
@@ -953,7 +1046,6 @@ fn text_ui_reports_caret_geometry_and_focus() {
         .focused_editbox_text_ui()
         .expect("focused box has text-UI");
     assert_eq!(ui.caret_x, 0.0);
-    assert_eq!(ui.display_from, 0);
     assert!(ui.selection.is_empty());
     assert!(
         s.extract().iter().any(|q| matches!(
@@ -1013,7 +1105,8 @@ fn click_places_cursor_and_drag_selects() {
     s.mouse_button(124.9, 60.0, "LeftButton", false);
 }
 
-/// Ctrl+arrows jump word boundaries (alnum runs); Ctrl+Shift extends the selection there.
+/// Ctrl+arrows jump word boundaries (runs of non-spaces; Right ends at the next word's start);
+/// Ctrl+Shift extends the selection there.
 #[test]
 fn ctrl_arrows_jump_words() {
     let mut s = script();
@@ -1030,8 +1123,8 @@ fn ctrl_arrows_jump_words() {
     });
     assert_eq!(
         s.focused_editbox_text_ui().unwrap().caret_x,
-        21.0,
-        "end of 'abc'"
+        28.0,
+        "start of 'def', past the space"
     );
     s.editbox_action(EditAction::Move {
         unit: EditUnit::Word,
@@ -1041,7 +1134,7 @@ fn ctrl_arrows_jump_words() {
     assert_eq!(
         s.focused_editbox_text_ui().unwrap().caret_x,
         49.0,
-        "end of 'def'"
+        "end of the text"
     );
     s.editbox_action(EditAction::Move {
         unit: EditUnit::Word,
@@ -1065,8 +1158,8 @@ fn ctrl_arrows_jump_words() {
     );
 }
 
-/// Copy needs a selection, cut copies then deletes, and a password box copies its mask run, never
-/// the text (the client copies the empty string, `0x882748`).
+/// Copy needs a selection, cut copies then deletes, and a password box copies the empty string,
+/// never the text (`0x77e1f8`, `0x882748`); its cut still deletes (`0x77b399` → `0x77cd70`).
 #[test]
 fn copy_cut_and_the_password_placeholder() {
     let mut s = script();
@@ -1085,14 +1178,16 @@ fn copy_cut_and_the_password_placeholder() {
     s.run("P:HighlightText(0, -1)").unwrap();
     assert_eq!(
         s.editbox_copy().as_deref(),
-        Some("**"),
-        "password copy must never yield the real text"
+        Some(""),
+        "password copy yields the empty string"
     );
+    assert_eq!(s.editbox_cut().as_deref(), Some(""));
+    assert_eq!(s.eval::<String>("return P:GetText()").unwrap(), "");
 }
 
-/// Word and edge deletes, the host's OS-native chords with no 1.12 counterpart: a word delete
-/// takes the adjacent alphanumeric run and the separators toward it, an edge delete clears to the
-/// line's end, and either deletes a live selection instead.
+/// Word deletes (`0x77c3f0`, `0x77c310`) take the spaces next to the caret and the non-space run
+/// beside them; the Mac's edge delete (Cmd+Backspace) clears to the text's edge; either deletes a
+/// live selection instead.
 #[test]
 fn word_and_edge_deletes() {
     let mut s = script();
@@ -1167,28 +1262,27 @@ fn select_all_action() {
     );
 }
 
-/// The scroll window keeps the cursor visible (`0x77da80`) in whole chars: typing past the edge
-/// advances `display_from`, HOME snaps it back.
+/// The focused box's caret geometry counts from the window's start, which the flush moves
+/// (`0x77d4d0`): typing past the edge leaves the caret three quarters in, HOME brings the window
+/// back to 0.
 #[test]
-fn scroll_window_keeps_the_cursor_visible() {
+fn the_text_ui_measures_from_the_window_the_flush_keeps() {
     let mut s = script();
-    // 40 bytes × 7px = 280px in a 200px box (avail 198): the window must slide.
+    // 40 bytes × 7px = 280px in a 200px box: the window must slide.
     seam_rig(&mut s, &"x".repeat(40));
+    s.tick(0.016);
     let ui = s.focused_editbox_text_ui().unwrap();
-    assert!(ui.display_from > 0, "overlong text must scroll: {ui:?}");
-    assert!(ui.caret_x <= 198.0, "caret inside the window: {ui:?}");
     assert_eq!(
-        ui.caret_x,
-        (40 - ui.display_from) as f32 * 7.0,
-        "caret x measures from the window origin"
+        ui.caret_x, 147.0,
+        "21 chars from the window's start: {ui:?}"
     );
     s.editbox_action(EditAction::Move {
         unit: EditUnit::Edge,
         back: true,
         extend: false,
     });
+    s.tick(0.016);
     let ui = s.focused_editbox_text_ui().unwrap();
-    assert_eq!(ui.display_from, 0);
     assert_eq!(ui.caret_x, 0.0);
 }
 
@@ -1526,33 +1620,86 @@ fn set_number_on_a_numeric_box_empties_it_when_the_text_is_not_all_digits() {
     );
 }
 
-/// `SetMaxBytes`: `SetMaxLetters`'s exact count gate and raw coercion, a byte cap, and -1 as the
-/// no-limit sentinel.
+/// `SetMaxBytes(n)` stores n - 1 for a positive n and -1 otherwise (`0x799012`-`0x799022`),
+/// `GetMaxBytes` answers the stored value plus one (`0x7990e9`), and the insert keeps the text at
+/// or under the stored value (`0x77c040`-`0x77c048`).
 #[test]
-fn set_max_bytes_caps_the_buffer_in_bytes_with_minus_one_unlimited() {
+fn set_max_bytes_keeps_n_minus_one_bytes_and_get_answers_zero_when_unlimited() {
     let s = script();
     s.run(r#"E = CreateFrame("EditBox", "E") E:SetFocus()"#)
         .unwrap();
     let max = |s: &UiScript| s.eval::<i64>("return E:GetMaxBytes()").unwrap();
-    assert_eq!(max(&s), -1, "unlimited from the ctor");
+    assert_eq!(max(&s), 0, "unlimited from the ctor");
     s.run("E:SetMaxBytes(4)").unwrap();
     assert_eq!(max(&s), 4);
-    // Four bytes hold two two-byte letters and not a third.
+    // Three bytes hold one two-byte letter and not a second.
     s.run(r#"E:SetText("ééé")"#).unwrap();
-    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "éé");
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "é");
+    s.run(r#"E:SetText("abcdef")"#).unwrap();
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "abc");
+    s.run("E:SetMaxBytes(1)").unwrap();
+    assert_eq!(max(&s), 1);
+    s.run(r#"E:SetText("xyz")"#).unwrap();
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "");
     s.run(r#"E:SetMaxBytes(0) E:SetText("ééé")"#).unwrap();
-    assert_eq!(max(&s), -1, "a non-positive value is unlimited");
+    assert_eq!(max(&s), 0, "a non-positive value is unlimited");
     assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "ééé");
     s.run(r#"E:SetMaxBytes("3") E:SetText("abcd")"#).unwrap();
     assert_eq!(
         s.eval::<String>("return E:GetText()").unwrap(),
-        "abc",
+        "ab",
         "a numeric string coerces"
     );
     s.run("E:SetMaxBytes(nil)").unwrap();
-    assert_eq!(max(&s), -1, "nil coerces to 0, which is unlimited");
+    assert_eq!(max(&s), 0, "nil coerces to 0, which is unlimited");
     assert!(s.run("E:SetMaxBytes()").is_err(), "too few raises");
     assert!(s.run("E:SetMaxBytes(1, 2)").is_err(), "too many raises");
+}
+
+/// Over the byte cap the box deletes back one character or one whole link (`0x77c066` calling
+/// `0x77c280(-1)`), so a link that does not fit leaves entirely, and the cap counts its escape
+/// bytes where the letter cap does not.
+#[test]
+fn the_byte_cap_sheds_a_whole_link_and_counts_its_escapes() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E") E:SetFocus()"#)
+        .unwrap();
+    let cap = LINK.len() + 2;
+    s.run(&format!("E:SetMaxBytes({cap})")).unwrap();
+    s.run(&format!("E:Insert(\"ab\") E:Insert(\"{LINK}\")"))
+        .unwrap();
+    assert_eq!(
+        text_of(&s),
+        "ab",
+        "ab + the link is {} bytes, over the cap of {}; the link goes whole",
+        LINK.len() + 2,
+        cap - 1
+    );
+    s.run(&format!("E:SetMaxBytes({})", LINK.len() + 1))
+        .unwrap();
+    s.run(&format!("E:SetText(\"{LINK}\")")).unwrap();
+    assert_eq!(text_of(&s), LINK, "the link alone fits exactly");
+    s.run("E:SetMaxLetters(20) E:SetText(\"\")").unwrap();
+    s.run(&format!("E:Insert(\"{LINK}\")")).unwrap();
+    assert_eq!(s.eval::<i64>("return E:GetNumLetters()").unwrap(), 9);
+}
+
+/// A font engine whose lines are 12 tall and which leaves every advance table to the host's round
+/// trip.
+struct TwelveTall;
+
+impl crate::script::TextMeasure for TwelveTall {
+    fn measure(&mut self, req: &crate::script::MeasureRequest) -> (f32, f32, f32) {
+        let w = req.text.len() as f32 * 7.0;
+        (w, 12.0, w)
+    }
+
+    fn editbox_advances(
+        &mut self,
+        _: &crate::script::EditBoxAdvanceRequest,
+    ) -> Option<(Vec<f32>, Vec<usize>, f32)> {
+        None
+    }
 }
 
 /// `OnCursorChanged(x, y, w, h)` fires when the caret moves, with the reference's args
@@ -1563,6 +1710,7 @@ fn set_max_bytes_caps_the_buffer_in_bytes_with_minus_one_unlimited() {
 fn the_caret_flush_fires_on_cursor_changed_with_the_references_four_args() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
+    s.set_text_measurer(Box::new(TwelveTall));
     s.run(
         r#"
         fires = {}

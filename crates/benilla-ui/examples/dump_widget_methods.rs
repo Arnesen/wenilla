@@ -7,7 +7,7 @@
 //! The census is `widget_method_census`, the same function the widget-surface gate reads.
 use benilla_ui::script::{widget_method_census, UiScript};
 
-fn main() -> mlua::Result<()> {
+fn main() -> benilla_ui::mlua::Result<()> {
     for (class, method) in widget_method_census(&UiScript::new()?)? {
         println!("{class}\t{method}");
     }

@@ -53,6 +53,7 @@ mod taxi;
 mod trade;
 mod trainer;
 mod tutorial;
+mod unserved;
 mod update_object;
 mod vendor;
 mod world_state;
@@ -60,7 +61,9 @@ pub use action_bar::{
     set_action_button, set_actionbar_toggles, ActionButton, ACTION_KIND_ITEM, ACTION_KIND_MACRO,
     ACTION_KIND_SPELL,
 };
-pub use addons::{hidden_from_reply, SecureAddon, STANDARD_MODULUS_CRC, STOCK_SECURE_ADDONS};
+pub use addons::{
+    pair_with_sent, AddonRecord, SecureAddon, STANDARD_MODULUS_CRC, STOCK_SECURE_ADDONS,
+};
 pub use area_trigger::area_trigger;
 pub use attack::{attack_swing, AttackSwingError, AttackerState};
 pub use auction::{
@@ -93,10 +96,10 @@ pub use client::{
     auth_session, channel_announcements, channel_ban, channel_invite, channel_kick, channel_list,
     channel_moderate, channel_moderator, channel_mute, channel_owner, channel_password,
     channel_set_owner, channel_unban, channel_unmoderator, channel_unmute, char_create,
-    creature_query, force_speed_ack, full_guid, join_channel, knock_back_ack, leave_channel,
-    messagechat, messagechat_channel, messagechat_kind, messagechat_whisper, move_flag_ack,
-    move_spline_done, move_time_skipped, movement, pet_name_query, ping, played_time, query_time,
-    random_roll, teleport_ack, text_emote,
+    char_rename, creature_query, force_speed_ack, full_guid, join_channel, knock_back_ack,
+    leave_channel, messagechat, messagechat_channel, messagechat_kind, messagechat_whisper,
+    move_flag_ack, move_spline_done, move_time_skipped, movement, pet_name_query, ping,
+    played_time, query_time, random_roll, teleport_ack, text_emote,
 };
 pub use combat_log::{
     DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExecuteLog, PartyKillLog,
@@ -147,7 +150,8 @@ pub use items::{
     auto_equip_item, auto_store_bag_item, destroy_item, item_query, open_item, set_ammo,
     split_item, swap_inv_item, swap_item, use_item, wrap_item, ItemDamage, ItemInfo,
     ItemSpellEntry, ItemUseSpell, UseItemTarget, BAG_PLAYER_INVENTORY, ITEM_DYNFLAG_UNLOCKED,
-    ITEM_DYNFLAG_WRAPPED, ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
+    ITEM_DYNFLAG_WRAPPED, ITEM_FLAG_LOOTABLE, ITEM_FLAG_PLAYERCAST, ITEM_FLAG_WRAPPER,
+    SLOT_BAG_FIRST, SLOT_PACK_FIRST,
 };
 pub use loot::{
     autostore_loot_item, loot, loot_error, loot_master_give, loot_money, loot_release, loot_roll,
@@ -214,12 +218,12 @@ pub use roster::{
     CHAR_CREATE_SERVER_LIMIT, CHAR_CREATE_SUCCESS, CHAR_DELETE_SUCCESS, CLASS_WARRIOR, GENDER_MALE,
     RACE_HUMAN,
 };
-pub use skills::unlearn_skill;
+pub use skills::{skill_buy_step, unlearn_skill};
 pub use social::{
     add_friend, add_ignore, del_friend, del_ignore, friend_list, friend_result, friend_status,
-    read_friend_list, read_friend_status, read_ignore_list, read_who, set_looking_for_group, who,
-    FriendEntry, FriendOnline, FriendStatusUpdate, WhoEntry, WhoRequest, WhoResults,
-    WHO_MAX_SEARCH_TERMS, WHO_MAX_ZONES,
+    looking_for_group_query, read_friend_list, read_friend_status, read_ignore_list, read_who,
+    set_looking_for_group, who, FriendEntry, FriendOnline, FriendStatusUpdate, WhoEntry,
+    WhoRequest, WhoResults, WHO_MAX_SEARCH_TERMS, WHO_MAX_ZONES,
 };
 pub use spellbook::SpellCooldown;
 pub use spells::{
@@ -246,6 +250,7 @@ pub use trade::{
 };
 pub use trainer::{train_fail, trainer_buy_spell, trainer_list, trainer_spell_state, TrainerSpell};
 pub use tutorial::{tutorial_flag, TutorialFlags};
+pub use unserved::{buy_lottery_ticket, gm_survey_submit, lottery_query, SurveyAnswer};
 pub use update_object::field;
 pub use update_object::{
     power_display_scale, quest_slot_state, CorpseLook, CreateSpline, MovementBlock, MoverState,
@@ -288,6 +293,30 @@ pub const AUTH_NO_TIME: u8 = 0x1E;
 pub const AUTH_DB_BUSY: u8 = 0x1F;
 pub const AUTH_SUSPENDED: u8 = 0x20;
 pub const AUTH_PARENTAL_CONTROL: u8 = 0x21;
+/// The billing group an `AUTH_OK` or `AUTH_WAIT_QUEUE` response carries when 5 or more bytes
+/// follow its result (`0x5b41f9`), which the client keeps on the connection (`0x5b41b0`). vmangos
+/// writes 0, the trial bits or none, and 0 (`World.cpp:327-331`, `:376-380`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Billing {
+    /// Minutes of play left (`+0x1af4`): the glue's `GetBillingTimeRemaining` and the in-game
+    /// play-time warning read it.
+    pub time_remaining: u32,
+    /// The plan flags (`+0x1afc`), vmangos `BillingPlanFlags` (`WorldSession.h:123-134`).
+    pub plan_flags: u8,
+    /// Rested minutes (`+0x1af8`), `GetBillingTimeRested()` unconverted (`0x48ec50`);
+    /// `PlayerFrame.lua:246` divides it by 60.
+    pub time_rested: u32,
+}
+
+impl Billing {
+    /// A recurring subscription: the play-time warning never arms (`0x48f654`), and the glue's
+    /// `GetBillingTimeRemaining` answers 0 (`0x46dc0a`). vmangos `BILLING_FLAG_RECURRING`.
+    pub const RECURRING: u8 = 0x02;
+    /// An Internet Gaming Room (IGR) plan: its warning is `IGR_BILLING_NAG_DIALOG`, not the minutes
+    /// (`0x4956cb`). vmangos `BILLING_FLAG_IGR`.
+    pub const IGR: u8 = 0x08;
+}
+
 /// `LogoutResult::Success` (`SMSG_LOGOUT_RESPONSE`).
 pub const LOGOUT_SUCCESS: u32 = 0x0;
 /// Faction-tongue `Language` ids (vmangos `SharedDefines.h:256-261`); vmangos rejects

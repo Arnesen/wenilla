@@ -154,6 +154,8 @@ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
         "Shift" => KeyCode::ShiftLeft,
         // The cost pill's toggle, dev chord + `P` (`perf::hud::toggle_hud`); it starts hidden.
         "P" => KeyCode::KeyP,
+        // The addon profiler's toggle, dev chord + `L` (`devtools::profiler::toggle`).
+        "L" => KeyCode::KeyL,
         // Text editing: `EditBox` has no Lua deletion API, so caret and deletion need real keys.
         "Backspace" => KeyCode::Backspace,
         "Delete" => KeyCode::Delete,
@@ -161,7 +163,7 @@ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
         "Right" => KeyCode::ArrowRight,
         "Home" => KeyCode::Home,
         "End" => KeyCode::End,
-        // Enter at character select enters the world (`char_select::input`): `/logout` then
+        // Enter at character select enters the world (`CharacterSelect_OnKeyDown`): `/logout` then
         // `Enter` is a relog in one process, since `WOW_CHAR` applies once (`run_mode`).
         "Enter" => KeyCode::Enter,
         // The SCREENSHOT binding's key; a Lua `TakeScreenshot()` skips the binding. On macOS it
@@ -321,22 +323,22 @@ fn fire_probe_lua(
     time: ProbeClock,
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
-    state: Res<State<crate::char_select::ClientState>>,
+    state: Res<State<crate::client_state::ClientState>>,
     entry_ui_pending: Option<Res<crate::ui_script::PendingEntryUiLoad>>,
 ) {
     if probe.chunk.is_empty() {
         return;
     }
     let Some(script) = script else {
-        // Between the world-entry edge and the entry load the boot VM is parked
-        // (`ui_script::ParkedBootVm`): not an entry yet.
+        // Between the world-entry edge and the entry load the glue VM is parked
+        // (`ui_script::ParkedGlueVm`): not an entry yet.
         probe.was_ready = false;
         return;
     };
     // Ready means the in-game VM, not the boot one: `InWorld` (the entered-world message and the
     // first object update can share a drain a frame before the VM is parked), the entry UI load
     // done, and a self player for `UnitName("player")`.
-    let in_world = *state.get() == crate::char_select::ClientState::InWorld;
+    let in_world = *state.get() == crate::client_state::ClientState::InWorld;
     let ready = in_world && entry_ui_pending.is_none() && !self_player.is_empty();
     let now = time.elapsed_secs();
     if ready && !probe.was_ready {
@@ -362,6 +364,97 @@ fn fire_probe_lua(
     );
     if let Err(e) = script.run(&probe.chunk) {
         error!("probe-lua: {e}");
+    }
+}
+
+/// `WOW_PROBE_GLUE_LUA="<chunk>"`: runs the chunk once in the stock glue VM
+/// `WOW_PROBE_GLUE_LUA_AT` seconds (default 10) into the run, to press the login screen's buttons
+/// headlessly; `WOW_PROBE_GLUE_SHOT=<path>` then saves one PNG `WOW_PROBE_GLUE_SHOT_AFTER` seconds
+/// (default 1) later. The chunk is never logged: it may carry
+/// a typed password.
+pub(crate) struct ProbeGlueLuaPlugin;
+
+impl Plugin for ProbeGlueLuaPlugin {
+    fn build(&self, app: &mut App) {
+        let secs = |k: &str, d: f32| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        app.insert_resource(ProbeGlueLua {
+            chunk: std::env::var("WOW_PROBE_GLUE_LUA").unwrap_or_default(),
+            at: secs("WOW_PROBE_GLUE_LUA_AT", 10.0),
+            shot: std::env::var("WOW_PROBE_GLUE_SHOT").ok(),
+            shot_after: secs("WOW_PROBE_GLUE_SHOT_AFTER", 1.0),
+            ran_at: None,
+            shot_done: false,
+        })
+        .add_systems(Update, fire_probe_glue_lua.after(crate::ui_script::UiInput));
+    }
+}
+
+#[derive(Resource)]
+struct ProbeGlueLua {
+    chunk: String,
+    at: f32,
+    shot: Option<String>,
+    shot_after: f32,
+    ran_at: Option<f32>,
+    shot_done: bool,
+}
+
+/// The log line for a failed glue chunk: its kind alone. The error's text can quote the chunk (a
+/// syntax error's `near '<token>'`, a chunk named by its own source), and the chunk may carry a
+/// typed password.
+fn glue_chunk_failure(e: &dyn std::fmt::Display) -> String {
+    let text = e.to_string();
+    let kind = if text.starts_with("syntax error") {
+        "a syntax error"
+    } else if text.starts_with("runtime error") {
+        "a runtime error"
+    } else if text.starts_with("callback error") {
+        "an error in a callback"
+    } else {
+        "an error"
+    };
+    format!("probe-glue-lua: the chunk failed with {kind}")
+}
+
+/// Runs the chunk once the glue VM stands and its time has come, then the one shot.
+fn fire_probe_glue_lua(
+    mut probe: ResMut<ProbeGlueLua>,
+    time: ProbeClock,
+    script: Option<NonSend<benilla_ui::script::UiScript>>,
+    mut commands: Commands,
+) {
+    let now = time.elapsed_secs();
+    match probe.ran_at {
+        None => {
+            let Some(script) = script.filter(|s| s.vm_kind() == benilla_ui::script::VmKind::Glue)
+            else {
+                return;
+            };
+            if now < probe.at {
+                return;
+            }
+            probe.ran_at = Some(now);
+            info!("probe-glue-lua: running the chunk at {now:.1}s");
+            if let Err(e) = script.run(&probe.chunk) {
+                error!("{}", glue_chunk_failure(&e));
+            }
+        }
+        Some(ran) if !probe.shot_done && now >= ran + probe.shot_after => {
+            probe.shot_done = true;
+            if let Some(out) = probe.shot.clone() {
+                use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+                commands
+                    .spawn(Screenshot::primary_window())
+                    .observe(save_to_disk(out.clone()));
+                info!("probe-glue-lua: shot writing {out}");
+            }
+        }
+        _ => {}
     }
 }
 
@@ -550,13 +643,13 @@ struct ProbeDrag {
     to: (f32, f32),
 }
 
-/// A frame's centre from its live `GetLeft`/`GetRight`/`GetTop`/`GetBottom`, in the space
-/// [`crate::ui_script::input`] feeds the cursor in.
+/// A frame's centre from its live `GetLeft`/`GetRight`/`GetTop`/`GetBottom`, times its effective
+/// scale: the edges answer in the frame's own units, the cursor is fed in the root's.
 fn frame_centre(script: &benilla_ui::script::UiScript, name: &str) -> Option<(f32, f32)> {
     let read = |edge: &str| {
         script
             .eval::<f32>(&format!(
-                "local f = getglobal(\"{name}\") return f and f:Get{edge}()"
+                "local f = getglobal(\"{name}\") return f and f:Get{edge}() * f:GetEffectiveScale()"
             ))
             .ok()
     };
@@ -723,5 +816,30 @@ mod tests {
             probe_lua_due(&p, 44.0),
             "WOW_PROBE_LUA_AGAIN past the re-entry"
         );
+    }
+}
+
+#[cfg(test)]
+mod glue_chunk_tests {
+    /// A failing chunk is logged by its kind, never its text: a syntax error quotes its token.
+    #[test]
+    fn a_failed_glue_chunk_never_echoes_its_text() {
+        let s = benilla_ui::script::UiScript::new_glue().unwrap();
+        for (chunk, kind) in [
+            ("x = 1 'SECRET'", "a syntax error"),
+            ("error('SECRET')", "a runtime error"),
+            ("SECRET()", "a runtime error"),
+        ] {
+            let e = s.run(chunk).unwrap_err();
+            assert!(
+                e.to_string().contains("SECRET"),
+                "the raw error quotes the chunk: {e}"
+            );
+            let line = super::glue_chunk_failure(&e);
+            assert_eq!(
+                line,
+                format!("probe-glue-lua: the chunk failed with {kind}")
+            );
+        }
     }
 }

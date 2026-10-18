@@ -100,6 +100,11 @@ impl MatAnim {
         }
     }
 
+    /// The entity whose player this instance follows, `None` when pinned.
+    pub fn host(&self) -> Option<Entity> {
+        self.host
+    }
+
     /// Whether the unit lane composes this instance's tag: a hosted or attach-model batch, never an
     /// effect part that drives its own.
     pub fn composes_unit_tag(&self) -> bool {
@@ -124,27 +129,32 @@ pub fn playing_seq(player: &AnimationPlayer, anims: &ModelAnimations) -> Option<
         .or_else(|| anims.idle_seq().map(|seq| (seq, 0.0)))
 }
 
-/// Sample every instance: a hosted one on its host's sequence and clip clock, a pinned one on its
-/// spawn clock; frozen ones keep their t = 0 sample. Hidden instances sample too, as the reference
+/// What a hosted alpha reads off its host: the rig that names its sequence and clip time, and the
+/// scene clock its global sequences run on, either absent.
+type AlphaHost = (
+    Option<(&'static AnimationPlayer, &'static ModelAnimations)>,
+    Option<&'static crate::rig_anim::SceneClock>,
+);
+
+/// Sample every instance: a hosted one on its host's sequence and clip clock, and its global
+/// sequences on the host's scene clock when it stands in one ([`crate::rig_anim::SceneClock`]);
+/// a pinned one on its spawn clock; frozen ones keep their t = 0 sample. Hidden instances sample too, as the reference
 /// evaluates the tracks every frame regardless of the cull (`0x707b3a`–`0x707b5c`), or a batch
 /// born at weight 0 would stay hidden. Runs before the visibility authority.
-pub fn sample_mat_anim(
-    time: Res<Time>,
-    hosts: Query<(&AnimationPlayer, &ModelAnimations)>,
-    mut q: Query<&mut MatAnim>,
-) {
+pub fn sample_mat_anim(time: Res<Time>, hosts: Query<AlphaHost>, mut q: Query<&mut MatAnim>) {
     let now = time.elapsed_secs();
-    // The scene clock in f64: a long-uptime f32 drifts whole milliseconds.
-    let shared = time.elapsed_secs_f64();
+    // The world clock in f64: a long-uptime f32 drifts whole milliseconds.
+    let world = time.elapsed_secs_f64();
     for mut m in &mut q {
         if m.frozen {
             continue;
         }
         // A host with no player yet keeps its last slot at t = 0, a bind-posed model's pose.
-        let played = m
+        let (rig, clock) = m
             .host
             .and_then(|h| hosts.get(h).ok())
-            .and_then(|(p, a)| playing_seq(p, a));
+            .unwrap_or((None, None));
+        let played = rig.and_then(|(p, a)| playing_seq(p, a));
         let (seq, elapsed) = match played {
             Some((seq, t)) => {
                 m.seq = Some(seq);
@@ -153,7 +163,9 @@ pub fn sample_mat_anim(
             None if m.host.is_some() => (m.seq, 0.0),
             None => (m.seq, now - m.spawned_at),
         };
-        // The gseq cursor is sceneNow − attach, the anchor stamped on the first pass.
+        // The gseq cursor is sceneNow − attach, the anchor stamped on the first pass, on the
+        // host's own scene clock when it has one.
+        let shared = clock.map_or(world, |c| c.0);
         let attach = *m.gseq_attach.get_or_insert(shared);
         m.current = m.anim.sample(seq, elapsed, shared - attach);
     }
@@ -202,6 +214,9 @@ pub struct UvAnimEntry {
     pub seed: [f32; 2],
     /// The rotation and scaling half ([`UvAffine`]), `None` when the transform only translates.
     affine: Option<UvAffine>,
+    /// The entity whose [`crate::rig_anim::SceneClock`] this entry runs on, `None` for the
+    /// world's clock.
+    clock: Option<Entity>,
 }
 
 /// A texture transform's rotation and scaling, which the translation row cannot carry: a second
@@ -282,7 +297,75 @@ impl UvAnimEntry {
     }
 }
 
+impl UvLoop {
+    /// Move a per-sequence or per-instance lane to `host`'s player; a shared one has none.
+    fn set_host(&mut self, to: Entity) {
+        if let UvLoop::PerSeq { host, .. } | UvLoop::Instance { host, .. } = self {
+            *host = to;
+        }
+    }
+
+    /// This lane for a twin of the material on another instance: the same loops, a per-sequence
+    /// or per-instance one following `host`'s player.
+    fn for_twin(&self, host: Entity) -> Self {
+        match self {
+            UvLoop::Shared(a) => UvLoop::Shared(a.clone()),
+            UvLoop::PerSeq { seqs, .. } => UvLoop::PerSeq {
+                seqs: seqs.clone(),
+                host,
+            },
+            UvLoop::Instance {
+                seqs,
+                single,
+                attached_at,
+                ..
+            } => UvLoop::Instance {
+                seqs: seqs.clone(),
+                single: single.clone(),
+                host,
+                attached_at: *attached_at,
+            },
+        }
+    }
+}
+
+impl TintLoop {
+    /// As [`UvLoop::set_host`].
+    fn set_host(&mut self, to: Entity) {
+        if let TintLoop::PerSeq { host, .. } = self {
+            *host = to;
+        }
+    }
+
+    /// As [`UvLoop`]'s: the same loop, a per-sequence one following `host`.
+    fn for_twin(&self, host: Entity) -> Self {
+        match self {
+            TintLoop::Shared(a) => TintLoop::Shared(a.clone()),
+            TintLoop::PerSeq { seqs, .. } => TintLoop::PerSeq {
+                seqs: seqs.clone(),
+                host,
+            },
+        }
+    }
+}
+
 impl UvAnimEntry {
+    /// This frame's translation row and affine row, on `scene`, the time of the scene clock the
+    /// entry runs on, else on the world's `now`: what the tick writes.
+    fn rows(
+        &self,
+        scene: Option<f64>,
+        now: f32,
+        gseq_now: f64,
+        playing: Option<(usize, f32)>,
+    ) -> ([f32; 4], Option<(u16, [f32; 4])>) {
+        let (now, gseq_now) = scene.map_or((now, gseq_now), |t| (t as f32, t));
+        (
+            self.delta(now, gseq_now, playing),
+            self.affine(now, gseq_now, playing),
+        )
+    }
+
     fn host(&self) -> Option<Entity> {
         match &self.anim {
             UvLoop::Shared(_) => None,
@@ -317,6 +400,18 @@ impl UvAnimEntry {
 }
 
 impl TintAnimEntry {
+    /// This frame's row on `scene`'s time, else the world's, as [`UvAnimEntry`]'s rows.
+    fn row(
+        &self,
+        scene: Option<f64>,
+        now: f32,
+        gseq_now: f64,
+        playing: Option<(usize, f32)>,
+    ) -> [f32; 4] {
+        let (now, gseq_now) = scene.map_or((now, gseq_now), |t| (t as f32, t));
+        self.delta(now, gseq_now, playing)
+    }
+
     fn host(&self) -> Option<Entity> {
         match &self.anim {
             TintLoop::Shared(_) => None,
@@ -340,6 +435,69 @@ pub struct UvAnimMaterials(
         UvAnimEntry,
     >,
 );
+
+/// Give `twin`, a booth's relit clone of the registered material `source`, rows of its own for the
+/// model `root`: a copy of each of the source's lanes on `root`'s scene clock, a per-sequence one
+/// following `root`'s player. The source's rows run on the world's clock and are written only
+/// while the world draws it; a scene that owns its clock animates its models on that clock alone.
+/// An already registered twin moves to `root`, clock and player both. Returns whether the twin has
+/// a row, which its part's [`AnimMatPart`] marker must agree with.
+pub fn clocked_twin(
+    uv: &mut UvAnimMaterials,
+    tint: &mut TintAnimMaterials,
+    table: &mut crate::mat_anim_table::MatAnimTable,
+    materials: &mut bevy::asset::Assets<benilla_assets::materials::WowModelMaterial>,
+    source: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
+    twin: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
+    root: Entity,
+) -> bool {
+    if source == twin {
+        return false; // no twin was made: the source's rows are the world's
+    }
+    if let Some(src) = uv.0.get(&source) {
+        let lane = src.anim.for_twin(root);
+        let affine = src
+            .affine
+            .as_ref()
+            .map(|a| (a.rot.clone(), a.scale.clone()));
+        if !uv.0.contains_key(&twin) {
+            register_uv(uv, table, materials, twin, lane);
+            if let Some((rot, scale)) = affine {
+                attach_affine(uv, table, materials, twin, rot, scale);
+            }
+        }
+    }
+    if let Some(src) = tint.0.get(&source) {
+        let lane = src.anim.for_twin(root);
+        register_tint(tint, table, materials, twin, lane);
+    }
+    // A twin registered for an earlier model follows this one.
+    if let Some(e) = uv.0.get_mut(&twin) {
+        e.anim.set_host(root);
+    }
+    if let Some(e) = tint.0.get_mut(&twin) {
+        e.anim.set_host(root);
+    }
+    scene_clocked(uv, tint, twin, root);
+    uv.0.contains_key(&twin) || tint.0.contains_key(&twin)
+}
+
+/// Put material `id`'s registered UV and tint entries on the clock of the scene `clock` stands in
+/// ([`crate::rig_anim::SceneClock`] on that entity): a scene with its own clock calls it after
+/// registering each of its batches.
+pub fn scene_clocked(
+    uv: &mut UvAnimMaterials,
+    tint: &mut TintAnimMaterials,
+    id: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
+    clock: Entity,
+) {
+    if let Some(e) = uv.0.get_mut(&id) {
+        e.clock = Some(clock);
+    }
+    if let Some(e) = tint.0.get_mut(&id) {
+        e.clock = Some(clock);
+    }
+}
 
 /// Register material `id` for the UV scroll: allocate its table slot, record the built seed and
 /// write the slot into `anim_slots.x`, the one material write this lane makes. A full table skips
@@ -390,6 +548,7 @@ pub(crate) fn register_uv(
             slot,
             seed,
             affine: None,
+            clock: None,
         },
     );
 }
@@ -552,6 +711,7 @@ impl UvLoops {
 /// spell-effect lane ([`UvAnimEntry::instance_lane`]).
 pub(super) fn tick_anim_materials(
     time: Res<Time>,
+    clocks: Query<&crate::rig_anim::SceneClock>,
     real: Res<Time<bevy::time::Real>>,
     mut uv_reg: ResMut<UvAnimMaterials>,
     mut tint_reg: ResMut<TintAnimMaterials>,
@@ -615,9 +775,10 @@ pub(super) fn tick_anim_materials(
         // lives about a second, so an undrawn one costs little.
         let fx = entry.instance_lane();
         if (fx || drawn.contains(id)) && (!frozen || fx) {
-            let playing = host_seq(&hosts, entry.host());
-            table.set(entry.slot, entry.delta(now, gseq_now, playing));
-            if let Some((slot, row)) = entry.affine(now, gseq_now, playing) {
+            let scene = entry.clock.and_then(|e| clocks.get(e).ok()).map(|c| c.0);
+            let (row, affine) = entry.rows(scene, now, gseq_now, host_seq(&hosts, entry.host()));
+            table.set(entry.slot, row);
+            if let Some((slot, row)) = affine {
                 table.set(slot, row);
             }
         }
@@ -629,9 +790,10 @@ pub(super) fn tick_anim_materials(
             return false;
         }
         if drawn.contains(id) && !frozen {
+            let scene = entry.clock.and_then(|e| clocks.get(e).ok()).map(|c| c.0);
             table.set(
                 entry.slot,
-                entry.delta(now, gseq_now, host_seq(&hosts, entry.host())),
+                entry.row(scene, now, gseq_now, host_seq(&hosts, entry.host())),
             );
         }
         true
@@ -677,6 +839,8 @@ pub struct TintAnimEntry {
     pub anim: TintLoop,
     pub slot: u16,
     pub seed: [f32; 3],
+    /// As [`UvAnimEntry`]'s: the entity whose scene clock it runs on, `None` for the world's.
+    clock: Option<Entity>,
 }
 
 impl TintAnimEntry {
@@ -739,7 +903,15 @@ pub fn register_tint(
         table.free(slot);
         return;
     };
-    reg.0.insert(id, TintAnimEntry { anim, slot, seed });
+    reg.0.insert(
+        id,
+        TintAnimEntry {
+            anim,
+            slot,
+            seed,
+            clock: None,
+        },
+    );
 }
 
 /// `WOW_MATANIM_PROBE=<secs>`: once, `secs` after boot, log one line per [`AnimMatPart`] with what
@@ -909,6 +1081,7 @@ mod delta_tests {
             slot: 9,
             seed: [0.0, 0.0],
             affine: None,
+            clock: None,
         }
     }
 
@@ -968,6 +1141,7 @@ mod delta_tests {
                 scale: None,
                 slot: 5,
             }),
+            clock: None,
         };
         // No translation channel: its row stays at zero.
         assert_eq!(e.delta(1.0, 1.0, None), [0.0, 0.0, 0.0, 0.0]);
@@ -1072,6 +1246,7 @@ mod delta_tests {
             slot: 3,
             seed,
             affine: None,
+            clock: None,
         };
         for t in [0.0_f32, 0.35, 1.0, 1.7] {
             let d = entry.delta(t, f64::from(t), None);
@@ -1119,6 +1294,7 @@ mod delta_tests {
             slot: 5,
             seed: [0.0, 0.0],
             affine: None,
+            clock: None,
         };
         // On slot 1, past its step key: the whole V flip shows.
         let d = entry.delta(0.0, 0.0, Some((1, 3.0)));
@@ -1149,11 +1325,181 @@ mod delta_tests {
             anim: TintLoop::Shared(anim.clone()),
             slot: 4,
             seed,
+            clock: None,
         };
         let d = entry.delta(0.4, 0.4, None);
         let old = benilla_assets::quant255(anim.sample(0.4));
         for i in 0..3 {
             assert_eq!(seed[i] + d[i], old[i], "channel {i}");
+        }
+    }
+
+    /// A scene that owns its clock animates its texture transforms and colour tracks on it: a
+    /// hidden glue pane's clock stops (`0x76d7f0`), and its cloud scroll with it.
+    #[test]
+    fn a_scene_clocked_material_samples_its_scenes_time_not_the_worlds() {
+        let id = bevy::asset::AssetId::<benilla_assets::materials::WowModelMaterial>::Uuid {
+            uuid: bevy::asset::uuid::Uuid::from_u128(7),
+        };
+        let scene = Entity::from_raw_u32(9).unwrap();
+        let mut uv = UvAnimMaterials::default();
+        uv.0.insert(
+            id,
+            UvAnimEntry {
+                anim: UvLoop::Shared(Some(uv_loop())),
+                slot: 3,
+                seed: [0.0, 0.0],
+                affine: None,
+                clock: None,
+            },
+        );
+        let pulse = std::sync::Arc::new(benilla_formats::RgbAnim {
+            period: 2.0,
+            step: false,
+            wrap: true,
+            gseq: false,
+            keys: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3]), (2.0, [0.0; 3])],
+        });
+        let mut tint = TintAnimMaterials::default();
+        tint.0.insert(
+            id,
+            TintAnimEntry {
+                anim: TintLoop::Shared(pulse),
+                slot: 4,
+                seed: [0.0; 3],
+                clock: None,
+            },
+        );
+        scene_clocked(&mut uv, &mut tint, id, scene);
+        assert_eq!(uv.0[&id].clock, Some(scene));
+        assert_eq!(tint.0[&id].clock, Some(scene));
+
+        // The world is at 10 s, the scene's clock at 0.5 s: the rows are the scene's.
+        let (row, _) = uv.0[&id].rows(Some(0.5), 10.0, 10.0, None);
+        assert_eq!(row, uv.0[&id].delta(0.5, 0.5, None));
+        assert_ne!(row, uv.0[&id].delta(10.0, 10.0, None));
+        let row = tint.0[&id].row(Some(0.5), 10.0, 10.0, None);
+        assert_eq!(row, tint.0[&id].delta(0.5, 0.5, None));
+        assert_ne!(row, tint.0[&id].delta(10.0, 10.0, None));
+
+        // An entry on no scene clock runs on the world's.
+        let other = UvAnimEntry {
+            anim: UvLoop::Shared(Some(uv_loop())),
+            slot: 5,
+            seed: [0.0, 0.0],
+            affine: None,
+            clock: None,
+        };
+        assert_eq!(
+            other.rows(None, 10.0, 10.0, None).0,
+            other.delta(10.0, 10.0, None)
+        );
+    }
+
+    /// A batch alpha following a host that stands in a scene with its own clock samples its
+    /// global sequences on that clock: hidden, the scene's vignette or flicker stands still.
+    #[test]
+    fn a_hosted_alpha_samples_its_hosts_scene_clock() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(100),
+        ));
+        app.add_systems(Update, sample_mat_anim);
+        // A 2 s gseq weight ramp, 0 → 1 → 0.
+        let anim = std::sync::Arc::new(
+            benilla_formats::AlphaAnim::new(vec![benilla_formats::AlphaSeq {
+                color: None,
+                weight: Some(benilla_formats::ScalarAnim {
+                    period: 2.0,
+                    step: false,
+                    wrap: true,
+                    gseq: true,
+                    keys: vec![(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)],
+                }),
+            }])
+            .expect("an animated weight is carried"),
+        );
+        let host = app.world_mut().spawn(crate::rig_anim::SceneClock(3.0)).id();
+        let part = app
+            .world_mut()
+            .spawn(MatAnim::driving_tag(anim, 0.0, None).following_host(Some(host)))
+            .id();
+        app.update(); // attach at the scene's 3.0
+        let current = |app: &App| app.world().get::<MatAnim>(part).unwrap().current;
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(current(&app), 0.0, "the world ran on; the scene did not");
+        app.world_mut()
+            .get_mut::<crate::rig_anim::SceneClock>(host)
+            .unwrap()
+            .0 = 3.5;
+        app.update();
+        assert!(
+            (current(&app) - 0.5).abs() < 1e-4,
+            "half a second of the scene's clock past attach: {}",
+            current(&app)
+        );
+    }
+
+    /// A booth's twin of a registered material takes the same loops on its own row, a
+    /// per-sequence lane following the booth's model instead of the world's.
+    #[test]
+    fn a_twin_lane_keeps_its_loops_and_follows_its_own_host() {
+        let world_unit = Entity::from_raw_u32(1).unwrap();
+        let booth = Entity::from_raw_u32(2).unwrap();
+        let seqs = std::sync::Arc::new(
+            benilla_formats::SeqLoops::new(vec![Some(benilla_formats::KeyAnim {
+                period: 1.0,
+                step: false,
+                wrap: true,
+                gseq: false,
+                keys: vec![(0.0, [0.0, 0.0]), (1.0, [1.0, 0.0])],
+            })])
+            .expect("one animating slot"),
+        );
+        let per_seq = UvLoop::PerSeq {
+            seqs: seqs.clone(),
+            host: world_unit,
+        };
+        match per_seq.for_twin(booth) {
+            UvLoop::PerSeq { seqs: s, host } => {
+                assert!(std::sync::Arc::ptr_eq(&s, &seqs));
+                assert_eq!(host, booth);
+            }
+            _ => panic!("a per-sequence lane stays one"),
+        }
+        // A twin already registered for another model moves to this one's player.
+        let mut moved = UvLoop::PerSeq {
+            seqs: seqs.clone(),
+            host: world_unit,
+        };
+        moved.set_host(booth);
+        assert!(matches!(moved, UvLoop::PerSeq { host, .. } if host == booth));
+        let shared = uv_loop();
+        match UvLoop::Shared(Some(shared.clone())).for_twin(booth) {
+            UvLoop::Shared(Some(a)) => assert!(std::sync::Arc::ptr_eq(&a, &shared)),
+            _ => panic!("a shared lane stays shared"),
+        }
+        let tint_seqs = std::sync::Arc::new(
+            benilla_formats::SeqLoops::new(vec![Some(benilla_formats::KeyAnim {
+                period: 1.0,
+                step: false,
+                wrap: true,
+                gseq: false,
+                keys: vec![(0.0, [1.0; 3]), (1.0, [0.0; 3])],
+            })])
+            .expect("one animating slot"),
+        );
+        match (TintLoop::PerSeq {
+            seqs: tint_seqs,
+            host: world_unit,
+        })
+        .for_twin(booth)
+        {
+            TintLoop::PerSeq { host, .. } => assert_eq!(host, booth),
+            TintLoop::Shared(_) => panic!("a per-sequence tint stays one"),
         }
     }
 }

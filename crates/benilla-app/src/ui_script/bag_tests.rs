@@ -385,23 +385,34 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_ThrowingKnife_02".into()),
             count: 200,
             quality: Some(1),
+            inventory_type: 0,
             item_id: 2947,
             link: Some("|cffffffff|Hitem:2947|h[Small Throwing Knife]|h|r".into()),
-            locked: false,
+            guid: 0x706,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     s.set_container(
@@ -462,23 +473,34 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Sword_04".into()),
             count: 1,
             quality: Some(1),
+            inventory_type: 0,
             item_id: 25,
             link: Some("|cffffffff|Hitem:25|h[Worn Shortsword]|h|r".into()),
-            locked: false,
+            guid: 0x707,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     s.set_container(
@@ -549,7 +571,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
 #[test]
 fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     benilla_formats::wow_data_or_skip!();
-    use benilla_ui::script::{MerchantState, ScriptValue, UiCursorMode};
+    use benilla_ui::script::{MerchantState, UiCursorMode};
 
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -569,45 +591,67 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Pelt_Wolf_01".into()),
             count: 4,
             quality: Some(1),
+            inventory_type: 0,
             item_id: 2318,
             link: Some("|cffffffff|Hitem:2318|h[Light Leather]|h|r".into()),
-            locked: false,
+            guid: 0x708,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     slots.insert(
         2,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Key_03".into()),
             count: 1,
             quality: Some(1),
+            inventory_type: 0,
             item_id: 9999,
             link: Some("|cffffffff|Hitem:9999|h[Shadowforge Key]|h|r".into()),
-            locked: false,
+            guid: 0x709,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     s.set_container(
@@ -640,7 +684,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     s.set_merchant(Some(MerchantState::default()));
     // `MERCHANT_SHOW` opens the bags (the window's OnShow calls `OpenBackpack`); a toggle here
     // would take `ToggleBackpack`'s close-all arm.
-    s.fire_event("MERCHANT_SHOW", vec![ScriptValue::Str("Vendor".into())]);
+    s.fire_event("MERCHANT_SHOW", vec![]);
     s.take_sounds();
     s.resolve();
     let b1 = bag_slot_button(&s, 0, 1);
@@ -778,23 +822,34 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,
             quality: Some(3),
+            inventory_type: 0,
             item_id: 117,
             link: Some("|cffffffff|Hitem:117|h[Tough Jerky]|h|r".into()),
-            locked: false,
+            guid: 0x70a,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     s.set_container(
@@ -864,23 +919,34 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Gem_01".into()),
             count: 1,
             quality: Some(2),
+            inventory_type: 0,
             item_id: 200,
             link: Some("|cffffffff|Hitem:200|h[Shiny Gem]|h|r".into()),
-            locked: false,
+            guid: 0x70b,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     s.set_container(
@@ -982,7 +1048,7 @@ fn equipped_bag_window_snug_fits_its_row_count() {
 }
 
 /// Open a backpack holding a five-stack in slot 1; returns that slot button's centre.
-fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
+pub(super) fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
         &[
@@ -1000,23 +1066,34 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,
             quality: Some(1),
+            inventory_type: 0,
             item_id: 117,
             link: Some("|cffffffff|Hitem:117|h[Tough Jerky]|h|r".into()),
-            locked: false,
+            guid: 0x70c,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     s.set_container(
@@ -1408,7 +1485,12 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     inv[20] = Some(benilla_ui::script::InvSlotView {
         duration_ms: None,
         already_bound: false,
+        occupied_seats: None,
+        bonding: 0,
+        use_spell: 0,
+        use_fork: Default::default(),
         bar_placeable: true,
+        consumable: false,
         durability: None,
         flags: 0,
         item_id: 4496,
@@ -1418,10 +1500,14 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
         quality: 1,
         name: Some("Small Brown Pouch".into()),
         link: Some("|cffffffff|Hitem:4496:0:0:0|h[Small Brown Pouch]|h|r".into()),
-        locked: false,
+        guid: 0x70d,
         equip_slots: vec![20],
         creator: None,
+        gift_creator: None,
+        creator_guid: 0,
+        gift_creator_guid: 0,
         enchants: Vec::new(),
+        spell_0: false,
     });
     s.set_inventory_slots(inv);
     hover(&mut s, "CharacterBag0Slot");

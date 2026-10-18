@@ -4,14 +4,53 @@ use crate::framexml::{self, Element};
 use crate::script::LabelFont;
 
 use super::regions::FontAttrs;
-use super::{
-    abs_dim, abs_value, children_named, children_named_any, color_of, tex_coords_of, Loader,
-};
+use super::{abs_dim, abs_value, children_named, children_named_any, color_of, Loader};
 
 impl Loader<'_> {
+    /// `<ScrollFrame>`'s `<ScrollChild>` (`LoadXML 0x786bc0`): after the base load (`0x769820`) it
+    /// builds the node's one child through `Instantiate 0x6ee280` (`0x786bf4`), a whole frame
+    /// lifecycle with the child's own `<Frames>` and OnLoad, and only then stores it with
+    /// `SetScrollChild` (`0x786ce0`), which marks the frame's scroll range. So the child's OnLoad
+    /// sees no scroll child yet. A template's `<ScrollChild>` was built by its own `LoadXML` level
+    /// (`0x76985c`), ahead of the instance's, which therefore wins. An empty one errors in the
+    /// reference (`0x786c0c`). Other frame kinds do not read the element.
+    pub(super) fn apply_scrollframe(
+        &mut self,
+        el: &Element,
+        wrapper: &Table,
+        self_name: &str,
+        dbg: &str,
+    ) {
+        if !el.tag.eq_ignore_ascii_case("ScrollFrame") {
+            return;
+        }
+        for sc in children_named(el, "ScrollChild") {
+            let Some(child) = sc.children.first() else {
+                self.report.fault(format!(
+                    "{dbg}: <ScrollChild> is empty — the reference errors here, and a \
+                     ScrollFrame with no child has no scroll range at all"
+                ));
+                continue;
+            };
+            let expanded = self.expand(child);
+            let Some(child_wrapper) = self.materialize(&expanded, Some(wrapper), self_name) else {
+                continue; // materialize already reported why
+            };
+            if let Err(e) = wrapper.call_method::<()>("SetScrollChild", child_wrapper) {
+                self.report.fault(format!("{dbg}: <ScrollChild>: {e}"));
+            }
+        }
+    }
+
     /// `<StatusBar>` (`0x782ef0`): a reversed `minValue`/`maxValue` pair is swapped, as
     /// `SetMinMaxValues` also does; `drawLayer` is the bar texture's layer, ARTWORK by default.
-    pub(super) fn apply_statusbar(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
+    pub(super) fn apply_statusbar(
+        &mut self,
+        el: &Element,
+        wrapper: &Table,
+        self_name: &str,
+        dbg: &str,
+    ) {
         if !el.tag.eq_ignore_ascii_case("StatusBar") {
             return;
         }
@@ -28,25 +67,13 @@ impl Loader<'_> {
         if let Some(o) = el.attr("orientation") {
             self.call(wrapper, "SetOrientation", o.to_string(), dbg);
         }
-        let layer = el.attr("drawLayer").map(str::to_string);
+        let layer = el.attr("drawLayer");
         for bar in children_named(el, "BarTexture") {
-            let color = children_named(bar, "Color").next().map(color_of);
-            if let Some(file) = bar.attr("file") {
-                self.call(
-                    wrapper,
-                    "SetStatusBarTexture",
-                    (file.to_string(), layer.clone()),
-                    dbg,
-                );
-                // A `<Color>` beside `file=` is discarded, as on any texture (`0x76fe20`);
-                // `<BarColor>` is the bar's tint.
-            } else if let Some(c) = color {
-                self.call(
-                    wrapper,
-                    "SetStatusBarTexture",
-                    (c[0], c[1], c[2], c[3]),
-                    dbg,
-                );
+            // Built as any texture element is, and installed as the bar on `drawLayer`, ARTWORK
+            // without one (`0x782f12`); `<BarColor>` is the bar's tint.
+            let level = layer.unwrap_or("ARTWORK");
+            if let Some(tex) = self.build_texture_child(bar, wrapper, self_name, level, dbg) {
+                self.install_texture(wrapper, "BarTexture", &tex, layer, dbg);
             }
         }
         for bc in children_named(el, "BarColor") {
@@ -77,52 +104,25 @@ impl Loader<'_> {
         {
             return;
         }
-        let tex = |tag: &str, method: &str, this: &mut Self| {
+        // Each state-texture element is a new region from the `<Layers>` texture adder (`0x6f26f0`,
+        // `0x778903`): named, laid out, painted and given its implicit all-points as any layer
+        // texture is, then handed to the slot store, which destroys the region it displaces. An
+        // instance's element over its template's therefore starts fresh: `LoadXML` runs the
+        // template's level first (`0x76985c`), and nothing of that region survives the instance's.
+        // The Lua path leg differs: it repaints the slot's region and keeps its state (`0x778f10`).
+        let tex = |tag: &str, this: &mut Self| {
             for raw in children_named(el, tag) {
-                // A state texture may inherit a virtual `<Texture>`, the stock button kit's only
-                // form (`UIPanelButtonUpTexture`); it expands like a `<Layers>` region.
-                let expanded = this.expand_region(raw);
-                let t = &expanded;
-                // The reference sends all four state textures through the `<Layers>` texture adder
-                // (`0x6f26f0`, from `0x778903`), so a `<Color>` is the region's own colour fill; the
-                // Lua setter has no colour form (`0x781970`). `""` creates the slot unpainted.
-                let color = children_named(t, "Color").next().map(color_of);
-                match t.attr("file") {
-                    Some(file) => this.call(wrapper, method, file.to_string(), dbg),
-                    None => this.call(wrapper, method, String::new(), dbg),
-                }
-                let getter = method.replacen("Set", "Get", 1);
-                if let Ok(region) = wrapper.call_method::<Table>(getter.as_str(), ()) {
-                    if let (None, Some(c)) = (t.attr("file"), color) {
-                        this.call_region(&region, "SetTexture", (c[0], c[1], c[2], c[3]), dbg);
-                    }
-                    if let Some(mode) = t.attr("alphaMode") {
-                        this.call_region(&region, "SetBlendMode", mode.to_string(), dbg);
-                    }
-                    // The setter gave the region the runtime path's implicit anchors, but the XML
-                    // path places the authored ones first and the implicit step after (`0x778903`):
-                    // clear, lay out, then re-run it, or a leftover implicit corner would pin it.
-                    this.call_region(&region, "ClearAllPoints", (), dbg);
-                    this.apply_region_layout(t, &region, self_name, dbg, FontAttrs::Own);
-                    if let Err(e) = crate::script::implicit_creation_anchor_lua(this.lua, &region) {
-                        this.report
-                            .errors
-                            .push(format!("{dbg}: implicit anchor: {e}"));
-                    }
-                    if let Some(tc) = tex_coords_of(t) {
-                        this.call_region(&region, "SetTexCoord", tc, dbg);
-                    }
-                    // A named state texture is published both ways: the region registry for its
-                    // `GetName()`, `_G` for `getglobal` and a sibling's `relativeTo`.
-                    if let Some(rname) = t.name().map(|raw| framexml::resolve_name(raw, self_name))
-                    {
-                        crate::script::region::publish_region_name(this.lua(), &rname, &region);
-                        if let Err(e) = this.lua().globals().set(rname.clone(), region) {
-                            this.report
-                                .warnings
-                                .push(format!("{dbg}: state-texture global '{rname}': {e}"));
-                        }
-                    }
+                let Some(region) =
+                    this.build_texture_child(raw, wrapper, self_name, "ARTWORK", dbg)
+                else {
+                    continue; // build_texture_child already reported why
+                };
+                this.install_texture(wrapper, tag, &region, None, dbg);
+                // Freeing the displaced region took its entry out of the name lookup, which a
+                // replacement of the same name takes back. The replacement's `GetName()` is its
+                // own (`0x76c650`); `_G` keeps its first holder (`0x701c8a`).
+                if let Some(rname) = raw.name().map(|n| framexml::resolve_name(n, self_name)) {
+                    crate::script::region::publish_region_name(this.lua(), &rname, &region);
                 }
             }
         };
@@ -164,10 +164,14 @@ impl Loader<'_> {
                 // the ctor's CENTER (`0x212`); the justify still reaches the paint (`0x784111`).
                 self.call_region(&region, "ClearAllPoints", (), dbg);
                 self.apply_region_layout(bt, &region, self_name, dbg, font_attrs);
+                // `<ButtonText>` reads its own `inherits=` and `font=` as any FontString does
+                // (`0x6f2780` → `0x770f40`); `<NormalText>` skips them (`0x778b7b`).
+                if font_attrs == FontAttrs::Own {
+                    self.apply_fontstring_font(bt, &region, dbg);
+                }
+                self.apply_wrap_attrs(bt, &region, dbg);
                 if let Err(e) = crate::script::implicit_creation_anchor_lua(self.lua, &region) {
-                    self.report
-                        .errors
-                        .push(format!("{dbg}: implicit anchor: {e}"));
+                    self.report.fault(format!("{dbg}: implicit anchor: {e}"));
                 }
                 // Published both ways, like a named state texture.
                 if let Some(rname) = bt_name {
@@ -180,15 +184,15 @@ impl Loader<'_> {
                 }
             }
         }
-        tex("NormalTexture", "SetNormalTexture", self);
-        tex("PushedTexture", "SetPushedTexture", self);
-        tex("DisabledTexture", "SetDisabledTexture", self);
-        tex("HighlightTexture", "SetHighlightTexture", self);
+        tex("NormalTexture", self);
+        tex("PushedTexture", self);
+        tex("DisabledTexture", self);
+        tex("HighlightTexture", self);
         if is_check {
-            tex("CheckedTexture", "SetCheckedTexture", self);
-            tex("DisabledCheckedTexture", "SetDisabledCheckedTexture", self);
-            if let Some(c) = el.attr("checked") {
-                let checked = c.eq_ignore_ascii_case("true") || c == "1";
+            tex("CheckedTexture", self);
+            tex("DisabledCheckedTexture", self);
+            // Read through `0x6f1b30`, a missing or empty one skipped (`0x78518e`-`0x78519d`).
+            if let Some(checked) = el.attr_bool_opt("checked") {
                 self.call(wrapper, "SetChecked", checked, dbg);
             }
         }
@@ -232,8 +236,7 @@ impl Loader<'_> {
                                 self.lua, wrapper, which, jh,
                             ) {
                                 self.report
-                                    .errors
-                                    .push(format!("{dbg}: <{}> justifyH: {e}", f.tag));
+                                    .fault(format!("{dbg}: <{}> justifyH: {e}", f.tag));
                             }
                         }
                         // Reported, not modelled: the reference clears the axis on a cross-axis
@@ -361,8 +364,8 @@ impl Loader<'_> {
                 self.call(wrapper, "SetFadeDuration", s, dbg);
             }
         }
-        if let Some(fade) = el.attr("fade") {
-            let on = fade.eq_ignore_ascii_case("true") || fade == "1";
+        // `0x6f1b30`, a missing or empty one skipped (`0x7859b2`-`0x7859bd`).
+        if let Some(on) = el.attr_bool_opt("fade") {
             self.call(wrapper, "SetFading", on, dbg);
         }
     }
@@ -393,38 +396,14 @@ impl Loader<'_> {
                 self.call(wrapper, "SetValue", v, dbg);
             }
         }
-        let layer = el.attr("drawLayer").map(str::to_string);
+        let layer = el.attr("drawLayer");
         for raw in children_named(el, "ThumbTexture") {
-            // As for a Button's state textures: `inherits=` expands, and a named thumb is
-            // published (`ScrollFrame_OnScrollRangeChanged` reads it by name).
-            let expanded = self.expand_region(raw);
-            let tt = &expanded;
-            if let Some(file) = tt.attr("file") {
-                self.call(
-                    wrapper,
-                    "SetThumbTexture",
-                    (file.to_string(), layer.clone()),
-                    dbg,
-                );
-            } else if let Some(c) = children_named(tt, "Color").next().map(color_of) {
-                self.call(wrapper, "SetThumbTexture", (c[0], c[1], c[2], c[3]), dbg);
-            }
-            if let Ok(region) = wrapper.call_method::<Table>("GetThumbTexture", ()) {
-                if let Some(mode) = tt.attr("alphaMode") {
-                    self.call_region(&region, "SetBlendMode", mode.to_string(), dbg);
-                }
-                self.apply_region_layout(tt, &region, self_name, dbg, FontAttrs::Own);
-                if let Some(tc) = tex_coords_of(tt) {
-                    self.call_region(&region, "SetTexCoord", tc, dbg);
-                }
-                if let Some(rname) = tt.name().map(|raw| framexml::resolve_name(raw, self_name)) {
-                    crate::script::region::publish_region_name(self.lua(), &rname, &region);
-                    if let Err(e) = self.lua().globals().set(rname.clone(), region) {
-                        self.report
-                            .warnings
-                            .push(format!("{dbg}: thumb-texture global '{rname}': {e}"));
-                    }
-                }
+            // Built as any texture element is (a named thumb is published, which
+            // `ScrollFrame_OnScrollRangeChanged` reads by name), then installed as the thumb on
+            // `drawLayer`, OVERLAY without one; the install clears its anchors (`0x789893`).
+            let level = layer.unwrap_or("OVERLAY");
+            if let Some(tex) = self.build_texture_child(raw, wrapper, self_name, level, dbg) {
+                self.install_texture(wrapper, "ThumbTexture", &tex, layer, dbg);
             }
         }
     }
@@ -442,58 +421,18 @@ impl Loader<'_> {
         if !el.tag.eq_ignore_ascii_case("ColorSelect") {
             return;
         }
-        let layer = el.attr("drawLayer").map(str::to_string);
-        for (tag, setter, getter) in [
-            (
-                "ColorWheelTexture",
-                "SetColorWheelTexture",
-                "GetColorWheelTexture",
-            ),
-            (
-                "ColorWheelThumbTexture",
-                "SetColorWheelThumbTexture",
-                "GetColorWheelThumbTexture",
-            ),
-            (
-                "ColorValueTexture",
-                "SetColorValueTexture",
-                "GetColorValueTexture",
-            ),
-            (
-                "ColorValueThumbTexture",
-                "SetColorValueThumbTexture",
-                "GetColorValueThumbTexture",
-            ),
+        for (tag, level) in [
+            ("ColorWheelTexture", "ARTWORK"),
+            ("ColorWheelThumbTexture", "OVERLAY"),
+            ("ColorValueTexture", "ARTWORK"),
+            ("ColorValueThumbTexture", "OVERLAY"),
         ] {
             for raw in children_named(el, tag) {
-                let expanded = self.expand_region(raw);
-                let tt = &expanded;
-                if let Some(file) = tt.attr("file") {
-                    self.call(wrapper, setter, (file.to_string(), layer.clone()), dbg);
-                } else if let Some(c) = children_named(tt, "Color").next().map(color_of) {
-                    self.call(wrapper, setter, (c[0], c[1], c[2], c[3]), dbg);
-                } else {
-                    self.call(wrapper, setter, (), dbg);
-                }
-                if let Ok(region) = wrapper.call_method::<Table>(getter, ()) {
-                    if let Some(mode) = tt.attr("alphaMode") {
-                        self.call_region(&region, "SetBlendMode", mode.to_string(), dbg);
-                    }
-                    self.apply_region_layout(tt, &region, self_name, dbg, FontAttrs::Own);
-                    if let Some(tc) = tex_coords_of(tt) {
-                        self.call_region(&region, "SetTexCoord", tc, dbg);
-                    }
-                    if let Some(rname) = tt.name().map(|raw| framexml::resolve_name(raw, self_name))
-                    {
-                        // Published both ways: the stock `<ColorValueTexture>` anchors to
-                        // `ColorPickerWheel` by name.
-                        crate::script::region::publish_region_name(self.lua(), &rname, &region);
-                        if let Err(e) = self.lua().globals().set(rname.clone(), region) {
-                            self.report
-                                .warnings
-                                .push(format!("{dbg}: {tag} global '{rname}': {e}"));
-                        }
-                    }
+                // The element has no `drawLayer` (`0x78b3f0` never reads it): the slot links its
+                // texture on its own layer. The wheel and the strip are painted by the client
+                // whatever file or colour the element names (`0x770300`).
+                if let Some(tex) = self.build_texture_child(raw, wrapper, self_name, level, dbg) {
+                    self.install_texture(wrapper, tag, &tex, None, dbg);
                 }
             }
         }
@@ -501,7 +440,9 @@ impl Loader<'_> {
 
     /// `<SimpleHTML>` (`0x78a130`): `font=` for all four element fonts (`0x78a17a`), the
     /// `<FontString>` and `<FontStringHeader1..3>` children one each (`0x78a1fe`, through
-    /// `0x783c30`), `hyperlinkFormat` (`0x78a540`), and `file=`, a global-string key for `SetText`.
+    /// `0x783c30`), `hyperlinkFormat` (`0x78a540`), and `file=`, a document whose whole text is
+    /// set as the frame's (`0x78a2a0` loads it through Storm, the attribute verbatim; `0x78a2b2`
+    /// sets it). A file that does not open leaves the frame empty.
     pub(super) fn apply_simplehtml(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
         if !el.tag.eq_ignore_ascii_case("SimpleHTML") {
             return;
@@ -530,8 +471,10 @@ impl Loader<'_> {
             self.apply_element_font(child, wrapper, elem, dbg);
         }
         if let Some(raw) = el.attr("file") {
-            let text = self.resolve_text(raw, dbg);
-            self.call(wrapper, "SetText", text, dbg);
+            if let Some(bytes) = (self.files)(raw) {
+                let text = crate::source::decode(&bytes).into_owned();
+                self.call(wrapper, "SetText", text, dbg);
+            }
         }
     }
 
@@ -550,19 +493,28 @@ impl Loader<'_> {
                 self.call(wrapper, "SetFontObject", (name, f.to_string()), dbg);
             }
             Some(path) => {
-                let height = children_named(el, "FontHeight").last().and_then(abs_value);
+                // As a FontString's file, `CSimpleFont::LoadXML` needs a height above 0
+                // (`0x783d6d`-`0x783d78`); else it reports `0x87a4f0` and returns (`0x783dae`)
+                // before `outline=`, `<Color>`, `<Shadow>`, the justifies and `spacing=`.
+                let height = children_named(el, "FontHeight")
+                    .last()
+                    .and_then(abs_value)
+                    .filter(|h| *h > 0.0);
+                let Some(height) = height else {
+                    self.report_missing_font_height("Font", "<unnamed>", &el.tag);
+                    return;
+                };
                 let outline = el.attr("outline").map(str::to_string);
                 if let Err(e) = crate::script::apply_simplehtml_font_parts(
                     self.lua,
                     wrapper,
                     elem,
                     Some(path.to_string()),
-                    height,
+                    Some(height),
                     outline,
                 ) {
                     self.report
-                        .errors
-                        .push(format!("{dbg}: <SimpleHTML> {name} font attrs: {e}"));
+                        .fault(format!("{dbg}: <SimpleHTML> {name} font attrs: {e}"));
                 }
             }
             None => {}

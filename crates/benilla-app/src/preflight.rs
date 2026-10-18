@@ -29,6 +29,7 @@ use crate::area::AreaTableRes;
 use crate::names::NameCache;
 use crate::net::{DisconnectedMessage, EnteredWorldMessage, ObjectStore, SelfGuid, SelfPlayer};
 use crate::probe_shield::{ProbeShield, ShieldReport};
+use crate::query_cache::Ask;
 use benilla_world::world_map::CurrentMap;
 
 /// `PLAYER_FLAGS_GM` (vmangos `Player.h`), set by `SetGameMaster(true)` with the faction-35
@@ -170,6 +171,7 @@ fn report_session(
     self_q: Query<(&ObjectStore, &Transform), With<SelfPlayer>>,
     self_guid: Res<SelfGuid>,
     names: Res<NameCache>,
+    unit_names: crate::ui_unit::NameTables,
     map: Option<Res<CurrentMap>>,
     world: benilla_world::world_point::WorldPoint,
     area_table: Option<Res<AreaTableRes>>,
@@ -228,17 +230,17 @@ fn report_session(
 
     let name = self_guid
         .0
-        .and_then(|g| names.peek(g))
+        .and_then(|g| names.resolve_unit(g, None, Ask::Read))
         .unwrap_or("<unnamed>");
     let race = store
         .0
         .unit_race()
-        .and_then(|r| crate::ui_unit::race_names(r).map(|(d, _)| d))
+        .and_then(|r| unit_names.get().race(r).map(|(d, _)| d))
         .unwrap_or("?");
     let class = store
         .0
         .unit_class()
-        .and_then(|c| crate::ui_unit::class_names(c).map(|(d, _)| d))
+        .and_then(|c| unit_names.get().class(c).map(|(d, _)| d))
         .unwrap_or("?");
     let zone = zone.unwrap_or_default();
     // The raw WoW triple, as `.go xyz <x> <y> <z> <map>` takes it.

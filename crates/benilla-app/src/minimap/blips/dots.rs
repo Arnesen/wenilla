@@ -107,9 +107,9 @@ pub(in crate::minimap) fn emit_quest_dots(
             color: [tint, tint, tint, ctx.alpha],
             ..default()
         });
-        if let (Some(c), Some(ui)) = (ctx.cursor, ctx.cursor_ui) {
+        if let Some(c) = ctx.cursor {
             if rect.contains(c) {
-                *hover = MinimapBlipHover::Npc(npc, ui, grey);
+                *hover = MinimapBlipHover::Npc(npc, grey);
             }
         }
     }
@@ -200,11 +200,11 @@ pub(in crate::minimap) fn emit_tracking_dots(
             color: [tint, tint, tint, ctx.alpha],
             ..default()
         });
-        if let (Some(c), Some(ui)) = (ctx.cursor, ctx.cursor_ui) {
+        if let Some(c) = ctx.cursor {
             if rect.contains(c) {
                 *hover = match name {
-                    DotName::Guid => MinimapBlipHover::Npc(guid, ui, grey),
-                    DotName::Known(n) => MinimapBlipHover::TrackedGo(n, ui, grey),
+                    DotName::Guid => MinimapBlipHover::Npc(guid, grey),
+                    DotName::Known(n) => MinimapBlipHover::TrackedGo(n, grey),
                 };
             }
         }
@@ -213,11 +213,11 @@ pub(in crate::minimap) fn emit_tracking_dots(
     // to `0x5ed2b0` and never reaches the status-7 compare.
     if tracking.resources != 0 {
         if let Some(locks) = locks {
-            for (guid, net, tf, _) in candidates.iter() {
+            for (guid, net, tf, store) in candidates.iter() {
                 if net.kind != EntityKind::GameObject {
                     continue;
                 }
-                let Some(t) = templates.get(guid.0) else {
+                let Some(t) = store.and_then(|s| templates.of(&s.0)) else {
                     continue; // template not answered yet
                 };
                 if tracked_resource(tracking.resources, t.lock_id, locks) {
@@ -230,6 +230,7 @@ pub(in crate::minimap) fn emit_tracking_dots(
     let types = CreatureTypeSources {
         names: Some(names),
         forms,
+        ..Default::default()
     };
     for (guid, net, tf, store) in candidates.iter() {
         if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
@@ -515,6 +516,7 @@ mod tests {
             CreatureTypeSources {
                 names: Some(&NameCache::default()),
                 forms: Some(&forms),
+                ..Default::default()
             }
             .of(&cat_druid),
         );

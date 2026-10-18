@@ -9,8 +9,9 @@ use common::hx;
 
 #[test]
 fn update_object_fixture_decodes() {
-    // A unit create (0xAA), a gameobject create (0xBB) and an out-of-range block [0x10, 0x20].
-    let body = hx("03000000000301aa03200000000000000000cdd70bc6357e04c3f90fa74200000040000000000000803f0000e040000090400000000000000000db0f4940051700000000000000000000000000000008000000aa00000000000000090000000000c03f320000000301bb05000117810700bb000000000000002100000000000040630000000000c84200004843000096430000803f040200000001100120");
+    // A unit create (0xAA), a gameobject create (0xBB, a HAS_POSITION block at (100, 200, 300), as
+    // vmangos sends one) and an out-of-range block [0x10, 0x20].
+    let body = hx("03000000000301aa03200000000000000000cdd70bc6357e04c3f90fa74200000040000000000000803f0000e040000090400000000000000000db0f4940051700000000000000000000000000000008000000aa00000000000000090000000000c03f320000000301bb05400000c84200004843000096430000803f0117810700bb000000000000002100000000000040630000000000c84200004843000096430000803f040200000001100120");
     let packet = messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap();
     let events = decode(packet);
 
@@ -594,6 +595,109 @@ fn unit_living_block_surfaces_the_walk_it_is_already_on() {
             );
         }
         other => panic!("expected one ObjectCreate, got {other:?}"),
+    }
+}
+
+/// The GameObject constructor copies the create block's position over `GAMEOBJECT_POS_X`..`FACING`
+/// (`0x5f7046`..`0x5f706b`), so a create whose descriptor and block disagree is placed by the block.
+#[test]
+fn gameobject_create_is_placed_by_the_block_over_its_position_fields() {
+    let mut body = 1u32.to_le_bytes().to_vec();
+    body.push(0); // has_transport
+    body.push(2); // CREATE_OBJECT
+    write_packed_guid(0xBB, &mut body).unwrap();
+    body.push(5); // TypeId::GameObject
+    body.push(0x40); // HAS_POSITION
+    for v in [5000.0f32, 6000.0, 15.0, 2.0] {
+        body.extend_from_slice(&v.to_le_bytes()); // the block's pose
+    }
+    // Fields 8 (GAMEOBJECT_DISPLAYID) and 15..=18 (GAMEOBJECT_POS_X, _Y, _Z, FACING) in block 0.
+    body.push(1);
+    body.extend_from_slice(&((1u32 << 8) | (0xF << 15)).to_le_bytes());
+    body.extend_from_slice(&3015u32.to_le_bytes());
+    for v in [100.0f32, 200.0, 300.0, 1.0] {
+        body.extend_from_slice(&v.to_le_bytes()); // the descriptor's pose
+    }
+
+    let packet = messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap();
+    match decode(packet).as_slice() {
+        [SessionEvent::ObjectCreate {
+            position,
+            orientation,
+            display_id,
+            ..
+        }] => {
+            assert_eq!(*display_id, Some(3015), "control: the fields were sent");
+            assert_eq!(*position, [5000.0, 6000.0, 15.0], "the block wins");
+            assert_eq!(*orientation, 2.0);
+        }
+        other => panic!("expected one ObjectCreate, got {other:?}"),
+    }
+}
+
+/// The create spline's final-facing bits are tested one by one, each field read in this order when
+/// its bit is set: point (`0x10000`, 12 bytes, `0x47f0bf`), guid (`0x20000`, 8, `0x47f0e8`), angle
+/// (`0x40000`, 4, `0x47f0f9`). The id, timing and path behind them land only if every set bit took
+/// its bytes. Flags `0x50000` is the golden: the point (1, 2, 3), then the angle 1.5.
+#[test]
+fn create_spline_reads_each_final_facing_field_its_bit_names() {
+    // A unit create with a LIVING block on a spline: head and move flags, pose, speeds, then
+    // `spline flags`, the facing fields, timing (3000, 12000, id 42, 5 nodes), the 5 nodes and the
+    // final destination, and a descriptor behind it (UNIT_FIELD_DISPLAYID 1234).
+    fn create(spline_flags: &str, facing: &str) -> Vec<u8> {
+        hx(&[
+            concat!("01000000", "00", "02", "01aa", "03", "20"),
+            concat!("00004000", "00000000"),
+            concat!("000060410000a0410000f04100000000", "00000000"),
+            "000020400000e04000009040721c974000002040db0f4940",
+            spline_flags,
+            facing,
+            "b80b0000e02e00002a00000005000000",
+            concat!("000000000000a0410000f041", "000020410000a0410000f041"),
+            concat!("0000a0410000a0410000f041", "0000a041000020420000f041"),
+            concat!("0000a041000020420000f041", "0000a041000020420000f041"),
+            "050000000000000000000000000000000008000000d2040000",
+        ]
+        .concat())
+    }
+    let point = "0000803f0000004000004040";
+    let guid = "1122334455667788";
+    let angle = "0000c03f";
+    for (name, flags, facing) in [
+        ("point and angle", "00000500", [point, angle].concat()),
+        ("point and guid", "00000300", [point, guid].concat()),
+        ("guid and angle", "00000600", [guid, angle].concat()),
+        ("all three", "00000700", [point, guid, angle].concat()),
+        ("the point alone", "00000100", point.to_string()),
+        ("the guid alone", "00000200", guid.to_string()),
+        ("the angle alone", "00000400", angle.to_string()),
+        ("none", "00000000", String::new()),
+    ] {
+        let packet = messages::parse_server(
+            messages::opcode::SMSG_UPDATE_OBJECT,
+            &create(flags, &facing),
+        )
+        .unwrap();
+        match decode(packet).as_slice() {
+            [SessionEvent::ObjectCreate {
+                guid: 0xAA,
+                display_id,
+                spline,
+                ..
+            }] => {
+                let s = spline.as_ref().expect("the spline");
+                assert_eq!(s.id, 42, "{name}: the id is read where the facing ends");
+                assert_eq!(s.time_passed_ms, 3_000, "{name}");
+                assert_eq!(s.duration_ms, 12_000, "{name}");
+                assert_eq!(s.path.len(), 3, "{name}");
+                assert_eq!(
+                    *display_id,
+                    Some(1234),
+                    "{name}: the fields behind it parse"
+                );
+            }
+            other => panic!("{name}: expected one ObjectCreate, got {other:?}"),
+        }
     }
 }
 

@@ -16,8 +16,8 @@ use benilla_ui::script::UnitState;
 use benilla_world::world_map::CurrentMap;
 
 use crate::area::ZoneInfo;
-use crate::char_select::ClientState;
-use crate::chr_classes::ChrClassTable;
+use crate::client_state::ClientState;
+use crate::chr_classes::{ChrClassTable, ChrRaceTable};
 use crate::creature_anim::select::{move_flags, MovementState};
 use crate::entities::mount::MountChild;
 use crate::names::NameCache;
@@ -74,6 +74,7 @@ pub(crate) struct BridgeReadout<'w, 's> {
     factions: Option<Res<'w, Factions>>,
     reputations: Option<Res<'w, Reputations>>,
     classes: Option<Res<'w, ChrClassTable>>,
+    races: Option<Res<'w, ChrRaceTable>>,
 }
 
 impl BridgeReadout<'_, '_> {
@@ -81,7 +82,6 @@ impl BridgeReadout<'_, '_> {
         match self.state.get() {
             ClientState::Login => "login",
             ClientState::CharSelect => "charselect",
-            ClientState::CharCreate => "charcreate",
             ClientState::InWorld => "inworld",
         }
     }
@@ -134,7 +134,10 @@ impl BridgeReadout<'_, '_> {
         ];
 
         let now = Instant::now();
-        let chr = self.classes.as_deref().map(|t| &t.0);
+        let chr = crate::ui_unit::UnitNames {
+            races: self.races.as_deref().map(|t| &t.0),
+            classes: self.classes.as_deref().map(|t| &t.0),
+        };
         let self_row = self.self_q.single().ok();
         let self_store = self_row.map(|(store, _, _)| store);
         let player_pos = self.player.as_ref().map(|p| p.pos);
@@ -245,13 +248,17 @@ impl BridgeReadout<'_, '_> {
         crate::creature_type::CreatureTypeSources {
             names: self.names.as_deref(),
             forms: None,
+            words: None,
         }
     }
 
     fn peek_name(&self, guid: u64) -> Option<String> {
         self.names
             .as_ref()
-            .and_then(|n| n.peek(guid).map(str::to_string))
+            .and_then(|n| {
+                n.resolve_unit(guid, None, crate::query_cache::Ask::Read)
+                    .map(str::to_string)
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -264,7 +271,7 @@ impl BridgeReadout<'_, '_> {
         motion: Option<&MovementState>,
         self_store: Option<&ObjectStore>,
         dist: f32,
-        chr: Option<&benilla_formats::ChrClasses>,
+        chr: crate::ui_unit::UnitNames<'_>,
     ) -> PlainValue {
         let name = self.peek_name(guid);
         let mut u = match store {

@@ -26,7 +26,7 @@ use super::sheath::{advance_sheath_ceremony, start_sheath_ceremony};
 use super::{
     find_resolved, move_flags, AnimData, AnimDriver, AutoRepeatArmed, BaseAnimRecompute, CastHold,
     DefenseAnim, EmoteAnim, Engaged, MovementState, NockLatch, Overlay, OverlayFade, SheathRequest,
-    SheathSwapMessage, SwingImpact, SwingMessage, SwingSlowdown, Wielded, WoundAnim,
+    SheathSwapMessage, StateKitPins, SwingImpact, SwingMessage, SwingSlowdown, Wielded, WoundAnim,
 };
 
 mod grip;
@@ -266,6 +266,8 @@ pub(super) fn drive_animations(
             Option<&crate::net::UnitMoveModes>,
             // A proc-11 rate node here (the freeze auras', `0x6201d0`) refuses the wound flinch.
             Option<&crate::aura_visual::AuraNodes>,
+            // The live state kits whose anim takes a stationary unit's plays (`0x5fde80`).
+            Option<&StateKitPins>,
         ),
     )>,
     // A mount child's movement view is its host's, fetched through `MountBody.host`.
@@ -281,6 +283,8 @@ pub(super) fn drive_animations(
         &Transform,
         // Read only by the debug trace.
         Has<SelfPlayer>,
+        // The rider's pins: `0x5fde80` writes the kit id into the mount's working state too.
+        Option<&StateKitPins>,
     )>,
     mut swings: MessageReader<SwingMessage>,
     mut impacts: MessageReader<SwingImpact>,
@@ -436,6 +440,7 @@ pub(super) fn drive_animations(
             transform,
             move_modes,
             aura_nodes,
+            state_pins,
         ),
     ) in &mut units
     {
@@ -452,12 +457,13 @@ pub(super) fn drive_animations(
             move_modes,
             host_scale,
             ridden_by_self,
+            state_pins,
         ) = match mount_body {
             Some(mb) => match mount_hosts.get(mb.host) {
-                Ok((s, r, m, sp, f, sw, md, t, host_self)) => {
-                    (s, r, m, sp, f, sw, md, t.scale.x, host_self)
+                Ok((s, r, m, sp, f, sw, md, t, host_self, pins)) => {
+                    (s, r, m, sp, f, sw, md, t.scale.x, host_self, pins)
                 }
-                Err(_) => (None, None, None, None, None, false, None, 1.0, false),
+                Err(_) => (None, None, None, None, None, false, None, 1.0, false, None),
             },
             None => (
                 spline,
@@ -469,6 +475,7 @@ pub(super) fn drive_animations(
                 move_modes,
                 1.0,
                 false,
+                state_pins,
             ),
         };
         // The `0x5fe2f0` rate divisor's `|modelScale|`: a mount child's display column composes
@@ -602,6 +609,7 @@ pub(super) fn drive_animations(
                 }
                 drv.mode = Mode::Gait;
                 drv.gait = Some(DEATH);
+                drv.gait_pinned = false; // a death is never pinned (`0x5fda90`)
                 drv.deferred = None; // a normal arm clears the cache
             }
             continue;
@@ -667,6 +675,28 @@ pub(super) fn drive_animations(
         // The `0x5fd8b0` chain calls loot before standState, after the airborne freeze: a looting
         // unit kneels rather than sits, but still jumps.
         let special = special.filter(|s| !(looting && matches!(s, select::Special::Pose(_))));
+
+        // The stationary state-kit pin (`0x5fde80`): with no `[+0x9e8] & 0x20000f` bit (turning
+        // and falling keep it), every play past `0x5fe2f0`'s lock and fast path plays the head
+        // state kit's id instead, so a pose's enter, loop and stand-up, a JumpStart (`0x60e4d9`),
+        // a landing and a one-shot all become the pin. One pass writes it into the mount's and
+        // the body's working states (`0x5fdeee`, `0x5fdf08`): a rider plays it over Mount (91),
+        // since the pin runs after `0x5fe809`, and a mount child takes its host's.
+        let kit_pin = state_pins
+            .and_then(StateKitPins::head)
+            .filter(|_| mv.flags & move_flags::CAST_PIN_MOVE == 0);
+        let special = special.filter(|_| kit_pin.is_none());
+        if kit_pin.is_some() {
+            match drv.mode {
+                Mode::Entering(_) | Mode::Looping(_) | Mode::Exiting(..) | Mode::Land { .. } => {
+                    drv.mode = Mode::Gait;
+                    drv.gait = None;
+                }
+                // A one-shot over a Special finishes into the pin, never the Special's loop.
+                Mode::Swing { id, under: Some(_) } => drv.mode = Mode::Swing { id, under: None },
+                _ => {}
+            }
+        }
 
         // ── Sheath state: the committed cache (`[+0xd40]`), not the descriptor byte, adopting the
         // byte whenever it changes (`0x604c70`). Every SetSheatheState (`0x611cf0`) snaps except
@@ -853,6 +883,15 @@ pub(super) fn drive_animations(
             }
             // A normal arm clears the cache (`0x5fe48e` writes −1).
             drv.deferred = None;
+            // The pin (`0x5feab5`): the request plays the pin's id, which the same-id dedup
+            // (`0x5fdba0`) drops while the pin already holds the base.
+            if let Some(pin) = kit_pin {
+                if !(drv.mode == Mode::Gait && drv.gait == Some(pin)) {
+                    drv.mode = Mode::Gait;
+                    drv.gait = None;
+                }
+                continue;
+            }
             // Same-id dedup (`0x5fdba0`): an id still playing in its slot is not re-armed, so an
             // eat/drink loop free-runs across the server's ~5 s kit resends.
             let overlay_live = drv.overlay.is_some_and(|ov| {
@@ -882,6 +921,42 @@ pub(super) fn drive_animations(
                 mount_body.is_none()
                     && route_oneshot(id, mv.flags, mv.stand_state) == OneShotRoute::Masked
             };
+            // The full-body route reaches bone 0, whose own state `PlayTrack` compares first
+            // (`0x5febf6` → `0x5fec06`; `0x5fdcab cmp; je 0x5fdd71`): a Gait base already asking
+            // for `id` drops the request. A running key-bone clip is the current id instead
+            // (`0x5fe422`-`0x5fe446`); that case and its `0x5feb5c`/`0x5fe930` routing are not
+            // modelled, so it is excluded here.
+            let key_bone_running = drv
+                .overlay
+                .is_some_and(|ov| player.animation(ov.node).is_some_and(|a| !a.is_finished()));
+            if !masked && !key_bone_running && drv.mode == Mode::Gait && drv.gait == Some(id) {
+                if benilla_assets::trace::enabled() {
+                    benilla_assets::trace::line(
+                        "fct",
+                        &format!("anim dedup-eat unit={entity} id={id} gait=true"),
+                    );
+                }
+                continue;
+            }
+            // The demotion drop (`0x5feb00`-`0x5feb56`): unmounted, route flag clear, request not a
+            // move id (`0x5fead7`), the current id (`0x5fe422`-`0x5fe446`, bone 0's with no key
+            // bone armed) a swing or ready stance and the request Stand or a ready stance, or a
+            // cast or spell-ready stance and the request Stand or spell-ready: with the key bone
+            // not armed `0x5feb54 je 0x5fe93d` drops the request. A kit's Stand over a melee
+            // swing or a ready stance keeps it.
+            if !masked && !key_bone_running && mount_body.is_none() {
+                if let Some(cur) = armed_id(&drv, &player, &tr, anims) {
+                    if select::demotion_drops(cur, id) {
+                        if benilla_assets::trace::enabled() {
+                            benilla_assets::trace::line(
+                                "fct",
+                                &format!("anim demotion-drop unit={entity} id={id} cur={cur}"),
+                            );
+                        }
+                        continue;
+                    }
+                }
+            }
             // Resolve to a clip this model has, roll its variation and its replay budget (a clamp
             // one-shot authored `(min,max)` plays R times).
             let picked =
@@ -1015,19 +1090,36 @@ pub(super) fn drive_animations(
         }
         // ── Stage-2 base recompute (`0x60f389`–`0x60f399`): a state kit's id that differs from
         // the one playing (`0x5fdb50`: key bone, else bone 0) runs `0x5fd9e0(unit, -1)`; it never
-        // plays the id. It must run after this frame's one-shot arms, so the state kit cuts the
-        // impact kit (Charge 22911: Knockdown 121, then Stun 14). A unit inside a Special is left
-        // alone: the recompute would land in the same state, and forcing Gait replays its entry.
+        // plays the id itself, the pin does. It must run after this frame's one-shot arms, so the
+        // state kit cuts the impact kit (Charge 22911: Knockdown 121, then Stun 14). A unit inside
+        // a Special is left alone: the recompute would land in the same state, and forcing Gait
+        // replays its entry. The armed id is the one requested (`+0xf8`, `0x712090`), not the
+        // model's stand-in, so a pinned EmoteSleep (71) playing Sleep (100) is no mismatch.
         if let Some(&want) = pending_recompute.get(&entity) {
-            let armed = drv.overlay.map(|ov| ov.id).or_else(|| {
-                tr.get_main_animation()
-                    .and_then(|n| anims.clips.iter().find(|c| c.node == n))
-                    .map(|c| c.anim_id)
-            });
+            let armed = drv
+                .overlay
+                .map(|ov| ov.id)
+                .or_else(|| drv.active_anim())
+                .or_else(|| {
+                    tr.get_main_animation()
+                        .and_then(|n| anims.clips.iter().find(|c| c.node == n))
+                        .map(|c| c.anim_id)
+                });
             if armed != Some(want) && matches!(drv.mode, Mode::Swing { .. } | Mode::Gait) {
+                // A Gait base already follows the per-frame pick, and `PlayTrack` drops a re-pick
+                // that asks for the id the track already asks for (`0x5fdcab cmp; je 0x5fdd71`),
+                // so only a clip the pick holds past its own target is re-picked: a turn shuffle
+                // and a pin outliving its aura. A Swing base was armed by a one-shot, and its
+                // stale gait id must not dedup the re-pick.
                 drv.deferred = None; // a normal arm clears the cache (`0x5fe48e`)
-                drv.mode = Mode::Gait;
-                drv.gait = None; // recompute a fresh gait next frame
+                let held = drv.gait.is_some_and(|g| {
+                    matches!(g, select::SHUFFLE_LEFT | select::SHUFFLE_RIGHT)
+                        || (drv.gait_pinned && kit_pin.is_none())
+                });
+                if drv.mode != Mode::Gait || held {
+                    drv.mode = Mode::Gait;
+                    drv.gait = None; // recompute a fresh gait next frame
+                }
             }
         }
 
@@ -1075,6 +1167,7 @@ pub(super) fn drive_animations(
                 airborne_frozen,
                 auto_repeat,
                 cast_hold,
+                kit_pin,
                 wielded,
                 store,
                 emote_sounds: emote_sounds.as_deref(),

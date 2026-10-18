@@ -27,7 +27,7 @@ fn end_to_end_two_frame_tree_extracts_in_zkey_order() {
         local cbg = child:CreateTexture(nil, "ARTWORK")
         cbg:SetTexture("Interface\\Child.blp")
         cbg:SetAllPoints()
-        local ctext = child:CreateFontString(nil, "OVERLAY")
+        local ctext = child:CreateFontString(nil, "OVERLAY"); ctext:SetFont("Fonts\\FRIZQT__.TTF", 12)
         ctext:SetText("Hello")
         ctext:SetVertexColor(1, 0, 0, 1)
         ctext:SetAllPoints()
@@ -73,7 +73,7 @@ fn end_to_end_two_frame_tree_extracts_in_zkey_order() {
         .unwrap();
     assert_eq!(parent_bg.rect, Some(Rect::new(300.0, 0.0, 600.0, 400.0)));
 
-    let zs: Vec<u64> = quads.iter().map(|q| q.z).collect();
+    let zs: Vec<u128> = quads.iter().map(|q| q.z).collect();
     let mut sorted = zs.clone();
     sorted.sort_unstable();
     assert_eq!(zs, sorted, "extract must already be in ZKey order");

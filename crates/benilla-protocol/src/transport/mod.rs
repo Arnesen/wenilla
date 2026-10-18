@@ -43,3 +43,15 @@ pub trait ReadExactAsync {
     /// native socket's own timeout raises).
     async fn read_exact_async(&mut self, buf: &mut [u8]) -> std::io::Result<()>;
 }
+
+/// What a non-blocking look at a connection finds ([`Conn::link_state`]): the character-select
+/// park services the link between requests, so a server that drops it is noticed there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkState {
+    /// Nothing to read, and the connection is up.
+    Quiet,
+    /// At least one byte is waiting.
+    Readable,
+    /// The peer closed the connection.
+    Closed,
+}

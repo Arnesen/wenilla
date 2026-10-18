@@ -55,7 +55,7 @@ pub struct Diagnostic {
 }
 
 /// The log, held on the model.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct DiagnosticLog {
     rows: VecDeque<Diagnostic>,
     /// The last `seq` handed out; kept apart from `rows.len()` so eviction never renumbers.
@@ -110,7 +110,7 @@ impl super::UiScript {
     }
 
     /// Retain an addon load failure that never raised (a missing file, an unparseable document, a
-    /// dependency cycle or missing dependency, a broken `Bindings.xml`). It is not dispatched to
+    /// missing or failed dependency, a broken `Bindings.xml`). It is not dispatched to
     /// `geterrorhandler()`: the reference logs such a failure and shows nothing. The caller still
     /// writes its own log line.
     pub fn report_load_failure(&self, msg: &str) {
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn a_warning_reaches_the_retained_log_and_the_host_drain() {
         let mut s = crate::script::UiScript::new().expect("vm");
-        s.run(r#"SetCVar("thisCVarDoesNotExist", "1")"#).unwrap();
+        s.set_cvar_host("thisCVarDoesNotExist", "1");
 
         let host = s.take_warnings();
         assert!(
@@ -220,7 +220,7 @@ mod tests {
         s.run(
             r#"
             f = CreateFrame("Frame", "BytesFrame")
-            t = f:CreateFontString("BytesText")
+            t = f:CreateFontString("BytesText"); t:SetFont("Fonts\\FRIZQT__.TTF", 12)
             -- "a—b" is 5 bytes; cutting at 2 leaves the em dash's lead byte alone.
             local sliced = strsub("a\226\128\148b", 1, 2)
             t:SetText(sliced)

@@ -4,6 +4,7 @@
 //! eligibility gate, the asleep gate, the stow, the posture, then `CMSG_TEXT_EMOTE`. Own sends are
 //! never echoed locally; the server echoes them.
 
+use crate::query_cache::Ask;
 use bevy::prelude::*;
 
 mod parse;
@@ -26,7 +27,10 @@ fn target_player_name(
     if !benilla_protocol::guid::is_player(guid) {
         return None;
     }
-    names.resolve(guid, commands).map(str::to_string)
+    // The command's lookup, as `UnitName`'s (`0x609210`) passes a callback.
+    names
+        .resolve_player(guid, Ask::Event(commands))
+        .map(str::to_string)
 }
 
 /// The target guid a `CMSG_TEXT_EMOTE` carries (`DoEmote`'s caller, `0x49fdb1`): the selection,
@@ -402,6 +406,23 @@ pub(super) fn drain_chat_input(
                         own_store
                     )
                 ));
+                // The forced-reaction table (`SMSG_SET_FORCED_REACTIONS`): when it names the
+                // unit's faction it answers both directions ahead of every faction rule, so a green
+                // ogre under *King of the Gordok* is explained by this line and no other. The
+                // leading rungs (identity, duel, free-for-all) still run first.
+                if let Some(line) = (|| {
+                    let catalog = factions.as_deref()?.catalog();
+                    let tpl = catalog.template(target_store?.0.unit_faction_template()?)?;
+                    let rank = crate::target::ring::forced_rank(reputations, tpl.faction)?;
+                    Some(format!(
+                        "reaction: faction {} is FORCED to rank {rank} by the server's table ({} \
+                         entries); the faction rules below are not reached",
+                        tpl.faction,
+                        reputations.forced.len(),
+                    ))
+                })() {
+                    lines.push(line);
+                }
                 // The at-war bit: the whole of the player-to-unit reaction's leg 3 for a faction
                 // with a reputation slot, which the cursor, the plate and `UnitCanAttack` turn on.
                 let war = (|| {
@@ -802,6 +823,8 @@ pub(super) fn drain_chat_input(
                             entity,
                             spell_id,
                             kind,
+                            cast_flags: 0,
+                            item_cast: false,
                             seq: play_seq.next(),
                         });
                         // A selected caster's GO hits us, so a missile flies end to end; a
@@ -1417,10 +1440,56 @@ fn auto_clear_afk(cvars: &crate::cvars::Cvars) -> bool {
     cvars.flag("autoClearAFK").unwrap_or(true)
 }
 
+/// `SendChatMessage`'s group arms (`0x49f33e`-`0x49f4c7`): the refusal a type meets without its
+/// group, as a message key (`DisplayError` `0x496720`), or the type that goes out. PARTY needs a
+/// party member (id 0x48, `ERR_NOT_IN_GROUP`); RAID, RAID_WARNING and BATTLEGROUND need a raid
+/// (0x19c, `ERR_NOT_IN_RAID`); RAID_WARNING also needs the leader or an assistant (0x4b,
+/// `ERR_NOT_LEADER`). The group leader's RAID goes out as RAID_LEADER (`0x49f3bf`) and its
+/// BATTLEGROUND as BATTLEGROUND_LEADER (`0x49f48b`).
+fn group_gate(
+    kind: super::edit::SendType,
+    group: benilla_ui::script::ChatGroup,
+) -> Result<super::edit::SendType, &'static str> {
+    use super::edit::SendType as T;
+    match kind {
+        T::Party if !group.in_party => Err("ERR_NOT_IN_GROUP"),
+        T::Raid | T::RaidWarning | T::Battleground if group.raid_members == 0 => {
+            Err("ERR_NOT_IN_RAID")
+        }
+        T::RaidWarning if !group.leads_or_assists => Err("ERR_NOT_LEADER"),
+        T::Raid if group.leads => Ok(T::RaidLeader),
+        T::Battleground if group.leads => Ok(T::BattlegroundLeader),
+        other => Ok(other),
+    }
+}
+
+/// Whether a dead or ghost player may send `kind`: the compare chain `0x49f5a3`-`0x49f5da` allows
+/// whisper, party, raid, raid leader, raid warning, guild, officer, channel, AFK, DND, battleground
+/// and battleground leader, so only say, yell and emote are refused (message 0xef,
+/// `ERR_CHAT_WHILE_DEAD`).
+fn dead_may_send(kind: super::edit::SendType) -> bool {
+    use super::edit::SendType as T;
+    match kind {
+        T::Say | T::Yell | T::Emote => false,
+        T::Whisper
+        | T::Party
+        | T::Raid
+        | T::RaidLeader
+        | T::RaidWarning
+        | T::Guild
+        | T::Officer
+        | T::Channel
+        | T::Afk
+        | T::Dnd
+        | T::Battleground
+        | T::BattlegroundLeader => true,
+    }
+}
+
 /// Turn `SendChatMessage` calls into sends. No slash grammar runs here: an addon sending
-/// `"/dance"` says six characters. An unknown chat-type token prints a system line and sends
-/// nothing; an empty line of any other type but AFK and DND sends nothing and prints nothing.
-pub(super) fn drain_addon_chat_sends(
+/// `"/dance"` says six characters. An empty line of any type but AFK and DND sends nothing and
+/// prints nothing.
+pub(crate) fn drain_addon_chat_sends(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     commands: Res<NetCommands>,
     mut chat_log: ResMut<super::feed::ChatLog>,
@@ -1432,26 +1501,29 @@ pub(super) fn drain_addon_chat_sends(
     self_q: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
     // The joined slots a `CHANNEL` target's number names.
     channels: Res<super::edit::ChannelState>,
+    mut errors: ResMut<crate::ui_action::UiErrorKeys>,
 ) {
     let Some(mut script) = script else {
         return;
     };
     for mut send in script.take_chat_sends() {
-        let Some(kind) = super::edit::SendType::from_token(&send.chat_type) else {
-            warn!(
-                "chat: SendChatMessage with unknown type {:?}",
-                send.chat_type
-            );
-            chat_log.push_event(super::event::ChatEvent::text_only(
-                super::event::ChatEventKind::System,
-                format!("Unknown chat type \"{}\".", send.chat_type),
-            ));
+        // The binding has raised on any other token (`0x49f27f`), so none reaches here.
+        let Some(mut kind) = super::edit::SendType::from_token(&send.chat_type) else {
             continue;
         };
-        // An empty line of any type but AFK and DND ends the call here, after the type check and
-        // ahead of the target checks, the AFK clear and the tutorial acknowledge (`0x49f2a1`).
+        // An empty line of any type but AFK and DND ends the call here, ahead of the target
+        // checks, the AFK clear and the tutorial acknowledge (`0x49f2a1`).
         if send.ends_at_empty_line() {
             continue;
+        }
+        // The group gates and the leader promotion, ahead of the AFK clear and the tutorial
+        // acknowledge, which a refused line never reaches.
+        match group_gate(kind, script.chat_group()) {
+            Ok(promoted) => kind = promoted,
+            Err(key) => {
+                errors.0.push(crate::ui_action::UiError::key(key));
+                continue;
+            }
         }
         // A channel target is a slot number, sent as that slot's name; with no such slot the call
         // ends here (`0x49f4ea`), ahead of the AFK clear and the tutorial acknowledge.
@@ -1499,6 +1571,14 @@ pub(super) fn drain_addon_chat_sends(
                     language: None,
                 });
             }
+        }
+        // A dead or ghost player's line is refused after the AFK clear (`0x49f592`-`0x49f5e4`,
+        // `0x605f30`) unless its type is on the allowed chain (`0x49f5a3`-`0x49f5da`).
+        if !dead_may_send(kind) && self_q.iter().next().is_some_and(|s| s.0.is_dead_or_ghost()) {
+            errors
+                .0
+                .push(crate::ui_action::UiError::key("ERR_CHAT_WHILE_DEAD"));
+            continue;
         }
         let text = match wire {
             crate::net::ChatKind::Afk => {

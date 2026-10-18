@@ -18,8 +18,9 @@
 //!   catalogs run in). Sent from a `PostStartup` system; the page repaints only after the task
 //!   yields, which is precisely the moment this lands.
 //! - `"ready"`  — the first glue screen (login *or* character select: the env fast path skips
-//!   Login entirely) has spawned. The page fades its overlay here. Sent once, ever —
-//!   [`signal_ready_once`] — because both screens' `materialize_screen` run every frame.
+//!   Login entirely) is up on the glue VM (`ui_script::lifecycle`'s glue install). The page fades
+//!   its overlay here. Sent once, ever — [`signal_ready_once`] — because the glue VM is rebuilt
+//!   on every return from the world.
 //!
 //! Native builds: every function is a no-op; there is no page.
 

@@ -20,6 +20,9 @@ pub(crate) mod click;
 // `pub(crate)` for the hover inspector, which runs the cursor's `cursor_mode::go_highlightable`.
 pub(crate) mod cursor_mode;
 mod flash;
+mod front;
+#[cfg(test)]
+mod front_tests;
 mod highlight;
 pub(crate) mod hover;
 mod hover_probe;
@@ -63,19 +66,30 @@ pub(crate) use price_discount::vendor_price_discount;
 #[cfg(test)]
 pub(crate) use price_discount::{stormwind_fixture, HUMAN_WARRIOR};
 pub(crate) use relations::{
-    can_assist, can_attack, can_interact, corpse_friendly, is_possessed_by, UNIT_FLAG_POSSESSED,
+    can_assist, can_attack, can_interact, corpse_friendly, is_possessed_by, is_selectable, Assist,
+    UNIT_FLAG_POSSESSED,
 };
 // The attack validator's target half, run in the call that asks, for the player's Attack and the
 // pet bar's; the melee probe's press with nothing selected.
-pub(crate) use scan::{AttackNearestRequest, AttackPick};
-// The chat layer's by-name asks (`/target`, `/assist`).
-pub(crate) use by_name::{AssistRequest, PlayerLookup, TargetByNameRequest};
+#[cfg(test)]
+pub(crate) use scan::LastEnemy;
+pub(crate) use scan::{AttackNearestRequest, AttackPick, CreatureTypes};
+// The chat layer's by-name asks (`/target`, `/assist`), and the typemask `TargetByName`'s
+// candidate feed shares.
+pub(crate) use by_name::{AssistRequest, Candidacy, NameSearch, PlayerLookup, TargetByNameRequest};
+// The one SetSelection path, for the loot response's select (`0x48f3a0`).
+pub(crate) use by_name::SelectCommit;
 // The reaction decode and its faction catalog, which also tint the target frame
 // (`TargetFrame_CheckFaction`); `duel_rung` is the same walk, for `/reaction`.
-pub(crate) use ring::{duel_rung, ring_reaction, ring_variant, Factions, RingVariant};
+pub(crate) use ring::{
+    both_reactions_at_least_neutral, duel_rung, ring_reaction, selection_variant, Factions,
+    RingVariant,
+};
+#[cfg(test)]
+pub(crate) use ring::{ring_variant, PlayerPath, SelectorInput};
 
-pub(crate) use click::DeselectGuid;
 pub use click::Interact;
+pub(crate) use click::{clear_selection_on_world_teardown, deselect_on_ui_shutdown, DeselectGuid};
 
 /// Our target, set the instant we click, as the 1.12 client does without waiting for the server,
 /// and cleared on deselect or when it streams out. `CMSG_SET_SELECTION` carries the guid, which the
@@ -109,6 +123,9 @@ pub(crate) struct Hovered {
     /// [`Self::distance`] holds the hit, so a chest behind the unit does not inherit the mouseover.
     /// To [`click::select_on_click`] it is an object hit, which clears no selection.
     pub(crate) refused: bool,
+    /// The pick is the hovered plate's unit, the plate's enter publishing it (`0x7cb850`), not the
+    /// world's own pick: it stands only while that plate still holds the hover.
+    pub(crate) plate: bool,
 }
 
 impl Hovered {
@@ -145,6 +162,8 @@ pub(crate) struct PickOcclusion {
     pub(crate) distance: f32,
     /// The world hit point, which the ground-targeting cursor rides, as in the reference.
     pub(crate) point: Option<Vec3>,
+    /// The cursor ray's direction, which a right-click on the sky walks along (`0x492d6c`).
+    pub(crate) ray: Option<Dir3>,
 }
 
 impl Default for PickOcclusion {
@@ -152,6 +171,7 @@ impl Default for PickOcclusion {
         Self {
             distance: f32::INFINITY,
             point: None,
+            ray: None,
         }
     }
 }

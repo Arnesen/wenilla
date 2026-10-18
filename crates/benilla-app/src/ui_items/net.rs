@@ -1,12 +1,12 @@
-//! The item packet handlers: `SMSG_INVENTORY_CHANGE_FAILURE` onto the error line, the pending
-//! item locks and the loot latch, and `SMSG_OPEN_CONTAINER` onto the `BAG_OPEN` queue.
+//! The item packet handlers: `SMSG_INVENTORY_CHANGE_FAILURE` onto the error line, the item
+//! unlocks and the loot latch, and `SMSG_OPEN_CONTAINER` onto the `BAG_OPEN` queue.
 
 use benilla_protocol::{ObjectFields, SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
 use super::{EquipError, EquipErrors, BAG_SLOT_FIRST, BANK_BAG_ID_FIRST};
 use crate::net::{NetHandlerApp, ObjectStore, SelfGuid, SelfPlayer};
-use crate::pending_item_ops::{LockTransitions, PendingItemOps};
+use crate::ui_items::locks::ItemReleases;
 use crate::ui_loot::LootLatch;
 
 pub(super) fn register(app: &mut App) {
@@ -15,15 +15,20 @@ pub(super) fn register(app: &mut App) {
         .net_handler(SessionEventKind::Disconnected, on_session_end);
 }
 
-/// The item locks and the queued unlocks die with the session: the reference's lock is item-object
-/// state (`item+0x314`), and the objects are rebuilt at every world entry.
+/// The queued unlocks die with the session, never to fire into a later VM: the reference's lock
+/// is item-object state (`item+0x314`), and the objects are rebuilt at every world entry. The
+/// refusals queued with theirs go too, lines and all: they were the ended world's.
 fn on_session_end(
     In(_): In<SessionEvent>,
-    mut pending: ResMut<PendingItemOps>,
-    mut lock_cleared: ResMut<LockTransitions>,
+    mut releases: ResMut<ItemReleases>,
+    mut equip_errors: ResMut<EquipErrors>,
+    held: Option<ResMut<super::locks::HeldItemLocks>>,
 ) {
-    pending.clear_session();
-    lock_cleared.0.clear();
+    releases.0.clear();
+    equip_errors.0.clear();
+    if let Some(mut held) = held {
+        *held = Default::default();
+    }
 }
 
 /// Container ids from `SMSG_OPEN_CONTAINER`, for [`super::feed::feed_containers`] to fire as
@@ -71,50 +76,57 @@ pub(super) fn container_of(
 fn on_inventory_failure(
     In(ev): In<SessionEvent>,
     mut equip_errors: ResMut<EquipErrors>,
-    mut pending: ResMut<PendingItemOps>,
-    mut lock_cleared: ResMut<LockTransitions>,
     mut latch: ResMut<LootLatch>,
 ) {
     if let SessionEvent::InventoryFailure {
         reason,
         required_level,
         item_guid,
+        item2_guid,
         bag_slot,
     } = ev
     {
-        inventory_failure(
+        let failure = Failure {
             reason,
             required_level,
-            item_guid,
+            items: [item_guid, item2_guid],
             bag_slot,
-            &mut equip_errors,
-            &mut pending,
-            &mut lock_cleared,
-            &mut latch,
-        );
+        };
+        inventory_failure(failure, &mut equip_errors, &mut latch);
     }
 }
 
-/// A refused inventory operation (reason 0 never arrives: `benilla_protocol::events` drops it):
-/// queues the error line and clears the item's pending lock, the unlocked slots waiting in
-/// [`LockTransitions`] for [`super::feed::feed_containers`], since this site has no `UiScript`.
-fn inventory_failure(
+/// One `SMSG_INVENTORY_CHANGE_FAILURE`, past the reason-0 filter.
+struct Failure {
     reason: u8,
     required_level: Option<u32>,
-    item_guid: u64,
+    /// The two item guids the packet names.
+    items: [u64; 2],
     bag_slot: u8,
-    equip_errors: &mut EquipErrors,
-    pending: &mut PendingItemOps,
-    lock_cleared: &mut LockTransitions,
-    latch: &mut LootLatch,
-) {
-    debug!("net: inventory failure {reason:#04x} (item {item_guid:#x}, bag slot {bag_slot})");
+}
+
+/// A refused inventory operation (reason 0 never arrives: `benilla_protocol::events` drops it):
+/// queues the error line, and after it the unlock of both guids the packet names (`0x5e3ac0`,
+/// the second only when nonzero, `0x5e3ad3`), which the container feed runs since this site has
+/// no `UiScript`.
+fn inventory_failure(failure: Failure, equip_errors: &mut EquipErrors, latch: &mut LootLatch) {
+    let Failure {
+        reason,
+        required_level,
+        items: [item_guid, item2_guid],
+        bag_slot,
+    } = failure;
+    debug!(
+        "net: inventory failure {reason:#04x} (items {item_guid:#x} {item2_guid:#x}, bag slot \
+         {bag_slot})"
+    );
+    // The line shows first (`0x496720`), then both unlock (the feed runs them after it).
     equip_errors.0.push(EquipError {
         reason,
         required_level,
         bag_slot,
+        unlocks: [item_guid, item2_guid],
     });
-    lock_cleared.0.extend(pending.clear_by_failure(item_guid));
     // A failure whose first item guid is the looted item (a lockbox) ends the loot (`0x5e3a84`).
     if item_guid != 0 {
         latch.clear_for(item_guid);
@@ -129,54 +141,113 @@ mod tests {
     fn an_inventory_failure_on_the_looted_object_clears_the_latch() {
         const LOCKBOX: u64 = 0x4000_0000_0000_0007;
         let mut errs = EquipErrors::default();
-        let mut pending = PendingItemOps::default();
-        let mut cleared = LockTransitions::default();
         let mut latch = LootLatch(Some(LOCKBOX));
+        let failure = |first: u64| Failure {
+            reason: 2,
+            required_level: None,
+            items: [first, 0],
+            bag_slot: 0,
+        };
 
         // An unrelated item's failure must not end the session.
-        inventory_failure(
-            2,
-            None,
-            0x1234,
-            0,
-            &mut errs,
-            &mut pending,
-            &mut cleared,
-            &mut latch,
-        );
+        inventory_failure(failure(0x1234), &mut errs, &mut latch);
         assert_eq!(latch.0, Some(LOCKBOX));
 
-        inventory_failure(
-            2,
-            None,
-            LOCKBOX,
-            0,
-            &mut errs,
-            &mut pending,
-            &mut cleared,
-            &mut latch,
-        );
+        inventory_failure(failure(LOCKBOX), &mut errs, &mut latch);
         assert_eq!(latch.0, None);
     }
+
+    /// A refusal shows its line first (`0x496720`), then unlocks both items it names (`0x5e3ac0`,
+    /// `0x5e3ad3`); driven through the real handler and the container feed.
+    #[test]
+    fn an_inventory_failure_shows_its_line_then_unlocks_both_items() {
+        use bevy::ecs::system::RunSystemOnce;
+        const A: u64 = 0x4000_0000_0000_00a1;
+        const B: u64 = 0x4000_0000_0000_00b2;
+        const REASON: u8 = 0x16;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        let key = super::super::equip_error::equip_error_key(REASON);
+        script
+            .run(&format!(
+                "{key} = 'Refused.' SEEN = {{}} local f = CreateFrame('Frame') \
+                 f:RegisterEvent('UI_ERROR_MESSAGE') f:RegisterEvent('ITEM_LOCK_CHANGED') \
+                 f:SetScript('OnEvent', function() table.insert(SEEN, event) end)"
+            ))
+            .unwrap();
+        script.lock_item(A);
+        script.lock_item(B);
+        script.run("SEEN = {}").unwrap();
+        app.insert_non_send_resource(script);
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![SessionEvent::InventoryFailure {
+                reason: REASON,
+                required_level: None,
+                item_guid: A,
+                item2_guid: B,
+                bag_slot: 0xff,
+            }],
+        );
+        app.world_mut()
+            .run_system_once(super::super::feed::feed_containers)
+            .unwrap();
+        let s = app
+            .world()
+            .non_send_resource::<benilla_ui::script::UiScript>();
+        assert_eq!(
+            s.eval::<Vec<String>>("return SEEN").unwrap(),
+            ["UI_ERROR_MESSAGE", "ITEM_LOCK_CHANGED", "ITEM_LOCK_CHANGED"]
+        );
+        assert!(!s.item_locked(A) && !s.item_locked(B));
+    }
+
+    /// A refusal that lands while no VM is up keeps its line for the next one but drops its
+    /// unlocks, which would otherwise fire into that VM's locks.
+    #[test]
+    fn a_refusal_with_no_vm_drops_its_unlocks_and_keeps_its_line() {
+        use bevy::ecs::system::RunSystemOnce;
+        const A: u64 = 0x4000_0000_0000_00a1;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        app.world_mut()
+            .resource_mut::<EquipErrors>()
+            .0
+            .push(EquipError {
+                reason: 0x16,
+                required_level: None,
+                bag_slot: 0xff,
+                unlocks: [A, 0],
+            });
+        app.world_mut()
+            .run_system_once(super::super::feed::feed_containers)
+            .unwrap();
+        let errs = &app.world().resource::<EquipErrors>().0;
+        assert_eq!(errs.len(), 1, "the line waits");
+        assert_eq!(errs[0].unlocks, [0, 0]);
+    }
+
     /// Driven through the real registration.
     #[test]
-    fn the_session_end_drops_every_item_lock() {
+    fn the_session_end_drops_every_queued_unlock() {
         let mut app = App::new();
         app.init_resource::<EquipErrors>()
-            .init_resource::<PendingItemOps>()
-            .init_resource::<LockTransitions>()
+            .init_resource::<ItemReleases>()
             .init_resource::<BagOpens>()
             .init_resource::<LootLatch>()
             .init_resource::<SelfGuid>();
         register(&mut app);
         app.world_mut()
-            .resource_mut::<PendingItemOps>()
-            .add([(0, 3, 0x4000_0000_0000_0007, 1)]);
+            .resource_mut::<ItemReleases>()
+            .unlock(0x4000_0000_0000_0007);
         app.world_mut()
-            .resource_mut::<LockTransitions>()
+            .resource_mut::<EquipErrors>()
             .0
-            .push((0, 5));
-        let epoch = app.world().resource::<PendingItemOps>().epoch();
+            .push(EquipError {
+                reason: 0x16,
+                required_level: None,
+                bag_slot: 0xff,
+                unlocks: [0x4000_0000_0000_0008, 0],
+            });
 
         crate::net::handlers::dispatch(
             app.world_mut(),
@@ -186,12 +257,13 @@ mod tests {
             }],
         );
 
-        let pending = app.world().resource::<PendingItemOps>();
-        assert!(pending.is_empty() && !pending.contains(0, 3));
-        assert_ne!(pending.epoch(), epoch, "the feed's gate sees the set move");
         assert!(
-            app.world().resource::<LockTransitions>().0.is_empty(),
-            "no ITEM_LOCK_CHANGED for the old session's slots"
+            app.world().resource::<ItemReleases>().0.is_empty(),
+            "no ITEM_LOCK_CHANGED for the old session's items"
+        );
+        assert!(
+            app.world().resource::<EquipErrors>().0.is_empty(),
+            "nor a refusal's line or unlocks"
         );
     }
 }

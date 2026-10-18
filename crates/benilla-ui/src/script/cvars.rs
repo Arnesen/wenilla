@@ -4,12 +4,14 @@
 //! The host registers the vars it backs and drains Lua's writes from a change queue; its own
 //! writes do not queue. The table dies with the VM, where the reference's outlives every
 //! `ReloadUI`, so the host seeds each new VM with the saved values before anything registers.
-//! An unknown name warns once and is ignored (`GetCVar` answers nil), where the reference's
-//! `GetCVar`, `SetCVar` and `GetCVarDefault` raise `Couldn't find CVar named '%s'` (`0x842310`).
+//! `GetCVar`, `SetCVar` and `GetCVarDefault` raise `Couldn't find CVar named '%s'` on an unknown
+//! name (`0x842310`, at `0x488be7`, `0x488c53` and `0x488d37`); the host-side writes and the
+//! other by-name bindings warn once and ignore it.
 
 use mlua::{Lua, Value};
 
 use super::binding_abi::lua_number_text;
+use super::cvar_checks::CvarCheck;
 use super::{Model, ScriptValue};
 
 /// One registered CVar.
@@ -26,16 +28,19 @@ pub(crate) struct CvarSlot {
     pub latched: bool,
     /// A latched row's staged value, reported to the host through the change queue when written.
     pub pending: Option<String>,
+    /// The change callback that may refuse a write ([`super::cvar_checks`]); host-seeded only.
+    pub check: Option<CvarCheck>,
 }
 
 /// One row of the host's registry as the VM's mirror is seeded from it; `value` is the applied
 /// value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct SeededCvar {
     pub name: String,
     pub value: String,
     pub default: String,
     pub latched: bool,
+    pub check: Option<CvarCheck>,
 }
 
 /// One multisample format the device supports, the reference's triple (`[0xb4b444]`, count
@@ -109,7 +114,8 @@ impl super::UiScript {
 
     /// Register the host-backed CVars as `(name, default)`, idempotently: a re-register refreshes
     /// the default and keeps a live value, and a new row starts at its saved value if the config
-    /// file has one. `&self` so the interface loader can register from a `&UiScript`: the stock
+    /// file has one. A row registered here has no change callback; [`Self::seed_cvars`] carries
+    /// the host registry's. `&self` so the interface loader can register from a `&UiScript`: the stock
     /// `UIOptionsFrame.xml` reads CVars in its own `OnLoad`.
     pub fn register_cvars<'a>(&self, vars: impl IntoIterator<Item = (&'a str, &'a str)>) {
         let mut model = self.model_mut();
@@ -131,6 +137,7 @@ impl super::UiScript {
                             default: default.to_string(),
                             latched: false,
                             pending: None,
+                            check: None,
                         },
                     );
                 }
@@ -153,6 +160,7 @@ impl super::UiScript {
                     default: row.default,
                     latched: row.latched,
                     pending: None,
+                    check: row.check,
                 },
             );
         }
@@ -181,6 +189,15 @@ impl super::UiScript {
             .map(|s| s.value.clone())
     }
 
+    /// One CVar's integer, the record's `+0x28`: Storm's `SStrToInt` of its text, as the set
+    /// stores it (`0x63e127`). `None` with no such record.
+    pub fn cvar_int(&self, name: &str) -> Option<i32> {
+        self.model_mut()
+            .cvars
+            .get(&name.to_ascii_lowercase())
+            .map(|s| super::binding_abi::s_str_to_int(&s.value) as i32)
+    }
+
     /// Snapshot the table as `(name, value, default)`; the saver writes only rows off their
     /// default, so the config file stays a diff.
     pub fn cvars_snapshot(&self) -> Vec<(String, String, String)> {
@@ -189,6 +206,20 @@ impl super::UiScript {
             .values()
             .map(|s| (s.name.clone(), s.value.clone(), s.default.clone()))
             .collect()
+    }
+
+    /// Drain the lines CVar change callbacks printed since the last call, for the console.
+    pub fn take_cvar_console_lines(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.model_mut().cvar_console)
+    }
+
+    /// Whether a Lua write, registration or callback line waits for [`Self::take_cvar_changes`],
+    /// [`Self::take_cvar_registrations`] or [`Self::take_cvar_console_lines`].
+    pub fn has_cvar_traffic(&self) -> bool {
+        let model = self.model_mut();
+        !model.cvar_changes.is_empty()
+            || !model.cvar_registrations.is_empty()
+            || !model.cvar_console.is_empty()
     }
 
     /// Drain the `(name, new_value)` changes queued since the last call, under the registered
@@ -201,6 +232,18 @@ impl super::UiScript {
     /// host's registry keeps them beside its own, as the reference's one table does.
     pub fn take_cvar_registrations(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.model_mut().cvar_registrations)
+    }
+
+    /// The process's count of CVars Lua has created ([`LUA_CVAR_LIMIT`]), which outlives the VM
+    /// as the reference's `[0xb4e3c8]` outlives every `ReloadUI`: the host seeds each new VM with
+    /// it and reads it back.
+    pub fn set_cvar_lua_created(&mut self, count: u32) {
+        self.model_mut().cvar_lua_created = count;
+    }
+
+    /// See [`Self::set_cvar_lua_created`].
+    pub fn cvar_lua_created(&self) -> u32 {
+        self.model_mut().cvar_lua_created
     }
 
     /// Flag a CVar read-only to Lua, or clear it: `CVar::SetReadOnly` (`0x63e030`). A flagged name
@@ -273,10 +316,19 @@ pub(super) fn set_from_engine(model: &mut Model, name: &str, value: String) {
 }
 
 /// The one store every write goes through; returns the registered spelling when the value moved
-/// and the change was queued. A latched slot stages the write, as the reference's `Set 0x63df50`
-/// stores `latchedValue` and skips `InternalSet`; writing back the applied value unstages it.
+/// and the change was queued. The row's check runs first and may refuse the write, as the
+/// reference's `Set 0x63df50` calls the callback before anything else (`0x63df7d`). A latched
+/// slot stages the write, as `Set` stores `latchedValue` and skips `InternalSet`; writing back the
+/// applied value unstages it.
 fn store(model: &mut Model, key: &str, value: String) -> Option<String> {
     let slot = model.cvars.get_mut(key)?;
+    if let Some(check) = slot.check {
+        let verdict = check(&value, &slot.value);
+        model.cvar_console.extend(verdict.line);
+        if !verdict.accept {
+            return None;
+        }
+    }
     if slot.latched {
         let staged = (value != slot.value).then_some(value.clone());
         if slot.pending == staged && staged.is_some() {
@@ -297,16 +349,22 @@ fn store(model: &mut Model, key: &str, value: String) -> Option<String> {
     Some(registered)
 }
 
-/// A by-name write from a binding (`SetCVar`, `ConsoleExec`, `SetGamma`, `SetWorldDetail`): the
-/// change is queued only when the value moved. `false`, with a warning, for an unknown name.
-pub(super) fn write_cvar(model: &mut Model, name: &str, value: String) -> bool {
+/// A by-name write from a binding that raises nothing (`ConsoleExec`, `SetGamma`,
+/// `SetWorldDetail`, the video pairs): the change is queued only when the value moved, and an
+/// unknown name warns once.
+pub(super) fn write_cvar(model: &mut Model, name: &str, value: String) {
     let key = name.to_ascii_lowercase();
     if !model.cvars.contains_key(&key) {
         warn_unknown(model, name);
-        return false;
+        return;
     }
     store(model, &key, value);
-    true
+}
+
+/// `Couldn't find CVar named '%s'` (`0x842310`), the error `GetCVar`, `SetCVar` and
+/// `GetCVarDefault` raise with the name as `lua_tostring` gave it.
+fn unknown_cvar(name: &str) -> mlua::Error {
+    mlua::Error::runtime(format!("Couldn't find CVar named '{name}'"))
 }
 
 fn warn_unknown(model: &mut Model, name: &str) {
@@ -367,11 +425,23 @@ pub fn sstr_to_int(s: &str) -> i32 {
 /// at `0x488c98` and `0x488b6f`).
 const NO_STRING_FORM: &str = "0";
 
+/// `0x842330`, verbatim.
+const USAGE_GET_CVAR: &str = "Usage: GetCVar(\"cvar\")";
+
+/// `0x84238c`, verbatim: the reference's `GetCVarDefault` names itself `SetCVarDefault`.
+const USAGE_GET_CVAR_DEFAULT: &str = "Usage: SetCVarDefault(\"cvar\")";
+
 /// `0x84235c`, verbatim, the unbalanced parenthesis included.
 const USAGE_SET_CVAR: &str = "Usage: SetCVar(\"cvar\", value [, \"scriptCvar\")";
 
 /// `0x8422e8`, verbatim.
 const USAGE_REGISTER_CVAR: &str = "Usage: RegisterCVar(\"cvar\" [, default])";
+
+/// How many CVars `RegisterCVar` creates per process (`0x488b25`: `cmp [0xb4e3c8], 0x1e`).
+pub const LUA_CVAR_LIMIT: u32 = 30;
+
+/// `0x8422c0`, verbatim.
+const TOO_MANY_CVARS: &str = "Attempted to register too many CVars";
 
 /// The CVars `CGGameUI::InitializeGame` flags read-only for the whole world session, the table
 /// at `0x83de4c` walked by `0x48f566`-`0x48f584`; `ShutdownGame` clears them again
@@ -390,14 +460,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(name) = cvar_arg(args.front()) else {
                 return Err(mlua::Error::runtime(USAGE_REGISTER_CVAR));
             };
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // The limit is tested before the name is looked up (`0x488b25`), so at the limit a
+            // re-declaration raises too.
+            if model.cvar_lua_created >= LUA_CVAR_LIMIT {
+                return Err(mlua::Error::runtime(TOO_MANY_CVARS));
+            }
             // The default only when `lua_isstring(2)` passes (`0x488b56`), else "0".
             let value = cvar_arg(args.get(1)).unwrap_or_else(|| NO_STRING_FORM.to_string());
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let key = name.to_ascii_lowercase();
             // A saved value outranks the declared one, which stays the default for the saver.
             let saved = model.cvars_saved_base.get(&key).cloned();
             if model.cvars.contains_key(&key) {
                 return Ok(());
+            }
+            // Only a call that creates the record counts (`0x488b8f`, past the lookup at
+            // `0x488b7d`). A saved name is no creation: the reference's config load already made
+            // its record (`set`, `0x63d582`), so its lookup finds one.
+            if saved.is_none() {
+                model.cvar_lua_created += 1;
             }
             // The host gives the row a place in its registry, which outlives this VM.
             model.cvar_registrations.push((name.clone(), value.clone()));
@@ -409,35 +490,40 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     default: value,
                     latched: false,
                     pending: None,
+                    check: None,
                 },
             );
             Ok(())
         })?,
     )?;
 
+    // `GetCVar(name)` (`0x488ba0`).
     lua.globals().set(
         "GetCVar",
-        lua.create_function(|lua, name: String| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        lua.create_function(|lua, args: mlua::MultiValue| {
+            // `lua_isstring(1)` (`0x488ba8`): a string or a number names it.
+            let Some(name) = cvar_arg(args.front()) else {
+                return Err(mlua::Error::runtime(USAGE_GET_CVAR));
+            };
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
             match model.cvars.get(&name.to_ascii_lowercase()) {
                 Some(slot) => Ok(Value::String(lua.create_string(&slot.value)?)),
-                None => {
-                    warn_unknown(&mut model, &name);
-                    Ok(Value::Nil)
-                }
+                None => Err(unknown_cvar(&name)),
             }
         })?,
     )?;
+    // `GetCVarDefault(name)` (`0x488cf0`).
     lua.globals().set(
         "GetCVarDefault",
-        lua.create_function(|lua, name: String| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        lua.create_function(|lua, args: mlua::MultiValue| {
+            // `lua_isstring(1)` (`0x488cf8`): a string or a number names it.
+            let Some(name) = cvar_arg(args.front()) else {
+                return Err(mlua::Error::runtime(USAGE_GET_CVAR_DEFAULT));
+            };
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
             match model.cvars.get(&name.to_ascii_lowercase()) {
                 Some(slot) => Ok(Value::String(lua.create_string(&slot.default)?)),
-                None => {
-                    warn_unknown(&mut model, &name);
-                    Ok(Value::Nil)
-                }
+                None => Err(unknown_cvar(&name)),
             }
         })?,
     )?;
@@ -525,13 +611,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let value = cvar_arg(args.get(1)).unwrap_or_else(|| NO_STRING_FORM.to_string());
             {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                // The lookup comes first (`0x488c47`-`0x488c59`): an unknown name raises before
+                // the read-only flag is read.
+                let key = name.to_ascii_lowercase();
+                if !model.cvars.contains_key(&key) {
+                    return Err(unknown_cvar(&name));
+                }
                 // Flag bit2 (`0x488c67`), tested before anything is written.
-                if model.cvars_read_only.contains(&name.to_ascii_lowercase()) {
+                if model.cvars_read_only.contains(&key) {
                     return Err(mlua::Error::runtime(format!("\"{name}\" is read-only")));
                 }
-                if !write_cvar(&mut model, &name, value.clone()) {
-                    return Ok(());
-                }
+                store(&mut model, &key, value.clone());
             }
             // A third argument that passes `lua_isstring` is the `CVAR_UPDATE` token, arg1, with
             // the value as arg2 (`0x488cad`-`0x488cd5`), fired on every such call, changed or not,
@@ -936,12 +1026,14 @@ mod tests {
                 value: "1".into(),
                 default: "1".into(),
                 latched: true,
+                check: None,
             },
             SeededCvar {
                 name: "MusicVolume".into(),
                 value: "0.4".into(),
                 default: "0.4".into(),
                 latched: false,
+                check: None,
             },
         ]);
         s.run(r#"SetCVar("gxVSync", 0)"#).unwrap();
@@ -1039,14 +1131,49 @@ mod tests {
         assert_eq!((master.1.as_str(), master.2.as_str()), ("0.25", "1.0"));
     }
 
+    /// `0x488bd1`-`0x488bed`, `0x488c47`-`0x488c59`, `0x488d21`-`0x488d3d`: the lookup `0x63dec0`
+    /// returns 0 and the verb raises `0x842310` with the name; nothing is returned or written.
     #[test]
-    fn unknown_names_warn_once_and_no_op() {
+    fn an_unknown_name_raises_in_the_three_verbs() {
         let mut s = script_with_volume();
-        assert!(s
-            .eval::<bool>(r#"return GetCVar("bogusKnob") == nil"#)
-            .unwrap());
-        s.run(r#"SetCVar("bogusKnob", 1)"#).unwrap();
-        s.run(r#"SetCVar("bogusKnob", 2)"#).unwrap();
+        for call in [
+            r#"GetCVar("bogusKnob")"#,
+            r#"SetCVar("bogusKnob", 1)"#,
+            r#"GetCVarDefault("bogusKnob")"#,
+        ] {
+            let observed: (bool, String) = s
+                .eval(&format!(
+                    "local ok, err = pcall(function() return {call} end) \
+                     return ok, tostring(err)"
+                ))
+                .unwrap();
+            assert!(!observed.0, "{call} must raise");
+            assert!(
+                observed.1.contains("Couldn't find CVar named 'bogusKnob'"),
+                "{call}: {}",
+                observed.1
+            );
+        }
+        assert!(s.take_cvar_changes().is_empty(), "nothing is written");
+        // The name is `lua_tostring`'s, so a number names one too (`0x488bca`).
+        let err = s.run("GetCVar(7)").expect_err("7 names no CVar");
+        assert!(
+            err.to_string().contains("Couldn't find CVar named '7'"),
+            "{err}"
+        );
+        // The lookup precedes the read-only test (`0x488c47` before `0x488c67`).
+        s.set_cvar_read_only("bogusKnob", true);
+        let err = s
+            .run(r#"SetCVar("bogusKnob", 1)"#)
+            .expect_err("still unknown");
+        assert!(err.to_string().contains("Couldn't find CVar"), "{err}");
+    }
+
+    #[test]
+    fn host_side_unknown_names_warn_once_and_no_op() {
+        let mut s = script_with_volume();
+        s.set_cvar_host("bogusKnob", "1");
+        s.set_cvar_host("bogusKnob", "2");
         assert!(s.take_cvar_changes().is_empty());
         let warns: Vec<String> = s.take_warnings();
         assert_eq!(warns.len(), 1, "warn-once: {warns:?}");

@@ -1,5 +1,5 @@
 //! The host's state lives off `_G`: 1.12.1's global table has no name for the clock, the zone
-//! caches, the game clock or the error-handler slot (`reference/1.12-globals.tsv`), and the
+//! caches, the game clock or the error-handler slot (`reference/lua_globals.tsv`), and the
 //! getters over them read the client's own state, which Lua cannot reach. So a global an addon
 //! assigns under one of benilla's old host names is a global no getter reads.
 
@@ -203,6 +203,23 @@ fn the_getters_answer_the_pushed_state_in_their_1_12_shapes() {
         s.eval::<(f64, f64)>("return GetGameTime()").unwrap(),
         (21.0, 7.0)
     );
+
+    // An ownerless zone: the type is answered and the faction name is the empty string
+    // (`0x48d633`, pushed at `0x48d68f`), not nil.
+    s.set_zone_texts(crate::script::ZoneTexts {
+        pvp_type: Some("contested".into()),
+        pvp_faction: Some(String::new()),
+        ..Default::default()
+    });
+    assert_eq!(s.arity("GetZonePVPInfo()").unwrap(), 3);
+    assert_eq!(
+        s.eval::<String>(
+            "local t, f, a = GetZonePVPInfo() \
+             return t .. '|' .. type(f) .. ':' .. f .. '|' .. tostring(a)"
+        )
+        .unwrap(),
+        "contested|string:|nil"
+    );
 }
 
 /// The reference's handler slot starts empty (`[0x8722cc]` = -1 at `0x7039e0`), so
@@ -244,11 +261,11 @@ fn the_engine_reads_the_handler_slot_not_the_geterrorhandler_global() {
          seterrorhandler(function(m) table.insert(Heard, m) end) \
          geterrorhandler = function() return function(m) table.insert(Decoy, m) end end \
          local f = CreateFrame('Frame') \
-         f:RegisterEvent('ERROR_PROBE') \
+         f:RegisterEvent('PLAYER_ALIVE') \
          f:SetScript('OnEvent', function() error('slot probe') end)",
     )
     .unwrap();
-    s.fire_event("ERROR_PROBE", vec![]);
+    s.fire_event("PLAYER_ALIVE", vec![]);
     s.dispatch_script_errors_to_handler();
     assert_eq!(
         s.eval::<(i64, i64)>("return table.getn(Heard), table.getn(Decoy)")

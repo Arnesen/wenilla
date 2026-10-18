@@ -23,6 +23,16 @@ use crate::ui_chat::ChatLog;
 use crate::ui_unit::{CombatTextEvent, UnitCombatFeedback};
 
 use crate::net::{GuidIndex, NetCommands, ObjectStore, SelfGuid};
+use crate::query_cache::Ask;
+
+/// A streamed unit's descriptor, which names it (`0x609210`); `None` for a guid not streamed.
+fn streamed<'a>(
+    index: &GuidIndex,
+    stores: &'a Query<&mut ObjectStore>,
+    guid: u64,
+) -> Option<&'a ObjectStore> {
+    index.0.get(&guid).and_then(|&e| stores.get(e).ok())
+}
 
 /// Gate A: the recipient's entity, unless the recipient is us (`0x607140` and `0x6128b0` compare
 /// the anchor guid to the active player and return before submitting).
@@ -323,9 +333,14 @@ pub(super) fn periodic_aura_log(
                 ),
                 PeriodicTick::Heal { amount } => Some(CombatTextEvent {
                     message_type: "PERIODIC_HEAL",
+                    // Once per packet, the lookup with a callback: a refused name is asked again.
                     data: Some(
                         names
-                            .resolve(s.caster, net)
+                            .resolve_unit(
+                                s.caster,
+                                streamed(index, stores, s.caster),
+                                Ask::Event(net),
+                            )
                             .map(str::to_string)
                             .unwrap_or_default(),
                     ),
@@ -457,6 +472,7 @@ pub(super) fn spell_heal_log(
     s: SpellHealLog,
     index: &GuidIndex,
     self_guid: &SelfGuid,
+    stores: &Query<&mut ObjectStore>,
     feedback: &mut MessageWriter<UnitCombatFeedback>,
     center: &mut MessageWriter<CombatTextEvent>,
     names: &NameCache,
@@ -474,9 +490,10 @@ pub(super) fn spell_heal_log(
     if self_guid.0 == Some(s.target) {
         center.write(CombatTextEvent {
             message_type: if s.critical { "HEAL_CRIT" } else { "HEAL" },
+            // Once per packet, the lookup with a callback: a refused name is asked again.
             data: Some(
                 names
-                    .resolve(s.healer, net)
+                    .resolve_unit(s.healer, streamed(index, stores, s.healer), Ask::Event(net))
                     .map(str::to_string)
                     .unwrap_or_default(),
             ),

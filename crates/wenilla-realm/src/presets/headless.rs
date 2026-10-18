@@ -383,7 +383,12 @@ impl Bot {
 }
 
 fn connect(servers: &Servers, account: &str, password: &str) -> Result<WorldSession> {
-    let logon = benilla_protocol::logon(&servers.realmd, account, password)
+    let logon = benilla_protocol::logon(
+        &servers.realmd,
+        account,
+        password,
+        benilla_protocol::auth::LOCALE_TAG_EN_US,
+    )
         .context("logging in to realmd")?;
     let world = if servers.mangosd.contains(':') {
         servers.mangosd.clone()

@@ -13,5 +13,6 @@ workspace = true
 # `Date.now()` in a browser, where std's panics on first use.
 web-time = "1"
 roxmltree = "0.20"
-# The script host's Lua 5.1; `vendored` builds it from the workspace's patched `lua-src`.
-mlua = { version = "0.11", features = ["lua51", "vendored"] }
+# The script host's Lua: benilla's own interpreter, through a crate that answers to the name
+# `mlua` (`src/lib.rs`).
+benilla-mlua = { path = "../benilla-mlua" }

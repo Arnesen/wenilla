@@ -2,7 +2,7 @@
 
 use std::io::{self, Read};
 
-use crate::wire::{read_f32_le, read_u32_le, read_u64_le, read_u8};
+use crate::wire::{read_f32_le, read_i32_le, read_u32_le, read_u64_le, read_u8};
 
 /// `SMSG_LOG_XPGAIN`: an XP award; `victim` is 0 for non-kill XP (vmangos `Misc.cpp:512-522`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,27 +92,29 @@ pub fn talent_wipe_confirm(trainer_guid: u64) -> Vec<u8> {
 pub struct LevelUpInfo {
     /// The level just reached.
     pub level: u32,
-    /// Hit points gained.
-    pub health: u32,
+    /// Hit points gained, negative on a loss.
+    pub health: i32,
     /// Power gains: mana, rage, focus, energy, happiness. The server fills only mana, which is
     /// the reference chat line's mana argument.
-    pub powers: [u32; 5],
+    pub powers: [i32; 5],
     /// Stat gains in `SPELL_STAT0..4` order (str, agi, stam, int, spirit), one chat line per
     /// positive entry.
-    pub stats: [u32; 5],
+    pub stats: [i32; 5],
 }
 
-/// Read `SMSG_LEVELUP_INFO`: `u32` level, health, 5 powers, 5 stats (`Misc.cpp:524-532`).
+/// Read `SMSG_LEVELUP_INFO`: `u32` level, `i32` health, 5 powers, 5 stats (`Misc.cpp:524-532`).
+/// The reference fires the gains as `%d` (`0x5e413e`), so a loss the server wraps into its `u32`
+/// (vmangos `Player.cpp:3203-3215`) reads negative.
 pub(super) fn read_level_up_info(r: &mut impl Read) -> io::Result<LevelUpInfo> {
     let level = read_u32_le(r)?;
-    let health = read_u32_le(r)?;
-    let mut powers = [0u32; 5];
+    let health = read_i32_le(r)?;
+    let mut powers = [0; 5];
     for p in &mut powers {
-        *p = read_u32_le(r)?;
+        *p = read_i32_le(r)?;
     }
-    let mut stats = [0u32; 5];
+    let mut stats = [0; 5];
     for s in &mut stats {
-        *s = read_u32_le(r)?;
+        *s = read_i32_le(r)?;
     }
     Ok(LevelUpInfo {
         level,

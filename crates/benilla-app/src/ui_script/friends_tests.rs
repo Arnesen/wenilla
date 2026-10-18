@@ -44,6 +44,25 @@ fn push(s: &mut UiScript, state: SocialState, event: &str) {
     s.fire_event(event, Vec::new());
 }
 
+/// `FriendsFrame.xml` writes `<FontString bytes="256"/>` on the `/who` box (`0x77a225`-`0x77a260`).
+#[test]
+fn the_who_box_stops_at_255_bytes() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let s = setup();
+    assert_eq!(
+        s.eval::<i64>("return WhoFrameEditBox:GetMaxBytes()")
+            .unwrap(),
+        256
+    );
+    s.run("WhoFrameEditBox:SetText(string.rep('a', 300))")
+        .unwrap();
+    assert_eq!(
+        s.eval::<i64>("return string.len(WhoFrameEditBox:GetText())")
+            .unwrap(),
+        255
+    );
+}
+
 /// With no guild seated, `IsInGuild()` is nil and `FriendsFrame_OnShow`'s `InGuildCheck()` greys
 /// the guild tab (`FriendsFrame.lua:78`, `:920-922`).
 #[test]
@@ -749,8 +768,11 @@ fn the_who_list_reaches_its_last_row_at_the_bars_end() {
         .eval::<(f64, f64)>("return WhoListScrollFrameScrollBar:GetMinMaxValues()")
         .unwrap();
     assert_eq!(bar_max, 512.0, "(49 − 17) × 16");
+    // The overflow as geometry: the stored range is not re-measured for a child's resize.
     let overflow = s
-        .eval::<f64>("return WhoListScrollFrame:GetVerticalScrollRange()")
+        .eval::<f64>(
+            "return WhoListScrollFrameScrollChildFrame:GetHeight() - WhoListScrollFrame:GetHeight()",
+        )
         .unwrap();
     assert_eq!(
         overflow, 497.0,

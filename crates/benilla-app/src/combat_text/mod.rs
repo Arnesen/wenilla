@@ -116,7 +116,7 @@ const MAX_PER_UNIT: usize = 4;
 
 /// World text draws beneath all UI, as the reference draws it in the world scene: the append
 /// lane's bottom band ([`crate::ui_pass::overlay_z`]).
-const Z_WORLD_TEXT: u64 = overlay_z::WORLD_TEXT;
+const Z_WORLD_TEXT: u128 = overlay_z::WORLD_TEXT;
 
 /// The first free of the unit's 4 slots; `None` is a hard drop, no eviction (`0x6c73f0`). The
 /// slot is also the seat-order key.
@@ -259,7 +259,12 @@ pub(crate) fn float_combat_text(
                 path: font.as_ref().and_then(|f| f.0.as_deref()),
                 height: Some(target_px),
                 outline: Outline::None,
+                monochrome: false,
+                spacing: 0.0, // one line
+                shadow_x: 0.0,
                 alpha_gradient: None,
+                non_space_wrap: false,
+                max_lines: 0,
             },
             // A world overlay with its own seat; the UI grid does not apply.
             crate::ui_text::TextSeat::Exact,

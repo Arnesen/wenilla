@@ -1,6 +1,10 @@
 //! The engine-free core of benilla's UI: the `.toc`, FrameXML and `Bindings.xml` parsers, the
 //! layout resolver, the frame arena, draw order and the Lua host FrameXML runs in; no Bevy, no GPU.
 
+// Every `mlua::` path in this crate resolves to benilla's own interpreter, and dependents name
+// the same API through `benilla_ui::mlua`.
+pub extern crate benilla_mlua as mlua;
+
 pub mod bindings_xml;
 pub mod civil;
 pub mod framexml;

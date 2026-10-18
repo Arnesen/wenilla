@@ -5,8 +5,9 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::binding_abi::flag;
+use super::binding_abi::{self, flag};
 use super::Model;
+use crate::script::binding_abi::Idx;
 
 /// Which questgiver panel a [`QuestState`] is for, set from the wire packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +61,11 @@ pub struct QuestState {
     pub greeting: String,
     pub active_titles: Vec<String>,
     pub available_titles: Vec<String>,
+    /// Each greeting quest's level, beside its title in the same pool (`+0x04` of a row, the title
+    /// at `+0x08`, `0xbde690` and `0xbdfe60`): `GetActiveLevel` and `GetAvailableLevel` read it. A
+    /// pool built without levels reads 0.
+    pub active_levels: Vec<u32>,
+    pub available_levels: Vec<u32>,
     // Detail, progress and reward panels.
     pub title: String,
     /// The text of whichever panel is live: quest, progress or reward.
@@ -89,6 +95,8 @@ impl Default for QuestState {
             greeting: String::new(),
             active_titles: Vec::new(),
             available_titles: Vec::new(),
+            active_levels: Vec::new(),
+            available_levels: Vec::new(),
             title: String::new(),
             body: String::new(),
             objectives: String::new(),
@@ -102,6 +110,13 @@ impl Default for QuestState {
             background_material: None,
         }
     }
+}
+
+/// The levels of the last greeting's active and available rows, one per row.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PoolLevels {
+    active: Vec<u32>,
+    available: Vec<u32>,
 }
 
 /// A greeting row picked by `SelectActiveQuest` or `SelectAvailableQuest`, 1-based in its list.
@@ -134,8 +149,23 @@ pub enum QuestAction {
 
 impl super::UiScript {
     /// Push (or clear, with `None`) the open questgiver panel snapshot.
+    ///
+    /// A greeting also refills the two level pools, which stay when the panel closes or another
+    /// panel opens, as the reference's pools do until its next quest list (`0x5dbb10`).
     pub fn set_quest(&mut self, state: Option<QuestState>) {
-        self.model_mut().quest = state;
+        let mut model = self.model_mut();
+        if let Some(q) = state.as_ref().filter(|q| q.panel == QuestPanel::Greeting) {
+            let pool = |titles: &[String], levels: &[u32]| {
+                (0..titles.len())
+                    .map(|i| levels.get(i).copied().unwrap_or(0))
+                    .collect()
+            };
+            model.quest_pool_levels = PoolLevels {
+                active: pool(&q.active_titles, &q.active_levels),
+                available: pool(&q.available_titles, &q.available_levels),
+            };
+        }
+        model.quest = state;
     }
 
     /// Drain the greeting-panel row selects queued since the last call.
@@ -146,6 +176,15 @@ impl super::UiScript {
     /// Drain the button intents queued since the last call.
     pub fn take_quest_actions(&mut self) -> Vec<QuestAction> {
         std::mem::take(&mut self.model_mut().quest_actions)
+    }
+
+    /// Take the `CloseQuest()` calls queued since the last drain, leaving the other intents in
+    /// order: a close core answers the call its own `QUEST_FINISHED` raised through `OnHide`.
+    pub fn take_quest_close(&mut self) -> bool {
+        let actions = &mut self.model_mut().quest_actions;
+        let before = actions.len();
+        actions.retain(|a| !matches!(a, QuestAction::Close));
+        actions.len() != before
     }
 }
 
@@ -246,7 +285,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     fn install_title(lua: &Lua, name: &str, active: bool) -> mlua::Result<()> {
         lua.globals().set(
             name,
-            lua.create_function(move |lua, i: usize| {
+            lua.create_function(move |lua, Idx(i): Idx| {
                 let title = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
                     model.quest.as_ref().and_then(|q| {
@@ -264,6 +303,42 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     }
     install_title(lua, "GetActiveTitle", true)?;
     install_title(lua, "GetAvailableTitle", false)?;
+
+    // GetActiveLevel(index) (`0x501c20`) and GetAvailableLevel(index) (`0x501ba0`): the level stored
+    // beside the greeting row, 0 for an index outside the pool (`dec`, then an unsigned compare
+    // against the count, so 0 and negatives miss too). The pools hold the rows of the last
+    // greeting, whether or not its panel is still open, and 0 before any. The usage texts are the exe's own,
+    // `Get` twice (`0x84ed40`, `0x84ed1c`).
+    fn install_level(lua: &Lua, name: &str, usage: &'static str, active: bool) -> mlua::Result<()> {
+        lua.globals().set(
+            name,
+            lua.create_function(move |lua, index: Value| {
+                let row = binding_abi::number_arg(lua, index, usage)?.wrapping_sub(1) as u32;
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let pool = &model.quest_pool_levels;
+                let levels = if active {
+                    &pool.active
+                } else {
+                    &pool.available
+                };
+                let level = levels.get(row as usize).copied().unwrap_or(0);
+                // The level is pushed through `fild` of a signed dword.
+                Ok(i64::from(level as i32))
+            })?,
+        )
+    }
+    install_level(
+        lua,
+        "GetActiveLevel",
+        "Usage: GetGetActiveLevel(index)",
+        true,
+    )?;
+    install_level(
+        lua,
+        "GetAvailableLevel",
+        "Usage: GetGetAvailableLevel(index)",
+        false,
+    )?;
 
     // GetQuestItemInfo(type, index) → name, texture, numItems, quality, isUsable (`0x501f80`): five
     // values, `isUsable` 1 or nil. A type other than `"reward"`, `"choice"` or `"required"` (any
@@ -329,7 +404,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetQuestItemLink(type, index), for a row's ctrl and shift clicks (`QuestFrame.lua:118`).
     g.set(
         "GetQuestItemLink",
-        lua.create_function(|lua, (kind, index): (String, usize)| {
+        lua.create_function(|lua, (kind, index): (String, Value)| {
+            // `index - 1` is compared unsigned against 6 (`0x501924`), so a zero or negative index
+            // is no item; every miss pushes one nil (`0x50216a`).
+            let index = super::binding_abi::index_arg(
+                lua,
+                index,
+                "Usage: GetQuestItemLink(\"type\", index)",
+            )?;
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model.quest.as_ref().and_then(|q| {
@@ -447,11 +529,36 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `RewChoiceItemId` with it.
     g.set(
         "GetQuestReward",
-        lua.create_function(|lua, choice: Option<u32>| {
+        lua.create_function(|lua, choice: Option<Value>| {
+            // `is-number` failing leaves the choice at -1 (`0x501d89`) and raises nothing; a
+            // number is `trunc(n) - 1` (`0x501da8`), read as signed.
+            let choice = match choice {
+                Some(v) => lua
+                    .coerce_number(v)?
+                    .map_or(-1, |n| super::binding_abi::ftol(n).wrapping_sub(1)),
+                None => -1,
+            };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.quest_actions.push(super::QuestAction::Reward(
-                choice.unwrap_or(0).saturating_sub(1),
-            ));
+            // Off the reward panel the reference does nothing and answers success (`0x5015b0`:
+            // `[0xbe0818] != 3`).
+            let Some(q) = model
+                .quest
+                .as_ref()
+                .filter(|q| q.panel == QuestPanel::Reward)
+            else {
+                return Ok(());
+            };
+            // With choices on offer an index outside `[0, n)` fails (`0x501608`..`0x50160e`) and
+            // the binding raises; without any, the wire gets `max(choice, 0)` (`0x501627`).
+            let n = q.choices.len() as i32;
+            if n > 0 && !(0..n).contains(&choice) {
+                return Err(mlua::Error::RuntimeError(
+                    "Invalid reward choice in GetQuestReward([choice])".into(),
+                ));
+            }
+            model
+                .quest_actions
+                .push(super::QuestAction::Reward(choice.max(0) as u32));
             Ok(())
         })?,
     )?;
@@ -664,6 +771,81 @@ mod tests {
         assert!(s.take_quest_selects().is_empty(), "drained");
     }
 
+    /// `GetActiveLevel` / `GetAvailableLevel` (`0x501c20`, `0x501ba0`): the level stored beside
+    /// the greeting row, 0 outside the pool or with no greeting, and the exe's own usage texts.
+    #[test]
+    fn greeting_levels_answer_per_pool_and_zero_outside_it() {
+        let mut s = UiScript::new().unwrap();
+        for (call, usage) in [
+            ("GetActiveLevel()", "Usage: GetGetActiveLevel(index)"),
+            ("GetActiveLevel(nil)", "Usage: GetGetActiveLevel(index)"),
+            ("GetActiveLevel('x')", "Usage: GetGetActiveLevel(index)"),
+            ("GetAvailableLevel()", "Usage: GetGetAvailableLevel(index)"),
+            (
+                "GetAvailableLevel({})",
+                "Usage: GetGetAvailableLevel(index)",
+            ),
+        ] {
+            let err = s.run(call).expect_err(call).to_string();
+            assert!(err.contains(usage), "{call}: {err}");
+        }
+        // No greeting open: every index reads 0.
+        assert_eq!(s.eval::<i64>("return GetActiveLevel(1)").unwrap(), 0);
+        s.set_quest(Some(QuestState {
+            panel: QuestPanel::Greeting,
+            active_titles: vec!["Report to Goldshire".into(), "Wolves".into()],
+            active_levels: vec![1, 7],
+            available_titles: vec!["Kobold Camp Cleanup".into()],
+            available_levels: vec![3],
+            ..QuestState::default()
+        }));
+        for (call, want) in [
+            ("GetActiveLevel(1)", 1),
+            ("GetActiveLevel(2)", 7),
+            ("GetActiveLevel('2')", 7),
+            ("GetActiveLevel(2.9)", 7),
+            ("GetActiveLevel(3)", 0),
+            ("GetActiveLevel(0)", 0),
+            ("GetActiveLevel(-1)", 0),
+            ("GetAvailableLevel(1)", 3),
+            ("GetAvailableLevel(2)", 0),
+        ] {
+            assert_eq!(
+                s.eval::<i64>(&format!("return {call}")).unwrap(),
+                want,
+                "{call}"
+            );
+        }
+        // The pools outlive the panel: closing it, or opening another, keeps the last list's
+        // levels until a new list replaces them.
+        s.set_quest(Some(QuestState {
+            panel: QuestPanel::Greeting,
+            active_titles: vec!["Report to Goldshire".into(), "Wolves".into()],
+            active_levels: vec![1, 7],
+            ..QuestState::default()
+        }));
+        s.set_quest(None);
+        assert_eq!(s.eval::<i64>("return GetActiveLevel(2)").unwrap(), 7);
+        s.set_quest(Some(QuestState::default()));
+        assert_eq!(s.eval::<i64>("return GetActiveLevel(1)").unwrap(), 1);
+        s.set_quest(Some(QuestState {
+            panel: QuestPanel::Greeting,
+            active_titles: vec!["Another".into()],
+            active_levels: vec![9],
+            ..QuestState::default()
+        }));
+        assert_eq!(s.eval::<i64>("return GetActiveLevel(1)").unwrap(), 9);
+        assert_eq!(s.eval::<i64>("return GetActiveLevel(2)").unwrap(), 0);
+        // A level of the wire's top bit reads as the signed dword the reference pushes.
+        s.set_quest(Some(QuestState {
+            panel: QuestPanel::Greeting,
+            active_titles: vec!["Odd".into()],
+            active_levels: vec![u32::MAX],
+            ..QuestState::default()
+        }));
+        assert_eq!(s.eval::<i64>("return GetActiveLevel(1)").unwrap(), -1);
+    }
+
     #[test]
     fn progress_panel_completability() {
         let mut s = UiScript::new().unwrap();
@@ -700,19 +882,87 @@ mod tests {
         assert_eq!(s.take_quest_actions(), vec![QuestAction::Accept]);
 
         s.run("CompleteQuest()").unwrap(); // progress -> reward
+        let mut offer = detail();
+        offer.panel = QuestPanel::Reward;
+        s.set_quest(Some(offer)); // the app pushes the reward panel
         s.run("GetQuestReward(2)").unwrap(); // row 2 (1-based) → wire choice 1 (0-based)
-        s.run("GetQuestReward()").unwrap(); // no-choice quest -> 0
         s.run("DeclineQuest()").unwrap();
         assert_eq!(
             s.take_quest_actions(),
             vec![
                 QuestAction::Continue,
                 QuestAction::Reward(1),
-                QuestAction::Reward(0),
                 QuestAction::Decline,
             ]
         );
         assert!(s.take_quest_actions().is_empty(), "drained");
+    }
+
+    /// `GetQuestReward` (`0x501d80` → `0x5015b0`): with choices on offer an index outside `[0, n)`
+    /// raises "Invalid reward choice" (`0x84eda4`), the default for no argument being -1; with
+    /// none the wire gets `max(index, 0)`; off the reward panel it does nothing.
+    #[test]
+    fn get_quest_reward_validates_the_choice_against_the_offer() {
+        let mut s = UiScript::new().unwrap();
+        s.set_quest(Some(detail()));
+        let n_choices = s.eval::<i64>("return GetNumQuestChoices()").unwrap();
+        assert!(n_choices >= 2);
+        // Not on the reward panel yet: nothing happens, and nothing raises.
+        s.run("GetQuestReward(99)").unwrap();
+        assert!(s.take_quest_actions().is_empty());
+        s.run("CompleteQuest()").unwrap();
+        s.take_quest_actions();
+        let mut offer = detail();
+        offer.panel = QuestPanel::Reward;
+        s.set_quest(Some(offer));
+        for call in [
+            "GetQuestReward()",
+            "GetQuestReward(0)",
+            "GetQuestReward(-3)",
+            &format!("GetQuestReward({})", n_choices + 1),
+            "GetQuestReward('x')",
+        ] {
+            let err = s.run(call).unwrap_err().to_string();
+            assert!(
+                err.contains("Invalid reward choice in GetQuestReward([choice])"),
+                "{call}: {err}"
+            );
+        }
+        assert!(
+            s.take_quest_actions().is_empty(),
+            "a failed pick sends nothing"
+        );
+        s.run(&format!("GetQuestReward({n_choices})")).unwrap();
+        s.run("GetQuestReward(1.9)").unwrap();
+        assert_eq!(
+            s.take_quest_actions(),
+            vec![
+                QuestAction::Reward(n_choices as u32 - 1),
+                QuestAction::Reward(0)
+            ]
+        );
+
+        // No choices on offer: any index goes, as `max(index, 0)`.
+        let mut bare = detail();
+        bare.choices.clear();
+        bare.panel = QuestPanel::Reward;
+        let mut s = UiScript::new().unwrap();
+        s.set_quest(Some(bare));
+        for call in [
+            "GetQuestReward()",
+            "GetQuestReward(-3)",
+            "GetQuestReward(4)",
+        ] {
+            s.run(call).unwrap();
+        }
+        assert_eq!(
+            s.take_quest_actions(),
+            vec![
+                QuestAction::Reward(0),
+                QuestAction::Reward(0),
+                QuestAction::Reward(3)
+            ]
+        );
     }
 
     #[test]

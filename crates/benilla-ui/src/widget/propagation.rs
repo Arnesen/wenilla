@@ -2,51 +2,111 @@
 
 use crate::order::Strata;
 
-use super::{FrameHandle, RegionHandle, WidgetArena, SCALE_EPS};
+use super::{ChildWalk, FrameHandle, KindState, RegionHandle, WidgetArena, SCALE_EPS};
 
 impl WidgetArena {
     // ── Visibility ───────────────────────────────────────────────────────────────────────────────
 
-    /// Set `shown` and propagate effective visibility down the subtree (show `0x76ae10`, hide
-    /// `0x76ad50`), returning the frames that changed, a node before its descendants, for the
-    /// caller to fire `OnShow`/`OnHide`. The reference notifies post-order (`0x76aef5`) and
-    /// re-reads live links, so a frame a handler hides mid-cascade fails its gate (`0x76ae1d`) and
-    /// is never notified; this list is a snapshot that still holds it.
+    /// The show transition's own step (`0x76ae10` up to its child walk): nothing unless the frame
+    /// is shown (`0x76ae1d`), its parent is visible or absent (`0x76ae35`) and it is not visible
+    /// yet (`0x76ae43`); otherwise it marks itself visible (`0x76ae7b`), before any child or
+    /// handler runs, and relinks at its bucket's tail (`0x764780`). Whether it transitioned.
+    pub fn show_step(&mut self, h: FrameHandle) -> bool {
+        if !self.show_gate(h) {
+            return false;
+        }
+        self.show_mark(h);
+        true
+    }
+
+    /// [`Self::show_step`]'s gate (`0x76ae1d`, `0x76ae35`, `0x76ae43`): shown, on a visible or
+    /// absent parent, and not visible yet.
+    pub fn show_gate(&self, h: FrameHandle) -> bool {
+        matches!(self.frame(h), Some(f) if f.shown && !f.effective_visible)
+            && self.parent_visible(h)
+    }
+
+    /// [`Self::show_step`]'s mark (`0x76ae7b`, `0x764780`), which follows the gate whatever ran
+    /// between them. A character pane coming visible asks for a fresh copy of its subject first:
+    /// its show hook builds one while the frame is not yet visible (`0x505d03`, `0x505d3c`,
+    /// `0x505d56`), then chains to the base step (`0x505d44`).
+    pub fn show_mark(&mut self, h: FrameHandle) {
+        let Some(f) = self.frame_mut(h) else {
+            return;
+        };
+        if let KindState::Model(m) = &mut f.kind_state {
+            if let Some(c) = &mut m.character {
+                c.request_build();
+            }
+        }
+        f.effective_visible = true;
+        self.resequence_to_tail(h);
+    }
+
+    /// The hide transition's own step (`0x76ad50` up to its child walk): nothing unless the frame
+    /// is visible (`0x76ad5b`); otherwise it marks itself invisible (`0x76ad93`). The shown bit is
+    /// not consulted. Whether it transitioned. A character pane releases what `+0x318` holds
+    /// ([`super::ModelState::release_on_hide`]) and keeps the subject it was built from.
+    pub fn hide_step(&mut self, h: FrameHandle) -> bool {
+        match self.frame_mut(h) {
+            Some(f) if f.effective_visible => {
+                f.effective_visible = false;
+                if let KindState::Model(m) = &mut f.kind_state {
+                    m.release_on_hide();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The next child of `parent` in a live walk of its child list (`0x76aec7`, `0x76ade0`). The
+    /// reference reads the next link from the current node after the call returns, so a child a
+    /// handler adds or removes later in the list is seen. A walked child that was itself moved
+    /// out leaves the walk at the child now in its place; the reference reads a stale link there.
+    pub fn next_child(&self, parent: FrameHandle, walk: &mut ChildWalk) -> Option<FrameHandle> {
+        let children = &self.frame(parent)?.children;
+        let at = match walk.last {
+            None => 0,
+            Some(last) if children.get(walk.at) == Some(&last) => walk.at + 1,
+            Some(last) => children
+                .iter()
+                .position(|&c| c == last)
+                .map_or(walk.at, |i| i + 1),
+        };
+        let next = *children.get(at)?;
+        walk.at = at;
+        walk.last = Some(next);
+        Some(next)
+    }
+
+    /// The Lua `Show`/`Hide` (`0x7757f1`/`0x7757fb`, `0x7758b1`/`0x7758bb`) with no handler to
+    /// fire: write the shown bit, then run the transition, which gates itself. Returns the frames
+    /// that changed in the order their notifies run, children before their parent. A caller with
+    /// handlers walks with [`Self::show_step`], [`Self::hide_step`] and [`Self::next_child`].
     pub fn set_shown(&mut self, h: FrameHandle, shown: bool) -> Vec<FrameHandle> {
         let mut changed = Vec::new();
-        match self.frame_mut(h) {
-            Some(f) if f.shown != shown => f.shown = shown,
-            _ => return changed,
+        if let Some(f) = self.frame_mut(h) {
+            f.shown = shown;
+            self.cascade_silent(h, shown, &mut changed);
         }
-        let parent_visible = self.parent_visible(h);
-        self.propagate_visible(h, parent_visible, &mut changed);
         changed
     }
 
-    fn propagate_visible(
-        &mut self,
-        h: FrameHandle,
-        parent_visible: bool,
-        changed: &mut Vec<FrameHandle>,
-    ) {
-        let (shown, old_ev, children) = {
-            let f = self.frame(h).expect("live node in propagation");
-            (f.shown, f.effective_visible, f.children.clone())
+    fn cascade_silent(&mut self, h: FrameHandle, show: bool, changed: &mut Vec<FrameHandle>) {
+        let stepped = if show {
+            self.show_step(h)
+        } else {
+            self.hide_step(h)
         };
-        let new_ev = shown && parent_visible;
-        if new_ev == old_ev {
-            // No change here means none below: prune, as the client's recursion does.
+        if !stepped {
             return;
         }
-        self.frame_mut(h).unwrap().effective_visible = new_ev;
-        if new_ev {
-            // Re-added at its bucket's tail, as the client does, and each descendant after it.
-            self.resequence_to_tail(h);
+        let mut walk = ChildWalk::default();
+        while let Some(c) = self.next_child(h, &mut walk) {
+            self.cascade_silent(c, show, changed);
         }
         changed.push(h);
-        for c in children {
-            self.propagate_visible(c, new_ev, changed);
-        }
     }
 
     // ── Strata ───────────────────────────────────────────────────────────────────────────────────
@@ -107,36 +167,45 @@ impl WidgetArena {
     }
 
     /// Level compaction (`0x764eb0`), run by `CSimpleTop::Raise` (`0x7650f0`) before it sets the
-    /// raised frame's level to the returned count: renumber the occupied levels of `strata` in
-    /// order, hidden frames included (the scan tests only strata and level, `0x764f18`/`0x764f20`),
-    /// without propagating (`0x764faf`). `level` is written directly, so `insertion_seq` survives
-    /// where the reference re-levels through `0x76a4f0` (`0x764fb6`) and relinks visible frames.
+    /// raised frame's level to the stratum's level bound (`0x7651d0`/`0x7651d3`):
+    /// renumber the occupied levels below the bound in order, hidden frames included (the scan
+    /// tests only strata and level, `0x764f18`/`0x764f20`), and set the bound to the count. Only
+    /// the levels below the bound are examined (`0x764f4c`) and moved (`0x764fcf`), so a frame
+    /// given a level above it while hidden is neither counted nor moved. Each frame of a shifted
+    /// level moves through [`Self::set_frame_level`] without propagating (`0x764faf`/`0x764fb6`),
+    /// the levels from the bottom and each in creation order (`0x764f80`-`0x764fc9`), so a moved
+    /// visible frame relinks and a shifted level's visible frames end in creation order. A frame
+    /// whose level holds is not moved.
     ///
     /// Deviation: levels pack contiguously, because the reference's resuming cursor
-    /// (`0x764fd3`/`0x764fd8`) leaves a hole past a wide gap ({0, 4, 6} at count 7 gives {0, 1, 3}
-    /// at count 4) that no draw or hit order can see.
+    /// (`0x764fd3`/`0x764fd8`) leaves a hole past a wide gap ({0, 4, 6} at bound 7 gives {0, 1, 3}
+    /// at bound 4). No draw or hit order sees the hole, but the raised frame takes the bound, so
+    /// `GetFrameLevel` shows one level more there than here.
     pub fn compact_levels(&mut self, strata: Strata) -> u16 {
+        let bound = self.level_bound[strata.index() as usize];
+        let below = |f: &super::Frame| f.strata == strata && u32::from(f.level) < bound;
         let mut occupied: Vec<u16> = self
             .iter_frames()
-            .filter(|(_, f)| f.strata == strata)
+            .filter(|(_, f)| below(f))
             .map(|(_, f)| f.level)
             .collect();
         occupied.sort_unstable();
         occupied.dedup();
-        let renumber: Vec<(FrameHandle, u16)> = self
+        let mut moves: Vec<(u16, u64, FrameHandle, u16)> = self
             .iter_frames()
-            .filter(|(_, f)| f.strata == strata)
+            .filter(|(_, f)| below(f))
             .filter_map(|(h, f)| {
                 let idx = occupied.binary_search(&f.level).ok()? as u16;
-                (idx != f.level).then_some((h, idx))
+                (idx != f.level).then_some((f.level, f.created, h, idx))
             })
             .collect();
-        for (h, level) in renumber {
-            if let Some(f) = self.frame_mut(h) {
-                f.level = level;
-            }
+        moves.sort_unstable_by_key(|&(from, created, ..)| (from, created));
+        for (_, _, h, level) in moves {
+            self.set_frame_level(h, level, false);
         }
-        occupied.len() as u16
+        let count = occupied.len() as u16;
+        self.level_bound[strata.index() as usize] = u32::from(count);
+        count
     }
 
     // ── Toplevel ─────────────────────────────────────────────────────────────────────────────────
@@ -202,18 +271,20 @@ impl WidgetArena {
 
     // ── Reparenting ──────────────────────────────────────────────────────────────────────────────
 
-    /// Phase 1 of `SetParent` (`0x76ab10`): the guards and the hide half. `None` when the parent
-    /// is unchanged (`0x76ab20` skips everything), the frame is dead, or the move would cycle (the
-    /// Lua binding raises first, `0x7a177f`); otherwise the frames that lost effective visibility,
-    /// in pre-order, whose `OnHide` runs under the old parent (`0x76ab41`).
+    /// Phase 1 of `SetParent` (`0x76ab10`): the guards. `None` when the parent is unchanged
+    /// (`0x76ab20` skips everything), the frame is dead, or the move would cycle (the Lua binding
+    /// raises first, `0x7a177f`); otherwise whether the frame is visible (`0x76ab2b`), in which
+    /// case the caller runs its hide transition under the old parent (`0x76ab41`) before
+    /// [`Self::reparent_finish`], and its show transition after it (`0x76abfd`).
     ///
     /// Deviation: the frame is still in the old parent's child list during `OnHide`, unlike the
-    /// reference, because a handler that itself reparents must not find the lists half-spliced.
+    /// reference (`0x76ab34` unlinks first), because a handler that itself reparents must not find
+    /// the lists half-spliced.
     pub fn reparent_begin(
         &mut self,
         h: FrameHandle,
         new_parent: Option<FrameHandle>,
-    ) -> Option<Vec<FrameHandle>> {
+    ) -> Option<bool> {
         self.frame(h)?;
         let new_parent = new_parent.filter(|&p| self.frame(p).is_some());
         if let Some(np) = new_parent {
@@ -221,32 +292,22 @@ impl WidgetArena {
                 return None;
             }
         }
-        if self.frame(h).unwrap().parent == new_parent {
+        let f = self.frame(h).unwrap();
+        if f.parent == new_parent {
             return None;
         }
-        let mut hidden = Vec::new();
-        if self.frame(h).unwrap().effective_visible {
-            self.propagate_visible(h, false, &mut hidden);
-        }
-        Some(hidden)
+        Some(f.effective_visible)
     }
 
     /// Phase 2 of `SetParent` (`0x76ab10`): relink, strata := the parent's (`0x76ab5a`, MEDIUM for
     /// none), level := the parent's + 1 without propagating (`0x76ab65`, 0 for none), scale
-    /// re-inherited, then the show half, returning the frames that became visible; alpha is
-    /// untouched. `h`'s own children keep their levels, so one can end up below `h`.
-    /// `was_visible` is whether phase 1 hid anything (the reference's `ebx` at `0x76ab2b`); the
-    /// show half runs only then (`0x76abfd`), so a hidden frame moved under a visible parent keeps
-    /// a stale effective visibility until something shows it.
-    pub fn reparent_finish(
-        &mut self,
-        h: FrameHandle,
-        new_parent: Option<FrameHandle>,
-        was_visible: bool,
-    ) -> Vec<FrameHandle> {
-        let mut shown = Vec::new();
+    /// re-inherited; alpha is untouched. `h`'s own children keep their levels, so one can end up
+    /// below `h`. The show half is the caller's, and runs only when phase 1 found the frame
+    /// visible (`0x76abe3`), so a hidden frame moved under a visible parent keeps a stale
+    /// effective visibility until something shows it.
+    pub fn reparent_finish(&mut self, h: FrameHandle, new_parent: Option<FrameHandle>) {
         if self.frame(h).is_none() {
-            return shown; // died inside an OnHide: nothing to move
+            return; // died inside an OnHide: nothing to move
         }
         let new_parent = new_parent.filter(|&p| self.frame(p).is_some());
         // Relink from the current parent: an `OnHide` may have reparented it, and the reference's
@@ -274,25 +335,73 @@ impl WidgetArena {
         self.set_frame_level(h, plevel, false);
         let ps = self.parent_effective_scale(h);
         self.propagate_scale(h, ps);
-
-        if was_visible && self.parent_visible(h) {
-            self.propagate_visible(h, true, &mut shown);
-        }
-        shown
+        // The subtree takes the new parent's scroll membership, none for no parent; the scroll
+        // child mark stays (`0x76ab8c`–`0x76abcb`: `0x76a400(parent & 0x2000, -1)`).
+        let member = new_parent.is_some_and(|np| self.frame(np).is_some_and(|f| f.scroll_member));
+        self.set_scroll_flags(h, member, None);
     }
 
-    /// Both reparent phases in one call, hide changes first, for a caller with no `OnHide` to fire.
+    /// `SetScrollChild` (`0x786ce0`) on the ScrollFrame `sf`: the old child's subtree leaves the
+    /// scroll draw and the new one's joins it, old first, so the same child again stays in
+    /// (`0x786cf4`, `0x786d0a`). Returns the old child; `None` changes nothing on a frame that is
+    /// not a ScrollFrame.
+    pub fn set_scroll_child(
+        &mut self,
+        sf: FrameHandle,
+        child: Option<FrameHandle>,
+    ) -> Option<Option<FrameHandle>> {
+        let KindState::Scroll(s) = &mut self.frame_mut(sf)?.kind_state else {
+            return None;
+        };
+        let old = std::mem::replace(&mut s.child, child);
+        if let Some(old) = old {
+            self.set_scroll_flags(old, false, Some(false));
+        }
+        if let Some(new) = child {
+            self.set_scroll_flags(new, true, Some(true));
+        }
+        Some(old)
+    }
+
+    /// `0x76a400`: set or clear the scroll membership (`0x2000`) on `h` and its whole subtree, and
+    /// when `root` is given, the scroll child mark (`0x4000`) on `h` alone. `SetScrollChild`
+    /// clears both on the old child and sets both on the new one (`0x786cf4`, `0x786d0a`).
+    pub fn set_scroll_flags(&mut self, h: FrameHandle, member: bool, root: Option<bool>) {
+        let Some(f) = self.frame_mut(h) else {
+            return;
+        };
+        f.scroll_member = member;
+        if let Some(root) = root {
+            f.scroll_root = root;
+        }
+        let mut stack = f.children.clone();
+        while let Some(c) = stack.pop() {
+            if let Some(cf) = self.frame_mut(c) {
+                cf.scroll_member = member;
+                stack.extend_from_slice(&cf.children);
+            }
+        }
+    }
+
+    /// `SetParent` whole, for a caller with no handler to fire: the frames that lost visibility,
+    /// then those that gained it, each half in notify order.
     pub fn set_parent(
         &mut self,
         h: FrameHandle,
         new_parent: Option<FrameHandle>,
     ) -> Vec<FrameHandle> {
-        let Some(hidden) = self.reparent_begin(h, new_parent) else {
+        let Some(was_visible) = self.reparent_begin(h, new_parent) else {
             return Vec::new();
         };
-        let was_visible = !hidden.is_empty();
-        let shown = self.reparent_finish(h, new_parent, was_visible);
-        [hidden, shown].concat()
+        let mut changed = Vec::new();
+        if was_visible {
+            self.cascade_silent(h, false, &mut changed);
+        }
+        self.reparent_finish(h, new_parent);
+        if was_visible {
+            self.cascade_silent(h, true, &mut changed);
+        }
+        changed
     }
 
     /// `Region:SetParent` for a texture or font string; `None` detaches. The client re-links in
@@ -313,6 +422,13 @@ impl WidgetArena {
             None if was_detached => return false,
             _ => {}
         }
+        // Leaving its parent runs the parent's region-removed hook (`0x77fd55`); a detached
+        // region already left.
+        if !was_detached {
+            if let Some(of) = self.frame_mut(old_owner) {
+                of.kind_state.region_removed(rh);
+            }
+        }
         let Some(new_owner) = new_owner else {
             if let Some(r) = self.region_mut(rh) {
                 r.detached = true;
@@ -322,12 +438,7 @@ impl WidgetArena {
         if let Some(of) = self.frame_mut(old_owner) {
             of.regions.retain(|&r| r != rh);
         }
-        let decl_seq = {
-            let f = self.frame_mut(new_owner).expect("live new owner");
-            let d = f.next_decl;
-            f.next_decl += 1;
-            d
-        };
+        let decl_seq = self.take_decl(new_owner).expect("live new owner");
         if let Some(r) = self.region_mut(rh) {
             r.owner = new_owner;
             r.decl_seq = decl_seq;
@@ -349,23 +460,62 @@ impl WidgetArena {
         }
     }
 
-    /// `EnableKeyboard` (`0x776ec0`): the char and key bits the key walk filters on.
+    /// `EnableKeyboard` (`0x776ec0`): the char and key bits the key walks filter on, both.
     pub fn set_keyboard_enabled(&mut self, h: FrameHandle, enabled: bool) {
-        if let Some(f) = self.frame_mut(h) {
-            f.keyboard_enabled = enabled;
-        }
+        self.set_char_enabled(h, enabled);
+        self.set_key_enabled(h, enabled);
     }
 
-    /// `IsKeyboardEnabled` (`0x776f90`).
+    /// The input mask's char bit alone (`0x76af00(0)`, `0x76af50(0)`), which the XML walker sets
+    /// for `OnChar` (`0x769f6b`). A bit newly set on a linked frame inserts it into the bucket
+    /// now, so it walks after the frames already there.
+    pub fn set_char_enabled(&mut self, h: FrameHandle, enabled: bool) {
+        let stamp = self.next_kb_stamp;
+        let mut joined = false;
+        if let Some(f) = self.frame_mut(h) {
+            joined = enabled && !f.char_enabled && f.effective_visible;
+            f.char_enabled = enabled;
+            if joined {
+                f.char_stamp = stamp;
+            }
+        }
+        self.next_kb_stamp += u64::from(joined);
+    }
+
+    /// The mask's key bit alone (`0x76af00(1)`), which the XML walker sets for `OnKeyDown` and
+    /// `OnKeyUp` (`0x769fa4`).
+    pub fn set_key_enabled(&mut self, h: FrameHandle, enabled: bool) {
+        let stamp = self.next_kb_stamp;
+        let mut joined = false;
+        if let Some(f) = self.frame_mut(h) {
+            joined = enabled && !f.key_enabled && f.effective_visible;
+            f.key_enabled = enabled;
+            if joined {
+                f.key_stamp = stamp;
+            }
+        }
+        self.next_kb_stamp += u64::from(joined);
+    }
+
+    /// `IsKeyboardEnabled` (`0x776f90`): either bit.
     pub fn is_keyboard_enabled(&self, h: FrameHandle) -> bool {
-        self.frame(h).is_some_and(|f| f.keyboard_enabled)
+        self.frame(h)
+            .is_some_and(|f| f.char_enabled || f.key_enabled)
     }
 
-    /// `EnableMouseWheel`, the wheel's own bit, separate from the mouse's.
+    /// `EnableMouseWheel`, the wheel's own bit, separate from the mouse's. A bit newly set on a
+    /// visible frame enters the wheel list now (`0x76af00`), behind the equal levels there.
     pub fn set_mouse_wheel_enabled(&mut self, h: FrameHandle, enabled: bool) {
+        let stamp = self.next_kb_stamp;
+        let mut joined = false;
         if let Some(f) = self.frame_mut(h) {
+            joined = enabled && !f.mouse_wheel_enabled && f.effective_visible;
             f.mouse_wheel_enabled = enabled;
+            if joined {
+                f.wheel_stamp = stamp;
+            }
         }
+        self.next_kb_stamp += u64::from(joined);
     }
 
     pub fn is_mouse_wheel_enabled(&self, h: FrameHandle) -> bool {

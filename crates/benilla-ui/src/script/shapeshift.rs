@@ -54,7 +54,7 @@ impl super::UiScript {
     /// each, or cancels it when it is the active form.
     pub fn take_shapeshift_casts(&mut self) -> Vec<u32> {
         self.take_calls_where(|c| match c {
-            super::ScriptCall::CastShapeshiftForm(id) => Some(*id),
+            super::ScriptCall::CastShapeshiftForm { spell_id, .. } => Some(*spell_id),
             _ => None,
         })
     }
@@ -65,6 +65,17 @@ fn form_at(model: &Model, i: u32) -> Option<&StoredShapeshiftForm> {
     usize::try_from(i.checked_sub(1)?)
         .ok()
         .and_then(|n| model.shapeshift_forms.get(n))
+}
+
+/// The index of the two form getters: `lua_tonumber` (`0x6f3620`) compared with 0.0 (`0x4b45d8`,
+/// `0x4b49b4`), so a zero, an absent or a non-number raises the binding's usage error (`0x846a6c`,
+/// `0x846ab4`) before the table is read; the truncated value is then compared unsigned.
+fn form_index(lua: &Lua, index: Option<Value>, usage: &'static str) -> mlua::Result<u32> {
+    let n = crate::script::binding_abi::coerced_number(lua, index);
+    if n == 0.0 {
+        return Err(mlua::Error::RuntimeError(usage.into()));
+    }
+    Ok(crate::script::binding_abi::ftol(n) as u32)
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -80,10 +91,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetShapeshiftFormInfo",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, index: Option<Value>| {
+            let i = form_index(lua, index, "Usage: GetShapeshiftFormInfo(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(form) = form_at(&model, i) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                // `0x4b47d9`: four nils.
+                return Ok(super::binding_abi::tuple(&[None; 4]));
             };
             let texture = match &form.view.texture {
                 Some(t) => Value::String(lua.create_string(t)?),
@@ -103,13 +116,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // replays the sweep.
     g.set(
         "GetShapeshiftFormCooldown",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, index: Option<Value>| {
+            let i = form_index(lua, index, "Usage: GetShapeshiftFormCooldown(index)")?;
             let now = crate::script::clock::now(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(match form_at(&model, i).and_then(|f| f.cooldown) {
-                Some((start, duration, enabled)) if start + duration > now || !enabled => {
-                    (start, duration, i32::from(enabled))
-                }
+                Some((start, duration, enabled)) if start + duration > now || !enabled => (
+                    crate::script::clock::held_start(start, enabled, now),
+                    duration,
+                    i32::from(enabled),
+                ),
                 _ => (0.0, 0.0, 1),
             })
         })?,
@@ -118,11 +134,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CastShapeshiftForm",
         lua.create_function(|lua, i: u32| {
+            // The form's cast is `TryCastSpell` (`0x4b4992` → `0x6e5a90`), behind the gate's tag 2;
+            // the cancels of an active form (`0x4b496b`, `0x4b497c`) run ahead of it, so the call
+            // is queued whatever the gate said and carries the answer to the cast alone.
+            let may_cast = super::protected::gate(lua, super::protected::Tag::CAST);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if let Some(spell_id) = form_at(&model, i).map(|f| f.view.spell_id) {
-                model
-                    .script_calls
-                    .push(super::ScriptCall::CastShapeshiftForm(spell_id));
+                model.queue_call(super::ScriptCall::CastShapeshiftForm { spell_id, may_cast });
             }
             Ok(())
         })?,
@@ -223,5 +241,24 @@ mod tests {
         s.run("CastShapeshiftForm(9)").unwrap(); // out of range: no-op
         assert_eq!(s.take_shapeshift_casts(), vec![71]);
         assert!(s.take_shapeshift_casts().is_empty(), "drain empties");
+    }
+
+    /// A held form answers the call's own now, whatever was pushed (`0x6e1517`).
+    #[test]
+    fn a_held_form_answers_the_polls_now() {
+        let mut s = UiScript::new().unwrap();
+        s.tick(10.0);
+        let mut f = forms();
+        f[1].cooldown = Some((0, 1, false));
+        s.set_shapeshift_forms(f);
+        let poll = |s: &UiScript| {
+            s.eval::<(f64, f64, i32)>("return GetShapeshiftFormCooldown(2)")
+                .unwrap()
+        };
+        assert_eq!(poll(&s), (10.0, 0.001, 0));
+        s.tick(0.02);
+        let (start, _, _) = poll(&s);
+        assert_eq!(start, s.eval::<f64>("return GetTime()").unwrap());
+        assert!((start - 10.02).abs() < 1e-9);
     }
 }

@@ -95,6 +95,7 @@ fn shipped_multibars_drive_end_to_end() {
             action: 100,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.set_action(
@@ -105,6 +106,7 @@ fn shipped_multibars_drive_end_to_end() {
             action: 200,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.set_action(
@@ -115,6 +117,7 @@ fn shipped_multibars_drive_end_to_end() {
             action: 300,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -449,6 +452,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
                 action: spell,
                 count: 0,
                 consumable: false,
+                use_spell: None,
             }),
         );
         s.set_spell_tooltip(
@@ -785,6 +789,7 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
             action: 100,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     // Raise after PLAYER_ENTERING_WORLD: its arm re-reads the server's toggle byte and would lower
@@ -840,9 +845,16 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
     let occupied = ring_alphas(&s, quickslot2);
     assert_eq!(occupied, vec![0.5], "the occupied ring ghosts too");
 
-    // Filling a ghosted well runs `ActionButton_UpdateUsable` (ActionButton.lua:269-283), whose
-    // three-argument `SetVertexColor(1, 1, 1)` sets alpha 1.0 in this engine; the reference keeps
-    // the region's alpha (`0x79abd0`), which would leave this ring dim.
+    // Filling a ghosted well runs `ActionButton_Update` (ActionButton.lua:162, 170). Its
+    // `SetNormalTexture(path)` (`0x781960` -> `0x781970`) reuses the XML-defined region in
+    // `[button + 4*state + 0x4b8]` (`0x778f10`) and sets only its file through `0x770200`, which
+    // writes `[tex+0xcc]` and `[tex+0x128]` and redraws (`0x77fdf0`); the colour array
+    // (`+0xa4/+0xa8/+0xb4/+0xb8`) is written by `0x77f750` alone, whose callers are the Lua
+    // colour setters and the XML loader, none a button state change. Then
+    // `ActionButton_UpdateUsable` (:274-275, :281) calls the three-argument
+    // `SetVertexColor(1, 1, 1)`, which keeps the region's alpha (`0x79abd0` re-tests the alpha
+    // gate at `0x79adfe` and copies the old byte back at `0x79ae0a`). So the filled well's ring
+    // stays at the grid's 0.5 like the occupied one.
     s.set_action(
         2,
         Some(ActionSlot {
@@ -851,15 +863,15 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
             action: 101,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     s.fire_event("ACTIONBAR_SLOT_CHANGED", vec![ScriptValue::Number(2.0)]);
     s.resolve();
     assert_eq!(
         ring_alphas(&s, quickslot2),
-        vec![0.5, 1.0],
-        "the well that got an action is opaque again (its Update ran UpdateUsable); the other \
-         occupied ring keeps its ghost, payload still held"
+        vec![0.5, 0.5],
+        "the filled well's UpdateUsable keeps the ghost alpha, as the occupied ring's does"
     );
 
     s.fire_event("ACTIONBAR_HIDEGRID", vec![]);
@@ -868,12 +880,14 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
     let after = ring_alphas(&s, quickslot2);
     assert_eq!(
         after,
-        vec![0.5, 1.0],
-        "HideGrid touches no colour: a ring the grid ghosted stays dim past the payload — the \
-         reference's own rule (ours used to clear it here)"
+        vec![0.5, 0.5],
+        "HideGrid touches no colour (ActionButton.lua:251-258): every ring the grid ghosted stays \
+         dim past the payload"
     );
-    // The ghosted ring's next `ActionButton_UpdateUsable` is not asserted: this engine resets its
-    // alpha to 1.0, the reference keeps 0.5 (`0x79abd0`).
+    // A later `ActionButton_UpdateUsable` (a target change fires it) keeps the dim alpha too.
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    s.resolve();
+    assert_eq!(ring_alphas(&s, quickslot2), vec![0.5, 0.5]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -1215,6 +1229,7 @@ fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
             action: 200,
             count: 0,
             consumable: false,
+            use_spell: None,
         }),
     );
     // An occupied well and two empty ones, all bound, held open so the empty ones show.
@@ -1274,14 +1289,13 @@ fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// `ShapeshiftBar_Update`'s `SetTexCoord(0, n-2, 0, 1)` (BonusActionBarFrame.lua:173) tiles the
-/// middle strip along u only. Wrapping v too would bleed the texture's opaque last row
-/// (`ShapeshiftBarMiddle.blp` row 31) into its transparent top edge as a grey hairline.
+/// `ShapeshiftBar_Update`'s `SetTexCoord(0, n-2, 0, 1)` (BonusActionBarFrame.lua:173) runs the
+/// middle strip's u past 1, but its XML `<TexCoords>` stay in [0, 1] (BonusActionBarFrame.xml:235),
+/// so the file loaded with the wrap flag off (`0x77012d`) and `SetTexCoord` never sets it: the
+/// strip clamps, on both axes, however many forms there are.
 #[test]
-fn the_middle_strip_tiles_along_its_length_only() {
+fn the_middle_strip_clamps_as_its_xml_loaded_it() {
     benilla_formats::wow_data_or_skip!();
-    use super::extract::tiling_axes;
-    use crate::ui_pass::UvRect;
     use benilla_ui::script::{ShapeshiftFormView, TexCoords};
 
     let mut s = UiScript::new().unwrap();
@@ -1297,46 +1311,46 @@ fn the_middle_strip_tiles_along_its_length_only() {
         castable: true,
         cooldown: None,
     };
-    // Every drawn piece whose texture path ends in `piece`, as the wrap it asks the renderer for.
-    let wraps_of = |s: &UiScript, piece: &str| -> Vec<(bool, bool)> {
+    // Every drawn piece whose texture path ends in `piece`: its load-time wrap and its edges.
+    let pieces = |s: &UiScript, piece: &str| -> Vec<(bool, Option<TexCoords>)> {
         s.extract()
             .into_iter()
             .filter_map(|q| match q.content {
                 QuadContent::Texture {
                     path: Some(p),
+                    wrap,
                     tex_coords,
                     ..
-                } if p.ends_with(piece) => Some(tiling_axes(&match tex_coords {
-                    Some(TexCoords::Rect(e)) => UvRect::from_tex_coords(e),
-                    Some(TexCoords::Corners(c)) => UvRect::from_corners(c),
-                    None => UvRect::FULL,
-                })),
+                } if p.ends_with(piece) => Some((wrap, tex_coords)),
                 _ => None,
             })
             .collect()
     };
 
-    // Four forms (a druid): two slots of middle, wrapped along u only; the end caps, atlas crops of
-    // `ShapeshiftBarEnds`, never wrap.
+    // Four forms (a druid): two slots of middle, its u running to 2, still clamped.
     s.set_shapeshift_forms(vec![form(2457), form(71), form(768), form(2458)]);
     s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
     s.resolve();
     assert_eq!(
-        wraps_of(&s, "ShapeshiftBarMiddle"),
-        vec![(true, false)],
-        "four forms: the strip tiles along its length and clamps across it"
+        pieces(&s, "ShapeshiftBarMiddle"),
+        vec![(false, Some(TexCoords::Rect([0.0, 2.0, 0.0, 1.0])))],
+        "four forms: u runs to 2 on a texture that loaded clamped"
     );
-    assert_eq!(
-        wraps_of(&s, "ShapeshiftBarEnds"),
-        vec![(false, false), (false, false)],
-        "the end caps are atlas crops and never tile"
+    assert!(
+        pieces(&s, "ShapeshiftBarEnds")
+            .iter()
+            .all(|(wrap, _)| !wrap),
+        "the end caps clamp"
     );
 
-    // Three forms (a warrior): one slot, the whole texture, nothing tiles.
+    // Three forms (a warrior): one slot, the whole texture.
     s.set_shapeshift_forms(vec![form(2457), form(71), form(2458)]);
     s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
     s.resolve();
-    assert_eq!(wraps_of(&s, "ShapeshiftBarMiddle"), vec![(false, false)]);
+    assert_eq!(
+        pieces(&s, "ShapeshiftBarMiddle"),
+        vec![(false, Some(TexCoords::Rect([0.0, 1.0, 0.0, 1.0])))]
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

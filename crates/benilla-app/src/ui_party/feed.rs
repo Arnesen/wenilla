@@ -13,20 +13,19 @@ use bevy::prelude::*;
 
 use crate::creature_type::CreatureTypeSources;
 use crate::names::NameCache;
-use crate::net::{
-    ClientCommand, FieldChanged, FieldEdges, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer,
-};
+use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
 use crate::target::Selection;
 use crate::ui_script::gate;
 
 use super::pets::{self, Roster};
 use super::GroupState;
+use crate::query_cache::Ask;
 
 // ─── The VM feed and drain ───────────────────────────────────────────────────────────────────────
 
 /// What the feed last pushed: the values its event edges fire on.
 #[derive(Default)]
-pub(super) struct FedParty {
+pub(crate) struct FedParty {
     /// The group lists the feed has answered with `PARTY_MEMBERS_CHANGED`.
     lists_applied: u32,
     leader: u64,
@@ -42,7 +41,7 @@ pub(super) struct FedParty {
     names_generation: gate::Watch,
     area: gate::Watch,
     raid_units: Vec<Option<UnitState>>,
-    /// `partypet1..4` and `raidpet1..40`, with the `UNIT_PET` edges (see [`pets`]).
+    /// `partypet1..4` and `raidpet1..40` (see [`pets`]).
     pets: pets::FedPets,
     /// The group lists' `RAID_ROSTER_UPDATE`s the feed has answered.
     roster_updates: u32,
@@ -120,7 +119,7 @@ pub(crate) const GROUP_MEMBER_SUBGROUP: u8 = 0x07;
 
 /// Push the roster and the party unit snapshots into the VM and fire the party events on their
 /// edges. A member's unit state is their live descriptor when streamed, else their roster record.
-pub(super) fn feed_party(
+pub(crate) fn feed_party(
     // `ChrClasses.dbc` field 16, `UnitHasRelicSlot`'s input, and the form table the creature type
     // reads.
     tables: crate::ui_unit::SnapshotTables,
@@ -130,7 +129,6 @@ pub(super) fn feed_party(
     stores: Query<&ObjectStore>,
     changed_stores: Query<(), Changed<ObjectStore>>,
     mut removed_stores: RemovedComponents<ObjectStore>,
-    mut edges: MessageReader<FieldChanged>,
     self_q: Query<(Entity, &Guid, &ObjectStore), With<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
     names: pets::Names,
@@ -146,7 +144,6 @@ pub(super) fn feed_party(
         return;
     };
     let (fed, vm_reset) = fed.get_reset(&script);
-    let edges = FieldEdges::collect(&mut edges);
     // The ready-check summary lines the timeout tick composed, pushed as system chat ahead of the
     // gate: the tick runs on the frame clock, which the gate does not watch.
     for line in script.take_ready_check_lines() {
@@ -155,7 +152,7 @@ pub(super) fn feed_party(
             line,
         ));
     }
-    let chr = tables.classes();
+    let chr = tables.unit_names();
     let types = tables.types(&names);
     // The gate also opens on a despawn, which `Changed` misses. Solo, it almost always stays shut.
     let names_moved = fed.names_generation.moved(names.generation());
@@ -289,7 +286,7 @@ pub(super) fn feed_party(
             .name(areas.0.top_zone(area).unwrap_or(area))
             .map(str::to_string)
     };
-    let raid = raid_roster(&group, me.as_ref(), &names, &zone_name);
+    let raid = raid_roster(&group, me.as_ref(), &names, chr, &zone_name);
     // The `RAID_ROSTER_UPDATE` key, taken before the roster moves into the snapshot.
     let raid_key: Vec<(u64, u32, u32, bool)> = raid
         .iter()
@@ -330,22 +327,13 @@ pub(super) fn feed_party(
         if fed.units[i] != snap {
             gate.audit("feed_party", "a party-token snapshot");
             script.set_unit(token, snap.clone());
-            if let Some(cur) = &snap {
-                crate::ui_unit::fire_transitions(
-                    &mut script,
-                    token,
-                    fed.units[i].as_ref(),
-                    cur,
-                    &edges,
-                );
-            }
             fed.units[i] = snap;
         }
         // ── PARTY_MEMBER_ENABLE / PARTY_MEMBER_DISABLE ──────────────────────
         //
         // Fired as a slot's object enters (`0x4e86b6`) or leaves (`0x5e9b78`) the object manager,
-        // with the 1-based slot as a string. Stock FrameXML ignores them
-        // (`PartyMemberFrame.lua:145` is commented out).
+        // with the 1-based slot as a number (`%d`, `esi+1` at `0x4e869d`). Stock FrameXML ignores
+        // them (`PartyMemberFrame.lua:145` is commented out).
         let presence = member.map_or((0, false), |m| (m.guid, index.0.contains_key(&m.guid)));
         if fed.presence[i] != presence {
             gate.audit("feed_party", "a party-slot presence edge");
@@ -357,7 +345,7 @@ pub(super) fn feed_party(
                 } else {
                     "PARTY_MEMBER_DISABLE"
                 };
-                script.fire_event(event, vec![ScriptValue::Str((i + 1).to_string())]);
+                script.fire_event(event, vec![ScriptValue::Int(i as i64 + 1)]);
             }
             fed.presence[i] = presence;
         }
@@ -370,16 +358,7 @@ pub(super) fn feed_party(
     for (i, token) in PARTY_PET_TOKENS.iter().enumerate() {
         let owner = slots.get(i).map_or(0, |m| m.guid);
         let now = pets::member_pet(&look, &group, owner, look.store(owner), Roster::Party);
-        pets::feed_token(
-            &mut script,
-            &gate,
-            &edges,
-            &mut fed.pets.party[i],
-            token,
-            Some(PARTY_TOKENS[i]),
-            owner,
-            now,
-        );
+        pets::feed_token(&mut script, &gate, &mut fed.pets.party[i], token, now);
     }
 
     // ── raid1..raid40 ──────────────────────────────────────────────────────
@@ -392,7 +371,9 @@ pub(super) fn feed_party(
         let snap = raid_guids.get(i).and_then(|guid| {
             if Some(*guid) == self_guid {
                 let (_, _, store) = self_pair?;
-                let name = names.peek(*guid).map(str::to_string);
+                let name = names
+                    .resolve_unit(*guid, None, Ask::Read)
+                    .map(str::to_string);
                 let mut s = crate::ui_unit::snapshot(store, *guid, name, 0, chr, types);
                 s.is_player = true;
                 s.raid_target = group.raid_target_index(*guid);
@@ -416,22 +397,13 @@ pub(super) fn feed_party(
         if fed.raid_units[i] != snap {
             gate.audit("feed_party", "a raid-token snapshot");
             script.set_unit(token, snap.clone());
-            if let Some(cur) = &snap {
-                crate::ui_unit::fire_transitions(
-                    &mut script,
-                    token,
-                    fed.raid_units[i].as_ref(),
-                    cur,
-                    &edges,
-                );
-            }
             fed.raid_units[i] = snap;
         }
     }
 
     // ── raidpet1..raidpet40 ────────────────────────────────────────────────
     //
-    // Row N's pet. Our own row's pet is `"pet"`, whose own feed fires `UNIT_PET("player")`.
+    // Row N's pet; our own row's is `"pet"`'s unit.
     fed.pets
         .raid
         .resize_with(RAID_PET_TOKENS.len(), Default::default);
@@ -444,16 +416,7 @@ pub(super) fn feed_party(
             look.store(owner)
         };
         let now = pets::member_pet(&look, &group, owner, held, Roster::Raid);
-        pets::feed_token(
-            &mut script,
-            &gate,
-            &edges,
-            &mut fed.pets.raid[i],
-            token,
-            (!ours).then_some(RAID_TOKENS[i]),
-            owner,
-            now,
-        );
+        pets::feed_token(&mut script, &gate, &mut fed.pets.raid[i], token, now);
     }
 
     // ── PARTY_MEMBERS_CHANGED ───────────────────────────────────────────────
@@ -640,7 +603,9 @@ fn raid_name_of(
     guid: u64,
 ) -> Option<String> {
     if Some(guid) == self_guid {
-        return names.peek(guid).map(str::to_string);
+        return names
+            .resolve_unit(guid, None, Ask::Read)
+            .map(str::to_string);
     }
     group
         .members
@@ -658,7 +623,10 @@ fn raid_guid_for_name(
     name: &str,
 ) -> Option<u64> {
     if let Some(g) = self_guid {
-        if names.peek(g).is_some_and(|n| n.eq_ignore_ascii_case(name)) {
+        if names
+            .resolve_unit(g, None, Ask::Read)
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        {
             return Some(g);
         }
     }
@@ -676,6 +644,7 @@ fn raid_roster(
     group: &GroupState,
     me: Option<&RaidSelf>,
     names: &NameCache,
+    unit_names: crate::ui_unit::UnitNames<'_>,
     zone_name: &dyn Fn(u32) -> Option<String>,
 ) -> Vec<RaidMemberInfo> {
     if group.group_type != GROUPTYPE_RAID {
@@ -701,7 +670,7 @@ fn raid_roster(
                online: bool,
                ninth: bool,
                class_byte: Option<u8>| {
-        let class = class_byte.and_then(crate::ui_unit::class_names);
+        let class = class_byte.and_then(|c| unit_names.class(c));
         RaidMemberInfo {
             name,
             guid,
@@ -721,7 +690,10 @@ fn raid_roster(
         roster.push(row(
             me.guid,
             // An unresolved name gets the binding's miss tuple, not a half-filled row (`0x4bb5f8`).
-            names.peek(me.guid).unwrap_or_default().to_string(),
+            names
+                .resolve_unit(me.guid, None, Ask::Read)
+                .unwrap_or_default()
+                .to_string(),
             me.flags,
             me.level,
             me.area.and_then(zone_name),
@@ -759,9 +731,9 @@ fn member_unit_state(
     store: Option<&ObjectStore>,
     group: &GroupState,
     own_group: Option<String>,
-    // `ChrClasses.dbc`, for the relic slot alone: only the live leg has a class byte to key it
-    // by, so an unstreamed paladin reads no relic slot.
-    classes: Option<&benilla_formats::ChrClasses>,
+    // `ChrRaces.dbc` and `ChrClasses.dbc`: the names and the relic slot, which only the live leg
+    // has a class byte to key by, so an unstreamed paladin reads no relic slot.
+    classes: crate::ui_unit::UnitNames<'_>,
     // The creature type resolves from the live descriptor alone, so an unstreamed member has none.
     types: CreatureTypeSources<'_>,
 ) -> UnitState {
@@ -868,7 +840,11 @@ pub(super) fn drain_party(
                     selection
                         .guid
                         .filter(|g| benilla_protocol::guid::is_player(*g))
-                        .and_then(|g| names.resolve(g, &commands).map(str::to_string))
+                        .and_then(|g| {
+                            names
+                                .resolve_player(g, Ask::Event(&commands))
+                                .map(str::to_string)
+                        })
                 } else {
                     member_for_token(&group, &token).map(|m| m.name.clone())
                 };
@@ -1524,7 +1500,7 @@ mod tests {
             None,
             &GroupState::default(),
             None,
-            None,
+            Default::default(),
             Default::default(),
         );
         assert_eq!(
@@ -1547,7 +1523,7 @@ mod tests {
             None,
             &GroupState::default(),
             None,
-            None,
+            Default::default(),
             Default::default(),
         );
         assert_eq!((bare.health, bare.max_health, bare.power), (0, 0, 0));
@@ -1575,7 +1551,7 @@ mod tests {
             None,
             &GroupState::default(),
             None,
-            None,
+            Default::default(),
             Default::default(),
         );
         assert!(
@@ -1594,7 +1570,7 @@ mod tests {
             None,
             &GroupState::default(),
             None,
-            None,
+            Default::default(),
             Default::default(),
         );
         assert!(s.ghost);
@@ -1611,7 +1587,7 @@ mod tests {
             None,
             &GroupState::default(),
             None,
-            None,
+            Default::default(),
             Default::default(),
         );
         assert!(s.dead);
@@ -2170,7 +2146,8 @@ mod tests {
             class: Some(11),
         };
 
-        let roster = raid_roster(&group, Some(&me), &names, &zone);
+        let korean = crate::ui_unit::TestNames::korean();
+        let roster = raid_roster(&group, Some(&me), &names, korean.names(), &zone);
         assert_eq!(roster.len(), 3, "the player is spliced back in");
 
         // Row 1, us: leader (rank 2), subgroup stored 0, class off the descriptor.
@@ -2182,6 +2159,11 @@ mod tests {
         );
         assert_eq!(roster[0].level, 60);
         assert_eq!(roster[0].class_file.as_deref(), Some("DRUID"));
+        assert_eq!(
+            roster[0].class.as_deref(),
+            Some("드루이드"),
+            "the display name is the table's, the token is not localized"
+        );
         assert_eq!(roster[0].zone.as_deref(), Some("Ironforge"));
         assert!(roster[0].online && !roster[0].ninth);
 
@@ -2200,7 +2182,7 @@ mod tests {
         // A party is not a raid: the list is empty, so `GetNumRaidMembers()` answers 0, while
         // `IsRaidLeader()` still answers 1.
         group.group_type = 0;
-        assert!(raid_roster(&group, Some(&me), &names, &zone).is_empty());
+        assert!(raid_roster(&group, Some(&me), &names, korean.names(), &zone).is_empty());
     }
 
     #[test]

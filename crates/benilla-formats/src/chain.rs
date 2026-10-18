@@ -17,6 +17,7 @@ use anyhow::{anyhow, bail};
 #[cfg(not(target_arch = "wasm32"))]
 use benilla_mpq::Archive;
 
+use crate::Locale;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::VANILLA_BASE_ORDER;
 
@@ -34,6 +35,8 @@ pub struct ChainEntry {
 pub struct Chain {
     /// Ascending priority: later archives win.
     archives: Vec<Archive>,
+    /// The locale the chain's `Wow.ini` names, read once at open as start-up reads it once.
+    locale: Locale,
 }
 
 /// The web build's `Chain`: no archives, just the web host's `/data` base URL every method fetches
@@ -53,6 +56,9 @@ pub struct Chain {
     base: String,
     /// `None` inside = the index could not be fetched/parsed; `contains` falls back to `HEAD`.
     index: std::sync::OnceLock<Option<std::collections::HashSet<String>>>,
+    /// The locale the chain's `Wow.ini` names, as the native chain's: read on first ask rather
+    /// than at open, so opening stays free of requests.
+    locale: std::sync::OnceLock<Locale>,
 }
 
 /// `patch-?.MPQ` as the reference's `FindFirstFileW` glob matches it (template `0x82edbc`, wrapper
@@ -129,7 +135,25 @@ impl Chain {
                 Archive::open(path).with_context(|| format!("opening MPQ {}", path.display()))?,
             );
         }
-        Ok(Self { archives })
+        let mut chain = Self {
+            archives,
+            locale: Locale::default(),
+        };
+        chain.locale = crate::wow_ini::client_locale(&chain);
+        Ok(chain)
+    }
+
+    /// The client locale, from the chain's `Wow.ini` (`0x402350`): its index picks the column of
+    /// every localized DBC string.
+    pub fn locale(&self) -> Locale {
+        self.locale
+    }
+
+    /// The same archives read as another locale, for a test of the column a loader reads.
+    #[cfg(test)]
+    pub(crate) fn with_locale(mut self, locale: Locale) -> Self {
+        self.locale = locale;
+        self
     }
 
     /// The highest-priority archive with an entry for `name`, a delete marker included, as a
@@ -225,7 +249,16 @@ impl Chain {
         Ok(Self {
             base: crate::web::data_base(),
             index: std::sync::OnceLock::new(),
+            locale: std::sync::OnceLock::new(),
         })
+    }
+
+    /// The client locale, from the chain's `Wow.ini` (`0x402350`): its index picks the column of
+    /// every localized DBC string.
+    pub fn locale(&self) -> Locale {
+        *self
+            .locale
+            .get_or_init(|| crate::wow_ini::client_locale(self))
     }
 
     /// The chain file's Data URL scheme address — the client half of the Lane A ↔ Lane H contract.

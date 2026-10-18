@@ -34,7 +34,8 @@ fn mid_tree_hide_blocks_a_shown_grandchild() {
     assert!(a.frame(grand).unwrap().effective_visible);
 
     let changed = a.set_shown(child, false);
-    assert_eq!(changed, vec![child, grand]); // pre-order
+    // Notify order: post-order, children before their parent (`0x76adee`, then `0x76adfd`).
+    assert_eq!(changed, vec![grand, child]);
     assert!(a.frame(root).unwrap().effective_visible);
     assert!(!a.frame(child).unwrap().effective_visible);
     assert!(!a.frame(grand).unwrap().effective_visible);
@@ -44,7 +45,7 @@ fn mid_tree_hide_blocks_a_shown_grandchild() {
     );
 
     let changed = a.set_shown(child, true);
-    assert_eq!(changed, vec![child, grand]);
+    assert_eq!(changed, vec![grand, child]);
     assert!(a.frame(grand).unwrap().effective_visible);
 }
 
@@ -58,10 +59,10 @@ fn hidden_grandchild_stays_hidden_when_ancestor_reshows() {
     a.set_shown(grand, false);
     let changed = a.set_shown(root, false);
     // grand is already invisible, so the hide does not report it.
-    assert_eq!(changed, vec![root, child]);
+    assert_eq!(changed, vec![child, root]);
 
     let changed = a.set_shown(root, true);
-    assert_eq!(changed, vec![root, child]);
+    assert_eq!(changed, vec![child, root]);
     assert!(a.frame(child).unwrap().effective_visible);
     assert!(!a.frame(grand).unwrap().effective_visible);
 }
@@ -118,6 +119,113 @@ fn level_shift_saturates_at_zero() {
     // Root drops by 10, which would take the child to -7: it stops at 0.
     a.set_frame_level(root, 0, true);
     assert_eq!(a.frame(child).unwrap().level, 0);
+}
+
+/// The compaction moves each frame of a shifted level through `0x76a4f0` without propagation
+/// (`0x764faf`/`0x764fb6`), walking the list of every frame in creation order (`0x764f80`), so a
+/// shifted visible frame relinks in that order, while a hidden one and an unshifted one keep
+/// their link. Creation order is not arena order once a destroyed frame's slot is reused.
+#[test]
+fn compaction_relinks_the_shifted_visible_frames_in_creation_order() {
+    let mut a = arena();
+    let low = a.create(FrameKind::Frame, None, None);
+    let doomed = a.create(FrameKind::Frame, None, None);
+    let first = a.create(FrameKind::Frame, None, None);
+    a.destroy(doomed);
+    let second = a.create(FrameKind::Frame, None, None); // reuses `doomed`'s slot, before `first`
+    let hidden = a.create(FrameKind::Frame, None, None);
+    let child = a.create(FrameKind::Frame, None, Some(first));
+    a.set_shown(hidden, false);
+    for h in [first, second, hidden] {
+        a.set_frame_level(h, 3, false);
+    }
+    a.set_frame_level(child, 6, false);
+    // `first` linked last, so it is the newer link of the two.
+    a.set_shown(first, false);
+    a.set_shown(first, true);
+    let seq = |a: &WidgetArena, h| a.frame(h).unwrap().insertion_seq;
+    assert!(seq(&a, second) < seq(&a, first));
+    let (low_seq, hidden_seq) = (seq(&a, low), seq(&a, hidden));
+
+    assert_eq!(
+        a.compact_levels(Strata::Medium),
+        3,
+        "{{0, 3, 6}} packs to [0, 3)"
+    );
+    for h in [first, second, hidden] {
+        assert_eq!(a.frame(h).unwrap().level, 1);
+    }
+    assert_eq!(
+        a.frame(child).unwrap().level,
+        2,
+        "the child moves on its own level's account, not by its parent's delta"
+    );
+    assert!(
+        seq(&a, first) < seq(&a, second),
+        "the shifted level's visible frames relink in creation order"
+    );
+    assert_eq!(seq(&a, low), low_seq, "an unshifted frame keeps its link");
+    assert_eq!(seq(&a, hidden), hidden_seq, "a hidden frame is in no list");
+}
+
+/// Compaction (`0x764eb0`) reads the stratum's bound `bucket+0x8` (`0x764ec2`) and examines only
+/// the levels below it (`0x764f4c`, `0x764fcf`). The bound is the highest visible link plus one,
+/// so a frame hidden above it keeps its level, and one hidden below it is packed with the rest.
+#[test]
+fn compaction_examines_only_the_levels_below_the_bound() {
+    let mut a = arena();
+    let low = a.create(FrameKind::Frame, None, None);
+    let below = a.create(FrameKind::Frame, None, None);
+    let above = a.create(FrameKind::Frame, None, None);
+    let panel = a.create(FrameKind::Frame, None, None);
+    a.set_shown(below, false);
+    a.set_shown(above, false);
+    a.set_frame_level(below, 3, false);
+    a.set_frame_level(above, 6, false);
+    a.set_frame_level(panel, 5, false); // the only high link: the bound is 6
+
+    assert_eq!(
+        a.compact_levels(Strata::Medium),
+        3,
+        "{{0, 3, 5}} pack to [0, 3); level 6 is not below the bound"
+    );
+    let levels = [low, below, panel, above].map(|h| a.frame(h).unwrap().level);
+    assert_eq!(levels, [0, 1, 2, 6]);
+
+    // The compaction set the bound to its count: the stratum's next raise lands at 3.
+    assert_eq!(a.compact_levels(Strata::Medium), 3);
+    assert_eq!(a.frame(above).unwrap().level, 6);
+}
+
+/// The bound grows on a visible link only (`0x764780`): a show, or a level or stratum change of a
+/// visible frame. A hidden frame's level never reaches it.
+#[test]
+fn the_bound_grows_on_a_visible_link_only() {
+    let mut a = arena();
+    let f = a.create(FrameKind::Frame, None, None);
+    let g = a.create(FrameKind::Frame, None, None);
+    a.set_shown(f, false);
+    a.set_frame_level(f, 9, false);
+    assert_eq!(a.compact_levels(Strata::Medium), 1, "only g's level 0");
+    assert_eq!(a.frame(f).unwrap().level, 9);
+
+    a.set_shown(f, true);
+    assert_eq!(
+        a.compact_levels(Strata::Medium),
+        2,
+        "f linked at 9: {{0, 9}}"
+    );
+    assert_eq!(a.frame(f).unwrap().level, 1);
+
+    a.set_frame_level(g, 7, false);
+    a.set_frame_strata(f, Strata::Dialog);
+    assert_eq!(
+        a.compact_levels(Strata::Dialog),
+        1,
+        "f's relink grows the new stratum's bound; the old one is unchanged"
+    );
+    assert_eq!(a.compact_levels(Strata::Medium), 1);
+    assert_eq!(a.frame(g).unwrap().level, 0);
 }
 
 // ── Scale ────────────────────────────────────────────────────────────────────────────────────
@@ -275,4 +383,67 @@ fn the_tooltip_registry_tracks_live_gametooltips() {
 
     a.destroy(loose);
     assert!(a.tooltip_kinds().is_empty());
+}
+
+// ── The region-removed hook (frame vtable `+0x2c`) ───────────────────────────────────────────
+
+/// Freeing, reparenting or detaching a region runs its parent's hook, and each kind that keeps a
+/// region in a slot lets go of it: StatusBar `0x783110`, Slider `0x789790`, ColorSelect
+/// `0x78b530`, CheckButton `0x785230` over Button `0x778cb0`.
+#[test]
+fn a_region_leaving_its_parent_empties_the_kind_slot_that_held_it() {
+    let mut a = arena();
+    let other = a.create(FrameKind::Frame, None, None);
+    let bar = a.create(FrameKind::StatusBar, None, None);
+    let slider = a.create(FrameKind::Slider, None, None);
+    let wheel = a.create(FrameKind::ColorSelect, None, None);
+    let check = a.create(FrameKind::CheckButton, None, None);
+    let tex = |a: &mut WidgetArena, f| {
+        a.create_region(f, RegionKind::Texture, DrawLayer::Artwork, 0)
+            .unwrap()
+    };
+    let (b, t, w, c, n) = (
+        tex(&mut a, bar),
+        tex(&mut a, slider),
+        tex(&mut a, wheel),
+        tex(&mut a, check),
+        tex(&mut a, check),
+    );
+    match &mut a.frame_mut(bar).unwrap().kind_state {
+        KindState::StatusBar(s) => s.bar = Some(b),
+        _ => unreachable!(),
+    }
+    match &mut a.frame_mut(slider).unwrap().kind_state {
+        KindState::Slider(s) => s.thumb = Some(t),
+        _ => unreachable!(),
+    }
+    match &mut a.frame_mut(wheel).unwrap().kind_state {
+        KindState::ColorSelect(s) => s.value_thumb = Some(w),
+        _ => unreachable!(),
+    }
+    match &mut a.frame_mut(check).unwrap().kind_state {
+        KindState::Button(s) => {
+            s.checked_tex = Some(c);
+            let _ = s.set_state_slot(ButtonVisualState::Normal, Some(n));
+        }
+        _ => unreachable!(),
+    }
+    // Freed, reparented, detached, freed, and the shown normal texture freed.
+    assert!(a.destroy_region(b));
+    assert!(a.set_region_owner(t, Some(other)));
+    assert!(a.set_region_owner(w, None));
+    assert!(a.destroy_region(c));
+    assert!(a.destroy_region(n));
+    assert!(
+        matches!(&a.frame(bar).unwrap().kind_state, KindState::StatusBar(s) if s.bar.is_none())
+    );
+    assert!(
+        matches!(&a.frame(slider).unwrap().kind_state, KindState::Slider(s) if s.thumb.is_none())
+    );
+    assert!(matches!(&a.frame(wheel).unwrap().kind_state,
+        KindState::ColorSelect(s) if s.value_thumb.is_none()));
+    let KindState::Button(s) = &a.frame(check).unwrap().kind_state else {
+        unreachable!()
+    };
+    assert_eq!((s.checked_tex, s.normal), (None, None));
 }

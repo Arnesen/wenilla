@@ -2,13 +2,16 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use crate::layout::{Anchor, Point};
+use crate::layout::{Anchor, Anchors, Point};
 use crate::script::region_map::{set_shared, Side};
 use crate::script::{Model, SCREEN};
 use crate::widget::FrameHandle;
 
-use super::anchor_args::{parse_set_all_points, parse_set_point, resolve_rel_target, UNNAMED};
-use super::{frame_handle_of, frame_parent_token_base, frame_wrapper, point_name};
+use super::anchor_args::{
+    get_point_index, get_point_values, parse_set_all_points, parse_set_point, resolve_rel_target,
+    UNNAMED,
+};
+use super::{frame_handle_of, frame_parent_token_base, frame_wrapper};
 
 /// The receiver's name for the error strings and its `$parent` base, read under one short `Model`
 /// borrow that ends before the ladder's `_G` read.
@@ -35,54 +38,44 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     set_shared(lua, m, Side::Frame, "ClearAllPoints", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
         let mut model = lua.app_data_mut::<Model>().expect("model");
-        // Every layout setter mutates only on a real change, so a per-frame caller setting the
-        // same value never reopens the layout gate. Clearing is a retarget to no targets.
-        let old: Option<Vec<u32>> = match model.layout_inputs.get_mut(&h) {
-            Some(input) if !input.anchors.is_empty() => {
-                let old = input.anchors.iter().map(|a| a.relative_to).collect();
-                input.anchors.clear();
-                Some(old)
-            }
-            _ => None,
-        };
-        if let Some(old) = old {
-            model.touch_layout_retarget_frame(h, &old, &[]);
+        // `0x767620` frees the anchors and unhooks each from its target, and queues no resolve:
+        // the frame keeps its rect until its own next invalidate. Named, as the graph loses the
+        // edges. Every layout setter mutates only on a real change, so a per-frame caller setting
+        // the same value never reopens the layout gate.
+        let cleared = model
+            .layout_inputs
+            .get_mut(&h)
+            .is_some_and(|input| input.anchors.clear());
+        if cleared {
+            model.touch_layout_frame(h);
         }
         Ok(())
     })?;
-    // GetPoint([n]) → point, relativeTo, relativePoint, x, y of the n-th anchor (default 1);
-    // relativeTo is nil for a screen-root anchor, since `SCREEN` has no wrapper.
+    // GetPoint([n]) → point, relativeTo, relativePoint, x, y of the n-th anchor in point order
+    // (`0x7a2340`); relativeTo is nil for a screen-root anchor, since `SCREEN` has no wrapper.
     set_shared(
         lua,
         m,
         Side::Frame,
         "GetPoint",
-        |lua, (this, n): (Table, Option<i64>)| {
+        |lua, (this, n): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
+            let idx = get_point_index(lua, n)?;
             let anchor = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                let idx = (n.unwrap_or(1).max(1) - 1) as usize;
                 model
                     .layout_inputs
                     .get(&h)
-                    .and_then(|i| i.anchors.get(idx))
-                    .cloned()
+                    .and_then(|i| i.anchors.nth(idx))
+                    .copied()
             };
-            let Some(a) = anchor else {
-                return Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil, Value::Nil));
-            };
-            let rel = if a.relative_to == SCREEN {
-                Value::Nil
-            } else {
-                Value::Table(frame_wrapper(lua, a.relative_to)?)
-            };
-            Ok((
-                Value::String(lua.create_string(point_name(a.point))?),
-                rel,
-                Value::String(lua.create_string(point_name(a.relative_point))?),
-                Value::Number(f64::from(a.x_off)),
-                Value::Number(f64::from(a.y_off)),
-            ))
+            get_point_values(lua, anchor, |rel| {
+                Ok(if rel == SCREEN {
+                    Value::Nil
+                } else {
+                    Value::Table(frame_wrapper(lua, rel)?)
+                })
+            })
         },
     )?;
     // GetNumPoints(): on the Region method table (`0x87c9b8`), so every widget answers it.
@@ -116,17 +109,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 Anchor::new(Point::BottomRight, rel_id, Point::BottomRight, 0.0, 0.0),
             ];
             let input = model.layout_inputs.entry(h).or_default();
-            let same = input.anchors.len() == 2
-                && input
-                    .anchors
-                    .iter()
-                    .zip(&pair)
-                    .all(|(a, b)| anchor_bits_eq(a, b));
-            if !same {
-                input.anchors.clear();
-                input.anchors.extend_from_slice(&pair);
-                model.touch_layout();
-            }
+            // The reference clears, sets both and invalidates (`0x767db0`); a bit-identical pair
+            // moves no input.
+            let pair = Anchors::from(pair);
+            let changed = !input.anchors.bits_eq(&pair);
+            input.anchors = pair;
+            model.invalidate_frame(h, changed);
             Ok(())
         },
     )?;
@@ -141,10 +129,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let input = model.layout_inputs.entry(h).or_default();
             let changed = input.width.to_bits() != w.to_bits();
             input.width = w;
-            if changed {
-                // A size write moves no edge and no roster membership.
-                model.touch_layout_frame(h);
-            }
+            // A size write moves no edge and no roster membership. It invalidates whether or not
+            // the width moved (`0x7683d0`).
+            model.invalidate_frame(h, changed);
             model.note_authored_size(h);
             Ok(())
         },
@@ -160,9 +147,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let input = model.layout_inputs.entry(h).or_default();
             let changed = input.height.to_bits() != ht.to_bits();
             input.height = ht;
-            if changed {
-                model.touch_layout_frame(h);
-            }
+            model.invalidate_frame(h, changed);
             model.note_authored_size(h);
             Ok(())
         },
@@ -170,22 +155,18 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // No `SetSize`: neither 1.12 method table has it.
     set_shared(lua, m, Side::Frame, "GetWidth", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
-        settle(lua);
-        let model = lua.app_data_ref::<Model>().expect("model");
-        Ok(size_read(&model, h, true))
+        Ok(size_read(lua, h, true))
     })?;
     set_shared(lua, m, Side::Frame, "GetHeight", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
-        settle(lua);
-        let model = lua.app_data_ref::<Model>().expect("model");
-        Ok(size_read(&model, h, false))
+        Ok(size_read(lua, h, false))
     })?;
 
     // GetCenter(): the resolved rect's centre in the frame's own units (screen ÷ effective scale,
     // y-up), as the reference's coordinate getters report; nil before the first resolve.
     set_shared(lua, m, Side::Frame, "GetCenter", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
-        settle(lua);
+        settle_frame(lua, h);
         let model = lua.app_data_ref::<Model>().expect("model");
         let inv = 1.0 / eff_scale(&model, h);
         Ok(match model.resolved.get(&h) {
@@ -197,11 +178,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })
     })?;
 
-    // GetEffectiveScale(): parent scale times own scale, from a root of 1: `uiScale` is applied at
-    // the raster seam (a screen `768/uiScale` units tall), so every coordinate Lua sees,
-    // `GetCursorPosition()` included, is already in UI units. The reference instead makes
-    // `uiScale` `UIParent`'s own scale (`0x494550` calls `SetScale`), so there
-    // `UIParent:GetEffectiveScale()` answers it.
+    // GetEffectiveScale(): parent scale times own scale (`0x76ac90`), from a root of 1. The UI
+    // scale is `UIParent`'s own (`0x494550`), so `UIParent:GetEffectiveScale()` answers it and a
+    // frame outside `UIParent` does not carry it.
     m.set(
         "GetEffectiveScale",
         lua.create_function(|lua, this: Table| {
@@ -221,7 +200,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     ] {
         set_shared(lua, m, Side::Frame, name, move |lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            settle(lua);
+            settle_frame(lua, h);
             let model = lua.app_data_mut::<Model>().expect("model");
             let inv = 1.0 / eff_scale(&model, h);
             Ok(model.resolved.get(&h).map(|r| {
@@ -238,12 +217,40 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 }
 
 /// Resolve the layout now if anything moved, as the reference answers a geometry query against
-/// current layout; a settled tree costs one epoch compare. Deviation: `OnSizeChanged` fires at the
-/// next `UiScript::resolve`, a tick after the reference's (`ApplyRect 0x76b580`), because running
-/// Lua handlers inside a binding risks a borrow panic or unbounded recursion.
-fn settle(lua: &Lua) {
+/// current layout; a settled tree costs one epoch compare. The read frame `h`, if pending, resolves
+/// inside the read, its deferral bit left set (`0x7a1a0b` → `0x7680e0(1)`), and its `OnSizeChanged`
+/// fires here, as its `ApplyRect` (`0x76b580` → vt+0x48) runs inside the getter.
+pub(in crate::script) fn settle_frame(lua: &Lua, h: FrameHandle) {
+    let id = lua
+        .app_data_ref::<Model>()
+        .expect("model")
+        .frame_to_id
+        .get(&h)
+        .copied();
+    settle_node(lua, id);
+}
+
+/// [`settle_frame`] for a region's rect, through the same getters (`0x7a1980`..).
+pub(in crate::script) fn settle_region(lua: &Lua, rh: crate::widget::RegionHandle) {
+    let id = lua
+        .app_data_ref::<Model>()
+        .expect("model")
+        .region_to_id
+        .get(&rh)
+        .copied();
+    settle_node(lua, id);
+}
+
+fn settle_node(lua: &Lua, id: Option<u32>) {
     let mut model = lua.app_data_mut::<Model>().expect("model");
-    crate::script::UiScript::resolve_layout(&mut model);
+    match id {
+        Some(id) if model.node_pending(id) => {
+            model.pull_read(id);
+            drop(model);
+            crate::script::visibility::resolve_and_fire(lua, vec![id]);
+        }
+        _ => crate::script::UiScript::resolve_layout(&mut model),
+    }
 }
 
 pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
@@ -259,18 +266,28 @@ pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
     }
 }
 
-/// `GetWidth`/`GetHeight`: the resolved span in the frame's own units (screen ÷ effective scale),
-/// else the size it was given, where 0 means derived, as in the reference.
-fn size_read(model: &Model, h: FrameHandle, width: bool) -> f32 {
-    if let Some(r) = model.resolved.get(&h) {
-        let span = if width { r.width() } else { r.height() };
-        return span / eff_scale(model, h);
+/// `GetWidth`/`GetHeight` (`0x7a1e00`, `0x7a2030`): the size the frame was given (`+0x1c`/`+0x20`
+/// → `0x768420`/`0x768410`), with no resolve, whatever its anchors span (`0x7a1e99`–`0x7a1ea5`).
+/// Only a zero size resolves a pending frame (`0x7a1eb6`) and answers its rect's span, else 0. The
+/// span is not divided by the effective scale, though the rect carries it: the answer is only
+/// converted (`0x41ad70`, `0x41ae40`), where `GetLeft` divides (`0x7a1a63`).
+fn size_read(lua: &Lua, h: FrameHandle, width: bool) -> f32 {
+    let set = {
+        let model = lua.app_data_ref::<Model>().expect("model");
+        model
+            .layout_inputs
+            .get(&h)
+            .map_or(0.0, |i| if width { i.width } else { i.height })
+    };
+    if set != 0.0 {
+        return set;
     }
+    settle_frame(lua, h);
+    let model = lua.app_data_ref::<Model>().expect("model");
     model
-        .layout_inputs
+        .resolved
         .get(&h)
-        .map(|i| if width { i.width } else { i.height })
-        .unwrap_or(0.0)
+        .map_or(0.0, |r| if width { r.width() } else { r.height() })
 }
 
 /// `SetPoint` (`0x7a2540`) for a frame: the argument ladder is [`super::anchor_args`], shared with
@@ -288,57 +305,16 @@ fn set_point(lua: &Lua, this: &Table, args: &MultiValue) -> mlua::Result<()> {
     let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, parent)?;
     let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
 
+    let units = model.layout_units();
     let input = model.layout_inputs.entry(h).or_default();
-    let new = Anchor::new(point, rel_to_id, rel_point, x, y);
-    // A no-op only when the identical anchor is already last and no earlier one has this point,
-    // mirroring the retain and push below; bits compared, as the fingerprint tells -0.0 from 0.0.
-    let same_at_tail = input
+    // An unchanged anchor stores nothing and queues no resolve (`0x767cde` → `0x767d5e`).
+    if input
         .anchors
-        .last()
-        .is_some_and(|a| anchor_bits_eq(a, &new))
-        && !input.anchors[..input.anchors.len() - 1]
-            .iter()
-            .any(|a| a.point == point);
-    if !same_at_tail {
-        // Target lists are collected only for a retarget: the value-only change is the per-frame
-        // idiom (a dragged window) and must stay allocation-free.
-        let structural = anchor_retarget_is_structural(&input.anchors, &new);
-        let old_targets: Option<Vec<u32>> =
-            structural.then(|| input.anchors.iter().map(|a| a.relative_to).collect());
-        input.anchors.retain(|a| a.point != point);
-        input.anchors.push(new);
-        match old_targets {
-            None => model.touch_layout_frame(h),
-            Some(old) => {
-                let new_targets: Vec<u32> = model.layout_inputs[&h]
-                    .anchors
-                    .iter()
-                    .map(|a| a.relative_to)
-                    .collect();
-                model.touch_layout_retarget_frame(h, &old, &new_targets);
-            }
-        }
+        .set(Anchor::new(point, rel_to_id, rel_point, x, y), units)
+    {
+        model.invalidate_frame(h, true);
     }
     Ok(())
-}
-
-/// Whether this `SetPoint` changes the node's anchor targets, mirroring the setters' retain and
-/// push: value-only exactly when one existing anchor has this point and keeps its target.
-pub(crate) fn anchor_retarget_is_structural(anchors: &[Anchor], new: &Anchor) -> bool {
-    let mut same_point = anchors.iter().filter(|a| a.point == new.point);
-    match (same_point.next(), same_point.next()) {
-        (Some(old), None) => old.relative_to != new.relative_to,
-        _ => true,
-    }
-}
-
-/// Bit-exact anchor equality, as the layout gate's fingerprint compares, so the two always agree.
-pub(crate) fn anchor_bits_eq(a: &Anchor, b: &Anchor) -> bool {
-    a.point == b.point
-        && a.relative_to == b.relative_to
-        && a.relative_point == b.relative_point
-        && a.x_off.to_bits() == b.x_off.to_bits()
-        && a.y_off.to_bits() == b.y_off.to_bits()
 }
 
 /// The default `relativeTo`: the parent, or [`SCREEN`] for a top-level frame (`0x76c6e0`).

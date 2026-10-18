@@ -87,6 +87,7 @@ fn fixture(points_spent: u32) -> TalentUiState {
             name: "Arms".into(),
             background: "WarriorArms".into(),
             points_spent,
+            texture: None,
         }],
         talents: vec![vec![rend, deep_wounds]],
         points: (2, 0),
@@ -318,8 +319,10 @@ fn a_wheel_spin_over_the_grid_scrolls_the_tree() {
     script.set_unit("player", Some(probe_player()));
     script.set_talents(tall_fixture());
     script.run("ToggleTalentFrame()").expect("toggle");
-    // Rects must be resolved before the wheel's hit-test can land on the grid.
+    // Rects must be resolved before the wheel's hit-test can land on the grid, and the range
+    // `UpdateScrollChildRect` marked is measured in the frame's update.
     script.resolve();
+    script.tick(0.016);
     let (x, y): (f32, f32) = script
         .eval("return TalentFrameTalent1:GetCenter()")
         .expect("talent 1 center");

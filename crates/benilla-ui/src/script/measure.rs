@@ -32,14 +32,37 @@ pub trait TextMeasure {
     }
 }
 
+/// The installed [`TextMeasure`], shared by a state and its forks ([`super::UiScript::fork`]): a
+/// font engine answers the same for every copy of the UI.
+#[derive(Clone)]
+pub(crate) struct SharedMeasurer(std::rc::Rc<std::cell::RefCell<Box<dyn TextMeasure>>>);
+
+impl TextMeasure for SharedMeasurer {
+    fn measure(&mut self, req: &MeasureRequest) -> (f32, f32, f32) {
+        self.0.borrow_mut().measure(req)
+    }
+
+    fn editbox_advances(
+        &mut self,
+        req: &super::EditBoxAdvanceRequest,
+    ) -> Option<(Vec<f32>, Vec<usize>, f32)> {
+        self.0.borrow_mut().editbox_advances(req)
+    }
+}
+
 /// Measure region `rh` now if a measurer is installed and its stored measure is stale; a current
 /// one is left alone, so a per-frame poll does not re-measure.
 pub(super) fn ensure_measured(lua: &Lua, rh: RegionHandle) {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    ensure_measured_in(&mut model, rh);
+}
+
+/// [`ensure_measured`] on a borrowed model, for the engine's own widgets.
+pub(super) fn ensure_measured_in(model: &mut Model, rh: RegionHandle) {
     if model.measurer.is_none() {
         return;
     }
-    let Some(req) = super::layout::measure_request_for(&mut model, rh) else {
+    let Some(req) = super::layout::measure_request_for(model, rh) else {
         return; // not a FontString, no text, or already current
     };
     // Taken out and put back: the measurer needs `&mut self` while the model is borrowed, and it
@@ -53,6 +76,11 @@ pub(super) fn ensure_measured(lua: &Lua, rh: RegionHandle) {
         natural_w,
         key: req.key,
     };
+    store_measured(model, rh, req.id, new);
+}
+
+/// Store `new` as region `rh`'s measure, touching the layout only when its box moved.
+pub(super) fn store_measured(model: &mut Model, rh: RegionHandle, id: u32, new: MeasuredText) {
     let mut moved = false;
     if let Some(d) = model.region_data.get_mut(&rh) {
         moved = super::types::MeasuredText::layout_moved(d.measured, new);
@@ -61,8 +89,9 @@ pub(super) fn ensure_measured(lua: &Lua, rh: RegionHandle) {
     }
     if moved {
         // Only a box that moved touches the layout, as in `set_measured_text`: a same-width
-        // re-measure (a countdown tick) must not cost a whole-roster hash.
+        // re-measure (a countdown tick) must not cost a whole-roster hash. Stored whole, as there.
         model.touch_layout_region(rh);
+        model.queue_force(id);
     }
 }
 
@@ -71,7 +100,9 @@ impl super::UiScript {
     /// it whenever the window size or `uiScale` changes: glyph advances snap to whole physical
     /// pixels.
     pub fn set_text_measurer(&mut self, measurer: Box<dyn TextMeasure>) {
-        self.model_mut().measurer = Some(measurer);
+        self.model_mut().measurer = Some(SharedMeasurer(std::rc::Rc::new(
+            std::cell::RefCell::new(measurer),
+        )));
     }
 
     /// Whether a [`TextMeasure`] is installed; the host then skips its batch measure pass.

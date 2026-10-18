@@ -144,6 +144,9 @@ pub struct UnitState {
     /// race's. `UnitCreatureType` answers it, and a creature's level line takes it as its class
     /// slot; a player's reads race and class instead. `None` for type 0 or no descriptor.
     pub creature_type_name: Option<String>,
+    /// The id that resolver returned, 0 for none. The tooltip's level line leaves the word out for
+    /// type 10, "Not specified" (`0x52a2c6`), where `UnitCreatureType` answers it.
+    pub creature_type: u32,
     /// Creature rank 0..=4 as the reference's getter (`0x605620`) answers it, so already gated:
     /// 0 without a cached creature template or with a pet number. The tooltip's rank word,
     /// `UnitLevel`'s boss -1 and `UnitClassification` all read it.
@@ -194,12 +197,23 @@ pub struct UnitState {
     /// (`0x516c50`, delegating to `CanAttack` `0x606980`) answers for both argument orders. Fed for
     /// `target`, `targettarget`, `npc` and the units a chain ends on; other tokens read false.
     pub can_attack: bool,
+    /// Whether the player can assist the unit, `UnitCanAssist("player", unit)`: `CanAssist`
+    /// (`0x6066f0`, `this` the player, the argument the unit). Fed where [`Self::can_attack`] is.
+    pub can_assist: bool,
+    /// The same with the unit as `this` and the player the argument (`0x6066f0` reads the reaction
+    /// of `this` toward the argument): `UnitCanAssist(unit, "player")`.
+    pub can_assist_player: bool,
     /// `UnitIsCorpse` (`0x5161c0`): the token names a `TYPEID_CORPSE` object, which a dead unit
     /// is not. No feed sets it.
     pub corpse_object: bool,
     /// `UnitAffectingCombat` (`0x517e10`): `UNIT_FIELD_FLAGS` bit `0x00080000`, for every token
     /// including `"player"`; the reference has no separate player combat flag.
     pub in_combat: bool,
+    /// A held player's `PLAYER_QUEST_LOG` window, `[quest id, count-state, timer]` per slot, all
+    /// zero off a player: the 20 slots of 12 bytes at `[player+0xe68]+0x28` that `IsUnitOnQuest`
+    /// scans (`0x4dfebd`) and the `UNIT_QUEST_LOG_CHANGED` watch compares (`0x51bc63`). Whole, so
+    /// a change anywhere in it is a snapshot change; a group mate's carries the ids alone.
+    pub quest_log: [[u32; 3]; 20],
 }
 
 /// The name of a unit whose name is not yet known, as the reference's `UnitName` (`0x517220`) and
@@ -374,8 +388,8 @@ impl super::UiScript {
         model.no_play_time = none;
     }
 
-    /// Push `GetBillingTimeRested()`'s minutes, from the `SMSG_AUTH_RESPONSE` that admitted the
-    /// session; nothing else on the wire writes it.
+    /// Push `GetBillingTimeRested()`'s minutes, from the last `SMSG_AUTH_RESPONSE` that carried the
+    /// billing group; nothing else on the wire writes it.
     pub fn set_billing_time_rested(&mut self, minutes: u32) {
         self.model_mut().billing_time_rested = minutes;
     }
@@ -420,7 +434,7 @@ impl super::UiScript {
     /// Take the queued [`SelectionRequest`]s out of the call stream, in call order.
     pub fn take_selection_requests(&mut self) -> Vec<SelectionRequest> {
         self.take_calls_where(|c| match c {
-            ScriptCall::Select(r) => Some(r.clone()),
+            ScriptCall::Select { request, .. } => Some(request.clone()),
             _ => None,
         })
     }
@@ -430,7 +444,7 @@ impl super::UiScript {
     /// `SetSelection`.
     pub fn take_target_nearest_requests(&mut self) -> Vec<(NearestMode, bool)> {
         self.take_calls_where(|c| match c {
-            ScriptCall::TargetNearest { mode, reverse } => Some((*mode, *reverse)),
+            ScriptCall::TargetNearest { mode, reverse, .. } => Some((*mode, *reverse)),
             _ => None,
         })
     }
@@ -438,7 +452,7 @@ impl super::UiScript {
     /// Take the `TargetByName(name, exactMatch)` calls out of the call stream.
     pub fn take_target_by_name_requests(&mut self) -> Vec<(String, bool)> {
         self.take_calls_where(|c| match c {
-            ScriptCall::TargetByName { name, exact } => Some((name.clone(), *exact)),
+            ScriptCall::TargetByName { name, exact, .. } => Some((name.clone(), *exact)),
             _ => None,
         })
     }
@@ -520,6 +534,7 @@ fn unit_predicate(
 
 /// The `Unit*` and `GetQuestGreenRange` registrations.
 mod bindings;
+pub mod by_name;
 #[cfg(test)]
 mod chain_tests;
 mod resolve;

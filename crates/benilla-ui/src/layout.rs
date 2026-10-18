@@ -16,11 +16,14 @@ use std::collections::VecDeque;
 const UNSET: f64 = f64::INFINITY;
 
 /// The least width or height change that fires `OnSizeChanged`: 2^-22, bits `0x34800000` at
-/// `0x8029d4`, tested in `ApplyRect` (`0x76b580`).
+/// `0x8029d4`, tested in `ApplyRect` (`0x76b5e7`, `0x76b602`) in the reference's layout units, the
+/// screen diagonal as 1; in benilla's units that is this times the layout unit
+/// (`Model::size_eps`).
 pub const SIZE_EPS: f64 = 2.384_185_791_015_625e-7;
 
-/// The least edge move against the cached rect for the client to re-store it and `ApplyRect`, 1e-5
-/// (`0x80c5c8`, in `0x768d20`). Recorded, not applied: the caller's own dirty gate decides.
+/// The least edge move against the cached rect for the drain's resolve to store the new rect and
+/// `ApplyRect`, 1e-5 (`0x3727c5ac` at `0x80c5c8`, tested in `0x768d20`), in the reference's layout
+/// units; in benilla's, this times the layout unit (`Model::resolve_eps`). See [`keeps_rect`].
 pub const RESOLVE_EPS: f64 = f32::from_bits(0x3727_c5ac) as f64;
 
 /// Point id to X column: left 0, center 1, right 2.
@@ -138,15 +141,201 @@ impl Anchor {
             y_off,
         }
     }
+
+    /// Bit-exact equality, as the layout gate's fingerprint compares, so the two always agree.
+    pub fn bits_eq(&self, other: &Anchor) -> bool {
+        self.point == other.point
+            && self.relative_to == other.relative_to
+            && self.relative_point == other.relative_point
+            && self.x_off.to_bits() == other.x_off.to_bits()
+            && self.y_off.to_bits() == other.y_off.to_bits()
+    }
+}
+
+/// The client's aspect globals, both written only by `0x41ad10(a)`: `[0x832a4c] = f32(a · 0.75)`
+/// (`0x41ad24`) and `[0x832a44] = f32(a / √(a² + 1))`, the quotient kept unrounded before its
+/// multiply (`0x41ad3e` `fst`, `0x41ad44`, `0x41ad47`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutUnits {
+    g3: f32,
+    g44: f32,
+}
+
+impl LayoutUnits {
+    /// From the screen aspect `a`, width over height.
+    pub fn from_aspect(a: f32) -> LayoutUnits {
+        let a64 = f64::from(a);
+        LayoutUnits {
+            g3: (a64 * 0.75) as f32,
+            g44: ((1.0 / (a64 * a64 + 1.0).sqrt()) * a64) as f32,
+        }
+    }
+
+    /// A Lua offset as `SetPoint`'s binding stores it, in layout units (`0x7a28a3`..`0x7a28e3`):
+    /// `f32(f32(v / ([0x832a4c] · 1024)) · [0x832a44])`.
+    pub fn store(self, v: f32) -> f32 {
+        let q = (f64::from(v) / (f64::from(self.g3) * 1024.0)) as f32;
+        (f64::from(self.g44) * f64::from(q)) as f32
+    }
+}
+
+/// A region's anchors, one slot per point: the client's `anchorPoints[9]` (`G+0x4`, a frame's
+/// `+0x28`), indexed by point id. Setting a point replaces its slot (`SetPoint` stores at
+/// `0x767d33`), so the order anchors were set in is not kept, and every walk runs in point order,
+/// TOPLEFT to BOTTOMRIGHT, as `GetPoint` (`0x7a23f5`) and `GetNumPoints` (`0x7a2311`) walk them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Anchors([Option<Anchor>; 9]);
+
+impl Anchors {
+    pub const fn new() -> Anchors {
+        Anchors([None; 9])
+    }
+
+    /// The anchor held for `point`.
+    #[inline]
+    pub fn get(&self, point: Point) -> Option<&Anchor> {
+        self.0[point.id() as usize].as_ref()
+    }
+
+    /// Store `a` in its point's slot, returning the anchor it replaces.
+    #[inline]
+    pub fn insert(&mut self, a: Anchor) -> Option<Anchor> {
+        self.0[a.point.id() as usize].replace(a)
+    }
+
+    /// `SetPoint`'s store (`0x767c70`): the anchor held for `a.point` stands when it has the same
+    /// target (`0x767ca9`) and relative point (`0x767cb1`) and both offsets, as the client stores
+    /// them ([`LayoutUnits::store`]), differ by less than 2⁻²² (`0x767cb6`..`0x767cde`), and the
+    /// call then stores nothing; else `a` replaces it. Returns whether it stored. A NaN offset
+    /// never matches, as the client's unordered compare.
+    pub fn set(&mut self, a: Anchor, units: LayoutUnits) -> bool {
+        let near = |p: f32, q: f32| {
+            (f64::from(units.store(p)) - f64::from(units.store(q))).abs() < SIZE_EPS
+        };
+        let unchanged = self.get(a.point).is_some_and(|h| {
+            h.relative_to == a.relative_to
+                && h.relative_point == a.relative_point
+                && near(h.x_off, a.x_off)
+                && near(h.y_off, a.y_off)
+        });
+        if !unchanged {
+            self.insert(a);
+        }
+        !unchanged
+    }
+
+    /// Empty every slot, returning whether any was held (`ClearAllPoints`, `0x767620`).
+    #[inline]
+    pub fn clear(&mut self) -> bool {
+        let held = !self.is_empty();
+        self.0 = [None; 9];
+        held
+    }
+
+    /// Empty every slot naming a target in `dying`, returning whether any did: the unhook a dying
+    /// layout object runs on each dependent (`0x767e70`, from `0x768e20`).
+    #[inline]
+    pub fn release_targets(&mut self, dying: &[u32]) -> bool {
+        let mut freed = false;
+        for slot in &mut self.0 {
+            if slot.is_some_and(|a| dying.contains(&a.relative_to)) {
+                *slot = None;
+                freed = true;
+            }
+        }
+        freed
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+
+    /// The occupied slots, `GetNumPoints`'s count.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.0.iter().filter(|s| s.is_some()).count()
+    }
+
+    /// The held anchors in point order.
+    #[inline]
+    pub fn iter(&self) -> std::iter::Flatten<std::slice::Iter<'_, Option<Anchor>>> {
+        self.0.iter().flatten()
+    }
+
+    /// The offsets of the anchor held for `point`; the point is not writable here, so an anchor
+    /// never leaves its slot.
+    #[inline]
+    pub fn offset_mut(&mut self, point: Point) -> Option<(&mut f32, &mut f32)> {
+        self.0[point.id() as usize]
+            .as_mut()
+            .map(|a| (&mut a.x_off, &mut a.y_off))
+    }
+
+    /// The `n`-th held anchor in point order, from 0.
+    #[inline]
+    pub fn nth(&self, n: usize) -> Option<&Anchor> {
+        self.iter().nth(n)
+    }
+
+    /// The first held anchor in point order.
+    #[inline]
+    pub fn first(&self) -> Option<&Anchor> {
+        self.iter().next()
+    }
+
+    /// The targets of the anchors in `reads`, a bit per point id, in point order.
+    #[inline]
+    pub fn read_targets(&self, reads: u16) -> impl Iterator<Item = Handle> + '_ {
+        self.0
+            .iter()
+            .enumerate()
+            .filter(move |(id, _)| reads & (1 << id) != 0)
+            .filter_map(|(_, a)| a.map(|a| a.relative_to))
+    }
+
+    /// Slot-for-slot [`Anchor::bits_eq`].
+    pub fn bits_eq(&self, other: &Anchors) -> bool {
+        self.0.iter().zip(&other.0).all(|(a, b)| match (a, b) {
+            (Some(a), Some(b)) => a.bits_eq(b),
+            (None, None) => true,
+            _ => false,
+        })
+    }
+}
+
+/// Each anchor into its point's slot, a later one on the same point replacing an earlier one.
+impl FromIterator<Anchor> for Anchors {
+    fn from_iter<I: IntoIterator<Item = Anchor>>(iter: I) -> Anchors {
+        let mut out = Anchors::new();
+        for a in iter {
+            out.insert(a);
+        }
+        out
+    }
+}
+
+impl<const N: usize> From<[Anchor; N]> for Anchors {
+    fn from(a: [Anchor; N]) -> Anchors {
+        a.into_iter().collect()
+    }
+}
+
+impl<'a> IntoIterator for &'a Anchors {
+    type Item = &'a Anchor;
+    type IntoIter = std::iter::Flatten<std::slice::Iter<'a, Option<Anchor>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 /// A frame's layout input, the geometry fields the client's resolver reads: `anchorPoints[9]`
 /// (`G+0x4`), `width` (`G+0x50`), `height` (`G+0x54`), `layoutScale` (`G+0x58`) and the clamp flag
-/// (bit 4 of `G+0x3c`).
+/// (mask `0x10` of `G+0x3c`, `0x768ccd`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutInput {
-    /// Slotted by `point`, the later of two on one point winning (`SetPoint`, `0x767c70`).
-    pub anchors: Vec<Anchor>,
+    pub anchors: Anchors,
     /// `0.0` is the no-size sentinel (`0x7ffd74`): the axis derives from the anchors.
     pub width: f32,
     pub height: f32,
@@ -164,7 +353,7 @@ pub struct LayoutInput {
 impl Default for LayoutInput {
     fn default() -> LayoutInput {
         LayoutInput {
-            anchors: Vec::new(),
+            anchors: Anchors::new(),
             width: 0.0,
             height: 0.0,
             scale: 1.0,
@@ -177,9 +366,13 @@ impl Default for LayoutInput {
 
 impl LayoutInput {
     /// A frame with the given anchors and explicit size, scale `1.0`, no clamp.
-    pub fn sized(anchors: Vec<Anchor>, width: f32, height: f32) -> LayoutInput {
+    pub fn sized(
+        anchors: impl IntoIterator<Item = Anchor>,
+        width: f32,
+        height: f32,
+    ) -> LayoutInput {
         LayoutInput {
-            anchors,
+            anchors: anchors.into_iter().collect(),
             width,
             height,
             ..LayoutInput::default()
@@ -298,7 +491,7 @@ pub struct AssembleRect {
     pub rect: [f32; 4],
 }
 
-/// `assemble` (`0x767a20`): fails if any edge is `+Inf`, else with `clamp` (flags bit 4) shifts
+/// `assemble` (`0x767a20`): fails if any edge is `+Inf`, else with `clamp` (flags `0x10`) shifts
 /// the rect into `[0, extent]` on each axis, low edge first, keeping its size.
 #[allow(clippy::float_cmp)]
 pub fn assemble_rect(edges: [f32; 4], clamp: bool, extent_x: f32, extent_y: f32) -> AssembleRect {
@@ -336,14 +529,26 @@ pub fn assemble_rect(edges: [f32; 4], clamp: bool, extent_x: f32, extent_y: f32)
     }
 }
 
-/// `ApplyRect`'s `OnSizeChanged` test (`0x76b580`): width or height moved by at least
-/// [`SIZE_EPS`], the deltas taken in `f64` from the `f32` edges.
-pub fn size_changed(old: Rect, new: Rect) -> bool {
+/// `ApplyRect`'s `OnSizeChanged` test (`0x76b580`): width or height moved by at least `eps`,
+/// [`SIZE_EPS`] in the units the rects are in, the deltas taken in `f64` from the `f32` edges.
+pub fn size_changed(old: Rect, new: Rect, eps: f64) -> bool {
     let dw =
         (f64::from(new.right) - f64::from(new.left)) - (f64::from(old.right) - f64::from(old.left));
     let dh =
         (f64::from(new.top) - f64::from(new.bottom)) - (f64::from(old.top) - f64::from(old.bottom));
-    dw.abs() >= SIZE_EPS || dh.abs() >= SIZE_EPS
+    dw.abs() >= eps || dh.abs() >= eps
+}
+
+/// The drain's keep test (`0x768d20`, `0x768d6e`–`0x768dc0`): every edge of `new` moved less than
+/// `eps` from the cached rect `old`, the deltas taken in `f64` from the `f32` edges. A kept rect is
+/// not stored and `ApplyRect` does not run (the return at `0x768dc2`); an edge at `eps` or past it,
+/// or a NaN, applies.
+pub fn keeps_rect(old: Rect, new: Rect, eps: f64) -> bool {
+    let near = |a: f32, b: f32| (f64::from(a) - f64::from(b)).abs() < eps;
+    near(new.left, old.left)
+        && near(new.right, old.right)
+        && near(new.bottom, old.bottom)
+        && near(new.top, old.top)
 }
 
 // ── The composed resolver: `assemble` over six recursion-guarded edge resolvers ──────────────
@@ -366,6 +571,9 @@ struct EdgeInput {
     clamp: bool,
     extent_x: f32,
     extent_y: f32,
+    /// The point ids whose anchor a scan read, a bit each: the anchors whose `ResolveX` or
+    /// `ResolveY` ran, each of which resolves a deferred target first (`0x7a2fb8`, `0x7a3098`).
+    reads: std::cell::Cell<u16>,
 }
 
 // The recursion-guard bits of the client's `G+0x28`.
@@ -389,6 +597,7 @@ const IDS_YC: [usize; 3] = [3, 4, 5];
 fn anchor_scan_x(ids: &[usize; 3], f: &EdgeInput) -> f64 {
     for &id in ids {
         if let Some(a) = f.anchors[id] {
+            f.reads.set(f.reads.get() | 1 << id);
             let v = anchor_resolve_x(f.scale, a.x_off, a.rel_point, a.rel_rect, a.mirror);
             if v != UNSET {
                 return v;
@@ -403,6 +612,7 @@ fn anchor_scan_x(ids: &[usize; 3], f: &EdgeInput) -> f64 {
 fn anchor_scan_y(ids: &[usize; 3], f: &EdgeInput) -> f64 {
     for &id in ids {
         if let Some(a) = f.anchors[id] {
+            f.reads.set(f.reads.get() | 1 << id);
             let v = anchor_resolve_y(f.scale, a.y_off, a.rel_point, a.rel_rect, a.mirror);
             if v != UNSET {
                 return v;
@@ -571,6 +781,18 @@ pub fn resolve_rect(
     resolve_edges(&build_edge_input(frame, target_rect))
 }
 
+/// [`resolve_rect`] with the anchors its scans read, a bit per point id ([`Anchors::read_targets`]).
+/// A scan stops at the first anchor that resolves (`0x7671a0`), so an anchor behind it is read only
+/// if another edge's scan reaches it.
+pub fn resolve_rect_reads(
+    frame: &LayoutInput,
+    target_rect: impl FnMut(Handle) -> Option<Rect>,
+) -> (ResolveOutcome, u16) {
+    let input = build_edge_input(frame, target_rect);
+    let outcome = resolve_edges(&input);
+    (outcome, input.reads.get())
+}
+
 fn build_edge_input(
     frame: &LayoutInput,
     mut target_rect: impl FnMut(Handle) -> Option<Rect>,
@@ -594,16 +816,25 @@ fn build_edge_input(
         clamp: frame.clamp,
         extent_x: frame.extent_x,
         extent_y: frame.extent_y,
+        reads: std::cell::Cell::new(0),
     }
 }
 
 /// Resolve one frame's edges, `[bottom, left, top, right]`, each `None` where it stayed unset;
 /// `assemble` and its clamp are not applied. The region pass reads it axis by axis.
-#[allow(clippy::float_cmp)]
 pub fn resolve_rect_edges(
     frame: &LayoutInput,
     target_rect: impl FnMut(Handle) -> Option<Rect>,
 ) -> [Option<f32>; 4] {
+    resolve_rect_edges_reads(frame, target_rect).0
+}
+
+/// [`resolve_rect_edges`] with the anchors its scans read, as [`resolve_rect_reads`].
+#[allow(clippy::float_cmp)]
+pub fn resolve_rect_edges_reads(
+    frame: &LayoutInput,
+    target_rect: impl FnMut(Handle) -> Option<Rect>,
+) -> ([Option<f32>; 4], u16) {
     let input = build_edge_input(frame, target_rect);
     let mut guard = 0u32;
     let left = resolve_left(&input, &mut guard);
@@ -611,7 +842,10 @@ pub fn resolve_rect_edges(
     let right = resolve_right(&input, &mut guard);
     let top = resolve_top(&input, &mut guard);
     let cvt = |v: f64| if v == UNSET { None } else { Some(v as f32) };
-    [cvt(bottom), cvt(left), cvt(top), cvt(right)]
+    (
+        [cvt(bottom), cvt(left), cvt(top), cvt(right)],
+        input.reads.get(),
+    )
 }
 
 // ── Graph driver ─────────────────────────────────────────────────────────────────────────────
@@ -622,11 +856,39 @@ pub fn resolve_rect_edges(
 /// [`set_external`](Self::set_external) and [`set_frame`](Self::set_frame), [`solve`](Self::solve).
 #[derive(Clone, Debug, Default)]
 pub struct LayoutSolver {
-    /// Overwritten in place, so each anchors `Vec` keeps its allocation.
+    /// Overwritten in place, so a steady round allocates nothing.
     input: Vec<LayoutInput>,
     is_frame: Vec<bool>,
     /// Externals as seeded, frames as they resolve.
     rect: Vec<Option<Rect>>,
+    /// Per node, the rect it held when this resolve began, its valid bit set, else `None`
+    /// ([`set_entry`](Self::set_entry)): what [`keeps_rect`] holds a new rect against, what a node
+    /// the resolve need not revisit keeps, and what a target's change is measured from.
+    cached: Vec<Option<Rect>>,
+    /// Per node, whether [`set_entry`](Self::set_entry) gave its entry state. A frame without one
+    /// is solved from its inputs alone, as if invalidated.
+    has_entry: Vec<bool>,
+    /// Per frame, whether it was invalidated (`0x7680e0`) since its entry state.
+    pending: Vec<bool>,
+    /// Per node, its deferral flag for this solve (`0x2` of `G+0x3c`, [`set_deferral`]): it keeps
+    /// its entry state, and an invalidate that reaches it passes on instead.
+    ///
+    /// [`set_deferral`]: Self::set_deferral
+    deferred: Vec<bool>,
+    /// Per node, pending under its deferral at entry (`0x4` with `0x2`): an invalidate reaching it
+    /// only writes the drain's retry counter, `+0x38 = 6` (`0x76814b`–`0x768166`).
+    held: Vec<bool>,
+    /// Per node, whether its invalidate passes to what anchors to it in this solve, each of which
+    /// is then reached (`0x768178`–`0x76819c`).
+    passes: Vec<bool>,
+    /// The deferred nodes this solve reached, now pending and passing on.
+    newly_held: Vec<Handle>,
+    /// `(reader, target)` for each anchor a resolving node read whose target is deferred: the read
+    /// resolves the target first (`0x7a2fb8` → `0x768060(0)`), which the caller does in its next
+    /// round.
+    deferred_reads: Vec<(Handle, Handle)>,
+    /// The keep test's threshold in the rects' units; 0 keeps nothing.
+    keep_eps: f64,
     /// Kahn in-degree and reverse edges; each inner `Vec` is cleared, never freed.
     indeg: Vec<u32>,
     dependents: Vec<Vec<Handle>>,
@@ -653,6 +915,12 @@ impl LayoutSolver {
             self.input.resize_with(need, LayoutInput::default);
             self.is_frame.resize(need, false);
             self.rect.resize(need, None);
+            self.cached.resize(need, None);
+            self.has_entry.resize(need, false);
+            self.pending.resize(need, false);
+            self.deferred.resize(need, false);
+            self.held.resize(need, false);
+            self.passes.resize(need, false);
             self.indeg.resize(need, 0);
             self.dependents.resize_with(need, Vec::new);
             self.marked.resize(need, false);
@@ -675,6 +943,12 @@ impl LayoutSolver {
             let i = h as usize;
             self.is_frame[i] = false;
             self.rect[i] = None;
+            self.cached[i] = None;
+            self.has_entry[i] = false;
+            self.pending[i] = false;
+            self.deferred[i] = false;
+            self.held[i] = false;
+            self.passes[i] = false;
             self.indeg[i] = 0;
             self.dependents[i].clear();
             self.marked[i] = false;
@@ -686,6 +960,8 @@ impl LayoutSolver {
         self.order.clear();
         self.cycle.clear();
         self.unresolvable.clear();
+        self.newly_held.clear();
+        self.deferred_reads.clear();
     }
 
     /// Seed a rect this solve does not compute, such as the screen root (`CSimpleTop`); also
@@ -701,23 +977,125 @@ impl LayoutSolver {
         self.ensure(h);
         self.touch(h);
         let dst = &mut self.input[h as usize];
-        dst.anchors.clear();
-        dst.anchors.extend_from_slice(&src.anchors);
+        dst.anchors = src.anchors;
         Self::copy_fields(dst, src);
         self.is_frame[h as usize] = true;
         self.live.push(h);
     }
 
-    /// [`set_frame`](Self::set_frame) with `anchor` as the only anchor: a ScrollFrame child's.
-    pub fn set_frame_anchored(&mut self, h: Handle, src: &LayoutInput, anchor: Anchor) {
+    /// The state node `h` was in when this resolve began, its rect while its valid bit is set,
+    /// and whether it was invalidated since (`0x7680e0`: its own write, a cleared valid bit).
+    ///
+    /// The reference resolves only what is invalidated: by its own write, or by a target's
+    /// resolve that stored a new rect (`0x768cf0`). A node the resolve does not reach keeps this
+    /// state, whatever its inputs now give, as a write that invalidates nothing (`ClearAllPoints`
+    /// `0x767620`, a dying target's unhook `0x767e70`, `SetTexture` `0x770200`) leaves it. The
+    /// rect is also what the keep test ([`set_keep_eps`](Self::set_keep_eps)) holds a new one
+    /// against.
+    pub fn set_entry(&mut self, h: Handle, rect: Option<Rect>, invalidated: bool) {
         self.ensure(h);
         self.touch(h);
-        let dst = &mut self.input[h as usize];
-        dst.anchors.clear();
-        dst.anchors.push(anchor);
-        Self::copy_fields(dst, src);
-        self.is_frame[h as usize] = true;
-        self.live.push(h);
+        let i = h as usize;
+        self.cached[i] = rect;
+        self.has_entry[i] = true;
+        self.pending[i] = invalidated;
+    }
+
+    /// Node `h`'s deferral bit for this solve and whether it is pending under it, for a node this
+    /// solve resolves, keeps or seeds alike: a seeded one is only read, and a read of it is
+    /// reported in [`deferred_reads`](Self::deferred_reads).
+    pub fn set_deferral(&mut self, h: Handle, deferred: bool, held: bool) {
+        self.ensure(h);
+        self.touch(h);
+        self.deferred[h as usize] = deferred;
+        self.held[h as usize] = held;
+    }
+
+    /// Node `h`'s invalidate passes to what anchors to it in this solve: it was invalidated under
+    /// its deferral (`0x768178`).
+    pub fn set_passes(&mut self, h: Handle) {
+        self.ensure(h);
+        self.touch(h);
+        self.passes[h as usize] = true;
+    }
+
+    /// Whether `h` is deferred in this solve.
+    #[inline]
+    pub fn deferred(&self, h: Handle) -> bool {
+        self.deferred.get(h as usize).copied().unwrap_or(false)
+    }
+
+    /// A deferred node `h` the resolve reached: an invalidate marks it pending and passes on to its
+    /// dependents, once, and queues no resolve (`0x76814b`, `0x768178`–`0x76819c`). It keeps its
+    /// entry state.
+    pub fn hold_reached(&mut self, h: Handle) {
+        let i = h as usize;
+        if !self.held[i] && !self.passes[i] {
+            self.passes[i] = true;
+            self.newly_held.push(h);
+        }
+    }
+
+    /// Report each anchor of `reader` its resolve read, `reads` a bit per point id, whose target is
+    /// deferred.
+    pub fn note_reads(&mut self, reader: Handle, anchors: &Anchors, reads: u16) {
+        for t in anchors.read_targets(reads) {
+            if self.deferred(t) {
+                self.deferred_reads.push((reader, t));
+            }
+        }
+    }
+
+    /// The deferred nodes this solve reached ([`hold_reached`](Self::hold_reached)).
+    pub fn newly_held(&self) -> &[Handle] {
+        &self.newly_held
+    }
+
+    /// The reads of deferred targets ([`note_reads`](Self::note_reads)).
+    pub fn deferred_reads(&self) -> &[(Handle, Handle)] {
+        &self.deferred_reads
+    }
+
+    /// Whether `h` now holds a rect it did not hold at entry: a resolve that stored a new rect,
+    /// which invalidates what anchors to `h`. A frame given no entry counts any rect as new; an
+    /// external given none never changes.
+    #[inline]
+    pub fn changed(&self, h: Handle) -> bool {
+        let i = h as usize;
+        let Some(now) = self.rect.get(i).copied().flatten() else {
+            return false;
+        };
+        if self.has_entry[i] {
+            self.cached[i] != Some(now)
+        } else {
+            self.is_frame[i]
+        }
+    }
+
+    /// Whether the resolve reaches node `h`, by the rule [`set_entry`] documents: it has no entry
+    /// state, it was invalidated, or an anchor target stored a new rect or passed on an invalidate
+    /// it took while deferred (`0x768178`–`0x76819c`). Only then does it take the rect its inputs
+    /// give it, or fail, unless it is deferred itself ([`hold_reached`]). `reads` lists its anchor
+    /// targets.
+    ///
+    /// [`set_entry`]: Self::set_entry
+    /// [`hold_reached`]: Self::hold_reached
+    pub fn reached(&self, h: Handle, mut reads: impl Iterator<Item = Handle>) -> bool {
+        let i = h as usize;
+        !self.has_entry.get(i).copied().unwrap_or(false)
+            || self.pending[i]
+            || reads.any(|t| self.changed(t) || self.passes.get(t as usize) == Some(&true))
+    }
+
+    /// The entry rect of node `h`, which it keeps when the resolve does not reach it.
+    #[inline]
+    pub fn entry(&self, h: Handle) -> Option<Rect> {
+        self.cached.get(h as usize).copied().flatten()
+    }
+
+    /// The keep test's threshold, [`RESOLVE_EPS`] in the rects' units; kept across rounds.
+    pub fn set_keep_eps(&mut self, eps: f64) {
+        self.keep_eps = eps;
     }
 
     fn copy_fields(dst: &mut LayoutInput, src: &LayoutInput) {
@@ -740,8 +1118,8 @@ impl LayoutSolver {
             let h = self.live[idx];
             let mut seen: [Handle; 9] = [0; 9];
             let mut n_seen = 0usize;
-            for a_idx in 0..self.input[h as usize].anchors.len() {
-                let d = self.input[h as usize].anchors[a_idx].relative_to;
+            let anchors = self.input[h as usize].anchors;
+            for d in anchors.iter().map(|a| a.relative_to) {
                 if !self.is_frame.get(d as usize).copied().unwrap_or(false) {
                     continue;
                 }
@@ -791,13 +1169,31 @@ impl LayoutSolver {
     }
 
     fn resolve_one(&mut self, h: Handle) {
-        let outcome = {
-            let input = &self.input[h as usize];
+        let i = h as usize;
+        let anchors = self.input[i].anchors;
+        let reached = self.reached(h, anchors.iter().map(|a| a.relative_to));
+        if reached && self.deferred[i] {
+            self.hold_reached(h);
+        }
+        if !reached || self.deferred[i] {
+            // Not reached, or deferred: the entry state stands, rect or none.
+            self.rect[i] = self.cached[i];
+            if self.rect[i].is_none() {
+                self.unresolvable.push(h);
+            }
+            return;
+        }
+        let (outcome, reads) = {
+            let input = &self.input[i];
             let rects = &self.rect;
-            resolve_rect(input, |t| rects.get(t as usize).copied().flatten())
+            resolve_rect_reads(input, |t| rects.get(t as usize).copied().flatten())
         };
+        self.note_reads(h, &anchors, reads);
         match outcome {
-            ResolveOutcome::Resolved(r) => self.rect[h as usize] = Some(r),
+            ResolveOutcome::Resolved(r) => {
+                let kept = self.cached[i].filter(|&c| keeps_rect(c, r, self.keep_eps));
+                self.rect[i] = Some(kept.unwrap_or(r));
+            }
             ResolveOutcome::Unresolvable => self.unresolvable.push(h),
         }
     }
@@ -828,6 +1224,15 @@ mod tests {
         Rect::new(0.0, 0.0, 600.0, 800.0)
     }
 
+    /// `0x41ad10` at 4:3: `[0x832a4c] = 1.0` and `[0x832a44] = 0.8` (as `f32`), so an offset
+    /// stores as `f32(f32(v / 1024) · 0.8)`.
+    #[test]
+    fn layout_units_at_four_thirds() {
+        let u = LayoutUnits::from_aspect(4.0 / 3.0);
+        assert_eq!(u, LayoutUnits { g3: 1.0, g44: 0.8 });
+        assert_eq!(u.store(1280.0), (1.25_f64 * f64::from(0.8_f32)) as f32);
+    }
+
     fn bits(r: Rect) -> [u32; 4] {
         [
             r.bottom.to_bits(),
@@ -835,6 +1240,53 @@ mod tests {
             r.top.to_bits(),
             r.right.to_bits(),
         ]
+    }
+
+    /// One slot per point, walked in point order whatever order the points were set in.
+    #[test]
+    fn anchors_keep_one_slot_per_point_in_point_order() {
+        let br = Anchor::new(Point::BottomRight, SCREEN, Point::BottomRight, -1.0, 1.0);
+        let tl = Anchor::new(Point::TopLeft, SCREEN, Point::TopLeft, 1.0, -1.0);
+        let tl2 = Anchor::new(Point::TopLeft, 7, Point::Center, 2.0, -2.0);
+        let a = Anchors::from([br, tl, tl2]);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.iter().copied().collect::<Vec<_>>(), vec![tl2, br]);
+        assert_eq!(a.nth(1), Some(&br));
+        assert_eq!(a.nth(2), None);
+    }
+
+    /// `SetPoint`'s compare (`0x767cb6`..`0x767cde`): under the threshold on both axes with the
+    /// same target and relative point stands; past it, NaN, or another target or relative point
+    /// replaces. At 4:3 a layout unit is 1280 FrameXML units, so 2⁻²² is about 3.05e-4.
+    #[test]
+    fn anchors_set_keeps_an_anchor_within_the_threshold() {
+        let eps = LayoutUnits::from_aspect(4.0 / 3.0);
+        let held = Anchor::new(Point::Center, SCREEN, Point::Center, 10.0, 20.0);
+        let mut a = Anchors::from([held]);
+        let with = |x: f32, y: f32| Anchor::new(Point::Center, SCREEN, Point::Center, x, y);
+        assert!(!a.set(with(10.0001, 19.9999), eps));
+        assert_eq!(a.get(Point::Center), Some(&held), "nothing is stored");
+        for (x, y) in [(10.001, 20.0), (10.0, 19.999), (f32::NAN, 20.0)] {
+            let mut b = a;
+            assert!(b.set(with(x, y), eps), "({x}, {y})");
+            assert!(b.get(Point::Center).unwrap().x_off.to_bits() == x.to_bits());
+        }
+        let mut b = a;
+        assert!(b.set(
+            Anchor::new(Point::Center, 3, Point::Center, 10.0, 20.0),
+            eps
+        ));
+        let mut b = a;
+        assert!(b.set(
+            Anchor::new(Point::Center, SCREEN, Point::Top, 10.0, 20.0),
+            eps
+        ));
+        let mut b = a;
+        assert!(b.set(
+            Anchor::new(Point::Top, SCREEN, Point::Center, 10.0, 20.0),
+            eps
+        ));
+        assert_eq!(b.len(), 2);
     }
     fn assert_rect(got: ResolveOutcome, want: Rect) {
         match got {
@@ -1024,13 +1476,13 @@ mod tests {
     #[test]
     fn scale_interaction() {
         let f = LayoutInput {
-            anchors: vec![Anchor::new(
+            anchors: Anchors::from([Anchor::new(
                 Point::TopLeft,
                 SCREEN,
                 Point::TopLeft,
                 10.0,
                 -5.0,
-            )],
+            )]),
             width: 200.0,
             height: 50.0,
             scale: 2.0,
@@ -1182,14 +1634,261 @@ mod tests {
         assert!(s.cycle().contains(&A));
     }
 
+    /// `0x768d20`'s four strict `<` tests: every edge under `eps` keeps, one at `eps` applies.
+    #[test]
+    fn keeps_rect_is_strict_on_every_edge() {
+        let old = Rect::new(0.0, 0.0, 40.0, 100.0);
+        let eps = 0.5;
+        assert!(keeps_rect(old, Rect::new(0.25, -0.25, 40.25, 99.75), eps));
+        for moved in [
+            Rect::new(0.5, 0.0, 40.0, 100.0),
+            Rect::new(0.0, -0.5, 40.0, 100.0),
+            Rect::new(0.0, 0.0, 40.5, 100.0),
+            Rect::new(0.0, 0.0, 40.0, 100.5),
+            Rect::new(f32::NAN, 0.0, 40.0, 100.0),
+        ] {
+            assert!(!keeps_rect(old, moved, eps), "{moved:?}");
+        }
+        assert!(!keeps_rect(old, old, 0.0), "a zero threshold keeps nothing");
+    }
+
+    /// A frame whose new rect is within the threshold of its cached one resolves to the cached
+    /// rect, and its dependents read that; past it, the new rect stands.
+    #[test]
+    fn the_solver_keeps_a_cached_rect_under_the_threshold() {
+        const A: Handle = 1;
+        const B: Handle = 2;
+        let solve = |x: f32| {
+            let mut s = LayoutSolver::new();
+            s.begin();
+            s.set_keep_eps(0.0128);
+            s.set_external(SCREEN, screen_rect());
+            s.set_frame(
+                A,
+                &LayoutInput::sized(
+                    vec![Anchor::new(
+                        Point::BottomLeft,
+                        SCREEN,
+                        Point::BottomLeft,
+                        x,
+                        0.0,
+                    )],
+                    20.0,
+                    20.0,
+                ),
+            );
+            s.set_entry(A, Some(Rect::new(0.0, 10.0, 20.0, 30.0)), true);
+            s.set_frame(
+                B,
+                &LayoutInput::sized(
+                    vec![Anchor::new(
+                        Point::BottomLeft,
+                        A,
+                        Point::BottomRight,
+                        0.0,
+                        0.0,
+                    )],
+                    5.0,
+                    5.0,
+                ),
+            );
+            s.solve();
+            (s.rect(A).unwrap(), s.rect(B).unwrap())
+        };
+        let (a, b) = solve(10.01);
+        assert_eq!(a, Rect::new(0.0, 10.0, 20.0, 30.0));
+        assert_eq!(b.left, 30.0);
+        let (a, b) = solve(10.02);
+        assert_eq!(a.left, 10.02);
+        assert_eq!(b.left, a.right);
+    }
+
+    /// A frame with no anchors keeps the rect it entered with until it is invalidated, and what
+    /// anchors to a frame whose resolve fails keeps its own: a failed resolve reaches nothing.
+    #[test]
+    fn a_node_not_reached_keeps_its_entry_state() {
+        const A: Handle = 1;
+        const B: Handle = 2;
+        let held = Rect::new(0.0, 10.0, 20.0, 30.0);
+        let below = Rect::new(-5.0, 30.0, 0.0, 35.0);
+        let solve = |a_invalidated: bool| {
+            let mut s = LayoutSolver::new();
+            s.begin();
+            s.set_external(SCREEN, screen_rect());
+            s.set_frame(A, &LayoutInput::sized(vec![], 20.0, 20.0));
+            s.set_entry(A, Some(held), a_invalidated);
+            s.set_frame(
+                B,
+                &LayoutInput::sized(
+                    vec![Anchor::new(Point::TopLeft, A, Point::BottomRight, 0.0, 0.0)],
+                    5.0,
+                    5.0,
+                ),
+            );
+            s.set_entry(B, Some(below), false);
+            s.solve();
+            (s.rect(A), s.rect(B))
+        };
+        assert_eq!(solve(false), (Some(held), Some(below)), "nothing reached A");
+        assert_eq!(
+            solve(true),
+            (None, Some(below)),
+            "A fails, and B is not reached"
+        );
+    }
+
+    /// A target that stores a new rect reaches what anchors to it, which resolves again.
+    #[test]
+    fn a_target_with_a_new_rect_reaches_its_dependents() {
+        const A: Handle = 1;
+        const B: Handle = 2;
+        let mut s = LayoutSolver::new();
+        s.begin();
+        s.set_external(SCREEN, screen_rect());
+        s.set_frame(
+            A,
+            &LayoutInput::sized(
+                vec![Anchor::new(
+                    Point::BottomLeft,
+                    SCREEN,
+                    Point::BottomLeft,
+                    10.0,
+                    0.0,
+                )],
+                20.0,
+                20.0,
+            ),
+        );
+        s.set_entry(A, None, true);
+        s.set_frame(
+            B,
+            &LayoutInput::sized(
+                vec![Anchor::new(
+                    Point::BottomLeft,
+                    A,
+                    Point::BottomRight,
+                    0.0,
+                    0.0,
+                )],
+                5.0,
+                5.0,
+            ),
+        );
+        s.set_entry(B, Some(Rect::new(0.0, 0.0, 1.0, 1.0)), false);
+        s.solve();
+        assert_eq!(s.rect(B), Some(Rect::new(0.0, 30.0, 5.0, 35.0)));
+    }
+
+    /// A deferred node a changed target reaches keeps its entry rect, is held, and passes the
+    /// invalidate on, so what anchors to it is reached and reports reading it (`0x768178`,
+    /// `0x7a2fb8`). One held at entry passes nothing.
+    #[test]
+    fn a_deferred_node_reached_holds_and_passes_on() {
+        const A: Handle = 1;
+        const B: Handle = 2;
+        const C: Handle = 3;
+        let solve = |b_held: bool| {
+            let mut s = LayoutSolver::new();
+            s.begin();
+            s.set_external(SCREEN, screen_rect());
+            let anchored = |to: Handle| {
+                LayoutInput::sized(
+                    vec![Anchor::new(
+                        Point::BottomLeft,
+                        to,
+                        Point::BottomRight,
+                        0.0,
+                        0.0,
+                    )],
+                    5.0,
+                    5.0,
+                )
+            };
+            s.set_frame(
+                A,
+                &LayoutInput::sized(
+                    vec![Anchor::new(
+                        Point::BottomLeft,
+                        SCREEN,
+                        Point::BottomLeft,
+                        10.0,
+                        0.0,
+                    )],
+                    20.0,
+                    20.0,
+                ),
+            );
+            s.set_entry(A, Some(Rect::new(0.0, 0.0, 20.0, 20.0)), true);
+            s.set_frame(B, &anchored(A));
+            s.set_entry(B, Some(Rect::new(0.0, 20.0, 5.0, 25.0)), false);
+            s.set_deferral(B, true, b_held);
+            s.set_frame(C, &anchored(B));
+            s.set_entry(C, Some(Rect::new(0.0, 25.0, 5.0, 30.0)), false);
+            s.solve();
+            (
+                s.rect(B),
+                s.newly_held().to_vec(),
+                s.deferred_reads().to_vec(),
+                s.rect(C),
+            )
+        };
+        let (b, held, reads, c) = solve(false);
+        assert_eq!(
+            b,
+            Some(Rect::new(0.0, 20.0, 5.0, 25.0)),
+            "B keeps its entry"
+        );
+        assert_eq!(held, vec![B]);
+        assert_eq!(reads, vec![(C, B)], "C was reached and read B");
+        assert_eq!(c, Some(Rect::new(0.0, 25.0, 5.0, 30.0)));
+        let (_, held, reads, _) = solve(true);
+        assert!(
+            held.is_empty() && reads.is_empty(),
+            "held already: nothing passes"
+        );
+    }
+
+    /// The reads a resolve reports are the anchors its edge scans reached: a scan stops at the
+    /// first anchor that resolves (`0x7671a0`), so a later anchor on the same edges is not read.
+    #[test]
+    fn the_resolve_reports_the_anchors_its_scans_read() {
+        let f = LayoutInput::sized(
+            vec![
+                Anchor::new(Point::TopLeft, 5, Point::TopLeft, 0.0, 0.0),
+                Anchor::new(Point::Left, 6, Point::Left, 0.0, 0.0),
+                Anchor::new(Point::BottomRight, 7, Point::BottomRight, 0.0, 0.0),
+            ],
+            0.0,
+            0.0,
+        );
+        let (out, reads) = resolve_rect_reads(&f, |_| Some(screen_rect()));
+        assert!(matches!(out, ResolveOutcome::Resolved(_)));
+        let read: Vec<Handle> = f.anchors.read_targets(reads).collect();
+        assert_eq!(
+            read,
+            vec![5, 7],
+            "LEFT is behind TOPLEFT and no centre is derived"
+        );
+        let (_, reads) = resolve_rect_reads(&f, |t| (t != 5).then(screen_rect));
+        let read: Vec<Handle> = f.anchors.read_targets(reads).collect();
+        assert_eq!(
+            read,
+            vec![5, 6, 7],
+            "TOPLEFT unresolved: the scan reaches LEFT"
+        );
+    }
+
     #[test]
     fn size_changed_epsilon() {
         let r = Rect::new(0.0, 0.0, 40.0, 100.0);
         // 1e-7 is under SIZE_EPS.
         let tiny = Rect::new(0.0, 0.0, 40.0, 100.0 + 1e-7);
-        assert!(!size_changed(r, tiny));
+        assert!(!size_changed(r, tiny, SIZE_EPS));
         let big = Rect::new(0.0, 0.0, 40.0, 100.001);
-        assert!(size_changed(r, big));
+        assert!(size_changed(r, big, SIZE_EPS));
+        // In units of 1280 to the reference's one, 1e-4 is under the threshold.
+        let jitter = Rect::new(0.0, 0.0, 40.0, 100.0001);
+        assert!(!size_changed(r, jitter, SIZE_EPS * 1280.0));
     }
 
     /// The buffers live across rounds, so `begin` must leave nothing behind: round 2 anchors to a
@@ -1283,45 +1982,5 @@ mod tests {
             bits(a_first)
         );
         assert!(s.unresolvable().is_empty());
-    }
-
-    /// The override keeps the size and scale but replaces the anchors, and the reused anchors `Vec`
-    /// must not leak the last round's.
-    #[test]
-    fn set_frame_anchored_replaces_only_the_anchors() {
-        const A: Handle = 1;
-        let mut s = LayoutSolver::new();
-        let input = LayoutInput::sized(
-            vec![
-                Anchor::new(Point::TopLeft, SCREEN, Point::TopLeft, 0.0, 0.0),
-                Anchor::new(Point::BottomRight, SCREEN, Point::BottomRight, 0.0, 0.0),
-            ],
-            100.0,
-            40.0,
-        );
-
-        // Plain: both anchors pin all four edges, so the size is ignored.
-        s.begin();
-        s.set_external(SCREEN, screen_rect());
-        s.set_frame(A, &input);
-        s.solve();
-        assert_eq!(
-            bits(s.rect(A).expect("resolved")),
-            bits(Rect::new(0.0, 0.0, 600.0, 800.0))
-        );
-
-        // Overridden: one TOPLEFT pin at (10, -5), so the 100x40 size decides the other edges.
-        s.begin();
-        s.set_external(SCREEN, screen_rect());
-        s.set_frame_anchored(
-            A,
-            &input,
-            Anchor::new(Point::TopLeft, SCREEN, Point::TopLeft, 10.0, -5.0),
-        );
-        s.solve();
-        assert_eq!(
-            bits(s.rect(A).expect("resolved")),
-            bits(Rect::new(555.0, 10.0, 595.0, 110.0))
-        );
     }
 }

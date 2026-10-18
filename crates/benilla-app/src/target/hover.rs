@@ -35,8 +35,7 @@ pub(super) fn update_pick_occlusion(
     occluders: Query<(), With<PickOccluder>>,
     mut occlusion: ResMut<PickOcclusion>,
 ) {
-    occlusion.distance = f32::INFINITY;
-    occlusion.point = None;
+    *occlusion = PickOcclusion::default();
     let (Ok((camera, cam_tf)), Ok(window)) = (camera.single(), window.single()) else {
         return;
     };
@@ -46,6 +45,7 @@ pub(super) fn update_pick_occlusion(
     let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
         return;
     };
+    occlusion.ray = Some(ray.direction);
     if let Some(hit) = spatial.cast_ray_predicate(
         ray.origin,
         ray.direction,
@@ -182,7 +182,7 @@ pub(super) fn update_hover(
     rig: Res<CameraControl>,
     pointer_over_ui: Res<PointerOverUi>,
     occlusion: Res<PickOcclusion>,
-    // The unit whose plate holds the pointer, as of last frame's plate layout.
+    // The unit whose plate holds the hover after this frame's UI walk.
     plate_hover: Res<crate::vplates::PlateHover>,
     mut hovered: ResMut<Hovered>,
     mesh_assets: Res<Assets<Mesh>>,
@@ -235,6 +235,7 @@ pub(super) fn update_hover(
     hovered.corpse_guid = None;
     hovered.distance = f32::MAX;
     hovered.refused = false;
+    hovered.plate = false;
     // A plate under the pointer is the mouseover, read before the UI gate below, which the plate
     // itself trips: the reference's plate OnEnter (`0x7cb850`) publishes `[0xb4e2c8]` ungraded,
     // with no world pick behind it. Freelook wins, as the plates hand the mouse back (`0x60f830`).
@@ -243,6 +244,7 @@ pub(super) fn update_hover(
             hovered.target = Some(entity);
             hovered.guid = units.get(entity).ok().map(|(g, _)| g.0);
             hovered.distance = 0.0; // topmost UI: it beats any world GameObject at a tie
+            hovered.plate = true;
             *last_pick = Some(entity);
             return;
         }
@@ -681,8 +683,10 @@ pub(super) fn update_hovered_object(
                             self_store, go_guid,
                         ),
                         meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
-                            go_guid
-                                .and_then(|g| go_gate.templates.get(g)?.meeting_stone)
+                            go_gate
+                                .templates
+                                .of(&s.0)
+                                .and_then(|t| t.meeting_stone)
                                 .map(|m| m.area),
                             go_gate.queued_area(),
                         ),
@@ -724,7 +728,7 @@ pub(super) fn update_hovered_object(
     // `0x492890`, `0x52aa20` and `0x4945e0` only past it. Its null mouseover also hides a unit
     // behind the object, which our split picks leave hoverable.
     if let Ok(store) = stores.get(net_entity) {
-        let tmpl = go_gate.templates.get(guid.0);
+        let tmpl = go_gate.templates.of(&store.0);
         let reaction = crate::target::cursor_mode::go_reaction(
             go_gate.factions.as_deref(),
             store.0.gameobject_faction(),
@@ -790,6 +794,18 @@ mod tests {
     use super::*;
     use crate::spell::targeting::corpse_fixture as fx;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// The plate hover the pick reads is this frame's walk's: a plate's leave publishes the loss
+    /// inside the walk (`0x7cb8b0`), so a pick a frame behind would publish the plate again.
+    #[test]
+    fn the_pick_reads_the_plate_hover_of_this_frames_walk() {
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        assert!(crate::test_support::runs_before(
+            &mut app,
+            crate::vplates::seed_plate_hover,
+            update_hover
+        ));
+    }
 
     fn card(bone: u16, owner: Entity) -> BillboardCard {
         let info = benilla_assets::BillboardInfo {
@@ -911,6 +927,7 @@ mod tests {
         world.insert_resource(PickOcclusion {
             distance: f32::INFINITY,
             point: None,
+            ray: None,
         });
         world.init_resource::<crate::vplates::PlateHover>();
         world.init_resource::<Hovered>();
@@ -920,7 +937,7 @@ mod tests {
         world.init_resource::<crate::spell::PicksSelf>();
         world.init_resource::<crate::spell::CorpsePick>();
         world.init_resource::<crate::spell::targeting::UnitPick>();
-        world.insert_resource(crate::net::Reputations(Vec::new()));
+        world.insert_resource(crate::net::Reputations::default());
         let mut camera = Camera::default();
         camera.computed.clip_from_view = Mat4::perspective_infinite_reverse_rh(1.0, 1.0, 0.1);
         camera.computed.target_info = Some(RenderTargetInfo {

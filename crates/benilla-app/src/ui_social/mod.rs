@@ -42,10 +42,12 @@ pub(crate) struct SocialState {
     who_to_ui: bool,
     /// Results whose line waits on a name query (the reference formats from the name cache).
     pending_lines: Vec<FriendStatusUpdate>,
+    /// The players whose name a packet looked up since the last feed: every row of
+    /// `SMSG_FRIEND_LIST` (`0x5ae438`) and `SMSG_IGNORE_LIST` (`0x5af59a`), and the subject of each
+    /// `SMSG_FRIEND_STATUS` (`0x5acb97`, an added ignore `0x5af627`), each with a callback.
+    name_events: std::collections::HashSet<u64>,
     /// Set when the friend list changed, so the feed fires its list event.
     friends_dirty: bool,
-    /// A `ShowFriends()` is out: the next list fires `FRIENDLIST_SHOW`, not `FRIENDLIST_UPDATE`.
-    pub(crate) friends_show_pending: bool,
     ignores_dirty: bool,
     who_dirty: bool,
 }
@@ -75,6 +77,7 @@ impl SocialState {
 
     /// `SMSG_FRIEND_LIST`: the whole list, never a delta.
     fn apply_friend_list(&mut self, friends: Vec<FriendEntry>) {
+        self.name_events.extend(friends.iter().map(|f| f.guid));
         self.friends = friends;
         self.friends_dirty = true;
     }
@@ -87,6 +90,7 @@ impl SocialState {
 
     /// `SMSG_IGNORE_LIST`: the whole list.
     fn apply_ignore_list(&mut self, guids: Vec<u64>) {
+        self.name_events.extend(guids.iter().copied());
         self.ignores = guids;
         self.ignores_dirty = true;
     }
@@ -151,6 +155,7 @@ impl SocialState {
             // Every other code is a refusal: a line, no change.
             _ => {}
         }
+        self.name_events.insert(update.guid);
         self.pending_lines.push(update);
     }
 
@@ -291,13 +296,47 @@ pub(crate) struct UiSocialPlugin;
 impl Plugin for UiSocialPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.init_resource::<SocialState>().add_systems(
-            Update,
-            (
-                feed::feed_social.in_set(UiFeed),
-                feed::drain_social.after(UiInput),
-            ),
-        );
+        app.init_resource::<SocialState>()
+            .add_systems(
+                Startup,
+                load_lfg_dungeons.after(benilla_assets::AssetSet::Open),
+            )
+            .add_systems(
+                Update,
+                (
+                    feed::feed_social.in_set(UiFeed),
+                    feed::drain_social.after(UiInput),
+                ),
+            );
+    }
+}
+
+/// `LFGDungeons.dbc` for the VM's looking-for-group lists.
+#[derive(Resource)]
+struct LfgDungeonsRes(Vec<benilla_ui::script::LfgDungeon>);
+
+fn load_lfg_dungeons(mut commands: Commands, assets: Option<Res<benilla_assets::WorldAssets>>) {
+    use benilla_assets::LockRecover;
+    let Some(assets) = assets else { return };
+    let loaded = {
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_lfg_dungeons(&mut chain)
+    };
+    match loaded {
+        Ok(rows) => commands.insert_resource(LfgDungeonsRes(
+            rows.into_iter()
+                .map(|r| benilla_ui::script::LfgDungeon {
+                    name: r.name,
+                    min_level: r.min_level,
+                    max_level: r.max_level,
+                    kind: r.kind,
+                    side: r.side,
+                })
+                .collect(),
+        )),
+        Err(e) => {
+            warn!("ui_social: LFGDungeons.dbc failed to load — the LFG lists stay empty: {e:#}")
+        }
     }
 }
 

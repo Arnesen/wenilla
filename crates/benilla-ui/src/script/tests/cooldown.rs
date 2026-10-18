@@ -53,6 +53,7 @@ fn action_state_bindings_answer_the_reference_conventions() {
             action: 117,
             count: 4,
             consumable: true,
+            use_spell: None,
         }),
     );
     assert!(s.eval::<bool>("return IsConsumableAction(3) == 1").unwrap());
@@ -169,4 +170,86 @@ fn shapeshift_and_container_cooldowns_keep_their_anchors_too() {
     assert!(s
         .eval::<bool>("local st = GetContainerItemCooldown(0, 1); return math.abs(st - 50) < 1e-3")
         .unwrap());
+}
+
+/// A held action (enable 0) answers the call's own now (`0x6e1517`, `0x6e15a1`): two polls with
+/// no feed change in between return starts as far apart as `GetTime()`.
+#[test]
+fn a_held_action_answers_the_polls_now() {
+    let mut s = script();
+    s.tick(50.0);
+    s.set_action_state(
+        3,
+        Some(ActionState {
+            cooldown: Some((0, 1, false)),
+            ..Default::default()
+        }),
+    );
+    let poll = |s: &UiScript| {
+        s.eval::<(f64, f64, i32)>("return GetActionCooldown(3)")
+            .unwrap()
+    };
+    let first = poll(&s);
+    assert_eq!(first, (50.0, 0.001, 0));
+    s.tick(0.02);
+    let second = poll(&s);
+    assert_eq!(second.0, s.eval::<f64>("return GetTime()").unwrap());
+    assert!((second.0 - first.0 - 0.02).abs() < 1e-9, "20 ms apart");
+}
+
+/// `GetInventoryItemCooldown` (`0x4c8a60`) answers the item query only for a worn item of the
+/// active player whose template names a block-0 spell (`+0x11c`), and three zeros, enable included,
+/// for every other case (`0x4c8bdf`). An on-use spell with nothing running answers enabled.
+#[test]
+fn get_inventory_item_cooldown_answers_the_item_query_under_the_clients_gates() {
+    use std::collections::HashMap;
+    let mut s = script();
+    s.tick(100.0);
+    let item = |spell_0| {
+        Some(InvSlotView {
+            item_id: 14_000,
+            spell_0,
+            ..Default::default()
+        })
+    };
+    let mut inv: InventorySlots = Default::default();
+    inv[13] = item(true); // running: 4 s into 10 s
+    inv[14] = item(true); // on-use, cold
+    inv[15] = item(true); // no answer: no on-use spell, or a spent charged template
+    inv[16] = item(false); // has an answer, but block 0 names no spell
+    s.set_inventory_slots(inv);
+    s.set_worn_cooldowns(HashMap::from([
+        (13, (96_000, 10_000, true)),
+        (14, (0, 0, true)),
+        (16, (96_000, 10_000, true)),
+    ]));
+    let poll = |s: &UiScript, unit: &str, slot: i32| {
+        s.eval::<(f64, f64, i32)>(&format!(
+            "return GetInventoryItemCooldown('{unit}', {slot})"
+        ))
+        .unwrap()
+    };
+    assert_eq!(
+        poll(&s, "player", 13),
+        (96.0, 10.0, 1),
+        "a running cooldown"
+    );
+    assert_eq!(poll(&s, "player", 14), (0.0, 0.0, 1), "cold is enabled");
+    assert_eq!(poll(&s, "player", 15), (0.0, 0.0, 0), "no answer: all zero");
+    assert_eq!(poll(&s, "player", 16), (0.0, 0.0, 0), "no spell in block 0");
+    assert_eq!(poll(&s, "player", 12), (0.0, 0.0, 0), "an empty slot");
+    assert_eq!(poll(&s, "player", 0), (0.0, 0.0, 0), "the ammo slot (-1)");
+    assert_eq!(
+        poll(&s, "target", 13),
+        (0.0, 0.0, 0),
+        "not the active player"
+    );
+    // Past its end the same entry reads cold, enabled.
+    s.tick(7.0);
+    assert_eq!(poll(&s, "player", 13), (0.0, 0.0, 1));
+    let err = |code: &str| s.run(code).unwrap_err().to_string();
+    assert!(err("GetInventoryItemCooldown({}, 1)")
+        .contains("Usage: GetInventoryItemCooldown(unit, slot)"));
+    assert!(err("GetInventoryItemCooldown('player', 30)")
+        .contains("Invalid inventory slot in GetInventoryItemCooldown"));
 }

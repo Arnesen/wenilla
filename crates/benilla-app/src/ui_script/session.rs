@@ -3,6 +3,8 @@
 //! kept past its VM silently skips the push into the next one; [`VmMemo`] keys it on
 //! [`UiScript::session`], so against a new VM it reads as fresh.
 
+use bevy::prelude::*;
+
 use benilla_ui::script::UiScript;
 
 /// A host-side memo valid only for the VM that wrote it: [`VmMemo::get`] resets it to
@@ -10,6 +12,8 @@ use benilla_ui::script::UiScript;
 pub(crate) struct VmMemo<T> {
     /// The VM this memory is about; 0 is no VM, as [`UiScript::session`] counts from 1.
     session: u64,
+    /// The world it is about, for [`VmMemo::get_in_world`]: the sweeps run before it was written.
+    world: u64,
     inner: T,
 }
 
@@ -17,6 +21,7 @@ impl<T: Default> Default for VmMemo<T> {
     fn default() -> Self {
         Self {
             session: 0,
+            world: 0,
             inner: T::default(),
         }
     }
@@ -40,6 +45,17 @@ impl<T: Default> VmMemo<T> {
         self.get_reset_for(Some(script))
     }
 
+    /// [`VmMemo::get`] for what a window's feed last told the VM: cleared as well once a
+    /// leave-world sweep has run, since the sweep closes the window and tells the VM itself, so
+    /// the feed's next look starts from a closed window and announces nothing twice.
+    pub(crate) fn get_in_world(&mut self, script: &UiScript, worlds: super::SweptWorlds) -> &mut T {
+        if self.world != worlds.0 {
+            self.world = worlds.0;
+            self.inner = T::default();
+        }
+        self.get(script)
+    }
+
     fn get_reset_for(&mut self, script: Option<&UiScript>) -> (&mut T, bool) {
         let now = script.map_or(0, UiScript::session);
         let reset = self.session != now;
@@ -48,6 +64,23 @@ impl<T: Default> VmMemo<T> {
             self.inner = T::default();
         }
         (&mut self.inner, reset)
+    }
+}
+
+/// What a window's feed last told the VM: a [`VmMemo`] that a leave-world sweep clears as well
+/// ([`VmMemo::get_in_world`]), for the windows whose sweep leg closes them and tells the VM.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct WindowMemo<'w, 's, T: Default + Send + 'static> {
+    memo: Local<'s, VmMemo<T>>,
+    /// Absent in a harness that registers no sweep, which then never sweeps.
+    worlds: Option<Res<'w, super::SweptWorlds>>,
+}
+
+impl<T: Default + Send + 'static> WindowMemo<'_, '_, T> {
+    /// The memory, cleared first against a different VM or after a sweep.
+    pub(crate) fn get(&mut self, script: &UiScript) -> &mut T {
+        let worlds = self.worlds.as_deref().copied().unwrap_or_default();
+        self.memo.get_in_world(script, worlds)
     }
 }
 
@@ -109,6 +142,22 @@ mod tests {
     }
 
     #[test]
+    fn a_window_memo_does_not_survive_a_sweep() {
+        let vm = UiScript::new().expect("VM");
+        let mut memo: VmMemo<Option<u32>> = VmMemo::default();
+        *memo.get_in_world(&vm, super::super::SweptWorlds(0)) = Some(7);
+        assert_eq!(
+            *memo.get_in_world(&vm, super::super::SweptWorlds(0)),
+            Some(7)
+        );
+        assert_eq!(
+            *memo.get_in_world(&vm, super::super::SweptWorlds(1)),
+            None,
+            "the sweep closed the window and told the VM"
+        );
+    }
+
+    #[test]
     fn a_seed_is_claimed_once_per_vm() {
         let first = UiScript::new().expect("VM");
         let second = UiScript::new().expect("VM");
@@ -160,6 +209,9 @@ mod tests {
     /// `Local`s in VM-holding systems that are not memory about the VM, keyed
     /// `(path under src/, parameter name)`.
     const EXEMPT: &[(&str, &str)] = &[
+        // The targeting cancels seen, a count over `SpellTargeting`, host state the VM never
+        // holds: a fresh VM starts with nothing armed to disarm.
+        ("ui_tradeskill.rs", "seen_aborts"),
         // A raster fact; a fresh VM re-seats its measurer on `!has_text_measurer()` anyway.
         ("ui_script/extract/mod.rs", "last_seam"),
         // The plate driver's anti-overlap scratch, cleared at the top of every run.
@@ -178,6 +230,14 @@ mod tests {
         ("cursor.rs", "last_ptr"),
         // The wheel's fraction toward its next notch, a fact about the device, not the VM.
         ("bindings.rs", "notches"),
+        // The keys believed down, a fact about the keyboard; an alt-tab wipes it by reconcile.
+        ("bindings.rs", "down"),
+        ("ui_script/input.rs", "pressed"),
+        // The catalog's bit-15 spells, a fact about the spell catalog, rebuilt when it changes.
+        ("ui_unit/control_gate.rs", "candidates"),
+        // The glue booth's stage numbers, which must outlive the VM: a scene parked under the old
+        // VM keeps its number until the booth drops it, so a new VM's scenes take fresh ones.
+        ("ui_script/glue_scene.rs", "top"),
     ];
 
     use crate::test_support::{fn_parameter_lists, rust_files};

@@ -1,6 +1,6 @@
-//! The Lua 5.0 dialect the vendored 5.1 VM restores: the iterator-less generic-for (5.0's
-//! `OP_TFORPREP` folded into `OP_TFORLOOP` in `third_party/lua-src/lua-5.1.5/lvm.c`), long-string
-//! nesting and the constructor compat-semicolon.
+//! The Lua 5.0 grammar the script host keeps over 5.1: the iterator-less generic-for (5.0's
+//! `OP_TFORPREP`, in benilla-lua's `TForLoop`), long-string nesting and the constructor
+//! compat-semicolon (`crates/benilla-lua/GRAMMAR.md`).
 
 use super::common::script;
 
@@ -166,8 +166,8 @@ fn nested_and_repeated_loops_each_substitute_independently() {
     assert_eq!(twice, 4);
 }
 
-/// `[[ ... [[ ... ]] ... ]]` nests in Lua 5.0, as 1.12.1 ships it; the vendored `luaconf.h` sets
-/// `LUA_COMPAT_LSTR` to 2, which enables 5.1's own nesting path in `read_long_string`.
+/// `[[ ... [[ ... ]] ... ]]` nests in Lua 5.0, as 1.12.1 ships it: 5.1's `read_long_string` with
+/// `LUA_COMPAT_LSTR` 2.
 #[test]
 fn a_nested_long_string_parses_as_lua_50_does() {
     let s = crate::script::UiScript::new().unwrap();

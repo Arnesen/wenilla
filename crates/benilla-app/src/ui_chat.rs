@@ -14,6 +14,8 @@ mod ace_gate_tests;
 mod away;
 /// The world broadcasts: `SMSG_ZONE_UNDER_ATTACK`/`_DEFENSE_MESSAGE`/`_SERVER_MESSAGE`.
 mod broadcast;
+/// The chat bubbles' hand-off to their `WorldFrame` widgets.
+pub(crate) mod bubbles;
 mod channels;
 /// The combat log's chat lines: classification, chat type and each sentence's GlobalString key.
 pub(crate) mod combat;
@@ -27,6 +29,9 @@ mod frames;
 /// The idle handler: the 5-minute auto-sit and auto-AFK, and the 30-minute camp.
 pub(crate) mod idle;
 mod input;
+/// The `SendChatMessage` drain, for the tests that feed it a real group.
+#[cfg(test)]
+pub(crate) use input::drain_addon_chat_sends;
 /// The language gate: the exemptions and fluency lookup behind the chat garble.
 mod language;
 /// `LoggingChat`/`LoggingCombat`: the two log files `/chatlog` and `/combatlog` toggle.
@@ -55,6 +60,9 @@ pub(crate) use event::event_name;
 pub(crate) use event::{default_color, ChatEvent, ChatEventKind};
 pub(crate) use feed::ChatLog;
 pub(crate) use frames::ChatWindows;
+/// Test-only: the quest log's rig tees the lines its timers show.
+#[cfg(test)]
+pub(crate) use frames::tee_shown_lines;
 /// The per-character chat cache's restore, called from the world-entry UI load: its two events
 /// must precede the session's first chat line and `PLAYER_LOGIN`.
 pub(crate) use settings::restore_chat_looks;
@@ -116,6 +124,13 @@ impl Plugin for UiChatPlugin {
                 )
                     .before(feed::feed_chat),
             )
+            // After the drain, so the log files take the frame's lines in one order.
+            .add_systems(
+                Update,
+                frames::tee_shown_lines
+                    .in_set(UiFeed)
+                    .after(feed::feed_chat),
+            )
             // Before the drain, so a broadcast lands on the frame it decodes.
             .add_systems(
                 Update,
@@ -169,7 +184,7 @@ impl Plugin for UiChatPlugin {
                     // Before the zone-channel walk renumbers or renames a slot, so a `/N` resolves
                     // against the roster the script's `GetChannelName` read this frame.
                     .before(channels::end_session_channels_on_disconnect)
-                    .in_set(crate::char_select::InWorldGated),
+                    .in_set(crate::client_state::InWorldGated),
             )
             // The zone-channel auto-join, which vmangos leaves to the client. The disconnect clear
             // runs first, so a same-frame drop cannot leave the walk diffing stale membership.
@@ -179,14 +194,15 @@ impl Plugin for UiChatPlugin {
                 Update,
                 (
                     channels::end_session_channels_on_disconnect,
-                    channels::auto_join_zone_channels.in_set(crate::char_select::InWorldGated),
-                    recruitment::guild_recruitment_cascade.in_set(crate::char_select::InWorldGated),
+                    channels::auto_join_zone_channels.in_set(crate::client_state::InWorldGated),
+                    recruitment::guild_recruitment_cascade
+                        .in_set(crate::client_state::InWorldGated),
                 )
                     .chain()
                     .after(benilla_world::terrain_stream::AreaAuthoritySet),
             )
             .add_systems(
-                OnExit(crate::char_select::ClientState::InWorld),
+                OnExit(crate::client_state::ClientState::InWorld),
                 (channels::end_session_channels, end_session_chat),
             );
         settings::plugin(app);

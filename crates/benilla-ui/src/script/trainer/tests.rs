@@ -19,7 +19,7 @@ fn svc(
         name: Some(name.into()),
         subtext: Some("Rank 1".into()),
         texture: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
-        description: format!("Teaches {name}."),
+        description: Some(format!("Teaches {name}.")),
         cost: 100,
         prof_first_rank: false,
         category: cat,
@@ -29,6 +29,9 @@ fn svc(
         is_trade_skill: false,
         group_key,
         group_name: group_name.into(),
+        skill_step: false,
+        step_increase: None,
+        line_name: Some(group_name.into()),
     }
 }
 
@@ -90,7 +93,8 @@ fn tree_interleaves_headers_and_ordered_services() {
         )
         .unwrap();
     assert_eq!((hn.as_str(), ht.as_str()), ("Arms", "header"));
-    assert_eq!((hsub, hexp), (None, Some(1)));
+    // The header's subText is the empty string (`0x4d8b50`), not nil.
+    assert_eq!((hsub.as_deref(), hexp), (Some(""), Some(1)));
 
     let info = |s: &mut UiScript, i: i64| {
         s.eval::<(String, String)>(&format!(
@@ -105,6 +109,52 @@ fn tree_interleaves_headers_and_ordered_services() {
     assert_eq!(info(&mut s, 3), ("Cleave".into(), "used".into()));
     assert_eq!(info(&mut s, 4), ("Fury".into(), "header".into()));
     assert_eq!(info(&mut s, 5), ("Bloodrage".into(), "unavailable".into()));
+}
+
+/// The fourth value of a service row is 1 (`0x4d8e42`: the header test `0x4d8c30` answers 0 for a
+/// row that is no header, which pushes 1), not nil; a collapsed header's is nil.
+#[test]
+fn a_service_row_answers_one_for_its_fourth_value() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    let fourth = |s: &mut UiScript, row: u32| -> (i64, Option<i64>) {
+        s.eval(&format!(
+            "local n = function(...) return arg.n, arg[4] end return n(GetTrainerServiceInfo({row}))"
+        ))
+        .unwrap()
+    };
+    // Rows: Arms header, Heroic Strike, Cleave, Fury header, Bloodrage.
+    assert_eq!(fourth(&mut s, 1), (4, Some(1)));
+    for service in [2, 3, 5] {
+        assert_eq!(fourth(&mut s, service), (4, Some(1)), "row {service}");
+    }
+    s.run("CollapseTrainerSkillLine(1)").unwrap();
+    assert_eq!(fourth(&mut s, 1), (4, None), "a collapsed header");
+}
+
+/// `GetTrainerServiceDescription` (`0x4d9b40`) pushes one value, nil (`0x4d9d90`) where there is
+/// no text to show: no row at the index (`0x4d9ba8` to `0x4d9d93`), a service with no spell record
+/// (`0x4d9bd7`), or a service whose spell has none (`0x4d9d44`, `0x4d9d49`). A header row has no service either.
+#[test]
+fn service_description_is_nil_without_text() {
+    let mut s = UiScript::new().unwrap();
+    let mut t = trainer();
+    t.services[1].description = None;
+    s.set_trainer(Some(t));
+
+    // `arg.n` counts the returns (`select` is 5.1's, not a 1.12 global).
+    let shape = |s: &mut UiScript, i: i64| {
+        s.eval::<String>(&format!(
+            "local function c(...) return arg.n .. ':' .. type(arg[1]) end \
+             return c(GetTrainerServiceDescription({i}))"
+        ))
+        .unwrap()
+    };
+    assert_eq!(shape(&mut s, 2), "1:string");
+    assert_eq!(shape(&mut s, 3), "1:nil", "a service with no text");
+    assert_eq!(shape(&mut s, 4), "1:nil", "a header row");
+    assert_eq!(shape(&mut s, 99), "1:nil", "past the last row");
+    assert_eq!(shape(&mut s, 0), "1:nil", "before the first");
 }
 
 #[test]
@@ -659,4 +709,259 @@ fn talent_order_sorts_on_state_within_a_group() {
     }));
     let got: Vec<String> = visible(&mut s).into_iter().map(|(n, _)| n).collect();
     assert_eq!(got, ["Riding", "Aye", "Bee", "Cee"]);
+}
+
+/// The mask commits fire `TRAINER_UPDATE` inside the verb, after the re-filter (`0x4d8410`, then
+/// `0x4d8ca0`/`0x4d8ce0`): a handler reads the filtered tree before the next Lua line runs.
+#[test]
+fn the_filter_and_collapse_verbs_fire_trainer_update_in_place() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    crate::script::tick::heard::listen(&s, &["TRAINER_UPDATE"], Some("GetNumTrainerServices()"));
+    let seen: Vec<String> = s
+        .eval(
+            "SetTrainerServiceTypeFilter('used', 0) local h = HEARD HEARD = {} \
+             CollapseTrainerSkillLine(1) table.insert(h, HEARD[1]) return h",
+        )
+        .unwrap();
+    assert_eq!(seen, ["TRAINER_UPDATE 4", "TRAINER_UPDATE 3"]);
+}
+
+/// `OpenTrainer` (`0x4d8cf0`) asks for the player's own list: it queues the intent for the app,
+/// which owns the player, and takes no argument.
+#[test]
+fn open_trainer_queues_a_close_and_the_own_list_request() {
+    let mut s = UiScript::new().unwrap();
+    assert!(!s.take_trainer_open_own());
+    s.run("OpenTrainer()").unwrap();
+    assert!(s.take_trainer_open_own());
+    assert!(!s.take_trainer_open_own(), "drained");
+    assert!(
+        !s.take_trainer_close(),
+        "the close waits on the player, which the app sees"
+    );
+}
+
+/// `IsTrainerServiceSkillStep` (`0x4d9dd0`) and `GetTrainerServiceStepIncrease` (`0x4da030`).
+#[test]
+fn skill_step_rows_answer_their_flag_and_their_increase_text() {
+    let mut s = UiScript::new().unwrap();
+    for (call, usage) in [
+        (
+            "IsTrainerServiceSkillStep()",
+            "Usage: IsTrainerServiceSkillStep(index)",
+        ),
+        (
+            "IsTrainerServiceSkillStep('x')",
+            "Usage: IsTrainerServiceSkillStep(index)",
+        ),
+        (
+            "GetTrainerServiceStepIncrease(nil)",
+            "Usage: GetTrainerServiceStepIncrease(index)",
+        ),
+        (
+            "GetTrainerServiceStepIncrease({})",
+            "Usage: GetTrainerServiceStepIncrease(index)",
+        ),
+    ] {
+        let err = s.run(call).expect_err(call).to_string();
+        assert!(err.contains(usage), "{call}: {err}");
+    }
+    let mut t = trainer();
+    // Rows: 1 H:Arms, 2 Heroic Strike (available), 3 Cleave (used), 4 H:Fury, 5 Bloodrage.
+    t.services[0].skill_step = true;
+    t.services[0].step_increase = Some("Increases potential in Arms by 75".into());
+    t.services[1].skill_step = true;
+    t.services[1].step_increase = Some("Increases potential in Arms by 75".into());
+    s.set_trainer(Some(t));
+    let nil =
+        |s: &mut UiScript, call: &str| s.eval::<bool>(&format!("return {call} == nil")).unwrap();
+    assert_eq!(
+        s.eval::<i64>("return IsTrainerServiceSkillStep(2)")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        s.eval::<String>("return type(IsTrainerServiceSkillStep(2))")
+            .unwrap(),
+        "number"
+    );
+    // A used row still is one; a row without the effect, a header and a miss are not.
+    assert_eq!(
+        s.eval::<i64>("return IsTrainerServiceSkillStep(3)")
+            .unwrap(),
+        1
+    );
+    for row in [5, 1, 4, 0, -1, 99] {
+        assert!(
+            nil(&mut s, &format!("IsTrainerServiceSkillStep({row})")),
+            "{row}"
+        );
+    }
+    assert_eq!(
+        s.eval::<String>("return GetTrainerServiceStepIncrease(2)")
+            .unwrap(),
+        "Increases potential in Arms by 75"
+    );
+    // A used row (state 2) refuses; so do the rest.
+    for row in [3, 5, 1, 0, 99] {
+        assert!(
+            nil(&mut s, &format!("GetTrainerServiceStepIncrease({row})")),
+            "{row}"
+        );
+    }
+}
+
+/// The skill-line filter: `GetTrainerSkillLines` (`0x4da660`), `GetTrainerSkillLineFilter`
+/// (`0x4da590`) and `SetTrainerSkillLineFilter` (`0x4da3f0`), over the header groups in order.
+#[test]
+fn the_skill_line_filter_hides_whole_groups_and_reports_them() {
+    let mut s = UiScript::new().unwrap();
+    // No trainer: no groups, no values, and "every group is shown".
+    assert_eq!(
+        s.eval::<i64>("local n = function(...) return arg.n end return n(GetTrainerSkillLines())",)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        s.eval::<i64>("return GetTrainerSkillLineFilter(0)")
+            .unwrap(),
+        1
+    );
+    let mut t = trainer();
+    // Fury's line has no `SkillLine.dbc` row.
+    t.services[2].line_name = None;
+    s.set_trainer(Some(t));
+    // Groups, in header order: Arms, Fury. One value per group, nil where the line has no row.
+    let (n, first, second): (i64, Option<String>, Option<String>) = s
+        .eval(
+            "local n = function(...) return arg.n, arg[1], arg[2] end \
+             return n(GetTrainerSkillLines())",
+        )
+        .unwrap();
+    assert_eq!((n, first.as_deref(), second), (2, Some("Arms"), None));
+
+    let shown = |s: &mut UiScript, n: i64| -> bool {
+        s.eval::<Option<i64>>(&format!("return GetTrainerSkillLineFilter({n})"))
+            .unwrap()
+            .is_some()
+    };
+    for n in [0, -3, 1, 2] {
+        assert!(shown(&mut s, n), "{n} on a fresh list");
+    }
+    assert_eq!(visible(&mut s).len(), 5);
+
+    // Clearing group 2 hides Fury and its row, header included.
+    s.run("SetTrainerSkillLineFilter(2, 0)").unwrap();
+    assert!(shown(&mut s, 1) && !shown(&mut s, 2));
+    assert!(!shown(&mut s, 0), "not every group is shown");
+    assert_eq!(
+        visible(&mut s)
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        ["Arms", "Heroic Strike", "Cleave"]
+    );
+    // Adding it back with a nonzero `on`.
+    s.run("SetTrainerSkillLineFilter(2, 1)").unwrap();
+    assert!(shown(&mut s, 0));
+    assert_eq!(visible(&mut s).len(), 5);
+    // Exclusive: only the named group.
+    s.run("SetTrainerSkillLineFilter(2, 1, 1)").unwrap();
+    assert!(!shown(&mut s, 1) && shown(&mut s, 2));
+    assert_eq!(
+        visible(&mut s)
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        ["Fury", "Bloodrage"]
+    );
+    // An index below 1 shows every group, and needs no `on`.
+    s.run("SetTrainerSkillLineFilter(0)").unwrap();
+    assert!(shown(&mut s, 0));
+    assert_eq!(visible(&mut s).len(), 5);
+    // A new list shows every group again.
+    s.run("SetTrainerSkillLineFilter(1, 0)").unwrap();
+    s.reset_trainer_list_state(0);
+    assert!(shown(&mut s, 0));
+}
+
+/// The three functions' errors, in the exe's order and words.
+#[test]
+fn the_skill_line_filter_raises_the_exes_errors() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    let raises = |s: &mut UiScript, call: &str, text: &str| {
+        let err = s.run(call).expect_err(call).to_string();
+        assert!(err.contains(text), "{call}: {err}");
+    };
+    let set_usage = r"Usage: SetTrainerSkillLineFilter(index [, on\off, exclusive])";
+    raises(&mut s, "SetTrainerSkillLineFilter()", set_usage);
+    raises(&mut s, "SetTrainerSkillLineFilter('x', 1)", set_usage);
+    raises(&mut s, "SetTrainerSkillLineFilter({})", set_usage);
+    // Past the group count (2 groups), before the `on` check.
+    raises(
+        &mut s,
+        "SetTrainerSkillLineFilter(3)",
+        "Bad skill line in SetTrainerSkillLineFilter",
+    );
+    raises(
+        &mut s,
+        "SetTrainerSkillLineFilter(3, 1)",
+        "Bad skill line in SetTrainerSkillLineFilter",
+    );
+    raises(
+        &mut s,
+        "SetTrainerSkillLineFilter(1)",
+        "Missing on//off parameter in SetTrainerSkillLineFilter",
+    );
+    raises(
+        &mut s,
+        "SetTrainerSkillLineFilter(1, 'x')",
+        "Missing on//off parameter in SetTrainerSkillLineFilter",
+    );
+    raises(
+        &mut s,
+        "GetTrainerSkillLineFilter()",
+        "Usage: GetTrainerSkillLineFilter(index)",
+    );
+    raises(
+        &mut s,
+        "GetTrainerSkillLineFilter(nil)",
+        "Usage: GetTrainerSkillLineFilter(index)",
+    );
+    raises(
+        &mut s,
+        "GetTrainerSkillLineFilter(3)",
+        "Bad skill line in GetTrainerSkillLineFilter",
+    );
+    // Nothing changed: the refused calls left the mask alone.
+    assert_eq!(
+        s.eval::<i64>("return GetTrainerSkillLineFilter(0)")
+            .unwrap(),
+        1
+    );
+}
+
+/// Each change to the skill-line filter signals `TRAINER_UPDATE` through the store routine
+/// (`0x4d8cb0`), also when the mask did not move.
+#[test]
+fn setting_the_skill_line_filter_signals_trainer_update() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    s.run(
+        "n = 0 local f = CreateFrame('Frame') f:RegisterEvent('TRAINER_UPDATE') \
+         f:SetScript('OnEvent', function() n = n + 1 end)",
+    )
+    .unwrap();
+    s.run("SetTrainerSkillLineFilter(1, 1)").unwrap();
+    assert_eq!(s.eval::<i64>("return n").unwrap(), 1);
+    s.run("SetTrainerSkillLineFilter(0)").unwrap();
+    assert_eq!(s.eval::<i64>("return n").unwrap(), 2);
+    let _ = s.run("SetTrainerSkillLineFilter(9, 1)");
+    assert_eq!(
+        s.eval::<i64>("return n").unwrap(),
+        2,
+        "a refusal signals nothing"
+    );
 }

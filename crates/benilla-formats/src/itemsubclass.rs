@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
-use crate::dbc::{i32_at, parse, u32_at};
+use crate::dbc::{i32_at, loc_str, parse, u32_at};
 use crate::Chain;
 
 const ITEM_SUB_CLASS: &str = "DBFilesClient\\ItemSubClass.dbc";
@@ -55,6 +55,12 @@ impl ItemSubClassCatalog {
             .into_iter()
             .find(|&v| v != -1)
             .map(|v| v as u32)
+    }
+
+    /// The prerequisite proficiency alone (`[row+0x08]`), `None` for -1 or an unknown pair.
+    pub fn proficiency_prerequisite(&self, class: u32, subclass: u32) -> Option<u32> {
+        let r = self.rows.get(&(class, subclass))?;
+        (r.prerequisite_proficiency != -1).then_some(r.prerequisite_proficiency as u32)
     }
 
     /// `WeaponSwingSize` (`[row+0x24]`, returned by `0x623870`). An unknown pair is the reference's
@@ -211,6 +217,7 @@ fn item_sub_class_mask_schema() -> Schema {
 
 /// Load `ItemSubClass.dbc` and the `ItemSubClassMask.dbc` group names off the patch chain.
 pub fn load_item_sub_classes(chain: &mut Chain) -> Result<ItemSubClassCatalog> {
+    let locale = chain.locale();
     let bytes = chain
         .read_file(ITEM_SUB_CLASS)
         .with_context(|| format!("reading {ITEM_SUB_CLASS}"))?;
@@ -228,7 +235,7 @@ pub fn load_item_sub_classes(chain: &mut Chain) -> Result<ItemSubClassCatalog> {
         let (Some(class), Some(mask), Some(name)) = (
             u32_at(r, 0),
             u32_at(r, 1),
-            crate::dbc::str_at(&mask_rs, r, 2).filter(|n| !n.is_empty()),
+            loc_str(&mask_rs, r, 2, locale).filter(|n| !n.is_empty()),
         ) else {
             continue;
         };
@@ -253,9 +260,9 @@ pub fn load_item_sub_classes(chain: &mut Chain) -> Result<ItemSubClassCatalog> {
                 weapon_swing_size: u32_at(r, 9).unwrap_or(0),
             },
         );
-        // The enUS verbose name (column 19) first, the display name (column 10) as fallback.
-        let display = crate::dbc::str_at(&rs, r, 10).filter(|n| !n.is_empty());
-        let name = crate::dbc::str_at(&rs, r, 19)
+        // The verbose name (column 19) first, the display name (column 10) as fallback.
+        let display = loc_str(&rs, r, 10, locale).filter(|n| !n.is_empty());
+        let name = loc_str(&rs, r, 19, locale)
             .filter(|n| !n.is_empty())
             .or_else(|| display.clone());
         if let Some(name) = name {
@@ -384,6 +391,13 @@ mod tests {
         assert_eq!(cat.proficiency_alt(2, 8), Some(7));
         assert_eq!(cat.proficiency_alt(4, 6), Some(5));
         assert_eq!(cat.proficiency_alt(2, 15), None);
+        // The prerequisite alone: a two-handed sword's one-handed twin, nothing for the one-handed
+        // sword, whose alternate is only its postrequisite.
+        assert_eq!(cat.proficiency_prerequisite(2, 8), Some(7));
+        assert_eq!(cat.proficiency_prerequisite(2, 7), None);
+        assert_eq!(cat.proficiency_prerequisite(4, 6), Some(5));
+        assert_eq!(cat.proficiency_prerequisite(2, 15), None);
+        assert_eq!(cat.proficiency_prerequisite(99, 0), None);
         // Display flag bit 0: Miscellaneous armor hides its type name.
         assert!(cat.hides_name(4, 0));
         assert!(!cat.hides_name(4, 1), "Cloth prints");

@@ -265,9 +265,11 @@ fn handshake(
     let mut s = futures_lite::future::block_on(Conn::connect(host, AUTH_PORT))
         .with_context(|| format!("connecting to {host}:{AUTH_PORT}"))?;
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
-    auth::write_logon_challenge(&mut s, user, BUILD).context("sending logon challenge")?;
+    auth::write_logon_challenge(&mut s, user, BUILD, auth::LOCALE_TAG_EN_US)
+        .context("sending logon challenge")?;
     let reply = futures_lite::future::block_on(auth::read_challenge_reply(&mut s))
-        .context("reading logon challenge reply")?;
+        .context("reading logon challenge reply")?
+        .ok_or_else(|| anyhow!("SUCCESS_SURVEY on the challenge: no SRP inputs"))?;
 
     // A wrong-shape `B` drops the connection before any proof, so realmd records no failure.
     if want != Want::Any && (reply.server_public_key[31] == 0) != (want == Want::ShortB) {
@@ -280,7 +282,8 @@ fn handshake(
     auth::write_logon_proof(&mut s, &attempt.a_pub, &attempt.m1, &reply.crc_salt)
         .context("sending logon proof")?;
     let outcome = match futures_lite::future::block_on(auth::read_proof_reply(&mut s)) {
-        Ok(m2) => Outcome::Accepted {
+        Ok(None) => Outcome::Error("SUCCESS_SURVEY: accepted with no M2".into()),
+        Ok(Some(m2)) => Outcome::Accepted {
             m2_fixed: m2 == attempt.expected_m2(Enc::Fixed),
             m2_minimal: m2 == attempt.expected_m2(Enc::Minimal),
         },
@@ -370,7 +373,12 @@ fn main() -> Result<()> {
         println!("logon: {logons} full handshakes through benilla_protocol::logon\n");
         let (mut ok, mut failed) = (0u32, 0u32);
         for i in 0..logons {
-            match benilla_protocol::logon(&host, &user, &pass) {
+            match benilla_protocol::logon(
+                &host,
+                &user,
+                &pass,
+                benilla_protocol::auth::LOCALE_TAG_EN_US,
+            ) {
                 Ok(_) => ok += 1,
                 Err(e) => {
                     failed += 1;

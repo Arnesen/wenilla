@@ -129,7 +129,15 @@ impl super::UiScript {
     /// victim's (`0x625374`), and a victim whose team is -1 gets no line at all (`0x625321`),
     /// hence `team: u8`.
     pub fn pvp_rank_title(&self, rank: u8, team: u8, female: bool) -> Option<String> {
-        rank_title_gendered(self.lua(), i64::from(rank), i64::from(team), female)
+        rank_title_gendered(
+            self.lua(),
+            RankTitle {
+                rank,
+                // Past `i8` names no key, the lookup's own miss.
+                team: i8::try_from(team).ok()?,
+                female,
+            },
+        )
     }
 }
 
@@ -218,14 +226,35 @@ fn rank_title_ungendered(lua: &Lua, rank: i64, team: i64) -> Option<String> {
     global_string(lua, &format!("PVP_RANK_{rank}_{team}"))
 }
 
+/// The `PVP_RANK_<rank>_<team>[_FEMALE]` inputs, kept together because the live lookup and the
+/// world-text pass's builder key on the same three.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RankTitle {
+    /// `PLAYER_BYTES_3` byte 3 (`UnitPVPRank`), the internal rank 0..=18; 19 is the racial
+    /// "Leader" the keys still name.
+    pub rank: u8,
+    /// The team digit from the race: 0 Horde, 1 Alliance, -1 no side.
+    pub team: i8,
+    /// Female takes the `_FEMALE` twin (`0x612bf0`) and falls back to the base key.
+    pub female: bool,
+}
+
 /// The same title gendered, `0x612bf0`: it passes 2 (male) or 3 (female) to `0x703bf0`, which
 /// asks FrameXML's `GetText` to append `_FEMALE` for 3 (the engine never builds that key), and
-/// retries ungendered on a miss (`0x612c2d`). Used by `UnitPVPName` and the credit line.
-fn rank_title_gendered(lua: &Lua, rank: i64, team: i64, female: bool) -> Option<String> {
-    female
-        .then(|| global_string(lua, &format!("PVP_RANK_{rank}_{team}_FEMALE")))
+/// retries ungendered on a miss (`0x612c2d`). The credit line's lookup; `UnitPVPName` and the
+/// overhead name reach the same keys through [`decorated_name`].
+fn rank_title_gendered(lua: &Lua, title: RankTitle) -> Option<String> {
+    rank_title(&|key| global_string(lua, key), title)
+}
+
+/// [`rank_title_gendered`]'s key construction over a string lookup, so a caller with no VM (the
+/// world-text pass) resolves the same `_FEMALE` twin and fallback.
+fn rank_title(lookup: &impl Fn(&str) -> Option<String>, title: RankTitle) -> Option<String> {
+    title
+        .female
+        .then(|| lookup(&format!("PVP_RANK_{}_{}_FEMALE", title.rank, title.team)))
         .flatten()
-        .or_else(|| rank_title_ungendered(lua, rank, team))
+        .or_else(|| lookup(&format!("PVP_RANK_{}_{}", title.rank, title.team)))
 }
 
 /// Fill a two-`%s` C format string, the install's template (enUS `UNIT_PVP_NAME` is `"%s %s"`);
@@ -254,14 +283,55 @@ fn format_two_strings(fmt: &str, a: &str, b: &str) -> String {
     out
 }
 
-/// `0x609370`, the name builder behind `UnitPVPName` (its legs are at the binding); `name` is the
-/// plain `UnitName`.
-fn pvp_name(lua: &Lua, u: &super::UnitState, name: &str, player_level: u32) -> String {
+/// The install keys a name-line rank prefix can resolve: `UNIT_PVP_NAME` and every
+/// `PVP_RANK_<rank>_<team>[_FEMALE]` for ranks 1..=19 and both team digits. The range reaches 19
+/// because the builder is range-unchecked and the install's `PVP_RANK_19_*` names the racial
+/// "Leader", past the player rank byte's 0..=18. The world-text pass, which runs without the VM,
+/// reads them off each VM once; `UnitPVPName` looks them up live.
+pub fn pvp_name_global_keys() -> Vec<String> {
+    let mut keys = Vec::with_capacity(1 + 19 * 2 * 2);
+    keys.push("UNIT_PVP_NAME".to_string());
+    for rank in 1..=19 {
+        for team in 0..=1 {
+            keys.push(format!("PVP_RANK_{rank}_{team}"));
+            keys.push(format!("PVP_RANK_{rank}_{team}_FEMALE"));
+        }
+    }
+    keys
+}
+
+/// `0x609370`'s ranked-player leg over a string lookup: `UNIT_PVP_NAME` filled rank first, the
+/// same builder [`pvp_name`] runs for `UnitPVPName`. `None` for rank 0, or a title or template
+/// the lookup lacks, where the callers keep the plain name: the reference prints a missing title
+/// as `""` (`" " + name`), which a playable race's 0..=18 rank never reaches in the stock strings.
+pub fn decorated_name(
+    lookup: impl Fn(&str) -> Option<String>,
+    key: RankTitle,
+    name: &str,
+) -> Option<String> {
+    if key.rank == 0 {
+        return None;
+    }
+    let title = rank_title(&lookup, key)?;
+    let template = lookup("UNIT_PVP_NAME")?;
+    Some(format_two_strings(&template, &title, name))
+}
+
+/// `0x609370`, the name builder behind `UnitPVPName` (its legs are at the binding) and the unit
+/// tooltip's title (`0x52a1ab`), both with the decoration flag `1`; `name` is the plain `UnitName`.
+pub(super) fn pvp_name(lua: &Lua, u: &super::UnitState, name: &str, player_level: u32) -> String {
     // Leg A: a ranked player; the title is gendered by this unit and range-unchecked.
     if u.is_player && u.pvp_rank != 0 {
-        let title = rank_title_gendered(lua, i64::from(u.pvp_rank), team_of(u), u.sex == 3);
-        if let (Some(fmt), Some(title)) = (global_string(lua, "UNIT_PVP_NAME"), title) {
-            let mut out = format_two_strings(&fmt, &title, name);
+        let decorated = decorated_name(
+            |key| global_string(lua, key),
+            RankTitle {
+                rank: u.pvp_rank,
+                team: u.pvp_team,
+                female: u.sex == 3,
+            },
+            name,
+        );
+        if let Some(mut out) = decorated {
             // Leg A′: the city-protector medal, on its own line, ungendered (`0x60941d push 0`).
             if u.pvp_medal != 0 {
                 if let Some(medal) = global_string(lua, &format!("PVP_MEDAL{}", u.pvp_medal)) {
@@ -433,8 +503,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     //   B  else a unit passing the civilian predicate (`0x612550`): `PVP_RANK_CIVILIAN`, a space
     //      and the name. Only creatures reach it.
     //   C  else the plain name.
-    // No snapshot or an unresolved name answers nil, and so does a token resolving to guid 0,
-    // where the reference returns one value it never pushed (`0x517343`).
+    // No snapshot or an unresolved name answers nil.
+    //
+    // Deviation: a token resolving to guid 0 answers nil too. The reference jumps from the guid
+    // test (`0x5172f6`) to `return 1` (`0x517343`) with nothing pushed, so the one value is its
+    // top argument, the token it read (`0x5172e6`); that is a stack quirk, not an answer.
     //
     // Deviation: with `UNIT_PVP_NAME` or the title missing from `_G` (no install) this answers
     // the plain name, where the reference would format an empty string, because the decoration

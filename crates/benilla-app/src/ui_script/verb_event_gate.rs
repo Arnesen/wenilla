@@ -1,5 +1,5 @@
 //! The verb-fired event gate: an event the reference fires on a verb's own call path
-//! (`reference/1.12-verb-events.tsv`) must be fired by a file that registers the verb, since stock
+//! (`reference/verb_events.tsv`) must be fired by a file that registers the verb, since stock
 //! Lua calls such a verb for its event (`0x4d8c90`, the trainer filter's commit, fires
 //! `TRAINER_UPDATE`). Otherwise the pair is declared in [`ELSEWHERE`] or [`GAP`], and the verb's
 //! own file must not fire it. The check is textual, so it cannot see a fire off the verb's path.
@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-/// One row of `reference/1.12-verb-events.tsv`.
+/// One row of `reference/verb_events.tsv`.
 struct Pair {
     verb: String,
     event: String,
@@ -15,118 +15,14 @@ struct Pair {
     via: String,
 }
 
-/// Pairs a feed fires on the state the verb changes, as `(verb, event, file)` with the file
-/// matched as a path suffix; each row's comment names the trigger.
-const ELSEWHERE: &[(&str, &str, &str)] = &[
-    // The sell slot's diff (`auction_sell_item` moved, or `sell_slot_dirty`).
-    (
-        "ClickAuctionSellItemButton",
-        "NEW_AUCTION_UPDATE",
-        "benilla-app/src/ui_auction/mod.rs",
-    ),
-    // The query goes to the wire; the inbox feed announces the list when it lands.
-    (
-        "CheckInbox",
-        "MAIL_INBOX_UPDATE",
-        "benilla-app/src/ui_mail/mod.rs",
-    ),
-    // `craft_close` / `trade_skill_close` are drained by the app, whose store transition
-    // `(Some, None)` is the fire.
-    ("CloseCraft", "CRAFT_CLOSE", "benilla-app/src/ui_craft.rs"),
-    (
-        "CloseTradeSkill",
-        "TRADE_SKILL_CLOSE",
-        "benilla-app/src/ui_tradeskill.rs",
-    ),
-    // `take_quest_log_collapses`: the app owns the collapse set, re-feeds the list, fires.
-    (
-        "CollapseQuestHeader",
-        "QUEST_LOG_UPDATE",
-        "benilla-app/src/ui_quest_log.rs",
-    ),
-    (
-        "ExpandQuestHeader",
-        "QUEST_LOG_UPDATE",
-        "benilla-app/src/ui_quest_log.rs",
-    ),
-    // `trade_skill_touched`, set by all four verbs, drained by `take_trade_skill_touched`.
-    (
-        "CollapseTradeSkillSubClass",
-        "TRADE_SKILL_UPDATE",
-        "benilla-app/src/ui_tradeskill.rs",
-    ),
-    (
-        "ExpandTradeSkillSubClass",
-        "TRADE_SKILL_UPDATE",
-        "benilla-app/src/ui_tradeskill.rs",
-    ),
-    (
-        "SetTradeSkillInvSlotFilter",
-        "TRADE_SKILL_UPDATE",
-        "benilla-app/src/ui_tradeskill.rs",
-    ),
-    (
-        "SetTradeSkillSubClassFilter",
-        "TRADE_SKILL_UPDATE",
-        "benilla-app/src/ui_tradeskill.rs",
-    ),
-    // `repeat_count` moved (`repeat_changed`).
-    (
-        "DoTradeSkill",
-        "UPDATE_TRADESKILL_RECAST",
-        "benilla-app/src/ui_tradeskill.rs",
-    ),
-    // `take_loot_roll_confirms`: a Need/Greed on a bind-on-pickup roll is diverted to the popup.
-    (
-        "ConfirmLootRoll",
-        "CANCEL_LOOT_ROLL",
-        "benilla-app/src/ui_loot_roll.rs",
-    ),
-    (
-        "ConfirmLootRoll",
-        "CONFIRM_LOOT_ROLL",
-        "benilla-app/src/ui_loot_roll.rs",
-    ),
-    (
-        "RollOnLoot",
-        "CANCEL_LOOT_ROLL",
-        "benilla-app/src/ui_loot_roll.rs",
-    ),
-    (
-        "RollOnLoot",
-        "CONFIRM_LOOT_ROLL",
-        "benilla-app/src/ui_loot_roll.rs",
-    ),
-    // `keybinds.generation` moves; `sync_dispatch` re-derives the table and fires.
-    (
-        "SetBinding",
-        "UPDATE_BINDINGS",
-        "benilla-app/src/bindings.rs",
-    ),
-    // Fired when the server's reply changes the bar, a round trip after the reference, which
-    // fires locally from the toggle.
-    (
-        "TogglePetAutocast",
-        "PET_BAR_UPDATE",
-        "benilla-app/src/ui_pet/bar.rs",
-    ),
-    (
-        "ToggleSpellAutocast",
-        "PET_BAR_UPDATE",
-        "benilla-app/src/ui_pet/bar.rs",
-    ),
-];
+/// Pairs whose event the verb's path leaves to a later server answer, as `(verb, event, file)` with
+/// the file that fires on that answer matched as a path suffix; each row's comment names the
+/// answer's fire site. Empty: every pair the table lists fires inside its verb, the reference's
+/// way, a check's throttled re-announce included (`CheckInbox`, `0x4aeaf8`).
+const ELSEWHERE: &[(&str, &str, &str)] = &[];
 
 /// Pairs nothing fires on the verb's path, each with its reason.
 const GAP: &[(&str, &str, &str)] = &[
-    (
-        "CancelSkillUps",
-        "SKILL_LINES_CHANGED",
-        "the reference's verb (0x4d3e30) calls the temp-point reset and fires unconditionally at \
-         0x4d3e35; here the reset runs over a table this model keeps empty (`skills.rs`), so \
-         nothing moves and `ui_char.rs`'s feed has nothing to announce — the stock SkillFrame \
-         would only repaint under its own Close",
-    ),
     (
         "ClickTargetTradeButton",
         "TRADE_REPLACE_ENCHANT",
@@ -176,9 +72,9 @@ const GAP: &[(&str, &str, &str)] = &[
 fn table() -> Vec<Pair> {
     let tsv = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../reference/1.12-verb-events.tsv"
+        "/../../reference/verb_events.tsv"
     );
-    let text = std::fs::read_to_string(tsv).expect("reference/1.12-verb-events.tsv");
+    let text = std::fs::read_to_string(tsv).expect("reference/verb_events.tsv");
     text.lines()
         .filter(|l| !l.starts_with('#') && !l.starts_with("verb\t"))
         .filter_map(|l| {
@@ -217,7 +113,10 @@ fn sources() -> Vec<(PathBuf, String)> {
             {
                 continue;
             }
-            let whole = std::fs::read_to_string(&p).unwrap_or_default();
+            // A CRLF checkout reads the same: the `#[cfg(test)]` split below is on `\n`.
+            let whole = std::fs::read_to_string(&p)
+                .unwrap_or_default()
+                .replace("\r\n", "\n");
             let head = whole
                 .rfind("#[cfg(test)]\nmod ")
                 .map_or(whole.as_str(), |i| &whole[..i]);
@@ -237,10 +136,15 @@ fn quoted(text: &str, name: &str) -> bool {
     text.contains(&format!("\"{name}\""))
 }
 
+/// A source path from `crates/` on, with forward slashes whichever separator the platform uses.
 fn short(p: &std::path::Path) -> String {
-    let s = p.to_string_lossy();
+    let s = slashed(p);
     s.split_once("/crates/")
         .map_or(s.to_string(), |(_, t)| t.to_string())
+}
+
+fn slashed(p: &std::path::Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
 }
 
 /// The files that register `verb`, and whether any of them fires `event`.
@@ -324,7 +228,7 @@ fn the_declared_rows_are_still_true() {
         }
         let named: Vec<&(PathBuf, String)> = src
             .iter()
-            .filter(|(p, _)| p.to_string_lossy().ends_with(file))
+            .filter(|(p, _)| slashed(p).ends_with(file))
             .collect();
         if named.is_empty() {
             wrong.push(format!(

@@ -62,7 +62,7 @@ fn region_fontstring_span_floors_at_one_unit_until_measured() {
         local f = CreateFrame("Frame", "Owner")
         f:SetPoint("BOTTOMLEFT", 0, 0)   -- owner [0, 0, 50, 100]
         f:SetWidth(100); f:SetHeight(50)
-        local fs = f:CreateFontString("FS", "ARTWORK")
+        local fs = f:CreateFontString("FS", "ARTWORK"); fs:SetFont("Fonts\\FRIZQT__.TTF", 12)
         fs:SetText("Name")
         fs:SetJustifyH("LEFT")
         fs:SetPoint("LEFT", 5, 0)        -- left edge pinned; no size
@@ -347,7 +347,7 @@ fn child_frame_layers_regions_render_after_the_fixpoint() {
         local child = CreateFrame("Frame", "SubPanel", parent)
         child:SetPoint("TOPLEFT", "Win", "TOPLEFT", 20, -20)
         child:SetWidth(200); child:SetHeight(100)
-        local fs = child:CreateFontString("SubText", "ARTWORK")
+        local fs = child:CreateFontString("SubText", "ARTWORK"); fs:SetFont("Fonts\\FRIZQT__.TTF", 12)
         fs:SetPoint("TOPLEFT", "SubPanel", "TOPLEFT", 5, -5)
         fs:SetWidth(150); fs:SetHeight(12)
         fs:SetText("hello from the child")
@@ -549,7 +549,7 @@ fn desaturation_rides_the_extract_for_art_and_never_for_a_solid() {
 fn desaturated(s: &UiScript, name: &str) -> bool {
     let lua = s.lua();
     let model = lua.app_data_ref::<crate::script::Model>().expect("model");
-    let id = *model.region_names.get(name).expect("region name");
+    let id = *model.region_by_name.get(name).expect("region name");
     let h = *model.id_to_region.get(&id).expect("region handle");
     model.region_data.get(&h).is_some_and(|d| d.desaturated)
 }
@@ -684,10 +684,29 @@ fn set_texture_ignores_arguments_past_the_path_like_the_client_does() {
         .expect("clear, blank and the plain colour form are unaffected");
 }
 
-/// A gradient fills the texture slot the colour form fills, so a gradient-only region paints;
-/// both stops are stored, and the quad paints their midpoint, not the gradient.
+/// The texture quad of the one region `t`, as extract hands it over: `(path, color, gradient)`.
+#[allow(clippy::type_complexity)]
+fn gradient_probe(
+    s: &mut UiScript,
+) -> Option<(Option<String>, Option<[f32; 4]>, Option<[[f32; 4]; 4]>)> {
+    s.resolve();
+    s.extract().into_iter().find_map(|q| match q.content {
+        QuadContent::Texture {
+            path,
+            color,
+            gradient,
+            ..
+        } => Some((path, color, gradient)),
+        _ => None,
+    })
+}
+
+/// A gradient is the four-colour form of the vertex-colour slot (`0x77f910` writes `+0xb8` with
+/// count 4), not a texture: alone it draws nothing (`0x7706e0` gates on `+0xcc`), over a fill or
+/// art each vertex multiplies the texel (stride 4 at `0x77304d`). pfUI's selected tab is
+/// `SetTexture(1, 1, 1, 1)` then a faint white ramp, which must not paint an opaque slab.
 #[test]
-fn a_gradient_is_stored_whole_and_painted_as_its_midpoint() {
+fn a_gradient_tints_each_vertex_over_the_texture_and_alone_draws_nothing() {
     let mut s = script();
     s.run(
         r#"
@@ -696,36 +715,117 @@ fn a_gradient_is_stored_whole_and_painted_as_its_midpoint() {
         f:SetPoint("TOPLEFT", 0, 0)
         t = f:CreateTexture(nil, "ARTWORK")
         t:SetAllPoints(f)
-        -- FuBar's own call: white at both stops, ALPHA only, vertical.
-        t:SetGradientAlpha("VERTICAL", 1, 1, 1, 0, 1, 1, 1, 0.5)
+        t:SetGradientAlpha("HORIZONTAL", 0, 0, 0, 0, 1, 1, 1, 0.05)
     "#,
     )
-    .expect("SetGradientAlpha must exist and accept the client's argument shape");
-
-    s.resolve();
-    let painted = s.extract().iter().any(|q| {
-        matches!(&q.content, crate::script::QuadContent::Texture { color: Some(c), .. }
-            // midpoint of alpha 0.0 and 0.5
-            if (c[3] - 0.25).abs() < 1e-6 && c[0] == 1.0)
-    });
-    assert!(
-        painted,
-        "a region carrying only a gradient must paint, at the midpoint of its two stops"
-    );
-
-    // Any orientation token but "VERTICAL" is horizontal.
-    s.run("t:SetGradient('HORIZONTAL', 1, 0, 0, 0, 0, 1)")
-        .expect("SetGradient takes six colour arguments and no alpha");
-    s.resolve();
-    let mid = s.extract().iter().find_map(|q| match &q.content {
-        crate::script::QuadContent::Texture { color: Some(c), .. } => Some(*c),
-        _ => None,
-    });
+    .unwrap();
+    let (path, color, gradient) = gradient_probe(&mut s).expect("the region extracts");
     assert_eq!(
-        mid.map(|c| [c[0], c[1], c[2], c[3]]),
-        Some([0.5, 0.0, 0.5, 1.0]),
-        "SetGradient's stops are opaque, so the midpoint alpha is 1"
+        (path, color, gradient),
+        (None, None, None),
+        "a gradient alone fills no texture slot, so nothing draws"
     );
+
+    let (min, max) = ([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.05]);
+    s.run("t:SetTexture(1, 1, 1, 1)").unwrap();
+    assert_eq!(
+        gradient_probe(&mut s).unwrap(),
+        (None, Some([1.0; 4]), Some([min, max, max, min])),
+        "HORIZONTAL: the min on the left pair, the max on the right, over the white fill"
+    );
+
+    s.run("t:SetGradientAlpha('vertical', 0, 0, 0, 0, 1, 1, 1, 0.05)")
+        .unwrap();
+    assert_eq!(
+        gradient_probe(&mut s).unwrap().2,
+        Some([max, max, min, min]),
+        "VERTICAL, in any case: the max on the top pair, the min on the bottom"
+    );
+
+    s.run(r#"t:SetTexture("Interface\\Buttons\\WHITE8X8")"#)
+        .unwrap();
+    assert_eq!(
+        gradient_probe(&mut s).unwrap(),
+        (
+            Some("Interface\\Buttons\\WHITE8X8".to_string()),
+            None,
+            Some([max, max, min, min])
+        ),
+        "file art keeps the gradient: the texture slot and the colour slot are apart"
+    );
+
+    s.run("t:SetVertexColor(0.5, 0.5, 0.5)").unwrap();
+    assert_eq!(
+        gradient_probe(&mut s).unwrap().1,
+        Some([0.5, 0.5, 0.5, 1.0]),
+        "SetVertexColor collapses the four colours to one (`0x77f87f`), its alpha unlent"
+    );
+    assert_eq!(gradient_probe(&mut s).unwrap().2, None);
+
+    s.run("t:SetGradient('HORIZONTAL', 1, 0, 0, 0, 0, 1)")
+        .unwrap();
+    assert_eq!(
+        gradient_probe(&mut s).unwrap().1,
+        None,
+        "a gradient replaces the one colour"
+    );
+    assert_eq!(
+        s.eval::<(f32, f32, f32, f32)>("return t:GetVertexColor()")
+            .unwrap(),
+        (1.0, 1.0, 1.0, 1.0),
+        "GetVertexColor answers white under four colours (`0x77f8c0`)"
+    );
+    let (red, blue) = ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(
+        gradient_probe(&mut s).unwrap().2,
+        Some([red, blue, blue, red]),
+        "SetGradient's stops are opaque"
+    );
+}
+
+/// The orientation must name HORIZONTAL or VERTICAL (`0x6f1a20`); anything else raises the usage
+/// line and writes nothing (`0x79b126`). The channels clamp to `0..=1` (`0x79af05`).
+#[test]
+fn a_gradient_rejects_an_unknown_orientation_and_clamps_its_channels() {
+    let mut s = script();
+    s.run(
+        r#"
+        f = CreateFrame("Frame", "GradArgs")
+        f:SetWidth(10) f:SetHeight(10)
+        f:SetPoint("TOPLEFT", 0, 0)
+        t = f:CreateTexture("GradArgsTex", "ARTWORK")
+        t:SetAllPoints(f)
+        t:SetTexture(1, 1, 1)
+        t:SetGradient("HORIZONTAL", 2, -1, 0.5, 0, 0, 0)
+    "#,
+    )
+    .unwrap();
+    let kept = gradient_probe(&mut s).unwrap().2;
+    assert_eq!(
+        kept,
+        Some([
+            [1.0, 0.0, 0.5, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.5, 1.0]
+        ]),
+        "each channel clamps to 0..=1"
+    );
+    for (call, usage) in [
+        (
+            "t:SetGradient('DIAGONAL', 1, 1, 1, 1, 1, 1)",
+            "Usage: GradArgsTex:SetGradient(\"orientation\", minR, minG, minB, maxR, maxG, maxB)",
+        ),
+        (
+            "t:SetGradientAlpha(1, 1, 1, 1, 1, 1, 1, 1, 1)",
+            "Usage: GradArgsTex:SetGradientAlpha(\"orientation\", minR, minG, minB, minA, maxR, maxG, maxB, maxA)",
+        ),
+        ("t:SetGradient(nil, 1, 1, 1, 1, 1, 1)", "Usage: GradArgsTex:SetGradient("),
+    ] {
+        let err = s.run(call).expect_err(call).to_string();
+        assert!(err.contains(usage), "{call}: {err}");
+        assert_eq!(gradient_probe(&mut s).unwrap().2, kept, "{call} wrote nothing");
+    }
 }
 
 /// Texture's map (`0x87c128`, 22 entries) and FontString's (`0xcf5400`, 32) each answer their own
@@ -860,9 +960,9 @@ fn the_size_getters_take_the_author_first_then_the_natural_width_and_wrapped_hei
         r#"
         local f = CreateFrame("Frame", "Owner")
         f:SetPoint("BOTTOMLEFT", 0, 0); f:SetWidth(100); f:SetHeight(50)
-        Sized = f:CreateFontString("Sized", "ARTWORK")
+        Sized = f:CreateFontString("Sized", "ARTWORK"); Sized:SetFont("Fonts\\FRIZQT__.TTF", 12)
         Sized:SetPoint("TOPLEFT", 0, 0); Sized:SetWidth(300); Sized:SetText("Name")
-        Auto = f:CreateFontString("Auto", "ARTWORK")
+        Auto = f:CreateFontString("Auto", "ARTWORK"); Auto:SetFont("Fonts\\FRIZQT__.TTF", 12)
         Auto:SetPoint("TOPLEFT", 0, 0); Auto:SetText("Name")
     "#,
     )
@@ -898,9 +998,9 @@ fn an_empty_string_reads_back_one_unit_and_a_pending_measure_reads_back_zero() {
         r#"
         local f = CreateFrame("Frame", "Owner")
         f:SetPoint("BOTTOMLEFT", 0, 0); f:SetWidth(100); f:SetHeight(50)
-        Pending = f:CreateFontString("Pending", "ARTWORK")
+        Pending = f:CreateFontString("Pending", "ARTWORK"); Pending:SetFont("Fonts\\FRIZQT__.TTF", 12)
         Pending:SetPoint("TOPLEFT", 0, 0); Pending:SetText("Name")
-        Empty = f:CreateFontString("Empty", "ARTWORK")
+        Empty = f:CreateFontString("Empty", "ARTWORK"); Empty:SetFont("Fonts\\FRIZQT__.TTF", 12)
         Empty:SetPoint("TOPLEFT", 0, 0); Empty:SetText("")
         assert(Pending:GetHeight() == 0, "a pending measure is not a size, got " .. tostring(Pending:GetHeight()))
         assert(Empty:GetHeight() == 1, "an EMPTY string is one unit, got " .. tostring(Empty:GetHeight()))
@@ -996,7 +1096,7 @@ fn the_constructors_string_arguments_are_four_shapes_not_one() {
     let layer_of = |s: &UiScript, name: &str| {
         let lua = s.lua();
         let model = lua.app_data_ref::<crate::script::Model>().expect("model");
-        let id = *model.region_names.get(name).expect("published region");
+        let id = *model.region_by_name.get(name).expect("published region");
         let rh = *model.id_to_region.get(&id).expect("live region");
         model.arena.region(rh).expect("region").draw_layer
     };
@@ -1060,8 +1160,8 @@ fn an_empty_fontstring_reads_back_nil_and_an_edit_box_does_not() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "TextCell")
-        fresh = f:CreateFontString(nil, "OVERLAY")
-        held  = f:CreateFontString(nil, "OVERLAY")
+        fresh = f:CreateFontString(nil, "OVERLAY"); fresh:SetFont("Fonts\\FRIZQT__.TTF", 12)
+        held  = f:CreateFontString(nil, "OVERLAY"); held:SetFont("Fonts\\FRIZQT__.TTF", 12)
     "#,
     )
     .unwrap();
@@ -1275,5 +1375,183 @@ fn tex_coord_modifies_rect_is_one_slash_nil_and_moves_no_rect_yet() {
         s.eval::<bool>("return TCMTex:GetTexCoordModifiesRect() == nil")
             .unwrap(),
         "cleared back to nil"
+    );
+}
+
+/// The draw order of the texture quads `label` names.
+fn quad_order(
+    s: &mut UiScript,
+    label: impl Fn(&QuadContent) -> Option<&'static str>,
+) -> Vec<&'static str> {
+    s.resolve();
+    let mut quads: Vec<(u128, &'static str)> = s
+        .extract()
+        .iter()
+        .filter_map(|q| label(&q.content).map(|l| (q.z, l)))
+        .collect();
+    quads.sort_by_key(|&(z, _)| z);
+    quads.into_iter().map(|(_, l)| l).collect()
+}
+
+/// A layer batch's End (`0x7731a0`) sorts its quads by texture handle, across every frame at the
+/// level: the solid fill before the files, one file's quads together (the cache keys `x.blp` as
+/// `X`), and the tie in the CRT's order. Hand-run `shortsort` (`0x73f87b`) on the batch
+/// `[A x, B solid, C x, D y]`: D stays last, then A swaps with C, then C with B, leaving
+/// `B C A D`.
+#[test]
+fn a_layer_draws_its_textures_in_handle_order_across_frames() {
+    let mut s = script();
+    s.run(
+        r#"
+        f1 = CreateFrame("Frame", "BatchOne")
+        f1:SetPoint("TOPLEFT", 0, 0) f1:SetWidth(50) f1:SetHeight(50)
+        a = f1:CreateTexture(nil, "BACKGROUND") a:SetAllPoints(f1)
+        a:SetTexture("Interface\\Batch\\X")
+        b = f1:CreateTexture(nil, "BACKGROUND") b:SetAllPoints(f1)
+        b:SetTexture(0, 0, 0)
+        f2 = CreateFrame("Frame", "BatchTwo")
+        f2:SetPoint("TOPLEFT", 0, 0) f2:SetWidth(50) f2:SetHeight(50)
+        c = f2:CreateTexture(nil, "BACKGROUND") c:SetAllPoints(f2)
+        c:SetTexture("interface\\batch\\x.blp")
+        d = f2:CreateTexture(nil, "BACKGROUND") d:SetAllPoints(f2)
+        d:SetTexture("Interface\\Batch\\Y")
+    "#,
+    )
+    .unwrap();
+    let label = |c: &QuadContent| match c {
+        QuadContent::Texture { path: Some(p), .. } if p.ends_with('X') => Some("A"),
+        QuadContent::Texture { path: Some(p), .. } if p.ends_with("x.blp") => Some("C"),
+        QuadContent::Texture { path: Some(p), .. } if p.ends_with('Y') => Some("D"),
+        QuadContent::Texture {
+            path: None,
+            color: Some(_),
+            ..
+        } => Some("B"),
+        _ => None,
+    };
+    assert_eq!(quad_order(&mut s, label), ["B", "C", "A", "D"]);
+
+    // Another layer is another batch: the solid on ARTWORK stays above them all.
+    s.run("b:SetDrawLayer('ARTWORK')").unwrap();
+    assert_eq!(quad_order(&mut s, label), ["C", "A", "D", "B"]);
+}
+
+/// In a scroll child's subtree each frame ends its own batches (`0x76b3f0`, End at `0x76b469`),
+/// so the sort stays inside one frame's layer: the child's solid draws after its parent's file.
+#[test]
+fn a_scroll_child_sorts_each_frames_layer_alone() {
+    let mut s = script();
+    s.run(
+        r#"
+        sf = CreateFrame("ScrollFrame", "BatchScroll")
+        sf:SetPoint("TOPLEFT", 0, 0) sf:SetWidth(50) sf:SetHeight(50)
+        p = CreateFrame("Frame", "BatchScrollChild")
+        p:SetWidth(50) p:SetHeight(50)
+        sf:SetScrollChild(p)
+        x = p:CreateTexture(nil, "ARTWORK") x:SetAllPoints(p)
+        x:SetTexture("Interface\\Batch\\X")
+        ps = p:CreateTexture(nil, "ARTWORK") ps:SetAllPoints(p)
+        ps:SetTexture(1, 0, 0)
+        q = CreateFrame("Frame", "BatchScrollInner", p)
+        q:SetAllPoints(p)
+        qs = q:CreateTexture(nil, "ARTWORK") qs:SetAllPoints(q)
+        qs:SetTexture(0, 1, 0)
+    "#,
+    )
+    .unwrap();
+    let label = |c: &QuadContent| match c {
+        QuadContent::Texture { path: Some(_), .. } => Some("x"),
+        QuadContent::Texture {
+            color: Some([1.0, 0.0, 0.0, _]),
+            ..
+        } => Some("parent solid"),
+        QuadContent::Texture {
+            color: Some([0.0, 1.0, 0.0, _]),
+            ..
+        } => Some("child solid"),
+        _ => None,
+    };
+    assert_eq!(
+        quad_order(&mut s, label),
+        ["parent solid", "x", "child solid"]
+    );
+}
+
+/// Different textures rank by when each was made, not by where their quads fall: the stand-in
+/// for the device texture's address on a growing heap. A file is made at the first draw after
+/// its set, and one its last region let go of is made anew.
+#[test]
+fn different_textures_draw_in_the_order_they_were_made() {
+    let mut s = script();
+    s.run(
+        r#"
+        f1 = CreateFrame("Frame", "StampOne")
+        f1:SetPoint("TOPLEFT", 0, 0) f1:SetWidth(50) f1:SetHeight(50)
+        a = f1:CreateTexture(nil, "BACKGROUND") a:SetAllPoints(f1)
+        f2 = CreateFrame("Frame", "StampTwo")
+        f2:SetPoint("TOPLEFT", 0, 0) f2:SetWidth(50) f2:SetHeight(50)
+        b = f2:CreateTexture(nil, "BACKGROUND") b:SetAllPoints(f2)
+        b:SetTexture("Interface\\Stamp\\Early")
+    "#,
+    )
+    .unwrap();
+    let label = |c: &QuadContent| match c {
+        QuadContent::Texture { path: Some(p), .. } if p.ends_with("Early") => Some("early"),
+        QuadContent::Texture { path: Some(p), .. } if p.ends_with("Late") => Some("late"),
+        _ => None,
+    };
+    let _ = quad_order(&mut s, label);
+    s.run(r#"a:SetTexture("Interface\\Stamp\\Late")"#).unwrap();
+    assert_eq!(
+        quad_order(&mut s, label),
+        ["early", "late"],
+        "the older texture first, though its frame links second"
+    );
+
+    s.run(r#"b:SetTexture(nil) b:SetTexture("Interface\\Stamp\\Early")"#)
+        .unwrap();
+    assert_eq!(
+        quad_order(&mut s, label),
+        ["late", "early"],
+        "let go of and set again, it is the newer one"
+    );
+}
+
+/// Every engine writer of the one vertex colour goes through `0x77f750`, so it collapses a
+/// gradient as `SetVertexColor` does: here the backdrop colour on its background piece.
+#[test]
+fn an_engine_vertex_colour_collapses_a_gradient() {
+    let mut s = script();
+    s.run(
+        r#"
+        f = CreateFrame("Frame", "GradBackdrop")
+        f:SetPoint("TOPLEFT", 0, 0) f:SetWidth(64) f:SetHeight(64)
+        f:SetBackdrop({ bgFile = "bg" })
+        bg = f:GetRegions()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.run(r#"bg:SetGradient("VERTICAL", 1, 0, 0, 0, 0, 1)"#)
+        .unwrap();
+    let bg = |s: &mut UiScript| {
+        s.resolve();
+        s.extract().into_iter().find_map(|q| match q.content {
+            QuadContent::Texture {
+                path: Some(p),
+                color,
+                gradient,
+                ..
+            } if p == "bg" => Some((color, gradient)),
+            _ => None,
+        })
+    };
+    assert!(bg(&mut s).unwrap().1.is_some(), "the gradient is on");
+    s.run("f:SetBackdropColor(0.5, 0.5, 0.5)").unwrap();
+    let (color, gradient) = bg(&mut s).unwrap();
+    assert_eq!(gradient, None, "the backdrop colour collapsed it");
+    assert!(
+        color.is_some_and(|c| (c[0] - 0.5).abs() < 0.01),
+        "{color:?}"
     );
 }

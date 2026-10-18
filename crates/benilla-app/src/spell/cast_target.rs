@@ -27,7 +27,7 @@ use super::group_relation::{GroupInputs, GroupRoster};
 use crate::creature_type::CreatureTypeSources;
 use crate::names::NameCache;
 use crate::net::{GuidIndex, ObjectStore, Reputations, SelfGuid, SelfPlayer};
-use crate::target::{can_assist, can_attack, Factions, Selection};
+use crate::target::{can_assist, can_attack, Assist, Factions, Selection};
 use benilla_protocol::messages::OwnerFallback;
 
 /// `TARGET_FLAG_*` bits of the client's targeting flag word (`0xcecac0`).
@@ -150,6 +150,7 @@ impl TargetRelations<'_> {
                 self.reputations,
                 self.self_store,
                 |_| self.target_owner_store.cloned(),
+                Assist::PlayerToUnit,
             )
     }
 
@@ -285,6 +286,7 @@ impl CastTargeting<'_, '_> {
                 types: CreatureTypeSources {
                     names: self.names.as_deref(),
                     forms: self.spells.as_deref().map(|s| &s.forms),
+                    ..Default::default()
                 },
                 group: GroupInputs {
                     self_guid: self.self_guid.0,
@@ -571,7 +573,7 @@ mod tests {
             target_owner_store: None,
             self_store: Some(&me),
             factions: None,
-            reputations: &Reputations(Vec::new()),
+            reputations: &Reputations::default(),
             types: Default::default(),
             group: Default::default(),
         };
@@ -637,7 +639,7 @@ mod tests {
         let me = ObjectStore(ObjectFields::from_pairs(&[(35, 1), (46, 0x8)]));
         let quiet = ObjectStore(ObjectFields::from_pairs(&[(35, 35), (46, 0)]));
         let pvp = ObjectStore(ObjectFields::from_pairs(&[(35, 35), (46, 0x1000)]));
-        let reputations = Reputations(Vec::new());
+        let reputations = Reputations::default();
         let rel = |target| TargetRelations {
             target_store: Some(target),
             target_owner_store: None,
@@ -849,7 +851,7 @@ mod tests {
     }
 
     fn rel_none() -> TargetRelations<'static> {
-        static EMPTY: Reputations = Reputations(Vec::new());
+        static EMPTY: Reputations = Reputations::from_slots(Vec::new());
         TargetRelations {
             target_store: None,
             target_owner_store: None,

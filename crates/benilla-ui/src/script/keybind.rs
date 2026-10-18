@@ -116,6 +116,9 @@ struct Entry {
     hidden: bool,
     /// The `<Binding>` element's Lua chunk, verbatim.
     body: String,
+    /// The insecure addon whose load registered it, whose code the body is (`0x51f443`,
+    /// [`super::taint`]); `None` for the core's and a secure addon's.
+    context: Option<String>,
 }
 
 /// One row of the list `GetNumBindings`/`GetBinding` walk, in load order.
@@ -129,7 +132,7 @@ enum Row {
 }
 
 /// The commands, the key sets and the queued host requests; lives in [`Model`].
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct KeybindState {
     entries: Vec<Entry>,
     /// The display list, headers and commands in load order.
@@ -145,9 +148,22 @@ pub(crate) struct KeybindState {
     /// The set the live table edits (`GetCurrentBindingSet`): 1 account, 2 character.
     current_set: u32,
     /// Bumped by every change to the live table or the commands: the app's signal to re-derive
-    /// dispatch.
+    /// dispatch. It says nothing of `UPDATE_BINDINGS`.
     generation: u64,
+    /// A host-side load of a set into the live table (the seed at the VM's birth) is owed its
+    /// `UPDATE_BINDINGS`, which the reference signals at the copy into set 3 (`0x4b649d`). The Lua
+    /// verbs signal in place (`SetBinding` `0x4b805b`, `LoadBindings`) and leave the debt, a
+    /// separate signal; a registration (`0x4b6f70`) signals nothing, so it moves
+    /// [`Self::generation`] alone.
+    signal_owed: bool,
     requests: Vec<KeybindRequest>,
+}
+
+impl KeybindState {
+    /// A verb's change, signalled in place: `UPDATE_BINDINGS` (`0x182`) before the verb returns.
+    fn signal(model: &mut Model) {
+        model.raise("UPDATE_BINDINGS", Vec::new());
+    }
 }
 
 /// `SetBinding(set, key, command)` on one key list: unbind `key` everywhere, then bind it to the
@@ -277,7 +293,12 @@ impl KeybindState {
     /// header opens a `HEADER_<addon>` row, where the reference files those rows under the
     /// previous file's last header, because under a foreign header the player could not find
     /// them. The core file passes `None` and is read as the reference reads it.
-    fn register(&mut self, fallback_header: Option<&str>, bindings: &[Binding]) {
+    fn register(
+        &mut self,
+        fallback_header: Option<&str>,
+        context: Option<&str>,
+        bindings: &[Binding],
+    ) {
         let mut opened = false;
         for b in bindings {
             if b.platform.as_deref().is_some_and(|p| p != THIS_PLATFORM) {
@@ -300,6 +321,7 @@ impl KeybindState {
                 run_on_up: b.run_on_up,
                 hidden: b.hidden,
                 body: b.body.clone(),
+                context: context.map(str::to_owned),
             });
             self.rows.push(Row::Command(idx));
         }
@@ -316,13 +338,13 @@ impl super::UiScript {
     /// Register the core's `Interface\FrameXML\Bindings.xml`, at the reference's point in the UI
     /// load: after the `FrameXML.toc` walk (`0x48ffed`), before the addons (`0x490018`).
     pub fn register_bindings(&self, bindings: &[Binding]) {
-        self.model_mut().keybinds.register(None, bindings);
+        self.model_mut().keybinds.register(None, None, bindings);
     }
 
     /// Register one addon's parsed `Bindings.xml`, at the reference's point in the addon load:
     /// after its `.toc` files, before its saved variables (`0x51f443`).
-    pub fn register_addon_bindings(&mut self, addon: &str, bindings: &[Binding]) {
-        self.model_mut().keybinds.register(Some(addon), bindings);
+    pub fn register_addon_bindings(&self, addon: &str, bindings: &[Binding]) {
+        register_addon_bindings(self.lua(), addon, bindings);
     }
 
     /// Set 0, the defaults, from `WTF\DefaultBindings.wtf` ([`parse_bindings_wtf`]), as
@@ -350,7 +372,9 @@ impl super::UiScript {
 
     /// Host-side `LoadBindings` (world entry: character set if it exists, else account).
     pub fn load_binding_set(&mut self, set: u32) {
-        self.model_mut().keybinds.load(set);
+        let mut model = self.model_mut();
+        model.keybinds.load(set);
+        model.keybinds.signal_owed = true;
     }
 
     /// The live keys as `(chord, command)` in bind order, for dispatch.
@@ -388,6 +412,12 @@ impl super::UiScript {
         self.model_mut().keybinds.generation
     }
 
+    /// Whether a host-side load still owes its `UPDATE_BINDINGS` (`0x4b649d`); taking it clears
+    /// the debt. A Lua verb's change signals in place and leaves it.
+    pub fn take_keybinds_signal_owed(&mut self) -> bool {
+        std::mem::take(&mut self.model_mut().keybinds.signal_owed)
+    }
+
     /// Drain the queued host requests.
     pub fn take_keybind_requests(&mut self) -> Vec<KeybindRequest> {
         std::mem::take(&mut self.model_mut().keybinds.requests)
@@ -407,19 +437,21 @@ impl super::UiScript {
 /// Register one addon's `Bindings.xml` from a bare `&Lua`: `LoadAddOn` runs inside a Lua binding
 /// with no `UiScript` to reach.
 pub(crate) fn register_addon_bindings(lua: &Lua, addon: &str, bindings: &[Binding]) {
-    lua.app_data_mut::<Model>()
-        .expect("model app_data")
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    // The context the load runs under: the addon's name unless it is secure (`0x51f387`).
+    let context = model.exec_context.borrow().clone();
+    model
         .keybinds
-        .register(Some(addon), bindings);
+        .register(Some(addon), context.as_deref(), bindings);
 }
 
 /// `CBindings::RunCommand` (`0x4b7b50`): look the command up by name (`0x4b7b77`); on a release
 /// run nothing unless it is `runOnUp` (`0x4b7bf1`); else set the global `keystate` to `"down"` or
 /// `"up"` (`0x4b7c0f`), run the body, and set `keystate` to nil (`0x4b7c42`-`0x4b7c4e`), since the
-/// 1.12 client's in-world `_G` has none (`reference/1.12-globals.tsv`). `Ok(false)` when nothing
+/// 1.12 client's in-world `_G` has none (`reference/lua_globals.tsv`). `Ok(false)` when nothing
 /// ran.
 pub(crate) fn run_command(lua: &Lua, command: &str, down: bool) -> mlua::Result<bool> {
-    let (name, body) = {
+    let (name, body, context) = {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
         let kb = &model.keybinds;
         let Some(&i) = kb.by_name.get(&command.to_ascii_uppercase()) else {
@@ -429,15 +461,23 @@ pub(crate) fn run_command(lua: &Lua, command: &str, down: bool) -> mlua::Result<
         if !down && !e.run_on_up {
             return Ok(false);
         }
-        (e.name.clone(), e.body.clone())
+        (e.name.clone(), e.body.clone(), e.context.clone())
     };
     let g = lua.globals();
     g.set("keystate", if down { "down" } else { "up" })?;
+    // The body was compiled under its addon's context when the file loaded (`0x4b73f9`), and the
+    // runner's call of it makes that the context again (`0x704cf0`).
     let ran = lua
         .load(body.as_str())
         .set_name(name)
         .set_mode(mlua::ChunkMode::Text)
-        .exec();
+        .into_function()
+        .and_then(|chunk| {
+            if let Some(addon) = context {
+                super::taint::tag(lua, &chunk, &super::taint::Context::Addon(addon));
+            }
+            chunk.call::<()>(())
+        });
     g.set("keystate", Value::Nil)?;
     ran.map(|()| true)
 }
@@ -476,11 +516,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(MultiValue::from_iter(out))
         })?,
     )?;
+    // A stored binding signals `UPDATE_BINDINGS` before the verb returns 1 (`0x4b805b`); a refused
+    // key returns nil and signals nothing.
     lua.globals().set(
         "SetBinding",
         lua.create_function(|lua, (key, command): (String, Option<String>)| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let ok = model.keybinds.set_binding(&key, command.as_deref());
+            let ok = super::tick::verb(lua, |model| {
+                let ok = model.keybinds.set_binding(&key, command.as_deref());
+                if ok {
+                    KeybindState::signal(model);
+                }
+                ok
+            });
             Ok(if ok { Some(1) } else { None })
         })?,
     )?;
@@ -528,11 +575,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             lua.create_string(name)
         })?,
     )?;
+    // The set's copy into the live table (`0x4b8252` → `0x4b6310`, destination 3) signals
+    // `UPDATE_BINDINGS` (`0x4b649d`) before the verb returns. The set is read by `tonumber`
+    // alone (`0x4b8228`, a non-number is 0); 3 and above raise the usage (`0x4b8232`-`0x4b823d`).
     lua.globals().set(
         "LoadBindings",
-        lua.create_function(|lua, set: u32| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.keybinds.load(set);
+        lua.create_function(|lua, set: Value| {
+            let set = super::binding_abi::ftol(super::binding_abi::coerced_number(lua, Some(set)));
+            if set >= 3 {
+                return Err(mlua::Error::RuntimeError(
+                    "Usage: LoadBindings(0||1||2)".into(),
+                ));
+            }
+            super::tick::verb(lua, |model| {
+                if let Ok(set) = u32::try_from(set) {
+                    model.keybinds.load(set);
+                    KeybindState::signal(model);
+                }
+            });
             Ok(())
         })?,
     )?;
@@ -635,6 +695,61 @@ mod tests {
             &parse(r#"<Bindings><Binding name="A">x()</Binding></Bindings>"#).unwrap(),
         );
         assert_eq!(rows(&s), [row(&["A"])]);
+    }
+
+    /// `SetBinding` signals `UPDATE_BINDINGS` before it returns 1 (`0x4b805b`), its handler reading
+    /// the new key; a refused key signals nothing. `LoadBindings` signals from the copy into the
+    /// live set (`0x4b649d`).
+    #[test]
+    fn the_binding_verbs_signal_update_bindings_in_place() {
+        let mut s = script();
+        let _ = s.take_keybinds_signal_owed(); // the fixture's own load
+        crate::script::tick::heard::listen(&s, &["UPDATE_BINDINGS"], Some("GetBindingAction('F')"));
+        s.run(r#"SetBinding("F", "JUMP")"#).unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            ["UPDATE_BINDINGS JUMP"]
+        );
+        s.run(r#"SetBinding("NOT A KEY", "JUMP")"#).unwrap();
+        assert!(crate::script::tick::heard::take(&s).is_empty());
+        s.run("LoadBindings(0)").unwrap();
+        assert_eq!(crate::script::tick::heard::take(&s), ["UPDATE_BINDINGS "]);
+        assert!(
+            !s.take_keybinds_signal_owed(),
+            "a verb's signal makes no debt"
+        );
+    }
+
+    /// The seed's copy into set 3 (`0x4b649d`) and `SetBinding` (`0x4b805b`) signal separately: a
+    /// verb in between does not pay the load's debt.
+    #[test]
+    fn a_verb_does_not_pay_a_host_loads_signal() {
+        let mut s = script();
+        s.load_binding_set(1);
+        s.run(r#"SetBinding("F", "JUMP") LoadBindings(1)"#).unwrap();
+        assert!(
+            s.take_keybinds_signal_owed(),
+            "the load's own signal is still owed"
+        );
+        assert!(!s.take_keybinds_signal_owed());
+    }
+
+    /// `LoadBindings` reads its set with a bare `tonumber` (`0x4b8228`) and raises its usage for
+    /// 3 and above (`0x4b8232`-`0x4b823d`), loading and signalling nothing; a non-number is set 0.
+    #[test]
+    fn load_bindings_raises_its_usage_past_set_two() {
+        let s = script();
+        crate::script::tick::heard::listen(&s, &["UPDATE_BINDINGS"], None);
+        let err = s.run("LoadBindings(3)").unwrap_err().to_string();
+        assert!(err.contains("Usage: LoadBindings(0||1||2)"), "{err}");
+        assert!(crate::script::tick::heard::take(&s).is_empty());
+        s.run(r#"SetBinding("F", "JUMP") LoadBindings("x")"#)
+            .unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetBindingAction("F")"#).unwrap(),
+            "",
+            "a non-number restores the defaults"
+        );
     }
 
     #[test]
@@ -760,7 +875,7 @@ mod tests {
 
     #[test]
     fn an_addons_bindings_xml_registers_as_ordinary_rows() {
-        let mut s = script();
+        let s = script();
         let parsed = parse(
             r#"<Bindings>
                 <Binding name="PROBEHOLD" runOnUp="true" header="PROBE">
@@ -849,7 +964,7 @@ mod tests {
     /// stock `platform="mac"` iTunes rows are never commands.
     #[test]
     fn a_binding_for_another_platform_does_not_register() {
-        let mut s = script();
+        let s = script();
         let parsed = parse(
             r#"<Bindings>
                 <Binding name="PROBEHERE" platform="Windows">Here();</Binding>

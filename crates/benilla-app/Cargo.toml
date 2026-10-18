@@ -20,6 +20,9 @@ trace_chrome = ["bevy/trace_chrome"]
 # needs WebGPU).
 webgl2 = ["bevy/webgl2", "benilla-world/webgl2"]
 webgpu = ["bevy/webgpu", "benilla-world/webgpu"]
+# Links Bevy as a shared library so an incremental rebuild relinks faster. The binary then starts
+# only through `cargo run`, which puts the toolchain's libstd on the loader path.
+bevy_dynamic_linking = ["bevy/dynamic_linking"]
 
 [dependencies]
 # Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
@@ -37,11 +40,18 @@ half = "2"
 include_dir = "0.7"
 # The 1.12 chat filters (`text_filter`), with one `RegexSet` for the any-match pass per line.
 regex = "1"
+# The same filters' word boundaries: `regex` has no look-around, and the client's word class is
+# its own table, not Unicode's.
+fancy-regex = { version = "0.18", default-features = false, features = ["std", "unicode", "perf"] }
 # `getrusage` for perf CPU time; `localtime_r` for the log stamp; the audio clock and render
 # thread's realtime policy on macOS.
 libc = "0.2"
 # PNG encoding only: the macOS cursor's NSImage data and screenshots.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# The "no WoW install" error dialog (`no_install`): AppKit, Win32 and, on Linux, `zenity`; no GTK.
+# `xdg-portal` is the Linux backend that carries the message dialog; `wayland` is its file-dialog
+# parent handle, which a message dialog without a parent never reads.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # Thread-to-ECS channels: crossbeam's `Receiver` is `Sync`, so it is a resource without a mutex.
 crossbeam-channel = "0.5"
 # The two channels the sequencer *waits* at (credentials, character pick). crossbeam's `recv` parks
@@ -82,6 +92,9 @@ rand = "0.8"
 # arboard has no wasm32 backend (`textinput/clipboard.rs` falls back to no pasteboard there).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 arboard = "3"
+# The character park's link-check tick under the net thread's `block_on` (`net/io/park_timer.rs`);
+# the version already in the graph.
+async-io = "2.6"
 
 # Wayland clipboard over the standard `wl_data_device`; arboard's speaks `wlr-data-control`,
 # which GNOME does not implement.

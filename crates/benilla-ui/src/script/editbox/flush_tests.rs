@@ -2,7 +2,7 @@
 //! (`0x77a790`), `OnCursorChanged` then `OnTextChanged`, on the dirty word `[E+0x31c]`.
 
 use crate::script::{
-    EditAction, EditBoxAdvanceRequest, EditUnit, MeasureRequest, TextMeasure, UiScript,
+    EditAction, EditBoxAdvanceRequest, EditUnit, MeasureRequest, QuadContent, TextMeasure, UiScript,
 };
 
 /// A stand-in font engine: each byte 7 wide and each line 14 tall, answering the advance table
@@ -90,6 +90,19 @@ fn the_flush_follows_the_boxs_own_on_update_cursor_then_text() {
         "early update late",
         "a quiet tick fires nothing"
     );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The box's place in the walk is its stratum's, not its creation's: a BACKGROUND box updates and
+/// flushes before the MEDIUM frames made around it (`0x7656c8`).
+#[test]
+fn a_box_flushes_after_its_on_update_in_its_strata_place() {
+    let mut s = script();
+    logged_box(&mut s);
+    s.run(r#"E:SetFrameStrata("BACKGROUND") E:SetText("abc")"#)
+        .unwrap();
+    s.tick(0.016);
+    assert_eq!(take_log(&s), "update cursor@21 text:abc early late");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -458,6 +471,9 @@ fn up_and_down_move_a_multi_line_boxs_caret_by_rows() {
     "#,
     )
     .unwrap();
+    // The flush sizes the box to its two rows; the drain after the walk resizes it, and the
+    // re-seat that runs fires once more at the next flush (`0x77a8d0` → `0x77b8c0`).
+    s.tick(0.016);
     s.tick(0.016);
     take_log(&s);
     let row = |back| EditAction::Move {
@@ -507,5 +523,318 @@ fn on_cursor_changed_reports_the_first_row_at_plus_zero() {
         "early update -14 text:a\nb late early update 0 text:c late",
         "multi-line, the second row and then the first"
     );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// `OnCursorChanged`'s `h` is the caret's height, which the text seat sets to one line of the
+/// box's font (`0x77b970` → `0x77ba76`) whether or not the box is multi-line, and its `w` the
+/// constant 4 (`0x77ba67`).
+#[test]
+fn on_cursor_changed_reports_one_line_tall_in_a_single_line_box() {
+    let mut s = script();
+    logged_box(&mut s);
+    s.run(
+        r#"
+        E:SetScript("OnCursorChanged", function()
+            table.insert(LOG, format("cursor@%g,%g,%g,%g", arg1, arg2, arg3, arg4))
+        end)
+        E:SetText("ab")
+    "#,
+    )
+    .unwrap();
+    s.tick(0.016);
+    assert_eq!(take_log(&s), "early update cursor@14,0,4,14 text:ab late");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// 40 distinct characters, 280 wide in [`Mono`].
+const ALPHA40: &str = "abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+
+/// A 200×32 single-line box `W` at `(100, 50)` holding [`ALPHA40`], nothing focused, flushed once.
+fn long_box(s: &mut UiScript) {
+    s.run(&format!(
+        r#"
+        W = CreateFrame("EditBox", "W")
+        W:SetAutoFocus(false)
+        W:SetPoint("BOTTOMLEFT", 100, 50)
+        W:SetWidth(200); W:SetHeight(32)
+        W:SetText("{ALPHA40}")
+    "#
+    ))
+    .unwrap();
+    s.resolve();
+    s.tick(0.016);
+    s.resolve();
+}
+
+/// What the box's text region holds.
+fn window(s: &UiScript) -> String {
+    s.eval("return (W:GetRegions()):GetText()").unwrap()
+}
+
+/// Every shown box runs its flush, focused or not, and the relayout hands its text region only
+/// the window (`0x77d840`–`0x77d858`): the 28 characters that fit 200 from the start, re-windowed
+/// once the caret at the end has left them, to the 21 characters that fit three quarters of the
+/// width back from it (`0x77d7df` → `0x77d320`). The region is the inset box, one `TOPLEFT` point
+/// and an explicit size (`0x77b905`, `0x77b940`, `0x77b96b`), and its quad draws as one line.
+#[test]
+fn an_unfocused_box_holds_the_window_its_caret_left() {
+    let mut s = script();
+    long_box(&mut s);
+    assert_eq!(window(&s), &ALPHA40[19..]);
+    assert_eq!(
+        s.eval::<(f64, f64, i64)>(
+            "local t = W:GetRegions() return t:GetWidth(), t:GetHeight(), t:GetNumPoints()"
+        )
+        .unwrap(),
+        (200.0, 32.0, 1)
+    );
+    let line = s.extract().into_iter().find_map(|q| match q.content {
+        QuadContent::Text {
+            text: Some(t),
+            edit_line,
+            ..
+        } if t == ALPHA40[19..] => Some(edit_line),
+        _ => None,
+    });
+    assert_eq!(line, Some(true), "the window's quad draws as an edit line");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The window moves only when the caret leaves it (`0x77d3f5`–`0x77d436` promote the caret's bit
+/// to the relayout's): leaving by the left starts it a quarter of the width back from the caret
+/// (`0x77d7d4`), and losing the focus leaves it where it is.
+#[test]
+fn the_window_moves_only_when_the_caret_leaves_it() {
+    let mut s = script();
+    long_box(&mut s);
+    s.run("W:SetFocus()").unwrap();
+    let left = EditAction::Move {
+        unit: EditUnit::Char,
+        back: true,
+        extend: false,
+    };
+    for _ in 0..21 {
+        s.editbox_action(left);
+    }
+    s.tick(0.016);
+    assert_eq!(window(&s), &ALPHA40[19..], "the caret at its left edge");
+    s.editbox_action(left);
+    s.tick(0.016);
+    assert_eq!(
+        window(&s),
+        &ALPHA40[11..39],
+        "7 back from the caret, then 28"
+    );
+    s.editbox_action(EditAction::Move {
+        unit: EditUnit::Edge,
+        back: true,
+        extend: false,
+    });
+    s.tick(0.016);
+    assert_eq!(window(&s), &ALPHA40[..28]);
+    s.run("W:ClearFocus()").unwrap();
+    s.tick(0.016);
+    assert_eq!(window(&s), &ALPHA40[..28], "the window outlives the focus");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// `OnCursorChanged`'s `x` counts from the caret's line's first byte in the line table
+/// (`0x77dcd8`–`0x77dcfc`), in a single-line box the window's (`0x77d750`): a scrolled box reports
+/// its caret inside its width.
+#[test]
+fn on_cursor_changed_measures_x_from_the_windows_start() {
+    let mut s = script();
+    long_box(&mut s);
+    s.run(
+        r#"
+        LOG = {}
+        W:SetScript("OnCursorChanged", function() table.insert(LOG, "cursor@" .. arg1) end)
+        W:SetFocus()
+    "#,
+    )
+    .unwrap();
+    s.tick(0.016);
+    s.editbox_action(EditAction::Move {
+        unit: EditUnit::Char,
+        back: true,
+        extend: false,
+    });
+    s.tick(0.016);
+    assert_eq!(
+        take_log(&s),
+        "cursor@147 cursor@140",
+        "21 then 20 characters past the window's start, at 19"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The caret is tested against the window's start as it stands (`0x77d7b4`–`0x77d7c2`): a text
+/// that shrinks below a scrolled start re-windows around the caret, never to an empty window.
+#[test]
+fn a_shorter_text_re_windows_a_scrolled_box() {
+    let mut s = script();
+    long_box(&mut s);
+    s.run(r#"W:SetText("abc")"#).unwrap();
+    s.tick(0.016);
+    assert_eq!(window(&s), "abc");
+}
+
+/// A password box never re-windows (`0x77d769` skips both re-window calls): its window is the mask
+/// that fits from its start, one `*` per byte of the text (`0x77d4fc`, `0x77d533`), and a caret
+/// past it fires no `OnCursorChanged` (`0x77da97` → `0x77de49`) until it comes back.
+#[test]
+fn a_password_box_keeps_its_window_at_the_start() {
+    let mut s = script();
+    s.run(&format!(
+        r#"
+        LOG = {{}}
+        W = CreateFrame("EditBox", "W")
+        W:SetAutoFocus(false)
+        W:SetPoint("BOTTOMLEFT", 100, 50)
+        W:SetWidth(200); W:SetHeight(32)
+        W:SetPassword(true)
+        W:SetScript("OnCursorChanged", function() table.insert(LOG, "cursor@" .. arg1) end)
+        W:SetText("{ALPHA40}")
+    "#
+    ))
+    .unwrap();
+    s.resolve();
+    s.tick(0.016);
+    assert_eq!(window(&s), "*".repeat(28));
+    s.run("W:SetFocus()").unwrap();
+    s.editbox_action(EditAction::Move {
+        unit: EditUnit::Edge,
+        back: true,
+        extend: false,
+    });
+    s.tick(0.016);
+    assert_eq!(take_log(&s), "cursor@0", "only the caret inside the window");
+
+    s.run(r"W:SetText('a\195\169')").unwrap();
+    s.tick(0.016);
+    assert_eq!(window(&s), "***", "a two-byte letter masks as two");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A window inside a colour run keeps its colour (`0x77d7f8`–`0x77d93c`): an unescaped `|r` met
+/// before any `|c` puts the run's `|cAARRGGBB` before the window.
+#[test]
+fn a_window_inside_a_colour_run_carries_its_colour() {
+    let mut s = script();
+    long_box(&mut s);
+    s.run(&format!(r#"W:SetText("|cff00ff00{ALPHA40}|r")"#))
+        .unwrap();
+    s.tick(0.016);
+    assert_eq!(window(&s), format!("|cff00ff00{}|r", &ALPHA40[21..]));
+}
+
+/// `OnCursorChanged`'s `x` follows justifyH: CENTER is the advance from the line's start less half
+/// the line (`0x77dc1d`–`0x77dc7b`), RIGHT minus the advance to the line's end (`0x77db89`–
+/// `0x77dbb0`), 0 with the caret at the end.
+#[test]
+fn on_cursor_changed_x_follows_justify_h() {
+    for (justify, want) in [
+        ("CENTER", "cursor@14 cursor@7"),
+        ("RIGHT", "cursor@0 cursor@-7"),
+    ] {
+        let mut s = script();
+        logged_box(&mut s);
+        s.run(&format!(
+            r#"
+            E:SetJustifyH("{justify}")
+            E:SetScript("OnCursorChanged", function() table.insert(LOG, "cursor@" .. arg1) end)
+            E:SetText("abcd")
+            E:SetFocus()
+        "#
+        ))
+        .unwrap();
+        s.tick(0.016);
+        s.editbox_action(EditAction::Move {
+            unit: EditUnit::Char,
+            back: true,
+            extend: false,
+        });
+        s.tick(0.016);
+        let log = take_log(&s);
+        let cursors: Vec<&str> = log
+            .split(' ')
+            .filter(|e| e.starts_with("cursor@"))
+            .collect();
+        assert_eq!(cursors.join(" "), want, "{justify}");
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+    }
+}
+
+/// [`Mono`] as the host answers a scaled box: glyphs 7 and lines 14 in the box's own units, the
+/// table in root units (measured at the box's scale, divided by the seam alone).
+struct ScaledMono;
+
+impl TextMeasure for ScaledMono {
+    fn measure(&mut self, req: &MeasureRequest) -> (f32, f32, f32) {
+        Mono.measure(req)
+    }
+
+    fn editbox_advances(
+        &mut self,
+        req: &EditBoxAdvanceRequest,
+    ) -> Option<(Vec<f32>, Vec<usize>, f32)> {
+        let (cum, rows, pitch) = Mono.editbox_advances(req)?;
+        let k = req.scale;
+        Some((cum.into_iter().map(|a| a * k).collect(), rows, pitch * k))
+    }
+}
+
+/// `OnCursorChanged` answers in the box's own units: the reference divides by its effective scale
+/// (`0x77db23 fdiv [esi+0x7c]`), so a half-scale box reports what a full-scale one does.
+#[test]
+fn on_cursor_changed_answers_in_the_boxs_own_units() {
+    let mut s = script();
+    s.set_text_measurer(Box::new(ScaledMono));
+    logged_box(&mut s);
+    s.run(
+        r#"
+        E:SetScale(0.5)
+        E:SetScript("OnCursorChanged", function()
+            table.insert(LOG, format("cursor@%g,%g,%g", arg1, arg2, arg4))
+        end)
+        E:SetMultiLine(true)
+        E:SetText("abc\nd")
+    "#,
+    )
+    .unwrap();
+    s.tick(0.016);
+    assert_eq!(
+        take_log(&s),
+        "early update cursor@7,-14,14 text:abc\nd late",
+        "one glyph along the second row, a row pitch down, one pitch tall"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A box created and anchored between frames, as an event handler does: the pump's drain before
+/// the walk (`0x7656ba`) gives it its first rect, whose resize runs the box's `OnSizeChanged`
+/// override (`0x76b63e` → `0x77a8d0`); the re-seat ORs its bits into the ctor's (`0x77ba7f`), so the
+/// walk's flush (`0x77a7a1`) fires `OnTextChanged` once, and the frames after it fire nothing.
+#[test]
+fn a_box_anchored_between_frames_fires_on_text_changed_once() {
+    let mut s = script();
+    s.run(
+        r#"
+        N = 0
+        local e = CreateFrame("EditBox", "Fresh")
+        e:SetAutoFocus(false)
+        e:SetPoint("BOTTOMLEFT", 100, 50)
+        e:SetWidth(200); e:SetHeight(32)
+        e:SetScript("OnTextChanged", function() N = N + 1 end)
+    "#,
+    )
+    .unwrap();
+    // The host's frame: the tick, then its own resolve for the draw.
+    for _ in 0..3 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert_eq!(s.eval::<i64>("return N").unwrap(), 1);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

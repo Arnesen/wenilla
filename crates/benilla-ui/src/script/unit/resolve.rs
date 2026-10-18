@@ -218,6 +218,102 @@ impl UnitGuids {
         self.held.values().copied().filter(|&guid| guid != 0)
     }
 
+    /// Every token that names a unit now, the base spellings `0x515c50` builds for a guid (it
+    /// tests the guid against each global and table in turn and keeps every match, so a unit two
+    /// tokens name is fired for twice), taken over all units at once: `player`, `pet`, `target`,
+    /// `mouseover`, `npc`, then each `partyN`, `partypetN`, `raidN` and `raidpetN` with a guid.
+    /// Hop tokens are not among them: the reference's array holds none.
+    pub fn bound_tokens(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut name = |token: String, base: UnitBase| {
+            if self.resolve_unit(base, 0).is_some() {
+                out.push(token);
+            }
+        };
+        name("player".into(), UnitBase::Player);
+        name("pet".into(), UnitBase::Pet);
+        name("target".into(), UnitBase::Target);
+        name("mouseover".into(), UnitBase::Mouseover);
+        name("npc".into(), UnitBase::Npc);
+        for row in 0..self.party.len() {
+            name(format!("party{}", row + 1), UnitBase::Party(row as u32));
+        }
+        for row in 0..self.party_pets.len() {
+            name(
+                format!("partypet{}", row + 1),
+                UnitBase::PartyPet(row as u32),
+            );
+        }
+        for row in 0..self.raid.len() {
+            name(format!("raid{}", row + 1), UnitBase::Raid(row as u32));
+        }
+        for row in 0..self.raid_pets.len() {
+            name(format!("raidpet{}", row + 1), UnitBase::RaidPet(row as u32));
+        }
+        out
+    }
+
+    /// The tokens naming `guid`, as `0x515c50` lists them for one unit: `player`, `pet`, `target`,
+    /// the first of party rows 1 to 4 whose member or pet it is (`0x515d61` stops there), the
+    /// first such of raid rows 1 to 40 (`0x515dc4`), then `npc` and `mouseover`, each compared
+    /// with its global (`0x515de6`, `0x515e14`). Nothing removes duplicates; nobody and a missing
+    /// player give none (`0x515c62`, `0x515c89`).
+    pub fn tokens_of(&self, guid: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        if guid == 0 || self.player == 0 {
+            return out;
+        }
+        for (token, at) in [
+            ("player", self.player),
+            ("pet", self.pet),
+            ("target", self.target),
+        ] {
+            if at == guid {
+                out.push(token.to_string());
+            }
+        }
+        if let Some(row) = (0..4).find(|&i| self.party[i] == guid || self.party_pets[i] == guid) {
+            let base = if self.party[row] == guid {
+                "party"
+            } else {
+                "partypet"
+            };
+            out.push(format!("{base}{}", row + 1));
+        }
+        let pet_of = |i: usize| self.raid_pets.get(i).copied().unwrap_or(0);
+        if let Some(row) =
+            (0..self.raid.len().min(40)).find(|&i| self.raid[i] == guid || pet_of(i) == guid)
+        {
+            let base = if self.raid[row] == guid {
+                "raid"
+            } else {
+                "raidpet"
+            };
+            out.push(format!("{base}{}", row + 1));
+        }
+        for (token, at) in [("npc", self.npc), ("mouseover", self.mouseover)] {
+            if at == guid {
+                out.push(token.to_string());
+            }
+        }
+        out
+    }
+
+    /// Whether `guid` carries the unit-field watchers: `0x51bbb0` registers them while the unit's
+    /// token flags are nonzero (`0x60c4a0`), and `0x60c520` sets those for the active player,
+    /// its pet, a party member or its pet, a raid member or its pet, and the target. `npc` and
+    /// `mouseover` set none.
+    pub fn has_field_watchers(&self, guid: u64) -> bool {
+        guid != 0
+            && (guid == self.player
+                || (self.player != 0 && guid == self.pet)
+                || guid == self.target
+                || self.party.contains(&guid)
+                || self.party_pets.contains(&guid)
+                || self.raid.contains(&guid)
+                || self.raid_pets.contains(&guid))
+    }
+
     /// [`Self::resolve`] with the raise as the Lua error it is.
     pub(crate) fn guid_of(&self, token: &str) -> mlua::Result<Option<u64>> {
         self.resolve(token)
@@ -290,6 +386,90 @@ mod tests {
         assert_eq!(at("partypet1"), Some(P1_PET));
         assert_eq!(at("raid3"), Some(R3));
         assert_eq!(at("raidpet2"), Some(P1_PET));
+    }
+
+    /// The tokens naming a unit, in the fan-out's order: the five globals that hold a guid, then
+    /// the group tables row by row. A hop token and a nobody are left out.
+    #[test]
+    fn bound_tokens_lists_each_base_that_names_a_unit() {
+        assert_eq!(
+            guids().bound_tokens(),
+            [
+                "player",
+                "pet",
+                "target",
+                "mouseover",
+                "npc",
+                "party1",
+                "party2",
+                "partypet1",
+                "raid1",
+                "raid2",
+                "raid3",
+                "raidpet1",
+                "raidpet2",
+            ]
+        );
+        // Every listed token resolves to a unit, and the omitted `raidpet3` to nobody.
+        for token in guids().bound_tokens() {
+            assert!(guids().resolve(&token).unwrap().is_some(), "{token}");
+        }
+        assert_eq!(guids().resolve("raidpet3"), Ok(None));
+        // Nothing seated, nothing named; no mouseover held, no mouseover.
+        assert!(UnitGuids::default().bound_tokens().is_empty());
+        let unheld = UnitGuids {
+            held: HashMap::new(),
+            ..guids()
+        };
+        assert!(!unheld.bound_tokens().contains(&"mouseover".to_string()));
+    }
+
+    /// One unit's tokens in `0x515c50`'s order: the three globals, one party row, one raid row,
+    /// then `npc` and `mouseover`; a unit two tokens name is listed twice.
+    #[test]
+    fn tokens_of_lists_one_units_names_in_the_fan_out_order() {
+        // The mob is the target, the mouseover and the NPC: target first, npc before mouseover.
+        assert_eq!(guids().tokens_of(MOB), ["target", "npc", "mouseover"]);
+        // We are raid row 1 and in no party table.
+        assert_eq!(guids().tokens_of(ME), ["player", "raid1"]);
+        assert_eq!(guids().tokens_of(PET), ["pet", "raidpet1"]);
+        // Party row 1's pet is also raid row 2's pet: one party row, one raid row.
+        assert_eq!(guids().tokens_of(P1_PET), ["partypet1", "raidpet2"]);
+        assert_eq!(guids().tokens_of(P1), ["party1", "raid2"]);
+        assert!(guids().tokens_of(0).is_empty());
+        let no_player = UnitGuids {
+            player: 0,
+            ..guids()
+        };
+        assert!(
+            no_player.tokens_of(MOB).is_empty(),
+            "no active player, no list"
+        );
+    }
+
+    /// The watchers follow the token flags, which `npc` and `mouseover` do not set.
+    #[test]
+    fn field_watchers_follow_the_token_flags() {
+        for guid in [ME, PET, MOB, P1, FAR, P1_PET, R3] {
+            assert!(guids().has_field_watchers(guid), "{guid:#x}");
+        }
+        let hovered = UnitGuids {
+            target: 0,
+            ..guids()
+        };
+        assert!(
+            !hovered.has_field_watchers(MOB),
+            "the mouseover and the NPC alone register nothing"
+        );
+        assert!(!guids().has_field_watchers(0));
+        // Our pet in no group table carries them by the pet's own flag, and only with a player.
+        let alone = UnitGuids {
+            player: ME,
+            pet: PET,
+            ..Default::default()
+        };
+        assert!(alone.has_field_watchers(PET));
+        assert!(!UnitGuids { player: 0, ..alone }.has_field_watchers(PET));
     }
 
     #[test]

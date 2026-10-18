@@ -11,12 +11,37 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{ScriptCall, UiScript};
+use benilla_ui::script::{QueuedCall, ScriptCall, UiScript};
 
 /// How deep calls made while applying a call may nest in one frame: a macro whose line presses a
 /// macro, and so on. Past it (a macro that presses itself), what is left waits for the next frame,
 /// so a frame always ends.
 const MAX_NESTING: u8 = 8;
+
+/// The player's Attack (`0x6131a0`) in the reference's order: the validator's `SelectTarget`s bind a
+/// unit to a standing targeting cursor's cast inside the validator, so that cast is sent before the
+/// swing the validated target gets.
+macro_rules! attack_in_order {
+    ($appliers:expr, $may_pick:expr) => {{
+        let target = $appliers.p7().validate_attack($may_pick);
+        $appliers.p1().bind_parked();
+        if let Some(guid) = target {
+            $appliers.p7().start_attack(guid);
+        }
+    }};
+}
+
+/// The pet bar's Attack (`0x4bd40d`) runs the same validator, so a cast it binds to a standing
+/// targeting cursor goes out ahead of the `CMSG_PET_ACTION` it validated.
+macro_rules! pet_in_order {
+    ($appliers:expr, $begin:ident($arg:expr)) => {{
+        let send = $appliers.p6().$begin($arg);
+        $appliers.p1().bind_parked();
+        if let Some(send) = send {
+            $appliers.p6().finish_press(send);
+        }
+    }};
+}
 
 /// Apply this frame's script calls in call order, in the target chain after the world clicks.
 #[allow(clippy::type_complexity)] // the appliers, one per owner of the state a call touches
@@ -33,73 +58,125 @@ pub(crate) fn apply_script_calls(
         crate::ui_action::AttackPress,
     )>,
 ) {
+    // The units a selection writer outside this pass (a loot window's select, the chat layer's
+    // `/target`) found the targeting cursor up for (`SelectTarget`, `0x4935d5`), bound to the cast
+    // in their place; this pass's own are bound after the call that parked them.
+    appliers.p1().bind_parked();
     let Some(mut script) = script else {
         return;
     };
     in_call_order(&mut script, |script, call| {
+        // The gate's answer for this call, made where the Lua verb ran: its casts start only if
+        // tag 2 passed there. The ladder reads it for as long as this call applies.
+        appliers.p3().ladder.permit(call.may_cast());
+        let selected_before = appliers.p0().selected();
+        let error_marks = (
+            appliers.p4().error_count(),
+            appliers.p3().ladder.cast_errors.0.len(),
+        );
         match call {
-            ScriptCall::Select(request) => appliers.p0().select(request),
-            ScriptCall::TargetByName { name, exact } => appliers.p0().target_by_name(&name, exact),
-            ScriptCall::TargetNearest { mode, reverse } => {
+            ScriptCall::Select { request, .. } => appliers.p0().select(request),
+            ScriptCall::TargetByName { name, exact, .. } => {
+                appliers.p0().target_by_name(&name, exact)
+            }
+            ScriptCall::TargetNearest { mode, reverse, .. } => {
                 appliers.p0().target_nearest(mode, reverse);
             }
-            ScriptCall::TargetLastTarget => appliers.p0().target_last_target(),
+            ScriptCall::TargetLastTarget { .. } => appliers.p0().target_last_target(),
             ScriptCall::ClearTarget => appliers.p0().clear_target(),
-            ScriptCall::AttackTarget => appliers.p7().attack_target(),
+            ScriptCall::AttackTarget { may_pick, .. } => attack_in_order!(appliers, may_pick),
             ScriptCall::SpellTargetUnit(token) => appliers.p1().spell_target_unit(&token),
             ScriptCall::SpellStopTargeting => appliers.p1().stop_targeting(),
             ScriptCall::SpellStopCasting => appliers.p2().stop_casting(),
-            ScriptCall::CastSpell { spell_id, on_self } => {
+            ScriptCall::CastSpell {
+                spell_id, on_self, ..
+            } => {
                 crate::ui_spellbook::cast_spell(&mut appliers.p3(), spell_id, on_self);
             }
-            ScriptCall::CastShapeshiftForm(spell_id) => {
+            ScriptCall::CastShapeshiftForm { spell_id, .. } => {
                 crate::ui_shapeshift::cast_form(&mut appliers.p3(), spell_id);
             }
             ScriptCall::UseAction(press) => {
                 let used = crate::ui_action::use_action(&mut appliers.p4(), script, press);
+                // The Attack slot is a cast, so the gate's tag 4 (the pick) is asked only after
+                // tag 2 passed, and so passes as well.
                 if used == crate::ui_action::UseOutcome::Attack {
-                    appliers.p7().attack_target();
+                    attack_in_order!(appliers, true);
                 }
             }
-            ScriptCall::UseContainerItem { bag, slot } => {
-                appliers.p5().use_container_item(script, bag, slot);
+            ScriptCall::UseContainerItem(call) => {
+                appliers.p5().use_container_item(script, call);
             }
-            ScriptCall::UseInventoryItem(id) => appliers.p5().use_inventory_item(script, id),
+            ScriptCall::UseInventoryItem { slot, on_self, .. } => {
+                appliers.p5().use_inventory_item(script, slot, on_self)
+            }
             ScriptCall::CastPetSpell { spell_id, on_self } => {
                 crate::ui_pet_book::cast_pet_spell(&mut appliers.p6(), spell_id, on_self);
             }
-            ScriptCall::PetAction(slot) => appliers.p6().press_slot(slot),
-            ScriptCall::PetOrder(packed) => appliers.p6().order(packed),
+            ScriptCall::PetAction(slot) => pet_in_order!(appliers, begin_slot(slot)),
+            ScriptCall::PetOrder(packed) => pet_in_order!(appliers, begin_order(packed)),
         }
+        // A selection this call made with the targeting cursor up was handed to the cast
+        // (`SelectTarget`, `0x4935d5`) and is bound now, before the next call reads either.
+        appliers.p1().bind_parked();
         // TryCast's attack pick can move the selection mid-cast (`0x6e4efb`), so a press held
         // there is picked and resumed before the next call reads the selection.
-        let Some(held) = appliers.p3().ladder.take_held() else {
-            return;
-        };
-        if appliers.p7().pick_for_cast(held) {
-            let mut cast = appliers.p3();
-            let ctx = cast.targeting.context();
-            cast.ladder.resume_after_pick(held, &ctx);
+        if let Some(held) = appliers.p3().ladder.take_held() {
+            // A held press passed tag 2 to be held, so the pick's tag 4 passes as well.
+            if appliers.p7().pick_for_cast(held) {
+                let mut cast = appliers.p3();
+                let ctx = cast.targeting.context();
+                cast.ladder.resume_after_pick(held, &ctx);
+            }
+        }
+        // The reference signals `PLAYER_TARGET_CHANGED` inside `SetSelection`, so inside this
+        // call's input events; the unit feed signals it a step later, and asks for them.
+        let selected_after = appliers.p0().selected();
+        let input = script.input_events();
+        if selected_after != selected_before {
+            script.note_selection_cause(selected_after, input);
+        }
+        // So are the refusals this call raised: the feed signals `UI_ERROR_MESSAGE` for them a
+        // frame later, inside the same events.
+        if input.any() {
+            appliers.p4().stamp_errors(error_marks.0, input);
+            for fail in appliers
+                .p3()
+                .ladder
+                .cast_errors
+                .0
+                .iter_mut()
+                .skip(error_marks.1)
+            {
+                fail.input = input;
+            }
         }
     });
+    // Whatever casts next is the engine's own, which asks no gate.
+    appliers.p3().ladder.permit(true);
 }
 
-/// Apply every queued call front to back. Applying one may queue more: a macro's lines run
-/// inside `UseAction` (`0x4e6098 call 0x4f1460`), so the calls they make go before the next one
-/// queued.
+/// Apply every queued call front to back, each with the input events its verb ran under raised
+/// again: the reference does the call inside the verb, so whatever it signals (a macro's lines, a
+/// handler of an event it fires) runs inside the key, click or Enter that made it. Applying one may
+/// queue more: a macro's lines run inside `UseAction` (`0x4e6098 call 0x4f1460`), so the calls they
+/// make go before the next one queued, under the same events.
 pub(crate) fn in_call_order(
     script: &mut UiScript,
     mut apply: impl FnMut(&mut UiScript, ScriptCall),
 ) {
-    let mut queue: VecDeque<(ScriptCall, u8)> = script
-        .take_script_calls()
+    let mut queue: VecDeque<(QueuedCall, u8)> = script
+        .take_queued_calls()
         .into_iter()
         .map(|call| (call, 0))
         .collect();
     let mut next_frame = Vec::new();
-    while let Some((call, depth)) = queue.pop_front() {
-        apply(script, call);
-        let nested = script.take_script_calls();
+    while let Some((QueuedCall { call, input }, depth)) = queue.pop_front() {
+        // The nested calls it queues are taken inside the replay, which they were made under.
+        let nested = script.with_input_events(input, |script| {
+            apply(script, call);
+            script.take_queued_calls()
+        });
         if depth >= MAX_NESTING {
             next_frame.extend(nested);
             continue;
@@ -109,7 +186,7 @@ pub(crate) fn in_call_order(
         }
     }
     if !next_frame.is_empty() {
-        script.requeue_script_calls(next_frame);
+        script.requeue_calls(next_frame);
     }
 }
 
@@ -238,6 +315,20 @@ mod tests {
             .world_mut()
             .non_send_resource_mut::<UiScript>()
             .run(lua)
+            .expect("the script runs");
+        f.app
+            .world_mut()
+            .run_system_once(apply_script_calls)
+            .expect("the calls apply as a one-shot system");
+    }
+
+    /// [`run`] with `lua` as a key's body, an input event of the protected-action gate
+    /// (`[[0xb71290]+0xd8]`): the press a macro's `/script` line needs to cast.
+    fn run_pressed(f: &mut Frame, lua: &str) {
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run_binding(lua)
             .expect("the script runs");
         f.app
             .world_mut()
@@ -578,6 +669,129 @@ mod tests {
         assert_eq!(swings(&f), (vec![NEW], false));
     }
 
+    /// `TargetByName` (`0x489d60`) commits through `SetSelection 0x493540` before it returns, so
+    /// `UnitName("target")` on the next line of the same chunk names the new unit, and the frame's
+    /// one application commits the same pick.
+    #[test]
+    fn target_by_name_names_the_new_target_in_the_same_chunk() {
+        let mut f = frame(true);
+        spawn_mob(&mut f, &[]);
+        let world = f.app.world_mut();
+        let mut names = world.resource_mut::<crate::names::NameCache>();
+        names.insert_player(OLD, "Old Mob".into(), None);
+        names.insert_player(MOB, "Red Affinity".into(), None);
+        names.insert_player(NEW, "Red Whelp".into(), None);
+        world
+            .run_system_once(crate::ui_unit::feed_name_candidates)
+            .expect("the candidate feed runs as a one-shot system");
+        let named = f
+            .app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .eval::<String>("TargetByName('Red Affinity', true) return UnitName('target')")
+            .expect("the chunk runs");
+        assert_eq!(named, "Red Affinity");
+        f.app
+            .world_mut()
+            .run_system_once(apply_script_calls)
+            .expect("the calls apply as a one-shot system");
+        assert_eq!(
+            selected(&f),
+            Some(MOB),
+            "the commit picks what the chunk read"
+        );
+    }
+
+    /// Two namesakes: the ranking decides, and the chunk shows the one the commit then selects --
+    /// the nearer, and of two at one distance the lower guid, whatever order either side walks.
+    #[test]
+    fn target_by_name_shows_the_namesake_the_commit_picks() {
+        /// A namesake of `MOB` on our other side, told apart by its health.
+        const TWIN: u64 = 0x30;
+        for (twin_x, picked, health) in [(-4.0, MOB, 100), (-3.0, TWIN, 40)] {
+            let mut f = frame(true);
+            spawn_mob(&mut f, &[]);
+            let world = f.app.world_mut();
+            let twin = world
+                .spawn((
+                    Guid(TWIN),
+                    Transform::from_xyz(twin_x, 0.0, 0.0),
+                    GlobalTransform::from_translation(Vec3::new(twin_x, 0.0, 0.0)),
+                    ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                        (HEALTH, 40),
+                        (28, 100),
+                    ])),
+                ))
+                .id();
+            world.resource_mut::<GuidIndex>().0.insert(TWIN, twin);
+            let mut names = world.resource_mut::<crate::names::NameCache>();
+            names.insert_player(MOB, "Red Affinity".into(), None);
+            names.insert_player(TWIN, "Red Affinity".into(), None);
+            world
+                .run_system_once(crate::ui_unit::feed_name_candidates)
+                .expect("the candidate feed runs as a one-shot system");
+            let shown = f
+                .app
+                .world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<i64>("TargetByName('Red Affinity') return UnitHealth('target')")
+                .expect("the chunk runs");
+            assert_eq!(shown, health, "the twin {twin_x} yd off");
+            f.app
+                .world_mut()
+                .run_system_once(apply_script_calls)
+                .expect("the calls apply as a one-shot system");
+            assert_eq!(selected(&f), Some(picked), "the twin {twin_x} yd off");
+        }
+    }
+
+    /// The candidate feed marks a `UNIT_FLAG_NOT_SELECTABLE` unit as the commit's `IsSelectable`
+    /// does (`0x4935ee`): the nearer namesake is the ranked pick and it is refused, so the chunk
+    /// keeps the old target's view and the commit keeps its selection, not the farther namesake.
+    #[test]
+    fn target_by_name_shows_nothing_when_the_commit_refuses_its_pick() {
+        /// `UNIT_FLAG_NOT_SELECTABLE`, `UNIT_FIELD_FLAGS` bit 25.
+        const NOT_SELECTABLE: u32 = 1 << 25;
+        /// A selectable namesake of `MOB` farther off, told apart by its health.
+        const TWIN: u64 = 0x30;
+        let mut f = frame(true);
+        spawn_mob(&mut f, &[(FLAGS, NOT_SELECTABLE)]);
+        let world = f.app.world_mut();
+        let twin = world
+            .spawn((
+                Guid(TWIN),
+                Transform::from_xyz(-4.0, 0.0, 0.0),
+                GlobalTransform::from_translation(Vec3::new(-4.0, 0.0, 0.0)),
+                ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                    (HEALTH, 40),
+                    (28, 100),
+                ])),
+            ))
+            .id();
+        world.resource_mut::<GuidIndex>().0.insert(TWIN, twin);
+        let mut names = world.resource_mut::<crate::names::NameCache>();
+        names.insert_player(MOB, "Red Affinity".into(), None);
+        names.insert_player(TWIN, "Red Affinity".into(), None);
+        world
+            .run_system_once(crate::ui_unit::feed_name_candidates)
+            .expect("the candidate feed runs as a one-shot system");
+        let shown = f
+            .app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .eval::<i64>("TargetByName('Red Affinity') return UnitHealth('target')")
+            .expect("the chunk runs");
+        assert_eq!(
+            shown, 0,
+            "the old target's view, not the twin's 40 or the mob's 100"
+        );
+        f.app
+            .world_mut()
+            .run_system_once(apply_script_calls)
+            .expect("the calls apply as a one-shot system");
+        assert_eq!(selected(&f), Some(OLD), "the commit refuses the same pick");
+    }
+
     /// `0x6130a3`: a unit we are friendly toward is dropped (`0x6130a8`) and `TargetNearestEnemy`
     /// runs (`0x6130b5`), moving the selection; the swing goes at what it picked (`0x6130c1`).
     /// The Attack button reaches the same `0x6131a0` through `TryCast` (`0x6e4c90`).
@@ -715,9 +929,355 @@ mod tests {
                     },
                 );
         }
-        run(&mut f, r#"UseAction(1) TargetUnit("party1")"#);
+        // The macro's line is a `RunScript` chunk, which casts only inside an input event: the
+        // press is a key's body, and the line runs inside it in the reference.
+        run_pressed(&mut f, r#"UseAction(1) TargetUnit("party1")"#);
         assert_eq!(casts(&f), vec![(HEAL, Some(OLD))]);
         assert_eq!(selected(&f), Some(NEW));
+    }
+
+    /// The macro's lines run inside the press (`0x4e6098`), so the input event that pressed it is
+    /// still up for them; here the press has returned by the time the app runs them, so they run
+    /// with it raised again. A press that was no input event (an addon's `OnUpdate`) hands them
+    /// none, and a `/script` cast in them is refused, silently.
+    #[test]
+    fn a_macros_script_line_casts_only_when_its_press_was_an_input_event() {
+        for (pressed, want) in [(true, vec![(HEAL, Some(OLD))]), (false, vec![])] {
+            let mut f = frame(true);
+            {
+                let world = f.app.world_mut();
+                let script = world.non_send_resource::<UiScript>();
+                script
+                    .run(
+                        r#"local f = CreateFrame("Frame")
+                        f:RegisterEvent("EXECUTE_CHAT_LINE")
+                        f:SetScript("OnEvent", function() RunScript(arg1) end)
+                        MACRO_INDEX = CreateMacro("heal", 1, 'CastSpellByName("Heal")', 1, nil)"#,
+                    )
+                    .expect("the macro is made");
+                let index: u32 = script.eval("return MACRO_INDEX").expect("an index");
+                world
+                    .resource_mut::<crate::ui_action::PlayerActions>()
+                    .buttons
+                    .insert(
+                        0,
+                        ActionButton {
+                            slot: 0,
+                            action: index,
+                            kind: ACTION_KIND_MACRO,
+                        },
+                    );
+            }
+            if pressed {
+                run_pressed(&mut f, "UseAction(1)");
+            } else {
+                run(&mut f, "UseAction(1)");
+            }
+            assert_eq!(casts(&f), want, "pressed in an input event: {pressed}");
+        }
+    }
+
+    /// `UseAction` on a spell is `TryCastSpell`, whose gate is its first rung (`0x6e4bc1`): a macro's
+    /// call outside an input event queues the press, which the app finds refused and sends
+    /// nothing, where the client's own press casts. The same press on a macro slot still runs it.
+    #[test]
+    fn a_use_action_the_gate_refused_casts_nothing() {
+        for (lua, want) in [
+            ("UseAction(1)", vec![(HEAL, Some(OLD))]),
+            (r#"RunScript("UseAction(1)")"#, vec![]),
+        ] {
+            let mut f = frame(true);
+            f.app
+                .world_mut()
+                .resource_mut::<crate::ui_action::PlayerActions>()
+                .buttons
+                .insert(
+                    0,
+                    ActionButton {
+                        slot: 0,
+                        action: HEAL,
+                        kind: ACTION_KIND_SPELL,
+                    },
+                );
+            run(&mut f, lua);
+            assert_eq!(casts(&f), want, "{lua}");
+        }
+    }
+
+    /// Ghost Wolf: an aura with an `ActiveIconID`, which a second press cancels.
+    const GHOST_WOLF: u32 = 2645;
+
+    /// Ghost Wolf in the catalog, the book and the form bar, and up on us as a cancelable aura.
+    fn with_ghost_wolf_up(f: &mut Frame, up: bool) {
+        let world = f.app.world_mut();
+        let display = benilla_formats::SpellDisplay {
+            active_icon_id: 1,
+            ..Default::default()
+        };
+        world.insert_resource(crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays([(GHOST_WOLF, display)].into()),
+            ..crate::ui_action::Spells::empty_for_tests()
+        });
+        let me = world.resource::<GuidIndex>().0[&ME];
+        let mut pairs = vec![(2, 0x19), (HEALTH, 100), (28, 100), (FLAGS, 0x8)];
+        if up {
+            // `UNIT_FIELD_AURA` 47 and the nibble-packed `UNIT_FIELD_AURAFLAGS` 95: occupied and
+            // cancelable.
+            pairs.extend([(47, GHOST_WOLF), (95, 0xb)]);
+        }
+        world
+            .entity_mut(me)
+            .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(
+                &pairs,
+            )));
+        let mut script = world.non_send_resource_mut::<UiScript>();
+        script.set_spellbook(SpellBookState {
+            tabs: vec![SpellTabView {
+                name: "Druid".into(),
+                texture: None,
+                offset: 0,
+                num_spells: 1,
+            }],
+            slots: vec![SpellSlotView {
+                spell_id: GHOST_WOLF,
+                name: "Ghost Wolf".into(),
+                ..Default::default()
+            }],
+        });
+        script.set_shapeshift_forms(vec![benilla_ui::script::ShapeshiftFormView {
+            spell_id: GHOST_WOLF,
+            name: "Ghost Wolf".into(),
+            castable: true,
+            ..Default::default()
+        }]);
+    }
+
+    /// The `CMSG_CANCEL_AURA`s sent, as spell ids.
+    fn cancels(f: &Frame) -> Vec<u32> {
+        f.rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::CancelAura { spell_id } => Some(spell_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `CastBookSpell` (`0x4b3300`) and `CastShapeshiftForm` (`0x4b4810`) cancel an active aura or
+    /// form before `TryCast` (`0x4b3466`, `0x4b496b`, `0x4b497c`), so the gate's tag 2, which is
+    /// `TryCast`'s first rung (`0x6e4bc1`), refuses only the cast: a macro's press outside an input
+    /// event cancels the wolf all the same, and casts nothing when it is down.
+    #[test]
+    fn a_refused_book_or_form_cast_still_runs_its_cancels() {
+        for lua in [
+            r#"RunScript('CastSpellByName("Ghost Wolf")')"#,
+            r#"RunScript("CastSpell(1, BOOKTYPE_SPELL)")"#,
+            r#"RunScript("CastShapeshiftForm(1)")"#,
+        ] {
+            let mut f = frame(true);
+            with_ghost_wolf_up(&mut f, true);
+            run(&mut f, lua);
+            assert_eq!(cancels(&f), vec![GHOST_WOLF], "{lua}: up, cancels");
+
+            let mut f = frame(true);
+            with_ghost_wolf_up(&mut f, false);
+            run(&mut f, lua);
+            assert_eq!(cancels(&f), Vec::<u32>::new(), "{lua}: down");
+            assert_eq!(casts(&f), vec![], "{lua}: down, refused, casts nothing");
+        }
+        // The client's own call casts when the wolf is down.
+        let mut f = frame(true);
+        with_ghost_wolf_up(&mut f, false);
+        run(&mut f, "CastShapeshiftForm(1)");
+        assert_eq!(
+            casts(&f).iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![GHOST_WOLF]
+        );
+    }
+
+    /// The stock UI over the frame's world, with an insecure addon, `Hook`, whose handler of
+    /// `PLAYER_TARGET_CHANGED` casts Heal.
+    fn with_stock_ui_and_a_casting_hook(f: &mut Frame) {
+        with_stock_ui(f, true);
+    }
+
+    /// The stock UI over the frame's world, and with `hook` the addon above.
+    fn with_stock_ui(f: &mut Frame, hook: bool) {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut script, failures) = crate::ui_script::layer_tests::production_load_with(
+            if hook { "tab-hook" } else { "tab-stock" },
+            false,
+            "",
+            |root| {
+                if !hook {
+                    return;
+                }
+                let dir = root.join("Hook");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("Hook.toc"), "## Interface: 11200\nhook.lua\n").unwrap();
+                std::fs::write(
+                    dir.join("hook.lua"),
+                    r#"local f = CreateFrame("Frame")
+                       f:RegisterEvent("PLAYER_TARGET_CHANGED")
+                       f:SetScript("OnEvent", function() CastSpellByName("Heal") end)"#,
+                )
+                .unwrap();
+            },
+        );
+        assert!(failures.is_empty(), "{failures:#?}");
+        script.set_spellbook(SpellBookState {
+            tabs: vec![SpellTabView {
+                name: "Holy".into(),
+                texture: None,
+                offset: 0,
+                num_spells: 1,
+            }],
+            slots: vec![SpellSlotView {
+                spell_id: HEAL,
+                name: "Heal".into(),
+                ..Default::default()
+            }],
+        });
+        f.app.world_mut().insert_non_send_resource(script);
+    }
+
+    /// Apply the queued calls, then the unit feed (which signals the selection's change), then the
+    /// calls the handlers made.
+    fn settle(f: &mut Frame) {
+        let world = f.app.world_mut();
+        world.run_system_once(apply_script_calls).unwrap();
+        crate::ui_unit::run_feed_units_once(world);
+        world.run_system_once(apply_script_calls).unwrap();
+    }
+
+    /// `SetSelection` signals `PLAYER_TARGET_CHANGED` inside `ExecuteBinding` (`0x4b7b02`-
+    /// `0x4b7b11`), so an insecure addon's handler that casts passes after a TAB press. Here the
+    /// unit feed signals it a step after the call is applied, with the call's input events raised
+    /// again around it: the stock `TARGETNEARESTENEMY` binding moves the target, the addon's handler
+    /// casts at the new one. A change no call made (the server's) hears it with none up, and its
+    /// cast is refused.
+    #[test]
+    fn a_tab_targets_and_the_addons_target_handler_casts() {
+        benilla_formats::wow_data_or_skip!();
+        let mut f = frame(true);
+        with_factions(&mut f, FRIEND, &[]);
+        spawn_mob(&mut f, &[(TEMPLATE, FOE)]);
+        with_stock_ui_and_a_casting_hook(&mut f);
+        // The feed's first pass seats the selection it finds, with its world-enter events.
+        settle(&mut f);
+        f.rx.try_iter().for_each(drop);
+
+        let pressed = f
+            .app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .execute_binding("TARGETNEARESTENEMY", true)
+            .expect("the binding runs");
+        assert!(pressed);
+        settle(&mut f);
+        assert_eq!(selected(&f), Some(MOB), "TAB picked the enemy");
+        assert_eq!(
+            casts(&f),
+            vec![(HEAL, Some(MOB))],
+            "the handler's cast passed"
+        );
+
+        // The same edge with no call behind it: the server moves the target.
+        f.app.world_mut().resource_mut::<Selection>().guid = Some(NEW);
+        settle(&mut f);
+        assert_eq!(
+            casts(&f),
+            vec![],
+            "no input event up for the handler: refused"
+        );
+    }
+
+    /// A refusal a call raises while it is applied is signalled by the feed a frame later, with the
+    /// input events the call ran under raised again (the reference signals it inside the press):
+    /// an attack with nothing to attack, pressed in a key's body, queues its refusal stamped with
+    /// the binding event, and pressed otherwise it carries none.
+    #[test]
+    fn a_refusal_a_call_raises_carries_the_events_it_ran_under() {
+        for (pressed, want) in [(true, true), (false, false)] {
+            let mut f = frame(false);
+            with_factions(&mut f, FRIEND, &[]);
+            if pressed {
+                run_pressed(&mut f, "AttackTarget()");
+            } else {
+                run(&mut f, "AttackTarget()");
+            }
+            let queued: Vec<_> = f
+                .app
+                .world()
+                .resource::<crate::ui_action::UiErrorKeys>()
+                .0
+                .iter()
+                .map(|e| (e.key, e.input.binding))
+                .collect();
+            assert_eq!(
+                queued,
+                vec![("ERR_NO_ATTACK_TARGET", want)],
+                "pressed: {pressed}"
+            );
+        }
+    }
+
+    /// The ladder reads the permit as an optional resource, so a world without it passes every
+    /// cast; the client must register it, or the gate is silently off.
+    #[test]
+    fn the_client_registers_the_cast_permit() {
+        let f = frame(false);
+        assert!(f
+            .app
+            .world()
+            .get_resource::<crate::spell::ScriptCastPermit>()
+            .is_some());
+    }
+
+    /// The Attack slot is a cast too (`UseAction` → `TryCast`, `0x6e4c90`), behind the same first
+    /// rung: a macro's press outside an input event swings at nothing, not even at a target
+    /// already selected.
+    #[test]
+    fn a_use_action_on_attack_the_gate_refused_swings_at_nothing() {
+        for (lua, want) in [
+            ("UseAction(1)", vec![OLD]),
+            (r#"RunScript("UseAction(1)")"#, vec![]),
+        ] {
+            let mut f = frame(true);
+            f.app
+                .world_mut()
+                .resource_mut::<crate::ui_action::PlayerActions>()
+                .buttons
+                .insert(
+                    0,
+                    ActionButton {
+                        slot: 0,
+                        action: crate::ui_action::SPELL_ATTACK,
+                        kind: ACTION_KIND_SPELL,
+                    },
+                );
+            run(&mut f, lua);
+            assert_eq!(swings(&f), (want, false), "{lua}");
+        }
+    }
+
+    /// The attack validator's pick of the nearest enemy asks the gate's tag 4 (`0x6130bc` →
+    /// `0x493f9b`): refused, nothing is picked and the selection stands, so the friend selected is
+    /// refused as the target and no swing goes out.
+    #[test]
+    fn an_attack_target_the_gate_refused_picks_no_enemy() {
+        for (lua, selected_after, swung) in [
+            ("AttackTarget()", MOB, vec![MOB]),
+            (r#"RunScript("AttackTarget()")"#, OLD, vec![]),
+        ] {
+            let mut f = frame(true);
+            with_factions(&mut f, FRIEND, &[]);
+            spawn_mob(&mut f, &[(TEMPLATE, FOE)]);
+            run(&mut f, lua);
+            assert_eq!(selected(&f), Some(selected_after), "{lua}");
+            assert_eq!(swings(&f), (swung, false), "{lua}");
+        }
     }
 
     /// Sinister Strike: `AttributesEx & 0x200`, one of predicate `0x6e5200`'s bits, and the enemy
@@ -834,5 +1394,854 @@ mod tests {
             .resource::<crate::ui_action::CastErrors>()
             .0
             .is_empty());
+    }
+
+    const POTION: u64 = 0x4000_0000_0000_0f07;
+    const POTION_ENTRY: u32 = 929;
+
+    /// Backpack slot 1 holds `POTION`, of a template `t` makes, and bar slot 1 names its entry;
+    /// the VM's backpack shows the slot as the container feed pushes it.
+    fn with_potion(f: &mut Frame, t: benilla_protocol::messages::ItemInfo) {
+        let world = f.app.world_mut();
+        let me = world.resource::<GuidIndex>().0[&ME];
+        world
+            .entity_mut(me)
+            .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (2, 0x19),
+                (22, 100),
+                (28, 100),
+                (46, 0x8),
+                (532, POTION as u32),
+                (533, (POTION >> 32) as u32),
+            ])));
+        crate::items::test_spawn_item(
+            world,
+            POTION,
+            benilla_protocol::ObjectFields::from_pairs(&[(3, POTION_ENTRY)]),
+            false,
+        );
+        let item_class = Some(t.class);
+        world
+            .resource_mut::<crate::items::Items>()
+            .insert_template(POTION_ENTRY, Some(t));
+        world
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .buttons
+            .insert(
+                0,
+                ActionButton {
+                    slot: 0,
+                    action: POTION_ENTRY,
+                    kind: benilla_protocol::messages::ACTION_KIND_ITEM,
+                },
+            );
+        world.non_send_resource_mut::<UiScript>().set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                num_slots: 16,
+                slots: std::collections::HashMap::from([(
+                    1,
+                    benilla_ui::script::ContainerSlot {
+                        item_id: POTION_ENTRY,
+                        item_class,
+                        count: 1,
+                        guid: POTION,
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+        );
+        let _ = f.rx.try_iter().count();
+    }
+
+    /// `CGItem::Use` casts an item's on-use spell through `TryCastSpell`, behind the gate's tag 2
+    /// (`0x4fa430` and `0x4c7af0` → `0x5d8d00` → `0x5d9258` → `0x6e5a90` → `0x6e4bc1`). A bag
+    /// click, a worn item's click and a bar press queue whatever the gate said, and the cast
+    /// ladder refuses the refused ones: the client's own call sends `CMSG_USE_ITEM`, a macro's
+    /// outside an input event sends nothing.
+    #[test]
+    fn a_refused_item_use_never_reaches_the_cast() {
+        const HEAD_ITEM: u64 = 0x4000_0000_0000_0f08;
+        let template = || {
+            let mut t = crate::items::test_template("Trinket");
+            t.spells = vec![benilla_protocol::messages::ItemSpellEntry {
+                index: 0,
+                spell_id: 4321,
+                trigger: 0,
+                charges: 0,
+                cooldown_ms: -1,
+                category: 0,
+                category_cooldown_ms: -1,
+            }];
+            t.use_spell = Some(benilla_protocol::messages::ItemUseSpell {
+                spell_id: 4321,
+                cooldown_ms: -1,
+                category: 0,
+                category_cooldown_ms: -1,
+            });
+            t
+        };
+        let uses = |f: &Frame| {
+            f.rx.try_iter()
+                .filter(|c| matches!(c, ClientCommand::UseItem { .. }))
+                .count()
+        };
+        for lua in [
+            "UseContainerItem(0, 1)",
+            "UseAction(1)",
+            "UseInventoryItem(1)",
+        ] {
+            for (call, want) in [(lua.to_string(), 1), (format!("RunScript({lua:?})"), 0)] {
+                let mut f = frame(false);
+                with_potion(&mut f, template());
+                // The worn item: slot 1 of the doll, the head, a copy of the same trinket.
+                let world = f.app.world_mut();
+                let me = world.resource::<GuidIndex>().0[&ME];
+                world.entity_mut(me).insert(ObjectStore(
+                    benilla_protocol::ObjectFields::from_pairs(&[
+                        (2, 0x19),
+                        (22, 100),
+                        (28, 100),
+                        (46, 0x8),
+                        (486, HEAD_ITEM as u32),
+                        (487, (HEAD_ITEM >> 32) as u32),
+                        (532, POTION as u32),
+                        (533, (POTION >> 32) as u32),
+                    ]),
+                ));
+                crate::items::test_spawn_item(
+                    world,
+                    HEAD_ITEM,
+                    benilla_protocol::ObjectFields::from_pairs(&[(3, POTION_ENTRY)]),
+                    false,
+                );
+                let mut slots: benilla_ui::script::InventorySlots = Default::default();
+                slots[1] = Some(benilla_ui::script::InvSlotView {
+                    item_id: POTION_ENTRY,
+                    guid: HEAD_ITEM,
+                    count: 1,
+                    use_spell: 4321,
+                    ..Default::default()
+                });
+                world
+                    .non_send_resource_mut::<UiScript>()
+                    .set_inventory_slots(slots);
+                let _ = f.rx.try_iter().count();
+                run(&mut f, &call);
+                assert_eq!(uses(&f), want, "{call}");
+            }
+        }
+    }
+
+    /// The bar's item use tests its copy's lock inside the call (`0x4e607b` → `0x5d8d32`): a
+    /// pickup after it in the frame does not stop it, and one before it does, though the cursor
+    /// let the item go again before the frame applied the press.
+    #[test]
+    fn a_bar_item_use_reads_the_lock_as_its_call_found_it() {
+        let mut f = frame(false);
+        with_potion(
+            &mut f,
+            benilla_protocol::messages::ItemInfo {
+                start_quest: 42,
+                ..crate::items::test_template("Questing Potion")
+            },
+        );
+        run(&mut f, "UseAction(1) PickupContainerItem(0, 1)");
+        assert!(
+            f.rx.try_iter().count() > 0,
+            "the use goes out; the pickup came after its call"
+        );
+        run(
+            &mut f,
+            "ClearCursor() PickupContainerItem(0, 1) UseAction(1) ClearCursor()",
+        );
+        assert_eq!(
+            f.rx.try_iter().count(),
+            0,
+            "the copy was locked when the use was called"
+        );
+    }
+
+    /// The bar's equip arm (`0x4e602a` → `0x5e1840` → `0x5e1480`) loads a projectile with
+    /// `CMSG_SET_AMMO`, by its class (`0x5e16ff`, `0x5e1704`), and the arm's `ClearCursor(1,1)`
+    /// unlocks it, signalling `ITEM_LOCK_CHANGED` though nothing held it (`0x5e1763`).
+    #[test]
+    fn a_bar_projectile_loads_by_class_and_signals_its_unlock() {
+        let mut f = frame(false);
+        with_potion(
+            &mut f,
+            benilla_protocol::messages::ItemInfo {
+                class: 6,
+                inventory_type: 24,
+                ..crate::items::test_template("Rough Arrow")
+            },
+        );
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(
+                "SIGNALS = 0 local f = CreateFrame('Frame') f:RegisterEvent('ITEM_LOCK_CHANGED') \
+                 f:SetScript('OnEvent', function() SIGNALS = SIGNALS + 1 end)",
+            )
+            .unwrap();
+        run(&mut f, "UseAction(1)");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                ClientCommand::SetAmmo {
+                    entry: POTION_ENTRY
+                }
+            )),
+            "{sent:?}"
+        );
+        let script = f.app.world().non_send_resource::<UiScript>();
+        assert_eq!(script.eval::<i64>("return SIGNALS").unwrap(), 1);
+        assert!(!script.item_locked(POTION));
+    }
+
+    /// The bar's item use reaches `CGItem::Use` (`0x4e607b`), which refuses a locked copy first
+    /// (`0x5d8d32`): nothing goes out until the lock lifts.
+    #[test]
+    fn a_bar_item_use_skips_a_locked_copy() {
+        let mut f = frame(false);
+        {
+            let world = f.app.world_mut();
+            let me = world.resource::<GuidIndex>().0[&ME];
+            world
+                .entity_mut(me)
+                .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                    (2, 0x19),
+                    (22, 100),
+                    (28, 100),
+                    (46, 0x8),
+                    (532, POTION as u32),
+                    (533, (POTION >> 32) as u32),
+                ])));
+            crate::items::test_spawn_item(
+                world,
+                POTION,
+                benilla_protocol::ObjectFields::from_pairs(&[(3, POTION_ENTRY)]),
+                false,
+            );
+            world.resource_mut::<crate::items::Items>().insert_template(
+                POTION_ENTRY,
+                Some(benilla_protocol::messages::ItemInfo {
+                    start_quest: 42,
+                    ..crate::items::test_template("Questing Potion")
+                }),
+            );
+            world
+                .resource_mut::<crate::ui_action::PlayerActions>()
+                .buttons
+                .insert(
+                    0,
+                    ActionButton {
+                        slot: 0,
+                        action: POTION_ENTRY,
+                        kind: benilla_protocol::messages::ACTION_KIND_ITEM,
+                    },
+                );
+            world.non_send_resource_mut::<UiScript>().lock_item(POTION);
+        }
+        let _ = f.rx.try_iter().count();
+        run(&mut f, "UseAction(1)");
+        assert_eq!(f.rx.try_iter().count(), 0, "a locked copy is not used");
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .unlock_item(POTION);
+        run(&mut f, "UseAction(1)");
+        assert!(f.rx.try_iter().count() > 0, "unlocked, the use goes out");
+    }
+    const HELD: u64 = 0x4000_0000_0000_0001;
+    const HELD_ENTRY: u32 = 7001;
+    const HELM: u64 = 0x4000_0000_0000_0002;
+    const HELM_ENTRY: u32 = 7002;
+
+    /// Backpack slot 1 holds an ordinary item, slot 2 a helm of `bonding`, and bar slot 1 names
+    /// the helm's entry; the VM's backpack shows both as the container feed pushes them.
+    fn with_bar_helm(f: &mut Frame, bonding: u32) {
+        let world = f.app.world_mut();
+        let me = world.resource::<GuidIndex>().0[&ME];
+        // Backpack slots 1 and 2 are the fields at 532 and 534.
+        world
+            .entity_mut(me)
+            .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (2, 0x19),
+                (22, 100),
+                (28, 100),
+                (46, 0x8),
+                (532, HELD as u32),
+                (533, (HELD >> 32) as u32),
+                (534, HELM as u32),
+                (535, (HELM >> 32) as u32),
+            ])));
+        for (guid, entry) in [(HELD, HELD_ENTRY), (HELM, HELM_ENTRY)] {
+            crate::items::test_spawn_item(
+                world,
+                guid,
+                benilla_protocol::ObjectFields::from_pairs(&[(3, entry)]),
+                false,
+            );
+        }
+        let mut items = world.resource_mut::<crate::items::Items>();
+        items.insert_template(HELD_ENTRY, Some(crate::items::test_template("Held Thing")));
+        items.insert_template(
+            HELM_ENTRY,
+            Some(benilla_protocol::messages::ItemInfo {
+                inventory_type: 1,
+                bonding,
+                ..crate::items::test_template("A Helm")
+            }),
+        );
+        world
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .buttons
+            .insert(
+                0,
+                ActionButton {
+                    slot: 0,
+                    action: HELM_ENTRY,
+                    kind: benilla_protocol::messages::ACTION_KIND_ITEM,
+                },
+            );
+        let slot = |guid, entry, equip: Vec<u8>, bonding| benilla_ui::script::ContainerSlot {
+            guid,
+            item_id: entry,
+            count: 1,
+            bonding,
+            equip_slots: equip,
+            ..Default::default()
+        };
+        let mut slots = std::collections::HashMap::new();
+        slots.insert(1, slot(HELD, HELD_ENTRY, vec![], 0));
+        slots.insert(2, slot(HELM, HELM_ENTRY, vec![1], bonding));
+        world.non_send_resource_mut::<UiScript>().set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                name: Some("Backpack".into()),
+                num_slots: 16,
+                slots,
+            }),
+        );
+    }
+
+    /// The bar's equip runs `0x5e1840` (`0x4e602a`): `SetCursorItem`'s inner clear drops and
+    /// unlocks a held item (`0x494bb6`), the bar's item takes the cursor and `AutoEquipCursorItem`
+    /// sends it, so a key press leaves the cursor empty and the held item free.
+    #[test]
+    fn a_bar_equip_drops_the_held_item_and_unlocks_it() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 0);
+        // Hold the first item, then press the bar key (`checkCursor` 0).
+        run(&mut f, "PickupContainerItem(0, 1) UseAction(1, 0)");
+
+        let script = f.app.world().non_send_resource::<UiScript>();
+        assert!(
+            script.cursor_item().is_none(),
+            "the held item was dropped and the bar's item sent off the cursor"
+        );
+        assert!(!script.item_locked(HELD), "the drop unlocked the held item");
+        assert!(!script.item_locked(HELM), "the bar's pick takes no lock");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                ClientCommand::AutoEquipItem {
+                    bag_index: 255,
+                    slot: 24
+                }
+            )),
+            "and the helm is equipped from backpack slot 2: {sent:?}"
+        );
+        // The set's pickup and the send's put-down both landed inside the call, so the pair is
+        // played here, the held item's own put-down being the cursor diff's.
+        let sounds: Vec<_> = f
+            .app
+            .world_mut()
+            .resource_mut::<Messages<crate::sound::AutoEquipSound>>()
+            .drain()
+            .collect();
+        assert_eq!(sounds.len(), 1, "one pair, for the helm");
+    }
+
+    /// A bind-on-equip helm from the bar asks first (`0x5e16c6`) and stays on the cursor
+    /// (`0x5e16ce`), not locked, since `SetCursorItem` takes no lock; the held item went back.
+    #[test]
+    fn a_bar_equip_of_a_bind_on_equip_item_holds_it_under_the_question() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 2);
+        run(&mut f, "PickupContainerItem(0, 1) UseAction(1, 0)");
+
+        let script = f.app.world().non_send_resource::<UiScript>();
+        assert_eq!(script.cursor_item().map(|i| i.guid), Some(HELM));
+        assert!(!script.item_locked(HELM));
+        assert!(!script.item_locked(HELD), "the held item went back");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert!(sent.is_empty(), "the question sends nothing: {sent:?}");
+        assert_eq!(
+            f.app
+                .world()
+                .resource::<crate::ui_bind_confirm::PendingEquips>()
+                .live(),
+            1,
+            "and files its record"
+        );
+        assert!(
+            f.app
+                .world_mut()
+                .resource_mut::<Messages<crate::sound::AutoEquipSound>>()
+                .drain()
+                .next()
+                .is_none(),
+            "a held item plays no pair; the cursor diff plays its pickup"
+        );
+    }
+    /// `SetCursorItem` refuses without control of the character (`0x494b8d`, `[0xb4b3e4]` clear
+    /// and no `UNIT_FLAG_TAXI_FLIGHT`) before its clear and its set: the bar's equip puts nothing
+    /// on the cursor and, with it empty, `AutoEquipCursorItem` has nothing to send.
+    #[test]
+    fn a_bar_equip_without_control_does_nothing() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 0);
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_player_control(false);
+        run(&mut f, "UseAction(1, 0)");
+        assert_eq!(f.rx.try_iter().count(), 0, "nothing is sent");
+        let script = f.app.world().non_send_resource::<UiScript>();
+        assert!(script.cursor_item().is_none());
+    }
+
+    /// The refused set does not stop `0x5e1840`: `AutoEquipCursorItem` runs on the cursor as it
+    /// stood (`0x5e18c9` falls through to `0x5e18d5`), so a held item is the one sent, the bar's
+    /// never touched.
+    #[test]
+    fn a_refused_bar_set_still_auto_equips_what_is_held() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 0);
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_player_control(false);
+        run(&mut f, "PickupContainerItem(0, 1) UseAction(1, 0)");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent[..],
+                [ClientCommand::AutoEquipItem {
+                    bag_index: 255,
+                    slot: 23
+                }]
+            ),
+            "the held item from backpack slot 1 goes, not the helm: {sent:?}"
+        );
+        let script = f.app.world().non_send_resource::<UiScript>();
+        assert!(script.cursor_item().is_none());
+    }
+
+    /// A taxi passenger has no control but passes the gate (`0x494ba6`-`0x494ba9`).
+    #[test]
+    fn a_bar_equip_on_a_taxi_passes_the_control_gate() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 0);
+        {
+            let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
+            script.set_player_control(false);
+            script.set_on_taxi(true);
+        }
+        run(&mut f, "UseAction(1, 0)");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent[..],
+                [ClientCommand::AutoEquipItem {
+                    bag_index: 255,
+                    slot: 24
+                }]
+            ),
+            "{sent:?}"
+        );
+    }
+
+    /// `0x5e1840` refuses an item in the trade window with its line (`0x4bfd20`, `0x5e18a5`) and
+    /// ends before the set: the bar sends nothing and the held item stays.
+    #[test]
+    fn a_bar_equip_of_an_item_in_the_trade_window_is_refused() {
+        let mut f = frame(false);
+        with_bar_helm(&mut f, 0);
+        // The refusal tests the partner cell first (`0x4bfd23`): the window is open.
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .open_trade_window();
+        run(
+            &mut f,
+            "PickupContainerItem(0, 2) ClickTradeButton(1) ClearCursor() PickupContainerItem(0, 1)",
+        );
+        let _ = f.rx.try_iter().count();
+        run(&mut f, "UseAction(1, 0)");
+
+        assert_eq!(f.rx.try_iter().count(), 0, "nothing is sent");
+        let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
+        assert_eq!(script.cursor_item().map(|i| i.guid), Some(HELD));
+        assert_eq!(script.take_ui_errors(), vec!["ERR_EQUIP_TRADE_ITEM"]);
+    }
+
+    /// The bar's item use reaches `CGItem::Use` (`0x4e607b`), whose control gate (`0x5d8eaa`) ends
+    /// it with `ERR_CLIENT_LOCKED_OUT` unless the item's on-use spell is one that passes.
+    #[test]
+    fn a_bar_item_use_meets_the_control_gate() {
+        let mut f = frame(false);
+        with_potion(
+            &mut f,
+            benilla_protocol::messages::ItemInfo {
+                use_spell: Some(benilla_protocol::messages::ItemUseSpell {
+                    spell_id: 4321,
+                    cooldown_ms: -1,
+                    category: 0,
+                    category_cooldown_ms: -1,
+                }),
+                ..crate::items::test_template("A Trinket")
+            },
+        );
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_player_control(false);
+        let _ = f.rx.try_iter().count();
+        run(&mut f, "UseAction(1)");
+        assert_eq!(f.rx.try_iter().count(), 0, "nothing is sent");
+        let keys = |f: &Frame| -> Vec<&'static str> {
+            f.app
+                .world()
+                .resource::<crate::ui_action::UiErrorKeys>()
+                .0
+                .iter()
+                .map(|e| e.key)
+                .collect()
+        };
+        assert_eq!(keys(&f), vec!["ERR_CLIENT_LOCKED_OUT"]);
+
+        // The spell is one the app fed as passing: the gate lets the use on to the cast.
+        f.app
+            .world_mut()
+            .resource_mut::<crate::ui_action::UiErrorKeys>()
+            .0
+            .clear();
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_control_bypass([4321].into());
+        run(&mut f, "UseAction(1)");
+        assert!(keys(&f).is_empty(), "{:?}", keys(&f));
+    }
+
+    /// A heal's targeting cursor up: `TARGET_FLAG_UNIT` (0x2), which any unit binds, in the app's
+    /// word and the VM's view of it.
+    fn with_the_cursor_up(f: &mut Frame) {
+        f.app
+            .world_mut()
+            .resource_mut::<crate::spell::SpellTargeting>()
+            .enter(HEAL, crate::spell::CastCommit::Spell, 0x0002);
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_spell_targeting(true);
+    }
+
+    fn cursor_is_up(f: &Frame) -> bool {
+        f.app
+            .world()
+            .resource::<crate::spell::SpellTargeting>()
+            .active()
+    }
+
+    /// The `CMSG_SET_SELECTION`s sent.
+    fn selections(sent: &[ClientCommand]) -> Vec<u64> {
+        sent.iter()
+            .filter_map(|c| match c {
+                ClientCommand::SetSelection { guid } => Some(*guid),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The units a selecting verb can find in the frame: `MOB` (an enemy, named, party1's target
+    /// and the last enemy) beside `OLD` (selected) and `NEW` (party1, "Bob"), with `OLD` the last
+    /// target.
+    fn with_things_to_select(f: &mut Frame) {
+        spawn_mob(f, &[]);
+        let world = f.app.world_mut();
+        let new = world.resource::<GuidIndex>().0[&NEW];
+        world
+            .entity_mut(new)
+            .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (22, 100),
+                (28, 100),
+                (16, MOB as u32),
+            ])));
+        let mut names = world.resource_mut::<crate::names::NameCache>();
+        names.insert_player(MOB, "Red Affinity".into(), None);
+        names.insert_player(NEW, "Bob".into(), None);
+        world.resource_mut::<crate::target::LastEnemy>().0 = Some(MOB);
+        world.resource_mut::<Selection>().last = Some(NEW);
+    }
+
+    /// `SelectTarget` (`0x493540`) with the targeting cursor up binds the unit to the pending cast
+    /// and returns without selecting (`0x4935ca`-`0x4935d5`), from every verb that calls it:
+    /// `TargetUnit`, `AssistUnit` and `TargetLastEnemy` (`0x489a40`), `AssistByName`,
+    /// `TargetLastTarget`, `TargetByName` (`0x489daa`) and `TargetNearestEnemy` (`0x4941e6`). The
+    /// bind asks the gate's tag 2 (`0x6e5ba5`): a macro's line outside an input event is refused,
+    /// and `SelectTarget` returns all the same, with the cursor still up and nothing selected.
+    #[test]
+    fn a_selecting_verb_with_the_cursor_up_casts_at_its_unit_and_selects_nothing() {
+        for (lua, bound) in [
+            (r#"TargetUnit("party1")"#, NEW),
+            (r#"AssistUnit("party1")"#, MOB),
+            ("TargetLastEnemy()", MOB),
+            (r#"TargetByName("Red Affinity")"#, MOB),
+            (r#"AssistByName("Bob")"#, MOB),
+            ("TargetLastTarget()", NEW),
+            ("TargetNearestEnemy()", MOB),
+        ] {
+            // Pressed: the call is the client's own inside an input event.
+            let mut f = frame(true);
+            with_things_to_select(&mut f);
+            with_the_cursor_up(&mut f);
+            run_pressed(&mut f, lua);
+            let sent: Vec<_> = f.rx.try_iter().collect();
+            assert!(
+                matches!(sent.iter().find_map(|c| match c {
+                    ClientCommand::CastSpell { spell_id, target } => Some((*spell_id, *target)),
+                    _ => None,
+                }), Some((HEAL, Some(g))) if g == bound),
+                "{lua}: casts at {bound:#x}: {sent:?}"
+            );
+            assert_eq!(
+                selections(&sent),
+                Vec::<u64>::new(),
+                "{lua}: selects nothing"
+            );
+            assert_eq!(selected(&f), Some(OLD), "{lua}");
+            assert!(!cursor_is_up(&f), "{lua}: the bind emptied the word");
+
+            // The same line as a macro's `/script`: tag 2 refuses the bind.
+            let mut f = frame(true);
+            with_things_to_select(&mut f);
+            with_the_cursor_up(&mut f);
+            run(&mut f, &format!("RunScript({lua:?})"));
+            let sent: Vec<_> = f.rx.try_iter().collect();
+            assert_eq!(casts_of(&sent), vec![], "{lua}: refused, casts nothing");
+            assert_eq!(
+                selections(&sent),
+                Vec::<u64>::new(),
+                "{lua}: and selects nothing"
+            );
+            assert_eq!(selected(&f), Some(OLD), "{lua}");
+            assert!(cursor_is_up(&f), "{lua}: the cursor stands");
+
+            // With the cursor down the same verb selects, and casts nothing.
+            if lua != "TargetNearestEnemy()" {
+                let mut f = frame(true);
+                with_things_to_select(&mut f);
+                run_pressed(&mut f, lua);
+                let sent: Vec<_> = f.rx.try_iter().collect();
+                assert_eq!(casts_of(&sent), vec![], "{lua}: cursor down");
+                assert_eq!(selected(&f), Some(bound), "{lua}: cursor down");
+            }
+        }
+    }
+
+    /// The `CMSG_CAST_SPELL`s among `sent`.
+    fn casts_of(sent: &[ClientCommand]) -> Vec<(u32, Option<u64>)> {
+        sent.iter()
+            .filter_map(|c| match c {
+                ClientCommand::CastSpell { spell_id, target } => Some((*spell_id, *target)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// TAB with a heal's cursor up, through the stock `TARGETNEARESTENEMY` binding: the cycler picks
+    /// the enemy, `SelectTarget` binds it (`0x4941e6` → `0x4935d5`) and the heal goes to it, the
+    /// target where it was. A second TAB, the cursor down now, selects as ever.
+    #[test]
+    fn a_tab_with_a_heals_cursor_up_casts_at_the_tabbed_unit() {
+        benilla_formats::wow_data_or_skip!();
+        let mut f = frame(true);
+        with_factions(&mut f, FRIEND, &[]);
+        spawn_mob(&mut f, &[(TEMPLATE, FOE)]);
+        with_stock_ui(&mut f, false);
+        settle(&mut f);
+        with_the_cursor_up(&mut f);
+        f.rx.try_iter().for_each(drop);
+
+        let tab = |f: &mut Frame| {
+            let pressed = f
+                .app
+                .world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .execute_binding("TARGETNEARESTENEMY", true)
+                .expect("the binding runs");
+            assert!(pressed);
+            settle(f);
+            f.rx.try_iter().collect::<Vec<_>>()
+        };
+        let sent = tab(&mut f);
+        assert_eq!(casts_of(&sent), vec![(HEAL, Some(MOB))], "{sent:?}");
+        assert_eq!(selections(&sent), Vec::<u64>::new());
+        assert_eq!(selected(&f), Some(OLD), "TAB left the target alone");
+        assert!(!cursor_is_up(&f));
+
+        let sent = tab(&mut f);
+        assert_eq!(casts_of(&sent), vec![]);
+        assert_eq!(selections(&sent), vec![MOB], "the cursor down, TAB selects");
+    }
+
+    /// A charmed player's `SelectTarget` returns before anything (`0x493589`-`0x49359c`): the bind
+    /// does not happen with the cursor up, nor the selection with it down.
+    #[test]
+    fn a_charmed_player_neither_binds_nor_selects() {
+        for cursor in [true, false] {
+            let mut f = frame(true);
+            let me = f.app.world().resource::<GuidIndex>().0[&ME];
+            f.app.world_mut().entity_mut(me).insert(ObjectStore(
+                benilla_protocol::ObjectFields::from_pairs(&[
+                    (2, 0x19),
+                    (HEALTH, 100),
+                    (28, 100),
+                    // `UNIT_FIELD_CHARMEDBY`, a guid of two fields.
+                    (10, 0x99),
+                    (11, 0),
+                ]),
+            ));
+            if cursor {
+                with_the_cursor_up(&mut f);
+            }
+            run_pressed(&mut f, r#"TargetUnit("party1")"#);
+            let sent: Vec<_> = f.rx.try_iter().collect();
+            assert_eq!(casts_of(&sent), vec![], "cursor {cursor}");
+            assert_eq!(selections(&sent), Vec::<u64>::new(), "cursor {cursor}");
+            assert_eq!(selected(&f), Some(OLD), "cursor {cursor}");
+            assert_eq!(cursor_is_up(&f), cursor, "cursor {cursor}");
+        }
+    }
+
+    /// A deselect passes guid 0 and skips the bind (`0x4935ac`): `ClearTarget` with the cursor up
+    /// clears the target and the cursor stands.
+    #[test]
+    fn clear_target_with_the_cursor_up_still_clears() {
+        let mut f = frame(true);
+        with_the_cursor_up(&mut f);
+        run_pressed(&mut f, "ClearTarget()");
+        assert_eq!(selected(&f), None);
+        assert!(cursor_is_up(&f));
+        assert_eq!(casts(&f), vec![]);
+    }
+
+    /// The attack validator selects a unit twice over: the one it keeps (`0x613100`, when the
+    /// selection is not friendly) and the nearest enemy it picks otherwise (`0x4941e6`). With the
+    /// cursor up each is bound to the cast and the selection stays; the attack goes on past it.
+    #[test]
+    fn attack_target_with_the_cursor_up_binds_the_unit_it_would_select() {
+        // A hostile selection is kept (`0x6130a3`): the bind is at it, and the swing follows.
+        let mut f = frame(true);
+        with_factions(&mut f, FOE, &[]);
+        spawn_mob(&mut f, &[(TEMPLATE, FOE)]);
+        with_the_cursor_up(&mut f);
+        run_pressed(&mut f, "AttackTarget()");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert_eq!(casts_of(&sent), vec![(HEAL, Some(OLD))], "{sent:?}");
+        assert_eq!(selections(&sent), Vec::<u64>::new());
+        assert_eq!(selected(&f), Some(OLD));
+        // The bind is inside the validator, ahead of the swing it validates.
+        let at = |want: fn(&ClientCommand) -> bool| sent.iter().position(want);
+        let (cast, swing) = (
+            at(|c| matches!(c, ClientCommand::CastSpell { .. })),
+            at(|c| matches!(c, ClientCommand::AttackSwing { guid: OLD })),
+        );
+        assert!(
+            cast.is_some() && swing.is_some() && cast < swing,
+            "the cast goes out before the swing: {sent:?}"
+        );
+
+        // A friendly one is dropped for the nearest enemy, which the bind takes.
+        let mut f = frame(true);
+        with_factions(&mut f, FRIEND, &[]);
+        spawn_mob(&mut f, &[(TEMPLATE, FOE)]);
+        with_the_cursor_up(&mut f);
+        run_pressed(&mut f, "AttackTarget()");
+        let sent: Vec<_> = f.rx.try_iter().collect();
+        assert_eq!(casts_of(&sent), vec![(HEAL, Some(MOB))], "{sent:?}");
+        assert_eq!(selections(&sent), Vec::<u64>::new());
+        assert_eq!(selected(&f), Some(OLD), "the friend stays selected");
+    }
+
+    /// The selection writers outside the script calls (a loot window's select, `0x48f3a0`) hand the
+    /// unit to the cursor too, and the next pass of the calls binds it.
+    #[test]
+    fn a_loot_windows_select_with_the_cursor_up_is_bound_by_the_next_pass() {
+        let mut f = frame(true);
+        spawn_mob(&mut f, &[(2, 0x9)]);
+        with_the_cursor_up(&mut f);
+        let world = f.app.world_mut();
+        world
+            .run_system_once(|mut select: crate::target::SelectCommit| select.select_unit(MOB))
+            .expect("the select runs");
+        assert_eq!(selected(&f), Some(OLD), "nothing selected");
+        assert_eq!(casts(&f), vec![], "and nothing bound until the pass");
+        f.app
+            .world_mut()
+            .run_system_once(apply_script_calls)
+            .expect("the calls apply as a one-shot system");
+        assert_eq!(casts(&f), vec![(HEAL, Some(MOB))]);
+        assert_eq!(selected(&f), Some(OLD));
+    }
+
+    /// `CastBookSpell` (`0x4b3300`) asks `GetTargetingSpellId` (`0x6e48e0`) ahead of the cast and the
+    /// gate: if the book spell is the one awaiting its target, the press stops targeting
+    /// (`StopSpellTargeting`, `0x4b347d`) and casts nothing, a macro's refused one as well. A
+    /// different spell's cursor is not its to stop: the cast goes and the cursor with it.
+    #[test]
+    fn a_book_cast_of_the_spell_awaiting_its_target_stops_targeting() {
+        for lua in [
+            r#"CastSpellByName("Heal")"#,
+            "CastSpell(1, BOOKTYPE_SPELL)",
+            r#"RunScript('CastSpellByName("Heal")')"#,
+            r#"RunScript("CastSpell(1, BOOKTYPE_SPELL)")"#,
+        ] {
+            let mut f = frame(true);
+            with_the_cursor_up(&mut f);
+            let before = f
+                .app
+                .world()
+                .resource::<crate::spell::SpellTargeting>()
+                .aborts();
+            run(&mut f, lua);
+            assert!(!cursor_is_up(&f), "{lua}: the press stopped targeting");
+            assert_eq!(
+                f.app
+                    .world()
+                    .resource::<crate::spell::SpellTargeting>()
+                    .aborts(),
+                before.wrapping_add(1),
+                "{lua}: as a cancel, not a commit"
+            );
+            assert_eq!(casts(&f), vec![], "{lua}: and cast nothing");
+        }
+
+        // Heal's cursor, Ghost Wolf's press: nothing to stop on its account; it casts.
+        let mut f = frame(true);
+        with_ghost_wolf_up(&mut f, false);
+        with_the_cursor_up(&mut f);
+        run(&mut f, r#"CastSpellByName("Ghost Wolf")"#);
+        assert_eq!(
+            casts(&f).iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![GHOST_WOLF]
+        );
     }
 }

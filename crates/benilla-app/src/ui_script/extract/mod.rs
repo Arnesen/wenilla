@@ -56,7 +56,7 @@ fn ui_pick_point() -> Option<(Vec2, f32)> {
 fn report_ui_pick(eq: &benilla_ui::script::ExtractedQuad, rect: Rect, at: Vec2, r: f32) {
     use std::collections::HashSet;
     use std::sync::Mutex;
-    static SEEN: std::sync::OnceLock<Mutex<HashSet<u64>>> = std::sync::OnceLock::new();
+    static SEEN: std::sync::OnceLock<Mutex<HashSet<u128>>> = std::sync::OnceLock::new();
     if !rect.inflate(r).contains(at) {
         return;
     }
@@ -97,26 +97,47 @@ fn content_kind(c: &QuadContent) -> &'static str {
         QuadContent::Texture { .. } => "texture",
         QuadContent::ColorWheel => "colorwheel",
         QuadContent::ColorValue { .. } => "colorvalue",
-        QuadContent::Backdrop { .. } => "backdrop",
         QuadContent::Text { .. } => "text",
     }
 }
 
-/// Which axes run past the texture, the reference's tiling idiom (`SetTexCoord(0, n, 0, 1)`
-/// repeats the art n times), and so sample `Repeat`; a bounded axis on `Repeat` would filter its
-/// edge against the opposite one. Its tolerance must match [`uv_clamp_window`]'s.
-pub(crate) fn tiling_axes(uv: &UvRect) -> (bool, bool) {
-    let past = |axis: usize| {
-        uv.corners
-            .iter()
-            .any(|c| !(-0.001..=1.001).contains(&c[axis]))
-    };
-    (past(0), past(1))
+/// Where a UI sprite comes from: the store's clamped and repeating images of one file.
+trait SpriteSource {
+    fn clamped(&mut self, path: &str, images: &mut Assets<Image>) -> Option<Handle<Image>>;
+    fn wrapped(&mut self, path: &str, images: &mut Assets<Image>) -> Option<Handle<Image>>;
+}
+
+impl SpriteSource for WorldAssets {
+    fn clamped(&mut self, path: &str, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+        self.sprite_texture(path, images)
+    }
+
+    fn wrapped(&mut self, path: &str, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+        self.sprite_texture_wrapped(path, images)
+    }
+}
+
+/// The image a texture quad samples: the repeating one when its file loaded with the wrap flag,
+/// else the clamped one (`0x770200`'s second argument, bits 3 and 4 of the flags word), whatever
+/// its coordinates say.
+fn sprite_for_wrap(
+    source: &mut impl SpriteSource,
+    path: &str,
+    wrap: bool,
+    images: &mut Assets<Image>,
+) -> Option<Handle<Image>> {
+    if wrap {
+        source.wrapped(path, images)
+    } else {
+        source.clamped(path, images)
+    }
 }
 
 /// The [`UiQuad::uv_clamp`] window of an atlas crop, inset half a texel so a magnified cell does
-/// not filter in its neighbour. A tiling axis is left alone, as
-/// [`benilla_ui::script::inset_atlas_bleed`] does; a whole-texture axis needs no window.
+/// not filter in its neighbour (in `ChatBubble-Backdrop`, a white alpha-0 column: a pale line
+/// through the speech bubble). An axis past the texture is left alone (repeating, each period
+/// would land short and walk the art; clamping, the sampler's edge is the window); a
+/// whole-texture axis needs no window.
 fn uv_clamp_window(uv: &UvRect, size: (u32, u32)) -> Option<[f32; 4]> {
     let mut out = [1.0, 1.0, 0.0, 0.0]; // both axes off: `min > max`
     let mut any = false;
@@ -227,9 +248,11 @@ struct Alignment {
     dropped: Vec<usize>,
 }
 
-/// A merge over `z`, a packed [`benilla_ui::order::ZKey`] that an insertion does not shift. Only
-/// fully equal pairs reuse quads, so a mis-pairing costs conversions, never correctness: `z` is
-/// not proven unique or sorted (a ScrollingMessageFrame's line sorts above its BACKGROUND layer).
+/// A merge over `z`, a packed [`benilla_ui::order::ZKey`] that an insertion does not shift, but in
+/// a scroll child's subtree, where a frame created or moved in renumbers those after it (a Show or
+/// Hide does not). Only fully equal pairs reuse quads, so a mis-pairing costs conversions, never
+/// correctness: `z` is not proven unique or sorted (a ScrollingMessageFrame's line sorts above its
+/// BACKGROUND layer).
 fn align_entries(
     was: &[benilla_ui::script::ExtractedQuad],
     now: &[benilla_ui::script::ExtractedQuad],
@@ -280,7 +303,6 @@ fn span_bounds(spans: &[u32], i: usize) -> (usize, usize) {
 fn splice_simple(eq: &benilla_ui::script::ExtractedQuad) -> bool {
     match &eq.content {
         QuadContent::Frame
-        | QuadContent::Backdrop { .. }
         // At most one quad and one idempotent tile request.
         | QuadContent::ModelPane { .. }
         | QuadContent::ColorWheel
@@ -425,26 +447,32 @@ pub(super) fn tick_script(
     mut last_seam: Local<f32>,
     // The `scale_factor` measures were last answered under; 0 until the first frame.
     mut last_dpi: Local<f32>,
-    ui_scale: Res<super::UiScaleCvar>,
+    // The dial, `UIParent`'s scale in the VM, and the automatic scale's last display.
+    (ui_scale, mut auto_cache): (
+        Res<super::UiScaleCvar>,
+        Option<ResMut<super::UiAutoScaleCache>>,
+    ),
     mut ui_cost: ResMut<super::UiFrameCost>,
     mut pass: ResMut<super::UiPassState>,
 ) {
     pass.live = false;
     let Some(mut script) = script else {
-        // No VM, no UI sampling a booth pane: a stranded pane would keep the paper-doll camera
-        // rendering behind a dead UI.
+        // No VM, no UI sampling a booth pane: a stranded pane would keep its camera rendering
+        // behind a dead UI.
         booths.panes.0.clear();
+        booths.character.reset(0);
         return;
     };
     let Ok(window) = window.single() else {
         booths.panes.0.clear();
+        booths.character.reset(0);
         return;
     };
     let (w, h) = (window.width(), window.height());
     // The client's UI space is 768 units tall at every aspect (`f(screenH) = 768`, `0x41ad10`; the
-    // caret's `H_px/192`, `0x77b8c0`), `768/uiScale` with the dial. The VM lives in it: quads
-    // scale ×s out, and the mouse and the measures ÷s in.
-    let s = super::seam_scale(h, ui_scale.0);
+    // caret's `H_px/192`, `0x77b8c0`), the dial being `UIParent`'s scale inside it. The VM lives in
+    // it: quads scale ×s out, and the mouse and the measures ÷s in.
+    let s = super::seam_scale(h);
     // A moved seam scale or DPI stales every text metric the engine caches: integer-stepped
     // advances do not rescale, and the size snap moves a string's width by several percent,
     // enough for the ellipsis to eat fitting text. A monitor hop moves the DPI alone.
@@ -486,9 +514,28 @@ pub(super) fn tick_script(
     {
         let _span = bevy::log::info_span!("ui_script: tick").entered();
         let resized = script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
-        // A resize re-runs what the interface computed from the old screen size.
-        if resized {
-            super::manifest::on_screen_resized(&script);
+        // The UI scale is `UIParent`'s, which only the in-game state has; the glue lays out on
+        // the root alone (`0x46dd30`).
+        if script.vm_kind() == benilla_ui::script::VmKind::InGame {
+            // A display change re-applies the UI scale (`0x492e90`), whose narrow-aspect cap
+            // follows the window; a moved dial applies once, as its CVar callback does
+            // (`0x490770`). Deviation: the reference then re-reads the aspect (`0x492f13`), and on
+            // a change of 0.001 or more calls `0x491380`, which sets the reload trigger
+            // (`[0xb4b3f4]`) when the script-context check `0x494a50(0xa)` allows it; here a
+            // resize re-lays out the live UI, the chat bubbles' window-derived `BubbleGeometry`
+            // with it, because the window resizes freely and a reload on each resize would tear
+            // down every addon's state mid-play.
+            if resized {
+                let display = (w.round() as u32, h.round() as u32);
+                let mut none = None;
+                let cache = auto_cache.as_deref_mut().map_or(&mut none, |c| &mut c.0);
+                script.apply_ui_scale(display, cache);
+            }
+            let rescaled = script.set_ui_scale(ui_scale.0);
+            // Either re-runs what the interface computed from the old `GetScreenHeight()`.
+            if resized || rescaled {
+                super::manifest::on_screen_resized(&script);
+            }
         }
         script.tick(time.delta_secs());
     }
@@ -507,7 +554,8 @@ pub(super) fn tick_script(
     let us_tick = lap();
     // ── The FontString measure round-trip, before the resolve ────────────────────────────────
     // A request reads only region data, never a resolved rect, and `resolve` writes no region's
-    // size, so measuring first lets the frame's one resolve see the answers.
+    // size, so measuring first lets the resolve below see the answers. The tick drained the layout
+    // after its walk; this resolve takes the measures and what the tick's tail moved.
     let mut measured_any = false;
     if let Some(atlas) = font_atlas.as_deref_mut() {
         measured_any = measure_fontstrings(&mut script, atlas, s, &mut ui_cost, ui_cost_wanted.0);
@@ -543,7 +591,13 @@ pub(super) fn tick_script(
                             path: r.font.as_deref(),
                             height: crate::ui_text::drawn_px(r.height, None, s * r.scale),
                             outline: r.outline, // the outline biases the stepped width
+                            monochrome: false,
+                            spacing: 0.0, // the gap moves rows, never counts them
+                            // The drawn shadow seeds each row, as the draw's does.
+                            shadow_x: r.shadow_x * s * r.scale,
                             alpha_gradient: None,
+                            non_space_wrap: false,
+                            max_lines: 0,
                         },
                     );
                     (r.frame, r.index, n, r.key)
@@ -563,8 +617,13 @@ pub(super) fn tick_script(
     for w in script.take_warnings() {
         warn!("ui_script: {w}");
     }
-    // A runtime `LoadAddOn`'s record, appended to `Logs\FrameXML.log`.
-    super::load_log::write(script.take_load_log_writes());
+    // A runtime `LoadAddOn`'s record, appended to `Logs\FrameXML.log`; the glue has none, but
+    // whatever its VM drains is the glue log's.
+    let writes = script.take_load_log_writes();
+    match script.vm_kind() {
+        benilla_ui::script::VmKind::InGame => super::load_log::write(writes),
+        benilla_ui::script::VmKind::Glue => super::load_log::write_glue(writes),
+    }
 
     // ── The handover ────────────────────────────────────────────────────────────────────────
     *pass = super::UiPassState {
@@ -950,9 +1009,10 @@ pub(super) fn paint_script(
     prev.text_ui = text_ui.clone();
     prev.portraits = booths.images.0.clone();
     prev.extracted = extracted.clone();
-    // Cleared only on the full-conversion path: a settled frame's map is still true, and
-    // clearing it would put the body panes' cameras to sleep.
+    // Cleared only on the full-conversion path: a settled frame's maps are still true, and
+    // clearing them would put the character panes' cameras to sleep.
     booths.panes.0.clear();
+    booths.character.reset(script.session());
     let mut spans: Vec<u32> = Vec::with_capacity(prev.extracted.len());
     for eq in extracted {
         convert_entry(
@@ -1115,11 +1175,13 @@ fn convert_entry(
             });
         }
         // A `<Model>`/`<PlayerModel>` pane draws itself, as the stock files declare a bare pane
-        // with no Texture: a file pane is a model tile, a unit pane samples its window's body
-        // bake square ([`crate::portrait::model_pane_booth`]), and an unclaimed pane draws nothing.
+        // with no Texture: a glue `ModelFFX` is the glue booth's scene, a file pane is a model
+        // tile, a character pane draws its own booth's copy of its subject
+        // (`crate::portrait::panes`), and a bare `Model` draws nothing.
         QuadContent::ModelPane {
             handle,
             name,
+            character,
             model,
             facing,
             model_scale,
@@ -1129,8 +1191,62 @@ fn convert_entry(
             camera,
             light,
             fog,
+            ffx,
         } => {
             use crate::portrait::PortraitSource;
+            // A `ModelFFX`'s scene draws once, at its own bucket's ARTWORK callback (`0x46fa90`
+            // overrides the paint registration `0x76d160`), so every UI region paints over it.
+            // The scene is the glue booth's, which renders the window's view of the stage the
+            // glue VM feeds it (`crate::ui_script::glue_scene`); the pane shows its part of it.
+            if ffx {
+                let Some(PortraitSource::Live(image)) =
+                    booths.images.0.get(crate::portrait::GLUE_SLOT)
+                else {
+                    return;
+                };
+                if w <= 0.0 || h <= 0.0 {
+                    return;
+                }
+                out.push(UiQuad {
+                    rect,
+                    z_key: eq.z,
+                    texture: Some(image.clone()),
+                    uv: UvRect::from_tex_coords([
+                        rect.min.x / w,
+                        rect.max.x / w,
+                        rect.min.y / h,
+                        rect.max.y / h,
+                    ]),
+                    // The scene draws at the widget's own alpha (`0x76d120`).
+                    color: [1.0, 1.0, 1.0, own_alpha],
+                    // The booth's target is premultiplied.
+                    premultiplied: true,
+                    clip,
+                    ..default()
+                });
+                return;
+            }
+            // A character pane publishes an idempotent request; `portrait::panes` builds the
+            // pane's booth and draws its quad each frame the engine lists the pane with a copy.
+            // Published with a file too: a `SetUnit` pending over it builds the copy that
+            // replaces the file.
+            if character && rect.width() > 0.0 && rect.height() > 0.0 {
+                let dpi = booths.tiles.dpi.max(0.01);
+                booths.character.insert(
+                    handle,
+                    crate::portrait::PaneRequest {
+                        rect,
+                        z_key: eq.z,
+                        // The copy draws at the widget's own alpha (`0x76d120`).
+                        alpha: own_alpha,
+                        clip,
+                        size_px: UVec2::new(
+                            (rect.width() * dpi).round().max(1.0) as u32,
+                            (rect.height() * dpi).round().max(1.0) as u32,
+                        ),
+                    },
+                );
+            }
             // A file pane publishes an idempotent tile request; `ui_models::compose_tiles` draws
             // its quad each frame, so a cell packed later needs no re-conversion.
             if let Some(path) = model.as_deref() {
@@ -1189,45 +1305,15 @@ fn convert_entry(
                         tiles.atlas_size
                     );
                 }
-                return;
             }
-            let Some(slot) = name.as_deref().and_then(crate::portrait::model_pane_booth) else {
-                return;
-            };
-            // The aspect is published before the readiness check: the bake waits on the publish.
-            if rect.height() > 0.0 {
-                booths
-                    .panes
-                    .0
-                    .insert(slot.to_string(), rect.width() / rect.height());
-            }
-            // The bake is premultiplied; the 2D stand-in while a model streams is straight alpha.
-            let (handle, premultiplied) = match booths.images.0.get(slot) {
-                Some(PortraitSource::Live(h)) => (Some(h.clone()), true),
-                Some(PortraitSource::File(p)) => (
-                    assets.as_mut().and_then(|a| a.sprite_texture(p, images)),
-                    false,
-                ),
-                None => (None, false),
-            };
-            let Some(handle) = handle else {
-                return;
-            };
-            out.push(UiQuad {
-                rect,
-                z_key: eq.z,
-                texture: Some(handle),
-                color: [1.0, 1.0, 1.0, eq.alpha],
-                premultiplied,
-                clip,
-                ..default()
-            });
         }
         QuadContent::Texture {
             path,
             color,
+            gradient,
             additive,
             tex_coords,
+            wrap,
             circular,
             portrait_unit,
             rotation,
@@ -1289,14 +1375,12 @@ fn convert_entry(
             // (a data-less run) the quad draws untextured.
             //
             // `SetTexCoord`'s edges map to raw UV corners, so a mirrored slice (`left > right`)
-            // keeps its flip; resolved before the handle because the wrap mode follows it.
+            // keeps its flip. The coordinates never decide the wrap: the file's load did.
             let uv = match tex_coords {
                 Some(TexCoords::Rect(edges)) => UvRect::from_tex_coords(edges),
                 Some(TexCoords::Corners(corners)) => UvRect::from_corners(corners),
                 None => UvRect::FULL,
             };
-            // A slice past the texture tiles (`BonusActionBarFrame.lua:173`), on that axis alone.
-            let wrap = tiling_axes(&uv);
             let handle = match (path.as_deref(), assets.as_mut()) {
                 (Some(p), Some(a)) => {
                     let resolved = if p == benilla_ui::script::nameplate::BORDER_TEXTURE {
@@ -1327,10 +1411,8 @@ fn convert_entry(
                     } else if circular {
                         // The circle-masked variant (`SetPortraitToTexture`).
                         a.portrait_texture(p, images)
-                    } else if wrap != (false, false) {
-                        a.sprite_texture_wrapped(p, wrap, images)
                     } else {
-                        a.sprite_texture(p, images)
+                        sprite_for_wrap(&mut **a, p, wrap, images)
                     };
                     if resolved.is_none() {
                         return;
@@ -1348,6 +1430,10 @@ fn convert_entry(
             // A pathless Texture region is a solid color; a textured one tints by it.
             let mut color = color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
             color[3] *= eq.alpha;
+            // A gradient's vertex colours each multiply the fill and the alpha, as `0x77fac0`
+            // folds the frame alpha into every vertex's byte.
+            let corner_colors =
+                gradient.map(|corners| corners.map(|v| std::array::from_fn(|i| v[i] * color[i])));
             out.push(UiQuad {
                 rect,
                 z_key: eq.z,
@@ -1355,6 +1441,7 @@ fn convert_entry(
                 uv,
                 uv_clamp,
                 color,
+                corner_colors,
                 additive,
                 clip,
                 // `SetRotation` is counter-clockwise-positive, `UiQuad::rotation` clockwise.
@@ -1397,44 +1484,6 @@ fn convert_entry(
                 ..default()
             });
         }
-        QuadContent::Backdrop {
-            path,
-            color,
-            uvs,
-            tile,
-        } => {
-            // A backdrop piece, the bg or one of the 8 border pieces, sampled `Repeat` when `tile`;
-            // its UVs are per-corner, as the TOP and BOTTOM edges are rotated.
-            let handle = assets.as_mut().and_then(|a| {
-                if tile {
-                    a.sprite_texture_tiled(&path, images)
-                } else {
-                    a.sprite_texture(&path, images)
-                }
-            });
-            // A missing BLP draws nothing.
-            let Some(handle) = handle else { return };
-            // The 8 border pieces share one atlas, so a `tile` piece is pulled half a texel in on
-            // its bounded axes; a stretched bg is a whole texture.
-            let uvs = match images.get(&handle) {
-                Some(img) if tile => {
-                    let sz = img.texture_descriptor.size;
-                    benilla_ui::script::inset_atlas_bleed(uvs, sz.width as f32, sz.height as f32)
-                }
-                _ => uvs,
-            };
-            let mut color = color;
-            color[3] *= eq.alpha;
-            out.push(UiQuad {
-                rect,
-                z_key: eq.z,
-                texture: Some(handle),
-                uv: UvRect::from_corners(uvs),
-                color,
-                clip,
-                ..default()
-            });
-        }
         QuadContent::Text {
             text,
             color,
@@ -1445,8 +1494,13 @@ fn convert_entry(
             text_height,
             shadow,
             outline,
+            monochrome,
+            spacing,
             alpha_gradient,
             world_seat,
+            edit_line,
+            non_space_wrap,
+            max_lines,
         } => {
             // No atlas (no client data, or an unreadable font) draws no text.
             let (Some(atlas), Some(text)) = (font_atlas.as_deref_mut(), text) else {
@@ -1464,8 +1518,13 @@ fn convert_entry(
                     text_height,
                     shadow,
                     outline,
+                    monochrome,
+                    spacing,
                     alpha_gradient,
                     world_seat,
+                    edit_line,
+                    non_space_wrap,
+                    max_lines,
                 },
                 text::TextHost {
                     z: eq.z,
@@ -1527,16 +1586,16 @@ fn cursor_icon_quad(pos: Vec2, texture: Handle<Image>) -> UiQuad {
     const SIZE: f32 = 32.0;
     UiQuad {
         rect: Rect::new(pos.x, pos.y, pos.x + SIZE, pos.y + SIZE),
-        z_key: u64::MAX,
+        z_key: u128::MAX,
         texture: Some(texture),
         ..default()
     }
 }
 
-/// [`uv_clamp_window`] and [`tiling_axes`] on shapes the stock UI draws.
+/// [`uv_clamp_window`] on shapes the stock UI draws.
 #[cfg(test)]
 mod uv_clamp_tests {
-    use super::{tiling_axes, uv_clamp_window, UvRect};
+    use super::{uv_clamp_window, UvRect};
 
     /// `POIIcons` is 128², and a world-map POI samples its cell (7, 1).
     #[test]
@@ -1553,40 +1612,6 @@ mod uv_clamp_tests {
     #[test]
     fn the_whole_texture_asks_for_no_window() {
         assert!(uv_clamp_window(&UvRect::FULL, (128, 128)).is_none());
-    }
-
-    /// The stance bar's middle strip, `SetTexCoord(0, n-2, 0, 1)` (`BonusActionBarFrame.lua:173`).
-    #[test]
-    fn a_one_axis_strip_wraps_that_axis_only() {
-        assert_eq!(
-            tiling_axes(&UvRect::from_tex_coords([0.0, 2.0, 0.0, 1.0])),
-            (true, false)
-        );
-        assert_eq!(
-            tiling_axes(&UvRect::from_tex_coords([0.0, 1.0, 0.0, 3.0])),
-            (false, true)
-        );
-    }
-
-    #[test]
-    fn a_bounded_mapping_tiles_nothing() {
-        assert_eq!(
-            tiling_axes(&UvRect::from_tex_coords([0.0, 1.0, 0.0, 1.0])),
-            (false, false)
-        );
-        assert_eq!(tiling_axes(&UvRect::FULL), (false, false));
-        assert_eq!(
-            tiling_axes(&UvRect::from_tex_coords([0.453125, 0.875, 0.0, 1.0])),
-            (false, false)
-        );
-    }
-
-    #[test]
-    fn a_two_axis_tile_wraps_both() {
-        assert_eq!(
-            tiling_axes(&UvRect::from_tex_coords([0.0, 4.0, 0.0, 2.5])),
-            (true, true)
-        );
     }
 
     #[test]
@@ -1634,7 +1659,7 @@ mod cursor_quad_tests {
         );
         assert_eq!(q.rect.width(), 32.0);
         assert_eq!(q.rect.height(), 32.0);
-        assert_eq!(q.z_key, u64::MAX);
+        assert_eq!(q.z_key, u128::MAX);
         assert!(q.texture.is_some());
         assert!(!q.additive);
     }
@@ -1678,6 +1703,7 @@ mod clip_plumb_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
+        app.init_resource::<crate::portrait::PaneRequests>();
         app.init_resource::<crate::ui_models::UiModelTiles>();
         app.init_resource::<crate::minimap::MinimapWidget>();
         app.init_resource::<crate::ui_script::UiFrameCost>();
@@ -1719,9 +1745,10 @@ mod clip_plumb_tests {
         );
     }
 
-    /// At dial 0.5 the VM sees a 2048×1536 screen, and every window-px rect halves.
+    /// The dial is `UIParent`'s scale, so a ScrollFrame with no parent keeps its px rect and clip
+    /// at dial 0.5: the root stays 768 units tall.
     #[test]
-    fn the_uiscale_dial_scales_the_extracted_rects() {
+    fn the_uiscale_dial_leaves_a_parentless_frame_alone() {
         let mut app = app_with_scrolled_marker();
         app.insert_resource(crate::ui_script::UiScaleCvar(0.5));
         app.update();
@@ -1732,12 +1759,10 @@ mod clip_plumb_tests {
             .find(|q| q.color[0] == 1.0 && q.color[1] == 0.0 && q.color[2] == 0.0)
             .expect("the colored marker quad extracted");
 
-        // WoW space: top 1536 − 100 = 1436, bottom 1236, right 300; ×0.5 is y-up px 618..718,
-        // and y-down through the 768 window the top is 50 and the bottom 150.
         assert_eq!(
             marker.clip,
-            Some(Rect::new(0.0, 50.0, 150.0, 150.0)),
-            "dial 0.5 halves the px rect and re-hangs the frame from the taller virtual top"
+            Some(Rect::new(0.0, 100.0, 300.0, 300.0)),
+            "dial 0.5 moves nothing outside UIParent"
         );
     }
 
@@ -1764,6 +1789,7 @@ mod clip_plumb_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
+        app.init_resource::<crate::portrait::PaneRequests>();
         app.init_resource::<crate::ui_models::UiModelTiles>();
         app.init_resource::<crate::minimap::MinimapWidget>();
         app.init_resource::<crate::ui_script::UiFrameCost>();
@@ -1951,6 +1977,42 @@ mod extract_gate_tests {
     fn app_from_script(lua: &str) -> App {
         let script = UiScript::new().unwrap();
         script.run(lua).unwrap();
+        app_over(script)
+    }
+
+    /// A black fill under a vertical alpha ramp, the credits fade's shape, in a frame at half
+    /// alpha: each corner is fill × gradient × frame alpha (`0x77fac0` folds it into every
+    /// vertex), the opaque end at the bottom.
+    #[test]
+    fn a_gradient_paints_per_corner_over_its_fill() {
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+            local f = CreateFrame("Frame", "Fade")
+            f:SetPoint("TOPLEFT", 0, 0)
+            f:SetWidth(100); f:SetHeight(100)
+            local t = f:CreateTexture(nil, "ARTWORK")
+            t:SetAllPoints(f)
+            t:SetTexture(0, 0, 0)
+            t:SetGradientAlpha("VERTICAL", 0, 1, 0, 1, 0, 1, 0, 0)
+            f:SetAlpha(0.5)
+        "#,
+            )
+            .unwrap();
+        let mut app = app_over(script);
+        app.update();
+        let quads = &app.world().resource::<UiQuads>().quads;
+        let fade = quads
+            .iter()
+            .find(|q| q.texture.is_none() && q.corner_colors.is_some())
+            .expect("the fade draws, with its corners");
+        let (top, bottom) = ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.5]);
+        assert_eq!(fade.corner_colors, Some([top, top, bottom, bottom]));
+    }
+
+    /// [`app_from_script`] over a VM of the caller's.
+    fn app_over(script: UiScript) -> App {
         let mut app = App::new();
         app.insert_non_send_resource(script);
         app.init_resource::<UiQuads>();
@@ -1958,6 +2020,7 @@ mod extract_gate_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
+        app.init_resource::<crate::portrait::PaneRequests>();
         app.init_resource::<crate::ui_models::UiModelTiles>();
         app.init_resource::<crate::minimap::MinimapWidget>();
         app.init_resource::<crate::ui_script::UiFrameCost>();
@@ -2027,56 +2090,152 @@ mod extract_gate_tests {
         );
     }
 
-    /// `PaperDollFrame.xml:204` declares a bare `<PlayerModel name="CharacterModelFrame">`; a pane
-    /// no window claims ([`crate::portrait::model_pane_booth`]) must not borrow a bake.
+    /// A glue `ModelFFX` draws the glue booth's image over its own rect, sampling the window's
+    /// part of the booth's view, at its bucket's callback rank, and asks the UI model tiles for
+    /// nothing; a plain `Model` beside it is still a tile.
     #[test]
-    fn a_named_model_pane_samples_its_booth_and_an_unclaimed_one_draws_nothing() {
+    fn a_model_ffx_draws_the_glue_booth_and_asks_for_no_tile() {
+        let script = UiScript::new_glue().unwrap();
+        script
+            .run(
+                r#"
+            local holder = CreateFrame("Frame", "Holder")
+            holder:SetPoint("TOPLEFT", 0, 0); holder:SetWidth(1024); holder:SetHeight(768)
+            holder:SetAlpha(0.5)
+            local scene = CreateFrame("ModelFFX", "Scene", holder)
+            scene:SetPoint("TOPLEFT", 100, -50)
+            scene:SetWidth(400); scene:SetHeight(300)
+            scene:SetModel("Interface\\Glues\\Models\\UI_Orc\\UI_Orc.mdx")
+            scene:SetAlpha(0.8)
+            local art = scene:CreateTexture(nil, "ARTWORK")
+            art:SetAllPoints(scene); art:SetTexture(1, 0, 0)
+            local over = scene:CreateTexture(nil, "OVERLAY")
+            over:SetAllPoints(scene); over:SetTexture(0, 1, 0)
+            local child = CreateFrame("Frame", "Child", scene)
+            child:SetAllPoints(scene)
+            local under = child:CreateTexture(nil, "BACKGROUND")
+            under:SetAllPoints(child); under:SetTexture(0, 0, 1)
+            local plain = CreateFrame("Model", "Plain")
+            plain:SetPoint("TOPLEFT", 600, -50)
+            plain:SetWidth(64); plain:SetHeight(64)
+            plain:SetModel("Plain.mdx")
+        "#,
+            )
+            .unwrap();
+        let mut app = app_over(script);
+        let image = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        app.world_mut().resource_mut::<PortraitImages>().0.insert(
+            crate::portrait::GLUE_SLOT.to_string(),
+            crate::portrait::PortraitSource::Live(image.clone()),
+        );
+        app.update();
+
+        let paths: Vec<String> = app
+            .world()
+            .resource::<crate::ui_models::UiModelTiles>()
+            .requests
+            .values()
+            .map(|r| r.path.clone())
+            .collect();
+        assert_eq!(paths, ["Plain.mdx"], "the ModelFFX is no tile");
+
+        let quads = &app.world().resource::<UiQuads>().quads;
+        let scene: Vec<_> = quads
+            .iter()
+            .filter(|q| q.texture.as_ref() == Some(&image))
+            .collect();
+        assert_eq!(scene.len(), 1, "the pane draws the glue booth's image once");
+        let q = scene[0];
+        assert!(q.premultiplied);
+        // The widget's own alpha (`0x76d120`); `SetAlpha` writes the raw value down the subtree
+        // with no product, so the holder's earlier 0.5 is gone.
+        assert!((q.color[3] - 0.8).abs() < 1e-3, "{:?}", q.color);
+        // The ARTWORK callback of the pane's own bucket: after its ARTWORK regions, before its
+        // OVERLAY ones and every child frame's (`0x46fa90`, layer 2).
+        let z_of = |rgb: [f32; 3]| {
+            quads
+                .iter()
+                .find(|q| q.texture.is_none() && q.color[..3] == rgb)
+                .map(|q| q.z_key)
+                .expect("the region drew")
+        };
+        let (art, over, child) = (
+            z_of([1.0, 0.0, 0.0]),
+            z_of([0.0, 1.0, 0.0]),
+            z_of([0.0, 0.0, 1.0]),
+        );
+        assert!(
+            art < q.z_key && q.z_key < over && over < child,
+            "{art} {} {over} {child}",
+            q.z_key
+        );
+        assert!(q.rect.width() > 0.0 && q.rect.height() > 0.0);
+        let (w, h) = (1024.0, 768.0);
+        assert!(
+            q.uv == super::UvRect::from_tex_coords([
+                q.rect.min.x / w,
+                q.rect.max.x / w,
+                q.rect.min.y / h,
+                q.rect.max.y / h,
+            ]),
+            "the pane samples its own part of the window's view"
+        );
+    }
+
+    /// `PaperDollFrame.xml:204` declares a bare `<PlayerModel name="CharacterModelFrame">`. Every
+    /// character pane, the stock window's or an addon's, publishes its own composite request at
+    /// its own rect, and draws no quad here: its booth's composite does (`crate::portrait`). A
+    /// plain `Model` with no file publishes nothing.
+    #[test]
+    fn every_character_pane_publishes_its_own_request_and_a_bare_model_none() {
         let mut app = app_from_script(
             r#"
             local doll = CreateFrame("PlayerModel", "CharacterModelFrame")
             doll:SetPoint("TOPLEFT", 0, 0)
             doll:SetWidth(233); doll:SetHeight(224)
             doll:SetUnit("player")
-            local stray = CreateFrame("PlayerModel", "SomeAddonsModelPane")
+            local stray = CreateFrame("DressUpModel", "SomeAddonsModelPane")
             stray:SetPoint("TOPLEFT", 300, 0)
-            stray:SetWidth(233); stray:SetHeight(224)
-            stray:SetUnit("player")
+            stray:SetWidth(100); stray:SetHeight(200)
+            local bare = CreateFrame("Model", "Bare")
+            bare:SetPoint("TOPLEFT", 500, 0)
+            bare:SetWidth(50); bare:SetHeight(50)
         "#,
-        );
-        let bake = app
-            .world_mut()
-            .resource_mut::<Assets<Image>>()
-            .add(Image::default());
-        app.world_mut().resource_mut::<PortraitImages>().0.insert(
-            "paperdoll".to_string(),
-            crate::portrait::PortraitSource::Live(bake.clone()),
         );
         app.update();
 
-        let quads = &app.world().resource::<UiQuads>().quads;
-        let panes: Vec<_> = quads
-            .iter()
-            .filter(|q| q.texture.as_ref() == Some(&bake))
-            .collect();
+        let script = app.world().non_send_resource::<UiScript>();
+        let handle = |name: &str| script.frame_handle(name).expect(name);
+        let (doll, stray, bare) = (
+            handle("CharacterModelFrame"),
+            handle("SomeAddonsModelPane"),
+            handle("Bare"),
+        );
+        let requests = app.world().resource::<crate::portrait::PaneRequests>();
+        let doll = requests.of(doll).expect("the paper doll publishes");
         assert_eq!(
-            panes.len(),
-            1,
-            "exactly the claimed pane draws the paper doll's bake"
+            doll.size_px,
+            UVec2::new(233, 224),
+            "its own rect, in device px"
+        );
+        assert!((doll.alpha - 1.0).abs() < 1e-6);
+        let stray = requests.of(stray).expect("an addon's pane publishes too");
+        assert_eq!(stray.size_px, UVec2::new(100, 200));
+        assert!(stray.rect.min.x > doll.rect.max.x, "at its own place");
+        assert!(
+            requests.of(bare).is_none(),
+            "a bare Model is no character pane"
         );
         assert!(
-            panes[0].premultiplied,
-            "a render-target bake carries premultiplied colour"
-        );
-        let aspect = app
-            .world()
-            .resource::<crate::portrait::BoothPanes>()
-            .0
-            .get("paperdoll")
-            .copied()
-            .expect("the pane publishes its aspect");
-        assert!(
-            (aspect - 233.0 / 224.0).abs() < 0.01,
-            "the pane's own rect is the aspect, got {aspect}"
+            app.world()
+                .resource::<UiQuads>()
+                .quads
+                .iter()
+                .all(|q| q.texture.is_none()),
+            "no pane draws a quad of its own in the extract"
         );
     }
 
@@ -2224,19 +2383,21 @@ mod extract_gate_tests {
     #[test]
     fn a_shown_sibling_splices_through_the_shift_and_matches_the_full_conversion() {
         // A, B, C in declaration order, so B's entries sort between A's and C's; B starts hidden.
+        // Each texture has a layer of its own: in one, the batch sort (`0x7731a0`) would rank the
+        // three by texture and move C's key when B rejoins.
         const BUILD: &str = r#"
-            local function box(name, x, r, g, b)
+            local function box(name, x, r, g, b, layer)
               local f = CreateFrame("Frame", name)
               f:SetPoint("TOPLEFT", x, 0)
               f:SetWidth(50); f:SetHeight(50)
-              local t = f:CreateTexture(nil, "ARTWORK")
+              local t = f:CreateTexture(nil, layer)
               t:SetTexture(r, g, b)
               t:SetAllPoints()
               return f
             end
-            box("A", 0, 1, 0, 0)
-            hidden = box("B", 60, 0, 1, 0)
-            box("C", 120, 0, 0, 1)
+            box("A", 0, 1, 0, 0, "BACKGROUND")
+            hidden = box("B", 60, 0, 1, 0, "BORDER")
+            box("C", 120, 0, 0, 1, "ARTWORK")
         "#;
         let mut app = app_from_script(&format!("{BUILD}\nhidden:Hide()"));
         app.world_mut()
@@ -2269,7 +2430,7 @@ mod extract_gate_tests {
             quads.quads.len()
         );
         // The comparison app replays the history: `Show()` re-stacks a hidden frame to the tail of
-        // its draw bucket (the client's show, `0x76ae10`), so B draws above C.
+        // its draw bucket (the client's show, `0x76ae10`).
         let mut reference = app_from_script(&format!("{BUILD}\nhidden:Hide()\nhidden:Show()"));
         reference.update();
         assert!(
@@ -2336,5 +2497,35 @@ mod extract_gate_tests {
             0,
             "a moved raster environment forbids splicing"
         );
+    }
+}
+
+/// [`sprite_for_wrap`]: the load-time flag alone picks the sampler.
+#[cfg(test)]
+mod sprite_wrap_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Calls(Vec<&'static str>);
+
+    impl SpriteSource for Calls {
+        fn clamped(&mut self, _: &str, _: &mut Assets<Image>) -> Option<Handle<Image>> {
+            self.0.push("clamped");
+            None
+        }
+
+        fn wrapped(&mut self, _: &str, _: &mut Assets<Image>) -> Option<Handle<Image>> {
+            self.0.push("wrapped");
+            None
+        }
+    }
+
+    #[test]
+    fn a_wrapped_file_repeats_and_any_other_clamps() {
+        let mut images = Assets::<Image>::default();
+        let mut calls = Calls::default();
+        sprite_for_wrap(&mut calls, "Interface\\A", true, &mut images);
+        sprite_for_wrap(&mut calls, "Interface\\B", false, &mut images);
+        assert_eq!(calls.0, ["wrapped", "clamped"]);
     }
 }

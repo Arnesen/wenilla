@@ -13,7 +13,7 @@ use super::Model;
 /// `0x4c8520`, the registrar's shared slot reader: `is-number`, `tonumber`, the truncating cast,
 /// then `dec` into the 0-based slot and the whitelist; a failure of either raises `message`. The
 /// 0-based slot, `-1` for Lua 0, the ammo leg.
-fn inventory_slot_arg(lua: &Lua, v: Value, message: &'static str) -> mlua::Result<i32> {
+pub(super) fn inventory_slot_arg(lua: &Lua, v: Value, message: &'static str) -> mlua::Result<i32> {
     let slot0 = number_arg(lua, v, message)?.wrapping_sub(1);
     if !inventory_slot_reader_accepts(slot0) {
         return Err(mlua::Error::RuntimeError(message.into()));
@@ -62,7 +62,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let sellable = usize::try_from(slot0 + 1)
                 .ok()
                 .and_then(|slot| model.inv_slot("player", slot))
-                .is_some_and(|v| v.item_id != 0 && !v.locked);
+                .is_some_and(|v| v.item_id != 0 && !super::cursor::item_locked(&model, v.guid));
             if sellable {
                 model.ui_cursor = Some(UiCursorMode::Buy);
                 model.ui_cursor_dirty = true;
@@ -102,16 +102,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // UpdateInventoryAlertStatus() (`0x4c9560`): the alert recompute (`0x4c7ee0`), which fires
-    // UPDATE_INVENTORY_ALERTS unconditionally; zero returns. Stock calls it when the durability
+    // UPDATE_INVENTORY_ALERTS (`0x4c8085`) in place, after every write; zero returns. Stock calls it when the durability
     // figure's enchant timer runs out (`DurabilityFrame.lua:81`).
     g.set(
         "UpdateInventoryAlertStatus",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            recompute_inventory_alerts(&mut model);
-            model
-                .pending_events
-                .push(("UPDATE_INVENTORY_ALERTS".to_string(), Vec::new()));
+            super::tick::verb(lua, |model| {
+                recompute_inventory_alerts(model);
+                model.raise("UPDATE_INVENTORY_ALERTS", Vec::new());
+            });
             Ok(MultiValue::new())
         })?,
     )?;
@@ -218,10 +217,11 @@ mod tests {
         });
         slots[17] = Some(InvSlotView {
             item_id: 2362,
-            locked: true,
+            guid: 0x109,
             ..Default::default()
         });
         s.set_inventory_slots(slots);
+        s.lock_item(0x109);
 
         for quiet in ["0", "1", "17"] {
             s.run(&format!("ShowInventorySellCursor({quiet})")).unwrap();

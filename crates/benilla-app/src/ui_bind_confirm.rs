@@ -14,9 +14,10 @@ use benilla_ui::script::{ScriptValue, UiScript};
 
 use crate::items::{Enchants, Items};
 use crate::net::Objects;
+use crate::query_cache::Ask;
 
 /// The equip arms' `item_template.bonding` (vmangos `ItemPrototype.h` `ItemBondingType`).
-pub(crate) const BIND_WHEN_EQUIPPED: u32 = 2;
+pub(crate) const BIND_WHEN_EQUIPPED: u32 = benilla_ui::script::BIND_WHEN_EQUIPPED;
 /// The use arm's value (`0x5d91d6`).
 pub(crate) const BIND_WHEN_USE: u32 = 3;
 
@@ -32,9 +33,9 @@ pub(crate) enum PendingEquip {
         dst_bag: i64,
         dst_slot: u32,
     },
-    /// `AUTOEQUIP_BIND_CONFIRM`, in wire space: the action bar's sender resolves an item entry to
-    /// a position and has no Lua pair. The guid lets the re-issue re-take the ammo fork.
-    AutoEquip { bag_index: u8, slot: u8, guid: u64 },
+    /// `AUTOEQUIP_BIND_CONFIRM`, in Lua space, where the accept re-issues the pick-up and
+    /// auto-equip from the slot as it stands (`0x5e1c23`). The guid is the item the cancel unlocks.
+    AutoEquip { bag: i64, slot: u32, guid: u64 },
 }
 
 /// The client's pending-equip array (`0xc4c290`-`0xc4c29c`, stride `0x20`), allocated by
@@ -95,16 +96,16 @@ pub(crate) struct BindGate<'w> {
 }
 
 impl BindGate<'_> {
-    /// Whether this equip must ask first: not already bound (`0x5da2c0`), `bonding == 2` and
-    /// equippable (`0x5ea930`). `item_guid` is the item that would bind (a swap's non-equip side,
-    /// an auto-equip's clicked slot); an unknown item or uncached template fails open, as the
-    /// reference's cache-hit conjunct does.
+    /// Whether this swap must ask first: not already bound (`0x5da2c0`), `bonding == 2` and
+    /// equippable (`0x5ea930`). `item_guid` is the item that would bind (the swap's non-equip
+    /// side); an unknown item or uncached template fails open, as the reference's cache-hit
+    /// conjunct does. The auto-equip arm asks in the VM, where the item is held
+    /// ([`benilla_ui::script::AutoEquip::Asked`]).
     pub(crate) fn equip_binds(
         &self,
         script: &UiScript,
         objects: &Objects,
         items: &Items,
-        commands: &crate::net::NetCommands,
         item_guid: u64,
     ) -> bool {
         let Some(fields) = objects.object(item_guid) else {
@@ -116,7 +117,7 @@ impl BindGate<'_> {
         let Some(entry) = objects.object(item_guid).and_then(|o| o.object_entry()) else {
             return false;
         };
-        let Some(t) = items.template(entry, item_guid, commands) else {
+        let Some(t) = items.template(entry, item_guid, Ask::Read) else {
             return false;
         };
         t.bonding == BIND_WHEN_EQUIPPED && script.item_usable(entry)
@@ -125,13 +126,7 @@ impl BindGate<'_> {
     /// The use arm's predicate: `[0x5d91d3, 0x5d91f2)` holds exactly three branches to the cast,
     /// `bonding == 3`, not already bound (`0x5da2c0`) and `suppress == 0`. There is no can-use
     /// (`0x5ea930`) leg: that failure exits `0x5d8d00` before the bind arm.
-    pub(crate) fn use_binds(
-        &self,
-        objects: &Objects,
-        items: &Items,
-        commands: &crate::net::NetCommands,
-        item_guid: u64,
-    ) -> bool {
+    pub(crate) fn use_binds(&self, objects: &Objects, items: &Items, item_guid: u64) -> bool {
         let Some(fields) = objects.object(item_guid) else {
             return false;
         };
@@ -142,7 +137,7 @@ impl BindGate<'_> {
             return false;
         };
         items
-            .template(entry, item_guid, commands)
+            .template(entry, item_guid, Ask::Read)
             .is_some_and(|t| t.bonding == BIND_WHEN_USE)
     }
 

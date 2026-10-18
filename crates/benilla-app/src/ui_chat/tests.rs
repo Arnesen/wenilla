@@ -2315,31 +2315,9 @@ fn level_up_gains_are_matched_by_level_and_a_miss_is_not_an_absence() {
     );
 }
 
-/// Stock `ChatFrame_OnEvent` prints the whole level-up block from `PLAYER_LEVEL_UP`
-/// (`ChatFrame.lua:1283-1323`); the app composes none of it.
-#[test]
-fn the_ding_block_is_printed_once() {
-    let _data = benilla_formats::wow_data_or_skip!();
-    use benilla_protocol::messages::LevelUpInfo;
-    let mut s = chat_vm();
-    let mut log = super::ChatLog::default();
-
-    let info = LevelUpInfo {
-        level: 10,
-        health: 22,
-        powers: [15, 0, 0, 0, 0],
-        stats: [1, 0, 0, 0, 0],
-    };
-    // The packet's apply parks the gains and prints nothing.
-    log.push_level_up_gains(&info, 1);
-    let before = lines_in_window(&s);
-    assert_eq!(
-        lines_in_window(&s) - before,
-        0,
-        "the app composes no ding line of its own"
-    );
-
-    // Tap the window's `AddMessage` to read the block itself.
+/// Fires `PLAYER_LEVEL_UP` with the nine reference args and returns every line the stock handler
+/// added to `ChatFrame1`.
+fn ding_lines(s: &mut benilla_ui::script::UiScript, args: [i64; 9]) -> Vec<String> {
     s.run(
         r#"
         DingLines = {}
@@ -2352,23 +2330,27 @@ fn the_ding_block_is_printed_once() {
     )
     .unwrap();
 
-    // The event `ui_unit` fires, with the reference's nine arguments.
-    let args: Vec<benilla_ui::script::ScriptValue> = [10i64, 22, 15, 1, 1, 0, 0, 0, 0]
+    let args = args
         .into_iter()
         .map(benilla_ui::script::ScriptValue::Int)
         .collect();
     s.fire_event("PLAYER_LEVEL_UP", args);
     assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
-    assert_eq!(
-        lines_in_window(&s) - before,
-        4,
-        "LEVEL_UP, the health/mana pair, CHAR_POINTS, and one STAT — once each"
-    );
 
-    // The singular `LEVEL_UP_CHAR_POINTS` (`GetText`'s plural pick) and one `LEVEL_UP_STAT`.
-    let lines: Vec<String> = (1..=4)
+    let n: usize = s.eval("return table.getn(DingLines)").unwrap();
+    (1..=n)
         .map(|i| s.eval::<String>(&format!("return DingLines[{i}]")).unwrap())
-        .collect();
+        .collect()
+}
+
+/// Stock `ChatFrame_OnEvent` prints the whole level-up block from `PLAYER_LEVEL_UP`
+/// (`ChatFrame.lua:1283-1323`), once; the app composes none of it. The singular
+/// `LEVEL_UP_CHAR_POINTS` is `GetText`'s plural pick.
+#[test]
+fn the_ding_block_is_printed_once() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let lines = ding_lines(&mut s, [10, 22, 15, 1, 1, 0, 0, 0, 0]);
     assert_eq!(
         lines,
         [
@@ -2376,6 +2358,22 @@ fn the_ding_block_is_printed_once() {
             "You have gained 22 hit points and 15 mana.",
             "You have gained 1 talent point.",
             "Your Strength increases by 1.",
+        ]
+    );
+}
+
+/// A loss reaches stock signed, as the reference's `%d` fire passes it (`0x5e413e`): the health
+/// line prints it, and a lost stat prints no line (`if ( argN > 0 )`, `ChatFrame.lua:1302-1321`).
+#[test]
+fn a_negative_gain_prints_signed() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    let lines = ding_lines(&mut s, [2, -2, 5, 0, -1, 0, 0, 0, 0]);
+    assert_eq!(
+        lines,
+        [
+            "Congratulations, you have reached level 2!",
+            "You have gained -2 hit points and 5 mana.",
         ]
     );
 }
@@ -2426,8 +2424,9 @@ fn the_free_professions_line_is_printed_once() {
 // ───────────── the chat cache restores inside the login ─────────
 
 /// `UPDATE_CHAT_WINDOWS` registers the chat frames for `CHAT_MSG_*`, and the `UPDATE_CHAT_COLOR`
-/// burst repaints id-0 lines through `ChatTypeInfo["REPLY"]`, so both come before `PLAYER_LOGIN`.
-/// The probe is a loose addon, because the entry load builds the VM it runs on.
+/// burst repaints id-0 lines through `ChatTypeInfo["REPLY"]`, so both come before `PLAYER_LOGIN`,
+/// which the load arms and the world-enter cascade fires. The probe is a loose addon, because the
+/// entry load builds the VM it runs on.
 #[test]
 fn the_chat_cache_restore_is_finished_before_player_login() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -2485,7 +2484,7 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
     world.init_resource::<super::settings::ChatWindowFile>();
     crate::ui_script::setup_script(&mut world);
 
-    world.insert_resource(crate::char_select::Roster::with_pending_pick(
+    world.insert_resource(crate::glue_session::roster::Roster::with_pending_pick(
         vec![benilla_protocol::Character {
             guid: 1,
             name: "Probeorder".into(),
@@ -2514,6 +2513,10 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
         1,
     ));
     crate::ui_script::load_ingame_ui_on_world_entry(&mut world);
+    // The cascade, as the unit feed runs it once the player is in the world.
+    world
+        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .fire_world_enter();
 
     let read = |expr: &str| -> String {
         world
@@ -2541,7 +2544,7 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
         read("ChatOrderProbe.loginRegistered")
     );
     // The reference's login order: `ADDON_LOADED` (`0x4900a3`), `VARIABLES_LOADED` (`0x4900b2`),
-    // the chat-cache burst (`0x4900d6`), `PLAYER_LOGIN` (`0x490959`).
+    // the chat-cache burst (`0x4900d6`), the arm (`0x49011d`), `PLAYER_LOGIN` (`0x490959`).
     assert_eq!(
         read("ChatOrderProbe.order"),
         "VARIABLES_LOADED UPDATE_CHAT_WINDOWS UPDATE_CHAT_COLOR PLAYER_LOGIN ",
@@ -2550,6 +2553,20 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
 
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A VM with the local player `SendChatMessage` needs (`0x49f223`), as in game.
+fn in_world_vm() -> benilla_ui::script::UiScript {
+    let mut script = benilla_ui::script::UiScript::new().expect("VM");
+    script.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probe".into()),
+            ..Default::default()
+        }),
+    );
+    script
 }
 
 /// `/afk` then `/dnd` through the real drain: every type but AFK clears a standing AFK first
@@ -2561,10 +2578,11 @@ fn afk_then_dnd_clears_the_afk_first() {
     use bevy::ecs::system::RunSystemOnce;
 
     let mut world = bevy::prelude::World::new();
-    world.insert_non_send_resource(benilla_ui::script::UiScript::new().expect("VM"));
+    world.insert_non_send_resource(in_world_vm());
     let (tx, rx) = crossbeam_channel::unbounded();
     world.insert_resource(NetCommands(tx));
     world.init_resource::<super::feed::ChatLog>();
+    world.init_resource::<crate::ui_action::UiErrorKeys>();
     world.init_resource::<super::away::AfkMirror>();
     world.init_resource::<crate::cvars::Cvars>();
     world.init_resource::<super::edit::ChannelState>();
@@ -2621,12 +2639,13 @@ fn a_named_language_rides_the_chat_command() {
     use bevy::ecs::system::RunSystemOnce;
 
     let mut world = bevy::prelude::World::new();
-    let mut script = benilla_ui::script::UiScript::new().expect("VM");
+    let mut script = in_world_vm();
     script.set_language_table(vec![(2, "Darnassian".into()), (7, "Common".into())]);
     world.insert_non_send_resource(script);
     let (tx, rx) = crossbeam_channel::unbounded();
     world.insert_resource(NetCommands(tx));
     world.init_resource::<super::feed::ChatLog>();
+    world.init_resource::<crate::ui_action::UiErrorKeys>();
     world.init_resource::<super::away::AfkMirror>();
     world.init_resource::<crate::cvars::Cvars>();
     world.init_resource::<super::edit::ChannelState>();
@@ -2665,7 +2684,8 @@ fn a_named_language_rides_the_chat_command() {
 
 /// `SendChatMessage`'s `CHANNEL` target through the real drain: `SStrToInt` into `0x49be50`
 /// (`0x49f4d9`-`0x49f4ea`), so the packet carries the numbered slot's name, and a number naming
-/// no confirmed slot, or a name, sends nothing at all.
+/// no confirmed slot, or a name, sends nothing at all. A call with no number raises instead
+/// (`0x49f535`), so it never reaches the drain.
 #[test]
 fn a_channel_send_carries_the_numbered_slots_name() {
     use super::edit::{ChannelSlot, ChannelState, SlotState};
@@ -2673,10 +2693,11 @@ fn a_channel_send_carries_the_numbered_slots_name() {
     use bevy::ecs::system::RunSystemOnce;
 
     let mut world = bevy::prelude::World::new();
-    world.insert_non_send_resource(benilla_ui::script::UiScript::new().expect("VM"));
+    world.insert_non_send_resource(in_world_vm());
     let (tx, rx) = crossbeam_channel::unbounded();
     world.insert_resource(NetCommands(tx));
     world.init_resource::<super::feed::ChatLog>();
+    world.init_resource::<crate::ui_action::UiErrorKeys>();
     world.init_resource::<super::away::AfkMirror>();
     world.init_resource::<crate::cvars::Cvars>();
     world.insert_resource(ChannelState {
@@ -2703,7 +2724,6 @@ fn a_channel_send_carries_the_numbered_slots_name() {
             SendChatMessage("past the end", "CHANNEL", nil, 9)
             SendChatMessage("by name", "CHANNEL", nil, "General - Elwynn Forest")
             SendChatMessage("zero", "CHANNEL", nil, "0")
-            SendChatMessage("none", "CHANNEL")
             SendChatMessage("tell", "WHISPER", nil, "2")
             "#,
         )
@@ -2741,8 +2761,8 @@ fn a_channel_send_carries_the_numbered_slots_name() {
 
 /// `SendChatMessage`'s empty-line gate through the real drain (`0x49f28d`-`0x49f2a1`): an empty
 /// line, or one whose first byte is NUL, of any type but AFK and DND sends nothing and leaves a
-/// standing AFK set, since the gate is ahead of the AFK clear. The type check comes first, so an
-/// unknown type still reports.
+/// standing AFK set, since the gate is ahead of the AFK clear. The binding's type check comes
+/// first, so an unknown type still raises.
 #[test]
 fn an_empty_line_sends_nothing_but_afk_and_dnd() {
     use super::edit::{ChannelSlot, ChannelState};
@@ -2750,10 +2770,11 @@ fn an_empty_line_sends_nothing_but_afk_and_dnd() {
     use bevy::ecs::system::RunSystemOnce;
 
     let mut world = bevy::prelude::World::new();
-    world.insert_non_send_resource(benilla_ui::script::UiScript::new().expect("VM"));
+    world.insert_non_send_resource(in_world_vm());
     let (tx, rx) = crossbeam_channel::unbounded();
     world.insert_resource(NetCommands(tx));
     world.init_resource::<super::feed::ChatLog>();
+    world.init_resource::<crate::ui_action::UiErrorKeys>();
     world.insert_resource(super::away::AfkMirror(2));
     world.init_resource::<crate::cvars::Cvars>();
     world.insert_resource(ChannelState {
@@ -2785,17 +2806,26 @@ fn an_empty_line_sends_nothing_but_afk_and_dnd() {
         SendChatMessage("", "WHISPER", nil, "Bob")
         SendChatMessage("", "CHANNEL", nil, 1)
         SendChatMessage("\0hidden", "YELL")
-        SendChatMessage("", "BOGUS")
         "#,
+    );
+    let unknown = world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .run(r#"SendChatMessage("", "BOGUS")"#)
+        .expect_err("the type check precedes the gate");
+    assert!(
+        unknown.to_string().contains("Unknown chat type"),
+        "{unknown}"
     );
     world
         .run_system_once(super::input::drain_addon_chat_sends)
         .expect("drain");
     assert_eq!(sent(&rx), vec![], "no empty line reaches the wire");
-    assert_eq!(
-        world.resource::<super::feed::ChatLog>().pending_lines(),
-        vec!["Unknown chat type \"BOGUS\"."],
-        "no AFK clear; the type check precedes the gate"
+    assert!(
+        world
+            .resource::<super::feed::ChatLog>()
+            .pending_lines()
+            .is_empty(),
+        "no AFK clear, no line"
     );
     assert!(world.resource::<super::away::AfkMirror>().is_afk());
 
@@ -2814,5 +2844,285 @@ fn an_empty_line_sends_nothing_but_afk_and_dnd() {
             (ChatKind::Say, "hi".into()),
             (ChatKind::Afk, "Away from Keyboard".into()),
         ]
+    );
+}
+
+/// Run `lua` through the real `SendChatMessage` drain in a group state, with a standing AFK, and
+/// return what went on the wire and the refusals shown.
+fn group_chat_sends(
+    group: benilla_ui::script::PartyState,
+    lua: &str,
+) -> (Vec<(crate::net::ChatKind, String)>, Vec<&'static str>, bool) {
+    let (sent, refused, afk) = chat_sends_as(group, None, lua);
+    // Without the empty AFK packet that tells the server a sent line cleared the standing AFK.
+    let sent = sent
+        .into_iter()
+        .filter(|(kind, text)| !(*kind == crate::net::ChatKind::Afk && text.is_empty()))
+        .collect();
+    (sent, refused, afk)
+}
+
+/// [`group_chat_sends`] with our descriptor's `(field, value)` pairs, when the player has one, and
+/// every packet kept.
+fn chat_sends_as(
+    group: benilla_ui::script::PartyState,
+    fields: Option<&[(u16, u32)]>,
+    lua: &str,
+) -> (Vec<(crate::net::ChatKind, String)>, Vec<&'static str>, bool) {
+    use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
+    use bevy::ecs::system::RunSystemOnce;
+
+    let mut world = bevy::prelude::World::new();
+    let mut script = in_world_vm();
+    script.set_party(group);
+    world.insert_non_send_resource(script);
+    let (tx, rx) = crossbeam_channel::unbounded();
+    world.insert_resource(NetCommands(tx));
+    world.init_resource::<super::feed::ChatLog>();
+    world.init_resource::<crate::ui_action::UiErrorKeys>();
+    world.insert_resource(super::away::AfkMirror(2));
+    world.init_resource::<crate::cvars::Cvars>();
+    world.init_resource::<super::edit::ChannelState>();
+    if let Some(pairs) = fields {
+        world.spawn((
+            SelfPlayer,
+            Guid(1),
+            ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(pairs)),
+        ));
+    }
+    world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .run(lua)
+        .expect("lua");
+    world
+        .run_system_once(super::input::drain_addon_chat_sends)
+        .expect("drain");
+    let sent = rx
+        .try_iter()
+        .map(|c| match c {
+            ClientCommand::Chat { kind, text, .. } => (kind, text),
+            other => panic!("unexpected command {other:?}"),
+        })
+        .collect();
+    let refused = world
+        .resource::<crate::ui_action::UiErrorKeys>()
+        .0
+        .iter()
+        .map(|e| e.key)
+        .collect();
+    (
+        sent,
+        refused,
+        world.resource::<super::away::AfkMirror>().is_afk(),
+    )
+}
+
+/// A raid of the player (guid 1, at `rank`) and one other, led by `leader`.
+fn raid_group(rank: u32, leader: u64) -> benilla_ui::script::PartyState {
+    use benilla_ui::script::{PartyMemberInfo, PartyState, RaidMemberInfo};
+    PartyState {
+        members: vec![PartyMemberInfo {
+            name: "Other".into(),
+            guid: 2,
+        }],
+        leader_guid: leader,
+        own_guid: 1,
+        raid: vec![
+            RaidMemberInfo {
+                guid: 1,
+                rank,
+                ..Default::default()
+            },
+            RaidMemberInfo {
+                guid: 2,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+/// `SendChatMessage`'s group arms (`0x49f343`, `0x49f379`, `0x49f4b2`): a type sent without its
+/// group is refused with the reference's error, ahead of the AFK clear, and nothing goes out.
+#[test]
+fn a_group_line_without_its_group_is_refused_and_leaves_afk_standing() {
+    use crate::net::ChatKind;
+    let all = r#"SendChatMessage("a", "PARTY") SendChatMessage("b", "RAID")
+        SendChatMessage("c", "RAID_WARNING") SendChatMessage("d", "BATTLEGROUND")"#;
+
+    let (sent, refused, afk) = group_chat_sends(Default::default(), all);
+    assert_eq!(sent, vec![]);
+    assert_eq!(
+        refused,
+        [
+            "ERR_NOT_IN_GROUP",
+            "ERR_NOT_IN_RAID",
+            "ERR_NOT_IN_RAID",
+            "ERR_NOT_IN_RAID"
+        ]
+    );
+    assert!(afk, "a refused line never reaches the AFK clear");
+
+    // A party of two is no raid.
+    let party = benilla_ui::script::PartyState {
+        members: vec![benilla_ui::script::PartyMemberInfo {
+            name: "Other".into(),
+            guid: 2,
+        }],
+        own_guid: 1,
+        leader_guid: 1,
+        ..Default::default()
+    };
+    let (sent, refused, _) = group_chat_sends(party, all);
+    assert_eq!(sent, vec![(ChatKind::Party, "a".into())]);
+    assert_eq!(refused, ["ERR_NOT_IN_RAID"; 3]);
+
+    // In a raid as a plain member: RAID_WARNING needs the leader or an assistant (`0x4bb080`).
+    let (sent, refused, _) = group_chat_sends(
+        raid_group(0, 9),
+        r#"SendChatMessage("w", "RAID_WARNING") SendChatMessage("r", "RAID")"#,
+    );
+    assert_eq!(sent, vec![(ChatKind::Raid, "r".into())]);
+    assert_eq!(refused, ["ERR_NOT_LEADER"]);
+    let (sent, refused, afk) =
+        group_chat_sends(raid_group(1, 9), r#"SendChatMessage("w", "RAID_WARNING")"#);
+    assert_eq!(sent, vec![(ChatKind::RaidWarning, "w".into())]);
+    assert!(refused.is_empty());
+    assert!(!afk, "a sent line clears the standing AFK");
+}
+
+/// `SendChatMessage` sends RAID as RAID_LEADER when the player's GUID is the group leader's
+/// (`0x49f3a4`-`0x49f3c4`) and BATTLEGROUND as BATTLEGROUND_LEADER likewise (`0x49f463`-`0x49f490`);
+/// the server relays a plain RAID as RAID (vmangos `ChatHandler.cpp:514-536`).
+#[test]
+fn the_group_leaders_raid_and_battleground_lines_go_out_as_leader_types() {
+    use crate::net::ChatKind;
+    let lines = r#"SendChatMessage("r", "RAID") SendChatMessage("b", "BATTLEGROUND")
+        SendChatMessage("w", "RAID_WARNING") SendChatMessage("p", "PARTY")"#;
+
+    let (sent, refused, _) = group_chat_sends(raid_group(2, 1), lines);
+    assert_eq!(
+        sent,
+        vec![
+            (ChatKind::RaidLeader, "r".into()),
+            (ChatKind::BattlegroundLeader, "b".into()),
+            (ChatKind::RaidWarning, "w".into()),
+            (ChatKind::Party, "p".into()),
+        ]
+    );
+    assert!(refused.is_empty());
+
+    // Someone else leads: both go out plain.
+    let (sent, _, _) = group_chat_sends(raid_group(2, 2), lines);
+    assert_eq!(sent[0], (ChatKind::Raid, "r".into()));
+    assert_eq!(sent[1], (ChatKind::Battleground, "b".into()));
+
+    // No leader known and no own guid: a zero matches nobody.
+    let mut unknown = raid_group(0, 0);
+    unknown.own_guid = 0;
+    let (sent, _, _) = group_chat_sends(unknown, r#"SendChatMessage("r", "RAID")"#);
+    assert_eq!(sent, vec![(ChatKind::Raid, "r".into())]);
+}
+
+/// `SendChatMessage` from a dead or ghost player (`0x49f592`-`0x49f5e4`, test `0x605f30`: health 0,
+/// or the ghost flag): say, yell and emote are refused with `ERR_CHAT_WHILE_DEAD` after the AFK
+/// clear has run, and every type on the allowed chain (`0x49f5a3`-`0x49f5da`) goes out.
+#[test]
+fn a_dead_or_ghost_players_say_yell_and_emote_are_refused_after_the_afk_clear() {
+    use crate::net::ChatKind;
+    // `UNIT_FIELD_HEALTH` 22 and `MAXHEALTH` 28; `PLAYER_FLAGS` 190, ghost bit `0x10`.
+    let ghost: &[(u16, u32)] = &[(22, 1), (28, 100), (190, 0x10)];
+    let dead: &[(u16, u32)] = &[(22, 0), (28, 100)];
+    let alive: &[(u16, u32)] = &[(22, 100), (28, 100)];
+    let refused_types = r#"SendChatMessage("a", "SAY") SendChatMessage("b", "YELL")
+        SendChatMessage("c", "EMOTE")"#;
+
+    for (who, fields) in [("ghost", ghost), ("dead", dead)] {
+        let (sent, refused, afk) = chat_sends_as(raid_group(2, 9), Some(fields), refused_types);
+        assert_eq!(
+            sent,
+            vec![(ChatKind::Afk, String::new())],
+            "{who}: only the AFK clear's empty packet, once"
+        );
+        assert_eq!(refused, ["ERR_CHAT_WHILE_DEAD"; 3], "{who}");
+        assert!(!afk, "{who}: the clear ran ahead of the refusal");
+    }
+
+    // Every other sendable type is allowed to the dead (the party is the raid's).
+    let (sent, refused, _) = chat_sends_as(
+        raid_group(2, 9),
+        Some(ghost),
+        r#"SendChatMessage("w", "WHISPER", nil, "Bob") SendChatMessage("p", "PARTY")
+        SendChatMessage("g", "GUILD") SendChatMessage("o", "OFFICER")
+        SendChatMessage("r", "RAID") SendChatMessage("rw", "RAID_WARNING")
+        SendChatMessage("bg", "BATTLEGROUND")"#,
+    );
+    assert!(refused.is_empty(), "{refused:?}");
+    let kinds: Vec<ChatKind> = sent.iter().skip(1).map(|(k, _)| *k).collect();
+    assert_eq!(
+        kinds,
+        [
+            ChatKind::Whisper,
+            ChatKind::Party,
+            ChatKind::Guild,
+            ChatKind::Officer,
+            ChatKind::Raid,
+            ChatKind::RaidWarning,
+            ChatKind::Battleground
+        ]
+    );
+
+    // The living, and a player with no descriptor yet, are not refused.
+    let (sent, refused, _) =
+        chat_sends_as(raid_group(2, 9), Some(alive), r#"SendChatMessage("a")"#);
+    assert!(refused.is_empty());
+    assert_eq!(sent.last(), Some(&(ChatKind::Say, "a".to_string())));
+    let (_, refused, _) = chat_sends_as(raid_group(2, 9), None, r#"SendChatMessage("a")"#);
+    assert!(refused.is_empty());
+}
+
+/// A macro's `/script` line reaches the engine through the stock chat code: `EXECUTE_CHAT_LINE`
+/// (`ChatFrame.lua:1343`) sets the edit box and `ChatEdit_SendText` runs `SlashCmdList["SCRIPT"]`,
+/// which is `RunScript(msg)`. So a gated movement call in it signals `MACRO_ACTION_FORBIDDEN`
+/// (`0x494ac6`-`0x494add`) and moves nothing, whether a macro button, a key or the player typed it.
+#[test]
+fn a_macro_script_line_that_moves_signals_the_macro_event() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_vm();
+    s.run(
+        r#"
+        Forbidden = {}
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("MACRO_ACTION_FORBIDDEN")
+        f:RegisterEvent("ADDON_ACTION_FORBIDDEN")
+        f:SetScript("OnEvent", function() table.insert(Forbidden, event) end)
+    "#,
+    )
+    .unwrap();
+    for line in [
+        "/script MoveForwardStart()",
+        "/script Jump() ToggleAutoRun()",
+    ] {
+        s.fire_event(
+            "EXECUTE_CHAT_LINE",
+            vec![benilla_ui::script::ScriptValue::Str(line.into())],
+        );
+    }
+    assert_eq!(
+        s.eval::<Vec<String>>("return Forbidden").unwrap(),
+        ["MACRO_ACTION_FORBIDDEN"; 3]
+    );
+    assert!(s.take_binding_input().is_empty(), "nothing moved");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A line the engine shows inside a verb carries the same ten arguments as a system line the
+/// chat feed fires, so `ChatFrame_OnEvent` cannot tell them apart.
+#[test]
+fn an_engine_shown_line_fires_the_feeds_system_arguments() {
+    let text = "Deliver the Message failed.".to_string();
+    assert_eq!(
+        ChatEvent::text_only(K::System, text.clone()).script_args(),
+        benilla_ui::script::system_chat_args(text)
     );
 }

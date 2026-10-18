@@ -38,6 +38,7 @@ fn button_state_textures_switch_with_interaction() {
         b:SetPushedTexture("Interface\\P.blp")
         b:SetDisabledTexture("Interface\\D.blp")
         b:SetHighlightTexture("Interface\\H.blp")
+        b:SetFont("Fonts\\FRIZQT__.TTF", 12)
         b:SetText("Go")
     "#,
     )
@@ -127,10 +128,17 @@ fn a_state_with_no_texture_leaves_the_shown_one_standing() {
     );
     s.run("StickyBtn:SetDisabledTexture(\"Interface\\\\D.blp\")")
         .unwrap();
+    // The slot store shows the new texture and moves the shown pointer onto it, but hides nothing
+    // (`0x77902f`..`0x779041`): the normal art keeps its bit until the next switch clears it.
+    let mut both = visible(&s, "StickyBtn");
+    both.sort();
     assert_eq!(
-        visible(&s, "StickyBtn"),
-        vec!["Interface\\D.blp".to_string()],
-        "and real disabled art displaces it on the spot"
+        both,
+        vec![
+            "Interface\\D.blp".to_string(),
+            "Interface\\N.blp".to_string()
+        ],
+        "real disabled art joins it on the spot; the store hides nothing"
     );
     s.run("StickyBtn:Enable()").unwrap();
     assert_eq!(visible(&s, "StickyBtn"), n, "back to normal on Enable");
@@ -541,6 +549,7 @@ fn button_label_repaints_by_state_font_object() {
         "GoldFont",
         FontObject {
             color: Some([1.0, 0.82, 0.0, 1.0]),
+            font: Some("Fonts\\FRIZQT__.TTF".into()),
             height: Some(12.0),
             ..Default::default()
         },
@@ -549,6 +558,7 @@ fn button_label_repaints_by_state_font_object() {
         "GrayFont",
         FontObject {
             color: Some([0.5, 0.5, 0.5, 1.0]),
+            font: Some("Fonts\\FRIZQT__.TTF".into()),
             height: Some(12.0),
             ..Default::default()
         },
@@ -615,6 +625,7 @@ fn a_locked_or_hovered_button_wears_its_highlight_font_over_its_normal_color() {
         "RowNormal",
         FontObject {
             color: Some([1.0, 0.82, 0.0, 1.0]),
+            font: Some("Fonts\\FRIZQT__.TTF".into()),
             height: Some(12.0),
             ..Default::default()
         },
@@ -623,6 +634,7 @@ fn a_locked_or_hovered_button_wears_its_highlight_font_over_its_normal_color() {
         "RowHighlight",
         FontObject {
             color: Some([1.0, 1.0, 1.0, 1.0]),
+            font: Some("Fonts\\FRIZQT__.TTF".into()),
             height: Some(12.0),
             ..Default::default()
         },
@@ -709,6 +721,7 @@ fn a_button_reports_its_labels_extent() {
         b = CreateFrame("Button", "WidthBtn", UIParent)
         b:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
         b:SetWidth(120) b:SetHeight(24)
+        b:SetFont("Fonts\\FRIZQT__.TTF", 12)
         b:SetText("A Label")
         plain = CreateFrame("Button", "LabellessBtn", UIParent)
     "#,
@@ -1367,4 +1380,109 @@ fn button_get_text_color_answers_four_values_through_the_state_font() {
     s.run(r#"CreateFrame("CheckButton", "ChkColorBtn")"#)
         .unwrap();
     assert_eq!(s.arity("ChkColorBtn:GetTextColor()").unwrap(), 4);
+}
+
+/// `CheckButton:SetChecked` (`0x799bf0`) reads its argument through `GetBoolOrDefault` (`0x6f1c10`)
+/// with default 1 (`0x799c77`): absent, a table, a function and an unknown string check; nil and
+/// zero do not; a string goes by its first byte, then by `on`/`off`/`enabled`/`disabled`; a number
+/// keeps only the low dword of its truncation.
+#[test]
+fn set_checked_reads_its_argument_as_get_bool_or_default() {
+    let s = script();
+    s.run(r#"C = CreateFrame("CheckButton", "C")"#).unwrap();
+    for (arg, checked) in [
+        ("", true),
+        ("nil", false),
+        ("true", true),
+        ("false", false),
+        ("0", false),
+        ("0.5", false),
+        ("-0.5", false),
+        ("1", true),
+        ("-1", true),
+        ("2^32", false),
+        ("2^32 + 1", true),
+        ("1/0", false),
+        ("{}", true),
+        ("function() end", true),
+        (r#""yes""#, true),
+        (r#""Yes""#, true),
+        (r#""y""#, true),
+        (r#""t""#, true),
+        (r#""on""#, true),
+        (r#""enabled""#, true),
+        (r#""1abc""#, true),
+        (r#""01""#, false),
+        (r#"" 0""#, true),
+        ("\"\"", true),
+        (r#""abc""#, true),
+        (r#""off""#, false),
+        (r#""Disabled""#, false),
+        (r#""no""#, false),
+        (r#""false""#, false),
+        (r#""true""#, true),
+        (r#""0""#, false),
+        (r#""1""#, true),
+        (r#"" 1""#, true),
+        (r#""-1""#, true),
+    ] {
+        // Start from the opposite state so a call that changes nothing reads as a failure.
+        s.run(&format!(
+            "C:SetChecked({})",
+            if checked { "nil" } else { "1" }
+        ))
+        .unwrap();
+        s.run(&format!("C:SetChecked({arg})")).unwrap();
+        assert_eq!(
+            s.eval::<bool>("return C:GetChecked() == 1").unwrap(),
+            checked,
+            "SetChecked({arg})"
+        );
+    }
+}
+
+/// `Button:SetFont` writes the whole flags word (`0x780880` → `0x79f210`, `0x79f334`): no flags
+/// clears the monochrome bit the label's font object holds, and `MONOCHROME` sets it.
+#[test]
+fn button_set_font_writes_the_monochrome_bit_over_its_font_object() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.register_font_object(
+        "MonoFont",
+        FontObject {
+            font: Some("Fonts\\ARIALN.TTF".into()),
+            height: Some(12.0),
+            monochrome: true,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        b = CreateFrame("Button", "MonoBtn")
+        b:SetPoint("CENTER", 0, 0); b:SetWidth(100); b:SetHeight(20)
+        b:SetText("Label")
+        b:SetTextFontObject("MonoFont")
+    "#,
+    )
+    .unwrap();
+    let mono = |s: &mut crate::script::UiScript| {
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                QuadContent::Text {
+                    text: Some(t),
+                    monochrome,
+                    ..
+                } if t == "Label" => Some(monochrome),
+                _ => None,
+            })
+            .expect("label text quad")
+    };
+    assert!(mono(&mut s), "the font object's bit");
+    s.run(r#"b:SetFont("Fonts\\ARIALN.TTF", 12, "")"#).unwrap();
+    assert!(!mono(&mut s), "no flags clears it");
+    s.run(r#"b:SetFont("Fonts\\ARIALN.TTF", 12, "MONOCHROME")"#)
+        .unwrap();
+    assert!(mono(&mut s), "MONOCHROME sets it");
 }

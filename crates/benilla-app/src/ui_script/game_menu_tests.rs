@@ -99,24 +99,37 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// Support closes the menu and toggles the stock help window, as the "?" micro button does
+/// (`MainMenuBarMicroButtons.xml:217`).
 #[test]
-fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
+fn support_closes_the_menu_and_toggles_the_help_window() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let s = harness();
+    s.run("HELP_TOGGLES = 0; function ToggleHelpFrame() HELP_TOGGLES = HELP_TOGGLES + 1 end")
+        .unwrap();
+    s.run("ShowUIPanel(GameMenuFrame); BenillaGameMenuButtonSupport:Click()")
+        .unwrap();
+    assert_eq!(s.eval::<i64>("return HELP_TOGGLES").unwrap(), 1);
+    assert!(!s
+        .eval::<bool>("return GameMenuFrame:IsVisible() == 1")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+#[test]
+fn the_unbacked_entry_is_disabled_and_the_rest_are_live() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
     s.run("ShowUIPanel(GameMenuFrame)").unwrap();
 
-    for name in [
-        "BenillaGameMenuButtonEditMode",
-        "BenillaGameMenuButtonSupport",
-    ] {
-        assert!(
-            !s.eval::<bool>(&format!("return {name}:IsEnabled() ~= 0"))
-                .unwrap(),
-            "{name} has no panel behind it and must read that way"
-        );
-    }
+    assert!(
+        !s.eval::<bool>("return BenillaGameMenuButtonEditMode:IsEnabled() ~= 0")
+            .unwrap(),
+        "Edit Mode has no panel behind it and must read that way"
+    );
     for name in [
         "GameMenuButtonOptions",
+        "BenillaGameMenuButtonSupport",
         "GameMenuButtonMacros",
         "GameMenuButtonLogout",
         "GameMenuButtonQuit",
@@ -694,23 +707,34 @@ fn backpack() -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            use_fork: Default::default(),
+            item_class: None,
             duration_ms: None,
             petition: None,
             already_bound: false,
+            occupied_seats: None,
+            bonding: 0,
+            use_spell: 0,
             bar_placeable: true,
+            consumable: false,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 1,
             quality: Some(1),
+            inventory_type: 0,
             item_id: 117,
             link: Some("|cffffffff|Hitem:117|h[Tough Jerky]|h|r".into()),
-            locked: false,
+            guid: 0x714,
             equip_slots: Vec::new(),
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     ContainerState {

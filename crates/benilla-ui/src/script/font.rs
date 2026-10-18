@@ -3,8 +3,7 @@
 //!
 //! The reference's class is `CSimpleFont` (`0x87a454`). Its method table (`0x87c7c8`) has 22
 //! entries (`mov edx,0x16` at `0x7a10d5`), and its lookup `0x7a1100` has no base-class fallback.
-//! All are here but the `SetSpacing` pair ([`install`]); `CopyFontObject` is the one a FontString
-//! lacks. A named font is published by `0x783870` through `SetName 0x784150` and `CreateLuaHandle
+//! All are here; `CopyFontObject` is the one a FontString lacks. A named font is published by `0x783870` through `SetName 0x784150` and `CreateLuaHandle
 //! 0x701bd0`, which leaves a non-nil `_G[name]` alone (`0x701cb8`).
 //!
 //! A setter repaints every FontString that inherits the font. The reference links dependents into
@@ -27,7 +26,7 @@ use super::binding_abi;
 use super::object::publish_global;
 use crate::justify;
 
-use super::{FontObject, FontShadow, Model, Outline, RegionData};
+use super::{FontObject, FontShadow, Model, RegionData};
 
 /// The shared metatable of every font-object handle.
 const REG_FONT_META: &str = "__benilla_font_meta";
@@ -108,8 +107,8 @@ fn resolve_required(verb: &str, v: &Value) -> mlua::Result<String> {
 /// on the source's held-value bits (`+0x38`, the merge `0x770910`), so an empty `CreateFont` font
 /// changes nothing.
 ///
-/// The outline is always copied, as [`Outline`] has no unset state; only an empty `CreateFont` font
-/// on an outlined FontString differs from the reference, clearing the outline.
+/// The outline is always copied, as [`Outline`](super::Outline) has no unset state; only an empty
+/// `CreateFont` font on an outlined FontString differs from the reference, clearing the outline.
 pub(crate) fn repaint(d: &mut RegionData, fo: &FontObject) {
     let ex = d.font_explicit;
     if !ex.face {
@@ -124,6 +123,7 @@ pub(crate) fn repaint(d: &mut RegionData, fo: &FontObject) {
     }
     if !ex.outline {
         d.outline = fo.outline;
+        d.monochrome = fo.monochrome;
     }
     if !ex.shadow {
         if let Some(s) = fo.shadow {
@@ -132,7 +132,7 @@ pub(crate) fn repaint(d: &mut RegionData, fo: &FontObject) {
     }
     if !ex.color {
         if let Some(c) = fo.color {
-            d.vertex_color = Some(c);
+            d.set_vertex_color(Some(c));
         }
     }
     if !ex.justify_h {
@@ -143,6 +143,13 @@ pub(crate) fn repaint(d: &mut RegionData, fo: &FontObject) {
     if !ex.justify_v {
         if let Some(j) = fo.justify_v {
             d.justify.set_v(j);
+        }
+    }
+    // Copied as given: a FontString's reader clamps it, as its setter `0x772240` does at the merge
+    // (`0x7708fd`).
+    if !ex.spacing {
+        if let Some(sp) = fo.spacing {
+            d.spacing = sp;
         }
     }
 }
@@ -185,10 +192,6 @@ fn read(lua: &Lua, this: &Table) -> mlua::Result<FontObject> {
 // ── install: the method table, the metatable and CreateFont ──────────────────────────────────
 
 /// Build the font-object method table and metatable, and register `CreateFont`.
-///
-/// Deviation: `SetSpacing`/`GetSpacing` are absent, because nothing renders line spacing (the line
-/// pitch is the font height): a missing method raises and names itself, where a stored, undrawn
-/// value would fail silently.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.set_named_registry_value(REG_FONT_WRAPPERS, lua.create_table()?)?;
 
@@ -239,29 +242,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // ── face ────────────────────────────────────────────────────────────────────────────────
-    // SetFont(path, height [, flags]) → 1, or nil when the font file fails to load, which does not
-    // raise. Deviation: any non-empty path answers 1, because the atlas falls back per face and no
-    // load fails; an empty one answers nil.
+    // SetFont(path, height [, flags]) → 1, or nil when the font fails to load, which does not raise
+    // and writes nothing: an empty path, one the host's probe refuses, or a height of 0 or less.
     m.set(
         "SetFont",
         lua.create_function(
-            |lua, (this, file, height, flags): (Table, Value, Value, Option<String>)| {
-                // The argument gate the FontString and EditBox tables share (`0x79f210`); a
-                // missing argument raises (`0x87c69c`).
-                let (path, height) = super::font_block::set_font_args(&file, &height, "Font")?;
-                let ok = !path.is_empty();
+            |lua, (this, file, height, flags): (Table, Value, Value, Value)| {
+                // The argument gate every kind shares (`0x79f210`); a bad path or height raises
+                // (`0x87c69c`), and anything but a string or a number is no flags.
+                let super::font_block::FontArgs {
+                    path,
+                    height,
+                    flags,
+                    monochrome,
+                } = super::font_block::set_font_args(lua, &this, &file, &height, &flags)?;
+                if !super::font_block::instance_loads(lua, &path, height) {
+                    return Ok(Value::Nil);
+                }
                 edit(lua, &this, |fo| {
-                    if ok {
-                        fo.font = Some(path);
-                    }
+                    fo.font = Some(path);
+                    fo.outline = flags;
+                    fo.monochrome = monochrome;
                     fo.height = Some(height);
-                    if let Some(f) = flags {
-                        // The Lua flag spelling (`OUTLINE`, `THICKOUTLINE`), not the XML
-                        // attribute's (`NORMAL`, `THICK`).
-                        fo.outline = Outline::flags(&f);
-                    }
                 })?;
-                Ok(if ok { Value::Number(1.0) } else { Value::Nil })
+                Ok(Value::Number(1.0))
             },
         )?,
     )?;
@@ -284,16 +288,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetTextColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let a = super::object::alpha_f32(lua, &a);
                 let (r, g, b) = (
-                    super::object::as_f32(&r),
-                    super::object::as_f32(&g),
-                    super::object::as_f32(&b),
+                    super::object::tonumber_f32(lua, &r),
+                    super::object::tonumber_f32(lua, &g),
+                    super::object::tonumber_f32(lua, &b),
                 );
-                edit(lua, &this, |fo| {
-                    let keep = fo.color.map_or(1.0, |c| c[3]);
-                    fo.color = Some([r, g, b, a.unwrap_or(keep)]);
-                })
+                // Alpha is staged 1.0 (`0x79f59b`) and never read back, so a bare colour call
+                // resets it.
+                edit(lua, &this, |fo| fo.color = Some([r, g, b, a]))
             },
         )?,
     )?;
@@ -325,17 +329,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetShadowColor",
         lua.create_function(
             // Shape C on r, g, b (`Font:SetShadowColor 0x79f730`): never raises.
-            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let a = super::object::alpha_f32(lua, &a);
                 let (r, g, b) = (
-                    crate::script::object::as_f32(&r),
-                    crate::script::object::as_f32(&g),
-                    crate::script::object::as_f32(&b),
+                    crate::script::object::tonumber_f32(lua, &r),
+                    crate::script::object::tonumber_f32(lua, &g),
+                    crate::script::object::tonumber_f32(lua, &b),
                 );
                 edit(lua, &this, |fo| {
                     let offset = fo.shadow.map_or([0.0, 0.0], |s| s.offset);
                     fo.shadow = Some(FontShadow {
                         offset,
-                        color: [r, g, b, a.unwrap_or(1.0)],
+                        color: [r, g, b, a],
                     });
                 })
             },
@@ -368,6 +373,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let o = read(lua, &this)?.shadow.map_or([0.0, 0.0], |s| s.offset);
             Ok((o[0], o[1]))
         })?,
+    )?;
+
+    // ── line spacing ────────────────────────────────────────────────────────────────────────
+    // The shared pair (`0x7a09f0` → `0x79fb40`, `0x7a0ab0` → `0x79fbe0`): `+0x50` as given, a
+    // negative included; a FontString that inherits it clamps it.
+    m.set(
+        "SetSpacing",
+        lua.create_function(|lua, (this, v): (Table, Value)| {
+            let sp = super::font_block::spacing_arg(lua, &this, &v)?;
+            edit(lua, &this, |fo| fo.spacing = Some(sp))
+        })?,
+    )?;
+    m.set(
+        "GetSpacing",
+        lua.create_function(|lua, this: Table| Ok(read(lua, &this)?.spacing.unwrap_or(0.0)))?,
     )?;
 
     // ── justification ───────────────────────────────────────────────────────────────────────
@@ -437,6 +457,18 @@ fn copy_from(lua: &Lua, this: &Table, other: &Value, verb: &str) -> mlua::Result
         })?
     };
     edit(lua, this, |fo| *fo = paint)
+}
+
+/// The font a new plate or chat bubble takes: `FrameScript_GetText` on `NAMEPLATE_FONT`
+/// (`0x703bf0`; plates `0x7cb3ee`/`0x7cb490`, bubbles `0x4b0b36`). Its `_G[key]` arm (`0x703c12` →
+/// `0x704350`) gates on `lua_isstring` (`0x6f3510`) and reads `lua_tostring` (`0x6f3690`), so a
+/// string or a number answers its text and any other value the shared "". `None` is that empty
+/// path, which `SetFont` rejects (`0x44d05c`, `0x44d040` answers 0) and leaves the FontString with
+/// no font.
+pub(super) fn nameplate_font(lua: &Lua) -> Option<String> {
+    let value = lua.globals().get::<Value>("NAMEPLATE_FONT").ok()?;
+    let text = lua.coerce_string(value).ok()??;
+    Some(text.to_string_lossy()).filter(|s| !s.is_empty())
 }
 
 /// `CreateFont(name)`: mint a font object, publish it as the global `name` and return it; addons

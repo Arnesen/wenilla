@@ -16,6 +16,21 @@ fn painted(s: &mut UiScript) -> Vec<String> {
         .collect()
 }
 
+/// The drawn font strings' texts, in draw order.
+fn written(s: &mut UiScript) -> Vec<String> {
+    s.resolve();
+    let mut texts: Vec<(u128, String)> = s
+        .extract()
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Text { text: Some(t), .. } => Some((q.z, t.clone())),
+            _ => None,
+        })
+        .collect();
+    texts.sort_by_key(|&(z, _)| z);
+    texts.into_iter().map(|(_, t)| t).collect()
+}
+
 fn level(s: &mut UiScript, frame: &str) -> i64 {
     s.eval::<i64>(&format!("return {frame}:GetFrameLevel()"))
         .unwrap()
@@ -151,6 +166,74 @@ fn a_raise_is_top_occupied_level_plus_one_after_compaction() {
         painted(&mut s),
         vec!["Board.blp".to_string(), "Dialog.blp".to_string()],
         "the dialog is now in front"
+    );
+}
+
+/// `board_and_dialog` plus `Hidden`: overlapping both, hidden before its level is set to 20, and
+/// never shown. The stratum's bound `bucket+0x8` grows only on a visible link (`0x764887`), so it
+/// is 6 here, from `Board`.
+fn board_dialog_and_hidden_twenty() -> UiScript {
+    let mut s = board_and_dialog();
+    s.run(
+        r#"
+        Hidden = CreateFrame("Frame", "Hidden")
+        Hidden:Hide()
+        Hidden:SetFrameLevel(20)
+        Hidden:SetPoint("BOTTOMLEFT", 250, 250)
+        Hidden:SetWidth(300); Hidden:SetHeight(300)
+        Hidden:CreateTexture(nil, "ARTWORK"):SetTexture("Hidden.blp")
+        Dialog:SetToplevel(true)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    s
+}
+
+/// The compaction examines only the levels below the stratum's bound (`0x764f4c`, `0x764fcf`), so
+/// a hidden frame at level 20, above the visible high-water, is neither counted nor moved: the
+/// raise gives 1, 20, 2, and the frame, shown later, still draws over the dialog.
+#[test]
+fn a_raise_leaves_a_hidden_frame_above_the_visible_high_water_where_it_is() {
+    let mut s = board_dialog_and_hidden_twenty();
+    s.run("Dialog:Show()").unwrap();
+    assert_eq!(
+        (
+            level(&mut s, "Board"),
+            level(&mut s, "Hidden"),
+            level(&mut s, "Dialog")
+        ),
+        (1, 20, 2)
+    );
+    s.run("Hidden:Show()").unwrap();
+    assert_eq!(level(&mut s, "Hidden"), 20, "showing re-levels nothing");
+    assert_eq!(
+        painted(&mut s),
+        vec!["Board.blp", "Dialog.blp", "Hidden.blp"],
+        "the shown frame draws over the dialog"
+    );
+}
+
+/// A visible link at a high level grows the bound (`0x764882`-`0x764887`), so the next compaction
+/// reaches it: `Hidden` shown at 20 is packed with the rest, and the raise lands above it.
+#[test]
+fn a_frame_shown_at_a_high_level_raises_the_bound_for_the_next_raise() {
+    let mut s = board_dialog_and_hidden_twenty();
+    s.run("Dialog:Show()").unwrap();
+    s.run("Hidden:Show()").unwrap();
+    s.run("Dialog:Raise()").unwrap();
+    assert_eq!(
+        (
+            level(&mut s, "Board"),
+            level(&mut s, "Hidden"),
+            level(&mut s, "Dialog")
+        ),
+        (0, 2, 3),
+        "{{1, 2, 20}} pack to [0, 3) and the dialog takes the bound, above Hidden"
+    );
+    assert_eq!(
+        painted(&mut s),
+        vec!["Board.blp", "Hidden.blp", "Dialog.blp"]
     );
 }
 
@@ -701,6 +784,63 @@ fn a_raise_with_a_hidden_child_keeps_the_windows_own_siblings_level() {
         level(&mut s, "Body"),
         "two children of one parent are level with each other — the raise's compaction may not \
          split them just because one of them was hidden when it ran"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The raise's compaction relinks each moved visible frame through `0x76a4f0` (`0x764fb6`), in
+/// creation order (`0x764f80`), so two frames sharing a shifted level swap when the first-created
+/// was linked last: the later link draws on top, and the hit sweep probes the earlier link first.
+/// Their font strings show it: a layer's textures draw sorted by texture (`0x7731a0`), its font
+/// strings in link order.
+#[test]
+fn a_compaction_relinks_a_shared_level_in_creation_order() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        function Square(name, x, y, size)
+            local f = CreateFrame("Frame", name)
+            f:SetPoint("BOTTOMLEFT", x, y)
+            f:SetWidth(size); f:SetHeight(size)
+            f:EnableMouse(true)
+            local t = f:CreateFontString(nil, "ARTWORK"); t:SetFont("Fonts\\FRIZQT__.TTF", 12)
+            t:SetAllPoints(f); t:SetText(name)
+            return f
+        end
+        Square("First", 100, 100, 200):SetFrameLevel(3)
+        Square("Second", 150, 150, 200):SetFrameLevel(3)
+        First:Hide(); First:Show()          -- the first-created is linked last
+        Top = Square("Top", 320, 320, 100)  -- overlaps Second alone, under it at level 0
+        Top:SetToplevel(true)
+        Top:Hide()
+        "#,
+    )
+    .unwrap();
+    // Inside First and Second, outside Top.
+    let (x, y) = (200.0, 200.0);
+    assert_eq!(
+        written(&mut s),
+        vec!["Second", "First"],
+        "before: the later link, First, draws on top"
+    );
+    assert_eq!(s.hit_test_name(x, y).as_deref(), Some("Second"));
+
+    s.run("Top:Show()").unwrap();
+    assert_eq!(
+        (level(&mut s, "First"), level(&mut s, "Second")),
+        (1, 1),
+        "the compaction shifted their level"
+    );
+    assert_eq!(
+        written(&mut s),
+        vec!["First", "Second", "Top"],
+        "after: relinked in creation order, Second draws on top"
+    );
+    assert_eq!(
+        s.hit_test_name(x, y).as_deref(),
+        Some("First"),
+        "and First, the earlier link now, takes the click"
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

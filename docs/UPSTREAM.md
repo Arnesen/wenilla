@@ -87,16 +87,21 @@ The recurring ones and the rule for each:
 
 | file | our carry | resolution |
 |---|---|---|
-| `benilla-app/src/net/io.rs` | `dispatch()` extracted; native/wasm split around the spawn | keep the split, take upstream's arms |
+| `benilla-app/src/net/io.rs` | the sequencer is `async` (`sequencer`, `run`, `world`, `stream`, the parks through `wake()`), under `block_on` on a thread natively and `spawn_local` on wasm; `dispatch()` extracted from `writer_loop`; the park tick is `io/park_timer.rs` | take upstream's file and re-apply the transform: each blocking call `.await`s its `_async` twin, each `select!` becomes a `wake()` match, park and reply channels are `async_channel`; lift upstream's arms into `dispatch()` |
+| `benilla-app/src/net.rs` (`ParkSender`), `net/io/{fake,cycle_tests}.rs` | the park and login channels are `async_channel`, sent with `try_send` | keep ours; upstream's tests that build a park or login sender need `async_channel::unbounded()` |
 | `benilla-app/src/net.rs` | `bevy::platform::time::Instant` (std's panics on wasm) | keep ours |
-| `benilla-protocol/…/world/session.rs` | `recv_async().await` | keep ours, take upstream's new fields |
+| `benilla-protocol/…/world/session.rs` | `recv_async().await`, `_async` twins of every reading verb, over `transport::Conn` (`link_state` for the park's look at the socket, `rejoin` for the split halves) | take upstream's file and re-apply the transform |
 | `benilla-app/src/sound/mixer.rs`, `sound/mod.rs` | kira backend per target: upstream's `OutputBackend` natively, our `sound/web_backend.rs` (Web Audio over cpal 0.17) on wasm32 | keep the split; kira's own cpal backend is on cpal 0.18, which cannot share the lockfile (`alsa-sys`) |
 | `benilla-app/src/sound/zone.rs`, `sound/web_load.rs` | soundscape loading off the frame on wasm: the music load, and the ambience bed's `OpeningBed` holding a `web_load::Pending` where native holds an IO-pool task | keep ours |
 | `benilla-app/src/cvars/mod.rs`, `cvars/browser.rs` | the page's URL overrides (wasm-only), `local_state` reads | follow upstream's `REGISTERED` shape |
 | `benilla-app/src/bindings.rs` | `BindingsState::synth_*`: the bridge presses a command by name through its `Bindings.xml` body, latched apart from the keys | keep ours |
 | `benilla-app/src/lib.rs`, `benilla-app/Cargo.toml` | plugin registration, wasm-only deps | keep ours plus upstream's additions |
 | `benilla-app/src/ui_script/lifecycle.rs`, `manifest.rs` | the entry load sliced across frames (`run_pending_entry_load`, `entry_prepare`/`entry_finish`/`entry_close`), stepping the core's `FrameXML.toc` rows through `manifest::load_core_missing`/`close_core` | keep the split; lift upstream's one-shot body into the three, and thread any new load input (`EntryInputs`) through the sliced path too |
-| `benilla-app/src/local_state.rs`, `ui_saved.rs`, `ui_script/addons.rs`, `login/mod.rs` | state files through `local_state::read*`/`write_atomic*` (localStorage on the page) | keep ours; a new `std::fs` read of a state file takes the `local_state` twin |
+| `benilla-app/src/local_state.rs`, `ui_saved.rs`, `ui_script/addons.rs`, `glue_session/login.rs` | state files through `local_state::read*`/`write_atomic*` (localStorage on the page) | keep ours; a new `std::fs` read of a state file takes the `local_state` twin |
+| `benilla-app/src/glue_session/{login,roster,realm}.rs`, `run_mode.rs` | the `WOW_USER`/`WOW_PASS`/`WOW_CHAR`/`WOW_REALM` fast paths through `webenv::var` (the page's query string) | keep ours wherever upstream moves them |
+| `benilla-app/src/sound/glue.rs`, `sound/cinematic.rs`, `sound/zone.rs` | wasm32 streams are fetched and decoded by the browser (`web_load`) and start when they land | keep the split; take upstream's native arm as is |
+| `benilla-assets/src/lib.rs`, `benilla-formats/src/chain.rs` | `MpqAssetReader::read_bytes` per target (`fetch` on wasm); the web `Chain` mirrors the native one's API (`locale()` included) | keep ours; a new `Chain` method needs its web twin |
+| `benilla-lua/src/vm.rs` | `Frame`'s 64-byte layout assert gated to 64-bit pointers | keep ours |
 | `benilla-protocol/src/{auth,lib}.rs`, `world/{mod,reader,session,writer/mod}.rs`, `tests/auth.rs` | the awaited readers over `transport::Conn` | keep ours; upstream's edits there have been comment-only so far |
 | `AGENTS.md`, `README.md`, `.gitignore` | the fork's map and front page | keep ours; upstream's own map is `docs/METHOD.md` and `docs/MAP.md` |
 

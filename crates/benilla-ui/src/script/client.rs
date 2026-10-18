@@ -4,22 +4,34 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::Model;
+use super::{Model, UiScript};
 
 /// The 1.12.1 client's build identity, as the strings in its binary spell it.
-const VERSION: &str = "1.12.1";
-const BUILD: &str = "5875";
-const BUILD_DATE: &str = "Sep 19 2006";
+pub(super) const VERSION: &str = "1.12.1";
+pub(super) const BUILD: &str = "5875";
+pub(super) const BUILD_DATE: &str = "Sep 19 2006";
+
+/// The release client's debug globals that do nothing (`0x83dec0`-`0x83ded0`, `0x83df80`-`0x83dfa0`).
+const DEBUG_TOGGLES: [&str; 8] = [
+    "ToggleTris",
+    "TogglePortals",
+    "ToggleCollision",
+    "ToggleCollisionDisplay",
+    "TogglePlayerBounds",
+    "TogglePerformanceValues",
+    "ResetPerformanceValues",
+    "TogglePerformanceDisplay",
+];
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // `GetLocale()` (glue `0x46ce40`, in-game `0x48d8b0`) returns one string, `enUS`, as benilla
-    // is enUS-only. `IsMacClient()` (`0x48c980`) returns one nil, the PC build's answer, which
+    // `GetLocale()` (glue `0x46ce40`, in-game `0x48d8b0`) returns one string, the name at the locale
+    // index ([`locale_name`]). `IsMacClient()` (`0x48c980`) returns one nil, the PC build's answer, which
     // takes FrameXML's PC key-label arm.
     g.set(
         "GetLocale",
-        lua.create_function(|lua, ()| lua.create_string("enUS"))?,
+        lua.create_function(|lua, ()| lua.create_string(locale_name(lua)))?,
     )?;
     g.set("IsMacClient", lua.create_function(|_, ()| Ok(Value::Nil))?)?;
     // The PC build's other two platform answers: `IsWindowsClient()` (`0x48c960`) pushes the
@@ -40,6 +52,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|_, _: MultiValue| Ok(MultiValue::new()))?,
     )?;
 
+    // The eight debug toggles, each returning zero values and reading no argument:
+    // `ToggleTris`, `TogglePortals`, `ToggleCollision`, `ToggleCollisionDisplay` and
+    // `TogglePlayerBounds` are `xor eax,eax; ret` (`0x489330`-`0x489360`, `0x489440`);
+    // `TogglePerformanceValues` and `ResetPerformanceValues` call a bare `ret` (`0x489420`,
+    // `0x489430`); `TogglePerformanceDisplay` (`0x489400`) flips `[0x885644]`, which nothing reads.
+    for name in DEBUG_TOGGLES {
+        g.set(
+            name,
+            lua.create_function(|_, _: MultiValue| Ok(MultiValue::new()))?,
+        )?;
+    }
+
     // `OpeningCinematic()` (`0x48c8c0`): sends an empty `CMSG_OPENING_CINEMATIC` (`0xf9`,
     // `0x48c8c9` into `0x5ab630`) and returns nothing; the server may answer with
     // `SMSG_TRIGGER_CINEMATIC`. Arguments are ignored.
@@ -53,36 +77,55 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // Three setters whose state has no reader here, so each takes its argument as the reference
-    // does, never raising, and stores nothing; all return zero values.
-    // - `SetEuropeanNumbers(flag)` (`0x48dec0`): `GetBoolOrDefault(1, true)` into `[0xcf4d24]`,
-    //   which turns on `FontString:SetText`'s digit-group pass (`0x771daa` into `0x771c50`).
-    //   benilla's `SetText` has no such pass.
-    // - `SetLayoutMode(mode)` (`0x488540`): a number truncates into the UI root's `+0xcf8`, anything
-    //   else stores 1; read by the root's mouse handler (`0x766301`) for a frame-dragging mode
-    //   benilla does not build.
-    // - `SetConsoleKey(key)` (`0x488640`): a one-character or named key becomes the console's
-    //   toggle key (`0x63cb00`), a non-string the default `0x30e`. benilla has no console screen.
-    for name in ["SetEuropeanNumbers", "SetLayoutMode", "SetConsoleKey"] {
-        g.set(
-            name,
-            lua.create_function(|_, _: MultiValue| Ok(MultiValue::new()))?,
-        )?;
-    }
+    // `SetLayoutMode([mode])` (`0x488540`): a number or numeric string (`0x6f34d0`) truncates
+    // (`0x40a2b0`, [`super::binding_abi::ftol`]) into the UI root's `+0xcf8`, anything else
+    // stores 1 (`0x488573`); never raises, returns zero values. The press handler reads it
+    // (`0x766301`).
+    g.set(
+        "SetLayoutMode",
+        lua.create_function(|lua, v: Value| {
+            let mode = lua.coerce_number(v)?.map_or(1, super::binding_abi::ftol);
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .layout_mode = mode;
+            Ok(())
+        })?,
+    )?;
+
+    // `SetConsoleKey(key)` (`0x488640`): a one-character or named key becomes the console's
+    // toggle key (`0x63cb00`), a non-string the default `0x30e`. Its state has no reader here, so
+    // it takes any argument, never raises, stores nothing and returns zero values: benilla has no
+    // console screen.
+    g.set(
+        "SetConsoleKey",
+        lua.create_function(|_, _: MultiValue| Ok(MultiValue::new()))?,
+    )?;
+
+    // `SetEuropeanNumbers([flag])` (`0x48dec0`): `GetBoolOrDefault(1, true)` ([`bool_or_default`],
+    // `0x6f1c10`) into `[0xcf4d24]` (`0x771c40`), which makes `SetText` swap the dots and commas of
+    // its numbers (`0x771d9f`; [`crate::strings::swap_number_separators`]). Returns zero values.
+    g.set(
+        "SetEuropeanNumbers",
+        lua.create_function(|lua, args: MultiValue| {
+            let on = super::binding_abi::bool_or_default(args.front(), true);
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .european_numbers = on;
+            Ok(())
+        })?,
+    )?;
 
     // `FrameXML_Debug([v])` (`0x488440`): get-or-set of the XML loader's trace flag `[0xceea30]`,
-    // which gates `crate::loader::LoadReport::traces`. A Lua-truthy argument sets it, truncated
-    // toward zero (`0x40a2b0`), so `FrameXML_Debug(0)` clears it; nil or false only reads. It
-    // returns the flag after the call.
+    // which gates `crate::loader::LoadReport::traces`. The set arm runs only when `lua_isnumber`
+    // (`0x6f34d0`, tested at `0x48845d`) accepts the argument, a number or a numeric string, and
+    // stores it truncated toward zero (`0x40a2b0`), so `FrameXML_Debug(0)` clears it; any other
+    // argument only reads. It returns the flag after the call.
     g.set(
         "FrameXML_Debug",
         lua.create_function(|lua, v: Value| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let truthy = !matches!(v, Value::Nil | Value::Boolean(false));
-            if truthy {
-                // A value that will not coerce is 0, as `lua_tonumber` (`0x6f3620`) answers.
-                let n = lua.coerce_number(v)?.unwrap_or(0.0);
-                model.framexml_debug.set(n.trunc() as i32);
+            if let Some(n) = lua.coerce_number(v)? {
+                model.framexml_debug.set(super::binding_abi::ftol(n));
             }
             Ok(model.framexml_debug.get())
         })?,
@@ -125,16 +168,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             }
             // The chunk name is the source bytes as given (1).
-            let name = String::from_utf8_lossy(&raw).into_owned();
-            if let Err(e) = lua
+            let name = raw.to_vec();
+            // The chunk and every call it makes run under `[0x83de24]` (`0x48b9bb`), the macro
+            // context the protected-action gate refuses ([`super::taint`]).
+            let ran = lua
                 .load(&*raw)
                 .set_name(name)
                 .set_mode(mlua::ChunkMode::Text)
-                .exec()
-            {
+                .into_function()
+                .and_then(|chunk| {
+                    super::taint::tag(lua, &chunk, &super::taint::Context::Macro);
+                    chunk.call::<()>(())
+                });
+            if let Err(e) = ran {
+                let bare = super::stdlib::lua_message(&e);
                 lua.app_data_mut::<crate::script::Model>()
                     .expect("model")
-                    .record_script_error(super::stdlib::lua_message(&e));
+                    .record_error(bare, super::model::HandlerArg::Error(e));
             }
             Ok(())
         })?,
@@ -241,6 +291,50 @@ impl super::UiScript {
     }
 }
 
+impl UiScript {
+    /// `SetEuropeanNumbers`'s switch `[0xcf4d24]`, a client global no UI rebuild resets.
+    pub fn european_numbers(&self) -> bool {
+        self.model_ref().european_numbers
+    }
+
+    /// Seat the switch a dying VM held in the VM that replaces it.
+    pub fn set_european_numbers(&mut self, on: bool) {
+        self.model_mut().european_numbers = on;
+    }
+
+    /// The client's locale index, `[0xc0e080]`.
+    pub fn locale(&self) -> usize {
+        self.model_ref().locale
+    }
+
+    /// Seat the install's locale index, which start-up reads from `Wow.ini` once (`0x402562`); an
+    /// index past the table's eight names reads as 0.
+    pub fn set_locale(&mut self, index: usize) {
+        self.model_mut().locale = if index < crate::toc::LOCALES.len() {
+            index
+        } else {
+            0
+        };
+    }
+
+    /// `Wow.ini`'s `Region` as seated, 0 until the host seats the install's.
+    pub fn client_region(&self) -> i32 {
+        self.model_ref().client_region
+    }
+
+    /// Seat `Wow.ini`'s `Region`, which start-up hands the name check once (`0x402b7f`); a signed
+    /// word there, and only 1 to 5 picks a charset pair of its own.
+    pub fn set_client_region(&mut self, region: i32) {
+        self.model_mut().client_region = region;
+    }
+}
+
+/// The locale name table `0x8558a4` at the VM's locale index, `GetLocale`'s answer in either state.
+pub(super) fn locale_name(lua: &Lua) -> &'static str {
+    let index = lua.app_data_ref::<Model>().map_or(0, |m| m.locale);
+    crate::toc::LOCALES[index]
+}
+
 #[cfg(test)]
 mod tests {
     use crate::script::UiScript;
@@ -259,6 +353,25 @@ mod tests {
             3,
             "three values, never a fourth"
         );
+    }
+
+    /// `GetLocale` answers the table `0x8558a4` at the seated index in either state (in-game
+    /// `0x48d8b0`, glue `0x46ce40`); an index past the eight names reads as 0.
+    #[test]
+    fn get_locale_answers_the_seated_locale_in_game_and_in_glue() {
+        for (kind, mut s) in [
+            ("in-game", UiScript::new().unwrap()),
+            ("glue", UiScript::new_glue().unwrap()),
+        ] {
+            let locale = |s: &UiScript| s.eval::<String>("return GetLocale()").unwrap();
+            assert_eq!(locale(&s), "enUS", "{kind}: unseated");
+            s.set_locale(3);
+            assert_eq!(locale(&s), "deDE", "{kind}");
+            s.set_locale(6);
+            assert_eq!(locale(&s), "esES", "{kind}");
+            s.set_locale(8);
+            assert_eq!((s.locale(), locale(&s).as_str()), (0, "enUS"), "{kind}");
+        }
     }
 
     /// Never nil: addons index with it at file scope, and a nil index errors far from the cause.
@@ -360,9 +473,10 @@ mod tests {
         );
     }
 
-    /// The three setters never raise, whatever they are handed, and return zero values.
+    /// The two stateless setters and `SetLayoutMode` never raise, whatever they are handed, and
+    /// return zero values.
     #[test]
-    fn the_stateless_setters_take_any_argument() {
+    fn the_setters_take_any_argument() {
         let s = UiScript::new().unwrap();
         for name in ["SetEuropeanNumbers", "SetLayoutMode", "SetConsoleKey"] {
             for arg in ["", "nil", "1", "\"x\"", "{}", "\"ESCAPE\""] {
@@ -373,5 +487,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The eight debug globals exist and do nothing: an addon or a `/script` calling one with any
+    /// arguments gets zero values and no error, where an undefined global raises.
+    #[test]
+    fn the_eight_debug_toggles_exist_and_return_nothing() {
+        let s = UiScript::new().unwrap();
+        for name in super::DEBUG_TOGGLES {
+            assert_eq!(
+                s.eval::<String>(&format!("return type({name})")).unwrap(),
+                "function"
+            );
+            for args in ["", "1", "nil, {}"] {
+                assert_eq!(
+                    s.arity(&format!("{name}({args})")).unwrap(),
+                    0,
+                    "{name}({args})"
+                );
+            }
+        }
+        s.run("TogglePerformanceDisplay() TogglePerformanceDisplay() ToggleTris()")
+            .expect("a call from a script raises nothing");
+    }
+
+    /// `SetEuropeanNumbers` stores its flag (`GetBoolOrDefault(1, true)`: absent is on, nil and 0
+    /// are off) and, while it is set, a FontString's and a Button's `SetText` swap the dots and
+    /// commas of their numbers; with it off the text is stored as given. An addon sets and
+    /// reads it back through `GetText`.
+    #[test]
+    fn set_european_numbers_makes_set_text_swap_number_separators() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            local f = CreateFrame("Frame", "Owner")
+            fs = f:CreateFontString("FS", "ARTWORK"); fs:SetFont("Fonts\\FRIZQT__.TTF", 12)
+            btn = CreateFrame("Button", "Btn")
+            function Put(text)
+                fs:SetText(text)
+                btn:SetText(text)
+                return fs:GetText(), btn:GetText()
+            end
+        "#,
+        )
+        .unwrap();
+        let put =
+            |text: &str| -> (String, String) { s.eval(&format!("return Put({text:?})")).unwrap() };
+        let same = |text: &str| (text.to_string(), text.to_string());
+        assert_eq!(put("1,234.56"), same("1,234.56"), "off at boot");
+
+        s.run("SetEuropeanNumbers()").unwrap();
+        assert_eq!(put("1,234.56"), ("1.234,56".into(), "1.234,56".into()));
+        assert_eq!(put("Costs 12.50 gold"), same("Costs 12,50 gold"));
+        s.run("SetEuropeanNumbers(false)").unwrap();
+        assert_eq!(put("1,234.56"), same("1,234.56"), "false is off");
+
+        for (arg, on) in [
+            ("1", true),
+            ("0", false),
+            ("nil", false),
+            ("true", true),
+            ("\"off\"", false),
+            ("\"yes\"", true),
+            ("{}", true),
+            ("", true),
+        ] {
+            s.run(&format!("SetEuropeanNumbers({arg})")).unwrap();
+            let want = if on { "3,5" } else { "3.5" };
+            assert_eq!(put("3.5"), same(want), "SetEuropeanNumbers({arg})");
+        }
+
+        // A number argument is turned into its string first (`lua_tostring`), then swapped.
+        s.run("SetEuropeanNumbers(1) fs:SetText(2.5)").unwrap();
+        assert_eq!(s.eval::<String>("return fs:GetText()").unwrap(), "2,5");
     }
 }

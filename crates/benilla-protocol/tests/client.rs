@@ -151,6 +151,14 @@ fn client_bodies_golden() {
         hx("f0debc9a78563412"),
         "full guid body"
     );
+    // CMSG_CHAR_RENAME (0x2C7): the full guid, then the name and its NUL (`0x46b340`; vmangos
+    // `Packets/Character.cpp:31-35`).
+    assert_eq!(messages::opcode::CMSG_CHAR_RENAME, 0x02C7);
+    assert_eq!(
+        messages::char_rename(0x0000_0000_0000_0011, "Newbie"),
+        hx("11000000000000004e657762696500"),
+        "CMSG_CHAR_RENAME body"
+    );
     // CMSG_SET_SELECTION is opcode 317 (vmangos `Opcodes_1_12_1.h`).
     assert_eq!(
         messages::opcode::CMSG_SET_SELECTION,
@@ -639,6 +647,38 @@ fn creature_query_empty_subname_decodes_to_none() {
     }
 }
 
+/// `0x5588e0`: a game object key with its top bit set is a refusal, which the template cache
+/// frees a node on. It reaches the app as a refusal, never as a zeroed template.
+#[test]
+fn gameobject_query_miss_decodes_to_a_refusal_not_a_zeroed_template() {
+    let parse = |b: &[u8]| {
+        messages::parse_server(messages::opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE, b).unwrap()
+    };
+    // Entry 1731 with the top bit set, and nothing after it.
+    match decode(parse(&hx("c3060080"))).as_slice() {
+        [SessionEvent::GameObjectUnknown { entry }] => assert_eq!(*entry, 1731),
+        other => panic!("expected one GameObjectUnknown event, got {other:?}"),
+    }
+    // A hit: entry, type 3 (chest), display 259, "Chest", four empty names, 24 data dwords.
+    let mut hit = hx("c3060000030000000301000043686573740000000000");
+    hit.extend((0..24u32).flat_map(|i| (i + 1).to_le_bytes()));
+    match decode(parse(&hit)).as_slice() {
+        [SessionEvent::GameObjectInfo {
+            entry,
+            type_id,
+            display_id,
+            name,
+            data,
+        }] => {
+            assert_eq!((*entry, *type_id, *display_id), (1731, 3, 259));
+            assert_eq!(name, "Chest");
+            assert_eq!(data[0], 1);
+            assert_eq!(data[23], 24);
+        }
+        other => panic!("expected one GameObjectInfo event, got {other:?}"),
+    }
+}
+
 /// `CMSG_PING` is `u32` sequence then `u32` last RTT (reference `0x537e10`, vmangos
 /// `_HandlePing`); `SMSG_PONG` echoes the sequence.
 #[test]
@@ -672,44 +712,132 @@ fn ping_body_golden_and_pong_roundtrip() {
 /// retail capture is 12 records of `{status 2, info 1, key 0, u32 revision 0, url 0}`; status 2
 /// hides the addon from the Lua index (reference `0x51db84`).
 #[test]
-fn the_addon_info_reply_pairs_its_statuses_back_against_what_we_sent() {
+fn the_addon_info_reply_pairs_its_records_back_against_what_we_sent() {
     let capture: Vec<u8> = std::iter::repeat_n(hx("0201000000000000"), 12)
         .flatten()
         .collect();
     assert_eq!(capture.len(), 96, "the capture is 12 x 8 bytes");
     let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &capture).unwrap();
-    let ServerPacket::AddonInfo { statuses } = packet else {
+    let ServerPacket::AddonInfo { records } = packet else {
         panic!("expected AddonInfo");
     };
-    assert_eq!(statuses, vec![2u8; 12]);
+    assert_eq!(records.len(), 12);
+    assert!(records.iter().all(|r| r.status == 2
+        && r.info_provided
+        && !r.key_provided
+        && r.revision == Some(0)
+        && r.url.is_none()));
 
-    // Every stock addon comes back hidden, so the reference's AddOns list shows none of Blizzard's.
-    let hidden = messages::hidden_from_reply(&statuses, &messages::STOCK_SECURE_ADDONS);
-    assert_eq!(hidden.len(), 12);
+    // Every stock addon comes back named for what we sent in its place.
+    let named = messages::pair_with_sent(&records, &messages::STOCK_SECURE_ADDONS);
+    assert_eq!(named.len(), 12);
     assert!(
-        hidden.iter().all(|n| n.starts_with("Blizzard_")),
-        "{hidden:?}"
+        named.iter().all(|r| r.name.starts_with("Blizzard_")),
+        "{named:?}"
     );
 
-    // A record with a key and a url is 8 + 256 + 256 bytes; status 1 leaves the addon visible,
-    // only status 2 hides it.
+    // A record with a key and a url: the key is 256 bytes, the url a C string that ends at its
+    // NUL (`0x4191b0`), so the next record starts right behind it.
     let mut fat = vec![1u8, 1, 1];
     fat.extend(std::iter::repeat_n(0xABu8, 256)); // modulus
-    fat.extend([0u8; 4]); // revision
+    fat.extend(7u32.to_le_bytes()); // revision
     fat.push(1); // urlProvided
-    fat.extend(std::iter::repeat_n(b'x', 256)); // url
+    fat.extend(b"http://example.com/a\0");
+    fat.extend(hx("0201000000000000")); // a second record, the minimal form
     let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &fat).unwrap();
-    let ServerPacket::AddonInfo { statuses } = packet else {
+    let ServerPacket::AddonInfo { records } = packet else {
         panic!("expected AddonInfo");
     };
-    assert_eq!(statuses, vec![1u8], "the fat record parsed whole");
-    assert!(messages::hidden_from_reply(&statuses, &messages::STOCK_SECURE_ADDONS).is_empty());
+    assert_eq!(records.len(), 2, "the second record follows the url's NUL");
+    let r = &records[0];
+    assert_eq!(
+        (r.status, r.key_provided, r.revision, r.url.as_deref()),
+        (1, true, Some(7), Some("http://example.com/a"))
+    );
+    assert_eq!((records[1].status, records[1].url.as_deref()), (2, None));
+
+    // An empty url is a NUL alone; a url of 255 bytes plus its NUL is the longest.
+    let mut edge = vec![1u8, 0, 1, 0];
+    edge.extend(hx("0201000000000000"));
+    let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &edge).unwrap();
+    let ServerPacket::AddonInfo { records } = packet else {
+        panic!("expected AddonInfo");
+    };
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].url.as_deref(), Some(""));
+    let mut long = vec![1u8, 0, 1];
+    long.extend(std::iter::repeat_n(b'x', 255));
+    long.push(0);
+    long.extend(hx("0201000000000000"));
+    let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &long).unwrap();
+    let ServerPacket::AddonInfo { records } = packet else {
+        panic!("expected AddonInfo");
+    };
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].url.as_ref().map(String::len), Some(255));
+
+    // 256 bytes with no NUL are no string: the url reads empty and the walk ends there, though
+    // the record is applied; fewer bytes with no NUL are a truncated record.
+    let mut open = vec![1u8, 0, 1];
+    open.extend(std::iter::repeat_n(b'x', 256));
+    open.extend(hx("0201000000000000"));
+    let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &open).unwrap();
+    let ServerPacket::AddonInfo { records } = packet else {
+        panic!("expected AddonInfo");
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].url.as_deref(), Some(""));
+    let mut cut = vec![1u8, 0, 1];
+    cut.extend(std::iter::repeat_n(b'x', 100));
+    let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &cut).unwrap();
+    let ServerPacket::AddonInfo { records } = packet else {
+        panic!("expected AddonInfo");
+    };
+    assert!(records.is_empty());
+
+    // Fewer records than addons sent: the rest take the last record's status and nothing else
+    // (`0x418cb0` leaves its outputs alone at the end of the packet).
+    let named = messages::pair_with_sent(
+        &[
+            messages::AddonRecord {
+                status: 1,
+                url: Some("u".into()),
+                ..Default::default()
+            },
+            messages::AddonRecord {
+                status: 2,
+                revision: Some(4),
+                ..Default::default()
+            },
+        ],
+        &messages::STOCK_SECURE_ADDONS,
+    );
+    assert_eq!(named.len(), 12);
+    assert_eq!(named[1].revision, Some(4));
+    for r in &named[2..] {
+        assert_eq!((r.status, r.revision, r.url.as_deref()), (2, None, None));
+    }
+    assert!(messages::pair_with_sent(&[], &messages::STOCK_SECURE_ADDONS).is_empty());
+
+    // A status 0 record with no info block and no url: banned, nothing else.
+    let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &[0, 0, 0]).unwrap();
+    let ServerPacket::AddonInfo { records } = packet else {
+        panic!("expected AddonInfo");
+    };
+    assert_eq!(
+        (
+            records[0].status,
+            records[0].info_provided,
+            records[0].revision
+        ),
+        (0, false, None)
+    );
 
     let mut short = hx("0201000000000000").to_vec();
     short.extend([2u8, 1]); // a second record that stops mid-way
     let packet = messages::parse_server(messages::opcode::SMSG_ADDON_INFO, &short).unwrap();
-    let ServerPacket::AddonInfo { statuses } = packet else {
+    let ServerPacket::AddonInfo { records } = packet else {
         panic!("expected AddonInfo");
     };
-    assert_eq!(statuses, vec![2u8], "only the whole record counted");
+    assert_eq!(records.len(), 1, "only the whole record counted");
 }

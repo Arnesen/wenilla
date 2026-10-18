@@ -26,7 +26,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{BinaryType, MessageEvent, WebSocket};
 
-use super::ReadExactAsync;
+use super::{LinkState, ReadExactAsync};
 
 thread_local! {
     /// Overrides the origin the WebSocket URL is built from. Default: the page's own origin, which
@@ -210,6 +210,27 @@ impl Conn {
     pub fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()> {
         self.sock.read_timeout.set(t);
         Ok(())
+    }
+
+    /// Look at the connection without waiting: bytes already queued, else whether it closed.
+    pub fn link_state(&self) -> io::Result<LinkState> {
+        let inbox = self.sock.inbox.borrow();
+        Ok(if !inbox.buf.is_empty() {
+            LinkState::Readable
+        } else if inbox.closed {
+            LinkState::Closed
+        } else {
+            LinkState::Quiet
+        })
+    }
+
+    /// The halves [`Self::split`] made, one connection again: both hold the same socket, so the
+    /// writer's handle is kept and the reader's dropped.
+    pub fn rejoin(reader: ConnReader, writer: ConnWriter) -> Conn {
+        drop(reader.sock.take());
+        Conn {
+            sock: SendWrapper::new(writer.sock.take()),
+        }
     }
 
     /// Split into a read and a write half. There is one socket underneath (a WebSocket cannot be

@@ -5,8 +5,9 @@
 //!
 //! `NotifyInspect(unit)` sends `CMSG_INSPECT`, which also sets the server-side selection, and
 //! latches the token; the window paints without waiting for `SMSG_INSPECT`, a bare guid echo.
-//! `UNIT_INVENTORY_CHANGED` and `UNIT_LEVEL` fire for the inspected token on change, a first
-//! resolve included (`InspectPaperDollFrame.lua:2-5`, `82`).
+//! `UNIT_INVENTORY_CHANGED` fires for the inspected token on change, a first resolve included
+//! (`InspectPaperDollFrame.lua:2-5`, `82`). Its `UNIT_LEVEL` is the unit-field bridge's
+//! ([`crate::field_watch`]), fired per token on a values block that moves the level.
 
 use bevy::prelude::*;
 
@@ -15,7 +16,7 @@ use benilla_ui::script::{InspectView, InvSlotView, InventorySlots, ScriptValue, 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore};
-use crate::portrait::InspectBooth;
+use crate::query_cache::Ask;
 use crate::ui_script::UiFeed;
 
 /// The reference's `InspectFrame.unit`. The token, not the guid, is the identity: the reference
@@ -25,7 +26,7 @@ pub(crate) struct InspectTarget {
     pub(crate) token: Option<String>,
 }
 
-/// The last view pushed and level seen, per VM ([`crate::ui_script::VmMemo`]), so a `/reload`'s
+/// The last view pushed, per VM ([`crate::ui_script::VmMemo`]), so a `/reload`'s
 /// new VM gets the view re-pushed and its events re-fired.
 #[derive(Resource, Default)]
 struct InspectFeedState {
@@ -36,7 +37,6 @@ struct InspectFeedState {
 #[derive(Default)]
 struct InspectFeedMemo {
     last: Option<InspectView>,
-    last_level: Option<u32>,
 }
 
 pub(crate) struct InspectUiPlugin;
@@ -59,7 +59,7 @@ fn inspect_slot_view(
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
-    commands: &NetCommands,
+    ask: Ask<'_>,
     slot0: u8,
 ) -> Option<InvSlotView> {
     let entry = store.0.player_visible_item_entry(slot0)?;
@@ -68,7 +68,7 @@ fn inspect_slot_view(
     // servers leave empty.
     let roll = store.0.player_visible_item_properties(slot0);
     // By entry alone (guid 0), as the reference's item cache asks: there is no item object.
-    let (name, quality, display) = match items.template(entry, 0, commands) {
+    let (name, quality, display) = match items.template(entry, 0, ask) {
         Some(t) => (
             Some(rolls.name(&t.name, roll)),
             t.quality,
@@ -108,7 +108,6 @@ fn feed_inspect(
     script: Option<NonSendMut<UiScript>>,
     mut target: ResMut<InspectTarget>,
     mut feed: ResMut<InspectFeedState>,
-    mut booth: ResMut<InspectBooth>,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     // `SpellItemEnchantment` names the enchant lines, `ItemRandomProperties` the roll suffix.
@@ -129,19 +128,21 @@ fn feed_inspect(
     let memo = feed.vm.get(&script);
 
     // `NotifyInspect(unit)`: send `CMSG_INSPECT` for the unit's guid and latch its token.
+    let mut notified = false;
     for token in script.take_inspect_notifies() {
         match crate::ui_unit::player_token_guid(&token, &selection, &group) {
             Some(guid) => {
                 debug!("inspect: {token:?} -> {guid:#x}; sending CMSG_INSPECT");
                 let _ = commands.0.send(ClientCommand::Inspect { target: guid });
                 target.token = Some(token);
+                notified = true;
             }
             None => {
                 debug!("inspect: {token:?} did not resolve to a player guid — nothing sent");
             }
         }
     }
-    // `ClearInspectPlayer()`, from `InspectFrame_OnHide`: the resolve stops and the booth empties.
+    // `ClearInspectPlayer()`, from `InspectFrame_OnHide`: the resolve stops.
     if script.take_inspect_clear() {
         target.token = None;
     }
@@ -155,23 +156,22 @@ fn feed_inspect(
     });
 
     let Some((token, guid, entity)) = resolved else {
-        // Nothing inspected, or the target is not streamed: clear the view and empty the booth.
+        // Nothing inspected, or the target is not streamed: clear the view.
         if memo.last.is_some() {
             script.set_inspect(None);
             memo.last = None;
-            memo.last_level = None;
         }
-        booth.unit = None;
         return;
     };
-
-    booth.unit = Some(entity);
-    // The stock Lua turns the doll through the pane (`InspectModelFrame:SetRotation`).
-    booth.yaw = script.model_pane_facing("InspectModelFrame");
 
     let Ok(store) = stores.get(entity) else {
         return;
     };
+    // The frame's show and a new inspectee are its slots' getter calls, whose lookups pass a
+    // callback (`0x4c83ce`); the frames between only see a slot change, which the visible item's
+    // own lookup asked (`0x5ed764`).
+    let shown = notified || memo.last.as_ref().map(|v| v.guid) != Some(guid);
+    let ask = Ask::at(shown, &commands);
     let mut slots: InventorySlots = Default::default();
     for slot in 1..=19u8 {
         slots[usize::from(slot)] = inspect_slot_view(
@@ -182,7 +182,7 @@ fn feed_inspect(
                 enchants: catalogs.0.as_deref(),
                 props: catalogs.1.as_deref(),
             },
-            &commands,
+            ask,
             slot - 1,
         );
     }
@@ -200,9 +200,128 @@ fn feed_inspect(
             vec![ScriptValue::Str(token.clone())],
         );
     }
-    let level = store.0.unit_level();
-    if memo.last_level != level {
-        memo.last_level = level;
-        script.fire_event("UNIT_LEVEL", vec![ScriptValue::Str(token)]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// The inspect's show and a new inspectee stand for the slots' getter calls, whose lookups
+    /// pass a callback (`0x4c83ce`): a refused entry is asked by no frame after it, only by the
+    /// next inspect.
+    #[test]
+    fn a_refused_inspected_item_is_asked_by_the_next_inspect_never_by_a_frame() {
+        use benilla_protocol::field::FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR;
+        // A player guid with a head piece showing.
+        const MATE: u64 = 0x2001;
+        let mut app = App::new();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<InspectTarget>()
+            .init_resource::<InspectFeedState>()
+            .init_resource::<Items>()
+            .init_resource::<GuidIndex>()
+            .insert_resource(crate::target::Selection {
+                guid: Some(MATE),
+                ..Default::default()
+            })
+            .init_resource::<crate::ui_party::GroupState>()
+            .add_systems(Update, feed_inspect);
+        let mate = app
+            .world_mut()
+            .spawn(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 2, 955),
+            ])))
+            .id();
+        app.world_mut()
+            .resource_mut::<GuidIndex>()
+            .0
+            .insert(MATE, mate);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        let inspect = |app: &mut App| {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .run(r#"NotifyInspect("target")"#)
+                .unwrap();
+            app.update();
+        };
+        let asked = |rx: &crossbeam_channel::Receiver<ClientCommand>| {
+            crate::query_cache::queries(rx)
+                .into_iter()
+                .filter(|c| matches!(c, ClientCommand::ItemQuery { entry: 955, .. }))
+                .count()
+        };
+        inspect(&mut app);
+        assert_eq!(asked(&rx), 1);
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(955, None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert_eq!(asked(&rx), 0, "no frame asks a refusal");
+        inspect(&mut app);
+        assert_eq!(asked(&rx), 1, "the next inspect asks again");
+    }
+
+    /// The inspected unit's level is the bridge's to announce: the feed fires no `UNIT_LEVEL`,
+    /// at the first resolve or on a change.
+    #[test]
+    fn the_inspect_feed_fires_no_level_event() {
+        const MATE: u64 = 0x2001;
+        const UNIT_FIELD_LEVEL: u16 = 34;
+        let mut app = App::new();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        std::mem::forget(rx);
+        app.insert_resource(NetCommands(tx))
+            .insert_resource(InspectTarget {
+                token: Some("target".into()),
+            })
+            .init_resource::<InspectFeedState>()
+            .init_resource::<Items>()
+            .init_resource::<GuidIndex>()
+            .insert_resource(crate::target::Selection {
+                guid: Some(MATE),
+                ..Default::default()
+            })
+            .init_resource::<crate::ui_party::GroupState>();
+        let mate = app
+            .world_mut()
+            .spawn(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (UNIT_FIELD_LEVEL, 10),
+            ])))
+            .id();
+        app.world_mut()
+            .resource_mut::<GuidIndex>()
+            .0
+            .insert(MATE, mate);
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = 0
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UNIT_LEVEL")
+                f:SetScript("OnEvent", function() SEEN = SEEN + 1 end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        for level in [10, 11] {
+            app.world_mut()
+                .entity_mut(mate)
+                .get_mut::<ObjectStore>()
+                .unwrap()
+                .0
+                .merge(benilla_protocol::ObjectFields::from_pairs(&[(
+                    UNIT_FIELD_LEVEL,
+                    level,
+                )]));
+            app.world_mut().run_system_once(feed_inspect).unwrap();
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.resolve();
+            assert_eq!(s.eval::<i64>("return SEEN").unwrap(), 0, "level {level}");
+        }
     }
 }

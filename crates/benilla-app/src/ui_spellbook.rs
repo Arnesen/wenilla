@@ -20,7 +20,6 @@ use benilla_ui::script::{ScriptValue, SpellBookState, SpellSlotView, SpellTabVie
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::NetCommands;
 use crate::ui_action::{melee_auto_attack_icon, ranged_weapon_icon, PlayerActions, Spells};
 use crate::ui_script::gate;
 use crate::ui_unit::UnitFeed;
@@ -103,7 +102,6 @@ fn feed_spellbook(
     mut inv: crate::items::Inventory,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
-    commands: Res<NetCommands>,
     cooldowns: Res<crate::spell::Cooldowns>,
     clock: Res<crate::ui_script::UiClock>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
@@ -113,8 +111,9 @@ fn feed_spellbook(
         return;
     };
     let (memory, vm_reset) = memory.get_reset(&script);
-    // The book depends on these inputs alone. `UiClock` is not one: `ui_triple` is frame-stable
-    // per arm, and expiry moves the store's `feed_epoch`.
+    // The book depends on these inputs alone. `UiClock` is not one: a running read's `ui_triple`
+    // is frame-stable per arm (a held read's start is the query's `anchor`, so it moves with
+    // `ui_now`, but nothing held moves an input), and expiry moves the store's `feed_epoch`.
     let objects_moved = inv.changes.moved();
     let templates_moved = memory.items_templates.moved(items.template_epoch());
     let cooldowns_moved = memory.cooldown_epoch.moved(cooldowns.feed_epoch());
@@ -175,19 +174,11 @@ fn feed_spellbook(
         .map(|s| (s.0.unit_race().unwrap_or(0), s.0.unit_class().unwrap_or(0)))
         .unwrap_or((0, 0));
     // The melee auto-attack shows the main-hand weapon, or Spell-Reset unarmed, not its `Temp`.
-    let attack_icon = store.map(|s| {
-        melee_auto_attack_icon(
-            s,
-            &spells.forms,
-            &inv.objects,
-            &items,
-            icons.as_deref(),
-            &commands,
-        )
-    });
+    let attack_icon = store
+        .map(|s| melee_auto_attack_icon(s, &spells.forms, &inv.objects, &items, icons.as_deref()));
     // Auto Shot and wand Shoot show the ranged weapon; without one, their own icon.
-    let ranged_icon = store
-        .and_then(|s| ranged_weapon_icon(s, &inv.objects, &items, icons.as_deref(), &commands));
+    let ranged_icon =
+        store.and_then(|s| ranged_weapon_icon(s, &inv.objects, &items, icons.as_deref()));
     let (mut fresh, tab_lines) = build_book(
         &actions.spells,
         &spells.catalog,
@@ -197,6 +188,29 @@ fn feed_spellbook(
         attack_icon,
         ranged_icon,
     );
+    // The face the action bar paints for a weapon-face or `ActiveIconID` spell, where it is not
+    // the book's: a drop writes it, so the slot's in-place event reads what the bar feed would.
+    for slot in &mut fresh.slots {
+        let Some(d) = spells
+            .catalog
+            .get(slot.spell_id)
+            .filter(|d| crate::ui_action::substitutes_weapon_icon(d) || d.active_icon_id != 0)
+        else {
+            continue;
+        };
+        let face = crate::ui_action::spell_action_icon(
+            slot.spell_id,
+            d,
+            spells,
+            store,
+            &inv.objects,
+            &items,
+            icons.as_deref(),
+        );
+        if face != slot.texture {
+            slot.bar_texture = Some(face);
+        }
+    }
     // The book's `IsCurrentCast` is `0x4b3600`, not the action bar's `0x4e53a0`, with two arms: a
     // form spell is current while the form byte is its form, and the open trade-skill window, not
     // built. It has no casting-now arm, so a book slot never lights during a cast.
@@ -210,7 +224,8 @@ fn feed_spellbook(
         }
     }
     // Each slot's cooldown (`GetCooldownInfo` `0x6e13e0`: id, category and GCD alike) on the
-    // `GetTime` clock, frame-stable per arm, so a running cooldown never churns the diff.
+    // `GetTime` clock, frame-stable per arm while it runs, so a running cooldown never churns the
+    // diff; a held read starts at `anchor`, so it differs per push.
     let (anchor, ui_now) = (clock.anchor, clock.ui_now);
     for slot in &mut fresh.slots {
         slot.cooldown = cooldowns
@@ -380,6 +395,8 @@ fn build_book(
                 // no packed word.
                 autocast: None,
                 packed: 0,
+                // Stamped by the feed after the build, from live state.
+                bar_texture: None,
             });
         }
         tabs.push(SpellTabView {
@@ -425,36 +442,49 @@ fn leading_number(s: &str) -> u32 {
 /// with `onSelf` at the caster.
 pub(crate) fn cast_spell(cast: &mut crate::spell::ScriptCast, spell_id: u32, on_self: bool) {
     let crate::spell::ScriptCast { targeting, ladder } = cast;
-    // `CastSpell`'s two cancel forks (`0x4b3300`), in order: the active-action toggle
-    // (`0x4b36f0`), then the form match (`0x4b348b`), which `UseAction` lacks, with its silent
-    // no-op (`0x4b35cf`).
-    if let (Some(sp), Some(store)) = (ladder.spells.as_ref(), targeting.self_store.iter().next()) {
-        if let Some(d) = sp.catalog.get(spell_id) {
-            if crate::ui_action::toggle::active_action_toggle(spell_id, d, store) {
-                debug!("ui_spellbook: cast {spell_id} re-pressed — aura cancels");
+    // `CastSpell`'s three forks ahead of the cast (`0x4b3300`), in order, all ahead of the gate:
+    // the active-action toggle (`0x4b36f0`), the stop of the targeting cursor this spell armed
+    // (`0x4b3474`-`0x4b347d`), then the form match (`0x4b348b`), which `UseAction` lacks, with its
+    // silent no-op (`0x4b35cf`).
+    let catalog_row = ladder
+        .spells
+        .as_ref()
+        .and_then(|sp| Some((sp, targeting.self_store.iter().next()?)))
+        .and_then(|(sp, store)| Some((sp, store, sp.catalog.get(spell_id)?)));
+    if let Some((_, store, d)) = catalog_row {
+        if crate::ui_action::toggle::active_action_toggle(spell_id, d, store) {
+            debug!("ui_spellbook: cast {spell_id} re-pressed — aura cancels");
+            let _ = ladder
+                .commands
+                .0
+                .send(crate::net::ClientCommand::CancelAura { spell_id });
+            return;
+        }
+    }
+    // `GetTargetingSpellId 0x6e48e0` is this spell: the press toggles the cursor off and casts
+    // nothing. Any other spell's cursor is aborted by the cast itself (`TryCast`, `0x6e4d62`).
+    if ladder.ground.spell() == Some(spell_id) {
+        debug!("ui_spellbook: cast {spell_id} re-pressed — targeting toggles off");
+        ladder.ground.cancel();
+        return;
+    }
+    if let Some((sp, store, d)) = catalog_row {
+        let form = store.0.unit_shapeshift_form();
+        let row = sp.forms.get(&u32::from(form));
+        match crate::ui_action::toggle::form_recast_disposition(d, form, row) {
+            Some(true) => {
+                debug!("ui_spellbook: cast {spell_id} — the active form cancels");
                 let _ = ladder
                     .commands
                     .0
                     .send(crate::net::ClientCommand::CancelAura { spell_id });
                 return;
             }
-            let form = store.0.unit_shapeshift_form();
-            let row = sp.forms.get(&u32::from(form));
-            match crate::ui_action::toggle::form_recast_disposition(d, form, row) {
-                Some(true) => {
-                    debug!("ui_spellbook: cast {spell_id} — the active form cancels");
-                    let _ = ladder
-                        .commands
-                        .0
-                        .send(crate::net::ClientCommand::CancelAura { spell_id });
-                    return;
-                }
-                Some(false) => {
-                    debug!("ui_spellbook: cast {spell_id} — non-cancelable form, silent no-op");
-                    return;
-                }
-                None => {}
+            Some(false) => {
+                debug!("ui_spellbook: cast {spell_id} — non-cancelable form, silent no-op");
+                return;
             }
+            None => {}
         }
     }
     debug!(

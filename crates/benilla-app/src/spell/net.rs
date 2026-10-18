@@ -27,6 +27,7 @@ use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::ecs::system::SystemParam;
 
 use crate::net::{GuidIndex, NetCommands, NetHandlerApp, ObjectStore, SelfGuid, SelfPlayer};
+use crate::query_cache::Ask;
 
 /// Register the spell's handlers; called from [`super::SpellPlugin`].
 pub(super) fn register(app: &mut App) {
@@ -162,6 +163,7 @@ pub(crate) struct Reply<'w, 's> {
     casting: Query<'w, 's, &'static Casting>,
     cast_events: MessageWriter<'w, CastEvent>,
     play_seq: ResMut<'w, crate::creature_anim::PlaySeq>,
+    items: Option<Res<'w, crate::items::Items>>,
 }
 
 /// `HandleCastResult 0x6e7330`, the one handler that casts: a reply whose spell names a
@@ -198,9 +200,11 @@ fn on_cast_result(
             &mut r.cast_bar,
             &mut ladder.pending,
             &mut ladder.queued_melee,
+            &ladder.ground,
             &mut ladder.cooldowns,
             &mut ladder.auto_repeat,
             ladder.spells.as_deref(),
+            r.items.as_deref(),
             &ladder.commands,
             r.play_seq.next(),
         );
@@ -273,8 +277,6 @@ fn on_spell_go(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
             &mut sc.go_targets,
             &l.self_guid,
             &sc.stores,
-            &mut l.cast_bar,
-            &mut l.pending,
             &mut l.queued_melee,
             &mut sc.text,
             *sc.damage_text,
@@ -316,7 +318,6 @@ fn on_spell_failed_other(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Sce
             &mut sc.cast_events,
             &l.self_guid,
             &mut l.cast_bar,
-            &mut l.pending,
             &mut l.queued_melee,
             l.play_seq.next(),
         );
@@ -591,16 +592,29 @@ fn cast_result(
     cast_bar: &mut CastBarFeed,
     pending: &mut PendingCast,
     queued_melee: &mut QueuedMeleeSpell,
+    targeting: &super::SpellTargeting,
     cooldowns: &mut Cooldowns,
     auto_repeat: &mut AutoRepeatActive,
     spells: Option<&Spells>,
+    items: Option<&crate::items::Items>,
     net: &crate::net::NetCommands,
     seq: u64,
 ) -> Option<u32> {
     debug!("net: cast result — spell {spell_id} success={success} reason={reason:?}");
-    // Is this the reply to our outstanding cast (`0x6e7408 cmp ecx,[0xceca88]`)? Read before either
-    // arm clears the guard: both clears are the reference's one `0x6e741a call 0x6e4940(0x1c)`.
-    let in_flight = pending.committed(Instant::now()) == Some(spell_id);
+    // The slot pair as the handler finds it: the in-flight slot `0xceca88` holds the spell
+    // awaiting its click, else the cast, else the queued strike, and the save `0xcecaa8` the
+    // strike a cast or a cursor sits over (`0x6e5026`). Read before anything clears them.
+    let now = Instant::now();
+    let slot = super::inflight(pending, queued_melee, targeting, None, now);
+    let top = slot.map(super::inflight::Inflight::spell_id);
+    let saved = match slot {
+        Some(super::inflight::Inflight::Strike(_)) | None => None,
+        Some(_) => queued_melee.current(),
+    };
+    // Is this the reply to our outstanding cast (`0x6e2201`, `0x6e7408`)?
+    let in_flight = top == Some(spell_id);
+    // Does the failure's report pop that slot (`0x6e2218`) before the handler compares again?
+    let mut report_pops = false;
     if !success {
         // `HandleCastFailed 0x6e1a00` clears the GCD armed at send (`0x6e1d83 → 0x6e1630`), and the
         // bit-25 revert below drops a parked record; the spell's own recovery starts at SPELL_GO,
@@ -609,11 +623,25 @@ fn cast_result(
         // `SMSG_CANCEL_AUTO_REPEAT` routine). A deselect arrives as this failure (vmangos
         // `HandleSetSelectionOpcode` → `Spell::cancel` → `SendCastResult(INTERRUPTED)`); target
         // death arrives as [`cancel_auto_repeat`].
-        let now = Instant::now();
         // Reason 0x17 DONT_REPORT exits before the GCD clear and the display (`6e1ce1`/`6e1cf7` →
-        // `0x6e224f`). The in-flight clear below still runs, as the reference's `0x6e741a` does
-        // once `HandleCastFailed` returns: vmangos sends 0x17 for real aborts.
+        // `0x6e224f`), and so before the report's slot pop: the handler's own pop `0x6e741a`
+        // finds the spell still in flight. vmangos sends 0x17 for real aborts.
         let dont_report = reason == Some(0x17);
+        let spell = spells.and_then(|s| s.catalog.get(spell_id));
+        // The report runs for every failure, in flight or not; only the in-flight spell's pops.
+        let reaches_pop = crate::ui_action::report_reaches_pop(
+            reason.unwrap_or(0),
+            arg,
+            spell,
+            spells.map(|s| &s.forms),
+            // The packet's lookup with the callback `0x6e29b0` (`0x6e1ea4`).
+            |item| items.is_some_and(|i| i.template(item, 0, Ask::Event(net)).is_some()),
+        );
+        report_pops = in_flight && reaches_pop;
+        // That pop's `0x6e4940(cl=1)` fires its event and clears the caster word (`0x6e4a5a`).
+        if report_pops {
+            pending.take_caster_event();
+        }
         if !dont_report {
             cooldowns.clear_gcd(spell_id, now);
             // The bit-25 revert (`6e73cc–6e73e6`): a non-0x3c failure of a cooldown-on-event spell
@@ -652,6 +680,7 @@ fn cast_result(
                     // `SMSG_CAST_FAILED` is addressed to the caster, and this handler is ours.
                     caster: crate::ui_action::Caster::Player,
                     redisplay: false,
+                    input: benilla_ui::script::InputEvents::NONE,
                 });
             }
         }
@@ -669,6 +698,8 @@ fn cast_result(
                 entity: e,
                 spell_id,
                 kind: CastEventKind::Fail,
+                cast_flags: 0,
+                item_cast: false,
                 seq,
             });
         }
@@ -677,23 +708,55 @@ fn cast_result(
     // to our in-flight cast finishes its slot, then reads column 38 of its spell; non-zero and not
     // the running repeat, the client casts it at the null target guid. Every hunter shot names 75,
     // Auto Shot.
-    // - It fires on success as well as failure: `0x6e7356 cmp [ebp+0xf],0x2` / `0x6e735a jne`
-    //   sends a non-failure straight to the block the failure path reaches at `0x6e73eb`.
+    // - A success chains: `0x6e7356 cmp [ebp+0xf],0x2` / `0x6e735a jne` sends it past the
+    //   report straight to the slot block `0x6e73eb`.
+    // - A failure chains only if the slot still holds the spell after its report: the report
+    //   pops the in-flight slot (`0x6e2201` → `0x6e2218` → `0x6e4940` → `0x6e4ad0(0, 0)`, the
+    //   save into the slot), so `0x6e7408` misses and `0x6e74bc` skips the chain. It holds when
+    //   the report left before that pop (`report_reaches_pop`: reason 0x17, a form-less 0x56, an
+    //   uncached 0x5c or 0x78 item) or when the save held the same spell (`0x6e73ee` clears the
+    //   save after the report, so the popped-in copy matches).
     // - The slot clears first (`0x6e741a`), or the IsCasting rung (`0x6e4d97`, our `0x61`) would
-    //   refuse the chain. vmangos sends `SMSG_CAST_RESULT` before `SMSG_SPELL_GO`
-    //   (`Spell.cpp:3681`, `Spell.cpp:3715`), so the guard is still armed here.
+    //   refuse the chain. vmangos sends `SMSG_CAST_RESULT` before `SMSG_SPELL_GO` (`Spell::cast`,
+    //   `Spell.cpp:3669`, then `3703` or `handle_immediate`'s `3771`), so the guard is still armed.
     // - Equal to the running repeat means re-arm, not re-cast (`0x6e745b` → `0x6e745d`), so a
-    //   second sting never resets the swing timer; with no record to refresh, we send nothing.
+    //   second sting never resets the swing timer; the record is refilled with the player as its
+    //   caster (`0x6e748f`) and nothing is sent.
     // The chained spell is returned; `on_cast_result` hands it to the ladder in the same call.
-    if in_flight {
+    //
+    // `SPELLCAST_STOP` (0x152) comes from this handler alone, at its two sites, never from the GO
+    // (`0x6e7a70` calls neither):
+    // - the slot's own pop, `0x6e741a` → `0x6e4940(cl=0)` → `0x6e4a4b`, while the caster word is
+    //   the player's ([`PendingCast::take_caster_event`]): a success, or a failure whose report
+    //   left the spell in flight. Every cast holds the slot until here, an instant, a channel and a
+    //   `ITEM_FLAG_PLAYERCAST` item too, so each gets its STOP, before its GO;
+    // - `0x6e74cb`, a spell not in the slot: when nothing is in flight (`0x6e3d30`) and the status
+    //   is not 2 (`0x6e74c5`), with no caster test; the use of an item without the flag lands here.
+    let slot_holds = in_flight && !(report_pops && saved != Some(spell_id));
+    let stop = if slot_holds {
         pending.clear_if(spell_id);
+        pending.take_caster_event()
+    } else {
+        success && slot.is_none()
+    };
+    if *crate::net::CAST_TRACE {
+        info!("cast-trace: RECV CAST_RESULT — spell {spell_id} success={success}; in_slot={slot_holds} stop={stop}");
+    }
+    if stop {
+        cast_bar.0.push(CastBarEdge::Stop);
+    }
+    if slot_holds {
         if let Some(next) = spells
             .and_then(|s| s.catalog.get(spell_id))
             .map(|d| d.modal_next_spell)
-            .filter(|&next| next != 0 && Some(next) != auto_repeat.0)
+            .filter(|&next| next != 0)
         {
-            debug!("net: cast result {spell_id} chains modalNextSpell {next}");
-            return Some(next);
+            if Some(next) == auto_repeat.0 {
+                pending.fill_record();
+            } else {
+                debug!("net: cast result {spell_id} chains modalNextSpell {next}");
+                return Some(next);
+            }
         }
     }
     None
@@ -791,6 +854,8 @@ fn spell_start(
             entity: e,
             spell_id,
             kind: CastEventKind::Start,
+            cast_flags: 0,
+            item_cast: false,
             seq,
         });
     }
@@ -821,8 +886,6 @@ fn spell_go(
     go_targets: &mut MessageWriter<SpellGoTargets>,
     self_guid: &SelfGuid,
     stores: &Query<&mut ObjectStore>,
-    cast_bar: &mut CastBarFeed,
-    pending: &mut PendingCast,
     queued_melee: &mut QueuedMeleeSpell,
     text: &mut MessageWriter<crate::combat_text::CombatTextSpawn>,
     // The floating-text CVars, read inside the word emitter `0x607140`: they gate miss words too.
@@ -901,21 +964,14 @@ fn spell_go(
             }
         }
     }
-    // Our own launch completes the bar and opens the in-flight guard, both keyed by spell id.
+    // Our own launch. The bar's STOP is not fired here: `0x6e7a70` reaches neither 0x152 site,
+    // and the cast result ahead of the GO fired it ([`cast_result`]).
     if self_guid.0 == Some(caster) {
-        // Only the cast the bar shows completes it: a proc landing mid-cast (Chilled, 6136) is our
-        // own cast too, and must not finish the running bar.
-        let completes_our_cast = index
-            .0
-            .get(&caster)
-            .is_some_and(|&e| casting.get(e).is_ok_and(|c| c.spell_id == spell_id));
         if *crate::net::CAST_TRACE {
-            info!("cast-trace: RECV SPELL_GO — spell {spell_id} (self); completes_bar={completes_our_cast}");
+            info!("cast-trace: RECV SPELL_GO — spell {spell_id} (self)");
         }
-        if completes_our_cast {
-            cast_bar.0.push(CastBarEdge::Stop);
-        }
-        pending.clear_if(spell_id);
+        // The in-flight slot is not popped here: only the spell's `SMSG_CAST_RESULT` pops it
+        // (`0x6e7408` → `0x6e741a`), and vmangos sends that result ahead of the GO.
         // The queued strike fired on this swing: the queue opens here, like the in-flight finish.
         queued_melee.clear_if(spell_id);
 
@@ -961,8 +1017,9 @@ fn spell_go(
         // The item's entry, off its own store.
         match item_caster.and_then(|g| stores.get(*index.0.get(&g)?).ok()?.0.object_entry()) {
             Some(entry) => {
+                // The item's record, which its create asked.
                 let use_spell = items
-                    .template(entry, 0, net_commands)
+                    .template(entry, 0, Ask::Read)
                     .and_then(|t| t.use_spell)
                     .filter(|u| u.spell_id == spell_id);
                 match use_spell {
@@ -1070,6 +1127,8 @@ fn spell_go(
             entity: e,
             spell_id,
             kind: CastEventKind::Go,
+            cast_flags,
+            item_cast: item_caster.is_some(),
             seq,
         });
         // Targets not streamed to us drop out. The miss code picks the victim's dodge or block
@@ -1109,7 +1168,6 @@ fn spell_failed_other(
     cast_events: &mut MessageWriter<CastEvent>,
     self_guid: &SelfGuid,
     cast_bar: &mut CastBarFeed,
-    pending: &mut PendingCast,
     queued_melee: &mut QueuedMeleeSpell,
     seq: u64,
 ) {
@@ -1127,7 +1185,6 @@ fn spell_failed_other(
         if interrupts_our_cast {
             cast_bar.0.push(CastBarEdge::Interrupted);
         }
-        pending.clear_if(spell_id);
         // The melee-slot interrupt's other half, beside the failing CAST_RESULT.
         queued_melee.clear_if(spell_id);
     }
@@ -1140,6 +1197,8 @@ fn spell_failed_other(
             entity: e,
             spell_id,
             kind: CastEventKind::Fail,
+            cast_flags: 0,
+            item_cast: false,
             seq,
         });
     }
@@ -1298,7 +1357,7 @@ fn channel_update(remaining_ms: u32, channel: &mut ActiveChannel, feed: &mut Cas
 
 /// `SMSG_UPDATE_AURA_DURATION`: one of our auras' remaining time, by raw slot, stamped with the
 /// receive time. It arrives before the descriptor delta that names the slot.
-fn aura_duration(slot: u8, remaining_ms: u32, durations: &mut AuraDurations, now_secs: f64) {
+fn aura_duration(slot: u8, remaining_ms: i32, durations: &mut AuraDurations, now_secs: f64) {
     durations.set(slot, remaining_ms, now_secs);
 }
 
@@ -1359,6 +1418,28 @@ fn spell_chain_targets(
 mod tests {
     use super::*;
     use benilla_protocol::messages::ACTION_KIND_SPELL;
+
+    /// `SMSG_COOLDOWN_EVENT` (`0x6e9670`): the event moves the held record's one start, which the
+    /// GCD leg reads (`0x6e15d8`), so the global cooldown runs again from the packet.
+    #[test]
+    fn a_cooldown_event_packet_restarts_the_held_records_gcd() {
+        let form = benilla_formats::SpellDisplay {
+            start_recovery_category: 133,
+            start_recovery_ms: 1_500,
+            attributes: 0x0200_0000,
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let mut cooldowns = Cooldowns::default();
+        cooldowns.start_gcd(15473, &form, t0, &crate::spell::SpellModifiers::default());
+        std::thread::sleep(Duration::from_millis(40));
+        cooldown_event(15473, 10, &mut cooldowns);
+
+        // 20 ms past the original GCD's end: only a restart from the packet is still running.
+        let info = cooldowns.info(15473, 0, Some(&form), t0 + Duration::from_millis(1_520));
+        assert!(info.remaining_ms >= 10, "the GCD runs from the event");
+        assert!(info.start > t0, "and reads the event's start");
+    }
 
     /// A catalog holding one row, so the announce tests can name a real `Attributes` value.
     fn catalog_with(id: u32, display: benilla_formats::SpellDisplay) -> Spells {
@@ -1592,56 +1673,144 @@ mod tests {
         assert!(actions.dirty, "…and `dirty` is what makes it follow");
     }
 
-    /// A proc landing mid-cast (Chilled, 6136) is our own cast, but its GO must not finish the
-    /// running Fireball bar: the edge is keyed to our `Casting`.
-    #[test]
-    fn a_proc_go_mid_cast_does_not_finish_the_running_bar() {
-        use crate::combat_text::CombatTextSpawn;
-        use crate::creature_anim::Casting;
-        use crate::go_anim::GoLidOpen;
-        use crate::net::{Guid, SelfPlayer};
-        use bevy::ecs::system::RunSystemOnce;
+    /// The self player's own packets, run through the real handlers in the order a server sends
+    /// them, with the bar edges each one queues.
+    struct CastSeq {
+        app: App,
+        self_e: Entity,
+    }
 
-        let mut app = App::new();
-        app.add_message::<CastEvent>()
-            .add_message::<SpellGoTargets>()
-            .add_message::<CombatTextSpawn>()
-            .add_message::<GoLidOpen>()
-            .add_message::<crate::creature_anim::SheathRequest>()
-            .add_message::<crate::player::StandStateRequest>()
-            .init_resource::<GuidIndex>()
-            .init_resource::<SelfGuid>()
-            .init_resource::<CastBarFeed>()
-            .init_resource::<PendingCast>()
-            .init_resource::<QueuedMeleeSpell>()
-            .init_resource::<Cooldowns>()
-            .init_resource::<crate::spell::SpellModifiers>()
-            .init_resource::<crate::ui_pet::PetBar>()
-            .init_resource::<crate::items::Items>();
+    impl CastSeq {
+        const SELF: u64 = 10;
 
-        // The self player mid-cast on Fireball (133): the bar is up, `Casting{133}` marks it.
-        let self_e = app
-            .world_mut()
-            .spawn((
-                Guid(10),
-                SelfPlayer,
-                Casting {
-                    spell_id: 133,
-                    until: None,
-                },
-                ObjectStore::default(),
-            ))
-            .id();
-        app.world_mut()
-            .resource_mut::<GuidIndex>()
-            .0
-            .insert(10, self_e);
-        app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
+        fn new() -> Self {
+            use crate::combat_text::CombatTextSpawn;
+            use crate::go_anim::GoLidOpen;
+            use crate::net::{Guid, SelfPlayer};
 
-        // One `spell_go` call, parameterized by the completing spell id.
-        let fire_go = |app: &mut App, go_spell: u32| {
-            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut app = App::new();
+            app.add_message::<CastEvent>()
+                .add_message::<SpellGoTargets>()
+                .add_message::<CombatTextSpawn>()
+                .add_message::<GoLidOpen>()
+                .add_message::<crate::creature_anim::SheathRequest>()
+                .add_message::<crate::player::StandStateRequest>()
+                .init_resource::<GuidIndex>()
+                .init_resource::<SelfGuid>()
+                .init_resource::<CastErrors>()
+                .init_resource::<CastBarFeed>()
+                .init_resource::<PendingCast>()
+                .init_resource::<QueuedMeleeSpell>()
+                .init_resource::<super::super::SpellTargeting>()
+                .init_resource::<ActiveChannel>()
+                .init_resource::<AutoRepeatActive>()
+                .init_resource::<Cooldowns>()
+                .init_resource::<crate::spell::SpellModifiers>()
+                .init_resource::<crate::ui_pet::PetBar>()
+                .init_resource::<crate::items::Items>();
+            let self_e = app
+                .world_mut()
+                .spawn((Guid(Self::SELF), SelfPlayer, ObjectStore::default()))
+                .id();
             app.world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(Self::SELF, self_e);
+            app.world_mut().resource_mut::<SelfGuid>().0 = Some(Self::SELF);
+            Self { app, self_e }
+        }
+
+        /// The attempt as the ladder commits it: the record fill (`0x6e4fb1`), then the push
+        /// (`0x6e5026`), which an item without `ITEM_FLAG_PLAYERCAST` skips.
+        fn commit(&mut self, spell_id: u32, item_flags: Option<u32>) {
+            let mut pending = self.app.world_mut().resource_mut::<PendingCast>();
+            pending.fill_record();
+            pending.push(spell_id, item_flags, Instant::now());
+        }
+
+        fn start(&mut self, spell_id: u32, cast_time_ms: u32) {
+            self.app
+                .world_mut()
+                .run_system_once(
+                    move |mut commands: Commands,
+                          index: Res<GuidIndex>,
+                          mut cast_events: MessageWriter<CastEvent>,
+                          self_guid: Res<SelfGuid>,
+                          mut cast_bar: ResMut<CastBarFeed>,
+                          mut pending: ResMut<PendingCast>| {
+                        spell_start(
+                            Self::SELF,
+                            spell_id,
+                            0,
+                            cast_time_ms,
+                            None,
+                            None,
+                            &mut commands,
+                            &index,
+                            &mut cast_events,
+                            &self_guid,
+                            &mut cast_bar,
+                            &mut pending,
+                            None,
+                            1,
+                        );
+                    },
+                )
+                .unwrap();
+        }
+
+        /// `fail` is `None` for status 0, else the status-2 reason.
+        fn result(&mut self, spell_id: u32, fail: Option<u8>) {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            self.app
+                .world_mut()
+                .run_system_once(
+                    move |mut commands: Commands,
+                          self_guid: Res<SelfGuid>,
+                          index: Res<GuidIndex>,
+                          mut cast_errors: ResMut<CastErrors>,
+                          casting: Query<&Casting>,
+                          mut cast_events: MessageWriter<CastEvent>,
+                          mut cast_bar: ResMut<CastBarFeed>,
+                          mut pending: ResMut<PendingCast>,
+                          mut queued_melee: ResMut<QueuedMeleeSpell>,
+                          targeting: Res<super::super::SpellTargeting>,
+                          mut cooldowns: ResMut<Cooldowns>,
+                          mut auto_repeat: ResMut<AutoRepeatActive>| {
+                        let net = crate::net::NetCommands(tx.clone());
+                        cast_result(
+                            spell_id,
+                            fail.is_none(),
+                            fail,
+                            None,
+                            &mut commands,
+                            &self_guid,
+                            &index,
+                            &mut cast_errors,
+                            &casting,
+                            &mut cast_events,
+                            &mut cast_bar,
+                            &mut pending,
+                            &mut queued_melee,
+                            &targeting,
+                            &mut cooldowns,
+                            &mut auto_repeat,
+                            None,
+                            None,
+                            &net,
+                            1,
+                        );
+                    },
+                )
+                .unwrap();
+        }
+
+        fn go(&mut self, spell_id: u32) {
+            use crate::combat_text::CombatTextSpawn;
+            use crate::go_anim::GoLidOpen;
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            self.app
+                .world_mut()
                 .run_system_once(
                     move |mut commands: Commands,
                           index: Res<GuidIndex>,
@@ -1650,8 +1819,6 @@ mod tests {
                           mut go_targets: MessageWriter<SpellGoTargets>,
                           self_guid: Res<SelfGuid>,
                           stores: Query<&mut ObjectStore>,
-                          mut cast_bar: ResMut<CastBarFeed>,
-                          mut pending: ResMut<PendingCast>,
                           mut queued_melee: ResMut<QueuedMeleeSpell>,
                           mut text: MessageWriter<CombatTextSpawn>,
                           mut go_lid: MessageWriter<GoLidOpen>,
@@ -1661,8 +1828,8 @@ mod tests {
                           mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
                         let net_commands = crate::net::NetCommands(tx.clone());
                         spell_go(
-                            10,
-                            go_spell,
+                            Self::SELF,
+                            spell_id,
                             0,
                             vec![],
                             vec![],
@@ -1678,8 +1845,6 @@ mod tests {
                             &mut go_targets,
                             &self_guid,
                             &stores,
-                            &mut cast_bar,
-                            &mut pending,
                             &mut queued_melee,
                             &mut text,
                             crate::combat_text::DamageTextGates::default(),
@@ -1703,24 +1868,222 @@ mod tests {
                     },
                 )
                 .unwrap();
-        };
+        }
 
-        // The proc's self-GO must not touch the bar.
-        fire_go(&mut app, 6136);
-        assert!(
-            app.world().resource::<CastBarFeed>().0.is_empty(),
-            "a proc's self-GO (6136) mid-cast must not push a bar edge"
-        );
+        /// `MSG_CHANNEL_START`, or `MSG_CHANNEL_UPDATE` with `start` false.
+        fn channel(&mut self, spell_id: u32, ms: u32, start: bool) {
+            let world = self.app.world_mut();
+            let mut feed = world.remove_resource::<CastBarFeed>().unwrap();
+            let mut channel = world.remove_resource::<ActiveChannel>().unwrap();
+            if start {
+                channel_start(spell_id, ms, &mut channel, &mut feed);
+            } else {
+                channel_update(ms, &mut channel, &mut feed);
+            }
+            world.insert_resource(feed);
+            world.insert_resource(channel);
+        }
 
-        // The cast the bar is showing (133) finishes it with one STOP.
-        fire_go(&mut app, 133);
-        let feed = &app.world().resource::<CastBarFeed>().0;
+        /// The edges queued since the last call, by event name.
+        fn events(&mut self) -> Vec<&'static str> {
+            self.app
+                .world_mut()
+                .resource_mut::<CastBarFeed>()
+                .0
+                .drain(..)
+                .map(|e| match e {
+                    CastBarEdge::Start { .. } => "START",
+                    CastBarEdge::Stop => "STOP",
+                    CastBarEdge::Failed => "FAILED",
+                    CastBarEdge::Interrupted => "INTERRUPTED",
+                    CastBarEdge::Delayed { .. } => "DELAYED",
+                    CastBarEdge::ChannelStart { .. } => "CHANNEL_START",
+                    CastBarEdge::ChannelUpdate { remaining_ms: 0 } => "CHANNEL_STOP",
+                    CastBarEdge::ChannelUpdate { .. } => "CHANNEL_UPDATE",
+                })
+                .collect()
+        }
+    }
+
+    use bevy::ecs::system::RunSystemOnce;
+
+    const FIREBALL: u32 = 133;
+    const FORTITUDE: u32 = 1243;
+    const ARCANE_MISSILES: u32 = 5143;
+    /// Hearthstone's spell; the item's template carries `ITEM_FLAG_PLAYERCAST`.
+    const HEARTHSTONE: u32 = 8690;
+    /// Minor Healing Potion's spell; the item's template does not.
+    const MINOR_HEALING: u32 = 439;
+
+    /// vmangos sends, for every non-triggered cast, `SMSG_SPELL_START` at `Spell::prepare`
+    /// (`Spell.cpp:3439`), then at the cast's end `Spell::cast` sends `SMSG_CAST_RESULT`
+    /// (`3669`) and at once `SMSG_SPELL_GO` (`3703`, or `handle_immediate`'s `3771`). Each event
+    /// is checked after its own packet, so a STOP at the GO fails here.
+    #[test]
+    fn a_timed_cast_stops_at_its_result_ahead_of_the_go() {
+        let mut s = CastSeq::new();
+        s.commit(FIREBALL, None);
+        s.start(FIREBALL, 3_000);
+        assert_eq!(s.events(), ["START"]);
+        s.result(FIREBALL, None);
         assert_eq!(
-            feed.len(),
-            1,
-            "the in-flight cast's own GO finishes the bar"
+            s.events(),
+            ["STOP"],
+            "`0x6e741a` pops the slot and `0x6e4a4b` fires STOP: the bar fills and flashes here"
         );
-        assert!(matches!(feed[0], CastBarEdge::Stop), "…with a STOP");
+        s.go(FIREBALL);
+        assert!(s.events().is_empty(), "`0x6e7a70` reaches no 0x152 site");
+    }
+
+    /// An instant opens no bar (`0x6e7a1d`), but it held the slot from its push, so its result
+    /// still pops it with STOP.
+    #[test]
+    fn an_instant_gets_its_stop_too() {
+        let mut s = CastSeq::new();
+        s.commit(FORTITUDE, None);
+        s.start(FORTITUDE, 0);
+        s.result(FORTITUDE, None);
+        assert_eq!(s.events(), ["STOP"]);
+        s.go(FORTITUDE);
+        assert!(s.events().is_empty());
+        assert!(
+            !s.app
+                .world()
+                .resource::<PendingCast>()
+                .in_flight(Instant::now()),
+            "the result opened the slot"
+        );
+    }
+
+    /// A channel: the result's STOP comes before the bar opens, since vmangos sends
+    /// `MSG_CHANNEL_START` after the GO (`handle_immediate`, `Spell.cpp:3781`), and the channel's
+    /// own end is `MSG_CHANNEL_UPDATE(0)` (`4157`).
+    #[test]
+    fn a_channel_stops_at_its_result_before_its_bar_opens() {
+        let mut s = CastSeq::new();
+        s.commit(ARCANE_MISSILES, None);
+        s.start(ARCANE_MISSILES, 0);
+        s.result(ARCANE_MISSILES, None);
+        s.go(ARCANE_MISSILES);
+        s.channel(ARCANE_MISSILES, 5_000, true);
+        s.channel(ARCANE_MISSILES, 0, false);
+        assert_eq!(s.events(), ["STOP", "CHANNEL_START", "CHANNEL_STOP"]);
+    }
+
+    /// An item use takes either site: one with `ITEM_FLAG_PLAYERCAST` holds the slot and pops it
+    /// (`0x6e741a`); one without was never pushed (`0x6e500b`–`0x6e501f`), and its result fires
+    /// STOP at `0x6e74cb` because nothing is in flight.
+    #[test]
+    fn an_item_use_gets_its_stop_with_or_without_the_slot() {
+        let mut s = CastSeq::new();
+        s.commit(HEARTHSTONE, Some(0x40));
+        s.start(HEARTHSTONE, 10_000);
+        s.result(HEARTHSTONE, None);
+        s.go(HEARTHSTONE);
+        assert_eq!(s.events(), ["START", "STOP"]);
+
+        let mut s = CastSeq::new();
+        s.commit(MINOR_HEALING, Some(0));
+        assert!(
+            !s.app
+                .world()
+                .resource::<PendingCast>()
+                .in_flight(Instant::now()),
+            "the potion never entered the slot"
+        );
+        s.start(MINOR_HEALING, 0);
+        s.result(MINOR_HEALING, None);
+        s.go(MINOR_HEALING);
+        assert_eq!(s.events(), ["STOP"]);
+    }
+
+    /// `0x6e74bc`–`0x6e74cb`: a spell not in the slot fires STOP only when nothing is in flight
+    /// and the status is not 2, with no caster test.
+    #[test]
+    fn a_result_with_nothing_in_flight_stops_unless_it_failed() {
+        let mut s = CastSeq::new();
+        s.result(FORTITUDE, None);
+        assert_eq!(
+            s.events(),
+            ["STOP"],
+            "no record was ever filled, and the site does not ask"
+        );
+        s.result(FORTITUDE, Some(0x59));
+        assert!(
+            s.events().iter().all(|e| *e != "STOP"),
+            "`0x6e74c5` skips status 2"
+        );
+
+        // Something in flight: our timed cast, or the spell awaiting its click.
+        let mut s = CastSeq::new();
+        s.commit(FIREBALL, None);
+        s.result(FORTITUDE, None);
+        assert!(s.events().is_empty(), "`0x6e3d30` answers a cast in flight");
+        let mut s = CastSeq::new();
+        s.app
+            .world_mut()
+            .resource_mut::<super::super::SpellTargeting>()
+            .enter(FIREBALL, CastCommit::Spell, 0x40);
+        s.result(FORTITUDE, None);
+        assert!(s.events().is_empty(), "the cursor's spell is in flight too");
+    }
+
+    /// The slot's own pop fires only while the caster word is the player's (`0x6e4a04`–`0x6e4a1e`)
+    /// and clears it (`0x6e4a5a`). A failure's report pops first and takes the word with it, so
+    /// the handler's own pop of the same spell, popped back in from the save, is silent; a report
+    /// that leaves before its pop (reason 0x17) leaves the handler's pop its STOP.
+    #[test]
+    fn the_slots_pop_stops_once_per_record() {
+        const HEROIC_STRIKE: u32 = 78;
+
+        // A strike queued, a cast over it; the cast's result pops the strike back in.
+        let mut s = CastSeq::new();
+        {
+            let world = s.app.world_mut();
+            world.resource_mut::<PendingCast>().fill_record();
+            world.resource_mut::<QueuedMeleeSpell>().arm(HEROIC_STRIKE);
+        }
+        s.commit(FORTITUDE, None);
+        s.result(FORTITUDE, None);
+        assert_eq!(s.events(), ["STOP"]);
+        s.result(HEROIC_STRIKE, None);
+        assert!(
+            s.events().is_empty(),
+            "the strike's own result finds the word cleared by the cast's"
+        );
+
+        // A failure that pops: no STOP at the handler, and the word is spent.
+        let mut s = CastSeq::new();
+        s.commit(FIREBALL, None);
+        s.result(FIREBALL, Some(0x59));
+        assert!(s.events().iter().all(|e| *e != "STOP"));
+        assert!(
+            !s.app
+                .world_mut()
+                .resource_mut::<PendingCast>()
+                .take_caster_event(),
+            "the report's own pop cleared the word"
+        );
+
+        // DONT_REPORT leaves the report before its pop (`0x6e1ce4`): the handler pops with STOP.
+        let mut s = CastSeq::new();
+        s.commit(FIREBALL, None);
+        s.result(FIREBALL, Some(0x17));
+        assert_eq!(s.events(), ["STOP"]);
+    }
+
+    /// A proc's GO mid-cast (Chilled, 6136) and the cast's own GO both leave the bar alone: no GO
+    /// fires a bar event.
+    #[test]
+    fn no_go_pushes_a_bar_edge() {
+        let mut s = CastSeq::new();
+        s.app.world_mut().entity_mut(s.self_e).insert(Casting {
+            spell_id: FIREBALL,
+            until: None,
+        });
+        s.go(6136);
+        s.go(FIREBALL);
+        assert!(s.events().is_empty());
     }
 
     /// A cancelled channel flashes green and fades, never red. vmangos `Spell::cancel` sends
@@ -1783,7 +2146,6 @@ mod tests {
                       mut cast_events: MessageWriter<CastEvent>,
                       self_guid: Res<SelfGuid>,
                       mut cast_bar: ResMut<CastBarFeed>,
-                      mut pending: ResMut<PendingCast>,
                       mut queued_melee: ResMut<QueuedMeleeSpell>| {
                     spell_failed_other(
                         10,
@@ -1794,7 +2156,6 @@ mod tests {
                         &mut cast_events,
                         &self_guid,
                         &mut cast_bar,
-                        &mut pending,
                         &mut queued_melee,
                         1,
                     );
@@ -1906,8 +2267,6 @@ mod tests {
                           mut go_targets: MessageWriter<SpellGoTargets>,
                           self_guid: Res<SelfGuid>,
                           stores: Query<&mut ObjectStore>,
-                          mut cast_bar: ResMut<CastBarFeed>,
-                          mut pending: ResMut<PendingCast>,
                           mut queued_melee: ResMut<QueuedMeleeSpell>,
                           mut text: MessageWriter<CombatTextSpawn>,
                           mut go_lid: MessageWriter<GoLidOpen>,
@@ -1934,8 +2293,6 @@ mod tests {
                             &mut go_targets,
                             &self_guid,
                             &stores,
-                            &mut cast_bar,
-                            &mut pending,
                             &mut queued_melee,
                             &mut text,
                             gates,
@@ -2072,8 +2429,6 @@ mod tests {
                       mut go_targets: MessageWriter<SpellGoTargets>,
                       self_guid: Res<SelfGuid>,
                       stores: Query<&mut ObjectStore>,
-                      mut cast_bar: ResMut<CastBarFeed>,
-                      mut pending: ResMut<PendingCast>,
                       mut queued_melee: ResMut<QueuedMeleeSpell>,
                       mut text: MessageWriter<CombatTextSpawn>,
                       mut go_lid: MessageWriter<GoLidOpen>,
@@ -2100,8 +2455,6 @@ mod tests {
                         &mut go_targets,
                         &self_guid,
                         &stores,
-                        &mut cast_bar,
-                        &mut pending,
                         &mut queued_melee,
                         &mut text,
                         crate::combat_text::DamageTextGates::default(),
@@ -2280,8 +2633,6 @@ mod tests {
                       mut go_targets: MessageWriter<SpellGoTargets>,
                       self_guid: Res<SelfGuid>,
                       stores: Query<&mut ObjectStore>,
-                      mut cast_bar: ResMut<CastBarFeed>,
-                      mut pending: ResMut<PendingCast>,
                       mut queued_melee: ResMut<QueuedMeleeSpell>,
                       mut text: MessageWriter<CombatTextSpawn>,
                       mut go_lid: MessageWriter<GoLidOpen>,
@@ -2308,8 +2659,6 @@ mod tests {
                         &mut go_targets,
                         &self_guid,
                         &stores,
-                        &mut cast_bar,
-                        &mut pending,
                         &mut queued_melee,
                         &mut text,
                         crate::combat_text::DamageTextGates::default(),
@@ -2421,8 +2770,10 @@ mod tests {
                             &mut cast_bar,
                             &mut pending,
                             &mut queued_melee,
+                            &crate::spell::SpellTargeting::default(),
                             &mut cooldowns,
                             &mut auto_repeat,
+                            None,
                             None,
                             &net,
                             1,
@@ -2666,8 +3017,6 @@ mod tests {
                           mut go_targets: MessageWriter<SpellGoTargets>,
                           self_guid: Res<SelfGuid>,
                           stores: Query<&mut ObjectStore>,
-                          mut cast_bar: ResMut<CastBarFeed>,
-                          mut pending: ResMut<PendingCast>,
                           mut queued_melee: ResMut<QueuedMeleeSpell>,
                           mut text: MessageWriter<CombatTextSpawn>,
                           mut go_lid: MessageWriter<GoLidOpen>,
@@ -2695,8 +3044,6 @@ mod tests {
                             &mut go_targets,
                             &self_guid,
                             &stores,
-                            &mut cast_bar,
-                            &mut pending,
                             &mut queued_melee,
                             &mut text,
                             crate::combat_text::DamageTextGates::default(),
@@ -2750,9 +3097,12 @@ mod tests {
             "somebody else's Backstab is not our attack-start"
         );
     }
-    /// The `modalNextSpell` chain (`HandleCastResult 0x6e7330`, `0x6e7408`–`0x6e74aa`):
-    /// - a successful sting chains Auto Shot (`0x6e735a jne` to the chain block);
-    /// - a failed one does too (both converge at `0x6e73eb`);
+    /// The `modalNextSpell` chain (`HandleCastResult 0x6e7330`, `0x6e7408`-`0x6e74aa`):
+    /// - a successful sting chains Auto Shot (`0x6e735a jne` past the report to `0x6e73eb`);
+    /// - a failed one does not: its report pops the in-flight slot (`0x6e2218`), so `0x6e7408`
+    ///   misses; it chains only when the report left before that pop (reason 0x17, `0x6e1ce4`;
+    ///   a form-less 0x56, `0x6e20c6`; an uncached 0x5c or 0x78 item, `0x6e1eab`) or when the
+    ///   save held the same spell (`0x6e73ee`);
     /// - the in-flight guard clears first, or the IsCasting rung would refuse the chain;
     /// - Auto Shot already running sends nothing (`0x6e745b`'s equal branch);
     /// - a reply for a spell not in flight chains nothing (`0x6e7408`).
@@ -2763,8 +3113,16 @@ mod tests {
 
         const SERPENT_STING: u32 = 1978;
         const AUTO_SHOT: u32 = 75;
+        const HEROIC_STRIKE: u32 = 78;
+        const OUT_OF_RANGE: u8 = 0x59;
+        const DONT_REPORT: u8 = 0x17;
+        const ONLY_SHAPESHIFT: u8 = 0x56;
+        const REAGENTS: u8 = 0x5c;
+        const TOTEMS: u8 = 0x78;
+        const TIN_BAR: u32 = 4306;
 
-        let spells = || crate::ui_action::Spells {
+        // The sting row carries `stances`: the form bits its 0x56 report names.
+        let spells = |stances: u32| crate::ui_action::Spells {
             catalog: benilla_formats::SpellCatalog::from_displays(
                 [
                     (
@@ -2775,6 +3133,7 @@ mod tests {
                             attributes: 0x0001_0002,
                             attributes_ex2: 0x0002_0000,
                             modal_next_spell: AUTO_SHOT,
+                            stances,
                             ..Default::default()
                         },
                     ),
@@ -2793,22 +3152,56 @@ mod tests {
                 .into_iter()
                 .collect(),
             ),
-            forms: Default::default(),
+            forms: [(
+                1,
+                benilla_formats::ShapeshiftForm {
+                    name: "Cat Form".into(),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
             ranges: Default::default(),
             cast_times: Default::default(),
             durations: Default::default(),
             radii: Default::default(),
         };
 
-        // One CAST_RESULT for `spell_id`, with `in_flight` outstanding and `running` the live
-        // repeat. Returns (what the reply chains, whether the guard is still armed).
-        let fire = |spell_id: u32, success: bool, in_flight: Option<u32>, running: Option<u32>| {
+        /// What one `SMSG_CAST_RESULT` meets and carries.
+        #[derive(Clone, Copy)]
+        struct Case {
+            spell_id: u32,
+            /// `None` is a success, `Some` the failure's reason.
+            fail: Option<u8>,
+            arg: Option<u32>,
+            /// The cast guard and the queued strike on entry.
+            pending: Option<u32>,
+            queued: Option<u32>,
+            /// The live auto-repeat spell.
+            running: Option<u32>,
+            /// The sting's `Stances` mask.
+            stances: u32,
+            /// The item cache holds `TIN_BAR`.
+            cached: bool,
+        }
+        let reply = |spell_id: u32, fail: Option<u8>| Case {
+            spell_id,
+            fail,
+            arg: None,
+            pending: Some(spell_id),
+            queued: None,
+            running: None,
+            stances: 0,
+            cached: false,
+        };
+
+        // One CAST_RESULT. Returns what the reply chains, and the guard and the strike left.
+        let fire = |r: Case| {
             let mut app = App::new();
             app.add_message::<CastEvent>()
                 .init_resource::<GuidIndex>()
                 .init_resource::<SelfGuid>()
                 .init_resource::<CastErrors>()
-                .init_resource::<crate::ui_action::UiErrorKeys>()
                 .init_resource::<crate::ui_action::UiErrorKeys>()
                 .init_resource::<CastBarFeed>()
                 .init_resource::<PendingCast>()
@@ -2822,15 +3215,21 @@ mod tests {
                 .0
                 .insert(10, self_e);
             app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
-            app.world_mut().resource_mut::<AutoRepeatActive>().0 = running;
-            if let Some(id) = in_flight {
+            app.world_mut().resource_mut::<AutoRepeatActive>().0 = r.running;
+            if let Some(id) = r.pending {
                 app.world_mut()
                     .resource_mut::<PendingCast>()
-                    // `guards: false`: a ranged hunter shot is recorded but does not guard.
-                    .arm(id, Instant::now(), false);
+                    .push(id, None, Instant::now());
+            }
+            if let Some(id) = r.queued {
+                app.world_mut().resource_mut::<QueuedMeleeSpell>().arm(id);
+            }
+            let mut items = crate::items::Items::default();
+            if r.cached {
+                items.insert_template(TIN_BAR, Some(crate::items::test_template("Tin Bar")));
             }
             let (tx, _rx) = crossbeam_channel::unbounded();
-            let cat = spells();
+            let cat = spells(r.stances);
             let chained = app
                 .world_mut()
                 .run_system_once(
@@ -2847,10 +3246,10 @@ mod tests {
                           mut auto_repeat: ResMut<AutoRepeatActive>| {
                         let net = crate::net::NetCommands(tx.clone());
                         cast_result(
-                            spell_id,
-                            success,
-                            if success { None } else { Some(0x1b) },
-                            None,
+                            r.spell_id,
+                            r.fail.is_none(),
+                            r.fail,
+                            r.arg,
                             &mut commands,
                             &self_guid,
                             &index,
@@ -2860,51 +3259,163 @@ mod tests {
                             &mut cast_bar,
                             &mut pending,
                             &mut queued_melee,
+                            &crate::spell::SpellTargeting::default(),
                             &mut cooldowns,
                             &mut auto_repeat,
                             Some(&cat),
+                            Some(&items),
                             &net,
                             1,
                         )
                     },
                 )
                 .unwrap();
-            let still_armed = app
+            let armed = app
                 .world()
                 .resource::<PendingCast>()
                 .in_flight(Instant::now());
-            (chained, still_armed)
+            let queued = app.world().resource::<QueuedMeleeSpell>().current();
+            (chained, armed, queued)
         };
+        let sting = |fail| reply(SERPENT_STING, fail);
 
         // The ordinary case: the sting lands, and Auto Shot follows by itself.
         assert_eq!(
-            fire(SERPENT_STING, true, Some(SERPENT_STING), None),
-            (Some(AUTO_SHOT), false),
+            fire(sting(None)),
+            (Some(AUTO_SHOT), false, None),
             "a successful sting chains Auto Shot, and clears the in-flight guard first"
-        );
-        // A failed one does too: both results converge on the same block.
-        assert_eq!(
-            fire(SERPENT_STING, false, Some(SERPENT_STING), None).0,
-            Some(AUTO_SHOT),
-            "a FAILED sting chains it as well (`0x6e735a jne` → the same `0x6e73eb`)"
         );
         // Already shooting: re-arm, never re-cast.
         assert_eq!(
-            fire(SERPENT_STING, true, Some(SERPENT_STING), Some(AUTO_SHOT)).0,
+            fire(Case {
+                running: Some(AUTO_SHOT),
+                ..sting(None)
+            })
+            .0,
             None,
             "Auto Shot already running: the equal branch sends nothing"
         );
         // Auto Shot's own replies terminate the chain.
         assert_eq!(
-            fire(AUTO_SHOT, true, Some(AUTO_SHOT), Some(AUTO_SHOT)).0,
+            fire(Case {
+                running: Some(AUTO_SHOT),
+                ..reply(AUTO_SHOT, None)
+            })
+            .0,
             None,
-            "Auto Shot's own column 38 is 0 — no second hop"
+            "Auto Shot's own column 38 is 0 - no second hop"
         );
         // Not our in-flight cast (a proc's result, a stale reply): not ours to chain from.
         assert_eq!(
-            fire(SERPENT_STING, true, Some(133), None).0,
+            fire(Case {
+                pending: Some(133),
+                ..sting(None)
+            })
+            .0,
             None,
             "a reply for a spell we do not have in flight chains nothing"
+        );
+
+        // A refused shot: the report pops the slot (`0x6e2218`), so `0x6e7408` misses.
+        assert_eq!(
+            fire(sting(Some(OUT_OF_RANGE))),
+            (None, false, None),
+            "a failed sting chains nothing, and the guard is open"
+        );
+        // Reason 0x17 leaves the report before the pop (`0x6e1ce4`, `0x6e1cfa`).
+        assert_eq!(
+            fire(sting(Some(DONT_REPORT))),
+            (Some(AUTO_SHOT), false, None),
+            "a DONT_REPORT failure still finds the sting in flight"
+        );
+        // The same with Auto Shot running: the equal branch re-arms, sends nothing.
+        assert_eq!(
+            fire(Case {
+                running: Some(AUTO_SHOT),
+                ..sting(Some(DONT_REPORT))
+            })
+            .0,
+            None
+        );
+
+        // 0x56 names the forms of `Stances`; with none named it leaves at `0x6e20c6`.
+        assert_eq!(
+            fire(sting(Some(ONLY_SHAPESHIFT))).0,
+            Some(AUTO_SHOT),
+            "a form-less ONLY_SHAPESHIFT report leaves before the pop"
+        );
+        assert_eq!(
+            fire(Case {
+                stances: 1,
+                ..sting(Some(ONLY_SHAPESHIFT))
+            })
+            .0,
+            None,
+            "a named form shows its line, and the pop follows"
+        );
+
+        // 0x5c and 0x78 read the item cache by the first word (`0x6e1e7f`): a miss leaves at
+        // `0x6e1eab`, a hit shows the line and pops.
+        for reason in [REAGENTS, TOTEMS] {
+            let named = Case {
+                arg: Some(TIN_BAR),
+                ..sting(Some(reason))
+            };
+            assert_eq!(
+                fire(named).0,
+                Some(AUTO_SHOT),
+                "reason {reason:#x} with the item uncached leaves before the pop"
+            );
+            assert_eq!(
+                fire(Case {
+                    cached: true,
+                    ..named
+                })
+                .0,
+                None,
+                "reason {reason:#x} with the item cached pops"
+            );
+            assert_eq!(
+                fire(Case {
+                    cached: true,
+                    arg: None,
+                    ..named
+                })
+                .0,
+                Some(AUTO_SHOT),
+                "reason {reason:#x} with no first word asks the cache for -1, a miss"
+            );
+        }
+
+        // A cast over a queued strike: the report's pop restores the strike into the slot. A
+        // different strike is not the spell; the same spell in the save is (`0x6e73ee` clears
+        // the save after the report, so `0x6e7408` finds it popped in).
+        assert_eq!(
+            fire(Case {
+                queued: Some(HEROIC_STRIKE),
+                ..sting(Some(OUT_OF_RANGE))
+            }),
+            (None, false, Some(HEROIC_STRIKE)),
+            "the strike under a failed shot comes back to the slot and is not the shot"
+        );
+        assert_eq!(
+            fire(Case {
+                queued: Some(SERPENT_STING),
+                ..sting(Some(OUT_OF_RANGE))
+            }),
+            (Some(AUTO_SHOT), false, None),
+            "the save holding the same spell is popped in, matches, and chains"
+        );
+        // A strike held under another cast is not the in-flight slot (`0x6e7408`).
+        assert_eq!(
+            fire(Case {
+                pending: Some(133),
+                queued: Some(SERPENT_STING),
+                ..sting(Some(OUT_OF_RANGE))
+            })
+            .0,
+            None,
+            "the save alone is not the in-flight slot"
         );
     }
 }

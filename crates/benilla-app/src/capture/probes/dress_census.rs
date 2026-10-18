@@ -14,9 +14,11 @@ use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
 use super::ProbeClock;
-use crate::entities::{Equipment, HeldAttached, ATTACH_SLOT_NAMES};
+use crate::entities::equipment::ATTACH_SLOT_NAMES;
+use crate::entities::{Equipment, HeldAttached};
 use crate::names::NameCache;
 use crate::net::{Guid, NetEntity, ObjectStore, SelfPlayer};
+use crate::query_cache::Ask;
 
 /// Census radius in yards, past what the server streams; `WOW_DRESS_CENSUS_RADIUS` overrides.
 const DEFAULT_RADIUS: f32 = 120.0;
@@ -61,7 +63,7 @@ fn fire_dress_census(
     names: Res<NameCache>,
     body: Query<(Entity, &Transform), With<SelfPlayer>>,
     // The self body's parts, one `DRESS_PART` line each.
-    body_parts: crate::entities::BodyPartsDesc,
+    body_parts: crate::entities::attach::BodyPartsDesc,
     entities: Query<DressQuery>,
     // `parts=`/`mats=`: mesh parts under the unit and the distinct materials they bind.
     children: Query<&Children>,
@@ -129,7 +131,7 @@ fn fire_dress_census(
                 eq.cloak,
                 u8::from(eq.settled),
                 spawned.join(","),
-                names.peek(guid.0).unwrap_or("?"),
+                names.resolve_unit(guid.0, None, Ask::Read).unwrap_or("?"),
                 if contradiction { "  !!" } else { "" },
             ),
         ));

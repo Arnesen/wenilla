@@ -16,6 +16,7 @@ use crate::net::{GuidIndex, NetCommands, ObjectStore, SelfGuid};
 use super::edit::ChannelState;
 use super::event::{flag_of_tag, kind_of_wire, language_name, ChatEvent, ChatEventKind};
 use super::frames::{route, ChatWindows};
+use crate::query_cache::Ask;
 
 /// Frames a line waits on a name, about 2 s at 60 fps, before it gives up.
 const NAME_MAX_TRIES: u16 = 120;
@@ -23,9 +24,6 @@ const NAME_MAX_TRIES: u16 = 120;
 /// The text-emote sentence tables, read once off the patch chain.
 #[derive(Resource)]
 pub(crate) struct EmoteTexts(pub(crate) EmoteTextCatalog);
-
-/// The DBC string column: 0, enUS; the reference reads its locale slot `[0xc0e080]`.
-const LOCALE: usize = 0;
 
 /// Load `EmotesText.dbc` with `EmotesTextData.dbc`; before `AssetSet::Open` it loads nothing.
 pub(super) fn load_emote_texts(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
@@ -98,6 +96,13 @@ enum Pending {
     },
     /// An area discovery (`SMSG_EXPLORATION_EXPERIENCE`), fired at the drain, which holds the VM.
     Discovery { area: String, xp: u32 },
+    /// "You are now <rank> with <faction>." (`0x62c670`), parked by the wire handler in packet
+    /// order and resolved against the VM's strings at the drain.
+    Standing {
+        faction: String,
+        rank: u8,
+        female: bool,
+    },
     /// One combat-log line, classified at the packet, waiting on its two endpoint names; the
     /// reference's deferred queue (`0xc4e208`) waits only on an item name.
     Combat(Box<super::combat::PendingCombat>),
@@ -132,7 +137,7 @@ pub(super) fn text_emote_event(
 ) -> Option<ChatEvent> {
     Some(ChatEvent {
         kind: Some(ChatEventKind::TextEmote),
-        text: cat.compose(text_id, line, LOCALE)?,
+        text: cat.compose(text_id, line)?,
         sender: line.performer.to_string(),
         ..Default::default()
     })
@@ -312,9 +317,55 @@ impl ChatLog {
         });
     }
 
+    /// Queue a reputation rank line (`FACTION_STANDING_CHANGED`) for the drain to fill.
+    pub(crate) fn push_standing(&mut self, faction: &str, rank: u8, female: bool) {
+        self.pending.push(Pending::Standing {
+            faction: faction.to_string(),
+            rank,
+            female,
+        });
+    }
+
     /// Drop every pending item on disconnect.
     pub(crate) fn clear_session(&mut self) {
         self.pending.clear();
+    }
+
+    /// What is parked, in order, by kind: the order a packet batch left the lines in.
+    #[cfg(test)]
+    pub(crate) fn pending_kinds(&self) -> Vec<&'static str> {
+        self.pending
+            .iter()
+            .map(|p| match p {
+                Pending::Wire { .. } => "wire",
+                Pending::Notice { .. } => "notice",
+                Pending::Addon { .. } => "addon",
+                Pending::Roll { .. } => "roll",
+                Pending::XpGain { .. } => "xp",
+                Pending::HonorGain { .. } => "honor",
+                Pending::TextEmote { .. } => "emote",
+                Pending::Discovery { .. } => "discovery",
+                Pending::Standing { .. } => "standing",
+                Pending::Combat(_) => "combat",
+                Pending::Event(_) => "event",
+            })
+            .collect()
+    }
+
+    /// The parked rank lines as `(faction, rank, female)`, in order.
+    #[cfg(test)]
+    pub(crate) fn pending_standing(&self) -> Vec<(String, u8, bool)> {
+        self.pending
+            .iter()
+            .filter_map(|p| match p {
+                Pending::Standing {
+                    faction,
+                    rank,
+                    female,
+                } => Some((faction.clone(), *rank, *female)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The parked addon lines as `(prefix, message, distribution)`.
@@ -627,6 +678,7 @@ pub(super) fn feed_chat(
     langs: Res<super::language::ChatLanguages>,
     // Item names for `TRADESKILL_LOG`, `FEEDPET_LOG`, `ITEMENCHANTMENT*`, `SPELLDURABILITYDAMAGE`.
     items: Res<crate::items::Items>,
+    unit_names: crate::ui_unit::NameTables,
     // The spam and profanity filters, which run in the reference's display function `0x49a870`.
     mut text_filter: crate::text_filter::ChatTextFilter,
 ) {
@@ -656,7 +708,7 @@ pub(super) fn feed_chat(
                 let name = match &msg.sender_name {
                     Some(n) => Some(n.clone()),
                     None if needs_name(msg.chat_type) && msg.sender_guid != 0 => names
-                        .resolve(msg.sender_guid, &commands)
+                        .resolve_player(msg.sender_guid, Ask::at(tries == 0, &commands))
                         .map(str::to_string),
                     _ => None,
                 };
@@ -689,7 +741,8 @@ pub(super) fn feed_chat(
                         &guids,
                         &stores,
                         &names,
-                        &commands,
+                        Ask::at(tries == 0, &commands),
+                        unit_names.get(),
                     );
                     let (text, clean) = crate::npc_text::substitute_checked(
                         &msg.text,
@@ -700,7 +753,9 @@ pub(super) fn feed_chat(
                     );
                     if clean {
                         Some(text)
-                    } else if subject_guid == 0 || names.peek(subject_guid).is_some() {
+                    } else if subject_guid == 0
+                        || names.resolve_unit(subject_guid, None, Ask::Read).is_some()
+                    {
                         debug!(
                             "chat: dropping unexpandable [{:#04x}] {:?} (subject {subject_guid:#x})",
                             msg.chat_type, msg.text
@@ -796,9 +851,10 @@ pub(super) fn feed_chat(
                 b_guid,
                 tries,
             } => {
-                let a = names.resolve(a_guid, &commands).map(str::to_string);
+                let ask = Ask::at(tries == 0, &commands);
+                let a = names.resolve_player(a_guid, ask).map(str::to_string);
                 let b = if b_guid != 0 {
-                    names.resolve(b_guid, &commands).map(str::to_string)
+                    names.resolve_player(b_guid, ask).map(str::to_string)
                 } else {
                     Some(String::new())
                 };
@@ -834,7 +890,9 @@ pub(super) fn feed_chat(
                 guid,
                 tries,
             } => {
-                let name = names.resolve(guid, &commands).map(str::to_string);
+                let name = names
+                    .resolve_player(guid, Ask::at(tries == 0, &commands))
+                    .map(str::to_string);
                 if name.is_none() && tries < NAME_MAX_TRIES {
                     still.push(Pending::Addon {
                         prefix,
@@ -860,7 +918,9 @@ pub(super) fn feed_chat(
                 guid,
                 tries,
             } => {
-                let name = names.resolve(guid, &commands).map(str::to_string);
+                let name = names
+                    .resolve_player(guid, Ask::at(tries == 0, &commands))
+                    .map(str::to_string);
                 if name.is_none() && tries < NAME_MAX_TRIES {
                     still.push(Pending::Roll {
                         min,
@@ -904,7 +964,13 @@ pub(super) fn feed_chat(
                 let name = if victim == 0 {
                     None
                 } else {
-                    let resolved = names.resolve(victim, &commands).map(str::to_string);
+                    let resolved = names
+                        .resolve_unit(
+                            victim,
+                            guids.0.get(&victim).and_then(|&e| stores.get(e).ok()),
+                            Ask::at(tries == 0, &commands),
+                        )
+                        .map(str::to_string);
                     if resolved.is_none() && tries < NAME_MAX_TRIES {
                         still.push(Pending::XpGain {
                             victim,
@@ -935,7 +1001,13 @@ pub(super) fn feed_chat(
                 let name = if victim == 0 {
                     None
                 } else {
-                    let resolved = names.resolve(victim, &commands).map(str::to_string);
+                    let resolved = names
+                        .resolve_unit(
+                            victim,
+                            guids.0.get(&victim).and_then(|&e| stores.get(e).ok()),
+                            Ask::at(tries == 0, &commands),
+                        )
+                        .map(str::to_string);
                     if resolved.is_none() && tries < NAME_MAX_TRIES {
                         still.push(Pending::HonorGain {
                             victim,
@@ -980,11 +1052,13 @@ pub(super) fn feed_chat(
                 target,
                 tries,
             } => {
-                // Both names ask-once: the performer's, and ours for the "is the target me?" test.
-                let performer_name = names.resolve(performer, &commands).map(str::to_string);
+                // Both names, looked up as the packet's (`0x49dc59`): the performer's, and ours for
+                // the "is the target me?" test.
+                let ask = Ask::at(tries == 0, &commands);
+                let performer_name = names.resolve_player(performer, ask).map(str::to_string);
                 let your_name = self_guid
                     .0
-                    .and_then(|g| names.resolve(g, &commands).map(str::to_string));
+                    .and_then(|g| names.resolve_player(g, ask).map(str::to_string));
                 if (performer_name.is_none() || your_name.is_none()) && tries < NAME_MAX_TRIES {
                     still.push(Pending::TextEmote {
                         performer,
@@ -1020,7 +1094,10 @@ pub(super) fn feed_chat(
                 route(&mut script, &mut windows, &event);
             }
             Pending::Combat(mut line) => {
-                // Both names, ask-once within `tries`; guid 0 is already filled (`/chattest`).
+                // Both names, looked up with a callback as the line's (`0x6265a7`, `0x6265e0`); its
+                // retries within `tries` ask only a name the cache holds nothing for. Guid 0 is
+                // already filled (`/chattest`).
+                let ask = Ask::at(line.tries == 0, &commands);
                 let mut wait = false;
                 for (guid, slot) in [(line.subject, 0usize), (line.object, 1usize)] {
                     if guid == 0 {
@@ -1030,7 +1107,7 @@ pub(super) fn feed_chat(
                         guid,
                         guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
                         &names,
-                        &commands,
+                        ask,
                     ) {
                         Some(name) if slot == 0 => line.fills.attacker = name,
                         Some(name) => line.fills.victim = name,
@@ -1042,7 +1119,7 @@ pub(super) fn feed_chat(
                 match line.named {
                     super::combat::Named::Ready => {}
                     super::combat::Named::Item(entry) => {
-                        match items.template(entry, 0, &commands).map(|t| t.name.clone()) {
+                        match items.template(entry, 0, ask).map(|t| t.name.clone()) {
                             Some(name) => line.fills.named = name,
                             None if !items.template_answered_unknown(entry) => wait = true,
                             None => {}
@@ -1053,7 +1130,7 @@ pub(super) fn feed_chat(
                             guid,
                             guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
                             &names,
-                            &commands,
+                            ask,
                         ) {
                             Some(name) => line.fills.named = name,
                             None => wait = true,
@@ -1074,6 +1151,21 @@ pub(super) fn feed_chat(
                         &mut script,
                         &mut windows,
                         &ChatEvent::text_only(line.kind, text),
+                    );
+                }
+            }
+            Pending::Standing {
+                faction,
+                rank,
+                female,
+            } => {
+                let line =
+                    crate::ui_reputation::standing_text(&globals(&script), rank, female, &faction);
+                if let Some(text) = line {
+                    route(
+                        &mut script,
+                        &mut windows,
+                        &ChatEvent::text_only(ChatEventKind::System, text),
                     );
                 }
             }

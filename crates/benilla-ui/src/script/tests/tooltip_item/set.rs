@@ -53,7 +53,7 @@ fn item_set_block_counts_and_colors() {
     s.run(
         r#"
         local a = CreateFrame("Button", "Slot10"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         SetItemByIdForTest(tt, 6303)
         -- The spacer is the reference's own literal `0x854b2c` — a space and a newline, which is
@@ -195,7 +195,7 @@ fn quest_item_hovers_render_the_rows_item_by_id() {
     s.run(
         r#"
         local a = CreateFrame("Button", "Q1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetQuestItem("choice", 1)
         "#,
     )
@@ -213,19 +213,14 @@ fn quest_item_hovers_render_the_rows_item_by_id() {
         .unwrap();
     assert_eq!(s.eval::<i64>("return TT:NumLines()").unwrap(), 0);
 
-    s.set_quest_log(QuestLogState {
-        entries: vec![QuestLogEntryView {
-            quest_id: 7,
-            detail: Some(QuestLogDetail {
-                rewards: vec![row()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        }],
-        ..Default::default()
-    });
-    // The detail hangs on the selected row, so select it first.
-    s.run("SelectQuestLogEntry(1)").unwrap();
+    let mut record = crate::script::quest_log::fixture::record("Q", 1, 12, "Elwynn Forest");
+    record.rewards = vec![(row().item_id, 1)];
+    crate::script::quest_log::fixture::seat(
+        &mut s,
+        &[(7, record, crate::script::quest_log::fixture::slot(7, 0, 0))],
+    );
+    // The reward is the selected quest's, so select it first: row 2, under its header.
+    s.run("SelectQuestLogEntry(2)").unwrap();
     s.run(r#"TT:SetOwner(Q1, "ANCHOR_RIGHT"); TT:SetQuestLogItem("reward", 1)"#)
         .unwrap();
     assert_eq!(lines_of(&mut s)[0].0, "Militia Hammer");

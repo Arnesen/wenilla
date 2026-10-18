@@ -11,11 +11,13 @@ fn one_tab_state() -> TalentUiState {
                 name: "Fire".into(),
                 background: "MageFire".into(),
                 points_spent: 7,
+                texture: Some("Interface\\Icons\\Spell_Fire_Fire".into()),
             },
             TalentTabView {
                 name: "Frost".into(),
                 background: "MageFrost".into(),
                 points_spent: 0,
+                texture: None,
             },
         ],
         talents: vec![
@@ -69,19 +71,23 @@ fn bindings_read_the_pushed_snapshot() {
         r#"
         assert(GetNumTalentTabs() == 2)
         local name, texture, points, file = GetTalentTabInfo(1)
-        assert(name == "Fire" and texture == nil and points == 7 and file == "MageFire")
+        assert(name == "Fire" and points == 7 and file == "MageFire")
+        assert(texture == "Interface\\Icons\\Spell_Fire_Fire", "the tab's SpellIcon path")
+        local n2, texture2, points2, file2 = GetTalentTabInfo(2)
+        assert(n2 == "Frost" and texture2 == nil and points2 == 0 and file2 == "MageFrost",
+            "a tab whose icon id is not in SpellIcon.dbc pushes nil there")
         assert(GetTalentTabInfo(3) == nil, "out of range is nil")
         assert(GetNumTalents(1) == 2 and GetNumTalents(2) == 0 and GetNumTalents(9) == 0)
 
         local n, icon, tier, col, rank, max, exc, meets = GetTalentInfo(1, 1)
         assert(n == "Improved Fireball" and tier == 1 and col == 1)
-        assert(rank == 3 and max == 5 and exc == 0 and meets == true)
+        assert(rank == 3 and max == 5 and exc == nil and meets == 1)
         assert(icon == "Interface\\Icons\\Spell_Fire_FlameBolt")
         assert(GetTalentInfo(1, 9) == nil)
 
         -- The prereq triplets, flat (the reference walks arg[5], arg[6], arg[7], ...).
         local pt, pc, pl = GetTalentPrereqs(1, 2)
-        assert(pt == 1 and pc == 1 and pl == false)
+        assert(pt == 1 and pc == 1 and pl == nil)
         assert(GetTalentPrereqs(1, 1) == nil, "no prereqs is empty")
 
         local cp1, cp2 = UnitCharacterPoints("player")
@@ -89,6 +95,40 @@ fn bindings_read_the_pushed_snapshot() {
     "#,
     )
     .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// `isExceptional` is `1.0` when `[rec+0x4c] & 1` and nil otherwise (`0x4f33e8`): never `0`, which
+/// Lua reads as true, and `meetsPrereq` and each prereq's `isLearnable` are 1 or nil too
+/// (`0x4f3403`-`0x4f3443`, `0x4f3676`, `0x4f3644`). `GetTalentPrereqs` answers three values per edge.
+#[test]
+fn talent_flags_are_one_or_nil() {
+    let mut s = script();
+    let mut state = one_tab_state();
+    state.talents[0][0].exceptional = true;
+    state.talents[0][1].meets_prereq = false;
+    state.talents[0][1].prereqs.push(TalentPrereqView {
+        tier: 1,
+        column: 2,
+        learnable: true,
+    });
+    s.set_talents(state);
+    s.run(
+        r#"
+        local _, _, _, _, _, _, exc, meets = GetTalentInfo(1, 1)
+        assert(exc == 1 and type(exc) == "number" and meets == 1)
+        local _, _, _, _, _, _, exc2, meets2 = GetTalentInfo(1, 2)
+        assert(exc2 == nil, "an ordinary talent is not exceptional")
+        assert(meets2 == nil, "an unmet prerequisite is nil, not false")
+
+        local t1, c1, l1, t2, c2, l2 = GetTalentPrereqs(1, 2)
+        assert(t1 == 1 and c1 == 1 and l1 == nil)
+        assert(t2 == 1 and c2 == 2 and l2 == 1 and type(l2) == "number")
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.arity("GetTalentInfo(1, 2)").unwrap(), 8);
+    assert_eq!(s.arity("GetTalentPrereqs(1, 2)").unwrap(), 6);
     assert!(s.take_errors().is_empty());
 }
 
@@ -153,7 +193,7 @@ fn set_talent_on_a_passive_talent_is_the_talent_builder() {
     s.run(
         r#"
         local a = CreateFrame("Button", "TB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT")
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetTalent(1, 1)
         assert(tt:IsShown(), "SetTalent shows")
@@ -214,7 +254,7 @@ fn set_talent_on_an_exceptional_talent_keeps_the_spell_body() {
     s.run(
         r#"
         local a = CreateFrame("Button", "TB3"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT3")
+        local tt = CreateFrame("GameTooltip", "TT3", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetTalent(1, 2)
         local want = {
@@ -232,6 +272,31 @@ fn set_talent_on_an_exceptional_talent_keeps_the_spell_body() {
     assert!(s.take_errors().is_empty());
 }
 
+/// `TOOLTIP_TALENT_RANK` is a `_G` read (`0x703bf0`), so an `__index` that calls a verb runs inside
+/// `SetTalent`; the Model must be free for it.
+#[test]
+fn set_talent_reads_the_rank_string_with_the_model_free() {
+    let mut s = script();
+    s.set_talents(one_tab_state());
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "TB4"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT4", nil, "TestTooltipTemplate")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        setmetatable(getfenv(0), { __index = function(t, k)
+            if k == "TOOLTIP_TALENT_RANK" then
+                CreateFrame("Frame"):SetWidth(10)
+                return "[RANK %d/%d]"
+            end
+        end })
+        tt:SetTalent(1, 2)
+        assert(TT4TextLeft1:GetText() == "[RANK 0/5]", tostring(TT4TextLeft1:GetText()))
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
 /// A missing spell view renders the rank line alone and asks for the view once.
 #[test]
 fn set_talent_locked_reqs_and_the_ask_once_miss() {
@@ -242,7 +307,7 @@ fn set_talent_locked_reqs_and_the_ask_once_miss() {
     s.run(
         r#"
         local a = CreateFrame("Button", "TB2"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
-        local tt = CreateFrame("GameTooltip", "TT2")
+        local tt = CreateFrame("GameTooltip", "TT2", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetTalent(1, 2)
         assert(tt:IsShown())

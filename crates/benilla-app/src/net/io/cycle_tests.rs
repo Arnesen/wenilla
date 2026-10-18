@@ -1,206 +1,22 @@
-//! The login cycle, [`super::run`], against a fake realmd and a fake world server on loopback: the
-//! real logon, realm park, world handshake and roster, driven through the parks as the app does.
+//! The login cycle, [`super::run`], against a fake realmd and a fake world server on loopback
+//! ([`super::fake`]): the real logon, the logon park, world handshake and roster, driven through
+//! the parks as the app does.
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
 
-use benilla_protocol::messages::{self, opcode};
-use benilla_protocol::{SessionEvent, WorldWriter};
-use benilla_srp::vanilla_header::HeaderCrypto;
-use benilla_srp::{
-    password_verifier, NormalizedString, GENERATOR, LARGE_SAFE_PRIME_LITTLE_ENDIAN,
-    SESSION_KEY_LENGTH,
-};
-use crossbeam_channel::{Receiver, Sender};
-use num_bigint::BigUint;
-use sha1::{Digest, Sha1};
+use benilla_protocol::messages::opcode;
+use benilla_protocol::{RealmInfo, RosterCause, SessionEvent};
 
-use super::{run, Cycle, LoginRequest, Parks, PingClock};
-use crate::net::{CharRequest, RealmRequest};
+use super::fake::{self, FakeRealm, WAIT};
+use super::{run, Cycle, LoginRequest, Parks, PingClock, WriterSwap};
+use crate::net::{CharRequest, ParkRequest, RealmRequest};
 
-const USER: &str = "empty";
-const PASS: &str = "secret";
 const REALM: &str = "Fake";
-const SALT: [u8; 32] = [0x5a; 32];
-/// Every wait in the test: long enough for a loaded machine, short of a hung gate.
-const WAIT: Duration = Duration::from_secs(20);
-
-fn sha1(parts: &[&[u8]]) -> [u8; 20] {
-    let mut h = Sha1::new();
-    for p in parts {
-        h.update(p);
-    }
-    h.finalize().into()
-}
-
-fn le32(v: &BigUint) -> [u8; 32] {
-    let raw = v.to_bytes_le();
-    let mut out = [0u8; 32];
-    out[..raw.len()].copy_from_slice(&raw);
-    out
-}
-
-/// `SHA1_Interleave` over all 32 bytes of `S`, as vmangos's `SRP6::HashSessionKey` does.
-fn interleave(s: &[u8; 32]) -> [u8; SESSION_KEY_LENGTH] {
-    let even: Vec<u8> = s.iter().step_by(2).copied().collect();
-    let odd: Vec<u8> = s.iter().skip(1).step_by(2).copied().collect();
-    let (g, h) = (sha1(&[&even]), sha1(&[&odd]));
-    let mut out = [0u8; SESSION_KEY_LENGTH];
-    for (i, (gi, hi)) in g.iter().zip(&h).enumerate() {
-        out[i * 2] = *gi;
-        out[i * 2 + 1] = *hi;
-    }
-    out
-}
-
-/// A realmd that logs [`USER`] in with the server half of SRP6 and lists one realm, [`REALM`] at
-/// `world`. The session key goes to the fake world server, which needs it for the header cipher.
-fn fake_realmd(world: String, keys: Sender<[u8; SESSION_KEY_LENGTH]>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    thread::spawn(move || {
-        let (mut s, _) = listener.accept().unwrap();
-        let n = BigUint::from_bytes_le(&LARGE_SAFE_PRIME_LITTLE_ENDIAN);
-        let g = BigUint::from(GENERATOR);
-        let user = NormalizedString::new(USER).unwrap();
-        let pass = NormalizedString::new(PASS).unwrap();
-        let v = BigUint::from_bytes_le(&password_verifier(&user, &pass, &SALT));
-
-        // CMD_AUTH_LOGON_CHALLENGE_Client: opcode, protocol, u16 size, then the body.
-        let mut head = [0u8; 4];
-        s.read_exact(&mut head).unwrap();
-        let mut body = vec![0u8; usize::from(u16::from_le_bytes([head[2], head[3]]))];
-        s.read_exact(&mut body).unwrap();
-
-        // B = k·v + g^b, with k = 3; `b` walks until `B`'s top byte is non-zero, since the client
-        // redials on a zero one.
-        let (b, b_pub) = (1u32..)
-            .map(|i| {
-                let b = BigUint::from_bytes_le(&[0x3c; 32]) + i;
-                let b_pub = le32(&((BigUint::from(3u8) * &v + g.modpow(&b, &n)) % &n));
-                (b, b_pub)
-            })
-            .find(|(_, b_pub)| b_pub[31] != 0)
-            .unwrap();
-        let mut reply = vec![0x00, 0x00, 0x00];
-        reply.extend_from_slice(&b_pub);
-        reply.extend_from_slice(&[1, GENERATOR, 32]);
-        reply.extend_from_slice(&LARGE_SAFE_PRIME_LITTLE_ENDIAN);
-        reply.extend_from_slice(&SALT);
-        reply.extend_from_slice(&[0u8; 16]); // crc_salt
-        reply.push(0); // security_flag
-        s.write_all(&reply).unwrap();
-
-        // CMD_AUTH_LOGON_PROOF_Client: opcode, A, M1, crc_hash, key count, security flag.
-        let mut proof = [0u8; 75];
-        s.read_exact(&mut proof).unwrap();
-        let (a_pub, m1) = (&proof[1..33], &proof[33..53]);
-        let u = BigUint::from_bytes_le(&sha1(&[a_pub, &b_pub]));
-        let a = BigUint::from_bytes_le(a_pub);
-        let big_s = (a * v.modpow(&u, &n) % &n).modpow(&b, &n);
-        let key = interleave(&le32(&big_s));
-        let mut reply = vec![0x01, 0x00];
-        reply.extend_from_slice(&sha1(&[a_pub, m1, &key]));
-        reply.extend_from_slice(&0u32.to_le_bytes()); // hardware_survey_id
-        s.write_all(&reply).unwrap();
-        keys.send(key).unwrap();
-
-        // CMD_REALM_LIST_Client, answered with the one realm.
-        s.read_exact(&mut [0u8; 5]).unwrap();
-        let mut realm = Vec::new();
-        realm.extend_from_slice(&0u32.to_le_bytes()); // realm_type
-        realm.push(0); // flags
-        realm.extend_from_slice(format!("{REALM}\0{world}\0").as_bytes());
-        realm.extend_from_slice(&0f32.to_le_bytes()); // population
-        realm.extend_from_slice(&[0, 1, 1]); // characters, category, id
-        let mut list = vec![0x10];
-        list.extend_from_slice(&((4 + 1 + realm.len() + 2) as u16).to_le_bytes());
-        list.extend_from_slice(&0u32.to_le_bytes());
-        list.push(1);
-        list.extend_from_slice(&realm);
-        list.extend_from_slice(&0u16.to_le_bytes());
-        s.write_all(&list).unwrap();
-
-        // Held until the cycle drops the logon, as realmd keeps it for the list refresh.
-        let _ = s.read(&mut [0u8; 1]);
-    });
-    addr
-}
-
-/// A server packet: `u16` BE size counting the opcode, `u16` LE opcode, the body.
-fn send(s: &mut TcpStream, crypto: Option<&mut HeaderCrypto>, op: u16, body: &[u8]) {
-    let size = ((body.len() + 2) as u16).to_be_bytes();
-    let op = op.to_le_bytes();
-    let mut header = [size[0], size[1], op[0], op[1]];
-    if let Some(c) = crypto {
-        c.encrypter().encrypt(&mut header);
-    }
-    s.write_all(&header).unwrap();
-    s.write_all(body).unwrap();
-}
-
-/// A client packet's opcode, reading past its body: `u16` BE size counting the 4-byte opcode.
-fn recv(s: &mut TcpStream, crypto: Option<&mut HeaderCrypto>) -> Option<u16> {
-    let mut header = [0u8; 6];
-    s.read_exact(&mut header).ok()?;
-    if let Some(c) = crypto {
-        c.decrypter().decrypt(&mut header);
-    }
-    let size = usize::from(u16::from_be_bytes([header[0], header[1]]));
-    s.read_exact(&mut vec![0u8; size.saturating_sub(4)]).ok()?;
-    Some(u16::from_le_bytes([header[2], header[3]]))
-}
-
-/// A world server whose account has no characters: it admits the session under realmd's key,
-/// answers every `CMSG_CHAR_ENUM` with an empty roster and a `CMSG_CHAR_CREATE` with success, and
-/// logs every opcode the client sends.
-fn fake_world(
-    listener: TcpListener,
-    keys: Receiver<[u8; SESSION_KEY_LENGTH]>,
-) -> Arc<Mutex<Vec<u16>>> {
-    let sent = Arc::new(Mutex::new(Vec::new()));
-    let log = Arc::clone(&sent);
-    thread::spawn(move || {
-        let (mut s, _) = listener.accept().unwrap();
-        send(
-            &mut s,
-            None,
-            opcode::SMSG_AUTH_CHALLENGE,
-            &0xDEAD_BEEFu32.to_le_bytes(),
-        );
-        assert_eq!(recv(&mut s, None), Some(opcode::CMSG_AUTH_SESSION));
-        let mut crypto = HeaderCrypto::from_session_key(keys.recv_timeout(WAIT).unwrap());
-        send(
-            &mut s,
-            Some(&mut crypto),
-            opcode::SMSG_AUTH_RESPONSE,
-            &[messages::AUTH_OK],
-        );
-        while let Some(op) = recv(&mut s, Some(&mut crypto)) {
-            log.lock().unwrap().push(op);
-            match op {
-                opcode::CMSG_CHAR_ENUM => {
-                    send(&mut s, Some(&mut crypto), opcode::SMSG_CHAR_ENUM, &[0]);
-                }
-                opcode::CMSG_CHAR_CREATE => send(
-                    &mut s,
-                    Some(&mut crypto),
-                    opcode::SMSG_CHAR_CREATE,
-                    &[messages::CHAR_CREATE_SUCCESS],
-                ),
-                _ => {}
-            }
-        }
-    });
-    sent
-}
 
 /// The next event, skipping the stage announcements; a login failure fails the test by name.
-fn next_event(events: &Receiver<SessionEvent>) -> SessionEvent {
+fn next_event(events: &crossbeam_channel::Receiver<SessionEvent>) -> SessionEvent {
     loop {
         match events.recv_timeout(WAIT).expect("the cycle went quiet") {
             SessionEvent::LoginStage { .. } => continue,
@@ -210,30 +26,60 @@ fn next_event(events: &Receiver<SessionEvent>) -> SessionEvent {
     }
 }
 
+/// Dial `realm` and wait for the world authentication that opens the character park: the
+/// session's epoch.
+fn dial(cycles: &fake::Cycles, realm: RealmInfo) -> u64 {
+    cycles.realm.send(enter(realm)).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::WorldAuthenticated { epoch, .. } => epoch,
+        other => panic!("expected the authentication, got {other:?}"),
+    }
+}
+
+/// Ask the park for the roster as the select screen does (`GetCharacterListUpdate`, `0x5aabb0`):
+/// the reply's epoch.
+fn ask_roster(cycles: &fake::Cycles) -> u64 {
+    cycles.pick.send(CharRequest::Enumerate).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::CharacterList { cause, epoch, .. } => {
+            assert_eq!(cause, RosterCause::Asked);
+            epoch
+        }
+        other => panic!("expected the asked-for roster, got {other:?}"),
+    }
+}
+
+/// A dial of `realm` asked under generation 0, the cycles' start.
+fn enter(realm: RealmInfo) -> RealmRequest {
+    RealmRequest::Enter {
+        realm,
+        generation: 0,
+    }
+}
+
+/// The next realm list, its realms and whether the query failed.
+fn next_list(events: &crossbeam_channel::Receiver<SessionEvent>) -> (Vec<RealmInfo>, bool) {
+    match next_event(events) {
+        SessionEvent::RealmList { realms, failed } => (realms, failed),
+        other => panic!("expected the realm list, got {other:?}"),
+    }
+}
+
 /// The reference builds `CMSG_CHAR_CREATE` in one place (`0x5aac50`), reached only from the glue's
 /// `CreateCharacter`, which the stock glue calls only from the create screen's Okay; so a login to
 /// an account with no characters parks at select on the empty list and creates nothing.
 #[test]
 fn an_empty_account_parks_at_select_without_creating_a_character() {
-    let world_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let world = world_listener.local_addr().unwrap().to_string();
-    let (keys_tx, keys_rx) = crossbeam_channel::unbounded();
-    let sent = fake_world(world_listener, keys_rx);
-    let realmd = fake_realmd(world, keys_tx);
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
 
     let (events_tx, events) = crossbeam_channel::unbounded();
-    let (writer_tx, _writer_rx) = crossbeam_channel::unbounded::<WorldWriter>();
-    // The parks are async channels: the sequencer awaits them (the browser build has no thread
-    // to park), and `block_on` turns it over here as the native net thread does.
+    let (writer_tx, _writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
+    // The parks are async channels (wenilla): the sequencer awaits them, and `block_on` turns it
+    // over here as the native net thread does.
     let (login_tx, login_rx) = async_channel::unbounded();
-    let (realm_tx, realm_rx) = async_channel::unbounded();
-    let (pick_tx, pick_rx) = async_channel::unbounded();
+    let (park_tx, park_rx) = async_channel::unbounded();
     let cycle = thread::spawn(move || {
-        let parks = Parks {
-            login_rx,
-            realm_rx,
-            pick_rx,
-        };
+        let parks = Parks { login_rx, park_rx };
         let ended = futures_lite::future::block_on(run(
             &events_tx,
             &writer_tx,
@@ -247,18 +93,25 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
 
     login_tx
         .send_blocking(LoginRequest {
-            user: USER.into(),
-            pass: PASS.into(),
-            host: realmd,
+            user: fake::USER.into(),
+            pass: fake::PASS.into(),
+            host: realmd.addr.clone(),
+            locale: benilla_protocol::auth::LOCALE_TAG_EN_US,
             generation: 0,
         })
         .unwrap();
-    match next_event(&events) {
-        SessionEvent::RealmList { realms } => assert_eq!(realms[0].name, REALM),
-        other => panic!("expected the realm list, got {other:?}"),
-    }
-    realm_tx
-        .send_blocking(RealmRequest::Enter(REALM.into()))
+    let (realms, failed) = next_list(&events);
+    assert!(!failed);
+    assert_eq!(realms[0].name, REALM);
+    park_tx
+        .send_blocking(ParkRequest::Realm(enter(realms[0].clone())))
+        .unwrap();
+    assert!(
+        matches!(next_event(&events), SessionEvent::WorldAuthenticated { .. }),
+        "the world connect completes with the authentication"
+    );
+    park_tx
+        .send_blocking(ParkRequest::Char(CharRequest::Enumerate))
         .unwrap();
     match next_event(&events) {
         SessionEvent::CharacterList { characters, .. } => assert!(
@@ -268,11 +121,749 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
         other => panic!("expected the roster at select, got {other:?}"),
     }
     // Select's Back ends the cycle, so the socket is done and its log complete.
-    pick_tx.send_blocking(CharRequest::Abandon).unwrap();
+    park_tx
+        .send_blocking(ParkRequest::Char(CharRequest::Abandon))
+        .unwrap();
     assert!(cycle.join().unwrap(), "Back returns to the login park");
-    let sent = sent.lock().unwrap().clone();
+    let sent = world.sent.lock().unwrap().clone();
     assert!(
         !sent.contains(&opcode::CMSG_CHAR_CREATE),
         "the login sent CMSG_CHAR_CREATE on its own: {sent:#06x?}"
     );
+    assert_eq!(
+        sent.iter()
+            .filter(|&&op| op == opcode::CMSG_CHAR_ENUM)
+            .count(),
+        1,
+        "the select screen's one ask enumerates once: {sent:#06x?}"
+    );
+}
+
+/// The park fetches no roster of its own: the world connect ends with the authentication, and the
+/// one `CMSG_CHAR_ENUM` goes out when the screen asks, its reply tagged as asked for (`0x5aabb0`).
+#[test]
+fn the_park_enumerates_only_when_asked() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    cycles.realm.send(enter(realms[0].clone())).unwrap();
+    assert!(matches!(
+        next_event(&cycles.events),
+        SessionEvent::WorldAuthenticated { .. }
+    ));
+    assert!(
+        cycles
+            .events
+            .recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
+        "the park sent a roster nobody asked for"
+    );
+    assert_eq!(world.enumerations(), 0);
+    cycles.pick.send(CharRequest::Enumerate).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::CharacterList { cause, .. } => assert_eq!(cause, RosterCause::Asked),
+        other => panic!("expected the asked-for roster, got {other:?}"),
+    }
+    assert_eq!(world.enumerations(), 1);
+    cycles.pick.send(CharRequest::Abandon).unwrap();
+}
+
+/// The logon park takes the next login (#833): closing the list ends the logon and the thread
+/// parks for credentials; a login while the list stands supersedes it. Either way the next login
+/// reaches realmd and its list.
+#[test]
+fn the_next_login_is_accepted_after_the_realm_list_closes_or_stands() {
+    let (realmd, _) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+
+    fake::login(&cycles, &realmd.addr);
+    assert!(!next_list(&cycles.events).1);
+    // `RealmListDialogCancelled` on the login screen: `CLoginMgr::Cancel`.
+    cycles.realm.send(RealmRequest::Close).unwrap();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, failed) = next_list(&cycles.events);
+    assert!(!failed && realms[0].name == REALM);
+    assert_eq!(realmd.logons(), 2, "the second login logged on");
+
+    // The close button leaves the list's link up; Login again supersedes it.
+    fake::login(&cycles, &realmd.addr);
+    assert!(!next_list(&cycles.events).1);
+    assert_eq!(realmd.logons(), 3);
+    let deadline = std::time::Instant::now() + WAIT;
+    while realmd.open() > 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the superseded links stay open: {}",
+            realmd.open()
+        );
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// A world attempt that fails returns to the logon park with the realmd link up, as the
+/// reference's state-2 failure arm drops only the world socket: the list is queried on the same
+/// link and another realm dialled, with no second logon.
+#[test]
+fn a_failed_world_dial_keeps_the_logon_for_the_next_realm() {
+    let (realmd, _) = fake::servers(|world| {
+        vec![
+            FakeRealm::new("Down", &fake::dead_address()),
+            FakeRealm::new(REALM, world),
+        ]
+    });
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    let down = realms.iter().find(|r| r.name == "Down").unwrap().clone();
+    let up = realms.iter().find(|r| r.name == REALM).unwrap().clone();
+
+    cycles.realm.send(enter(down)).unwrap();
+    loop {
+        match cycles
+            .events
+            .recv_timeout(WAIT)
+            .expect("the dial went quiet")
+        {
+            SessionEvent::LoginFailed { refusal, dial, .. } => {
+                assert!(
+                    refusal.is_none() && dial.is_none(),
+                    "a world transport failure"
+                );
+                break;
+            }
+            SessionEvent::LoginStage { .. } => {}
+            other => panic!("expected the dial to fail, got {other:?}"),
+        }
+    }
+    cycles.realm.send(RealmRequest::Refresh).unwrap();
+    assert!(!next_list(&cycles.events).1, "the link answers the query");
+    assert_eq!(realmd.lists(), 2);
+    dial(&cycles, up);
+    assert_eq!(realmd.logons(), 1, "one logon throughout");
+}
+
+/// With no logon a realm list query fails at once (`REALM_LIST_FAILED`); the dial and the close
+/// have nothing to act on.
+#[test]
+fn a_query_without_a_logon_fails_at_once() {
+    let cycles = fake::spawn_cycles();
+    cycles.realm.send(RealmRequest::Close).unwrap();
+    cycles.realm.send(RealmRequest::Refresh).unwrap();
+    let (realms, failed) = next_list(&cycles.events);
+    assert!(failed && realms.is_empty());
+}
+
+/// A query on a link realmd has closed dials again and answers (`0x5b2200`), so a list left up
+/// past vmangos's `MaxSessionDuration` still refreshes.
+#[test]
+fn a_query_on_a_closed_link_dials_again() {
+    let (realmd, _) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    assert!(!next_list(&cycles.events).1);
+    realmd.drop_links();
+    cycles.realm.send(RealmRequest::Refresh).unwrap();
+    let (realms, failed) = next_list(&cycles.events);
+    assert!(!failed, "the re-dial answers");
+    assert_eq!(realms[0].name, REALM);
+    assert_eq!(realmd.logons(), 2);
+}
+
+/// A Cancel after the dial was asked ends it, however early it lands: the dial carries the
+/// generation the app held when it asked, so the thread drops it and stays at the logon park.
+#[test]
+fn a_cancel_after_the_dial_was_asked_drops_it() {
+    let (realmd, _) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    // The dial was asked under 0, and the Cancel's bump landed before the thread read it.
+    cycles
+        .abandon
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    cycles.realm.send(enter(realms[0].clone())).unwrap();
+    cycles.realm.send(RealmRequest::Refresh).unwrap();
+    assert!(
+        !next_list(&cycles.events).1,
+        "the logon park answers, with no roster before it"
+    );
+}
+
+/// A server that lists no realm gets its empty list published and the logon parked, and the
+/// screens show it empty, as the reference does.
+#[test]
+fn an_empty_realm_list_is_published_and_parked() {
+    let (realmd, _) = fake::servers(|_| Vec::new());
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, failed) = next_list(&cycles.events);
+    assert!(realms.is_empty() && !failed);
+    cycles.realm.send(RealmRequest::Refresh).unwrap();
+    assert!(!next_list(&cycles.events).1, "parked at the logon park");
+    assert_eq!(realmd.lists(), 2);
+}
+
+/// Change Realm with the world up drops the session first (`0x46b22b`) and returns to the logon
+/// park, realmd still up: the world socket closes before any query.
+#[test]
+fn leave_drops_the_world_session_and_keeps_the_logon() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    dial(&cycles, realms[0].clone());
+    assert_eq!(world.open(), 1);
+    cycles.realm.send(RealmRequest::Leave).unwrap();
+    let deadline = std::time::Instant::now() + WAIT;
+    while world.open() != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the world session is still open"
+        );
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    cycles.realm.send(RealmRequest::Refresh).unwrap();
+    assert!(!next_list(&cycles.events).1);
+    dial(&cycles, realms[0].clone());
+    assert_eq!(realmd.logons(), 1, "one logon throughout");
+}
+
+/// The character park's requests and the realm list's are met in the order the app made them, on
+/// one channel. Two roster asks and a `Leave` queue while the IO thread is held in an earlier
+/// ask's slow reply: both asks go out on the old link before it leaves, none is dropped, and the
+/// leave is honored after them. The reference sends `CMSG_CHAR_ENUM` at the verb (`0x46b880`) and
+/// `ConnectToRealm` only then closes the link (`0x46b22b`).
+#[test]
+fn the_park_serves_its_requests_in_the_order_they_were_made() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    world.delay_rosters(std::time::Duration::from_millis(15));
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    cycles.realm.send(enter(realms[0].clone())).unwrap();
+    assert!(matches!(
+        next_event(&cycles.events),
+        SessionEvent::WorldAuthenticated { .. }
+    ));
+    // The first ask holds the thread; the second and the leave queue behind it together.
+    cycles.pick.send(CharRequest::Enumerate).unwrap();
+    cycles.pick.send(CharRequest::Enumerate).unwrap();
+    cycles.realm.send(RealmRequest::Leave).unwrap();
+    for ask in 1..=2 {
+        match next_event(&cycles.events) {
+            SessionEvent::CharacterList { cause, .. } => {
+                assert_eq!(cause, RosterCause::Asked, "ask {ask}")
+            }
+            other => panic!("expected the asked-for roster, got {other:?}"),
+        }
+    }
+    assert_eq!(world.enumerations_in(0), 2);
+    wait_until(|| world.open() == 0, "the leave closes the world session");
+}
+
+/// Wait for `done`, up to the tests' bound.
+fn wait_until(done: impl Fn() -> bool, what: &str) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+/// A session's authentication and its roster carry the same epoch and the attempt's generation; a
+/// realm change dials a new session, which has a new epoch.
+#[test]
+fn a_world_session_has_one_epoch_and_a_realm_change_a_new_one() {
+    let (realmd, _world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    let mut seen = Vec::new();
+    // The second dial is Change Realm at the park: a new dial, a new session.
+    for round in 0..2 {
+        cycles.realm.send(enter(realms[0].clone())).unwrap();
+        let auth = match next_event(&cycles.events) {
+            SessionEvent::WorldAuthenticated {
+                epoch, generation, ..
+            } => (epoch, generation),
+            other => panic!("round {round}: expected the authentication, got {other:?}"),
+        };
+        cycles.pick.send(CharRequest::Enumerate).unwrap();
+        let listed = match next_event(&cycles.events) {
+            SessionEvent::CharacterList {
+                epoch, generation, ..
+            } => (epoch, generation),
+            other => panic!("round {round}: expected the roster, got {other:?}"),
+        };
+        assert_eq!(auth, listed, "round {round}: one session, one epoch");
+        assert_eq!(auth.1, 0, "the attempt's generation");
+        seen.push(auth.0);
+    }
+    assert_ne!(seen[0], seen[1], "a new session has a new epoch");
+}
+
+/// `CMSG_WARDEN_DATA`, the answer the reference's Warden module sends (`0x6ca6a0`).
+const CMSG_WARDEN_DATA: u16 = 0x02E7;
+
+/// A server with Warden on asks behind the authentication answer and serves the roster and the
+/// world entry without waiting for the answer (vmangos, `World.cpp:333-338`): benilla reads the
+/// request past, answers nothing, and the login goes on to select and into the world.
+#[test]
+fn a_warden_request_is_read_past_and_the_login_goes_on() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    world.ask_warden();
+    world.set_roster(&[crate::glue_session::roster::test_character(GUID, "Alpha")]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    let epoch = dial(&cycles, realms[0].clone());
+    cycles.pick.send(CharRequest::Enumerate).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::CharacterList {
+            characters,
+            epoch: listed,
+            ..
+        } => {
+            assert_eq!(listed, epoch);
+            assert_eq!(characters.len(), 1, "the roster past the Warden request");
+        }
+        other => panic!("expected the roster, got {other:?}"),
+    }
+    cycles.pick.send(CharRequest::Enter(GUID)).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::Connected { self_guid, .. } => assert_eq!(self_guid, GUID),
+        other => panic!("expected the world entry, got {other:?}"),
+    }
+    wait_until(
+        || {
+            world
+                .sent
+                .lock()
+                .unwrap()
+                .contains(&opcode::CMSG_PLAYER_LOGIN)
+        },
+        "the entry goes out",
+    );
+    assert!(
+        !world.sent.lock().unwrap().contains(&CMSG_WARDEN_DATA),
+        "benilla never answers Warden"
+    );
+    assert_eq!(world.open(), 1, "the world link is kept");
+}
+
+/// The kick of a server whose Warden clock ran out (`Warden.cpp:686-691`, `KickSession` closing
+/// the socket, `WorldSession.cpp:873-876`) is a bare close, which ends the world session as any
+/// lost link does: `Disconnected` with `SessionEnd::Lost`.
+#[test]
+fn a_kick_after_an_unanswered_warden_request_is_a_lost_link() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    world.ask_warden();
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    dial(&cycles, realms[0].clone());
+    // The roster ask reads the request at select, ahead of its answer.
+    ask_roster(&cycles);
+    cycles.pick.send(CharRequest::Enter(GUID)).unwrap();
+    assert!(matches!(
+        next_event(&cycles.events),
+        SessionEvent::Connected { .. }
+    ));
+    world.drop_links();
+    loop {
+        match next_event(&cycles.events) {
+            SessionEvent::Disconnected { end, .. } => {
+                assert_eq!(end, benilla_protocol::SessionEnd::Lost);
+                break;
+            }
+            SessionEvent::PacketDropped { .. } => {}
+            other => panic!("expected the loss, got {other:?}"),
+        }
+    }
+    assert!(!world.sent.lock().unwrap().contains(&CMSG_WARDEN_DATA));
+}
+
+/// A roster ask that fails on the stream (the server cut the connection) tells the screen its
+/// query failed (`0x5ab300`'s failure leg) before the session ends as a dropped socket does.
+#[test]
+fn a_roster_ask_cut_on_the_stream_reports_its_failure_then_the_loss() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    world.cut_on_roster_ask();
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    cycles.realm.send(enter(realms[0].clone())).unwrap();
+    let epoch = match next_event(&cycles.events) {
+        SessionEvent::WorldAuthenticated { epoch, .. } => epoch,
+        other => panic!("expected the authentication, got {other:?}"),
+    };
+    cycles.pick.send(CharRequest::Enumerate).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::RosterFailed { epoch: failed } => assert_eq!(failed, epoch),
+        other => panic!("expected the failed roster ask, got {other:?}"),
+    }
+    assert!(matches!(
+        next_event(&cycles.events),
+        SessionEvent::Disconnected { .. }
+    ));
+}
+
+/// The reference keeps servicing the connection at character select, and a server that drops it
+/// (vmangos, after `CharacterScreenMaxIdleTime`) runs the disconnect handler (`0x46c540`) at once:
+/// the park ends the session as a stream failure with no request from the app.
+#[test]
+fn a_link_dropped_while_parked_at_select_ends_the_session() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    dial(&cycles, realms[0].clone());
+    world.drop_links();
+    match next_event(&cycles.events) {
+        SessionEvent::Disconnected { end, .. } => {
+            assert_eq!(end, benilla_protocol::SessionEnd::Lost)
+        }
+        other => panic!("expected the loss, got {other:?}"),
+    }
+}
+
+/// A create's result goes to the screen alone: the screen asks for the changed roster itself
+/// (`0x46c1a7`), so the IO thread enumerates nothing behind it.
+#[test]
+fn a_create_sends_its_result_alone() {
+    let req = benilla_protocol::CharCreateReq {
+        name: "Newone".into(),
+        race: 1,
+        class: 1,
+        gender: 0,
+        skin: 0,
+        face: 0,
+        hair_style: 0,
+        hair_color: 0,
+        facial_hair: 0,
+    };
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    dial(&cycles, realms[0].clone());
+    cycles.pick.send(CharRequest::Create(req)).unwrap();
+    assert!(matches!(
+        next_event(&cycles.events),
+        SessionEvent::CharActionResult { .. }
+    ));
+    assert_eq!(world.enumerations(), 0);
+}
+
+/// The park serves a rename in place: the reply goes out as it came, with no roster asked, and
+/// the park's own copy of the roster takes the new name, so the world entry names the character
+/// by it. A refused rename changes nothing.
+#[test]
+fn the_park_serves_a_rename_and_follows_it() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let mut bravo = crate::glue_session::roster::test_character(GUID, "Bravo");
+    bravo.flags = benilla_protocol::CHARACTER_FLAG_RENAME;
+    world.set_roster(&[bravo]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    cycles.realm.send(enter(realms[0].clone())).unwrap();
+    assert!(matches!(
+        next_event(&cycles.events),
+        SessionEvent::WorldAuthenticated { .. }
+    ));
+    cycles.pick.send(CharRequest::Enumerate).unwrap();
+    assert!(matches!(
+        next_event(&cycles.events),
+        SessionEvent::CharacterList { .. }
+    ));
+
+    world.answer_renames(0x2f);
+    cycles
+        .pick
+        .send(CharRequest::Rename {
+            guid: GUID,
+            name: "Newbie".into(),
+        })
+        .unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::CharRenamed { result, renamed } => {
+            assert_eq!((result, renamed), (0x2f, None))
+        }
+        other => panic!("expected the rename's reply, got {other:?}"),
+    }
+    world.answer_renames(0);
+    cycles
+        .pick
+        .send(CharRequest::Rename {
+            guid: GUID,
+            name: "Newbie".into(),
+        })
+        .unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::CharRenamed { result, renamed } => {
+            assert_eq!((result, renamed), (0, Some((GUID, "Newbie".to_string()))));
+        }
+        other => panic!("expected the rename's reply, got {other:?}"),
+    }
+    assert_eq!(world.enumerations(), 1, "no roster behind the rename");
+    cycles.pick.send(CharRequest::Enter(GUID)).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::Connected { name, .. } => assert_eq!(name, "Newbie"),
+        other => panic!("expected the world entry, got {other:?}"),
+    }
+}
+
+/// Logs in, dials the one realm and picks `GUID` at character select: the session's epoch once
+/// the entry is announced.
+fn enter_world(cycles: &fake::Cycles, realmd: &fake::Realmd) -> u64 {
+    fake::login(cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    let epoch = dial(cycles, realms[0].clone());
+    cycles.pick.send(CharRequest::Enter(GUID)).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::Connected { self_guid, .. } => assert_eq!(self_guid, GUID),
+        other => panic!("expected the world entry, got {other:?}"),
+    }
+    epoch
+}
+
+/// The character every entry picks.
+const GUID: u64 = 0x2a;
+
+/// The world session's end after `ended`: the event itself, then the teardown edge with the link
+/// kept, a `Disconnected` that ends in a logout.
+fn expect_back(
+    events: &crossbeam_channel::Receiver<SessionEvent>,
+    ended: fn(&SessionEvent) -> bool,
+) {
+    let ev = next_event(events);
+    assert!(ended(&ev), "expected the world session's end, got {ev:?}");
+    match next_event(events) {
+        SessionEvent::Disconnected { end, .. } => {
+            assert_eq!(end, benilla_protocol::SessionEnd::LoggedOut)
+        }
+        other => panic!("expected the teardown, got {other:?}"),
+    }
+}
+
+/// A logout returns to character select on the world link it entered by (`SMSG_LOGOUT_COMPLETE`
+/// → `0x5aaeb0` → `0x401ee0(1, 1, 0)`, then `CharacterSelect_OnShow` → `0x46b880`): the park sends
+/// no roster of its own, and the screen's ask is one `CMSG_CHAR_ENUM` on the same session, with no
+/// realmd logon and no second `CMSG_AUTH_SESSION`.
+#[test]
+fn a_logout_returns_to_character_select_on_the_same_link() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    let epoch = enter_world(&cycles, &realmd);
+    cycles
+        .commands
+        .send(crate::net::ClientCommand::Logout)
+        .unwrap();
+    expect_back(&cycles.events, |ev| matches!(ev, SessionEvent::LoggedOut));
+    assert!(
+        cycles
+            .events
+            .recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
+        "the park sent a roster the screen did not ask for"
+    );
+    assert_eq!(
+        ask_roster(&cycles),
+        epoch,
+        "the roster comes on the link the world was entered by"
+    );
+    assert_eq!(
+        world.enumerations_in(0),
+        1,
+        "one CMSG_CHAR_ENUM after the logout, on the first session"
+    );
+    assert_eq!(world.authentications(), 1, "no second CMSG_AUTH_SESSION");
+    assert_eq!(world.open(), 1, "the world link is kept");
+    assert_eq!(realmd.logons(), 1, "no realmd logon");
+}
+
+/// `EnterWorld` closes the realmd link (`CLoginMgr::Cancel`, `0x46b70c` → `0x5b3320`); it stays up
+/// at character select until then.
+#[test]
+fn entering_the_world_closes_the_realmd_link() {
+    let (realmd, _world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    dial(&cycles, realms[0].clone());
+    assert_eq!(
+        realmd.open(),
+        1,
+        "the realmd link is up at character select"
+    );
+    cycles.pick.send(CharRequest::Enter(GUID)).unwrap();
+    assert!(matches!(
+        next_event(&cycles.events),
+        SessionEvent::Connected { .. }
+    ));
+    wait_until(|| realmd.open() == 0, "the entry closes the realmd link");
+}
+
+/// Change Realm after a logout finds the realmd link closed since Enter World and dials it again
+/// (`0x46b8d0` → `0x5ab840` → `0x5b2200`), then dials the realm with the new logon's key: a second
+/// world session.
+#[test]
+fn change_realm_after_a_logout_dials_realmd_again() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    let epoch = enter_world(&cycles, &realmd);
+    cycles
+        .commands
+        .send(crate::net::ClientCommand::Logout)
+        .unwrap();
+    expect_back(&cycles.events, |ev| matches!(ev, SessionEvent::LoggedOut));
+    ask_roster(&cycles);
+    assert_eq!(realmd.logons(), 1);
+    cycles.realm.send(RealmRequest::Refresh).unwrap();
+    let (realms, failed) = next_list(&cycles.events);
+    assert!(!failed, "the re-dial answers");
+    assert_eq!(realmd.logons(), 2, "the query dialled realmd again");
+    cycles.realm.send(enter(realms[0].clone())).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::WorldAuthenticated { epoch: next, .. } => assert_ne!(next, epoch),
+        other => panic!("expected the new session's authentication, got {other:?}"),
+    }
+    assert_eq!(
+        world.authentications(),
+        2,
+        "the change dials a new world session"
+    );
+}
+
+/// Back from the world the link still carries what the world session left in flight: a pong for
+/// a ping sent before the writer came back, a reply vmangos serves an authenticated session. A
+/// packet of a known opcode whose body does not parse is skipped at the park, as the world stream
+/// skips it, and the roster behind it is read; the link is not lost over it.
+#[test]
+fn a_packet_left_in_flight_by_the_world_does_not_cost_the_link() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    world.trail_logouts_with(vec![
+        // An `SMSG_PONG` with no sequence: a known opcode that does not parse.
+        (opcode::SMSG_PONG, Vec::new()),
+        (opcode::SMSG_PONG, 7u32.to_le_bytes().to_vec()),
+    ]);
+    let cycles = fake::spawn_cycles();
+    let epoch = enter_world(&cycles, &realmd);
+    cycles
+        .commands
+        .send(crate::net::ClientCommand::Logout)
+        .unwrap();
+    expect_back(&cycles.events, |ev| matches!(ev, SessionEvent::LoggedOut));
+    assert_eq!(ask_roster(&cycles), epoch, "the roster past the leftovers");
+    assert_eq!(world.open(), 1, "the world link is kept");
+}
+
+/// The write thread holds a lost link's dead writer until the next entry installs a new one, and
+/// a command can be ready in the same wake-up as that install. Every pending swap is applied
+/// before a command is judged, so the command goes out on the new link. The write thread is held
+/// inside the first install (on the ping clock's lock) while the second install and the command
+/// queue, so both are ready together; without the drain the pick between them is a coin toss,
+/// and twelve rounds catch it.
+#[test]
+fn a_command_ready_with_an_install_goes_out_on_the_new_writer() {
+    use super::{writer_loop, WriterSwap};
+    use crate::net::ClientCommand;
+    const KEY: [u8; benilla_srp::SESSION_KEY_LENGTH] = [9; benilla_srp::SESSION_KEY_LENGTH];
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let (keys_tx, keys_rx) = crossbeam_channel::unbounded();
+    keys_tx.send(KEY).unwrap();
+    let world = fake::world(listener, keys_rx);
+    let writer = || {
+        benilla_protocol::WorldSession::connect(&addr, fake::USER, KEY)
+            .unwrap()
+            .into_split()
+            .unwrap()
+    };
+
+    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<ClientCommand>();
+    let (swap_tx, swap_rx) = crossbeam_channel::unbounded::<WriterSwap>();
+    let clock = std::sync::Arc::new(Mutex::new(PingClock::default()));
+    let thread_clock = std::sync::Arc::clone(&clock);
+    thread::spawn(move || writer_loop(&cmd_rx, swap_rx, &thread_clock));
+
+    let played_in = |session: usize| {
+        world
+            .session_packets
+            .lock()
+            .unwrap()
+            .get(session)
+            .is_some_and(|packets| {
+                packets
+                    .iter()
+                    .any(|p| p[2..4] == opcode::CMSG_PLAYED_TIME.to_le_bytes())
+            })
+    };
+    let mut readers = Vec::new();
+    for round in 0..12 {
+        let (old_reader, old) = writer();
+        let (new_reader, new) = writer();
+        readers.extend([old_reader, new_reader]);
+        let held = clock.lock().unwrap();
+        swap_tx
+            .send(WriterSwap::Install {
+                writer: old,
+                fresh_link: true,
+            })
+            .unwrap();
+        // The write thread has taken the old writer and waits on the clock inside the install.
+        thread::sleep(std::time::Duration::from_millis(5));
+        swap_tx
+            .send(WriterSwap::Install {
+                writer: new,
+                fresh_link: true,
+            })
+            .unwrap();
+        cmd_tx.send(ClientCommand::PlayedTime).unwrap();
+        drop(held);
+        let (old_index, new_index) = (2 * round, 2 * round + 1);
+        wait_until(
+            || played_in(old_index) || played_in(new_index),
+            "the command went out",
+        );
+        assert!(
+            played_in(new_index) && !played_in(old_index),
+            "round {round}: the command went out on the writer being replaced"
+        );
+    }
+}
+
+/// A refused character login returns the same way (`SMSG_CHARACTER_LOGIN_FAILED` → `0x5aad70` →
+/// `0x401ee0(1, 1, 1)`): the session is kept, and the roster comes only when the screen asks (from
+/// the refusal dialog's `StatusDialogClick`, `0x46b767` → `0x46b880`), on the same link, where the
+/// next pick goes out too.
+#[test]
+fn a_refused_login_returns_to_character_select_on_the_same_link() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    world.refuse_logins();
+    let cycles = fake::spawn_cycles();
+    let epoch = enter_world(&cycles, &realmd);
+    expect_back(&cycles.events, |ev| {
+        matches!(ev, SessionEvent::CharacterLoginFailed { result: 1 })
+    });
+    assert!(
+        cycles
+            .events
+            .recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
+        "the park sent a roster the screen did not ask for"
+    );
+    assert_eq!(world.enumerations_in(0), 0);
+    assert_eq!(ask_roster(&cycles), epoch);
+    assert_eq!(world.enumerations_in(0), 1);
+    assert_eq!(world.authentications(), 1, "no second CMSG_AUTH_SESSION");
+    assert_eq!(realmd.logons(), 1, "no realmd logon");
+    cycles.pick.send(CharRequest::Enter(GUID)).unwrap();
+    assert!(matches!(
+        next_event(&cycles.events),
+        SessionEvent::Connected { .. }
+    ));
+    assert_eq!(world.authentications(), 1);
 }

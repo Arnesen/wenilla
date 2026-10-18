@@ -47,12 +47,12 @@ fn globals_are_restored_after_firing_nesting_safe() {
         r#"
         this, event, arg1 = "outer_this", "outer_event", "outer_arg1"
         local f = CreateFrame("Frame", "NF")
-        f:RegisterEvent("E")
+        f:RegisterEvent("PLAYER_LOGIN")
         f:SetScript("OnEvent", function() end)
     "#,
     )
     .unwrap();
-    s.fire_event("E", vec![ScriptValue::Str("x".into())]);
+    s.fire_event("PLAYER_LOGIN", vec![ScriptValue::Str("x".into())]);
     // `0x704f10` sets the globals for the handler and restores the prior values after.
     let (t, e, a): (String, String, String) = s.eval("return this, event, arg1").unwrap();
     assert_eq!(
@@ -67,12 +67,12 @@ fn handler_errors_are_collected_not_panicked() {
     s.run(
         r#"
         local f = CreateFrame("Frame", "BoomF")
-        f:RegisterEvent("E")
+        f:RegisterEvent("PLAYER_LOGIN")
         f:SetScript("OnEvent", function() error("boom") end)
     "#,
     )
     .unwrap();
-    s.fire_event("E", vec![]);
+    s.fire_event("PLAYER_LOGIN", vec![]);
     let errs = s.errors();
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert!(errs[0].contains("boom"), "{errs:?}");
@@ -89,26 +89,65 @@ fn events_fire_in_registration_order_fifo() {
         local a = CreateFrame("Frame", "FA")
         local b = CreateFrame("Frame", "FB")
         local c = CreateFrame("Frame", "FC")
-        a:RegisterEvent("E"); b:RegisterEvent("E"); c:RegisterEvent("E")
+        a:RegisterEvent("PLAYER_LOGIN"); b:RegisterEvent("PLAYER_LOGIN"); c:RegisterEvent("PLAYER_LOGIN")
         a:SetScript("OnEvent", function() order = order .. "A" end)
         b:SetScript("OnEvent", function() order = order .. "B" end)
         c:SetScript("OnEvent", function() order = order .. "C" end)
     "#,
     )
     .unwrap();
-    s.fire_event("E", vec![]);
+    s.fire_event("PLAYER_LOGIN", vec![]);
     assert_eq!(s.eval::<String>("return order").unwrap(), "ABC");
 
     // A duplicate registration keeps A's position.
-    s.run("FA:RegisterEvent('E'); order = ''").unwrap();
-    s.fire_event("E", vec![]);
+    s.run("FA:RegisterEvent('PLAYER_LOGIN'); order = ''")
+        .unwrap();
+    s.fire_event("PLAYER_LOGIN", vec![]);
     assert_eq!(s.eval::<String>("return order").unwrap(), "ABC");
 
     // Unregistering frees B's node, so re-registering appends it at the tail.
-    s.run("FB:UnregisterEvent('E'); FB:RegisterEvent('E'); order = ''")
+    s.run("FB:UnregisterEvent('PLAYER_LOGIN'); FB:RegisterEvent('PLAYER_LOGIN'); order = ''")
         .unwrap();
-    s.fire_event("E", vec![]);
+    s.fire_event("PLAYER_LOGIN", vec![]);
     assert_eq!(s.eval::<String>("return order").unwrap(), "ACB");
+}
+
+/// `RegisterEvent` (`0x774a40` → `0x702140`) walks the in-game event table with an ASCII
+/// case-folding compare (`0x64a4c0` → `0x414310`): a name in any case registers that event, the
+/// handler's `event` is the table's spelling, and a name the table lacks matches nothing and
+/// raises nothing. `UnregisterEvent` (`0x702280`) compares the same way.
+#[test]
+fn register_event_matches_the_table_case_insensitively_and_drops_unknown_names() {
+    let mut s = script();
+    s.run(
+        r#"
+        heard = {}
+        f = CreateFrame("Frame", "CaseF")
+        f:SetScript("OnEvent", function() table.insert(heard, event) end)
+        f:RegisterEvent("player_login")
+        f:RegisterEvent("Not_An_Event")
+        g = CreateFrame("Frame", "CaseG")
+        g:SetScript("OnEvent", function() table.insert(heard, "g:" .. event) end)
+        g:RegisterEvent("UNIT_health")
+        "#,
+    )
+    .expect("a name off the table raises nothing");
+    s.fire_event("PLAYER_LOGIN", vec![]);
+    s.fire_event("Not_An_Event", vec![]);
+    s.fire_event("UNIT_HEALTH", vec![]);
+    assert_eq!(
+        s.eval::<Vec<String>>("return heard").unwrap(),
+        ["PLAYER_LOGIN", "g:UNIT_HEALTH"],
+        "the table's spelling registers and is what the handler reads; the unknown name never fires"
+    );
+
+    s.run(r#"heard = {} f:UnregisterEvent("Player_Login")"#)
+        .unwrap();
+    s.fire_event("PLAYER_LOGIN", vec![]);
+    assert!(
+        s.eval::<Vec<String>>("return heard").unwrap().is_empty(),
+        "UnregisterEvent matches in any case too"
+    );
 }
 
 /// Callers ask before hooking, when nothing is set yet (`Tablet-2.0.lua:2409`). Our kind table is
@@ -161,18 +200,20 @@ fn a_self_unregistering_handler_does_not_rob_its_successor() {
     s.run(
         r#"
         log = {}
-        for _, n in ipairs({"WalkA", "WalkB", "WalkC"}) do
+        for _, name in ipairs({"WalkA", "WalkB", "WalkC"}) do
+            -- A body local: the loop's own variable is one for the whole loop, nil after it.
+            local n = name
             local f = CreateFrame("Frame", n)
-            f:RegisterEvent("E")
+            f:RegisterEvent("PLAYER_LOGIN")
             f:SetScript("OnEvent", function()
                 table.insert(log, n)
-                if n == "WalkB" then WalkB:UnregisterEvent("E") end
+                if n == "WalkB" then WalkB:UnregisterEvent("PLAYER_LOGIN") end
             end)
         end
     "#,
     )
     .unwrap();
-    s.fire_event("E", vec![]);
+    s.fire_event("PLAYER_LOGIN", vec![]);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
     let log: Vec<String> = s.eval("return log").unwrap();
     assert_eq!(
@@ -180,7 +221,7 @@ fn a_self_unregistering_handler_does_not_rob_its_successor() {
         vec!["WalkA", "WalkB", "WalkC"],
         "the once-idiom's self-removal must not skip the next listener"
     );
-    s.fire_event("E", vec![]);
+    s.fire_event("PLAYER_LOGIN", vec![]);
     let log: Vec<String> = s.eval("return log").unwrap();
     assert_eq!(log, vec!["WalkA", "WalkB", "WalkC", "WalkA", "WalkC"]);
 }
@@ -195,19 +236,19 @@ fn mid_dispatch_removal_of_the_next_stops_and_append_is_visited() {
         log = {}
         local function reg(n, body)
             local f = CreateFrame("Frame", n)
-            f:RegisterEvent("E2")
+            f:RegisterEvent("PLAYER_LOGOUT")
             f:SetScript("OnEvent", function() table.insert(log, n); if body then body() end end)
             return f
         end
         reg("NxA", function()
-            NxB:UnregisterEvent("E2")   -- kill the walk's saved next
+            NxB:UnregisterEvent("PLAYER_LOGOUT")   -- kill the walk's saved next
         end)
         reg("NxB")
         reg("NxC")
     "#,
     )
     .unwrap();
-    s.fire_event("E2", vec![]);
+    s.fire_event("PLAYER_LOGOUT", vec![]);
     let log: Vec<String> = s.eval("return log").unwrap();
     assert_eq!(
         log,
@@ -220,19 +261,19 @@ fn mid_dispatch_removal_of_the_next_stops_and_append_is_visited() {
         log = {}
         local function reg(n, body)
             local f = CreateFrame("Frame", n)
-            f:RegisterEvent("E3")
+            f:RegisterEvent("PLAYER_ALIVE")
             f:SetScript("OnEvent", function() table.insert(log, n); if body then body() end end)
         end
         reg("ApA", function()
             local f = CreateFrame("Frame", "ApLate")
-            f:RegisterEvent("E3")
+            f:RegisterEvent("PLAYER_ALIVE")
             f:SetScript("OnEvent", function() table.insert(log, "ApLate") end)
         end)
         reg("ApB")
     "#,
     )
     .unwrap();
-    s.fire_event("E3", vec![]);
+    s.fire_event("PLAYER_ALIVE", vec![]);
     let log: Vec<String> = s.eval("return log").unwrap();
     assert_eq!(
         log,
@@ -362,4 +403,50 @@ fn an_all_events_listener_runs_after_the_events_own() {
     assert_eq!(s.eval::<String>("return order[1]").unwrap(), "named");
     assert_eq!(s.eval::<String>("return order[2]").unwrap(), "all");
     assert_eq!(s.eval::<i64>("return table.getn(order)").unwrap(), 2);
+}
+
+/// The world-enter cascade (`0x4908c0`) fires `PLAYER_LOGIN` (`0x490959`) only while a load's arm
+/// (`0x49011d`) is unspent, clearing it (`0x49095e`), then `PLAYER_ENTERING_WORLD` (`0x49096a`)
+/// every time, inside its own sound bracket (`0x4908d5` to `0x490a56`).
+#[test]
+fn the_world_enter_cascade_spends_the_login_arm_once_and_plays_nothing() {
+    let mut s = script();
+    s.run(
+        r#"
+        order = ""
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("PLAYER_LOGIN")
+        f:RegisterEvent("PLAYER_ENTERING_WORLD")
+        f:SetScript("OnEvent", function()
+            order = order .. event .. " "
+            PlaySound("igMainMenuOpen")
+        end)
+        "#,
+    )
+    .unwrap();
+    s.fire_world_enter();
+    assert_eq!(
+        s.eval::<String>("return order").unwrap(),
+        "PLAYER_ENTERING_WORLD ",
+        "no load armed it"
+    );
+    s.run(r#"order = """#).unwrap();
+    s.arm_player_login();
+    s.fire_world_enter();
+    s.fire_world_enter();
+    assert_eq!(
+        s.eval::<String>("return order").unwrap(),
+        "PLAYER_LOGIN PLAYER_ENTERING_WORLD PLAYER_ENTERING_WORLD ",
+        "the arm is one-shot"
+    );
+    assert!(
+        s.take_sounds().is_empty(),
+        "the cascade's handlers are silent"
+    );
+    s.run(r#"PlaySound("igMainMenuOpen")"#).unwrap();
+    assert_eq!(
+        s.take_sounds().len(),
+        1,
+        "and the bracket closed behind them"
+    );
 }

@@ -50,6 +50,14 @@ pub struct ScrollingMessageState {
     pub fading_enabled: bool,
     /// Lines scrolled back from the newest; 0 is AtBottom, the only state in which fades tick.
     pub scroll_offset: usize,
+    /// The link-button rebuild flag (`+0x3b8`, cleared by the ctor at `0x7878d0`): set by a
+    /// relayout (`0x788a8e`), a line fading out (`0x788538`) and a fade re-arm (`0x788bf1`), and
+    /// spent by the per-frame rebuild (`0x788595` → `0x788c00`).
+    pub links_dirty: bool,
+    /// A key of what the last relayout laid out against: the frame's size and font. A change is
+    /// a resize (`0x788427`) or a font change (`0x788086`), and `None` after a show (`0x788451`):
+    /// each relayouts at the current position, which re-arms what it walks unless at the bottom.
+    pub laid: Option<u64>,
 }
 
 impl Default for ScrollingMessageState {
@@ -64,6 +72,8 @@ impl Default for ScrollingMessageState {
             fading_enabled: true,
             lines_gen: 0,
             scroll_offset: 0,
+            links_dirty: false,
+            laid: None,
         }
     }
 }
@@ -73,14 +83,72 @@ pub fn quantize_u8(x: f32) -> u8 {
     (x.clamp(0.0, 1.0) * 255.0 + 0.5).trunc() as u8
 }
 
+/// The space a ScrollingMessageFrame's layout fits messages into, in screen pixels. The relayout
+/// charges each message its block height, which spaces its rows by the spacing times the scale
+/// snapped up to a whole pixel (`0x772a07`-`0x772a0d` forms it, `0x5c2143`-`0x5c215c` snaps it),
+/// plus the gap to the next message, the spacing snapped unscaled and then scaled
+/// (`0x788954`-`0x788975`, `0x7889a3`-`0x7889ad`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Viewport {
+    /// The frame's height.
+    pub height: f32,
+    /// One row's height.
+    pub line_h: f32,
+    /// The gap between the rows of one message, snapped up to a whole pixel.
+    pub row_gap: f32,
+    /// The gap between one message and the next.
+    pub message_gap: f32,
+}
+
+impl Viewport {
+    /// A viewport of `n` unit rows with no gaps, for a test that has no font.
+    #[cfg(test)]
+    pub fn rows(n: usize) -> Viewport {
+        Viewport {
+            height: n as f32,
+            line_h: 1.0,
+            row_gap: 0.0,
+            message_gap: 0.0,
+        }
+    }
+
+    /// The height of a message of `rows` wrapped rows, as `GxuFontGetTextBlockHeight` gives it:
+    /// `rows` lines and `rows - 1` row gaps (`0x5c2168`).
+    pub fn block(&self, rows: u16) -> f32 {
+        let rows = f32::from(rows.max(1));
+        rows * self.line_h + (rows - 1.0) * self.row_gap
+    }
+
+    /// What a message of `rows` wrapped rows takes from the frame: its block and the gap after it.
+    pub fn cost(&self, rows: u16) -> f32 {
+        self.block(rows) + self.message_gap
+    }
+}
+
+#[cfg(test)]
+impl From<usize> for Viewport {
+    fn from(n: usize) -> Viewport {
+        Viewport::rows(n)
+    }
+}
+
 impl ScrollingMessageState {
     /// `UpdateColorByID(id, r, g, b)` (`0x7932b0`): recolour every line tagged `id`, returning how
     /// many changed. `id == 0` matches nothing (the guard at `0x788250`): a line printed without
     /// an id stores 0 (`0x7929b7`), and `ChatFrame.lua:1357` recolours REPLY, whose id is 0.
-    pub fn update_color_by_id(&mut self, id: u32, r: f32, g: f32, b: f32) -> usize {
+    pub fn update_color_by_id(
+        &mut self,
+        id: u32,
+        r: f32,
+        g: f32,
+        b: f32,
+        viewport: impl Into<Viewport>,
+    ) -> usize {
         if id == 0 {
             return 0;
         }
+        // Past the guard the relayout runs whether or not a line matched (`0x78829e`).
+        self.relayout(viewport);
         let rgb = [quantize_u8(r), quantize_u8(g), quantize_u8(b)];
         let mut moved = 0;
         for line in self.lines.iter_mut().filter(|l| l.id == id) {
@@ -95,14 +163,34 @@ impl ScrollingMessageState {
         moved
     }
 
+    /// [`Self::add_with_id`] for a state that has no viewport yet, here eight rows high.
+    #[cfg(test)]
     pub fn add(&mut self, text: String, r: f32, g: f32, b: f32) {
-        self.add_with_id(text, r, g, b, 0);
+        self.add_with_id(text, r, g, b, 0, 8);
     }
 
     /// `AddMessage(text, r, g, b, id)` (`0x792900`, `0x788150`): push the line and drop the oldest
-    /// past `max_lines`; a scrolled-up view stays on the same lines.
-    pub fn add_with_id(&mut self, text: String, r: f32, g: f32, b: f32, id: u32) {
+    /// past `max_lines`. The store leaves the anchor slot where it is, so a scrolled-up view
+    /// stays on the same messages (`0x788220`) and relayouts nothing, except that a full ring
+    /// whose write lands on the topmost shown message, the oldest, scrolls one line newer
+    /// (`0x78819e`-`0x7881bb`, `0x78823f`-`0x78824a`). At the bottom it relayouts at the newest
+    /// (`0x788234`).
+    pub fn add_with_id(
+        &mut self,
+        text: String,
+        r: f32,
+        g: f32,
+        b: f32,
+        id: u32,
+        viewport: impl Into<Viewport>,
+    ) {
+        let viewport = viewport.into();
         self.lines_gen = self.lines_gen.wrapping_add(1);
+        let scrolled_up = self.scroll_offset > 0;
+        // A full ring writes over the oldest message, which is the topmost shown one when the
+        // view reaches the top.
+        let overwrites_topmost =
+            scrolled_up && self.lines.len() >= self.max_lines && self.at_top(viewport);
         let line = MessageLine {
             text,
             id,
@@ -114,14 +202,18 @@ impl ScrollingMessageState {
             rows_key: 0,
         };
         self.lines.push_back(line);
-        // Scrolled up: keep the same lines in view as the ring grows below them.
-        if self.scroll_offset > 0 {
-            self.scroll_offset += 1;
-        }
         while self.lines.len() > self.max_lines {
             self.lines.pop_front();
-            // The dropped line was above the view: walk the anchor back down with it.
-            self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        }
+        if !scrolled_up {
+            self.links_dirty = true;
+        } else if overwrites_topmost {
+            // The new message puts the anchor one further from the newest, and the scroll down
+            // (`0x788245`) takes it back one, so the offset holds.
+            self.rearm_walked(viewport);
+        } else {
+            // The same messages stay in view: the new one is one place newer than the anchor.
+            self.scroll_offset += 1;
         }
         self.clamp_scroll();
     }
@@ -137,6 +229,8 @@ impl ScrollingMessageState {
     /// `Clear` (`0x7882b0`): retire every line immediately (no fade), reset to the bottom.
     pub fn clear(&mut self) {
         self.lines_gen = self.lines_gen.wrapping_add(1);
+        // Its relayout (`0x7882c9`).
+        self.links_dirty = true;
         self.lines.clear();
         self.scroll_offset = 0;
     }
@@ -146,12 +240,23 @@ impl ScrollingMessageState {
         self.scroll_offset == 0
     }
 
-    /// Whether the view is scrolled as far back as the ring allows (`AtTop`).
-    pub fn at_top(&self) -> bool {
-        self.scroll_offset >= self.max_scroll()
+    /// `AtTop` (`0x793130`), which reads the flag `+0x350`: the relayout sets it when every older
+    /// message was placed (`0x788a37`-`0x788a3c`), so the oldest is on screen. An empty frame
+    /// answers false: the constructor, `Clear` after its relayout and `SetMaxLines` all zero it
+    /// (`0x787775`, `0x7882ce`, `0x787eb1`). This reads the layout live, while the reference caches
+    /// the flag per relayout, so the two differ on a hidden frame, whose relayout does nothing
+    /// (`0x78878e`), and after an `AddMessage` while scrolled up (`0x788220`-`0x78824a`).
+    pub fn at_top(&self, viewport: impl Into<Viewport>) -> bool {
+        let viewport = viewport.into();
+        if self.lines.is_empty() {
+            return false;
+        }
+        let available = self.lines.len().saturating_sub(self.scroll_offset);
+        self.displayed_count(viewport) == available
     }
 
-    /// The furthest the view can scroll up: enough to bring the oldest line to the bottom row.
+    /// The furthest the view can scroll: the oldest line as the anchor, where `ScrollToTop`
+    /// relayouts (`0x788690`).
     fn max_scroll(&self) -> usize {
         self.lines.len().saturating_sub(1)
     }
@@ -160,12 +265,44 @@ impl ScrollingMessageState {
         self.scroll_offset = self.scroll_offset.min(self.max_scroll());
     }
 
-    /// Re-arm the fade of the displayed lines only (`0x788b80`): full alpha and the frame's
-    /// current `timeVisible`/`fadeDuration`, so even a fully faded line comes back (expiry frees
-    /// nothing, `0x788525`). Engine-only, not a 1.12 Lua verb; every scroll entry reaches it.
-    pub fn reset_all_fade_times(&mut self, viewport_rows: usize) {
+    /// Re-arm the fade of the displayed lines only, on a frame with lines (`0x788b80`): full alpha
+    /// and the frame's current `timeVisible`/`fadeDuration`, so even a fully faded line comes back
+    /// (expiry frees nothing, `0x788525`). The refused scroll's re-arm; a scroll that moves
+    /// re-arms [`Self::rearm_walked`]. Engine-only, not a 1.12 Lua verb.
+    pub fn reset_all_fade_times(&mut self, viewport: impl Into<Viewport>) {
+        let viewport = viewport.into();
+        // Both a refused scroll's re-arm (`0x788bf1`) and a moving one's relayout (`0x788a8e`)
+        // mark the links for rebuild.
+        self.links_dirty = true;
+        self.rearm(self.displayed_range(viewport));
+    }
+
+    /// A relayout at the current position, with no scroll: it marks the links and, off the bottom,
+    /// re-arms what it walks (force 0 re-arms unless `+0x354` is set, `0x788aff`). `UpdateColorByID`
+    /// (`0x78829e`), a resize (`0x788427`), a font change (`0x788086`) and a show (`0x788451`) are
+    /// such relayouts.
+    pub fn relayout(&mut self, viewport: impl Into<Viewport>) {
+        if self.at_bottom() {
+            self.links_dirty = true;
+        } else {
+            self.rearm_walked(viewport);
+        }
+    }
+
+    /// A moving scroll's re-arm: the relayout re-arms each message it walks (`0x788af0` at
+    /// `0x7888be`, before the fit test at `0x7889b3`). That is the displayed messages and the
+    /// first older one that did not fit; a walk that ran out of messages has no extra one. The
+    /// extra message is re-armed but not shown, so it ticks only once a larger view places it.
+    pub fn rearm_walked(&mut self, viewport: impl Into<Viewport>) {
+        let viewport = viewport.into();
+        self.links_dirty = true;
+        let shown = self.displayed_range(viewport);
+        self.rearm(shown.start.saturating_sub(1)..shown.end);
+    }
+
+    fn rearm(&mut self, range: std::ops::Range<usize>) {
         let (time_visible, fade_duration) = (self.time_visible, self.fade_duration);
-        for line in self.lines.range_mut(self.displayed_range(viewport_rows)) {
+        for line in self.lines.range_mut(range) {
             line.time_left = time_visible;
             line.fade_left = fade_duration;
             line.alpha = 1.0;
@@ -173,8 +310,9 @@ impl ScrollingMessageState {
     }
 
     /// The ring indices the view shows, oldest first.
-    pub fn displayed_range(&self, viewport_rows: usize) -> std::ops::Range<usize> {
-        let count = self.displayed_count(viewport_rows);
+    pub fn displayed_range(&self, viewport: impl Into<Viewport>) -> std::ops::Range<usize> {
+        let viewport = viewport.into();
+        let count = self.displayed_count(viewport);
         if count == 0 {
             return 0..0;
         }
@@ -189,85 +327,165 @@ impl ScrollingMessageState {
     // (`0x788750`), whose helper `0x788af0` re-arms on landing off the bottom or back onto it.
 
     /// `ScrollUp` (`0x788610`): one line older, then re-arm.
-    pub fn scroll_up(&mut self, viewport_rows: usize) {
-        self.scroll_offset = (self.scroll_offset + 1).min(self.max_scroll());
-        self.reset_all_fade_times(viewport_rows);
+    pub fn scroll_up(&mut self, viewport: impl Into<Viewport>) {
+        let viewport = viewport.into();
+        self.step_up(viewport);
     }
 
     /// `ScrollDown` (`0x788650`): one line newer, then re-arm.
-    pub fn scroll_down(&mut self, viewport_rows: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
-        self.reset_all_fade_times(viewport_rows);
+    pub fn scroll_down(&mut self, viewport: impl Into<Viewport>) {
+        let viewport = viewport.into();
+        self.step_down(viewport);
     }
 
-    /// `ScrollToBottom` (`0x7886d0`): to the newest line, then re-arm.
-    pub fn scroll_to_bottom(&mut self, viewport_rows: usize) {
+    /// `0x788610`'s answer: whether the view moved. An empty frame answers 0 and touches nothing
+    /// (`0x788619`); one whose oldest message is on screen re-arms and answers 0 (`0x78861c`-
+    /// `0x788626`).
+    pub fn step_up(&mut self, viewport: impl Into<Viewport>) -> bool {
+        let viewport = viewport.into();
+        if self.lines.is_empty() {
+            return false;
+        }
+        let moved = !self.at_top(viewport);
+        if moved {
+            self.scroll_offset += 1;
+            self.rearm_walked(viewport);
+        } else {
+            self.reset_all_fade_times(viewport);
+        }
+        moved
+    }
+
+    /// `0x788650`'s answer: the same, toward the newest line (`0x788659`, `0x788666`).
+    pub fn step_down(&mut self, viewport: impl Into<Viewport>) -> bool {
+        let viewport = viewport.into();
+        if self.lines.is_empty() {
+            return false;
+        }
+        let moved = !self.at_bottom();
+        if moved {
+            self.scroll_offset -= 1;
+            self.rearm_walked(viewport);
+        } else {
+            self.reset_all_fade_times(viewport);
+        }
+        moved
+    }
+
+    /// `ScrollToBottom` (`0x7886d0`): to the newest line, then re-arm. An empty frame returns
+    /// at once (`0x7886d6`-`0x7886d9`).
+    pub fn scroll_to_bottom(&mut self, viewport: impl Into<Viewport>) {
+        let viewport = viewport.into();
+        if self.lines.is_empty() {
+            return;
+        }
+        // At the bottom it is the refused re-arm (`0x7886e5`); else the relayout's.
+        let moved = !self.at_bottom();
         self.scroll_offset = 0;
-        self.reset_all_fade_times(viewport_rows);
+        if moved {
+            self.rearm_walked(viewport);
+        } else {
+            self.reset_all_fade_times(viewport);
+        }
     }
 
-    /// `ScrollToTop` (`0x788690`): to the oldest line, then re-arm, as its relayout always lands
-    /// off the bottom.
-    pub fn scroll_to_top(&mut self, viewport_rows: usize) {
+    /// `ScrollToTop` (`0x788690`): the oldest line as the anchor, then re-arm, as its relayout
+    /// lands off the bottom. With exactly one message the anchor is the newest (`0x788799`-
+    /// `0x7887aa`), and a frame already at the bottom skips the re-arm (`0x788aff`); the links
+    /// still rebuild (`0x788a8e`). An empty frame returns at once (`0x788697`-`0x78869a`).
+    pub fn scroll_to_top(&mut self, viewport: impl Into<Viewport>) {
+        let viewport = viewport.into();
+        if self.lines.is_empty() {
+            return;
+        }
+        let stays_at_bottom = self.at_bottom() && self.lines.len() == 1;
         self.scroll_offset = self.max_scroll();
-        self.reset_all_fade_times(viewport_rows);
+        if stays_at_bottom {
+            self.links_dirty = true;
+        } else {
+            self.rearm_walked(viewport);
+        }
     }
 
-    /// How many messages fit `viewport_rows` from the anchor, each costing its wrapped rows; a
-    /// partly fitting one counts, as in the draw's band walk (`emit_message_lines`).
-    pub fn displayed_count(&self, viewport_rows: usize) -> usize {
-        if self.lines.is_empty() || viewport_rows == 0 {
+    /// How many messages the layout places in `viewport`, the client's lines shown (`+0x34c`,
+    /// which paging reads at `0x7885b4`). From the anchor outward each message costs its block
+    /// height plus the gap to the next (`0x7889a3`-`0x7889ad`); one that does not fit whole in
+    /// what is left ends the walk (`0x7889b3`-`0x7889be`, `0x788a2f`) unless it is the anchored
+    /// one (`0x7889c0`-`0x7889c5`), which always shows. A faded message is placed all the same
+    /// (`0x7889c7`-`0x7889ee` only hides it), so it holds its rows. The draw
+    /// (`emit_message_lines`) walks this many.
+    pub fn displayed_count(&self, viewport: impl Into<Viewport>) -> usize {
+        let viewport = viewport.into();
+        if self.lines.is_empty() {
             return 0;
         }
         let top_index = self.lines.len().saturating_sub(1 + self.scroll_offset);
-        let mut used = 0usize;
+        let mut left = viewport.height;
         let mut count = 0usize;
         for idx in (0..=top_index).rev() {
-            if used >= viewport_rows {
+            let cost = viewport.cost(self.lines[idx].rows);
+            if count > 0 && left < cost {
                 break;
             }
-            used += usize::from(self.lines[idx].rows.max(1));
+            left -= cost;
             count += 1;
         }
-        count.max(1)
+        count
     }
 
-    /// `PageUp` (`0x7885b0`): back by the displayed count less one, then re-arm.
-    pub fn page_up(&mut self, viewport_rows: usize) {
-        let page = self.displayed_count(viewport_rows).saturating_sub(1).max(1);
-        self.scroll_offset = (self.scroll_offset + page).min(self.max_scroll());
-        self.reset_all_fade_times(viewport_rows);
+    /// `PageUp` (`0x7885b0`): `ScrollUp` once per displayed line, the count read once up front
+    /// (`0x7885b4`); a step that cannot move ends the page there (`0x7885ca`), else one `ScrollDown`
+    /// follows (`0x7885d4`). A page is the displayed count less one, and one displayed line nets 0.
+    pub fn page_up(&mut self, viewport: impl Into<Viewport>) {
+        let viewport = viewport.into();
+        for _ in 0..self.displayed_count(viewport) {
+            if !self.step_up(viewport) {
+                return;
+            }
+        }
+        self.step_down(viewport);
     }
 
-    /// `PageDown`: the same page toward the newest line, then re-arm.
-    pub fn page_down(&mut self, viewport_rows: usize) {
-        let page = self.displayed_count(viewport_rows).saturating_sub(1).max(1);
-        self.scroll_offset = self.scroll_offset.saturating_sub(page);
-        self.reset_all_fade_times(viewport_rows);
+    /// `PageDown` (`0x7885e0`): the mirror, `ScrollDown` per displayed line (`0x7885f3`), a refusal
+    /// ending the page (`0x7885fa`), else one `ScrollUp` (`0x788604`).
+    pub fn page_down(&mut self, viewport: impl Into<Viewport>) {
+        let viewport = viewport.into();
+        for _ in 0..self.displayed_count(viewport) {
+            if !self.step_down(viewport) {
+                return;
+            }
+        }
+        self.step_up(viewport);
     }
 
     /// Advance the fade by `dt` (OnUpdate, `0x788460`), only at the bottom with fading on; the
     /// scroll entries, not this, bring faded lines back. Both countdowns store `f32` while the
     /// ramp reads the unrounded x87 value (`fst` without pop, `0x7884d7`, `0x788544`), and phase
     /// 1's overshoot is dropped, so the fade starts whole on the next tick.
-    pub fn tick(&mut self, dt: f32) {
+    pub fn tick(&mut self, dt: f32, viewport: impl Into<Viewport>) {
+        let viewport = viewport.into();
         if !self.fading_enabled || !self.at_bottom() {
             return;
         }
         let dt = f64::from(dt);
-        for line in &mut self.lines {
+        // Only the shown messages: the loop is bounded by the shown count (`0x78849b`,
+        // `0x788582`), so a line out of view keeps its fade where it stopped.
+        for line in self.lines.range_mut(self.displayed_range(viewport)) {
             if line.time_left > 0.0 {
                 line.time_left = ((f64::from(line.time_left) - dt).max(0.0)) as f32;
                 continue;
             }
             if self.fade_duration <= 0.0 {
-                // No ramp: the line vanishes when phase 1 ends.
+                // No ramp: the line vanishes when phase 1 ends, marking the links (`0x788538`).
+                self.links_dirty |= line.alpha > 0.0;
                 line.alpha = 0.0;
                 continue;
             }
             let remaining = f64::from(line.fade_left) - dt;
             line.fade_left = remaining as f32;
             if remaining <= 0.0 {
+                // The hide marks the links (`0x788538`), once: a hidden line is skipped after.
+                self.links_dirty |= line.alpha > 0.0;
                 line.fade_left = 0.0;
                 line.alpha = 0.0;
             } else {

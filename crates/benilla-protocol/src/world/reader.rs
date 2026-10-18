@@ -6,12 +6,15 @@ use crate::transport::{ConnReader, ReadExactAsync};
 
 use super::recv_packet;
 
-/// Read half of a split [`WorldSession`](super::WorldSession) — owns the read half of the
-/// connection + the decrypter. Lives on the network thread (native) or in the sequencer task
-/// (web), streaming decoded [`crate::SessionEvent`]s (via [`Self::poll_async`]).
+/// The read half of a split [`WorldSession`](super::WorldSession): the connection's read half and
+/// decrypter, and what the connection learned before the split, for
+/// [`WorldSession::rejoin`](super::WorldSession::rejoin). Lives on the network thread (native) or
+/// in the sequencer task (web), streaming decoded [`crate::SessionEvent`]s (via
+/// [`Self::poll_async`]).
 pub struct WorldReader {
     pub(super) reader: ConnReader,
     pub(super) decrypter: DecrypterHalf,
+    pub(super) link: super::session::LinkFacts,
 }
 
 impl WorldReader {
@@ -58,6 +61,7 @@ impl WorldReader {
                 opcode,
                 events: crate::decode(packet),
                 tail,
+                body,
             }),
             Err(e) => Ok(crate::Poll::Skipped {
                 opcode,
@@ -66,6 +70,7 @@ impl WorldReader {
                     messages::opcode_name(opcode).unwrap_or("?"),
                     hex_preview(&body, 64)
                 ),
+                body,
             }),
         }
     }

@@ -24,15 +24,15 @@
 //! character file's existence is the character-set state, as in the reference.
 
 use bevy::input::keyboard::KeyboardInput;
-use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input::mouse::MouseScrollUnit;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
 use benilla_ui::script::keybind::KeybindRequest;
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{KeyUp, KeyWalk, UiScript};
 
-use crate::char_select::InWorldGated;
-use crate::ui_script::{PlayerUiHover, PointerOverUiPanel, UiKeyboardCapture};
+use crate::client_state::InWorldGated;
+use crate::ui_script::{PlayerUiHover, UiKeyboardCapture};
 
 pub(crate) mod chord;
 mod layout;
@@ -46,7 +46,7 @@ pub(crate) use script_input::Input;
 /// The chord-to-command map, rebuilt whenever the engine table's generation moves. Probe it
 /// through [`BindingDispatch::resolve`]: the lookup is two probes.
 #[derive(Resource, Default)]
-struct BindingDispatch {
+pub(crate) struct BindingDispatch {
     map: std::collections::HashMap<Chord, String>,
     /// The engine table's generation this map was built from, keyed per VM: a fresh VM restarts
     /// its counter at 0.
@@ -93,9 +93,48 @@ pub(crate) struct BindingsState {
     /// Normalized like [`latched`](Self::latched) and reconciled against `ButtonInput` every
     /// pass, so a window deactivate empties it and a key held across an alt-tab resumes, as in
     /// the reference. Keyboard only: mouse edges cannot repeat.
-    down: Vec<KeyCode>,
+    down: KeyDownList,
     /// The web bridge's latches, by command name ([`Self::synth_press`]).
     synth: Vec<String>,
+}
+
+/// The keys believed down, the reference's own list (`0x4248b3`): a press of a key on it is an
+/// auto-repeat, whatever the OS flagged. One instance is the bindings', another the UI key feed's
+/// ([`crate::ui_script`]), which decides repeat for the frames by the same rule and reconcile.
+#[derive(Default)]
+pub(crate) struct KeyDownList(Vec<KeyCode>);
+
+impl KeyDownList {
+    /// Drop what is no longer physically down, per bevy's button plane: a window deactivate
+    /// empties it (the reference's `0x424790` wipe), so the first repeat after an alt-tab is a
+    /// fresh press and re-latches.
+    pub(crate) fn reconcile(&mut self, keys: &ButtonInput<KeyCode>) {
+        self.0.retain(|&kc| key_physically_down(kc, keys));
+    }
+
+    /// Record a press; whether the key was already down, which makes it a repeat.
+    pub(crate) fn press(&mut self, key: KeyCode) -> bool {
+        let key = chord::normalize_key(key);
+        let repeat = self.0.contains(&key);
+        if !repeat {
+            self.0.push(key);
+        }
+        repeat
+    }
+
+    pub(crate) fn release(&mut self, key: KeyCode) {
+        let key = chord::normalize_key(key);
+        self.0.retain(|&kc| kc != key);
+    }
+}
+
+/// `ENTER` is down while either physical key is, since [`chord::normalize_key`] folds
+/// `NUMPADENTER` into it.
+fn key_physically_down(kc: KeyCode, keys: &ButtonInput<KeyCode>) -> bool {
+    match kc {
+        KeyCode::Enter => keys.pressed(KeyCode::Enter) || keys.pressed(KeyCode::NumpadEnter),
+        kc => keys.pressed(kc),
+    }
 }
 
 /// The physical input a latch waits on: a keyboard key by its code, not its name, so its release
@@ -261,7 +300,7 @@ pub(crate) fn seed_bindings_for_vm(world: &mut World, script: &mut UiScript) {
     // The character's own set: its file existing makes it the active set, the reference's rule.
     // No roster identity (a rigged or capture run) leaves set 2 unseeded.
     let id = world
-        .get_resource::<crate::char_select::Roster>()
+        .get_resource::<crate::glue_session::roster::Roster>()
         .and_then(crate::ui_macro::identity);
     let character = id
         .as_ref()
@@ -336,25 +375,28 @@ fn drain_binding_requests(script: Option<NonSendMut<UiScript>>, files: Res<Bindi
 }
 
 /// Rebuild the dispatch map when the engine table moved (a rebind, a set switch, the seed, a
-/// load), and fire `UPDATE_BINDINGS` so the Lua consumers (the action bar's hotkey corners)
-/// repaint.
+/// load, a registration), and fire the `UPDATE_BINDINGS` a host-side load owes so the Lua
+/// consumers (the action bar's hotkey corners) repaint. The reference signals it from `SetBinding`
+/// (`0x4b805b`), which signals in place, and from the copy of a set into the live table
+/// (`0x4b649d`); reading a `Bindings.xml` (`0x4b6f70`) signals nothing.
 fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<BindingDispatch>) {
     let Some(mut script) = script else { return };
     let generation = script.keybinds_generation();
-    if *dispatch.seen_generation.get(&script) == Some(generation) {
-        return;
-    }
-    *dispatch.seen_generation.get(&script) = Some(generation);
-    dispatch.map.clear();
-    for (key, command) in script.binding_keys() {
-        match Chord::parse(&key) {
-            Some(ch) => {
-                dispatch.map.insert(ch, command);
+    if *dispatch.seen_generation.get(&script) != Some(generation) {
+        *dispatch.seen_generation.get(&script) = Some(generation);
+        dispatch.map.clear();
+        for (key, command) in script.binding_keys() {
+            match Chord::parse(&key) {
+                Some(ch) => {
+                    dispatch.map.insert(ch, command);
+                }
+                None => warn!("bindings: {command}: unpressable chord '{key}' (unknown token)"),
             }
-            None => warn!("bindings: {command}: unpressable chord '{key}' (unknown token)"),
         }
     }
-    script.fire_event("UPDATE_BINDINGS", vec![]);
+    if script.take_keybinds_signal_owed() {
+        script.fire_event("UPDATE_BINDINGS", vec![]);
+    }
 }
 
 /// A wheel delta in lines (notches), whatever unit the OS reported: a trackpad's `Pixel` deltas
@@ -363,6 +405,60 @@ pub(crate) fn wheel_lines(unit: MouseScrollUnit, dy: f32) -> f32 {
     match unit {
         MouseScrollUnit::Line => dy,
         MouseScrollUnit::Pixel => dy / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR,
+    }
+}
+
+/// Whether the OS turns Shift plus the vertical wheel into a horizontal scroll before the window
+/// sees it: macOS does, Windows (`WM_MOUSEWHEEL` with `MK_SHIFT` in its key flags) does not.
+pub(crate) const OS_REMAPS_SHIFT_WHEEL: bool = cfg!(target_os = "macos");
+
+/// The vertical travel of a scroll: `y`, except that where the OS remapped Shift plus the wheel to
+/// a horizontal-only scroll (`remapped`), that scroll is the wheel notch it came from. It undoes
+/// the OS's remap so the reference's `WM_MOUSEWHEEL` arrives as it would on Windows (`0x42d54f`),
+/// SHIFT-MOUSEWHEELUP and DOWN stay bindable and Shift plus the wheel still counts as input.
+pub(crate) fn notch_travel_with(x: f32, y: f32, shift: bool, remapped: bool) -> f32 {
+    if remapped && shift && y == 0.0 {
+        x
+    } else {
+        y
+    }
+}
+
+/// [`notch_travel_with`] on this platform.
+pub(crate) fn notch_travel(x: f32, y: f32, shift: bool) -> f32 {
+    notch_travel_with(x, y, shift, OS_REMAPS_SHIFT_WHEEL)
+}
+
+/// The chord a wheel notch runs: the held modifiers and the direction. `None` while Super is held,
+/// where the notch runs no binding.
+fn wheel_chord(keys: &ButtonInput<KeyCode>, up: bool) -> Option<Chord> {
+    let held = |a, b| keys.pressed(a) || keys.pressed(b);
+    if held(KeyCode::SuperLeft, KeyCode::SuperRight) {
+        return None;
+    }
+    Some(Chord {
+        alt: held(KeyCode::AltLeft, KeyCode::AltRight),
+        ctrl: held(KeyCode::ControlLeft, KeyCode::ControlRight),
+        shift: held(KeyCode::ShiftLeft, KeyCode::ShiftRight),
+        key: if up {
+            BindKey::WheelUp
+        } else {
+            BindKey::WheelDown
+        },
+    })
+}
+
+/// Whether the world frame's wheel slot takes a notch: it runs the notch's chord and answers the
+/// sum of the two `ExecuteBinding` results (`0x483d87`), which is 0 for a chord with no binding.
+pub(crate) fn world_takes_wheel(
+    dispatch: Option<&BindingDispatch>,
+    keys: &ButtonInput<KeyCode>,
+    up: bool,
+) -> bool {
+    match (dispatch, wheel_chord(keys, up)) {
+        (Some(dispatch), Some(chord)) => dispatch.resolve(chord, false).is_some(),
+        (None, _) => true,
+        (Some(_), None) => false,
     }
 }
 
@@ -392,6 +488,12 @@ impl WheelNotches {
     }
 }
 
+/// The wheel notches this frame's sweep left to the world frame, signed (`WheelWalk::World`):
+/// the UI feed writes them, the dispatch pass runs the `MOUSEWHEELUP`/`MOUSEWHEELDOWN` binding
+/// for each (`0x483d20`).
+#[derive(Default, Resource)]
+pub(crate) struct WorldWheel(pub(crate) i32);
+
 /// The dispatch pass (see the module doc). Runs after the UI key feed and before
 /// `WorldStage::Input`, so a bound key acts this frame, once.
 fn latch_and_dispatch(
@@ -401,15 +503,12 @@ fn latch_and_dispatch(
     layout: Res<LayoutNames>,
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    scroll: Res<AccumulatedMouseScroll>,
+    world_wheel: Res<WorldWheel>,
     capture: Res<UiKeyboardCapture>,
     hover: Res<PlayerUiHover>,
-    // The chrome flag; only the wheel branch reads it.
-    over_ui: Res<PointerOverUiPanel>,
     dispatch: Res<BindingDispatch>,
     mut state: ResMut<BindingsState>,
     mut same_vm: Local<crate::ui_script::VmMemo<bool>>,
-    mut notches: Local<WheelNotches>,
     mut focus_lost: MessageReader<bevy::input::keyboard::KeyboardFocusLost>,
     cover: Option<Res<crate::loading_screen::LoadingScreen>>,
 ) {
@@ -465,9 +564,7 @@ fn latch_and_dispatch(
     // ── The pressed-key reconcile ── against bevy's button planes, before this frame's messages:
     // a release the window never saw drops off the list, and a window deactivate empties it, the
     // reference's `0x424790` wipe, so a key held across an alt-tab re-latches on its next repeat.
-    state
-        .down
-        .retain(|&kc| physically_down(Held::Key(kc), &keys, &buttons));
+    state.down.reconcile(&keys);
 
     // ── Keyboard ── press edges run their command, gated on ownership and the capture arm;
     // release edges unlatch and run the `runOnUp` up-half.
@@ -486,15 +583,17 @@ fn latch_and_dispatch(
                             | KeyCode::ArrowUp
                             | KeyCode::ArrowDown
                     );
+                // The box declines PRINTSCREEN before it looks at focus (`0x77b17f`), so the
+                // walk goes on and the world frame's binding runs while typing.
+                let arrow_exempt = arrow_exempt
+                    || chord::key_token(ev.key_code, &layout)
+                        == Some(chord::KeyName::Word("PRINTSCREEN"));
                 // A keyboard frame ate this one key (the world map's `OnKeyDown`, a cinematic);
                 // per key, so every other binding is untouched.
                 let eaten = capture.consumed.contains(&ev.key_code);
                 // A repeat is a key we already believe is down, the reference's test. Recorded
                 // before the gates below, so a key held through a focused box stays down.
-                let repeat = state.down.contains(&key);
-                if !repeat {
-                    state.down.push(key);
-                }
+                let repeat = state.down.press(key);
                 // `sup`: the Super deviation (module doc).
                 if (typing && !arrow_exempt) || eaten || sup || repeat {
                     continue;
@@ -514,12 +613,44 @@ fn latch_and_dispatch(
                     key: BindKey::Key(name),
                 };
                 if let Some(command) = dispatch.resolve(chord, dev_plane) {
+                    // The world frame's key-down ran it and returned that (`0x483b70`), so its
+                    // key-up and repeats are the world frame's, not a stale earlier consumer's.
+                    if let Some(s) = script.as_mut() {
+                        s.note_world_key(&name.to_string());
+                    }
                     press(&mut state, &mut script, command, Held::Key(key));
                 }
             }
             ButtonState::Released => {
-                state.down.retain(|&kc| kc != key);
+                state.down.release(key);
                 release(&mut state, &mut script, Held::Key(key));
+                // The release, to the frame that took the press (`0x765fd0`), here and not in the
+                // key feed so it follows this key's press in event order: a binding's press has
+                // just made the world frame its consumer. PRINTSCREEN arrives as an up alone on
+                // Windows (`VK_SNAPSHOT` sends no `WM_KEYDOWN`), and with no consumer on record the
+                // client runs the key-down walk on it (`0x76603c`-`0x76604d`), the world frame's
+                // binding last: the up then runs the chord as a press, with no latch since no
+                // release follows.
+                let Some(name) = chord::walk_name(ev.key_code, &layout) else {
+                    continue;
+                };
+                let Some(s) = script.as_mut() else {
+                    continue;
+                };
+                if s.key_up(&name) == KeyUp::Walked(KeyWalk::Declined) && !sup {
+                    if let Some(token) = chord::key_token(ev.key_code, &layout) {
+                        let chord = Chord {
+                            alt,
+                            ctrl,
+                            shift,
+                            key: BindKey::Key(token),
+                        };
+                        if let Some(command) = dispatch.resolve(chord, dev_plane) {
+                            press(&mut state, &mut script, command, Held::Key(key));
+                            state.latched.retain(|(k, _)| *k != Held::Key(key));
+                        }
+                    }
+                }
             }
         }
     }
@@ -556,27 +687,15 @@ fn latch_and_dispatch(
     // ── Wheel ── each notch is a press and its release, back to back: the reference hands one
     // chord to `CBindings::ExecuteBinding` with `isDown=1` (`0x483d6f`) then `isDown=0`
     // (`0x483d82`) per wheel message. A `runOnUp` command runs both halves; a plain one's up leg is
-    // the `RunCommand` (`0x4b7bf1`) no-op. A trackpad's fractional lines carry to whole notches.
-    let wheel = wheel_lines(scroll.unit, scroll.delta.y);
-    // Over chrome only (`PointerOverUiPanel`): the wheel still zooms with the cursor on a
-    // nameplate, a mouse-enabled widget but not a panel.
-    if wheel != 0.0 && !sup && !over_ui.0 {
-        let steps = notches.feed(wheel);
-        let key = if steps > 0 {
-            BindKey::WheelUp
-        } else {
-            BindKey::WheelDown
-        };
-        let chord = Chord {
-            alt,
-            ctrl,
-            shift,
-            key,
-        };
-        if let Some(command) = dispatch.resolve(chord, false) {
-            for _ in 0..steps.unsigned_abs() {
-                press(&mut state, &mut script, command, Held::Wheel);
-                release(&mut state, &mut script, Held::Wheel);
+    // the `RunCommand` (`0x4b7bf1`) no-op. `WorldWheel` holds the notches no frame took.
+    let steps = world_wheel.0;
+    if steps != 0 {
+        if let Some(chord) = wheel_chord(&keys, steps > 0) {
+            if let Some(command) = dispatch.resolve(chord, false) {
+                for _ in 0..steps.unsigned_abs() {
+                    press(&mut state, &mut script, command, Held::Wheel);
+                    release(&mut state, &mut script, Held::Wheel);
+                }
             }
         }
     }
@@ -612,10 +731,7 @@ fn physically_down(
     buttons: &ButtonInput<MouseButton>,
 ) -> bool {
     match key {
-        Held::Key(KeyCode::Enter) => {
-            keys.pressed(KeyCode::Enter) || keys.pressed(KeyCode::NumpadEnter)
-        }
-        Held::Key(kc) => keys.pressed(kc),
+        Held::Key(kc) => key_physically_down(kc, keys),
         Held::Mouse(b) => buttons.pressed(b),
         // A notch is a press and a release in one frame; it is never "held".
         Held::Wheel => false,
@@ -659,7 +775,7 @@ fn release(state: &mut BindingsState, script: &mut Option<NonSendMut<UiScript>>,
 #[cfg(test)]
 mod tests {
     use bevy::input::keyboard::{Key, KeyboardInput};
-    use bevy::input::mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel};
+    use bevy::input::mouse::MouseButtonInput;
 
     use super::*;
 
@@ -742,13 +858,9 @@ mod tests {
             window: Entity::PLACEHOLDER,
         });
     }
-    fn wheel(app: &mut App, y: f32) {
-        app.world_mut().write_message(MouseWheel {
-            unit: MouseScrollUnit::Line,
-            x: 0.0,
-            y,
-            window: Entity::PLACEHOLDER,
-        });
+    /// `notches` whole notches (up positive) that the UI sweep left to the world frame.
+    fn wheel(app: &mut App, notches: i32) {
+        app.world_mut().resource_mut::<WorldWheel>().0 = notches;
     }
 
     /// What a keyboard frame ate this frame. Set, not pushed: `feed_ui_input` rewrites the list
@@ -780,7 +892,7 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::input::InputPlugin))
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiHover>()
-            .init_resource::<PointerOverUiPanel>()
+            .init_resource::<WorldWheel>()
             .init_resource::<BindingsState>()
             .init_resource::<BindingDispatch>()
             .init_resource::<LayoutNames>()
@@ -806,12 +918,97 @@ mod tests {
     }
 
     fn with_addon(bindings: &str) -> UiScript {
-        let mut script = core_script();
+        let script = core_script();
         script.register_addon_bindings(
             "ProbeAddon",
             &benilla_ui::bindings_xml::parse(bindings).expect("well-formed"),
         );
         script
+    }
+
+    /// `SetBinding` signalled its `UPDATE_BINDINGS` in place (`0x4b805b`): the dispatch map still
+    /// re-derives, and the frame fires no second signal for the same change.
+    #[test]
+    fn a_verbs_binding_change_is_signalled_once() {
+        let script = core_script();
+        let mut app = vm_harness(script);
+        app.update();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(
+                "UPDATES = 0 local f = CreateFrame('Frame') f:RegisterEvent('UPDATE_BINDINGS') \
+                 f:SetScript('OnEvent', function() UPDATES = UPDATES + 1 end) \
+                 SetBinding('F', 'JUMP')",
+            )
+            .unwrap();
+        assert_eq!(lua_count(&app, "UPDATES"), 1, "the verb's own signal");
+        app.update();
+        assert_eq!(
+            lua_count(&app, "UPDATES"),
+            1,
+            "no second signal from the feed"
+        );
+        assert!(app
+            .world()
+            .resource::<BindingDispatch>()
+            .map
+            .values()
+            .any(|c| c == "JUMP"));
+    }
+
+    /// Only the two reference sites signal `UPDATE_BINDINGS`: a set's copy into the live table
+    /// (`0x4b649d`, here the host's load) and a stored `SetBinding`. Reading an addon's
+    /// `Bindings.xml` (`0x4b6f70`) moves the dispatch table and signals nothing.
+    #[test]
+    fn registering_an_addons_bindings_signals_nothing_but_a_load_does() {
+        let script = core_script();
+        script
+            .run(
+                "UPDATES = 0 local f = CreateFrame('Frame') f:RegisterEvent('UPDATE_BINDINGS') \
+                 f:SetScript('OnEvent', function() UPDATES = UPDATES + 1 end)",
+            )
+            .unwrap();
+        let mut app = vm_harness(script);
+        app.update();
+        assert_eq!(
+            lua_count(&app, "UPDATES"),
+            1,
+            "the seed's load owes its signal"
+        );
+        app.update();
+        assert_eq!(lua_count(&app, "UPDATES"), 1, "once");
+
+        {
+            let script = app.world().non_send_resource::<UiScript>();
+            // The verb signals in place and owes nothing; only then does the registration run.
+            script
+                .run(r#"SetBinding("J", "PROBEHOLD") UPDATES = 0"#)
+                .unwrap();
+            script.register_addon_bindings(
+                "ProbeAddon",
+                &benilla_ui::bindings_xml::parse(PROBE_BINDINGS).expect("well-formed"),
+            );
+        }
+        app.update();
+        assert_eq!(
+            lua_count(&app, "UPDATES"),
+            0,
+            "a registration signals nothing"
+        );
+        assert!(
+            app.world()
+                .resource::<BindingDispatch>()
+                .map
+                .values()
+                .any(|c| c == "PROBEHOLD"),
+            "but the dispatch map re-derives"
+        );
+
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .load_binding_set(1);
+        app.update();
+        assert_eq!(lua_count(&app, "UPDATES"), 1, "a load does");
     }
 
     /// A `runOnUp` body is one chunk run twice, `keystate` "down" then "up"; a plain one runs on
@@ -912,6 +1109,67 @@ mod tests {
         );
     }
 
+    /// The box declines PRINTSCREEN before it looks at focus (`0x77b17f`), so the walk goes on and
+    /// the binding runs while typing, with every other key still eaten.
+    #[test]
+    fn printscreen_runs_its_binding_while_a_box_has_focus() {
+        let script = with_addon(PROBE_BINDINGS);
+        script
+            .run(r#"SetBinding("PRINTSCREEN", "PROBEEDGE"); SetBinding("G", "PROBEHOLD")"#)
+            .expect("bind");
+        let mut app = vm_harness(script);
+        app.world_mut().resource_mut::<UiKeyboardCapture>().typing = true;
+
+        press_key(&mut app, KeyCode::KeyG);
+        app.update();
+        assert_eq!(lua_count(&app, "PROBE_DOWN"), 0, "G is eaten by the box");
+
+        press_key(&mut app, KeyCode::PrintScreen);
+        app.update();
+        assert_eq!(
+            lua_count(&app, "PROBE_EDGE"),
+            1,
+            "PRINTSCREEN is declined, so its binding runs"
+        );
+    }
+
+    /// A press that resolved to a binding is the world frame's (`0x483b70`): the key's up goes to
+    /// it, not to the hidden frame that took the key's last press.
+    #[test]
+    fn a_press_that_runs_a_binding_makes_the_world_frame_its_consumer() {
+        let script = with_addon(PROBE_BINDINGS);
+        script
+            .run(
+                r#"
+                SetBinding("G", "PROBEEDGE")
+                CreateFrame("WorldFrame", "WorldFrame")
+                ups = 0
+                stale = CreateFrame("Frame", "StaleG")
+                stale:EnableKeyboard(true)
+                stale:SetScript("OnKeyDown", function() end)
+                stale:SetScript("OnKeyUp", function() ups = ups + 1 end)
+                "#,
+            )
+            .expect("bind");
+        let mut app = vm_harness(script);
+        {
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            assert!(s.key_input("G"), "the frame takes G first");
+            s.run("stale:Hide()").unwrap();
+        }
+        press_key(&mut app, KeyCode::KeyG);
+        app.update();
+        assert_eq!(
+            lua_count(&app, "PROBE_EDGE"),
+            1,
+            "the binding took the press"
+        );
+        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        s.run("stale:Show()").unwrap();
+        assert!(s.key_up("G").taken());
+        assert_eq!(s.eval::<i64>("return ups").unwrap(), 0);
+    }
+
     /// A box taking focus releases nothing already held: the reference's focused box freezes the
     /// direction bits rather than clearing them (`0x514490` is the OS window-deactivate clear).
     #[test]
@@ -994,13 +1252,119 @@ mod tests {
         let mut app = vm_harness(s);
 
         // The bound chord now dispatches: the next notch jumps rather than binding.
-        wheel(&mut app, 1.0);
+        wheel(&mut app, 1);
         app.update();
         assert!(state(&app).fired(Input::Jump));
         assert!(
             !state(&app).fired(Input::CameraZoomIn),
             "JUMP stole the wheel from the camera, the 1.12 steal law"
         );
+    }
+
+    /// The whole path of a notch over the stock chrome: the UI's sweep first, then the bindings
+    /// pass with what it left. Over a button with no `OnMouseWheel` the camera zooms (`0x76c1cb`,
+    /// `0x483d20`); over a frame that has one, the frame scrolls and the camera does not.
+    #[test]
+    fn a_notch_zooms_the_camera_over_a_button_and_not_over_a_scroll_pane() {
+        use bevy::input::mouse::MouseScrollUnit;
+        let notch = (MouseScrollUnit::Line, 1.0);
+        let mut s = core_script();
+        s.set_screen_size(1024.0, 768.0);
+        s.run(
+            r#"
+            local w = CreateFrame("WorldFrame", "WorldFrame")
+            w:SetPoint("BOTTOMLEFT", 0, 0) w:SetWidth(1024) w:SetHeight(768)
+            local b = CreateFrame("Button", "ActionButton")
+            b:SetPoint("BOTTOMLEFT", 100, 100) b:SetWidth(40) b:SetHeight(40)
+            local p = CreateFrame("Frame", "Pane")
+            p:SetPoint("BOTTOMLEFT", 600, 100) p:SetWidth(100) p:SetHeight(100)
+            p:EnableMouseWheel(true)
+            p:SetScript("OnMouseWheel", function() SCROLLED = (SCROLLED or 0) + 1 end)
+            "#,
+        )
+        .expect("frames");
+        s.resolve();
+        let mut notches = WheelNotches::default();
+        let over_button = crate::ui_script::feed_wheel(
+            &mut s,
+            &mut notches,
+            Vec2::new(120.0, 120.0),
+            notch,
+            |_| true,
+        );
+        let over_pane = crate::ui_script::feed_wheel(
+            &mut s,
+            &mut notches,
+            Vec2::new(650.0, 150.0),
+            notch,
+            |_| true,
+        );
+        let mut app = vm_harness(s);
+
+        wheel(&mut app, over_pane);
+        app.update();
+        assert!(
+            !state(&app).fired(Input::CameraZoomIn),
+            "the pane took the notch"
+        );
+        assert_eq!(lua_count(&app, "SCROLLED"), 1);
+
+        wheel(&mut app, over_button);
+        app.update();
+        assert!(
+            state(&app).fired(Input::CameraZoomIn),
+            "a button has no OnMouseWheel: the notch is the camera's"
+        );
+        assert_eq!(lua_count(&app, "SCROLLED"), 1);
+    }
+
+    /// Where the OS turned Shift plus the wheel sideways, a horizontal-only scroll with Shift held
+    /// is the vertical notch it came from; nowhere else is a sideways scroll a notch.
+    #[test]
+    fn a_remapped_shift_wheel_is_the_vertical_notch() {
+        assert_eq!(notch_travel_with(-1.0, 0.0, true, true), -1.0);
+        assert_eq!(notch_travel_with(2.0, 0.0, true, true), 2.0);
+        assert_eq!(
+            notch_travel_with(2.0, 0.0, false, true),
+            0.0,
+            "no Shift: sideways"
+        );
+        assert_eq!(
+            notch_travel_with(2.0, 0.0, true, false),
+            0.0,
+            "no remap: sideways"
+        );
+        assert_eq!(
+            notch_travel_with(2.0, 3.0, true, true),
+            3.0,
+            "a vertical part wins"
+        );
+        assert_eq!(notch_travel_with(0.0, -1.0, true, true), -1.0);
+    }
+
+    /// The world slot takes a notch only when its chord has a binding (`0x483d87`); Super holds
+    /// the notch back.
+    #[test]
+    fn the_world_takes_a_notch_only_for_a_bound_chord() {
+        let mut app = harness();
+        app.update();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        let dispatch = app.world().resource::<BindingDispatch>();
+        assert!(world_takes_wheel(Some(dispatch), &keys, true));
+        assert!(world_takes_wheel(Some(dispatch), &keys, false));
+        // SHIFT-MOUSEWHEELUP has no binding; the unmodified chord's retry is the leftmost
+        // modifier dropped, so it falls back to the bound plain chord.
+        keys.press(KeyCode::ShiftLeft);
+        assert!(world_takes_wheel(Some(dispatch), &keys, true));
+        keys.press(KeyCode::SuperLeft);
+        assert!(!world_takes_wheel(Some(dispatch), &keys, true));
+        assert!(world_takes_wheel(None, &keys, true), "no table, no say");
+        let empty = BindingDispatch::default();
+        assert!(!world_takes_wheel(
+            Some(&empty),
+            &ButtonInput::default(),
+            true
+        ));
     }
 
     /// A notch is a press and its release (`0x483d6f`, `0x483d82`), so a `runOnUp` binding on the
@@ -1015,7 +1379,7 @@ mod tests {
         script.load_binding_set(1);
         let mut app = vm_harness(script);
 
-        wheel(&mut app, 1.0);
+        wheel(&mut app, 1);
         app.update();
         assert_eq!(lua_count(&app, "PROBE_DOWN"), 1, "the notch's press half");
         assert_eq!(
@@ -1073,6 +1437,165 @@ mod tests {
             state(&app).pressed(Input::MoveForward),
             "the first repeat after re-activation re-latches"
         );
+    }
+
+    /// The UI key feed beside the dispatch, as the world runs them: the feed first, on the same
+    /// events, with the world frame in the walk.
+    fn feed_and_dispatch_harness() -> App {
+        fn feed(
+            mut script: NonSendMut<UiScript>,
+            mut capture: ResMut<UiKeyboardCapture>,
+            mut events: MessageReader<KeyboardInput>,
+            keys: Res<ButtonInput<KeyCode>>,
+            layout: Res<LayoutNames>,
+            mut clipboard: NonSendMut<crate::textinput::HostClipboard>,
+            mut down: Local<KeyDownList>,
+        ) {
+            capture.consumed.clear();
+            crate::ui_script::feed_keys(
+                &mut script,
+                &mut capture,
+                events.read(),
+                &keys,
+                &mut down,
+                false,
+                crate::textinput::keymap::Mods {
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                    sup: false,
+                },
+                &layout,
+                &mut clipboard,
+                None,
+            );
+        }
+        let script = core_script();
+        script
+            .run(r#"CreateFrame("WorldFrame", "WorldFrame")"#)
+            .expect("world frame");
+        let mut app = vm_harness(script);
+        app.insert_non_send_resource(crate::textinput::HostClipboard::holding(""))
+            .add_systems(Update, feed.before(latch_and_dispatch));
+        app
+    }
+
+    /// A key held across an alt-tab resumes at its next OS repeat even when its binding made the
+    /// world frame its consumer: the feed decides repeat from the same wiped pressed-key list
+    /// (`0x424790`), not from the OS flag, so the repeat is a fresh press for both and W runs
+    /// again (`0x4248b3`).
+    #[test]
+    fn a_held_movement_key_resumes_after_an_alt_tab_through_the_feed_too() {
+        let mut app = feed_and_dispatch_harness();
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(state(&app).pressed(Input::MoveForward));
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release_all();
+        app.update();
+        assert!(
+            !state(&app).pressed(Input::MoveForward),
+            "the deactivate releases the direction bits"
+        );
+
+        repeat_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(
+            state(&app).pressed(Input::MoveForward),
+            "the first repeat after re-activation re-latches"
+        );
+        assert!(
+            !app.world()
+                .resource::<UiKeyboardCapture>()
+                .consumed
+                .contains(&KeyCode::KeyW),
+            "…the feed did not hand the repeat to the world frame's stub"
+        );
+
+        // A real repeat of the key now held is the stub's, and eaten by nobody's binding.
+        repeat_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(state(&app).pressed(Input::MoveForward));
+    }
+
+    /// A press and its release in one frame's batch reach the dispatch in event order: the release
+    /// follows the press that made the world frame the consumer, so it is not sent on to the frame
+    /// that took the key's last press.
+    #[test]
+    fn a_press_and_a_release_in_one_batch_go_to_the_world_frame_not_a_stale_consumer() {
+        let mut app = feed_and_dispatch_harness();
+        {
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.run(
+                r#"
+                ups = 0
+                stale = CreateFrame("Frame", "StaleBatch")
+                stale:EnableKeyboard(true)
+                stale:SetScript("OnKeyDown", function() end)
+                stale:SetScript("OnKeyUp", function() ups = ups + 1 end)
+                "#,
+            )
+            .unwrap();
+            assert!(s.key_input("W"), "the frame takes W once");
+            s.run("stale:EnableKeyboard(false)").unwrap();
+        }
+        press_key(&mut app, KeyCode::KeyW);
+        release_key(&mut app, KeyCode::KeyW);
+        app.update();
+        let s = app.world().non_send_resource::<UiScript>();
+        assert_eq!(s.eval::<i64>("return ups").unwrap(), 0);
+    }
+
+    /// PRINTSCREEN reaches Windows as an up alone (`VK_SNAPSHOT` sends no `WM_KEYDOWN`). With no
+    /// consumer on record the client runs the key-down walk on the up (`0x76603c`-`0x76604d`), the
+    /// world frame's binding last, so the binding runs on the release; a frame that takes the walk
+    /// keeps it from the binding; and a platform that sends both halves runs it once.
+    #[test]
+    fn printscreen_as_an_up_alone_runs_its_binding_through_the_key_down_walk() {
+        let script = with_addon(PROBE_BINDINGS);
+        script
+            .run(
+                r#"SetBinding("PRINTSCREEN", "PROBEEDGE") CreateFrame("WorldFrame", "WorldFrame")"#,
+            )
+            .expect("bind");
+        let mut app = vm_harness(script);
+        release_key(&mut app, KeyCode::PrintScreen);
+        app.update();
+        assert_eq!(lua_count(&app, "PROBE_EDGE"), 1, "the up alone runs it");
+
+        // A frame that takes the key-down walk keeps it from the binding.
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(
+                r#"
+                got = 0
+                cover = CreateFrame("Frame", "PrintCover")
+                cover:EnableKeyboard(true)
+                cover:SetScript("OnKeyDown", function() got = got + 1 end)
+                "#,
+            )
+            .unwrap();
+        release_key(&mut app, KeyCode::PrintScreen);
+        app.update();
+        assert_eq!(lua_count(&app, "got"), 1, "the frame took the walk");
+        assert_eq!(
+            lua_count(&app, "PROBE_EDGE"),
+            1,
+            "…so the binding did not run"
+        );
+
+        // A platform that sends both halves: the press ran it and made the world frame the
+        // consumer, so the up is delivered, not walked again.
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("cover:Hide()")
+            .unwrap();
+        press_key(&mut app, KeyCode::PrintScreen);
+        release_key(&mut app, KeyCode::PrintScreen);
+        app.update();
+        assert_eq!(lua_count(&app, "PROBE_EDGE"), 2, "…once, not twice");
     }
 
     /// An addon's bindings that call the movement functions: a Start and a Stop alone.
@@ -1512,7 +2035,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_buttons_bind_only_over_the_world_and_the_wheel_respects_ui() {
+    fn mouse_buttons_bind_only_over_the_world() {
         let mut app = harness();
         // BUTTON4 (winit Forward) is TOGGLEAUTORUN's second default.
         mouse(&mut app, MouseButton::Forward, ButtonState::Pressed);
@@ -1536,40 +2059,42 @@ mod tests {
         mouse(&mut app, MouseButton::Middle, ButtonState::Released);
         app.update();
         assert!(!state(&app).steering());
-        // The wheel: each notch runs CAMERAZOOMIN's `CameraZoomIn(1.0)`; over UI it belongs to
-        // the frame.
+    }
+
+    /// The notches the sweep left to the world each run CAMERAZOOMIN's `CameraZoomIn(1.0)`, and
+    /// none left run nothing.
+    #[test]
+    fn each_notch_left_to_the_world_zooms() {
         let mut app = harness();
-        wheel(&mut app, 2.0);
+        wheel(&mut app, 2);
         app.update();
         assert!(state(&app).fired(Input::CameraZoomIn));
         assert_eq!(state(&app).amount(Input::CameraZoomIn), 2.0, "two notches");
-        app.world_mut().resource_mut::<PointerOverUiPanel>().0 = true;
-        wheel(&mut app, 2.0);
+        wheel(&mut app, -1);
         app.update();
-        assert!(
-            !state(&app).fired(Input::CameraZoomIn),
-            "a UI wheel is the frame's"
-        );
+        assert_eq!(state(&app).amount(Input::CameraZoomOut), 1.0);
+        wheel(&mut app, 0);
+        app.update();
+        assert!(!state(&app).fired(Input::CameraZoomIn), "no notch, no zoom");
+        assert!(!state(&app).fired(Input::CameraZoomOut));
     }
 
     /// A trackpad's fractional lines carry to whole notches, each one `CameraZoomIn(1.0)`, and a
     /// reversal drops the carried fraction.
     #[test]
-    fn fractional_wheel_lines_dispatch_per_whole_notch() {
-        let mut app = harness();
-        for want in [0.0, 0.0, 1.0] {
-            wheel(&mut app, 0.4);
-            app.update();
-            assert_eq!(
-                state(&app).amount(Input::CameraZoomIn),
-                want,
-                "0.4 lines a frame: the third completes the notch"
-            );
-        }
-        wheel(&mut app, -1.0);
-        app.update();
-        assert_eq!(state(&app).amount(Input::CameraZoomOut), 1.0);
-        assert_eq!(state(&app).amount(Input::CameraZoomIn), 0.0);
+    fn fractional_wheel_lines_carry_to_whole_notches() {
+        let mut notches = WheelNotches::default();
+        let got: Vec<i32> = [0.4, 0.4, 0.4].map(|l| notches.feed(l)).to_vec();
+        assert_eq!(
+            got,
+            [0, 0, 1],
+            "0.4 lines a frame: the third completes the notch"
+        );
+        assert_eq!(
+            notches.feed(-1.0),
+            -1,
+            "a reversal drops the carried fraction"
+        );
     }
 
     /// The window deactivate (`0x514490`) clears the direction bits a Lua Start set and keeps the

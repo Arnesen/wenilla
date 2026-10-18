@@ -958,6 +958,414 @@ fn an_exalted_npc_target_reads_revered_and_its_plate_is_green() {
     }
 }
 
+/// A target whose faction template the server changes live recolours its plate: template 35
+/// (friendly) to 14 (hostile) names no side either way, so only the template's own watch fires
+/// `UNIT_FACTION` (bridge id 29). Pushing the new reaction alone, or another unit's watch, leaves
+/// the plate as it was.
+#[test]
+fn a_live_faction_template_change_recolours_the_target_plate() {
+    benilla_formats::wow_data_or_skip!();
+    use crate::field_watch::FieldNotice;
+    use crate::ui_unit::field_events::fire_unit_notice;
+
+    const ME: u64 = 0x77;
+    const MOB: u64 = 0xF130_0000_3796_0001;
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: ME,
+        target: MOB,
+        ..Default::default()
+    });
+    let mob = |reaction: u8| UnitState {
+        exists: true,
+        has_object: true,
+        guid: MOB,
+        name: Some("Pusillin".into()),
+        health: 100,
+        max_health: 100,
+        level: 58,
+        reaction,
+        can_attack: reaction < 4,
+        ..UnitState::default()
+    };
+    let is_green = |c: [f32; 4]| c[0].abs() < 1e-6 && (c[1] - 1.0).abs() < 1e-6;
+    let is_red = |c: [f32; 4]| (c[0] - 1.0).abs() < 1e-6 && c[1].abs() < 1e-6;
+
+    s.set_unit("target", Some(mob(5)));
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    let before = plate_color(&mut s);
+    assert!(is_green(before), "template 35 reads green, got {before:?}");
+
+    s.set_unit("target", Some(mob(2)));
+    let stale = plate_color(&mut s);
+    assert!(is_green(stale), "a push alone, no repaint, got {stale:?}");
+    fire_unit_notice(
+        &mut s,
+        FieldNotice::Unit {
+            guid: MOB + 1,
+            id: 29,
+        },
+    );
+    let other = plate_color(&mut s);
+    assert!(is_green(other), "another unit's watch, got {other:?}");
+    fire_unit_notice(&mut s, FieldNotice::Unit { guid: MOB, id: 29 });
+    let after = plate_color(&mut s);
+    assert!(is_red(after), "template 14 reads red, got {after:?}");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The stock target frame's health bar off the real pipeline: a values block on the target runs
+/// its health watch, whose `UNIT_HEALTH("target")` the bar answers (`TargetFrame.lua:40`), and a
+/// retarget is `PLAYER_TARGET_CHANGED` alone (`0x493540` signals only that, `0x49389c`), on which
+/// the frame rereads the new unit whole. No unit event carries `"targettarget"`, though the token is
+/// pushed for the stock poll.
+#[test]
+fn a_values_block_moves_the_target_health_bar_and_a_retarget_fires_no_unit_event() {
+    use crate::field_watch::FieldNotice;
+    use crate::net::{Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+    use crate::target::Selection;
+    use benilla_protocol::field::{FIELD_UNIT_HEALTH, FIELD_UNIT_MAXHEALTH};
+    use benilla_protocol::messages::ObjectType;
+    use benilla_protocol::ObjectFields;
+    use benilla_ui::script::UnitGuids;
+    use bevy::prelude::*;
+
+    /// `UNIT_FIELD_TARGET`, absolute descriptor index.
+    const TARGET: u16 = 16;
+    const ME: u64 = 0x77;
+    const WOLF: u64 = 0xF130_0000_0044_0001;
+    const BOAR: u64 = 0xF130_0000_0045_0002;
+
+    benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+    s.run(
+        r#"
+        SEEN = {}
+        local f = CreateFrame("Frame")
+        f:RegisterAllEvents()
+        f:SetScript("OnEvent", function()
+            if string.find(event, "^UNIT_") then
+                table.insert(SEEN, event .. ":" .. tostring(arg1))
+            end
+        end)
+    "#,
+    )
+    .unwrap();
+
+    let mut app = App::new();
+    app.init_resource::<Selection>()
+        .init_resource::<GuidIndex>()
+        .init_resource::<crate::names::NameCache>()
+        .init_resource::<crate::net::Reputations>()
+        .init_resource::<crate::ui_party::GroupState>()
+        .init_resource::<crate::ui_chat::ChatLog>()
+        .init_resource::<crate::sound::MessageSounds>()
+        .init_resource::<crate::ui_guild::GuildState>()
+        .insert_resource(NetCommands(crossbeam_channel::unbounded().0))
+        .insert_non_send_resource(s);
+    crate::ui_unit::add_unit_feed(&mut app);
+    app.world_mut().spawn((
+        SelfPlayer,
+        Guid(ME),
+        ObjectStore(ObjectFields::from_pairs(&[]).into_created(ObjectType::Player)),
+    ));
+    let mob = |health: u32, max: u32, target: u64| {
+        ObjectStore(
+            ObjectFields::from_pairs(&[
+                (FIELD_UNIT_HEALTH, health),
+                (FIELD_UNIT_MAXHEALTH, max),
+                (TARGET, target as u32),
+                (TARGET + 1, (target >> 32) as u32),
+            ])
+            .into_created(ObjectType::Unit),
+        )
+    };
+    // The wolf targets the boar, so `"targettarget"` names it while the wolf is ours.
+    let wolf = app
+        .world_mut()
+        .spawn((Guid(WOLF), mob(100, 100, BOAR)))
+        .id();
+    let boar = app.world_mut().spawn((Guid(BOAR), mob(50, 80, ME))).id();
+    app.world_mut()
+        .resource_mut::<GuidIndex>()
+        .0
+        .extend([(WOLF, wolf), (BOAR, boar)]);
+
+    fn script(app: &mut App) -> Mut<'_, UiScript> {
+        app.world_mut().non_send_resource_mut()
+    }
+    let seen = |app: &mut App| -> Vec<String> {
+        let s = script(app);
+        let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+        s.run("SEEN = {}").unwrap();
+        out
+    };
+    let bar = |app: &mut App| -> (f64, f64) {
+        let s = script(app);
+        s.eval::<(f64, f64)>(
+            "local lo, hi = TargetFrameHealthBar:GetMinMaxValues() \
+             return TargetFrameHealthBar:GetValue(), hi",
+        )
+        .unwrap()
+    };
+    // Target `guid` as the selection and the resolver's seat move together.
+    let select = |app: &mut App, entity: Entity, guid: u64, held: &[(u64, u64)]| {
+        *app.world_mut().resource_mut::<Selection>() = Selection {
+            target: Some(entity),
+            guid: Some(guid),
+            ..Default::default()
+        };
+        script(app).set_unit_guids(&UnitGuids {
+            player: ME,
+            target: guid,
+            held: held.iter().copied().collect(),
+            ..Default::default()
+        });
+        app.update();
+    };
+
+    select(&mut app, wolf, WOLF, &[(ME, 0), (WOLF, BOAR), (BOAR, ME)]);
+    assert!(
+        seen(&mut app).is_empty(),
+        "a first target fires no unit event"
+    );
+    assert_eq!(bar(&mut app), (100.0, 100.0));
+    assert_eq!(
+        script(&mut app)
+            .eval::<Option<f64>>("return UnitHealth('targettarget')")
+            .unwrap(),
+        Some(50.0),
+        "the hop is pushed for the poll"
+    );
+
+    // A values block on the wolf: the object handler's merge and its watches, then a frame.
+    let notices = {
+        let mut store = app.world_mut().get_mut::<ObjectStore>(wolf).unwrap();
+        let mut edges = Vec::new();
+        store.0.merge_diff(
+            ObjectFields::from_pairs(&[(FIELD_UNIT_HEALTH, 60)]),
+            |i, o, n| edges.push((i, o, n)),
+        );
+        crate::field_watch::values(
+            &crate::field_watch::Around {
+                me: Some(ME),
+                creature_lookup: &|_| false,
+                others: &Vec::new,
+                pet_bar: 0,
+            },
+            WOLF,
+            ObjectType::Unit,
+            &store.0,
+            &edges,
+        )
+    };
+    app.world_mut()
+        .resource_mut::<Messages<FieldNotice>>()
+        .write_batch(notices);
+    app.update();
+    assert_eq!(seen(&mut app), ["UNIT_HEALTH:target"]);
+    assert_eq!(bar(&mut app), (60.0, 100.0), "the bar follows the event");
+
+    // A values block on the boar, the hop: nothing, since no token of the fan-out names it.
+    let notices = {
+        let mut store = app.world_mut().get_mut::<ObjectStore>(boar).unwrap();
+        let mut edges = Vec::new();
+        store.0.merge_diff(
+            ObjectFields::from_pairs(&[(FIELD_UNIT_HEALTH, 40)]),
+            |i, o, n| edges.push((i, o, n)),
+        );
+        crate::field_watch::values(
+            &crate::field_watch::Around {
+                me: Some(ME),
+                creature_lookup: &|_| false,
+                others: &Vec::new,
+                pet_bar: 0,
+            },
+            BOAR,
+            ObjectType::Unit,
+            &store.0,
+            &edges,
+        )
+    };
+    app.world_mut()
+        .resource_mut::<Messages<FieldNotice>>()
+        .write_batch(notices);
+    app.update();
+    assert!(seen(&mut app).is_empty(), "no targettarget unit event");
+
+    // The retarget: `PLAYER_TARGET_CHANGED` alone, and the frame reads the boar whole.
+    select(&mut app, boar, BOAR, &[(ME, 0), (BOAR, ME)]);
+    assert!(seen(&mut app).is_empty(), "a retarget fires no unit event");
+    assert_eq!(bar(&mut app), (40.0, 80.0));
+    let errors = script(&mut app).errors();
+    assert!(errors.is_empty(), "script errors: {errors:?}");
+}
+
+/// A forced-reaction table arriving recolours the target plate: the reference's handler `0x4d59a0`
+/// fires `UNIT_FACTION` for every token naming a unit (`0x4d5a5e` → `0x606e20`), where the plate
+/// listens for it (`TargetFrame.lua:75-79`) and no field edge moves. A change of the standings
+/// alone fires nothing, a resend of the same table fires again, and a table naming another
+/// faction still fires: the handler tests nothing.
+#[test]
+fn a_forced_reaction_table_arriving_recolours_the_target_plate() {
+    use crate::net::{FieldChanged, Guid, NetCommands, ObjectStore, Reputations, SelfPlayer};
+    use crate::target::{stormwind_fixture, Selection, HUMAN_WARRIOR};
+    use benilla_protocol::field::{
+        FIELD_UNIT_FACTIONTEMPLATE, FIELD_UNIT_HEALTH, FIELD_UNIT_MAXHEALTH,
+    };
+    use benilla_protocol::ObjectFields;
+    use benilla_ui::script::UnitGuids;
+    use bevy::prelude::*;
+
+    /// `UNIT_FIELD_BYTES_0`, absolute descriptor index.
+    const BYTES_0: u16 = 36;
+    const ME: u64 = 0x77;
+    const GUARD: u64 = 0xF130_0000_0044_0001;
+
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    // A human warrior Friendly with Stormwind (3000), and its guard's template.
+    let (factions, template, reps) = stormwind_fixture(&mut chain, 3_000);
+    let faction = factions
+        .catalog()
+        .template(template)
+        .expect("the guard's template")
+        .faction;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+    s.run(
+        r#"
+        SEEN = {}
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("UNIT_FACTION")
+        f:SetScript("OnEvent", function() table.insert(SEEN, arg1) end)
+    "#,
+    )
+    .unwrap();
+    // The resolver's inputs, as the aura feed pushes them every frame.
+    s.set_unit_guids(&UnitGuids {
+        player: ME,
+        target: GUARD,
+        held: [(ME, 0), (GUARD, 0)].into(),
+        ..Default::default()
+    });
+
+    let mut app = App::new();
+    app.insert_resource(reps)
+        .insert_resource(factions)
+        .init_resource::<Selection>()
+        .init_resource::<crate::names::NameCache>()
+        .init_resource::<crate::ui_party::GroupState>()
+        .init_resource::<crate::ui_chat::ChatLog>()
+        .init_resource::<crate::sound::MessageSounds>()
+        .init_resource::<crate::ui_guild::GuildState>()
+        .insert_resource(NetCommands(crossbeam_channel::unbounded().0))
+        .add_message::<FieldChanged>()
+        .insert_non_send_resource(s);
+    crate::ui_unit::add_unit_feed(&mut app);
+    app.world_mut().spawn((
+        SelfPlayer,
+        Guid(ME),
+        ObjectStore(ObjectFields::from_pairs(&[(BYTES_0, HUMAN_WARRIOR)])),
+    ));
+    let guard = app
+        .world_mut()
+        .spawn(ObjectStore(ObjectFields::from_pairs(&[
+            (FIELD_UNIT_FACTIONTEMPLATE, template),
+            (FIELD_UNIT_HEALTH, 100),
+            (FIELD_UNIT_MAXHEALTH, 100),
+        ])))
+        .id();
+    {
+        let mut selection = app.world_mut().resource_mut::<Selection>();
+        selection.target = Some(guard);
+        selection.guid = Some(GUARD);
+    }
+
+    fn script(app: &mut App) -> Mut<'_, UiScript> {
+        app.world_mut().non_send_resource_mut()
+    }
+    let seen = |app: &mut App| -> Vec<String> {
+        let s = script(app);
+        let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+        s.run("SEEN = {}").unwrap();
+        out
+    };
+    let plate = |app: &mut App| plate_color(&mut script(app));
+    let is_green =
+        |c: [f32; 4]| c[0].abs() < 1e-6 && (c[1] - 1.0).abs() < 1e-6 && c[2].abs() < 1e-6;
+    let is_red = |c: [f32; 4]| (c[0] - 1.0).abs() < 1e-6 && c[1].abs() < 1e-6 && c[2].abs() < 1e-6;
+
+    app.update();
+    let _ = seen(&mut app);
+    let before = plate(&mut app);
+    assert!(
+        is_green(before),
+        "a Friendly guard reads green, got {before:?}"
+    );
+
+    // A standing moves: the questgiver and unit feeds wake, and no event fires.
+    app.world_mut()
+        .resource_mut::<Reputations>()
+        .slots
+        .push((0, 0));
+    app.update();
+    assert!(seen(&mut app).is_empty(), "no table arrived");
+
+    // A table naming another faction still fires: the handler tests nothing (`0x4d5a5e`).
+    app.world_mut()
+        .resource_mut::<Reputations>()
+        .set_forced(vec![(faction + 1000, 0)]);
+    app.update();
+    assert_eq!(
+        seen(&mut app),
+        ["player", "target"],
+        "every token naming a unit"
+    );
+    assert!(
+        is_green(plate(&mut app)),
+        "and the guard's own faction is unforced"
+    );
+
+    // The guard's faction forced to Hated: the plate follows `UNIT_FACTION`, not a retarget.
+    app.world_mut()
+        .resource_mut::<Reputations>()
+        .set_forced(vec![(faction, 0)]);
+    app.update();
+    assert_eq!(seen(&mut app), ["player", "target"]);
+    let after = plate(&mut app);
+    assert!(is_red(after), "forced Hated reads red, got {after:?}");
+
+    // The same table sent again fires again, and the aura's removal (an empty table) repaints.
+    app.world_mut()
+        .resource_mut::<Reputations>()
+        .set_forced(vec![(faction, 0)]);
+    app.update();
+    assert_eq!(
+        seen(&mut app),
+        ["player", "target"],
+        "a resend is an arrival"
+    );
+    app.world_mut()
+        .resource_mut::<Reputations>()
+        .set_forced(Vec::new());
+    app.update();
+    assert_eq!(seen(&mut app), ["player", "target"]);
+    let cleared = plate(&mut app);
+    assert!(
+        is_green(cleared),
+        "the empty table restores green, got {cleared:?}"
+    );
+    let errors = script(&mut app).errors();
+    assert!(errors.is_empty(), "script errors: {errors:?}");
+}
+
 /// Stock `TargetFrame_CheckClassification` (`TargetFrame.lua:205-218`), asserted on the drawn
 /// quads: elite, rare-elite and world boss share the Elite art (1.12 ships no rare-elite border),
 /// and `UNIT_CLASSIFICATION_CHANGED` alone repaints it.
@@ -1511,6 +1919,8 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
 
     let alive = |health: u32, power: u32, power_type: u8| UnitState {
         exists: true,
+        // The tooltip builder finds a unit by its guid (`0x52a021`).
+        guid: 0xF130_0000_0000_0B0D,
         name: Some("Somebody".into()),
         health,
         max_health: 100,

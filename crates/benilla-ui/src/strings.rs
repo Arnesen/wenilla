@@ -2,10 +2,99 @@
 //! the client's `SStrPrintf` does: `%s`, `%d`, `%c`, `%f` and `%g` take the next argument left to
 //! right, `%N$s` takes argument N without moving that cursor (`DUEL_WINNER_RETREAT` reorders its
 //! two names), `%%` is `%`, and the precision is the template's. A hole with no argument, or one
-//! this does not know, is copied through literally so a mis-modelled template shows. Reals round
-//! as the MSVC CRT behind `SStrPrintf` does: half up on the decimal digits ([`crt_digits`]).
+//! this does not know, is copied through literally so a mis-modelled template shows. Reals are the
+//! MSVC CRT's behind `SStrPrintf` ([`crt_float`]).
 
 use std::fmt::Write as _;
+
+/// The client's string-to-bool `0x6f1b30` for the words it knows, `None` for any other string. A
+/// first byte of `1`-`9`, `T`, `t`, `Y` or `y` is true and `0`, `F`, `f`, `N` or `n` false (the
+/// jump table `0x6f1bc0` over `0x6f1bb4`); every other string, an empty one included, is compared
+/// whole and case-insensitively (`0x64a4c0`): `off` (`0x871460`) and `disabled` (`0x853758`) are
+/// false, `on` (`0x87145c`) and `enabled` (`0x853764`) true.
+pub fn keyword_bool(bytes: &[u8]) -> Option<bool> {
+    match bytes.first() {
+        Some(b'0' | b'F' | b'N' | b'f' | b'n') => Some(false),
+        Some(b'1'..=b'9' | b'T' | b'Y' | b't' | b'y') => Some(true),
+        _ if bytes.eq_ignore_ascii_case(b"off") || bytes.eq_ignore_ascii_case(b"disabled") => {
+            Some(false)
+        }
+        _ if bytes.eq_ignore_ascii_case(b"on") || bytes.eq_ignore_ascii_case(b"enabled") => {
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+/// `0x6f1b30` whole: anything [`keyword_bool`] does not know is false. The `.toc` reader's
+/// `LoadOnDemand:` and `Secure:` and the XML loaders' bool attributes (`hidden`, `toplevel`,
+/// `movable`, ...) all read through it.
+pub fn string_to_bool(s: &str) -> bool {
+    keyword_bool(s.as_bytes()).unwrap_or(false)
+}
+
+/// The number-separator pass `0x771c50` that `SetText` (`0x771d80`) runs on its text while
+/// `SetEuropeanNumbers` holds `[0xcf4d24]` set (`0x771d9f`-`0x771daa`). A number is a run of ASCII
+/// digits, `.` and `,` that starts at a digit. Its `.` and `,` trade places (`0x771d16`,
+/// `0x771d23`) when it has exactly one `.` (`0x771cc3`), no `,` after that `.` (`0x771ccc`), a byte
+/// after the `.` that is at least `0` and a byte after that which is at most `9` (`0x771cd1`,
+/// `0x771cd7`), both compared as signed bytes, so `1.5g` stays and `1.55g` becomes `1,55g`.
+/// Every other number, and every other character, is copied unchanged. The result stops at the
+/// 4095th byte of the static buffer `0xcf1cc8` (`0x771c70`, `0x771cf5`).
+pub(crate) fn swap_number_separators(text: &str) -> String {
+    /// `0xcf2cc7 - 0xcf1cc8`: the bytes the pass writes before it stops.
+    const CAP: usize = 0xfff;
+    let b = text.as_bytes();
+    // `cmp al,0x30; jl` / `cmp al,0x39; jg` are signed, so a byte of 0x80 or more is below `0`.
+    let digit = |c: u8| c.is_ascii_digit();
+    let number_byte = |c: u8| digit(c) || c == b'.' || c == b',';
+    let signed_at = |k: usize| b.get(k).copied().unwrap_or(0) as i8;
+    let mut out = Vec::with_capacity(b.len().min(CAP));
+    let mut i = 0;
+    while i < b.len() && out.len() < CAP {
+        if !digit(b[i]) {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        let end = (i..b.len())
+            .find(|&k| !number_byte(b[k]))
+            .unwrap_or(b.len());
+        let run = &b[i..end];
+        let dots = run.iter().filter(|&&c| c == b'.').count();
+        let swap = dots == 1 && {
+            let dot = i + run.iter().position(|&c| c == b'.').unwrap_or(0);
+            let comma_after = run
+                .iter()
+                .rposition(|&c| c == b',')
+                .is_some_and(|k| i + k >= dot);
+            !comma_after && signed_at(dot + 1) >= b'0' as i8 && signed_at(dot + 2) <= b'9' as i8
+        };
+        for &c in run {
+            if out.len() >= CAP {
+                break;
+            }
+            out.push(match c {
+                b'.' if swap => b',',
+                b',' if swap => b'.',
+                c => c,
+            });
+        }
+        i = end;
+    }
+    // The input is valid UTF-8 and only ASCII bytes change, so the cap alone can cut a sequence:
+    // drop the cut character, which the reference's one-byte characters never have, rather than
+    // show U+FFFD.
+    match String::from_utf8(out) {
+        Ok(text) => text,
+        Err(e) => {
+            let valid = e.utf8_error().valid_up_to();
+            let mut bytes = e.into_bytes();
+            bytes.truncate(valid);
+            String::from_utf8(bytes).unwrap_or_default()
+        }
+    }
+}
 
 /// One argument to [`fill`]; any variant renders in any hole, so the template's order decides.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -81,124 +170,32 @@ impl Arg<'_> {
         }
     }
 
-    /// `%f`/`%.Nf`, the precision defaulting to C's 6.
+    /// `%f`/`%.Nf` by the CRT, the precision defaulting to C's 6.
     fn as_f(&self, prec: Option<usize>, out: &mut String) {
-        let p = prec.unwrap_or(6);
         match self {
-            Arg::F(x) => crt_f(*x, p, out),
-            Arg::D(n) => crt_f(*n as f64, p, out),
+            Arg::F(x) => out.push_str(&crt_float(*x, b'f', prec)),
+            Arg::D(n) => out.push_str(&crt_float(*n as f64, b'f', prec)),
             Arg::S(s) => out.push_str(s),
         }
     }
 
-    /// `%g`/`%.Ng` by C's rule, the precision P counting significant digits: with X the exponent
-    /// of the value in `%e` at precision P−1, use `%f` at P−1−X when P > X ≥ −4, else `%e`, then
-    /// drop trailing zeros. 1.12's five `%.3g` cast and cooldown templates need it: a 100-second
-    /// cooldown is "1.67 min", where Rust's shortest round-trip `{}` prints 17 digits.
+    /// `%g`/`%.Ng` by the CRT, the precision counting significant digits: 1.12's five `%.3g`
+    /// cast and cooldown templates need it, a 100-second cooldown being "1.67 min".
     fn as_g(&self, prec: Option<usize>, out: &mut String) {
         let Arg::F(x) = self else {
             return self.as_s(out);
         };
-        let p = prec.unwrap_or(6).max(1);
-        if *x == 0.0 {
-            out.push('0');
-            return;
-        }
-        if !x.is_finite() {
-            let _ = write!(out, "{x}");
-            return;
-        }
-        if x.is_sign_negative() {
-            out.push('-');
-        }
-        // Round to P significant digits first, then read the exponent, so 9.999 at P=3 is "10",
-        // not "10.0"; the style's digits are the rounded ones, never rounded twice.
-        let (digits, decpt) = crt_digits(x.abs(), |_| p as i32);
-        let exp = decpt - 1;
-        if exp < -4 || exp >= p as i32 {
-            // `%e`: C writes at least two exponent digits and always a sign; Rust writes neither.
-            let mantissa = fixed(&digits, 1, p - 1);
-            out.push_str(trim_zeros(&mantissa));
-            let _ = write!(out, "e{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs());
-        } else {
-            let decimals = (p as i32 - 1 - exp).max(0) as usize;
-            out.push_str(trim_zeros(&fixed(&digits, decpt, decimals)));
-        }
+        out.push_str(&crt_float(*x, b'g', prec));
     }
 }
 
-/// `%f` by the CRT: the sign, then [`crt_digits`] rounded at `p` decimals.
-fn crt_f(x: f64, p: usize, out: &mut String) {
-    if !x.is_finite() {
-        let _ = write!(out, "{x:.p$}");
-        return;
-    }
-    if x.is_sign_negative() {
-        out.push('-');
-    }
-    let (digits, decpt) = crt_digits(x.abs(), |decpt| decpt + p as i32);
-    out.push_str(&fixed(&digits, decpt, p));
-}
-
-/// The CRT's decimal digits of a finite `a >= 0` and its point position `decpt` (the value is
-/// `0.d1d2… × 10^decpt`): `_fltout2` takes 17 significant digits, then `_fptostr 0x40fef0` keeps
-/// `keep(decpt)` of them and rounds on the next digit, half up (`40ff3d: cmp byte [ecx],0x35`),
-/// a carry out of the first digit moving the point (`40ff4f`). A negative count keeps nothing
-/// and rounds nothing (`40ff3b`). So 41.25 at one decimal is 41.3, where Rust's `{:.1}` rounds
-/// the tie to even.
-fn crt_digits(a: f64, keep: impl FnOnce(i32) -> i32) -> (Vec<u8>, i32) {
-    let sci = format!("{a:.16e}");
-    let (mantissa, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
-    let mant: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).collect();
-    let mut decpt = exp.parse::<i32>().unwrap_or(0) + 1;
-    let Ok(n) = usize::try_from(keep(decpt)) else {
-        return (Vec::new(), decpt);
-    };
-    // A leading slot takes the carry.
-    let mut buf = vec![b'0'];
-    buf.extend((0..n).map(|i| mant.get(i).copied().unwrap_or(b'0')));
-    if mant.get(n).is_some_and(|&d| d >= b'5') {
-        let mut i = buf.len() - 1;
-        while buf[i] == b'9' {
-            buf[i] = b'0';
-            i -= 1;
-        }
-        buf[i] += 1;
-    }
-    if buf[0] == b'1' {
-        decpt += 1;
-    } else {
-        buf.remove(0);
-    }
-    (buf, decpt)
-}
-
-/// Lay rounded digits out as `int.frac` with `p` decimals, zero-padded both sides (`_cftof`).
-fn fixed(digits: &[u8], decpt: i32, p: usize) -> String {
-    let digit = |i: i32| -> char {
-        usize::try_from(i)
-            .ok()
-            .and_then(|i| digits.get(i))
-            .map_or('0', |&d| d as char)
-    };
-    let mut s: String = if decpt <= 0 {
-        "0".into()
-    } else {
-        (0..decpt).map(digit).collect()
-    };
-    if p > 0 {
-        s.push('.');
-        s.extend((0..p as i32).map(|k| digit(decpt + k)));
-    }
-    s
-}
-
-/// `%g`'s last step: drop a fraction's trailing zeros, and the point if nothing is left.
-fn trim_zeros(s: &str) -> &str {
-    match s.contains('.') {
-        true => s.trim_end_matches('0').trim_end_matches('.'),
-        false => s,
-    }
+/// A real as `SStrPrintf` (`0x64a7f0`) writes it: `ISStrVPrintf` (`0x64a820`) hands the
+/// template to the CRT's `_vsnprintf` (`0x73f6ad`), or with Storm's positional option set to
+/// `vsnoprintf` (`0x6697d0`), which passes each hole to the CRT's `_snprintf` (`0x6699fb`);
+/// either way MSVC's `__output` formats it, half up on the digit text, with three exponent
+/// digits and `1.#INF` for an infinity.
+fn crt_float(x: f64, conv: u8, prec: Option<usize>) -> String {
+    mlua::benilla_lua::crt_float(x, conv, prec)
 }
 
 /// One parsed `%…` specifier.
@@ -349,9 +346,10 @@ mod tests {
         assert_eq!(g("%.3g", 9.999), "10");
         // A bare `%g` is C's default precision of six.
         assert_eq!(g("%g", 1.0 / 3.0), "0.333333");
-        // Outside `P > X >= -4` the style is `%e`, with C's signed two-digit exponent.
-        assert_eq!(g("%.3g", 0.000_012_345), "1.23e-05");
-        assert_eq!(g("%.3g", 123_456.0), "1.23e+05");
+        // Outside `P > X >= -4` the style is `%e`, with MSVC's three exponent digits.
+        assert_eq!(g("%.3g", 0.000_012_345), "1.23e-005");
+        assert_eq!(g("%.3g", 123_456.0), "1.23e+005");
+        assert_eq!(g("%g", f64::INFINITY), "1.#INF");
     }
 
     #[test]
@@ -481,5 +479,70 @@ mod tests {
         assert_eq!(fill("%.1f and %.1f", &[Arg::F(1.0)]), "1.0 and %.1f");
         // `%1 ` never reaches a conversion letter, so the `%` stays literal.
         assert_eq!(fill("100%1 of it", &[Arg::D(3)]), "100%1 of it");
+    }
+
+    /// `0x771c50`, byte for byte: a number with one `.` and no `,` after it trades them when the
+    /// byte after the `.` is at least `0` and the next is at most `9`, so the quirks below are the
+    /// reference's, not slips.
+    #[test]
+    fn number_separators_swap_as_the_bytes_decide() {
+        let swapped = swap_number_separators;
+        for (text, want) in [
+            ("1.5", "1,5"),
+            ("1,234.56", "1.234,56"),
+            ("12.50 gold", "12,50 gold"),
+            ("1.5 to 2.5", "1,5 to 2,5"),
+            ("10.5%", "10,5%"),
+            // No `.`: unchanged. Two `.`: unchanged. A `,` after the `.`: unchanged.
+            ("1,234,567", "1,234,567"),
+            ("1.2.3", "1.2.3"),
+            ("1.234,5", "1.234,5"),
+            // A number starts at a digit, so a leading `.` is text.
+            (".5", ".5"),
+            ("a.b", "a.b"),
+            // The byte after the `.` must be at least `0`: a space, a newline or the end is below.
+            ("Level 5. Next", "Level 5. Next"),
+            ("5.", "5."),
+            ("5.\n", "5.\n"),
+            // The second byte after the `.` must be at most `9`: a letter there leaves the number
+            // whole (`1.5g`), while a two-digit fraction before a letter swaps (`1.55g`).
+            ("1.5g", "1.5g"),
+            ("0.5s", "0.5s"),
+            ("1.55g", "1,55g"),
+            ("1.5 g", "1,5 g"),
+            // A letter straight after the `.` passes the first test, so `3.x ` swaps.
+            ("3.x ", "3,x "),
+            // Bytes of 0x80 and over are below `0` as signed bytes: after the `.` they refuse the
+            // swap, and in the second place they pass it.
+            ("1.\u{e9}", "1.\u{e9}"),
+            ("1.5\u{e9}", "1,5\u{e9}"),
+            ("", ""),
+        ] {
+            assert_eq!(swapped(text), want, "{text:?}");
+        }
+    }
+
+    /// The pass writes into a 4095-byte static buffer and stops there.
+    #[test]
+    fn number_separators_stop_at_the_static_buffer() {
+        let long = "ab".repeat(3000);
+        assert_eq!(swap_number_separators(&long).len(), 4095);
+        let numbers = "1.5 ".repeat(2000);
+        let out = swap_number_separators(&numbers);
+        assert_eq!(out.len(), 4095);
+        assert!(out.starts_with("1,5 1,5 "));
+    }
+
+    /// The cap cuts at a character boundary: a two-byte character straddling byte 4095 is dropped
+    /// whole, never left as a replacement character.
+    #[test]
+    fn number_separators_cut_at_a_character_boundary() {
+        let out = swap_number_separators(&"\u{e9}".repeat(3000));
+        assert_eq!(out.len(), 4094);
+        assert_eq!(out.chars().count(), 2047);
+        assert!(!out.contains('\u{fffd}'));
+        let out = swap_number_separators(&format!("1.5 {}", "\u{e9}".repeat(3000)));
+        assert!(out.starts_with("1,5 "));
+        assert!(out.len() <= 4095 && !out.contains('\u{fffd}'));
     }
 }

@@ -22,6 +22,7 @@ use benilla_ui::script::{BattlefieldFlagView, BattlefieldPositionView, UiScript}
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, EnteredWorldMessage, GuidIndex, NetCommands, NetEntity, SelfGuid};
+use crate::query_cache::Ask;
 use crate::ui_dialog_verbs::BattlefieldQueue;
 use crate::ui_party::GroupState;
 use crate::ui_script::{UiFeed, UiInput};
@@ -117,6 +118,11 @@ fn feed_battlefield_positions(
         pending_names,
         ..
     } = &mut *state;
+    // The getter's calls are its name lookups with the callback `0x4ac190` (`0x4ac118`): the map's
+    // `OnUpdate` makes them every frame it shows (`WorldMapFrame.lua:408`,
+    // `Blizzard_BattlefieldMinimap.lua:290`), so a row read nameless is asked, a refused name
+    // again once per answer. The push itself only reads.
+    let looked_up = script.take_battlefield_position_lookups();
     let (Some(map), Some(packet)) = (active, packet.as_ref()) else {
         let key = Some((false, icon_scale.to_bits()));
         let last = last_empty.get(&script);
@@ -140,8 +146,13 @@ fn feed_battlefield_positions(
         if me.0 == Some(p.guid) || group.members.iter().any(|m| m.guid == p.guid) {
             continue;
         }
+        let ask = if looked_up.contains(&players.len()) {
+            Ask::Event(&commands)
+        } else {
+            Ask::Read
+        };
         let (x, y) = live_or_packet(p, &guids, &unit_pos);
-        let name = names.resolve(p.guid, &commands).map(str::to_string);
+        let name = names.resolve_player(p.guid, ask).map(str::to_string);
         match name {
             None => {
                 if !pending_names.contains(&p.guid) {
@@ -247,6 +258,84 @@ impl Plugin for BattlefieldPositionsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The getter's calls are the name lookups (`0x4ac118`, callback `0x4ac190`), which the map's
+    /// `OnUpdate` makes every frame: the packet and the frames without a call ask nothing, a call
+    /// on a nameless row asks once while pending, and the call after a refusal asks again.
+    #[test]
+    fn a_position_name_is_asked_by_each_getter_call_once_per_answer() {
+        use benilla_protocol::messages::BattlefieldStatus;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        let mut queue = BattlefieldQueue::default();
+        queue.apply(BattlefieldStatus {
+            slot: 0,
+            map_id: 489,
+            bracket: 0,
+            instance_id: 3,
+            status: 3,
+            time_ms: None,
+            in_progress: Some((0, 0)),
+            queued: None,
+        });
+        app.insert_resource(NetCommands(tx))
+            .insert_resource(queue)
+            .init_resource::<BattlefieldPositions>()
+            .init_resource::<SelfGuid>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<NameCache>()
+            .add_systems(Update, feed_battlefield_positions);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        let packet = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<BattlefieldPositions>()
+                .apply(PositionsPacket {
+                    players: vec![BattlefieldPosition {
+                        guid: 0x9,
+                        x: 0.0,
+                        y: 0.0,
+                    }],
+                    carrier: None,
+                });
+            app.update();
+        };
+        let call = |app: &mut App| {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .run("GetBattlefieldPosition(1)")
+                .unwrap();
+            app.update();
+        };
+        packet(&mut app);
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "the packet only reads"
+        );
+        call(&mut app);
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1, "a call asks");
+        call(&mut app);
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "once while the answer is pending"
+        );
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(0x9, String::new(), None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "no frame without a call asks"
+        );
+        call(&mut app);
+        assert_eq!(
+            crate::query_cache::queries(&rx).len(),
+            1,
+            "the call after the refusal asks again"
+        );
+    }
 
     #[test]
     fn the_request_throttle_is_the_references_five_seconds() {

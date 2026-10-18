@@ -55,7 +55,7 @@ use benilla_world::world_map::MapChange;
 
 use crate::area::{ZoneFeed, ZoneInfo};
 use crate::bindings::{BindingSet, BindingsState};
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::player::Player;
 use crate::ui_chat::{event_name, ChatWindows};
 use crate::ui_script::{UiInput, UiKeyboardCapture, VmMemo};

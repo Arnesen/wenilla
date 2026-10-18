@@ -10,7 +10,7 @@
 //! [`commit`] through `SetSelection` (`0x493540`), the attack acquire (`0x612df0` at `0x6130b5`),
 //! the ATTACKERSTATEUPDATE acquire (`0x6259c9`–`0x6259fe`) and the 41 yd range.
 
-use benilla_formats::CreatureTypeFlags;
+use benilla_formats::CreatureTypeTable;
 use benilla_protocol::{guid, EntityKind};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -18,9 +18,10 @@ use bevy::prelude::*;
 use crate::creature_anim::{Engaged, SwingMessage};
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetEntity, ObjectStore, Reputations, SelfPlayer};
+use crate::query_cache::Ask;
 use benilla_assets::{LockRecover, WorldAssets};
 
-use super::relations::{can_assist, can_attack};
+use super::relations::{can_assist, can_attack, Assist};
 use super::ring::reaction_from_player;
 use super::{Factions, Selection};
 
@@ -154,17 +155,32 @@ fn combat_with_me(store: &ObjectStore, me: Option<u64>) -> bool {
     me.is_some() && store.0.unit_target() == me && store.0.unit_flags() & (1 << 19) != 0
 }
 
-/// `CreatureType.dbc`'s flags, whose no-TAB bit is set on type 8, Critter, alone (Totem reads 0).
-/// Absent after a load failure, when nothing is filtered.
+/// `CreatureType.dbc`: the flags, whose no-TAB bit is set on type 8, Critter, alone (Totem reads
+/// 0), and the type words at the install's locale. Absent after a load failure, when nothing is
+/// filtered and no unit has a type word.
 #[derive(Resource)]
-pub(crate) struct CreatureTypes(CreatureTypeFlags);
+pub(crate) struct CreatureTypes(pub(crate) CreatureTypeTable);
+
+#[cfg(test)]
+impl CreatureTypes {
+    /// The words of a koKR install's column, for a test that must tell the table's word from
+    /// English: Beast, Demon, Humanoid and "Not specified".
+    pub(crate) fn korean_for_tests() -> Self {
+        Self(CreatureTypeTable::from_rows([
+            (1, "야수", 0),
+            (3, "악마", 0),
+            (7, "인간형", 0),
+            (10, "지정되지 않음", 0),
+        ]))
+    }
+}
 
 pub(super) fn load_creature_types(mut commands: Commands, world_assets: Option<Res<WorldAssets>>) {
     let Some(world_assets) = world_assets else {
         return;
     };
     let mut chain = world_assets.chain.lock_recover();
-    match benilla_formats::load_creature_type_flags(&mut chain) {
+    match benilla_formats::load_creature_type_table(&mut chain) {
         Ok(flags) => {
             info!("creature types: {} rows", flags.len());
             commands.insert_resource(CreatureTypes(flags));
@@ -252,6 +268,7 @@ impl TargetScan<'_, '_> {
                     &self.reputations,
                     self_store,
                     |owner| self.store_of(owner).cloned(),
+                    Assist::PlayerToUnit,
                 ) && !store.is_some_and(|s| s.0.unit_is_dead())
             }
             // Modes 3 and 4 open on `cmp esi,ecx`, the candidate is not us, which our own body's
@@ -319,7 +336,9 @@ impl TargetScan<'_, '_> {
             }
             info!(
                 "tab-trace:   {guid:#x} \"{}\" {:.1} yd — {verdict}",
-                self.names.peek(guid).unwrap_or("?"),
+                self.names
+                    .resolve_unit(guid, None, Ask::Read)
+                    .unwrap_or("?"),
                 (tf.translation - self_tf.translation).length()
             );
         };
@@ -345,7 +364,10 @@ impl TargetScan<'_, '_> {
             if guid::is_creature_or_pet(guid_c.0) {
                 if let (Some(types), Some(ty)) = (
                     self.creature_types.as_deref(),
-                    guid::entry(guid_c.0).and_then(|e| self.names.creature_type(e)),
+                    store
+                        .and_then(|s| s.0.object_entry())
+                        .filter(|&e| e != 0)
+                        .and_then(|e| self.names.creature_type(e)),
                 ) {
                     if types.0.no_tab_target(ty) {
                         trace_unit(guid_c.0, tf, "REJECT critter-type");
@@ -390,7 +412,9 @@ impl TargetScan<'_, '_> {
                 info!(
                     "tab-trace: list[{i}] {:#x} \"{}\" {} score {:+.2}",
                     c.guid,
-                    self.names.peek(c.guid).unwrap_or("?"),
+                    self.names
+                        .resolve_unit(c.guid, None, Ask::Read)
+                        .unwrap_or("?"),
                     if c.on_screen { "on-screen" } else { "fallback" },
                     c.score
                 );
@@ -455,6 +479,10 @@ pub(super) fn commit(
     self_guid: Option<u64>,
     new_attackable: bool,
 ) -> CommitOutcome {
+    // `SelectTarget`'s charmed return (`0x49359c`) is ahead of everything, for every writer.
+    if seam.player_is_charmed() {
+        return CommitOutcome::default();
+    }
     // `IsSelectable`, before the dedup (`0x4935ec`–`0x4935f3`): a non-selectable unit is a complete
     // no-op that keeps the current target, for every selection writer.
     if !super::relations::is_selectable(target_store, self_guid) {
@@ -499,6 +527,7 @@ pub(super) fn cycle(
     history: &mut TabHistory,
     selection: &mut Selection,
     seam: &mut crate::creature_anim::AttackSeam,
+    front: &mut super::front::SelectFront,
     engaged: bool,
 ) {
     history.enter(side);
@@ -545,6 +574,17 @@ pub(super) fn cycle(
             (pool[i].entity, pool[i].guid, wrapped)
         }
     };
+    // `0x4941e6`: the pick goes to `SelectTarget`, whose front may bind it to the cursor's cast
+    // instead. The cycle's index was stored before that call (`0x4941d4`), so the next press moves
+    // past the pick whatever became of it; the history, which stands in for the index, records it
+    // as visited without a selection to push.
+    if front.takes(entity, guid) {
+        if wrapped {
+            history.visited.clear();
+        }
+        history.push(guid, now);
+        return;
+    }
     if wrapped {
         history.visited.clear();
     }
@@ -572,7 +612,9 @@ pub(super) fn cycle(
     if trace {
         info!(
             "tab-trace: pick {guid:#x} \"{}\"{} — {}",
-            scan.names.peek(guid).unwrap_or("?"),
+            scan.names
+                .resolve_unit(guid, None, Ask::Read)
+                .unwrap_or("?"),
             if wrapped { " (wrapped)" } else { "" },
             if out.changed {
                 "selection changed"
@@ -593,6 +635,8 @@ pub(crate) struct AttackPick<'w, 's> {
     history: ResMut<'w, TabHistory>,
     time: Res<'w, Time>,
     engaged: Query<'w, 's, (), (With<Engaged>, With<SelfPlayer>)>,
+    /// The `SelectTarget` returns ahead of the validator's two selecting calls.
+    front: super::front::SelectFront<'w, 's>,
 }
 
 impl AttackPick<'_, '_> {
@@ -615,15 +659,31 @@ impl AttackPick<'_, '_> {
     /// pick before this returns, so a call after this one reads it. The target is then the
     /// selection as it stands (`0x6130c1`): a fruitless scan leaves a friendly unit selected for
     /// the final gate to refuse, and only an empty selection is `ERR_NO_ATTACK_TARGET`
-    /// (`0x6130d9`).
+    /// (`0x6130d9`). `may_pick` is the protected-action gate's tag 4, which opens the cycle
+    /// (`0x493f9b`): refused, the cycle returns having picked nothing and the target is the
+    /// selection as it stands. A unit kept goes to `SelectTarget` (`0x613100`) and the cycle's pick
+    /// does too (`0x4941e6`), so with the targeting cursor up either is bound to the cast and the
+    /// selection stays ([`super::front`]).
     pub(crate) fn target(
         &mut self,
         passed: Option<u64>,
+        may_pick: bool,
         selection: &mut Selection,
         seam: &mut crate::creature_anim::AttackSeam,
         errors: &mut crate::ui_action::UiErrorKeys,
     ) -> Option<u64> {
-        if !passed.or(selection.guid).is_some_and(|g| self.keeps(g)) {
+        let candidate = passed.or(selection.guid);
+        if candidate.is_some_and(|g| self.keeps(g)) {
+            // `0x613100`: the kept unit is selected again, a no-op unless the cursor is up. Only
+            // the selection is kept in practice: the unit a caller passes is the caster.
+            if let Some((entity, guid)) = selection
+                .target
+                .zip(selection.guid)
+                .filter(|&(_, guid)| Some(guid) == candidate)
+            {
+                self.front.takes(entity, guid);
+            }
+        } else if may_pick {
             let engaged = self.engaged();
             cycle(
                 ScanSide::Enemy,
@@ -633,6 +693,7 @@ impl AttackPick<'_, '_> {
                 &mut self.history,
                 selection,
                 seam,
+                &mut self.front,
                 engaged,
             );
         }
@@ -690,7 +751,7 @@ impl AttackPick<'_, '_> {
 /// The final gate's target legs (`0x613152`–`0x613169`): alive, where a zero-health target passes
 /// iff `UNIT_DYNAMIC_FLAGS` bit 5 is set (`0x613159`), and the full `CanAttack 0x606980`. A target
 /// with no descriptor fails [`can_attack`]; the reference always holds a live unit here.
-fn attack_target_valid(
+pub(super) fn attack_target_valid(
     store: Option<&ObjectStore>,
     factions: Option<&Factions>,
     reputations: &Reputations,
@@ -758,6 +819,7 @@ pub(super) fn auto_acquire_attacker(
     stores: Query<&ObjectStore>,
     mut selection: ResMut<Selection>,
     mut seam: crate::creature_anim::AttackSeam,
+    mut front: super::front::SelectFront,
 ) {
     for s in swings.read() {
         if selection.target.is_some() {
@@ -776,6 +838,11 @@ pub(super) fn auto_acquire_attacker(
             "auto-target: attacker {:#x} (victim = me, no target)",
             guid.0
         );
+        // `0x6259fe` is `SelectTarget`, whose front may bind the attacker to a standing cursor's
+        // cast instead; the packet handler runs in no script, whose gate context passes tag 2.
+        if front.takes(s.attacker, guid.0) {
+            continue;
+        }
         // The selection was empty, so no switch law: selection only.
         commit(
             &mut selection,

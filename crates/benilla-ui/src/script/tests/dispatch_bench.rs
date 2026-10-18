@@ -6,6 +6,7 @@
 use std::time::Instant;
 
 use super::common::script;
+use crate::script::ScriptValue;
 
 /// Lookups per timed loop, enough that the loop's own overhead is noise at nanosecond scale.
 const N: usize = 400_000;
@@ -158,5 +159,26 @@ fn dispatch_bench() {
     floor(
         "ctrl: variadic hop + relay",
         &format!("for _ = 1, {N} do local v = __mv_relay(F, 1, 2) end"),
+    );
+
+    // One event from the host to one listener, through the handler convention: `this`,
+    // `event` and `arg1` set as globals around the call and put back after.
+    s.run(
+        "Fired = 0 F:RegisterEvent('PLAYER_ALIVE') \
+         F:SetScript('OnEvent', function() Fired = Fired + arg1 end)",
+    )
+    .expect("listener");
+    let mut s = s;
+    let mut best = f64::INFINITY;
+    for _ in 0..ROUNDS {
+        let t = Instant::now();
+        for _ in 0..N / 10 {
+            s.fire_event("PLAYER_ALIVE", vec![ScriptValue::Number(1.0)]);
+        }
+        best = best.min(ns_per(t, N / 10));
+    }
+    println!(
+        "[dispatch] {:>26}  {best:7.1} ns",
+        "OnEvent fire, 1 listener"
     );
 }

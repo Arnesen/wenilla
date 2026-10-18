@@ -15,7 +15,7 @@ use bevy::prelude::*;
 
 use crate::area::AreaTableRes;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_unit::class_names;
+use crate::ui_unit::{NameTables, UnitNames};
 
 use super::{last_online, GuildState, Identity, RosterRow, ROSTER_REQUEST_THROTTLE_SECS};
 
@@ -40,6 +40,7 @@ pub(super) fn feed_guild(
     mut guild: ResMut<GuildState>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     areas: Option<Res<AreaTableRes>>,
+    unit_names: NameTables,
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
     mut fed: Local<crate::ui_script::VmMemo<FedGuild>>,
@@ -51,13 +52,10 @@ pub(super) fn feed_guild(
 
     // Our guild id and rank come from our own descriptor, mirrored only while the avatar is
     // streamed: the frames between logout despawn and teardown must not read as leaving the guild.
-    let mut id_changed = false;
-    let mut rank_changed = false;
+    // Their `PLAYER_GUILD_UPDATE` is the descriptor watchers' (`crate::field_watch`), fired after
+    // this push.
     if let Some(store) = self_q.iter().next() {
-        let (id, rank) = (store.0.player_guild_id(), store.0.player_guild_rank());
-        id_changed = id != guild.guild_id;
-        rank_changed = rank != guild.rank_index;
-        guild.mirror_self(id, rank);
+        guild.mirror_self(store.0.player_guild_id(), store.0.player_guild_rank());
     }
 
     // Rebuilt only on a change: every apply and every local intent sets the flag.
@@ -66,14 +64,21 @@ pub(super) fn feed_guild(
     }
     guild.dirty = false;
 
-    // The lazy identity fill: the reference's `GetGuildRosterInfo` asks inline on a miss, and the
-    // answer fires a bare `GUILD_ROSTER_UPDATE`.
+    // The lazy identity fill: the reference's `GetGuildRosterInfo` asks inline on a miss with the
+    // callback `0x4d1480` (`0x4d1291`), and the answer fires a bare `GUILD_ROSTER_UPDATE`. This
+    // rebuild runs on a change, which stands for the stock frame's call.
     let guild_id = guild.guild_id;
-    guild.request_identity(guild_id, &commands);
-    let identity = guild.identity(guild_id).cloned();
+    let identity = guild
+        .resolve_identity(guild_id, crate::query_cache::Ask::Event(&commands))
+        .cloned();
     let identity = identity.as_ref();
 
-    let rows = display_rows(&guild, areas.as_deref().map(|a| &a.0), identity);
+    let rows = display_rows(
+        &guild,
+        areas.as_deref().map(|a| &a.0),
+        identity,
+        unit_names.get(),
+    );
     let display_order: Vec<u64> = rows.iter().map(|r| r.guid).collect();
     let selection = index_of(&display_order, guild.selection);
     guild.display_order = display_order;
@@ -114,32 +119,17 @@ pub(super) fn feed_guild(
         // A frame loaded after the roster still needs one push to draw from.
         super::RosterUpdate::Applied,
     )) {
-        let args = if kind.arg1() {
-            vec![ScriptValue::Int(1)]
+        if kind.arg1() {
+            script.fire_event("GUILD_ROSTER_UPDATE", vec![ScriptValue::Int(1)]);
         } else {
-            Vec::new()
-        };
-        script.fire_event("GUILD_ROSTER_UPDATE", args);
+            script.fire_event("GUILD_ROSTER_UPDATE", vec![]);
+        }
     }
 
     // `GUILD_MOTD` carries the text; its chat line is the FrameXML's (`ChatFrame.lua:1335-1340`).
     if fed.motd != guild.motd {
         fed.motd = guild.motd.clone();
         script.fire_event("GUILD_MOTD", vec![ScriptValue::Str(guild.motd.clone())]);
-    }
-
-    // `PLAYER_GUILD_UPDATE`, as the reference's descriptor callbacks fire it (`0x5e27b0`,
-    // `0x5e2770`, `0x515e50`): bare on a `PLAYER_GUILDRANK` change, and once per unit token naming
-    // the player, the token as arg1, on a `PLAYER_GUILDID` change. Only our own avatar's edges
-    // fire here; other players' are not built, and the reference's per-token walk is unconfirmed.
-    if id_changed {
-        script.fire_event(
-            "PLAYER_GUILD_UPDATE",
-            vec![ScriptValue::Str("player".to_string())],
-        );
-    }
-    if rank_changed {
-        script.fire_event("PLAYER_GUILD_UPDATE", Vec::new());
     }
 
     // `GUILD_INVITE_REQUEST` shows the popup. There is no hide edge: nothing in the 1.12 client
@@ -204,11 +194,12 @@ pub(super) fn display_rows(
     guild: &GuildState,
     areas: Option<&AreaTableCatalog>,
     identity: Option<&Identity>,
+    names: UnitNames<'_>,
 ) -> Vec<RosterRow> {
     let mut rows: Vec<RosterRow> = guild
         .members
         .iter()
-        .map(|m| row(m, areas, identity))
+        .map(|m| row(m, areas, identity, names))
         .collect();
     guild.sort.order(&mut rows, guild.show_offline);
     rows
@@ -220,6 +211,7 @@ fn row(
     m: &GuildRosterMember,
     areas: Option<&AreaTableCatalog>,
     identity: Option<&Identity>,
+    names: UnitNames<'_>,
 ) -> RosterRow {
     let online = m.is_online();
     RosterRow {
@@ -232,7 +224,8 @@ fn row(
                 .unwrap_or_default(),
             rank_index: m.rank_id,
             level: u32::from(m.level),
-            class: class_names(m.class)
+            class: names
+                .class(m.class)
                 .map(|(display, _)| display.to_string())
                 .unwrap_or_default(),
             zone: areas
@@ -470,9 +463,13 @@ mod tests {
             public_note: "alt".into(),
             officer_note: String::new(),
         };
-        let row = row(&member, None, None);
+        let korean = crate::ui_unit::TestNames::korean();
+        let row = row(&member, None, None, korean.names());
         assert_eq!(row.info.level, 42);
-        assert_eq!(row.info.class, "Mage");
+        assert_eq!(
+            row.info.class, "마법사",
+            "the table's word at the install's locale"
+        );
         assert!(!row.info.online);
         assert_eq!(row.info.last_online.days, 3);
         assert_eq!(row.info.status, "");
@@ -488,7 +485,9 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            row(&member, None, None).info.last_online,
+            row(&member, None, None, Default::default())
+                .info
+                .last_online,
             Default::default()
         );
     }

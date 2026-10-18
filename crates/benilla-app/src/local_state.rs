@@ -4,9 +4,14 @@
 //!
 //! Resolution, in order, the same shape as [`benilla_formats::wow_data`]:
 //! 1. `$BENILLA_HOME`.
-//! 2. `<project folder>/benilla-config/`, dev builds only ([`benilla_formats::project_folder`], the
-//!    launcher's): a shipped binary must not carry the build machine's source tree.
-//! 3. `<exe dir>/benilla-config/`.
+//! 2. An unattended run ([`crate::run_mode::unattended`]): a fresh folder of its own for the run,
+//!    under the system temp folder, so a probe neither reads the player's settings nor writes back
+//!    over them.
+//! 3. `<project folder>/benilla-config/`, dev builds only ([`benilla_formats::project_folder`], the
+//!    launcher's): a shipped binary must not carry the build machine's source tree. A linked
+//!    worktree resolves to its primary checkout's folder, unless it declares its own probe account
+//!    ([`shared_root`]).
+//! 4. `<exe dir>/benilla-config/`.
 //!
 //! With `$WOW_CAPTURE` set every path resolves to `None`: a capture neither reads nor writes
 //! player state.
@@ -30,25 +35,45 @@ pub(crate) fn home() -> Option<PathBuf> {
     // is what makes this the one place the web needs to know about.
     #[cfg(target_arch = "wasm32")]
     return Some(PathBuf::from("/benilla-config"));
+    home_in(cfg!(test))
+}
+
+/// [`home`], with the unit-test stop as an argument so a test can walk the steps behind it.
+fn home_in(unit_test: bool) -> Option<PathBuf> {
     if std::env::var_os("WOW_CAPTURE").is_some() {
         return None; // hermetic: captures neither read nor write player state
     }
     if let Some(over) = std::env::var_os("BENILLA_HOME") {
         return Some(PathBuf::from(over));
     }
-    if cfg!(test) {
+    if unit_test {
         return None; // a unit test reaches no real state folder unless it pins `$BENILLA_HOME`
+    }
+    if crate::run_mode::unattended() {
+        return Some(run_home().to_path_buf());
     }
     resident_home()
 }
 
-/// Steps 2 and 3 of [`home`]: the folder the build itself lives in.
+/// Step 2 of [`home`]: the unattended run's own folder, one per process, created on first write.
+/// Left behind for whoever reads what the run wrote; the system cleans its temp folder.
+pub(crate) fn run_home() -> &'static Path {
+    static RUN_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    RUN_HOME.get_or_init(|| run_home_in(&std::env::temp_dir(), std::process::id()))
+}
+
+/// [`run_home`]'s path under `temp` for process `pid`.
+fn run_home_in(temp: &Path, pid: u32) -> PathBuf {
+    temp.join(format!("benilla-run-{pid}")).join(STATE_DIR)
+}
+
+/// Steps 3 and 4 of [`home`]: the folder the build itself lives in.
 fn resident_home() -> Option<PathBuf> {
-    // 2 · the project folder, dev builds only.
+    // 3 · the project folder, dev builds only.
     if let Some(root) = dev_project_root() {
         return Some(root.join(STATE_DIR));
     }
-    // 3 · beside the binary; a dev build never reaches here.
+    // 4 · beside the binary; a dev build never reaches here.
     std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf))
@@ -62,11 +87,13 @@ fn dev_project_root() -> Option<PathBuf> {
 }
 
 /// `here`, or for a linked worktree its primary checkout, whichever worktree built the binary, so
-/// every worktree shares one settings folder. Anything unexpected keeps `here`.
+/// a developer's worktrees share one settings folder. A worktree that declares an account of its
+/// own in `.probe-identity` is a probe's checkout and keeps its own folder, so no run from it,
+/// attended or not, reads or writes the player's settings. Anything unexpected keeps `here`.
 fn shared_root(here: &Path) -> PathBuf {
     let dot_git = here.join(".git");
     // A linked worktree: `.git` is a file pointing at `<primary>/.git/worktrees/<name>`.
-    if dot_git.is_file() {
+    if dot_git.is_file() && !here.join(".probe-identity").exists() {
         if let Some(gitdir) = std::fs::read_to_string(&dot_git).ok().and_then(|s| {
             s.trim()
                 .strip_prefix("gitdir:")
@@ -100,8 +127,7 @@ pub(crate) fn macros_account_path() -> Option<PathBuf> {
 /// `benilla-config/macros/<realm>-<character>.txt`: the per-character macro tab (19..=36), the
 /// reference's `WTF/Account/<ACC>/<REALM>/<CHAR>/macros-cache.txt` flattened into one folder.
 pub(crate) fn macros_character_path(realm: &str, character: &str) -> Option<PathBuf> {
-    let key = format!("{}-{}", file_token(realm), file_token(character));
-    home().map(|h| h.join("macros").join(format!("{key}.txt")))
+    character_path(CharacterFile::Macros, realm, character)
 }
 
 /// `benilla-config/bindings/account.txt`: the account-wide key bindings (the `bindings-cache.wtf`
@@ -113,8 +139,7 @@ pub(crate) fn bindings_account_path() -> Option<PathBuf> {
 /// `benilla-config/bindings/<realm>-<character>.txt`: the character-specific binding set. Its
 /// existence is the "character specific key bindings" state; going back to general deletes it.
 pub(crate) fn bindings_character_path(realm: &str, character: &str) -> Option<PathBuf> {
-    let key = format!("{}-{}", file_token(realm), file_token(character));
-    home().map(|h| h.join("bindings").join(format!("{key}.txt")))
+    character_path(CharacterFile::Bindings, realm, character)
 }
 
 /// `benilla-config/saved-variables.lua`: the flat channel our FrameXML saves through
@@ -123,12 +148,90 @@ pub(crate) fn saved_variables_path() -> Option<PathBuf> {
     home().map(|h| h.join("saved-variables.lua"))
 }
 
-/// `benilla-config/addons/<Realm>-<Character>.txt`: the AddOn enable state, per character in the
-/// reference's `AddOns.txt` format (`<AddOnName>: enabled|disabled`), which it writes at the tail
-/// of its UI shutdown (`0x490bd0`). An addon absent from the file is enabled.
+/// The folder of the AddOn enable files. Not `addons`, which names the AddOns root (`AddOns`) on a
+/// case-insensitive filesystem, so the two shared one folder there.
+const ADDON_STATE_DIR: &str = "addon-state";
+
+/// `benilla-config/addon-state/<Realm>-<Character>.txt`: the AddOn enable state, per character in
+/// the reference's `AddOns.txt` format (`<AddOnName>: enabled|disabled`), which it writes at the
+/// tail of its UI shutdown (`0x490bd0`). An addon absent from the file is enabled. The files a
+/// build before this one kept in `benilla-config/addons/` are moved here the first time a path is
+/// asked for ([`migrate_addon_state`]).
 pub(crate) fn addons_state_path(realm: &str, character: &str) -> Option<PathBuf> {
-    let key = format!("{}-{}", file_token(realm), file_token(character));
-    home().map(|h| h.join("addons").join(format!("{key}.txt")))
+    migrate_addon_state(&home()?);
+    character_path(CharacterFile::AddonState, realm, character)
+}
+
+/// Move the enable files an earlier build wrote to `<home>/addons/` into [`ADDON_STATE_DIR`], once
+/// per process and home. A file qualifies when it is named `<Realm>-<Character>.txt`, holds at
+/// least one row and every non-blank line of it reads `<AddOn>: enabled` or `<AddOn>: disabled`,
+/// so a loose `.txt` of the player's in a folder that is also the AddOns root (case-insensitive
+/// filesystems) stays where it is, and so does a file whose new name is already taken. An old
+/// folder left empty goes, unless it is the AddOns root.
+fn migrate_addon_state(home: &Path) {
+    static DONE: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    {
+        let mut done = DONE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if done.iter().any(|h| h == home) {
+            return;
+        }
+        done.push(home.to_path_buf());
+    }
+    let old = home.join("addons");
+    let Ok(entries) = std::fs::read_dir(&old) else {
+        return;
+    };
+    let new = home.join(ADDON_STATE_DIR);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_state_name = path.is_file()
+            && name.strip_suffix(".txt").is_some_and(|stem| {
+                stem.matches('-').count() == 1 && !stem.starts_with('-') && !stem.ends_with('-')
+            });
+        if !is_state_name {
+            continue;
+        }
+        // At least one row, and nothing but rows: an empty file, or a player's note, stays.
+        let looks_like_state = std::fs::read(&path).is_ok_and(|bytes| {
+            let text = benilla_ui::source::decode(&bytes);
+            let row = |line: &str| {
+                line.split_once(':').is_some_and(|(addon, state)| {
+                    !addon.trim().is_empty()
+                        && matches!(
+                            state.trim().to_ascii_lowercase().as_str(),
+                            "enabled" | "disabled"
+                        )
+                })
+            };
+            text.lines().any(row) && text.lines().all(|l| l.trim().is_empty() || row(l))
+        });
+        let target = new.join(&name);
+        if !looks_like_state || target.exists() {
+            continue;
+        }
+        if std::fs::create_dir_all(&new).is_ok() && std::fs::rename(&path, &target).is_ok() {
+            bevy::log::info!("addons: moved {} to {}", path.display(), target.display());
+        }
+    }
+    // An emptied folder goes, unless it is the AddOns root under another case, which the player
+    // drops addons into: that is told by the two being one folder, not by `AddOns` existing, as
+    // on a case-sensitive filesystem both can be there.
+    remove_emptied(&old, &home.join("AddOns"));
+}
+
+/// Remove `old` if it is empty and not the same folder as `root`.
+fn remove_emptied(old: &Path, root: &Path) {
+    let same = match (std::fs::canonicalize(old), std::fs::canonicalize(root)) {
+        (Ok(a), Ok(b)) => a == b,
+        (_, Err(_)) => false,
+        (Err(_), _) => true,
+    };
+    if !same {
+        let _ = std::fs::remove_dir(old);
+    }
 }
 
 /// `benilla-config/saved/`: per-addon saved variables, account scope, one `<Addon>.lua` per addon
@@ -140,15 +243,13 @@ pub(crate) fn addon_saved_account_dir() -> Option<PathBuf> {
 /// `benilla-config/saved/<Realm>-<Character>/`: per-addon saved variables, character scope
 /// (`## SavedVariablesPerCharacter`), loaded after the account file so it wins.
 pub(crate) fn addon_saved_character_dir(realm: &str, character: &str) -> Option<PathBuf> {
-    let key = format!("{}-{}", file_token(realm), file_token(character));
-    home().map(|h| h.join("saved").join(key))
+    character_path(CharacterFile::SavedVariables, realm, character)
 }
 
 /// `benilla-config/camera/<realm>-<character>.txt`: the third-person camera pose (the
 /// `<Char>/camera-settings.txt` analog), two lines in the reference's keys and order.
 pub(crate) fn camera_character_path(realm: &str, character: &str) -> Option<PathBuf> {
-    let key = format!("{}-{}", file_token(realm), file_token(character));
-    home().map(|h| h.join("camera").join(format!("{key}.txt")))
+    character_path(CharacterFile::Camera, realm, character)
 }
 
 /// `benilla-config/account`: the account name the login screen remembers
@@ -160,22 +261,104 @@ pub(crate) fn saved_account_path() -> Option<PathBuf> {
 /// `benilla-config/chat/<realm>-<character>.txt`: the chat windows' tint, alpha, font size and
 /// lock, the four the reference keeps in its per-character `chat-cache.txt`.
 pub(crate) fn chat_character_path(realm: &str, character: &str) -> Option<PathBuf> {
-    Some(home()?.join("chat").join(format!(
-        "{}-{}.txt",
-        file_token(realm),
-        file_token(character)
-    )))
+    character_path(CharacterFile::Chat, realm, character)
 }
 
 /// `benilla-config/layout/<realm>-<character>.txt`: the layout cache, the geometry of every
 /// user-placed frame, as the reference's per-character `layout-cache.txt`; [`crate::ui_layout`]
 /// owns the shape.
 pub(crate) fn layout_character_path(realm: &str, character: &str) -> Option<PathBuf> {
-    Some(home()?.join("layout").join(format!(
-        "{}-{}.txt",
-        file_token(realm),
-        file_token(character)
-    )))
+    character_path(CharacterFile::Layout, realm, character)
+}
+
+/// The state benilla keeps per character, the analog of the reference's per-character folder
+/// `WTF\Account\<account>\<realm>\<character>\`, each a file or folder named
+/// `<realm>-<character>` in a folder of its kind. Every per-character path goes through
+/// [`character_path`], so a rename ([`move_character_state`]) moves all of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CharacterFile {
+    /// [`addons_state_path`].
+    AddonState,
+    /// [`macros_character_path`].
+    Macros,
+    /// [`bindings_character_path`].
+    Bindings,
+    /// [`addon_saved_character_dir`], a folder.
+    SavedVariables,
+    /// [`camera_character_path`].
+    Camera,
+    /// [`chat_character_path`].
+    Chat,
+    /// [`layout_character_path`].
+    Layout,
+}
+
+impl CharacterFile {
+    pub(crate) const ALL: [CharacterFile; 7] = [
+        CharacterFile::AddonState,
+        CharacterFile::Macros,
+        CharacterFile::Bindings,
+        CharacterFile::SavedVariables,
+        CharacterFile::Camera,
+        CharacterFile::Chat,
+        CharacterFile::Layout,
+    ];
+
+    /// The folder under the home, and the suffix of the key (none for a folder).
+    fn place(self) -> (&'static str, &'static str) {
+        match self {
+            CharacterFile::AddonState => (ADDON_STATE_DIR, ".txt"),
+            CharacterFile::Macros => ("macros", ".txt"),
+            CharacterFile::Bindings => ("bindings", ".txt"),
+            CharacterFile::SavedVariables => ("saved", ""),
+            CharacterFile::Camera => ("camera", ".txt"),
+            CharacterFile::Chat => ("chat", ".txt"),
+            CharacterFile::Layout => ("layout", ".txt"),
+        }
+    }
+}
+
+/// `benilla-config/<kind>/<realm>-<character>[.txt]`, the one place a per-character path is made.
+fn character_path(file: CharacterFile, realm: &str, character: &str) -> Option<PathBuf> {
+    let (dir, suffix) = file.place();
+    let key = format!("{}-{}{suffix}", file_token(realm), file_token(character));
+    Some(home()?.join(dir).join(key))
+}
+
+/// A rename's move of the character's state, the reference's `MoveFileW` of its folder from the
+/// old name to the new (`0x4725f0`: `0x47269a` for `WTF\Account\<account>\<realm>\<name>`,
+/// `0x4726f0` for the older `WTF\Account\<account>\<name>`). The reference's folder moves
+/// whole or not at all: a move onto a name that exists fails and leaves everything under the old
+/// name. So when the new name has any per-character file or folder, nothing moves.
+pub(crate) fn move_character_state(realm: &str, old: &str, new: &str) {
+    let pairs: Option<Vec<(PathBuf, PathBuf)>> = CharacterFile::ALL
+        .iter()
+        .map(|&file| {
+            Some((
+                character_path(file, realm, old)?,
+                character_path(file, realm, new)?,
+            ))
+        })
+        .collect();
+    let Some(pairs) = pairs else {
+        return;
+    };
+    if pairs.iter().any(|(from, to)| from == to) {
+        return;
+    }
+    if let Some((_, taken)) = pairs.iter().find(|(_, to)| to.exists()) {
+        bevy::log::warn!(
+            "rename: {} exists, so {old}'s files stay under that name",
+            taken.display()
+        );
+        return;
+    }
+    for (from, to) in pairs.into_iter().filter(|(from, _)| from.exists()) {
+        match std::fs::rename(&from, &to) {
+            Ok(()) => bevy::log::info!("rename: moved {} to {}", from.display(), to.display()),
+            Err(e) => bevy::log::warn!("rename: cannot move {}: {e}", from.display()),
+        }
+    }
 }
 
 /// `benilla-config/cache/<realm>.tsv`: the player, creature and pet names the server has answered,
@@ -395,6 +578,87 @@ mod tests {
         );
     }
 
+    /// A rename moves every per-character file and folder of the realm's character to the new
+    /// name, and none of another realm's or character's; when the new name has any of its own,
+    /// nothing moves.
+    #[test]
+    fn a_rename_moves_every_per_character_file() {
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-ls-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+        let paths = |realm: &str, character: &str| {
+            [
+                addons_state_path(realm, character),
+                macros_character_path(realm, character),
+                bindings_character_path(realm, character),
+                addon_saved_character_dir(realm, character),
+                camera_character_path(realm, character),
+                chat_character_path(realm, character),
+                layout_character_path(realm, character),
+            ]
+            .map(Option::unwrap)
+        };
+        // The public path functions are the enum's, kind for kind.
+        assert_eq!(
+            paths("Realm", "Old").to_vec(),
+            CharacterFile::ALL
+                .iter()
+                .map(|&f| character_path(f, "Realm", "Old").unwrap())
+                .collect::<Vec<_>>()
+        );
+        let write = |p: &Path, what: &str| {
+            if p.extension().is_some() {
+                write_atomic(p, what).unwrap();
+            } else {
+                write_atomic(&p.join("Addon.lua"), what).unwrap();
+            }
+        };
+        let read = |p: &Path| {
+            let p = if p.extension().is_some() {
+                p.to_path_buf()
+            } else {
+                p.join("Addon.lua")
+            };
+            std::fs::read_to_string(p).ok()
+        };
+        for p in paths("Realm", "Old") {
+            write(&p, "old");
+        }
+        for p in paths("Other Realm", "Old") {
+            write(&p, "other realm");
+        }
+        move_character_state("Realm", "Old", "New");
+        let (old, new) = (paths("Realm", "Old"), paths("Realm", "New"));
+        for (o, n) in old.iter().zip(&new) {
+            assert_eq!(read(n).as_deref(), Some("old"), "{}", n.display());
+            assert!(!o.exists(), "{}", o.display());
+        }
+        for p in paths("Other Realm", "Old") {
+            assert_eq!(read(&p).as_deref(), Some("other realm"));
+        }
+
+        // The new name already has a layout: nothing moves, as the reference's one folder move
+        // fails whole onto a name that exists.
+        for p in paths("Realm", "Two") {
+            write(&p, "two");
+        }
+        write(&layout_character_path("Realm", "Three").unwrap(), "taken");
+        move_character_state("Realm", "Two", "Three");
+        for p in paths("Realm", "Two") {
+            assert_eq!(read(&p).as_deref(), Some("two"), "{}", p.display());
+        }
+        assert_eq!(
+            read(&layout_character_path("Realm", "Three").unwrap()).as_deref(),
+            Some("taken")
+        );
+        assert!(!macros_character_path("Realm", "Three").unwrap().exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// The layout under the override, the one step of [`home`] whose answer a test can state.
     #[test]
     fn the_home_law_override_then_the_residents_and_hermetic_captures() {
@@ -476,6 +740,46 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
+    /// An unattended run keeps its state in a folder of its own, never the player's, unless
+    /// `$BENILLA_HOME` pins one; a capture still resolves none.
+    #[test]
+    fn an_unattended_run_keeps_its_own_state_folder() {
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _r = EnvGuard::unset("WOW_RIG");
+        let _h = EnvGuard::unset("BENILLA_HOME");
+        let _u = EnvGuard::set("WOW_UNATTENDED", "1");
+        let run = home_in(false).expect("an unattended run has a state folder");
+        assert_eq!(run, run_home());
+        assert_ne!(
+            Some(&run),
+            resident_home().as_ref(),
+            "never the player's folder"
+        );
+        assert_eq!(
+            home_in(false),
+            Some(run.clone()),
+            "one folder for the whole run"
+        );
+        assert_eq!(
+            run_home_in(Path::new("/tmp"), 42),
+            Path::new("/tmp/benilla-run-42/benilla-config")
+        );
+
+        // A rig is unattended too.
+        let _u2 = EnvGuard::unset("WOW_UNATTENDED");
+        let _r2 = EnvGuard::set("WOW_RIG", "tauren druid 60");
+        assert_eq!(home_in(false), Some(run));
+
+        // The override still wins, and a capture still resolves nothing.
+        let _h2 = EnvGuard::set("BENILLA_HOME", "/tmp/benilla-pinned");
+        assert_eq!(home_in(false), Some(PathBuf::from("/tmp/benilla-pinned")));
+        let _c2 = EnvGuard::set("WOW_CAPTURE", "ui-options");
+        assert_eq!(home_in(false), None);
+    }
+
     /// A unit test that does not pin `$BENILLA_HOME` resolves no state folder, so no test can write
     /// the real one.
     #[test]
@@ -509,7 +813,7 @@ mod tests {
     }
 
     /// A player build resolves beside the binary; a dev build to the primary checkout, even from a
-    /// linked worktree (whose `.git` is a file).
+    /// linked worktree (whose `.git` is a file), unless that worktree declares a probe account.
     #[test]
     fn the_state_folder_lands_where_the_build_says() {
         let _l = ENV_LOCK
@@ -531,7 +835,7 @@ mod tests {
             return;
         };
 
-        if here.join(".git").is_file() {
+        if here.join(".git").is_file() && !here.join(".probe-identity").exists() {
             assert_ne!(
                 h,
                 here.join(STATE_DIR),
@@ -548,7 +852,8 @@ mod tests {
     }
 
     /// A project folder that is a linked worktree keeps its state in the primary checkout, so every
-    /// worktree shares one; any other folder, a crate on top of benilla's included, keeps its own.
+    /// worktree shares one, unless it declares a probe account; any other folder, a crate on top of
+    /// benilla's included, keeps its own.
     #[test]
     fn the_state_root_is_the_folder_or_its_primary_checkout() {
         let tmp = std::env::temp_dir().join(format!("benilla-root-{}", std::process::id()));
@@ -561,6 +866,19 @@ mod tests {
         std::fs::write(slot.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
         assert_eq!(shared_root(&slot), primary);
         assert_eq!(shared_root(&primary), primary);
+        // A worktree that logs in as its own account never shares the player's settings.
+        std::fs::write(
+            slot.join(".probe-identity"),
+            "WOW_USER=probe3\nWOW_PASS=unused\nWOW_CHAR=Probethree\n",
+        )
+        .unwrap();
+        assert_eq!(shared_root(&slot), slot);
+        std::fs::write(primary.join(".probe-identity"), "WOW_USER=probe0\n").unwrap();
+        assert_eq!(
+            shared_root(&primary),
+            primary,
+            "the primary keeps its own either way"
+        );
         let hello_mod = tmp.join("hello-mod");
         std::fs::create_dir_all(hello_mod.join(".git")).unwrap();
         assert_eq!(shared_root(&hello_mod), hello_mod);
@@ -641,5 +959,109 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = \"2\"\n");
         assert!(!path.with_extension("tmp").exists(), "tmp renamed away");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The enable files live where no AddOns root can be: the old `addons/` folder is the AddOns
+    /// root under another case on a case-insensitive filesystem. A file of the earlier layout is
+    /// moved once; a loose `.txt` of the player's that is no enable state stays, and so does a
+    /// file whose new name is taken.
+    #[test]
+    fn the_enable_files_leave_the_addon_folder_and_old_ones_move_once() {
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-enable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("benilla-config");
+        let old = home.join("addons");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("Realm-One.txt"), "A: disabled\r\nB: enabled\n").unwrap();
+        std::fs::write(old.join("Realm-Two.txt"), "A: disabled\n").unwrap();
+        std::fs::write(old.join("Notes-Todo.txt"), "buy milk\n").unwrap();
+        std::fs::write(old.join("README.txt"), "A: enabled\n").unwrap();
+        std::fs::write(old.join("Realm-Empty.txt"), "").unwrap();
+        std::fs::write(old.join("Realm-Blank.txt"), "\n  \n").unwrap();
+        let _g = EnvGuard::set("BENILLA_HOME", home.to_str().unwrap());
+
+        let path = addons_state_path("Realm", "One").unwrap();
+        assert_ne!(
+            path.parent()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_ascii_lowercase(),
+            old.to_str().unwrap().to_ascii_lowercase(),
+            "no case spelling of the AddOns root"
+        );
+        assert_ne!(
+            path.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_ascii_lowercase(),
+            "addons"
+        );
+        let new = path.parent().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "A: disabled\r\nB: enabled\n",
+            "moved whole"
+        );
+        assert!(new.join("Realm-Two.txt").is_file());
+        assert!(!old.join("Realm-One.txt").exists());
+        assert!(
+            old.join("Notes-Todo.txt").is_file() && old.join("README.txt").is_file(),
+            "a file that is no enable state stays"
+        );
+        assert!(
+            old.join("Realm-Empty.txt").is_file() && old.join("Realm-Blank.txt").is_file(),
+            "a file with no row stays"
+        );
+        // Once: a file written to the old place afterwards is not taken, and the new is not
+        // overwritten.
+        std::fs::write(old.join("Realm-Three.txt"), "A: enabled\n").unwrap();
+        let _ = addons_state_path("Realm", "Three");
+        assert!(old.join("Realm-Three.txt").is_file());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// With nothing but enable files in an `addons/` that is not the AddOns root, the emptied
+    /// folder goes; with `AddOns/` beside it (different folders on a case-sensitive filesystem) it
+    /// goes too, and the root stays whatever its case.
+    #[test]
+    fn an_emptied_old_folder_goes_unless_it_is_the_addons_root() {
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-enable-rm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("benilla-config");
+        let (old, root) = (home.join("addons"), home.join("AddOns"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        // One folder under two spellings, or two folders.
+        let one_folder =
+            std::fs::canonicalize(&old).unwrap() == std::fs::canonicalize(&root).unwrap();
+        std::fs::write(old.join("Realm-One.txt"), "A: disabled\n").unwrap();
+        let _g = EnvGuard::set("BENILLA_HOME", home.to_str().unwrap());
+        let path = addons_state_path("Realm", "One").unwrap();
+        assert!(path.is_file());
+        assert!(root.is_dir(), "the AddOns root is never removed");
+        assert_eq!(old.exists(), one_folder, "an emptied old folder goes");
+
+        // Two folders by any spelling: the emptied one goes, the other stays.
+        let (a, b) = (tmp.join("a"), tmp.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        remove_emptied(&a, &b);
+        assert!(!a.exists() && b.is_dir());
+        // The same folder, or one with something in it, stays.
+        remove_emptied(&b, &b);
+        assert!(b.is_dir());
+        std::fs::create_dir_all(tmp.join("c")).unwrap();
+        std::fs::write(tmp.join("c/keep.txt"), "x").unwrap();
+        remove_emptied(&tmp.join("c"), &b);
+        assert!(tmp.join("c/keep.txt").is_file());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

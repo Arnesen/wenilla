@@ -18,11 +18,14 @@ use crate::ui_action::Spells;
 
 use super::{PetBar, PetUnit};
 
-/// What the feed last pushed, so `PET_BAR_UPDATE` fires on a change; the key's leading `u32` is
-/// [`PetBar::bar_signals`], so a press that changes nothing still repaints.
+/// What the feed last computed from its own sources, so it pushes only what moved since: the
+/// bar-wide key, whose leading `u32` is [`PetBar::bar_signals`] so a signal that changes nothing
+/// still repaints, the ten slot views without their cooldowns, and the state word.
 #[derive(Default)]
 pub(super) struct PetBarMemory {
-    pushed: Option<(u32, bool, bool, bool, Vec<PetActionView>)>,
+    pushed: Option<(u32, bool, bool, bool)>,
+    slots: Vec<PetActionView>,
+    state: Option<u32>,
     /// The ten cooldown triples as last pushed, so a cooldown alone is pushed with no event: its
     /// events are [`fire_pet_cooldown_events`]'s.
     cooldowns: Vec<Option<(i64, u32, bool)>>,
@@ -156,7 +159,7 @@ pub(super) fn slot_paint(
 /// The spell id when the slot shows active: `0x4bcea0`, the pet-side twin of `0x4e55f0`
 /// ([`crate::ui_action::toggle::active_action_toggle`]). It tests `ActiveIconID != 0` first
 /// (`0x4bcefd`), so a press on a spell without one re-casts rather than cancels.
-pub(super) fn active_aura_press(
+pub(crate) fn active_aura_press(
     entry: PetActionEntry,
     pet: Option<&ObjectStore>,
     spell: Option<&benilla_formats::SpellDisplay>,
@@ -229,8 +232,9 @@ pub(super) fn feed_pet_bar(
         Vec::new()
     };
 
-    // `bar_signals` in the key repaints a press that moved nothing (`0x4bc940`/`0x4bc960`); the
-    // cooldown triples are keyed apart, since they carry no `PET_BAR_UPDATE`.
+    // `bar_signals` in the key repaints a signal that moved nothing (`SetPet`'s `0x4bc90c`, the
+    // possessed Attack latch's `0x4bd438`); the cooldown triples are keyed apart, since they carry
+    // no `PET_BAR_UPDATE`.
     let cooldowns: Vec<Option<(i64, u32, bool)>> = fresh.iter().map(|s| s.cooldown).collect();
     let content: Vec<PetActionView> = fresh
         .iter()
@@ -240,18 +244,55 @@ pub(super) fn feed_pet_bar(
             s
         })
         .collect();
-    let key = (bar.bar_signals, has_bar, usable, pickup_allowed, content);
-    let bar_changed = memory.pushed.as_ref() != Some(&key);
+    // A slot is pushed only when this feed's own source moved since its last push: the drag, the
+    // autocast toggles and the reaction and Stay/Follow presses write the VM and fire
+    // `PET_BAR_UPDATE` in place (`0x4bcb6d`, `0x4bcc81`, `0x4bcdcb`, `0x4bc956`, `0x4bc979`), so
+    // a store that has not caught up never rolls them back, and one that has is no change. The
+    // event fires only when what is pushed differs from what the VM shows.
+    let held = script.pet_action_views();
+    let key = (bar.bar_signals, has_bar, usable, pickup_allowed);
+    let key_changed = memory.pushed.as_ref() != Some(&key);
+    // A signal from this side (`SMSG_PET_SPELLS` through `SetPet`, `0x4bc90c`, or the possessed
+    // Attack latch) is the whole bar's source moving, even with equal values: it overwrites the VM
+    // whole, so a latch the VM made and this side refused to send cannot outlive the packet.
+    let resignalled = memory.pushed.map(|k| k.0) != Some(bar.bar_signals);
+    let resized = resignalled || memory.slots.len() != content.len() || held.len() != content.len();
+    let next: Vec<PetActionView> = content
+        .iter()
+        .enumerate()
+        .map(|(i, view)| {
+            if resized || memory.slots.get(i) != Some(view) {
+                view.clone()
+            } else {
+                held[i].clone()
+            }
+        })
+        .collect();
+    let slots_moved = resized || memory.slots != content;
+    let bar_changed = key_changed || next != held;
     let cooldowns_changed = memory.cooldowns != cooldowns;
-    if bar_changed || cooldowns_changed {
-        script.set_pet_actions(has_bar, usable, pickup_allowed, fresh);
+    if resignalled || memory.state != Some(bar.spells.state) {
+        script.set_pet_state(bar.spells.state);
+        memory.state = Some(bar.spells.state);
+    }
+    if key_changed || slots_moved || cooldowns_changed {
+        let views = next
+            .iter()
+            .zip(&cooldowns)
+            .map(|(view, &cooldown)| PetActionView {
+                cooldown,
+                ..view.clone()
+            })
+            .collect();
+        script.set_pet_actions(has_bar, usable, pickup_allowed, views);
         memory.cooldowns = cooldowns;
+        memory.slots = content.clone();
     }
     if bar_changed {
         debug!(
             "ui_pet: bar {} ({} occupied slot(s), {}{})",
             if key.1 { "shown" } else { "hidden" },
-            key.4.iter().filter(|s| s.name.is_some()).count(),
+            content.iter().filter(|s| s.name.is_some()).count(),
             if key.2 { "usable" } else { "disabled" },
             if key.3 { "" } else { ", possessed" },
         );

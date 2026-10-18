@@ -4,7 +4,6 @@
 //! effect hosts seat on demand-spawned anchors ([`BoothRig::anchor`]).
 
 use benilla_formats::BillboardKind;
-use bevy::animation::RepeatAnimation;
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 
@@ -24,15 +23,16 @@ pub(super) struct BoothPart {
     pub(super) twins: BoothTwins,
     /// Whether the builder registered this batch's material on the UV and tint lane. It records the
     /// registration, never re-tests the asset: the marker and the registration must be one fact.
-    /// True only for the glue scenes, which animate texture transforms per frame (`0x715f25` to
-    /// `0x7163bc` over `md+0x74`); portraits and panes are stills.
+    /// True only on the glue stage (its scene, character and pet), which animates texture
+    /// transforms per frame (`0x715f25` to `0x7163bc` over `md+0x74`) on the stage's own clock;
+    /// portraits and panes are stills.
     pub(super) mat_anim: bool,
 }
 
 /// Marks a booth child for the draw gate when its material is on the UV and tint lane; an
 /// unmarked registered batch stays frozen at its seed.
-fn mark_mat_anim(child: &mut bevy::ecs::system::EntityCommands<'_>, p: &BoothPart) {
-    if p.mat_anim {
+fn mark_mat_anim(child: &mut bevy::ecs::system::EntityCommands<'_>, mat_anim: bool) {
+    if mat_anim {
         child.insert(benilla_world::doodad_anim::AnimMatPart);
     }
 }
@@ -115,6 +115,8 @@ pub(super) struct BoothRider {
     /// An attached model composes onto its parent's alpha (`0x714000`), so a ghost's helm
     /// feathers with the head under it.
     pub(super) twins: BoothTwins,
+    /// As [`BoothPart::mat_anim`]: its material has UV or tint rows of its own.
+    pub(super) mat_anim: bool,
 }
 
 /// One camera-facing batch headed into a booth bake: the undead or night-elf eye glow, or an
@@ -130,6 +132,8 @@ pub(super) struct BoothBillboardSpec {
     pub(super) kind: BillboardKind,
     /// A card takes the instance alpha like every other batch of the model.
     pub(super) twins: BoothTwins,
+    /// As [`BoothPart::mat_anim`].
+    pub(super) mat_anim: bool,
 }
 
 /// A spawned booth billboard card, faced to its own booth's camera every frame by
@@ -156,6 +160,7 @@ pub(super) struct BoothEffects {
     pub(super) bone: u16,
     pub(super) offset: Vec3,
     pub(super) emitters: Vec<benilla_assets::ModelEmitter>,
+    pub(super) rig: Option<super::EffectRig>,
 }
 
 /// The in-flight bake's rig: the booth root and its pending [`RigPose`] buffer (`None` for a
@@ -249,6 +254,22 @@ pub(super) fn spawn_booth_effects(
             host.insert(benilla_world::model_fade::ModelFade(instance.alpha));
         }
         let host = host.id();
+        // The model's idle poses the bones its emitters ride, as the world's item does.
+        let mut pose = fx.rig.as_ref().map(|r| {
+            let mut player = AnimationPlayer::default();
+            if let Some(idle) = r.animations.idle_clip() {
+                let active = player.play(idle.node);
+                if idle.looping {
+                    active.repeat();
+                }
+            }
+            commands.entity(host).insert((
+                player,
+                AnimationGraphHandle(r.animations.graph.clone()),
+                r.animations.clone(),
+            ));
+            benilla_world::rig_anim::RigPose::new(host, &r.skeleton).without_camera_billboards()
+        });
         for em in &fx.emitters {
             // A billboard bone in the chain puts the origin at
             // `pivot + camBasis·(position − pivot)`, so a mesh-less `BoothBillboard` at the pivot
@@ -269,7 +290,10 @@ pub(super) fn spawn_booth_effects(
                     frames += 1;
                     (frame, bb.pivot)
                 }
-                None => (host, [0.0; 3]),
+                None => pose
+                    .as_mut()
+                    .and_then(|p| p.anchor_for(commands, host, em.def.bone))
+                    .map_or((host, [0.0; 3]), |anchor| (anchor, em.bone_pivot)),
             };
             let Some(e) = benilla_world::particles::spawn_emitter(
                 commands,
@@ -298,6 +322,9 @@ pub(super) fn spawn_booth_effects(
                     ));
             }
             spawned += 1;
+        }
+        if let Some(pose) = pose {
+            commands.entity(host).insert((pose, super::StageRig));
         }
     }
     (spawned, frames)
@@ -386,6 +413,11 @@ pub(super) enum BoothMotion {
     Loop,
 }
 
+/// Marks one of a bake's own batches, a direct child of the booth root, so a re-dress
+/// ([`redress_booth_batches`]) tells them from the rig's anchors.
+#[derive(Component)]
+pub(super) struct BoothBatch;
+
 /// Spawns a booth bake under `root`: a fresh throwaway instance posed at Stand (the reference's
 /// instance `0x707400`, pose `0x7121a0`), never the unit's live pose.
 ///
@@ -419,37 +451,9 @@ pub(super) fn spawn_booth_model(
     // A re-bake must not inherit the previous model's animation state, pose buffer or palette slot.
     clear_booth_rig(commands, root);
     let Some((skeleton, ibp, anims)) = rig.filter(|(s, _, _)| !s.joints.is_empty()) else {
+        // No palette slot: every part draws its static twin at bind pose.
         for p in parts {
-            let mut child = commands.spawn((
-                Mesh3d(p.static_mesh.clone()),
-                MeshMaterial3d(instance.material(&p.material, &p.twins)),
-                Transform::IDENTITY,
-                layer.clone(),
-                ChildOf(root),
-            ));
-            mark_mat_anim(&mut child, p);
-            // The batch's material alpha times the instance alpha, the reference's
-            // `model+0x180 × the batch factor` (`0x707680`).
-            if let Some(anim) = &p.alpha_anim {
-                let mat_anim =
-                    benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None);
-                child.insert((
-                    bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
-                        0,
-                        mat_anim.current * instance.alpha,
-                    )),
-                    mat_anim,
-                    BoothMatAlpha,
-                ));
-            } else if instance.feathering() {
-                child.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
-                    0,
-                    instance.alpha,
-                )));
-            }
-            if let Some(fm) = instance.fade_materials(&p.material, &p.twins) {
-                child.insert(fm);
-            }
+            spawn_batch(commands, root, &layer, p, 0, instance, None);
         }
         return BoothRig {
             root,
@@ -508,107 +512,25 @@ pub(super) fn spawn_booth_model(
             }
         }
     }
+    // A live booth's batch alphas follow the sequence its root plays, on its clock; a still's
+    // stay pinned.
+    let host = (motion == BoothMotion::Loop && anims.is_some()).then_some(root);
     for p in parts {
-        let use_rig = p.skinned.is_some() && rig_slot != 0;
-        let mesh = if use_rig {
-            p.skinned.clone().expect("use_rig ⇒ skinned twin present")
-        } else {
-            p.static_mesh.clone()
-        };
-        let mut child = commands.spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(instance.material(&p.material, &p.twins)),
-            Transform::IDENTITY,
-            layer.clone(),
-            ChildOf(root),
-        ));
-        mark_mat_anim(&mut child, p);
-        // The material alpha drives the tag's alpha field itself (nothing else writes a booth
-        // part's alpha) beside the rig slot. `alpha_bits` floors a true zero just above 0, so the
-        // shader's all-zero "untagged, opaque" sentinel cannot fire on an invisible batch.
-        let tag_slot = if use_rig { rig_slot } else { 0 };
-        if let Some(anim) = &p.alpha_anim {
-            let mat_anim =
-                benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None);
-            child.insert((
-                bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
-                    tag_slot,
-                    mat_anim.current * instance.alpha,
-                )),
-                mat_anim,
-                BoothMatAlpha,
-            ));
-        } else if use_rig || instance.feathering() {
-            child.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
-                tag_slot,
-                instance.alpha,
-            )));
-        }
-        // While translucent, `benilla_world::zfill` keeps a colour-masked z-writing child on it, so
-        // overlapping limbs blend as one layer (the reference's `M2UseZFill`).
-        if let Some(fm) = instance.fade_materials(&p.material, &p.twins) {
-            child.insert(fm);
-        }
-        if use_rig {
-            child.insert(benilla_world::rig_palette::RigPart(root));
-            // A skinned booth part is never frustum-culled: Bevy's bound is the bind-pose box, the
-            // camera frames the Stand pose, and on a model whose rest pose is far from Stand
-            // (`Creature\CarrionBird`, bind z to 1.19, Stand z 0.54 to 6.23) every batch culls.
-            child.insert(bevy::camera::visibility::NoFrustumCulling);
-        }
+        spawn_batch(commands, root, &layer, p, rig_slot, instance, host);
     }
     let mut booth_rig = BoothRig {
         root,
         rig: Some(pose),
         slot: rig_slot,
     };
-    for r in riders {
-        let Some(anchor) = booth_rig.anchor(commands, r.bone) else {
-            continue; // bad bone index: bake the body without this rider
-        };
-        let mut child = commands.spawn((
-            Mesh3d(r.mesh.clone()),
-            MeshMaterial3d(instance.material(&r.material, &r.twins)),
-            Transform::from_translation(r.offset),
-            layer.clone(),
-            ChildOf(anchor),
-        ));
-        // An attached model composes onto its parent's colour and alpha (`0x714000`). Untagged
-        // means opaque and slot 0, so the tag goes up only for a translucent instance or a slot.
-        if instance.feathering() || rig_slot != 0 {
-            child.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
-                rig_slot,
-                instance.alpha,
-            )));
-        }
-        if let Some(fm) = instance.fade_materials(&r.material, &r.twins) {
-            child.insert(fm);
-        }
-    }
-    // Camera-facing batches seat under their bone's anchor for `face_booth_billboards` to face;
-    // a bone the rig lacks drops the card, like a rider.
-    for bb in billboards {
-        let Some(anchor) = booth_rig.anchor(commands, bb.bone) else {
-            continue;
-        };
-        let mut card = commands.spawn((
-            Mesh3d(bb.mesh.clone()),
-            MeshMaterial3d(instance.material(&bb.material, &bb.twins)),
-            Transform::from_translation(bb.offset),
-            layer.clone(),
-            ChildOf(anchor),
-            BoothBillboard { kind: bb.kind },
-        ));
-        if instance.feathering() || rig_slot != 0 {
-            card.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
-                rig_slot,
-                instance.alpha,
-            )));
-        }
-        if let Some(fm) = instance.fade_materials(&bb.material, &bb.twins) {
-            card.insert(fm);
-        }
-    }
+    hang_attachments(
+        commands,
+        &mut booth_rig,
+        &layer,
+        riders,
+        billboards,
+        instance,
+    );
     // The player is configured before insertion, so the pose lands with the first animation pass;
     // `ModelAnimations` goes beside it because the rig evaluator reads the player through it.
     if let Some(anims) = anims {
@@ -623,15 +545,7 @@ pub(super) fn spawn_booth_model(
                     player.play(clip.node).repeat();
                 }
             }
-            // A weapon hand plays its `HandsClosed` finger overlay over Stand, repeated because it
-            // is a one-key clamp pose; armed once, since a bake's grip never changes.
-            for (hand, want) in grip.into_iter().enumerate() {
-                if let (true, Some(node)) = (want, anims.hand_close[hand]) {
-                    let active = player.play(node);
-                    active.repeat();
-                    active.set_weight(crate::creature_anim::HAND_GRIP_WEIGHT);
-                }
-            }
+            set_grip(&mut player, anims.hand_close, grip);
             commands.entity(root).insert((
                 player,
                 AnimationGraphHandle(anims.graph.clone()),
@@ -642,211 +556,251 @@ pub(super) fn spawn_booth_model(
     booth_rig
 }
 
-/// The ids `PlayerModel:SetRotation` chooses between, from the reference's name table
-/// (`0x6143b6`, `[ecx*4+0x8686a8]`): 0 `Stand`, 11 `ShuffleLeft`, 12 `ShuffleRight`.
-const STAND: u16 = 0;
-const SHUFFLE_LEFT: u16 = 11;
-const SHUFFLE_RIGHT: u16 = 12;
-
-/// The sequence a facing change arms (`0x505bb0`, the `fcomp` at `0x505bce`): current facing below
-/// the angle arms ShuffleRight, above it ShuffleLeft; equal or NaN arms Stand, an active play,
-/// which is why `Model:SetSequence` cannot stick on these panes. Compared on the Lua-facing
-/// scalar `SetRotation` takes, so no sign conversion is involved.
-pub(super) fn turn_shuffle(faced: f32, angle: f32) -> u16 {
-    if faced < angle {
-        SHUFFLE_RIGHT
-    } else if faced > angle {
-        SHUFFLE_LEFT
-    } else {
-        STAND
+/// The mesh a batch draws against palette slot `rig_slot`: its skinned twin when it skins there,
+/// else its static one (slot 0 is no rig).
+fn batch_mesh(p: &BoothPart, rig_slot: u16) -> &Handle<Mesh> {
+    match &p.skinned {
+        Some(skinned) if rig_slot != 0 => skinned,
+        _ => &p.static_mesh,
     }
 }
 
-/// How long one rotation keeps its shuffle stepping: the reference's `[+0x3ec] = clock() + 100`
-/// (`0x42c010`, milliseconds), drained per paint by `0x505c50`. Every path through `0x505bb0` sets
-/// it (`0x505c28`), so a held arrow pushes it out each frame. Taking `spun` before the expiry
-/// check matches the `[+0x3e8]` latch: a paint after a `SetRotation` never expires.
-const SHUFFLE_HOLD_SECS: f64 = 0.100;
-
-/// The fraction of a cross-fade still to run, 1 to 0: the client's `(blendEnd − now) · blendRate`,
-/// recomputed every frame. The per-frame weights and the half-blend refusal must agree on it.
-fn fade_frac(fade: &super::Fade, now: f64) -> f32 {
-    ((fade.until - now) / f64::from(fade.span)) as f32
+/// Spawns one batch under `root`, skinned against `rig_slot` when it has a skinned twin.
+fn spawn_batch(
+    commands: &mut Commands,
+    root: Entity,
+    layer: &RenderLayers,
+    p: &BoothPart,
+    rig_slot: u16,
+    instance: BoothInstance,
+    host: Option<Entity>,
+) -> Entity {
+    let use_rig = p.skinned.is_some() && rig_slot != 0;
+    let mut child = commands.spawn((
+        Mesh3d(batch_mesh(p, rig_slot).clone()),
+        Transform::IDENTITY,
+        layer.clone(),
+        ChildOf(root),
+        BoothBatch,
+    ));
+    dress_batch(&mut child, p, rig_slot, instance, host);
+    if use_rig {
+        child.insert(benilla_world::rig_palette::RigPart(root));
+        // A skinned booth part is never frustum-culled: Bevy's bound is the bind-pose box, the
+        // camera frames the Stand pose, and on a model whose rest pose is far from Stand
+        // (`Creature\CarrionBird`, bind z to 1.19, Stand z 0.54 to 6.23) every batch culls.
+        child.insert(bevy::camera::visibility::NoFrustumCulling);
+    }
+    child.id()
 }
 
-/// Arms one `AnimationData` id as the reference's turn does,
-/// `0x7121a0(bone -1, id, variation -1, offset 0, rate 1.0, blend 1, primary 1)`:
-///
-/// - variation -1: a frequency-weighted roll on every arm, expiry included (HumanMale authors
-///   four Stands).
-/// - offset 0: from the top of the clip.
-/// - blend 1: a cross-fade over the incoming clip's `M2Sequence.blendTime` ([`super::Fade`]),
-///   on HumanMale 0.25 s into a shuffle and 0.5 s back to Stand.
-///
-/// Returns false, scheduling nothing, when the display does not author the id (most pets for the
-/// shuffles): the doll stays standing.
-fn arm_turn(
-    player: &mut AnimationPlayer,
-    anims: &benilla_assets::ModelAnimations,
-    catalog: &benilla_formats::AnimDataCatalog,
-    rng: &mut benilla_assets::AnimRng,
-    turn: &mut super::Turn,
-    id: u16,
-    now: f64,
-) -> bool {
-    // The pose this arm fades out of: the last arm's clip, or before the first turn the bake's own
-    // Stand, the head variation.
-    let outgoing = turn
-        .playing
-        .or_else(|| anims.find(anims.resolve(STAND, catalog).id).map(|c| c.node));
-    let res = anims.resolve(id, catalog);
-    if res.id != id {
-        return false;
-    }
-    let Some(clip) = anims.pick_variation(res.id, rng.draw()) else {
-        return false;
-    };
-    let (node, looping, blend) = (clip.node, clip.looping, clip.blend_time.max(0.0));
-    // The half-blend refusal (`0x7125c9`/`0x7125d4`): a running blend with λ > 0.5 is not
-    // re-seeded; the old secondary keeps its window and the primary is dropped. λ equal to 0.5
-    // re-seeds. A second arrow nudge within 250 ms of a release meets it.
-    let refused = turn
-        .fade
-        .is_some_and(|f| crate::creature_anim::select::blend_lambda(fade_frac(&f, now)) > 0.5);
-    if refused {
-        // The outgoing primary is dropped; the secondary keeps its older pose and λ.
-        if let Some(out) = outgoing.filter(|o| *o != node) {
-            player.stop(out);
-        }
-    } else if let Some(old) = turn.fade.take() {
-        // One secondary slot: a fade in flight is displaced and stops drawing, unless it is the
-        // node about to replay (a reversal back inside a running window).
-        if old.node != node && Some(old.node) != outgoing {
-            player.stop(old.node);
-        }
-    }
-    let fade = if refused {
-        turn.fade // untouched: old node, old window, old λ
-    } else {
-        outgoing
-            .filter(|o| *o != node && blend > 0.0)
-            .map(|node| super::Fade {
-                node,
-                until: now + f64::from(blend),
-                span: blend,
-            })
-    };
-    {
-        // Set explicitly: `play` is idempotent on a live node, which would keep its old clock and
-        // weight.
-        let active = player.play(node);
-        active.set_repeat(if looping {
-            RepeatAnimation::Forever
-        } else {
-            RepeatAnimation::Never
-        });
-        active.set_speed(1.0);
-        active.seek_to(0.0);
-        // λ = 1 on a blended arm's first frame, so the pose does not move on the frame it lands.
-        active.set_weight(if fade.is_some() { 0.0 } else { 1.0 });
-    }
-    if fade.is_none() {
-        // Nothing was playing, or `blendTime = 0`: a cut, the client's `[blk+0xd0] = -1` path.
-        if let Some(out) = outgoing.filter(|o| *o != node) {
-            player.stop(out);
-        }
-    }
-    turn.playing = Some(node);
-    turn.fade = fade;
-    true
-}
-
-/// Steps a pane doll's feet when it turns: `Model:SetRotation` arms a turn-in-place shuffle by
-/// direction and then writes the facing. Both the shuffle and the return to Stand after the
-/// 100 ms expiry are blended arms ([`arm_turn`]); the client's `rep movsd` copies the outgoing
-/// track's clock, so the shuffle keeps stepping under the whole fade. Body panes only
-/// ([`Booth::live`]); a booth root has no `AnimDriver`, so it fires no footstep sounds.
-pub(super) fn drive_booth_turn(
-    time: Res<Time<bevy::time::Real>>,
-    mut booths: ResMut<super::Booths>,
-    anim_data: Option<Res<crate::creature_anim::AnimData>>,
-    mut rigs: Query<(&mut AnimationPlayer, &benilla_assets::ModelAnimations)>,
-    // Variation -1 is a frequency-weighted roll off the CRT LCG (`0x71249a` calls `0x7400e5`),
-    // the same generator the world's picks use.
-    mut rng: ResMut<benilla_assets::AnimRng>,
+/// A batch's dressing: its material, its tag (the palette slot beside the instance alpha, or the
+/// material alpha that drives it) and its depth-prime record. `host` is the root whose player the
+/// material alpha follows, its sequence and its scene's clock; `None` pins it.
+fn dress_batch(
+    child: &mut bevy::ecs::system::EntityCommands<'_>,
+    p: &BoothPart,
+    rig_slot: u16,
+    instance: BoothInstance,
+    host: Option<Entity>,
 ) {
-    let Some(anim_data) = anim_data.as_deref() else {
-        return;
-    };
-    let now = time.elapsed_secs_f64();
-    for booth in booths.0.values_mut() {
-        if !booth.live {
-            continue;
+    child.insert(MeshMaterial3d(instance.material(&p.material, &p.twins)));
+    mark_mat_anim(child, p.mat_anim);
+    // The material alpha drives the tag's alpha field itself (nothing else writes a booth part's
+    // alpha) beside the rig slot. `alpha_bits` floors a true zero just above 0, so the shader's
+    // all-zero "untagged, opaque" sentinel cannot fire on an invisible batch.
+    let use_rig = p.skinned.is_some() && rig_slot != 0;
+    let tag_slot = if use_rig { rig_slot } else { 0 };
+    if let Some(anim) = &p.alpha_anim {
+        // The batch's material alpha times the instance alpha, the reference's
+        // `model+0x180 × the batch factor` (`0x707680`).
+        let mat_anim = benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None)
+            .following_host(host);
+        child.insert((
+            bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                tag_slot,
+                mat_anim.current * instance.alpha,
+            )),
+            mat_anim,
+            BoothMatAlpha,
+        ));
+    } else if use_rig || instance.feathering() {
+        child.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+            tag_slot,
+            instance.alpha,
+        )));
+    }
+    // While translucent, `benilla_world::zfill` keeps a colour-masked z-writing child on it, so
+    // overlapping limbs blend as one layer (the reference's `M2UseZFill`).
+    if let Some(fm) = instance.fade_materials(&p.material, &p.twins) {
+        child.insert(fm);
+    }
+}
+
+/// Seats the riders on their bones' anchors and the camera-facing cards under theirs; a bone the
+/// rig lacks drops its rider or card.
+fn hang_attachments(
+    commands: &mut Commands,
+    booth_rig: &mut BoothRig,
+    layer: &RenderLayers,
+    riders: &[BoothRider],
+    billboards: &[BoothBillboardSpec],
+    instance: BoothInstance,
+) {
+    let rig_slot = booth_rig.slot;
+    for r in riders {
+        let Some(anchor) = booth_rig.anchor(commands, r.bone) else {
+            continue; // bad bone index: bake the body without this rider
+        };
+        let mut child = commands.spawn((
+            Mesh3d(r.mesh.clone()),
+            MeshMaterial3d(instance.material(&r.material, &r.twins)),
+            Transform::from_translation(r.offset),
+            layer.clone(),
+            ChildOf(anchor),
+        ));
+        mark_mat_anim(&mut child, r.mat_anim);
+        // An attached model composes onto its parent's colour and alpha (`0x714000`). Untagged
+        // means opaque and slot 0, so the tag goes up only for a translucent instance or a slot.
+        if instance.feathering() || rig_slot != 0 {
+            child.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                rig_slot,
+                instance.alpha,
+            )));
         }
-        let Ok((mut player, anims)) = rigs.get_mut(booth.root) else {
-            // No rig: a turn in flight names nodes of a player that is gone.
-            booth.turn.rebaked();
+        if let Some(fm) = instance.fade_materials(&r.material, &r.twins) {
+            child.insert(fm);
+        }
+    }
+    // Camera-facing batches seat under their bone's anchor for `face_booth_billboards` to face.
+    for bb in billboards {
+        let Some(anchor) = booth_rig.anchor(commands, bb.bone) else {
             continue;
         };
-        step_turn(
-            &mut player,
-            anims,
-            &anim_data.0,
-            &mut rng,
-            &mut booth.turn,
-            now,
-        );
+        let mut card = commands.spawn((
+            Mesh3d(bb.mesh.clone()),
+            MeshMaterial3d(instance.material(&bb.material, &bb.twins)),
+            Transform::from_translation(bb.offset),
+            layer.clone(),
+            ChildOf(anchor),
+            BoothBillboard { kind: bb.kind },
+        ));
+        mark_mat_anim(&mut card, bb.mat_anim);
+        if instance.feathering() || rig_slot != 0 {
+            card.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                rig_slot,
+                instance.alpha,
+            )));
+        }
+        if let Some(fm) = instance.fade_materials(&bb.material, &bb.twins) {
+            card.insert(fm);
+        }
     }
 }
 
-/// One booth's turn for one frame, apart from the ECS so a test can step it at chosen times.
-fn step_turn(
-    player: &mut AnimationPlayer,
-    anims: &benilla_assets::ModelAnimations,
-    catalog: &benilla_formats::AnimDataCatalog,
-    rng: &mut benilla_assets::AnimRng,
-    turn: &mut super::Turn,
-    now: f64,
+/// Re-dresses the instance standing on `root` without replacing it, as the reference's setters
+/// act on one `CharacterModel`: the skin setter `0x478790` rebinds its textures and raises the
+/// dirty byte `[cm+8]`, and the class re-dress `0x470800` re-equips the same model. The root keeps
+/// its player, global sequences and palette slot `rig_slot`, so its clock runs on. A batch whose
+/// mesh is still worn keeps its entity and takes its new dressing; the others spawn or go, as a
+/// geoset toggles. `standing` is the root's [`BoothBatch`] children by the mesh each draws.
+///
+/// Opaque instances only: a feathering batch's depth-prime twin belongs to the zfill lane, which
+/// does not reap it when the record goes.
+pub(super) fn redress_booth_batches(
+    commands: &mut Commands,
+    root: Entity,
+    layer: &RenderLayers,
+    parts: &[BoothPart],
+    standing: &[(Entity, AssetId<Mesh>)],
+    rig_slot: u16,
+    instance: BoothInstance,
 ) {
-    // Arm: the reference compares the id against the root bone's (`0x712090`), so a held direction
-    // arms once and loops while a reversal restarts from t = 0.
-    if let Some(want) = turn.spun.take() {
-        let armed = turn.shuffle.map_or(STAND, |(id, _)| id);
-        if want == armed {
-            // Same direction held, or Stand sent to a standing doll: only the deadline moves.
-            if let Some((_, until)) = turn.shuffle.as_mut() {
-                *until = now + SHUFFLE_HOLD_SECS;
+    debug_assert!(
+        !instance.feathering(),
+        "a re-dress keeps opaque batches only"
+    );
+    let mut free: Vec<Option<(Entity, AssetId<Mesh>)>> =
+        standing.iter().copied().map(Some).collect();
+    for p in parts {
+        let want = batch_mesh(p, rig_slot).id();
+        let kept = free
+            .iter_mut()
+            .find(|s| s.is_some_and(|(_, mesh)| mesh == want))
+            .and_then(Option::take);
+        match kept {
+            Some((batch, _)) => {
+                let mut child = commands.entity(batch);
+                // Strip the old dressing; `Visibility` too, which the material-alpha writer owns.
+                child
+                    .remove::<(
+                        bevy::mesh::MeshTag,
+                        benilla_world::doodad_anim::MatAnim,
+                        BoothMatAlpha,
+                        benilla_world::doodad_anim::AnimMatPart,
+                    )>()
+                    .insert(Visibility::Inherited);
+                dress_batch(&mut child, p, rig_slot, instance, Some(root));
             }
-        } else if arm_turn(player, anims, catalog, rng, turn, want, now) {
-            // Equal facings and NaN arm Stand (`0x505c23`), which schedules no expiry.
-            turn.shuffle = (want != STAND).then_some((want, now + SHUFFLE_HOLD_SECS));
+            None => {
+                spawn_batch(commands, root, layer, p, rig_slot, instance, Some(root));
+            }
         }
     }
-    // Expire: the arrow came up, so back to Stand, re-rolled and blended (`0x505c98`).
-    if let Some((_, until)) = turn.shuffle {
-        if now > until {
-            arm_turn(player, anims, catalog, rng, turn, STAND, now);
-            turn.shuffle = None;
+    for (batch, _) in free.into_iter().flatten() {
+        commands.entity(batch).despawn();
+    }
+}
+
+impl BoothRig {
+    /// A fresh bind-pose buffer for the instance standing on `root`, on its palette slot `slot`:
+    /// a re-dress re-hangs its attachments on new anchors ([`Self::hang`]), and the pose
+    /// evaluator re-poses it from the root's player before it draws.
+    pub(super) fn rehang(
+        root: Entity,
+        skeleton: &benilla_assets::ModelSkeleton,
+        slot: u16,
+    ) -> Self {
+        Self {
+            root,
+            rig: Some(
+                benilla_world::rig_anim::RigPose::new(root, skeleton).without_camera_billboards(),
+            ),
+            slot,
         }
     }
-    // Advance the cross-fade: λ, smoothstep of the window still to run (`0x714880`), weights the
-    // outgoing pose and the incoming takes `1 − λ`, the client's
-    // `out = primary + (secondary − primary)·λ`.
-    let Some(fade) = turn.fade else {
-        return;
-    };
-    let frac = fade_frac(&fade, now);
-    if frac <= 0.0 {
-        turn.fade = None;
-        player.stop(fade.node);
-        if let Some(cur) = turn.playing {
-            player.play(cur).set_weight(1.0);
-        }
-    } else {
-        let lambda = crate::creature_anim::select::blend_lambda(frac);
-        player.play(fade.node).set_weight(lambda);
-        if let Some(cur) = turn.playing {
-            player.play(cur).set_weight(1.0 - lambda);
+
+    /// Seats `riders` and `billboards` on this rig ([`hang_attachments`]).
+    pub(super) fn hang(
+        &mut self,
+        commands: &mut Commands,
+        layer: &RenderLayers,
+        riders: &[BoothRider],
+        billboards: &[BoothBillboardSpec],
+        instance: BoothInstance,
+    ) {
+        hang_attachments(commands, self, layer, riders, billboards, instance);
+    }
+}
+
+/// Closes each hand whose attach point holds a weapon (`CloseHand` `0x479660`) and opens the
+/// other, as an unequip's detach does (`0x47a380`): the `HandsClosed` finger overlay over Stand,
+/// repeated because it is a one-key clamp pose.
+pub(super) fn set_grip(
+    player: &mut AnimationPlayer,
+    hand_close: [Option<bevy::animation::graph::AnimationNodeIndex>; 2],
+    grip: [bool; 2],
+) {
+    for (hand, want) in grip.into_iter().enumerate() {
+        let Some(node) = hand_close[hand] else {
+            continue;
+        };
+        if !want {
+            player.stop(node);
+        } else if player.animation(node).is_none() {
+            let active = player.play(node);
+            active.repeat();
+            active.set_weight(crate::creature_anim::HAND_GRIP_WEIGHT);
         }
     }
 }
@@ -1218,6 +1172,202 @@ mod tests {
         );
     }
 
+    /// A live booth's batch alpha follows its root's player, its sequence and its scene's clock,
+    /// so a glue scene's dimming loops stop with the scene; a still's stays pinned.
+    #[test]
+    fn a_live_booths_batch_alpha_follows_its_root() {
+        let skeleton = benilla_assets::ModelSkeleton {
+            joints: vec![benilla_assets::ModelJoint {
+                parent: -1,
+                local_translation: Vec3::ZERO,
+                billboard: None,
+                parent_arm: None,
+            }],
+            spine_bone: None,
+            head_bone: None,
+        };
+        let anims = benilla_assets::ModelAnimations {
+            graph: Handle::default(),
+            clips: vec![benilla_assets::AnimClip {
+                anim_id: 0,
+                seq_index: 0,
+                node: bevy::animation::graph::AnimationNodeIndex::new(1),
+                looping: true,
+                duration: 0.5,
+                move_speed: 0.0,
+                blend_time: 0.5,
+                bounds_center: Vec3::ZERO,
+                bounds_radius: 0.0,
+                bounds_min: Vec3::ZERO,
+                bounds_max: Vec3::ZERO,
+                events: Vec::new().into(),
+                arm_nodes: None,
+                upper_node: None,
+                frequency: 32767,
+                replay: (0, 0),
+                poses_bones: true,
+            }],
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        };
+        for (motion, follows) in [(BoothMotion::Loop, true), (BoothMotion::Frozen, false)] {
+            let mut app = App::new();
+            app.init_resource::<benilla_world::rig_palette::RigPalettes>();
+            let parts = vec![BoothPart {
+                skinned: None,
+                static_mesh: Handle::default(),
+                material: Handle::default(),
+                alpha_anim: Some(constant_alpha(0.55)),
+                twins: BoothTwins::default(),
+                mat_anim: false,
+            }];
+            let root = app.world_mut().spawn(Transform::IDENTITY).id();
+            let mut palettes = app
+                .world_mut()
+                .remove_resource::<benilla_world::rig_palette::RigPalettes>()
+                .expect("just inserted");
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            {
+                let mut commands = Commands::new(&mut queue, app.world());
+                spawn_booth_model(
+                    &mut commands,
+                    &mut palettes,
+                    root,
+                    RenderLayers::layer(9),
+                    &parts,
+                    &[],
+                    Some((&skeleton, &Handle::default(), Some(&anims))),
+                    None,
+                    motion,
+                    [false, false],
+                    &[],
+                    BoothInstance::default(),
+                )
+                .finish(&mut commands);
+            }
+            queue.apply(app.world_mut());
+            let mut q = app.world_mut().query::<&MatAnim>();
+            let hosts: Vec<_> = q.iter(app.world()).map(MatAnim::host).collect();
+            assert_eq!(
+                hosts,
+                vec![follows.then_some(root)],
+                "{} booth",
+                if follows { "a live" } else { "a still" }
+            );
+        }
+    }
+
+    /// An effect model with a rig poses its bones by its idle, so its emitter rides its bone's
+    /// anchor on the effect host, as the world's item does.
+    #[test]
+    fn a_rigged_effect_model_poses_the_bone_its_emitter_rides() {
+        let mut app = App::new();
+        app.init_resource::<benilla_world::rig_palette::RigPalettes>();
+        app.init_resource::<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>();
+        let joint = |parent, local_translation| benilla_assets::ModelJoint {
+            parent,
+            local_translation,
+            billboard: None,
+            parent_arm: None,
+        };
+        let skeleton = benilla_assets::ModelSkeleton {
+            joints: vec![joint(-1, Vec3::ZERO), joint(0, Vec3::Y)],
+            spine_bone: None,
+            head_bone: None,
+        };
+        let animations = benilla_assets::ModelAnimations {
+            graph: Handle::default(),
+            clips: Vec::new(),
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        };
+        let mut em = benilla_assets::ModelEmitter {
+            def: benilla_world::testing::plain_particle_def(),
+            texture: Some(Handle::default()),
+            bone_pivot: [0.0; 3],
+            billboard: None,
+            recursion: None,
+            geometry: None,
+            owner_reach: 0.0,
+            water_bound: (Vec3::ZERO, 0.0),
+            idle_seq: 0,
+        };
+        em.def.bone = 1;
+        let effects = [BoothEffects {
+            bone: 1,
+            offset: Vec3::ZERO,
+            emitters: vec![em],
+            rig: Some(super::super::EffectRig {
+                skeleton: skeleton.clone(),
+                animations,
+            }),
+        }];
+        let ibp = Handle::default();
+
+        let root = app.world_mut().spawn(Transform::IDENTITY).id();
+        let mut palettes = app
+            .world_mut()
+            .remove_resource::<benilla_world::rig_palette::RigPalettes>()
+            .expect("just inserted");
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let spawned = {
+            let mut commands = Commands::new(&mut queue, app.world());
+            let mut rig = spawn_booth_model(
+                &mut commands,
+                &mut palettes,
+                root,
+                RenderLayers::layer(9),
+                &[],
+                &[],
+                Some((&skeleton, &ibp, None)),
+                None,
+                BoothMotion::Frozen,
+                [false, false],
+                &[],
+                BoothInstance::default(),
+            );
+            let (spawned, _) = spawn_booth_effects(
+                &mut commands,
+                &mut rig,
+                &RenderLayers::layer(9),
+                None,
+                &effects,
+                BoothInstance::default(),
+            );
+            rig.finish(&mut commands);
+            spawned
+        };
+        queue.apply(app.world_mut());
+        assert_eq!(spawned, 1);
+
+        let host = app
+            .world_mut()
+            .query_filtered::<Entity, (
+                With<benilla_world::rig_anim::RigPose>,
+                With<AnimationPlayer>,
+                With<super::super::StageRig>,
+            )>()
+            .iter(app.world())
+            .find(|&e| e != root)
+            .expect("the effect host is posed by its idle, outside the world parker");
+        let anchors: Vec<u16> = app
+            .world_mut()
+            .query::<&benilla_world::rig_anim::RigAnchor>()
+            .iter(app.world())
+            .filter(|a| a.rig == host)
+            .map(|a| a.bone)
+            .collect();
+        assert_eq!(anchors, vec![1], "the emitter rides its own bone's anchor");
+    }
+
     /// World parts carry `MatAnim` too; their alpha belongs to the world's visibility pass.
     #[test]
     fn the_booth_alpha_writer_ignores_unmarked_parts() {
@@ -1242,292 +1392,6 @@ mod tests {
             1.0,
             "no BoothMatAlpha marker ⇒ untouched"
         );
-    }
-
-    /// The stock Lua turns opposite ways in its two callers: a held left arrow adds
-    /// (`Model_OnUpdate`, `UIParent.lua:1449`), a left click subtracts (`Model_RotateLeft`,
-    /// `UIParent.lua:1429`).
-    #[test]
-    fn a_turn_arms_the_shuffle_for_the_way_it_turned() {
-        assert_eq!(turn_shuffle(0.9, 1.0), SHUFFLE_RIGHT, "facing rose");
-        assert_eq!(turn_shuffle(1.0, 0.9), SHUFFLE_LEFT, "facing fell");
-        assert_eq!(turn_shuffle(0.61, 0.61), STAND, "a re-pose arms Stand");
-        assert_eq!(
-            turn_shuffle(0.61, f32::NAN),
-            STAND,
-            "unordered falls to Stand"
-        );
-        let facing = 0.61;
-        // Held: left adds, so a held left arrow steps ShuffleRight.
-        assert_eq!(
-            turn_shuffle(facing, facing + 0.05),
-            SHUFFLE_RIGHT,
-            "held left"
-        );
-        assert_eq!(
-            turn_shuffle(facing, facing - 0.05),
-            SHUFFLE_LEFT,
-            "held right"
-        );
-        // Clicked: left subtracts, so the same arrow lands on the other shuffle.
-        assert_eq!(
-            turn_shuffle(facing, facing - 0.03),
-            SHUFFLE_LEFT,
-            "clicked left"
-        );
-        assert_eq!(
-            turn_shuffle(facing, facing + 0.03),
-            SHUFFLE_RIGHT,
-            "clicked right"
-        );
-    }
-
-    // ── The turn's cross-fades ────────────────────────────────────────────
-
-    /// The three ids a turn arms, with HumanMale's authored blend times (shuffles 0.25 s, Stand
-    /// 0.5 s). Two Stands, weighted so a roll never lands on the head, which `find` would return.
-    fn turning_model() -> benilla_assets::ModelAnimations {
-        let clip = |anim_id, node, blend_time, frequency| benilla_assets::AnimClip {
-            anim_id,
-            seq_index: 0,
-            node: bevy::animation::graph::AnimationNodeIndex::new(node),
-            looping: true,
-            duration: 0.5,
-            move_speed: 0.0,
-            blend_time,
-            bounds_center: Vec3::ZERO,
-            bounds_radius: 0.0,
-            bounds_min: Vec3::ZERO,
-            bounds_max: Vec3::ZERO,
-            events: Vec::new().into(),
-            arm_nodes: None,
-            upper_node: None,
-            frequency,
-            replay: (0, 0),
-            poses_bones: true,
-        };
-        benilla_assets::ModelAnimations {
-            graph: Handle::default(),
-            clips: vec![
-                clip(STAND, 1, 0.5, 1),         // the head, all but unreachable by the roll
-                clip(STAND, 2, 0.5, 32766),     // where a roll lands
-                clip(SHUFFLE_LEFT, 3, 0.25, 0), // the only variation
-                clip(SHUFFLE_RIGHT, 4, 0.25, 0),
-            ],
-            hand_close: [None, None],
-            playable_animation_lookup: Vec::new(),
-            animation_lookup: Vec::new(),
-            global_bones: Vec::new(),
-            first_seq: None,
-            pose: Default::default(),
-        }
-    }
-
-    fn node(n: usize) -> bevy::animation::graph::AnimationNodeIndex {
-        bevy::animation::graph::AnimationNodeIndex::new(n)
-    }
-
-    /// The bake's own arm, Stand's head variation looping, which the first turn fades out of.
-    fn baked() -> AnimationPlayer {
-        let mut player = AnimationPlayer::default();
-        player.play(node(1)).repeat();
-        player
-    }
-
-    fn weight(player: &AnimationPlayer, n: usize) -> Option<f32> {
-        player.animation(node(n)).map(|a| a.weight())
-    }
-
-    /// Every arm `0x505bb0`/`0x505c50` makes carries `blendFlag = 1`, each over the incoming clip's
-    /// `blendTime`; the weights sum to 1 throughout.
-    #[test]
-    fn a_turn_blends_both_ways_over_the_incoming_clips_own_time() {
-        let (anims, catalog) = (
-            turning_model(),
-            benilla_formats::AnimDataCatalog::from_rows([]),
-        );
-        let (mut player, mut rng) = (baked(), benilla_assets::AnimRng::default());
-        let mut turn = super::super::Turn {
-            // Arrow down: the shuffle is armed but contributes nothing yet.
-            spun: Some(SHUFFLE_LEFT),
-            ..Default::default()
-        };
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.0);
-        assert_eq!(turn.playing, Some(node(3)), "the shuffle is the primary");
-        assert_eq!(weight(&player, 3), Some(0.0), "and it starts at nothing");
-        assert_eq!(
-            weight(&player, 1),
-            Some(1.0),
-            "the bake's Stand still holds"
-        );
-
-        // Mid-blend, on the shuffle's 0.25 s.
-        turn.spun = Some(SHUFFLE_LEFT);
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.2);
-        let (out, inc) = (weight(&player, 1).unwrap(), weight(&player, 3).unwrap());
-        assert!((out + inc - 1.0).abs() < 1e-5, "{out} + {inc}");
-        assert!(inc > 0.8, "four fifths in, the shuffle dominates: {inc}");
-
-        // Past 0.25 s the fade is done and the pose it faded out of is gone from the player.
-        turn.spun = Some(SHUFFLE_LEFT);
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.3);
-        assert_eq!(weight(&player, 3), Some(1.0));
-        assert_eq!(weight(&player, 1), None, "the outgoing Stand is stopped");
-        assert!(turn.fade.is_none());
-
-        // Arrow up: 100 ms later the expiry arms Stand, and this frame must not move the doll.
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.41);
-        let stand = turn.playing.expect("Stand armed");
-        assert_ne!(stand, node(1), "a fresh frequency roll, not `find`'s head");
-        assert_eq!(stand, node(2));
-        assert_eq!(
-            weight(&player, 2),
-            Some(0.0),
-            "the release frame does not jump"
-        );
-        assert_eq!(
-            weight(&player, 3),
-            Some(1.0),
-            "the shuffle still holds the pose"
-        );
-        assert!(turn.shuffle.is_none());
-
-        // It runs for Stand's 0.5 s, so it is still blending 0.3 s in.
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.71);
-        let (out, inc) = (weight(&player, 3).unwrap(), weight(&player, 2).unwrap());
-        assert!((out + inc - 1.0).abs() < 1e-5, "{out} + {inc}");
-        assert!(
-            out > 0.0 && inc > 0.0,
-            "both still contribute: {out} / {inc}"
-        );
-
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.92);
-        assert_eq!(weight(&player, 2), Some(1.0), "settled on Stand");
-        assert_eq!(
-            weight(&player, 3),
-            None,
-            "the shuffle is stopped, not muted"
-        );
-    }
-
-    /// Inside a blend's first half `0x7125d4` refuses the arm; at or past halfway the arm takes the
-    /// one secondary slot.
-    #[test]
-    fn a_reversal_is_refused_inside_the_half_blend_and_displaces_it_after() {
-        let (anims, catalog) = (
-            turning_model(),
-            benilla_formats::AnimDataCatalog::from_rows([]),
-        );
-
-        // Reverse at 0.1 s of a 0.25 s blend: 60% still to run, λ = 0.648, refused.
-        let (mut player, mut rng) = (baked(), benilla_assets::AnimRng::default());
-        let mut turn = super::super::Turn {
-            spun: Some(SHUFFLE_LEFT),
-            ..Default::default()
-        };
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.0);
-        turn.spun = Some(SHUFFLE_RIGHT);
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.1);
-
-        assert_eq!(
-            turn.playing,
-            Some(node(4)),
-            "the opposite shuffle took over"
-        );
-        assert_eq!(
-            turn.fade.map(|f| (f.node, f.until)),
-            Some((node(1), 1.25)),
-            "the ORIGINAL fade is untouched — same pose, same window"
-        );
-        assert_eq!(
-            weight(&player, 3),
-            None,
-            "the first shuffle is dropped, not faded"
-        );
-        assert_eq!(turn.shuffle.map(|(id, _)| id), Some(SHUFFLE_RIGHT));
-
-        // Reverse at 0.2 s instead: 20% still to run, λ = 0.104, the slot is taken.
-        let (mut player, mut rng) = (baked(), benilla_assets::AnimRng::default());
-        let mut turn = super::super::Turn {
-            spun: Some(SHUFFLE_LEFT),
-            ..Default::default()
-        };
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.0);
-        turn.spun = Some(SHUFFLE_RIGHT);
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.2);
-
-        assert_eq!(
-            turn.fade.map(|f| f.node),
-            Some(node(3)),
-            "…fading out of the first"
-        );
-        assert_eq!(weight(&player, 1), None, "the displaced Stand is gone");
-    }
-
-    /// Stand blends in over 0.5 s, so a nudge within 250 ms of a release meets a blend more than
-    /// half to run.
-    #[test]
-    fn a_second_nudge_inside_stands_own_blend_is_refused() {
-        let (anims, catalog) = (
-            turning_model(),
-            benilla_formats::AnimDataCatalog::from_rows([]),
-        );
-        let (mut player, mut rng) = (baked(), benilla_assets::AnimRng::default());
-        let mut turn = super::super::Turn {
-            spun: Some(SHUFFLE_LEFT),
-            ..Default::default()
-        };
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.0);
-        turn.spun = Some(SHUFFLE_LEFT);
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.1);
-        // Released: the expiry arms Stand, fading out of the shuffle over Stand's own 0.5 s.
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.3);
-        let settling = turn.playing.expect("Stand armed");
-        assert_eq!(turn.fade.map(|f| (f.node, f.until)), Some((node(3), 1.8)));
-
-        // Nudged again 100 ms later: 80% of Stand's blend still to run, λ = 0.896, refused.
-        turn.spun = Some(SHUFFLE_RIGHT);
-        step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, 1.4);
-
-        assert_eq!(
-            turn.playing,
-            Some(node(4)),
-            "the new shuffle is the primary"
-        );
-        assert_eq!(
-            turn.fade.map(|f| (f.node, f.until)),
-            Some((node(3), 1.8)),
-            "still fading the shuffle it was already fading, on the same window"
-        );
-        assert_eq!(
-            player.animation(settling).map(|a| a.weight()),
-            None,
-            "the half-faded Stand is dropped, not layered on"
-        );
-    }
-
-    #[test]
-    fn a_display_with_no_shuffle_never_leaves_stand() {
-        let mut anims = turning_model();
-        anims.clips.retain(|c| c.anim_id == STAND);
-        // The model's own baked resolution: both shuffles fall back to Stand.
-        anims.playable_animation_lookup = vec![
-            benilla_formats::PlayableAnim {
-                resolved_id: STAND,
-                dir_flags: 0,
-            };
-            usize::from(SHUFFLE_RIGHT) + 1
-        ];
-        let catalog = benilla_formats::AnimDataCatalog::from_rows([]);
-        let (mut player, mut rng) = (baked(), benilla_assets::AnimRng::default());
-        let mut turn = super::super::Turn::default();
-        for t in [1.0, 1.1, 1.2, 2.0] {
-            turn.spun = Some(SHUFFLE_LEFT);
-            step_turn(&mut player, &anims, &catalog, &mut rng, &mut turn, t);
-        }
-        assert!(turn.shuffle.is_none(), "no expiry was ever scheduled");
-        assert!(turn.fade.is_none(), "and nothing was cross-faded");
-        assert_eq!(weight(&player, 1), Some(1.0), "the bake's Stand, untouched");
     }
 }
 

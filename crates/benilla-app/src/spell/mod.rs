@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_unit::UnitFeed;
 use benilla_world::schedule::WorldStage;
@@ -27,7 +27,9 @@ pub(crate) mod validator;
 
 // The one cast path: every caster takes [`CastLadder`] and commits through [`CastCommit`];
 // `send_spell_cast` is private to `cast_send`, so no second send path can exist.
-pub(crate) use cast_send::{CastCommit, CastLadder, HeldCast, HeldForPick, TargetedBind};
+pub(crate) use cast_send::{
+    CastCommit, CastLadder, HeldCast, HeldForPick, ScriptCastPermit, TargetedBind,
+};
 pub(crate) use cast_target::AutoSelfCast;
 pub(crate) use cooldowns::Cooldowns;
 pub(crate) use inflight::{
@@ -40,7 +42,8 @@ pub(crate) use mods::{OP_COOLDOWN, OP_RANGE};
 pub(crate) use range_units::{RangeUnits, DEFAULT_REACH};
 // `TargetingWants` is exported for the ground reticle, which draws for the location word alone.
 pub(crate) use targeting::{
-    ground_cast_radius, CorpsePick, PicksSelf, ScriptCursor, SpellTargeting, TargetingWants,
+    ground_cast_radius, CorpsePick, CursorPicks, PicksSelf, ScriptCursor, SpellTargeting,
+    TargetingWants,
 };
 
 /// A script cast's inputs, the cast tail the action bar uses, for the spellbook's and the stance
@@ -70,6 +73,8 @@ impl Plugin for SpellPlugin {
             .init_resource::<AutoSelfCast>()
             .init_resource::<SpellTargeting>()
             .init_resource::<HeldForPick>()
+            .init_resource::<ScriptCastPermit>()
+            .init_resource::<CursorPicks>()
             .init_resource::<targeting::EnchantConfirmItem>()
             .init_resource::<targeting::PicksSelf>()
             .init_resource::<targeting::CorpsePick>()
@@ -128,6 +133,15 @@ pub(crate) fn spell_skill_value(
         return 0;
     };
     skill_line_value(me, line)
+}
+
+/// A pet's `[vtbl+0xa8]`, `CGUnit`'s `0x60cd80`: `UNIT_FIELD_LEVEL × 5`, which
+/// [`benilla_formats::SpellDisplay::skill_level`] caps at `maxLevel × 5` and divides by 5 as
+/// `0x60cdb2`-`0x60cdb9` and `0x6e3195` do. No unit reads 0 (`0x6e31a4`).
+pub(crate) fn pet_skill_value(pet: Option<&benilla_protocol::ObjectFields>) -> u32 {
+    pet.and_then(|p| p.unit_level())
+        .unwrap_or(0)
+        .saturating_mul(5)
 }
 
 /// The player's skill in `line`, [`spell_skill_value`]'s second half: 0 without a player or a

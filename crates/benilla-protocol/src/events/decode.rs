@@ -1,6 +1,6 @@
 //! The [`ServerPacket`] to [`SessionEvent`] mapping: pure functions of the packet, no state.
 
-use crate::messages::{CastOutcome, MovementBlock, Object, ObjectFields, ObjectType, ServerPacket};
+use crate::messages::{CastOutcome, Object, ObjectFields, ObjectType, ServerPacket};
 use crate::wire::Vector3d;
 
 use super::{EntityKind, MoveSpeeds, SessionEvent};
@@ -31,6 +31,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::CharEnum { characters } => vec![SessionEvent::CharacterList {
             characters,
             realm: None,
+            cause: super::RosterCause::Unasked,
+            epoch: 0,
+            generation: 0,
         }],
         ServerPacket::CharacterLoginFailed { result } => {
             vec![SessionEvent::CharacterLoginFailed { result }]
@@ -179,12 +182,14 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             reason,
             required_level,
             item_guid,
+            item2_guid,
             bag_slot,
         } if reason != 0 => {
             vec![SessionEvent::InventoryFailure {
                 reason,
                 required_level,
                 item_guid,
+                item2_guid,
                 bag_slot,
             }]
         }
@@ -461,8 +466,8 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             items,
         }],
         ServerPacket::LootError { guid, error } => vec![SessionEvent::LootError { guid, error }],
-        ServerPacket::LootReleaseResponse { guid, .. } => {
-            vec![SessionEvent::LootReleaseResponse { guid }]
+        ServerPacket::LootReleaseResponse { guid, result } => {
+            vec![SessionEvent::LootReleaseResponse { guid, result }]
         }
         ServerPacket::LootRemoved { slot } => vec![SessionEvent::LootRemoved { slot }],
         ServerPacket::LootMoneyNotify { amount } => {
@@ -818,6 +823,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::SetFactionStanding { standings } => {
             vec![SessionEvent::ReputationDelta { standings }]
         }
+        ServerPacket::SetForcedReactions { reactions } => {
+            vec![SessionEvent::ForcedReactions { reactions }]
+        }
         ServerPacket::SetFactionVisible { list_id } => {
             vec![SessionEvent::ReputationVisible { list_id }]
         }
@@ -895,13 +903,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                     name: i.name,
                     data: i.data,
                 },
-                None => SessionEvent::GameObjectInfo {
-                    entry,
-                    type_id: 0,
-                    display_id: 0,
-                    name: String::new(),
-                    data: [0; 24],
-                },
+                None => SessionEvent::GameObjectUnknown { entry },
             };
             vec![event]
         }
@@ -1094,6 +1096,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         | ServerPacket::AuthResponse { .. }
         | ServerPacket::CharCreate { .. }
         | ServerPacket::CharDelete { .. }
+        | ServerPacket::CharRename { .. }
         | ServerPacket::AddonInfo { .. } => Vec::new(),
     }
 }
@@ -1118,9 +1121,10 @@ fn decode_objects(objects: Vec<Object>) -> Vec<SessionEvent> {
                     });
                     continue;
                 }
-                if let Some((position, orientation)) =
-                    create_placement(object_type, &mask, &movement)
-                {
+                // The block's own position, for every type: the GameObject constructor copies it
+                // over `GAMEOBJECT_POS_X`..`FACING` (`0x5f7046`..`0x5f706b`), so the descriptor's
+                // copy never places anything.
+                if let Some((position, orientation)) = movement.position {
                     let display = display_id(object_type, &mask);
                     let scale = object_scale(object_type, &mask);
                     let speeds = movement.speeds.map(MoveSpeeds::from_wire);
@@ -1205,19 +1209,4 @@ fn object_scale(t: ObjectType, mask: &ObjectFields) -> f32 {
         _ => None,
     };
     raw.filter(|s| *s > 0.0).unwrap_or(1.0)
-}
-
-/// A create's pose: a GameObject's `GAMEOBJECT_POS_*` when sent, else the movement block, since
-/// vmangos never sets those fields on a transport. Gate on `gameobject_pos_sent`, not `.or`: a
-/// create reads absent fields as zero, so `gameobject_position()` is `Some` even when unsent.
-fn create_placement(
-    object_type: ObjectType,
-    mask: &ObjectFields,
-    movement: &MovementBlock,
-) -> Option<(Vector3d, f32)> {
-    if object_type == ObjectType::GameObject && mask.gameobject_pos_sent() {
-        mask.gameobject_position()
-    } else {
-        movement.position
-    }
 }
