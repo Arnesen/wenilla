@@ -1259,7 +1259,13 @@ fn pointer_of(r: &RefH) -> *const c_void {
         V::Str(s) => (3, s.id as usize),
         _ => (0, 0),
     };
-    ((kind << 40) | (id << 4) | 8) as *const c_void
+    #[cfg(target_pointer_width = "64")]
+    let address = (kind << 40) | (id << 4) | 8;
+    // wenilla: wasm32's `usize` is 32 bits, so the kind takes the top two and the handle the 26
+    // under them.
+    #[cfg(not(target_pointer_width = "64"))]
+    let address = (kind << 30) | ((id << 4) & ((1 << 30) - 1)) | 8;
+    address as *const c_void
 }
 
 // ── tables ───────────────────────────────────────────────────────────────────────────────────
