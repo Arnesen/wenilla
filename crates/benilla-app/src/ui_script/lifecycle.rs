@@ -433,6 +433,12 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
         // [`load_ingame_ui_on_world_entry`]'s steps before its load, once, on the first slice.
         crate::minimap::restore_default_mask(world);
         crate::ui_billing::arm_at_world_entry(world);
+        // The world session's read-only rows, whether or not a UI then loads.
+        if let Some(mut cvars) = world.get_resource_mut::<crate::cvars::Cvars>() {
+            for name in benilla_ui::script::IN_WORLD_READ_ONLY_CVARS {
+                cvars.set_read_only(name, true);
+            }
+        }
     }
     unpark_glue_vm(world);
     if !ui_wanted(world) {
@@ -1639,7 +1645,7 @@ mod tests {
         world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
         world.insert_resource(crate::run_mode::CaptureMode);
         world.init_resource::<crate::cvars::Cvars>();
-        world.insert_resource(PendingEntryUiLoad);
+        world.insert_resource(PendingEntryUiLoad::default());
         run_pending_entry_load(&mut world);
         let set = |world: &mut World, name: &str| {
             world

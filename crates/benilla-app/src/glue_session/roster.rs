@@ -386,7 +386,7 @@ mod tests {
     /// ([`send_pick`]); with no tables to answer, the lookup is a miss and the position stands.
     #[test]
     fn a_re_answered_pick_of_a_new_character_looks_up_its_eye() {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = async_channel::unbounded();
         let mut new = test_character(7, "Seven");
         new.race = 3;
         new.new_character = true;
