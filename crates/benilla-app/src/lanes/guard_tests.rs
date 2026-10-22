@@ -26,8 +26,9 @@ enum Row {
     Exclusive,
     /// A queue the handlers fill that the call host holds too, by a suffix of its type's name:
     /// every feed that lends the host holds it, so no access tells the feed that takes it apart,
-    /// and the row is found by reading the feed, not by this guard. It is stale once the host or
-    /// the handlers no longer hold the queue.
+    /// and the row is found by reading the feed, not by this guard. Every such queue needs its
+    /// row or a place in [`HOST_HELD_UNREAD`]; a row is stale once the host or the handlers no
+    /// longer hold the queue.
     HostHeld,
 }
 
@@ -136,6 +137,18 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
          their calls, hold it in the host",
     ),
     (
+        Row::HostHeld,
+        "::ui_mail::MailOpen",
+        "the mailbox's list and results, the send result's equip refusal line among them, which \
+         `feed_mail` fires from; the mail verbs, acting in their calls, hold it in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_mail::pending::MailPending",
+        "the pending-mail notices, whose `UPDATE_PENDING_MAIL` `feed_mail` fires; the mail verbs \
+         hold it in the host",
+    ),
+    (
         Row::Queue,
         "::ui_honor::InspectHonor",
         "the inspected honor",
@@ -145,13 +158,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
         "::ui_instance::InstanceState",
         "the instance state",
     ),
-    (Row::Queue, "::ui_items::EquipErrors", "the equip errors"),
-    (
-        Row::Queue,
-        "::ui_items::locks::ItemReleases",
-        "the item releases",
-    ),
-    (Row::Queue, "::ui_items::net::BagOpens", "the bag opens"),
     (Row::Queue, "::ui_logout::LogoutState", "the logout state"),
     (Row::Queue, "::ui_loot_roll::LootRolls", "the loot rolls"),
     (
@@ -258,19 +264,11 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::Edge,
-        "::ui_items::feed::feed_containers",
-        "`BAG_UPDATE`, `BAG_CLOSED` and `PLAYERBANKSLOTS_CHANGED`, found by comparing the bags' \
-         views and guids, where the reference signals them inside the item and seat watchers' \
-         runs (`0x4f9480` from `0x5d94ff`, `0x5d85e8` and `0x5d9b1b`; `0x4f8db0`, `0x4f90d0`, \
-         `0x4f91a0`, `0x5ddcf0`)",
-    ),
-    (
-        Row::Edge,
         "::ui_items::locks::apply_item_releases",
-        "the seat, restack and arrival unlocks' `ITEM_LOCK_CHANGED`, found by comparing the seats \
-         and the stacks, where the reference runs them first in those watchers' runs (`0x4f8e15`, \
-         `0x4f912c`, `0x5ddd50`, `0x5d94af`, `0x5d8590`); they move with `BAG_UPDATE`, which \
-         follows them",
+        "the item source's two unlocks a loot close owes (`0x48f2bd`, `0x4c1d36`) and the copier's \
+         ending's (`0x5ebc35` → `0x4c1d36`), taken off the loot session, a lane's type the queue \
+         check skips: `close_interaction` serves the packets' closes and the calls' and clicks' \
+         alike, so they move when it does",
     ),
     (
         Row::Edge,
@@ -285,8 +283,51 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
          and combo watchers (`0x5de011`, `0x5ddff0`), the unit-flags, health, power and \
          aura-state watchers, the selection and the cooldowns. Here it is one pass a frame over \
          the bar's 120 slots and the reactive list, diffed against the usable cache, so one \
-         caller's run cannot be cut out to fire at its own notice",
+         caller's run cannot be cut out to fire at its own notice. It also fires \
+         `SMSG_ITEM_COOLDOWN`'s `BAG_UPDATE_COOLDOWN` (`0x6e965b`), which the reference signals \
+         inside that packet's handler and which reaches here through the cooldowns' flush, a \
+         queue the call host holds and so no row of its own shows",
     ),
+];
+
+/// The host-held queues a handler fills that are yet to be read for what their feeds fire, so
+/// the list is the whole of that remaining work and must only shrink: the check finds a queue
+/// the handlers and the host both hold, but not whether a feed fires off it what a packet
+/// raised. Each goes once its feeds are read, to a [`Row::HostHeld`] row when one does, or named
+/// quiet beside why when none does; a new one fails, and an entry whose queue the handlers or the
+/// host no longer hold fails as stale.
+const HOST_HELD_UNREAD: &[&str] = &[
+    "::creature_anim::AttackStopInFlight",
+    "::creature_anim::PlaySeq",
+    "::items::Items",
+    "::net::GuidIndex",
+    "::net::Reputations",
+    "::net::SelfGuid",
+    "::net::game_time::ServerTime",
+    "::spell::cast_send::HeldForPick",
+    "::spell::cast_send::ScriptCastPermit",
+    "::spell::cast_send::unit_caster::PetGcdsOwed",
+    "::spell::cast_send::unit_caster::UnitAttackOwed",
+    "::spell::cooldowns::Cooldowns",
+    "::spell::inflight::ActiveChannel",
+    "::spell::inflight::AutoRepeatActive",
+    "::spell::inflight::PendingCast",
+    "::spell::inflight::QueuedMeleeSpell",
+    "::spell::mods::SpellModifiers",
+    "::spell::targeting::CursorPicks",
+    "::spell::targeting::SpellTargeting",
+    "::target::Selection",
+    "::ui_action::PlayerActions",
+    "::ui_auction::AuctionOpen",
+    "::ui_loot::AutoLootByte",
+    "::ui_loot::LootLatch",
+    "::ui_merchant::MerchantOpen",
+    "::ui_pet::PetBar",
+    "::ui_petition::GuildRegistrarState",
+    "::ui_petition::PetitionRecords",
+    "::ui_session::latch::InteractLatch",
+    "::ui_social::SocialState",
+    "::ui_tradeskill::TradeSkillOpens",
 ];
 
 /// The resources the handlers fill through a shared reference, which their declared access shows
@@ -323,6 +364,8 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::NameCache",
     "::ServerTime",
     "::GuidIndex",
+    // The bag cache the open-container handler numbers its `BAG_OPEN`s from.
+    "::BagCache",
     "::NetCommands",
     "::Reputations",
     "::SelfGuid",
@@ -385,10 +428,12 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
 ];
 
 /// Every lane's queue, by type: what a handler fills there fires in the packets' order.
-fn lane_types() -> [TypeId; 8] {
+fn lane_types() -> [TypeId; 10] {
     [
+        TypeId::of::<crate::ui_items::feed::BagView>(),
         TypeId::of::<crate::field_watch::NoticeLane>(),
         TypeId::of::<crate::item_lane::ItemLane>(),
+        TypeId::of::<crate::ui_items::EquipErrors>(),
         // The loot lane: the session's steps and pushes, stamped at their packets.
         TypeId::of::<crate::ui_loot::LootState>(),
         TypeId::of::<crate::ui_chat::ChatLog>(),
@@ -443,6 +488,21 @@ fn call_host_access(world: &mut World) -> bevy::ecs::query::Access {
     System::initialize(&mut host, world)
         .combined_access()
         .clone()
+}
+
+/// The resources a handler that does not lend the call host writes: a handler that lends it
+/// holds all the host holds, so its access names the host's state, not what its packet fills.
+fn filled_apart_from_the_host(app: &mut App) -> std::collections::HashSet<ComponentId> {
+    let host = call_host_access(app.world_mut());
+    let host_writes: Vec<ComponentId> = host.resource_writes().collect();
+    let handlers = app.world().resource::<crate::net::handlers::NetHandlers>();
+    handlers
+        .accesses
+        .iter()
+        .map(|(_, a)| a.combined_access())
+        .filter(|a| !host_writes.iter().all(|&id| a.has_resource_write(id)))
+        .flat_map(|a| a.resource_writes().collect::<Vec<_>>())
+        .collect()
 }
 
 /// Whether `node` sits in the `UiFeed` phase, through any set.
@@ -534,8 +594,10 @@ fn the_drain_runs_after_the_feeds_and_before_the_tick() {
         lanes,
         [
             "auction house",
+            "bag view",
             "cast reports",
             "chat",
+            "equip errors",
             "field notices",
             "item watchers",
             "loot",
@@ -619,6 +681,7 @@ fn every_handler_queue_a_feed_takes_is_on_a_lane_or_listed() {
         .classes
         .caches;
     let queues = handler_queues(app.world(), &caches);
+    let filled_apart = filled_apart_from_the_host(&mut app);
     let (taken, exclusive, systems, host_held) =
         app.world_mut().schedule_scope(Update, |world, schedule| {
             schedule.graph_mut().systems.initialize(world);
@@ -641,6 +704,7 @@ fn every_handler_queue_a_feed_takes_is_on_a_lane_or_listed() {
                 .filter(|&&id| !is_messages(world, id))
                 .filter(|&&id| !ends_with_any(&self::name(world, id), FILLED_THROUGH_A_READ))
                 .filter(|&&id| host.has_resource_read(id))
+                .filter(|id| filled_apart.contains(id))
                 .map(|&id| self::name(world, id))
                 .collect();
             for (key, system, _) in graph.systems.iter() {
@@ -707,10 +771,24 @@ fn every_handler_queue_a_feed_takes_is_on_a_lane_or_listed() {
             .filter(|n| !ends_with_any(n, &rows(Row::Exclusive)))
             .map(|n| format!("exclusive {n}")),
     );
+    unlisted.extend(
+        host_held
+            .iter()
+            .filter(|n| {
+                !ends_with_any(n, &rows(Row::HostHeld)) && !ends_with_any(n, HOST_HELD_UNREAD)
+            })
+            .map(|n| format!("host-held {n}")),
+    );
     let mut stale: Vec<&str> = rows(Row::Queue)
         .into_iter()
         .filter(|s| !taken.iter().any(|n| n.ends_with(s)))
         .collect();
+    stale.extend(
+        HOST_HELD_UNREAD
+            .iter()
+            .filter(|s| !host_held.iter().any(|n| n.ends_with(*s)))
+            .copied(),
+    );
     stale.extend(
         rows(Row::HostHeld)
             .into_iter()

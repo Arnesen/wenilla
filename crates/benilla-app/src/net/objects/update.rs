@@ -335,6 +335,7 @@ fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene) {
         }
     };
     sc.pass.copies.insert(guid, moved);
+    bag_write(&mut sc, guid, None);
     notify_in_place(
         &mut sc,
         Notify::Create {
@@ -397,6 +398,7 @@ fn on_item_create(In(ev): In<SessionEvent>, mut sc: Scene) {
         }
     };
     sc.pass.copies.insert(guid, moved);
+    bag_write(&mut sc, guid, None);
     notify_in_place(
         &mut sc,
         Notify::Create {
@@ -404,6 +406,25 @@ fn on_item_create(In(ev): In<SessionEvent>, mut sc: Scene) {
             kind: Created::Item,
         },
     );
+}
+
+/// A write of what the bag view reads: any item or container object coming, changing or going,
+/// or our player's own create or release, or its seats or level (the keyring's size) in `sent`.
+/// The frame's first stamps where the view changes ([`crate::ui_items::feed::BagView`]).
+fn bag_write(sc: &mut Scene, guid: u64, sent: Option<&[u16]>) {
+    use benilla_protocol::field::{FIELD_PLAYER_INV_SLOT_HEAD, FIELD_UNIT_LEVEL};
+    /// The 113 seats, two fields each (`PLAYER_FIELD_INV_SLOT_HEAD` through the keyring's last).
+    const SEATS: std::ops::Range<u16> =
+        FIELD_PLAYER_INV_SLOT_HEAD..FIELD_PLAYER_INV_SLOT_HEAD + 226;
+    let read = benilla_protocol::guid::is_item(guid)
+        || (sc.self_guid.0 == Some(guid)
+            && sent.is_none_or(|f| {
+                f.iter()
+                    .any(|&i| i == FIELD_UNIT_LEVEL || SEATS.contains(&i))
+            }));
+    if read {
+        sc.bag_view.wrote();
+    }
 }
 
 /// A values block (`0x467160`): written into a held object, or one it brings back; a guid the
@@ -437,6 +458,7 @@ fn on_object_values(In(ev): In<SessionEvent>, mut sc: Scene) {
     };
     if let Some(moved) = moved {
         sc.pass.copies.insert(guid, moved);
+        bag_write(&mut sc, guid, Some(&sent));
     }
     notify_in_place(&mut sc, Notify::Values { guid, sent });
 }
@@ -590,6 +612,7 @@ fn respawn(sc: &mut Scene, guid: u64, body: Body, store: ObjectFields, pose: Opt
         }
     }
     sc.pass.reactivated.push(guid);
+    bag_write(sc, guid, None);
 }
 
 /// The out-of-range list, which the protocol hands over only as a packet's first block
@@ -705,6 +728,7 @@ fn on_object_destroyed(In(ev): In<SessionEvent>, mut sc: Scene, script: Option<N
     let Some(e) = sc.index.0.remove(&guid) else {
         return;
     };
+    bag_write(&mut sc, guid, None);
     // An item has no model to fade, so it goes now with its countdown cells.
     if benilla_protocol::guid::is_item(guid) {
         sc.commands.entity(e).despawn();
@@ -737,6 +761,7 @@ fn release(sc: &mut Scene, guid: u64) {
     let Some(e) = sc.index.0.remove(&guid) else {
         return;
     };
+    bag_write(sc, guid, None);
     let kept = sc
         .stores
         .get(e)
@@ -899,15 +924,15 @@ fn notify(sc: &mut Scene, guid: u64, block: Notified, bridged: bool) {
     if !bridged {
         placed.retain(|(_, n)| !matches!(n, crate::field_watch::FieldNotice::Unit { .. }));
     }
-    // The item watchers' runs, each with the signals its handler ends in, at their watches' places.
-    let runs: Vec<(crate::field_watch::Place, crate::item_watch::Run)> = {
-        let watch = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items);
-        watch
-            .placed_values(guid, kind, fields, &block)
-            .into_iter()
-            .map(|(at, n)| (at, watch.run(n)))
-            .collect()
-    };
+    // The item watchers' runs, each with its unlocks, its bag events and the signals its handler
+    // ends in, at their watches' places; a bag seat's rescans the bag cache.
+    let runs: Vec<(crate::field_watch::Place, crate::item_watch::Run)> = item_watch(
+        &sc.index,
+        &sc.stores,
+        &sc.self_guid,
+        &sc.items,
+    )
+    .placed_values(guid, kind, fields, &block, &mut sc.bag_cache);
     let stamp = crate::field_watch::guild_timestamp(&block, kind, fields);
     // `OnCharmOrSummonChanged` (`0x5e2660`) on the active player or a party or raid member
     // (`0x5e266b`, `0x4918e0`): an old pet the object manager holds no unit of has its selection
@@ -959,7 +984,8 @@ fn notify(sc: &mut Scene, guid: u64, block: Notified, bridged: bool) {
         }
     }
     // The active player's coinage watcher `OnMoneyChanged` (`0x5ddf30`), registered on its own
-    // object (`0x5dd8a0`): the trade offer's trim, at the packet.
+    // object (`0x5dd8a0`): the trade offer's trim (`0x5ddfda`), at the packet, behind the
+    // `PLAYER_MONEY` its notice stamped (`0x5ddf4b`); the trim signals nothing.
     if kind == ObjectType::Player
         && me == Some(guid)
         && block
@@ -995,8 +1021,11 @@ fn create_hook(sc: &mut Scene, guid: u64, kind: Created, script: Option<&UiScrip
         Created::Item => {
             // The record, set up at once when cached, for our item in the world, and its signal
             // for the owner of any item.
-            let run = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items)
-                .created_run(guid, &fields);
+            let run = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items).created_run(
+                guid,
+                &fields,
+                &sc.bag_cache,
+            );
             // The set-up asks for the record of every item, whoever's, with the callback
             // `0x5d8390` (`0x5d8300` into `0x55ba30`): the readers of a held item only read it.
             if let Some(entry) = fields.object_entry() {
@@ -1015,6 +1044,19 @@ fn create_hook(sc: &mut Scene, guid: u64, kind: Created, script: Option<&UiScrip
             sc.item_lane.push(run);
         }
         Created::World(EntityKind::Player) => {
+            // Our own create runs the world-enter cascade (`0x5deb60` → `0x4908c0`), whose bag
+            // watcher set-up zeroes and rescans the bag cache (`0x49098d` → `0x4f8cc0`).
+            if sc.self_guid.0 == Some(guid) {
+                let (index, stores) = (&sc.index, &sc.stores);
+                let lookup = |g: u64| {
+                    index
+                        .0
+                        .get(&g)
+                        .and_then(|&e| stores.get(e).ok())
+                        .map(|s| &s.0)
+                };
+                sc.bag_cache.seat(&fields, &lookup);
+            }
             resolve_display_records(sc, guid, &fields);
             sc.names.lookup_fields(guid, &fields, &sc.net);
             sc.field_notices

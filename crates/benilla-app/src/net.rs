@@ -106,6 +106,8 @@ impl Plugin for NetPlugin {
             .add_message::<TeleportMessage>()
             .add_message::<FieldChanged>()
             .init_resource::<crate::item_lane::ItemLane>()
+            .init_resource::<crate::item_watch::BagCache>()
+            .init_resource::<crate::ui_items::feed::BagView>()
             .init_resource::<crate::field_watch::NoticeLane>()
             .add_message::<SelfMoveMessage>()
             .add_message::<SpeedChangeMessage>()

@@ -61,6 +61,11 @@ impl Stamp {
         &self.path[..usize::from(self.len)]
     }
 
+    /// Below every stamp the clock gives: an item there fires first in the drain.
+    pub(crate) fn origin() -> Self {
+        Self::root(0)
+    }
+
     /// The count of the outermost push: the drain fires only what was stamped before it began.
     fn first(&self) -> u64 {
         self.path[0]
@@ -284,6 +289,8 @@ pub(crate) fn fire_in_order(world: &mut World) {
     world.insert_resource(lanes);
 }
 
+#[cfg(test)]
+mod bag_tests;
 #[cfg(test)]
 mod guard_tests;
 #[cfg(test)]
