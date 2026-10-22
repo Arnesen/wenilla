@@ -564,12 +564,14 @@ pub(crate) struct PartyBooths<'w, 's> {
 #[derive(Component)]
 pub(crate) struct BoothCam(pub(crate) String);
 
-/// The display aspect the client's `screencoord` scale uses: `gxResolution`'s width/height with
-/// `widescreen` on (its default), `4/3` off. Read by [`framing::pane_model_scale`].
+/// The display aspect the client's `screencoord` scale uses (`0x4901e0`): `gxResolution`'s
+/// width/height with `widescreen` on (its default), `4/3` off. Read by
+/// [`framing::pane_model_scale`]. Defaults to `4/3`, where the factor is 1.0.
 ///
-/// Deviation: this reads the window's aspect, not `gxResolution` (here only the windowed size)
-/// under `widescreen` (not registered), because fullscreen is the monitor's own size with no mode
-/// list, where the two agree. Defaults to `4/3`, where the factor is 1.0.
+/// Deviation: this reads the window's aspect, not `gxResolution`'s, because the window here takes
+/// any shape a drag gives it, where the reference's keeps `gxResolution`'s (`0x5989d7`). In
+/// fullscreen the window is the screen in logical pixels and `gxResolution` the screen in device
+/// pixels, so their aspects agree and their sizes need not.
 #[derive(Resource)]
 pub(crate) struct GxAspect(pub(crate) f32);
 
@@ -579,20 +581,25 @@ impl Default for GxAspect {
     }
 }
 
-/// Track the primary window's aspect into [`GxAspect`].
+/// Track the primary window's aspect into [`GxAspect`], or 4/3 with `widescreen` off.
 fn feed_gx_aspect(
     mut gx: ResMut<GxAspect>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    widescreen: Option<Res<crate::video::Widescreen>>,
 ) {
     let Ok(w) = window.single() else {
         return;
     };
     let (px_w, px_h) = (w.resolution.width(), w.resolution.height());
-    if px_h > 0.0 {
-        let a = px_w / px_h;
-        if (a - gx.0).abs() > 1e-4 {
-            gx.0 = a;
-        }
+    let a = if widescreen.is_some_and(|w| !w.0) {
+        4.0 / 3.0
+    } else if px_h > 0.0 {
+        px_w / px_h
+    } else {
+        return;
+    };
+    if (a - gx.0).abs() > 1e-4 {
+        gx.0 = a;
     }
 }
 
@@ -1715,6 +1722,24 @@ fn aim(
 mod tests {
     use super::*;
     use crate::entities::ItemModelKind;
+
+    /// The screen basis's aspect is `0x4901e0`'s: the display's width over height while
+    /// `widescreen` is on, 4/3 when it is 0.
+    #[test]
+    fn the_gx_aspect_is_four_thirds_with_widescreen_off() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<GxAspect>();
+        world.init_resource::<crate::video::Widescreen>();
+        let mut window = Window::default();
+        window.resolution.set(1920.0, 1080.0);
+        world.spawn((window, bevy::window::PrimaryWindow));
+        world.run_system_once(feed_gx_aspect).unwrap();
+        assert!((world.resource::<GxAspect>().0 - 16.0 / 9.0).abs() < 1e-6);
+        world.insert_resource(crate::video::Widescreen(false));
+        world.run_system_once(feed_gx_aspect).unwrap();
+        assert_eq!(world.resource::<GxAspect>().0, 4.0 / 3.0);
+    }
 
     /// The stock pet frame binds `"partypetN"` (`PartyFrameTemplates.xml`, `UnitFrame_Initialize`),
     /// and `SetPortraitTexture` draws only a token a slot bakes.

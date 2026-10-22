@@ -123,7 +123,9 @@ const CVAR_COMMANDS: [(&str, &str); 3] = [
     ),
 ];
 
-/// The built-ins: `ConsoleVar.cpp`'s `cvarlist` (`0x63d423`) and `help` (`0x6400f1`).
+/// The built-ins: `ConsoleVar.cpp`'s `cvarlist` (`0x63d423`), then `RegisterBuiltinCommands`'
+/// four (`0x6400e0`, from `InitializeGlobal` at `0x40236b`): `help`, and `quit`, `ver` and
+/// `setmap` in category 5 with no help.
 pub(crate) struct ConsolePlugin;
 
 impl Plugin for ConsolePlugin {
@@ -135,8 +137,33 @@ impl Plugin for ConsolePlugin {
                 CONSOLE,
                 Some("Provides help information about a command."),
                 help,
-            );
+            )
+            .console_command("quit", DEFAULT, None, quit)
+            .console_command("ver", DEFAULT, None, ver)
+            .console_command("setmap", DEFAULT, None, setmap);
     }
+}
+
+/// `quit` (`0x640130`): `0x63cdf0` closes the current context (`0x41f9b0`), the call the window's
+/// close box makes (`0x63c9a0`), so the client goes down at once, with no logout countdown and
+/// nothing printed. Here it asks the primary window to close, the path a click on its close box
+/// takes.
+fn quit(world: &mut World, _args: &str) -> Vec<String> {
+    let mut windows = world.query_filtered::<Entity, With<bevy::window::PrimaryWindow>>();
+    if let Ok(window) = windows.single(world) {
+        world.write_message(bevy::window::WindowCloseRequested { window });
+    }
+    Vec::new()
+}
+
+/// `ver` (`0x640140`): the build line (`0x80e238`), whatever follows.
+fn ver(_world: &mut World, _args: &str) -> Vec<String> {
+    vec!["WoW [Release] Build 5875 (Sep 19 2006)".to_string()]
+}
+
+/// `setmap` (`0x63cf70`): returns 1 and does nothing else.
+fn setmap(_world: &mut World, _args: &str) -> Vec<String> {
+    Vec::new()
 }
 
 /// Run one console line `ConsoleExec` handed on, its replies to the log.
@@ -481,6 +508,46 @@ mod tests {
             run(&mut app, "help set ").is_empty(),
             "the whole tail is the word"
         );
+    }
+
+    /// `0x6400e0` registers `quit`, `ver` and `setmap` in category 5 with no help: `ver` writes
+    /// the build line (`0x640140`, `0x80e238`), `setmap` only returns 1 (`0x63cf70`), and `quit`
+    /// closes the context as the window's close box does (`0x640130` to `0x63cdf0`), with nothing
+    /// printed and no countdown.
+    #[test]
+    fn quit_ver_and_setmap_are_the_references_built_ins() {
+        let mut app = console_app();
+        app.add_message::<bevy::window::WindowCloseRequested>();
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), bevy::window::PrimaryWindow))
+            .id();
+        assert_eq!(
+            run(&mut app, "VER whatever"),
+            ["WoW [Release] Build 5875 (Sep 19 2006)"]
+        );
+        assert!(run(&mut app, "setmap 1 2 3").is_empty());
+        assert_eq!(
+            run(&mut app, "help ver"),
+            ["Help for command ver:", "     ver No help yet"]
+        );
+        let default = run(&mut app, "help default");
+        for name in ["quit", "ver", "setmap"] {
+            assert!(
+                default[1..]
+                    .iter()
+                    .any(|l| l.split(", ").any(|n| n == name)),
+                "{name} lists under default: {default:?}"
+            );
+        }
+        assert!(run(&mut app, "quit now").is_empty());
+        let asked: Vec<Entity> = app
+            .world_mut()
+            .resource_mut::<Messages<bevy::window::WindowCloseRequested>>()
+            .drain()
+            .map(|c| c.window)
+            .collect();
+        assert_eq!(asked, [window], "the primary window is asked to close");
     }
 
     #[test]

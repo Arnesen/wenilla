@@ -500,10 +500,27 @@ pub fn check_camera_view(value: &str, _applied: &str, _rows: CvarRows<'_>) -> Cv
     camera_range(value, 0.0, 4.0)
 }
 
+/// The full-screen effect switches' shared callback (`0x6cde30`), on `ffx`, `ffxGlow`, `ffxDeath`
+/// and `ffxRectangle`: the value's `atoi` (`0x41449c`), "enabled" (`0x853764`) when nonzero, else
+/// "disabled" (`0x853758`), through `ConsoleWrite` (`0x63cb50`); it takes every value (`mov al,1`).
+pub fn check_ffx_echo(value: &str, _applied: &str, _rows: CvarRows<'_>) -> CvarVerdict {
+    CvarVerdict::accept_saying(if crate::crt::atoi(value) != 0 {
+        "enabled"
+    } else {
+        "disabled"
+    })
+}
+
 /// `sscanf(s, "%f")` as the reference's CRT reads it: leading white space, an optional sign, digits
 /// with at most one `.` (at least one digit), then `e`/`E` with an optional sign and digits,
 /// converted as a double and stored as a float. `None` when no number starts the string.
 fn scanf_f(s: &str) -> Option<f32> {
+    scanf_f_prefix(s).map(|(v, _)| v)
+}
+
+/// [`scanf_f`]'s conversion with the bytes it consumed, so a format of several `%f` goes on
+/// after it.
+pub fn scanf_f_prefix(s: &str) -> Option<(f32, usize)> {
     let b = s.as_bytes();
     let mut i = b
         .iter()
@@ -537,7 +554,7 @@ fn scanf_f(s: &str) -> Option<f32> {
             i = e;
         }
     }
-    s[start..i].parse::<f64>().ok().map(|v| v as f32)
+    s[start..i].parse::<f64>().ok().map(|v| (v as f32, i))
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 //! Video settings that reach the window and the presentation path: 1.12's `gxWindow` and
-//! `gxVSync` rows (`OptionsFrame.lua:14`, `:9`) and the `gxResolution` windowed size.
+//! `gxVSync` rows (`OptionsFrame.lua:14`, `:9`) and `gxResolution`, the windowed size and, in
+//! fullscreen, the size the screen runs at.
 //!
 //! Deviation: `gxWindow "0"` is borderless fullscreen, not 1.12's exclusive mode-set at
 //! `gxResolution`, because Wayland has no client mode-setting (winit ignores
@@ -173,7 +174,8 @@ pub(crate) struct VideoConfig {
     pub(crate) display: DisplayMode,
     /// `gxMaximize`: a windowed window fills the monitor, borderless ([`window_mode`]).
     pub(crate) maximize: bool,
-    /// The windowed size, `gxResolution`. Kept while fullscreen so leaving it can restore it.
+    /// The windowed size, `gxResolution`'s own value. Kept while fullscreen, where the row
+    /// answers the screen's size ([`show_screen_size`]), so leaving it can restore it.
     pub(crate) windowed: UVec2,
 }
 
@@ -299,6 +301,17 @@ fn pace_to_refresh(
 
 pub(crate) struct VideoPlugin;
 
+/// `widescreen` (`0x63a74f`, default "1"), as its readers take its integer: the resolution list
+/// (`0x48bcac`) and the display aspect (`0x46ab40`, `0x4901e0`).
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Widescreen(pub(crate) bool);
+
+impl Default for Widescreen {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 /// The change callbacks of the reference's video-options registration block (`0x688470`); each
 /// arm writes only its own resource.
 pub(crate) fn on_cvar(
@@ -313,6 +326,7 @@ pub(crate) fn on_cvar(
     particles: Option<ResMut<benilla_world::particles::ParticleTuning>>,
     mut spell_effect_level: ResMut<SpellEffectLevel>,
     mut ffx: ResMut<benilla_world::ffx_glow::FfxSwitches>,
+    mut widescreen: ResMut<Widescreen>,
     mut cvars: ResMut<crate::cvars::Cvars>,
 ) {
     use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
@@ -324,6 +338,7 @@ pub(crate) fn on_cvar(
             None => warn!("cvar gxResolution: unparseable value '{}' ignored", ev.new),
         },
         "gxvsync" => cfg.vsync = ev.flag(),
+        "widescreen" => widescreen.0 = ev.flag(),
         // The reference's polarity: `1` is windowed (the row is "Windowed Mode").
         "gxwindow" => cfg.display = display_from_flag(v),
         // Latched like `gxWindow`: the commit is `RestartGx`, which rebuilds the window
@@ -435,41 +450,18 @@ pub(crate) fn spell_effect_scale(level: i32) -> f32 {
     }
 }
 
-/// `/console detailDoodadAlpha <n>`, the reference's console command (`0x6739a0`, registered by
-/// `0x63f9e0` as a command, not a CVar, so it never persists): the ground-clutter cutout that
-/// `texel.a x distance_ramp` is tested against (`[0xc7b2fc]`, 128 at `0x66f861`), so at the
-/// default grass ends ~61 yd out of the 70 yd horizon. `sscanf(args, "%d")` (`0x835154`), then an
-/// unsigned compare with 255 (`0x6739b9`): in range it is set without a word, above it (a
-/// negative too) only "Alpha ref range 0 - 255." (`0x867f6c`) is printed. With no number the
-/// slot keeps what `push ecx` left in it, the parse buffer's address `0xc4ee08`, which is above
-/// 255.
-fn detail_doodad_alpha(world: &mut World, args: &str) -> Vec<String> {
-    let alpha = benilla_ui::script::scanf_d(args).map_or(0x00c4_ee08, |v| v as u32);
-    if alpha > 0xff {
-        return vec!["Alpha ref range 0 - 255.".to_string()];
-    }
-    if let Some(mut clutter) = world.get_resource_mut::<benilla_world::clutter::ClutterConfig>() {
-        clutter.alpha_ref = alpha as f32 / 255.0;
-    }
-    Vec::new()
-}
-
 impl Plugin for VideoPlugin {
     fn build(&self, app: &mut App) {
-        use crate::console::ConsoleCommandApp;
-        app.init_resource::<SpellEffectLevel>();
+        app.init_resource::<SpellEffectLevel>()
+            .init_resource::<Widescreen>();
         app.add_observer(on_cvar);
-        // Category 1 with no help (`0x66fae8`-`0x66faf5`).
-        app.console_command(
-            "detailDoodadAlpha",
-            crate::console::GRAPHICS,
-            None,
-            detail_doodad_alpha,
-        );
         app.init_resource::<VideoConfig>()
             .init_resource::<GxRestarts>()
             .init_resource::<RefreshPacing>()
             .add_systems(Last, pace_to_refresh)
+            // Ahead of the glue's size callback (`ui_script::glue::watch_glue_aspect`) and of
+            // every `GetCVar`, so both read the screen the window has this frame.
+            .add_systems(PreUpdate, show_screen_size)
             .add_systems(Startup, (log_display_session, check_window_pinned).chain())
             .add_systems(
                 Update,
@@ -532,8 +524,8 @@ fn offerable(r: ScreenResolution) -> bool {
 }
 
 /// The reference's four hardcoded modes, in its append order (`0x48bda2`, `0x48bddf`, `0x48be43`,
-/// `0x48bea7`), used when no enumerated mode survives [`offerable`]. The reference also takes this
-/// path when `widescreen` (`0x63a747`, default `"1"`) is 0; benilla does not register that CVar.
+/// `0x48bea7`), used when no enumerated mode survives [`offerable`], and alone when `widescreen`
+/// is 0 (`0x48bcac`-`0x48bcc1`).
 const SCREEN_FALLBACK: [ScreenResolution; 4] = [
     ScreenResolution {
         width: 800,
@@ -553,20 +545,57 @@ const SCREEN_FALLBACK: [ScreenResolution; 4] = [
     },
 ];
 
+/// The rows `GetScreenResolutions` offers from the monitors' sizes and modes: [`offerable`] ones
+/// in ascending area, else [`SCREEN_FALLBACK`], which `widescreen` off takes whatever the
+/// display offers, never mixed with its modes (`0x48bd79`-`0x48bd91`).
+fn offered_modes<'a>(
+    monitors: impl IntoIterator<Item = &'a Monitor>,
+    widescreen: bool,
+) -> Vec<ScreenResolution> {
+    if !widescreen {
+        return SCREEN_FALLBACK.to_vec();
+    }
+    let mut offered: Vec<ScreenResolution> = Vec::new();
+    for m in monitors {
+        // The monitor's own scale, not the window's: these rows describe the panel.
+        let scale = if m.scale_factor > 0.0 {
+            m.scale_factor
+        } else {
+            1.0
+        };
+        let logical = |size: UVec2| ScreenResolution {
+            width: (size.x as f64 / scale).round() as u32,
+            height: (size.y as f64 / scale).round() as u32,
+        };
+        offered.push(logical(m.physical_size()));
+        offered.extend(m.video_modes.iter().map(|v| logical(v.physical_size)));
+    }
+    offered.retain(|r| offerable(*r));
+    if offered.is_empty() {
+        offered.extend(SCREEN_FALLBACK);
+    }
+    offered.sort_by_key(|r| (u64::from(r.width) * u64::from(r.height), r.width, r.height));
+    offered.dedup();
+    offered
+}
+
 /// The list [`publish_display_modes`] last pushed and the current entry.
 type PublishedModes = Option<(Vec<ScreenResolution>, Option<ScreenResolution>)>;
 
 /// The host half of `GetScreenResolutions` / `GetCurrentResolution`: the monitors' mode sizes and
 /// full sizes through [`offerable`], else [`SCREEN_FALLBACK`]; a pick sets the windowed size,
 /// `gxResolution`. The engine adds the live window size when missing, which `CT_Viewport.lua:201`
-/// needs. Deviation: sizes are logical px, because `gxResolution` is a logical inner size here.
+/// needs. Deviation: sizes are logical px, because the windowed `gxResolution` is a logical inner
+/// size here.
 /// The list is recomputed on change; the reference builds its list once and never invalidates it.
 fn publish_display_modes(
     mut hosted_vm: crate::script_calls::HostedVm,
     windows: Query<&Window, With<PrimaryWindow>>,
     monitors: Query<&bevy::window::Monitor>,
+    widescreen: Option<Res<Widescreen>>,
     mut last: Local<crate::ui_script::VmMemo<PublishedModes>>,
 ) {
+    let widescreen = widescreen.is_none_or(|w| w.0);
     hosted_vm.run(|script| {
         let Some(script) = script else {
             return;
@@ -580,27 +609,7 @@ fn publish_display_modes(
             height: res.height() as u32,
         })
         .filter(|r| r.width > 0 && r.height > 0);
-        let mut offered: Vec<ScreenResolution> = Vec::new();
-        for m in &monitors {
-            // The monitor's own scale, not the window's: these rows describe the panel.
-            let scale = if m.scale_factor > 0.0 {
-                m.scale_factor
-            } else {
-                1.0
-            };
-            let logical = |size: UVec2| ScreenResolution {
-                width: (size.x as f64 / scale).round() as u32,
-                height: (size.y as f64 / scale).round() as u32,
-            };
-            offered.push(logical(m.physical_size()));
-            offered.extend(m.video_modes.iter().map(|v| logical(v.physical_size)));
-        }
-        offered.retain(|r| offerable(*r));
-        if offered.is_empty() {
-            offered.extend(SCREEN_FALLBACK);
-        }
-        offered.sort_by_key(|r| (u64::from(r.width) * u64::from(r.height), r.width, r.height));
-        offered.dedup();
+        let offered = offered_modes(monitors.iter(), widescreen);
         // Keyed by VM: a `ReloadUI` VM has been pushed nothing, so a plain `Local` would skip it.
         let memo = last.get(script);
         if memo.as_ref() == Some(&(offered.clone(), current)) {
@@ -806,40 +815,40 @@ pub(crate) fn apply_window_mode(
     );
 }
 
+/// `gxResolution` answers the size the screen runs at. 1.12.1's fullscreen runs at the mode the
+/// CVar names, so the CVar always describes the backbuffer; benilla's fullscreen is the borderless
+/// window over the monitor, so while it holds, the row shows that window's device pixels
+/// ([`crate::cvars::Cvars::show`]). The windowed size, [`VideoConfig::windowed`], stays the row's
+/// own value: it is what the save writes and what the row answers again once the window is back.
+pub(crate) fn show_screen_size(
+    cfg: Res<VideoConfig>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    cvars: Option<ResMut<crate::cvars::Cvars>>,
+) {
+    let Some(mut cvars) = cvars else {
+        return;
+    };
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let res = &window.resolution;
+    let screen = (cfg.display == DisplayMode::Fullscreen
+        && matches!(window.mode, WindowMode::BorderlessFullscreen(_))
+        && res.physical_width() > 0
+        && res.physical_height() > 0)
+        .then(|| format!("{}x{}", res.physical_width(), res.physical_height()));
+    if cvars.shown(GX_RESOLUTION) == screen.as_deref() {
+        return;
+    }
+    cvars.show(GX_RESOLUTION, screen.as_deref());
+}
+
+const GX_RESOLUTION: &str = "gxResolution";
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `0x6739a0`: `sscanf %d` and an unsigned compare with 255. In range it sets the cutout and
-    /// says nothing; above it, a negative and text with no number print only the range line.
-    #[test]
-    fn detail_doodad_alpha_reads_like_the_references_command() {
-        let mut world = World::new();
-        world.insert_resource(benilla_world::clutter::ClutterConfig::default());
-        let at = |w: &World| {
-            (w.resource::<benilla_world::clutter::ClutterConfig>()
-                .alpha_ref
-                * 255.0)
-                .round() as u32
-        };
-        for (args, said, now) in [
-            ("12abc", None, 12),
-            (" +12", None, 12),
-            ("200", None, 200),
-            ("300", Some("Alpha ref range 0 - 255."), 200),
-            ("-1", Some("Alpha ref range 0 - 255."), 200),
-            ("", Some("Alpha ref range 0 - 255."), 200),
-            ("abc", Some("Alpha ref range 0 - 255."), 200),
-        ] {
-            let lines = detail_doodad_alpha(&mut world, args);
-            assert_eq!(
-                lines,
-                said.map(String::from).into_iter().collect::<Vec<_>>(),
-                "{args:?}"
-            );
-            assert_eq!(at(&world), now, "{args:?}");
-        }
-    }
     /// Synced is `Fifo`, not `AutoVsync` (`FifoRelaxed`, which tears on a late frame).
     #[test]
     fn the_default_is_synced_like_the_window_literal() {
@@ -1144,6 +1153,45 @@ mod tests {
         ));
     }
 
+    /// In fullscreen `gxResolution` answers the size the screen runs at, the borderless window's
+    /// device pixels, as 1.12.1's fullscreen runs at the mode it names; the windowed size stays
+    /// the row's saved value and comes back when the window does.
+    #[test]
+    fn gxresolution_reads_the_screen_size_in_fullscreen() {
+        let mut app = App::new();
+        app.insert_resource(VideoConfig {
+            vsync: true,
+            display: DisplayMode::Fullscreen,
+            maximize: false,
+            windowed: UVec2::new(1600, 900),
+        })
+        .insert_resource(crate::cvars::Cvars::with_value("gxResolution", "1600x900"))
+        .add_systems(Update, show_screen_size);
+        let mut window = Window {
+            mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+            ..default()
+        };
+        window.resolution = WindowResolution::new(2880, 1800).with_scale_factor_override(2.0);
+        let win = app.world_mut().spawn((window, PrimaryWindow)).id();
+        app.update();
+        let gx = |app: &App| {
+            app.world()
+                .resource::<crate::cvars::Cvars>()
+                .get("gxResolution")
+                .map(str::to_string)
+        };
+        assert_eq!(gx(&app).as_deref(), Some("2880x1800"));
+        app.world_mut().resource_mut::<VideoConfig>().display = DisplayMode::Windowed;
+        {
+            let mut e = app.world_mut().entity_mut(win);
+            let mut w = e.get_mut::<Window>().unwrap();
+            w.mode = WindowMode::Windowed;
+            w.resolution.set(1600.0, 900.0);
+        }
+        app.update();
+        assert_eq!(gx(&app).as_deref(), Some("1600x900"));
+    }
+
     /// `gxMaximize` counts only while windowed, and there it is the reference's popup over the
     /// whole screen (`0x58cf10`: style `0x90000000`, `GetSystemMetrics` 0 and 1).
     #[test]
@@ -1208,6 +1256,40 @@ mod tests {
         assert_eq!(
             (w.resolution.width(), w.resolution.height()),
             (1024.0, 768.0)
+        );
+    }
+
+    /// With `widescreen` 0 the list is the four fixed sizes (`0x48bcac`-`0x48bcc1`), never mixed
+    /// with the display's modes (`0x48bd79`-`0x48bd91`); on, the display's offerable modes.
+    #[test]
+    fn widescreen_off_offers_the_four_fixed_sizes() {
+        let monitor = Monitor {
+            name: None,
+            physical_height: 1080,
+            physical_width: 1920,
+            physical_position: IVec2::ZERO,
+            refresh_rate_millihertz: None,
+            scale_factor: 1.0,
+            video_modes: vec![bevy::window::VideoMode {
+                physical_size: UVec2::new(1280, 720),
+                bit_depth: 32,
+                refresh_rate_millihertz: 60_000,
+            }],
+        };
+        let size = |r: &ScreenResolution| (r.width, r.height);
+        assert_eq!(
+            offered_modes([&monitor], true)
+                .iter()
+                .map(size)
+                .collect::<Vec<_>>(),
+            [(1280, 720), (1920, 1080)]
+        );
+        assert_eq!(
+            offered_modes([&monitor], false)
+                .iter()
+                .map(size)
+                .collect::<Vec<_>>(),
+            [(800, 600), (1024, 768), (1280, 1024), (1600, 1200)]
         );
     }
 

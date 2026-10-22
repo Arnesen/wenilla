@@ -418,9 +418,14 @@ fn frustum_corner_reach(fov_y: f32, aspect: f32) -> f32 {
 
 /// Build a chunk's clutter when its box comes within the fade reach, and tear it down past it,
 /// where the fade is already zero. The reference builds and unlinks per chunk at 70 yd
-/// (`[0x867958]`), by the nearest view depth of the chunk's bounding sphere.
+/// (`[0x867958]`), by the nearest view depth of the chunk's bounding sphere. With world flag
+/// 0x100000 clear (`showDetailDoodads`) every chunk takes the far leg (`0x6847c9`, `0x6847fc`):
+/// nothing builds, and the built tufts stop drawing but keep their meshes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_chunk_clutter(
     mut commands: Commands,
+    flags: Option<Res<crate::world_flags::WorldFlags>>,
+    mut shown: Local<Option<bool>>,
     cam: Query<(&GlobalTransform, Option<&Projection>), With<WorldCamera>>,
     mut chunks: Query<(Entity, &mut ClutterChunk)>,
     cfg: Res<ClutterConfig>,
@@ -430,6 +435,26 @@ pub(crate) fn stream_chunk_clutter(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
 ) {
+    let show = flags
+        .as_deref()
+        .copied()
+        .unwrap_or_default()
+        .has(crate::world_flags::WorldFlags::DETAIL_DOODADS);
+    if shown.replace(show) != Some(show) {
+        let vis = if show {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        for (_, cc) in &chunks {
+            for &e in &cc.built {
+                commands.entity(e).try_insert(vis);
+            }
+        }
+    }
+    if !show {
+        return;
+    }
     // Both are absent without an install, and a hard `ResMut` would fail validation and panic.
     let (Some(mut geometry), Some(mut assets)) = (geometry, assets) else {
         return;
@@ -549,6 +574,33 @@ mod tests {
         assert!((slope - 0.0573670).abs() < 1e-6, "slope per yard");
         assert!(ramp(61.11328, 70.0) < DETAIL_DOODAD_ALPHA_REF + 1e-5);
         assert!(ramp(61.11, 70.0) > DETAIL_DOODAD_ALPHA_REF);
+    }
+
+    /// With world flag 0x100000 clear (`showDetailDoodads`) the chunk pass takes its far leg
+    /// (`0x6847c9`, `0x6847fc`): a built chunk's tufts stop drawing and keep their batch, and come
+    /// back with the flag.
+    #[test]
+    fn show_detail_doodads_off_hides_the_built_clutter() {
+        use crate::world_flags::WorldFlags;
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<ClutterConfig>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<WowModelMaterial>>();
+        world.insert_resource(WorldFlags(WorldFlags::START & !WorldFlags::DETAIL_DOODADS));
+        world.spawn((WorldCamera, GlobalTransform::default()));
+        let tuft = world.spawn(Visibility::Inherited).id();
+        world.spawn(ClutterChunk {
+            bounds: (Vec3::splat(-1.0), Vec3::splat(1.0)),
+            models: Vec::new(),
+            built: vec![tuft],
+        });
+        world.run_system_once(stream_chunk_clutter).unwrap();
+        assert_eq!(world.get::<Visibility>(tuft), Some(&Visibility::Hidden));
+        world.resource_mut::<WorldFlags>().0 = WorldFlags::START;
+        world.run_system_once(stream_chunk_clutter).unwrap();
+        assert_eq!(world.get::<Visibility>(tuft), Some(&Visibility::Inherited));
     }
 
     #[test]
